@@ -35,6 +35,7 @@
  */
 
 import path from "node:path";
+import { resolveVimeoRef } from "../vimeo/url.ts";
 
 /** A summary doc as listed by huginn (already url-bearing — see module docstring). */
 export interface ListedDoc {
@@ -99,7 +100,16 @@ function isDocIdToken(token: string): boolean {
  * carries no such id (anthropic-summaries, unknown hosts) — those stay URL-only.
  *  - YouTube: `watch?v=<11>`, `youtu.be/<11>`, `shorts/<11>`;
  *  - X/Twitter: `/status/<15–20 digits>`;
+ *  - Vimeo: every shape `resolveVimeoRef` accepts, id only (the unlisted hash is
+ *    a credential for reaching the page, never part of the video's identity);
  *  - TikTok: `/video/<digits>`.
+ *
+ * Vimeo goes through the host-gated parser rather than a regex of its own, and
+ * sits above the TikTok match because the two shapes overlap:
+ * `player.vimeo.com/video/<id>` matches the bare `/video/<digits>` rule as well.
+ * They AGREE on every such url today (both yield the digits), so the order is
+ * ownership rather than correctness — what the parser adds is the host gate and
+ * the `vimeo.com/<id>` and `/channels/<c>/<id>` shapes no `/video/` rule sees.
  */
 export function docIdFromUrl(url: string): string | null {
   const yt =
@@ -109,6 +119,8 @@ export function docIdFromUrl(url: string): string | null {
   if (yt) return yt[1]!;
   const status = url.match(/\/status\/(\d{15,20})/);
   if (status) return status[1]!;
+  const vimeo = resolveVimeoRef(url);
+  if (vimeo) return vimeo.id;
   const tiktok = url.match(/\/video\/(\d+)/);
   if (tiktok) return tiktok[1]!;
   return null;

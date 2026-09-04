@@ -103,11 +103,18 @@ mock.module("../../vimeo/oembed.ts", () => ({
 // from here, and a mock that dropped it would make the 413 case assert against
 // `undefined > x`, i.e. never fire.
 let vimeoSummarizeCalls = 0;
+/**
+ * Held open by the in-flight cases below: the route's dedup claim lives exactly
+ * as long as this promise, so a test that wants a SECOND POST to land while a
+ * capture is running parks the first one here.
+ */
+let vimeoSummarizeGate: Promise<void> | null = null;
 const realVimeoSummarizer = await import("../../vimeo/summarizer.ts");
 mock.module("../../vimeo/summarizer.ts", () => ({
   ...realVimeoSummarizer,
   summarizeVimeo: async () => {
     vimeoSummarizeCalls++;
+    if (vimeoSummarizeGate) await vimeoSummarizeGate;
   },
 }));
 
@@ -188,6 +195,7 @@ beforeEach(() => {
   tiktokSummarizeCalls = 0;
   youtubeSummarizeCalls = 0;
   vimeoSummarizeCalls = 0;
+  vimeoSummarizeGate = null;
   oembedCalls = 0;
   oembedThrows = null;
   oembedAnswer = {
@@ -391,6 +399,156 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
 
     expect(((await res.json()) as { duplicate?: boolean }).duplicate).toBe(true);
     expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("dedup resolves each listed url to its VIDEO ID — an unlisted-hash row matches", async () => {
+    // The live collection already holds a row this route never wrote, so
+    // "every writer posts the canonical url" is not true of the stored data.
+    // Both of these address video 1223358361.
+    knowledgeApiImpl = async () => ({
+      documents: [{ id: "ai/rag/Unlisted.md", url: "https://vimeo.com/1223358361/abc1234567" }],
+    });
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.duplicate).toBe(true);
+    expect(body.document_id).toBe("ai/rag/Unlisted.md");
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("dedup matches a stored player.vimeo.com/video/<id> row too", async () => {
+    knowledgeApiImpl = async () => ({
+      documents: [{ id: "ai/rag/Embed.md", url: "https://player.vimeo.com/video/1223358361" }],
+    });
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(((await res.json()) as { duplicate?: boolean }).duplicate).toBe(true);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("a listing row whose url is not a Vimeo video is not a duplicate", async () => {
+    // `https://vimeo.com/` — a real row in the live collection. Resolving it
+    // yields no id, and a row with no id must never match a capture.
+    knowledgeApiImpl = async () => ({
+      documents: [{ id: "ai/rag/Bare.md", url: "https://vimeo.com/" }, { id: "ai/x.md" }],
+    });
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.duplicate).toBeUndefined();
+    expect(body.job_id).toBeTruthy();
+  });
+
+  // Acceptance: oEmbed's duration is the ONLY length bound this vertical has.
+  test("an oEmbed answer with no duration 422s duration_unknown and leaves NO job behind", async () => {
+    // `toDurationSec` degrades a missing/non-numeric/negative duration to 0,
+    // and 0 passes `> 10_800` unconditionally — so a metadata answer that never
+    // said how long the video is used to start an unbounded capture.
+    oembedAnswer = { ...(oembedAnswer as Record<string, unknown>), durationSec: 0 } as typeof oembedAnswer;
+    const before = vmState.getRecentJobs().length;
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "duration_unknown" });
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("a not-public answer with no duration is still not_public, not duration_unknown", async () => {
+    // The ORDER is pinned by the compiler, not by this case: `VimeoNotPublic`
+    // has no `durationSec`, so hoisting the duration branch above `isNotPublic`
+    // is a TS2339 (verified by mutation). This asserts the reachable behaviour —
+    // a private video is never reported as a metadata gap.
+    oembedAnswer = { notPublic: true, status: 403 };
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "not_public", status: 403 });
+  });
+
+  // Acceptance: check-then-act across the huginn lookup created TWO jobs, and
+  // huginn suffixes `(2)` rather than overwriting — so the corpus kept a shadow
+  // copy of the same talk.
+  test("two POSTs of the same url 0 ms apart create ONE job; the second answers in_flight", async () => {
+    let release!: () => void;
+    vimeoSummarizeGate = new Promise<void>((resolve) => { release = resolve; });
+    const app = vmApp();
+    const before = vmState.getRecentJobs().length;
+
+    const [resA, resB] = await Promise.all([
+      post(app, "/api/vimeo/summarize", { url: VIMEO_URL }),
+      post(app, "/api/vimeo/summarize", { url: VIMEO_URL }),
+    ]);
+    const bodies = [
+      (await resA.json()) as Record<string, unknown>,
+      (await resB.json()) as Record<string, unknown>,
+    ];
+
+    expect(vmState.getRecentJobs().length).toBe(before + 1);
+    expect(vimeoSummarizeCalls).toBe(1);
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+
+    const started = bodies.find((b) => !b.in_flight)!;
+    const follower = bodies.find((b) => b.in_flight)!;
+    expect(started.job_id).toBeTruthy();
+    expect(follower.job_id).toBe(started.job_id);
+    expect(follower.dashboard_url).toBe(`/summaries?source=vimeo&job=${String(started.job_id)}`);
+
+    release();
+    await Promise.resolve();
+  });
+
+  test("a DIFFERENT video is never held up by an in-flight capture", async () => {
+    let release!: () => void;
+    vimeoSummarizeGate = new Promise<void>((resolve) => { release = resolve; });
+    const app = vmApp();
+
+    const first = await post(app, "/api/vimeo/summarize", { url: VIMEO_URL });
+    const second = await post(app, "/api/vimeo/summarize", { url: "https://vimeo.com/1223642971" });
+
+    expect(((await first.json()) as Record<string, unknown>).in_flight).toBeUndefined();
+    expect(((await second.json()) as Record<string, unknown>).in_flight).toBeUndefined();
+    expect(vimeoSummarizeCalls).toBe(2);
+
+    release();
+    await Promise.resolve();
+  });
+
+  test("the claim is released when the job settles, so the video can be captured again", async () => {
+    // No gate: the mocked capture settles immediately, which is what a real
+    // `completeJob`/`failJob` does at the end of `summarizeVimeo`.
+    const app = vmApp();
+    const first = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as {
+      job_id: string;
+    };
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    const second = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+
+    expect(second.in_flight).toBeUndefined();
+    expect(second.job_id).toBeTruthy();
+    expect(second.job_id).not.toBe(first.job_id);
+    expect(vimeoSummarizeCalls).toBe(2);
+  });
+
+  test("a refused POST releases the claim rather than wedging the video", async () => {
+    // The claim is taken BEFORE the huginn lookup, so every early return under
+    // it has to give it back — otherwise one 500 locks that video out until the
+    // process restarts. NB this pins the OBSERVABLE property; two mechanisms
+    // provide it (the `finally` release and the waiter loop's same-flight
+    // break), so mutating either alone leaves this case green.
+    summarizerBot = null;
+    const app = vmApp();
+    expect((await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).status).toBe(500);
+
+    summarizerBot = cliBot;
+    const res = await post(app, "/api/vimeo/summarize", { url: VIMEO_URL });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, unknown>).job_id).toBeTruthy();
+    expect(vimeoSummarizeCalls).toBe(1);
   });
 
   test("an unreachable huginn degrades to 'not a duplicate' and the capture runs", async () => {

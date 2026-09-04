@@ -5,6 +5,7 @@ import { getLog } from "../logging.ts";
 import { resolveServingProfile } from "../config.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { getSummarySource } from "../summaries/sources.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { createQueue } from "../wiki/queue.ts";
 import { canonicalVimeoUrl } from "./url.ts";
@@ -28,8 +29,15 @@ import {
 
 const log = getLog("vimeo", "summarizer");
 
-/** The collection this vertical ingests into (huginn's `--vimeo-collection`). */
-export const VIMEO_COLLECTION = "vimeo-summaries";
+/**
+ * The collection this vertical ingests into (huginn's `--vimeo-collection`).
+ *
+ * Derived from the summary-source registry, never spelled again: the route
+ * reads the same entry for its dedup listing, and two literals for one
+ * collection name is a pair that can drift into a capture that ingests into one
+ * collection and dedups against another.
+ */
+export const VIMEO_COLLECTION = getSummarySource("vimeo")!.collection;
 
 /**
  * Longest video this vertical will capture: 3 hours.
@@ -65,8 +73,9 @@ export function ingestDate(uploadDate: string): string | undefined {
 
 const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
   "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
-    "The transcript is grouped into windows headed with an absolute [HH:MM:SS] timestamp; " +
-    "those headings are positions in the talk, not content — never quote one as if it were speech.",
+    "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
+    "carrying its absolute position in the talk; those headings are positions, not content — " +
+    "never quote one as if it were speech.",
   VALID_CATEGORIES,
 );
 
@@ -137,24 +146,12 @@ export interface VimeoSummarizerDeps {
  *  - the file EXISTS — a typo'd path would otherwise fail deep inside the job
  *    as an empty transcript.
  *
- * The stub is resolved per call (not once at import) so a test can set and clear
- * the variable, and it logs ONE line per distinct resolution so a long-running
- * dev server says on every boot which fixture it is serving.
+ * The resolution is memoized on the two variables it reads (see
+ * {@link harvestStub}), so a long-running dev server stats the fixture once —
+ * but the WARN is per capture, in {@link summarizeVimeo}, naming the job: a
+ * once-per-process line is a line nobody sees on the capture they are looking
+ * at. The document itself says so too, via `caption_kind: "stub"`.
  */
-let lastStubWarn: string | null = null;
-
-function stubWarnOnce(message: string, props: Record<string, unknown>): void {
-  const key = `${message}:${JSON.stringify(props)}`;
-  if (lastStubWarn === key) return;
-  lastStubWarn = key;
-  log.warn(message, props);
-}
-
-/** Test-only: forget the once-per-value warn dedup. */
-export function resetHarvestStubWarnState(): void {
-  lastStubWarn = null;
-}
-
 export async function resolveHarvestStubDeps(
   env: Record<string, string | undefined> = process.env,
 ): Promise<VimeoSummarizerDeps | null> {
@@ -163,14 +160,14 @@ export async function resolveHarvestStubDeps(
 
   const profile = resolveServingProfile(env);
   if (profile !== "default") {
-    stubWarnOnce(
+    log.warn(
       "VIMEO_HARVEST_STUB is ignored on serving profile {profile} — running a real harvest",
       { profile },
     );
     return null;
   }
   if (!raw.startsWith("/")) {
-    stubWarnOnce(
+    log.warn(
       "VIMEO_HARVEST_STUB={path} is not an absolute path — ignored, running a real harvest",
       { path: raw },
     );
@@ -178,17 +175,12 @@ export async function resolveHarvestStubDeps(
   }
   const file = Bun.file(raw);
   if (!(await file.exists())) {
-    stubWarnOnce(
+    log.warn(
       "VIMEO_HARVEST_STUB={path} does not exist — ignored, running a real harvest",
       { path: raw },
     );
     return null;
   }
-
-  stubWarnOnce(
-    "VIMEO_HARVEST_STUB active: harvesting NOTHING, serving captions from {path}",
-    { path: raw },
-  );
 
   const vttUrl = `https://captions.vimeo.com/captions/stub.vtt`;
   return {
@@ -200,6 +192,35 @@ export async function resolveHarvestStubDeps(
     }),
     downloadVtt: async () => await file.text(),
   };
+}
+
+/**
+ * The memoized form {@link summarizeVimeo} uses: ONE resolution (one profile
+ * parse, one stat) per distinct configuration, instead of one per capture.
+ *
+ * Keyed on BOTH variables `resolveHarvestStubDeps` reads, so a process that
+ * changes either is not served a stale answer — and a THROW is not memoized, so
+ * a transient failure (a permission error on the stat) is retried rather than
+ * pinned for the lifetime of the process.
+ */
+let stubCache: { key: string; value: Promise<VimeoSummarizerDeps | null> } | null = null;
+
+async function harvestStub(
+  env: Record<string, string | undefined> = process.env,
+): Promise<{ deps: VimeoSummarizerDeps; path: string } | null> {
+  const path = env.VIMEO_HARVEST_STUB?.trim() ?? "";
+  const key = `${path} ${env.MUNINN_PROFILE ?? ""}`;
+  if (!stubCache || stubCache.key !== key) {
+    stubCache = { key, value: resolveHarvestStubDeps(env) };
+  }
+  const cached = stubCache;
+  try {
+    const deps = await cached.value;
+    return deps ? { deps, path } : null;
+  } catch (err) {
+    if (stubCache === cached) stubCache = null;
+    throw err;
+  }
 }
 
 const REAL_DEPS: VimeoSummarizerDeps = {
@@ -222,23 +243,46 @@ export async function summarizeVimeo(
   botConfig: BotConfig,
   deps?: Partial<VimeoSummarizerDeps>,
 ): Promise<void> {
-  const resolved: VimeoSummarizerDeps = {
-    ...REAL_DEPS,
-    ...((await resolveHarvestStubDeps()) ?? {}),
-    ...(deps ?? {}),
-  };
-
   try {
-    // 1. Harvest the signed caption URL and download it, serialized against
-    //    every other harvest in this process.
-    updateStatus(jobId, "harvesting_captions");
+    // 0. Resolve the deps INSIDE the try. `resolveServingProfile` throws on an
+    //    unrecognised MUNINN_PROFILE and the stat can throw on a permission
+    //    error; outside the try that escaped into the route's fire-and-forget
+    //    `.catch` and left the job `pending` for the whole 12 h in-flight grace.
+    //
+    //    A caller that brought its own deps never consults the stub at all: it
+    //    would only be overridden, and every unit-test capture was paying for a
+    //    resolution it then threw away.
+    let resolved: VimeoSummarizerDeps;
+    let stubbed = false;
+    if (deps) {
+      resolved = { ...REAL_DEPS, ...deps };
+    } else {
+      const stub = await harvestStub();
+      stubbed = stub !== null;
+      resolved = stub ? stub.deps : REAL_DEPS;
+      if (stub) {
+        // EVERY stubbed capture says so, not the first one of the process: this
+        // is the line that tells the reader of a job that its "capture" never
+        // touched vimeo.com.
+        log.warn(
+          "VIMEO_HARVEST_STUB active for job {jobId} ({videoId}): harvesting NOTHING, serving captions from {path}",
+          { jobId, videoId: meta.videoId, path: stub.path },
+        );
+      }
+    }
 
-    const captions = await harvestQueue.run(HARVEST_QUEUE_KEY, () =>
-      resolved.harvest(meta.videoId, {
+    // 1. Harvest the signed caption URL and download it, serialized against
+    //    every other harvest in this process. The status moves INSIDE the queued
+    //    closure: announced before the queue, a job waiting its turn reported a
+    //    Chromium that was not running — for as long as every harvest ahead of
+    //    it took.
+    const captions = await harvestQueue.run(HARVEST_QUEUE_KEY, () => {
+      updateStatus(jobId, "harvesting_captions");
+      return resolved.harvest(meta.videoId, {
         ...(meta.hash ? { hash: meta.hash } : {}),
         timeoutMs: VIMEO_HARVEST_TIMEOUT_MS,
-      }),
-    );
+      });
+    });
 
     const track = chooseTrack(captions.tracks);
     if (!track) {
@@ -316,6 +360,7 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
     updateStatus(jobId, "ingesting");
 
     let ingestedDocId: string | undefined;
+    const date = ingestDate(meta.uploadDate);
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/vimeo/ingest",
@@ -324,10 +369,14 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
         url: canonicalVimeoUrl(meta.videoId),
         summary,
         category,
-        ...(ingestDate(meta.uploadDate) ? { date: ingestDate(meta.uploadDate) } : {}),
+        ...(date ? { date } : {}),
         transcript_markdown: transcript,
         caption_lang: track.lang,
-        caption_kind: captionKind,
+        // A stubbed capture is marked ON THE DOCUMENT. The prompt still gets the
+        // kind the track claims (the rider is about the text), but a document
+        // written off a local .vtt must never be indistinguishable in the corpus
+        // from one harvested off vimeo.com.
+        caption_kind: stubbed ? "stub" : captionKind,
         duration_sec: meta.durationSec,
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
@@ -341,14 +390,27 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
     // 4. Fire-and-forget source-page draft, keyed on huginn's stored doc id so a
     //    later run-now click cannot mint a duplicate proposal (same rule as the
     //    youtube vertical).
-    triggerSourceDraftFromCapture(botConfig, {
-      collection: VIMEO_COLLECTION,
-      docId: ingestedDocId ?? meta.videoId,
-      url: meta.url,
-      body: summary,
-      sourceTitle: meta.title,
-      category,
-    });
+    //
+    //    Its OWN try/catch, and that is load-bearing: this runs after
+    //    `completeJob`, its first statements are synchronous (`isWikiReadonly`,
+    //    `isReadonlyWikiRoot`), and the job store has no guard against a second
+    //    terminal transition — so a throw here reached the catch below and
+    //    turned a finished capture's card from complete into error.
+    try {
+      triggerSourceDraftFromCapture(botConfig, {
+        collection: VIMEO_COLLECTION,
+        docId: ingestedDocId ?? meta.videoId,
+        url: meta.url,
+        body: summary,
+        sourceTitle: meta.title,
+        category,
+      });
+    } catch (err) {
+      log.error("Vimeo source-draft trigger failed for job {jobId} (the capture stands): {error}", {
+        jobId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error("Vimeo summarization failed for job {jobId}: {error}", { jobId, error: msg });

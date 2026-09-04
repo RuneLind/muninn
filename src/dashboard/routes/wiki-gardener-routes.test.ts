@@ -917,7 +917,17 @@ describe("ingest-backlog pipeline + cache", () => {
     expect(x.queued).toBe(0); // x1 referenced by url in the wiki
 
     // byCollection is in SUMMARY_SOURCES order and covers every collection.
-    expect(data.byCollection.map((c) => c.source)).toEqual(SUMMARY_SOURCES.map((s) => s.id));
+    // A LITERAL list, deliberately: production iterates the same array, so
+    // `SUMMARY_SOURCES.map(s => s.id)` compared the module against itself and
+    // could no longer fail on membership, order or a typo'd id.
+    expect(data.byCollection.map((c) => c.source)).toEqual([
+      "youtube",
+      "x-article",
+      "anthropic",
+      "tiktok",
+      "article",
+      "vimeo",
+    ]);
 
     expect(data.total).toBe(4);
     expect(data.ingested).toBe(3);

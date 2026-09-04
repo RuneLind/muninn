@@ -1220,6 +1220,62 @@ export const spec = {
       },
     },
 
+    // ===================== Vimeo =====================
+
+    "/api/vimeo/summarize": {
+      post: {
+        tags: ["Vimeo"],
+        summary: "Summarize a Vimeo video",
+        description:
+          "Starts a background capture of a Vimeo video: oEmbed metadata, then a headless-Chromium caption harvest, then a summary ingested into `vimeo-summaries`. Every refusal happens on oEmbed's answer, before a job exists — a private or deleted video is 422 `not_public`, an answer carrying no duration is 422 `duration_unknown`, past the 3h cap is 413, and an already-captured video answers 200 with `duplicate` and no `job_id`. A second POST while the same video is still capturing answers 200 with `in_flight` and the running job's id.",
+        operationId: "postVimeoSummarize",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  url: {
+                    type: "string",
+                    format: "uri",
+                    description:
+                      "Any Vimeo video URL: `vimeo.com/<id>`, `vimeo.com/<id>/<hash>`, `player.vimeo.com/video/<id>`, `vimeo.com/channels/<channel>/<id>`, `?h=<hash>`.",
+                  },
+                },
+                required: ["url"],
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Capture started, already captured, or already in flight",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    job_id: { type: "string" },
+                    dashboard_url: { type: "string" },
+                    duplicate: { type: "boolean" },
+                    document_id: { type: "string" },
+                    existing_url: { type: "string" },
+                    in_flight: { type: "boolean" },
+                  },
+                },
+              },
+            },
+          },
+          "400": errorResponse,
+          "413": errorResponse,
+          "422": errorResponse,
+          "500": errorResponse,
+          "502": errorResponse,
+        },
+      },
+    },
+
     // ===================== Chat (/chat prefix) =====================
 
     "/chat/knowledge-config": {

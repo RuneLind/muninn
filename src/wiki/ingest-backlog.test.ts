@@ -117,6 +117,20 @@ describe("docIdFromUrl — platform-native id extraction", () => {
     );
   });
 
+  test("Vimeo, in every shape the capture route accepts", () => {
+    expect(docIdFromUrl("https://vimeo.com/1223358361")).toBe("1223358361");
+    // The unlisted hash is a credential for reaching the page, never part of
+    // the video's identity — both spellings credit the same document.
+    expect(docIdFromUrl("https://vimeo.com/1223358361/abc1234567")).toBe("1223358361");
+    expect(docIdFromUrl("https://player.vimeo.com/video/1223358361")).toBe("1223358361");
+    expect(docIdFromUrl("https://vimeo.com/channels/staffpicks/1223358361")).toBe("1223358361");
+  });
+
+  test("a Vimeo host with no video id → null (and vimeo.com is not tiktok)", () => {
+    expect(docIdFromUrl("https://vimeo.com/")).toBeNull();
+    expect(docIdFromUrl("https://vimeo.com/channels/staffpicks")).toBeNull();
+  });
+
   test("anthropic-summaries and unknown shapes → null (URL-only crediting)", () => {
     expect(docIdFromUrl("https://www.anthropic.com/news/some-post")).toBeNull();
     expect(docIdFromUrl("https://example.com/whatever")).toBeNull();

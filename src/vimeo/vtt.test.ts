@@ -209,15 +209,23 @@ describe("vttToSegments", () => {
 });
 
 describe("segmentsToMarkdown", () => {
-  test("the fixture renders [00:00:00] then [00:02:00]", () => {
+  // Each window opens a `###` HEADING, not a bare `[HH:MM:SS]` line. huginn's
+  // MarkdownHeadingSplitter cuts the ingested `## Transcript` section into
+  // ~1000-char chunks and carries the nearest heading into every chunk's
+  // `heading` field — with bare lines, 48 of 75 measured chunks carried no
+  // timestamp at all, so a search hit inside a 50-minute talk could not be
+  // cited to a minute.
+  test("the fixture renders ### [00:00:00] then ### [00:02:00]", () => {
     const md = segmentsToMarkdown(vttToSegments(fixture, 120));
-    expect(md.startsWith("[00:00:00]\n")).toBe(true);
-    expect(md.split("\n\n")[1]!.startsWith("[00:02:00]\n")).toBe(true);
+    expect(md.startsWith("### [00:00:00]\n")).toBe(true);
+    expect(md.split("\n\n")[1]!.startsWith("### [00:02:00]\n")).toBe(true);
   });
 
-  test("one header per window", () => {
+  test("one heading per window", () => {
     const md = segmentsToMarkdown(vttToSegments(fixture, 120));
-    expect(md.match(/^\[\d{2}:\d{2}:\d{2}\]$/gm)!.length).toBe(27);
+    expect(md.match(/^### \[\d{2}:\d{2}:\d{2}\]$/gm)!.length).toBe(27);
+    // No window is left as a bare bracketed line.
+    expect(md.match(/^\[\d{2}:\d{2}:\d{2}\]$/gm)).toBeNull();
   });
 });
 

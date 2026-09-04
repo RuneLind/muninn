@@ -23,17 +23,41 @@ The route is `src/dashboard/routes/vimeo-routes.ts`; the huginn half is the
 
 **There is no `fetching_metadata` status.** oEmbed runs in the ROUTE, before a job
 exists, because it is what decides whether there is anything to capture at all —
-not public ⇒ 422, over the 3 h cap ⇒ 413, already captured ⇒ a `duplicate` body
-with no `job_id`. A job created above one of those early returns is never settled
-and sits for the whole in-flight grace at the top of `/summaries` with a
-"running" `/agents` card (the ordering `capture-route-job-ordering.test.ts` pins
-for every capture vertical). The metadata is then handed to `summarizeVimeo`,
-which never asks oEmbed again.
+not public ⇒ 422 `not_public`, no duration ⇒ 422 `duration_unknown`, over the 3 h
+cap ⇒ 413, already captured ⇒ a `duplicate` body with no `job_id`, already
+capturing ⇒ an `in_flight` body carrying the running job's id. A job created
+above one of those early returns is never settled and sits for the whole
+in-flight grace at the top of `/summaries` with a "running" `/agents` card (the
+ordering `capture-route-job-ordering.test.ts` pins for TikTok, YouTube and
+Vimeo — three of the six verticals). The metadata is then handed to
+`summarizeVimeo`, which never asks oEmbed again.
 
-**The dedup key is `canonicalVimeoUrl(id)`, compared as a whole string.** Every
-writer of this collection posts that url, so the stored value IS the key by
-construction; re-extracting an id from each listing row would be a second, weaker
-copy of the same rule. An unlisted-hash paste therefore still matches.
+**oEmbed's duration is the only length bound, so "it did not say" refuses.**
+`toDurationSec` degrades a missing, non-numeric or negative `duration` to 0, and
+0 passes `> VIMEO_MAX_DURATION_SEC` unconditionally — there is no download to
+time out and no frame budget behind it, so a 0 would have started an unbounded
+capture. It answers 422 `duration_unknown`, below the not-public branch (which
+carries no duration at all).
+
+**The dedup key is the VIDEO ID, resolved out of each listed row's url**
+(`resolveVimeoRef(d.url)?.id`, the same rule as the youtube sibling). "Every
+writer posts `canonicalVimeoUrl(id)`" is true of this route and false of the
+collection: the live one already holds rows this route never wrote, including a
+bare `https://vimeo.com/`, and a row spelled `vimeo.com/<id>/<hash>` or
+`player.vimeo.com/video/<id>` is the same video. A row whose url resolves to no
+id matches nothing.
+
+**The stored-document check is only half of dedup; the other half is
+in-process.** Nothing is stored until a capture finishes, and the huginn listing
+is an await, so two POSTs of one url either side of it both found nothing and
+both captured — and huginn suffixes `(2)` rather than overwriting, so the corpus
+kept a shadow copy of the same talk. `inFlight` is a module-level claim keyed on
+the video id, taken SYNCHRONOUSLY before that lookup and given back when the job
+settles (`summarizeVimeo` resolves exactly when `completeJob`/`failJob` has run)
+or, on any early return under it, in the handler's `finally` — one 500 must not
+lock a video out for the life of the process. A POST arriving before the claim
+carries a job id waits for that decision rather than being answered with an id
+that does not exist yet.
 
 **ONE Chromium at a time, process-wide.** `harvestVimeoCaptions` launches a
 browser per harvest, so every harvest goes through a module-level
@@ -54,9 +78,31 @@ is deliberately absent from huginn's ingest RESPONSE and from its similarity
 query (`write_summary`'s `body_suffix`). Measured on the first real capture: a
 `?q=tiny LLM library` search hits inside that section.
 
+**Each window opens a `### [HH:MM:SS]` HEADING, not a bare bracketed line.**
+huginn's `MarkdownHeadingSplitter` cuts that `## Transcript` section on headings
+and then at ~1000 chars, and carries the nearest heading into every chunk's
+`heading` field. With bare lines only the chunks that happened to START at a
+window boundary carried a timestamp — measured, 48 of 75 — so most hits inside a
+talk could not be cited to a minute, which is the whole reason the transcript is
+ingested.
+
 **`no_captions` is a job ERROR with a stable code, not a crash.** A video with no
 usable track is a legitimate answer about the video; `manifestUrl` is logged
 because it is what PR 4's audio fallback would need and it expires.
+
+**Everything that can fail is INSIDE the job's try; the source-draft trigger is
+inside one of its own.** The dep resolution moved in because
+`resolveServingProfile` throws on an unrecognised `MUNINN_PROFILE` and the
+fixture stat can throw on a permission error — outside, that escaped into the
+route's fire-and-forget `.catch` and left the job `pending` forever. The trigger
+moved out because it runs AFTER `completeJob`, its first statements are
+synchronous (`isWikiReadonly`, `isReadonlyWikiRoot`), and the job store has no
+guard against a second terminal transition — so a throw there turned a finished
+capture's card from complete into error.
+
+**The status moves inside the queued closure.** `harvesting_captions` announced
+before `harvestQueue.run` meant a job waiting its turn reported a Chromium that
+was not running, for as long as every harvest ahead of it took.
 
 **oEmbed's `upload_date` is a datetime; huginn's `date` is a day.** `ingestDate`
 takes the day half and omits the field entirely when it cannot — huginn then
@@ -278,7 +324,7 @@ on both and 0 means *"the player never said"*, never "a zero-length video".
 | Variable | Default | What it does |
 |---|---|---|
 | `VIMEO_OEMBED_BASE` | `https://vimeo.com` | Base URL of the oEmbed endpoint, read at call time. PR 3's e2e points it at a local stub so a spec can fake the metadata half over HTTP without faking a browser. |
-| `VIMEO_HARVEST_STUB` | — | An **absolute** path to a `.vtt` that stands in for the whole browser half, so an acceptance run drives the vertical end to end with no Chromium and no live Vimeo. It is a backdoor by construction — the process summarizes a file off local disk while reporting a capture of a public video — so it has THREE gates, all required and all failing to a warn plus a real harvest rather than a throw: `resolveServingProfile() === "default"`, an absolute path, and the file existing. One warn line per distinct resolution, so a long-running dev server keeps saying which fixture it is serving. |
+| `VIMEO_HARVEST_STUB` | — | An **absolute** path to a `.vtt` that stands in for the whole browser half, so an acceptance run drives the vertical end to end with no Chromium and no live Vimeo. It is a backdoor by construction — the process summarizes a file off local disk while reporting a capture of a public video — so it has THREE gates, all required and all failing to a warn plus a real harvest rather than a throw: `resolveServingProfile() === "default"`, an absolute path, and the file existing. **Every stubbed capture warns**, naming the fixture AND the job id, and the document it writes carries `caption_kind: "stub"` — a once-per-process line is a line nobody sees on the capture they are looking at, and a stubbed document must not be indistinguishable in the corpus from a harvested one. The resolution itself is memoized on the two variables it reads (one profile parse, one stat per configuration; a throw is not memoized), and a caller that passes its own `deps` skips it entirely. |
 
 Both are in `src/test/ambient-env.ts`, so no suite and no e2e-spawned muninn
 inherits a developer's value.

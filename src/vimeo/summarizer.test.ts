@@ -10,7 +10,8 @@
  * `src/vimeo/` directory: the directory glob would sweep this file into the
  * first chunk.
  */
-import { test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { test, expect, beforeEach, beforeAll, afterEach, mock } from "bun:test";
+import { configure, type LogRecord } from "@logtape/logtape";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { VimeoCaptions } from "./captions.ts";
@@ -38,9 +39,13 @@ mock.module("../ai/one-shot.ts", () => ({
 }));
 
 let sourceDraftCalls: Array<Record<string, unknown>> = [];
+let sourceDraftThrows: Error | null = null;
 mock.module("../gardener/source-drafter-run.ts", () => ({
   triggerSourceDraftFromCapture: (_bot: unknown, input: Record<string, unknown>) => {
     sourceDraftCalls.push(input);
+    // The real function's first statements are synchronous (`isWikiReadonly`,
+    // `isReadonlyWikiRoot`), so it CAN throw on the caller's stack.
+    if (sourceDraftThrows) throw sourceDraftThrows;
   },
 }));
 
@@ -70,7 +75,6 @@ const {
   VIMEO_COLLECTION,
   ingestDate,
   resolveHarvestStubDeps,
-  resetHarvestStubWarnState,
 } = await import("./summarizer.ts");
 const { createJob, getJob, subscribe } = await import("./state.ts");
 
@@ -116,20 +120,42 @@ function deps(over: Partial<{ tracks: VimeoCaptions["tracks"]; vtt: string }> = 
   };
 }
 
+/** Every warn this module logs, so the stub's per-capture line can be counted. */
+let warns: LogRecord[] = [];
+beforeAll(async () => {
+  await configure({
+    sinks: {
+      capture: (r: LogRecord) => {
+        if (r.category.join(".") === "muninn.vimeo.summarizer" && r.level === "warning") {
+          warns.push(r);
+        }
+      },
+    },
+    loggers: [
+      { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+      { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+    ],
+    reset: true,
+  });
+});
+
 beforeEach(() => {
   claudeResult = "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n- point";
   lastSystemPrompt = undefined;
   lastPrompt = undefined;
   ingestPayload = undefined;
   sourceDraftCalls = [];
-  resetHarvestStubWarnState();
+  sourceDraftThrows = null;
+  warns = [];
   delete process.env.VIMEO_HARVEST_STUB;
+  delete process.env.MUNINN_PROFILE;
   installFetchMock();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   delete process.env.VIMEO_HARVEST_STUB;
+  delete process.env.MUNINN_PROFILE;
 });
 
 test("the happy path walks harvesting_captions → summarizing → ingesting → complete", async () => {
@@ -149,10 +175,10 @@ test("the prompt is the windowed transcript, headed with absolute timestamps", a
   const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
   await summarizeVimeo(jobId, META, config, bot, deps());
 
-  expect(lastPrompt).toContain("[00:00:00]");
+  expect(lastPrompt).toContain("### [00:00:00]");
   expect(lastPrompt).toContain("Hello and welcome to the talk.");
   // The second cue is at 2:30, so it opens the 120s window at 00:02:00.
-  expect(lastPrompt).toContain("[00:02:00]");
+  expect(lastPrompt).toContain("### [00:02:00]");
 });
 
 test("the ingest body carries the canonical url, the transcript and the caption provenance", async () => {
@@ -165,7 +191,7 @@ test("the ingest body carries the canonical url, the transcript and the caption 
   expect(ingestPayload!.duration_sec).toBe(3180);
   // oEmbed's upload_date is a datetime; huginn's `date` frontmatter is a day.
   expect(ingestPayload!.date).toBe("2026-08-20");
-  expect(String(ingestPayload!.transcript_markdown)).toContain("[00:00:00]");
+  expect(String(ingestPayload!.transcript_markdown)).toContain("### [00:00:00]");
   expect(ingestPayload!.summary).not.toContain("Hello and welcome");
 });
 
@@ -283,6 +309,37 @@ test("two concurrent jobs harvest STRICTLY one at a time", async () => {
   expect(getJob(jobB)!.status).toBe("complete");
 });
 
+test("a QUEUED job stays pending — it reports harvesting only when its harvest starts", async () => {
+  // `updateStatus` fired before `harvestQueue.run`, so the second job announced
+  // a Chromium that was not running — for as long as the first harvest took
+  // (up to the 60 s budget, and stacking with every further queued job).
+  const releases: Array<() => void> = [];
+  const slowDeps = {
+    harvest: async () => {
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return captionsWith([AUTO_TRACK]);
+    },
+    downloadVtt: async () => VTT,
+  };
+
+  const jobA = createJob(VIDEO_ID, "A", CANONICAL);
+  const jobB = createJob("1223642971", "B", "https://vimeo.com/1223642971");
+  const runA = summarizeVimeo(jobA, META, config, bot, slowDeps);
+  const runB = summarizeVimeo(jobB, { ...META, videoId: "1223642971" }, config, bot, slowDeps);
+
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  expect(getJob(jobA)!.status).toBe("harvesting_captions");
+  expect(getJob(jobB)!.status).toBe("pending");
+
+  releases[0]!();
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  expect(getJob(jobB)!.status).toBe("harvesting_captions");
+
+  releases[1]!();
+  await Promise.all([runA, runB]);
+  expect(getJob(jobB)!.status).toBe("complete");
+});
+
 // --- ingestDate --------------------------------------------------------------
 
 test("ingestDate takes the day off oEmbed's datetime and drops anything unparseable", () => {
@@ -346,8 +403,11 @@ test("the stub drives a whole capture with no browser and no live Vimeo", async 
   await summarizeVimeo(jobId, META, config, bot);
 
   expect(getJob(jobId)!.status).toBe("complete");
-  expect(ingestPayload!.caption_kind).toBe("auto");
-  expect(String(ingestPayload!.transcript_markdown)).toContain("[00:00:00]");
+  // The DOCUMENT says it was stubbed. The track is `-x-autogen`, so the prompt
+  // still gets the auto rider — but a document written off a local file must
+  // never be indistinguishable from one harvested off vimeo.com.
+  expect(ingestPayload!.caption_kind).toBe("stub");
+  expect(String(ingestPayload!.transcript_markdown)).toContain("### [00:00:00]");
 });
 
 test("an explicit deps argument still beats the stub", async () => {
@@ -356,4 +416,77 @@ test("an explicit deps argument still beats the stub", async () => {
   await summarizeVimeo(jobId, META, config, bot, deps({ tracks: [MANUAL_TRACK] }));
 
   expect(ingestPayload!.caption_kind).toBe("manual");
+});
+
+test("EVERY stubbed capture warns, naming the fixture and the job", async () => {
+  const path = `${import.meta.dir}/fixtures/totto-trust-but-verify.vtt`;
+  process.env.VIMEO_HARVEST_STUB = path;
+
+  const jobA = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobA, META, config, bot);
+  const jobB = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobB, META, config, bot);
+
+  // Two captures, two lines — the once-per-value dedup made a long-running dev
+  // server say this once and then never again, while every later capture was
+  // just as stubbed.
+  expect(warns.length).toBe(2);
+  expect(warns.map((w) => w.properties.jobId)).toEqual([jobA, jobB]);
+  for (const w of warns) {
+    expect(w.properties.path).toBe(path);
+    expect(w.message.join("")).toContain("VIMEO_HARVEST_STUB");
+  }
+});
+
+// --- The stub resolution is a failure path of its own -----------------------
+
+test("a stub resolution that THROWS lands on the job, not on the caller", async () => {
+  // `resolveServingProfile` throws on an unrecognised MUNINN_PROFILE, and the
+  // resolution used to sit OUTSIDE the try — so the throw escaped `summarizeVimeo`
+  // into the route's fire-and-forget `.catch`, leaving the job `pending` forever
+  // (12 h of in-flight grace at the top of /summaries with a "running" card).
+  process.env.MUNINN_PROFILE = "not-a-profile";
+  process.env.VIMEO_HARVEST_STUB = `${import.meta.dir}/fixtures/totto-trust-but-verify.vtt`;
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+
+  await summarizeVimeo(jobId, META, config, bot);
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("error");
+  expect(job.error).toContain("MUNINN_PROFILE");
+});
+
+test("explicit deps skip the stub resolution ENTIRELY", async () => {
+  // Same throwing environment as above: if the resolution ran at all this call
+  // would fail. A caller that brought its own harvest never needs the stub, and
+  // every unit-test capture was paying a stat for an answer it then overrode.
+  process.env.MUNINN_PROFILE = "not-a-profile";
+  process.env.VIMEO_HARVEST_STUB = `${import.meta.dir}/fixtures/totto-trust-but-verify.vtt`;
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+
+  await summarizeVimeo(jobId, META, config, bot, deps());
+
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(ingestPayload!.caption_kind).toBe("auto");
+});
+
+// --- The source-draft trigger is OUTSIDE the job's failure envelope ----------
+
+test("a source-draft trigger that throws leaves the job COMPLETE", async () => {
+  // The trigger runs after `completeJob` and its first statements are
+  // synchronous, so a throw there used to reach the job's own catch and call
+  // `failJob` on a completed job — the store has no second-terminal-transition
+  // guard, so the card went complete → error.
+  sourceDraftThrows = new Error("wiki root is read-only");
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  const events: string[] = [];
+  subscribe(jobId, (e) => events.push(e.type));
+
+  await summarizeVimeo(jobId, META, config, bot, deps());
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  expect(job.error).toBeUndefined();
+  expect(events).not.toContain("error");
+  expect(sourceDraftCalls.length).toBe(1);
 });
