@@ -44,6 +44,7 @@ const DROPPED_PATHS: Record<string, string> = {
   "youtube": "/api/youtube/summarize",
   "x-article": "/api/x-articles/summarize",
   "tiktok": "/api/tiktok/summarize",
+  "vimeo": "/api/vimeo/summarize",
 };
 
 /** The page routes that go with them — a dropped group must take its HTML

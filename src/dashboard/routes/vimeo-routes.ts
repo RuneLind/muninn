@@ -1,0 +1,413 @@
+import type { Hono } from "hono";
+import type { Config } from "../../config.ts";
+import { getLog } from "../../logging.ts";
+import { createJob, getJob, getRecentJobs, subscribe } from "../../vimeo/state.ts";
+import { summarizeVimeo, VIMEO_MAX_DURATION_SEC } from "../../vimeo/summarizer.ts";
+import { canonicalVimeoUrl, resolveVimeoRef } from "../../vimeo/url.ts";
+import { fetchVimeoOembed, isNotPublic } from "../../vimeo/oembed.ts";
+import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
+import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
+import { getSummarySource } from "../../summaries/sources.ts";
+import { registerSummaryVertical } from "./summary-vertical.ts";
+
+const log = getLog("dashboard");
+
+// The registry owns the collection name; `src/vimeo/summarizer.ts` derives its
+// `VIMEO_COLLECTION` from the same entry, so the collection this route dedups
+// against and the one the job ingests into cannot drift apart.
+const VIMEO_SOURCE = getSummarySource("vimeo")!;
+const VIMEO_COLLECTION = VIMEO_SOURCE.collection;
+
+interface VimeoDocumentMeta { id: string; url?: string }
+
+/**
+ * How long a just-ingested video is answered from memory rather than from
+ * huginn's listing.
+ *
+ * The window this covers is huginn's REINDEX lag (seconds to a minute or two on
+ * this corpus), so 30 minutes is generous slack rather than a fitted number —
+ * the listing is authoritative the moment it catches up, and an entry that
+ * outlives its usefulness costs nothing but a map slot. It is not longer,
+ * because the map is the one dedup half with no evidence behind it: a document
+ * deleted from huginn in the meantime would keep answering `duplicate` for as
+ * long as this lasts.
+ */
+export const VIMEO_RECENT_INGEST_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * How many videos the recently-ingested map remembers.
+ *
+ * Sized to be unreachable in practice (a capture is minutes of model time, so
+ * 200 of them inside one TTL is not a real load) and bounded anyway, because
+ * this map is the only unbounded-by-nature structure in the route: `inFlight`
+ * empties itself when jobs settle, this one only ages out. Eviction is
+ * oldest-INSERTED first, which is also oldest-ingested.
+ */
+export const VIMEO_RECENT_INGEST_MAX = 200;
+
+/**
+ * A video this process ingested but has not yet seen in huginn's listing.
+ *
+ * `documentId` is huginn's own `file_path` — the same string its `/documents`
+ * listing reports as `id` — so the `duplicate` body this produces is
+ * indistinguishable from the listing's.
+ */
+interface VimeoRecentIngest {
+  documentId: string;
+  existingUrl: string;
+  /** When the ingest landed, read from the injected clock. */
+  at: number;
+}
+
+/** Options a caller may inject; production passes none. */
+export interface VimeoRouteOptions {
+  /** The clock the recently-ingested TTL is measured on. */
+  now?: () => number;
+}
+
+/**
+ * Look for an already-captured document of this VIDEO.
+ *
+ * Each listed row's url is resolved to its video id and compared with the
+ * capture's, the way the youtube sibling does — not compared as a whole string.
+ * "Every writer posts `canonicalVimeoUrl(id)`" is true of this route and false
+ * of the collection: the live one already holds rows this route never wrote
+ * (including a bare `https://vimeo.com/`), and a row spelled
+ * `vimeo.com/<id>/<hash>` or `player.vimeo.com/video/<id>` is the same video.
+ * A row whose url resolves to no id (or has none) matches nothing.
+ *
+ * A failed listing degrades to "not a duplicate" — the same call the other
+ * verticals make, since the cost is a rare re-capture and the alternative is
+ * refusing to capture while huginn is down.
+ */
+async function findExistingByVideoId(
+  baseUrl: string,
+  videoId: string,
+): Promise<VimeoDocumentMeta | null> {
+  try {
+    const data = await fetchKnowledgeApi(
+      baseUrl,
+      `/api/collection/${VIMEO_COLLECTION}/documents`,
+      { timeoutMs: 10000 },
+    );
+    const docs = (data?.documents ?? []) as VimeoDocumentMeta[];
+    return docs.find((d) => d.url !== undefined && resolveVimeoRef(d.url)?.id === videoId) ?? null;
+  } catch (err) {
+    log.warn("Vimeo duplicate check failed: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * The captures this process has started and not yet settled, keyed on the VIDEO
+ * id — the in-flight half of the duplicate check.
+ *
+ * The huginn lookup is an await, so the stored-document check is check-then-act:
+ * two POSTs of the same url on either side of it both found nothing and both
+ * captured, and huginn suffixes `(2)` rather than overwriting, so the corpus
+ * kept a shadow copy of the same talk. The claim is taken SYNCHRONOUSLY, before
+ * that lookup, and `jobId` is filled in once the job exists — a second POST
+ * arriving in the window between the two waits for the first to decide (one
+ * huginn call, ≤10 s) rather than being answered with a job id that does not
+ * exist yet.
+ */
+interface VimeoFlight {
+  jobId: string | null;
+  /** Resolves when the claim is either filled in or released. */
+  decided: Promise<void>;
+  settle: () => void;
+}
+
+export function registerVimeoRoutes(
+  app: Hono,
+  config: Config,
+  opts: VimeoRouteOptions = {},
+): void {
+  const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
+  const now = opts.now ?? Date.now;
+
+  /**
+   * ONE map per REGISTRATION, not one per module — the truthful scope, since a
+   * process registers these routes exactly once and the claim is about "a
+   * capture this app has started".
+   *
+   * Module-level it was also process-level state with no seam, which is a
+   * testing hazard rather than a production one: a test builds a fresh app per
+   * case, so a claim leaked by one case (a handler that threw between the claim
+   * and its release) outlived it and answered `in_flight` for every later case
+   * touching that video — measured: one leaked claim failed between 6 and 14
+   * unrelated cases depending on the file's shape at the time, none of them
+   * naming the route that leaked. Deliberately NOT a
+   * test-only reset export: the scope is what was wrong, and an export would
+   * leave the wrong scope in place behind a lever only tests pull.
+   */
+  const inFlight = new Map<string, VimeoFlight>();
+
+  function claimVideo(videoId: string): VimeoFlight {
+    let settle!: () => void;
+    const decided = new Promise<void>((resolve) => { settle = resolve; });
+    const flight: VimeoFlight = { jobId: null, decided, settle };
+    inFlight.set(videoId, flight);
+    return flight;
+  }
+
+  function releaseVideo(videoId: string, flight: VimeoFlight): void {
+    if (inFlight.get(videoId) === flight) inFlight.delete(videoId);
+    flight.settle();
+  }
+
+  /**
+   * The videos this process has INGESTED but huginn has not listed yet — the
+   * third state of a video id, and the one that was owned by nothing.
+   *
+   * A video id is in exactly one of four states, and dedup needs a guard for
+   * each:
+   *
+   *  1. absent everywhere                → capture it;
+   *  2. claimed in-flight                → `inFlight`, answered `in_flight`;
+   *  3. **ingested, not yet listed**     → THIS map, answered `duplicate`;
+   *  4. listed by huginn                 → `findExistingByVideoId`, `duplicate`.
+   *
+   * State 3 exists because the two guards either side of it end and begin at
+   * different instants. `GET /api/collection/<c>/documents` is derived from
+   * huginn's `index_document_mapping.json`, which moves only when the background
+   * reindex enqueued AFTER an ingest has run — seconds to minutes later — while
+   * the in-flight claim is given back the moment the capture settles. Measured:
+   * a completed capture re-POSTed immediately started a SECOND job and spent a
+   * second model call, and the corpus hid it, because huginn's writer overwrote
+   * the same category/title/url and only one document remained.
+   *
+   * Bounded on BOTH axes ({@link VIMEO_RECENT_INGEST_TTL_MS},
+   * {@link VIMEO_RECENT_INGEST_MAX}) because it is a cache with no invalidation:
+   * the listing is the authority, this only covers the gap in front of it, and
+   * an entry that outlives the reindex is answering from memory about a document
+   * it can no longer see.
+   *
+   * Same scope as `inFlight` — one map per REGISTRATION — for the same reason:
+   * "a capture this app has started" is the truthful scope, and a module-level
+   * map would leak one case's ingest into every later one.
+   */
+  const recentIngests = new Map<string, VimeoRecentIngest>();
+
+  function rememberIngest(videoId: string, documentId: string, existingUrl: string): void {
+    // A plain `set`, and that is only correct because this key is NEVER already
+    // present — `Map.set` on an existing key keeps its ORIGINAL insertion
+    // position, so a re-insert would age wrongly under the eviction below.
+    //
+    // Enumerated rather than assumed: this runs only from the ingest hook of a
+    // capture, a capture starts only past `recentIngest(videoId)` returning null
+    // (which DELETES an entry it found expired), and `inFlight` admits one
+    // capture per video at a time — so no live entry can exist here. A change
+    // that breaks any of those three needs a `delete` before this line.
+    recentIngests.set(videoId, { documentId, existingUrl, at: now() });
+    while (recentIngests.size > VIMEO_RECENT_INGEST_MAX) {
+      const oldest = recentIngests.keys().next();
+      if (oldest.done) break;
+      recentIngests.delete(oldest.value);
+    }
+  }
+
+  /** The map's answer for this video, or null — an expired entry is dropped. */
+  function recentIngest(videoId: string): VimeoRecentIngest | null {
+    const hit = recentIngests.get(videoId);
+    if (!hit) return null;
+    if (now() - hit.at >= VIMEO_RECENT_INGEST_TTL_MS) {
+      recentIngests.delete(videoId);
+      return null;
+    }
+    return hit;
+  }
+
+  /**
+   * The one `duplicate` body, shared by both halves of the stored-document
+   * check, so a reader (and `/summaries`) cannot tell which one answered.
+   */
+  function duplicateBody(documentId: string, existingUrl: string | undefined) {
+    return {
+      duplicate: true as const,
+      document_id: documentId,
+      existing_url: existingUrl,
+      dashboard_url: `/summaries?source=vimeo&doc=${encodeURIComponent(documentId)}&duplicate=1`,
+    };
+  }
+
+  // Shared plumbing: bare-path redirect, SSE stream, jobs, document/similar
+  // proxies. NO CORS preflight and no `applyCors` on the POST below: there is no
+  // Chrome extension for this vertical (PR 3 adds a URL field on /summaries,
+  // which is same-origin), and a cross-origin summarize entry is a way for any
+  // page to spend the operator's model budget.
+  registerSummaryVertical(app, config, {
+    apiBase: VIMEO_SOURCE.apiBase,
+    collection: VIMEO_COLLECTION,
+    store: { getJob, getRecentJobs, subscribe },
+    redirect: { path: "/vimeo", source: "vimeo" },
+    corsPreflight: false,
+  });
+
+  app.post("/api/vimeo/summarize", async (c) => {
+    const body = await c.req.json<{ url?: string }>().catch(() => ({} as { url?: string }));
+    const url = body.url;
+
+    if (!url) {
+      return c.json({ error: "Missing required field: url" }, 400);
+    }
+
+    const ref = resolveVimeoRef(url);
+    if (!ref) {
+      return c.json({ error: `Not a Vimeo video URL: ${url}` }, 400);
+    }
+
+    // oEmbed FIRST, and everything that can refuse the capture happens on its
+    // answer — before a job exists. A job created above an early return is never
+    // settled and lingers for the whole in-flight grace at the top of
+    // /summaries with a "running" /agents card (the ordering
+    // capture-route-job-ordering.test.ts pins for the other verticals).
+    let meta;
+    try {
+      meta = await fetchVimeoOembed(url);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn("Vimeo oEmbed failed for {url}: {error}", { url, error: message });
+      return c.json({ error: "oembed_failed", detail: message }, 502);
+    }
+
+    if (isNotPublic(meta)) {
+      return c.json({ error: "not_public", status: meta.status }, 422);
+    }
+
+    // `toDurationSec` degrades a missing, non-numeric or negative `duration` to
+    // 0 — "the endpoint did not say" — and 0 passes the cap below unconditionally.
+    // The duration is the ONLY length bound this vertical has (there is no
+    // download to time out and no frame budget), so a metadata answer that never
+    // said how long the video is refuses rather than starting an unbounded
+    // capture. Below the not-public branch, which carries no duration at all.
+    if (meta.durationSec === 0) {
+      return c.json({ error: "duration_unknown" }, 422);
+    }
+
+    if (meta.durationSec > VIMEO_MAX_DURATION_SEC) {
+      return c.json(
+        { error: "too_long", durationSec: meta.durationSec, maxSec: VIMEO_MAX_DURATION_SEC },
+        413,
+      );
+    }
+
+    // A capture of this video already running in this process is the other half
+    // of the duplicate check — the stored-document half cannot see it, because
+    // nothing is stored until the job finishes.
+    let running = inFlight.get(ref.id);
+    while (running) {
+      await running.decided;
+      if (running.jobId) {
+        return c.json({
+          in_flight: true,
+          job_id: running.jobId,
+          dashboard_url: `/summaries?source=vimeo&job=${running.jobId}`,
+        });
+      }
+      // That POST refused (duplicate, no bot, …) and released its claim without
+      // starting anything, so this one decides for itself. Re-read rather than
+      // fall straight through: another waiter may have claimed it meanwhile.
+      const next = inFlight.get(ref.id);
+      // A claim that settled without a job id and is STILL mapped has nothing
+      // left to wait for, and awaiting its resolved promise again is an infinite
+      // loop that hangs the request — measured, by mutating the release away.
+      // `releaseVideo` deletes and settles together, so this cannot happen
+      // today; the guard is what keeps a future bug a wrong answer rather than a
+      // wedged handler.
+      if (next === running) break;
+      running = next;
+    }
+
+    const canonicalUrl = canonicalVimeoUrl(ref.id);
+    // oEmbed can answer 200 with no title (`toMetadata` degrades every field to
+    // ""), and huginn derives the document's FILENAME from the title — an empty
+    // one would collide with every other title-less capture (huginn suffixes
+    // `(2)`, so the corpus would carry near-identical rows nothing can tell
+    // apart). The url is a usable, unique stand-in.
+    const title = meta.title || canonicalUrl;
+
+    const flight = claimVideo(ref.id);
+    let started = false;
+    try {
+      // State 3 BEFORE state 4: the listing is authoritative, but it does not
+      // know about a document ingested inside the reindex window, and asking it
+      // first would spend a round-trip to be told "no" about a video this
+      // process just captured.
+      const recent = recentIngest(ref.id);
+      if (recent) {
+        log.info("Vimeo duplicate detected for {videoId} (ingested here, not yet listed): {docId}", {
+          videoId: ref.id,
+          docId: recent.documentId,
+        });
+        return c.json(duplicateBody(recent.documentId, recent.existingUrl));
+      }
+
+      const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, ref.id);
+      if (existing) {
+        log.info("Vimeo duplicate detected for {videoId}: {docId}", {
+          videoId: ref.id,
+          docId: existing.id,
+        });
+        return c.json(duplicateBody(existing.id, existing.url));
+      }
+
+      const summarizerBot = resolveSummarizerBot(discoverAllBots());
+      if (!summarizerBot) {
+        return c.json({ error: "No bots configured" }, 500);
+      }
+
+      const jobId = createJob(ref.id, title, canonicalUrl);
+      flight.jobId = jobId;
+      started = true;
+
+      // Fire and forget — background capture. `summarizeVimeo` settles exactly
+      // when the job does (it never rethrows; both terminal paths are inside
+      // it), so this is where the claim is given back — on `completeJob` and on
+      // `failJob` alike, and on a throw the catch below would report.
+      //
+      // `.finally`, never `.then`: the release must not depend on the log line
+      // above it succeeding. The two spellings differ in exactly one cell of
+      // this chain's state space — a settled capture is fulfilled (both run) or
+      // rejected, and a rejection either logs cleanly (the catch fulfils, both
+      // run) or throws inside the catch, where only `.finally` still releases.
+      // A throwing catch is not hypothetical: `String(err)` runs a rejection
+      // value's own `toString`.
+      summarizeVimeo(
+        jobId,
+        {
+          videoId: ref.id,
+          ...(ref.hash ? { hash: ref.hash } : {}),
+          url: canonicalUrl,
+          title,
+          durationSec: meta.durationSec,
+          uploadDate: meta.uploadDate,
+        },
+        config,
+        summarizerBot,
+        undefined,
+        // The ONE moment the route can learn that a document now exists: huginn
+        // answered the ingest, and its listing will not say so for another
+        // reindex cycle. `canonicalUrl` is closed over rather than re-derived —
+        // it is the exact string the capture posted as the document's `url`.
+        (videoId, documentId) => rememberIngest(videoId, documentId, canonicalUrl),
+      )
+        .catch((err) => {
+          log.error("Vimeo summarization failed: {error}", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => releaseVideo(ref.id, flight));
+
+      return c.json({ job_id: jobId, dashboard_url: `/summaries?source=vimeo&job=${jobId}` });
+    } finally {
+      // Every early return under the claim gives it back here; a started capture
+      // keeps it until the job settles. Without this one 500 would lock that
+      // video out for the life of the process.
+      if (!started) releaseVideo(ref.id, flight);
+      else flight.settle();
+    }
+  });
+}

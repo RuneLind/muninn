@@ -17,7 +17,7 @@ import type { MuninnProfile } from "../config.ts";
 export const ROUTE_GROUPS = [
   "data", "traces", "memsearch", "logs", "search", "research", "tools",
   "summaries", "anthropic", "article", "youtube", "x-article", "tiktok",
-  "sse", "graph", "wiki", "wiki-gardener", "benchmark", "models",
+  "vimeo", "sse", "graph", "wiki", "wiki-gardener", "benchmark", "models",
   "indexing", "agents", "sync", "claude-usage", "plans", "jira",
 ] as const;
 
@@ -42,7 +42,10 @@ export type RouteGroup = (typeof ROUTE_GROUPS)[number];
  *    `youtube`, `x-article`, `tiktok`. The nais image ships neither binary
  *    (`WITH_MEDIA=false`), so registering them would answer 500 on a route that
  *    can never work. `benchmark` joins them: it spawns judge runs against the
- *    Claude CLI, which the nais image also drops (`WITH_CLI=false`).
+ *    Claude CLI, which the nais image also drops (`WITH_CLI=false`). `vimeo`
+ *    joins them for the same reason with a different binary: its capture
+ *    launches a headless Chromium, and `bunx playwright install chromium` is an
+ *    operator step on a laptop, never a build step in the image.
  *
  * **A dropped group takes its HTML surface with it** — which is why `summaries`
  * is here despite reading only the job store and huginn: every control on that
@@ -61,6 +64,7 @@ export type RouteGroup = (typeof ROUTE_GROUPS)[number];
 export const NAIS_DROPPED_ROUTE_GROUPS: readonly RouteGroup[] = [
   "wiki", "wiki-gardener", "plans", "sync", "claude-usage", "benchmark", "logs",
   "summaries", "anthropic", "article", "youtube", "x-article", "tiktok",
+  "vimeo",
 ];
 
 /** The groups this profile does not register. Empty on `default`. */

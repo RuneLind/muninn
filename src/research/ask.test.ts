@@ -136,14 +136,17 @@ test("passes the full corpus + bot context to researchKnowledge", async () => {
   await collect("anything");
   expect(lastResearchOpts).toBeTruthy();
   const collections = lastResearchOpts!.collections as string[];
-  // Default corpus = the `ai` profile (RESEARCH_COLLECTIONS), which now includes
-  // tiktok-summaries after the domain-split profile restructure.
+  // Default corpus = the `ai` profile (RESEARCH_COLLECTIONS). Spelled out
+  // rather than derived from RESEARCH_PROFILES: this is the contract /research
+  // answers over, so adding a collection to that profile must show up here as a
+  // deliberate edit rather than as a silently-widened corpus.
   expect(collections).toEqual([
     "anthropic-summaries",
     "anthropic-knowledge",
     "youtube-summaries",
     "x-articles",
     "tiktok-summaries",
+    "vimeo-summaries",
     "wiki",
   ]);
   expect(lastResearchOpts!.botName).toBe("jarvis");

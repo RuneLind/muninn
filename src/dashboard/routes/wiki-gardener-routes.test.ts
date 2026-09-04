@@ -28,6 +28,15 @@ import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki
 import { getWikiIndex, __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
+import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
+
+/**
+ * One fetch per registered summary source. Derived, never a literal: the
+ * backlog fans out over `SUMMARY_SOURCES`, so a new vertical moves every count
+ * below — the literal 5 these assertions carried failed the day Vimeo was
+ * registered, saying nothing about sequencing or caching.
+ */
+const COLLECTION_COUNT = SUMMARY_SOURCES.length;
 
 /**
  * Route-level tests for `/api/wiki/linter-findings`. Mirrors the
@@ -908,7 +917,17 @@ describe("ingest-backlog pipeline + cache", () => {
     expect(x.queued).toBe(0); // x1 referenced by url in the wiki
 
     // byCollection is in SUMMARY_SOURCES order and covers every collection.
-    expect(data.byCollection.map((c) => c.source)).toEqual(["youtube", "x-article", "anthropic", "tiktok", "article"]);
+    // A LITERAL list, deliberately: production iterates the same array, so
+    // `SUMMARY_SOURCES.map(s => s.id)` compared the module against itself and
+    // could no longer fail on membership, order or a typo'd id.
+    expect(data.byCollection.map((c) => c.source)).toEqual([
+      "youtube",
+      "x-article",
+      "anthropic",
+      "tiktok",
+      "article",
+      "vimeo",
+    ]);
 
     expect(data.total).toBe(4);
     expect(data.ingested).toBe(3);
@@ -919,7 +938,7 @@ describe("ingest-backlog pipeline + cache", () => {
 
   test("fetches each collection SEQUENTIALLY, one request per collection", async () => {
     await computeIngestBacklogResponse(root, "jarvis", deps());
-    expect(fetchCalls.length).toBe(5);
+    expect(fetchCalls.length).toBe(COLLECTION_COUNT);
   });
 
   test("a failed collection lands in errors with partial data (never a throw)", async () => {
@@ -935,15 +954,15 @@ describe("ingest-backlog pipeline + cache", () => {
     const d = deps({ consumed: ["youtube-summaries/y2"] });
 
     await getIngestBacklogCached(root, "jarvis", d, false);
-    expect(fetchCalls.length).toBe(5);
+    expect(fetchCalls.length).toBe(COLLECTION_COUNT);
 
     // Served from cache — no new fetches.
     await getIngestBacklogCached(root, "jarvis", d, false);
-    expect(fetchCalls.length).toBe(5);
+    expect(fetchCalls.length).toBe(COLLECTION_COUNT);
 
     // refresh bypasses the cache read.
     await getIngestBacklogCached(root, "jarvis", d, true);
-    expect(fetchCalls.length).toBe(10);
+    expect(fetchCalls.length).toBe(2 * COLLECTION_COUNT);
 
     // Concurrent misses share one computation (single-flight).
     __resetIngestBacklogCacheForTest();
@@ -952,7 +971,7 @@ describe("ingest-backlog pipeline + cache", () => {
       getIngestBacklogCached(root, "jarvis", d, false),
       getIngestBacklogCached(root, "jarvis", d, false),
     ]);
-    expect(fetchCalls.length).toBe(5);
+    expect(fetchCalls.length).toBe(COLLECTION_COUNT);
   });
 
   test("a degraded (errors) result is NOT cached — the next request re-fetches", async () => {
@@ -960,17 +979,17 @@ describe("ingest-backlog pipeline + cache", () => {
     failCollections = new Set(["anthropic-summaries"]);
     const first = await getIngestBacklogCached(root, "jarvis", d, false);
     expect(first.errors).toBeDefined();
-    expect(fetchCalls.length).toBe(5);
+    expect(fetchCalls.length).toBe(COLLECTION_COUNT);
 
     // Huginn recovers — a plain request must re-fetch (not serve the degraded cache).
     failCollections = new Set();
     const second = await getIngestBacklogCached(root, "jarvis", d, false);
     expect(second.errors).toBeUndefined();
-    expect(fetchCalls.length).toBe(10);
+    expect(fetchCalls.length).toBe(2 * COLLECTION_COUNT);
 
     // The clean result IS cached now.
     await getIngestBacklogCached(root, "jarvis", d, false);
-    expect(fetchCalls.length).toBe(10);
+    expect(fetchCalls.length).toBe(2 * COLLECTION_COUNT);
   });
 });
 

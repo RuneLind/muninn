@@ -143,9 +143,20 @@ export function formatTimestamp(totalSec: number): string {
   return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 }
 
-/** `[HH:MM:SS]`-headed paragraphs, one per window, blank-line separated. */
+/**
+ * `### [HH:MM:SS]`-headed paragraphs, one per window, blank-line separated.
+ *
+ * A `###` HEADING, not a bare bracketed line, and that is the whole point:
+ * huginn splits the ingested `## Transcript` section with its
+ * `MarkdownHeadingSplitter`, which cuts on headings and then on ~1000 chars,
+ * and carries the nearest heading into every chunk's `heading` field. With bare
+ * lines only the chunks that happened to START at a window boundary carried a
+ * timestamp — measured on the first real capture, 48 of 75 chunks had none — so
+ * a search hit inside a 50-minute talk could not be cited to a minute, which is
+ * the reason the transcript is ingested at all.
+ */
 export function segmentsToMarkdown(segments: readonly TranscriptSegment[]): string {
-  return segments.map((s) => `[${formatTimestamp(s.startSec)}]\n${s.text}`).join("\n\n");
+  return segments.map((s) => `### [${formatTimestamp(s.startSec)}]\n${s.text}`).join("\n\n");
 }
 
 /**
