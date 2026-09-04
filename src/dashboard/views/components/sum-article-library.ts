@@ -504,10 +504,9 @@ export function sumArticleLibraryScript(): string {
       // Refetch ONCE through the memo (getSummaryDocuments(true) is the only call
       // that throws — loadShelf and loadLibrary each swallow their own failures
       // into their own "Failed to load…" element, so a catch around THEM is dead
-      // code), then let
-      // both renderers ride on the fresh memo, AWAITED so the re-render is done
-      // before the rows are pulled again — the doc is gone from disk whatever the
-      // listing still says.
+      // code), then let both renderers ride on the fresh memo, AWAITED so the
+      // re-render is done before the rows are pulled again — the doc is gone from
+      // disk whatever the listing still says.
       try {
         await getSummaryDocuments(true);
         if (typeof loadShelf === 'function') await loadShelf();
