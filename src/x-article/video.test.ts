@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { SUMMARY_STRUCTURE_BULLETS } from "../summaries/summarizer-shared.ts";
 
 // --- Module mocks (registered before the dynamic import below) ---
 // Same pattern as the TikTok summarizer test: the media pipeline and the Claude
@@ -249,4 +250,37 @@ test("fires the source-draft trigger against the x-articles collection with the 
     url: BARE_STATUS_URL,
     category: "ai/claude-code",
   });
+});
+
+// The video verticals interpolate SUMMARY_STRUCTURE_BULLETS into their own
+// numbered prompt instead of calling buildSummarySystemPrompt, so nothing in
+// src/summaries/ can see whether they still carry the shared rules — a review
+// proved that decoupling this file from the array left the whole capture suite
+// green. This drives the REAL summarizer and asserts on the prompt it hands the
+// executor.
+//
+// What it catches, measured rather than assumed: decoupling-with-drift, a
+// changed join separator or indent, relocation to another numbered step,
+// renumbering, and text inserted between the heading and the block. What it
+// CANNOT catch, because both sides read the same imported array: a byte-
+// identical fork of the list into a local const (green until someone later
+// edits the shared array), a second copy of the block, and anything appended
+// after it — including a line negating every bullet above.
+test("the system prompt carries the shared structure rules, incl. the verbatim-artifact one", async () => {
+  const jobId = createJob("2081279674966044799", "My X video", SLOT_URL, "");
+  await summarizeXVideo(jobId, SLOT_URL, "My X video", config, bot);
+
+  // The whole interpolated block — separator and indent included, not bullet by
+  // bullet. A per-bullet toContain() survives a changed join: verified, swapping
+  // `.join("\n   ")` for `.join("\n")` kept both files green while breaking the
+  // bullets out of the prompt's numbered step 5.
+  // Anchored on the numbered step that introduces it, not just the indent: a
+  // bare `toContain(indent + join)` matches an indented block ANYWHERE, so
+  // relocating the whole interpolation into another step kept both files green.
+  expect(lastSystemPrompt).toContain(
+    `5. Then write a structured summary with:\n   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}`,
+  );
+  // Named explicitly: an X video that reads a prompt out loud is the case the
+  // verbatim rule exists for, and this vertical also sees on-screen text.
+  expect(lastSystemPrompt).toContain("reproduce it VERBATIM inside a fenced code block");
 });
