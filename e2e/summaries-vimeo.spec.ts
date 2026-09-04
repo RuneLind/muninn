@@ -93,6 +93,9 @@ const OTHER_URL = `https://vimeo.com/${OTHER_ID}`;
 /** A third capture, held open mid-stream so a second paste can land on it. */
 const HELD_ID = "1223777001";
 const HELD_URL = `https://vimeo.com/${HELD_ID}`;
+/** A fourth, held the same way, for the paste about a DIFFERENT url. */
+const HELD2_ID = "1223777002";
+const HELD2_URL = `https://vimeo.com/${HELD2_ID}`;
 /** oEmbed 404s on this one — "not public". */
 const PRIVATE_URL = "https://vimeo.com/1";
 /** 20 000 s of video — past the 3 h cap. */
@@ -146,6 +149,9 @@ function oembedFor(id: string): Record<string, unknown> | null {
   }
   if (id === HELD_ID) {
     return { title: "E2E held talk", author_name: "x", duration: 140, upload_date: "2026-09-04 13:00:00" };
+  }
+  if (id === HELD2_ID) {
+    return { title: "E2E held talk two", author_name: "x", duration: 160, upload_date: "2026-09-04 14:00:00" };
   }
   if (id === "9999999999") {
     return { title: "E2E long talk", author_name: "x", duration: 20000, upload_date: "2026-09-04 12:00:00" };
@@ -240,10 +246,41 @@ function removeBotsRoot(): void {
   botsRoot = undefined;
 }
 
-// A hard kill (Ctrl-C, a CI cancel) skips `afterAll`. The temp root is outside
-// the repo either way, but leaving one per aborted run is still litter.
-process.once("SIGINT", removeBotsRoot);
-process.once("SIGTERM", removeBotsRoot);
+/**
+ * A hard kill (Ctrl-C, a CI cancel) skips `afterAll`. The temp root is outside
+ * the repo either way, but leaving one per aborted run is still litter.
+ *
+ * ⚠️ Two things about this are load-bearing, both measured:
+ *
+ * 1. **It RE-RAISES.** Registering ANY listener for SIGINT/SIGTERM suppresses
+ *    Node's default termination — measured, a process whose only listener was a
+ *    cleanup function survived a self-sent SIGINT and kept running. So the
+ *    handler removes itself and re-sends the same signal, which now finds no
+ *    listener and terminates with the right status. Without that, Ctrl-C on a
+ *    Playwright worker running this file left the worker (and the muninn it
+ *    spawned) alive.
+ * 2. **They are registered in `beforeAll` and removed in `afterAll`,** not at
+ *    module import. A Playwright worker is reused across spec files, so
+ *    import-time registration accumulates a listener per file for the whole
+ *    worker lifetime and leaves this file's handler armed — pointing at a
+ *    `botsRoot` it no longer owns — long after its own tests are done.
+ */
+function handleSignal(signal: NodeJS.Signals): void {
+  removeBotsRoot();
+  removeSignalHandlers();
+  process.kill(process.pid, signal);
+}
+const onSigint = () => handleSignal("SIGINT");
+const onSigterm = () => handleSignal("SIGTERM");
+
+function addSignalHandlers(): void {
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+}
+function removeSignalHandlers(): void {
+  process.off("SIGINT", onSigint);
+  process.off("SIGTERM", onSigterm);
+}
 
 /** The statuses the card's badge went through, in order, without duplicates. */
 async function installStatusRecorder(page: import("@playwright/test").Page): Promise<void> {
@@ -268,6 +305,7 @@ async function jobCount(request: import("@playwright/test").APIRequestContext): 
 test.beforeAll(async () => {
   fake = await startFake();
   const root = writeBot();
+  addSignalHandlers();
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -308,6 +346,11 @@ test.afterAll(async () => {
   server?.kill("SIGTERM");
   fake?.close();
   removeBotsRoot();
+  removeSignalHandlers();
+  // Nothing in this file asked the fake for a path it does not play. Asserted
+  // here rather than inside the last case, so a FILTERED run (`--grep`) that
+  // never reaches that case still checks it.
+  expect(unexpected).toEqual([]);
 });
 
 // The dedup case reads state the capture case created, so a failure of the first
@@ -398,7 +441,7 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await page.locator("#captureUrl").fill(LONG_URL);
     await page.locator("#captureUrlBtn").click();
 
-    await expect(page.locator("#errorBanner")).toHaveText("Longer than the 3 h cap (5h 33m)");
+    await expect(page.locator("#errorBanner")).toHaveText("Longer than the 3h cap (5h 33m)");
     expect(await jobCount(page.request)).toBe(jobsBefore);
   });
 
@@ -477,10 +520,40 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await expect(page.locator("#statusBadge .status-text")).toHaveText("Complete", { timeout: 60_000 });
     await expect(page.locator("#summaryArea")).toContainText("CATEGORY: tech");
     await expect(page.locator("#summaryArea")).toContainText(SUMMARY_LINE);
-    // A completed capture does not sit under "Already being captured".
+    // A completed capture does not sit under "Already being captured" — that
+    // notice was about THIS job, and it is answered now.
     await expect(page.locator("#errorBanner")).not.toHaveClass(/visible/);
+  });
 
-    // Nothing in this file asked the fake for a path it does not play.
-    expect(unexpected).toEqual([]);
+  test("a banner about ANOTHER url survives the running job's completion", async ({ page }) => {
+    test.setTimeout(120_000);
+    // The mirror of the case above, and the reason the clear is conditional.
+    // Mid-stream, an answer about a second url is the banner AND NOTHING ELSE —
+    // the card belongs to the running job — so that banner is the only feedback
+    // the paste gets. Clearing it whenever any job completes erased the answer.
+    holdModel = new Promise<void>((resolve) => { releaseModel = resolve; });
+
+    await page.goto(`${BASE}/summaries`);
+    await page.locator("#captureUrl").fill(HELD2_URL);
+    await page.locator("#captureUrlBtn").click();
+    await expect(page.locator("#statusBadge .status-text")).toHaveText("Summarizing", { timeout: 60_000 });
+
+    // A DIFFERENT url, already in the archive from the first case ⇒ `duplicate`.
+    await page.locator("#captureUrl").fill(VIDEO_URL);
+    await page.locator("#captureUrlBtn").click();
+    const banner = page.locator("#errorBanner");
+    await expect(banner).toContainText("Already captured");
+    await expect(banner).toHaveClass(/visible/);
+    await expect(banner.locator("a")).toHaveAttribute("href", /doc=/);
+
+    releaseModel!();
+    holdModel = null;
+
+    await expect(page.locator("#statusBadge .status-text")).toHaveText("Complete", { timeout: 60_000 });
+    // Still there: the answer about VIDEO_URL is not this job's to erase, and
+    // its link is the only way the reader reaches that summary.
+    await expect(banner).toContainText("Already captured");
+    await expect(banner).toHaveClass(/visible/);
+    await expect(banner.locator("a")).toHaveAttribute("href", /doc=/);
   });
 });

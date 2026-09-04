@@ -231,10 +231,26 @@ test("stream: a reader that CLOSED does not silence the next reader of the same 
     store,
   });
 
-  // A REAL server, on an ephemeral port. `app.request()` cannot drive this:
-  // measured, a `reader.cancel()` on the response it returns never reaches
-  // `stream.onAbort` at all — the abort path exists only over a socket — so the
-  // in-process form of this test passed against the unfixed store.
+  // A REAL server, on an ephemeral port, and that is the load-bearing part.
+  //
+  // NOT because `app.request()` cannot deliver the abort — measured, a
+  // `reader.cancel()` on the response it returns DOES reach `stream.onAbort`.
+  // The reason is simpler and worse: the in-process form of this test passes
+  // against BOTH stores. Measured by mutating `subscribe`'s returned
+  // unsubscribe back to the unconditional `subscribers.delete(jobId)`: over
+  // `app.request()` all three assertions still pass (replay, re-attach, and the
+  // live delta after the stale unsubscribe fires), while over this socket the
+  // same mutant fails on `LIVE-DELTA` with an empty read. So the in-process
+  // form distinguishes nothing — it is not a weaker test, it is a test of
+  // nothing — and only the socket reproduces the ordering the browser produces.
+  //
+  // What it pins is the route + store COMBINATION: the route's `onAbort`
+  // unsubscribe plus its redundant post-loop one, against the store's rule that
+  // an unsubscribe evicts the map entry only when the entry is STILL its own
+  // set. The STORE half is pinned on its own in `job-store.test.ts` — so if the
+  // route's second `unsubscribe()` call is ever removed as redundant, this test
+  // may stop exercising the double-call and that store test is what keeps the
+  // rule covered. Do not delete it along with the call.
   const server = Bun.serve({ port: 0, fetch: app.fetch });
   const base = `http://127.0.0.1:${server.port}`;
   try {

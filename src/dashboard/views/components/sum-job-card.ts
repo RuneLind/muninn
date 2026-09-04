@@ -316,16 +316,28 @@ export function sumJobCardScript(): string {
       return VIMEO_MAX_DURATION_SEC;
     }
 
-    // "3 h" for the shipped 10800. Whole hours read as hours; anything else
+    // "3h" for the shipped 10800. Whole hours read as hours; anything else
     // spells the remainder, so raising the cap to 2.5 h does not silently
-    // truncate the sentence to "2 h".
+    // truncate the sentence to "2h".
+    //
+    // ONE duration format across this file: \`Nh\`, \`Nh Mm\`, \`Mm\` — no space
+    // between the number and its unit, the same shape \`vimeoTooLongSentence\`
+    // already used for the measurement it prints. The cap and the measurement
+    // appear in ONE sentence ("Longer than the 3h cap (5h 33m)"), and two
+    // spellings of the same quantity in one line read as two different units.
+    // The cap omits a zero remainder and the measurement keeps it: a cap is a
+    // named round number, a measurement is a measurement.
+    //
+    // Minutes are ROUNDED, not floored: the cap is the number the refusal is
+    // about, and flooring 10830 s to "3h" would name a cap 30 s short of the one
+    // the route enforces.
     function vimeoCapLabel(maxSec) {
       var min = Math.round(vimeoCapSec(maxSec) / 60);
       var h = Math.floor(min / 60);
       var m = min % 60;
-      if (h && m) return h + ' h ' + m + ' m';
-      if (h) return h + ' h';
-      return m + ' m';
+      if (h && m) return h + 'h ' + m + 'm';
+      if (h) return h + 'h';
+      return m + 'm';
     }
 
     // \`too_long\` is the one sentence carrying a measurement, so it is derived
@@ -495,6 +507,20 @@ export function sumJobCardScript(): string {
       return currentJobId !== null && eventSource !== null;
     }
 
+    /**
+     * WHICH job the banner currently on the card is about, or null when it is
+     * about no job at all (a refusal, a duplicate — an answer about a url that
+     * started nothing).
+     *
+     * It exists because \`complete\` may clear the banner ONLY when the banner
+     * belongs to the job that just completed. Clearing unconditionally wiped an
+     * answer about a DIFFERENT url: paste a second link mid-capture, get
+     * "Already captured" (or a refusal) as the banner — which is the ONLY
+     * feedback that paste gets, since a live stream is never repainted — and the
+     * running job's completion, seconds later, erased it.
+     */
+    var bannerOwnerJob = null;
+
     /** Empty the card's banner and drop BOTH of its tones. */
     function clearCaptureBanner() {
       var banner = document.getElementById('errorBanner');
@@ -502,6 +528,7 @@ export function sumJobCardScript(): string {
       banner.textContent = '';
       banner.classList.remove('visible');
       banner.classList.remove('notice');
+      bannerOwnerJob = null;
     }
 
     /**
@@ -543,6 +570,11 @@ export function sumJobCardScript(): string {
         banner.appendChild(a);
       }
       banner.classList.add('visible');
+      // Whose answer this is. \`opts.jobId\` is set only on an \`in_flight\` attach;
+      // every other outcome is about a url that started nothing, so it owns no
+      // job and no completion may clear it. Set AFTER the \`showJob\` branch
+      // above — that path calls \`clearCaptureBanner\`, which nulls this.
+      bannerOwnerJob = opts.jobId || null;
       setJobDetailExpanded(true);
     }
 
@@ -604,10 +636,21 @@ export function sumJobCardScript(): string {
           }
           finalizeSummary();
           updateStatusBadge('complete');
-          // The card carried an "Already being captured" notice from the paste
-          // that ATTACHED to this job. It is answered now — a finished capture
-          // sitting under it reads as still-queued.
-          clearCaptureBanner();
+          // Clear the banner only when it is about THIS job — the
+          // "Already being captured" notice from a paste that ATTACHED to it,
+          // which is answered now (a finished capture sitting under it reads as
+          // still-queued).
+          //
+          // Never a banner about another url. While this job streamed, the
+          // reader may have pasted a second link and been told "Already
+          // captured", or refused; that banner is the ONLY feedback that paste
+          // got (a live stream is never repainted), and clearing it here erased
+          // the answer to a question the reader had just asked.
+          //
+          // Compared against \`jobId\` — this handler map's OWN job, from the
+          // \`connectSSE\` closure — rather than \`currentJobId\`, which is mutable
+          // and belongs to whichever stream is current.
+          if (bannerOwnerJob === jobId) clearCaptureBanner();
           if (eventSource) eventSource.close();
           eventSource = null;
           if (typeof loadShelf === 'function') loadShelf(true);  // force-refresh so the just-ingested doc appears

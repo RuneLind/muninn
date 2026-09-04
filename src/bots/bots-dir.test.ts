@@ -57,6 +57,39 @@ describe("resolveBotsDir", () => {
   });
 });
 
+describe("resolveBotsDir REFUSES a value that would empty the roster", () => {
+  /**
+   * Both refusals fall back to the checkout's own `bots/`. Honouring either is a
+   * silent roster of ZERO — `discoverBotsInternal` warns once and returns `[]`,
+   * every bot goes offline, no Telegram poller starts and `resolveSummarizerBot`
+   * has nothing to resolve — and the only visible symptom is an instance that
+   * came up healthy and answers nothing.
+   */
+  test("a RELATIVE value is refused even when it names a REAL directory", () => {
+    // `src` exists and resolves (against whatever cwd the process has — a
+    // launchd service and a shell do not share one), which is exactly why it is
+    // refused rather than resolved.
+    process.env.MUNINN_BOTS_DIR = "src";
+    expect(resolveBotsDir()).toBe(resolve(import.meta.dir, "../../bots"));
+    process.env.MUNINN_BOTS_DIR = "./src";
+    expect(resolveBotsDir()).toBe(resolve(import.meta.dir, "../../bots"));
+  });
+
+  test("an absolute value naming a directory that is NOT there is refused", () => {
+    const root = tempBotsRoot("zzgonebot");
+    rmSync(root, { recursive: true, force: true });
+    process.env.MUNINN_BOTS_DIR = root;
+    expect(resolveBotsDir()).toBe(resolve(import.meta.dir, "../../bots"));
+  });
+
+  test("so discovery still finds the checkout's own bots after a typo", () => {
+    // The property the two cases above exist for, at the seam that matters:
+    // a mistyped `.env` line degrades to the real roster, not to no bots at all.
+    process.env.MUNINN_BOTS_DIR = join(tmpdir(), "muninn-no-such-bots-root-zz");
+    expect(discoverAllBots().map((b) => b.name)).toContain("jarvis");
+  });
+});
+
 describe("discovery reads the override", () => {
   test("discoverAllBots finds EXACTLY the bots under MUNINN_BOTS_DIR", () => {
     const root = tempBotsRoot("zztestonlybot");

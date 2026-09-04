@@ -1,7 +1,7 @@
-import { resolve } from "node:path";
 import type { Subprocess } from "bun";
 import type { SerenaInstanceConfig } from "./config.ts";
 import { discoverSerenaConfigs } from "./config.ts";
+import { resolveBotsDir } from "../bots/config.ts";
 import { serenaToolProxy } from "./tool-proxy.ts";
 import { getLog } from "../logging.ts";
 
@@ -34,8 +34,10 @@ class SerenaManager {
 
   /** Initialize from bot configs. Call once at startup. */
   init(): void {
-    const botsDir = resolve(import.meta.dir, "../../bots");
-    const configs = discoverSerenaConfigs(botsDir);
+    // The roster this process discovered, not a second copy of the default —
+    // `MUNINN_BOTS_DIR` moves it, and scanning `../../bots` regardless would look
+    // for Serena entries in bots this process does not have.
+    const configs = discoverSerenaConfigs(resolveBotsDir());
     for (const botConfig of configs) {
       for (const inst of botConfig.instances) {
         if (this.instances.has(inst.name)) {

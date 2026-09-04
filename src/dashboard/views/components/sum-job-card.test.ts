@@ -24,6 +24,16 @@ interface Harness {
   setSource: (source: string) => void;
   bannerText: () => string;
   bannerClasses: () => string[];
+  /**
+   * The script-local `bannerOwnerJob` — which job the banner on the card is
+   * about, or null when it is about none.
+   *
+   * Read directly because the invariant "an empty banner is owned by nobody" has
+   * no rendered consequence to assert: with unique job ids a stale owner left
+   * behind by `clearCaptureBanner` can never match a later completion, so the
+   * only way to pin the reset is to look at it.
+   */
+  bannerOwner: () => string | null;
   badgeHtml: () => string;
   titleHtml: () => string;
   titleText: () => string;
@@ -126,6 +136,7 @@ function harness(): Harness {
       "return { vimeoSentence: vimeoSentence, showError: showError," +
       " showCaptureOutcome: showCaptureOutcome, showJob: showJob," +
       " connectSSE: connectSSE," +
+      " bannerOwner: function() { return bannerOwnerJob; }," +
       " setSource: function(s) { currentSource = s; } };",
   )(ctx) as Pick<
     Harness,
@@ -134,6 +145,7 @@ function harness(): Harness {
     | "showCaptureOutcome"
     | "showJob"
     | "connectSSE"
+    | "bannerOwner"
     | "setSource"
   >;
 
@@ -157,12 +169,12 @@ describe("sum-job-card: the Vimeo sentence map", () => {
     expect(h.vimeoSentence("bad_url")).toBe("Not a Vimeo video URL");
     expect(h.vimeoSentence("not_public")).toBe("Vimeo says this video is not public");
     expect(h.vimeoSentence("duration_unknown")).toBe(
-      "Vimeo did not report a duration, so the 3 h cap cannot be checked",
+      "Vimeo did not report a duration, so the 3h cap cannot be checked",
     );
     // …and the cap in it is DERIVED from the injected server constant, not
     // spelled: a route that reports its own maxSec names that one instead.
     expect(h.vimeoSentence("duration_unknown", { maxSec: 5400 })).toBe(
-      "Vimeo did not report a duration, so the 1 h 30 m cap cannot be checked",
+      "Vimeo did not report a duration, so the 1h 30m cap cannot be checked",
     );
     expect(h.vimeoSentence("oembed_failed")).toBe("Vimeo did not answer");
   });
@@ -178,15 +190,35 @@ describe("sum-job-card: the Vimeo sentence map", () => {
 
   test("too_long carries the measurement the route reported", () => {
     expect(h.vimeoSentence("too_long", { durationSec: 20000 })).toBe(
-      "Longer than the 3 h cap (5h 33m)",
+      "Longer than the 3h cap (5h 33m)",
     );
     expect(h.vimeoSentence("too_long", { durationSec: 10801 })).toBe(
-      "Longer than the 3 h cap (3h 0m)",
+      "Longer than the 3h cap (3h 0m)",
     );
     // A duration the route did not report degrades to the cap alone rather than
     // to "NaNh NaNm".
-    expect(h.vimeoSentence("too_long", {})).toBe("Longer than the 3 h cap");
-    expect(h.vimeoSentence("too_long")).toBe("Longer than the 3 h cap");
+    expect(h.vimeoSentence("too_long", {})).toBe("Longer than the 3h cap");
+    expect(h.vimeoSentence("too_long")).toBe("Longer than the 3h cap");
+  });
+
+  test("the cap's minutes are ROUNDED, and both halves share one format", () => {
+    // Every other cap in these tests is a whole number of minutes, so
+    // `Math.round` → `Math.floor` in `vimeoCapLabel` changed nothing and
+    // survived the whole suite. 10830 s is 180.5 minutes: rounded it is 3h 1m,
+    // floored it is a flat "3h" — a cap 30 s short of the one the route
+    // enforces, in the sentence explaining the refusal.
+    expect(h.vimeoSentence("duration_unknown", { maxSec: 10830 })).toBe(
+      "Vimeo did not report a duration, so the 3h 1m cap cannot be checked",
+    );
+    // The cap and the measurement land in ONE sentence, so they are spelled the
+    // same way: no space between number and unit, on both halves.
+    expect(h.vimeoSentence("too_long", { durationSec: 20000, maxSec: 10830 })).toBe(
+      "Longer than the 3h 1m cap (5h 33m)",
+    );
+    // Under an hour the cap is minutes alone, same spelling.
+    expect(h.vimeoSentence("duration_unknown", { maxSec: 900 })).toBe(
+      "Vimeo did not report a duration, so the 15m cap cannot be checked",
+    );
   });
 
   test("an unknown code has no sentence, so the caller can fall back", () => {
@@ -276,26 +308,26 @@ describe("sum-job-card: the too_long measurement", () => {
    */
   test("never renders a 60-minute remainder", () => {
     expect(h.vimeoSentence("too_long", { durationSec: 14390 })).toBe(
-      "Longer than the 3 h cap (4h 0m)",
+      "Longer than the 3h cap (4h 0m)",
     );
     expect(h.vimeoSentence("too_long", { durationSec: 21599 })).toBe(
-      "Longer than the 3 h cap (6h 0m)",
+      "Longer than the 3h cap (6h 0m)",
     );
     // The rounding is to the nearest minute of the WHOLE measurement, so 3h59m50s
     // is four hours — 14390 above is that value, and this is the boundary either
     // side of it.
     expect(h.vimeoSentence("too_long", { durationSec: 14369 })).toBe(
-      "Longer than the 3 h cap (3h 59m)",
+      "Longer than the 3h cap (3h 59m)",
     );
   });
 
   test("names the cap the ROUTE reported, when it reported one", () => {
     expect(h.vimeoSentence("too_long", { durationSec: 20000, maxSec: 7200 })).toBe(
-      "Longer than the 2 h cap (5h 33m)",
+      "Longer than the 2h cap (5h 33m)",
     );
     // No maxSec on the wire ⇒ the injected server constant.
     expect(h.vimeoSentence("too_long", { durationSec: 20000 })).toBe(
-      "Longer than the 3 h cap (5h 33m)",
+      "Longer than the 3h cap (5h 33m)",
     );
   });
 });
@@ -420,6 +452,89 @@ describe("sum-job-card: the banner's lifecycle", () => {
     expect(h.bannerText()).toBe("");
     expect(h.bannerClasses()).not.toContain("visible");
     expect(h.bannerClasses()).not.toContain("notice");
+  });
+
+  /**
+   * …but a banner about ANOTHER url survives that completion.
+   *
+   * While a capture streams, a second paste is answered by the banner AND
+   * NOTHING ELSE (the card belongs to the running job and is never repainted),
+   * so that banner is the only feedback the paste gets. Clearing it whenever any
+   * job completes erased the answer to a question the reader had just asked —
+   * measured: paste url B mid-capture, read "Already captured" with its link,
+   * and watch both vanish when job A finishes.
+   */
+  test("a duplicate about ANOTHER url survives the running job's completion", () => {
+    const h = harness();
+    h.showJob("job-1", "T", "https://vimeo.com/1223358361", "vimeo");
+    h.connectSSE("job-1", "vimeo");
+    h.showCaptureOutcome("https://vimeo.com/9", {
+      status: "duplicate",
+      tone: "notice",
+      sentence: "Already captured",
+      link: "/summaries?doc=abc",
+      linkLabel: "open the summary",
+    });
+    expect(h.bannerClasses()).toContain("visible");
+
+    h.sse().complete!({ data: "" });
+    expect(h.bannerText()).toBe("Already captured");
+    expect(h.bannerClasses()).toContain("visible");
+    expect(h.bannerClasses()).toContain("notice");
+    // The link went with the sentence — it is the whole point of the answer.
+    expect(h.appended()).toContain("open the summary");
+  });
+
+  test("clearing the banner also clears WHOSE it was", () => {
+    // "Empty banner, no owner" keeps the invariant total. Without the reset the
+    // owner id outlives the banner it described, and the next reader of it is
+    // deciding whether to erase something on screen.
+    const h = harness();
+    h.showJob("job-1", "T", "https://vimeo.com/1223358361", "vimeo");
+    h.connectSSE("job-1", "vimeo");
+    h.showCaptureOutcome("https://vimeo.com/1223358361", {
+      status: "pending",
+      tone: "notice",
+      jobId: "job-1",
+      sentence: "Already being captured",
+    });
+    expect(h.bannerOwner()).toBe("job-1");
+
+    h.showJob("job-2", "T2", "https://vimeo.com/2", "vimeo");
+    expect(h.bannerText()).toBe("");
+    expect(h.bannerOwner()).toBeNull();
+  });
+
+  test("a refusal about another url survives it too", () => {
+    const h = harness();
+    h.showJob("job-1", "T", "https://vimeo.com/1223358361", "vimeo");
+    h.connectSSE("job-1", "vimeo");
+    h.showCaptureOutcome("https://vimeo.com/1", {
+      status: "error",
+      sentence: "Vimeo says this video is not public",
+    });
+
+    h.sse().complete!({ data: "" });
+    expect(h.bannerText()).toBe("Vimeo says this video is not public");
+    expect(h.bannerClasses()).toContain("visible");
+  });
+
+  test("an in-flight notice for a DIFFERENT job survives too", () => {
+    // Two cards can't stream at once, but the notice names the job it attached
+    // to — so the ownership test is on the job id, not on "is there a banner".
+    const h = harness();
+    h.showJob("job-1", "T", "https://vimeo.com/1223358361", "vimeo");
+    h.connectSSE("job-1", "vimeo");
+    h.showCaptureOutcome("https://vimeo.com/7", {
+      status: "pending",
+      tone: "notice",
+      jobId: "job-2",
+      sentence: "Already being captured",
+    });
+
+    h.sse().complete!({ data: "" });
+    expect(h.bannerText()).toBe("Already being captured");
+    expect(h.bannerClasses()).toContain("visible");
   });
 
   test("showJob drops BOTH tones, not just `visible`", () => {

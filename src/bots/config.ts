@@ -1,5 +1,5 @@
 import { readdirSync, existsSync, readFileSync, type Dirent } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.ts";
 import type { McpStatusConfig } from "../ai/mcp-status.ts";
@@ -671,11 +671,55 @@ function validateWikiAutoCommitConfig(settings: Record<string, unknown>, botName
  * it once at boot, and a test that sets it per case must not be answered from a
  * snapshot the first case took. It is in `AMBIENT_INSTANCE_ENV`, so no suite
  * inherits a developer's value.
+ *
+ * ⚠️ A RELATIVE or NON-EXISTENT value is refused (warned about, once per value)
+ * and falls back to the checkout's own `bots/` — the `MUNINN_AGENT_CWD`
+ * precedent. Honouring either is a silent roster of ZERO: a relative value
+ * resolves against whatever cwd the process happens to have (a launchd service
+ * and a shell have different ones), and a directory that is not there makes
+ * `discoverBotsInternal` warn once and return `[]`, at which point every bot is
+ * offline, no Telegram poller starts, and `resolveSummarizerBot` has nothing to
+ * resolve. A typo in `.env` must not do that.
  */
 export function resolveBotsDir(): string {
+  const fallback = resolve(import.meta.dir, "../../bots");
   const override = (process.env.MUNINN_BOTS_DIR ?? "").trim();
-  if (override) return resolve(override);
-  return resolve(import.meta.dir, "../../bots");
+  if (!override) return fallback;
+  if (!isAbsolute(override)) {
+    warnBotsDirOnce(
+      `relative:${override}`,
+      "MUNINN_BOTS_DIR={value} is relative — ignoring it and using {fallback}",
+      { value: override, fallback },
+    );
+    return fallback;
+  }
+  const abs = resolve(override);
+  if (!existsSync(abs)) {
+    warnBotsDirOnce(
+      `missing:${abs}`,
+      "MUNINN_BOTS_DIR={value} does not exist — ignoring it and using {fallback}",
+      { value: abs, fallback },
+    );
+    return fallback;
+  }
+  return abs;
+}
+
+/**
+ * `resolveBotsDir` is called per discovery, and a bad value is a PERMANENT
+ * condition (a `.env` line), so an unthrottled warn repeats at discovery rate.
+ * Same shape as `agent-cwd.ts`'s: warn once per distinct value, with a cap so a
+ * caller that varies the value cannot grow the set without bound, and a CLEAR
+ * rather than a stop so a full set does not go silent on a new value.
+ */
+const warnedBotsDirs = new Set<string>();
+const WARNED_BOTS_DIRS_MAX = 64;
+
+function warnBotsDirOnce(key: string, message: string, props: Record<string, unknown>): void {
+  if (warnedBotsDirs.has(key)) return;
+  if (warnedBotsDirs.size >= WARNED_BOTS_DIRS_MAX) warnedBotsDirs.clear();
+  warnedBotsDirs.add(key);
+  log.warn(message, props);
 }
 
 function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {

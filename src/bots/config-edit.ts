@@ -1,12 +1,14 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { getLog } from "../logging.ts";
-import { isEditableBotField, validateBotConfigField, type EditableBotField } from "./config.ts";
+import {
+  isEditableBotField,
+  resolveBotsDir,
+  validateBotConfigField,
+  type EditableBotField,
+} from "./config.ts";
 
 const log = getLog("bots", "config-edit");
-
-/** Same base dir discovery scans (`discoverBotsInternal`). */
-const DEFAULT_BOTS_DIR = resolve(import.meta.dir, "../../bots");
 
 export interface WriteConfigResult {
   /** Absolute path written. */
@@ -42,7 +44,13 @@ export function writeBotConfigField(
   const err = validateBotConfigField(name, editableField, value);
   if (err) throw new Error(err);
 
-  const base = opts.baseDir ?? DEFAULT_BOTS_DIR;
+  // `resolveBotsDir()`, not a second copy of the default: this writes into the
+  // roster the running process actually DISCOVERED, and since `MUNINN_BOTS_DIR`
+  // exists a hardcoded `../../bots` is a different directory whenever it is set
+  // — the edit would land on a bot this process does not have (or 404 as an
+  // "unknown bot" for one it does). Read per call for the same reason discovery
+  // reads it per call.
+  const base = opts.baseDir ?? resolveBotsDir();
   const dir = join(base, name);
   if (!existsSync(join(dir, "CLAUDE.md"))) {
     throw new Error(`Unknown bot "${name}" (no bots/${name}/CLAUDE.md)`);

@@ -23,7 +23,20 @@ beforeEach(() => {
   baseDir = mkdtempSync(join(tmpdir(), "muninn-cfg-"));
 });
 afterEach(() => {
+  delete process.env.MUNINN_BOTS_DIR;
   rmSync(baseDir, { recursive: true, force: true });
+});
+
+test("with no baseDir it writes into the roster MUNINN_BOTS_DIR names", () => {
+  // The dir this module writes into and the dir discovery SCANS have to be the
+  // same one. They stopped being the same the day `MUNINN_BOTS_DIR` shipped: a
+  // hardcoded `../../bots` here sends every /models edit to a bot the running
+  // process does not have, and answers "Unknown bot" for one it does.
+  makeBot("zzenvbot", { model: "sonnet" });
+  process.env.MUNINN_BOTS_DIR = baseDir;
+  const res = writeBotConfigField("zzenvbot", "model", "opus");
+  expect(res.path).toBe(join(baseDir, "zzenvbot", "config.json"));
+  expect(readConfig("zzenvbot").model).toBe("opus");
 });
 
 test("round-trips a field into an existing config.json, preserving other keys", () => {
@@ -81,8 +94,10 @@ test("validateBotConfigField: matches discovery messages + edge cases", () => {
     'Bot "jarvis" has unknown connector "bad" — valid values: claude-cli, copilot-sdk, openai-compat, claude-sdk',
   );
   expect(validateBotConfigField("jarvis", "haikuBackend", "anthropic")).toBeNull();
+  // `vertex` joined the backend list and this line did not, because the file was
+  // in no test chain and had not run since. Now it runs.
   expect(validateBotConfigField("jarvis", "haikuBackend", "gemini")).toBe(
-    'Bot "jarvis" has unknown haikuBackend "gemini" — valid values: cli, anthropic, copilot',
+    'Bot "jarvis" has unknown haikuBackend "gemini" — valid values: cli, anthropic, copilot, vertex',
   );
   expect(validateBotConfigField("jarvis", "model", "")).toContain("must not be empty");
   expect(validateBotConfigField("jarvis", "thinkingMaxTokens", -5)).toContain("non-negative integer");

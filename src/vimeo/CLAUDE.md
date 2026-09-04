@@ -199,9 +199,8 @@ spell the same word.
 |---|---|
 | 400 (unparseable — the route sends no code, so the STATUS names it) | Not a Vimeo video URL |
 | 422 `not_public` | Vimeo says this video is not public |
-| 422 `duration_unknown` | Vimeo did not report a duration, so the 3 h cap cannot be checked |
-| 413 `too_long` | Longer than the 3 h cap (Xh Ym) — derived from the reported `durationSec` |
-
+| 422 `duration_unknown` | Vimeo did not report a duration, so the 3h cap cannot be checked |
+| 413 `too_long` | Longer than the 3h cap (Xh Ym) — derived from the reported `durationSec` |
 | 502 `oembed_failed` | Vimeo did not answer |
 | 200 `duplicate` | Already captured — plus a link to `dashboard_url` |
 | 200 `in_flight` | Already being captured — plus an attach to the running job |
@@ -227,7 +226,13 @@ the same constant); raising the cap used to change the refusal and leave the
 sentence claiming the old number. The measurement in `too_long` rounds to the
 nearest minute of the WHOLE duration and reads the hours off THAT — rounding the
 remainder instead rendered 14 390 s as **"3h 60m"**, because 3 590 s rounds to 60
-minutes and 60 is not a minute count. It reads "4h 0m".
+minutes and 60 is not a minute count. It reads "4h 0m". **The cap's own minutes
+are rounded too, and both halves share ONE format** (`3h`, `3h 1m`, `15m` — no
+space between number and unit, since the two land in one sentence): flooring the
+cap survived the whole suite while every tested cap was a whole number of
+minutes, and would name a 10 830 s cap as a flat "3h", 30 s short of the number
+the route enforces. The cap omits a zero remainder and the measurement keeps it —
+a cap is a named round number, a measurement is a measurement.
 
 **An answer that is not a fresh job never repaints a card with a LIVE stream.**
 `showCaptureOutcome` renders the banner (with its tone) and returns; only when
