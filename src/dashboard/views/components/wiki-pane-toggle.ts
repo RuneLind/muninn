@@ -15,10 +15,12 @@
  * Keys: `]` right pane, `F` focus, `Escape` leaves focus. The Explain pill's own
  * Escape handler runs too; both are "dismiss", so they do not conflict.
  *
- * `]` is inert while the pane is not on screen — in focus mode, and below the
- * 1100px breakpoint where the media rule hides it — because a toggle with no
- * visible effect still PERSISTED: a `]` on a narrow window folded the pane on the
- * reader's next wide session with no memory of asking.
+ * `]` is inert while the pane is not on screen — in focus mode, on the start
+ * view's Atlas tab, and below the 1100px breakpoint where the media rule hides
+ * it (the check is the pane's computed display, so it covers every such state)
+ * — because a toggle with no visible effect still PERSISTED: a `]` on a narrow
+ * window folded the pane on the reader's next wide session with no memory of
+ * asking.
  *
  * The right-pane state persists (localStorage, best-effort like the rail width);
  * focus does not — see the rationale in `wiki-panes.ts`.
@@ -51,14 +53,13 @@ let syncButtons: () => void = () => {};
 /** Un-collapse the right pane and leave focus — for code that is about to show
  *  something IN that pane (the Ask/Explain/Fact-check stream reveals the Ask tab
  *  there): with the pane folded the reveal was a 38px sliver, and in focus mode
- *  it was nothing at all, with no sign the session history existed. */
+ *  it was nothing at all, with no sign the session history existed.
+ *  For THIS sitting only: the stored preference is not touched, so a reader who
+ *  keeps the pane folded gets it back on the next load rather than losing the
+ *  preference the first time they click Explain (round-1 verify finding). */
 export function revealRightPane(): void {
   if (!layoutEl) return;
-  layoutEl.classList.remove(FOCUS);
-  if (layoutEl.classList.contains(RIGHT)) {
-    layoutEl.classList.remove(RIGHT);
-    persist(false);
-  }
+  layoutEl.classList.remove(FOCUS, RIGHT);
   syncButtons();
   window.dispatchEvent(new Event("resize"));
 }
@@ -81,8 +82,8 @@ export function initPaneToggles(): void {
     document.querySelectorAll<HTMLElement>("[data-pane-toggle='focus'][aria-pressed]").forEach((b) => b.setAttribute("aria-pressed", focus));
   };
 
-  /** The pane is toggleable only while it is on screen (not in focus, not
-   *  hidden by the ≤1100px media rule). */
+  /** The pane is toggleable only while it is on screen — its computed display,
+   *  so focus mode, the Atlas tab and the ≤1100px media rule all count. */
   const rightOnScreen = (): boolean =>
     !layout.classList.contains(FOCUS) && !!connPane && getComputedStyle(connPane).display !== "none";
 

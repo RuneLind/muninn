@@ -197,8 +197,69 @@ test.describe("Wiki pane toggles", () => {
       expect(hit).toBe("wikiShareBtn");
       // Single-line pill.
       expect(pill.height).toBeLessThan(30);
+      // In FLOW above the breadcrumb, not floated over it: the pill's bottom is
+      // at or above the breadcrumb's top. A floated pill with a small enough
+      // icon clears Share by geometry and passed the two asserts above.
+      const crumb = await page.locator("#wikiBreadcrumb").boundingBox();
+      if (!crumb) throw new Error("breadcrumb not laid out");
+      expect(pill.y + pill.height).toBeLessThanOrEqual(crumb.y + 0.5);
     });
   }
+
+  test("a remembered collapse does not squeeze the Atlas below 1100px either (fix round 2)", async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    await page.evaluate((k) => localStorage.setItem(k, "collapsed"), PANES_KEY);
+    await page.reload();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    await page.locator(".wiki-tab[data-tab='atlas']").click();
+    await expect(page.locator(LAYOUT)).toHaveClass(/atlas-full/);
+    expect(await width(page, ARTICLE)).toBe((await width(page, LAYOUT)) - 48);
+    await page.evaluate((k) => localStorage.removeItem(k), PANES_KEY);
+  });
+
+  test("Explain reveals a collapsed pane for THIS sitting and keeps the stored collapse (fix round 2)", async ({ page }) => {
+    // The stream is stubbed: the reveal happens before the connection opens, so
+    // one terminal app_error event is all the server needs to say.
+    await page.route("**/api/wiki/explain*", (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: 'event: app_error\ndata: {"message":"stubbed"}\n\n',
+      }),
+    );
+    await open(page);
+    await page.locator("body").press("]");
+    expect(await width(page, CONN)).toBe(STRIP_WIDTH);
+    // Select a passage the way a reader does: a range over the paragraph, then
+    // the mouseup the article pane listens for.
+    await page.evaluate(() => {
+      // A one-line body renders as bare text inside .wiki-article (no <p>), so
+      // select the body container's contents.
+      const body = document.querySelector("#articleWrap .wiki-article");
+      if (!body) throw new Error("no article body");
+      const r = document.createRange();
+      r.selectNodeContents(body);
+      const sel = window.getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(r);
+      document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
+    const explain = page.locator("#wikiExplainBtn");
+    await expect(explain).toBeVisible();
+    await explain.dispatchEvent("mousedown");
+    // The pane is back on screen, on the Ask tab, with the answer streaming…
+    await expect(page.locator(".wiki-conn-tabs")).toBeVisible();
+    expect(await width(page, CONN)).toBeGreaterThan(STRIP_WIDTH + 100);
+    await expect(page.locator(".wiki-conn-tab[data-conntab='ask']")).toHaveClass(/active/);
+    // …and the reader's stored preference is untouched: a reload folds it again.
+    expect(await page.evaluate((k) => localStorage.getItem(k), PANES_KEY)).toBe("collapsed");
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("One");
+    expect(await width(page, CONN)).toBe(STRIP_WIDTH);
+    await page.evaluate((k) => localStorage.removeItem(k), PANES_KEY);
+  });
 
   test("] is inert where the pane is not on screen: below 1100px and in focus mode (fix round 1)", async ({ page }) => {
     await page.setViewportSize({ width: 1000, height: 900 });
