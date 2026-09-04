@@ -141,7 +141,14 @@ Keys, both suffixed with the wiki's canonical name (`""` for the default wiki),
 so a browser reading two wikis keeps two lists: `muninn.wiki.recents.v1:<wiki>`
 (last 6 opened) and `muninn.wiki.pins.v1:<wiki>`. The rail's third key is
 `muninn.wiki.railWidth.v1` (PR #501), which is NOT per wiki — a width is a
-property of the reader's screen, not of the wiki.
+property of the reader's screen, not of the wiki. Same rule for the fourth,
+`muninn.wiki.panes.v1` (`wiki-panes.ts` rules + `wiki-pane-toggle.ts` DOM):
+`collapsed` when the reader folded the Connections/Ask pane to its 40px icon
+strip (`]`, or the › in the tab row). Focus mode (`F` / ⤢, both side panes
+gone, `Esc` back) is deliberately NOT stored — a reload with no rail and no pane
+is a "where did everything go" moment — but it survives in-page wikilink
+navigation, since that is the reading it was entered for. Acceptance:
+`e2e/wiki-pane-toggles.spec.ts`, bounding boxes only.
 
 Two more keys, owned by `views/components/wiki-home.ts` (pure rules) + `wiki-home-store.ts`
 (the storage half; the shell and the site nav apply them): `muninn.wiki.last.v1` — the wiki last opened BY

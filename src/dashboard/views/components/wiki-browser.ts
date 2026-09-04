@@ -91,6 +91,7 @@ import {
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
+import { initPaneToggles } from "./wiki-pane-toggle.ts";
 import { buildRail, isPinnedRelPath, type RailEntry } from "./wiki-recents.ts";
 import {
   clearRecents,
@@ -479,6 +480,7 @@ function relPathToName(relPath: string): string | null {
 
 initStartCards({ withWiki, resolvePageName: relPathToName });
 initRailResize();
+initPaneToggles();
 
 function sortMode(): WikiSortMode {
   return (document.getElementById("wikiSort") as HTMLSelectElement).value as WikiSortMode;
