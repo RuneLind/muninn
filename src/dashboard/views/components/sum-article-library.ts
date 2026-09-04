@@ -13,7 +13,7 @@
  * each doc carries its `source` so opens/similar/original-link route to the right
  * collection (SOURCES[source].apiBase). */
 
-import { docPanelStyles, DOC_PANEL_SHARE_BTN_ID } from "./doc-panel.ts";
+import { docPanelStyles, DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID } from "./doc-panel.ts";
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
 
 /** The whole /summaries share target as a browser expression — URLs, surface
@@ -409,6 +409,116 @@ export function sumArticleLibraryScript(): string {
       });
     })();
 
+    // --- 🗑 Delete (opt-in: docPanelHtml({remove:true}), /summaries only). Acts on
+    // the same held doc as Share. Posts to the gardener's backlog-doc-delete route
+    // with NO ?wiki= — the default wiki bot (the one whose source drafter wrote the
+    // draft) is what the route resolves, exactly as the Stats tab's coverage does.
+    // Success closes the panel and pulls the doc's rows off the page at once; huginn's
+    // LISTING only drops it once its reindex lands, so the shelf is refetched after
+    // the status poll goes terminal, and the notice says so when it does not.
+    (function() {
+      var btn = document.getElementById('${DOC_PANEL_DELETE_BTN_ID}');
+      if (!btn) return;
+      btn.addEventListener('click', function() {
+        if (!_shareDoc || btn.disabled) return;
+        var doc = _shareDoc;
+        var collection = SOURCES[doc.source].collection;
+        if (!window.confirm('Delete "' + doc.title + '"?\\n\\nThis removes the summary from huginn (' + collection + ') and deletes the wiki draft written from it. An already-applied wiki page is kept.')) return;
+        btn.disabled = true;
+        deleteSummaryDoc(collection, doc.docId, doc.title).finally(function() { btn.disabled = false; });
+      });
+    })();
+
+    function showDeleteNotice(text, tone) {
+      var el = document.getElementById('deleteNotice');
+      if (!el) return;
+      el.textContent = text;
+      el.classList.toggle('err', tone === 'err');
+      el.classList.add('visible');
+    }
+
+    // Pull every row/link for the doc off the page — shelf rows, similar items, the
+    // category sidebar — without waiting for huginn's listing to catch up.
+    function removeDocRows(docId) {
+      document.querySelectorAll('[data-doc-id]').forEach(function(el) {
+        if (el.getAttribute('data-doc-id') === docId) el.remove();
+      });
+    }
+
+    async function deleteSummaryDoc(collection, docId, title) {
+      var body;
+      try {
+        var res = await fetch('/api/wiki/gardener/backlog-doc-delete', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ collection: collection, id: docId }),
+        });
+        body = await res.json().catch(function() { return {}; });
+        if (!res.ok) {
+          showDeleteNotice('Delete failed: ' + (body.error || ('HTTP ' + res.status)), 'err');
+          return;
+        }
+      } catch (err) {
+        showDeleteNotice('Delete failed: could not reach the server', 'err');
+        return;
+      }
+
+      closeDocPanel();
+      removeDocRows(docId);
+      var proposals = body.proposals || { deleted: [], kept: [] };
+      var parts = ['Deleted "' + title + '"'];
+      if (proposals.deleted.length) parts.push('and ' + proposals.deleted.length + ' wiki draft' + (proposals.deleted.length === 1 ? '' : 's') + ' written from it');
+      if (proposals.kept.length) parts.push('(kept the applied page ' + proposals.kept.map(function(p) { return p.targetPath; }).join(', ') + ')');
+      showDeleteNotice(parts.join(' ') + '.', 'ok');
+
+      // Wait for the reindex huginn started; then the listing is trustworthy again.
+      var polling = Array.isArray(body.polling) ? body.polling : [];
+      var skipped = Array.isArray(body.skipped) ? body.skipped : [];
+      var unresolved = await waitForDeleteReindex(polling);
+      var caveats = [];
+      if (skipped.length) caveats.push('a reindex was already running for ' + skipped.join(', '));
+      if (unresolved.length) caveats.push('the reindex for ' + unresolved.join(', ') + ' never reported finishing');
+      if (caveats.length) {
+        showDeleteNotice(parts.join(' ') + ' — but ' + caveats.join(' and ') + ', so it may reappear in the list until the next index run.', 'ok');
+      }
+      // Refetch: memoized listing → shelf + category sidebar data.
+      try {
+        await getSummaryDocuments(true);
+        if (typeof loadShelf === 'function') loadShelf(true);
+        if (typeof loadLibrary === 'function') loadLibrary();
+        if (!caveats.length) removeDocRows(docId);
+      } catch (e) { /* the listing failing is shown by the shelf itself */ }
+    }
+
+    // Poll each started collection's update-status until terminal, ~60s at most.
+    // Mirrors the gardener page's waitForReindex (wiki-gardener-browser.ts).
+    async function waitForDeleteReindex(collections) {
+      var pending = collections.slice();
+      var unresolved = [];
+      var strikes = {};
+      var deadline = Date.now() + 60000;
+      while (pending.length && Date.now() < deadline) {
+        await new Promise(function(r) { setTimeout(r, 1500); });
+        for (var i = pending.length - 1; i >= 0; i--) {
+          var coll = pending[i];
+          var status = 'unknown';
+          try {
+            var r2 = await fetch('/api/wiki/gardener/backlog-doc-delete-status?collection=' + encodeURIComponent(coll));
+            status = ((await r2.json()) || {}).status || 'unknown';
+          } catch (e) { /* strike */ }
+          if (status === 'succeeded' || status === 'failed') {
+            pending.splice(i, 1);
+          } else if (status === 'running') {
+            strikes[coll] = 0;
+          } else {
+            strikes[coll] = (strikes[coll] || 0) + 1;
+            if (strikes[coll] >= 3) { pending.splice(i, 1); unresolved.push(coll); }
+          }
+        }
+      }
+      return unresolved.concat(pending);
+    }
+
     // --- Article Library ---
     var allDocuments = [];
     var docsByCategory = {};
@@ -541,6 +651,9 @@ export function sumArticleLibraryScript(): string {
         : null;
       var shareBtnEl = document.getElementById('${DOC_PANEL_SHARE_BTN_ID}');
       if (shareBtnEl) shareBtnEl.hidden = !_shareDoc;
+      // Same doc, same gate: Delete needs the registered source's collection.
+      var deleteBtnEl = document.getElementById('${DOC_PANEL_DELETE_BTN_ID}');
+      if (deleteBtnEl) deleteBtnEl.hidden = !_shareDoc;
       if (typeof closeShareDialogOnNavigate === 'function') closeShareDialogOnNavigate(docId);
 
       var overlay = document.getElementById('docOverlay');

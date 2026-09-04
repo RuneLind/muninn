@@ -34,7 +34,10 @@ import {
   DEFAULT_COVERAGE_DEPS,
   type CoverageDeps,
   type WikiProposal,
+  deleteSourceProposalsForDoc,
+  type DeletedSourceProposal,
 } from "../../db/wiki-proposals.ts";
+import { invalidateSummariesStatsCache } from "./summaries-routes.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import type { StatsError } from "../../summaries/stats.ts";
@@ -341,6 +344,17 @@ export interface BacklogRouteDeps extends CoverageDeps {
    * test that cannot see the CAS can only assume.
    */
   revertProposal: (id: string) => Promise<WikiProposal | null>;
+  /**
+   * The proposal half of a doc delete (`backlog-doc-delete`): drop the `source`
+   * proposals drafted from the doc, report the applied ones kept. Injectable so the
+   * route test can pin WHEN it runs — after huginn's DELETE succeeded, never on a
+   * 404/502 — without a database.
+   */
+  deleteSourceProposalsForDoc: (
+    botName: string,
+    collection: string,
+    docId: string,
+  ) => Promise<{ deleted: DeletedSourceProposal[]; kept: DeletedSourceProposal[] }>;
 }
 
 export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
@@ -364,6 +378,8 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
   getProposalById: (id) => getWikiProposalById(id),
   approveProposal: (id) => approveWikiProposal(id),
   revertProposal: (id) => revertWikiProposalToDraft(id),
+  deleteSourceProposalsForDoc: (botName, collection, docId) =>
+    deleteSourceProposalsForDoc(botName, collection, docId),
 };
 
 /** Read the offered-key snapshot as a Set (JSONB array → Set; anything else ⇒ ∅). */
@@ -1815,13 +1831,24 @@ export function registerWikiGardenerRoutes(
       // Same rule for the attempt ledger: the doc is gone, and a re-capture under the
       // same id must not inherit a months-old skip reason.
       await deleteSourceDraftAttempt(target.bot.name, collection, id);
-      return res;
+      // And the draft the source drafter wrote FROM it: a review-gate card whose
+      // source no longer exists is not reviewable, and left in `draft` it would keep
+      // the doc counted as "pending" in the Stats coverage view forever. Applied rows
+      // are kept and reported (their wiki page still exists). Under the mutex, so an
+      // in-flight drain cannot re-draft the doc between huginn's move and this DELETE.
+      const proposals = await backlogDeps.deleteSourceProposalsForDoc(target.bot.name, collection, id);
+      // The pending set just changed; the 5-min stats cache would report the old count.
+      invalidateSummariesStatsCache(target.bot.name);
+      return { res, proposals };
     });
     if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
 
     let res: Record<string, unknown>;
+    let proposals: { deleted: DeletedSourceProposal[]; kept: DeletedSourceProposal[] };
     try {
-      res = (await run) as Record<string, unknown>;
+      const done = await run;
+      res = done.res as Record<string, unknown>;
+      proposals = done.proposals;
     } catch (err) {
       // huginn 404 = the id isn't a member of that collection (its membership gate);
       // anything else is an upstream/transport failure. Never a muninn 5xx.
@@ -1847,12 +1874,17 @@ export function registerWikiGardenerRoutes(
       if (state === "started") polling.push(coll);
       else skipped.push(coll);
     }
-    log.info("Backlog: deleted {key} for {bot} (reindex started: {polling}, skipped: {skipped})", {
-      bot: target.bot.name,
-      key,
-      polling: polling.join(",") || "none",
-      skipped: skipped.join(",") || "none",
-    });
+    log.info(
+      "Backlog: deleted {key} for {bot} (reindex started: {polling}, skipped: {skipped}; proposals deleted: {deleted}, kept: {kept})",
+      {
+        bot: target.bot.name,
+        key,
+        polling: polling.join(",") || "none",
+        skipped: skipped.join(",") || "none",
+        deleted: proposals.deleted.length,
+        kept: proposals.kept.length,
+      },
+    );
     return c.json({
       ok: true,
       collection,
@@ -1860,6 +1892,7 @@ export function registerWikiGardenerRoutes(
       movedTo: typeof res.movedTo === "string" ? res.movedTo : null,
       polling,
       skipped,
+      proposals,
     });
   });
 

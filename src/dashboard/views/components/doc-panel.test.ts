@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { docPanelHtml, docPanelScript, DOC_PANEL_SHARE_BTN_ID } from "./doc-panel.ts";
+import { docPanelHtml, docPanelScript, DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID } from "./doc-panel.ts";
 
 describe("docPanelHtml askFollowUp", () => {
   test("omits the follow-up action by default (Research/Search use this)", () => {
@@ -29,6 +29,18 @@ describe("docPanelHtml askFollowUp", () => {
     expect(html).toContain("Share");
     // …and the two opt-ins are independent.
     expect(docPanelHtml({ share: true })).not.toContain("docPanelFollowUp");
+  });
+
+  test("the Delete action is opt-in too, and independent of the other two", () => {
+    // It posts to the gardener's doc-delete route, which only means something for a
+    // captured summary — /search and /research show arbitrary collections.
+    expect(docPanelHtml()).not.toContain(DOC_PANEL_DELETE_BTN_ID);
+    expect(docPanelHtml()).toBe(docPanelHtml({ remove: false }));
+    const html = docPanelHtml({ remove: true });
+    expect(html).toContain(`id="${DOC_PANEL_DELETE_BTN_ID}"`);
+    expect(html).toContain("Delete");
+    expect(html).not.toContain(DOC_PANEL_SHARE_BTN_ID);
+    expect(html).not.toContain("docPanelFollowUp");
   });
 
   test("the shared opener seeds the follow-up href from the doc title", () => {

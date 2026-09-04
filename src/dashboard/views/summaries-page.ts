@@ -136,6 +136,10 @@ export async function renderSummariesPage(): Promise<string> {
       font-size: 14px;
     }
     .duplicate-banner.visible { display: block; }
+    /* Outcome of a 🗑 Delete from the doc panel — the panel closes, so the message
+       must live on the page. Same shape as the duplicate banner; tone err swaps the
+       accent for the error colour. */
+    .delete-notice.err { border-left-color: var(--status-error); }
   </style>
 </head>
 <body>
@@ -149,6 +153,8 @@ export async function renderSummariesPage(): Promise<string> {
   <div class="duplicate-banner" id="duplicateBanner">
     This item has already been summarized — showing the existing summary.
   </div>
+
+  <div class="duplicate-banner delete-notice" id="deleteNotice" role="status"></div>
 
   <div class="page-content">
     <!-- Page head: title, live presence (capture job / gardener drain), and the
@@ -184,7 +190,7 @@ export async function renderSummariesPage(): Promise<string> {
     </div>
   </div>
 
-  ${docPanelHtml({ askFollowUp: true, share: true })}
+  ${docPanelHtml({ askFollowUp: true, share: true, remove: true })}
 
   ${MARKED_CDN_SCRIPT}
   <!-- Publishes openShareDialog/closeShareDialog on globalThis. Loaded BEFORE

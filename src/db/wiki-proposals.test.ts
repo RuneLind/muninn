@@ -18,6 +18,7 @@ import {
   getLiveTopicKeysByWiki,
   getLiveOrAppliedTopicKeysByWiki,
   getRecentlyRejectedTopicKeysByWiki,
+  deleteSourceProposalsForDoc,
   type InsertWikiProposalParams,
 } from "./wiki-proposals.ts";
 
@@ -295,5 +296,37 @@ describe("wiki-keyed (consolidation) proposals — isolation from bot-keyed read
     const again = await insertWikiProposal(mimirRow({ topicKey: "shared-key" }));
     expect(again).not.toBeNull();
     expect(again!.id).not.toBe(wiki!.id);
+  });
+});
+
+describe("deleteSourceProposalsForDoc", () => {
+  const doc = { collection: "youtube-summaries", docId: "2026-09-04_gone.md", title: "Gone", url: "https://g" };
+  const other = { collection: "youtube-summaries", docId: "2026-09-04_stays.md", title: "Stays", url: "https://s" };
+
+  test("drops the doc's non-applied source proposals, keeps + reports the applied one, never touches other docs or kinds", async () => {
+    const sql = getDb();
+    const bot = `delsrc-${Date.now()}`;
+    const mk = (topicKey: string, over: Partial<InsertWikiProposalParams>) =>
+      insertWikiProposal(makeProposal({ botName: bot, topicKey, kind: "source", targetPath: `sources/${topicKey}.mdx`, sourceDocs: [doc], ...over }));
+    const draft = (await mk("gone-draft", {}))!;
+    const rejected = (await mk("gone-rejected", { status: "rejected" }))!;
+    const applied = (await mk("gone-applied", { status: "applied" }))!;
+    // Same doc, but a CONCEPT proposal (the weekly gardener's) — not a source page.
+    const concept = (await mk("gone-concept", { kind: "concept" }))!;
+    // A different doc entirely.
+    const stays = (await mk("stays-draft", { sourceDocs: [other] }))!;
+
+    const res = await deleteSourceProposalsForDoc(bot, doc.collection, doc.docId);
+    expect(res.deleted.map((r) => r.id).sort()).toEqual([draft.id, rejected.id].sort());
+    expect(res.deleted.find((r) => r.id === draft.id)).toEqual({ id: draft.id, targetPath: "sources/gone-draft.mdx", status: "draft" });
+    expect(res.kept).toEqual([{ id: applied.id, targetPath: "sources/gone-applied.mdx", status: "applied" }]);
+
+    const remaining = (await sql`SELECT id FROM wiki_proposals WHERE bot_name = ${bot} ORDER BY id`).map((r) => r.id as string);
+    expect(remaining.sort()).toEqual([applied.id, concept.id, stays.id].sort());
+  });
+
+  test("a doc with no proposals is a no-op with empty lists", async () => {
+    const res = await deleteSourceProposalsForDoc(`delsrc-none-${Date.now()}`, "youtube-summaries", "nope.md");
+    expect(res).toEqual({ deleted: [], kept: [] });
   });
 });

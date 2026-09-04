@@ -87,9 +87,21 @@ export function getSummarySource(id: string): SummarySource | undefined {
  * code can do `SOURCES[doc.source].apiBase` without a lookup helper.
  */
 export function clientSourcesJson(): string {
-  const map: Record<string, { label: string; badge: string; apiBase: string; linkLabel: string }> = {};
+  const map: Record<
+    string,
+    { label: string; badge: string; apiBase: string; linkLabel: string; collection: string }
+  > = {};
   for (const s of SUMMARY_SOURCES) {
-    map[s.id] = { label: s.label, badge: s.badge, apiBase: s.apiBase, linkLabel: s.linkLabel };
+    // `collection` is what the doc panel's 🗑 Delete posts to the gardener's
+    // backlog-doc-delete route, which is keyed on the huginn collection, not the
+    // source id (the two diverge: `x-article` → `x-articles`).
+    map[s.id] = {
+      label: s.label,
+      badge: s.badge,
+      apiBase: s.apiBase,
+      linkLabel: s.linkLabel,
+      collection: s.collection,
+    };
   }
   return JSON.stringify(map);
 }

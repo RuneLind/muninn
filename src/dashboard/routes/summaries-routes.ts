@@ -43,6 +43,16 @@ interface StatsCacheEntry {
 const statsCache = new Map<string, StatsCacheEntry>();
 const statsInFlight = new Map<string, Promise<SummariesStats>>();
 
+/**
+ * Drop one bot's cached stats — called by the gardener's doc-delete route, whose
+ * proposal delete moves the "pending review" count the cached payload reports.
+ * The in-flight guard is left alone: a compute already running reads the DB
+ * after this call's caller committed, so its result is not stale.
+ */
+export function invalidateSummariesStatsCache(botName: string): void {
+  statsCache.delete(botName);
+}
+
 /** Test-only: clear the stats cache (and in-flight guard) between cases. */
 export function __resetSummariesStatsCacheForTest(): void {
   statsCache.clear();
