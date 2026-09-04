@@ -171,9 +171,9 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
  * carries `text`/`summary` only and every ingest body posts the summary, not the
  * transcript. Most sources are re-fetchable from the stored url (and youtube's
  * transcript from huginn), so recovery means re-running the whole capture; the
- * two PASTED paths — `src/article/` and x-article's TEXT path, whose bodies
- * arrive as an `article_text` POST field (x-article's VIDEO path re-downloads
- * like the rest) — have nothing to re-run, and their loss is final.
+ * two PASTED paths — `src/article/` (POST field `text`) and x-article's TEXT
+ * path (POST field `article_text`); x-article's VIDEO path re-downloads like
+ * the rest — have nothing to re-run, and their loss is final.
  *
  * The rule's "never invent one" half is load-bearing rather than decoration: a
  * rule that only demanded a fenced prompt would be satisfied by writing a
@@ -184,27 +184,33 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
  * summary, so an unbounded quote can run out MID-FENCE. An unclosed fence is not
  * a code block — `src/format/markdown-ast.ts` runs those lines through the
  * ordinary block parser, so a heading, a list or a `<Callout>` inside one
- * RENDERS, which is the wikilinks-inside-code class (`src/web/CLAUDE.md`)
- * arriving through the prompt instead of the renderer.
+ * RENDERS (the tag is consumed, not shown), which is the wikilinks-inside-code
+ * class (`src/web/CLAUDE.md`) arriving through the prompt instead of the
+ * renderer.
  *
  * Two review rounds were spent trying to carve markup OUT of that hazard, and
  * the enumeration is why the attempt was abandoned rather than narrowed again:
  * `COMPONENT_NAMES` registers FIFTEEN components and a denylist naming six left
- * nine rendering — measured by driving `formatWebHtml` over every registered
- * name in paired-tag form inside an unclosed fence: all 15 render, none is
- * escaped — and a sixteenth would go stale silently. So there is no markup
- * exemption at all: "plain markdown only" applies everywhere, which is what
- * keeps component markup out of the output in the first place, and a source
- * dictating markup is described rather than quoted. `mermaid` is named
- * explicitly because it is the one language that escapes even a CLOSED fence —
- * the reader swaps that block for a drawn diagram.
+ * nine live — measured by driving `formatWebHtml` over every registered name
+ * inside an unclosed fence: PAIRED (`<X>body</X>`) all 15 are consumed, none
+ * escaped; self-closing only 4 are — and a sixteenth would go stale silently.
+ * So there is no markup exemption at all: "plain markdown only" applies
+ * everywhere, which is what keeps component markup out of the output in the
+ * first place, and a source dictating markup is described rather than quoted.
+ * `mermaid` is named separately because it is the one language a reader
+ * rewrites out of a CLOSED fence, replacing the block with a drawn diagram.
  *
- * Worth knowing before re-litigating any of this: a stored summary does NOT
- * reach that renderer today. `/summaries` renders it with marked.js and an
- * escaping `html` renderer (`views/components/{doc-panel,sum-job-card}.ts`), so
- * no component is parsed there at all. The hazard is real for the wiki/chat
- * pipeline a summary reaches once the source-drafter stops summarizing quotes
- * away — prospective, not live, and the cheap rules above are priced for that.
+ * BOTH of those hazards are PROSPECTIVE, and saying so is the point — two
+ * rounds were spent on them reading as live. A stored summary today goes to
+ * `/summaries`, which renders with marked.js and an escaping `html` renderer
+ * (`views/components/{doc-panel,sum-job-card}.ts`), so no component is parsed;
+ * to the huginn doc; and to chat, which runs no mermaid at all (`enhanceMermaid`
+ * is the /wiki reader, the Ask pane and /research — see `wiki-mermaid.ts`).
+ * The channel to a renderer that does either is `src/gardener/source-drafter.ts`,
+ * and it is doubly indirect: that prompt REWRITES rather than copies ("synthesize,
+ * don't transcribe", :196) and itself mandates a mermaid fence and permits
+ * components (:197-198). These rules are cheap, so they are priced for the day
+ * that channel becomes direct rather than for today.
  *
  * The ingress + closer restore what the pre-#309 loose prompt produced
  * emergently on the best summaries (and inconsistently on the rest): an
