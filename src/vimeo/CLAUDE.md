@@ -6,7 +6,7 @@ UI — those are PR 2/3.
 
 | File | Role |
 |---|---|
-| `url.ts` | `extractVimeoVideoId` (host-gated), `canonicalVimeoUrl` (the dedup key), `vimeoWatchUrl` (the page to load) |
+| `url.ts` | `resolveVimeoRef` (a bare id OR any URL — the one door callers use), `extractVimeoVideoId` (host-gated), `canonicalVimeoUrl` (the dedup key), `vimeoWatchUrl` (the page to load) |
 | `oembed.ts` | `fetchVimeoOembed` — title/author/duration/upload date/thumbnail with **no browser** |
 | `vtt.ts` | `parseVttCues`, `vttToSegments`, `segmentsToMarkdown`, `detectCaptionKind` — pure |
 | `captions.ts` | `harvestVimeoCaptions` (headless Chromium), `downloadVtt` (host-pinned), `chooseTrack` (pure) |
@@ -60,9 +60,13 @@ inside `harvestVimeoCaptions`.** Two halves, both load-bearing:
   and a postinstall.
 - Dynamic rather than top-level, because `src/dashboard/routes.ts` statically
   imports every route module: a top-level import would pull a browser driver into
-  `MUNINN_PROFILE=nais` boot, in an image built without one. `captions.test.ts`
-  pins the absence of a static import by reading this module's source text, since
-  nothing else would catch a later refactor re-adding one.
+  `MUNINN_PROFILE=nais` boot. `captions.test.ts` pins that TWO ways, neither of
+  them a line-shaped regex — the regex version was vacuous against the two
+  regressions that would really happen, a module-scope `await import(...)` and a
+  side-effect `import "playwright-core";`, both of which passed it:
+  `Bun.Transpiler.scanImports` (a parser, so a multi-line import is seen and the
+  dynamic one is a different KIND) and a child process that refuses to load any
+  `playwright*` module and then imports this one — the property itself, executed.
 
 **`downloadVtt` is HOST-PINNED to `captions.vimeo.com`**, https only, with
 `redirect: "error"`, a 2 MB cap and a 20 s budget. The URL comes out of a page a
@@ -71,6 +75,15 @@ the first hop can be anywhere. The cap REFUSES rather than truncating: half a VT
 is a transcript with a silent hole in it, and everything downstream would treat it
 as complete. (Contrast `src/summaries/safe-fetch.ts`, which truncates: there the
 body is enrichment prose and a prefix is still useful.)
+
+**A URL's hash rules differ by WHERE it sits.** A trailing path segment is a hash
+only if it looks hex — that rule exists to tell `/<hash>` from `/likes`, and it
+applies on `player.vimeo.com` exactly as on `vimeo.com`. `?h=` gets no shape rule
+at all and is kept VERBATIM: the parameter is unambiguous, and a value that does
+not look hex is still the credential the page needs — refusing it turned a
+reachable unlisted video into a 404 that a caller records as "not public". A video
+id never has a leading zero, because `/0123` and `/123` would be two dedup keys
+for one video.
 
 **A cue's identifier is decided by POSITION, never by shape.** The optional
 identifier is the line BEFORE the timing line. Dropping `/^\d+$/` lines is the
@@ -82,7 +95,9 @@ cues.
 
 **Windows sit on ABSOLUTE boundaries** (0, 120, 240 …), not relative to the first
 cue, so two captures of the same talk window identically and a `[HH:MM:SS]`
-citation means one thing.
+citation means one thing. Cues are GROUPED by boundary rather than compared with
+the previous window: a cue that steps back in time opened a second window with the
+same start, so `[00:00:00]` was printed twice and the citation named two places.
 
 **The whole harvest lives in ONE budget** (60 s by default, browser launch
 included) and every Playwright wait gets what is left of it — never 0, which
@@ -118,14 +133,40 @@ load measured the opposite, four ways:
 of the launched binary at runtime and only the automation token is dropped, so
 the version and platform stay honest and a Chromium upgrade needs no edit. If it
 stops being enough, `harvestVimeoCaptions({headless: false})` is the measured
-fallback — it needs a display, so it is a laptop lever, not a server one, and a
-server deployment of this vertical is a PR 2/3 question. (`MUNINN_PROFILE=nais`
-drops capture verticals entirely, so the pod is not affected.)
+fallback, and `scripts/smoke-vimeo.ts --headed` is the same lever from the command
+line. It needs a display, so it is a laptop lever, not a server one, and a server
+deployment of this vertical is a PR 2/3 question.
 
-`looksLikeBotPage` matches all three interstitial headings measured above, not
-just the older "Sorry" page — a challenge must raise `VimeoBotBlockedError` (one
-retry with a fresh context) rather than `VimeoNotPublicError`, which is what an
+**What the pod does and does not escape.** `MUNINN_PROFILE=nais` drops the capture
+verticals, so no nais request reaches this code — but `playwright-core` is a
+**production dependency** and the image is built with `bun install --production`,
+so its **9.6 MB ships in every image**, nais included. What the pod avoids is the
+browser BINARY (`bunx playwright install chromium` is an operator step, never a
+build step) and the code path; the driver package itself is carried. Dropping that
+weight would take an optional dependency or a separate image, and neither is in
+this PR.
+
+`probeChallenge` (was `looksLikeBotPage`) answers **three** things, not two —
+`bot`, `clean`, or `unknown`: an evaluate that fails is not evidence about the
+video, and swallowing it into "clean" reported an unreadable page as a private
+one. It matches the three measured interstitials on the `h1`, and the same three
+against `document.title` **anchored WHOLE**, because a prefix match read the real
+video *"Sorry, Not Sorry on Vimeo"* as a bot page. A challenge raises
+`VimeoBotBlockedError` (one retry in a fresh CONTEXT — a new cookie jar and
+storage, same browser and same UA, so it can shake off a session cookie and can do
+nothing about the UA gate) rather than `VimeoNotPublicError`, which is what an
 absent `<video>` would otherwise be read as.
+
+**`VimeoBrowserMissingError` is reserved for the ONE launch failure whose remedy is
+`bunx playwright install chromium`** — Playwright's own *"Executable doesn't
+exist"*. Every other launch failure, and every exhausted budget, is a
+`VimeoHarvestError`: sending an operator to install a browser they already have is
+worse than the raw error. The same rule downward — an exhausted budget is never
+reported as "not publicly playable".
+
+**oEmbed is the duration source.** `v.duration` was not a number at either read on
+both talks measured 2026-09-04 (an MSE source), so `VimeoCaptions.durationSec` is 0
+on both and 0 means *"the player never said"*, never "a zero-length video".
 
 ## Env
 
@@ -141,10 +182,20 @@ inherits a developer's value.
 
 `bun test src/vimeo/` — in both the `test` and `test:unit` chains (they are
 hand-enumerated file lists, not globs: a new directory is green-by-absence until
-it is listed). Every test is offline; the browser half is covered structurally
-(no static import) and by the pure `chooseTrack`, with the live mechanism left to
-the smoke script:
+it is listed). Every test is offline. The browser half is covered three ways —
+structurally (no driver is loaded by importing the module), by the pure
+`chooseTrack`, and by driving `harvestVimeoCaptions` through its `launcher` test
+seam over a stub DOM: the page-side closures are RUN there, so which track ends up
+`hidden` and which ends up `disabled` is really asserted rather than matched in
+the source text. What is left to the smoke script is the live mechanism itself:
 
 ```
 bun scripts/smoke-vimeo.ts https://vimeo.com/1223642971
+bun scripts/smoke-vimeo.ts --headed --window 60 https://vimeo.com/1223642971
 ```
+
+Both `--name value` and `--name=value` work, and an unknown or unparseable flag is
+REFUSED (exit 2) rather than ignored: a typo'd `--windows=60` that silently kept
+the default made the script report on settings nobody chose, and `--timeout=abc`
+put a NaN through every Playwright timeout, which Playwright reads as "wait
+forever".

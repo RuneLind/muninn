@@ -107,6 +107,37 @@ describe("parseVttCues (structure)", () => {
     expect(parseVttCues("")).toEqual([]);
     expect(parseVttCues("WEBVTT\n")).toEqual([]);
   });
+
+  test("a single-digit hour field parses", () => {
+    // `1:02:03.000` is legal WebVTT and a two-digit-hours rule dropped the whole
+    // cue silently — an hour into a talk, which is where a long recording lives.
+    expect(parseVttCues("WEBVTT\n\n1:02:03.000 --> 1:02:04.000\nsent")).toEqual([
+      { startSec: 3723, endSec: 3724, text: "sent" },
+    ]);
+    expect(parseVttCues("WEBVTT\n\n100:00:00.000 --> 100:00:01.000\nlangt")[0]!.startSec).toBe(360_000);
+  });
+
+  test("a blank separator line made of NBSP still separates two cues", () => {
+    // The block splitter counted only space and tab as blank padding while the
+    // line filter used `trim()`, which does not — so the two passes disagreed and
+    // the second cue's TIMING LINE was injected into the first cue's prose.
+    const vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nførste\n \n00:00:03.000 --> 00:00:04.000\nandre";
+    expect(parseVttCues(vtt)).toEqual([
+      { startSec: 1, endSec: 2, text: "første" },
+      { startSec: 3, endSec: 4, text: "andre" },
+    ]);
+  });
+
+  test("a cue whose IDENTIFIER is NOTE/STYLE/REGION is still a cue", () => {
+    // Non-cue blocks are the ones with NO timing line. Deciding by the first
+    // line instead threw away a real cue whose identifier happened to be one of
+    // those words — the same shape-over-position mistake as the `21` cue.
+    for (const id of ["NOTE", "STYLE", "REGION nope"]) {
+      expect(parseVttCues(`WEBVTT\n\n${id}\n00:00:05.000 --> 00:00:06.000\ninnhold`)).toEqual([
+        { startSec: 5, endSec: 6, text: "innhold" },
+      ]);
+    }
+  });
 });
 
 describe("vttToSegments", () => {
@@ -138,6 +169,42 @@ describe("vttToSegments", () => {
 
   test("refuses a non-positive window", () => {
     expect(() => vttToSegments(fixture, 0)).toThrow();
+    expect(() => vttToSegments(fixture, -120)).toThrow();
+  });
+
+  test("refuses a window that is not a finite number", () => {
+    // `Infinity > 0` is true, so it walked past the guard and every header came
+    // out `NaN:NaN:NaN`. NaN fails `> 0` already; it is pinned so the guard
+    // cannot be weakened back to a bare comparison.
+    expect(() => vttToSegments(fixture, Number.POSITIVE_INFINITY)).toThrow();
+    expect(() => vttToSegments(fixture, Number.NaN)).toThrow();
+  });
+
+  test("cues out of time order are grouped by WINDOW, not by neighbour", () => {
+    // The old loop compared each cue only with the LAST window, so a cue that
+    // stepped back in time opened a second window with the same start — the same
+    // `[00:00:00]` header printed twice, which a citation cannot resolve.
+    const vtt = [
+      "WEBVTT",
+      "",
+      "00:00:01.000 --> 00:00:02.000",
+      "en",
+      "",
+      "00:02:30.000 --> 00:02:31.000",
+      "to",
+      "",
+      "00:00:05.000 --> 00:00:06.000",
+      "tre",
+    ].join("\n");
+    expect(vttToSegments(vtt, 120)).toEqual([
+      { startSec: 0, text: "en tre" },
+      { startSec: 120, text: "to" },
+    ]);
+  });
+
+  test("windows come out in time order whatever order the cues arrived in", () => {
+    const vtt = "WEBVTT\n\n00:04:00.000 --> 00:04:01.000\nsist\n\n00:00:01.000 --> 00:00:02.000\nførst";
+    expect(vttToSegments(vtt, 120).map((s) => s.startSec)).toEqual([0, 240]);
   });
 });
 

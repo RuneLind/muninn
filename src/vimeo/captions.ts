@@ -104,9 +104,21 @@ export class VimeoVttDownloadError extends Error {
   }
 }
 
+/**
+ * The one thing a harvest needs from `playwright-core`. It is a TEST SEAM (the
+ * `fetchImpl` idiom of this module's other half): production passes nothing and
+ * the dynamic `await import("playwright-core")` stays the default, which is what
+ * keeps a browser driver out of a `MUNINN_PROFILE=nais` boot.
+ */
+export interface VimeoBrowserLauncher {
+  launch(options: { headless: boolean; timeout: number }): Promise<PwBrowser>;
+}
+
 export interface HarvestOptions {
   /** Unlisted video's private hash — the watch page 404s without it. */
   hash?: string;
+  /** Test seam — production takes the dynamic import. */
+  launcher?: VimeoBrowserLauncher;
   /** Whole-operation budget (default {@link VIMEO_HARVEST_TIMEOUT_MS}). */
   timeoutMs?: number;
   /**
@@ -165,16 +177,24 @@ function isAuto(lang: string): boolean {
  * 2. A MANUAL track beats an auto-generated one — auto-captions garble proper
  *    nouns ("JavaBeen" for JavaBin, measured on the fixture's talk).
  * 3. Within the surviving partition, the TALK's own language wins over a
- *    translation. The talk's language is read off an auto-generated track when
- *    there is one: Vimeo generates those from the audio, so their language IS
- *    the spoken language — a fact no manual track carries.
+ *    translation — but only when the talk's language is actually KNOWN. It is
+ *    read off an auto-generated track: Vimeo generates those from the audio, so
+ *    a lone auto track's language IS the spoken language, a fact no manual track
+ *    carries. With SEVERAL auto tracks it is not known at all — Vimeo's
+ *    auto-translations carry `-x-autogen` too, so "the first auto track" named
+ *    the spoken language only by luck of ordering. This step is then skipped
+ *    rather than guessed.
  * 4. Otherwise source order, which is the order the player lists them.
+ *
+ * ⚠️ Steps 2–4 have NO live coverage: both videos measured on 2026-09-04 had
+ * exactly one track, so everything below step 1 is reasoning about Vimeo's
+ * model, pinned by unit tests, not by an observed multi-track video.
  */
 export function chooseTrack(tracks: readonly VimeoCaptionTrack[]): VimeoCaptionTrack | null {
   const usable = tracks.filter((t) => !!t.vttUrl);
   if (usable.length === 0) return null;
-  const spoken = usable.find((t) => isAuto(t.lang));
-  const talkLang = spoken ? baseLang(spoken.lang) : null;
+  const auto = usable.filter((t) => isAuto(t.lang));
+  const talkLang = auto.length === 1 ? baseLang(auto[0]!.lang) : null;
 
   const manual = usable.filter((t) => !isAuto(t.lang));
   const pool = manual.length > 0 ? manual : usable;
@@ -214,7 +234,9 @@ export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): P
   if (parsed.protocol !== "https:") {
     throw new VimeoVttDownloadError(`Refusing non-https caption URL: ${parsed.protocol}//${parsed.host}`);
   }
-  if (parsed.hostname.toLowerCase().replace(/\.$/, "") !== VIMEO_CAPTIONS_HOST) {
+  // `URL.hostname` is already lowercase (WHATWG lowercases it); only the
+  // trailing root dot is left to normalise.
+  if (parsed.hostname.replace(/\.$/, "") !== VIMEO_CAPTIONS_HOST) {
     throw new VimeoVttDownloadError(
       `Refusing caption URL on host ${parsed.hostname} (only ${VIMEO_CAPTIONS_HOST} is allowed)`,
     );
@@ -224,19 +246,33 @@ export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): P
   const timeoutMs = opts.timeoutMs ?? VIMEO_VTT_TIMEOUT_MS;
   const doFetch = opts.fetchImpl ?? fetch;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // The FLAG says why, not `signal.aborted`: this function aborts its own
+  // controller on an over-cap body too, and that is not a timeout.
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     let res: Response;
     try {
       res = await doFetch(url, { redirect: "error", signal: controller.signal });
     } catch (err) {
+      // A real `fetch` throws here for two different reasons — the budget, and
+      // `redirect: "error"` meeting a 3xx — and naming only the second made a
+      // plain timeout read as a redirect refusal. The transport's own message
+      // says which; this line no longer guesses.
       throw new VimeoVttDownloadError(
-        controller.signal.aborted
+        timedOut
           ? `Caption download timed out after ${timeoutMs}ms`
-          : `Caption download failed (a redirect is refused, not followed): ${err instanceof Error ? err.message : String(err)}`,
+          : `Caption download failed: ${err instanceof Error ? err.message : String(err)}`,
         { cause: err },
       );
     }
+    // UNREACHABLE against a real `fetch`: with `redirect: "error"` a 3xx throws
+    // above and never becomes a Response. It stays for a `fetchImpl` that hands
+    // one back anyway — a stub, an e2e fake — so the refusal is the same either
+    // way rather than a redirect body being parsed as a transcript.
     if (res.status >= 300 && res.status < 400) {
       controller.abort();
       throw new VimeoVttDownloadError(`Caption URL answered a redirect (${res.status}); refusing to follow it`);
@@ -246,9 +282,22 @@ export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): P
       throw new VimeoVttDownloadError(`Caption download returned HTTP ${res.status}`);
     }
 
+    // Deliberately NOT `readBounded` (`src/utils/bounded-fetch.ts`), the repo's
+    // other body cap: that one cancels its reader on the over-cap path, and a
+    // `reader.cancel()` does not close a Bun fetch socket (measured
+    // cross-process: 52 GB kept arriving after a read that returned in 8 ms).
+    // Only aborting the CONTROLLER stops the transfer, and it has to happen at
+    // the moment the cap is crossed — inside this loop.
     const reader = res.body?.getReader();
     if (!reader) {
-      const text = await res.text();
+      // No stream to bound. The declared length is then the only bound there
+      // is, so it is checked BEFORE anything is buffered.
+      const declared = Number(res.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        controller.abort();
+        throw new VimeoVttDownloadError(`Caption body declares ${declared} bytes, over the ${maxBytes}-byte cap`);
+      }
+      const text = await readInsideBudget(res.text(), timeoutMs, () => timedOut);
       if (new TextEncoder().encode(text).length > maxBytes) {
         throw new VimeoVttDownloadError(`Caption body exceeds ${maxBytes} bytes`);
       }
@@ -256,18 +305,31 @@ export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): P
     }
     const chunks: Uint8Array[] = [];
     let received = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-      received += value.byteLength;
-      if (received > maxBytes) {
-        // Stopping the READ does not stop the TRANSFER — abort the request that
-        // opened the socket (the `safe-fetch.ts` measurement).
-        controller.abort();
-        throw new VimeoVttDownloadError(`Caption body exceeds ${maxBytes} bytes`);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        received += value.byteLength;
+        if (received > maxBytes) {
+          // Stopping the READ does not stop the TRANSFER — abort the request
+          // that opened the socket (the `safe-fetch.ts` measurement).
+          controller.abort();
+          throw new VimeoVttDownloadError(`Caption body exceeds ${maxBytes} bytes`);
+        }
+        chunks.push(value);
       }
-      chunks.push(value);
+    } catch (err) {
+      // The budget can expire HERE, mid-body — the likeliest failure this
+      // download has, and it used to escape as a raw `AbortError` past every
+      // caller's `instanceof VimeoVttDownloadError`.
+      if (err instanceof VimeoVttDownloadError) throw err;
+      throw new VimeoVttDownloadError(
+        timedOut
+          ? `Caption download timed out after ${timeoutMs}ms`
+          : `Caption body could not be read: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
     }
     const joined = new Uint8Array(received);
     let offset = 0;
@@ -278,6 +340,23 @@ export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): P
     return new TextDecoder().decode(joined);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * The bodiless path's read, classified the same way the streamed one is: a
+ * `res.text()` that ends in an abort is this module's error, naming the budget.
+ */
+async function readInsideBudget(reading: Promise<string>, timeoutMs: number, timedOut: () => boolean): Promise<string> {
+  try {
+    return await reading;
+  } catch (err) {
+    throw new VimeoVttDownloadError(
+      timedOut()
+        ? `Caption download timed out after ${timeoutMs}ms`
+        : `Caption body could not be read: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
   }
 }
 
@@ -297,28 +376,51 @@ export async function harvestVimeoCaptions(
   opts: HarvestOptions = {},
 ): Promise<VimeoCaptions> {
   const watchUrl = vimeoWatchUrl({ id: videoId, hash: opts.hash });
-  const deadline = Date.now() + (opts.timeoutMs ?? VIMEO_HARVEST_TIMEOUT_MS);
+  // Validated at the DOOR, because `remaining()` guards `left <= 0` and that is
+  // false for NaN: a NaN budget flowed into every Playwright timeout, and
+  // Playwright reads a falsy timeout as "wait forever" — the budget silently
+  // switched off. `--timeout=abc` on the smoke script is how it arrives.
+  const budgetMs = opts.timeoutMs ?? VIMEO_HARVEST_TIMEOUT_MS;
+  if (!Number.isFinite(budgetMs) || budgetMs <= 0) {
+    throw new VimeoHarvestError(
+      `Vimeo caption harvest needs a finite budget in ms, got ${budgetMs}`,
+    );
+  }
+  const deadline = Date.now() + budgetMs;
 
-  let chromium: PlaywrightModule["chromium"];
-  try {
-    ({ chromium } = await import("playwright-core"));
-  } catch (err) {
-    throw new VimeoBrowserMissingError(err);
+  let launcher: VimeoBrowserLauncher;
+  if (opts.launcher) {
+    launcher = opts.launcher;
+  } else {
+    try {
+      ({ chromium: launcher } = await import("playwright-core"));
+    } catch (err) {
+      throw new VimeoBrowserMissingError(err);
+    }
   }
 
+  // OUTSIDE the try: an exhausted budget is a `VimeoHarvestError` and must not
+  // be caught below and re-told as "install a Chromium" — the operator would go
+  // fix a browser that is already installed.
+  const launchTimeout = remaining(deadline);
   let browser: PwBrowser;
   try {
-    browser = await chromium.launch({
-      headless: opts.headless ?? true,
-      timeout: remaining(deadline),
-    });
+    browser = await launcher.launch({ headless: opts.headless ?? true, timeout: launchTimeout });
   } catch (err) {
-    throw new VimeoBrowserMissingError(err);
+    if (isBrowserMissing(err)) throw new VimeoBrowserMissingError(err);
+    throw new VimeoHarvestError(
+      `Vimeo caption harvest could not launch a browser: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
   }
 
   try {
     const userAgent = opts.userAgent ?? (await derivedUserAgent(browser));
-    // One retry on the bot page, with a FRESH context (new fingerprint/storage).
+    // One retry on the bot page, in a NEW CONTEXT — which is a new cookie jar and
+    // new storage, and nothing else: same browser, same binary, same derived user
+    // agent, same locale. So it can shake off a per-session challenge cookie and
+    // cannot do a thing about the UA gate; that is what `deHeadlessUserAgent`
+    // (and, failing it, `headless: false`) is for.
     for (let attempt = 1; attempt <= 2; attempt++) {
       const context = await browser.newContext({ locale: "en-US", userAgent });
       try {
@@ -333,6 +435,9 @@ export async function harvestVimeoCaptions(
         await context.close().catch(() => {});
       }
     }
+    // Unreachable: the loop either returns, retries once, or rethrows. It is
+    // here because control-flow analysis cannot see that, and a `return`-less
+    // path would otherwise be typed `VimeoCaptions | undefined`.
     throw new VimeoBotBlockedError(videoId);
   } finally {
     await browser.close().catch(() => {});
@@ -359,12 +464,23 @@ async function harvestInContext(
   });
 
   await page.goto(watchUrl, { waitUntil: "domcontentloaded", timeout: remaining(deadline, 30_000) });
-  if (await looksLikeBotPage(page)) throw new VimeoBotBlockedError(videoId);
+  if ((await probeChallenge(page)).kind === "bot") throw new VimeoBotBlockedError(videoId);
 
+  // OUTSIDE the try: the catch below means "this page has no <video>", and an
+  // exhausted budget computed inside it was reported as a private video.
+  const selectorTimeout = remaining(deadline, 20_000);
   try {
-    await page.waitForSelector("video", { timeout: remaining(deadline, 20_000) });
+    await page.waitForSelector("video", { timeout: selectorTimeout });
   } catch (err) {
-    if (await looksLikeBotPage(page)) throw new VimeoBotBlockedError(videoId);
+    const probe = await probeChallenge(page);
+    if (probe.kind === "bot") throw new VimeoBotBlockedError(videoId);
+    if (probe.kind === "unknown") {
+      // No `<video>` AND no readable page: that is not evidence about the video.
+      throw new VimeoHarvestError(
+        `Vimeo video ${videoId} showed no <video> and the page could not be inspected: ${probe.reason}`,
+        { cause: err },
+      );
+    }
     throw new VimeoNotPublicError(videoId);
   }
 
@@ -377,6 +493,9 @@ async function harvestInContext(
     v.muted = true;
     void v.play().catch(() => {});
   });
+  // Outside the try for the same reason as the selector wait above: this catch
+  // means "no text tracks", which an exhausted budget is not.
+  const tracksTimeout = remaining(deadline, 25_000);
   try {
     await page.waitForFunction(
       () => {
@@ -384,7 +503,7 @@ async function harvestInContext(
         return !!v && v.textTracks.length > 0;
       },
       undefined,
-      { timeout: remaining(deadline, 25_000) },
+      { timeout: tracksTimeout },
     );
   } catch {
     // No tracks is a legitimate answer (spec §5: fall back to audio), not a
@@ -411,18 +530,30 @@ async function harvestInContext(
   });
 
   // CORRELATION: the request stream carries URLs, the DOM carries lang/label, and
-  // nothing links them. So the tracks are enabled ONE AT A TIME and the first URL
-  // that arrives after track i is enabled is track i's — a pairing by causation
-  // rather than by "request order happens to match DOM order". A track that
-  // produces no new request within its slice (the player may have prefetched it)
-  // falls back to positional assignment from whatever is still unclaimed.
+  // nothing links them. So exactly ONE track is enabled at a time and the first
+  // URL that arrives after track i is enabled is track i's — a pairing by
+  // causation rather than by "request order happens to match DOM order". A track
+  // that produces no new request within its slice (the player may have
+  // prefetched it) falls back to positional assignment from whatever is still
+  // unclaimed.
+  //
+  // "One at a time" means every OTHER track is put back to `disabled` in the
+  // same evaluate. Only ever enabling made it cumulative — from track 2 on,
+  // several tracks were live at once, so a URL the player fetched late for track
+  // i-1 was credited to track i, silently, as a caption file in the wrong
+  // language.
   const paired: (string | undefined)[] = new Array(meta.tracks.length).fill(undefined);
   for (let i = 0; i < meta.tracks.length; i++) {
     const before = vttUrls.length;
     await page.evaluate((idx) => {
       const v = document.querySelector("video");
-      const track = v?.textTracks[idx];
-      if (track) track.mode = "hidden";
+      if (!v) return;
+      for (let j = 0; j < v.textTracks.length; j++) {
+        const track = v.textTracks[j];
+        if (!track) continue;
+        const wanted = j === idx ? "hidden" : "disabled";
+        if (track.mode !== wanted) track.mode = wanted;
+      }
     }, i);
     await waitFor(() => vttUrls.length > before, Math.min(10_000, remaining(deadline, 10_000)));
     if (vttUrls.length > before) paired[i] = vttUrls[before];
@@ -432,11 +563,15 @@ async function harvestInContext(
     if (!paired[i]) paired[i] = unclaimed.shift();
   }
 
-  // Duration is re-read here, at the LAST possible moment: the player is an MSE
-  // source and `v.duration` is still NaN when the text tracks first appear
-  // (measured — the first read reported 0 for a 56-minute talk). Whichever of the
-  // two reads is finite wins; 0 means "the player never said", and the oEmbed
-  // duration is the caller's answer then.
+  // Duration is re-read here, at the LAST possible moment, and on the two talks
+  // measured 2026-09-04 it changed NOTHING: the player is an MSE source and
+  // `v.duration` was still not a number at either read, so both sweeps printed
+  // `player says unknown (MSE, no duration)` and `durationSec === 0`.
+  //
+  // **oEmbed is the duration source for this vertical.** The late read is kept
+  // because it costs one evaluate and a progressive (non-MSE) source would
+  // answer it — but 0 here means "the player never said", not "a zero-length
+  // video", and no caller may read it as a duration.
   const lateDuration = await page
     .evaluate(() => {
       const v = document.querySelector("video");
@@ -486,30 +621,65 @@ async function derivedUserAgent(browser: PwBrowser): Promise<string | undefined>
 }
 
 /**
- * The interstitials Vimeo serves instead of a watch page, all of them measured
- * rather than guessed: the older "Sorry" bot page, and the Cloudflare challenge
- * that headless Chromium got on 2026-09-04 — "Verify to continue" on the watch
- * page, "We couldn't verify the security of your connection" on the player embed.
- * Matched on the HEADING, which is where they differ from a real page; a page
+ * The THREE interstitials Vimeo serves instead of a watch page, all of them
+ * measured rather than guessed: the older "Sorry" bot page, and the Cloudflare
+ * challenge headless Chromium got on 2026-09-04 — "Verify to continue" on the
+ * watch page, "We couldn't verify the security of your connection" on the player
+ * embed. (A fourth, "confirm that you're a human", was never measured on Vimeo
+ * and is not carried: an unmeasured pattern here can only mislabel a real page.)
+ *
+ * Matched on the `h1`, which is where they differ from a real page — and a page
  * with a `<video>` is never one of these whatever its wording.
  */
-const CHALLENGE_HEADINGS = [
-  /^sorry\b/i,
-  /verify to continue/i,
-  /couldn.{0,3}t verify the security/i,
-  /confirm that you.{0,3}re a human/i,
+const CHALLENGE_HEADINGS = [/^sorry\b/i, /verify to continue/i, /couldn.{0,3}t verify the security/i];
+
+/**
+ * The same three against `document.title`, anchored WHOLE. The title is a much
+ * weaker signal than the heading: a prefix match read the real video "Sorry, Not
+ * Sorry on Vimeo" as a bot page. The 403 page's title is the word "Sorry" and
+ * nothing else.
+ */
+const CHALLENGE_TITLES = [
+  /^sorry[.!]?$/i,
+  /^verify to continue$/i,
+  /^(we )?couldn.{0,3}t verify the security of your connection[.!]?$/i,
 ];
 
-async function looksLikeBotPage(page: PwPage): Promise<boolean> {
-  const probe = await page
-    .evaluate(() => ({
+/**
+ * What the page LOOKS like, with "could not tell" kept distinct from "not a
+ * challenge". Swallowing the evaluate failure into `false` meant a page that
+ * could not be read at all was reported as a private video — a claim about the
+ * video, made from a probe that never ran.
+ */
+type ChallengeProbe = { kind: "bot" } | { kind: "clean" } | { kind: "unknown"; reason: string };
+
+async function probeChallenge(page: PwPage): Promise<ChallengeProbe> {
+  let probe: { title: string; heading: string; hasVideo: boolean };
+  try {
+    probe = await page.evaluate(() => ({
       title: document.title || "",
       heading: document.querySelector("h1")?.textContent?.trim() ?? "",
       hasVideo: !!document.querySelector("video"),
-    }))
-    .catch(() => null);
-  if (!probe || probe.hasVideo) return false;
-  return CHALLENGE_HEADINGS.some((re) => re.test(probe.title.trim()) || re.test(probe.heading));
+    }));
+  } catch (err) {
+    return { kind: "unknown", reason: err instanceof Error ? err.message : String(err) };
+  }
+  if (probe.hasVideo) return { kind: "clean" };
+  const title = probe.title.trim();
+  const bot =
+    CHALLENGE_TITLES.some((re) => re.test(title)) || CHALLENGE_HEADINGS.some((re) => re.test(probe.heading));
+  return bot ? { kind: "bot" } : { kind: "clean" };
+}
+
+/**
+ * Playwright's own wording when the browser binary is not installed — the ONLY
+ * failure that earns {@link VimeoBrowserMissingError}, whose message tells the
+ * operator to run `bunx playwright install chromium`. A sandbox refusal, an OOM
+ * or a closed target sent them to fix a browser they already had.
+ */
+function isBrowserMissing(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /Executable doesn't exist/i.test(message) || /browserType\.launch: Executable/i.test(message);
 }
 
 /**

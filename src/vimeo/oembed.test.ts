@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { fetchVimeoOembed, isNotPublic, VimeoOembedError, vimeoOembedBaseUrl } from "./oembed.ts";
+import {
+  fetchVimeoOembed,
+  isNotPublic,
+  VIMEO_OEMBED_MAX_BYTES,
+  VimeoOembedError,
+  vimeoOembedBaseUrl,
+} from "./oembed.ts";
 
 /** The shape vimeo.com/api/oembed.json actually answers with (trimmed). */
 const OEMBED_BODY = {
@@ -95,6 +101,79 @@ describe("fetchVimeoOembed", () => {
     await expect(
       fetchVimeoOembed("1223642971", { fetchImpl: impl, timeoutMs: 25 }),
     ).rejects.toThrow(/timed out after 25ms/);
+  });
+
+  test("the budget covers the BODY, not just the headers", async () => {
+    // A 200 whose body never arrives is the shape that hung: the abort timer
+    // used to be cleared the moment the headers landed, so `res.json()` ran with
+    // no timer and no abort behind it. Measured hanging at 3 s with a 200 ms
+    // budget before the fix.
+    const impl = (async () =>
+      new Response(
+        new ReadableStream({
+          start() {
+            /* headers, then silence */
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as unknown as typeof fetch;
+    // Raced against a watchdog rather than awaited: an UNBOUNDED implementation
+    // must fail this test with a legible message, not wedge the suite — the
+    // unfixed code hung past 3 s and bun's own per-test timeout did not reap it.
+    const outcome = await Promise.race([
+      fetchVimeoOembed("1223642971", { fetchImpl: impl, timeoutMs: 50 }).then(
+        () => "resolved with metadata",
+        (err: Error) => `rejected: ${err.message}`,
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("STILL RUNNING after 1000ms"), 1_000)),
+    ]);
+    expect(outcome).toMatch(/timed out after 50ms/);
+  }, 5_000);
+
+  test("an oversized body is refused, not buffered", async () => {
+    // An oEmbed answer is ~1 KB. Anything near the cap is a wrong service on the
+    // host, not metadata. The body size here is ABSOLUTE and the cap is bounded
+    // separately: sizing the body from the constant makes the test scale with
+    // it, so raising the cap to 64 MB would keep passing.
+    expect(VIMEO_OEMBED_MAX_BYTES).toBeLessThanOrEqual(256 * 1024);
+    const { impl } = jsonFetch({ ...OEMBED_BODY, title: "x".repeat(512 * 1024) });
+    await expect(fetchVimeoOembed("1223642971", { fetchImpl: impl })).rejects.toThrow(VimeoOembedError);
+  });
+
+  test("a body just under the cap still parses", async () => {
+    const { impl } = jsonFetch({ ...OEMBED_BODY, title: "x".repeat(1_000) });
+    const result = await fetchVimeoOembed("1223642971", { fetchImpl: impl });
+    expect(isNotPublic(result)).toBe(false);
+    expect((result as { title: string }).title.length).toBe(1_000);
+  });
+
+  test("a non-object body is refused — including an ARRAY", async () => {
+    // `typeof [] === "object"`, so an array walked straight past the guard and
+    // came back as empty metadata: a titleless, dateless record that reads like
+    // a video with no title rather than like a broken endpoint.
+    const { impl } = jsonFetch([OEMBED_BODY]);
+    await expect(fetchVimeoOembed("1223642971", { fetchImpl: impl })).rejects.toThrow(/non-object body/);
+    const nulled = jsonFetch(null);
+    await expect(fetchVimeoOembed("1223642971", { fetchImpl: nulled.impl })).rejects.toThrow(
+      /non-object body/,
+    );
+  });
+
+  test("duration must be a non-negative number (a numeric string counts)", async () => {
+    const duration = async (value: unknown): Promise<number> => {
+      const { impl } = jsonFetch({ ...OEMBED_BODY, duration: value });
+      const result = await fetchVimeoOembed("1223642971", { fetchImpl: impl });
+      return (result as { durationSec: number }).durationSec;
+    };
+    expect(await duration(3220)).toBe(3220);
+    expect(await duration("3220")).toBe(3220);
+    expect(await duration(0)).toBe(0);
+    // `Number(true) === 1`: a boolean used to become a one-second video.
+    expect(await duration(true)).toBe(0);
+    expect(await duration(-5)).toBe(0);
+    expect(await duration("abc")).toBe(0);
+    expect(await duration(null)).toBe(0);
+    expect(await duration({ sec: 10 })).toBe(0);
   });
 
   test("a non-Vimeo URL is refused before any request", async () => {

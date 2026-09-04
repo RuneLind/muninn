@@ -38,7 +38,9 @@ export const DEFAULT_WINDOW_SEC = 120;
  * else, which is what makes a `-->` inside cue TEXT harmless.
  */
 function parseTimestamp(raw: string): number | null {
-  const m = raw.trim().match(/^(?:(\d{2,}):)?([0-5]\d):([0-5]\d[.,]\d{1,3})$/);
+  // Hours are `\d+`, not `\d{2,}`: `1:02:03.000` is legal WebVTT, and requiring
+  // two digits dropped the whole cue — silently, an hour into a talk.
+  const m = raw.trim().match(/^(?:(\d+):)?([0-5]\d):([0-5]\d[.,]\d{1,3})$/);
   if (!m) return null;
   const hours = m[1] ? Number(m[1]) : 0;
   const minutes = Number(m[2]);
@@ -60,11 +62,6 @@ function parseTimingLine(line: string): { startSec: number; endSec: number } | n
   return { startSec, endSec };
 }
 
-/** Blocks that are not cues, identified by their first line. */
-function isNonCueBlock(firstLine: string): boolean {
-  return /^(WEBVTT|NOTE|STYLE|REGION)\b/.test(firstLine) || firstLine === "NOTE";
-}
-
 /**
  * Parse every cue out of a WebVTT document, in file order.
  *
@@ -76,17 +73,26 @@ function isNonCueBlock(firstLine: string): boolean {
  */
 export function parseVttCues(vtt: string): VttCue[] {
   const normalized = vtt.replace(/^﻿/, "").replace(/\r\n?/g, "\n");
-  const blocks = normalized.split(/\n[ \t]*\n+/);
+  // A blank separator line is any line of WHITESPACE — the same notion `trim()`
+  // uses two lines below. `[ \t]` disagreed with it: an NBSP-padded separator
+  // was a blank line to the filter and not to the splitter, so two cues merged
+  // and the second one's TIMING LINE landed in the first one's prose.
+  const blocks = normalized.split(/\n(?:[^\S\n]*\n)+/);
   const cues: VttCue[] = [];
 
   for (const block of blocks) {
     const lines = block.split("\n").filter((l) => l.trim() !== "");
     if (lines.length === 0) continue;
-    if (isNonCueBlock(lines[0]!.trim())) continue;
 
     // POSITION, not shape: the timing line splits the block. Everything before
     // it is the identifier; everything after it is cue text — including a line
     // that happens to be a bare number.
+    //
+    // It also decides what a NON-cue block is: one with no timing line, which is
+    // what `WEBVTT`, `NOTE`, `STYLE` and `REGION` blocks are (the spec forbids
+    // `-->` inside a comment or a style block). Testing the FIRST LINE for those
+    // words instead threw away a real cue whose identifier happened to be one of
+    // them — shape over position, the same mistake as dropping `/^\d+$/` lines.
     const timingIdx = lines.findIndex((l) => parseTimingLine(l) !== null);
     if (timingIdx < 0) continue;
     const timing = parseTimingLine(lines[timingIdx]!)!;
@@ -104,18 +110,30 @@ export function parseVttCues(vtt: string): VttCue[] {
 /**
  * Collapse cues into fixed windows at absolute `windowSec` boundaries. Windows
  * with no cues are not emitted (a silent stretch is an absent header, not an
- * empty one).
+ * empty one), and each boundary is emitted ONCE, in time order, whatever order
+ * the cues arrived in.
+ *
+ * Grouped by bucket rather than compared against the previous window: a cue that
+ * steps back in time — a re-ordered file, a track with overlapping cues — used
+ * to open a SECOND window with the same start, so `[00:00:00]` appeared twice
+ * and a citation timestamp no longer named one place in the transcript.
  */
 export function vttToSegments(vtt: string, windowSec: number = DEFAULT_WINDOW_SEC): TranscriptSegment[] {
-  if (!(windowSec > 0)) throw new Error(`vttToSegments: windowSec must be > 0, got ${windowSec}`);
-  const out: { startSec: number; parts: string[] }[] = [];
+  // `Infinity > 0` is true, and an infinite window makes every bucket NaN and
+  // every header `NaN:NaN:NaN`.
+  if (!Number.isFinite(windowSec) || windowSec <= 0) {
+    throw new Error(`vttToSegments: windowSec must be a finite number > 0, got ${windowSec}`);
+  }
+  const buckets = new Map<number, string[]>();
   for (const cue of parseVttCues(vtt)) {
     const bucket = Math.floor(cue.startSec / windowSec) * windowSec;
-    const last = out[out.length - 1];
-    if (last && last.startSec === bucket) last.parts.push(cue.text);
-    else out.push({ startSec: bucket, parts: [cue.text] });
+    const parts = buckets.get(bucket);
+    if (parts) parts.push(cue.text);
+    else buckets.set(bucket, [cue.text]);
   }
-  return out.map((w) => ({ startSec: w.startSec, text: w.parts.join(" ") }));
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([startSec, parts]) => ({ startSec, text: parts.join(" ") }));
 }
 
 /** `3661` → `01:01:01`. */

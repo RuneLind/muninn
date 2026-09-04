@@ -27,7 +27,14 @@
  *     bun scripts/smoke-vimeo.ts https://vimeo.com/1223642971
  *     … --window=120     (window width in seconds, default 120)
  *     … --timeout=60000  (whole-operation harvest budget in ms)
+ *     … --headed         (a VISIBLE Chromium — the documented escape hatch for
+ *                         the day `deHeadlessUserAgent` stops beating the gate.
+ *                         Needs a display, so it is a laptop lever)
  *     … --json           (JSON on stdout, prose on stderr)
+ *
+ * `--name value` and `--name=value` both work, and an unknown or unparseable
+ * flag is refused rather than ignored — a measurement script that quietly runs
+ * on defaults is reporting on something nobody asked for.
  *
  * Network-dependent by construction, so it is NOT in the test chain. It writes
  * nothing, persists nothing, and needs no credential — but it does need a
@@ -41,27 +48,72 @@ import {
   type VimeoCaptions,
 } from "../src/vimeo/captions.ts";
 import { fetchVimeoOembed, isNotPublic } from "../src/vimeo/oembed.ts";
-import { extractVimeoVideoId, vimeoWatchUrl } from "../src/vimeo/url.ts";
+import { resolveVimeoRef, vimeoWatchUrl } from "../src/vimeo/url.ts";
 import { detectCaptionKind, parseVttCues, segmentsToMarkdown, vttToSegments } from "../src/vimeo/vtt.ts";
 
-const JSON_MODE = process.argv.includes("--json");
-const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-const flag = (name: string): string | undefined =>
-  process.argv.find((a) => a.startsWith(`--${name}=`))?.split("=")[1];
+const USAGE =
+  "usage: bun scripts/smoke-vimeo.ts <vimeo url|id> [--window=120] [--timeout=60000] [--headed] [--json]";
 
-const target = args[0];
-if (!target) {
-  console.error("usage: bun scripts/smoke-vimeo.ts <vimeo url|id> [--window=120] [--timeout=60000] [--json]");
+/** Flags taking a value, in either `--name=v` or `--name v` form. */
+const VALUE_FLAGS = new Set(["window", "timeout"]);
+/** Flags that are their own value. */
+const BOOL_FLAGS = new Set(["json", "headed"]);
+
+function die(message: string): never {
+  console.error(message);
+  console.error(USAGE);
   process.exit(2);
 }
-const windowSec = Number(flag("window") ?? 120);
-const timeoutMs = Number(flag("timeout") ?? 60_000);
 
-const ref = /^\d+$/.test(target) ? { id: target } : extractVimeoVideoId(target);
-if (!ref) {
-  console.error(`Not a Vimeo URL: ${target}`);
-  process.exit(2);
+// Parsed from `argv.slice(2)` — scanning ALL of argv reads the interpreter's own
+// arguments — and an unknown or malformed flag is a REFUSAL: a typo'd
+// `--windows=60` that silently keeps the default makes a measurement script
+// report on settings nobody asked for.
+const values = new Map<string, string>();
+const bools = new Set<string>();
+const positional: string[] = [];
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  const arg = argv[i]!;
+  if (!arg.startsWith("--")) {
+    positional.push(arg);
+    continue;
+  }
+  const [name, inline] = arg.slice(2).split(/=(.*)/s, 2) as [string, string | undefined];
+  if (BOOL_FLAGS.has(name)) {
+    if (inline !== undefined) die(`--${name} takes no value`);
+    bools.add(name);
+  } else if (VALUE_FLAGS.has(name)) {
+    const value = inline ?? argv[++i];
+    if (value === undefined || value.startsWith("--")) die(`--${name} needs a value`);
+    values.set(name, value);
+  } else {
+    die(`unknown flag: ${arg}`);
+  }
 }
+
+const JSON_MODE = bools.has("json");
+
+function positiveNumber(name: string, fallback: number): number {
+  const raw = values.get(name);
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  // `Number("abc")` is NaN, and NaN passes every `> 0` guard downstream — which
+  // is exactly how the harvest budget got switched off.
+  if (!Number.isFinite(n) || n <= 0) die(`--${name} must be a finite number > 0, got "${raw}"`);
+  return n;
+}
+
+const target = positional[0];
+if (!target) die("no video given");
+if (positional.length > 1) die(`unexpected argument: ${positional[1]}`);
+
+const windowSec = positiveNumber("window", 120);
+const timeoutMs = positiveNumber("timeout", 60_000);
+const headless = !bools.has("headed");
+
+const ref = resolveVimeoRef(target);
+if (!ref) die(`Not a Vimeo URL: ${target}`);
 
 /** Prose goes to stderr in `--json` mode so stdout stays machine-readable. */
 function say(line: string): void {
@@ -104,7 +156,9 @@ if (metadata instanceof Error) {
 // 2. Harvest.
 let captions: VimeoCaptions;
 try {
-  captions = await timed("harvest", () => harvestVimeoCaptions(ref.id, { hash: ref.hash, timeoutMs }));
+  captions = await timed("harvest", () =>
+    harvestVimeoCaptions(ref.id, { hash: ref.hash, timeoutMs, headless }),
+  );
 } catch (err) {
   if (err instanceof VimeoBrowserMissingError) {
     say(`HARVEST FAILED (no browser): ${err.message}`);
