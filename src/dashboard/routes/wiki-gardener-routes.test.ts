@@ -20,6 +20,10 @@ import {
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
+import {
+  __setSummariesStatsCacheForTest,
+  __peekSummariesStatsCacheForTest,
+} from "./summaries-routes.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { getWikiIndex, __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
@@ -778,6 +782,7 @@ describe("GET /api/wiki/ingest-backlog — docs=1 through the route", () => {
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
 
@@ -1188,6 +1193,7 @@ describe("prune routes — dismiss / un-dismiss / reset guards (PR 2)", () => {
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
 
@@ -1321,11 +1327,16 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
   /** Stubbed huginn behaviour for the DELETE + the update-status poll. */
   let deleteResponse: () => Response;
   let statusResponse: () => Response;
+  /** Every (bot, collection, id) the proposal-delete seam was asked for. */
+  let proposalCalls: string[];
+  let mutexHeldDuringProposalDelete: boolean | null;
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), "wiki-delete-route-"));
     await Bun.write(path.join(root, "notes.md"), "# Notes\n");
     deleteCalls = [];
+    proposalCalls = [];
+    mutexHeldDuringProposalDelete = null;
     listCalls = 0;
     deleteResponse = () =>
       new Response(
@@ -1395,6 +1406,16 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      deleteSourceProposalsForDoc: async (bot, collection, id) => {
+        proposalCalls.push(`${bot}:${collection}/${id}`);
+        // The seam runs INSIDE the gardener mutex, or a drain could re-draft the doc
+        // between huginn's move and this delete: a second acquire must be refused.
+        mutexHeldDuringProposalDelete = runExclusive(bot, async () => 0) === null;
+        return {
+          deleted: [{ id: "p1", targetPath: "sources/junk.mdx", status: "draft" }],
+          kept: [{ id: "p2", targetPath: "sources/junk-applied.mdx", status: "applied" }],
+        };
+      },
     });
   });
 
@@ -1435,6 +1456,38 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     // The deleted key leaves BOTH snapshot sets; the untouched key survives.
     expect(snapshots.get("backlog:offered")).toEqual(["youtube-summaries/keep.md"]);
     expect(snapshots.get("backlog:dismissed")).toEqual([]);
+  });
+
+  test("the source-drafter proposals for the doc go with it — after huginn's DELETE, reported in the response", async () => {
+    const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(res.status).toBe(200);
+    expect(proposalCalls).toEqual(["delbot:youtube-summaries/junk.md"]);
+    const body = (await res.json()) as {
+      proposals: { deleted: { id: string; status: string }[]; kept: { id: string; targetPath: string; status: string }[] };
+    };
+    expect(body.proposals.deleted.map((p) => p.id)).toEqual(["p1"]);
+    // The applied row is KEPT (its wiki page exists) and named, so the client can say so.
+    expect(body.proposals.kept).toEqual([
+      { id: "p2", targetPath: "sources/junk-applied.mdx", status: "applied" },
+    ]);
+  });
+
+  test("the proposal delete runs INSIDE the gardener mutex, and drops the summaries stats cache", async () => {
+    __setSummariesStatsCacheForTest("jarvis", { months: [], bySource: {}, coverage: { windowDays: 30, total: 1, consumed: 0, pending: 1, neverClustered: [], undated: 0 }, errors: [] });
+    const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(res.status).toBe(200);
+    expect(mutexHeldDuringProposalDelete).toBe(true);
+    // The cache is keyed on the stats route's `?bot=` fallback ("jarvis"), NOT the
+    // deleting bot ("delbot") — so the invalidation must clear every key.
+    expect(__peekSummariesStatsCacheForTest("jarvis")).toBeUndefined();
+  });
+
+  test("huginn refusing the delete leaves the proposals alone", async () => {
+    deleteResponse = () => new Response("not found", { status: 404 });
+    expect((await del({ collection: "youtube-summaries", id: "junk.md" })).status).toBe(404);
+    deleteResponse = () => new Response("boom", { status: 500 });
+    expect((await del({ collection: "youtube-summaries", id: "junk.md" })).status).toBe(502);
+    expect(proposalCalls).toEqual([]);
   });
 
   test("huginn 404 (id not in that collection) → 404, and neither snapshot set is touched", async () => {
@@ -1551,6 +1604,7 @@ describe("POST /api/wiki/gardener/source-draft-doc — pre-I/O guards", () => {
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
 
@@ -1680,6 +1734,7 @@ describe("POST /api/wiki/gardener/source-draft-run — the per-bot mutex", () =>
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
 
@@ -1800,6 +1855,7 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
 

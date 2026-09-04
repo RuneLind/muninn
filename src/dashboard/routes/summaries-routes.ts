@@ -43,6 +43,28 @@ interface StatsCacheEntry {
 const statsCache = new Map<string, StatsCacheEntry>();
 const statsInFlight = new Map<string, Promise<SummariesStats>>();
 
+/**
+ * Drop the whole stats cache — called by the gardener's doc-delete route, whose
+ * proposal delete moves the "pending review" count a cached payload reports.
+ * ALL keys, not the deleting bot's: the cache is keyed on the stats route's
+ * `?bot=` (which the page never sends, so the live key is the literal fallback
+ * `"jarvis"`), while the delete resolves a wiki-registry bot — two names that
+ * only coincide on some instances. The in-flight guard is left alone: a compute
+ * already running reads the DB after the caller's delete committed.
+ */
+export function invalidateSummariesStatsCache(): void {
+  statsCache.clear();
+}
+
+/** Test-only: seed + read the cache, so a route in another module can prove it
+ *  invalidated (the route test cannot drive a stats GET). */
+export function __setSummariesStatsCacheForTest(botName: string, data: SummariesStats): void {
+  statsCache.set(botName, { data, at: Date.now() });
+}
+export function __peekSummariesStatsCacheForTest(botName: string): SummariesStats | undefined {
+  return statsCache.get(botName)?.data;
+}
+
 /** Test-only: clear the stats cache (and in-flight guard) between cases. */
 export function __resetSummariesStatsCacheForTest(): void {
   statsCache.clear();

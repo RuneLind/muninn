@@ -909,7 +909,7 @@ function bulkDismissTargets(): string[] {
 async function deleteBacklogDoc(collection: string, id: string, label: string): Promise<void> {
   const key = `${collection}/${id}`;
   if (inspector.removing.includes(key)) return;
-  if (!window.confirm(`Delete "${label}" from ${collection}?\n\nThis removes the document from huginn and cannot be undone from this page.`)) {
+  if (!window.confirm(`Delete "${label}" from ${collection}?\n\nThis removes the document from huginn AND deletes every unapplied source-page draft written from it (an applied page is kept). It cannot be undone from this page.`)) {
     return;
   }
   inspector.removing = [...inspector.removing, key];
@@ -944,6 +944,10 @@ async function deleteBacklogDoc(collection: string, id: string, label: string): 
     rerenderStrip();
     return;
   }
+
+  // The route also deleted the doc's source-page proposals — a gate card for one
+  // of them is now a 404 behind Approve, so the gate re-lists before anything else.
+  loadProposals();
 
   const { unresolved } = await waitForReindex(polling);
   inspector.removing = inspector.removing.filter((k) => k !== key);

@@ -2,6 +2,9 @@ import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { docPanelHtml, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { clientSourcesJson } from "../../summaries/sources.ts";
+import { resolveSummariesDeleteTarget } from "../../summaries/delete-target.ts";
+import { getWikiRegistry } from "../../wiki/registry-memo.ts";
+import { isReadonlyWikiRoot, isWikiReadonly } from "../../wiki/readonly.ts";
 import { clientDomainMapJson } from "../../summaries/domain.ts";
 import { getAuthorTierThresholds } from "../../summaries/author-scores.ts";
 import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript } from "./components/sum-submit-form.ts";
@@ -52,6 +55,12 @@ export async function renderSummariesPage(): Promise<string> {
   // authors" filter read these directly (no extra endpoint). null when the scores file
   // is unavailable, which the client treats as "no author tiers".
   const authorTiers = await getAuthorTierThresholds();
+  // The 🗑 Delete target, decided HERE and injected: `null` (no bot wiki, or a
+  // read-only instance/root) renders no button at all — see delete-target.ts.
+  const deleteTarget = resolveSummariesDeleteTarget(getWikiRegistry(), {
+    instanceReadonly: isWikiReadonly(),
+    isReadonlyRoot: isReadonlyWikiRoot,
+  });
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -136,6 +145,11 @@ export async function renderSummariesPage(): Promise<string> {
       font-size: 14px;
     }
     .duplicate-banner.visible { display: block; }
+    /* Outcome of a 🗑 Delete from the doc panel — the panel closes, so the message
+       must live on the page. Same shape as the duplicate banner; tone err swaps the
+       accent for the error colour. */
+    .delete-notice { cursor: pointer; }
+    .delete-notice.err { border-left-color: var(--status-error); }
   </style>
 </head>
 <body>
@@ -149,6 +163,8 @@ export async function renderSummariesPage(): Promise<string> {
   <div class="duplicate-banner" id="duplicateBanner">
     This item has already been summarized — showing the existing summary.
   </div>
+
+  <div class="duplicate-banner delete-notice" id="deleteNotice" role="status" title="Click to dismiss"></div>
 
   <div class="page-content">
     <!-- Page head: title, live presence (capture job / gardener drain), and the
@@ -184,7 +200,7 @@ export async function renderSummariesPage(): Promise<string> {
     </div>
   </div>
 
-  ${docPanelHtml({ askFollowUp: true, share: true })}
+  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null })}
 
   ${MARKED_CDN_SCRIPT}
   <!-- Publishes openShareDialog/closeShareDialog on globalThis. Loaded BEFORE
@@ -198,6 +214,8 @@ export async function renderSummariesPage(): Promise<string> {
     // Percentile cuts on huginn's X author ranking (top 1% / top 5%), or null when the
     // scores file was unavailable at render. Drives the X author tier badge + filter.
     const AUTHOR_TIERS = ${JSON.stringify(authorTiers)};
+    // The wiki the doc panel's 🗑 Delete posts against (null ⇒ no button rendered).
+    const DELETE_TARGET = ${JSON.stringify(deleteTarget)};
   </script>
   <script>
     ${helpers}

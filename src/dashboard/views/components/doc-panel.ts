@@ -125,6 +125,10 @@ export function docPanelStyles(animationName = "slideIn"): string {
        source). Spelled out rather than left to the UA rule, because this button
        sits in a flex row where an author display rule would silently win. */
     button.doc-panel-followup[hidden] { display: none; }
+    /* The opt-in 🗑 Delete action: same slot, same shape, but it destroys — so it
+       reads as the danger colour on hover and never as an accent link. */
+    button.doc-panel-danger:hover { border-color: var(--status-error); color: var(--status-error); }
+    button.doc-panel-danger:disabled { opacity: 0.5; cursor: progress; }
     .doc-panel-body {
       flex: 1;
       overflow-y: auto;
@@ -142,6 +146,9 @@ export function docPanelStyles(animationName = "slideIn"): string {
  *  the dialog its own click just opened). */
 export const DOC_PANEL_SHARE_BTN_ID = "docPanelShare";
 
+/** The 🗑 Delete button's id — the render and the summaries page's click handler. */
+export const DOC_PANEL_DELETE_BTN_ID = "docPanelDelete";
+
 /**
  * HTML markup for the slide-in doc panel overlay.
  *
@@ -157,9 +164,18 @@ export const DOC_PANEL_SHARE_BTN_ID = "docPanelShare";
  * have mounted the share-dialog bundle (`shareDialogClientScript`) AND its CSS,
  * which only `/summaries` does. `/search`, `/research` and chat render this panel
  * too and pass neither flag, so their markup stays byte-identical.
+ *
+ * `remove` is the third opt-in, for the 🗑 Delete button: it posts to the gardener's
+ * `backlog-doc-delete` route (huginn soft-delete + the source-drafter proposals
+ * drafted from the doc), which only makes sense where the panel shows a CAPTURED
+ * summary — `/summaries`. Search and Research show arbitrary collections.
  */
 export function docPanelHtml(
-  { askFollowUp = false, share = false }: { askFollowUp?: boolean; share?: boolean } = {},
+  {
+    askFollowUp = false,
+    share = false,
+    remove = false,
+  }: { askFollowUp?: boolean; share?: boolean; remove?: boolean } = {},
 ): string {
   return `
   <div class="doc-overlay" id="docOverlay" onclick="if(event.target===this)closeDocPanel()">
@@ -168,7 +184,9 @@ export function docPanelHtml(
         <button class="doc-panel-close" onclick="closeDocPanel()">&larr; Back</button>
         <span class="doc-panel-title" id="docPanelTitle"></span>${share ? `
         <button class="doc-panel-followup" id="${DOC_PANEL_SHARE_BTN_ID}" type="button"
-          title="Turn this summary into a post you can paste into Slack or an email">&#128228; Share</button>` : ""}${askFollowUp ? `
+          title="Turn this summary into a post you can paste into Slack or an email">&#128228; Share</button>` : ""}${remove ? `
+        <button class="doc-panel-followup doc-panel-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button"
+          title="Delete this summary from huginn, and the wiki draft written from it">&#128465; Delete</button>` : ""}${askFollowUp ? `
         <a class="doc-panel-followup" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}
         <div class="doc-panel-links" id="docPanelLinks"></div>
       </div>

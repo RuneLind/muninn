@@ -540,3 +540,50 @@ function mapRow(r: Record<string, any>): WikiProposal {
     resolvedAt: r.resolved_at ? new Date(r.resolved_at).getTime() : null,
   };
 }
+
+/** One proposal row a doc delete touched — enough for the client to name it. */
+export interface DeletedSourceProposal {
+  id: string;
+  targetPath: string;
+  status: WikiProposalStatus;
+}
+
+/**
+ * The proposal side of deleting a captured doc: drop every `source` proposal this
+ * bot drafted FROM that doc (`draft`, `approved`, and the terminal `rejected`/`stale`/
+ * `error` rows — the doc is gone, so a rejection's negative memory has nothing left to
+ * suppress), and report the `applied` ones we deliberately KEEP — an applied row is the
+ * provenance of a wiki page that still exists on disk, and deleting the row would only
+ * turn that page's source into an unexplained gap in the coverage view.
+ *
+ * Matched through `source_docs @> [{collection, docId}]` — array containment, so a
+ * row naming the doc under a DIFFERENT collection does not match (probed: two
+ * elements `{A,X}`,`{B,Y}` do not contain `{A,Y}`). `kind = 'source'` only: a weekly
+ * gardener `concept`/`entity` draft that clustered this doc among others is left
+ * alone — it is a synthesis over several sources, not a page about this one.
+ */
+export async function deleteSourceProposalsForDoc(
+  botName: string,
+  collection: string,
+  docId: string,
+): Promise<{ deleted: DeletedSourceProposal[]; kept: DeletedSourceProposal[] }> {
+  const sql = getDb();
+  const match = sql.json([{ collection, docId }] as any);
+  const toRow = (r: Record<string, unknown>): DeletedSourceProposal => ({
+    id: r.id as string,
+    targetPath: r.target_path as string,
+    status: r.status as WikiProposalStatus,
+  });
+  const kept = await sql`
+    SELECT id, target_path, status FROM wiki_proposals
+    WHERE bot_name = ${botName} AND wiki_name IS NULL AND kind = 'source'
+      AND status = 'applied' AND source_docs @> ${match}
+  `;
+  const deleted = await sql`
+    DELETE FROM wiki_proposals
+    WHERE bot_name = ${botName} AND wiki_name IS NULL AND kind = 'source'
+      AND status <> 'applied' AND source_docs @> ${match}
+    RETURNING id, target_path, status
+  `;
+  return { deleted: deleted.map(toRow), kept: kept.map(toRow) };
+}

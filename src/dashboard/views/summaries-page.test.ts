@@ -21,7 +21,7 @@
 
 import { test, expect, describe, beforeAll } from "bun:test";
 import { renderSummariesPage } from "./summaries-page.ts";
-import { DOC_PANEL_SHARE_BTN_ID } from "./components/doc-panel.ts";
+import { DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID } from "./components/doc-panel.ts";
 import { SHARE_DIALOG_ID } from "./components/wiki-share-dialog.ts";
 
 let html = "";
@@ -31,9 +31,49 @@ beforeAll(async () => {
   html = await renderSummariesPage();
 }, 60_000);
 
+/**
+ * Same guard as `/models`: a template-literal escape slip (`\\n` written as `\n`
+ * inside the page script) emits a RAW newline into a JS string, and the browser
+ * drops the WHOLE block — every renderer on the page dead behind a 200 and a
+ * green string-assertion suite. Measured on this page: the Delete confirm
+ * message did exactly that on its first draft. `new Function` parses without
+ * executing, which is the check the browser performs.
+ */
+test("every inline script on /summaries parses as JavaScript", () => {
+  const blocks = [...html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(
+    (m) => m[1] as string,
+  );
+  expect(blocks.length).toBeGreaterThanOrEqual(3);
+  expect(blocks.join("").length).toBeGreaterThan(10_000);
+  const failures: string[] = [];
+  blocks.forEach((body, i) => {
+    try {
+      new Function(body);
+    } catch (err) {
+      failures.push(`block ${i}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+  expect(failures).toEqual([]);
+});
+
 describe("renderSummariesPage — the share mount", () => {
   test("renders the 📤 Share button in the doc panel header", () => {
     expect(html).toContain(`id="${DOC_PANEL_SHARE_BTN_ID}"`);
+  });
+
+  test("renders the 🗑 Delete button, its notice slot, and the collection the click posts", () => {
+    expect(html).toContain(`id="${DOC_PANEL_DELETE_BTN_ID}"`);
+    // The panel closes on success, so the outcome needs a home on the page.
+    expect(html).toContain('id="deleteNotice"');
+    // The click posts a huginn COLLECTION, read off the injected source map — the
+    // source id and the collection diverge (`x-article` → `x-articles`).
+    expect(html).toContain('"collection":"x-articles"');
+    expect(html).toContain("/api/wiki/gardener/backlog-doc-delete");
+    // …with an EXPLICIT ?wiki= from the server-resolved target — the route's own
+    // defaults answer a WIKI_DIR instance with a 404 and a WIKI_EXTRA one with a 400.
+    // Non-null, since the button IS rendered above — the two are gated together.
+    expect(html).toMatch(/const DELETE_TARGET = \{"wiki":"[^"]+"\};/);
+    expect(html).toContain("'wiki=' + encodeURIComponent(DELETE_TARGET.wiki)");
   });
 
   test("renders the dialog stylesheet server-side — the bundle drops it", () => {
