@@ -2,9 +2,10 @@
  * The /wiki reader's pane toggles: collapse Connections/Ask to an icon strip
  * (remembered), and a focus mode that drops both side panes (not remembered).
  *
- * What the unit tests (`wiki-panes.test.ts`) cannot reach — every assertion here
- * is on a BOUNDING BOX, never on a class: a class the grid does not read would
- * still "toggle".
+ * What the unit tests (`wiki-panes.test.ts`) cannot reach. Every LAYOUT
+ * assertion here is on a BOUNDING BOX, never on a class: a class the grid does
+ * not read would still "toggle". Classes and localStorage are asserted only for
+ * what they are — the selected tab, the stored preference.
  *  1. Collapse → the pane is the strip width and the article gained the
  *     difference; a reload keeps it (localStorage).
  *  2. A strip icon expands the pane AND selects that tab.
