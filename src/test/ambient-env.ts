@@ -114,6 +114,19 @@ const VERTEX_FLAGS = [
   "VERTEX_REGION",
 ];
 
+/** The Vimeo capture vertical's two knobs. Both are the same class of value: they
+ *  say WHERE this process looks for Vimeo, and a developer who has pointed either
+ *  at a local stub while debugging a capture would otherwise have the vertical's
+ *  suites resolve a different endpoint on that machine than on the other one —
+ *  this file's whole failure shape. `VIMEO_OEMBED_BASE` is read at call time by
+ *  `vimeoOembedBaseUrl()`, and the tests that exercise it pass an explicit
+ *  `baseUrl`, per this file's convention. `VIMEO_HARVEST_STUB` is listed AHEAD of
+ *  the loader that reads it (PR 2's summarizer): the name has to be blanked from
+ *  the first moment anything can read it, and a name added later, after a suite
+ *  has already been written against ambient state, is exactly how this list gets
+ *  a hole. */
+const VIMEO_FLAGS = ["VIMEO_OEMBED_BASE", "VIMEO_HARVEST_STUB"];
+
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.
  *
@@ -134,6 +147,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...SYNC_FLAGS,
   ...AUTH_FLAGS,
   ...VERTEX_FLAGS,
+  ...VIMEO_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
   // thirteen route groups and turns every Claude-CLI spawn into a throw, so the
