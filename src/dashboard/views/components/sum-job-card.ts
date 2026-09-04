@@ -97,6 +97,11 @@ export function sumJobCardStyles(): string {
     .status-ingesting { background: color-mix(in srgb, var(--status-warning) 20%, transparent); color: var(--status-warning); }
     .status-complete { background: color-mix(in srgb, var(--status-success) 20%, transparent); color: var(--status-success); }
     .status-error { background: color-mix(in srgb, var(--status-error) 20%, transparent); color: var(--status-error); }
+    /* Not a job status the server ever sends — the card's own badge for a
+       capture route answering "this video is already in the archive". It is
+       terminal and it is not an error, so it takes the info tone rather than
+       either of the two above. */
+    .status-duplicate { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
 
     .status-badge .spinner {
       width: 12px;
@@ -145,6 +150,26 @@ export function sumJobCardStyles(): string {
       animation: blink 1s step-end infinite;
     }
     @keyframes blink { 50% { opacity: 0; } }
+
+    /* Was an inline style attribute on the element. It moved here so the notice tone
+       below can override the border at all — an inline declaration wins over
+       every stylesheet rule, so the red top border survived the tone swap. */
+    #errorBanner {
+      margin: 0;
+      border-radius: 0;
+      border-top: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
+    }
+
+    /* The card's banner carries NON-error outcomes too — "already captured",
+       "already being captured" — so it gets a second TONE rather than a second
+       element: it is the one line inside the card the reader is already looking
+       at. */
+    #errorBanner.notice {
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+      color: var(--text-secondary);
+    }
+    #errorBanner.notice a { color: var(--accent-light); }
 
     /* --- Similar articles --- */
     .similar-panel {
@@ -231,7 +256,7 @@ export function sumJobCardHtml(): string {
         <div class="summary-area empty" id="summaryArea">
           Waiting for summary...
         </div>
-        <div class="error-banner" id="errorBanner" style="margin:0;border-radius:0;border-top:1px solid color-mix(in srgb, var(--status-error) 30%, transparent);"></div>
+        <div class="error-banner" id="errorBanner"></div>
         <div class="similar-panel" id="similarPanel">
           <h3>Similar</h3>
           <div class="similar-list" id="similarList"></div>
@@ -258,10 +283,47 @@ export function sumJobCardScript(): string {
       summarizing: 'Summarizing',
       ingesting: 'Indexing',
       complete: 'Complete',
-      error: 'Error'
+      error: 'Error',
+      // Not a job status: the card's badge for a capture route that answered
+      // "already captured" and started nothing.
+      duplicate: 'Already captured'
     };
 
-    var TERMINAL_STATES = ['complete', 'error'];
+    var TERMINAL_STATES = ['complete', 'error', 'duplicate'];
+
+    // --- Vimeo sentences: ONE map ------------------------------------------
+    //
+    // Read from two places — the URL form's rendering of a route answer that is
+    // not a fresh job, and the job-error path below (\`no_captions\`). One map,
+    // because a code spelled in two places drifts into a card reporting a
+    // generic failure for a video Vimeo simply declined to describe.
+    var VIMEO_SENTENCES = {
+      bad_url: 'Not a Vimeo video URL',
+      not_public: 'Vimeo says this video is not public',
+      duration_unknown: 'Vimeo did not report a duration, so the 3 h cap cannot be checked',
+      oembed_failed: 'Vimeo did not answer',
+      no_captions: 'This video has no caption track',
+      duplicate: 'Already captured',
+      in_flight: 'Already being captured'
+    };
+
+    // \`too_long\` is the one sentence carrying a measurement, so it is derived
+    // rather than stored. A duration the route did not report (it always does on
+    // this branch) degrades to the cap alone rather than to "NaNh NaNm".
+    function vimeoTooLongSentence(durationSec) {
+      var secs = typeof durationSec === 'number' && isFinite(durationSec) && durationSec > 0
+        ? Math.round(durationSec) : null;
+      if (secs === null) return 'Longer than the 3 h cap';
+      var h = Math.floor(secs / 3600);
+      var m = Math.round((secs - h * 3600) / 60);
+      return 'Longer than the 3 h cap (' + h + 'h ' + m + 'm)';
+    }
+
+    /** The sentence for a Vimeo route/job code, or null when there is none. */
+    function vimeoSentence(code, data) {
+      if (code === 'too_long') return vimeoTooLongSentence(data && data.durationSec);
+      return VIMEO_SENTENCES[code] || null;
+    }
 
     // Per-source API prefix (from the SOURCES registry injected by the page).
     function sourceApiBase(source) {
@@ -371,9 +433,45 @@ export function sumJobCardScript(): string {
 
     function showError(message) {
       var banner = document.getElementById('errorBanner');
-      banner.textContent = message;
+      banner.classList.remove('notice');
+      // A vimeo job stores its refusals as CODES (\`no_captions\`), so the same
+      // map the URL form reads turns them into a sentence here. Scoped to the
+      // vimeo source: another vertical's error text must never be swallowed by
+      // a code that happens to spell the same word.
+      banner.textContent = (currentSource === 'vimeo' && vimeoSentence(message)) || message;
       banner.classList.add('visible');
       // An error is worth surfacing without a click — auto-expand the detail.
+      setJobDetailExpanded(true);
+    }
+
+    /**
+     * A capture-route answer that is not a fresh job — a refusal, a duplicate,
+     * or an attach to a capture already running. It renders as a SENTENCE on the
+     * card rather than an alert: the card is where the reader is already looking,
+     * and a refusal is about the video, not about the form.
+     */
+    function showCaptureOutcome(url, opts) {
+      showJob(opts.jobId || null, url, url, opts.source || 'vimeo');
+      updateStatusBadge(opts.status);
+      if (opts.status !== 'pending') {
+        // The card's placeholder promises a summary that is not coming.
+        var area = document.getElementById('summaryArea');
+        area.className = 'summary-area empty';
+        area.textContent = opts.areaText || 'Nothing was captured.';
+      }
+      var banner = document.getElementById('errorBanner');
+      banner.classList.toggle('notice', opts.tone === 'notice');
+      // Built as NODES, not innerHTML: the sentence is ours but the url in a
+      // refusal is the reader's own paste.
+      banner.textContent = opts.sentence;
+      if (opts.link) {
+        banner.appendChild(document.createTextNode(' — '));
+        var a = document.createElement('a');
+        a.href = opts.link;
+        a.textContent = opts.linkLabel || 'open it';
+        banner.appendChild(a);
+      }
+      banner.classList.add('visible');
       setJobDetailExpanded(true);
     }
 

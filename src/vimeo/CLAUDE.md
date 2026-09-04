@@ -1,9 +1,8 @@
 # Vimeo — the capture vertical
 
 Given a Vimeo URL, produce a summarized, indexed, citable conference talk. PR 1
-was the transcript core; PR 2 added the job, the route and the ingest. No UI
-entry yet — the route is curl-driven until PR 3 adds the URL field on
-`/summaries`.
+was the transcript core; PR 2 added the job, the route and the ingest; PR 3 added
+the UI entry — the URL field on `/summaries`.
 
 | File | Role |
 |---|---|
@@ -161,6 +160,69 @@ budget.
 verticals are dropped with a different binary: the capture launches a headless
 Chromium, and `bunx playwright install chromium` is an operator step on a laptop,
 never a build step in the image.
+
+## The UI entry (PR 3)
+
+`/summaries` carries an always-visible one-line **URL field** above the collapsed
+"+ Paste article" form (`src/dashboard/views/components/sum-submit-form.ts` —
+`captureUrlFormHtml`, `submitCaptureUrl`, `submitCaptureUrlFromInput`). It POSTs
+`{url}` to `POST /api/vimeo/summarize` and then reuses the page's ordinary job
+card and SSE client verbatim (`showJob` + `connectSSE`), so a Vimeo capture
+streams exactly like a YouTube one. This is the whole entry point: **Vimeo is the
+one capture vertical with no Chrome extension**, because what it needs is a
+headless browser muninn drives itself, not one the reader is sitting in.
+
+**`detectCaptureProvider` is a HINT and lives in the form script.** It answers
+`'vimeo'` for any `vimeo.com` / `www.vimeo.com` / `player.vimeo.com` http(s)
+address, whatever the path, and its ONE job is deciding whether a bare link
+pasted into the ARTICLE textarea is forwardable — pasting into the wrong box
+works, and every other bare link keeps the byte-identical Chrome-extension alert
+(pinned in `sum-submit-form.test.ts`, which drives the real script). The URL
+field itself does **not** consult it and posts whatever was typed: the server's
+`resolveVimeoRef` is the single authority on what is a video, and answers 400 for
+everything else. A second host test in the client would be a second authority,
+which is how `vimeo.com/channels/staffpicks` ends up refused in two different
+sentences.
+
+**Every route answer that is not a fresh job renders as a SENTENCE on the card,
+from ONE map.** `VIMEO_SENTENCES` + `vimeoSentence` live in
+`views/components/sum-job-card.ts` — beside the card that renders them, not in
+the form — because the same map serves two callers: the form's rendering of a
+route refusal, and `showError`, which turns the `no_captions` CODE a failed job
+stores into "This video has no caption track" rather than showing the reader the
+word `no_captions`. That translation is scoped to `currentSource === 'vimeo'`, so
+another vertical's error text can never be swallowed by a code that happens to
+spell the same word.
+
+| Answer | Sentence |
+|---|---|
+| 400 (unparseable — the route sends no code, so the STATUS names it) | Not a Vimeo video URL |
+| 422 `not_public` | Vimeo says this video is not public |
+| 422 `duration_unknown` | Vimeo did not report a duration, so the 3 h cap cannot be checked |
+| 413 `too_long` | Longer than the 3 h cap (Xh Ym) — derived from the reported `durationSec` |
+| 502 `oembed_failed` | Vimeo did not answer |
+| 200 `duplicate` | Already captured — plus a link to `dashboard_url` |
+| 200 `in_flight` | Already being captured — plus an attach to the running job |
+| job error `no_captions` | This video has no caption track |
+
+Two rendering rules: the input **clears** on an answer that started or adopted a
+capture (and on a duplicate, which is likewise nothing to retry) and **keeps its
+text** on a refusal, where the reader has something to fix; and the card's banner
+grew a second `notice` TONE for the two non-error outcomes rather than a second
+element. That tone needed the banner's `border-top` moved out of an inline
+`style=` attribute and into the stylesheet — an inline declaration wins over every
+stylesheet rule, so the red border survived the tone swap.
+
+`duplicate` is also a badge status (`STATUS_LABELS` + `TERMINAL_STATES` +
+`.status-duplicate`) that the SERVER never sends. It exists so the strip can say
+"Already captured" without borrowing `complete`, which promises a summary this
+card is not going to show.
+
+End-to-end acceptance is `e2e/summaries-vimeo.spec.ts`: the harvest is the
+`VIMEO_HARVEST_STUB` fixture, oEmbed is a local fake over `VIMEO_OEMBED_BASE`,
+and the summarize step runs against a throwaway `openai-compat` bot the spec
+creates and points at the same fake — so the whole walk to `complete` costs no
+model call and no Chromium.
 
 ## Why a headless browser
 

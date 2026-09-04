@@ -87,7 +87,7 @@ graph LR
 | `DATABASE_URL` | Yes | — | Postgres connection string |
 | `DASHBOARD_PORT` | No | `3010` | Web dashboard port |
 | `DASHBOARD_HOST` | No | `127.0.0.1` | Dashboard/chat bind address. Defaults to loopback because with `MUNINN_AUTH=off` the dashboard exposes MCP tools, logs, traces, and full CRUD with **no authentication**. Set `0.0.0.0` to deliberately expose on the LAN (trusted home network) — required when running under Docker, where the container's network is the trust boundary (docker-compose sets it). |
-| `MUNINN_PROFILE` | No | *(unset ⇒ `default`)* | Which deployment this process is. Unset is today's muninn — every route registered. `nais` is a pod: thirteen route groups (wiki, wiki-gardener, plans, sync, claude-usage, benchmark, logs, summaries and the five capture verticals) are **not registered**, so they answer 404 with no handler and the nav omits their links; the one log line carrying message text drops to `debug`; and the **Haiku** spawns — `spawnHaiku`, i.e. the Haiku router's CLI fallback, the watchers and the scheduler — refuse with a typed `HaikuCliUnavailableError` instead of hanging on a binary the `WITH_CLI=false` image does not ship. ⚠️ That guard is `spawnHaiku` only: the **`claude-cli` chat connector** (`src/ai/executor.ts`) and the `executeOneShot` capture family spawn the CLI on their own path and are **not** covered, so every bot on a `nais` deployment must be pinned to a non-CLI `connector` in its `config.json`. `/chat`, the DB/huginn-bound operator routes and both health paths are unchanged. An unrecognised value **throws at startup** rather than degrading to `default` — the degrade direction here is "serve everything". |
+| `MUNINN_PROFILE` | No | *(unset ⇒ `default`)* | Which deployment this process is. Unset is today's muninn — every route registered. `nais` is a pod: fourteen route groups (wiki, wiki-gardener, plans, sync, claude-usage, benchmark, logs, summaries and the six capture verticals) are **not registered**, so they answer 404 with no handler and the nav omits their links; the one log line carrying message text drops to `debug`; and the **Haiku** spawns — `spawnHaiku`, i.e. the Haiku router's CLI fallback, the watchers and the scheduler — refuse with a typed `HaikuCliUnavailableError` instead of hanging on a binary the `WITH_CLI=false` image does not ship. ⚠️ That guard is `spawnHaiku` only: the **`claude-cli` chat connector** (`src/ai/executor.ts`) and the `executeOneShot` capture family spawn the CLI on their own path and are **not** covered, so every bot on a `nais` deployment must be pinned to a non-CLI `connector` in its `config.json`. `/chat`, the DB/huginn-bound operator routes and both health paths are unchanged. An unrecognised value **throws at startup** rather than degrading to `default` — the degrade direction here is "serve everything". |
 | `MUNINN_AUTH` | No | `off` | `off` is the default and is unchanged behaviour. `local` requires a session for HTTP requests: one pinned identity (`MUNINN_LOCAL_USER`) behind a shared secret (`MUNINN_LOCAL_TOKEN`, min 16 chars), presented on `X-Muninn-Token` / `Authorization: Bearer` / `?muninn_token=` and exchanged for an `HttpOnly` cookie. Also requires `MUNINN_ADMIN_IDENTS` and `MUNINN_ALLOWED_ORIGINS`; the process refuses to start without them. Optional `MUNINN_LOCAL_ROLE` (`user` by default, `admin` to reach the operator surface). A **direct** loopback request bypasses auth by design, so a wrong secret is not a lockout. Routes with an "own" version derive the id from the session rather than the client; id-addressed routes resolve the owner from the row (404, never 403); the `/chat/ws` upgrade is authenticated and owner-scoped; `MUNINN_ALLOWED_ORIGINS` is enforced on side-effecting requests, on the CORS headers and on the socket handshake; and **role decides which routes are reachable at all** — a `user` gets `/chat` and the routes that page calls, everything else answers 403, and `GET /` redirects them to `/chat`. Only `/api/live` and `/api/ready` answer with no credential. ⚠️ **It is still not multi-tenant.** The pinned identity is role `user` unless `MUNINN_LOCAL_ROLE=admin`, so by default the operator's own dashboard is 403 — and that promotion deliberately does not apply to a credential-less loopback request, so a browser on the muninn host stays `user` (reach the dashboard through the proxy, or with the token on the request). Admin-zone collection routes still return every user's rows to an admin (audited, not filtered); a `user` still sees operator nav links they get 403 on; and the loopback bypass is blind to an L4 forward (`ssh -L`, `socat`, `tailscale serve --tcp`, a bare nginx `proxy_pass`) — behind one, every client is granted the pinned identity with no credential, at role `user`. An unauthenticated browser gets raw 401 JSON, not a login page. The four Chrome extensions in `extensions/` do **not** work on an authenticating instance: allowlisting their `chrome-extension://<id>` origin in `MUNINN_ALLOWED_ORIGINS` fixes CORS and the origin check, but their capture/research routes are not in the user zone and answer 403 by role — a documented residual, not something the allowlist lifts. It hardens a single-human instance against casual LAN/tailnet access; it does not make muninn multi-tenant. `entra` is the third mode: every credential is a Bearer access token introspected against `NAIS_TOKEN_INTROSPECTION_ENDPOINT` (one introspection per token, cached and single-flighted), the claims are linked to a `users` row keyed on the token's `oid`, and role comes from `MUNINN_ADMIN_IDENTS` matched against the token's own claims. It additionally requires `MUNINN_TENANT` (written onto the identity row as provenance) and refuses to start without it or the introspection endpoint. No muninn cookie is minted in that mode — an external auth proxy owns the session — and memory/goal extraction is forced OFF for such accounts. **Read `src/auth/CLAUDE.md` before exposing an instance.** |
 | `CLAUDE_TIMEOUT_MS` | No | `120000` | Claude response timeout in ms |
 | `CLAUDE_MODEL` | No | `sonnet` | Claude model for main responses |
@@ -452,6 +452,25 @@ graph TB
 | Search | `/search` | Full-text search across all knowledge collections |
 | Logs | `/logs` | Browse daily JSONL log files with filtering |
 | API Docs | `/docs` | Scalar UI rendering the auto-generated OpenAPI spec |
+
+### Capture entry points
+
+Every capture vertical writes a summarized, indexed document into its own huginn
+collection. What differs is how a capture is *started*.
+
+| Vertical | Entry | Collection |
+|---|---|---|
+| YouTube | Chrome extension (`extensions/youtube/`) | `youtube-summaries` |
+| X / Twitter | Chrome extension (`extensions/x-article/`) | `x-articles` |
+| TikTok | Chrome extension (`extensions/tiktok/`) | `tiktok-summaries` |
+| Anthropic | The watcher's candidate inbox on `/summaries` | `anthropic-summaries` |
+| Article | The "+ Paste article" form on `/summaries` (pasted text) | `article-summaries` |
+| Vimeo | **The URL field on `/summaries`** — paste the link, no extension | `vimeo-summaries` |
+
+Vimeo is the one vertical with no browser extension: its capture drives a
+headless Chromium of muninn's own to harvest the video's captions, so a URL is
+the whole input. Pasting a Vimeo link into the article textarea works too — it is
+forwarded to the same submit.
 
 ### Dashboard API
 
@@ -931,6 +950,7 @@ The app container polls `GET /api/live` every 30 seconds — the dependency-free
 | `src/dashboard/` | Hono web server — 10+ pages, REST APIs, SSE, OpenAPI spec |
 | `src/serena/` | Serena instance manager + MCP tool proxy |
 | `src/youtube/` | YouTube video summarizer (transcript → Claude → knowledge base) |
+| `src/vimeo/` | Vimeo conference-talk capture (harvested captions → Claude → knowledge base); entry is the URL field on `/summaries` |
 | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
 | `src/web/` | Web HTML formatting (markdown → HTML) |
 | `extensions/` | Chrome extensions (Jira research, YouTube summarizer) |

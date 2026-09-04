@@ -7,7 +7,7 @@ import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../../wiki/readonly.ts";
 import { clientDomainMapJson } from "../../summaries/domain.ts";
 import { getAuthorTierThresholds } from "../../summaries/author-scores.ts";
-import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript } from "./components/sum-submit-form.ts";
+import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript, captureUrlFormHtml } from "./components/sum-submit-form.ts";
 import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components/sum-job-card.ts";
 import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
 import { sumOutcomesStyles, sumOutcomesHtml, sumOutcomesScript } from "./components/sum-outcomes.ts";
@@ -174,6 +174,11 @@ export async function renderSummariesPage(): Promise<string> {
       <span class="sum-presence-slot">${agentPresenceHtml("sumPresence")}</span>
       <button class="paste-toggle" id="pasteToggleBtn" type="button" aria-expanded="false" aria-controls="pasteFormWrap">+ Paste article</button>
     </div>
+
+    <!-- Capture by URL — always visible, because Vimeo has no Chrome extension
+         and a link is its whole input. Sits between the head row (which carries
+         the "+ Paste article" toggle) and the collapsed paste form below. -->
+    ${captureUrlFormHtml()}
 
     <!-- Manual submit form (pasted article text; YouTube/X come from the Chrome
          extension) — collapsed behind the toggle above so the inbox leads. -->

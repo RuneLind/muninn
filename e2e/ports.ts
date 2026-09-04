@@ -70,6 +70,13 @@ export const E2E_PORTS = {
   // `.wiki-reader.json` declaration, so proving it needs a declaring wiki and a
   // non-declaring one reachable from the same reader build.
   "wiki-project-facet": 3045,
+  // The /summaries URL field, end to end. ONE fake `node:http` server plays
+  // BOTH halves the capture talks to — Vimeo's oEmbed endpoint
+  // (`VIMEO_OEMBED_BASE`) and huginn (`KNOWLEDGE_API_URL`) — plus the
+  // OpenAI-compatible endpoint the spec's own summarizer bot is pointed at, so
+  // the summarize step spends no model call. Different paths, one port.
+  "summaries-vimeo": 3049,
+  "summaries-vimeo/fake": 3050,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
