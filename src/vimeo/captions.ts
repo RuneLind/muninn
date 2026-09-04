@@ -498,7 +498,18 @@ async function harvestInContext(
     }
   });
 
-  await page.goto(watchUrl, { waitUntil: "domcontentloaded", timeout: remaining(deadline, 30_000) });
+  try {
+    await page.goto(watchUrl, { waitUntil: "domcontentloaded", timeout: remaining(deadline, 30_000) });
+  } catch (err) {
+    // The same states as the two waits below: a navigation cut short by the
+    // budget is reported as the budget, naming the ambiguity (the site may also
+    // be slow or unreachable — nothing was observed); any other navigation
+    // failure is a harvest error carrying Playwright's own message, never a raw
+    // TimeoutError with no class (measured: `--timeout=1500` on the live site
+    // surfaced `TimeoutError: goto: Timeout 709ms exceeded.` verbatim).
+    remaining(deadline, undefined, "before the watch page loaded — the site may also be slow or unreachable; raise the budget to tell the two apart");
+    throw new VimeoHarvestError(`Vimeo watch page for ${videoId} failed to load: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
   if ((await probeChallenge(page)).kind === "bot") throw new VimeoBotBlockedError(videoId);
 
   // OUTSIDE the try: the catch below means "this page has no <video>", and an
@@ -512,16 +523,20 @@ async function harvestInContext(
     //   1. it got its FULL slice (the cap) and the deadline is still ahead — the
     //      page was observed for the whole window: classify (bot / unknown /
     //      not public) below;
-    //   2. its slice was CUT SHORT by the budget (`selectorTimeout < cap`) and
-    //      the deadline has now passed — the observation window was truncated,
-    //      so "private" and "slow" are the same evidence: report the budget,
-    //      and say in the message that the video may also be private;
-    //   3. the wait failed for another reason (page closed) — falls through to
-    //      `probeChallenge`, which answers `unknown` and names it.
-    // State 2 is a deliberate choice, not a defect: with the default 60 s budget
-    // and a 30 s `goto` cap, the selector wait gets its full 20 s unless the page
-    // itself was slow, and a budget error naming the ambiguity is honest where a
-    // "not public" verdict about a video nobody observed for 20 s would not be.
+    //   2. the deadline has now passed — which in practice means its slice was
+    //      cut short by the budget (`selectorTimeout < cap`), though a wait that
+    //      got its full slice and exhausted the budget by a millisecond lands
+    //      here too — the observation window was truncated, so "private" and
+    //      "slow" are the same evidence: report the budget, and say in the
+    //      message that the video may also be private;
+    //   3. the wait failed for another reason (page closed) while the deadline
+    //      still stands — falls through to `probeChallenge`, which answers
+    //      `unknown` and names it. With the deadline passed, state 2 wins and
+    //      the closed page is reported as the budget.
+    // The code evaluates ONE predicate, "has the deadline passed", not the
+    // slice-vs-cap comparison. State 2 is a deliberate choice, not a defect: a
+    // budget error naming the ambiguity is honest where a "not public" verdict
+    // about a video nobody observed for its window would not be.
     remaining(deadline, undefined, "before a <video> appeared — the page may also be private; raise the budget to tell the two apart");
     const probe = await probeChallenge(page);
     if (probe.kind === "bot") throw new VimeoBotBlockedError(videoId);
@@ -614,7 +629,7 @@ async function harvestInContext(
         if (track.mode !== wanted) track.mode = wanted;
       }
     }, i);
-    await waitFor(() => vttUrls.length > before, Math.min(10_000, remaining(deadline, 10_000)));
+    await waitFor(() => vttUrls.length > before, remaining(deadline, 10_000));
     if (vttUrls.length > before) paired[i] = vttUrls[before];
   }
   const unclaimed = vttUrls.filter((u) => !paired.includes(u));

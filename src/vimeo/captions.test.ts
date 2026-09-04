@@ -315,6 +315,8 @@ interface FakePageSpec {
   urlPerTrack?: (string | null)[];
   /** Burned before `goto` resolves, to exhaust the whole-operation budget. */
   gotoDelayMs?: number;
+  /** `goto` burns its own timeout and rejects the way Playwright does. */
+  stallGoto?: boolean;
   /**
    * A failing `waitForSelector`/`waitForFunction` BURNS the timeout it was given
    * before rejecting — which is what Playwright's real waits do, and the only
@@ -399,9 +401,13 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
     on(event: string, handler: (req: { url: () => string }) => void) {
       if (event === "request") requestHandlers.push(handler);
     },
-    async goto() {
+    async goto(_url: string, opts?: { timeout?: number }) {
       navigations++;
       if (spec.gotoDelayMs) await Bun.sleep(spec.gotoDelayMs);
+      if (spec.stallGoto) {
+        await Bun.sleep((opts?.timeout ?? 0) + 5);
+        throw new Error(`goto: Timeout ${opts?.timeout}ms exceeded.`);
+      }
       return null;
     },
     async evaluate(fn: (arg?: unknown) => unknown, arg?: unknown) {
@@ -510,6 +516,15 @@ describe("harvestVimeoCaptions — what a failure is ALLOWED to be called", () =
     // so the budget error must SAY the video may also be private — otherwise the
     // operator reads "raise the timeout" about a video that never had a <video>.
     await expect(promise).rejects.toThrow(/may also be private/);
+  }, 5_000);
+
+  test("a budget that expires DURING the navigation is the budget, not a raw Playwright error", async () => {
+    // Measured live with `--timeout=1500`: `TimeoutError: goto: Timeout 709ms
+    // exceeded.` reached the operator verbatim — no class, no budget wording.
+    const harness = fakeHarness({ hasVideo: true, tracks: [], stallGoto: true });
+    const promise = harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 60 });
+    await expect(promise).rejects.toThrow(VimeoHarvestError);
+    await expect(promise).rejects.toThrow(/may also be slow or unreachable/);
   }, 5_000);
 
   test("a budget that expires DURING the text-track wait is not 'no tracks'", async () => {

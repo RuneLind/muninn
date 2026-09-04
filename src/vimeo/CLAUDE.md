@@ -91,8 +91,11 @@ got its FULL cap and still failed is classified (bot page / not public / no
 captions). A wait whose slice was CUT SHORT by the budget rejects at the deadline,
 and the harvest reports the BUDGET — with a message saying the video may also be
 private (or caption-less) — rather than a verdict about a page it observed for
-less than its window. With the default 60 s budget that only happens after a slow
-`goto`; `--timeout` below ~55 s makes it the common case, by design.
+less than its window. The same rule covers `goto` (a navigation cut short by the
+budget says the site may also be slow or unreachable). Measured on the live talk
+the whole harvest takes ~3–4 s, so with the default 60 s budget no wait is cut
+short unless the page itself stalls; the caps (goto 30 s, selector 20 s, tracks
+25 s) only sum past the budget when several of them are actually consumed.
 
 **A URL's hash rules differ by WHERE it sits.** A trailing path segment is a hash
 only if it looks hex — that rule exists to tell `/<hash>` from `/likes`, and it
