@@ -112,6 +112,24 @@ describe("downloadVtt — the host pin", () => {
   });
 });
 
+/**
+ * Settle-or-report, because the property under test is "this call comes back at
+ * all". `bun test`'s per-test timeout does NOT reap a promise that never settles
+ * (measured on bun 1.3.10 against a bare `await new Promise(() => {})`: the whole
+ * FILE hangs and has to be killed), so a plain `await` on a regression would take
+ * CI out rather than fail the test. This returns the rejection value, or the
+ * string below when the call is still running — either way it comes back.
+ */
+async function settledWithin(call: Promise<unknown>, ms = 1_000): Promise<unknown> {
+  return await Promise.race([
+    call.then(
+      (value) => value,
+      (err) => err,
+    ),
+    Bun.sleep(ms).then(() => "STILL RUNNING — the call is not bounded by its budget"),
+  ]);
+}
+
 describe("downloadVtt — the bounds", () => {
   test("refuses a body over the cap (a half VTT is a hole in a transcript)", async () => {
     const { impl } = textFetch("x".repeat(5_000));
@@ -148,6 +166,48 @@ describe("downloadVtt — the bounds", () => {
     const promise = downloadVtt(SIGNED, { fetchImpl: stallingFetch("WEBVTT\n\n"), timeoutMs: 30 });
     await expect(promise).rejects.toThrow(VimeoVttDownloadError);
     await expect(promise).rejects.toThrow(/timed out after 30ms/);
+  }, 5_000);
+
+  test("a fetchImpl that never answers is bounded by the budget, not by the signal", async () => {
+    // The abort bounds a fetch that HONOURS it. `fetchVimeoOembed` additionally
+    // RACES the budget for the case that does not — a stub, an e2e fake, a body
+    // that ignores the signal — and this download did not, so such a caller hung
+    // with a fired timer and nothing listening to it.
+    const impl = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+    const outcome = await settledWithin(downloadVtt(SIGNED, { fetchImpl: impl, timeoutMs: 30 }));
+    expect(outcome).toBeInstanceOf(VimeoVttDownloadError);
+    expect((outcome as Error).message).toMatch(/timed out after 30ms/);
+  }, 5_000);
+
+  test("a BODY that ignores the abort is bounded by the budget too", async () => {
+    // The headers land, then the stream neither yields nor errors on abort:
+    // `reader.read()` simply never settles. The race has to cover the body read
+    // as well as the request, or the bound stops at the headers.
+    const impl = (() =>
+      Promise.resolve(
+        new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200 }),
+      )) as unknown as typeof fetch;
+    const outcome = await settledWithin(downloadVtt(SIGNED, { fetchImpl: impl, timeoutMs: 30 }));
+    expect(outcome).toBeInstanceOf(VimeoVttDownloadError);
+    expect((outcome as Error).message).toMatch(/timed out after 30ms/);
+  }, 5_000);
+
+  test("the BODILESS read is inside the budget as well", async () => {
+    // The third door into the same hang: `res.body` null takes an
+    // `await res.text()` shortcut, and a stub whose `text()` never settles is
+    // bounded by neither the cap nor the signal. Built as a bare object rather
+    // than a `Response`, because a real bodiless `Response.text()` always
+    // resolves — the stub IS the seam this path is reached through.
+    const impl = (async () => ({
+      status: 200,
+      ok: true,
+      headers: new Headers(),
+      body: null,
+      text: () => new Promise<string>(() => {}),
+    })) as unknown as typeof fetch;
+    const outcome = await settledWithin(downloadVtt(SIGNED, { fetchImpl: impl, timeoutMs: 30 }));
+    expect(outcome).toBeInstanceOf(VimeoVttDownloadError);
+    expect((outcome as Error).message).toMatch(/timed out after 30ms/);
   }, 5_000);
 
   test("a bodiless response is not a silently empty transcript", async () => {
@@ -253,6 +313,14 @@ interface FakePageSpec {
   urlPerTrack?: (string | null)[];
   /** Burned before `goto` resolves, to exhaust the whole-operation budget. */
   gotoDelayMs?: number;
+  /**
+   * A failing `waitForSelector`/`waitForFunction` BURNS the timeout it was given
+   * before rejecting — which is what Playwright's real waits do, and the only
+   * way the budget can expire while a wait is in flight rather than before it.
+   * (A few ms over, so "the deadline has passed" is deterministic rather than a
+   * race with the clock.)
+   */
+  stallWaits?: boolean;
   /** The probe evaluate throws with this message (a detached frame, say). */
   probeThrows?: string;
   duration?: number;
@@ -319,6 +387,11 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
     }
   }
 
+  /** Spend the wait's own timeout before failing, when the spec asks for it. */
+  async function burnTimeout(timeout: number | undefined): Promise<void> {
+    if (spec.stallWaits) await Bun.sleep((timeout ?? 0) + 5);
+  }
+
   let navigations = 0;
   const page = {
     on(event: string, handler: (req: { url: () => string }) => void) {
@@ -334,13 +407,19 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
       if (source.includes("hasVideo") && spec.probeThrows) throw new Error(spec.probeThrows);
       return await runInPage(fn, arg);
     },
-    async waitForSelector(selector: string) {
-      if (selector === "video" && spec.hasVideo === false) throw new Error("Timeout waiting for selector");
+    async waitForSelector(selector: string, options?: { timeout?: number }) {
+      if (selector === "video" && spec.hasVideo === false) {
+        await burnTimeout(options?.timeout);
+        throw new Error("Timeout waiting for selector");
+      }
       return {};
     },
-    async waitForFunction(fn: () => unknown) {
+    async waitForFunction(fn: () => unknown, _arg?: unknown, options?: { timeout?: number }) {
       const ok = await runInPage(fn as (arg?: unknown) => unknown);
-      if (!ok) throw new Error("Timeout waiting for function");
+      if (!ok) {
+        await burnTimeout(options?.timeout);
+        throw new Error("Timeout waiting for function");
+      }
       return {};
     },
   };
@@ -409,6 +488,30 @@ describe("harvestVimeoCaptions — what a failure is ALLOWED to be called", () =
     const promise = harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 40 });
     await expect(promise).rejects.toThrow(VimeoHarvestError);
     await expect(promise).rejects.not.toThrow(VimeoNotPublicError);
+  }, 5_000);
+
+  test("a budget that expires DURING the <video> wait is still a harvest error", async () => {
+    // Hoisting `remaining()` out of the try covers only a budget already spent
+    // when the wait STARTS. The likelier case is the one the wait itself causes:
+    // `waitForSelector` gets what is left of the budget, burns it, and rejects —
+    // and that rejection is indistinguishable from "this page has no <video>".
+    // Classified on the shape of the error alone it read as VimeoNotPublicError,
+    // i.e. a claim about the video made by a clock.
+    const harness = fakeHarness({ hasVideo: false, stallWaits: true, title: "Whatever on Vimeo" });
+    const promise = harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 60 });
+    await expect(promise).rejects.toThrow(VimeoHarvestError);
+    await expect(promise).rejects.not.toThrow(VimeoNotPublicError);
+  }, 5_000);
+
+  test("a budget that expires DURING the text-track wait is not 'no tracks'", async () => {
+    // Same shape one step down: that catch means "this video has no captions",
+    // which an exhausted budget is not — and with no tracks to pair, nothing
+    // downstream calls `remaining()` again, so the harvest RESOLVED, reporting an
+    // empty track list for a video whose tracks were never waited out.
+    const harness = fakeHarness({ hasVideo: true, tracks: [], stallWaits: true });
+    await expect(
+      harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 60 }),
+    ).rejects.toThrow(VimeoHarvestError);
   }, 5_000);
 
   test("a non-finite budget is refused at the door", async () => {

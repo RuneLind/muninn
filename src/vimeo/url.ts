@@ -29,6 +29,20 @@ export interface VimeoVideoRef {
 const HASH_RE = /^[0-9a-f]{6,32}$/i;
 
 /**
+ * The charset a hash may use ANYWHERE it is trusted — hex plus `_`/`-` headroom.
+ *
+ * `?h=` still gets no SHAPE rule (a non-hex value is still the credential the
+ * page needs, and refusing it 404s a reachable unlisted video), but it does get
+ * a CHARSET, because the value becomes a path SEGMENT in a URL a browser loads
+ * and percent-encoding is not enough on its own: `encodeURIComponent` leaves `.`
+ * untouched, so `?h=..` built `https://vimeo.com/<id>/..` — which resolves to
+ * the vimeo.com homepage — and `?h=.` resolved back to the video with the
+ * credential silently gone. Anything outside this charset degrades to NO hash,
+ * exactly as an unrecognised path segment (`/likes`) already did.
+ */
+const SAFE_HASH_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
  * A video id has no leading zero. `/0123` and `/123` are the same video to
  * Vimeo but two different `canonicalVimeoUrl` keys, and Vimeo never writes the
  * first — so a padded id is a malformed URL, not a second video.
@@ -94,14 +108,15 @@ export function extractVimeoVideoId(url: string): VimeoVideoRef | null {
   }
   if (!id) return null;
 
-  // `?h=` needs NO shape rule and gets none. The hex test exists to tell a hash
+  // `?h=` needs no SHAPE rule and gets none. The hex test exists to tell a hash
   // segment from `/likes`; a query parameter is unambiguous, so a value that
   // does not look hex is still the credential the page needs — dropping it
   // turned a reachable unlisted video into a 404 a caller records as "not
-  // public". Kept VERBATIM for the same reason: it is a credential, and
-  // case-folding one is a guess.
+  // public". Case is kept VERBATIM for the same reason: case-folding a
+  // credential is a guess. What it does get is a CHARSET ({@link SAFE_HASH_RE}),
+  // because this value ends up as a path segment in a URL a browser loads.
   const q = parsed.searchParams.get("h");
-  if (!hash && q) hash = q;
+  if (!hash && q && SAFE_HASH_RE.test(q)) hash = q;
 
   return hash ? { id, hash } : { id };
 }
@@ -130,11 +145,15 @@ export function canonicalVimeoUrl(id: string): string {
  * the video.
  */
 export function vimeoWatchUrl(ref: VimeoVideoRef): string {
-  // The hash is ENCODED as one path segment. `?h=` is accepted verbatim because
-  // it is a credential rather than a shape, and this URL is then loaded in a
-  // browser — un-encoded, `?h=../../settings` addressed a different vimeo.com
-  // page. A real (hex) hash is unchanged by this.
-  return ref.hash
+  // The hash is CHARSET-CHECKED and then encoded as one path segment. The check
+  // is the load-bearing half: this URL is loaded in a browser, and encoding
+  // alone leaves `.` alone, so `..` still resolved to the vimeo.com homepage.
+  // The check is repeated here rather than trusted from the parser because a
+  // `VimeoVideoRef` also arrives hand-built — `HarvestOptions.hash` reaches this
+  // function without passing through {@link extractVimeoVideoId}. A hash that
+  // fails it is dropped, the same degrade an unrecognised path segment gets; a
+  // real (hex) hash is unchanged by either step.
+  return ref.hash && SAFE_HASH_RE.test(ref.hash)
     ? `https://vimeo.com/${ref.id}/${encodeURIComponent(ref.hash)}`
     : canonicalVimeoUrl(ref.id);
 }

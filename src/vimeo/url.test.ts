@@ -150,17 +150,31 @@ describe("canonical + watch URLs", () => {
     expect(vimeoWatchUrl({ id: "123" })).toBe("https://vimeo.com/123");
   });
 
-  test("the hash cannot steer the URL off the video's own path", () => {
-    // `?h=` is accepted verbatim (it is a credential, not a shape), and the
-    // watch URL is then LOADED IN A BROWSER — so the segment is encoded on the
-    // way in. Without this, `?h=..%2f..%2fsettings` addressed another vimeo.com
-    // page entirely.
-    const ref = extractVimeoVideoId("https://vimeo.com/123?h=..%2f..%2fsettings")!;
-    expect(ref.hash).toBe("../../settings");
-    const url = vimeoWatchUrl(ref);
-    expect(new URL(url).pathname).toBe("/123/..%2F..%2Fsettings");
-    expect(url.includes("/../")).toBe(false);
-    // A real hex hash is untouched by the encoding.
-    expect(vimeoWatchUrl({ id: "123", hash: "a1b2c3d4e5" })).toBe("https://vimeo.com/123/a1b2c3d4e5");
+  test("the watch URL's path is the video's own, whatever ?h= carried", () => {
+    // The RESOLVED path, not a substring test. `encodeURIComponent` leaves `.`
+    // alone, so `?h=..` built `https://vimeo.com/<id>/..` — which resolves to the
+    // vimeo.com homepage — and `?h=.` dropped the credential, both while passing
+    // an `includes("/../")` check. A `?h=` value now has to be on the safe
+    // charset and otherwise degrades to NO hash, as an unrecognised path segment
+    // already did.
+    const good = extractVimeoVideoId("https://vimeo.com/123?h=a1b2c3d4e5")!;
+    expect(good.hash).toBe("a1b2c3d4e5");
+    expect(new URL(vimeoWatchUrl(good)).pathname).toBe("/123/a1b2c3d4e5");
+
+    for (const raw of ["..", ".", "%2e%2e", "a/b", "a?b", "..%2f..%2fsettings"]) {
+      const ref = extractVimeoVideoId(`https://vimeo.com/123?h=${raw}`)!;
+      expect(ref).toEqual({ id: "123" });
+      expect(ref.hash).toBeUndefined();
+      expect(new URL(vimeoWatchUrl(ref)).pathname).toBe("/123");
+    }
+  });
+
+  test("a hash handed straight to vimeoWatchUrl cannot leave the video's path either", () => {
+    // The second door: `HarvestOptions.hash` reaches `vimeoWatchUrl` without
+    // passing through the parser, and `encodeURIComponent("..")` is `..`.
+    expect(new URL(vimeoWatchUrl({ id: "123", hash: ".." })).pathname).toBe("/123");
+    expect(new URL(vimeoWatchUrl({ id: "123", hash: "../../settings" })).pathname).toBe("/123");
+    // A real hash is untouched.
+    expect(new URL(vimeoWatchUrl({ id: "123", hash: "a1b2c3d4e5" })).pathname).toBe("/123/a1b2c3d4e5");
   });
 });

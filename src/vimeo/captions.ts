@@ -249,15 +249,34 @@ export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): P
   // The FLAG says why, not `signal.aborted`: this function aborts its own
   // controller on an over-cap body too, and that is not a timeout.
   let timedOut = false;
+  // The budget as something to RACE, not only as an abort — the same shape
+  // `fetchVimeoOembed` uses, and for the same reason: the signal bounds a
+  // transport that HONOURS it, while racing bounds the CALLER whatever the
+  // transport does. A `fetchImpl` stub, an e2e fake, or a body that ignores its
+  // signal left this function awaiting a promise that never settled, with the
+  // timer already fired and nobody listening. `.catch` is attached at once so a
+  // timer firing when nothing is racing cannot raise an unhandled rejection, and
+  // the timer is cleared in the `finally` below.
+  let expire: () => void = () => {};
+  const budgetExpired = new Promise<never>((_resolve, reject) => {
+    expire = () => reject(new VimeoVttDownloadError(`Caption download timed out after ${timeoutMs}ms`));
+  });
+  budgetExpired.catch(() => {});
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
+    expire();
   }, timeoutMs);
   try {
     let res: Response;
     try {
-      res = await doFetch(url, { redirect: "error", signal: controller.signal });
+      const fetching = doFetch(url, { redirect: "error", signal: controller.signal });
+      fetching.catch(() => {}); // the race's loser is nobody's rejection
+      res = await Promise.race([fetching, budgetExpired]);
     } catch (err) {
+      // The budget's own rejection is already this module's error, with the
+      // right message — re-wrapping it would bury it as a transport failure.
+      if (err instanceof VimeoVttDownloadError) throw err;
       // A real `fetch` throws here for two different reasons — the budget, and
       // `redirect: "error"` meeting a 3xx — and naming only the second made a
       // plain timeout read as a redirect refusal. The transport's own message
@@ -297,7 +316,13 @@ export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): P
         controller.abort();
         throw new VimeoVttDownloadError(`Caption body declares ${declared} bytes, over the ${maxBytes}-byte cap`);
       }
-      const text = await readInsideBudget(res.text(), timeoutMs, () => timedOut);
+      const reading = res.text();
+      reading.catch(() => {});
+      const text = await readInsideBudget(
+        Promise.race([reading, budgetExpired]),
+        timeoutMs,
+        () => timedOut,
+      );
       if (new TextEncoder().encode(text).length > maxBytes) {
         throw new VimeoVttDownloadError(`Caption body exceeds ${maxBytes} bytes`);
       }
@@ -306,19 +331,26 @@ export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): P
     const chunks: Uint8Array[] = [];
     let received = 0;
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-        received += value.byteLength;
-        if (received > maxBytes) {
-          // Stopping the READ does not stop the TRANSFER — abort the request
-          // that opened the socket (the `safe-fetch.ts` measurement).
-          controller.abort();
-          throw new VimeoVttDownloadError(`Caption body exceeds ${maxBytes} bytes`);
+      // Raced, not merely awaited: a stream that neither yields nor errors on
+      // abort leaves `reader.read()` pending forever, and the cap below can only
+      // fire on bytes that actually arrive.
+      const draining = (async () => {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          received += value.byteLength;
+          if (received > maxBytes) {
+            // Stopping the READ does not stop the TRANSFER — abort the request
+            // that opened the socket (the `safe-fetch.ts` measurement).
+            controller.abort();
+            throw new VimeoVttDownloadError(`Caption body exceeds ${maxBytes} bytes`);
+          }
+          chunks.push(value);
         }
-        chunks.push(value);
-      }
+      })();
+      draining.catch(() => {});
+      await Promise.race([draining, budgetExpired]);
     } catch (err) {
       // The budget can expire HERE, mid-body — the likeliest failure this
       // download has, and it used to escape as a raw `AbortError` past every
@@ -351,6 +383,9 @@ async function readInsideBudget(reading: Promise<string>, timeoutMs: number, tim
   try {
     return await reading;
   } catch (err) {
+    // The budget's own rejection arrives here already classified when the read
+    // is raced against it; re-wrapping would only re-derive the same message.
+    if (err instanceof VimeoVttDownloadError) throw err;
     throw new VimeoVttDownloadError(
       timedOut()
         ? `Caption download timed out after ${timeoutMs}ms`
@@ -472,6 +507,13 @@ async function harvestInContext(
   try {
     await page.waitForSelector("video", { timeout: selectorTimeout });
   } catch (err) {
+    // Hoisting the budget check out of the try only covers a budget already
+    // spent when the wait STARTS. The likelier case is the one this wait itself
+    // causes: it is handed what is left, burns it, and rejects — a rejection
+    // shaped exactly like "this page has no <video>". So the deadline is asked
+    // again HERE, before anything is classified; `remaining()` throws the budget
+    // error when it has passed.
+    remaining(deadline);
     const probe = await probeChallenge(page);
     if (probe.kind === "bot") throw new VimeoBotBlockedError(videoId);
     if (probe.kind === "unknown") {
@@ -506,6 +548,12 @@ async function harvestInContext(
       { timeout: tracksTimeout },
     );
   } catch {
+    // Same question as the selector wait above, one step down: this catch means
+    // "this video has no captions", and an exhausted budget is not that. It has
+    // to be asked here — with no tracks to pair, nothing further down calls
+    // `remaining()`, so the harvest RESOLVED with an empty track list for a video
+    // whose tracks were never waited out.
+    remaining(deadline);
     // No tracks is a legitimate answer (spec §5: fall back to audio), not a
     // failure — return the metadata we do have with an empty track list.
     log.info("Vimeo video {videoId} exposed no text tracks", { videoId });

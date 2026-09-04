@@ -74,14 +74,28 @@ third party controls, and a host pin that follows redirects is not a host pin �
 the first hop can be anywhere. The cap REFUSES rather than truncating: half a VTT
 is a transcript with a silent hole in it, and everything downstream would treat it
 as complete. (Contrast `src/summaries/safe-fetch.ts`, which truncates: there the
-body is enrichment prose and a prefix is still useful.)
+body is enrichment prose and a prefix is still useful.) The cap has two halves and
+they are not the same promise: the STREAMED path refuses at the cap, byte by byte,
+while a response with a null body has only its declared `content-length` to go on
+— nothing else is knowable before buffering. The 20 s budget is RACED at all three
+reads (request, streamed body, bodiless body), not left to the abort signal alone:
+the signal bounds a transport that honours it, and a `fetchImpl` stub or a stream
+that ignores its abort is bounded by nothing else. Measured on bun 1.3.10: a test
+awaiting such a call does not fail, it hangs the whole file.
 
 **A URL's hash rules differ by WHERE it sits.** A trailing path segment is a hash
 only if it looks hex — that rule exists to tell `/<hash>` from `/likes`, and it
-applies on `player.vimeo.com` exactly as on `vimeo.com`. `?h=` gets no shape rule
-at all and is kept VERBATIM: the parameter is unambiguous, and a value that does
+applies on `player.vimeo.com` exactly as on `vimeo.com`. `?h=` gets no SHAPE rule
+and keeps its case VERBATIM: the parameter is unambiguous, and a value that does
 not look hex is still the credential the page needs — refusing it turned a
-reachable unlisted video into a 404 that a caller records as "not public". A video
+reachable unlisted video into a 404 that a caller records as "not public". What it
+does get is a CHARSET (`[A-Za-z0-9_-]+`), because the value becomes a path SEGMENT
+in a URL a browser LOADS and percent-encoding does not cover it:
+`encodeURIComponent` leaves `.` alone, so `?h=..` addressed `vimeo.com/<id>/..` —
+the homepage — and `?h=.` silently dropped the credential. Off-charset degrades to
+NO hash, the same way `/likes` does. The check is repeated in `vimeoWatchUrl`
+rather than trusted from the parser, because a `VimeoVideoRef` also arrives
+hand-built (`HarvestOptions.hash`). A video
 id never has a leading zero, because `/0123` and `/123` would be two dedup keys
 for one video.
 
@@ -162,7 +176,18 @@ absent `<video>` would otherwise be read as.
 exist"*. Every other launch failure, and every exhausted budget, is a
 `VimeoHarvestError`: sending an operator to install a browser they already have is
 worse than the raw error. The same rule downward — an exhausted budget is never
-reported as "not publicly playable".
+reported as "not publicly playable", and never as "no captions".
+
+That rule needs the deadline asked TWICE, and hoisting the check above the `try`
+buys only half of it. Above the `try` covers a budget already spent when a wait
+STARTS; the likelier case is the one the wait itself causes — `waitForSelector`
+and `waitForFunction` are each handed what is LEFT of the budget, burn it, and
+reject with something indistinguishable from "no `<video>` on this page" and "this
+video has no captions". So each of those two catches re-checks the deadline
+(`remaining(deadline)`) BEFORE classifying anything. The tracks wait is the worse
+of the two: with no tracks to pair, nothing further down calls `remaining()` at
+all, so the harvest RESOLVED and reported an empty track list for a video whose
+tracks were never waited out.
 
 **oEmbed is the duration source.** `v.duration` was not a number at either read on
 both talks measured 2026-09-04 (an MSE source), so `VimeoCaptions.durationSec` is 0
