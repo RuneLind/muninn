@@ -31,7 +31,7 @@ Instructions:
    - Open the summary with ONE *italic* ingress line (max ~30 words): what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*
    - Then a \`## Key takeaways\` section FIRST (before any other section) — 3–6 tight bullet points, one line each, capturing the most important points.
    - Then \`##\`-level section headers for each major topic; use \`###\` only for sub-sections. Keep the heading hierarchy consistent.
-   - When the source DICTATES something meant to be reused — a prompt, a command, a config, a query, a formula, a code snippet ("the prompt I use is…", "run this…", text shown on screen) — reproduce it VERBATIM and in FULL inside a fenced code block, under a short line saying what it is. Never paraphrase, shorten or describe it: for these, fidelity beats brevity and the "keep it concise" rule below does not apply. If the source names such an artifact without ever giving its text, say so — never invent one.
+   - When the source DICTATES something meant to be reused — a prompt, a command, a config, a query, a formula, a code snippet ("the prompt I use is…", "run this…", text shown on screen) — reproduce it VERBATIM inside a fenced code block, under a short line saying what it is. Never paraphrase or describe it: for these, fidelity beats brevity, and neither the "keep it concise" rule nor the "plain markdown only" rule below applies INSIDE the fence — quote HTML, JSX or component markup exactly as given. Quote it whole; only when it is too long to finish, quote the essential part and mark it \`(excerpted)\` — never truncate silently, and always close the fence. If the source names such an artifact without ever giving its text, say so — never invent one.
    - Use a markdown table when the content is genuinely comparative (options side by side, before/after, feature or tradeoff matrices) — don't force a table onto non-comparative content.
    - **Bold** for key terms; bullet lists for enumerations, prefixed with a fitting emoji (as in \`- 🧪 Evals catch…\`).
    - Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).
@@ -55,33 +55,31 @@ test("the default structure leads with a `## Key takeaways` section and forbids 
   expect(built).toContain("markdown table when the content is genuinely comparative");
 });
 
-// The video verticals (tiktok, x-video) interpolate SUMMARY_STRUCTURE_BULLETS
-// directly instead of going through buildSummarySystemPrompt, so the scaffold
-// snapshot above does not cover them. Asserting on the exported array is what
-// pins the rule for all six prompt sites at once.
+// The byte-for-byte snapshot above already detects any wording change to the
+// array, so a second `toContain` on the same string would add no detection.
+// What it CANNOT see is ORDER coupling: the verbatim bullet disapplies two
+// later rules by referring to them as "below", and a reorder that keeps every
+// string intact leaves a dangling reference the snapshot happily accepts.
+//
+// The other blind spot — the two video verticals, which interpolate the array
+// instead of calling buildSummarySystemPrompt — is NOT pinnable from here at
+// all. It is pinned end-to-end in src/tiktok/summarizer.test.ts and
+// src/x-article/video.test.ts, against the system prompt those modules
+// actually hand to the executor.
 describe("the verbatim-artifact rule", () => {
-  const joined = SUMMARY_STRUCTURE_BULLETS.join("\n");
+  const idxOf = (needle: string) => SUMMARY_STRUCTURE_BULLETS.findIndex((b) => b.includes(needle));
 
-  test("demands the full text of reusable material, in a fenced block", () => {
-    expect(joined).toContain("VERBATIM and in FULL inside a fenced code block");
-    // The trigger set — a prompt read out loud is the case this exists for.
-    expect(joined).toContain("a prompt, a command, a config, a query, a formula, a code snippet");
-  });
-
-  test("forbids inventing an artifact the source never gave", () => {
-    // Without this half, "always produce a fenced prompt" is satisfiable by
-    // writing a plausible one for a source that merely mentions having one.
-    expect(joined).toContain("never invent one");
-  });
-
-  test("is stated BEFORE the concision rule it exempts itself from", () => {
-    // The bullet says the "keep it concise" rule *below* does not apply, so the
-    // two are order-coupled: reordering them would leave a dangling reference.
-    const verbatimIdx = SUMMARY_STRUCTURE_BULLETS.findIndex((b) => b.includes("VERBATIM"));
-    const conciseIdx = SUMMARY_STRUCTURE_BULLETS.findIndex((b) => b.includes("Keep it concise"));
-    expect(verbatimIdx).toBeGreaterThanOrEqual(0);
-    expect(conciseIdx).toBeGreaterThanOrEqual(0);
-    expect(verbatimIdx).toBeLessThan(conciseIdx);
+  test("is stated BEFORE both rules it exempts itself from", () => {
+    const verbatim = idxOf("VERBATIM");
+    // Case-sensitive on purpose: the verbatim bullet quotes both rule names in
+    // lowercase, so an uppercase needle cannot match the bullet itself.
+    const concise = idxOf("Keep it concise");
+    const plainMarkdown = idxOf("Plain markdown only");
+    expect(verbatim).toBeGreaterThanOrEqual(0);
+    expect(concise).toBeGreaterThanOrEqual(0);
+    expect(plainMarkdown).toBeGreaterThanOrEqual(0);
+    expect(verbatim).toBeLessThan(concise);
+    expect(verbatim).toBeLessThan(plainMarkdown);
   });
 });
 

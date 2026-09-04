@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { SUMMARY_STRUCTURE_BULLETS } from "../summaries/summarizer-shared.ts";
 
 // --- Module mocks (registered before the dynamic import below) ---
 // Same pattern as the TikTok summarizer test: the media pipeline and the Claude
@@ -249,4 +250,22 @@ test("fires the source-draft trigger against the x-articles collection with the 
     url: BARE_STATUS_URL,
     category: "ai/claude-code",
   });
+});
+
+// The video verticals interpolate SUMMARY_STRUCTURE_BULLETS into their own
+// numbered prompt instead of calling buildSummarySystemPrompt, so nothing in
+// src/summaries/ can see whether they still carry the shared rules — a review
+// proved that decoupling this file from the array left the whole capture suite
+// green. This drives the REAL summarizer and asserts on the system prompt it
+// hands the executor, so an inlined or forked bullet list fails here.
+test("the system prompt carries the shared structure rules, incl. the verbatim-artifact one", async () => {
+  const jobId = createJob("2081279674966044799", "My X video", SLOT_URL, "");
+  await summarizeXVideo(jobId, SLOT_URL, "My X video", config, bot);
+
+  for (const bullet of SUMMARY_STRUCTURE_BULLETS) {
+    expect(lastSystemPrompt).toContain(bullet);
+  }
+  // Named explicitly: an X video that reads a prompt out loud is the case the
+  // verbatim rule exists for, and this vertical also sees on-screen text.
+  expect(lastSystemPrompt).toContain("reproduce it VERBATIM inside a fenced code block");
 });

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { SUMMARY_STRUCTURE_BULLETS } from "../summaries/summarizer-shared.ts";
 
 // --- Module mocks (registered before the dynamic import below) ---
 // The media pipeline (yt-dlp / whisper / ffmpeg) and the Claude call are mocked
@@ -334,4 +335,22 @@ test("passes the work dir as extraDirs and raises the timeout to >=600s", async 
   expect(lastBotConfig).toBe(bot);
   expect(bot.spawnArgs).toEqual(["--strict-mcp-config"]);
   expect(bot.timeoutMs).toBeUndefined();
+});
+
+// The video verticals interpolate SUMMARY_STRUCTURE_BULLETS into their own
+// numbered prompt instead of calling buildSummarySystemPrompt, so nothing in
+// src/summaries/ can see whether they still carry the shared rules — a review
+// proved that decoupling this file from the array left the whole capture suite
+// green. This drives the REAL summarizer and asserts on the system prompt it
+// hands the executor, so an inlined or forked bullet list fails here.
+test("the system prompt carries the shared structure rules, incl. the verbatim-artifact one", async () => {
+  const jobId = createJob("7523456789", "My TikTok", SHORT_URL);
+  await summarizeTikTok(jobId, SHORT_URL, "My TikTok", config, bot);
+
+  for (const bullet of SUMMARY_STRUCTURE_BULLETS) {
+    expect(lastSystemPrompt).toContain(bullet);
+  }
+  // Named explicitly: a TikTok that reads a prompt out loud is the case the
+  // verbatim rule exists for, and this vertical also sees on-screen text.
+  expect(lastSystemPrompt).toContain("reproduce it VERBATIM inside a fenced code block");
 });

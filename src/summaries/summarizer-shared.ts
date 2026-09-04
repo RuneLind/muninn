@@ -167,10 +167,18 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
  *
  * The verbatim-artifact rule is the one exception to "concise but
  * comprehensive": summarizing is the wrong operation for material meant to be
- * reused, and the loss is permanent — no vertical retains its source text, so
- * a paraphrased prompt is unrecoverable once the job's TTL expires. Its
- * "never invent one" half is load-bearing rather than decoration: a rule that
- * only demanded a fenced prompt would be satisfied by writing a plausible one.
+ * reused, and no vertical retains its source text to recover it from — `BaseJob`
+ * carries `text`/`summary` only and every ingest body posts the summary, not the
+ * transcript. Most sources are re-fetchable from the stored url (and youtube's
+ * transcript from huginn), so recovery means re-running the whole capture; on
+ * the pasted `article` vertical there is nothing to re-run and the loss is final.
+ * The rule's "never invent one" half is load-bearing rather than decoration: a
+ * rule that only demanded a fenced prompt would be satisfied by writing a
+ * plausible one for a source that merely mentions having one. The excerpt clause
+ * is the counterweight to "verbatim": the model's output ceiling binds the whole
+ * summary (on openai-compat, `thinkingMaxTokens` IS the response's max_tokens),
+ * so an unbounded quote can run out mid-fence and cost the reader the sections
+ * and the `> 💬 **Takeaway:**` closer that would have followed.
  *
  * The ingress + closer restore what the pre-#309 loose prompt produced
  * emergently on the best summaries (and inconsistently on the rest): an
@@ -183,7 +191,7 @@ export const SUMMARY_STRUCTURE_BULLETS = [
   "- Open the summary with ONE *italic* ingress line (max ~30 words): what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*",
   "- Then a `## Key takeaways` section FIRST (before any other section) — 3–6 tight bullet points, one line each, capturing the most important points.",
   "- Then `##`-level section headers for each major topic; use `###` only for sub-sections. Keep the heading hierarchy consistent.",
-  "- When the source DICTATES something meant to be reused — a prompt, a command, a config, a query, a formula, a code snippet (\"the prompt I use is…\", \"run this…\", text shown on screen) — reproduce it VERBATIM and in FULL inside a fenced code block, under a short line saying what it is. Never paraphrase, shorten or describe it: for these, fidelity beats brevity and the \"keep it concise\" rule below does not apply. If the source names such an artifact without ever giving its text, say so — never invent one.",
+  "- When the source DICTATES something meant to be reused — a prompt, a command, a config, a query, a formula, a code snippet (\"the prompt I use is…\", \"run this…\", text shown on screen) — reproduce it VERBATIM inside a fenced code block, under a short line saying what it is. Never paraphrase or describe it: for these, fidelity beats brevity, and neither the \"keep it concise\" rule nor the \"plain markdown only\" rule below applies INSIDE the fence — quote HTML, JSX or component markup exactly as given. Quote it whole; only when it is too long to finish, quote the essential part and mark it `(excerpted)` — never truncate silently, and always close the fence. If the source names such an artifact without ever giving its text, say so — never invent one.",
   "- Use a markdown table when the content is genuinely comparative (options side by side, before/after, feature or tradeoff matrices) — don't force a table onto non-comparative content.",
   "- **Bold** for key terms; bullet lists for enumerations, prefixed with a fitting emoji (as in `- 🧪 Evals catch…`).",
   "- Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).",
