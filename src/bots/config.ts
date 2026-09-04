@@ -1,5 +1,5 @@
-import { readdirSync, existsSync, readFileSync, type Dirent } from "node:fs";
-import { join, resolve } from "node:path";
+import { readdirSync, existsSync, readFileSync, statSync, type Dirent } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.ts";
 import type { McpStatusConfig } from "../ai/mcp-status.ts";
@@ -655,8 +655,90 @@ function validateWikiAutoCommitConfig(settings: Record<string, unknown>, botName
   }
 }
 
+/**
+ * The directory bot discovery walks — the checkout's `bots/` unless
+ * `MUNINN_BOTS_DIR` names another one.
+ *
+ * The override exists for TESTS that need a bot the process under test can
+ * discover. Without it the only way to give a spawned muninn a bot was to write
+ * one into the repo's own `bots/`, which is process-external state: a hard-killed
+ * run leaves it behind, and the next `bun run dev` discovers it — `bots[0]` is
+ * whatever `readdirSync` hands back first (it is NOT alphabetical), so
+ * `resolveSummarizerBot`/`resolveResearchBot` can land on a throwaway pointing at
+ * a dead port. Under parallel e2e workers, other specs' servers see it too.
+ *
+ * Read on every call rather than memoised at module load: a spawned server reads
+ * it once at boot, and a test that sets it per case must not be answered from a
+ * snapshot the first case took. It is in `AMBIENT_INSTANCE_ENV`, so no suite
+ * inherits a developer's value.
+ *
+ * ⚠️ A RELATIVE value, or an absolute one that is NOT A DIRECTORY (absent, a
+ * file, a dangling symlink), is refused (warned about, once per value) and
+ * falls back to the checkout's own `bots/` — the `MUNINN_AGENT_CWD` precedent.
+ * Honouring any of them is worse than a warning: a relative value resolves
+ * against whatever cwd the process happens to have (a launchd service and a
+ * shell have different ones), an absent directory makes `discoverBotsInternal`
+ * warn once and return `[]` (every bot offline, no Telegram poller, nothing for
+ * `resolveSummarizerBot` to resolve), and a FILE made `readdirSync` throw
+ * ENOTDIR out of discovery — a boot crash (measured with `/etc/hosts`). A typo
+ * in `.env` must not do any of that. KNOWN residual: a directory the process
+ * may not READ passes this guard and `readdirSync` throws EACCES, exactly as
+ * the default `bots/` always did — the fix for that class belongs around the
+ * `readdirSync` in discovery, not here.
+ */
+export function resolveBotsDir(): string {
+  const fallback = resolve(import.meta.dir, "../../bots");
+  const override = (process.env.MUNINN_BOTS_DIR ?? "").trim();
+  if (!override) return fallback;
+  if (!isAbsolute(override)) {
+    warnBotsDirOnce(
+      `relative:${override}`,
+      "MUNINN_BOTS_DIR={value} is relative — ignoring it and using {fallback}",
+      { value: override, fallback },
+    );
+    return fallback;
+  }
+  const abs = resolve(override);
+  // Directory-ness, not existence: `existsSync` let a FILE through and
+  // `readdirSync` then threw ENOTDIR out of discovery — a boot crash from a
+  // typo, the exact failure this guard exists to prevent (measured with
+  // `MUNINN_BOTS_DIR=/etc/hosts`).
+  let isDir = false;
+  try {
+    isDir = statSync(abs).isDirectory();
+  } catch {
+    isDir = false;
+  }
+  if (!isDir) {
+    warnBotsDirOnce(
+      `missing:${abs}`,
+      "MUNINN_BOTS_DIR={value} does not exist or is not a directory — ignoring it and using {fallback}",
+      { value: abs, fallback },
+    );
+    return fallback;
+  }
+  return abs;
+}
+
+/**
+ * `resolveBotsDir` is called per discovery, and a bad value is a PERMANENT
+ * condition (a `.env` line), so an unthrottled warn repeats at discovery rate.
+ * Same shape as `agent-cwd.ts`'s: warn once per distinct value, with a cap so a
+ * caller that varies the value cannot grow the set without bound, and a CLEAR
+ * rather than a stop so a full set does not go silent on a new value.
+ */
+const warnedBotsDirs = new Set<string>();
+const WARNED_BOTS_DIRS_MAX = 64;
+
+function warnBotsDirOnce(key: string, message: string, props: Record<string, unknown>): void {
+  if (warnedBotsDirs.has(key)) return;
+  if (warnedBotsDirs.size >= WARNED_BOTS_DIRS_MAX) warnedBotsDirs.clear();
+  warnedBotsDirs.add(key);
+  log.warn(message, props);
+}
+
 function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
-  const botsDir = resolve(import.meta.dir, "../../bots");
+  const botsDir = resolveBotsDir();
 
   if (!existsSync(botsDir)) {
     log.warn("bots/ directory not found at {path}", { path: botsDir });

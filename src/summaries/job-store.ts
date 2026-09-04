@@ -219,16 +219,42 @@ export function createJobStore<S extends string, F>(
     }
   }
 
+  /**
+   * Subscribe to one job's events.
+   *
+   * The returned unsubscribe evicts the map entry only when the entry is STILL
+   * the set this subscription joined. The closure captures that set; once the
+   * set is empty the entry is dropped, and a LATER subscriber that arrived in
+   * between is holding a DIFFERENT set under the same key — so deleting by key
+   * alone unregistered a stranger.
+   *
+   * That is not a hypothetical ordering. The SSE route calls its unsubscribe
+   * TWICE on every disconnect: once from `stream.onAbort`, and again after its
+   * `while (alive)` loop exits, up to a second later. Measured against the
+   * shipped route over a real socket: close one EventSource, open a second on
+   * the same job inside that second, and the second received its state replay
+   * and then not one live event — the reload / re-attach path of every capture
+   * vertical, and the path a Vimeo re-paste takes.
+   *
+   * Deliberately the ONLY guard. A `released` latch fixes the same case and was
+   * written first, but with both present neither can be mutation-killed: each
+   * alone is sufficient, so a defect introduced into either survives every test.
+   * This one is kept because it states the actual rule — an unsubscribe may not
+   * evict a set it does not own — rather than a rule about how often callers
+   * call it. Repeat calls stay safe: `Set.delete` is idempotent, and a stale
+   * closure's set never matches the map again.
+   */
   function subscribe(jobId: string, fn: JobSubscriber<S>): () => void {
     let subs = subscribers.get(jobId);
     if (!subs) {
       subs = new Set();
       subscribers.set(jobId, subs);
     }
-    subs.add(fn);
+    const own = subs;
+    own.add(fn);
     return () => {
-      subs!.delete(fn);
-      if (subs!.size === 0) subscribers.delete(jobId);
+      own.delete(fn);
+      if (own.size === 0 && subscribers.get(jobId) === own) subscribers.delete(jobId);
     };
   }
 

@@ -740,6 +740,54 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     expect(vmState.getJob(body.job_id)!.title).toBe(CANONICAL);
   });
 
+  // Acceptance: the page had the pasted URL and nothing else, so a capture ran
+  // for minutes under a title a RELOAD then replaced with the real one.
+  test("a fresh job answers with the video's TITLE, not only its id", async () => {
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    const body = (await res.json()) as { job_id: string; title?: string };
+    expect(body.title).toBe("Trust but verify");
+    // The same string the job carries, so a reload cannot relabel the card.
+    expect(body.title).toBe(vmState.getJob(body.job_id)!.title);
+  });
+
+  test("an in_flight answer carries the RUNNING job's title, not the follower's own oEmbed", async () => {
+    // The two are the same string in the ordinary case, so the fixture is
+    // changed between the POSTs — otherwise "the running job's title" and "this
+    // request's title" are indistinguishable and either implementation passes.
+    // What the follower is being told is which title the CARD already shows.
+    let release!: () => void;
+    vimeoSummarizeGate = new Promise<void>((resolve) => { release = resolve; });
+    const app = vmApp();
+
+    const started = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as {
+      job_id: string;
+      title: string;
+    };
+    expect(started.title).toBe("Trust but verify");
+
+    oembedAnswer = {
+      ...(oembedAnswer as Record<string, unknown>),
+      title: "Renamed while the capture ran",
+    } as typeof oembedAnswer;
+
+    const follower = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+    expect(follower.in_flight).toBe(true);
+    expect(follower.job_id).toBe(started.job_id);
+    expect(follower.title).toBe("Trust but verify");
+    expect(follower.title).toBe(vmState.getJob(started.job_id)!.title);
+
+    release();
+    await Promise.resolve();
+  });
+
+  test("a title-less oEmbed answer sends the canonical url as the title, never \"\"", async () => {
+    oembedAnswer = { ...(oembedAnswer as Record<string, unknown>), title: "" } as typeof oembedAnswer;
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+    expect(((await res.json()) as { title?: string }).title).toBe(CANONICAL);
+  });
+
   test("the summarize entry registers NO CORS preflight", async () => {
     // Deliberate: no Chrome extension for this vertical, and a cross-origin
     // summarize entry is a way for any page to spend the operator's budget.

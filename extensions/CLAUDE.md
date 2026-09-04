@@ -17,6 +17,8 @@ extensions/
     └── README.md
 ```
 
+**Vimeo deliberately has no extension.** Its capture drives a headless Chromium of muninn's own to harvest the video's signed caption track, so the entry point is the URL field on `/summaries` — paste the link, no browser integration needed (`src/vimeo/CLAUDE.md`).
+
 ## Shared conventions
 
 ### Settings storage

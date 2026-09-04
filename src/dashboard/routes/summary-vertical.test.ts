@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import type { Job, JobEvent } from "../../summaries/job-store.ts";
+import { createJobStore } from "../../summaries/job-store.ts";
 import { registerSummaryVertical, type SummaryVerticalStore } from "./summary-vertical.ts";
 
 type Status = "pending" | "summarizing" | "complete" | "error";
@@ -185,3 +186,100 @@ test("cors preflight: omitted when corsPreflight is not set (no OPTIONS handler)
   const res = await app.request("/api/test/summarize", { method: "OPTIONS" });
   expect(res.status).toBe(404);
 });
+
+/**
+ * The reload / re-attach path, driven through the REAL store and the REAL route
+ * rather than a stub — this is the only tier that puts the route's
+ * double-unsubscribe and the store's map-eviction rule in the same process.
+ *
+ * A browser closes an EventSource and opens another on the same job constantly:
+ * a reload mid-capture, a second tab, and (for Vimeo) a second paste of a url
+ * already being captured. Measured before the fix, the second stream received
+ * its state replay and then nothing at all, for every capture vertical.
+ */
+async function readFrames(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  until: (text: string) => boolean,
+  budgetMs: number,
+): Promise<string> {
+  const dec = new TextDecoder();
+  let text = "";
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (until(text)) return text;
+    const chunk = await Promise.race([
+      reader.read(),
+      Bun.sleep(200).then(() => "timeout" as const),
+    ]);
+    if (chunk === "timeout") continue;
+    if (chunk.done) break;
+    text += dec.decode(chunk.value);
+  }
+  return text;
+}
+
+test("stream: a reader that CLOSED does not silence the next reader of the same job", async () => {
+  const store = createJobStore<Status, Fields>({
+    subsystem: "test",
+    label: "Test",
+    initialStatus: "pending",
+  });
+  const app = new Hono();
+  registerSummaryVertical(app, CONFIG, {
+    apiBase: "/api/test",
+    collection: "test-summaries",
+    store,
+  });
+
+  // A REAL server, on an ephemeral port, and that is the load-bearing part.
+  //
+  // NOT because `app.request()` cannot deliver the abort — measured, a
+  // `reader.cancel()` on the response it returns DOES reach `stream.onAbort`.
+  // The reason is simpler and worse: the in-process form of this test passes
+  // against BOTH stores. Measured by mutating `subscribe`'s returned
+  // unsubscribe back to the unconditional `subscribers.delete(jobId)`: over
+  // `app.request()` all three assertions still pass (replay, re-attach, and the
+  // live delta after the stale unsubscribe fires), while over this socket the
+  // same mutant fails on `LIVE-DELTA` with an empty read. So the in-process
+  // form distinguishes nothing — it is not a weaker test, it is a test of
+  // nothing — and only the socket reproduces the ordering the browser produces.
+  //
+  // What it pins is the route + store COMBINATION: the route's `onAbort`
+  // unsubscribe plus its redundant post-loop one, against the store's rule that
+  // an unsubscribe evicts the map entry only when the entry is STILL its own
+  // set. The STORE half is pinned on its own in `job-store.test.ts` — so if the
+  // route's second `unsubscribe()` call is ever removed as redundant, this test
+  // may stop exercising the double-call and that store test is what keeps the
+  // rule covered. Do not delete it along with the call.
+  const server = Bun.serve({ port: 0, fetch: app.fetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const id = store.createJob({ videoId: "v1", title: "T", url: "https://example.com/v" });
+    store.appendText(id, "REPLAY");
+
+    const ctl = new AbortController();
+    const first = await fetch(`${base}/api/test/stream/${id}`, { signal: ctl.signal });
+    const r1 = first.body!.getReader();
+    expect(await readFrames(r1, (t) => t.includes("REPLAY"), 3000)).toContain("REPLAY");
+    // What `EventSource.close()` does to the server side of the connection.
+    ctl.abort();
+
+    // Immediately, the way the page reconnects. The route's stale unsubscribe
+    // runs again up to a second from now — after this subscription exists.
+    const second = await fetch(`${base}/api/test/stream/${id}`);
+    const r2 = second.body!.getReader();
+    expect(await readFrames(r2, (t) => t.includes("REPLAY"), 3000)).toContain("REPLAY");
+
+    // Past the aborted stream's post-loop unsubscribe (its `while` ticks at 1 s).
+    await Bun.sleep(1600);
+    store.appendText(id, "LIVE-DELTA");
+    store.updateStatus(id, "summarizing");
+
+    const live = await readFrames(r2, (t) => t.includes("summarizing"), 4000);
+    expect(live).toContain("LIVE-DELTA");
+    expect(live).toContain("summarizing");
+    await r2.cancel();
+  } finally {
+    server.stop(true);
+  }
+}, 20_000);

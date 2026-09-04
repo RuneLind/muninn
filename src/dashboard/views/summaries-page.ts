@@ -7,8 +7,9 @@ import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../../wiki/readonly.ts";
 import { clientDomainMapJson } from "../../summaries/domain.ts";
 import { getAuthorTierThresholds } from "../../summaries/author-scores.ts";
-import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript } from "./components/sum-submit-form.ts";
+import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript, captureUrlFormHtml } from "./components/sum-submit-form.ts";
 import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components/sum-job-card.ts";
+import { VIMEO_MAX_DURATION_SEC } from "../../vimeo/limits.ts";
 import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
 import { sumOutcomesStyles, sumOutcomesHtml, sumOutcomesScript } from "./components/sum-outcomes.ts";
 import { sumStatsStyles, sumStatsHtml, sumStatsScript } from "./components/sum-stats.ts";
@@ -175,6 +176,11 @@ export async function renderSummariesPage(): Promise<string> {
       <button class="paste-toggle" id="pasteToggleBtn" type="button" aria-expanded="false" aria-controls="pasteFormWrap">+ Paste article</button>
     </div>
 
+    <!-- Capture by URL — always visible, because Vimeo has no Chrome extension
+         and a link is its whole input. Sits between the head row (which carries
+         the "+ Paste article" toggle) and the collapsed paste form below. -->
+    ${captureUrlFormHtml()}
+
     <!-- Manual submit form (pasted article text; YouTube/X come from the Chrome
          extension) — collapsed behind the toggle above so the inbox leads. -->
     <div id="pasteFormWrap" hidden>${sumSubmitFormHtml()}</div>
@@ -216,6 +222,11 @@ export async function renderSummariesPage(): Promise<string> {
     const AUTHOR_TIERS = ${JSON.stringify(authorTiers)};
     // The wiki the doc panel's 🗑 Delete posts against (null ⇒ no button rendered).
     const DELETE_TARGET = ${JSON.stringify(deleteTarget)};
+    // The Vimeo capture cap, from the server constant the ROUTE enforces
+    // (src/vimeo/limits.ts). The job card derives both cap-naming sentences from
+    // it rather than spelling "3 h" — a raised cap changed the refusal and left
+    // the sentence claiming the old number.
+    const VIMEO_MAX_DURATION_SEC = ${JSON.stringify(VIMEO_MAX_DURATION_SEC)};
   </script>
   <script>
     ${helpers}
