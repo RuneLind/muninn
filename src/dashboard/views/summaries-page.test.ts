@@ -23,6 +23,8 @@ import { test, expect, describe, beforeAll } from "bun:test";
 import { renderSummariesPage } from "./summaries-page.ts";
 import { DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID } from "./components/doc-panel.ts";
 import { SHARE_DIALOG_ID } from "./components/wiki-share-dialog.ts";
+import { VIMEO_MAX_DURATION_SEC } from "../../vimeo/limits.ts";
+import { sumJobCardScript } from "./components/sum-job-card.ts";
 
 let html = "";
 // One render for the whole file: it runs a real `Bun.build` for each bundled
@@ -112,5 +114,24 @@ describe("renderSummariesPage — the share mount", () => {
     expect(html).toContain('"source":_shareDoc.source');
     expect(html).toContain('"docId":_shareDoc.docId');
     expect(html).toContain("A share is already running for this document.");
+  });
+});
+
+describe("summaries page: the Vimeo cap is injected, not spelled", () => {
+  /**
+   * The job card's two cap-naming sentences read a bare global. If the page
+   * stops emitting it the card throws a ReferenceError the moment a refusal
+   * arrives — a silent break, since nothing else on the page touches it.
+   */
+  test("declares VIMEO_MAX_DURATION_SEC with the SERVER's value", () => {
+    expect(html).toContain(`const VIMEO_MAX_DURATION_SEC = ${VIMEO_MAX_DURATION_SEC};`);
+    // …and the constant it names is the one the route enforces.
+    expect(VIMEO_MAX_DURATION_SEC).toBe(3 * 60 * 60);
+  });
+
+  test("the card script reads that global rather than a literal cap", () => {
+    expect(sumJobCardScript()).toContain("VIMEO_MAX_DURATION_SEC");
+    // The old spelling: the number as prose inside the sentences.
+    expect(sumJobCardScript()).not.toContain("the 3 h cap");
   });
 });

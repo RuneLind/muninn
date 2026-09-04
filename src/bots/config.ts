@@ -655,8 +655,31 @@ function validateWikiAutoCommitConfig(settings: Record<string, unknown>, botName
   }
 }
 
+/**
+ * The directory bot discovery walks — the checkout's `bots/` unless
+ * `MUNINN_BOTS_DIR` names another one.
+ *
+ * The override exists for TESTS that need a bot the process under test can
+ * discover. Without it the only way to give a spawned muninn a bot was to write
+ * one into the repo's own `bots/`, which is process-external state: a hard-killed
+ * run leaves it behind, and the next `bun run dev` discovers it — `bots[0]` is
+ * whatever `readdirSync` hands back first (it is NOT alphabetical), so
+ * `resolveSummarizerBot`/`resolveResearchBot` can land on a throwaway pointing at
+ * a dead port. Under parallel e2e workers, other specs' servers see it too.
+ *
+ * Read on every call rather than memoised at module load: a spawned server reads
+ * it once at boot, and a test that sets it per case must not be answered from a
+ * snapshot the first case took. It is in `AMBIENT_INSTANCE_ENV`, so no suite
+ * inherits a developer's value.
+ */
+export function resolveBotsDir(): string {
+  const override = (process.env.MUNINN_BOTS_DIR ?? "").trim();
+  if (override) return resolve(override);
+  return resolve(import.meta.dir, "../../bots");
+}
+
 function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
-  const botsDir = resolve(import.meta.dir, "../../bots");
+  const botsDir = resolveBotsDir();
 
   if (!existsSync(botsDir)) {
     log.warn("bots/ directory not found at {path}", { path: botsDir });

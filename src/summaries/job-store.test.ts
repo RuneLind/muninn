@@ -447,3 +447,62 @@ describe("createJobStore — attachRun", () => {
     expect(ring[0]!.inputTokens).toBeUndefined();
   });
 });
+
+describe("subscribe: one reader's unsubscribe is scoped to that reader", () => {
+  /**
+   * The SSE route calls its unsubscribe TWICE on every disconnect — once from
+   * `stream.onAbort`, once after its `while (alive)` loop exits, up to a second
+   * later. A second reader that arrived in that window created a NEW subscriber
+   * set under the same job id, and the stale closure's second call — seeing its
+   * own (now empty) set — deleted the map entry holding it. The new reader then
+   * received its state replay and not one live event.
+   */
+  test("a stale unsubscribe called twice does not unregister a LATER subscriber", () => {
+    const store = makeStore();
+    const id = store.createJob({ videoId: "v1", title: "T", url: "u" });
+
+    const first: string[] = [];
+    const second: string[] = [];
+    const unsubFirst = store.subscribe(id, (e) => first.push(e.type));
+    unsubFirst(); // the route's onAbort call
+    const unsubSecond = store.subscribe(id, (e) => second.push(e.type));
+    unsubFirst(); // the SAME route's post-loop call, up to a second later
+
+    store.appendText(id, "x");
+    store.updateStatus(id, "working");
+
+    expect(second).toEqual(["text_delta", "status"]);
+    expect(first).toEqual([]);
+    unsubSecond();
+  });
+
+  test("closing one of two live readers leaves the other receiving", () => {
+    const store = makeStore();
+    const id = store.createJob({ videoId: "v1", title: "T", url: "u" });
+    const a: string[] = [];
+    const b: string[] = [];
+    const unsubA = store.subscribe(id, (e) => a.push(e.type));
+    store.subscribe(id, (e) => b.push(e.type));
+
+    unsubA();
+    unsubA(); // idempotent — the route's second call
+    store.appendText(id, "x");
+
+    expect(a).toEqual([]);
+    expect(b).toEqual(["text_delta"]);
+  });
+
+  test("the second reader can still unsubscribe itself afterwards", () => {
+    const store = makeStore();
+    const id = store.createJob({ videoId: "v1", title: "T", url: "u" });
+    const got: string[] = [];
+    const unsubFirst = store.subscribe(id, () => {});
+    unsubFirst();
+    const unsubSecond = store.subscribe(id, (e) => got.push(e.type));
+    unsubFirst();
+    unsubSecond();
+
+    store.appendText(id, "x");
+    expect(got).toEqual([]);
+  });
+});

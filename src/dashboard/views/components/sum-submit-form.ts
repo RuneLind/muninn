@@ -111,7 +111,7 @@ export function sumSubmitFormStyles(): string {
 export function captureUrlFormHtml(): string {
   return `
     <div class="capture-url-form">
-      <input type="url" id="captureUrl" placeholder="Paste a Vimeo URL…" autocomplete="off" spellcheck="false" />
+      <input type="url" id="captureUrl" aria-label="Vimeo URL" placeholder="Paste a Vimeo URL…" autocomplete="off" spellcheck="false" />
       <button id="captureUrlBtn" type="button" onclick="submitCaptureUrlFromInput()">Summarize</button>
     </div>`;
 }
@@ -157,7 +157,13 @@ export function sumSubmitFormScript(): string {
         // alert, byte for byte: those verticals are captured with the extension
         // and there is nothing here to forward them to.
         if (detectCaptureProvider(text) === 'vimeo') {
-          await submitCaptureUrl(text, { clear: function() { textEl.value = ''; } });
+          // The button the reader actually pressed is this form's own, not the
+          // URL field's — the forward used to disable and relabel a button on
+          // the other side of the page while #submitBtn sat there looking idle.
+          await submitCaptureUrl(text, {
+            buttonId: 'submitBtn',
+            clear: function() { textEl.value = ''; },
+          });
           return;
         }
         alert('This looks like a bare link. YouTube and X posts are captured with the Muninn Chrome extension — open the page and click the extension. This form wants the pasted article text itself.');
@@ -232,6 +238,21 @@ export function sumSubmitFormScript(): string {
     }
 
     /**
+     * The submit buttons' resting labels, snapshotted ONCE at script init.
+     *
+     * Read at call time instead, a submit that starts while another is in flight
+     * captures "Starting..." and restores THAT in its \`finally\` — permanently,
+     * because nothing else ever writes the label back.
+     */
+    var CAPTURE_BUTTON_LABELS = {};
+    (function() {
+      ['captureUrlBtn', 'submitBtn'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) CAPTURE_BUTTON_LABELS[id] = el.textContent;
+      });
+    })();
+
+    /**
      * POST one url to the Vimeo capture route and render whatever comes back on
      * the job card — a streaming job, an attach to one already running, a
      * duplicate, or a refusal as a SENTENCE (see \`vimeoSentence\` in the job
@@ -239,12 +260,24 @@ export function sumSubmitFormScript(): string {
      *
      * \`opts.clear\` is called only on an answer that STARTED or ADOPTED
      * something: a refusal leaves the reader's text where they can fix it.
+     * \`opts.buttonId\` is the button the reader actually pressed (default: the
+     * URL field's own).
+     *
+     * ⚠️ Nothing here touches a LIVE stream. An answer that is not a fresh job
+     * is a banner when one is running (\`showCaptureOutcome\` decides that), and
+     * the reconnect below is skipped for the same reason — reconnecting to the
+     * job already streaming closed the working EventSource and opened a second
+     * one that received the state replay and then nothing at all.
      */
     async function submitCaptureUrl(url, opts) {
       var options = opts || {};
-      var btn = document.getElementById('captureUrlBtn');
-      var btnLabel = btn ? btn.textContent : '';
+      var btnId = options.buttonId || 'captureUrlBtn';
+      var btn = document.getElementById(btnId);
+      var btnLabel = CAPTURE_BUTTON_LABELS[btnId] || 'Summarize';
       if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+      // A refusal from the PREVIOUS paste is not an answer about this one, and it
+      // outlived the whole next request.
+      clearCaptureBanner();
       try {
         var res = await fetch('/api/vimeo/summarize', {
           method: 'POST',
@@ -278,20 +311,41 @@ export function sumSubmitFormScript(): string {
           return;
         }
 
-        // Both remaining answers carry a live job. Preserve the active tab hash
-        // (switchSection wrote it) so the rewrite doesn't yank the user off it.
-        history.replaceState(null, '', '/summaries?source=vimeo&job=' + data.job_id + location.hash);
+        // Every remaining answer claims to carry a job. Validated BEFORE the URL
+        // is rewritten: a 200 with neither \`duplicate\` nor \`job_id\` put
+        // \`?job=undefined\` in the address bar and opened a stream on
+        // \`/api/vimeo/stream/undefined\`.
+        if (typeof data.job_id !== 'string' || data.job_id === '') {
+          showCaptureOutcome(url, {
+            status: 'error',
+            sentence: 'The capture route answered something this page cannot read',
+          });
+          return;
+        }
+
+        var live = captureStreamIsLive();
         if (data.in_flight) {
           showCaptureOutcome(url, {
             status: 'pending',
             tone: 'notice',
             jobId: data.job_id,
+            title: data.title,
             sentence: vimeoSentence('in_flight'),
           });
+          if (!live) {
+            // Preserve the active tab hash (switchSection wrote it) so the
+            // rewrite doesn't yank the user off it.
+            history.replaceState(null, '', '/summaries?source=vimeo&job=' + data.job_id + location.hash);
+            connectSSE(data.job_id, 'vimeo');
+          }
         } else {
-          showJob(data.job_id, url, url, 'vimeo');
+          history.replaceState(null, '', '/summaries?source=vimeo&job=' + data.job_id + location.hash);
+          // The route's own title, so the card is labelled with the video's name
+          // from the first frame rather than with the pasted address until a
+          // reload replaces it.
+          showJob(data.job_id, data.title || url, url, 'vimeo');
+          connectSSE(data.job_id, 'vimeo');
         }
-        connectSSE(data.job_id, 'vimeo');
         if (options.clear) options.clear();
       } catch (err) {
         showCaptureOutcome(url, { status: 'error', sentence: 'Request failed: ' + err.message });

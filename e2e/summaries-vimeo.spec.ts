@@ -17,6 +17,9 @@
  *      extension alert, byte for byte, and POSTs nothing to the capture route.
  *   5. A Vimeo link pasted into that same textarea is forwarded to the capture —
  *      pasting into the wrong box works.
+ *   6. A paste that lands WHILE a capture is streaming is a banner and nothing
+ *      else: the running card is not repainted and its stream is not re-opened,
+ *      so the whole summary still arrives.
  *
  * NO MODEL SPEND, NO CHROMIUM, NO LIVE VIMEO. Three seams do it, and all three
  * are shipped code rather than test-only branches:
@@ -29,8 +32,9 @@
  *     model-free summarize: the connector seam PR 2's unit tests use
  *     (`oneShot` / `mock.module`) does not exist in a spawned process, jarvis is
  *     `claude-sdk` and CI has no Anthropic credential at all, so a real call
- *     would not merely be slow — it would fail on CI. The bot folder is removed
- *     in `afterAll`; a leftover is inert-ish by construction (see BOT_DIR).
+ *     would not merely be slow — it would fail on CI. The bot lives in an OS
+ *     TEMP directory the server is pointed at with `MUNINN_BOTS_DIR`; nothing is
+ *     ever written under the repo's own `bots/` (see the BOT block below).
  *
  * ONE fake `node:http` server plays all three remote halves — Vimeo's oEmbed
  * endpoint, huginn, and the OpenAI-compatible model API — on different paths.
@@ -43,7 +47,8 @@
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
@@ -61,16 +66,23 @@ const FIXTURE = path.join(REPO_ROOT, "src/vimeo/fixtures/totto-trust-but-verify.
 /**
  * A throwaway summarizer bot, created and removed by this spec.
  *
- * `bots/*` is gitignored apart from jarvis, so it never dirties the tree. Two
- * things bound the blast radius of a leftover after a hard kill: the name sorts
- * LAST (`resolveSummarizerBot`'s no-env fallback is the FIRST discovered bot),
- * and it carries no platform token, so `discoverBots()` — the runtime that opens
- * Telegram/Slack connections — skips it entirely. It is still visible to
- * `discoverAllBots()`, which is exactly why it is removed in `afterAll` and
- * again before each run.
+ * It lives in a fresh OS temp directory the spawned server is pointed at with
+ * `MUNINN_BOTS_DIR`, and NOTHING is ever written under the repo's own `bots/`.
+ *
+ * That directory is process-external state shared with the developer's machine,
+ * and the two bounds first claimed for a leftover there are both false:
+ * `discoverBotsInternal` iterates raw `readdirSync` order, which is not
+ * alphabetical (measured on this volume), so "the name sorts LAST" does not hold
+ * and `resolveSummarizerBot`'s no-env fallback — the FIRST discovered bot — could
+ * land on a dead `127.0.0.1:<port>`; and being invisible to `discoverBots()` is
+ * no help at all, because every capture path resolves through
+ * `discoverAllBots()`. Under local parallel workers, other specs' servers
+ * discovered it too.
+ *
+ * The temp root is created per RUN and removed in `afterAll` and on a signal.
  */
 const BOT = "zze2evimeo";
-const BOT_DIR = path.join(REPO_ROOT, "bots", BOT);
+let botsRoot: string | undefined;
 
 /** The happy-path video: oEmbed answers, the fixture stands in for its captions. */
 const VIDEO_ID = "1223358361";
@@ -78,6 +90,9 @@ const VIDEO_URL = `https://vimeo.com/${VIDEO_ID}`;
 /** A second capture, for the "pasted into the article box" case. */
 const OTHER_ID = "1223642971";
 const OTHER_URL = `https://vimeo.com/${OTHER_ID}`;
+/** A third capture, held open mid-stream so a second paste can land on it. */
+const HELD_ID = "1223777001";
+const HELD_URL = `https://vimeo.com/${HELD_ID}`;
 /** oEmbed 404s on this one — "not public". */
 const PRIVATE_URL = "https://vimeo.com/1";
 /** 20 000 s of video — past the 3 h cap. */
@@ -94,6 +109,24 @@ let fake: Server | undefined;
 let ingests: unknown[] = [];
 /** How many model calls were made. */
 let modelCalls = 0;
+/**
+ * Every path the fake was asked for that it does not play a role for.
+ *
+ * The catch-all used to answer `200 {}`, which makes the fake agree with any
+ * request at all: a capture that called a huginn endpoint this file never
+ * modelled got a plausible empty answer instead of a failure, so the spec could
+ * pass while asserting nothing about that call. It 404s now, and the list is
+ * asserted empty.
+ */
+let unexpected: string[] = [];
+/**
+ * When set, the fake's completion PAUSES between its two content chunks until
+ * the spec resolves it. That is what makes "a paste that lands mid-stream" a
+ * deterministic state rather than a race: the card is parked in `Summarizing`
+ * with the first chunk already accumulated.
+ */
+let holdModel: Promise<void> | null = null;
+let releaseModel: (() => void) | null = null;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
@@ -111,6 +144,9 @@ function oembedFor(id: string): Record<string, unknown> | null {
   if (id === OTHER_ID) {
     return { title: "E2E talk two", author_name: "x", duration: 120, upload_date: "2026-09-04 11:00:00" };
   }
+  if (id === HELD_ID) {
+    return { title: "E2E held talk", author_name: "x", duration: 140, upload_date: "2026-09-04 13:00:00" };
+  }
   if (id === "9999999999") {
     return { title: "E2E long talk", author_name: "x", duration: 20000, upload_date: "2026-09-04 12:00:00" };
   }
@@ -127,6 +163,7 @@ async function writeCompletion(res: ServerResponse): Promise<void> {
   // A real summarize is minutes; this delay is what makes `Summarizing` an
   // observable state on the card rather than a frame nobody can catch.
   await new Promise((r) => setTimeout(r, 600));
+  if (holdModel) await holdModel;
   res.write(chunk({ content: `## Key takeaways\n\n${SUMMARY_LINE}` }));
   res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
   res.write("data: [DONE]\n\n");
@@ -171,22 +208,42 @@ async function startFake(): Promise<Server> {
         return json({ documents: [] });
       }
       if (p === "/api/search") return json({ results: [] });
-      return json({});
+      // The page's own knowledge-API banner probe, proxied through
+      // `/api/search/health` on every /summaries load. It is a real call this
+      // file makes; the 404 catch-all below is what surfaced it.
+      if (p === "/health") return json({ status: "ok" });
+
+      unexpected.push(`${req.method ?? "GET"} ${p}`);
+      return json({ error: "unexpected path", path: p }, 404);
     })();
   });
   await new Promise<void>((resolve) => srv.listen(FAKE_PORT, "127.0.0.1", resolve));
   return srv;
 }
 
-function writeBot(): void {
-  rmSync(BOT_DIR, { recursive: true, force: true });
-  mkdirSync(BOT_DIR, { recursive: true });
-  writeFileSync(path.join(BOT_DIR, "CLAUDE.md"), "# e2e summarizer\n\nCreated by e2e/summaries-vimeo.spec.ts.\n");
+/** Create the throwaway bot in a fresh temp root and return that root. */
+function writeBot(): string {
+  const root = mkdtempSync(path.join(tmpdir(), "muninn-e2e-vimeo-bots-"));
+  const dir = path.join(root, BOT);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, "CLAUDE.md"), "# e2e summarizer\n\nCreated by e2e/summaries-vimeo.spec.ts.\n");
   writeFileSync(
-    path.join(BOT_DIR, "config.json"),
+    path.join(dir, "config.json"),
     JSON.stringify({ connector: "openai-compat", model: "e2e-fake", baseUrl: `${FAKE}/v1`, timeoutMs: 60000 }, null, 2),
   );
+  botsRoot = root;
+  return root;
 }
+
+function removeBotsRoot(): void {
+  if (botsRoot) rmSync(botsRoot, { recursive: true, force: true });
+  botsRoot = undefined;
+}
+
+// A hard kill (Ctrl-C, a CI cancel) skips `afterAll`. The temp root is outside
+// the repo either way, but leaving one per aborted run is still litter.
+process.once("SIGINT", removeBotsRoot);
+process.once("SIGTERM", removeBotsRoot);
 
 /** The statuses the card's badge went through, in order, without duplicates. */
 async function installStatusRecorder(page: import("@playwright/test").Page): Promise<void> {
@@ -209,8 +266,8 @@ async function jobCount(request: import("@playwright/test").APIRequestContext): 
 }
 
 test.beforeAll(async () => {
-  writeBot();
   fake = await startFake();
+  const root = writeBot();
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -225,6 +282,12 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
+      // The bot roster this server discovers — a temp directory holding exactly
+      // the throwaway bot, so nothing under the repo's `bots/` is written or
+      // read. In `AMBIENT_INSTANCE_ENV`, hence after the `e2eEnv()` spread.
+      MUNINN_BOTS_DIR: root,
+      // Explicit regardless: `resolveSummarizerBot`'s fallback is positional,
+      // and a role_overrides row in the test DB would otherwise re-point it.
       SUMMARIZER_BOT: BOT,
       KNOWLEDGE_API_URL: FAKE,
     },
@@ -244,7 +307,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   fake?.close();
-  rmSync(BOT_DIR, { recursive: true, force: true });
+  removeBotsRoot();
 });
 
 // The dedup case reads state the capture case created, so a failure of the first
@@ -284,13 +347,15 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     expect(statuses.indexOf("Summarizing")).toBeLessThan(statuses.indexOf("Indexing"));
 
     expect(posts).toHaveLength(1);
+    // The fake model API really answered this capture — i.e. the throwaway bot
+    // is what ran, so "no model spend" in the next case means something.
+    expect(modelCalls).toBeGreaterThan(0);
     expect(ingests).toHaveLength(1);
     expect(ingests[0]).toMatchObject({ url: VIDEO_URL, caption_kind: "stub", duration_sec: 100 });
     expect(await jobCount(page.request)).toBe(1);
   });
 
   test("pasting the same URL again says 'Already captured' and starts nothing", async ({ page }) => {
-    const modelCallsBefore = modelCalls;
     const jobsBefore = await jobCount(page.request);
 
     await page.goto(`${BASE}/summaries`);
@@ -303,11 +368,14 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await expect(banner.locator("a")).toHaveAttribute("href", /doc=/);
     await expect(page.locator("#statusBadge .status-text")).toHaveText("Already captured");
 
-    // Nothing ran: no new job, no second harvest, no second model call. The
-    // fake's listing is still EMPTY, so this answer came from the route's
-    // recently-ingested map — dedup state 3, the reindex window.
+    // Nothing ran: no new job, no second harvest. The fake's listing is still
+    // EMPTY, so this answer came from the route's recently-ingested map — dedup
+    // state 3, the reindex window.
+    //
+    // `jobCount` is the property, not the model-call count: a capture that DID
+    // start would be a job here, while its model call lands whenever the
+    // harvest finishes and a `modelCalls` read is a race against it.
     expect(await jobCount(page.request)).toBe(jobsBefore);
-    expect(modelCalls).toBe(modelCallsBefore);
     expect(ingests).toHaveLength(1);
   });
 
@@ -373,5 +441,46 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await expect(page.locator("#summaryArea")).toContainText(SUMMARY_LINE);
     await expect(page.locator("#articleText")).toHaveValue("");
     expect(dialogs).toEqual([]);
+  });
+
+  test("a paste that lands mid-capture is a banner only — the running card keeps streaming", async ({ page }) => {
+    test.setTimeout(120_000);
+    // The model call parks between its two chunks until this resolves, so the
+    // card below really is mid-stream rather than racing one.
+    holdModel = new Promise<void>((resolve) => { releaseModel = resolve; });
+
+    await page.goto(`${BASE}/summaries`);
+    await page.locator("#captureUrl").fill(HELD_URL);
+    await page.locator("#captureUrlBtn").click();
+
+    // Parked mid-stream: the first chunk is on the card and the second is held.
+    await expect(page.locator("#statusBadge .status-text")).toHaveText("Summarizing", { timeout: 60_000 });
+    await expect(page.locator("#summaryArea")).toContainText("CATEGORY: tech");
+
+    // The same url again, while that capture is streaming. The route answers
+    // `in_flight`; the page must render it as the banner and touch NOTHING else.
+    await page.locator("#captureUrl").fill(HELD_URL);
+    await page.locator("#captureUrlBtn").click();
+    await expect(page.locator("#errorBanner")).toContainText("Already being captured");
+    await expect(page.locator("#errorBanner")).toHaveClass(/notice/);
+    // Not repainted: the badge still belongs to the running job, and the title is
+    // the video's, not the pasted address.
+    await expect(page.locator("#statusBadge .status-text")).toHaveText("Summarizing");
+    await expect(page.locator("#jobTitle")).toHaveText("E2E held talk");
+    await expect(page.locator("#summaryArea")).toContainText("CATEGORY: tech");
+
+    releaseModel!();
+    holdModel = null;
+
+    // The stream was never re-opened, so the rest of the summary still arrives —
+    // and the WHOLE text is there, not just the part that came after the paste.
+    await expect(page.locator("#statusBadge .status-text")).toHaveText("Complete", { timeout: 60_000 });
+    await expect(page.locator("#summaryArea")).toContainText("CATEGORY: tech");
+    await expect(page.locator("#summaryArea")).toContainText(SUMMARY_LINE);
+    // A completed capture does not sit under "Already being captured".
+    await expect(page.locator("#errorBanner")).not.toHaveClass(/visible/);
+
+    // Nothing in this file asked the fake for a path it does not play.
+    expect(unexpected).toEqual([]);
   });
 });

@@ -45,8 +45,12 @@ export const VIMEO_COLLECTION = getSummarySource("vimeo")!.collection;
  * Enforced in the ROUTE (413), not here — the check needs oEmbed's duration,
  * which the route already has, and refusing before a job exists is what keeps an
  * over-cap paste from leaving an unsettled row at the top of /summaries.
+ *
+ * Re-exported from `./limits.ts`, which owns it: `/summaries` injects the same
+ * number into the page and must not import this module (playwright-core and the
+ * whole harvest pipeline) to read one integer.
  */
-export const VIMEO_MAX_DURATION_SEC = 3 * 60 * 60;
+export { VIMEO_MAX_DURATION_SEC } from "./limits.ts";
 
 /**
  * A conference talk's summarize call gets the 600 s floor `summarizeTimeoutFor`

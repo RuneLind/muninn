@@ -2,7 +2,8 @@ import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { createJob, getJob, getRecentJobs, subscribe } from "../../vimeo/state.ts";
-import { summarizeVimeo, VIMEO_MAX_DURATION_SEC } from "../../vimeo/summarizer.ts";
+import { summarizeVimeo } from "../../vimeo/summarizer.ts";
+import { VIMEO_MAX_DURATION_SEC } from "../../vimeo/limits.ts";
 import { canonicalVimeoUrl, resolveVimeoRef } from "../../vimeo/url.ts";
 import { fetchVimeoOembed, isNotPublic } from "../../vimeo/oembed.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
@@ -294,6 +295,18 @@ export function registerVimeoRoutes(
       );
     }
 
+    const canonicalUrl = canonicalVimeoUrl(ref.id);
+    // oEmbed can answer 200 with no title (`toMetadata` degrades every field to
+    // ""), and huginn derives the document's FILENAME from the title — an empty
+    // one would collide with every other title-less capture (huginn suffixes
+    // `(2)`, so the corpus would carry near-identical rows nothing can tell
+    // apart). The url is a usable, unique stand-in.
+    //
+    // Resolved HERE, above the in-flight wait, because the `in_flight` answer
+    // below needs a title too and would otherwise be the one answer that has
+    // none.
+    const title = meta.title || canonicalUrl;
+
     // A capture of this video already running in this process is the other half
     // of the duplicate check — the stored-document half cannot see it, because
     // nothing is stored until the job finishes.
@@ -304,6 +317,10 @@ export function registerVimeoRoutes(
         return c.json({
           in_flight: true,
           job_id: running.jobId,
+          // The RUNNING job's own title, so a second paste attaching to it
+          // labels the card the way the first paste did. `?? title` covers the
+          // job having been reaped between the claim and this read.
+          title: getJob(running.jobId)?.title ?? title,
           dashboard_url: `/summaries?source=vimeo&job=${running.jobId}`,
         });
       }
@@ -320,14 +337,6 @@ export function registerVimeoRoutes(
       if (next === running) break;
       running = next;
     }
-
-    const canonicalUrl = canonicalVimeoUrl(ref.id);
-    // oEmbed can answer 200 with no title (`toMetadata` degrades every field to
-    // ""), and huginn derives the document's FILENAME from the title — an empty
-    // one would collide with every other title-less capture (huginn suffixes
-    // `(2)`, so the corpus would carry near-identical rows nothing can tell
-    // apart). The url is a usable, unique stand-in.
-    const title = meta.title || canonicalUrl;
 
     const flight = claimVideo(ref.id);
     let started = false;
@@ -401,7 +410,11 @@ export function registerVimeoRoutes(
         })
         .finally(() => releaseVideo(ref.id, flight));
 
-      return c.json({ job_id: jobId, dashboard_url: `/summaries?source=vimeo&job=${jobId}` });
+      // `title` rides along so the card is labelled with the video's name from
+      // the first frame. Without it the page had the pasted URL and nothing
+      // else, so a capture ran for minutes under a title a RELOAD then replaced
+      // with the real one.
+      return c.json({ job_id: jobId, title, dashboard_url: `/summaries?source=vimeo&job=${jobId}` });
     } finally {
       // Every early return under the claim gives it back here; a started capture
       // keeps it until the job settles. Without this one 500 would lock that

@@ -10,6 +10,7 @@ the UI entry — the URL field on `/summaries`.
 | `oembed.ts` | `fetchVimeoOembed` — title/author/duration/upload date/thumbnail with **no browser** |
 | `vtt.ts` | `parseVttCues`, `vttToSegments`, `segmentsToMarkdown`, `detectCaptionKind` — pure |
 | `captions.ts` | `harvestVimeoCaptions` (headless Chromium), `downloadVtt` (host-pinned), `chooseTrack` (pure) |
+| `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · summarizing · ingesting · complete · error` |
 | `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft |
 | `fixtures/totto-trust-but-verify.vtt` | Real auto-captions from a public JavaZone talk: 63 KB, 928 cues, 53 min |
@@ -200,6 +201,7 @@ spell the same word.
 | 422 `not_public` | Vimeo says this video is not public |
 | 422 `duration_unknown` | Vimeo did not report a duration, so the 3 h cap cannot be checked |
 | 413 `too_long` | Longer than the 3 h cap (Xh Ym) — derived from the reported `durationSec` |
+
 | 502 `oembed_failed` | Vimeo did not answer |
 | 200 `duplicate` | Already captured — plus a link to `dashboard_url` |
 | 200 `in_flight` | Already being captured — plus an attach to the running job |
@@ -218,11 +220,51 @@ stylesheet rule, so the red border survived the tone swap.
 "Already captured" without borrowing `complete`, which promises a summary this
 card is not going to show.
 
+**The two cap sentences name the SERVER's number, never a literal.** The page
+injects `VIMEO_MAX_DURATION_SEC` from `src/vimeo/limits.ts` and the card derives
+its label from that (falling back to the `maxSec` the 413 body reports, which is
+the same constant); raising the cap used to change the refusal and leave the
+sentence claiming the old number. The measurement in `too_long` rounds to the
+nearest minute of the WHOLE duration and reads the hours off THAT — rounding the
+remainder instead rendered 14 390 s as **"3h 60m"**, because 3 590 s rounds to 60
+minutes and 60 is not a minute count. It reads "4h 0m".
+
+**An answer that is not a fresh job never repaints a card with a LIVE stream.**
+`showCaptureOutcome` renders the banner (with its tone) and returns; only when
+nothing is streaming does it also retitle the card, move the badge and replace
+the summary area. Measured before the guard: paste a second link mid-capture,
+take the refusal, and twelve seconds later the FIRST job's summary streamed into
+a card titled with the url that had failed, under an Error badge, starting
+mid-word — `showJob` zeroes `accumulatedText`, so only the tail arrived. The form
+half is the same rule: on `in_flight` for a job already streaming it does NOT
+call `connectSSE` again. That reconnect closed the working EventSource and opened
+a second one which got the state replay and then nothing at all — see the
+subscribe rule in `src/summaries/job-store.ts`, whose stale unsubscribe was
+evicting it.
+
+**The banner is cleared when a submit starts and when a job completes.** It is
+one element carrying answers about DIFFERENT pastes, so a stale refusal used to
+stay on screen for the whole next request, and a capture finished with "Already
+being captured" still under it. `showJob` clears both classes (`visible` and
+`notice`), not just the first.
+
+**The route sends `title` with both job-carrying answers.** A fresh job gets the
+oEmbed title (or the canonical url, never `""`); an `in_flight` answer gets the
+RUNNING job's title, which is the one the card is already showing. Without it the
+card wore the pasted address for the whole capture and a reload replaced it.
+
+**The card's title only becomes an anchor for an `http(s)` url.** `esc` escapes
+the attribute and says nothing about the scheme, and one caller passes the
+reader's own paste — so `javascript:…` was a live href on an operator page.
+
 End-to-end acceptance is `e2e/summaries-vimeo.spec.ts`: the harvest is the
 `VIMEO_HARVEST_STUB` fixture, oEmbed is a local fake over `VIMEO_OEMBED_BASE`,
 and the summarize step runs against a throwaway `openai-compat` bot the spec
 creates and points at the same fake — so the whole walk to `complete` costs no
-model call and no Chromium.
+model call and no Chromium. That bot lives in an OS **temp** directory the
+spawned server is pointed at with `MUNINN_BOTS_DIR`; nothing is written under the
+repo's `bots/`, which is state the developer's own `bun run dev` reads and where
+discovery order is raw `readdirSync`, not alphabetical.
 
 ## Why a headless browser
 

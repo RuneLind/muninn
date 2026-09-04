@@ -49,6 +49,16 @@ interface Harness {
   articleValue: () => string;
   setUrl: (v: string) => void;
   setArticle: (v: string) => void;
+  /** Live-ness of the job card's stream, as the script sees it. */
+  setStreamLive: (live: boolean) => void;
+  /** How many times the script cleared the card's banner. */
+  bannerClears: () => number;
+  /** The disabled flag + label of one submit button, right now. */
+  button: (id: string) => { disabled: boolean; label: string };
+  /** The label a button carried while a submit was in flight. */
+  labelDuring: (id: string) => string | undefined;
+  /** Overwrite a button's label after init, the way an in-flight submit does. */
+  setTransientLabel: (id: string, label: string) => void;
   submitCaptureUrlFromInput: () => Promise<void>;
   submitArticle: () => Promise<void>;
   detectCaptureProvider: (url: unknown) => string | null;
@@ -80,6 +90,9 @@ function harness(response: { status: number; body: unknown } | { throws: true })
     textContent: "Summarize",
     addEventListener() {},
   });
+  let streamLive = false;
+  let bannerClears = 0;
+  const labelDuring: Record<string, string> = {};
   const nodes: Record<string, ReturnType<typeof element>> = {};
   const doc = {
     getElementById(id: string) {
@@ -96,6 +109,12 @@ function harness(response: { status: number; body: unknown } | { throws: true })
         method: init?.method ?? "GET",
         body: init?.body ? JSON.parse(init.body) : undefined,
       });
+      // Sampled WHILE the request is in flight — the only moment the "Starting…"
+      // label and the disabled flag are observable.
+      for (const id of ["captureUrlBtn", "submitBtn"]) {
+        const el = nodes[id];
+        if (el) labelDuring[id] = el.textContent;
+      }
       if ("throws" in response) throw new Error("network down");
       return {
         ok: response.status >= 200 && response.status < 300,
@@ -111,6 +130,9 @@ function harness(response: { status: number; body: unknown } | { throws: true })
     showCaptureOutcome: (url: string, opts: Record<string, unknown>) => outcomes.push({ url, opts }),
     // The job card owns the sentence map; here it only has to be callable.
     vimeoSentence: (code: string) => (code ? `sentence:${code}` : null),
+    // The job card owns the banner and the stream; the form only asks.
+    clearCaptureBanner: () => { bannerClears += 1; },
+    captureStreamIsLive: () => streamLive,
     showDuplicateBanner: () => {},
     openSummaryDoc: () => {},
   };
@@ -125,6 +147,8 @@ function harness(response: { status: number; body: unknown } | { throws: true })
     "var connectSSE = ctx.connectSSE;",
     "var showCaptureOutcome = ctx.showCaptureOutcome;",
     "var vimeoSentence = ctx.vimeoSentence;",
+    "var clearCaptureBanner = ctx.clearCaptureBanner;",
+    "var captureStreamIsLive = ctx.captureStreamIsLive;",
     "var showDuplicateBanner = ctx.showDuplicateBanner;",
     "var openSummaryDoc = ctx.openSummaryDoc;",
   ].join("\n");
@@ -153,6 +177,21 @@ function harness(response: { status: number; body: unknown } | { throws: true })
     },
     setArticle: (v: string) => {
       values.articleText = v;
+    },
+    setStreamLive: (live: boolean) => {
+      streamLive = live;
+    },
+    bannerClears: () => bannerClears,
+    button: (id: string) => ({
+      disabled: nodes[id]?.disabled ?? false,
+      label: nodes[id]?.textContent ?? "",
+    }),
+    labelDuring: (id: string) => labelDuring[id],
+    // `doc.getElementById`, not a `nodes[id]` read: the node is created lazily,
+    // so a bare lookup is a silent no-op on any script that has not touched this
+    // button yet — which is exactly the script this test exists to fail against.
+    setTransientLabel: (id: string, label: string) => {
+      doc.getElementById(id).textContent = label;
     },
     ...made,
   };
@@ -319,5 +358,161 @@ describe("sum-submit-form: markup", () => {
     expect(html).toContain('type="url"');
     // The paste form is a separate, collapsed affordance and keeps its own ids.
     expect(sumSubmitFormHtml()).toContain('id="articleText"');
+  });
+});
+
+describe("sum-submit-form: an answer that lands while a capture is STREAMING", () => {
+  /**
+   * The `in_flight` answer names the job the card is ALREADY streaming. The page
+   * used to reconnect to it: the working EventSource was closed and a second one
+   * opened on the same url, which received the state replay and then not one
+   * live event — measured twice in a browser, the badge stuck on `Summarizing`
+   * with 2969 of 9560 characters on screen.
+   */
+  test("does not re-open the stream of the job already running", async () => {
+    const h = harness({ status: 200, body: { in_flight: true, job_id: "job-9" } });
+    h.setStreamLive(true);
+    h.setUrl("https://vimeo.com/1223358361");
+    await h.submitCaptureUrlFromInput();
+
+    expect(h.connected).toEqual([]);
+    // …and the address bar is not rewritten either: the card still belongs to
+    // the running job, so the `?job=` it carries is already right.
+    expect(h.replacedUrls).toEqual([]);
+    // The reader still gets told what happened.
+    expect(h.outcomes[0]!.opts).toMatchObject({ tone: "notice", sentence: "sentence:in_flight" });
+  });
+
+  test("with nothing streaming it DOES attach, which is the reload path", async () => {
+    const h = harness({ status: 200, body: { in_flight: true, job_id: "job-9" } });
+    h.setStreamLive(false);
+    h.setUrl("https://vimeo.com/1223358361");
+    await h.submitCaptureUrlFromInput();
+
+    expect(h.connected).toEqual([{ jobId: "job-9", source: "vimeo" }]);
+    expect(h.replacedUrls).toEqual(["/summaries?source=vimeo&job=job-9"]);
+  });
+});
+
+describe("sum-submit-form: a 200 whose shape is not an answer", () => {
+  /**
+   * The URL was rewritten and the stream opened BEFORE `job_id` was looked at,
+   * so a 200 carrying neither `duplicate` nor `job_id` put `?job=undefined` in
+   * the address bar and opened `/api/vimeo/stream/undefined`.
+   */
+  test("is a refusal sentence, and rewrites nothing", async () => {
+    const h = harness({ status: 200, body: {} });
+    h.setUrl("https://vimeo.com/1223358361");
+    await h.submitCaptureUrlFromInput();
+
+    expect(h.replacedUrls).toEqual([]);
+    expect(h.connected).toEqual([]);
+    expect(h.shownJobs).toEqual([]);
+    expect(h.outcomes).toHaveLength(1);
+    expect(h.outcomes[0]!.opts.status).toBe("error");
+    expect(String(h.outcomes[0]!.opts.sentence)).toContain("cannot read");
+    // Nothing was started, so the text stays where it can be fixed.
+    expect(h.urlValue()).toBe("https://vimeo.com/1223358361");
+  });
+
+  test("a job_id that is not a string is refused the same way", async () => {
+    const h = harness({ status: 200, body: { job_id: 42 } });
+    h.setUrl("https://vimeo.com/1223358361");
+    await h.submitCaptureUrlFromInput();
+    expect(h.replacedUrls).toEqual([]);
+    expect(h.connected).toEqual([]);
+  });
+});
+
+describe("sum-submit-form: the card's title comes from the route", () => {
+  test("a fresh job is titled with the video's name, not the pasted address", async () => {
+    const h = harness({ status: 200, body: { job_id: "job-1", title: "Trust, but verify" } });
+    h.setUrl("https://vimeo.com/1223358361");
+    await h.submitCaptureUrlFromInput();
+
+    expect(h.shownJobs).toEqual([
+      {
+        jobId: "job-1",
+        title: "Trust, but verify",
+        url: "https://vimeo.com/1223358361",
+        source: "vimeo",
+      },
+    ]);
+  });
+
+  test("an answer with no title still shows the url, rather than nothing", async () => {
+    const h = harness({ status: 200, body: { job_id: "job-1" } });
+    h.setUrl("https://vimeo.com/1223358361");
+    await h.submitCaptureUrlFromInput();
+    expect(h.shownJobs[0]!.title).toBe("https://vimeo.com/1223358361");
+  });
+
+  test("an in-flight attach carries the running job's title too", async () => {
+    const h = harness({ status: 200, body: { in_flight: true, job_id: "job-9", title: "The talk" } });
+    h.setUrl("https://vimeo.com/1223358361");
+    await h.submitCaptureUrlFromInput();
+    expect(h.outcomes[0]!.opts).toMatchObject({ title: "The talk" });
+  });
+});
+
+describe("sum-submit-form: the button the reader actually pressed", () => {
+  test("a Vimeo link in the ARTICLE box gives ITS button the feedback", async () => {
+    const h = harness({ status: 200, body: { job_id: "job-2" } });
+    h.setArticle("https://vimeo.com/1223358361");
+    await h.submitArticle();
+
+    expect(h.labelDuring("submitBtn")).toBe("Starting...");
+    // The URL field's button is on the other side of the page and was not
+    // pressed — disabling and relabelling it was feedback nobody was looking at.
+    expect(h.labelDuring("captureUrlBtn")).toBe("Summarize");
+    expect(h.button("submitBtn")).toEqual({ disabled: false, label: "Summarize" });
+  });
+
+  test("the URL field's own submit still drives the URL field's button", async () => {
+    const h = harness({ status: 200, body: { job_id: "job-1" } });
+    h.setUrl("https://vimeo.com/1223358361");
+    await h.submitCaptureUrlFromInput();
+    expect(h.labelDuring("captureUrlBtn")).toBe("Starting...");
+    expect(h.button("captureUrlBtn")).toEqual({ disabled: false, label: "Summarize" });
+  });
+
+  test("a label captured at INIT is what gets restored, never a transient one", async () => {
+    const h = harness({ status: 200, body: { job_id: "job-1" } });
+    // What a second submit sees when one is already in flight. Read at call time,
+    // this is what the finally block restored — permanently.
+    h.setUrl("https://vimeo.com/1223358361");
+    h.setTransientLabel("captureUrlBtn", "Starting...");
+    // The instrument really applied — a lazily-created stub node made this a
+    // silent no-op once, and the test passed against the code it should fail on.
+    expect(h.button("captureUrlBtn").label).toBe("Starting...");
+    await h.submitCaptureUrlFromInput();
+    expect(h.button("captureUrlBtn").label).toBe("Summarize");
+  });
+});
+
+describe("sum-submit-form: the banner does not outlive the request it belongs to", () => {
+  test("a submit STARTS by clearing whatever the last answer left there", async () => {
+    const h = harness({ status: 422, body: { error: "not_public" } });
+    h.setUrl("https://vimeo.com/1");
+    await h.submitCaptureUrlFromInput();
+    expect(h.bannerClears()).toBe(1);
+
+    await h.submitCaptureUrlFromInput();
+    // Cleared again the moment the second request went out — the stale refusal
+    // used to stay on screen for the whole of it.
+    expect(h.bannerClears()).toBe(2);
+  });
+
+  test("the forward from the article box clears it too", async () => {
+    const h = harness({ status: 200, body: { job_id: "job-2" } });
+    h.setArticle("https://vimeo.com/1223358361");
+    await h.submitArticle();
+    expect(h.bannerClears()).toBe(1);
+  });
+});
+
+describe("sum-submit-form: markup, accessibility", () => {
+  test("the URL field has an accessible name", () => {
+    expect(captureUrlFormHtml()).toContain('aria-label="Vimeo URL"');
   });
 });

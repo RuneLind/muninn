@@ -1,0 +1,90 @@
+import { test, expect, describe, afterEach } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { discoverAllBots, resolveBotsDir } from "./config.ts";
+import { AMBIENT_INSTANCE_ENV } from "../test/ambient-env.ts";
+
+/**
+ * `MUNINN_BOTS_DIR` — the seam that lets a TEST give a process a bot roster
+ * without writing into the repo's own `bots/`.
+ *
+ * That directory is process-external state shared with the developer's machine:
+ * a spec that creates a bot there and is hard-killed leaves it behind, and the
+ * next `bun run dev` discovers it. There is no ordering to hide behind —
+ * `discoverBotsInternal` iterates raw `readdirSync` order — so
+ * `resolveSummarizerBot`'s no-env fallback (the FIRST discovered bot) can land
+ * on a throwaway pointing at a dead port.
+ */
+
+const created: string[] = [];
+
+function tempBotsRoot(botName: string): string {
+  const root = mkdtempSync(join(tmpdir(), "muninn-bots-dir-test-"));
+  created.push(root);
+  const dir = join(root, botName);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "CLAUDE.md"), `Persona for ${botName}`);
+  return root;
+}
+
+afterEach(() => {
+  delete process.env.MUNINN_BOTS_DIR;
+  while (created.length > 0) rmSync(created.pop()!, { recursive: true, force: true });
+});
+
+describe("resolveBotsDir", () => {
+  test("defaults to the checkout's own bots/", () => {
+    delete process.env.MUNINN_BOTS_DIR;
+    expect(resolveBotsDir()).toBe(resolve(import.meta.dir, "../../bots"));
+  });
+
+  test("honours an override, resolved to an absolute path", () => {
+    const root = tempBotsRoot("someBot");
+    process.env.MUNINN_BOTS_DIR = root;
+    expect(resolveBotsDir()).toBe(resolve(root));
+  });
+
+  test("an EMPTY value is the default, not the working directory", () => {
+    // `e2eEnv()` blanks every AMBIENT_INSTANCE_ENV name with an explicit "",
+    // because a delete lets the child fall back to its own `.env`. `resolve("")`
+    // is the CWD, so treating a blank as an override would point discovery at
+    // the repo root and find no bots at all.
+    process.env.MUNINN_BOTS_DIR = "";
+    expect(resolveBotsDir()).toBe(resolve(import.meta.dir, "../../bots"));
+    process.env.MUNINN_BOTS_DIR = "   ";
+    expect(resolveBotsDir()).toBe(resolve(import.meta.dir, "../../bots"));
+  });
+});
+
+describe("discovery reads the override", () => {
+  test("discoverAllBots finds EXACTLY the bots under MUNINN_BOTS_DIR", () => {
+    const root = tempBotsRoot("zztestonlybot");
+    process.env.MUNINN_BOTS_DIR = root;
+
+    const names = discoverAllBots().map((b) => b.name);
+    expect(names).toEqual(["zztestonlybot"]);
+    // The checkout's own roster is NOT merged in — the override replaces it, so
+    // a spec's throwaway cannot be picked over a real bot or vice versa.
+    expect(names).not.toContain("jarvis");
+    expect(discoverAllBots()[0]!.dir).toBe(join(root, "zztestonlybot"));
+  });
+
+  test("the override is re-read per call, not snapshotted at module load", () => {
+    // A spawned server reads it once at boot; a test that sets it per case must
+    // not be answered from the first case's snapshot.
+    const a = tempBotsRoot("zzfirstbot");
+    const b = tempBotsRoot("zzsecondbot");
+    process.env.MUNINN_BOTS_DIR = a;
+    expect(discoverAllBots().map((x) => x.name)).toEqual(["zzfirstbot"]);
+    process.env.MUNINN_BOTS_DIR = b;
+    expect(discoverAllBots().map((x) => x.name)).toEqual(["zzsecondbot"]);
+  });
+});
+
+test("MUNINN_BOTS_DIR is an instance-profile flag no suite may inherit", () => {
+  // Which bots this process has is the same class of value as which wikis it may
+  // write: an ambient one would give every bot-resolution suite a different
+  // roster on one machine than on the other.
+  expect(AMBIENT_INSTANCE_ENV).toContain("MUNINN_BOTS_DIR");
+});
