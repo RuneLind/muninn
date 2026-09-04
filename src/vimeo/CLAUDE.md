@@ -86,12 +86,12 @@ assertion — `await expect(call).rejects.toThrow()` — is not: it hangs the wh
 file, which is why the tests race the call against a 1 s settle instead.
 
 **When the budget is the binding clock, "private" and "slow" are the same
-evidence.** Each Playwright wait is handed `min(cap, what is left)`. A wait that
-got its FULL cap and still failed is classified (bot page / not public / no
-captions). A wait whose slice was CUT SHORT by the budget rejects at the deadline,
-and the harvest reports the BUDGET — with a message saying the video may also be
+evidence.** Each Playwright wait is handed `min(cap, what is left)`. The one
+predicate each catch evaluates is "has the deadline passed": if not, the failure
+is classified (bot page / not public / no captions); if so, the harvest reports
+the BUDGET — with a message saying the video may also be
 private (or caption-less) — rather than a verdict about a page it observed for
-less than its window. The same rule covers `goto` (a navigation cut short by the
+less than its window. The same predicate covers `goto` (a navigation cut short by the
 budget says the site may also be slow or unreachable). Measured on the live talk
 the whole harvest takes ~3–4 s, so with the default 60 s budget no wait is cut
 short unless the page itself stalls; the caps (goto 30 s, selector 20 s, tracks

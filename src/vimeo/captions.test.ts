@@ -317,6 +317,10 @@ interface FakePageSpec {
   gotoDelayMs?: number;
   /** `goto` burns its own timeout and rejects the way Playwright does. */
   stallGoto?: boolean;
+  /** `goto` rejects immediately with this message (a DNS/transport failure). */
+  gotoThrows?: string;
+  /** `launch` takes this long — spends budget before any navigation. */
+  launchDelayMs?: number;
   /**
    * A failing `waitForSelector`/`waitForFunction` BURNS the timeout it was given
    * before rejecting — which is what Playwright's real waits do, and the only
@@ -408,6 +412,7 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
         await Bun.sleep((opts?.timeout ?? 0) + 5);
         throw new Error(`goto: Timeout ${opts?.timeout}ms exceeded.`);
       }
+      if (spec.gotoThrows) throw new Error(spec.gotoThrows);
       return null;
     },
     async evaluate(fn: (arg?: unknown) => unknown, arg?: unknown) {
@@ -446,7 +451,12 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
   };
 
   return {
-    launcher: { launch: async () => browser } as unknown as VimeoBrowserLauncher,
+    launcher: {
+      launch: async () => {
+        if (spec.launchDelayMs) await Bun.sleep(spec.launchDelayMs);
+        return browser;
+      },
+    } as unknown as VimeoBrowserLauncher,
     modeLog,
     get navigations() {
       return navigations;
@@ -525,6 +535,28 @@ describe("harvestVimeoCaptions — what a failure is ALLOWED to be called", () =
     const promise = harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 60 });
     await expect(promise).rejects.toThrow(VimeoHarvestError);
     await expect(promise).rejects.toThrow(/may also be slow or unreachable/);
+  }, 5_000);
+
+  test("a navigation that fails with budget to spare is a harvest error carrying Playwright's message", async () => {
+    // The non-budget half of the goto catch: a DNS or transport failure must
+    // come back classified AND with the underlying reason, never the ambiguity
+    // clause (nothing about the budget is true here).
+    const harness = fakeHarness({ hasVideo: true, tracks: [], gotoThrows: "net::ERR_NAME_NOT_RESOLVED" });
+    const promise = harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 60_000 });
+    await expect(promise).rejects.toThrow(VimeoHarvestError);
+    await expect(promise).rejects.toThrow(/net::ERR_NAME_NOT_RESOLVED/);
+    await expect(promise).rejects.not.toThrow(/slow or unreachable/);
+  }, 5_000);
+
+  test("a budget already spent by launch is reported WITHOUT the navigation clause", async () => {
+    // `remaining()` for goto is computed outside its try: computed inside, a
+    // budget gone before navigation was rethrown with "the site may also be
+    // slow" about a page that was never requested.
+    const harness = fakeHarness({ hasVideo: true, tracks: [], launchDelayMs: 60 });
+    const promise = harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 40 });
+    await expect(promise).rejects.toThrow(VimeoHarvestError);
+    await expect(promise).rejects.not.toThrow(/slow or unreachable/);
+    expect(harness.navigations).toBe(0);
   }, 5_000);
 
   test("a budget that expires DURING the text-track wait is not 'no tracks'", async () => {

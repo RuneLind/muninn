@@ -498,8 +498,13 @@ async function harvestInContext(
     }
   });
 
+  // OUTSIDE the try, like the two waits below: computed inside it, a budget
+  // already spent by browser launch was rethrown by the catch WITH the "site may
+  // be slow" clause about a navigation that was never attempted (measured:
+  // launch is ~0.8 s, so `--timeout=800` blamed Vimeo for Chromium's startup).
+  const gotoTimeout = remaining(deadline, 30_000);
   try {
-    await page.goto(watchUrl, { waitUntil: "domcontentloaded", timeout: remaining(deadline, 30_000) });
+    await page.goto(watchUrl, { waitUntil: "domcontentloaded", timeout: gotoTimeout });
   } catch (err) {
     // The same states as the two waits below: a navigation cut short by the
     // budget is reported as the budget, naming the ambiguity (the site may also
