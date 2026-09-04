@@ -82,6 +82,18 @@ describe("resolveBotsDir REFUSES a value that would empty the roster", () => {
     expect(resolveBotsDir()).toBe(resolve(import.meta.dir, "../../bots"));
   });
 
+  test("an absolute value naming a FILE is refused, not crashed on", () => {
+    // `existsSync` alone let `/etc/hosts` through, and `readdirSync` then threw
+    // ENOTDIR out of discovery — a boot crash from a typo, the exact failure the
+    // guard exists to prevent. The check is on directory-ness, not existence.
+    const root = tempBotsRoot("zzfilebot");
+    const file = join(root, "not-a-dir.txt");
+    writeFileSync(file, "x");
+    process.env.MUNINN_BOTS_DIR = file;
+    expect(resolveBotsDir()).toBe(resolve(import.meta.dir, "../../bots"));
+    expect(() => discoverAllBots()).not.toThrow();
+  });
+
   test("so discovery still finds the checkout's own bots after a typo", () => {
     // The property the two cases above exist for, at the seam that matters:
     // a mistyped `.env` line degrades to the real roster, not to no bots at all.

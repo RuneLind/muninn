@@ -1,4 +1,4 @@
-import { readdirSync, existsSync, readFileSync, type Dirent } from "node:fs";
+import { readdirSync, existsSync, readFileSync, statSync, type Dirent } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.ts";
@@ -694,10 +694,20 @@ export function resolveBotsDir(): string {
     return fallback;
   }
   const abs = resolve(override);
-  if (!existsSync(abs)) {
+  // Directory-ness, not existence: `existsSync` let a FILE through and
+  // `readdirSync` then threw ENOTDIR out of discovery — a boot crash from a
+  // typo, the exact failure this guard exists to prevent (measured with
+  // `MUNINN_BOTS_DIR=/etc/hosts`).
+  let isDir = false;
+  try {
+    isDir = statSync(abs).isDirectory();
+  } catch {
+    isDir = false;
+  }
+  if (!isDir) {
     warnBotsDirOnce(
       `missing:${abs}`,
-      "MUNINN_BOTS_DIR={value} does not exist — ignoring it and using {fallback}",
+      "MUNINN_BOTS_DIR={value} is not a directory — ignoring it and using {fallback}",
       { value: abs, fallback },
     );
     return fallback;
