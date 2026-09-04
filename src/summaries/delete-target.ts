@@ -14,12 +14,18 @@
  * Those are the three refusals the route answers with, and a destructive confirm
  * dialog in front of a guaranteed refusal is worse than no button.
  *
- * Which bot wiki: the registry's default (`jarvis`, else the first entry) when it
- * IS a bot wiki, else the first bot wiki whose root is writable. (`/wiki/gardener`
- * stops at the default and renders a "not a bot wiki" notice for a standalone one;
- * this page has no such notice, so it falls through instead.) The one gate this
- * cannot see is the seeded `wiki-gardener` watcher — the route 404s without one,
- * and the client shows that message.
+ * Which bot wiki — the whole state space, enumerated:
+ *   - no bot wiki in the registry            ⇒ null
+ *   - default is a bot wiki, root writable    ⇒ the default
+ *   - default is a bot wiki, root read-only   ⇒ null — NEVER the next bot: the route
+ *     deletes the resolved bot's proposals, and another bot's drafts are not the
+ *     ones written from this doc's gardener, so re-pointing would delete the wrong
+ *     bot's drafts and leave the right ones dangling behind a "success" notice
+ *   - default is standalone (`WIKI_EXTRA`)    ⇒ the first bot wiki, if writable, else null
+ * (`/wiki/gardener` keeps a standalone default and explains itself on the page;
+ * this page has no such notice, so it falls through past a standalone only.) The
+ * one gate this cannot see is the seeded `wiki-gardener` watcher — the route 404s
+ * without one, and the client shows that message.
  */
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
 import { defaultWikiEntry } from "../wiki/registry.ts";
@@ -30,7 +36,7 @@ export function resolveSummariesDeleteTarget(
 ): { wiki: string } | null {
   if (opts.instanceReadonly) return null;
   const dflt = defaultWikiEntry(registry);
-  const usable = (e: WikiRegistryEntry) => e.source === "bot" && !opts.isReadonlyRoot(e.root);
-  const entry = dflt && usable(dflt) ? dflt : registry.find(usable);
-  return entry ? { wiki: entry.name } : null;
+  const entry = dflt && dflt.source === "bot" ? dflt : registry.find((e) => e.source === "bot");
+  if (!entry || opts.isReadonlyRoot(entry.root)) return null;
+  return { wiki: entry.name };
 }

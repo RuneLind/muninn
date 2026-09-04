@@ -22,9 +22,13 @@ describe("resolveSummariesDeleteTarget", () => {
   test("a wiki-readonly instance ⇒ no button, whatever the registry", () => {
     expect(resolveSummariesDeleteTarget([bot("jarvis")], { ...writable, instanceReadonly: true })).toBeNull();
   });
-  test("a read-only ROOT ⇒ no button (the route 403s it) — unless another bot wiki is writable", () => {
+  test("a read-only bot DEFAULT ⇒ no button, even with a writable bot wiki behind it — never re-point the delete at another bot's drafts", () => {
     const ro = { ...writable, isReadonlyRoot: (r: string) => r === "/ro/jarvis" };
     expect(resolveSummariesDeleteTarget([bot("jarvis", "/ro/jarvis")], ro)).toBeNull();
-    expect(resolveSummariesDeleteTarget([bot("jarvis", "/ro/jarvis"), bot("capra")], ro)).toEqual({ wiki: "capra" });
+    expect(resolveSummariesDeleteTarget([bot("jarvis", "/ro/jarvis"), bot("capra")], ro)).toBeNull();
+  });
+  test("a standalone default falls through to the first bot wiki, and THAT one's read-only root still refuses", () => {
+    const ro = { ...writable, isReadonlyRoot: (r: string) => r === "/ro/capra" };
+    expect(resolveSummariesDeleteTarget([extra("notes"), bot("capra", "/ro/capra"), bot("melosys")], ro)).toBeNull();
   });
 });

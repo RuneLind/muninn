@@ -502,8 +502,9 @@ export function sumArticleLibraryScript(): string {
         showDeleteNotice(parts.join(' ') + ' — but ' + caveats.join(' and ') + ', so it may reappear in the list until the next index run.', 'ok');
       }
       // Refetch ONCE through the memo (getSummaryDocuments(true) is the only call
-      // that throws — loadShelf/loadLibrary swallow their own failures into the
-      // shelf's "Failed to load", so a catch around THEM is dead code), then let
+      // that throws — loadShelf and loadLibrary each swallow their own failures
+      // into their own "Failed to load…" element, so a catch around THEM is dead
+      // code), then let
       // both renderers ride on the fresh memo, AWAITED so the re-render is done
       // before the rows are pulled again — the doc is gone from disk whatever the
       // listing still says.
