@@ -378,7 +378,9 @@ test("two concurrent jobs harvest STRICTLY one at a time", async () => {
   //  - the `finally` covers the other half, a case that genuinely FAILS with
   //    harvests still parked. Forcing the negative assertion below to fail
   //    (`toBe(999)`) strands harvest A parked and B queued behind it: with the
-  //    drain that is ONE failure in 0.07 s, without it EIGHT in 35.0 s.
+  //    drain that is ONE failure in well under a second; without it, every
+  //    case queued behind the stranded harvests times out at 5 s each (8 of
+  //    them when this drain was written, 11 once the memo cases joined the file).
   //    NB deleting the queue does NOT demonstrate this — measured 2 failures in
   //    0.07 s either way, because with no queue there is nothing left for a
   //    stranded harvest to block.

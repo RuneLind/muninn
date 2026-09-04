@@ -85,7 +85,7 @@ in the process that knows a document exists — and read BEFORE the huginn listi
 answering a `duplicate` body byte-identical to the listing's (one
 `duplicateBody` builder, so the two cannot drift). It is bounded on BOTH axes,
 because it is a cache with no invalidation: `VIMEO_RECENT_INGEST_TTL_MS` (30 min,
-generous slack over a reindex measured in seconds) and `VIMEO_RECENT_INGEST_MAX`
+generous slack over a reindex measured at seconds to a minute or two on this corpus) and `VIMEO_RECENT_INGEST_MAX`
 (200 entries, oldest-inserted evicted first). Past either bound the listing is
 authoritative again and the worst case is the pre-existing one, a re-capture.
 Three details are load-bearing: the hook fires only when huginn returned a

@@ -137,8 +137,9 @@ export function registerVimeoRoutes(
    * testing hazard rather than a production one: a test builds a fresh app per
    * case, so a claim leaked by one case (a handler that threw between the claim
    * and its release) outlived it and answered `in_flight` for every later case
-   * touching that video — measured, one mutation produced 12 unrelated
-   * failures, none of them naming the route that leaked. Deliberately NOT a
+   * touching that video — measured: one leaked claim failed between 6 and 14
+   * unrelated cases depending on the file's shape at the time, none of them
+   * naming the route that leaked. Deliberately NOT a
    * test-only reset export: the scope is what was wrong, and an export would
    * leave the wrong scope in place behind a lever only tests pull.
    */
