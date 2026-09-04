@@ -21,13 +21,10 @@ export const PANES_KEY = "muninn.wiki.panes.v1";
 /** Width of the collapsed strip's grid column; the CSS reads it interpolated. */
 export const STRIP_WIDTH = 40;
 
-/** Read the stored preference. Anything but the exact literal is "open". */
+/** Read the stored preference. Anything but the exact literal `collapsed` is
+ *  "open"; the writer stores that literal or removes the key. */
 export function parseStoredRightCollapsed(raw: string | null | undefined): boolean {
   return raw === "collapsed";
-}
-
-export function serializeRightCollapsed(collapsed: boolean): string | null {
-  return collapsed ? "collapsed" : null;
 }
 
 export type PaneKeyAction = "toggle-right" | "toggle-focus" | "exit-focus";
@@ -49,15 +46,17 @@ export interface PaneKeyEvent {
  * Which action a keydown maps to, or null. `]` toggles the right pane, `F`
  * toggles focus, `Escape` leaves focus. Every one of them is refused while the
  * reader is typing (an input, a textarea, contenteditable — `]` and `f` are
- * letters there), with a modifier held (⌘F is the browser's find), or on key
- * repeat. Escape inside a dialog belongs to the dialog.
+ * letters there), with a modifier held (⌘F is the browser's find), on key
+ * repeat, and inside a modal dialog — the Share and Discuss dialogs are
+ * `aria-modal`, and `f` on one of their buttons collapsed the reader behind the
+ * scrim (measured in review).
  */
 export function paneKeyAction(e: PaneKeyEvent): PaneKeyAction | null {
-  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return null;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || e.targetInDialog) return null;
   const tag = (e.targetTag || "").toUpperCase();
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.targetEditable) return null;
   if (e.key === "]") return "toggle-right";
   if (e.key === "f" || e.key === "F") return "toggle-focus";
-  if (e.key === "Escape") return e.targetInDialog ? null : "exit-focus";
+  if (e.key === "Escape") return "exit-focus";
   return null;
 }

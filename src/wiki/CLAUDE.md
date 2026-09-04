@@ -144,10 +144,14 @@ so a browser reading two wikis keeps two lists: `muninn.wiki.recents.v1:<wiki>`
 property of the reader's screen, not of the wiki. Same rule for the fourth,
 `muninn.wiki.panes.v1` (`wiki-panes.ts` rules + `wiki-pane-toggle.ts` DOM):
 `collapsed` when the reader folded the Connections/Ask pane to its 40px icon
-strip (`]`, or the › in the tab row). Focus mode (`F` / ⤢, both side panes
-gone, `Esc` back) is deliberately NOT stored — a reload with no rail and no pane
+strip (`]`, or the collapse button in its tab row). Focus mode (`F` / ⤢,
+both side panes gone, `Esc` back) is deliberately NOT stored — a reload with no rail and no pane
 is a "where did everything go" moment — but it survives in-page wikilink
-navigation, since that is the reading it was entered for. Acceptance:
+navigation, since that is the reading it was entered for. Both are cleared by
+`revealRightPane()` when a stream is about to show something IN the pane (Ask,
+Explain, Fact check), and `]` is inert while the pane is not on screen (focus
+mode, or the ≤1100px media rule), so a keypress with no visible effect can
+never persist one. Acceptance:
 `e2e/wiki-pane-toggles.spec.ts`, bounding boxes only.
 
 Two more keys, owned by `views/components/wiki-home.ts` (pure rules) + `wiki-home-store.ts`

@@ -143,12 +143,103 @@ test.describe("Wiki pane toggles", () => {
     await expect(page.locator(CONN)).toBeVisible();
     await expect(page.locator("#wikiFocusExit")).toBeHidden();
 
-    await page.locator("#wikiFocusExit").waitFor({ state: "hidden" });
     await page.locator(".wiki-conn-tabs [data-pane-toggle='focus']").click();
     await expect(page.locator(RAIL)).toBeHidden();
     await page.reload();
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Two");
     await expect(page.locator(RAIL)).toBeVisible();
+  });
+
+  test("a remembered collapse does not squeeze the Atlas (fix round 1)", async ({ page }) => {
+    await open(page);
+    await page.locator("body").press("]");
+    expect(await width(page, CONN)).toBe(STRIP_WIDTH);
+    // The start view's Atlas tab collapses BOTH side panes; with the collapse
+    // stored, the article must still take the whole layout (minus 24px padding).
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await page.locator(".wiki-tab[data-tab='atlas']").click();
+    await expect(page.locator(LAYOUT)).toHaveClass(/atlas-full/);
+    expect(await width(page, ARTICLE)).toBe((await width(page, LAYOUT)) - 48);
+  });
+
+  test("collapsing FROM the Ask tab hides the Ask form too (fix round 1)", async ({ page }) => {
+    await open(page);
+    await page.locator(".wiki-conn-tab[data-conntab='ask']").click();
+    await expect(page.locator("#askBody")).toBeVisible();
+    await page.locator(".wiki-conn-tabs [data-pane-toggle='right']").click();
+    expect(await width(page, CONN)).toBe(STRIP_WIDTH);
+    await expect(page.locator("#askBody")).toBeHidden();
+    await expect(page.locator("#wikiAskInput")).toBeHidden();
+    // …and expanding again brings the Ask tab back as it was.
+    await page.locator("body").press("]");
+    await expect(page.locator("#askBody")).toBeVisible();
+    await expect(page.locator(".wiki-conn-tab[data-conntab='ask']")).toHaveClass(/active/);
+  });
+
+  // One test per width (the copy-path sweep's shape): a second setViewportSize
+  // inside one test trips Chromium's window-bounds protocol error.
+  for (const w of [1000, 1400]) {
+    test(`the exit pill does not cover the breadcrumb actions in focus mode at ${w}px (fix round 1)`, async ({ page }) => {
+      await page.setViewportSize({ width: w, height: 900 });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=one.md`);
+      await expect(page.locator(".wiki-article-head h1")).toHaveText("One");
+      await page.locator("body").press("f");
+      const pill = await page.locator("#wikiFocusExit").boundingBox();
+      const share = await page.locator("#wikiShareBtn").boundingBox();
+      if (!pill || !share) throw new Error("pill or share button not laid out");
+      const overlap = pill.x < share.x + share.width && share.x < pill.x + pill.width && pill.y < share.y + share.height && share.y < pill.y + pill.height;
+      expect(overlap, `pill overlaps Share at ${w}px`).toBe(false);
+      // The click must LAND on Share, not on the pill: the element at Share's centre is Share.
+      const hit = await page.evaluate(() => {
+        const b = document.getElementById("wikiShareBtn")!.getBoundingClientRect();
+        return document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)?.closest("#wikiShareBtn")?.id ?? null;
+      });
+      expect(hit).toBe("wikiShareBtn");
+      // Single-line pill.
+      expect(pill.height).toBeLessThan(30);
+    });
+  }
+
+  test("] is inert where the pane is not on screen: below 1100px and in focus mode (fix round 1)", async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=one.md`);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("One");
+    await expect(page.locator(CONN)).toBeHidden();
+    await page.locator("body").press("]");
+    expect(await page.evaluate((k) => localStorage.getItem(k), PANES_KEY)).toBeNull();
+    // A collapse stored on a wide screen folds into the two-column grid here:
+    // the article reaches the layout's right padding, no dead 40px column.
+    await page.evaluate((k) => localStorage.setItem(k, "collapsed"), PANES_KEY);
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("One");
+    const layout = await page.locator(LAYOUT).boundingBox();
+    const art = await page.locator(ARTICLE).boundingBox();
+    if (!layout || !art) throw new Error("not laid out");
+    expect(Math.round(art.x + art.width)).toBe(Math.round(layout.x + layout.width) - 24);
+    await page.evaluate((k) => localStorage.removeItem(k), PANES_KEY);
+
+    await open(page);
+    await page.locator("body").press("f");
+    await page.locator("body").press("]");
+    expect(await page.evaluate((k) => localStorage.getItem(k), PANES_KEY)).toBeNull();
+    await page.locator("body").press("Escape");
+    expect(await width(page, CONN)).toBeGreaterThan(STRIP_WIDTH + 100);
+  });
+
+  test("the strip's expand button is not announced as pressed; the tab-row collapse button is (fix round 1)", async ({ page }) => {
+    await open(page);
+    const hide = page.locator(".wiki-conn-tabs [data-pane-toggle='right']");
+    await expect(hide).toHaveAttribute("aria-pressed", "false");
+    await hide.click();
+    await expect(hide).toHaveAttribute("aria-pressed", "true");
+    const show = page.locator("#wikiConnStrip [data-pane-toggle='right']");
+    await expect(show).toBeVisible();
+    expect(await show.getAttribute("aria-pressed")).toBeNull();
+    // The focus buttons are toggles on both surfaces.
+    await page.locator("body").press("f");
+    await expect(page.locator("#wikiFocusExit")).toBeVisible();
+    await page.locator("body").press("Escape");
+    await expect(page.locator("#wikiConnStrip [data-pane-toggle='focus']")).toHaveAttribute("aria-pressed", "false");
   });
 
   test("] typed into the Ask box is a character, not a toggle", async ({ page }) => {

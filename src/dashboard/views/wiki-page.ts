@@ -16,6 +16,14 @@ import {
 } from "./components/wiki-readonly-client.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
 
+/* Inline stroke icons for the pane toggles — sized/coloured by .wiki-pane-btn. */
+const SVG_COLLAPSE = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>';
+const SVG_EXPAND = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>';
+const SVG_CONN = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.3 11l7.4-4M8.3 13l7.4 4"/></svg>';
+const SVG_ASK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg>';
+const SVG_FOCUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>';
+const SVG_FOCUS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>';
+
 /**
  * /wiki — reader for the huginn-jarvis knowledge wiki.
  *
@@ -36,14 +44,6 @@ import { isWikiReadonly } from "../../wiki/readonly.ts";
  * (bot-only) Gardener link. Switching wiki is a full navigation to
  * `/wiki?wiki=<name>` so links stay shareable.
  */
-/* Inline stroke icons for the pane toggles — sized/coloured by .wiki-pane-btn. */
-const SVG_COLLAPSE = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>';
-const SVG_EXPAND = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>';
-const SVG_CONN = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.3 11l7.4-4M8.3 13l7.4 4"/></svg>';
-const SVG_ASK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg>';
-const SVG_FOCUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>';
-const SVG_FOCUS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>';
-
 export async function renderWikiPage(opts?: {
   wikis?: string[];
   /** Per-wiki freshness date (`YYYY-MM-DD`) shown in the picker label. */
@@ -140,21 +140,25 @@ export async function renderWikiPage(opts?: {
        is active on the start view the layout collapses to the article column
        alone (class toggled by setAtlasFull in wiki-browser.ts); switching tabs
        or opening a page restores the 3-pane reader. */
-    .wiki-layout.atlas-full { grid-template-columns: minmax(0, 1fr); }
-    .wiki-layout.atlas-full > .wiki-pane:first-child,
-    .wiki-layout.atlas-full > .wiki-conn-pane { display: none; }
     /* Pane toggles (wiki-pane-toggle.ts). \`.right-collapsed\` folds the
-       Connections/Ask pane to an icon strip — the pane's other children are
-       hidden by class, so their own inline display state (the tab bodies)
-       survives untouched and comes back as it was. \`.focus-mode\` drops both
-       side panes; the exit pill is the one control left. Below the 1100px
-       breakpoint both collapse to the two-column grid that media rule sets. */
+       Connections/Ask pane to an icon strip. Its other children are hidden with
+       !important because \`switchConnTab\` sets the Ask body's display INLINE
+       (\`style.display = "flex"\`), which outranks any stylesheet rule — without
+       it, collapsing from the Ask tab rendered the whole Ask form crushed into
+       the 40px strip (measured in review); the inline value is left in place, so
+       expanding restores the tab exactly as it was.
+       \`.focus-mode\` and the Atlas tab's \`.atlas-full\` drop both side panes.
+       They are ONE rule, declared AFTER \`.right-collapsed\` on purpose: equal
+       specificity, so source order decides, and with the collapse stored a
+       later \`.right-collapsed\` kept its 3-column template while \`.atlas-full\`
+       hid the panes — the Atlas rendered in the 300px rail column. */
     .wiki-layout.right-collapsed { grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT}px) minmax(0, 1fr) ${STRIP_WIDTH}px; }
-    .wiki-layout.right-collapsed > .wiki-conn-pane > :not(.wiki-conn-strip) { display: none; }
+    .wiki-layout.right-collapsed > .wiki-conn-pane > :not(.wiki-conn-strip) { display: none !important; }
     .wiki-conn-strip { display: none; flex-direction: column; align-items: center; gap: 4px; padding-top: 8px; }
     .wiki-layout.right-collapsed .wiki-conn-strip { display: flex; }
-    .wiki-conn-strip .wiki-pane-btn { width: 30px; }
-    .wiki-layout.focus-mode { grid-template-columns: minmax(0, 1fr); }
+    .wiki-layout.atlas-full, .wiki-layout.focus-mode { grid-template-columns: minmax(0, 1fr); }
+    .wiki-layout.atlas-full > .wiki-pane:first-child,
+    .wiki-layout.atlas-full > .wiki-conn-pane,
     .wiki-layout.focus-mode > .wiki-pane:first-child,
     .wiki-layout.focus-mode > .wiki-conn-pane { display: none; }
     .wiki-pane-btn {
@@ -164,16 +168,19 @@ export async function renderWikiPage(opts?: {
     .wiki-pane-btn:hover { background: var(--bg-surface); color: var(--text-primary); }
     .wiki-pane-btn[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
     .wiki-pane-btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-    .wiki-conn-tabs .wiki-conn-tools { display: flex; align-items: center; gap: 2px; padding: 0 6px; }
+    .wiki-conn-tools { display: flex; align-items: center; gap: 2px; padding: 0 6px; }
+    /* Focus mode's one control, in FLOW above the breadcrumb: a floated pill at
+       the pane's top-right sat on Share/Discuss (measured in review). */
+    .wiki-focus-bar { display: none; justify-content: flex-end; padding: 6px 12px 0; flex-shrink: 0; }
+    .wiki-layout.focus-mode .wiki-focus-bar { display: flex; }
     .wiki-focus-exit {
-      display: none; position: absolute; top: 8px; right: 12px; z-index: 3;
-      align-items: center; gap: 6px; padding: 4px 8px 4px 6px; border-radius: 6px;
-      border: 1px solid var(--border-primary); background: var(--bg-panel);
-      color: var(--text-muted); font-size: 11.5px; cursor: pointer; font-family: inherit;
+      display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 3px 6px; border-radius: 6px;
+      border: 1px solid var(--border-primary); background: var(--bg-panel); white-space: nowrap;
+      color: var(--text-muted); font-size: 11.5px; line-height: 1.3; cursor: pointer; font-family: inherit;
     }
     .wiki-focus-exit:hover { color: var(--text-primary); }
     .wiki-focus-exit kbd { font-family: ui-monospace, Menlo, monospace; font-size: 10px; border: 1px solid var(--border-secondary); border-radius: 3px; padding: 0 4px; }
-    .wiki-layout.focus-mode .wiki-focus-exit { display: inline-flex; }
+    .wiki-focus-exit svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
     .wiki-pane {
       background: var(--bg-panel);
       border: 1px solid var(--border-primary);
@@ -1436,8 +1443,11 @@ export async function renderWikiPage(opts?: {
     .wiki-empty-state code { background: var(--bg-inset); padding: 2px 6px; border-radius: 4px; }
 
     @media (max-width: 1100px) {
+      /* \`.right-collapsed\` must fold into the two-column grid too (same
+         specificity as the wide rule, later source), and the full-width pair
+         must be re-declared AFTER it here for the same reason as above. */
       .wiki-layout, .wiki-layout.right-collapsed { grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT_NARROW}px) minmax(0, 1fr); }
-      .wiki-layout.focus-mode { grid-template-columns: minmax(0, 1fr); }
+      .wiki-layout.atlas-full, .wiki-layout.focus-mode { grid-template-columns: minmax(0, 1fr); }
       .wiki-conn-pane { display: none; }
     }
     ${agentPresenceStyles()}
@@ -1496,8 +1506,8 @@ export async function renderWikiPage(opts?: {
       <div class="wiki-rail-resizer" id="wikiRailResizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the page list" title="Drag or use ← → to resize · double-click or Home to reset"></div>
     </div>
 
-    <div class="wiki-pane" style="position:relative">
-      <button class="wiki-focus-exit" id="wikiFocusExit" type="button" data-pane-toggle="focus-exit" title="Leave focus (Esc)">${SVG_FOCUS_EXIT} Exit focus <kbd>Esc</kbd></button>
+    <div class="wiki-pane">
+      <div class="wiki-focus-bar"><button class="wiki-focus-exit" id="wikiFocusExit" type="button" data-pane-toggle="focus" title="Leave focus (Esc)">${SVG_FOCUS_EXIT} Exit focus <kbd>Esc</kbd></button></div>
       <div class="wiki-breadcrumb" id="wikiBreadcrumb" style="display:none"></div>
       <!-- Read-only banner. Rendered UNCONDITIONALLY and shown by CSS keyed on
            \`body.wiki-readonly-wiki\` — the same body class the click guard
@@ -1516,14 +1526,14 @@ export async function renderWikiPage(opts?: {
         <button class="wiki-pane-btn" type="button" data-pane-toggle="right" title="Show connections (])">${SVG_EXPAND}</button>
         <button class="wiki-pane-btn" type="button" data-pane-open="conn" title="Connections">${SVG_CONN}</button>
         <button class="wiki-pane-btn" type="button" data-pane-open="ask" title="Ask">${SVG_ASK}</button>
-        <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" title="Focus (F)">${SVG_FOCUS}</button>
+        <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
       </div>
       <div class="wiki-conn-tabs">
         <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
         <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
         <div class="wiki-conn-tools">
-          <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" title="Focus (F)">${SVG_FOCUS}</button>
-          <button class="wiki-pane-btn" type="button" data-pane-toggle="right" title="Hide connections (])">${SVG_COLLAPSE}</button>
+          <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
+          <button class="wiki-pane-btn" type="button" data-pane-toggle="right" aria-pressed="false" title="Hide connections (])">${SVG_COLLAPSE}</button>
         </div>
       </div>
       <div class="wiki-conn-body" id="connBody">

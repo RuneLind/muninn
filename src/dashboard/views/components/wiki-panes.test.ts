@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { paneKeyAction, parseStoredRightCollapsed, serializeRightCollapsed } from "./wiki-panes.ts";
+import { paneKeyAction, parseStoredRightCollapsed } from "./wiki-panes.ts";
 
 describe("stored right-pane preference", () => {
   test("only the exact literal reads as collapsed", () => {
@@ -10,11 +10,6 @@ describe("stored right-pane preference", () => {
     expect(parseStoredRightCollapsed("")).toBe(false);
     expect(parseStoredRightCollapsed(null)).toBe(false);
     expect(parseStoredRightCollapsed(undefined)).toBe(false);
-  });
-
-  test("serialize round-trips, and open clears the key", () => {
-    expect(parseStoredRightCollapsed(serializeRightCollapsed(true))).toBe(true);
-    expect(serializeRightCollapsed(false)).toBeNull();
   });
 });
 
@@ -47,9 +42,9 @@ describe("paneKeyAction", () => {
     expect(paneKeyAction({ key: "f", targetTag: "BODY", repeat: true })).toBeNull();
   });
 
-  test("Escape inside a dialog belongs to the dialog", () => {
+  test("every key is refused inside a modal dialog (fix round 1: f behind the Share dialog collapsed the reader)", () => {
     expect(paneKeyAction({ key: "Escape", targetTag: "BUTTON", targetInDialog: true })).toBeNull();
-    // …but ] and F are not dialog-owned keys, only Escape is
-    expect(paneKeyAction({ key: "]", targetTag: "BUTTON", targetInDialog: true })).toBe("toggle-right");
+    expect(paneKeyAction({ key: "]", targetTag: "BUTTON", targetInDialog: true })).toBeNull();
+    expect(paneKeyAction({ key: "f", targetTag: "BUTTON", targetInDialog: true })).toBeNull();
   });
 });
