@@ -499,9 +499,12 @@ async function harvestInContext(
   });
 
   // OUTSIDE the try, like the two waits below: computed inside it, a budget
-  // already spent by browser launch was rethrown by the catch WITH the "site may
-  // be slow" clause about a navigation that was never attempted (measured:
-  // launch is ~0.8 s, so `--timeout=800` blamed Vimeo for Chromium's startup).
+  // already spent before navigation was rethrown by the catch WITH the "site may
+  // be slow" clause about a navigation that was never attempted. The window is
+  // narrow — launch measured 665 ms cold / 94 ms warm, and a launch that eats
+  // the whole budget is classified as a LAUNCH failure first — so it binds only
+  // when launch finishes inside the last few ms of budget (measured live at
+  // `--timeout=825`); the launch-delay unit test is what pins it.
   const gotoTimeout = remaining(deadline, 30_000);
   try {
     await page.goto(watchUrl, { waitUntil: "domcontentloaded", timeout: gotoTimeout });

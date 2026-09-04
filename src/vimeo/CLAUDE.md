@@ -86,16 +86,18 @@ assertion — `await expect(call).rejects.toThrow()` — is not: it hangs the wh
 file, which is why the tests race the call against a 1 s settle instead.
 
 **When the budget is the binding clock, "private" and "slow" are the same
-evidence.** Each Playwright wait is handed `min(cap, what is left)`. The one
-predicate each catch evaluates is "has the deadline passed": if not, the failure
-is classified (bot page / not public / no captions); if so, the harvest reports
-the BUDGET — with a message saying the video may also be
-private (or caption-less) — rather than a verdict about a page it observed for
-less than its window. The same predicate covers `goto` (a navigation cut short by the
-budget says the site may also be slow or unreachable). Measured on the live talk
-the whole harvest takes ~3–4 s, so with the default 60 s budget no wait is cut
-short unless the page itself stalls; the caps (goto 30 s, selector 20 s, tracks
-25 s) only sum past the budget when several of them are actually consumed.
+evidence.** Each Playwright wait is handed `min(cap, what is left)`, computed
+OUTSIDE its try. The one predicate each catch evaluates is "has the deadline
+passed": if so, the harvest reports the BUDGET — with a clause saying what else
+the failure could mean (the video may be private; it may have no captions; for
+`goto`, the site may be slow or unreachable) — rather than a verdict about a
+page it observed for less than its window. If not, the failure is classified on
+its own evidence: the `<video>` wait as bot page / not public / uninspectable,
+the track wait as "no captions" (a legitimate answer), and `goto` as a harvest
+error carrying Playwright's own message. Measured on the live talk the whole
+harvest takes ~3–4 s, so with the default 60 s budget no wait is cut short unless
+the page itself stalls; the caps (goto 30 s, selector 20 s, tracks 25 s) only sum
+past the budget when several of them are actually consumed.
 
 **A URL's hash rules differ by WHERE it sits.** A trailing path segment is a hash
 only if it looks hex — that rule exists to tell `/<hash>` from `/likes`, and it
