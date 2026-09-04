@@ -20,6 +20,10 @@ import {
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
+import {
+  __setSummariesStatsCacheForTest,
+  __peekSummariesStatsCacheForTest,
+} from "./summaries-routes.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { getWikiIndex, __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
@@ -1325,12 +1329,14 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
   let statusResponse: () => Response;
   /** Every (bot, collection, id) the proposal-delete seam was asked for. */
   let proposalCalls: string[];
+  let mutexHeldDuringProposalDelete: boolean | null;
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), "wiki-delete-route-"));
     await Bun.write(path.join(root, "notes.md"), "# Notes\n");
     deleteCalls = [];
     proposalCalls = [];
+    mutexHeldDuringProposalDelete = null;
     listCalls = 0;
     deleteResponse = () =>
       new Response(
@@ -1402,6 +1408,9 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       revertProposal: async () => null,
       deleteSourceProposalsForDoc: async (bot, collection, id) => {
         proposalCalls.push(`${bot}:${collection}/${id}`);
+        // The seam runs INSIDE the gardener mutex, or a drain could re-draft the doc
+        // between huginn's move and this delete: a second acquire must be refused.
+        mutexHeldDuringProposalDelete = runExclusive(bot, async () => 0) === null;
         return {
           deleted: [{ id: "p1", targetPath: "sources/junk.mdx", status: "draft" }],
           kept: [{ id: "p2", targetPath: "sources/junk-applied.mdx", status: "applied" }],
@@ -1461,6 +1470,16 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     expect(body.proposals.kept).toEqual([
       { id: "p2", targetPath: "sources/junk-applied.mdx", status: "applied" },
     ]);
+  });
+
+  test("the proposal delete runs INSIDE the gardener mutex, and drops the summaries stats cache", async () => {
+    __setSummariesStatsCacheForTest("jarvis", { months: [], bySource: {}, coverage: { windowDays: 30, total: 1, consumed: 0, pending: 1, neverClustered: [], undated: 0 }, errors: [] });
+    const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(res.status).toBe(200);
+    expect(mutexHeldDuringProposalDelete).toBe(true);
+    // The cache is keyed on the stats route's `?bot=` fallback ("jarvis"), NOT the
+    // deleting bot ("delbot") — so the invalidation must clear every key.
+    expect(__peekSummariesStatsCacheForTest("jarvis")).toBeUndefined();
   });
 
   test("huginn refusing the delete leaves the proposals alone", async () => {

@@ -1832,13 +1832,15 @@ export function registerWikiGardenerRoutes(
       // same id must not inherit a months-old skip reason.
       await deleteSourceDraftAttempt(target.bot.name, collection, id);
       // And the draft the source drafter wrote FROM it: a review-gate card whose
-      // source no longer exists is not reviewable, and left in `draft` it would keep
-      // the doc counted as "pending" in the Stats coverage view forever. Applied rows
-      // are kept and reported (their wiki page still exists). Under the mutex, so an
-      // in-flight drain cannot re-draft the doc between huginn's move and this DELETE.
+      // source no longer exists is not reviewable, and approving it would write a
+      // wiki page from a document that is gone. Applied rows are kept and reported
+      // (their wiki page still exists). Under the mutex — pinned by the route test,
+      // whose seam asserts the mutex is HELD when it runs — so a drain cannot
+      // re-draft the doc between huginn's move and this DELETE.
       const proposals = await backlogDeps.deleteSourceProposalsForDoc(target.bot.name, collection, id);
-      // The pending set just changed; the 5-min stats cache would report the old count.
-      invalidateSummariesStatsCache(target.bot.name);
+      // The pending set the stats coverage reads just changed; a cached payload
+      // would report the old pending/consumed split for its full 5-min TTL.
+      invalidateSummariesStatsCache();
       return { res, proposals };
     });
     if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);

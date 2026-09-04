@@ -38,6 +38,8 @@ export const E2E_PORTS = {
   "wiki-share": 3027,
   "summaries-share": 3028,
   "summaries-share/huginn": 3029,
+  "summaries-delete": 3046,
+  "summaries-delete/huginn": 3047,
   "wiki-start-cards": 3030,
   "ws-scope": 3031,
   // Two instances, one spec: MUNINN_LOCAL_ROLE is a per-PROCESS setting, so the

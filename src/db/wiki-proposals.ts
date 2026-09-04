@@ -556,9 +556,11 @@ export interface DeletedSourceProposal {
  * provenance of a wiki page that still exists on disk, and deleting the row would only
  * turn that page's source into an unexplained gap in the coverage view.
  *
- * Matched through `source_docs @> [{collection, docId}]` — the same JSONB the
- * consumed/pending sets read, so the row the Stats coverage counts as "pending" for
- * this doc is exactly the row this removes.
+ * Matched through `source_docs @> [{collection, docId}]` — array containment, so a
+ * row naming the doc under a DIFFERENT collection does not match (probed: two
+ * elements `{A,X}`,`{B,Y}` do not contain `{A,Y}`). `kind = 'source'` only: a weekly
+ * gardener `concept`/`entity` draft that clustered this doc among others is left
+ * alone — it is a synthesis over several sources, not a page about this one.
  */
 export async function deleteSourceProposalsForDoc(
   botName: string,
