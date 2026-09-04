@@ -351,7 +351,12 @@ test("the system prompt carries the shared structure rules, incl. the verbatim-a
   // bullet. A per-bullet toContain() survives a changed join: verified, swapping
   // `.join("\n   ")` for `.join("\n")` kept both files green while breaking the
   // bullets out of the prompt's numbered step 5.
-  expect(lastSystemPrompt).toContain(`   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}`);
+  // Anchored on the numbered step that introduces it, not just the indent: a
+  // bare `toContain(indent + join)` matches an indented block ANYWHERE, so
+  // relocating the whole interpolation into another step kept both files green.
+  expect(lastSystemPrompt).toContain(
+    `5. Then write a structured summary with:\n   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}`,
+  );
   // Named explicitly: a TikTok that reads a prompt out loud is the case the
   // verbatim rule exists for, and this vertical also sees on-screen text.
   expect(lastSystemPrompt).toContain("reproduce it VERBATIM inside a fenced code block");
