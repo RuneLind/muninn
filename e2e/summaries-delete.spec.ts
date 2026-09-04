@@ -55,6 +55,11 @@ let sql: ReturnType<typeof postgres> | null = null;
 let seededWatcherId: string | null = null;
 /** Every DELETE path the fake huginn received. */
 let deletes: string[] = [];
+/** When set, the listing answers 500 — the post-delete refetch failure path. */
+let failListing = false;
+/** A doc with the SAME id in another vertical: a delete must leave its row alone. */
+const OTHER_SOURCE = "x-article";
+const OTHER_COLLECTION = "x-articles";
 /** The listing keeps carrying the doc AFTER the delete — deliberately. Huginn's
  *  listing lags its reindex, so the refetch the client runs after the status
  *  poll can re-render the row; the row staying gone is the client pulling it
@@ -76,10 +81,14 @@ async function startFakeHuginn(): Promise<Server> {
       });
     }
     if (p.startsWith("/api/collection/") && p.endsWith("/documents")) {
+      if (failListing) {
+        res.writeHead(500, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: "listing down" }));
+      }
       const collection = p.slice("/api/collection/".length, -"/documents".length);
       return json({
         documents:
-          collection === COLLECTION
+          collection === COLLECTION || collection === OTHER_COLLECTION
             ? [{ id: DOC_ID, title: DOC_TITLE, date: "2026-09-01", url: "https://example.com/v" }]
             : [],
       });
@@ -101,12 +110,15 @@ async function startFakeHuginn(): Promise<Server> {
  *  spec deleted nothing and reported so). */
 const SOURCE_DOCS = [{ collection: COLLECTION, docId: DOC_ID, title: DOC_TITLE, url: "https://example.com/v" }];
 
+async function seedProposals(): Promise<void> {
+  await sql!`DELETE FROM wiki_proposals WHERE bot_name = ${BOT} AND topic_key IN (${TOPIC_DRAFT}, ${TOPIC_APPLIED})`;
+  await sql!`INSERT INTO wiki_proposals (bot_name, topic_key, kind, mode, target_path, draft, source_docs, status)
+            VALUES (${BOT}, ${TOPIC_DRAFT}, 'source', 'create', ${"sources/" + TOPIC_DRAFT + ".mdx"}, '---\ntype: source\n---\n# x', ${sql!.json(SOURCE_DOCS as never)}, 'draft'),
+                   (${BOT}, ${TOPIC_APPLIED}, 'source', 'create', ${"sources/" + TOPIC_APPLIED + ".mdx"}, '---\ntype: source\n---\n# y', ${sql!.json(SOURCE_DOCS as never)}, 'applied')`;
+}
+
 test.beforeAll(async () => {
   sql = postgres(TEST_DB, { max: 2 });
-  await sql`DELETE FROM wiki_proposals WHERE bot_name = ${BOT} AND topic_key IN (${TOPIC_DRAFT}, ${TOPIC_APPLIED})`;
-  await sql`INSERT INTO wiki_proposals (bot_name, topic_key, kind, mode, target_path, draft, source_docs, status)
-            VALUES (${BOT}, ${TOPIC_DRAFT}, 'source', 'create', ${"sources/" + TOPIC_DRAFT + ".mdx"}, '---\ntype: source\n---\n# x', ${sql.json(SOURCE_DOCS as never)}, 'draft'),
-                   (${BOT}, ${TOPIC_APPLIED}, 'source', 'create', ${"sources/" + TOPIC_APPLIED + ".mdx"}, '---\ntype: source\n---\n# y', ${sql.json(SOURCE_DOCS as never)}, 'applied')`;
   // The route 404s without a seeded wiki-gardener watcher for the bot.
   const [existing] = await sql<{ id: string }[]>`SELECT id FROM watchers WHERE bot_name = ${BOT} AND type = 'wiki-gardener' LIMIT 1`;
   if (!existing) {
@@ -158,8 +170,18 @@ test.afterAll(async () => {
 });
 
 test.describe("Summaries: doc-panel delete", () => {
+  test.beforeEach(async () => {
+    deletes = [];
+    failListing = false;
+    await seedProposals();
+  });
+
   test("deletes the summary from huginn and the draft written from it, keeps the applied page, and says so", async ({ page }) => {
     const dialogs: string[] = [];
+    const deletePosts: string[] = [];
+    page.on("request", (req) => {
+      if (req.method() === "POST" && req.url().includes("/backlog-doc-delete")) deletePosts.push(req.url());
+    });
     page.on("dialog", async (d) => {
       dialogs.push(d.message());
       await d.accept();
@@ -171,6 +193,9 @@ test.describe("Summaries: doc-panel delete", () => {
     // Shelf tab is behind the panel; the row is there (data-doc-id + data-source).
     const row = page.locator(`#shelfList [data-doc-id="${DOC_ID}"][data-source="${SOURCE}"]`);
     await expect(row).toHaveCount(1);
+    // Same id, other vertical — must survive the delete (doc ids are collection-relative).
+    const otherRow = page.locator(`#shelfList [data-doc-id="${DOC_ID}"][data-source="${OTHER_SOURCE}"]`);
+    await expect(otherRow).toHaveCount(1);
 
     const btn = page.locator("#docPanelDelete");
     await expect(btn).toBeVisible();
@@ -193,8 +218,12 @@ test.describe("Summaries: doc-panel delete", () => {
     // The button is reusable for the next doc, not stuck disabled behind the poll.
     await expect(btn).toBeEnabled();
 
-    // 2. Huginn got exactly one DELETE, for the collection (not the source id).
+    // 2. Huginn got exactly one DELETE, for the collection (not the source id) —
+    //    and the client named its wiki EXPLICITLY rather than riding the route's
+    //    request defaults (a WIKI_DIR instance answers those with a 404).
     expect(deletes).toEqual([`/api/document/${COLLECTION}/${DOC_ID}`]);
+    expect(deletePosts).toHaveLength(1);
+    expect(new URL(deletePosts[0]!).searchParams.get("wiki")).toBe(BOT);
 
     // 3. The rows, read back.
     const rows = await sql!<{ topic_key: string; status: string }[]>`
@@ -205,5 +234,21 @@ test.describe("Summaries: doc-panel delete", () => {
     // re-renders the shelf; a removal that ran before the re-render is inert).
     await page.waitForTimeout(3000);
     await expect(row).toHaveCount(0);
+    await expect(otherRow).toHaveCount(1);
+  });
+
+  test("a listing that fails after the delete is said, not hidden behind a green notice", async ({ page }) => {
+    page.on("dialog", (d) => d.accept());
+    await page.goto(`${BASE}/summaries?source=${SOURCE}&doc=${encodeURIComponent(DOC_ID)}`);
+    await expect(page.locator("#docPanelTitle")).toHaveText(DOC_TITLE);
+    failListing = true;
+    await page.locator("#docPanelDelete").click();
+    const notice = page.locator("#deleteNotice");
+    // The delete itself succeeded; the refetch could not — both facts in one line,
+    // in the error tone. (Timeout covers the reindex poll before the refetch.)
+    await expect(notice).toContainText("the listing could not be reloaded", { timeout: 15_000 });
+    await expect(notice).toContainText(`Deleted "${DOC_TITLE}"`);
+    await expect(notice).toHaveClass(/err/);
+    expect(deletes).toHaveLength(1);
   });
 });

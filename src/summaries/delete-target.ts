@@ -15,9 +15,11 @@
  * dialog in front of a guaranteed refusal is worse than no button.
  *
  * Which bot wiki: the registry's default (`jarvis`, else the first entry) when it
- * IS a bot wiki, else the first bot wiki. That matches `/wiki/gardener`'s own
- * default target. The one gate this cannot see is the seeded `wiki-gardener`
- * watcher — the route 404s without one, and the client shows that message.
+ * IS a bot wiki, else the first bot wiki whose root is writable. (`/wiki/gardener`
+ * stops at the default and renders a "not a bot wiki" notice for a standalone one;
+ * this page has no such notice, so it falls through instead.) The one gate this
+ * cannot see is the seeded `wiki-gardener` watcher — the route 404s without one,
+ * and the client shows that message.
  */
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
 import { defaultWikiEntry } from "../wiki/registry.ts";
@@ -28,8 +30,7 @@ export function resolveSummariesDeleteTarget(
 ): { wiki: string } | null {
   if (opts.instanceReadonly) return null;
   const dflt = defaultWikiEntry(registry);
-  const entry = dflt && dflt.source === "bot" ? dflt : registry.find((e) => e.source === "bot");
-  if (!entry) return null;
-  if (opts.isReadonlyRoot(entry.root)) return null;
-  return { wiki: entry.name };
+  const usable = (e: WikiRegistryEntry) => e.source === "bot" && !opts.isReadonlyRoot(e.root);
+  const entry = dflt && usable(dflt) ? dflt : registry.find(usable);
+  return entry ? { wiki: entry.name } : null;
 }

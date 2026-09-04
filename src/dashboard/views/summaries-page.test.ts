@@ -69,6 +69,10 @@ describe("renderSummariesPage — the share mount", () => {
     // source id and the collection diverge (`x-article` → `x-articles`).
     expect(html).toContain('"collection":"x-articles"');
     expect(html).toContain("/api/wiki/gardener/backlog-doc-delete");
+    // …with an EXPLICIT ?wiki= from the server-resolved target — the route's own
+    // defaults answer a WIKI_DIR instance with a 404 and a WIKI_EXTRA one with a 400.
+    expect(html).toMatch(/const DELETE_TARGET = (\{"wiki":"[^"]+"\}|null);/);
+    expect(html).toContain("'wiki=' + encodeURIComponent(DELETE_TARGET.wiki)");
   });
 
   test("renders the dialog stylesheet server-side — the bundle drops it", () => {

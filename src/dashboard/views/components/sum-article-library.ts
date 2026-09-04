@@ -501,11 +501,15 @@ export function sumArticleLibraryScript(): string {
       if (caveats.length) {
         showDeleteNotice(parts.join(' ') + ' — but ' + caveats.join(' and ') + ', so it may reappear in the list until the next index run.', 'ok');
       }
-      // Refetch (loadShelf forces the memoized listing; loadLibrary rides on it),
-      // AWAITED so the re-render is done before the rows are pulled again — the doc
-      // is gone from disk whatever the listing still says.
+      // Refetch ONCE through the memo (getSummaryDocuments(true) is the only call
+      // that throws — loadShelf/loadLibrary swallow their own failures into the
+      // shelf's "Failed to load", so a catch around THEM is dead code), then let
+      // both renderers ride on the fresh memo, AWAITED so the re-render is done
+      // before the rows are pulled again — the doc is gone from disk whatever the
+      // listing still says.
       try {
-        if (typeof loadShelf === 'function') await loadShelf(true);
+        await getSummaryDocuments(true);
+        if (typeof loadShelf === 'function') await loadShelf();
         if (typeof loadLibrary === 'function') await loadLibrary();
         removeDocRows(docId, source);
       } catch (e) {

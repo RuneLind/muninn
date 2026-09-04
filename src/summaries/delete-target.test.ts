@@ -22,9 +22,9 @@ describe("resolveSummariesDeleteTarget", () => {
   test("a wiki-readonly instance ⇒ no button, whatever the registry", () => {
     expect(resolveSummariesDeleteTarget([bot("jarvis")], { ...writable, instanceReadonly: true })).toBeNull();
   });
-  test("a read-only ROOT ⇒ no button (the route 403s it)", () => {
-    expect(
-      resolveSummariesDeleteTarget([bot("jarvis", "/ro/jarvis")], { ...writable, isReadonlyRoot: (r) => r === "/ro/jarvis" }),
-    ).toBeNull();
+  test("a read-only ROOT ⇒ no button (the route 403s it) — unless another bot wiki is writable", () => {
+    const ro = { ...writable, isReadonlyRoot: (r: string) => r === "/ro/jarvis" };
+    expect(resolveSummariesDeleteTarget([bot("jarvis", "/ro/jarvis")], ro)).toBeNull();
+    expect(resolveSummariesDeleteTarget([bot("jarvis", "/ro/jarvis"), bot("capra")], ro)).toEqual({ wiki: "capra" });
   });
 });
