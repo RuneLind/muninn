@@ -91,6 +91,7 @@ import {
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
+import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import { buildRail, isPinnedRelPath, type RailEntry } from "./wiki-recents.ts";
 import {
   clearRecents,
@@ -479,6 +480,7 @@ function relPathToName(relPath: string): string | null {
 
 initStartCards({ withWiki, resolvePageName: relPathToName });
 initRailResize();
+initPaneToggles();
 
 function sortMode(): WikiSortMode {
   return (document.getElementById("wikiSort") as HTMLSelectElement).value as WikiSortMode;
@@ -3384,7 +3386,9 @@ function runAskStream(url: string, turn: AskTurn): void {
   // Reveal the Ask tab in the rail so the compose + session history are visible
   // while the answer streams into the main pane. Covers the Ask box, the in-pane
   // follow-up bar, and Explain (all converge here). No focus steal — the follow-up
-  // input in the article pane keeps the caret.
+  // input in the article pane keeps the caret. The pane itself must be on screen
+  // for the reveal to mean anything: un-collapse it and leave focus mode first.
+  revealRightPane();
   switchConnTab("ask");
   askActive = turn;
   askBuffer = "";
