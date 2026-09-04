@@ -672,14 +672,19 @@ function validateWikiAutoCommitConfig(settings: Record<string, unknown>, botName
  * snapshot the first case took. It is in `AMBIENT_INSTANCE_ENV`, so no suite
  * inherits a developer's value.
  *
- * ⚠️ A RELATIVE or NON-EXISTENT value is refused (warned about, once per value)
- * and falls back to the checkout's own `bots/` — the `MUNINN_AGENT_CWD`
- * precedent. Honouring either is a silent roster of ZERO: a relative value
- * resolves against whatever cwd the process happens to have (a launchd service
- * and a shell have different ones), and a directory that is not there makes
- * `discoverBotsInternal` warn once and return `[]`, at which point every bot is
- * offline, no Telegram poller starts, and `resolveSummarizerBot` has nothing to
- * resolve. A typo in `.env` must not do that.
+ * ⚠️ A RELATIVE value, or an absolute one that is NOT A DIRECTORY (absent, a
+ * file, a dangling symlink), is refused (warned about, once per value) and
+ * falls back to the checkout's own `bots/` — the `MUNINN_AGENT_CWD` precedent.
+ * Honouring any of them is worse than a warning: a relative value resolves
+ * against whatever cwd the process happens to have (a launchd service and a
+ * shell have different ones), an absent directory makes `discoverBotsInternal`
+ * warn once and return `[]` (every bot offline, no Telegram poller, nothing for
+ * `resolveSummarizerBot` to resolve), and a FILE made `readdirSync` throw
+ * ENOTDIR out of discovery — a boot crash (measured with `/etc/hosts`). A typo
+ * in `.env` must not do any of that. KNOWN residual: a directory the process
+ * may not READ passes this guard and `readdirSync` throws EACCES, exactly as
+ * the default `bots/` always did — the fix for that class belongs around the
+ * `readdirSync` in discovery, not here.
  */
 export function resolveBotsDir(): string {
   const fallback = resolve(import.meta.dir, "../../bots");
@@ -707,7 +712,7 @@ export function resolveBotsDir(): string {
   if (!isDir) {
     warnBotsDirOnce(
       `missing:${abs}`,
-      "MUNINN_BOTS_DIR={value} is not a directory — ignoring it and using {fallback}",
+      "MUNINN_BOTS_DIR={value} does not exist or is not a directory — ignoring it and using {fallback}",
       { value: abs, fallback },
     );
     return fallback;
