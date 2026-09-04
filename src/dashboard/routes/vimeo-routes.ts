@@ -74,23 +74,38 @@ interface VimeoFlight {
   decided: Promise<void>;
   settle: () => void;
 }
-const inFlight = new Map<string, VimeoFlight>();
-
-function claimVideo(videoId: string): VimeoFlight {
-  let settle!: () => void;
-  const decided = new Promise<void>((resolve) => { settle = resolve; });
-  const flight: VimeoFlight = { jobId: null, decided, settle };
-  inFlight.set(videoId, flight);
-  return flight;
-}
-
-function releaseVideo(videoId: string, flight: VimeoFlight): void {
-  if (inFlight.get(videoId) === flight) inFlight.delete(videoId);
-  flight.settle();
-}
 
 export function registerVimeoRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
+
+  /**
+   * ONE map per REGISTRATION, not one per module — the truthful scope, since a
+   * process registers these routes exactly once and the claim is about "a
+   * capture this app has started".
+   *
+   * Module-level it was also process-level state with no seam, which is a
+   * testing hazard rather than a production one: a test builds a fresh app per
+   * case, so a claim leaked by one case (a handler that threw between the claim
+   * and its release) outlived it and answered `in_flight` for every later case
+   * touching that video — measured, one mutation produced 12 unrelated
+   * failures, none of them naming the route that leaked. Deliberately NOT a
+   * test-only reset export: the scope is what was wrong, and an export would
+   * leave the wrong scope in place behind a lever only tests pull.
+   */
+  const inFlight = new Map<string, VimeoFlight>();
+
+  function claimVideo(videoId: string): VimeoFlight {
+    let settle!: () => void;
+    const decided = new Promise<void>((resolve) => { settle = resolve; });
+    const flight: VimeoFlight = { jobId: null, decided, settle };
+    inFlight.set(videoId, flight);
+    return flight;
+  }
+
+  function releaseVideo(videoId: string, flight: VimeoFlight): void {
+    if (inFlight.get(videoId) === flight) inFlight.delete(videoId);
+    flight.settle();
+  }
 
   // Shared plumbing: bare-path redirect, SSE stream, jobs, document/similar
   // proxies. NO CORS preflight and no `applyCors` on the POST below: there is no
@@ -218,6 +233,14 @@ export function registerVimeoRoutes(app: Hono, config: Config): void {
       // when the job does (it never rethrows; both terminal paths are inside
       // it), so this is where the claim is given back — on `completeJob` and on
       // `failJob` alike, and on a throw the catch below would report.
+      //
+      // `.finally`, never `.then`: the release must not depend on the log line
+      // above it succeeding. The two spellings differ in exactly one cell of
+      // this chain's state space — a settled capture is fulfilled (both run) or
+      // rejected, and a rejection either logs cleanly (the catch fulfils, both
+      // run) or throws inside the catch, where only `.finally` still releases.
+      // A throwing catch is not hypothetical: `String(err)` runs a rejection
+      // value's own `toString`.
       summarizeVimeo(
         jobId,
         {

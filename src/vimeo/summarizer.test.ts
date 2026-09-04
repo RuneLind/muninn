@@ -75,6 +75,7 @@ const {
   VIMEO_COLLECTION,
   ingestDate,
   resolveHarvestStubDeps,
+  stubCacheKey,
 } = await import("./summarizer.ts");
 const { createJob, getJob, subscribe } = await import("./state.ts");
 
@@ -313,10 +314,41 @@ test("a QUEUED job stays pending — it reports harvesting only when its harvest
   // `updateStatus` fired before `harvestQueue.run`, so the second job announced
   // a Chromium that was not running — for as long as the first harvest took
   // (up to the 60 s budget, and stacking with every further queued job).
+  //
+  // TWO things about the scaffolding are load-bearing, both learned the hard
+  // way in this file:
+  //
+  //  - the harvests are released in a `finally`. `harvestQueue` is MODULE-level
+  //    and shared with every other test here, so a parked harvest that is never
+  //    released does not fail this test — it wedges the queue for the rest of
+  //    the FILE, and the run reports five 5 s timeouts under unrelated names.
+  //    `parkingOpen` closes the door for harvests that have not started yet, so
+  //    the drain cannot miss one that parks after the loop.
+  //  - the test waits on a SIGNAL the stub harvest raises when it STARTS, not
+  //    on a fixed number of microtask turns. `for (i < 20) await
+  //    Promise.resolve()` is a guess about how many awaits the code under test
+  //    performs before it gets there, which is exactly the thing this test is
+  //    allowed to change.
+  let parkingOpen = true;
   const releases: Array<() => void> = [];
+  let startCount = 0;
+  let startWaiters: Array<{ n: number; resolve: () => void }> = [];
+
+  /** Resolves once `n` harvests have ENTERED (already resolved if they have). */
+  function harvestStarted(n: number): Promise<void> {
+    if (startCount >= n) return Promise.resolve();
+    return new Promise<void>((resolve) => { startWaiters.push({ n, resolve }); });
+  }
+
   const slowDeps = {
     harvest: async () => {
-      await new Promise<void>((resolve) => releases.push(resolve));
+      startCount++;
+      const due = startWaiters.filter((w) => startCount >= w.n);
+      startWaiters = startWaiters.filter((w) => startCount < w.n);
+      for (const w of due) w.resolve();
+      // No await between the read and the push: a harvest either parks or is
+      // waved through, never both and never neither.
+      if (parkingOpen) await new Promise<void>((resolve) => { releases.push(resolve); });
       return captionsWith([AUTO_TRACK]);
     },
     downloadVtt: async () => VTT,
@@ -327,17 +359,23 @@ test("a QUEUED job stays pending — it reports harvesting only when its harvest
   const runA = summarizeVimeo(jobA, META, config, bot, slowDeps);
   const runB = summarizeVimeo(jobB, { ...META, videoId: "1223642971" }, config, bot, slowDeps);
 
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  expect(getJob(jobA)!.status).toBe("harvesting_captions");
-  expect(getJob(jobB)!.status).toBe("pending");
+  try {
+    await harvestStarted(1);
+    expect(getJob(jobA)!.status).toBe("harvesting_captions");
+    expect(getJob(jobB)!.status).toBe("pending");
 
-  releases[0]!();
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  expect(getJob(jobB)!.status).toBe("harvesting_captions");
+    releases[0]!();
+    await harvestStarted(2);
+    expect(getJob(jobB)!.status).toBe("harvesting_captions");
 
-  releases[1]!();
-  await Promise.all([runA, runB]);
-  expect(getJob(jobB)!.status).toBe("complete");
+    releases[1]!();
+    await Promise.all([runA, runB]);
+    expect(getJob(jobB)!.status).toBe("complete");
+  } finally {
+    parkingOpen = false;
+    for (const release of releases.splice(0)) release();
+    await Promise.allSettled([runA, runB]);
+  }
 });
 
 // --- ingestDate --------------------------------------------------------------
@@ -375,6 +413,37 @@ test("the stub is REFUSED when the file does not exist", async () => {
   expect(
     await resolveHarvestStubDeps({ VIMEO_HARVEST_STUB: "/nonexistent/absolutely-not.vtt" }),
   ).toBeNull();
+});
+
+test("the memo key separates a path holding a SPACE from a profile", () => {
+  // Both witnesses below are pairs a SPACE separator maps to one key, so
+  // whichever configuration asks first decides for the other — and the memo
+  // hands back deps, i.e. the stub RUNS where it should have been refused.
+  // Derived, not sampled: `path + SEP + profile` collides exactly when the
+  // profile contributes the separator, so with SEP=" " a profile that carries
+  // a space is the whole collision class, and both reachable shapes of that are
+  // pinned here. NUL is the one byte a path cannot contain, so there is no
+  // such shape for it.
+  //
+  // (1) an untrimmed `MUNINN_PROFILE` — `resolveServingProfile` trims, so
+  //     "nais " really is a nais process, and it must refuse the stub.
+  expect(stubCacheKey({ VIMEO_HARVEST_STUB: "/tmp/x nais" })).not.toBe(
+    stubCacheKey({ VIMEO_HARVEST_STUB: "/tmp/x", MUNINN_PROFILE: "nais " }),
+  );
+  // (2) an INVALID profile, which must throw rather than resolve to anything —
+  //     the fail-open direction, and the worse of the two.
+  expect(stubCacheKey({ VIMEO_HARVEST_STUB: "/tmp/a b", MUNINN_PROFILE: "c" })).not.toBe(
+    stubCacheKey({ VIMEO_HARVEST_STUB: "/tmp/a", MUNINN_PROFILE: "b c" }),
+  );
+  // Trimming is part of the key, not of the caller: two spellings of ONE
+  // configuration must still share an answer.
+  expect(stubCacheKey({ VIMEO_HARVEST_STUB: "  /tmp/x  ", MUNINN_PROFILE: "nais" })).toBe(
+    stubCacheKey({ VIMEO_HARVEST_STUB: "/tmp/x", MUNINN_PROFILE: "nais" }),
+  );
+  // And an absent profile is not a different configuration from a blank one.
+  expect(stubCacheKey({ VIMEO_HARVEST_STUB: "/tmp/x" })).toBe(
+    stubCacheKey({ VIMEO_HARVEST_STUB: "/tmp/x", MUNINN_PROFILE: "" }),
+  );
 });
 
 test("an unset stub resolves to null (the real deps stay)", async () => {

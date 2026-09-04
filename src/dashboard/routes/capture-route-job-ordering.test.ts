@@ -109,12 +109,23 @@ let vimeoSummarizeCalls = 0;
  * capture is running parks the first one here.
  */
 let vimeoSummarizeGate: Promise<void> | null = null;
+/**
+ * What the capture REJECTS with, when a case wants the failure path.
+ *
+ * The real `summarizeVimeo` puts both terminal transitions inside itself and
+ * does not rethrow, so this is the shape of a bug in it (or in the deps it
+ * resolves) rather than an ordinary capture failure — which is exactly the path
+ * the route's `.catch(…).finally(release)` exists for, and the one no case
+ * covered: every other case here resolves.
+ */
+let vimeoSummarizeRejectsWith: unknown = null;
 const realVimeoSummarizer = await import("../../vimeo/summarizer.ts");
 mock.module("../../vimeo/summarizer.ts", () => ({
   ...realVimeoSummarizer,
   summarizeVimeo: async () => {
     vimeoSummarizeCalls++;
     if (vimeoSummarizeGate) await vimeoSummarizeGate;
+    if (vimeoSummarizeRejectsWith !== null) throw vimeoSummarizeRejectsWith;
   },
 }));
 
@@ -196,6 +207,7 @@ beforeEach(() => {
   youtubeSummarizeCalls = 0;
   vimeoSummarizeCalls = 0;
   vimeoSummarizeGate = null;
+  vimeoSummarizeRejectsWith = null;
   oembedCalls = 0;
   oembedThrows = null;
   oembedAnswer = {
@@ -532,6 +544,74 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     expect(second.job_id).toBeTruthy();
     expect(second.job_id).not.toBe(first.job_id);
     expect(vimeoSummarizeCalls).toBe(2);
+  });
+
+  test("a capture that REJECTS releases the claim — the video is not wedged", async () => {
+    // The claim is given back in a `.finally` on the fire-and-forget chain, and
+    // nothing covered the rejecting half of it: every other case here resolves,
+    // so "release on failure" was carried by a mechanism no test could see. A
+    // release moved onto the SUCCESS side of the chain (`.then(release)` before
+    // the `.catch`, the natural way to write it) leaves this video claimed for
+    // the life of the process — every later POST answers `in_flight` pointing
+    // at a job that failed. Deleting the release outright dies here too.
+    //
+    // What this case does NOT kill, stated because it looks like it should:
+    // `.catch(log).finally(release)` → `.catch(log).then(release)`. Those two
+    // differ in exactly ONE cell of the chain's state space, enumerated rather
+    // than sampled — the capture settles fulfilled (the catch passes through,
+    // both run) or rejected, and a rejection either logs cleanly (the catch
+    // fulfils, both run) or throws INSIDE the catch, where only `.finally` still
+    // releases. That last cell is reachable (`String(err)` runs the rejection
+    // value's own `toString`) but not ASSERTABLE here: the catch's throw
+    // rejects the chain's tail, which has no terminal handler, and bun's runner
+    // fails the case on the escaped rejection whatever `process.on(
+    // "unhandledRejection")` says — measured. So the mutant is unpinned, and
+    // the missing terminal `.catch` is the follow-up.
+    vimeoSummarizeRejectsWith = new Error("the harvester threw on its own stack");
+    const app = vmApp();
+    const first = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as {
+      job_id: string;
+    };
+    // The POST answers 200 with a job id whatever the background capture does —
+    // the route's own error path logs and returns, it never throws into the
+    // handler (which already responded) and never rejects the response.
+    expect(first.job_id).toBeTruthy();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    const second = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+
+    expect(second.in_flight).toBeUndefined();
+    expect(second.job_id).toBeTruthy();
+    expect(second.job_id).not.toBe(first.job_id);
+    expect(vimeoSummarizeCalls).toBe(2);
+  });
+
+  test("two registrations do not share a claim — the map belongs to the app", async () => {
+    // The map was module-level while `vmApp()` builds a fresh app per case, so
+    // it was process state with no seam: a claim leaked by one case (a handler
+    // that threw between the claim and its release) outlived that case and
+    // answered `in_flight` for every later one touching the same video —
+    // measured, one mutation of the release produced 12 failures, none of them
+    // in the case that leaked. One map per REGISTRATION is the truthful scope.
+    let release!: () => void;
+    vimeoSummarizeGate = new Promise<void>((resolve) => { release = resolve; });
+    const appA = vmApp();
+    const appB = vmApp();
+
+    const a = (await (await post(appA, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+    const b = (await (await post(appB, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+
+    expect(a.in_flight).toBeUndefined();
+    expect(b.in_flight).toBeUndefined();
+    expect(b.job_id).toBeTruthy();
+    expect(b.job_id).not.toBe(a.job_id);
+    expect(vimeoSummarizeCalls).toBe(2);
+
+    release();
+    await Promise.resolve();
   });
 
   test("a refused POST releases the claim rather than wedging the video", async () => {

@@ -104,6 +104,28 @@ function isDocIdToken(token: string): boolean {
  *    a credential for reaching the page, never part of the video's identity);
  *  - TikTok: `/video/<digits>`.
  *
+ * ⚠️ **Vimeo is URL-only — it is NOT symmetric with the other three.** The ids
+ * this function returns feed two credit paths, and Vimeo reaches just one of
+ * them: a doc is credited when a wiki page carries its URL, never when a page
+ * cites it by the bare backtick-token convention (`` `1223358361` ``). That
+ * convention runs {@link isDocIdToken}, whose two shapes are an 11-char YouTube
+ * id and a 15–20-digit X/TikTok status id — a Vimeo id is ~10 digits and
+ * matches neither, so it can never be credited that way. Widening the token
+ * rule is a wiki-CITATION-convention change (a bare 10-digit run in prose is
+ * not obviously an id at all), so it is deliberately left as a follow-up rather
+ * than smuggled in with the vertical.
+ *
+ * ⚠️ The same asymmetry has a second face, and it bites the URL path this
+ * function DOES serve: Vimeo is the only branch here that goes through a strict
+ * URL PARSER, the other three are loose regexes over the raw string. So a
+ * trailing character the sweep hands over — a backtick, which `URL_SWEEP_RE`
+ * admits and {@link normalizeUrl} does not trim — is survivable for them and
+ * fatal for Vimeo. Measured over the two real wikis on this machine (1 939
+ * pages): `` `https://vimeo.com/1223358361` `` yields null while the identically
+ * quoted YouTube, X and TikTok urls still yield their ids, and 1 of the 3 vimeo
+ * mentions in the corpus is written that way. Also a follow-up (the fix is in
+ * the sweep/normalize pair, not here — every consumer of a swept url has it).
+ *
  * Vimeo goes through the host-gated parser rather than a regex of its own, and
  * sits above the TikTok match because the two shapes overlap:
  * `player.vimeo.com/video/<id>` matches the bare `/video/<digits>` rule as well.

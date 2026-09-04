@@ -12,8 +12,14 @@ const log = getLog("vimeo", "state");
  * exists — it is what decides whether there is anything to capture at all (not
  * public → 422, over the duration cap → 413), and a job created before that
  * verdict would be a row nothing settles. The metadata is handed to
- * `summarizeVimeo`, so the first state a job is ever seen in is
- * `harvesting_captions`.
+ * `summarizeVimeo`, which never asks oEmbed again.
+ *
+ * `pending` is observable, and not only as the instant between `createJob` and
+ * the first `updateStatus`: harvests are serialized process-wide (ONE Chromium
+ * at a time, `summarizer.ts`), and the status moves INSIDE that queued closure,
+ * so a job waiting its turn reports `pending` for as long as every harvest
+ * ahead of it takes. Announcing `harvesting_captions` on arrival would be a
+ * claim about a browser that is not running.
  */
 export type JobStatus =
   | "pending"

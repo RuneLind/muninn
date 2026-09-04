@@ -205,11 +205,31 @@ export async function resolveHarvestStubDeps(
  */
 let stubCache: { key: string; value: Promise<VimeoSummarizerDeps | null> } | null = null;
 
+/**
+ * The memo key for one `(VIMEO_HARVEST_STUB, MUNINN_PROFILE)` pair.
+ *
+ * The separator is **NUL, spelled as an escape** — the one byte a filesystem
+ * path cannot contain. It cannot be a SPACE, because a path may hold one:
+ * `/tmp/x nais` with no profile and `/tmp/x` with `MUNINN_PROFILE=nais` would
+ * both spell `"/tmp/x nais"`, so the second configuration is served the first's
+ * cached answer and a `nais` process runs the stub it exists to refuse. And it
+ * is an ESCAPE rather than the raw byte it shipped as, which no reader, diff or
+ * review can see — it renders as a space in every one of them, i.e. as exactly
+ * the bug it is there to prevent.
+ *
+ * Exported because that property is otherwise untestable: the memo is a private
+ * wrapper and the collision needs two configurations inside ONE process, which
+ * only a test arranges.
+ */
+export function stubCacheKey(env: Record<string, string | undefined>): string {
+  return `${env.VIMEO_HARVEST_STUB?.trim() ?? ""}\u0000${env.MUNINN_PROFILE ?? ""}`;
+}
+
 async function harvestStub(
   env: Record<string, string | undefined> = process.env,
 ): Promise<{ deps: VimeoSummarizerDeps; path: string } | null> {
   const path = env.VIMEO_HARVEST_STUB?.trim() ?? "";
-  const key = `${path} ${env.MUNINN_PROFILE ?? ""}`;
+  const key = stubCacheKey(env);
   if (!stubCache || stubCache.key !== key) {
     stubCache = { key, value: resolveHarvestStubDeps(env) };
   }
