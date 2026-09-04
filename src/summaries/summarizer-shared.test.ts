@@ -4,6 +4,7 @@ import {
   ingestSummary,
   runCaptureOneShot,
   CAPTURE_THINKING_MAX_TOKENS,
+  SUMMARY_STRUCTURE_BULLETS,
 } from "./summarizer-shared.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 import type { Tracer } from "../tracing/index.ts";
@@ -30,6 +31,7 @@ Instructions:
    - Open the summary with ONE *italic* ingress line (max ~30 words): what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*
    - Then a \`## Key takeaways\` section FIRST (before any other section) — 3–6 tight bullet points, one line each, capturing the most important points.
    - Then \`##\`-level section headers for each major topic; use \`###\` only for sub-sections. Keep the heading hierarchy consistent.
+   - When the source DICTATES something meant to be reused — a prompt, a command, a config, a query, a formula, a code snippet ("the prompt I use is…", "run this…", text shown on screen) — reproduce it VERBATIM and in FULL inside a fenced code block, under a short line saying what it is. Never paraphrase, shorten or describe it: for these, fidelity beats brevity and the "keep it concise" rule below does not apply. If the source names such an artifact without ever giving its text, say so — never invent one.
    - Use a markdown table when the content is genuinely comparative (options side by side, before/after, feature or tradeoff matrices) — don't force a table onto non-comparative content.
    - **Bold** for key terms; bullet lists for enumerations, prefixed with a fitting emoji (as in \`- 🧪 Evals catch…\`).
    - Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).
@@ -51,6 +53,36 @@ test("the default structure leads with a `## Key takeaways` section and forbids 
   expect(built).toContain("no custom block components");
   // Tables only where content is genuinely comparative.
   expect(built).toContain("markdown table when the content is genuinely comparative");
+});
+
+// The video verticals (tiktok, x-video) interpolate SUMMARY_STRUCTURE_BULLETS
+// directly instead of going through buildSummarySystemPrompt, so the scaffold
+// snapshot above does not cover them. Asserting on the exported array is what
+// pins the rule for all six prompt sites at once.
+describe("the verbatim-artifact rule", () => {
+  const joined = SUMMARY_STRUCTURE_BULLETS.join("\n");
+
+  test("demands the full text of reusable material, in a fenced block", () => {
+    expect(joined).toContain("VERBATIM and in FULL inside a fenced code block");
+    // The trigger set — a prompt read out loud is the case this exists for.
+    expect(joined).toContain("a prompt, a command, a config, a query, a formula, a code snippet");
+  });
+
+  test("forbids inventing an artifact the source never gave", () => {
+    // Without this half, "always produce a fenced prompt" is satisfiable by
+    // writing a plausible one for a source that merely mentions having one.
+    expect(joined).toContain("never invent one");
+  });
+
+  test("is stated BEFORE the concision rule it exempts itself from", () => {
+    // The bullet says the "keep it concise" rule *below* does not apply, so the
+    // two are order-coupled: reordering them would leave a dangling reference.
+    const verbatimIdx = SUMMARY_STRUCTURE_BULLETS.findIndex((b) => b.includes("VERBATIM"));
+    const conciseIdx = SUMMARY_STRUCTURE_BULLETS.findIndex((b) => b.includes("Keep it concise"));
+    expect(verbatimIdx).toBeGreaterThanOrEqual(0);
+    expect(conciseIdx).toBeGreaterThanOrEqual(0);
+    expect(verbatimIdx).toBeLessThan(conciseIdx);
+  });
 });
 
 // --- ingestSummary ---

@@ -165,6 +165,13 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
  * output is PLAIN markdown — no block components (Callout/Verdict/Pill/etc.),
  * a stated non-goal for stored summaries.
  *
+ * The verbatim-artifact rule is the one exception to "concise but
+ * comprehensive": summarizing is the wrong operation for material meant to be
+ * reused, and the loss is permanent — no vertical retains its source text, so
+ * a paraphrased prompt is unrecoverable once the job's TTL expires. Its
+ * "never invent one" half is load-bearing rather than decoration: a rule that
+ * only demanded a fenced prompt would be satisfied by writing a plausible one.
+ *
  * The ingress + closer restore what the pre-#309 loose prompt produced
  * emergently on the best summaries (and inconsistently on the rest): an
  * orientation line up top and a memorable distillation at the bottom. The
@@ -176,6 +183,7 @@ export const SUMMARY_STRUCTURE_BULLETS = [
   "- Open the summary with ONE *italic* ingress line (max ~30 words): what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*",
   "- Then a `## Key takeaways` section FIRST (before any other section) — 3–6 tight bullet points, one line each, capturing the most important points.",
   "- Then `##`-level section headers for each major topic; use `###` only for sub-sections. Keep the heading hierarchy consistent.",
+  "- When the source DICTATES something meant to be reused — a prompt, a command, a config, a query, a formula, a code snippet (\"the prompt I use is…\", \"run this…\", text shown on screen) — reproduce it VERBATIM and in FULL inside a fenced code block, under a short line saying what it is. Never paraphrase, shorten or describe it: for these, fidelity beats brevity and the \"keep it concise\" rule below does not apply. If the source names such an artifact without ever giving its text, say so — never invent one.",
   "- Use a markdown table when the content is genuinely comparative (options side by side, before/after, feature or tradeoff matrices) — don't force a table onto non-comparative content.",
   "- **Bold** for key terms; bullet lists for enumerations, prefixed with a fitting emoji (as in `- 🧪 Evals catch…`).",
   "- Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).",
