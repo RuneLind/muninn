@@ -18,6 +18,7 @@ import { registerToolsRoutes } from "./routes/tools-routes.ts";
 import { registerYouTubeRoutes } from "./routes/youtube-routes.ts";
 import { registerXArticleRoutes } from "./routes/x-article-routes.ts";
 import { registerTikTokRoutes } from "./routes/tiktok-routes.ts";
+import { registerVimeoRoutes } from "./routes/vimeo-routes.ts";
 import { registerSummariesRoutes } from "./routes/summaries-routes.ts";
 import { registerAnthropicRoutes } from "./routes/anthropic-routes.ts";
 import { registerArticleRoutes } from "./routes/article-routes.ts";
@@ -117,6 +118,7 @@ export function createDashboardRoutes(config: Config): Hono {
     ["youtube", (a) => registerYouTubeRoutes(a, config)],
     ["x-article", (a) => registerXArticleRoutes(a, config)],
     ["tiktok", (a) => registerTikTokRoutes(a, config)],
+    ["vimeo", (a) => registerVimeoRoutes(a, config)],
     ["sse", (a) => registerSSERoutes(a)],
     ["graph", (a) => registerGraphRoutes(a, config)],
     ["wiki", (a) => registerWikiRoutes(a, config)],

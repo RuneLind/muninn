@@ -92,7 +92,7 @@ export function sumJobCardStyles(): string {
       letter-spacing: 0.5px;
     }
     .status-pending { background: color-mix(in srgb, var(--text-dim) 20%, transparent); color: var(--text-dim); }
-    .status-fetching_transcript, .status-downloading, .status-transcribing { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
+    .status-fetching_transcript, .status-downloading, .status-transcribing, .status-harvesting_captions { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
     .status-summarizing, .status-extracting_frames { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-light); }
     .status-ingesting { background: color-mix(in srgb, var(--status-warning) 20%, transparent); color: var(--status-warning); }
     .status-complete { background: color-mix(in srgb, var(--status-success) 20%, transparent); color: var(--status-success); }
@@ -251,6 +251,7 @@ export function sumJobCardScript(): string {
     var STATUS_LABELS = {
       pending: 'Pending',
       fetching_transcript: 'Fetching transcript',
+      harvesting_captions: 'Harvesting captions',
       downloading: 'Downloading',
       transcribing: 'Transcribing',
       extracting_frames: 'Extracting frames',

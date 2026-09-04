@@ -1,8 +1,9 @@
-# Vimeo — transcript core
+# Vimeo — the capture vertical
 
-Given a Vimeo id, produce a timestamped transcript. PR 1 of the capture vertical:
-the four modules below plus `scripts/smoke-vimeo.ts`. No route, no job store, no
-UI — those are PR 2/3.
+Given a Vimeo URL, produce a summarized, indexed, citable conference talk. PR 1
+was the transcript core; PR 2 added the job, the route and the ingest. No UI
+entry yet — the route is curl-driven until PR 3 adds the URL field on
+`/summaries`.
 
 | File | Role |
 |---|---|
@@ -10,7 +11,70 @@ UI — those are PR 2/3.
 | `oembed.ts` | `fetchVimeoOembed` — title/author/duration/upload date/thumbnail with **no browser** |
 | `vtt.ts` | `parseVttCues`, `vttToSegments`, `segmentsToMarkdown`, `detectCaptionKind` — pure |
 | `captions.ts` | `harvestVimeoCaptions` (headless Chromium), `downloadVtt` (host-pinned), `chooseTrack` (pure) |
+| `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · summarizing · ingesting · complete · error` |
+| `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft |
 | `fixtures/totto-trust-but-verify.vtt` | Real auto-captions from a public JavaZone talk: 63 KB, 928 cues, 53 min |
+
+The route is `src/dashboard/routes/vimeo-routes.ts`; the huginn half is the
+`vimeo` push source (`main/ingest/vimeo.py`, `POST /api/vimeo/ingest`, collection
+`vimeo-summaries`).
+
+## Rules the VERTICAL lives by (PR 2)
+
+**There is no `fetching_metadata` status.** oEmbed runs in the ROUTE, before a job
+exists, because it is what decides whether there is anything to capture at all —
+not public ⇒ 422, over the 3 h cap ⇒ 413, already captured ⇒ a `duplicate` body
+with no `job_id`. A job created above one of those early returns is never settled
+and sits for the whole in-flight grace at the top of `/summaries` with a
+"running" `/agents` card (the ordering `capture-route-job-ordering.test.ts` pins
+for every capture vertical). The metadata is then handed to `summarizeVimeo`,
+which never asks oEmbed again.
+
+**The dedup key is `canonicalVimeoUrl(id)`, compared as a whole string.** Every
+writer of this collection posts that url, so the stored value IS the key by
+construction; re-extracting an id from each listing row would be a second, weaker
+copy of the same rule. An unlisted-hash paste therefore still matches.
+
+**ONE Chromium at a time, process-wide.** `harvestVimeoCaptions` launches a
+browser per harvest, so every harvest goes through a module-level
+`createQueue()` key in `summarizer.ts`. A QUEUE, not a try-lock: two pastes are
+two legitimate jobs and neither may be dropped — the second waits, then runs, and
+its own 60 s budget starts when it does.
+
+**The auto-caption rider is appended exactly when `detectCaptionKind` says
+`auto`.** Vimeo's machine captions garble proper nouns ("JavaBeen" for JavaBin,
+measured), and the failure that matters is a summary confidently naming a
+library that was never said. The rider tells the model to DESCRIBE rather than
+assert such a name, not to omit it.
+
+**The transcript is ingested, not just summarized.** `transcript_markdown` is
+written into the huginn document under a `## Transcript` heading after the
+summary, so a search hit in a 50-minute talk can be cited to the minute — but it
+is deliberately absent from huginn's ingest RESPONSE and from its similarity
+query (`write_summary`'s `body_suffix`). Measured on the first real capture: a
+`?q=tiny LLM library` search hits inside that section.
+
+**`no_captions` is a job ERROR with a stable code, not a crash.** A video with no
+usable track is a legitimate answer about the video; `manifestUrl` is logged
+because it is what PR 4's audio fallback would need and it expires.
+
+**oEmbed's `upload_date` is a datetime; huginn's `date` is a day.** `ingestDate`
+takes the day half and omits the field entirely when it cannot — huginn then
+stamps today, which sorts, where a malformed date does not. A title-less oEmbed
+answer falls back to the canonical url, because huginn derives the document
+FILENAME from the title and `""` would collide with every other title-less
+capture.
+
+**No CORS, deliberately.** `registerSummaryVertical` is called with
+`corsPreflight: false` and the POST calls no `applyCors`: there is no Chrome
+extension for this vertical (PR 3's entry point is same-origin), and a
+cross-origin summarize entry is a way for any page to spend the operator's model
+budget.
+
+**`MUNINN_PROFILE=nais` drops the group**, for the reason the other capture
+verticals are dropped with a different binary: the capture launches a headless
+Chromium, and `bunx playwright install chromium` is an operator step on a laptop,
+never a build step in the image.
 
 ## Why a headless browser
 
@@ -214,16 +278,24 @@ on both and 0 means *"the player never said"*, never "a zero-length video".
 | Variable | Default | What it does |
 |---|---|---|
 | `VIMEO_OEMBED_BASE` | `https://vimeo.com` | Base URL of the oEmbed endpoint, read at call time. PR 3's e2e points it at a local stub so a spec can fake the metadata half over HTTP without faking a browser. |
-| `VIMEO_HARVEST_STUB` | — | **PR 2.** The name is already in `AMBIENT_INSTANCE_ENV`; nothing reads it yet. |
+| `VIMEO_HARVEST_STUB` | — | An **absolute** path to a `.vtt` that stands in for the whole browser half, so an acceptance run drives the vertical end to end with no Chromium and no live Vimeo. It is a backdoor by construction — the process summarizes a file off local disk while reporting a capture of a public video — so it has THREE gates, all required and all failing to a warn plus a real harvest rather than a throw: `resolveServingProfile() === "default"`, an absolute path, and the file existing. One warn line per distinct resolution, so a long-running dev server keeps saying which fixture it is serving. |
 
 Both are in `src/test/ambient-env.ts`, so no suite and no e2e-spawned muninn
 inherits a developer's value.
 
 ## Testing
 
-`bun test src/vimeo/` — in both the `test` and `test:unit` chains (they are
-hand-enumerated file lists, not globs: a new directory is green-by-absence until
-it is listed). Every test is offline. The browser half is covered three ways —
+The chains name the `src/vimeo/*.test.ts` files **individually**, not the
+directory. That is load-bearing: `summarizer.test.ts` uses `mock.module` on
+`../ai/one-shot.ts` and `../gardener/source-drafter-run.ts`, which a large share
+of the suite imports transitively, so it needs its OWN `bun test` process — and
+the `src/vimeo/` directory entry the chains used to carry would have swept it
+into the first chunk. `url` / `oembed` / `vtt` / `captions` / `state` stay in that
+chunk; `summarizer` has its own `&&` link at the end of both chains. The route's
+own cases live in `src/dashboard/routes/capture-route-job-ordering.test.ts`,
+which already runs in a process of its own for the same reason.
+
+Every test is offline. The browser half is covered three ways —
 structurally (no driver is loaded by importing the module), by the pure
 `chooseTrack`, and by driving `harvestVimeoCaptions` through its `launcher` test
 seam over a stub DOM: the page-side closures are RUN there, so which track ends up

@@ -1,6 +1,7 @@
 /**
- * Acceptance for ONE property of the TikTok + YouTube capture POST routes: a
- * job row is created only on the path that will actually run a capture.
+ * Acceptance for ONE property of the TikTok + YouTube + Vimeo capture POST
+ * routes: a job row is created only on the path that will actually run a
+ * capture.
  *
  * What only this file can see: both handlers used to call `createJob` ABOVE
  * their `resolveSummarizerBot` 500 and (TikTok) their `supportsExtraDirs` 503.
@@ -15,6 +16,12 @@
  * The response bodies are asserted alongside, because "no job created" is also
  * satisfiable by breaking the route — the point is that the 200 path is
  * unchanged while the early returns leak nothing.
+ *
+ * Vimeo has four early returns rather than two, because it fetches oEmbed
+ * FIRST: a not-public video, a video past the 3h cap and an already-captured
+ * url all refuse before a job exists, and each case asserts the mocked
+ * summarizer was never called (the harvester launches a Chromium, so "no job"
+ * alone would not say the expensive half was skipped).
  *
  * RUNS IN ITS OWN `bun test` PROCESS (its own `&&` link in the `test`/`test:unit`
  * chains) and MUST stay that way: `mock.module` here replaces `bots/config.ts`,
@@ -39,13 +46,16 @@ mock.module("../../bots/config.ts", () => ({
 }));
 
 // No huginn: the dedup pre-check must degrade to "not a duplicate", which is
-// what the real route does on a failed fetch.
+// what the real route does on a failed fetch. The Vimeo cases below need the
+// OTHER answer too (a listing containing the canonical url), so the throw is the
+// DEFAULT of a settable impl rather than the whole mock.
+let knowledgeApiImpl: (baseUrl: string, path: string) => Promise<unknown> = async () => {
+  throw new Error("no knowledge api in this test");
+};
 const realKnowledgeApi = await import("../../ai/knowledge-api-client.ts");
 mock.module("../../ai/knowledge-api-client.ts", () => ({
   ...realKnowledgeApi,
-  fetchKnowledgeApi: async () => {
-    throw new Error("no knowledge api in this test");
-  },
+  fetchKnowledgeApi: (baseUrl: string, path: string) => knowledgeApiImpl(baseUrl, path),
 }));
 
 let tiktokSummarizeCalls = 0;
@@ -62,10 +72,51 @@ mock.module("../../youtube/summarizer.ts", () => ({
   },
 }));
 
+// The Vimeo route calls oEmbed BEFORE it creates a job — that ordering is the
+// whole point of the cases below, so the metadata is a settable stub rather
+// than a live HTTP call. `isNotPublic` stays real (it is the route's branch).
+type OembedAnswer =
+  | { title: string; author: string; durationSec: number; uploadDate: string; thumbnailUrl: string }
+  | { notPublic: true; status: number };
+let oembedAnswer: OembedAnswer = {
+  title: "Trust but verify",
+  author: "JavaZone",
+  durationSec: 3180,
+  uploadDate: "2026-08-20 09:33:04",
+  thumbnailUrl: "https://i.vimeocdn.com/x.jpg",
+};
+let oembedThrows: Error | null = null;
+let oembedCalls = 0;
+const realOembed = await import("../../vimeo/oembed.ts");
+mock.module("../../vimeo/oembed.ts", () => ({
+  ...realOembed,
+  fetchVimeoOembed: async () => {
+    oembedCalls++;
+    if (oembedThrows) throw oembedThrows;
+    return oembedAnswer;
+  },
+}));
+
+// The harvester stands in for the browser half: acceptance 4/5 require that a
+// duplicate / not-public / over-cap paste never reaches it AT ALL.
+// The spread keeps `VIMEO_MAX_DURATION_SEC` real — the route imports the cap
+// from here, and a mock that dropped it would make the 413 case assert against
+// `undefined > x`, i.e. never fire.
+let vimeoSummarizeCalls = 0;
+const realVimeoSummarizer = await import("../../vimeo/summarizer.ts");
+mock.module("../../vimeo/summarizer.ts", () => ({
+  ...realVimeoSummarizer,
+  summarizeVimeo: async () => {
+    vimeoSummarizeCalls++;
+  },
+}));
+
 const { registerTikTokRoutes } = await import("./tiktok-routes.ts");
 const { registerYouTubeRoutes } = await import("./youtube-routes.ts");
+const { registerVimeoRoutes } = await import("./vimeo-routes.ts");
 const ttState = await import("../../tiktok/state.ts");
 const ytState = await import("../../youtube/state.ts");
+const vmState = await import("../../vimeo/state.ts");
 
 const config = {
   knowledgeApiUrl: "http://127.0.0.1:1",
@@ -86,6 +137,12 @@ function ttApp(): Hono {
 function ytApp(): Hono {
   const app = new Hono();
   registerYouTubeRoutes(app, config);
+  return app;
+}
+
+function vmApp(): Hono {
+  const app = new Hono();
+  registerVimeoRoutes(app, config);
   return app;
 }
 
@@ -130,6 +187,19 @@ beforeEach(() => {
   summarizerBot = cliBot;
   tiktokSummarizeCalls = 0;
   youtubeSummarizeCalls = 0;
+  vimeoSummarizeCalls = 0;
+  oembedCalls = 0;
+  oembedThrows = null;
+  oembedAnswer = {
+    title: "Trust but verify",
+    author: "JavaZone",
+    durationSec: 3180,
+    uploadDate: "2026-08-20 09:33:04",
+    thumbnailUrl: "https://i.vimeocdn.com/x.jpg",
+  };
+  knowledgeApiImpl = async () => {
+    throw new Error("no knowledge api in this test");
+  };
 });
 
 describe("TikTok capture POST — a job exists only when a capture will run", () => {
@@ -219,5 +289,172 @@ describe("YouTube capture POST — a job exists only when a capture will run", (
     expect(ytState.getJob(body.job_id)).toBeDefined();
     expect(ytState.getRecentJobs().length).toBe(before + 1);
     expect(youtubeSummarizeCalls).toBe(1);
+  });
+});
+
+
+describe("Vimeo capture POST — nothing is created until a capture will run", () => {
+  const VIMEO_URL = "https://vimeo.com/1223358361";
+  const CANONICAL = "https://vimeo.com/1223358361";
+
+  /** A huginn listing that already holds this video's canonical url. */
+  function listingWithDuplicate() {
+    knowledgeApiImpl = async () => ({
+      documents: [
+        { id: "ai/general/Something else.md", url: "https://vimeo.com/999" },
+        { id: "ai/rag/Trust but verify.md", url: CANONICAL },
+      ],
+    });
+  }
+
+  test("a non-Vimeo url 400s before oEmbed is even asked", async () => {
+    const before = vmState.getRecentJobs().length;
+    const res = await post(vmApp(), "/api/vimeo/summarize", {
+      url: "https://youtube.com/watch?v=abc",
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("Not a Vimeo video URL");
+    expect(oembedCalls).toBe(0);
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("a missing url 400s before anything else", async () => {
+    const before = vmState.getRecentJobs().length;
+    const res = await post(vmApp(), "/api/vimeo/summarize", { title: "no url" });
+
+    expect(res.status).toBe(400);
+    expect(oembedCalls).toBe(0);
+    expect(vmState.getRecentJobs().length).toBe(before);
+  });
+
+  // Acceptance 5: a not-public paste creates NO job and never reaches the harvester.
+  test("a private/deleted video 422s not_public and leaves NO job behind", async () => {
+    oembedAnswer = { notPublic: true, status: 404 };
+    const before = vmState.getRecentJobs().length;
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: "https://vimeo.com/1" });
+
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "not_public", status: 404 });
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("a video over the 3h cap 413s and leaves NO job behind", async () => {
+    oembedAnswer = { ...(oembedAnswer as { title: string } & Record<string, unknown>), durationSec: 10_801 } as typeof oembedAnswer;
+    const before = vmState.getRecentJobs().length;
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: string; durationSec: number; maxSec: number };
+    expect(body.error).toBe("too_long");
+    expect(body.durationSec).toBe(10_801);
+    expect(body.maxSec).toBe(realVimeoSummarizer.VIMEO_MAX_DURATION_SEC);
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("a video EXACTLY at the cap is accepted", async () => {
+    oembedAnswer = { ...(oembedAnswer as Record<string, unknown>), durationSec: 10_800 } as typeof oembedAnswer;
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(200);
+    expect(vimeoSummarizeCalls).toBe(1);
+  });
+
+  // Acceptance 4: a duplicate answers a shape with no job_id, and the harvester
+  // call count is 0.
+  test("an already-captured url answers duplicate with NO job_id and NO harvest", async () => {
+    listingWithDuplicate();
+    const before = vmState.getRecentJobs().length;
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.duplicate).toBe(true);
+    expect(body.document_id).toBe("ai/rag/Trust but verify.md");
+    expect(body.existing_url).toBe(CANONICAL);
+    expect(body.job_id).toBeUndefined();
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("the dedup key is the CANONICAL url — an unlisted-hash paste still matches", async () => {
+    listingWithDuplicate();
+    const res = await post(vmApp(), "/api/vimeo/summarize", {
+      url: "https://vimeo.com/1223358361/abc1234567",
+    });
+
+    expect(((await res.json()) as { duplicate?: boolean }).duplicate).toBe(true);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("an unreachable huginn degrades to 'not a duplicate' and the capture runs", async () => {
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { job_id?: string }).job_id).toBeTruthy();
+    expect(vimeoSummarizeCalls).toBe(1);
+  });
+
+  test("no summarizer bot 500s and leaves NO job behind", async () => {
+    summarizerBot = null;
+    const before = vmState.getRecentJobs().length;
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "No bots configured" });
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("an oEmbed transport failure 502s and leaves NO job behind", async () => {
+    oembedThrows = new Error("Vimeo oEmbed timed out after 10000ms");
+    const before = vmState.getRecentJobs().length;
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toBe("oembed_failed");
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("the happy path creates ONE job whose title comes from oEmbed", async () => {
+    const before = vmState.getRecentJobs().length;
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { job_id: string; dashboard_url: string };
+    expect(body.dashboard_url).toContain("source=vimeo");
+    expect(vmState.getRecentJobs().length).toBe(before + 1);
+    const job = vmState.getJob(body.job_id)!;
+    expect(job.title).toBe("Trust but verify");
+    expect(job.url).toBe(CANONICAL);
+    expect(job.videoId).toBe("1223358361");
+    expect(vimeoSummarizeCalls).toBe(1);
+  });
+
+  test("a title-less oEmbed answer falls back to the canonical url, never an empty title", async () => {
+    // huginn derives the document FILENAME from the title; "" would collide
+    // with every other title-less capture.
+    oembedAnswer = { ...(oembedAnswer as Record<string, unknown>), title: "" } as typeof oembedAnswer;
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    const body = (await res.json()) as { job_id: string };
+    expect(vmState.getJob(body.job_id)!.title).toBe(CANONICAL);
+  });
+
+  test("the summarize entry registers NO CORS preflight", async () => {
+    // Deliberate: no Chrome extension for this vertical, and a cross-origin
+    // summarize entry is a way for any page to spend the operator's budget.
+    const res = await vmApp().request("/api/vimeo/summarize", { method: "OPTIONS" });
+    expect(res.status).toBe(404);
   });
 });

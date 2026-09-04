@@ -75,6 +75,7 @@ const COLLECTION_META: ResearchCollection[] = [
   { collection: "youtube-summaries", label: "YouTube", badge: "YouTube", sourceId: "youtube" },
   { collection: "x-articles", label: "X articles", badge: "X", sourceId: "x-article" },
   { collection: "tiktok-summaries", label: "TikTok", badge: "TikTok", sourceId: "tiktok" },
+  { collection: "vimeo-summaries", label: "Vimeo", badge: "Vimeo", sourceId: "vimeo" },
   { collection: "wiki", label: "Knowledge wiki", badge: "Wiki" },
   { collection: "wiki-life", label: "Life wiki", badge: "Life" },
   // ── melosys (Jira composer only — not in any /research profile, see above) ──
@@ -97,6 +98,7 @@ export const RESEARCH_PROFILES: Record<string, ResearchProfile> = {
       "youtube-summaries",
       "x-articles",
       "tiktok-summaries",
+      "vimeo-summaries",
       "wiki",
     ],
   },

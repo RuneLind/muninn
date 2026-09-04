@@ -6,6 +6,15 @@ import {
   __resetSummariesStatsCacheForTest,
   type SummariesStatsDeps,
 } from "./summaries-routes.ts";
+import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
+
+/**
+ * One fetch per registered summary source. Derived, never a literal: a new
+ * vertical adds a source and every count below moves with it — the literal 5
+ * these assertions carried failed the day Vimeo was registered, saying nothing
+ * about caching.
+ */
+const COLLECTION_COUNT = SUMMARY_SOURCES.length;
 
 const CONFIG = { knowledgeApiUrl: "http://kb.test" } as Config;
 const DAY = 86_400_000;
@@ -130,13 +139,13 @@ test("caches within the TTL (no re-fetch) and ?refresh=1 bypasses the cache read
   const app = appWith(fakeDeps());
   await app.request("/api/summaries/stats");
   const afterFirst = fetchCalls.length;
-  expect(afterFirst).toBe(5); // one fetch per collection
+  expect(afterFirst).toBe(COLLECTION_COUNT); // one fetch per collection
 
   await app.request("/api/summaries/stats");
   expect(fetchCalls.length).toBe(afterFirst); // served from cache
 
   await app.request("/api/summaries/stats?refresh=1");
-  expect(fetchCalls.length).toBe(afterFirst + 5); // refresh re-fetched
+  expect(fetchCalls.length).toBe(afterFirst + COLLECTION_COUNT); // refresh re-fetched
 });
 
 test("a degraded (errors) payload is NOT cached — the next request re-fetches", async () => {
@@ -151,12 +160,12 @@ test("a degraded (errors) payload is NOT cached — the next request re-fetches"
   // stale degraded payload from cache for the whole TTL.
   failCollections = new Set();
   const second = await (await app.request("/api/summaries/stats")).json();
-  expect(fetchCalls.length).toBe(afterFirst + 5); // re-fetched all collections
+  expect(fetchCalls.length).toBe(afterFirst + COLLECTION_COUNT); // re-fetched all collections
   expect(second.errors).toBeUndefined();
 
   // The now-clean result IS cached.
   await app.request("/api/summaries/stats");
-  expect(fetchCalls.length).toBe(afterFirst + 5);
+  expect(fetchCalls.length).toBe(afterFirst + COLLECTION_COUNT);
 });
 
 test("passes ?bot= through to the coverage lookups (default jarvis)", async () => {

@@ -76,6 +76,14 @@ export const SUMMARY_SOURCES: SummarySource[] = [
     apiBase: "/api/articles",
     linkLabel: "Open original ↗",
   },
+  {
+    id: "vimeo",
+    label: "Vimeo",
+    badge: "Vimeo",
+    collection: "vimeo-summaries",
+    apiBase: "/api/vimeo",
+    linkLabel: "Watch on Vimeo ↗",
+  },
 ];
 
 export function getSummarySource(id: string): SummarySource | undefined {

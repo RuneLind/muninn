@@ -217,6 +217,7 @@ export function sumStatsScript(): string {
       'x-article': 'var(--status-info)',
       anthropic: 'var(--status-magenta)',
       tiktok: 'var(--status-cyan)',
+      vimeo: 'var(--status-success)',
     };
     function statsColor(sourceId) { return STATS_COLORS[sourceId] || 'var(--accent-muted)'; }
     function statsSourceLabel(sourceId) {
