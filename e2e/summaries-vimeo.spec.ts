@@ -267,9 +267,13 @@ function removeBotsRoot(): void {
  */
 function handleSignal(signal: NodeJS.Signals): void {
   // The spawned muninn and the fake are `afterAll`'s to stop, and a hard kill
-  // skips `afterAll` — measured, a Ctrl-C mid-run left a `bun run src/index.ts`
-  // bound to this file's port, so the NEXT run's server never came up and its
-  // first case timed out on `/api/live`. Same order as `afterAll`.
+  // skips `afterAll`. Measured without this: after a SIGINT to the worker the
+  // muninn stayed bound to this file's port AND the surviving worker (Playwright
+  // keeps its own listener, so the re-raise below does not end it) kept the
+  // fake's port, so the NEXT run died in `beforeAll` with EADDRINUSE on the
+  // FAKE's port — and had that port been free, the stale muninn ANSWERS
+  // `/api/live`, so the first case would have run against a server whose bots
+  // root the old handler had already deleted. Same order as `afterAll`.
   server?.kill("SIGTERM");
   fake?.close();
   removeBotsRoot();
@@ -316,10 +320,19 @@ async function installStatusRecorder(page: import("@playwright/test").Page): Pro
  */
 async function ensureCaptured(request: import("@playwright/test").APIRequestContext): Promise<void> {
   const res = await request.post(`${BASE}/api/vimeo/summarize`, { data: { url: VIDEO_URL } });
-  const body = (await res.json()) as { duplicate?: boolean; job_id?: string; error?: string };
+  const raw = await res.text();
+  let body: { duplicate?: boolean; job_id?: string; error?: string };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    throw new Error(`ensureCaptured: ${res.status()} with a non-JSON body: ${raw.slice(0, 200)}`);
+  }
   if (body.duplicate) return;
-  if (!body.job_id) throw new Error(`ensureCaptured: unexpected answer ${JSON.stringify(body)}`);
-  const deadline = Date.now() + 60_000;
+  if (!body.job_id) throw new Error(`ensureCaptured: unexpected answer ${res.status()} ${raw.slice(0, 200)}`);
+  // Well inside every case's own budget: the stubbed capture completes in a
+  // few seconds, and a helper bound that outruns the case's timeout would be
+  // reported as a generic test timeout instead of the message below.
+  const deadline = Date.now() + ENSURE_CAPTURED_BOUND_MS;
   for (;;) {
     const jobs = (await (await request.get(`${BASE}/api/vimeo/jobs`)).json()) as {
       jobs?: Array<{ id: string; status: string }>;
@@ -327,10 +340,19 @@ async function ensureCaptured(request: import("@playwright/test").APIRequestCont
     const job = (jobs.jobs ?? []).find((j) => j.id === body.job_id);
     if (job?.status === "complete") return;
     if (job?.status === "error") throw new Error("ensureCaptured: the seeding capture failed");
-    if (Date.now() > deadline) throw new Error("ensureCaptured: the seeding capture did not complete");
+    if (Date.now() > deadline) {
+      // The listing is the newest 20 jobs and the store reaps old ones, so an
+      // absent id is not a running capture; say which it was.
+      throw new Error(
+        job
+          ? `ensureCaptured: the seeding capture was still "${job.status}" after ${ENSURE_CAPTURED_BOUND_MS} ms`
+          : `ensureCaptured: job ${body.job_id} is not in the jobs listing (reaped, or pushed out of the newest 20)`,
+      );
+    }
     await new Promise((r) => setTimeout(r, 300));
   }
 }
+const ENSURE_CAPTURED_BOUND_MS = 30_000;
 
 async function jobCount(request: import("@playwright/test").APIRequestContext): Promise<number> {
   const res = await request.get(`${BASE}/api/vimeo/jobs`);
@@ -435,6 +457,9 @@ test.describe("Summaries: capture a Vimeo URL", () => {
   });
 
   test("pasting the same URL again says 'Already captured' and starts nothing", async ({ page }) => {
+    // Under `--grep` the first case may not have run; the count below is taken
+    // AFTER the seed, so it is still the delta this case is about.
+    await ensureCaptured(page.request);
     const jobsBefore = await jobCount(page.request);
 
     await page.goto(`${BASE}/summaries`);
@@ -562,7 +587,9 @@ test.describe("Summaries: capture a Vimeo URL", () => {
   });
 
   test("a banner about ANOTHER url survives the running job's completion", async ({ page }) => {
-    test.setTimeout(120_000);
+    // Two 60 s waits plus the seeding helper's bound, so the helper's own
+    // message is what a stuck seed reports rather than this budget.
+    test.setTimeout(120_000 + ENSURE_CAPTURED_BOUND_MS);
     // The mirror of the case above, and the reason the clear is conditional.
     // Mid-stream, an answer about a second url is the banner AND NOTHING ELSE —
     // the card belongs to the running job — so that banner is the only feedback
