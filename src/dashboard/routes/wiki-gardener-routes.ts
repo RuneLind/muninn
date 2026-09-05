@@ -38,6 +38,7 @@ import {
   type DeletedSourceProposal,
 } from "../../db/wiki-proposals.ts";
 import { invalidateSummariesStatsCache } from "./summaries-routes.ts";
+import { notifySummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import type { StatsError } from "../../summaries/stats.ts";
@@ -1864,6 +1865,12 @@ export function registerWikiGardenerRoutes(
       if (upstream === 404) return c.json({ error: "that doc is not in that collection" }, 404);
       return c.json({ error: `huginn refused the delete: ${message}` }, 502);
     }
+
+    // The document is gone (huginn confirmed the move), so every cache that
+    // remembers it by id — the Vimeo route's recently-ingested dedup map —
+    // forgets it now. After the catch above, never inside the mutex section: a
+    // refused delete leaves the document in place.
+    notifySummaryDocumentDeleted({ collection, id });
 
     // Split huginn's `reindex` map into what we can poll and what we cannot: a
     // `skipped_already_running` collection's in-flight run started BEFORE the move,

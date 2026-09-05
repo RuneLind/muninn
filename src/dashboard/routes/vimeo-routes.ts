@@ -10,6 +10,7 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
+import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 
 const log = getLog("dashboard");
 
@@ -84,6 +85,12 @@ export interface VimeoRouteOptions {
 async function findExistingByVideoId(
   baseUrl: string,
   videoId: string,
+  /** Rows to pass over — a document a `/summaries` Delete just removed, which
+   *  huginn keeps listing until its reindex lands. Applied per ROW, not to the
+   *  first match: two rows can resolve to one video (`/<id>` and
+   *  `/<id>/<hash>`; a title collision suffixed `(2)`), and skipping only the
+   *  first would hide a live document behind a deleted one. */
+  isGone: (documentId: string) => boolean = () => false,
 ): Promise<VimeoDocumentMeta | null> {
   try {
     const data = await fetchKnowledgeApi(
@@ -92,7 +99,11 @@ async function findExistingByVideoId(
       { timeoutMs: 10000 },
     );
     const docs = (data?.documents ?? []) as VimeoDocumentMeta[];
-    return docs.find((d) => d.url !== undefined && resolveVimeoRef(d.url)?.id === videoId) ?? null;
+    return (
+      docs.find(
+        (d) => d.url !== undefined && resolveVimeoRef(d.url)?.id === videoId && !isGone(d.id),
+      ) ?? null
+    );
   } catch (err) {
     log.warn("Vimeo duplicate check failed: {error}", {
       error: err instanceof Error ? err.message : String(err),
@@ -181,10 +192,10 @@ export function registerVimeoRoutes(
    * the same category/title/url and only one document remained.
    *
    * Bounded on BOTH axes ({@link VIMEO_RECENT_INGEST_TTL_MS},
-   * {@link VIMEO_RECENT_INGEST_MAX}) because it is a cache with no invalidation:
-   * the listing is the authority, this only covers the gap in front of it, and
-   * an entry that outlives the reindex is answering from memory about a document
-   * it can no longer see.
+   * {@link VIMEO_RECENT_INGEST_MAX}) because it is a cache whose only
+   * invalidation is the delete signal below: the listing is the authority, this
+   * only covers the gap in front of it, and an entry that outlives the reindex
+   * is answering from memory about a document it can no longer see.
    *
    * Same scope as `inFlight` — one map per REGISTRATION — for the same reason:
    * "a capture this app has started" is the truthful scope, and a module-level
@@ -203,11 +214,74 @@ export function registerVimeoRoutes(
     // capture per video at a time — so no live entry can exist here. A change
     // that breaks any of those three needs a `delete` before this line.
     recentIngests.set(videoId, { documentId, existingUrl, at: now() });
+    // The listing's row under this id is a real document again.
+    recentDeletes.delete(documentId);
     while (recentIngests.size > VIMEO_RECENT_INGEST_MAX) {
       const oldest = recentIngests.keys().next();
       if (oldest.done) break;
       recentIngests.delete(oldest.value);
     }
+  }
+
+  // The one invalidation the map has: a `/summaries` Delete goes through
+  // `backlog-doc-delete`, which announces the document AFTER huginn confirmed
+  // the move. Without this, a capture deleted and re-pasted inside the TTL was
+  // answered `duplicate` from memory about a document that no longer existed —
+  // with a link to nothing. Matched on the document id, which is what the map
+  // holds and what the delete names; the video id is not on the wire there.
+  //
+  // Never unsubscribed: a registration lives as long as the process, and a
+  // test app that outlives its case keeps forgetting only from its OWN map.
+  onSummaryDocumentDeleted(({ collection, id }) => {
+    if (collection !== VIMEO_COLLECTION) return;
+    for (const [videoId, hit] of recentIngests) {
+      if (hit.documentId === id) recentIngests.delete(videoId);
+    }
+    rememberDelete(id);
+  });
+
+  /**
+   * The documents a `/summaries` Delete removed that huginn may STILL LIST —
+   * the delete's own reindex window, the mirror image of `recentIngests`.
+   *
+   * huginn's DELETE is a soft delete: it moves the file and enqueues a reindex,
+   * and the listing keeps naming the document until that reindex lands
+   * (seconds to minutes when a reindex runs; huginn schedules NONE when that
+   * collection's update was already running, and the UI's delete flow gives up
+   * polling after 120 s saying the doc may reappear — so the TTL below bounds
+   * this map, not the window). Forgetting the map alone moved the stale
+   * `duplicate` from state 3 to state 4 — same body, same link to nothing — so
+   * the listing half passes over a row naming one of these ids. An entry is
+   * dropped the moment a capture ingests under that id again
+   * (`rememberIngest`), when the row IS a document once more, and otherwise
+   * expires with the same TTL and cap as its sibling. The two maps never hold
+   * the same id at once (the delete listener drops the ingest entry and
+   * `rememberIngest` drops the delete stamp), so the ways the listing half can
+   * again answer `duplicate` about a REMOVED document are exactly this map's
+   * own TTL expiry and its own cap eviction — both pinned in
+   * `capture-route-job-ordering.test.ts`.
+   */
+  const recentDeletes = new Map<string, number>();
+
+  function rememberDelete(documentId: string): void {
+    recentDeletes.delete(documentId);
+    recentDeletes.set(documentId, now());
+    while (recentDeletes.size > VIMEO_RECENT_INGEST_MAX) {
+      const oldest = recentDeletes.keys().next();
+      if (oldest.done) break;
+      recentDeletes.delete(oldest.value);
+    }
+  }
+
+  /** Whether the listing's row for this id is a document the delete removed. */
+  function recentlyDeleted(documentId: string): boolean {
+    const at = recentDeletes.get(documentId);
+    if (at === undefined) return false;
+    if (now() - at >= VIMEO_RECENT_INGEST_TTL_MS) {
+      recentDeletes.delete(documentId);
+      return false;
+    }
+    return true;
   }
 
   /** The map's answer for this video, or null — an expired entry is dropped. */
@@ -354,7 +428,7 @@ export function registerVimeoRoutes(
         return c.json(duplicateBody(recent.documentId, recent.existingUrl));
       }
 
-      const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, ref.id);
+      const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, ref.id, recentlyDeleted);
       if (existing) {
         log.info("Vimeo duplicate detected for {videoId}: {docId}", {
           videoId: ref.id,
