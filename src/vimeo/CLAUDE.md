@@ -46,7 +46,10 @@ first, the caption tag second.** Both exist only after the harvest.
 `resolveOutputLang(pick, captionLang, transcript)` asks `detectTextLang` — a
 function-word count over the windowed transcript (`og/ikke/det/er/som…` against
 `the/and/is/to/of…`, no word spelled the same in both, ≥`TEXT_LANG_MIN_HITS`
-hits and a ≥70 % share to call it, `null` otherwise) — and only when the text
+(20) hits, a ≥70 % share AND ≥`TEXT_LANG_MIN_DISTINCT` (6) different markers
+on the winning side to call it, `null` otherwise — the distinct floor exists
+because composed French and Spanish scored 100 % Norwegian through the single
+marker `de`, measured in the review of #525; `de` is out of the set too) — and only when the text
 does not say falls back to the tag's BASE subtag (`langFromCaptionTag`:
 `no`/`nb`/`nn` ⇒ bokmål, anything else, an empty tag included ⇒ English). The
 text comes first because the tag is not a reliable signal: Vimeo tagged the
@@ -57,7 +60,13 @@ logs one info line ("the text wins"). `caption_lang` on the document stays what
 Vimeo said — provenance — and `summary_lang` is the resolved language. Nynorsk
 speech gets a bokmål summary — the rider knows one Norwegian; a Swedish or
 Danish talk shares enough markers to read as Norwegian and lands on the bokmål
-rider, the better of the two outcomes on offer. Deterministic, no model call.
+rider, the better of the two outcomes on offer; German, Dutch, French and
+Spanish measure `null` and the tag decides. Deterministic, no model call. The
+"text wins" info line names the caption language's SOURCE (a track tag, or
+whisper's detection on the no-captions path) and is logged only for `talk`.
+The committed 53-min fixture is Norwegian auto-captions and reads `nb` at a
+95 % share, so a `VIMEO_HARVEST_STUB` acceptance run left on `talk` now
+produces a bokmål summary where it produced English.
 The document carries the RESOLVED language (`summary_lang: nb|en`), never
 `talk`, and the kind id (`summary_kind`); huginn allowlists both (huginn #126,
 merged first).
@@ -350,9 +359,16 @@ Delete removes the document's kept frames** (`removeKeptFrames`, the
 DOCUMENT id, so the video id comes from the ingest map when the capture was
 recent and otherwise from the listing row huginn still serves (its DELETE is
 soft — the same reindex window `recentDeletes` exists for); async and
-best-effort, a listing that is down leaves the frames in place with a warn.
-The id is charset-gated before anything is removed, so the path is always
-`<root>/<digits>`. ⚠️ Every `registerVimeoRoutes` in a TEST passes a temp
+best-effort, a listing that is down leaves the frames in place with a warn —
+and the listing is asked only when the frames root has ANY entry, since frames
+are off by default and most deletes have nothing to remove (a 200-row
+collection read for a video that kept no frames is the wide read this module
+avoids elsewhere). The id is charset-gated before anything is removed, so the
+path is always `<root>/<digits>`. **Accepted consequence:** a source-drafted
+wiki page that quoted the capture's slides (`![Slide at …](/api/vimeo/frames/…)`)
+outlives the vimeo document, and its images break when the document is
+deleted — the frames were only ever served by muninn's UI for the capture,
+and a Delete is the reader saying the capture should go. ⚠️ Every `registerVimeoRoutes` in a TEST passes a temp
 `framesRoot`: the listener set is module-level and never unsubscribed, so a
 registration with no root would remove frames under the developer's real
 `~/.muninn/vimeo-frames` on the next test that fires the signal. The two

@@ -1340,3 +1340,36 @@ test("a short transcript cannot overrule the tag — the two-cue English VTT und
   await summarizeVimeo(jobId, META, config, bot, deps({ tracks: [NORWEGIAN_AUTO_TRACK] }));
   expect(ingestPayload!.summary_lang).toBe("nb");
 });
+
+test("fix round 1 (#525): an explicit pick logs NO 'text wins' line — the transcript made no decision there", async () => {
+  const infos: LogRecord[] = [];
+  await configure({
+    sinks: { capture: (r: LogRecord) => { if (r.category.join(".") === "muninn.vimeo.summarizer" && r.level === "info") infos.push(r); } },
+    loggers: [
+      { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+      { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+    ],
+    reset: true,
+  });
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...META, lang: "nb" as const }, config, bot, deps({ tracks: [AUTO_TRACK], vtt: NB_LONG_VTT }));
+  expect(ingestPayload!.summary_lang).toBe("nb");
+  expect(infos.some((r) => /the text wins/.test(String(r.message)))).toBe(false);
+  // And on the whisper path the line names a detected language, not a "caption tag" the video never had.
+  const infos2: LogRecord[] = [];
+  await configure({
+    sinks: { capture: (r: LogRecord) => { if (r.category.join(".") === "muninn.vimeo.summarizer" && r.level === "info") infos2.push(r); } },
+    loggers: [
+      { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+      { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+    ],
+    reset: true,
+  });
+  const jobId2 = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId2, META, config, bot, whisperDeps({
+    transcribeAudio: async (_i: unknown, hooks: { onTranscribing: () => void }) => { hooks.onTranscribing(); return { vtt: NB_LONG_VTT.replace("00:02:10.000 --> 00:02:30.000", "00:02:10.000 --> 00:02:30.000").concat(`\n00:03:00.000 --> 00:03:30.000\n${Array(300).fill("og ikke det er som på").join(" ")}\n`), lang: "en", audioBytes: 1 }; },
+  }));
+  const line = infos2.find((r) => /the text wins/.test(String(r.message)));
+  expect(line).toBeDefined();
+  expect(String(line!.message)).not.toContain("caption tag");
+});

@@ -16,7 +16,7 @@ import {
   removeKeptFrames,
 } from "../../vimeo/frames.ts";
 import { resolve as resolvePath, sep as pathSep } from "node:path";
-import { realpath } from "node:fs/promises";
+import { readdir, realpath } from "node:fs/promises";
 import { findCapturePreset, resolveCapturePresets } from "../../summaries/presets.ts";
 import { DEFAULT_CAPTURE_LANG, isCaptureLang } from "../../summaries/language.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
@@ -246,6 +246,14 @@ export function registerVimeoRoutes(
   //
   // Never unsubscribed: a registration lives as long as the process, and a
   // test app that outlives its case keeps forgetting only from its OWN map.
+  async function framesRootHasEntries(root: string | undefined): Promise<boolean> {
+    try {
+      return (await readdir(root ?? framesRootDir())).length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   onSummaryDocumentDeleted(({ collection, id }) => {
     if (collection !== VIMEO_COLLECTION) return;
     let deletedVideoId: string | null = null;
@@ -269,6 +277,11 @@ export function registerVimeoRoutes(
   async function forgetFramesOfDeletedDocument(documentId: string, knownVideoId: string | null): Promise<void> {
     try {
       let videoId = knownVideoId;
+      if (videoId === null && !(await framesRootHasEntries(opts.framesRoot))) {
+        // Frames are off by default, so most deletes have nothing to remove:
+        // no kept frames anywhere ⇒ no listing call to learn a video id for.
+        return;
+      }
       if (videoId === null) {
         const data = await fetchKnowledgeApi(KNOWLEDGE_API_URL, `/api/collection/${VIMEO_COLLECTION}/documents`, {
           timeoutMs: 10000,

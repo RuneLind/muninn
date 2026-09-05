@@ -3,7 +3,10 @@ import {
   CAPTURE_LANGS,
   DEFAULT_CAPTURE_LANG,
   detectTextLang,
+  ENGLISH_MARKERS,
   langFromCaptionTag,
+  NORWEGIAN_MARKERS,
+  TEXT_LANG_MIN_DISTINCT,
   TEXT_LANG_MIN_HITS,
   isCaptureLang,
   isOutputLang,
@@ -88,26 +91,51 @@ describe("detectTextLang — the transcript's own language (v2 follow-up)", () =
     expect(detectTextLang(EN_TEXT)).toBe("en");
   });
 
-  test("too little text says nothing: below TEXT_LANG_MIN_HITS marker hits ⇒ null", () => {
+  test("too little text says nothing: below 20 marker hits ⇒ null (the constant IS 20 — a literal, so a drift is caught)", () => {
+    expect(TEXT_LANG_MIN_HITS).toBe(20);
     expect(detectTextLang("")).toBeNull();
     expect(detectTextLang("Hei og velkommen.")).toBeNull();
-    // Exactly one hit short of the floor, all Norwegian.
-    expect(detectTextLang(Array(TEXT_LANG_MIN_HITS - 1).fill("og").join(" "))).toBeNull();
-    expect(detectTextLang(Array(TEXT_LANG_MIN_HITS).fill("og").join(" "))).toBe("nb");
+    // Exactly one hit short of the floor, all Norwegian, six distinct markers.
+    const six = ["og", "ikke", "det", "er", "som", "på"];
+    const hits = (n: number) => Array.from({ length: n }, (_, i) => six[i % 6]).join(" ");
+    expect(detectTextLang(hits(19))).toBeNull();
+    expect(detectTextLang(hits(20))).toBe("nb");
+  });
+
+  test("fix round 1: one word repeated is not a language — fewer than 6 DISTINCT markers ⇒ null, and French/Spanish prose does not read as Norwegian", () => {
+    expect(TEXT_LANG_MIN_DISTINCT).toBe(6);
+    expect(detectTextLang(Array(40).fill("og").join(" "))).toBeNull();
+    expect(detectTextLang(Array(40).fill("the").join(" "))).toBeNull();
+    // Composed French and Spanish — the review measured both as `nb` through `de`.
+    const fr = `Aujourd'hui je vais parler de la façon dont nous avons construit le système de recherche, et de ce que nous
+avons appris. Le premier problème est que l'on ne peut pas savoir ce qui se passe dans le système si l'on n'a pas de
+données, et c'est là que cela devient intéressant. Nous allons regarder trois choses, et à la fin de la présentation
+je vous montrerai le code de la nouvelle version.`;
+    const es = `Hoy quiero hablar de cómo construimos el sistema de búsqueda y de lo que aprendimos. El primer problema es que no
+se puede saber lo que pasa en el sistema si no se tienen datos, y ahí es donde se pone interesante. Vamos a ver tres
+cosas, y al final de la charla les mostraré el código de la nueva versión.`;
+    expect(detectTextLang(fr)).toBeNull();
+    expect(detectTextLang(es)).toBeNull();
+    // The floor is the class fix; `de` is out of the set as hygiene, and no word sits in both sets.
+    expect(NORWEGIAN_MARKERS.has("de")).toBe(false);
+    expect([...NORWEGIAN_MARKERS].filter((w) => ENGLISH_MARKERS.has(w))).toEqual([]);
   });
 
   test("a mixed text with no side at the share threshold ⇒ null, never a coin toss", () => {
-    const mixed = Array(15).fill("og").concat(Array(15).fill("the")).join(" ");
-    expect(detectTextLang(mixed)).toBeNull();
+    const nbWords = ["og", "ikke", "det", "er", "som", "på"];
+    const enWords = ["the", "and", "is", "to", "of", "that"];
+    const nb = (n: number) => Array.from({ length: n }, (_, i) => nbWords[i % 6]);
+    const en = (n: number) => Array.from({ length: n }, (_, i) => enWords[i % 6]);
+    expect(detectTextLang(nb(15).concat(en(15)).join(" "))).toBeNull();
     // 70 % is the line: 14 nb / 6 en is nb; 13 / 7 is not.
-    expect(detectTextLang(Array(14).fill("det").concat(Array(6).fill("the")).join(" "))).toBe("nb");
-    expect(detectTextLang(Array(13).fill("det").concat(Array(7).fill("the")).join(" "))).toBeNull();
+    expect(detectTextLang(nb(14).concat(en(6)).join(" "))).toBe("nb");
+    expect(detectTextLang(nb(13).concat(en(7)).join(" "))).toBeNull();
   });
 
   test("tokens are whole words, case-insensitive, split on any non-letter — markdown headings and timestamps are not words", () => {
     expect(detectTextLang(`### [00:02:00]\n${NB_TEXT.toUpperCase()}`)).toBe("nb");
-    // `theory`/`android` contain `the`/`and` and must not count.
-    expect(detectTextLang(Array(30).fill("theory android").join(" "))).toBeNull();
+    // `theory`/`android` contain `the`/`and` and must not count — against six real markers they would tip the share.
+    expect(detectTextLang(Array(30).fill("theory android").join(" ") + " og ikke det er som på og ikke det er som på og ikke det er som på og ikke")).toBe("nb");
   });
 });
 

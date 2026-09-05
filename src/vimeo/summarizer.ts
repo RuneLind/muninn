@@ -615,7 +615,8 @@ export async function summarizeVimeo(
     // two disagree, so a surprising summary language is explicable afterwards.
     const outputLang = resolveOutputLang(meta.lang, captionLang, transcript);
     if (meta.lang === "talk" && outputLang !== langFromCaptionTag(captionLang)) {
-      log.info("Vimeo video {videoId}: the transcript reads as {outputLang} while the caption tag {captionLang} says otherwise — the text wins", {
+      log.info("Vimeo video {videoId}: the transcript reads as {outputLang} while the caption language {captionLang} ({source}) says otherwise — the text wins", {
+        source: track ? "track tag" : "whisper detection",
         videoId: meta.videoId,
         outputLang,
         captionLang,
