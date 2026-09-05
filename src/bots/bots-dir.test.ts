@@ -184,4 +184,3 @@ describe("discovery survives a bots root the process may not READ", () => {
     }
   });
 });
-});
