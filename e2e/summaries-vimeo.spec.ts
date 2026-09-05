@@ -102,6 +102,14 @@ const PRIVATE_URL = "https://vimeo.com/1";
 const LONG_URL = "https://vimeo.com/9999999999";
 
 const SUMMARY_LINE = "Trust, but verify.";
+/**
+ * `ensureCaptured`'s wait bound. Every case that calls the helper adds this to
+ * its own timeout, so a stuck seed is reported by the helper's message rather
+ * than as a generic test timeout (the config default is 30 s — equal to this,
+ * with the clock started before the helper's POST, so without the addition
+ * the helper's deadline was unreachable at the dedup case).
+ */
+const ENSURE_CAPTURED_BOUND_MS = 30_000;
 /** Byte-identical to the string in `sum-submit-form.ts`. */
 const BARE_LINK_ALERT =
   "This looks like a bare link. YouTube and X posts are captured with the Muninn Chrome extension — open the page and click the extension. This form wants the pasted article text itself.";
@@ -266,6 +274,16 @@ function removeBotsRoot(): void {
  *    `botsRoot` it no longer owns — long after its own tests are done.
  */
 function handleSignal(signal: NodeJS.Signals): void {
+  // The spawned muninn and the fake are `afterAll`'s to stop, and a hard kill
+  // skips `afterAll`. Measured without this: after a SIGINT to the worker the
+  // muninn stayed bound to this file's port AND the surviving worker (Playwright
+  // keeps its own listener, so the re-raise below does not end it) kept the
+  // fake's port, so the NEXT run died in `beforeAll` with EADDRINUSE on the
+  // FAKE's port — and had that port been free, the stale muninn ANSWERS
+  // `/api/live`, so the first case would have run against a server whose bots
+  // root the old handler had already deleted. Same order as `afterAll`.
+  server?.kill("SIGTERM");
+  fake?.close();
   removeBotsRoot();
   removeSignalHandlers();
   process.kill(process.pid, signal);
@@ -294,6 +312,55 @@ async function installStatusRecorder(page: import("@playwright/test").Page): Pro
       if (text && w.__statuses![w.__statuses!.length - 1] !== text) w.__statuses!.push(text);
     }).observe(badge, { childList: true, subtree: true, characterData: true });
   });
+}
+
+/**
+ * Make sure VIDEO_URL is in the route's recently-ingested map — the state the
+ * dedup cases read.
+ *
+ * The first case is what puts it there on a full run, and `mode: "serial"`
+ * pins that order. Under `--grep` the first case may not RUN, and a case that
+ * assumed it did was answered with a fresh job instead of `duplicate` and
+ * failed on its own banner — a failure about test selection, not about the
+ * property. So a case that depends on the capture ASKS for it: a `duplicate`
+ * answer is the state already; a `job_id` is a capture this call waits out.
+ * Any other answer is a real failure and is reported as one.
+ */
+async function ensureCaptured(request: import("@playwright/test").APIRequestContext): Promise<void> {
+  const res = await request.post(`${BASE}/api/vimeo/summarize`, { data: { url: VIDEO_URL } });
+  const raw = await res.text();
+  let body: { duplicate?: boolean; job_id?: string; error?: string };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    throw new Error(`ensureCaptured: ${res.status()} with a non-JSON body: ${raw.slice(0, 200)}`);
+  }
+  if (body.duplicate) return;
+  if (!body.job_id) throw new Error(`ensureCaptured: unexpected answer ${res.status()} ${raw.slice(0, 200)}`);
+  // Well inside every case's own budget: the stubbed capture completes in a
+  // few seconds, and a helper bound that outruns the case's timeout would be
+  // reported as a generic test timeout instead of the message below.
+  const deadline = Date.now() + ENSURE_CAPTURED_BOUND_MS;
+  for (;;) {
+    const jobs = (await (await request.get(`${BASE}/api/vimeo/jobs`)).json()) as {
+      jobs?: Array<{ id: string; status: string }>;
+    };
+    const job = (jobs.jobs ?? []).find((j) => j.id === body.job_id);
+    if (job?.status === "complete") return;
+    if (job?.status === "error") throw new Error("ensureCaptured: the seeding capture failed");
+    if (Date.now() > deadline) {
+      // A job this POST created cannot be reaped (1 h TTL) or pushed out of
+      // the newest-20 listing inside this bound, so an absent id means the
+      // listing is answered by a DIFFERENT muninn than the one that took the
+      // POST — a stale or restarted server on this port. Say so.
+      throw new Error(
+        job
+          ? `ensureCaptured: the seeding capture was still "${job.status}" after ${ENSURE_CAPTURED_BOUND_MS} ms`
+          : `ensureCaptured: job ${body.job_id} is not in the jobs listing — is ${BASE} answered by the muninn this spec spawned?`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 async function jobCount(request: import("@playwright/test").APIRequestContext): Promise<number> {
@@ -399,6 +466,10 @@ test.describe("Summaries: capture a Vimeo URL", () => {
   });
 
   test("pasting the same URL again says 'Already captured' and starts nothing", async ({ page }) => {
+    test.setTimeout(30_000 + ENSURE_CAPTURED_BOUND_MS);
+    // Under `--grep` the first case may not have run; the count below is taken
+    // AFTER the seed, so it is still the delta this case is about.
+    await ensureCaptured(page.request);
     const jobsBefore = await jobCount(page.request);
 
     await page.goto(`${BASE}/summaries`);
@@ -419,7 +490,10 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     // start would be a job here, while its model call lands whenever the
     // harvest finishes and a `modelCalls` read is a race against it.
     expect(await jobCount(page.request)).toBe(jobsBefore);
-    expect(ingests).toHaveLength(1);
+    // Deliberately NOT `ingests.length`: an ingest is downstream of the model
+    // call, so it is the same race one step further out — measured, a second
+    // capture's ingest lands seconds after this line has run, and an
+    // assertion here passed with dedup switched off entirely.
   });
 
   test("a video Vimeo will not describe is a sentence, and starts no job", async ({ page }) => {
@@ -526,11 +600,15 @@ test.describe("Summaries: capture a Vimeo URL", () => {
   });
 
   test("a banner about ANOTHER url survives the running job's completion", async ({ page }) => {
-    test.setTimeout(120_000);
+    // Two 60 s waits plus the seeding helper's bound, so the helper's own
+    // message is what a stuck seed reports rather than this budget.
+    test.setTimeout(120_000 + ENSURE_CAPTURED_BOUND_MS);
     // The mirror of the case above, and the reason the clear is conditional.
     // Mid-stream, an answer about a second url is the banner AND NOTHING ELSE —
     // the card belongs to the running job — so that banner is the only feedback
     // the paste gets. Clearing it whenever any job completes erased the answer.
+    // BEFORE the hold: the seeding capture, if one runs, must not park on it.
+    await ensureCaptured(page.request);
     holdModel = new Promise<void>((resolve) => { releaseModel = resolve; });
 
     await page.goto(`${BASE}/summaries`);
@@ -538,7 +616,8 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await page.locator("#captureUrlBtn").click();
     await expect(page.locator("#statusBadge .status-text")).toHaveText("Summarizing", { timeout: 60_000 });
 
-    // A DIFFERENT url, already in the archive from the first case ⇒ `duplicate`.
+    // A DIFFERENT url, already captured (the first case, or `ensureCaptured`
+    // above under `--grep`) ⇒ `duplicate`.
     await page.locator("#captureUrl").fill(VIDEO_URL);
     await page.locator("#captureUrlBtn").click();
     const banner = page.locator("#errorBanner");
