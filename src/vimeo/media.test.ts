@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VIMEO_MEDIA_HOST, VimeoDownloadError } from "./download.ts";
@@ -541,5 +541,26 @@ describe("v2 PR 4 — the media host is an ALLOWLIST (skyfire.vimeocdn.com serve
     await downloadRendition(SKYFIRE_URL, m, rep, [0], out, { fetchImpl: impl });
     expect(new URL(urls[0]!).hostname).toBe("skyfire.vimeocdn.com");
     expect(new URL(urls[0]!).pathname).toContain("/v2/range/prot/");
+  });
+});
+
+describe("downloadRendition — the write side is verified (fix round 1 of #524)", () => {
+  test("a file that holds fewer bytes than were written is refused as truncated and unlinked; a matching size is handed over", async () => {
+    const m = fixture();
+    const rep = rep720(m);
+    const { impl } = bytesFetch((url) => {
+      const range = Number(new URL(url).searchParams.get("range"));
+      return new Uint8Array(new ArrayBuffer(rep.segments[range]!.size + 1));
+    });
+    const out = join(mkdtempSync(join(tmpdir(), "vimeo-media-")), "short.mp4");
+    // The disk "says" one byte less than was written — the shape a lost
+    // background flush produces, at its smallest.
+    await expect(
+      downloadRendition(MANIFEST_URL, m, rep, [0, 1], out, { fetchImpl: impl, sizeOnDisk: (p) => statSync(p).size - 1 }),
+    ).rejects.toThrow(/holds \d+ bytes after \d+ were written — refusing a truncated/);
+    expect(existsSync(out)).toBe(false);
+
+    const ok = await downloadRendition(MANIFEST_URL, m, rep, [0, 1], out, { fetchImpl: impl });
+    expect(statSync(out).size).toBe(ok.bytes);
   });
 });

@@ -377,6 +377,12 @@ export interface DownloadRenditionOptions {
   maxSegmentBytes?: number;
   /** Cap on the DECLARED total; default {@link VIMEO_RENDITION_MAX_BYTES}. */
   maxTotalBytes?: number;
+  /**
+   * Test seam for the size-on-disk check; production is `statSync(path).size`.
+   * A truncated write cannot be provoked from a test (it needs a Chromium
+   * launched in-process), so the check is pinned by faking what the disk says.
+   */
+  sizeOnDisk?: (path: string) => number;
 }
 
 export interface RenditionFile {
@@ -514,7 +520,7 @@ export async function downloadRendition(
       segmentsWritten.push({ index: i, start: seg.start, end: seg.end });
     }
     closeSync(fd);
-    const onDisk = statSync(outPath).size;
+    const onDisk = (opts.sizeOnDisk ?? ((p: string) => statSync(p).size))(outPath);
     if (onDisk !== written) {
       throw new VimeoMediaDownloadError(
         `Rendition file holds ${onDisk} bytes after ${written} were written — refusing a truncated ${rep.id}`,
