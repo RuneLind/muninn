@@ -106,7 +106,11 @@ export interface VimeoJobMeta {
   readonly url: string;
   readonly title: string;
   readonly durationSec: number;
-  /** oEmbed's `upload_date`, used as the document's `date` frontmatter. */
+  /**
+   * oEmbed's `upload_date`. Retained on the job, read by nothing: the document's
+   * `date` is the capture day (see the ingest body below), and a frontmatter
+   * field of its own is a huginn allowlist change.
+   */
   readonly uploadDate: string;
 }
 
@@ -399,11 +403,12 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
         url: canonicalVimeoUrl(meta.videoId),
         summary,
         category,
-        // The CAPTURE date, like every other vertical (youtube/tiktok/article all
-        // stamp today): `date` is what the /summaries shelf buckets and sorts on,
-        // and stamping oEmbed's upload_date instead filed a talk captured today
-        // under the week it was uploaded, below the fold. The upload date is still
-        // in the job's metadata; it has no frontmatter field of its own yet.
+        // The CAPTURE date, the same expression youtube/tiktok/article stamp
+        // (anthropic alone prefers the source's own publish date): `date` is what
+        // the /summaries shelf buckets and sorts on, and stamping oEmbed's
+        // upload_date instead filed a talk captured today under the week it was
+        // uploaded, below the fold. UTC day, like the siblings — a capture in the
+        // first two CEST hours lands under "Yesterday"; shared, not fixed here.
         date: new Date().toISOString().split("T")[0],
         transcript_markdown: transcript,
         caption_lang: track.lang,
