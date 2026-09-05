@@ -266,6 +266,12 @@ function removeBotsRoot(): void {
  *    `botsRoot` it no longer owns — long after its own tests are done.
  */
 function handleSignal(signal: NodeJS.Signals): void {
+  // The spawned muninn and the fake are `afterAll`'s to stop, and a hard kill
+  // skips `afterAll` — measured, a Ctrl-C mid-run left a `bun run src/index.ts`
+  // bound to this file's port, so the NEXT run's server never came up and its
+  // first case timed out on `/api/live`. Same order as `afterAll`.
+  server?.kill("SIGTERM");
+  fake?.close();
   removeBotsRoot();
   removeSignalHandlers();
   process.kill(process.pid, signal);
@@ -294,6 +300,36 @@ async function installStatusRecorder(page: import("@playwright/test").Page): Pro
       if (text && w.__statuses![w.__statuses!.length - 1] !== text) w.__statuses!.push(text);
     }).observe(badge, { childList: true, subtree: true, characterData: true });
   });
+}
+
+/**
+ * Make sure VIDEO_URL is in the route's recently-ingested map — the state the
+ * dedup cases read.
+ *
+ * The first case is what puts it there on a full run, and `mode: "serial"`
+ * pins that order. Under `--grep` the first case may not RUN, and a case that
+ * assumed it did was answered with a fresh job instead of `duplicate` and
+ * failed on its own banner — a failure about test selection, not about the
+ * property. So a case that depends on the capture ASKS for it: a `duplicate`
+ * answer is the state already; a `job_id` is a capture this call waits out.
+ * Any other answer is a real failure and is reported as one.
+ */
+async function ensureCaptured(request: import("@playwright/test").APIRequestContext): Promise<void> {
+  const res = await request.post(`${BASE}/api/vimeo/summarize`, { data: { url: VIDEO_URL } });
+  const body = (await res.json()) as { duplicate?: boolean; job_id?: string; error?: string };
+  if (body.duplicate) return;
+  if (!body.job_id) throw new Error(`ensureCaptured: unexpected answer ${JSON.stringify(body)}`);
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    const jobs = (await (await request.get(`${BASE}/api/vimeo/jobs`)).json()) as {
+      jobs?: Array<{ id: string; status: string }>;
+    };
+    const job = (jobs.jobs ?? []).find((j) => j.id === body.job_id);
+    if (job?.status === "complete") return;
+    if (job?.status === "error") throw new Error("ensureCaptured: the seeding capture failed");
+    if (Date.now() > deadline) throw new Error("ensureCaptured: the seeding capture did not complete");
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 async function jobCount(request: import("@playwright/test").APIRequestContext): Promise<number> {
@@ -531,6 +567,8 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     // Mid-stream, an answer about a second url is the banner AND NOTHING ELSE —
     // the card belongs to the running job — so that banner is the only feedback
     // the paste gets. Clearing it whenever any job completes erased the answer.
+    // BEFORE the hold: the seeding capture, if one runs, must not park on it.
+    await ensureCaptured(page.request);
     holdModel = new Promise<void>((resolve) => { releaseModel = resolve; });
 
     await page.goto(`${BASE}/summaries`);
@@ -538,7 +576,8 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await page.locator("#captureUrlBtn").click();
     await expect(page.locator("#statusBadge .status-text")).toHaveText("Summarizing", { timeout: 60_000 });
 
-    // A DIFFERENT url, already in the archive from the first case ⇒ `duplicate`.
+    // A DIFFERENT url, already captured (the first case, or `ensureCaptured`
+    // above under `--grep`) ⇒ `duplicate`.
     await page.locator("#captureUrl").fill(VIDEO_URL);
     await page.locator("#captureUrlBtn").click();
     const banner = page.locator("#errorBanner");
