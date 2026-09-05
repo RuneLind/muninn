@@ -25,9 +25,13 @@ export function discoverSerenaConfigs(botsDir: string): SerenaBotConfig[] {
 
   if (!existsSync(botsDir)) return results;
 
-  // The caller hands over the root discovery READ, so this is the second reader
-  // of a directory that has already been read once; a failure here is the root
-  // going unreadable between the two, and Serena entries are not worth a boot.
+  // Its own guard, because not every caller hands over a root that has been
+  // read: the manager passes the root discovery READ (`readBotsRoot().root`),
+  // and when the override AND the checkout's `bots/` are both unreadable that
+  // is the fallback, handed over with an empty entry list rather than a throw —
+  // so this readdir fails on every boot in that state, not only in a race. The
+  // copilot connector passes a discovered bot's parent, which is readable by
+  // construction. Serena entries are not worth a boot either way.
   let entries;
   try {
     entries = readdirSync(botsDir, { withFileTypes: true });

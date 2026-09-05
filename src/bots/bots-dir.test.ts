@@ -1,4 +1,5 @@
-import { test, expect, describe, afterEach } from "bun:test";
+import { test, expect, describe, afterEach, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -169,7 +170,13 @@ describe("discovery survives a bots root the process may not READ", () => {
 
       // The warn is the operator's only signal that the roster was swapped —
       // once, naming the refused value, its code and the fallback.
-      const warns = records.filter((r) => r.level === "warning");
+      // Only THIS guard's warn: re-discovering the checkout's real roster can
+      // emit config-validation warns of its own (a mistyped field in a
+      // developer's `bots/`), and counting those would make the case fail on
+      // one machine and pass on another.
+      const botsDirWarns = (rs: LogRecord[]) =>
+        rs.filter((r) => r.level === "warning" && r.message.some((m) => typeof m === "string" && m.includes("MUNINN_BOTS_DIR")));
+      const warns = botsDirWarns(records);
       expect(warns).toHaveLength(1);
       const text = warns[0]!.message.map((m) => (typeof m === "string" ? m : String(m))).join("");
       expect(text).toContain(root);
@@ -177,10 +184,39 @@ describe("discovery survives a bots root the process may not READ", () => {
       expect(text).toContain(resolve(import.meta.dir, "../../bots"));
       // Throttled per value: a second discovery does not warn again.
       discoverAllBots();
-      expect(records.filter((r) => r.level === "warning")).toHaveLength(1);
+      expect(botsDirWarns(records)).toHaveLength(1);
     } finally {
       await reset();
       chmodSync(root, 0o755);
+    }
+  });
+  test("only permission/type codes fall back; anything else rethrows", () => {
+    // The refusal set is the whole decision, so it is pinned code by code: a
+    // fault on a VALID root (EMFILE) must fail the call visibly rather than
+    // answer with the checkout's roster, and a permission/type code on the
+    // override must degrade. `spyOn` on the `node:fs` namespace reaches the
+    // named import under Bun (measured; no `mock.module` needed).
+    const root = tempBotsRoot("zzcodebot");
+    process.env.MUNINN_BOTS_DIR = root;
+    const real = fs.readdirSync;
+    const failWith = (code: string) =>
+      spyOn(fs, "readdirSync").mockImplementation(((...args: Parameters<typeof real>) => {
+        if (String(args[0]) === resolve(root)) throw Object.assign(new Error(`${code}: simulated`), { code });
+        return real(...args);
+      }) as typeof real);
+    try {
+      for (const code of ["EMFILE", "EIO", "ENOMEM"]) {
+        const spy = failWith(code);
+        expect(() => discoverAllBots()).toThrow(code);
+        spy.mockRestore();
+      }
+      for (const code of ["EACCES", "EPERM", "ENOTDIR", "ENOENT", "ELOOP"]) {
+        const spy = failWith(code);
+        expect(readBotsRoot().root).toBe(resolve(import.meta.dir, "../../bots"));
+        spy.mockRestore();
+      }
+    } finally {
+      spyOn(fs, "readdirSync").mockRestore();
     }
   });
 });

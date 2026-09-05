@@ -1,6 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { writeBotConfigField } from "./config-edit.ts";
 import { validateBotConfigField } from "./config.ts";
@@ -105,4 +105,31 @@ test("validateBotConfigField: matches discovery messages + edge cases", () => {
   expect(validateBotConfigField("jarvis", "thinkingMaxTokens", "180000")).toContain("should be a number");
   expect(validateBotConfigField("jarvis", "thinkingMaxTokens", 0)).toBeNull();
   expect(validateBotConfigField("jarvis", "model", null)).toBeNull(); // clear
+});
+
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+test.skipIf(isRoot)("with no baseDir it writes into the root discovery READ, not the override it refused", () => {
+  // Discovery falls back to the checkout's `bots/` when `MUNINN_BOTS_DIR` cannot
+  // be read; an editor resolving the override again would answer "unknown bot"
+  // for every bot the same /models page lists. Pinned through the refusal
+  // message, which names the base it looked under — the only observable that
+  // does not require writing into the checkout's own roster.
+  const locked = mkdtempSync(join(tmpdir(), "muninn-locked-bots-"));
+  chmodSync(locked, 0o000);
+  process.env.MUNINN_BOTS_DIR = locked;
+  try {
+    let message = "";
+    try {
+      writeBotConfigField("zz-no-such-bot", "model", "x");
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    expect(message).toContain("Unknown bot");
+    expect(message).toContain(resolve(import.meta.dir, "../../bots"));
+    expect(message).not.toContain(locked);
+  } finally {
+    chmodSync(locked, 0o755);
+    rmSync(locked, { recursive: true, force: true });
+  }
 });
