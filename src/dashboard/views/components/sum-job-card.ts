@@ -305,7 +305,9 @@ export function sumJobCardScript(): string {
       duplicate: 'Already captured',
       in_flight: 'Already being captured',
       bad_kind: 'That summary kind is not offered here',
-      bad_lang: 'That output language is not offered here'
+      bad_lang: 'That output language is not offered here',
+      bad_frames: 'The Slides flag must be on or off',
+      frames_unsupported: 'The summarizer bot cannot read slide frames (its connector has no file access) — untick Slides, or set SUMMARIZER_BOT to a claude-cli or claude-sdk bot'
     };
 
     // The duration cap, in seconds, injected by the page from the SERVER

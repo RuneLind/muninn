@@ -510,3 +510,36 @@ describe("fix round 2 — what the verify pass found", () => {
     expect(Date.now() - started).toBeLessThan(250);
   });
 });
+
+describe("v2 PR 4 — the media host is an ALLOWLIST (skyfire.vimeocdn.com serves the same manifest)", () => {
+  const SKYFIRE_URL =
+    "https://skyfire.vimeocdn.com/0-0x0/00000000-0000-4000-8000-000000000000/psid=placeholder/v2/playlist/av/primary/prot/placeholder/playlist.json?omit=av1-hevc&pathsig=placeholder";
+
+  test("fetchVimeoManifest accepts both measured hosts and refuses any other vimeocdn host", async () => {
+    const { impl, urls } = bytesFetch(() => new TextEncoder().encode(JSON.stringify(FIXTURE_RAW)) as Uint8Array<ArrayBuffer>);
+    expect((await fetchVimeoManifest(SKYFIRE_URL, { fetchImpl: impl })).video.length).toBe(5);
+    expect((await fetchVimeoManifest(MANIFEST_URL, { fetchImpl: impl })).video.length).toBe(5);
+    expect(urls.length).toBe(2);
+    await expect(
+      fetchVimeoManifest(SKYFIRE_URL.replace("skyfire.vimeocdn.com", "f.vimeocdn.com"), { fetchImpl: impl }),
+    ).rejects.toThrow(/only vod-adaptive-ak\.vimeocdn\.com, skyfire\.vimeocdn\.com/);
+    await expect(
+      fetchVimeoManifest(SKYFIRE_URL.replace("skyfire.vimeocdn.com", "skyfire.vimeocdn.com.evil.example"), { fetchImpl: impl }),
+    ).rejects.toThrow(VimeoMediaDownloadError);
+    // Exact, never a suffix: a subdomain of an allowlisted host is another host.
+    await expect(
+      fetchVimeoManifest(SKYFIRE_URL.replace("skyfire.vimeocdn.com", "evil.skyfire.vimeocdn.com"), { fetchImpl: impl }),
+    ).rejects.toThrow(/only vod-adaptive-ak/);
+    expect(urls.length).toBe(2);
+  });
+
+  test("segments of a skyfire manifest resolve to skyfire and download there", async () => {
+    const m = fixture();
+    const rep = { ...rep720(m), segments: rep720(m).segments.map((seg) => ({ ...seg, size: 4 })) };
+    const { impl, urls } = bytesFetch(() => new Uint8Array(new ArrayBuffer(4)));
+    const out = join(mkdtempSync(join(tmpdir(), "vimeo-media-")), "sky.mp4");
+    await downloadRendition(SKYFIRE_URL, m, rep, [0], out, { fetchImpl: impl });
+    expect(new URL(urls[0]!).hostname).toBe("skyfire.vimeocdn.com");
+    expect(new URL(urls[0]!).pathname).toContain("/v2/range/prot/");
+  });
+});

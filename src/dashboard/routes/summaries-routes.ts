@@ -4,6 +4,7 @@ import { getLog } from "../../logging.ts";
 import { renderSummariesPage } from "../views/summaries-page.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { capturePresetOptions, resolveCapturePresets } from "../../summaries/presets.ts";
+import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { docDateMs } from "../../gardener/harvest.ts";
@@ -139,7 +140,9 @@ export function registerSummariesRoutes(
     const captureKinds = capturePresetOptions(
       resolveCapturePresets(summarizerBot?.prompts, summarizerBot?.connector),
     );
-    return c.html(await renderSummariesPage({ captureKinds }));
+    // The Slides checkbox is live only where the Vimeo route would not 503 it.
+    const framesSupported = summarizerBot ? connectorCapabilities(summarizerBot).supportsExtraDirs : false;
+    return c.html(await renderSummariesPage({ captureKinds, framesSupported }));
   });
 
   // Share: `POST /api/summaries/share` (SSE) + its preset list — the doc panel's

@@ -8,6 +8,9 @@ import { canonicalVimeoUrl, resolveVimeoRef } from "../../vimeo/url.ts";
 import { fetchVimeoOembed, isNotPublic } from "../../vimeo/oembed.ts";
 import { speakerFromTitle } from "../../vimeo/metadata.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
+import { connectorCapabilities } from "../../ai/one-shot.ts";
+import { FRAME_FILE_RE, FRAME_VIDEO_ID_RE, framesRootDir } from "../../vimeo/frames.ts";
+import { resolve as resolvePath, sep as pathSep } from "node:path";
 import { findCapturePreset, resolveCapturePresets } from "../../summaries/presets.ts";
 import { DEFAULT_CAPTURE_LANG, isCaptureLang } from "../../summaries/language.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
@@ -68,6 +71,8 @@ interface VimeoRecentIngest {
 export interface VimeoRouteOptions {
   /** The clock the recently-ingested TTL is measured on. */
   now?: () => number;
+  /** Where the frames route reads from; default `framesRootDir()`. */
+  framesRoot?: string;
 }
 
 /**
@@ -324,8 +329,37 @@ export function registerVimeoRoutes(
     corsPreflight: false,
   });
 
+  /**
+   * The frames a summary quotes inline (PR 4), served READ-ONLY off
+   * `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg` — the only writer is the
+   * capture's `keepReferencedFrames`. Both path segments are gated to their
+   * charset BEFORE any filesystem access (a video id is digits, a file is
+   * `<digits>.jpg`), and the resolved path is checked to stay under the root
+   * anyway — defence in depth, the wiki explainer route's shape. Anything else
+   * is a 404, never a 400 that confirms the shape. Registered here so the
+   * `nais` profile drops it with the rest of the vertical.
+   */
+  const framesRoot = opts.framesRoot ?? framesRootDir();
+  app.get("/api/vimeo/frames/:videoId/:file", async (c) => {
+    const { videoId, file } = c.req.param();
+    if (!FRAME_VIDEO_ID_RE.test(videoId) || !FRAME_FILE_RE.test(file)) return c.notFound();
+    const rootAbs = resolvePath(framesRoot);
+    const fileAbs = resolvePath(rootAbs, videoId, file);
+    if (!fileAbs.startsWith(rootAbs + pathSep)) return c.notFound();
+    const f = Bun.file(fileAbs);
+    if (!(await f.exists())) return c.notFound();
+    return new Response(f, {
+      headers: {
+        "Content-Type": "image/jpeg",
+        // A frame is (video, second) — re-extracting the same second of the
+        // same rendition is the same picture, so a day of caching is safe.
+        "Cache-Control": "public, max-age=86400",
+      },
+    });
+  });
+
   app.post("/api/vimeo/summarize", async (c) => {
-    type Body = { url?: string; kind?: unknown; lang?: unknown };
+    type Body = { url?: string; kind?: unknown; lang?: unknown; frames?: unknown };
     const body = await c.req.json<Body>().catch(() => ({} as Body));
     const url = body.url;
 
@@ -376,6 +410,30 @@ export function registerVimeoRoutes(
       return c.json(
         { error: `Unknown output language: ${String(body.lang)}`, code: "bad_lang", lang: body.lang },
         400,
+      );
+    }
+    // Slides (PR 4): a BOOLEAN, absent ⇒ off (the plan's default). Validated
+    // like kind/lang — before oEmbed, a 400 with a code the card renders — and
+    // then PRE-FLIGHTED against the summarizer's connector: frames are read by
+    // the model through `extraDirs`, which only the Claude connectors can
+    // express, so a bot that cannot read files answers 503 `frames_unsupported`
+    // BEFORE a job exists (the TikTok precedent) rather than silently
+    // summarizing without the slides the reader ticked.
+    if (body.frames !== undefined && typeof body.frames !== "boolean") {
+      return c.json({ error: "frames must be a boolean", code: "bad_frames" }, 400);
+    }
+    const frames = body.frames === true;
+    if (frames && !connectorCapabilities(summarizerBot).supportsExtraDirs) {
+      return c.json(
+        {
+          error: "frames_unsupported",
+          code: "frames_unsupported",
+          detail:
+            `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector ?? "claude-cli"}", ` +
+            `which cannot read the extracted slide frames (no extra-dirs support). Untick Slides, or set ` +
+            `SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
+        },
+        503,
       );
     }
 
@@ -517,6 +575,7 @@ export function registerVimeoRoutes(
             : {}),
           preset,
           lang,
+          frames,
         },
         config,
         summarizerBot,

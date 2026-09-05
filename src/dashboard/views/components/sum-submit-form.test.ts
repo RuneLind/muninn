@@ -77,6 +77,9 @@ interface Harness {
   select: (id: string, value: string) => void;
   /** A select's current value. */
   selected: (id: string) => string;
+  /** Tick/untick a checkbox and fire its change listeners. */
+  check: (id: string, checked: boolean) => void;
+  checked: (id: string) => boolean;
   /** What the fake localStorage holds now. */
   stored: () => Record<string, string>;
   submitCaptureUrlFromInput: () => Promise<void>;
@@ -88,6 +91,8 @@ interface Harness {
 interface HarnessSetup {
   /** The options each select offers, as the server rendered them. */
   selects?: Record<string, string[]>;
+  /** Element ids rendered `disabled` (the Slides checkbox on a connector without file access). */
+  disabled?: string[];
   /** What `localStorage` holds at script init; `throws` makes the accessor throw. */
   storage?: Record<string, string> | { throws: true };
 }
@@ -118,7 +123,8 @@ function harness(
     set value(v: string) {
       values[id] = v;
     },
-    disabled: false,
+    disabled: setup.disabled?.includes(id) ?? false,
+    checked: false,
     textContent: "Summarize",
     // A select's options, as the server rendered them; a text field has none.
     options: (setup.selects?.[id] ?? []).map((value) => ({ value })),
@@ -252,6 +258,11 @@ function harness(
       for (const fn of changeListeners[id] ?? []) fn();
     },
     selected: (id: string) => values[id] ?? "",
+    check: (id: string, checked: boolean) => {
+      doc.getElementById(id).checked = checked;
+      for (const fn of changeListeners[id] ?? []) fn();
+    },
+    checked: (id: string) => doc.getElementById(id).checked,
     stored: () => ({ ...stored }),
     ...made,
   };
@@ -300,7 +311,7 @@ describe("sum-submit-form: the URL field", () => {
     await h.submitCaptureUrlFromInput();
 
     expect(h.fetchCalls).toEqual([
-      { url: "/api/vimeo/summarize", method: "POST", body: { url: "https://vimeo.com/1223358361" } },
+      { url: "/api/vimeo/summarize", method: "POST", body: { url: "https://vimeo.com/1223358361", frames: false } },
     ]);
     expect(h.shownJobs).toEqual([
       {
@@ -394,7 +405,7 @@ describe("sum-submit-form: a Vimeo link in the ARTICLE box", () => {
 
     expect(h.alerts).toEqual([]);
     expect(h.fetchCalls).toEqual([
-      { url: "/api/vimeo/summarize", method: "POST", body: { url: "https://vimeo.com/1223358361" } },
+      { url: "/api/vimeo/summarize", method: "POST", body: { url: "https://vimeo.com/1223358361", frames: false } },
     ]);
     expect(h.connected).toEqual([{ jobId: "job-2", source: "vimeo" }]);
     expect(h.articleValue()).toBe("");
@@ -450,11 +461,11 @@ describe("sum-submit-form: the kind + language picker", () => {
     h.select("captureLang", "nb");
     h.setUrl("https://vimeo.com/1223642971");
     await h.submitCaptureUrlFromInput();
-    expect(h.fetchCalls[0]!.body).toEqual({ url: "https://vimeo.com/1223642971", kind: "talk-notes", lang: "nb" });
+    expect(h.fetchCalls[0]!.body).toEqual({ url: "https://vimeo.com/1223642971", kind: "talk-notes", lang: "nb", frames: false });
 
     h.setArticle("https://vimeo.com/1223642972");
     await h.submitArticle();
-    expect(h.fetchCalls[1]!.body).toEqual({ url: "https://vimeo.com/1223642972", kind: "talk-notes", lang: "nb" });
+    expect(h.fetchCalls[1]!.body).toEqual({ url: "https://vimeo.com/1223642972", kind: "talk-notes", lang: "nb", frames: false });
   });
 
   test("with nothing stored the selects stay on their first option — the server's defaults", async () => {
@@ -463,14 +474,14 @@ describe("sum-submit-form: the kind + language picker", () => {
     expect(h.selected("captureLang")).toBe("talk");
     h.setUrl("https://vimeo.com/1223642971");
     await h.submitCaptureUrlFromInput();
-    expect(h.fetchCalls[0]!.body).toEqual({ url: "https://vimeo.com/1223642971", kind: "standard", lang: "talk" });
+    expect(h.fetchCalls[0]!.body).toEqual({ url: "https://vimeo.com/1223642971", kind: "standard", lang: "talk", frames: false });
   });
 
   test("a change is remembered under the versioned key, and restored on the next init", () => {
     const h = harness({ status: 200, body: {} }, { selects: SELECTS });
     h.select("captureKind", "deep");
     h.select("captureLang", "en");
-    expect(h.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "deep", lang: "en" }) });
+    expect(h.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "deep", lang: "en", frames: false }) });
 
     const again = harness({ status: 200, body: {} }, { selects: SELECTS, storage: h.stored() });
     expect(again.selected("captureKind")).toBe("deep");
@@ -480,10 +491,10 @@ describe("sum-submit-form: the kind + language picker", () => {
   test("EACH select persists on its own change — a reader who only changes the kind keeps it", () => {
     const kindOnly = harness({ status: 200, body: {} }, { selects: SELECTS });
     kindOnly.select("captureKind", "deep");
-    expect(kindOnly.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "deep", lang: "talk" }) });
+    expect(kindOnly.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "deep", lang: "talk", frames: false }) });
     const langOnly = harness({ status: 200, body: {} }, { selects: SELECTS });
     langOnly.select("captureLang", "en");
-    expect(langOnly.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "standard", lang: "en" }) });
+    expect(langOnly.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "standard", lang: "en", frames: false }) });
   });
 
   test("a stored value the server no longer offers is ignored, per axis", () => {
@@ -670,5 +681,84 @@ describe("sum-submit-form: the banner does not outlive the request it belongs to
 describe("sum-submit-form: markup, accessibility", () => {
   test("the URL field has an accessible name", () => {
     expect(captureUrlFormHtml(PICKER)).toContain('aria-label="Vimeo URL"');
+  });
+});
+
+describe("sum-submit-form: the Slides checkbox (v2 PR 4)", () => {
+  const SELECTS = { captureKind: ["standard", "deep", "talk-notes"], captureLang: ["talk", "nb", "en"] };
+  const OK = { status: 200, body: { job_id: "j1", title: "T" } };
+
+  test("renders between the language select and the button; disabled with the reason when unsupported", () => {
+    const live = captureUrlFormHtml({ ...PICKER, framesSupported: true });
+    expect(live).toContain('<input type="checkbox" id="captureFrames" />');
+    expect(live).not.toContain("disabled");
+    expect(live.indexOf('id="captureLang"')).toBeLessThan(live.indexOf('id="captureFrames"'));
+    expect(live.indexOf('id="captureFrames"')).toBeLessThan(live.indexOf('id="captureUrlBtn"'));
+    expect(live).toContain("off by default; remembered");
+
+    const dead = captureUrlFormHtml({ ...PICKER, framesSupported: false });
+    expect(dead).toContain('<input type="checkbox" id="captureFrames" disabled />');
+    expect(dead).toContain("cannot read frame files");
+    // Default (no bot in hand) is the live control.
+    expect(captureUrlFormHtml(PICKER)).not.toContain("disabled");
+    // Never pre-checked by the server: the browser's memory decides.
+    expect(live).not.toContain("checked");
+  });
+
+  test("off by default, on the wire as a boolean, and ticking it rides on the POST", async () => {
+    const h = harness(OK, { selects: SELECTS });
+    expect(h.checked("captureFrames")).toBe(false);
+    h.setUrl("https://vimeo.com/1223642971");
+    await h.submitCaptureUrlFromInput();
+    expect(h.fetchCalls[0]!.body).toEqual({ url: "https://vimeo.com/1223642971", kind: "standard", lang: "talk", frames: false });
+
+    h.check("captureFrames", true);
+    h.setUrl("https://vimeo.com/1223642972");
+    await h.submitCaptureUrlFromInput();
+    expect(h.fetchCalls[1]!.body).toEqual({ url: "https://vimeo.com/1223642972", kind: "standard", lang: "talk", frames: true });
+  });
+
+  test("the tick is remembered under the same versioned key and restored on the next init", () => {
+    const h = harness(OK, { selects: SELECTS });
+    h.check("captureFrames", true);
+    expect(h.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "standard", lang: "talk", frames: true }) });
+    const again = harness(OK, { selects: SELECTS, storage: h.stored() });
+    expect(again.checked("captureFrames")).toBe(true);
+    // Unticking is remembered too (not just "ever ticked").
+    again.check("captureFrames", false);
+    expect(JSON.parse(again.stored()["muninn.summaries.capture.v1"]!).frames).toBe(false);
+    // Only a real boolean true restores: a stored string is off.
+    const stringy = harness(OK, {
+      selects: SELECTS,
+      storage: { "muninn.summaries.capture.v1": JSON.stringify({ kind: "standard", lang: "talk", frames: "true" }) },
+    });
+    expect(stringy.checked("captureFrames")).toBe(false);
+  });
+
+  test("a DISABLED checkbox posts false whatever storage remembers — a tick from another instance never 503s here", async () => {
+    const h = harness(OK, {
+      selects: SELECTS,
+      disabled: ["captureFrames"],
+      storage: { "muninn.summaries.capture.v1": JSON.stringify({ kind: "standard", lang: "talk", frames: true }) },
+    });
+    expect(h.checked("captureFrames")).toBe(false);
+    h.setUrl("https://vimeo.com/1223642971");
+    await h.submitCaptureUrlFromInput();
+    expect((h.fetchCalls[0]!.body as { frames: boolean }).frames).toBe(false);
+    // Defence in depth: even a disabled box that somehow READS checked (a stale
+    // DOM, devtools) posts false — the read site checks `disabled` itself.
+    h.check("captureFrames", true);
+    h.setUrl("https://vimeo.com/1223642972"); // the first submit cleared the field
+    await h.submitCaptureUrlFromInput();
+    expect((h.fetchCalls[1]!.body as { frames: boolean }).frames).toBe(false);
+  });
+
+  test("a 503 frames_unsupported is the card's sentence for that code, and keeps the text", async () => {
+    const h = harness({ status: 503, body: { error: "frames_unsupported", code: "frames_unsupported", detail: "x" } }, { selects: SELECTS });
+    h.check("captureFrames", true);
+    h.setUrl("https://vimeo.com/1223642971");
+    await h.submitCaptureUrlFromInput();
+    expect(h.outcomes[0]!.opts.sentence).toBe("sentence:frames_unsupported");
+    expect(h.urlValue()).toBe("https://vimeo.com/1223642971");
   });
 });

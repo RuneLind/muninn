@@ -332,6 +332,10 @@ interface FakePageSpec {
   stallWaits?: boolean;
   /** The probe evaluate throws with this message (a detached frame, say). */
   probeThrows?: string;
+  /** The player requests its MANIFEST this long after `goto` resolves (default: never). */
+  manifestAfterMs?: number;
+  /** The CDN host that manifest request names (default the vod-adaptive one). */
+  manifestHost?: string;
   duration?: number;
 }
 
@@ -414,6 +418,15 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
         throw new Error(`goto: Timeout ${opts?.timeout}ms exceeded.`);
       }
       if (spec.gotoThrows) throw new Error(spec.gotoThrows);
+      if (spec.manifestAfterMs !== undefined) {
+        setTimeout(() => {
+          for (const h of requestHandlers) {
+            h({ url: () => spec.manifestHost
+              ? `https://${spec.manifestHost}/0-0x0/x/psid=x/v2/playlist/av/primary/prot/x/playlist.json`
+              : "https://vod-adaptive-ak.vimeocdn.com/exp=0/x/v2/playlist/av/primary/prot/x/playlist.json" });
+          }
+        }, spec.manifestAfterMs);
+      }
       return null;
     },
     async evaluate(fn: (arg?: unknown) => unknown, arg?: unknown) {
@@ -723,5 +736,59 @@ describe("no browser driver is loaded by importing this module", () => {
     // `playwright`, not `playwright-core`, ships the browser binaries and a
     // postinstall — the package name itself is part of the decision.
     expect(captionsSource).not.toMatch(/["']playwright["']/);
+  });
+});
+
+describe("harvestVimeoCaptions — waiting for the manifest (v2 PR 4)", () => {
+  const TRACK = { tracks: [{ lang: "en", label: "English" }], urlPerTrack: ["https://captions.vimeo.com/captions/1.vtt?sig=a"] };
+
+  test("by default the harvest closes on the captions and reports no manifest, even one 150 ms away", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 150 });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher });
+    expect(c.tracks.length).toBe(1);
+    expect(c.manifestUrl).toBeUndefined();
+  });
+
+  test("asked to wait, it holds the page open until the player's playlist request lands", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 150 });
+    const started = Date.now();
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 3_000 });
+    expect(c.manifestUrl).toContain("vod-adaptive-ak.vimeocdn.com");
+    expect(c.manifestUrl).toContain("/playlist/av/");
+    // It waited for the request, not for the whole allowance.
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("the wait is bounded by its own allowance and by the harvest budget, and gives up cleanly", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 5_000 });
+    const started = Date.now();
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 200 });
+    expect(c.manifestUrl).toBeUndefined();
+    expect(c.tracks.length).toBe(1);
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(190);
+    expect(elapsed).toBeLessThan(1_500);
+    // Budget beats allowance: a 10 s allowance under a 300 ms budget ends with the budget.
+    const tight = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 5_000 });
+    const t0 = Date.now();
+    const c2 = await harvestVimeoCaptions("123", { launcher: tight.launcher, awaitManifestMs: 10_000, timeoutMs: 300 });
+    expect(c2.manifestUrl).toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(1_500);
+  });
+});
+
+describe("harvestVimeoCaptions — which manifest hosts count (v2 PR 4)", () => {
+  const TRACK = { tracks: [{ lang: "en", label: "English" }], urlPerTrack: ["https://captions.vimeo.com/captions/1.vtt?sig=a"] };
+
+  test("a playlist on skyfire.vimeocdn.com IS the manifest (measured: vimeo.com/1223423400 is served from it)", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 50, manifestHost: "skyfire.vimeocdn.com" });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 2_000 });
+    expect(c.manifestUrl).toContain("skyfire.vimeocdn.com");
+  });
+
+  test("a playlist-shaped URL on an unlisted host is NOT recorded — the pin decides what is fetched, the harvest what is looked at", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 50, manifestHost: "cdn.example" });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 300 });
+    expect(c.manifestUrl).toBeUndefined();
   });
 });

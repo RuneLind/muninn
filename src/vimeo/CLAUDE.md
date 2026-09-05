@@ -10,10 +10,11 @@ the UI entry — the URL field on `/summaries`.
 | `oembed.ts` | `fetchVimeoOembed` — title/author/duration/upload date/thumbnail with **no browser** |
 | `vtt.ts` | `parseVttCues`, `vttToSegments`, `segmentsToMarkdown`, `detectCaptionKind` — pure |
 | `captions.ts` | `harvestVimeoCaptions` (headless Chromium — captures the caption URLs AND the signed JSON `manifestUrl`), `downloadVtt` (host-pinned to `captions.vimeo.com`), `chooseTrack` (pure) |
-| `download.ts` | `downloadPinned` — the ONE host-pinned, bounded byte download (`downloadVtt`'s rules, stated once), parameterised on host, caps and the noun in its messages; `VimeoDownloadError` is the base every refusal extends; it also OWNS the two host constants (`VIMEO_CAPTIONS_HOST`, `VIMEO_MEDIA_HOST`), so `captions.ts` and `media.ts` import a string from the module both already depend on and never from each other |
-| `media.ts` | The media seam (v2 PR 3): `fetchVimeoManifest` (host-pinned to `vod-adaptive-ak.vimeocdn.com`), `parseVimeoManifest` / `chooseRepresentation` / `segmentIndexAt` / `resolveSegmentUrl` (pure), `downloadRendition` (init + segments → ONE fMP4 ffmpeg reads) |
+| `download.ts` | `downloadPinned` — the ONE host-pinned, bounded byte download (`downloadVtt`'s rules, stated once), parameterised on host, caps and the noun in its messages; `VimeoDownloadError` is the base every refusal extends; it also OWNS the host constants (`VIMEO_CAPTIONS_HOST`, the `VIMEO_MEDIA_HOSTS` allowlist), so `captions.ts` and `media.ts` import a string from the module both already depend on and never from each other |
+| `media.ts` | The media seam (v2 PR 3): `fetchVimeoManifest` (host-pinned to the `VIMEO_MEDIA_HOSTS` allowlist — `vod-adaptive-ak.vimeocdn.com`, `skyfire.vimeocdn.com`), `parseVimeoManifest` / `chooseRepresentation` / `segmentIndexAt` / `resolveSegmentUrl` (pure), `downloadRendition` (init + segments → ONE fMP4 ffmpeg reads) |
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
-| `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · summarizing · ingesting · complete · error` |
+| `frames.ts` | Slides (v2 PR 4): `cadenceTimes` / `framesPromptSection` / `referencedFrameSeconds` (pure), `extractCadenceFrames` (one 720p segment per tick through `media.ts`, one ffmpeg grab each), `keepReferencedFrames` (the quoted ones → `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg`), the route's two path charsets |
+| `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · extracting_frames · summarizing · ingesting · complete · error` |
 | `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
 | `metadata.ts` | `speakerFromTitle` — the last ` - ` segment of a CONFERENCE account's title (`VIMEO_CONFERENCE_ACCOUNTS`, JavaZone today), undefined for everyone else — pure |
 | `../summaries/presets.ts` | The capture KINDS (`standard` · `deep` · `talk-notes`), per-bot `prompts/captureSummary.<id>.md` overrides, and the two run levers a kind can pull (`captureThinkingFor`, `captureBotConfigFor`) — pure |
@@ -254,6 +255,106 @@ rendition, `ffprobe`s the file and (video) pulls a JPEG at `--at` — the
 mechanism itself, which no offline test can prove. Unknown flags are refused
 (exit 2), as in `smoke-vimeo.ts`.
 
+## Slides in the summary (v2 PR 4, cadence tier)
+
+**One 720p frame every ~40 s of talk, read by the model, quoted inline where it
+adds something.** `src/vimeo/frames.ts`: `cadenceTimes(duration)` is
+`frameBudgetFor(duration)` ticks (the TikTok/X budget — 30 at 10 min, ceiling 60
+from 40 min, spacing growing past that) at the MIDPOINTS of equal slices, whole
+seconds, so the first frame is not the t=0 title card; `extractCadenceFrames`
+fetches, per tick, the ONE 6 s segment covering it through PR 3's
+`downloadRendition` (a segment shared by two ticks is fetched once) and pulls
+one JPEG with `ffmpeg -ss <t − segment.start> -frames:v 1 -vf scale=-2:720` —
+the seek is RELATIVE to the segment's `start_time`, which is absolute. 60 frames
+≈ 22 MB of fetches, one budget (`framesTimeoutFor`, 30 s + 3 s/frame), and a
+failure on ONE frame fails the pass: a summary that quotes slide 23 and never
+saw 24 is a partial record presented as complete. Cadence, not scene
+detection, deliberately — the plan's skip trigger decides whether scene
+detection is ever built.
+
+**`frames` is a boolean on the route body, off by default, pre-flighted BEFORE
+oEmbed.** A non-boolean is 400 `bad_frames`; `true` on a summarizer whose
+connector lacks `supportsExtraDirs` is **503 `frames_unsupported`** before a job
+exists (the TikTok precedent), rendered by the card from the one sentence map —
+slides are opt-out, never a silent skip. On `/summaries` the **Slides checkbox**
+(`captureUrlFormHtml`, `framesSupported` from `GET /summaries`'s
+`connectorCapabilities(summarizerBot)`) renders DISABLED with the reason in its
+title where the route would 503, and a disabled box posts `false` whatever
+storage remembers — a tick taken on one instance must not 503 on another. The
+tick is remembered under the same `muninn.summaries.capture.v1` key as kind and
+language, restored only as a real boolean `true`.
+
+**The harvest WAITS for the manifest when frames are wanted, and the media
+host is an ALLOWLIST.** Measured on the first live frames capture: the caption
+URL arrives before the player asks for its playlist, so a harvest that closes
+on the captions reports no manifest and a reader who ticked Slides gets none.
+`awaitManifestMs` (`VIMEO_MANIFEST_WAIT_MS`, 10 s, inside the harvest budget)
+keeps the page playing until the request lands; transcript-only captures pass
+0 and close as before. And the second acceptance talk (`vimeo.com/1223423400`)
+is served from `skyfire.vimeocdn.com`, not `vod-adaptive-ak` — identical
+manifest shape, different CDN host, so a single host string missed it
+entirely (the wait then expired for nothing). `VIMEO_MEDIA_HOSTS` in
+`download.ts` lists both measured hosts; the harvest records a `/playlist/av/`
+request only on one of them (`isMediaHostUrl`, the same predicate the download
+pin applies, so what is recorded is exactly what will be fetched), and a new
+host is added there with the video it was measured on — matched exactly,
+never by suffix.
+
+**In the job, frames sit between harvest and summarize as `extracting_frames`,
+and every failure is a WARN plus transcript-only, never an error job.** No
+`manifestUrl` from the harvest (the player never asked for one inside the
+wait — or asked on a host not yet listed — and the `VIMEO_HARVEST_STUB` deps
+deliberately return none) ⇒
+`frames: no_manifest`; extraction throwing ⇒ `frames: failed`; both land on the
+trace as `frames` + `frameCount` so the outcome is readable afterwards. The
+frame list rides the USER prompt after the transcript (`framesPromptSection`,
+the TikTok `t=HH:MM:SS <path>` shape) plus the one rule TikTok does not need:
+**a slide is quoted as an image IN PLACE**, by exactly
+`![Slide at HH:MM:SS](/api/vimeo/frames/<videoId>/<sec>.jpg)` where `<sec>` is
+the frame's file name, only where it adds something the transcript did not
+say, at most `MAX_INLINE_SLIDES` (8). The SYSTEM prompt says nothing about
+frames, so a frames-off capture's prompt is byte-identical to PR 1's.
+`extraDirs: [workDir]` only when there are frames; the summarize timeout is
+`summarizeTimeoutFor(frames.length, 600 s)`.
+
+**Only the frames the summary QUOTES survive the job.** `keepReferencedFrames`
+parses the summary for this video's `/api/vimeo/frames/<id>/<sec>.jpg` paths and
+copies those out of the work dir to `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg`
+(`framesRootDir()`, beside `agent-cwd`) — a quoted path that was never
+extracted is logged and skipped, so the reader gets a broken image rather than
+a served file from nowhere — and the work dir (segments + unquoted frames) is
+removed in the job's `finally`. The summary text is ingested with the image
+markdown intact; the doc panel renders it through `marked`'s default `<img>`,
+same-origin. **The document's frames are therefore only live inside muninn's
+UI**, which the plan accepted (huginn serves no static files). Nothing removes
+a kept frame when the document is deleted (the delete signal carries a document
+id, not a video id) — a follow-up; a talk's quoted frames are ~8 × 50 KB.
+
+**`GET /api/vimeo/frames/:videoId/:file` is read-only and default-deny by
+charset.** Both segments are gated (`FRAME_VIDEO_ID_RE` digits,
+`FRAME_FILE_RE` `<digits>.jpg`) BEFORE any filesystem access, the resolved path
+is checked to stay under the root anyway, everything else is a 404 (never a 400
+that confirms the shape), `Cache-Control: public, max-age=86400` (a frame is
+(video, second) — re-extracting the same second is the same picture). It is
+registered inside `registerVimeoRoutes`, so `MUNINN_PROFILE=nais` drops it with
+the vertical. A test seam (`VimeoRouteOptions.framesRoot`) points it at a temp
+root.
+
+**Measured on the two acceptance talks (2026-09-05, the plan's skip trigger):**
+Kotlin extension functions (10 min, `en-x-autogen` — Vimeo mis-tagged a
+Norwegian talk, so `talk` gave English; the caption tag is not a reliable
+language signal) — 30 frames read, 8 quoted, 8/8 carry code or a stack trace
+the captions cannot; ES2026 news (10 min, `no-x-autogen`, Norwegian summary) —
+30 read, 6 quoted, 5/6 add something; the sixth is a live-coding demo caught
+mid-typing, and one slide landed under the neighbouring section. 13 of 14 is
+well over the trigger's half, so cadence stands; the two failure shapes seen
+(mid-typing state, off-by-one section) are what scene detection would address.
+
+**Residual, declared:** `linkVimeoTimestamps` (PR 2) rewrites `[MM:SS]` in the
+markdown, so a model that ignores the "nothing else in the alt text" rule and
+writes `![[23:10]](…)` gets its image broken into a link. The prompt states the
+exact alt text; on the two acceptance captures, none did.
+
 ## Rules the VERTICAL lives by (PR 2)
 
 **There is no `fetching_metadata` status.** oEmbed runs in the ROUTE, before a job
@@ -444,6 +545,8 @@ spell the same word.
 | 502 `oembed_failed` | Vimeo did not answer |
 | 200 `duplicate` | Already captured — plus a link to `dashboard_url` |
 | 200 `in_flight` | Already being captured — plus an attach to the running job |
+| 400 `bad_frames` | The Slides flag must be on or off |
+| 503 `frames_unsupported` | The summarizer bot cannot read slide frames — untick Slides, or set SUMMARIZER_BOT to a claude-cli / claude-sdk bot |
 | job error `no_captions` | This video has no caption track |
 
 Two rendering rules: the input **clears** on an answer that started or adopted a
