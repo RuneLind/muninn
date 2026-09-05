@@ -10,6 +10,7 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
+import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 
 const log = getLog("dashboard");
 
@@ -181,10 +182,10 @@ export function registerVimeoRoutes(
    * the same category/title/url and only one document remained.
    *
    * Bounded on BOTH axes ({@link VIMEO_RECENT_INGEST_TTL_MS},
-   * {@link VIMEO_RECENT_INGEST_MAX}) because it is a cache with no invalidation:
-   * the listing is the authority, this only covers the gap in front of it, and
-   * an entry that outlives the reindex is answering from memory about a document
-   * it can no longer see.
+   * {@link VIMEO_RECENT_INGEST_MAX}) because it is a cache whose only
+   * invalidation is the delete signal below: the listing is the authority, this
+   * only covers the gap in front of it, and an entry that outlives the reindex
+   * is answering from memory about a document it can no longer see.
    *
    * Same scope as `inFlight` — one map per REGISTRATION — for the same reason:
    * "a capture this app has started" is the truthful scope, and a module-level
@@ -209,6 +210,22 @@ export function registerVimeoRoutes(
       recentIngests.delete(oldest.value);
     }
   }
+
+  // The one invalidation the map has: a `/summaries` Delete goes through
+  // `backlog-doc-delete`, which announces the document AFTER huginn confirmed
+  // the move. Without this, a capture deleted and re-pasted inside the TTL was
+  // answered `duplicate` from memory about a document that no longer existed —
+  // with a link to nothing. Matched on the document id, which is what the map
+  // holds and what the delete names; the video id is not on the wire there.
+  //
+  // Never unsubscribed: a registration lives as long as the process, and a
+  // test app that outlives its case keeps forgetting only from its OWN map.
+  onSummaryDocumentDeleted(({ collection, id }) => {
+    if (collection !== VIMEO_COLLECTION) return;
+    for (const [videoId, hit] of recentIngests) {
+      if (hit.documentId === id) recentIngests.delete(videoId);
+    }
+  });
 
   /** The map's answer for this video, or null — an expired entry is dropped. */
   function recentIngest(videoId: string): VimeoRecentIngest | null {

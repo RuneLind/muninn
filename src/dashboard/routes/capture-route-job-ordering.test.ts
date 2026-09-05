@@ -152,6 +152,7 @@ mock.module("../../vimeo/summarizer.ts", () => ({
 const { registerTikTokRoutes } = await import("./tiktok-routes.ts");
 const { registerYouTubeRoutes } = await import("./youtube-routes.ts");
 const { registerVimeoRoutes } = await import("./vimeo-routes.ts");
+const { notifySummaryDocumentDeleted } = await import("../../summaries/document-deleted.ts");
 const ttState = await import("../../tiktok/state.ts");
 const ytState = await import("../../youtube/state.ts");
 const vmState = await import("../../vimeo/state.ts");
@@ -909,6 +910,32 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
       Record<string, unknown>;
     expect(outside.duplicate).toBeUndefined();
     expect(outside.job_id).toBeTruthy();
+    expect(vimeoSummarizeCalls).toBe(2);
+  });
+
+  test("a /summaries Delete of the ingested document forgets it inside the TTL", async () => {
+    // The map is a cache with no invalidation against the listing, and the
+    // listing is the one place a delete shows up — so a capture deleted and
+    // re-pasted inside 30 min was answered `duplicate` about a document that no
+    // longer existed. The delete route's notification is the invalidation.
+    knowledgeApiImpl = async () => ({ documents: [] });
+    vimeoIngestDocId = "ai/rag/Trust but verify.md";
+    const app = vmApp();
+
+    await post(app, "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    // Another collection's document of the same id is NOT this map's business.
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: "ai/rag/Trust but verify.md" });
+    const stillHeld = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+    expect(stillHeld.duplicate).toBe(true);
+    expect(vimeoSummarizeCalls).toBe(1);
+
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: "ai/rag/Trust but verify.md" });
+    const after = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+    expect(after.duplicate).toBeUndefined();
+    expect(after.job_id).toBeTruthy();
     expect(vimeoSummarizeCalls).toBe(2);
   });
 

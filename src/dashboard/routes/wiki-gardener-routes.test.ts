@@ -19,6 +19,7 @@ import {
   type IngestBacklogDeps,
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
+import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
 import {
   __setSummariesStatsCacheForTest,
@@ -1454,6 +1455,31 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+
+  test("a confirmed delete notifies the summary-document listeners; a refused one does not", async () => {
+    // The Vimeo route's recently-ingested dedup map hears about deletes only
+    // through this signal. It fires AFTER huginn confirmed the move — a refused
+    // delete leaves the document in place, and forgetting it would re-open a
+    // second capture of a document that still exists.
+    const heard: Array<{ collection: string; id: string }> = [];
+    const off = onSummaryDocumentDeleted((e) => heard.push(e));
+    try {
+      const ok = await del({ collection: "youtube-summaries", id: "junk.md" });
+      expect(ok.status).toBe(200);
+      expect(heard).toEqual([{ collection: "youtube-summaries", id: "junk.md" }]);
+
+      deleteResponse = () =>
+        new Response(JSON.stringify({ error: "not a member" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      const refused = await del({ collection: "youtube-summaries", id: "gone.md" });
+      expect(refused.status).toBe(404);
+      expect(heard).toHaveLength(1);
+    } finally {
+      off();
+    }
+  });
 
   test("happy path: calls huginn's DELETE, splits reindex into pollable vs skipped, prunes both sets", async () => {
     const res = await del({ collection: "youtube-summaries", id: "junk.md" });
