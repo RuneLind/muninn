@@ -13,7 +13,7 @@ import {
   captureThinkingFor,
   type CapturePreset,
 } from "../summaries/presets.ts";
-import { languageRider, resolveOutputLang, type CaptureLang } from "../summaries/language.ts";
+import { languageRider, langFromCaptionTag, resolveOutputLang, type CaptureLang } from "../summaries/language.ts";
 import { getSummarySource } from "../summaries/sources.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { createQueue } from "../wiki/queue.ts";
@@ -609,7 +609,18 @@ export async function summarizeVimeo(
     //    route: `talk` needs the chosen track's tag, which exists only now.
     updateStatus(jobId, "summarizing");
 
-    const outputLang = resolveOutputLang(meta.lang, captionLang);
+    // `talk` reads the TRANSCRIPT first and the caption tag second: the tag
+    // is not a reliable signal (Vimeo tagged a Norwegian talk `en-x-autogen`,
+    // measured), the text cannot be mis-tagged. Named on the log line when the
+    // two disagree, so a surprising summary language is explicable afterwards.
+    const outputLang = resolveOutputLang(meta.lang, captionLang, transcript);
+    if (meta.lang === "talk" && outputLang !== langFromCaptionTag(captionLang)) {
+      log.info("Vimeo video {videoId}: the transcript reads as {outputLang} while the caption tag {captionLang} says otherwise — the text wins", {
+        videoId: meta.videoId,
+        outputLang,
+        captionLang,
+      });
+    }
     const systemPrompt = buildVimeoSystemPrompt({
       preset: meta.preset,
       title: meta.title,

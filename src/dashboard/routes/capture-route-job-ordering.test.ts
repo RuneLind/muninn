@@ -31,7 +31,7 @@
 
 import { test, expect, describe, mock, beforeEach, beforeAll, afterAll } from "bun:test";
 import { Hono } from "hono";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../../config.ts";
@@ -194,9 +194,23 @@ function ytApp(): Hono {
   return app;
 }
 
+/**
+ * EVERY Vimeo registration in this file names a throwaway frames root. Since
+ * the v2 follow-up a `/summaries` Delete REMOVES the deleted document's kept
+ * frames under the registration's root, and a registration with no root uses
+ * the real `~/.muninn/vimeo-frames` — so a test that fires
+ * `notifySummaryDocumentDeleted` against a listing naming a real video id
+ * would delete a developer's kept frames. The listener set is module-level
+ * and never unsubscribed, so every registration this file has ever made hears
+ * every notification; each one must therefore point at a root of its own.
+ */
+function tmpFramesRoot(): string {
+  return mkdtempSync(join(tmpdir(), "vimeo-frames-route-"));
+}
+
 function vmApp(): Hono {
   const app = new Hono();
-  registerVimeoRoutes(app, config);
+  registerVimeoRoutes(app, config, { framesRoot: tmpFramesRoot() });
   return app;
 }
 
@@ -209,7 +223,7 @@ function vmApp(): Hono {
  */
 function vmAppAt(now: () => number): Hono {
   const app = new Hono();
-  registerVimeoRoutes(app, config, { now });
+  registerVimeoRoutes(app, config, { now, framesRoot: tmpFramesRoot() });
   return app;
 }
 
@@ -1294,6 +1308,75 @@ describe("Vimeo: the frames flag (v2 PR 4)", () => {
     // frames:false on the same bot is an ordinary capture.
     const ok = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, frames: false });
     expect(ok.status).toBe(200);
+  });
+});
+
+describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 follow-up)", () => {
+  const DOC = "ai/rag/Trust but verify.md";
+  const VIDEO_ID = "1223358361";
+  const VIMEO_URL = `https://vimeo.com/${VIDEO_ID}`;
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+
+  function rootWithFrames(): string {
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-del-"));
+    mkdirSync(join(root, VIDEO_ID));
+    writeFileSync(join(root, VIDEO_ID, "1390.jpg"), "JPEG");
+    mkdirSync(join(root, "424242"));
+    writeFileSync(join(root, "424242", "10.jpg"), "OTHER");
+    return root;
+  }
+
+  test("a recently captured document: the video id comes from the ingest map, not the listing", async () => {
+    // The listing names the deleted document under ANOTHER video id. A
+    // registration that consulted it would remove 424242; the ingest map,
+    // written by this registration's own capture, says VIDEO_ID. (Listing-call
+    // counts cannot pin this: every registration this file ever made hears the
+    // notification, and only THIS one has the ingest entry.)
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: "https://vimeo.com/424242" }] });
+    vimeoIngestDocId = DOC;
+    const root = rootWithFrames();
+    const app = new Hono();
+    registerVimeoRoutes(app, config, { framesRoot: root });
+    const started = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as Record<string, unknown>;
+    expect(started.job_id).toBeTruthy();
+
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle();
+    expect(existsSync(join(root, VIDEO_ID))).toBe(false);
+    expect(readFileSync(join(root, "424242", "10.jpg"), "utf8")).toBe("OTHER");
+  });
+
+  test("an older document: the video id is resolved from the listing row huginn still serves", async () => {
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: `https://player.vimeo.com/video/${VIDEO_ID}` }] });
+    const root = rootWithFrames();
+    const app = new Hono();
+    registerVimeoRoutes(app, config, { framesRoot: root });
+
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle();
+    expect(existsSync(join(root, VIDEO_ID))).toBe(false);
+    expect(existsSync(join(root, "424242", "10.jpg"))).toBe(true);
+  });
+
+  test("another collection's delete, an unlisted document, or a listing that is down leave every frame in place", async () => {
+    const root = rootWithFrames();
+    const app = new Hono();
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: `https://vimeo.com/${VIDEO_ID}` }] });
+    registerVimeoRoutes(app, config, { framesRoot: root });
+
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    await settle();
+    expect(existsSync(join(root, VIDEO_ID, "1390.jpg"))).toBe(true);
+
+    knowledgeApiImpl = async () => ({ documents: [{ id: "ai/rag/Another.md", url: `https://vimeo.com/${VIDEO_ID}` }] });
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle();
+    expect(existsSync(join(root, VIDEO_ID, "1390.jpg"))).toBe(true);
+
+    knowledgeApiImpl = async () => { throw new Error("huginn is down"); };
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle();
+    expect(existsSync(join(root, VIDEO_ID, "1390.jpg"))).toBe(true);
   });
 });
 

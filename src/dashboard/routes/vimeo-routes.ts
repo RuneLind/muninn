@@ -9,7 +9,12 @@ import { fetchVimeoOembed, isNotPublic } from "../../vimeo/oembed.ts";
 import { speakerFromTitle } from "../../vimeo/metadata.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
-import { FRAME_FILE_RE, FRAME_VIDEO_ID_RE, framesRootDir } from "../../vimeo/frames.ts";
+import {
+  FRAME_FILE_RE,
+  FRAME_VIDEO_ID_RE,
+  framesRootDir,
+  removeKeptFrames,
+} from "../../vimeo/frames.ts";
 import { resolve as resolvePath, sep as pathSep } from "node:path";
 import { realpath } from "node:fs/promises";
 import { findCapturePreset, resolveCapturePresets } from "../../summaries/presets.ts";
@@ -243,11 +248,48 @@ export function registerVimeoRoutes(
   // test app that outlives its case keeps forgetting only from its OWN map.
   onSummaryDocumentDeleted(({ collection, id }) => {
     if (collection !== VIMEO_COLLECTION) return;
+    let deletedVideoId: string | null = null;
     for (const [videoId, hit] of recentIngests) {
-      if (hit.documentId === id) recentIngests.delete(videoId);
+      if (hit.documentId === id) {
+        recentIngests.delete(videoId);
+        deletedVideoId = videoId;
+      }
     }
     rememberDelete(id);
+    // The kept frames go with the document. The signal carries the DOCUMENT
+    // id; the video id comes from the ingest map when the capture was recent,
+    // else from the listing row huginn still serves (its DELETE is soft, so
+    // the row is there for the reindex window — the same window
+    // `recentDeletes` exists for). Async and best-effort: a listing that is
+    // down leaves the frames in place, logged, and the document is gone either
+    // way. Fired, not awaited — the listener contract is synchronous.
+    void forgetFramesOfDeletedDocument(id, deletedVideoId);
   });
+
+  async function forgetFramesOfDeletedDocument(documentId: string, knownVideoId: string | null): Promise<void> {
+    try {
+      let videoId = knownVideoId;
+      if (videoId === null) {
+        const data = await fetchKnowledgeApi(KNOWLEDGE_API_URL, `/api/collection/${VIMEO_COLLECTION}/documents`, {
+          timeoutMs: 10000,
+        });
+        const row = ((data?.documents ?? []) as VimeoDocumentMeta[]).find((d) => d.id === documentId);
+        videoId = row?.url !== undefined ? (resolveVimeoRef(row.url)?.id ?? null) : null;
+      }
+      if (videoId === null) {
+        log.info("Vimeo document {documentId} was deleted but no video id resolves for it — no frames to remove", {
+          documentId,
+        });
+        return;
+      }
+      await removeKeptFrames(videoId, opts.framesRoot);
+    } catch (err) {
+      log.warn("Removing the kept frames for deleted Vimeo document {documentId} failed: {error}", {
+        documentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   /**
    * The documents a `/summaries` Delete removed that huginn may STILL LIST —

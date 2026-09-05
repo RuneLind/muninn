@@ -1292,3 +1292,51 @@ test("fix round 2: no track, NO manifest, on a machine WITHOUT whisper is no_cap
   expect(transcribeCalls).toEqual([]);
   expect(manifestFetches).toEqual([]);
 });
+
+// ── The transcript's own language beats the caption tag (v2 follow-up) ───────
+
+/** Placeholder Norwegian cues — enough function words to clear TEXT_LANG_MIN_HITS. Not corpus text. */
+const NB_LONG_VTT = `WEBVTT
+
+00:00:01.000 --> 00:00:20.000
+Hei og velkommen. I dag skal vi snakke om hvordan vi kan skrive kode som er lett å lese, og hvorfor det er viktig.
+
+00:00:21.000 --> 00:00:40.000
+Det er ikke så vanskelig som man skulle tro, og vi skal se på noen eksempler her. Da kan vi bare begynne med det første.
+
+00:02:10.000 --> 00:02:30.000
+Jeg har med meg litt kode fra et prosjekt, og den skal vi se på sammen. Så er det veldig viktig at vi ikke bare kopierer.
+`;
+
+test("the measured mis-tag: Norwegian speech under an en-x-autogen track ⇒ a bokmål summary, summary_lang nb, and one info line naming the disagreement", async () => {
+  const infos: LogRecord[] = [];
+  await configure({
+    sinks: {
+      capture: (r: LogRecord) => {
+        if (r.category.join(".") === "muninn.vimeo.summarizer") {
+          if (r.level === "warning") warns.push(r);
+          if (r.level === "info") infos.push(r);
+        }
+      },
+    },
+    loggers: [
+      { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+      { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+    ],
+    reset: true,
+  });
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, deps({ tracks: [AUTO_TRACK], vtt: NB_LONG_VTT }));
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(lastSystemPrompt).toContain("bokmål");
+  expect(ingestPayload!.summary_lang).toBe("nb");
+  // The tag is provenance and stays what Vimeo said.
+  expect(ingestPayload!.caption_lang).toBe("en-x-autogen");
+  expect(infos.some((r) => /the text wins/.test(String(r.message)))).toBe(true);
+});
+
+test("a short transcript cannot overrule the tag — the two-cue English VTT under a Norwegian tag is still nb", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, deps({ tracks: [NORWEGIAN_AUTO_TRACK] }));
+  expect(ingestPayload!.summary_lang).toBe("nb");
+});

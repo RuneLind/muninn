@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FRAME_BUDGET_MAX, frameBudgetFor } from "../video/media.ts";
@@ -15,6 +15,7 @@ import {
   framesTimeoutFor,
   keepReferencedFrames,
   referencedFrameSeconds,
+  removeKeptFrames,
   type VimeoFrame,
 } from "./frames.ts";
 
@@ -295,5 +296,41 @@ describe("extractCadenceFrames", () => {
     expect(fetched.length).toBeGreaterThan(0);
     expect(fetched.every((u) => u.includes("rep-video-1080p"))).toBe(true);
     expect(fetched.some((u) => u.includes("rep-video-1440p"))).toBe(false);
+  });
+});
+
+describe("removeKeptFrames — the Delete's counterpart to keepReferencedFrames", () => {
+  test("removes exactly that video's directory and reports it; a video with no kept frames reports false", async () => {
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-rm-"));
+    mkdirSync(join(root, "1223358361"));
+    writeFileSync(join(root, "1223358361", "1390.jpg"), "a");
+    mkdirSync(join(root, "9999"));
+    writeFileSync(join(root, "9999", "10.jpg"), "b");
+
+    expect(await removeKeptFrames("1223358361", root)).toBe(true);
+    expect(existsSync(join(root, "1223358361"))).toBe(false);
+    expect(readFileSync(join(root, "9999", "10.jpg"), "utf8")).toBe("b");
+    expect(await removeKeptFrames("1223358361", root)).toBe(false);
+    expect(await removeKeptFrames("55555", root)).toBe(false);
+  });
+
+  test("an id outside the digit charset removes NOTHING, whatever path it spells", async () => {
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-rm-"));
+    mkdirSync(join(root, "1223358361"));
+    writeFileSync(join(root, "1223358361", "1390.jpg"), "a");
+    writeFileSync(join(root, "stray.txt"), "s");
+    for (const bad of ["..", ".", "", "1223358361/..", "../1223358361", "stray.txt", "12a", " 1223358361"]) {
+      expect(await removeKeptFrames(bad, root)).toBe(false);
+    }
+    expect(existsSync(join(root, "1223358361", "1390.jpg"))).toBe(true);
+    expect(existsSync(join(root, "stray.txt"))).toBe(true);
+    expect(existsSync(root)).toBe(true);
+  });
+
+  test("a FILE named like a video id is not a directory and is left alone", async () => {
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-rm-"));
+    writeFileSync(join(root, "777"), "not a dir");
+    expect(await removeKeptFrames("777", root)).toBe(false);
+    expect(existsSync(join(root, "777"))).toBe(true);
   });
 });
