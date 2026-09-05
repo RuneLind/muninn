@@ -24,3 +24,22 @@ test("unsubscribing during a notify is safe, and an unsubscribed listener hears 
   notifySummaryDocumentDeleted({ collection: "c", id: "2" });
   expect(heard).toEqual(["1"]);
 });
+
+test("a listener that unsubscribes ANOTHER listener mid-notify does not silence it for this event", () => {
+  // The fan-out iterates a snapshot. Iterating the live Set would skip a
+  // not-yet-visited listener that an earlier one removed — and a registration
+  // that arrives mid-notify would be called for an event it never subscribed to.
+  const heard: string[] = [];
+  let offB: () => void = () => {};
+  const offA = onSummaryDocumentDeleted(() => { offB(); });
+  offB = onSummaryDocumentDeleted((e) => { heard.push(`B:${e.id}`); });
+  try {
+    notifySummaryDocumentDeleted({ collection: "c", id: "1" });
+    expect(heard).toEqual(["B:1"]);
+    notifySummaryDocumentDeleted({ collection: "c", id: "2" });
+    expect(heard).toEqual(["B:1"]);
+  } finally {
+    offA();
+    offB();
+  }
+});

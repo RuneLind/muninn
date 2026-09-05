@@ -254,9 +254,12 @@ export function registerVimeoRoutes(
    * the listing half passes over a row naming one of these ids. An entry is
    * dropped the moment a capture ingests under that id again
    * (`rememberIngest`), when the row IS a document once more, and otherwise
-   * expires with the same TTL and cap as its sibling. Within ONE registration
-   * the ingest is always the later stamp, so only cap eviction of the sibling
-   * can expose the listing half while a delete is still remembered.
+   * expires with the same TTL and cap as its sibling. The two maps never hold
+   * the same id at once (the delete listener drops the ingest entry and
+   * `rememberIngest` drops the delete stamp), so the ways the listing half can
+   * again answer `duplicate` about a REMOVED document are exactly this map's
+   * own TTL expiry and its own cap eviction — both pinned in
+   * `capture-route-job-ordering.test.ts`.
    */
   const recentDeletes = new Map<string, number>();
 

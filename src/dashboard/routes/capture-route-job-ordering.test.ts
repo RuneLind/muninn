@@ -1032,8 +1032,8 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     const inside = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
       Record<string, unknown>;
     // Inside the window the listed row is treated as gone ⇒ captured. The
-    // capture ingests nothing here, so nothing clears the stamp.
-    vimeoIngestDocId = null;
+    // capture ingests nothing (`vimeoIngestDocId` is null from `beforeEach`,
+    // read synchronously during the POST), so nothing clears the stamp.
     expect(inside.job_id).toBeTruthy();
     expect(vimeoSummarizeCalls).toBe(1);
 
