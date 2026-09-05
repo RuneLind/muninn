@@ -246,14 +246,6 @@ export function registerVimeoRoutes(
   //
   // Never unsubscribed: a registration lives as long as the process, and a
   // test app that outlives its case keeps forgetting only from its OWN map.
-  async function framesRootHasEntries(root: string | undefined): Promise<boolean> {
-    try {
-      return (await readdir(root ?? framesRootDir())).length > 0;
-    } catch {
-      return false;
-    }
-  }
-
   onSummaryDocumentDeleted(({ collection, id }) => {
     if (collection !== VIMEO_COLLECTION) return;
     let deletedVideoId: string | null = null;
@@ -273,6 +265,26 @@ export function registerVimeoRoutes(
     // way. Fired, not awaited — the listener contract is synchronous.
     void forgetFramesOfDeletedDocument(id, deletedVideoId);
   });
+
+  /**
+   * Whether the frames root holds anything at all. An ABSENT root is "no" (no
+   * capture ever kept a frame here); any other read failure is "yes" with a
+   * warn, so a transient EMFILE/EACCES falls through to the listing + removal
+   * rather than silently orphaning the frames of a deleted document.
+   */
+  async function framesRootHasEntries(root: string | undefined): Promise<boolean> {
+    const dir = root ?? framesRootDir();
+    try {
+      return (await readdir(dir)).length > 0;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      log.warn("Could not read the Vimeo frames root {dir} ({code}) — assuming it has kept frames", {
+        dir,
+        code: (err as NodeJS.ErrnoException).code ?? "unknown",
+      });
+      return true;
+    }
+  }
 
   async function forgetFramesOfDeletedDocument(documentId: string, knownVideoId: string | null): Promise<void> {
     try {

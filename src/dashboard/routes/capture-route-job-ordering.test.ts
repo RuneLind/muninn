@@ -205,13 +205,18 @@ function ytApp(): Hono {
  * every notification; each one must therefore point at a root of its own.
  */
 const tmpFramesRoots: string[] = [];
+/** EVERY temp directory this file makes goes through here, whatever its prefix, so `afterAll` can remove them all. */
+function trackedTmpDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpFramesRoots.push(dir);
+  return dir;
+}
 function tmpFramesRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "vimeo-frames-route-"));
-  tmpFramesRoots.push(root);
-  return root;
+  return trackedTmpDir("vimeo-frames-route-");
 }
 afterAll(() => {
-  // ~60 roots per run otherwise accumulate in the temp dir (measured 835 → 895).
+  // ~60 roots per run otherwise accumulated in the temp dir (measured 835 → 895
+  // at base; the verify pass found 6 more per run outside the first tracker).
   for (const root of tmpFramesRoots) rmSync(root, { recursive: true, force: true });
 });
 
@@ -1322,16 +1327,22 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
   const DOC = "ai/rag/Trust but verify.md";
   const VIDEO_ID = "1223358361";
   const VIMEO_URL = `https://vimeo.com/${VIDEO_ID}`;
-  /** The listener is fire-and-forget; wait for the removal (or its absence) rather than a fixed slice. */
+  /**
+   * The listener is fire-and-forget. A POSITIVE case passes what it waits for
+   * and polls up to 3 s; a NEGATIVE case passes `() => true` and gets ONLY the
+   * fixed 150 ms slice below — a wrongly fired removal or listing call slower
+   * than that would pass such a case. The mocks resolve in microseconds
+   * (mutations that fire wrongly are caught at ~150 ms), so the slice is
+   * adequate today, and the fixed number is the honest shape of the check.
+   */
   const settle = async (done: () => boolean = () => false) => {
     const until = Date.now() + 3_000;
     while (!done() && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
-    // A little more, so a wrongly-fired removal has had time to show.
     await new Promise((r) => setTimeout(r, 150));
   };
 
   function rootWithFrames(): string {
-    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-del-"));
+    const root = trackedTmpDir("vimeo-frames-del-");
     mkdirSync(join(root, VIDEO_ID));
     writeFileSync(join(root, VIDEO_ID, "1390.jpg"), "JPEG");
     mkdirSync(join(root, "424242"));
@@ -1342,7 +1353,7 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
   test("fix round 1 (#525): a frames root with NO kept frames skips the listing entirely — the common transcript-only delete costs nothing", async () => {
     let listings = 0;
     knowledgeApiImpl = async () => { listings++; return { documents: [{ id: DOC, url: VIMEO_URL }] }; };
-    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-del-empty-"));
+    const root = trackedTmpDir("vimeo-frames-del-empty-");
     const app = new Hono();
     registerVimeoRoutes(app, config, { framesRoot: root });
     // FIRST in this describe on purpose: every registration this file ever made
@@ -1351,6 +1362,21 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
     await settle(() => true);
     expect(listings).toBe(0);
+  });
+
+  test("fix round 2 (#525): a frames root that cannot be read (here: a FILE, ENOTDIR) is not 'empty' — the listing is still consulted and the failure is logged, never a silent skip", async () => {
+    // SECOND in this describe on purpose, before any root with frames exists:
+    // every other registration has an empty root and skips, so the one
+    // listing call below is this registration's.
+    let listings = 0;
+    knowledgeApiImpl = async () => { listings++; return { documents: [{ id: DOC, url: VIMEO_URL }] }; };
+    const notADir = join(tmpFramesRoot(), "root-is-a-file");
+    writeFileSync(notADir, "x");
+    const app = new Hono();
+    registerVimeoRoutes(app, config, { framesRoot: notADir });
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle(() => listings > 0);
+    expect(listings).toBe(1);
   });
 
   test("a recently captured document: the video id comes from the ingest map, not the listing", async () => {
@@ -1464,7 +1490,7 @@ describe("Vimeo: GET /api/vimeo/frames/:videoId/:file (v2 PR 4)", () => {
     // Both charset gates pass (`7/9.jpg`), the lexical prefix passes, and the
     // file the kernel opens lives outside the root. The one live escape.
     const root = tmpFramesRoot();
-    const outside = mkdtempSync(join(tmpdir(), "vimeo-frames-outside-"));
+    const outside = trackedTmpDir("vimeo-frames-outside-");
     writeFileSync(join(outside, "9.jpg"), "OUTSIDE");
     writeFileSync(join(outside, "secret.txt"), "SECRET");
     symlinkSync(outside, join(root, "7")); // a directory symlink
@@ -1478,7 +1504,7 @@ describe("Vimeo: GET /api/vimeo/frames/:videoId/:file (v2 PR 4)", () => {
   });
 
   test("is read-only: no POST, PUT or DELETE is registered on the path", async () => {
-    const app = appWithFrames(mkdtempSync(join(tmpdir(), "vimeo-frames-route-")));
+    const app = appWithFrames(trackedTmpDir("vimeo-frames-route-"));
     for (const method of ["POST", "PUT", "DELETE"]) {
       const res = await app.request("/api/vimeo/frames/1223358361/1390.jpg", { method });
       expect(res.status).toBe(404);
