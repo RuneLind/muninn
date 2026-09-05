@@ -708,8 +708,9 @@ export function sumArticleLibraryScript(): string {
     /**
      * The rendered timestamp links open the video in a NEW tab, like every
      * other outbound link in this view: markdown cannot say \`target\`, so it
-     * is set on the anchors after render, and only on the ones this transform
-     * made (the \`#t=\` href on the video's own host).
+     * is set on the anchors after render — on every anchor whose href is a
+     * \`#t=\` address on this video, which is what the transform makes and
+     * what a summary's own link to the same second would be.
      */
     function openVimeoLinksInNewTab(container, videoUrl) {
       var id = vimeoVideoIdFromUrl(videoUrl);
@@ -802,6 +803,13 @@ export function sumArticleLibraryScript(): string {
         // link (the duplicate answer's own link, a bookmark) opens with '' —
         // measured, that path rendered plain text.
         var videoUrl = doc.url || url;
+        // The header's own source link, for the same reason: built from the
+        // parameter before the fetch, the ?doc= path had no link at all —
+        // for every vertical, since they all hand out that shape on a
+        // duplicate paste.
+        if (videoUrl && !url) {
+          linksEl.innerHTML = '<a href="' + esc(videoUrl) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>';
+        }
         if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, videoUrl);
         var mainEl = document.getElementById('sumArticleMain');
         if (mainEl) {

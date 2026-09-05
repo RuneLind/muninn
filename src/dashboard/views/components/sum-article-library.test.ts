@@ -8,17 +8,57 @@
 import { describe, expect, test } from "bun:test";
 import { sumArticleLibraryScript } from "./sum-article-library.ts";
 
+interface FakeAnchor {
+  attrs: Record<string, string>;
+  getAttribute(name: string): string | null;
+  setAttribute(name: string, value: string): void;
+}
+
+function anchor(href: string): FakeAnchor {
+  return {
+    attrs: { href },
+    getAttribute(name) {
+      return this.attrs[name] ?? null;
+    },
+    setAttribute(name, value) {
+      this.attrs[name] = value;
+    },
+  };
+}
+
 function load(): {
   linkVimeoTimestamps: (markdown: string, videoUrl: string) => string;
   vimeoVideoIdFromUrl: (url: unknown) => string | null;
+  openVimeoLinksInNewTab: (container: { querySelectorAll(sel: string): FakeAnchor[] } | null, videoUrl: string) => void;
 } {
   const ctx = { document: { addEventListener() {}, getElementById: () => null } };
   return new Function(
     "ctx",
     `var document = ctx.document;\n${sumArticleLibraryScript()}\n` +
-      "return { linkVimeoTimestamps: linkVimeoTimestamps, vimeoVideoIdFromUrl: vimeoVideoIdFromUrl };",
+      "return { linkVimeoTimestamps: linkVimeoTimestamps, vimeoVideoIdFromUrl: vimeoVideoIdFromUrl, openVimeoLinksInNewTab: openVimeoLinksInNewTab };",
   )(ctx);
 }
+
+describe("openVimeoLinksInNewTab", () => {
+  const { openVimeoLinksInNewTab } = load();
+
+  test("sets target + rel on the video's #t= links and leaves every other anchor alone", () => {
+    const stamp = anchor("https://vimeo.com/1223444307#t=750s");
+    const other = anchor("https://vimeo.com/1223444307");
+    const elsewhere = anchor("https://example.com/#t=750s");
+    openVimeoLinksInNewTab({ querySelectorAll: () => [stamp, other, elsewhere] }, "https://vimeo.com/1223444307");
+    expect(stamp.attrs).toEqual({ href: "https://vimeo.com/1223444307#t=750s", target: "_blank", rel: "noopener" });
+    expect(other.attrs).toEqual({ href: "https://vimeo.com/1223444307" });
+    expect(elsewhere.attrs).toEqual({ href: "https://example.com/#t=750s" });
+  });
+
+  test("no container, or no video id, is a no-op", () => {
+    const stamp = anchor("https://vimeo.com/1223444307#t=750s");
+    openVimeoLinksInNewTab(null, "https://vimeo.com/1223444307");
+    openVimeoLinksInNewTab({ querySelectorAll: () => [stamp] }, "https://youtu.be/x");
+    expect(stamp.attrs).toEqual({ href: "https://vimeo.com/1223444307#t=750s" });
+  });
+});
 
 describe("vimeoVideoIdFromUrl (client mirror)", () => {
   const { vimeoVideoIdFromUrl } = load();

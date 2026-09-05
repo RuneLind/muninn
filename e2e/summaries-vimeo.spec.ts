@@ -672,10 +672,13 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     const expectLinks = async () => {
       const links = page.locator("#sumArticleMain a[href^='https://vimeo.com/424242#t=']");
       await expect(links).toHaveCount(2);
-      expect(await links.evaluateAll((as) => as.map((a) => [a.getAttribute("href"), a.getAttribute("target"), a.textContent]))).toEqual([
-        ["https://vimeo.com/424242#t=750s", "_blank", "[12:30]"],
-        ["https://vimeo.com/424242#t=720s", "_blank", "[00:12:00]"],
+      expect(await links.evaluateAll((as) => as.map((a) => [a.getAttribute("href"), a.getAttribute("target"), a.getAttribute("rel"), a.textContent]))).toEqual([
+        ["https://vimeo.com/424242#t=750s", "_blank", "noopener", "[12:30]"],
+        ["https://vimeo.com/424242#t=720s", "_blank", "noopener", "[00:12:00]"],
       ]);
+      // The panel's own header link to the video — from the DOCUMENT's url,
+      // so the ?doc= path (which carries no url) has it too.
+      await expect(page.locator("#docPanelLinks a")).toHaveAttribute("href", "https://vimeo.com/424242");
     };
     await page.goto(`${BASE}/summaries#shelf`);
     await page.locator('.recent-item[data-doc-url="https://vimeo.com/424242"]').click();
