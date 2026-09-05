@@ -117,8 +117,11 @@ describe("referencedFrameSeconds", () => {
   });
 
   test("a ZERO-PADDED second is not a reference: the route serves 47.jpg, never 047.jpg, so counting it as kept would be a served 404", () => {
-    const summary = "![Slide at 00:00:47](/api/vimeo/frames/42/047.jpg) ![ok](/api/vimeo/frames/42/47.jpg) ![zero](/api/vimeo/frames/42/0.jpg)";
-    expect(referencedFrameSeconds(summary, "42")).toEqual([0, 47]);
+    // The padded spelling ALONE — beside a canonical `47.jpg` the two would
+    // collapse in the set and the assertion could not tell the fix from `Number`.
+    expect(referencedFrameSeconds("![Slide at 00:00:47](/api/vimeo/frames/42/047.jpg)", "42")).toEqual([]);
+    expect(referencedFrameSeconds("![zero](/api/vimeo/frames/42/0.jpg) ![ok](/api/vimeo/frames/42/47.jpg)", "42")).toEqual([0, 47]);
+    expect(referencedFrameSeconds("![padded zero](/api/vimeo/frames/42/00.jpg)", "42")).toEqual([]);
   });
 });
 
@@ -269,14 +272,25 @@ describe("extractCadenceFrames", () => {
 
   test("the rendition is the smallest at least VIMEO_FRAME_HEIGHT tall — 720p when present, 1080p when 720p is missing", async () => {
     expect(VIMEO_FRAME_HEIGHT).toBe(720);
+    // 720p absent and TWO renditions at least that tall (1080p, and a 1440p
+    // cloned from it): the smallest of them is what the frames path fetches.
     const m = smallFixture();
+    const r1080 = m.video.find((r) => r.height === 1080)!;
+    const r1440 = {
+      ...r1080,
+      id: "rep-video-1440p",
+      height: 1440,
+      width: 2560,
+      segments: r1080.segments.map((seg) => ({ ...seg, size: 7, url: seg.url.replace("rep-video-1080p", "rep-video-1440p") })),
+    };
     const no720: VimeoManifest = {
       ...m,
-      video: m.video.filter((r) => r.height !== 720).map((r) => ({ ...r, segments: r.segments.map((seg) => ({ ...seg, size: 7 })) })),
+      video: [...m.video.filter((r) => r.height !== 720).map((r) => ({ ...r, segments: r.segments.map((seg) => ({ ...seg, size: 7 })) })), r1440],
     };
     const { fetchImpl, fetched, grabFrame } = stubs();
     await extractCadenceFrames({ manifestUrl: MANIFEST_URL, manifest: no720, durationSec: 3, workDir: dir() }, { fetchImpl, grabFrame });
     expect(fetched.length).toBeGreaterThan(0);
     expect(fetched.every((u) => u.includes("rep-video-1080p"))).toBe(true);
+    expect(fetched.some((u) => u.includes("rep-video-1440p"))).toBe(false);
   });
 });

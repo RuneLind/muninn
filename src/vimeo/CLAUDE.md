@@ -331,14 +331,15 @@ markdown intact; the doc panel renders it through `marked`'s default `<img>`,
 same-origin. **The document's frames are therefore only live inside muninn's
 UI**, which the plan accepted (huginn serves no static files). Nothing removes
 a kept frame when the document is deleted (the delete signal carries a document
-id, not a video id) — a follow-up; a talk's quoted frames measured 725 KB for
-8 (54–102 KB each at 720p).
+id, not a video id) — a follow-up; the two acceptance talks' quoted frames
+measured 725 KB for 8 (81–102 KB each) and 428 KB for 6 (54–87 KB each), at 720p.
 
 **`GET /api/vimeo/frames/:videoId/:file` is read-only and default-deny by
 charset.** Both segments are gated (`FRAME_VIDEO_ID_RE` digits,
 `FRAME_FILE_RE` `<digits>.jpg`) BEFORE any filesystem access, the resolved path
-is checked to stay under the root anyway (unreachable while both charset gates
-hold — enumerated, defence in depth), everything else is a 404 (never a 400
+is checked to stay under the root on its REAL path (`realpath` on both sides —
+the charset gates make the spelling safe by enumeration, and only the real path
+sees a symlink planted under the root; pinned with one), everything else is a 404 (never a 400
 that confirms the shape), `Cache-Control: private, max-age=86400` (a frame is
 (video, second) — re-extracting the same second is the same picture; PRIVATE
 because the route is in the admin zone under `MUNINN_AUTH` and a shared cache
@@ -375,12 +376,13 @@ ordering `capture-route-job-ordering.test.ts` pins for TikTok, YouTube and
 Vimeo — three of the six verticals). The metadata is then handed to
 `summarizeVimeo`, which never asks oEmbed again.
 
-**oEmbed's duration is the only length bound, so "it did not say" refuses.**
-`toDurationSec` degrades a missing, non-numeric or negative `duration` to 0, and
-0 passes `> VIMEO_MAX_DURATION_SEC` unconditionally — there is no download to
-time out and no frame budget behind it, so a 0 would have started an unbounded
-capture. It answers 422 `duration_unknown`, below the not-public branch (which
-carries no duration at all).
+**oEmbed's duration is the length bound everything downstream is sized from, so
+"it did not say" refuses.** `toDurationSec` degrades a missing, non-numeric or
+negative `duration` to 0, and 0 passes `> VIMEO_MAX_DURATION_SEC`
+unconditionally — and since PR 4 the frame budget (`cadenceTimes`) and the
+summarize timeout are computed from the same number, so a 0 would have started
+a capture with no cap and no frames. It answers 422 `duration_unknown`, below
+the not-public branch (which carries no duration at all).
 
 **State 4 — the dedup key is the VIDEO ID, resolved out of each listed row's url**
 (`resolveVimeoRef(d.url)?.id`, the same rule as the youtube sibling). "Every

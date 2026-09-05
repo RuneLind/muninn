@@ -11,6 +11,7 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { FRAME_FILE_RE, FRAME_VIDEO_ID_RE, framesRootDir } from "../../vimeo/frames.ts";
 import { resolve as resolvePath, sep as pathSep } from "node:path";
+import { realpath } from "node:fs/promises";
 import { findCapturePreset, resolveCapturePresets } from "../../summaries/presets.ts";
 import { DEFAULT_CAPTURE_LANG, isCaptureLang } from "../../summaries/language.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
@@ -343,14 +344,23 @@ export function registerVimeoRoutes(
   app.get("/api/vimeo/frames/:videoId/:file", async (c) => {
     const { videoId, file } = c.req.param();
     if (!FRAME_VIDEO_ID_RE.test(videoId) || !FRAME_FILE_RE.test(file)) return c.notFound();
-    const rootAbs = resolvePath(framesRoot);
-    const fileAbs = resolvePath(rootAbs, videoId, file);
-    // Unreachable while the two charset gates above hold (both segments are
-    // ASCII digits, so the resolved path is always `<root>/<digits>/<digits>.jpg`
-    // — enumerated, not sampled). Kept as defence in depth, the wiki explainer
-    // route's shape; a test cannot reach it and none claims to.
-    if (!fileAbs.startsWith(rootAbs + pathSep)) return c.notFound();
-    const f = Bun.file(fileAbs);
+    const fileAbs = resolvePath(framesRoot, videoId, file);
+    // Containment is judged on the REAL path the kernel would open, not on the
+    // spelling: with both charset gates holding the spelling is always
+    // `<root>/<digits>/<digits>.jpg` (enumerated), so a lexical prefix check
+    // was dead code — and blind to the one live escape, a SYMLINK under the
+    // root pointing outside it (measured by review: a planted `<root>/7 →
+    // /tmp/outside` served `/7/9.jpg` with 200). `realpath` follows symlinks
+    // on both sides; a missing file throws and is the same 404 as before.
+    let rootReal: string;
+    let fileReal: string;
+    try {
+      [rootReal, fileReal] = await Promise.all([realpath(framesRoot), realpath(fileAbs)]);
+    } catch {
+      return c.notFound();
+    }
+    if (!fileReal.startsWith(rootReal + pathSep)) return c.notFound();
+    const f = Bun.file(fileReal);
     if (!(await f.exists())) return c.notFound();
     return new Response(f, {
       headers: {

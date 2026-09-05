@@ -31,7 +31,7 @@
 
 import { test, expect, describe, mock, beforeEach, beforeAll, afterAll } from "bun:test";
 import { Hono } from "hono";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../../config.ts";
@@ -1348,6 +1348,23 @@ describe("Vimeo: GET /api/vimeo/frames/:videoId/:file (v2 PR 4)", () => {
     writeFileSync(join(root, "1223358361", "1390.jpg"), "X");
     const res = await appWithFrames(root).request("/api/vimeo/frames/1223358361/1390.jpg");
     expect(res.headers.get("cache-control")).toBe("private, max-age=86400");
+  });
+
+  test("a SYMLINK under the root pointing outside it is refused — containment is judged on the real path, not the spelling", async () => {
+    // Both charset gates pass (`7/9.jpg`), the lexical prefix passes, and the
+    // file the kernel opens lives outside the root. The one live escape.
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-route-"));
+    const outside = mkdtempSync(join(tmpdir(), "vimeo-frames-outside-"));
+    writeFileSync(join(outside, "9.jpg"), "OUTSIDE");
+    writeFileSync(join(outside, "secret.txt"), "SECRET");
+    symlinkSync(outside, join(root, "7")); // a directory symlink
+    mkdirSync(join(root, "1"));
+    symlinkSync(join(outside, "secret.txt"), join(root, "1", "2.jpg")); // a file symlink
+    writeFileSync(join(root, "1", "1.jpg"), "INSIDE");
+    const app = appWithFrames(root);
+    expect((await app.request("/api/vimeo/frames/7/9.jpg")).status).toBe(404);
+    expect((await app.request("/api/vimeo/frames/1/2.jpg")).status).toBe(404);
+    expect((await app.request("/api/vimeo/frames/1/1.jpg")).status).toBe(200);
   });
 
   test("is read-only: no POST, PUT or DELETE is registered on the path", async () => {
