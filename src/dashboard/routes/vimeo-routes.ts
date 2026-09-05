@@ -85,6 +85,12 @@ export interface VimeoRouteOptions {
 async function findExistingByVideoId(
   baseUrl: string,
   videoId: string,
+  /** Rows to pass over — a document a `/summaries` Delete just removed, which
+   *  huginn keeps listing until its reindex lands. Applied per ROW, not to the
+   *  first match: two rows can resolve to one video (`/<id>` and
+   *  `/<id>/<hash>`; a title collision suffixed `(2)`), and skipping only the
+   *  first would hide a live document behind a deleted one. */
+  isGone: (documentId: string) => boolean = () => false,
 ): Promise<VimeoDocumentMeta | null> {
   try {
     const data = await fetchKnowledgeApi(
@@ -93,7 +99,11 @@ async function findExistingByVideoId(
       { timeoutMs: 10000 },
     );
     const docs = (data?.documents ?? []) as VimeoDocumentMeta[];
-    return docs.find((d) => d.url !== undefined && resolveVimeoRef(d.url)?.id === videoId) ?? null;
+    return (
+      docs.find(
+        (d) => d.url !== undefined && resolveVimeoRef(d.url)?.id === videoId && !isGone(d.id),
+      ) ?? null
+    );
   } catch (err) {
     log.warn("Vimeo duplicate check failed: {error}", {
       error: err instanceof Error ? err.message : String(err),
@@ -236,13 +246,17 @@ export function registerVimeoRoutes(
    *
    * huginn's DELETE is a soft delete: it moves the file and enqueues a reindex,
    * and the listing keeps naming the document until that reindex lands
-   * (seconds to minutes; the UI's delete flow polls the reindex for exactly
-   * this reason). Forgetting the map alone moved the stale `duplicate` from
-   * state 3 to state 4 — same body, same link to nothing — so the listing half
-   * treats a row naming one of these ids as absent. An entry is dropped the
-   * moment a capture ingests under that id again (`rememberIngest`), when the
-   * row IS a document once more, and otherwise expires with the same TTL and
-   * cap as its sibling.
+   * (seconds to minutes when a reindex runs; huginn schedules NONE when that
+   * collection's update was already running, and the UI's delete flow gives up
+   * polling after 120 s saying the doc may reappear — so the TTL below bounds
+   * this map, not the window). Forgetting the map alone moved the stale
+   * `duplicate` from state 3 to state 4 — same body, same link to nothing — so
+   * the listing half passes over a row naming one of these ids. An entry is
+   * dropped the moment a capture ingests under that id again
+   * (`rememberIngest`), when the row IS a document once more, and otherwise
+   * expires with the same TTL and cap as its sibling. Within ONE registration
+   * the ingest is always the later stamp, so only cap eviction of the sibling
+   * can expose the listing half while a delete is still remembered.
    */
   const recentDeletes = new Map<string, number>();
 
@@ -411,8 +425,8 @@ export function registerVimeoRoutes(
         return c.json(duplicateBody(recent.documentId, recent.existingUrl));
       }
 
-      const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, ref.id);
-      if (existing && !recentlyDeleted(existing.id)) {
+      const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, ref.id, recentlyDeleted);
+      if (existing) {
         log.info("Vimeo duplicate detected for {videoId}: {docId}", {
           videoId: ref.id,
           docId: existing.id,
