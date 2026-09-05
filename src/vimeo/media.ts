@@ -35,12 +35,12 @@
 
 import { unlink } from "node:fs/promises";
 import { getLog } from "../logging.ts";
-import { downloadPinned, VimeoDownloadError } from "./download.ts";
+import { downloadPinned, VimeoDownloadError, VIMEO_MEDIA_HOST } from "./download.ts";
 
 const log = getLog("vimeo", "media");
 
-/** The one host a manifest URL and every segment URL may name. */
-export const VIMEO_MEDIA_HOST = "vod-adaptive-ak.vimeocdn.com";
+/** The one host a manifest URL and every segment URL may name (owned by `download.ts`). */
+export { VIMEO_MEDIA_HOST };
 
 /**
  * Manifest cap: measured 928 KB for a 53-minute talk (537 segments × 7
@@ -59,10 +59,14 @@ export const VIMEO_SEGMENT_MAX_BYTES = 16 * 1024 * 1024;
 export const VIMEO_SEGMENT_TIMEOUT_MS = 30_000;
 
 /**
- * The most a single `downloadRendition` may write, checked on the manifest's
- * DECLARED sizes before the first fetch. Sized against the whole-rendition
- * callers: the entire 240p video of a 3 h talk is ~176 MB (52 MB measured per
- * 53 min), the entire Opus audio ~137 MB, and 60 sparse 1080p segments ~72 MB.
+ * The most a single `downloadRendition` may write — checked TWICE: on the
+ * manifest's DECLARED sizes before the first fetch (so an oversized request is
+ * refused at zero cost) and on the bytes actually WRITTEN as they arrive (so a
+ * manifest that under-declares cannot walk past it — the declared sizes come
+ * from the same third-party page as the URLs). Sized against the
+ * whole-rendition callers: the entire 240p video of a 3 h talk is ~176 MB
+ * (52 MB measured per 53 min), the entire Opus audio ~137 MB, and 60 sparse
+ * 1080p segments ~72 MB.
  */
 export const VIMEO_RENDITION_MAX_BYTES = 256 * 1024 * 1024;
 
@@ -134,6 +138,17 @@ function num(rec: Record<string, unknown>, key: string, where: string): number {
   return v;
 }
 
+/**
+ * A size or a position: finite AND non-negative. A negative declared `size`
+ * would let one segment cancel another in the declared-total cap (300 MB and
+ * −300 MB sum to 0), and a negative `start` has no meaning in a talk.
+ */
+function nonneg(rec: Record<string, unknown>, key: string, where: string): number {
+  const v = num(rec, key, where);
+  if (v < 0) throw new VimeoMediaError(`Manifest ${where}: "${key}" is not a non-negative number`);
+  return v;
+}
+
 function str(rec: Record<string, unknown>, key: string, where: string, allowEmpty = false): string {
   const v = rec[key];
   if (typeof v !== "string" || (!allowEmpty && v.length === 0)) {
@@ -150,10 +165,10 @@ function parseRepresentation(raw: unknown, kind: "video" | "audio", i: number): 
   const segments: VimeoSegment[] = rawSegments.map((s, j) => {
     const sw = `${where}.segments[${j}]`;
     if (!isRecord(s)) throw new VimeoMediaError(`Manifest ${sw}: not an object`);
-    const start = num(s, "start", sw);
-    const end = num(s, "end", sw);
+    const start = nonneg(s, "start", sw);
+    const end = nonneg(s, "end", sw);
     if (end < start) throw new VimeoMediaError(`Manifest ${sw}: end ${end} before start ${start}`);
-    return { start, end, size: num(s, "size", sw), url: str(s, "url", sw) };
+    return { start, end, size: nonneg(s, "size", sw), url: str(s, "url", sw) };
   });
   for (let j = 1; j < segments.length; j++) {
     if (segments[j]!.start < segments[j - 1]!.start) {
@@ -271,10 +286,16 @@ export function segmentIndicesFor(rep: VimeoRepresentation, timesSec: readonly n
 }
 
 /**
- * The absolute URL of one segment: `rep.baseUrl + segment.url` against the
- * manifest's `baseUrl` against the manifest URL — the two-step resolution the
- * player performs. Returned as a string so `downloadPinned` re-parses and
- * re-judges it; nothing here decides whether the host is allowed.
+ * The absolute URL of one segment, RESOLVED in three steps like a DASH client:
+ * the manifest's `baseUrl` against the manifest URL, the representation's
+ * `baseUrl` against that, the segment's `url` against that. Each step is a
+ * URL resolution, never a string concatenation — `"abc" + "def.mp4"` is not
+ * `abc/def.mp4`, and a base with no trailing slash is a file reference the
+ * next step replaces. Every live representation carries `base_url: ""`
+ * (measured 2026-09-05), which resolves to its parent unchanged, so the day
+ * Vimeo populates the field is the day this rule matters. Returned as a
+ * string so `downloadPinned` re-parses and re-judges it; nothing here decides
+ * whether the host is allowed.
  */
 export function resolveSegmentUrl(
   manifestUrl: string,
@@ -282,8 +303,9 @@ export function resolveSegmentUrl(
   rep: VimeoRepresentation,
   segment: VimeoSegment,
 ): string {
-  const base = new URL(manifest.baseUrl, manifestUrl);
-  return new URL(rep.baseUrl + segment.url, base).toString();
+  const manifestBase = new URL(manifest.baseUrl, manifestUrl);
+  const repBase = new URL(rep.baseUrl, manifestBase);
+  return new URL(segment.url, repBase).toString();
 }
 
 /** The representation's init segment, decoded — the bytes every written file opens with. */
@@ -371,11 +393,13 @@ export interface RenditionFile {
  * is a valid fMP4 with gaps, whose frames still carry absolute timestamps; a
  * contiguous run is a playable rendition. Every segment is fetched under the
  * pinned-host rules with `min(VIMEO_SEGMENT_TIMEOUT_MS, what is left of the
- * budget)`; the DECLARED total is checked against `maxTotalBytes` before the
- * first fetch, so an oversized request is refused at zero cost. Fetches are
- * sequential — one socket to the CDN, bytes appended in order, no reassembly.
- * On any failure the partial file is removed and the error rethrown: a
- * truncated fMP4 is a file ffmpeg reads to the cut and reports success on.
+ * budget)`; `maxTotalBytes` is checked on the DECLARED total before the first
+ * fetch (an oversized request is refused at zero cost) AND on the bytes
+ * written as they arrive (a manifest that under-declares cannot walk past
+ * it); a segment shorter than it declared is refused. Fetches are sequential
+ * — one socket to the CDN, bytes appended in order, no reassembly. On any
+ * failure the partial file is removed and the error rethrown: a truncated
+ * fMP4 is a file ffmpeg reads to the cut and reports success on.
  */
 export async function downloadRendition(
   manifestUrl: string,
@@ -440,6 +464,22 @@ export async function downloadRendition(
           );
         }
         throw err;
+      }
+      // The manifest's declared size is exact (measured to the byte on the
+      // live talk), so a SHORTER body is a truncated segment — the one thing
+      // the engine's cap cannot see, since the cap bounds "too much", not "too
+      // little" — and a truncated fMP4 is a file ffmpeg reads to the cut and
+      // reports success on. A LONGER body is bounded by the per-segment cap
+      // and by the written total below.
+      if (bytes.byteLength < seg.size) {
+        throw new VimeoMediaError(
+          `Refusing ${rep.id} segment ${i}: arrived with ${bytes.byteLength} bytes, declared ${seg.size}`,
+        );
+      }
+      if (written + bytes.byteLength > maxTotal) {
+        throw new VimeoMediaError(
+          `Refusing ${rep.id}: wrote ${written + bytes.byteLength} bytes, over the ${maxTotal}-byte cap (declared ${declared})`,
+        );
       }
       sink.write(bytes);
       written += bytes.byteLength;

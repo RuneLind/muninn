@@ -22,6 +22,16 @@
  * to the cut and then reports success on.
  */
 
+/**
+ * The two hosts this vertical downloads from, pinned here — beside the engine
+ * that enforces them — so the caption core and the media seam both import the
+ * spelling from the module they already depend on, and neither has to import
+ * the other for a string (`captions.ts` → `media.ts` was one such edge, and
+ * `media.ts` has an obvious reason to reach for the harvest one day).
+ */
+export const VIMEO_CAPTIONS_HOST = "captions.vimeo.com";
+export const VIMEO_MEDIA_HOST = "vod-adaptive-ak.vimeocdn.com";
+
 /** Base class for every refusal this downloader produces. */
 export class VimeoDownloadError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -158,10 +168,13 @@ export async function downloadPinned(url: string, opts: DownloadPinnedOptions): 
         controller.abort();
         throw new Err(`${what} body declares ${declared} bytes, over the ${maxBytes}-byte cap`);
       }
-      const reading = res.arrayBuffer();
-      reading.catch(() => {});
       let buf: ArrayBuffer;
       try {
+        // The CALL is inside the try too: a `fetchImpl`/e2e fake handing back a
+        // Response-like with no `arrayBuffer` used to throw a raw TypeError past
+        // every caller's `instanceof` — the same shape `res.text()` had on main.
+        const reading = res.arrayBuffer();
+        reading.catch(() => {});
         buf = await Promise.race([reading, budgetExpired]);
       } catch (err) {
         classify(err, true);

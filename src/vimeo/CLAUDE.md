@@ -10,7 +10,7 @@ the UI entry — the URL field on `/summaries`.
 | `oembed.ts` | `fetchVimeoOembed` — title/author/duration/upload date/thumbnail with **no browser** |
 | `vtt.ts` | `parseVttCues`, `vttToSegments`, `segmentsToMarkdown`, `detectCaptionKind` — pure |
 | `captions.ts` | `harvestVimeoCaptions` (headless Chromium — captures the caption URLs AND the signed JSON `manifestUrl`), `downloadVtt` (host-pinned to `captions.vimeo.com`), `chooseTrack` (pure) |
-| `download.ts` | `downloadPinned` — the ONE host-pinned, bounded byte download (`downloadVtt`'s rules, stated once), parameterised on host, caps and the noun in its messages; `VimeoDownloadError` is the base every refusal extends |
+| `download.ts` | `downloadPinned` — the ONE host-pinned, bounded byte download (`downloadVtt`'s rules, stated once), parameterised on host, caps and the noun in its messages; `VimeoDownloadError` is the base every refusal extends; it also OWNS the two host constants (`VIMEO_CAPTIONS_HOST`, `VIMEO_MEDIA_HOST`), so `captions.ts` and `media.ts` import a string from the module both already depend on and never from each other |
 | `media.ts` | The media seam (v2 PR 3): `fetchVimeoManifest` (host-pinned to `vod-adaptive-ak.vimeocdn.com`), `parseVimeoManifest` / `chooseRepresentation` / `segmentIndexAt` / `resolveSegmentUrl` (pure), `downloadRendition` (init + segments → ONE fMP4 ffmpeg reads) |
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · summarizing · ingesting · complete · error` |
@@ -19,7 +19,7 @@ the UI entry — the URL field on `/summaries`.
 | `../summaries/presets.ts` | The capture KINDS (`standard` · `deep` · `talk-notes`), per-bot `prompts/captureSummary.<id>.md` overrides, and the two run levers a kind can pull (`captureThinkingFor`, `captureBotConfigFor`) — pure |
 | `../summaries/language.ts` | `talk \| nb \| en`, `resolveOutputLang` (the `talk` → caption base tag rule), `captionBaseLang` (shared with `chooseTrack`) and the ONE spelling of the bokmål/English rider, which `src/share/prompt.ts` re-exports |
 | `fixtures/totto-trust-but-verify.vtt` | Real auto-captions from a public JavaZone talk: 63 KB, 928 cues, 53 min |
-| `fixtures/manifest-placeholder.json` | A real manifest's SHAPE (5 video + 2 audio representations, real codec strings/bitrates/heights/init segments, 12 segments each) with every signed path, id and URL replaced by a placeholder — the test pins that no live `pathsig`/`hmac`/`psid`/UUID survives |
+| `fixtures/manifest-placeholder.json` | A real manifest's SHAPE (5 video + 2 audio representations in the live manifest's UNSORTED order — 1080, 360, 720, 540, 240 — real codec strings/bitrates/heights/init segments, 12 segments each) with every signed path, id and URL replaced by a placeholder — the test pins that no live `pathsig`/`hmac`/`psid`/UUID survives, and that the order is the live one |
 
 The route is `src/dashboard/routes/vimeo-routes.ts`; the huginn half is the
 `vimeo` push source (`main/ingest/vimeo.py`, `POST /api/vimeo/ingest`, collection
@@ -171,11 +171,15 @@ second copy of that engine with a different host string is how the two would
 have drifted on the next fix round.
 
 **The host pin is judged where the bytes are fetched, never where the URL is
-built.** `resolveSegmentUrl` performs the player's two-step resolution
-(`rep.base_url + segment.url` against the manifest's `base_url` against the
-manifest URL — `../../../../../range/prot/` climbs five directories from the
-`playlist.json` to `/…/v2/`) and returns a STRING; `downloadPinned` re-parses
-and refuses it. A manifest whose `base_url` names another host therefore
+built.** `resolveSegmentUrl` RESOLVES in three steps like a DASH client — the
+manifest's `base_url` against the manifest URL (`../../../../../range/prot/`
+climbs five directories from the `playlist.json` to `/…/v2/`), the
+representation's `base_url` against that, the segment's `url` against that —
+each a URL resolution and never a concatenation (`"abc" + "def.mp4"` is not
+`abc/def.mp4`; a base with no trailing slash is a file reference the next step
+replaces). Every live representation carries `base_url: ""` (measured), so the
+non-empty branch is pinned by the test, not by the corpus. It returns a STRING;
+`downloadPinned` re-parses and refuses it. A manifest whose `base_url` names another host therefore
 resolves there and is refused before any request is sent, with the partial file
 never created — pinned in `media.test.ts`. The manifest URL itself is pinned the
 same way, so `fetchVimeoManifest` on a `captions.vimeo.com` address is a
@@ -189,21 +193,31 @@ measured). Audio: the requested codec family (`opus` for Whisper — 101 kbps
 against AAC's 194 for the same speech), else the lowest average bitrate. A
 representation with no segments is never chosen; the manifest's arrays are not
 mutated (the live manifest lists renditions UNSORTED — 1080p, 360p, 720p, 540p,
-240p — so the sort is load-bearing and happens on a copy).
+240p, the order the committed fixture keeps — so the sort is load-bearing and
+happens on a copy).
 
-**Four bounds on a rendition download, each its own constant.**
-`VIMEO_MANIFEST_MAX_BYTES` (8 MB; a 3 h talk's manifest is ~3.2 MB by the
-measured rate), `VIMEO_SEGMENT_MAX_BYTES` (16 MB per segment; the largest measured
-is 1.2 MB), `VIMEO_RENDITION_MAX_BYTES` (256 MB, checked on the manifest's
-DECLARED sizes before the first fetch — the whole 240p rendition of a 3 h talk is
+**Four bounds on a rendition download, each its own constant — and the sizes
+the manifest DECLARES are third-party input too.** `VIMEO_MANIFEST_MAX_BYTES`
+(8 MB; a 3 h talk's manifest is ~3.2 MB by the measured rate),
+`VIMEO_SEGMENT_MAX_BYTES` (16 MB per segment; the largest measured is 1.2 MB),
+`VIMEO_RENDITION_MAX_BYTES` (256 MB — the whole 240p rendition of a 3 h talk is
 ~176 MB, the whole Opus ~137 MB), and the whole-operation budget
 `renditionTimeoutFor(n)` = 30 s + 1.5 s × segments, from which each segment fetch
-gets `min(30 s, what is left)`. When a segment is handed the last sliver of the
-budget and times out, the error names the WHOLE operation ("Rendition download
-timed out after 20ms (3/6 segments)") rather than the sliver ("Segment download
-timed out after 2ms" — true and useless). On any failure the partial file is
-unlinked: a truncated fMP4 is a file ffmpeg reads up to the cut and reports
-success on.
+gets `min(30 s, what is left)` (pinned: a never-settling fetch under a 50 ms
+whole budget rejects in ~50 ms, not 30 s). The rendition cap is checked TWICE:
+on the declared total before the first fetch, so an oversized request costs
+nothing, and on the bytes WRITTEN as they arrive — the first review found the
+declared check alone let 5 declared-50-byte segments write 1 MB, and a negative
+declared `size` cancel a positive one (parse now refuses negative `size`,
+`start`, `end`). A segment that arrives SHORTER than it declared is refused
+outright: the declared size is exact (measured to the byte, 485 621 declared /
+485 621 + 804 init written), a short body is a truncated segment, and a truncated
+fMP4 is a file ffmpeg reads up to the cut and reports success on — the one
+failure the engine's own cap cannot see, since a cap bounds "too much". When a
+segment is handed the last sliver of the budget and times out, the error names
+the WHOLE operation ("Rendition download timed out after Nms (k/n segments)")
+rather than the sliver ("Segment download timed out after 2ms" — true and
+useless). On any failure the partial file is unlinked.
 
 **Indices need not be contiguous.** A sparse set (one segment per cadence tick,
 the PR 4 shape) is a valid fMP4 with gaps whose frames still carry absolute

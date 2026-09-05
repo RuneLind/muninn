@@ -98,6 +98,98 @@
    "base_url": "",
    "format": "dash",
    "mime_type": "video/mp4",
+   "codecs": "avc1.64001E",
+   "bitrate": 485000,
+   "avg_bitrate": 237000,
+   "duration": 72.16,
+   "framerate": 25,
+   "width": 640,
+   "height": 360,
+   "max_segment_duration": 6,
+   "id": "rep-video-360p",
+   "avg_id": "placeholder",
+   "init_segment": "AAAAIGZ0eXBkYXNoAAAAAGRhc2htcDQyaXNvNmF2YzEAAAMFbW9vdgAAAGxtdmhkAAAAAOa/AnPmvwJzAAAAGQAAAAAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAlV0cmFrAAAAXHRraGQAAAAH5r8Cc+a/AnMAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAoAAAAFoAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAAAAAAAAwABAAAAAAHNbWRpYQAAACBtZGhkAAAAAOa/AnPmvwJzAAAAGQAAAABVxAAAAAAAO2hkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaW1lbyBJc29wb2QgVmlkZW8gSGFuZGxlcgAAAAFqbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAABKnN0YmwAAACyc3RzZAAAAAAAAAABAAAAomF2YzEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAACgAFoAEgAAABIAAAAAAAAAAEKQVZDIENvZGluZwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//8AAAA5YXZjQwFkAB7/4QAdZ2QAHqzZgKAv+WagICAoAAADAAgAAAMBkHixbNABAAVo6Xssi/34+AAAAAATY29scm5jbHgAAQABAAEAAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAUc3RzegAAAAAAAAAAAAAAAAAAABBzdGNvAAAAAAAAAAAAAAAYc2dwZAEAAAByb2xsAAAAAgAAAAAAAAAUc2JncAAAAAByb2xsAAAAAAAAADxtdmV4AAAAFG1laGQBAAAAAAAAAAABOnwAAAAgdHJleAAAAAAAAAABAAAAAQAAAAEAAAAAAAEAAA==",
+   "init_segment_url": "",
+   "index_segment": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=index",
+   "segments": [
+    {
+     "start": 0,
+     "end": 6.08,
+     "size": 138721,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=0"
+    },
+    {
+     "start": 6.08,
+     "end": 12.16,
+     "size": 236652,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=1"
+    },
+    {
+     "start": 12.16,
+     "end": 18.24,
+     "size": 195391,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=2"
+    },
+    {
+     "start": 18.24,
+     "end": 24.32,
+     "size": 192259,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=3"
+    },
+    {
+     "start": 24.32,
+     "end": 30.4,
+     "size": 191380,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=4"
+    },
+    {
+     "start": 30.4,
+     "end": 36.48,
+     "size": 182611,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=5"
+    },
+    {
+     "start": 36.48,
+     "end": 42.56,
+     "size": 199723,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=6"
+    },
+    {
+     "start": 42.56,
+     "end": 48.64,
+     "size": 223872,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=7"
+    },
+    {
+     "start": 48.64,
+     "end": 54.72,
+     "size": 137450,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=8"
+    },
+    {
+     "start": 54.72,
+     "end": 60,
+     "size": 175901,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=9"
+    },
+    {
+     "start": 60,
+     "end": 66.08,
+     "size": 301800,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=10"
+    },
+    {
+     "start": 66.08,
+     "end": 72.16,
+     "size": 242525,
+     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=11"
+    }
+   ]
+  },
+  {
+   "base_url": "",
+   "format": "dash",
+   "mime_type": "video/mp4",
    "codecs": "avc1.640020",
    "bitrate": 2117000,
    "avg_bitrate": 712000,
@@ -275,98 +367,6 @@
      "end": 72.16,
      "size": 431813,
      "url": "placeholder/avf/rep-video-540p.mp4?pathsig=placeholder&range=11"
-    }
-   ]
-  },
-  {
-   "base_url": "",
-   "format": "dash",
-   "mime_type": "video/mp4",
-   "codecs": "avc1.64001E",
-   "bitrate": 485000,
-   "avg_bitrate": 237000,
-   "duration": 72.16,
-   "framerate": 25,
-   "width": 640,
-   "height": 360,
-   "max_segment_duration": 6,
-   "id": "rep-video-360p",
-   "avg_id": "placeholder",
-   "init_segment": "AAAAIGZ0eXBkYXNoAAAAAGRhc2htcDQyaXNvNmF2YzEAAAMFbW9vdgAAAGxtdmhkAAAAAOa/AnPmvwJzAAAAGQAAAAAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAlV0cmFrAAAAXHRraGQAAAAH5r8Cc+a/AnMAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAoAAAAFoAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAAAAAAAAwABAAAAAAHNbWRpYQAAACBtZGhkAAAAAOa/AnPmvwJzAAAAGQAAAABVxAAAAAAAO2hkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaW1lbyBJc29wb2QgVmlkZW8gSGFuZGxlcgAAAAFqbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAABKnN0YmwAAACyc3RzZAAAAAAAAAABAAAAomF2YzEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAACgAFoAEgAAABIAAAAAAAAAAEKQVZDIENvZGluZwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//8AAAA5YXZjQwFkAB7/4QAdZ2QAHqzZgKAv+WagICAoAAADAAgAAAMBkHixbNABAAVo6Xssi/34+AAAAAATY29scm5jbHgAAQABAAEAAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAUc3RzegAAAAAAAAAAAAAAAAAAABBzdGNvAAAAAAAAAAAAAAAYc2dwZAEAAAByb2xsAAAAAgAAAAAAAAAUc2JncAAAAAByb2xsAAAAAAAAADxtdmV4AAAAFG1laGQBAAAAAAAAAAABOnwAAAAgdHJleAAAAAAAAAABAAAAAQAAAAEAAAAAAAEAAA==",
-   "init_segment_url": "",
-   "index_segment": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=index",
-   "segments": [
-    {
-     "start": 0,
-     "end": 6.08,
-     "size": 138721,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=0"
-    },
-    {
-     "start": 6.08,
-     "end": 12.16,
-     "size": 236652,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=1"
-    },
-    {
-     "start": 12.16,
-     "end": 18.24,
-     "size": 195391,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=2"
-    },
-    {
-     "start": 18.24,
-     "end": 24.32,
-     "size": 192259,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=3"
-    },
-    {
-     "start": 24.32,
-     "end": 30.4,
-     "size": 191380,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=4"
-    },
-    {
-     "start": 30.4,
-     "end": 36.48,
-     "size": 182611,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=5"
-    },
-    {
-     "start": 36.48,
-     "end": 42.56,
-     "size": 199723,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=6"
-    },
-    {
-     "start": 42.56,
-     "end": 48.64,
-     "size": 223872,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=7"
-    },
-    {
-     "start": 48.64,
-     "end": 54.72,
-     "size": 137450,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=8"
-    },
-    {
-     "start": 54.72,
-     "end": 60,
-     "size": 175901,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=9"
-    },
-    {
-     "start": 60,
-     "end": 66.08,
-     "size": 301800,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=10"
-    },
-    {
-     "start": 66.08,
-     "end": 72.16,
-     "size": 242525,
-     "url": "placeholder/avf/rep-video-360p.mp4?pathsig=placeholder&range=11"
     }
    ]
   },

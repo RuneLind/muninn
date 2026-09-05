@@ -25,8 +25,7 @@
  */
 import { captionBaseLang } from "../summaries/language.ts";
 import { getLog } from "../logging.ts";
-import { downloadPinned, VimeoDownloadError } from "./download.ts";
-import { VIMEO_MEDIA_HOST } from "./media.ts";
+import { downloadPinned, VimeoDownloadError, VIMEO_CAPTIONS_HOST, VIMEO_MEDIA_HOST } from "./download.ts";
 import { vimeoWatchUrl } from "./url.ts";
 
 const log = getLog("vimeo", "captions");
@@ -39,7 +38,7 @@ type PwContext = Awaited<ReturnType<PwBrowser["newContext"]>>;
 type PwPage = Awaited<ReturnType<PwContext["newPage"]>>;
 
 /** The ONLY host a caption URL may point at. */
-export const VIMEO_CAPTIONS_HOST = "captions.vimeo.com";
+export { VIMEO_CAPTIONS_HOST };
 /** Whole-operation budget for a harvest, browser launch included. */
 export const VIMEO_HARVEST_TIMEOUT_MS = 60_000;
 /** A 53-minute talk's VTT is 62 KB. The cap bounds the process, generously. */
