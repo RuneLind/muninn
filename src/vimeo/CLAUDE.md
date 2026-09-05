@@ -332,14 +332,18 @@ same-origin. **The document's frames are therefore only live inside muninn's
 UI**, which the plan accepted (huginn serves no static files). Nothing removes
 a kept frame when the document is deleted (the delete signal carries a document
 id, not a video id) — a follow-up; the two acceptance talks' quoted frames
-measured 725 KB for 8 (81–102 KB each) and 428 KB for 6 (54–87 KB each), at 720p.
+measured 725 KB for 8 (81–102 KB each) and 425 KB for 6 (54–87 KB each), byte
+sums, at 720p.
 
 **`GET /api/vimeo/frames/:videoId/:file` is read-only and default-deny by
 charset.** Both segments are gated (`FRAME_VIDEO_ID_RE` digits,
 `FRAME_FILE_RE` `<digits>.jpg`) BEFORE any filesystem access, the resolved path
 is checked to stay under the root on its REAL path (`realpath` on both sides —
 the charset gates make the spelling safe by enumeration, and only the real path
-sees a symlink planted under the root; pinned with one), everything else is a 404 (never a 400
+sees a symlink planted under the root; pinned with one. Stated residual: a
+HARDLINK planted under the root is invisible to `realpath` and still serves, so
+the guarantee rests on the root's only writer, `keepReferencedFrames`, writing
+plain files), everything else is a 404 (never a 400
 that confirms the shape), `Cache-Control: private, max-age=86400` (a frame is
 (video, second) — re-extracting the same second is the same picture; PRIVATE
 because the route is in the admin zone under `MUNINN_AUTH` and a shared cache

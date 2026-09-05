@@ -335,9 +335,11 @@ export function registerVimeoRoutes(
    * `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg` — the only writer is the
    * capture's `keepReferencedFrames`. Both path segments are gated to their
    * charset BEFORE any filesystem access (a video id is digits, a file is
-   * `<digits>.jpg`), and the resolved path is checked to stay under the root
-   * anyway — defence in depth, the wiki explainer route's shape. Anything else
-   * is a 404, never a 400 that confirms the shape. Registered here so the
+   * `<digits>.jpg`), and the REAL path (`realpath`, both sides) is checked to
+   * stay under the root — not defence in depth: the charset gates make the
+   * spelling safe by enumeration, and this is the one check that sees a
+   * symlink planted under the root. Anything else is a 404, never a 400 that
+   * confirms the shape. Registered here so the
    * `nais` profile drops it with the rest of the vertical.
    */
   const framesRoot = opts.framesRoot ?? framesRootDir();
@@ -348,10 +350,14 @@ export function registerVimeoRoutes(
     // Containment is judged on the REAL path the kernel would open, not on the
     // spelling: with both charset gates holding the spelling is always
     // `<root>/<digits>/<digits>.jpg` (enumerated), so a lexical prefix check
-    // was dead code — and blind to the one live escape, a SYMLINK under the
-    // root pointing outside it (measured by review: a planted `<root>/7 →
-    // /tmp/outside` served `/7/9.jpg` with 200). `realpath` follows symlinks
-    // on both sides; a missing file throws and is the same 404 as before.
+    // was dead code — and blind to a SYMLINK under the root pointing outside
+    // it (measured by review: a planted `<root>/7 → /tmp/outside` served
+    // `/7/9.jpg` with 200). `realpath` follows symlinks on both sides; a
+    // missing file throws and is the same 404 as before. RESIDUAL, stated: a
+    // HARDLINK planted under the root is invisible to `realpath` too and still
+    // serves (measured, same volume only) — the guard against that is that the
+    // only writer under the root is `keepReferencedFrames`, which writes plain
+    // files; a writer that plants links there has the disk already.
     let rootReal: string;
     let fileReal: string;
     try {
