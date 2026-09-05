@@ -30,6 +30,7 @@
  */
 
 import { test, expect, describe, mock, beforeEach, beforeAll, afterAll } from "bun:test";
+import { configure, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1364,19 +1365,61 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     expect(listings).toBe(0);
   });
 
-  test("fix round 2 (#525): a frames root that cannot be read (here: a FILE, ENOTDIR) is not 'empty' — the listing is still consulted and the failure is logged, never a silent skip", async () => {
+  test("fix rounds 2–3 (#525): the frames-root check's FOUR states — absent and empty skip the listing; non-empty and unreadable consult it, unreadable with a warn naming the errno", async () => {
     // SECOND in this describe on purpose, before any root with frames exists:
-    // every other registration has an empty root and skips, so the one
-    // listing call below is this registration's.
+    // every other registration so far has an empty root and skips, so listing
+    // calls below belong to the registrations THIS test makes. (Outgoing
+    // direction: the unreadable-root registration below is permanent and adds
+    // one listing call + one warn to every later notification in this file — a
+    // later test counting listings must account for it.)
+    const warns: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => { if (r.level === "warning" && r.category.join(".").startsWith("muninn.")) warns.push(r); } },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+      ],
+      reset: true,
+    });
     let listings = 0;
     knowledgeApiImpl = async () => { listings++; return { documents: [{ id: DOC, url: VIMEO_URL }] }; };
-    const notADir = join(tmpFramesRoot(), "root-is-a-file");
-    writeFileSync(notADir, "x");
-    const app = new Hono();
-    registerVimeoRoutes(app, config, { framesRoot: notADir });
+
+    // State 1 — ABSENT root (no capture ever kept a frame here): no listing, no warn.
+    const absent = join(tmpFramesRoot(), "never-created");
+    registerVimeoRoutes(new Hono(), config, { framesRoot: absent });
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle(() => true);
+    expect(listings).toBe(0);
+    expect(warns.filter((w) => /frames root/.test(String(w.message)))).toEqual([]);
+
+    // State 2 — EMPTY root: no listing (the round-1 case, re-stated here so the enumeration is in one place).
+    registerVimeoRoutes(new Hono(), config, { framesRoot: tmpFramesRoot() });
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle(() => true);
+    expect(listings).toBe(0);
+
+    // State 3 — NON-EMPTY root: the listing is consulted (one call from this registration).
+    const withFrames = tmpFramesRoot();
+    mkdirSync(join(withFrames, "424242"));
+    writeFileSync(join(withFrames, "424242", "10.jpg"), "x");
+    registerVimeoRoutes(new Hono(), config, { framesRoot: withFrames });
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
     await settle(() => listings > 0);
     expect(listings).toBe(1);
+    expect(warns.filter((w) => /frames root/.test(String(w.message)))).toEqual([]);
+
+    // State 4 — UNREADABLE root (a FILE ⇒ ENOTDIR): consulted too — two registrations now list — with one warn naming the errno.
+    listings = 0;
+    const notADir = join(tmpFramesRoot(), "root-is-a-file");
+    writeFileSync(notADir, "x");
+    registerVimeoRoutes(new Hono(), config, { framesRoot: notADir });
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle(() => listings >= 2);
+    expect(listings).toBe(2);
+    const warn = warns.filter((w) => /Could not read the Vimeo frames root/.test(String(w.message)));
+    expect(warn.length).toBe(1);
+    expect(warn[0]!.properties.code).toBe("ENOTDIR");
+    expect(warn[0]!.properties.dir).toBe(notADir);
   });
 
   test("a recently captured document: the video id comes from the ingest map, not the listing", async () => {
