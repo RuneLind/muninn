@@ -13,6 +13,7 @@
 import { test, expect, beforeEach, beforeAll, afterEach, mock } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
 import { mkdtemp } from "node:fs/promises";
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
@@ -35,6 +36,8 @@ mock.module("../ai/one-shot.ts", () => ({
     opts?: {
       systemPrompt?: string;
       thinkingMaxTokens?: number;
+      extraDirs?: string[];
+      timeoutMs?: number;
       onProgress?: (e: { type: string; text: string }) => void;
     },
   ) => {
@@ -42,6 +45,8 @@ mock.module("../ai/one-shot.ts", () => ({
     lastSystemPrompt = opts?.systemPrompt;
     lastRunModel = b.model;
     lastThinking = opts?.thinkingMaxTokens;
+    lastExtraDirs = opts?.extraDirs;
+    lastTimeoutMs = opts?.timeoutMs;
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
@@ -51,6 +56,8 @@ mock.module("../ai/one-shot.ts", () => ({
 /** The model the connector was handed, and the thinking cap it was (or was not) given. */
 let lastRunModel: string | undefined;
 let lastThinking: number | undefined;
+let lastExtraDirs: string[] | undefined;
+let lastTimeoutMs: number | undefined;
 let sourceDraftCalls: Array<Record<string, unknown>> = [];
 let sourceDraftThrows: Error | null = null;
 mock.module("../gardener/source-drafter-run.ts", () => ({
@@ -139,6 +146,7 @@ const META = {
   // The route's defaults: the standard kind, in the talk's own language.
   preset: STANDARD,
   lang: "talk" as const,
+  frames: false,
 };
 
 const NORWEGIAN_AUTO_TRACK = {
@@ -203,6 +211,12 @@ beforeEach(() => {
   lastPrompt = undefined;
   lastRunModel = undefined;
   lastThinking = undefined;
+  lastExtraDirs = undefined;
+  lastTimeoutMs = undefined;
+  manifestFetches = [];
+  extractCalls = [];
+  lastHarvestOpts = undefined;
+  framesRoot = mkdtempSync(join(tmpdir(), "vimeo-frames-root-"));
   ingestPayload = undefined;
   sourceDraftCalls = [];
   sourceDraftThrows = null;
@@ -930,4 +944,120 @@ test("a source-draft trigger that throws leaves the job COMPLETE", async () => {
   expect(job.error).toBeUndefined();
   expect(events).not.toContain("error");
   expect(sourceDraftCalls.length).toBe(1);
+});
+
+// ── v2 PR 4: frames ─────────────────────────────────────────────────────────
+
+const FRAMES_META = { ...META, frames: true, durationSec: 600 };
+const MANIFEST_URL = "https://vod-adaptive-ak.vimeocdn.com/exp=0/x/v2/playlist/av/primary/prot/x/playlist.json";
+const FAKE_MANIFEST = { clipId: "c", baseUrl: "", video: [], audio: [] } as unknown as import("./media.ts").VimeoManifest;
+
+/** Deps with a harvest that saw the manifest, a manifest fetch and a frame extractor that writes real files. */
+function framesDeps(overrides: Record<string, unknown> = {}) {
+  const base = deps();
+  return {
+    ...base,
+    framesRoot,
+    harvest: async (_videoId: string, opts: { awaitManifestMs?: number }) => {
+      lastHarvestOpts = opts;
+      return { ...(await base.harvest()), manifestUrl: MANIFEST_URL };
+    },
+    fetchManifest: async (url: string) => {
+      manifestFetches.push(url);
+      return FAKE_MANIFEST;
+    },
+    extractFrames: async (input: { workDir: string; durationSec: number; manifestUrl: string }) => {
+      extractCalls.push(input);
+      const out = [10, 30, 50].map((t) => ({ path: join(input.workDir, `${t}.jpg`), tSeconds: t }));
+      for (const f of out) writeFileSync(f.path, `frame ${f.tSeconds}`);
+      return out;
+    },
+    ...overrides,
+  };
+}
+let manifestFetches: string[] = [];
+let lastHarvestOpts: { awaitManifestMs?: number } | undefined;
+let extractCalls: Array<{ workDir: string; durationSec: number; manifestUrl: string }> = [];
+let framesRoot = "";
+
+test("frames ON: extracting_frames runs between harvest and summarize, the frame list rides the USER prompt, extraDirs is the work dir", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  const statuses: string[] = [];
+  subscribe(jobId, (e) => { if (e.type === "status") statuses.push(e.status); });
+  await summarizeVimeo(jobId, FRAMES_META, config, bot, framesDeps());
+
+  expect(statuses).toEqual(["harvesting_captions", "extracting_frames", "summarizing", "ingesting"]);
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(manifestFetches).toEqual([MANIFEST_URL]);
+  expect(extractCalls.length).toBe(1);
+  expect(extractCalls[0]!.durationSec).toBe(600);
+  expect(extractCalls[0]!.manifestUrl).toBe(MANIFEST_URL);
+  // The transcript still opens the prompt; the frame list follows it.
+  expect(lastPrompt!.startsWith("### [00:00:00]")).toBe(true);
+  expect(lastPrompt).toContain(`t=00:00:10 ${join(extractCalls[0]!.workDir, "10.jpg")}`);
+  expect(lastPrompt).toContain(`![Slide at HH:MM:SS](/api/vimeo/frames/${VIDEO_ID}/<sec>.jpg)`);
+  // The SYSTEM prompt says nothing about frames — a frames-off capture's prompt is unchanged.
+  expect(lastSystemPrompt).not.toContain("Slide");
+  expect(lastExtraDirs).toEqual([extractCalls[0]!.workDir]);
+  expect(lastTimeoutMs).toBe(600_000); // 3 frames: the floor
+  // The harvest is told to WAIT for the manifest: measured on the first live
+  // frames capture, the captions arrive before the player asks for its
+  // playlist, and a harvest that closes on the captions reports no manifest.
+  expect(lastHarvestOpts?.awaitManifestMs).toBe(10_000);
+});
+
+test("frames OFF: no manifest fetch, no extraction, no extraDirs, prompt byte-identical to before", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...FRAMES_META, frames: false }, config, bot, framesDeps());
+  expect(lastHarvestOpts?.awaitManifestMs).toBe(0); // frames off: close on the captions
+  expect(manifestFetches).toEqual([]);
+  expect(extractCalls).toEqual([]);
+  expect(lastExtraDirs).toBeUndefined();
+  expect(lastPrompt).not.toContain("Slide frames");
+});
+
+test("the frames the summary QUOTES are kept under <root>/<videoId>/<sec>.jpg; the rest die with the work dir", async () => {
+  claudeResult =
+    "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n" +
+    `![Slide at 00:00:30](/api/vimeo/frames/${VIDEO_ID}/30.jpg)\n- point\n` +
+    `![Slide at 00:01:00](/api/vimeo/frames/${VIDEO_ID}/60.jpg)`; // 60 was never extracted
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, FRAMES_META, config, bot, framesDeps());
+  expect(readdirSync(join(framesRoot, VIDEO_ID))).toEqual(["30.jpg"]);
+  expect(existsSync(extractCalls[0]!.workDir)).toBe(false);
+  // The summary text is ingested with the image markdown intact.
+  expect(String(ingestPayload!.summary)).toContain(`/api/vimeo/frames/${VIDEO_ID}/30.jpg`);
+});
+
+test("frames requested but the harvest saw no manifest: transcript-only, one warn, status skips extracting_frames", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  const statuses: string[] = [];
+  subscribe(jobId, (e) => { if (e.type === "status") statuses.push(e.status); });
+  await summarizeVimeo(jobId, FRAMES_META, config, bot, deps()); // the plain deps' harvest has no manifestUrl
+  expect(statuses).toEqual(["harvesting_captions", "summarizing", "ingesting"]);
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(warns.some((w) => /frames requested but the player requested no manifest/.test(String(w.message)))).toBe(true);
+  expect(lastExtraDirs).toBeUndefined();
+});
+
+test("frame extraction failing degrades to transcript-only with a warn, never an error job", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, FRAMES_META, config, bot, framesDeps({
+    extractFrames: async () => { throw new Error("ffmpeg frame grab failed (exit 1)"); },
+  }));
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(warns.some((w) => /frame extraction failed — transcript only/.test(String(w.message)))).toBe(true);
+  expect(lastExtraDirs).toBeUndefined();
+  expect(lastPrompt).not.toContain("Slide frames");
+});
+
+test("the summarize timeout scales with the frame count", async () => {
+  const many = Array.from({ length: 60 }, (_, i) => ({ tSeconds: i * 10, path: "" }));
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, FRAMES_META, config, bot, framesDeps({
+    extractFrames: async (input: { workDir: string }) => {
+      return many.map((f) => { const path = join(input.workDir, `${f.tSeconds}.jpg`); writeFileSync(path, "x"); return { ...f, path }; });
+    },
+  }));
+  expect(lastTimeoutMs).toBe(600_000 + 30 * 24_000);
 });

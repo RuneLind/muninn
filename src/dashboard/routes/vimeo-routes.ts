@@ -8,6 +8,10 @@ import { canonicalVimeoUrl, resolveVimeoRef } from "../../vimeo/url.ts";
 import { fetchVimeoOembed, isNotPublic } from "../../vimeo/oembed.ts";
 import { speakerFromTitle } from "../../vimeo/metadata.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
+import { connectorCapabilities } from "../../ai/one-shot.ts";
+import { FRAME_FILE_RE, FRAME_VIDEO_ID_RE, framesRootDir } from "../../vimeo/frames.ts";
+import { resolve as resolvePath, sep as pathSep } from "node:path";
+import { realpath } from "node:fs/promises";
 import { findCapturePreset, resolveCapturePresets } from "../../summaries/presets.ts";
 import { DEFAULT_CAPTURE_LANG, isCaptureLang } from "../../summaries/language.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
@@ -68,6 +72,8 @@ interface VimeoRecentIngest {
 export interface VimeoRouteOptions {
   /** The clock the recently-ingested TTL is measured on. */
   now?: () => number;
+  /** Where the frames route reads from; default `framesRootDir()`. */
+  framesRoot?: string;
 }
 
 /**
@@ -324,8 +330,59 @@ export function registerVimeoRoutes(
     corsPreflight: false,
   });
 
+  /**
+   * The frames a summary quotes inline (PR 4), served READ-ONLY off
+   * `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg` — the only writer is the
+   * capture's `keepReferencedFrames`. Both path segments are gated to their
+   * charset BEFORE any filesystem access (a video id is digits, a file is
+   * `<digits>.jpg`), and the REAL path (`realpath`, both sides) is checked to
+   * stay under the root — not defence in depth: the charset gates make the
+   * spelling safe by enumeration, and this is the one check that sees a
+   * symlink planted under the root. Anything else is a 404, never a 400 that
+   * confirms the shape. Registered here so the
+   * `nais` profile drops it with the rest of the vertical.
+   */
+  const framesRoot = opts.framesRoot ?? framesRootDir();
+  app.get("/api/vimeo/frames/:videoId/:file", async (c) => {
+    const { videoId, file } = c.req.param();
+    if (!FRAME_VIDEO_ID_RE.test(videoId) || !FRAME_FILE_RE.test(file)) return c.notFound();
+    const fileAbs = resolvePath(framesRoot, videoId, file);
+    // Containment is judged on the REAL path the kernel would open, not on the
+    // spelling: with both charset gates holding the spelling is always
+    // `<root>/<digits>/<digits>.jpg` (enumerated), so a lexical prefix check
+    // was dead code — and blind to a SYMLINK under the root pointing outside
+    // it (measured by review: a planted `<root>/7 → /tmp/outside` served
+    // `/7/9.jpg` with 200). `realpath` follows symlinks on both sides; a
+    // missing file throws and is the same 404 as before. RESIDUAL, stated: a
+    // HARDLINK planted under the root is invisible to `realpath` too and still
+    // serves (measured, same volume only) — the guard against that is that the
+    // only writer under the root is `keepReferencedFrames`, which writes plain
+    // files; a writer that plants links there has the disk already.
+    let rootReal: string;
+    let fileReal: string;
+    try {
+      [rootReal, fileReal] = await Promise.all([realpath(framesRoot), realpath(fileAbs)]);
+    } catch {
+      return c.notFound();
+    }
+    if (!fileReal.startsWith(rootReal + pathSep)) return c.notFound();
+    const f = Bun.file(fileReal);
+    if (!(await f.exists())) return c.notFound();
+    return new Response(f, {
+      headers: {
+        "Content-Type": "image/jpeg",
+        // A frame is (video, second) — re-extracting the same second of the
+        // same rendition is the same picture, so a day of caching is safe —
+        // PRIVATE, because this route sits in the default-deny (admin) zone
+        // under MUNINN_AUTH and `public` would let a shared cache in front of
+        // the instance serve a slide to a request that would otherwise 403.
+        "Cache-Control": "private, max-age=86400",
+      },
+    });
+  });
+
   app.post("/api/vimeo/summarize", async (c) => {
-    type Body = { url?: string; kind?: unknown; lang?: unknown };
+    type Body = { url?: string; kind?: unknown; lang?: unknown; frames?: unknown };
     const body = await c.req.json<Body>().catch(() => ({} as Body));
     const url = body.url;
 
@@ -378,6 +435,30 @@ export function registerVimeoRoutes(
         400,
       );
     }
+    // Slides (PR 4): a BOOLEAN, absent ⇒ off (the plan's default). Validated
+    // like kind/lang — before oEmbed, a 400 with a code the card renders — and
+    // then PRE-FLIGHTED against the summarizer's connector: frames are read by
+    // the model through `extraDirs`, which only the Claude connectors can
+    // express, so a bot that cannot read files answers 503 `frames_unsupported`
+    // BEFORE a job exists (the TikTok precedent) rather than silently
+    // summarizing without the slides the reader ticked.
+    if (body.frames !== undefined && typeof body.frames !== "boolean") {
+      return c.json({ error: "frames must be a boolean", code: "bad_frames" }, 400);
+    }
+    const frames = body.frames === true;
+    if (frames && !connectorCapabilities(summarizerBot).supportsExtraDirs) {
+      return c.json(
+        {
+          error: "frames_unsupported",
+          code: "frames_unsupported",
+          detail:
+            `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector ?? "claude-cli"}", ` +
+            `which cannot read the extracted slide frames (no extra-dirs support). Untick Slides, or set ` +
+            `SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
+        },
+        503,
+      );
+    }
 
     // oEmbed FIRST, and everything that can refuse the capture happens on its
     // answer — before a job exists. A job created above an early return is never
@@ -399,10 +480,11 @@ export function registerVimeoRoutes(
 
     // `toDurationSec` degrades a missing, non-numeric or negative `duration` to
     // 0 — "the endpoint did not say" — and 0 passes the cap below unconditionally.
-    // The duration is the ONLY length bound this vertical has (there is no
-    // download to time out and no frame budget), so a metadata answer that never
-    // said how long the video is refuses rather than starting an unbounded
-    // capture. Below the not-public branch, which carries no duration at all.
+    // The duration is the length bound EVERYTHING downstream is sized from — the
+    // 3 h cap, the frame budget (`cadenceTimes`) and the summarize timeout all
+    // read it — so a metadata answer that never said how long the video is
+    // refuses rather than starting an unbounded capture. Below the not-public
+    // branch, which carries no duration at all.
     if (meta.durationSec === 0) {
       return c.json({ error: "duration_unknown" }, 422);
     }
@@ -517,6 +599,7 @@ export function registerVimeoRoutes(
             : {}),
           preset,
           lang,
+          frames,
         },
         config,
         summarizerBot,

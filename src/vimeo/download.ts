@@ -30,7 +30,23 @@
  * `media.ts` has an obvious reason to reach for the harvest one day).
  */
 export const VIMEO_CAPTIONS_HOST = "captions.vimeo.com";
-export const VIMEO_MEDIA_HOST = "vod-adaptive-ak.vimeocdn.com";
+/**
+ * The CDN hosts Vimeo serves the JSON manifest and its segments from — an
+ * ALLOWLIST, because the player picks one per video: `vimeo.com/1223642971`
+ * is on `vod-adaptive-ak`, `vimeo.com/1223423400` on `skyfire` (measured
+ * 2026-09-05, identical manifest shape on both). A host not listed here is
+ * not fetched and not even recorded by the harvest; a new one is added here,
+ * with the video it was measured on, never matched by suffix.
+ */
+export const VIMEO_MEDIA_HOSTS: readonly string[] = ["vod-adaptive-ak.vimeocdn.com", "skyfire.vimeocdn.com"];
+/** The first measured media host — kept for the fixtures and tests that name one. */
+export const VIMEO_MEDIA_HOST = VIMEO_MEDIA_HOSTS[0]!;
+
+/** Whether a URL's host is one of the allowlisted ones (trailing root dot normalised). */
+export function isAllowedHost(hostname: string, allowed: string | readonly string[]): boolean {
+  const h = hostname.replace(/\.$/, "");
+  return typeof allowed === "string" ? h === allowed : allowed.includes(h);
+}
 
 /** Base class for every refusal this downloader produces. */
 export class VimeoDownloadError extends Error {
@@ -41,8 +57,8 @@ export class VimeoDownloadError extends Error {
 }
 
 export interface DownloadPinnedOptions {
-  /** The ONLY hostname the URL may name. Compared exactly, lowercase. */
-  host: string;
+  /** The ONLY hostname(s) the URL may name. Compared exactly, lowercase. */
+  host: string | readonly string[];
   maxBytes: number;
   timeoutMs: number;
   /**
@@ -84,8 +100,9 @@ export async function downloadPinned(url: string, opts: DownloadPinnedOptions): 
   }
   // `URL.hostname` is already lowercase (WHATWG lowercases it); only the
   // trailing root dot is left to normalise.
-  if (parsed.hostname.replace(/\.$/, "") !== host) {
-    throw new Err(`Refusing ${lowerWhat} URL on host ${parsed.hostname} (only ${host} is allowed)`);
+  if (!isAllowedHost(parsed.hostname, host)) {
+    const allowed = typeof host === "string" ? `${host} is` : `${host.join(", ")} are`;
+    throw new Err(`Refusing ${lowerWhat} URL on host ${parsed.hostname} (only ${allowed} allowed)`);
   }
 
   const doFetch = opts.fetchImpl ?? fetch;

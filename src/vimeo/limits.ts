@@ -13,8 +13,9 @@
 /**
  * The longest video this vertical will capture.
  *
- * The duration is the ONLY length bound the vertical has — there is no download
- * to time out and no frame budget — so it is enforced on the oEmbed answer,
+ * The duration is the length bound everything downstream is sized from — the
+ * segment downloads and frame budget of a frames capture (`cadenceTimes`) and
+ * the summarize timeout all read it — so it is enforced on the oEmbed answer,
  * before a job exists.
  */
 export const VIMEO_MAX_DURATION_SEC = 3 * 60 * 60;

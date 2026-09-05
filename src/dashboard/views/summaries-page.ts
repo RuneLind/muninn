@@ -65,6 +65,12 @@ export interface SummariesPageOptions {
    * it re-offers `deep` on a bot that will 400 it.
    */
   captureKinds?: readonly CapturePickerOption[];
+  /**
+   * Whether the SUMMARIZER bot's connector can read frames (`supportsExtraDirs`)
+   * — the Slides checkbox renders disabled, with the reason, when it cannot.
+   * Default true, for the same no-bot render the kinds default covers.
+   */
+  framesSupported?: boolean;
 }
 
 export async function renderSummariesPage(opts: SummariesPageOptions = {}): Promise<string> {
@@ -202,7 +208,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     <!-- Capture by URL — always visible, because Vimeo has no Chrome extension
          and a link is its whole input. Sits between the head row (which carries
          the "+ Paste article" toggle) and the collapsed paste form below. -->
-    ${captureUrlFormHtml({ kinds: captureKinds, langs: CAPTURE_LANGS })}
+    ${captureUrlFormHtml({ kinds: captureKinds, langs: CAPTURE_LANGS, framesSupported: opts.framesSupported ?? true })}
 
     <!-- Manual submit form (pasted article text; YouTube/X come from the Chrome
          extension) — collapsed behind the toggle above so the inbox leads. -->

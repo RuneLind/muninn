@@ -1,3 +1,6 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { mkdir, rm } from "node:fs/promises";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
@@ -14,12 +17,21 @@ import { languageRider, resolveOutputLang, type CaptureLang } from "../summaries
 import { getSummarySource } from "../summaries/sources.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { createQueue } from "../wiki/queue.ts";
+import { summarizeTimeoutFor } from "../video/media.ts";
 import { canonicalVimeoUrl } from "./url.ts";
+import { fetchVimeoManifest as realFetchManifest, type VimeoManifest } from "./media.ts";
+import {
+  extractCadenceFrames as realExtractFrames,
+  framesPromptSection,
+  keepReferencedFrames,
+  type VimeoFrame,
+} from "./frames.ts";
 import {
   chooseTrack,
   downloadVtt as realDownloadVtt,
   harvestVimeoCaptions,
   VIMEO_HARVEST_TIMEOUT_MS,
+  VIMEO_MANIFEST_WAIT_MS,
   type VimeoCaptions,
 } from "./captions.ts";
 import { detectCaptionKind, segmentsToMarkdown, vttToSegments, DEFAULT_WINDOW_SEC } from "./vtt.ts";
@@ -59,11 +71,12 @@ export const VIMEO_COLLECTION = getSummarySource("vimeo")!.collection;
 export { VIMEO_MAX_DURATION_SEC } from "./limits.ts";
 
 /**
- * A conference talk's summarize call gets the 600 s floor `summarizeTimeoutFor`
- * gives a 30-frame TikTok. There is no frame count to scale by here: the whole
- * input is one transcript, and a 3-hour talk's transcript is ~200 KB of text —
- * large for a prompt, but nothing like the multi-turn image reading the TikTok
- * scaling exists for.
+ * A transcript-only summarize call gets the 600 s floor `summarizeTimeoutFor`
+ * gives a 30-frame TikTok: the whole input is one transcript, and a 3-hour
+ * talk's transcript is ~200 KB of text — large for a prompt, but nothing like
+ * multi-turn image reading. With frames ON the call is scaled by the frame
+ * count through that same function (24 s per frame past 30), because every
+ * frame is one more image Read in the same session.
  */
 export const VIMEO_SUMMARIZE_TIMEOUT_MS = 600_000;
 
@@ -156,18 +169,39 @@ export interface VimeoJobMeta {
    * why this is the PICK and not the resolved language.
    */
   readonly lang: CaptureLang;
+  /**
+   * Slides on: pull one 720p frame per cadence tick through the media seam,
+   * hand them to the model via `extraDirs`, and let the summary quote them
+   * inline (v2 PR 4). The route pre-flights the connector's
+   * `supportsExtraDirs` and 503s BEFORE a job exists, so a job that gets here
+   * with `frames: true` runs on a connector that can read files.
+   */
+  readonly frames: boolean;
 }
 
 export type HarvestFn = (
   videoId: string,
-  opts: { hash?: string; timeoutMs?: number },
+  opts: { hash?: string; timeoutMs?: number; awaitManifestMs?: number },
 ) => Promise<VimeoCaptions>;
 
 export type DownloadVttFn = (url: string) => Promise<string>;
 
+export type FetchManifestFn = (manifestUrl: string) => Promise<VimeoManifest>;
+export type ExtractFramesFn = (input: {
+  manifestUrl: string;
+  manifest: VimeoManifest;
+  durationSec: number;
+  workDir: string;
+}) => Promise<VimeoFrame[]>;
+
 export interface VimeoSummarizerDeps {
   harvest: HarvestFn;
   downloadVtt: DownloadVttFn;
+  /** The frames half (PR 4): the manifest fetch and the cadence extraction. */
+  fetchManifest: FetchManifestFn;
+  extractFrames: ExtractFramesFn;
+  /** Where quoted frames are kept (test seam); default `framesRootDir()`. */
+  framesRoot?: string;
 }
 
 /**
@@ -247,8 +281,13 @@ export async function resolveHarvestStubDeps(
       title: "",
       durationSec: 0,
       tracks: [{ lang: "en-x-autogen", label: "English (auto-generated)", vttUrl }],
+      // No manifestUrl: a stubbed capture has no video to pull frames from, so
+      // a `frames: true` job under the stub degrades to transcript-only with
+      // the same warn a live harvest that saw no manifest gets.
     }),
     downloadVtt: async () => await file.text(),
+    fetchManifest: REAL_DEPS.fetchManifest,
+    extractFrames: REAL_DEPS.extractFrames,
   };
 }
 
@@ -304,6 +343,8 @@ async function harvestStub(
 const REAL_DEPS: VimeoSummarizerDeps = {
   harvest: (videoId, opts) => harvestVimeoCaptions(videoId, opts),
   downloadVtt: (url) => realDownloadVtt(url),
+  fetchManifest: (manifestUrl) => realFetchManifest(manifestUrl),
+  extractFrames: (input) => realExtractFrames(input),
 };
 
 /**
@@ -322,6 +363,10 @@ export async function summarizeVimeo(
   deps?: Partial<VimeoSummarizerDeps>,
   onIngested?: VimeoIngestedHook,
 ): Promise<void> {
+  // The frames' work dir — created only when frames are on, removed in the
+  // `finally` whatever happened, AFTER the kept frames have been copied out.
+  const workDir = join(tmpdir(), `muninn-vimeo-${jobId}`);
+  let frames: VimeoFrame[] = [];
   try {
     // 0. Resolve the deps INSIDE the try. `resolveServingProfile` throws on an
     //    unrecognised MUNINN_PROFILE and the stat can throw on a permission
@@ -360,6 +405,9 @@ export async function summarizeVimeo(
       return resolved.harvest(meta.videoId, {
         ...(meta.hash ? { hash: meta.hash } : {}),
         timeoutMs: VIMEO_HARVEST_TIMEOUT_MS,
+        // Only the frames path waits for the manifest: a transcript-only
+        // capture closes the browser the moment it has the captions.
+        awaitManifestMs: meta.frames ? VIMEO_MANIFEST_WAIT_MS : 0,
       });
     });
 
@@ -396,6 +444,43 @@ export async function summarizeVimeo(
         chars: transcript.length,
       },
     );
+
+    // 1b. Frames (PR 4): one 720p frame per cadence tick, through the media
+    //     seam, into the work dir the model reads. A failure here degrades the
+    //     capture to transcript-only with a WARN (the TikTok precedent) — the
+    //     reader asked for a summary and a summary without slides is still one;
+    //     but it is never silent, and the trace attribute says which happened.
+    let framesOutcome: "off" | "on" | "no_manifest" | "failed" = "off";
+    if (meta.frames) {
+      if (!captions.manifestUrl) {
+        framesOutcome = "no_manifest";
+        log.warn("Vimeo capture {jobId}: frames requested but the player requested no manifest — transcript only", {
+          jobId,
+          videoId: meta.videoId,
+        });
+      } else {
+        updateStatus(jobId, "extracting_frames");
+        try {
+          await mkdir(workDir, { recursive: true });
+          const manifest = await resolved.fetchManifest(captions.manifestUrl);
+          frames = await resolved.extractFrames({
+            manifestUrl: captions.manifestUrl,
+            manifest,
+            durationSec: meta.durationSec,
+            workDir,
+          });
+          framesOutcome = "on";
+          log.info("Vimeo capture {jobId}: {n} cadence frames extracted", { jobId, n: frames.length });
+        } catch (err) {
+          framesOutcome = "failed";
+          frames = [];
+          log.warn("Vimeo capture {jobId}: frame extraction failed — transcript only: {error}", {
+            jobId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
 
     // 2. Summarize — in the KIND the reader picked, in the language they
     //    picked or the talk's own. The language is resolved HERE, not in the
@@ -436,29 +521,56 @@ export async function summarizeVimeo(
       jobId,
       title: meta.title,
       url: meta.url,
-      prompt: transcript,
+      // The frame list rides on the USER prompt after the transcript (the
+      // TikTok shape); the system prompt is the kind + riders and says nothing
+      // about frames, so a transcript-only capture's prompt is byte-identical
+      // to before.
+      prompt: transcript + framesPromptSection(meta.videoId, frames),
       systemPrompt,
       config,
       botConfig: runBot,
       attachRun,
       onProgress,
-      timeoutMs: VIMEO_SUMMARIZE_TIMEOUT_MS,
+      // `--add-dir` only when there is something to read: an empty extraDirs
+      // would still flip the connector's file-access mode for nothing.
+      ...(frames.length > 0 ? { extraDirs: [workDir] } : {}),
+      timeoutMs: summarizeTimeoutFor(frames.length, VIMEO_SUMMARIZE_TIMEOUT_MS),
       ...(captureThinkingFor(meta.preset) === null ? { thinkingMaxTokens: null } : {}),
       extraTraceAttrs: {
         captionLang: track.lang,
         captionKind,
         summaryKind: meta.preset.id,
         summaryLang: outputLang,
+        frames: framesOutcome,
+        frameCount: String(frames.length),
       },
     });
 
     const { category, summary } = parseSummaryResponse(result.result);
     setCategory(jobId, category);
 
-    log.info("Summarized {videoId}: category={category}, {tokens} output tokens", {
+    // The frames the summary QUOTES are copied out of the work dir to the
+    // served root before the work dir dies; the rest go with it. Inside its
+    // own try: a copy failure must not fail a capture whose text is already
+    // on the reader's screen — the reader gets broken images and a log line.
+    let keptFrames: number[] = [];
+    if (frames.length > 0) {
+      try {
+        keptFrames = await keepReferencedFrames(summary, meta.videoId, frames, resolved.framesRoot);
+      } catch (err) {
+        log.error("Vimeo capture {jobId}: keeping quoted frames failed: {error}", {
+          jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    log.info("Summarized {videoId}: category={category}, {tokens} output tokens, {frames} frames read, {kept} quoted", {
       videoId: meta.videoId,
       category,
       tokens: result.outputTokens,
+      frames: frames.length,
+      kept: keptFrames.length,
     });
 
     // 3. Ingest (best-effort — the summary already streamed to the client).
@@ -556,5 +668,9 @@ export async function summarizeVimeo(
     const msg = err instanceof Error ? err.message : String(err);
     log.error("Vimeo summarization failed for job {jobId}: {error}", { jobId, error: msg });
     failJob(jobId, msg);
+  } finally {
+    // Segments and unquoted frames. Only ever created by this job, under a
+    // name only this job uses; an rm of a dir that was never made is a no-op.
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 }

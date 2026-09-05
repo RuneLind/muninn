@@ -35,12 +35,12 @@
 
 import { unlink } from "node:fs/promises";
 import { getLog } from "../logging.ts";
-import { downloadPinned, VimeoDownloadError, VIMEO_MEDIA_HOST } from "./download.ts";
+import { downloadPinned, VimeoDownloadError, VIMEO_MEDIA_HOST, VIMEO_MEDIA_HOSTS } from "./download.ts";
 
 const log = getLog("vimeo", "media");
 
-/** The one host a manifest URL and every segment URL may name (owned by `download.ts`). */
-export { VIMEO_MEDIA_HOST };
+/** The hosts a manifest URL and every segment URL may name (owned by `download.ts`). */
+export { VIMEO_MEDIA_HOST, VIMEO_MEDIA_HOSTS };
 
 /**
  * Manifest cap: measured 928 KB for a 53-minute talk (537 segments × 7
@@ -351,7 +351,7 @@ export async function fetchVimeoManifest(
   opts: FetchManifestOptions = {},
 ): Promise<VimeoManifest> {
   const bytes = await downloadPinned(manifestUrl, {
-    host: VIMEO_MEDIA_HOST,
+    host: VIMEO_MEDIA_HOSTS,
     maxBytes: opts.maxBytes ?? VIMEO_MANIFEST_MAX_BYTES,
     timeoutMs: opts.timeoutMs ?? VIMEO_MANIFEST_TIMEOUT_MS,
     what: "Manifest",
@@ -453,7 +453,7 @@ export async function downloadRendition(
       let bytes: Uint8Array;
       try {
         bytes = await downloadPinned(resolveSegmentUrl(manifestUrl, manifest, rep, seg), {
-          host: VIMEO_MEDIA_HOST,
+          host: VIMEO_MEDIA_HOSTS,
           maxBytes: maxSegmentBytes,
           timeoutMs: Math.min(VIMEO_SEGMENT_TIMEOUT_MS, remaining),
           what: "Segment",

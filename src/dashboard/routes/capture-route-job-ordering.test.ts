@@ -31,6 +31,9 @@
 
 import { test, expect, describe, mock, beforeEach, beforeAll, afterAll } from "bun:test";
 import { Hono } from "hono";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Config } from "../../config.ts";
 
 // --- Mocks: everything the handlers reach for that isn't the ordering itself.
@@ -136,6 +139,7 @@ let lastVimeoMeta: {
   videoId: string;
   preset?: { id: string };
   lang?: string;
+  frames?: boolean;
   author?: string;
   thumbnailUrl?: string;
   uploadDate?: string;
@@ -1247,5 +1251,127 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     expect(oldest.duplicate).toBeUndefined();
     expect(oldest.job_id).toBeTruthy();
     expect(vimeoSummarizeCalls).toBe(capturesSoFar + 1);
+  });
+});
+
+describe("Vimeo: the frames flag (v2 PR 4)", () => {
+  const VIMEO_URL = "https://vimeo.com/1223358361";
+
+  test("absent ⇒ off; true rides to the job meta on a connector that can read files", async () => {
+    summarizerBot = cliBot;
+    let res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+    expect(res.status).toBe(200);
+    expect(lastVimeoMeta!.frames).toBe(false);
+
+    res = await post(vmApp(), "/api/vimeo/summarize", { url: "https://vimeo.com/1223358362", frames: true });
+    expect(res.status).toBe(200);
+    expect(lastVimeoMeta!.frames).toBe(true);
+  });
+
+  test("a non-boolean is a 400 bad_frames, before oEmbed", async () => {
+    summarizerBot = cliBot;
+    const before = oembedCalls;
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, frames: "yes" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: "bad_frames" });
+    expect(oembedCalls).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("frames on a connector without extra-dirs support is a 503 frames_unsupported BEFORE oEmbed and before any job", async () => {
+    summarizerBot = copilotBot;
+    const before = oembedCalls;
+    const jobsBefore = vmState.getRecentJobs(1000).length;
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, frames: true });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe("frames_unsupported");
+    expect(body.code).toBe("frames_unsupported");
+    expect(body.detail).toContain("melosys");
+    expect(oembedCalls).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+    expect(vmState.getRecentJobs(1000).length).toBe(jobsBefore); // the module store is shared across cases
+    // frames:false on the same bot is an ordinary capture.
+    const ok = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, frames: false });
+    expect(ok.status).toBe(200);
+  });
+});
+
+describe("Vimeo: GET /api/vimeo/frames/:videoId/:file (v2 PR 4)", () => {
+  function appWithFrames(root: string): Hono {
+    const app = new Hono();
+    registerVimeoRoutes(app, config, { framesRoot: root });
+    return app;
+  }
+
+  test("serves a kept frame as image/jpeg with a day of caching; anything else is a 404", async () => {
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-route-"));
+    mkdirSync(join(root, "1223358361"));
+    writeFileSync(join(root, "1223358361", "1390.jpg"), "JPEGBYTES");
+    const app = appWithFrames(root);
+
+    const ok = await app.request("/api/vimeo/frames/1223358361/1390.jpg");
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toBe("image/jpeg");
+    expect(ok.headers.get("cache-control")).toBe("private, max-age=86400");
+    expect(await ok.text()).toBe("JPEGBYTES");
+
+    for (const path of [
+      "/api/vimeo/frames/1223358361/1391.jpg",       // not kept
+      "/api/vimeo/frames/1223358361/1390.png",       // wrong extension
+      "/api/vimeo/frames/1223358361/x.jpg",          // not digits
+      "/api/vimeo/frames/abc/1390.jpg",              // id not digits
+      "/api/vimeo/frames/1223358361/..%2F1390.jpg",  // traversal shape
+      "/api/vimeo/frames/1223358361/1390.jpg%00",    // charset
+    ]) {
+      const res = await app.request(path);
+      expect(res.status).toBe(404);
+    }
+  });
+
+  test("the charset gate refuses a non-digit id even when that FILE EXISTS under the root", async () => {
+    // Without a planted file, `/abc/1390.jpg` 404s because nothing is there —
+    // a test that cannot tell "refused by charset" from "missing". Plant it.
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-route-"));
+    mkdirSync(join(root, "abc"));
+    writeFileSync(join(root, "abc", "1390.jpg"), "X");
+    mkdirSync(join(root, "1223358361"));
+    writeFileSync(join(root, "1223358361", "frame.jpg"), "X");
+    const app = appWithFrames(root);
+    expect((await app.request("/api/vimeo/frames/abc/1390.jpg")).status).toBe(404);
+    expect((await app.request("/api/vimeo/frames/1223358361/frame.jpg")).status).toBe(404);
+  });
+
+  test("a kept frame is cached PRIVATELY: the route sits in the admin zone under MUNINN_AUTH, and a shared cache must not serve it past a 403", async () => {
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-route-"));
+    mkdirSync(join(root, "1223358361"));
+    writeFileSync(join(root, "1223358361", "1390.jpg"), "X");
+    const res = await appWithFrames(root).request("/api/vimeo/frames/1223358361/1390.jpg");
+    expect(res.headers.get("cache-control")).toBe("private, max-age=86400");
+  });
+
+  test("a SYMLINK under the root pointing outside it is refused — containment is judged on the real path, not the spelling", async () => {
+    // Both charset gates pass (`7/9.jpg`), the lexical prefix passes, and the
+    // file the kernel opens lives outside the root. The one live escape.
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-route-"));
+    const outside = mkdtempSync(join(tmpdir(), "vimeo-frames-outside-"));
+    writeFileSync(join(outside, "9.jpg"), "OUTSIDE");
+    writeFileSync(join(outside, "secret.txt"), "SECRET");
+    symlinkSync(outside, join(root, "7")); // a directory symlink
+    mkdirSync(join(root, "1"));
+    symlinkSync(join(outside, "secret.txt"), join(root, "1", "2.jpg")); // a file symlink
+    writeFileSync(join(root, "1", "1.jpg"), "INSIDE");
+    const app = appWithFrames(root);
+    expect((await app.request("/api/vimeo/frames/7/9.jpg")).status).toBe(404);
+    expect((await app.request("/api/vimeo/frames/1/2.jpg")).status).toBe(404);
+    expect((await app.request("/api/vimeo/frames/1/1.jpg")).status).toBe(200);
+  });
+
+  test("is read-only: no POST, PUT or DELETE is registered on the path", async () => {
+    const app = appWithFrames(mkdtempSync(join(tmpdir(), "vimeo-frames-route-")));
+    for (const method of ["POST", "PUT", "DELETE"]) {
+      const res = await app.request("/api/vimeo/frames/1223358361/1390.jpg", { method });
+      expect(res.status).toBe(404);
+    }
   });
 });

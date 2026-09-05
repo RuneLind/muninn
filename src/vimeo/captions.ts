@@ -25,7 +25,7 @@
  */
 import { captionBaseLang } from "../summaries/language.ts";
 import { getLog } from "../logging.ts";
-import { downloadPinned, VimeoDownloadError, VIMEO_CAPTIONS_HOST, VIMEO_MEDIA_HOST } from "./download.ts";
+import { downloadPinned, isAllowedHost, VimeoDownloadError, VIMEO_CAPTIONS_HOST, VIMEO_MEDIA_HOSTS } from "./download.ts";
 import { vimeoWatchUrl } from "./url.ts";
 
 const log = getLog("vimeo", "captions");
@@ -57,7 +57,7 @@ export interface VimeoCaptions {
   readonly durationSec: number;
   readonly tracks: VimeoCaptionTrack[];
   /**
-   * The signed JSON manifest on {@link VIMEO_MEDIA_HOST}, if the player asked
+   * The signed JSON manifest on one of {@link VIMEO_MEDIA_HOSTS}, if the player asked
    * for one while we watched — the media seam's (`media.ts`) input: frames and
    * the audio fallback both start from it. Absent when the player never
    * requested it inside the budget, which the harvest does not wait for: the
@@ -135,7 +135,23 @@ export interface HarvestOptions {
   headless?: boolean;
   /** Override the derived user agent entirely. Diagnostics; see below. */
   userAgent?: string;
+  /**
+   * How long to keep the page open waiting for the player's MANIFEST request
+   * once the captions are in hand (default 0: captions are what a capture
+   * NEEDS, and the browser closes the moment it has them). The frames path
+   * passes {@link VIMEO_MANIFEST_WAIT_MS}: measured on the first live frames
+   * capture, the caption URL arrives before the player has asked for its
+   * playlist, so a harvest that closes on the captions reports no manifest and
+   * a reader who ticked Slides gets none. Bounded by the harvest budget too.
+   */
+  awaitManifestMs?: number;
 }
+
+/**
+ * The frames path's manifest wait. The player requests its playlist within a
+ * second or two of `play()`; 10 s is slack over that, inside the 60 s budget.
+ */
+export const VIMEO_MANIFEST_WAIT_MS = 10_000;
 
 /**
  * Take the `Headless` token out of the browser's OWN user agent.
@@ -303,7 +319,7 @@ export async function harvestVimeoCaptions(
     for (let attempt = 1; attempt <= 2; attempt++) {
       const context = await browser.newContext({ locale: "en-US", userAgent });
       try {
-        return await harvestInContext(context, videoId, watchUrl, deadline);
+        return await harvestInContext(context, videoId, watchUrl, deadline, Math.max(0, opts.awaitManifestMs ?? 0));
       } catch (err) {
         if (err instanceof VimeoBotBlockedError && attempt === 1) {
           log.warn("Vimeo bot page for {videoId}; retrying once with a fresh context", { videoId });
@@ -323,11 +339,21 @@ export async function harvestVimeoCaptions(
   }
 }
 
+function isMediaHostUrl(u: string): boolean {
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === "https:" && isAllowedHost(parsed.hostname, VIMEO_MEDIA_HOSTS);
+  } catch {
+    return false;
+  }
+}
+
 async function harvestInContext(
   context: PwContext,
   videoId: string,
   watchUrl: string,
   deadline: number,
+  awaitManifestMs: number,
 ): Promise<VimeoCaptions> {
   const page = await context.newPage();
   const vttUrls: string[] = [];
@@ -337,7 +363,13 @@ async function harvestInContext(
     if (u.includes("captions.vimeo.com/captions/") && u.includes(".vtt") && !vttUrls.includes(u)) {
       vttUrls.push(u);
     }
-    if (!manifestUrl && u.includes(VIMEO_MEDIA_HOST) && u.includes("/playlist/av/")) {
+    // The JSON manifest: a `/playlist/av/` request on one of the ALLOWLISTED
+    // CDN hosts (`VIMEO_MEDIA_HOSTS` — the player picks one per video; the
+    // first live frames capture never saw its manifest because this line
+    // matched one host's name as a substring). Judged on the parsed hostname,
+    // the same predicate the download pin applies, so what is recorded here
+    // is exactly what `media.ts` will agree to fetch.
+    if (!manifestUrl && u.includes("/playlist/av/") && isMediaHostUrl(u)) {
       manifestUrl = u;
     }
   });
@@ -487,6 +519,26 @@ async function harvestInContext(
   const unclaimed = vttUrls.filter((u) => !paired.includes(u));
   for (let i = 0; i < paired.length; i++) {
     if (!paired[i]) paired[i] = unclaimed.shift();
+  }
+
+  // The frames path needs the manifest URL too, and the player asks for its
+  // playlist AFTER the caption tracks are served — measured: the first live
+  // frames capture harvested captions in ~4 s and closed with no manifest seen.
+  // So, when asked, keep the page (still playing) open until the request
+  // arrives, for at most `awaitManifestMs` and never past the budget. Polled
+  // rather than a Playwright wait: the URL lands in `page.on("request")`.
+  const manifestWait = awaitManifestMs;
+  if (!manifestUrl && manifestWait > 0) {
+    const waitUntil = Math.min(deadline, Date.now() + manifestWait);
+    while (!manifestUrl && Date.now() < waitUntil) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!manifestUrl) {
+      log.warn("Vimeo video {videoId}: the player requested no manifest within {ms}ms — frames will be skipped", {
+        videoId,
+        ms: manifestWait,
+      });
+    }
   }
 
   // Duration is re-read here, at the LAST possible moment, and on the two talks
