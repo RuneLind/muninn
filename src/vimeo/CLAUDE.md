@@ -204,20 +204,28 @@ the manifest DECLARES are third-party input too.** `VIMEO_MANIFEST_MAX_BYTES`
 ~176 MB, the whole Opus ~137 MB), and the whole-operation budget
 `renditionTimeoutFor(n)` = 30 s + 1.5 s × segments, from which each segment fetch
 gets `min(30 s, what is left)` (pinned: a never-settling fetch under a 50 ms
-whole budget rejects in ~50 ms, not 30 s). The rendition cap is checked TWICE:
-on the declared total before the first fetch, so an oversized request costs
-nothing, and on the bytes WRITTEN as they arrive — the first review found the
-declared check alone let 5 declared-50-byte segments write 1 MB, and a negative
-declared `size` cancel a positive one (parse now refuses negative `size`,
-`start`, `end`). A segment that arrives SHORTER than it declared is refused
-outright: the declared size is exact (measured to the byte, 485 621 declared /
-485 621 + 804 init written), a short body is a truncated segment, and a truncated
-fMP4 is a file ffmpeg reads up to the cut and reports success on — the one
-failure the engine's own cap cannot see, since a cap bounds "too much". When a
-segment is handed the last sliver of the budget and times out, the error names
-the WHOLE operation ("Rendition download timed out after Nms (k/n segments)")
-rather than the sliver ("Segment download timed out after 2ms" — true and
-useless). On any failure the partial file is unlinked.
+whole budget rejects in ~50 ms measured, under 250 ms asserted, not 30 s). The
+rendition cap is checked TWICE on the SAME quantity — the bytes the call will
+write, init segment included: on the declared total before the first fetch, so
+an oversized request costs nothing, and on the bytes WRITTEN as they arrive —
+the first review found the declared check alone let ten declared-10-byte
+segments' worth of 200 000-byte bodies through, and a negative declared `size`
+cancel a positive one (parse now refuses negative `size`, `start`, `end`); the
+verify pass found the two checks measuring different things (init in one, not
+the other), so a cap exactly at the declared total passed the pre-flight and
+failed after every fetch. **The declared size is NOT exact.** Every live
+segment arrives at declared + 1 byte — measured on 20 segments across all four
+renditions, +1 every time: the segment URL's `range=a-b` is an INCLUSIVE byte
+range and `size` is `b − a`; the 720p init segment is 803 bytes, so the
+smoke's "declared 485 621, wrote 486 425" is 803 + 485 622. A segment that
+arrives SHORTER than it declared is refused outright (a truncated fMP4 is a
+file ffmpeg reads up to the cut and reports success on — the one failure the
+engine's own cap cannot see, since a cap bounds "too much"); the check is `<`
+and must stay `<`, because `!==` fails 100% of live captures on the first
+segment. When a segment is handed the last sliver of the budget and times out,
+the error names the WHOLE operation ("Rendition download timed out after Nms
+(k/n segments)") rather than the sliver ("Segment download timed out after
+2ms" — true and useless). On any failure the partial file is unlinked.
 
 **Indices need not be contiguous.** A sparse set (one segment per cadence tick,
 the PR 4 shape) is a valid fMP4 with gaps whose frames still carry absolute

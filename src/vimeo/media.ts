@@ -393,10 +393,11 @@ export interface RenditionFile {
  * is a valid fMP4 with gaps, whose frames still carry absolute timestamps; a
  * contiguous run is a playable rendition. Every segment is fetched under the
  * pinned-host rules with `min(VIMEO_SEGMENT_TIMEOUT_MS, what is left of the
- * budget)`; `maxTotalBytes` is checked on the DECLARED total before the first
- * fetch (an oversized request is refused at zero cost) AND on the bytes
- * written as they arrive (a manifest that under-declares cannot walk past
- * it); a segment shorter than it declared is refused. Fetches are sequential
+ * budget)`; `maxTotalBytes` is checked on the DECLARED total (init included)
+ * before the first fetch (an oversized request is refused at zero cost) AND on
+ * the bytes written as they arrive (a manifest that under-declares cannot walk
+ * past it); a segment shorter than it declared is refused, while the one extra
+ * byte the live CDN delivers per segment is accepted. Fetches are sequential
  * — one socket to the CDN, bytes appended in order, no reassembly. On any
  * failure the partial file is removed and the error rethrown: a truncated
  * fMP4 is a file ffmpeg reads to the cut and reports success on.
@@ -417,14 +418,19 @@ export async function downloadRendition(
     }
   }
   const maxTotal = opts.maxTotalBytes ?? VIMEO_RENDITION_MAX_BYTES;
-  const declared = ordered.reduce((sum, i) => sum + rep.segments[i]!.size, 0);
+  const init = initSegmentBytes(rep);
+  // The pre-flight and the written check below measure the SAME quantity —
+  // the bytes this call will put in the file, init segment included — so a cap
+  // that passes the pre-flight is not then failed by the init bytes after every
+  // segment has been fetched. (The declared sum still under-states by one byte
+  // per segment on the live CDN; see the short-segment check.)
+  const declared = init.byteLength + ordered.reduce((sum, i) => sum + rep.segments[i]!.size, 0);
   if (declared > maxTotal) {
     throw new VimeoMediaError(
-      `Refusing to download ${declared} declared bytes of ${rep.id} (cap ${maxTotal})`,
+      `Refusing to download ${declared} declared bytes (init included) of ${rep.id} (cap ${maxTotal})`,
     );
   }
 
-  const init = initSegmentBytes(rep);
   const timeoutMs = opts.timeoutMs ?? renditionTimeoutFor(ordered.length);
   const deadline = Date.now() + timeoutMs;
   const maxSegmentBytes = opts.maxSegmentBytes ?? VIMEO_SEGMENT_MAX_BYTES;
@@ -465,12 +471,15 @@ export async function downloadRendition(
         }
         throw err;
       }
-      // The manifest's declared size is exact (measured to the byte on the
-      // live talk), so a SHORTER body is a truncated segment — the one thing
-      // the engine's cap cannot see, since the cap bounds "too much", not "too
-      // little" — and a truncated fMP4 is a file ffmpeg reads to the cut and
-      // reports success on. A LONGER body is bounded by the per-segment cap
-      // and by the written total below.
+      // The manifest's declared size is NOT exact: every live segment arrives
+      // at declared + 1 byte (measured 2026-09-05 on 20 segments across four
+      // renditions, +1 every time — the segment URL's `range=a-b` is an
+      // INCLUSIVE byte range and `size` is `b - a`). So this is `<`, never
+      // `!==`: a body SHORTER than declared is a truncated segment — the one
+      // thing the engine's cap cannot see, since a cap bounds "too much" — and
+      // a truncated fMP4 is a file ffmpeg reads to the cut and reports success
+      // on; a LONGER body is bounded by the per-segment cap and the written
+      // total below. Tightening this to equality fails 100% of live captures.
       if (bytes.byteLength < seg.size) {
         throw new VimeoMediaError(
           `Refusing ${rep.id} segment ${i}: arrived with ${bytes.byteLength} bytes, declared ${seg.size}`,

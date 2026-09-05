@@ -319,15 +319,12 @@ describe("downloadRendition", () => {
     ).rejects.toThrow(/Refusing to download \d+ declared bytes/);
     expect(urls).toEqual([]);
     expect(VIMEO_RENDITION_MAX_BYTES).toBeGreaterThan(declared);
-    // Exactly at the cap is allowed — on the WRITTEN total too: init + 2 × 4 bytes.
+    // Exactly at the cap is allowed — init + 2 × 4 declared bytes, the same
+    // quantity both checks measure (the boundary itself is pinned in round 2).
     const rep = rep4(m);
     const exact = initSegmentBytes(rep).byteLength + 8;
     await downloadRendition(MANIFEST_URL, m, rep, [0, 1], out, { fetchImpl: impl, maxTotalBytes: exact });
     expect(urls.length).toBe(2);
-    await expect(
-      downloadRendition(MANIFEST_URL, m, rep, [0, 1], out, { fetchImpl: impl, maxTotalBytes: exact - 1 }),
-    ).rejects.toThrow(/wrote \d+ bytes, over the \d+-byte cap/);
-    expect(existsSync(out)).toBe(false);
   });
 
   test("a failing segment removes the partial file and rethrows the engine's error", async () => {
@@ -467,5 +464,62 @@ describe("fix round 1 — what the review found", () => {
     const imports = new Bun.Transpiler({ loader: "ts" }).scanImports(src).map((i) => i.path);
     expect(imports).not.toContain("./media.ts");
     expect(imports).toContain("./download.ts");
+  });
+});
+
+describe("fix round 2 — what the verify pass found", () => {
+  const dir = () => mkdtempSync(join(tmpdir(), "vimeo-media-"));
+  function rep4(m: VimeoManifest) {
+    const r = rep720(m);
+    return { ...r, segments: r.segments.map((seg) => ({ ...seg, size: 4 })) };
+  }
+  function body(n: number) {
+    return bytesFetch(() => new Uint8Array(new ArrayBuffer(n)));
+  }
+
+  test("the declared pre-flight and the written check measure the SAME quantity — init included — and the boundary is exact", async () => {
+    const m = fixture();
+    const rep = rep4(m);
+    const total = initSegmentBytes(rep).byteLength + 8; // init + 2 × 4 declared bytes
+    const out = join(dir(), "boundary.mp4");
+    // One under: refused BEFORE any fetch, by the declared pre-flight.
+    const under = body(4);
+    await expect(
+      downloadRendition(MANIFEST_URL, m, rep, [0, 1], out, { fetchImpl: under.impl, maxTotalBytes: total - 1 }),
+    ).rejects.toThrow(/Refusing to download \d+ declared bytes \(init included\)/);
+    expect(under.urls).toEqual([]);
+    expect(existsSync(out)).toBe(false);
+    // Exactly at the cap: allowed by both checks.
+    const at = body(4);
+    const r = await downloadRendition(MANIFEST_URL, m, rep, [0, 1], out, { fetchImpl: at.impl, maxTotalBytes: total });
+    expect(r.bytes).toBe(total);
+    expect(at.urls.length).toBe(2);
+  });
+
+  test("a body of declared+1 — what the live CDN delivers, an INCLUSIVE byte range — is accepted", async () => {
+    const m = fixture();
+    const rep = rep4(m);
+    const { impl } = body(5);
+    const out = join(dir(), "plusone.mp4");
+    const r = await downloadRendition(MANIFEST_URL, m, rep, [0, 1, 2], out, { fetchImpl: impl });
+    expect(r.bytes).toBe(initSegmentBytes(rep).byteLength + 15);
+  });
+
+  test("the per-segment clamp rejects within a bounded wall-clock, not 'eventually'", async () => {
+    const m = fixture();
+    const impl = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+    const out = join(dir(), "hang2.mp4");
+    const started = Date.now();
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      downloadRendition(MANIFEST_URL, m, rep720(m), [0], out, { fetchImpl: impl, timeoutMs: 50 }).catch((e) => e),
+      new Promise((r) => { settle = setTimeout(() => r("still pending"), 1_000); }),
+    ]);
+    clearTimeout(settle);
+    expect(outcome).toBeInstanceOf(VimeoMediaDownloadError);
+    // 50 ms budget, measured ~54 ms; 250 ms is generous jitter slack and still
+    // a fifth of what a regression to the 30 s per-segment budget would take
+    // to notice — the earlier 400 ms race pinned only "under 400 ms".
+    expect(Date.now() - started).toBeLessThan(250);
   });
 });
