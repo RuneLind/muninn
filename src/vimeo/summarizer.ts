@@ -36,6 +36,14 @@ import {
 } from "./captions.ts";
 import { detectCaptionKind, segmentsToMarkdown, vttToSegments, DEFAULT_WINDOW_SEC } from "./vtt.ts";
 import {
+  transcribeOpusRendition,
+  whisperUnavailableReason,
+  VimeoTranscriptionError,
+  WHISPER_CAPTION_KIND,
+  looksSpeechless,
+  type WhisperTranscript,
+} from "./whisper.ts";
+import {
   attachRun,
   updateStatus,
   appendText,
@@ -82,6 +90,15 @@ export const VIMEO_SUMMARIZE_TIMEOUT_MS = 600_000;
 
 /** Error code stored on a job whose video has captions we could not choose from. */
 export const NO_CAPTIONS_ERROR = "no_captions";
+/**
+ * The Whisper fallback's three codes (v2 PR 5), each a sentence on the card:
+ * no caption track AND this machine cannot transcribe (binary or model
+ * missing — the operator's to fix); the pipeline failed on this video; the
+ * audio came back with no speech in it.
+ */
+export const WHISPER_UNAVAILABLE_ERROR = "whisper_unavailable";
+export const TRANSCRIPTION_FAILED_ERROR = "transcription_failed";
+export const NO_SPEECH_ERROR = "no_speech";
 
 const SUMMARIZE_INTRO =
   "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
@@ -181,7 +198,7 @@ export interface VimeoJobMeta {
 
 export type HarvestFn = (
   videoId: string,
-  opts: { hash?: string; timeoutMs?: number; awaitManifestMs?: number },
+  opts: { hash?: string; timeoutMs?: number; awaitManifestMs?: number; awaitManifestNoCaptionsMs?: number },
 ) => Promise<VimeoCaptions>;
 
 export type DownloadVttFn = (url: string) => Promise<string>;
@@ -194,12 +211,26 @@ export type ExtractFramesFn = (input: {
   workDir: string;
 }) => Promise<VimeoFrame[]>;
 
+/**
+ * The Whisper half (PR 5). `unavailableReason` is the pre-flight (null ⇒ go);
+ * `transcribeAudio` is the whole download → decode → whisper pipeline.
+ */
+export type WhisperUnavailableFn = (config: Config) => string | null;
+export type TranscribeAudioFn = (
+  input: { manifestUrl: string; manifest: VimeoManifest; durationSec: number; workDir: string },
+  hooks: { onTranscribing: () => void },
+  config: Config,
+) => Promise<WhisperTranscript>;
+
 export interface VimeoSummarizerDeps {
   harvest: HarvestFn;
   downloadVtt: DownloadVttFn;
   /** The frames half (PR 4): the manifest fetch and the cadence extraction. */
   fetchManifest: FetchManifestFn;
   extractFrames: ExtractFramesFn;
+  /** The Whisper half (PR 5): the no-captions fallback. */
+  whisperUnavailable: WhisperUnavailableFn;
+  transcribeAudio: TranscribeAudioFn;
   /** Where quoted frames are kept (test seam); default `framesRootDir()`. */
   framesRoot?: string;
 }
@@ -288,6 +319,10 @@ export async function resolveHarvestStubDeps(
     downloadVtt: async () => await file.text(),
     fetchManifest: REAL_DEPS.fetchManifest,
     extractFrames: REAL_DEPS.extractFrames,
+    // Unreachable under the stub (its harvest always lists one track), kept
+    // real so the deps object is the full shape.
+    whisperUnavailable: REAL_DEPS.whisperUnavailable,
+    transcribeAudio: REAL_DEPS.transcribeAudio,
   };
 }
 
@@ -344,6 +379,9 @@ const REAL_DEPS: VimeoSummarizerDeps = {
   harvest: (videoId, opts) => harvestVimeoCaptions(videoId, opts),
   downloadVtt: (url) => realDownloadVtt(url),
   fetchManifest: (manifestUrl) => realFetchManifest(manifestUrl),
+  whisperUnavailable: (config) => whisperUnavailableReason(config.vimeoWhisperModelPath),
+  transcribeAudio: (input, hooks, config) =>
+    transcribeOpusRendition(input, { modelPath: config.vimeoWhisperModelPath, onTranscribing: hooks.onTranscribing }),
   extractFrames: (input) => realExtractFrames(input),
 };
 
@@ -400,6 +438,14 @@ export async function summarizeVimeo(
     //    closure: announced before the queue, a job waiting its turn reported a
     //    Chromium that was not running — for as long as every harvest ahead of
     //    it took.
+    // The whisper pre-flight runs BEFORE the harvest so its answer is in hand
+    // when the track question is; the harvest still waits for the manifest on
+    // a track-less video either way (10 s, on such videos only), because the
+    // card must say which of two facts holds — "nothing to transcribe from"
+    // (no manifest) or "this machine cannot transcribe" — and without the
+    // wait the first would shadow the second on every whisper-less machine.
+    const whisperUnavailable = resolved.whisperUnavailable(config);
+
     const captions = await harvestQueue.run(HARVEST_QUEUE_KEY, () => {
       updateStatus(jobId, "harvesting_captions");
       return resolved.harvest(meta.videoId, {
@@ -408,38 +454,114 @@ export async function summarizeVimeo(
         // Only the frames path waits for the manifest: a transcript-only
         // capture closes the browser the moment it has the captions.
         awaitManifestMs: meta.frames ? VIMEO_MANIFEST_WAIT_MS : 0,
+        // ALWAYS: a video with no caption track is transcribed from its
+        // manifest (PR 5), and nothing knows before the harvest whether the
+        // track exists. Costs nothing on a captioned video — the harvest only
+        // waits on this when the player lists no track.
+        awaitManifestNoCaptionsMs: VIMEO_MANIFEST_WAIT_MS,
       });
     });
 
+    // The manifest is fetched at most ONCE per job, whichever of the two
+    // consumers (Whisper, frames) asks first.
+    let manifest: VimeoManifest | undefined;
+    const getManifest = async (manifestUrl: string) => (manifest ??= await resolved.fetchManifest(manifestUrl));
+
+    // 1a. The transcript: the chosen caption track, or — with NO usable track
+    //     and a manifest in hand — the talk's own audio through Whisper (PR 5).
+    //     `track` is null on the Whisper path; everything downstream reads the
+    //     three fields below instead of the track.
     const track = chooseTrack(captions.tracks);
-    if (!track) {
-      // A legitimate answer about the video, not a failure of the mechanism.
-      // The manifest url is kept on the log line: it is what PR 4's audio
-      // fallback would need, and it expires, so it is worth naming while it is
-      // still live.
-      log.info("Vimeo video {videoId} has no usable caption track (manifest: {manifestUrl})", {
+    let transcriptVtt: string;
+    /** The tag the language is resolved from: the track's, or whisper's detection. */
+    let captionLang: string;
+    /** What the DOCUMENT records: `manual` / `auto` / `whisper` (`stub` overrides below). */
+    let captionKindOnDocument: string;
+    if (track) {
+      transcriptVtt = await resolved.downloadVtt(track.vttUrl);
+      captionLang = track.lang;
+      captionKindOnDocument = detectCaptionKind(track.lang);
+    } else if (!captions.manifestUrl) {
+      // A legitimate answer about the video, not a failure of the mechanism:
+      // no caption track, and the player asked for no playlist inside the
+      // wait, so there is no audio to fall back to either — on ANY machine.
+      log.info("Vimeo video {videoId} has no usable caption track and no manifest — nothing to transcribe", {
         videoId: meta.videoId,
-        manifestUrl: captions.manifestUrl ?? "none",
       });
       failJob(jobId, NO_CAPTIONS_ERROR);
       return;
+    } else if (whisperUnavailable !== null) {
+      // There is a manifest to try and this machine cannot transcribe: the
+      // pre-flight's answer, before the manifest fetch and the download (40 MB
+      // of audio for a machine that cannot transcribe it is the wrong order).
+      // Whether that manifest carries an AUDIO rendition is only known after
+      // the fetch this branch skips — a video-only manifest answers here where
+      // a whisper-capable machine would answer transcription_failed.
+      log.warn("Vimeo video {videoId} has no caption track and this machine cannot transcribe it: {reason}", {
+        videoId: meta.videoId,
+        reason: whisperUnavailable,
+      });
+      failJob(jobId, WHISPER_UNAVAILABLE_ERROR);
+      return;
+    } else {
+      updateStatus(jobId, "downloading");
+      let whisper: WhisperTranscript;
+      try {
+        await mkdir(workDir, { recursive: true });
+        const m = await getManifest(captions.manifestUrl);
+        whisper = await resolved.transcribeAudio(
+          { manifestUrl: captions.manifestUrl, manifest: m, durationSec: meta.durationSec, workDir },
+          { onTranscribing: () => updateStatus(jobId, "transcribing") },
+          config,
+        );
+      } catch (err) {
+        // A stable code on the job, the detail in the log: the card turns the
+        // code into a sentence, and a raw ffmpeg tail is not one.
+        log.error("Vimeo video {videoId}: transcription failed — {error}", {
+          videoId: meta.videoId,
+          error: err instanceof Error ? err.message : String(err),
+          step: err instanceof VimeoTranscriptionError ? "pipeline" : "unexpected",
+        });
+        failJob(jobId, TRANSCRIPTION_FAILED_ERROR);
+        return;
+      }
+      transcriptVtt = whisper.vtt;
+      captionLang = whisper.lang;
+      captionKindOnDocument = WHISPER_CAPTION_KIND;
+      log.info("Vimeo video {videoId}: transcribed from audio ({bytes} bytes of Opus), language {lang}", {
+        videoId: meta.videoId,
+        bytes: whisper.audioBytes,
+        lang: whisper.lang,
+      });
     }
 
-    const vtt = await resolved.downloadVtt(track.vttUrl);
-    const segments = vttToSegments(vtt, DEFAULT_WINDOW_SEC);
-    if (segments.length === 0) {
+    const segments = vttToSegments(transcriptVtt, DEFAULT_WINDOW_SEC);
+    if (track && segments.length === 0) {
       failJob(jobId, NO_CAPTIONS_ERROR);
       return;
     }
+    if (!track && looksSpeechless(segments, meta.durationSec)) {
+      // A whisper run that heard nothing is its own answer — and "nothing" is
+      // a FLOOR, not zero cues: whisper hallucinates a word on silence.
+      log.info("Vimeo video {videoId}: the audio transcribed to {n} window(s) below the speech floor — no speech", {
+        videoId: meta.videoId,
+        n: segments.length,
+      });
+      failJob(jobId, NO_SPEECH_ERROR);
+      return;
+    }
     const transcript = segmentsToMarkdown(segments);
-    const captionKind = detectCaptionKind(track.lang);
+    // The prompt's proper-noun rider is about the TEXT: a whisper transcript
+    // garbles names exactly the way an auto-caption does (measured: "Jepro"
+    // for a company name on the first live run), so it gets the same rider.
+    const captionKind: "manual" | "auto" = captionKindOnDocument === "manual" ? "manual" : "auto";
 
     log.info(
       "Harvested {videoId}: {lang} ({kind}), {cues} windows, {chars} chars",
       {
         videoId: meta.videoId,
-        lang: track.lang,
-        kind: captionKind,
+        lang: captionLang,
+        kind: captionKindOnDocument,
         cues: segments.length,
         chars: transcript.length,
       },
@@ -462,10 +584,10 @@ export async function summarizeVimeo(
         updateStatus(jobId, "extracting_frames");
         try {
           await mkdir(workDir, { recursive: true });
-          const manifest = await resolved.fetchManifest(captions.manifestUrl);
+          const m = await getManifest(captions.manifestUrl);
           frames = await resolved.extractFrames({
             manifestUrl: captions.manifestUrl,
-            manifest,
+            manifest: m,
             durationSec: meta.durationSec,
             workDir,
           });
@@ -487,7 +609,7 @@ export async function summarizeVimeo(
     //    route: `talk` needs the chosen track's tag, which exists only now.
     updateStatus(jobId, "summarizing");
 
-    const outputLang = resolveOutputLang(meta.lang, track.lang);
+    const outputLang = resolveOutputLang(meta.lang, captionLang);
     const systemPrompt = buildVimeoSystemPrompt({
       preset: meta.preset,
       title: meta.title,
@@ -537,8 +659,8 @@ export async function summarizeVimeo(
       timeoutMs: summarizeTimeoutFor(frames.length, VIMEO_SUMMARIZE_TIMEOUT_MS),
       ...(captureThinkingFor(meta.preset) === null ? { thinkingMaxTokens: null } : {}),
       extraTraceAttrs: {
-        captionLang: track.lang,
-        captionKind,
+        captionLang,
+        captionKind: captionKindOnDocument,
         summaryKind: meta.preset.id,
         summaryLang: outputLang,
         frames: framesOutcome,
@@ -593,12 +715,12 @@ export async function summarizeVimeo(
         // first two CEST hours lands under "Yesterday"; shared, not fixed here.
         date: new Date().toISOString().split("T")[0],
         transcript_markdown: transcript,
-        caption_lang: track.lang,
+        caption_lang: captionLang,
         // A stubbed capture is marked ON THE DOCUMENT. The prompt still gets the
         // kind the track claims (the rider is about the text), but a document
         // written off a local .vtt must never be indistinguishable in the corpus
         // from one harvested off vimeo.com.
-        caption_kind: stubbed ? "stub" : captionKind,
+        caption_kind: stubbed ? "stub" : captionKindOnDocument,
         duration_sec: meta.durationSec,
         // The summary's OWN provenance, beside the caption's: the kind that
         // wrote it and the language it was written in — the RESOLVED one, so a

@@ -195,6 +195,9 @@ describe("extractCadenceFrames", () => {
     expect(fetched.length).toBeLessThanOrEqual(12);
     expect(fetched.length).toBe(new Set(grabs.map((g) => g.segmentFile)).size);
     expect(fetched.every((u) => u.includes("rep-video-720p"))).toBe(true);
+    // fix round 2 of #524: the fetched segments do not outlive the pass — the
+    // work dir is what the model is handed as --add-dir, and holds only JPEGs.
+    expect(readdirSync(work).filter((f) => f.startsWith("segment-"))).toEqual([]);
     // Every offset is t − segment.start (RELATIVE: input `-ss` on the fMP4 is
     // measured from its start_time), inside its segment — checked for every
     // tick, so a tick in segment 6 at t=40 s seeks ~3.5 s, not 40 s.

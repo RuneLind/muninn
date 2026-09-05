@@ -2,7 +2,8 @@
 
 Given a Vimeo URL, produce a summarized, indexed, citable conference talk. PR 1
 was the transcript core; PR 2 added the job, the route and the ingest; PR 3 added
-the UI entry — the URL field on `/summaries`.
+the UI entry — the URL field on `/summaries`. v2 added the kind/language picker,
+the metadata, the media seam, inline slides and the Whisper fallback.
 
 | File | Role |
 |---|---|
@@ -14,7 +15,8 @@ the UI entry — the URL field on `/summaries`.
 | `media.ts` | The media seam (v2 PR 3): `fetchVimeoManifest` (host-pinned to the `VIMEO_MEDIA_HOSTS` allowlist — `vod-adaptive-ak.vimeocdn.com`, `skyfire.vimeocdn.com`), `parseVimeoManifest` / `chooseRepresentation` / `segmentIndexAt` / `resolveSegmentUrl` (pure), `downloadRendition` (init + segments → ONE fMP4 ffmpeg reads) |
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
 | `frames.ts` | Slides (v2 PR 4): `cadenceTimes` / `framesPromptSection` / `referencedFrameSeconds` (pure), `extractCadenceFrames` (one 720p segment per tick through `media.ts`, one ffmpeg grab each), `keepReferencedFrames` (the quoted ones → `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg`), the route's two path charsets |
-| `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · extracting_frames · summarizing · ingesting · complete · error` |
+| `whisper.ts` | The no-captions fallback (v2 PR 5): `transcribeOpusRendition` (the whole Opus rendition through `media.ts` → ffmpeg → `whisper-cli -l auto -ovtt` → a WebVTT `vttToSegments` windows like a caption track), `whisperUnavailableReason` (the pre-flight — binaries + model — BEFORE any download), `parseDetectedLanguage` / `isEnglishOnlyModel` / the two clocks (pure) |
+| `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · downloading · transcribing · extracting_frames · summarizing · ingesting · complete · error` (`downloading`/`transcribing` only on the Whisper path) |
 | `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
 | `metadata.ts` | `speakerFromTitle` — the last ` - ` segment of a CONFERENCE account's title (`VIMEO_CONFERENCE_ACCOUNTS`, JavaZone today), undefined for everyone else — pure |
 | `../summaries/presets.ts` | The capture KINDS (`standard` · `deep` · `talk-notes`), per-bot `prompts/captureSummary.<id>.md` overrides, and the two run levers a kind can pull (`captureThinkingFor`, `captureBotConfigFor`) — pure |
@@ -367,6 +369,126 @@ markdown, so a model that ignores the "nothing else in the alt text" rule and
 writes `![[23:10]](…)` gets its image broken into a link. The prompt states the
 exact alt text; on the two acceptance captures, none did.
 
+## The Whisper fallback (v2 PR 5)
+
+**A talk with no caption track is transcribed from its own audio, and the
+transcript then takes the caption track's path unchanged.** `summarizer.ts`'s
+no-track branch forks on the manifest: no `manifestUrl` ⇒ `no_captions` as
+before (nothing to transcribe from); a manifest ⇒ `whisper.ts`
+`transcribeOpusRendition` — `chooseRepresentation({kind: "audio", codec:
+"opus"})` (101 kbps against AAC's 194 for the same speech), EVERY segment of it
+through PR 3's `downloadRendition` as one contiguous fMP4, `ffmpeg` to 16 kHz
+mono WAV, then `whisper-cli --model <path> -l auto -ovtt -of <base>`, whose
+`<base>.vtt` is read back and handed to `vttToSegments` exactly as a downloaded
+caption VTT is. So the `### [HH:MM:SS]` windows, the prompt, `transcript_markdown`
+and the retrieval chunks are byte-for-byte the caption shape. Whisper's stdout is
+not parsed: the file carries whisper's own cue timing, and the one thing read off
+stderr is `auto-detected language: no (p = …)`, printed nowhere else.
+
+**Measured 2026-09-05 on the mini (M4, `ggml-small.bin`):** two minutes of a
+Norwegian lightning talk — 20 Opus segments, 1.5 MB — downloaded in 0.6 s,
+decoded in 0.2 s, transcribed in 7 s (17× real time), language `no` at p = 0.88,
+proper nouns garbled the way auto-captions garble them ("Jepro" for a company
+name) — which is why the prompt's auto-caption rider applies to a whisper
+transcript too. The clocks are TikTok's, verbatim: `whisperTimeoutFor` = 1 s per
+second of talk, floor 2 min (room for `medium` on a slower machine);
+`audioDecodeTimeoutFor` = 0.2 s per second, floor 1 min; the download budget is
+`renditionTimeoutFor(segments)`. A 3 h talk's Opus is ~137 MB, under
+`VIMEO_RENDITION_MAX_BYTES`.
+
+**The harvest waits for the manifest when the player lists NO track — on every
+capture — and only then.** `awaitManifestNoCaptionsMs` (`VIMEO_MANIFEST_WAIT_MS`,
+10 s) is passed by the summarizer unconditionally, because nothing knows before
+the harvest whether captions exist; it is INERT on a captioned video, so a
+frames-off capture still closes the browser the moment it has its VTT, and the
+Slides tick keeps its own `awaitManifestMs`. The larger of the two applies to a
+track-less video. Pinned in `captions.test.ts` both ways.
+
+**Three stable job codes, each a sentence on the card, and the pre-flight comes
+BEFORE the download.** `whisper_unavailable` — `whisperUnavailableReason` found
+no `ffmpeg`, no `whisper-cli` or no model file (the reason, with its remedy —
+`brew install whisper-cpp`, `VIMEO_WHISPER_MODEL_PATH` — is on the warn line;
+40 MB of audio for a machine that cannot transcribe it is the wrong order);
+`transcription_failed` — download, decode or whisper failed on THIS video (the
+ffmpeg/whisper stderr tail in the log, never on the card); `no_speech` — whisper
+ran and its VTT has no cues, which is a different fact from a caption file with
+no cues (that one stays `no_captions`). A raw throw from the pipeline is never
+the job's error text.
+
+**The document says how the transcript came to be.** `caption_kind: "whisper"`
+beside `manual` / `auto` / `stub`; `caption_lang` is whisper's DETECTED language
+(`no`, `en`, …), `en` on an English-only model (its detection never ran — see
+below) and `und` when a multilingual model printed no line; `talk` resolves from
+it exactly as from a caption tag, so a Norwegian talk with no captions still
+gets a bokmål summary. An explicit `nb`/`en` pick beats the detection, as it
+beats a tag. huginn stores the kind verbatim (its `vimeo.py` comment names two
+values; no allowlist change was needed).
+
+**The model must be multilingual, and the shared default is not.**
+`VIMEO_WHISPER_MODEL_PATH` → `TIKTOK_WHISPER_MODEL_PATH` → `WHISPER_MODEL_PATH`
+(default `./models/ggml-base.en.bin`, the Telegram voice model). An `.en` model
+(`isEnglishOnlyModel`, the `.en` before the extension) makes whisper ignore
+`-l auto` and transcribe Norwegian as English noise, so the run WARNS naming the
+variable and records `en`, rather than refusing — the operator's intent was to
+capture. On the mini: `~/.muninn/whisper/ggml-small.bin` (466 MB, fetched
+interactively — the launchd rule for models applies), `brew install whisper-cpp`
+(1.9.2).
+
+**Whisper + frames share one manifest fetch and one work dir; the audio does
+not outlive whisper.** `getManifest` in the job memoizes the fetch; the fMP4
+and the WAV are unlinked the moment `whisper-cli` exits (a 3 h talk is ~137 MB
+of Opus plus ~345 MB of WAV, and with Slides on the work dir is what the model
+is handed as `--add-dir`), and the segments go with the dir in the `finally`.
+Statuses on that path: `harvesting_captions → downloading → transcribing →
+extracting_frames → summarizing → ingesting`.
+
+**The review of #524 (seven findings) and its two fix rounds left these
+rules.** (1) *The rendition file is written by one synchronous `appendFileSync`
+per segment — no descriptor held across an await — and its size is verified
+against the byte count* (`media.ts`, `sizeOnDisk` test seam). Two measured
+failures in a process that had launched and closed a Playwright Chromium (the
+production shape — the harvest runs first): the `Bun.file().writer()` sink
+flushed in the background and reported a failed flush as a loose error nothing
+awaited, so the count said 6 418 143 bytes while 2.6–3.1 MB were on disk (3/3,
+ffmpeg read the cut as a complete file); and round 1's descriptor opened once
+and held across the segment awaits was closed out from under the download —
+`EBADF` at segment 53 of 123 (2/2) — by the browser's delayed cleanup closing
+an fd number it no longer owned. A descriptor that exists only inside one
+synchronous call cannot interleave with that cleanup: 2/2 exact after the
+change, same shape. A size mismatch is a `VimeoMediaDownloadError` and the
+file is unlinked. (2) *`no_speech` is a FLOOR, not "no cues"*
+(`looksSpeechless`, `SPEECH_MIN_WORDS_PER_MINUTE` = 5): whisper hallucinates a
+word on silence (20 s of digital silence ⇒ exit 0, `en (p = 0.35)`, one cue
+"you"), so zero cues never happens; below 5 words per minute of talk the job
+is `no_speech` and no model call is spent (the committed 53-min fixture runs
+at 104 wpm). (3) *The Opus claim is a preference*: `chooseRepresentation`
+falls back to the cheapest audio when a manifest has no Opus, so an AAC-only
+manifest is transcribed from AAC with a warn naming the codec; the sizing
+claims above are Opus claims — AAC at 194 kbps × 3 h is ~262 MB, still inside
+the 256 MiB (268 MB) cap by ~6 MB, and anything above ~199 kbps × 3 h is
+refused by the declared-total pre-flight as `transcription_failed`. (4) *The
+pre-flight runs BEFORE the harvest, and `no_captions` is answered BEFORE
+`whisper_unavailable`*: a track-less video with no manifest is `no_captions`
+on every machine (nothing to transcribe from — the operator remedy would be
+irrelevant), and only a video with a MANIFEST to try reports the machine's
+missing piece (whether that manifest has an audio rendition is known only
+after the fetch the branch skips — a video-only manifest answers
+`whisper_unavailable` there and `transcription_failed` on a capable machine);
+so the harvest keeps its 10 s manifest wait on a whisper-less
+machine too, because without it the first answer would shadow the second.
+(5) *On the success path nothing of the audio or frames pass outlives its
+step in the work dir*: the fMP4, the WAV and whisper's `.vtt` are unlinked as
+soon as they are consumed, and `extractCadenceFrames` removes its segment
+files after the last grab — the work dir is what the model is handed as
+`--add-dir`, and holds only the JPEGs. A step that FAILS (ffmpeg non-zero, a
+whisper killed mid-write, a frame grab throwing) leaves its files for the
+job's `rm` of the work dir, and no failed pass reaches `--add-dir`. (6) The docs' operator remedy is spelled without `~` (no
+expansion). (7) The "larger of two allowances" test covers both orders.
+Stated residual: a track-less harvest spends the 25 s track wait AND up to
+10 s of manifest wait inside the 60 s budget, so a watch page that takes
+≥25 s to load leaves no room for the manifest and the capture degrades to
+`no_captions` rather than being transcribed.
+
 ## Rules the VERTICAL lives by (PR 2)
 
 **There is no `fetching_metadata` status.** oEmbed runs in the ROUTE, before a job
@@ -475,10 +597,9 @@ window boundary carried a timestamp — measured, 48 of 75 — so most hits insi
 talk could not be cited to a minute, which is the whole reason the transcript is
 ingested.
 
-**`no_captions` is a job ERROR with a stable code, not a crash.** A video with no
-usable track is a legitimate answer about the video; `manifestUrl` is logged
-because it is what PR 5's audio fallback (the media seam's Opus rendition) will
-consume, and it expires.
+**`no_captions` is a job ERROR with a stable code, not a crash.** Since v2 PR 5
+it means "no usable track AND no manifest to transcribe from" — a video with a
+manifest takes the Whisper path instead (its own three codes, above).
 
 **Everything that can fail is INSIDE the job's try; the source-draft trigger is
 inside one of its own.** The dep resolution moved in because
@@ -561,6 +682,9 @@ spell the same word.
 | 400 `bad_frames` | The Slides flag must be on or off |
 | 503 `frames_unsupported` | The summarizer bot cannot read slide frames — untick Slides, or set SUMMARIZER_BOT to a claude-cli / claude-sdk bot |
 | job error `no_captions` | This video has no caption track |
+| job error `whisper_unavailable` | This video has no caption track, and this machine cannot transcribe it (whisper-cli and a multilingual model are needed — see VIMEO_WHISPER_MODEL_PATH) |
+| job error `transcription_failed` | This video has no caption track, and transcribing its audio failed |
+| job error `no_speech` | This video has no caption track, and no speech was found in its audio |
 
 Two rendering rules: the input **clears** on an answer that started or adopted a
 capture (and on a duplicate, which is likewise nothing to retry) and **keeps its
@@ -648,9 +772,10 @@ load `https://vimeo.com/<id>` in a headless Chromium, `play()` it muted, set eve
 request stream. It then downloads with a plain cookie-less `fetch`.
 
 **This is the one mechanism here that can rot** — a player change, a rate limit,
-an account wall. It has no contract behind it. The rollback is PR 4's audio path
-(the HLS manifest `harvestVimeoCaptions` already captures as `manifestUrl`, then
-ffmpeg + Whisper) or dropping the vertical; the metadata half survives either way,
+an account wall. It has no contract behind it. The Whisper path (v2 PR 5) is
+half a rollback: it still needs the harvest for the MANIFEST url, so a caption
+outage is survivable and a watch-page outage is not; the other half is dropping
+the vertical. The metadata half survives either way,
 because oEmbed is a different mechanism entirely. `scripts/smoke-vimeo.ts` is what
 tells you which state you are in — run it before assuming a code bug.
 
@@ -663,6 +788,24 @@ bunx playwright install chromium
 `playwright-core` is a dependency (pinned `1.58.2`), but it ships **no browser
 binaries**. Without that command a harvest throws `VimeoBrowserMissingError`,
 whose message is that line. The laptop and the mini each need it.
+
+For the Whisper fallback (v2 PR 5), additionally:
+
+```
+brew install whisper-cpp
+mkdir -p ~/.muninn/whisper
+curl -L -o ~/.muninn/whisper/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+VIMEO_WHISPER_MODEL_PATH=/Users/<you>/.muninn/whisper/ggml-small.bin   # in .env — spelled OUT, no `~`
+```
+
+The value is read through `optionalEnv` with **no `~` expansion** (unlike the
+`WIKI_EXTRA` dialect), so a tilde in `.env` is a path that does not exist and
+every no-captions capture answers `whisper_unavailable` pointing back at the
+variable. Without the three steps a no-captions capture fails with
+`whisper_unavailable` and a warn naming what is missing; captioned captures are
+unaffected; a track-less video on such a machine still waits up to 10 s for
+the manifest, so the card can say "nothing to transcribe from" when that is
+the fact and "cannot transcribe" only when there is audio.
 
 ## Rules this module lives by
 
@@ -831,7 +974,9 @@ on both and 0 means *"the player never said"*, never "a zero-length video".
 | `VIMEO_OEMBED_BASE` | `https://vimeo.com` | Base URL of the oEmbed endpoint, read at call time. PR 3's e2e points it at a local stub so a spec can fake the metadata half over HTTP without faking a browser. |
 | `VIMEO_HARVEST_STUB` | — | An **absolute** path to a `.vtt` that stands in for the whole browser half, so an acceptance run drives the vertical end to end with no Chromium and no live Vimeo. It is a backdoor by construction — the process summarizes a file off local disk while reporting a capture of a public video — so it has THREE gates, all required and all failing to a warn plus a real harvest rather than a throw: `resolveServingProfile() === "default"`, an absolute path, and the file existing. **Every stubbed capture warns**, naming the fixture AND the job id, and the document it writes carries `caption_kind: "stub"` — a once-per-process line is a line nobody sees on the capture they are looking at, and a stubbed document must not be indistinguishable in the corpus from a harvested one. The resolution itself is memoized on the two variables it reads (one profile parse, one stat per configuration; a throw is not memoized), and a caller that passes its own `deps` skips it entirely. |
 
-Both are in `src/test/ambient-env.ts`, so no suite and no e2e-spawned muninn
+| `VIMEO_WHISPER_MODEL_PATH` | `TIKTOK_WHISPER_MODEL_PATH`, else `WHISPER_MODEL_PATH` | The ggml model the no-captions fallback transcribes with. Must be MULTILINGUAL for a Norwegian talk; the shared default `ggml-base.en.bin` is English-only, and an `.en` model warns and records `caption_lang: en` rather than refusing. |
+
+All three are in `src/test/ambient-env.ts`, so no suite and no e2e-spawned muninn
 inherits a developer's value.
 
 ## Testing
@@ -843,7 +988,8 @@ of the suite imports transitively, so it needs its OWN `bun test` process — an
 the `src/vimeo/` directory entry the chains used to carry would have swept it
 into the first chunk. `url` / `oembed` / `vtt` / `captions` / `state` stay in that
 chunk (`media` too — its download half is driven through `fetchImpl`, no
-network); `summarizer` has its own `&&` link at the end of both chains. The route's
+network — and `whisper`, whose download is `fetchImpl` and whose two spawns are
+the `run` seam); `summarizer` has its own `&&` link at the end of both chains. The route's
 own cases live in `src/dashboard/routes/capture-route-job-ordering.test.ts`,
 which already runs in a process of its own for the same reason.
 
