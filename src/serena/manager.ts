@@ -1,7 +1,7 @@
 import type { Subprocess } from "bun";
 import type { SerenaInstanceConfig } from "./config.ts";
 import { discoverSerenaConfigs } from "./config.ts";
-import { resolveBotsDir } from "../bots/config.ts";
+import { readBotsRoot } from "../bots/config.ts";
 import { serenaToolProxy } from "./tool-proxy.ts";
 import { getLog } from "../logging.ts";
 
@@ -36,8 +36,11 @@ class SerenaManager {
   init(): void {
     // The roster this process discovered, not a second copy of the default —
     // `MUNINN_BOTS_DIR` moves it, and scanning `../../bots` regardless would look
-    // for Serena entries in bots this process does not have.
-    const configs = discoverSerenaConfigs(resolveBotsDir());
+    // for Serena entries in bots this process does not have. `readBotsRoot`,
+    // not `resolveBotsDir`: the root discovery READ, which on an unreadable
+    // override is the fallback — reading the override here again threw EACCES
+    // out of the boot after discovery had already degraded (measured).
+    const configs = discoverSerenaConfigs(readBotsRoot().root);
     for (const botConfig of configs) {
       for (const inst of botConfig.instances) {
         if (this.instances.has(inst.name)) {

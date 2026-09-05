@@ -2,7 +2,8 @@ import { test, expect, describe, afterEach } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { discoverAllBots, resolveBotsDir } from "./config.ts";
+import { discoverAllBots, readBotsRoot, resolveBotsDir } from "./config.ts";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { AMBIENT_INSTANCE_ENV } from "../test/ambient-env.ts";
 
 /**
@@ -143,21 +144,44 @@ describe("discovery survives a bots root the process may not READ", () => {
    * sits around the `readdirSync` itself, and degrades the same way the other
    * refusals do: warn, then the checkout's own `bots/`.
    */
-  test("an unreadable MUNINN_BOTS_DIR warns and falls back to the checkout's bots/", () => {
-    if (typeof process.getuid === "function" && process.getuid() === 0) {
-      // root reads everything; the property is not observable there.
-      return;
-    }
+  // root reads everything; the property is not observable there — skipped
+  // VISIBLY, not passed with zero assertions.
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+  test.skipIf(isRoot)("an unreadable MUNINN_BOTS_DIR warns and falls back to the checkout's bots/", async () => {
     const root = tempBotsRoot("zzlockedbot");
     chmodSync(root, 0o000);
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
     try {
       process.env.MUNINN_BOTS_DIR = root;
       let names: string[] = [];
       expect(() => { names = discoverAllBots().map((b) => b.name); }).not.toThrow();
       expect(names).toContain("jarvis");
       expect(names).not.toContain("zzlockedbot");
+      // The root discovery READ is the fallback, and a second reader of the
+      // root (`serenaManager.init()`) gets that one, not the override.
+      expect(readBotsRoot().root).toBe(resolve(import.meta.dir, "../../bots"));
+
+      // The warn is the operator's only signal that the roster was swapped —
+      // once, naming the refused value, its code and the fallback.
+      const warns = records.filter((r) => r.level === "warning");
+      expect(warns).toHaveLength(1);
+      const text = warns[0]!.message.map((m) => (typeof m === "string" ? m : String(m))).join("");
+      expect(text).toContain(root);
+      expect(text).toContain("EACCES");
+      expect(text).toContain(resolve(import.meta.dir, "../../bots"));
+      // Throttled per value: a second discovery does not warn again.
+      discoverAllBots();
+      expect(records.filter((r) => r.level === "warning")).toHaveLength(1);
     } finally {
+      await reset();
       chmodSync(root, 0o755);
     }
   });
+});
 });

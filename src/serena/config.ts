@@ -25,7 +25,21 @@ export function discoverSerenaConfigs(botsDir: string): SerenaBotConfig[] {
 
   if (!existsSync(botsDir)) return results;
 
-  for (const entry of readdirSync(botsDir, { withFileTypes: true })) {
+  // The caller hands over the root discovery READ, so this is the second reader
+  // of a directory that has already been read once; a failure here is the root
+  // going unreadable between the two, and Serena entries are not worth a boot.
+  let entries;
+  try {
+    entries = readdirSync(botsDir, { withFileTypes: true });
+  } catch (err) {
+    log.warn("Cannot read bots root {path} for Serena configs: {error}", {
+      path: botsDir,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return results;
+  }
+
+  for (const entry of entries) {
     if (!entry.isDirectory()) continue;
 
     const configPath = join(botsDir, entry.name, "config.json");
