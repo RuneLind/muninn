@@ -27,7 +27,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { copyFile, mkdir, rm } from "node:fs/promises";
+import { copyFile, mkdir, rm, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { frameBudgetFor } from "../video/media.ts";
 import {
@@ -178,6 +178,29 @@ export async function keepReferencedFrames(
     kept.push(sec);
   }
   return kept;
+}
+
+/**
+ * Remove every kept frame of ONE video — the `/summaries` Delete's counterpart
+ * to `keepReferencedFrames`. The id is charset-gated (the same `FRAME_VIDEO_ID_RE`
+ * the route serves by), so the path removed is always `<root>/<digits>` and
+ * never anything a document's url could steer; an id that fails the gate
+ * removes nothing and returns false. A missing directory is not an error
+ * (a transcript-only capture kept none). Returns whether a directory was there.
+ */
+export async function removeKeptFrames(videoId: string, root: string = framesRootDir()): Promise<boolean> {
+  if (!FRAME_VIDEO_ID_RE.test(videoId)) return false;
+  const dir = join(root, videoId);
+  let present: boolean;
+  try {
+    present = (await stat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
+  if (!present) return false;
+  await rm(dir, { recursive: true, force: true });
+  log.info("Removed the kept frames of Vimeo video {videoId}", { videoId });
+  return true;
 }
 
 export interface ExtractFramesOptions {

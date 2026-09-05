@@ -14,13 +14,13 @@ the metadata, the media seam, inline slides and the Whisper fallback.
 | `download.ts` | `downloadPinned` — the ONE host-pinned, bounded byte download (`downloadVtt`'s rules, stated once), parameterised on host, caps and the noun in its messages; `VimeoDownloadError` is the base every refusal extends; it also OWNS the host constants (`VIMEO_CAPTIONS_HOST`, the `VIMEO_MEDIA_HOSTS` allowlist), so `captions.ts` and `media.ts` import a string from the module both already depend on and never from each other |
 | `media.ts` | The media seam (v2 PR 3): `fetchVimeoManifest` (host-pinned to the `VIMEO_MEDIA_HOSTS` allowlist — `vod-adaptive-ak.vimeocdn.com`, `skyfire.vimeocdn.com`), `parseVimeoManifest` / `chooseRepresentation` / `segmentIndexAt` / `resolveSegmentUrl` (pure), `downloadRendition` (init + segments → ONE fMP4 ffmpeg reads) |
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
-| `frames.ts` | Slides (v2 PR 4): `cadenceTimes` / `framesPromptSection` / `referencedFrameSeconds` (pure), `extractCadenceFrames` (one 720p segment per tick through `media.ts`, one ffmpeg grab each), `keepReferencedFrames` (the quoted ones → `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg`), the route's two path charsets |
+| `frames.ts` | Slides (v2 PR 4): `cadenceTimes` / `framesPromptSection` / `referencedFrameSeconds` (pure), `extractCadenceFrames` (one 720p segment per tick through `media.ts`, one ffmpeg grab each), `keepReferencedFrames` (the quoted ones → `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg`), `removeKeptFrames` (a Delete's counterpart), the route's two path charsets |
 | `whisper.ts` | The no-captions fallback (v2 PR 5): `transcribeOpusRendition` (the whole Opus rendition through `media.ts` → ffmpeg → `whisper-cli -l auto -ovtt` → a WebVTT `vttToSegments` windows like a caption track), `whisperUnavailableReason` (the pre-flight — binaries + model — BEFORE any download), `parseDetectedLanguage` / `isEnglishOnlyModel` / the two clocks (pure) |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · downloading · transcribing · extracting_frames · summarizing · ingesting · complete · error` (`downloading`/`transcribing` only on the Whisper path) |
 | `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
 | `metadata.ts` | `speakerFromTitle` — the last ` - ` segment of a CONFERENCE account's title (`VIMEO_CONFERENCE_ACCOUNTS`, JavaZone today), undefined for everyone else — pure |
 | `../summaries/presets.ts` | The capture KINDS (`standard` · `deep` · `talk-notes`), per-bot `prompts/captureSummary.<id>.md` overrides, and the two run levers a kind can pull (`captureThinkingFor`, `captureBotConfigFor`) — pure |
-| `../summaries/language.ts` | `talk \| nb \| en`, `resolveOutputLang` (the `talk` → caption base tag rule), `captionBaseLang` (shared with `chooseTrack`) and the ONE spelling of the bokmål/English rider, which `src/share/prompt.ts` re-exports |
+| `../summaries/language.ts` | `talk \| nb \| en`, `resolveOutputLang` (the `talk` rule: transcript text first via `detectTextLang`, caption base tag second via `langFromCaptionTag`), `captionBaseLang` (shared with `chooseTrack`) and the ONE spelling of the bokmål/English rider, which `src/share/prompt.ts` re-exports |
 | `fixtures/totto-trust-but-verify.vtt` | Real auto-captions from a public JavaZone talk: 63 KB, 928 cues, 53 min |
 | `fixtures/manifest-placeholder.json` | A real manifest's SHAPE (5 video + 2 audio representations in the live manifest's UNSORTED order — 1080, 360, 720, 540, 240 — real codec strings/bitrates/heights/init segments, 12 segments each) with every signed path, id and URL replaced by a placeholder — the test pins that no live `pathsig`/`hmac`/`psid`/UUID survives, and that the order is the live one |
 
@@ -41,13 +41,35 @@ Validated first because the oEmbed call is a network round-trip and the answer
 does not depend on the video. The summarizer bot is therefore resolved ABOVE
 oEmbed too, which moved the "No bots configured" 500 up with it.
 
-**`talk` is resolved in the SUMMARIZER, not the route.** It needs the chosen
-caption track's tag, which exists only after the harvest. `resolveOutputLang`
-reads the BASE subtag: `no`/`nb`/`nn` ⇒ bokmål, anything else (an empty tag
-included) ⇒ English. Nynorsk speech gets a bokmål summary — the rider knows one
-Norwegian. The document carries the RESOLVED language (`summary_lang: nb|en`),
-never `talk`, and the kind id (`summary_kind`); huginn allowlists both
-(huginn #126, merged first).
+**`talk` is resolved in the SUMMARIZER, not the route — from the TRANSCRIPT
+first, the caption tag second.** Both exist only after the harvest.
+`resolveOutputLang(pick, captionLang, transcript)` asks `detectTextLang` — a
+function-word count over the windowed transcript (`og/ikke/det/er/som…` against
+`the/and/is/to/of…`, no word spelled the same in both, ≥`TEXT_LANG_MIN_HITS`
+(20) hits, a ≥70 % share AND ≥`TEXT_LANG_MIN_DISTINCT` (6) different markers
+on the winning side to call it, `null` otherwise — the distinct floor exists
+because composed French and Spanish scored 100 % Norwegian through the single
+marker `de`, measured in the review of #525; `de` is out of the set too) — and only when the text
+does not say falls back to the tag's BASE subtag (`langFromCaptionTag`:
+`no`/`nb`/`nn` ⇒ bokmål, anything else, an empty tag included ⇒ English). The
+text comes first because the tag is not a reliable signal: Vimeo tagged the
+Kotlin lightning talk's auto-captions `en-x-autogen` while the speech is
+Norwegian (measured 2026-09-05), and `talk` produced an English summary of a
+Norwegian talk; the text cannot be mis-tagged. When the two disagree the job
+logs one info line ("the text wins"). `caption_lang` on the document stays what
+Vimeo said — provenance — and `summary_lang` is the resolved language. Nynorsk
+speech gets a bokmål summary — the rider knows one Norwegian; a Swedish or
+Danish talk shares enough markers to read as Norwegian and lands on the bokmål
+rider, the better of the two outcomes on offer; German, Dutch, French and
+Spanish measure `null` and the tag decides. Deterministic, no model call. The
+"text wins" info line names the caption language's SOURCE (a track tag, or
+whisper's detection on the no-captions path) and is logged only for `talk`.
+The committed 53-min fixture is Norwegian auto-captions and reads `nb` at a
+95 % share, so a `VIMEO_HARVEST_STUB` acceptance run left on `talk` now
+produces a bokmål summary where it produced English.
+The document carries the RESOLVED language (`summary_lang: nb|en`), never
+`talk`, and the kind id (`summary_kind`); huginn allowlists both (huginn #126,
+merged first).
 
 **The language rider is the LAST thing in the system prompt** — after the kind's
 structure and after the auto-caption rider — for the reason the share prompt puts
@@ -331,11 +353,27 @@ a served file from nowhere — and the work dir (segments + unquoted frames) is
 removed in the job's `finally`. The summary text is ingested with the image
 markdown intact; the doc panel renders it through `marked`'s default `<img>`,
 same-origin. **The document's frames are therefore only live inside muninn's
-UI**, which the plan accepted (huginn serves no static files). Nothing removes
-a kept frame when the document is deleted (the delete signal carries a document
-id, not a video id) — a follow-up; the two acceptance talks' quoted frames
-measured 725 KB for 8 (81–102 KB each) and 425 KB for 6 (54–87 KB each), byte
-sums, at 720p.
+UI**, which the plan accepted (huginn serves no static files). **A `/summaries`
+Delete removes the document's kept frames** (`removeKeptFrames`, the
+`onSummaryDocumentDeleted` listener in the route): the signal carries a
+DOCUMENT id, so the video id comes from the ingest map when the capture was
+recent and otherwise from the listing row huginn still serves (its DELETE is
+soft — the same reindex window `recentDeletes` exists for); async and
+best-effort, a listing that is down leaves the frames in place with a warn —
+and the listing is asked only when the frames root has ANY entry, since frames
+are off by default and most deletes have nothing to remove (a 200-row
+collection read for a video that kept no frames is the wide read this module
+avoids elsewhere). The id is charset-gated before anything is removed, so the
+path is always `<root>/<digits>`. **Accepted consequence:** a source-drafted
+wiki page that quoted the capture's slides (`![Slide at …](/api/vimeo/frames/…)`)
+outlives the vimeo document, and its images break when the document is
+deleted — the frames were only ever served by muninn's UI for the capture,
+and a Delete is the reader saying the capture should go. ⚠️ Every `registerVimeoRoutes` in a TEST passes a temp
+`framesRoot`: the listener set is module-level and never unsubscribed, so a
+registration with no root would remove frames under the developer's real
+`~/.muninn/vimeo-frames` on the next test that fires the signal. The two
+acceptance talks' quoted frames measured 725 KB for 8 (81–102 KB each) and
+425 KB for 6 (54–87 KB each), byte sums, at 720p.
 
 **`GET /api/vimeo/frames/:videoId/:file` is read-only and default-deny by
 charset.** Both segments are gated (`FRAME_VIDEO_ID_RE` digits,
@@ -356,8 +394,8 @@ root.
 
 **Measured on the two acceptance talks (2026-09-05, the plan's skip trigger):**
 Kotlin extension functions (10 min, `en-x-autogen` — Vimeo mis-tagged a
-Norwegian talk, so `talk` gave English; the caption tag is not a reliable
-language signal) — 30 frames read, 8 quoted, 8/8 carry code or a stack trace
+Norwegian talk, so `talk` gave English at the time; the transcript-first
+language rule above is the fix) — 30 frames read, 8 quoted, 8/8 carry code or a stack trace
 the captions cannot; ES2026 news (10 min, `no-x-autogen`, Norwegian summary) —
 30 read, 6 quoted, 5/6 add something; the sixth is a live-coding demo caught
 mid-typing, and one slide landed under the neighbouring section. 13 of 14 is
