@@ -101,7 +101,7 @@ is its own key because `date` is the CAPTURE day the shelf buckets on (#519).
 
 **The speaker is derived, and only from an account whose convention we know.**
 Vimeo has no speaker field; JavaZone titles its uploads `<talk> - <speaker>`
-(`… - Totto - Thor Henning Hetland` with a handle), so `speakerFromTitle` takes
+(`… - Handle - Full Name` with a handle), so `speakerFromTitle` takes
 the LAST ` - ` segment — but only when `author_name` is in
 `VIMEO_CONFERENCE_ACCOUNTS`. An individual's "Kotlin - the good parts" is not
 a talk by "the good parts". Two speakers stay one string; the convention has
