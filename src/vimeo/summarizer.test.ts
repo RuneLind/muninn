@@ -490,6 +490,9 @@ test("no usable track fails the job with the stable no_captions code and never c
   await summarizeVimeo(jobId, META, config, bot, {
     harvest: async () => captionsWith([]),
     downloadVtt: async () => { throw new Error("must not download"); },
+    // A machine that COULD transcribe, so the answer is about the video (no
+    // manifest), not about the machine.
+    whisperUnavailable: () => null,
   });
 
   const job = getJob(jobId)!;
@@ -1067,13 +1070,16 @@ test("the summarize timeout scales with the frame count", async () => {
 
 // ── The Whisper fallback (v2 PR 5) ───────────────────────────────────────────
 
+// Enough placeholder words to clear the speech floor for META's 53 minutes
+// (`SPEECH_MIN_WORDS_PER_MINUTE` × 53): whisper's output is windowed and then
+// judged for speech, and a two-cue transcript of an hour is silence.
 const WHISPER_VTT = `WEBVTT
 
 00:00:02.000 --> 00:00:06.000
-Hei, og velkommen til foredraget.
+Hei, og velkommen til foredraget. ${Array(150).fill("ord").join(" ")}
 
 00:02:10.000 --> 00:02:15.000
-Nå kommer demoen.
+Nå kommer demoen. ${Array(150).fill("ord").join(" ")}
 `;
 
 let transcribeCalls: Array<{ manifestUrl: string; durationSec: number; workDir: string }> = [];
@@ -1146,26 +1152,26 @@ test("no track + a manifest: the talk is transcribed from its audio — statuses
   expect(lastHarvestOpts?.awaitManifestMs).toBe(0);
 });
 
-test("a captioned capture never touches the whisper deps, and still asks for the no-captions wait", async () => {
+test("a captioned capture runs the pre-flight ONCE (before the harvest), never transcribes, and asks for the no-captions wait", async () => {
   const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
   await summarizeVimeo(jobId, META, config, bot, whisperDeps({
     harvest: async (_v: string, opts: Record<string, unknown>) => { lastHarvestOpts = opts; return captionsWith([AUTO_TRACK]); },
     downloadVtt: async () => VTT,
   }));
   expect(getJob(jobId)!.status).toBe("complete");
-  expect(unavailableCalls).toBe(0);
+  expect(unavailableCalls).toBe(1);
   expect(transcribeCalls).toEqual([]);
   expect(ingestPayload!.caption_kind).toBe("auto");
   expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(10_000);
 });
 
-test("no track and NO manifest is still no_captions: nothing to transcribe from, and the pre-flight is not even asked", async () => {
+test("no track and NO manifest on a machine that could transcribe is still no_captions: nothing to transcribe from", async () => {
   const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
   await summarizeVimeo(jobId, META, config, bot, whisperDeps({
     harvest: async () => captionsWith([]),
   }));
   expect(getJob(jobId)!.error).toBe(NO_CAPTIONS_ERROR);
-  expect(unavailableCalls).toBe(0);
+  expect(unavailableCalls).toBe(1);
   expect(transcribeCalls).toEqual([]);
   expect(manifestFetches).toEqual([]);
 });
@@ -1228,4 +1234,35 @@ test("whisper + frames: ONE manifest fetch serves both, and the statuses run dow
   expect(extractCalls[0]!.workDir).toBe(transcribeCalls[0]!.workDir);
   expect(lastPrompt).toContain("Slide frames");
   expect(ingestPayload!.caption_kind).toBe("whisper");
+});
+
+test("fix round 1: the whisper pre-flight runs BEFORE the harvest, so a machine that cannot transcribe never asks the browser to wait for the manifest", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, whisperDeps({
+    whisperUnavailable: () => "whisper-cli is not on PATH (brew install whisper-cpp)",
+  }));
+  expect(getJob(jobId)!.error).toBe(WHISPER_UNAVAILABLE_ERROR);
+  expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(0);
+  // ...and a captioned capture on that machine is unaffected.
+  const jobId2 = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId2, META, config, bot, whisperDeps({
+    whisperUnavailable: () => "no whisper",
+    harvest: async (_v: string, opts: Record<string, unknown>) => { lastHarvestOpts = opts; return captionsWith([AUTO_TRACK]); },
+    downloadVtt: async () => VTT,
+  }));
+  expect(getJob(jobId2)!.status).toBe("complete");
+  expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(0);
+});
+
+test("fix round 1: whisper's one hallucinated cue on silence is no_speech, not a summary of the word 'you'", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, whisperDeps({
+    transcribeAudio: async (_i: unknown, hooks: { onTranscribing: () => void }) => {
+      hooks.onTranscribing();
+      // Measured on 20 s of digital silence with ggml-small: exit 0, `en (p = 0.35)`, one cue.
+      return { vtt: "WEBVTT\n\n00:00:00.000 --> 00:00:20.000\n you\n", lang: "en", audioBytes: 10 };
+    },
+  }));
+  expect(getJob(jobId)!.error).toBe(NO_SPEECH_ERROR);
+  expect(lastPrompt).toBeUndefined();
 });

@@ -19,6 +19,8 @@ import {
   whisperUnavailableReason,
   UNDETERMINED_LANG,
   WHISPER_CAPTION_KIND,
+  looksSpeechless,
+  SPEECH_MIN_WORDS_PER_MINUTE,
 } from "./whisper.ts";
 
 const FIXTURE_RAW = JSON.parse(readFileSync(new URL("./fixtures/manifest-placeholder.json", import.meta.url).pathname, "utf8"));
@@ -145,7 +147,8 @@ describe("transcribeOpusRendition", () => {
     expect(urls.length).toBe(rep.segments.length);
     expect(urls.every((u) => u.includes("rep-audio-opus"))).toBe(true);
     expect(urls.map((u) => Number(new URL(u).searchParams.get("range")))).toEqual(rep.segments.map((_, i) => i));
-    expect(existsSync(join(dir, "audio.mp4"))).toBe(true);
+    // The audio is spent once whisper has run (see "fix round 1" below); the byte count survives.
+    expect(existsSync(join(dir, "audio.mp4"))).toBe(false);
     expect(result.audioBytes).toBeGreaterThan(rep.segments.reduce((s, x) => s + x.size, 0));
 
     // Status hook fires AFTER the download and BEFORE the first spawn.
@@ -239,5 +242,37 @@ describe("transcribeOpusRendition", () => {
     ).catch((e) => e);
     expect(err2).toBeInstanceOf(VimeoTranscriptionError);
     expect(err2.message).toContain(`wrote no ${join(dir, "whisper")}.vtt`);
+  });
+});
+
+describe("fix round 1", () => {
+  test("the audio artifacts (mp4 + wav) are unlinked once whisper has run — they do not ride into the model's --add-dir", async () => {
+    const m = fixture();
+    const dir = workDir();
+    const { run } = fakeRun();
+    // The fake ffmpeg writes nothing, so plant the wav the real one would leave.
+    const runWithWav = async (cmd: string[], t: number, l: string) => {
+      if (cmd[0] === "ffmpeg") await Bun.write(join(dir, "audio.wav"), "RIFF");
+      return run(cmd, t, l);
+    };
+    await transcribeOpusRendition(
+      { manifestUrl: MANIFEST_URL, manifest: m, durationSec: 60, workDir: dir },
+      { modelPath: "/m/ggml-small.bin", fetchImpl: cdnFetch(m).impl, run: runWithWav, readVtt: async () => WHISPER_VTT },
+    );
+    expect(existsSync(join(dir, "audio.mp4"))).toBe(false);
+    expect(existsSync(join(dir, "audio.wav"))).toBe(false);
+  });
+
+  test("looksSpeechless: fewer than SPEECH_MIN_WORDS_PER_MINUTE words per minute is silence (whisper hallucinates a word on nothing)", () => {
+    const mins = (n: number) => n * 60;
+    expect(looksSpeechless([{ text: "you" }], mins(12))).toBe(true);
+    expect(looksSpeechless([], mins(12))).toBe(true);
+    // Exactly at the line: 12 min × the floor is speech; one word under is not.
+    const words = (n: number) => Array(n).fill("ord").join(" ");
+    expect(looksSpeechless([{ text: words(12 * SPEECH_MIN_WORDS_PER_MINUTE) }], mins(12))).toBe(false);
+    expect(looksSpeechless([{ text: words(12 * SPEECH_MIN_WORDS_PER_MINUTE - 1) }], mins(12))).toBe(true);
+    // Unknown duration (0): the floor is one minute's worth.
+    expect(looksSpeechless([{ text: words(SPEECH_MIN_WORDS_PER_MINUTE) }], 0)).toBe(false);
+    expect(looksSpeechless([{ text: "you" }], 0)).toBe(true);
   });
 });

@@ -40,6 +40,7 @@ import {
   whisperUnavailableReason,
   VimeoTranscriptionError,
   WHISPER_CAPTION_KIND,
+  looksSpeechless,
   type WhisperTranscript,
 } from "./whisper.ts";
 import {
@@ -437,6 +438,11 @@ export async function summarizeVimeo(
     //    closure: announced before the queue, a job waiting its turn reported a
     //    Chromium that was not running — for as long as every harvest ahead of
     //    it took.
+    // The whisper pre-flight runs BEFORE the harvest: a machine that cannot
+    // transcribe must not hold the browser 10 s for a manifest it will never
+    // use, and the answer is the same either side of the harvest.
+    const whisperUnavailable = resolved.whisperUnavailable(config);
+
     const captions = await harvestQueue.run(HARVEST_QUEUE_KEY, () => {
       updateStatus(jobId, "harvesting_captions");
       return resolved.harvest(meta.videoId, {
@@ -449,7 +455,7 @@ export async function summarizeVimeo(
         // manifest (PR 5), and nothing knows before the harvest whether the
         // track exists. Costs nothing on a captioned video — the harvest only
         // waits on this when the player lists no track.
-        awaitManifestNoCaptionsMs: VIMEO_MANIFEST_WAIT_MS,
+        awaitManifestNoCaptionsMs: whisperUnavailable === null ? VIMEO_MANIFEST_WAIT_MS : 0,
       });
     });
 
@@ -472,6 +478,17 @@ export async function summarizeVimeo(
       transcriptVtt = await resolved.downloadVtt(track.vttUrl);
       captionLang = track.lang;
       captionKindOnDocument = detectCaptionKind(track.lang);
+    } else if (whisperUnavailable !== null) {
+      // The pre-flight's answer, given before the download (40 MB of audio
+      // for a machine that cannot transcribe it is the wrong order) — and
+      // before the manifest question, since without whisper the manifest is
+      // moot and the harvest was told not to wait for it.
+      log.warn("Vimeo video {videoId} has no caption track and this machine cannot transcribe it: {reason}", {
+        videoId: meta.videoId,
+        reason: whisperUnavailable,
+      });
+      failJob(jobId, WHISPER_UNAVAILABLE_ERROR);
+      return;
     } else if (!captions.manifestUrl) {
       // A legitimate answer about the video, not a failure of the mechanism:
       // no caption track, and the player asked for no playlist inside the
@@ -482,17 +499,6 @@ export async function summarizeVimeo(
       failJob(jobId, NO_CAPTIONS_ERROR);
       return;
     } else {
-      // Pre-flight BEFORE the download: a machine with no whisper must not
-      // pull 40 MB of audio to find out. The reason is the card's sentence.
-      const unavailable = resolved.whisperUnavailable(config);
-      if (unavailable !== null) {
-        log.warn("Vimeo video {videoId} has no caption track and this machine cannot transcribe it: {reason}", {
-          videoId: meta.videoId,
-          reason: unavailable,
-        });
-        failJob(jobId, WHISPER_UNAVAILABLE_ERROR);
-        return;
-      }
       updateStatus(jobId, "downloading");
       let whisper: WhisperTranscript;
       try {
@@ -525,10 +531,18 @@ export async function summarizeVimeo(
     }
 
     const segments = vttToSegments(transcriptVtt, DEFAULT_WINDOW_SEC);
-    if (segments.length === 0) {
-      // A caption file with no cues is "no captions"; a whisper run that heard
-      // nothing is its own answer — the operator reads them differently.
-      failJob(jobId, track ? NO_CAPTIONS_ERROR : NO_SPEECH_ERROR);
+    if (track && segments.length === 0) {
+      failJob(jobId, NO_CAPTIONS_ERROR);
+      return;
+    }
+    if (!track && looksSpeechless(segments, meta.durationSec)) {
+      // A whisper run that heard nothing is its own answer — and "nothing" is
+      // a FLOOR, not zero cues: whisper hallucinates a word on silence.
+      log.info("Vimeo video {videoId}: the audio transcribed to {n} window(s) below the speech floor — no speech", {
+        videoId: meta.videoId,
+        n: segments.length,
+      });
+      failJob(jobId, NO_SPEECH_ERROR);
       return;
     }
     const transcript = segmentsToMarkdown(segments);

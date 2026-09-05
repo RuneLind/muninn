@@ -434,11 +434,37 @@ capture. On the mini: `~/.muninn/whisper/ggml-small.bin` (466 MB, fetched
 interactively — the launchd rule for models applies), `brew install whisper-cpp`
 (1.9.2).
 
-**Whisper + frames share one manifest fetch and one work dir.** `getManifest`
-in the job memoizes the fetch; the audio, the WAV and the segments live in the
-job's `workDir` and go with it in the `finally`. Statuses on that path:
-`harvesting_captions → downloading → transcribing → extracting_frames →
-summarizing → ingesting`.
+**Whisper + frames share one manifest fetch and one work dir; the audio does
+not outlive whisper.** `getManifest` in the job memoizes the fetch; the fMP4
+and the WAV are unlinked the moment `whisper-cli` exits (a 3 h talk is ~137 MB
+of Opus plus ~345 MB of WAV, and with Slides on the work dir is what the model
+is handed as `--add-dir`), and the segments go with the dir in the `finally`.
+Statuses on that path: `harvesting_captions → downloading → transcribing →
+extracting_frames → summarizing → ingesting`.
+
+**Three findings from the review of #524, each now a rule.** (1) *The
+rendition file is written through a file descriptor with synchronous writes
+and its size is verified against the byte count* (`media.ts`): the
+`Bun.file().writer()` sink it replaced flushes in the background and reports a
+failed flush as a loose error nothing awaits — measured in a process that had
+launched and closed Chromium (the production shape): three of three whole-Opus
+downloads claimed 6 418 143 bytes and left 2.6–3.1 MB on disk, ffmpeg read the
+cut as a complete file, and the ingested talk would have ended halfway with
+nothing saying so. A size mismatch is a `VimeoMediaDownloadError` and the file
+is unlinked. (2) *`no_speech` is a FLOOR, not "no cues"*
+(`looksSpeechless`, `SPEECH_MIN_WORDS_PER_MINUTE` = 5): whisper hallucinates a
+word on silence (20 s of digital silence ⇒ exit 0, `en (p = 0.35)`, one cue
+"you"), so zero cues never happens; below 5 words per minute of talk the job is
+`no_speech` and no model call is spent. (3) *The Opus claim is a preference*:
+`chooseRepresentation` falls back to the cheapest audio when a manifest has no
+Opus, so an AAC-only manifest is transcribed from AAC with a warn naming the
+codec — and the sizing claims above are Opus claims (AAC at 194 kbps × 3 h is
+~262 MB against the 256 MiB cap; past it the declared-total pre-flight refuses
+and the job is `transcription_failed`). Stated residual: a track-less harvest
+spends the 25 s track wait AND up to 10 s of manifest wait inside the 60 s
+budget, so a watch page that takes ≥25 s to load leaves no room for the
+manifest and the capture degrades to `no_captions` rather than being
+transcribed.
 
 ## Rules the VERTICAL lives by (PR 2)
 
@@ -744,12 +770,18 @@ For the Whisper fallback (v2 PR 5), additionally:
 
 ```
 brew install whisper-cpp
+mkdir -p ~/.muninn/whisper
 curl -L -o ~/.muninn/whisper/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
-VIMEO_WHISPER_MODEL_PATH=~/.muninn/whisper/ggml-small.bin   # in .env, absolute
+VIMEO_WHISPER_MODEL_PATH=/Users/<you>/.muninn/whisper/ggml-small.bin   # in .env — spelled OUT, no `~`
 ```
 
-Without them a no-captions capture fails with `whisper_unavailable` and a warn
-naming what is missing; captioned captures are unaffected.
+The value is read through `optionalEnv` with **no `~` expansion** (unlike the
+`WIKI_EXTRA` dialect), so a tilde in `.env` is a path that does not exist and
+every no-captions capture answers `whisper_unavailable` pointing back at the
+variable. Without the three steps a no-captions capture fails with
+`whisper_unavailable` and a warn naming what is missing; captioned captures are
+unaffected — and since the pre-flight runs BEFORE the harvest, such a machine
+never holds the browser waiting for a manifest it cannot use.
 
 ## Rules this module lives by
 

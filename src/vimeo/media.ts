@@ -34,6 +34,7 @@
  */
 
 import { unlink } from "node:fs/promises";
+import { closeSync, openSync, statSync, writeSync } from "node:fs";
 import { getLog } from "../logging.ts";
 import { downloadPinned, VimeoDownloadError, VIMEO_MEDIA_HOST, VIMEO_MEDIA_HOSTS } from "./download.ts";
 
@@ -403,6 +404,14 @@ export interface RenditionFile {
  * failure the partial file is removed and the error rethrown: a truncated
  * fMP4 is a file ffmpeg reads to the cut and reports success on.
  */
+/** `writeSync` may write fewer bytes than asked; loop until the buffer is on the descriptor or it throws. */
+function writeAll(fd: number, bytes: Uint8Array): void {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    offset += writeSync(fd, bytes, offset, bytes.byteLength - offset);
+  }
+}
+
 export async function downloadRendition(
   manifestUrl: string,
   manifest: VimeoManifest,
@@ -436,11 +445,20 @@ export async function downloadRendition(
   const deadline = Date.now() + timeoutMs;
   const maxSegmentBytes = opts.maxSegmentBytes ?? VIMEO_SEGMENT_MAX_BYTES;
 
-  const sink = Bun.file(outPath).writer();
+  // A plain file descriptor with SYNCHRONOUS writes, not `Bun.file().writer()`:
+  // that sink flushes in the background and reports a failed flush as a loose
+  // error nothing awaits, so `written` counted bytes QUEUED while the file on
+  // disk held fewer — measured 2026-09-05 (review of #524): in a process that
+  // had launched and closed a Playwright Chromium, three of three whole-Opus
+  // downloads claimed 6 418 143 bytes and left 2.6–3.1 MB on disk (66 × EBADF
+  // in the console), and ffmpeg read the truncated fMP4 to the cut and
+  // reported success. `writeSync` either writes or throws, and the size on
+  // disk is compared with the count before the file is handed over.
+  const fd = openSync(outPath, "w");
   let written = 0;
   const segmentsWritten: { index: number; start: number; end: number }[] = [];
   try {
-    sink.write(init);
+    writeAll(fd, init);
     written += init.byteLength;
     for (const i of ordered) {
       const remaining = deadline - Date.now();
@@ -491,16 +509,22 @@ export async function downloadRendition(
           `Refusing ${rep.id}: wrote ${written + bytes.byteLength} bytes, over the ${maxTotal}-byte cap (declared ${declared})`,
         );
       }
-      sink.write(bytes);
+      writeAll(fd, bytes);
       written += bytes.byteLength;
       segmentsWritten.push({ index: i, start: seg.start, end: seg.end });
     }
-    await sink.end();
+    closeSync(fd);
+    const onDisk = statSync(outPath).size;
+    if (onDisk !== written) {
+      throw new VimeoMediaDownloadError(
+        `Rendition file holds ${onDisk} bytes after ${written} were written — refusing a truncated ${rep.id}`,
+      );
+    }
   } catch (err) {
     try {
-      await sink.end();
+      closeSync(fd);
     } catch {
-      // the write side is already failing; the unlink below is what matters
+      // already closed, or the write side is failing; the unlink below is what matters
     }
     await unlink(outPath).catch(() => {});
     throw err;

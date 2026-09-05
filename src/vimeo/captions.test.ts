@@ -804,10 +804,15 @@ describe("harvestVimeoCaptions — the no-captions manifest wait (v2 PR 5)", () 
     expect(c.manifestUrl).toBeUndefined();
   });
 
-  test("the larger of the two allowances applies when both are set on a track-less video", async () => {
-    const harness = fakeHarness({ hasVideo: true, tracks: [], manifestAfterMs: 400 });
-    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 100, awaitManifestNoCaptionsMs: 3_000 });
+  test("the larger of the two allowances applies when both are set on a track-less video — in BOTH orders", async () => {
+    const a = fakeHarness({ hasVideo: true, tracks: [], manifestAfterMs: 400 });
+    const c = await harvestVimeoCaptions("123", { launcher: a.launcher, awaitManifestMs: 100, awaitManifestNoCaptionsMs: 3_000 });
     expect(c.manifestUrl).toContain("/playlist/av/");
+    // The frames allowance is the larger one here; a rule that read only the
+    // no-captions allowance would give up at 100 ms and miss the manifest.
+    const b = fakeHarness({ hasVideo: true, tracks: [], manifestAfterMs: 400 });
+    const c2 = await harvestVimeoCaptions("123", { launcher: b.launcher, awaitManifestMs: 3_000, awaitManifestNoCaptionsMs: 100 });
+    expect(c2.manifestUrl).toContain("/playlist/av/");
   });
 });
 

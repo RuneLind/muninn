@@ -24,6 +24,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { getLog } from "../logging.ts";
 import { runProc, type ProcResult } from "../video/media.ts";
@@ -71,6 +72,25 @@ export function isEnglishOnlyModel(modelPath: string): boolean {
 export function parseDetectedLanguage(stderr: string): string | null {
   const m = /auto-detected language:\s*([a-z]{2,3})\b/i.exec(stderr);
   return m ? m[1]!.toLowerCase() : null;
+}
+
+/**
+ * Below this many words per minute of talk the "transcript" is whisper
+ * hallucinating on nothing: measured on 20 s of digital silence, `ggml-small`
+ * exits 0 with `auto-detected language: en (p = 0.35)` and ONE cue reading
+ * "you" — so "no cues" never happens and `no_speech` needs a floor. Speech
+ * runs at 100–160 wpm; a talk with long pauses still clears 5 by a wide margin.
+ */
+export const SPEECH_MIN_WORDS_PER_MINUTE = 5;
+
+/**
+ * Whether the windowed transcript is too thin to be speech. Duration 0 (the
+ * player never said) is read as one minute, so the floor still applies.
+ */
+export function looksSpeechless(segments: readonly { text: string }[], durationSec: number): boolean {
+  const words = segments.reduce((n, seg) => n + seg.text.split(/\s+/).filter((w) => w.length > 0).length, 0);
+  const minutes = Math.max(1, durationSec / 60);
+  return words < minutes * SPEECH_MIN_WORDS_PER_MINUTE;
 }
 
 /** The machine cannot transcribe: a binary or the model is missing. A job ERROR with its own code. */
@@ -152,6 +172,15 @@ export async function transcribeOpusRendition(
 ): Promise<WhisperTranscript> {
   const rep = chooseRepresentation(input.manifest, { kind: "audio", codec: "opus" });
   if (!rep) throw new VimeoTranscriptionError("Vimeo manifest has no audio rendition");
+  if (rep.codecs !== "opus") {
+    // `chooseRepresentation` falls back to the cheapest audio when there is no
+    // Opus. Named, because the size claims are Opus claims: at AAC's 194 kbps
+    // a 3 h talk is ~262 MB against the 256 MiB rendition cap.
+    log.warn("Vimeo manifest has no Opus rendition — transcribing from {codecs} ({kbps} kbps)", {
+      codecs: rep.codecs,
+      kbps: Math.round(rep.avgBitrate / 1000),
+    });
+  }
   const run = opts.run ?? runProc;
   const readVtt = opts.readVtt ?? ((p: string) => Bun.file(p).text());
 
@@ -204,6 +233,10 @@ export async function transcribeOpusRendition(
     whisperTimeoutFor(input.durationSec),
     "whisper-cli",
   );
+  // The audio is spent the moment whisper has exited, whatever it exited with:
+  // a 3 h talk is ~137 MB of Opus plus ~345 MB of WAV, and with Slides on the
+  // work dir is what the model is handed as --add-dir.
+  await Promise.all([unlink(audioPath).catch(() => {}), unlink(wavPath).catch(() => {})]);
   if (whisper.exitCode !== 0) {
     throw new VimeoTranscriptionError(`whisper-cli failed (exit ${whisper.exitCode}): ${whisper.stderr.slice(-500)}`);
   }
