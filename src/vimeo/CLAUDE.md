@@ -442,29 +442,47 @@ is handed as `--add-dir`), and the segments go with the dir in the `finally`.
 Statuses on that path: `harvesting_captions → downloading → transcribing →
 extracting_frames → summarizing → ingesting`.
 
-**Three findings from the review of #524, each now a rule.** (1) *The
-rendition file is written through a file descriptor with synchronous writes
-and its size is verified against the byte count* (`media.ts`): the
-`Bun.file().writer()` sink it replaced flushes in the background and reports a
-failed flush as a loose error nothing awaits — measured in a process that had
-launched and closed Chromium (the production shape): three of three whole-Opus
-downloads claimed 6 418 143 bytes and left 2.6–3.1 MB on disk, ffmpeg read the
-cut as a complete file, and the ingested talk would have ended halfway with
-nothing saying so. A size mismatch is a `VimeoMediaDownloadError` and the file
-is unlinked. (2) *`no_speech` is a FLOOR, not "no cues"*
+**The review of #524 (seven findings) and its two fix rounds left these
+rules.** (1) *The rendition file is written by one synchronous `appendFileSync`
+per segment — no descriptor held across an await — and its size is verified
+against the byte count* (`media.ts`, `sizeOnDisk` test seam). Two measured
+failures in a process that had launched and closed a Playwright Chromium (the
+production shape — the harvest runs first): the `Bun.file().writer()` sink
+flushed in the background and reported a failed flush as a loose error nothing
+awaited, so the count said 6 418 143 bytes while 2.6–3.1 MB were on disk (3/3,
+ffmpeg read the cut as a complete file); and round 1's descriptor opened once
+and held across the segment awaits was closed out from under the download —
+`EBADF` at segment 53 of 123 (2/2) — by the browser's delayed cleanup closing
+an fd number it no longer owned. A descriptor that exists only inside one
+synchronous call cannot interleave with that cleanup: 2/2 exact after the
+change, same shape. A size mismatch is a `VimeoMediaDownloadError` and the
+file is unlinked. (2) *`no_speech` is a FLOOR, not "no cues"*
 (`looksSpeechless`, `SPEECH_MIN_WORDS_PER_MINUTE` = 5): whisper hallucinates a
 word on silence (20 s of digital silence ⇒ exit 0, `en (p = 0.35)`, one cue
-"you"), so zero cues never happens; below 5 words per minute of talk the job is
-`no_speech` and no model call is spent. (3) *The Opus claim is a preference*:
-`chooseRepresentation` falls back to the cheapest audio when a manifest has no
-Opus, so an AAC-only manifest is transcribed from AAC with a warn naming the
-codec — and the sizing claims above are Opus claims (AAC at 194 kbps × 3 h is
-~262 MB against the 256 MiB cap; past it the declared-total pre-flight refuses
-and the job is `transcription_failed`). Stated residual: a track-less harvest
-spends the 25 s track wait AND up to 10 s of manifest wait inside the 60 s
-budget, so a watch page that takes ≥25 s to load leaves no room for the
-manifest and the capture degrades to `no_captions` rather than being
-transcribed.
+"you"), so zero cues never happens; below 5 words per minute of talk the job
+is `no_speech` and no model call is spent (the committed 53-min fixture runs
+at 104 wpm). (3) *The Opus claim is a preference*: `chooseRepresentation`
+falls back to the cheapest audio when a manifest has no Opus, so an AAC-only
+manifest is transcribed from AAC with a warn naming the codec; the sizing
+claims above are Opus claims — AAC at 194 kbps × 3 h is ~262 MB, still inside
+the 256 MiB (268 MB) cap by ~6 MB, and anything above ~199 kbps × 3 h is
+refused by the declared-total pre-flight as `transcription_failed`. (4) *The
+pre-flight runs BEFORE the harvest, and `no_captions` is answered BEFORE
+`whisper_unavailable`*: a track-less video with no manifest is `no_captions`
+on every machine (nothing to transcribe from — the operator remedy would be
+irrelevant), and only a video WITH audio to transcribe reports the machine's
+missing piece; so the harvest keeps its 10 s manifest wait on a whisper-less
+machine too, because without it the first answer would shadow the second.
+(5) *Nothing of the audio or frames pass outlives its step in the work dir*:
+the fMP4, the WAV and whisper's `.vtt` are unlinked as soon as they are
+consumed, and `extractCadenceFrames` removes its segment files after the last
+grab — the work dir is what the model is handed as `--add-dir`, and holds only
+the JPEGs. (6) The docs' operator remedy is spelled without `~` (no
+expansion). (7) The "larger of two allowances" test covers both orders.
+Stated residual: a track-less harvest spends the 25 s track wait AND up to
+10 s of manifest wait inside the 60 s budget, so a watch page that takes
+≥25 s to load leaves no room for the manifest and the capture degrades to
+`no_captions` rather than being transcribed.
 
 ## Rules the VERTICAL lives by (PR 2)
 
@@ -780,8 +798,9 @@ The value is read through `optionalEnv` with **no `~` expansion** (unlike the
 every no-captions capture answers `whisper_unavailable` pointing back at the
 variable. Without the three steps a no-captions capture fails with
 `whisper_unavailable` and a warn naming what is missing; captioned captures are
-unaffected — and since the pre-flight runs BEFORE the harvest, such a machine
-never holds the browser waiting for a manifest it cannot use.
+unaffected; a track-less video on such a machine still waits up to 10 s for
+the manifest, so the card can say "nothing to transcribe from" when that is
+the fact and "cannot transcribe" only when there is audio.
 
 ## Rules this module lives by
 

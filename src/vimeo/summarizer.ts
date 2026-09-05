@@ -438,9 +438,12 @@ export async function summarizeVimeo(
     //    closure: announced before the queue, a job waiting its turn reported a
     //    Chromium that was not running — for as long as every harvest ahead of
     //    it took.
-    // The whisper pre-flight runs BEFORE the harvest: a machine that cannot
-    // transcribe must not hold the browser 10 s for a manifest it will never
-    // use, and the answer is the same either side of the harvest.
+    // The whisper pre-flight runs BEFORE the harvest so its answer is in hand
+    // when the track question is; the harvest still waits for the manifest on
+    // a track-less video either way (10 s, on such videos only), because the
+    // card must say which of two facts holds — "nothing to transcribe from"
+    // (no manifest) or "this machine cannot transcribe" — and without the
+    // wait the first would shadow the second on every whisper-less machine.
     const whisperUnavailable = resolved.whisperUnavailable(config);
 
     const captions = await harvestQueue.run(HARVEST_QUEUE_KEY, () => {
@@ -455,7 +458,7 @@ export async function summarizeVimeo(
         // manifest (PR 5), and nothing knows before the harvest whether the
         // track exists. Costs nothing on a captioned video — the harvest only
         // waits on this when the player lists no track.
-        awaitManifestNoCaptionsMs: whisperUnavailable === null ? VIMEO_MANIFEST_WAIT_MS : 0,
+        awaitManifestNoCaptionsMs: VIMEO_MANIFEST_WAIT_MS,
       });
     });
 
@@ -478,25 +481,24 @@ export async function summarizeVimeo(
       transcriptVtt = await resolved.downloadVtt(track.vttUrl);
       captionLang = track.lang;
       captionKindOnDocument = detectCaptionKind(track.lang);
+    } else if (!captions.manifestUrl) {
+      // A legitimate answer about the video, not a failure of the mechanism:
+      // no caption track, and the player asked for no playlist inside the
+      // wait, so there is no audio to fall back to either — on ANY machine.
+      log.info("Vimeo video {videoId} has no usable caption track and no manifest — nothing to transcribe", {
+        videoId: meta.videoId,
+      });
+      failJob(jobId, NO_CAPTIONS_ERROR);
+      return;
     } else if (whisperUnavailable !== null) {
-      // The pre-flight's answer, given before the download (40 MB of audio
-      // for a machine that cannot transcribe it is the wrong order) — and
-      // before the manifest question, since without whisper the manifest is
-      // moot and the harvest was told not to wait for it.
+      // There IS audio to transcribe and this machine cannot: the pre-flight's
+      // answer, before the manifest fetch and the download (40 MB of audio for
+      // a machine that cannot transcribe it is the wrong order).
       log.warn("Vimeo video {videoId} has no caption track and this machine cannot transcribe it: {reason}", {
         videoId: meta.videoId,
         reason: whisperUnavailable,
       });
       failJob(jobId, WHISPER_UNAVAILABLE_ERROR);
-      return;
-    } else if (!captions.manifestUrl) {
-      // A legitimate answer about the video, not a failure of the mechanism:
-      // no caption track, and the player asked for no playlist inside the
-      // wait, so there is no audio to fall back to either.
-      log.info("Vimeo video {videoId} has no usable caption track and no manifest — nothing to transcribe", {
-        videoId: meta.videoId,
-      });
-      failJob(jobId, NO_CAPTIONS_ERROR);
       return;
     } else {
       updateStatus(jobId, "downloading");

@@ -34,7 +34,7 @@
  */
 
 import { unlink } from "node:fs/promises";
-import { closeSync, openSync, statSync, writeSync } from "node:fs";
+import { appendFileSync, statSync, writeFileSync } from "node:fs";
 import { getLog } from "../logging.ts";
 import { downloadPinned, VimeoDownloadError, VIMEO_MEDIA_HOST, VIMEO_MEDIA_HOSTS } from "./download.ts";
 
@@ -410,14 +410,6 @@ export interface RenditionFile {
  * failure the partial file is removed and the error rethrown: a truncated
  * fMP4 is a file ffmpeg reads to the cut and reports success on.
  */
-/** `writeSync` may write fewer bytes than asked; loop until the buffer is on the descriptor or it throws. */
-function writeAll(fd: number, bytes: Uint8Array): void {
-  let offset = 0;
-  while (offset < bytes.byteLength) {
-    offset += writeSync(fd, bytes, offset, bytes.byteLength - offset);
-  }
-}
-
 export async function downloadRendition(
   manifestUrl: string,
   manifest: VimeoManifest,
@@ -451,20 +443,23 @@ export async function downloadRendition(
   const deadline = Date.now() + timeoutMs;
   const maxSegmentBytes = opts.maxSegmentBytes ?? VIMEO_SEGMENT_MAX_BYTES;
 
-  // A plain file descriptor with SYNCHRONOUS writes, not `Bun.file().writer()`:
-  // that sink flushes in the background and reports a failed flush as a loose
-  // error nothing awaits, so `written` counted bytes QUEUED while the file on
-  // disk held fewer — measured 2026-09-05 (review of #524): in a process that
-  // had launched and closed a Playwright Chromium, three of three whole-Opus
-  // downloads claimed 6 418 143 bytes and left 2.6–3.1 MB on disk (66 × EBADF
-  // in the console), and ffmpeg read the truncated fMP4 to the cut and
-  // reported success. `writeSync` either writes or throws, and the size on
-  // disk is compared with the count before the file is handed over.
-  const fd = openSync(outPath, "w");
+  // Every write is one SYNCHRONOUS `appendFileSync` — open, write, close, no
+  // descriptor held across an await — and the size on disk is compared with
+  // the count before the file is handed over. Two measured reasons, both from
+  // the review of #524 (2026-09-05), both in a process that had launched and
+  // closed a Playwright Chromium (the production shape — the harvest runs
+  // first): `Bun.file().writer()` flushed in the background and reported a
+  // failed flush as a loose error nothing awaited, so the count said 6 418 143
+  // bytes while 2.6–3.1 MB were on disk (3/3); and a descriptor OPENED here and
+  // held across the segment awaits was closed out from under the download —
+  // `EBADF` at segment 53 of 123 (2/2) — by the browser's delayed cleanup
+  // closing a number it no longer owned. A descriptor that exists only inside
+  // one synchronous call cannot be interleaved with that cleanup.
+  writeFileSync(outPath, new Uint8Array(0));
   let written = 0;
   const segmentsWritten: { index: number; start: number; end: number }[] = [];
   try {
-    writeAll(fd, init);
+    appendFileSync(outPath, init);
     written += init.byteLength;
     for (const i of ordered) {
       const remaining = deadline - Date.now();
@@ -515,11 +510,10 @@ export async function downloadRendition(
           `Refusing ${rep.id}: wrote ${written + bytes.byteLength} bytes, over the ${maxTotal}-byte cap (declared ${declared})`,
         );
       }
-      writeAll(fd, bytes);
+      appendFileSync(outPath, bytes);
       written += bytes.byteLength;
       segmentsWritten.push({ index: i, start: seg.start, end: seg.end });
     }
-    closeSync(fd);
     const onDisk = (opts.sizeOnDisk ?? ((p: string) => statSync(p).size))(outPath);
     if (onDisk !== written) {
       throw new VimeoMediaDownloadError(
@@ -527,11 +521,6 @@ export async function downloadRendition(
       );
     }
   } catch (err) {
-    try {
-      closeSync(fd);
-    } catch {
-      // already closed, or the write side is failing; the unlink below is what matters
-    }
     await unlink(outPath).catch(() => {});
     throw err;
   }

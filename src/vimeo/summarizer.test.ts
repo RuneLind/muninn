@@ -1165,7 +1165,7 @@ test("a captioned capture runs the pre-flight ONCE (before the harvest), never t
   expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(10_000);
 });
 
-test("no track and NO manifest on a machine that could transcribe is still no_captions: nothing to transcribe from", async () => {
+test("no track and NO manifest is no_captions: nothing to transcribe from (the pre-flight was asked, before the harvest)", async () => {
   const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
   await summarizeVimeo(jobId, META, config, bot, whisperDeps({
     harvest: async () => captionsWith([]),
@@ -1236,14 +1236,23 @@ test("whisper + frames: ONE manifest fetch serves both, and the statuses run dow
   expect(ingestPayload!.caption_kind).toBe("whisper");
 });
 
-test("fix round 1: the whisper pre-flight runs BEFORE the harvest, so a machine that cannot transcribe never asks the browser to wait for the manifest", async () => {
+test("fix round 1/2: the whisper pre-flight runs BEFORE the harvest (asked exactly once), and a captioned capture on a whisper-less machine is unaffected", async () => {
   const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  let harvestSeenPreflight = false;
   await summarizeVimeo(jobId, META, config, bot, whisperDeps({
-    whisperUnavailable: () => "whisper-cli is not on PATH (brew install whisper-cpp)",
+    whisperUnavailable: () => { unavailableCalls++; return "whisper-cli is not on PATH (brew install whisper-cpp)"; },
+    harvest: async (_v: string, opts: Record<string, unknown>) => {
+      harvestSeenPreflight = unavailableCalls === 1;
+      lastHarvestOpts = opts;
+      return { ...captionsWith([]), manifestUrl: MANIFEST_URL };
+    },
   }));
   expect(getJob(jobId)!.error).toBe(WHISPER_UNAVAILABLE_ERROR);
-  expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(0);
-  // ...and a captioned capture on that machine is unaffected.
+  expect(harvestSeenPreflight).toBe(true);
+  expect(unavailableCalls).toBe(1);
+  // The wait is NOT withheld on such a machine: without the manifest the card
+  // could not tell "nothing to transcribe from" apart from "cannot transcribe".
+  expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(10_000);
   const jobId2 = createJob(VIDEO_ID, META.title, CANONICAL);
   await summarizeVimeo(jobId2, META, config, bot, whisperDeps({
     whisperUnavailable: () => "no whisper",
@@ -1251,7 +1260,6 @@ test("fix round 1: the whisper pre-flight runs BEFORE the harvest, so a machine 
     downloadVtt: async () => VTT,
   }));
   expect(getJob(jobId2)!.status).toBe("complete");
-  expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(0);
 });
 
 test("fix round 1: whisper's one hallucinated cue on silence is no_speech, not a summary of the word 'you'", async () => {
@@ -1265,4 +1273,22 @@ test("fix round 1: whisper's one hallucinated cue on silence is no_speech, not a
   }));
   expect(getJob(jobId)!.error).toBe(NO_SPEECH_ERROR);
   expect(lastPrompt).toBeUndefined();
+});
+
+test("fix round 2: no track, NO manifest, on a machine WITHOUT whisper is no_captions — the video's fact beats the machine's, and the harvest still waited for the manifest", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, whisperDeps({
+    whisperUnavailable: () => "whisper-cli is not on PATH (brew install whisper-cpp)",
+    harvest: async (_v: string, opts: Record<string, unknown>) => { lastHarvestOpts = opts; return captionsWith([]); },
+  }));
+  expect(getJob(jobId)!.error).toBe(NO_CAPTIONS_ERROR);
+  expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(10_000);
+  // With a manifest, the same machine is told what it is missing.
+  const jobId2 = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId2, META, config, bot, whisperDeps({
+    whisperUnavailable: () => "whisper-cli is not on PATH (brew install whisper-cpp)",
+  }));
+  expect(getJob(jobId2)!.error).toBe(WHISPER_UNAVAILABLE_ERROR);
+  expect(transcribeCalls).toEqual([]);
+  expect(manifestFetches).toEqual([]);
 });

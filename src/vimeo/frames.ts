@@ -27,7 +27,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { copyFile, mkdir } from "node:fs/promises";
+import { copyFile, mkdir, rm } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { frameBudgetFor } from "../video/media.ts";
 import {
@@ -247,6 +247,9 @@ export async function extractCadenceFrames(
     await grab(segmentFile, offset, out);
     frames.push({ path: out, tSeconds: t });
   }
+  // The segments are spent: the work dir is what the model is handed as
+  // --add-dir, and holds only the JPEGs from here on.
+  await Promise.all([...segmentFiles.values()].map((f) => rm(f, { force: true }).catch(() => {})));
   log.info("Extracted {n} cadence frames from {rep} ({segments} segments fetched)", {
     n: frames.length,
     rep: repLabel(rep),

@@ -263,6 +263,23 @@ describe("fix round 1", () => {
     expect(existsSync(join(dir, "audio.wav"))).toBe(false);
   });
 
+  test("fix round 2: whisper's .vtt is read and then unlinked too — the work dir holds nothing of the audio pass afterwards", async () => {
+    const m = fixture();
+    const dir = workDir();
+    const { run } = fakeRun();
+    const runWritingVtt = async (cmd: string[], t: number, l: string) => {
+      if (cmd[0] === "whisper-cli") await Bun.write(join(dir, "whisper.vtt"), WHISPER_VTT);
+      return run(cmd, t, l);
+    };
+    // The PRODUCTION reader (no readVtt seam), so the file must really be there when read.
+    const r = await transcribeOpusRendition(
+      { manifestUrl: MANIFEST_URL, manifest: m, durationSec: 60, workDir: dir },
+      { modelPath: "/m/ggml-small.bin", fetchImpl: cdnFetch(m).impl, run: runWritingVtt },
+    );
+    expect(r.vtt).toBe(WHISPER_VTT);
+    expect(existsSync(join(dir, "whisper.vtt"))).toBe(false);
+  });
+
   test("looksSpeechless: fewer than SPEECH_MIN_WORDS_PER_MINUTE words per minute is silence (whisper hallucinates a word on nothing)", () => {
     const mins = (n: number) => n * 60;
     expect(looksSpeechless([{ text: "you" }], mins(12))).toBe(true);

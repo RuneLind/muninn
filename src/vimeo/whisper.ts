@@ -175,7 +175,9 @@ export async function transcribeOpusRendition(
   if (rep.codecs !== "opus") {
     // `chooseRepresentation` falls back to the cheapest audio when there is no
     // Opus. Named, because the size claims are Opus claims: at AAC's 194 kbps
-    // a 3 h talk is ~262 MB against the 256 MiB rendition cap.
+    // a 3 h talk is ~262 MB, which still fits the 256 MiB (268 MB) rendition
+    // cap with ~6 MB to spare; anything above ~199 kbps × 3 h is refused by the
+    // declared-total pre-flight and lands as `transcription_failed`.
     log.warn("Vimeo manifest has no Opus rendition — transcribing from {codecs} ({kbps} kbps)", {
       codecs: rep.codecs,
       kbps: Math.round(rep.avgBitrate / 1000),
@@ -248,6 +250,9 @@ export async function transcribeOpusRendition(
       `whisper-cli exited 0 but wrote no ${vttBase}.vtt: ${err instanceof Error ? err.message : String(err)}`,
       { cause: err },
     );
+  } finally {
+    // Read into memory; the work dir holds nothing of the audio pass afterwards.
+    await unlink(`${vttBase}.vtt`).catch(() => {});
   }
   const lang = englishOnly ? "en" : (parseDetectedLanguage(whisper.stderr) ?? UNDETERMINED_LANG);
   log.info("Transcribed {sec}s of audio: language {lang}, {chars} chars of VTT", {
