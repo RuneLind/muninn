@@ -615,9 +615,8 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await page.reload();
     await expect(page.locator("#captureKind")).toHaveValue("talk-notes");
     await expect(page.locator("#captureLang")).toHaveValue("nb");
-    // Put back for the cases after this one, which post the defaults.
-    await page.locator("#captureKind").selectOption("standard");
-    await page.locator("#captureLang").selectOption("talk");
+    // Nothing to put back: every case gets its own browser context, so the
+    // stored picker dies with this one.
   });
 
   test("a picker value the server does not offer is a sentence on the card, and starts no job", async ({ request, page }) => {

@@ -477,6 +477,15 @@ describe("sum-submit-form: the kind + language picker", () => {
     expect(again.selected("captureLang")).toBe("en");
   });
 
+  test("EACH select persists on its own change — a reader who only changes the kind keeps it", () => {
+    const kindOnly = harness({ status: 200, body: {} }, { selects: SELECTS });
+    kindOnly.select("captureKind", "deep");
+    expect(kindOnly.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "deep", lang: "talk" }) });
+    const langOnly = harness({ status: 200, body: {} }, { selects: SELECTS });
+    langOnly.select("captureLang", "en");
+    expect(langOnly.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "standard", lang: "en" }) });
+  });
+
   test("a stored value the server no longer offers is ignored, per axis", () => {
     const h = harness(
       { status: 200, body: {} },
@@ -499,7 +508,7 @@ describe("sum-submit-form: the kind + language picker", () => {
   });
 
   test("a 400 that names a refused kind or language is that sentence, not the URL one", async () => {
-    const h = harness({ status: 400, body: { error: "bad_kind", code: "bad_kind", kind: "x" } }, { selects: SELECTS });
+    const h = harness({ status: 400, body: { error: "Unknown summary kind: x", code: "bad_kind", kind: "x" } }, { selects: SELECTS });
     h.setUrl("https://vimeo.com/1223642971");
     await h.submitCaptureUrlFromInput();
     expect(h.outcomes[0]!.opts).toMatchObject({ status: "error", sentence: "sentence:bad_kind" });

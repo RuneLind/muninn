@@ -99,6 +99,23 @@ describe("resolveCapturePresets", () => {
   });
 });
 
+describe("resolveCapturePresets — the connector decides whether an opus kind is OFFERED", () => {
+  test("deep is offered on the Anthropic-namespace connectors and omitted elsewhere", () => {
+    for (const c of ["claude-cli", "claude-sdk", "copilot-sdk", undefined] as const) {
+      expect(resolveCapturePresets(undefined, c).map((p) => p.id)).toEqual(["standard", "deep", "talk-notes"]);
+    }
+    expect(resolveCapturePresets(undefined, "openai-compat").map((p) => p.id)).toEqual(["standard", "talk-notes"]);
+  });
+
+  test("a per-bot override of deep is omitted with it on openai-compat — the run options are the kind's, not the file's", () => {
+    const resolved = resolveCapturePresets(
+      { captureSummaryVariants: [{ id: "deep", label: "Deep (ours)", content: "- ours" }] },
+      "openai-compat",
+    );
+    expect(resolved.map((p) => p.id)).toEqual(["standard", "talk-notes"]);
+  });
+});
+
 describe("findCapturePreset", () => {
   const presets = resolveCapturePresets(undefined);
 

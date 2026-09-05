@@ -134,7 +134,9 @@ export function registerSummariesRoutes(
     // The kind picker offers what the SUMMARIZER bot offers — the same
     // resolution the Vimeo route validates a POSTed kind against.
     const summarizerBot = resolveSummarizerBot(discoverAllBots());
-    const captureKinds = capturePresetOptions(resolveCapturePresets(summarizerBot?.prompts));
+    const captureKinds = capturePresetOptions(
+      resolveCapturePresets(summarizerBot?.prompts, summarizerBot?.connector),
+    );
     return c.html(await renderSummariesPage({ captureKinds }));
   });
 

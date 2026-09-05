@@ -14,7 +14,7 @@ the UI entry — the URL field on `/summaries`.
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · summarizing · ingesting · complete · error` |
 | `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
 | `../summaries/presets.ts` | The capture KINDS (`standard` · `deep` · `talk-notes`), per-bot `prompts/captureSummary.<id>.md` overrides, and the two run levers a kind can pull (`captureThinkingFor`, `captureBotConfigFor`) — pure |
-| `../summaries/language.ts` | `talk | nb | en`, `resolveOutputLang` (the `talk` → caption base tag rule) and the ONE spelling of the bokmål/English rider, which `src/share/prompt.ts` re-exports |
+| `../summaries/language.ts` | `talk \| nb \| en`, `resolveOutputLang` (the `talk` → caption base tag rule), `captionBaseLang` (shared with `chooseTrack`) and the ONE spelling of the bokmål/English rider, which `src/share/prompt.ts` re-exports |
 | `fixtures/totto-trust-but-verify.vtt` | Real auto-captions from a public JavaZone talk: 63 KB, 928 cues, 53 min |
 
 The route is `src/dashboard/routes/vimeo-routes.ts`; the huginn half is the
@@ -70,9 +70,22 @@ the picker rides on every capture POST, the article-box forward included. No
 `selected` attribute is server-rendered: the browser's memory is the script's,
 and a server-picked option would win over it.
 
-**Measured 2026-09-05 (the retrieval question the plan left open):** see the PR
-body of the muninn PR that shipped this — the Norwegian `?q=` before/after a
-Norwegian summary decides whether an English `## Key takeaways` anchor is added.
+**A kind the SUMMARIZER bot's connector cannot honour is not offered.**
+`resolveCapturePresets(prompts, connector)` drops an opus kind on a connector
+outside the Anthropic namespace, so `/summaries` never shows `deep` for an
+Ollama/Vertex summarizer and the route 400s a client that posts it anyway —
+otherwise the capture would run on the bot's own model and still be stamped
+`summary_kind: deep`, a document lying about itself. The summarizer's own
+model-stays warn is defence for a hand-built preset, not the product path.
+
+**Measured 2026-09-05 — the retrieval question the plan left open is closed, no
+anchor block.** With an ENGLISH summary on a Norwegian talk, Norwegian `?q=`
+hits were transcript windows first (0.999/0.996, the summary chunk 0.991 or
+absent); with a NORWEGIAN summary the top matched chunks were the summary's on
+all three queries (1.0/1.0/1.0; 0.997/0.995/0.994; 0.999/0.961 over a 0.927
+transcript window). The Norwegian summary ranks BETTER than the transcript, so
+`talk` stays the default and the English `## Key takeaways` anchor is not built.
+Table + queries: muninn #520.
 
 ## Rules the VERTICAL lives by (PR 2)
 

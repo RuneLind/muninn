@@ -52,8 +52,18 @@ export function isCaptureLang(value: unknown): value is CaptureLang {
  */
 export function resolveOutputLang(pick: CaptureLang, captionLang: string): OutputLang {
   if (pick !== "talk") return pick;
-  const base = captionLang.trim().toLowerCase().split("-")[0] ?? "";
+  const base = captionBaseLang(captionLang);
   return base === "no" || base === "nb" || base === "nn" ? "nb" : "en";
+}
+
+/**
+ * `no-x-autogen` → `no`, `nn-NO` → `nn`: the BASE subtag of a caption track's
+ * tag, ONE rule shared with `chooseTrack` (`src/vimeo/captions.ts`) so the
+ * track chosen as "the talk's own language" and the language the summary is
+ * written in can never disagree about what a tag means.
+ */
+export function captionBaseLang(lang: string): string {
+  return lang.trim().toLowerCase().replace(/-x-autogen$/, "").split("-")[0] ?? "";
 }
 
 /**

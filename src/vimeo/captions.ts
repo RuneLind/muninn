@@ -23,6 +23,7 @@
  * The signed URL expires in ~3.5 h. Download it IMMEDIATELY and persist the VTT,
  * never the URL.
  */
+import { captionBaseLang } from "../summaries/language.ts";
 import { getLog } from "../logging.ts";
 import { vimeoWatchUrl } from "./url.ts";
 
@@ -161,10 +162,8 @@ export function deHeadlessUserAgent(userAgent: string): string {
 
 // ── Track choice (pure) ──────────────────────────────────────────────────────
 
-/** `no-x-autogen` → `no`. */
-function baseLang(lang: string): string {
-  return lang.trim().toLowerCase().replace(/-x-autogen$/, "").split("-")[0] ?? "";
-}
+/** `no-x-autogen` → `no` — the ONE base-tag rule, owned by `src/summaries/language.ts`. */
+const baseLang = captionBaseLang;
 
 function isAuto(lang: string): boolean {
   return /-x-autogen$/i.test(lang.trim());

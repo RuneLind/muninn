@@ -708,9 +708,29 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, kind: "should-i-watch" });
 
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "bad_kind", code: "bad_kind", kind: "should-i-watch" });
+    expect(await res.json()).toMatchObject({ code: "bad_kind", kind: "should-i-watch" });
     expect(oembedCalls).toBe(oembedBefore);
     expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("the refusal's `error` is prose and its `code` is the machine token", async () => {
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, kind: "should-i-watch" });
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.code).toBe("bad_kind");
+    expect(body.error).not.toBe("bad_kind");
+    expect(body.error).toContain("should-i-watch");
+    const lang = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, lang: "no" });
+    const lb = (await lang.json()) as { error: string; code: string };
+    expect(lb.code).toBe("bad_lang");
+    expect(lb.error).not.toBe("bad_lang");
+  });
+
+  test("deep on a summarizer bot whose connector cannot run opus is bad_kind — never a deep-stamped non-deep capture", async () => {
+    summarizerBot = { ...cliBot, connector: "openai-compat", model: "qwen3.5:35b" };
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, kind: "deep" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("bad_kind");
     expect(vimeoSummarizeCalls).toBe(0);
   });
 
@@ -728,7 +748,7 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, lang: "no" });
 
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "bad_lang", code: "bad_lang", lang: "no" });
+    expect(await res.json()).toMatchObject({ code: "bad_lang", lang: "no" });
     expect(oembedCalls).toBe(oembedBefore);
     expect(vmState.getRecentJobs().length).toBe(before);
     expect(vimeoSummarizeCalls).toBe(0);

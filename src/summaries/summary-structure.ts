@@ -10,7 +10,7 @@
 
 /**
  * Shared structured-summary rules used by every capture vertical (youtube /
- * x-article / anthropic / article via {@link buildSummarySystemPrompt}, and tiktok inline).
+ * x-article / anthropic / article via `buildSummarySystemPrompt` in `summarizer-shared.ts`, and tiktok inline).
  *
  * The contract is deliberately uniform so stored summaries read consistently on
  * /summaries AND make clean drafter input downstream: one italic ingress line

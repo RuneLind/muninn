@@ -28,7 +28,7 @@
  * Pure + IO-free: the `BotPrompts` import is type-only, as in the share sibling.
  */
 
-import type { BotConfig, BotPrompts } from "../bots/config.ts";
+import type { BotConfig, BotPrompts, ConnectorType } from "../bots/config.ts";
 import { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
 
 /** How a kind's model call differs from the default capture call. */
@@ -105,30 +105,60 @@ export const SHIPPED_CAPTURE_PRESETS: readonly CapturePreset[] = [
 ];
 
 /**
- * Resolve the kinds a bot offers: the shipped set in order, with a per-bot
+ * Whether a connector can run {@link CAPTURE_DEEP_MODEL}: its model ids are
+ * Anthropic's. `claude-cli` and `claude-sdk` speak that namespace directly;
+ * `copilot-sdk` carries the id VERBATIM in its catalog (measured 2026-09-05 via
+ * `CopilotClient.listModels()`: `claude-opus-5` is listed as-is — its
+ * `resolveCopilotModelId` only respells a trailing `-N-M` version, which this
+ * id has none of, so a respelled catalog entry such as `claude-opus-5.1` would
+ * make Copilot fall back to its default model silently; re-measure when the
+ * constant moves). On `openai-compat` the model is whatever the endpoint serves
+ * — `qwen3.5:35b`, `google/gemini-2.5-flash` — and a Claude id there is a 400
+ * from the endpoint, not a bigger model.
+ */
+export function connectorRunsOpus(connector: ConnectorType | undefined): boolean {
+  const c = connector ?? "claude-cli";
+  return c === "claude-cli" || c === "claude-sdk" || c === "copilot-sdk";
+}
+
+/**
+ * Resolve the kinds a bot OFFERS: the shipped set in order, with a per-bot
  * `captureSummary.<id>.md` of the same id replacing that kind's INSTRUCTION in
  * place (label and run options kept — a file cannot state run options, and an
  * override that silently dropped `deep` to the capped call would be a kind
  * lying about itself), then the bot's remaining new ids appended with the
  * default run options.
  *
- * Never empty, and blank is absent at this layer too (the share sibling's rule:
- * the loader drops an empty file, but a `BotPrompts` from any other producer
- * handing over `"  \n"` would otherwise replace a kind's whole structure with
- * nothing).
+ * A kind whose run options this bot's CONNECTOR cannot honour is not offered
+ * at all: `deep` promises the opus model, and on a connector that cannot name
+ * it the capture would run on the bot's own model and still be stamped
+ * `summary_kind: deep` — a document lying about itself, with the only signal a
+ * server-side warn. Omitted here, the picker never shows it and the route 400s
+ * a client that asks anyway. A per-bot override of such a kind goes with it:
+ * the run options are the kind's, not the file's.
+ *
+ * Never empty (`standard` always survives), and blank is absent at this layer
+ * too (the share sibling's rule: the loader drops an empty file, but a
+ * `BotPrompts` from any other producer handing over `"  \n"` would otherwise
+ * replace a kind's whole structure with nothing).
  */
-export function resolveCapturePresets(prompts: BotPrompts | undefined): CapturePreset[] {
+export function resolveCapturePresets(
+  prompts: BotPrompts | undefined,
+  connector?: ConnectorType,
+): CapturePreset[] {
   const overrides = new Map<string, { label: string; content: string }>();
   for (const v of prompts?.captureSummaryVariants ?? []) {
     if (v.content.trim() === "") continue;
     overrides.set(v.id, { label: v.label, content: v.content });
   }
 
+  const runsOpus = connectorRunsOpus(connector);
   const resolved: CapturePreset[] = [];
   for (const shipped of SHIPPED_CAPTURE_PRESETS) {
     const override = overrides.get(shipped.id);
-    resolved.push(override ? { ...shipped, instruction: override.content } : shipped);
     overrides.delete(shipped.id);
+    if (shipped.run.model === "opus" && !runsOpus) continue;
+    resolved.push(override ? { ...shipped, instruction: override.content } : shipped);
   }
   for (const [id, extra] of overrides) {
     resolved.push({ id, label: extra.label, instruction: extra.content, run: DEFAULT_RUN });
@@ -158,23 +188,16 @@ export function capturePresetOptions(
 }
 
 /**
- * The bot config a kind's model call runs with.
- *
- * `opus` swaps the model ONLY on a connector whose model ids are Anthropic's
- * (`claude-cli`, `claude-sdk`, and `copilot-sdk`, which normalizes the dashed
- * id to its own catalog spelling): on `openai-compat` the model is whatever the
- * endpoint serves — `qwen3.5:35b`, `google/gemini-2.5-flash` — and a Claude id
- * there is a 400 from the endpoint, not a bigger model. The kind still lifts
- * the thinking cap there (`runCaptureOneShot` already treats the field as
- * `max_tokens` on that connector and never caps it), and the caller logs that
- * the model stayed, so a `deep` capture on such a bot is honest about what ran.
+ * The bot config a kind's model call runs with: `opus` swaps the model on a
+ * connector {@link connectorRunsOpus} admits, and otherwise returns the config
+ * UNCHANGED. That second branch is defence only — {@link resolveCapturePresets}
+ * does not offer an opus kind to such a bot, and the route refuses one — so a
+ * caller that reaches it (a direct `summarizeVimeo` call with a hand-built
+ * preset) gets the bot's model and, in the summarizer, one warn saying so.
  */
 export function captureBotConfigFor(botConfig: BotConfig, preset: CapturePreset): BotConfig {
   if (preset.run.model !== "opus") return botConfig;
-  const connector = botConfig.connector ?? "claude-cli";
-  const anthropicNamespace =
-    connector === "claude-cli" || connector === "claude-sdk" || connector === "copilot-sdk";
-  return anthropicNamespace ? { ...botConfig, model: CAPTURE_DEEP_MODEL } : botConfig;
+  return connectorRunsOpus(botConfig.connector) ? { ...botConfig, model: CAPTURE_DEEP_MODEL } : botConfig;
 }
 
 /**

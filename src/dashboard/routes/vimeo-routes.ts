@@ -345,21 +345,37 @@ export function registerVimeoRoutes(
     // reader would read the result as the kind they picked. The kind set is
     // the SUMMARIZER bot's (a per-bot `captureSummary.<id>.md` adds one), so
     // the bot is resolved here, ahead of dedup, and a missing bot is answered
-    // here too. Both 400s carry a machine `code` the card has a sentence for.
+    // here too — and the kind set is narrowed by the bot's CONNECTOR, so a
+    // `deep` a picker built for another bot cannot land on one that would run
+    // it on its own model. Both 400s carry a machine `code` the card has a
+    // sentence for.
     const summarizerBot = resolveSummarizerBot(discoverAllBots());
     if (!summarizerBot) {
       return c.json({ error: "No bots configured" }, 500);
     }
+    // `error` is PROSE and `code` is the machine token, the shape the URL 400
+    // above set: the card looks the code up in its sentence map and falls back
+    // to `error`, so a code that ever loses its sentence still reads as a
+    // sentence rather than as the token itself.
     if (body.kind !== undefined && typeof body.kind !== "string") {
-      return c.json({ error: "bad_kind", code: "bad_kind" }, 400);
+      return c.json({ error: "Summary kind must be a string", code: "bad_kind" }, 400);
     }
-    const preset = findCapturePreset(resolveCapturePresets(summarizerBot.prompts), body.kind);
+    const preset = findCapturePreset(
+      resolveCapturePresets(summarizerBot.prompts, summarizerBot.connector),
+      body.kind,
+    );
     if (!preset) {
-      return c.json({ error: "bad_kind", code: "bad_kind", kind: body.kind }, 400);
+      return c.json(
+        { error: `Unknown summary kind: ${body.kind}`, code: "bad_kind", kind: body.kind },
+        400,
+      );
     }
     const lang = body.lang === undefined || body.lang === "" ? DEFAULT_CAPTURE_LANG : body.lang;
     if (!isCaptureLang(lang)) {
-      return c.json({ error: "bad_lang", code: "bad_lang", lang: body.lang }, 400);
+      return c.json(
+        { error: `Unknown output language: ${String(body.lang)}`, code: "bad_lang", lang: body.lang },
+        400,
+      );
     }
 
     // oEmbed FIRST, and everything that can refuse the capture happens on its
