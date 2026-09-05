@@ -208,16 +208,20 @@ whole budget rejects in ~50 ms measured, under 250 ms asserted, not 30 s). The
 rendition cap is checked TWICE on the SAME quantity — the bytes the call will
 write, init segment included: on the declared total before the first fetch, so
 an oversized request costs nothing, and on the bytes WRITTEN as they arrive —
-the first review found the declared check alone let ten declared-10-byte
-segments' worth of 200 000-byte bodies through, and a negative declared `size`
-cancel a positive one (parse now refuses negative `size`, `start`, `end`); the
-verify pass found the two checks measuring different things (init in one, not
-the other), so a cap exactly at the declared total passed the pre-flight and
-failed after every fetch. **The declared size is NOT exact.** Every live
-segment arrives at declared + 1 byte — measured on 20 segments across all four
-renditions, +1 every time: the segment URL's `range=a-b` is an INCLUSIVE byte
-range and `size` is `b − a`; the 720p init segment is 803 bytes, so the
-smoke's "declared 485 621, wrote 486 425" is 803 + 485 622. A segment that
+the first review found the declared check alone let bodies far larger than
+their declared sizes through (the pin: `media.test.ts` "the total cap bounds
+bytes WRITTEN, not only bytes declared" — the numbers live THERE, not here),
+and a negative declared `size` cancel a positive one (parse now refuses
+negative `size`, `start`, `end`); the verify pass found the two checks
+measuring different things (init in one, not the other), so a cap exactly at
+the declared total passed the pre-flight and failed after every fetch (the
+pin: "the declared pre-flight and the written check measure the SAME
+quantity"). **The declared size is NOT exact.** Every live segment arrives at
+declared + 1 byte — measured 2026-09-05 on 20 segments across four of the seven
+renditions (720p, 1080p, 240p, Opus), +1 every time: the segment URL's
+`range=a-b` is an INCLUSIVE byte range and `size` is `b − a`; init segments
+run 678–806 bytes by rendition (the 720p one is 803), so the smoke's
+"declared 485 621, wrote 486 425" is 803 + 485 622. A segment that
 arrives SHORTER than it declared is refused outright (a truncated fMP4 is a
 file ffmpeg reads up to the cut and reports success on — the one failure the
 engine's own cap cannot see, since a cap bounds "too much"); the check is `<`

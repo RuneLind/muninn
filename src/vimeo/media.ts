@@ -59,14 +59,15 @@ export const VIMEO_SEGMENT_MAX_BYTES = 16 * 1024 * 1024;
 export const VIMEO_SEGMENT_TIMEOUT_MS = 30_000;
 
 /**
- * The most a single `downloadRendition` may write — checked TWICE: on the
- * manifest's DECLARED sizes before the first fetch (so an oversized request is
- * refused at zero cost) and on the bytes actually WRITTEN as they arrive (so a
- * manifest that under-declares cannot walk past it — the declared sizes come
- * from the same third-party page as the URLs). Sized against the
- * whole-rendition callers: the entire 240p video of a 3 h talk is ~176 MB
- * (52 MB measured per 53 min), the entire Opus audio ~137 MB, and 60 sparse
- * 1080p segments ~72 MB.
+ * The most a single `downloadRendition` may write — checked TWICE on the SAME
+ * quantity, the bytes the call will put in the file, init segment included: on
+ * the manifest's DECLARED sizes before the first fetch (so an oversized request
+ * is refused at zero cost) and on the bytes actually WRITTEN as they arrive (so
+ * a manifest that under-declares cannot walk past it — the declared sizes come
+ * from the same third-party page as the URLs, and the live CDN over-delivers
+ * by one byte per segment anyway). Sized against the whole-rendition callers:
+ * the entire 240p video of a 3 h talk is ~176 MB (52 MB measured per 53 min),
+ * the entire Opus audio ~137 MB, and 60 sparse 1080p segments ~72 MB.
  */
 export const VIMEO_RENDITION_MAX_BYTES = 256 * 1024 * 1024;
 

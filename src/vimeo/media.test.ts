@@ -420,21 +420,8 @@ describe("fix round 1 — what the review found", () => {
     expect(() => parseVimeoManifest(negStart)).toThrow(/"start" is not a non-negative number/);
   });
 
-  test("each segment fetch is clamped to what is LEFT of the whole budget", async () => {
-    // A fetch that never settles and ignores its signal: with the clamp the
-    // segment's own budget is the 50 ms left and the download rejects in ~50 ms
-    // naming the whole operation; without it the segment would wait 30 s.
-    const m = fixture();
-    const impl = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
-    const out = join(dir(), "hang.mp4");
-    const outcome = await Promise.race([
-      downloadRendition(MANIFEST_URL, m, rep720(m), [0], out, { fetchImpl: impl, timeoutMs: 50 }).catch((e) => e),
-      new Promise((r) => setTimeout(() => r("still pending after 400ms"), 400)),
-    ]);
-    expect(outcome).toBeInstanceOf(VimeoMediaDownloadError);
-    expect((outcome as Error).message).toMatch(/Rendition download timed out after 50ms \(0\/1 segments\)/);
-    expect(existsSync(out)).toBe(false);
-  });
+  // The clamp's pin lives in "fix round 2" below (bounded wall-clock, timer
+  // cleared); the 400 ms race that first sat here pinned only "under 400 ms".
 
   test("resolveSegmentUrl RESOLVES the representation's base, it does not concatenate", () => {
     const m = fixture();
