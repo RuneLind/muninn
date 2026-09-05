@@ -24,6 +24,7 @@ const log = getLog("vimeo", "state");
 export type JobStatus =
   | "pending"
   | "harvesting_captions"
+  | "extracting_frames"
   | "summarizing"
   | "ingesting"
   | "complete"

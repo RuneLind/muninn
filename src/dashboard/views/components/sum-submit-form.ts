@@ -113,6 +113,21 @@ export function sumSubmitFormStyles(): string {
       cursor: pointer;
     }
     .capture-url-form select:focus { outline: none; border-color: var(--accent); }
+    .capture-url-form .capture-frames {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      font-size: 14px;
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+    }
+    .capture-url-form .capture-frames:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
     @media (max-width: 720px) {
       .capture-url-form { flex-wrap: wrap; }
       .capture-url-form input { flex-basis: 100%; }
@@ -155,12 +170,25 @@ function selectHtml(id: string, label: string, options: readonly CapturePickerOp
 export function captureUrlFormHtml(picker: {
   kinds: readonly CapturePickerOption[];
   langs: readonly CapturePickerOption[];
+  /**
+   * Whether the SUMMARIZER bot's connector can read frames (`supportsExtraDirs`).
+   * When false the Slides checkbox renders DISABLED with the reason in its
+   * title, rather than absent — the reader learns why there are no slides
+   * instead of never seeing the control. Default true (a render with no bot in
+   * hand — tests).
+   */
+  framesSupported?: boolean;
 }): string {
+  const framesSupported = picker.framesSupported ?? true;
+  const framesTitle = framesSupported
+    ? "Pull one slide frame every ~40 s of the talk and let the summary quote slides inline (off by default; remembered)"
+    : "The summarizer bot's connector cannot read frame files (no extra-dirs support) — set SUMMARIZER_BOT to a claude-cli or claude-sdk bot";
   return `
     <div class="capture-url-form">
       <input type="url" id="captureUrl" aria-label="Vimeo URL" placeholder="Paste a Vimeo URL…" autocomplete="off" spellcheck="false" />
       ${selectHtml("captureKind", "Summary kind", picker.kinds)}
       ${selectHtml("captureLang", "Output language", picker.langs)}
+      <label class="capture-frames" title="${escapeAttr(framesTitle)}"><input type="checkbox" id="captureFrames"${framesSupported ? "" : " disabled"} /> Slides</label>
       <button id="captureUrlBtn" type="button" onclick="submitCaptureUrlFromInput()">Summarize</button>
     </div>`;
 }
@@ -319,25 +347,49 @@ export function sumSubmitFormScript(): string {
       }
     }
 
-    /** The picker's current choice, as the capture POST body carries it. */
+    /**
+     * The picker's current choice, as the capture POST body carries it.
+     * \`frames\` is always a boolean: a DISABLED checkbox (the summarizer's
+     * connector cannot read frames) reads false whatever storage remembers,
+     * so a browser that ticked Slides on one instance never sends a 503 on
+     * another.
+     */
     function capturePickerValues() {
       var kindEl = document.getElementById('captureKind');
       var langEl = document.getElementById('captureLang');
+      var framesEl = document.getElementById('captureFrames');
       var out = {};
       if (kindEl && kindEl.value) out.kind = kindEl.value;
       if (langEl && langEl.value) out.lang = langEl.value;
+      out.frames = !!(framesEl && !framesEl.disabled && framesEl.checked);
       return out;
     }
 
     (function initCapturePicker() {
       var kindEl = document.getElementById('captureKind');
       var langEl = document.getElementById('captureLang');
+      var framesEl = document.getElementById('captureFrames');
       var prefs = readCapturePrefs();
       selectIfOffered(kindEl, prefs.kind);
       selectIfOffered(langEl, prefs.lang);
-      function persist() { writeCapturePrefs(capturePickerValues()); }
+      // Off by default (the plan's decision); restored only as a real boolean.
+      if (framesEl && !framesEl.disabled && prefs.frames === true) framesEl.checked = true;
+      // A DISABLED box has nothing to say about the reader's standing choice:
+      // the picker's kind/lang changes persist too, and rewriting \`frames\`
+      // from a disabled box erased a tick made on another instance (measured
+      // by review: laptop ticks Slides, the copilot-summarizer instance changes
+      // only the kind, the tick is gone on both). Storage keeps what it had.
+      function persist() {
+        var values = capturePickerValues();
+        if (framesEl && framesEl.disabled) {
+          var stored = readCapturePrefs();
+          if (typeof stored.frames === 'boolean') values.frames = stored.frames;
+        }
+        writeCapturePrefs(values);
+      }
       if (kindEl && kindEl.addEventListener) kindEl.addEventListener('change', persist);
       if (langEl && langEl.addEventListener) langEl.addEventListener('change', persist);
+      if (framesEl && framesEl.addEventListener) framesEl.addEventListener('change', persist);
     })();
 
     /**
@@ -389,7 +441,7 @@ export function sumSubmitFormScript(): string {
         var res = await fetch('/api/vimeo/summarize', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: url, kind: picked.kind, lang: picked.lang }),
+          body: JSON.stringify({ url: url, kind: picked.kind, lang: picked.lang, frames: picked.frames }),
         });
         var data = {};
         try { data = await res.json(); } catch (e) { data = {}; }
