@@ -129,7 +129,20 @@ export function referencedFrameSeconds(summary: string, videoId: string): number
   const re = new RegExp(`\\(/api/vimeo/frames/${videoId}/(\\d{1,6})\\.jpg\\)`, "g");
   const out = new Set<number>();
   let m: RegExpExecArray | null;
-  while ((m = re.exec(summary)) !== null) out.add(Number(m[1]));
+  while ((m = re.exec(summary)) !== null) {
+    // Only the CANONICAL spelling is a reference: the file is `47.jpg` and the
+    // route serves exactly that, so `047.jpg` is an address that will 404 —
+    // counting it as kept (via `Number`) would report a frame the reader never
+    // gets. Logged and dropped, like an invented path.
+    if (String(Number(m[1])) !== m[1]) {
+      log.warn("Vimeo summary of {videoId} quotes a non-canonical frame path {path} — not a served address", {
+        videoId,
+        path: m[0],
+      });
+      continue;
+    }
+    out.add(Number(m[1]));
+  }
   return [...out].sort((a, b) => a - b);
 }
 

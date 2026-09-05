@@ -345,6 +345,10 @@ export function registerVimeoRoutes(
     if (!FRAME_VIDEO_ID_RE.test(videoId) || !FRAME_FILE_RE.test(file)) return c.notFound();
     const rootAbs = resolvePath(framesRoot);
     const fileAbs = resolvePath(rootAbs, videoId, file);
+    // Unreachable while the two charset gates above hold (both segments are
+    // ASCII digits, so the resolved path is always `<root>/<digits>/<digits>.jpg`
+    // — enumerated, not sampled). Kept as defence in depth, the wiki explainer
+    // route's shape; a test cannot reach it and none claims to.
     if (!fileAbs.startsWith(rootAbs + pathSep)) return c.notFound();
     const f = Bun.file(fileAbs);
     if (!(await f.exists())) return c.notFound();
@@ -352,8 +356,11 @@ export function registerVimeoRoutes(
       headers: {
         "Content-Type": "image/jpeg",
         // A frame is (video, second) — re-extracting the same second of the
-        // same rendition is the same picture, so a day of caching is safe.
-        "Cache-Control": "public, max-age=86400",
+        // same rendition is the same picture, so a day of caching is safe —
+        // PRIVATE, because this route sits in the default-deny (admin) zone
+        // under MUNINN_AUTH and `public` would let a shared cache in front of
+        // the instance serve a slide to a request that would otherwise 403.
+        "Cache-Control": "private, max-age=86400",
       },
     });
   });
@@ -457,10 +464,11 @@ export function registerVimeoRoutes(
 
     // `toDurationSec` degrades a missing, non-numeric or negative `duration` to
     // 0 — "the endpoint did not say" — and 0 passes the cap below unconditionally.
-    // The duration is the ONLY length bound this vertical has (there is no
-    // download to time out and no frame budget), so a metadata answer that never
-    // said how long the video is refuses rather than starting an unbounded
-    // capture. Below the not-public branch, which carries no duration at all.
+    // The duration is the length bound EVERYTHING downstream is sized from — the
+    // 3 h cap, the frame budget (`cadenceTimes`) and the summarize timeout all
+    // read it — so a metadata answer that never said how long the video is
+    // refuses rather than starting an unbounded capture. Below the not-public
+    // branch, which carries no duration at all.
     if (meta.durationSec === 0) {
       return c.json({ error: "duration_unknown" }, 422);
     }

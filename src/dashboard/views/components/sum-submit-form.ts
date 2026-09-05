@@ -374,7 +374,19 @@ export function sumSubmitFormScript(): string {
       selectIfOffered(langEl, prefs.lang);
       // Off by default (the plan's decision); restored only as a real boolean.
       if (framesEl && !framesEl.disabled && prefs.frames === true) framesEl.checked = true;
-      function persist() { writeCapturePrefs(capturePickerValues()); }
+      // A DISABLED box has nothing to say about the reader's standing choice:
+      // the picker's kind/lang changes persist too, and rewriting \`frames\`
+      // from a disabled box erased a tick made on another instance (measured
+      // by review: laptop ticks Slides, the copilot-summarizer instance changes
+      // only the kind, the tick is gone on both). Storage keeps what it had.
+      function persist() {
+        var values = capturePickerValues();
+        if (framesEl && framesEl.disabled) {
+          var stored = readCapturePrefs();
+          if (typeof stored.frames === 'boolean') values.frames = stored.frames;
+        }
+        writeCapturePrefs(values);
+      }
       if (kindEl && kindEl.addEventListener) kindEl.addEventListener('change', persist);
       if (langEl && langEl.addEventListener) langEl.addEventListener('change', persist);
       if (framesEl && framesEl.addEventListener) framesEl.addEventListener('change', persist);

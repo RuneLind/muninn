@@ -336,6 +336,8 @@ interface FakePageSpec {
   manifestAfterMs?: number;
   /** The CDN host that manifest request names (default the vod-adaptive one). */
   manifestHost?: string;
+  /** The scheme of that request (default https). */
+  manifestScheme?: string;
   duration?: number;
 }
 
@@ -421,8 +423,8 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
       if (spec.manifestAfterMs !== undefined) {
         setTimeout(() => {
           for (const h of requestHandlers) {
-            h({ url: () => spec.manifestHost
-              ? `https://${spec.manifestHost}/0-0x0/x/psid=x/v2/playlist/av/primary/prot/x/playlist.json`
+            h({ url: () => spec.manifestHost || spec.manifestScheme
+              ? `${spec.manifestScheme ?? "https"}://${spec.manifestHost ?? "vod-adaptive-ak.vimeocdn.com"}/0-0x0/x/psid=x/v2/playlist/av/primary/prot/x/playlist.json`
               : "https://vod-adaptive-ak.vimeocdn.com/exp=0/x/v2/playlist/av/primary/prot/x/playlist.json" });
           }
         }, spec.manifestAfterMs);
@@ -784,6 +786,12 @@ describe("harvestVimeoCaptions — which manifest hosts count (v2 PR 4)", () => 
     const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 50, manifestHost: "skyfire.vimeocdn.com" });
     const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 2_000 });
     expect(c.manifestUrl).toContain("skyfire.vimeocdn.com");
+  });
+
+  test("an http:// playlist on a listed host is NOT recorded — the pin would refuse it, and recording it would turn 'no frames' into 'frames failed'", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 50, manifestScheme: "http" });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 300 });
+    expect(c.manifestUrl).toBeUndefined();
   });
 
   test("a playlist-shaped URL on an unlisted host is NOT recorded — the pin decides what is fetched, the harvest what is looked at", async () => {

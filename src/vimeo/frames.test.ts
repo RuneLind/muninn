@@ -115,6 +115,11 @@ describe("referencedFrameSeconds", () => {
     expect(referencedFrameSeconds(summary, "999")).toEqual([26]);
     expect(referencedFrameSeconds("no images here", "1223642971")).toEqual([]);
   });
+
+  test("a ZERO-PADDED second is not a reference: the route serves 47.jpg, never 047.jpg, so counting it as kept would be a served 404", () => {
+    const summary = "![Slide at 00:00:47](/api/vimeo/frames/42/047.jpg) ![ok](/api/vimeo/frames/42/47.jpg) ![zero](/api/vimeo/frames/42/0.jpg)";
+    expect(referencedFrameSeconds(summary, "42")).toEqual([0, 47]);
+  });
 });
 
 describe("keepReferencedFrames", () => {
@@ -128,8 +133,8 @@ describe("keepReferencedFrames", () => {
     const summary =
       "![Slide at 00:23:10](/api/vimeo/frames/42/1390.jpg) ![Slide](/api/vimeo/frames/42/26.jpg) " +
       "![invented](/api/vimeo/frames/42/777.jpg)";
-    const kept = await keepReferencedFrames(summary, "42", frames, root);
-    expect(kept).toEqual([26, 1390]);
+    const kept = await keepReferencedFrames(summary + " ![padded](/api/vimeo/frames/42/02000.jpg)", "42", frames, root);
+    expect(kept).toEqual([26, 1390]); // 02000 is not 2000.jpg's address
     expect(readdirSync(join(root, "42")).sort()).toEqual(["1390.jpg", "26.jpg"]);
     expect(readFileSync(join(root, "42", "1390.jpg"), "utf8")).toBe("B");
     expect(existsSync(join(root, "42", "2000.jpg"))).toBe(false);
@@ -262,7 +267,16 @@ describe("extractCadenceFrames", () => {
     ).rejects.toThrow(/Frame extraction timed out after 30ms \(\d+\/\d+ frames\)/);
   });
 
-  test("the rendition is the smallest at least VIMEO_FRAME_HEIGHT tall", () => {
+  test("the rendition is the smallest at least VIMEO_FRAME_HEIGHT tall — 720p when present, 1080p when 720p is missing", async () => {
     expect(VIMEO_FRAME_HEIGHT).toBe(720);
+    const m = smallFixture();
+    const no720: VimeoManifest = {
+      ...m,
+      video: m.video.filter((r) => r.height !== 720).map((r) => ({ ...r, segments: r.segments.map((seg) => ({ ...seg, size: 7 })) })),
+    };
+    const { fetchImpl, fetched, grabFrame } = stubs();
+    await extractCadenceFrames({ manifestUrl: MANIFEST_URL, manifest: no720, durationSec: 3, workDir: dir() }, { fetchImpl, grabFrame });
+    expect(fetched.length).toBeGreaterThan(0);
+    expect(fetched.every((u) => u.includes("rep-video-1080p"))).toBe(true);
   });
 });

@@ -1313,7 +1313,7 @@ describe("Vimeo: GET /api/vimeo/frames/:videoId/:file (v2 PR 4)", () => {
     const ok = await app.request("/api/vimeo/frames/1223358361/1390.jpg");
     expect(ok.status).toBe(200);
     expect(ok.headers.get("content-type")).toBe("image/jpeg");
-    expect(ok.headers.get("cache-control")).toBe("public, max-age=86400");
+    expect(ok.headers.get("cache-control")).toBe("private, max-age=86400");
     expect(await ok.text()).toBe("JPEGBYTES");
 
     for (const path of [
@@ -1327,6 +1327,27 @@ describe("Vimeo: GET /api/vimeo/frames/:videoId/:file (v2 PR 4)", () => {
       const res = await app.request(path);
       expect(res.status).toBe(404);
     }
+  });
+
+  test("the charset gate refuses a non-digit id even when that FILE EXISTS under the root", async () => {
+    // Without a planted file, `/abc/1390.jpg` 404s because nothing is there —
+    // a test that cannot tell "refused by charset" from "missing". Plant it.
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-route-"));
+    mkdirSync(join(root, "abc"));
+    writeFileSync(join(root, "abc", "1390.jpg"), "X");
+    mkdirSync(join(root, "1223358361"));
+    writeFileSync(join(root, "1223358361", "frame.jpg"), "X");
+    const app = appWithFrames(root);
+    expect((await app.request("/api/vimeo/frames/abc/1390.jpg")).status).toBe(404);
+    expect((await app.request("/api/vimeo/frames/1223358361/frame.jpg")).status).toBe(404);
+  });
+
+  test("a kept frame is cached PRIVATELY: the route sits in the admin zone under MUNINN_AUTH, and a shared cache must not serve it past a 403", async () => {
+    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-route-"));
+    mkdirSync(join(root, "1223358361"));
+    writeFileSync(join(root, "1223358361", "1390.jpg"), "X");
+    const res = await appWithFrames(root).request("/api/vimeo/frames/1223358361/1390.jpg");
+    expect(res.headers.get("cache-control")).toBe("private, max-age=86400");
   });
 
   test("is read-only: no POST, PUT or DELETE is registered on the path", async () => {

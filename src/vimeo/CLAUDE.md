@@ -282,7 +282,9 @@ slides are opt-out, never a silent skip. On `/summaries` the **Slides checkbox**
 title where the route would 503, and a disabled box posts `false` whatever
 storage remembers — a tick taken on one instance must not 503 on another. The
 tick is remembered under the same `muninn.summaries.capture.v1` key as kind and
-language, restored only as a real boolean `true`.
+language, restored only as a real boolean `true` — and a disabled box never
+WRITES `frames`: kind/lang changes persist the whole picker, so a disabled
+instance would otherwise erase a tick made on another one.
 
 **The harvest WAITS for the manifest when frames are wanted, and the media
 host is an ALLOWLIST.** Measured on the first live frames capture: the caption
@@ -321,21 +323,26 @@ frames, so a frames-off capture's prompt is byte-identical to PR 1's.
 parses the summary for this video's `/api/vimeo/frames/<id>/<sec>.jpg` paths and
 copies those out of the work dir to `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg`
 (`framesRootDir()`, beside `agent-cwd`) — a quoted path that was never
-extracted is logged and skipped, so the reader gets a broken image rather than
+extracted, or a non-canonical spelling (`047.jpg`, which the route never
+serves), is logged and skipped, so the reader gets a broken image rather than
 a served file from nowhere — and the work dir (segments + unquoted frames) is
 removed in the job's `finally`. The summary text is ingested with the image
 markdown intact; the doc panel renders it through `marked`'s default `<img>`,
 same-origin. **The document's frames are therefore only live inside muninn's
 UI**, which the plan accepted (huginn serves no static files). Nothing removes
 a kept frame when the document is deleted (the delete signal carries a document
-id, not a video id) — a follow-up; a talk's quoted frames are ~8 × 50 KB.
+id, not a video id) — a follow-up; a talk's quoted frames measured 725 KB for
+8 (54–102 KB each at 720p).
 
 **`GET /api/vimeo/frames/:videoId/:file` is read-only and default-deny by
 charset.** Both segments are gated (`FRAME_VIDEO_ID_RE` digits,
 `FRAME_FILE_RE` `<digits>.jpg`) BEFORE any filesystem access, the resolved path
-is checked to stay under the root anyway, everything else is a 404 (never a 400
-that confirms the shape), `Cache-Control: public, max-age=86400` (a frame is
-(video, second) — re-extracting the same second is the same picture). It is
+is checked to stay under the root anyway (unreachable while both charset gates
+hold — enumerated, defence in depth), everything else is a 404 (never a 400
+that confirms the shape), `Cache-Control: private, max-age=86400` (a frame is
+(video, second) — re-extracting the same second is the same picture; PRIVATE
+because the route is in the admin zone under `MUNINN_AUTH` and a shared cache
+must not serve past a 403). It is
 registered inside `registerVimeoRoutes`, so `MUNINN_PROFILE=nais` drops it with
 the vertical. A test seam (`VimeoRouteOptions.framesRoot`) points it at a temp
 root.

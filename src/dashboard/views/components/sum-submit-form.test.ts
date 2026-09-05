@@ -745,6 +745,10 @@ describe("sum-submit-form: the Slides checkbox (v2 PR 4)", () => {
     h.setUrl("https://vimeo.com/1223642971");
     await h.submitCaptureUrlFromInput();
     expect((h.fetchCalls[0]!.body as { frames: boolean }).frames).toBe(false);
+    // The stored tick SURVIVES a disabled instance: changing the kind here
+    // must not rewrite storage with frames:false and erase the laptop's choice.
+    h.select("captureKind", "deep");
+    expect(JSON.parse(h.stored()["muninn.summaries.capture.v1"]!)).toEqual({ kind: "deep", lang: "talk", frames: true });
     // Defence in depth: even a disabled box that somehow READS checked (a stale
     // DOM, devtools) posts false — the read site checks `disabled` itself.
     h.check("captureFrames", true);
