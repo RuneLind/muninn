@@ -196,16 +196,17 @@ describe("downloadVtt — the bounds", () => {
 
   test("the BODILESS read is inside the budget as well", async () => {
     // The third door into the same hang: `res.body` null takes an
-    // `await res.text()` shortcut, and a stub whose `text()` never settles is
-    // bounded by neither the cap nor the signal. Built as a bare object rather
-    // than a `Response`, because a real bodiless `Response.text()` always
+    // `await res.arrayBuffer()` shortcut (the shared engine in `download.ts`
+    // reads bytes; this caller decodes), and a stub whose read never settles
+    // is bounded by neither the cap nor the signal. Built as a bare object
+    // rather than a `Response`, because a real bodiless `Response` read always
     // resolves — the stub IS the seam this path is reached through.
     const impl = (async () => ({
       status: 200,
       ok: true,
       headers: new Headers(),
       body: null,
-      text: () => new Promise<string>(() => {}),
+      arrayBuffer: () => new Promise<ArrayBuffer>(() => {}),
     })) as unknown as typeof fetch;
     const outcome = await settledWithin(downloadVtt(SIGNED, { fetchImpl: impl, timeoutMs: 30 }));
     expect(outcome).toBeInstanceOf(VimeoVttDownloadError);

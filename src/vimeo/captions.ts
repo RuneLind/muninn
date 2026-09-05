@@ -25,6 +25,8 @@
  */
 import { captionBaseLang } from "../summaries/language.ts";
 import { getLog } from "../logging.ts";
+import { downloadPinned, VimeoDownloadError } from "./download.ts";
+import { VIMEO_MEDIA_HOST } from "./media.ts";
 import { vimeoWatchUrl } from "./url.ts";
 
 const log = getLog("vimeo", "captions");
@@ -56,9 +58,12 @@ export interface VimeoCaptions {
   readonly durationSec: number;
   readonly tracks: VimeoCaptionTrack[];
   /**
-   * The signed HLS/DASH manifest, if the player asked for one while we watched.
-   * Nothing in PR 1 reads it — it is what an audio/Whisper fallback would need,
-   * and capturing a URL we are already listening for costs nothing.
+   * The signed JSON manifest on {@link VIMEO_MEDIA_HOST}, if the player asked
+   * for one while we watched — the media seam's (`media.ts`) input: frames and
+   * the audio fallback both start from it. Absent when the player never
+   * requested it inside the budget, which the harvest does not wait for: the
+   * captions are what a capture NEEDS, the manifest is what frames WANT.
+   * Expires like the caption URL (~3.5 h); never persisted.
    */
   readonly manifestUrl?: string;
 }
@@ -98,7 +103,7 @@ export class VimeoHarvestError extends Error {
   }
 }
 
-export class VimeoVttDownloadError extends Error {
+export class VimeoVttDownloadError extends VimeoDownloadError {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = "VimeoVttDownloadError";
@@ -216,182 +221,23 @@ export interface DownloadVttOptions {
 /**
  * Download one signed caption URL.
  *
- * HOST-PINNED: the URL comes out of a page a third party controls, so it is
- * checked against {@link VIMEO_CAPTIONS_HOST} exactly, over https, with
- * `redirect: "error"` — a host pin that follows redirects is not a host pin,
- * since the first hop can be anywhere. Bounded in time AND in bytes, and an
- * over-cap body is REFUSED rather than truncated: half a VTT is a transcript
- * with a silent hole in it, which is worse than no transcript.
+ * HOST-PINNED to {@link VIMEO_CAPTIONS_HOST}, https only, `redirect: "error"`,
+ * bounded in time AND in bytes with an over-cap body REFUSED rather than
+ * truncated — the rules live in `download.ts` (`downloadPinned`), shared with
+ * the media seam, which downloads the manifest and its segments off a
+ * different pinned host under the same rules. Half a VTT is a transcript with
+ * a silent hole in it, which is worse than no transcript.
  */
 export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): Promise<string> {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch (err) {
-    throw new VimeoVttDownloadError(`Not a URL: ${url}`, { cause: err });
-  }
-  if (parsed.protocol !== "https:") {
-    throw new VimeoVttDownloadError(`Refusing non-https caption URL: ${parsed.protocol}//${parsed.host}`);
-  }
-  // `URL.hostname` is already lowercase (WHATWG lowercases it); only the
-  // trailing root dot is left to normalise.
-  if (parsed.hostname.replace(/\.$/, "") !== VIMEO_CAPTIONS_HOST) {
-    throw new VimeoVttDownloadError(
-      `Refusing caption URL on host ${parsed.hostname} (only ${VIMEO_CAPTIONS_HOST} is allowed)`,
-    );
-  }
-
-  const maxBytes = opts.maxBytes ?? VIMEO_VTT_MAX_BYTES;
-  const timeoutMs = opts.timeoutMs ?? VIMEO_VTT_TIMEOUT_MS;
-  const doFetch = opts.fetchImpl ?? fetch;
-  const controller = new AbortController();
-  // The FLAG says why, not `signal.aborted`: this function aborts its own
-  // controller on an over-cap body too, and that is not a timeout.
-  let timedOut = false;
-  // The budget as something to RACE, not only as an abort — the same shape
-  // `fetchVimeoOembed` uses, and for the same reason: the signal bounds a
-  // transport that HONOURS it, while racing bounds the CALLER whatever the
-  // transport does. A `fetchImpl` stub, an e2e fake, or a body that ignores its
-  // signal left this function awaiting a promise that never settled, with the
-  // timer already fired and nobody listening. `.catch` is attached at once so a
-  // timer firing when nothing is racing cannot raise an unhandled rejection, and
-  // the timer is cleared in the `finally` below.
-  let expire: () => void = () => {};
-  const budgetExpired = new Promise<never>((_resolve, reject) => {
-    expire = () => reject(new VimeoVttDownloadError(`Caption download timed out after ${timeoutMs}ms`));
+  const bytes = await downloadPinned(url, {
+    host: VIMEO_CAPTIONS_HOST,
+    maxBytes: opts.maxBytes ?? VIMEO_VTT_MAX_BYTES,
+    timeoutMs: opts.timeoutMs ?? VIMEO_VTT_TIMEOUT_MS,
+    what: "Caption",
+    error: VimeoVttDownloadError,
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
   });
-  budgetExpired.catch(() => {});
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-    expire();
-  }, timeoutMs);
-  try {
-    let res: Response;
-    try {
-      const fetching = doFetch(url, { redirect: "error", signal: controller.signal });
-      fetching.catch(() => {}); // the race's loser is nobody's rejection
-      res = await Promise.race([fetching, budgetExpired]);
-    } catch (err) {
-      // The budget's own rejection is already this module's error, with the
-      // right message — re-wrapping it would bury it as a transport failure.
-      if (err instanceof VimeoVttDownloadError) throw err;
-      // A real `fetch` throws here for two different reasons — the budget, and
-      // `redirect: "error"` meeting a 3xx — and naming only the second made a
-      // plain timeout read as a redirect refusal. The transport's own message
-      // says which; this line no longer guesses.
-      throw new VimeoVttDownloadError(
-        timedOut
-          ? `Caption download timed out after ${timeoutMs}ms`
-          : `Caption download failed: ${err instanceof Error ? err.message : String(err)}`,
-        { cause: err },
-      );
-    }
-    // UNREACHABLE against a real `fetch`: with `redirect: "error"` a 3xx throws
-    // above and never becomes a Response. It stays for a `fetchImpl` that hands
-    // one back anyway — a stub, an e2e fake — so the refusal is the same either
-    // way rather than a redirect body being parsed as a transcript.
-    if (res.status >= 300 && res.status < 400) {
-      controller.abort();
-      throw new VimeoVttDownloadError(`Caption URL answered a redirect (${res.status}); refusing to follow it`);
-    }
-    if (!res.ok) {
-      controller.abort();
-      throw new VimeoVttDownloadError(`Caption download returned HTTP ${res.status}`);
-    }
-
-    // Deliberately NOT `readBounded` (`src/utils/bounded-fetch.ts`), the repo's
-    // other body cap: that one cancels its reader on the over-cap path, and a
-    // `reader.cancel()` does not close a Bun fetch socket (measured
-    // cross-process: 52 GB kept arriving after a read that returned in 8 ms).
-    // Only aborting the CONTROLLER stops the transfer, and it has to happen at
-    // the moment the cap is crossed — inside this loop.
-    const reader = res.body?.getReader();
-    if (!reader) {
-      // No stream to bound. The declared length is then the only bound there
-      // is, so it is checked BEFORE anything is buffered.
-      const declared = Number(res.headers.get("content-length"));
-      if (Number.isFinite(declared) && declared > maxBytes) {
-        controller.abort();
-        throw new VimeoVttDownloadError(`Caption body declares ${declared} bytes, over the ${maxBytes}-byte cap`);
-      }
-      const reading = res.text();
-      reading.catch(() => {});
-      const text = await readInsideBudget(
-        Promise.race([reading, budgetExpired]),
-        timeoutMs,
-        () => timedOut,
-      );
-      if (new TextEncoder().encode(text).length > maxBytes) {
-        throw new VimeoVttDownloadError(`Caption body exceeds ${maxBytes} bytes`);
-      }
-      return text;
-    }
-    const chunks: Uint8Array[] = [];
-    let received = 0;
-    try {
-      // Raced, not merely awaited: a stream that neither yields nor errors on
-      // abort leaves `reader.read()` pending forever, and the cap below can only
-      // fire on bytes that actually arrive.
-      const draining = (async () => {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!value) continue;
-          received += value.byteLength;
-          if (received > maxBytes) {
-            // Stopping the READ does not stop the TRANSFER — abort the request
-            // that opened the socket (the `safe-fetch.ts` measurement).
-            controller.abort();
-            throw new VimeoVttDownloadError(`Caption body exceeds ${maxBytes} bytes`);
-          }
-          chunks.push(value);
-        }
-      })();
-      draining.catch(() => {});
-      await Promise.race([draining, budgetExpired]);
-    } catch (err) {
-      // The budget can expire HERE, mid-body — the likeliest failure this
-      // download has, and it used to escape as a raw `AbortError` past every
-      // caller's `instanceof VimeoVttDownloadError`.
-      if (err instanceof VimeoVttDownloadError) throw err;
-      throw new VimeoVttDownloadError(
-        timedOut
-          ? `Caption download timed out after ${timeoutMs}ms`
-          : `Caption body could not be read: ${err instanceof Error ? err.message : String(err)}`,
-        { cause: err },
-      );
-    }
-    const joined = new Uint8Array(received);
-    let offset = 0;
-    for (const chunk of chunks) {
-      joined.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return new TextDecoder().decode(joined);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * The bodiless path's read, classified the same way the streamed one is: a
- * `res.text()` that ends in an abort is this module's error, naming the budget.
- */
-async function readInsideBudget(reading: Promise<string>, timeoutMs: number, timedOut: () => boolean): Promise<string> {
-  try {
-    return await reading;
-  } catch (err) {
-    // The budget's own rejection arrives here already classified when the read
-    // is raced against it; re-wrapping would only re-derive the same message.
-    if (err instanceof VimeoVttDownloadError) throw err;
-    throw new VimeoVttDownloadError(
-      timedOut()
-        ? `Caption download timed out after ${timeoutMs}ms`
-        : `Caption body could not be read: ${err instanceof Error ? err.message : String(err)}`,
-      { cause: err },
-    );
-  }
+  return new TextDecoder().decode(bytes);
 }
 
 // ── Harvest ──────────────────────────────────────────────────────────────────
@@ -492,7 +338,7 @@ async function harvestInContext(
     if (u.includes("captions.vimeo.com/captions/") && u.includes(".vtt") && !vttUrls.includes(u)) {
       vttUrls.push(u);
     }
-    if (!manifestUrl && u.includes("vod-adaptive-ak.vimeocdn.com") && u.includes("/playlist/av/")) {
+    if (!manifestUrl && u.includes(VIMEO_MEDIA_HOST) && u.includes("/playlist/av/")) {
       manifestUrl = u;
     }
   });
