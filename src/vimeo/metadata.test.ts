@@ -5,7 +5,7 @@ describe("speakerFromTitle", () => {
   test("a JavaZone title's last ` - ` segment is the speaker", () => {
     expect(speakerFromTitle("Understanding Buildpacks- Delving Deep - Kari Nordmann", "JavaZone")).toBe("Kari Nordmann");
     // A handle in the middle: still the LAST segment.
-    expect(speakerFromTitle("Trust, But Verify - Totto - Ola Nordmann", "JavaZone")).toBe("Ola Nordmann");
+    expect(speakerFromTitle("Trust, But Verify - Handle - Ola Nordmann", "JavaZone")).toBe("Ola Nordmann");
     // Two speakers stay one string — the convention has no separator for them.
     expect(speakerFromTitle("Bra tools - Kari Nordmann og Ola Nordmann", "javazone")).toBe("Kari Nordmann og Ola Nordmann");
   });

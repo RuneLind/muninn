@@ -58,6 +58,16 @@ describe("linkVimeoTimestamps", () => {
     expect(out).toContain("already [00:01:00](https://x) linked");
   });
 
+  test("fences are paired by their own marker — a ~~~ line inside a ``` block does not close it", () => {
+    const md = "```\n~~~\n[02:00]\n```\n[03:00] after";
+    const out = linkVimeoTimestamps(md, URL);
+    expect(out).toContain("```\n~~~\n[02:00]\n```");
+    expect(out).toContain("[\\[03:00\\]](https://vimeo.com/1223444307#t=180s) after");
+    // And the mirror image.
+    const md2 = "~~~\n```\n[02:00]\n~~~\n[03:00] after";
+    expect(linkVimeoTimestamps(md2, URL)).toContain("~~~\n```\n[02:00]\n~~~\n[\\[03:00\\]]");
+  });
+
   test("a url with no video id returns the markdown untouched", () => {
     const md = "### [00:12:00]\n";
     expect(linkVimeoTimestamps(md, "https://youtu.be/x")).toBe(md);

@@ -262,12 +262,13 @@ export function sumShelfScript(): string {
     /**
      * The poster frame, or nothing. Only an https URL is rendered: the value
      * is a frontmatter string off a document, and an <img src> is a fetch the
-     * reader's browser makes to whatever it names. Lazy, so a 200-row shelf
-     * does not fetch 200 frames on load.
+     * reader's browser makes to whatever it names — https bounds the scheme,
+     * no-referrer keeps this page's address out of that request. Lazy, so
+     * a 200-row shelf does not fetch 200 frames on load.
      */
     function thumbnailHtml(url) {
       if (typeof url !== 'string' || !/^https:\\/\\//i.test(url)) return '';
-      return '<img class="recent-item-thumb" src="' + esc(url) + '" alt="" loading="lazy" />';
+      return '<img class="recent-item-thumb" src="' + esc(url) + '" alt="" loading="lazy" referrerpolicy="no-referrer" />';
     }
 
     function renderSourceFilter(docs) {

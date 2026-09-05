@@ -495,9 +495,10 @@ export async function summarizeVimeo(
         // derivable from `caption_lang`.
         summary_kind: meta.preset.id,
         summary_lang: outputLang,
-        // What oEmbed knew (v2 PR 2). Sent only when non-empty — huginn writes
-        // a key it is sent, and an empty `author: ""` on the document is a
-        // wrong fact, not a missing one.
+        // What oEmbed knew (v2 PR 2). Sent only when non-empty, so an empty
+        // string is never on the wire: huginn's own writer skips an empty
+        // value too (`if req.author:`), and this side says the same thing
+        // rather than relying on it.
         ...(meta.author ? { author: meta.author } : {}),
         ...(meta.uploadDate ? { upload_date: meta.uploadDate } : {}),
         ...(meta.speaker ? { speaker: meta.speaker } : {}),

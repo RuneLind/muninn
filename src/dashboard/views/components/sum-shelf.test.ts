@@ -19,9 +19,10 @@ describe("sum-shelf: the thumbnail cell", () => {
 
   test("an https url renders a lazy, cover-cropped img with the url escaped", () => {
     expect(thumbnailHtml('https://i.vimeocdn.com/video/a.jpg?x="1"')).toBe(
-      '<img class="recent-item-thumb" src="https://i.vimeocdn.com/video/a.jpg?x=&quot;1&quot;" alt="" loading="lazy" />',
+      '<img class="recent-item-thumb" src="https://i.vimeocdn.com/video/a.jpg?x=&quot;1&quot;" alt="" loading="lazy" referrerpolicy="no-referrer" />',
     );
-    expect(sumShelfStyles()).toContain(".recent-item-thumb");
+    // The rule itself, selector + brace: a renamed selector ships an unstyled img.
+    expect(sumShelfStyles()).toMatch(/\.recent-item-thumb \{/);
   });
 
   test("anything that is not an https url renders nothing", () => {

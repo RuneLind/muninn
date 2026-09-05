@@ -509,8 +509,9 @@ export function registerVimeoRoutes(
           uploadDate: meta.uploadDate,
           author: meta.author,
           thumbnailUrl: meta.thumbnailUrl,
-          // From oEmbed's own title, not the url-fallback `title` above: the
-          // fallback is an address and has no speaker in it.
+          // From oEmbed's own title. (Reading the url-fallback `title` above
+          // instead would be equivalent today — a canonical url has no ` - `
+          // in it — so this is the honest source, not a pinned distinction.)
           ...(speakerFromTitle(meta.title, meta.author) !== undefined
             ? { speaker: speakerFromTitle(meta.title, meta.author) }
             : {}),

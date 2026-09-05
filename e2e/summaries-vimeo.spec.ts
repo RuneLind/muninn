@@ -250,6 +250,15 @@ async function startFake(): Promise<Server> {
         return json({ documents: [] });
       }
       if (p === "/api/search") return json({ results: [] });
+      // The one document the shelf row above names, served for the article
+      // view: a Vimeo capture with a window heading and a cited timestamp.
+      if (p === "/api/document/vimeo-summaries/ai/general/E2E shelf talk.md") {
+        return json({
+          id: "ai/general/E2E shelf talk.md",
+          url: "https://vimeo.com/424242",
+          text: "[vimeo-summaries > ai/general]\ntags: ai, general\n# E2E shelf talk\n\nAt [12:30] the demo.\n\n## Transcript\n\n### [00:12:00]\n\nwords",
+        });
+      }
       // The page's own knowledge-API banner probe, proxied through
       // `/api/search/health` on every /summaries load. It is a real call this
       // file makes; the 404 catch-all below is what surfaced it.
@@ -657,6 +666,23 @@ test.describe("Summaries: capture a Vimeo URL", () => {
       "src",
       "https://i.vimeocdn.com/video/shelf-1280x720.jpg",
     );
+  });
+
+  test("a Vimeo document's timestamps are links into the video — from the shelf AND from a ?doc= deep link", async ({ page }) => {
+    const expectLinks = async () => {
+      const links = page.locator("#sumArticleMain a[href^='https://vimeo.com/424242#t=']");
+      await expect(links).toHaveCount(2);
+      expect(await links.evaluateAll((as) => as.map((a) => [a.getAttribute("href"), a.getAttribute("target"), a.textContent]))).toEqual([
+        ["https://vimeo.com/424242#t=750s", "_blank", "[12:30]"],
+        ["https://vimeo.com/424242#t=720s", "_blank", "[00:12:00]"],
+      ]);
+    };
+    await page.goto(`${BASE}/summaries#shelf`);
+    await page.locator('.recent-item[data-doc-url="https://vimeo.com/424242"]').click();
+    await expectLinks();
+    // The duplicate answer's own link is a ?doc= deep link with NO url on it.
+    await page.goto(`${BASE}/summaries?source=vimeo&doc=${encodeURIComponent("ai/general/E2E shelf talk.md")}&duplicate=1`);
+    await expectLinks();
   });
 
   test("a picker value the server does not offer is a sentence on the card, and starts no job", async ({ request, page }) => {

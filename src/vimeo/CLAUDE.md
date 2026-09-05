@@ -101,7 +101,8 @@ is its own key because `date` is the CAPTURE day the shelf buckets on (#519).
 
 **The speaker is derived, and only from an account whose convention we know.**
 Vimeo has no speaker field; JavaZone titles its uploads `<talk> - <speaker>`
-(`… - Handle - Full Name` with a handle), so `speakerFromTitle` takes
+(9 of the 10 RSS items on 2026-09-05; the tenth had no ` - ` and yields no
+speaker; `… - Handle - Full Name` with a handle), so `speakerFromTitle` takes
 the LAST ` - ` segment — but only when `author_name` is in
 `VIMEO_CONFERENCE_ACCOUNTS`. An individual's "Kotlin - the good parts" is not
 a talk by "the good parts". Two speakers stay one string; the convention has
@@ -120,9 +121,15 @@ frames on load.
 view (`sum-article-library.ts`, `linkVimeoTimestamps`) rewrites `[HH:MM:SS]`
 and `[MM:SS]` in the MARKDOWN — the transcript's `### [HH:MM:SS]` window
 headings and anything the summary cites — into `[\[HH:MM:SS\]](https://vimeo.com/<id>#t=<sec>s)`,
-which the Vimeo player honours; the label keeps its brackets so the page reads
-as before. Fenced code is left alone (a timestamp inside a quoted config is
-source text) and a bracket already followed by `(` is an existing link. The
+which the Vimeo player honours, opened in a new tab like every other outbound
+link in the view (`openVimeoLinksInNewTab`, set after render — markdown cannot
+say `target`); the label keeps its brackets so the page reads as before. The
+url is the DOCUMENT's (`doc.url`), because a `?doc=` deep link — the duplicate
+answer's own link — opens the panel with no url at all (measured: plain text).
+Fenced code is left alone (a timestamp inside a quoted config is source text;
+a fence closes on its OWN marker, so a `~~~` line inside a ``` block is
+content), inline backtick and 4-space indented code are not skipped
+(accepted, rare), and a bracket already followed by `(` is an existing link. The
 video id is a CLIENT mirror of `src/vimeo/url.ts`'s rule over the two shapes
 stored documents carry. ⚠️ Both client functions live inside a template
 literal: every backslash is DOUBLED in the `.ts` source, and a regex that reads

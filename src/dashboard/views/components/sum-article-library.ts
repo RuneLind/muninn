@@ -673,9 +673,13 @@ export function sumArticleLibraryScript(): string {
      * Vimeo player honours) — the transcript's \`### [HH:MM:SS]\` window headings
      * and any timestamp the summary cites. Markdown in, markdown out: the label
      * keeps its brackets (\`[\\[00:12:00\\]](url)\`) so the page reads exactly as
-     * before, only clickable. Fenced code is left alone (a timestamp inside a
-     * quoted config is source text), and a bracket already followed by \`(\` is
-     * an existing link. No id ⇒ the text is returned untouched.
+     * before, only clickable. Fenced code is left alone — a fence is closed by
+     * its OWN marker, so a \`~~~\` line inside a \`\`\` block is content, not a
+     * close (measured: pairing them interchangeably linked inside the block
+     * and de-linked everything after it) — and a bracket already followed by
+     * \`(\` is an existing link. Inline backtick code and 4-space indented code
+     * are NOT skipped (a timestamp there becomes a link; accepted, rare). No
+     * id ⇒ the text is returned untouched.
      *
      * ⚠️ This lives inside a TEMPLATE LITERAL: every backslash below is written
      * doubled in the .ts source so the browser sees one. A regex that looks
@@ -685,15 +689,38 @@ export function sumArticleLibraryScript(): string {
       var id = vimeoVideoIdFromUrl(videoUrl);
       if (!id) return markdown;
       var base = 'https://vimeo.com/' + id + '#t=';
-      var inFence = false;
+      var fence = null;
       return String(markdown).split('\\n').map(function(line) {
-        if (/^\\s*(\`\`\`|~~~)/.test(line)) { inFence = !inFence; return line; }
-        if (inFence) return line;
+        var m = /^\\s*(\`\`\`|~~~)/.exec(line);
+        if (m) {
+          if (fence === null) fence = m[1];
+          else if (fence === m[1]) fence = null;
+          return line;
+        }
+        if (fence !== null) return line;
         return line.replace(/\\[(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\](?!\\()/g, function(whole, a, b, c) {
           var sec = c === undefined ? Number(a) * 60 + Number(b) : Number(a) * 3600 + Number(b) * 60 + Number(c);
           return '[\\\\[' + whole.slice(1, -1) + '\\\\]](' + base + sec + 's)';
         });
       }).join('\\n');
+    }
+
+    /**
+     * The rendered timestamp links open the video in a NEW tab, like every
+     * other outbound link in this view: markdown cannot say \`target\`, so it
+     * is set on the anchors after render, and only on the ones this transform
+     * made (the \`#t=\` href on the video's own host).
+     */
+    function openVimeoLinksInNewTab(container, videoUrl) {
+      var id = vimeoVideoIdFromUrl(videoUrl);
+      if (!container || !id) return;
+      var prefix = 'https://vimeo.com/' + id + '#t=';
+      container.querySelectorAll('a[href]').forEach(function(a) {
+        if (a.getAttribute('href').indexOf(prefix) === 0) {
+          a.setAttribute('target', '_blank');
+          a.setAttribute('rel', 'noopener');
+        }
+      });
     }
 
     async function openSummaryDoc(docId, url, source) {
@@ -770,10 +797,17 @@ export function sumArticleLibraryScript(): string {
         var text = doc.text || '';
         // Strip breadcrumb prefix [collection > path] and tags line
         var cleaned = text.replace(/^\\[.*?\\]\\n*/, '').replace(/^tags:.*\\n*/m, '');
-        // A Vimeo capture's timestamps become clicks into the video.
-        if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, url);
+        // A Vimeo capture's timestamps become clicks into the video. The
+        // DOCUMENT's url, not this function's url parameter: a ?doc= deep
+        // link (the duplicate answer's own link, a bookmark) opens with '' —
+        // measured, that path rendered plain text.
+        var videoUrl = doc.url || url;
+        if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, videoUrl);
         var mainEl = document.getElementById('sumArticleMain');
-        if (mainEl) mainEl.innerHTML = renderMarkdown(cleaned);
+        if (mainEl) {
+          mainEl.innerHTML = renderMarkdown(cleaned);
+          if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
+        }
 
         // Right panel: other articles matching in relevance (within this source)
         loadDocSimilar(title, docId, myRequest, source);
