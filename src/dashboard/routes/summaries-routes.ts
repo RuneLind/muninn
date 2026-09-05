@@ -2,6 +2,8 @@ import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderSummariesPage } from "../views/summaries-page.ts";
+import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
+import { capturePresetOptions, resolveCapturePresets } from "../../summaries/presets.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { docDateMs } from "../../gardener/harvest.ts";
@@ -129,7 +131,13 @@ export function registerSummariesRoutes(
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
   app.get("/summaries", async (c) => {
-    return c.html(await renderSummariesPage());
+    // The kind picker offers what the SUMMARIZER bot offers — the same
+    // resolution the Vimeo route validates a POSTed kind against.
+    const summarizerBot = resolveSummarizerBot(discoverAllBots());
+    const captureKinds = capturePresetOptions(
+      resolveCapturePresets(summarizerBot?.prompts, summarizerBot?.connector),
+    );
+    return c.html(await renderSummariesPage({ captureKinds }));
   });
 
   // Share: `POST /api/summaries/share` (SSE) + its preset list — the doc panel's

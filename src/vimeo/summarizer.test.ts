@@ -18,6 +18,7 @@ import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { VimeoCaptions } from "./captions.ts";
+import { CAPTURE_DEEP_MODEL, SHIPPED_CAPTURE_PRESETS } from "../summaries/presets.ts";
 
 const VIDEO_ID = "1223358361";
 const CANONICAL = "https://vimeo.com/1223358361";
@@ -30,17 +31,26 @@ mock.module("../ai/one-shot.ts", () => ({
   executeOneShot: async (
     prompt: string,
     _c: unknown,
-    _b: unknown,
-    opts?: { systemPrompt?: string; onProgress?: (e: { type: string; text: string }) => void },
+    b: { model?: string },
+    opts?: {
+      systemPrompt?: string;
+      thinkingMaxTokens?: number;
+      onProgress?: (e: { type: string; text: string }) => void;
+    },
   ) => {
     lastPrompt = prompt;
     lastSystemPrompt = opts?.systemPrompt;
+    lastRunModel = b.model;
+    lastThinking = opts?.thinkingMaxTokens;
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
   connectorCapabilities: () => ({ supportsExtraDirs: true, supportsThinkingBudget: true }),
 }));
 
+/** The model the connector was handed, and the thinking cap it was (or was not) given. */
+let lastRunModel: string | undefined;
+let lastThinking: number | undefined;
 let sourceDraftCalls: Array<Record<string, unknown>> = [];
 let sourceDraftThrows: Error | null = null;
 mock.module("../gardener/source-drafter-run.ts", () => ({
@@ -111,12 +121,27 @@ const { createJob, getJob, subscribe } = await import("./state.ts");
 const config = { knowledgeApiUrl: "http://kb.test", claudeTimeoutMs: 120_000 } as unknown as Config;
 const bot = { name: "jarvis", dir: "/tmp/bot", model: "sonnet" } as unknown as BotConfig;
 
+const [STANDARD, DEEP, TALK_NOTES] = SHIPPED_CAPTURE_PRESETS as [
+  (typeof SHIPPED_CAPTURE_PRESETS)[number],
+  (typeof SHIPPED_CAPTURE_PRESETS)[number],
+  (typeof SHIPPED_CAPTURE_PRESETS)[number],
+];
+
 const META = {
   videoId: VIDEO_ID,
   url: CANONICAL,
   title: "Trust but verify",
   durationSec: 3180,
   uploadDate: "2026-08-20 09:33:04",
+  // The route's defaults: the standard kind, in the talk's own language.
+  preset: STANDARD,
+  lang: "talk" as const,
+};
+
+const NORWEGIAN_AUTO_TRACK = {
+  lang: "no-x-autogen",
+  label: "Norwegian (auto-generated)",
+  vttUrl: "https://captions.vimeo.com/captions/no.vtt?sig=z",
 };
 
 const VTT = `WEBVTT
@@ -173,6 +198,8 @@ beforeEach(() => {
   claudeResult = "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n- point";
   lastSystemPrompt = undefined;
   lastPrompt = undefined;
+  lastRunModel = undefined;
+  lastThinking = undefined;
   ingestPayload = undefined;
   sourceDraftCalls = [];
   sourceDraftThrows = null;
@@ -235,6 +262,105 @@ test("the source-draft trigger keys off huginn's stored doc id and the vimeo col
   expect(sourceDraftCalls[0]!.collection).toBe(VIMEO_COLLECTION);
   expect(sourceDraftCalls[0]!.docId).toBe("ai/rag/Trust but verify.md");
   expect(sourceDraftCalls[0]!.url).toBe(CANONICAL);
+});
+
+// --- Kind + language (v2 PR 1) ----------------------------------------------
+
+test("`talk` on a Norwegian track writes the summary in bokmål and stamps summary_lang: nb", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, deps({ tracks: [NORWEGIAN_AUTO_TRACK] }));
+
+  expect(lastSystemPrompt).toContain("LANGUAGE: write the summary in Norwegian (bokmål)");
+  expect(lastSystemPrompt).not.toContain("write the summary in English");
+  expect(ingestPayload!.summary_lang).toBe("nb");
+  expect(ingestPayload!.summary_kind).toBe("standard");
+  expect(ingestPayload!.caption_lang).toBe("no-x-autogen");
+});
+
+test("`talk` on an English track writes English, stated explicitly", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, deps());
+
+  expect(lastSystemPrompt).toContain("LANGUAGE: write the summary in English");
+  expect(ingestPayload!.summary_lang).toBe("en");
+});
+
+test("an explicit language pick beats the track: `en` on a Norwegian talk", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...META, lang: "en" }, config, bot, deps({ tracks: [NORWEGIAN_AUTO_TRACK] }));
+
+  expect(lastSystemPrompt).toContain("LANGUAGE: write the summary in English");
+  expect(ingestPayload!.summary_lang).toBe("en");
+});
+
+test("the language rider comes LAST — after the structure and after the auto-caption rider", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...META, lang: "nb" }, config, bot, deps());
+
+  const sys = lastSystemPrompt!;
+  const structureAt = sys.indexOf("## Key takeaways");
+  const autoAt = sys.indexOf(AUTO_CAPTION_RIDER.trim());
+  const langAt = sys.indexOf("LANGUAGE:");
+  expect(structureAt).toBeGreaterThan(-1);
+  expect(autoAt).toBeGreaterThan(structureAt);
+  expect(langAt).toBeGreaterThan(autoAt);
+  expect(sys.trim().endsWith("translate the prose around them, not them.")).toBe(true);
+});
+
+test("the standard kind is the capped call on the bot's own model, with the shared structure", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, deps());
+
+  expect(lastRunModel).toBe("sonnet");
+  expect(lastThinking).toBe(8000);
+  expect(lastSystemPrompt).toContain("- Then a `## Key takeaways` section FIRST");
+  expect(lastSystemPrompt).not.toContain("## Timeline");
+});
+
+test("the deep kind swaps in the opus model and lifts the thinking cap", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...META, preset: DEEP }, config, bot, deps());
+
+  expect(lastRunModel).toBe(CAPTURE_DEEP_MODEL);
+  // `null` on the seam means "inherit the bot's budget": no cap is passed.
+  expect(lastThinking).toBeUndefined();
+  expect(ingestPayload!.summary_kind).toBe("deep");
+  expect(warns.map((w) => String(w.message))).not.toContainEqual(expect.stringContaining("opus"));
+});
+
+test("deep on a connector outside the Anthropic namespace keeps the bot's model and says so", async () => {
+  const ollama = { ...bot, connector: "openai-compat", model: "qwen3.5:35b" } as unknown as BotConfig;
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...META, preset: DEEP }, config, ollama, deps());
+
+  expect(lastRunModel).toBe("qwen3.5:35b");
+  expect(getJob(jobId)!.status).toBe("complete");
+  const opusWarn = warns.find((w) => String(w.message).includes("asks for the opus model"));
+  expect(opusWarn).toBeDefined();
+  expect(opusWarn!.properties).toMatchObject({ kind: "deep", connector: "openai-compat", model: "qwen3.5:35b" });
+});
+
+test("the talk-notes kind puts the timeline structure in the prompt and stamps summary_kind", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...META, preset: TALK_NOTES }, config, bot, deps());
+
+  expect(lastSystemPrompt).toContain("## Timeline");
+  expect(lastSystemPrompt).toContain("### [HH:MM:SS]");
+  // Indented under step 3 like the shared bullets, so the envelope reads as one list.
+  expect(lastSystemPrompt).toContain("\n   - Then a `## Timeline` section");
+  expect(lastRunModel).toBe("sonnet");
+  expect(lastThinking).toBe(8000);
+  expect(ingestPayload!.summary_kind).toBe("talk-notes");
+});
+
+test("a per-bot kind runs with its own instruction, verbatim", async () => {
+  const custom = { id: "should-i-watch", label: "Should I watch?", instruction: "- Five lines only.", run: STANDARD.run };
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...META, preset: custom }, config, bot, deps());
+
+  expect(lastSystemPrompt).toContain("3. Then write a structured summary with:\n   - Five lines only.");
+  expect(lastSystemPrompt).not.toContain("## Key takeaways");
+  expect(ingestPayload!.summary_kind).toBe("should-i-watch");
 });
 
 // --- The onIngested hook -----------------------------------------------------

@@ -131,18 +131,21 @@ let vimeoSummarizeRejectsWith: unknown = null;
  * recently-ingested entry, so the claim-release cases still see a fresh capture.
  */
 let vimeoIngestDocId: string | null = null;
+/** The meta the LAST started capture was handed — the kind + language ride on it. */
+let lastVimeoMeta: { videoId: string; preset?: { id: string }; lang?: string } | null = null;
 const realVimeoSummarizer = await import("../../vimeo/summarizer.ts");
 mock.module("../../vimeo/summarizer.ts", () => ({
   ...realVimeoSummarizer,
   summarizeVimeo: async (
     _jobId: string,
-    meta: { videoId: string },
+    meta: { videoId: string; preset?: { id: string }; lang?: string },
     _config: unknown,
     _botConfig: unknown,
     _deps: unknown,
     onIngested?: (videoId: string, documentId: string) => void,
   ) => {
     vimeoSummarizeCalls++;
+    lastVimeoMeta = meta;
     if (vimeoSummarizeGate) await vimeoSummarizeGate;
     if (vimeoIngestDocId !== null) onIngested?.(meta.videoId, vimeoIngestDocId);
     if (vimeoSummarizeRejectsWith !== null) throw vimeoSummarizeRejectsWith;
@@ -259,6 +262,7 @@ beforeEach(() => {
   tiktokSummarizeCalls = 0;
   youtubeSummarizeCalls = 0;
   vimeoSummarizeCalls = 0;
+  lastVimeoMeta = null;
   vimeoSummarizeGate = null;
   vimeoSummarizeRejectsWith = null;
   vimeoIngestDocId = null;
@@ -689,6 +693,94 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     expect(res.status).toBe(200);
     expect(((await res.json()) as { job_id?: string }).job_id).toBeTruthy();
     expect(vimeoSummarizeCalls).toBe(1);
+  });
+
+  // --- The kind + language picker (v2 PR 1) ---------------------------------
+  //
+  // Both are validated BEFORE oEmbed: a picker value the server does not offer
+  // is a 400 whatever the video, and it must not spend a network round-trip
+  // (or a job) finding that out.
+
+  test("an unknown kind 400s with code bad_kind, before oEmbed, and leaves NO job behind", async () => {
+    const before = vmState.getRecentJobs().length;
+    const oembedBefore = oembedCalls;
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, kind: "should-i-watch" });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: "bad_kind", kind: "should-i-watch" });
+    expect(oembedCalls).toBe(oembedBefore);
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("the refusal's `error` is prose and its `code` is the machine token", async () => {
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, kind: "should-i-watch" });
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.code).toBe("bad_kind");
+    expect(body.error).not.toBe("bad_kind");
+    expect(body.error).toContain("should-i-watch");
+    const lang = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, lang: "no" });
+    const lb = (await lang.json()) as { error: string; code: string };
+    expect(lb.code).toBe("bad_lang");
+    expect(lb.error).toBe("Unknown output language: no");
+  });
+
+  test("deep on a summarizer bot whose connector cannot run opus is bad_kind — never a deep-stamped non-deep capture", async () => {
+    summarizerBot = { ...cliBot, connector: "openai-compat", model: "qwen3.5:35b" };
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, kind: "deep" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("bad_kind");
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("a non-string kind is bad_kind too, not a crash", async () => {
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, kind: 7 });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("bad_kind");
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("an unknown language 400s with code bad_lang, before oEmbed, and leaves NO job behind", async () => {
+    const before = vmState.getRecentJobs().length;
+    const oembedBefore = oembedCalls;
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, lang: "no" });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: "bad_lang", lang: "no" });
+    expect(oembedCalls).toBe(oembedBefore);
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("absent kind and lang are the defaults: standard, in the talk's language", async () => {
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    expect(res.status).toBe(200);
+    expect(vimeoSummarizeCalls).toBe(1);
+    expect(lastVimeoMeta!.preset!.id).toBe("standard");
+    expect(lastVimeoMeta!.lang).toBe("talk");
+  });
+
+  test("a picked kind and language ride on the job's meta", async () => {
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, kind: "talk-notes", lang: "nb" });
+
+    expect(res.status).toBe(200);
+    expect(lastVimeoMeta!.preset!.id).toBe("talk-notes");
+    expect(lastVimeoMeta!.lang).toBe("nb");
+  });
+
+  test("a per-bot captureSummary.<id>.md is a kind this route accepts", async () => {
+    summarizerBot = {
+      ...cliBot,
+      prompts: { captureSummaryVariants: [{ id: "brief", label: "Brief", content: "- three lines" }] },
+    };
+
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, kind: "brief" });
+
+    expect(res.status).toBe(200);
+    expect(lastVimeoMeta!.preset!.id).toBe("brief");
   });
 
   test("no summarizer bot 500s and leaves NO job behind", async () => {

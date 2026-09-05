@@ -12,12 +12,80 @@ the UI entry — the URL field on `/summaries`.
 | `captions.ts` | `harvestVimeoCaptions` (headless Chromium), `downloadVtt` (host-pinned), `chooseTrack` (pure) |
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · summarizing · ingesting · complete · error` |
-| `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft |
+| `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
+| `../summaries/presets.ts` | The capture KINDS (`standard` · `deep` · `talk-notes`), per-bot `prompts/captureSummary.<id>.md` overrides, and the two run levers a kind can pull (`captureThinkingFor`, `captureBotConfigFor`) — pure |
+| `../summaries/language.ts` | `talk \| nb \| en`, `resolveOutputLang` (the `talk` → caption base tag rule), `captionBaseLang` (shared with `chooseTrack`) and the ONE spelling of the bokmål/English rider, which `src/share/prompt.ts` re-exports |
 | `fixtures/totto-trust-but-verify.vtt` | Real auto-captions from a public JavaZone talk: 63 KB, 928 cues, 53 min |
 
 The route is `src/dashboard/routes/vimeo-routes.ts`; the huginn half is the
 `vimeo` push source (`main/ingest/vimeo.py`, `POST /api/vimeo/ingest`, collection
 `vimeo-summaries`).
+
+## Kind + language (v2 PR 1)
+
+**The route body is `{url, kind?, lang?}`, validated BEFORE oEmbed.** A kind
+is looked up in the SUMMARIZER bot's resolved preset set (`resolveCapturePresets`
+over its `prompts.captureSummaryVariants`, so a per-bot `captureSummary.<id>.md`
+is a kind the route accepts); a language must be one of `talk | nb | en`.
+Absent is the default (`standard`, `talk`); present-but-unknown is a 400 carrying
+`code: bad_kind` / `bad_lang`, which the card renders from the same sentence map
+as every other refusal — never summarized as `standard` on the reader's behalf.
+Validated first because the oEmbed call is a network round-trip and the answer
+does not depend on the video. The summarizer bot is therefore resolved ABOVE
+oEmbed too, which moved the "No bots configured" 500 up with it.
+
+**`talk` is resolved in the SUMMARIZER, not the route.** It needs the chosen
+caption track's tag, which exists only after the harvest. `resolveOutputLang`
+reads the BASE subtag: `no`/`nb`/`nn` ⇒ bokmål, anything else (an empty tag
+included) ⇒ English. Nynorsk speech gets a bokmål summary — the rider knows one
+Norwegian. The document carries the RESOLVED language (`summary_lang: nb|en`),
+never `talk`, and the kind id (`summary_kind`); huginn allowlists both
+(huginn #126, merged first).
+
+**The language rider is the LAST thing in the system prompt** — after the kind's
+structure and after the auto-caption rider — for the reason the share prompt puts
+its rider after the instruction: the language is the reader's pick (or the talk's
+own) and nothing a preset says may un-pick it. `buildVimeoSystemPrompt` is
+exported so a test can pin that order.
+
+**A kind is instruction + run options, and a file on disk can only replace the
+instruction.** `deep` is `standard`'s structure on `claude-opus-5` with the
+thinking cap lifted (`thinkingMaxTokens: null`, the TikTok mechanism); a per-bot
+`captureSummary.deep.md` keeps those run options, and a NEW per-bot id runs like
+`standard`. The model swap applies only on connectors whose model ids are
+Anthropic's (`claude-cli`, `claude-sdk`, `copilot-sdk`); on `openai-compat` the
+bot's model stays and the job logs one warn naming that, so a `deep` capture on
+an Ollama bot is honest about what ran. `talk-notes` is a `## Timeline` of
+`### [HH:MM:SS] <section>` blocks anchored on the transcript's own window
+headings, with the shared ingress/takeaways/closer around it so it still reads
+as a summary on the shelf. `should-i-watch` is wanted and deliberately not built
+(it pays on a backlog day, which needs batch paste); it is one more entry in
+`SHIPPED_CAPTURE_PRESETS` when it lands.
+
+**The picker is remembered per browser**, under `muninn.summaries.capture.v1`
+(`sum-submit-form.ts`): every `localStorage` read and write is in a try/catch, a
+stored value the server no longer offers is ignored per axis (the select keeps
+its first option — the server's default — rather than landing on a blank), and
+the picker rides on every capture POST, the article-box forward included. No
+`selected` attribute is server-rendered: the browser's memory is the script's,
+and a server-picked option would win over it.
+
+**A kind the SUMMARIZER bot's connector cannot honour is not offered.**
+`resolveCapturePresets(prompts, connector)` drops an opus kind on a connector
+outside the Anthropic namespace, so `/summaries` never shows `deep` for an
+Ollama/Vertex summarizer and the route 400s a client that posts it anyway —
+otherwise the capture would run on the bot's own model and still be stamped
+`summary_kind: deep`, a document lying about itself. The summarizer's own
+model-stays warn is defence for a hand-built preset, not the product path.
+
+**Measured 2026-09-05 — the retrieval question the plan left open is closed, no
+anchor block.** With an ENGLISH summary on a Norwegian talk, Norwegian `?q=`
+hits were transcript windows first (0.999/0.996, the summary chunk 0.991 or
+absent); with a NORWEGIAN summary the top matched chunks were the summary's on
+all three queries (1.0/1.0/1.0; 0.997/0.995/0.994; 0.999/0.961 over a 0.927
+transcript window). The Norwegian summary ranks BETTER than the transcript, so
+`talk` stays the default and the English `## Key takeaways` anchor is not built.
+Table + queries: muninn #520.
 
 ## Rules the VERTICAL lives by (PR 2)
 

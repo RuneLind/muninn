@@ -96,6 +96,9 @@ const HELD_URL = `https://vimeo.com/${HELD_ID}`;
 /** A fourth, held the same way, for the paste about a DIFFERENT url. */
 const HELD2_ID = "1223777002";
 const HELD2_URL = `https://vimeo.com/${HELD2_ID}`;
+/** A fifth, captured through the kind + language PICKER. */
+const PICKED_ID = "1223777003";
+const PICKED_URL = `https://vimeo.com/${PICKED_ID}`;
 /** oEmbed 404s on this one — "not public". */
 const PRIVATE_URL = "https://vimeo.com/1";
 /** 20 000 s of video — past the 3 h cap. */
@@ -120,6 +123,8 @@ let fake: Server | undefined;
 let ingests: unknown[] = [];
 /** How many model calls were made. */
 let modelCalls = 0;
+/** Every model request body — the SYSTEM prompt the capture assembled rides in it. */
+let modelRequests: Array<{ model?: string; messages?: Array<{ role: string; content: string }> }> = [];
 /**
  * Every path the fake was asked for that it does not play a role for.
  *
@@ -160,6 +165,9 @@ function oembedFor(id: string): Record<string, unknown> | null {
   }
   if (id === HELD2_ID) {
     return { title: "E2E held talk two", author_name: "x", duration: 160, upload_date: "2026-09-04 14:00:00" };
+  }
+  if (id === PICKED_ID) {
+    return { title: "E2E picked talk", author_name: "x", duration: 180, upload_date: "2026-09-04 15:00:00" };
   }
   if (id === "9999999999") {
     return { title: "E2E long talk", author_name: "x", duration: 20000, upload_date: "2026-09-04 12:00:00" };
@@ -206,7 +214,7 @@ async function startFake(): Promise<Server> {
       // --- The model API (the throwaway bot's baseUrl) ---
       if (p === "/v1/chat/completions") {
         modelCalls += 1;
-        await readBody(req);
+        modelRequests.push(JSON.parse((await readBody(req)) || "{}"));
         return await writeCompletion(res);
       }
 
@@ -558,6 +566,86 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await expect(page.locator("#summaryArea")).toContainText(SUMMARY_LINE);
     await expect(page.locator("#articleText")).toHaveValue("");
     expect(dialogs).toEqual([]);
+  });
+
+  test("the kind + language picker reaches the prompt and the document, and survives a reload", async ({ page }) => {
+    test.setTimeout(90_000);
+    const bodies: unknown[] = [];
+    page.on("request", (req) => {
+      if (req.method() === "POST" && req.url().includes("/api/vimeo/summarize")) bodies.push(req.postDataJSON());
+    });
+    const modelBefore = modelRequests.length;
+    const ingestsBefore = ingests.length;
+
+    await page.goto(`${BASE}/summaries`);
+    // The picker offers what THIS summarizer bot can run: it is `openai-compat`,
+    // so `deep` (the opus kind) is not in the list — the GET narrows by the
+    // bot's connector, and this is the one place that narrowing is pinned.
+    expect(await page.locator("#captureKind option").evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value)))
+      .toEqual(["standard", "talk-notes"]);
+    expect(await page.locator("#captureLang option").evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value)))
+      .toEqual(["talk", "nb", "en"]);
+    await expect(page.locator("#captureKind")).toHaveValue("standard");
+    await expect(page.locator("#captureLang")).toHaveValue("talk");
+    await page.locator("#captureKind").selectOption("talk-notes");
+    await page.locator("#captureLang").selectOption("nb");
+    await page.locator("#captureUrl").fill(PICKED_URL);
+    await page.locator("#captureUrlBtn").click();
+
+    await expect(page.locator("#jobCard")).toBeVisible();
+    await expect(page.locator("#statusBadge .status-text")).toHaveText("Complete", { timeout: 60_000 });
+
+    // 1. The POST carried the picker.
+    expect(bodies).toEqual([{ url: PICKED_URL, kind: "talk-notes", lang: "nb" }]);
+
+    // 2. The model saw the kind's structure and the bokmål rider — on the
+    //    SYSTEM prompt, after the auto-caption rider (the stub track is
+    //    `en-x-autogen`, so `nb` here is the explicit pick beating the talk).
+    const request = modelRequests[modelBefore]!;
+    const system = (request.messages ?? []).find((m) => m.role === "system")?.content ?? "";
+    expect(system).toContain("## Timeline");
+    expect(system).toContain("LANGUAGE: write the summary in Norwegian (bokmål)");
+    expect(system.indexOf("MACHINE-GENERATED")).toBeLessThan(system.indexOf("LANGUAGE:"));
+    // talk-notes is a bot-model, capped kind: the throwaway bot's own model ran.
+    expect(request.model).toBe("e2e-fake");
+
+    // 3. The document carries both as frontmatter keys.
+    expect(ingests[ingestsBefore]).toMatchObject({
+      url: PICKED_URL,
+      summary_kind: "talk-notes",
+      summary_lang: "nb",
+      caption_kind: "stub",
+    });
+
+    // 4. A reload restores the picker from the browser's own memory.
+    await page.reload();
+    await expect(page.locator("#captureKind")).toHaveValue("talk-notes");
+    await expect(page.locator("#captureLang")).toHaveValue("nb");
+    // Nothing to put back: every case gets its own browser context, so the
+    // stored picker dies with this one.
+  });
+
+  test("a picker value the server does not offer is a sentence on the card, and starts no job", async ({ request, page }) => {
+    const before = await jobCount(request);
+    const res = await request.post(`${BASE}/api/vimeo/summarize`, { data: { url: PICKED_URL, kind: "should-i-watch" } });
+    expect(res.status()).toBe(400);
+    expect(await res.json()).toMatchObject({ code: "bad_kind" });
+    expect(await jobCount(request)).toBe(before);
+
+    // The card's sentence for it, driven through the page's own fetch by
+    // planting the refused value on the select.
+    await page.goto(`${BASE}/summaries`);
+    await page.evaluate(() => {
+      const sel = document.getElementById("captureKind") as HTMLSelectElement;
+      const opt = document.createElement("option");
+      opt.value = "should-i-watch";
+      sel.appendChild(opt);
+      sel.value = "should-i-watch";
+    });
+    await page.locator("#captureUrl").fill(PICKED_URL);
+    await page.locator("#captureUrlBtn").click();
+    await expect(page.locator("#errorBanner")).toHaveText("That summary kind is not offered here");
+    await expect(page.locator("#captureUrl")).toHaveValue(PICKED_URL);
   });
 
   test("a paste that lands mid-capture is a banner only — the running card keeps streaming", async ({ page }) => {

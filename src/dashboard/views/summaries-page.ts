@@ -7,7 +7,15 @@ import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../../wiki/readonly.ts";
 import { clientDomainMapJson } from "../../summaries/domain.ts";
 import { getAuthorTierThresholds } from "../../summaries/author-scores.ts";
-import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript, captureUrlFormHtml } from "./components/sum-submit-form.ts";
+import {
+  sumSubmitFormStyles,
+  sumSubmitFormHtml,
+  sumSubmitFormScript,
+  captureUrlFormHtml,
+  type CapturePickerOption,
+} from "./components/sum-submit-form.ts";
+import { SHIPPED_CAPTURE_PRESETS, capturePresetOptions } from "../../summaries/presets.ts";
+import { CAPTURE_LANGS } from "../../summaries/language.ts";
 import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components/sum-job-card.ts";
 import { VIMEO_MAX_DURATION_SEC } from "../../vimeo/limits.ts";
 import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
@@ -45,7 +53,22 @@ const SUMMARIES_TABS: SectionTabsConfig = {
   aliases: { recently: "shelf", library: "shelf" },
 };
 
-export async function renderSummariesPage(): Promise<string> {
+export interface SummariesPageOptions {
+  /**
+   * The summary kinds the URL field's picker offers — the SUMMARIZER bot's
+   * resolved preset set, which the route computes (`resolveCapturePresets` over
+   * that bot's `prompts` AND its `connector`, so a per-bot
+   * `captureSummary.<id>.md` is a kind the reader can pick and an opus kind
+   * is not offered where the connector cannot run it). The default is the
+   * WHOLE shipped set, un-narrowed — right only for a render with no bot in
+   * hand (tests); a second caller with a bot must pass the narrowed list, or
+   * it re-offers `deep` on a bot that will 400 it.
+   */
+  captureKinds?: readonly CapturePickerOption[];
+}
+
+export async function renderSummariesPage(opts: SummariesPageOptions = {}): Promise<string> {
+  const captureKinds = opts.captureKinds ?? capturePresetOptions(SHIPPED_CAPTURE_PRESETS);
   const helpers = await helpersClientScript();
   // The share dialog, as the STANDALONE bundle (this page composes
   // template-string scripts in one scope and cannot import). Exactly one copy
@@ -179,7 +202,7 @@ export async function renderSummariesPage(): Promise<string> {
     <!-- Capture by URL — always visible, because Vimeo has no Chrome extension
          and a link is its whole input. Sits between the head row (which carries
          the "+ Paste article" toggle) and the collapsed paste form below. -->
-    ${captureUrlFormHtml()}
+    ${captureUrlFormHtml({ kinds: captureKinds, langs: CAPTURE_LANGS })}
 
     <!-- Manual submit form (pasted article text; YouTube/X come from the Chrome
          extension) — collapsed behind the toggle above so the inbox leads. -->

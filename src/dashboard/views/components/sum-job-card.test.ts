@@ -179,6 +179,11 @@ describe("sum-job-card: the Vimeo sentence map", () => {
     expect(h.vimeoSentence("oembed_failed")).toBe("Vimeo did not answer");
   });
 
+  test("names a refused picker value, so the machine token never reaches the reader", () => {
+    expect(h.vimeoSentence("bad_kind")).toBe("That summary kind is not offered here");
+    expect(h.vimeoSentence("bad_lang")).toBe("That output language is not offered here");
+  });
+
   test("names the two answers that are not refusals", () => {
     expect(h.vimeoSentence("duplicate")).toBe("Already captured");
     expect(h.vimeoSentence("in_flight")).toBe("Already being captured");

@@ -360,6 +360,35 @@ describe("bot discovery", () => {
       expect(found!.prompts?.shareVariants).toEqual([{ id: "slack", label: "Slack", content: "Body" }]);
     });
 
+    // Capture summary KINDS (`src/summaries/presets.ts`) — the third variant-only
+    // key. Before it existed, `captureSummary.talk-notes.md` was warned about and
+    // dropped like any unknown file.
+    test("discovers captureSummary.<id>.md variants, sorted, with label + fallback", () => {
+      setupTestBot("_test_capturekinds", {
+        prompts: {
+          "captureSummary.talk-notes": "<!-- label: Talk notes (ours) -->\n- One bullet per section",
+          "captureSummary.brief": "Brief body without label",
+        },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_capturekinds");
+      expect(found!.prompts?.captureSummaryVariants).toEqual([
+        { id: "brief", label: "Brief", content: "Brief body without label" },
+        { id: "talk-notes", label: "Talk notes (ours)", content: "- One bullet per section" },
+      ]);
+    });
+
+    test("a bare captureSummary.md is NOT loaded — variant-only key", () => {
+      setupTestBot("_test_capturekindbare", {
+        prompts: { captureSummary: "Should be ignored", "share.slack": "Body" },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_capturekindbare");
+      expect(found!.prompts?.captureSummary).toBeUndefined();
+      expect(found!.prompts?.captureSummaryVariants).toBeUndefined();
+      expect(found!.prompts?.shareVariants).toEqual([{ id: "slack", label: "Slack", content: "Body" }]);
+    });
+
     // Adversarial review: an empty file is ABSENT, not an empty prompt. Kept, an
     // empty share.md replaced the shipped default with "" (`?? DEFAULT` keeps a
     // present-but-empty string) and the share flow ran instruction-free.

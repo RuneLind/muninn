@@ -22,6 +22,20 @@ import { captureUrlFormHtml, sumSubmitFormHtml, sumSubmitFormScript } from "./su
 /** The alert a bare non-Vimeo link gets. Spelled out here on purpose: this test
  *  is the pin, so the string is compared against a literal rather than against
  *  something derived from the source it is checking. */
+/** The picker as the page renders it with no per-bot kinds. */
+const PICKER = {
+  kinds: [
+    { id: "standard", label: "Standard" },
+    { id: "deep", label: "Deep (opus, full thinking)" },
+    { id: "talk-notes", label: "Talk notes (timeline)" },
+  ],
+  langs: [
+    { id: "talk", label: "Talk's language" },
+    { id: "nb", label: "Norsk (bokmål)" },
+    { id: "en", label: "English" },
+  ],
+};
+
 const BARE_LINK_ALERT =
   "This looks like a bare link. YouTube and X posts are captured with the Muninn Chrome extension — open the page and click the extension. This form wants the pasted article text itself.";
 
@@ -59,12 +73,29 @@ interface Harness {
   labelDuring: (id: string) => string | undefined;
   /** Overwrite a button's label after init, the way an in-flight submit does. */
   setTransientLabel: (id: string, label: string) => void;
+  /** Pick an option on a select the way a reader does — value + change event. */
+  select: (id: string, value: string) => void;
+  /** A select's current value. */
+  selected: (id: string) => string;
+  /** What the fake localStorage holds now. */
+  stored: () => Record<string, string>;
   submitCaptureUrlFromInput: () => Promise<void>;
   submitArticle: () => Promise<void>;
   detectCaptureProvider: (url: unknown) => string | null;
 }
 
-function harness(response: { status: number; body: unknown } | { throws: true }): Harness {
+/** What the harness lets a case set up BEFORE the script runs. */
+interface HarnessSetup {
+  /** The options each select offers, as the server rendered them. */
+  selects?: Record<string, string[]>;
+  /** What `localStorage` holds at script init; `throws` makes the accessor throw. */
+  storage?: Record<string, string> | { throws: true };
+}
+
+function harness(
+  response: { status: number; body: unknown } | { throws: true },
+  setup: HarnessSetup = {},
+): Harness {
   const fetchCalls: FetchCall[] = [];
   const alerts: string[] = [];
   const outcomes: Outcome[] = [];
@@ -79,6 +110,7 @@ function harness(response: { status: number; body: unknown } | { throws: true })
     captureUrl: "",
   };
 
+  const changeListeners: Record<string, Array<() => void>> = {};
   const element = (id: string) => ({
     get value() {
       return values[id] ?? "";
@@ -88,8 +120,28 @@ function harness(response: { status: number; body: unknown } | { throws: true })
     },
     disabled: false,
     textContent: "Summarize",
-    addEventListener() {},
+    // A select's options, as the server rendered them; a text field has none.
+    options: (setup.selects?.[id] ?? []).map((value) => ({ value })),
+    addEventListener(type: string, fn: () => void) {
+      if (type === "change") (changeListeners[id] ??= []).push(fn);
+    },
   });
+  // A select with options starts on its FIRST one, like a real <select>.
+  for (const [id, options] of Object.entries(setup.selects ?? {})) {
+    if (options.length > 0) values[id] = options[0]!;
+  }
+  const stored: Record<string, string> = "throws" in (setup.storage ?? {}) ? {} : { ...(setup.storage as Record<string, string> | undefined) };
+  const storageThrows = "throws" in (setup.storage ?? {});
+  const fakeStorage = {
+    getItem(key: string) {
+      if (storageThrows) throw new Error("storage blocked");
+      return key in stored ? stored[key]! : null;
+    },
+    setItem(key: string, value: string) {
+      if (storageThrows) throw new Error("storage blocked");
+      stored[key] = value;
+    },
+  };
   let streamLive = false;
   let bannerClears = 0;
   const labelDuring: Record<string, string> = {};
@@ -102,6 +154,7 @@ function harness(response: { status: number; body: unknown } | { throws: true })
 
   const ctx = {
     document: doc,
+    localStorage: fakeStorage,
     alert: (message: string) => alerts.push(message),
     fetch: async (url: string, init?: { method?: string; body?: string }) => {
       fetchCalls.push({
@@ -139,6 +192,7 @@ function harness(response: { status: number; body: unknown } | { throws: true })
 
   const prelude = [
     "var document = ctx.document;",
+    "var localStorage = ctx.localStorage;",
     "var alert = ctx.alert;",
     "var fetch = ctx.fetch;",
     "var history = ctx.history;",
@@ -193,6 +247,12 @@ function harness(response: { status: number; body: unknown } | { throws: true })
     setTransientLabel: (id: string, label: string) => {
       doc.getElementById(id).textContent = label;
     },
+    select: (id: string, value: string) => {
+      values[id] = value;
+      for (const fn of changeListeners[id] ?? []) fn();
+    },
+    selected: (id: string) => values[id] ?? "",
+    stored: () => ({ ...stored }),
     ...made,
   };
 }
@@ -352,12 +412,108 @@ describe("sum-submit-form: a Vimeo link in the ARTICLE box", () => {
 
 describe("sum-submit-form: markup", () => {
   test("the URL field and its button carry the ids the script wires", () => {
-    const html = captureUrlFormHtml();
+    const html = captureUrlFormHtml(PICKER);
     expect(html).toContain('id="captureUrl"');
     expect(html).toContain('id="captureUrlBtn"');
     expect(html).toContain('type="url"');
     // The paste form is a separate, collapsed affordance and keeps its own ids.
     expect(sumSubmitFormHtml()).toContain('id="articleText"');
+  });
+
+  test("the picker renders one select per axis, in the order given, labels escaped", () => {
+    const html = captureUrlFormHtml({
+      kinds: [
+        { id: "standard", label: "Standard" },
+        { id: "talk-notes", label: 'Notes <"ours" & more>' },
+      ],
+      langs: PICKER.langs,
+    });
+    expect(html).toContain('<select id="captureKind" aria-label="Summary kind"');
+    expect(html).toContain('<select id="captureLang" aria-label="Output language"');
+    expect(html).toContain('<option value="standard">Standard</option><option value="talk-notes">Notes &lt;&quot;ours&quot; &amp; more&gt;</option>');
+    expect(html).toContain('<option value="talk">Talk\'s language</option>');
+    expect(html.indexOf('id="captureUrl"')).toBeLessThan(html.indexOf('id="captureKind"'));
+    expect(html.indexOf('id="captureKind"')).toBeLessThan(html.indexOf('id="captureLang"'));
+    expect(html.indexOf('id="captureLang"')).toBeLessThan(html.indexOf('id="captureUrlBtn"'));
+    // No `selected` attribute anywhere: the browser's memory of the picker is
+    // the script's, from localStorage — a server-picked option would win over it.
+    expect(html).not.toContain("selected");
+  });
+});
+
+describe("sum-submit-form: the kind + language picker", () => {
+  const SELECTS = { captureKind: ["standard", "deep", "talk-notes"], captureLang: ["talk", "nb", "en"] };
+
+  test("the picker's values ride on the capture POST, from the URL field and from the article-box forward", async () => {
+    const h = harness({ status: 200, body: { job_id: "j1", title: "T" } }, { selects: SELECTS });
+    h.select("captureKind", "talk-notes");
+    h.select("captureLang", "nb");
+    h.setUrl("https://vimeo.com/1223642971");
+    await h.submitCaptureUrlFromInput();
+    expect(h.fetchCalls[0]!.body).toEqual({ url: "https://vimeo.com/1223642971", kind: "talk-notes", lang: "nb" });
+
+    h.setArticle("https://vimeo.com/1223642972");
+    await h.submitArticle();
+    expect(h.fetchCalls[1]!.body).toEqual({ url: "https://vimeo.com/1223642972", kind: "talk-notes", lang: "nb" });
+  });
+
+  test("with nothing stored the selects stay on their first option — the server's defaults", async () => {
+    const h = harness({ status: 200, body: { job_id: "j1", title: "T" } }, { selects: SELECTS });
+    expect(h.selected("captureKind")).toBe("standard");
+    expect(h.selected("captureLang")).toBe("talk");
+    h.setUrl("https://vimeo.com/1223642971");
+    await h.submitCaptureUrlFromInput();
+    expect(h.fetchCalls[0]!.body).toEqual({ url: "https://vimeo.com/1223642971", kind: "standard", lang: "talk" });
+  });
+
+  test("a change is remembered under the versioned key, and restored on the next init", () => {
+    const h = harness({ status: 200, body: {} }, { selects: SELECTS });
+    h.select("captureKind", "deep");
+    h.select("captureLang", "en");
+    expect(h.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "deep", lang: "en" }) });
+
+    const again = harness({ status: 200, body: {} }, { selects: SELECTS, storage: h.stored() });
+    expect(again.selected("captureKind")).toBe("deep");
+    expect(again.selected("captureLang")).toBe("en");
+  });
+
+  test("EACH select persists on its own change — a reader who only changes the kind keeps it", () => {
+    const kindOnly = harness({ status: 200, body: {} }, { selects: SELECTS });
+    kindOnly.select("captureKind", "deep");
+    expect(kindOnly.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "deep", lang: "talk" }) });
+    const langOnly = harness({ status: 200, body: {} }, { selects: SELECTS });
+    langOnly.select("captureLang", "en");
+    expect(langOnly.stored()).toEqual({ "muninn.summaries.capture.v1": JSON.stringify({ kind: "standard", lang: "en" }) });
+  });
+
+  test("a stored value the server no longer offers is ignored, per axis", () => {
+    const h = harness(
+      { status: 200, body: {} },
+      { selects: SELECTS, storage: { "muninn.summaries.capture.v1": JSON.stringify({ kind: "should-i-watch", lang: "nb" }) } },
+    );
+    expect(h.selected("captureKind")).toBe("standard");
+    expect(h.selected("captureLang")).toBe("nb");
+  });
+
+  test("garbage in storage, or storage that throws, leaves the defaults and never breaks the script", async () => {
+    const garbage = harness({ status: 200, body: { job_id: "j" } }, { selects: SELECTS, storage: { "muninn.summaries.capture.v1": "{not json" } });
+    expect(garbage.selected("captureKind")).toBe("standard");
+    const blocked = harness({ status: 200, body: { job_id: "j" } }, { selects: SELECTS, storage: { throws: true } });
+    expect(blocked.selected("captureLang")).toBe("talk");
+    // A change with blocked storage still changes the select and still posts.
+    blocked.select("captureLang", "en");
+    blocked.setUrl("https://vimeo.com/1223642971");
+    await blocked.submitCaptureUrlFromInput();
+    expect(blocked.fetchCalls[0]!.body).toMatchObject({ lang: "en" });
+  });
+
+  test("a 400 that names a refused kind or language is that sentence, not the URL one", async () => {
+    const h = harness({ status: 400, body: { error: "Unknown summary kind: x", code: "bad_kind", kind: "x" } }, { selects: SELECTS });
+    h.setUrl("https://vimeo.com/1223642971");
+    await h.submitCaptureUrlFromInput();
+    expect(h.outcomes[0]!.opts).toMatchObject({ status: "error", sentence: "sentence:bad_kind" });
+    // The field keeps the url: nothing was started.
+    expect(h.urlValue()).toBe("https://vimeo.com/1223642971");
   });
 });
 
@@ -513,6 +669,6 @@ describe("sum-submit-form: the banner does not outlive the request it belongs to
 
 describe("sum-submit-form: markup, accessibility", () => {
   test("the URL field has an accessible name", () => {
-    expect(captureUrlFormHtml()).toContain('aria-label="Vimeo URL"');
+    expect(captureUrlFormHtml(PICKER)).toContain('aria-label="Vimeo URL"');
   });
 });

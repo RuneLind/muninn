@@ -5,6 +5,12 @@ import { getLog } from "../logging.ts";
 import { resolveServingProfile } from "../config.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import {
+  captureBotConfigFor,
+  captureThinkingFor,
+  type CapturePreset,
+} from "../summaries/presets.ts";
+import { languageRider, resolveOutputLang, type CaptureLang } from "../summaries/language.ts";
 import { getSummarySource } from "../summaries/sources.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { createQueue } from "../wiki/queue.ts";
@@ -64,13 +70,33 @@ export const VIMEO_SUMMARIZE_TIMEOUT_MS = 600_000;
 /** Error code stored on a job whose video has captions we could not choose from. */
 export const NO_CAPTIONS_ERROR = "no_captions";
 
-const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
+const SUMMARIZE_INTRO =
   "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
-    "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
-    "carrying its absolute position in the talk; those headings are positions, not content — " +
-    "never quote one as if it were speech.",
-  VALID_CATEGORIES,
-);
+  "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
+  "carrying its absolute position in the talk; those headings are positions, not content — " +
+  "never quote one as if it were speech.";
+
+/**
+ * The system prompt for one capture: the shared envelope around the KIND's
+ * structure bullets, then the video, then the riders — language LAST, after
+ * the auto-caption one, for the reason the share prompt puts its rider after
+ * the instruction: the language is the reader's explicit pick (or the talk's
+ * own), and nothing a preset says may un-pick it.
+ */
+export function buildVimeoSystemPrompt(input: {
+  preset: CapturePreset;
+  title: string;
+  url: string;
+  captionKind: "manual" | "auto";
+  outputLang: "nb" | "en";
+}): string {
+  return `${buildSummarySystemPrompt(SUMMARIZE_INTRO, VALID_CATEGORIES, input.preset.instruction)}
+
+Video title: ${input.title}
+Video URL: ${input.url}${input.captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}
+
+${languageRider(input.outputLang, "summary")}`;
+}
 
 /**
  * The rider appended when the chosen track is machine-generated.
@@ -112,6 +138,18 @@ export interface VimeoJobMeta {
    * field of its own is a huginn allowlist change.
    */
   readonly uploadDate: string;
+  /**
+   * The summary KIND the reader picked, resolved by the route against the
+   * summarizer bot's preset set (`findCapturePreset` — an unknown id is a 400
+   * there, so this is always a real preset).
+   */
+  readonly preset: CapturePreset;
+  /**
+   * The output language the reader picked — `talk` (the default) resolves
+   * against the chosen caption track's tag once the harvest has run, which is
+   * why this is the PICK and not the resolved language.
+   */
+  readonly lang: CaptureLang;
 }
 
 export type HarvestFn = (
@@ -353,13 +391,33 @@ export async function summarizeVimeo(
       },
     );
 
-    // 2. Summarize.
+    // 2. Summarize — in the KIND the reader picked, in the language they
+    //    picked or the talk's own. The language is resolved HERE, not in the
+    //    route: `talk` needs the chosen track's tag, which exists only now.
     updateStatus(jobId, "summarizing");
 
-    const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}
-
-Video title: ${meta.title}
-Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
+    const outputLang = resolveOutputLang(meta.lang, track.lang);
+    const systemPrompt = buildVimeoSystemPrompt({
+      preset: meta.preset,
+      title: meta.title,
+      url: meta.url,
+      captionKind,
+      outputLang,
+    });
+    const runBot = captureBotConfigFor(botConfig, meta.preset);
+    if (meta.preset.run.model === "opus" && runBot === botConfig) {
+      // Honest about what ran: the kind promised the bigger model and this
+      // connector's namespace cannot name it. The thinking half still applies.
+      log.warn(
+        "Vimeo capture {jobId}: kind {kind} asks for the opus model, but connector {connector} keeps its own ({model})",
+        {
+          jobId,
+          kind: meta.preset.id,
+          connector: botConfig.connector ?? "claude-cli",
+          model: botConfig.model ?? "default",
+        },
+      );
+    }
 
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {
@@ -375,11 +433,17 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
       prompt: transcript,
       systemPrompt,
       config,
-      botConfig,
+      botConfig: runBot,
       attachRun,
       onProgress,
       timeoutMs: VIMEO_SUMMARIZE_TIMEOUT_MS,
-      extraTraceAttrs: { captionLang: track.lang, captionKind },
+      ...(captureThinkingFor(meta.preset) === null ? { thinkingMaxTokens: null } : {}),
+      extraTraceAttrs: {
+        captionLang: track.lang,
+        captionKind,
+        summaryKind: meta.preset.id,
+        summaryLang: outputLang,
+      },
     });
 
     const { category, summary } = parseSummaryResponse(result.result);
@@ -418,6 +482,13 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
         // from one harvested off vimeo.com.
         caption_kind: stubbed ? "stub" : captionKind,
         duration_sec: meta.durationSec,
+        // The summary's OWN provenance, beside the caption's: the kind that
+        // wrote it and the language it was written in — the RESOLVED one, so a
+        // `talk` pick on a Norwegian track lands as `nb`. A Norwegian summary
+        // of an English talk is a legitimate document, so neither is
+        // derivable from `caption_lang`.
+        summary_kind: meta.preset.id,
+        summary_lang: outputLang,
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
       onIngested: (info) => {

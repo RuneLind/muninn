@@ -123,6 +123,25 @@ describe("summaries page: the Vimeo cap is injected, not spelled", () => {
    * stops emitting it the card throws a ReferenceError the moment a refusal
    * arrives — a silent break, since nothing else on the page touches it.
    */
+  test("renders the kind + language picker beside the URL field, shipped kinds by default", () => {
+    expect(html).toContain('<select id="captureKind"');
+    expect(html).toContain('<option value="standard">Standard</option>');
+    expect(html).toContain('<option value="deep">');
+    expect(html).toContain('<option value="talk-notes">');
+    expect(html).toContain('<select id="captureLang"');
+    expect(html).toContain('<option value="talk">');
+    expect(html).toContain('<option value="nb">Norsk (bokmål)</option>');
+    expect(html).toContain('<option value="en">English</option>');
+  });
+
+  test("a caller-supplied kind list (the summarizer bot's) is what the picker offers", async () => {
+    const custom = await renderSummariesPage({
+      captureKinds: [{ id: "standard", label: "Standard" }, { id: "brief", label: "Brief (ours)" }],
+    });
+    expect(custom).toContain('<option value="brief">Brief (ours)</option>');
+    expect(custom).not.toContain('<option value="deep">');
+  });
+
   test("declares VIMEO_MAX_DURATION_SEC with the SERVER's value", () => {
     expect(html).toContain(`const VIMEO_MAX_DURATION_SEC = ${VIMEO_MAX_DURATION_SEC};`);
     // …and the constant it names is the one the route enforces.
