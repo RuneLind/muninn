@@ -133,11 +133,17 @@ export interface VimeoJobMeta {
   readonly title: string;
   readonly durationSec: number;
   /**
-   * oEmbed's `upload_date`. Retained on the job, read by nothing: the document's
-   * `date` is the capture day (see the ingest body below), and a frontmatter
-   * field of its own is a huginn allowlist change.
+   * oEmbed's `upload_date`, written on the document as `upload_date` — kept
+   * apart from `date`, which is the CAPTURE day the shelf buckets on.
    */
   readonly uploadDate: string;
+  /** oEmbed's `author_name` — the uploading account ("JavaZone"). */
+  readonly author: string;
+  /** oEmbed's `thumbnail_url` — the poster frame the shelf card shows. */
+  readonly thumbnailUrl: string;
+  /** Derived by the route from a conference account's title convention
+   *  (`speakerFromTitle`); absent for every other uploader. */
+  readonly speaker?: string;
   /**
    * The summary KIND the reader picked, resolved by the route against the
    * summarizer bot's preset set (`findCapturePreset` — an unknown id is a 400
@@ -489,6 +495,13 @@ export async function summarizeVimeo(
         // derivable from `caption_lang`.
         summary_kind: meta.preset.id,
         summary_lang: outputLang,
+        // What oEmbed knew (v2 PR 2). Sent only when non-empty — huginn writes
+        // a key it is sent, and an empty `author: ""` on the document is a
+        // wrong fact, not a missing one.
+        ...(meta.author ? { author: meta.author } : {}),
+        ...(meta.uploadDate ? { upload_date: meta.uploadDate } : {}),
+        ...(meta.speaker ? { speaker: meta.speaker } : {}),
+        ...(meta.thumbnailUrl ? { thumbnail_url: meta.thumbnailUrl } : {}),
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
       onIngested: (info) => {

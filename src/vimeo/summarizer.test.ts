@@ -133,6 +133,9 @@ const META = {
   title: "Trust but verify",
   durationSec: 3180,
   uploadDate: "2026-08-20 09:33:04",
+  author: "JavaZone",
+  thumbnailUrl: "https://i.vimeocdn.com/video/x-1280x720.jpg",
+  speaker: "Thor Henning Hetland",
   // The route's defaults: the standard kind, in the talk's own language.
   preset: STANDARD,
   lang: "talk" as const,
@@ -262,6 +265,31 @@ test("the source-draft trigger keys off huginn's stored doc id and the vimeo col
   expect(sourceDraftCalls[0]!.collection).toBe(VIMEO_COLLECTION);
   expect(sourceDraftCalls[0]!.docId).toBe("ai/rag/Trust but verify.md");
   expect(sourceDraftCalls[0]!.url).toBe(CANONICAL);
+});
+
+// --- oEmbed metadata on the document (v2 PR 2) --------------------------------
+
+test("the ingest body carries author, upload_date, speaker and thumbnail_url from the route's meta", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, deps());
+
+  expect(ingestPayload!.author).toBe("JavaZone");
+  expect(ingestPayload!.upload_date).toBe("2026-08-20 09:33:04");
+  expect(ingestPayload!.speaker).toBe("Thor Henning Hetland");
+  expect(ingestPayload!.thumbnail_url).toBe("https://i.vimeocdn.com/video/x-1280x720.jpg");
+  // `date` stays the capture day — the upload date is its own key.
+  expect(ingestPayload!.date).not.toBe("2026-08-20 09:33:04");
+});
+
+test("an empty oEmbed field is an ABSENT key, never an empty string on the document", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  const { speaker: _s, ...noSpeaker } = META;
+  await summarizeVimeo(jobId, { ...noSpeaker, author: "", thumbnailUrl: "", uploadDate: "" }, config, bot, deps());
+
+  expect(ingestPayload).not.toHaveProperty("author");
+  expect(ingestPayload).not.toHaveProperty("upload_date");
+  expect(ingestPayload).not.toHaveProperty("speaker");
+  expect(ingestPayload).not.toHaveProperty("thumbnail_url");
 });
 
 // --- Kind + language (v2 PR 1) ----------------------------------------------

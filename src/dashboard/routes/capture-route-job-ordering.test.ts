@@ -132,13 +132,21 @@ let vimeoSummarizeRejectsWith: unknown = null;
  */
 let vimeoIngestDocId: string | null = null;
 /** The meta the LAST started capture was handed — the kind + language ride on it. */
-let lastVimeoMeta: { videoId: string; preset?: { id: string }; lang?: string } | null = null;
+let lastVimeoMeta: {
+  videoId: string;
+  preset?: { id: string };
+  lang?: string;
+  author?: string;
+  thumbnailUrl?: string;
+  uploadDate?: string;
+  speaker?: string;
+} | null = null;
 const realVimeoSummarizer = await import("../../vimeo/summarizer.ts");
 mock.module("../../vimeo/summarizer.ts", () => ({
   ...realVimeoSummarizer,
   summarizeVimeo: async (
     _jobId: string,
-    meta: { videoId: string; preset?: { id: string }; lang?: string },
+    meta: typeof lastVimeoMeta & object,
     _config: unknown,
     _botConfig: unknown,
     _deps: unknown,
@@ -769,6 +777,28 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     expect(res.status).toBe(200);
     expect(lastVimeoMeta!.preset!.id).toBe("talk-notes");
     expect(lastVimeoMeta!.lang).toBe("nb");
+  });
+
+  // --- oEmbed metadata rides on the meta (v2 PR 2) --------------------------
+
+  test("author, thumbnail and upload date come from oEmbed; a conference title yields the speaker", async () => {
+    oembedAnswer = { ...oembedAnswer, title: "Trust, But Verify - Totto - Thor Henning Hetland", author: "JavaZone" };
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+    expect(res.status).toBe(200);
+    expect(lastVimeoMeta).toMatchObject({
+      author: "JavaZone",
+      thumbnailUrl: "https://i.vimeocdn.com/x.jpg",
+      uploadDate: "2026-08-20 09:33:04",
+      speaker: "Thor Henning Hetland",
+    });
+  });
+
+  test("an individual's upload has NO speaker key, whatever its title says", async () => {
+    oembedAnswer = { ...oembedAnswer, title: "Kotlin - the good parts", author: "Some Person" };
+    const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
+    expect(res.status).toBe(200);
+    expect(lastVimeoMeta).not.toHaveProperty("speaker");
+    expect(lastVimeoMeta!.author).toBe("Some Person");
   });
 
   test("a per-bot captureSummary.<id>.md is a kind this route accepts", async () => {

@@ -657,6 +657,45 @@ export function sumArticleLibraryScript(): string {
       });
     }
 
+    /**
+     * The video id in a Vimeo url — a CLIENT mirror of the host-gated rule in
+     * src/vimeo/url.ts, kept to the two shapes the stored documents carry
+     * (vimeo.com/<id> and player.vimeo.com/video/<id>, hash suffix or not).
+     */
+    function vimeoVideoIdFromUrl(url) {
+      var m = /^https?:\\/\\/(?:www\\.)?(?:player\\.)?vimeo\\.com\\/(?:video\\/)?(\\d+)(?:[\\/?#]|$)/i.exec(String(url || '').trim());
+      return m ? m[1] : null;
+    }
+
+    /**
+     * Turn every \`[HH:MM:SS]\` / \`[MM:SS]\` in a Vimeo capture's markdown into a
+     * link to that second of the video (\`vimeo.com/<id>#t=<sec>s\`, which the
+     * Vimeo player honours) — the transcript's \`### [HH:MM:SS]\` window headings
+     * and any timestamp the summary cites. Markdown in, markdown out: the label
+     * keeps its brackets (\`[\\[00:12:00\\]](url)\`) so the page reads exactly as
+     * before, only clickable. Fenced code is left alone (a timestamp inside a
+     * quoted config is source text), and a bracket already followed by \`(\` is
+     * an existing link. No id ⇒ the text is returned untouched.
+     *
+     * ⚠️ This lives inside a TEMPLATE LITERAL: every backslash below is written
+     * doubled in the .ts source so the browser sees one. A regex that looks
+     * right in the source and has a single backslash is a broken page script.
+     */
+    function linkVimeoTimestamps(markdown, videoUrl) {
+      var id = vimeoVideoIdFromUrl(videoUrl);
+      if (!id) return markdown;
+      var base = 'https://vimeo.com/' + id + '#t=';
+      var inFence = false;
+      return String(markdown).split('\\n').map(function(line) {
+        if (/^\\s*(\`\`\`|~~~)/.test(line)) { inFence = !inFence; return line; }
+        if (inFence) return line;
+        return line.replace(/\\[(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\](?!\\()/g, function(whole, a, b, c) {
+          var sec = c === undefined ? Number(a) * 60 + Number(b) : Number(a) * 3600 + Number(b) * 60 + Number(c);
+          return '[\\\\[' + whole.slice(1, -1) + '\\\\]](' + base + sec + 's)';
+        });
+      }).join('\\n');
+    }
+
     async function openSummaryDoc(docId, url, source) {
       // Take a new request id at the top so any earlier in-flight fetch (slow
       // article A while user clicks B) is invalidated — its post-await
@@ -731,6 +770,8 @@ export function sumArticleLibraryScript(): string {
         var text = doc.text || '';
         // Strip breadcrumb prefix [collection > path] and tags line
         var cleaned = text.replace(/^\\[.*?\\]\\n*/, '').replace(/^tags:.*\\n*/m, '');
+        // A Vimeo capture's timestamps become clicks into the video.
+        if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, url);
         var mainEl = document.getElementById('sumArticleMain');
         if (mainEl) mainEl.innerHTML = renderMarkdown(cleaned);
 
