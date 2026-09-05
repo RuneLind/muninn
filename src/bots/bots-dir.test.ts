@@ -1,5 +1,5 @@
 import { test, expect, describe, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { discoverAllBots, resolveBotsDir } from "./config.ts";
@@ -132,4 +132,32 @@ test("MUNINN_BOTS_DIR is an instance-profile flag no suite may inherit", () => {
   // write: an ambient one would give every bot-resolution suite a different
   // roster on one machine than on the other.
   expect(AMBIENT_INSTANCE_ENV).toContain("MUNINN_BOTS_DIR");
+});
+
+describe("discovery survives a bots root the process may not READ", () => {
+  /**
+   * The residual `resolveBotsDir` documented: directory-ness is checked with
+   * `stat`, which needs only search permission on the PARENT, so a directory
+   * the process cannot read passes the guard and `readdirSync` threw EACCES out
+   * of discovery — a boot crash, from a `.env` line. The guard for that class
+   * sits around the `readdirSync` itself, and degrades the same way the other
+   * refusals do: warn, then the checkout's own `bots/`.
+   */
+  test("an unreadable MUNINN_BOTS_DIR warns and falls back to the checkout's bots/", () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      // root reads everything; the property is not observable there.
+      return;
+    }
+    const root = tempBotsRoot("zzlockedbot");
+    chmodSync(root, 0o000);
+    try {
+      process.env.MUNINN_BOTS_DIR = root;
+      let names: string[] = [];
+      expect(() => { names = discoverAllBots().map((b) => b.name); }).not.toThrow();
+      expect(names).toContain("jarvis");
+      expect(names).not.toContain("zzlockedbot");
+    } finally {
+      chmodSync(root, 0o755);
+    }
+  });
 });

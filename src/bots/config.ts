@@ -681,10 +681,10 @@ function validateWikiAutoCommitConfig(settings: Record<string, unknown>, botName
  * warn once and return `[]` (every bot offline, no Telegram poller, nothing for
  * `resolveSummarizerBot` to resolve), and a FILE made `readdirSync` throw
  * ENOTDIR out of discovery — a boot crash (measured with `/etc/hosts`). A typo
- * in `.env` must not do any of that. KNOWN residual: a directory the process
- * may not READ passes this guard and `readdirSync` throws EACCES, exactly as
- * the default `bots/` always did — the fix for that class belongs around the
- * `readdirSync` in discovery, not here.
+ * in `.env` must not do any of that. A directory the process may not READ
+ * passes this guard (`stat` needs only search permission on the parent) and is
+ * caught one level down, around the `readdirSync` in discovery
+ * (`readBotsDirEntries`), with the same fallback.
  */
 export function resolveBotsDir(): string {
   const fallback = resolve(import.meta.dir, "../../bots");
@@ -737,15 +737,52 @@ function warnBotsDirOnce(key: string, message: string, props: Record<string, unk
   log.warn(message, props);
 }
 
-function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
-  const botsDir = resolveBotsDir();
+/**
+ * `readdirSync` on the bots root, degraded the way `resolveBotsDir`'s refusals
+ * are. That guard checks directory-ness with `stat`, which needs only search
+ * permission on the PARENT, so a directory the process may not READ passes it
+ * and the `readdirSync` here threw EACCES out of discovery — a boot crash from
+ * a `.env` line (measured with a `chmod 000` root). An override that cannot be
+ * read falls back to the checkout's own `bots/`, warned once per value; the
+ * fallback itself failing is a roster of zero, warned the same way — the exact
+ * shape an absent `bots/` already has.
+ */
+function readBotsDirEntries(botsDir: string): { root: string; entries: Dirent[] } {
+  const fallback = resolve(import.meta.dir, "../../bots");
+  try {
+    return { root: botsDir, entries: readdirSync(botsDir, { withFileTypes: true }) };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+    if (botsDir !== fallback) {
+      warnBotsDirOnce(
+        `unreadable:${botsDir}`,
+        "MUNINN_BOTS_DIR={value} cannot be read ({code}) — ignoring it and using {fallback}",
+        { value: botsDir, code, fallback },
+      );
+      return readBotsDirEntries(fallback);
+    }
+    warnBotsDirOnce(
+      `unreadable:${botsDir}`,
+      "bots/ directory at {path} cannot be read ({code}) — no bots discovered",
+      { path: botsDir, code },
+    );
+    return { root: botsDir, entries: [] };
+  }
+}
 
-  if (!existsSync(botsDir)) {
-    log.warn("bots/ directory not found at {path}", { path: botsDir });
+function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
+  if (!existsSync(resolveBotsDir())) {
+    log.warn("bots/ directory not found at {path}", { path: resolveBotsDir() });
     return [];
   }
 
-  const entries = readdirSync(botsDir, { withFileTypes: true });
+  // `botsDir` is re-bound to the root the entries actually came from: on the
+  // fallback path, joining the checkout's entry names onto the UNREADABLE
+  // override found no CLAUDE.md under any of them and discovered nothing —
+  // measured, the first cut of this guard did exactly that.
+  const read = readBotsDirEntries(resolveBotsDir());
+  const botsDir = read.root;
+  const entries = read.entries;
   const bots: BotConfig[] = [];
 
   for (const entry of entries) {
