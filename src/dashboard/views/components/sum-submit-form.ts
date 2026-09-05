@@ -101,17 +101,66 @@ export function sumSubmitFormStyles(): string {
     }
     .capture-url-form button:hover { opacity: 0.9; }
     .capture-url-form button:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* The kind + language picker beside the URL field — the same field look. */
+    .capture-url-form select {
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      font-size: 14px;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    .capture-url-form select:focus { outline: none; border-color: var(--accent); }
+    @media (max-width: 720px) {
+      .capture-url-form { flex-wrap: wrap; }
+      .capture-url-form input { flex-basis: 100%; }
+    }
   `;
+}
+
+/** One `{id, label}` option of the picker, as the page injects it. */
+export interface CapturePickerOption {
+  id: string;
+  label: string;
+}
+
+/**
+ * The localStorage key the picker's controls persist under, per browser.
+ * Versioned (the plan-board draft-key idiom): a changed shape gets a new key
+ * rather than a migration.
+ */
+export const CAPTURE_PREFS_KEY = "muninn.summaries.capture.v1";
+
+function escapeAttr(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function selectHtml(id: string, label: string, options: readonly CapturePickerOption[]): string {
+  const opts = options
+    .map((o) => `<option value="${escapeAttr(o.id)}">${escapeAttr(o.label)}</option>`)
+    .join("");
+  return `<select id="${id}" aria-label="${escapeAttr(label)}" title="${escapeAttr(label)}">${opts}</select>`;
 }
 
 /**
  * The one-line capture-by-URL form. Rendered ABOVE the collapsed paste form, and
  * never collapsed itself: it is the whole entry point for the Vimeo vertical.
  */
-export function captureUrlFormHtml(): string {
+export function captureUrlFormHtml(picker: {
+  kinds: readonly CapturePickerOption[];
+  langs: readonly CapturePickerOption[];
+}): string {
   return `
     <div class="capture-url-form">
       <input type="url" id="captureUrl" aria-label="Vimeo URL" placeholder="Paste a Vimeo URL…" autocomplete="off" spellcheck="false" />
+      ${selectHtml("captureKind", "Summary kind", picker.kinds)}
+      ${selectHtml("captureLang", "Output language", picker.langs)}
       <button id="captureUrlBtn" type="button" onclick="submitCaptureUrlFromInput()">Summarize</button>
     </div>`;
 }
@@ -238,6 +287,60 @@ export function sumSubmitFormScript(): string {
     }
 
     /**
+     * The picker's two controls, remembered per browser under
+     * \`CAPTURE_PREFS_KEY\` — a reader who summarizes Norwegian talks as talk
+     * notes should not re-pick that on every paste. Every read and write is in
+     * a try/catch (private windows and blocked storage throw on the accessor
+     * itself), a stored value that is not one of the select's options is
+     * ignored (a kind the server stopped offering must not leave the select on
+     * a blank), and with nothing stored the selects keep their first option —
+     * the server's defaults.
+     */
+    var CAPTURE_PREFS_KEY = ${JSON.stringify(CAPTURE_PREFS_KEY)};
+
+    function readCapturePrefs() {
+      try {
+        var raw = localStorage.getItem(CAPTURE_PREFS_KEY);
+        if (!raw) return {};
+        var parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch (e) { return {}; }
+    }
+
+    function writeCapturePrefs(prefs) {
+      try { localStorage.setItem(CAPTURE_PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
+    }
+
+    /** Set a select to \`value\` only if it is one of its options. */
+    function selectIfOffered(el, value) {
+      if (!el || typeof value !== 'string') return;
+      for (var i = 0; i < el.options.length; i++) {
+        if (el.options[i].value === value) { el.value = value; return; }
+      }
+    }
+
+    /** The picker's current choice, as the capture POST body carries it. */
+    function capturePickerValues() {
+      var kindEl = document.getElementById('captureKind');
+      var langEl = document.getElementById('captureLang');
+      var out = {};
+      if (kindEl && kindEl.value) out.kind = kindEl.value;
+      if (langEl && langEl.value) out.lang = langEl.value;
+      return out;
+    }
+
+    (function initCapturePicker() {
+      var kindEl = document.getElementById('captureKind');
+      var langEl = document.getElementById('captureLang');
+      var prefs = readCapturePrefs();
+      selectIfOffered(kindEl, prefs.kind);
+      selectIfOffered(langEl, prefs.lang);
+      function persist() { writeCapturePrefs(capturePickerValues()); }
+      if (kindEl && kindEl.addEventListener) kindEl.addEventListener('change', persist);
+      if (langEl && langEl.addEventListener) langEl.addEventListener('change', persist);
+    })();
+
+    /**
      * The submit buttons' resting labels, snapshotted ONCE at script init.
      *
      * Read at call time instead, a submit that starts while another is in flight
@@ -279,18 +382,24 @@ export function sumSubmitFormScript(): string {
       // outlived the whole next request.
       clearCaptureBanner();
       try {
+        // The picker rides on EVERY capture POST, the article-box forward
+        // included: the kind and language are the reader's standing choice,
+        // not a property of the box the link was pasted into.
+        var picked = capturePickerValues();
         var res = await fetch('/api/vimeo/summarize', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: url }),
+          body: JSON.stringify({ url: url, kind: picked.kind, lang: picked.lang }),
         });
         var data = {};
         try { data = await res.json(); } catch (e) { data = {}; }
 
         if (!res.ok) {
-          // A 400 carries no machine code (the route spells the url in prose),
-          // so the STATUS is what names it; every other refusal carries one.
-          var code = res.status === 400 ? 'bad_url' : data.error;
+          // A 400 about the URL carries no machine code (the route spells the
+          // url in prose), so the STATUS names it — unless the body carries a
+          // \`code\` (a refused kind or language); every other refusal
+          // carries one in \`error\`.
+          var code = res.status === 400 ? (typeof data.code === 'string' ? data.code : 'bad_url') : data.error;
           showCaptureOutcome(url, {
             status: 'error',
             sentence: vimeoSentence(code, data) || data.error || ('Capture refused (HTTP ' + res.status + ')'),

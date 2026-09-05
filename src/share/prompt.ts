@@ -42,18 +42,13 @@ export const SHARE_EXCLUDED_TOOLS = ["WebSearch", "WebFetch"];
  */
 export const neutralizeShareFence = neutralizePromptFence;
 
-/** The rider that pins the output language. English is stated as explicitly as
- *  Norwegian — an unstated default is what a strongly-worded source page overrides. */
-export function languageRider(lang: ShareLang): string {
-  if (lang === "nb") {
-    return (
-      "LANGUAGE: write the post in Norwegian (bokmål), whatever language the source is in. " +
-      "Keep product names, proper nouns, code identifiers and quoted strings in their original form — " +
-      "translate the prose around them, not them."
-    );
-  }
-  return "LANGUAGE: write the post in English, whatever language the source is in.";
-}
+/**
+ * The rider that pins the output language — ONE spelling, owned by
+ * `src/summaries/language.ts` since the capture verticals took it up too, and
+ * re-exported here because the whole share surface calls it by this name.
+ */
+import { languageRider } from "../summaries/language.ts";
+export { languageRider };
 
 /**
  * The system prompt. Deliberately thin: the PRESET carries the instruction and

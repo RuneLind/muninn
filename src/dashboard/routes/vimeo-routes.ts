@@ -7,6 +7,8 @@ import { VIMEO_MAX_DURATION_SEC } from "../../vimeo/limits.ts";
 import { canonicalVimeoUrl, resolveVimeoRef } from "../../vimeo/url.ts";
 import { fetchVimeoOembed, isNotPublic } from "../../vimeo/oembed.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
+import { findCapturePreset, resolveCapturePresets } from "../../summaries/presets.ts";
+import { DEFAULT_CAPTURE_LANG, isCaptureLang } from "../../summaries/language.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
@@ -322,7 +324,8 @@ export function registerVimeoRoutes(
   });
 
   app.post("/api/vimeo/summarize", async (c) => {
-    const body = await c.req.json<{ url?: string }>().catch(() => ({} as { url?: string }));
+    type Body = { url?: string; kind?: unknown; lang?: unknown };
+    const body = await c.req.json<Body>().catch(() => ({} as Body));
     const url = body.url;
 
     if (!url) {
@@ -332,6 +335,31 @@ export function registerVimeoRoutes(
     const ref = resolveVimeoRef(url);
     if (!ref) {
       return c.json({ error: `Not a Vimeo video URL: ${url}` }, 400);
+    }
+
+    // The KIND and the LANGUAGE the reader picked, validated before anything is
+    // spent on this paste — the oEmbed call below is a network round-trip, and
+    // a picker value the server does not offer is a 400 whatever the video.
+    // Absent is the default on both (an older client, a curl); present but
+    // unknown is refused rather than silently summarized as `standard` — the
+    // reader would read the result as the kind they picked. The kind set is
+    // the SUMMARIZER bot's (a per-bot `captureSummary.<id>.md` adds one), so
+    // the bot is resolved here, ahead of dedup, and a missing bot is answered
+    // here too. Both 400s carry a machine `code` the card has a sentence for.
+    const summarizerBot = resolveSummarizerBot(discoverAllBots());
+    if (!summarizerBot) {
+      return c.json({ error: "No bots configured" }, 500);
+    }
+    if (body.kind !== undefined && typeof body.kind !== "string") {
+      return c.json({ error: "bad_kind", code: "bad_kind" }, 400);
+    }
+    const preset = findCapturePreset(resolveCapturePresets(summarizerBot.prompts), body.kind);
+    if (!preset) {
+      return c.json({ error: "bad_kind", code: "bad_kind", kind: body.kind }, 400);
+    }
+    const lang = body.lang === undefined || body.lang === "" ? DEFAULT_CAPTURE_LANG : body.lang;
+    if (!isCaptureLang(lang)) {
+      return c.json({ error: "bad_lang", code: "bad_lang", lang: body.lang }, 400);
     }
 
     // oEmbed FIRST, and everything that can refuse the capture happens on its
@@ -437,11 +465,6 @@ export function registerVimeoRoutes(
         return c.json(duplicateBody(existing.id, existing.url));
       }
 
-      const summarizerBot = resolveSummarizerBot(discoverAllBots());
-      if (!summarizerBot) {
-        return c.json({ error: "No bots configured" }, 500);
-      }
-
       const jobId = createJob(ref.id, title, canonicalUrl);
       flight.jobId = jobId;
       started = true;
@@ -467,6 +490,8 @@ export function registerVimeoRoutes(
           title,
           durationSec: meta.durationSec,
           uploadDate: meta.uploadDate,
+          preset,
+          lang,
         },
         config,
         summarizerBot,

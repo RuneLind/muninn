@@ -259,6 +259,18 @@ export interface BotPrompts {
    *  An id colliding with a shipped template overrides it; a new id appends.
    *  Merge lives in `src/jira/templates.ts`, not here. */
   jiraTemplateVariants?: PromptVariant[];
+  /**
+   * **Type-level anchor, like `jiraTemplate` above — declared, never assigned.**
+   * A capture summary KIND is always a named id (`standard`/`deep`/`talk-notes`
+   * ship in `src/summaries/presets.ts`), so there is no bare `captureSummary.md`
+   * and a stray one keeps hitting the unknown-file warn.
+   */
+  captureSummary?: string;
+  /** Named capture summary kinds — discovered from `prompts/captureSummary.<id>.md`.
+   *  An id colliding with a shipped kind replaces that kind's INSTRUCTION (its
+   *  run options are kept); a new id appends. Merge lives in
+   *  `src/summaries/presets.ts`, not here. */
+  captureSummaryVariants?: PromptVariant[];
 }
 
 const SINGLE_PROMPT_KEYS = ["jiraAnalysis", "investigateCode", "deepAnalysis", "specGeneration", "specDomain", "share"] as const satisfies readonly (keyof BotPrompts)[];
@@ -276,6 +288,8 @@ const VARIANT_PROMPT_FIELDS = {
   // Variant-only — see the `jiraTemplate` doc comment on `BotPrompts` for why the
   // key is declared there but kept out of `SINGLE_PROMPT_KEYS`.
   jiraTemplate: "jiraTemplateVariants",
+  // Capture summary KINDS (`src/summaries/presets.ts`). Variant-only, same rule.
+  captureSummary: "captureSummaryVariants",
 } as const satisfies Partial<Record<keyof BotPrompts, keyof BotPrompts>>;
 
 const VARIANT_PROMPT_KEYS = Object.keys(VARIANT_PROMPT_FIELDS) as (keyof typeof VARIANT_PROMPT_FIELDS)[];

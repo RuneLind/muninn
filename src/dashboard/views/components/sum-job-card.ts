@@ -303,7 +303,9 @@ export function sumJobCardScript(): string {
       oembed_failed: 'Vimeo did not answer',
       no_captions: 'This video has no caption track',
       duplicate: 'Already captured',
-      in_flight: 'Already being captured'
+      in_flight: 'Already being captured',
+      bad_kind: 'That summary kind is not offered here',
+      bad_lang: 'That output language is not offered here'
     };
 
     // The duration cap, in seconds, injected by the page from the SERVER
