@@ -241,7 +241,10 @@ async function startFake(): Promise<Server> {
           return json({
             documents: [{
               id: "ai/general/E2E shelf talk.md",
-              url: "https://vimeo.com/424242",
+              // Deliberately NOT the document's own url (the listing may carry a
+              // hash or player spelling): the shelf path keeps THIS one on its
+              // header link, the ?doc= path gets the document's.
+              url: "https://vimeo.com/424242?from=listing",
               date: "2026-09-04",
               thumbnail_url: "https://i.vimeocdn.com/video/shelf-1280x720.jpg",
             }],
@@ -660,7 +663,7 @@ test.describe("Summaries: capture a Vimeo URL", () => {
 
   test("the shelf shows a video capture's poster frame, off the listing's own thumbnail", async ({ page }) => {
     await page.goto(`${BASE}/summaries#shelf`);
-    const row = page.locator('.recent-item[data-doc-url="https://vimeo.com/424242"]');
+    const row = page.locator('.recent-item[data-doc-url="https://vimeo.com/424242?from=listing"]');
     await expect(row).toBeVisible();
     await expect(row.locator("img.recent-item-thumb")).toHaveAttribute(
       "src",
@@ -669,23 +672,30 @@ test.describe("Summaries: capture a Vimeo URL", () => {
   });
 
   test("a Vimeo document's timestamps are links into the video — from the shelf AND from a ?doc= deep link", async ({ page }) => {
-    const expectLinks = async () => {
+    // EVERY outbound anchor the panel renders, with all of its attributes —
+    // the timestamp links AND the header link — so an attribute dropped from
+    // either is a failure here, not a live window.opener in production.
+    const expectLinks = async (headerHref: string) => {
       const links = page.locator("#sumArticleMain a[href^='https://vimeo.com/424242#t=']");
       await expect(links).toHaveCount(2);
       expect(await links.evaluateAll((as) => as.map((a) => [a.getAttribute("href"), a.getAttribute("target"), a.getAttribute("rel"), a.textContent]))).toEqual([
         ["https://vimeo.com/424242#t=750s", "_blank", "noopener", "[12:30]"],
         ["https://vimeo.com/424242#t=720s", "_blank", "noopener", "[00:12:00]"],
       ]);
-      // The panel's own header link to the video — from the DOCUMENT's url,
-      // so the ?doc= path (which carries no url) has it too.
-      await expect(page.locator("#docPanelLinks a")).toHaveAttribute("href", "https://vimeo.com/424242");
+      const header = page.locator("#docPanelLinks a");
+      await expect(header).toHaveCount(1);
+      expect(await header.evaluate((a) => [a.getAttribute("href"), a.getAttribute("target"), a.getAttribute("rel")])).toEqual([
+        headerHref, "_blank", "noopener",
+      ]);
     };
     await page.goto(`${BASE}/summaries#shelf`);
-    await page.locator('.recent-item[data-doc-url="https://vimeo.com/424242"]').click();
-    await expectLinks();
-    // The duplicate answer's own link is a ?doc= deep link with NO url on it.
+    await page.locator('.recent-item[data-doc-url="https://vimeo.com/424242?from=listing"]').click();
+    // From the shelf the header link is the LISTING's url, untouched by the fetch.
+    await expectLinks("https://vimeo.com/424242?from=listing");
+    // The duplicate answer's own link is a ?doc= deep link with NO url on it:
+    // the header link is then the DOCUMENT's.
     await page.goto(`${BASE}/summaries?source=vimeo&doc=${encodeURIComponent("ai/general/E2E shelf talk.md")}&duplicate=1`);
-    await expectLinks();
+    await expectLinks("https://vimeo.com/424242");
   });
 
   test("a picker value the server does not offer is a sentence on the card, and starts no job", async ({ request, page }) => {

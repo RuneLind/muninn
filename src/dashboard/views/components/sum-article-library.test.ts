@@ -55,8 +55,12 @@ describe("openVimeoLinksInNewTab", () => {
   test("no container, or no video id, is a no-op", () => {
     const stamp = anchor("https://vimeo.com/1223444307#t=750s");
     openVimeoLinksInNewTab(null, "https://vimeo.com/1223444307");
-    openVimeoLinksInNewTab({ querySelectorAll: () => [stamp] }, "https://youtu.be/x");
     expect(stamp.attrs).toEqual({ href: "https://vimeo.com/1223444307#t=750s" });
+    // The no-id half is only pinned by an anchor the id-less prefix WOULD
+    // match: without the guard the prefix is the literal "…/null#t=".
+    const nullish = anchor("https://vimeo.com/null#t=750s");
+    openVimeoLinksInNewTab({ querySelectorAll: () => [nullish] }, "https://youtu.be/x");
+    expect(nullish.attrs).toEqual({ href: "https://vimeo.com/null#t=750s" });
   });
 });
 

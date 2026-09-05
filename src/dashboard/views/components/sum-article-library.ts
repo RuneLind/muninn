@@ -708,9 +708,10 @@ export function sumArticleLibraryScript(): string {
     /**
      * The rendered timestamp links open the video in a NEW tab, like every
      * other outbound link in this view: markdown cannot say \`target\`, so it
-     * is set on the anchors after render — on every anchor whose href is a
-     * \`#t=\` address on this video, which is what the transform makes and
-     * what a summary's own link to the same second would be.
+     * is set on the anchors after render — on every anchor whose href starts
+     * with the transform's own spelling, \`https://vimeo.com/<id>#t=\` (a
+     * summary's own link in that spelling gets it too; a \`player.vimeo.com\`
+     * one does not).
      */
     function openVimeoLinksInNewTab(container, videoUrl) {
       var id = vimeoVideoIdFromUrl(videoUrl);
