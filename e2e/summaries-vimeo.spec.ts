@@ -467,11 +467,10 @@ test.describe("Summaries: capture a Vimeo URL", () => {
 
   test("pasting the same URL again says 'Already captured' and starts nothing", async ({ page }) => {
     test.setTimeout(30_000 + ENSURE_CAPTURED_BOUND_MS);
-    // Under `--grep` the first case may not have run; both counts below are
-    // taken AFTER the seed, so they are still the deltas this case is about.
+    // Under `--grep` the first case may not have run; the count below is taken
+    // AFTER the seed, so it is still the delta this case is about.
     await ensureCaptured(page.request);
     const jobsBefore = await jobCount(page.request);
-    const ingestsBefore = ingests.length;
 
     await page.goto(`${BASE}/summaries`);
     await page.locator("#captureUrl").fill(VIDEO_URL);
@@ -491,7 +490,10 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     // start would be a job here, while its model call lands whenever the
     // harvest finishes and a `modelCalls` read is a race against it.
     expect(await jobCount(page.request)).toBe(jobsBefore);
-    expect(ingests).toHaveLength(ingestsBefore);
+    // Deliberately NOT `ingests.length`: an ingest is downstream of the model
+    // call, so it is the same race one step further out — measured, a second
+    // capture's ingest lands seconds after this line has run, and an
+    // assertion here passed with dedup switched off entirely.
   });
 
   test("a video Vimeo will not describe is a sentence, and starts no job", async ({ page }) => {
