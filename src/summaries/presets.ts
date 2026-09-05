@@ -109,10 +109,12 @@ export const SHIPPED_CAPTURE_PRESETS: readonly CapturePreset[] = [
  * Anthropic's. `claude-cli` and `claude-sdk` speak that namespace directly;
  * `copilot-sdk` carries the id VERBATIM in its catalog (measured 2026-09-05 via
  * `CopilotClient.listModels()`: `claude-opus-5` is listed as-is — its
- * `resolveCopilotModelId` only respells a trailing `-N-M` version, which this
- * id has none of, so a respelled catalog entry such as `claude-opus-5.1` would
- * make Copilot fall back to its default model silently; re-measure when the
- * constant moves). On `openai-compat` the model is whatever the endpoint serves
+ * `resolveCopilotModelId` strips a trailing 8-digit date and respells a
+ * trailing `-N-M` version, and this id has neither, so it is looked up
+ * verbatim; a respelled catalog entry such as `claude-opus-5.1` would make
+ * Copilot fall back to its default model with only a server-side error line,
+ * and the document would still say `deep` — re-measure when the constant
+ * moves). On `openai-compat` the model is whatever the endpoint serves
  * — `qwen3.5:35b`, `google/gemini-2.5-flash` — and a Claude id there is a 400
  * from the endpoint, not a bigger model.
  */

@@ -723,7 +723,7 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     const lang = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, lang: "no" });
     const lb = (await lang.json()) as { error: string; code: string };
     expect(lb.code).toBe("bad_lang");
-    expect(lb.error).not.toBe("bad_lang");
+    expect(lb.error).toBe("Unknown output language: no");
   });
 
   test("deep on a summarizer bot whose connector cannot run opus is bad_kind — never a deep-stamped non-deep capture", async () => {

@@ -57,9 +57,12 @@ export interface SummariesPageOptions {
   /**
    * The summary kinds the URL field's picker offers — the SUMMARIZER bot's
    * resolved preset set, which the route computes (`resolveCapturePresets` over
-   * that bot's `prompts`) so a per-bot `captureSummary.<id>.md` is a kind the
-   * reader can pick. Defaults to the shipped set, which is what a render with
-   * no bot in hand (tests) gets.
+   * that bot's `prompts` AND its `connector`, so a per-bot
+   * `captureSummary.<id>.md` is a kind the reader can pick and an opus kind
+   * is not offered where the connector cannot run it). The default is the
+   * WHOLE shipped set, un-narrowed — right only for a render with no bot in
+   * hand (tests); a second caller with a bot must pass the narrowed list, or
+   * it re-offers `deep` on a bot that will 400 it.
    */
   captureKinds?: readonly CapturePickerOption[];
 }

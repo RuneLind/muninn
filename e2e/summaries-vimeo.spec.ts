@@ -578,7 +578,13 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     const ingestsBefore = ingests.length;
 
     await page.goto(`${BASE}/summaries`);
-    // The picker renders the shipped kinds and the three languages, defaults first.
+    // The picker offers what THIS summarizer bot can run: it is `openai-compat`,
+    // so `deep` (the opus kind) is not in the list — the GET narrows by the
+    // bot's connector, and this is the one place that narrowing is pinned.
+    expect(await page.locator("#captureKind option").evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value)))
+      .toEqual(["standard", "talk-notes"]);
+    expect(await page.locator("#captureLang option").evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value)))
+      .toEqual(["talk", "nb", "en"]);
     await expect(page.locator("#captureKind")).toHaveValue("standard");
     await expect(page.locator("#captureLang")).toHaveValue("talk");
     await page.locator("#captureKind").selectOption("talk-notes");
