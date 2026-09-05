@@ -17,6 +17,10 @@
  * there.
  */
 
+import { getLog } from "../logging.ts";
+
+const log = getLog("summaries", "document-deleted");
+
 export interface SummaryDocumentDeleted {
   collection: string;
   /** The document id as huginn lists it (its path inside the collection). */
@@ -43,9 +47,15 @@ export function notifySummaryDocumentDeleted(event: SummaryDocumentDeleted): voi
   for (const listener of [...listeners]) {
     try {
       listener(event);
-    } catch {
+    } catch (err) {
       // A cache that failed to forget is a stale `duplicate` at worst; the
-      // route's answer about the delete stays truthful.
+      // route's answer about the delete stays truthful. Logged, because that
+      // stale answer is exactly the symptom this signal exists to remove.
+      log.error("A summary-document-deleted listener threw for {collection}/{id}: {error}", {
+        collection: event.collection,
+        id: event.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }

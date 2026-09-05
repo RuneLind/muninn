@@ -204,6 +204,8 @@ export function registerVimeoRoutes(
     // capture per video at a time — so no live entry can exist here. A change
     // that breaks any of those three needs a `delete` before this line.
     recentIngests.set(videoId, { documentId, existingUrl, at: now() });
+    // The listing's row under this id is a real document again.
+    recentDeletes.delete(documentId);
     while (recentIngests.size > VIMEO_RECENT_INGEST_MAX) {
       const oldest = recentIngests.keys().next();
       if (oldest.done) break;
@@ -225,7 +227,45 @@ export function registerVimeoRoutes(
     for (const [videoId, hit] of recentIngests) {
       if (hit.documentId === id) recentIngests.delete(videoId);
     }
+    rememberDelete(id);
   });
+
+  /**
+   * The documents a `/summaries` Delete removed that huginn may STILL LIST —
+   * the delete's own reindex window, the mirror image of `recentIngests`.
+   *
+   * huginn's DELETE is a soft delete: it moves the file and enqueues a reindex,
+   * and the listing keeps naming the document until that reindex lands
+   * (seconds to minutes; the UI's delete flow polls the reindex for exactly
+   * this reason). Forgetting the map alone moved the stale `duplicate` from
+   * state 3 to state 4 — same body, same link to nothing — so the listing half
+   * treats a row naming one of these ids as absent. An entry is dropped the
+   * moment a capture ingests under that id again (`rememberIngest`), when the
+   * row IS a document once more, and otherwise expires with the same TTL and
+   * cap as its sibling.
+   */
+  const recentDeletes = new Map<string, number>();
+
+  function rememberDelete(documentId: string): void {
+    recentDeletes.delete(documentId);
+    recentDeletes.set(documentId, now());
+    while (recentDeletes.size > VIMEO_RECENT_INGEST_MAX) {
+      const oldest = recentDeletes.keys().next();
+      if (oldest.done) break;
+      recentDeletes.delete(oldest.value);
+    }
+  }
+
+  /** Whether the listing's row for this id is a document the delete removed. */
+  function recentlyDeleted(documentId: string): boolean {
+    const at = recentDeletes.get(documentId);
+    if (at === undefined) return false;
+    if (now() - at >= VIMEO_RECENT_INGEST_TTL_MS) {
+      recentDeletes.delete(documentId);
+      return false;
+    }
+    return true;
+  }
 
   /** The map's answer for this video, or null — an expired entry is dropped. */
   function recentIngest(videoId: string): VimeoRecentIngest | null {
@@ -372,7 +412,7 @@ export function registerVimeoRoutes(
       }
 
       const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, ref.id);
-      if (existing) {
+      if (existing && !recentlyDeleted(existing.id)) {
         log.info("Vimeo duplicate detected for {videoId}: {docId}", {
           videoId: ref.id,
           docId: existing.id,

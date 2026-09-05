@@ -939,6 +939,63 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     expect(vimeoSummarizeCalls).toBe(2);
   });
 
+  test("a deleted document huginn STILL LISTS does not answer duplicate — until it is captured again", async () => {
+    // huginn's DELETE is a soft delete: it moves the file and enqueues a
+    // reindex, and the listing keeps naming the document until that reindex
+    // lands (seconds to minutes). Forgetting the map alone moved the stale
+    // `duplicate` from state 3 to state 4 — same body, same link to nothing.
+    const DOC = "ai/rag/Trust but verify.md";
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: CANONICAL }] });
+    vimeoIngestDocId = DOC;
+    const app = vmApp();
+
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    const first = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+    expect(first.duplicate).toBeUndefined();
+    expect(first.job_id).toBeTruthy();
+    expect(vimeoSummarizeCalls).toBe(1);
+
+    // The re-capture ingested under the SAME id, so the listing row is a real
+    // document again — and the map (state 3) answers for it.
+    const second = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+    expect(second.duplicate).toBe(true);
+    expect(vimeoSummarizeCalls).toBe(1);
+  });
+
+  test("a re-capture under the deleted id is a real document again, even once its own map entry is gone", async () => {
+    // The two maps expire on the same TTL and the ingest is always the later
+    // stamp, so the only way the listing half is asked about a re-captured id
+    // while the delete is still remembered is `recentIngests` being EVICTED by
+    // the cap first. Enumerated, not sampled: TTL cannot produce it. Without
+    // the clear on re-ingest, the listed row is treated as deleted and the
+    // talk is captured a third time.
+    const CAP = 200;
+    const DOC = "ai/rag/Trust but verify.md";
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: CANONICAL }] });
+    const app = vmApp();
+    const urlFor = (i: number) => `https://vimeo.com/${String(1_100_000_000 + i)}`;
+
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    vimeoIngestDocId = DOC;
+    await post(app, "/api/vimeo/summarize", { url: VIMEO_URL });
+    expect(vimeoSummarizeCalls).toBe(1);
+
+    // Evict the re-capture's own recently-ingested entry.
+    for (let i = 0; i < CAP; i++) {
+      vimeoIngestDocId = `ai/rag/other-${i}.md`;
+      await post(app, "/api/vimeo/summarize", { url: urlFor(i) });
+    }
+    expect(vimeoSummarizeCalls).toBe(1 + CAP);
+
+    const again = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+    expect(again.duplicate).toBe(true);
+    expect(again.document_id).toBe(DOC);
+    expect(vimeoSummarizeCalls).toBe(1 + CAP);
+  });
+
   test("the map is bounded — the 201st ingest evicts the oldest entry", async () => {
     // Mirrors `VIMEO_RECENT_INGEST_MAX`, same reason as the TTL mirror above.
     const CAP = 200;
