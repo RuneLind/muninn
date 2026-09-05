@@ -64,17 +64,6 @@ export const VIMEO_SUMMARIZE_TIMEOUT_MS = 600_000;
 /** Error code stored on a job whose video has captions we could not choose from. */
 export const NO_CAPTIONS_ERROR = "no_captions";
 
-/**
- * oEmbed's `upload_date` is `"YYYY-MM-DD HH:MM:SS"`, huginn's `date` frontmatter
- * is a bare ISO date on every other vertical. Take the date half when it is
- * there and drop the field entirely otherwise — huginn then stamps today, which
- * is a better record than a malformed date nothing can sort on.
- */
-export function ingestDate(uploadDate: string): string | undefined {
-  const match = /^(\d{4}-\d{2}-\d{2})/.exec(uploadDate.trim());
-  return match ? match[1] : undefined;
-}
-
 const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
   "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
     "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
@@ -402,7 +391,6 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
     updateStatus(jobId, "ingesting");
 
     let ingestedDocId: string | undefined;
-    const date = ingestDate(meta.uploadDate);
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/vimeo/ingest",
@@ -411,7 +399,12 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
         url: canonicalVimeoUrl(meta.videoId),
         summary,
         category,
-        ...(date ? { date } : {}),
+        // The CAPTURE date, like every other vertical (youtube/tiktok/article all
+        // stamp today): `date` is what the /summaries shelf buckets and sorts on,
+        // and stamping oEmbed's upload_date instead filed a talk captured today
+        // under the week it was uploaded, below the fold. The upload date is still
+        // in the job's metadata; it has no frontmatter field of its own yet.
+        date: new Date().toISOString().split("T")[0],
         transcript_markdown: transcript,
         caption_lang: track.lang,
         // A stubbed capture is marked ON THE DOCUMENT. The prompt still gets the

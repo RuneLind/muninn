@@ -103,7 +103,6 @@ const {
   AUTO_CAPTION_RIDER,
   NO_CAPTIONS_ERROR,
   VIMEO_COLLECTION,
-  ingestDate,
   resolveHarvestStubDeps,
   stubCacheKey,
 } = await import("./summarizer.ts");
@@ -220,8 +219,10 @@ test("the ingest body carries the canonical url, the transcript and the caption 
   expect(ingestPayload!.caption_lang).toBe("en-x-autogen");
   expect(ingestPayload!.caption_kind).toBe("auto");
   expect(ingestPayload!.duration_sec).toBe(3180);
-  // oEmbed's upload_date is a datetime; huginn's `date` frontmatter is a day.
-  expect(ingestPayload!.date).toBe("2026-08-20");
+  // The capture date, never oEmbed's upload_date (META carries 2026-08-20): the
+  // shelf buckets on `date`, and the upload date filed a fresh capture under an
+  // old week.
+  expect(ingestPayload!.date).toBe(new Date().toISOString().split("T")[0]);
   expect(String(ingestPayload!.transcript_markdown)).toContain("### [00:00:00]");
   expect(ingestPayload!.summary).not.toContain("Hello and welcome");
 });
@@ -515,22 +516,6 @@ test("a QUEUED job stays pending — it reports harvesting only when its harvest
     for (const release of releases.splice(0)) release();
     await Promise.allSettled([runA, runB]);
   }
-});
-
-// --- ingestDate --------------------------------------------------------------
-
-test("ingestDate takes the day off oEmbed's datetime and drops anything unparseable", () => {
-  expect(ingestDate("2026-08-20 09:33:04")).toBe("2026-08-20");
-  expect(ingestDate("2026-08-20")).toBe("2026-08-20");
-  expect(ingestDate("")).toBeUndefined();
-  expect(ingestDate("not a date")).toBeUndefined();
-});
-
-test("an unparseable upload date omits the field so huginn stamps today", async () => {
-  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
-  await summarizeVimeo(jobId, { ...META, uploadDate: "" }, config, bot, deps());
-
-  expect("date" in ingestPayload!).toBe(false);
 });
 
 // --- VIMEO_HARVEST_STUB: three gates, all required ---------------------------
