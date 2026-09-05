@@ -9,7 +9,9 @@ the UI entry — the URL field on `/summaries`.
 | `url.ts` | `resolveVimeoRef` (a bare id OR any URL — the one door callers use), `extractVimeoVideoId` (host-gated), `canonicalVimeoUrl` (the dedup key), `vimeoWatchUrl` (the page to load) |
 | `oembed.ts` | `fetchVimeoOembed` — title/author/duration/upload date/thumbnail with **no browser** |
 | `vtt.ts` | `parseVttCues`, `vttToSegments`, `segmentsToMarkdown`, `detectCaptionKind` — pure |
-| `captions.ts` | `harvestVimeoCaptions` (headless Chromium), `downloadVtt` (host-pinned), `chooseTrack` (pure) |
+| `captions.ts` | `harvestVimeoCaptions` (headless Chromium — captures the caption URLs AND the signed JSON `manifestUrl`), `downloadVtt` (host-pinned to `captions.vimeo.com`), `chooseTrack` (pure) |
+| `download.ts` | `downloadPinned` — the ONE host-pinned, bounded byte download (`downloadVtt`'s rules, stated once), parameterised on host, caps and the noun in its messages; `VimeoDownloadError` is the base every refusal extends; it also OWNS the two host constants (`VIMEO_CAPTIONS_HOST`, `VIMEO_MEDIA_HOST`), so `captions.ts` and `media.ts` import a string from the module both already depend on and never from each other |
+| `media.ts` | The media seam (v2 PR 3): `fetchVimeoManifest` (host-pinned to `vod-adaptive-ak.vimeocdn.com`), `parseVimeoManifest` / `chooseRepresentation` / `segmentIndexAt` / `resolveSegmentUrl` (pure), `downloadRendition` (init + segments → ONE fMP4 ffmpeg reads) |
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · summarizing · ingesting · complete · error` |
 | `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
@@ -17,6 +19,7 @@ the UI entry — the URL field on `/summaries`.
 | `../summaries/presets.ts` | The capture KINDS (`standard` · `deep` · `talk-notes`), per-bot `prompts/captureSummary.<id>.md` overrides, and the two run levers a kind can pull (`captureThinkingFor`, `captureBotConfigFor`) — pure |
 | `../summaries/language.ts` | `talk \| nb \| en`, `resolveOutputLang` (the `talk` → caption base tag rule), `captionBaseLang` (shared with `chooseTrack`) and the ONE spelling of the bokmål/English rider, which `src/share/prompt.ts` re-exports |
 | `fixtures/totto-trust-but-verify.vtt` | Real auto-captions from a public JavaZone talk: 63 KB, 928 cues, 53 min |
+| `fixtures/manifest-placeholder.json` | A real manifest's SHAPE (5 video + 2 audio representations in the live manifest's UNSORTED order — 1080, 360, 720, 540, 240 — real codec strings/bitrates/heights/init segments, 12 segments each) with every signed path, id and URL replaced by a placeholder — the test pins that no live `pathsig`/`hmac`/`psid`/UUID survives, and that the order is the live one |
 
 The route is `src/dashboard/routes/vimeo-routes.ts`; the huginn half is the
 `vimeo` push source (`main/ingest/vimeo.py`, `POST /api/vimeo/ingest`, collection
@@ -138,6 +141,119 @@ took the whole `/summaries` inline script down, and the harness test
 `sum-article-library.test.ts` — which evaluates the REAL script source — is
 what catches it).
 
+## The media seam (v2 PR 3)
+
+**The manifest is the mechanism; the browser screenshot path is closed.** The
+plan measured it three ways (0 frames in 3 runs — the player never decodes video
+on demand in a headless tab), while the signed JSON manifest the harvest was
+already recording as `manifestUrl` answers a bare cookie-less `fetch`: 928 KB for
+a 53-minute talk, five H.264 renditions (240p–1080p) and two audio (AAC, Opus),
+each 537 segments of ~6 s with `start`/`end`/`size`/`url` and a base64
+`init_segment`. `src/vimeo/media.ts` turns that into a file: fetch the manifest,
+`chooseRepresentation`, map times to segment indices, `downloadRendition` writes
+init + the segments as ONE fragmented MP4. Measured 2026-09-05 through
+`scripts/smoke-vimeo-media.ts`: a single 720p segment (486 KB) is a valid fMP4
+whose `ffprobe start_time` is the segment's ABSOLUTE position (`1386.08`), so a
+frame pulled from it is stamped with its place in the talk with no arithmetic —
+and one Opus segment probes as `opus/48000`, which is what PR 5's Whisper
+fallback needs. The whole harvest → manifest → segment → JPEG walk is ~4 s.
+
+**One download engine, three hosts' worth of rules.** `downloadVtt`'s body
+moved to `download.ts` as `downloadPinned(url, {host, maxBytes, timeoutMs,
+what, error})` and is now what the manifest AND every segment go through: https
+only, hostname compared exactly, `redirect: "error"`, the budget RACED at every
+read, the cap REFUSING and ABORTING the request at the byte it is crossed.
+`downloadVtt` is a six-line caller of it (`what: "Caption"`, its own error
+subclass, so its callers' `instanceof VimeoVttDownloadError` still holds — the
+44 captions tests pass unchanged, bar one stub that faked `text()` and now fakes
+`arrayBuffer()`, because the engine reads bytes and the caller decodes). A
+second copy of that engine with a different host string is how the two would
+have drifted on the next fix round.
+
+**The host pin is judged where the bytes are fetched, never where the URL is
+built.** `resolveSegmentUrl` RESOLVES in three steps like a DASH client — the
+manifest's `base_url` against the manifest URL (`../../../../../range/prot/`
+climbs five directories from the `playlist.json` to `/…/v2/`), the
+representation's `base_url` against that, the segment's `url` against that —
+each a URL resolution and never a concatenation (`"abc" + "def.mp4"` is not
+`abc/def.mp4`; a base with no trailing slash is a file reference the next step
+replaces). Every live representation carries `base_url: ""` (measured), so the
+non-empty branch is pinned by the test, not by the corpus. It returns a STRING;
+`downloadPinned` re-parses and refuses it. A manifest whose `base_url` names another host therefore
+resolves there and is refused before any request is sent, with the partial file
+never created — pinned in `media.test.ts`. The manifest URL itself is pinned the
+same way, so `fetchVimeoManifest` on a `captions.vimeo.com` address is a
+`VimeoMediaDownloadError`.
+
+**`chooseRepresentation` is pure and picks the SMALLEST rendition that
+suffices.** Video: the smallest height at least the target, the tallest available
+when none reaches it — a frame the model reads gains nothing above what it is
+scaled to, and a 1080p 6 s segment is ~1.6× the bytes of 720p (592 KB vs 371 KB,
+measured). Audio: the requested codec family (`opus` for Whisper — 101 kbps
+against AAC's 194 for the same speech), else the lowest average bitrate. A
+representation with no segments is never chosen; the manifest's arrays are not
+mutated (the live manifest lists renditions UNSORTED — 1080p, 360p, 720p, 540p,
+240p, the order the committed fixture keeps — so the sort is load-bearing and
+happens on a copy).
+
+**Four bounds on a rendition download, each its own constant — and the sizes
+the manifest DECLARES are third-party input too.** `VIMEO_MANIFEST_MAX_BYTES`
+(8 MB; a 3 h talk's manifest is ~3.2 MB by the measured rate),
+`VIMEO_SEGMENT_MAX_BYTES` (16 MB per segment; the largest measured is 1.2 MB),
+`VIMEO_RENDITION_MAX_BYTES` (256 MB — the whole 240p rendition of a 3 h talk is
+~176 MB, the whole Opus ~137 MB), and the whole-operation budget
+`renditionTimeoutFor(n)` = 30 s + 1.5 s × segments, from which each segment fetch
+gets `min(30 s, what is left)` (pinned: a never-settling fetch under a 50 ms
+whole budget rejects in ~50 ms measured, under 250 ms asserted, not 30 s). The
+rendition cap is checked TWICE on the SAME quantity — the bytes the call will
+write, init segment included: on the declared total before the first fetch, so
+an oversized request costs nothing, and on the bytes WRITTEN as they arrive —
+the first review found the declared check alone let bodies far larger than
+their declared sizes through (the pin: `media.test.ts` "the total cap bounds
+bytes WRITTEN, not only bytes declared" — the numbers live THERE, not here),
+and a negative declared `size` cancel a positive one (parse now refuses
+negative `size`, `start`, `end`); the verify pass found the two checks
+measuring different things (init in one, not the other), so a cap exactly at
+the declared total passed the pre-flight and failed after every fetch (the
+pin: "the declared pre-flight and the written check measure the SAME
+quantity"). **The declared size is NOT exact.** Every live segment arrives at
+declared + 1 byte — measured 2026-09-05 on 20 segments across four of the seven
+renditions (720p, 1080p, 240p, Opus), +1 every time: the segment URL's
+`range=a-b` is an INCLUSIVE byte range and `size` is `b − a`; init segments
+run 678–806 bytes by rendition (the 720p one is 803), so the smoke's
+"declared 485 621, wrote 486 425" is 803 + 485 622. A segment that
+arrives SHORTER than it declared is refused outright (a truncated fMP4 is a
+file ffmpeg reads up to the cut and reports success on — the one failure the
+engine's own cap cannot see, since a cap bounds "too much"); the check is `<`
+and must stay `<`, because `!==` fails 100% of live captures on the first
+segment. When a segment is handed the last sliver of the budget and times out,
+the error names the WHOLE operation ("Rendition download timed out after Nms
+(k/n segments)") rather than the sliver ("Segment download timed out after
+2ms" — true and useless). On any failure the partial file is unlinked.
+
+**Indices need not be contiguous.** A sparse set (one segment per cadence tick,
+the PR 4 shape) is a valid fMP4 with gaps whose frames still carry absolute
+timestamps; a contiguous run is a playable rendition (the PR 5 shape, and scene
+detection's if the skip trigger asks for it). Duplicates are collapsed and the
+file is written in INDEX order whatever order the caller asked in. Fetches are
+sequential — one socket to the CDN, bytes appended, no reassembly — which the
+sparse shape does not notice and the whole-rendition shape pays ~0.15 s per
+round trip for (537 Opus segments ≈ 80 s), accepted until measured otherwise.
+
+**The manifest is fetched in the same job as the harvest and never persisted**
+— it expires like the VTT (~3.5 h). Nothing in PR 3 calls the seam from the
+summarizer yet; PR 4 (frames) and PR 5 (Whisper) are its callers.
+
+```
+bun scripts/smoke-vimeo-media.ts --at 1390 --height 720 https://vimeo.com/1223642971
+bun scripts/smoke-vimeo-media.ts --audio --at 600 https://vimeo.com/1223642971
+```
+
+The smoke harvests the live manifest, downloads ONE segment of the chosen
+rendition, `ffprobe`s the file and (video) pulls a JPEG at `--at` — the
+mechanism itself, which no offline test can prove. Unknown flags are refused
+(exit 2), as in `smoke-vimeo.ts`.
+
 ## Rules the VERTICAL lives by (PR 2)
 
 **There is no `fetching_metadata` status.** oEmbed runs in the ROUTE, before a job
@@ -247,7 +363,8 @@ ingested.
 
 **`no_captions` is a job ERROR with a stable code, not a crash.** A video with no
 usable track is a legitimate answer about the video; `manifestUrl` is logged
-because it is what PR 4's audio fallback would need and it expires.
+because it is what PR 5's audio fallback (the media seam's Opus rendition) will
+consume, and it expires.
 
 **Everything that can fail is INSIDE the job's try; the source-draft trigger is
 inside one of its own.** The dep resolution moved in because
@@ -609,7 +726,8 @@ directory. That is load-bearing: `summarizer.test.ts` uses `mock.module` on
 of the suite imports transitively, so it needs its OWN `bun test` process — and
 the `src/vimeo/` directory entry the chains used to carry would have swept it
 into the first chunk. `url` / `oembed` / `vtt` / `captions` / `state` stay in that
-chunk; `summarizer` has its own `&&` link at the end of both chains. The route's
+chunk (`media` too — its download half is driven through `fetchImpl`, no
+network); `summarizer` has its own `&&` link at the end of both chains. The route's
 own cases live in `src/dashboard/routes/capture-route-job-ordering.test.ts`,
 which already runs in a process of its own for the same reason.
 
