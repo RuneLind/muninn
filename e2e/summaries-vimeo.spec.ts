@@ -102,6 +102,14 @@ const PRIVATE_URL = "https://vimeo.com/1";
 const LONG_URL = "https://vimeo.com/9999999999";
 
 const SUMMARY_LINE = "Trust, but verify.";
+/**
+ * `ensureCaptured`'s wait bound. Every case that calls the helper adds this to
+ * its own timeout, so a stuck seed is reported by the helper's message rather
+ * than as a generic test timeout (the config default is 30 s — equal to this,
+ * with the clock started before the helper's POST, so without the addition
+ * the helper's deadline was unreachable at the dedup case).
+ */
+const ENSURE_CAPTURED_BOUND_MS = 30_000;
 /** Byte-identical to the string in `sum-submit-form.ts`. */
 const BARE_LINK_ALERT =
   "This looks like a bare link. YouTube and X posts are captured with the Muninn Chrome extension — open the page and click the extension. This form wants the pasted article text itself.";
@@ -341,18 +349,19 @@ async function ensureCaptured(request: import("@playwright/test").APIRequestCont
     if (job?.status === "complete") return;
     if (job?.status === "error") throw new Error("ensureCaptured: the seeding capture failed");
     if (Date.now() > deadline) {
-      // The listing is the newest 20 jobs and the store reaps old ones, so an
-      // absent id is not a running capture; say which it was.
+      // A job this POST created cannot be reaped (1 h TTL) or pushed out of
+      // the newest-20 listing inside this bound, so an absent id means the
+      // listing is answered by a DIFFERENT muninn than the one that took the
+      // POST — a stale or restarted server on this port. Say so.
       throw new Error(
         job
           ? `ensureCaptured: the seeding capture was still "${job.status}" after ${ENSURE_CAPTURED_BOUND_MS} ms`
-          : `ensureCaptured: job ${body.job_id} is not in the jobs listing (reaped, or pushed out of the newest 20)`,
+          : `ensureCaptured: job ${body.job_id} is not in the jobs listing — is ${BASE} answered by the muninn this spec spawned?`,
       );
     }
     await new Promise((r) => setTimeout(r, 300));
   }
 }
-const ENSURE_CAPTURED_BOUND_MS = 30_000;
 
 async function jobCount(request: import("@playwright/test").APIRequestContext): Promise<number> {
   const res = await request.get(`${BASE}/api/vimeo/jobs`);
@@ -457,10 +466,12 @@ test.describe("Summaries: capture a Vimeo URL", () => {
   });
 
   test("pasting the same URL again says 'Already captured' and starts nothing", async ({ page }) => {
-    // Under `--grep` the first case may not have run; the count below is taken
-    // AFTER the seed, so it is still the delta this case is about.
+    test.setTimeout(30_000 + ENSURE_CAPTURED_BOUND_MS);
+    // Under `--grep` the first case may not have run; both counts below are
+    // taken AFTER the seed, so they are still the deltas this case is about.
     await ensureCaptured(page.request);
     const jobsBefore = await jobCount(page.request);
+    const ingestsBefore = ingests.length;
 
     await page.goto(`${BASE}/summaries`);
     await page.locator("#captureUrl").fill(VIDEO_URL);
@@ -480,7 +491,7 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     // start would be a job here, while its model call lands whenever the
     // harvest finishes and a `modelCalls` read is a race against it.
     expect(await jobCount(page.request)).toBe(jobsBefore);
-    expect(ingests).toHaveLength(1);
+    expect(ingests).toHaveLength(ingestsBefore);
   });
 
   test("a video Vimeo will not describe is a sentence, and starts no job", async ({ page }) => {
