@@ -167,7 +167,14 @@ function oembedFor(id: string): Record<string, unknown> | null {
     return { title: "E2E held talk two", author_name: "x", duration: 160, upload_date: "2026-09-04 14:00:00" };
   }
   if (id === PICKED_ID) {
-    return { title: "E2E picked talk", author_name: "x", duration: 180, upload_date: "2026-09-04 15:00:00" };
+    // A CONFERENCE upload: the title's last ` - ` segment is the speaker.
+    return {
+      title: "E2E picked talk - Ada Lovelace",
+      author_name: "JavaZone",
+      duration: 180,
+      upload_date: "2026-09-04 15:00:00",
+      thumbnail_url: "https://i.vimeocdn.com/video/e2e-1280x720.jpg",
+    };
   }
   if (id === "9999999999") {
     return { title: "E2E long talk", author_name: "x", duration: 20000, upload_date: "2026-09-04 12:00:00" };
@@ -227,9 +234,34 @@ async function startFake(): Promise<Server> {
         return json({ file_path: "ai/general/E2E talk.md", similar: [] });
       }
       if (p.startsWith("/api/collection/") && p.endsWith("/documents")) {
+        // Empty for dedup (see the header), except ONE row that no case ever
+        // captures, carrying a thumbnail: what the shelf renders it with is
+        // the /summaries half of the listing's `include_thumbnails`.
+        if (p.includes("vimeo-summaries") && url.searchParams.get("include_thumbnails") === "1") {
+          return json({
+            documents: [{
+              id: "ai/general/E2E shelf talk.md",
+              // Deliberately NOT the document's own url (the listing may carry a
+              // hash or player spelling): the shelf path keeps THIS one on its
+              // header link, the ?doc= path gets the document's.
+              url: "https://vimeo.com/424242?from=listing",
+              date: "2026-09-04",
+              thumbnail_url: "https://i.vimeocdn.com/video/shelf-1280x720.jpg",
+            }],
+          });
+        }
         return json({ documents: [] });
       }
       if (p === "/api/search") return json({ results: [] });
+      // The one document the shelf row above names, served for the article
+      // view: a Vimeo capture with a window heading and a cited timestamp.
+      if (p === "/api/document/vimeo-summaries/ai/general/E2E shelf talk.md") {
+        return json({
+          id: "ai/general/E2E shelf talk.md",
+          url: "https://vimeo.com/424242",
+          text: "[vimeo-summaries > ai/general]\ntags: ai, general\n# E2E shelf talk\n\nAt [12:30] the demo.\n\n## Transcript\n\n### [00:12:00]\n\nwords",
+        });
+      }
       // The page's own knowledge-API banner probe, proxied through
       // `/api/search/health` on every /summaries load. It is a real call this
       // file makes; the 404 catch-all below is what surfaced it.
@@ -609,12 +641,16 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     // talk-notes is a bot-model, capped kind: the throwaway bot's own model ran.
     expect(request.model).toBe("e2e-fake");
 
-    // 3. The document carries both as frontmatter keys.
+    // 3. The document carries both as frontmatter keys — and what oEmbed knew.
     expect(ingests[ingestsBefore]).toMatchObject({
       url: PICKED_URL,
       summary_kind: "talk-notes",
       summary_lang: "nb",
       caption_kind: "stub",
+      author: "JavaZone",
+      upload_date: "2026-09-04 15:00:00",
+      speaker: "Ada Lovelace",
+      thumbnail_url: "https://i.vimeocdn.com/video/e2e-1280x720.jpg",
     });
 
     // 4. A reload restores the picker from the browser's own memory.
@@ -623,6 +659,43 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await expect(page.locator("#captureLang")).toHaveValue("nb");
     // Nothing to put back: every case gets its own browser context, so the
     // stored picker dies with this one.
+  });
+
+  test("the shelf shows a video capture's poster frame, off the listing's own thumbnail", async ({ page }) => {
+    await page.goto(`${BASE}/summaries#shelf`);
+    const row = page.locator('.recent-item[data-doc-url="https://vimeo.com/424242?from=listing"]');
+    await expect(row).toBeVisible();
+    await expect(row.locator("img.recent-item-thumb")).toHaveAttribute(
+      "src",
+      "https://i.vimeocdn.com/video/shelf-1280x720.jpg",
+    );
+  });
+
+  test("a Vimeo document's timestamps are links into the video — from the shelf AND from a ?doc= deep link", async ({ page }) => {
+    // EVERY outbound anchor the panel renders, with all of its attributes —
+    // the timestamp links AND the header link — so an attribute dropped from
+    // either is a failure here, not a live window.opener in production.
+    const expectLinks = async (headerHref: string) => {
+      const links = page.locator("#sumArticleMain a[href^='https://vimeo.com/424242#t=']");
+      await expect(links).toHaveCount(2);
+      expect(await links.evaluateAll((as) => as.map((a) => [a.getAttribute("href"), a.getAttribute("target"), a.getAttribute("rel"), a.textContent]))).toEqual([
+        ["https://vimeo.com/424242#t=750s", "_blank", "noopener", "[12:30]"],
+        ["https://vimeo.com/424242#t=720s", "_blank", "noopener", "[00:12:00]"],
+      ]);
+      const header = page.locator("#docPanelLinks a");
+      await expect(header).toHaveCount(1);
+      expect(await header.evaluate((a) => [a.getAttribute("href"), a.getAttribute("target"), a.getAttribute("rel")])).toEqual([
+        headerHref, "_blank", "noopener",
+      ]);
+    };
+    await page.goto(`${BASE}/summaries#shelf`);
+    await page.locator('.recent-item[data-doc-url="https://vimeo.com/424242?from=listing"]').click();
+    // From the shelf the header link is the LISTING's url, untouched by the fetch.
+    await expectLinks("https://vimeo.com/424242?from=listing");
+    // The duplicate answer's own link is a ?doc= deep link with NO url on it:
+    // the header link is then the DOCUMENT's.
+    await page.goto(`${BASE}/summaries?source=vimeo&doc=${encodeURIComponent("ai/general/E2E shelf talk.md")}&duplicate=1`);
+    await expectLinks("https://vimeo.com/424242");
   });
 
   test("a picker value the server does not offer is a sentence on the card, and starts no job", async ({ request, page }) => {

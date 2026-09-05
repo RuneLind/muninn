@@ -96,6 +96,17 @@ export function sumShelfStyles(): string {
       cursor: pointer;
     }
     .recent-item:hover { border-color: var(--accent); }
+    /* The poster frame a video capture's listing row carries (Vimeo, via
+       huginn's include_thumbnails). Fixed box, cover-cropped, so a 16:9 frame
+       and a portrait one take the same room. */
+    .recent-item-thumb {
+      flex: 0 0 auto;
+      width: 64px;
+      height: 36px;
+      border-radius: 4px;
+      object-fit: cover;
+      background: var(--bg-surface);
+    }
     .recent-item-title {
       flex: 1;
       font-size: 14px;
@@ -248,6 +259,18 @@ export function sumShelfScript(): string {
 
     // Render the source-filter chips from whichever sources appear in the
     // domain-narrowed archive. "All" plus one chip per present source.
+    /**
+     * The poster frame, or nothing. Only an https URL is rendered: the value
+     * is a frontmatter string off a document, and an <img src> is a fetch the
+     * reader's browser makes to whatever it names — https bounds the scheme,
+     * no-referrer keeps this page's address out of that request. Lazy, so
+     * a 200-row shelf does not fetch 200 frames on load.
+     */
+    function thumbnailHtml(url) {
+      if (typeof url !== 'string' || !/^https:\\/\\//i.test(url)) return '';
+      return '<img class="recent-item-thumb" src="' + esc(url) + '" alt="" loading="lazy" referrerpolicy="no-referrer" />';
+    }
+
     function renderSourceFilter(docs) {
       var el = document.getElementById('sourceFilter');
       if (!el) return;
@@ -386,6 +409,7 @@ export function sumShelfScript(): string {
             var cat = docCategory(doc.id);
             return '<div class="recent-item" data-doc-id="' + esc(doc.id) + '" data-doc-url="' + esc(doc.url || '') + '" data-source="' + esc(doc.source) + '">' +
               sourceBadge(doc.source) +
+              thumbnailHtml(doc.thumbnail_url) +
               '<span class="recent-item-title">' + esc(title) + '</span>' +
               '<span class="category-badge">' + esc(cat) + '</span>' +
               sourceLink(doc) +

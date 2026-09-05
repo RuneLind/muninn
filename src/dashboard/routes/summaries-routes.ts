@@ -20,6 +20,8 @@ interface SummaryDocumentMeta {
   date?: string;
   /** Full-precision ingest timestamp from huginn — intra-day sort tiebreaker. */
   modifiedTime?: string;
+  /** The poster frame, when the document's frontmatter carries one (Vimeo). */
+  thumbnail_url?: string;
   title?: string;
   [key: string]: unknown;
 }
@@ -197,7 +199,9 @@ export function registerSummariesRoutes(
         try {
           const data = await fetchKnowledgeApi(
             KNOWLEDGE_API_URL,
-            `/api/collection/${source.collection}/documents?include_dates=1`,
+            // Thumbnails ride on the same one-read pass as the dates (huginn
+            // #127); a document with none simply has no key.
+            `/api/collection/${source.collection}/documents?include_dates=1&include_thumbnails=1`,
             { timeoutMs: 10000 },
           );
           const docs = (data?.documents ?? []) as SummaryDocumentMeta[];

@@ -13,6 +13,7 @@ the UI entry — the URL field on `/summaries`.
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · summarizing · ingesting · complete · error` |
 | `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
+| `metadata.ts` | `speakerFromTitle` — the last ` - ` segment of a CONFERENCE account's title (`VIMEO_CONFERENCE_ACCOUNTS`, JavaZone today), undefined for everyone else — pure |
 | `../summaries/presets.ts` | The capture KINDS (`standard` · `deep` · `talk-notes`), per-bot `prompts/captureSummary.<id>.md` overrides, and the two run levers a kind can pull (`captureThinkingFor`, `captureBotConfigFor`) — pure |
 | `../summaries/language.ts` | `talk \| nb \| en`, `resolveOutputLang` (the `talk` → caption base tag rule), `captionBaseLang` (shared with `chooseTrack`) and the ONE spelling of the bokmål/English rider, which `src/share/prompt.ts` re-exports |
 | `fixtures/totto-trust-but-verify.vtt` | Real auto-captions from a public JavaZone talk: 63 KB, 928 cues, 53 min |
@@ -86,6 +87,56 @@ all three queries (1.0/1.0/1.0; 0.997/0.995/0.994; 0.999/0.961 over a 0.927
 transcript window). The Norwegian summary ranks BETTER than the transcript, so
 `talk` stays the default and the English `## Key takeaways` anchor is not built.
 Table + queries: muninn #520.
+
+## Metadata + deep links (v2 PR 2)
+
+**What oEmbed knew is on the document.** The route already held `author_name`,
+`upload_date` and `thumbnail_url` and threw them away; they now ride on
+`VimeoJobMeta` and the ingest body as `author`, `upload_date`, `speaker`,
+`thumbnail_url` (huginn #127 allowlists the four — `author` globally, which
+also surfaces the x/tiktok/article authors that were written and never
+served). Each is sent only when NON-EMPTY: huginn writes what it is sent, and
+`author: ""` on a document is a wrong fact, not a missing one. `upload_date`
+is its own key because `date` is the CAPTURE day the shelf buckets on (#519).
+
+**The speaker is derived, and only from an account whose convention we know.**
+Vimeo has no speaker field; JavaZone titles its uploads `<talk> - <speaker>`
+(9 of the 10 RSS items on 2026-09-05; the tenth had no ` - ` and yields no
+speaker; `… - Handle - Full Name` with a handle), so `speakerFromTitle` takes
+the LAST ` - ` segment — but only when `author_name` is in
+`VIMEO_CONFERENCE_ACCOUNTS`. An individual's "Kotlin - the good parts" is not
+a talk by "the good parts". Two speakers stay one string; the convention has
+no separator for them. Derived from oEmbed's own title, never the
+url-fallback title, which is an address.
+
+**The shelf card shows the poster frame off the listing it already fetches.**
+`/api/summaries/documents` asks huginn for `include_thumbnails=1` beside
+`include_dates=1` (one read per document either way), and `thumbnailHtml`
+renders an `<img>` only for an `https:` url — the value is a frontmatter
+string off a document, and an `<img src>` is a fetch the reader's browser
+makes to whatever it names — lazily, so a 200-row shelf does not fetch 200
+frames on load.
+
+**Every timestamp in a Vimeo capture is a click into the video.** The article
+view (`sum-article-library.ts`, `linkVimeoTimestamps`) rewrites `[HH:MM:SS]`
+and `[MM:SS]` in the MARKDOWN — the transcript's `### [HH:MM:SS]` window
+headings and anything the summary cites — into `[\[HH:MM:SS\]](https://vimeo.com/<id>#t=<sec>s)`,
+which the Vimeo player honours, opened in a new tab like every other outbound
+link in the view (`openVimeoLinksInNewTab`, set after render — markdown cannot
+say `target`); the label keeps its brackets so the page reads as before. The
+url is the DOCUMENT's (`doc.url`), because a `?doc=` deep link — the duplicate
+answer's own link — opens the panel with no url at all (measured: plain text).
+Fenced code is left alone (a timestamp inside a quoted config is source text;
+a fence closes on its OWN marker, so a `~~~` line inside a ``` block is
+content), inline backtick and 4-space indented code are not skipped
+(accepted, rare), and a bracket already followed by `(` is an existing link. The
+video id is a CLIENT mirror of `src/vimeo/url.ts`'s rule over the two shapes
+stored documents carry. ⚠️ Both client functions live inside a template
+literal: every backslash is DOUBLED in the `.ts` source, and a regex that reads
+right there with a single one is a broken page script (measured: the first cut
+took the whole `/summaries` inline script down, and the harness test
+`sum-article-library.test.ts` — which evaluates the REAL script source — is
+what catches it).
 
 ## Rules the VERTICAL lives by (PR 2)
 

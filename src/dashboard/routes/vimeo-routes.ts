@@ -6,6 +6,7 @@ import { summarizeVimeo } from "../../vimeo/summarizer.ts";
 import { VIMEO_MAX_DURATION_SEC } from "../../vimeo/limits.ts";
 import { canonicalVimeoUrl, resolveVimeoRef } from "../../vimeo/url.ts";
 import { fetchVimeoOembed, isNotPublic } from "../../vimeo/oembed.ts";
+import { speakerFromTitle } from "../../vimeo/metadata.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { findCapturePreset, resolveCapturePresets } from "../../summaries/presets.ts";
 import { DEFAULT_CAPTURE_LANG, isCaptureLang } from "../../summaries/language.ts";
@@ -506,6 +507,14 @@ export function registerVimeoRoutes(
           title,
           durationSec: meta.durationSec,
           uploadDate: meta.uploadDate,
+          author: meta.author,
+          thumbnailUrl: meta.thumbnailUrl,
+          // From oEmbed's own title. (Reading the url-fallback `title` above
+          // instead would be equivalent today — a canonical url has no ` - `
+          // in it — so this is the honest source, not a pinned distinction.)
+          ...(speakerFromTitle(meta.title, meta.author) !== undefined
+            ? { speaker: speakerFromTitle(meta.title, meta.author) }
+            : {}),
           preset,
           lang,
         },
