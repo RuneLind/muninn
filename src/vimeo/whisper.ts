@@ -251,7 +251,9 @@ export async function transcribeOpusRendition(
       { cause: err },
     );
   } finally {
-    // Read into memory; the work dir holds nothing of the audio pass afterwards.
+    // Read into memory; on the success path the work dir holds nothing of the
+    // audio pass afterwards (a whisper killed mid-write leaves its partial .vtt
+    // for the job's own rm of the work dir).
     await unlink(`${vttBase}.vtt`).catch(() => {});
   }
   const lang = englishOnly ? "en" : (parseDetectedLanguage(whisper.stderr) ?? UNDETERMINED_LANG);

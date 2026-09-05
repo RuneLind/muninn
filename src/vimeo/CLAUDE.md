@@ -470,14 +470,19 @@ refused by the declared-total pre-flight as `transcription_failed`. (4) *The
 pre-flight runs BEFORE the harvest, and `no_captions` is answered BEFORE
 `whisper_unavailable`*: a track-less video with no manifest is `no_captions`
 on every machine (nothing to transcribe from — the operator remedy would be
-irrelevant), and only a video WITH audio to transcribe reports the machine's
-missing piece; so the harvest keeps its 10 s manifest wait on a whisper-less
+irrelevant), and only a video with a MANIFEST to try reports the machine's
+missing piece (whether that manifest has an audio rendition is known only
+after the fetch the branch skips — a video-only manifest answers
+`whisper_unavailable` there and `transcription_failed` on a capable machine);
+so the harvest keeps its 10 s manifest wait on a whisper-less
 machine too, because without it the first answer would shadow the second.
-(5) *Nothing of the audio or frames pass outlives its step in the work dir*:
-the fMP4, the WAV and whisper's `.vtt` are unlinked as soon as they are
-consumed, and `extractCadenceFrames` removes its segment files after the last
-grab — the work dir is what the model is handed as `--add-dir`, and holds only
-the JPEGs. (6) The docs' operator remedy is spelled without `~` (no
+(5) *On the success path nothing of the audio or frames pass outlives its
+step in the work dir*: the fMP4, the WAV and whisper's `.vtt` are unlinked as
+soon as they are consumed, and `extractCadenceFrames` removes its segment
+files after the last grab — the work dir is what the model is handed as
+`--add-dir`, and holds only the JPEGs. A step that FAILS (ffmpeg non-zero, a
+whisper killed mid-write, a frame grab throwing) leaves its files for the
+job's `rm` of the work dir, and no failed pass reaches `--add-dir`. (6) The docs' operator remedy is spelled without `~` (no
 expansion). (7) The "larger of two allowances" test covers both orders.
 Stated residual: a track-less harvest spends the 25 s track wait AND up to
 10 s of manifest wait inside the 60 s budget, so a watch page that takes

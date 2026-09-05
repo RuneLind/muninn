@@ -491,9 +491,12 @@ export async function summarizeVimeo(
       failJob(jobId, NO_CAPTIONS_ERROR);
       return;
     } else if (whisperUnavailable !== null) {
-      // There IS audio to transcribe and this machine cannot: the pre-flight's
-      // answer, before the manifest fetch and the download (40 MB of audio for
-      // a machine that cannot transcribe it is the wrong order).
+      // There is a manifest to try and this machine cannot transcribe: the
+      // pre-flight's answer, before the manifest fetch and the download (40 MB
+      // of audio for a machine that cannot transcribe it is the wrong order).
+      // Whether that manifest carries an AUDIO rendition is only known after
+      // the fetch this branch skips — a video-only manifest answers here where
+      // a whisper-capable machine would answer transcription_failed.
       log.warn("Vimeo video {videoId} has no caption track and this machine cannot transcribe it: {reason}", {
         videoId: meta.videoId,
         reason: whisperUnavailable,
