@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { getLog } from "../logging.ts";
 import {
   isEditableBotField,
-  resolveBotsDir,
+  readBotsRoot,
   validateBotConfigField,
   type EditableBotField,
 } from "./config.ts";
@@ -44,16 +44,17 @@ export function writeBotConfigField(
   const err = validateBotConfigField(name, editableField, value);
   if (err) throw new Error(err);
 
-  // `resolveBotsDir()`, not a second copy of the default: this writes into the
-  // roster the running process actually DISCOVERED, and since `MUNINN_BOTS_DIR`
-  // exists a hardcoded `../../bots` is a different directory whenever it is set
-  // — the edit would land on a bot this process does not have (or 404 as an
-  // "unknown bot" for one it does). Read per call for the same reason discovery
-  // reads it per call.
-  const base = opts.baseDir ?? resolveBotsDir();
+  // `readBotsRoot().root`, not a second copy of the default and not
+  // `resolveBotsDir()` either: this writes into the roster the running process
+  // actually DISCOVERED. `MUNINN_BOTS_DIR` moves that roster, and an override
+  // discovery REFUSED (unreadable) moves it back to the checkout's `bots/` —
+  // resolving the override here again answered "unknown bot" for every bot the
+  // same /models page lists (measured). Read per call for the same reason
+  // discovery reads it per call.
+  const base = opts.baseDir ?? readBotsRoot().root;
   const dir = join(base, name);
   if (!existsSync(join(dir, "CLAUDE.md"))) {
-    throw new Error(`Unknown bot "${name}" (no bots/${name}/CLAUDE.md)`);
+    throw new Error(`Unknown bot "${name}" (no CLAUDE.md under ${dir})`);
   }
 
   const configPath = join(dir, "config.json");

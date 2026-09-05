@@ -25,7 +25,25 @@ export function discoverSerenaConfigs(botsDir: string): SerenaBotConfig[] {
 
   if (!existsSync(botsDir)) return results;
 
-  for (const entry of readdirSync(botsDir, { withFileTypes: true })) {
+  // Its own guard, because not every caller hands over a root that has been
+  // read: the manager passes the root discovery READ (`readBotsRoot().root`),
+  // and when the override AND the checkout's `bots/` are both unreadable that
+  // is the fallback, handed over with an empty entry list rather than a throw —
+  // so this readdir fails on every boot in that state, not only in a race. The
+  // copilot connector passes a discovered bot's parent, which is readable by
+  // construction. Serena entries are not worth a boot either way.
+  let entries;
+  try {
+    entries = readdirSync(botsDir, { withFileTypes: true });
+  } catch (err) {
+    log.warn("Cannot read bots root {path} for Serena configs: {error}", {
+      path: botsDir,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return results;
+  }
+
+  for (const entry of entries) {
     if (!entry.isDirectory()) continue;
 
     const configPath = join(botsDir, entry.name, "config.json");
