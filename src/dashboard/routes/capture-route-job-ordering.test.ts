@@ -782,14 +782,14 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
   // --- oEmbed metadata rides on the meta (v2 PR 2) --------------------------
 
   test("author, thumbnail and upload date come from oEmbed; a conference title yields the speaker", async () => {
-    oembedAnswer = { ...oembedAnswer, title: "Trust, But Verify - Totto - Thor Henning Hetland", author: "JavaZone" };
+    oembedAnswer = { ...oembedAnswer, title: "Trust, But Verify - Totto - Ola Nordmann", author: "JavaZone" };
     const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });
     expect(res.status).toBe(200);
     expect(lastVimeoMeta).toMatchObject({
       author: "JavaZone",
       thumbnailUrl: "https://i.vimeocdn.com/x.jpg",
       uploadDate: "2026-08-20 09:33:04",
-      speaker: "Thor Henning Hetland",
+      speaker: "Ola Nordmann",
     });
   });
 

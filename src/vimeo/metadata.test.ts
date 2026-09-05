@@ -3,11 +3,11 @@ import { isVimeoConferenceAccount, speakerFromTitle } from "./metadata.ts";
 
 describe("speakerFromTitle", () => {
   test("a JavaZone title's last ` - ` segment is the speaker", () => {
-    expect(speakerFromTitle("Understanding Buildpacks- Delving Deep - Patrick Baumgartner", "JavaZone")).toBe("Patrick Baumgartner");
+    expect(speakerFromTitle("Understanding Buildpacks- Delving Deep - Kari Nordmann", "JavaZone")).toBe("Kari Nordmann");
     // A handle in the middle: still the LAST segment.
-    expect(speakerFromTitle("Trust, But Verify - Totto - Thor Henning Hetland", "JavaZone")).toBe("Thor Henning Hetland");
+    expect(speakerFromTitle("Trust, But Verify - Totto - Ola Nordmann", "JavaZone")).toBe("Ola Nordmann");
     // Two speakers stay one string — the convention has no separator for them.
-    expect(speakerFromTitle("Bra tools - Bjørn Nordlund og Eirik Fagtun Kjærnli", "javazone")).toBe("Bjørn Nordlund og Eirik Fagtun Kjærnli");
+    expect(speakerFromTitle("Bra tools - Kari Nordmann og Ola Nordmann", "javazone")).toBe("Kari Nordmann og Ola Nordmann");
   });
 
   test("an account outside the allowlist yields no speaker, whatever the title", () => {

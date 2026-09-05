@@ -135,7 +135,7 @@ const META = {
   uploadDate: "2026-08-20 09:33:04",
   author: "JavaZone",
   thumbnailUrl: "https://i.vimeocdn.com/video/x-1280x720.jpg",
-  speaker: "Thor Henning Hetland",
+  speaker: "Ola Nordmann",
   // The route's defaults: the standard kind, in the talk's own language.
   preset: STANDARD,
   lang: "talk" as const,
@@ -275,7 +275,7 @@ test("the ingest body carries author, upload_date, speaker and thumbnail_url fro
 
   expect(ingestPayload!.author).toBe("JavaZone");
   expect(ingestPayload!.upload_date).toBe("2026-08-20 09:33:04");
-  expect(ingestPayload!.speaker).toBe("Thor Henning Hetland");
+  expect(ingestPayload!.speaker).toBe("Ola Nordmann");
   expect(ingestPayload!.thumbnail_url).toBe("https://i.vimeocdn.com/video/x-1280x720.jpg");
   // `date` stays the capture day — the upload date is its own key.
   expect(ingestPayload!.date).not.toBe("2026-08-20 09:33:04");
