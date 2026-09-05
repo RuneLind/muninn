@@ -779,6 +779,38 @@ describe("harvestVimeoCaptions — waiting for the manifest (v2 PR 4)", () => {
   });
 });
 
+describe("harvestVimeoCaptions — the no-captions manifest wait (v2 PR 5)", () => {
+  const TRACK = { tracks: [{ lang: "en", label: "English" }], urlPerTrack: ["https://captions.vimeo.com/captions/1.vtt?sig=a"] };
+
+  test("with NO caption track listed, the no-captions allowance holds the page open for the manifest", async () => {
+    const harness = fakeHarness({ hasVideo: true, tracks: [], manifestAfterMs: 150 });
+    const started = Date.now();
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestNoCaptionsMs: 3_000 });
+    expect(c.tracks).toEqual([]);
+    expect(c.manifestUrl).toContain("/playlist/av/");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("with a caption track listed, the no-captions allowance is INERT — the browser closes on the captions as before", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 150 });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestNoCaptionsMs: 3_000 });
+    expect(c.tracks.length).toBe(1);
+    expect(c.manifestUrl).toBeUndefined();
+  });
+
+  test("without either allowance a track-less harvest still closes at once and reports no manifest", async () => {
+    const harness = fakeHarness({ hasVideo: true, tracks: [], manifestAfterMs: 150 });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher });
+    expect(c.manifestUrl).toBeUndefined();
+  });
+
+  test("the larger of the two allowances applies when both are set on a track-less video", async () => {
+    const harness = fakeHarness({ hasVideo: true, tracks: [], manifestAfterMs: 400 });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 100, awaitManifestNoCaptionsMs: 3_000 });
+    expect(c.manifestUrl).toContain("/playlist/av/");
+  });
+});
+
 describe("harvestVimeoCaptions — which manifest hosts count (v2 PR 4)", () => {
   const TRACK = { tracks: [{ lang: "en", label: "English" }], urlPerTrack: ["https://captions.vimeo.com/captions/1.vtt?sig=a"] };
 

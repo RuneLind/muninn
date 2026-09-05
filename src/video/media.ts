@@ -259,7 +259,7 @@ function thinEvenly<T>(items: T[], max: number): T[] {
 // Spawn helper — concurrent stdout/stderr/exit drain + hard timeout
 // ---------------------------------------------------------------------------
 
-interface ProcResult {
+export interface ProcResult {
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -270,7 +270,7 @@ interface ProcResult {
  * `exited` first can deadlock if the pipe buffer fills — same fix as stt.ts),
  * and kill it if it runs past `timeoutMs` (mirrors executor.ts's timeout).
  */
-async function runProc(
+export async function runProc(
   cmd: string[],
   timeoutMs: number,
   label: string,

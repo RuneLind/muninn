@@ -565,6 +565,14 @@ export function loadConfig() {
     // model so English-only bots keep working; set TIKTOK_WHISPER_MODEL_PATH to
     // a multilingual model (e.g. ggml-base.bin) without touching Telegram voice.
     tiktokWhisperModelPath: optionalEnv("TIKTOK_WHISPER_MODEL_PATH", whisperModelPath),
+    // Vimeo's no-captions fallback (v2 PR 5) transcribes conference talks, many
+    // of them Norwegian, so it wants a MULTILINGUAL model; the shared default
+    // is English-only. Falls back through the TikTok path so one multilingual
+    // model set there covers both.
+    vimeoWhisperModelPath: optionalEnv(
+      "VIMEO_WHISPER_MODEL_PATH",
+      optionalEnv("TIKTOK_WHISPER_MODEL_PATH", whisperModelPath),
+    ),
     schedulerIntervalMs: optionalEnvInt(
       "SCHEDULER_INTERVAL_MS",
       optionalEnvInt("GOAL_CHECK_INTERVAL_MS", 60000),

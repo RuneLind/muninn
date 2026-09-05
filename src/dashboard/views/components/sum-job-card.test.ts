@@ -193,6 +193,14 @@ describe("sum-job-card: the Vimeo sentence map", () => {
     expect(h.vimeoSentence("no_captions")).toBe("This video has no caption track");
   });
 
+  test("names the Whisper fallback's three job-error codes (v2 PR 5), each opening on the fact the reader can check", () => {
+    expect(h.vimeoSentence("whisper_unavailable")).toBe(
+      "This video has no caption track, and this machine cannot transcribe it (whisper-cli and a multilingual model are needed — see VIMEO_WHISPER_MODEL_PATH)",
+    );
+    expect(h.vimeoSentence("transcription_failed")).toBe("This video has no caption track, and transcribing its audio failed");
+    expect(h.vimeoSentence("no_speech")).toBe("This video has no caption track, and no speech was found in its audio");
+  });
+
   test("too_long carries the measurement the route reported", () => {
     expect(h.vimeoSentence("too_long", { durationSec: 20000 })).toBe(
       "Longer than the 3h cap (5h 33m)",

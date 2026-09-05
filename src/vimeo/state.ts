@@ -24,6 +24,10 @@ const log = getLog("vimeo", "state");
 export type JobStatus =
   | "pending"
   | "harvesting_captions"
+  // The Whisper fallback (v2 PR 5): the Opus rendition coming down, then
+  // whisper-cli running — both only on a video with no caption track.
+  | "downloading"
+  | "transcribing"
   | "extracting_frames"
   | "summarizing"
   | "ingesting"

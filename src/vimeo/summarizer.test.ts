@@ -119,6 +119,9 @@ const {
   summarizeVimeo,
   AUTO_CAPTION_RIDER,
   NO_CAPTIONS_ERROR,
+  NO_SPEECH_ERROR,
+  TRANSCRIPTION_FAILED_ERROR,
+  WHISPER_UNAVAILABLE_ERROR,
   VIMEO_COLLECTION,
   resolveHarvestStubDeps,
   stubCacheKey,
@@ -976,7 +979,7 @@ function framesDeps(overrides: Record<string, unknown> = {}) {
   };
 }
 let manifestFetches: string[] = [];
-let lastHarvestOpts: { awaitManifestMs?: number } | undefined;
+let lastHarvestOpts: { awaitManifestMs?: number; awaitManifestNoCaptionsMs?: number } | undefined;
 let extractCalls: Array<{ workDir: string; durationSec: number; manifestUrl: string }> = [];
 let framesRoot = "";
 
@@ -1060,4 +1063,169 @@ test("the summarize timeout scales with the frame count", async () => {
     },
   }));
   expect(lastTimeoutMs).toBe(600_000 + 30 * 24_000);
+});
+
+// ── The Whisper fallback (v2 PR 5) ───────────────────────────────────────────
+
+const WHISPER_VTT = `WEBVTT
+
+00:00:02.000 --> 00:00:06.000
+Hei, og velkommen til foredraget.
+
+00:02:10.000 --> 00:02:15.000
+Nå kommer demoen.
+`;
+
+let transcribeCalls: Array<{ manifestUrl: string; durationSec: number; workDir: string }> = [];
+let unavailableCalls = 0;
+
+/** No caption track, a manifest in hand, a machine that can transcribe, and a whisper that heard Norwegian. */
+function whisperDeps(overrides: Record<string, unknown> = {}) {
+  return {
+    harvest: async (_videoId: string, opts: { awaitManifestMs?: number; awaitManifestNoCaptionsMs?: number }) => {
+      lastHarvestOpts = opts;
+      return { ...captionsWith([]), manifestUrl: MANIFEST_URL };
+    },
+    downloadVtt: async () => { throw new Error("must not download a VTT: there is no track"); },
+    fetchManifest: async (url: string) => { manifestFetches.push(url); return FAKE_MANIFEST; },
+    extractFrames: async (input: { workDir: string }) => {
+      extractCalls.push({ ...input, durationSec: 0, manifestUrl: MANIFEST_URL });
+      const f = { path: join(input.workDir, "10.jpg"), tSeconds: 10 };
+      writeFileSync(f.path, "frame");
+      return [f];
+    },
+    framesRoot,
+    whisperUnavailable: () => { unavailableCalls++; return null; },
+    transcribeAudio: async (
+      input: { manifestUrl: string; durationSec: number; workDir: string },
+      hooks: { onTranscribing: () => void },
+    ) => {
+      transcribeCalls.push(input);
+      expect(existsSync(input.workDir)).toBe(true);
+      hooks.onTranscribing();
+      return { vtt: WHISPER_VTT, lang: "no", audioBytes: 912_822 };
+    },
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  transcribeCalls = [];
+  unavailableCalls = 0;
+});
+
+test("no track + a manifest: the talk is transcribed from its audio — statuses, prompt, document and language all say so", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  const statuses: string[] = [];
+  subscribe(jobId, (e) => { if (e.type === "status") statuses.push(e.status); });
+  await summarizeVimeo(jobId, META, config, bot, whisperDeps());
+
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(statuses).toEqual(["harvesting_captions", "downloading", "transcribing", "summarizing", "ingesting"]);
+  expect(unavailableCalls).toBe(1);
+  expect(transcribeCalls.length).toBe(1);
+  expect(transcribeCalls[0]!.manifestUrl).toBe(MANIFEST_URL);
+  expect(transcribeCalls[0]!.durationSec).toBe(META.durationSec);
+  expect(manifestFetches).toEqual([MANIFEST_URL]);
+  // The whisper VTT went through the SAME windowing as a caption track.
+  expect(lastPrompt!.startsWith("### [00:00:00]")).toBe(true);
+  expect(lastPrompt).toContain("### [00:02:00]");
+  expect(lastPrompt).toContain("Nå kommer demoen.");
+  // A whisper transcript garbles names like an auto-caption: the rider applies.
+  expect(lastSystemPrompt).toContain(AUTO_CAPTION_RIDER);
+  // `talk` resolved from whisper's detection: Norwegian in, bokmål out.
+  expect(lastSystemPrompt).toContain("bokmål");
+  expect(ingestPayload!.summary_lang).toBe("nb");
+  expect(ingestPayload!.caption_lang).toBe("no");
+  expect(ingestPayload!.caption_kind).toBe("whisper");
+  expect(ingestPayload!.transcript_markdown).toContain("### [00:02:00]");
+  // The work dir the audio lived in is gone with the job.
+  expect(existsSync(transcribeCalls[0]!.workDir)).toBe(false);
+  // The harvest is told to wait for the manifest when there are no captions — on EVERY capture.
+  expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(10_000);
+  expect(lastHarvestOpts?.awaitManifestMs).toBe(0);
+});
+
+test("a captioned capture never touches the whisper deps, and still asks for the no-captions wait", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, whisperDeps({
+    harvest: async (_v: string, opts: Record<string, unknown>) => { lastHarvestOpts = opts; return captionsWith([AUTO_TRACK]); },
+    downloadVtt: async () => VTT,
+  }));
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(unavailableCalls).toBe(0);
+  expect(transcribeCalls).toEqual([]);
+  expect(ingestPayload!.caption_kind).toBe("auto");
+  expect(lastHarvestOpts?.awaitManifestNoCaptionsMs).toBe(10_000);
+});
+
+test("no track and NO manifest is still no_captions: nothing to transcribe from, and the pre-flight is not even asked", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, whisperDeps({
+    harvest: async () => captionsWith([]),
+  }));
+  expect(getJob(jobId)!.error).toBe(NO_CAPTIONS_ERROR);
+  expect(unavailableCalls).toBe(0);
+  expect(transcribeCalls).toEqual([]);
+  expect(manifestFetches).toEqual([]);
+});
+
+test("a machine that cannot transcribe fails with whisper_unavailable BEFORE the manifest fetch or any download", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, whisperDeps({
+    whisperUnavailable: () => "whisper-cli is not on PATH (brew install whisper-cpp)",
+  }));
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("error");
+  expect(job.error).toBe(WHISPER_UNAVAILABLE_ERROR);
+  expect(transcribeCalls).toEqual([]);
+  expect(manifestFetches).toEqual([]);
+  expect(lastPrompt).toBeUndefined();
+  const warn = warns.find((w) => /cannot transcribe it/.test(String(w.message)));
+  expect(warn?.properties.reason).toBe("whisper-cli is not on PATH (brew install whisper-cpp)");
+});
+
+test("a transcription that throws is transcription_failed — a stable code on the job, the ffmpeg tail in the log only", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, whisperDeps({
+    transcribeAudio: async () => { throw new Error("ffmpeg audio decode failed (exit 1): Invalid data"); },
+  }));
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("error");
+  expect(job.error).toBe(TRANSCRIPTION_FAILED_ERROR);
+  expect(job.error).not.toContain("ffmpeg");
+  expect(lastPrompt).toBeUndefined();
+  expect(ingestPayload).toBeUndefined();
+});
+
+test("a whisper VTT with no cues is no_speech, not no_captions — the operator reads the two differently", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, whisperDeps({
+    transcribeAudio: async (_i: unknown, hooks: { onTranscribing: () => void }) => { hooks.onTranscribing(); return { vtt: "WEBVTT\n\n", lang: "und", audioBytes: 10 }; },
+  }));
+  expect(getJob(jobId)!.error).toBe(NO_SPEECH_ERROR);
+  expect(lastPrompt).toBeUndefined();
+});
+
+test("an explicit language pick beats whisper's detection, as it beats a caption tag", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...META, lang: "en" as const }, config, bot, whisperDeps());
+  expect(ingestPayload!.summary_lang).toBe("en");
+  expect(ingestPayload!.caption_lang).toBe("no");
+});
+
+test("whisper + frames: ONE manifest fetch serves both, and the statuses run download → transcribe → frames → summarize", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  const statuses: string[] = [];
+  subscribe(jobId, (e) => { if (e.type === "status") statuses.push(e.status); });
+  await summarizeVimeo(jobId, { ...META, frames: true, durationSec: 600 }, config, bot, whisperDeps());
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(statuses).toEqual(["harvesting_captions", "downloading", "transcribing", "extracting_frames", "summarizing", "ingesting"]);
+  expect(manifestFetches).toEqual([MANIFEST_URL]);
+  expect(extractCalls.length).toBe(1);
+  expect(transcribeCalls.length).toBe(1);
+  // Audio and frames share the job's work dir.
+  expect(extractCalls[0]!.workDir).toBe(transcribeCalls[0]!.workDir);
+  expect(lastPrompt).toContain("Slide frames");
+  expect(ingestPayload!.caption_kind).toBe("whisper");
 });

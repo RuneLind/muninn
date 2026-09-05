@@ -124,8 +124,10 @@ const VERTEX_FLAGS = [
  *  the loader that reads it (PR 2's summarizer): the name has to be blanked from
  *  the first moment anything can read it, and a name added later, after a suite
  *  has already been written against ambient state, is exactly how this list gets
- *  a hole. */
-const VIMEO_FLAGS = ["VIMEO_OEMBED_BASE", "VIMEO_HARVEST_STUB"];
+ *  a hole. `VIMEO_WHISPER_MODEL_PATH` (v2 PR 5) names the model the no-captions
+ *  fallback transcribes with; the config tests assert its DEFAULT chain, which a
+ *  developer's multilingual model would otherwise satisfy on one machine only. */
+const VIMEO_FLAGS = ["VIMEO_OEMBED_BASE", "VIMEO_HARVEST_STUB", "VIMEO_WHISPER_MODEL_PATH"];
 
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.

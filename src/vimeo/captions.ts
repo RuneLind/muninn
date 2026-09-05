@@ -145,6 +145,16 @@ export interface HarvestOptions {
    * a reader who ticked Slides gets none. Bounded by the harvest budget too.
    */
   awaitManifestMs?: number;
+  /**
+   * The manifest wait that applies ONLY when the player lists no caption
+   * track (default 0). The Whisper fallback (`whisper.ts`) has nothing to
+   * transcribe without the manifest, and it cannot know before the harvest
+   * whether captions exist — so the summarizer passes this on every capture
+   * while `awaitManifestMs` stays tied to the Slides tick: a captioned,
+   * frames-off capture still closes the browser the moment it has its VTT.
+   * The larger of the two applies when both are set. Bounded by the budget.
+   */
+  awaitManifestNoCaptionsMs?: number;
 }
 
 /**
@@ -319,7 +329,10 @@ export async function harvestVimeoCaptions(
     for (let attempt = 1; attempt <= 2; attempt++) {
       const context = await browser.newContext({ locale: "en-US", userAgent });
       try {
-        return await harvestInContext(context, videoId, watchUrl, deadline, Math.max(0, opts.awaitManifestMs ?? 0));
+        return await harvestInContext(context, videoId, watchUrl, deadline, {
+          awaitManifestMs: Math.max(0, opts.awaitManifestMs ?? 0),
+          awaitManifestNoCaptionsMs: Math.max(0, opts.awaitManifestNoCaptionsMs ?? 0),
+        });
       } catch (err) {
         if (err instanceof VimeoBotBlockedError && attempt === 1) {
           log.warn("Vimeo bot page for {videoId}; retrying once with a fresh context", { videoId });
@@ -353,7 +366,7 @@ async function harvestInContext(
   videoId: string,
   watchUrl: string,
   deadline: number,
-  awaitManifestMs: number,
+  waits: { awaitManifestMs: number; awaitManifestNoCaptionsMs: number },
 ): Promise<VimeoCaptions> {
   const page = await context.newPage();
   const vttUrls: string[] = [];
@@ -527,7 +540,12 @@ async function harvestInContext(
   // So, when asked, keep the page (still playing) open until the request
   // arrives, for at most `awaitManifestMs` and never past the budget. Polled
   // rather than a Playwright wait: the URL lands in `page.on("request")`.
-  const manifestWait = awaitManifestMs;
+  //
+  // With NO caption track listed, the no-captions allowance applies too: the
+  // Whisper fallback starts from the manifest, and a harvest that closed on
+  // "no captions" would report a video that cannot be transcribed either.
+  const manifestWait =
+    meta.tracks.length === 0 ? Math.max(waits.awaitManifestMs, waits.awaitManifestNoCaptionsMs) : waits.awaitManifestMs;
   if (!manifestUrl && manifestWait > 0) {
     const waitUntil = Math.min(deadline, Date.now() + manifestWait);
     while (!manifestUrl && Date.now() < waitUntil) {
