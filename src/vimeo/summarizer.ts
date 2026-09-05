@@ -64,17 +64,6 @@ export const VIMEO_SUMMARIZE_TIMEOUT_MS = 600_000;
 /** Error code stored on a job whose video has captions we could not choose from. */
 export const NO_CAPTIONS_ERROR = "no_captions";
 
-/**
- * oEmbed's `upload_date` is `"YYYY-MM-DD HH:MM:SS"`, huginn's `date` frontmatter
- * is a bare ISO date on every other vertical. Take the date half when it is
- * there and drop the field entirely otherwise — huginn then stamps today, which
- * is a better record than a malformed date nothing can sort on.
- */
-export function ingestDate(uploadDate: string): string | undefined {
-  const match = /^(\d{4}-\d{2}-\d{2})/.exec(uploadDate.trim());
-  return match ? match[1] : undefined;
-}
-
 const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
   "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
     "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
@@ -117,7 +106,11 @@ export interface VimeoJobMeta {
   readonly url: string;
   readonly title: string;
   readonly durationSec: number;
-  /** oEmbed's `upload_date`, used as the document's `date` frontmatter. */
+  /**
+   * oEmbed's `upload_date`. Retained on the job, read by nothing: the document's
+   * `date` is the capture day (see the ingest body below), and a frontmatter
+   * field of its own is a huginn allowlist change.
+   */
   readonly uploadDate: string;
 }
 
@@ -402,7 +395,6 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
     updateStatus(jobId, "ingesting");
 
     let ingestedDocId: string | undefined;
-    const date = ingestDate(meta.uploadDate);
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/vimeo/ingest",
@@ -411,7 +403,13 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
         url: canonicalVimeoUrl(meta.videoId),
         summary,
         category,
-        ...(date ? { date } : {}),
+        // The CAPTURE date, the same expression youtube/tiktok/article stamp
+        // (anthropic alone prefers the source's own publish date): `date` is what
+        // the /summaries shelf buckets and sorts on, and stamping oEmbed's
+        // upload_date instead filed a talk captured today under the week it was
+        // uploaded, below the fold. UTC day, like the siblings — a capture in the
+        // first two CEST hours lands under "Yesterday"; shared, not fixed here.
+        date: new Date().toISOString().split("T")[0],
         transcript_markdown: transcript,
         caption_lang: track.lang,
         // A stubbed capture is marked ON THE DOCUMENT. The prompt still gets the

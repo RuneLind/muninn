@@ -144,9 +144,13 @@ capture's card from complete into error.
 before `harvestQueue.run` meant a job waiting its turn reported a Chromium that
 was not running, for as long as every harvest ahead of it took.
 
-**oEmbed's `upload_date` is a datetime; huginn's `date` is a day.** `ingestDate`
-takes the day half and omits the field entirely when it cannot — huginn then
-stamps today, which sorts, where a malformed date does not. A title-less oEmbed
+**The document's `date` is the CAPTURE day, never oEmbed's `upload_date`.**
+The `/summaries` shelf buckets and sorts on `date`, and youtube/tiktok/article
+stamp today; stamping the upload date filed a talk captured today under the week
+it was uploaded, below the fold (#519). `uploadDate` stays on the job meta with
+no consumer: it has no frontmatter field yet, because huginn's converter metadata
+allowlist is global (the `anthropic` vertical, which prefers the SOURCE's own
+publish date, is the precedent for adding one). A title-less oEmbed
 answer falls back to the canonical url, because huginn derives the document
 FILENAME from the title and `""` would collide with every other title-less
 capture.
