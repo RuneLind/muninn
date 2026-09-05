@@ -619,6 +619,13 @@ test.describe("Summaries: capture a Vimeo URL", () => {
       .toEqual(["talk", "nb", "en"]);
     await expect(page.locator("#captureKind")).toHaveValue("standard");
     await expect(page.locator("#captureLang")).toHaveValue("talk");
+    // The Slides checkbox (v2 PR 4) is rendered DISABLED with its reason on this
+    // bot — an `openai-compat` connector cannot read frame files — so the POST
+    // below carries `frames: false` whatever a browser remembers, and the route
+    // is never asked to 503.
+    await expect(page.locator("#captureFrames")).toBeDisabled();
+    await expect(page.locator("#captureFrames")).not.toBeChecked();
+    expect(await page.locator("label.capture-frames").getAttribute("title")).toContain("cannot read frame files");
     await page.locator("#captureKind").selectOption("talk-notes");
     await page.locator("#captureLang").selectOption("nb");
     await page.locator("#captureUrl").fill(PICKED_URL);
@@ -628,7 +635,7 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     await expect(page.locator("#statusBadge .status-text")).toHaveText("Complete", { timeout: 60_000 });
 
     // 1. The POST carried the picker.
-    expect(bodies).toEqual([{ url: PICKED_URL, kind: "talk-notes", lang: "nb" }]);
+    expect(bodies).toEqual([{ url: PICKED_URL, kind: "talk-notes", lang: "nb", frames: false }]);
 
     // 2. The model saw the kind's structure and the bokmål rider — on the
     //    SYSTEM prompt, after the auto-caption rider (the stub track is
