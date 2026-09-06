@@ -9,9 +9,10 @@
  * error, and its `alert()` failure path is sandboxed too).
  *
  * Its own dependency-free module, NOT a sibling of `EXPLAINER_BRIDGE_SCRIPT`:
- * that string contains a literal `</script>`, and the wiki reader is an
+ * that string contains a literal `<\/script>` (written escaped even here, since
+ * this docblock rides the same bundle), and the wiki reader is an
  * inlined browser bundle — importing the bridge module into it closed the
  * page's own script tag mid-bundle and blanked the reader (measured: every
- * e2e spec red, "Unexpected end of input").
+ * wiki e2e spec red, "Unexpected end of input").
  */
 export const EXPLAINER_SANDBOX = "allow-scripts allow-popups allow-downloads";

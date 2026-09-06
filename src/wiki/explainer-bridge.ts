@@ -25,7 +25,6 @@
  *  to confirm the bridge was appended to the served explainer HTML. */
 export const EXPLAINER_BRIDGE_MARKER = "wiki-explainer-bridge";
 
-
 /** The `<script>…</script>` forwarder appended to every served explainer page. */
 export const EXPLAINER_BRIDGE_SCRIPT = `<script>/* ${EXPLAINER_BRIDGE_MARKER} */
 (function () {
