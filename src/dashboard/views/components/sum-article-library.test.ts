@@ -165,7 +165,7 @@ describe("splitTranscript", () => {
       "### Key takeaways\n- a",
       "### [00:00:00]\nhello there\n\n### [00:02:00]\nmore words",
     );
-    const parts = splitTranscript(doc);
+    const parts = splitTranscript(doc.text);
     expect(parts.body.trim()).toBe("### Key takeaways\n- a");
     expect(parts.transcript).toContain("### [00:02:00]");
     // The summary half keeps no trace of the transcript.

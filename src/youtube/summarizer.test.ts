@@ -81,7 +81,7 @@ mock.module("../gardener/source-drafter-run.ts", () => ({
 
 const { summarizeVideo } = await import("./summarizer.ts");
 const { createJob, getJob } = await import("./state.ts");
-const { YOUTUBE_FRAME_HEIGHT, YOUTUBE_FRAME_FORMAT_SELECTOR } = await import("./frames.ts");
+const { YOUTUBE_FRAME_FORMAT_SELECTOR } = await import("./frames.ts");
 
 // --- a real huginn on loopback ---------------------------------------------
 
@@ -92,6 +92,16 @@ let ingestBodies: Array<Record<string, unknown>> = [];
 /** The transcript the stub answers with, and the status it answers under. */
 let transcriptBody: { transcript?: string } = {};
 let transcriptStatus = 200;
+/**
+ * Whether this huginn is a post-#129 one.
+ *
+ * `true` — the shipped endpoint: it ECHOES `timestamps: true` when it windowed
+ * the transcript. `false` — a pre-#129 huginn (the one on 127.0.0.1:8321 as
+ * this lands): it ignores the parameter entirely and answers a plain transcript
+ * with no `timestamps` key, which is exactly the case where asking for windows
+ * and getting none must not put a `### [HH:MM:SS]` rider on the prompt.
+ */
+let huginnEchoesTimestamps = true;
 
 const huginn = Bun.serve({
   port: 0,
@@ -100,7 +110,8 @@ const huginn = Bun.serve({
     if (u.pathname.startsWith("/api/youtube/transcript/")) {
       transcriptRequests.push(u.pathname + u.search);
       if (transcriptStatus !== 200) return new Response("nope", { status: transcriptStatus });
-      return Response.json(transcriptBody);
+      const windowed = huginnEchoesTimestamps && u.searchParams.get("timestamps") === "1";
+      return Response.json(windowed ? { ...transcriptBody, timestamps: true } : transcriptBody);
     }
     if (u.pathname === "/api/youtube/ingest") {
       ingestBodies.push((await req.json()) as Record<string, unknown>);
@@ -131,7 +142,15 @@ afterAll(() => {
 
 let probeAnswer: YtDlpInfo | null = { id: VIDEO_ID, title: "A talk", duration: 1200, uploader: "conf" };
 let probeCalls: string[] = [];
+/** Whatever a case wants to know about the world at the moment the probe runs. */
+let atProbe: (() => void) | null = null;
 let downloadCalls: Array<{ url: string; workDir: string; opts: DownloadOptions }> = [];
+/** Same, for the download — the work dir has to exist by then. */
+let atDownload: ((workDir: string) => void) | null = null;
+/** Held open by the concurrency case: a download parks here until it is released. */
+let downloadGate: Promise<void> | null = null;
+/** `download:start` / `download:end` in order, so an overlap is visible as interleaving. */
+let downloadTrace: string[] = [];
 let downloadThrows: Error | null = null;
 let extractCalls: Array<{ file: string; durationSec: number; outDir: string }> = [];
 let extractThrows: Error | null = null;
@@ -146,10 +165,15 @@ function deps() {
   return {
     probeVideoInfo: async (url: string) => {
       probeCalls.push(url);
+      atProbe?.();
       return probeAnswer;
     },
     downloadVideo: async (url: string, workDir: string, opts: DownloadOptions): Promise<DownloadResult> => {
       downloadCalls.push({ url, workDir, opts });
+      atDownload?.(workDir);
+      downloadTrace.push(`start:${url}`);
+      if (downloadGate) await downloadGate;
+      downloadTrace.push(`end:${url}`);
       if (downloadThrows) throw downloadThrows;
       mkdirSync(workDir, { recursive: true });
       lastVideoPath = join(workDir, "video.mp4");
@@ -197,9 +221,14 @@ beforeEach(() => {
   ingestBodies = [];
   sourceDraftCalls = [];
   probeCalls = [];
+  atProbe = null;
+  atDownload = null;
+  downloadGate = null;
+  downloadTrace = [];
   downloadCalls = [];
   extractCalls = [];
   downloadThrows = null;
+  huginnEchoesTimestamps = true;
   extractThrows = null;
   extractTicks = [30, 600, 1170];
   probeAnswer = { id: VIDEO_ID, title: "A talk", duration: 1200, uploader: "conf" };
@@ -219,7 +248,7 @@ beforeEach(() => {
 /** Run one capture and hand back its job id. */
 async function run(opts: { frames?: boolean; onIngested?: (v: string, d: string) => void } = {}) {
   const jobId = createJob(VIDEO_ID, "A talk", WATCH_URL);
-  await summarizeVideo(jobId, VIDEO_ID, "A talk", WATCH_URL, config, bot, {
+  await summarizeVideo(jobId, VIDEO_ID, "A talk", config, bot, {
     ...(opts.frames !== undefined ? { frames: opts.frames } : {}),
     ...(opts.onIngested ? { onIngested: opts.onIngested } : {}),
     deps: deps(),
@@ -263,7 +292,6 @@ describe("frames on", () => {
       createJob(VIDEO_ID, "A talk", "https://evil.test/whatever"),
       VIDEO_ID,
       "A talk",
-      "https://evil.test/whatever",
       config,
       bot,
       { frames: true, deps: deps() },
@@ -292,9 +320,20 @@ describe("frames on", () => {
     expect(extractCalls).toHaveLength(1);
     expect(extractCalls[0]!.durationSec).toBe(1200);
     expect(extractCalls[0]!.outDir).toBe(join(downloadCalls[0]!.workDir, "frames"));
-    // The height is the seam's, applied by the production dep; assert the
-    // constant the module publishes so a change to it is visible here.
-    expect(YOUTUBE_FRAME_HEIGHT).toBe(720);
+    // The height itself is the SEAM's constant (`CAPTURE_FRAME_HEIGHT`), pinned
+    // in `src/summaries/frames.test.ts` — this vertical no longer keeps a
+    // second copy of it to assert against.
+  });
+
+  test("the work dir EXISTS by the time the download is handed it", async () => {
+    // yt-dlp creates the `-o` directory itself, so this is not load-bearing for
+    // the download — it is for everything after: the extractor writes into
+    // `<workDir>/frames` and the model is handed `workDir` as `--add-dir`. The
+    // sibling verticals all mkdir first.
+    let existed: boolean | null = null as boolean | null;
+    atDownload = (workDir) => { existed = existsSync(workDir); };
+    await run({ frames: true });
+    expect(existed).toBe(true);
   });
 
   test("the video file is gone BEFORE the model call, and the work dir is the extraDir", async () => {
@@ -321,6 +360,15 @@ describe("frames on", () => {
     expect(lastThinking).toBeUndefined();
     // 3 frames is under the 30-frame knee, so the floor binds.
     expect(lastTimeoutMs).toBe(600_000);
+  });
+
+  test("the summarize budget SCALES with the frame count past the 30-frame knee", async () => {
+    // A bare constant here would hold a 60-frame session to a budget sized for
+    // a 25-frame one: every extra frame is another image Read in the same
+    // multi-turn session. 40 frames ⇒ 600 s + 10 × 24 s.
+    extractTicks = Array.from({ length: 40 }, (_, i) => i * 30);
+    await run({ frames: true });
+    expect(lastTimeoutMs).toBe(600_000 + 10 * 24_000);
   });
 
   test("only the QUOTED frames are kept, under the injected root", async () => {
@@ -353,7 +401,7 @@ describe("frames on", () => {
   test("onIngested fires with huginn's doc id, BEFORE the job completes", async () => {
     const seen: Array<[string, string, string | undefined]> = [];
     const jobId = createJob(VIDEO_ID, "A talk", WATCH_URL);
-    await summarizeVideo(jobId, VIDEO_ID, "A talk", WATCH_URL, config, bot, {
+    await summarizeVideo(jobId, VIDEO_ID, "A talk", config, bot, {
       frames: true,
       // A re-POST racing the terminal job event must find the claim already
       // written, so the hook runs while the job is still `ingesting`.
@@ -422,6 +470,152 @@ describe("every frames failure degrades to a transcript-only capture", () => {
     // round-trip for a worse document; the transcript section still lands.
     expect(transcriptRequests).toEqual([`/api/youtube/transcript/${VIDEO_ID}?timestamps=1`]);
     expect(String(ingestBodies[0]!.summary)).toContain("## Transcript");
+  });
+});
+
+describe("what is WINDOWED is what huginn ANSWERED, not what we asked for", () => {
+  test("`timestamps: true` on the response ⇒ the rider and the `## Transcript` section", async () => {
+    await run({ frames: true });
+    expect(transcriptRequests).toEqual([`/api/youtube/transcript/${VIDEO_ID}?timestamps=1`]);
+    expect(lastSystemPrompt).toContain("### [HH:MM:SS]");
+    expect(String(ingestBodies[0]!.summary)).toContain("\n## Transcript\n");
+  });
+
+  test("a pre-#129 huginn ignores the parameter — no rider and no section, frames or not", async () => {
+    // The endpoint that ignores `?timestamps=1` answers a PLAIN transcript with
+    // no `timestamps` key (127.0.0.1:8321 as this lands). Deriving "windowed"
+    // from our own frames decision then puts a `### [HH:MM:SS]` rider on a
+    // prompt whose transcript has no headings at all, and files a flat wall of
+    // text under `## Transcript` as if it were windowed.
+    huginnEchoesTimestamps = false;
+    const jobId = await run({ frames: true });
+
+    expect(transcriptRequests).toEqual([`/api/youtube/transcript/${VIDEO_ID}?timestamps=1`]);
+    expect(lastSystemPrompt).not.toContain("### [HH:MM:SS]");
+    expect(String(ingestBodies[0]!.summary)).not.toContain("## Transcript");
+    // Everything else about the capture is unchanged: frames still ran.
+    expect(downloadCalls).toHaveLength(1);
+    expect(lastExtraDirs).toEqual([downloadCalls[0]!.workDir]);
+    expect(getJob(jobId)?.status).toBe("complete");
+  });
+
+  test("a frames pass that FAILED keeps the section and the rider it was answered with", async () => {
+    // The transcript is windowed whether or not frames were produced, so the
+    // document keeps its clock; what goes away is the slides.
+    extractThrows = new Error("ffmpeg frame grab failed (exit 1)");
+    await run({ frames: true });
+
+    expect(lastSystemPrompt).toContain("### [HH:MM:SS]");
+    const summary = String(ingestBodies[0]!.summary);
+    expect(summary).toContain("\n## Transcript\n");
+    expect(summary).not.toContain("![");
+    expect(lastPrompt).not.toContain("/api/frames/youtube/");
+  });
+});
+
+describe("the URL on the document is built from the VIDEO ID", () => {
+  const OTHER = "https://www.youtube.com/watch?v=abcdefghijk";
+
+  test("the ingest body, the prompt and the source draft all carry the canonical watch URL", async () => {
+    // The capture takes no url at all: everything that names this video is
+    // built from the id the route validated, so a POST naming video X with a
+    // url for video Y cannot put Y's address on X's document (which then made
+    // every later capture of Y a `duplicate` of X).
+    const jobId = createJob(VIDEO_ID, "A talk", OTHER);
+    await summarizeVideo(jobId, VIDEO_ID, "A talk", config, bot, { deps: deps() });
+
+    expect(ingestBodies[0]!.url).toBe(WATCH_URL);
+    expect(lastSystemPrompt).toContain(`Video URL: ${WATCH_URL}`);
+    expect(lastSystemPrompt).not.toContain(OTHER);
+    expect(sourceDraftCalls[0]!.url).toBe(WATCH_URL);
+  });
+});
+
+describe("the job card moves before the expensive half", () => {
+  test("the status has left `pending` by the time the probe runs", async () => {
+    // The probe is a yt-dlp spawn (~3 s) and the download is minutes; a card
+    // sitting at "pending" through both reads as a stuck job.
+    let statusAtProbe: string | undefined;
+    let jobId = "";
+    atProbe = () => { statusAtProbe = getJob(jobId)?.status; };
+    jobId = createJob(VIDEO_ID, "A talk", WATCH_URL);
+    await summarizeVideo(jobId, VIDEO_ID, "A talk", config, bot, {
+      frames: true,
+      deps: deps(),
+    });
+    expect(statusAtProbe).toBe("fetching_transcript");
+  });
+});
+
+describe("the yt-dlp/ffmpeg half is serialized process-wide", () => {
+  test("two captures of DIFFERENT videos do not download at the same time", async () => {
+    // N distinct-id POSTs are N legitimate captures, but they must not be N
+    // concurrent yt-dlp downloads and ffmpeg passes on a laptop also running
+    // the dev server, the bots and huginn (the Vimeo harvest precedent).
+    let release!: () => void;
+    downloadGate = new Promise<void>((r) => { release = r; });
+    const OTHER_ID = "abcdefghijk";
+
+    const first = summarizeVideo(createJob(VIDEO_ID, "A", WATCH_URL), VIDEO_ID, "A", config, bot, {
+      frames: true,
+      deps: deps(),
+    });
+    const second = summarizeVideo(
+      createJob(OTHER_ID, "B", `https://www.youtube.com/watch?v=${OTHER_ID}`),
+      OTHER_ID,
+      "B",
+      config,
+      bot,
+      { frames: true, deps: deps() },
+    );
+
+    // Let both reach their download step, then release the first.
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(downloadTrace.filter((t) => t.startsWith("start:"))).toHaveLength(1);
+    release();
+    downloadGate = null;
+    await Promise.all([first, second]);
+
+    // Serial: each download ends before the next begins.
+    expect(downloadTrace).toEqual([
+      `start:${WATCH_URL}`,
+      `end:${WATCH_URL}`,
+      `start:https://www.youtube.com/watch?v=${OTHER_ID}`,
+      `end:https://www.youtube.com/watch?v=${OTHER_ID}`,
+    ]);
+    // Both captures still completed — a try-lock would have dropped one.
+    expect(extractCalls).toHaveLength(2);
+  });
+});
+
+describe("the transcript's own size is reported, not silently cut", () => {
+  test("a transcript over the 2 MiB bound warns with both byte counts", async () => {
+    // `capTranscriptWindows` returns `truncated` so a caller can say so; with
+    // no consumer, a talk whose second half never reached the document was
+    // invisible everywhere but in the stored file.
+    const window = `### [00:00:00]\n${"x".repeat(500)}`;
+    transcriptBody = { transcript: Array.from({ length: 5000 }, () => window).join("\n\n") };
+    await run({ frames: true });
+
+    expect(logged("warning", "transcript truncated")).toBe(true);
+    const warn = logs.find((r) => r.level === "warning" && String(r.message.join("")).includes("transcript truncated"));
+    expect(Number(warn!.properties.transcriptBytes)).toBeGreaterThan(2 * 1024 * 1024);
+    expect(Number(warn!.properties.keptBytes)).toBeLessThanOrEqual(2 * 1024 * 1024);
+  });
+
+  test("the ingest budget is sized from the body it is posting", async () => {
+    // 15 s is a fine budget for a 6 KB summary and a coin flip for a 2 MiB one:
+    // an ingest whose RESPONSE is dropped by the timeout leaves huginn holding
+    // a document this process never learns the id of, which is exactly what the
+    // reindex-window dedup map needs.
+    const window = `### [00:00:00]\n${"x".repeat(500)}`;
+    transcriptBody = { transcript: Array.from({ length: 2000 }, () => window).join("\n\n") };
+    await run({ frames: true });
+
+    const line = logs.find((r) => String(r.message.join("")).includes("Ingesting"));
+    expect(line).toBeDefined();
+    expect(Number(line!.properties.timeoutMs)).toBeGreaterThan(15_000);
   });
 });
 

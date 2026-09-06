@@ -1,15 +1,23 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rm, unlink } from "node:fs/promises";
+import { mkdir, rm, unlink } from "node:fs/promises";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import {
+  CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
+  buildSummarySystemPrompt,
+  ingestSummary,
+  runCaptureOneShot,
+  windowedTranscriptRider,
+} from "../summaries/summarizer-shared.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { connectorCapabilities } from "../ai/one-shot.ts";
+import { createQueue } from "../wiki/queue.ts";
 import {
+  CAPTURE_FRAME_HEIGHT,
   YOUTUBE_FRAME_SOURCE,
   extractCadenceFramesFromFile,
   framesPromptSection,
@@ -27,8 +35,7 @@ import {
 import {
   YOUTUBE_FRAMES_MAX_DURATION_SEC,
   YOUTUBE_FRAME_FORMAT_SELECTOR,
-  YOUTUBE_FRAME_HEIGHT,
-  YOUTUBE_SUMMARIZE_TIMEOUT_MS,
+  YOUTUBE_TRANSCRIPT_MAX_BYTES,
   appendTranscriptSection,
   decideYouTubeFrames,
   transcriptUrl,
@@ -54,15 +61,30 @@ const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
 );
 
 /**
- * The rider added when the transcript came back WINDOWED (`?timestamps=1`, the
- * frames path). Copied from the Vimeo prompt verbatim, because the shape is the
- * same one huginn emits for both: a slide can only be placed beside its passage
- * if the model knows the headings are positions.
+ * The rider added when huginn ANSWERED with a windowed transcript. The sentence
+ * is the seam's, shared with the Vimeo prompt (which says "talk"): a slide can
+ * only be placed beside its passage if the model knows the headings are
+ * positions.
  */
-const WINDOWED_TRANSCRIPT_RIDER =
-  "\n\nThe transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
-  "carrying its absolute position in the video; those headings are positions, not content — " +
-  "never quote one as if it were speech.";
+const WINDOWED_TRANSCRIPT_RIDER = `\n\n${windowedTranscriptRider("video")}`;
+
+/**
+ * ONE yt-dlp download and one ffmpeg pass at a time, process-wide.
+ *
+ * N POSTs of N DISTINCT videos are N legitimate captures — the route's dedup
+ * only holds back a second capture of the SAME video — but they must not be N
+ * concurrent 50 MiB downloads and N ffmpeg fan-outs on a laptop also running
+ * the dev server, the bots and huginn. A queue rather than a try-lock, for the
+ * Vimeo harvest's reason: neither capture may be dropped, so the second waits
+ * and then runs with its own budget.
+ *
+ * The section is entered TWICE and never held across the transcript fetch: the
+ * probe decides which transcript to ask for, so a single section spanning both
+ * would serialize a 30 s network wait that spends no CPU and no disk. What the
+ * key guarantees is what it is for — one yt-dlp / ffmpeg at a time.
+ */
+const framesQueue = createQueue();
+const FRAMES_QUEUE_KEY = "youtube-frames";
 
 /** Told once, on a SUCCESSFUL ingest, with huginn's stored doc id — the Vimeo hook. */
 export type YouTubeIngestedHook = (videoId: string, documentId: string) => void;
@@ -93,7 +115,7 @@ const REAL_DEPS: YouTubeSummarizerDeps = {
   probeVideoInfo: (url, opts) => realProbeVideoInfo(url, opts),
   downloadVideo: (url, workDir, opts) => realDownloadVideo(url, workDir, opts),
   extractFrames: ({ file, durationSec, outDir }) =>
-    extractCadenceFramesFromFile(file, durationSec, outDir, { height: YOUTUBE_FRAME_HEIGHT }),
+    extractCadenceFramesFromFile(file, durationSec, outDir, { height: CAPTURE_FRAME_HEIGHT }),
 };
 
 export interface SummarizeVideoOptions {
@@ -127,12 +149,17 @@ export interface SummarizeVideoOptions {
  * Every frames failure — a probe that says nothing, a live stream, yt-dlp rot,
  * an ffmpeg error — is a WARN plus today's transcript-only capture, never a
  * failed job (the TikTok precedent). The outcome rides the trace as `frames`.
+ *
+ * It takes no `url`: everything that names this video — the yt-dlp target, the
+ * ingest body, the system prompt, the source draft — is built from the id the
+ * route validated ({@link youtubeWatchUrl}). A caller-supplied url reached four
+ * of those, and a POST naming video X with a url for video Y put Y's address on
+ * X's document.
  */
 export async function summarizeVideo(
   jobId: string,
   videoId: string,
   title: string,
-  url: string,
   config: Config,
   botConfig: BotConfig,
   opts: SummarizeVideoOptions = {},
@@ -141,6 +168,11 @@ export async function summarizeVideo(
   // Created only on the frames path, removed in the `finally` whatever
   // happened — AFTER the quoted frames have been copied out.
   const workDir = join(tmpdir(), `muninn-youtube-${jobId}`);
+  // The ONE url this capture states, built from the id the route validated.
+  // Never the caller's `url`: a POST naming video X with a url for video Y
+  // would otherwise put Y's address on X's document and make every later
+  // capture of Y a `duplicate` of X (the same rule the yt-dlp target follows).
+  const videoUrl = youtubeWatchUrl(videoId);
   let frames: CaptureFrame[] = [];
 
   try {
@@ -148,14 +180,18 @@ export async function summarizeVideo(
     //    decides which transcript is asked for: `?timestamps=1` is the windowed
     //    form a slide can be placed against (huginn #129), and asking for it
     //    unconditionally would change every frames-off capture's prompt.
+    //
+    //    The status moves FIRST: the probe is a yt-dlp spawn (~3 s) and the
+    //    download that may follow is minutes, so a card left at `pending`
+    //    through both reads as a stuck job.
+    updateStatus(jobId, "fetching_transcript");
     let framesOutcome: FramesOutcome = "off";
     let durationSec = 0;
     if (opts.frames === true) {
-      // The yt-dlp target is derived from the VIDEO ID, never from the caller's
-      // `url`: this route is CORS-`*` with `MUNINN_AUTH=off` and the origin
-      // check is mounted only in authenticating modes, so a client-supplied URL
-      // here would let any page spawn yt-dlp against an arbitrary host.
-      const probe = await resolved.probeVideoInfo(youtubeWatchUrl(videoId), {});
+      // In the frames queue: a probe is a yt-dlp process too.
+      const probe = await framesQueue.run(FRAMES_QUEUE_KEY, () =>
+        resolved.probeVideoInfo(videoUrl, {}),
+      );
       durationSec = probe?.duration ?? 0;
       framesOutcome = decideYouTubeFrames({
         framesRequested: true,
@@ -171,21 +207,30 @@ export async function summarizeVideo(
         });
       }
     }
-    // What the TRANSCRIPT is: windowed exactly when the frames pass will run.
-    // A frames pass that then FAILS keeps the windowed transcript — it is a
-    // better document either way, and re-fetching the plain form to undo a
-    // decision would be a second round-trip for a worse result.
-    const timestamped = framesOutcome === "on";
 
     // 1. Fetch transcript
-    updateStatus(jobId, "fetching_transcript");
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30_000);
 
     let transcriptText: string;
+    /**
+     * Whether the transcript came back WINDOWED — huginn's own answer, not our
+     * request.
+     *
+     * `?timestamps=1` is asked for exactly when frames will run, but a pre-#129
+     * huginn ignores the parameter and answers a plain transcript with no
+     * `timestamps` key (127.0.0.1:8321 as this lands). Deriving this from the
+     * frames decision put a `### [HH:MM:SS]` rider on a prompt whose transcript
+     * has no headings at all, and filed a flat wall of text under
+     * `## Transcript` as if it were windowed.
+     *
+     * It also settles the frames-FAILURE case, for free: the transcript is
+     * windowed whether or not any frame came out of the video, so the section
+     * and the rider stay and only the slides go away.
+     */
+    let timestamped = false;
     try {
-      const res = await fetch(transcriptUrl(config.knowledgeApiUrl, videoId, timestamped), {
+      const res = await fetch(transcriptUrl(config.knowledgeApiUrl, videoId, framesOutcome === "on"), {
         signal: controller.signal,
       });
       clearTimeout(timeout);
@@ -193,8 +238,9 @@ export async function summarizeVideo(
         failJob(jobId, `Transcript API returned ${res.status}`);
         return;
       }
-      const data = await res.json() as { transcript?: string };
+      const data = await res.json() as { transcript?: string; timestamps?: boolean };
       transcriptText = data.transcript ?? "";
+      timestamped = data.timestamps === true;
       if (!transcriptText) {
         failJob(jobId, "Empty transcript returned");
         return;
@@ -217,29 +263,39 @@ export async function summarizeVideo(
     //     — it must not sit on disk through a ten-minute model turn.
     if (framesOutcome === "on") {
       try {
-        updateStatus(jobId, "downloading");
-        const dl = await resolved.downloadVideo(youtubeWatchUrl(videoId), workDir, {
-          // The cap is enforced a SECOND time here, by yt-dlp's own
-          // `--break-match-filters` (exit 101): the probe above sized this
-          // capture, and a video that grew between the two calls — a stream
-          // that ended, a re-upload — must not be downloaded past the cap.
-          maxDurationSeconds: YOUTUBE_FRAMES_MAX_DURATION_SEC,
-          timeoutMs: youtubeDownloadTimeoutFor(durationSec),
-          format: YOUTUBE_FRAME_FORMAT_SELECTOR,
-        });
-        updateStatus(jobId, "extracting_frames");
-        try {
-          frames = await resolved.extractFrames({
-            file: dl.videoPath,
-            durationSec,
-            outDir: join(workDir, "frames"),
+        // One download + one ffmpeg pass at a time, process-wide. The model
+        // turn below is deliberately OUTSIDE the section: it spends no local
+        // CPU, runs for minutes, and holding the queue across it would make two
+        // captures strictly serial end to end.
+        frames = await framesQueue.run(FRAMES_QUEUE_KEY, async () => {
+          updateStatus(jobId, "downloading");
+          // The sibling verticals all create the work dir first. yt-dlp would
+          // create it itself, but everything after does not: the extractor
+          // writes into `<workDir>/frames` and the model is handed `workDir`.
+          await mkdir(workDir, { recursive: true });
+          const dl = await resolved.downloadVideo(videoUrl, workDir, {
+            // The cap is enforced a SECOND time here, by yt-dlp's own
+            // `--break-match-filters` (exit 101): the probe above sized this
+            // capture, and a video that grew between the two calls — a stream
+            // that ended, a re-upload — must not be downloaded past the cap.
+            maxDurationSeconds: YOUTUBE_FRAMES_MAX_DURATION_SEC,
+            timeoutMs: youtubeDownloadTimeoutFor(durationSec),
+            format: YOUTUBE_FRAME_FORMAT_SELECTOR,
           });
-        } finally {
-          // Whether the pass succeeded or threw: the model is handed `workDir`
-          // as `--add-dir`, and a 90 MB mp4 sitting in it is bytes the turn can
-          // read and nothing wants it to.
-          await unlink(dl.videoPath).catch(() => {});
-        }
+          updateStatus(jobId, "extracting_frames");
+          try {
+            return await resolved.extractFrames({
+              file: dl.videoPath,
+              durationSec,
+              outDir: join(workDir, "frames"),
+            });
+          } finally {
+            // Whether the pass succeeded or threw: the model is handed `workDir`
+            // as `--add-dir`, and a 90 MB mp4 sitting in it is bytes the turn can
+            // read and nothing wants it to.
+            await unlink(dl.videoPath).catch(() => {});
+          }
+        });
         log.info("YouTube capture {jobId}: {n} cadence frames extracted from a {durationSec}s video", {
           jobId,
           n: frames.length,
@@ -262,7 +318,7 @@ export async function summarizeVideo(
     const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}${timestamped ? WINDOWED_TRANSCRIPT_RIDER : ""}
 
 Video title: ${title}
-Video URL: ${url}`;
+Video URL: ${videoUrl}`;
 
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {
@@ -274,7 +330,7 @@ Video URL: ${url}`;
       source: "youtube",
       jobId,
       title,
-      url,
+      url: videoUrl,
       // The frame list rides the USER prompt after the transcript (the TikTok
       // and Vimeo shape); with no frames it contributes "" and the prompt is
       // byte-identical to the one that shipped before this PR.
@@ -287,7 +343,7 @@ Video URL: ${url}`;
       // `--add-dir` only when there is something to read: an empty extraDirs
       // would still flip the connector's file-access mode for nothing.
       ...(frames.length > 0 ? { extraDirs: [workDir] } : {}),
-      timeoutMs: summarizeTimeoutFor(frames.length, YOUTUBE_SUMMARIZE_TIMEOUT_MS),
+      timeoutMs: summarizeTimeoutFor(frames.length, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS),
       // Frame reading IS the reasoning, so the 8k capture cap is opted out of
       // exactly where TikTok opts out of it. A transcript-only capture keeps it.
       ...(frames.length > 0 ? { thinkingMaxTokens: null } : {}),
@@ -334,18 +390,33 @@ Video URL: ${url}`;
     // (`newest.id`) — otherwise a run-now click on a just-auto-drafted video would
     // mint a duplicate proposal under a different topic_key.
     let ingestedDocId: string | undefined;
+    // The windowed transcript rides the SUMMARY string, and only when huginn
+    // answered with windows — its YouTube ingest has no `transcript_markdown`
+    // field, so the summary IS the document body. See `appendTranscriptSection`;
+    // `completeJob`, the shelf card and the source draft get the summary alone.
+    const ingestSummaryBody = timestamped ? appendTranscriptSection(summary, transcriptText) : null;
+    if (ingestSummaryBody?.truncated) {
+      // The one consumer of the cap's own answer: without it, a talk whose
+      // second half never reached the document is invisible outside the file.
+      log.warn(
+        "YouTube capture {jobId}: transcript truncated at the {maxBytes}-byte bound " +
+          "({transcriptBytes} bytes in, {keptBytes} kept) — the document ends mid-talk",
+        {
+          jobId,
+          videoId,
+          maxBytes: YOUTUBE_TRANSCRIPT_MAX_BYTES,
+          transcriptBytes: ingestSummaryBody.inputBytes,
+          keptBytes: ingestSummaryBody.keptBytes,
+        },
+      );
+    }
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/youtube/ingest",
       body: {
         title,
-        url,
-        // The windowed transcript rides the SUMMARY string, and only on the
-        // frames path — huginn's YouTube ingest has no `transcript_markdown`
-        // field, so the summary IS the document body. See
-        // `appendTranscriptSection`; everything else below gets the summary
-        // alone.
-        summary: timestamped ? appendTranscriptSection(summary, transcriptText) : summary,
+        url: videoUrl,
+        summary: ingestSummaryBody?.text ?? summary,
         category,
         date: new Date().toISOString().split("T")[0],
       },
@@ -385,7 +456,7 @@ Video URL: ${url}`;
     triggerSourceDraftFromCapture(botConfig, {
       collection: "youtube-summaries",
       docId: ingestedDocId ?? videoId,
-      url,
+      url: videoUrl,
       body: summary,
       sourceTitle: title,
       category,
