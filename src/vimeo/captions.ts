@@ -44,6 +44,13 @@ export const VIMEO_HARVEST_TIMEOUT_MS = 60_000;
 /** A 53-minute talk's VTT is 62 KB. The cap bounds the process, generously. */
 export const VIMEO_VTT_MAX_BYTES = 2 * 1024 * 1024;
 export const VIMEO_VTT_TIMEOUT_MS = 20_000;
+/**
+ * The player's `/config` body is parsed for the manifest URL. Measured 15.8 KB
+ * on 2026-09-06 (vimeo.com/1223305711); the cap bounds the one read in this
+ * vertical that does not go through `downloadPinned`. Over it, the config is
+ * ignored (the sniff remains).
+ */
+export const VIMEO_PLAYER_CONFIG_MAX_BYTES = 2 * 1024 * 1024;
 
 export interface VimeoCaptionTrack {
   readonly lang: string;
@@ -57,12 +64,15 @@ export interface VimeoCaptions {
   readonly durationSec: number;
   readonly tracks: VimeoCaptionTrack[];
   /**
-   * The signed JSON manifest on one of {@link VIMEO_MEDIA_HOSTS}, if the player asked
-   * for one while we watched — the media seam's (`media.ts`) input: frames and
-   * the audio fallback both start from it. Absent when the player never
-   * requested it inside the budget, which the harvest does not wait for: the
-   * captions are what a capture NEEDS, the manifest is what frames WANT.
-   * Expires like the caption URL (~3.5 h); never persisted.
+   * The signed JSON manifest on one of {@link VIMEO_MEDIA_HOSTS} — the media
+   * seam's (`media.ts`) input: frames and the audio fallback both start from
+   * it. Read from the player's `/config` response (`request.files.dash`), with
+   * the player's own `playlist.json` request as the fallback; see
+   * {@link manifestUrlFromPlayerConfig} for why the request alone is not
+   * enough. Absent when neither arrived inside the budget, which the harvest
+   * does not wait for unless asked: the captions are what a capture NEEDS,
+   * the manifest is what frames WANT. Expires like the caption URL (~3.5 h);
+   * never persisted.
    */
   readonly manifestUrl?: string;
 }
@@ -361,6 +371,71 @@ function isMediaHostUrl(u: string): boolean {
   }
 }
 
+/**
+ * The signed JSON manifest URL out of the player's `/config` response, or
+ * undefined. `request.files.dash.cdns[default_cdn].avc_url` (then its `url`,
+ * then any other cdn's) — on an https host in {@link VIMEO_MEDIA_HOSTS}, the
+ * same pin the download applies, so what is recorded is what `media.ts` will
+ * agree to fetch. `avc_url` first: measured, the two differ only by
+ * `?omit=av1-hevc` on `avc_url`, and `chooseRepresentation`'s VIDEO branch
+ * picks by height without looking at `codecs` (the audio branch does match
+ * codecs), so the AVC-only manifest is the one whose every video rendition
+ * the host ffmpeg decodes. The player's own DASH request is the `avc_url`
+ * variant too (measured: its `playlist.json` carries `omit=av1-hevc`), so the
+ * sniff fallback records the same manifest. The cost: an upload published
+ * AV1/HEVC-only would list no video rendition here and frames would degrade
+ * to the warn, where `url` would have offered renditions — accepted, since
+ * such renditions are ones ffmpeg may not decode anyway.
+ *
+ * Why the config and not the player's own playlist request: the player picks
+ * DASH or HLS per page load. Measured 2026-09-06 (vimeo.com/1223305711, six
+ * harvests): four loads requested `…/playlist/av/primary/prot/…/playlist.json`;
+ * two requested `…/playlist/av/primary/sub/<track>/prot/…/playlist.m3u8` and
+ * NEVER the JSON, and the harvest — which took the first `/playlist/av/`
+ * request — handed `fetchVimeoManifest` an `#EXTM3U` body ("Manifest is not
+ * JSON"), so a Slides capture came back with none. The `.m3u8` path cannot be
+ * rewritten to the JSON one (`pathsig` covers the path: 403), but the config
+ * names the JSON URL on every load, and fetched during an HLS load it answers
+ * 200 with the real manifest.
+ */
+export function manifestUrlFromPlayerConfig(raw: unknown): string | undefined {
+  const dash = asRecord(asRecord(asRecord(raw)?.request)?.files)?.dash;
+  const cdns = asRecord(asRecord(dash)?.cdns);
+  if (!cdns) return undefined;
+  const preferred = asRecord(dash)?.default_cdn;
+  const order = [...(typeof preferred === "string" ? [preferred] : []), ...Object.keys(cdns)];
+  for (const name of order) {
+    const cdn = asRecord(cdns[name]);
+    if (!cdn) continue;
+    for (const key of ["avc_url", "url"] as const) {
+      const u = cdn[key];
+      if (typeof u === "string" && isMediaHostUrl(u)) return u;
+    }
+  }
+  return undefined;
+}
+
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+/** `https://player.vimeo.com/video/<id>/config[?…]` — the response that carries the manifest URL. */
+function isPlayerConfigUrl(u: string, videoId: string): boolean {
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === "https:" && parsed.hostname === "player.vimeo.com" && parsed.pathname === `/video/${videoId}/config`;
+  } catch {
+    return false;
+  }
+}
+
+/** The player's own JSON manifest request — `playlist.json`, never an HLS `playlist.m3u8`, on a pinned host. */
+function isJsonManifestRequest(u: string): boolean {
+  if (!isMediaHostUrl(u)) return false;
+  const path = new URL(u).pathname;
+  return path.includes("/playlist/av/") && path.endsWith("/playlist.json");
+}
+
 async function harvestInContext(
   context: PwContext,
   videoId: string,
@@ -376,15 +451,42 @@ async function harvestInContext(
     if (u.includes("captions.vimeo.com/captions/") && u.includes(".vtt") && !vttUrls.includes(u)) {
       vttUrls.push(u);
     }
-    // The JSON manifest: a `/playlist/av/` request on one of the ALLOWLISTED
-    // CDN hosts (`VIMEO_MEDIA_HOSTS` — the player picks one per video; the
-    // first live frames capture never saw its manifest because this line
-    // matched one host's name as a substring). Judged on the parsed hostname,
-    // the same predicate the download pin applies, so what is recorded here
-    // is exactly what `media.ts` will agree to fetch.
-    if (!manifestUrl && u.includes("/playlist/av/") && isMediaHostUrl(u)) {
+    // The FALLBACK source of the JSON manifest: the player's own
+    // `playlist.json` request on one of the ALLOWLISTED CDN hosts
+    // (`VIMEO_MEDIA_HOSTS` — the player picks one per video; the first live
+    // frames capture never saw its manifest because this line matched one
+    // host's name as a substring). Judged on the parsed hostname, the same
+    // predicate the download pin applies. `.json` only: on an HLS load the
+    // player requests a `playlist.m3u8` under the same `/playlist/av/` prefix
+    // and never the JSON — recording that turned "no frames" into "frames
+    // failed" (see `manifestUrlFromPlayerConfig`).
+    if (!manifestUrl && isJsonManifestRequest(u)) {
       manifestUrl = u;
     }
+  });
+  // The PRIMARY source: the player's `/config` response names the signed JSON
+  // manifest whichever format the player then streams. It arrives before the
+  // caption tracks, so the frames wait below normally resolves here. Read in
+  // a try and never awaited: a config the harvest cannot parse (a body gone
+  // with the page, a shape change) degrades to the request sniff, not to a
+  // failed harvest.
+  page.on("response", (res) => {
+    if (manifestUrl || !isPlayerConfigUrl(res.url(), videoId)) return;
+    void res
+      .body()
+      .then((body: Uint8Array) => {
+        if (body.byteLength > VIMEO_PLAYER_CONFIG_MAX_BYTES) {
+          throw new Error(`config body ${body.byteLength} bytes exceeds the ${VIMEO_PLAYER_CONFIG_MAX_BYTES}-byte cap`);
+        }
+        const fromConfig = manifestUrlFromPlayerConfig(JSON.parse(new TextDecoder().decode(body)));
+        if (fromConfig && !manifestUrl) manifestUrl = fromConfig;
+      })
+      .catch((err: unknown) => {
+        log.debug("Vimeo video {videoId}: player config unreadable, falling back to the playlist request: {error}", {
+          videoId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
   });
 
   // OUTSIDE the try, like the two waits below: computed inside it, a budget

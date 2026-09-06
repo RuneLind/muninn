@@ -6,11 +6,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  manifestUrlFromPlayerConfig,
   chooseTrack,
   deHeadlessUserAgent,
   downloadVtt,
   harvestVimeoCaptions,
   VIMEO_CAPTIONS_HOST,
+  VIMEO_PLAYER_CONFIG_MAX_BYTES,
   VimeoBotBlockedError,
   VimeoBrowserMissingError,
   type VimeoBrowserLauncher,
@@ -338,6 +340,20 @@ interface FakePageSpec {
   manifestHost?: string;
   /** The scheme of that request (default https). */
   manifestScheme?: string;
+  /** The file that request names (default `playlist.json`; `playlist.m3u8` is the HLS shape). */
+  manifestFile?: string;
+  /** The whole path of that request instead (beats `manifestFile`). */
+  manifestPath?: string;
+  /** The player's `/config` response lands this long after `goto` resolves (default: never). */
+  configAfterMs?: number;
+  /** Its parsed body (default: a config whose dash cdn names the JSON manifest). */
+  configJson?: unknown;
+  /** Its URL (default `https://player.vimeo.com/video/123/config?…`). */
+  configUrl?: string;
+  /** `response.body()` rejects with this message. */
+  configJsonThrows?: string;
+  /** The default config padded with a filler field of this many bytes — still valid JSON naming the manifest. */
+  configPadBytes?: number;
   duration?: number;
 }
 
@@ -350,9 +366,29 @@ interface FakeHarness {
   navigations: number;
 }
 
+/** The shape of the player's `/config` (measured 2026-09-06 on vimeo.com/1223305711); URLs are placeholders. */
+const CONFIG_ALL_CODECS_URL = "https://vod-adaptive-ak.vimeocdn.com/exp=0~acl=x~hmac=x/x/psid=x/v2/playlist/av/primary/prot/x/playlist.json?pathsig=x";
+/** `avc_url` — the same manifest with the AV1/HEVC renditions omitted; measured, the two differ only by this query. */
+const CONFIG_DASH_URL = `${CONFIG_ALL_CODECS_URL}&omit=av1-hevc`;
+const CONFIG_WITH_DASH = {
+  request: {
+    files: {
+      dash: {
+        default_cdn: "akfire_interconnect_quic",
+        cdns: {
+          akfire_interconnect_quic: { url: CONFIG_ALL_CODECS_URL, avc_url: CONFIG_DASH_URL, origin: "gcs" },
+          fastly_skyfire: { url: CONFIG_ALL_CODECS_URL.replace("vod-adaptive-ak", "skyfire"), origin: "gcs" },
+        },
+      },
+      hls: { default_cdn: "akfire_interconnect_quic", cdns: {} },
+    },
+  },
+};
+
 function fakeHarness(spec: FakePageSpec): FakeHarness {
   const modeLog: string[] = [];
   const requestHandlers: ((req: { url: () => string }) => void)[] = [];
+  const responseHandlers: ((res: { url: () => string; body: () => Promise<Uint8Array> }) => void)[] = [];
   const trackSpecs = spec.tracks ?? [];
   const tracks: FakeTrack[] = trackSpecs.map((t, i) => {
     let mode = "disabled";
@@ -409,8 +445,9 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
 
   let navigations = 0;
   const page = {
-    on(event: string, handler: (req: { url: () => string }) => void) {
-      if (event === "request") requestHandlers.push(handler);
+    on(event: string, handler: (arg: never) => void) {
+      if (event === "request") requestHandlers.push(handler as (req: { url: () => string }) => void);
+      if (event === "response") responseHandlers.push(handler as (typeof responseHandlers)[number]);
     },
     async goto(_url: string, opts?: { timeout?: number }) {
       navigations++;
@@ -423,11 +460,30 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
       if (spec.manifestAfterMs !== undefined) {
         setTimeout(() => {
           for (const h of requestHandlers) {
-            h({ url: () => spec.manifestHost || spec.manifestScheme
-              ? `${spec.manifestScheme ?? "https"}://${spec.manifestHost ?? "vod-adaptive-ak.vimeocdn.com"}/0-0x0/x/psid=x/v2/playlist/av/primary/prot/x/playlist.json`
-              : "https://vod-adaptive-ak.vimeocdn.com/exp=0/x/v2/playlist/av/primary/prot/x/playlist.json" });
+            h({ url: () => spec.manifestPath
+              ? `https://vod-adaptive-ak.vimeocdn.com${spec.manifestPath}`
+              : spec.manifestHost || spec.manifestScheme
+              ? `${spec.manifestScheme ?? "https"}://${spec.manifestHost ?? "vod-adaptive-ak.vimeocdn.com"}/0-0x0/x/psid=x/v2/playlist/av/primary/prot/x/${spec.manifestFile ?? "playlist.json"}`
+              : `https://vod-adaptive-ak.vimeocdn.com/exp=0/x/v2/playlist/av/primary/prot/x/${spec.manifestFile ?? "playlist.json"}` });
           }
         }, spec.manifestAfterMs);
+      }
+      if (spec.configAfterMs !== undefined) {
+        setTimeout(() => {
+          for (const h of responseHandlers) {
+            h({
+              url: () => spec.configUrl ?? "https://player.vimeo.com/video/123/config?airplay=1&autoplay=1",
+              body: async () => {
+                if (spec.configJsonThrows) throw new Error(spec.configJsonThrows);
+                // Padded to a VALID config: a body of zeros fails JSON.parse with or
+                // without the cap, so it could not tell the cap was there (measured:
+                // the first version of this fake survived the cap's deletion).
+                const json = spec.configPadBytes !== undefined ? { ...CONFIG_WITH_DASH, pad: "x".repeat(spec.configPadBytes) } : (spec.configJson ?? CONFIG_WITH_DASH);
+                return new TextEncoder().encode(JSON.stringify(json));
+              },
+            });
+          }
+        }, spec.configAfterMs);
       }
       return null;
     },
@@ -813,6 +869,105 @@ describe("harvestVimeoCaptions — the no-captions manifest wait (v2 PR 5)", () 
     const b = fakeHarness({ hasVideo: true, tracks: [], manifestAfterMs: 400 });
     const c2 = await harvestVimeoCaptions("123", { launcher: b.launcher, awaitManifestMs: 3_000, awaitManifestNoCaptionsMs: 100 });
     expect(c2.manifestUrl).toContain("/playlist/av/");
+  });
+});
+
+describe("harvestVimeoCaptions — the manifest URL comes from the player's config (HLS runs)", () => {
+  const TRACK = { tracks: [{ lang: "en", label: "English" }], urlPerTrack: ["https://captions.vimeo.com/captions/1.vtt?sig=a"] };
+
+  // Measured 2026-09-06, six harvests of vimeo.com/1223305711: on two of them
+  // the player streamed HLS — a `/playlist/av/…/playlist.m3u8` request, then
+  // `media.m3u8` variants, and NO `playlist.json` request at all — and the
+  // harvest recorded the m3u8 as the manifest, which `fetchVimeoManifest`
+  // then failed on JSON.parse ("Manifest is not JSON"): a Slides capture with
+  // no slides. The player's `/config` response names the signed JSON URL on
+  // every run (fetched during an HLS run: 200, the real manifest).
+  test("the player streams HLS: the m3u8 request is NOT the manifest, the config's dash url IS", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 50, manifestFile: "playlist.m3u8", configAfterMs: 100 });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 2_000 });
+    expect(c.manifestUrl).toBe(CONFIG_DASH_URL);
+  });
+
+  test("an HLS playlist request with NO config seen records nothing — 'no frames', never 'frames failed'", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 50, manifestFile: "playlist.m3u8" });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 300 });
+    expect(c.manifestUrl).toBeUndefined();
+  });
+
+  test("the config lands BEFORE the player's own playlist request and the wait resolves on it", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, configAfterMs: 100, manifestAfterMs: 5_000 });
+    const started = Date.now();
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 3_000 });
+    expect(c.manifestUrl).toBe(CONFIG_DASH_URL);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("a config whose dash urls are all on unlisted hosts records nothing, and the sniffed playlist.json still counts", async () => {
+    const off = fakeHarness({ hasVideo: true, ...TRACK, configAfterMs: 50, configJson: {
+      request: { files: { dash: { default_cdn: "x", cdns: { x: { url: "https://cdn.example/v2/playlist/av/primary/prot/x/playlist.json" } } } } },
+    } });
+    const c = await harvestVimeoCaptions("123", { launcher: off.launcher, awaitManifestMs: 300 });
+    expect(c.manifestUrl).toBeUndefined();
+    const sniffed = fakeHarness({ hasVideo: true, ...TRACK, configAfterMs: 50, manifestAfterMs: 100, configJson: {
+      request: { files: { dash: { default_cdn: "x", cdns: { x: { url: "https://cdn.example/v2/playlist/av/primary/prot/x/playlist.json" } } } } },
+    } });
+    const c2 = await harvestVimeoCaptions("123", { launcher: sniffed.launcher, awaitManifestMs: 2_000 });
+    expect(c2.manifestUrl).toContain("/playlist/av/primary/prot/x/playlist.json");
+  });
+
+  test("another video's config, a config with no dash block, and a body that fails to parse are each ignored without failing the harvest", async () => {
+    const other = fakeHarness({ hasVideo: true, ...TRACK, configAfterMs: 50, configUrl: "https://player.vimeo.com/video/999/config" });
+    expect((await harvestVimeoCaptions("123", { launcher: other.launcher, awaitManifestMs: 300 })).manifestUrl).toBeUndefined();
+    const noDash = fakeHarness({ hasVideo: true, ...TRACK, configAfterMs: 50, configJson: { request: { files: { hls: {} } } } });
+    expect((await harvestVimeoCaptions("123", { launcher: noDash.launcher, awaitManifestMs: 300 })).manifestUrl).toBeUndefined();
+    const broken = fakeHarness({ hasVideo: true, ...TRACK, configAfterMs: 50, configJsonThrows: "Response body is unavailable" });
+    const c = await harvestVimeoCaptions("123", { launcher: broken.launcher, awaitManifestMs: 300 });
+    expect(c.manifestUrl).toBeUndefined();
+    expect(c.tracks.length).toBe(1);
+  });
+});
+
+describe("harvestVimeoCaptions — what counts as the player's config, and as its playlist request", () => {
+  const TRACK = { tracks: [{ lang: "en", label: "English" }], urlPerTrack: ["https://captions.vimeo.com/captions/1.vtt?sig=a"] };
+
+  // `isPlayerConfigUrl` is the ONE gate deciding whose response body is
+  // parsed for a URL the harvest then records; the download pin bounds the
+  // fetch either way, so these pin the defence-in-depth, which the first
+  // review found survived deletion with the suite green.
+  test("a /video/<id>/config response on another host, or over http, is not the config", async () => {
+    for (const configUrl of ["https://cdn.example/video/123/config", "http://player.vimeo.com/video/123/config"]) {
+      const harness = fakeHarness({ hasVideo: true, ...TRACK, configAfterMs: 50, configUrl });
+      const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 300 });
+      expect(c.manifestUrl).toBeUndefined();
+    }
+  });
+
+  test("a `playlist.json` on a pinned host outside `/playlist/av/` is not the manifest request", async () => {
+    const harness = fakeHarness({ hasVideo: true, ...TRACK, manifestAfterMs: 50, manifestPath: "/exp=0/x/v2/other/x/playlist.json" });
+    const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 300 });
+    expect(c.manifestUrl).toBeUndefined();
+  });
+
+  test("a config body over VIMEO_PLAYER_CONFIG_MAX_BYTES is ignored, one under it is read", async () => {
+    const big = fakeHarness({ hasVideo: true, ...TRACK, configAfterMs: 50, configPadBytes: VIMEO_PLAYER_CONFIG_MAX_BYTES });
+    expect((await harvestVimeoCaptions("123", { launcher: big.launcher, awaitManifestMs: 300 })).manifestUrl).toBeUndefined();
+    const ok = fakeHarness({ hasVideo: true, ...TRACK, configAfterMs: 50 });
+    expect((await harvestVimeoCaptions("123", { launcher: ok.launcher, awaitManifestMs: 2_000 })).manifestUrl).toBe(CONFIG_DASH_URL);
+  });
+});
+
+describe("manifestUrlFromPlayerConfig", () => {
+  test("default cdn first, then any cdn; `avc_url` before `url`; only allowlisted https hosts", () => {
+    expect(manifestUrlFromPlayerConfig(CONFIG_WITH_DASH)).toBe(CONFIG_DASH_URL);
+    const sky = CONFIG_DASH_URL.replace("vod-adaptive-ak", "skyfire");
+    expect(manifestUrlFromPlayerConfig({ request: { files: { dash: { default_cdn: "b", cdns: { a: { avc_url: CONFIG_DASH_URL }, b: { avc_url: sky } } } } } })).toBe(sky);
+    expect(manifestUrlFromPlayerConfig({ request: { files: { dash: { default_cdn: "missing", cdns: { a: { url: CONFIG_ALL_CODECS_URL } } } } } })).toBe(CONFIG_ALL_CODECS_URL);
+    // avc_url wins over url on the same cdn (the AVC-only manifest), and a cdn with only `url` still answers.
+    expect(manifestUrlFromPlayerConfig({ request: { files: { dash: { default_cdn: "a", cdns: { a: { url: CONFIG_ALL_CODECS_URL, avc_url: sky } } } } } })).toBe(sky);
+    expect(manifestUrlFromPlayerConfig({ request: { files: { dash: { default_cdn: "a", cdns: { a: { avc_url: "http://vod-adaptive-ak.vimeocdn.com/x/playlist.json", url: sky } } } } } })).toBe(sky);
+    expect(manifestUrlFromPlayerConfig({ request: { files: { dash: { cdns: { a: { url: "https://cdn.example/playlist.json" } } } } } })).toBeUndefined();
+    expect(manifestUrlFromPlayerConfig(null)).toBeUndefined();
+    expect(manifestUrlFromPlayerConfig({ request: { files: { dash: { cdns: "nope" } } } })).toBeUndefined();
   });
 });
 
