@@ -54,7 +54,7 @@ const telegramRenderer: BlockRenderer = {
       case "Figure":
         return attrs.caption ? `${children}\n${escapeHtml(attrs.caption)}` : children;
       case "Embed":
-        return `Embedded page: ${escapeHtml(parseEmbedAttrs(attrs)?.src ?? "invalid src")}`;
+        return `Embedded page: ${escapeHtml(parseEmbedAttrs(attrs)?.src ?? "invalid embed")}`;
       case "FileRef":
         return children.trim() || escapeHtml(attrs.path ?? "");
       case "ComparisonTable":

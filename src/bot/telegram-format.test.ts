@@ -247,6 +247,6 @@ test("inline component injection through inner text cannot emit a live tag", () 
 test("Embed fallback line echoes only a gated src", () => {
   expect(formatTelegramHtml('<Embed src="./arch.html" />')).toContain("Embedded page: ./arch.html");
   const bad = formatTelegramHtml('<Embed src="javascript:alert(1)" />');
-  expect(bad).toContain("Embedded page: invalid src");
+  expect(bad).toContain("Embedded page: invalid embed");
   expect(bad).not.toContain("javascript:");
 });

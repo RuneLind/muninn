@@ -344,6 +344,13 @@ describe("formatWebHtml — component blocks", () => {
     }
   });
 
+  test("Embed with a bad height is an invalid embed — the src is not blamed", () => {
+    const out = formatWebHtml('<Embed src="./arch.html" height="640px" />');
+    expect(out).toContain('class="embed embed-invalid"');
+    expect(out).toContain("invalid embed");
+    expect(out).not.toContain("invalid src");
+  });
+
   test("Embed escapes its src and title in the attributes", () => {
     const out = formatWebHtml('<Embed src="a b.html" title="x &lt; y" />');
     expect(out).toContain('data-embed-src="a b.html"');

@@ -308,7 +308,7 @@ const webRenderer: BlockRenderer = {
         // other surface shows the line itself, which names the file.
         const e = parseEmbedAttrs(attrs);
         if (!e) {
-          return `<figure class="embed embed-invalid"><p class="embed-fallback">Embedded page: invalid src</p></figure>`;
+          return `<figure class="embed embed-invalid"><p class="embed-fallback">Embedded page: invalid embed</p></figure>`;
         }
         return (
           `<figure class="embed" data-embed-src="${escapeHtml(e.src)}" data-embed-height="${e.height}" data-embed-title="${escapeHtml(e.title)}">` +

@@ -54,7 +54,7 @@ const slackRenderer: BlockRenderer = {
       case "Figure":
         return attrs.caption ? `${children}\n${renderInline(attrs.caption)}` : children;
       case "Embed":
-        return `Embedded page: ${parseEmbedAttrs(attrs)?.src ?? "invalid src"}`;
+        return `Embedded page: ${parseEmbedAttrs(attrs)?.src ?? "invalid embed"}`;
       case "FileRef":
         return children.trim() || renderInline(attrs.path ?? "");
       case "ComparisonTable":
