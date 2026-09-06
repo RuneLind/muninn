@@ -4,12 +4,13 @@ import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
 //
 // RUNS IN ITS OWN `bun test` PROCESS (its own `&&` link in the `test` and
 // `test:unit` chains, like `src/scheduler/executor.test.ts`) — and it MUST stay
-// that way; `src/test/mock-isolation.test.ts` pins it. `mock.module` applies to
-// every file loaded after this one in the same process, and `bun test` orders
-// files by path hash, not by argv — so in the first unit chunk this file ran
-// AFTER the two `setupTestDb` files on macOS (green) and BEFORE them on the
-// GitHub runner, where `getDb()` then answered this mock: `TypeError:
-// getDb().unsafe is not a function`, red on main for 18 runs.
+// that way; `src/test/mock-isolation.test.ts` pins every `mock.module` file to
+// a process of its own. `mock.module` applies to every file loaded after this
+// one in the same process, and `bun test` orders files by path hash, not by
+// argv — so in the first unit chunk this file ran AFTER the two `setupTestDb`
+// files on macOS (green) and BEFORE them on the GitHub runner, where `getDb()`
+// then answered this mock: `TypeError: getDb().unsafe is not a function`, red
+// on main for 18 runs.
 mock.module("../db/client.ts", () => ({
   getDb: () => {
     const sql = (_strings: TemplateStringsArray, ..._values: unknown[]) =>
