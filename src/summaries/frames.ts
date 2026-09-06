@@ -746,31 +746,30 @@ export async function migrateLegacyVimeoFramesRoot(
       { legacyRoot, target },
     );
   } else if (decision === "refuse" && legacy.isDir && newExists) {
-    // A plain file or a DANGLING symlink at the target: the route serves
-    // NOTHING there (a live symlink to a directory is served — the route
-    // resolves both sides — and takes the "both exist" branch above), so the
-    // "both exist" remedy — which tells the operator the target is served and
-    // the legacy root is disposable — would have them delete the only real
-    // frames. The legacy root is the one to keep; the target is the one to
-    // clear.
+    // The target exists but does not resolve to a directory — a plain file,
+    // a dangling symlink, or a symlink to a non-directory — so the route
+    // serves NOTHING there (a symlink that resolves to a directory is served,
+    // the route resolves both sides, and takes the "both exist" branch above).
+    // The "both exist" remedy — which tells the operator the target is served
+    // and the legacy root is disposable — would have them delete the only
+    // real frames. The legacy root is the one to keep; the target is the one
+    // to clear.
     log.warn(
       "{target} exists but is not a directory ({kind}) — leaving {legacyRoot} alone, it still holds the kept " +
         "frames and nothing is served until {target} is removed by hand and the next start moves them",
-      { legacyRoot, target, kind: targetProbe.isSymlink ? "dangling symlink" : "file" },
+      { legacyRoot, target, kind: targetProbe.isSymlink ? "symlink" : "file" },
     );
   }
   return decision;
 }
 
 /**
- * What is at this path, WITHOUT following a link — `lstat`, not `stat`. The
- * difference is the whole point: `stat` reports a symlinked directory as a
- * directory, and `rename` then moves the link rather than the tree.
- */
-/**
- * `servesDir` is what the ROUTE would see: a directory, or a live symlink to
- * one (the route's containment `realpath`s both sides, so such a link serves
- * normally). A dangling symlink and a plain file exist without serving.
+ * What is at this path. `isDir`/`isSymlink` come from `lstat` — WITHOUT
+ * following a link, because `rename` moves the link rather than the tree —
+ * and `servesDir` is what the ROUTE would see: a directory, or a symlink that
+ * `stat`s to one (the route's containment `realpath`s both sides, so such a
+ * link serves normally). A dangling symlink, a symlink to a non-directory and
+ * a plain file exist without serving.
  */
 async function probeRoot(
   dir: string,

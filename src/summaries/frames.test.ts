@@ -822,7 +822,7 @@ describe("the one-time frames-root rename", () => {
       const warns = records.filter((r) => r.level === "warning");
       expect(warns.length).toBe(1);
       expect(warns[0]!.rawMessage).not.toContain("Both");
-      expect(warns[0]!.properties.kind).toBe("dangling symlink");
+      expect(warns[0]!.properties.kind).toBe("symlink");
     });
   });
 
