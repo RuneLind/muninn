@@ -43,12 +43,16 @@
  * summary REFERENCES are copied to `~/.muninn/frames/<source>/<id>/<sec>.jpg`
  * ({@link keepReferencedFrames}) — that is what `GET /api/frames/...` serves
  * (`src/dashboard/routes/frames-routes.ts`) — and the work dir is deleted with
- * the rest. Nothing else in the process writes there.
+ * the rest. **The root has exactly TWO writers**, and both matter to the
+ * route's containment guarantee: {@link migrateLegacyVimeoFramesRoot}, which
+ * moves an arbitrary pre-existing tree in ONCE at startup (and refuses a
+ * SYMLINKED legacy root for exactly that reason), and `keepReferencedFrames`
+ * from then on, which writes plain files it copied itself.
  */
 
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { copyFile, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { copyFile, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { frameBudgetFor } from "../video/media.ts";
 
@@ -104,6 +108,21 @@ export const FRAME_FFMPEG_TIMEOUT_MS = 15_000;
 /** The route's charset for the file segment it serves. The name IS the integer second. */
 export const FRAME_FILE_RE = /^\d{1,6}\.jpg$/;
 
+/**
+ * The longest video {@link cadenceTimes} will lay a cadence over, in seconds.
+ *
+ * Derived from {@link FRAME_FILE_RE}, not chosen: the file name IS the integer
+ * second, that pattern accepts six digits, so this is the largest duration that
+ * is itself a servable second — and every tick is strictly smaller than the
+ * duration, so all of them fit by construction. Past it the ticks really do
+ * leave the charset (measured: the last tick reaches seven digits at a duration
+ * of 1 008 404), and a capture would spend a whole frame budget of ffmpeg runs
+ * and image reads on frames no summary can quote, silently. 999 999 s is 11.6
+ * days, well past any caller's own cap — Vimeo's is 3 h — so this binds only on
+ * a duration that came back wrong.
+ */
+export const FRAME_MAX_DURATION_SEC = 999_999;
+
 export interface CaptureFrame {
   /** Absolute path of the JPEG (inside the work dir while the job runs). */
   readonly path: string;
@@ -134,7 +153,13 @@ export function framesRootDir(): string {
   return join(homedir(), ".muninn", "frames");
 }
 
-/** `<root>/<source>/<id>` — the only directory shape this module reads or writes. */
+/**
+ * `<root>/<source>/<id>` — the ONE spelling of the layout. Every site that
+ * needs a video's directory goes through this: {@link keepReferencedFrames},
+ * {@link removeKeptFrames} and the route (`frames-routes.ts`, which resolves
+ * the file segment against it). Spelled inline at each, the layout was three
+ * literals a rename would have to find.
+ */
 export function frameDirFor(source: FrameSource, id: string, root: string = framesRootDir()): string {
   assertFrameId(source, id);
   return join(root, source.name, id);
@@ -147,9 +172,19 @@ export function frameDirFor(source: FrameSource, id: string, root: string = fram
  * not the title card at t=0 and the last is not the applause. Whole seconds,
  * since the second IS the frame's file name and the route's path segment.
  * Pure.
+ *
+ * A duration that is not a measurement — non-finite — or past
+ * {@link FRAME_MAX_DURATION_SEC} THROWS rather than returning ticks: both
+ * callers already degrade a thrown frame pass to a warn plus a transcript-only
+ * capture, which is the honest answer, while returning ticks would spend the
+ * whole budget on frames the route cannot address. A vertical that takes its
+ * duration from an external probe (yt-dlp, oEmbed) has no cap of its own.
  */
 export function cadenceTimes(durationSec: number): number[] {
-  if (!Number.isFinite(durationSec) || durationSec <= 0) return [];
+  if (!Number.isFinite(durationSec) || durationSec > FRAME_MAX_DURATION_SEC) {
+    throw new Error(`Not a usable video duration for a frame cadence: ${durationSec}s`);
+  }
+  if (durationSec <= 0) return [];
   const n = frameBudgetFor(durationSec);
   const out: number[] = [];
   for (let i = 0; i < n; i++) {
@@ -179,17 +214,30 @@ export function frameUrlPath(source: FrameSource, id: string, tSeconds: number):
  * prompt does not need: a slide is quoted as an image IN PLACE, by the exact
  * path shape the route serves, only where it adds something, at most
  * {@link MAX_INLINE_SLIDES} times.
+ *
+ * **No frames ⇒ `""`, BEFORE the id is looked at.** A frames-off capture builds
+ * no address, so there is nothing for the gate to refuse — and the gate is
+ * narrower than the verticals' own id rules (`src/vimeo/url.ts` accepts any
+ * `/^[1-9]\d*$/`, this seam caps at 20 digits), so asserting first turned a
+ * capture that would have succeeded into a throw at prompt assembly.
+ *
+ * The spacing it states is DERIVED from the frames it was handed — the median
+ * gap — because the cadence is not a constant: `frameBudgetFor` gives 30 frames
+ * over a 10-minute talk (20 s apart) and 60 over a 3-hour one (180 s apart), so
+ * a fixed "~40 s" was wrong at both ends.
  */
 export function framesPromptSection(
   source: FrameSource,
   id: string,
   frames: readonly CaptureFrame[],
 ): string {
-  assertFrameId(source, id);
   if (frames.length === 0) return "";
+  assertFrameId(source, id);
   const list = frames.map((f) => `t=${formatHms(f.tSeconds)} ${f.path}`).join("\n");
+  const spacing = medianGapSec(frames);
+  const cadence = spacing === null ? "" : `, one every ~${spacing} s of the talk`;
   return (
-    `\n\nSlide frames, one every ~40 s of the talk (read EVERY image below with the Read tool FIRST, ` +
+    `\n\nSlide frames${cadence} (read EVERY image below with the Read tool FIRST, ` +
     `batching many Read calls into one turn — never one frame per message):\n${list}\n\n` +
     `When a frame shows a slide that ADDS something the transcript did not say — a diagram, code, a table, ` +
     `a number, a definition on screen — quote it as an image IN PLACE in the summary, right where the point ` +
@@ -199,6 +247,23 @@ export function framesPromptSection(
     `its time. At most ${MAX_INLINE_SLIDES} slides in the whole summary; a speaker-only frame, a title card ` +
     `or a slide the transcript already states in full is not quoted. Never invent a path.`
   );
+}
+
+/**
+ * The typical gap between consecutive frames, whole seconds — what the prompt
+ * reports as the cadence. `null` for fewer than two frames, which have no gap:
+ * one frame is a still, not a cadence, and stating one would be an invention.
+ * The MEDIAN rather than the mean, because the ticks are floored midpoints and
+ * a single rounding artefact must not move the number the model is told.
+ */
+function medianGapSec(frames: readonly CaptureFrame[]): number | null {
+  if (frames.length < 2) return null;
+  const gaps: number[] = [];
+  for (let i = 1; i < frames.length; i++) gaps.push(frames[i]!.tSeconds - frames[i - 1]!.tSeconds);
+  gaps.sort((a, b) => a - b);
+  const mid = Math.floor(gaps.length / 2);
+  const median = gaps.length % 2 === 0 ? (gaps[mid - 1]! + gaps[mid]!) / 2 : gaps[mid]!;
+  return Math.max(1, Math.round(median));
 }
 
 /** Every character a `RegExp` gives meaning to, made literal. */
@@ -271,7 +336,7 @@ export async function keepReferencedFrames(
   }
   const wanted = referencedFrameSeconds(summary, source, id);
   if (wanted.length === 0) return [];
-  const dir = join(root, source.name, id);
+  const dir = frameDirFor(source, id, root);
   const bysecond = new Map(frames.map((f) => [f.tSeconds, f] as const));
   await mkdir(dir, { recursive: true });
   const kept: number[] = [];
@@ -295,17 +360,22 @@ export async function keepReferencedFrames(
  * Remove every kept frame of ONE video — the `/summaries` Delete's counterpart
  * to {@link keepReferencedFrames}. The id is charset-gated, so the path removed
  * is always `<root>/<source>/<id>` and never anything a document's url could
- * steer; an id that fails the gate removes nothing and returns false. A missing
- * directory is not an error (a transcript-only capture kept none). Returns
- * whether a directory was there.
+ * steer; an id that fails the gate removes nothing, WARNS (the module docblock
+ * promises a reader or writer says so, and a delete that silently removed
+ * nothing is the one outcome nothing else in the process would report) and
+ * returns false. A missing directory is not an error (a transcript-only capture
+ * kept none) and is not warned about. Returns whether a directory was there.
  */
 export async function removeKeptFrames(
   source: FrameSource,
   id: string,
   root: string = framesRootDir(),
 ): Promise<boolean> {
-  if (!isFrameId(source, id)) return false;
-  const dir = join(root, source.name, id);
+  if (!isFrameId(source, id)) {
+    log.warn("Not a {source} video id — no frames removed for {id}", { source: source.name, id });
+    return false;
+  }
+  const dir = frameDirFor(source, id, root);
   let present: boolean;
   try {
     present = (await stat(dir)).isDirectory();
@@ -400,7 +470,18 @@ export async function removeKeptFramesForDocument(
   }
 }
 
-/** 30 s + 3 s per frame: a segment fetch (~0.3 s) and one ffmpeg run (~0.3 s) each, with slack. */
+/**
+ * 30 s + 3 s per frame — the whole-pass budget both extractors share.
+ *
+ * Generous for both shapes rather than derived from either — the earlier
+ * "a segment fetch (~0.3 s) + one ffmpeg run" reading described only the Vimeo
+ * path, and the FILE path does no fetching at all. Measured over 30 frames of a
+ * 19-minute 720p video: 46 ms/frame cold and 44 ms warm through this module's
+ * own extractor, and 63 ms/frame on a real 1280x720 capture. The Vimeo path
+ * adds a ~370 KB segment fetch per NEW segment on top of the same ffmpeg run.
+ * 3 s each therefore leaves both roughly fifty times their measured cost, which
+ * is the point of a budget meant to fire only on a hang.
+ */
 export function framesTimeoutFor(frameCount: number): number {
   return 30_000 + 3_000 * Math.max(0, frameCount);
 }
@@ -464,8 +545,19 @@ export async function extractCadenceFramesFromFile(
  * in a filtergraph — is what stops a shorter source being upscaled: a 360p
  * rendition scaled to 720 is the same picture with twice the bytes and twice
  * the image tokens. `-ss` before `-i` is the fast seek.
+ *
+ * Two things it refuses to build, both because ffmpeg would accept them:
+ * a height that is not a positive integer becomes `min(NaN\,ih)`, which is not
+ * a parse error but a filter that quietly yields nothing, one frame at a time;
+ * and a RELATIVE input path is resolved, so a file named `-crf.mp4` reaches
+ * ffmpeg as the input rather than as an option. Neither is reachable from
+ * today's two callers (both pass a constant height and a path they joined
+ * themselves) — this is the argv builder, and the argv is where it is checkable.
  */
 export function ffmpegFrameArgs(file: string, offsetSec: number, outPath: string, height: number): string[] {
+  if (!Number.isInteger(height) || height <= 0) {
+    throw new Error(`Frame height must be a positive integer, got ${height}`);
+  }
   return [
     "ffmpeg",
     "-v",
@@ -474,7 +566,7 @@ export function ffmpegFrameArgs(file: string, offsetSec: number, outPath: string
     "-ss",
     offsetSec.toFixed(2),
     "-i",
-    file,
+    resolve(file),
     "-frames:v",
     "1",
     "-vf",
@@ -485,6 +577,35 @@ export function ffmpegFrameArgs(file: string, offsetSec: number, outPath: string
   ];
 }
 
+/**
+ * Wait for a spawned process, killing it and REJECTING if it runs past `ms` —
+ * `runProc`'s shape in `src/video/media.ts`, over the minimum a fake process
+ * needs so the timeout is drivable by a unit test.
+ *
+ * It rejects rather than letting the kill surface as an exit code, which is the
+ * whole point: a killed ffmpeg exits 143, and the caller reported that as
+ * `ffmpeg frame grab failed (exit 143)` — a crash, when what happened was a
+ * hang. Naming the budget is also what makes the log say which budget to raise.
+ */
+export async function raceKill<T>(
+  proc: { readonly exited: Promise<T>; kill: () => void },
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      proc.kill();
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([proc.exited, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** One frame at `offsetSec` into `file`, scaled to at most `height`, as JPEG. */
 export const ffmpegGrabFrame: GrabFrame = async (file, offsetSec, outPath, height) => {
   const proc = Bun.spawn(ffmpegFrameArgs(file, offsetSec, outPath, height), {
@@ -492,14 +613,14 @@ export const ffmpegGrabFrame: GrabFrame = async (file, offsetSec, outPath, heigh
     stderr: "pipe",
     stdin: "ignore",
   });
-  const timer = setTimeout(() => proc.kill(), FRAME_FFMPEG_TIMEOUT_MS);
-  try {
-    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
-    if (exitCode !== 0) {
-      throw new Error(`ffmpeg frame grab failed (exit ${exitCode}): ${stderr.slice(-300)}`);
-    }
-  } finally {
-    clearTimeout(timer);
+  // The drain STARTS before the exit is awaited (awaiting `exited` behind a
+  // full stderr pipe deadlocks — the `runProc` fix), and it can never reject
+  // this call on its own: a killed process's partial stderr is not the failure
+  // being reported.
+  const stderrText = new Response(proc.stderr).text().catch(() => "");
+  const exitCode = await raceKill(proc, FRAME_FFMPEG_TIMEOUT_MS, "ffmpeg frame grab");
+  if (exitCode !== 0) {
+    throw new Error(`ffmpeg frame grab failed (exit ${exitCode}): ${(await stderrText).slice(-300)}`);
   }
   if (!(await Bun.file(outPath).exists())) {
     throw new Error(`ffmpeg wrote no frame at ${offsetSec.toFixed(2)}s of ${file}`);
@@ -518,20 +639,39 @@ export type FramesRootMigration =
   | "refuse";
 
 /**
+ * Whether this serving profile migrates at all. Its own function because
+ * {@link migrateLegacyVimeoFramesRoot} asks it BEFORE it stats anything, so
+ * that "nothing under `$HOME` is touched on a pod" is literally true rather
+ * than true of the writes only; {@link decideFramesRootMigration} asks the same
+ * question as its first branch, and a test pins the two answers to each other.
+ */
+export function framesRootMigrationRuns(profile: string): boolean {
+  return profile !== "nais";
+}
+
+/**
  * Whether the one-time `~/.muninn/vimeo-frames` → `~/.muninn/frames/vimeo`
- * rename should run. Pure, so the three states are pinned without a filesystem.
+ * rename should run. Pure, so the states are pinned without a filesystem.
  *
  * Refusing when BOTH exist is the point: merging two roots is a decision this
  * has no basis for, and the alias serves the new one — so a warn naming both
  * beats a silent pick. On `nais` the capture verticals are not registered at
  * all, so there is nothing to migrate and nothing to write under `$HOME`.
+ *
+ * `legacyIsSymlink` is a fact of its own, and it is neither `oldExists` nor
+ * "nothing to do": the probe is `lstat`, so a symlink is never a directory to
+ * it — and `rename(2)` moves the LINK, which would leave a symlink AT the
+ * served path pointing outside the root. The route's realpath containment then
+ * 404s every kept frame while the log says "Moved".
  */
 export function decideFramesRootMigration(input: {
   oldExists: boolean;
   newExists: boolean;
+  legacyIsSymlink: boolean;
   profile: string;
 }): FramesRootMigration {
-  if (input.profile === "nais") return "refuse";
+  if (!framesRootMigrationRuns(input.profile)) return "refuse";
+  if (input.legacyIsSymlink) return "refuse";
   if (!input.oldExists) return "nothing";
   if (input.newExists) return "refuse";
   return "move";
@@ -539,9 +679,15 @@ export function decideFramesRootMigration(input: {
 
 /**
  * Run that rename ONCE, at startup — never at module load and never at route
- * registration, where a test or an e2e-spawned server would perform it under
- * the developer's real `$HOME` (the route factory takes a `framesRoot` for
- * exactly that reason; production has no such override).
+ * registration.
+ *
+ * Where it is called from matters, but not for the reason first stated here:
+ * unit tests never load `src/index.ts` at all, while an e2e-spawned server DOES
+ * run it, under the developer's real `$HOME`. What makes that safe is that the
+ * move is idempotent and a no-op once done — the first run after this ships
+ * moves the old root, and every run after that finds nothing to move. (The
+ * route factory's `framesRoot` is a separate matter: it keeps a test's READS
+ * and a delete's REMOVALS off the real root, and production has no override.)
  *
  * A no-op unless the OLD root exists and its new place does not, so a machine
  * that never ran the Vimeo vertical touches nothing. Log-and-continue on any
@@ -556,8 +702,21 @@ export async function migrateLegacyVimeoFramesRoot(
   const legacyRoot = opts.legacyRoot ?? join(homedir(), ".muninn", LEGACY_VIMEO_FRAMES_DIRNAME);
   const framesRoot = opts.framesRoot ?? framesRootDir();
   const target = join(framesRoot, VIMEO_FRAME_SOURCE.name);
-  const [oldExists, newExists] = await Promise.all([dirExists(legacyRoot), dirExists(target)]);
-  const decision = decideFramesRootMigration({ oldExists, newExists, profile });
+  // The profile is asked FIRST, before either probe: on a pod nothing under
+  // `$HOME` is touched at all, not even a stat. `decideFramesRootMigration`
+  // answers "refuse" for such a profile whatever the probes would have said,
+  // and a test pins that parity.
+  if (!framesRootMigrationRuns(profile)) return "refuse";
+  const [legacy, targetProbe] = await Promise.all([probeRoot(legacyRoot), probeRoot(target)]);
+  // Anything already at the target — a directory or a link — means "taken":
+  // `rename` must never land on top of something this has no basis to merge.
+  const newExists = targetProbe.isDir || targetProbe.isSymlink;
+  const decision = decideFramesRootMigration({
+    oldExists: legacy.isDir,
+    newExists,
+    legacyIsSymlink: legacy.isSymlink,
+    profile,
+  });
   if (decision === "move") {
     try {
       await mkdir(framesRoot, { recursive: true });
@@ -570,7 +729,13 @@ export async function migrateLegacyVimeoFramesRoot(
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  } else if (decision === "refuse" && oldExists && newExists) {
+  } else if (decision === "refuse" && legacy.isSymlink) {
+    log.warn(
+      "{legacyRoot} is a symlink — leaving it alone; renaming it would move the LINK to {target} and every kept " +
+        "frame would then 404, so copy its contents there by hand and remove the link",
+      { legacyRoot, target },
+    );
+  } else if (decision === "refuse" && legacy.isDir && newExists) {
     log.warn(
       "Both {legacyRoot} and {target} exist — leaving both alone; the alias serves {target}, so move or remove " +
         "{legacyRoot} by hand if it still holds frames a summary quotes",
@@ -580,10 +745,16 @@ export async function migrateLegacyVimeoFramesRoot(
   return decision;
 }
 
-async function dirExists(dir: string): Promise<boolean> {
+/**
+ * What is at this path, WITHOUT following a link — `lstat`, not `stat`. The
+ * difference is the whole point: `stat` reports a symlinked directory as a
+ * directory, and `rename` then moves the link rather than the tree.
+ */
+async function probeRoot(dir: string): Promise<{ isDir: boolean; isSymlink: boolean }> {
   try {
-    return (await stat(dir)).isDirectory();
+    const st = await lstat(dir);
+    return { isDir: st.isDirectory(), isSymlink: st.isSymbolicLink() };
   } catch {
-    return false;
+    return { isDir: false, isSymlink: false };
   }
 }

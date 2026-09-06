@@ -1,10 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { configure, reset as resetLogging, type LogRecord } from "@logtape/logtape";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { FRAME_BUDGET_MAX, frameBudgetFor } from "../video/media.ts";
 import {
   FRAME_FILE_RE,
+  FRAME_MAX_DURATION_SEC,
   FrameIdError,
   MAX_INLINE_SLIDES,
   VIMEO_FRAME_SOURCE,
@@ -18,16 +29,36 @@ import {
   frameUrlPath,
   framesPromptSection,
   framesRootHasEntries,
+  framesRootMigrationRuns,
   framesTimeoutFor,
   isFrameId,
   keepReferencedFrames,
   migrateLegacyVimeoFramesRoot,
+  raceKill,
   referencedFrameSeconds,
   removeKeptFrames,
   removeKeptFramesForDocument,
   type CaptureFrame,
   type FrameSource,
 } from "./frames.ts";
+
+/** Capture muninn's warns for the duration of one test. */
+async function withCapturedLogs(run: (records: LogRecord[]) => Promise<void> | void): Promise<void> {
+  const records: LogRecord[] = [];
+  await configure({
+    sinks: { capture: (r: LogRecord) => records.push(r) },
+    loggers: [
+      { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+      { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+    ],
+    reset: true,
+  });
+  try {
+    await run(records);
+  } finally {
+    await resetLogging();
+  }
+}
 
 const dir = (prefix = "capture-frames-") => mkdtempSync(join(tmpdir(), prefix));
 
@@ -85,10 +116,34 @@ describe("cadenceTimes", () => {
     expect(long[1]! - long[0]!).toBe(180);
   });
 
-  test("a duration that is not a positive number yields nothing", () => {
+  test("a duration that is zero or negative yields nothing", () => {
     expect(cadenceTimes(0)).toEqual([]);
     expect(cadenceTimes(-1)).toEqual([]);
-    expect(cadenceTimes(Number.NaN)).toEqual([]);
+  });
+
+  test("a duration past FRAME_MAX_DURATION_SEC is REFUSED — its ticks stop being addresses", () => {
+    // The bound is derived from the route's own charset, not restated: the file
+    // name IS the second and `FRAME_FILE_RE` accepts `\d{1,6}`, so the cap is
+    // the largest duration that is ITSELF a servable second. Every tick is
+    // strictly smaller than the duration, so all of them fit by construction.
+    expect(FRAME_FILE_RE.test(`${FRAME_MAX_DURATION_SEC}.jpg`)).toBe(true);
+    expect(FRAME_FILE_RE.test(`${FRAME_MAX_DURATION_SEC + 1}.jpg`)).toBe(false);
+    const last = cadenceTimes(FRAME_MAX_DURATION_SEC).at(-1)!;
+    expect(last).toBeLessThan(FRAME_MAX_DURATION_SEC);
+    expect(FRAME_FILE_RE.test(`${last}.jpg`)).toBe(true);
+
+    // Past the cap the ticks really do leave the charset — measured, the last
+    // tick reaches 7 digits at a duration of 1008404 — and a capture would
+    // spend a full frame budget of ffmpeg runs and image reads on frames no
+    // summary can quote. The cap sits below that with room.
+    expect(`${cadenceTimes(FRAME_MAX_DURATION_SEC)[0]}`.length).toBeLessThanOrEqual(6);
+    expect(() => cadenceTimes(FRAME_MAX_DURATION_SEC + 1)).toThrow(/duration/i);
+    expect(() => cadenceTimes(1_008_404)).toThrow(/duration/i);
+    expect(() => cadenceTimes(1e21)).toThrow(/duration/i);
+    // A duration nothing could measure is refused for the same reason: the
+    // caller's warn + transcript-only degrade is the honest answer, not silence.
+    expect(() => cadenceTimes(Number.NaN)).toThrow(/duration/i);
+    expect(() => cadenceTimes(Number.POSITIVE_INFINITY)).toThrow(/duration/i);
   });
 });
 
@@ -133,9 +188,33 @@ describe("framesPromptSection", () => {
     expect(s).not.toContain("/api/frames/vimeo/");
   });
 
-  test("no frames ⇒ nothing appended; a bad id refuses even with no frames", () => {
+  test("no frames ⇒ nothing appended, WHATEVER the id — the empty return is above the gate", () => {
     expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1", [])).toBe("");
-    expect(() => framesPromptSection(VIMEO_FRAME_SOURCE, "../x", [])).toThrow(FrameIdError);
+    // A frames-OFF capture builds no address at all, so an id this seam's
+    // charset refuses must not fail the capture at prompt assembly. It is not
+    // hypothetical: `src/vimeo/url.ts`'s own id rule is unbounded (`/^[1-9]\d*$/`)
+    // while this one caps at 20 digits, so a 21-digit id is a video the vertical
+    // captures and this gate rejects.
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "x", [])).toBe("");
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1".repeat(21), [])).toBe("");
+    expect(framesPromptSection(YOUTUBE_FRAME_SOURCE, "../x", [])).toBe("");
+    // With frames there IS an address to build, and a non-address gets none.
+    expect(() => framesPromptSection(VIMEO_FRAME_SOURCE, "../x", frames)).toThrow(FrameIdError);
+  });
+
+  test("the spacing it states is DERIVED from the frames, not a fixed ~40 s", () => {
+    // 20 s at 10 minutes, 180 s at the 3 h cap — one sentence for both would be
+    // wrong at each end. `cadenceTimes` is the source of the gaps.
+    const at = (durationSec: number): CaptureFrame[] =>
+      cadenceTimes(durationSec).map((t) => ({ path: `/work/${t}.jpg`, tSeconds: t }));
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", at(600))).toContain("one every ~20 s");
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", at(10_800))).toContain("one every ~180 s");
+    // A single frame has no gap to report, so it says nothing about spacing.
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", [frames[0]!])).not.toContain("one every");
+    // The MEDIAN, not the smallest gap and not the mean: the cadence's own
+    // ticks are floored midpoints, so one short gap must not move the number.
+    const irregular: CaptureFrame[] = [0, 5, 25, 50].map((t) => ({ path: `/work/${t}.jpg`, tSeconds: t }));
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", irregular)).toContain("one every ~20 s");
   });
 });
 
@@ -289,6 +368,27 @@ describe("removeKeptFrames", () => {
     expect(existsSync(root)).toBe(true);
   });
 
+  test("a refused id is also SAID OUT LOUD — the module docblock promises readers/writers 'say so'", async () => {
+    await withCapturedLogs(async (records) => {
+      const root = dir("capture-frames-rm-");
+      expect(await removeKeptFrames(VIMEO_FRAME_SOURCE, "../escape", root)).toBe(false);
+      const warns = records.filter((r) => r.level === "warning");
+      expect(warns.length).toBe(1);
+      expect(warns[0]!.rawMessage).toContain("Not a {source} video id");
+      expect(warns[0]!.properties.id).toBe("../escape");
+      expect(warns[0]!.properties.source).toBe("vimeo");
+      // A GOOD id that simply kept nothing is not a warn — silence is correct
+      // there, on BOTH shapes of "nothing": no directory at all (a
+      // transcript-only capture) and a non-directory in its place.
+      records.length = 0;
+      expect(await removeKeptFrames(VIMEO_FRAME_SOURCE, "55555", root)).toBe(false);
+      mkdirSync(join(root, "vimeo"), { recursive: true });
+      writeFileSync(join(root, "vimeo", "66666"), "not a directory");
+      expect(await removeKeptFrames(VIMEO_FRAME_SOURCE, "66666", root)).toBe(false);
+      expect(records.filter((r) => r.level === "warning")).toEqual([]);
+    });
+  });
+
   test("a FILE named like a video id is not a directory and is left alone", async () => {
     const root = dir("capture-frames-rm-");
     mkdirSync(join(root, "vimeo"), { recursive: true });
@@ -434,6 +534,61 @@ describe("ffmpegFrameArgs", () => {
     expect(vf).not.toContain("min(720,ih)");
     expect(ffmpegFrameArgs("/v.mp4", 7.25, "/o.jpg", 360)).toContain("scale=-2:min(360\\,ih),format=yuvj420p");
   });
+
+  test("a height that is not a positive integer is refused, and the input file is made ABSOLUTE", () => {
+    // `min(NaN\,ih)` is not an error to ffmpeg's filtergraph parser — it is a
+    // filter that quietly produces nothing, one frame at a time.
+    for (const h of [Number.NaN, 0, -720, 1.5, Number.POSITIVE_INFINITY]) {
+      expect(() => ffmpegFrameArgs("/work/v.mp4", 10, "/work/10.jpg", h)).toThrow(/height/i);
+    }
+    // A `-`-leading relative path reaches ffmpeg as an OPTION, not as the input.
+    const args = ffmpegFrameArgs("-crf.mp4", 10, "/work/10.jpg", 720);
+    const input = args[args.indexOf("-i") + 1]!;
+    expect(input).toBe(resolve("-crf.mp4"));
+    expect(input.startsWith("-")).toBe(false);
+    // An already-absolute path is untouched.
+    expect(ffmpegFrameArgs("/work/v.mp4", 10, "/work/10.jpg", 720)[7]).toBe("/work/v.mp4");
+  });
+});
+
+describe("raceKill", () => {
+  test("the process's own answer wins when it exits inside the budget, and nothing is killed", async () => {
+    let killed = 0;
+    await expect(
+      raceKill({ exited: Promise.resolve(0), kill: () => void killed++ }, 500, "ffmpeg frame grab"),
+    ).resolves.toBe(0);
+    expect(killed).toBe(0);
+  });
+
+  test("the timer is CLEARED on the happy path — an armed one kills a process that already finished", async () => {
+    let killed = 0;
+    await raceKill({ exited: Promise.resolve(0), kill: () => void killed++ }, 5, "ffmpeg frame grab");
+    // Past the budget the grab was given. Uncleared, the timer also holds the
+    // event loop open for the full 15 s after every successful frame.
+    await new Promise((r) => setTimeout(r, 40));
+    expect(killed).toBe(0);
+  });
+
+  test("a process that never exits is KILLED and reported as a TIMEOUT, not as an exit code", async () => {
+    let killed = 0;
+    // Raced against a bound of its own, because the failure being guarded
+    // against is a call that never SETTLES: awaited bare, an implementation
+    // that killed but forgot to reject would hang the runner instead of
+    // failing, and a hang is not a red anyone can read.
+    const stalled = Symbol("stalled");
+    const outcome = await Promise.race([
+      raceKill({ exited: new Promise<number>(() => {}), kill: () => void killed++ }, 5, "ffmpeg frame grab").then(
+        (v) => ({ resolved: v }) as const,
+        (e: unknown) => ({ rejected: e }) as const,
+      ),
+      new Promise<typeof stalled>((r) => setTimeout(() => r(stalled), 1_000)),
+    ]);
+    expect(outcome).not.toBe(stalled);
+    expect((outcome as { rejected?: unknown }).rejected).toBeInstanceOf(Error);
+    expect(String((outcome as { rejected: Error }).rejected.message)).toBe("ffmpeg frame grab timed out after 5ms");
+    // Without the kill the process outlives the job that gave up on it.
+    expect(killed).toBe(1);
+  });
 });
 
 describe("extractCadenceFramesFromFile", () => {
@@ -519,14 +674,49 @@ describe("extractCadenceFramesFromFile", () => {
 });
 
 describe("the one-time frames-root rename", () => {
-  test("the decision is over three facts, and BOTH roots existing refuses", () => {
-    expect(decideFramesRootMigration({ oldExists: true, newExists: false, profile: "default" })).toBe("move");
-    expect(decideFramesRootMigration({ oldExists: false, newExists: false, profile: "default" })).toBe("nothing");
-    expect(decideFramesRootMigration({ oldExists: false, newExists: true, profile: "default" })).toBe("nothing");
-    expect(decideFramesRootMigration({ oldExists: true, newExists: true, profile: "default" })).toBe("refuse");
+  const decide = (o: Partial<Parameters<typeof decideFramesRootMigration>[0]>) =>
+    decideFramesRootMigration({
+      oldExists: false,
+      newExists: false,
+      legacyIsSymlink: false,
+      profile: "default",
+      ...o,
+    });
+
+  test("the decision is over four facts, and BOTH roots existing refuses", () => {
+    expect(decide({ oldExists: true })).toBe("move");
+    expect(decide({})).toBe("nothing");
+    expect(decide({ newExists: true })).toBe("nothing");
+    expect(decide({ oldExists: true, newExists: true })).toBe("refuse");
     // nais registers no capture vertical, so it never writes under $HOME here.
-    expect(decideFramesRootMigration({ oldExists: true, newExists: false, profile: "nais" })).toBe("refuse");
-    expect(decideFramesRootMigration({ oldExists: true, newExists: true, profile: "nais" })).toBe("refuse");
+    expect(decide({ oldExists: true, profile: "nais" })).toBe("refuse");
+    expect(decide({ oldExists: true, newExists: true, profile: "nais" })).toBe("refuse");
+  });
+
+  test("a SYMLINKED legacy root refuses, and it is a fact of its own — lstat does not report it as a directory", () => {
+    // `rename(2)` moves the LINK, so a symlinked legacy root would become a
+    // symlink AT the served path, pointing outside the root — which the route's
+    // realpath containment then 404s, for every frame, while the log said
+    // "Moved". The probe is `lstat`, so a symlink is never `oldExists`.
+    expect(decide({ legacyIsSymlink: true })).toBe("refuse");
+    expect(decide({ legacyIsSymlink: true, newExists: true })).toBe("refuse");
+    // …and it outranks the "nothing to do" answer an lstat-shaped probe gives.
+    expect(decide({ oldExists: false, legacyIsSymlink: false })).toBe("nothing");
+  });
+
+  test("the profile gate is ONE rule: a profile that does not migrate refuses every combination", () => {
+    // `migrateLegacyVimeoFramesRoot` asks `framesRootMigrationRuns` BEFORE it
+    // stats anything, so the docblock's "nothing under $HOME is touched on a
+    // pod" is literally true — this pins the two answers to each other.
+    expect(framesRootMigrationRuns("nais")).toBe(false);
+    expect(framesRootMigrationRuns("default")).toBe(true);
+    for (const oldExists of [false, true]) {
+      for (const newExists of [false, true]) {
+        for (const legacyIsSymlink of [false, true]) {
+          expect(decide({ oldExists, newExists, legacyIsSymlink, profile: "nais" })).toBe("refuse");
+        }
+      }
+    }
   });
 
   test("it MOVES the old root under <framesRoot>/vimeo, and is a no-op on a second run", async () => {
@@ -567,6 +757,30 @@ describe("the one-time frames-root rename", () => {
     expect(await migrateLegacyVimeoFramesRoot("default", { legacyRoot: legacy, framesRoot })).toBe("refuse");
     expect(readFileSync(join(legacy, "111", "1.jpg"), "utf8")).toBe("OLD");
     expect(readFileSync(join(framesRoot, "vimeo", "222", "2.jpg"), "utf8")).toBe("NEW");
+  });
+
+  test("a SYMLINKED legacy root is REFUSED, not renamed — rename would move the link itself", async () => {
+    await withCapturedLogs(async (records) => {
+      const home = dir("capture-frames-mig-");
+      const elsewhere = dir("capture-frames-elsewhere-");
+      const legacy = join(home, "vimeo-frames");
+      const framesRoot = join(home, "frames");
+      mkdirSync(join(elsewhere, "1223358361"), { recursive: true });
+      writeFileSync(join(elsewhere, "1223358361", "1390.jpg"), "JPEG");
+      symlinkSync(elsewhere, legacy);
+
+      expect(await migrateLegacyVimeoFramesRoot("default", { legacyRoot: legacy, framesRoot })).toBe("refuse");
+      // Nothing moved: the link is still a link, its target still holds the
+      // frames, and no `<framesRoot>/vimeo` was created for the route to read.
+      expect(lstatSync(legacy).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(elsewhere, "1223358361", "1390.jpg"), "utf8")).toBe("JPEG");
+      expect(existsSync(join(framesRoot, "vimeo"))).toBe(false);
+
+      const warns = records.filter((r) => r.level === "warning");
+      expect(warns.length).toBe(1);
+      expect(warns[0]!.rawMessage).toContain("symlink");
+      expect(warns[0]!.properties.legacyRoot).toBe(legacy);
+    });
   });
 
   test("on nais it does not run, even with an old root present", async () => {
