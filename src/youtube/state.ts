@@ -7,9 +7,18 @@ const log = getLog("youtube", "state");
 
 // --- Types ---
 
+/**
+ * `downloading` and `extracting_frames` are the FRAMES path only (the reader
+ * ticked Slides): the video comes down from yt-dlp and one JPEG per cadence
+ * tick comes out of it. A transcript-only capture never leaves the three
+ * statuses it always had. Both already have a label and a colour on the
+ * /summaries job card — they were added for the Vimeo and X verticals.
+ */
 export type JobStatus =
   | "pending"
   | "fetching_transcript"
+  | "downloading"
+  | "extracting_frames"
   | "summarizing"
   | "ingesting"
   | "complete"

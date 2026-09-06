@@ -70,9 +70,36 @@ mock.module("../../tiktok/summarizer.ts", () => ({
 }));
 
 let youtubeSummarizeCalls = 0;
+/** The options the LAST started YouTube capture was handed — `frames` rides on them. */
+let lastYouTubeOpts: { frames?: boolean } | null = null;
+/**
+ * Held open by the in-flight cases: the route's claim lives exactly as long as
+ * this promise, so a case that wants a SECOND POST to land while a capture is
+ * running parks the first one here.
+ */
+let youtubeSummarizeGate: Promise<void> | null = null;
+/**
+ * The huginn doc id this capture "ingests", or null for a capture that never
+ * reaches the ingest. The real `summarizeVideo` calls the route's `onIngested`
+ * hook from inside its `ingestSummary` success path — the only moment the route
+ * can learn a document exists, since huginn's `/documents` listing does not move
+ * until the background reindex has run.
+ */
+let youtubeIngestDocId: string | null = null;
 mock.module("../../youtube/summarizer.ts", () => ({
-  summarizeVideo: async () => {
+  summarizeVideo: async (
+    _jobId: string,
+    videoId: string,
+    _title: string,
+    _url: string,
+    _config: unknown,
+    _botConfig: unknown,
+    opts?: { frames?: boolean; onIngested?: (videoId: string, documentId: string) => void },
+  ) => {
     youtubeSummarizeCalls++;
+    lastYouTubeOpts = opts ?? {};
+    if (youtubeSummarizeGate) await youtubeSummarizeGate;
+    if (youtubeIngestDocId !== null) opts?.onIngested?.(videoId, youtubeIngestDocId);
   },
 }));
 
@@ -166,7 +193,7 @@ mock.module("../../vimeo/summarizer.ts", () => ({
 }));
 
 const { registerTikTokRoutes } = await import("./tiktok-routes.ts");
-const { registerYouTubeRoutes } = await import("./youtube-routes.ts");
+const { registerYouTubeRoutes, YOUTUBE_RECENT_INGEST_TTL_MS } = await import("./youtube-routes.ts");
 const { registerVimeoRoutes } = await import("./vimeo-routes.ts");
 const { notifySummaryDocumentDeleted } = await import("../../summaries/document-deleted.ts");
 const ttState = await import("../../tiktok/state.ts");
@@ -189,9 +216,23 @@ function ttApp(): Hono {
   return app;
 }
 
+/**
+ * EVERY YouTube registration here names a throwaway frames root, for the reason
+ * spelled out over `tmpFramesRoot` below: the delete listener set is
+ * module-level and never unsubscribed, so a registration with no root would
+ * remove frames under the developer's real `~/.muninn/frames` on the next test
+ * that fires `notifySummaryDocumentDeleted`.
+ */
 function ytApp(): Hono {
   const app = new Hono();
-  registerYouTubeRoutes(app, config);
+  registerYouTubeRoutes(app, config, { framesRoot: tmpFramesRoot() });
+  return app;
+}
+
+/** The same app with an injected clock, for the recently-ingested map's TTL. */
+function ytAppAt(now: () => number): Hono {
+  const app = new Hono();
+  registerYouTubeRoutes(app, config, { now, framesRoot: tmpFramesRoot() });
   return app;
 }
 
@@ -300,6 +341,9 @@ beforeEach(() => {
   summarizerBot = cliBot;
   tiktokSummarizeCalls = 0;
   youtubeSummarizeCalls = 0;
+  lastYouTubeOpts = null;
+  youtubeSummarizeGate = null;
+  youtubeIngestDocId = null;
   vimeoSummarizeCalls = 0;
   lastVimeoMeta = null;
   vimeoSummarizeGate = null;
@@ -378,14 +422,28 @@ describe("TikTok capture POST — a job exists only when a capture will run", ()
 });
 
 describe("YouTube capture POST — a job exists only when a capture will run", () => {
+  // A REAL 11-character id. The two pre-existing cases posted `abc123`, which
+  // the route now refuses as `bad_video_id` before it does anything else — so
+  // a 6-char fixture would assert the early returns while never reaching the
+  // path they are about.
+  const YT_ID = "dQw4w9WgXcQ";
+  const YT_URL = `https://www.youtube.com/watch?v=${YT_ID}`;
+
+  /** A huginn listing that already holds a document for this video. */
+  function listingWithDuplicate(docId = "ai/rag/A talk.md") {
+    knowledgeApiImpl = async () => ({
+      documents: [
+        { id: "ai/general/Something else.md", url: "https://www.youtube.com/watch?v=abcdefghijk" },
+        { id: docId, url: YT_URL },
+      ],
+    });
+  }
+
   test("no summarizer bot 500s and leaves NO job behind", async () => {
     summarizerBot = null;
     const before = ytState.getRecentJobs().length;
 
-    const res = await post(ytApp(), "/api/youtube/summarize", {
-      url: "https://www.youtube.com/watch?v=abc123",
-      video_id: "abc123",
-    });
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
 
     expect(res.status).toBe(500);
     expect(ytState.getRecentJobs().length).toBe(before);
@@ -396,8 +454,8 @@ describe("YouTube capture POST — a job exists only when a capture will run", (
     const before = ytState.getRecentJobs().length;
 
     const res = await post(ytApp(), "/api/youtube/summarize", {
-      url: "https://www.youtube.com/watch?v=abc123",
-      video_id: "abc123",
+      url: YT_URL,
+      video_id: YT_ID,
       title: "My video",
     });
 
@@ -406,6 +464,202 @@ describe("YouTube capture POST — a job exists only when a capture will run", (
     expect(ytState.getJob(body.job_id)).toBeDefined();
     expect(ytState.getRecentJobs().length).toBe(before + 1);
     expect(youtubeSummarizeCalls).toBe(1);
+    // Absent `frames` is off — every existing client keeps its capture.
+    expect(lastYouTubeOpts?.frames).toBe(false);
+  });
+
+  test("`frames: true` reaches the capture", async () => {
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      frames: true,
+    });
+    expect(res.status).toBe(200);
+    expect(lastYouTubeOpts?.frames).toBe(true);
+  });
+
+  test("a malformed video_id 400s BEFORE the huginn listing is read", async () => {
+    // The id gate is route-wide: a malformed id must not cost a listing read,
+    // and on the frames path it would become a directory name and a served
+    // address. `knowledgeApiImpl` throws by default, so a listing read here
+    // would be visible as a call count rather than as a different status.
+    let listingReads = 0;
+    knowledgeApiImpl = async () => {
+      listingReads++;
+      return { documents: [] };
+    };
+    const before = ytState.getRecentJobs().length;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: "https://www.youtube.com/watch?v=abc123",
+      video_id: "abc123",
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "bad_video_id" });
+    expect(listingReads).toBe(0);
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("a non-boolean `frames` 400s and leaves NO job behind", async () => {
+    const before = ytState.getRecentJobs().length;
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      frames: "yes",
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "bad_frames" });
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("a connector without extra-dirs 503s on frames and leaves NO job behind", async () => {
+    // The live trigger: SUMMARIZER_BOT points at a copilot-sdk bot. A job
+    // created above this early return would never settle and would sit at the
+    // top of /summaries for the whole 12h in-flight grace.
+    summarizerBot = copilotBot;
+    const before = ytState.getRecentJobs().length;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      frames: true,
+    });
+
+    expect(res.status).toBe(503);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "frames_unsupported" });
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("the SAME bot without frames captures normally — the 503 is scoped to slides", async () => {
+    summarizerBot = copilotBot;
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    expect(res.status).toBe(200);
+    expect(youtubeSummarizeCalls).toBe(1);
+  });
+
+  test("a second POST while a capture is running is answered `in_flight`, not a second job", async () => {
+    // Nothing is stored until a capture finishes and the huginn lookup is an
+    // await, so the stored-document check alone let two POSTs either side of it
+    // both capture — and huginn's YouTube ingest dedups by FILE PATH, so the
+    // second one can leave a whole second document.
+    knowledgeApiImpl = async () => ({ documents: [] });
+    let release!: () => void;
+    youtubeSummarizeGate = new Promise<void>((r) => { release = r; });
+    const app = ytApp();
+
+    const first = await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    const firstBody = (await first.json()) as { job_id: string };
+    const second = await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+
+    expect((await second.json()) as Record<string, unknown>).toMatchObject({
+      in_flight: true,
+      job_id: firstBody.job_id,
+    });
+    expect(youtubeSummarizeCalls).toBe(1);
+    release();
+  });
+
+  test("a just-ingested video is a duplicate BEFORE the listing is asked", async () => {
+    // State 3, huginn's reindex window: the claim is released the instant the
+    // capture settles, while the `/documents` listing does not move for
+    // seconds to minutes. Without this map a re-POST started a second capture
+    // and spent a second model call.
+    let listingReads = 0;
+    knowledgeApiImpl = async () => {
+      listingReads++;
+      return { documents: [] };
+    };
+    youtubeIngestDocId = "ai/rag/A talk.md";
+    const app = ytApp();
+
+    await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    expect(listingReads).toBe(1);
+
+    const again = await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    expect((await again.json()) as Record<string, unknown>).toMatchObject({
+      duplicate: true,
+      document_id: "ai/rag/A talk.md",
+      existing_url: YT_URL,
+    });
+    // The listing was NOT read a second time: the map answers first.
+    expect(listingReads).toBe(1);
+    expect(youtubeSummarizeCalls).toBe(1);
+  });
+
+  test("past the TTL the listing is authoritative again", async () => {
+    knowledgeApiImpl = async () => ({ documents: [] });
+    youtubeIngestDocId = "ai/rag/A talk.md";
+    let clock = 1_000_000;
+    const app = ytAppAt(() => clock);
+
+    await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    clock += YOUTUBE_RECENT_INGEST_TTL_MS;
+    const again = await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+
+    expect(again.status).toBe(200);
+    expect((await again.json()) as Record<string, unknown>).not.toHaveProperty("duplicate");
+    expect(youtubeSummarizeCalls).toBe(2);
+  });
+
+  test("a listed document is a duplicate and starts nothing", async () => {
+    listingWithDuplicate();
+    const before = ytState.getRecentJobs().length;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({
+      duplicate: true,
+      document_id: "ai/rag/A talk.md",
+    });
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("a Delete drops the ingest entry, so the video can be captured again", async () => {
+    knowledgeApiImpl = async () => ({ documents: [] });
+    youtubeIngestDocId = "ai/rag/A talk.md";
+    const app = ytApp();
+
+    await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: "ai/rag/A talk.md" });
+
+    const again = await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    expect(again.status).toBe(200);
+    expect((await again.json()) as Record<string, unknown>).not.toHaveProperty("duplicate");
+    expect(youtubeSummarizeCalls).toBe(2);
+  });
+
+  test("a Delete also masks the row huginn is STILL listing", async () => {
+    // huginn's DELETE is soft: the listing keeps naming the document until its
+    // reindex lands. Forgetting the ingest map alone would only move the stale
+    // `duplicate` from state 3 to state 4 — same body, same link to nothing.
+    youtubeIngestDocId = "ai/rag/A talk.md";
+    const app = ytApp();
+    await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+
+    listingWithDuplicate();
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: "ai/rag/A talk.md" });
+
+    const again = await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    expect(again.status).toBe(200);
+    expect((await again.json()) as Record<string, unknown>).not.toHaveProperty("duplicate");
+  });
+
+  test("a Delete of ANOTHER collection's document changes nothing here", async () => {
+    knowledgeApiImpl = async () => ({ documents: [] });
+    youtubeIngestDocId = "ai/rag/A talk.md";
+    const app = ytApp();
+    await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: "ai/rag/A talk.md" });
+
+    const again = await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    expect((await again.json()) as Record<string, unknown>).toMatchObject({ duplicate: true });
   });
 });
 

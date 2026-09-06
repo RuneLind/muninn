@@ -4,9 +4,12 @@
  * One frame every `frameBudgetFor(duration)` ticks of a video, read by the
  * model and quoted INLINE in the summary as
  * `![Slide at HH:MM:SS](/api/frames/<source>/<id>/<sec>.jpg)`. Vimeo pulls its
- * ticks out of a DASH manifest (`src/vimeo/frames.ts`); a source with the whole
- * file on disk uses {@link extractCadenceFramesFromFile}. Everything either of
- * them does with a URL, a path, the served root or the summary text is here.
+ * ticks out of a DASH manifest (`src/vimeo/frames.ts`); YouTube downloads the
+ * whole file with yt-dlp and uses {@link extractCadenceFramesFromFile}
+ * (`src/youtube/frames.ts` is its own pure half — the probe that gives it a
+ * duration, the video-only format selector, the transcript rules). Everything
+ * either of them does with a URL, a path, the served root or the summary text
+ * is here.
  *
  * Three contracts this module lives by:
  *

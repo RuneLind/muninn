@@ -335,6 +335,101 @@ export interface DownloadOptions {
   /** Override the yt-dlp process timeout — hour-plus videos (X workshops) are
    * gigabyte-scale downloads that outrun the 120s short-clip default. */
   timeoutMs?: number;
+  /**
+   * Override the `-f` format selector. Absent ⇒ {@link YTDLP_FORMAT_SELECTOR},
+   * so TikTok and X are byte-identical to before this field existed.
+   *
+   * It exists for a caller that wants something the shared selector cannot
+   * express: the YouTube frames path pulls a VIDEO-ONLY ≤720p rendition,
+   * because it reads frames and takes its transcript from huginn — every byte
+   * of audio in that download is spent on nothing.
+   */
+  format?: string;
+}
+
+/**
+ * The yt-dlp argv for one download. Pure and exported so the argv itself is
+ * asserted rather than a yt-dlp run — the `ffmpegFrameArgs` shape.
+ */
+export function ytDlpDownloadArgs(
+  url: string,
+  workDir: string,
+  opts: DownloadOptions,
+): string[] {
+  return [
+    "yt-dlp",
+    "-f",
+    opts.format ?? YTDLP_FORMAT_SELECTOR,
+    "--no-playlist",
+    "-o",
+    join(workDir, "video.%(ext)s"),
+    "--print-json",
+    "--break-match-filters",
+    `duration <= ${opts.maxDurationSeconds}`,
+    url,
+  ];
+}
+
+/** How long a metadata-only probe may take. No bytes move; this bounds a hang. */
+export const PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * The yt-dlp argv for a metadata-only probe. Pure, exported for the same reason
+ * {@link ytDlpDownloadArgs} is.
+ */
+export function ytDlpProbeArgs(url: string): string[] {
+  return ["yt-dlp", "--dump-json", "--skip-download", "--no-playlist", url];
+}
+
+/**
+ * What yt-dlp knows about a video BEFORE any bytes move — `null` when it will
+ * not say.
+ *
+ * The frames path needs the duration to size everything it is about to spend
+ * (the cap, the frame budget, the download and summarize timeouts), and
+ * `downloadVideo`'s own `--print-json` line arrives only AFTER the download it
+ * is meant to bound. So this is a separate ~3 s call.
+ *
+ * `null` rather than a throw on every failure — a non-zero exit, an unparseable
+ * stdout, a killed process — because the one caller degrades to a
+ * transcript-only capture on any of them and a failed probe must never be a
+ * failed job. The reason is logged here, where it is known, rather than
+ * reconstructed by the caller from a null.
+ */
+export async function probeVideoInfo(
+  url: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<YtDlpInfo | null> {
+  let stdout: string;
+  let stderr: string;
+  let exitCode: number;
+  try {
+    ({ stdout, stderr, exitCode } = await runProc(
+      ytDlpProbeArgs(url),
+      opts.timeoutMs ?? PROBE_TIMEOUT_MS,
+      "yt-dlp probe",
+    ));
+  } catch (err) {
+    log.warn("yt-dlp probe of {url} failed: {error}", {
+      url,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  if (exitCode !== 0) {
+    log.warn("yt-dlp probe of {url} exited {exitCode}: {stderr}", {
+      url,
+      exitCode,
+      stderr: stderr.slice(-300),
+    });
+    return null;
+  }
+  for (const line of stdout.split("\n")) {
+    const parsed = parseYtDlpJson(line);
+    if (parsed) return parsed;
+  }
+  log.warn("yt-dlp probe of {url} produced no parseable metadata JSON", { url });
+  return null;
 }
 
 /**
@@ -348,19 +443,7 @@ export async function downloadVideo(
   opts: DownloadOptions,
 ): Promise<DownloadResult> {
   const maxDuration = opts.maxDurationSeconds;
-  const outputTemplate = join(workDir, "video.%(ext)s");
-  const args = [
-    "yt-dlp",
-    "-f",
-    YTDLP_FORMAT_SELECTOR,
-    "--no-playlist",
-    "-o",
-    outputTemplate,
-    "--print-json",
-    "--break-match-filters",
-    `duration <= ${maxDuration}`,
-    url,
-  ];
+  const args = ytDlpDownloadArgs(url, workDir, opts);
 
   const { stdout, stderr, exitCode } = await runProc(
     args,

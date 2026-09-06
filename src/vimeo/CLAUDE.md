@@ -287,7 +287,12 @@ adds something.** The manifest half is `src/vimeo/frames.ts`; **everything a
 second vertical would need is `src/summaries/frames.ts`**, which owns the
 cadence, the served root, the URL shape, the prompt section, the id gate, the
 kept-frame copy and removal, the ffmpeg argv and the file-based
-`extractCadenceFramesFromFile`. The dependency is ONE-WAY — the seam never
+`extractCadenceFramesFromFile`. **The YOUTUBE vertical is that second vertical
+now** (`src/youtube/CLAUDE.md`): it holds the whole video on disk, so it uses
+`extractCadenceFramesFromFile` and the seam's `youtube` `FrameSource` and adds
+only its own pure decisions — the yt-dlp probe that gives it a duration at all,
+the video-only format selector, and the `?timestamps=1` transcript. Anything
+BOTH verticals need belongs in the seam, never here. The dependency is ONE-WAY — the seam never
 imports this module, and a second copy of a constant next door is exactly the
 two-literals failure `src/video/media.ts` documents for the frame budget.
 `cadenceTimes(duration)` is
