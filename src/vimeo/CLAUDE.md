@@ -318,7 +318,8 @@ on the captions reports no manifest and a reader who ticked Slides gets none.
 keeps the page playing until the URL lands; transcript-only captures pass
 0 and close as before. **The URL's PRIMARY source is the player's `/config`
 response** (`request.files.dash.cdns[default_cdn].avc_url` — the AVC-only
-manifest, since `chooseRepresentation` ignores `codecs` — then `url`, read by
+manifest, since `chooseRepresentation`'s video branch picks by height and
+never by `codecs` — then `url`, read by
 `manifestUrlFromPlayerConfig`, host-pinned, body capped at
 `VIMEO_PLAYER_CONFIG_MAX_BYTES`), and the player's own
 `playlist.json` request is only the fallback — because the player picks DASH

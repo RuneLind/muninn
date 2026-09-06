@@ -45,9 +45,10 @@ export const VIMEO_HARVEST_TIMEOUT_MS = 60_000;
 export const VIMEO_VTT_MAX_BYTES = 2 * 1024 * 1024;
 export const VIMEO_VTT_TIMEOUT_MS = 20_000;
 /**
- * The player's `/config` body is parsed for the manifest URL. Measured ~300 KB
- * on 2026-09-06; the cap bounds the one read in this vertical that does not go
- * through `downloadPinned`. Over it, the config is ignored (the sniff remains).
+ * The player's `/config` body is parsed for the manifest URL. Measured 15.8 KB
+ * on 2026-09-06 (vimeo.com/1223305711); the cap bounds the one read in this
+ * vertical that does not go through `downloadPinned`. Over it, the config is
+ * ignored (the sniff remains).
  */
 export const VIMEO_PLAYER_CONFIG_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -376,10 +377,15 @@ function isMediaHostUrl(u: string): boolean {
  * then any other cdn's) — on an https host in {@link VIMEO_MEDIA_HOSTS}, the
  * same pin the download applies, so what is recorded is what `media.ts` will
  * agree to fetch. `avc_url` first: measured, the two differ only by
- * `?omit=av1-hevc` on `avc_url`, and `chooseRepresentation` picks by height
- * without looking at `codecs`, so the AVC-only manifest is the one whose
- * every rendition the host ffmpeg decodes. (The player's own DASH request is
- * the `url` variant, so the sniff fallback still records that one.)
+ * `?omit=av1-hevc` on `avc_url`, and `chooseRepresentation`'s VIDEO branch
+ * picks by height without looking at `codecs` (the audio branch does match
+ * codecs), so the AVC-only manifest is the one whose every video rendition
+ * the host ffmpeg decodes. The player's own DASH request is the `avc_url`
+ * variant too (measured: its `playlist.json` carries `omit=av1-hevc`), so the
+ * sniff fallback records the same manifest. The cost: an upload published
+ * AV1/HEVC-only would list no video rendition here and frames would degrade
+ * to the warn, where `url` would have offered renditions — accepted, since
+ * such renditions are ones ffmpeg may not decode anyway.
  *
  * Why the config and not the player's own playlist request: the player picks
  * DASH or HLS per page load. Measured 2026-09-06 (vimeo.com/1223305711, six
