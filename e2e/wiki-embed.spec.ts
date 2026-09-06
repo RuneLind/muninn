@@ -122,6 +122,14 @@ test.describe("Wiki reader: <Embed src>", () => {
     expect(await frame.evaluate((el) => (el as HTMLElement).style.height)).toBe("500px");
     // The acceptance: the file's own content is on screen inside the frame.
     await expect(page.frameLocator(FRAME).locator("h1")).toHaveText(MARKER);
+    // An "open in new tab" link beside the frame, pointing at the SAME url the
+    // frame loads — the html is shadowed out of the page list, so this link is
+    // the only way a reader reaches the standalone viewer.
+    const open = page.locator(".embed-open");
+    await expect(open).toHaveCount(1);
+    await expect(open).toHaveAttribute("target", "_blank");
+    await expect(open).toHaveAttribute("rel", /noopener/);
+    expect(await open.getAttribute("href")).toBe(await frame.getAttribute("src"));
     // …and the page around it kept its prose and its fallback line is gone.
     await expect(page.locator(".wiki-article")).toContainText("Prose after.");
     await expect(page.locator(".embed-fallback")).toHaveCount(0);

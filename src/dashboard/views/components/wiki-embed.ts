@@ -43,8 +43,18 @@ export function enhanceEmbeds(
     frame.title = plan.title;
     frame.style.height = `${plan.height}px`;
     frame.src = withWiki("/api/wiki/html?relPath=" + encodeURIComponent(plan.relPath));
+    // The standalone viewer is reachable ONLY from here: the embedded html is
+    // shadowed out of the page list, and the markdown renderer keeps no
+    // relative links. Same url as the frame, so the two cannot disagree.
+    const open = document.createElement("a");
+    open.className = "embed-open";
+    open.href = frame.src;
+    open.target = "_blank";
+    open.rel = "noopener";
+    open.textContent = "Open in new tab ↗";
     const fallback = fig.querySelector(".embed-fallback");
     if (fallback) fallback.replaceWith(frame);
     else fig.appendChild(frame);
+    fig.appendChild(open);
   }
 }

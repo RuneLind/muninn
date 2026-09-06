@@ -841,6 +841,13 @@ export async function renderWikiPage(opts?: {
       border-radius: 8px;
       background: #fff;
     }
+    .embed-open {
+      display: inline-block;
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .embed-open:hover { color: var(--accent-light); }
 
     .wiki-article { font-size: 14px; line-height: 1.65; color: var(--text-secondary); }
     .wiki-article h1, .wiki-article h2, .wiki-article h3, .wiki-article h4 { color: var(--text-primary); margin: 20px 0 8px; }
