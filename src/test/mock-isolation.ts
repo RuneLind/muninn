@@ -19,12 +19,20 @@
 /**
  * A `mock.module(` CALL: at the start of a line, optionally behind `await`/`void`,
  * an assignment, or a `bun:test` namespace (`bt.mock.module(`). Never one quoted
- * in prose or in a regex. The one form this cannot see is an aliased import
- * (`import { mock as m }`), which the live test asserts absent.
+ * in prose or in a regex. The live test asserts this regex and MOCK_MODULE_SUBSTRING
+ * agree on every test file, so a form the call regex cannot see is a red rather
+ * than a hole — as long as the substring sees it. RESIDUAL, deferred (#526 round-3
+ * verify pass): spellings NEITHER regex sees — `mock.module (`, `mock . module(`,
+ * `mock["module"](` — and alias forms MOCK_ALIAS_IMPORT does not see — `export {
+ * mock as m }`, `import def, { mock as m }`. None of the 386 test files uses any
+ * of them (swept 2026-09-06), and the repo has no formatter that would normalize
+ * them, so a future file could; a follow-up widens the substring to
+ * `\bmock\s*(?:\.\s*module|\[\s*["']module["']\s*\])\s*\(` and the alias check to
+ * `\bmock\s+as\s+\w+\s*[,}]`.
  */
 export const MOCK_MODULE_CALL =
   /^\s*(?:await\s+|void\s+|(?:const|let|var)\s+\w+\s*=\s*)?(?:\w+\.)?mock\.module\(/m;
-/** `import { mock as … } from "bun:test"` would hide a call from MOCK_MODULE_CALL. */
+/** `import { …, mock as m } from …` would hide a call from MOCK_MODULE_CALL (the specifier is not checked). */
 export const MOCK_ALIAS_IMPORT = /import\s*\{[^}]*\bmock\s+as\s+\w+[^}]*\}/;
 /** The substring every call form contains — what MOCK_MODULE_CALL must agree with, file by file. */
 export const MOCK_MODULE_SUBSTRING = /\bmock\.module\(/;
