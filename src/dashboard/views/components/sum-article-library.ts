@@ -128,6 +128,22 @@ export function sumArticleLibraryStyles(): string {
     /* min-width:0 lets code blocks shrink; cap + center the reading column so
        full-page width doesn't stretch lines uncomfortably wide */
     .sum-col-main { min-width: 0; max-width: 1000px; justify-self: center; }
+    /* The stored transcript sits under the summary as a "## Transcript"
+       section and is longer than the summary by an order of magnitude; it
+       opens on request, the summary is what the panel is for. */
+    .sum-transcript { margin-top: 24px; border-top: 1px solid var(--border-primary); padding-top: 12px; }
+    .sum-transcript > summary {
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      list-style: none;
+    }
+    .sum-transcript > summary::-webkit-details-marker { display: none; }
+    .sum-transcript > summary::marker { content: ""; }
+    .sum-transcript > summary::before { content: '▸'; display: inline-block; width: 1.1em; }
+    .sum-transcript[open] > summary::before { content: '▾'; }
+    .sum-transcript > summary:hover { color: var(--text-primary); }
     .sum-col-left, .sum-col-right {
       position: sticky;
       top: 0;
@@ -668,18 +684,40 @@ export function sumArticleLibraryScript(): string {
     }
 
     /**
+     * The ONE fence scanner both markdown transforms in this view use: maps
+     * \`fn(line, index)\` over every line OUTSIDE fenced code (fn returns the
+     * line to emit) and keeps fenced lines verbatim. A fence is closed only by
+     * its OWN marker character in a run at least as long as the opener (the
+     * CommonMark close rule), so a four-backtick fence that SHOWS a
+     * three-backtick block is one fence, not two. Any leading whitespace opens
+     * a fence, as the loop this replaces accepted. Fenced code keeps its text:
+     * a timestamp there is source, a \`## Transcript\` there is content.
+     * Inline backtick code and 4-space indented code are not skipped (accepted,
+     * rare). Two copies of this loop drifted once; there is one now.
+     */
+    function mapProseLines(markdown, fn) {
+      var fence = null;
+      return String(markdown).split('\\n').map(function(line, i) {
+        var m = /^\\s*(\`{3,}|~{3,})/.exec(line);
+        if (m) {
+          if (fence === null) { fence = m[1]; return line; }
+          if (m[1].charAt(0) === fence.charAt(0) && m[1].length >= fence.length) { fence = null; return line; }
+        }
+        return fence === null ? fn(line, i) : line;
+      }).join('\\n');
+    }
+
+    /**
      * Turn every \`[HH:MM:SS]\` / \`[MM:SS]\` in a Vimeo capture's markdown into a
      * link to that second of the video (\`vimeo.com/<id>#t=<sec>s\`, which the
      * Vimeo player honours) — the transcript's \`### [HH:MM:SS]\` window headings
      * and any timestamp the summary cites. Markdown in, markdown out: the label
      * keeps its brackets (\`[\\[00:12:00\\]](url)\`) so the page reads exactly as
-     * before, only clickable. Fenced code is left alone — a fence is closed by
-     * its OWN marker, so a \`~~~\` line inside a \`\`\` block is content, not a
-     * close (measured: pairing them interchangeably linked inside the block
-     * and de-linked everything after it) — and a bracket already followed by
-     * \`(\` is an existing link. Inline backtick code and 4-space indented code
-     * are NOT skipped (a timestamp there becomes a link; accepted, rare). No
-     * id ⇒ the text is returned untouched.
+     * before, only clickable. Fenced code is left alone (mapProseLines — a
+     * fence is closed by its OWN marker; measured: pairing \`~~~\` and \`\`\`
+     * interchangeably linked inside the block and de-linked everything after
+     * it), and a bracket already followed by \`(\` is an existing link. No id
+     * ⇒ the text is returned untouched.
      *
      * ⚠️ This lives inside a TEMPLATE LITERAL: every backslash below is written
      * doubled in the .ts source so the browser sees one. A regex that looks
@@ -689,20 +727,46 @@ export function sumArticleLibraryScript(): string {
       var id = vimeoVideoIdFromUrl(videoUrl);
       if (!id) return markdown;
       var base = 'https://vimeo.com/' + id + '#t=';
-      var fence = null;
-      return String(markdown).split('\\n').map(function(line) {
-        var m = /^\\s*(\`\`\`|~~~)/.exec(line);
-        if (m) {
-          if (fence === null) fence = m[1];
-          else if (fence === m[1]) fence = null;
-          return line;
-        }
-        if (fence !== null) return line;
+      return mapProseLines(markdown, function(line) {
         return line.replace(/\\[(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\](?!\\()/g, function(whole, a, b, c) {
           var sec = c === undefined ? Number(a) * 60 + Number(b) : Number(a) * 3600 + Number(b) * 60 + Number(c);
           return '[\\\\[' + whole.slice(1, -1) + '\\\\]](' + base + sec + 's)';
         });
-      }).join('\\n');
+      });
+    }
+
+    /**
+     * Split a stored document at its \`## Transcript\` heading: the summary
+     * before it, the transcript from it on. The heading is matched outside
+     * fenced code (same fence rule as linkVimeoTimestamps) and only at level
+     * 2, which is where huginn's vimeo ingest writes it (the windows under it
+     * are \`###\`). No such heading ⇒ the whole text is the body and
+     * transcript is null. Markdown in, markdown out.
+     */
+    function splitTranscript(markdown) {
+      var text = String(markdown);
+      var at = -1;
+      mapProseLines(text, function(line, i) {
+        if (at === -1 && /^## Transcript\\s*$/.test(line)) at = i;
+        return line;
+      });
+      if (at === -1) return { body: text, transcript: null };
+      var lines = text.split('\\n');
+      return { body: lines.slice(0, at).join('\\n'), transcript: lines.slice(at + 1).join('\\n') };
+    }
+
+    /**
+     * The article column's HTML for one stored document: the summary, then —
+     * when the document carries a transcript — a closed <details> the reader
+     * opens on request. Everything reader-controlled goes through
+     * renderMarkdown; the wrapper is fixed markup.
+     */
+    function renderArticleHtml(cleaned) {
+      var parts = splitTranscript(cleaned);
+      return renderMarkdown(parts.body) + (parts.transcript === null ? '' :
+        '<details class="sum-transcript"><summary>Transcript</summary>' +
+          '<div class="sum-transcript-body">' + renderMarkdown(parts.transcript) + '</div>' +
+        '</details>');
     }
 
     /**
@@ -814,7 +878,7 @@ export function sumArticleLibraryScript(): string {
         if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, videoUrl);
         var mainEl = document.getElementById('sumArticleMain');
         if (mainEl) {
-          mainEl.innerHTML = renderMarkdown(cleaned);
+          mainEl.innerHTML = renderArticleHtml(cleaned);
           if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
         }
 

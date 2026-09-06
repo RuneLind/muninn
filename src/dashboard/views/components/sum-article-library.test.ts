@@ -30,12 +30,16 @@ function load(): {
   linkVimeoTimestamps: (markdown: string, videoUrl: string) => string;
   vimeoVideoIdFromUrl: (url: unknown) => string | null;
   openVimeoLinksInNewTab: (container: { querySelectorAll(sel: string): FakeAnchor[] } | null, videoUrl: string) => void;
+  splitTranscript: (markdown: string) => { body: string; transcript: string | null };
+  renderArticleHtml: (cleaned: string) => string;
 } {
   const ctx = { document: { addEventListener() {}, getElementById: () => null } };
+  // renderMarkdown is the page's marked wrapper (sum-job-card.ts), a global
+  // this script calls; a tagging stub is enough to see what went through it.
   return new Function(
     "ctx",
-    `var document = ctx.document;\n${sumArticleLibraryScript()}\n` +
-      "return { linkVimeoTimestamps: linkVimeoTimestamps, vimeoVideoIdFromUrl: vimeoVideoIdFromUrl, openVimeoLinksInNewTab: openVimeoLinksInNewTab };",
+    `var document = ctx.document;\nvar renderMarkdown = function(t) { return '<md>' + t + '</md>'; };\n${sumArticleLibraryScript()}\n` +
+      "return { linkVimeoTimestamps: linkVimeoTimestamps, vimeoVideoIdFromUrl: vimeoVideoIdFromUrl, openVimeoLinksInNewTab: openVimeoLinksInNewTab, splitTranscript: splitTranscript, renderArticleHtml: renderArticleHtml };",
   )(ctx);
 }
 
@@ -122,5 +126,82 @@ describe("linkVimeoTimestamps", () => {
     // Three-part with a 1-digit seconds field, or a footnote-style [1], are not times.
     const md = "[1] and [12:3] and [a:bc] and [123:45]";
     expect(linkVimeoTimestamps(md, URL)).toBe(md);
+  });
+});
+
+describe("splitTranscript", () => {
+  const { splitTranscript } = load();
+
+  test("splits at the level-2 Transcript heading; the heading itself is dropped", () => {
+    const md = "## Key takeaways\n- a\n\n## Transcript\n\n### [00:00:00]\nHei";
+    expect(splitTranscript(md)).toEqual({
+      body: "## Key takeaways\n- a\n",
+      transcript: "\n### [00:00:00]\nHei",
+    });
+  });
+
+  test("no heading ⇒ whole text is the body, transcript null", () => {
+    const md = "## Summary\nText";
+    expect(splitTranscript(md)).toEqual({ body: md, transcript: null });
+  });
+
+  test("a Transcript heading inside a fence is content, not the split point", () => {
+    const md = "Intro\n```\n## Transcript\nnot it\n```\n## Transcript\nreal";
+    expect(splitTranscript(md)).toEqual({ body: "Intro\n```\n## Transcript\nnot it\n```", transcript: "real" });
+  });
+
+  test("level 3 or a suffixed heading does not split", () => {
+    expect(splitTranscript("### Transcript\nx").transcript).toBeNull();
+    expect(splitTranscript("## Transcript notes\nx").transcript).toBeNull();
+  });
+});
+
+describe("fences shared by both transforms (mapProseLines)", () => {
+  const { splitTranscript, linkVimeoTimestamps } = load();
+  const url = "https://vimeo.com/123";
+
+  test("a four-backtick fence showing a three-backtick block is ONE fence", () => {
+    const md = "Intro\n````md\n```\n## Transcript\n[00:10]\n```\n````\nAfter [00:20]";
+    expect(splitTranscript(md).transcript).toBeNull();
+    const linked = linkVimeoTimestamps(md, url);
+    expect(linked).toContain("\n[00:10]\n");
+    expect(linked).toContain("[\\[00:20\\]](https://vimeo.com/123#t=20s)");
+  });
+
+  test("an indented opener still opens a fence (the old loop's rule, kept)", () => {
+    const md = "    ```\n[00:10]\n    ```\n## Transcript\nT";
+    expect(linkVimeoTimestamps(md, url)).toBe(md);
+    expect(splitTranscript(md)).toEqual({ body: "    ```\n[00:10]\n    ```", transcript: "T" });
+  });
+
+  test("the FIRST Transcript heading wins", () => {
+    expect(splitTranscript("a\n## Transcript\nb\n## Transcript\nc")).toEqual({ body: "a", transcript: "b\n## Transcript\nc" });
+  });
+
+  test("a non-string input is coerced on both paths", () => {
+    expect(splitTranscript(123 as unknown as string)).toEqual({ body: "123", transcript: null });
+    expect(splitTranscript({ toString: () => "x\n## Transcript\ny" } as unknown as string)).toEqual({ body: "x", transcript: "y" });
+    expect(linkVimeoTimestamps(123 as unknown as string, url)).toBe("123");
+  });
+
+  test("a fence is closed only by its own marker character", () => {
+    const md = "```\n~~~\n[00:10]\n```\n[00:20]";
+    expect(linkVimeoTimestamps(md, url)).toBe("```\n~~~\n[00:10]\n```\n[\\[00:20\\]](https://vimeo.com/123#t=20s)");
+  });
+});
+
+describe("renderArticleHtml", () => {
+  const { renderArticleHtml } = load();
+
+  test("summary only ⇒ just the rendered markdown, no details", () => {
+    expect(renderArticleHtml("## A\nx")).toBe("<md>## A\nx</md>");
+  });
+
+  test("a transcript renders inside a closed details after the summary", () => {
+    expect(renderArticleHtml("## A\nx\n## Transcript\n### [00:00:00]\nHei")).toBe(
+      "<md>## A\nx</md>" +
+        '<details class="sum-transcript"><summary>Transcript</summary>' +
+        '<div class="sum-transcript-body"><md>### [00:00:00]\nHei</md></div></details>',
+    );
   });
 });
