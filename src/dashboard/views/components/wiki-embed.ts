@@ -42,13 +42,14 @@ export function enhanceEmbeds(
     frame.setAttribute("loading", "lazy");
     frame.title = plan.title;
     frame.style.height = `${plan.height}px`;
-    frame.src = withWiki("/api/wiki/html?relPath=" + encodeURIComponent(plan.relPath));
+    const url = withWiki("/api/wiki/html?relPath=" + encodeURIComponent(plan.relPath));
+    frame.setAttribute("src", url);
     // The standalone viewer is reachable ONLY from here: the embedded html is
     // shadowed out of the page list, and the markdown renderer keeps no
     // relative links. Same url as the frame, so the two cannot disagree.
     const open = document.createElement("a");
     open.className = "embed-open";
-    open.href = frame.src;
+    open.setAttribute("href", url);
     open.target = "_blank";
     open.rel = "noopener";
     open.textContent = "Open in new tab ↗";
