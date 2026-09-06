@@ -174,11 +174,13 @@ export function frameDirFor(source: FrameSource, id: string, root: string = fram
  * Pure.
  *
  * A duration that is not a measurement — non-finite — or past
- * {@link FRAME_MAX_DURATION_SEC} THROWS rather than returning ticks: both
- * callers already degrade a thrown frame pass to a warn plus a transcript-only
- * capture, which is the honest answer, while returning ticks would spend the
- * whole budget on frames the route cannot address. A vertical that takes its
- * duration from an external probe (yt-dlp, oEmbed) has no cap of its own.
+ * {@link FRAME_MAX_DURATION_SEC} THROWS rather than returning ticks: the one
+ * production caller today (the Vimeo summarizer) degrades a thrown frame pass
+ * to a warn plus a transcript-only capture, and a caller of
+ * {@link extractCadenceFramesFromFile} must do the same, since returning ticks
+ * would spend the whole budget on frames the route cannot address. A vertical
+ * that takes its duration from an external probe (yt-dlp, oEmbed) has no cap
+ * of its own.
  */
 export function cadenceTimes(durationSec: number): number[] {
   if (!Number.isFinite(durationSec) || durationSec > FRAME_MAX_DURATION_SEC) {
@@ -708,9 +710,11 @@ export async function migrateLegacyVimeoFramesRoot(
   // and a test pins that parity.
   if (!framesRootMigrationRuns(profile)) return "refuse";
   const [legacy, targetProbe] = await Promise.all([probeRoot(legacyRoot), probeRoot(target)]);
-  // Anything already at the target — a directory or a link — means "taken":
-  // `rename` must never land on top of something this has no basis to merge.
-  const newExists = targetProbe.isDir || targetProbe.isSymlink;
+  // Anything already at the target — a directory, a link, a plain file —
+  // means "taken": `rename` must never land on top of something this has no
+  // basis to merge, and a plain file would fail it with ENOTDIR and the
+  // generic warn instead of the remedy the refuse branch names.
+  const newExists = targetProbe.exists;
   const decision = decideFramesRootMigration({
     oldExists: legacy.isDir,
     newExists,
@@ -750,11 +754,11 @@ export async function migrateLegacyVimeoFramesRoot(
  * difference is the whole point: `stat` reports a symlinked directory as a
  * directory, and `rename` then moves the link rather than the tree.
  */
-async function probeRoot(dir: string): Promise<{ isDir: boolean; isSymlink: boolean }> {
+async function probeRoot(dir: string): Promise<{ isDir: boolean; isSymlink: boolean; exists: boolean }> {
   try {
     const st = await lstat(dir);
-    return { isDir: st.isDirectory(), isSymlink: st.isSymbolicLink() };
+    return { isDir: st.isDirectory(), isSymlink: st.isSymbolicLink(), exists: true };
   } catch {
-    return { isDir: false, isSymlink: false };
+    return { isDir: false, isSymlink: false, exists: false };
   }
 }

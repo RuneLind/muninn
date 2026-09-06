@@ -783,6 +783,39 @@ describe("the one-time frames-root rename", () => {
     });
   });
 
+  test("a REGULAR FILE at the target is 'taken' too — refuse, nothing moved, the both-exist remedy logged", async () => {
+    await withCapturedLogs(async (records) => {
+      const home = dir("capture-frames-mig-");
+      const legacy = join(home, "vimeo-frames");
+      const framesRoot = join(home, "frames");
+      mkdirSync(join(legacy, "111"), { recursive: true });
+      writeFileSync(join(legacy, "111", "1.jpg"), "OLD");
+      mkdirSync(framesRoot, { recursive: true });
+      writeFileSync(join(framesRoot, "vimeo"), "NOT A DIRECTORY");
+
+      expect(await migrateLegacyVimeoFramesRoot("default", { legacyRoot: legacy, framesRoot })).toBe("refuse");
+      expect(readFileSync(join(legacy, "111", "1.jpg"), "utf8")).toBe("OLD");
+      expect(readFileSync(join(framesRoot, "vimeo"), "utf8")).toBe("NOT A DIRECTORY");
+      const warns = records.filter((r) => r.level === "warning");
+      expect(warns.length).toBe(1);
+      expect(warns[0]!.rawMessage).toContain("Both");
+    });
+  });
+
+  test("a DANGLING symlink at the target is 'taken' — refuse, no rename attempted", async () => {
+    const home = dir("capture-frames-mig-");
+    const legacy = join(home, "vimeo-frames");
+    const framesRoot = join(home, "frames");
+    mkdirSync(join(legacy, "111"), { recursive: true });
+    writeFileSync(join(legacy, "111", "1.jpg"), "OLD");
+    mkdirSync(framesRoot, { recursive: true });
+    symlinkSync(join(home, "gone"), join(framesRoot, "vimeo"));
+
+    expect(await migrateLegacyVimeoFramesRoot("default", { legacyRoot: legacy, framesRoot })).toBe("refuse");
+    expect(lstatSync(join(framesRoot, "vimeo")).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(legacy, "111", "1.jpg"), "utf8")).toBe("OLD");
+  });
+
   test("on nais it does not run, even with an old root present", async () => {
     const home = dir("capture-frames-mig-");
     const legacy = join(home, "vimeo-frames");
