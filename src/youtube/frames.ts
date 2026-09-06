@@ -21,37 +21,39 @@
  */
 
 /**
- * The rendition frames are pulled from, and the height they are scaled to.
+ * The yt-dlp format selector for a frames download.
  *
- * 720p for the reason the Vimeo half states: a slide's text is legible there,
- * and 1080p is ~1.6× the bytes and ~2.25× the image tokens for the same
- * picture. The extractor's filter is `min(height, ih)`, so a source that is
- * SHORTER than this is never upscaled.
- */
-export const YOUTUBE_FRAME_HEIGHT = 720;
-
-/**
- * The yt-dlp format selector for a frames download: the best VIDEO-ONLY
- * rendition at most 720 tall, mp4 preferred.
- *
- * Video-only is the point. The transcript comes from huginn's caption API, so
- * this download exists solely to be decoded into JPEGs — every byte of audio in
- * it would be paid for and thrown away. `bv` is also what keeps the fallback
+ * What it GUARANTEES, in every tier: a VIDEO-ONLY rendition at most 720 tall.
+ * Video-only is the point — the transcript comes from huginn's caption API, so
+ * this download exists solely to be decoded into JPEGs, and every byte of audio
+ * in it would be paid for and thrown away. `bv` is also what keeps the fallback
  * honest: `b` (a muxed stream) at `height<=720` exists on most uploads but is
- * strictly larger, and the shared {@link YTDLP_FORMAT_SELECTOR} cannot express
- * "no audio" at all.
+ * strictly larger, and the shared `YTDLP_FORMAT_SELECTOR` in
+ * `src/video/media.ts` cannot express "no audio" at all. There is deliberately
+ * NO uncapped tail: an upload with no ≤720p video-only rendition degrades to a
+ * transcript-only capture rather than pulling 1080p to scale it down.
  *
- * Two tiers rather than one: `ext=mp4` first because an H.264 mp4 is the
- * cheapest thing ffmpeg can seek into, then the same height cap with no
- * container preference, for an upload whose only ≤720p video-only rendition is
- * WebM/VP9. There is deliberately NO uncapped tail — a capture that cannot get
- * a ≤720p video stream degrades to transcript-only rather than pulling a 1080p
- * one it would immediately scale down.
+ * What it PREFERS, tier by tier, each dropping one preference:
  *
- * `YTDLP_FORMAT_SELECTOR` in `src/video/media.ts` is the shared muxed selector
- * the other verticals use; it has no way to say "no audio".
+ *  1. `[ext=mp4][vcodec^=avc1]` — H.264 in mp4, the cheapest thing ffmpeg can
+ *     seek into, and the codec every hardware decoder has.
+ *  2. `[ext=mp4]` — an mp4 in whatever codec YouTube offers (AV1, VP9).
+ *  3. bare `[height<=720]` — any container, for an upload whose only ≤720p
+ *     video-only rendition is WebM.
+ *
+ * **The codec tier is the fix, and mp4 alone was not it:** mp4 is a CONTAINER.
+ * Measured on `SkVqJ1SGeL0`, `bv[height<=720][ext=mp4]` resolved to format 398
+ * (`av01`) on a video that also offered 136 (`avc1`) — so every one of the ~36
+ * ffmpeg seeks paid for an AV1 decode, which on this laptop has no hardware
+ * path. The preference is a preference: tiers 2 and 3 drop it, so a video with
+ * no H.264 rendition still gets frames.
+ *
+ * The `720` is `CAPTURE_FRAME_HEIGHT` spelled out: this module imports nothing
+ * by design (see the file header), and the seam's constant is what the
+ * extractor actually scales to.
  */
-export const YOUTUBE_FRAME_FORMAT_SELECTOR = "bv[height<=720][ext=mp4]/bv[height<=720]";
+export const YOUTUBE_FRAME_FORMAT_SELECTOR =
+  "bv[height<=720][ext=mp4][vcodec^=avc1]/bv[height<=720][ext=mp4]/bv[height<=720]";
 
 /**
  * Longest video this vertical will pull frames from: 3 hours, the X-video cap.
@@ -67,28 +69,17 @@ export const YOUTUBE_FRAMES_MAX_DURATION_SEC = 10_800;
 /**
  * Shortest video worth pulling frames from.
  *
- * A DURATION cut, not a frame-count one: under a minute
- * {@link frameBudgetFor} still hands out 15 ticks, so the budget would happily
- * sample a 40-second clip every 2.7 seconds — a download, 15 ffmpeg runs and 15
- * image reads for a video whose transcript already says everything. Talks are
- * what slides pay for.
+ * A DURATION cut, and the reason is what a short video IS, not what the budget
+ * would spend on it: nothing under a minute is a slide deck. A clip's
+ * transcript already says everything, and the frames would be a talking head.
+ *
+ * Note the density it admits rather than refuses: `frameBudgetFor` hands out 15
+ * ticks up to 60 s and **25** up to 180 s, so the cut sits immediately below its
+ * DENSEST sampling — a 150 s clip is measured at 25 frames, one every 6 s. That
+ * is deliberate (a two-minute conference lightning talk does have slides) and it
+ * is why the cut is stated as an editorial rule rather than as a spend bound.
  */
 export const YOUTUBE_FRAMES_MIN_DURATION_SEC = 60;
-
-/**
- * A transcript-only summarize call gets the 600 s floor `summarizeTimeoutFor`
- * gives a 30-frame TikTok; with frames ON it is scaled by the frame count
- * through that same function (24 s per frame past 30), because every frame is
- * one more image Read in the same session. The Vimeo constant, for the same
- * reason.
- *
- * This is a RAISE for the transcript-only path, which used to inherit the bot's
- * own `timeoutMs` — stated, because it is the one thing here a frames-off
- * capture notices. It is a ceiling on a background job that nothing waits on,
- * and the old default (120 s from `CLAUDE_TIMEOUT_MS`) is well under what a
- * long transcript takes.
- */
-export const YOUTUBE_SUMMARIZE_TIMEOUT_MS = 600_000;
 
 /**
  * The most bytes of windowed transcript the ingest body may carry — huginn's
@@ -171,8 +162,8 @@ export function decideYouTubeFrames(input: {
  * rendition of a long talk is two orders of magnitude bigger. Floor 5 min,
  * 0.3 s per second of talk, ceiling 30 min — slack by construction rather than
  * a fitted curve: measured on a 1435 s talk, the rendition is 51.5 MiB and
- * comes down in 8.6 s against a 360 s budget. It bounds a HANG; nothing waits
- * on the job.
+ * comes down in 8.6 s against the 430.5 s this gives it. It bounds a HANG;
+ * nothing waits on the job.
  *
  * There is no BYTE cap, and that is stated rather than papered over:
  * `--max-filesize` has no exit code of its own, so a caller cannot tell an
@@ -186,39 +177,94 @@ export function youtubeDownloadTimeoutFor(durationSec: number): number {
   return Math.min(1_800_000, Math.max(300_000, scaled));
 }
 
+/** The line a truncated transcript ends on, so a reader never takes the cut for the end of the talk. */
+export const TRANSCRIPT_TRUNCATION_NOTE =
+  "_(transcript truncated — the talk continues past this point.)_";
+
+/** What {@link capTranscriptWindows} did, in the two numbers a caller can log. */
+export interface CappedTranscript {
+  readonly text: string;
+  readonly truncated: boolean;
+  /** UTF-8 bytes of the transcript handed in. */
+  readonly inputBytes: number;
+  /** UTF-8 bytes of {@link text} — the note included, and never above `maxBytes`. */
+  readonly keptBytes: number;
+}
+
 /**
- * The windowed transcript, trimmed to {@link YOUTUBE_TRANSCRIPT_MAX_BYTES} at a
- * WINDOW boundary.
+ * The longest prefix of `text` that fits in `maxBytes`, cut at a LINE boundary
+ * and never inside a code point.
+ *
+ * Byte-safe by construction: the slice is decoded, and a multi-byte sequence
+ * cut in half decodes to a single trailing U+FFFD, which is dropped. Then the
+ * head is trimmed back to its last newline, so no half-line survives. Returns
+ * `""` when not even one line fits.
+ */
+function headWithinBytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const sliced = new TextDecoder().decode(new TextEncoder().encode(text).slice(0, maxBytes));
+  const head = sliced.endsWith("�") ? sliced.slice(0, -1) : sliced;
+  const lastNewline = head.lastIndexOf("\n");
+  return (lastNewline > 0 ? head.slice(0, lastNewline) : head).trimEnd();
+}
+
+/**
+ * The windowed transcript, trimmed to `maxBytes` at a WINDOW boundary.
  *
  * At a boundary rather than at a byte, because the windows are the contract: a
  * cut mid-window leaves a `### [HH:MM:SS]` heading over half a sentence, and
  * huginn's heading splitter would carry that timestamp into a chunk that ends
  * mid-word. A transcript over the cap keeps as many whole windows as fit and
- * says so in the text, so a reader of the stored document is never shown a
- * truncation as if it were the end of the talk.
+ * says so in the text.
  *
- * Pure. `truncated` is returned as well as noted, so a caller can log it.
+ * Two things the first cut of this got wrong, both stated because they are
+ * invisible until a real 3-hour talk arrives:
+ *
+ *  - **The note's bytes come out of the budget.** It is part of what is
+ *    returned, so a budget that ignores it hands the caller a string over the
+ *    cap it asked for — and the cap exists to keep the ingest body under
+ *    huginn's own bound.
+ *  - **A first window over the cap keeps a HEAD of it, never the note alone.**
+ *    huginn windows at 120 s, but nothing guarantees the first window fits an
+ *    arbitrary `maxBytes`, and answering with only the truncation note is a
+ *    document that says a talk exists and nothing about it. The head is cut at
+ *    a line boundary ({@link headWithinBytes}), so the `### [HH:MM:SS]` heading
+ *    and whole lines under it survive.
+ *
+ * Pure. `truncated` and the byte counts are returned so a caller can say so —
+ * `summarizeVideo` warns with them; without a consumer, a talk whose second
+ * half never reached the document was invisible outside the stored file.
  */
 export function capTranscriptWindows(
   transcript: string,
   maxBytes: number = YOUTUBE_TRANSCRIPT_MAX_BYTES,
-): { text: string; truncated: boolean } {
+): CappedTranscript {
   const encoder = new TextEncoder();
-  if (encoder.encode(transcript).length <= maxBytes) return { text: transcript, truncated: false };
+  const inputBytes = encoder.encode(transcript).length;
+  if (inputBytes <= maxBytes) {
+    return { text: transcript, truncated: false, inputBytes, keptBytes: inputBytes };
+  }
+
+  // The note plus the `\n\n` it is joined on is reserved up front.
+  const noteBytes = encoder.encode(TRANSCRIPT_TRUNCATION_NOTE).length + 2;
+  const budget = maxBytes - noteBytes;
 
   const windows = transcript.split("\n\n");
   const kept: string[] = [];
   let bytes = 0;
   for (const w of windows) {
-    // +2 for the `\n\n` this window is joined on (the first one pays it too;
-    // one separator of slack is not worth an off-by-one branch).
-    const size = encoder.encode(w).length + 2;
-    if (bytes + size > maxBytes) break;
+    // The separator is only paid for from the second window on.
+    const size = encoder.encode(w).length + (kept.length === 0 ? 0 : 2);
+    if (bytes + size > budget) break;
     kept.push(w);
     bytes += size;
   }
-  const note = "_(transcript truncated — the talk continues past this window.)_";
-  return { text: [...kept, note].join("\n\n"), truncated: true };
+
+  // Not one whole window fits: keep whole LINES of the first one instead. With
+  // no room even for the note, the note is what goes — the cap is the promise.
+  const body = kept.length > 0 ? kept.join("\n\n") : headWithinBytes(transcript, budget);
+  const text = body === "" ? headWithinBytes(transcript, maxBytes) : `${body}\n\n${TRANSCRIPT_TRUNCATION_NOTE}`;
+  return { text, truncated: true, inputBytes, keptBytes: encoder.encode(text).length };
 }
 
 /**
@@ -235,10 +281,23 @@ export function capTranscriptWindows(
  * every chunk). A `transcript_markdown` field on the YouTube ingest is the
  * better shape and is filed as a follow-up.
  *
- * Only the INGEST body carries it: `completeJob`, the `similar` enrichment the
- * card shows and the source-page draft all get the summary alone.
+ * Only the INGEST body carries it: `completeJob`, the shelf card's text and the
+ * source-page draft all get the summary alone. ⚠️ The `similar` list is NOT in
+ * that group — huginn computes it from `result["summary"][:2000]`, i.e. from
+ * the string this function returns, so a summary under 2 000 characters lets
+ * the first transcript window into the similarity query (huginn
+ * `main/ingest/registry.py`). It is a query, not stored content; the
+ * `transcript_markdown` follow-up retires it.
+ *
+ * Returns what the cap did, so the caller can warn when a talk did not fit. The
+ * byte counts describe the TRANSCRIPT (in, and what survived the cap) — not
+ * `text`, which is the summary and the heading on top of it.
  */
-export function appendTranscriptSection(summary: string, transcript: string): string {
-  const capped = capTranscriptWindows(transcript);
-  return `${summary.trimEnd()}\n\n## Transcript\n\n${capped.text}\n`;
+export function appendTranscriptSection(
+  summary: string,
+  transcript: string,
+  maxBytes: number = YOUTUBE_TRANSCRIPT_MAX_BYTES,
+): CappedTranscript {
+  const capped = capTranscriptWindows(transcript, maxBytes);
+  return { ...capped, text: `${summary.trimEnd()}\n\n## Transcript\n\n${capped.text}\n` };
 }
