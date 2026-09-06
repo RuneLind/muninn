@@ -317,8 +317,10 @@ on the captions reports no manifest and a reader who ticked Slides gets none.
 `awaitManifestMs` (`VIMEO_MANIFEST_WAIT_MS`, 10 s, inside the harvest budget)
 keeps the page playing until the URL lands; transcript-only captures pass
 0 and close as before. **The URL's PRIMARY source is the player's `/config`
-response** (`request.files.dash.cdns[default_cdn].url`, read by
-`manifestUrlFromPlayerConfig`, host-pinned), and the player's own
+response** (`request.files.dash.cdns[default_cdn].avc_url` — the AVC-only
+manifest, since `chooseRepresentation` ignores `codecs` — then `url`, read by
+`manifestUrlFromPlayerConfig`, host-pinned, body capped at
+`VIMEO_PLAYER_CONFIG_MAX_BYTES`), and the player's own
 `playlist.json` request is only the fallback — because the player picks DASH
 or HLS per page LOAD. Measured 2026-09-06 on `vimeo.com/1223305711`, six
 harvests: two loads streamed HLS (`…/playlist/av/primary/sub/<track>/prot/…/playlist.m3u8`
@@ -342,9 +344,10 @@ never by suffix.
 
 **In the job, frames sit between harvest and summarize as `extracting_frames`,
 and every failure is a WARN plus transcript-only, never an error job.** No
-`manifestUrl` from the harvest (the player never asked for one inside the
-wait — or asked on a host not yet listed — and the `VIMEO_HARVEST_STUB` deps
-deliberately return none) ⇒
+`manifestUrl` from the harvest (no readable `/config` inside the wait AND the
+player never requested a `playlist.json` — an HLS load never does — or the
+config named a host not yet listed; the `VIMEO_HARVEST_STUB` deps deliberately
+return none) ⇒
 `frames: no_manifest`; extraction throwing ⇒ `frames: failed`; both land on the
 trace as `frames` + `frameCount` so the outcome is readable afterwards. The
 frame list rides the USER prompt after the transcript (`framesPromptSection`,

@@ -44,6 +44,12 @@ export const VIMEO_HARVEST_TIMEOUT_MS = 60_000;
 /** A 53-minute talk's VTT is 62 KB. The cap bounds the process, generously. */
 export const VIMEO_VTT_MAX_BYTES = 2 * 1024 * 1024;
 export const VIMEO_VTT_TIMEOUT_MS = 20_000;
+/**
+ * The player's `/config` body is parsed for the manifest URL. Measured ~300 KB
+ * on 2026-09-06; the cap bounds the one read in this vertical that does not go
+ * through `downloadPinned`. Over it, the config is ignored (the sniff remains).
+ */
+export const VIMEO_PLAYER_CONFIG_MAX_BYTES = 2 * 1024 * 1024;
 
 export interface VimeoCaptionTrack {
   readonly lang: string;
@@ -366,10 +372,14 @@ function isMediaHostUrl(u: string): boolean {
 
 /**
  * The signed JSON manifest URL out of the player's `/config` response, or
- * undefined. `request.files.dash.cdns[default_cdn].url` (then its `avc_url`,
+ * undefined. `request.files.dash.cdns[default_cdn].avc_url` (then its `url`,
  * then any other cdn's) — on an https host in {@link VIMEO_MEDIA_HOSTS}, the
  * same pin the download applies, so what is recorded is what `media.ts` will
- * agree to fetch.
+ * agree to fetch. `avc_url` first: measured, the two differ only by
+ * `?omit=av1-hevc` on `avc_url`, and `chooseRepresentation` picks by height
+ * without looking at `codecs`, so the AVC-only manifest is the one whose
+ * every rendition the host ffmpeg decodes. (The player's own DASH request is
+ * the `url` variant, so the sniff fallback still records that one.)
  *
  * Why the config and not the player's own playlist request: the player picks
  * DASH or HLS per page load. Measured 2026-09-06 (vimeo.com/1223305711, six
@@ -391,7 +401,7 @@ export function manifestUrlFromPlayerConfig(raw: unknown): string | undefined {
   for (const name of order) {
     const cdn = asRecord(cdns[name]);
     if (!cdn) continue;
-    for (const key of ["url", "avc_url"] as const) {
+    for (const key of ["avc_url", "url"] as const) {
       const u = cdn[key];
       if (typeof u === "string" && isMediaHostUrl(u)) return u;
     }
@@ -457,9 +467,12 @@ async function harvestInContext(
   page.on("response", (res) => {
     if (manifestUrl || !isPlayerConfigUrl(res.url(), videoId)) return;
     void res
-      .json()
-      .then((json: unknown) => {
-        const fromConfig = manifestUrlFromPlayerConfig(json);
+      .body()
+      .then((body: Uint8Array) => {
+        if (body.byteLength > VIMEO_PLAYER_CONFIG_MAX_BYTES) {
+          throw new Error(`config body ${body.byteLength} bytes exceeds the ${VIMEO_PLAYER_CONFIG_MAX_BYTES}-byte cap`);
+        }
+        const fromConfig = manifestUrlFromPlayerConfig(JSON.parse(new TextDecoder().decode(body)));
         if (fromConfig && !manifestUrl) manifestUrl = fromConfig;
       })
       .catch((err: unknown) => {
