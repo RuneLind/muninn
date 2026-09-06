@@ -20,12 +20,13 @@ import { createQueue } from "../wiki/queue.ts";
 import { summarizeTimeoutFor } from "../video/media.ts";
 import { canonicalVimeoUrl } from "./url.ts";
 import { fetchVimeoManifest as realFetchManifest, type VimeoManifest } from "./media.ts";
+import { extractCadenceFrames as realExtractFrames } from "./frames.ts";
 import {
-  extractCadenceFrames as realExtractFrames,
+  VIMEO_FRAME_SOURCE,
   framesPromptSection,
   keepReferencedFrames,
-  type VimeoFrame,
-} from "./frames.ts";
+  type CaptureFrame,
+} from "../summaries/frames.ts";
 import {
   chooseTrack,
   downloadVtt as realDownloadVtt,
@@ -209,7 +210,7 @@ export type ExtractFramesFn = (input: {
   manifest: VimeoManifest;
   durationSec: number;
   workDir: string;
-}) => Promise<VimeoFrame[]>;
+}) => Promise<CaptureFrame[]>;
 
 /**
  * The Whisper half (PR 5). `unavailableReason` is the pre-flight (null ⇒ go);
@@ -404,7 +405,7 @@ export async function summarizeVimeo(
   // The frames' work dir — created only when frames are on, removed in the
   // `finally` whatever happened, AFTER the kept frames have been copied out.
   const workDir = join(tmpdir(), `muninn-vimeo-${jobId}`);
-  let frames: VimeoFrame[] = [];
+  let frames: CaptureFrame[] = [];
   try {
     // 0. Resolve the deps INSIDE the try. `resolveServingProfile` throws on an
     //    unrecognised MUNINN_PROFILE and the stat can throw on a permission
@@ -659,7 +660,7 @@ export async function summarizeVimeo(
       // TikTok shape); the system prompt is the kind + riders and says nothing
       // about frames, so a transcript-only capture's prompt is byte-identical
       // to before.
-      prompt: transcript + framesPromptSection(meta.videoId, frames),
+      prompt: transcript + framesPromptSection(VIMEO_FRAME_SOURCE, meta.videoId, frames),
       systemPrompt,
       config,
       botConfig: runBot,
@@ -690,7 +691,7 @@ export async function summarizeVimeo(
     let keptFrames: number[] = [];
     if (frames.length > 0) {
       try {
-        keptFrames = await keepReferencedFrames(summary, meta.videoId, frames, resolved.framesRoot);
+        keptFrames = await keepReferencedFrames(summary, VIMEO_FRAME_SOURCE, meta.videoId, frames, resolved.framesRoot);
       } catch (err) {
         log.error("Vimeo capture {jobId}: keeping quoted frames failed: {error}", {
           jobId,

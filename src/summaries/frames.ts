@@ -1,0 +1,589 @@
+/**
+ * Slides in a capture summary — the SOURCE-NEUTRAL half.
+ *
+ * One frame every `frameBudgetFor(duration)` ticks of a video, read by the
+ * model and quoted INLINE in the summary as
+ * `![Slide at HH:MM:SS](/api/frames/<source>/<id>/<sec>.jpg)`. Vimeo pulls its
+ * ticks out of a DASH manifest (`src/vimeo/frames.ts`); a source with the whole
+ * file on disk uses {@link extractCadenceFramesFromFile}. Everything either of
+ * them does with a URL, a path, the served root or the summary text is here.
+ *
+ * Three contracts this module lives by:
+ *
+ * **The id gate is an invariant of the SEAM, not of the route.** Every function
+ * that turns an id into a path, a pattern or a filesystem operation refuses an
+ * id that fails its `source.idRe` — a builder ({@link frameUrlPath},
+ * {@link framesPromptSection}) by THROWING, since there is no honest address to
+ * return for a non-address, and a reader or writer over untrusted input
+ * ({@link referencedFrameSeconds}, {@link keepReferencedFrames},
+ * {@link removeKeptFrames}) by refusing to match or touch anything and saying
+ * so. The route's charset gates are a second line, not the first: before this
+ * module `referencedFrameSeconds` interpolated the id RAW into a `RegExp` and
+ * only `removeKeptFrames` gated at all. The id is regex-escaped on top of the
+ * gate, so the two failures are independent.
+ *
+ * **The file name IS the integer second.** `<tick>.jpg`, no padding — the route
+ * serves exactly that spelling, so `047.jpg` is an address that 404s and a
+ * summary quoting it is treated as quoting nothing ({@link FRAME_FILE_RE},
+ * and the canonical-spelling check in {@link referencedFrameSeconds}). Every
+ * path {@link extractCadenceFramesFromFile} produces satisfies that shape by
+ * construction; ticks are distinct integers, so no two frames collide.
+ *
+ * **The dependency direction is one-way.** This module owns every
+ * source-neutral symbol — the helpers above plus {@link FRAME_FILE_RE},
+ * {@link FRAME_FFMPEG_TIMEOUT_MS}, {@link framesTimeoutFor} and the ffmpeg grab
+ * — and never imports a vertical. `src/vimeo/frames.ts` keeps only
+ * `VIMEO_FRAME_HEIGHT` and its manifest-shaped `extractCadenceFrames`, and
+ * imports the rest from here. A second copy of a timeout constant next door is
+ * exactly the two-literals failure `src/video/media.ts` documents for the frame
+ * budget, where a raised ceiling stayed inert behind a second literal.
+ *
+ * Where frames live: extraction writes into the job's WORK dir (which the model
+ * reads via `extraDirs`); after the summary is written, only the frames the
+ * summary REFERENCES are copied to `~/.muninn/frames/<source>/<id>/<sec>.jpg`
+ * ({@link keepReferencedFrames}) — that is what `GET /api/frames/...` serves
+ * (`src/dashboard/routes/frames-routes.ts`) — and the work dir is deleted with
+ * the rest. Nothing else in the process writes there.
+ */
+
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { copyFile, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { getLog } from "../logging.ts";
+import { frameBudgetFor } from "../video/media.ts";
+
+const log = getLog("summaries", "frames");
+
+/** The capture verticals that keep frames. One path segment each. */
+export type FrameSourceName = "vimeo" | "youtube";
+
+/**
+ * What the seam needs to know about a vertical: its name (the path segment and
+ * the directory under the root) and the CHARSET of its video ids, which is the
+ * gate every helper here applies.
+ */
+export interface FrameSource {
+  readonly name: FrameSourceName;
+  /** The whole id, anchored. Never carries `g` — these regexes are re-tested. */
+  readonly idRe: RegExp;
+  /**
+   * A path prefix documents written BEFORE the seam quote their frames by,
+   * still served by an alias route. `referencedFrameSeconds` accepts it beside
+   * the current shape, so a re-run over old markdown keeps its frames.
+   */
+  readonly legacyUrlPrefix?: string;
+}
+
+/** Vimeo ids are digits, and a leading zero is a second key for one video (`src/vimeo/url.ts`). */
+export const VIMEO_FRAME_SOURCE: FrameSource = {
+  name: "vimeo",
+  idRe: /^\d{1,20}$/,
+  // Every Vimeo document ingested before the seam quotes this prefix.
+  legacyUrlPrefix: "/api/vimeo/frames/",
+};
+
+/** A YouTube video id is 11 characters of the URL-safe base64 alphabet. */
+export const YOUTUBE_FRAME_SOURCE: FrameSource = {
+  name: "youtube",
+  idRe: /^[A-Za-z0-9_-]{11}$/,
+};
+
+export const FRAME_SOURCES: readonly FrameSource[] = [VIMEO_FRAME_SOURCE, YOUTUBE_FRAME_SOURCE];
+
+/** The source with this name, or undefined — the route's default-deny lookup. */
+export function frameSourceByName(name: string): FrameSource | undefined {
+  return FRAME_SOURCES.find((s) => s.name === name);
+}
+
+/** The most slides a summary may quote inline — past this it stops being a summary. */
+export const MAX_INLINE_SLIDES = 8;
+
+/** One ffmpeg run per frame; a seek + one decoded frame is well under a second. */
+export const FRAME_FFMPEG_TIMEOUT_MS = 15_000;
+
+/** The route's charset for the file segment it serves. The name IS the integer second. */
+export const FRAME_FILE_RE = /^\d{1,6}\.jpg$/;
+
+export interface CaptureFrame {
+  /** Absolute path of the JPEG (inside the work dir while the job runs). */
+  readonly path: string;
+  /** The cadence time this frame was taken at, whole seconds — also its file name. */
+  readonly tSeconds: number;
+}
+
+/** Thrown when an id that cannot be part of an address is asked to become one. */
+export class FrameIdError extends Error {
+  constructor(source: FrameSource, id: string) {
+    super(`Not a ${source.name} video id: ${JSON.stringify(id)}`);
+    this.name = "FrameIdError";
+  }
+}
+
+/** Whether this id may be used as a path segment and a pattern for this source. */
+export function isFrameId(source: FrameSource, id: string): boolean {
+  return source.idRe.test(id);
+}
+
+/** The gate the BUILDERS apply: there is no honest address for a non-address. */
+export function assertFrameId(source: FrameSource, id: string): void {
+  if (!isFrameId(source, id)) throw new FrameIdError(source, id);
+}
+
+/** Where kept frames are served from. `~/.muninn/frames`, beside `agent-cwd`. */
+export function framesRootDir(): string {
+  return join(homedir(), ".muninn", "frames");
+}
+
+/** `<root>/<source>/<id>` — the only directory shape this module reads or writes. */
+export function frameDirFor(source: FrameSource, id: string, root: string = framesRootDir()): string {
+  assertFrameId(source, id);
+  return join(root, source.name, id);
+}
+
+/**
+ * The cadence: `frameBudgetFor(duration)` frames (the TikTok/X budget — ~40 s
+ * spacing, ceiling 60 at 40 min, spacing growing again past that), at the
+ * MIDPOINTS of equal slices rather than the slice starts, so the first frame is
+ * not the title card at t=0 and the last is not the applause. Whole seconds,
+ * since the second IS the frame's file name and the route's path segment.
+ * Pure.
+ */
+export function cadenceTimes(durationSec: number): number[] {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) return [];
+  const n = frameBudgetFor(durationSec);
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = Math.floor(((i + 0.5) * durationSec) / n);
+    if (out.length === 0 || t !== out[out.length - 1]) out.push(t);
+  }
+  return out;
+}
+
+/** `HH:MM:SS` for the frame list — the same spelling the transcript's window headings use. */
+export function formatHms(totalSec: number): string {
+  const s = Math.max(0, Math.floor(totalSec));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+/** The URL path the summary quotes a frame by, and the route serves it at. */
+export function frameUrlPath(source: FrameSource, id: string, tSeconds: number): string {
+  assertFrameId(source, id);
+  return `/api/frames/${source.name}/${id}/${Math.floor(tSeconds)}.jpg`;
+}
+
+/**
+ * The `t=HH:MM:SS <path>` list handed to the model, plus the one rule the TikTok
+ * prompt does not need: a slide is quoted as an image IN PLACE, by the exact
+ * path shape the route serves, only where it adds something, at most
+ * {@link MAX_INLINE_SLIDES} times.
+ */
+export function framesPromptSection(
+  source: FrameSource,
+  id: string,
+  frames: readonly CaptureFrame[],
+): string {
+  assertFrameId(source, id);
+  if (frames.length === 0) return "";
+  const list = frames.map((f) => `t=${formatHms(f.tSeconds)} ${f.path}`).join("\n");
+  return (
+    `\n\nSlide frames, one every ~40 s of the talk (read EVERY image below with the Read tool FIRST, ` +
+    `batching many Read calls into one turn — never one frame per message):\n${list}\n\n` +
+    `When a frame shows a slide that ADDS something the transcript did not say — a diagram, code, a table, ` +
+    `a number, a definition on screen — quote it as an image IN PLACE in the summary, right where the point ` +
+    `it illustrates is made, using EXACTLY this markdown and nothing else in the alt text:\n` +
+    `![Slide at HH:MM:SS](${frameUrlPath(source, id, 0).replace(/0\.jpg$/, "<sec>.jpg")})\n` +
+    `where <sec> is the integer in that frame's file name (t=00:23:10 is the file 1390.jpg) and HH:MM:SS is ` +
+    `its time. At most ${MAX_INLINE_SLIDES} slides in the whole summary; a speaker-only frame, a title card ` +
+    `or a slide the transcript already states in full is not quoted. Never invent a path.`
+  );
+}
+
+/** Every character a `RegExp` gives meaning to, made literal. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The whole seconds of every frame the summary quotes by this video's path —
+ * what {@link keepReferencedFrames} copies out of the work dir. Pure;
+ * duplicates collapsed; a path of another video is not this video's frame.
+ *
+ * BOTH spellings count: the current `/api/frames/<source>/<id>/` and, where the
+ * source declares one, the `legacyUrlPrefix` documents written before the seam
+ * quote. A re-run over old markdown that accepted only the new shape would keep
+ * no frames at all.
+ *
+ * The id is gated AND escaped before it enters the pattern: gated because an id
+ * outside the charset addresses nothing this route serves, escaped because a
+ * pattern is not a place to find out.
+ */
+export function referencedFrameSeconds(summary: string, source: FrameSource, id: string): number[] {
+  if (!isFrameId(source, id)) {
+    log.warn("Not a {source} video id, so nothing is a reference to its frames: {id}", { source: source.name, id });
+    return [];
+  }
+  const prefixes = [`/api/frames/${source.name}/`, ...(source.legacyUrlPrefix ? [source.legacyUrlPrefix] : [])];
+  const re = new RegExp(
+    `\\((?:${prefixes.map(escapeRegExp).join("|")})${escapeRegExp(id)}/(\\d{1,6})\\.jpg\\)`,
+    "g",
+  );
+  const out = new Set<number>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(summary)) !== null) {
+    // Only the CANONICAL spelling is a reference: the file is `47.jpg` and the
+    // route serves exactly that, so `047.jpg` is an address that will 404 —
+    // counting it as kept (via `Number`) would report a frame the reader never
+    // gets. Logged and dropped, like an invented path.
+    if (String(Number(m[1])) !== m[1]) {
+      log.warn("The {source} summary of {id} quotes a non-canonical frame path {path} — not a served address", {
+        source: source.name,
+        id,
+        path: m[0],
+      });
+      continue;
+    }
+    out.add(Number(m[1]));
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/**
+ * Copy the frames the summary references into the served root; everything
+ * else stays in the work dir and dies with it. Returns the seconds kept. A
+ * reference to a frame that was never extracted (the model invented a path)
+ * is logged and skipped — the reader gets a broken image, not a served file
+ * from nowhere. An id outside the source's charset keeps nothing and creates
+ * no directory.
+ */
+export async function keepReferencedFrames(
+  summary: string,
+  source: FrameSource,
+  id: string,
+  frames: readonly CaptureFrame[],
+  root: string = framesRootDir(),
+): Promise<number[]> {
+  if (!isFrameId(source, id)) {
+    log.warn("Not a {source} video id — no frames kept for {id}", { source: source.name, id });
+    return [];
+  }
+  const wanted = referencedFrameSeconds(summary, source, id);
+  if (wanted.length === 0) return [];
+  const dir = join(root, source.name, id);
+  const bysecond = new Map(frames.map((f) => [f.tSeconds, f] as const));
+  await mkdir(dir, { recursive: true });
+  const kept: number[] = [];
+  for (const sec of wanted) {
+    const frame = bysecond.get(sec);
+    if (!frame) {
+      log.warn("The {source} summary of {id} quotes frame {sec}.jpg, which was never extracted — skipped", {
+        source: source.name,
+        id,
+        sec,
+      });
+      continue;
+    }
+    await copyFile(frame.path, join(dir, `${sec}.jpg`));
+    kept.push(sec);
+  }
+  return kept;
+}
+
+/**
+ * Remove every kept frame of ONE video — the `/summaries` Delete's counterpart
+ * to {@link keepReferencedFrames}. The id is charset-gated, so the path removed
+ * is always `<root>/<source>/<id>` and never anything a document's url could
+ * steer; an id that fails the gate removes nothing and returns false. A missing
+ * directory is not an error (a transcript-only capture kept none). Returns
+ * whether a directory was there.
+ */
+export async function removeKeptFrames(
+  source: FrameSource,
+  id: string,
+  root: string = framesRootDir(),
+): Promise<boolean> {
+  if (!isFrameId(source, id)) return false;
+  const dir = join(root, source.name, id);
+  let present: boolean;
+  try {
+    present = (await stat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
+  if (!present) return false;
+  await rm(dir, { recursive: true, force: true });
+  log.info("Removed the kept frames of {source} video {id}", { source: source.name, id });
+  return true;
+}
+
+/**
+ * Whether THIS SOURCE's half of the frames root holds anything at all. An
+ * ABSENT directory is "no" (no capture of this source ever kept a frame); any
+ * other read failure is "yes" with a warn, so a transient EMFILE/EACCES falls
+ * through to the listing + removal rather than silently orphaning the frames of
+ * a deleted document.
+ *
+ * Scoped to `<root>/<source>/` rather than the root: with two verticals sharing
+ * it, a YouTube capture's kept frames would otherwise re-open the listing read
+ * on every Vimeo delete.
+ */
+export async function framesRootHasEntries(
+  source: FrameSource,
+  root: string = framesRootDir(),
+): Promise<boolean> {
+  const dir = join(root, source.name);
+  try {
+    return (await readdir(dir)).length > 0;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    log.warn("Could not read the {source} frames dir {dir} ({code}) — assuming it has kept frames", {
+      source: source.name,
+      dir,
+      code: (err as NodeJS.ErrnoException).code ?? "unknown",
+    });
+    return true;
+  }
+}
+
+export interface RemoveFramesForDocumentDeps {
+  /** Where kept frames live; default {@link framesRootDir}. */
+  framesRoot?: string;
+  /**
+   * The video id behind a document id, when the fast path does not know it —
+   * a huginn listing read in production. `null` when nothing resolves.
+   */
+  resolveVideoId: (documentId: string) => Promise<string | null>;
+}
+
+/**
+ * Remove the kept frames of a DELETED document, for one source.
+ *
+ * Called from INSIDE a vertical's own single delete listener, never as a second
+ * listener of its own: the Vimeo listener reads its recently-ingested map for
+ * the video id and DELETES that entry first, so a second listener fanning out
+ * in Set order would run the dedup one first, find nothing, and send every
+ * delete down the fallback — orphaning the frames of any document huginn's
+ * listing had already reindexed away.
+ *
+ * The fast path is therefore load-bearing: with a `knownId` nothing is looked
+ * up at all. Without one, the frames dir is checked first (frames are off by
+ * default, so most deletes have nothing to remove and must not cost a listing
+ * read), then `resolveVideoId`. Best-effort throughout: a listing that is down
+ * leaves the frames in place with a warn, and the document is gone either way.
+ */
+export async function removeKeptFramesForDocument(
+  source: FrameSource,
+  documentId: string,
+  knownId: string | null,
+  deps: RemoveFramesForDocumentDeps,
+): Promise<void> {
+  try {
+    let id = knownId;
+    if (id === null && !(await framesRootHasEntries(source, deps.framesRoot ?? framesRootDir()))) return;
+    if (id === null) id = await deps.resolveVideoId(documentId);
+    if (id === null) {
+      log.info("{source} document {documentId} was deleted but no video id resolves for it — no frames to remove", {
+        source: source.name,
+        documentId,
+      });
+      return;
+    }
+    await removeKeptFrames(source, id, deps.framesRoot ?? framesRootDir());
+  } catch (err) {
+    log.warn("Removing the kept frames for deleted {source} document {documentId} failed: {error}", {
+      source: source.name,
+      documentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** 30 s + 3 s per frame: a segment fetch (~0.3 s) and one ffmpeg run (~0.3 s) each, with slack. */
+export function framesTimeoutFor(frameCount: number): number {
+  return 30_000 + 3_000 * Math.max(0, frameCount);
+}
+
+/** One frame out of `file` at `offsetSec`, scaled to at most `height`, as JPEG. */
+export type GrabFrame = (file: string, offsetSec: number, outPath: string, height: number) => Promise<void>;
+
+export interface ExtractFramesFromFileOptions {
+  /** The tallest the frame may be; a shorter source is never upscaled. */
+  height: number;
+  /** Test seam for the frame grab; production spawns ffmpeg. */
+  grabFrame?: GrabFrame;
+  /** Whole-pass budget; default {@link framesTimeoutFor}. */
+  timeoutMs?: number;
+}
+
+/**
+ * One frame per cadence tick out of a LOCAL video file — the shape a vertical
+ * that downloads the whole video uses, against Vimeo's per-segment shape.
+ *
+ * The seek is ABSOLUTE (the file starts at t=0), and fast: `-ss` before `-i` on
+ * a local file seeks by index rather than decoding forward. A failure on ONE
+ * frame fails the pass — a summary that quotes slide 23 but never saw slide 24
+ * is a partial record presented as complete, and the caller degrades the WHOLE
+ * capture to transcript-only with a warn, the TikTok precedent.
+ *
+ * Every produced path is `<outDir>/<integer>.jpg`, which is what
+ * {@link FRAME_FILE_RE} accepts and {@link keepReferencedFrames} resolves; the
+ * ticks are distinct integers by construction, so no two frames collide.
+ */
+export async function extractCadenceFramesFromFile(
+  file: string,
+  durationSec: number,
+  outDir: string,
+  opts: ExtractFramesFromFileOptions,
+): Promise<CaptureFrame[]> {
+  const times = cadenceTimes(durationSec);
+  if (times.length === 0) return [];
+  const grab = opts.grabFrame ?? ffmpegGrabFrame;
+  const timeoutMs = opts.timeoutMs ?? framesTimeoutFor(times.length);
+  const deadline = Date.now() + timeoutMs;
+  await mkdir(outDir, { recursive: true });
+  const frames: CaptureFrame[] = [];
+  for (const t of times) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Frame extraction timed out after ${timeoutMs}ms (${frames.length}/${times.length} frames)`);
+    }
+    const out = join(outDir, `${t}.jpg`);
+    await grab(file, t, out, opts.height);
+    frames.push({ path: out, tSeconds: t });
+  }
+  log.info("Extracted {n} cadence frames from {file}", { n: frames.length, file });
+  return frames;
+}
+
+/**
+ * The ffmpeg argv for one frame grab. Pure and exported so the argv itself is
+ * asserted rather than an ffmpeg run.
+ *
+ * `min(<height>\,ih)` — the comma ESCAPED, because a bare one separates filters
+ * in a filtergraph — is what stops a shorter source being upscaled: a 360p
+ * rendition scaled to 720 is the same picture with twice the bytes and twice
+ * the image tokens. `-ss` before `-i` is the fast seek.
+ */
+export function ffmpegFrameArgs(file: string, offsetSec: number, outPath: string, height: number): string[] {
+  return [
+    "ffmpeg",
+    "-v",
+    "error",
+    "-y",
+    "-ss",
+    offsetSec.toFixed(2),
+    "-i",
+    file,
+    "-frames:v",
+    "1",
+    "-vf",
+    `scale=-2:min(${height}\\,ih),format=yuvj420p`,
+    "-q:v",
+    "3",
+    outPath,
+  ];
+}
+
+/** One frame at `offsetSec` into `file`, scaled to at most `height`, as JPEG. */
+export const ffmpegGrabFrame: GrabFrame = async (file, offsetSec, outPath, height) => {
+  const proc = Bun.spawn(ffmpegFrameArgs(file, offsetSec, outPath, height), {
+    stdout: "ignore",
+    stderr: "pipe",
+    stdin: "ignore",
+  });
+  const timer = setTimeout(() => proc.kill(), FRAME_FFMPEG_TIMEOUT_MS);
+  try {
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    if (exitCode !== 0) {
+      throw new Error(`ffmpeg frame grab failed (exit ${exitCode}): ${stderr.slice(-300)}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!(await Bun.file(outPath).exists())) {
+    throw new Error(`ffmpeg wrote no frame at ${offsetSec.toFixed(2)}s of ${file}`);
+  }
+};
+
+/** Where the Vimeo vertical kept frames before the seam. */
+export const LEGACY_VIMEO_FRAMES_DIRNAME = "vimeo-frames";
+
+export type FramesRootMigration =
+  /** Move the old root in: it is there and its new place is not. */
+  | "move"
+  /** Nothing to do: no old root. */
+  | "nothing"
+  /** Both exist, or this profile does not migrate — leave both alone, loudly. */
+  | "refuse";
+
+/**
+ * Whether the one-time `~/.muninn/vimeo-frames` → `~/.muninn/frames/vimeo`
+ * rename should run. Pure, so the three states are pinned without a filesystem.
+ *
+ * Refusing when BOTH exist is the point: merging two roots is a decision this
+ * has no basis for, and the alias serves the new one — so a warn naming both
+ * beats a silent pick. On `nais` the capture verticals are not registered at
+ * all, so there is nothing to migrate and nothing to write under `$HOME`.
+ */
+export function decideFramesRootMigration(input: {
+  oldExists: boolean;
+  newExists: boolean;
+  profile: string;
+}): FramesRootMigration {
+  if (input.profile === "nais") return "refuse";
+  if (!input.oldExists) return "nothing";
+  if (input.newExists) return "refuse";
+  return "move";
+}
+
+/**
+ * Run that rename ONCE, at startup — never at module load and never at route
+ * registration, where a test or an e2e-spawned server would perform it under
+ * the developer's real `$HOME` (the route factory takes a `framesRoot` for
+ * exactly that reason; production has no such override).
+ *
+ * A no-op unless the OLD root exists and its new place does not, so a machine
+ * that never ran the Vimeo vertical touches nothing. Log-and-continue on any
+ * error: kept frames are a cache of pictures, and no capture may be blocked by
+ * a failed move. Stated: rolling back to pre-seam code strands the frames under
+ * the new name.
+ */
+export async function migrateLegacyVimeoFramesRoot(
+  profile: string,
+  opts: { legacyRoot?: string; framesRoot?: string } = {},
+): Promise<FramesRootMigration> {
+  const legacyRoot = opts.legacyRoot ?? join(homedir(), ".muninn", LEGACY_VIMEO_FRAMES_DIRNAME);
+  const framesRoot = opts.framesRoot ?? framesRootDir();
+  const target = join(framesRoot, VIMEO_FRAME_SOURCE.name);
+  const [oldExists, newExists] = await Promise.all([dirExists(legacyRoot), dirExists(target)]);
+  const decision = decideFramesRootMigration({ oldExists, newExists, profile });
+  if (decision === "move") {
+    try {
+      await mkdir(framesRoot, { recursive: true });
+      await rename(legacyRoot, target);
+      log.info("Moved the kept Vimeo frames from {legacyRoot} to {target}", { legacyRoot, target });
+    } catch (err) {
+      log.warn("Could not move the kept Vimeo frames from {legacyRoot} to {target}: {error}", {
+        legacyRoot,
+        target,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else if (decision === "refuse" && oldExists && newExists) {
+    log.warn(
+      "Both {legacyRoot} and {target} exist — leaving both alone; the alias serves {target}, so move or remove " +
+        "{legacyRoot} by hand if it still holds frames a summary quotes",
+      { legacyRoot, target },
+    );
+  }
+  return decision;
+}
+
+async function dirExists(dir: string): Promise<boolean> {
+  try {
+    return (await stat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
+}

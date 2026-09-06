@@ -1001,7 +1001,7 @@ test("frames ON: extracting_frames runs between harvest and summarize, the frame
   // The transcript still opens the prompt; the frame list follows it.
   expect(lastPrompt!.startsWith("### [00:00:00]")).toBe(true);
   expect(lastPrompt).toContain(`t=00:00:10 ${join(extractCalls[0]!.workDir, "10.jpg")}`);
-  expect(lastPrompt).toContain(`![Slide at HH:MM:SS](/api/vimeo/frames/${VIDEO_ID}/<sec>.jpg)`);
+  expect(lastPrompt).toContain(`![Slide at HH:MM:SS](/api/frames/vimeo/${VIDEO_ID}/<sec>.jpg)`);
   // The SYSTEM prompt says nothing about frames — a frames-off capture's prompt is unchanged.
   expect(lastSystemPrompt).not.toContain("Slide");
   expect(lastExtraDirs).toEqual([extractCalls[0]!.workDir]);
@@ -1022,17 +1022,29 @@ test("frames OFF: no manifest fetch, no extraction, no extraDirs, prompt byte-id
   expect(lastPrompt).not.toContain("Slide frames");
 });
 
-test("the frames the summary QUOTES are kept under <root>/<videoId>/<sec>.jpg; the rest die with the work dir", async () => {
+test("the frames the summary QUOTES are kept under <root>/<source>/<videoId>/<sec>.jpg; the rest die with the work dir", async () => {
   claudeResult =
     "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n" +
-    `![Slide at 00:00:30](/api/vimeo/frames/${VIDEO_ID}/30.jpg)\n- point\n` +
-    `![Slide at 00:01:00](/api/vimeo/frames/${VIDEO_ID}/60.jpg)`; // 60 was never extracted
+    `![Slide at 00:00:30](/api/frames/vimeo/${VIDEO_ID}/30.jpg)\n- point\n` +
+    `![Slide at 00:01:00](/api/frames/vimeo/${VIDEO_ID}/60.jpg)`; // 60 was never extracted
   const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
   await summarizeVimeo(jobId, FRAMES_META, config, bot, framesDeps());
-  expect(readdirSync(join(framesRoot, VIDEO_ID))).toEqual(["30.jpg"]);
+  expect(readdirSync(join(framesRoot, "vimeo", VIDEO_ID))).toEqual(["30.jpg"]);
   expect(existsSync(extractCalls[0]!.workDir)).toBe(false);
   // The summary text is ingested with the image markdown intact.
-  expect(String(ingestPayload!.summary)).toContain(`/api/vimeo/frames/${VIDEO_ID}/30.jpg`);
+  expect(String(ingestPayload!.summary)).toContain(`/api/frames/vimeo/${VIDEO_ID}/30.jpg`);
+});
+
+test("a summary quoting the PRE-SEAM /api/vimeo/frames/ path still keeps its frames — the alias serves them", async () => {
+  // A model steered by an old example, or any re-run over pre-seam markdown:
+  // accepting only the current spelling would silently keep NOTHING and leave
+  // the reader a broken image for a frame that was extracted.
+  claudeResult =
+    "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n" +
+    `![Slide at 00:00:30](/api/vimeo/frames/${VIDEO_ID}/30.jpg)`;
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, FRAMES_META, config, bot, framesDeps());
+  expect(readdirSync(join(framesRoot, "vimeo", VIDEO_ID))).toEqual(["30.jpg"]);
 });
 
 test("frames requested but the harvest saw no manifest: transcript-only, one warn, status skips extracting_frames", async () => {

@@ -1342,12 +1342,17 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     await new Promise((r) => setTimeout(r, 150));
   };
 
+  /** Kept frames live under `<root>/<source>/<id>/` since the frames seam. */
+  function framesDir(root: string, videoId: string): string {
+    return join(root, "vimeo", videoId);
+  }
+
   function rootWithFrames(): string {
     const root = trackedTmpDir("vimeo-frames-del-");
-    mkdirSync(join(root, VIDEO_ID));
-    writeFileSync(join(root, VIDEO_ID, "1390.jpg"), "JPEG");
-    mkdirSync(join(root, "424242"));
-    writeFileSync(join(root, "424242", "10.jpg"), "OTHER");
+    mkdirSync(framesDir(root, VIDEO_ID), { recursive: true });
+    writeFileSync(join(framesDir(root, VIDEO_ID), "1390.jpg"), "JPEG");
+    mkdirSync(framesDir(root, "424242"), { recursive: true });
+    writeFileSync(join(framesDir(root, "424242"), "10.jpg"), "OTHER");
     return root;
   }
 
@@ -1365,9 +1370,27 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     expect(listings).toBe(0);
   });
 
+  test("the frames-dir check is scoped to THIS SOURCE: a root holding only another vertical's kept frames still skips the listing", async () => {
+    // THIRD in this describe, still before any root with VIMEO frames exists, so
+    // a listing call here can only be this registration's. Root-scoped (the
+    // pre-seam shape) a YouTube capture's kept frames would re-open the listing
+    // read on every Vimeo delete, for a video whose frames cannot be there.
+    let listings = 0;
+    knowledgeApiImpl = async () => { listings++; return { documents: [{ id: DOC, url: VIMEO_URL }] }; };
+    const root = trackedTmpDir("vimeo-frames-del-other-source-");
+    mkdirSync(join(root, "youtube", "dQw4-9W_gXQ"), { recursive: true });
+    writeFileSync(join(root, "youtube", "dQw4-9W_gXQ", "47.jpg"), "YT");
+    registerVimeoRoutes(new Hono(), config, { framesRoot: root });
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle(() => true);
+    expect(listings).toBe(0);
+    // Untouched: this delete has nothing to do with that vertical.
+    expect(existsSync(join(root, "youtube", "dQw4-9W_gXQ", "47.jpg"))).toBe(true);
+  });
+
   test("fix rounds 2–3 (#525): the frames-root check's FOUR states — absent and empty skip the listing; non-empty and unreadable consult it, unreadable with a warn naming the errno", async () => {
-    // SECOND in this describe on purpose, before any root with frames exists:
-    // every other registration so far has an empty root and skips, so listing
+    // EARLY in this describe on purpose, before any root with VIMEO frames
+    // exists: every other registration so far skips the listing, so listing
     // calls below belong to the registrations THIS test makes. (Outgoing
     // direction: the unreadable-root registration below is permanent and adds
     // one listing call + one warn to every later notification in this file — a
@@ -1400,8 +1423,8 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
 
     // State 3 — NON-EMPTY root: the listing is consulted (one call from this registration).
     const withFrames = tmpFramesRoot();
-    mkdirSync(join(withFrames, "424242"));
-    writeFileSync(join(withFrames, "424242", "10.jpg"), "x");
+    mkdirSync(framesDir(withFrames, "424242"), { recursive: true });
+    writeFileSync(join(framesDir(withFrames, "424242"), "10.jpg"), "x");
     registerVimeoRoutes(new Hono(), config, { framesRoot: withFrames });
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
     await settle(() => listings > 0);
@@ -1416,10 +1439,11 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
     await settle(() => listings >= 2);
     expect(listings).toBe(2);
-    const warn = warns.filter((w) => /Could not read the Vimeo frames root/.test(String(w.message)));
+    const warn = warns.filter((w) => /Could not read the .* frames dir/.test(String(w.message)));
     expect(warn.length).toBe(1);
     expect(warn[0]!.properties.code).toBe("ENOTDIR");
-    expect(warn[0]!.properties.dir).toBe(notADir);
+    expect(warn[0]!.properties.source).toBe("vimeo");
+    expect(warn[0]!.properties.dir).toBe(join(notADir, "vimeo"));
   });
 
   test("a recently captured document: the video id comes from the ingest map, not the listing", async () => {
@@ -1437,9 +1461,9 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     expect(started.job_id).toBeTruthy();
 
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
-    await settle(() => !existsSync(join(root, VIDEO_ID)));
-    expect(existsSync(join(root, VIDEO_ID))).toBe(false);
-    expect(readFileSync(join(root, "424242", "10.jpg"), "utf8")).toBe("OTHER");
+    await settle(() => !existsSync(framesDir(root, VIDEO_ID)));
+    expect(existsSync(framesDir(root, VIDEO_ID))).toBe(false);
+    expect(readFileSync(join(framesDir(root, "424242"), "10.jpg"), "utf8")).toBe("OTHER");
   });
 
   test("an older document: the video id is resolved from the listing row huginn still serves", async () => {
@@ -1449,9 +1473,9 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     registerVimeoRoutes(app, config, { framesRoot: root });
 
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
-    await settle(() => !existsSync(join(root, VIDEO_ID)));
-    expect(existsSync(join(root, VIDEO_ID))).toBe(false);
-    expect(existsSync(join(root, "424242", "10.jpg"))).toBe(true);
+    await settle(() => !existsSync(framesDir(root, VIDEO_ID)));
+    expect(existsSync(framesDir(root, VIDEO_ID))).toBe(false);
+    expect(existsSync(join(framesDir(root, "424242"), "10.jpg"))).toBe(true);
   });
 
   test("another collection's delete, an unlisted document, or a listing that is down leave every frame in place", async () => {
@@ -1462,95 +1486,20 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
 
     notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
     await settle(() => true);
-    expect(existsSync(join(root, VIDEO_ID, "1390.jpg"))).toBe(true);
+    expect(existsSync(join(framesDir(root, VIDEO_ID), "1390.jpg"))).toBe(true);
 
     knowledgeApiImpl = async () => ({ documents: [{ id: "ai/rag/Another.md", url: `https://vimeo.com/${VIDEO_ID}` }] });
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
     await settle(() => true);
-    expect(existsSync(join(root, VIDEO_ID, "1390.jpg"))).toBe(true);
+    expect(existsSync(join(framesDir(root, VIDEO_ID), "1390.jpg"))).toBe(true);
 
     knowledgeApiImpl = async () => { throw new Error("huginn is down"); };
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
     await settle(() => true);
-    expect(existsSync(join(root, VIDEO_ID, "1390.jpg"))).toBe(true);
+    expect(existsSync(join(framesDir(root, VIDEO_ID), "1390.jpg"))).toBe(true);
   });
 });
 
-describe("Vimeo: GET /api/vimeo/frames/:videoId/:file (v2 PR 4)", () => {
-  function appWithFrames(root: string): Hono {
-    const app = new Hono();
-    registerVimeoRoutes(app, config, { framesRoot: root });
-    return app;
-  }
-
-  test("serves a kept frame as image/jpeg with a day of caching; anything else is a 404", async () => {
-    const root = tmpFramesRoot();
-    mkdirSync(join(root, "1223358361"));
-    writeFileSync(join(root, "1223358361", "1390.jpg"), "JPEGBYTES");
-    const app = appWithFrames(root);
-
-    const ok = await app.request("/api/vimeo/frames/1223358361/1390.jpg");
-    expect(ok.status).toBe(200);
-    expect(ok.headers.get("content-type")).toBe("image/jpeg");
-    expect(ok.headers.get("cache-control")).toBe("private, max-age=86400");
-    expect(await ok.text()).toBe("JPEGBYTES");
-
-    for (const path of [
-      "/api/vimeo/frames/1223358361/1391.jpg",       // not kept
-      "/api/vimeo/frames/1223358361/1390.png",       // wrong extension
-      "/api/vimeo/frames/1223358361/x.jpg",          // not digits
-      "/api/vimeo/frames/abc/1390.jpg",              // id not digits
-      "/api/vimeo/frames/1223358361/..%2F1390.jpg",  // traversal shape
-      "/api/vimeo/frames/1223358361/1390.jpg%00",    // charset
-    ]) {
-      const res = await app.request(path);
-      expect(res.status).toBe(404);
-    }
-  });
-
-  test("the charset gate refuses a non-digit id even when that FILE EXISTS under the root", async () => {
-    // Without a planted file, `/abc/1390.jpg` 404s because nothing is there —
-    // a test that cannot tell "refused by charset" from "missing". Plant it.
-    const root = tmpFramesRoot();
-    mkdirSync(join(root, "abc"));
-    writeFileSync(join(root, "abc", "1390.jpg"), "X");
-    mkdirSync(join(root, "1223358361"));
-    writeFileSync(join(root, "1223358361", "frame.jpg"), "X");
-    const app = appWithFrames(root);
-    expect((await app.request("/api/vimeo/frames/abc/1390.jpg")).status).toBe(404);
-    expect((await app.request("/api/vimeo/frames/1223358361/frame.jpg")).status).toBe(404);
-  });
-
-  test("a kept frame is cached PRIVATELY: the route sits in the admin zone under MUNINN_AUTH, and a shared cache must not serve it past a 403", async () => {
-    const root = tmpFramesRoot();
-    mkdirSync(join(root, "1223358361"));
-    writeFileSync(join(root, "1223358361", "1390.jpg"), "X");
-    const res = await appWithFrames(root).request("/api/vimeo/frames/1223358361/1390.jpg");
-    expect(res.headers.get("cache-control")).toBe("private, max-age=86400");
-  });
-
-  test("a SYMLINK under the root pointing outside it is refused — containment is judged on the real path, not the spelling", async () => {
-    // Both charset gates pass (`7/9.jpg`), the lexical prefix passes, and the
-    // file the kernel opens lives outside the root. The one live escape.
-    const root = tmpFramesRoot();
-    const outside = trackedTmpDir("vimeo-frames-outside-");
-    writeFileSync(join(outside, "9.jpg"), "OUTSIDE");
-    writeFileSync(join(outside, "secret.txt"), "SECRET");
-    symlinkSync(outside, join(root, "7")); // a directory symlink
-    mkdirSync(join(root, "1"));
-    symlinkSync(join(outside, "secret.txt"), join(root, "1", "2.jpg")); // a file symlink
-    writeFileSync(join(root, "1", "1.jpg"), "INSIDE");
-    const app = appWithFrames(root);
-    expect((await app.request("/api/vimeo/frames/7/9.jpg")).status).toBe(404);
-    expect((await app.request("/api/vimeo/frames/1/2.jpg")).status).toBe(404);
-    expect((await app.request("/api/vimeo/frames/1/1.jpg")).status).toBe(200);
-  });
-
-  test("is read-only: no POST, PUT or DELETE is registered on the path", async () => {
-    const app = appWithFrames(trackedTmpDir("vimeo-frames-route-"));
-    for (const method of ["POST", "PUT", "DELETE"]) {
-      const res = await app.request("/api/vimeo/frames/1223358361/1390.jpg", { method });
-      expect(res.status).toBe(404);
-    }
-  });
-});
+// `GET /api/frames/:source/:id/:file` and the pre-seam `/api/vimeo/frames/...`
+// alias moved out of this vertical with the frames seam; their cases live in
+// `frames-routes.test.ts`, over `registerFramesRoutes` with a temp root.

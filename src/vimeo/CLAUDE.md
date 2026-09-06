@@ -14,7 +14,8 @@ the metadata, the media seam, inline slides and the Whisper fallback.
 | `download.ts` | `downloadPinned` — the ONE host-pinned, bounded byte download (`downloadVtt`'s rules, stated once), parameterised on host, caps and the noun in its messages; `VimeoDownloadError` is the base every refusal extends; it also OWNS the host constants (`VIMEO_CAPTIONS_HOST`, the `VIMEO_MEDIA_HOSTS` allowlist), so `captions.ts` and `media.ts` import a string from the module both already depend on and never from each other |
 | `media.ts` | The media seam (v2 PR 3): `fetchVimeoManifest` (host-pinned to the `VIMEO_MEDIA_HOSTS` allowlist — `vod-adaptive-ak.vimeocdn.com`, `skyfire.vimeocdn.com`), `parseVimeoManifest` / `chooseRepresentation` / `segmentIndexAt` / `resolveSegmentUrl` (pure), `downloadRendition` (init + segments → ONE fMP4 ffmpeg reads) |
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
-| `frames.ts` | Slides (v2 PR 4): `cadenceTimes` / `framesPromptSection` / `referencedFrameSeconds` (pure), `extractCadenceFrames` (one 720p segment per tick through `media.ts`, one ffmpeg grab each), `keepReferencedFrames` (the quoted ones → `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg`), `removeKeptFrames` (a Delete's counterpart), the route's two path charsets |
+| `frames.ts` | Slides (v2 PR 4), the VIMEO half only: `VIMEO_FRAME_HEIGHT` and `extractCadenceFrames` (one 720p segment per tick through `media.ts`, one ffmpeg grab each). Everything source-neutral is `../summaries/frames.ts` — see below |
+| `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam: `FrameSource` (vimeo/youtube + their id charsets), the id gate, `cadenceTimes` / `formatHms` / `frameUrlPath` / `framesPromptSection` / `referencedFrameSeconds` (pure), `keepReferencedFrames` (the quoted ones → `~/.muninn/frames/<source>/<id>/<sec>.jpg`), `removeKeptFrames` + `removeKeptFramesForDocument` (a Delete's counterpart), `framesRootHasEntries`, `framesTimeoutFor`, the ffmpeg argv + grab, `extractCadenceFramesFromFile` (a vertical holding the whole video on disk), and the one-time root rename |
 | `whisper.ts` | The no-captions fallback (v2 PR 5): `transcribeOpusRendition` (the whole Opus rendition through `media.ts` → ffmpeg → `whisper-cli -l auto -ovtt` → a WebVTT `vttToSegments` windows like a caption track), `whisperUnavailableReason` (the pre-flight — binaries + model — BEFORE any download), `parseDetectedLanguage` / `isEnglishOnlyModel` / the two clocks (pure) |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · downloading · transcribing · extracting_frames · summarizing · ingesting · complete · error` (`downloading`/`transcribing` only on the Whisper path) |
 | `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
@@ -282,14 +283,24 @@ mechanism itself, which no offline test can prove. Unknown flags are refused
 ## Slides in the summary (v2 PR 4, cadence tier)
 
 **One 720p frame every ~40 s of talk, read by the model, quoted inline where it
-adds something.** `src/vimeo/frames.ts`: `cadenceTimes(duration)` is
+adds something.** The manifest half is `src/vimeo/frames.ts`; **everything a
+second vertical would need is `src/summaries/frames.ts`**, which owns the
+cadence, the served root, the URL shape, the prompt section, the id gate, the
+kept-frame copy and removal, the ffmpeg argv and the file-based
+`extractCadenceFramesFromFile`. The dependency is ONE-WAY — the seam never
+imports this module, and a second copy of a constant next door is exactly the
+two-literals failure `src/video/media.ts` documents for the frame budget.
+`cadenceTimes(duration)` is
 `frameBudgetFor(duration)` ticks (the TikTok/X budget — 30 at 10 min, ceiling 60
 from 40 min, spacing growing past that) at the MIDPOINTS of equal slices, whole
 seconds, so the first frame is not the t=0 title card; `extractCadenceFrames`
 fetches, per tick, the ONE 6 s segment covering it through PR 3's
 `downloadRendition` (a segment shared by two ticks is fetched once) and pulls
-one JPEG with `ffmpeg -ss <t − segment.start> -frames:v 1 -vf scale=-2:720` —
-the seek is RELATIVE to the segment's `start_time`, which is absolute. 60 frames
+one JPEG with `ffmpeg -ss <t − segment.start> -frames:v 1 -vf scale=-2:min(720\,ih)` —
+the seek is RELATIVE to the segment's `start_time`, which is absolute, and the
+`min()` is why a rendition BELOW 720p (which `chooseRepresentation` falls back
+to when nothing reaches the target) is no longer upscaled into twice the bytes
+and twice the image tokens for the same picture. 60 frames
 ≈ 22 MB of fetches, one budget (`framesTimeoutFor`, 30 s + 3 s/frame), and a
 failure on ONE frame fails the pass: a summary that quotes slide 23 and never
 saw 24 is a partial record presented as complete. Cadence, not scene
@@ -354,7 +365,7 @@ trace as `frames` + `frameCount` so the outcome is readable afterwards. The
 frame list rides the USER prompt after the transcript (`framesPromptSection`,
 the TikTok `t=HH:MM:SS <path>` shape) plus the one rule TikTok does not need:
 **a slide is quoted as an image IN PLACE**, by exactly
-`![Slide at HH:MM:SS](/api/vimeo/frames/<videoId>/<sec>.jpg)` where `<sec>` is
+`![Slide at HH:MM:SS](/api/frames/vimeo/<videoId>/<sec>.jpg)` where `<sec>` is
 the frame's file name, only where it adds something the transcript did not
 say, at most `MAX_INLINE_SLIDES` (8). The SYSTEM prompt says nothing about
 frames, so a frames-off capture's prompt is byte-identical to PR 1's.
@@ -362,8 +373,11 @@ frames, so a frames-off capture's prompt is byte-identical to PR 1's.
 `summarizeTimeoutFor(frames.length, 600 s)`.
 
 **Only the frames the summary QUOTES survive the job.** `keepReferencedFrames`
-parses the summary for this video's `/api/vimeo/frames/<id>/<sec>.jpg` paths and
-copies those out of the work dir to `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg`
+parses the summary for this video's `/api/frames/vimeo/<id>/<sec>.jpg` paths —
+**and the pre-seam `/api/vimeo/frames/<id>/<sec>.jpg` spelling too**, because
+huginn stores the summary markdown verbatim and a re-run over an older document
+would otherwise keep nothing — and copies those out of the work dir to
+`~/.muninn/frames/vimeo/<videoId>/<sec>.jpg`
 (`framesRootDir()`, beside `agent-cwd`) — a quoted path that was never
 extracted, or a non-canonical spelling (`047.jpg`, which the route never
 serves), is logged and skipped, so the reader gets a broken image rather than
@@ -372,30 +386,41 @@ removed in the job's `finally`. The summary text is ingested with the image
 markdown intact; the doc panel renders it through `marked`'s default `<img>`,
 same-origin. **The document's frames are therefore only live inside muninn's
 UI**, which the plan accepted (huginn serves no static files). **A `/summaries`
-Delete removes the document's kept frames** (`removeKeptFrames`, the
-`onSummaryDocumentDeleted` listener in the route): the signal carries a
+Delete removes the document's kept frames** (`removeKeptFramesForDocument`,
+called from INSIDE this vertical's ONE `onSummaryDocumentDeleted` listener and
+deliberately not as a second listener of its own — the dedup half DELETES the
+ingest entry, so a listener running after it in Set order would lose the fast
+path and send every delete down the listing fallback, orphaning the frames of a
+document huginn had already reindexed away): the signal carries a
 DOCUMENT id, so the video id comes from the ingest map when the capture was
 recent and otherwise from the listing row huginn still serves (its DELETE is
 soft — the same reindex window `recentDeletes` exists for); async and
 best-effort, a listing that is down leaves the frames in place with a warn —
-and the listing is asked only when the frames root has ANY entry, since frames
+and the listing is asked only when `<root>/vimeo/` has ANY entry, since frames
 are off by default and most deletes have nothing to remove (a 200-row
 collection read for a video that kept no frames is the wide read this module
-avoids elsewhere). The id is charset-gated before anything is removed, so the
-path is always `<root>/<digits>`. **Accepted consequence:** a source-drafted
-wiki page that quoted the capture's slides (`![Slide at …](/api/vimeo/frames/…)`)
+avoids elsewhere) — scoped to the SOURCE's own directory, or a YouTube capture's
+kept frames would re-open that read on every Vimeo delete. The id is
+charset-gated before anything is removed, so the path is always
+`<root>/vimeo/<digits>`. **Accepted consequence:** a source-drafted
+wiki page that quoted the capture's slides (`![Slide at …](/api/frames/vimeo/…)`)
 outlives the vimeo document, and its images break when the document is
 deleted — the frames were only ever served by muninn's UI for the capture,
 and a Delete is the reader saying the capture should go. ⚠️ Every `registerVimeoRoutes` in a TEST passes a temp
 `framesRoot`: the listener set is module-level and never unsubscribed, so a
 registration with no root would remove frames under the developer's real
-`~/.muninn/vimeo-frames` on the next test that fires the signal. The two
+`~/.muninn/frames` on the next test that fires the signal. The two
 acceptance talks' quoted frames measured 725 KB for 8 (81–102 KB each) and
 425 KB for 6 (54–87 KB each), byte sums, at 720p.
 
-**`GET /api/vimeo/frames/:videoId/:file` is read-only and default-deny by
-charset.** Both segments are gated (`FRAME_VIDEO_ID_RE` digits,
-`FRAME_FILE_RE` `<digits>.jpg`) BEFORE any filesystem access, the resolved path
+**`GET /api/frames/:source/:id/:file` is read-only and default-deny by
+charset.** Every segment is gated — the SOURCE against the known frame sources,
+the id against THAT source's own `idRe` (vimeo digits, youtube 11 URL-safe
+base64 characters), the file as `<digits>.jpg` — BEFORE any filesystem access,
+and the same gates are an invariant of the SEAM rather than of this route
+(`keepReferencedFrames`, `frameUrlPath`, `framesPromptSection` and
+`referencedFrameSeconds` all refuse a bad id, and the id is regex-escaped on
+top). The resolved path
 is checked to stay under the root on its REAL path (`realpath` on both sides —
 the charset gates make the spelling safe by enumeration, and only the real path
 sees a symlink planted under the root; pinned with one. Stated residual: a
@@ -406,9 +431,28 @@ that confirms the shape), `Cache-Control: private, max-age=86400` (a frame is
 (video, second) — re-extracting the same second is the same picture; PRIVATE
 because the route is in the admin zone under `MUNINN_AUTH` and a shared cache
 must not serve past a 403). It is
-registered inside `registerVimeoRoutes`, so `MUNINN_PROFILE=nais` drops it with
-the vertical. A test seam (`VimeoRouteOptions.framesRoot`) points it at a temp
-root.
+registered by `registerFramesRoutes` (`src/dashboard/routes/frames-routes.ts`)
+INSIDE the `summaries` route group — vimeo, youtube and summaries are dropped
+together on `MUNINN_PROFILE=nais`, so a group of its own would buy nothing but a
+`ROUTE_GROUPS` edit and a restructuring of `routes-profile.test.ts`, whose probe
+table is literal paths a parameterised route cannot satisfy. The same factory
+serves the pre-seam alias **`GET /api/vimeo/frames/:videoId/:file`** over the
+same root and the same bytes, for the documents that quote it. A test seam
+(`FramesRouteOptions.framesRoot`) points both at a temp root, and a test MUST
+pass one.
+
+**`~/.muninn/vimeo-frames` becomes `~/.muninn/frames/vimeo` by a ONE-TIME
+rename in `src/index.ts`** (`migrateLegacyVimeoFramesRoot`) — never at module
+load and never at route registration, where a test or an e2e-spawned server
+would perform it under the developer's real `$HOME`. It is a no-op unless the
+old root exists and its new place does not, skipped on `nais` (no capture
+vertical is registered there), refused with a warn when BOTH exist (merging two
+roots is a decision this has no basis for), and log-and-continue on any error:
+kept frames are a cache of pictures and no capture may be blocked by a failed
+move. Stated: on a developer machine that HAS an old root, the first e2e run
+performs the rename under the real `$HOME` before the developer starts a new
+server — harmless, since it is idempotent and the alias reads the new root — and
+rolling back to pre-seam code strands the frames under the new name.
 
 **Measured on the two acceptance talks (2026-09-05, the plan's skip trigger):**
 Kotlin extension functions (10 min, `en-x-autogen` — Vimeo mis-tagged a
