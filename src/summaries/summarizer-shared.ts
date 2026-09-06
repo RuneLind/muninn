@@ -283,13 +283,17 @@ export async function ingestSummary(opts: {
   timeoutMs?: number;
 }): Promise<void> {
   const payload = JSON.stringify(opts.body);
-  const timeoutMs = opts.timeoutMs ?? ingestTimeoutFor(payload.length);
+  // BYTES, not code units: the budget bounds what goes on the WIRE, and a
+  // windowed `## Transcript` of a Japanese or Norwegian talk is mostly
+  // multi-byte — `.length` would hand a 3 MB POST the budget of a 1 MB one.
+  const payloadBytes = Buffer.byteLength(payload);
+  const timeoutMs = opts.timeoutMs ?? ingestTimeoutFor(payloadBytes);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   // Debug rather than info: one line per capture, and the only place the
   // resolved budget is visible (an AbortSignal does not report its deadline).
   log.debug("Ingesting {bytes} bytes into {path} with a {timeoutMs} ms budget", {
-    bytes: payload.length,
+    bytes: payloadBytes,
     path: opts.ingestPath,
     timeoutMs,
   });

@@ -513,3 +513,52 @@ test("ingestSummary sizes its own timeout from the body it is posting", async ()
   expect(sawSignal).toBeInstanceOf(AbortSignal);
   expect(sawSignal!.aborted).toBe(false);
 });
+
+test("ingestSummary sizes and logs a multi-byte body in BYTES, not in code units", async () => {
+  // `JSON.stringify(body).length` counts UTF-16 code units; the budget bounds
+  // what goes on the WIRE, and a windowed `## Transcript` of a Japanese or
+  // Norwegian talk is mostly multi-byte. Sized in characters, a 3 MB POST is
+  // given the budget of a 1 MB one — and the `bytes` an operator reads off the
+  // log line is not a count of bytes at all.
+  const body = { title: "T", url: "u", summary: "あ".repeat(1_000_000), category: "ai/general" };
+  const payload = JSON.stringify(body);
+  const wireBytes = Buffer.byteLength(payload);
+  expect(wireBytes).toBeGreaterThan(payload.length * 2);
+
+  const records: LogRecord[] = [];
+  await configure({
+    sinks: { capture: (r: LogRecord) => records.push(r) },
+    loggers: [
+      { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+      { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+    ],
+    reset: true,
+  });
+  const restore = stubFetch(
+    () =>
+      new Response(JSON.stringify({ file_path: "ai/general/T.md" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  );
+  try {
+    await ingestSummary({
+      knowledgeApiUrl: "http://kb.test",
+      ingestPath: "/api/youtube/ingest",
+      body,
+      onSimilar: () => {},
+    });
+  } finally {
+    restore();
+    await configure({ sinks: {}, loggers: [{ category: ["logtape", "meta"], sinks: [], lowestLevel: "error" }], reset: true });
+  }
+
+  const line = records.find((r) => String(r.message.join("")).includes("Ingesting"));
+  expect(line).toBeDefined();
+  expect(line!.properties.bytes).toBe(wireBytes);
+  expect(line!.properties.timeoutMs).toBe(ingestTimeoutFor(wireBytes));
+  // 60 s for these 3 000 060 bytes. The code-unit count would have bought 30 s
+  // — half the budget for the same POST.
+  expect(line!.properties.timeoutMs).toBe(60_000);
+  expect(ingestTimeoutFor(payload.length)).toBe(30_000);
+});

@@ -75,9 +75,10 @@ export const YOUTUBE_FRAMES_MAX_DURATION_SEC = 10_800;
  *
  * Note the density it admits rather than refuses: `frameBudgetFor` hands out 15
  * ticks up to 60 s and **25** up to 180 s, so the cut sits immediately below its
- * DENSEST sampling — a 150 s clip is measured at 25 frames, one every 6 s. That
- * is deliberate (a two-minute conference lightning talk does have slides) and it
- * is why the cut is stated as an editorial rule rather than as a spend bound.
+ * DENSEST sampling — a 61 s video, the shortest this admits, is measured at 25
+ * frames, one every ~2.4 s. That is deliberate (a two-minute conference
+ * lightning talk does have slides) and it is why the cut is stated as an
+ * editorial rule rather than as a spend bound.
  */
 export const YOUTUBE_FRAMES_MIN_DURATION_SEC = 60;
 
@@ -192,20 +193,41 @@ export interface CappedTranscript {
 }
 
 /**
- * The longest prefix of `text` that fits in `maxBytes`, cut at a LINE boundary
- * and never inside a code point.
+ * The longest prefix of `text` that fits in `maxBytes`, cut at a boundary a
+ * reader can see and never inside a code point.
+ *
+ * **The window shape this has to survive is TWO lines**, not many:
+ * huginn's `format_transcript_windows` emits `### [HH:MM:SS]\n<the window's
+ * 120 s of speech as ONE unbroken line>`. So a cut taken at the last NEWLINE
+ * finds only the newline under the heading, and the "head of the first window"
+ * comes out as a timestamp with nothing beneath it — inert on the exact input
+ * this function exists for. The rule is therefore:
+ *
+ *  - **A newline PAST the heading** ⇒ cut there, so no half-line survives. This
+ *    is the many-line case (a whisper transcript, a hand-written fixture).
+ *  - **Otherwise** ⇒ cut at the last SPACE inside the budget, keeping the
+ *    heading line, so no half-WORD survives.
+ *  - **No space either** — a CJK run has neither — ⇒ the byte cut stands, and
+ *    the U+FFFD trim below is the only thing between it and a `�` in the stored
+ *    document. That trim is load-bearing exactly here.
  *
  * Byte-safe by construction: the slice is decoded, and a multi-byte sequence
- * cut in half decodes to a single trailing U+FFFD, which is dropped. Then the
- * head is trimmed back to its last newline, so no half-line survives. Returns
- * `""` when not even one line fits.
+ * cut in half decodes to a single trailing U+FFFD, which is dropped.
+ *
+ * Returns `""` when the budget did not even reach the end of the transcript's
+ * FIRST line — that line is the `### [HH:MM:SS]` heading, and a fragment of a
+ * timestamp is not a head of the talk. The caller answers with the note alone.
  */
 function headWithinBytes(text: string, maxBytes: number): string {
   if (maxBytes <= 0) return "";
   const sliced = new TextDecoder().decode(new TextEncoder().encode(text).slice(0, maxBytes));
   const head = sliced.endsWith("�") ? sliced.slice(0, -1) : sliced;
+  const firstNewline = head.indexOf("\n");
+  if (firstNewline === -1 && text.includes("\n")) return "";
   const lastNewline = head.lastIndexOf("\n");
-  return (lastNewline > 0 ? head.slice(0, lastNewline) : head).trimEnd();
+  if (lastNewline > firstNewline) return head.slice(0, lastNewline).trimEnd();
+  const lastSpace = head.lastIndexOf(" ");
+  return (lastSpace > firstNewline ? head.slice(0, lastSpace) : head).trimEnd();
 }
 
 /**
@@ -227,9 +249,18 @@ function headWithinBytes(text: string, maxBytes: number): string {
  *  - **A first window over the cap keeps a HEAD of it, never the note alone.**
  *    huginn windows at 120 s, but nothing guarantees the first window fits an
  *    arbitrary `maxBytes`, and answering with only the truncation note is a
- *    document that says a talk exists and nothing about it. The head is cut at
- *    a line boundary ({@link headWithinBytes}), so the `### [HH:MM:SS]` heading
- *    and whole lines under it survive.
+ *    document that says a talk exists and nothing about it. The head keeps the
+ *    `### [HH:MM:SS]` heading and cuts at the last boundary a reader can see
+ *    ({@link headWithinBytes} — a line where the window has more than one, a
+ *    word where it does not, which is huginn's real shape).
+ *
+ * **A truncated answer ALWAYS carries the note.** Below roughly a hundred bytes
+ * not even the heading fits, and there the note is what goes, alone — a head
+ * with no note is a fragment of a three-hour talk that reads as the whole of
+ * it, which is what this returned before. The note may then be longer than
+ * `maxBytes`: the cap bounds a transcript, and at that budget there is no
+ * transcript left to bound. Every budget that fits any of the talk at all keeps
+ * the result inside the cap.
  *
  * Pure. `truncated` and the byte counts are returned so a caller can say so —
  * `summarizeVideo` warns with them; without a consumer, a talk whose second
@@ -260,10 +291,11 @@ export function capTranscriptWindows(
     bytes += size;
   }
 
-  // Not one whole window fits: keep whole LINES of the first one instead. With
-  // no room even for the note, the note is what goes — the cap is the promise.
+  // Not one whole window fits: keep a head of the first one instead. With no
+  // room even for its heading, the note is what goes — alone, because a head
+  // with no note reads as a complete transcript.
   const body = kept.length > 0 ? kept.join("\n\n") : headWithinBytes(transcript, budget);
-  const text = body === "" ? headWithinBytes(transcript, maxBytes) : `${body}\n\n${TRANSCRIPT_TRUNCATION_NOTE}`;
+  const text = body === "" ? TRANSCRIPT_TRUNCATION_NOTE : `${body}\n\n${TRANSCRIPT_TRUNCATION_NOTE}`;
   return { text, truncated: true, inputBytes, keptBytes: encoder.encode(text).length };
 }
 

@@ -181,9 +181,15 @@ export async function summarizeVideo(
     //    form a slide can be placed against (huginn #129), and asking for it
     //    unconditionally would change every frames-off capture's prompt.
     //
-    //    The status moves FIRST: the probe is a yt-dlp spawn (~3 s) and the
-    //    download that may follow is minutes, so a card left at `pending`
-    //    through both reads as a stuck job.
+    //    The status moves FIRST so the card is never left at `pending` through
+    //    a yt-dlp spawn and a transcript fetch. ⚠️ `fetching_transcript` is
+    //    what a SECOND capture then shows for as long as the first one holds
+    //    the frames queue: the probe below is inside that section (a probe is a
+    //    yt-dlp process too), so its ~3 s is a wait of minutes whenever another
+    //    capture is in its download. Accepted rather than labelled — the
+    //    statuses this vertical has are the ones the card renders, and
+    //    `downloading` here would be a false label on the transcript fetch that
+    //    follows the probe.
     updateStatus(jobId, "fetching_transcript");
     let framesOutcome: FramesOutcome = "off";
     let durationSec = 0;

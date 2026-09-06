@@ -93,9 +93,9 @@ too_short · too_long · failed`) beside `frameCount`.
 rather than a spend bound: nothing under a minute is a slide deck, its
 transcript already says everything, and the frames would be a talking head. Note
 what the cut ADMITS: `frameBudgetFor` hands out 15 ticks up to 60 s and **25** up
-to 180 s, so the line sits immediately below its densest sampling (a 150 s clip
-is measured at 25 frames, one every 6 s). That is deliberate — a two-minute
-lightning talk does have slides.
+to 180 s, so the line sits immediately below its densest sampling — a 61 s video,
+the shortest this admits, is measured at 25 frames, one every ~2.4 s. That is
+deliberate — a two-minute lightning talk does have slides.
 
 ## The transcript with a clock
 
@@ -128,8 +128,12 @@ window boundary** with a line saying so — a byte cut would leave a heading ove
 half a sentence and carry that timestamp into a chunk that ends mid-word. Three
 rules the cap lives by: the note's own bytes come OUT of the budget (the result
 never exceeds `maxBytes`); a FIRST window bigger than the budget keeps a head of
-it, cut at a line boundary and never inside a code point, because the note alone
-is a document that says nothing; and `truncated` has a consumer — `summarizeVideo`
+it, never inside a code point, cut at a LINE boundary where the window has more
+than one line and at a WORD boundary where it does not — which is huginn's real
+shape, `### [HH:MM:SS]` over one unbroken line, and where a line cut kept the
+heading and threw the talk away; a truncated answer ALWAYS carries the note, and
+below ~100 bytes, where not even the heading fits, the note is what goes, alone
+(a head with no note reads as a complete transcript); and `truncated` has a consumer — `summarizeVideo`
 warns with both byte counts, or a talk whose second half never reached the
 document is invisible outside the stored file. `completeJob`, the shelf card and
 the source-page draft get the summary ALONE — **but `setSimilar` does not**: the

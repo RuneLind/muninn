@@ -1404,9 +1404,18 @@ test("fix round 1 (#525): an explicit pick logs NO 'text wins' line — the tran
 });
 
 test("the windowed-transcript sentence in the Vimeo prompt IS the shared seam's, byte for byte", () => {
-  // The two verticals had the same sentence twice, differing in one noun. The
-  // seam now owns it, and this asserts the Vimeo prompt did not move a byte:
-  // the intro is the analyst line plus exactly `windowedTranscriptRider("talk")`.
+  // The two verticals had the same sentence twice, differing in one noun; the
+  // seam now owns it. What this has to prove is that the Vimeo prompt did not
+  // move a byte when it moved — so the expectation is the literal string Vimeo
+  // shipped, transcribed from `SUMMARIZE_INTRO` at 7b81bec6 (the commit before
+  // the extraction), NOT `windowedTranscriptRider("talk")`: written against the
+  // seam's own output, this assertion would pass over any edit that changed
+  // both sides at once, which is exactly the regression it is here to catch.
+  const shippedIntro =
+    "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
+    "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
+    "carrying its absolute position in the talk; those headings are positions, not content — " +
+    "never quote one as if it were speech.";
   const prompt = buildVimeoSystemPrompt({
     preset: STANDARD,
     title: "Trust but verify",
@@ -1414,8 +1423,8 @@ test("the windowed-transcript sentence in the Vimeo prompt IS the shared seam's,
     captionKind: "manual",
     outputLang: "en",
   });
-  expect(prompt).toContain(
-    "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
-      windowedTranscriptRider("talk"),
-  );
+  expect(prompt).toContain(shippedIntro);
+  // And the seam is what produces it, rather than a second copy that happens to
+  // agree today.
+  expect(shippedIntro.endsWith(windowedTranscriptRider("talk"))).toBe(true);
 });

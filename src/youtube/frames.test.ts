@@ -212,6 +212,90 @@ describe("capTranscriptWindows", () => {
     expect(body).toBe(`### [00:00:00]\n${"あ".repeat(7)}\n${"あ".repeat(7)}\n${"あ".repeat(7)}`);
   });
 
+  test("a NEWLINE-FREE window: the byte cut still never leaves a replacement character", () => {
+    // The other byte-safety fixture has newlines in it, so its cut is taken by
+    // the LINE rule and the U+FFFD trim never has to do anything. A window with
+    // no newline and no space in it — a CJK run is exactly that — takes neither
+    // the line rule nor the word rule, and the trim is then the ONLY guard
+    // between a mid-code-point byte slice and a `�` in the stored document.
+    //
+    // The budget is COMPUTED to land inside a character: `あ` is 3 bytes, so a
+    // head budget of 100 puts the cut one byte into the 34th (33 × 3 = 99).
+    const t = "あ".repeat(400);
+    expect(t.includes("\n")).toBe(false);
+    expect(t.includes(" ")).toBe(false);
+    const headBudget = 100;
+    const cap = bytesOf(TRANSCRIPT_TRUNCATION_NOTE) + 2 + headBudget;
+    const { text, truncated } = capTranscriptWindows(t, cap);
+
+    expect(truncated).toBe(true);
+    expect(text).not.toContain("�");
+    expect(bytesOf(text)).toBeLessThanOrEqual(cap);
+    // 33 whole code points survive; the 34th is where the byte cut landed.
+    expect(text).toBe(`${"あ".repeat(33)}\n\n${TRANSCRIPT_TRUNCATION_NOTE}`);
+  });
+
+  test("huginn's REAL window shape — a heading over one long line — keeps the talk, not just the heading", () => {
+    // What `format_transcript_windows` emits per window is TWO lines: the
+    // `### [HH:MM:SS]` heading, and the window's 120 s of speech joined into a
+    // single unbroken line. A head cut taken at the last NEWLINE therefore
+    // finds only the newline under the heading, and "a head of the first
+    // window" comes out as the timestamp with nothing beneath it — the exact
+    // case the head cut exists for, and the one it was inert on.
+    const body = Array.from({ length: 500 }, (_, i) => `word${i}`).join(" ");
+    const t = `### [00:00:00]\n${body}`;
+    expect(body.length).toBeGreaterThan(3_000);
+    expect(t.split("\n")).toHaveLength(2);
+
+    const { text, truncated } = capTranscriptWindows(t, 400);
+    expect(truncated).toBe(true);
+    expect(bytesOf(text)).toBeLessThanOrEqual(400);
+
+    const head = text.slice(0, text.indexOf("\n\n_("));
+    expect(head.startsWith("### [00:00:00]\n")).toBe(true);
+    // The talk itself survives, not merely its heading.
+    expect(head).toContain("word0");
+    expect(head.length).toBeGreaterThan("### [00:00:00]\n".length + 200);
+    // A PREFIX of the transcript cut at a WORD boundary: the next character of
+    // the original is the space this cut replaced, so no word is halved.
+    expect(t.startsWith(head)).toBe(true);
+    expect(t[head.length]).toBe(" ");
+  });
+
+  test("a budget too small for even the heading answers with the NOTE alone", () => {
+    // The promise is that a truncated transcript SAYS it was truncated. Before
+    // this, a budget under the note's own size fell through to a second head
+    // cut with no note attached — a fragment of a three-hour talk that reads as
+    // the whole of it. Under ~100 bytes there is no honest answer but the note,
+    // and it may then exceed `maxBytes`: the cap bounds a transcript, and at
+    // that budget there is no transcript left to bound.
+    const t = `### [00:00:00]\n${"word ".repeat(1_000)}`;
+    const out = capTranscriptWindows(t, 40);
+
+    expect(out.truncated).toBe(true);
+    expect(out.text).toBe(TRANSCRIPT_TRUNCATION_NOTE);
+    expect(out.keptBytes).toBe(bytesOf(TRANSCRIPT_TRUNCATION_NOTE));
+
+    // The whole band, not one sample — including 67…79, where the head budget
+    // is POSITIVE but reaches only part of the `### [00:00:00]` heading. That
+    // band is the one a byte cut answers with `###`, and `###` plus a note is
+    // not a head of a talk. 81 is the first budget that fits the heading.
+    for (const cap of [1, 40, 67, 70, 75, 79]) {
+      expect([cap, capTranscriptWindows(t, cap).text]).toEqual([cap, TRANSCRIPT_TRUNCATION_NOTE]);
+    }
+    expect(capTranscriptWindows(t, 81).text).toBe(`### [00:00:00]\n\n${TRANSCRIPT_TRUNCATION_NOTE}`);
+  });
+
+  test("the note is present in EVERY truncated answer", () => {
+    // The contract swept rather than sampled: at every budget from one byte to
+    // well past the note, a `truncated: true` answer says so in its text.
+    const t = `### [00:00:00]\n${"word ".repeat(1_000)}`;
+    for (let cap = 1; cap <= 600; cap += 7) {
+      const out = capTranscriptWindows(t, cap);
+      expect([cap, out.truncated, out.text.includes("transcript truncated")]).toEqual([cap, true, true]);
+    }
+  });
+
   test("an over-cap transcript is cut at a WINDOW boundary, never mid-window", () => {
     const t = windows(20, 100);
     const { text, truncated } = capTranscriptWindows(t, 400);
