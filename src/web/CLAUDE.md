@@ -214,6 +214,10 @@ unresolvable one — only the first tells a real fix from "the dead
 `e2e/wiki-code-highlight.spec.ts`, which reads the CLIPBOARD, the only assertion
 that proves what actually leaves the page.
 
+## `<Embed src>` — a markdown page carrying a standalone `.html` explainer
+
+`<Embed src="./x.html" height="640" title="…" />` (self-closing, block-level; `src/format/embed.ts`) lets an `.mdx` page carry an archify diagram or any standalone explainer INSIDE its body, so the narrative page keeps the graph membership an `.html` file never gets (frontmatter, wikilinks, backlinks, Ask/Fact check/Share) while the diagram stays the full interactive viewer. **The server render emits NO iframe**: `formatWebHtml` does not know which page it is rendering, so it cannot resolve a relative `src`, and chat's `sanitizeHtml` has no `iframe` anyway — it emits `<figure class="embed" data-embed-*>` around a fallback line naming the file, and only the wiki reader's `enhanceEmbeds` (`views/components/wiki-embed.ts`) swaps that line for the explainer view's exact sandboxed frame (`allow-scripts allow-popups`, no `allow-same-origin`), resolved against the OPEN page's relPath (`..` allowed, escaping the root refused ⇒ the line stays). The gate accepts only a relative `.html` path — no scheme, leading slash, query or fragment — and an invalid `src` renders as `embed-invalid` with no `data-embed-src` at all. **The route half:** `GET /api/wiki/html` resolves through the index first and, when the index lists nothing for a `?relPath=` ending in `.html`, falls back to the path itself under the same root-containment check — because the natural shape, `post.mdx` beside `post.html`, is exactly the one stem precedence (`.md` > `.mdx` > `.html`) DROPS from the index, and an index-only lookup 404'd it. `name` lookups get no fallback. Slack/Telegram/email render the fallback line as text.
+
 ## Code-block chrome (header bar + copy)
 
 The bar and the copy button are built by a CLIENT enhancer,

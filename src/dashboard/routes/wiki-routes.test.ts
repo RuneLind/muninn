@@ -117,6 +117,44 @@ describe("GET /api/wiki/html", () => {
     expect(res.status).toBe(404);
   });
 
+  // `<Embed src>`: a page embedding its OWN diagram (`x.mdx` + `x.html`) shadows
+  // the `.html` out of the index (`.md` > `.mdx` > `.html`), so the route serves
+  // an unlisted `.html` by exact relPath — under the root only.
+  test("serves a same-stem .html the index dropped, by relPath", async () => {
+    await Bun.write(
+      path.join(root, "blogs/Explainer One.mdx"),
+      '---\ntitle: Explainer One\n---\n\n<Embed src="./Explainer One.html" />\n',
+    );
+    __resetWikiCacheForTest();
+    // Precondition: the index really did drop the .html.
+    const page = await app.request("/api/wiki/page?relPath=" + encodeURIComponent("blogs/Explainer One.html"));
+    expect(page.status).toBe(404);
+    const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/Explainer One.html"));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("<title>Explainer One</title>");
+    expect(body).toContain(EXPLAINER_BRIDGE_MARKER);
+  });
+
+  test("the unlisted-.html fallback never leaves the root and never serves markdown", async () => {
+    await Bun.write(path.join(root, "..", "outside-" + path.basename(root) + ".html"), "<p>outside</p>");
+    try {
+      const up = await app.request(
+        "/api/wiki/html?relPath=" + encodeURIComponent("../outside-" + path.basename(root) + ".html"),
+      );
+      expect(up.status).toBe(400);
+      const md = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("concepts/A Concept.md"));
+      expect(md.status).toBe(404);
+      const missing = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/nope.html"));
+      expect(missing.status).toBe(404);
+      // `name` lookups stay index-only: no fallback by stem.
+      const byName = await app.request("/api/wiki/html?name=" + encodeURIComponent("nope.html"));
+      expect(byName.status).toBe(404);
+    } finally {
+      await rm(path.join(root, "..", "outside-" + path.basename(root) + ".html"), { force: true });
+    }
+  });
+
   // The explainer view's Connections panel is fed by /api/wiki/page — it must
   // serve explainers (meta + backlinks), not just markdown pages.
   test("/api/wiki/page serves an explainer with its backlinks", async () => {

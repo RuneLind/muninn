@@ -1825,13 +1825,21 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return c.text("wiki directory not found", 503);
     const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
-    if (!meta || meta.type !== "explainer") {
+    // An `.html` the index does NOT list is still servable by exact relPath — for
+    // `<Embed src>`. The index drops a same-stem `.html` when a `.md`/`.mdx` page
+    // shadows it (`.md` > `.mdx` > `.html`), and a page embedding its own
+    // diagram (`x.mdx` + `x.html`) is exactly that shape. The index's stored
+    // relPath is preferred when it exists; the fallback resolves the query as a
+    // path, and the containment check below is what makes that safe.
+    const shadowed = !meta && !!relPathQ && /\.html$/i.test(relPathQ);
+    if (!shadowed && (!meta || meta.type !== "explainer")) {
       return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
     }
-    // meta.relPath is the index's own stored path (never user input); still,
-    // defend in depth — confirm the resolved file stays under the wiki root.
+    // meta.relPath is the index's own stored path (never user input); the
+    // shadowed fallback IS user input. Either way — confirm the resolved file
+    // stays under the wiki root.
     const rootAbs = path.resolve(index.root);
-    const fileAbs = path.resolve(rootAbs, meta.relPath);
+    const fileAbs = path.resolve(rootAbs, meta ? meta.relPath : relPathQ!);
     if (fileAbs !== rootAbs && !fileAbs.startsWith(rootAbs + path.sep)) {
       return c.text("invalid path", 400);
     }

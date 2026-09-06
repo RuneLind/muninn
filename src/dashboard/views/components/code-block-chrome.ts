@@ -113,6 +113,7 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   Checklist: null,
   Fact: null,
   FactCheck: null,
+  Embed: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);

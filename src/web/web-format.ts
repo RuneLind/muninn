@@ -19,6 +19,7 @@ import type { Block, FactVerdict } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
+import { parseEmbedAttrs } from "../format/embed.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
 const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.name === "Tab";
@@ -297,6 +298,22 @@ const webRenderer: BlockRenderer = {
         const nAttr = n === null ? "" : ` data-fact="${n}"`;
         if (!children.trim()) return chip;
         return `<div class="fc-mark fc-mark-block fc-mark-${v}"${nAttr}>${children}${chip}</div>`;
+      }
+      case "Embed": {
+        // Server render emits NO iframe: `formatWebHtml` does not know which page
+        // it is rendering, so it cannot resolve a relative `src`, and the chat's
+        // `sanitizeHtml` has no `iframe` in its tag allowlist anyway. The reader's
+        // `enhanceEmbeds` (wiki-embed.ts) resolves the data attributes against
+        // the open page and swaps the fallback line for the sandboxed frame; every
+        // other surface shows the line itself, which names the file.
+        const e = parseEmbedAttrs(attrs);
+        if (!e) {
+          return `<figure class="embed embed-invalid"><p class="embed-fallback">Embedded page: invalid src</p></figure>`;
+        }
+        return (
+          `<figure class="embed" data-embed-src="${escapeHtml(e.src)}" data-embed-height="${e.height}" data-embed-title="${escapeHtml(e.title)}">` +
+          `<p class="embed-fallback">Embedded page: <code>${escapeHtml(e.src)}</code></p></figure>`
+        );
       }
       case "FactCheck": {
         // Collapsed by DEFAULT — the per-claim evidence is reachable from the

@@ -76,6 +76,8 @@ export function componentBlockCss(scope: string): string {
     ${scope} .figure { margin: 1.4rem 0; }
     ${scope} .figure-body { overflow-x: auto; }
     ${scope} .figure img { max-width: 100%; height: auto; }
+    ${scope} .embed { margin: 1.4rem 0; }
+    ${scope} .embed-fallback { color: var(--text-muted); font-size: 0.9em; margin: 0; }
     ${scope} .diagram {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

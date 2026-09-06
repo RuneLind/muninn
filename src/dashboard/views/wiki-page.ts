@@ -833,6 +833,15 @@ export async function renderWikiPage(opts?: {
       background: #fff;
     }
 
+    /* <Embed src> inside a markdown page: same sandbox, height from the tag. */
+    .wiki-embed-frame {
+      display: block;
+      width: 100%;
+      border: 1px solid var(--border-primary);
+      border-radius: 8px;
+      background: #fff;
+    }
+
     .wiki-article { font-size: 14px; line-height: 1.65; color: var(--text-secondary); }
     .wiki-article h1, .wiki-article h2, .wiki-article h3, .wiki-article h4 { color: var(--text-primary); margin: 20px 0 8px; }
     .wiki-article h2 { font-size: 18px; }
