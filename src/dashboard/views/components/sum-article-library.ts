@@ -128,6 +128,24 @@ export function sumArticleLibraryStyles(): string {
     /* min-width:0 lets code blocks shrink; cap + center the reading column so
        full-page width doesn't stretch lines uncomfortably wide */
     .sum-col-main { min-width: 0; max-width: 1000px; justify-self: center; }
+    /* A Vimeo capture quotes slides as images; a 1280px frame must not push
+       the reading column past its grid cell. */
+    .sum-col-main img { max-width: 100%; height: auto; border-radius: 6px; }
+    /* The stored transcript sits under the summary as a "## Transcript"
+       section and is longer than the summary by an order of magnitude; it
+       opens on request, the summary is what the panel is for. */
+    .sum-transcript { margin-top: 24px; border-top: 1px solid var(--border-primary); padding-top: 12px; }
+    .sum-transcript > summary {
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      list-style: none;
+    }
+    .sum-transcript > summary::-webkit-details-marker { display: none; }
+    .sum-transcript > summary::before { content: '▸'; display: inline-block; width: 1.1em; }
+    .sum-transcript[open] > summary::before { content: '▾'; }
+    .sum-transcript > summary:hover { color: var(--text-primary); }
     .sum-col-left, .sum-col-right {
       position: sticky;
       top: 0;
@@ -706,6 +724,32 @@ export function sumArticleLibraryScript(): string {
     }
 
     /**
+     * Split a stored document at its \`## Transcript\` heading: the summary
+     * before it, the transcript from it on. The heading is matched outside
+     * fenced code (same fence rule as linkVimeoTimestamps) and only at level
+     * 2, which is where huginn's vimeo ingest writes it (the windows under it
+     * are \`###\`). No such heading ⇒ the whole text is the body and
+     * transcript is null. Markdown in, markdown out.
+     */
+    function splitTranscript(markdown) {
+      var lines = String(markdown).split('\\n');
+      var fence = null;
+      for (var i = 0; i < lines.length; i++) {
+        var m = /^\\s*(\`\`\`|~~~)/.exec(lines[i]);
+        if (m) {
+          if (fence === null) fence = m[1];
+          else if (fence === m[1]) fence = null;
+          continue;
+        }
+        if (fence !== null) continue;
+        if (/^## Transcript\\s*$/.test(lines[i])) {
+          return { body: lines.slice(0, i).join('\\n'), transcript: lines.slice(i + 1).join('\\n') };
+        }
+      }
+      return { body: markdown, transcript: null };
+    }
+
+    /**
      * The rendered timestamp links open the video in a NEW tab, like every
      * other outbound link in this view: markdown cannot say \`target\`, so it
      * is set on the anchors after render — on every anchor whose href starts
@@ -814,7 +858,11 @@ export function sumArticleLibraryScript(): string {
         if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, videoUrl);
         var mainEl = document.getElementById('sumArticleMain');
         if (mainEl) {
-          mainEl.innerHTML = renderMarkdown(cleaned);
+          var parts = splitTranscript(cleaned);
+          mainEl.innerHTML = renderMarkdown(parts.body) + (parts.transcript === null ? '' :
+            '<details class="sum-transcript"><summary>Transcript</summary>' +
+              '<div class="sum-transcript-body">' + renderMarkdown(parts.transcript) + '</div>' +
+            '</details>');
           if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
         }
 

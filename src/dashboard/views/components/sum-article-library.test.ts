@@ -30,12 +30,13 @@ function load(): {
   linkVimeoTimestamps: (markdown: string, videoUrl: string) => string;
   vimeoVideoIdFromUrl: (url: unknown) => string | null;
   openVimeoLinksInNewTab: (container: { querySelectorAll(sel: string): FakeAnchor[] } | null, videoUrl: string) => void;
+  splitTranscript: (markdown: string) => { body: string; transcript: string | null };
 } {
   const ctx = { document: { addEventListener() {}, getElementById: () => null } };
   return new Function(
     "ctx",
     `var document = ctx.document;\n${sumArticleLibraryScript()}\n` +
-      "return { linkVimeoTimestamps: linkVimeoTimestamps, vimeoVideoIdFromUrl: vimeoVideoIdFromUrl, openVimeoLinksInNewTab: openVimeoLinksInNewTab };",
+      "return { linkVimeoTimestamps: linkVimeoTimestamps, vimeoVideoIdFromUrl: vimeoVideoIdFromUrl, openVimeoLinksInNewTab: openVimeoLinksInNewTab, splitTranscript: splitTranscript };",
   )(ctx);
 }
 
@@ -122,5 +123,32 @@ describe("linkVimeoTimestamps", () => {
     // Three-part with a 1-digit seconds field, or a footnote-style [1], are not times.
     const md = "[1] and [12:3] and [a:bc] and [123:45]";
     expect(linkVimeoTimestamps(md, URL)).toBe(md);
+  });
+});
+
+describe("splitTranscript", () => {
+  const { splitTranscript } = load();
+
+  test("splits at the level-2 Transcript heading; the heading itself is dropped", () => {
+    const md = "## Key takeaways\n- a\n\n## Transcript\n\n### [00:00:00]\nHei";
+    expect(splitTranscript(md)).toEqual({
+      body: "## Key takeaways\n- a\n",
+      transcript: "\n### [00:00:00]\nHei",
+    });
+  });
+
+  test("no heading ⇒ whole text is the body, transcript null", () => {
+    const md = "## Summary\nText";
+    expect(splitTranscript(md)).toEqual({ body: md, transcript: null });
+  });
+
+  test("a Transcript heading inside a fence is content, not the split point", () => {
+    const md = "Intro\n```\n## Transcript\nnot it\n```\n## Transcript\nreal";
+    expect(splitTranscript(md)).toEqual({ body: "Intro\n```\n## Transcript\nnot it\n```", transcript: "real" });
+  });
+
+  test("level 3 or a suffixed heading does not split", () => {
+    expect(splitTranscript("### Transcript\nx").transcript).toBeNull();
+    expect(splitTranscript("## Transcript notes\nx").transcript).toBeNull();
   });
 });
