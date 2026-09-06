@@ -42,6 +42,28 @@ test("renderWikiPage embeds the bundled script and the pane skeleton", async () 
   expect(html).not.toContain("Answered by");
 });
 
+/**
+ * The reader is an INLINED bundle: whatever the entrypoint transitively imports
+ * lands inside the page's own <script> tag, and a string literal containing
+ * `</script>` closes that tag mid-bundle — the browser then runs a truncated
+ * script ("Unexpected end of input") and the reader is blank. Measured when
+ * `wiki-embed.ts` imported `EXPLAINER_SANDBOX` from `explainer-bridge.ts`,
+ * whose `EXPLAINER_BRIDGE_SCRIPT` is exactly such a string: every e2e spec
+ * red. The constant lives in `explainer-sandbox.ts` for that reason, and this
+ * pins the property on the page as served rather than on any one import.
+ */
+test("the inlined reader bundle never carries a literal </script>", async () => {
+  const js = await wikiClientScript();
+  expect(js).not.toContain("</script>");
+  // …and the page as served keeps the entrypoint's LAST statement inside the
+  // tag that the bundle opened — the property the browser actually depends on.
+  const html = await renderWikiPage();
+  const tail = js.slice(-60);
+  const at = html.indexOf(tail);
+  expect(at).toBeGreaterThan(0);
+  expect(html.slice(html.lastIndexOf("<script", at), at)).not.toContain("</script>");
+});
+
 test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
   const owner = await renderWikiPage({
     selected: "jarvis",

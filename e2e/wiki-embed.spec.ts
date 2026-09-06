@@ -113,7 +113,7 @@ test.describe("Wiki reader: <Embed src>", () => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PAGE_REL)}`);
     const frame = page.locator(FRAME);
     await expect(frame).toHaveCount(1);
-    await expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-popups");
+    await expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-popups allow-downloads");
     await expect(frame).toHaveAttribute("title", "The map");
     await expect(frame).toHaveAttribute(
       "src",
@@ -144,7 +144,7 @@ test.describe("Wiki reader: <Embed src>", () => {
     await expect(open).toHaveCSS("color", muted);
     // The bytes the link opens top-level carry the sandbox the iframe applies.
     const res = await page.request.get(`${BASE}${await open.getAttribute("href")}`);
-    expect(res.headers()["content-security-policy"]).toBe("sandbox allow-scripts allow-popups");
+    expect(res.headers()["content-security-policy"]).toBe("sandbox allow-scripts allow-popups allow-downloads");
     // …and the page around it kept its prose and its fallback line is gone.
     await expect(page.locator(".wiki-article")).toContainText("Prose after.");
     await expect(page.locator(".embed-fallback")).toHaveCount(0);

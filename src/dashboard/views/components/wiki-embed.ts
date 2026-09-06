@@ -10,7 +10,7 @@
  *    escaping the root refused), skip a figure already carrying a frame, plan
  *    nothing for an unknown page relPath — is `planEmbeds`, DOM-free and
  *    unit-tested; this module only reads the figures and applies the plan.
- *  - `sandbox="allow-scripts allow-popups"` — identical to the explainer view's
+ *  - `sandbox="${EXPLAINER_SANDBOX}"` — identical to the explainer view's
  *    frame, and deliberately without `allow-same-origin`, so the embedded page
  *    runs on an opaque origin and cannot reach the reader's cookies or DOM.
  *  - Runs at the ARTICLE render site only. The Ask/Explain/fact-check answer
@@ -19,6 +19,7 @@
  */
 
 import { planEmbeds, type EmbedFigure } from "../../../format/embed.ts";
+import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 
 export const EMBED_FRAME_CLASS = "wiki-embed-frame";
 
@@ -38,7 +39,7 @@ export function enhanceEmbeds(
     const fig = figures[plan.index]!;
     const frame = document.createElement("iframe");
     frame.className = EMBED_FRAME_CLASS;
-    frame.setAttribute("sandbox", "allow-scripts allow-popups");
+    frame.setAttribute("sandbox", EXPLAINER_SANDBOX);
     frame.setAttribute("loading", "lazy");
     frame.title = plan.title;
     frame.style.height = `${plan.height}px`;

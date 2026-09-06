@@ -172,6 +172,7 @@ import {
   type IndexCoverageResponse,
 } from "../../wiki/index-coverage.ts";
 import { EXPLAINER_BRIDGE_SCRIPT } from "../../wiki/explainer-bridge.ts";
+import { EXPLAINER_SANDBOX } from "../../wiki/explainer-sandbox.ts";
 import { wikiDirtyStat } from "../../wiki/commit.ts";
 import { buildDistillPrompt, parseDistillResult, buildSavedNotesBlock } from "../../wiki/remember.ts";
 import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
@@ -1778,10 +1779,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // embedder as a search query, the same "this wiki's content leaves the
     // machine" shape that puts `/api/wiki/reindex` on the list. Loopback does not
     // bound it, and the rail fetches on every page open, which makes it the
-    // highest-VOLUME egress the reader has. (`/api/wiki/html`, its sibling in this
-    // PR, serves a local file — to the reader's iframe or, via the <Embed> open-
-    // in-new-tab link, as a top-level document under a CSP `sandbox` — and
-    // reaches nothing; unguarded on purpose.) Ordered ahead of the collection check for the same reason every
+    // highest-VOLUME egress the reader has. (`/api/wiki/html`, its sibling, serves
+    // a local file — to the reader's iframe or, via the <Embed> open-in-new-tab
+    // link, as a top-level document under a CSP `sandbox` — and reaches nothing;
+    // unguarded on purpose.) Ordered ahead of the collection check for the same reason every
     // other prologue is: a policy refusal must not depend on configuration that
     // happens to stop the call today.
     const similarEgress = egressRefusal(c, entry, unknownWiki);
@@ -1872,12 +1873,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // same response as a TOP-LEVEL document, where an attribute cannot reach: a
     // CSP `sandbox` makes the document opaque-origin wherever it is loaded, so a
     // script inside a wiki-hosted .html cannot call /api/* with the reader's
-    // session, read localStorage, or drive a write route. Same two allowances
-    // as the frames, so the embedded page behaves identically in both.
+    // session, read localStorage, or drive a write route. The SAME allowance
+    // list as the frames (`EXPLAINER_SANDBOX`), so the page behaves identically
+    // in both. Only the 200 carries it; the text refusals above do not.
     return new Response(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
-        "Content-Security-Policy": "sandbox allow-scripts allow-popups",
+        "Content-Security-Policy": `sandbox ${EXPLAINER_SANDBOX}`,
       },
     });
   });

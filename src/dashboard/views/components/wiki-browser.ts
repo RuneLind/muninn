@@ -104,6 +104,7 @@ import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
+import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
@@ -1555,7 +1556,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   const src = withWiki("/api/wiki/html?relPath=" + encodeURIComponent(m.relPath));
   document.getElementById("articleWrap")!.innerHTML =
     articleHeadHtml(m) +
-    `<iframe class="wiki-explainer-frame" src="${esc(src)}" sandbox="allow-scripts allow-popups" title="${esc(m.title)}"></iframe>`;
+    `<iframe class="wiki-explainer-frame" src="${esc(src)}" sandbox="${EXPLAINER_SANDBOX}" title="${esc(m.title)}"></iframe>`;
   document.getElementById("articleWrap")!.scrollTop = 0;
   document.getElementById("connBody")!.innerHTML = '<div class="wiki-conn-empty">Loading…</div>';
   fetch(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(m.relPath)))
