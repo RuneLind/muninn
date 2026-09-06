@@ -3,17 +3,29 @@
  * rule itself can be tested on fixtures and then applied to the live package.json.
  *
  * `mock.module()` applies to every file loaded AFTER it in the same `bun test`
- * process, and `bun test` orders files by a hash of the absolute path — not by
- * argv, not alphabetically — so which files it reaches differs between a laptop,
- * the mini and a GitHub runner. The only placement that removes the order from
- * the outcome is the one CLAUDE.md prescribes: a file that calls `mock.module`
- * runs in a `bun test` process of its own. "Of its own" is measured on the FILES
- * the link expands to, not on its argument count — `bun test src/watchers/` is
- * one argument and fourteen files.
+ * process, and `bun test` runs files in an order of its own — not argv order, not
+ * alphabetical — that depends on the SET of files in the run: on the same GitHub
+ * runner, main run #508 loaded `chat-config` before `haiku-direct` (green) and
+ * #509, which added one test file and touched no chain, loaded them the other way
+ * round (red); the mini ordered the same set differently again. So which files a
+ * mock reaches is fixed per (machine, file set) and flips on any commit that adds
+ * a test file. The only placement that removes the order from the outcome is the
+ * one CLAUDE.md prescribes: a file that calls `mock.module` runs in a `bun test`
+ * process of its own. "Of its own" is measured on the FILES the link expands to,
+ * not on its argument count — `bun test src/watchers/` is one argument and
+ * fourteen files, and `bun test` with no path at all is EVERY test file.
  */
 
-/** A `mock.module(` call at the start of a line — never one quoted in prose or in a regex. */
-export const MOCK_MODULE_CALL = /^\s*mock\.module\(/m;
+/**
+ * A `mock.module(` CALL: at the start of a line, optionally behind `await`/`void`,
+ * an assignment, or a `bun:test` namespace (`bt.mock.module(`). Never one quoted
+ * in prose or in a regex. The one form this cannot see is an aliased import
+ * (`import { mock as m }`), which the live test asserts absent.
+ */
+export const MOCK_MODULE_CALL =
+  /^\s*(?:await\s+|void\s+|(?:const|let|var)\s+\w+\s*=\s*)?(?:\w+\.)?mock\.module\(/m;
+/** `import { mock as … }` would hide a call from MOCK_MODULE_CALL. */
+export const MOCK_ALIAS_IMPORT = /\bmock\s+as\s+\w+/;
 
 export interface BunTestLink {
   script: string;
@@ -37,10 +49,13 @@ export function bunTestLinks(scripts: Record<string, string>): BunTestLink[] {
 
 /**
  * The test files a link runs: an argument ending in `/` is a directory and covers
- * every test file under it; anything else is taken as one file. A directory
- * argument WITHOUT the slash is not a shape the chains use (asserted by the test).
+ * every test file under it; anything else is taken as one file; NO positional
+ * argument (`bun test --coverage`) is bun's whole-repo run — every test file. A
+ * directory argument WITHOUT the slash is not a shape the chains use (asserted by
+ * the test).
  */
 export function expandLink(args: string[], allTestFiles: readonly string[]): string[] {
+  if (args.length === 0) return [...allTestFiles];
   const files = new Set<string>();
   for (const arg of args) {
     if (arg.endsWith("/")) {
