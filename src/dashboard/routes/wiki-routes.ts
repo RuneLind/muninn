@@ -1,4 +1,5 @@
 import path from "node:path";
+import { realpath } from "node:fs/promises";
 import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
@@ -1825,17 +1826,41 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return c.text("wiki directory not found", 503);
     const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
-    if (!meta || meta.type !== "explainer") {
+    // An `.html` the index does NOT list is still servable by exact relPath — for
+    // `<Embed src>`. The index drops a same-stem `.html` when a `.md`/`.mdx` page
+    // shadows it (`.md` > `.mdx` > `.html`), and a page embedding its own
+    // diagram (`x.mdx` + `x.html`) is exactly that shape. The index's stored
+    // relPath is preferred when it exists; the fallback resolves the query as a
+    // path, and the containment check below is what makes that safe.
+    if (relPathQ && relPathQ.includes("\u0000")) return c.text("invalid path", 400);
+    const shadowed = !meta && !!relPathQ && /\.html$/i.test(relPathQ);
+    if (!shadowed && (!meta || meta.type !== "explainer")) {
       return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
     }
-    // meta.relPath is the index's own stored path (never user input); still,
-    // defend in depth — confirm the resolved file stays under the wiki root.
+    // meta.relPath is the index's own stored path (never user input); the
+    // shadowed fallback IS user input. Either way — confirm the resolved file
+    // stays under the wiki root, judged on the REAL path of both: `path.resolve`
+    // is lexical, so a symlink sitting under the root but pointing outside it
+    // (a file, or a whole directory) passed the check and was served. The index
+    // never lists a symlink (its scan does not follow them), so before the
+    // fallback existed this was unreachable; with it, the realpath is the guard.
     const rootAbs = path.resolve(index.root);
-    const fileAbs = path.resolve(rootAbs, meta.relPath);
+    const fileAbs = path.resolve(rootAbs, meta ? meta.relPath : relPathQ!);
     if (fileAbs !== rootAbs && !fileAbs.startsWith(rootAbs + path.sep)) {
       return c.text("invalid path", 400);
     }
-    const file = Bun.file(fileAbs);
+    let rootReal: string;
+    let fileReal: string;
+    try {
+      rootReal = await realpath(rootAbs);
+      fileReal = await realpath(fileAbs);
+    } catch {
+      return c.text("explainer file not found", 404);
+    }
+    if (fileReal !== rootReal && !fileReal.startsWith(rootReal + path.sep)) {
+      return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
+    }
+    const file = Bun.file(fileReal);
     if (!(await file.exists())) return c.text("explainer file not found", 404);
     // Append the Select-to-Explain forwarder. A trailing listener-only script
     // runs wherever it lands (even after </html>), so no anchor parsing is

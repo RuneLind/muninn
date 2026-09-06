@@ -70,6 +70,8 @@ export const E2E_PORTS = {
   // `.wiki-reader.json` declaration, so proving it needs a declaring wiki and a
   // non-declaring one reachable from the same reader build.
   "wiki-project-facet": 3045,
+  // `<Embed src>`: a markdown page carrying a same-stem `.html` the index drops.
+  "wiki-embed": 3051,
   // The /summaries URL field, end to end. ONE fake `node:http` server plays
   // BOTH halves the capture talks to — Vimeo's oEmbed endpoint
   // (`VIMEO_OEMBED_BASE`) and huginn (`KNOWLEDGE_API_URL`) — plus the

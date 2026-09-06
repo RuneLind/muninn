@@ -33,6 +33,7 @@ import {
 } from "./markdown-ast.ts";
 import type { Block, FactVerdict } from "./markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "./block-renderer.ts";
+import { parseEmbedAttrs } from "./embed.ts";
 import {
   Placeholders,
   escapeHtml,
@@ -153,6 +154,8 @@ const emailRenderer: BlockRenderer = {
           : "";
         return `<div style="margin:0 0 12px;">${children}${caption}</div>`;
       }
+      case "Embed":
+        return `<div style="${S.dim}margin:0 0 12px;">Embedded page: ${escapeHtml(parseEmbedAttrs(attrs)?.src ?? "invalid embed")}</div>`;
       case "FileRef":
         return `<code style="${S.code}">${children.trim() || escapeHtml(attrs.path ?? "")}</code>`;
       case "ComparisonTable":

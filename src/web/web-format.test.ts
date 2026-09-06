@@ -326,6 +326,37 @@ describe("formatWebHtml — component blocks", () => {
     );
   });
 
+  test("Embed renders the data attributes and a fallback line, never an iframe", () => {
+    const out = formatWebHtml('<Embed src="./arch.html" height="720" title="The map" />');
+    expect(out).toBe(
+      '<figure class="embed" data-embed-src="./arch.html" data-embed-height="720" data-embed-title="The map">' +
+        "<p class=\"embed-fallback\">Embedded page: <code>./arch.html</code></p></figure>",
+    );
+    expect(out).not.toContain("<iframe");
+  });
+
+  test("Embed with an absolute or non-html src renders as invalid, carrying no src", () => {
+    for (const src of ["https://evil.example/x.html", "/etc/x.html", "notes.md"]) {
+      const out = formatWebHtml(`<Embed src="${src}" />`);
+      expect(out).toContain('class="embed embed-invalid"');
+      expect(out).not.toContain("data-embed-src");
+      expect(out).not.toContain(src);
+    }
+  });
+
+  test("Embed with a bad height is an invalid embed — the src is not blamed", () => {
+    const out = formatWebHtml('<Embed src="./arch.html" height="640px" />');
+    expect(out).toContain('class="embed embed-invalid"');
+    expect(out).toContain("invalid embed");
+    expect(out).not.toContain("invalid src");
+  });
+
+  test("Embed escapes its src and title in the attributes", () => {
+    const out = formatWebHtml('<Embed src="a b.html" title="x &lt; y" />');
+    expect(out).toContain('data-embed-src="a b.html"');
+    expect(out).toContain('data-embed-title="x &amp;lt; y"');
+  });
+
   test("ComparisonTable wraps its inner table", () => {
     const out = formatWebHtml("<ComparisonTable>\n| A | B |\n| --- | --- |\n| 1 | 2 |\n</ComparisonTable>");
     expect(out).toContain('<div class="tablewrap"><table>');

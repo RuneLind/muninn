@@ -527,3 +527,18 @@ Found it ~~wrong~~ correct.`;
     });
   });
 });
+
+describe("Embed fallback line", () => {
+  test("echoes only a src that passes the shared gate — an invalid one says so", () => {
+    expect(formatSlackMrkdwn('<Embed src="./arch.html" />')).toContain("Embedded page: ./arch.html");
+    const bad = formatSlackMrkdwn('<Embed src="javascript:alert(1)" />');
+    expect(bad).toContain("Embedded page: invalid embed");
+    expect(bad).not.toContain("javascript:");
+  });
+});
+
+test("Embed: a bad height is an invalid embed, the src is not blamed", () => {
+  const out = formatSlackMrkdwn('<Embed src="./arch.html" height="640px" />');
+  expect(out).toContain("Embedded page: invalid embed");
+  expect(out).not.toContain("./arch.html");
+});

@@ -31,6 +31,8 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "verdict", "verdict-yes", "verdict-no",
   "pill", "pill-rec", "pill-warn",
   "figure", "figure-body", "caption", "fileref", "tablewrap",
+  // `<Embed>` — the fallback line only; the iframe exists in the wiki reader alone.
+  "embed", "embed-invalid", "embed-fallback",
   // CodeTabs markup — kept so the enhancer can find/switch tabs and the CSS
   // applies. (The other tier-1 blocks render as unstyled-but-present markup in
   // the chat re-render, matching the Meter precedent.)

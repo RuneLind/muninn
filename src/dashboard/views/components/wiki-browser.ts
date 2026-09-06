@@ -103,6 +103,7 @@ import {
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
+import { enhanceEmbeds } from "./wiki-embed.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
@@ -1715,6 +1716,9 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       const articleRoot = document.getElementById("articleWrap")!;
       enhanceCodeTabs(articleRoot);
       enhanceCodeBlocks(articleRoot);
+      // `<Embed src>` → sandboxed iframe, resolved against THIS page's relPath.
+      // No-op on a page without one.
+      enhanceEmbeds(articleRoot, data.meta.relPath, withWiki);
       // Fact-check layer: chip → evidence card, the summary strip, and the
       // layer toggle. No-op on a page carrying no annotation.
       enhanceFactCheck(document.getElementById("articleWrap")!);

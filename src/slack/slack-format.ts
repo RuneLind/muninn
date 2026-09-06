@@ -8,6 +8,7 @@ import {
   parseMeterAttrs,
   parseChecklist,
 } from "../format/markdown-ast.ts";
+import { parseEmbedAttrs } from "../format/embed.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import {
   Placeholders,
@@ -52,6 +53,8 @@ const slackRenderer: BlockRenderer = {
         return `[${children.trim()}]`;
       case "Figure":
         return attrs.caption ? `${children}\n${renderInline(attrs.caption)}` : children;
+      case "Embed":
+        return `Embedded page: ${parseEmbedAttrs(attrs)?.src ?? "invalid embed"}`;
       case "FileRef":
         return children.trim() || renderInline(attrs.path ?? "");
       case "ComparisonTable":

@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, symlink } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -115,6 +115,67 @@ describe("GET /api/wiki/html", () => {
   test("404 for an unknown page name", async () => {
     const res = await app.request("/api/wiki/html?name=does-not-exist");
     expect(res.status).toBe(404);
+  });
+
+  // `<Embed src>`: a page embedding its OWN diagram (`x.mdx` + `x.html`) shadows
+  // the `.html` out of the index (`.md` > `.mdx` > `.html`), so the route serves
+  // an unlisted `.html` by exact relPath — under the root only.
+  test("serves a same-stem .html the index dropped, by relPath", async () => {
+    await Bun.write(
+      path.join(root, "blogs/Explainer One.mdx"),
+      '---\ntitle: Explainer One\n---\n\n<Embed src="./Explainer One.html" />\n',
+    );
+    __resetWikiCacheForTest();
+    // Precondition: the index really did drop the .html.
+    const page = await app.request("/api/wiki/page?relPath=" + encodeURIComponent("blogs/Explainer One.html"));
+    expect(page.status).toBe(404);
+    const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/Explainer One.html"));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("<title>Explainer One</title>");
+    expect(body).toContain(EXPLAINER_BRIDGE_MARKER);
+  });
+
+  test("the unlisted-.html fallback never leaves the root and never serves markdown", async () => {
+    await Bun.write(path.join(root, "..", "outside-" + path.basename(root) + ".html"), "<p>outside</p>");
+    try {
+      const up = await app.request(
+        "/api/wiki/html?relPath=" + encodeURIComponent("../outside-" + path.basename(root) + ".html"),
+      );
+      expect(up.status).toBe(400);
+      const md = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("concepts/A Concept.md"));
+      expect(md.status).toBe(404);
+      const missing = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/nope.html"));
+      expect(missing.status).toBe(404);
+      // `name` lookups stay index-only: no fallback by stem.
+      const byName = await app.request("/api/wiki/html?name=" + encodeURIComponent("nope.html"));
+      expect(byName.status).toBe(404);
+    } finally {
+      await rm(path.join(root, "..", "outside-" + path.basename(root) + ".html"), { force: true });
+    }
+  });
+
+  // Containment is judged on the REAL path: `path.resolve` is lexical, so a
+  // symlink under the root pointing outside it passed the check and was served.
+  test("the unlisted-.html fallback does not follow a symlink out of the root", async () => {
+    const outsideDir = await mkdtemp(path.join(tmpdir(), "wiki-html-outside-"));
+    try {
+      await Bun.write(path.join(outsideDir, "secret.html"), "<html>SECRET-OUTSIDE</html>");
+      await symlink(path.join(outsideDir, "secret.html"), path.join(root, "blogs/link.html"));
+      await symlink(outsideDir, path.join(root, "blogs/outdir"));
+      for (const rel of ["blogs/link.html", "blogs/outdir/secret.html"]) {
+        const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent(rel));
+        expect(`${rel}: ${res.status}`).toBe(`${rel}: 404`);
+        expect(await res.text()).not.toContain("SECRET-OUTSIDE");
+      }
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a NUL byte in relPath is a 400, not a thrown 500", async () => {
+    const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/p.mdx\u0000.html"));
+    expect(res.status).toBe(400);
   });
 
   // The explainer view's Connections panel is fed by /api/wiki/page — it must

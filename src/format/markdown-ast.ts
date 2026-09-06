@@ -48,6 +48,7 @@ export const COMPONENT_NAMES = [
   "Tab",
   "Fact",
   "FactCheck",
+  "Embed",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -59,6 +60,7 @@ const SELF_CLOSING_ALLOWED: ReadonlySet<ComponentName> = new Set<ComponentName>(
   "Verdict",
   "Pill",
   "Fact",
+  "Embed",
 ]);
 
 /** Attribute whitelist per component; any other attribute is dropped. */
@@ -87,6 +89,9 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // claims get NO `<Fact>` wrapper and NO appendix section, so without a count
   // they would vanish from the page entirely.
   FactCheck: ["date", "ok", "warn", "bad", "unknown"],
+  // A markdown page embedding a standalone `.html` explainer in its body
+  // (`src/format/embed.ts` owns the gate on these values).
+  Embed: ["src", "height", "title"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
