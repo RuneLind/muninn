@@ -1,7 +1,8 @@
 /**
  * The frames a capture summary quotes inline, served READ-ONLY off
- * `~/.muninn/frames/<source>/<id>/<sec>.jpg` — the only writer is a capture's
- * `keepReferencedFrames`.
+ * `~/.muninn/frames/<source>/<id>/<sec>.jpg`. The root has two writers, both in
+ * `src/summaries/frames.ts`: the one-time `migrateLegacyVimeoFramesRoot` at
+ * startup, and a capture's `keepReferencedFrames` from then on.
  *
  * `GET /api/frames/:source/:id/:file` is the shape every vertical uses.
  * `GET /api/vimeo/frames/:videoId/:file` is an ALIAS over the same root, kept
@@ -29,6 +30,7 @@ import { realpath } from "node:fs/promises";
 import {
   FRAME_FILE_RE,
   VIMEO_FRAME_SOURCE,
+  frameDirFor,
   frameSourceByName,
   framesRootDir,
   isFrameId,
@@ -49,7 +51,9 @@ export function registerFramesRoutes(app: Hono, _config: Config, opts: FramesRou
     file: string,
   ): Promise<Response | null> {
     if (!source || !isFrameId(source, id) || !FRAME_FILE_RE.test(file)) return null;
-    const fileAbs = resolvePath(framesRoot, source.name, id, file);
+    // `frameDirFor` is the one spelling of `<root>/<source>/<id>` (the seam
+    // owns it; the id gate above is what keeps its assert unreachable here).
+    const fileAbs = resolvePath(frameDirFor(source, id, framesRoot), file);
     // Containment is judged on the REAL path the kernel would open, not on the
     // spelling: with the charset gates holding, the spelling is always
     // `<root>/<source>/<id>/<digits>.jpg` (enumerated), so a lexical prefix
@@ -57,17 +61,30 @@ export function registerFramesRoutes(app: Hono, _config: Config, opts: FramesRou
     // outside it (measured by review of #525: a planted `<root>/7 →
     // /tmp/outside` served `/7/9.jpg` with 200). `realpath` follows symlinks on
     // both sides; a missing file throws and is the same 404 as before.
+    //
+    // The base is `<root>/<source>/`, NOT the root: the root holds every
+    // vertical, so a link that stays INSIDE it still crosses a boundary —
+    // measured, `<root>/vimeo/77 → <root>/youtube/<id>` served the YouTube
+    // frame at a Vimeo address, on the alias too, which carries no source
+    // segment for a reader to notice it by.
+    //
     // RESIDUAL, stated: a HARDLINK planted under the root is invisible to
-    // `realpath` too and still serves — the guard against that is that the only
-    // writer under the root is `keepReferencedFrames`, which writes plain files.
-    let rootReal: string;
+    // `realpath` too and still serves. The root has exactly TWO writers and
+    // neither makes one — the one-time `migrateLegacyVimeoFramesRoot`, which
+    // renames a pre-existing tree in once (and refuses a symlinked legacy
+    // root), and `keepReferencedFrames` from then on, which writes plain files
+    // it copied itself.
+    let baseReal: string;
     let fileReal: string;
     try {
-      [rootReal, fileReal] = await Promise.all([realpath(framesRoot), realpath(fileAbs)]);
+      [baseReal, fileReal] = await Promise.all([
+        realpath(resolvePath(framesRoot, source.name)),
+        realpath(fileAbs),
+      ]);
     } catch {
       return null;
     }
-    if (!fileReal.startsWith(rootReal + pathSep)) return null;
+    if (!fileReal.startsWith(baseReal + pathSep)) return null;
     const f = Bun.file(fileReal);
     if (!(await f.exists())) return null;
     return new Response(f, {

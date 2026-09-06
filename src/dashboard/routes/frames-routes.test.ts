@@ -104,6 +104,23 @@ describe("GET /api/frames/:source/:id/:file", () => {
     expect((await app.request("/api/frames/vimeo/1/1.jpg")).status).toBe(200);
   });
 
+  test("containment is judged under <root>/<source>/, so an INTRA-root link to another source is refused too", async () => {
+    // The root has two sources under it, so "inside the root" is not the
+    // question the route is asking: `<root>/vimeo/77 → <root>/youtube/<id>`
+    // resolves to a real path under the root and would serve a YouTube frame
+    // at a Vimeo address — on the alias too, which has no source segment at
+    // all for a reader to notice it by.
+    const root = rootWithFrames();
+    symlinkSync(join(root, "youtube", YT), join(root, "vimeo", "77"));
+    const app = appWith(root);
+    expect((await app.request("/api/frames/vimeo/77/47.jpg")).status).toBe(404);
+    expect((await app.request("/api/vimeo/frames/77/47.jpg")).status).toBe(404);
+    // The frame is still served at its own source's address, unchanged.
+    const own = await app.request(`/api/frames/youtube/${YT}/47.jpg`);
+    expect(own.status).toBe(200);
+    expect(await own.text()).toBe("YOUTUBEBYTES");
+  });
+
   test("is read-only: no POST, PUT or DELETE is registered on either path", async () => {
     const app = appWith(rootWithFrames());
     for (const method of ["POST", "PUT", "DELETE"]) {
