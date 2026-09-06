@@ -7,6 +7,8 @@ import {
   summarizeTimeoutFor,
   parseYtDlpJson,
   parseShowinfoTimestamps,
+  ytDlpDownloadArgs,
+  ytDlpProbeArgs,
   YTDLP_FORMAT_SELECTOR,
 } from "./media.ts";
 
@@ -262,4 +264,60 @@ test("parseShowinfoTimestamps skips non-numeric artifacts", () => {
   // A stray "pts_time:" with no number should not crash or add an entry.
   const stderr = "n:0 pts_time:1.5 x\nn:1 pts_time: y\nn:2 pts_time:3.0 z";
   expect(parseShowinfoTimestamps(stderr)).toEqual([1.5, 3.0]);
+});
+
+// -- the yt-dlp argv builders -----------------------------------------------
+// Pure and asserted as argv, the `ffmpegFrameArgs` shape: the alternative is
+// running yt-dlp in a unit test, and the whole risk here is one flag.
+
+test("ytDlpDownloadArgs is byte-identical to the pre-`format` argv when no format is given", () => {
+  // The regression this pins: TikTok and X pass no `format`, and adding the
+  // field must leave their download exactly as it was. Spelled out in full
+  // rather than compared against a helper — a helper that drifted with the
+  // builder would assert nothing.
+  expect(ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 })).toEqual([
+    "yt-dlp",
+    "-f",
+    YTDLP_FORMAT_SELECTOR,
+    "--no-playlist",
+    "-o",
+    "/work/video.%(ext)s",
+    "--print-json",
+    "--break-match-filters",
+    "duration <= 3600",
+    "https://x.test/v",
+  ]);
+});
+
+test("ytDlpDownloadArgs puts a caller's format in -f and changes nothing else", () => {
+  const base = ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 });
+  const withFormat = ytDlpDownloadArgs("https://x.test/v", "/work", {
+    maxDurationSeconds: 3600,
+    format: "bv[height<=720]",
+  });
+  expect(withFormat[withFormat.indexOf("-f") + 1]).toBe("bv[height<=720]");
+  // Every other argument is the same, in the same order.
+  const strip = (a: string[]) => a.filter((_, i) => i !== a.indexOf("-f") + 1);
+  expect(strip(withFormat)).toEqual(strip(base));
+});
+
+test("ytDlpDownloadArgs carries the duration cap into --break-match-filters", () => {
+  // The second enforcement of the cap: the frames path probes the duration
+  // first, and this is what refuses a video that grew between the two calls
+  // (exit 101).
+  const args = ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 10800 });
+  expect(args[args.indexOf("--break-match-filters") + 1]).toBe("duration <= 10800");
+});
+
+test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () => {
+  // `--skip-download` is the whole point (the probe runs BEFORE the download it
+  // sizes) and `--no-playlist` keeps a `&list=` watch URL from dumping a whole
+  // playlist's worth of JSON.
+  expect(ytDlpProbeArgs("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toEqual([
+    "yt-dlp",
+    "--dump-json",
+    "--skip-download",
+    "--no-playlist",
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  ]);
 });

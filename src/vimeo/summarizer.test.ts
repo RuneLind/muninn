@@ -20,6 +20,7 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { VimeoCaptions } from "./captions.ts";
 import { CAPTURE_DEEP_MODEL, SHIPPED_CAPTURE_PRESETS } from "../summaries/presets.ts";
+import { windowedTranscriptRider } from "../summaries/summarizer-shared.ts";
 
 const VIDEO_ID = "1223358361";
 const CANONICAL = "https://vimeo.com/1223358361";
@@ -117,6 +118,7 @@ function installFetchMock() {
 
 const {
   summarizeVimeo,
+  buildVimeoSystemPrompt,
   AUTO_CAPTION_RIDER,
   NO_CAPTIONS_ERROR,
   NO_SPEECH_ERROR,
@@ -1399,4 +1401,30 @@ test("fix round 1 (#525): an explicit pick logs NO 'text wins' line — the tran
   await summarizeVimeo(jobId3, META, config, bot, deps({ tracks: [AUTO_TRACK], vtt: NB_LONG_VTT }));
   const line3 = infos3.find((r) => /the text wins/.test(String(r.message)));
   expect(line3?.properties.source).toBe("track tag");
+});
+
+test("the windowed-transcript sentence in the Vimeo prompt IS the shared seam's, byte for byte", () => {
+  // The two verticals had the same sentence twice, differing in one noun; the
+  // seam now owns it. What this has to prove is that the Vimeo prompt did not
+  // move a byte when it moved — so the expectation is the literal string Vimeo
+  // shipped, transcribed from `SUMMARIZE_INTRO` at 7b81bec6 (the commit before
+  // the extraction), NOT `windowedTranscriptRider("talk")`: written against the
+  // seam's own output, this assertion would pass over any edit that changed
+  // both sides at once, which is exactly the regression it is here to catch.
+  const shippedIntro =
+    "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
+    "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
+    "carrying its absolute position in the talk; those headings are positions, not content — " +
+    "never quote one as if it were speech.";
+  const prompt = buildVimeoSystemPrompt({
+    preset: STANDARD,
+    title: "Trust but verify",
+    url: "https://vimeo.com/1223358361",
+    captionKind: "manual",
+    outputLang: "en",
+  });
+  expect(prompt).toContain(shippedIntro);
+  // And the seam is what produces it, rather than a second copy that happens to
+  // agree today.
+  expect(shippedIntro.endsWith(windowedTranscriptRider("talk"))).toBe(true);
 });

@@ -7,6 +7,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { sumArticleLibraryScript } from "./sum-article-library.ts";
+import { appendTranscriptSection } from "../../../youtube/frames.ts";
 
 interface FakeAnchor {
   attrs: Record<string, string>;
@@ -153,6 +154,22 @@ describe("splitTranscript", () => {
   test("level 3 or a suffixed heading does not split", () => {
     expect(splitTranscript("### Transcript\nx").transcript).toBeNull();
     expect(splitTranscript("## Transcript notes\nx").transcript).toBeNull();
+  });
+
+  test("a YouTube frames capture's own document folds here — the writer and this reader agree", () => {
+    // The coupling, not a second fixture: `appendTranscriptSection` is what the
+    // YouTube ingest body is built with, and this is what the article view does
+    // with the document that comes back. Spelling the heading twice by hand
+    // would let the two drift and pass.
+    const doc = appendTranscriptSection(
+      "### Key takeaways\n- a",
+      "### [00:00:00]\nhello there\n\n### [00:02:00]\nmore words",
+    );
+    const parts = splitTranscript(doc.text);
+    expect(parts.body.trim()).toBe("### Key takeaways\n- a");
+    expect(parts.transcript).toContain("### [00:02:00]");
+    // The summary half keeps no trace of the transcript.
+    expect(parts.body).not.toContain("[00:00:00]");
   });
 });
 

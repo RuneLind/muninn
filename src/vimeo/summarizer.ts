@@ -7,7 +7,13 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { resolveServingProfile } from "../config.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import {
+  CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
+  buildSummarySystemPrompt,
+  ingestSummary,
+  runCaptureOneShot,
+  windowedTranscriptRider,
+} from "../summaries/summarizer-shared.ts";
 import {
   captureBotConfigFor,
   captureThinkingFor,
@@ -79,16 +85,6 @@ export const VIMEO_COLLECTION = getSummarySource("vimeo")!.collection;
  */
 export { VIMEO_MAX_DURATION_SEC } from "./limits.ts";
 
-/**
- * A transcript-only summarize call gets the 600 s floor `summarizeTimeoutFor`
- * gives a 30-frame TikTok: the whole input is one transcript, and a 3-hour
- * talk's transcript is ~200 KB of text — large for a prompt, but nothing like
- * multi-turn image reading. With frames ON the call is scaled by the frame
- * count through that same function (24 s per frame past 30), because every
- * frame is one more image Read in the same session.
- */
-export const VIMEO_SUMMARIZE_TIMEOUT_MS = 600_000;
-
 /** Error code stored on a job whose video has captions we could not choose from. */
 export const NO_CAPTIONS_ERROR = "no_captions";
 /**
@@ -103,9 +99,9 @@ export const NO_SPEECH_ERROR = "no_speech";
 
 const SUMMARIZE_INTRO =
   "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
-  "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
-  "carrying its absolute position in the talk; those headings are positions, not content — " +
-  "never quote one as if it were speech.";
+  // The windowed-transcript sentence is the seam's, shared with the YouTube
+  // prompt (which says "video"). Byte-identical to what shipped.
+  windowedTranscriptRider("talk");
 
 /**
  * The system prompt for one capture: the shared envelope around the KIND's
@@ -669,7 +665,7 @@ export async function summarizeVimeo(
       // `--add-dir` only when there is something to read: an empty extraDirs
       // would still flip the connector's file-access mode for nothing.
       ...(frames.length > 0 ? { extraDirs: [workDir] } : {}),
-      timeoutMs: summarizeTimeoutFor(frames.length, VIMEO_SUMMARIZE_TIMEOUT_MS),
+      timeoutMs: summarizeTimeoutFor(frames.length, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS),
       ...(captureThinkingFor(meta.preset) === null ? { thinkingMaxTokens: null } : {}),
       extraTraceAttrs: {
         captionLang,

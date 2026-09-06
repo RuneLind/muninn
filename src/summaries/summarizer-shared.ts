@@ -29,6 +29,40 @@ const captureLog = getLog("summaries", "capture");
  */
 export const CAPTURE_THINKING_MAX_TOKENS = 8000;
 
+/**
+ * The floor every capture's summarize call is given, before the per-frame term
+ * {@link summarizeTimeoutFor} adds on top of it.
+ *
+ * 600 s is what that function gives a 30-frame TikTok, and it is the right
+ * floor for a transcript-only capture too: the whole input is one transcript,
+ * and a 3-hour talk's is ~200 KB of text — large for a prompt, but nothing like
+ * multi-turn image reading. It bounds a background job nothing waits on.
+ *
+ * ONE constant, in the seam both video verticals already import: Vimeo and
+ * YouTube each declared their own `600_000` with the same paragraph over it,
+ * which is exactly the two-literals shape `src/video/media.ts` documents for the
+ * frame budget — where a raised ceiling stayed inert behind the second copy.
+ */
+export const CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS = 600_000;
+
+/**
+ * The rider a capture adds when its transcript came back WINDOWED — huginn's
+ * `### [HH:MM:SS]`-headed buckets, the shape both video verticals ingest.
+ *
+ * A slide can only be placed beside its passage if the model knows the headings
+ * are positions rather than speech. The two verticals carried the same sentence
+ * twice, differing in one noun; `noun` is that word ("talk" for a conference
+ * recording, "video" for anything else), and nothing else about the sentence is
+ * per-vertical.
+ */
+export function windowedTranscriptRider(noun: "talk" | "video"): string {
+  return (
+    "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
+    `carrying its absolute position in the ${noun}; those headings are positions, not content — ` +
+    "never quote one as if it were speech."
+  );
+}
+
 export interface CaptureOneShotOptions {
   /** Vertical id — names the trace root span, e.g. `capture:youtube`. */
   source: string;
@@ -190,6 +224,34 @@ Instructions:
    ${structure.trim().split("\n").join("\n   ")}`;
 }
 
+/** How long an ingest of a body this size may take. */
+const INGEST_TIMEOUT_FLOOR_MS = 15_000;
+/** One extra second per this many bytes of body. */
+const INGEST_TIMEOUT_BYTES_PER_SECOND = 64 * 1024;
+/** The ceiling: past here the ingest is hung, not slow. */
+const INGEST_TIMEOUT_MAX_MS = 120_000;
+
+/**
+ * The abort budget for one ingest POST, sized from the body it is posting.
+ *
+ * 15 s is a fine budget for the 6 KB summary this endpoint was written for and
+ * a coin flip for the 2 MiB one a windowed `## Transcript` produces: huginn
+ * writes the document and reindexes before it answers, and an abort that drops
+ * the RESPONSE loses the stored doc id — the only place it ever appears, and
+ * what the verticals' reindex-window dedup maps are keyed on. The document is
+ * written either way, so the timeout does not undo the ingest; it just makes
+ * this process forget that it happened.
+ *
+ * A rate, not a curve: one second per 64 KiB (a 2 MiB body gets 47 s), floored
+ * at today's 15 s so every small caller is byte-identical, and capped at 120 s
+ * because past that the far end is hung rather than slow.
+ */
+export function ingestTimeoutFor(bodyBytes: number): number {
+  const bytes = Number.isFinite(bodyBytes) ? Math.max(0, bodyBytes) : 0;
+  const scaled = INGEST_TIMEOUT_FLOOR_MS + Math.floor(bytes / INGEST_TIMEOUT_BYTES_PER_SECOND) * 1_000;
+  return Math.min(INGEST_TIMEOUT_MAX_MS, scaled);
+}
+
 /**
  * Best-effort POST of a finished summary to a Huginn `<vertical>/ingest`
  * endpoint, shared by the youtube / x-article / tiktok / article summarizers. A failure
@@ -217,16 +279,29 @@ export async function ingestSummary(opts: {
    * `undefined` when the response omits it (older huginn).
    */
   onIngested?: (info: { filePath?: string }) => void;
-  /** Abort timeout (default 15s). */
+  /** Abort timeout. Absent ⇒ {@link ingestTimeoutFor} over the serialized body. */
   timeoutMs?: number;
 }): Promise<void> {
+  const payload = JSON.stringify(opts.body);
+  // BYTES, not code units: the budget bounds what goes on the WIRE, and a
+  // windowed `## Transcript` of a Japanese or Norwegian talk is mostly
+  // multi-byte — `.length` would hand a 3 MB POST the budget of a 1 MB one.
+  const payloadBytes = Buffer.byteLength(payload);
+  const timeoutMs = opts.timeoutMs ?? ingestTimeoutFor(payloadBytes);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  // Debug rather than info: one line per capture, and the only place the
+  // resolved budget is visible (an AbortSignal does not report its deadline).
+  log.debug("Ingesting {bytes} bytes into {path} with a {timeoutMs} ms budget", {
+    bytes: payloadBytes,
+    path: opts.ingestPath,
+    timeoutMs,
+  });
   try {
     const res = await fetch(`${opts.knowledgeApiUrl}${opts.ingestPath}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(opts.body),
+      body: payload,
       signal: controller.signal,
     });
     clearTimeout(timeout);

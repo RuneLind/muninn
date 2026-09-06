@@ -44,14 +44,17 @@ async function getSettings() {
   });
 }
 
-async function handleSummarize({ title, url, videoId }) {
+async function handleSummarize({ title, url, videoId, frames }) {
   const settings = await getSettings();
 
   // Submit to Muninn — it handles transcript, summarization, indexing
   const response = await fetch(`${settings.muninnUrl}/api/youtube/summarize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, url, video_id: videoId }),
+    // `frames` is coerced here rather than trusted from the popup message: the
+    // route refuses a non-boolean with 400 `bad_frames`, and an older popup
+    // sends nothing at all (⇒ false, today's transcript-only capture).
+    body: JSON.stringify({ title, url, video_id: videoId, frames: frames === true }),
   });
 
   if (!response.ok) {

@@ -1,5 +1,10 @@
 const $ = (sel) => document.querySelector(sel);
 
+// The Slides tick, remembered per browser under the same sync storage the
+// Muninn URL lives in. Default OFF: slides cost a download, an ffmpeg pass and
+// a multi-turn model session, so they are opt-in per the plan.
+const FRAMES_KEY = 'frames';
+
 let videoInfo = null;
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -23,6 +28,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
       });
     }
+  });
+
+  // Restore the remembered tick, then persist every change. Both halves are
+  // guarded: a storage failure must leave the button working, not the popup
+  // dead — the tick then simply defaults to off for that session.
+  const frames = $('#chk-frames');
+  try {
+    const stored = await chrome.storage.sync.get({ [FRAMES_KEY]: false });
+    frames.checked = stored[FRAMES_KEY] === true;
+  } catch (err) {
+    console.warn('Could not read the Slides preference', err);
+  }
+  frames.addEventListener('change', () => {
+    chrome.storage.sync
+      .set({ [FRAMES_KEY]: frames.checked })
+      .catch((err) => console.warn('Could not save the Slides preference', err));
   });
 
   $('#btn-summarize').addEventListener('click', handleSummarize);
@@ -65,6 +86,8 @@ async function handleSummarize() {
         title: videoInfo.title,
         url: videoInfo.url,
         videoId: videoInfo.videoId,
+        // Always a real boolean: the route 400s `bad_frames` on anything else.
+        frames: $('#chk-frames').checked === true,
       }, (response) => {
         if (response?.error) {
           reject(new Error(response.error));

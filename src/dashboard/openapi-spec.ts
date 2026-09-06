@@ -1064,7 +1064,8 @@ export const spec = {
       post: {
         tags: ["YouTube"],
         summary: "Summarize a video",
-        description: "Starts a background summarization job for a YouTube video.",
+        description:
+          "Starts a background summarization job for a YouTube video: huginn's transcript, a summary on `SUMMARIZER_BOT`'s connector, then an ingest into `youtube-summaries`. With `frames: true` it first probes the video with yt-dlp and downloads a video-only ≤720p rendition, so the summary can quote slides inline. The body must be `application/json` (415 otherwise — a `text/plain` POST is a CORS-simple request, and this one spends a download, an ffmpeg pass and an image-reading model turn). Refusals happen before a job exists: a `video_id` outside YouTube's 11-character alphabet is 400 `bad_video_id` (checked before the huginn listing read), a non-boolean `frames` is 400 `bad_frames`, and `frames: true` on a summarizer bot whose connector cannot read files is 503 `frames_unsupported`. An already-captured video answers 200 with `duplicate` and no `job_id`; a second POST while the same video is still capturing answers 200 with `in_flight` and the running job's id. Everything stored — the job, the ingest body's url, the dedup memory — is built from `video_id`; `url` is required but not stored.",
         operationId: "postYoutubeSummarize",
         requestBody: {
           required: true,
@@ -1073,9 +1074,14 @@ export const spec = {
               schema: {
                 type: "object",
                 properties: {
-                  title: { type: "string" },
+                  title: { type: "string", description: "Capped at 300 characters." },
                   url: { type: "string", format: "uri" },
-                  video_id: { type: "string" },
+                  video_id: { type: "string", description: "11 URL-safe base64 characters." },
+                  frames: {
+                    type: "boolean",
+                    description:
+                      "Pull one 720p frame per cadence tick and let the summary quote slides inline. Default false; videos under 60 s or over 3 h skip frames and capture the transcript alone.",
+                  },
                 },
                 required: ["url", "video_id"],
               },
@@ -1083,9 +1089,28 @@ export const spec = {
           },
         },
         responses: {
-          "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { job_id: { type: "string" }, dashboard_url: { type: "string" } } } } } },
+          "200": {
+            description: "Capture started, already captured, or already in flight",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    job_id: { type: "string" },
+                    dashboard_url: { type: "string" },
+                    duplicate: { type: "boolean" },
+                    document_id: { type: "string" },
+                    existing_url: { type: "string" },
+                    in_flight: { type: "boolean" },
+                  },
+                },
+              },
+            },
+          },
           "400": errorResponse,
+          "415": errorResponse,
           "500": errorResponse,
+          "503": errorResponse,
         },
       },
     },

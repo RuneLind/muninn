@@ -14,7 +14,7 @@ the metadata, the media seam, inline slides and the Whisper fallback.
 | `download.ts` | `downloadPinned` — the ONE host-pinned, bounded byte download (`downloadVtt`'s rules, stated once), parameterised on host, caps and the noun in its messages; `VimeoDownloadError` is the base every refusal extends; it also OWNS the host constants (`VIMEO_CAPTIONS_HOST`, the `VIMEO_MEDIA_HOSTS` allowlist), so `captions.ts` and `media.ts` import a string from the module both already depend on and never from each other |
 | `media.ts` | The media seam (v2 PR 3): `fetchVimeoManifest` (host-pinned to the `VIMEO_MEDIA_HOSTS` allowlist — `vod-adaptive-ak.vimeocdn.com`, `skyfire.vimeocdn.com`), `parseVimeoManifest` / `chooseRepresentation` / `segmentIndexAt` / `resolveSegmentUrl` (pure), `downloadRendition` (init + segments → ONE fMP4 ffmpeg reads) |
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
-| `frames.ts` | Slides (v2 PR 4), the VIMEO half only: `VIMEO_FRAME_HEIGHT` and `extractCadenceFrames` (one 720p segment per tick through `media.ts`, one ffmpeg grab each). Everything source-neutral is `../summaries/frames.ts` — see below |
+| `frames.ts` | Slides (v2 PR 4), the VIMEO half only: `VIMEO_FRAME_HEIGHT` (an alias of the seam's `CAPTURE_FRAME_HEIGHT`, kept because `chooseRepresentation` reads it as a manifest constraint) and `extractCadenceFrames` (one 720p segment per tick through `media.ts`, one ffmpeg grab each). Everything source-neutral is `../summaries/frames.ts` — see below |
 | `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam: `FrameSource` (vimeo/youtube + their id charsets), the id gate, `cadenceTimes` / `formatHms` / `frameUrlPath` / `framesPromptSection` / `referencedFrameSeconds` (pure), `keepReferencedFrames` (the quoted ones → `~/.muninn/frames/<source>/<id>/<sec>.jpg`), `removeKeptFrames` + `removeKeptFramesForDocument` (a Delete's counterpart), `framesRootHasEntries`, `framesTimeoutFor`, the ffmpeg argv + grab (`raceKill` is the per-grab kill-and-reject, so a hang is reported as a timeout rather than as `exit 143`), `FRAME_MAX_DURATION_SEC` (the cadence refuses a duration whose ticks would not be servable file names), `extractCadenceFramesFromFile` (a vertical holding the whole video on disk), and the one-time root rename |
 | `whisper.ts` | The no-captions fallback (v2 PR 5): `transcribeOpusRendition` (the whole Opus rendition through `media.ts` → ffmpeg → `whisper-cli -l auto -ovtt` → a WebVTT `vttToSegments` windows like a caption track), `whisperUnavailableReason` (the pre-flight — binaries + model — BEFORE any download), `parseDetectedLanguage` / `isEnglishOnlyModel` / the two clocks (pure) |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · downloading · transcribing · extracting_frames · summarizing · ingesting · complete · error` (`downloading`/`transcribing` only on the Whisper path) |
@@ -287,7 +287,12 @@ adds something.** The manifest half is `src/vimeo/frames.ts`; **everything a
 second vertical would need is `src/summaries/frames.ts`**, which owns the
 cadence, the served root, the URL shape, the prompt section, the id gate, the
 kept-frame copy and removal, the ffmpeg argv and the file-based
-`extractCadenceFramesFromFile`. The dependency is ONE-WAY — the seam never
+`extractCadenceFramesFromFile`. **The YOUTUBE vertical is that second vertical
+now** (`src/youtube/CLAUDE.md`): it holds the whole video on disk, so it uses
+`extractCadenceFramesFromFile` and the seam's `youtube` `FrameSource` and adds
+only its own pure decisions — the yt-dlp probe that gives it a duration at all,
+the video-only format selector, and the `?timestamps=1` transcript. Anything
+BOTH verticals need belongs in the seam, never here. The dependency is ONE-WAY — the seam never
 imports this module, and a second copy of a constant next door is exactly the
 two-literals failure `src/video/media.ts` documents for the frame budget.
 `cadenceTimes(duration)` is
