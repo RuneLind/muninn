@@ -783,7 +783,7 @@ describe("the one-time frames-root rename", () => {
     });
   });
 
-  test("a REGULAR FILE at the target is 'taken' too — refuse, nothing moved, the both-exist remedy logged", async () => {
+  test("a REGULAR FILE at the target is 'taken' too — refuse, nothing moved, and NOT the both-exist remedy", async () => {
     await withCapturedLogs(async (records) => {
       const home = dir("capture-frames-mig-");
       const legacy = join(home, "vimeo-frames");
@@ -798,7 +798,11 @@ describe("the one-time frames-root rename", () => {
       expect(readFileSync(join(framesRoot, "vimeo"), "utf8")).toBe("NOT A DIRECTORY");
       const warns = records.filter((r) => r.level === "warning");
       expect(warns.length).toBe(1);
-      expect(warns[0]!.rawMessage).toContain("Both");
+      // NOT the "Both … exist" remedy: that one says the target is served and
+      // the legacy root is disposable, which here would delete the only frames.
+      expect(warns[0]!.rawMessage).not.toContain("Both");
+      expect(warns[0]!.rawMessage).toContain("not a directory");
+      expect(warns[0]!.properties.kind).toBe("file");
     });
   });
 
@@ -811,9 +815,15 @@ describe("the one-time frames-root rename", () => {
     mkdirSync(framesRoot, { recursive: true });
     symlinkSync(join(home, "gone"), join(framesRoot, "vimeo"));
 
-    expect(await migrateLegacyVimeoFramesRoot("default", { legacyRoot: legacy, framesRoot })).toBe("refuse");
-    expect(lstatSync(join(framesRoot, "vimeo")).isSymbolicLink()).toBe(true);
-    expect(readFileSync(join(legacy, "111", "1.jpg"), "utf8")).toBe("OLD");
+    await withCapturedLogs(async (records) => {
+      expect(await migrateLegacyVimeoFramesRoot("default", { legacyRoot: legacy, framesRoot })).toBe("refuse");
+      expect(lstatSync(join(framesRoot, "vimeo")).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(legacy, "111", "1.jpg"), "utf8")).toBe("OLD");
+      const warns = records.filter((r) => r.level === "warning");
+      expect(warns.length).toBe(1);
+      expect(warns[0]!.rawMessage).not.toContain("Both");
+      expect(warns[0]!.properties.kind).toBe("symlink");
+    });
   });
 
   test("on nais it does not run, even with an old root present", async () => {

@@ -739,11 +739,22 @@ export async function migrateLegacyVimeoFramesRoot(
         "frame would then 404, so copy its contents there by hand and remove the link",
       { legacyRoot, target },
     );
-  } else if (decision === "refuse" && legacy.isDir && newExists) {
+  } else if (decision === "refuse" && legacy.isDir && targetProbe.isDir) {
     log.warn(
       "Both {legacyRoot} and {target} exist — leaving both alone; the alias serves {target}, so move or remove " +
         "{legacyRoot} by hand if it still holds frames a summary quotes",
       { legacyRoot, target },
+    );
+  } else if (decision === "refuse" && legacy.isDir && newExists) {
+    // A plain file or a symlink (live or dangling) at the target: the route
+    // serves NOTHING there, so the "both exist" remedy above — which tells the
+    // operator the target is served and the legacy root is disposable — would
+    // have them delete the only real frames. The legacy root is the one to
+    // keep; the target is the one to clear.
+    log.warn(
+      "{target} exists but is not a directory ({kind}) — leaving {legacyRoot} alone, it still holds the kept " +
+        "frames and nothing is served until {target} is removed by hand and the next start moves them",
+      { legacyRoot, target, kind: targetProbe.isSymlink ? "symlink" : "file" },
     );
   }
   return decision;
@@ -755,6 +766,10 @@ export async function migrateLegacyVimeoFramesRoot(
  * directory, and `rename` then moves the link rather than the tree.
  */
 async function probeRoot(dir: string): Promise<{ isDir: boolean; isSymlink: boolean; exists: boolean }> {
+  // Any `lstat` failure reads as absent — ENOENT is the expected one, and an
+  // EACCES on an unreadable `~/.muninn/frames` then decides "move", whose
+  // `rename` fails under the generic "Could not move" warn. Accepted: an
+  // unreadable home is not a state this can repair or name better.
   try {
     const st = await lstat(dir);
     return { isDir: st.isDirectory(), isSymlink: st.isSymbolicLink(), exists: true };
