@@ -15,7 +15,9 @@ The server fetches the transcript, summarizes it with Claude, categorizes it, an
 ### Slides
 
 Off by default. With it on, Muninn also downloads a video-only 720p rendition,
-pulls one frame every ~40 s of talk, hands them to the model and lets the
+pulls one frame per cadence tick — roughly one every 20 s on a 10-minute video,
+one every ~40 s from there to 40 minutes, and one every ~180 s at the 3-hour cap
+— hands them to the model and lets the
 summary quote a slide **in place** where it shows something the transcript does
 not say (a diagram, code, a table). It adds a download and a few minutes to the
 capture, and the transcript is stored under `## Transcript` with `[HH:MM:SS]`
@@ -74,6 +76,7 @@ The extension talks to one endpoint:
 
 ```
 POST /api/youtube/summarize
+Content-Type: application/json   (required — 415 otherwise)
 {
   title: "Video Title",
   url: "https://www.youtube.com/watch?v=...",
@@ -90,6 +93,7 @@ Refusals carry a prose `error` and a machine `code` the popup renders as-is:
 |---|---|
 | 400 `bad_video_id` | `video_id` is not 11 URL-safe base64 characters |
 | 400 `bad_frames` | `frames` was sent as something other than `true`/`false` |
+| 415 `bad_content_type` | the POST was not `application/json` (the extension always sends it) |
 | 503 `frames_unsupported` | the summarizer bot's connector cannot read the frames |
 | 200 `duplicate` | already captured — the body carries the existing document |
 | 200 `in_flight` | already being captured — the body carries the running job's id |

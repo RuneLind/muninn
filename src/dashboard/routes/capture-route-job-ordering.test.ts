@@ -91,7 +91,6 @@ mock.module("../../youtube/summarizer.ts", () => ({
     _jobId: string,
     videoId: string,
     _title: string,
-    _url: string,
     _config: unknown,
     _botConfig: unknown,
     opts?: { frames?: boolean; onIngested?: (videoId: string, documentId: string) => void },
@@ -516,6 +515,37 @@ describe("YouTube capture POST — a job exists only when a capture will run", (
     expect(youtubeSummarizeCalls).toBe(0);
   });
 
+  test("a POST that is not `application/json` is 415, before anything else", async () => {
+    // Hono parses any body whatever the header says, and `text/plain` is a CORS
+    // *simple* request — no preflight at all. This route fires a yt-dlp
+    // download, an ffmpeg pass and a 60-image model turn, so the gate is what
+    // forces a preflight onto a cross-origin caller (the jira-routes precedent).
+    let listingReads = 0;
+    knowledgeApiImpl = async () => { listingReads++; return { documents: [] }; };
+    const before = ytState.getRecentJobs().length;
+
+    const res = await ytApp().request("/api/youtube/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ url: YT_URL, video_id: YT_ID, frames: true }),
+    });
+
+    expect(res.status).toBe(415);
+    expect(listingReads).toBe(0);
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("`application/json; charset=utf-8` is still JSON", async () => {
+    const res = await ytApp().request("/api/youtube/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ url: YT_URL, video_id: YT_ID }),
+    });
+    expect(res.status).toBe(200);
+    expect(youtubeSummarizeCalls).toBe(1);
+  });
+
   test("a connector without extra-dirs 503s on frames and leaves NO job behind", async () => {
     // The live trigger: SUMMARIZER_BOT points at a copilot-sdk bot. A job
     // created above this early return would never settle and would sit at the
@@ -530,7 +560,15 @@ describe("YouTube capture POST — a job exists only when a capture will run", (
     });
 
     expect(res.status).toBe(503);
-    expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "frames_unsupported" });
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.code).toBe("frames_unsupported");
+    // `error` is the SENTENCE and `code` is the machine token — this file's own
+    // documented rule, which its 400s already follow. The extension popup
+    // renders `detail` then `error`, so a token in `error` shows a reader the
+    // word `frames_unsupported`.
+    expect(body.error).not.toBe("frames_unsupported");
+    expect(String(body.error)).toContain(" ");
+    expect(String(body.detail)).toContain("melosys");
     expect(ytState.getRecentJobs().length).toBe(before);
     expect(youtubeSummarizeCalls).toBe(0);
   });
@@ -661,8 +699,176 @@ describe("YouTube capture POST — a job exists only when a capture will run", (
     const again = await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
     expect((await again.json()) as Record<string, unknown>).toMatchObject({ duplicate: true });
   });
-});
 
+  test("the job and the dedup memory carry the CANONICAL url, never the caller's", async () => {
+    // A POST naming video X with a url for video Y used to store Y's url as X's
+    // `existing_url`, so every later capture of Y was answered `duplicate` with
+    // a link to X's document. `body.url` is still required (the extension
+    // contract) and is now stored nowhere.
+    knowledgeApiImpl = async () => ({ documents: [] });
+    youtubeIngestDocId = "ai/rag/A talk.md";
+    const app = ytApp();
+
+    const started = (await (
+      await post(app, "/api/youtube/summarize", {
+        url: "https://www.youtube.com/watch?v=abcdefghijk",
+        video_id: YT_ID,
+        title: "My video",
+      })
+    ).json()) as { job_id: string };
+    expect(ytState.getJob(started.job_id)?.url).toBe(YT_URL);
+
+    const again = (await (
+      await post(app, "/api/youtube/summarize", { url: "https://evil.test/x", video_id: YT_ID })
+    ).json()) as Record<string, unknown>;
+    expect(again).toMatchObject({ duplicate: true, existing_url: YT_URL });
+  });
+
+  test("a title is capped rather than carried whole into the job and the prompt", async () => {
+    knowledgeApiImpl = async () => ({ documents: [] });
+    const long = "T".repeat(500);
+    const started = (await (
+      await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, title: long })
+    ).json()) as { job_id: string };
+
+    const title = ytState.getJob(started.job_id)!.title;
+    expect(title.length).toBe(300);
+    expect(title.endsWith("…")).toBe(true);
+    expect(long.startsWith(title.slice(0, -1))).toBe(true);
+  });
+
+  test("a listing row on a LOOK-ALIKE host is not this video", async () => {
+    // `endsWith("youtube.com")` also matches `evilyoutube.com`, so a document
+    // ingested from such a url used to answer `duplicate` for the real video —
+    // and, through the delete listener, name the video whose frames get
+    // removed.
+    knowledgeApiImpl = async () => ({
+      documents: [{ id: "ai/rag/Look-alike.md", url: `https://evilyoutube.com/watch?v=${YT_ID}` }],
+    });
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+
+    expect((await res.json()) as Record<string, unknown>).not.toHaveProperty("duplicate");
+    expect(youtubeSummarizeCalls).toBe(1);
+  });
+
+  test("a real subdomain (`m.youtube.com`, `www.`) still resolves, and `youtu.be` is exact", async () => {
+    knowledgeApiImpl = async () => ({
+      documents: [{ id: "ai/rag/A talk.md", url: `https://m.youtube.com/watch?v=${YT_ID}` }],
+    });
+    expect((await (await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID })).json()))
+      .toMatchObject({ duplicate: true });
+
+    knowledgeApiImpl = async () => ({
+      documents: [{ id: "ai/rag/A talk.md", url: `https://youtu.be/${YT_ID}` }],
+    });
+    expect((await (await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID })).json()))
+      .toMatchObject({ duplicate: true });
+
+    knowledgeApiImpl = async () => ({
+      documents: [{ id: "ai/rag/Look-alike.md", url: `https://notyoutu.be/${YT_ID}` }],
+    });
+    expect((await (await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID })).json()))
+      .not.toHaveProperty("duplicate");
+  });
+
+  test("the ingest map is bounded — the 201st ingest evicts the oldest entry", async () => {
+    // Mirrors `YOUTUBE_RECENT_INGEST_MAX`, the Vimeo case's rationale: the map
+    // only ever covers huginn's reindex window, so the honest degrade past the
+    // bound is a re-capture, not a cleared map.
+    const CAP = 200;
+    knowledgeApiImpl = async () => ({ documents: [] });
+    const app = ytApp();
+    // 11 characters of the URL-safe base64 alphabet, distinct per index.
+    const idFor = (i: number) => `vid${String(i).padStart(8, "0")}`;
+    const urlFor = (i: number) => `https://www.youtube.com/watch?v=${idFor(i)}`;
+
+    for (let i = 0; i <= CAP; i++) {
+      youtubeIngestDocId = `ai/rag/talk-${i}.md`;
+      await post(app, "/api/youtube/summarize", { url: urlFor(i), video_id: idFor(i) });
+    }
+    const capturesSoFar = youtubeSummarizeCalls;
+    expect(capturesSoFar).toBe(CAP + 1);
+
+    const newest = (await (
+      await post(app, "/api/youtube/summarize", { url: urlFor(CAP), video_id: idFor(CAP) })
+    ).json()) as Record<string, unknown>;
+    expect(newest).toMatchObject({ duplicate: true, document_id: `ai/rag/talk-${CAP}.md` });
+
+    // The eviction took exactly ONE entry rather than clearing the map.
+    const second = (await (
+      await post(app, "/api/youtube/summarize", { url: urlFor(1), video_id: idFor(1) })
+    ).json()) as Record<string, unknown>;
+    expect(second).toMatchObject({ duplicate: true, document_id: "ai/rag/talk-1.md" });
+
+    const oldest = (await (
+      await post(app, "/api/youtube/summarize", { url: urlFor(0), video_id: idFor(0) })
+    ).json()) as Record<string, unknown>;
+    expect(oldest).not.toHaveProperty("duplicate");
+    expect(youtubeSummarizeCalls).toBe(capturesSoFar + 1);
+  });
+
+  test("the delete map is bounded — the 201st delete evicts the oldest", async () => {
+    const CAP = 200;
+    const DOC = "ai/rag/A talk.md";
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: YT_URL }] });
+    youtubeIngestDocId = null;
+    const app = ytApp();
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    for (let i = 0; i < CAP; i++) {
+      notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: `ai/rag/other-${i}.md` });
+    }
+    // DOC was the oldest of 201 ⇒ evicted ⇒ the listing's row counts again.
+    const body = (await (await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID })).json()) as
+      Record<string, unknown>;
+    expect(body).toMatchObject({ duplicate: true });
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("deleting the same document twice re-stamps it as the NEWEST entry", async () => {
+    // `Map.set` on an existing key keeps its ORIGINAL insertion position, so
+    // without the delete-then-set a twice-deleted document is evicted by the
+    // cap in its first position and the stale `duplicate` comes back while
+    // huginn is still listing it.
+    const CAP = 200;
+    const DOC = "ai/rag/A talk.md";
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: YT_URL }] });
+    youtubeIngestDocId = null;
+    const app = ytApp();
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    for (let i = 0; i < CAP - 1; i++) {
+      notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: `ai/rag/other-${i}.md` });
+    }
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: "ai/rag/one-more.md" });
+
+    const body = (await (await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID })).json()) as
+      Record<string, unknown>;
+    expect(body).not.toHaveProperty("duplicate");
+    expect(youtubeSummarizeCalls).toBe(1);
+  });
+
+  test("an ingest under a deleted document's id makes the listing's row count again", async () => {
+    // huginn's YouTube writer keys on the FILE PATH, so two videos whose
+    // category and title agree land on ONE document id. Delete it, capture the
+    // other video, and the row huginn lists is a real document again — the
+    // delete stamp has to come off, or the second video is captured forever.
+    const DOC = "ai/rag/A talk.md";
+    const OTHER_ID = "abcdefghijk";
+    const OTHER_URL = `https://www.youtube.com/watch?v=${OTHER_ID}`;
+    knowledgeApiImpl = async () => ({ documents: [] });
+    const app = ytApp();
+
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    youtubeIngestDocId = DOC;
+    await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: OTHER_URL }] });
+    const other = (await (
+      await post(app, "/api/youtube/summarize", { url: OTHER_URL, video_id: OTHER_ID })
+    ).json()) as Record<string, unknown>;
+    expect(other).toMatchObject({ duplicate: true, document_id: DOC });
+  });
+});
 
 describe("Vimeo capture POST — nothing is created until a capture will run", () => {
   const VIMEO_URL = "https://vimeo.com/1223358361";
@@ -1753,6 +1959,84 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     expect(existsSync(join(framesDir(root, VIDEO_ID), "1390.jpg"))).toBe(true);
   });
 });
+
+describe("YouTube: a /summaries Delete removes the document's kept frames", () => {
+  const DOC = "ai/rag/A talk.md";
+  const YT_ID = "dQw4w9WgXcQ";
+  const YT_URL = `https://www.youtube.com/watch?v=${YT_ID}`;
+
+  /** The listener is fire-and-forget; a positive case polls, a negative one gets the fixed slice. */
+  const settle = async (done: () => boolean = () => false) => {
+    const until = Date.now() + 3_000;
+    while (!done() && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 150));
+  };
+
+  function framesDir(root: string, videoId: string): string {
+    return join(root, "youtube", videoId);
+  }
+
+  function rootWithFrames(): string {
+    const root = trackedTmpDir("yt-frames-del-");
+    mkdirSync(framesDir(root, YT_ID), { recursive: true });
+    writeFileSync(join(framesDir(root, YT_ID), "600.jpg"), "JPEG");
+    mkdirSync(framesDir(root, "abcdefghijk"), { recursive: true });
+    writeFileSync(join(framesDir(root, "abcdefghijk"), "10.jpg"), "OTHER");
+    return root;
+  }
+
+  test("a recently captured document: the video id comes from the ingest map", async () => {
+    // The listing names the deleted document under ANOTHER video. A
+    // registration that consulted it would remove that video's frames; the
+    // ingest map, written by this registration's own capture, says which video
+    // this document is.
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: "https://www.youtube.com/watch?v=abcdefghijk" }] });
+    youtubeIngestDocId = DOC;
+    const root = rootWithFrames();
+    const app = new Hono();
+    registerYouTubeRoutes(app, config, { framesRoot: root });
+    const started = (await (await post(app, "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID })).json()) as
+      Record<string, unknown>;
+    expect(started.job_id).toBeTruthy();
+
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    await settle(() => !existsSync(framesDir(root, YT_ID)));
+    expect(existsSync(framesDir(root, YT_ID))).toBe(false);
+    expect(readFileSync(join(framesDir(root, "abcdefghijk"), "10.jpg"), "utf8")).toBe("OTHER");
+  });
+
+  test("an older document: the video id is resolved from the listing row huginn still serves", async () => {
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: `https://youtu.be/${YT_ID}` }] });
+    const root = rootWithFrames();
+    registerYouTubeRoutes(new Hono(), config, { framesRoot: root });
+
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    await settle(() => !existsSync(framesDir(root, YT_ID)));
+    expect(existsSync(framesDir(root, YT_ID))).toBe(false);
+    expect(existsSync(join(framesDir(root, "abcdefghijk"), "10.jpg"))).toBe(true);
+  });
+
+  test("another collection's delete, an unlisted document, or a listing that is down leave every frame in place", async () => {
+    const root = rootWithFrames();
+    knowledgeApiImpl = async () => ({ documents: [{ id: DOC, url: YT_URL }] });
+    registerYouTubeRoutes(new Hono(), config, { framesRoot: root });
+
+    notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
+    await settle(() => true);
+    expect(existsSync(join(framesDir(root, YT_ID), "600.jpg"))).toBe(true);
+
+    knowledgeApiImpl = async () => ({ documents: [{ id: "ai/rag/Another.md", url: YT_URL }] });
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    await settle(() => true);
+    expect(existsSync(join(framesDir(root, YT_ID), "600.jpg"))).toBe(true);
+
+    knowledgeApiImpl = async () => { throw new Error("huginn is down"); };
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    await settle(() => true);
+    expect(existsSync(join(framesDir(root, YT_ID), "600.jpg"))).toBe(true);
+  });
+});
+
 
 // `GET /api/frames/:source/:id/:file` and the pre-seam `/api/vimeo/frames/...`
 // alias moved out of this vertical with the frames seam; their cases live in

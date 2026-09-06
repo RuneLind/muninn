@@ -10,6 +10,7 @@ import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
 import { applyCors } from "../../auth/cors.ts";
 import { YOUTUBE_FRAME_SOURCE, isFrameId, removeKeptFramesForDocument } from "../../summaries/frames.ts";
+import { youtubeWatchUrl } from "../../youtube/frames.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 
 const log = getLog("dashboard");
@@ -75,12 +76,32 @@ export interface YouTubeRouteOptions {
 export function extractYouTubeVideoId(url: string): string | null {
   try {
     const u = new URL(url);
-    if (u.hostname === "youtu.be") return u.pathname.slice(1) || null;
-    if (u.hostname.endsWith("youtube.com")) return u.searchParams.get("v");
+    // Exact host or a real SUBDOMAIN of it, never a suffix match: `endsWith`
+    // also accepts `evilyoutube.com`, so one document ingested from such a url
+    // answered `duplicate` for the real video — and, through the delete
+    // listener, named the video whose kept frames get removed.
+    const host = u.hostname.toLowerCase();
+    if (host === "youtu.be") return u.pathname.slice(1) || null;
+    if (host === "youtube.com" || host.endsWith(".youtube.com")) return u.searchParams.get("v");
     return null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The longest title this route stores.
+ *
+ * It is third-party text (the extension reads the page's own `<title>`) and it
+ * reaches the job card, the `/agents` run name, the system prompt and huginn's
+ * FILE NAME. 300 characters is far past any real video title and well under
+ * anything that would matter in a prompt.
+ */
+export const YOUTUBE_TITLE_MAX = 300;
+
+/** `title`, capped — with the ellipsis inside the bound, never appended past it. */
+export function capYouTubeTitle(title: string): string {
+  return title.length <= YOUTUBE_TITLE_MAX ? title : `${title.slice(0, YOUTUBE_TITLE_MAX - 1)}…`;
 }
 
 /**
@@ -187,12 +208,15 @@ export function registerYouTubeRoutes(
    * the in-flight claim is given back the moment the capture settles.
    *
    * **And on THIS vertical the consequence of missing it is worse than a double
-   * spend.** huginn's YouTube ingest dedups by FILE PATH
-   * (`<category>/<sanitized title>.md`, `write_categorized_markdown`), not by
-   * url — so a re-capture whose auto-picked category or resolved title differs
-   * by a character writes a SECOND document rather than overwriting the first.
-   * (Where they do match it overwrites, which is what made the Vimeo instance of
-   * this bug invisible.) This map is the only thing in front of that.
+   * spend.** huginn's YouTube ingest keys on the FILE PATH
+   * (`<category>/<sanitized title>.md`, `write_categorized_markdown`) and then
+   * compares the STORED url: same path + same url overwrites, same path + a
+   * DIFFERENT url forks `Title (2).md`. So a re-capture whose auto-picked
+   * category or resolved title differs by a character writes a SECOND document
+   * under a second path — which is also why everything stored below is built
+   * from the validated id rather than from `body.url`. (On the Vimeo side path
+   * and url both match on a re-capture, which is what made the same bug
+   * invisible there.) This map is the only thing in front of that.
    *
    * Bounded on BOTH axes because it is a cache whose only invalidation is the
    * delete signal below: the listing is the authority, this only covers the gap
@@ -340,6 +364,20 @@ export function registerYouTubeRoutes(
     // what the extension origin is allowlisted in.
     applyCors(c);
 
+    // **`application/json` is REQUIRED** (the `jira-routes.ts` precedent).
+    // Hono parses any body whatever the header says, and `text/plain` is a CORS
+    // *simple* request — no preflight at all — so without this gate a
+    // cross-origin page could start a yt-dlp download, an ffmpeg pass and a
+    // 60-image model turn with the browser never asking permission. The
+    // extension already sends JSON. A `charset` parameter is fine.
+    const contentType = (c.req.header("content-type") ?? "").trim();
+    if (!/^application\/json\s*(;|$)/i.test(contentType)) {
+      return c.json(
+        { error: "This endpoint takes application/json.", code: "bad_content_type" },
+        415,
+      );
+    }
+
     type Body = { title?: string; url?: string; video_id?: string; frames?: unknown };
     const body = await c.req.json<Body>().catch(() => ({} as Body));
     const { title, url, video_id } = body;
@@ -367,6 +405,9 @@ export function registerYouTubeRoutes(
       );
     }
 
+    // The canonical address of this video, from the id above and nothing else.
+    const canonicalUrl = youtubeWatchUrl(video_id);
+
     if (body.frames !== undefined && typeof body.frames !== "boolean") {
       return c.json({ error: "frames must be a boolean", code: "bad_frames" }, 400);
     }
@@ -383,9 +424,13 @@ export function registerYouTubeRoutes(
       return c.json({ error: "No bots configured" }, 500);
     }
     if (frames && !connectorCapabilities(summarizerBot).supportsExtraDirs) {
+      // `error` is the SENTENCE and `code` is the machine token — this file's
+      // own rule, which its 400s follow. The extension popup renders `detail`
+      // then `error`, so a token in `error` shows the reader the word
+      // `frames_unsupported`.
       return c.json(
         {
-          error: "frames_unsupported",
+          error: "Slides are not available on this summarizer bot's connector.",
           code: "frames_unsupported",
           detail:
             `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector ?? "claude-cli"}", ` +
@@ -447,7 +492,13 @@ export function registerYouTubeRoutes(
         return c.json(duplicateBody(existing.id, existing.url));
       }
 
-      const jobId = createJob(video_id, title || url, url);
+      // Everything stored from here on is built from the VALIDATED id, never
+      // from `body.url`: a POST naming video X with a url for video Y used to
+      // store Y's url as X's `existing_url`, so every later capture of Y was
+      // answered `duplicate` with a link to X's document. `url` is still
+      // required (the extension contract) and is now stored nowhere — it is
+      // only a title fallback, where it is the reader's own paste.
+      const jobId = createJob(video_id, capYouTubeTitle(title || canonicalUrl), canonicalUrl);
       flight.jobId = jobId;
       started = true;
 
@@ -455,12 +506,12 @@ export function registerYouTubeRoutes(
       // exactly when the job does (both terminal paths are inside it), so this
       // is where the claim is given back. `.finally`, never `.then`: the release
       // must not depend on the log line above it succeeding.
-      summarizeVideo(jobId, video_id, title || url, url, config, summarizerBot, {
+      summarizeVideo(jobId, video_id, capYouTubeTitle(title || canonicalUrl), config, summarizerBot, {
         frames,
         // The ONE moment the route can learn that a document now exists: huginn
         // answered the ingest, and its listing will not say so for another
         // reindex cycle.
-        onIngested: (videoId, documentId) => rememberIngest(videoId, documentId, url),
+        onIngested: (videoId, documentId) => rememberIngest(videoId, documentId, canonicalUrl),
       })
         .catch((err) => {
           log.error("YouTube summarization failed: {error}", { error: err instanceof Error ? err.message : String(err) });

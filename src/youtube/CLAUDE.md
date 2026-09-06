@@ -10,7 +10,7 @@ into huginn.
 | File | Role |
 |---|---|
 | `state.ts` | The job store. Statuses `pending · fetching_transcript · downloading · extracting_frames · summarizing · ingesting · complete · error` — the middle two are the FRAMES path only |
-| `frames.ts` | Everything the frames path DECIDES, all of it pure and import-free: `decideYouTubeFrames`, the height/format/cap/floor constants, `youtubeWatchUrl`, `transcriptUrl`, `youtubeDownloadTimeoutFor`, `capTranscriptWindows`, `appendTranscriptSection` |
+| `frames.ts` | Everything the frames path DECIDES, all of it pure and import-free: `decideYouTubeFrames`, the format/cap/floor constants, `youtubeWatchUrl`, `transcriptUrl`, `youtubeDownloadTimeoutFor`, `capTranscriptWindows`, `appendTranscriptSection` |
 | `summarizer.ts` | The job: probe → transcript → download → frames → `runCaptureOneShot` → ingest → source-draft |
 | `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam this vertical uses whole — the cadence, the served root, the URL shape, the prompt section, the id gate, `keepReferencedFrames`, `removeKeptFramesForDocument`, `extractCadenceFramesFromFile`. See `src/vimeo/CLAUDE.md` for its full contract |
 
@@ -46,16 +46,34 @@ the "shorter than a minute" cut and be reported as a clip.
 modes, so handing yt-dlp a client-supplied URL would let any page spawn it
 against an arbitrary host.
 
-**The download is VIDEO-ONLY** (`bv[height<=720][ext=mp4]/bv[height<=720]`),
+**The download is VIDEO-ONLY** (`bv[height<=720][ext=mp4][vcodec^=avc1]/bv[height<=720][ext=mp4]/bv[height<=720]`),
 because the transcript comes from huginn and every byte of audio would be paid
 for and thrown away; there is no uncapped tail, so an upload with no ≤720p video
 rendition degrades to transcript-only rather than pulling 1080p to scale it
-down. The cap is enforced **twice** — once by the probe and once by yt-dlp's own
+down. **The first tier names the CODEC, and mp4 alone was not enough**: mp4 is a
+container — measured on `SkVqJ1SGeL0`, `bv[height<=720][ext=mp4]` resolved to
+format 398 (`av01`) on a video that also offered 136 (`avc1`), so every ffmpeg
+seek paid for an AV1 decode. The tiers below drop the codec again, so a video
+with no H.264 rendition still gets frames. The height is
+`CAPTURE_FRAME_HEIGHT` (`src/summaries/frames.ts`), spelled out here because
+`frames.ts` imports nothing.
+
+The duration cap is enforced **twice** — once by the probe and once by yt-dlp's own
 `--break-match-filters duration <= N` (exit 101), for a video that grew between
 the two calls. **There is no BYTE cap**, stated rather than papered over:
 `--max-filesize` has no exit code of its own, so a caller cannot tell an
 over-size refusal from an ordinary failure. What binds is the duration cap and
 the whole-operation timeout.
+
+**The download and the ffmpeg pass run under ONE process-wide queue key**
+(`framesQueue`, the Vimeo harvest precedent): the route's dedup only holds back
+a second capture of the SAME video, so N distinct-id POSTs are N legitimate
+captures — and must not be N concurrent 50 MiB downloads on a laptop also
+running the dev server, the bots and huginn. A queue, not a try-lock: the second
+capture waits and then runs. The section is entered twice (probe; then
+download + extract) and is never held across the transcript fetch or the model
+turn — what it guarantees is one yt-dlp / ffmpeg at a time, not one capture at a
+time.
 
 **The video file is unlinked the moment the ffmpeg pass returns**, in a
 `finally` so a failed pass unlinks too: `workDir` is what the model is handed as
@@ -71,10 +89,13 @@ yt-dlp rot, an ffmpeg error, a connector that cannot read files. The outcome
 rides the trace as `frames` (`off · on · unsupported · duration_unknown ·
 too_short · too_long · failed`) beside `frameCount`.
 
-**Videos under 60 s skip frames, and it is a DURATION cut.** `frameBudgetFor`
-still hands out 15 ticks below a minute, so the budget would sample a
-40-second clip every 2.7 s — a download, 15 ffmpeg runs and 15 image reads for a
-video whose transcript already says everything.
+**Videos under 60 s skip frames, and it is a DURATION cut** — an editorial rule
+rather than a spend bound: nothing under a minute is a slide deck, its
+transcript already says everything, and the frames would be a talking head. Note
+what the cut ADMITS: `frameBudgetFor` hands out 15 ticks up to 60 s and **25** up
+to 180 s, so the line sits immediately below its densest sampling (a 150 s clip
+is measured at 25 frames, one every 6 s). That is deliberate — a two-minute
+lightning talk does have slides.
 
 ## The transcript with a clock
 
@@ -82,10 +103,18 @@ video whose transcript already says everything.
 then returns the transcript as `### [HH:MM:SS]`-headed 120 s windows, the same
 shape muninn's Vimeo captures ingest. Never sent blank — an empty value is a
 422 — and never on the frames-off path, whose URL and prompt stay byte-identical
-to what shipped before slides existed. A frames pass that then FAILS keeps the
-windowed transcript it already fetched: it is the better document either way,
-and re-fetching the plain form to undo the decision would be a second round-trip
-for a worse result.
+to what shipped before slides existed.
+
+⚠️ **What is WINDOWED is what huginn ANSWERED, never what was asked for.** The
+#129 endpoint echoes `timestamps: true` when it windowed; a pre-#129 huginn
+(127.0.0.1:8321 as this lands) ignores the parameter and answers a plain
+transcript with no `timestamps` key. So `timestamped = data.timestamps === true`,
+and the `## Transcript` section and the windowed rider ride on THAT — deriving
+them from the frames decision put a `### [HH:MM:SS]` rider on a prompt whose
+transcript had no headings, and filed a flat wall of text under `## Transcript`
+as if it were windowed. It settles the frames-FAILURE case for free: the
+transcript is windowed whether or not any frame came out, so the section and the
+rider stay and only the slides go away.
 
 **The windowed transcript is appended to the SUMMARY STRING sent to the ingest,
 and only there.** huginn's `YouTubeIngestRequest` has no `transcript_markdown`
@@ -96,17 +125,30 @@ Vimeo-only — so the document body is exactly what is posted as `summary`.
 huginn's `MarkdownHeadingSplitter` cuts the section on the `###` windows inside
 it, so a hit in a 40-minute talk cites to the minute), capped at 2 MiB **at a
 window boundary** with a line saying so — a byte cut would leave a heading over
-half a sentence and carry that timestamp into a chunk that ends mid-word.
-`completeJob`, the shelf card, `setSimilar` and the source-page draft all get
-the summary ALONE.
+half a sentence and carry that timestamp into a chunk that ends mid-word. Three
+rules the cap lives by: the note's own bytes come OUT of the budget (the result
+never exceeds `maxBytes`); a FIRST window bigger than the budget keeps a head of
+it, cut at a line boundary and never inside a code point, because the note alone
+is a document that says nothing; and `truncated` has a consumer — `summarizeVideo`
+warns with both byte counts, or a talk whose second half never reached the
+document is invisible outside the stored file. `completeJob`, the shelf card and
+the source-page draft get the summary ALONE — **but `setSimilar` does not**: the
+`similar` list is computed by huginn from `result["summary"][:2000]`, i.e. from
+the string that carries the transcript.
 
 ⚠️ **Two consequences of riding the summary string**, both accepted and both
 retired by a `transcript_markdown` field on the YouTube ingest (filed
 follow-up): huginn's similarity query for this source is
-`result["summary"][:2000]`, so a summary shorter than 2000 characters lets the
-first transcript window into that query; and `response_fields` echoes the whole
-summary back, so the ingest response carries the transcript over HTTP. Neither
-touches the stored document or anything muninn reads.
+`result["summary"][:2000]` (`main/ingest/registry.py`), so a summary shorter than
+2000 characters lets the first transcript window into that query — which is what
+the shelf card's "similar" list is ranked by; and `response_fields` echoes the
+whole summary back, so the ingest response carries the transcript over HTTP. The
+second is also why the ingest's abort budget is sized from the body
+(`ingestTimeoutFor`, `src/summaries/summarizer-shared.ts`): 15 s over a 2 MiB
+round-trip risks dropping the response after huginn has already written the
+document, and that response is the only place the stored doc id appears — which
+is what state 3 below is keyed on. Neither consequence touches the stored
+document.
 
 ## The four dedup states
 
@@ -130,12 +172,14 @@ listing, and bounded on both axes (`YOUTUBE_RECENT_INGEST_TTL_MS` 30 min,
 `YOUTUBE_RECENT_INGEST_MAX` 200).
 
 **On THIS vertical missing state 3 is worse than a double spend.** huginn's
-YouTube ingest writes through `write_categorized_markdown`, which dedups by FILE
-PATH (`<category>/<sanitized title>.md`) and not by url — so a re-capture whose
-auto-picked category or resolved title differs by a character leaves a SECOND
-document in the corpus. (Where they match it overwrites, which is what made the
-same bug invisible on the Vimeo side.) This map is the only thing in front of
-that. Do not describe huginn as overwriting.
+YouTube ingest writes through `write_categorized_markdown`, which keys on the
+FILE PATH (`<category>/<sanitized title>.md`) and then compares the STORED url:
+same path + same url overwrites, same path + a DIFFERENT url forks `Title (2).md`
+(`main/ingest/_markdown_writer.py`). So a re-capture whose auto-picked category
+or resolved title differs by a character writes a second document under a second
+path, and one whose url differs forks even where the path matches — which is why
+`body.url` is no longer the caller's (below). This map is the only thing in
+front of that.
 
 **A `/summaries` Delete invalidates both halves.** `backlog-doc-delete` calls
 `notifySummaryDocumentDeleted` after huginn confirmed the move; this vertical's
@@ -152,6 +196,18 @@ listener set is module-level and never unsubscribed, so a registration with no
 root would remove frames under the developer's real `~/.muninn/frames` on the
 next test that fires the signal.
 
+## The url, and the title
+
+**Everything stored is built from the validated `video_id`** — `youtubeWatchUrl`
+for the job's url, the ingest body, the system prompt's `Video URL:`, the
+source-page draft and the dedup memory. `url` stays required (the extension
+contract) but is stored NOWHERE: a POST naming video X with a url for video Y
+used to store Y's address as X's `existing_url`, so every later capture of Y was
+answered `duplicate` with a link to X's document. `summarizeVideo` takes no url
+parameter at all, so there is no second place to get this wrong. `title` is
+capped at 300 characters (`capYouTubeTitle`) — it is third-party text that
+reaches the job card, the `/agents` run name, the prompt and huginn's file name.
+
 ## CORS stays
 
 Unlike the Vimeo vertical, `POST /api/youtube/summarize` keeps `applyCors` — the
@@ -159,6 +215,15 @@ entry point IS a Chrome extension, which is cross-origin by construction. Stated
 because slides put a yt-dlp download, an ffmpeg pass and a 60-image model turn
 behind that POST; what bounds it is `MUNINN_ALLOWED_ORIGINS` under
 `MUNINN_AUTH`, which is where the extension's own origin is allowlisted.
+
+**`application/json` is REQUIRED (415 otherwise)**, the `jira-routes.ts`
+precedent: Hono parses any body whatever the header says, and a `text/plain`
+POST is a CORS *simple* request — no preflight — so without the gate a
+cross-origin page could start a yt-dlp download, an ffmpeg pass and a 60-image
+model turn with the browser never asking. Under `MUNINN_AUTH=off` the CORS
+disposition is the wildcard one (`src/auth/cors.ts`) and no origin middleware is
+mounted, so the gate forces a preflight but does not by itself bound the spend;
+under an authenticating mode the route is admin-zone.
 
 **The id gate is route-WIDE, not frames-only, and runs before the huginn
 listing read.** A `video_id` outside the frames seam's charset (11 URL-safe
