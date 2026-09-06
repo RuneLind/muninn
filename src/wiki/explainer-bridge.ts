@@ -2,7 +2,7 @@
  * Select-to-Explain **forwarder** injected into standalone HTML explainer pages
  * served for the /wiki reader's sandboxed `<iframe>`.
  *
- * The explainer iframe is `sandbox="allow-scripts allow-popups"` — deliberately
+ * The explainer iframe is `sandbox="<EXPLAINER_SANDBOX>"` (`explainer-sandbox.ts`) — deliberately
  * WITHOUT `allow-same-origin`, so it runs on an opaque origin and the parent
  * reader cannot read the iframe's selection directly. This listener-only script
  * bridges that gap with `postMessage`: on a non-collapsed selection it forwards

@@ -10,7 +10,7 @@
  *    escaping the root refused), skip a figure already carrying a frame, plan
  *    nothing for an unknown page relPath — is `planEmbeds`, DOM-free and
  *    unit-tested; this module only reads the figures and applies the plan.
- *  - `sandbox="allow-scripts allow-popups"` — identical to the explainer view's
+ *  - `sandbox="${EXPLAINER_SANDBOX}"` — identical to the explainer view's
  *    frame, and deliberately without `allow-same-origin`, so the embedded page
  *    runs on an opaque origin and cannot reach the reader's cookies or DOM.
  *  - Runs at the ARTICLE render site only. The Ask/Explain/fact-check answer
@@ -19,6 +19,7 @@
  */
 
 import { planEmbeds, type EmbedFigure } from "../../../format/embed.ts";
+import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 
 export const EMBED_FRAME_CLASS = "wiki-embed-frame";
 
@@ -38,13 +39,27 @@ export function enhanceEmbeds(
     const fig = figures[plan.index]!;
     const frame = document.createElement("iframe");
     frame.className = EMBED_FRAME_CLASS;
-    frame.setAttribute("sandbox", "allow-scripts allow-popups");
+    frame.setAttribute("sandbox", EXPLAINER_SANDBOX);
     frame.setAttribute("loading", "lazy");
     frame.title = plan.title;
     frame.style.height = `${plan.height}px`;
-    frame.src = withWiki("/api/wiki/html?relPath=" + encodeURIComponent(plan.relPath));
+    const url = withWiki("/api/wiki/html?relPath=" + encodeURIComponent(plan.relPath));
+    frame.setAttribute("src", url);
+    // For the same-stem shape (`post.mdx` beside `post.html`) this link is the
+    // only way to the standalone viewer: the html is shadowed out of the page
+    // list, and the markdown renderer keeps no relative links. (A differently
+    // named html is also an ordinary explainer entry in the list.) Same url as
+    // the frame, so the two cannot disagree; the route's CSP `sandbox` keeps the
+    // top-level tab opaque-origin like the frame.
+    const open = document.createElement("a");
+    open.className = "embed-open";
+    open.setAttribute("href", url);
+    open.target = "_blank";
+    open.rel = "noopener";
+    open.textContent = "Open in new tab ↗";
     const fallback = fig.querySelector(".embed-fallback");
     if (fallback) fallback.replaceWith(frame);
     else fig.appendChild(frame);
+    fig.appendChild(open);
   }
 }
