@@ -44,9 +44,12 @@ export function enhanceEmbeds(
     frame.style.height = `${plan.height}px`;
     const url = withWiki("/api/wiki/html?relPath=" + encodeURIComponent(plan.relPath));
     frame.setAttribute("src", url);
-    // The standalone viewer is reachable ONLY from here: the embedded html is
-    // shadowed out of the page list, and the markdown renderer keeps no
-    // relative links. Same url as the frame, so the two cannot disagree.
+    // For the same-stem shape (`post.mdx` beside `post.html`) this link is the
+    // only way to the standalone viewer: the html is shadowed out of the page
+    // list, and the markdown renderer keeps no relative links. (A differently
+    // named html is also an ordinary explainer entry in the list.) Same url as
+    // the frame, so the two cannot disagree; the route's CSP `sandbox` keeps the
+    // top-level tab opaque-origin like the frame.
     const open = document.createElement("a");
     open.className = "embed-open";
     open.setAttribute("href", url);

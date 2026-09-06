@@ -841,13 +841,17 @@ export async function renderWikiPage(opts?: {
       border-radius: 8px;
       background: #fff;
     }
-    .embed-open {
+    /* Specificity matters: .wiki-article a[target="_blank"] below is 0-2-1 and
+       paints every new-tab link in the article's link blue; a bare .embed-open
+       (0-1-0) lost to it, and .wiki-article a.embed-open (0-2-1) only TIED and
+       lost on source order. The figure ancestor makes this 0-3-2. */
+    .wiki-article figure.embed a.embed-open {
       display: inline-block;
       margin-top: 6px;
       font-size: 12px;
       color: var(--text-muted);
     }
-    .embed-open:hover { color: var(--accent-light); }
+    .wiki-article figure.embed a.embed-open:hover { color: var(--accent-light); }
 
     .wiki-article { font-size: 14px; line-height: 1.65; color: var(--text-secondary); }
     .wiki-article h1, .wiki-article h2, .wiki-article h3, .wiki-article h4 { color: var(--text-primary); margin: 20px 0 8px; }

@@ -1779,8 +1779,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // machine" shape that puts `/api/wiki/reindex` on the list. Loopback does not
     // bound it, and the rail fetches on every page open, which makes it the
     // highest-VOLUME egress the reader has. (`/api/wiki/html`, its sibling in this
-    // PR, serves a local file to a local iframe and reaches nothing — unguarded on
-    // purpose.) Ordered ahead of the collection check for the same reason every
+    // PR, serves a local file — to the reader's iframe or, via the <Embed> open-
+    // in-new-tab link, as a top-level document under a CSP `sandbox` — and
+    // reaches nothing; unguarded on purpose.) Ordered ahead of the collection check for the same reason every
     // other prologue is: a policy refusal must not depend on configuration that
     // happens to stop the call today.
     const similarEgress = egressRefusal(c, entry, unknownWiki);
@@ -1866,8 +1867,18 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // runs wherever it lands (even after </html>), so no anchor parsing is
     // needed. Full-text read is fine at explainer sizes (≤ a few hundred KB).
     const html = (await file.text()) + EXPLAINER_BRIDGE_SCRIPT;
+    // The sandbox travels WITH the bytes. The reader's iframes apply exactly this
+    // sandbox as an attribute, but the <Embed> "open in new tab" link loads the
+    // same response as a TOP-LEVEL document, where an attribute cannot reach: a
+    // CSP `sandbox` makes the document opaque-origin wherever it is loaded, so a
+    // script inside a wiki-hosted .html cannot call /api/* with the reader's
+    // session, read localStorage, or drive a write route. Same two allowances
+    // as the frames, so the embedded page behaves identically in both.
     return new Response(html, {
-      headers: { "Content-Type": "text/html; charset=utf-8" },
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Security-Policy": "sandbox allow-scripts allow-popups",
+      },
     });
   });
 

@@ -130,6 +130,21 @@ test.describe("Wiki reader: <Embed src>", () => {
     await expect(open).toHaveAttribute("target", "_blank");
     await expect(open).toHaveAttribute("rel", /noopener/);
     expect(await open.getAttribute("href")).toBe(await frame.getAttribute("src"));
+    // A quiet secondary affordance: its colour is the muted token, not the
+    // article's external-link blue — compared against the token resolved on a
+    // body probe, never a literal (a literal passes against the wrong rule).
+    const muted = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--text-muted)";
+      document.body.appendChild(probe);
+      const c = getComputedStyle(probe).color;
+      probe.remove();
+      return c;
+    });
+    await expect(open).toHaveCSS("color", muted);
+    // The bytes the link opens top-level carry the sandbox the iframe applies.
+    const res = await page.request.get(`${BASE}${await open.getAttribute("href")}`);
+    expect(res.headers()["content-security-policy"]).toBe("sandbox allow-scripts allow-popups");
     // …and the page around it kept its prose and its fallback line is gone.
     await expect(page.locator(".wiki-article")).toContainText("Prose after.");
     await expect(page.locator(".embed-fallback")).toHaveCount(0);
@@ -153,5 +168,6 @@ test.describe("Wiki reader: <Embed src>", () => {
     await expect(page.locator(".embed-fallback")).toHaveCount(1);
     await page.locator(`.wiki-list-item[data-relpath="${PAGE_REL}"]`).click();
     await expect(page.locator(FRAME)).toHaveCount(1);
+    await expect(page.locator(".embed-open")).toHaveCount(1);
   });
 });

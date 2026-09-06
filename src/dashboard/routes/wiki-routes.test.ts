@@ -102,6 +102,21 @@ describe("GET /api/wiki/html", () => {
     expect(body.trimEnd().endsWith("</script>")).toBe(true);
   });
 
+  // The bytes are served as a TOP-LEVEL document too now (the <Embed> "open in
+  // new tab" link), so the sandbox the reader's iframe applies has to travel
+  // with the response: a CSP `sandbox` makes the document opaque-origin wherever
+  // it loads, and a wiki-hosted script cannot reach /api/* with the reader's
+  // session.
+  test("serves the html under a CSP sandbox, on the indexed and the fallback path", async () => {
+    const indexed = await app.request("/api/wiki/html?name=" + encodeURIComponent("Explainer One"));
+    expect(indexed.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-popups");
+    await Bun.write(path.join(root, "blogs/Explainer One.mdx"), "---\ntitle: Explainer One\n---\n\nbody\n");
+    __resetWikiCacheForTest();
+    const shadowed = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/Explainer One.html"));
+    expect(shadowed.status).toBe(200);
+    expect(shadowed.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-popups");
+  });
+
   test("400 without a name param", async () => {
     const res = await app.request("/api/wiki/html");
     expect(res.status).toBe(400);
