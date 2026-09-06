@@ -127,7 +127,8 @@ it, so a hit in a 40-minute talk cites to the minute), capped at 2 MiB **at a
 window boundary** with a line saying so — a byte cut would leave a heading over
 half a sentence and carry that timestamp into a chunk that ends mid-word. Three
 rules the cap lives by: the note's own bytes come OUT of the budget (the result
-never exceeds `maxBytes`); a FIRST window bigger than the budget keeps a head of
+never exceeds `maxBytes`, except in the note-alone band under ~100 bytes, where
+the note by itself is the whole answer); a FIRST window bigger than the budget keeps a head of
 it, never inside a code point, cut at a LINE boundary where the window has more
 than one line and at a WORD boundary where it does not — which is huginn's real
 shape, `### [HH:MM:SS]` over one unbroken line, and where a line cut kept the

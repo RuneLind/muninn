@@ -188,7 +188,11 @@ export interface CappedTranscript {
   readonly truncated: boolean;
   /** UTF-8 bytes of the transcript handed in. */
   readonly inputBytes: number;
-  /** UTF-8 bytes of {@link text} — the note included, and never above `maxBytes`. */
+  /**
+   * UTF-8 bytes of {@link text}, the note included. Never above `maxBytes`
+   * EXCEPT in the note-alone band: a budget too small for even the heading
+   * answers with the note by itself, and the note is ~65 bytes.
+   */
   readonly keptBytes: number;
 }
 

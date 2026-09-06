@@ -260,6 +260,21 @@ describe("capTranscriptWindows", () => {
     // the original is the space this cut replaced, so no word is halved.
     expect(t.startsWith(head)).toBe(true);
     expect(t[head.length]).toBe(" ");
+
+    // One budget can land its BYTE cut on a space by coincidence (400 did, so
+    // the assertion above held with the word rule deleted). Over a sweep of
+    // budgets the byte cut lands inside a word far more often than on a space,
+    // so the word rule is what keeps every one of these true.
+    let cutsInsideAWord = 0;
+    for (let cap = 300; cap <= 520; cap++) {
+      const r = capTranscriptWindows(t, cap);
+      const h = r.text.slice(0, r.text.indexOf("\n\n_("));
+      expect(t.startsWith(h)).toBe(true);
+      expect(t[h.length]).toBe(" ");
+      const rawCut = new TextDecoder().decode(new TextEncoder().encode(t).slice(0, cap - bytesOf(r.text) + bytesOf(h)));
+      if (t[rawCut.length] !== " ") cutsInsideAWord++;
+    }
+    expect(cutsInsideAWord).toBeGreaterThan(100);
   });
 
   test("a budget too small for even the heading answers with the NOTE alone", () => {
