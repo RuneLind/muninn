@@ -34,10 +34,11 @@
  *
  * **The dependency direction is one-way.** This module owns every
  * source-neutral symbol — the helpers above plus {@link FRAME_FILE_RE},
- * {@link FRAME_FFMPEG_TIMEOUT_MS}, {@link framesTimeoutFor} and the ffmpeg grab
- * — and never imports a vertical. `src/vimeo/frames.ts` keeps only
- * `VIMEO_FRAME_HEIGHT` and its manifest-shaped `extractCadenceFrames`, and
- * imports the rest from here. A second copy of a timeout constant next door is
+ * {@link CAPTURE_FRAME_HEIGHT}, {@link FRAME_FFMPEG_TIMEOUT_MS},
+ * {@link framesTimeoutFor} and the ffmpeg grab — and never imports a vertical.
+ * `src/vimeo/frames.ts` keeps only its manifest-shaped `extractCadenceFrames`
+ * (and `VIMEO_FRAME_HEIGHT`, an alias of the height constant here), and imports
+ * the rest from here. A second copy of a timeout constant next door is
  * exactly the two-literals failure `src/video/media.ts` documents for the frame
  * budget, where a raised ceiling stayed inert behind a second literal.
  *
@@ -104,6 +105,20 @@ export function frameSourceByName(name: string): FrameSource | undefined {
 
 /** The most slides a summary may quote inline — past this it stops being a summary. */
 export const MAX_INLINE_SLIDES = 8;
+
+/**
+ * The height every vertical's frames are scaled to.
+ *
+ * 720p: a slide's text is legible there, and 1080p is ~1.6× the bytes and
+ * ~2.25× the image tokens for the same picture. {@link ffmpegFrameArgs}' filter
+ * is `min(height, ih)`, so a source SHORTER than this is never upscaled.
+ *
+ * It lives here, with the extractor that applies it, rather than once per
+ * vertical — a per-vertical copy is the two-literals shape `src/video/media.ts`
+ * documents for the frame budget, where a raised ceiling stayed inert behind
+ * the second literal.
+ */
+export const CAPTURE_FRAME_HEIGHT = 720;
 
 /** One ffmpeg run per frame; a seek + one decoded frame is well under a second. */
 export const FRAME_FFMPEG_TIMEOUT_MS = 15_000;

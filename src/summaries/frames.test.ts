@@ -22,6 +22,7 @@ import {
   YOUTUBE_FRAME_SOURCE,
   cadenceTimes,
   decideFramesRootMigration,
+  CAPTURE_FRAME_HEIGHT,
   extractCadenceFramesFromFile,
   ffmpegFrameArgs,
   formatHms,
@@ -860,5 +861,15 @@ describe("the one-time frames-root rename", () => {
     expect(await migrateLegacyVimeoFramesRoot("nais", { legacyRoot: legacy, framesRoot })).toBe("refuse");
     expect(existsSync(join(legacy, "111"))).toBe(true);
     expect(existsSync(framesRoot)).toBe(false);
+  });
+});
+
+describe("CAPTURE_FRAME_HEIGHT", () => {
+  test("one height for every vertical, and it is 720", () => {
+    // 720p because a slide's text is legible there and 1080p is ~1.6x the bytes
+    // and ~2.25x the image tokens for the same picture. It lives HERE because
+    // the extractor's `min(height, ih)` filter is here: a per-vertical copy is
+    // the two-literals shape that made a raised frame budget inert.
+    expect(CAPTURE_FRAME_HEIGHT).toBe(720);
   });
 });

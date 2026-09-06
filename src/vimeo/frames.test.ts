@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseVimeoManifest, VIMEO_MEDIA_HOST, type VimeoManifest } from "./media.ts";
-import { cadenceTimes } from "../summaries/frames.ts";
+import { CAPTURE_FRAME_HEIGHT, cadenceTimes } from "../summaries/frames.ts";
 import { VIMEO_FRAME_HEIGHT, extractCadenceFrames } from "./frames.ts";
 
 const FIXTURE_RAW = JSON.parse(
@@ -177,4 +177,10 @@ describe("extractCadenceFrames", () => {
     expect(fetched.every((u) => u.includes("rep-video-1080p"))).toBe(true);
     expect(fetched.some((u) => u.includes("rep-video-1440p"))).toBe(false);
   });
+});
+
+test("VIMEO_FRAME_HEIGHT is the shared capture height, not a second copy of 720", () => {
+  // The two verticals pull frames at the same height for the same reason; the
+  // Vimeo name survives because this module's own extractor reads it.
+  expect(VIMEO_FRAME_HEIGHT).toBe(CAPTURE_FRAME_HEIGHT);
 });

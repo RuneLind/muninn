@@ -1,11 +1,16 @@
 import { test, expect, describe } from "bun:test";
+import { configure, type LogRecord } from "@logtape/logtape";
 import {
   buildSummarySystemPrompt,
   ingestSummary,
+  ingestTimeoutFor,
   runCaptureOneShot,
+  windowedTranscriptRider,
+  CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
   CAPTURE_THINKING_MAX_TOKENS,
   SUMMARY_STRUCTURE_BULLETS,
 } from "./summarizer-shared.ts";
+import { summarizeTimeoutFor } from "../video/media.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 import type { Tracer } from "../tracing/index.ts";
 import type { Config } from "../config.ts";
@@ -412,4 +417,99 @@ describe("runCaptureOneShot", () => {
     // still clickable from /agents into /traces.
     expect(h.attached[0]!.traceId).toBe("trace-1");
   });
+});
+
+// --- the constants and riders the capture verticals share ---
+
+describe("the shared capture summarize floor", () => {
+  test("is 600 s, and a frame-less capture gets exactly it", () => {
+    // One constant for every vertical: Vimeo and YouTube both declared their
+    // own 600_000 with the same paragraph of rationale over it, which is the
+    // two-literals shape `src/video/media.ts` documents for the frame budget —
+    // where a raised ceiling stayed inert behind the second copy.
+    expect(CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS).toBe(600_000);
+    expect(summarizeTimeoutFor(0, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS)).toBe(600_000);
+    expect(summarizeTimeoutFor(40, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS)).toBe(600_000 + 10 * 24_000);
+  });
+});
+
+describe("windowedTranscriptRider", () => {
+  test("the sentence, once, with the vertical's own noun", () => {
+    expect(windowedTranscriptRider("talk")).toBe(
+      "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
+        "carrying its absolute position in the talk; those headings are positions, not content — " +
+        "never quote one as if it were speech.",
+    );
+    // The only difference between the two verticals' copies was this word.
+    expect(windowedTranscriptRider("video")).toBe(
+      windowedTranscriptRider("talk").replace("in the talk;", "in the video;"),
+    );
+  });
+});
+
+describe("ingestTimeoutFor", () => {
+  test("15 s for an ordinary summary, +1 s per 64 KiB, capped at 120 s", () => {
+    expect(ingestTimeoutFor(0)).toBe(15_000);
+    expect(ingestTimeoutFor(6_000)).toBe(15_000);
+    expect(ingestTimeoutFor(64 * 1024)).toBe(16_000);
+    expect(ingestTimeoutFor(2 * 1024 * 1024)).toBe(15_000 + 32_000);
+    expect(ingestTimeoutFor(64 * 1024 * 1024)).toBe(120_000);
+  });
+
+  test("a nonsense size still yields the floor, never 0 or NaN", () => {
+    // It bounds an abort; a 0 here would be "abort immediately".
+    expect(ingestTimeoutFor(-1)).toBe(15_000);
+    expect(ingestTimeoutFor(Number.NaN)).toBe(15_000);
+  });
+});
+
+test("ingestSummary sizes its own timeout from the body it is posting", async () => {
+  // A 2 MiB `## Transcript` body posted under the 15 s default can have its
+  // RESPONSE dropped after huginn already wrote the document — and that
+  // response is the only place the stored doc id ever appears, which is what
+  // the verticals' reindex-window dedup maps are keyed on.
+  //
+  // The resolved budget is read off the log line, because an AbortSignal does
+  // not report the deadline it was built with — and that line is the only
+  // place an operator can see it either.
+  const big = "x".repeat(3 * 1024 * 1024);
+  const body = { title: "T", url: "u", summary: big, category: "ai/general" };
+  const records: LogRecord[] = [];
+  await configure({
+    sinks: { capture: (r: LogRecord) => records.push(r) },
+    loggers: [
+      { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+      { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+    ],
+    reset: true,
+  });
+  let sawSignal: AbortSignal | undefined;
+  const restore = stubFetch((_input, init) => {
+    sawSignal = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ file_path: "ai/general/T.md" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  try {
+    await ingestSummary({
+      knowledgeApiUrl: "http://kb.test",
+      ingestPath: "/api/youtube/ingest",
+      body,
+      onSimilar: () => {},
+    });
+  } finally {
+    restore();
+    await configure({ sinks: {}, loggers: [{ category: ["logtape", "meta"], sinks: [], lowestLevel: "error" }], reset: true });
+  }
+
+  const line = records.find((r) => String(r.message.join("")).includes("Ingesting"));
+  expect(line).toBeDefined();
+  expect(line!.properties.bytes).toBe(JSON.stringify(body).length);
+  expect(line!.properties.timeoutMs).toBe(ingestTimeoutFor(JSON.stringify(body).length));
+  // Which for this body is 63 s — not the 15 s a caller-less default would give.
+  expect(line!.properties.timeoutMs).toBe(15_000 + 48_000);
+  // The abort is still wired, and nothing aborted it.
+  expect(sawSignal).toBeInstanceOf(AbortSignal);
+  expect(sawSignal!.aborted).toBe(false);
 });

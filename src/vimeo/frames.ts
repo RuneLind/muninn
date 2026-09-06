@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { rm } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import {
+  CAPTURE_FRAME_HEIGHT,
   cadenceTimes,
   ffmpegGrabFrame,
   framesTimeoutFor,
@@ -41,8 +42,12 @@ import {
 
 const log = getLog("vimeo", "frames");
 
-/** The rendition frames are pulled from. A slide's text is legible at 720p; 1080p is 1.6× the bytes. */
-export const VIMEO_FRAME_HEIGHT = 720;
+/**
+ * The rendition frames are pulled from — the shared capture height
+ * ({@link CAPTURE_FRAME_HEIGHT}), under this vertical's own name because
+ * `chooseRepresentation` below reads it as a manifest constraint.
+ */
+export const VIMEO_FRAME_HEIGHT = CAPTURE_FRAME_HEIGHT;
 
 export interface ExtractFramesOptions {
   /** Test seam for the segment fetches. */
