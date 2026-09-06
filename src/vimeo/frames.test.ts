@@ -1,23 +1,20 @@
+/**
+ * The VIMEO half of slides: `extractCadenceFrames`, which pulls one frame per
+ * cadence tick out of a DASH manifest.
+ *
+ * Everything source-neutral — the cadence, the URL shape, the prompt section,
+ * the id gate, the kept-frame copy/removal, the ffmpeg argv, the file-based
+ * extractor — lives in `src/summaries/frames.ts` and is tested in
+ * `src/summaries/frames.test.ts`.
+ */
+
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FRAME_BUDGET_MAX, frameBudgetFor } from "../video/media.ts";
 import { parseVimeoManifest, VIMEO_MEDIA_HOST, type VimeoManifest } from "./media.ts";
-import {
-  MAX_INLINE_SLIDES,
-  VIMEO_FRAME_HEIGHT,
-  cadenceTimes,
-  extractCadenceFrames,
-  formatHms,
-  frameUrlPath,
-  framesPromptSection,
-  framesTimeoutFor,
-  keepReferencedFrames,
-  referencedFrameSeconds,
-  removeKeptFrames,
-  type VimeoFrame,
-} from "./frames.ts";
+import { cadenceTimes } from "../summaries/frames.ts";
+import { VIMEO_FRAME_HEIGHT, extractCadenceFrames } from "./frames.ts";
 
 const FIXTURE_RAW = JSON.parse(
   readFileSync(new URL("./fixtures/manifest-placeholder.json", import.meta.url).pathname, "utf8"),
@@ -41,123 +38,6 @@ function smallFixture(): VimeoManifest {
   };
 }
 const dir = () => mkdtempSync(join(tmpdir(), "vimeo-frames-"));
-
-describe("cadenceTimes", () => {
-  test("frameBudgetFor frames at slice MIDPOINTS, whole seconds, never t=0", () => {
-    const t = cadenceTimes(3220);
-    expect(t.length).toBe(frameBudgetFor(3220));
-    expect(t.length).toBe(FRAME_BUDGET_MAX);
-    expect(t[0]).toBe(Math.floor((0.5 * 3220) / 60)); // 26, not 0
-    expect(t[t.length - 1]).toBeLessThan(3220);
-    for (let i = 1; i < t.length; i++) expect(t[i]).toBeGreaterThan(t[i - 1]!);
-    // ~54 s spacing at 53 min (the ceiling binds), all integers.
-    expect(t.every((x) => Number.isInteger(x))).toBe(true);
-    expect(t[1]! - t[0]!).toBeGreaterThanOrEqual(53);
-  });
-
-  test("a 10-min lightning talk gets 30 frames ~20 s apart; a 3 h talk 60 frames 180 s apart", () => {
-    expect(cadenceTimes(600).length).toBe(30);
-    expect(cadenceTimes(600)[1]! - cadenceTimes(600)[0]!).toBe(20);
-    const long = cadenceTimes(10_800);
-    expect(long.length).toBe(60);
-    expect(long[1]! - long[0]!).toBe(180);
-  });
-
-  test("degenerate durations", () => {
-    expect(cadenceTimes(0)).toEqual([]);
-    expect(cadenceTimes(-5)).toEqual([]);
-    expect(cadenceTimes(Number.NaN)).toEqual([]);
-    // 15 frames in 3 s collapse onto 3 distinct whole seconds: no duplicates.
-    const tiny = cadenceTimes(3);
-    expect(new Set(tiny).size).toBe(tiny.length);
-  });
-});
-
-describe("formatHms / frameUrlPath", () => {
-  test("HH:MM:SS with hours, and the served path shape", () => {
-    expect(formatHms(0)).toBe("00:00:00");
-    expect(formatHms(1390)).toBe("00:23:10");
-    expect(formatHms(3661.9)).toBe("01:01:01");
-    expect(frameUrlPath("1223642971", 1390)).toBe("/api/vimeo/frames/1223642971/1390.jpg");
-    expect(frameUrlPath("1", 12.7)).toBe("/api/vimeo/frames/1/12.jpg");
-  });
-});
-
-describe("framesPromptSection", () => {
-  const frames: VimeoFrame[] = [
-    { path: "/work/26.jpg", tSeconds: 26 },
-    { path: "/work/1390.jpg", tSeconds: 1390 },
-  ];
-
-  test("lists every frame as t=HH:MM:SS <path> and states the exact quote shape for THIS video", () => {
-    const s = framesPromptSection("1223642971", frames);
-    expect(s).toContain("t=00:00:26 /work/26.jpg");
-    expect(s).toContain("t=00:23:10 /work/1390.jpg");
-    expect(s).toContain("![Slide at HH:MM:SS](/api/vimeo/frames/1223642971/<sec>.jpg)");
-    expect(s).toContain(`At most ${MAX_INLINE_SLIDES} slides`);
-    expect(s).toContain("Read tool FIRST");
-    expect(s).toContain("t=00:23:10 is the file 1390.jpg");
-  });
-
-  test("no frames ⇒ nothing appended", () => {
-    expect(framesPromptSection("1", [])).toBe("");
-  });
-});
-
-describe("referencedFrameSeconds", () => {
-  test("the seconds this video's quoted frames name, deduped and sorted; other videos' paths ignored", () => {
-    const summary =
-      "Intro.\n\n![Slide at 00:23:10](/api/vimeo/frames/1223642971/1390.jpg)\n\n" +
-      "![Slide at 00:00:26](/api/vimeo/frames/1223642971/26.jpg) and again " +
-      "![x](/api/vimeo/frames/1223642971/1390.jpg)\n" +
-      "![other](/api/vimeo/frames/999/26.jpg)\n" +
-      "![abs](https://muninn.example/api/vimeo/frames/1223642971/50.jpg)";
-    expect(referencedFrameSeconds(summary, "1223642971")).toEqual([26, 1390]);
-    expect(referencedFrameSeconds(summary, "999")).toEqual([26]);
-    expect(referencedFrameSeconds("no images here", "1223642971")).toEqual([]);
-  });
-
-  test("a ZERO-PADDED second is not a reference: the route serves 47.jpg, never 047.jpg, so counting it as kept would be a served 404", () => {
-    // The padded spelling ALONE — beside a canonical `47.jpg` the two would
-    // collapse in the set and the assertion could not tell the fix from `Number`.
-    expect(referencedFrameSeconds("![Slide at 00:00:47](/api/vimeo/frames/42/047.jpg)", "42")).toEqual([]);
-    expect(referencedFrameSeconds("![zero](/api/vimeo/frames/42/0.jpg) ![ok](/api/vimeo/frames/42/47.jpg)", "42")).toEqual([0, 47]);
-    expect(referencedFrameSeconds("![padded zero](/api/vimeo/frames/42/00.jpg)", "42")).toEqual([]);
-  });
-});
-
-describe("keepReferencedFrames", () => {
-  test("copies ONLY the quoted frames into <root>/<videoId>/<sec>.jpg; an invented path is skipped", async () => {
-    const work = dir();
-    const root = dir();
-    writeFileSync(join(work, "26.jpg"), "A");
-    writeFileSync(join(work, "1390.jpg"), "B");
-    writeFileSync(join(work, "2000.jpg"), "C");
-    const frames: VimeoFrame[] = [26, 1390, 2000].map((t) => ({ path: join(work, `${t}.jpg`), tSeconds: t }));
-    const summary =
-      "![Slide at 00:23:10](/api/vimeo/frames/42/1390.jpg) ![Slide](/api/vimeo/frames/42/26.jpg) " +
-      "![invented](/api/vimeo/frames/42/777.jpg)";
-    const kept = await keepReferencedFrames(summary + " ![padded](/api/vimeo/frames/42/02000.jpg)", "42", frames, root);
-    expect(kept).toEqual([26, 1390]); // 02000 is not 2000.jpg's address
-    expect(readdirSync(join(root, "42")).sort()).toEqual(["1390.jpg", "26.jpg"]);
-    expect(readFileSync(join(root, "42", "1390.jpg"), "utf8")).toBe("B");
-    expect(existsSync(join(root, "42", "2000.jpg"))).toBe(false);
-    expect(existsSync(join(root, "42", "777.jpg"))).toBe(false);
-  });
-
-  test("a summary quoting nothing creates no directory", async () => {
-    const root = dir();
-    expect(await keepReferencedFrames("plain text", "42", [], root)).toEqual([]);
-    expect(existsSync(join(root, "42"))).toBe(false);
-  });
-});
-
-describe("framesTimeoutFor", () => {
-  test("30 s + 3 s per frame", () => {
-    expect(framesTimeoutFor(0)).toBe(30_000);
-    expect(framesTimeoutFor(60)).toBe(210_000);
-  });
-});
 
 describe("extractCadenceFrames", () => {
   /** Every segment fetch answers 8 bytes; the grab writes a marker file naming its inputs. */
@@ -296,41 +176,5 @@ describe("extractCadenceFrames", () => {
     expect(fetched.length).toBeGreaterThan(0);
     expect(fetched.every((u) => u.includes("rep-video-1080p"))).toBe(true);
     expect(fetched.some((u) => u.includes("rep-video-1440p"))).toBe(false);
-  });
-});
-
-describe("removeKeptFrames — the Delete's counterpart to keepReferencedFrames", () => {
-  test("removes exactly that video's directory and reports it; a video with no kept frames reports false", async () => {
-    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-rm-"));
-    mkdirSync(join(root, "1223358361"));
-    writeFileSync(join(root, "1223358361", "1390.jpg"), "a");
-    mkdirSync(join(root, "9999"));
-    writeFileSync(join(root, "9999", "10.jpg"), "b");
-
-    expect(await removeKeptFrames("1223358361", root)).toBe(true);
-    expect(existsSync(join(root, "1223358361"))).toBe(false);
-    expect(readFileSync(join(root, "9999", "10.jpg"), "utf8")).toBe("b");
-    expect(await removeKeptFrames("1223358361", root)).toBe(false);
-    expect(await removeKeptFrames("55555", root)).toBe(false);
-  });
-
-  test("an id outside the digit charset removes NOTHING, whatever path it spells", async () => {
-    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-rm-"));
-    mkdirSync(join(root, "1223358361"));
-    writeFileSync(join(root, "1223358361", "1390.jpg"), "a");
-    writeFileSync(join(root, "stray.txt"), "s");
-    for (const bad of ["..", ".", "", "1223358361/..", "../1223358361", "stray.txt", "12a", " 1223358361"]) {
-      expect(await removeKeptFrames(bad, root)).toBe(false);
-    }
-    expect(existsSync(join(root, "1223358361", "1390.jpg"))).toBe(true);
-    expect(existsSync(join(root, "stray.txt"))).toBe(true);
-    expect(existsSync(root)).toBe(true);
-  });
-
-  test("a FILE named like a video id is not a directory and is left alone", async () => {
-    const root = mkdtempSync(join(tmpdir(), "vimeo-frames-rm-"));
-    writeFileSync(join(root, "777"), "not a dir");
-    expect(await removeKeptFrames("777", root)).toBe(false);
-    expect(existsSync(join(root, "777"))).toBe(true);
   });
 });

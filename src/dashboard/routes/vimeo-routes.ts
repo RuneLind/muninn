@@ -9,14 +9,7 @@ import { fetchVimeoOembed, isNotPublic } from "../../vimeo/oembed.ts";
 import { speakerFromTitle } from "../../vimeo/metadata.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
-import {
-  FRAME_FILE_RE,
-  FRAME_VIDEO_ID_RE,
-  framesRootDir,
-  removeKeptFrames,
-} from "../../vimeo/frames.ts";
-import { resolve as resolvePath, sep as pathSep } from "node:path";
-import { readdir, realpath } from "node:fs/promises";
+import { VIMEO_FRAME_SOURCE, removeKeptFramesForDocument } from "../../summaries/frames.ts";
 import { findCapturePreset, resolveCapturePresets } from "../../summaries/presets.ts";
 import { DEFAULT_CAPTURE_LANG, isCaptureLang } from "../../summaries/language.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
@@ -77,7 +70,14 @@ interface VimeoRecentIngest {
 export interface VimeoRouteOptions {
   /** The clock the recently-ingested TTL is measured on. */
   now?: () => number;
-  /** Where the frames route reads from; default `framesRootDir()`. */
+  /**
+   * Where this vertical's kept frames live, for the DELETE listener below;
+   * default `framesRootDir()`. The serving route is registered elsewhere
+   * (`frames-routes.ts`), but a test registering these routes still needs a
+   * temp root: the listener set is module-level and never unsubscribed, so a
+   * registration with no root removes frames under the developer's real home
+   * on the next test that fires the signal.
+   */
   framesRoot?: string;
 }
 
@@ -263,57 +263,31 @@ export function registerVimeoRoutes(
     // `recentDeletes` exists for). Async and best-effort: a listing that is
     // down leaves the frames in place, logged, and the document is gone either
     // way. Fired, not awaited — the listener contract is synchronous.
-    void forgetFramesOfDeletedDocument(id, deletedVideoId);
+    //
+    // Called from INSIDE this listener, never as a second listener of its own:
+    // the dedup half above DELETES the ingest entry, so two listeners fanning
+    // out in Set order would run this one second, find nothing, and send every
+    // delete down the listing fallback — orphaning the frames of a document
+    // huginn had already reindexed away.
+    void removeKeptFramesForDocument(VIMEO_FRAME_SOURCE, id, deletedVideoId, {
+      ...(opts.framesRoot !== undefined ? { framesRoot: opts.framesRoot } : {}),
+      resolveVideoId: resolveDeletedDocumentVideoId,
+    });
   });
 
   /**
-   * Whether the frames root holds anything at all. An ABSENT root is "no" (no
-   * capture ever kept a frame here); any other read failure is "yes" with a
-   * warn, so a transient EMFILE/EACCES falls through to the listing + removal
-   * rather than silently orphaning the frames of a deleted document.
+   * The video behind a deleted document, when the ingest map did not know it:
+   * huginn's DELETE is soft, so the row is still listed for the reindex window
+   * — the same window `recentDeletes` exists for. Only reached when the frames
+   * dir for this source is non-empty, so a transcript-only delete (the common
+   * case) costs no listing read.
    */
-  async function framesRootHasEntries(root: string | undefined): Promise<boolean> {
-    const dir = root ?? framesRootDir();
-    try {
-      return (await readdir(dir)).length > 0;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
-      log.warn("Could not read the Vimeo frames root {dir} ({code}) — assuming it has kept frames", {
-        dir,
-        code: (err as NodeJS.ErrnoException).code ?? "unknown",
-      });
-      return true;
-    }
-  }
-
-  async function forgetFramesOfDeletedDocument(documentId: string, knownVideoId: string | null): Promise<void> {
-    try {
-      let videoId = knownVideoId;
-      if (videoId === null && !(await framesRootHasEntries(opts.framesRoot))) {
-        // Frames are off by default, so most deletes have nothing to remove:
-        // no kept frames anywhere ⇒ no listing call to learn a video id for.
-        return;
-      }
-      if (videoId === null) {
-        const data = await fetchKnowledgeApi(KNOWLEDGE_API_URL, `/api/collection/${VIMEO_COLLECTION}/documents`, {
-          timeoutMs: 10000,
-        });
-        const row = ((data?.documents ?? []) as VimeoDocumentMeta[]).find((d) => d.id === documentId);
-        videoId = row?.url !== undefined ? (resolveVimeoRef(row.url)?.id ?? null) : null;
-      }
-      if (videoId === null) {
-        log.info("Vimeo document {documentId} was deleted but no video id resolves for it — no frames to remove", {
-          documentId,
-        });
-        return;
-      }
-      await removeKeptFrames(videoId, opts.framesRoot);
-    } catch (err) {
-      log.warn("Removing the kept frames for deleted Vimeo document {documentId} failed: {error}", {
-        documentId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+  async function resolveDeletedDocumentVideoId(documentId: string): Promise<string | null> {
+    const data = await fetchKnowledgeApi(KNOWLEDGE_API_URL, `/api/collection/${VIMEO_COLLECTION}/documents`, {
+      timeoutMs: 10000,
+    });
+    const row = ((data?.documents ?? []) as VimeoDocumentMeta[]).find((d) => d.id === documentId);
+    return row?.url !== undefined ? (resolveVimeoRef(row.url)?.id ?? null) : null;
   }
 
   /**
@@ -397,56 +371,11 @@ export function registerVimeoRoutes(
     corsPreflight: false,
   });
 
-  /**
-   * The frames a summary quotes inline (PR 4), served READ-ONLY off
-   * `~/.muninn/vimeo-frames/<videoId>/<sec>.jpg` — the only writer is the
-   * capture's `keepReferencedFrames`. Both path segments are gated to their
-   * charset BEFORE any filesystem access (a video id is digits, a file is
-   * `<digits>.jpg`), and the REAL path (`realpath`, both sides) is checked to
-   * stay under the root — not defence in depth: the charset gates make the
-   * spelling safe by enumeration, and this is the one check that sees a
-   * symlink planted under the root. Anything else is a 404, never a 400 that
-   * confirms the shape. Registered here so the
-   * `nais` profile drops it with the rest of the vertical.
-   */
-  const framesRoot = opts.framesRoot ?? framesRootDir();
-  app.get("/api/vimeo/frames/:videoId/:file", async (c) => {
-    const { videoId, file } = c.req.param();
-    if (!FRAME_VIDEO_ID_RE.test(videoId) || !FRAME_FILE_RE.test(file)) return c.notFound();
-    const fileAbs = resolvePath(framesRoot, videoId, file);
-    // Containment is judged on the REAL path the kernel would open, not on the
-    // spelling: with both charset gates holding the spelling is always
-    // `<root>/<digits>/<digits>.jpg` (enumerated), so a lexical prefix check
-    // was dead code — and blind to a SYMLINK under the root pointing outside
-    // it (measured by review: a planted `<root>/7 → /tmp/outside` served
-    // `/7/9.jpg` with 200). `realpath` follows symlinks on both sides; a
-    // missing file throws and is the same 404 as before. RESIDUAL, stated: a
-    // HARDLINK planted under the root is invisible to `realpath` too and still
-    // serves (measured, same volume only) — the guard against that is that the
-    // only writer under the root is `keepReferencedFrames`, which writes plain
-    // files; a writer that plants links there has the disk already.
-    let rootReal: string;
-    let fileReal: string;
-    try {
-      [rootReal, fileReal] = await Promise.all([realpath(framesRoot), realpath(fileAbs)]);
-    } catch {
-      return c.notFound();
-    }
-    if (!fileReal.startsWith(rootReal + pathSep)) return c.notFound();
-    const f = Bun.file(fileReal);
-    if (!(await f.exists())) return c.notFound();
-    return new Response(f, {
-      headers: {
-        "Content-Type": "image/jpeg",
-        // A frame is (video, second) — re-extracting the same second of the
-        // same rendition is the same picture, so a day of caching is safe —
-        // PRIVATE, because this route sits in the default-deny (admin) zone
-        // under MUNINN_AUTH and `public` would let a shared cache in front of
-        // the instance serve a slide to a request that would otherwise 403.
-        "Cache-Control": "private, max-age=86400",
-      },
-    });
-  });
+  // `GET /api/frames/:source/:id/:file` and its pre-seam Vimeo alias are
+  // registered by `registerFramesRoutes` inside the `summaries` group
+  // (`src/dashboard/routes/frames-routes.ts`) — one served root for every
+  // vertical. The three groups are dropped together on `nais`, so the frames
+  // of a Vimeo capture are still absent from the pod exactly as before.
 
   app.post("/api/vimeo/summarize", async (c) => {
     type Body = { url?: string; kind?: unknown; lang?: unknown; frames?: unknown };
