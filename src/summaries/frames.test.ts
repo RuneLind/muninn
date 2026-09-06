@@ -822,7 +822,33 @@ describe("the one-time frames-root rename", () => {
       const warns = records.filter((r) => r.level === "warning");
       expect(warns.length).toBe(1);
       expect(warns[0]!.rawMessage).not.toContain("Both");
-      expect(warns[0]!.properties.kind).toBe("symlink");
+      expect(warns[0]!.properties.kind).toBe("dangling symlink");
+    });
+  });
+
+  test("a LIVE symlink to a directory at the target IS served — refuse with the both-exist remedy, not the clear-it one", async () => {
+    await withCapturedLogs(async (records) => {
+      const home = dir("capture-frames-mig-");
+      const bigdisk = dir("capture-frames-bigdisk-");
+      const legacy = join(home, "vimeo-frames");
+      const framesRoot = join(home, "frames");
+      mkdirSync(join(legacy, "111"), { recursive: true });
+      writeFileSync(join(legacy, "111", "1.jpg"), "OLD");
+      mkdirSync(join(bigdisk, "222"), { recursive: true });
+      writeFileSync(join(bigdisk, "222", "2.jpg"), "RELOCATED");
+      mkdirSync(framesRoot, { recursive: true });
+      symlinkSync(bigdisk, join(framesRoot, "vimeo"));
+
+      expect(await migrateLegacyVimeoFramesRoot("default", { legacyRoot: legacy, framesRoot })).toBe("refuse");
+      expect(lstatSync(join(framesRoot, "vimeo")).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(legacy, "111", "1.jpg"), "utf8")).toBe("OLD");
+      const warns = records.filter((r) => r.level === "warning");
+      expect(warns.length).toBe(1);
+      // The route resolves the link and serves the relocated store, so the
+      // remedy that says "remove the target" would strand it: this state gets
+      // the both-exist remedy, whose "the alias serves the target" is true.
+      expect(warns[0]!.rawMessage).toContain("Both");
+      expect(warns[0]!.properties.kind).toBeUndefined();
     });
   });
 

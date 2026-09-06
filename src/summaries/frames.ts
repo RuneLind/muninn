@@ -739,22 +739,24 @@ export async function migrateLegacyVimeoFramesRoot(
         "frame would then 404, so copy its contents there by hand and remove the link",
       { legacyRoot, target },
     );
-  } else if (decision === "refuse" && legacy.isDir && targetProbe.isDir) {
+  } else if (decision === "refuse" && legacy.isDir && targetProbe.servesDir) {
     log.warn(
       "Both {legacyRoot} and {target} exist — leaving both alone; the alias serves {target}, so move or remove " +
         "{legacyRoot} by hand if it still holds frames a summary quotes",
       { legacyRoot, target },
     );
   } else if (decision === "refuse" && legacy.isDir && newExists) {
-    // A plain file or a symlink (live or dangling) at the target: the route
-    // serves NOTHING there, so the "both exist" remedy above — which tells the
-    // operator the target is served and the legacy root is disposable — would
-    // have them delete the only real frames. The legacy root is the one to
-    // keep; the target is the one to clear.
+    // A plain file or a DANGLING symlink at the target: the route serves
+    // NOTHING there (a live symlink to a directory is served — the route
+    // resolves both sides — and takes the "both exist" branch above), so the
+    // "both exist" remedy — which tells the operator the target is served and
+    // the legacy root is disposable — would have them delete the only real
+    // frames. The legacy root is the one to keep; the target is the one to
+    // clear.
     log.warn(
       "{target} exists but is not a directory ({kind}) — leaving {legacyRoot} alone, it still holds the kept " +
         "frames and nothing is served until {target} is removed by hand and the next start moves them",
-      { legacyRoot, target, kind: targetProbe.isSymlink ? "symlink" : "file" },
+      { legacyRoot, target, kind: targetProbe.isSymlink ? "dangling symlink" : "file" },
     );
   }
   return decision;
@@ -765,15 +767,32 @@ export async function migrateLegacyVimeoFramesRoot(
  * difference is the whole point: `stat` reports a symlinked directory as a
  * directory, and `rename` then moves the link rather than the tree.
  */
-async function probeRoot(dir: string): Promise<{ isDir: boolean; isSymlink: boolean; exists: boolean }> {
+/**
+ * `servesDir` is what the ROUTE would see: a directory, or a live symlink to
+ * one (the route's containment `realpath`s both sides, so such a link serves
+ * normally). A dangling symlink and a plain file exist without serving.
+ */
+async function probeRoot(
+  dir: string,
+): Promise<{ isDir: boolean; isSymlink: boolean; exists: boolean; servesDir: boolean }> {
   // Any `lstat` failure reads as absent — ENOENT is the expected one, and an
   // EACCES on an unreadable `~/.muninn/frames` then decides "move", whose
   // `rename` fails under the generic "Could not move" warn. Accepted: an
   // unreadable home is not a state this can repair or name better.
   try {
     const st = await lstat(dir);
-    return { isDir: st.isDirectory(), isSymlink: st.isSymbolicLink(), exists: true };
+    const isDir = st.isDirectory();
+    const isSymlink = st.isSymbolicLink();
+    let servesDir = isDir;
+    if (isSymlink) {
+      try {
+        servesDir = (await stat(dir)).isDirectory();
+      } catch {
+        servesDir = false;
+      }
+    }
+    return { isDir, isSymlink, exists: true, servesDir };
   } catch {
-    return { isDir: false, isSymlink: false, exists: false };
+    return { isDir: false, isSymlink: false, exists: false, servesDir: false };
   }
 }
