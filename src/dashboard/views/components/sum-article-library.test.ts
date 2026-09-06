@@ -31,12 +31,15 @@ function load(): {
   vimeoVideoIdFromUrl: (url: unknown) => string | null;
   openVimeoLinksInNewTab: (container: { querySelectorAll(sel: string): FakeAnchor[] } | null, videoUrl: string) => void;
   splitTranscript: (markdown: string) => { body: string; transcript: string | null };
+  renderArticleHtml: (cleaned: string) => string;
 } {
   const ctx = { document: { addEventListener() {}, getElementById: () => null } };
+  // renderMarkdown is the page's marked wrapper (sum-job-card.ts), a global
+  // this script calls; a tagging stub is enough to see what went through it.
   return new Function(
     "ctx",
-    `var document = ctx.document;\n${sumArticleLibraryScript()}\n` +
-      "return { linkVimeoTimestamps: linkVimeoTimestamps, vimeoVideoIdFromUrl: vimeoVideoIdFromUrl, openVimeoLinksInNewTab: openVimeoLinksInNewTab, splitTranscript: splitTranscript };",
+    `var document = ctx.document;\nvar renderMarkdown = function(t) { return '<md>' + t + '</md>'; };\n${sumArticleLibraryScript()}\n` +
+      "return { linkVimeoTimestamps: linkVimeoTimestamps, vimeoVideoIdFromUrl: vimeoVideoIdFromUrl, openVimeoLinksInNewTab: openVimeoLinksInNewTab, splitTranscript: splitTranscript, renderArticleHtml: renderArticleHtml };",
   )(ctx);
 }
 
@@ -150,5 +153,39 @@ describe("splitTranscript", () => {
   test("level 3 or a suffixed heading does not split", () => {
     expect(splitTranscript("### Transcript\nx").transcript).toBeNull();
     expect(splitTranscript("## Transcript notes\nx").transcript).toBeNull();
+  });
+});
+
+describe("fences shared by both transforms (mapProseLines)", () => {
+  const { splitTranscript, linkVimeoTimestamps } = load();
+  const url = "https://vimeo.com/123";
+
+  test("a four-backtick fence showing a three-backtick block is ONE fence", () => {
+    const md = "Intro\n````md\n```\n## Transcript\n[00:10]\n```\n````\nAfter [00:20]";
+    expect(splitTranscript(md).transcript).toBeNull();
+    const linked = linkVimeoTimestamps(md, url);
+    expect(linked).toContain("\n[00:10]\n");
+    expect(linked).toContain("[\\[00:20\\]](https://vimeo.com/123#t=20s)");
+  });
+
+  test("a fence is closed only by its own marker character", () => {
+    const md = "```\n~~~\n[00:10]\n```\n[00:20]";
+    expect(linkVimeoTimestamps(md, url)).toBe("```\n~~~\n[00:10]\n```\n[\\[00:20\\]](https://vimeo.com/123#t=20s)");
+  });
+});
+
+describe("renderArticleHtml", () => {
+  const { renderArticleHtml } = load();
+
+  test("summary only ⇒ just the rendered markdown, no details", () => {
+    expect(renderArticleHtml("## A\nx")).toBe("<md>## A\nx</md>");
+  });
+
+  test("a transcript renders inside a closed details after the summary", () => {
+    expect(renderArticleHtml("## A\nx\n## Transcript\n### [00:00:00]\nHei")).toBe(
+      "<md>## A\nx</md>" +
+        '<details class="sum-transcript"><summary>Transcript</summary>' +
+        '<div class="sum-transcript-body"><md>### [00:00:00]\nHei</md></div></details>',
+    );
   });
 });
