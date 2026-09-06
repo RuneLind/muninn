@@ -24,8 +24,10 @@
  */
 export const MOCK_MODULE_CALL =
   /^\s*(?:await\s+|void\s+|(?:const|let|var)\s+\w+\s*=\s*)?(?:\w+\.)?mock\.module\(/m;
-/** `import { mock as … }` would hide a call from MOCK_MODULE_CALL. */
-export const MOCK_ALIAS_IMPORT = /\bmock\s+as\s+\w+/;
+/** `import { mock as … } from "bun:test"` would hide a call from MOCK_MODULE_CALL. */
+export const MOCK_ALIAS_IMPORT = /import\s*\{[^}]*\bmock\s+as\s+\w+[^}]*\}/;
+/** The substring every call form contains — what MOCK_MODULE_CALL must agree with, file by file. */
+export const MOCK_MODULE_SUBSTRING = /\bmock\.module\(/;
 
 export interface BunTestLink {
   script: string;

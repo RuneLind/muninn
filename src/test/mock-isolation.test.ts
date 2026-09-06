@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   MOCK_ALIAS_IMPORT,
   MOCK_MODULE_CALL,
+  MOCK_MODULE_SUBSTRING,
   bunTestLinks,
   expandLink,
   sharedLinkOffenders,
@@ -49,12 +50,36 @@ function mockFiles(files: readonly string[]): string[] {
   return files.filter((f) => MOCK_MODULE_CALL.test(readFileSync(join(ROOT, f), "utf8")));
 }
 
+/**
+ * `bun test --coverage` is bun's whole-repo, single-process run: every mock in the
+ * tree leaks into every other file there, and coverage cannot be collected across
+ * processes. It is a developer-only script whose numbers are known to be
+ * mock-contaminated; it is exempted BY NAME so the exemption is visible here rather
+ * than falling out of a zero-argument link the rule never saw.
+ */
+const SINGLE_PROCESS_SCRIPTS = new Set(["test:coverage"]);
+
+/**
+ * The live chains, with the single-process scripts ALREADY removed from `links` —
+ * in one place, so no assertion below can forget to. Round 2 of #526 applied the
+ * exemption per assertion and missed one: with `expandLink([])` meaning "every
+ * file", the unfiltered `test:coverage` link marked every mock file as run by a
+ * chain, and deleting every `haiku-direct.test.ts` link left the guard green.
+ * `singleProcessLinks` is what the exemption itself is checked against.
+ */
 function liveInput() {
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
     scripts: Record<string, string>;
   };
   const all = allTestFiles();
-  return { links: bunTestLinks(pkg.scripts), mockFiles: mockFiles(all), allTestFiles: all, scripts: pkg.scripts };
+  const every = bunTestLinks(pkg.scripts);
+  return {
+    links: every.filter((l) => !SINGLE_PROCESS_SCRIPTS.has(l.script)),
+    singleProcessLinks: every.filter((l) => SINGLE_PROCESS_SCRIPTS.has(l.script)),
+    mockFiles: mockFiles(all),
+    allTestFiles: all,
+    scripts: pkg.scripts,
+  };
 }
 
 describe("the rule, on fixtures", () => {
@@ -114,7 +139,9 @@ describe("the rule, on fixtures", () => {
     expect(MOCK_MODULE_CALL.test('const p = mock.module("./a.ts", () => ({}));')).toBe(true);
     expect(MOCK_MODULE_CALL.test('bt.mock.module("./a.ts", () => ({}));')).toBe(true);
     expect(MOCK_ALIAS_IMPORT.test('import { mock as m } from "bun:test";')).toBe(true);
+    expect(MOCK_ALIAS_IMPORT.test('import { test, mock as m, expect } from "bun:test";')).toBe(true);
     expect(MOCK_ALIAS_IMPORT.test('import { mock, test } from "bun:test";')).toBe(false);
+    expect(MOCK_ALIAS_IMPORT.test("// treat the mock as a stand-in for the DB")).toBe(false);
     expect(MOCK_MODULE_CALL.test(" * a file that mock.module()s a db module\nconst r = /mock\\.module\\(/;")).toBe(false);
   });
 });
@@ -172,31 +199,27 @@ describe("the live chains", () => {
     }
   });
 
-  /**
-   * `bun test --coverage` is bun's whole-repo, single-process run: every mock in
-   * the tree leaks into every other file there, and coverage cannot be collected
-   * across processes. It is a developer-only script whose numbers are known to be
-   * mock-contaminated; it is exempted BY NAME so the exemption is visible here
-   * rather than falling out of a zero-argument link the rule never saw.
-   */
-  const SINGLE_PROCESS_SCRIPTS = new Set(["test:coverage"]);
-
   test("the exemption list names only scripts that exist and run everything", () => {
-    const { links } = liveInput();
-    for (const script of SINGLE_PROCESS_SCRIPTS) {
-      const own = links.filter((l) => l.script === script);
-      expect(own).toHaveLength(1);
-      expect(own[0]!.args).toEqual([]);
-    }
+    const { singleProcessLinks } = liveInput();
+    expect(singleProcessLinks.map((l) => l.script).sort()).toEqual([...SINGLE_PROCESS_SCRIPTS].sort());
+    for (const l of singleProcessLinks) expect(l.args, `${l.script} is exempt only while it has no path argument`).toEqual([]);
   });
 
   test("every file that calls mock.module is ALONE in each bun test process that runs it", () => {
-    const input = liveInput();
-    const links = input.links.filter((l) => !SINGLE_PROCESS_SCRIPTS.has(l.script));
-    expect(sharedLinkOffenders({ ...input, links })).toEqual([]);
+    expect(sharedLinkOffenders(liveInput())).toEqual([]);
   });
 
-  test("every explicit file argument in a chain is on disk (a missing one is a silent name filter, not an error)", () => {
+  test("the detector and the plain substring agree on every test file (a call form it cannot see is a red here, not a hole)", () => {
+    const { allTestFiles: all } = liveInput();
+    const disagree = all.filter((f) => {
+      if (f === "src/test/mock-isolation.test.ts") return false; // quotes the forms in its fixtures
+      const src = readFileSync(join(ROOT, f), "utf8");
+      return MOCK_MODULE_SUBSTRING.test(src) !== MOCK_MODULE_CALL.test(src);
+    });
+    expect(disagree).toEqual([]);
+  });
+
+  test("every explicit file argument in a chain is on disk (beside other arguments a missing one is a silent name filter, exit 0)", () => {
     const { links, allTestFiles: all } = liveInput();
     const onDisk = new Set(all);
     for (const { script, args } of links) {
