@@ -167,15 +167,17 @@ try {
 }
 
 // Move the pre-seam Vimeo frames root under the shared one (one-time,
-// best-effort). HERE and not at module load or route registration: a test or an
-// e2e-spawned server would otherwise perform a rename under the developer's
-// real $HOME (the frames route factory takes a `framesRoot` for exactly that
-// reason; production has no such override). A no-op unless the old root exists
-// and its new place does not — and skipped entirely on `nais`, where the
-// capture verticals are not registered at all.
+// best-effort). HERE and not at module load or route registration, so it runs
+// once per PROCESS BOOT rather than once per test file or per registered app.
+// A unit test never loads this module at all; an e2e-spawned server does run
+// it, under the developer's real $HOME — which is safe because the move is
+// idempotent and a no-op once done, not because it is unreachable from a test.
+// A no-op unless the old root exists and its new place does not, and skipped
+// before any $HOME probe on `nais`, where no capture vertical is registered.
 try {
   const { migrateLegacyVimeoFramesRoot } = await import("./summaries/frames.ts");
-  await migrateLegacyVimeoFramesRoot(config.profile ?? "default");
+  const { resolveServingProfile } = await import("./config.ts");
+  await migrateLegacyVimeoFramesRoot(config.profile ?? resolveServingProfile());
 } catch (err) {
   log.warn("Failed to migrate the Vimeo frames root: {error}", {
     error: err instanceof Error ? err.message : String(err),

@@ -32,7 +32,7 @@
 import { test, expect, describe, mock, beforeEach, beforeAll, afterAll } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../../config.ts";
@@ -199,7 +199,7 @@ function ytApp(): Hono {
  * EVERY Vimeo registration in this file names a throwaway frames root. Since
  * the v2 follow-up a `/summaries` Delete REMOVES the deleted document's kept
  * frames under the registration's root, and a registration with no root uses
- * the real `~/.muninn/vimeo-frames` — so a test that fires
+ * the real `~/.muninn/frames` — so a test that fires
  * `notifySummaryDocumentDeleted` against a listing naming a real video id
  * would delete a developer's kept frames. The listener set is module-level
  * and never unsubscribed, so every registration this file has ever made hears
@@ -1413,7 +1413,7 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
     await settle(() => true);
     expect(listings).toBe(0);
-    expect(warns.filter((w) => /frames root/.test(String(w.message)))).toEqual([]);
+    expect(warns.filter((w) => /Could not read the .* frames dir/.test(String(w.message)))).toEqual([]);
 
     // State 2 — EMPTY root: no listing (the round-1 case, re-stated here so the enumeration is in one place).
     registerVimeoRoutes(new Hono(), config, { framesRoot: tmpFramesRoot() });
@@ -1429,7 +1429,7 @@ describe("Vimeo: a /summaries Delete removes the document's kept frames (v2 foll
     notifySummaryDocumentDeleted({ collection: "vimeo-summaries", id: DOC });
     await settle(() => listings > 0);
     expect(listings).toBe(1);
-    expect(warns.filter((w) => /frames root/.test(String(w.message)))).toEqual([]);
+    expect(warns.filter((w) => /Could not read the .* frames dir/.test(String(w.message)))).toEqual([]);
 
     // State 4 — UNREADABLE root (a FILE ⇒ ENOTDIR): consulted too — two registrations now list — with one warn naming the errno.
     listings = 0;

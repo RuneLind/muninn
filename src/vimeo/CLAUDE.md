@@ -15,7 +15,7 @@ the metadata, the media seam, inline slides and the Whisper fallback.
 | `media.ts` | The media seam (v2 PR 3): `fetchVimeoManifest` (host-pinned to the `VIMEO_MEDIA_HOSTS` allowlist — `vod-adaptive-ak.vimeocdn.com`, `skyfire.vimeocdn.com`), `parseVimeoManifest` / `chooseRepresentation` / `segmentIndexAt` / `resolveSegmentUrl` (pure), `downloadRendition` (init + segments → ONE fMP4 ffmpeg reads) |
 | `limits.ts` | `VIMEO_MAX_DURATION_SEC` alone, with NO imports — the route, the summarizer AND the server-rendered `/summaries` page read it, and a view importing `summarizer.ts` for one integer would drag playwright-core into the page render |
 | `frames.ts` | Slides (v2 PR 4), the VIMEO half only: `VIMEO_FRAME_HEIGHT` and `extractCadenceFrames` (one 720p segment per tick through `media.ts`, one ffmpeg grab each). Everything source-neutral is `../summaries/frames.ts` — see below |
-| `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam: `FrameSource` (vimeo/youtube + their id charsets), the id gate, `cadenceTimes` / `formatHms` / `frameUrlPath` / `framesPromptSection` / `referencedFrameSeconds` (pure), `keepReferencedFrames` (the quoted ones → `~/.muninn/frames/<source>/<id>/<sec>.jpg`), `removeKeptFrames` + `removeKeptFramesForDocument` (a Delete's counterpart), `framesRootHasEntries`, `framesTimeoutFor`, the ffmpeg argv + grab, `extractCadenceFramesFromFile` (a vertical holding the whole video on disk), and the one-time root rename |
+| `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam: `FrameSource` (vimeo/youtube + their id charsets), the id gate, `cadenceTimes` / `formatHms` / `frameUrlPath` / `framesPromptSection` / `referencedFrameSeconds` (pure), `keepReferencedFrames` (the quoted ones → `~/.muninn/frames/<source>/<id>/<sec>.jpg`), `removeKeptFrames` + `removeKeptFramesForDocument` (a Delete's counterpart), `framesRootHasEntries`, `framesTimeoutFor`, the ffmpeg argv + grab (`raceKill` is the per-grab kill-and-reject, so a hang is reported as a timeout rather than as `exit 143`), `FRAME_MAX_DURATION_SEC` (the cadence refuses a duration whose ticks would not be servable file names), `extractCadenceFramesFromFile` (a vertical holding the whole video on disk), and the one-time root rename |
 | `whisper.ts` | The no-captions fallback (v2 PR 5): `transcribeOpusRendition` (the whole Opus rendition through `media.ts` → ffmpeg → `whisper-cli -l auto -ovtt` → a WebVTT `vttToSegments` windows like a caption track), `whisperUnavailableReason` (the pre-flight — binaries + model — BEFORE any download), `parseDetectedLanguage` / `isEnglishOnlyModel` / the two clocks (pure) |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · downloading · transcribing · extracting_frames · summarizing · ingesting · complete · error` (`downloading`/`transcribing` only on the Whisper path) |
 | `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
@@ -421,12 +421,19 @@ and the same gates are an invariant of the SEAM rather than of this route
 (`keepReferencedFrames`, `frameUrlPath`, `framesPromptSection` and
 `referencedFrameSeconds` all refuse a bad id, and the id is regex-escaped on
 top). The resolved path
-is checked to stay under the root on its REAL path (`realpath` on both sides —
-the charset gates make the spelling safe by enumeration, and only the real path
-sees a symlink planted under the root; pinned with one. Stated residual: a
-HARDLINK planted under the root is invisible to `realpath` and still serves, so
-the guarantee rests on the root's only writer, `keepReferencedFrames`, writing
-plain files), everything else is a 404 (never a 400
+is checked to stay under **`<root>/<source>/`** on its REAL path (`realpath` on
+both sides — the charset gates make the spelling safe by enumeration, and only
+the real path sees a symlink planted under the root; pinned with two. The base
+is the SOURCE's directory and not the root because the root holds every
+vertical, so a link that stays inside it still crosses a boundary: measured,
+`<root>/vimeo/77 → <root>/youtube/<id>` served the YouTube frame at a Vimeo
+address, on the alias too — which carries no source segment for a reader to
+notice it by. Stated residual: a HARDLINK planted under the root is invisible to
+`realpath` and still serves. The root has exactly TWO writers and neither makes
+one: the one-time `migrateLegacyVimeoFramesRoot`, which renames a pre-existing
+tree in once at startup — and refuses a SYMLINKED legacy root, which would
+otherwise put a link at the served path — and `keepReferencedFrames` from then
+on, which writes plain files it copied itself), everything else is a 404 (never a 400
 that confirms the shape), `Cache-Control: private, max-age=86400` (a frame is
 (video, second) — re-extracting the same second is the same picture; PRIVATE
 because the route is in the admin zone under `MUNINN_AUTH` and a shared cache
@@ -443,16 +450,25 @@ pass one.
 
 **`~/.muninn/vimeo-frames` becomes `~/.muninn/frames/vimeo` by a ONE-TIME
 rename in `src/index.ts`** (`migrateLegacyVimeoFramesRoot`) — never at module
-load and never at route registration, where a test or an e2e-spawned server
-would perform it under the developer's real `$HOME`. It is a no-op unless the
-old root exists and its new place does not, skipped on `nais` (no capture
-vertical is registered there), refused with a warn when BOTH exist (merging two
-roots is a decision this has no basis for), and log-and-continue on any error:
-kept frames are a cache of pictures and no capture may be blocked by a failed
-move. Stated: on a developer machine that HAS an old root, the first e2e run
-performs the rename under the real `$HOME` before the developer starts a new
-server — harmless, since it is idempotent and the alias reads the new root — and
-rolling back to pre-seam code strands the frames under the new name.
+load and never at route registration, so it runs once per process BOOT rather
+than once per test file or per registered app. Being in `src/index.ts` does not
+keep it away from the developer's real `$HOME`: a unit test never loads that
+module at all, but every e2e-spawned server runs it, and the acceptance run for
+this feature really did move the real root. What makes that safe is that the
+move is idempotent and a no-op once done, not that it is unreachable. It is a
+no-op unless the old root exists and its new place does not; the `nais` answer
+is given BEFORE either probe, so nothing under `$HOME` is touched at all there,
+not even a stat; a legacy root that is a SYMLINK is refused with a warn naming
+it (`rename(2)` moves the link, which would leave a symlink at the served path
+pointing outside the root — the route's realpath containment then 404s every
+kept frame while the log says "Moved"), as is the case where BOTH roots exist
+(merging two roots is a decision this has no basis for); and it is
+log-and-continue on any error, since kept frames are a cache of pictures and no
+capture may be blocked by a failed move. Stated: rolling back to pre-seam code
+strands the frames under the new name. Stated and accepted: a failed move
+followed by a new capture leaves BOTH roots present, and every later boot then
+takes the refuse branch and warns again — the plan chose refuse-over-merge, and
+the warn names both roots and says to move or remove the old one by hand.
 
 **Measured on the two acceptance talks (2026-09-05, the plan's skip trigger):**
 Kotlin extension functions (10 min, `en-x-autogen` — Vimeo mis-tagged a
