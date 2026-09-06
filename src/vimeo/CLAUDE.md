@@ -315,8 +315,22 @@ host is an ALLOWLIST.** Measured on the first live frames capture: the caption
 URL arrives before the player asks for its playlist, so a harvest that closes
 on the captions reports no manifest and a reader who ticked Slides gets none.
 `awaitManifestMs` (`VIMEO_MANIFEST_WAIT_MS`, 10 s, inside the harvest budget)
-keeps the page playing until the request lands; transcript-only captures pass
-0 and close as before. And the second acceptance talk (`vimeo.com/1223423400`)
+keeps the page playing until the URL lands; transcript-only captures pass
+0 and close as before. **The URL's PRIMARY source is the player's `/config`
+response** (`request.files.dash.cdns[default_cdn].url`, read by
+`manifestUrlFromPlayerConfig`, host-pinned), and the player's own
+`playlist.json` request is only the fallback — because the player picks DASH
+or HLS per page LOAD. Measured 2026-09-06 on `vimeo.com/1223305711`, six
+harvests: two loads streamed HLS (`…/playlist/av/primary/sub/<track>/prot/…/playlist.m3u8`
++ `media.m3u8` variants) and never requested the JSON, and the harvest, which
+then took the first `/playlist/av/` request, recorded the m3u8 — so
+`fetchVimeoManifest` failed on `#EXTM3U` ("Manifest is not JSON") and a
+Slides capture landed transcript-only. The m3u8 path cannot be rewritten to
+the JSON one (`pathsig` covers the path: 403 with the query, without it, and
+with only the signature), but the config names the JSON URL on every load and
+it answers 200 during an HLS load. The sniff is `.json`-only now: an HLS-only
+load with no readable config reports NO manifest (frames skipped with the
+warn) rather than a manifest that fails. And the second acceptance talk (`vimeo.com/1223423400`)
 is served from `skyfire.vimeocdn.com`, not `vod-adaptive-ak` — identical
 manifest shape, different CDN host, so a single host string missed it
 entirely (the wait then expired for nothing). `VIMEO_MEDIA_HOSTS` in
