@@ -168,6 +168,22 @@ describe("fences shared by both transforms (mapProseLines)", () => {
     expect(linked).toContain("[\\[00:20\\]](https://vimeo.com/123#t=20s)");
   });
 
+  test("an indented opener still opens a fence (the old loop's rule, kept)", () => {
+    const md = "    ```\n[00:10]\n    ```\n## Transcript\nT";
+    expect(linkVimeoTimestamps(md, url)).toBe(md);
+    expect(splitTranscript(md)).toEqual({ body: "    ```\n[00:10]\n    ```", transcript: "T" });
+  });
+
+  test("the FIRST Transcript heading wins", () => {
+    expect(splitTranscript("a\n## Transcript\nb\n## Transcript\nc")).toEqual({ body: "a", transcript: "b\n## Transcript\nc" });
+  });
+
+  test("a non-string input is coerced on both paths", () => {
+    expect(splitTranscript(123 as unknown as string)).toEqual({ body: "123", transcript: null });
+    expect(splitTranscript({ toString: () => "x\n## Transcript\ny" } as unknown as string)).toEqual({ body: "x", transcript: "y" });
+    expect(linkVimeoTimestamps(123 as unknown as string, url)).toBe("123");
+  });
+
   test("a fence is closed only by its own marker character", () => {
     const md = "```\n~~~\n[00:10]\n```\n[00:20]";
     expect(linkVimeoTimestamps(md, url)).toBe("```\n~~~\n[00:10]\n```\n[\\[00:20\\]](https://vimeo.com/123#t=20s)");

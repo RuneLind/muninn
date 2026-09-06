@@ -684,27 +684,26 @@ export function sumArticleLibraryScript(): string {
     }
 
     /**
-     * The ONE fence scanner both markdown transforms in this view use: calls
-     * \`fn(line, index)\` for every line OUTSIDE fenced code and keeps fenced
-     * lines verbatim (fn may return a replacement string, or undefined to keep
-     * the line). A fence is closed only by its OWN marker character in a run at
-     * least as long as the opener (CommonMark), so a four-backtick fence that
-     * SHOWS a three-backtick block is one fence, not two. Fenced code keeps its
-     * text: a timestamp there is source, a \`## Transcript\` there is content.
+     * The ONE fence scanner both markdown transforms in this view use: maps
+     * \`fn(line, index)\` over every line OUTSIDE fenced code (fn returns the
+     * line to emit) and keeps fenced lines verbatim. A fence is closed only by
+     * its OWN marker character in a run at least as long as the opener (the
+     * CommonMark close rule), so a four-backtick fence that SHOWS a
+     * three-backtick block is one fence, not two. Any leading whitespace opens
+     * a fence, as the loop this replaces accepted. Fenced code keeps its text:
+     * a timestamp there is source, a \`## Transcript\` there is content.
      * Inline backtick code and 4-space indented code are not skipped (accepted,
      * rare). Two copies of this loop drifted once; there is one now.
      */
     function mapProseLines(markdown, fn) {
       var fence = null;
       return String(markdown).split('\\n').map(function(line, i) {
-        var m = /^\\s{0,3}(\`{3,}|~{3,})/.exec(line);
+        var m = /^\\s*(\`{3,}|~{3,})/.exec(line);
         if (m) {
           if (fence === null) { fence = m[1]; return line; }
           if (m[1].charAt(0) === fence.charAt(0) && m[1].length >= fence.length) { fence = null; return line; }
         }
-        if (fence !== null) return line;
-        var out = fn(line, i);
-        return out === undefined ? line : out;
+        return fence === null ? fn(line, i) : line;
       }).join('\\n');
     }
 
@@ -749,6 +748,7 @@ export function sumArticleLibraryScript(): string {
       var at = -1;
       mapProseLines(text, function(line, i) {
         if (at === -1 && /^## Transcript\\s*$/.test(line)) at = i;
+        return line;
       });
       if (at === -1) return { body: text, transcript: null };
       var lines = text.split('\\n');
