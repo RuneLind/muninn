@@ -9,6 +9,7 @@ import {
   parseChecklist,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
+import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
 /**
@@ -53,7 +54,7 @@ const telegramRenderer: BlockRenderer = {
       case "Figure":
         return attrs.caption ? `${children}\n${escapeHtml(attrs.caption)}` : children;
       case "Embed":
-        return `Embedded page: ${escapeHtml(attrs.src ?? "")}`;
+        return `Embedded page: ${escapeHtml(parseEmbedAttrs(attrs)?.src ?? "invalid src")}`;
       case "FileRef":
         return children.trim() || escapeHtml(attrs.path ?? "");
       case "ComparisonTable":

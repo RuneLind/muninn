@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, symlink } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -153,6 +153,29 @@ describe("GET /api/wiki/html", () => {
     } finally {
       await rm(path.join(root, "..", "outside-" + path.basename(root) + ".html"), { force: true });
     }
+  });
+
+  // Containment is judged on the REAL path: `path.resolve` is lexical, so a
+  // symlink under the root pointing outside it passed the check and was served.
+  test("the unlisted-.html fallback does not follow a symlink out of the root", async () => {
+    const outsideDir = await mkdtemp(path.join(tmpdir(), "wiki-html-outside-"));
+    try {
+      await Bun.write(path.join(outsideDir, "secret.html"), "<html>SECRET-OUTSIDE</html>");
+      await symlink(path.join(outsideDir, "secret.html"), path.join(root, "blogs/link.html"));
+      await symlink(outsideDir, path.join(root, "blogs/outdir"));
+      for (const rel of ["blogs/link.html", "blogs/outdir/secret.html"]) {
+        const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent(rel));
+        expect(`${rel}: ${res.status}`).toBe(`${rel}: 404`);
+        expect(await res.text()).not.toContain("SECRET-OUTSIDE");
+      }
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a NUL byte in relPath is a 400, not a thrown 500", async () => {
+    const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/p.mdx\u0000.html"));
+    expect(res.status).toBe(400);
   });
 
   // The explainer view's Connections panel is fed by /api/wiki/page — it must

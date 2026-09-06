@@ -4,7 +4,9 @@ import {
   EMBED_HEIGHT_MAX,
   EMBED_HEIGHT_MIN,
   parseEmbedAttrs,
+  planEmbeds,
   resolveEmbedRelPath,
+  type EmbedFigure,
 } from "./embed.ts";
 
 describe("parseEmbedAttrs", () => {
@@ -70,5 +72,36 @@ describe("resolveEmbedRelPath", () => {
   test("escaping the root is refused, not clamped", () => {
     expect(resolveEmbedRelPath("blogs/post.mdx", "../../arch.html")).toBeNull();
     expect(resolveEmbedRelPath("index.md", "../arch.html")).toBeNull();
+  });
+});
+
+describe("planEmbeds", () => {
+  const item = (o: Partial<EmbedFigure>): EmbedFigure => ({
+    hasFrame: false,
+    src: "arch.html",
+    height: "500",
+    title: "T",
+    ...o,
+  });
+
+  test("resolves each figure against the page and carries height/title", () => {
+    expect(planEmbeds([item({})], "blogs/post.mdx")).toEqual([
+      { index: 0, relPath: "blogs/arch.html", height: 500, title: "T" },
+    ]);
+  });
+
+  test("a figure already carrying a frame is skipped — the enhancer is idempotent", () => {
+    expect(planEmbeds([item({ hasFrame: true }), item({ src: "b.html" })], "blogs/post.mdx")).toEqual([
+      { index: 1, relPath: "blogs/b.html", height: 500, title: "T" },
+    ]);
+  });
+
+  test("an unknown page relPath plans nothing rather than resolving against the root", () => {
+    expect(planEmbeds([item({})], "")).toEqual([]);
+  });
+
+  test("an escaping src is skipped; a bad height falls back to the default", () => {
+    expect(planEmbeds([item({ src: "../../x.html" })], "blogs/post.mdx")).toEqual([]);
+    expect(planEmbeds([item({ height: "NaN" })], "blogs/post.mdx")[0]!.height).toBe(EMBED_HEIGHT_DEFAULT);
   });
 });

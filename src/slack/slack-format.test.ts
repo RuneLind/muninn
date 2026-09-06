@@ -527,3 +527,12 @@ Found it ~~wrong~~ correct.`;
     });
   });
 });
+
+describe("Embed fallback line", () => {
+  test("echoes only a src that passes the shared gate — an invalid one says so", () => {
+    expect(formatSlackMrkdwn('<Embed src="./arch.html" />')).toContain("Embedded page: ./arch.html");
+    const bad = formatSlackMrkdwn('<Embed src="javascript:alert(1)" />');
+    expect(bad).toContain("Embedded page: invalid src");
+    expect(bad).not.toContain("javascript:");
+  });
+});

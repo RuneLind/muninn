@@ -43,6 +43,41 @@ export function parseEmbedAttrs(attrs: Record<string, string>): EmbedAttrs | nul
   return { src, height, title };
 }
 
+/** What the client reads off one `<figure class="embed">` before deciding. */
+export interface EmbedFigure {
+  hasFrame: boolean;
+  src: string;
+  height: string;
+  title: string;
+}
+
+export interface EmbedPlan {
+  index: number;
+  relPath: string;
+  height: number;
+  title: string;
+}
+
+/**
+ * The enhancer's whole decision, DOM-free so the two skips can be pinned: a
+ * figure already carrying a frame is left alone (a repaint that re-runs the
+ * enhancers must not stack two), and an UNKNOWN page relPath plans nothing —
+ * resolving against the root would load a different file than the author meant.
+ */
+export function planEmbeds(figures: readonly EmbedFigure[], pageRelPath: string): EmbedPlan[] {
+  if (!pageRelPath) return [];
+  const out: EmbedPlan[] = [];
+  figures.forEach((f, index) => {
+    if (f.hasFrame) return;
+    const relPath = resolveEmbedRelPath(pageRelPath, f.src);
+    if (relPath === null) return;
+    const h = Number(f.height);
+    const height = Number.isFinite(h) && h > 0 ? h : EMBED_HEIGHT_DEFAULT;
+    out.push({ index, relPath, height, title: f.title || f.src });
+  });
+  return out;
+}
+
 /**
  * Join `src` onto the directory of `pageRelPath` (posix, `/`-separated, as the
  * wiki index stores it). Returns `null` when the result would climb above the
