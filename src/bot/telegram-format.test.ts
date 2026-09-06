@@ -250,3 +250,9 @@ test("Embed fallback line echoes only a gated src", () => {
   expect(bad).toContain("Embedded page: invalid embed");
   expect(bad).not.toContain("javascript:");
 });
+
+test("Embed: a bad height is an invalid embed, the src is not blamed", () => {
+  const out = formatTelegramHtml('<Embed src="./arch.html" height="640px" />');
+  expect(out).toContain("Embedded page: invalid embed");
+  expect(out).not.toContain("./arch.html");
+});
