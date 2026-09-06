@@ -1,5 +1,6 @@
 import { test, expect, describe, afterEach, beforeEach, mock } from "bun:test";
 import * as realExecutor from "../scheduler/executor.ts";
+import * as realSummaryCandidates from "../db/summary-candidates.ts";
 import type { Watcher } from "../types.ts";
 
 // --- Module mocks (registered before the dynamic import below) ---
@@ -65,7 +66,14 @@ mock.module("../db/watchers.ts", () => ({
 // exercised without a live DB.
 const upsertCalls: { url: string; score: number; kind?: string | null }[] = [];
 const candidateRows = new Map<string, { id: string; title: string; url: string; status: string }>();
+// Spread the real module first: `anthropic.ts` imports `x.ts`, which imports
+// `upsertDestinationCandidate` from here, and a mock that omits it fails to LINK
+// (`SyntaxError: Export named 'upsertDestinationCandidate' not found`). That was
+// masked for as long as this file shared a `bun test` process with `x.test.ts`,
+// whose fuller mock happened to load first on macOS — and surfaced the moment
+// the file ran alone (which `src/test/mock-isolation.test.ts` now requires).
 mock.module("../db/summary-candidates.ts", () => ({
+  ...realSummaryCandidates,
   upsertCandidate: async (p: { url: string; score: number; kind?: string | null }) => {
     upsertCalls.push({ url: p.url, score: p.score, kind: p.kind });
   },
