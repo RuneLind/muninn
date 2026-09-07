@@ -126,10 +126,13 @@ const ATTR_RE = /([A-Za-z][\w-]*)="([^"]*)"/g;
  * (query stripping) and `src/wiki/integrate-edits.ts` (exclusion-zone masking)
  * both derive from it rather than hand-rolling a third variant that drifts.
  *
- * Attributes are matched loosely (`[^>]*`) on purpose, and this variant is
- * deliberately NOT given the single-line one's quote awareness below: its
- * consumers strip tags across lines, and letting a stray `"` open a quoted run
- * would swallow every line up to the next one. {@link COMPONENT_OPEN_RE} requires
+ * Attributes are matched loosely (`[^>]*`) on purpose. This variant is NOT
+ * given the single-line one's quote awareness below — not because that would
+ * run away (measured: the loose tail already matches across lines up to the next
+ * `>`, and the single-line tail ported here matches nothing on an unclosed
+ * quote), but because its consumers (`similar.ts`, `store.ts`) strip tags for
+ * search text where over-matching is harmless, and narrowing it is a separate
+ * change with its own corpus sweep. {@link COMPONENT_OPEN_RE} requires
  * DOUBLE-QUOTED attrs because it also has to parse them; a masker only has to
  * find the tag's extent, and a stricter pattern would half-match
  * `<Callout tone={x}>` — masking the name but leaving `tone={x}>` editable prose,
