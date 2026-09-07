@@ -728,12 +728,16 @@ describe("claimExtractionText", () => {
     // SOURCE assertion — the house pattern already used to refuse a bare `fetch(`
     // under `src/chat/views/` and a bare `postgres()` under `src/`.
     //
-    // Two things about the DERIVATION are pinned here for the same reason. It is
+    // Three things about the DERIVATION are pinned here for the same reason. It is
     // the shared `pageHasComponentVocabulary`, not an inline `endsWith`: a `.md`
-    // plan page carries folds too, and the renderer never reads the extension. And
-    // its second argument is `raw` — the CAS-pinned disk bytes — never a stripped
+    // plan page carries folds too, and the renderer never reads the extension. Its
+    // second argument is `raw` — the CAS-pinned disk bytes — never a stripped
     // derivative, so this route's `bodyLen` and the integrate route's (which reads
-    // `current` for the same reason) cannot disagree about one page version.
+    // `current` for the same reason) cannot disagree about one page version. And it
+    // is GATED on the page not being an explainer: `raw` is HTML bytes there, and a
+    // line in them that happens to look like a block-component tag would otherwise
+    // flip the flag and make `claimExtractionText` mask real content out of the
+    // extractor's view. An explainer is never integrable, so `false` is right.
     const routes = readFileSync(
       new URL("./wiki-routes.ts", import.meta.url).pathname,
       "utf8",
@@ -748,7 +752,9 @@ describe("claimExtractionText", () => {
     expect(from).toBeGreaterThan(-1);
     expect(to).toBeGreaterThan(from);
     const handler = routes.slice(from, to);
-    expect(handler).toContain("isMdx = pageHasComponentVocabulary(meta.relPath, raw)");
+    expect(handler).toContain(
+      'isMdx = meta.type !== "explainer" && pageHasComponentVocabulary(meta.relPath, raw)',
+    );
     // Never the POLICY twin, and never the bare extension test it replaced.
     expect(handler).not.toContain("isMdx = isAnnotatablePage");
     expect(handler).not.toContain('isMdx = meta.relPath.endsWith(".mdx")');

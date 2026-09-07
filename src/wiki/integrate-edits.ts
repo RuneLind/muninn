@@ -227,20 +227,14 @@ function inRanges(pos: number, ranges: Zone[]): boolean {
 /**
  * The block-tag probe behind {@link pageHasComponentVocabulary} — the same shape
  * {@link BLOCK_COMPONENT_TAG_RE} matches, over every component name but the two
- * the fact-check path writes itself.
- *
- * Three properties, each load-bearing:
- *
- *  - **`m` and NOT `g`.** `.test` on a `/g/` regex advances `lastIndex`, so the
- *    same regex would answer differently on the second page it is asked about.
- *  - **Line-anchored.** A prose mention of `` `<Callout>` `` mid-sentence is not
- *    a component — `tryParseComponent` only ever claims a line whose trimmed
- *    content STARTS with the tag — so an inline mention must flip nothing, for
- *    the same reason `findExclusionZones` does not zone inline tags.
- *  - **`Fact`/`FactCheck` excluded.** Those are written by the fact-check path,
- *    not by an author. Counting them would make a `.md` page's flag flip between
- *    its annotated and stripped states, which is exactly the "one number, one
- *    page version" contract {@link integrateBodyLen} exists to hold.
+ * the fact-check path writes itself. Three properties, each load-bearing: **`m`
+ * and NOT `g`** (`.test` on a `/g/` regex advances `lastIndex`, so it would answer
+ * differently on the second page); **line-anchored**, since `tryParseComponent`
+ * only claims a line whose trimmed content STARTS with the tag, so a prose mention
+ * of `` `<Callout>` `` must flip nothing; and **`Fact`/`FactCheck` excluded**,
+ * because counting what the fact-check path writes would flip a `.md` page's flag
+ * between its annotated and stripped states — the "one number, one page version"
+ * contract {@link integrateBodyLen} exists to hold.
  */
 const AUTHORED_BLOCK_COMPONENT_RE = new RegExp(
   `^[ \\t]*(?:${componentTagSourceSingleLine(
@@ -253,21 +247,23 @@ const AUTHORED_BLOCK_COMPONENT_RE = new RegExp(
  * Does this page carry the component vocabulary — i.e. must {@link findExclusionZones}
  * mask block-component TAGS on it?
  *
- * `.mdx` always does, by convention. A `.md` page does when a person has
- * ALREADY authored a block component in it: the renderer never reads the
- * extension, so a `<Fold>` on a `.md` plan page renders exactly like one on an
- * `.mdx` page — and an accepted fact-check or Ask-remember edit that rewrites
- * the tag line leaves an unclosed component that swallows the rest of the
- * section. A `.md` page with no such tag is untouched by this.
+ * `.mdx` always does, by convention. A `.md` page does when a person has ALREADY
+ * authored a block component in it: the renderer never reads the extension, so a
+ * `<Fold>` on a `.md` plan page renders like one on an `.mdx` page and an accepted
+ * fact-check edit — the ONLY writer that reaches {@link applyEdits} — could rewrite
+ * its tag line. Measured, that breaks the fold and leaves raw markup on screen (an
+ * unclosed `<Fold>` renders as ONE escaped line, every following block normally);
+ * it does not swallow the section.
  *
  * `diskBytes` must be the page AS READ FROM DISK, before any `stripFactWrappers`
- * or `stripSupersededMarks`: every caller pins one CAS'd page version, so the
- * flag has to be a function of that version rather than of whichever derived
- * string a given route happens to hold.
+ * or `stripSupersededMarks`: every caller pins one CAS'd page version, so the flag
+ * is a function of that version rather than of whichever derived string a route
+ * happens to hold.
  *
- * A component example inside a FENCE flips this too. The zones it would add are
- * already covered by the fence zone, so the only page where the flag is
- * observable is one carrying a tag OUTSIDE a fence.
+ * A tag in a code EXAMPLE flips this too. Fenced: nothing observable changes, its
+ * zones already being inside the fence zone. Indented four spaces: not zoned here
+ * at all, so the flag AND real zones appear — correct, since the renderer renders
+ * an indented tag live.
  */
 export function pageHasComponentVocabulary(relPath: string, diskBytes: string): boolean {
   return relPath.endsWith(".mdx") || AUTHORED_BLOCK_COMPONENT_RE.test(diskBytes);
@@ -276,9 +272,8 @@ export function pageHasComponentVocabulary(relPath: string, diskBytes: string): 
 /**
  * Every exclusion zone in `body`, merged and sorted by start offset. Component
  * tags are scanned only when `isMdx` — the caller's answer to "does this page
- * carry the component vocabulary?", which for a `.md` page is a question about
- * its CONTENT rather than its extension: see {@link pageHasComponentVocabulary},
- * which is what every route derives the flag with.
+ * carry the component vocabulary?", which {@link pageHasComponentVocabulary} owns
+ * and every route derives the flag with.
  */
 export function findExclusionZones(body: string, isMdx: boolean): Zone[] {
   const zones: Zone[] = [];

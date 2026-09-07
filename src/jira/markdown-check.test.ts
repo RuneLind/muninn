@@ -123,6 +123,17 @@ describe("the scan is neither noisy nor blind", () => {
     expect(kinds("<BR/>")).toEqual(["html"]);
   });
 
+  test("a block-component tag is raw HTML too — `<Fold>` included", () => {
+    // Every component name in the list is there because a copied-in prompt could
+    // reintroduce it, and each has to be pinned individually: the alternation is a
+    // hand-kept array, so dropping one name is invisible to tsc and to every other
+    // case here.
+    expect(kinds('<Fold title="Hva vi målte">')).toEqual(["html"]);
+    expect(kinds("</Fold>")).toEqual(["html"]);
+    // Case-folded like the other multi-letter names.
+    expect(kinds("<fold>")).toEqual(["html"]);
+  });
+
   test("a markdown link whose text is `[x]` is NOT a task list", () => {
     expect(kinds("- [x](https://jira.adeo.no/browse/MELOSYS-1) er fikset")).toEqual([]);
     expect(kinds("- [ ] Krav")).toEqual(["task-list"]);

@@ -13,9 +13,10 @@
  *     restores wikilinks over the RENDERED html, so a new container is exactly
  *     the kind of thing that can silently swallow one.
  *
- * No model calls, no DB rows. ENV / SPAWN ENV: as every other spec here — a
- * working `.env` at the repo root, and `e2eEnv()` to keep this muninn off
- * Telegram/Slack and off the host's instance-profile flags.
+ * No model calls, no DB rows. ENV / SPAWN ENV: no `.env` is required — the spawn
+ * inherits `DATABASE_URL` (CI passes it inline) and `e2eEnv()` blanks the platform
+ * tokens and the host's instance-profile flags, which is what keeps this muninn off
+ * Telegram/Slack and off a `MUNINN_WIKI_READONLY=1` host.
  */
 
 import { test, expect } from "@playwright/test";
@@ -182,6 +183,11 @@ test.describe("Wiki reader: <Fold>", () => {
     expect(await fold.evaluate((el) => (el as HTMLDetailsElement).open)).toBe(false);
     await fold.locator("summary").click();
     await expect(fold.locator(".fold-body")).toContainText("page folds exactly like");
-    await expect(fold.locator("h3.fold-heading-dup")).toBeHidden();
+    // `toBeHidden()` passes on ZERO elements, so the count comes first — exactly
+    // as in the `.mdx` case above. Without it a fold that never emitted the class
+    // (or emitted a different one) satisfied this assertion.
+    const dup = fold.locator("h3.fold-heading-dup");
+    await expect(dup).toHaveCount(1);
+    await expect(dup).toBeHidden();
   });
 });

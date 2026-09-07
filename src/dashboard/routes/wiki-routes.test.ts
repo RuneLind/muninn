@@ -755,6 +755,28 @@ describe("integrate routes — pre-model / pre-write rejections", () => {
     );
   });
 
+  test("…and the APPLY route measures the same page the same way", async () => {
+    // The third derivation site, and the one no other test reaches. A mutant
+    // hardcoding it (`false`, or the bare `endsWith(".mdx")` it replaced) survives
+    // the whole suite otherwise: apply reads its own `current` bytes and its own
+    // `isMdx`, so the propose-route number above says nothing about it.
+    //
+    // Asserted against `true` LITERALLY rather than via the predicate, so this
+    // pins the NUMBER a `.mdx`-style mask produces instead of re-deriving it with
+    // the same helper the route calls.
+    await Bun.write(path.join(root, "Annotated.md"), ANNOTATED_MD_PAGE);
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Annotated",
+      baseHash: "whatever", // the cap is checked before the CAS
+      edits: editsFor("prose prose", "text text"),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; bodyLen: number };
+    expect(body.error).toBe("page too long to integrate");
+    expect(body.bodyLen).toBe(integrateBodyLen(stripFactWrappers(ANNOTATED_MD_PAGE), true));
+  });
+
   // ── Claim quotes (PR 2) ────────────────────────────────────────────────────
   // Also reachable on the zero-claims early return, so no model call is spent.
 

@@ -367,6 +367,40 @@ test("an edit reaching into a fold's tag line on a .md page is refused", () => {
   expect(r.body).toContain("The probe returned 149 lines.");
 });
 
+describe("a `>` inside a quoted title does not split the tag", () => {
+  // `COMPONENT_OPEN_RE` accepts any character but `"` inside a double-quoted
+  // attribute value, so `<Fold title="Before > after">` really is a component and
+  // really does render. A masker whose attribute tail stopped at the first `>`
+  // zoned only `<Fold title="Before >` and left ` after">` as editable prose — an
+  // accepted edit could rewrite it and break the tag it belongs to.
+  const OPEN = '<Fold title="Before > after">';
+  const page = ["# A plan", "", OPEN, "", "The probe returned 4M lines.", "", "</Fold>", ""].join("\n");
+
+  test("the zone covers the WHOLE tag, not up to the first `>`", () => {
+    const zones = findExclusionZones(page, true).filter((z) => z.kind === "component");
+    const start = page.indexOf(OPEN);
+    expect(zones[0]).toEqual({ start, end: start + OPEN.length, kind: "component" });
+    expect(zones).toHaveLength(2); // …and the closing tag
+  });
+
+  test("the vocabulary probe still answers true", () => {
+    // A no-change guard rather than a new property: the probe only has to FIND a
+    // tag, and it did so even on the truncated match.
+    expect(pageHasComponentVocabulary("plans/x.md", page)).toBe(true);
+  });
+
+  test("an edit targeting the tag's tail is refused", () => {
+    expect(applyEdits(page, [edit({ old: ' after">', new: ' later">' })], true).appliedCount).toBe(0);
+  });
+
+  test("an UNMATCHED quote is not a component tag at all — and gets no zone", () => {
+    // Correct, not a regression: such a line does not parse as a component either,
+    // so it renders as escaped text and is ordinary editable prose.
+    const broken = ["# A plan", "", '<Fold title="broken>', "", "prose.", ""].join("\n");
+    expect(findExclusionZones(broken, true).filter((z) => z.kind === "component")).toHaveLength(0);
+  });
+});
+
 // ── parseEditList ────────────────────────────────────────────────────────────
 
 test("parseEditList accepts a well-formed list with a note", () => {

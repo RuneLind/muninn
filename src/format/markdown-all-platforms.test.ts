@@ -805,6 +805,18 @@ describe("Fact with an absent/garbage verdict degrades to `unknown`, never to ok
 describe("Fold — a details on the web, an open run-in section everywhere else", () => {
   const md = '<Fold title="What was measured">\n\n## What was measured\n\nThe probe returned 149 lines.\n\n</Fold>';
 
+  /**
+   * The same fold with a body heading that DIFFERS from the title — which is what
+   * the three run-in surfaces have to be asserted against. On `md` the title and
+   * the body's first heading are the same words (the retrofit convention), and
+   * every surface renders a bare `##` as bold too, so "the title is rendered as a
+   * bold run-in" passed off the BODY: deleting a platform's whole `case "Fold"`
+   * left all three cases green. Here the title appears nowhere in the body, so
+   * both must be present and in that order.
+   */
+  const twoHeadings =
+    '<Fold title="What was measured">\n\n## Method and probe\n\nThe probe returned 149 lines.\n\n</Fold>';
+
   test("web → a CLOSED details whose duplicate heading is marked", () => {
     const out = formatWebHtml(md);
     expect(out).toContain('<details class="fold">');
@@ -817,23 +829,28 @@ describe("Fold — a details on the web, an open run-in section everywhere else"
   test('web → open="true" renders it expanded', () =>
     expect(formatWebHtml(md.replace(">", ' open="true">'))).toContain('<details class="fold" open>'));
 
-  test("telegram → bold run-in title, body open, no fold", () => {
-    const out = formatTelegramHtml(md);
+  test("telegram → bold run-in title ABOVE the body's own heading, no fold", () => {
+    const out = formatTelegramHtml(twoHeadings);
     expect(out.startsWith("<b>What was measured</b>")).toBe(true);
+    expect(out).toContain("<b>Method and probe</b>");
+    expect(out.indexOf("What was measured")).toBeLessThan(out.indexOf("Method and probe"));
     expect(out).toContain("The probe returned 149 lines.");
     expect(out).not.toContain("<details");
   });
 
-  test("slack → bold run-in title, body open", () => {
-    const out = formatSlackMrkdwn(md);
+  test("slack → bold run-in title ABOVE the body's own heading", () => {
+    const out = formatSlackMrkdwn(twoHeadings);
     expect(out.startsWith("*What was measured*")).toBe(true);
+    expect(out).toContain("*Method and probe*");
+    expect(out.indexOf("What was measured")).toBeLessThan(out.indexOf("Method and probe"));
     expect(out).toContain("The probe returned 149 lines.");
   });
 
-  test("email → styled run-in title, body open (no <details> in mail)", () => {
-    const out = formatEmailHtml(md);
-    expect(out).toContain("font-weight:600");
-    expect(out).toContain("What was measured");
+  test("email → styled run-in title ABOVE the body's own heading (no <details> in mail)", () => {
+    const out = formatEmailHtml(twoHeadings);
+    expect(out).toContain('<div style="font-weight:600;margin:0 0 6px;color:#1f2328;">What was measured</div>');
+    expect(out).toContain("Method and probe");
+    expect(out.indexOf("What was measured")).toBeLessThan(out.indexOf("Method and probe"));
     expect(out).toContain("The probe returned 149 lines.");
     expect(out).not.toContain("<details");
   });
@@ -847,12 +864,20 @@ describe("Fold — a details on the web, an open run-in section everywhere else"
     expect(formatWebHtml(plain)).toContain("<summary>Details</summary>");
   });
 
-  test("a title is escaped on every HTML surface", () => {
+  test("a title carrying markup is handled on every surface", () => {
     const hostile = '<Fold title="a <b>x">\n\nbody\n\n</Fold>';
+    // The three HTML surfaces ESCAPE it.
     for (const out of [formatWebHtml(hostile), formatTelegramHtml(hostile), formatEmailHtml(hostile)]) {
       expect(out).toContain("a &lt;b&gt;x");
       expect(out).not.toContain("<b>x");
     }
+    // Slack is mrkdwn, not HTML, so it runs the title through `renderInline` like
+    // any other inline text: the tag is CONVERTED AWAY rather than escaped. House
+    // style — asserted as it is, not changed. What matters is the same guarantee:
+    // no live tag survives into the message.
+    const slack = formatSlackMrkdwn(hostile);
+    expect(slack.startsWith("*a x*")).toBe(true);
+    expect(slack).not.toContain("<b>");
   });
 });
 

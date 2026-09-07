@@ -2196,6 +2196,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // (a policy call over the same extension) and derived by the ONE shared
     // predicate, over the DISK bytes, so extraction and integrate mask the same
     // page the same way — `.md` pages carrying an authored component included.
+    // EXPLAINERS ARE EXCLUDED: their disk bytes are HTML, and the probe is a
+    // line-anchored tag test, so an HTML line shaped like a block-component tag
+    // would flip the flag and mask real content out of the extractor's view. An
+    // explainer is never integrable, so there is nothing the flag could buy there.
     let isMdx = false;
     if (!preflightError && entry && index && meta) {
       // Explainers are HTML on disk; reduce to prose so claim extraction / the
@@ -2211,7 +2215,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // Measured on the WRAPPER-STRIPPED body, because that is what the integrate
       // route resolves against — the two must be the same number or the client
       // budgets a "too long" verdict the server would never reach.
-      isMdx = pageHasComponentVocabulary(meta.relPath, raw);
+      isMdx = meta.type !== "explainer" && pageHasComponentVocabulary(meta.relPath, raw);
       if (meta.type !== "explainer") {
         bodyLen = integrateBodyLen(stripFactWrappers(raw), isMdx);
       }

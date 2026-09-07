@@ -14,9 +14,15 @@
  * fold's title already repeats. Both are green in every unit test.
  *
  * No DB row, no model call: the spec calls the two published functions directly.
- * ENV / SPAWN ENV: as every other spec here — a working `.env` at the repo root,
- * and `e2eEnv()` to keep this muninn off Telegram/Slack and off the host's
- * instance-profile flags.
+ *
+ * **It boots its own muninn rather than reusing the config's server on 3011**
+ * because what it asserts is the CHAT BUNDLE, and `bun --watch` never rebuilds a
+ * client bundle — a reused dev server would serve whichever build was current when
+ * that server started, so a green run would say nothing about the code in the tree.
+ *
+ * ENV / SPAWN ENV: no `.env` is required — the spawn inherits `DATABASE_URL` (CI
+ * passes it inline) and `e2eEnv()` blanks the platform tokens and the host's
+ * instance-profile flags, which is what keeps this muninn off Telegram/Slack.
  */
 
 import { test, expect } from "@playwright/test";
