@@ -13,6 +13,12 @@
  * rebuild is then a red test rather than a popup running last month's rules.
  * The output is bun's own codegen, so a bun version bump can fail it too — the
  * remedy is `bun run build:extension` and committing the result.
+ *
+ * ⚠️ The last case calls `process.chdir`, and this file shares a process with
+ * the ~265 other files of the `test:unit` chunk: the working directory is
+ * process-wide state, so its `finally` restore is load-bearing for every one of
+ * them — a case that leaves the process in `/tmp` breaks whichever file reads a
+ * relative path next, in an order that changes with the file set.
  */
 
 import { describe, expect, test } from "bun:test";

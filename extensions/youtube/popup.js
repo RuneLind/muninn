@@ -22,11 +22,22 @@ const $ = (sel) => document.querySelector(sel);
 const FRAMES_KEY = 'frames';
 const KIND_KEY = 'summaryKind';
 
-/** The Slides label's ordinary tooltip, restored when the tick is usable. */
-const FRAMES_LABEL_TITLE =
-  'Pull one frame per cadence tick (~20s on a 10-minute video, ~180s at the 3-hour cap) ' +
-  'and let the summary quote the slides that add something the transcript does not say. ' +
-  'Adds a download and a few minutes.';
+/**
+ * The Slides label's ordinary tooltip, restored when the tick is usable — READ
+ * off `popup.html` rather than spelled out again here, so the sentence a reader
+ * hovers exists in one place. A module script runs after parsing, so the label
+ * is on the page, and this is captured before `populateControls` can overwrite
+ * the attribute with the dimmed-tick explanation.
+ */
+const FRAMES_LABEL_TITLE = $('#lbl-frames').title;
+
+/**
+ * How long the remembered choices get to arrive before the controls go live on
+ * this instance's defaults. `chrome.storage.sync.get` is a round trip to the
+ * profile's sync backend and is not otherwise bounded — and Summarize stays
+ * disabled until it settles, so an unbounded wait there is a dead popup.
+ */
+const STORAGE_READ_TIMEOUT_MS = 2000;
 
 let videoInfo = null;
 /** What this Muninn offers. Replaced once the options endpoint answers. */
@@ -62,7 +73,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // fetch waits on a `muninnUrl` that can be a black hole — and until it
   // settled, neither Summarize nor Settings had a listener, so the one control
   // that could fix a wrong URL was dead exactly when it was needed.
-  $('#btn-summarize').addEventListener('click', handleSummarize);
+  const summarize = $('#btn-summarize');
+  summarize.addEventListener('click', handleSummarize);
+  // Disabled until `populateControls` settles — success, unreachable fallback
+  // or timeout alike. Before that the picker is empty and the remembered kind
+  // and tick have not been restored, so a click inside the window the options
+  // read owns (up to the worker's 4s budget) submits `{kind:"standard",
+  // frames:false}` over a storage that says `deep` and `true`: the wrong-kind
+  // capture the server-side 400 exists to prevent, arriving from the client.
+  // Settings stays live throughout — it is the one control that fixes the URL
+  // this popup may be hanging on.
+  summarize.disabled = true;
   $('#open-options').addEventListener('click', (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
@@ -103,6 +124,19 @@ document.addEventListener('DOMContentLoaded', () => {
  * exists to remove.
  */
 async function populateControls() {
+  try {
+    await renderControls();
+  } finally {
+    // Settled, whichever way it went: the picker holds what this instance
+    // offers (or the Standard-only fallback), and the remembered kind and tick
+    // are restored — or the storage read timed out and the controls show this
+    // instance's defaults, which is what a click would then submit. A throw in
+    // between must not leave Summarize dead, so this is a `finally`.
+    $('#btn-summarize').disabled = false;
+  }
+}
+
+async function renderControls() {
   // The callback form: a worker that failed to answer leaves
   // `chrome.runtime.lastError` set and hands the callback `undefined`, which is
   // one of the shapes `parseCaptureOptions` refuses — so an unreachable Muninn
@@ -139,12 +173,21 @@ async function populateControls() {
     ? "Summarizer bot's connector cannot read frames."
     : FRAMES_LABEL_TITLE;
 
+  // Painted BEFORE the storage read, and again after it: a sync backend that
+  // never answers would otherwise leave the dimmed tick unexplained for as long
+  // as it hangs, which is the state this note exists for.
+  renderNotes();
+
   // Restore, then persist every change. Both halves are guarded: a storage
   // failure must leave the button working, not the popup dead — the controls
-  // then show this instance's defaults for that session.
+  // then show this instance's defaults for that session. The read is bounded
+  // for the same reason: a hang is a failure the reader cannot see.
   let stored = {};
   try {
-    stored = await chrome.storage.sync.get({ [FRAMES_KEY]: false, [KIND_KEY]: null });
+    stored = await Promise.race([
+      chrome.storage.sync.get({ [FRAMES_KEY]: false, [KIND_KEY]: null }),
+      new Promise((resolve) => setTimeout(() => resolve({}), STORAGE_READ_TIMEOUT_MS)),
+    ]);
   } catch (err) {
     console.warn('Could not read the remembered capture settings', err);
   }

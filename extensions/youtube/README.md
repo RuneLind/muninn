@@ -127,10 +127,15 @@ the worker or the manifest, reload the unpacked extension and confirm:
   "Could not reach Muninn options — Standard only." and still offers Standard
 - **pointing it at a host that HANGS**, which is a different failure from a
   refused port: use an address that accepts the connection and never answers
-  (`http://10.255.255.1:3010`, or a tailnet host that is offline). Within a few
-  seconds the popup must show the same "Could not reach Muninn options" line —
-  and **Settings** must be clickable the whole time, since that is the only
-  control that can fix the URL
+  (`http://10.255.255.1:3010`, or a tailnet host that is offline). That address
+  is outside the `host_permissions` the manifest grants (`localhost:3010` only),
+  which does not spoil the check: CORS is enforced on the RESPONSE, and there is
+  none — the fetch hangs until the worker's timeout, exactly as a granted host
+  that never answers would. A real capture still needs a granted host. Within a
+  few seconds the popup must show the same "Could not reach Muninn options" line,
+  **Summarize** must go from disabled to enabled when it does — and **Settings**
+  must be clickable the whole time, since that is the only control that can fix
+  the URL
 - **on a summarizer bot whose connector cannot read frames** (a `copilot-sdk`
   bot), the **Slides** tick renders dimmed with the line "Slides are off: this
   Muninn's summarizer bot uses a connector that cannot read frames." — and

@@ -27,6 +27,9 @@
       <div id="options-note" class="note hidden"></div>
       <div class="controls">
         <button id="btn-summarize" class="primary">Summarize</button>
+        <!-- This title is the ONE copy of the usable-tick tooltip: popup.js
+             reads it off the DOM at load and restores it after a dimmed tick,
+             so editing it here is enough. -->
         <label class="opt" id="lbl-frames" title="Pull one frame per cadence tick (~20s on a 10-minute video, ~180s at the 3-hour cap) and let the summary quote the slides that add something the transcript does not say. Adds a download and a few minutes.">
           <input type="checkbox" id="chk-frames"> Slides
         </label>
