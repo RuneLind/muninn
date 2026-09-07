@@ -66,11 +66,6 @@ mock.module("../ai/one-shot.ts", () => ({
     supportsThinkingBudget: true,
     supportsWebTools: true,
   }),
-  capabilitiesForConnectorType: () => ({
-    supportsExtraDirs: connectorSupportsExtraDirs,
-    supportsThinkingBudget: true,
-    supportsWebTools: true,
-  }),
 }));
 /** The one capability this file flips — the summarizer's second-line frames check. */
 let connectorSupportsExtraDirs = true;
@@ -82,6 +77,29 @@ mock.module("../gardener/source-drafter-run.ts", () => ({
   },
 }));
 
+/**
+ * The attributes the `claude` span was STARTED with.
+ *
+ * `extraTraceAttrs` is the only channel that carries the kind and the effective
+ * thinking budget onto the trace, and it reaches the span through
+ * `runCaptureOneShot` → `tracedOneShot` → `tracer.start`. Patching the real
+ * prototype rather than mocking a module keeps the whole chain under test — the
+ * mocked `executeOneShot` below is downstream of it and never sees these — and
+ * this file already runs in a process of its own (its `mock.module` calls), so
+ * the patch cannot reach another suite.
+ */
+let lastClaudeSpanAttrs: Record<string, unknown> | undefined;
+const { Tracer } = await import("../tracing/tracer.ts");
+const realTracerStart = Tracer.prototype.start;
+Tracer.prototype.start = function patchedStart(
+  this: InstanceType<typeof Tracer>,
+  label: string,
+  attributes?: Record<string, unknown>,
+) {
+  if (label === "claude") lastClaudeSpanAttrs = attributes;
+  return realTracerStart.call(this, label, attributes);
+};
+
 const { summarizeVideo } = await import("./summarizer.ts");
 const { createJob, getJob } = await import("./state.ts");
 const { YOUTUBE_FRAME_FORMAT_SELECTOR } = await import("./frames.ts");
@@ -92,6 +110,9 @@ const {
   resolveCapturePresets,
 } = await import("../summaries/presets.ts");
 type CapturePreset = (typeof SHIPPED_CAPTURE_PRESETS)[number];
+
+/** The kind every case runs under unless it names another. */
+const STANDARD_PRESET = findCapturePreset(SHIPPED_CAPTURE_PRESETS, "standard")!;
 
 // --- a real huginn on loopback ---------------------------------------------
 
@@ -253,6 +274,7 @@ beforeEach(() => {
   lastBotConfig = undefined;
   lastTimeoutMs = undefined;
   atModelCall = null;
+  lastClaudeSpanAttrs = undefined;
   framesRoot = tmpRoot("yt-frames-root-");
 });
 
@@ -269,10 +291,15 @@ async function run(
   const jobId = createJob(VIDEO_ID, "A talk", WATCH_URL);
   await summarizeVideo(jobId, VIDEO_ID, "A talk", config, opts.botConfig ?? bot, {
     ...(opts.frames !== undefined ? { frames: opts.frames } : {}),
-    ...(opts.preset ? { preset: opts.preset } : {}),
-    ...(opts.sourceDraft !== undefined ? { sourceDraft: opts.sourceDraft } : {}),
+    // REQUIRED on the options now (the Vimeo precedent): a caller that names no
+    // kind is a compile error rather than a positional pick out of the shipped
+    // array, so this helper names `standard` explicitly.
+    preset: opts.preset ?? STANDARD_PRESET,
     ...(opts.onIngested ? { onIngested: opts.onIngested } : {}),
-    deps: deps(),
+    deps: {
+      ...deps(),
+      ...(opts.sourceDraft !== undefined ? { sourceDraft: opts.sourceDraft } : {}),
+    },
   });
   return jobId;
 }
@@ -315,7 +342,7 @@ describe("frames on", () => {
       "A talk",
       config,
       bot,
-      { frames: true, deps: deps() },
+      { frames: true, preset: STANDARD_PRESET, deps: deps() },
     );
     expect(probeCalls).toEqual([WATCH_URL]);
     expect(downloadCalls.map((d) => d.url)).toEqual([WATCH_URL]);
@@ -424,6 +451,7 @@ describe("frames on", () => {
     const jobId = createJob(VIDEO_ID, "A talk", WATCH_URL);
     await summarizeVideo(jobId, VIDEO_ID, "A talk", config, bot, {
       frames: true,
+      preset: STANDARD_PRESET,
       // A re-POST racing the terminal job event must find the claim already
       // written, so the hook runs while the job is still `ingesting`.
       onIngested: (v, d) => seen.push([v, d, getJob(jobId)?.status]),
@@ -543,7 +571,7 @@ describe("the URL on the document is built from the VIDEO ID", () => {
     // url for video Y cannot put Y's address on X's document (which then made
     // every later capture of Y a `duplicate` of X).
     const jobId = createJob(VIDEO_ID, "A talk", OTHER);
-    await summarizeVideo(jobId, VIDEO_ID, "A talk", config, bot, { deps: deps() });
+    await summarizeVideo(jobId, VIDEO_ID, "A talk", config, bot, { preset: STANDARD_PRESET, deps: deps() });
 
     expect(ingestBodies[0]!.url).toBe(WATCH_URL);
     expect(lastSystemPrompt).toContain(`Video URL: ${WATCH_URL}`);
@@ -562,6 +590,7 @@ describe("the job card moves before the expensive half", () => {
     jobId = createJob(VIDEO_ID, "A talk", WATCH_URL);
     await summarizeVideo(jobId, VIDEO_ID, "A talk", config, bot, {
       frames: true,
+      preset: STANDARD_PRESET,
       deps: deps(),
     });
     expect(statusAtProbe).toBe("fetching_transcript");
@@ -579,6 +608,7 @@ describe("the yt-dlp/ffmpeg half is serialized process-wide", () => {
 
     const first = summarizeVideo(createJob(VIDEO_ID, "A", WATCH_URL), VIDEO_ID, "A", config, bot, {
       frames: true,
+      preset: STANDARD_PRESET,
       deps: deps(),
     });
     const second = summarizeVideo(
@@ -587,7 +617,7 @@ describe("the yt-dlp/ffmpeg half is serialized process-wide", () => {
       "B",
       config,
       bot,
-      { frames: true, deps: deps() },
+      { frames: true, preset: STANDARD_PRESET, deps: deps() },
     );
 
     // Let both reach their download step, then release the first.
@@ -754,6 +784,29 @@ describe("the summary KIND", () => {
     expect(line!.properties.model).toBe("unknown");
     expect(line!.properties.requestedModel).toBe(CAPTURE_DEEP_MODEL);
     expect(line!.properties.thinking).toBe("inherit:bot-default");
+  });
+
+  test("the kind and the budget reach the TRACE, not only the log line", async () => {
+    // `extraTraceAttrs` is the only channel that puts these on the span, and
+    // `/traces` is where a run is inspected after the fact. The log line was
+    // pinned; the span was not.
+    await run({ preset: deep });
+    expect(lastClaudeSpanAttrs).toMatchObject({
+      summaryKind: "deep",
+      thinking: "inherit:bot-default",
+      frames: "off",
+    });
+
+    lastClaudeSpanAttrs = undefined;
+    await run({ preset: standard, frames: true });
+    expect(lastClaudeSpanAttrs).toMatchObject({
+      summaryKind: "standard",
+      // Frames came out, so the cap is not applied here either — and the label
+      // says which of the two reasons it was.
+      thinking: "inherit:bot-default",
+      frames: "on",
+      frameCount: "3",
+    });
   });
 
   test("a kind asking for opus on a connector that cannot NAME it warns and keeps the bot's model", async () => {

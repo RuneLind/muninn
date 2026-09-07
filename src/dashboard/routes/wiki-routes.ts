@@ -92,7 +92,8 @@ import {
 import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
-import { capabilitiesForConnectorType, connectorCapabilities } from "../../ai/one-shot.ts";
+import { connectorCapabilities } from "../../ai/one-shot.ts";
+import { capabilitiesForConnectorType } from "../../ai/connector-capabilities.ts";
 import { jiraBotName } from "../../jira/bot.ts";
 import type { executeOneShot } from "../../ai/one-shot.ts";
 import { streamFactcheckSSE } from "./factcheck-sse.ts";

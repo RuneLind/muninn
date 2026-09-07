@@ -151,6 +151,10 @@ export interface ResolveCapturePresetsOptions {
   /**
    * Also drop a kind whose THINKING half this connector cannot honour.
    *
+   * **This docblock is the one place that rationale lives** — the YouTube route,
+   * `src/youtube/kinds.ts`, both CLAUDE.md files and the two test suites point
+   * here rather than restating it.
+   *
    * Two halves of `deep` are promised by its label — "opus, full thinking" —
    * and they are honoured by different mechanisms. The MODEL half is gated by
    * {@link connectorRunsOpus} above and is checked on every caller. The

@@ -3,7 +3,7 @@ import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { createJob, getJob, getRecentJobs, subscribe } from "../../youtube/state.ts";
 import { summarizeVideo } from "../../youtube/summarizer.ts";
-import { discoverAllBots, resolveSummarizerBot, type BotPrompts, type ConnectorType } from "../../bots/config.ts";
+import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
@@ -12,11 +12,11 @@ import {
   DEFAULT_CAPTURE_KIND,
   capturePresetOptions,
   findCapturePreset,
-  resolveCapturePresets,
 } from "../../summaries/presets.ts";
 import { applyCors } from "../../auth/cors.ts";
 import { YOUTUBE_FRAME_SOURCE, isFrameId, removeKeptFramesForDocument } from "../../summaries/frames.ts";
 import { youtubeWatchUrl } from "../../youtube/frames.ts";
+import { youtubeCaptureKinds } from "../../youtube/kinds.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 
 const log = getLog("dashboard");
@@ -104,28 +104,6 @@ export function extractYouTubeVideoId(url: string): string | null {
  * anything that would matter in a prompt.
  */
 export const YOUTUBE_TITLE_MAX = 300;
-
-/**
- * The summary kinds THIS vertical offers on a given summarizer bot.
- *
- * `requireThinkingControl` is what makes it the YouTube set rather than the
- * shared one: `deep`'s label is "opus, full thinking", and the thinking half is
- * honoured only where `supportsThinkingBudget` is — `runCaptureOneShot` forces
- * the budget to `null` on every other connector. `resolveCapturePresets` already
- * drops the kind where the MODEL cannot be named; this drops it where the model
- * can be named but the budget cannot, so a Copilot summarizer bot is never
- * offered a run that would be stamped `deep` without being one.
- *
- * Accepted consequence, stated rather than hidden: that same bot IS offered
- * `deep` for Vimeo on `/summaries`, whose picker sells the model and not the
- * budget. The two callers below are the only ones — the picker and the `400
- * bad_kind` come from this one function, so they cannot disagree.
- */
-function youtubeCaptureKinds(summarizerBot: { prompts?: BotPrompts; connector?: ConnectorType }) {
-  return resolveCapturePresets(summarizerBot.prompts, summarizerBot.connector, {
-    requireThinkingControl: true,
-  });
-}
 
 /** `title`, capped — with the ellipsis inside the bound, never appended past it. */
 export function capYouTubeTitle(title: string): string {
@@ -498,6 +476,17 @@ export function registerYouTubeRoutes(
     // machine token — the shape the popup renders.
     if (body.kind !== undefined && typeof body.kind !== "string") {
       return c.json({ error: "Summary kind must be a string", code: "bad_kind" }, 400);
+    }
+    // PRESENT BUT BLANK is refused with the rest. `findCapturePreset` reads a
+    // blank id as ABSENT — the right rule for a key that is not there at all
+    // (an older extension, a curl) and the wrong one for a caller that sent the
+    // key and put nothing in it, which is a picker that failed to fill. Without
+    // this, `kind: ""` ran `standard` and was reported as the kind picked.
+    if (typeof body.kind === "string" && body.kind.trim() === "") {
+      return c.json(
+        { error: "Summary kind must not be blank", code: "bad_kind", kind: body.kind },
+        400,
+      );
     }
     const preset = findCapturePreset(youtubeCaptureKinds(summarizerBot), body.kind);
     if (!preset) {

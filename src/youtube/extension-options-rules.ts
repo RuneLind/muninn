@@ -118,18 +118,48 @@ export function parseCaptureOptions(payload: unknown): CaptureOptions | null {
 
 /**
  * The kind to SELECT, given what this browser remembered and what the server
- * currently offers.
+ * offers now.
  *
- * A remembered id that is no longer offered — or was never a string, which is
- * what an install from before the picker has — falls back to the server's
- * default. It never throws and never returns an id outside `options.kinds`, so
- * the value the popup submits is always one the route accepts.
+ * A remembered id the server no longer offers — or one that was never a string,
+ * which is what an install from before the picker has — falls back to the
+ * server's default. It never throws and never returns an id outside
+ * `options.kinds`, so the value the popup submits is always one the route
+ * accepts. When the answer differs from what was stored, `restoredKindNote`
+ * below is the line that says so.
  */
 export function pickKind(stored: unknown, options: CaptureOptions): string {
   if (isNonEmptyString(stored) && options.kinds.some((k) => k.id === stored.trim())) {
     return stored.trim();
   }
   return options.defaultKind;
+}
+
+/**
+ * The one line the popup shows when {@link pickKind} did NOT restore what this
+ * browser remembered — or null when there is nothing to say.
+ *
+ * Without it the fallback is silent: a browser carrying `deep` on an instance
+ * that no longer offers it renders `standard`, the reader clicks Summarize and
+ * gets a capture in a kind they did not pick, with the picker showing the kind
+ * that ran and no trace of the one that did not.
+ *
+ * Two cases are deliberately silent. An install with no stored kind is the
+ * DEFAULT, not a fallback — there was no choice to lose. And under the
+ * unreachable fallback ({@link FALLBACK_CAPTURE_OPTIONS}) the popup already
+ * shows {@link OPTIONS_UNREACHABLE_MESSAGE}, which is the true explanation:
+ * this instance is not known to have dropped anything.
+ */
+export function restoredKindNote(
+  stored: unknown,
+  picked: string,
+  options: CaptureOptions,
+): string | null {
+  if (!options.fromServer) return null;
+  if (!isNonEmptyString(stored)) return null;
+  const wanted = stored.trim();
+  if (wanted === picked) return null;
+  const label = options.kinds.find((k) => k.id === picked)?.label ?? picked;
+  return `“${wanted}” is not offered here — using ${label}.`;
 }
 
 /**

@@ -108,11 +108,8 @@ describe("resolveCapturePresets — the connector decides whether an opus kind i
   });
 
   test("requireThinkingControl also drops a kind whose BUDGET the connector cannot honour", () => {
-    // Copilot can NAME `claude-opus-5` (it is in the catalog verbatim), so the
-    // model half of `deep` is honourable there — but `supportsThinkingBudget` is
-    // false and `runCaptureOneShot` forces the budget to null, so "full
-    // thinking" is not. The YouTube route asks for this narrowing; the Vimeo
-    // picker does not, and the DEFAULT must stay exactly what it was.
+    // Why, on the option's own docblock above. The DEFAULT must stay exactly
+    // what it was.
     expect(resolveCapturePresets(undefined, "copilot-sdk", { requireThinkingControl: true }).map((p) => p.id))
       .toEqual(["standard", "talk-notes"]);
     // Every existing caller: byte-identical offer sets, argument absent or false.

@@ -42,6 +42,16 @@
  *     --video <local.mp4> --transcript <transcript.json> --video-id <11 chars> \
  *     --title "…" --kind standard|deep --frames --runs 2 --out <dir>
  *
+ * ## The trace half
+ *
+ * The harness calls `initDb`, so the capture's `capture:youtube` trace is
+ * written to `DATABASE_URL` — the dev server's database — and the run shows up
+ * on `/traces` and `/agents` beside a live one. If that database is not
+ * answering, tracing is switched OFF for the run with one line rather than left
+ * to fail one span at a time; `run.json` is unaffected either way.
+ *
+ * ## Output
+ *
  * Per run it writes `<out>/<kind>-<n>/`: `summary.md` (the stored body),
  * `ingest.json` (the body posted to the stub), `frames/` (the frames the summary
  * quoted) and `run.json` (requested vs observed model, thinking budget,
@@ -53,6 +63,7 @@ import { existsSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { configure, type LogRecord } from "@logtape/logtape";
 import { loadConfig } from "../src/config.ts";
+import { getDb, initDb } from "../src/db/client.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../src/bots/config.ts";
 import { connectorCapabilities } from "../src/ai/one-shot.ts";
 import { agentStatus } from "../src/observability/agent-status.ts";
@@ -61,8 +72,8 @@ import {
   captureBotConfigFor,
   captureThinkingFor,
   findCapturePreset,
-  resolveCapturePresets,
 } from "../src/summaries/presets.ts";
+import { youtubeCaptureKinds } from "../src/youtube/kinds.ts";
 import { CAPTURE_THINKING_MAX_TOKENS } from "../src/summaries/summarizer-shared.ts";
 import { CAPTURE_FRAME_HEIGHT, extractCadenceFramesFromFile } from "../src/summaries/frames.ts";
 import { summarizeVideo } from "../src/youtube/summarizer.ts";
@@ -192,13 +203,61 @@ const huginn = Bun.serve({
   },
 });
 
-const config = { ...loadConfig(), knowledgeApiUrl: `http://127.0.0.1:${huginn.port}` };
+const loaded = loadConfig();
+
+/**
+ * The trace half of the evidence, or none at all — never four
+ * `Failed to write span: Database not initialized` lines and no trace.
+ *
+ * `runCaptureOneShot` opens a `capture:youtube` trace unconditionally and the
+ * tracer writes through the shared client, which nothing here used to
+ * initialize. So `initDb` runs — `loadConfig` has already made `DATABASE_URL`
+ * required, so there is no "unset" case to branch on — and the run then appears
+ * on `/traces` and `/agents` beside a live capture, which is the point.
+ *
+ * What IS worth branching on is a database that is not answering (`db:up` not
+ * run), which reproduces the same shape one layer down: four failed span writes
+ * per run and nothing to read afterwards. One bounded probe settles it, and
+ * tracing is turned off for the run with a single line instead.
+ */
+async function tracingUsable(): Promise<boolean> {
+  if (!loaded.tracingEnabled) return false;
+  initDb(loaded);
+  try {
+    await Promise.race([
+      getDb()`SELECT 1`,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), 5000)),
+    ]);
+    return true;
+  } catch (err) {
+    console.log(
+      `replay-youtube: no trace this run — the database is not answering ` +
+        `(${err instanceof Error ? err.message : String(err)}). Run \`bun run db:up\` for the trace half.`,
+    );
+    return false;
+  }
+}
+
+const tracingEnabled = await tracingUsable();
+// The `Config` field is NOT what the tracer reads. `Tracer` calls its own
+// `isTracingEnabled()`, which re-reads the ENVIRONMENT (once, then caches on
+// the first `new Tracer`), so a `tracingEnabled: false` on the object handed to
+// `summarizeVideo` suppresses nothing — measured: four `Failed to write span`
+// lines with the field already false. This runs before any capture, i.e. before
+// the first Tracer exists.
+if (!tracingEnabled) process.env.TRACING_ENABLED = "false";
+
+const config = {
+  ...loaded,
+  tracingEnabled,
+  knowledgeApiUrl: `http://127.0.0.1:${huginn.port}`,
+};
 const botConfig = resolveSummarizerBot(discoverAllBots());
 if (!botConfig) die("No bots discovered — nothing to run the capture on");
 
-const presets = resolveCapturePresets(botConfig.prompts, botConfig.connector, {
-  requireThinkingControl: true,
-});
+// The ROUTE's offer set, not a second spelling of it: a harness that resolved
+// its own kinds could run one the route would 400.
+const presets = youtubeCaptureKinds(botConfig);
 const preset = findCapturePreset(presets, args.kind);
 if (!preset) {
   die(`Unknown kind "${args.kind}" on bot ${botConfig.name} — offered: ${presets.map((p) => p.id).join(", ")}`);
@@ -227,10 +286,10 @@ for (let run = 1; run <= args.runs; run++) {
   await summarizeVideo(jobId, args.videoId, args.title, config, botConfig, {
     frames: args.frames,
     preset,
-    // Never a wiki proposal: this ingests into a stub, so a draft would be a
-    // gate item about a document that does not exist.
-    sourceDraft: false,
     deps: {
+      // Never a wiki proposal: this ingests into a stub, so a draft would be a
+      // gate item about a document that does not exist.
+      sourceDraft: false,
       // The probe seam answers from the local file — no yt-dlp, no network.
       probeVideoInfo: async (): Promise<YtDlpInfo> => ({
         id: args.videoId,

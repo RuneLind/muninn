@@ -18,7 +18,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   FALLBACK_CAPTURE_OPTIONS,
   FALLBACK_KIND_ID,
@@ -26,9 +26,10 @@ import {
   parseCaptureOptions,
   pickFrames,
   pickKind,
+  restoredKindNote,
   type CaptureOptions,
 } from "./extension-options-rules.ts";
-import { EXTENSION_RULES_OUTPUT, buildExtensionRules } from "../../scripts/build-extension.ts";
+import { EXTENSION_RULES_OUTPUT, buildExtensionRules } from "./extension-build.ts";
 
 const SERVER_PAYLOAD = {
   kinds: [
@@ -136,6 +137,40 @@ describe("pickKind — a remembered choice is re-validated against the CURRENT o
   });
 });
 
+describe("restoredKindNote — the fallback is SAID, not silent", () => {
+  const options = parseCaptureOptions(SERVER_PAYLOAD) as CaptureOptions;
+  const narrowed = parseCaptureOptions({
+    kinds: [{ id: "standard", label: "Standard" }],
+    default_kind: "standard",
+  }) as CaptureOptions;
+
+  test("a remembered kind this instance dropped is named, with what runs instead", () => {
+    const note = restoredKindNote("deep", pickKind("deep", narrowed), narrowed);
+    expect(note).toContain("deep");
+    expect(note).toContain("Standard");
+  });
+
+  test("nothing to say when the remembered kind survived", () => {
+    expect(restoredKindNote("deep", pickKind("deep", options), options)).toBeNull();
+    expect(restoredKindNote(" deep ", pickKind(" deep ", options), options)).toBeNull();
+  });
+
+  test("an install that never stored a kind is the default, not a fallback", () => {
+    for (const stored of [undefined, null, "", "   ", 7, {}, true]) {
+      expect(restoredKindNote(stored, pickKind(stored, narrowed), narrowed)).toBeNull();
+    }
+  });
+
+  test("silent under the unreachable fallback — that message is the explanation", () => {
+    // `OPTIONS_UNREACHABLE_MESSAGE` already says the picker is Standard-only
+    // because Muninn could not be read; a second line about the remembered kind
+    // would blame the wrong thing.
+    expect(
+      restoredKindNote("deep", pickKind("deep", FALLBACK_CAPTURE_OPTIONS), FALLBACK_CAPTURE_OPTIONS),
+    ).toBeNull();
+  });
+});
+
 describe("pickFrames", () => {
   const options = parseCaptureOptions(SERVER_PAYLOAD) as CaptureOptions;
   const noFrames = parseCaptureOptions({ ...SERVER_PAYLOAD, frames: { supported: false } }) as CaptureOptions;
@@ -189,6 +224,34 @@ describe("the checked-in extension copy", () => {
       const checkedIn = await Bun.file(EXTENSION_RULES_OUTPUT).text();
       expect(fresh).toBe(checkedIn);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the emitted bytes do not depend on the process's working directory", async () => {
+    // The gate above compares a build run from wherever `bun test` was invoked
+    // against a copy committed by a build run from the repo root. Bun writes one
+    // `// <path>` module banner per bundled module, relative to `process.cwd()`
+    // — so without normalization the same source emits three different files
+    // from the repo root, from `src/`, and from `/tmp`, and the gate's remedy
+    // ("a bun bump changed the codegen") names the wrong cause.
+    const dir = mkdtempSync(join(tmpdir(), "muninn-ext-cwd-"));
+    const originalCwd = process.cwd();
+    // Not `process.cwd()`: the point of the case is that the answer must not
+    // depend on it, so the reference build is taken from a directory this file
+    // can name — the repo root two levels above it.
+    const repoRoot = resolve(import.meta.dir, "../..");
+    try {
+      process.chdir(repoRoot);
+      const fromRepoRoot = await buildExtensionRules(join(dir, "from-repo-root.js"));
+      const elsewhere: string[] = [];
+      for (const cwd of [join(repoRoot, "src"), tmpdir()]) {
+        process.chdir(cwd);
+        elsewhere.push(await buildExtensionRules(join(dir, `from-${elsewhere.length}.js`)));
+      }
+      for (const text of elsewhere) expect(text).toBe(fromRepoRoot);
+    } finally {
+      process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
   });

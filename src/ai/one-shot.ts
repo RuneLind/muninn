@@ -76,12 +76,11 @@ export interface OneShotOptions {
 
 /**
  * The connector-capability table lives in the dependency-free
- * `connector-capabilities.ts` leaf now (the capture-kind resolver narrows the
- * kinds a bot offers by it and must stay IO-free); both names are re-exported
- * here because every existing consumer imports them by this path.
+ * `connector-capabilities.ts` leaf (the capture-kind resolver narrows the kinds
+ * a bot offers by it and must stay IO-free). Import the table's own names from
+ * THERE; this module keeps only the bot-config convenience below, which is
+ * what a caller holding a `BotConfig` wants.
  */
-export type { ConnectorCapabilities } from "./connector-capabilities.ts";
-export { capabilitiesForConnectorType } from "./connector-capabilities.ts";
 import type { ConnectorCapabilities } from "./connector-capabilities.ts";
 import { capabilitiesForConnectorType } from "./connector-capabilities.ts";
 

@@ -72,7 +72,7 @@ mock.module("../../tiktok/summarizer.ts", () => ({
 let youtubeSummarizeCalls = 0;
 /** The options the LAST started YouTube capture was handed — `frames` and the
  *  resolved summary KIND ride on them. */
-let lastYouTubeOpts: { frames?: boolean; preset?: { id: string } } | null = null;
+let lastYouTubeOpts: { frames?: boolean; preset?: { id: string; instruction?: string } } | null = null;
 /**
  * Held open by the in-flight cases: the route's claim lives exactly as long as
  * this promise, so a case that wants a SECOND POST to land while a capture is
@@ -916,10 +916,8 @@ describe("YouTube: the summary KIND (`/api/youtube/options` + `kind`)", () => {
   });
 
   test("a Copilot summarizer bot is offered NO deep here, while Vimeo's resolver still offers it", async () => {
-    // `deep` sells "opus, full thinking". Copilot can NAME the opus model, but
-    // `supportsThinkingBudget` is false there and `runCaptureOneShot` forces the
-    // budget to null — so the thinking half cannot be honoured, and this
-    // vertical drops the kind rather than stamping `deep` on a run that is not.
+    // Why this vertical narrows and Vimeo does not: the `requireThinkingControl`
+    // docblock in `src/summaries/presets.ts`.
     summarizerBot = copilotBot;
     const body = (await (await options(ytApp())).json()) as {
       kinds: { id: string }[];
@@ -957,6 +955,50 @@ describe("YouTube: the summary KIND (`/api/youtube/options` + `kind`)", () => {
     });
     expect(res.status).toBe(200);
     expect(lastYouTubeOpts?.preset?.id).toBe("deep");
+  });
+
+  test("a per-bot captureSummary.<id>.md kind is ACCEPTED and rides on the capture", async () => {
+    // The offer set and the 400 come from one function, so a kind the options
+    // endpoint lists must be one the POST takes — otherwise the picker offers a
+    // click that fails. Only the refusal half was pinned before.
+    summarizerBot = botWithVariant;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      kind: "should-i-watch",
+    });
+
+    expect(res.status).toBe(200);
+    expect(lastYouTubeOpts?.preset?.id).toBe("should-i-watch");
+    expect(lastYouTubeOpts?.preset?.instruction).toBe("- five lines");
+  });
+
+  test("a present-but-blank kind is 400 bad_kind, not a silent standard capture", async () => {
+    // `""` and `"   "` are what a client sends for "the picker had nothing" —
+    // and `findCapturePreset` reads blank as ABSENT, i.e. standard. Absent is a
+    // caller that never picked (an older extension, a curl); a blank string is
+    // a caller that meant to pick and sent nothing, and the reader would read
+    // the result as the kind they picked. Refused, like every other present
+    // value this instance does not offer.
+    for (const kind of ["", "   "]) {
+      let listingReads = 0;
+      knowledgeApiImpl = async () => { listingReads++; return { documents: [] }; };
+      const before = ytState.getRecentJobs().length;
+
+      const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, kind });
+
+      expect(res.status).toBe(400);
+      expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "bad_kind" });
+      expect(listingReads).toBe(0);
+      expect(ytState.getRecentJobs().length).toBe(before);
+      expect(youtubeSummarizeCalls).toBe(0);
+    }
+
+    // …while an ABSENT kind is still the default, and still runs.
+    const absent = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    expect(absent.status).toBe(200);
+    expect(lastYouTubeOpts?.preset?.id).toBe("standard");
   });
 
   test("a non-string kind is 400 bad_kind, before the listing and before a job", async () => {

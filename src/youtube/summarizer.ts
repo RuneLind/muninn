@@ -15,7 +15,6 @@ import {
   windowedTranscriptRider,
 } from "../summaries/summarizer-shared.ts";
 import {
-  SHIPPED_CAPTURE_PRESETS,
   captureBotConfigFor,
   captureThinkingFor,
   type CapturePreset,
@@ -66,16 +65,6 @@ const SUMMARIZE_INTRO =
   "You are a video content analyst. Summarize the following YouTube video transcript.";
 
 /**
- * The kind a capture runs as when the caller names none.
- *
- * `standard`'s instruction IS `SUMMARY_STRUCTURE_BULLETS`, which is
- * `buildSummarySystemPrompt`'s own default, so a caller that passes no preset
- * gets the byte-identical prompt this vertical built as a module constant
- * before kinds existed (pinned in `src/summaries/presets.test.ts`).
- */
-const DEFAULT_PRESET: CapturePreset = SHIPPED_CAPTURE_PRESETS[0]!;
-
-/**
  * The rider added when huginn ANSWERED with a windowed transcript. The sentence
  * is the seam's, shared with the Vimeo prompt (which says "talk"): a slide can
  * only be placed beside its passage if the model knows the headings are
@@ -124,6 +113,18 @@ export interface YouTubeSummarizerDeps {
   }) => Promise<CaptureFrame[]>;
   /** Where quoted frames are kept (test seam); default `framesRootDir()`. */
   framesRoot?: string;
+  /**
+   * Fire the per-article source-page drafter on a successful capture. Default
+   * ON — the route never passes it.
+   *
+   * It sits in `deps` rather than beside `frames`/`preset` because it is not a
+   * property of the capture: `false` is the replay harness
+   * (`scripts/replay-youtube.ts`), which re-runs real captures against a stub
+   * huginn to compare kinds, where a draft proposal per run would be N
+   * proposals in the summarizer bot's wiki gate about a document that was never
+   * ingested.
+   */
+  sourceDraft?: boolean;
 }
 
 const REAL_DEPS: YouTubeSummarizerDeps = {
@@ -146,24 +147,20 @@ export interface SummarizeVideoOptions {
   /**
    * The summary KIND this capture writes, resolved by the ROUTE against the
    * summarizer bot's preset set (`findCapturePreset` — an unknown id is a 400
-   * there, so a job that gets here carries a real preset). Absent ⇒
-   * {@link DEFAULT_PRESET}, i.e. today's standard capture.
+   * there, so a job that gets here carries a real preset).
+   *
+   * REQUIRED, the Vimeo precedent: a default here would be `standard` picked
+   * positionally out of `SHIPPED_CAPTURE_PRESETS`, so reordering that array
+   * would silently change what a caller who named no kind gets. Every caller —
+   * the route, the replay harness, the tests — resolves a preset already.
    *
    * It decides three things: the structure bullets in the system prompt, the
    * model the call runs on (`captureBotConfigFor`) and whether the 8k capture
    * thinking cap applies (`captureThinkingFor`).
    */
-  preset?: CapturePreset;
+  preset: CapturePreset;
   /** Told when huginn has stored a document, BEFORE `completeJob`. */
   onIngested?: YouTubeIngestedHook;
-  /**
-   * Fire the per-article source-page drafter on a successful capture. Default
-   * ON — the route never passes this. `false` is the replay harness
-   * (`scripts/replay-youtube.ts`), which re-runs real captures against a stub
-   * huginn to compare kinds: a draft proposal per run would be N proposals in
-   * the summarizer bot's wiki gate about a document that was never ingested.
-   */
-  sourceDraft?: boolean;
   /** Test seams; production passes none. */
   deps?: Partial<YouTubeSummarizerDeps>;
 }
@@ -196,7 +193,7 @@ export async function summarizeVideo(
   title: string,
   config: Config,
   botConfig: BotConfig,
-  opts: SummarizeVideoOptions = {},
+  opts: SummarizeVideoOptions,
 ): Promise<void> {
   const resolved: YouTubeSummarizerDeps = { ...REAL_DEPS, ...opts.deps };
   // Created only on the frames path, removed in the `finally` whatever
@@ -207,7 +204,7 @@ export async function summarizeVideo(
   // would otherwise put Y's address on X's document and make every later
   // capture of Y a `duplicate` of X (the same rule the yt-dlp target follows).
   const videoUrl = youtubeWatchUrl(videoId);
-  const preset = opts.preset ?? DEFAULT_PRESET;
+  const preset = opts.preset;
   let frames: CaptureFrame[] = [];
 
   try {
@@ -562,8 +559,9 @@ Video URL: ${videoUrl}`;
     //    fall back to videoId only when the ingest returned no file_path (older
     //    huginn / failed ingest — in which case the doc isn't listed anyway, so
     //    run-now can't draft a colliding duplicate).
-    //    Skipped only by the replay harness, which ingests into a stub.
-    if (opts.sourceDraft === false) return;
+    //    Skipped only by the replay harness (`deps.sourceDraft`), which
+    //    ingests into a stub.
+    if (opts.deps?.sourceDraft === false) return;
     triggerSourceDraftFromCapture(botConfig, {
       collection: "youtube-summaries",
       docId: ingestedDocId ?? videoId,
