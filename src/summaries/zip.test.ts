@@ -49,6 +49,13 @@ describe("buildStoredZip", () => {
     }
   });
 
+  test("a pre-1980 mtime is clamped to the ZIP epoch, whole date and all", () => {
+    const zip = buildStoredZip([{ name: "a", data: new Uint8Array([1]), mtime: new Date(1979, 11, 31, 23, 59, 59) }]);
+    const dv = new DataView(zip.buffer);
+    expect(dv.getUint16(10, true)).toBe(0); // time
+    expect(dv.getUint16(12, true)).toBe((0 << 9) | (1 << 5) | 1); // 1980-01-01
+  });
+
   test("a non-ASCII entry name is refused, never written", () => {
     expect(() => buildStoredZip([{ name: "frames/tøm.jpg", data: new Uint8Array([1]) }])).toThrow(/ASCII/);
   });

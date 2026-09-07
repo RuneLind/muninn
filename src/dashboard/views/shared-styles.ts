@@ -178,8 +178,7 @@ const LIGHT_TOKENS = `
  * export's standalone HTML) inlines so it reads in the same colours.
  */
 export function themeTokenStyles(): string {
-  return `
-    :root {${DARK_TOKENS}    }
+  return `    :root {${DARK_TOKENS}    }
 
     /* System follow: honor the OS preference when no explicit override is set. */
     @media (prefers-color-scheme: light) {
@@ -189,8 +188,7 @@ export function themeTokenStyles(): string {
     /* Explicit overrides (set by the theme toggle). html[data-theme] has higher
        specificity than the media-query :root, so it wins regardless of OS setting. */
     html[data-theme="dark"] {${DARK_TOKENS}    }
-    html[data-theme="light"] {${LIGHT_TOKENS}    }
-`;
+    html[data-theme="light"] {${LIGHT_TOKENS}    }`;
 }
 
 /** Shared CSS for all dashboard pages — base reset, header, and nav */

@@ -16,17 +16,26 @@
  * relative path: the reader sees the alt text, and the rest of the export is
  * unaffected — a slide is never a reason to refuse the page.
  *
- * Unknown source / empty docId ⇒ 400; huginn has no such document ⇒ 404;
- * huginn down ⇒ 503 — all JSON, all before any bytes of the archive.
+ * Unknown source / empty or dot-segment docId ⇒ 400; huginn has no such
+ * document ⇒ 404; huginn unreachable ⇒ 503, huginn erroring ⇒ 502 — all JSON,
+ * all before any bytes of the archive.
+ *
+ * Three guards the frame half carries, each measured before it existed: only
+ * the EXPORTING source's frame quotes count (`frameSourceByName(source.id)`),
+ * the file is read only when its REAL path is under `<root>/<source>/` (the
+ * `frames-routes.ts` rule — a symlink planted under the root served an outside
+ * file into the archive), and a `..` doc id is refused before the fetch
+ * (`isSafeDocId`).
  */
 
 import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import { join, sep as pathSep } from "node:path";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
-import { getSummarySource } from "../../summaries/sources.ts";
+import { getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
-import { frameDirFor, framesRootDir } from "../../summaries/frames.ts";
+import { frameDirFor, frameSourceByName, framesRootDir } from "../../summaries/frames.ts";
 import {
   EXPORT_FRAMES_DIR,
   EXPORT_PAGE_NAME,
@@ -36,6 +45,7 @@ import {
   rewriteFrameUrls,
 } from "../../summaries/export.ts";
 import { buildStoredZip, type ZipEntry } from "../../summaries/zip.ts";
+import { summaryDocTitle } from "./summaries-share.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "summaries-export");
@@ -58,6 +68,12 @@ export interface SummariesExportDeps {
 
 const DOC_FETCH_TIMEOUT_MS = 10_000;
 
+/**
+ * NB `fetchKnowledgeApi` never returns `null` — a missing document is a thrown
+ * `KnowledgeApiError` with `upstreamStatus` 404 — so the mapping below is what
+ * makes the `null` branch real; the share adapter's twin has the same signature
+ * and a dead `null` branch, which is why the two are not one function.
+ */
 export function defaultSummariesExportDeps(knowledgeApiUrl: string): SummariesExportDeps {
   return {
     fetchDoc: async (collection, docId) => {
@@ -74,14 +90,6 @@ export function defaultSummariesExportDeps(knowledgeApiUrl: string): SummariesEx
       }
     },
   };
-}
-
-/** The share adapter's title rule: huginn's own title, else the id's basename. */
-function docTitle(docId: string, doc: SummaryExportDoc): string {
-  const fromDoc = doc.title?.trim();
-  if (fromDoc) return fromDoc;
-  const base = docId.split("/").pop() ?? docId;
-  return base.replace(/\.(md|mdx|txt)$/i, "") || docId;
 }
 
 /**
@@ -107,6 +115,7 @@ export function registerSummariesExportRoutes(
     const source = getSummarySource(sourceId);
     if (!source) return c.json({ error: `unknown summary source "${sourceId}"` }, 400);
     if (!docId) return c.json({ error: "docId is required" }, 400);
+    if (!isSafeDocId(docId)) return c.json({ error: "docId is not a document path" }, 400);
 
     let doc: SummaryExportDoc | null;
     try {
@@ -120,14 +129,24 @@ export function registerSummariesExportRoutes(
 
     let markdown = prepareSummaryDocBody(doc.text ?? "");
     const entries: ZipEntry[] = [];
-    const ref = findFrameReference(markdown);
+    // A vertical with no frame source of its own (article, x-article, …) gets
+    // no frames at all, whatever its markdown quotes.
+    const frameSource = frameSourceByName(source.id);
+    const ref = frameSource ? findFrameReference(markdown, frameSource) : null;
     if (ref) {
       const rewritten = rewriteFrameUrls(markdown, ref);
       markdown = rewritten.markdown;
       const dir = frameDirFor(ref.source, ref.id, framesRoot);
+      // Containment on the REAL path, as `frames-routes.ts` does: the charset
+      // gates make the spelling `<root>/<source>/<id>/<digits>.jpg`, but a
+      // symlink at `<id>` points wherever it likes.
+      const baseReal = await realpath(join(framesRoot, ref.source.name)).catch(() => null);
       for (const sec of rewritten.seconds) {
         try {
-          const data = await readFile(`${dir}/${sec}.jpg`);
+          const file = `${dir}/${sec}.jpg`;
+          const fileReal = await realpath(file);
+          if (baseReal === null || !fileReal.startsWith(baseReal + pathSep)) throw new Error("outside the frames root");
+          const data = await readFile(fileReal);
           entries.push({ name: `${EXPORT_FRAMES_DIR}/${sec}.jpg`, data: new Uint8Array(data) });
         } catch {
           log.warn("Export of {docId} quotes frame {sec} of {source}/{id}, which is not on this machine", {
@@ -140,7 +159,7 @@ export function registerSummariesExportRoutes(
       }
     }
 
-    const title = docTitle(docId, doc);
+    const title = summaryDocTitle(docId, doc);
     const html = renderExportPage({
       title,
       url: doc.url,

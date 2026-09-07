@@ -122,9 +122,10 @@ export function docPanelStyles(animationName = "slideIn"): string {
        button inherits neither the page font nor a transparent background. */
     button.doc-panel-followup { background: none; font-family: inherit; cursor: pointer; }
     /* …and it is HIDDEN for a document no share route can serve (an unregistered
-       source). Spelled out rather than left to the UA rule, because this button
-       sits in a flex row where an author display rule would silently win. */
-    button.doc-panel-followup[hidden] { display: none; }
+       source). Spelled out rather than left to the UA rule, because this control
+       sits in a flex row where an author display rule would silently win. Class-
+       scoped, not button-scoped: the ⬇ Export control is an <a> in the same row. */
+    .doc-panel-followup[hidden] { display: none; }
     /* The opt-in 🗑 Delete action: same slot, same shape, but it destroys — so it
        reads as the danger colour on hover and never as an accent link. */
     button.doc-panel-danger:hover { border-color: var(--status-error); color: var(--status-error); }

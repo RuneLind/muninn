@@ -31,8 +31,7 @@ import { Marked, type Tokens } from "marked";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { markdownContentStyles } from "../dashboard/views/components/doc-panel.ts";
 import { themeTokenStyles } from "../dashboard/views/shared-styles.ts";
-import { FRAME_SOURCES, isFrameId, type FrameSource } from "./frames.ts";
-import { extractVimeoVideoId } from "../vimeo/url.ts";
+import { FRAME_SOURCES, frameQuoteRegExp, isFrameId, type FrameSource } from "./frames.ts";
 
 /** The folder the page's `<img>`s point into, beside `index.html` in the archive. */
 export const EXPORT_FRAMES_DIR = "frames";
@@ -47,50 +46,53 @@ export interface FrameReference {
 }
 
 /**
- * The first served frame address in the markdown — `/api/frames/<source>/<id>/`
- * or a source's legacy prefix — whose id passes that source's charset gate.
- * A summary quotes ONE video's frames, so the first valid hit is the
- * reference; `null` when the markdown quotes none.
+ * The first served frame address in the markdown's PROSE — `/api/frames/
+ * <source>/<id>/` or the source's legacy prefix, {@link frameQuoteRegExp} —
+ * whose id passes that source's charset gate. With `source` given, only that
+ * source's quotes count: the route passes the exporting vertical's own frame
+ * source, so an `article` capture that pastes a Vimeo frame path cannot pull
+ * another capture's slides into its archive. A quote inside fenced code is
+ * source text, not a reference. `null` when nothing qualifies.
  */
-export function findFrameReference(markdown: string): FrameReference | null {
-  for (const source of FRAME_SOURCES) {
-    const prefixes = [`/api/frames/${source.name}/`, ...(source.legacyUrlPrefix ? [source.legacyUrlPrefix] : [])];
-    for (const prefix of prefixes) {
-      const re = new RegExp(`\\(${escapeRegExp(prefix)}([^/\\s)]+)/\\d{1,6}\\.jpg\\)`, "g");
+export function findFrameReference(markdown: string, source?: FrameSource): FrameReference | null {
+  const sources = source ? [source] : FRAME_SOURCES;
+  let found: FrameReference | null = null;
+  mapProseLines(markdown, (line) => {
+    if (found) return line;
+    for (const src of sources) {
+      const re = frameQuoteRegExp(src, null);
       let m: RegExpExecArray | null;
-      while ((m = re.exec(markdown)) !== null) {
-        const id = m[1]!;
-        if (isFrameId(source, id)) return { source, id };
+      while ((m = re.exec(line)) !== null) {
+        if (isFrameId(src, m[1]!)) {
+          found = { source: src, id: m[1]! };
+          return line;
+        }
       }
     }
-  }
-  return null;
+    return line;
+  });
+  return found;
 }
 
 /**
- * Every served address of THIS reference's frames → `frames/<sec>.jpg`. Only
- * canonical seconds are rewritten (`047.jpg` is not an address the route
- * serves, so it is not one the folder holds either); returns the rewritten
- * markdown and the seconds it now points at, ascending and deduped.
+ * Every served address of THIS reference's frames, outside fenced code →
+ * `frames/<sec>.jpg` (a markdown title after the path is kept). Only canonical
+ * seconds are rewritten (`047.jpg` is not an address the route serves, so it
+ * is not one the folder holds either); returns the rewritten markdown and the
+ * seconds it now points at, ascending and deduped.
  */
 export function rewriteFrameUrls(
   markdown: string,
   ref: FrameReference,
 ): { markdown: string; seconds: number[] } {
-  const prefixes = [
-    `/api/frames/${ref.source.name}/`,
-    ...(ref.source.legacyUrlPrefix ? [ref.source.legacyUrlPrefix] : []),
-  ];
-  const re = new RegExp(
-    `\\((?:${prefixes.map(escapeRegExp).join("|")})${escapeRegExp(ref.id)}/(\\d{1,6})\\.jpg\\)`,
-    "g",
-  );
   const seconds = new Set<number>();
-  const out = markdown.replace(re, (whole, sec: string) => {
-    if (String(Number(sec)) !== sec) return whole;
-    seconds.add(Number(sec));
-    return `(${EXPORT_FRAMES_DIR}/${sec}.jpg)`;
-  });
+  const out = mapProseLines(markdown, (line) =>
+    line.replace(frameQuoteRegExp(ref.source, ref.id), (whole: string, _id: string, sec: string) => {
+      if (String(Number(sec)) !== sec) return whole;
+      seconds.add(Number(sec));
+      return whole.replace(/^\([^\s)]+/, `(${EXPORT_FRAMES_DIR}/${sec}.jpg`);
+    }),
+  );
   return { markdown: out, seconds: [...seconds].sort((a, b) => a - b) };
 }
 
@@ -123,8 +125,20 @@ function mapProseLines(markdown: string, fn: (line: string, i: number) => string
  * label → `[\[HH:MM:SS\]](https://vimeo.com/<id>#t=<sec>s)`. No id ⇒ untouched.
  * The port of the article view's transform, byte-for-byte in its output.
  */
+/**
+ * The article view's own id rule (`vimeoVideoIdFromUrl` in
+ * `sum-article-library.ts`), ported verbatim rather than `extractVimeoVideoId`:
+ * the two disagree on a `/channels/<c>/<id>` URL and on a leading-zero id, and
+ * the parity this module promises is with the page the reader compared the
+ * export against.
+ */
+function vimeoVideoIdFromUrl(url: string | undefined): string | null {
+  const m = /^https?:\/\/(?:www\.)?(?:player\.)?vimeo\.com\/(?:video\/)?(\d+)(?:[\/?#]|$)/i.exec(String(url ?? "").trim());
+  return m ? m[1]! : null;
+}
+
 export function linkVimeoTimestamps(markdown: string, videoUrl: string | undefined): string {
-  const id = videoUrl ? extractVimeoVideoId(videoUrl)?.id ?? null : null;
+  const id = vimeoVideoIdFromUrl(videoUrl);
   if (!id) return markdown;
   const base = `https://vimeo.com/${id}#t=`;
   return mapProseLines(markdown, (line) =>
@@ -151,10 +165,29 @@ export function splitTranscript(markdown: string): { body: string; transcript: s
 }
 
 /**
+ * A link target the exported page may carry: `http(s)`, `mailto`, or no scheme
+ * at all (a fragment, a relative path). The page leaves this machine and opens
+ * from `file://`, where a `javascript:`/`data:`/`vbscript:` href is script
+ * execution on the reader's disk — measured through a real click. marked has
+ * no sanitizer of its own; the source is model output over third-party
+ * material.
+ */
+export function isSafeLinkHref(href: string): boolean {
+  const scheme = /^\s*([a-z][a-z0-9+.-]*):/i.exec(href)?.[1]?.toLowerCase();
+  return scheme === undefined || scheme === "http" || scheme === "https" || scheme === "mailto";
+}
+
+/** The only image the page may load: a packaged frame. Anything else — a
+ *  remote pixel, a served address the rewrite did not claim — would phone home
+ *  or break, from a folder the reader believes is offline. */
+const PACKAGED_FRAME_SRC_RE = new RegExp(`^${EXPORT_FRAMES_DIR}/\\d{1,6}\\.jpg$`);
+
+/**
  * The renderer: marked, with raw HTML in the source escaped (the article view's
- * `renderer.html` override — the source is model output, not a page author) and
- * every absolute link opening in a new tab, since a `file://` page navigating
- * itself to vimeo.com has no way back.
+ * `renderer.html` override — the source is model output, not a page author),
+ * unsafe link schemes reduced to their text, images limited to packaged
+ * frames, and every absolute link opening in a new tab, since a `file://`
+ * page navigating itself to vimeo.com has no way back.
  */
 const exportMarked = new Marked({
   renderer: {
@@ -164,9 +197,15 @@ const exportMarked = new Marked({
     link(token: Tokens.Link) {
       const text = this.parser.parseInline(token.tokens);
       const href = token.href;
+      if (!isSafeLinkHref(href)) return text;
       const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
       const external = /^https?:\/\//i.test(href) ? ` target="_blank" rel="noopener"` : "";
       return `<a href="${escapeHtml(href)}"${title}${external}>${text}</a>`;
+    },
+    image(token: Tokens.Image) {
+      if (!PACKAGED_FRAME_SRC_RE.test(token.href)) return escapeHtml(token.text);
+      const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+      return `<img src="${escapeHtml(token.href)}" alt="${escapeHtml(token.text)}"${title}>`;
     },
   },
 });
@@ -195,15 +234,16 @@ function metaString(meta: Record<string, unknown> | undefined, key: string): str
 }
 
 /** The archive's base name: the title with the characters no filesystem takes
- *  removed, whitespace collapsed, capped, and never empty. */
+ *  removed, whitespace collapsed, capped at a word boundary, and never empty. */
 export function exportBaseName(title: string): string {
   const cleaned = title
     .replace(/[\\\/:*?"<>|]+/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80)
     .trim();
-  return cleaned || "summary";
+  if (cleaned.length <= 80) return cleaned || "summary";
+  const cut = cleaned.slice(0, 80);
+  const at = cut.lastIndexOf(" ");
+  return (at > 0 ? cut.slice(0, at) : cut).trim() || "summary";
 }
 
 /** One self-contained HTML document: theme tokens, the article styles, the
@@ -221,7 +261,7 @@ export function renderExportPage(input: ExportPageInput): string {
   if (when) facts.push(escapeHtml(when.slice(0, 10)));
   const kind = metaString(meta, "summary_kind");
   if (kind) facts.push(`${escapeHtml(kind)} summary`);
-  if (input.url) {
+  if (input.url && /^https?:\/\//i.test(input.url)) {
     facts.push(
       `<a href="${escapeHtml(input.url)}" target="_blank" rel="noopener">${escapeHtml(input.linkLabel)}</a>`,
     );
@@ -281,8 +321,4 @@ ${
 </body>
 </html>
 `;
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

@@ -6,7 +6,7 @@
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerSummariesExportRoutes, contentDisposition, type SummaryExportDoc } from "./summaries-export.ts";
@@ -44,6 +44,13 @@ beforeAll(() => {
       "and ![missing](/api/vimeo/frames/42/999.jpg) at [00:03:07]\n\n## Transcript\n### [00:00:00]\nhi",
   });
   docs.set("plain.md", { text: "just text, no frames" });
+  // A planted symlink under the root: <root>/vimeo/43 → a directory outside it.
+  const outside = join(root, "..", `muninn-export-outside-${process.pid}`);
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "7.jpg"), new TextEncoder().encode("SECRET-NOT-A-FRAME"));
+  symlinkSync(outside, join(root, "vimeo", "43"));
+  docs.set("linked.md", { text: "![s](/api/frames/vimeo/43/7.jpg)" });
+  docs.set("other-source.md", { text: "![s](/api/frames/vimeo/42/187.jpg)" });
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -92,8 +99,34 @@ describe("GET /api/summaries/export", () => {
     }
   });
 
+  test("a frame reached through a symlink out of the root is not packaged", async () => {
+    const res = await app().request("/api/summaries/export?source=vimeo&docId=linked.md");
+    expect(res.status).toBe(200);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect(new TextDecoder().decode(bytes)).not.toContain("SECRET-NOT-A-FRAME");
+  });
+
+  test("only the exporting source's frames are packaged", async () => {
+    const res = await app().request("/api/summaries/export?source=article&docId=other-source.md");
+    expect(res.status).toBe(200);
+    const dir = mkdtempSync(join(tmpdir(), "muninn-export-out-"));
+    try {
+      const path = join(dir, "x.zip");
+      writeFileSync(path, new Uint8Array(await res.arrayBuffer()));
+      expect((await Bun.$`unzip -Z1 ${path}`.text()).trim()).toBe("index.html");
+      expect(await Bun.$`unzip -p ${path} index.html`.text()).not.toContain("/api/frames/");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("refusals are JSON and precede any bytes", async () => {
     const a = app();
+    for (const bad of ["../mimir/x.md", "a/./b.md", "a//b.md", "..", "a/..", "./x"]) {
+      const r = await a.request("/api/summaries/export?source=vimeo&docId=" + encodeURIComponent(bad));
+      expect([bad, r.status]).toEqual([bad, 400]);
+    }
+    expect(calls.some(([, d]) => d.includes(".."))).toBe(false);
     expect((await a.request("/api/summaries/export?source=bogus&docId=x")).status).toBe(400);
     expect((await a.request("/api/summaries/export?source=vimeo&docId=%20")).status).toBe(400);
     expect((await a.request("/api/summaries/export?source=vimeo&docId=nope.md")).status).toBe(404);

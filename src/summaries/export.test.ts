@@ -45,6 +45,18 @@ describe("findFrameReference", () => {
     expect(yt?.source).toBe(YOUTUBE_FRAME_SOURCE);
     expect(yt?.id).toBe("dQw4w9WgXcQ");
   });
+  test("only the exporting source's frames count when a source is given", () => {
+    const md = "![a](/api/frames/youtube/dQw4w9WgXcQ/60.jpg) ![b](/api/frames/vimeo/111/60.jpg)";
+    expect(findFrameReference(md, VIMEO_FRAME_SOURCE)?.id).toBe("111");
+    expect(findFrameReference(md, YOUTUBE_FRAME_SOURCE)?.id).toBe("dQw4w9WgXcQ");
+    expect(findFrameReference("![b](/api/frames/vimeo/111/60.jpg)", YOUTUBE_FRAME_SOURCE)).toBeNull();
+  });
+  test("a quote inside fenced code is source text, not a reference", () => {
+    expect(findFrameReference("```\n![a](/api/frames/vimeo/123/60.jpg)\n```")).toBeNull();
+  });
+  test("an image carrying a markdown title is still a reference", () => {
+    expect(findFrameReference('![a](/api/frames/vimeo/123/60.jpg "Slide")')?.id).toBe("123");
+  });
   test("an id outside the charset is not a reference; no quotes ⇒ null", () => {
     expect(findFrameReference("![s](/api/frames/vimeo/../etc/7.jpg)")).toBeNull();
     expect(findFrameReference("![s](/api/frames/youtube/short/7.jpg)")).toBeNull();
@@ -59,6 +71,12 @@ describe("rewriteFrameUrls", () => {
     const out = rewriteFrameUrls(md, ref);
     expect(out.markdown).toBe("a ![x](frames/670.jpg) b ![y](frames/187.jpg) c ![z](frames/670.jpg)");
     expect(out.seconds).toEqual([187, 670]);
+  });
+  test("a quote inside fenced code keeps its source text; a titled image is rewritten", () => {
+    const md = '```\n![a](/api/frames/vimeo/42/60.jpg)\n```\n![b](/api/frames/vimeo/42/61.jpg "Slide")';
+    const out = rewriteFrameUrls(md, ref);
+    expect(out.markdown).toBe('```\n![a](/api/frames/vimeo/42/60.jpg)\n```\n![b](frames/61.jpg "Slide")');
+    expect(out.seconds).toEqual([61]);
   });
   test("another video's frames and a non-canonical second are left as they are", () => {
     const md = "![a](/api/frames/vimeo/43/1.jpg) ![b](/api/frames/vimeo/42/007.jpg)";
@@ -78,12 +96,19 @@ describe("Vimeo transforms match the client copies", () => {
     "## Transcript\n### [00:00:00]\nhello",
     "body\n\n## Transcript\n\n### [00:02:00]\nwindow\n\n```\n## Transcript\n```\n",
     "no transcript here\n```\n## Transcript\n```",
+    "a [01:02](https://vimeo.com/1#t=62s) b [01:03]",
+    "````\n```\n[00:01:00] still fenced\n````\nout [00:02:00]",
   ];
   test("linkVimeoTimestamps", () => {
     for (const f of fixtures) expect(linkVimeoTimestamps(f, url)).toBe(client.linkVimeoTimestamps(f, url));
     expect(linkVimeoTimestamps(fixtures[0]!, url)).toContain("[\\[00:12:00\\]](https://vimeo.com/1223642971#t=720s)");
     expect(linkVimeoTimestamps(fixtures[0]!, "https://youtu.be/x")).toBe(fixtures[0]!);
     expect(linkVimeoTimestamps(fixtures[0]!, undefined)).toBe(fixtures[0]!);
+  });
+  test("the video id is read with the client's own rule", () => {
+    for (const u of ["https://vimeo.com/channels/foo/123", "https://vimeo.com/0123", "https://player.vimeo.com/video/7?h=x", "https://youtu.be/x"]) {
+      expect(linkVimeoTimestamps("[00:12] hi", u)).toBe(client.linkVimeoTimestamps("[00:12] hi", u));
+    }
   });
   test("splitTranscript", () => {
     for (const f of fixtures) expect(splitTranscript(f)).toEqual(client.splitTranscript(f));
@@ -102,6 +127,21 @@ describe("renderExportMarkdown", () => {
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain('<a href="https://vimeo.com/1#t=5s" target="_blank" rel="noopener">t</a>');
     expect(html).toContain('<a href="frames/x">rel</a>');
+  });
+  test("a link with an executable scheme is emitted as text; a remote image as its alt text", () => {
+    const html = renderExportMarkdown(
+      "[j](javascript:alert(1)) [d](data:text/html;base64,AA==) [v](vbscript:x) [m](mailto:a@b.c) [h](#top)\n\n" +
+        "![remote](https://evil.example/pixel.png) ![j](javascript:x) ![ok](frames/187.jpg)",
+    );
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("data:");
+    expect(html).not.toContain("vbscript:");
+    expect(html).toContain("j d v");
+    expect(html).toContain('<a href="mailto:a@b.c">m</a>');
+    expect(html).toContain('<a href="#top">h</a>');
+    expect(html).not.toContain("evil.example");
+    expect(html).toContain("remote j <img");
+    expect(html).toContain('<img src="frames/187.jpg" alt="ok">');
   });
 });
 
@@ -124,6 +164,11 @@ describe("renderExportPage", () => {
     expect(html).not.toContain("/api/frames/");
     expect(html).toContain("prefers-color-scheme: light");
   });
+  test("a document url with an executable scheme gets no source link", () => {
+    const html = renderExportPage({ title: "t", url: "javascript:alert(1)", linkLabel: "Open", markdown: "x", sourceId: "article" });
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain(">Open<");
+  });
   test("a non-Vimeo source gets no timestamp links and no facts line without metadata", () => {
     const html = renderExportPage({ title: "t", linkLabel: "x", markdown: "see [00:01:00]", sourceId: "youtube" });
     expect(html).not.toContain("#t=");
@@ -138,5 +183,7 @@ describe("exportBaseName", () => {
     expect(exportBaseName("Æøå · talk")).toBe("Æøå · talk");
     expect(exportBaseName("///")).toBe("summary");
     expect(exportBaseName("x".repeat(200)).length).toBe(80);
+    // 16 words are 79 chars and fit; the 17th would cut mid-word, so it is dropped whole.
+    expect(exportBaseName("word ".repeat(30).trim())).toBe("word ".repeat(16).trim());
   });
 });

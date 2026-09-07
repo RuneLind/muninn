@@ -86,6 +86,19 @@ export const SUMMARY_SOURCES: SummarySource[] = [
   },
 ];
 
+/**
+ * A huginn doc id is a path (`<category>/<title>.md`), and the routes that
+ * take one interpolate it segment-encoded into `/api/document/<collection>/…`.
+ * `encodeURIComponent("..")` is `..`, and `fetch` collapses dot segments, so a
+ * `..` popped the COLLECTION out of the path — measured, `?docId=../mimir/x.md`
+ * on the vimeo source served a mimir page. A dot segment or an empty one is
+ * never a real id; refuse before the fetch.
+ */
+export function isSafeDocId(docId: string): boolean {
+  if (!docId) return false;
+  return docId.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
 export function getSummarySource(id: string): SummarySource | undefined {
   return SUMMARY_SOURCES.find((s) => s.id === id);
 }

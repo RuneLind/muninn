@@ -39,10 +39,11 @@ export function crc32(data: Uint8Array): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-/** MS-DOS date/time pair. ZIP has no epoch before 1980; earlier dates clamp. */
-function dosDateTime(d: Date): { date: number; time: number } {
-  const year = Math.max(1980, d.getFullYear());
-  const date = ((year - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+/** MS-DOS date/time pair. ZIP has no epoch before 1980; an earlier date is
+ *  1980-01-01 00:00:00 whole, not a 1980 year on a 1979 month and day. */
+function dosDateTime(input: Date): { date: number; time: number } {
+  const d = input.getFullYear() < 1980 ? new Date(1980, 0, 1) : input;
+  const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
   const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
   return { date, time };
 }
