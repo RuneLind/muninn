@@ -42,6 +42,7 @@ import {
   parseCaptureOptions,
   pickFrames,
   pickKind,
+  pickVisualDetail,
   restoredKindNote,
 } from './capture-rules.js';
 
@@ -53,6 +54,10 @@ const $ = (sel) => document.querySelector(sel);
 // whatever the server calls its default, which is Standard.
 const FRAMES_KEY = 'frames';
 const KIND_KEY = 'summaryKind';
+// How much of the video a slides capture may SHOW — a second axis, remembered
+// separately from the kind. It is only ever consulted with Slides ticked, so it
+// has no effect on a transcript-only capture and is remembered across both.
+const VISUAL_KEY = 'visualDetail';
 
 /**
  * The Slides label's ordinary tooltip, restored when the tick is usable — READ
@@ -129,6 +134,19 @@ function renderNotes() {
     el.textContent = panelShown ? text : '';
     el.classList.toggle('hidden', !panelShown || text === '');
   }
+}
+
+/**
+ * Show the Visuals row exactly while it means something: this instance offers
+ * the choice AND slides are ticked. With no frames there is nothing to choose
+ * between, and a control that is always there reads as a setting that always
+ * applies.
+ */
+function renderVisualRow() {
+  const label = $('#lbl-visual');
+  if (!label) return;
+  const ticked = $('#chk-frames')?.checked === true;
+  label.classList.toggle('hidden', !(ticked && captureOptions.visualDetail));
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -365,6 +383,24 @@ function paintControls({ options, stored, notes }) {
   frames.disabled = !options.framesSupported;
   frames.checked = pickFrames(stored[FRAMES_KEY], options);
 
+  // The visuals picker, on the instances that offer one. Guarded rather than
+  // required, the `#lbl-frames` rule: a missing node must cost the reader that
+  // one control, never the whole popup.
+  const visualSelect = $('#sel-visual');
+  if (visualSelect && captureOptions.visualDetail) {
+    visualSelect.replaceChildren(
+      ...captureOptions.visualDetail.options.map((row) => {
+        const option = document.createElement('option');
+        option.value = row.id;
+        option.textContent = row.label;
+        return option;
+      }),
+    );
+    const detail = pickVisualDetail(stored[VISUAL_KEY], captureOptions);
+    if (detail) visualSelect.value = detail;
+  }
+  renderVisualRow();
+
   // A dimmed control with no explanation reads as a bug. The reason is the
   // summarizer bot's CONNECTOR, which is a server fact the reader cannot infer.
   framesNote = frames.disabled ? FRAMES_UNSUPPORTED_NOTE : '';
@@ -405,9 +441,21 @@ function attachControlListeners() {
       .catch((err) => console.warn('Could not save the summary kind', err));
   });
   frames.addEventListener('change', () => {
+    // Ticking Slides is what reveals the Visuals row, so the paint and this
+    // listener both go through `renderVisualRow` rather than each toggling the
+    // class on their own.
+    renderVisualRow();
     chrome.storage.sync
       .set({ [FRAMES_KEY]: frames.checked })
       .catch((err) => console.warn('Could not save the Slides preference', err));
+  });
+  const visualSelect = $('#sel-visual');
+  visualSelect?.addEventListener('change', () => {
+    // The element, not `ev.target` — the same shape the kind listener uses, and
+    // the one that does not depend on how the event was dispatched.
+    chrome.storage.sync
+      .set({ [VISUAL_KEY]: visualSelect.value })
+      .catch((err) => console.warn('Could not save the visual detail preference', err));
   });
 }
 
@@ -425,6 +473,7 @@ async function handleSummarize() {
   const status = $('#status');
   const kindSelect = $('#sel-kind');
   const frames = $('#chk-frames');
+  const visualSelect = $('#sel-visual');
 
   if (btn) btn.disabled = true;
   if (status) {
@@ -457,6 +506,9 @@ async function handleSummarize() {
         // an id it does not offer.
         kind: pickKind(kindSelect?.value, captureOptions),
         frames: pickFrames(frames?.checked, captureOptions),
+        // Null on an instance that does not offer the choice — the worker then
+        // sends no such field, which is what that instance reads as the default.
+        visualDetail: pickVisualDetail(visualSelect?.value, captureOptions),
       }, (response) => {
         if (response?.error) {
           reject(new Error(response.error));

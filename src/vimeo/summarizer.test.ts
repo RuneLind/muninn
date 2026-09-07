@@ -1004,6 +1004,15 @@ test("frames ON: extracting_frames runs between harvest and summarize, the frame
   expect(lastPrompt!.startsWith("### [00:00:00]")).toBe(true);
   expect(lastPrompt).toContain(`t=00:00:10 ${join(extractCalls[0]!.workDir, "10.jpg")}`);
   expect(lastPrompt).toContain(`![Slide at HH:MM:SS](/api/frames/vimeo/${VIDEO_ID}/<sec>.jpg)`);
+  // ⚠️ Vimeo passes NO prompt policy, so it keeps the seam's default rules
+  // verbatim. `framesPromptSection` grew an optional policy argument for
+  // YouTube's Selected/Detailed choice, and the failure that argument invites is
+  // a vertical acquiring one by accident: this asserts the default rubric
+  // sentence is still what Vimeo sends, and that the YouTube rubric is not.
+  expect(lastPrompt).toContain("ADDS something the transcript did not say");
+  expect(lastPrompt).toContain("At most 8 slides in the whole summary");
+  expect(lastPrompt).not.toContain("explain, compare, verify or revisit");
+  expect(lastPrompt).not.toContain("## Visual reference");
   // The SYSTEM prompt says nothing about frames — a frames-off capture's prompt is unchanged.
   expect(lastSystemPrompt).not.toContain("Slide");
   expect(lastExtraDirs).toEqual([extractCalls[0]!.workDir]);

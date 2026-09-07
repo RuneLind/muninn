@@ -34,6 +34,13 @@
           <input type="checkbox" id="chk-frames"> Slides
         </label>
       </div>
+      <!-- How much of the video the summary may SHOW. Revealed only while
+           Slides is ticked, because with no frames there is nothing to choose
+           between. Its own axis, not a summary kind: Deep works with either. -->
+      <label class="opt kind hidden" id="lbl-visual" title="Selected quotes up to 8 visuals inline. Detailed keeps up to 20 in total — 8 inline and the rest under a Visual reference section with captions.">
+        Visuals
+        <select id="sel-visual"></select>
+      </label>
       <!-- Why the Slides tick is dimmed, when it is. -->
       <div id="frames-note" class="note hidden"></div>
       <div id="status" class="hidden"></div>

@@ -15,6 +15,11 @@ import {
 } from "../../summaries/presets.ts";
 import { applyCors } from "../../auth/cors.ts";
 import { YOUTUBE_FRAME_SOURCE, isFrameId, removeKeptFramesForDocument } from "../../summaries/frames.ts";
+import {
+  DEFAULT_VISUAL_DETAIL,
+  isVisualDetail,
+  visualDetailOptions,
+} from "../../summaries/visual-detail.ts";
 import { youtubeWatchUrl } from "../../youtube/frames.ts";
 import { youtubeCaptureKinds } from "../../youtube/kinds.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
@@ -353,12 +358,18 @@ export function registerYouTubeRoutes(
 
   // Shared plumbing: bare-path redirect, CORS preflight, SSE stream, jobs,
   // document/similar proxies (the /youtube page merged into /summaries).
+  //
+  // `completeCarriesSummary` is the REPLAY half of the pair `state.ts` explains:
+  // the summary is rewritten (dropped frame references) after it has already
+  // streamed to the card, so a reader who reloads must be replayed the rewritten
+  // body rather than the stream that still quotes frames nothing serves.
   registerSummaryVertical(app, config, {
     apiBase: YT_SOURCE.apiBase,
     collection: YT_COLLECTION,
     store: { getJob, getRecentJobs, subscribe },
     redirect: { path: "/youtube", source: "youtube" },
     corsPreflight: true,
+    completeCarriesSummary: true,
   });
 
   /**
@@ -394,6 +405,20 @@ export function registerYouTubeRoutes(
       // left as "the first entry", so the popup never has to assume an order.
       default_kind: DEFAULT_CAPTURE_KIND,
       frames: { supported: connectorCapabilities(summarizerBot).supportsExtraDirs },
+      // How much of the video the summary may SHOW, offered the same way the
+      // kinds are: the popup renders the control from the server rather than
+      // from a catalog of its own, so an instance that does not offer this at
+      // all (an older muninn) is a popup with no such control rather than a
+      // client sending a field that 400s. It is a property of THIS code, not of
+      // the bot — nothing about it depends on the connector — so `supported` is
+      // a constant true here and the field's absence is the whole signal.
+      visual_detail: {
+        supported: true,
+        default: DEFAULT_VISUAL_DETAIL,
+        // Labelled rows rather than bare ids, exactly like `kinds`: a client
+        // that had to name them would be a second catalog nobody updates.
+        options: visualDetailOptions(),
+      },
     });
   });
 
@@ -420,7 +445,14 @@ export function registerYouTubeRoutes(
       );
     }
 
-    type Body = { title?: string; url?: string; video_id?: string; frames?: unknown; kind?: unknown };
+    type Body = {
+      title?: string;
+      url?: string;
+      video_id?: string;
+      frames?: unknown;
+      kind?: unknown;
+      visual_detail?: unknown;
+    };
     const body = await c.req.json<Body>().catch(() => ({} as Body));
     const { title, url, video_id } = body;
 
@@ -454,6 +486,38 @@ export function registerYouTubeRoutes(
       return c.json({ error: "frames must be a boolean", code: "bad_frames" }, 400);
     }
     const frames = body.frames === true;
+
+    // How much of the video the summary may SHOW. Validated with the rest of the
+    // body shape — above the bot resolution, the huginn listing read and
+    // `createJob` — because a value this instance does not offer is a refusal
+    // whatever the video and whatever the bot, and it must cost neither a
+    // round-trip nor a job row (the `kind` ordering, for the `kind` reasons).
+    //
+    // Refused rather than folded back to the default, and a PRESENT-but-blank
+    // string is refused with the rest: a client that sent the key and put
+    // nothing in it is a picker that failed to fill, and running the cheaper
+    // policy while the reader believes they asked for the fuller one is the
+    // silent wrong answer this check exists to prevent. ABSENT is the default
+    // (an older extension, a curl) and is not an error.
+    //
+    // It is validated even with slides OFF, where it changes nothing: the value
+    // is still either one this instance offers or one it does not, and telling a
+    // caller their typo was accepted because of an unrelated field is worse than
+    // a 400. `error` is PROSE and `code` the machine token, this route's rule.
+    if (body.visual_detail !== undefined && !isVisualDetail(body.visual_detail)) {
+      return c.json(
+        {
+          error:
+            typeof body.visual_detail === "string"
+              ? `Unknown visual detail: ${JSON.stringify(body.visual_detail)}`
+              : "Visual detail must be a string",
+          code: "bad_visual_detail",
+          visual_detail: body.visual_detail,
+        },
+        400,
+      );
+    }
+    const visualDetail = isVisualDetail(body.visual_detail) ? body.visual_detail : DEFAULT_VISUAL_DETAIL;
 
     // Resolve the bot and pre-flight the connector BEFORE the duplicate check
     // and before `createJob`. A job created above an early return is never
@@ -582,6 +646,7 @@ export function registerYouTubeRoutes(
       summarizeVideo(jobId, video_id, capYouTubeTitle(title || canonicalUrl), config, summarizerBot, {
         frames,
         preset,
+        visualDetail,
         // The ONE moment the route can learn that a document now exists: huginn
         // answered the ingest, and its listing will not say so for another
         // reindex cycle.

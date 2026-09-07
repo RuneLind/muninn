@@ -40,7 +40,11 @@
  *
  *   bun scripts/replay-youtube.ts \
  *     --video <local.mp4> --transcript <transcript.json> --video-id <11 chars> \
- *     --title "…" --kind standard|deep --frames --runs 2 --out <dir>
+ *     --title "…" --kind standard|deep --frames \
+ *     --visual-detail selected|detailed --runs 2 --out <dir>
+ *
+ * `--visual-detail` is the SLIDES policy and is read only where `--frames` is
+ * on; it defaults to `selected`, the route's own default.
  *
  * ## The trace half
  *
@@ -52,10 +56,13 @@
  *
  * ## Output
  *
- * Per run it writes `<out>/<kind>-<n>/`: `summary.md` (the stored body),
- * `ingest.json` (the body posted to the stub), `frames/` (the frames the summary
- * quoted) and `run.json` (requested vs observed model, thinking budget,
- * connector, tokens, cost, elapsed).
+ * Per run it writes `<out>/<kind>-<visual-detail>-<n>/`: `summary.md` (the
+ * stored body), `ingest.json` (the body posted to the stub), `kept/` (the frames
+ * the summary quoted) and `run.json` (requested vs observed model, thinking
+ * budget, connector, tokens, cost, elapsed, the four frame counts —
+ * extracted / selected / referenced / retained — the seconds the stored text
+ * quotes, and whether a `## Visual reference` appendix landed before
+ * `## Transcript`).
  */
 
 import { mkdir, copyFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -75,7 +82,19 @@ import {
 } from "../src/summaries/presets.ts";
 import { youtubeCaptureKinds } from "../src/youtube/kinds.ts";
 import { CAPTURE_THINKING_MAX_TOKENS } from "../src/summaries/summarizer-shared.ts";
-import { CAPTURE_FRAME_HEIGHT, extractCadenceFramesFromFile } from "../src/summaries/frames.ts";
+import {
+  CAPTURE_FRAME_HEIGHT,
+  YOUTUBE_FRAME_SOURCE,
+  extractCadenceFramesFromFile,
+  referencedFrameSeconds,
+} from "../src/summaries/frames.ts";
+import {
+  DEFAULT_VISUAL_DETAIL,
+  VISUAL_DETAIL_VALUES,
+  isVisualDetail,
+  visualDetailCaps,
+  type VisualDetail,
+} from "../src/summaries/visual-detail.ts";
 import { summarizeVideo } from "../src/youtube/summarizer.ts";
 import { createJob, getJob } from "../src/youtube/state.ts";
 import type { DownloadResult, YtDlpInfo } from "../src/video/media.ts";
@@ -89,6 +108,7 @@ interface Args {
   title: string;
   kind: string;
   frames: boolean;
+  visualDetail: VisualDetail;
   out: string;
   runs: number;
 }
@@ -107,6 +127,12 @@ function parseArgs(argv: string[]): Args {
   const need = (name: string): string => flags.get(name) ?? die(`--${name} is required`);
   const runs = Number(flags.get("runs") ?? "1");
   if (!Number.isInteger(runs) || runs < 1) die("--runs must be a positive integer");
+  // The ROUTE's own validation, not a second spelling: a harness that accepted a
+  // policy the route 400s would compare a run production cannot make.
+  const visualDetail = flags.get("visual-detail") ?? DEFAULT_VISUAL_DETAIL;
+  if (!isVisualDetail(visualDetail)) {
+    die(`--visual-detail must be one of ${VISUAL_DETAIL_VALUES.join(", ")}`);
+  }
   return {
     video: resolve(need("video")),
     transcript: resolve(need("transcript")),
@@ -114,6 +140,7 @@ function parseArgs(argv: string[]): Args {
     title: flags.get("title") ?? "Replay capture",
     kind: flags.get("kind") ?? "standard",
     frames,
+    visualDetail,
     out: resolve(flags.get("out") ?? "./replay-out"),
     runs,
   };
@@ -122,6 +149,22 @@ function parseArgs(argv: string[]): Args {
 function die(message: string): never {
   console.error(`replay-youtube: ${message}`);
   process.exit(1);
+}
+
+/**
+ * Where the `## Visual reference` appendix sits relative to `## Transcript` in
+ * the body that was ingested — the plan's placement rule, checkable per run.
+ *
+ * `null` when the body carries no appendix (every `selected` run, and a
+ * `detailed` run whose model wrote none); otherwise true only when the appendix
+ * heading really precedes the transcript heading.
+ */
+function appendixOrder(ingested: string | null): boolean | null {
+  if (ingested === null) return null;
+  const appendix = ingested.search(/^##[ \t]+Visual reference[ \t]*$/m);
+  if (appendix === -1) return null;
+  const transcript = ingested.search(/^##[ \t]+Transcript[ \t]*$/m);
+  return transcript === -1 || appendix < transcript;
 }
 
 // --- the video's duration ---------------------------------------------------
@@ -267,6 +310,7 @@ const durationSec = await probeDurationSec(args.video);
 
 console.log(
   `replay: ${args.videoId} (${durationSec}s) · kind=${preset.id} · frames=${args.frames} · ` +
+    `visual=${args.visualDetail} · ` +
     `bot=${botConfig.name}/${botConfig.connector ?? "claude-cli"} · model=${runBot.model ?? "(bot default)"} · ` +
     `runs=${args.runs} · huginn stub on ${huginn.port}`,
 );
@@ -274,7 +318,7 @@ console.log(
 await mkdir(args.out, { recursive: true });
 
 for (let run = 1; run <= args.runs; run++) {
-  const runDir = join(args.out, `${preset.id}-${run}`);
+  const runDir = join(args.out, `${preset.id}-${args.visualDetail}-${run}`);
   await rm(runDir, { recursive: true, force: true });
   const framesRoot = join(runDir, "kept");
   await mkdir(framesRoot, { recursive: true });
@@ -286,6 +330,7 @@ for (let run = 1; run <= args.runs; run++) {
   await summarizeVideo(jobId, args.videoId, args.title, config, botConfig, {
     frames: args.frames,
     preset,
+    visualDetail: args.visualDetail,
     deps: {
       // Never a wiki proposal: this ingests into a stub, so a draft would be a
       // gate item about a document that does not exist.
@@ -336,12 +381,19 @@ for (let run = 1; run <= args.runs; run++) {
   const keptDir = join(framesRoot, "youtube", args.videoId);
   const keptFrames = existsSync(keptDir) ? (await readdir(keptDir)).sort() : [];
 
+  // Read once through the holder's declared type: TypeScript narrows
+  // `ingest.body` to `null` here (it is only ever assigned inside the server's
+  // handler), which is the same reason `ingestSummaryKind` below casts.
+  const ingestBody = ingest.body as Record<string, unknown> | null;
+
   const runJson = {
     videoId: args.videoId,
     title: args.title,
     durationSec,
     kind: preset.id,
     framesRequested: args.frames,
+    visualDetail: args.visualDetail,
+    visualCaps: visualDetailCaps(args.visualDetail),
     status: job?.status,
     error: job?.error ?? null,
     category: job?.category ?? null,
@@ -368,13 +420,36 @@ for (let run = 1; run <= args.runs; run++) {
     toolCount: agentRun?.toolCount ?? null,
     elapsedMs,
     summaryChars: (job?.summary ?? "").length,
-    ingestSummaryKind: (ingest.body as Record<string, unknown> | null)?.summary_kind ?? null,
+    ingestSummaryKind: ingestBody?.summary_kind ?? null,
+    // The four frame counts the summarizer's own completion line reports, kept
+    // SEPARATE because each answers a different question: what the model was
+    // shown, what it chose, what survived the caps and the manifest, and what is
+    // on disk to serve. They are read off that line rather than recomputed, so
+    // `run.json` cannot report a number production never logged.
+    extractedFrames: (summarized?.frames as number | undefined) ?? null,
+    selectedFrames: (summarized?.selected as number | undefined) ?? null,
+    referencedFrames: (summarized?.referenced as number | undefined) ?? null,
+    retainedFrames: (summarized?.kept as number | undefined) ?? null,
+    // Which seconds the model CHOSE — the set `referencedSeconds` below is a
+    // subset of. The difference is what the policy's caps refused, which is the
+    // number a calibration run is actually reading.
+    selectedSeconds:
+      typeof summarized?.selectedSeconds === "string" && summarized.selectedSeconds !== ""
+        ? summarized.selectedSeconds.split(",").map(Number)
+        : [],
+    // What the STORED text actually quotes, read back out of it with the seam's
+    // own reader — the one number that is evidence rather than a report.
+    referencedSeconds: referencedFrameSeconds(job?.summary ?? "", YOUTUBE_FRAME_SOURCE, args.videoId),
     // Numerically, not by filename: `readdir` sorts "1236.jpg" before "98.jpg".
     keptFrames: keptFrames
       .map((f) => Number(f.replace(/\.jpg$/, "")))
       .filter((n) => !Number.isNaN(n))
       .sort((a, b) => a - b),
     keptFrameCount: keptFrames.length,
+    /** Whether the appendix landed BEFORE `## Transcript` in the ingested body. */
+    appendixBeforeTranscript: appendixOrder(
+      typeof ingestBody?.summary === "string" ? ingestBody.summary : null,
+    ),
   };
   await writeFile(join(runDir, "run.json"), `${JSON.stringify(runJson, null, 2)}\n`);
   console.log(`run ${run}/${args.runs} → ${runDir}`);

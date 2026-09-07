@@ -31,6 +31,13 @@ import {
   type CaptureFrame,
 } from "../summaries/frames.ts";
 import {
+  DEFAULT_VISUAL_DETAIL,
+  dropFrameReferences,
+  enforceVisualReferences,
+  visualDetailPolicy,
+  type VisualDetail,
+} from "../summaries/visual-detail.ts";
+import {
   downloadVideo as realDownloadVideo,
   probeVideoInfo as realProbeVideoInfo,
   summarizeTimeoutFor,
@@ -159,6 +166,18 @@ export interface SummarizeVideoOptions {
    * thinking cap applies (`captureThinkingFor`).
    */
   preset: CapturePreset;
+  /**
+   * How much of the video the summary may SHOW — the reader's Selected/Detailed
+   * choice, consulted only where slides actually ran.
+   *
+   * Optional where `preset` is required, and the difference is real rather than
+   * inconsistent: a missing preset would be `standard` picked POSITIONALLY out
+   * of `SHIPPED_CAPTURE_PRESETS`, so reordering that array would change what a
+   * caller who named nothing gets, while a missing policy is the NAMED constant
+   * {@link DEFAULT_VISUAL_DETAIL} and cannot move under anyone. The route
+   * validates the body and always passes one.
+   */
+  visualDetail?: VisualDetail;
   /** Told when huginn has stored a document, BEFORE `completeJob`. */
   onIngested?: YouTubeIngestedHook;
   /** Test seams; production passes none. */
@@ -205,6 +224,7 @@ export async function summarizeVideo(
   // capture of Y a `duplicate` of X (the same rule the yt-dlp target follows).
   const videoUrl = youtubeWatchUrl(videoId);
   const preset = opts.preset;
+  const visualDetail = opts.visualDetail ?? DEFAULT_VISUAL_DETAIL;
   let frames: CaptureFrame[] = [];
 
   try {
@@ -417,8 +437,21 @@ Video URL: ${videoUrl}`;
       url: videoUrl,
       // The frame list rides the USER prompt after the transcript (the TikTok
       // and Vimeo shape); with no frames it contributes "" and the prompt is
-      // byte-identical to the one that shipped before this PR.
-      prompt: transcriptText + framesPromptSection(YOUTUBE_FRAME_SOURCE, videoId, frames),
+      // byte-identical to the one that shipped before slides existed.
+      //
+      // The POLICY is built only where frames came out, deliberately: building
+      // it needs an ADDRESS (`frameQuoteTemplate`), and `framesPromptSection`'s
+      // contract is that a frames-off capture never asks the id gate anything.
+      prompt:
+        transcriptText +
+        (frames.length > 0
+          ? framesPromptSection(
+              YOUTUBE_FRAME_SOURCE,
+              videoId,
+              frames,
+              visualDetailPolicy(visualDetail, YOUTUBE_FRAME_SOURCE, videoId),
+            )
+          : ""),
       systemPrompt,
       config,
       botConfig: runBot,
@@ -438,27 +471,70 @@ Video URL: ${videoUrl}`;
         // these two are the parts only this vertical knows.
         summaryKind: preset.id,
         thinking: thinkingLabel,
+        visualDetail,
       },
     });
 
-    // 3. Parse response
-    const { category, summary } = parseSummaryResponse(result.result);
+    // 3. Parse response, then hold its frame references to this capture's own
+    //    manifest and this policy's caps.
+    //
+    //    The summary STREAMED to the job card delta by delta while the model
+    //    wrote it, so this rewrite happens after the reader has already seen the
+    //    unrewritten text. That is what `completeReplacesText` +
+    //    `completeCarriesSummary` are for (`state.ts`, `youtube-routes.ts`): the
+    //    terminal event carries the rewritten body, so the live card swaps it in
+    //    and an SSE replay after a reload serves it too. Everything downstream —
+    //    the ingest body, the source draft, `completeJob` — is built from
+    //    `summary` below and never from `parsed`.
+    const { category, summary: parsed } = parseSummaryResponse(result.result);
     setCategory(jobId, category);
+
+    const enforced = enforceVisualReferences({
+      summary: parsed,
+      source: YOUTUBE_FRAME_SOURCE,
+      videoId,
+      extracted: frames.map((f) => f.tSeconds),
+      detail: visualDetail,
+    });
+    let summary = enforced.text;
 
     // The frames the summary QUOTES are copied out of the work dir to the
     // served root before the work dir dies; the rest go with it. Inside its own
     // try: a copy failure must not fail a capture whose text is already on the
     // reader's screen.
     let keptFrames: number[] = [];
+    let copyFailed = false;
     if (frames.length > 0) {
       try {
         keptFrames = await keepReferencedFrames(summary, YOUTUBE_FRAME_SOURCE, videoId, frames, resolved.framesRoot);
       } catch (err) {
+        copyFailed = true;
         log.error("YouTube capture {jobId}: keeping quoted frames failed: {error}", {
           jobId,
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    }
+
+    // The copy is the last thing between a reference and a served file, so
+    // whatever it did NOT keep is a promise of a picture the route will 404 —
+    // including the case where it threw and kept nothing at all. The text is
+    // made true before it is stored, ingested or drafted from.
+    const unserved = enforced.referenced.filter((sec) => !keptFrames.includes(sec));
+    if (unserved.length > 0) {
+      const repaired = dropFrameReferences(summary, YOUTUBE_FRAME_SOURCE, videoId, unserved);
+      summary = repaired.text;
+      log.warn(
+        "YouTube capture {jobId}: {n} quoted frame(s) were not copied ({seconds}) — their references were " +
+          "removed from the stored summary{because}",
+        {
+          jobId,
+          videoId,
+          n: repaired.removed,
+          seconds: unserved.join(", "),
+          because: copyFailed ? " (the copy failed)" : "",
+        },
+      );
     }
 
     // The one line that says what actually ran. `model` is the connector's own
@@ -468,18 +544,33 @@ Video URL: ${videoUrl}`;
     // connector that reports no model at all must read as unknown rather than
     // as the request echoed back. It is also what `scripts/replay-youtube.ts`
     // reads for its `run.json`.
+    //
+    // The four frame counts are separate on purpose, and each answers a
+    // different question: `extracted` is what the model was shown, `selected`
+    // what it chose, `referenced` what survived the caps and the manifest, and
+    // `retained` what is on disk to serve. Collapsed into one number, a policy
+    // that over-quotes and a model that under-selects are indistinguishable.
     log.info(
-      "Summarized {videoId}: kind={summaryKind}, category={category}, model={model} (requested {requestedModel}), thinking={thinking}, {tokens} output tokens, {frames} frames read, {kept} quoted",
+      "Summarized {videoId}: kind={summaryKind}, visual={visualDetail}, category={category}, model={model} (requested {requestedModel}), thinking={thinking}, {tokens} output tokens, frames extracted={frames} selected={selected} referenced={referenced} retained={kept}",
       {
         videoId,
         summaryKind: preset.id,
+        visualDetail,
         category,
         model: result.model ?? "unknown",
         requestedModel: runBot.model ?? "bot-default",
         thinking: thinkingLabel,
         tokens: result.outputTokens,
         frames: frames.length,
+        selected: enforced.selected.length,
+        referenced: enforced.referenced.length,
         kept: keptFrames.length,
+        // Not in the message, and the one part that is not a count: WHICH
+        // seconds the model chose. `selected` minus what the stored text ends up
+        // quoting is exactly the set the caps refused, which is the question a
+        // policy is tuned on — a count alone cannot say whether the frame the
+        // reader wanted was never chosen or was chosen and trimmed.
+        selectedSeconds: enforced.selected.join(","),
       },
     );
 

@@ -22,6 +22,7 @@ import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { CaptureFrame } from "../summaries/frames.ts";
+import type { VisualDetail } from "../summaries/visual-detail.ts";
 import type { DownloadOptions, DownloadResult, YtDlpInfo } from "../video/media.ts";
 
 const VIDEO_ID = "dQw4w9WgXcQ";
@@ -187,6 +188,12 @@ let extractCalls: Array<{ file: string; durationSec: number; outDir: string }> =
 let extractThrows: Error | null = null;
 /** The seconds the fake extractor produces frames at. */
 let extractTicks: number[] = [30, 600, 1170];
+/**
+ * Ticks the extractor REPORTS but writes no file for — the only way to reach
+ * `keepReferencedFrames`' copy failure, which is what the stored text has to be
+ * repaired against (a reference to a picture the route will 404).
+ */
+let missingFrameFiles: number[] = [];
 /** Where kept frames land — a throwaway root, never the developer's `~/.muninn`. */
 let framesRoot = "";
 /** The path of the "downloaded video", so a case can check when it was unlinked. */
@@ -224,7 +231,7 @@ function deps() {
       mkdirSync(input.outDir, { recursive: true });
       return extractTicks.map((t) => {
         const path = join(input.outDir, `${t}.jpg`);
-        writeFileSync(path, `jpeg-${t}`);
+        if (!missingFrameFiles.includes(t)) writeFileSync(path, `jpeg-${t}`);
         return { path, tSeconds: t };
       });
     },
@@ -262,6 +269,7 @@ beforeEach(() => {
   huginnEchoesTimestamps = true;
   extractThrows = null;
   extractTicks = [30, 600, 1170];
+  missingFrameFiles = [];
   probeAnswer = { id: VIDEO_ID, title: "A talk", duration: 1200, uploader: "conf" };
   connectorSupportsExtraDirs = true;
   transcriptStatus = 200;
@@ -285,12 +293,17 @@ async function run(
     preset?: CapturePreset;
     sourceDraft?: boolean;
     botConfig?: BotConfig;
+    visualDetail?: VisualDetail;
     onIngested?: (v: string, d: string) => void;
   } = {},
 ) {
   const jobId = createJob(VIDEO_ID, "A talk", WATCH_URL);
   await summarizeVideo(jobId, VIDEO_ID, "A talk", config, opts.botConfig ?? bot, {
     ...(opts.frames !== undefined ? { frames: opts.frames } : {}),
+    // Deliberately ABSENT unless a case names one: the summarizer's own default
+    // is the named `DEFAULT_VISUAL_DETAIL`, and a helper that always passed a
+    // value would hide a default that moved.
+    ...(opts.visualDetail !== undefined ? { visualDetail: opts.visualDetail } : {}),
     // REQUIRED on the options now (the Vimeo precedent): a caller that names no
     // kind is a compile error rather than a positional pick out of the shipped
     // array, so this helper names `standard` explicitly.
@@ -685,6 +698,130 @@ describe("the transcript half still fails the job", () => {
     await run({ frames: true });
     expect(probeCalls).toHaveLength(1);
     expect(downloadCalls).toEqual([]);
+  });
+});
+
+describe("the VISUAL DETAIL policy", () => {
+  /** A summary quoting the seconds named, through the route's own address shape. */
+  function summaryQuoting(...secs: number[]): string {
+    return (
+      "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n\n" +
+      secs.map((s) => `![Slide at 00:00:00](/api/frames/youtube/${VIDEO_ID}/${s}.jpg)`).join("\n\n") +
+      "\n\n- point"
+    );
+  }
+
+  const kept = (sec: number) => existsSync(join(framesRoot, "youtube", VIDEO_ID, `${sec}.jpg`));
+
+  test("the default policy is `selected`, and its rubric is what the prompt carries", async () => {
+    await run({ frames: true });
+    // The revised inclusion rule, not the seam's default one: a speaker talking
+    // through a chart is a reason to show the chart.
+    expect(lastPrompt).toContain("explain, compare, verify or revisit");
+    expect(lastPrompt).not.toContain("ADDS something the transcript did not say");
+    // No appendix is offered under `selected`.
+    expect(lastPrompt).not.toContain("## Visual reference");
+    expect(lastPrompt).toContain("At most 8 distinct frames in the whole summary");
+    expect(lastClaudeSpanAttrs?.visualDetail).toBe("selected");
+  });
+
+  test("`detailed` asks for the appendix and the higher total", async () => {
+    await run({ frames: true, visualDetail: "detailed" });
+    expect(lastPrompt).toContain("## Visual reference");
+    expect(lastPrompt).toContain("8 frames inline and 20 distinct frames");
+    expect(lastClaudeSpanAttrs?.visualDetail).toBe("detailed");
+  });
+
+  test("with slides OFF the policy reaches the trace and nothing else — the prompt is untouched", async () => {
+    await run({ frames: false, visualDetail: "detailed" });
+    expect(lastPrompt).toBe(transcriptBody.transcript);
+    expect(lastPrompt).not.toContain("Slide frames");
+    expect(lastClaudeSpanAttrs?.visualDetail).toBe("detailed");
+  });
+
+  test("a quoted frame that was never extracted is removed from EVERYTHING stored", async () => {
+    // The failure this closes: only quoted frames are copied to the served root,
+    // so a reference to a second nobody extracted is a broken image in the job
+    // card, the ingested document, the wiki source draft and the export.
+    claudeResult = summaryQuoting(600, 999);
+    const jobId = await run({ frames: true });
+
+    expect(getJob(jobId)!.summary).toContain("600.jpg");
+    expect(getJob(jobId)!.summary).not.toContain("999.jpg");
+    expect(String(ingestBodies[0]!.summary)).not.toContain("999.jpg");
+    expect(String(sourceDraftCalls[0]!.body)).not.toContain("999.jpg");
+    expect(kept(600)).toBe(true);
+    expect(logged("warning", "will not serve")).toBe(true);
+  });
+
+  test("`selected` keeps at most eight, and only those eight are on disk", async () => {
+    extractTicks = Array.from({ length: 12 }, (_, i) => (i + 1) * 30);
+    claudeResult = summaryQuoting(...extractTicks);
+    const jobId = await run({ frames: true });
+
+    const stored = getJob(jobId)!.summary!;
+    expect(stored.match(/\/api\/frames\//g)).toHaveLength(8);
+    expect(kept(30)).toBe(true);
+    // The ninth quote and everything after it went, so its file was never copied.
+    expect(kept(270)).toBe(false);
+    expect(kept(360)).toBe(false);
+  });
+
+  test("`detailed` keeps twenty, eight of them inline, with the appendix before `## Transcript`", async () => {
+    const inline = Array.from({ length: 10 }, (_, i) => (i + 1) * 10);
+    const appendix = Array.from({ length: 15 }, (_, i) => 200 + i * 10);
+    extractTicks = [...inline, ...appendix];
+    claudeResult =
+      "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n\n" +
+      inline.map((s) => `![Slide at 00:00:00](/api/frames/youtube/${VIDEO_ID}/${s}.jpg)`).join("\n\n") +
+      "\n\n## Visual reference\n\n" +
+      appendix
+        .map((s) => `![Slide at 00:00:00](/api/frames/youtube/${VIDEO_ID}/${s}.jpg)\nWhy it is here.`)
+        .join("\n\n");
+
+    const jobId = await run({ frames: true, visualDetail: "detailed" });
+    const stored = getJob(jobId)!.summary!;
+    const [body, tail] = stored.split("## Visual reference") as [string, string];
+
+    expect(stored.match(/\/api\/frames\//g)).toHaveLength(20);
+    expect(body.match(/\/api\/frames\//g)).toHaveLength(8);
+    expect(tail.match(/\/api\/frames\//g)).toHaveLength(12);
+
+    // The plan's placement rule, measured on the body that was INGESTED — the
+    // one place the appendix and the transcript are in the same string.
+    const ingested = String(ingestBodies[0]!.summary);
+    expect(ingested.indexOf("## Visual reference")).toBeGreaterThan(-1);
+    expect(ingested.indexOf("## Visual reference")).toBeLessThan(ingested.indexOf("## Transcript"));
+  });
+
+  test("a frame the copy could NOT keep loses its reference — no promise of a 404", async () => {
+    // The extractor reports the tick and writes no file, so `keepReferencedFrames`
+    // throws mid-copy. The capture stands; the stored text must stop naming it.
+    missingFrameFiles = [600];
+    claudeResult = summaryQuoting(600);
+    const jobId = await run({ frames: true });
+
+    expect(getJob(jobId)!.status).toBe("complete");
+    expect(getJob(jobId)!.summary).not.toContain("600.jpg");
+    expect(String(ingestBodies[0]!.summary)).not.toContain("600.jpg");
+    expect(logged("warning", "were not copied")).toBe(true);
+  });
+
+  test("the four frame counts are reported separately", async () => {
+    extractTicks = Array.from({ length: 12 }, (_, i) => (i + 1) * 30);
+    claudeResult = summaryQuoting(...extractTicks, 999);
+    await run({ frames: true });
+
+    const line = logs.find((r) => String(r.message.join("")).includes("frames extracted="));
+    expect(line?.properties).toMatchObject({
+      frames: 12, // shown to the model
+      selected: 12, // chosen by it, 999 was never a frame
+      referenced: 8, // survived the `selected` cap
+      kept: 8, // copied to the served root
+      // And WHICH ones it chose — the four the cap refused are the difference
+      // between this list and what the stored text quotes.
+      selectedSeconds: extractTicks.join(","),
+    });
   });
 });
 

@@ -28,15 +28,18 @@ import { join, resolve } from "node:path";
 import {
   FALLBACK_CAPTURE_OPTIONS,
   FALLBACK_KIND_ID,
+  FALLBACK_VISUAL_DETAIL_ID,
   buildSummarizeBody,
   parseCaptureOptions,
   pickFrames,
   pickKind,
+  pickVisualDetail,
   restoredKindNote,
   type CaptureOptions,
 } from "./extension-options-rules.ts";
 import { EXTENSION_RULES_OUTPUT, buildExtensionRules } from "./extension-build.ts";
 
+/** An instance from BEFORE the visual-detail axis: kinds and frames, nothing else. */
 const SERVER_PAYLOAD = {
   kinds: [
     { id: "standard", label: "Standard" },
@@ -45,6 +48,19 @@ const SERVER_PAYLOAD = {
   ],
   default_kind: "standard",
   frames: { supported: true },
+};
+
+/** What this repo's own options endpoint answers. */
+const SERVER_PAYLOAD_V2 = {
+  ...SERVER_PAYLOAD,
+  visual_detail: {
+    supported: true,
+    default: "selected",
+    options: [
+      { id: "selected", label: "Selected" },
+      { id: "detailed", label: "Detailed" },
+    ],
+  },
 };
 
 describe("parseCaptureOptions", () => {
@@ -58,8 +74,46 @@ describe("parseCaptureOptions", () => {
       ],
       defaultKind: "standard",
       framesSupported: true,
+      // An instance with no visual-detail capability at all: no control, and no
+      // such field on the POST.
+      visualDetail: null,
       fromServer: true,
     });
+  });
+
+  test("the visual-detail capability is read when the instance offers one", () => {
+    expect(parseCaptureOptions(SERVER_PAYLOAD_V2)?.visualDetail).toEqual({
+      options: [
+        { id: "selected", label: "Selected" },
+        { id: "detailed", label: "Detailed" },
+      ],
+      defaultDetail: "selected",
+    });
+  });
+
+  test("every unusable visual-detail shape is null, and never a broken picker", () => {
+    // A control rendered from junk offers the reader a choice the route refuses.
+    for (const bad of [
+      undefined,
+      null,
+      "detailed",
+      {},
+      { supported: true },
+      { supported: true, options: [] },
+      { supported: true, options: {} },
+      { supported: true, options: [{ label: "Detailed" }] },
+      { supported: false, options: [{ id: "selected", label: "Selected" }] },
+    ]) {
+      expect(parseCaptureOptions({ ...SERVER_PAYLOAD, visual_detail: bad })?.visualDetail).toBeNull();
+    }
+  });
+
+  test("a visual-detail default the server does not offer falls back to the first row", () => {
+    const parsed = parseCaptureOptions({
+      ...SERVER_PAYLOAD,
+      visual_detail: { supported: true, default: "exhaustive", options: [{ id: "detailed", label: "D" }] },
+    });
+    expect(parsed?.visualDetail?.defaultDetail).toBe("detailed");
   });
 
   test("every unusable answer is null, so the popup can SAY it could not read them", () => {
@@ -111,6 +165,17 @@ describe("parseCaptureOptions", () => {
     expect(FALLBACK_CAPTURE_OPTIONS.kinds).toEqual([{ id: "standard", label: "Standard" }]);
     expect(FALLBACK_CAPTURE_OPTIONS.fromServer).toBe(false);
     expect(FALLBACK_CAPTURE_OPTIONS.defaultKind).toBe(FALLBACK_KIND_ID);
+  });
+
+  test("the fallback still OFFERS the visual choice — the `framesSupported` rule", () => {
+    // Hiding it whenever the options fetch fails removes a working control on
+    // every instance that has one, and the two policies are fixed by the
+    // server's code rather than narrowed per bot.
+    expect(FALLBACK_CAPTURE_OPTIONS.visualDetail?.options.map((o) => o.id)).toEqual([
+      "selected",
+      "detailed",
+    ]);
+    expect(FALLBACK_CAPTURE_OPTIONS.visualDetail?.defaultDetail).toBe(FALLBACK_VISUAL_DETAIL_ID);
   });
 });
 
@@ -193,11 +258,44 @@ describe("pickFrames", () => {
   });
 });
 
+describe("pickVisualDetail — the second axis, re-validated the same way", () => {
+  const options = parseCaptureOptions(SERVER_PAYLOAD_V2) as CaptureOptions;
+  const noCapability = parseCaptureOptions(SERVER_PAYLOAD) as CaptureOptions;
+
+  test("a remembered policy the instance offers is restored", () => {
+    expect(pickVisualDetail("detailed", options)).toBe("detailed");
+    expect(pickVisualDetail(" selected ", options)).toBe("selected");
+  });
+
+  test("anything the instance does not offer falls back to its default, never a 400", () => {
+    for (const stored of [undefined, null, "", "   ", "exhaustive", 7, {}, true]) {
+      expect(pickVisualDetail(stored, options)).toBe("selected");
+    }
+  });
+
+  test("an instance with no such capability answers null — the signal to send no field", () => {
+    expect(pickVisualDetail("detailed", noCapability)).toBeNull();
+    expect(pickVisualDetail(undefined, noCapability)).toBeNull();
+  });
+});
+
 describe("buildSummarizeBody", () => {
   test("the two coercions the route 400s on", () => {
     expect(
       buildSummarizeBody({ title: "T", url: "https://x/y", videoId: "dQw4w9WgXcQ", kind: "deep", frames: true }),
     ).toEqual({ title: "T", url: "https://x/y", video_id: "dQw4w9WgXcQ", kind: "deep", frames: true });
+  });
+
+  test("a visual detail rides along when there is one, and is ABSENT when there is not", () => {
+    // Absent rather than blank: the route refuses a present key holding
+    // something it does not offer, and reads an absent one as the default.
+    const withDetail = buildSummarizeBody({ url: "u", videoId: "v", visualDetail: " detailed " });
+    expect(withDetail.visual_detail).toBe("detailed");
+    for (const detail of [undefined, null, "", "   ", 7, {}, true]) {
+      const body = buildSummarizeBody({ url: "u", videoId: "v", visualDetail: detail });
+      expect("visual_detail" in body).toBe(false);
+      expect("visual_detail" in JSON.parse(JSON.stringify(body))).toBe(false);
+    }
   });
 
   test("a missing kind is the default id, never an absent key", () => {

@@ -53,6 +53,14 @@ const SERVER_OPTIONS = {
   ],
   default_kind: "standard",
   frames: { supported: true },
+  visual_detail: {
+    supported: true,
+    default: "selected",
+    options: [
+      { id: "selected", label: "Selected" },
+      { id: "detailed", label: "Detailed" },
+    ],
+  },
 };
 
 const LABEL_TITLE = "Pull one frame per cadence tick and quote the slides.";
@@ -82,7 +90,10 @@ interface StubEl {
 }
 
 function makeEl(id: string): StubEl {
-  const classes = new Set<string>(id === "video-info" || id === "not-video" ? ["hidden"] : []);
+  // The ids `popup.html` renders with `class="hidden"`.
+  const classes = new Set<string>(
+    ["video-info", "not-video", "lbl-visual"].includes(id) ? ["hidden"] : [],
+  );
   const el: StubEl = {
     id,
     textContent: "",
@@ -122,6 +133,8 @@ const NODE_IDS = [
   "sel-kind",
   "chk-frames",
   "lbl-frames",
+  "sel-visual",
+  "lbl-visual",
   "options-note",
   "frames-note",
   "video-info",
@@ -139,11 +152,16 @@ interface DriveOptions {
   stored?: Record<string, unknown>;
   /** Whether the summarizer bot's connector can read frames. */
   framesSupported?: boolean;
+  /** Answer without the visual-detail capability — a Muninn from before it existed. */
+  noVisualDetail?: boolean;
   /** Ids to leave OFF the page. */
   missing?: string[];
   /**
-   * Which `document.createElement` calls throw, 1-based. The synchronous
-   * fallback paint is call 1; the settle paint is 2..n; the retry follows.
+   * Which `document.createElement` calls throw, 1-based, counting EVERY option
+   * element a paint builds — the kind rows and then the visual-detail rows. The
+   * synchronous fallback paint runs first (1 kind + 2 visual = calls 1-3), the
+   * settle paint next, and the retry after that. Adding a picker moves these
+   * indices, which is why the cases below say which paint they mean.
    */
   throwOnCreateCalls?: number[];
 }
@@ -220,10 +238,11 @@ async function drivePopup(opts: DriveOptions): Promise<Driven> {
     return realSetTimeout(fn, 1);
   });
 
-  const serverPayload = {
+  const serverPayload: Record<string, unknown> = {
     ...SERVER_OPTIONS,
     frames: { supported: opts.framesSupported ?? true },
   };
+  if (opts.noVisualDetail) delete serverPayload.visual_detail;
 
   installGlobal("chrome", {
     runtime: {
@@ -423,13 +442,13 @@ describe("the popup settles onto controls that match what a click submits", () =
   });
 
   test("a paint that throws is repainted from the fallback, enabled, with a note", async () => {
-    // Call 1 is the synchronous fallback paint; call 2 is the settle paint's
-    // first option element.
+    // Calls 1-3 are the synchronous fallback paint (Standard + the two visual
+    // rows); call 4 is the settle paint's first option element.
     const d = await drivePopup({
       options: "server",
       storage: "answers",
       stored: { summaryKind: "deep" },
-      throwOnCreateCalls: [2],
+      throwOnCreateCalls: [4],
     });
     d.fireDomReady();
     await d.settleTimers();
@@ -444,7 +463,7 @@ describe("the popup settles onto controls that match what a click submits", () =
     const d = await drivePopup({
       options: "server",
       storage: "answers",
-      throwOnCreateCalls: [1, 2, 3, 4, 5, 6],
+      throwOnCreateCalls: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     });
     d.fireDomReady();
     await d.settleTimers();
@@ -492,6 +511,84 @@ describe("the popup settles onto controls that match what a click submits", () =
     expect(d.node("chk-frames").checked).toBe(false);
     expect(d.node("frames-note").textContent).toContain("cannot read frames");
     expect(d.node("lbl-frames").title).toContain("cannot read frames");
+  });
+
+  test("the Visuals row is hidden until Slides is ticked, and revealed the moment it is", async () => {
+    const d = await drivePopup({ options: "server", storage: "answers" });
+    d.fireDomReady();
+    await d.settleTimers();
+
+    // Slides default OFF, so there is nothing to choose between yet.
+    expect(d.node("chk-frames").checked).toBe(false);
+    expect(d.node("lbl-visual").classes.has("hidden")).toBe(true);
+    expect(d.node("sel-visual").children.map((o) => o.value)).toEqual(["selected", "detailed"]);
+
+    d.node("chk-frames").checked = true;
+    d.node("chk-frames").fire("change");
+    expect(d.node("lbl-visual").classes.has("hidden")).toBe(false);
+  });
+
+  test("a remembered visual detail is restored and SUBMITTED", async () => {
+    const d = await drivePopup({
+      options: "server",
+      storage: "answers",
+      stored: { frames: true, visualDetail: "detailed" },
+    });
+    d.fireDomReady();
+    await d.settleTimers();
+
+    expect(d.node("sel-visual").value).toBe("detailed");
+    // Slides came back ticked, so the row that explains itself is on screen.
+    expect(d.node("lbl-visual").classes.has("hidden")).toBe(false);
+
+    d.node("btn-summarize").fire("click");
+    await d.settleTimers();
+    expect(d.sent.find((m) => m.type === "SUMMARIZE")).toMatchObject({
+      frames: true,
+      visualDetail: "detailed",
+    });
+  });
+
+  test("an instance that offers no such choice renders no row and submits no value", async () => {
+    const d = await drivePopup({
+      options: "server",
+      storage: "answers",
+      noVisualDetail: true,
+      stored: { frames: true, visualDetail: "detailed" },
+    });
+    d.fireDomReady();
+    await d.settleTimers();
+
+    // Ticked Slides and a remembered policy, and still no row: that Muninn would
+    // ignore the field, so a control here is a choice nothing acts on.
+    expect(d.node("chk-frames").checked).toBe(true);
+    expect(d.node("lbl-visual").classes.has("hidden")).toBe(true);
+
+    d.node("btn-summarize").fire("click");
+    await d.settleTimers();
+    expect(d.sent.find((m) => m.type === "SUMMARIZE")).toMatchObject({ visualDetail: null });
+  });
+
+  test("changing the Visuals picker is remembered, and only after the reads settle", async () => {
+    const d = await drivePopup({
+      options: "never",
+      storage: "answers",
+      stored: { visualDetail: "detailed" },
+    });
+    d.fireDomReady();
+    await d.microtasks();
+
+    // Pre-settle the picker is this instance's default, so a stray change must
+    // not write it over the remembered value — the kind rule, same reason.
+    d.node("sel-visual").fire("change");
+    await d.microtasks();
+    expect(d.saved).toEqual([]);
+
+    await d.settleTimers();
+    d.node("sel-visual").value = "detailed";
+    d.node("sel-visual").fire("change");
+    await d.microtasks();
+    expect(d.saved).toEqual([{ visualDetail: "detailed" }]);
   });
 });
 

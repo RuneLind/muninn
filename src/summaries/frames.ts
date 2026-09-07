@@ -107,6 +107,40 @@ export function frameSourceByName(name: string): FrameSource | undefined {
 export const MAX_INLINE_SLIDES = 8;
 
 /**
+ * A vertical's own rules for how many frames a summary may quote and how it is
+ * told to quote them — the OPT-IN half of {@link framesPromptSection}.
+ *
+ * The default (no policy) is the wording every caller has always had, so Vimeo,
+ * TikTok and a frames-off capture are byte-identical without one. YouTube opts
+ * in (`src/summaries/visual-detail.ts`), because its Selected/Detailed choice is
+ * two different rubrics over the same frame list.
+ *
+ * `rules` is the paragraph that replaces the default one, spelled by the policy
+ * rather than assembled here: a policy that stated its caps in prose and handed
+ * over different numbers would be two sources of truth for one bound. The caps
+ * ride along so the DETERMINISTIC pass that trims the model's answer reads the
+ * same object the prompt was built from.
+ */
+export interface FramesPromptPolicy {
+  /** Most frames quoted INLINE. Never above {@link MAX_INLINE_SLIDES}. */
+  readonly maxInline: number;
+  /** Most DISTINCT frames in the whole summary, an appendix included. */
+  readonly maxTotal: number;
+  /** The rules paragraph, already carrying both caps and the address shape. */
+  readonly rules: string;
+}
+
+/**
+ * The markdown a summary quotes a frame by, with `<sec>` left as a placeholder
+ * — the ONE spelling of that line, shared by the default prompt section and by
+ * every policy's rules, so a policy can never teach the model a second address
+ * shape. Built from {@link frameUrlPath}, i.e. from the route's own layout.
+ */
+export function frameQuoteTemplate(source: FrameSource, id: string): string {
+  return `![Slide at HH:MM:SS](${frameUrlPath(source, id, 0).replace(/0\.jpg$/, "<sec>.jpg")})`;
+}
+
+/**
  * The height every vertical's frames are scaled to.
  *
  * 720p: a slide's text is legible there, and 1080p is ~1.6× the bytes and
@@ -245,27 +279,42 @@ export function frameUrlPath(source: FrameSource, id: string, tSeconds: number):
  * gap — because the cadence is not a constant: `frameBudgetFor` gives 30 frames
  * over a 10-minute talk (20 s apart) and 60 over a 3-hour one (180 s apart), so
  * a fixed "~40 s" was wrong at both ends.
+ *
+ * **`policy` is opt-in and changes only the rules paragraph.** Called without
+ * one — Vimeo, and every existing caller — the section is byte-identical to the
+ * one that shipped before policies existed; a test pins that. A policy may not
+ * raise the inline cap: {@link MAX_INLINE_SLIDES} is the seam's bound, and a
+ * vertical asking for more is a THROW rather than a summary that is a slide
+ * deck.
  */
 export function framesPromptSection(
   source: FrameSource,
   id: string,
   frames: readonly CaptureFrame[],
+  policy?: FramesPromptPolicy,
 ): string {
   if (frames.length === 0) return "";
   assertFrameId(source, id);
+  if (policy && policy.maxInline > MAX_INLINE_SLIDES) {
+    throw new Error(
+      `A frames prompt policy may quote at most ${MAX_INLINE_SLIDES} frames inline, not ${policy.maxInline}`,
+    );
+  }
   const list = frames.map((f) => `t=${formatHms(f.tSeconds)} ${f.path}`).join("\n");
   const spacing = medianGapSec(frames);
   const cadence = spacing === null ? "" : `, one every ~${spacing} s of the talk`;
+  const rules =
+    policy?.rules ??
+    `When a frame shows a slide that ADDS something the transcript did not say — a diagram, code, a table, ` +
+      `a number, a definition on screen — quote it as an image IN PLACE in the summary, right where the point ` +
+      `it illustrates is made, using EXACTLY this markdown and nothing else in the alt text:\n` +
+      `${frameQuoteTemplate(source, id)}\n` +
+      `where <sec> is the integer in that frame's file name (t=00:23:10 is the file 1390.jpg) and HH:MM:SS is ` +
+      `its time. At most ${MAX_INLINE_SLIDES} slides in the whole summary; a speaker-only frame, a title card ` +
+      `or a slide the transcript already states in full is not quoted. Never invent a path.`;
   return (
     `\n\nSlide frames${cadence} (read EVERY image below with the Read tool FIRST, ` +
-    `batching many Read calls into one turn — never one frame per message):\n${list}\n\n` +
-    `When a frame shows a slide that ADDS something the transcript did not say — a diagram, code, a table, ` +
-    `a number, a definition on screen — quote it as an image IN PLACE in the summary, right where the point ` +
-    `it illustrates is made, using EXACTLY this markdown and nothing else in the alt text:\n` +
-    `![Slide at HH:MM:SS](${frameUrlPath(source, id, 0).replace(/0\.jpg$/, "<sec>.jpg")})\n` +
-    `where <sec> is the integer in that frame's file name (t=00:23:10 is the file 1390.jpg) and HH:MM:SS is ` +
-    `its time. At most ${MAX_INLINE_SLIDES} slides in the whole summary; a speaker-only frame, a title card ` +
-    `or a slide the transcript already states in full is not quoted. Never invent a path.`
+    `batching many Read calls into one turn — never one frame per message):\n${list}\n\n${rules}`
   );
 }
 

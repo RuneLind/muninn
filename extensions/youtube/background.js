@@ -85,19 +85,20 @@ async function handleGetOptions() {
   return { options: await response.json() };
 }
 
-async function handleSummarize({ title, url, videoId, kind, frames }) {
+async function handleSummarize({ title, url, videoId, kind, frames, visualDetail }) {
   const settings = await getSettings();
 
   // Submit to Muninn — it handles transcript, summarization, indexing
   const response = await fetch(`${settings.muninnUrl}/api/youtube/summarize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    // `frames` and `kind` are coerced here rather than trusted from the popup
-    // message: the route refuses a non-boolean with 400 `bad_frames` and an
-    // unoffered id with 400 `bad_kind`. An older popup sends neither — which is
+    // `frames`, `kind` and `visual_detail` are coerced here rather than trusted
+    // from the popup message: the route refuses a non-boolean with 400
+    // `bad_frames`, an unoffered id with 400 `bad_kind` and an unoffered policy
+    // with 400 `bad_visual_detail`. An older popup sends none of them — which is
     // today's transcript-only Standard capture, exactly as before.
     body: JSON.stringify(
-      buildSummarizeBody({ title, url, videoId, kind, frames }),
+      buildSummarizeBody({ title, url, videoId, kind, frames, visualDetail }),
     ),
   });
 
