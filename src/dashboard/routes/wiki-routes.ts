@@ -62,6 +62,7 @@ import {
   enforceEditBounds,
   hasSourcesSection,
   integrateBodyLen,
+  pageHasComponentVocabulary,
   dropLinkCrossingCorrections,
   maxChangedChars,
   neutralizeFactcheckSentinels,
@@ -2192,9 +2193,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     let annotatable = false;
     // The SYNTAX half of the same derivation — whether `promptMaskBody` should hide
     // component TAG markup from claim extraction. Kept separate from `annotatable`
-    // (a policy call that happens to share the extension test today) and from the
-    // inline `endsWith` the body-length measure used, so extraction and integrate
-    // mask the same page the same way.
+    // (a policy call over the same extension) and derived by the ONE shared
+    // predicate, over the DISK bytes, so extraction and integrate mask the same
+    // page the same way — `.md` pages carrying an authored component included.
+    // EXPLAINERS ARE EXCLUDED: their disk bytes are HTML, and the probe is a
+    // line-anchored tag test, so an HTML line shaped like a block-component tag
+    // would flip the flag and mask real content out of the extractor's view. An
+    // explainer is never integrable, so there is nothing the flag could buy there.
     let isMdx = false;
     if (!preflightError && entry && index && meta) {
       // Explainers are HTML on disk; reduce to prose so claim extraction / the
@@ -2210,7 +2215,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // Measured on the WRAPPER-STRIPPED body, because that is what the integrate
       // route resolves against — the two must be the same number or the client
       // budgets a "too long" verdict the server would never reach.
-      isMdx = meta.relPath.endsWith(".mdx");
+      isMdx = meta.type !== "explainer" && pageHasComponentVocabulary(meta.relPath, raw);
       if (meta.type !== "explainer") {
         bodyLen = integrateBodyLen(stripFactWrappers(raw), isMdx);
       }
@@ -3654,7 +3659,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         return c.json({ error: "page changed since the fact check", stale: true }, 409);
       }
 
-      const isMdx = meta.relPath.endsWith(".mdx");
+      const isMdx = pageHasComponentVocabulary(meta.relPath, current);
       // STRIP → resolve → splice. Every prior `<Fact>` wrapper comes off before the
       // model sees the page and before any offset is resolved, so (a) the anchors
       // the model quotes exist in the body we resolve against, and (b) a re-run
@@ -3967,7 +3972,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       }
 
       const current = (await readWikiPage(resolved.index, meta)) ?? "";
-      const isMdx = meta.relPath.endsWith(".mdx");
+      const isMdx = pageHasComponentVocabulary(meta.relPath, current);
       const bodyLen = integrateBodyLen(stripFactWrappers(current), isMdx);
       // Same cap + same copy as propose — apply must not be a way around it.
       if (bodyLen > INTEGRATE_BODY_MAX) {

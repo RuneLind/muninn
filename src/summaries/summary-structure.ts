@@ -45,10 +45,12 @@
  *
  * Two review rounds were spent trying to carve markup OUT of that hazard, and
  * the enumeration is why the attempt was abandoned rather than narrowed again:
- * `COMPONENT_NAMES` registers FIFTEEN components and a denylist naming six left
- * nine live — measured by driving `formatWebHtml` over every registered name
- * inside an unclosed fence: PAIRED (`<X>body</X>`) all 15 are consumed, none
- * escaped; self-closing only 4 are — and a sixteenth would go stale silently.
+ * a denylist naming some component tags leaves every other one live. Re-measured
+ * by driving `formatWebHtml` over EVERY name in `COMPONENT_NAMES` inside an
+ * unclosed fence: the PAIRED form (`<X>body</X>`) is consumed for all of them,
+ * none escaped, and the self-closing form for exactly `SELF_CLOSING_ALLOWED`.
+ * This sentence deliberately carries no counts — the vocabulary grows, the
+ * previous spelling pinned six numbers, and it was stale before it was next read.
  * So there is no markup exemption at all: "plain markdown only" applies
  * everywhere, which is what keeps component markup out of the output in the
  * first place, and a source dictating markup is described rather than quoted.

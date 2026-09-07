@@ -410,11 +410,19 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).toContain('<span class="meter-value">4/5</span>');
   });
 
-  test("Meter at depth 2 degrades to escaped text (component depth cap)", () => {
+  test("Meter at depth 2 still renders (the cap is 3)", () => {
     const out = formatWebHtml(
       "<Callout tone=\"info\">\n<Callout tone=\"warn\">\n<Meter value=\"4\" max=\"5\">Focus</Meter>\n</Callout>\n</Callout>",
     );
-    // Two nested components put the Meter at depth 2, past MAX_COMPONENT_DEPTH.
+    expect(out).toContain('<div class="meter">');
+    expect(out).toContain('<span class="meter-value">4/5</span>');
+  });
+
+  test("Meter at depth 3 degrades to escaped text (component depth cap)", () => {
+    const out = formatWebHtml(
+      "<Fold title=\"F\">\n<Callout tone=\"info\">\n<Callout tone=\"warn\">\n<Meter value=\"4\" max=\"5\">Focus</Meter>\n</Callout>\n</Callout>\n</Fold>",
+    );
+    // Three nested components put the Meter at depth 3, past MAX_COMPONENT_DEPTH.
     expect(out).toContain("&lt;Meter");
     expect(out).not.toContain('<span class="meter-fill"');
   });
@@ -537,11 +545,21 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).not.toContain('<div class="code-tabs-bar"');
   });
 
-  test("CodeTabs nested past the depth cap degrades: Tab is text, fallback shown", () => {
-    // Callout(0) → CodeTabs(1) → Tab(2). Tab at depth 2 is not parsed as a
-    // component, so CodeTabs sees zero Tab children → visible fallback, not raw tags.
+  test("CodeTabs one level down renders its tabs (Callout → CodeTabs → Tab)", () => {
+    // Callout(0) → CodeTabs(1) → Tab(2), all under the cap of 3 — the whole point
+    // of the raise, since a fold around a section spends a level of its own.
     const out = formatWebHtml(
       "<Callout>\n<CodeTabs>\n<Tab label=\"A\">\nx\n</Tab>\n</CodeTabs>\n</Callout>",
+    );
+    expect(out).toContain('<button class="code-tabs-tab is-active" type="button">A</button>');
+    expect(out).not.toContain('<div class="code-tabs-fallback">');
+  });
+
+  test("CodeTabs nested past the depth cap degrades: Tab is text, fallback shown", () => {
+    // Fold(0) → Callout(1) → CodeTabs(2) → Tab(3). Tab at depth 3 is not parsed as
+    // a component, so CodeTabs sees zero Tab children → visible fallback, not raw tags.
+    const out = formatWebHtml(
+      "<Fold title=\"F\">\n<Callout>\n<CodeTabs>\n<Tab label=\"A\">\nx\n</Tab>\n</CodeTabs>\n</Callout>\n</Fold>",
     );
     expect(out).toContain('<div class="code-tabs-fallback">');
     expect(out).toContain("&lt;Tab");
@@ -589,9 +607,65 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).not.toContain('<div class="annotated-code">');
   });
 
+  // ── Fold ───────────────────────────────────────────────────────────────────
+
+  test("Fold renders a CLOSED details with its title in the summary", () => {
+    const out = formatWebHtml('<Fold title="What was measured">\n\nprose\n\n</Fold>');
+    expect(out).toBe(
+      '<details class="fold"><summary>What was measured</summary>' +
+        '<div class="fold-body">\nprose\n</div></details>',
+    );
+  });
+
+  test('Fold with open="true" renders the details open', () => {
+    const out = formatWebHtml('<Fold title="Current state" open="true">\n\nprose\n\n</Fold>');
+    expect(out).toContain('<details class="fold" open>');
+  });
+
+  test("any other `open` value leaves the fold closed", () => {
+    // `open="true"` is the ONE spelling. A bare `open` is not even a component tag
+    // in this grammar (COMPONENT_OPEN_RE requires double-quoted attrs).
+    expect(formatWebHtml('<Fold title="T" open="1">\n\nx\n\n</Fold>')).toContain('<details class="fold">');
+    expect(formatWebHtml('<Fold title="T" open>\n\nx\n\n</Fold>')).toContain("&lt;Fold");
+  });
+
+  test("an empty title renders `Details`, and a title is escaped", () => {
+    expect(formatWebHtml("<Fold>\n\nx\n\n</Fold>")).toContain("<summary>Details</summary>");
+    expect(formatWebHtml('<Fold title="a <b> tag">\n\nx\n\n</Fold>')).toContain(
+      "<summary>a &lt;b&gt; tag</summary>",
+    );
+  });
+
+  test("a first heading equal to the title is marked as the duplicate, others are not", () => {
+    const out = formatWebHtml(
+      '<Fold title="What was measured">\n\n## What was measured\n\nprose\n\n### Detail\n\n</Fold>',
+    );
+    expect(out).toContain('<h3 class="fold-heading-dup">What was measured</h3>');
+    expect(out).toContain("<h4>Detail</h4>");
+    expect(out).toContain("prose");
+  });
+
+  test("a first heading that DIFFERS from the title renders normally", () => {
+    const out = formatWebHtml('<Fold title="Measurements">\n\n## What was measured\n\nprose\n\n</Fold>');
+    expect(out).toContain("<h3>What was measured</h3>");
+    expect(out).not.toContain("fold-heading-dup");
+  });
+
+  test("a heading that is not the FIRST block is never marked, even if it matches", () => {
+    const out = formatWebHtml('<Fold title="Notes">\n\nlead\n\n## Notes\n\n</Fold>');
+    expect(out).not.toContain("fold-heading-dup");
+    expect(out).toContain("<h3>Notes</h3>");
+  });
+
+  test("unclosed Fold degrades to escaped text (no details)", () => {
+    const out = formatWebHtml('<Fold title="T">\nno close here');
+    expect(out).toContain("&lt;Fold");
+    expect(out).not.toContain("<details");
+  });
+
   // Folded from the #306 review: components NOT in SELF_CLOSING_ALLOWED that are
   // written self-closing fall through to text and render as escaped tags.
-  test.each(["Diff", "FileTree", "Checklist", "AnnotatedCode", "CodeTabs", "Tab"])(
+  test.each(["Diff", "FileTree", "Checklist", "AnnotatedCode", "CodeTabs", "Tab", "Fold"])(
     "self-closing <%s/> is not allowed → escaped text",
     (tag) => {
       const out = formatWebHtml(`<${tag}/>`);

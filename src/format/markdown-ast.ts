@@ -49,6 +49,7 @@ export const COMPONENT_NAMES = [
   "Fact",
   "FactCheck",
   "Embed",
+  "Fold",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -92,11 +93,25 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // A markdown page embedding a standalone `.html` explainer in its body
   // (`src/format/embed.ts` owns the gate on these values).
   Embed: ["src", "height", "title"],
+  // A collapsible section — the wiki plan-page convention's fold. `open="true"`
+  // (double-quoted, like every attribute this grammar parses) renders it
+  // expanded; a bare `open` is not a component tag at all and the section
+  // degrades to visible escaped text.
+  Fold: ["title", "open"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
- *  current depth is below this; at the cap, inner tags degrade to plain text. */
-const MAX_COMPONENT_DEPTH = 2;
+ *  current depth is below this; at the cap, inner tags degrade to plain text.
+ *
+ *  3, not 2, since `Fold`: a fold wrapping a section costs every component in it
+ *  one level, so at 2 a `<CodeTabs><Tab>` inside a fold would render as a
+ *  fallback panel the same markup renders fine outside one. The cap exists for
+ *  the chat's per-delta re-render, so the extra level was measured rather than
+ *  assumed (`scripts/bench-component-depth.ts`, a plan-shaped page replayed as
+ *  200 growing prefixes): the two caps land within a few percent of each other
+ *  and the SIGN flips between replays, at ~0.1–0.25 ms per delta either way.
+ *  Measured 2026-09-07 — no direction is claimed, because none held up. */
+const MAX_COMPONENT_DEPTH = 3;
 
 // Anchored to the start of a (trimmed) line and gated on a leading `<`, so the
 // common case (a line not starting with `<`) fails the match cheaply — the
@@ -111,13 +126,34 @@ const ATTR_RE = /([A-Za-z][\w-]*)="([^"]*)"/g;
  * (query stripping) and `src/wiki/integrate-edits.ts` (exclusion-zone masking)
  * both derive from it rather than hand-rolling a third variant that drifts.
  *
- * Attributes are matched loosely (`[^>]*`) on purpose. {@link COMPONENT_OPEN_RE}
- * requires DOUBLE-QUOTED attrs because it also has to parse them; a masker only
- * has to find the tag's extent, and a stricter pattern would half-match
+ * Attributes are matched loosely (`[^>]*`) on purpose. This variant is NOT
+ * given the single-line one's quote awareness below — not because that would
+ * run away (measured: the loose tail already matches across lines up to the next
+ * `>`, and the single-line tail ported here matches nothing on an unclosed
+ * quote), but because its consumers (`similar.ts`, `store.ts`) strip tags for
+ * search text where over-matching is harmless, and narrowing it is a separate
+ * change with its own corpus sweep. {@link COMPONENT_OPEN_RE} requires
+ * DOUBLE-QUOTED attrs because it also has to parse them; a masker only has to
+ * find the tag's extent, and a stricter pattern would half-match
  * `<Callout tone={x}>` — masking the name but leaving `tone={x}>` editable prose,
  * which is exactly the corruption the mask exists to prevent.
  */
 export const COMPONENT_TAG_SOURCE = componentTagSource("[^>]*");
+
+/**
+ * The single-line attribute tail: either a whole double-quoted value (which may
+ * contain `>`, since {@link COMPONENT_OPEN_RE} admits any non-`"` there) or one
+ * ordinary character that is neither `>`, `"` nor a newline.
+ *
+ * A plain `[^>\n]*` stopped at the first `>` whatever quoted it, so
+ * `<Fold title="Before > after">` zoned only `<Fold title="Before >` and left
+ * ` after">` as editable prose — an accepted edit could rewrite it and break the
+ * tag. A line whose quote is never closed now fails the match entirely, which is
+ * correct: it is not a component tag either, so it renders as escaped text and is
+ * ordinary prose. The two branches are disjoint on their first character, so the
+ * alternation cannot backtrack quadratically.
+ */
+const SINGLE_LINE_ATTR_TAIL = '(?:"[^"\\n]*"|[^>"\\n])*';
 
 /**
  * Single-line variant of {@link COMPONENT_TAG_SOURCE}: the attribute tail may not
@@ -127,10 +163,21 @@ export const COMPONENT_TAG_SOURCE = componentTagSource("[^>]*");
  * whatever this matches, so a runaway match would silently mark editable prose
  * (and even a blockquote marker) uneditable.
  */
-export const COMPONENT_TAG_SOURCE_SINGLE_LINE = componentTagSource("[^>\\n]*");
+export const COMPONENT_TAG_SOURCE_SINGLE_LINE = componentTagSource(SINGLE_LINE_ATTR_TAIL);
 
-function componentTagSource(attrTail: string): string {
-  return `</?(?:${COMPONENT_NAMES.join("|")})\\b${attrTail}>`;
+/**
+ * {@link COMPONENT_TAG_SOURCE_SINGLE_LINE} narrowed to a SUBSET of the
+ * vocabulary. Exported so a caller that must exclude some names still derives
+ * the TAG SHAPE from here rather than hand-rolling a fourth variant that drifts
+ * — `src/wiki/integrate-edits.ts` builds its "did a person author a component on
+ * this page?" probe from every name but the two the fact-check path writes.
+ */
+export function componentTagSourceSingleLine(names: readonly ComponentName[]): string {
+  return componentTagSource(SINGLE_LINE_ATTR_TAIL, names);
+}
+
+function componentTagSource(attrTail: string, names: readonly string[] = COMPONENT_NAMES): string {
+  return `</?(?:${names.join("|")})\\b${attrTail}>`;
 }
 
 /** Normalize an untrusted `tone` attr for Callout to the four known tones. */

@@ -1,7 +1,7 @@
 /**
  * CSS for the component block vocabulary (Callout, Verdict, Pill, Figure,
  * FileRef, ComparisonTable, Meter, Diff, FileTree, Checklist, AnnotatedCode,
- * CodeTabs + its Tab child), scoped to a caller-supplied selector.
+ * CodeTabs + its Tab child, Fold), scoped to a caller-supplied selector.
  *
  * The class names and markup mirror mimir's MDX explainer set
  * (`scripts/mdx-explainer/components.tsx` + `template.ts`) so the vocabulary
@@ -78,6 +78,33 @@ export function componentBlockCss(scope: string): string {
     ${scope} .figure img { max-width: 100%; height: auto; }
     ${scope} .embed { margin: 1.4rem 0; }
     ${scope} .embed-fallback { color: var(--text-muted); font-size: 0.9em; margin: 0; }
+    ${scope} .fold {
+      margin: 1.4rem 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 10px;
+      background: var(--bg-surface);
+    }
+    ${scope} .fold > summary {
+      cursor: pointer;
+      padding: 0.55rem 0.9rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      border-radius: 10px;
+    }
+    ${scope} .fold > summary:hover { color: var(--accent-light); }
+    ${scope} .fold > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    ${scope} .fold[open] > summary {
+      border-bottom: 1px solid var(--border-secondary);
+      border-radius: 10px 10px 0 0;
+    }
+    ${scope} .fold-body { padding: 0.2rem 1rem 0.9rem; }
+    ${scope} .fold-body > :first-child { margin-top: 0.6rem; }
+    ${scope} .fold-body > :last-child { margin-bottom: 0; }
+    /* The section heading the fold's own title repeats. Hidden, not removed —
+       the reader's Explain helper finds a selection's section by walking back to
+       a heading tag, so dropping the element would move every following
+       paragraph into the previous section. */
+    ${scope} .fold-heading-dup { display: none; }
     ${scope} .diagram {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

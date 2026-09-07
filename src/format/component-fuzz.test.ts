@@ -239,6 +239,53 @@ describe("component fuzz — never throws, never injects", () => {
     expect(out.slack).not.toContain("— A —");
   });
 
+  test("an unclosed Fold degrades to text on every platform", () => {
+    const md = '<Fold title="What was measured">\nleft open forever\nmore lines';
+    const out = format(md);
+    expect(out.web).toContain("&lt;Fold");
+    expect(out.web).not.toContain("<details");
+    expect(out.telegram).toContain("&lt;Fold");
+    expect(out.slack).toContain("left open forever");
+    expect(() => format(md)).not.toThrow();
+  });
+
+  test("Fold > CodeTabs > Tab renders tabs; one level further degrades", () => {
+    // The depth-3 cap, from both sides: the raise exists so a fold is transparent
+    // to the two-level vocabulary, and it is still a cap.
+    const ok = format('<Fold title="T">\n<CodeTabs>\n<Tab label="A">\nx\n</Tab>\n</CodeTabs>\n</Fold>');
+    expect(ok.web).toContain('<button class="code-tabs-tab is-active" type="button">A</button>');
+    expect(ok.web).not.toContain('<div class="code-tabs-fallback">');
+
+    const past = format(
+      '<Fold title="T">\n<Callout>\n<CodeTabs>\n<Tab label="A">\nx\n</Tab>\n</CodeTabs>\n</Callout>\n</Fold>',
+    );
+    expect(past.web).toContain('<div class="code-tabs-fallback">');
+    expect(past.web).toContain("&lt;Tab");
+    expect(past.web).not.toContain('<button class="code-tabs-tab');
+  });
+
+  test("a Fold title cannot inject markup on any platform", () => {
+    // The title must actually REACH a renderer for this to say anything: an
+    // earlier fixture carried trailing junk after the tag's `>`, so it never
+    // parsed as a component at all (parseBlocks → text) and every assertion here
+    // was about escaped source text. This one parses, and the markup is in the
+    // ATTRIBUTE, which is where a title's markup would come from.
+    const md = '<Fold title="a <b>x</b> &amp; y">\n\nbody\n\n</Fold>';
+    expect(parseBlocks(md)[0]?.type).toBe("component");
+    const out = format(md);
+    // Web: the summary carries the title as ESCAPED TEXT, tags and entity alike.
+    expect(out.web).toContain("<summary>a &lt;b&gt;x&lt;/b&gt; &amp;amp; y</summary>");
+    expect(out.web).not.toContain("<b>x");
+    // Telegram: escaped inside the run-in bold it renders the title as.
+    expect(out.telegram).toContain("a &lt;b&gt;x&lt;/b&gt; &amp;amp; y");
+    expect(out.telegram).not.toContain("<b>x");
+    // Slack is mrkdwn, not HTML: `renderInline` converts the tags away rather
+    // than escaping them, so no HTML tag survives to be injected anywhere.
+    expect(out.slack).not.toContain("<b>");
+    expect(out.slack).toContain("y");
+    for (const s of [out.web, out.telegram, out.slack]) expect(s).not.toContain("<script>");
+  });
+
   test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
     const depth = 50;
     const md = `${"<Callout>\n".repeat(depth)}core${"\n</Callout>".repeat(depth)}`;

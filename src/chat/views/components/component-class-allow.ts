@@ -63,6 +63,11 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "fc-chip", "fc-chip-ok", "fc-chip-warn", "fc-chip-bad", "fc-chip-unknown", "fc-chip-label",
   "fc-block", "fc-block-body", "fc-strip", "fc-strip-lead",
   "fc-count", "fc-count-ok", "fc-count-warn", "fc-count-bad", "fc-claim",
+  // `<Fold>` — a `details` whose body is ordinary prose. `fold-heading-dup` is
+  // the one that carries behaviour rather than looks: it is the ONLY thing
+  // hiding the section heading a fold's title repeats, so a stripped class
+  // renders the same words twice in chat and once in the reader.
+  "fold", "fold-body", "fold-heading-dup",
   // Syntax highlighting. Imported from the module that EMITS them rather than
   // retyped: a `tok-*` class added there and forgotten here renders colorless
   // in chat while looking perfect in /wiki — a bug visible on one surface only.

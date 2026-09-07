@@ -720,32 +720,44 @@ describe("claimExtractionText", () => {
     expect(out.length).toBeLessThanOrEqual(200);
   });
 
-  test("the ROUTE passes isMdx — the one line no behavioural test can reach", () => {
+  test("the ROUTE derives isMdx with the shared predicate, over the disk bytes", () => {
     // Every test above hands `isMdx` in directly, so dropping the field at the call
-    // site (or passing `annotatable`, the POLICY twin of the same extension test)
-    // would leave component tags visible to the extractor with nothing failing. The
-    // handler builds its opts inside a Hono route and cannot be driven from a unit
-    // test, so this is a SOURCE assertion — the house pattern already used to refuse
-    // a bare `fetch(` under `src/chat/views/` and a bare `postgres()` under `src/`.
-    // It pins the wiring's existence, not its value; the derivation itself is the
-    // same `endsWith(".mdx")` the integrate route uses two functions away.
+    // site (or passing `annotatable`, the POLICY twin) would leave component tags
+    // visible to the extractor with nothing failing. The handler builds its opts
+    // inside a Hono route and cannot be driven from a unit test, so this is a
+    // SOURCE assertion — the house pattern already used to refuse a bare `fetch(`
+    // under `src/chat/views/` and a bare `postgres()` under `src/`.
+    //
+    // Three things about the DERIVATION are pinned here for the same reason. It is
+    // the shared `pageHasComponentVocabulary`, not an inline `endsWith`: a `.md`
+    // plan page carries folds too, and the renderer never reads the extension. Its
+    // second argument is `raw` — the CAS-pinned disk bytes — never a stripped
+    // derivative, so this route's `bodyLen` and the integrate route's (which reads
+    // `current` for the same reason) cannot disagree about one page version. And it
+    // is GATED on the page not being an explainer: `raw` is HTML bytes there, and a
+    // line in them that happens to look like a block-component tag would otherwise
+    // flip the flag and make `claimExtractionText` mask real content out of the
+    // extractor's view. An explainer is never integrable, so `false` is right.
     const routes = readFileSync(
       new URL("./wiki-routes.ts", import.meta.url).pathname,
       "utf8",
     );
-    // Both assertions are scoped to THIS handler — from its `let isMdx` declaration
-    // to its `streamFactcheckSSE` call. A whole-file `toContain` is vacuous here: the
-    // two integrate routes spell `const isMdx = meta.relPath.endsWith(".mdx")` of
-    // their own, so a mutation of the factcheck derivation still finds a match
-    // elsewhere in the file (measured — that mutant survived the first spelling).
+    // Every assertion is scoped to THIS handler — from its `let isMdx` declaration
+    // to its `streamFactcheckSSE` call. A whole-file `toContain` is vacuous here:
+    // the two integrate routes call the same helper, so a mutation of the factcheck
+    // derivation still finds a match elsewhere in the file (measured — that mutant
+    // survived the first spelling of this test).
     const from = routes.indexOf("let isMdx = false;");
     const to = routes.indexOf("return streamFactcheckSSE(c, {", from);
     expect(from).toBeGreaterThan(-1);
     expect(to).toBeGreaterThan(from);
     const handler = routes.slice(from, to);
-    // Derived from the resolved PATH, never from `annotatable` (the policy twin).
-    expect(handler).toContain('isMdx = meta.relPath.endsWith(".mdx")');
+    expect(handler).toContain(
+      'isMdx = meta.type !== "explainer" && pageHasComponentVocabulary(meta.relPath, raw)',
+    );
+    // Never the POLICY twin, and never the bare extension test it replaced.
     expect(handler).not.toContain("isMdx = isAnnotatablePage");
+    expect(handler).not.toContain('isMdx = meta.relPath.endsWith(".mdx")');
     // …and actually handed over.
     const call = routes.slice(to);
     expect(call.slice(0, call.indexOf("\n    });"))).toContain("isMdx,");

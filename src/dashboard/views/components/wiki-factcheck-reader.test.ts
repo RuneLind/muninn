@@ -303,6 +303,7 @@ describe("resolveInsertionPoint", () => {
 
     const point = resolveInsertionPoint(c as unknown as Element, layer as unknown as Element);
     expect(point).not.toBeNull();
+    expect(point!.parent).toBe(layer as unknown as Element);
     expect(point!.before).toBe(head as unknown as Node);
   });
 
@@ -316,6 +317,7 @@ describe("resolveInsertionPoint", () => {
     const { layer } = makeLayer([ul, after]);
 
     const point = resolveInsertionPoint(c as unknown as Element, layer as unknown as Element);
+    expect(point!.parent).toBe(layer as unknown as Element);
     expect(point!.before).toBe(after as unknown as Node);
   });
 
@@ -323,7 +325,43 @@ describe("resolveInsertionPoint", () => {
     const c = chip("1");
     const { layer } = makeLayer([txt("prose "), c, txt(" tail")]);
     const point = resolveInsertionPoint(c as unknown as Element, layer as unknown as Element);
+    expect(point!.parent).toBe(layer as unknown as Element);
     expect(point!.before).toBeNull();
+  });
+
+  test("a chip inside an open fold resolves INTO the fold body, not after the whole fold", () => {
+    // Without this the walk climbs to the layer-level block — the <details> — and
+    // the evidence card lands after the entire folded section, pages away from the
+    // passage it belongs to.
+    const c = chip("2", "warn");
+    const para = el("p");
+    para.appendChild(c);
+    const head = el("h4");
+    const body = el("div", "fold-body");
+    body.appendChild(para);
+    body.appendChild(head);
+    const details = el("details", "fold");
+    details.appendChild(el("summary"));
+    details.appendChild(body);
+    const after = el("h3");
+    const { layer } = makeLayer([details, after]);
+
+    const point = resolveInsertionPoint(c as unknown as Element, layer as unknown as Element);
+    expect(point!.parent).toBe(body as unknown as Element);
+    expect(point!.before).toBe(head as unknown as Node);
+  });
+
+  test("a fold body OUTSIDE the layer is not an insertion parent", () => {
+    // `closest` climbs happily out of the layer, so the fold branch needs its own
+    // containment test — otherwise a chip in a detached (or Ask-pane) fold body
+    // resolves to a parent the article does not own.
+    const c = chip("3");
+    const body = el("div", "fold-body");
+    body.appendChild(c);
+    const details = el("details", "fold");
+    details.appendChild(body);
+    const { layer } = makeLayer([txt("prose")]);
+    expect(resolveInsertionPoint(c as unknown as Element, layer as unknown as Element)).toBeNull();
   });
 
   test("a chip outside the layer resolves to nothing", () => {

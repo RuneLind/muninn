@@ -309,6 +309,64 @@ replaces. `--bg-code` separates in each theme's own direction (dark goes lighter
 than the page, light keeps its well), because `--bg-inset` sits ~2 L* BELOW
 `--bg-panel` on dark and left the block with no visible edge at all.
 
+## `<Fold title open>` — a collapsible section
+
+`<Fold title="What was measured">` … `</Fold>` is a block component with the
+Callout grammar (stands alone, blank line either side, markdown body). Web render
+is `<details class="fold"><summary>title</summary><div class="fold-body">…</div></details>`,
+CLOSED unless `open="true"` — always double-quoted, because a bare `open` is not
+a component tag in this grammar (`COMPONENT_OPEN_RE` parses attributes and
+requires quotes) and the section then renders with its tags visible. An empty
+title renders `Details`. Email, Telegram and Slack have nothing to collapse, so
+they render the title as a run-in heading with the body open, the way the
+`<FactCheck>` appendix degrades.
+
+Three couplings, each of which is what a fold is bought with:
+
+- **`MAX_COMPONENT_DEPTH` is 3, not 2.** A fold wrapping a section costs every
+  component inside it one level, so at 2 a `CodeTabs > Tab` inside a fold would
+  render as a fallback panel while the same markup outside one renders tabs. The
+  cap exists for the chat's per-delta re-render, so it was measured
+  (`scripts/bench-component-depth.ts`, a plan-shaped page replayed as 200 growing
+  prefixes): the two caps land **within a few percent of each other and the sign
+  flips between replays**, at ~0.1–0.25 ms per delta either way. Measured
+  2026-09-07. No direction is claimed — three independent replays disagreed about
+  which cap was faster, which is the finding.
+- **The sanitizer needs an `open` clause and three classes.** `sanitizeHtml`'s
+  attribute loop is an allowlist, so without `details[open]` an author's expanded
+  fold arrives in chat collapsed, and `classIsComponent` drops the whole `class`
+  unless every token is in `COMPONENT_CLASS_ALLOW` — `fold`, `fold-body` and
+  `fold-heading-dup`. Driven through the real bundle in `e2e/chat-fold.spec.ts`.
+- **The doubled label is suppressed, not deleted.** The retrofit convention keeps
+  the section's own `##` heading INSIDE the fold (huginn's breadcrumbs cite it,
+  Explain's `nearestHeading` finds it, the strip-and-diff guard compares it), so a
+  fold titled after its section shows the same words twice. When the body's first
+  non-blank block is a heading whose trimmed source equals the title, it renders
+  with `fold-heading-dup`, which the fold CSS HIDES — the element stays in the DOM
+  because `nearestHeading` walks previous siblings and removing it would move every
+  paragraph after it into the previous section. Every other heading renders.
+  ⚠️ **It is WEB-ONLY.** Telegram, Slack and email have no CSS, so they print the
+  label twice — the run-in title and then the body's own heading. Deliberate: the
+  suppression is a `display: none` rule, and the alternative on those surfaces is
+  DELETING a heading from the text, which is the thing the web path refuses to do.
+
+⚠️ **A fold the reader toggles in CHAT collapses again on the next streaming delta
+and on any history repaint** — `streaming-ui.ts` replaces `innerHTML`, so the
+`<details>` element (and its `open` state) is rebuilt. Same class as the existing
+fact-check block, and low-impact because `Fold` is outside the model vocabulary:
+a chat fold only ever arrives via `/research` markdown, a peer message or a paste.
+Not fixed here; fixing it means state the repaint restores, not a render change.
+
+`Fold` is renderer-only and deliberately ABSENT from `COMPONENT_VOCABULARY_RULES`
+(defined in `src/research/answer.ts`, imported by `src/ai/prompt-builder.ts`):
+folding is an authoring convention for wiki plan pages, and a model folding half a
+chat answer is a regression.
+
+**A `.md` page renders one too** — the renderer never reads the extension — which
+is why `findExclusionZones`' `isMdx` is derived from
+`pageHasComponentVocabulary(relPath, diskBytes)` rather than from the extension:
+see the `wiki-routes.ts` row of `src/dashboard/CLAUDE.md`.
+
 ## Fact-check annotation pair
 
 - `<Fact n="4" v="bad">passage</Fact>` (inline, paired + self-closing) marks a fact-checked passage with a verdict-tinted underline plus a `<button class="fc-chip">`.
@@ -496,7 +554,7 @@ Golden fixture: `src/wiki/__fixtures__/factcheck-annotated-page.mdx` (+ the acce
 - A `.fc-toolbar` summary strip whose lead is cloned from the appendix's own `summary.fc-strip` (one authority for the wording — "N not checked" rides along).
 - A layer toggle flipping `fc-off` on `.wiki-article` (CSS-class only, nothing rebuilt; `fc-off` also hides the toolbar's own summary, leaving just the toggle).
 
-**Insertion is the trap:** `formatWebHtml` emits NO `<p>`, so top-level prose is bare text nodes and an inline `.fc-chip` is a DIRECT child of `.wiki-article` — "the block containing the chip" resolves to the chip itself and splices the card mid-sentence (5 of the fixture's 8 chips). `resolveInsertionPoint` therefore advances forward through the following siblings to the next BLOCK-tag element (allowlist; `null` ⇒ append) so the card lands after the whole inline run.
+**Insertion is the trap:** `formatWebHtml` emits NO `<p>`, so top-level prose is bare text nodes and an inline `.fc-chip` is a DIRECT child of `.wiki-article` — "the block containing the chip" resolves to the chip itself and splices the card mid-sentence (5 of the fixture's 8 chips). `resolveInsertionPoint` therefore advances forward through the following siblings to the next BLOCK-tag element (allowlist) so the card lands after the whole inline run. It returns **`{parent, before}`**, not a bare `{before}`: `parent` is the chip's nearest `.fold-body` ancestor when there is one and the layer otherwise, and `before: null` means append to THAT parent. Without the parent, a chip inside an open `<Fold>` resolved to the layer-level `<details>` and the evidence card landed after the whole fold, pages from the passage. The `.fold-body` lookup is guarded by `layer.contains` — `closest` climbs out of the layer, so a chip in a detached or Ask-pane fold body would otherwise resolve to a parent the article does not own (pinned by its own test; it survived the first mutation round unpinned). The one call site, `toggleChip`, inserts with `point.parent.insertBefore`; `buildCard` and `demoteHeadings` are untouched.
 
 Details that are deliberate, not accidental:
 - The toolbar is built even on a page with marks but no appendix (toggle-only — otherwise those chips are inert with no way to turn them off).
