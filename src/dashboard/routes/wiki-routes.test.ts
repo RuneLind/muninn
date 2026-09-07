@@ -20,6 +20,7 @@ import {
   isAnnotatablePage,
   resolveExplainPreflight,
   resolveFactcheckPreflight,
+  stripSupersededMarks,
   fetchSavedNotes,
   fetchSavedNotesBlock,
   raceTimeout,
@@ -31,6 +32,7 @@ import {
 } from "../views/components/wiki-atlas-semantic.ts";
 import { slugifyTopicKey } from "../../gardener/doc-page-map.ts";
 import { countFactWrappers, stripFactWrappers } from "../../format/markdown-ast.ts";
+import { integrateBodyLen, pageHasComponentVocabulary } from "../../wiki/integrate-edits.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
@@ -518,6 +520,27 @@ describe("coerceClientEdits — client-payload parity with parseEditList", () =>
 });
 
 /**
+ * A `.md` plan page as the fold convention leaves one: an authored `<Fold>`
+ * (which the renderer honours whatever the extension says) plus a previous
+ * fact-check run's `<Fact>` marks, and long enough to trip `INTEGRATE_BODY_MAX`
+ * so the propose route reports the number it measured.
+ */
+const ANNOTATED_MD_PAGE = [
+  "# Widgets",
+  "",
+  '<Fact n="1" v="bad">The device ships 4M units.</Fact>',
+  "",
+  '<Fold title="What was measured">',
+  "",
+  "## What was measured",
+  "",
+  "prose ".repeat(5000).trim(),
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
+/**
  * The integrate routes' cheap rejection branches — every one of these fires
  * BEFORE the 90s one-shot / before the write queue, so none of them needs a model
  * or a DB. The happy paths are covered by `integrate-edits.test.ts` (the pure
@@ -692,6 +715,44 @@ describe("integrate routes — pre-model / pre-write rejections", () => {
     expect(json.supersededNote).toContain("3 marks from a previous check superseded");
     // The claim the note makes, checked against the strip apply actually runs.
     expect(countFactWrappers(body) - countFactWrappers(stripFactWrappers(body))).toBe(3);
+  });
+
+  test("a fact-annotated .md page's bodyLen is the same number both fact-check routes measure", () => {
+    // `bodyLen` is a ONE-NUMBER contract: the fact-check `done` payload budgets
+    // the client against it and the propose route enforces it. Both derive their
+    // masking flag from the SAME predicate over the page's DISK bytes, so a `.md`
+    // page carrying an authored `<Fold>` (and a previous run's `<Fact>` marks)
+    // must measure identically on both sides.
+    //
+    // Driven at the route for propose (below) and as the expression for the
+    // fact-check side, whose number rides an SSE `done` that cannot be reached
+    // without a bot and a model call; that route's expression is pinned as source
+    // text in `factcheck-sse.test.ts`.
+    const annotated = ANNOTATED_MD_PAGE;
+    const flag = pageHasComponentVocabulary("Annotated.md", annotated);
+    expect(flag).toBe(true); // the <Fold>, not the marks
+    const factcheckSide = integrateBodyLen(stripFactWrappers(annotated), flag);
+    const proposeSide = integrateBodyLen(stripSupersededMarks(annotated).body, flag);
+    expect(proposeSide).toBe(factcheckSide);
+  });
+
+  test("…and it is the number the propose route actually reports", async () => {
+    await Bun.write(path.join(root, "Annotated.md"), ANNOTATED_MD_PAGE);
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "Annotated",
+      answer: "### ❌ Claim 1/1 — Units\n\nIt is wrong.",
+      baseHash: createHash("sha256").update(ANNOTATED_MD_PAGE).digest("hex"),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; bodyLen: number };
+    expect(body.error).toBe("page too long to integrate");
+    expect(body.bodyLen).toBe(
+      integrateBodyLen(
+        stripFactWrappers(ANNOTATED_MD_PAGE),
+        pageHasComponentVocabulary("Annotated.md", ANNOTATED_MD_PAGE),
+      ),
+    );
   });
 
   // ── Claim quotes (PR 2) ────────────────────────────────────────────────────

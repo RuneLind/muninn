@@ -65,25 +65,40 @@ function isBlockNode(node: Node | null): boolean {
 }
 
 /**
- * Where the evidence card goes, expressed as the layer child to insert BEFORE
- * (`null` ⇒ append at the end of the layer).
+ * Where the evidence card goes: the element to insert INTO, and the child of it
+ * to insert BEFORE (`null` ⇒ append at the end of that element).
  *
- * The walk first finds the layer-level node owning `el`. When that node is a
+ * The insertion parent is the nearest `.fold-body` ancestor when the chip sits
+ * inside an open `<Fold>`, and the layer otherwise. Without that, a chip in a
+ * folded section resolved to the `details` — the layer-level block owning it —
+ * and the evidence landed after the WHOLE fold, pages away from the passage it
+ * belongs to. A fold body is ordinary rendered markdown, so once the parent is
+ * right the rest of the walk is unchanged.
+ *
+ * Within that parent: find the node owning `el` at parent level. When it is a
  * real block (a list, a table, a callout `div`) the card follows it, so a chip
  * inside a table cell still gets a full-width card rather than one wedged inside
  * the structure it annotates. When it is an INLINE element or a text node — the
- * common case, since top-level prose is unwrapped — we advance through the
+ * common case, since top-level prose is unwrapped — advance through the
  * following siblings to the next block, so the card lands after the whole inline
  * run instead of splitting the sentence the chip sits in.
  */
-export function resolveInsertionPoint(el: Element, layer: Element): { before: Node | null } | null {
+export function resolveInsertionPoint(
+  el: Element,
+  layer: Element,
+): { parent: Element; before: Node | null } | null {
+  // `layer.contains` is the guard, not decoration: a chip that is not in the
+  // layer at all must still resolve to nothing, and `closest` happily climbs
+  // out of it.
+  const foldBody = el.closest(".fold-body");
+  const parent = foldBody && layer.contains(foldBody) ? foldBody : layer;
   let cur: Element | null = el;
-  while (cur && cur.parentElement && cur.parentElement !== layer) cur = cur.parentElement;
-  if (!cur || cur.parentElement !== layer) return null;
-  if (isBlockNode(cur)) return { before: cur.nextSibling };
+  while (cur && cur.parentElement && cur.parentElement !== parent) cur = cur.parentElement;
+  if (!cur || cur.parentElement !== parent) return null;
+  if (isBlockNode(cur)) return { parent, before: cur.nextSibling };
   let node: Node | null = cur.nextSibling;
   while (node && !isBlockNode(node)) node = node.nextSibling;
-  return { before: node };
+  return { parent, before: node };
 }
 
 /** Replace every `h1`–`h6` in the clone with a `div role="heading"` carrying the
@@ -191,7 +206,7 @@ function toggleChip(chip: HTMLElement, layer: Element): void {
   const point = resolveInsertionPoint(chip, layer);
   if (!point) return;
   const card = buildCard(n, section, chipVerdict(chip));
-  layer.insertBefore(card, point.before);
+  point.parent.insertBefore(card, point.before);
   chip.setAttribute("aria-expanded", "true");
   chip.setAttribute("aria-controls", card.id);
   openCard = { card, chip };

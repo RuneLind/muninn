@@ -802,6 +802,60 @@ describe("Fact with an absent/garbage verdict degrades to `unknown`, never to ok
   }
 });
 
+describe("Fold — a details on the web, an open run-in section everywhere else", () => {
+  const md = '<Fold title="What was measured">\n\n## What was measured\n\nThe probe returned 149 lines.\n\n</Fold>';
+
+  test("web → a CLOSED details whose duplicate heading is marked", () => {
+    const out = formatWebHtml(md);
+    expect(out).toContain('<details class="fold">');
+    expect(out).not.toContain("<details open");
+    expect(out).toContain("<summary>What was measured</summary>");
+    expect(out).toContain('<h3 class="fold-heading-dup">What was measured</h3>');
+    expect(out).toContain("The probe returned 149 lines.");
+  });
+
+  test('web → open="true" renders it expanded', () =>
+    expect(formatWebHtml(md.replace(">", ' open="true">'))).toContain('<details class="fold" open>'));
+
+  test("telegram → bold run-in title, body open, no fold", () => {
+    const out = formatTelegramHtml(md);
+    expect(out.startsWith("<b>What was measured</b>")).toBe(true);
+    expect(out).toContain("The probe returned 149 lines.");
+    expect(out).not.toContain("<details");
+  });
+
+  test("slack → bold run-in title, body open", () => {
+    const out = formatSlackMrkdwn(md);
+    expect(out.startsWith("*What was measured*")).toBe(true);
+    expect(out).toContain("The probe returned 149 lines.");
+  });
+
+  test("email → styled run-in title, body open (no <details> in mail)", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("font-weight:600");
+    expect(out).toContain("What was measured");
+    expect(out).toContain("The probe returned 149 lines.");
+    expect(out).not.toContain("<details");
+  });
+
+  test("every platform keeps the body of a title-less fold", () => {
+    const plain = "<Fold>\n\nThe probe returned 149 lines.\n\n</Fold>";
+    for (const out of [formatWebHtml(plain), formatTelegramHtml(plain), formatSlackMrkdwn(plain), formatEmailHtml(plain)]) {
+      expect(out).toContain("The probe returned 149 lines.");
+    }
+    // Only the web surface has somewhere to put a label for a title-less fold.
+    expect(formatWebHtml(plain)).toContain("<summary>Details</summary>");
+  });
+
+  test("a title is escaped on every HTML surface", () => {
+    const hostile = '<Fold title="a <b>x">\n\nbody\n\n</Fold>';
+    for (const out of [formatWebHtml(hostile), formatTelegramHtml(hostile), formatEmailHtml(hostile)]) {
+      expect(out).toContain("a &lt;b&gt;x");
+      expect(out).not.toContain("<b>x");
+    }
+  });
+});
+
 describe("FactCheck appendix renders collapsed, with per-claim sections", () => {
   const md =
     '<FactCheck date="2026-07-29" ok="3" warn="1" bad="2">\n### ✅ Claim 1/3 — the weight\n\nEvidence line.\n</FactCheck>';

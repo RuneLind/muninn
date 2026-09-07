@@ -239,6 +239,39 @@ describe("component fuzz — never throws, never injects", () => {
     expect(out.slack).not.toContain("— A —");
   });
 
+  test("an unclosed Fold degrades to text on every platform", () => {
+    const md = '<Fold title="What was measured">\nleft open forever\nmore lines';
+    const out = format(md);
+    expect(out.web).toContain("&lt;Fold");
+    expect(out.web).not.toContain("<details");
+    expect(out.telegram).toContain("&lt;Fold");
+    expect(out.slack).toContain("left open forever");
+    expect(() => format(md)).not.toThrow();
+  });
+
+  test("Fold > CodeTabs > Tab renders tabs; one level further degrades", () => {
+    // The depth-3 cap, from both sides: the raise exists so a fold is transparent
+    // to the two-level vocabulary, and it is still a cap.
+    const ok = format('<Fold title="T">\n<CodeTabs>\n<Tab label="A">\nx\n</Tab>\n</CodeTabs>\n</Fold>');
+    expect(ok.web).toContain('<button class="code-tabs-tab is-active" type="button">A</button>');
+    expect(ok.web).not.toContain('<div class="code-tabs-fallback">');
+
+    const past = format(
+      '<Fold title="T">\n<Callout>\n<CodeTabs>\n<Tab label="A">\nx\n</Tab>\n</CodeTabs>\n</Callout>\n</Fold>',
+    );
+    expect(past.web).toContain('<div class="code-tabs-fallback">');
+    expect(past.web).toContain("&lt;Tab");
+    expect(past.web).not.toContain('<button class="code-tabs-tab');
+  });
+
+  test("a Fold title cannot inject markup on any platform", () => {
+    const md = '<Fold title="x"><script>alert(1)</script>">\nbody\n</Fold>';
+    const out = format(md);
+    expect(out.web).not.toContain("<script>");
+    expect(out.telegram).not.toContain("<script>");
+    expect(out.slack).not.toContain("<script>");
+  });
+
   test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
     const depth = 50;
     const md = `${"<Callout>\n".repeat(depth)}core${"\n</Callout>".repeat(depth)}`;

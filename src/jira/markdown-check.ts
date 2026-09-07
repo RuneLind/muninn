@@ -55,7 +55,7 @@ const HTML_TAGS = [
   "hr", "i", "img", "li", "ol", "p", "pre", "s", "small", "span", "strong", "sub", "sup",
   "table", "tbody", "td", "tfoot", "th", "thead", "tr", "u", "ul",
   "details", "summary", "font", "center",
-  "Callout", "Verdict", "Pill", "Figure", "FileRef", "ComparisonTable",
+  "Callout", "Verdict", "Pill", "Figure", "FileRef", "ComparisonTable", "Fold",
 ];
 /**
  * Case-insensitive — but only for names of TWO characters or more.

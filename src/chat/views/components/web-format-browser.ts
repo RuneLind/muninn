@@ -82,6 +82,11 @@ function sanitizeHtml(html: string, isWeb: boolean): string {
         if (tag === "section" && attr.name === "data-claim") continue;
         if (tag === "section" && attr.name === "id" && FC_CLAIM_ID_RE.test(attr.value)) continue;
         if (attr.name === "aria-hidden" && attr.value === "true") continue;
+        // A `<Fold open="true">` renders `<details open>`, and the attribute IS
+        // the state — stripped, an author's deliberately-expanded section arrives
+        // collapsed in chat. Scoped to `details`: `open` on anything else is not
+        // ours to keep.
+        if (tag === "details" && attr.name === "open") continue;
         el.removeAttribute(attr.name);
       }
       if (tag === "a") {

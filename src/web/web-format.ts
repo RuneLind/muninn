@@ -145,6 +145,41 @@ function codeFenceHtml(lang: string, code: string): string {
   return `<pre><code${langClass}>${highlightCode(code, lang)}</code></pre>`;
 }
 
+/**
+ * A `<Fold>` body, with the DOUBLED LABEL suppressed.
+ *
+ * The retrofit convention puts the section's own `##` heading inside the fold —
+ * huginn's breadcrumbs, Explain's `nearestHeading` and the strip-and-diff guard
+ * all read it — so a fold titled after its section shows the same words twice.
+ * When the body's FIRST block is a heading whose trimmed source equals the
+ * title, it renders with `fold-heading-dup`, which the fold CSS hides. The
+ * element stays in the DOM on purpose: Explain walks previous siblings for a
+ * heading tag, and removing it would move every following paragraph's section.
+ * Every other heading, and a first heading that differs, renders normally.
+ */
+function foldBodyHtml(title: string, children: string, rawChildren: Block[]): string {
+  if (!title) return children;
+  // The component grammar wants a blank line after the opening tag, so the body's
+  // first BLOCK is routinely an empty `text` one. Skipping those is what makes the
+  // rule "the section's own heading", not "a heading written flush against the tag".
+  let i = 0;
+  while (i < rawChildren.length && isBlankTextBlock(rawChildren[i]!)) i++;
+  const first = rawChildren[i];
+  if (!first || first.type !== "heading" || first.content.trim() !== title) return children;
+  const tag = `h${Math.min(first.level + 1, 6)}`;
+  const head = `<${tag} class="fold-heading-dup">${renderInline(first.content)}</${tag}>`;
+  const rest = rawChildren.slice(i + 1);
+  return [
+    ...(i > 0 ? [renderBlocks(rawChildren.slice(0, i), webRenderer)] : []),
+    head,
+    ...(rest.length > 0 ? [renderBlocks(rest, webRenderer)] : []),
+  ].join("\n");
+}
+
+function isBlankTextBlock(block: Block): boolean {
+  return block.type === "text" && block.lines.every((l) => l.trim() === "");
+}
+
 const webRenderer: BlockRenderer = {
   code_block(block) {
     return codeFenceHtml(block.lang, block.code);
@@ -313,6 +348,17 @@ const webRenderer: BlockRenderer = {
         return (
           `<figure class="embed" data-embed-src="${escapeHtml(e.src)}" data-embed-height="${e.height}" data-embed-title="${escapeHtml(e.title)}">` +
           `<p class="embed-fallback">Embedded page: <code>${escapeHtml(e.src)}</code></p></figure>`
+        );
+      }
+      case "Fold": {
+        const title = (attrs.title ?? "").trim();
+        // Closed by default; `open="true"` is the one spelling that expands it.
+        const openAttr = attrs.open === "true" ? " open" : "";
+        return (
+          `<details class="fold"${openAttr}>` +
+          `<summary>${title ? escapeHtml(title) : "Details"}</summary>` +
+          `<div class="fold-body">${foldBodyHtml(title, children, rawChildren)}</div>` +
+          `</details>`
         );
       }
       case "FactCheck": {

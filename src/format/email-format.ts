@@ -221,6 +221,14 @@ const emailRenderer: BlockRenderer = {
           `${children} ${factMarker(v)}</div>`
         );
       }
+      case "Fold": {
+        // No fold in mail either: the title becomes a run-in heading and the body
+        // renders open, the way the FactCheck appendix below does.
+        const title = attrs.title
+          ? `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">${escapeHtml(attrs.title)}</div>`
+          : "";
+        return `<div style="margin:0 0 12px;">${title}${children}</div>`;
+      }
       case "FactCheck":
         // No <details> in mail — the appendix renders open, under its summary line.
         return (

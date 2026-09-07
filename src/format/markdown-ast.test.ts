@@ -211,17 +211,23 @@ describe("parseBlocks — component blocks", () => {
     ]);
   });
 
-  test("nesting depth cap: a component at depth 2 is not parsed (body stays text)", () => {
-    // Callout(0) > Callout(1) > Pill — the innermost Pill is at depth 2, not parsed.
-    const input = "<Callout>\n<Callout>\n<Pill>x</Pill>\n</Callout>\n</Callout>";
+  test("nesting depth cap: a component at depth 3 is not parsed (body stays text)", () => {
+    // Fold(0) > Callout(1) > Callout(2) > Pill — the Pill is at depth 3, not parsed.
+    // The cap is 3 rather than 2 so that a fold, which costs everything inside it
+    // one level, is transparent to the existing two-level vocabulary.
+    const input =
+      "<Fold title=\"F\">\n<Callout>\n<Callout>\n<Pill>x</Pill>\n</Callout>\n</Callout>\n</Fold>";
     const outer = parseBlocks(input);
     expect(outer).toHaveLength(1);
-    expect(outer[0]).toMatchObject({ type: "component", name: "Callout" });
+    expect(outer[0]).toMatchObject({ type: "component", name: "Fold" });
     const mid = (outer[0] as any).children;
     expect(mid).toHaveLength(1);
     expect(mid[0]).toMatchObject({ type: "component", name: "Callout" });
-    // The innermost body is at depth 2 → the Pill is plain text, not a component.
-    expect(mid[0].children).toEqual([{ type: "text", lines: ["<Pill>x</Pill>"] }]);
+    const inner = mid[0].children;
+    expect(inner).toHaveLength(1);
+    expect(inner[0]).toMatchObject({ type: "component", name: "Callout" });
+    // The innermost body is at depth 3 → the Pill is plain text, not a component.
+    expect(inner[0].children).toEqual([{ type: "text", lines: ["<Pill>x</Pill>"] }]);
   });
 
   test("code fence inside a Callout is preserved as a code block", () => {
@@ -330,12 +336,25 @@ describe("parseBlocks — component blocks", () => {
     });
   });
 
-  test("a CodeTabs nested in a component puts Tab at depth 2 → Tab degrades to text", () => {
-    // Documented top-level-only constraint: MAX_COMPONENT_DEPTH = 2.
+  test("a CodeTabs nested in a component keeps its Tab children (depth 2 parses)", () => {
+    // MAX_COMPONENT_DEPTH = 3: Callout(0) > CodeTabs(1) > Tab(2) all parse. This
+    // is the case the raise exists for — a fold around a section must not turn
+    // its tabs into a fallback panel.
     const blocks = parseBlocks("<Callout>\n<CodeTabs>\n<Tab label=\"A\">\nx\n</Tab>\n</CodeTabs>\n</Callout>");
     const callout = blocks[0] as { children: { type: string; name?: string; children?: unknown[] }[] };
     const codeTabs = callout.children.find((c) => c.name === "CodeTabs")!;
-    // CodeTabs at depth 1 IS a component, but its <Tab> body is at depth 2 → text.
+    expect(codeTabs.children).toHaveLength(1);
+    expect(codeTabs.children![0]).toMatchObject({ type: "component", name: "Tab" });
+  });
+
+  test("one level further down, the Tab body is past the cap → text", () => {
+    const blocks = parseBlocks(
+      "<Fold title=\"F\">\n<Callout>\n<CodeTabs>\n<Tab label=\"A\">\nx\n</Tab>\n</CodeTabs>\n</Callout>\n</Fold>",
+    );
+    const fold = blocks[0] as { children: { name?: string; children?: unknown[] }[] };
+    const callout = fold.children[0] as { children: { name?: string; children?: unknown[] }[] };
+    const codeTabs = callout.children.find((c) => c.name === "CodeTabs")!;
+    // Tab sits at depth 3 here → not a component, so CodeTabs sees only text.
     expect(codeTabs.children!.every((c) => (c as { type: string }).type === "text")).toBe(true);
   });
 });

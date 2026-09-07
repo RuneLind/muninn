@@ -14,6 +14,7 @@ import {
   maxChangedChars,
   neutralizeFactcheckSentinels,
   outcomeChangedChars,
+  pageHasComponentVocabulary,
   parseEditList,
   promptMaskBody,
   ZONE_SENTINEL,
@@ -256,6 +257,114 @@ test("an INDENTED block tag is still zoned — markdown-ast trims the line befor
   expect(zoned.map((z) => page.slice(z.start, z.end))).toEqual(['<Callout tone="warn">', "</Callout>"]);
   // The captured indent stays OUTSIDE the zone (it is prose whitespace).
   expect(page[zoned[0]!.start - 1]).toBe(" ");
+});
+
+// ── pageHasComponentVocabulary ───────────────────────────────────────────────
+
+describe("pageHasComponentVocabulary", () => {
+  const FOLD_PAGE = [
+    "# A plan",
+    "",
+    '<Fold title="What was measured">',
+    "",
+    "## What was measured",
+    "",
+    "The probe returned 149 lines.",
+    "",
+    "</Fold>",
+    "",
+  ].join("\n");
+
+  test("an .mdx page always carries the vocabulary, whatever is in it", () => {
+    expect(pageHasComponentVocabulary("plans/x.mdx", "just prose\n")).toBe(true);
+  });
+
+  test("a .md page with an authored BLOCK component carries it", () => {
+    expect(pageHasComponentVocabulary("plans/x.md", FOLD_PAGE)).toBe(true);
+  });
+
+  test("a .md page whose only mention is INLINE does not", () => {
+    // The same rule `findExclusionZones` follows: a mid-sentence tag is prose, and
+    // treating it as markup made every sentence mentioning one unintegratable.
+    const page = "The `<Callout>` component wraps prose, and <Verdict value=\"yes\"/> mid-line.\n";
+    expect(pageHasComponentVocabulary("plans/x.md", page)).toBe(false);
+  });
+
+  test("a .md page carrying only <Fact> marks does not — those are ours, not the author's", () => {
+    // Otherwise the flag would flip between a page's annotated and stripped
+    // states, and `bodyLen` would disagree across the routes that pin one version.
+    const marked = [
+      '<Fact n="1" v="ok">The probe returned 149 lines.</Fact>',
+      "",
+      '<FactCheck date="2026-09-07" ok="1" warn="0" bad="0" unknown="0">',
+      "</FactCheck>",
+      "",
+    ].join("\n");
+    expect(pageHasComponentVocabulary("plans/x.md", marked)).toBe(false);
+  });
+
+  test("a plain .md page does not", () => {
+    expect(pageHasComponentVocabulary("plans/x.md", "# A plan\n\nprose only.\n")).toBe(false);
+  });
+
+  test("the probe is stateless — the same page answers the same every time", () => {
+    // A `/g/` regex's `.test` advances `lastIndex`, so a shared instance would
+    // answer differently on the second call. Three, because the second is where a
+    // `/g/` regex first goes wrong and the third is where it recovers.
+    expect(pageHasComponentVocabulary("a.md", FOLD_PAGE)).toBe(true);
+    expect(pageHasComponentVocabulary("a.md", FOLD_PAGE)).toBe(true);
+    expect(pageHasComponentVocabulary("a.md", FOLD_PAGE)).toBe(true);
+  });
+
+  test("a tag that only appears inside a FENCE flips the flag and changes no zone", () => {
+    // Documenting a real consequence rather than a guard: the flag is a cheap
+    // line-anchored probe that does not parse fences, so a page whose only tag is
+    // a fenced EXAMPLE reads as component-carrying. It costs nothing, because the
+    // zones the flag would add are already inside the fence zone.
+    const page = [
+      "# Page",
+      "",
+      "Prose about folding.",
+      "",
+      "```md",
+      '<Fold title="What was measured">',
+      "body",
+      "</Fold>",
+      "```",
+      "",
+      "Tail prose.",
+      "",
+    ].join("\n");
+    expect(pageHasComponentVocabulary("plans/x.md", page)).toBe(true);
+    expect(findExclusionZones(page, true)).toEqual(findExclusionZones(page, false));
+    // …unlike the same tag OUTSIDE a fence, which is the case the flag exists for.
+    expect(findExclusionZones(FOLD_PAGE, true).filter((z) => z.kind === "component")).toHaveLength(2);
+  });
+});
+
+test("an edit reaching into a fold's tag line on a .md page is refused", () => {
+  // The whole point of the helper: on a `.md` plan page a `<Fold>` is renderer
+  // markup, so an accepted fact-check edit must not be able to rewrite the tag
+  // and leave an unclosed component swallowing the section.
+  const page = [
+    "# A plan",
+    "",
+    '<Fold title="What was measured">',
+    "",
+    "The probe returned 4M lines.",
+    "",
+    "</Fold>",
+    "",
+  ].join("\n");
+  const isMdx = pageHasComponentVocabulary("plans/x.md", page);
+  expect(isMdx).toBe(true);
+  expect(
+    applyEdits(page, [edit({ old: '<Fold title="What was measured">', new: "<Fold>" })], isMdx).appliedCount,
+  ).toBe(0);
+  // The prose inside it stays editable, as it does on an `.mdx` page.
+  const r = applyEdits(page, [edit({ old: "returned 4M lines", new: "returned 149 lines" })], isMdx);
+  expect(r.appliedCount).toBe(1);
+  expect(r.body).toContain("The probe returned 149 lines.");
 });
 
 // ── parseEditList ────────────────────────────────────────────────────────────

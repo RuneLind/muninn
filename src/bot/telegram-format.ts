@@ -87,6 +87,9 @@ const telegramRenderer: BlockRenderer = {
         // no plain-text equivalent worth the noise, so only the verdict glyph rides
         // along. Never drop the passage — it is the article's own prose.
         return `${children}${children.trim() ? ` ${FACT_VERDICT_MARK[normalizeFactVerdict(attrs.v)]}` : ""}`;
+      case "Fold":
+        // Nothing collapses in a Telegram message: bold run-in title, body open.
+        return attrs.title ? `<b>${escapeHtml(attrs.title)}</b>\n${children}` : children;
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.

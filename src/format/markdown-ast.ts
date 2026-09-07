@@ -49,6 +49,7 @@ export const COMPONENT_NAMES = [
   "Fact",
   "FactCheck",
   "Embed",
+  "Fold",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -92,11 +93,22 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // A markdown page embedding a standalone `.html` explainer in its body
   // (`src/format/embed.ts` owns the gate on these values).
   Embed: ["src", "height", "title"],
+  // A collapsible section — the wiki plan-page convention's fold. `open="true"`
+  // (double-quoted, like every attribute this grammar parses) renders it
+  // expanded; a bare `open` is not a component tag at all and the section
+  // degrades to visible escaped text.
+  Fold: ["title", "open"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
- *  current depth is below this; at the cap, inner tags degrade to plain text. */
-const MAX_COMPONENT_DEPTH = 2;
+ *  current depth is below this; at the cap, inner tags degrade to plain text.
+ *
+ *  3, not 2, since `Fold`: a fold wrapping a section costs every component in it
+ *  one level, so at 2 a `<CodeTabs><Tab>` inside a fold would render as a
+ *  fallback panel the same markup renders fine outside one. The cap exists for
+ *  the chat's per-delta re-render, so the extra level was measured rather than
+ *  assumed — see the PR body for the run. */
+const MAX_COMPONENT_DEPTH = 3;
 
 // Anchored to the start of a (trimmed) line and gated on a leading `<`, so the
 // common case (a line not starting with `<`) fails the match cheaply — the
@@ -129,8 +141,19 @@ export const COMPONENT_TAG_SOURCE = componentTagSource("[^>]*");
  */
 export const COMPONENT_TAG_SOURCE_SINGLE_LINE = componentTagSource("[^>\\n]*");
 
-function componentTagSource(attrTail: string): string {
-  return `</?(?:${COMPONENT_NAMES.join("|")})\\b${attrTail}>`;
+/**
+ * {@link COMPONENT_TAG_SOURCE_SINGLE_LINE} narrowed to a SUBSET of the
+ * vocabulary. Exported so a caller that must exclude some names still derives
+ * the TAG SHAPE from here rather than hand-rolling a fourth variant that drifts
+ * — `src/wiki/integrate-edits.ts` builds its "did a person author a component on
+ * this page?" probe from every name but the two the fact-check path writes.
+ */
+export function componentTagSourceSingleLine(names: readonly ComponentName[]): string {
+  return componentTagSource("[^>\\n]*", names);
+}
+
+function componentTagSource(attrTail: string, names: readonly string[] = COMPONENT_NAMES): string {
+  return `</?(?:${names.join("|")})\\b${attrTail}>`;
 }
 
 /** Normalize an untrusted `tone` attr for Callout to the four known tones. */

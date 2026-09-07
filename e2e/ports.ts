@@ -79,6 +79,11 @@ export const E2E_PORTS = {
   // the summarize step spends no model call. Different paths, one port.
   "summaries-vimeo": 3049,
   "summaries-vimeo/fake": 3050,
+  // The chat page's own sanitizer + formatter, driven in-page: a `<Fold>` must
+  // survive `sanitizeHtml` with its `open` attribute and its classes.
+  "chat-fold": 3052,
+  // A temp wiki carrying folds, in the reader.
+  "wiki-fold": 3053,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

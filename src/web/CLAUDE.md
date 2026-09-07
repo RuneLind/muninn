@@ -309,6 +309,50 @@ replaces. `--bg-code` separates in each theme's own direction (dark goes lighter
 than the page, light keeps its well), because `--bg-inset` sits ~2 L* BELOW
 `--bg-panel` on dark and left the block with no visible edge at all.
 
+## `<Fold title open>` — a collapsible section
+
+`<Fold title="What was measured">` … `</Fold>` is a block component with the
+Callout grammar (stands alone, blank line either side, markdown body). Web render
+is `<details class="fold"><summary>title</summary><div class="fold-body">…</div></details>`,
+CLOSED unless `open="true"` — always double-quoted, because a bare `open` is not
+a component tag in this grammar (`COMPONENT_OPEN_RE` parses attributes and
+requires quotes) and the section then renders with its tags visible. An empty
+title renders `Details`. Email, Telegram and Slack have nothing to collapse, so
+they render the title as a run-in heading with the body open, the way the
+`<FactCheck>` appendix degrades.
+
+Three couplings, each of which is what a fold is bought with:
+
+- **`MAX_COMPONENT_DEPTH` is 3, not 2.** A fold wrapping a section costs every
+  component inside it one level, so at 2 a `CodeTabs > Tab` inside a fold would
+  render as a fallback panel while the same markup outside one renders tabs. The
+  cap exists for the chat's per-delta re-render; measured on a 204-line plan-shaped
+  page replayed as 200 growing prefixes, depth 3 is 0.193 ms/delta against depth
+  2's 0.198 — i.e. inside the run-to-run spread.
+- **The sanitizer needs an `open` clause and three classes.** `sanitizeHtml`'s
+  attribute loop is an allowlist, so without `details[open]` an author's expanded
+  fold arrives in chat collapsed, and `classIsComponent` drops the whole `class`
+  unless every token is in `COMPONENT_CLASS_ALLOW` — `fold`, `fold-body` and
+  `fold-heading-dup`. Driven through the real bundle in `e2e/chat-fold.spec.ts`.
+- **The doubled label is suppressed, not deleted.** The retrofit convention keeps
+  the section's own `##` heading INSIDE the fold (huginn's breadcrumbs cite it,
+  Explain's `nearestHeading` finds it, the strip-and-diff guard compares it), so a
+  fold titled after its section shows the same words twice. When the body's first
+  non-blank block is a heading whose trimmed source equals the title, it renders
+  with `fold-heading-dup`, which the fold CSS HIDES — the element stays in the DOM
+  because `nearestHeading` walks previous siblings and removing it would move every
+  paragraph after it into the previous section. Every other heading renders.
+
+`Fold` is renderer-only and deliberately ABSENT from `COMPONENT_VOCABULARY_RULES`
+(`src/research/answer.ts`, `src/ai/prompt-builder.ts`): folding is an authoring
+convention for wiki plan pages, and a model folding half a chat answer is a
+regression.
+
+**A `.md` page renders one too** — the renderer never reads the extension — which
+is why `findExclusionZones`' `isMdx` is derived from
+`pageHasComponentVocabulary(relPath, diskBytes)` rather than from the extension:
+see the `wiki-routes.ts` row of `src/dashboard/CLAUDE.md`.
+
 ## Fact-check annotation pair
 
 - `<Fact n="4" v="bad">passage</Fact>` (inline, paired + self-closing) marks a fact-checked passage with a verdict-tinted underline plus a `<button class="fc-chip">`.
