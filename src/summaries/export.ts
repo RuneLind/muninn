@@ -179,11 +179,12 @@ export function splitTranscript(markdown: string): { body: string; transcript: s
  * enumeration rather than as a list of prefixes:
  *
  *  1. It has a scheme — allowed only for `http`, `https`, `mailto`.
- *  2. It has no scheme and opens with TWO slash-class characters — a host
- *     reference, refused: from `file://` it navigates to `file://host`. The
- *     WHATWG parser treats `\` as `/` on a special base, so `/\host` and
- *     `\\host` are the same reference as `//host` (the second verify pass
- *     clicked `/\evil.example/p` into `file://evil.example/p`).
+ *  2. It has no scheme and opens with TWO slash-class characters — the
+ *     network-path shape, refused: `//host` and `/\host` navigate to
+ *     `file://host` (the WHATWG parser treats `\` as `/` on a special base —
+ *     the second verify pass clicked `/\evil.example/p` into
+ *     `file://evil.example/p`). `///path` has an EMPTY host and is refused
+ *     with them: a link no reader needs, over-refused rather than carved out.
  *  3. Anything else — a path or a fragment, resolved inside the folder.
  */
 export function isSafeLinkHref(href: string): boolean {
@@ -216,7 +217,10 @@ const exportMarked = new Marked({
       const href = token.href;
       if (!isSafeLinkHref(href)) return text;
       const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
-      const external = /^https?:\/\//i.test(href) ? ` target="_blank" rel="noopener"` : "";
+      // New tab on the SCHEME the gate parsed, not on a `://` spelling:
+      // `http:host` resolves to the remote site exactly like `http://host`,
+      // and without a new tab the file:// page navigates itself away.
+      const external = /^\s*https?:/i.test(href) ? ` target="_blank" rel="noopener"` : "";
       return `<a href="${escapeHtml(href)}"${title}${external}>${text}</a>`;
     },
     image(token: Tokens.Image) {

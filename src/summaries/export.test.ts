@@ -156,10 +156,20 @@ describe("renderExportMarkdown", () => {
     expect(html).toMatch(/^<p>a \[b\]/);
     expect(html).toContain(" c [d]");
   });
+  test("an absolute link opens in a new tab whatever its authority spelling", () => {
+    // `http:host` and `https:/\\host` resolve to the remote site exactly like
+    // `http://host`; without a new tab the file:// page navigates ITSELF away.
+    const html = renderExportMarkdown("[a](http:evil.example) [b](https:/\\evil.example) [c](mailto:x@y.z) [d](/p)");
+    expect(html).toContain('<a href="http:evil.example" target="_blank" rel="noopener">a</a>');
+    expect(html).toContain('<a href="https:/\\evil.example" target="_blank" rel="noopener">b</a>');
+    expect(html).toContain('<a href="mailto:x@y.z">c</a>');
+    expect(html).toContain('<a href="/p">d</a>');
+  });
   test("a host reference in any slash spelling is not a link; a plain path or fragment is", () => {
     // The WHATWG parser treats `\` as `/` on a special base such as `file:`,
-    // so `/\host` is a host reference exactly like `//host`. (`\\host` in
-    // markdown is an escaped backslash and reaches the href as a plain path.)
+    // so `/\host` is a host reference exactly like `//host`. (A markdown
+    // backslash escape — `\/host`, `\\host` — reaches the href as `/host` or
+    // `\host`, a plain path either way, so those spellings are not fixtures.)
     const html = renderExportMarkdown("[a](/\\evil.example/p) [c](//evil.example) [d](/local/p) [e](#f) [f](sub/p.html)");
     expect(html).not.toContain("evil.example");
     expect(html).toContain('<a href="/local/p">d</a>');
