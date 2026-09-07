@@ -185,7 +185,9 @@ export function splitTranscript(markdown: string): { body: string; transcript: s
  *     the second verify pass clicked `/\evil.example/p` into
  *     `file://evil.example/p`). `///path` has an EMPTY host and is refused
  *     with them: a link no reader needs, over-refused rather than carved out.
- *  3. Anything else — a path or a fragment, resolved inside the folder.
+ *  3. Anything else — a fragment, a relative path resolved inside the folder,
+ *     or an absolute path resolved against the local filesystem root (no
+ *     host, no network; measured `/local/p` → `file:///local/p`).
  */
 export function isSafeLinkHref(href: string): boolean {
   if (/[\u0000-\u001f\u007f]/.test(href)) return false;
