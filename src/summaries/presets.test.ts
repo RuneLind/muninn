@@ -107,6 +107,35 @@ describe("resolveCapturePresets — the connector decides whether an opus kind i
     expect(resolveCapturePresets(undefined, "openai-compat").map((p) => p.id)).toEqual(["standard", "talk-notes"]);
   });
 
+  test("requireThinkingControl also drops a kind whose BUDGET the connector cannot honour", () => {
+    // Why, on the option's own docblock above. The DEFAULT must stay exactly
+    // what it was.
+    expect(resolveCapturePresets(undefined, "copilot-sdk", { requireThinkingControl: true }).map((p) => p.id))
+      .toEqual(["standard", "talk-notes"]);
+    // Every existing caller: byte-identical offer sets, argument absent or false.
+    for (const c of ["claude-cli", "claude-sdk", "copilot-sdk", "openai-compat", undefined] as const) {
+      expect(resolveCapturePresets(undefined, c, {})).toEqual(resolveCapturePresets(undefined, c));
+      expect(resolveCapturePresets(undefined, c, { requireThinkingControl: false }))
+        .toEqual(resolveCapturePresets(undefined, c));
+    }
+  });
+
+  test("requireThinkingControl changes NOTHING on the two Claude connectors", () => {
+    for (const c of ["claude-cli", "claude-sdk", undefined] as const) {
+      expect(resolveCapturePresets(undefined, c, { requireThinkingControl: true }).map((p) => p.id))
+        .toEqual(["standard", "deep", "talk-notes"]);
+    }
+  });
+
+  test("requireThinkingControl never drops a per-bot NEW kind — those run capped", () => {
+    const resolved = resolveCapturePresets(
+      { captureSummaryVariants: [{ id: "should-i-watch", label: "Should I watch?", content: "- five lines" }] },
+      "copilot-sdk",
+      { requireThinkingControl: true },
+    );
+    expect(resolved.map((p) => p.id)).toEqual(["standard", "talk-notes", "should-i-watch"]);
+  });
+
   test("a per-bot override of deep is omitted with it on openai-compat — the run options are the kind's, not the file's", () => {
     const resolved = resolveCapturePresets(
       { captureSummaryVariants: [{ id: "deep", label: "Deep (ours)", content: "- ours" }] },

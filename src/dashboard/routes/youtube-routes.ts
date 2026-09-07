@@ -8,9 +8,15 @@ import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
+import {
+  DEFAULT_CAPTURE_KIND,
+  capturePresetOptions,
+  findCapturePreset,
+} from "../../summaries/presets.ts";
 import { applyCors } from "../../auth/cors.ts";
 import { YOUTUBE_FRAME_SOURCE, isFrameId, removeKeptFramesForDocument } from "../../summaries/frames.ts";
 import { youtubeWatchUrl } from "../../youtube/frames.ts";
+import { youtubeCaptureKinds } from "../../youtube/kinds.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 
 const log = getLog("dashboard");
@@ -355,6 +361,42 @@ export function registerYouTubeRoutes(
     corsPreflight: true,
   });
 
+  /**
+   * What this instance can be asked for — the summary kinds and whether slides
+   * are available — so the extension popup renders the picker from the SERVER
+   * rather than from a catalog of its own. A second hardcoded list in an
+   * unpackaged Chrome extension is a list nobody updates: it would offer `deep`
+   * on an instance whose summarizer bot cannot run it and get a 400 back.
+   *
+   * `applyCors` for the same reason the POST has it, and it is not optional
+   * here: this module applies CORS inside the summarize handler only, and
+   * registers a preflight only for `/summarize`. The extension's `muninnUrl` is
+   * user-editable past the manifest's `localhost:3010` grant, so without the
+   * header this GET fails silently on every other install and the popup falls
+   * back to Standard-only — a picker that is wrong with no way to tell.
+   *
+   * A SIMPLE request by construction: `GET`, no custom request headers, so the
+   * browser sends no preflight and none is registered.
+   *
+   * Read-only, and the kinds are the same resolution the POST validates against
+   * — one call, `requireThinkingControl` on both, so the picker and the 400
+   * cannot disagree.
+   */
+  app.get("/api/youtube/options", (c) => {
+    applyCors(c);
+    const summarizerBot = resolveSummarizerBot(discoverAllBots());
+    if (!summarizerBot) {
+      return c.json({ error: "No bots configured", code: "no_bot" }, 500);
+    }
+    return c.json({
+      kinds: capturePresetOptions(youtubeCaptureKinds(summarizerBot)),
+      // The id a client sends when the reader picks nothing. Named rather than
+      // left as "the first entry", so the popup never has to assume an order.
+      default_kind: DEFAULT_CAPTURE_KIND,
+      frames: { supported: connectorCapabilities(summarizerBot).supportsExtraDirs },
+    });
+  });
+
   app.post("/api/youtube/summarize", async (c) => {
     // CORS STAYS on this route, deliberately: the entry point is a Chrome
     // extension, which is cross-origin by construction (the Vimeo vertical has
@@ -378,7 +420,7 @@ export function registerYouTubeRoutes(
       );
     }
 
-    type Body = { title?: string; url?: string; video_id?: string; frames?: unknown };
+    type Body = { title?: string; url?: string; video_id?: string; frames?: unknown; kind?: unknown };
     const body = await c.req.json<Body>().catch(() => ({} as Body));
     const { title, url, video_id } = body;
 
@@ -423,6 +465,37 @@ export function registerYouTubeRoutes(
     if (!summarizerBot) {
       return c.json({ error: "No bots configured" }, 500);
     }
+
+    // The summary KIND, validated before the duplicate lookup and before
+    // `createJob` — the Vimeo ordering, for the Vimeo reason: a picker value
+    // this instance does not offer is a 400 whatever the video, and it must not
+    // cost a huginn listing read or leave a job row behind. Absent is the
+    // default (an older extension, a curl); present but unknown is REFUSED
+    // rather than quietly summarized as `standard`, since the reader would read
+    // the result as the kind they picked. `error` is prose and `code` is the
+    // machine token — the shape the popup renders.
+    if (body.kind !== undefined && typeof body.kind !== "string") {
+      return c.json({ error: "Summary kind must be a string", code: "bad_kind" }, 400);
+    }
+    // PRESENT BUT BLANK is refused with the rest. `findCapturePreset` reads a
+    // blank id as ABSENT — the right rule for a key that is not there at all
+    // (an older extension, a curl) and the wrong one for a caller that sent the
+    // key and put nothing in it, which is a picker that failed to fill. Without
+    // this, `kind: ""` ran `standard` and was reported as the kind picked.
+    if (typeof body.kind === "string" && body.kind.trim() === "") {
+      return c.json(
+        { error: "Summary kind must not be blank", code: "bad_kind", kind: body.kind },
+        400,
+      );
+    }
+    const preset = findCapturePreset(youtubeCaptureKinds(summarizerBot), body.kind);
+    if (!preset) {
+      return c.json(
+        { error: `Unknown summary kind: ${body.kind}`, code: "bad_kind", kind: body.kind },
+        400,
+      );
+    }
+
     if (frames && !connectorCapabilities(summarizerBot).supportsExtraDirs) {
       // `error` is the SENTENCE and `code` is the machine token — this file's
       // own rule, which its 400s follow. The extension popup renders `detail`
@@ -508,6 +581,7 @@ export function registerYouTubeRoutes(
       // must not depend on the log line above it succeeding.
       summarizeVideo(jobId, video_id, capYouTubeTitle(title || canonicalUrl), config, summarizerBot, {
         frames,
+        preset,
         // The ONE moment the route can learn that a document now exists: huginn
         // answered the ingest, and its listing will not say so for another
         // reindex cycle.

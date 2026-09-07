@@ -1,7 +1,12 @@
 /**
  * Background service worker.
  * Submits YouTube videos to Muninn for summarization, opens dashboard.
+ *
+ * `capture-rules.js` is emitted from `src/youtube/extension-options-rules.ts`
+ * by `bun run build:extension` — the request body is built there, where it is
+ * tested, rather than assembled twice.
  */
+import { buildSummarizeBody } from './capture-rules.js';
 
 const tabState = {};
 
@@ -26,6 +31,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       return true;
 
+    case 'GET_OPTIONS':
+      handleGetOptions().then(sendResponse).catch(err => {
+        sendResponse({ error: err.message });
+      });
+      return true;
+
     case 'SUMMARIZE':
       handleSummarize(message).then(sendResponse).catch(err => {
         sendResponse({ error: err.message });
@@ -44,17 +55,50 @@ async function getSettings() {
   });
 }
 
-async function handleSummarize({ title, url, videoId, frames }) {
+/**
+ * What this Muninn offers — the summary kinds and whether slides are available.
+ *
+ * The fetch lives here rather than in the popup for the reason the SUMMARIZE
+ * fetch does: `muninnUrl` is settings the worker owns, and it is routinely a
+ * host the manifest does not grant, which only an extension-page fetch would
+ * be blocked on. A plain GET with no custom headers, so it is a CORS *simple*
+ * request and needs no preflight. Never throws for the popup: any failure comes
+ * back as `{error}`, which the popup renders as "Standard only".
+ *
+ * The TIMEOUT is not optional. `muninnUrl` is a URL the reader typed, and a host
+ * that accepts the connection and never answers — a stale tailnet address, a
+ * VPN that is down, a firewall that drops rather than refuses — leaves this
+ * fetch pending for minutes. A refused port fails in milliseconds and was the
+ * only case ever exercised. Small, because the reader is looking at an open
+ * popup: past a few seconds, "could not reach it" is the useful answer.
+ */
+const OPTIONS_TIMEOUT_MS = 4000;
+
+async function handleGetOptions() {
+  const settings = await getSettings();
+  const response = await fetch(`${settings.muninnUrl}/api/youtube/options`, {
+    signal: AbortSignal.timeout(OPTIONS_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`Muninn options: ${response.status}`);
+  }
+  return { options: await response.json() };
+}
+
+async function handleSummarize({ title, url, videoId, kind, frames }) {
   const settings = await getSettings();
 
   // Submit to Muninn — it handles transcript, summarization, indexing
   const response = await fetch(`${settings.muninnUrl}/api/youtube/summarize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    // `frames` is coerced here rather than trusted from the popup message: the
-    // route refuses a non-boolean with 400 `bad_frames`, and an older popup
-    // sends nothing at all (⇒ false, today's transcript-only capture).
-    body: JSON.stringify({ title, url, video_id: videoId, frames: frames === true }),
+    // `frames` and `kind` are coerced here rather than trusted from the popup
+    // message: the route refuses a non-boolean with 400 `bad_frames` and an
+    // unoffered id with 400 `bad_kind`. An older popup sends neither — which is
+    // today's transcript-only Standard capture, exactly as before.
+    body: JSON.stringify(
+      buildSummarizeBody({ title, url, videoId, kind, frames }),
+    ),
   });
 
   if (!response.ok) {

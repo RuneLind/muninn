@@ -8,11 +8,17 @@ import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import {
   CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
+  CAPTURE_THINKING_MAX_TOKENS,
   buildSummarySystemPrompt,
   ingestSummary,
   runCaptureOneShot,
   windowedTranscriptRider,
 } from "../summaries/summarizer-shared.ts";
+import {
+  captureBotConfigFor,
+  captureThinkingFor,
+  type CapturePreset,
+} from "../summaries/presets.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { connectorCapabilities } from "../ai/one-shot.ts";
 import { createQueue } from "../wiki/queue.ts";
@@ -55,10 +61,8 @@ import {
 
 const log = getLog("youtube", "summarizer");
 
-const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
-  "You are a video content analyst. Summarize the following YouTube video transcript.",
-  VALID_CATEGORIES,
-);
+const SUMMARIZE_INTRO =
+  "You are a video content analyst. Summarize the following YouTube video transcript.";
 
 /**
  * The rider added when huginn ANSWERED with a windowed transcript. The sentence
@@ -109,6 +113,18 @@ export interface YouTubeSummarizerDeps {
   }) => Promise<CaptureFrame[]>;
   /** Where quoted frames are kept (test seam); default `framesRootDir()`. */
   framesRoot?: string;
+  /**
+   * Fire the per-article source-page drafter on a successful capture. Default
+   * ON — the route never passes it.
+   *
+   * It sits in `deps` rather than beside `frames`/`preset` because it is not a
+   * property of the capture: `false` is the replay harness
+   * (`scripts/replay-youtube.ts`), which re-runs real captures against a stub
+   * huginn to compare kinds, where a draft proposal per run would be N
+   * proposals in the summarizer bot's wiki gate about a document that was never
+   * ingested.
+   */
+  sourceDraft?: boolean;
 }
 
 const REAL_DEPS: YouTubeSummarizerDeps = {
@@ -128,6 +144,21 @@ export interface SummarizeVideoOptions {
    * `decideYouTubeFrames` re-checks it anyway, as a second line.
    */
   frames?: boolean;
+  /**
+   * The summary KIND this capture writes, resolved by the ROUTE against the
+   * summarizer bot's preset set (`findCapturePreset` — an unknown id is a 400
+   * there, so a job that gets here carries a real preset).
+   *
+   * REQUIRED, the Vimeo precedent: a default here would be `standard` picked
+   * positionally out of `SHIPPED_CAPTURE_PRESETS`, so reordering that array
+   * would silently change what a caller who named no kind gets. Every caller —
+   * the route, the replay harness, the tests — resolves a preset already.
+   *
+   * It decides three things: the structure bullets in the system prompt, the
+   * model the call runs on (`captureBotConfigFor`) and whether the 8k capture
+   * thinking cap applies (`captureThinkingFor`).
+   */
+  preset: CapturePreset;
   /** Told when huginn has stored a document, BEFORE `completeJob`. */
   onIngested?: YouTubeIngestedHook;
   /** Test seams; production passes none. */
@@ -162,7 +193,7 @@ export async function summarizeVideo(
   title: string,
   config: Config,
   botConfig: BotConfig,
-  opts: SummarizeVideoOptions = {},
+  opts: SummarizeVideoOptions,
 ): Promise<void> {
   const resolved: YouTubeSummarizerDeps = { ...REAL_DEPS, ...opts.deps };
   // Created only on the frames path, removed in the `finally` whatever
@@ -173,6 +204,7 @@ export async function summarizeVideo(
   // would otherwise put Y's address on X's document and make every later
   // capture of Y a `duplicate` of X (the same rule the yt-dlp target follows).
   const videoUrl = youtubeWatchUrl(videoId);
+  const preset = opts.preset;
   let frames: CaptureFrame[] = [];
 
   try {
@@ -318,13 +350,59 @@ export async function summarizeVideo(
       }
     }
 
-    // 2. Summarize with Claude
+    // 2. Summarize with Claude, in the KIND the reader picked.
     updateStatus(jobId, "summarizing");
 
-    const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}${timestamped ? WINDOWED_TRANSCRIPT_RIDER : ""}
+    // Built per capture rather than as a module constant: the structure bullets
+    // are the PRESET's now, and a constant could only ever carry one kind's.
+    const systemPrompt = `${buildSummarySystemPrompt(SUMMARIZE_INTRO, VALID_CATEGORIES, preset.instruction)}${
+      timestamped ? WINDOWED_TRANSCRIPT_RIDER : ""
+    }
 
 Video title: ${title}
 Video URL: ${videoUrl}`;
+
+    // The model the kind asks for — `deep` swaps in `CAPTURE_DEEP_MODEL`, every
+    // other kind keeps the bot's own. Resolved BEFORE `runCaptureOneShot`, which
+    // is what stamps the requested model onto the `/agents` card and the trace
+    // span, so an in-flight Deep run says "opus" from its first frame.
+    const runBot = captureBotConfigFor(botConfig, preset);
+    if (preset.run.model === "opus" && runBot === botConfig) {
+      // Honest about what ran: the kind promised the bigger model and this
+      // connector's namespace cannot name it. Defence only — the route resolves
+      // its kind set with `requireThinkingControl`, which drops `deep` on every
+      // connector that would land here.
+      log.warn(
+        "YouTube capture {jobId}: kind {kind} asks for the opus model, but connector {connector} keeps its own ({model})",
+        {
+          jobId,
+          kind: preset.id,
+          connector: botConfig.connector ?? "claude-cli",
+          model: botConfig.model ?? "default",
+        },
+      );
+    }
+
+    // Whether this call INHERITS the bot's own thinking budget instead of the
+    // 8k capture cap. Two independent reasons, either of which is enough:
+    //
+    //  - the KIND says so (`deep`: "full thinking" means no capture override,
+    //    not an infinite budget). It holds with slides off, on, skipped or
+    //    failed — `preset` is not touched by the frames path, so a frame pass
+    //    that threw cannot reapply the cap;
+    //  - FRAMES came out, which is where TikTok opts out of the cap: reading
+    //    them IS the reasoning. That is exactly today's `standard` rule and is
+    //    kept byte-identical.
+    const inheritThinking = captureThinkingFor(preset) === null || frames.length > 0;
+    // What the trace and the completion line say the budget actually was. The
+    // seam forces `null` on a connector that does not honour the field at all
+    // (openai-compat reuses it as `max_tokens`), so naming the cap there would
+    // be a number nothing applied.
+    const thinkingLabel = !connectorCapabilities(runBot).supportsThinkingBudget
+      ? "connector-default"
+      : inheritThinking
+        ? `inherit:${runBot.thinkingMaxTokens ?? "bot-default"}`
+        : `capped:${CAPTURE_THINKING_MAX_TOKENS}`;
 
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {
@@ -343,20 +421,23 @@ Video URL: ${videoUrl}`;
       prompt: transcriptText + framesPromptSection(YOUTUBE_FRAME_SOURCE, videoId, frames),
       systemPrompt,
       config,
-      botConfig,
+      botConfig: runBot,
       attachRun,
       onProgress,
       // `--add-dir` only when there is something to read: an empty extraDirs
       // would still flip the connector's file-access mode for nothing.
       ...(frames.length > 0 ? { extraDirs: [workDir] } : {}),
       timeoutMs: summarizeTimeoutFor(frames.length, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS),
-      // Frame reading IS the reasoning, so the 8k capture cap is opted out of
-      // exactly where TikTok opts out of it. A transcript-only capture keeps it.
-      ...(frames.length > 0 ? { thinkingMaxTokens: null } : {}),
+      ...(inheritThinking ? { thinkingMaxTokens: null } : {}),
       extraTraceAttrs: {
         frames: framesOutcome,
         frameCount: String(frames.length),
         transcriptWindows: String(timestamped),
+        // The connector and the requested model are stamped by the shared seam
+        // (`tracedOneShot`), and the RETURNED model + elapsed time at its end;
+        // these two are the parts only this vertical knows.
+        summaryKind: preset.id,
+        thinking: thinkingLabel,
       },
     });
 
@@ -380,13 +461,27 @@ Video URL: ${videoUrl}`;
       }
     }
 
-    log.info("Summarized {videoId}: category={category}, {tokens} output tokens, {frames} frames read, {kept} quoted", {
-      videoId,
-      category,
-      tokens: result.outputTokens,
-      frames: frames.length,
-      kept: keptFrames.length,
-    });
+    // The one line that says what actually ran. `model` is the connector's own
+    // answer (`ClaudeExecResult.model`) rather than what was asked for, which is
+    // why both are here: a kind that promises opus and a run that reports
+    // something else is the failure this campaign has to be able to see, and a
+    // connector that reports no model at all must read as unknown rather than
+    // as the request echoed back. It is also what `scripts/replay-youtube.ts`
+    // reads for its `run.json`.
+    log.info(
+      "Summarized {videoId}: kind={summaryKind}, category={category}, model={model} (requested {requestedModel}), thinking={thinking}, {tokens} output tokens, {frames} frames read, {kept} quoted",
+      {
+        videoId,
+        summaryKind: preset.id,
+        category,
+        model: result.model ?? "unknown",
+        requestedModel: runBot.model ?? "bot-default",
+        thinking: thinkingLabel,
+        tokens: result.outputTokens,
+        frames: frames.length,
+        kept: keptFrames.length,
+      },
+    );
 
     // 4. Ingest into knowledge base (best-effort)
     updateStatus(jobId, "ingesting");
@@ -425,6 +520,11 @@ Video URL: ${videoUrl}`;
         summary: ingestSummaryBody?.text ?? summary,
         category,
         date: new Date().toISOString().split("T")[0],
+        // The SUMMARY's own provenance — which kind wrote this body — on the
+        // same key and with the same meaning as the Vimeo vertical's. Sent
+        // always, including for `standard`: "absent" has to keep meaning
+        // "written before kinds existed" rather than "written as standard".
+        summary_kind: preset.id,
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
       onIngested: (info) => {
@@ -459,6 +559,9 @@ Video URL: ${videoUrl}`;
     //    fall back to videoId only when the ingest returned no file_path (older
     //    huginn / failed ingest — in which case the doc isn't listed anyway, so
     //    run-now can't draft a colliding duplicate).
+    //    Skipped only by the replay harness (`deps.sourceDraft`), which
+    //    ingests into a stub.
+    if (opts.deps?.sourceDraft === false) return;
     triggerSourceDraftFromCapture(botConfig, {
       collection: "youtube-summaries",
       docId: ingestedDocId ?? videoId,
