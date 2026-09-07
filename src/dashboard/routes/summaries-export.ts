@@ -71,8 +71,9 @@ const DOC_FETCH_TIMEOUT_MS = 10_000;
 /**
  * NB `fetchKnowledgeApi` never returns `null` — a missing document is a thrown
  * `KnowledgeApiError` with `upstreamStatus` 404 — so the mapping below is what
- * makes the `null` branch real; the share adapter's twin has the same signature
- * and a dead `null` branch, which is why the two are not one function.
+ * makes this route's 404 real. The share adapter's twin has the same signature
+ * but never returns `null` itself (its route reaches `null` through its own
+ * `catch`), which is why the two fetchers are not one function.
  */
 export function defaultSummariesExportDeps(knowledgeApiUrl: string): SummariesExportDeps {
   return {

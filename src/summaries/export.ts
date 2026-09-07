@@ -173,7 +173,15 @@ export function splitTranscript(markdown: string): { body: string; transcript: s
  * material.
  */
 export function isSafeLinkHref(href: string): boolean {
-  const scheme = /^\s*([a-z][a-z0-9+.-]*):/i.exec(href)?.[1]?.toLowerCase();
+  // Browsers strip ASCII tab/CR/LF (and ignore other C0 controls) BEFORE
+  // parsing the scheme, so `java<TAB>script:` is `javascript:` to the click
+  // and "no scheme" to a naive regex — measured through a real click. Any
+  // control character is refused outright; a protocol-relative `//host` is
+  // refused too, since from `file://` it navigates the page to `file://host`.
+  if (/[\u0000-\u001f\u007f]/.test(href)) return false;
+  const trimmed = href.trim();
+  if (trimmed.startsWith("//")) return false;
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(trimmed)?.[1]?.toLowerCase();
   return scheme === undefined || scheme === "http" || scheme === "https" || scheme === "mailto";
 }
 

@@ -143,6 +143,18 @@ describe("renderExportMarkdown", () => {
     expect(html).toContain("remote j <img");
     expect(html).toContain('<img src="frames/187.jpg" alt="ok">');
   });
+  test("a control character inside the scheme, or a protocol-relative href, is not a link either", () => {
+    // Browsers strip ASCII tab/CR/LF from a URL before parsing the scheme, so
+    // `java<TAB>script:` re-forms as `javascript:` — measured through a click.
+    // The LF and NUL forms never parse as links in marked (literal text); the
+    // tab form DOES, and is the one the gate must reduce to text.
+    const html = renderExportMarkdown("[a](<java\tscript:x>) [b](<java\nscript:x>) [c](//evil.example/p) [d](java\u0000script:x)");
+    expect(html).not.toMatch(/<a /);
+    expect(html).not.toContain("href=");
+    expect(html).not.toContain("evil.example");
+    expect(html).toMatch(/^<p>a \[b\]/);
+    expect(html).toContain(" c [d]");
+  });
 });
 
 describe("renderExportPage", () => {
@@ -183,7 +195,8 @@ describe("exportBaseName", () => {
     expect(exportBaseName("Æøå · talk")).toBe("Æøå · talk");
     expect(exportBaseName("///")).toBe("summary");
     expect(exportBaseName("x".repeat(200)).length).toBe(80);
-    // 16 words are 79 chars and fit; the 17th would cut mid-word, so it is dropped whole.
-    expect(exportBaseName("word ".repeat(30).trim())).toBe("word ".repeat(16).trim());
+    // 13 six-char words are 77 chars; the 80-char slice ends inside the 14th
+    // ("wo"), which a hard slice keeps and a word-boundary cut drops.
+    expect(exportBaseName("wordy ".repeat(30).trim())).toBe("wordy ".repeat(13).trim());
   });
 });
