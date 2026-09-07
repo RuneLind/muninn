@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Transcript Summarizer",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Summarize YouTube videos with Claude AI, store and find similar transcripts",
   "permissions": [
     "storage",
@@ -12,7 +12,8 @@
     "http://localhost:3010/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "content_scripts": [
     {

@@ -74,53 +74,16 @@ export interface OneShotOptions {
   extraDirs?: string[];
 }
 
-export interface ConnectorCapabilities {
-  /**
-   * Whether the connector can grant read access to directories outside the bot
-   * folder. `claude-cli` expresses this via `--add-dir`; `claude-sdk` via the
-   * Agent SDK's `additionalDirectories`. The Copilot / OpenAI-compat connectors
-   * have no equivalent knob.
-   */
-  supportsExtraDirs: boolean;
-  /**
-   * Whether `thinkingMaxTokens` actually means "extended-thinking budget" on
-   * this connector. It does NOT mean that everywhere: `openai-compat` reuses the
-   * field as the request's **`max_tokens`** (an output-length cap), and
-   * `copilot-sdk` ignores it entirely. So a caller that wants to tune *thinking*
-   * (e.g. the capture summarizers capping it to kill first-token dead-air) must
-   * gate on this — overriding the field on an openai-compat bot would silently
-   * clamp how long its answer is allowed to be.
-   */
-  supportsThinkingBudget: boolean;
-  /**
-   * Whether the connector exposes built-in web tools (WebFetch / web search) so a
-   * one-shot can verify claims against the live web. `claude-cli` and `claude-sdk`
-   * both surface WebFetch; the Copilot / OpenAI-compat connectors run only the
-   * bot's `.mcp.json` tools and have no built-in web fetch. The wiki fact-check
-   * route pre-flights on this and emits a clean `app_error` when it's false
-   * (mirrors the `supportsExtraDirs` TikTok pre-flight precedent).
-   */
-  supportsWebTools: boolean;
-}
-
 /**
- * Capabilities of a connector TYPE, with no bot in hand.
- *
- * Extracted from {@link connectorCapabilities} (which now delegates) for the one
- * caller that legitimately has no `BotConfig`: the wiki chat-target endpoint
- * flags each named `connectors` row — a DB row carrying a `connectorType`, not a
- * bot — so the reader's connector picker can say "no web search" honestly.
- * Deriving that in the browser from a second hardcoded list is exactly the drift
- * this single implementation exists to prevent.
+ * The connector-capability table lives in the dependency-free
+ * `connector-capabilities.ts` leaf now (the capture-kind resolver narrows the
+ * kinds a bot offers by it and must stay IO-free); both names are re-exported
+ * here because every existing consumer imports them by this path.
  */
-export function capabilitiesForConnectorType(connector: ConnectorType): ConnectorCapabilities {
-  const isClaude = connector === "claude-cli" || connector === "claude-sdk";
-  return {
-    supportsExtraDirs: isClaude,
-    supportsThinkingBudget: isClaude,
-    supportsWebTools: isClaude,
-  };
-}
+export type { ConnectorCapabilities } from "./connector-capabilities.ts";
+export { capabilitiesForConnectorType } from "./connector-capabilities.ts";
+import type { ConnectorCapabilities } from "./connector-capabilities.ts";
+import { capabilitiesForConnectorType } from "./connector-capabilities.ts";
 
 /** Query a bot's connector capabilities without spawning anything. */
 export function connectorCapabilities(botConfig: BotConfig): ConnectorCapabilities {

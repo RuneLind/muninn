@@ -70,8 +70,9 @@ mock.module("../../tiktok/summarizer.ts", () => ({
 }));
 
 let youtubeSummarizeCalls = 0;
-/** The options the LAST started YouTube capture was handed — `frames` rides on them. */
-let lastYouTubeOpts: { frames?: boolean } | null = null;
+/** The options the LAST started YouTube capture was handed — `frames` and the
+ *  resolved summary KIND ride on them. */
+let lastYouTubeOpts: { frames?: boolean; preset?: { id: string } } | null = null;
 /**
  * Held open by the in-flight cases: the route's claim lives exactly as long as
  * this promise, so a case that wants a SECOND POST to land while a capture is
@@ -93,7 +94,11 @@ mock.module("../../youtube/summarizer.ts", () => ({
     _title: string,
     _config: unknown,
     _botConfig: unknown,
-    opts?: { frames?: boolean; onIngested?: (videoId: string, documentId: string) => void },
+    opts?: {
+      frames?: boolean;
+      preset?: { id: string };
+      onIngested?: (videoId: string, documentId: string) => void;
+    },
   ) => {
     youtubeSummarizeCalls++;
     lastYouTubeOpts = opts ?? {};
@@ -194,6 +199,7 @@ mock.module("../../vimeo/summarizer.ts", () => ({
 const { registerTikTokRoutes } = await import("./tiktok-routes.ts");
 const { registerYouTubeRoutes, YOUTUBE_RECENT_INGEST_TTL_MS } = await import("./youtube-routes.ts");
 const { registerVimeoRoutes } = await import("./vimeo-routes.ts");
+const { resolveCapturePresets } = await import("../../summaries/presets.ts");
 const { notifySummaryDocumentDeleted } = await import("../../summaries/document-deleted.ts");
 const ttState = await import("../../tiktok/state.ts");
 const ytState = await import("../../youtube/state.ts");
@@ -867,6 +873,156 @@ describe("YouTube capture POST — a job exists only when a capture will run", (
       await post(app, "/api/youtube/summarize", { url: OTHER_URL, video_id: OTHER_ID })
     ).json()) as Record<string, unknown>;
     expect(other).toMatchObject({ duplicate: true, document_id: DOC });
+  });
+});
+
+describe("YouTube: the summary KIND (`/api/youtube/options` + `kind`)", () => {
+  const YT_ID = "dQw4w9WgXcQ";
+  const YT_URL = `https://www.youtube.com/watch?v=${YT_ID}`;
+
+  /** A bot carrying a per-bot `captureSummary.<id>.md`, i.e. a kind only it offers. */
+  const botWithVariant = {
+    ...cliBot,
+    prompts: {
+      captureSummaryVariants: [{ id: "should-i-watch", label: "Should I watch?", content: "- five lines" }],
+    },
+  };
+
+  const options = (app: Hono) => app.request("/api/youtube/options");
+
+  test("the options endpoint serves the kinds and the slide capability, with CORS", async () => {
+    const res = await options(ytApp());
+
+    expect(res.status).toBe(200);
+    // CORS is not optional here: the extension's `muninnUrl` is user-editable
+    // past the manifest's localhost grant, and without the header this GET
+    // fails silently and the popup falls back to Standard-only.
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect((await res.json()) as Record<string, unknown>).toEqual({
+      kinds: [
+        { id: "standard", label: "Standard" },
+        { id: "deep", label: "Deep (opus, full thinking)" },
+        { id: "talk-notes", label: "Talk notes (timeline)" },
+      ],
+      default_kind: "standard",
+      frames: { supported: true },
+    });
+  });
+
+  test("a per-bot captureSummary.<id>.md is offered too", async () => {
+    summarizerBot = botWithVariant;
+    const body = (await (await options(ytApp())).json()) as { kinds: { id: string }[] };
+    expect(body.kinds.map((k) => k.id)).toEqual(["standard", "deep", "talk-notes", "should-i-watch"]);
+  });
+
+  test("a Copilot summarizer bot is offered NO deep here, while Vimeo's resolver still offers it", async () => {
+    // `deep` sells "opus, full thinking". Copilot can NAME the opus model, but
+    // `supportsThinkingBudget` is false there and `runCaptureOneShot` forces the
+    // budget to null — so the thinking half cannot be honoured, and this
+    // vertical drops the kind rather than stamping `deep` on a run that is not.
+    summarizerBot = copilotBot;
+    const body = (await (await options(ytApp())).json()) as {
+      kinds: { id: string }[];
+      frames: { supported: boolean };
+    };
+    expect(body.kinds.map((k) => k.id)).toEqual(["standard", "talk-notes"]);
+    // Slides are gone on that connector too — the POST would 503 them.
+    expect(body.frames.supported).toBe(false);
+
+    // The DEFAULT-argument resolution is untouched: /summaries still offers
+    // `deep` for Vimeo on the same bot. The narrowing is this route's, not the
+    // resolver's.
+    expect(resolveCapturePresets(undefined, "copilot-sdk").map((p) => p.id))
+      .toEqual(["standard", "deep", "talk-notes"]);
+  });
+
+  test("no summarizer bot answers 500 rather than an empty picker", async () => {
+    summarizerBot = null;
+    const res = await options(ytApp());
+    expect(res.status).toBe(500);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "no_bot" });
+  });
+
+  test("an absent kind is standard, and it reaches the capture", async () => {
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    expect(res.status).toBe(200);
+    expect(lastYouTubeOpts?.preset?.id).toBe("standard");
+  });
+
+  test("a picked kind rides on the capture", async () => {
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      kind: "deep",
+    });
+    expect(res.status).toBe(200);
+    expect(lastYouTubeOpts?.preset?.id).toBe("deep");
+  });
+
+  test("a non-string kind is 400 bad_kind, before the listing and before a job", async () => {
+    let listingReads = 0;
+    knowledgeApiImpl = async () => { listingReads++; return { documents: [] }; };
+    const before = ytState.getRecentJobs().length;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, kind: 42 });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "bad_kind" });
+    expect(listingReads).toBe(0);
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("an unknown kind is 400 bad_kind, and its `error` is prose", async () => {
+    let listingReads = 0;
+    knowledgeApiImpl = async () => { listingReads++; return { documents: [] }; };
+    const before = ytState.getRecentJobs().length;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      kind: "should-i-watch",
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.code).toBe("bad_kind");
+    // The popup renders `detail` then `error`, so `error` must not be the token.
+    expect(body.error).toBe("Unknown summary kind: should-i-watch");
+    expect(listingReads).toBe(0);
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("deep on a Copilot summarizer bot is bad_kind — never a deep-stamped non-deep capture", async () => {
+    summarizerBot = copilotBot;
+    const before = ytState.getRecentJobs().length;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, kind: "deep" });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "bad_kind" });
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("deep does not bypass dedup: an already-listed video answers the same duplicate body and runs nothing", async () => {
+    knowledgeApiImpl = async () => ({
+      documents: [{ id: "ai/rag/A talk.md", url: YT_URL }],
+    });
+    const before = ytState.getRecentJobs().length;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, kind: "deep" });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({
+      duplicate: true,
+      document_id: "ai/rag/A talk.md",
+      existing_url: YT_URL,
+    });
+    // No new run: the kind is validated above the dedup, not instead of it.
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
   });
 });
 

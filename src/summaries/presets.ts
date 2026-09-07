@@ -25,10 +25,13 @@
  * here yet — it pays on a backlog day, which needs batch paste first. It lands
  * as one more entry in {@link SHIPPED_CAPTURE_PRESETS}, nothing else.
  *
- * Pure + IO-free: the `BotPrompts` import is type-only, as in the share sibling.
+ * Pure + IO-free: the `BotPrompts` import is type-only, as in the share sibling,
+ * and the one value import is the dependency-free connector-capability table
+ * (`src/ai/connector-capabilities.ts`) — a leaf that constructs no connector.
  */
 
 import type { BotConfig, BotPrompts, ConnectorType } from "../bots/config.ts";
+import { capabilitiesForConnectorType } from "../ai/connector-capabilities.ts";
 import { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
 
 /** How a kind's model call differs from the default capture call. */
@@ -144,9 +147,31 @@ export function connectorRunsOpus(connector: ConnectorType | undefined): boolean
  * `BotPrompts` from any other producer handing over `"  \n"` would otherwise
  * replace a kind's whole structure with nothing).
  */
+export interface ResolveCapturePresetsOptions {
+  /**
+   * Also drop a kind whose THINKING half this connector cannot honour.
+   *
+   * Two halves of `deep` are promised by its label — "opus, full thinking" —
+   * and they are honoured by different mechanisms. The MODEL half is gated by
+   * {@link connectorRunsOpus} above and is checked on every caller. The
+   * THINKING half is gated by `supportsThinkingBudget`, which is true only on
+   * the two Claude connectors: `runCaptureOneShot` forces the budget to `null`
+   * everywhere else, so on `copilot-sdk` the kind runs opus with whatever
+   * thinking the connector defaults to. That is a fair Vimeo offer (its picker
+   * sells the model) and a false YouTube one (this campaign's label sells the
+   * budget), so the narrowing is a per-caller ARGUMENT rather than a change to
+   * the default — `false` keeps every existing caller's offer set byte-identical.
+   *
+   * Only ever narrows: a per-bot NEW id runs with {@link DEFAULT_RUN}
+   * (`thinking: "capped"`), so nothing a bot adds can be dropped by this.
+   */
+  readonly requireThinkingControl?: boolean;
+}
+
 export function resolveCapturePresets(
   prompts: BotPrompts | undefined,
   connector?: ConnectorType,
+  opts: ResolveCapturePresetsOptions = {},
 ): CapturePreset[] {
   const overrides = new Map<string, { label: string; content: string }>();
   for (const v of prompts?.captureSummaryVariants ?? []) {
@@ -155,11 +180,14 @@ export function resolveCapturePresets(
   }
 
   const runsOpus = connectorRunsOpus(connector);
+  // Read once, not per kind: the answer depends only on the connector.
+  const honoursThinking = capabilitiesForConnectorType(connector ?? "claude-cli").supportsThinkingBudget;
   const resolved: CapturePreset[] = [];
   for (const shipped of SHIPPED_CAPTURE_PRESETS) {
     const override = overrides.get(shipped.id);
     overrides.delete(shipped.id);
     if (shipped.run.model === "opus" && !runsOpus) continue;
+    if (opts.requireThinkingControl === true && shipped.run.thinking === "inherit" && !honoursThinking) continue;
     resolved.push(override ? { ...shipped, instruction: override.content } : shipped);
   }
   for (const [id, extra] of overrides) {

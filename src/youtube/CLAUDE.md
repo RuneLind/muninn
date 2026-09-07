@@ -12,6 +12,7 @@ into huginn.
 | `state.ts` | The job store. Statuses `pending · fetching_transcript · downloading · extracting_frames · summarizing · ingesting · complete · error` — the middle two are the FRAMES path only |
 | `frames.ts` | Everything the frames path DECIDES, all of it pure and import-free: `decideYouTubeFrames`, the format/cap/floor constants, `youtubeWatchUrl`, `transcriptUrl`, `youtubeDownloadTimeoutFor`, `capTranscriptWindows`, `appendTranscriptSection` |
 | `summarizer.ts` | The job: probe → transcript → download → frames → `runCaptureOneShot` → ingest → source-draft |
+| `extension-options-rules.ts` | The popup's rules, pure and import-free — payload validation, restore-and-revalidate, the POST body. Emitted into `extensions/youtube/capture-rules.js` by `bun run build:extension` |
 | `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam this vertical uses whole — the cadence, the served root, the URL shape, the prompt section, the id gate, `keepReferencedFrames`, `removeKeptFramesForDocument`, `extractCadenceFramesFromFile`. See `src/vimeo/CLAUDE.md` for its full contract |
 
 The route is `src/dashboard/routes/youtube-routes.ts`; the huginn half is the
@@ -240,6 +241,114 @@ fetch anyway. Refusals use the shape the Vimeo route documents — `{error,
 code}`, `error` PROSE and `code` the machine token — so the extension popup,
 which renders `detail` then `error`, shows a sentence with no client change.
 
+
+## Kinds
+
+**A capture writes one KIND, and the route decides which** — `kind` on the body,
+absent ⇒ `standard`. A non-string, or an id this instance does not offer, is
+**400 `bad_kind`**, raised above the huginn listing read and above `createJob`
+(the Vimeo ordering): a picker value the server does not offer is a refusal
+whatever the video, and it must cost neither a round-trip nor a job row. It is
+refused rather than quietly summarized as `standard` — the reader would read the
+result as the kind they picked.
+
+**The kind set is the shared one, narrowed** (`youtubeCaptureKinds` in
+`youtube-routes.ts`, the ONE function the picker and the 400 both call, so they
+cannot disagree). `resolveCapturePresets` already drops a kind whose MODEL the
+connector cannot name; this vertical also passes `requireThinkingControl`, which
+drops one whose BUDGET it cannot honour. That second gate exists because
+`deep`'s label sells *opus, full thinking* and the two halves are honoured by
+different mechanisms: Copilot carries `claude-opus-5` verbatim in its catalog,
+but `supportsThinkingBudget` is false there and `runCaptureOneShot` forces the
+budget to `null`, so the run would be stamped `deep` without being one.
+**Accepted consequence, stated rather than hidden:** a Copilot summarizer bot is
+offered `deep` for Vimeo on `/summaries` — whose picker sells the model — and
+refused it here. A per-bot `captureSummary.<id>.md` kind runs with the default
+run options and is never touched by either gate.
+
+**What `deep` means, exactly:** `captureBotConfigFor` swaps in
+`CAPTURE_DEEP_MODEL`, and `captureThinkingFor` returns `null` so the capture's
+8 k thinking override is not applied at all — *full thinking* is the bot's own
+configured budget (jarvis: 40 000), not an unbounded one. The swap happens
+BEFORE `runCaptureOneShot`, which is what stamps the requested model onto the
+`/agents` card and the trace span, so an in-flight Deep run says opus from its
+first frame.
+
+**It applies with slides off, on, skipped or failed.** `inheritThinking` is
+`captureThinkingFor(preset) === null || frames.length > 0` — two independent
+reasons, either sufficient. The old spelling was `frames.length > 0` alone, so a
+yt-dlp or ffmpeg failure on a Deep capture silently reapplied the 8 k cap: a
+deep-stamped document written under the capture cap, with one warn to say so.
+`standard` keeps its own rule unchanged (the cap unless frames came out).
+
+**What the kind leaves behind:** `summary_kind` on the ingest body — sent for
+every kind, `standard` included, so *absent* keeps meaning "written before kinds
+existed" — `summaryKind` and `thinking` on the trace span (the connector and the
+requested model are the shared seam's, the returned model and the elapsed time
+its end), and a completion log line naming the kind, the connector's OWN
+reported model (`ClaudeExecResult.model`, `unknown` when it names none) and the
+requested one. Never infer the observed model from the request.
+
+## The options endpoint, and the picker
+
+**`GET /api/youtube/options`** answers `{kinds: [{id, label}…], default_kind,
+frames: {supported}}` — the same resolution the POST validates against, so the
+extension renders its picker from the server instead of from a catalog of its
+own. Two rules:
+
+- **`applyCors`, exactly like the POST.** This module applies CORS inside the
+  summarize handler only and registers a preflight only for `/summarize`, while
+  the extension's `muninnUrl` is user-editable past the manifest's
+  `localhost:3010` grant — so without the header this GET fails silently on
+  every other install and the popup falls back to Standard-only, which is the
+  one failure the endpoint exists to remove.
+- **It stays a CORS *simple* request** — a `GET` with no custom headers — so no
+  preflight is needed and none is registered.
+
+The popup's own rules live in `src/youtube/extension-options-rules.ts` because
+**the extension has no test harness**: an unusable payload (an older instance, a
+proxy answering HTML, an empty list) becomes the Standard-only fallback AND a
+sentence saying so; a remembered `kind` is re-validated against the CURRENT
+options; a remembered Slides tick does not survive onto an instance that cannot
+read frames; and an install from before the picker (`{frames}` and no `kind`) is
+the default, not an error. `bun run build:extension` emits it into
+`extensions/youtube/capture-rules.js` (`scripts/build-extension.ts`, one emitter
+with an `--out` override so the co-located test can re-run it), and that test
+compares the fresh bytes with the checked-in copy — a stale copy fails CI. The
+output is bun's own codegen, pinned to CI's `BUN_VERSION`; a bun bump that
+changes it is fixed by `bun run build:extension` plus committing the result.
+`popup.html` loads `popup.js` as a module and the service worker declares
+`"type": "module"`, since both import the emit.
+
+## The replay harness
+
+`bun scripts/replay-youtube.ts` re-runs a real capture as many times and in as
+many kinds as you like, without touching the corpus. It exists because the live
+vertical makes a comparison impossible three ways over: the route answers
+`duplicate` before a job exists, `summarizeVideo` ingests and fires the source
+drafter unconditionally, and the remedy that shape suggests — delete the
+document, capture again — is what must not be done to production data.
+
+It drives the summarizer directly over seams it already has: `deps`
+(`probeVideoInfo` from ffprobe on a local file, `downloadVideo` copying that
+file into the work dir, the REAL `extractCadenceFramesFromFile`, a temp
+`framesRoot`), a stub huginn on loopback that serves a saved transcript and
+RECORDS the ingest, and `sourceDraft: false` — the one seam this PR added, the
+route never passes it. The MODEL CALL is real, on the resolved summarizer bot.
+
+```bash
+curl -s 'http://127.0.0.1:8321/api/youtube/transcript/<id>?timestamps=1' > transcript.json
+yt-dlp -f "$YOUTUBE_FRAME_FORMAT_SELECTOR" --no-playlist -o '<id>.mp4' 'https://www.youtube.com/watch?v=<id>'
+
+bun scripts/replay-youtube.ts --video <id>.mp4 --transcript transcript.json \
+  --video-id <id> --title "…" --kind deep --frames --runs 2 --out ./out
+```
+
+Per run it writes `summary.md`, the recorded `ingest.json`, the kept frames and
+a `run.json` carrying requested vs observed model, the effective thinking
+budget, connector, tokens, cost and elapsed time. Keep the fixtures OUT of the
+repo — muninn is public.
+
 ## Testing
 
 `frames.ts` imports nothing, so `frames.test.ts` runs in the shared chunk beside
@@ -254,3 +363,9 @@ are injected through `SummarizeVideoOptions.deps`; nothing in the suite
 downloads or decodes anything. Route cases live in
 `src/dashboard/routes/capture-route-job-ordering.test.ts`, which runs in a
 process of its own for the same reason.
+
+⚠️ **No chain globs `src/youtube/`**: both `test` and `test:unit` enumerate this
+directory's files one by one, and `src/test/mock-isolation.test.ts` checks
+PRESENCE, not coverage — a new test file here is added to BOTH chains or it
+never runs. `extension-options-rules.test.ts` sits in the shared chunk (it mocks
+nothing) and spawns the emitter as a subprocess.

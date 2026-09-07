@@ -1,11 +1,29 @@
+/**
+ * The popup. Loaded as a MODULE (`popup.html`), so it can import the rules the
+ * repo tests: `capture-rules.js` is emitted from
+ * `src/youtube/extension-options-rules.ts` by `bun run build:extension`.
+ * Nothing here re-implements a rule that lives there.
+ */
+import {
+  FALLBACK_CAPTURE_OPTIONS,
+  OPTIONS_UNREACHABLE_MESSAGE,
+  parseCaptureOptions,
+  pickFrames,
+  pickKind,
+} from './capture-rules.js';
+
 const $ = (sel) => document.querySelector(sel);
 
-// The Slides tick, remembered per browser under the same sync storage the
-// Muninn URL lives in. Default OFF: slides cost a download, an ffmpeg pass and
-// a multi-turn model session, so they are opt-in per the plan.
+// The Slides tick and the summary KIND, remembered per browser under the same
+// sync storage the Muninn URL lives in. Slides default OFF (they cost a
+// download, an ffmpeg pass and a multi-turn model session); the kind defaults to
+// whatever the server calls its default, which is Standard.
 const FRAMES_KEY = 'frames';
+const KIND_KEY = 'summaryKind';
 
 let videoInfo = null;
+/** What this Muninn offers. Replaced once the options endpoint answers. */
+let captureOptions = FALLBACK_CAPTURE_OPTIONS;
 
 document.addEventListener('DOMContentLoaded', async () => {
   chrome.runtime.sendMessage({ type: 'GET_STATE' }, (state) => {
@@ -30,21 +48,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Restore the remembered tick, then persist every change. Both halves are
-  // guarded: a storage failure must leave the button working, not the popup
-  // dead — the tick then simply defaults to off for that session.
-  const frames = $('#chk-frames');
-  try {
-    const stored = await chrome.storage.sync.get({ [FRAMES_KEY]: false });
-    frames.checked = stored[FRAMES_KEY] === true;
-  } catch (err) {
-    console.warn('Could not read the Slides preference', err);
-  }
-  frames.addEventListener('change', () => {
-    chrome.storage.sync
-      .set({ [FRAMES_KEY]: frames.checked })
-      .catch((err) => console.warn('Could not save the Slides preference', err));
-  });
+  await populateControls();
 
   $('#btn-summarize').addEventListener('click', handleSummarize);
   $('#open-options').addEventListener('click', (e) => {
@@ -52,6 +56,73 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.runtime.openOptionsPage();
   });
 });
+
+/**
+ * Ask the server what it offers, then restore the remembered choices against
+ * THAT — never against a catalog of the extension's own, which would offer a
+ * kind this Muninn cannot run and collect a 400 on click.
+ *
+ * A failed read is said out loud (`OPTIONS_UNREACHABLE_MESSAGE`) and leaves
+ * Standard only. A silent Standard-only picker is the failure this endpoint
+ * exists to remove.
+ */
+async function populateControls() {
+  // The callback form: a worker that failed to answer leaves
+  // `chrome.runtime.lastError` set and hands the callback `undefined`, which is
+  // one of the shapes `parseCaptureOptions` refuses — so an unreachable Muninn
+  // and a broken worker land in the same place.
+  const answer = await new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'GET_OPTIONS' }, (response) => {
+      void chrome.runtime.lastError;
+      resolve(response);
+    });
+  });
+
+  const parsed = answer && !answer.error ? parseCaptureOptions(answer.options) : null;
+  captureOptions = parsed ?? FALLBACK_CAPTURE_OPTIONS;
+  if (!captureOptions.fromServer) {
+    const status = $('#status');
+    status.className = 'error';
+    status.textContent = OPTIONS_UNREACHABLE_MESSAGE;
+    status.classList.remove('hidden');
+  }
+
+  const kindSelect = $('#sel-kind');
+  kindSelect.replaceChildren(
+    ...captureOptions.kinds.map((kind) => {
+      const option = document.createElement('option');
+      option.value = kind.id;
+      option.textContent = kind.label;
+      return option;
+    }),
+  );
+
+  const frames = $('#chk-frames');
+  frames.disabled = !captureOptions.framesSupported;
+
+  // Restore, then persist every change. Both halves are guarded: a storage
+  // failure must leave the button working, not the popup dead — the controls
+  // then simply show this instance's defaults for that session.
+  let stored = {};
+  try {
+    stored = await chrome.storage.sync.get({ [FRAMES_KEY]: false, [KIND_KEY]: null });
+  } catch (err) {
+    console.warn('Could not read the remembered capture settings', err);
+  }
+  kindSelect.value = pickKind(stored[KIND_KEY], captureOptions);
+  frames.checked = pickFrames(stored[FRAMES_KEY], captureOptions);
+
+  kindSelect.addEventListener('change', () => {
+    chrome.storage.sync
+      .set({ [KIND_KEY]: kindSelect.value })
+      .catch((err) => console.warn('Could not save the summary kind', err));
+  });
+  frames.addEventListener('change', () => {
+    chrome.storage.sync
+      .set({ [FRAMES_KEY]: frames.checked })
+      .catch((err) => console.warn('Could not save the Slides preference', err));
+  });
+}
 
 function showVideoPage(state) {
   $('#video-title').textContent = state.title;
@@ -86,8 +157,11 @@ async function handleSummarize() {
         title: videoInfo.title,
         url: videoInfo.url,
         videoId: videoInfo.videoId,
-        // Always a real boolean: the route 400s `bad_frames` on anything else.
-        frames: $('#chk-frames').checked === true,
+        // Re-validated rather than read straight off the control: the options
+        // can only have narrowed since they were rendered, and the route 400s
+        // an id it does not offer.
+        kind: pickKind($('#sel-kind').value, captureOptions),
+        frames: pickFrames($('#chk-frames').checked, captureOptions),
       }, (response) => {
         if (response?.error) {
           reject(new Error(response.error));
