@@ -158,8 +158,9 @@ describe("renderExportMarkdown", () => {
   });
   test("a host reference in any slash spelling is not a link; a plain path or fragment is", () => {
     // The WHATWG parser treats `\` as `/` on a special base such as `file:`,
-    // so `/\host` and `\/host` are host references exactly like `//host`.
-    const html = renderExportMarkdown("[a](/\\evil.example/p) [b](\\/evil.example/p) [c](//evil.example) [d](/local/p) [e](#f) [f](sub/p.html)");
+    // so `/\host` is a host reference exactly like `//host`. (`\\host` in
+    // markdown is an escaped backslash and reaches the href as a plain path.)
+    const html = renderExportMarkdown("[a](/\\evil.example/p) [c](//evil.example) [d](/local/p) [e](#f) [f](sub/p.html)");
     expect(html).not.toContain("evil.example");
     expect(html).toContain('<a href="/local/p">d</a>');
     expect(html).toContain('<a href="#f">e</a>');
