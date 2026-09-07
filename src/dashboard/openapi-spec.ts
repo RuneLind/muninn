@@ -1065,7 +1065,7 @@ export const spec = {
         tags: ["YouTube"],
         summary: "Summarize a video",
         description:
-          "Starts a background summarization job for a YouTube video: huginn's transcript, a summary on `SUMMARIZER_BOT`'s connector, then an ingest into `youtube-summaries`. With `frames: true` it first probes the video with yt-dlp and downloads a video-only ≤720p rendition, so the summary can quote slides inline. The body must be `application/json` (415 otherwise — a `text/plain` POST is a CORS-simple request, and this one spends a download, an ffmpeg pass and an image-reading model turn). Refusals happen before a job exists: a `video_id` outside YouTube's 11-character alphabet is 400 `bad_video_id` (checked before the huginn listing read), a non-boolean `frames` is 400 `bad_frames`, and `frames: true` on a summarizer bot whose connector cannot read files is 503 `frames_unsupported`. An already-captured video answers 200 with `duplicate` and no `job_id`; a second POST while the same video is still capturing answers 200 with `in_flight` and the running job's id. Everything stored — the job, the ingest body's url, the dedup memory — is built from `video_id`; `url` is required but not stored.",
+          "Starts a background summarization job for a YouTube video: huginn's transcript, a summary on `SUMMARIZER_BOT`'s connector, then an ingest into `youtube-summaries`. With `frames: true` it first probes the video with yt-dlp and downloads a video-only ≤720p rendition, so the summary can quote slides inline. The body must be `application/json` (415 otherwise — a `text/plain` POST is a CORS-simple request, and this one spends a download, an ffmpeg pass and an image-reading model turn). Refusals happen before a job exists: a `video_id` outside YouTube's 11-character alphabet is 400 `bad_video_id` (checked before the huginn listing read), a non-boolean `frames` is 400 `bad_frames`, a `kind` that is not a string, is blank, or names a kind this instance does not offer is 400 `bad_kind`, and `frames: true` on a summarizer bot whose connector cannot read files is 503 `frames_unsupported`. An already-captured video answers 200 with `duplicate` and no `job_id`; a second POST while the same video is still capturing answers 200 with `in_flight` and the running job's id. Everything stored — the job, the ingest body's url, the dedup memory — is built from `video_id`; `url` is required but not stored.",
         operationId: "postYoutubeSummarize",
         requestBody: {
           required: true,
@@ -1081,6 +1081,11 @@ export const spec = {
                     type: "boolean",
                     description:
                       "Pull one 720p frame per cadence tick and let the summary quote slides inline. Default false; videos under 60 s or over 3 h skip frames and capture the transcript alone.",
+                  },
+                  kind: {
+                    type: "string",
+                    description:
+                      "The summary kind this capture writes, from `GET /api/youtube/options`. Absent is `standard`; present but blank, non-string, or unoffered is 400 `bad_kind` — never a silent standard capture. It decides the prompt's structure, the model (`deep` runs the opus constant) and whether the 8k capture thinking cap applies.",
                   },
                 },
                 required: ["url", "video_id"],
@@ -1111,6 +1116,46 @@ export const spec = {
           "415": errorResponse,
           "500": errorResponse,
           "503": errorResponse,
+        },
+      },
+    },
+
+    "/api/youtube/options": {
+      get: {
+        tags: ["YouTube"],
+        summary: "Capture options this instance offers",
+        description:
+          "The summary kinds `POST /api/youtube/summarize` accepts on this instance, and whether it can read slides at all — one resolution, so the extension popup's picker and the POST's 400 cannot disagree. The kinds are `SUMMARIZER_BOT`'s resolved preset set narrowed to those whose model AND thinking budget its connector can honour, so `deep` is absent on a `copilot-sdk` bot. `frames.supported` mirrors that bot's `supportsExtraDirs`. Read-only, with the same CORS disposition the POST applies (the caller is a Chrome extension whose Muninn URL is user-editable past the manifest's localhost grant), and a CORS-simple request, so no preflight is registered. No summarizer bot at all is 500 `no_bot`, not an empty picker.",
+        operationId: "getYoutubeOptions",
+        responses: {
+          "200": {
+            description: "OK",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    kinds: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: { id: { type: "string" }, label: { type: "string" } },
+                      },
+                    },
+                    default_kind: {
+                      type: "string",
+                      description: "The id a client sends for \"no pick\" — named, so no client assumes an order.",
+                    },
+                    frames: {
+                      type: "object",
+                      properties: { supported: { type: "boolean" } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "500": errorResponse,
         },
       },
     },

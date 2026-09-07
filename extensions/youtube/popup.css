@@ -101,6 +101,16 @@ header h1 {
   margin-bottom: 10px;
 }
 
+/* The two explanatory lines under the picker and the Slides row. Dim and small:
+   they say why a control looks the way it does, and must not compete with the
+   Summarize button. */
+.note {
+  margin-bottom: 10px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
 /* A disabled Slides tick means this instance's summarizer bot cannot read
    frames — dimmed rather than absent, so the control is explicable. */
 .controls .opt input:disabled { cursor: not-allowed; }

@@ -16,16 +16,23 @@
 
     <div id="video-info" class="hidden">
       <div class="video-title" id="video-title"></div>
-      <label class="opt kind" title="Which summary this capture writes. Deep runs the bigger model with the bot's full thinking budget and takes noticeably longer.">
+      <label class="opt kind" id="lbl-kind" title="Which summary this capture writes. Deep runs the bigger model with the bot's full thinking budget and takes noticeably longer.">
         Kind
         <select id="sel-kind"></select>
       </label>
+      <!-- Why the picker looks the way it does: Muninn could not be reached, or
+           a remembered kind is no longer offered. Rendered only here, inside the
+           capture panel, because a note about a picker is unreadable on a tab
+           that shows no picker. -->
+      <div id="options-note" class="note hidden"></div>
       <div class="controls">
         <button id="btn-summarize" class="primary">Summarize</button>
-        <label class="opt" title="Pull one frame per cadence tick (~20s on a 10-minute video, ~180s at the 3-hour cap) and let the summary quote the slides that add something the transcript does not say. Adds a download and a few minutes.">
+        <label class="opt" id="lbl-frames" title="Pull one frame per cadence tick (~20s on a 10-minute video, ~180s at the 3-hour cap) and let the summary quote the slides that add something the transcript does not say. Adds a download and a few minutes.">
           <input type="checkbox" id="chk-frames"> Slides
         </label>
       </div>
+      <!-- Why the Slides tick is dimmed, when it is. -->
+      <div id="frames-note" class="note hidden"></div>
       <div id="status" class="hidden"></div>
     </div>
   </div>

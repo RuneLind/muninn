@@ -64,10 +64,21 @@ async function getSettings() {
  * be blocked on. A plain GET with no custom headers, so it is a CORS *simple*
  * request and needs no preflight. Never throws for the popup: any failure comes
  * back as `{error}`, which the popup renders as "Standard only".
+ *
+ * The TIMEOUT is not optional. `muninnUrl` is a URL the reader typed, and a host
+ * that accepts the connection and never answers — a stale tailnet address, a
+ * VPN that is down, a firewall that drops rather than refuses — leaves this
+ * fetch pending for minutes. A refused port fails in milliseconds and was the
+ * only case ever exercised. Small, because the reader is looking at an open
+ * popup: past a few seconds, "could not reach it" is the useful answer.
  */
+const OPTIONS_TIMEOUT_MS = 4000;
+
 async function handleGetOptions() {
   const settings = await getSettings();
-  const response = await fetch(`${settings.muninnUrl}/api/youtube/options`);
+  const response = await fetch(`${settings.muninnUrl}/api/youtube/options`, {
+    signal: AbortSignal.timeout(OPTIONS_TIMEOUT_MS),
+  });
   if (!response.ok) {
     throw new Error(`Muninn options: ${response.status}`);
   }

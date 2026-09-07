@@ -39,6 +39,17 @@ function pickKind(stored, options) {
   }
   return options.defaultKind;
 }
+function restoredKindNote(stored, picked, options) {
+  if (!options.fromServer)
+    return null;
+  if (!isNonEmptyString(stored))
+    return null;
+  const wanted = stored.trim();
+  if (wanted === picked)
+    return null;
+  const label = options.kinds.find((k) => k.id === picked)?.label ?? picked;
+  return `“${wanted}” is not offered here — using ${label}.`;
+}
 function pickFrames(stored, options) {
   return options.framesSupported && stored === true;
 }
@@ -52,6 +63,7 @@ function buildSummarizeBody(input) {
   };
 }
 export {
+  restoredKindNote,
   pickKind,
   pickFrames,
   parseCaptureOptions,

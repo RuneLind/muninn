@@ -12,7 +12,9 @@ into huginn.
 | `state.ts` | The job store. Statuses `pending · fetching_transcript · downloading · extracting_frames · summarizing · ingesting · complete · error` — the middle two are the FRAMES path only |
 | `frames.ts` | Everything the frames path DECIDES, all of it pure and import-free: `decideYouTubeFrames`, the format/cap/floor constants, `youtubeWatchUrl`, `transcriptUrl`, `youtubeDownloadTimeoutFor`, `capTranscriptWindows`, `appendTranscriptSection` |
 | `summarizer.ts` | The job: probe → transcript → download → frames → `runCaptureOneShot` → ingest → source-draft |
-| `extension-options-rules.ts` | The popup's rules, pure and import-free — payload validation, restore-and-revalidate, the POST body. Emitted into `extensions/youtube/capture-rules.js` by `bun run build:extension` |
+| `kinds.ts` | `youtubeCaptureKinds` — the offer set this vertical narrows, called by the options route, the `bad_kind` check and the replay harness |
+| `extension-options-rules.ts` | The popup's rules, pure and import-free — payload validation, restore-and-revalidate, the restore NOTE, the POST body. Emitted into `extensions/youtube/capture-rules.js` by `bun run build:extension` |
+| `extension-build.ts` | That emitter. Bundles for the browser and normalizes bun's cwd-relative module banner, so the byte gate cannot depend on where it ran |
 | `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam this vertical uses whole — the cadence, the served root, the URL shape, the prompt section, the id gate, `keepReferencedFrames`, `removeKeptFramesForDocument`, `extractCadenceFramesFromFile`. See `src/vimeo/CLAUDE.md` for its full contract |
 
 The route is `src/dashboard/routes/youtube-routes.ts`; the huginn half is the
@@ -245,26 +247,24 @@ which renders `detail` then `error`, shows a sentence with no client change.
 ## Kinds
 
 **A capture writes one KIND, and the route decides which** — `kind` on the body,
-absent ⇒ `standard`. A non-string, or an id this instance does not offer, is
-**400 `bad_kind`**, raised above the huginn listing read and above `createJob`
+absent ⇒ `standard`. A non-string, a PRESENT-but-blank string, or an id this
+instance does not offer, is **400 `bad_kind`**, raised above the huginn listing read and above `createJob`
 (the Vimeo ordering): a picker value the server does not offer is a refusal
 whatever the video, and it must cost neither a round-trip nor a job row. It is
 refused rather than quietly summarized as `standard` — the reader would read the
-result as the kind they picked.
+result as the kind they picked. Blank is refused for that same reason and not
+folded into "absent": `findCapturePreset` reads a blank id as absent, which is
+right for a key that is not there (an older extension, a curl) and wrong for a
+picker that failed to fill.
 
 **The kind set is the shared one, narrowed** (`youtubeCaptureKinds` in
-`youtube-routes.ts`, the ONE function the picker and the 400 both call, so they
-cannot disagree). `resolveCapturePresets` already drops a kind whose MODEL the
-connector cannot name; this vertical also passes `requireThinkingControl`, which
-drops one whose BUDGET it cannot honour. That second gate exists because
-`deep`'s label sells *opus, full thinking* and the two halves are honoured by
-different mechanisms: Copilot carries `claude-opus-5` verbatim in its catalog,
-but `supportsThinkingBudget` is false there and `runCaptureOneShot` forces the
-budget to `null`, so the run would be stamped `deep` without being one.
-**Accepted consequence, stated rather than hidden:** a Copilot summarizer bot is
-offered `deep` for Vimeo on `/summaries` — whose picker sells the model — and
-refused it here. A per-bot `captureSummary.<id>.md` kind runs with the default
-run options and is never touched by either gate.
+`src/youtube/kinds.ts` — the ONE function the picker, the `400 bad_kind` and the
+replay harness all call, so none of the three can offer what another refuses).
+It passes `requireThinkingControl`, whose rationale — and the accepted
+consequence that a Copilot summarizer bot is offered `deep` for Vimeo and
+refused it here — is documented once, on that option in `src/summaries/presets.ts`.
+A per-bot `captureSummary.<id>.md` kind runs with the default run options and is
+never touched by either gate.
 
 **What `deep` means, exactly:** `captureBotConfigFor` swaps in
 `CAPTURE_DEEP_MODEL`, and `captureThinkingFor` returns `null` so the capture's
@@ -312,8 +312,9 @@ sentence saying so; a remembered `kind` is re-validated against the CURRENT
 options; a remembered Slides tick does not survive onto an instance that cannot
 read frames; and an install from before the picker (`{frames}` and no `kind`) is
 the default, not an error. `bun run build:extension` emits it into
-`extensions/youtube/capture-rules.js` (`scripts/build-extension.ts`, one emitter
-with an `--out` override so the co-located test can re-run it), and that test
+`extensions/youtube/capture-rules.js` (`src/youtube/extension-build.ts`, with
+`scripts/build-extension.ts` as the CLI wrapper and an `--out` override so the
+co-located test can re-run it), and that test
 compares the fresh bytes with the checked-in copy — a stale copy fails CI. The
 output is bun's own codegen, pinned to CI's `BUN_VERSION`; a bun bump that
 changes it is fixed by `bun run build:extension` plus committing the result.
@@ -332,13 +333,18 @@ document, capture again — is what must not be done to production data.
 It drives the summarizer directly over seams it already has: `deps`
 (`probeVideoInfo` from ffprobe on a local file, `downloadVideo` copying that
 file into the work dir, the REAL `extractCadenceFramesFromFile`, a temp
-`framesRoot`), a stub huginn on loopback that serves a saved transcript and
-RECORDS the ingest, and `sourceDraft: false` — the one seam this PR added, the
-route never passes it. The MODEL CALL is real, on the resolved summarizer bot.
+`framesRoot`, `sourceDraft: false` — the one seam this PR added, the route never
+passes it) and a stub huginn on loopback that serves a saved transcript and
+RECORDS the ingest. The MODEL CALL is real, on the resolved summarizer bot;
+with `DATABASE_URL` set it also writes its trace, so the run appears on
+`/traces` and `/agents`.
 
 ```bash
 curl -s 'http://127.0.0.1:8321/api/youtube/transcript/<id>?timestamps=1' > transcript.json
-yt-dlp -f "$YOUTUBE_FRAME_FORMAT_SELECTOR" --no-playlist -o '<id>.mp4' 'https://www.youtube.com/watch?v=<id>'
+# The selector is YOUTUBE_FRAME_FORMAT_SELECTOR in src/youtube/frames.ts — a
+# TypeScript constant, not a shell variable. Copy it if it ever changes.
+yt-dlp -f 'bv[height<=720][ext=mp4][vcodec^=avc1]/bv[height<=720][ext=mp4]/bv[height<=720]' \
+  --no-playlist -o '<id>.mp4' 'https://www.youtube.com/watch?v=<id>'
 
 bun scripts/replay-youtube.ts --video <id>.mp4 --transcript transcript.json \
   --video-id <id> --title "…" --kind deep --frames --runs 2 --out ./out
@@ -368,4 +374,6 @@ process of its own for the same reason.
 directory's files one by one, and `src/test/mock-isolation.test.ts` checks
 PRESENCE, not coverage — a new test file here is added to BOTH chains or it
 never runs. `extension-options-rules.test.ts` sits in the shared chunk (it mocks
-nothing) and spawns the emitter as a subprocess.
+nothing) and calls `buildExtensionRules` (`src/youtube/extension-build.ts`)
+IN-PROCESS — no subprocess. It also `process.chdir`s, to prove the emitted bytes
+do not depend on the working directory, and restores the cwd in a `finally`.

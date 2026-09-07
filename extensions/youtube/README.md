@@ -116,12 +116,30 @@ rebuilds it and fails when the checked-in copy is stale.
 Nothing in this folder has an automated harness, so after changing the popup,
 the worker or the manifest, reload the unpacked extension and confirm:
 
+- **the service worker registers with no error.** On `chrome://extensions`, the
+  card shows "service worker" with no red "Errors" badge — the worker is declared
+  `"type": "module"` and imports `capture-rules.js`, so a bad path or a syntax
+  error there kills every action the popup can take, silently
 - the popup populates on a fresh load — the video title, the **Kind** picker and
   the **Slides** tick all appear
 - a chosen kind and tick survive closing and reopening the popup
 - pointing **Muninn URL** at a port with nothing on it shows
   "Could not reach Muninn options — Standard only." and still offers Standard
-- "Summarize" submits and opens the dashboard tab
+- **pointing it at a host that HANGS**, which is a different failure from a
+  refused port: use an address that accepts the connection and never answers
+  (`http://10.255.255.1:3010`, or a tailnet host that is offline). Within a few
+  seconds the popup must show the same "Could not reach Muninn options" line —
+  and **Settings** must be clickable the whole time, since that is the only
+  control that can fix the URL
+- **on a summarizer bot whose connector cannot read frames** (a `copilot-sdk`
+  bot), the **Slides** tick renders dimmed with the line "Slides are off: this
+  Muninn's summarizer bot uses a connector that cannot read frames." — and
+  **Deep** is absent from the **Kind** picker on that bot
+- **remembering a kind this Muninn no longer offers**: pick Deep on a bot that
+  offers it, then point **Muninn URL** at one that does not. The picker falls
+  back and says so ("…is not offered here — using Standard.")
+- **on a tab that is not a YouTube video**, the popup shows only "Navigate to a
+  YouTube video…" — no picker, and no note about one
 
 ## API
 

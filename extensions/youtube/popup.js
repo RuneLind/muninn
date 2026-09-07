@@ -10,6 +10,7 @@ import {
   parseCaptureOptions,
   pickFrames,
   pickKind,
+  restoredKindNote,
 } from './capture-rules.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -21,11 +22,52 @@ const $ = (sel) => document.querySelector(sel);
 const FRAMES_KEY = 'frames';
 const KIND_KEY = 'summaryKind';
 
+/** The Slides label's ordinary tooltip, restored when the tick is usable. */
+const FRAMES_LABEL_TITLE =
+  'Pull one frame per cadence tick (~20s on a 10-minute video, ~180s at the 3-hour cap) ' +
+  'and let the summary quote the slides that add something the transcript does not say. ' +
+  'Adds a download and a few minutes.';
+
 let videoInfo = null;
 /** What this Muninn offers. Replaced once the options endpoint answers. */
 let captureOptions = FALLBACK_CAPTURE_OPTIONS;
+/**
+ * The two lines that explain the controls, held rather than written straight
+ * out: the capture panel is revealed by an ASYNC callback, so whichever of the
+ * two arrives second is what paints. Both are re-rendered from here.
+ */
+let optionsNote = '';
+let framesNote = '';
+/** Whether the capture panel is on screen — the panel the notes describe. */
+let panelShown = false;
 
-document.addEventListener('DOMContentLoaded', async () => {
+/**
+ * Paint the explanatory lines, if there is a panel to paint them in.
+ *
+ * On a tab that is not a YouTube video — and in the window before the content
+ * script has answered — `#video-info` is hidden, so a note written there is
+ * invisible AND is about controls the reader cannot see. Nothing is shown until
+ * the panel is.
+ */
+function renderNotes() {
+  for (const [sel, text] of [['#options-note', optionsNote], ['#frames-note', framesNote]]) {
+    const el = $(sel);
+    el.textContent = panelShown ? text : '';
+    el.classList.toggle('hidden', !panelShown || text === '');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  // BEFORE any await. `populateControls` waits on the worker, whose options
+  // fetch waits on a `muninnUrl` that can be a black hole — and until it
+  // settled, neither Summarize nor Settings had a listener, so the one control
+  // that could fix a wrong URL was dead exactly when it was needed.
+  $('#btn-summarize').addEventListener('click', handleSummarize);
+  $('#open-options').addEventListener('click', (e) => {
+    e.preventDefault();
+    chrome.runtime.openOptionsPage();
+  });
+
   chrome.runtime.sendMessage({ type: 'GET_STATE' }, (state) => {
     if (state && state.videoId) {
       videoInfo = state;
@@ -48,13 +90,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  await populateControls();
-
-  $('#btn-summarize').addEventListener('click', handleSummarize);
-  $('#open-options').addEventListener('click', (e) => {
-    e.preventDefault();
-    chrome.runtime.openOptionsPage();
-  });
+  void populateControls();
 });
 
 /**
@@ -80,12 +116,7 @@ async function populateControls() {
 
   const parsed = answer && !answer.error ? parseCaptureOptions(answer.options) : null;
   captureOptions = parsed ?? FALLBACK_CAPTURE_OPTIONS;
-  if (!captureOptions.fromServer) {
-    const status = $('#status');
-    status.className = 'error';
-    status.textContent = OPTIONS_UNREACHABLE_MESSAGE;
-    status.classList.remove('hidden');
-  }
+  optionsNote = captureOptions.fromServer ? '' : OPTIONS_UNREACHABLE_MESSAGE;
 
   const kindSelect = $('#sel-kind');
   kindSelect.replaceChildren(
@@ -99,20 +130,41 @@ async function populateControls() {
 
   const frames = $('#chk-frames');
   frames.disabled = !captureOptions.framesSupported;
+  // A dimmed control with no explanation reads as a bug. The reason is the
+  // summarizer bot's CONNECTOR, which is a server fact the reader cannot infer.
+  framesNote = frames.disabled
+    ? "Slides are off: this Muninn's summarizer bot uses a connector that cannot read frames."
+    : '';
+  $('#lbl-frames').title = frames.disabled
+    ? "Summarizer bot's connector cannot read frames."
+    : FRAMES_LABEL_TITLE;
 
   // Restore, then persist every change. Both halves are guarded: a storage
   // failure must leave the button working, not the popup dead — the controls
-  // then simply show this instance's defaults for that session.
+  // then show this instance's defaults for that session.
   let stored = {};
   try {
     stored = await chrome.storage.sync.get({ [FRAMES_KEY]: false, [KIND_KEY]: null });
   } catch (err) {
     console.warn('Could not read the remembered capture settings', err);
   }
-  kindSelect.value = pickKind(stored[KIND_KEY], captureOptions);
+  const picked = pickKind(stored[KIND_KEY], captureOptions);
+  kindSelect.value = picked;
   frames.checked = pickFrames(stored[FRAMES_KEY], captureOptions);
 
+  // A remembered kind this instance no longer offers falls back silently
+  // otherwise: the picker shows Standard and the reader reads the capture as
+  // the kind they thought they had picked. Never shown under the unreachable
+  // fallback — the line above is the true explanation there.
+  optionsNote = optionsNote || (restoredKindNote(stored[KIND_KEY], picked, captureOptions) ?? '');
+  renderNotes();
+
   kindSelect.addEventListener('change', () => {
+    // The note explains a value the reader has now overridden.
+    if (optionsNote && captureOptions.fromServer) {
+      optionsNote = '';
+      renderNotes();
+    }
     chrome.storage.sync
       .set({ [KIND_KEY]: kindSelect.value })
       .catch((err) => console.warn('Could not save the summary kind', err));
@@ -127,6 +179,9 @@ async function populateControls() {
 function showVideoPage(state) {
   $('#video-title').textContent = state.title;
   $('#video-info').classList.remove('hidden');
+  panelShown = true;
+  // The options read may already have finished against a hidden panel.
+  renderNotes();
 }
 
 async function handleSummarize() {
@@ -178,7 +233,7 @@ async function handleSummarize() {
       return;
     }
 
-    // Close popup — dashboard tab is now open
+    // Close the popup — the dashboard tab is open
     window.close();
   } catch (err) {
     status.className = 'error';
