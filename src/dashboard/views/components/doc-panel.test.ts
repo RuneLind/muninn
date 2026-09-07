@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { docPanelHtml, docPanelScript, DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID } from "./doc-panel.ts";
+import { MARKED_CDN_SCRIPT } from "./doc-panel.ts";
 
 describe("docPanelHtml askFollowUp", () => {
   test("omits the follow-up action by default (Research/Search use this)", () => {
@@ -48,4 +49,17 @@ describe("docPanelHtml askFollowUp", () => {
     expect(script).toContain("setFollowUpHref");
     expect(script).toContain("/research?q=");
   });
+});
+
+/**
+ * The export (`src/summaries/export.ts`) renders with the npm `marked` and
+ * promises to match the article view, which loads marked from this CDN tag.
+ * Two literals, one promise — pinned so a `bun update marked` cannot make the
+ * export drift from the page the reader compared it against.
+ */
+test("the marked CDN tag and the marked dependency are the same version", async () => {
+  const pkg = (await import("../../../../package.json")) as { dependencies: Record<string, string> };
+  const version = pkg.dependencies["marked"];
+  expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+  expect(MARKED_CDN_SCRIPT).toContain(`marked@${version}/`);
 });

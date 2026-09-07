@@ -171,9 +171,14 @@ const LIGHT_TOKENS = `
       --bg-code-bar: #e2e4ea;
 `;
 
-/** Shared CSS for all dashboard pages — base reset, header, and nav */
-export const SHARED_STYLES = `
-    :root {${DARK_TOKENS}    }
+/**
+ * The palette alone — the four token blocks (dark default, light on system
+ * preference, and the two `html[data-theme]` overrides) with none of the
+ * dashboard chrome. What a page rendered OUTSIDE the dashboard (the summary
+ * export's standalone HTML) inlines so it reads in the same colours.
+ */
+export function themeTokenStyles(): string {
+  return `    :root {${DARK_TOKENS}    }
 
     /* System follow: honor the OS preference when no explicit override is set. */
     @media (prefers-color-scheme: light) {
@@ -183,7 +188,12 @@ export const SHARED_STYLES = `
     /* Explicit overrides (set by the theme toggle). html[data-theme] has higher
        specificity than the media-query :root, so it wins regardless of OS setting. */
     html[data-theme="dark"] {${DARK_TOKENS}    }
-    html[data-theme="light"] {${LIGHT_TOKENS}    }
+    html[data-theme="light"] {${LIGHT_TOKENS}    }`;
+}
+
+/** Shared CSS for all dashboard pages — base reset, header, and nav */
+export const SHARED_STYLES = `
+${themeTokenStyles()}
 
     /* Theme toggle button (right of the nav, on every page) */
     .header-right { display: flex; align-items: center; gap: 12px; }

@@ -49,7 +49,7 @@ import type { Config } from "../../config.ts";
 import type { executeOneShot } from "../../ai/one-shot.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
-import { getSummarySource } from "../../summaries/sources.ts";
+import { getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { findSharePreset, resolveSharePresets, type SharePreset } from "../../share/presets.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
 import { buildShareSystemPrompt, buildShareUserPrompt } from "../../share/prompt.ts";
@@ -195,6 +195,9 @@ export function registerSummariesShareRoutes(
       // bot; the source is the thing that is actually wrong).
       const source = getSummarySource(sourceId);
       if (!source) return c.json({ error: `unknown summary source "${sourceId}"` }, 400);
+      // A `..` segment pops the collection out of huginn's document path
+      // (`isSafeDocId`); client-validatable, so a 400 like the source.
+      if (!isSafeDocId(docId)) return c.json({ error: "docId is not a document path" }, 400);
 
       const botConfig = resolveSummarizerBot(discoverAllBots());
       // Validated against the shipped set even when no bot resolved: a bot's

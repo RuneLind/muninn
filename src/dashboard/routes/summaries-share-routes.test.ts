@@ -155,6 +155,16 @@ describe("POST /api/summaries/share — pre-commit guards", () => {
     }
   });
 
+  test("a dot-segment docId is a pre-commit 400 — `..` pops the collection out of huginn's path", async () => {
+    const { app, seen } = makeApp();
+    for (const docId of ["../mimir/x.md", "a/./b.md", "a//b.md", ".."]) {
+      const res = await post(app, { ...ok, docId });
+      expect([docId, res.status]).toEqual([docId, 400]);
+    }
+    expect(seen.fetched).toHaveLength(0);
+    expect(seen.ran).toBe(0);
+  });
+
   test("an unknown SOURCE is a pre-commit 400 — it is client-validatable", async () => {
     const { app, seen } = makeApp();
     const res = await post(app, { ...ok, source: "myspace" });

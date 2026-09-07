@@ -235,7 +235,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     </div>
   </div>
 
-  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null })}
+  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null, exportPage: true })}
 
   ${MARKED_CDN_SCRIPT}
   <!-- Publishes openShareDialog/closeShareDialog on globalThis. Loaded BEFORE

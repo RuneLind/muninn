@@ -287,8 +287,28 @@ function medianGapSec(frames: readonly CaptureFrame[]): number | null {
 }
 
 /** Every character a `RegExp` gives meaning to, made literal. */
-function escapeRegExp(s: string): string {
+export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The ONE pattern for "a markdown image quoting a served frame": the `(…)`
+ * half of `![alt](<prefix><id>/<sec>.jpg)`, with an optional markdown title.
+ * Group 1 is the id (the literal `id` when given, else any non-slash run for a
+ * caller that wants to DISCOVER it), group 2 the seconds. Both spellings —
+ * the current `/api/frames/<source>/` and the source's `legacyUrlPrefix` —
+ * count. Shared by {@link referencedFrameSeconds} (what to keep) and the
+ * export's rewrite (what to relocate), so the two can never disagree about
+ * which addresses are references. Fresh `g` regex per call: these are reused
+ * with `exec`.
+ */
+export function frameQuoteRegExp(source: FrameSource, id: string | null): RegExp {
+  const prefixes = [`/api/frames/${source.name}/`, ...(source.legacyUrlPrefix ? [source.legacyUrlPrefix] : [])];
+  const idPart = id === null ? "([^/\\s)]+)" : `(${escapeRegExp(id)})`;
+  return new RegExp(
+    `\\((?:${prefixes.map(escapeRegExp).join("|")})${idPart}/(\\d{1,6})\\.jpg(?:\\s+"[^"\\n]*")?\\)`,
+    "g",
+  );
 }
 
 /**
@@ -310,11 +330,7 @@ export function referencedFrameSeconds(summary: string, source: FrameSource, id:
     log.warn("Not a {source} video id, so nothing is a reference to its frames: {id}", { source: source.name, id });
     return [];
   }
-  const prefixes = [`/api/frames/${source.name}/`, ...(source.legacyUrlPrefix ? [source.legacyUrlPrefix] : [])];
-  const re = new RegExp(
-    `\\((?:${prefixes.map(escapeRegExp).join("|")})${escapeRegExp(id)}/(\\d{1,6})\\.jpg\\)`,
-    "g",
-  );
+  const re = frameQuoteRegExp(source, id);
   const out = new Set<number>();
   let m: RegExpExecArray | null;
   while ((m = re.exec(summary)) !== null) {
@@ -322,7 +338,7 @@ export function referencedFrameSeconds(summary: string, source: FrameSource, id:
     // route serves exactly that, so `047.jpg` is an address that will 404 —
     // counting it as kept (via `Number`) would report a frame the reader never
     // gets. Logged and dropped, like an invented path.
-    if (String(Number(m[1])) !== m[1]) {
+    if (String(Number(m[2])) !== m[2]) {
       log.warn("The {source} summary of {id} quotes a non-canonical frame path {path} — not a served address", {
         source: source.name,
         id,
@@ -330,7 +346,7 @@ export function referencedFrameSeconds(summary: string, source: FrameSource, id:
       });
       continue;
     }
-    out.add(Number(m[1]));
+    out.add(Number(m[2]));
   }
   return [...out].sort((a, b) => a - b);
 }

@@ -122,9 +122,10 @@ export function docPanelStyles(animationName = "slideIn"): string {
        button inherits neither the page font nor a transparent background. */
     button.doc-panel-followup { background: none; font-family: inherit; cursor: pointer; }
     /* …and it is HIDDEN for a document no share route can serve (an unregistered
-       source). Spelled out rather than left to the UA rule, because this button
-       sits in a flex row where an author display rule would silently win. */
-    button.doc-panel-followup[hidden] { display: none; }
+       source). Spelled out rather than left to the UA rule, because this control
+       sits in a flex row where an author display rule would silently win. Class-
+       scoped, not button-scoped: the ⬇ Export control is an <a> in the same row. */
+    .doc-panel-followup[hidden] { display: none; }
     /* The opt-in 🗑 Delete action: same slot, same shape, but it destroys — so it
        reads as the danger colour on hover and never as an accent link. */
     button.doc-panel-danger:hover { border-color: var(--status-error); color: var(--status-error); }
@@ -149,6 +150,10 @@ export const DOC_PANEL_SHARE_BTN_ID = "docPanelShare";
 /** The 🗑 Delete button's id — the render and the summaries page's click handler. */
 export const DOC_PANEL_DELETE_BTN_ID = "docPanelDelete";
 
+/** The ⬇ Export link's id — a plain download anchor the opener points at
+ *  `GET /api/summaries/export?source=&docId=` for the document it shows. */
+export const DOC_PANEL_EXPORT_LINK_ID = "docPanelExport";
+
 /**
  * HTML markup for the slide-in doc panel overlay.
  *
@@ -169,13 +174,20 @@ export const DOC_PANEL_DELETE_BTN_ID = "docPanelDelete";
  * `backlog-doc-delete` route (huginn soft-delete + the source-drafter proposals
  * drafted from the doc), which only makes sense where the panel shows a CAPTURED
  * summary — `/summaries`. Search and Research show arbitrary collections.
+ *
+ * `exportPage` is the fourth, for the ⬇ Export link: a download of the summary
+ * as a standalone HTML page with its quoted slides in a sibling folder
+ * (`GET /api/summaries/export`). It is an ANCHOR, not a button: the browser's
+ * own download handling is the whole client, so there is no fetch and no
+ * bundle. Rendered hidden; the opener sets its href and reveals it.
  */
 export function docPanelHtml(
   {
     askFollowUp = false,
     share = false,
     remove = false,
-  }: { askFollowUp?: boolean; share?: boolean; remove?: boolean } = {},
+    exportPage = false,
+  }: { askFollowUp?: boolean; share?: boolean; remove?: boolean; exportPage?: boolean } = {},
 ): string {
   return `
   <div class="doc-overlay" id="docOverlay" onclick="if(event.target===this)closeDocPanel()">
@@ -186,7 +198,9 @@ export function docPanelHtml(
         <button class="doc-panel-followup" id="${DOC_PANEL_SHARE_BTN_ID}" type="button"
           title="Turn this summary into a post you can paste into Slack or an email">&#128228; Share</button>` : ""}${remove ? `
         <button class="doc-panel-followup doc-panel-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button"
-          title="Delete this summary from huginn, and the wiki draft written from it">&#128465; Delete</button>` : ""}${askFollowUp ? `
+          title="Delete this summary from huginn, and the wiki draft written from it">&#128465; Delete</button>` : ""}${exportPage ? `
+        <a class="doc-panel-followup" id="${DOC_PANEL_EXPORT_LINK_ID}" href="#" download hidden
+          title="Download this summary as a standalone HTML page, with its slides in a folder beside it">&#11015; Export</a>` : ""}${askFollowUp ? `
         <a class="doc-panel-followup" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}
         <div class="doc-panel-links" id="docPanelLinks"></div>
       </div>

@@ -21,7 +21,7 @@
 
 import { test, expect, describe, beforeAll } from "bun:test";
 import { renderSummariesPage } from "./summaries-page.ts";
-import { DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID } from "./components/doc-panel.ts";
+import { DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID, DOC_PANEL_EXPORT_LINK_ID } from "./components/doc-panel.ts";
 import { SHARE_DIALOG_ID } from "./components/wiki-share-dialog.ts";
 import { VIMEO_MAX_DURATION_SEC } from "../../vimeo/limits.ts";
 import { sumJobCardScript } from "./components/sum-job-card.ts";
@@ -153,4 +153,17 @@ describe("summaries page: the Vimeo cap is injected, not spelled", () => {
     // The old spelling: the number as prose inside the sentences.
     expect(sumJobCardScript()).not.toContain("the 3 h cap");
   });
+});
+
+/**
+ * The ⬇ Export link: rendered hidden as a download anchor (the browser's own
+ * download handling is the whole client), and the opener's href builder names
+ * the route with both identity keys — so the anchor cannot point at a route
+ * that 400s the source it was opened for.
+ */
+test("the doc panel renders the Export download link and the opener targets the export route", () => {
+  const anchor = new RegExp(`<a[^>]*id="${DOC_PANEL_EXPORT_LINK_ID}"[^>]*>`).exec(html)?.[0] ?? "";
+  expect(anchor).toContain("download");
+  expect(anchor).toContain("hidden");
+  expect(html).toContain("'/api/summaries/export?source=' + encodeURIComponent(source) + '&docId=' + encodeURIComponent(docId)");
 });

@@ -12,6 +12,7 @@ import { buildStats, type StatsDoc, type SummariesStats } from "../../summaries/
 import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import { DEFAULT_COVERAGE_DEPS, type CoverageDeps } from "../../db/wiki-proposals.ts";
 import { registerSummariesShareRoutes } from "./summaries-share.ts";
+import { registerSummariesExportRoutes } from "./summaries-export.ts";
 import { registerFramesRoutes } from "./frames-routes.ts";
 
 const log = getLog("dashboard");
@@ -150,6 +151,10 @@ export function registerSummariesRoutes(
   // 📤 Share button. Its own module (`summaries-share.ts`) because it is an
   // adapter onto the shared share layer, with its own injectable seams.
   registerSummariesShareRoutes(app, config);
+
+  // Export: `GET /api/summaries/export` — the doc panel's ⬇ Export link. One
+  // summary as a ZIP of a standalone page plus its quoted slides.
+  registerSummariesExportRoutes(app, config);
 
   // The quoted slide frames of every capture vertical, plus the pre-seam Vimeo
   // alias. Here rather than in a group of its own: `summaries`, `vimeo` and
