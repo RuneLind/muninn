@@ -1,0 +1,142 @@
+/**
+ * The pure half of the summary export.
+ *
+ * Two things only this file pins: the frame rewrite (served address →
+ * `frames/<sec>.jpg`, both spellings, non-canonical seconds left alone) and the
+ * PARITY between the two Vimeo transforms ported here and the client's own
+ * copies in `sum-article-library.ts` — same fixtures, same output, because the
+ * client copy lives in a template literal nothing can import.
+ */
+
+import { test, expect, describe } from "bun:test";
+import {
+  exportBaseName,
+  findFrameReference,
+  linkVimeoTimestamps,
+  renderExportMarkdown,
+  renderExportPage,
+  rewriteFrameUrls,
+  splitTranscript,
+} from "./export.ts";
+import { VIMEO_FRAME_SOURCE, YOUTUBE_FRAME_SOURCE } from "./frames.ts";
+import { sumArticleLibraryScript } from "../dashboard/views/components/sum-article-library.ts";
+
+function clientTransforms(): {
+  linkVimeoTimestamps: (markdown: string, videoUrl: string) => string;
+  splitTranscript: (markdown: string) => { body: string; transcript: string | null };
+} {
+  const ctx = { document: { addEventListener() {}, getElementById: () => null } };
+  return new Function(
+    "ctx",
+    `var document = ctx.document;\nvar renderMarkdown = function(t) { return t; };\n${sumArticleLibraryScript()}\n` +
+      "return { linkVimeoTimestamps: linkVimeoTimestamps, splitTranscript: splitTranscript };",
+  )(ctx);
+}
+
+describe("findFrameReference", () => {
+  test("reads source + id off the current spelling", () => {
+    const ref = findFrameReference("x ![Slide at 00:03:07](/api/frames/vimeo/1223642971/187.jpg) y");
+    expect(ref?.source).toBe(VIMEO_FRAME_SOURCE);
+    expect(ref?.id).toBe("1223642971");
+  });
+  test("reads the legacy Vimeo spelling and a YouTube id", () => {
+    expect(findFrameReference("![s](/api/vimeo/frames/42/7.jpg)")?.id).toBe("42");
+    const yt = findFrameReference("![s](/api/frames/youtube/dQw4w9WgXcQ/7.jpg)");
+    expect(yt?.source).toBe(YOUTUBE_FRAME_SOURCE);
+    expect(yt?.id).toBe("dQw4w9WgXcQ");
+  });
+  test("an id outside the charset is not a reference; no quotes ⇒ null", () => {
+    expect(findFrameReference("![s](/api/frames/vimeo/../etc/7.jpg)")).toBeNull();
+    expect(findFrameReference("![s](/api/frames/youtube/short/7.jpg)")).toBeNull();
+    expect(findFrameReference("plain text")).toBeNull();
+  });
+});
+
+describe("rewriteFrameUrls", () => {
+  const ref = { source: VIMEO_FRAME_SOURCE, id: "42" };
+  test("both spellings become relative; seconds deduped ascending", () => {
+    const md = "a ![x](/api/frames/vimeo/42/670.jpg) b ![y](/api/vimeo/frames/42/187.jpg) c ![z](/api/frames/vimeo/42/670.jpg)";
+    const out = rewriteFrameUrls(md, ref);
+    expect(out.markdown).toBe("a ![x](frames/670.jpg) b ![y](frames/187.jpg) c ![z](frames/670.jpg)");
+    expect(out.seconds).toEqual([187, 670]);
+  });
+  test("another video's frames and a non-canonical second are left as they are", () => {
+    const md = "![a](/api/frames/vimeo/43/1.jpg) ![b](/api/frames/vimeo/42/007.jpg)";
+    const out = rewriteFrameUrls(md, ref);
+    expect(out.markdown).toBe(md);
+    expect(out.seconds).toEqual([]);
+  });
+});
+
+describe("Vimeo transforms match the client copies", () => {
+  const client = clientTransforms();
+  const url = "https://vimeo.com/1223642971";
+  const fixtures = [
+    "At [00:12:00] the speaker says [1:05] and [\\[00:00:10\\]](https://x) stays.",
+    "```\n[00:01:00] inside a fence\n```\nafter [02:00]",
+    "~~~\n[00:01:00]\n```\nstill fenced [00:02:00]\n~~~\nout [00:03:00]",
+    "## Transcript\n### [00:00:00]\nhello",
+    "body\n\n## Transcript\n\n### [00:02:00]\nwindow\n\n```\n## Transcript\n```\n",
+    "no transcript here\n```\n## Transcript\n```",
+  ];
+  test("linkVimeoTimestamps", () => {
+    for (const f of fixtures) expect(linkVimeoTimestamps(f, url)).toBe(client.linkVimeoTimestamps(f, url));
+    expect(linkVimeoTimestamps(fixtures[0]!, url)).toContain("[\\[00:12:00\\]](https://vimeo.com/1223642971#t=720s)");
+    expect(linkVimeoTimestamps(fixtures[0]!, "https://youtu.be/x")).toBe(fixtures[0]!);
+    expect(linkVimeoTimestamps(fixtures[0]!, undefined)).toBe(fixtures[0]!);
+  });
+  test("splitTranscript", () => {
+    for (const f of fixtures) expect(splitTranscript(f)).toEqual(client.splitTranscript(f));
+    expect(splitTranscript(fixtures[5]!).transcript).toBeNull();
+    expect(splitTranscript(fixtures[4]!).body).toBe("body\n");
+  });
+});
+
+describe("renderExportMarkdown", () => {
+  test("images render, raw HTML is escaped, external links open in a new tab", () => {
+    const html = renderExportMarkdown(
+      "![Slide at 00:03:07](frames/187.jpg)\n\n<script>alert(1)</script>\n\n[t](https://vimeo.com/1#t=5s) [rel](frames/x)",
+    );
+    expect(html).toContain('<img src="frames/187.jpg" alt="Slide at 00:03:07">');
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).toContain('<a href="https://vimeo.com/1#t=5s" target="_blank" rel="noopener">t</a>');
+    expect(html).toContain('<a href="frames/x">rel</a>');
+  });
+});
+
+describe("renderExportPage", () => {
+  test("title escaped, facts from metadata, transcript folded, no server URL left", () => {
+    const html = renderExportPage({
+      title: 'A <b>"talk"</b>',
+      url: "https://vimeo.com/42",
+      linkLabel: "Watch on Vimeo ↗",
+      metadata: { speaker: "Kari", author: "JavaZone", upload_date: "2026-09-03 06:49:18", summary_kind: "deep" },
+      markdown: "Intro ![s](frames/7.jpg) at [00:00:07]\n\n## Transcript\n### [00:00:00]\nhi",
+      sourceId: "vimeo",
+    });
+    expect(html).toContain("<title>A &lt;b&gt;&quot;talk&quot;&lt;/b&gt;</title>");
+    expect(html).toContain("<span>Kari</span><span>JavaZone</span><span>2026-09-03</span><span>deep summary</span>");
+    expect(html).toContain('<a href="https://vimeo.com/42" target="_blank" rel="noopener">Watch on Vimeo ↗</a>');
+    expect(html).toContain('<details class="transcript"><summary>Transcript</summary>');
+    expect(html).toContain('href="https://vimeo.com/42#t=7s"');
+    expect(html).toContain('<img src="frames/7.jpg"');
+    expect(html).not.toContain("/api/frames/");
+    expect(html).toContain("prefers-color-scheme: light");
+  });
+  test("a non-Vimeo source gets no timestamp links and no facts line without metadata", () => {
+    const html = renderExportPage({ title: "t", linkLabel: "x", markdown: "see [00:01:00]", sourceId: "youtube" });
+    expect(html).not.toContain("#t=");
+    expect(html).not.toContain('class="facts"');
+    expect(html).not.toContain("<details");
+  });
+});
+
+describe("exportBaseName", () => {
+  test("drops filesystem-hostile characters, keeps hyphens and non-ASCII, caps and never empties", () => {
+    expect(exportBaseName('Trust, But Verify: "Skill/Driven" - Totto')).toBe("Trust, But Verify Skill Driven - Totto");
+    expect(exportBaseName("Æøå · talk")).toBe("Æøå · talk");
+    expect(exportBaseName("///")).toBe("summary");
+    expect(exportBaseName("x".repeat(200)).length).toBe(80);
+  });
+});

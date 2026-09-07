@@ -13,7 +13,7 @@
  * each doc carries its `source` so opens/similar/original-link route to the right
  * collection (SOURCES[source].apiBase). */
 
-import { docPanelStyles, DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID } from "./doc-panel.ts";
+import { docPanelStyles, DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID, DOC_PANEL_EXPORT_LINK_ID } from "./doc-panel.ts";
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
 
 /** The whole /summaries share target as a browser expression — URLs, surface
@@ -815,6 +815,15 @@ export function sumArticleLibraryScript(): string {
       // Same doc, same gate: Delete needs the registered source's collection.
       var deleteBtnEl = document.getElementById('${DOC_PANEL_DELETE_BTN_ID}');
       if (deleteBtnEl) { deleteBtnEl.hidden = !_shareDoc; deleteBtnEl.disabled = false; }
+      // Same gate again for Export: the route 400s an unregistered source. The
+      // anchor's href is the whole client — the browser downloads the ZIP.
+      var exportEl = document.getElementById('${DOC_PANEL_EXPORT_LINK_ID}');
+      if (exportEl) {
+        exportEl.hidden = !_shareDoc;
+        exportEl.href = _shareDoc
+          ? '/api/summaries/export?source=' + encodeURIComponent(source) + '&docId=' + encodeURIComponent(docId)
+          : '#';
+      }
       if (typeof closeShareDialogOnNavigate === 'function') closeShareDialogOnNavigate(docId);
 
       var overlay = document.getElementById('docOverlay');
