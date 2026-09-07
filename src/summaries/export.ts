@@ -165,24 +165,33 @@ export function splitTranscript(markdown: string): { body: string; transcript: s
 }
 
 /**
- * A link target the exported page may carry: `http(s)`, `mailto`, or no scheme
- * at all (a fragment, a relative path). The page leaves this machine and opens
- * from `file://`, where a `javascript:`/`data:`/`vbscript:` href is script
- * execution on the reader's disk — measured through a real click. marked has
- * no sanitizer of its own; the source is model output over third-party
- * material.
+ * A link target the exported page may carry. The page leaves this machine and
+ * opens from `file://`, where a `javascript:`/`data:`/`vbscript:` href is
+ * script execution on the reader's disk — measured through a real click.
+ * marked has no sanitizer of its own; the source is model output over
+ * third-party material.
+ *
+ * After the control-character refusal (browsers strip tab/CR/LF before
+ * parsing the scheme, so `java<TAB>script:` is `javascript:` to a click and
+ * "no scheme" to a naive regex — measured; other C0 controls are
+ * percent-encoded, refused here for the same conservatism) and a trim, an
+ * href is exactly ONE of three things, and the rule is written over that
+ * enumeration rather than as a list of prefixes:
+ *
+ *  1. It has a scheme — allowed only for `http`, `https`, `mailto`.
+ *  2. It has no scheme and opens with TWO slash-class characters — a host
+ *     reference, refused: from `file://` it navigates to `file://host`. The
+ *     WHATWG parser treats `\` as `/` on a special base, so `/\host` and
+ *     `\\host` are the same reference as `//host` (the second verify pass
+ *     clicked `/\evil.example/p` into `file://evil.example/p`).
+ *  3. Anything else — a path or a fragment, resolved inside the folder.
  */
 export function isSafeLinkHref(href: string): boolean {
-  // Browsers strip ASCII tab/CR/LF (and ignore other C0 controls) BEFORE
-  // parsing the scheme, so `java<TAB>script:` is `javascript:` to the click
-  // and "no scheme" to a naive regex — measured through a real click. Any
-  // control character is refused outright; a protocol-relative `//host` is
-  // refused too, since from `file://` it navigates the page to `file://host`.
   if (/[\u0000-\u001f\u007f]/.test(href)) return false;
   const trimmed = href.trim();
-  if (trimmed.startsWith("//")) return false;
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(trimmed)?.[1]?.toLowerCase();
-  return scheme === undefined || scheme === "http" || scheme === "https" || scheme === "mailto";
+  if (scheme !== undefined) return scheme === "http" || scheme === "https" || scheme === "mailto";
+  return !/^[/\\]{2}/.test(trimmed);
 }
 
 /** The only image the page may load: a packaged frame. Anything else — a
