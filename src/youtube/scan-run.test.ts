@@ -58,6 +58,91 @@ async function makeFixture(dir: string): Promise<string> {
   return out;
 }
 
+/**
+ * A 40 s CLOCK clip: the whole frame is one flat gray whose value encodes
+ * `floor(t)`, with a hard CUT at 11.5 s — a non-multiple of the 5 s grid.
+ *
+ * The point of encoding the second in the picture is that it makes a sampling
+ * SKEW visible. A fixture that only changes at multiples of the interval cannot
+ * show one: a sample taken 2.5 s late still lands inside the same solid block,
+ * so the counts and the dedup both agree with themselves while every file name
+ * is a lie. Here the value moves every second, so the frame named `<t>.jpg`
+ * either decodes back to `t` or it does not.
+ *
+ * Two slopes rather than one, because the cut is what a bucket cannot hide:
+ * frames before 11.5 s are `20 + floor(t)·4` and after it `100 + floor(t)·3`,
+ * two ranges that never meet, so a sample that crossed the cut is wrong by a
+ * whole band and not by a step.
+ */
+async function makeClockFixture(dir: string): Promise<string> {
+  const out = join(dir, "clock.mp4");
+  const proc = Bun.spawn(
+    [
+      "ffmpeg", "-v", "error", "-y",
+      "-f", "lavfi", "-i", "color=c=black:s=160x90:r=30:d=40",
+      "-vf", "geq=lum='if(lt(T,11.5),20+floor(T)*4,100+floor(T)*3)':cb=128:cr=128",
+      "-pix_fmt", "yuv420p", out,
+    ],
+    { stdout: "ignore", stderr: "pipe", stdin: "ignore" },
+  );
+  const err = await new Response(proc.stderr).text();
+  if ((await proc.exited) !== 0) throw new Error(`clock fixture build failed: ${err}`);
+  return out;
+}
+
+/** The mean gray value of an image file, from one ffmpeg decode to raw gray. */
+async function meanLuma(file: string): Promise<number> {
+  const proc = Bun.spawn(
+    ["ffmpeg", "-v", "error", "-i", file, "-vf", "format=gray", "-f", "rawvideo", "-"],
+    { stdout: "pipe", stderr: "ignore", stdin: "ignore" },
+  );
+  const bytes = new Uint8Array(await new Response(proc.stdout).arrayBuffer());
+  if ((await proc.exited) !== 0 || bytes.length === 0) throw new Error(`could not read ${file}`);
+  let sum = 0;
+  for (const b of bytes) sum += b;
+  return sum / bytes.length;
+}
+
+/**
+ * `second → mean gray value`, built by SEEKING into the clip rather than by
+ * repeating the `geq` arithmetic here.
+ *
+ * The encoder scales full-range luma into video range and JPEG scales it back,
+ * so the value in the file is not the value the filter wrote. Reading the truth
+ * out of the same clip with the same decoder is what makes the comparison exact
+ * without either side knowing that transform.
+ */
+async function lumaBySecond(file: string, seconds: number): Promise<number[]> {
+  const dir = mkdtempSync(join(tmpdir(), "yt-clock-ref-"));
+  roots.push(dir);
+  const table: number[] = [];
+  for (let t = 0; t < seconds; t++) {
+    const out = join(dir, `${t}.jpg`);
+    const proc = Bun.spawn(
+      ["ffmpeg", "-v", "error", "-y", "-ss", `${t + 0.2}`, "-i", file, "-frames:v", "1",
+        "-vf", "scale=320:-2", "-q:v", "4", out],
+      { stdout: "ignore", stderr: "ignore", stdin: "ignore" },
+    );
+    if ((await proc.exited) !== 0) throw new Error(`reference grab failed at ${t}s`);
+    table.push(await meanLuma(out));
+  }
+  return table;
+}
+
+/** Which second of the clock clip an image shows, by nearest reference value. */
+function decodeSecond(luma: number, table: readonly number[]): number {
+  let best = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let t = 0; t < table.length; t++) {
+    const d = Math.abs(table[t]! - luma);
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = t;
+    }
+  }
+  return best;
+}
+
 describe("denseScanArgs", () => {
   // Pure, so it runs with or without ffmpeg — the argv is the contract.
   test("one decode feeding both outputs, at the shipped geometry", () => {
@@ -96,6 +181,37 @@ describe.skipIf(ffmpeg === null)("the scan against real ffmpeg", () => {
     // ffmpeg's own sequence numbers are gone: the dir says what it holds.
     expect(readdirSync(join(root, "scan")).filter((f) => /^\d{6}\.jpg$/.test(f))).toEqual([]);
   }, 120_000);
+
+  /** The clock clip's samples, decoded back to the second each one shows. */
+  async function decodeClockScan(root: string): Promise<{ named: number[]; shows: number[] }> {
+    const file = await makeClockFixture(root);
+    const reference = await lumaBySecond(file, 40);
+    const scan = await runDenseScan({ file, scanDir: join(root, "scan"), timeoutMs: 120_000 });
+    const shows: number[] = [];
+    for (const sample of scan.samples) shows.push(decodeSecond(await meanLuma(sample.path), reference));
+    return { named: scan.samples.map((s) => s.tSeconds), shows };
+  }
+
+  test("the sample named `<t>.jpg` IS the video at second t", async () => {
+    // The property every consumer of this scan assumes and none of them could
+    // check: the file name, the cell the prompt labels, the second the model
+    // answers with, the `-ss` the re-grab seeks to and the URL the reader loads
+    // are all the same number, so they must all be the same PICTURE.
+    const { named, shows } = await decodeClockScan(tmpRoot());
+    expect(shows).toEqual(named);
+  }, 180_000);
+
+  test("the cut at 11.5 s falls between the samples named 10 and 15", async () => {
+    // The same property with no clock to read, which is what makes it a check
+    // and not a restatement: 11.5 is a NON-multiple of the 5 s grid, sitting
+    // between slot 10 and where a half-interval skew puts slot 10's picture. A
+    // fixture that only changed at multiples of the interval would hide that
+    // skew inside a bucket and pass.
+    const { named, shows } = await decodeClockScan(tmpRoot());
+    const at = (sec: number): number => shows[named.indexOf(sec)]!;
+    expect(at(10)).toBeLessThan(11.5);
+    expect(at(15)).toBeGreaterThan(11.5);
+  }, 180_000);
 
   test("the dedup keeps the CUT and drops the static run", async () => {
     const root = tmpRoot();

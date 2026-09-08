@@ -35,7 +35,7 @@
  * seeks for the same work.
  */
 
-import { formatHms, type CaptureFrame } from "../summaries/frames.ts";
+import { formatHms } from "../summaries/frames.ts";
 
 /**
  * Seconds between scan samples.
@@ -149,21 +149,28 @@ export function scanTimeoutFor(durationSec: number): number {
 }
 
 /**
- * The seconds the scan samples, `[0, 5, 10, …]` up to but not including the
- * duration.
+ * The seconds `sampleCount` emitted samples sit at: `[0, 5, 10, …]`.
  *
- * ffmpeg's `fps=1/N` filter emits its first frame at t=0 and one every N
- * seconds after, so this is the mapping from the i-th emitted sample back to its
- * position in the video — the ONE place that mapping is spelled, and what the
- * pass renames the emitted files by.
+ * The mapping from the i-th emitted sample back to its position in the video,
+ * and the ONE place it is spelled — {@link denseScanArgs}' grid is anchored at
+ * absolute zero (`fps=1/N:round=up:start_time=0`), so slot i IS second i × N,
+ * and `runDenseScan` renames the emitted files through exactly this function.
+ *
+ * It takes a COUNT rather than a duration because the count is what the pass
+ * has: a duration a fraction over a tick predicts one more sample than ffmpeg
+ * emits, and a caller zipping the two lists by index would then hold a phantom
+ * at the tail.
  */
-export function scanTimes(durationSec: number, intervalSec: number = YOUTUBE_SCAN_INTERVAL_SEC): number[] {
-  if (!Number.isFinite(durationSec) || durationSec <= 0) return [];
+export function scanSampleTimes(
+  sampleCount: number,
+  intervalSec: number = YOUTUBE_SCAN_INTERVAL_SEC,
+): number[] {
   if (!Number.isInteger(intervalSec) || intervalSec <= 0) {
     throw new Error(`Scan interval must be a positive integer, got ${intervalSec}`);
   }
+  if (!Number.isFinite(sampleCount) || sampleCount <= 0) return [];
   const out: number[] = [];
-  for (let t = 0; t < durationSec; t += intervalSec) out.push(t);
+  for (let i = 0; i < Math.floor(sampleCount); i++) out.push(i * intervalSec);
   return out;
 }
 
@@ -533,15 +540,6 @@ export function selectionPrompt(input: {
     `\`category\` is one of: ${SELECTION_CATEGORIES.join(", ")}. \`duplicateGroup\` is optional. ` +
     `\`reason\` is one short clause. Order does not matter.`
   );
-}
-
-/** The frames a selection manifest asks for, as the seam's own frame records. */
-export function manifestFrames(
-  entries: readonly SelectionEntry[],
-  frameDir: string,
-  join: (dir: string, file: string) => string,
-): CaptureFrame[] {
-  return entries.map((e) => ({ path: join(frameDir, `${e.tSeconds}.jpg`), tSeconds: e.tSeconds }));
 }
 
 /**

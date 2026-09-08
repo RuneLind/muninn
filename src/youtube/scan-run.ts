@@ -38,6 +38,7 @@ import {
   SCAN_SIGNATURE_WIDTH,
   YOUTUBE_SCAN_INTERVAL_SEC,
   contactSheetPlans,
+  scanSampleTimes,
   splitScanSignatures,
   type ContactSheetPlan,
   type ScanCandidate,
@@ -66,10 +67,29 @@ const RAW_THUMB_PATTERN = "%06d.jpg";
  * The argv for the one scan pass. Pure and exported so the filtergraph is
  * asserted rather than an ffmpeg run.
  *
- * `fps=1/N` emits its first frame at t=0 and one every N seconds after, which is
- * what makes the i-th emitted sample `i × N` seconds in — the mapping
- * `scanTimes` states. The `split` feeds the same decoded frame to both scalers,
- * so the signature plane costs one extra scale and no extra decode.
+ * **`round=up:start_time=0` is what makes the i-th sample second `i × N`, and a
+ * bare `fps=1/N` does not.** The filter's default rounding is `near`: an input
+ * frame at time t is assigned to output slot round(t/N) and the slot emits the
+ * LAST frame that landed in it, so slot i carries the picture from just under
+ * `i × N + N/2`. Measured two ways — a synthetic clock clip whose luma encodes
+ * floor(t) returned seconds 2, 7, 12 … under slots 0, 5, 10 (`scan-run.test.ts`
+ * drives exactly that), and on the 1767 s reference rendition 59 of the 110
+ * candidates disagreed with an `-ss <t>` re-grab of their own second by more
+ * than {@link SCAN_CHANGE_THRESHOLD}. Every consumer reads the number as exact:
+ * the file name, the cell the prompt labels, the second the selection pass
+ * answers with, the seek the re-grab performs and the URL the reader loads.
+ *
+ * `round=up` puts the frame at exactly `i × N` in slot i (the slot spans
+ * `((i-1)·N, i·N]`), and `start_time=0` anchors the grid to absolute zero rather
+ * than to the first frame's own timestamp, so a rendition that starts late does
+ * not shift every name by a slot. With the same fixture both go from 51/110 to
+ * 111/111 matching re-grabs. The alternative — `select` on source pts with
+ * `-fps_mode passthrough` — samples correctly too but drops a slot wherever the
+ * source has a gap longer than N, which silently renames every later sample;
+ * `fps` fills such a slot instead, so the count-based mapping stays exact.
+ *
+ * The `split` feeds the same decoded frame to both scalers, so the signature
+ * plane costs one extra scale and no extra decode.
  */
 export function denseScanArgs(input: {
   file: string;
@@ -89,7 +109,7 @@ export function denseScanArgs(input: {
     "-i",
     input.file,
     "-filter_complex",
-    `[0:v]fps=1/${interval},split=2[a][b];` +
+    `[0:v]fps=1/${interval}:round=up:start_time=0,split=2[a][b];` +
       `[a]scale=${CONTACT_SHEET.cellWidth}:-2[thumb];` +
       `[b]scale=${SCAN_SIGNATURE_WIDTH}:${SCAN_SIGNATURE_HEIGHT},format=gray[sig]`,
     "-map",
@@ -169,8 +189,11 @@ export async function runDenseScan(input: {
   if (emitted.length === 0) throw new Error("The dense scan emitted no frames");
 
   const samples: ScanSample[] = [];
+  // ONE spelling of the slot → second mapping, shared with everything that reads
+  // a scan sample's name back as a position in the video.
+  const times = scanSampleTimes(emitted.length, interval);
   for (let i = 0; i < emitted.length; i++) {
-    const tSeconds = i * interval;
+    const tSeconds = times[i]!;
     const path = join(input.scanDir, `${tSeconds}.jpg`);
     await rename(join(input.scanDir, emitted[i]!), path);
     samples.push({ path, tSeconds });

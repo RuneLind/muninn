@@ -31,8 +31,8 @@ import {
   dedupeScanSamples,
   parseSelectionManifest,
   resolveFrameScanMode,
+  scanSampleTimes,
   scanTimeoutFor,
-  scanTimes,
   selectionLimitFor,
   selectionPrompt,
   selectionTimeoutFor,
@@ -69,22 +69,23 @@ const TOTAL_BLOCKS = SCAN_BLOCK_COLS * SCAN_BLOCK_ROWS;
 
 // --- the grid ---------------------------------------------------------------
 
-describe("scanTimes", () => {
-  test("every interval up to but not including the duration", () => {
-    expect(scanTimes(23)).toEqual([0, 5, 10, 15, 20]);
-    expect(scanTimes(20)).toEqual([0, 5, 10, 15]);
+describe("scanSampleTimes", () => {
+  test("slot i is second i x the interval", () => {
+    expect(scanSampleTimes(5)).toEqual([0, 5, 10, 15, 20]);
+    expect(scanSampleTimes(4)).toEqual([0, 5, 10, 15]);
+    expect(scanSampleTimes(3, 2)).toEqual([0, 2, 4]);
   });
 
-  test("a non-duration is no grid at all", () => {
-    expect(scanTimes(0)).toEqual([]);
-    expect(scanTimes(-5)).toEqual([]);
-    expect(scanTimes(Number.NaN)).toEqual([]);
+  test("no samples is no grid at all", () => {
+    expect(scanSampleTimes(0)).toEqual([]);
+    expect(scanSampleTimes(-5)).toEqual([]);
+    expect(scanSampleTimes(Number.NaN)).toEqual([]);
   });
 
   test("the default interval is the shipped constant", () => {
-    expect(scanTimes(11)).toEqual(scanTimes(11, YOUTUBE_SCAN_INTERVAL_SEC));
-    expect(() => scanTimes(60, 0)).toThrow(/positive integer/);
-    expect(() => scanTimes(60, 2.5)).toThrow(/positive integer/);
+    expect(scanSampleTimes(3)).toEqual(scanSampleTimes(3, YOUTUBE_SCAN_INTERVAL_SEC));
+    expect(() => scanSampleTimes(12, 0)).toThrow(/positive integer/);
+    expect(() => scanSampleTimes(12, 2.5)).toThrow(/positive integer/);
   });
 });
 

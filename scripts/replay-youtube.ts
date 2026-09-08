@@ -112,7 +112,12 @@ import {
 import { splitTranscript } from "../src/summaries/export.ts";
 import { inProtectedRegion, markdownCodeRegions } from "../src/format/markdown-ast.ts";
 import {
+  SCAN_CHANGE_THRESHOLD,
+  SCAN_SIGNATURE_BYTES,
+  SCAN_SIGNATURE_HEIGHT,
+  SCAN_SIGNATURE_WIDTH,
   YOUTUBE_FRAME_SCAN_ENV,
+  blockChangeFraction,
   capScanCandidates,
   dedupeScanSamples,
   resolveFrameScanMode,
@@ -384,6 +389,64 @@ await mkdir(args.out, { recursive: true });
  * `du -sk`, because the roots hold hundreds of small JPEGs and a recursive walk
  * in-process would itself be slow enough to move the number it reports.
  */
+/**
+ * The 32×18 gray signature of an image file — the plane the scan's own dedup
+ * compares, computed here for a file the scan did not write.
+ */
+async function signatureOf(file: string): Promise<Uint8Array> {
+  const proc = Bun.spawn(
+    ["ffmpeg", "-v", "error", "-i", file,
+      "-vf", `scale=${SCAN_SIGNATURE_WIDTH}:${SCAN_SIGNATURE_HEIGHT},format=gray`,
+      "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  const bytes = new Uint8Array(await new Response(proc.stdout).arrayBuffer());
+  if ((await proc.exited) !== 0 || bytes.length < SCAN_SIGNATURE_BYTES) {
+    throw new Error(`could not read a signature from ${file}`);
+  }
+  return bytes.subarray(0, SCAN_SIGNATURE_BYTES);
+}
+
+/**
+ * Does the sheet cell labelled `t` show the same picture as an `-ss t` seek?
+ *
+ * The whole dense path rests on one number meaning one thing in five places —
+ * the thumbnail's file name, the cell the selection prompt labels, the second
+ * the manifest answers with, the seek the re-grab performs and the URL the
+ * reader loads — and NOTHING in the product compares them. A sampler that
+ * emitted every frame half an interval late kept every count, every dedup and
+ * every test intact while the model read one picture and the reader was served
+ * another; that is what this measures, per candidate, with the scan's OWN
+ * comparator and threshold.
+ */
+async function regrabParity(
+  video: string,
+  thumbDir: string,
+  seconds: readonly number[],
+  scratch: string,
+): Promise<{ candidates: number; matches: number; differs: number[] }> {
+  await mkdir(scratch, { recursive: true });
+  const differs: number[] = [];
+  let matches = 0;
+  for (const sec of seconds) {
+    const thumb = join(thumbDir, `${sec}.jpg`);
+    if (!existsSync(thumb)) continue;
+    const grabbed = join(scratch, `${sec}.jpg`);
+    // The scan's own thumbnail geometry, so the comparison is content and not
+    // a scaling artefact.
+    const proc = Bun.spawn(
+      ["ffmpeg", "-v", "error", "-y", "-ss", sec.toFixed(2), "-i", video,
+        "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "4", grabbed],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    if ((await proc.exited) !== 0) continue;
+    const moved = blockChangeFraction(await signatureOf(thumb), await signatureOf(grabbed));
+    if (moved < SCAN_CHANGE_THRESHOLD) matches++;
+    else differs.push(sec);
+  }
+  return { candidates: seconds.length, matches, differs };
+}
+
 async function dirBytes(dir: string): Promise<number> {
   if (!existsSync(dir)) return 0;
   const proc = Bun.spawn(["du", "-sk", dir], { stdout: "pipe", stderr: "ignore" });
@@ -419,6 +482,8 @@ for (let run = 1; run <= args.runs; run++) {
   let afterDedup: number | null = null;
   let afterCap: number | null = null;
   let sheetCount: number | null = null;
+  let candidateSeconds: number[] = [];
+  const scanThumbDir = join(runDir, "scan-thumbs");
   let peakScratchBytes = 0;
   const workDir = join(tmpdir(), `muninn-youtube-${jobId}`);
   const mediaDir = join(tmpdir(), `muninn-youtube-media-${jobId}`);
@@ -487,6 +552,14 @@ for (let run = 1; run <= args.runs; run++) {
         return result;
       },
       buildSheets: async (input) => {
+        // The candidates' own thumbnails, copied out before the job's `finally`
+        // removes the scan dir — this is the only moment they exist, and the
+        // parity check below has nothing to compare without them.
+        candidateSeconds = input.candidates.map((c) => c.tSeconds);
+        await mkdir(scanThumbDir, { recursive: true });
+        for (const c of input.candidates) {
+          await copyFile(input.thumbPathFor(c.tSeconds), join(scanThumbDir, `${c.tSeconds}.jpg`));
+        }
         const t0 = Date.now();
         const plans = await buildContactSheets(input);
         sheetWallMs = Date.now() - t0;
@@ -507,6 +580,13 @@ for (let run = 1; run <= args.runs; run++) {
   });
   clearInterval(scratchSampler);
   const elapsedMs = Date.now() - startedAt;
+
+  // After the job, against the ORIGINAL fixture: the summarizer unlinks its own
+  // copy, and this is a measurement of the video the capture actually read.
+  const parity = candidateSeconds.length > 0
+    ? await regrabParity(args.video, scanThumbDir, candidateSeconds, join(runDir, "regrab-check"))
+    : null;
+  await rm(join(runDir, "regrab-check"), { recursive: true, force: true });
 
   const job = getJob(jobId);
   const runLogs = logs.slice(logsBefore).map((r) => r.properties as Record<string, unknown>);
@@ -601,6 +681,12 @@ for (let run = 1; run <= args.runs; run++) {
     candidatesAfterDedup: afterDedup,
     candidatesAfterCap: afterCap,
     sheetCount,
+    /**
+     * Whether the frame named `<t>.jpg` really is the video at second t, per
+     * candidate, against an `-ss t` seek of the same file. `matches` short of
+     * `candidates` means the sampler and every consumer of its names disagree.
+     */
+    regrabParity: parity,
     /** The selection pass's manifest as it was parsed, entry by entry. */
     selectionManifest: summarized?.selectionManifest
       ? (JSON.parse(String(summarized.selectionManifest)) as unknown[])
