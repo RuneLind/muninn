@@ -74,8 +74,17 @@
  * On a dense run `run.json` also carries the scan step by step — samples,
  * candidates after the dedup, candidates after the cap, sheet count, the
  * selection manifest — the two passes' spend SEPARATELY beside the accumulated
- * total, each stage's wall time, and the peak size of the two temp roots
+ * total, each stage's wall time (with `ffmpegWallMs` and `selectionWallMs` kept
+ * apart, since a single extraction number mixes ffmpeg with a model turn that
+ * varies by minutes), `regrabParity`, and the peak DISK the two temp roots took
  * (sampled while the job runs, because both are removed in its `finally`).
+ *
+ * `regrabParity` is the one measurement that is not about cost: for every
+ * candidate it compares the sheet cell labelled t against an `-ss t` seek of the
+ * same file, through the scan's own comparator. `matches` short of `candidates`
+ * means the sampler and every consumer of its names disagree about what second a
+ * frame shows — which no count, no dedup and no test inside the pipeline can
+ * see, because they all read the same names.
  */
 
 import { mkdir, copyFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -484,14 +493,16 @@ for (let run = 1; run <= args.runs; run++) {
   let sheetCount: number | null = null;
   let candidateSeconds: number[] = [];
   const scanThumbDir = join(runDir, "scan-thumbs");
-  let peakScratchBytes = 0;
+  let peakScratchDiskBytes = 0;
+  /** The last `du` sample in flight — awaited before `run.json` is written. */
+  let scratchSample: Promise<unknown> = Promise.resolve();
   const workDir = join(tmpdir(), `muninn-youtube-${jobId}`);
   const mediaDir = join(tmpdir(), `muninn-youtube-media-${jobId}`);
   // Sampled WHILE the job runs: both roots are removed in its `finally`, so a
   // measurement after it returns is always zero.
   const scratchSampler = setInterval(() => {
-    void Promise.all([dirBytes(workDir), dirBytes(mediaDir)]).then(([a, b]) => {
-      peakScratchBytes = Math.max(peakScratchBytes, a + b);
+    scratchSample = Promise.all([dirBytes(workDir), dirBytes(mediaDir)]).then(([a, b]) => {
+      peakScratchDiskBytes = Math.max(peakScratchDiskBytes, a + b);
     });
   }, 2000);
 
@@ -579,6 +590,10 @@ for (let run = 1; run <= args.runs; run++) {
     },
   });
   clearInterval(scratchSampler);
+  // The last sample was started before the job returned but may not have
+  // landed; without this the reported peak is whatever the second-to-last
+  // sample saw.
+  await scratchSample;
   const elapsedMs = Date.now() - startedAt;
 
   // After the job, against the ORIGINAL fixture: the summarizer unlinks its own
@@ -696,10 +711,20 @@ for (let run = 1; run <= args.runs; run++) {
     sheetWallMs,
     regrabWallMs,
     cadenceWallMs,
-    /** Download start to the last frame-producing pass returning. */
+    /**
+     * Download start to the last frame-producing pass returning, SPLIT at the
+     * model call — a single number mixes ffmpeg wall time with a selection turn
+     * that varies by minutes, so it compares nothing between runs.
+     */
+    ffmpegWallMs:
+      (scanWallMs ?? 0) + (sheetWallMs ?? 0) + (regrabWallMs ?? 0) + (cadenceWallMs ?? 0) || null,
+    selectionWallMs: (selected?.elapsedMs as number | undefined) ?? null,
     extractionWallMs: extractionEndedAt > 0 ? extractionEndedAt - extractionStartedAt : null,
-    /** The largest both temp roots got together, sampled while the job ran. */
-    peakScratchBytes,
+    /**
+     * The largest both temp roots got together while the job ran — `du -sk`, so
+     * DISK usage (allocated blocks), not the sum of the file sizes.
+     */
+    peakScratchDiskBytes,
     elapsedMs,
     summaryChars: (job?.summary ?? "").length,
     ingestSummaryKind: ingestBody?.summary_kind ?? null,

@@ -19,7 +19,7 @@
  * grid catches two of the three; the third is on screen ~166–170 s and the 10 s
  * grid's 170 s cell already shows the next page. A 5 s grid catches all three,
  * and one sequential decode pass over the whole file costs 6.7 s wall
- * (353 samples, 5.3 MB of 320 px thumbnails). The change-aware detector — a
+ * (354 samples, ~5 MB of 320 px thumbnails). The change-aware detector — a
  * stabilization window, region comparison — stays an experiment.
  *
  * **Nothing here does I/O and nothing here spawns ffmpeg**, so the whole
@@ -45,8 +45,9 @@ import { summarizeTimeoutFor } from "../video/media.ts";
  * summary has to be able to show sit at ~130 s, ~150 s and ~166–170 s, and only
  * a 5 s grid lands inside all three windows (a 10 s grid's 170 s cell is already
  * the next page). It is also what makes the whole scan one decode: at 1 frame
- * per 5 s a 3-hour video is 2160 samples, which is 2160 JPEG writes and ~32 s of
- * decode, against the same single sequential read of the file.
+ * per 5 s a 3-hour video is 2161 samples, which is that many JPEG writes and
+ * ~41 s of decode (at the 227 ms per source minute measured below), against the
+ * same single sequential read of the file.
  */
 export const YOUTUBE_SCAN_INTERVAL_SEC = 5;
 
@@ -155,11 +156,13 @@ export const CONTACT_SHEET_CELLS = CONTACT_SHEET.cols * CONTACT_SHEET.rows;
 /**
  * Whole-scan ffmpeg budget, from the video's own duration.
  *
- * Measured decode-bound at ~0.18 s per source minute on this laptop (1767 s of
- * 720p H.264 in 6.7 s wall). 2 s per source minute is a generous multiple of
- * that — an order of magnitude — and the 60 s floor covers a short video whose
- * cost is dominated by process start and the JPEG writes rather than the decode.
- * At the 3 h frames cap this gives 360 s against a ~32 s expected pass.
+ * Measured decode-bound at **227 ms per source minute** on this laptop (1767 s
+ * of 720p H.264 in 6.7 s of wall clock; 6700 / 29.45 = 227). 2 s per source
+ * minute is ~8.8x that — generous, and not the order of magnitude an earlier
+ * reading of the same measurement claimed — and the 60 s floor covers a short
+ * video whose cost is dominated by process start and the JPEG writes rather
+ * than the decode. At the 3 h frames cap this gives 360 s against a ~41 s
+ * expected pass.
  *
  * It bounds a HANG. Every scan failure, this timeout included, degrades to the
  * cadence path with a warn — never a failed capture.
