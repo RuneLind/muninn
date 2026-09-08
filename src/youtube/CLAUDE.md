@@ -162,6 +162,19 @@ zero so a rendition that starts late does not shift every name by a slot.
 `scan-run.test.ts` drives a synthetic clock clip whose luma encodes floor(t), and
 the replay harness reports `regrabParity` per run.
 
+⚠️ **That exactness is CONDITIONAL on the source being CFR**, and the condition
+is the price of the count-based mapping. Across a source timestamp GAP longer
+than the interval, `fps` FILLS the slot by repeating the last frame it decoded
+before the gap, so the name is later than the picture. Measured on the clock clip
+with the frames between 11.5 s and 19.5 s dropped and the original pts kept: the
+sample named 15 carries the frame from second 11, and whether the dedup hides it
+depends on the picture rather than on the gap — at one gray level per second the
+fill scored 0.000 and was dropped (second 15 simply unrepresented), at forty it
+scored 1.000 and was KEPT, named 15 and showing second 11. Nothing downstream can
+see it: the count, the label, the manifest and the re-grab all read the same
+name. Bounding it means naming samples from each emitted frame's real pts
+(`showinfo`) — a change to the sampler, filed rather than made.
+
 **Why a uniform grid and not scene detection.** Measured on the reference video
 (1767 s, an article walkthrough with an inset presenter): plain
 `select='gt(scene,0.25)'` returns 27 candidates over the whole video and two in
@@ -253,6 +266,16 @@ when nothing parses at all — a failed pass, which falls back — and an array 
 no objects in it (`[130, 145]`) counts as nothing parsing. Only a genuinely empty
 array is "looked and found nothing", and that is `selection_empty` plus a warn
 rather than a silently slide-less `dense` capture.
+
+**The `reason` is held like the numbers are, because it is PROMPT INPUT.** Fix
+round 1 put it on the frame's own line in `framesPromptSection`'s list
+(`attachSelectionNotes`), where every other line is an address this capture can
+serve — so a `\n` in it renders as one more `t=…` line naming a frame nothing can
+grab. `holdReason` collapses every run of whitespace, control and format
+characters to ONE SPACE (a space, never nothing: removing a byte must not join
+two words), trims, and cuts past `SELECTION_REASON_MAX_CHARS` (160) back to the
+last word boundary. A non-string is no reason at all, which is the bare category
+the note already had for a reasonless entry.
 
 **The deadline is arithmetic, not machinery.** Nothing can abort an in-flight
 connector call: `executeOneShot` takes a `timeoutMs` and no signal. So the job
@@ -539,6 +562,16 @@ Vimeo and every other caller — and a test pins that literally rather than by
 needs an address and the seam's contract is that a frames-off capture never asks
 the id gate anything.
 
+**`detailed`'s must-quote rule rides on the FRAMES' notes, not on the policy.**
+`visualDetailPolicy` takes a required `framesHaveNotes` — the summarizer answers
+it with `frames.some(f => f.note)` — and states "every frame whose note above
+calls it a chart or a diagram MUST appear" only where a frame carries one. Only
+the dense scan's selection pass writes notes, so the cadence sampler, every dense
+attempt that fell back to it and the `YOUTUBE_FRAME_SCAN=cadence` kill switch
+were all being handed a MUST about a channel their prompt does not have. The
+argument is REQUIRED rather than defaulted for the same reason: an omission is
+how the rule reached those paths in the first place.
+
 **Then the answer is held to it.** `enforceVisualReferences` walks every quote of
 a frames address in the summary's PROSE and removes, deterministically and in
 document order: a second that was never extracted, another video's id, another
@@ -715,8 +748,10 @@ accumulated totals, `scanWallMs` / `sheetWallMs` / `regrabWallMs` /
 `cadenceWallMs`, `ffmpegWallMs` and `selectionWallMs` (the extraction wall split
 at the model call, which is what makes the ffmpeg half comparable between runs),
 `regrabParity` (every candidate's sheet thumbnail against an `-ss t` seek of the
-same file, through the scan's own comparator — `matches` short of `candidates`
-means the sampler and every consumer of its names disagree), and
+same file, through the scan's own comparator — `matches` short of
+`candidates - skipped` means the sampler and every consumer of its names
+disagree; a comparison that could not be MADE, because the thumbnail is gone or
+the re-grab failed, is counted as `skipped` and never as a difference), and
 `peakScratchDiskBytes` — `du -sk`, sampled every 2 s WHILE the job runs, because
 both temp roots are removed in its `finally` and a measurement afterwards is
 always zero. `--scan` writes `YOUTUBE_FRAME_SCAN`

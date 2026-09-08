@@ -73,7 +73,7 @@ describe("the policy the prompt states", () => {
     // summarizer test that counts images: the number is a product limit to
     // evaluate, so a change to it is a decision, never a side effect.
     expect(MAX_DETAILED_VISUALS).toBe(20);
-    expect(visualDetailPolicy("detailed", YOUTUBE_FRAME_SOURCE, YT_ID).rules).toContain(
+    expect(visualDetailPolicy("detailed", YOUTUBE_FRAME_SOURCE, YT_ID, true).rules).toContain(
       `${MAX_DETAILED_VISUALS} distinct frames`,
     );
   });
@@ -87,12 +87,12 @@ describe("the policy the prompt states", () => {
   });
 
   test("the rules state the caps the pass will enforce, and the route's own address", () => {
-    const selected = visualDetailPolicy("selected", YOUTUBE_FRAME_SOURCE, YT_ID);
+    const selected = visualDetailPolicy("selected", YOUTUBE_FRAME_SOURCE, YT_ID, true);
     expect(selected.rules).toContain(`/api/frames/youtube/${YT_ID}/<sec>.jpg`);
     expect(selected.rules).toContain(`At most ${MAX_INLINE_SLIDES} distinct frames`);
     expect(selected.rules).not.toContain("Visual reference");
 
-    const detailed = visualDetailPolicy("detailed", YOUTUBE_FRAME_SOURCE, YT_ID);
+    const detailed = visualDetailPolicy("detailed", YOUTUBE_FRAME_SOURCE, YT_ID, true);
     expect(detailed.rules).toContain("## Visual reference");
     // Detailed asks for the offered charts and diagrams by DEFAULT, because the
     // measured gap was never selection — all three reference charts reached the
@@ -101,7 +101,7 @@ describe("the policy the prompt states", () => {
     expect(detailed.rules).toContain("diagram");
     expect(detailed.rules).toMatch(/MUST/);
     // `selected` states no such rule: eight slots cannot absorb every chart.
-    expect(visualDetailPolicy("selected", YOUTUBE_FRAME_SOURCE, YT_ID).rules).not.toMatch(/MUST/);
+    expect(visualDetailPolicy("selected", YOUTUBE_FRAME_SOURCE, YT_ID, true).rules).not.toMatch(/MUST/);
     expect(detailed.rules).toContain(`${MAX_INLINE_SLIDES} frames inline`);
     expect(detailed.rules).toContain(`${MAX_DETAILED_VISUALS} distinct frames`);
   });
@@ -110,12 +110,31 @@ describe("the policy the prompt states", () => {
     // "adds facts the transcript did not say" excluded the frames a talk is
     // ABOUT: a speaker reading their own chart aloud disqualified the chart.
     for (const detail of VISUAL_DETAIL_VALUES) {
-      const rules = visualDetailPolicy(detail, YOUTUBE_FRAME_SOURCE, YT_ID).rules;
+      const rules = visualDetailPolicy(detail, YOUTUBE_FRAME_SOURCE, YT_ID, true).rules;
       expect(rules).toContain("explain, compare, verify or revisit");
       expect(rules).toContain("talking through a chart is a reason to show it");
       expect(rules).toContain("does not disqualify");
       expect(rules).not.toContain("ADDS something the transcript did not say");
     }
+  });
+
+  test("the must-quote rule rides on the FRAMES' notes, not on the policy alone", () => {
+    // The rule names "the note above". A capture whose frames carry no note —
+    // the cadence sampler, and every dense attempt that fell back to it — got a
+    // MUST about a channel its prompt does not have.
+    const noted = visualDetailPolicy("detailed", YOUTUBE_FRAME_SOURCE, YT_ID, true);
+    const bare = visualDetailPolicy("detailed", YOUTUBE_FRAME_SOURCE, YT_ID, false);
+    expect(noted.rules).toMatch(/chart or a diagram MUST appear/);
+    expect(bare.rules).not.toMatch(/MUST/);
+    // Only that paragraph moves: the appendix, the caps and the rubric stay.
+    expect(bare.rules).toContain(`## Visual reference`);
+    expect(bare.rules).toContain(`${MAX_DETAILED_VISUALS} distinct frames`);
+    expect(bare.rules).toContain("explain, compare, verify or revisit");
+    expect(bare.maxTotal).toBe(noted.maxTotal);
+    // `selected` never states it, with notes or without.
+    expect(visualDetailPolicy("selected", YOUTUBE_FRAME_SOURCE, YT_ID, true).rules).not.toMatch(
+      /MUST/,
+    );
   });
 
   test("a policy that tried to quote more than the seam allows is refused", () => {

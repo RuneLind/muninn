@@ -81,10 +81,11 @@
  *
  * `regrabParity` is the one measurement that is not about cost: for every
  * candidate it compares the sheet cell labelled t against an `-ss t` seek of the
- * same file, through the scan's own comparator. `matches` short of `candidates`
- * means the sampler and every consumer of its names disagree about what second a
- * frame shows — which no count, no dedup and no test inside the pipeline can
- * see, because they all read the same names.
+ * same file, through the scan's own comparator. `matches` short of
+ * `candidates - skipped` means the sampler and every consumer of its names
+ * disagree about what second a frame shows — which no count, no dedup and no
+ * test inside the pipeline can see, because they all read the same names. A
+ * comparison that could not be made at all is `skipped`, never a difference.
  */
 
 import { mkdir, copyFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -427,19 +428,31 @@ async function signatureOf(file: string): Promise<Uint8Array> {
  * every test intact while the model read one picture and the reader was served
  * another; that is what this measures, per candidate, with the scan's OWN
  * comparator and threshold.
+ *
+ * `matches + skipped + differs.length === candidates`. A candidate whose
+ * thumbnail is gone or whose re-grab failed is SKIPPED, counted on its own:
+ * folded into neither total it read as a disagreement, which is the alarm this
+ * measurement exists to raise.
  */
 async function regrabParity(
   video: string,
   thumbDir: string,
   seconds: readonly number[],
   scratch: string,
-): Promise<{ candidates: number; matches: number; differs: number[] }> {
+): Promise<{ candidates: number; matches: number; skipped: number; differs: number[] }> {
   await mkdir(scratch, { recursive: true });
   const differs: number[] = [];
   let matches = 0;
+  // A comparison that could not be MADE is neither a match nor a difference. Not
+  // counted, both reasons read as `matches < candidates`, which is the one thing
+  // this number exists to mean.
+  let skipped = 0;
   for (const sec of seconds) {
     const thumb = join(thumbDir, `${sec}.jpg`);
-    if (!existsSync(thumb)) continue;
+    if (!existsSync(thumb)) {
+      skipped++;
+      continue;
+    }
     const grabbed = join(scratch, `${sec}.jpg`);
     // The scan's own thumbnail geometry, so the comparison is content and not
     // a scaling artefact.
@@ -448,12 +461,15 @@ async function regrabParity(
         "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "4", grabbed],
       { stdout: "ignore", stderr: "ignore" },
     );
-    if ((await proc.exited) !== 0) continue;
+    if ((await proc.exited) !== 0) {
+      skipped++;
+      continue;
+    }
     const moved = blockChangeFraction(await signatureOf(thumb), await signatureOf(grabbed));
     if (moved < SCAN_CHANGE_THRESHOLD) matches++;
     else differs.push(sec);
   }
-  return { candidates: seconds.length, matches, differs };
+  return { candidates: seconds.length, matches, skipped, differs };
 }
 
 async function dirBytes(dir: string): Promise<number> {

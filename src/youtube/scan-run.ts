@@ -96,6 +96,26 @@ const RAW_THUMB_PATTERN = "%06d.jpg";
  * source has a gap longer than N, which silently renames every later sample;
  * `fps` fills such a slot instead, so the count-based mapping stays exact.
  *
+ * **What "exact" means here is CONDITIONAL on the source being CFR, and the
+ * condition is the price of that count-based mapping.** On a constant-frame-rate
+ * source every sample IS the video at its own name. Across a source timestamp
+ * GAP longer than N, `fps` fills the slot by REPEATING the last frame it decoded
+ * before the gap — so the name is later than the picture. Measured on a lavfi
+ * clock clip (luma encodes floor(t)) with the frames between 11.5 s and 19.5 s
+ * dropped and the original pts kept: the sample named 15 carries the frame from
+ * second 11 in both fixtures built, and whether the dedup then hides it depends
+ * on the picture and NOT on the gap — with one gray level per second (a 5-level
+ * step over 4 s, under the dedup's 12-level block delta) `blockChangeFraction` scored it
+ * 0.000 and `dedupeScanSamples` dropped it, so second 15 was simply
+ * unrepresented; with a 40-level step the same filled slot scored 1.000 and was
+ * KEPT, named 15 and showing second 11. Nothing downstream can see that: the
+ * count, the label, the manifest and the re-grab all read the same name, and the
+ * re-grab's own `-ss 15` then serves a picture the selection pass never saw.
+ * Bounding it would mean reading each emitted sample's real pts back
+ * (`showinfo`) and naming samples from that, which is a change to the sampler
+ * rather than to this argv; a YouTube ≤720p rendition with a hole of that size
+ * is the case it would buy.
+ *
  * The `split` feeds the same decoded frame to both scalers, so the signature
  * plane costs one extra scale and no extra decode.
  */

@@ -938,7 +938,17 @@ Video URL: ${videoUrl}`;
               YOUTUBE_FRAME_SOURCE,
               videoId,
               frames,
-              visualDetailPolicy(visualDetail, YOUTUBE_FRAME_SOURCE, videoId),
+              // The `detailed` must-quote rule names "the note above": it is
+              // stated only where a frame actually carries one, which is the
+              // dense scan's selection pass and nothing else — the cadence
+              // sampler, every dense attempt that fell back to it and the kill
+              // switch all hand over a bare list of paths.
+              visualDetailPolicy(
+                visualDetail,
+                YOUTUBE_FRAME_SOURCE,
+                videoId,
+                frames.some((f) => (f.note ?? "") !== ""),
+              ),
             )
           : ""),
       systemPrompt,

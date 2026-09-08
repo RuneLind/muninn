@@ -480,6 +480,47 @@ export interface SelectionEntry {
   readonly reason: string;
 }
 
+/**
+ * The most characters of one selection reason that reach the summary prompt.
+ *
+ * 160 is about two lines of the frame list at the width the rest of the prompt
+ * is written to, and every reason the reference captures produced is well under
+ * it (the prompt asks for "one short clause"). It is a BOUND on third-party
+ * text, not a style rule: the reason is written by a model reading pictures this
+ * capture did not choose, and it is pasted into a list the summary call reads as
+ * instructions.
+ */
+export const SELECTION_REASON_MAX_CHARS = 160;
+
+/**
+ * The reason, held to one line of ordinary characters.
+ *
+ * `attachSelectionNotes` puts this string on the frame's own line in
+ * `framesPromptSection`'s list, so it is PROMPT INPUT — and every other line
+ * there is an address this capture can serve. A `\n` in it renders as one more
+ * `t=…` line, which is a frame the summary call may quote and nothing can grab;
+ * a control or format character is a byte the list cannot carry meaningfully and
+ * a bidi override is one that reorders the line around it.
+ *
+ * So: every run of whitespace, control and format characters becomes ONE SPACE
+ * (a space rather than nothing, so removing a byte can never join two words into
+ * a third), the result is trimmed, and anything past
+ * {@link SELECTION_REASON_MAX_CHARS} is cut back to the last word boundary. A
+ * non-string is no reason at all — the note is then the bare category, which is
+ * the shape `attachSelectionNotes` already had for a reasonless entry.
+ */
+function holdReason(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const flat = value.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim();
+  if (flat.length <= SELECTION_REASON_MAX_CHARS) return flat;
+  let cut = flat.slice(0, SELECTION_REASON_MAX_CHARS);
+  // Never end on half of a surrogate pair: the cut is by UTF-16 unit, and a lone
+  // high surrogate is an unpaired code unit in the prompt.
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
+}
+
 /** What {@link parseSelectionManifest} made of the pass's answer. */
 export interface SelectionManifest {
   readonly entries: SelectionEntry[];
@@ -617,6 +658,10 @@ function extractJsonArray(text: string): unknown[] | null {
  * becomes `other` rather than dropping the entry — the category is a label on
  * the reason, not a gate.
  *
+ * The `reason` is held the same way the numbers are, for the same reason it is
+ * kept at all: it reaches the summary prompt as text on the frame's own line
+ * (see {@link holdReason}).
+ *
  * A second that is not on the grid is SNAPPED to it before it is held to the
  * candidate set: the sheets only ever offered multiples of `intervalSec`, so a
  * decimal read off a cell names a candidate this capture can serve, and
@@ -664,7 +709,7 @@ export function parseSelectionManifest(
       tSeconds: sec,
       category,
       ...(group !== "" ? { duplicateGroup: group } : {}),
-      reason: typeof rec.reason === "string" ? rec.reason.trim() : "",
+      reason: holdReason(rec.reason),
     });
   }
   entries.sort((a, b) => a.tSeconds - b.tSeconds);
