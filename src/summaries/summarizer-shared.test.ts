@@ -478,6 +478,87 @@ describe("runCaptureOneShot", () => {
     expect(tracer.name).toBe(captureTraceName("youtube"));
     expect(tracer.traceId).toMatch(/^[0-9a-f-]{36}$/);
   });
+  // --- the closing-takeaway check (`takeaway-check.ts`, run in this seam) ----
+  const WITH_CLOSER =
+    "CATEGORY: tech\n\nSUMMARY:\n*ingress*\n\n## Key takeaways\n- 🧱 Stopping the project was healthy.\n\n## Body\nThe rollout of one line was delayed.\n\n> 💬 **Takeaway:** The cancelled project was the most valuable one.";
+  const verdictJson = (v: { verdict: string; issues?: string[]; rewrite?: string | null }) => ({
+    result: JSON.stringify({ issues: [], rewrite: null, ...v }),
+    model: "claude-sonnet-4-6",
+    inputTokens: 4_000,
+    outputTokens: 200,
+    backend: "anthropic" as const,
+  });
+
+  test("an ungrounded closer is rewritten in the RAW text the vertical parses", async () => {
+    const prompts: string[] = [];
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async (p) => {
+        prompts.push(p);
+        return verdictJson({ verdict: "ungrounded", issues: ["reversal"], rewrite: "Stopping the project was healthy." });
+      },
+    });
+    const result = await runCaptureOneShot(h.opts);
+    expect(result.result.endsWith("> 💬 **Takeaway:** Stopping the project was healthy.")).toBe(true);
+    expect(result.result).toContain("## Key takeaways"); // the body is untouched
+    expect(result.result).not.toContain("most valuable");
+    // The check sees the body and the closer, never the prompt/transcript.
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("The rollout of one line was delayed.");
+    expect(prompts[0]).not.toContain("transcript");
+    // A child span of the capture, labelled off the summary pass, stamped with the outcome.
+    const end = h.calls.find((c) => c.op === "end" && c.label === "claude:takeaway-check")!;
+    expect(end.attrs).toMatchObject({ takeaway: "rewritten", takeawayIssues: "reversal", model: "claude-sonnet-4-6" });
+    // The check runs BEFORE the root is finished, so its span lands inside it.
+    const idx = (op: string, label?: string) => h.calls.findIndex((c) => c.op === op && (label === undefined || c.label === label));
+    expect(idx("end", "claude:takeaway-check")).toBeLessThan(idx("finish:ok"));
+  });
+
+  test("a grounded closer leaves the result object untouched", async () => {
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async () => verdictJson({ verdict: "grounded" }),
+    });
+    const result = await runCaptureOneShot(h.opts);
+    expect(result.result).toBe(WITH_CLOSER);
+    expect(h.calls.find((c) => c.op === "end" && c.label === "claude:takeaway-check")!.attrs).toMatchObject({ takeaway: "grounded" });
+  });
+
+  test("a failing check keeps the closer as written and never fails the capture", async () => {
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async () => { throw new Error("router down"); },
+    });
+    const result = await runCaptureOneShot(h.opts);
+    expect(result.result).toBe(WITH_CLOSER);
+    expect(h.calls.find((c) => c.op === "end" && c.label === "claude:takeaway-check")!.attrs).toMatchObject({ takeaway: "check-failed" });
+    expect(h.calls.some((c) => c.op === "finish:ok")).toBe(true);
+  });
+
+  test("a result with no closer (the YouTube selection pass) opens no check span and makes no call", async () => {
+    let calls = 0;
+    const h = harness({
+      pass: "claude:select",
+      oneShot: async () => fakeResult({ result: "[3, 7, 11]" }),
+      takeawayCheck: async () => { calls++; return verdictJson({ verdict: "grounded" }); },
+    });
+    await runCaptureOneShot(h.opts);
+    expect(calls).toBe(0);
+    expect(h.calls.some((c) => String(c.label).includes("takeaway-check"))).toBe(false);
+  });
+
+  test("takeawayCheck: false skips the check", async () => {
+    let calls = 0;
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: false,
+    });
+    // A `false` cannot carry a stub, so the proof is the absence of the span.
+    const result = await runCaptureOneShot(h.opts);
+    expect(result.result).toBe(WITH_CLOSER);
+    expect(h.calls.some((c) => String(c.label).includes("takeaway-check"))).toBe(false);
+    expect(calls).toBe(0);
+  });
 });
 
 // --- the constants and riders the capture verticals share ---

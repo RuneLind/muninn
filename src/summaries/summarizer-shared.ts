@@ -8,6 +8,7 @@ import { Tracer } from "../tracing/tracer.ts";
 import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { getConnectorLabel } from "../observability/agent-status.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
+import { groundTakeaway, splitClosingTakeaway, type GroundTakeawayOptions } from "./takeaway-check.ts";
 
 const log = getLog("summaries", "ingest");
 const captureLog = getLog("summaries", "capture");
@@ -102,6 +103,15 @@ export interface CaptureOneShotOptions {
    * a label would also clobber each other: `Tracer` keys its spans by label.
    */
   pass?: string;
+  /**
+   * The closing-takeaway grounding check (`takeaway-check.ts`), on by default:
+   * after the model call, the closer is checked against the text above it and
+   * rewritten when it asserts what the body does not. It runs where the
+   * result carries a `> 💬 **Takeaway:**` block, which is every summary pass
+   * and never the YouTube selection pass. `false` skips it; a function
+   * replaces the Haiku-router call (tests, the eval harness).
+   */
+  takeawayCheck?: boolean | GroundTakeawayOptions["call"];
   /**
    * A trace root the CALLER owns, for a job that makes more than one model call.
    *
@@ -218,9 +228,42 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
     };
 
     attachRun(jobId, usage);
+
+    // The closer check, a child span of the capture. It rewrites the RAW text
+    // (the envelope parser runs after this in every vertical), so an
+    // ungrounded closer never reaches the store, the ingest or the card. A
+    // failed check keeps the text and stamps the outcome; it never fails the
+    // capture. A result with no closer (a selection pass) opens no span at all.
+    let text = result.result;
+    if (opts.takeawayCheck !== false && splitClosingTakeaway(text) !== null) {
+      const spanLabel = `${opts.pass ?? "claude"}:takeaway-check`;
+      tracer.start(spanLabel, { source });
+      const checked = await groundTakeaway(text, {
+        botName: botConfig.name,
+        connector: botConfig.connector,
+        haikuBackend: botConfig.haikuBackend,
+        tracer,
+        entrypoint: `capture:${source}`,
+        ...(typeof opts.takeawayCheck === "function" ? { call: opts.takeawayCheck } : {}),
+      });
+      tracer.end(spanLabel, {
+        takeaway: checked.outcome,
+        ...(checked.issues.length > 0 ? { takeawayIssues: checked.issues.join(" | ") } : {}),
+        ...(checked.usage ?? {}),
+      });
+      if (checked.outcome === "rewritten") {
+        captureLog.info("Capture {source} job {jobId}: closing takeaway rewritten ({count} unsupported clause(s))", {
+          source,
+          jobId,
+          count: checked.issues.length,
+        });
+      }
+      text = checked.text;
+    }
+
     if (ownsRoot) tracer.finish("ok", { source, ...usage });
 
-    return result;
+    return text === result.result ? result : { ...result, result: text };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (ownsRoot) tracer.finish("error", { source, error: message });

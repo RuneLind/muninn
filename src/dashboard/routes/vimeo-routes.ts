@@ -369,6 +369,7 @@ export function registerVimeoRoutes(
     store: { getJob, getRecentJobs, subscribe },
     redirect: { path: "/vimeo", source: "vimeo" },
     corsPreflight: false,
+    completeCarriesSummary: true,
   });
 
   // `GET /api/frames/:source/:id/:file` and its pre-seam Vimeo alias are

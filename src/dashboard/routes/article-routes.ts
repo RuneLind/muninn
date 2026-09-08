@@ -66,6 +66,7 @@ export function registerArticleRoutes(app: Hono, config: Config): void {
     apiBase: ARTICLE_SOURCE.apiBase,
     collection: ARTICLE_COLLECTION,
     store: { getJob, getRecentJobs, subscribe },
+    completeCarriesSummary: true,
   });
 
   app.post("/api/articles/summarize", async (c) => {
