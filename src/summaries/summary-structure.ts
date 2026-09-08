@@ -16,7 +16,7 @@
  * /summaries AND make clean drafter input downstream: one italic ingress line
  * orients the reader, a `## Key takeaways` section leads the body, `##`-level
  * headings structure the rest, tables appear only for genuinely comparative
- * content, a closing blockquote distills the headline revelations, and the
+ * content, a closing blockquote restates the source's own conclusion, and the
  * output is PLAIN markdown — no block components (Callout/Verdict/Pill/etc.),
  * a stated non-goal for stored summaries.
  *
@@ -71,7 +71,11 @@
  *
  * The ingress + closer restore what the pre-#309 loose prompt produced
  * emergently on the best summaries (and inconsistently on the rest): an
- * orientation line up top and a memorable distillation at the bottom. The
+ * orientation line up top and a distillation at the bottom — which since
+ * 2026-09-08 is a RESTATEMENT of the body, never a new claim: on a talk
+ * captured with the opus model and full thinking, the body was right on every
+ * point and a closer asked for "the most surprising … punchy" revelations
+ * added a cause, a ranking and a reversal the speaker never stated. The
  * `## Key takeaways` section stays the FIRST *section* — nothing parses the
  * body positionally, but /summaries scanability and drafter-input uniformity
  * were the point of the restructure and are preserved.
@@ -85,5 +89,5 @@ export const SUMMARY_STRUCTURE_BULLETS = [
   "- **Bold** for key terms; bullet lists for enumerations, prefixed with a fitting emoji (as in `- 🧪 Evals catch…`).",
   "- Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).",
   "- Keep it concise but comprehensive.",
-  "- End with a closing blockquote takeaway: `> 💬 **Takeaway:** …` — the 1–3 most surprising or headline revelations, distilled into one or two punchy sentences.",
+  "- End with a closing blockquote takeaway: `> 💬 **Takeaway:** …` — one or two sentences that COMPRESS the summary above into the source's own conclusion, in the source's own emphasis. Every clause must restate something the `## Key takeaways` bullets or the body already say; never add a cause, a ranking, a superlative or a reversal the source did not state, and prefer what the speaker actually concluded over a more memorable line. A reader who reads only this line must learn nothing the body would contradict.",
 ];

@@ -69,7 +69,7 @@ export const DEFAULT_SHARE_PROMPT = `Summarize the source below as a short, self
 Structure:
 - One or two opening sentences saying what this is and why it matters.
 - A handful of bullets with the concrete substance.
-- A closing line with the takeaway.
+- A closing line with the takeaway — the source's own conclusion restated, never a claim the bullets above do not carry.
 
 ${SHARED_PRESET_RULES}`;
 
@@ -96,7 +96,7 @@ Structure:
 - A one-line subject suggestion on the first line, prefixed with "Subject: ".
 - A short opening paragraph saying what this is and why you are sending it.
 - Two to four short paragraphs, or a small bulleted list, with the substance.
-- A closing line with the takeaway or the ask.
+- A closing line with the takeaway or the ask — the takeaway being the source's own conclusion restated, never a claim the paragraphs above do not carry.
 
 Prose over bullets where the point needs a sentence — this is a document, not a chat message.
 
