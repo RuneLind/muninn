@@ -580,6 +580,35 @@ describe("runCaptureOneShot", () => {
     expect(select.calls.some((c) => c.op === "event")).toBe(false);
   });
 
+  test("a REMOVED closer reaches the vertical without its block, and its spend still lands on the run", async () => {
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async () => verdictJson({ verdict: "ungrounded", issues: ["reversal"], rewrite: "<b>bad</b>" }),
+    });
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+      ],
+      reset: true,
+    });
+    try {
+      const result = await runCaptureOneShot(h.opts);
+      expect(result.result).not.toContain("Takeaway");
+      expect(result.result).toContain("## Key takeaways");
+      const end = h.calls.find((c) => c.op === "end" && c.label === "claude:takeaway-check")!;
+      expect(end.attrs).toMatchObject({ takeaway: "removed", takeawayIssues: "reversal", inputTokens: 4_000 });
+      expect(h.attached.some((m) => m.inputTokens === 4_000 && m.outputTokens === 200)).toBe(true);
+      // The seam's own line names the outcome, so a removed closer is greppable in the capture log.
+      const line = records.find((r) => r.category.join("/") === "muninn/summaries/capture" && String(r.message.join("")).includes("closing takeaway"));
+      expect(line?.properties.outcome).toBe("removed");
+    } finally {
+      await configure({ sinks: {}, loggers: [{ category: ["logtape", "meta"], sinks: [], lowestLevel: "error" }], reset: true });
+    }
+  });
+
   test("takeawayCheck: false skips the check", async () => {
     let calls = 0;
     const h = harness({

@@ -92,9 +92,13 @@ export function splitClosingTakeaway(text: string): SplitTakeaway | null {
     if (!lines[i]!.trimStart().startsWith(TAKEAWAY_MARKER)) continue;
     if (inProtectedRegion(starts[i]!, code)) continue;
     // An INDENTED code block (four spaces or a tab) is code too, and
-    // `markdownCodeRegions` covers fences only. A closer inside a list item
-    // sits at two spaces, so it is still found.
-    if (/^( {4}|\t)/.test(lines[i]!)) continue;
+    // `markdownCodeRegions` covers fences only. Enumerated (round 3) over
+    // (indent ≥ 4, previous non-blank line is a list item): four spaces under
+    // a list item is list CONTINUATION in CommonMark, not code, so only an
+    // indented line whose nearest non-blank predecessor is not a list item is
+    // skipped. A top-level closer, a two-space list closer and a nested-list
+    // closer are all found.
+    if (/^( {4}|\t)/.test(lines[i]!) && !precededByListItem(lines, i)) continue;
     start = i;
     break;
   }
@@ -117,6 +121,16 @@ export function splitClosingTakeaway(text: string): SplitTakeaway | null {
     hasLead: start > 0,
     after: end < lines.length ? `\n${lines.slice(end).join("\n")}` : "",
   };
+}
+
+/** Whether the nearest non-blank line above `i` is a list item (`-`, `*`, `+`, `1.`, `1)`). */
+function precededByListItem(lines: readonly string[], i: number): boolean {
+  for (let j = i - 1; j >= 0; j--) {
+    const l = lines[j]!;
+    if (l.trim() === "") continue;
+    return /^\s*(?:[-*+]|\d+[.)])\s/.test(l);
+  }
+  return false;
 }
 
 /** Put a (new) closer text back where the old one was, single-line, same indent. */
@@ -311,10 +325,15 @@ export async function groundTakeaway(text: string, opts: GroundTakeawayOptions):
   const split = splitClosingTakeaway(text);
   if (!split) return { text, outcome: "no-takeaway", issues: [] };
   const prompt = buildTakeawayCheckPrompt(split.before, split.takeaway);
+  // The result shape, enumerated once (round 3): `usage` is present exactly
+  // when the call ANSWERED — grounded, rewritten, removed, and a check-failed
+  // whose answer did not parse — and absent when the call threw or there was
+  // no closer. It is captured outside the try so every arm below carries it.
+  let usage: GroundTakeawayResult["usage"];
   try {
     const call = opts.call ?? ((p: string) => callHaikuWithFallback(p, routerOptionsFor(opts)));
     const answer = await call(prompt);
-    const usage = {
+    usage = {
       model: answer.model,
       inputTokens: answer.inputTokens,
       outputTokens: answer.outputTokens,
@@ -342,12 +361,12 @@ export async function groundTakeaway(text: string, opts: GroundTakeawayOptions):
         botName: opts.botName,
         error: err.message,
       });
-      return { text: removeClosingTakeaway(split), outcome: "removed", issues: err.issues, original: split.takeaway };
+      return { text: removeClosingTakeaway(split), outcome: "removed", issues: err.issues, original: split.takeaway, usage };
     }
     log.warn("Capture takeaway check failed for {botName}, keeping the closer as written: {error}", {
       botName: opts.botName,
       error: err instanceof Error ? err.message : String(err),
     });
-    return { text, outcome: "check-failed", issues: [], original: split.takeaway };
+    return { text, outcome: "check-failed", issues: [], original: split.takeaway, ...(usage ? { usage } : {}) };
   }
 }

@@ -246,3 +246,38 @@ describe("fix round 2: prose brackets, indented code, a leading blank line, refu
     expect(routerOptionsFor({ botName: "v", haikuBackend: "vertex" }).model).toBeUndefined();
   });
 });
+
+// --- fix round 3 (class check: the result shape and the indent rule, enumerated) ---
+describe("fix round 3: usage on every answered arm, nested-list closers, the empty-body remove", () => {
+  const answered = (result: string) => async () => ({ result, model: "claude-sonnet-4-6", inputTokens: 4_000, outputTokens: 200, backend: "anthropic" as const });
+  const text = `${BODY}\n> 💬 **Takeaway:** wrong.\n`;
+
+  test("usage is present exactly when the call answered: removed and an unparseable answer carry it, a throwing call does not", async () => {
+    const removed = await groundTakeaway(text, { botName: "t", call: answered(JSON.stringify({ verdict: "ungrounded", issues: ["x"], rewrite: "<b>bad</b>" })) });
+    expect(removed.outcome).toBe("removed");
+    expect(removed.usage).toMatchObject({ inputTokens: 4_000, outputTokens: 200, model: "claude-sonnet-4-6" });
+    const garbage = await groundTakeaway(text, { botName: "t", call: answered("not json") });
+    expect(garbage.outcome).toBe("check-failed");
+    expect(garbage.usage).toMatchObject({ inputTokens: 4_000 });
+    const thrown = await groundTakeaway(text, { botName: "t", call: async () => { throw new Error("down"); } });
+    expect(thrown.outcome).toBe("check-failed");
+    expect(thrown.usage).toBeUndefined();
+  });
+
+  test("the indent rule, enumerated: 0–3 spaces found; 4+/tab skipped unless under a list item", () => {
+    for (const indent of ["", " ", "  ", "   "]) {
+      expect(splitClosingTakeaway(`body\n\n${indent}> 💬 **Takeaway:** found`)?.takeaway).toBe("found");
+    }
+    for (const indent of ["    ", "\t", "     "]) {
+      expect(splitClosingTakeaway(`body\n\n${indent}> 💬 **Takeaway:** code`)).toBeNull();
+      expect(splitClosingTakeaway(`- a\n  - b\n${indent}> 💬 **Takeaway:** nested`)?.takeaway).toBe("nested");
+      expect(splitClosingTakeaway(`1. a\n\n${indent}> 💬 **Takeaway:** numbered`)?.takeaway).toBe("numbered");
+    }
+    // A paragraph, not a list item, before the indented line: still code.
+    expect(splitClosingTakeaway("prose line\n    > 💬 **Takeaway:** code")).toBeNull();
+  });
+
+  test("removing a closer that is the whole body keeps exactly the trailing text", () => {
+    expect(removeClosingTakeaway(splitClosingTakeaway("> 💬 **Takeaway:** alone\n\nTrailing.")!)).toBe("\nTrailing.");
+  });
+});
