@@ -21,8 +21,22 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONTACT_SHEET, SCAN_SIGNATURE_BYTES, dedupeScanSamples, type ScanCandidate } from "./scan.ts";
-import { buildContactSheets, denseScanArgs, regrabFrames, runDenseScan } from "./scan-run.ts";
+import { renderLabelStrip, toPgm } from "./label.ts";
+import {
+  CONTACT_SHEET,
+  CONTACT_SHEET_LABEL,
+  SCAN_SIGNATURE_BYTES,
+  cellLabelText,
+  dedupeScanSamples,
+  type ScanCandidate,
+} from "./scan.ts";
+import {
+  buildContactSheets,
+  contactSheetArgs,
+  denseScanArgs,
+  regrabFrames,
+  runDenseScan,
+} from "./scan-run.ts";
 
 // BOTH binaries: `probeSize` below shells out to ffprobe, so a host with ffmpeg
 // and no ffprobe would run the ffmpeg-gated cases and fail inside one of them.
@@ -171,6 +185,51 @@ describe("denseScanArgs", () => {
   });
 });
 
+describe("contactSheetArgs", () => {
+  // Pure, so it runs with or without ffmpeg — the filtergraph is the contract.
+  const args = (n: number): string[] =>
+    contactSheetArgs({
+      cellPaths: Array.from({ length: n }, (_, i) => `/thumbs/${i}.jpg`),
+      labelPaths: Array.from({ length: n }, (_, i) => `/cells/label-${i}.pgm`),
+      outPath: "/select/sheet-01.jpg",
+    });
+
+  test("each cell is stacked over its own label before the grid is tiled", () => {
+    const argv = args(3);
+    const graph = argv[argv.indexOf("-filter_complex") + 1]!;
+    // Input i is cell i and input n+i is its label — the pairing the caller's
+    // two arrays imply, spelled once.
+    expect(graph).toContain(`[0:v]scale=${CONTACT_SHEET.cellWidth}:-2`);
+    expect(graph).toContain("[3:v]");
+    expect(graph).toContain("[c0][l0]vstack=inputs=2[t0]");
+    expect(graph).toContain("[c2][l2]vstack=inputs=2[t2]");
+    // …then one stream of labelled cells, tiled into the sheet.
+    expect(graph).toContain("[t0][t1][t2]concat=n=3:v=1[seq]");
+    expect(graph).toContain(`[seq]tile=${CONTACT_SHEET.cols}x${CONTACT_SHEET.rows}[sheet]`);
+    expect(argv).toContain("[sheet]");
+    expect(argv.at(-1)).toBe("/select/sheet-01.jpg");
+  });
+
+  test("the inputs are the cells and then the labels, in order", () => {
+    const argv = args(2);
+    const inputs = argv.filter((a, i) => argv[i - 1] === "-i");
+    expect(inputs).toEqual(["/thumbs/0.jpg", "/thumbs/1.jpg", "/cells/label-0.pgm", "/cells/label-1.pgm"]);
+  });
+
+  test("a sheet with no cells, or one label short, is refused", () => {
+    // A silently short sheet would pair cell 2 with cell 1's caption, which is
+    // the exact lie the labels exist to prevent.
+    expect(() => contactSheetArgs({ cellPaths: [], labelPaths: [], outPath: "/o.jpg" })).toThrow(/no cells/i);
+    expect(() =>
+      contactSheetArgs({ cellPaths: ["/a.jpg", "/b.jpg"], labelPaths: ["/a.pgm"], outPath: "/o.jpg" }),
+    ).toThrow(/2 cell\(s\) and 1 label\(s\)/);
+  });
+
+  test("more cells than the grid holds is refused rather than silently dropped", () => {
+    expect(() => args(CONTACT_SHEET.cols * CONTACT_SHEET.rows + 1)).toThrow(/13 cell\(s\)/);
+  });
+});
+
 /** Burn `ms` of wall clock without yielding — a deadline test needs time to pass. */
 function burn(ms: number): void {
   const end = Date.now() + ms;
@@ -256,6 +315,77 @@ describe("buildContactSheets bounds the whole pass", () => {
     // is bounded at three times the budget it was given.
     expect(handed[1]!).toBeLessThan(handed[0]!);
     expect(handed[2]!).toBeLessThan(handed[1]!);
+  });
+
+  test("every cell is handed to ffmpeg with a label strip of its own", async () => {
+    // The mapping from a grid position to a second used to live only in the
+    // prose beside the sheet, and fix round 1 measured the model mis-reading it
+    // for four cells of one sheet. Each cell now carries its own caption, so
+    // what this pins is that the caption reaches ffmpeg: one input per cell,
+    // one PGM per cell, on disk, when the run is invoked.
+    const root = tmpRoot();
+    const { candidates, thumbPathFor } = await threeSheets(root);
+    const sheetCells = candidates.slice(0, CONTACT_SHEET.cols * CONTACT_SHEET.rows);
+    const seen: { argv: string[]; labelBytes: (Uint8Array | null)[] }[] = [];
+    await buildContactSheets({
+      candidates: sheetCells,
+      thumbPathFor,
+      outDir: join(root, "select"),
+      scratchDir: join(root, "scratch"),
+      timeoutMs: 30_000,
+      run: async (argv) => {
+        // Read INSIDE the run: the scratch cells are removed behind each sheet,
+        // so a check afterwards would be checking deleted files.
+        const labels = argv.filter((a) => a.endsWith(".pgm"));
+        const labelBytes: (Uint8Array | null)[] = [];
+        for (const p of labels) {
+          labelBytes.push(existsSync(p) ? new Uint8Array(await Bun.file(p).arrayBuffer()) : null);
+        }
+        seen.push({ argv, labelBytes });
+      },
+    });
+
+    expect(seen).toHaveLength(1);
+    const { argv, labelBytes } = seen[0]!;
+    const cells = CONTACT_SHEET.cols * CONTACT_SHEET.rows;
+    const inputs = argv.filter((a, i) => argv[i - 1] === "-i");
+    // Twelve thumbnails and twelve labels, thumbnails first — which is the
+    // order the filtergraph pairs them in.
+    expect(inputs).toHaveLength(cells * 2);
+    expect(inputs.slice(0, cells).every((p) => p.endsWith(".jpg"))).toBe(true);
+    expect(inputs.slice(cells).every((p) => p.endsWith(".pgm"))).toBe(true);
+    expect(labelBytes).toHaveLength(cells);
+    /** The strip this test expects under cell `n`, drawn from its own knowledge. */
+    const expectedStrip = (n: number, tSeconds: number): Uint8Array =>
+      toPgm(
+        renderLabelStrip({
+          text: cellLabelText(n, tSeconds),
+          width: CONTACT_SHEET.cellWidth,
+          height: CONTACT_SHEET_LABEL.height,
+          scale: CONTACT_SHEET_LABEL.scale,
+          padX: CONTACT_SHEET_LABEL.padX,
+        }),
+      );
+    for (let i = 0; i < cells; i++) {
+      const bytes = labelBytes[i];
+      expect(bytes).not.toBeNull();
+      // A binary PGM of exactly the cell width and the label height: ffmpeg
+      // vstacks it under the cell, so a mismatched width is a failed sheet.
+      expect(new TextDecoder().decode(bytes!.subarray(0, 16))).toStartWith(
+        `P5\n${CONTACT_SHEET.cellWidth} ${CONTACT_SHEET_LABEL.height}\n255\n`,
+      );
+      expect(bytes!.length).toBeGreaterThan(CONTACT_SHEET.cellWidth * CONTACT_SHEET_LABEL.height);
+      // Not a blank strip — a label with nothing drawn on it is the old failure
+      // with extra pixels.
+      expect(bytes!.some((v) => v === 255)).toBe(true);
+      // …and it says what THIS cell is: `#i+1` and this candidate's own second,
+      // both derived here from the candidate list rather than read back out of
+      // the pass. A label naming the next cell is a counting mismatch of exactly
+      // the kind the labels replaced.
+      expect([...bytes!]).toEqual([...expectedStrip(i + 1, sheetCells[i]!.tSeconds)]);
+      expect([...bytes!]).not.toEqual([...expectedStrip(i + 2, sheetCells[i]!.tSeconds)]);
+      expect([...bytes!]).not.toEqual([...expectedStrip(i + 1, sheetCells[i]!.tSeconds + 5)]);
+    }
   });
 
   test("a spent budget stops the pass rather than starting another sheet", async () => {
@@ -362,13 +492,38 @@ describe.skipIf(!media)("the scan against real ffmpeg", () => {
     expect(plans[0]!.cells).toHaveLength(6);
     const sheet = join(root, "select", plans[0]!.fileName);
     expect(existsSync(sheet)).toBe(true);
-    // The full grid's width, padded — the geometry the prompt describes.
+    // The full grid's width, padded — and every ROW is a 180 px cell plus its
+    // burned-in label strip. This is the one place the composition is measured
+    // rather than described: an argv that names the label inputs and a
+    // filtergraph that drops them look identical from the caller.
     expect(await probeSize(sheet)).toEqual({
       width: CONTACT_SHEET.cols * CONTACT_SHEET.cellWidth,
-      height: CONTACT_SHEET.rows * 180,
+      height: CONTACT_SHEET.rows * (180 + CONTACT_SHEET_LABEL.height),
     });
     // The scratch cells are cleaned up behind each sheet.
     expect(readdirSync(join(root, "scratch"))).toEqual([]);
+
+    // The label band under the first cell carries INK on a dark ground — the
+    // strip is not merely allocated, something is drawn in it. The fixture's
+    // first cell is solid red, so every bright pixel in that band is glyph.
+    const rowHeight = 180 + CONTACT_SHEET_LABEL.height;
+    const band = (col: number, row: number): Promise<number[]> =>
+      cropGray(
+        sheet,
+        col * CONTACT_SHEET.cellWidth,
+        row * rowHeight + 180,
+        CONTACT_SHEET.cellWidth,
+        CONTACT_SHEET_LABEL.height,
+      );
+    const first = await band(0, 0);
+    expect(Math.max(...first)).toBeGreaterThan(200);
+    expect(first.filter((v) => v < 64).length / first.length).toBeGreaterThan(0.5);
+    // The LAST real cell too (the 6th, row 2 column 2): every cell is captioned,
+    // not only the one the eye lands on first.
+    expect(Math.max(...(await band(1, 1)))).toBeGreaterThan(200);
+    // …while the 7th slot is padding — `tile` fills it, so it carries no
+    // caption, which is what the prompt tells the model to expect.
+    expect(Math.max(...(await band(2, 1)))).toBeLessThan(200);
   }, 120_000);
 
   test("the re-grab writes `<second>.jpg` at the asked-for height", async () => {
@@ -385,6 +540,24 @@ describe.skipIf(!media)("the scan against real ffmpeg", () => {
     expect(readdirSync(join(root, "frames")).sort()).toEqual(["12.jpg", "22.jpg"]);
   }, 120_000);
 });
+
+/** A rectangle of an image as raw gray bytes, from one ffmpeg decode. */
+async function cropGray(
+  file: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): Promise<number[]> {
+  const proc = Bun.spawn(
+    ["ffmpeg", "-v", "error", "-i", file, "-vf", `crop=${w}:${h}:${x}:${y},format=gray`,
+      "-f", "rawvideo", "-"],
+    { stdout: "pipe", stderr: "ignore", stdin: "ignore" },
+  );
+  const bytes = new Uint8Array(await new Response(proc.stdout).arrayBuffer());
+  if ((await proc.exited) !== 0 || bytes.length === 0) throw new Error(`could not crop ${file}`);
+  return [...bytes];
+}
 
 /** The pixel size of an image, from ffprobe. */
 async function probeSize(file: string): Promise<{ width: number; height: number }> {

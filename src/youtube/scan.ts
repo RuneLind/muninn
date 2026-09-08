@@ -37,6 +37,7 @@
 
 import { formatHms, framesTimeoutFor } from "../summaries/frames.ts";
 import { summarizeTimeoutFor } from "../video/media.ts";
+import { GLYPH_HEIGHT, textBitmapWidth } from "./label.ts";
 
 /**
  * Seconds between scan samples.
@@ -152,6 +153,63 @@ export const CONTACT_SHEET = { cols: 4, rows: 3, cellWidth: 320 } as const;
 
 /** Cells per sheet — the one place the product of the geometry is spelled. */
 export const CONTACT_SHEET_CELLS = CONTACT_SHEET.cols * CONTACT_SHEET.rows;
+
+/**
+ * The label strip burned under every cell.
+ *
+ * `height` is EVEN because the sheet is encoded as `yuv420p`, whose chroma
+ * planes are half-resolution: an odd stacked height is a size ffmpeg refuses or
+ * silently pads. 30 px carries a 7×5 glyph at ×3 (21 px) with room above and
+ * below; at a 320 px cell that is a legible caption rather than a hairline —
+ * verified by opening a built sheet, see the PR body.
+ *
+ * `padX` is the left inset. Nothing is centred: every label starts at the same
+ * x, so a column of cells reads as a column of labels.
+ */
+export const CONTACT_SHEET_LABEL = { height: 30, scale: 3, padX: 6 } as const;
+
+/**
+ * The text under cell `cellIndex` (1-based within its sheet) — the AUTHORITATIVE
+ * channel for what second that cell shows.
+ *
+ * Both halves are there on purpose. The `#n` is what lets the prose list and the
+ * picture be checked against each other; the `HH:MM:SS` is what the model copies
+ * into `tSeconds`, and it is the whole reason the label exists: fix round 1
+ * measured the model naming the wrong second for four cells of one sheet with
+ * the mapping available only as a row-major prose list.
+ */
+export function cellLabelText(cellIndex: number, tSeconds: number): string {
+  return `#${cellIndex} ${formatHms(tSeconds)}`;
+}
+
+/**
+ * Refuse a label that cannot fit the cell it goes under.
+ *
+ * {@link renderLabelStrip} throws on an overflowing run, which would surface as
+ * `sheets_failed` on a real capture — a fallback to the cadence sampler because
+ * of a constant. Checked at module load against the WIDEST label this geometry
+ * can produce (the last cell of a sheet, at a two-digit hour) so the numbers
+ * cannot ship unchecked.
+ */
+export function assertLabelFits(
+  label: { height: number; scale: number; padX: number } = CONTACT_SHEET_LABEL,
+  cellWidth: number = CONTACT_SHEET.cellWidth,
+): void {
+  const widest = cellLabelText(CONTACT_SHEET_CELLS, 99 * 3600 + 59 * 60 + 59);
+  const width = textBitmapWidth(widest, label.scale) + 2 * label.padX;
+  if (width > cellWidth) {
+    throw new Error(`A contact-sheet label needs ${width}px and the cell is ${cellWidth}px wide`);
+  }
+  const glyphHeight = GLYPH_HEIGHT * label.scale;
+  if (label.height < glyphHeight || label.height % 2 !== 0) {
+    throw new Error(
+      `A contact-sheet label strip must be even and at least ${glyphHeight}px tall, ` +
+        `not ${label.height}`,
+    );
+  }
+}
+
+assertLabelFits();
 
 /**
  * Whole-scan ffmpeg budget, from the video's own duration.
@@ -621,13 +679,16 @@ export const SELECTION_SYSTEM_PROMPT =
 /**
  * The selection pass's user prompt.
  *
- * **The cell labels are in the PROSE, not burned into the image.** ffmpeg's
- * `drawtext` filter needs a font build that this machine's ffmpeg (and the
- * container images) does not have — `ffmpeg -filters | grep drawtext` finds
- * nothing — so a sheet with labels drawn on it is a sheet that fails to build on
- * exactly the hosts that matter. The cells are laid out ROW-MAJOR and each
- * sheet's line names its cells in that order, which is a mapping the model can
- * apply without reading anything off the picture.
+ * **Every cell carries its own label, burned in under the picture** —
+ * `#n HH:MM:SS`, rendered font-free by `src/youtube/label.ts` — and the prompt
+ * says that label is what `tSeconds` comes from. The prose list stays as a
+ * SECOND channel, not as the only one: with the mapping available only as a
+ * row-major list beside the sheet, fix round 1 measured the model naming the
+ * wrong second for four cells of one sheet (170 called the coding-agent usage
+ * chart when it is the experiment-velocity chart; 175 and 180 called charts when
+ * both are plain article text; 130 called a text excerpt when it is the
+ * usage-growth chart), with the sheet image and the list each verified correct.
+ * Counting cells is what failed, so the count is no longer on the critical path.
  */
 export function selectionPrompt(input: {
   title: string;
@@ -640,7 +701,9 @@ export function selectionPrompt(input: {
   const sheetLines = input.sheets
     .map((sheet) => {
       const cells = sheet.cells
-        .map((cell, i) => `${i + 1}. t=${formatHms(cell.tSeconds)} (${cell.tSeconds})`)
+        // The same spelling the cell's own label carries, plus the integer, so
+        // the two channels are compared by reading rather than by translating.
+        .map((cell, i) => `${cellLabelText(i + 1, cell.tSeconds)} (${cell.tSeconds})`)
         .join("  ");
       return `${input.sheetDir}/${sheet.fileName} — ${sheet.cells.length} cell(s): ${cells}`;
     })
@@ -650,9 +713,13 @@ export function selectionPrompt(input: {
     `Below are ${input.sheets.length} contact sheet(s). Read EVERY one with the Read tool FIRST, ` +
     `batching many Read calls into one turn — never one sheet per message.\n\n` +
     `Each sheet is a ${cols}×${rows} grid of frames in TIME order, filled ROW-MAJOR: cell 1 is top-left, ` +
-    `cell ${cols} is top-right, cell ${cols + 1} starts the second row. The line after each file name gives ` +
-    `that sheet's cells in the same order, with each cell's timestamp and the integer second in brackets. ` +
-    `A sheet may end with blank cells; they are padding and have no second.\n\n` +
+    `cell ${cols} is top-right, cell ${cols + 1} starts the second row. **Every cell has its own label ` +
+    `burned in under the picture, reading \`#<cell> HH:MM:SS\`. That label is authoritative: read the ` +
+    `timestamp off the label of the cell you are describing and convert it to a whole number of seconds ` +
+    `for \`tSeconds\`.** Do not count cells to work out which frame you are looking at. The line after each ` +
+    `file name repeats the same mapping in prose, in the same order, as a cross-check — where the two ` +
+    `disagree, the label under the cell wins. A sheet may end with blank cells; they are padding, they ` +
+    `carry no label and they have no second.\n\n` +
     `${sheetLines}\n\n` +
     `Pick at most ${input.limit} frames that would help a reader explain, compare, verify or revisit a ` +
     `substantive point in this video: charts, diagrams, code, tables, and legible article or documentation ` +
@@ -664,7 +731,8 @@ export function selectionPrompt(input: {
     "```json\n" +
     `[{"tSeconds": 130, "category": "chart", "duplicateGroup": "research-growth", "reason": "the growth chart the narrator reads out"}]\n` +
     "```\n" +
-    `\`tSeconds\` is the integer in brackets for that cell and must be one of the seconds listed above. ` +
+    `\`tSeconds\` is the second the cell's OWN label shows, as a whole number — the integer in brackets ` +
+    `beside it above is the same number — and must be one of the seconds listed above. ` +
     `\`category\` is one of: ${SELECTION_CATEGORIES.join(", ")}. \`duplicateGroup\` is optional. ` +
     `\`reason\` is one short clause. Order does not matter.`
   );

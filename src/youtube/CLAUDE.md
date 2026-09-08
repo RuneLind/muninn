@@ -11,8 +11,9 @@ into huginn.
 |---|---|
 | `state.ts` | The job store. Statuses `pending · fetching_transcript · downloading · extracting_frames · selecting_frames · summarizing · ingesting · complete · error` — the middle three are the FRAMES path only |
 | `frames.ts` | Everything the frames path DECIDES, all of it pure and import-free: `decideYouTubeFrames`, the format/cap/floor constants, `youtubeWatchUrl`, `transcriptUrl`, `youtubeDownloadTimeoutFor`, `capTranscriptWindows`, `appendTranscriptSection` |
-| `scan.ts` | The DENSE scan's decision surface, pure: the 5 s grid, the block-signature dedup, the coverage-reserving cap, the contact-sheet layout, the selection prompt + manifest parse, the two-pass budget split, and the `YOUTUBE_FRAME_SCAN` switch |
-| `scan-run.ts` | Its ffmpeg half: one decode pass producing thumbnails + signatures, the tiled sheets, the full-height re-grab |
+| `scan.ts` | The DENSE scan's decision surface, pure: the 5 s grid, the block-signature dedup, the coverage-reserving cap, the contact-sheet layout and its label geometry (`cellLabelText`), the selection prompt + manifest parse, the two-pass budget split, and the `YOUTUBE_FRAME_SCAN` switch |
+| `label.ts` | The FONT-FREE label renderer, import-free: a 5×7 glyph table, integer scaling, and a binary PGM strip. `drawtext` needs a libfreetype build the hosts do not have |
+| `scan-run.ts` | Its ffmpeg half: one decode pass producing thumbnails + signatures, the labelled tiled sheets (`contactSheetArgs`), the full-height re-grab |
 | `summarizer.ts` | The job: probe → transcript → download → frames (dense two-pass, or cadence) → `runCaptureOneShot` → ingest → source-draft |
 | `kinds.ts` | `youtubeCaptureKinds` — the offer set this vertical narrows, called by the options route, the `bad_kind` check and the replay harness |
 | `extension-options-rules.ts` | The popup's rules, pure and import-free — payload validation, restore-and-revalidate, the restore NOTE, the POST body. Emitted into `extensions/youtube/capture-rules.js` by `bun run build:extension` |
@@ -201,14 +202,39 @@ exactly that job: anchors follow the candidates rather than the video, so a busy
 opening that survives as 300 candidates and a half-hour screen-share that
 survives as 30 kept 4 of the 30 — measured.
 
-**The sheets carry no burned-in labels, and that is a build constraint rather
-than a preference:** `drawtext` needs font support this machine's ffmpeg and the
-container images are built without (`ffmpeg -filters | grep drawtext` finds
-nothing), so a labelled sheet is one that fails to build on the hosts that
-matter. `CONTACT_SHEET = {cols: 4, rows: 3, cellWidth: 320}` is the named
-benchmark variable; the cells are ROW-MAJOR and `selectionPrompt` names each
-sheet's cells in that order, with their integer seconds. A short last sheet is
-padded by `tile` and its padding cells are simply not listed.
+**Every cell carries its own label, burned in, and the font is HAND-CODED.**
+`#<cell> HH:MM:SS` sits in a 30 px strip under each picture, and the prompt says
+that label is where `tSeconds` comes from. `drawtext` is not an option — it needs
+libfreetype support this machine's ffmpeg and the container images are built
+without (`ffmpeg -filters | grep drawtext` finds nothing), so a sheet drawn with
+it fails to build on exactly the hosts that matter. `src/youtube/label.ts`
+renders the caption instead: a 5×7 glyph table for `0-9 : #` and space, scaled
+×3, blitted into a raw **PGM** (`P5`) strip at exactly the cell width, which
+ffmpeg reads as an ordinary input. `contactSheetArgs` then `vstack`s each cell
+over its own strip, `concat`s the stacked cells into one stream and `tile`s that
+— one ffmpeg process per sheet, 2N inputs (cells first, then labels, so cell `i`
+pairs with input `n + i`). `setsar=1,format=yuv420p` on both halves is what makes
+them stackable at all, and the strip height is EVEN because `yuv420p` needs it.
+
+The labels exist because the prose list was not enough. Through fix round 1 the
+grid-position → second mapping lived only in `selectionPrompt`'s row-major list,
+and on both `detailed` runs of the reference video the model applied it wrong:
+second 170 called "the coding-agent usage chart" (it is the experiment-velocity
+chart), 175 and 180 called charts (both are plain article text), 130 called a
+text excerpt (it is the usage-growth chart) — with the sheet image and the list
+each verified correct. The list is still there as a second channel, spelled
+exactly like the label (`#9 00:02:10 (130)`) so the two are compared by reading;
+the prompt says the label wins.
+
+A label failure is a SHEET failure and nothing more: `renderLabelStrip` throws on
+a caption that will not fit, which surfaces as `sheets_failed` and a fallback to
+the cadence sampler on the video already downloaded. `assertLabelFits` runs at
+module load so the constants cannot ship over-wide, and `assertGlyphTable` runs
+at `label.ts`'s load so a mistyped glyph row cannot.
+
+`CONTACT_SHEET = {cols: 4, rows: 3, cellWidth: 320}` is the named benchmark
+variable; the cells are ROW-MAJOR. A short last sheet is padded by `tile`, its
+padding cells carry no label and are simply not listed.
 
 **The read arithmetic, once.** The selection pass reads ⌈120 / 12⌉ = **10**
 sheets. The synthesis pass reads the re-grabbed frames, which the manifest caps
@@ -715,7 +741,9 @@ process of its own for the same reason.
 `scan.test.ts` is the dense path's decision surface with no ffmpeg and no video
 — the signatures are built at the SHIPPED geometry (32×18, 8×6 blocks), because
 a test over 4-byte arrays would pass against a comparator that divides by the
-wrong number. `scan-run.test.ts` drives the real ffmpeg over a 30 s fixture it
+wrong number. `label.test.ts` is the glyph renderer over the bytes it produces —
+no ffmpeg either, since a PGM is a header and one byte per pixel.
+`scan-run.test.ts` drives the real ffmpeg over a 30 s fixture it
 generates in-test with `-f lavfi` (a static colour, a cut, a moving pattern) and
 `test.skipIf`s itself with a PRINTED line when ffmpeg is absent — CI has no media
 binaries, and a silent skip reads as a pass. Neither mocks anything, so both sit

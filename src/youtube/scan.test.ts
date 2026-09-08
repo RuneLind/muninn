@@ -14,6 +14,7 @@ import { test, expect, describe } from "bun:test";
 import {
   CONTACT_SHEET,
   CONTACT_SHEET_CELLS,
+  CONTACT_SHEET_LABEL,
   SCAN_BLOCK_COLS,
   SCAN_BLOCK_DELTA,
   SCAN_BLOCK_ROWS,
@@ -26,8 +27,10 @@ import {
   YOUTUBE_FULL_READ_CAP,
   YOUTUBE_SCAN_INTERVAL_SEC,
   assertBlockGrid,
+  assertLabelFits,
   blockChangeFraction,
   capScanCandidates,
+  cellLabelText,
   contactSheetPlans,
   dedupeScanSamples,
   parseSelectionManifest,
@@ -305,6 +308,30 @@ describe("capScanCandidates", () => {
 
 // --- the sheets -------------------------------------------------------------
 
+describe("the cell label", () => {
+  test("`#<cell> HH:MM:SS`, the cell 1-based within its sheet", () => {
+    expect(cellLabelText(1, 0)).toBe("#1 00:00:00");
+    expect(cellLabelText(9, 130)).toBe("#9 00:02:10");
+    expect(cellLabelText(12, 3661)).toBe("#12 01:01:01");
+  });
+
+  test("the widest label this geometry can produce FITS the cell", () => {
+    // A label that overflows throws out of `renderLabelStrip`, which on a real
+    // capture is a `sheets_failed` fallback to the cadence sampler caused by a
+    // constant. The module runs this at load; running it here is what makes it
+    // a test rather than a comment.
+    expect(() => assertLabelFits()).not.toThrow();
+    // Both directions, the `assertBlockGrid` shape: an assertion that only ever
+    // sees values it accepts cannot tell a check from a removed check.
+    expect(() => assertLabelFits(CONTACT_SHEET_LABEL, 120)).toThrow(/the cell is 120px wide/);
+    expect(() => assertLabelFits({ height: 29, scale: 3, padX: 6 })).toThrow(/must be even/);
+    expect(() => assertLabelFits({ height: 12, scale: 3, padX: 6 })).toThrow(/at least 21px tall/);
+    // And the strip is even-height, which is what `yuv420p` requires of the
+    // stacked cell — an odd one is a sheet ffmpeg refuses to encode.
+    expect(CONTACT_SHEET_LABEL.height % 2).toBe(0);
+  });
+});
+
 describe("contactSheetPlans", () => {
   test("the shipped cap is exactly ten sheets", () => {
     const cands = Array.from({ length: YOUTUBE_CANDIDATE_CAP }, (_, i) => candidate(i, 1));
@@ -493,14 +520,34 @@ describe("selectionPrompt", () => {
       limit: 16,
     });
     expect(prompt).toContain("/tmp/select/sheet-01.jpg — 3 cell(s):");
-    expect(prompt).toContain("1. t=00:00:00 (0)");
-    expect(prompt).toContain("3. t=00:02:10 (130)");
+    // The prose list is spelled EXACTLY like the label burned under the cell,
+    // so the model compares two channels by reading rather than by translating.
+    expect(prompt).toContain(`${cellLabelText(1, 0)} (0)`);
+    expect(prompt).toContain(`${cellLabelText(3, 130)} (130)`);
+    expect(prompt).toContain("#1 00:00:00 (0)");
+    expect(prompt).toContain("#3 00:02:10 (130)");
     expect(prompt).toContain("at most 16 frames");
   });
 
+  test("says the burned-in label is authoritative, and prose is the cross-check", () => {
+    // The prose list was the ONLY channel through fix round 1, and the model
+    // could not apply it — four cells of one sheet named wrong on both runs.
+    // What this pins is that the prompt sends the model to the label instead.
+    const prompt = selectionPrompt({
+      title: "A talk",
+      durationSec: 200,
+      sheets,
+      sheetDir: "/tmp/select",
+      limit: 16,
+    });
+    expect(prompt).toContain("label burned in under the picture");
+    expect(prompt).toContain("That label is authoritative");
+    expect(prompt).toContain("Do not count cells");
+    expect(prompt).toContain("the label under the cell wins");
+    expect(prompt).toContain("`tSeconds` is the second the cell's OWN label shows");
+  });
+
   test("says the layout is row-major and that padding cells have no second", () => {
-    // The labels are PROSE because `drawtext` is not available in the ffmpeg
-    // builds this runs on, so this sentence is the whole labelling mechanism.
     const prompt = selectionPrompt({
       title: "A talk",
       durationSec: 200,
@@ -510,7 +557,9 @@ describe("selectionPrompt", () => {
     });
     expect(prompt).toContain("ROW-MAJOR");
     expect(prompt).toContain(`${CONTACT_SHEET.cols}×${CONTACT_SHEET.rows}`);
-    expect(prompt).toContain("padding and have no second");
+    // Padding is where the two channels genuinely differ: `tile` fills a short
+    // sheet with black cells that carry no caption at all.
+    expect(prompt).toContain("they carry no label and they have no second");
   });
 });
 

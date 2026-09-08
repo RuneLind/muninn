@@ -14,15 +14,18 @@
  * thumbnails and the dedup signatures off the SAME decode, so the signature
  * costs nothing beyond a second scaler.
  *
- * **`drawtext` is not available**, so a contact sheet carries no burned-in
- * labels: this machine's ffmpeg and the container images are built without the
- * font support (`ffmpeg -filters | grep drawtext` finds nothing), and a sheet
- * that fails to build on the hosts that matter is worse than one whose cell
- * order the prompt states. `selectionPrompt` names each sheet's cells row-major
- * instead.
+ * **Every cell carries a burned-in label, and it is FONT-FREE.** `drawtext`
+ * needs a libfreetype build that this machine's ffmpeg and the container images
+ * do not have (`ffmpeg -filters | grep drawtext` finds nothing), so the caption
+ * is rendered in TypeScript instead — `src/youtube/label.ts` draws
+ * `#<cell> HH:MM:SS` from a 5×7 glyph table into a raw PGM strip, and ffmpeg
+ * stacks that strip under the cell like any other input. The prose list in
+ * `selectionPrompt` stays as a second channel; it was the ONLY channel until fix
+ * round 2, and the model could not apply it (four cells of one sheet named
+ * wrong, measured on both `detailed` runs).
  */
 
-import { copyFile, mkdir, readdir, rename, rm } from "node:fs/promises";
+import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { getLog } from "../logging.ts";
 import {
@@ -32,12 +35,16 @@ import {
   type CaptureFrame,
   type GrabFrame,
 } from "../summaries/frames.ts";
+import { renderLabelStrip, toPgm } from "./label.ts";
 import {
   CONTACT_SHEET,
+  CONTACT_SHEET_CELLS,
+  CONTACT_SHEET_LABEL,
   SCAN_SIGNATURE_BYTES,
   SCAN_SIGNATURE_HEIGHT,
   SCAN_SIGNATURE_WIDTH,
   YOUTUBE_SCAN_INTERVAL_SEC,
+  cellLabelText,
   contactSheetPlans,
   scanSampleTimes,
   splitScanSignatures,
@@ -198,16 +205,80 @@ export async function runDenseScan(input: {
 }
 
 /**
- * Tile the candidates into contact sheets, in time order.
+ * The argv for ONE labelled contact sheet. Pure and exported so the filtergraph
+ * is asserted rather than an ffmpeg run.
  *
- * ffmpeg's `tile` filter reads an image SEQUENCE, so each sheet's cells are
- * copied into a scratch directory under contiguous names first. Copies rather
- * than symlinks: a link into a directory the job is about to delete is a sheet
- * that builds and then cannot be read, and a 320 px thumbnail is ~15 KB.
+ * The inputs are the cells and THEN the labels — cell `i` is input `i` and its
+ * label is input `n + i` — which is what lets the graph be written as a loop
+ * rather than as an interleaving the caller has to match. Each pair is stacked
+ * (`vstack`, the label under the picture), the stacked cells are concatenated
+ * into one stream of frames, and `tile` lays that stream out over the grid,
+ * padding a short last sheet exactly as it did when the cells were read as an
+ * image sequence.
+ *
+ * `setsar=1` and `format=yuv420p` on both halves are what make the two stackable:
+ * a JPEG arrives as `yuvj420p` with a sample aspect of its own and a PGM as
+ * `gray`, and `vstack` refuses inputs whose format or sample aspect disagree.
+ * The label strip is written at exactly the cell width, so nothing scales it.
+ *
+ * A short or empty sheet is REFUSED rather than built: silently pairing cell 2
+ * with cell 1's caption is the exact lie the labels exist to prevent.
+ */
+export function contactSheetArgs(input: {
+  cellPaths: readonly string[];
+  labelPaths: readonly string[];
+  outPath: string;
+}): string[] {
+  const n = input.cellPaths.length;
+  if (n === 0) throw new Error("A contact sheet with no cells cannot be built");
+  if (n !== input.labelPaths.length) {
+    throw new Error(`A contact sheet has ${n} cell(s) and ${input.labelPaths.length} label(s)`);
+  }
+  if (n > CONTACT_SHEET_CELLS) {
+    throw new Error(`A contact sheet holds ${CONTACT_SHEET_CELLS} cells; got ${n} cell(s)`);
+  }
+  const parts: string[] = [];
+  for (let i = 0; i < n; i++) {
+    parts.push(`[${i}:v]scale=${CONTACT_SHEET.cellWidth}:-2,setsar=1,format=yuv420p[c${i}]`);
+    parts.push(`[${n + i}:v]setsar=1,format=yuv420p[l${i}]`);
+    parts.push(`[c${i}][l${i}]vstack=inputs=2[t${i}]`);
+  }
+  const stacked = Array.from({ length: n }, (_, i) => `[t${i}]`).join("");
+  parts.push(`${stacked}concat=n=${n}:v=1[seq]`);
+  parts.push(`[seq]tile=${CONTACT_SHEET.cols}x${CONTACT_SHEET.rows}[sheet]`);
+  return [
+    "ffmpeg",
+    "-v",
+    "error",
+    "-y",
+    ...input.cellPaths.flatMap((p) => ["-i", p]),
+    ...input.labelPaths.flatMap((p) => ["-i", p]),
+    "-filter_complex",
+    parts.join(";"),
+    "-map",
+    "[sheet]",
+    "-frames:v",
+    "1",
+    "-q:v",
+    "4",
+    input.outPath,
+  ];
+}
+
+/**
+ * Tile the candidates into contact sheets, in time order, each cell captioned
+ * with its own second.
+ *
+ * The captions are rendered here — one PGM per cell, into the scratch directory,
+ * removed behind each sheet — because a caption is what the selection pass reads
+ * `tSeconds` off. A LABEL failure is a sheet failure and nothing more: it throws
+ * out of this pass like any ffmpeg error, and the caller degrades to the cadence
+ * sampler on the video it has already downloaded.
  *
  * A short last sheet is fine — `tile` pads the missing cells — and the prompt
  * lists only the cells that exist, so a padded cell is never a second the model
- * can name.
+ * can name. Padding carries no label either, which is what the prompt tells the
+ * model to expect.
  *
  * **`timeoutMs` is the budget for the WHOLE pass, not for each sheet.** Handed
  * to every sheet in turn it was a bound of `timeoutMs × sheetCount` — ten sheets
@@ -243,30 +314,30 @@ export async function buildContactSheets(input: {
     const cellDir = join(input.scratchDir, `cells-${plan.number}`);
     await rm(cellDir, { recursive: true, force: true });
     await mkdir(cellDir, { recursive: true });
+    const cellPaths: string[] = [];
+    const labelPaths: string[] = [];
     for (let i = 0; i < plan.cells.length; i++) {
-      await copyFile(
-        input.thumbPathFor(plan.cells[i]!.tSeconds),
-        join(cellDir, `${String(i + 1).padStart(3, "0")}.jpg`),
+      const cell = plan.cells[i]!;
+      cellPaths.push(input.thumbPathFor(cell.tSeconds));
+      const labelPath = join(cellDir, `label-${String(i + 1).padStart(3, "0")}.pgm`);
+      await Bun.write(
+        labelPath,
+        toPgm(
+          renderLabelStrip({
+            // 1-based WITHIN THE SHEET, which is what the prompt's own list
+            // counts — a cell's label and its line say the same `#n`.
+            text: cellLabelText(i + 1, cell.tSeconds),
+            width: CONTACT_SHEET.cellWidth,
+            height: CONTACT_SHEET_LABEL.height,
+            scale: CONTACT_SHEET_LABEL.scale,
+            padX: CONTACT_SHEET_LABEL.padX,
+          }),
+        ),
       );
+      labelPaths.push(labelPath);
     }
     await run(
-      [
-        "ffmpeg",
-        "-v",
-        "error",
-        "-y",
-        "-start_number",
-        "1",
-        "-i",
-        join(cellDir, "%03d.jpg"),
-        "-vf",
-        `scale=${CONTACT_SHEET.cellWidth}:-2,tile=${CONTACT_SHEET.cols}x${CONTACT_SHEET.rows}`,
-        "-frames:v",
-        "1",
-        "-q:v",
-        "4",
-        join(input.outDir, plan.fileName),
-      ],
+      contactSheetArgs({ cellPaths, labelPaths, outPath: join(input.outDir, plan.fileName) }),
       remaining,
       `ffmpeg contact sheet ${plan.number}`,
     );
