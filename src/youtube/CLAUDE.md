@@ -226,8 +226,16 @@ renders the caption instead: a 5×7 glyph table for `0-9 : #` and space, scaled
 ffmpeg reads as an ordinary input. `contactSheetArgs` then `vstack`s each cell
 over its own strip, `concat`s the stacked cells into one stream and `tile`s that
 — one ffmpeg process per sheet, 2N inputs (cells first, then labels, so cell `i`
-pairs with input `n + i`). `setsar=1,format=yuv420p` on both halves is what makes
-them stackable at all, and the strip height is EVEN because `yuv420p` needs it.
+pairs with input `n + i`). `setsar=1,format=yuv420p` on both halves pins ONE
+explicit pixel format on both branches; it is not what makes them stackable.
+Measured on ffmpeg 8.0.1, a raw JPEG cell and a gray PGM strip stack with no
+normalisation at all (exit 0, 320×210, auto-negotiated `yuvj444p`) — the
+normalisation is there so the sheet's own format is a decision rather than
+ffmpeg's negotiation over whatever the rendition happened to be. The strip height
+is EVEN by the same kind of choice: strip heights 21/29/30/31 all encode through
+the shipped `contactSheetArgs` (1280×603 / 627 / 630 / 633, `yuvj420p`, exit 0),
+so `assertLabelFits`' `% 2` check keeps the stacked cell height deterministic and
+does not stand in front of a refusal.
 
 The labels exist because the prose list was not enough. Through fix round 1 the
 grid-position → second mapping lived only in `selectionPrompt`'s row-major list,

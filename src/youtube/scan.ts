@@ -157,11 +157,16 @@ export const CONTACT_SHEET_CELLS = CONTACT_SHEET.cols * CONTACT_SHEET.rows;
 /**
  * The label strip burned under every cell.
  *
- * `height` is EVEN because the sheet is encoded as `yuv420p`, whose chroma
- * planes are half-resolution: an odd stacked height is a size ffmpeg refuses or
- * silently pads. 30 px carries a 7×5 glyph at ×3 (21 px) with room above and
- * below; at a 320 px cell that is a legible caption rather than a hairline —
- * verified by opening a built sheet, see the PR body.
+ * `height` is EVEN as a DETERMINISM choice, not because an encoder demands it.
+ * Measured on ffmpeg 8.0.1 through the shipped `contactSheetArgs`: strip heights
+ * 21, 29, 30 and 31 under a 320×180 cell all encode, exit 0 and no warning, at
+ * 1280×603 / 627 / 630 / 633 in mjpeg's own `yuvj420p`. So an odd stacked height
+ * is neither refused nor padded, and the `% 2` check in {@link assertLabelFits}
+ * is not protection against a refusal — there is none. It keeps the stacked cell
+ * height even so the sheet's geometry does not depend on how a given ffmpeg
+ * build rounds a half-resolution chroma plane. 30 px carries a 7×5 glyph at ×3
+ * (21 px) with room above and below; at a 320 px cell that is a legible caption
+ * rather than a hairline — verified by opening a built sheet, see the PR body.
  *
  * `padX` is the left inset. Nothing is centred: every label starts at the same
  * x, so a column of cells reads as a column of labels.

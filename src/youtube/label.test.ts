@@ -107,6 +107,45 @@ describe("the glyph table", () => {
     // would be a throw on a real capture, i.e. a `sheets_failed` fallback.
     for (const ch of "0123456789:# ") expect(GLYPHS[ch]).toBeDefined();
   });
+
+  test("every glyph renders as the exact rows it is drawn from", () => {
+    // The `renderTextBitmap` case above spells out ONE glyph. With only that
+    // one spelled out, a BLANKED `":"` or a garbled `"3"` ships and every test
+    // still passes: the coverage case asks `toBeDefined()`, `assertGlyphTable`
+    // counts rows and columns, and the `"7"` case reads a different key. A
+    // garbled digit is a wrong second under a cell, which is the whole failure
+    // this module exists to remove — so the shipped table is RETYPED here
+    // rather than read back out of `GLYPHS`, which would be a tautology any
+    // garble survives.
+    const expected: Record<string, string[]> = {
+      "0": [".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."],
+      "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
+      "2": [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"],
+      "3": ["#####", "...#.", "..#..", "...#.", "....#", "#...#", ".###."],
+      "4": ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
+      "5": ["#####", "#....", "####.", "....#", "....#", "#...#", ".###."],
+      "6": ["..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."],
+      "7": ["#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."],
+      "8": [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
+      "9": [".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."],
+      ":": [".....", "..#..", "..#..", ".....", "..#..", "..#..", "....."],
+      "#": [".#.#.", ".#.#.", "#####", ".#.#.", ".#.#.", "#####", ".#.#."],
+      " ": [".....", ".....", ".....", ".....", ".....", ".....", "....."],
+    };
+    for (const [ch, rows] of Object.entries(expected)) {
+      expect({ [ch]: rowsOf(renderTextBitmap(ch, 1)) }).toEqual({ [ch]: rows });
+    }
+    // The space is the ONLY glyph that renders blank, over the SHIPPED table
+    // rather than over the literal above: a blanked digit or `:` is not merely
+    // unreadable, it renders as a space, so the label loses a character and the
+    // ones either side of it close no gap.
+    const blank = Object.keys(GLYPHS).filter((ch) =>
+      rowsOf(renderTextBitmap(ch, 1)).every((row) => !row.includes("#")),
+    );
+    expect(blank).toEqual([" "]);
+    // …and the table holds nothing this case did not spell out.
+    expect(Object.keys(GLYPHS).sort()).toEqual(Object.keys(expected).sort());
+  });
 });
 
 describe("renderLabelStrip", () => {

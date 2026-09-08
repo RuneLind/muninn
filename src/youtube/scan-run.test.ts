@@ -198,10 +198,23 @@ describe("contactSheetArgs", () => {
     const argv = args(3);
     const graph = argv[argv.indexOf("-filter_complex") + 1]!;
     // Input i is cell i and input n+i is its label — the pairing the caller's
-    // two arrays imply, spelled once.
-    expect(graph).toContain(`[0:v]scale=${CONTACT_SHEET.cellWidth}:-2`);
-    expect(graph).toContain("[3:v]");
+    // two arrays imply, spelled once. Every INPUT INDEX is pinned, per cell:
+    // asserting `[c0][l0]vstack…` and a bare `[3:v]` says nothing about which
+    // input feeds `[l0]`, and mutating the pairing to `[${n + ((i + 1) % n)}:v]`
+    // builds a real sheet where every cell carries its neighbour's caption.
+    expect(graph).toContain(`[0:v]scale=${CONTACT_SHEET.cellWidth}:-2,setsar=1,format=yuv420p[c0]`);
+    expect(graph).toContain(`[1:v]scale=${CONTACT_SHEET.cellWidth}:-2,setsar=1,format=yuv420p[c1]`);
+    expect(graph).toContain(`[2:v]scale=${CONTACT_SHEET.cellWidth}:-2,setsar=1,format=yuv420p[c2]`);
+    expect(graph).toContain("[3:v]setsar=1,format=yuv420p[l0]");
+    expect(graph).toContain("[4:v]setsar=1,format=yuv420p[l1]");
+    expect(graph).toContain("[5:v]setsar=1,format=yuv420p[l2]");
+    // …and no OTHER input feeds a label. A positive-only assertion passes a
+    // graph that also declares `[l0]` twice, or one that shifts the whole set.
+    expect(graph).not.toContain("[4:v]setsar=1,format=yuv420p[l0]");
+    expect(graph).not.toContain("[5:v]setsar=1,format=yuv420p[l1]");
+    expect(graph).not.toContain("[3:v]setsar=1,format=yuv420p[l2]");
     expect(graph).toContain("[c0][l0]vstack=inputs=2[t0]");
+    expect(graph).toContain("[c1][l1]vstack=inputs=2[t1]");
     expect(graph).toContain("[c2][l2]vstack=inputs=2[t2]");
     // …then one stream of labelled cells, tiled into the sheet.
     expect(graph).toContain("[t0][t1][t2]concat=n=3:v=1[seq]");

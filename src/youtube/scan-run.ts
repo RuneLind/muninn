@@ -236,10 +236,15 @@ export async function runDenseScan(input: {
  * padding a short last sheet exactly as it did when the cells were read as an
  * image sequence.
  *
- * `setsar=1` and `format=yuv420p` on both halves are what make the two stackable:
+ * `setsar=1` and `format=yuv420p` on both halves are what give the stack ONE
+ * explicit pixel format on both branches. They are not what makes it possible:
  * a JPEG arrives as `yuvj420p` with a sample aspect of its own and a PGM as
- * `gray`, and `vstack` refuses inputs whose format or sample aspect disagree.
- * The label strip is written at exactly the cell width, so nothing scales it.
+ * `gray`, and measured on ffmpeg 8.0.1 that pair stacks with no normalisation at
+ * all — exit 0, a 320×210 output, auto-negotiated to `yuvj444p`. That
+ * negotiation is the reason to be explicit: what the stack comes out as would
+ * otherwise be ffmpeg's choice from the two inputs' formats, so a differently
+ * encoded rendition could change the sheet's own pixel format. The label strip
+ * is written at exactly the cell width, so nothing scales it.
  *
  * A short or empty sheet is REFUSED rather than built: silently pairing cell 2
  * with cell 1's caption is the exact lie the labels exist to prevent.

@@ -46,6 +46,7 @@ import {
   twoPassBudgetFor,
   type ScanCandidate,
 } from "./scan.ts";
+import { textBitmapWidth } from "./label.ts";
 import { framesTimeoutFor } from "../summaries/frames.ts";
 import { summarizeTimeoutFor } from "../video/media.ts";
 
@@ -327,9 +328,27 @@ describe("the cell label", () => {
     expect(() => assertLabelFits(CONTACT_SHEET_LABEL, 120)).toThrow(/the cell is 120px wide/);
     expect(() => assertLabelFits({ height: 29, scale: 3, padX: 6 })).toThrow(/must be even/);
     expect(() => assertLabelFits({ height: 12, scale: 3, padX: 6 })).toThrow(/at least 21px tall/);
-    // And the strip is even-height, which is what `yuv420p` requires of the
-    // stacked cell — an odd one is a sheet ffmpeg refuses to encode.
+    // And the strip is even-height. NOT because an encoder refuses an odd one —
+    // measured on ffmpeg 8.0.1 through the shipped `contactSheetArgs`, strip
+    // heights 21/29/30/31 all encode — but so the stacked cell height is one
+    // deterministic number rather than one a build may round.
     expect(CONTACT_SHEET_LABEL.height % 2).toBe(0);
+  });
+
+  test("it is the WIDEST label that is checked, not the first one", () => {
+    // The widest label this geometry can produce is the last cell of a sheet at
+    // a two-digit hour, and the check is vacuous the moment it measures a
+    // narrower one: `#1 00:00:00` is 207px at the shipped scale and inset,
+    // `#12 99:59:59` is 225px, so a 216px cell is exactly the band where only
+    // the real argument overflows. Measured, not derived from the formula the
+    // function itself uses.
+    const { scale, padX } = CONTACT_SHEET_LABEL;
+    expect(textBitmapWidth(cellLabelText(1, 0), scale) + 2 * padX).toBe(207);
+    expect(textBitmapWidth(cellLabelText(CONTACT_SHEET_CELLS, 99 * 3600 + 59 * 60 + 59), scale) + 2 * padX).toBe(225);
+    expect(() => assertLabelFits(CONTACT_SHEET_LABEL, 216)).toThrow(/needs 225px and the cell is 216px wide/);
+    // …and a cell exactly as wide as that label fits it, so the throw above is
+    // the width check answering about THIS label and not a blanket refusal.
+    expect(() => assertLabelFits(CONTACT_SHEET_LABEL, 225)).not.toThrow();
   });
 });
 
