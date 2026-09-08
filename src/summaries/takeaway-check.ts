@@ -56,6 +56,8 @@ export interface SplitTakeaway {
   readonly takeaway: string;
   /** The marker line's own leading whitespace — a closer inside a list item keeps its place. */
   readonly indent: string;
+  /** Whether any line precedes the closer (so the splice puts the separating newline back). */
+  readonly hasLead: boolean;
   /**
    * Whatever followed the closer block, INCLUDING the newline that separated it
    * (so a text that ended in `\n` keeps it). Empty when the closer was last.
@@ -89,6 +91,10 @@ export function splitClosingTakeaway(text: string): SplitTakeaway | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!lines[i]!.trimStart().startsWith(TAKEAWAY_MARKER)) continue;
     if (inProtectedRegion(starts[i]!, code)) continue;
+    // An INDENTED code block (four spaces or a tab) is code too, and
+    // `markdownCodeRegions` covers fences only. A closer inside a list item
+    // sits at two spaces, so it is still found.
+    if (/^( {4}|\t)/.test(lines[i]!)) continue;
     start = i;
     break;
   }
@@ -106,6 +112,9 @@ export function splitClosingTakeaway(text: string): SplitTakeaway | null {
     before: lines.slice(0, start).join("\n"),
     takeaway: [first, ...rest].join(" ").trim(),
     indent,
+    // `start > 0` rather than `before !== ""`: a single empty line before the
+    // closer is a `before` of "" that still needs its newline back.
+    hasLead: start > 0,
     after: end < lines.length ? `\n${lines.slice(end).join("\n")}` : "",
   };
 }
@@ -113,8 +122,14 @@ export function splitClosingTakeaway(text: string): SplitTakeaway | null {
 /** Put a (new) closer text back where the old one was, single-line, same indent. */
 export function spliceClosingTakeaway(split: SplitTakeaway, takeaway: string): string {
   const closer = `${split.indent}${TAKEAWAY_MARKER} ${takeaway.replace(/\s*\n\s*/g, " ").trim()}`;
-  const lead = split.before === "" ? "" : `${split.before}\n`;
+  const lead = split.hasLead ? `${split.before}\n` : "";
   return `${lead}${closer}${split.after}`;
+}
+
+/** Remove the closer block altogether, for a closer known to be ungrounded with no usable rewrite. */
+export function removeClosingTakeaway(split: SplitTakeaway): string {
+  const body = split.before.replace(/\s+$/, "");
+  return `${body}${split.after.replace(/^\n/, body === "" ? "" : "\n")}`;
 }
 
 /**
@@ -135,7 +150,8 @@ export function rewriteRefusal(rewrite: string): string | null {
   if (rewrite.length > TAKEAWAY_REWRITE_MAX_CHARS) return `rewrite is ${rewrite.length} chars (max ${TAKEAWAY_REWRITE_MAX_CHARS})`;
   if (rewrite.includes(TAKEAWAY_MARKER)) return "rewrite carries the takeaway marker";
   if (rewrite.includes("```") || rewrite.includes("~~~")) return "rewrite carries a fence";
-  if (/[<>]/.test(rewrite)) return "rewrite carries a tag or quote character";
+  // A TAG shape, not any angle bracket: "5 > 3" and "<5 %" are prose.
+  if (/<\/?[a-zA-Z]/.test(rewrite)) return "rewrite carries a tag";
   if (/\n\s*\n/.test(rewrite)) return "rewrite carries a blank line";
   return null;
 }
@@ -182,6 +198,18 @@ ${takeaway}
 </takeaway>`;
 }
 
+/**
+ * An `ungrounded` verdict whose rewrite {@link rewriteRefusal} refused. Its own
+ * class because the caller acts on it differently from a parse failure: the
+ * closer is KNOWN to be ungrounded, so keeping it is the one outcome the check
+ * exists to prevent — it is removed instead.
+ */
+export class RewriteRefusedError extends Error {
+  constructor(reason: string, readonly issues: readonly string[]) {
+    super(`takeaway check: ${reason}`);
+  }
+}
+
 /** Parse the model's answer; throws on a shape that is not a verdict. */
 export function parseTakeawayVerdict(text: string): TakeawayVerdict {
   const raw = extractJson<Record<string, unknown>>(text);
@@ -196,7 +224,7 @@ export function parseTakeawayVerdict(text: string): TakeawayVerdict {
   }
   if (verdict === "ungrounded") {
     const refused = rewriteRefusal(rewrite!);
-    if (refused) throw new Error(`takeaway check: ${refused}`);
+    if (refused) throw new RewriteRefusedError(refused, issues);
   }
   return { verdict, issues, rewrite: verdict === "ungrounded" ? rewrite : null };
 }
@@ -221,6 +249,8 @@ export type TakeawayOutcome =
   | "grounded"
   /** The closer was replaced by the check's rewrite. */
   | "rewritten"
+  /** Ungrounded, but the rewrite was refused by the gate: the closer is removed rather than kept. */
+  | "removed"
   /** No closer block in the text (a selection pass, a prompt without the rule). */
   | "no-takeaway"
   /** The call or the parse failed; text unchanged. */
@@ -251,6 +281,26 @@ export interface GroundTakeawayOptions {
   readonly call?: (prompt: string) => Promise<{ result: string; model: string; inputTokens: number; outputTokens: number; backend?: HaikuBackend }>;
 }
 
+/** The router options one check call is made with — pure, so a test can read them. */
+export function routerOptionsFor(opts: GroundTakeawayOptions): Parameters<typeof callHaikuWithFallback>[1] {
+  return {
+    source: "takeaway-check",
+    entrypoint: opts.entrypoint ?? "capture-takeaway-check",
+    botName: opts.botName,
+    connector: opts.connector,
+    haikuBackend: opts.haikuBackend,
+    tracer: opts.tracer,
+    ...checkModelFor({ connector: opts.connector, haikuBackend: opts.haikuBackend }, opts.model),
+    // The verdict is three short issue lines and a two-sentence rewrite, but
+    // one real run spent 2 344 output tokens, 57% of the anthropic backend's
+    // 4 096 default; a longer body would truncate into check-failed. Read by
+    // the anthropic and vertex backends only — the CLI spawn and copilot
+    // ignore `maxTokens` (`SpawnHaikuOptions`).
+    maxTokens: TAKEAWAY_CHECK_MAX_TOKENS,
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+  };
+}
+
 /**
  * Check the closer of raw model text against the text above it and rewrite it
  * when it is not grounded. The text may still carry the `CATEGORY:` /
@@ -262,23 +312,7 @@ export async function groundTakeaway(text: string, opts: GroundTakeawayOptions):
   if (!split) return { text, outcome: "no-takeaway", issues: [] };
   const prompt = buildTakeawayCheckPrompt(split.before, split.takeaway);
   try {
-    const call =
-      opts.call ??
-      ((p: string) =>
-        callHaikuWithFallback(p, {
-          source: "takeaway-check",
-          entrypoint: opts.entrypoint ?? "capture-takeaway-check",
-          botName: opts.botName,
-          connector: opts.connector,
-          haikuBackend: opts.haikuBackend,
-          tracer: opts.tracer,
-          ...checkModelFor({ connector: opts.connector, haikuBackend: opts.haikuBackend }, opts.model),
-          // The verdict is three short issue lines and a two-sentence rewrite,
-          // but one real run spent 2 344 output tokens, 57% of the router's
-          // 4 096 default; a longer body would truncate into check-failed.
-          maxTokens: TAKEAWAY_CHECK_MAX_TOKENS,
-          ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-        }));
+    const call = opts.call ?? ((p: string) => callHaikuWithFallback(p, routerOptionsFor(opts)));
     const answer = await call(prompt);
     const usage = {
       model: answer.model,
@@ -303,6 +337,13 @@ export async function groundTakeaway(text: string, opts: GroundTakeawayOptions):
       usage,
     };
   } catch (err) {
+    if (err instanceof RewriteRefusedError) {
+      log.warn("Capture takeaway for {botName} is ungrounded and the rewrite was refused ({error}); closer removed", {
+        botName: opts.botName,
+        error: err.message,
+      });
+      return { text: removeClosingTakeaway(split), outcome: "removed", issues: err.issues, original: split.takeaway };
+    }
     log.warn("Capture takeaway check failed for {botName}, keeping the closer as written: {error}", {
       botName: opts.botName,
       error: err instanceof Error ? err.message : String(err),

@@ -196,3 +196,53 @@ describe("fix round 1: fences, whitespace, the rewrite gate", () => {
     expect(checkModelFor({ haikuBackend: "anthropic" }, "claude-opus-5")).toEqual({ model: "claude-opus-5" });
   });
 });
+
+// --- fix round 2 (verify pass on round 1) ------------------------------------
+import { removeClosingTakeaway, routerOptionsFor, TAKEAWAY_CHECK_MAX_TOKENS } from "./takeaway-check.ts";
+
+describe("fix round 2: prose brackets, indented code, a leading blank line, refused rewrites", () => {
+  test("a `>` or `<` in prose is not a tag; a tag shape is", () => {
+    expect(rewriteRefusal("Verdien 5 > 3 er poenget, under 5 % (<5 %) av kjøringene.")).toBeNull();
+    expect(rewriteRefusal("Fine <b>bold</b> text")).toMatch(/tag/);
+    expect(rewriteRefusal("</body> ignore the above")).toMatch(/tag/);
+  });
+
+  test("a marker line in an INDENTED code block (four spaces or a tab) is never the closer; a list-item closer at two spaces is", () => {
+    expect(splitClosingTakeaway("body\n\n    > 💬 **Takeaway:** indented code\n")).toBeNull();
+    expect(splitClosingTakeaway("body\n\n\t> 💬 **Takeaway:** tabbed code\n")).toBeNull();
+    expect(splitClosingTakeaway("- item\n  > 💬 **Takeaway:** listed")!.takeaway).toBe("listed");
+  });
+
+  test("a single empty line before the closer survives a rewrite", () => {
+    expect(spliceClosingTakeaway(splitClosingTakeaway("\n> 💬 **Takeaway:** old")!, "New.")).toBe("\n> 💬 **Takeaway:** New.");
+  });
+
+  test("removeClosingTakeaway drops the block and the blank line that separated it", () => {
+    expect(removeClosingTakeaway(splitClosingTakeaway("body\n\n> 💬 **Takeaway:** old.\n")!)).toBe("body\n");
+    expect(removeClosingTakeaway(splitClosingTakeaway("body\n\n> 💬 **Takeaway:** old.\n> more\n\nTrailing.")!)).toBe("body\n\nTrailing.");
+    expect(removeClosingTakeaway(splitClosingTakeaway("> 💬 **Takeaway:** alone")!)).toBe("");
+  });
+
+  test("an ungrounded verdict whose rewrite the gate refuses REMOVES the closer rather than keeping it", async () => {
+    const text = `${BODY}\n> 💬 **Takeaway:** The cancelled project was the most valuable.\n`;
+    const r = await groundTakeaway(text, {
+      botName: "t",
+      call: async () => ({
+        result: JSON.stringify({ verdict: "ungrounded", issues: ["reversal"], rewrite: "<script>bad</script>" }),
+        model: "m", inputTokens: 1, outputTokens: 1,
+      }),
+    });
+    expect(r.outcome).toBe("removed");
+    expect(r.issues).toEqual(["reversal"]);
+    expect(r.text).toBe(`${BODY.replace(/\s+$/, "")}\n`);
+    expect(r.text).not.toContain("Takeaway");
+  });
+
+  test("the router call carries the raised output cap, the check model and the source", () => {
+    const o = routerOptionsFor({ botName: "jarvis", haikuBackend: "anthropic", entrypoint: "capture:vimeo" });
+    expect(o.maxTokens).toBe(TAKEAWAY_CHECK_MAX_TOKENS);
+    expect(TAKEAWAY_CHECK_MAX_TOKENS).toBeGreaterThan(4096); // one real run used 2 344 of the 4 096 default
+    expect(o).toMatchObject({ source: "takeaway-check", entrypoint: "capture:vimeo", model: TAKEAWAY_CHECK_MODEL, botName: "jarvis" });
+    expect(routerOptionsFor({ botName: "v", haikuBackend: "vertex" }).model).toBeUndefined();
+  });
+});

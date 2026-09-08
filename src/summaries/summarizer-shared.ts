@@ -261,8 +261,9 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       });
       // Spend only: the run's model/connector identity is the summary call's.
       if (checked.usage) attachRun(jobId, { inputTokens: checked.usage.inputTokens, outputTokens: checked.usage.outputTokens });
-      if (checked.outcome === "rewritten") {
-        captureLog.info("Capture {source} job {jobId}: closing takeaway rewritten ({count} unsupported clause(s))", {
+      if (checked.outcome === "rewritten" || checked.outcome === "removed") {
+        captureLog.info("Capture {source} job {jobId}: closing takeaway {outcome} ({count} unsupported clause(s))", {
+          outcome: checked.outcome,
           source,
           jobId,
           count: checked.issues.length,
