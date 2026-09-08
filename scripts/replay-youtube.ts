@@ -96,6 +96,7 @@ import {
   type VisualDetail,
 } from "../src/summaries/visual-detail.ts";
 import { splitTranscript } from "../src/summaries/export.ts";
+import { inProtectedRegion, markdownCodeRegions } from "../src/format/markdown-ast.ts";
 import { summarizeVideo } from "../src/youtube/summarizer.ts";
 import { createJob, getJob } from "../src/youtube/state.ts";
 import type { DownloadResult, YtDlpInfo } from "../src/video/media.ts";
@@ -169,13 +170,25 @@ function die(message: string): never {
 function appendixOrder(ingested: string | null): boolean | null {
   if (ingested === null) return null;
   const { body, transcript } = splitTranscript(ingested);
-  const inBody = body.split("\n").some((line) => VISUAL_REFERENCE_HEADING_RE.test(line));
-  if (inBody) return true;
+  if (hasAppendixHeading(body)) return true;
   if (transcript === null) return null;
   // No appendix before the transcript: either there is none at all, or the
   // model put it after — which is the placement rule failing, not a run with no
   // appendix.
-  return transcript.split("\n").some((line) => VISUAL_REFERENCE_HEADING_RE.test(line)) ? false : null;
+  return hasAppendixHeading(transcript) ? false : null;
+}
+
+/** A real appendix heading in this text — never one quoted inside a fence. */
+function hasAppendixHeading(markdown: string): boolean {
+  const code = markdownCodeRegions(markdown);
+  let offset = 0;
+  for (const line of markdown.split("\n")) {
+    const at = offset;
+    offset += line.length + 1;
+    if (inProtectedRegion(at, code)) continue;
+    if (VISUAL_REFERENCE_HEADING_RE.test(line)) return true;
+  }
+  return false;
 }
 
 // --- the video's duration ---------------------------------------------------
