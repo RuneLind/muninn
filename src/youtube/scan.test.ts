@@ -25,6 +25,7 @@ import {
   YOUTUBE_CANDIDATE_CAP,
   YOUTUBE_FULL_READ_CAP,
   YOUTUBE_SCAN_INTERVAL_SEC,
+  assertBlockGrid,
   blockChangeFraction,
   capScanCandidates,
   contactSheetPlans,
@@ -99,9 +100,18 @@ describe("scanTimeoutFor", () => {
     expect(scanTimeoutFor(10_800)).toBe(360_000);
   });
 
-  test("an order of magnitude over the measured ~0.18 s per source minute", () => {
-    const measuredMs = (1767 / 60) * 180;
-    expect(scanTimeoutFor(1767)).toBeGreaterThan(measuredMs * 10);
+  test("about nine times the measured rate, at a duration the floor does NOT bind", () => {
+    // At 1767 s the 60 s floor is what answers, so the same assertion there
+    // passed against any multiplier at all — including one ten times too small.
+    // 6.7 s of wall for 1767 s of 720p H.264 is 227 ms per source minute.
+    const measuredMsPerMinute = 6_700 / (1767 / 60);
+    const threeHours = 10_800;
+    const measuredMs = (threeHours / 60) * measuredMsPerMinute;
+    expect(scanTimeoutFor(threeHours)).toBeGreaterThan(60_000);
+    // Two-sided: a budget that is generous is the point, one that is unbounded
+    // is not a budget.
+    expect(scanTimeoutFor(threeHours)).toBeGreaterThan(measuredMs * 8);
+    expect(scanTimeoutFor(threeHours)).toBeLessThan(measuredMs * 10);
   });
 });
 
@@ -147,6 +157,20 @@ describe("blockChangeFraction", () => {
 
   test("mismatched geometry throws rather than comparing nothing", () => {
     expect(() => blockChangeFraction(flat(0), new Uint8Array(10))).toThrow(/signature is/);
+  });
+
+  test("a block grid that does not DIVIDE the plane is refused at module load", () => {
+    // A fractional block is not a smaller block: the inner loop indexes the
+    // plane at a non-integer offset, every read is `undefined`, every difference
+    // is NaN and every pair therefore scores 0 — the dedup silently off, with
+    // the shipped constants still looking plausible. The assertion runs at
+    // import, so the only way to reach it is with the numbers themselves.
+    expect(() => assertBlockGrid(32, 18, 8, 6)).not.toThrow();
+    expect(() => assertBlockGrid(32, 18, 8, 5)).toThrow(/divide/);
+    expect(() => assertBlockGrid(32, 18, 7, 6)).toThrow(/divide/);
+    // And the shipped geometry really is the one that divides.
+    expect(SCAN_SIGNATURE_WIDTH % SCAN_BLOCK_COLS).toBe(0);
+    expect(SCAN_SIGNATURE_HEIGHT % SCAN_BLOCK_ROWS).toBe(0);
   });
 });
 

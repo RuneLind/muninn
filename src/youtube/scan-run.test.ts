@@ -24,9 +24,16 @@ import { join } from "node:path";
 import { CONTACT_SHEET, SCAN_SIGNATURE_BYTES, dedupeScanSamples, type ScanCandidate } from "./scan.ts";
 import { buildContactSheets, denseScanArgs, regrabFrames, runDenseScan } from "./scan-run.ts";
 
-const ffmpeg = Bun.which("ffmpeg");
-if (ffmpeg === null) {
-  console.log("scan-run.test.ts: SKIPPED — no `ffmpeg` on PATH (the dense scan cannot be driven here).");
+// BOTH binaries: `probeSize` below shells out to ffprobe, so a host with ffmpeg
+// and no ffprobe would run the ffmpeg-gated cases and fail inside one of them.
+// The skip line is PRINTED — a silent skip reads as a pass, and CI has no media
+// binaries, so this is the only signal that these cases did not run there.
+const media = Bun.which("ffmpeg") !== null && Bun.which("ffprobe") !== null;
+if (!media) {
+  console.log(
+    "scan-run.test.ts: SKIPPED — `ffmpeg` and `ffprobe` are not both on PATH " +
+      "(the dense scan cannot be driven here).",
+  );
 }
 
 const roots: string[] = [];
@@ -272,7 +279,7 @@ describe("buildContactSheets bounds the whole pass", () => {
   });
 });
 
-describe.skipIf(ffmpeg === null)("the scan against real ffmpeg", () => {
+describe.skipIf(!media)("the scan against real ffmpeg", () => {
   test("one thumbnail and one signature per 5 s sample, named by second", async () => {
     const root = tmpRoot();
     const file = await makeFixture(root);

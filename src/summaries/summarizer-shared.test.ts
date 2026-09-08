@@ -469,11 +469,14 @@ describe("runCaptureOneShot", () => {
 
   test("the capture trace root has ONE name, and the two-pass caller builds it with the same one", () => {
     expect(captureTraceName("youtube")).toBe("capture:youtube");
-    // A Tracer does not expose the name it was built with, so this helper is
-    // where the string is checkable — and `createCaptureTracer` is the only
-    // other caller of it, which is what stops a two-pass vertical opening a root
-    // under a name `/traces` does not group by.
-    expect(createCaptureTracer("youtube", botConfig).traceId).toMatch(/^[0-9a-f-]{36}$/);
+    // The NAME the tracer was constructed with, not merely that one was built.
+    // `createCaptureTracer` is the only other caller of the helper, so this is
+    // what stops a two-pass vertical opening a root under a name `/traces` does
+    // not group by — and asserting the traceId instead asserted `crypto`.
+    const tracer = createCaptureTracer("youtube", botConfig);
+    expect(tracer.name).toBe("capture:youtube");
+    expect(tracer.name).toBe(captureTraceName("youtube"));
+    expect(tracer.traceId).toMatch(/^[0-9a-f-]{36}$/);
   });
 });
 

@@ -97,6 +97,26 @@ export const SCAN_BLOCK_COLS = 8;
 export const SCAN_BLOCK_ROWS = 6;
 
 /**
+ * Refuse a block grid that does not DIVIDE the signature plane.
+ *
+ * A fractional block is not a smaller block. {@link blockChangeFraction} walks
+ * the plane at `by * blockH + y`, so a non-integer `blockH` indexes it at a
+ * fractional offset: every read is `undefined`, every difference is `NaN`,
+ * `NaN >= SCAN_BLOCK_DELTA` is false, and every pair of samples scores 0 — the
+ * dedup off, silently, with four plausible-looking constants still in place.
+ * Called at module load below, so the numbers cannot ship unchecked.
+ */
+export function assertBlockGrid(width: number, height: number, cols: number, rows: number): void {
+  if (cols <= 0 || rows <= 0 || width % cols !== 0 || height % rows !== 0) {
+    throw new Error(
+      `The scan block grid must divide the signature plane: ${width}x${height} does not split into ${cols}x${rows}`,
+    );
+  }
+}
+
+assertBlockGrid(SCAN_SIGNATURE_WIDTH, SCAN_SIGNATURE_HEIGHT, SCAN_BLOCK_COLS, SCAN_BLOCK_ROWS);
+
+/**
  * How far a block's mean gray value must move to count as changed, 0–255.
  *
  * 12 is above JPEG/scaling noise on a static frame (measured: a static run of

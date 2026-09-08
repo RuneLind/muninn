@@ -44,6 +44,14 @@ interface SpanEntry {
 
 export class Tracer {
   private timing: Timing;
+  /**
+   * The root span's name, as it was constructed.
+   *
+   * Exposed because it is otherwise write-only: it goes into the INSERT and is
+   * never readable again, so a caller that builds a root under the wrong name —
+   * one `/traces` does not group by — is unassertable from outside the database.
+   */
+  readonly name: string;
   readonly traceId: string;
   private rootSpanId: string;
   private spans = new Map<string, SpanEntry>();
@@ -55,6 +63,7 @@ export class Tracer {
 
   constructor(name: string, opts: TracerOpts = {}) {
     this.timing = new Timing();
+    this.name = name;
     this.opts = opts;
     this.enabled = isTracingEnabled();
     this.traceId = opts.traceId ?? crypto.randomUUID();

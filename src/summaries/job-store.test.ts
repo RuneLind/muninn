@@ -521,6 +521,23 @@ describe("createJobStore — attachRun", () => {
     expect(ring[0]!.toolCount).toBe(4);
   });
 
+  test("a FIRST call of zero lands as zero, not as an absent field", () => {
+    // `12 then 0` cannot tell summing from ignoring — both answer 12. A first
+    // call of 0 can: ignored, the field is undefined and the card says nothing;
+    // recorded, it says the connector reported no usage, which is a different
+    // and checkable claim.
+    const s = store();
+    const id = s.createJob({ videoId: "v2", title: "T", url: "u" });
+    s.attachRun(id, { inputTokens: 0, outputTokens: 0, toolCount: 0, costUsd: 0 });
+    s.completeJob(id, "summary", "cat");
+
+    const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+    expect(ring[0]!.inputTokens).toBe(0);
+    expect(ring[0]!.outputTokens).toBe(0);
+    expect(ring[0]!.toolCount).toBe(0);
+    expect(ring[0]!.costUsd).toBe(0);
+  });
+
   test("attachRun after the job settled does not resurrect the run", () => {
     const s = store();
     const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
