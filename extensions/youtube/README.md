@@ -33,13 +33,26 @@ options cannot be read, the popup says
 ### Slides
 
 Off by default. With it on, Muninn also downloads a video-only 720p rendition,
-pulls one frame per cadence tick — roughly one every 20 s on a 10-minute video,
-one every ~40 s from there to 40 minutes, and one every ~180 s at the 3-hour cap
-— hands them to the model and lets the
-summary quote a slide **in place** where it shows something the transcript does
-not say (a diagram, code, a table). It adds a download and a few minutes to the
-capture, and the transcript is stored under `## Transcript` with `[HH:MM:SS]`
-windows so a search hit cites to the minute.
+samples it **every 5 seconds**, throws away the samples where nothing on screen
+changed, shows what is left to the model as contact sheets, and then re-grabs
+only the frames it picked at full height. The summary quotes those **in place**,
+where they help explain, compare, verify or revisit a point. It adds a download
+and a few minutes to the capture, and the transcript is stored under
+`## Transcript` with `[HH:MM:SS]` windows so a search hit cites to the minute.
+
+The dense sampling is why a chart that is on screen for four seconds can be
+shown at all: the previous sampler took one frame every ~40 s and simply missed
+anything shorter than that. Nothing about the request changes — the tick and the
+**Visuals** picker are the same, and a capture whose scan, sheet build, frame
+selection or re-grab fails quietly falls back to the old sampler rather than
+losing its slides.
+
+There is now ONE way a slides capture can fail the whole job rather than
+degrading: the frame-selection call taking so long that what is left of the
+capture's stated budget is less than the summary call needs. Muninn refuses to
+start that summary rather than run past the time it announced, and the job's
+error names the stage. Everything else — no video, an ffmpeg error, a selection
+answer it cannot read — still ends as a transcript-only summary.
 
 It is refused with a sentence rather than silently skipped: a summarizer bot
 whose connector cannot read files answers 503 and the popup says so. Videos

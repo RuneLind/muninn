@@ -6,10 +6,12 @@ import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
+import type { Tracer } from "../tracing/tracer.ts";
 import {
   CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
   CAPTURE_THINKING_MAX_TOKENS,
   buildSummarySystemPrompt,
+  createCaptureTracer,
   ingestSummary,
   runCaptureOneShot,
   windowedTranscriptRider,
@@ -34,9 +36,33 @@ import {
   DEFAULT_VISUAL_DETAIL,
   dropFrameReferences,
   enforceVisualReferences,
+  visualDetailCaps,
   visualDetailPolicy,
   type VisualDetail,
 } from "../summaries/visual-detail.ts";
+import {
+  SELECTION_SYSTEM_PROMPT,
+  capScanCandidates,
+  dedupeScanSamples,
+  parseSelectionManifest,
+  resolveFrameScanMode,
+  scanTimeoutFor,
+  selectionLimitFor,
+  selectionPrompt,
+  selectionTimeoutFor,
+  splitTwoPassBudget,
+  twoPassBudgetFor,
+  YOUTUBE_FRAME_SCAN_ENV,
+  type ContactSheetPlan,
+  type ScanCandidate,
+  type SelectionEntry,
+} from "./scan.ts";
+import {
+  buildContactSheets as realBuildContactSheets,
+  regrabFrames as realRegrabFrames,
+  runDenseScan as realRunDenseScan,
+  type DenseScanResult,
+} from "./scan-run.ts";
 import {
   downloadVideo as realDownloadVideo,
   probeVideoInfo as realProbeVideoInfo,
@@ -108,6 +134,42 @@ export type YouTubeIngestedHook = (videoId: string, documentId: string) => void;
  */
 type FramesOutcome = YouTubeFramesReason | "failed";
 
+/**
+ * WHICH sampler produced this capture's frames, and where a dense attempt gave
+ * up. Stamped on the trace as `frameScan` beside `frames`, and the reason the
+ * two are separate: `frames: on` says the reader asked and the video was usable,
+ * this says what was actually done with it.
+ */
+export type YouTubeScanOutcome =
+  /** No frames at all — the reader did not ask, or the pre-flight said no. */
+  | "off"
+  /** The cadence extractor ran, because the switch says so. */
+  | "cadence"
+  /** The dense scan, the selection pass and the re-grab all ran. */
+  | "dense"
+  /**
+   * Slides were asked for and the frames path threw before any sampler produced
+   * a frame — the download, the work dirs, or the fallback extractor itself.
+   * Kept apart from `off`, which means the reader never asked.
+   */
+  | "prep_failed"
+  /** The scan itself failed (ffmpeg, the timeout) — cadence ran on the same download. */
+  | "scan_failed"
+  /** The scan worked and the TILING did not — cadence ran on the same download. */
+  | "sheets_failed"
+  /** The selection pass threw or answered nothing parseable — cadence ran on the same download. */
+  | "selection_failed"
+  /**
+   * The selection pass answered an EMPTY manifest — it read the sheets and
+   * chose nothing. Not a failure and not a fallback (there is nothing the
+   * cadence sampler would know that this pass did not), but never `dense`
+   * either: a slides capture that ships no slides is a zero-slide outcome and
+   * says so, here and in a warn.
+   */
+  | "selection_empty"
+  /** The re-grab of the selected seconds failed — cadence ran on the same download. */
+  | "regrab_failed";
+
 export interface YouTubeSummarizerDeps {
   /** yt-dlp metadata probe — the duration everything on the frames path is sized from. */
   probeVideoInfo: (url: string, opts: { timeoutMs?: number }) => Promise<YtDlpInfo | null>;
@@ -117,6 +179,23 @@ export interface YouTubeSummarizerDeps {
     file: string;
     durationSec: number;
     outDir: string;
+  }) => Promise<CaptureFrame[]>;
+  /** One decode pass over the whole file — 320 px thumbnails plus a dedup signature each. */
+  scanVideo: (input: { file: string; scanDir: string; timeoutMs: number }) => Promise<DenseScanResult>;
+  /** The tiled JPEGs the selection pass reads. */
+  buildSheets: (input: {
+    candidates: readonly ScanCandidate[];
+    thumbPathFor: (tSeconds: number) => string;
+    outDir: string;
+    scratchDir: string;
+    timeoutMs: number;
+  }) => Promise<ContactSheetPlan[]>;
+  /** The selected seconds, re-grabbed at full frame height out of the still-present video. */
+  regrabFrames: (input: {
+    file: string;
+    seconds: readonly number[];
+    outDir: string;
+    height: number;
   }) => Promise<CaptureFrame[]>;
   /** Where quoted frames are kept (test seam); default `framesRootDir()`. */
   framesRoot?: string;
@@ -139,7 +218,49 @@ const REAL_DEPS: YouTubeSummarizerDeps = {
   downloadVideo: (url, workDir, opts) => realDownloadVideo(url, workDir, opts),
   extractFrames: ({ file, durationSec, outDir }) =>
     extractCadenceFramesFromFile(file, durationSec, outDir, { height: CAPTURE_FRAME_HEIGHT }),
+  scanVideo: (input) => realRunDenseScan(input),
+  buildSheets: (input) => realBuildContactSheets(input),
+  regrabFrames: (input) => realRegrabFrames(input),
 };
+
+/**
+ * Label each re-grabbed frame with what the selection pass said it is.
+ *
+ * `<category>: <reason>`, or the category alone where the pass gave no reason —
+ * a bare colon reads as a truncated sentence. A frame with no matching entry
+ * keeps no note at all rather than an empty one, so the prompt line is exactly
+ * what it was before notes existed.
+ */
+function attachSelectionNotes(
+  frames: readonly CaptureFrame[],
+  selection: readonly SelectionEntry[],
+): CaptureFrame[] {
+  const bySecond = new Map(selection.map((e) => [e.tSeconds, e] as const));
+  return frames.map((frame) => {
+    const entry = bySecond.get(frame.tSeconds);
+    if (entry === undefined) return frame;
+    const note = entry.reason === "" ? entry.category : `${entry.category}: ${entry.reason}`;
+    return { ...frame, note };
+  });
+}
+
+/**
+ * A two-pass capture whose SELECTION pass left too little of the stated budget
+ * for the summary call to finish inside it.
+ *
+ * Its own class because it is the one frames-path failure that must NOT degrade
+ * to a transcript-only capture: nothing here can abort an in-flight connector
+ * call (`executeOneShot` takes a `timeoutMs` and no signal), so a deadline is
+ * arithmetic — and a job that quietly ran a second model call past the budget it
+ * announced is exactly what the gate exists to make visible. Both frames catches
+ * re-throw it.
+ */
+class TwoPassBudgetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TwoPassBudgetError";
+  }
+}
 
 export interface SummarizeVideoOptions {
   /**
@@ -200,6 +321,18 @@ export interface SummarizeVideoOptions {
  * an ffmpeg error — is a WARN plus today's transcript-only capture, never a
  * failed job (the TikTok precedent). The outcome rides the trace as `frames`.
  *
+ * **With `YOUTUBE_FRAME_SCAN=dense` (the default) the frames path is TWO model
+ * calls**: a dense 5 s scan of the whole video, deduped and capped into contact
+ * sheets, a SELECTION pass that answers with a JSON manifest of which frames are
+ * worth looking at, a re-grab of exactly those at full height, and only then the
+ * summary. Both calls hang off ONE trace root and one `/agents` run, which this
+ * function owns rather than the shared seam — see `parentTracer` in
+ * `summarizer-shared.ts`. Every dense-stage failure below the budget gate falls
+ * back to the cadence extractor on the video already on disk, so the fallback
+ * costs no second download; the gate itself fails the job, because a summary
+ * call that cannot finish inside the announced budget is not something to run
+ * quietly.
+ *
  * It takes no `url`: everything that names this video — the yt-dlp target, the
  * ingest body, the system prompt, the source draft — is built from the id the
  * route validated ({@link youtubeWatchUrl}). A caller-supplied url reached four
@@ -215,9 +348,33 @@ export async function summarizeVideo(
   opts: SummarizeVideoOptions,
 ): Promise<void> {
   const resolved: YouTubeSummarizerDeps = { ...REAL_DEPS, ...opts.deps };
-  // Created only on the frames path, removed in the `finally` whatever
-  // happened — AFTER the quoted frames have been copied out.
+  // TWO roots, and the split is what keeps a 90 MB mp4 and 350 scan thumbnails
+  // out of the model's reach.
+  //
+  // `workDir` is what the SUMMARY call is handed as `--add-dir`: the re-grabbed
+  // (or cadence) frames, nothing else. `mediaDir` is the downloaded video, the
+  // scan's intermediates and the contact sheets — one subdirectory of it goes to
+  // the selection pass and the root itself is named in no `extraDirs` — the
+  // video used to live in the dir the turn could read, which is why it had to be
+  // unlinked the instant ffmpeg was done with it. On the dense path it cannot
+  // be: the re-grab happens AFTER a model call, so the file has to survive one.
+  // Putting it somewhere the model cannot see is what makes that safe. Both are
+  // removed in the job's `finally`, whatever happened.
   const workDir = join(tmpdir(), `muninn-youtube-${jobId}`);
+  const mediaDir = join(tmpdir(), `muninn-youtube-media-${jobId}`);
+  /** Where the re-grabbed / cadence frames land — inside `workDir`, so the model reads them. */
+  const framesDir = join(workDir, "frames");
+  /**
+   * The contact sheets, and the ONLY thing the selection pass is given.
+   *
+   * Under `mediaDir`, so that `workDir` — the dir the SUMMARY call is handed as
+   * `--add-dir` — holds the frames and nothing else. A sheet dir inside it would
+   * put ten contact sheets of a scan in front of the second pass, and in front
+   * of a CADENCE fallback that was never told about a scan at all. `mediaDir`
+   * itself is still named in no `extraDirs`; this one subdirectory of it is
+   * handed to the selection pass alone.
+   */
+  const selectDir = join(mediaDir, "select");
   // The ONE url this capture states, built from the id the route validated.
   // Never the caller's `url`: a POST naming video X with a url for video Y
   // would otherwise put Y's address on X's document and make every later
@@ -226,6 +383,39 @@ export async function summarizeVideo(
   const preset = opts.preset;
   const visualDetail = opts.visualDetail ?? DEFAULT_VISUAL_DETAIL;
   let frames: CaptureFrame[] = [];
+
+  /**
+   * The trace root of a TWO-PASS capture, owned here rather than by the shared
+   * seam, and finished exactly once.
+   *
+   * `Tracer.finish` has no idempotence guard, so "exactly once" is enforced by
+   * the closure below nulling the field: every exit path calls `finishParent`
+   * and only the first one writes. It stays null on every single-pass capture —
+   * frames off, cadence, and every dense attempt that fell back — where the seam
+   * owns its own root as it always has.
+   */
+  let parentTracer: Tracer | null = null;
+  const finishParent = (status: "ok" | "error", attrs: Record<string, unknown>): void => {
+    const tracer = parentTracer;
+    if (tracer === null) return;
+    parentTracer = null;
+    tracer.finish(status, attrs);
+  };
+  /** Both passes' spend, summed for the root's own attributes. */
+  const passUsage = { inputTokens: 0, outputTokens: 0, numTurns: 0, toolCount: 0, costUsd: 0 };
+  const addUsage = (r: {
+    inputTokens?: number;
+    outputTokens?: number;
+    numTurns?: number;
+    toolCalls?: unknown[];
+    costUsd?: number;
+  }): void => {
+    passUsage.inputTokens += r.inputTokens ?? 0;
+    passUsage.outputTokens += r.outputTokens ?? 0;
+    passUsage.numTurns += r.numTurns ?? 0;
+    passUsage.toolCount += r.toolCalls?.length ?? 0;
+    passUsage.costUsd += r.costUsd ?? 0;
+  };
 
   try {
     // 0. The frames pre-flight, BEFORE the transcript, because its answer
@@ -316,22 +506,88 @@ export async function summarizeVideo(
       timestamped,
     });
 
-    // 1b. Frames: download the ≤720p video-only rendition, pull one JPEG per
-    //     cadence tick, and unlink the video the moment ffmpeg is done with it
-    //     — it must not sit on disk through a ten-minute model turn.
+    // The model the kind asks for — `deep` swaps in `CAPTURE_DEEP_MODEL`, every
+    // other kind keeps the bot's own. Resolved BEFORE `runCaptureOneShot`, which
+    // is what stamps the requested model onto the `/agents` card and the trace
+    // span, so an in-flight Deep run says "opus" from its first frame. Resolved
+    // before the FRAMES path too, since the selection pass is a model call of
+    // its own and runs on the same resolved config as the summary.
+    const runBot = captureBotConfigFor(botConfig, preset);
+    if (preset.run.model === "opus" && runBot === botConfig) {
+      // Honest about what ran: the kind promised the bigger model and this
+      // connector's namespace cannot name it. Defence only — the route resolves
+      // its kind set with `requireThinkingControl`, which drops `deep` on every
+      // connector that would land here.
+      log.warn(
+        "YouTube capture {jobId}: kind {kind} asks for the opus model, but connector {connector} keeps its own ({model})",
+        {
+          jobId,
+          kind: preset.id,
+          connector: botConfig.connector ?? "claude-cli",
+          model: botConfig.model ?? "default",
+        },
+      );
+    }
+
+    // 1b. Frames: download the ≤720p video-only rendition, then either the
+    //     cadence extractor (one JPEG per `frameBudgetFor` tick, what shipped
+    //     before) or the DENSE path — a 5 s scan, a selection pass, a re-grab.
+    //     The video is unlinked as soon as the last thing that needs it is done.
+    /** The downloaded rendition while it is still needed; null once released. */
+    let videoPath: string | null = null;
+    let scanOutcome: YouTubeScanOutcome = "off";
+    /** What the selection pass asked for, for the completion line and the harness. */
+    let selection: SelectionEntry[] = [];
+    /** Numbers only the dense path has, reported on the completion line. */
+    let scanSamples = 0;
+    let scanCandidates = 0;
+    let scanSheets = 0;
+    /** The summary call's budget. On the dense path it is what is LEFT of the whole one. */
+    let synthesisTimeoutMs: number | null = null;
     if (framesOutcome === "on") {
+      const scan = resolveFrameScanMode();
+      if (scan.unrecognized !== null) {
+        log.warn(
+          "YouTube capture {jobId}: {env}=\"{value}\" is not a scan mode — falling back to the cadence sampler " +
+            "(expected dense or cadence)",
+          { jobId, env: YOUTUBE_FRAME_SCAN_ENV, value: scan.unrecognized },
+        );
+      }
+      /** Set when a dense stage gave up and the cadence extractor took over. */
+      let denseFallback: { stage: YouTubeScanOutcome; error: string } | null = null;
+
+      /**
+       * The cadence extractor over the already-downloaded file, releasing the
+       * video afterwards. Both the plain cadence path and every dense fallback
+       * end here, which is why it is a closure rather than two copies: the
+       * fallback must never cost a second download.
+       */
+      const cadenceFrames = async (file: string): Promise<CaptureFrame[]> =>
+        framesQueue.run(FRAMES_QUEUE_KEY, async () => {
+          updateStatus(jobId, "extracting_frames");
+          try {
+            return await resolved.extractFrames({ file, durationSec, outDir: framesDir });
+          } finally {
+            await unlink(file).catch(() => {});
+            videoPath = null;
+          }
+        });
+
       try {
-        // One download + one ffmpeg pass at a time, process-wide. The model
-        // turn below is deliberately OUTSIDE the section: it spends no local
-        // CPU, runs for minutes, and holding the queue across it would make two
-        // captures strictly serial end to end.
-        frames = await framesQueue.run(FRAMES_QUEUE_KEY, async () => {
+        // Section 1: the download, and — on the dense path — the scan and the
+        // sheets. One yt-dlp and one ffmpeg at a time, process-wide. The MODEL
+        // calls are deliberately OUTSIDE every section: they spend no local CPU,
+        // run for minutes, and holding the queue across one would make two
+        // captures strictly serial end to end. Nothing below ever calls
+        // `framesQueue.run` from inside a held section.
+        const prepared = await framesQueue.run(FRAMES_QUEUE_KEY, async () => {
           updateStatus(jobId, "downloading");
           // The sibling verticals all create the work dir first. yt-dlp would
-          // create it itself, but everything after does not: the extractor
-          // writes into `<workDir>/frames` and the model is handed `workDir`.
+          // create its own, but everything after does not: the frames and the
+          // sheets are written under `workDir`, which is what the model reads.
           await mkdir(workDir, { recursive: true });
-          const dl = await resolved.downloadVideo(videoUrl, workDir, {
+          await mkdir(mediaDir, { recursive: true });
+          const dl = await resolved.downloadVideo(videoUrl, mediaDir, {
             // The cap is enforced a SECOND time here, by yt-dlp's own
             // `--break-match-filters` (exit 101): the probe above sized this
             // capture, and a video that grew between the two calls — a stream
@@ -340,28 +596,282 @@ export async function summarizeVideo(
             timeoutMs: youtubeDownloadTimeoutFor(durationSec),
             format: YOUTUBE_FRAME_FORMAT_SELECTOR,
           });
+          videoPath = dl.videoPath;
+          if (scan.mode !== "dense") return null;
           updateStatus(jobId, "extracting_frames");
+          // Which PREP stage is running, so a failure names the one that failed.
+          // Reported as `scan_failed` with `samples=0`, a tiling error said the
+          // decode produced nothing — a different diagnosis and a different fix.
+          let prepStage: YouTubeScanOutcome = "scan_failed";
           try {
-            return await resolved.extractFrames({
+            const scanned = await resolved.scanVideo({
               file: dl.videoPath,
-              durationSec,
-              outDir: join(workDir, "frames"),
+              scanDir: join(mediaDir, "scan"),
+              timeoutMs: scanTimeoutFor(durationSec),
             });
-          } finally {
-            // Whether the pass succeeded or threw: the model is handed `workDir`
-            // as `--add-dir`, and a 90 MB mp4 sitting in it is bytes the turn can
-            // read and nothing wants it to.
-            await unlink(dl.videoPath).catch(() => {});
+            // Stamped as they become known, so a later stage's failure still
+            // reports what the earlier ones really produced.
+            scanSamples = scanned.samples.length;
+            const candidates = capScanCandidates(
+              dedupeScanSamples(scanned.signatures, scanned.samples.map((s) => s.tSeconds)),
+            );
+            scanCandidates = candidates.length;
+            const thumbs = new Map(scanned.samples.map((s) => [s.tSeconds, s.path] as const));
+            prepStage = "sheets_failed";
+            const sheets = await resolved.buildSheets({
+              candidates,
+              thumbPathFor: (sec) => {
+                const path = thumbs.get(sec);
+                if (path === undefined) throw new Error(`No scan thumbnail for second ${sec}`);
+                return path;
+              },
+              outDir: selectDir,
+              scratchDir: join(mediaDir, "cells"),
+              // ONE budget for every sheet, not one each: `buildContactSheets`
+              // spends what is left of it per sheet.
+              timeoutMs: scanTimeoutFor(durationSec),
+            });
+            scanSheets = sheets.length;
+            return { candidates, sheets };
+          } catch (err) {
+            // The scan is an optimisation over the cadence sampler, not a
+            // prerequisite for it — and the video is already here.
+            denseFallback = {
+              stage: prepStage,
+              error: err instanceof Error ? err.message : String(err),
+            };
+            return null;
           }
         });
-        log.info("YouTube capture {jobId}: {n} cadence frames extracted from a {durationSec}s video", {
-          jobId,
-          n: frames.length,
-          durationSec,
-        });
+
+        if (prepared === null) {
+          // Read through its declared type: the assignment happens inside the
+          // closure above, which TypeScript's control flow cannot see.
+          const prep = denseFallback as { stage: YouTubeScanOutcome; error: string } | null;
+          frames = await cadenceFrames(videoPath!);
+          scanOutcome = prep === null ? "cadence" : prep.stage;
+        } else {
+          // Which dense stage is in progress, so the catch below can name the
+          // one that failed. Derived from a flag rather than from
+          // `frames.length`, which is 0 both before the re-grab and after one
+          // that threw — the two stages this has to tell apart.
+          let stage: YouTubeScanOutcome = "selection_failed";
+          try {
+            // Pass 1: the SELECTION call. One trace root for both passes, opened
+            // here because this is the first moment a second call is certain.
+            parentTracer = createCaptureTracer("youtube", runBot);
+            const limit = selectionLimitFor(visualDetailCaps(visualDetail).maxTotal);
+            const wholeBudgetMs = twoPassBudgetFor(
+              prepared.sheets.length,
+              limit,
+              CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
+            );
+            updateStatus(jobId, "selecting_frames");
+            const startedAt = Date.now();
+            const picked = await runCaptureOneShot({
+              source: "youtube",
+              jobId,
+              title,
+              url: videoUrl,
+              // Not `claude`: `/models`' observed-model query and the traces
+              // fast path both join on that label, and two spans under one root
+              // sharing it would clobber each other in the tracer's own map.
+              pass: "claude:select",
+              parentTracer,
+              prompt: selectionPrompt({
+                title,
+                durationSec,
+                sheets: prepared.sheets,
+                sheetDir: selectDir,
+                limit,
+              }),
+              systemPrompt: SELECTION_SYSTEM_PROMPT,
+              config,
+              botConfig: runBot,
+              attachRun,
+              // No `onProgress`: this pass answers with JSON, and streaming it
+              // into the job's text would put a manifest on the reader's card.
+              // The status is the whole progress signal it has.
+              //
+              // The sheets and NOTHING else. The re-grabbed frames do not exist
+              // yet, and the video sits BESIDE this directory rather than inside
+              // it (`mediaDir/<file>.mp4` against `mediaDir/select/`), so this is
+              // the one call in the job that can reach neither.
+              extraDirs: [selectDir],
+              timeoutMs: selectionTimeoutFor(prepared.sheets.length),
+              // ⚠️ Only the THINKING budget is capped here. The MODEL is the
+              // kind's — `runBot`, so `deep` runs this pass on opus too, which is
+              // what "the same resolved kind config as the synthesis call" means
+              // and is where a third of a Deep capture's cost goes. What the cap
+              // says is that `deep`'s full thinking budget is for the SUMMARY:
+              // this pass ranks pictures against a rubric, which is not the
+              // reasoning the kind sells.
+              extraTraceAttrs: {
+                summaryKind: preset.id,
+                visualDetail,
+                scanSamples: String(scanSamples),
+                candidates: String(prepared.candidates.length),
+                sheets: String(prepared.sheets.length),
+                selectionLimit: String(limit),
+              },
+            });
+            addUsage(picked);
+            const manifest = parseSelectionManifest(
+              picked.result,
+              prepared.candidates.map((c) => c.tSeconds),
+              limit,
+            );
+            if (manifest === null) {
+              throw new Error("the selection pass answered no parseable JSON manifest");
+            }
+            if (manifest.dropped.length > 0 || manifest.droppedOverCap > 0) {
+              log.warn(
+                "YouTube capture {jobId}: the selection pass named {invalid} second(s) this scan never sampled " +
+                  "({seconds}) and {overCap} past the {limit}-frame limit — dropped",
+                {
+                  jobId,
+                  videoId,
+                  invalid: manifest.dropped.length,
+                  seconds: manifest.dropped.join(", "),
+                  overCap: manifest.droppedOverCap,
+                  limit,
+                },
+              );
+            }
+            selection = manifest.entries;
+            log.info(
+              "YouTube capture {jobId}: selection pass chose {n} of {candidates} candidates " +
+                "(model={model}, {inputTokens} in / {outputTokens} out, {toolCount} reads, {elapsedMs}ms)",
+              {
+                jobId,
+                event: "selection_complete",
+                videoId,
+                n: selection.length,
+                candidates: prepared.candidates.length,
+                sheets: prepared.sheets.length,
+                scanSamples,
+                model: picked.model ?? "unknown",
+                inputTokens: picked.inputTokens,
+                outputTokens: picked.outputTokens,
+                costUsd: picked.costUsd ?? 0,
+                numTurns: picked.numTurns ?? 0,
+                toolCount: picked.toolCalls?.length ?? 0,
+                elapsedMs: Date.now() - startedAt,
+                selectedSeconds: selection.map((e) => e.tSeconds).join(","),
+                manifest: JSON.stringify(selection),
+              },
+            );
+
+            if (selection.length === 0) {
+              // Not a failure — the pass read the sheets and answered — but a
+              // slides capture that ships no slides is a zero-slide outcome and
+              // is reported as one, rather than completing as an ordinary dense
+              // capture that happens to quote nothing.
+              log.warn(
+                "YouTube capture {jobId}: the selection pass chose no frames at all out of {candidates} " +
+                  "candidate(s) on {sheets} sheet(s) — the summary has no slides",
+                {
+                  jobId,
+                  videoId,
+                  candidates: prepared.candidates.length,
+                  sheets: prepared.sheets.length,
+                },
+              );
+            }
+
+            // The launch gate. Nothing can abort an in-flight connector call, so
+            // the second pass either starts with enough budget to finish or does
+            // not start: a summary call launched on a spent budget does not stop
+            // early, it runs its own timeout and the job silently overruns the
+            // number it announced.
+            const split = splitTwoPassBudget({
+              wholeMs: wholeBudgetMs,
+              selectionElapsedMs: Date.now() - startedAt,
+              frameCount: selection.length,
+              floorMs: CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
+            });
+            if (!split.launch) {
+              throw new TwoPassBudgetError(
+                `the selection pass left ${split.remainingMs}ms of this capture's ${wholeBudgetMs}ms budget, ` +
+                  `which is under the summary call's own floor — refusing to start it`,
+              );
+            }
+            synthesisTimeoutMs = split.synthesisTimeoutMs;
+
+            // Pass 1b: the re-grab, in its OWN queue section, taken after the
+            // model call returned rather than held across it.
+            stage = "regrab_failed";
+            updateStatus(jobId, "extracting_frames");
+            const regrabbed = await framesQueue.run(FRAMES_QUEUE_KEY, () =>
+              resolved.regrabFrames({
+                file: videoPath!,
+                seconds: selection.map((e) => e.tSeconds),
+                outDir: framesDir,
+                height: CAPTURE_FRAME_HEIGHT,
+              }),
+            );
+            // The selection pass's own answer, carried into the summary prompt:
+            // it has already looked at every one of these and said what it is
+            // and why it chose it, and a bare list of paths threw that away. The
+            // note is attached HERE rather than inside the re-grab, so the
+            // extractor stays a file operation and the manifest stays this
+            // vertical's business.
+            frames = attachSelectionNotes(regrabbed, selection);
+            // Early release, and deliberately NOT in a `finally` around the
+            // re-grab: a re-grab that threw falls back to the cadence extractor,
+            // which needs the same file. It unlinks the video itself, and the
+            // job's own `finally` removes `mediaDir` whole on every path that
+            // reaches neither.
+            await unlink(videoPath!).catch(() => {});
+            videoPath = null;
+            scanOutcome = selection.length === 0 ? "selection_empty" : "dense";
+          } catch (err) {
+            if (err instanceof TwoPassBudgetError) throw err;
+            // The scan produced sheets but the pass over them did not produce
+            // frames. The video is still here, so the cadence sampler is the
+            // fallback — and the root this job opened for two passes is finished
+            // now, because the summary call below opens its own.
+            const error = err instanceof Error ? err.message : String(err);
+            denseFallback = { stage, error };
+            finishParent("error", { source: "youtube", error, ...passUsage });
+            // Back on the CADENCE path's own budget. The split above was sized
+            // for the frames the selection pass picked; the summary call below
+            // reads what the cadence extractor produces instead, and keeping
+            // the two-pass number would hand a different frame list a longer
+            // hang than a single-pass capture of it ever gets.
+            synthesisTimeoutMs = null;
+            // A re-grab that threw may have written some of its frames into the
+            // very dir the cadence extractor is about to fill — and that dir is
+            // what the summary call reads as `--add-dir`. A leftover is a frame
+            // in the prompt's directory that no frame list names.
+            await rm(framesDir, { recursive: true, force: true }).catch(() => {});
+            frames = await cadenceFrames(videoPath!);
+            scanOutcome = stage;
+          }
+        }
+
+        if (denseFallback !== null) {
+          const fallback: { stage: YouTubeScanOutcome; error: string } = denseFallback;
+          log.warn(
+            "YouTube capture {jobId}: the dense scan path gave up at {stage} ({error}) — " +
+              "the cadence sampler produced {n} frame(s) instead",
+            { jobId, videoId, stage: fallback.stage, error: fallback.error, n: frames.length },
+          );
+        } else {
+          log.info(
+            "YouTube capture {jobId}: {n} frame(s) from the {mode} sampler on a {durationSec}s video",
+            { jobId, n: frames.length, mode: scanOutcome, durationSec },
+          );
+        }
       } catch (err) {
+        if (err instanceof TwoPassBudgetError) throw err;
         framesOutcome = "failed";
+        // NOT `off`, which means the reader never asked: they did, and the path
+        // threw before any sampler produced a frame.
+        scanOutcome = "prep_failed";
         frames = [];
+        // Whatever the split decided is void — there are no frames to read.
+        synthesisTimeoutMs = null;
         log.warn("YouTube capture {jobId}: frames failed — transcript only: {error}", {
           jobId,
           videoId,
@@ -381,27 +891,6 @@ export async function summarizeVideo(
 
 Video title: ${title}
 Video URL: ${videoUrl}`;
-
-    // The model the kind asks for — `deep` swaps in `CAPTURE_DEEP_MODEL`, every
-    // other kind keeps the bot's own. Resolved BEFORE `runCaptureOneShot`, which
-    // is what stamps the requested model onto the `/agents` card and the trace
-    // span, so an in-flight Deep run says "opus" from its first frame.
-    const runBot = captureBotConfigFor(botConfig, preset);
-    if (preset.run.model === "opus" && runBot === botConfig) {
-      // Honest about what ran: the kind promised the bigger model and this
-      // connector's namespace cannot name it. Defence only — the route resolves
-      // its kind set with `requireThinkingControl`, which drops `deep` on every
-      // connector that would land here.
-      log.warn(
-        "YouTube capture {jobId}: kind {kind} asks for the opus model, but connector {connector} keeps its own ({model})",
-        {
-          jobId,
-          kind: preset.id,
-          connector: botConfig.connector ?? "claude-cli",
-          model: botConfig.model ?? "default",
-        },
-      );
-    }
 
     // Whether this call INHERITS the bot's own thinking budget instead of the
     // 8k capture cap. Two independent reasons, either of which is enough:
@@ -449,7 +938,17 @@ Video URL: ${videoUrl}`;
               YOUTUBE_FRAME_SOURCE,
               videoId,
               frames,
-              visualDetailPolicy(visualDetail, YOUTUBE_FRAME_SOURCE, videoId),
+              // The `detailed` must-quote rule names "the note above": it is
+              // stated only where a frame actually carries one, which is the
+              // dense scan's selection pass and nothing else — the cadence
+              // sampler, every dense attempt that fell back to it and the kill
+              // switch all hand over a bare list of paths.
+              visualDetailPolicy(
+                visualDetail,
+                YOUTUBE_FRAME_SOURCE,
+                videoId,
+                frames.some((f) => (f.note ?? "") !== ""),
+              ),
             )
           : ""),
       systemPrompt,
@@ -460,8 +959,14 @@ Video URL: ${videoUrl}`;
       // `--add-dir` only when there is something to read: an empty extraDirs
       // would still flip the connector's file-access mode for nothing.
       ...(frames.length > 0 ? { extraDirs: [workDir] } : {}),
-      timeoutMs: summarizeTimeoutFor(frames.length, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS),
+      // On the dense path this is what is LEFT of the whole two-pass budget the
+      // job announced; everywhere else it is the single call's own budget, as
+      // before.
+      timeoutMs: synthesisTimeoutMs ?? summarizeTimeoutFor(frames.length, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS),
       ...(inheritThinking ? { thinkingMaxTokens: null } : {}),
+      // Only on the two-pass path — everywhere else the seam opens and finishes
+      // its own root, exactly as it always has.
+      ...(parentTracer ? { parentTracer } : {}),
       extraTraceAttrs: {
         frames: framesOutcome,
         frameCount: String(frames.length),
@@ -472,8 +977,20 @@ Video URL: ${videoUrl}`;
         summaryKind: preset.id,
         thinking: thinkingLabel,
         visualDetail,
+        // Which sampler produced the frames above, and — where it was the dense
+        // one — what it cost to get there.
+        frameScan: scanOutcome,
+        scanSamples: String(scanSamples),
+        scanCandidates: String(scanCandidates),
+        scanSheets: String(scanSheets),
       },
     });
+    addUsage(result);
+    // The root this job owns, finished on its SUCCESS path — with both passes'
+    // spend summed, so a two-pass trace does not report the summary call's cost
+    // as the whole job's. A no-op on every single-pass capture, where
+    // `parentTracer` was never set and the seam has already finished its own.
+    finishParent("ok", { source: "youtube", model: result.model, ...passUsage });
 
     // 3. Parse response, then hold its frame references to this capture's own
     //    manifest and this policy's caps.
@@ -561,10 +1078,26 @@ Video URL: ${videoUrl}`;
     // `retained` what is on disk to serve. Collapsed into one number, a policy
     // that over-quotes and a model that under-selects are indistinguishable.
     log.info(
-      "Summarized {videoId}: kind={summaryKind}, visual={visualDetail}, category={category}, model={model} (requested {requestedModel}), thinking={thinking}, {tokens} output tokens, frames extracted={frames} selected={selected} referenced={referenced} retained={kept}",
+      "Summarized {videoId}: kind={summaryKind}, visual={visualDetail}, category={category}, model={model} (requested {requestedModel}), thinking={thinking}, {tokens} output tokens, scan={frameScan} samples={scanSamples} candidates={scanCandidates} sheets={scanSheets}, frames extracted={frames} selected={selected} referenced={referenced} retained={kept}",
       {
         videoId,
+        // A MARKER, not a description: this vertical now writes a second line
+        // carrying a `model` (the selection pass's), so a reader looking for
+        // "the record with a model and a summaryKind" would find whichever came
+        // last. `scripts/replay-youtube.ts` matches on this.
+        event: "capture_complete",
         summaryKind: preset.id,
+        frameScan: scanOutcome,
+        scanSamples,
+        scanCandidates,
+        scanSheets,
+        // The whole job's spend, both passes summed, so the harness never has to
+        // add two log lines together.
+        totalInputTokens: passUsage.inputTokens,
+        totalOutputTokens: passUsage.outputTokens,
+        totalCostUsd: passUsage.costUsd,
+        totalToolCount: passUsage.toolCount,
+        synthesisTimeoutMs: synthesisTimeoutMs ?? null,
         visualDetail,
         category,
         model: result.model ?? "unknown",
@@ -581,6 +1114,12 @@ Video URL: ${videoUrl}`;
         // policy is tuned on — a count alone cannot say whether the frame the
         // reader wanted was never chosen or was chosen and trimmed.
         selectedSeconds: enforced.selected.join(","),
+        // What the SELECTION pass asked for, as JSON — a superset of the above
+        // on a dense capture, empty on every other path. It is the only place a
+        // rejected pick is inspectable: `selectedSeconds` is what the summary
+        // quoted, and the difference between the two is what the summary turned
+        // down after reading the frames properly.
+        selectionManifest: JSON.stringify(selection),
       },
     );
 
@@ -673,12 +1212,24 @@ Video URL: ${videoUrl}`;
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // The root a two-pass capture opened, on its FAILURE path — including a
+    // synthesis call that threw after the selection pass succeeded, and the
+    // budget gate's own refusal. A no-op when the seam owns the root.
+    finishParent("error", { source: "youtube", error: msg, ...passUsage });
     log.error("YouTube summarization failed for job {jobId}: {error}", { jobId, error: msg });
     failJob(jobId, msg);
   } finally {
-    // The downloaded video (already unlinked on the success path) and the
-    // frames the summary did not quote. Only ever created by this job, under a
-    // name only this job uses; an rm of a dir that was never made is a no-op.
-    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    // BOTH roots, recursively. `workDir` holds the frames the summary did not
+    // quote and the contact sheets; `mediaDir` holds the downloaded video and
+    // the scan's several hundred thumbnails. The video is unlinked earlier on
+    // every path that gets that far, but not on all of them — a selection pass
+    // that threw before the re-grab, or a scan that failed before the fallback
+    // — so this is what guarantees a 90 MB rendition never outlives the job.
+    // Only ever created by this job, under names only this job uses; an rm of a
+    // dir that was never made is a no-op.
+    await Promise.all([
+      rm(workDir, { recursive: true, force: true }).catch(() => {}),
+      rm(mediaDir, { recursive: true, force: true }).catch(() => {}),
+    ]);
   }
 }

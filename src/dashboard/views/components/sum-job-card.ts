@@ -93,7 +93,7 @@ export function sumJobCardStyles(): string {
     }
     .status-pending { background: color-mix(in srgb, var(--text-dim) 20%, transparent); color: var(--text-dim); }
     .status-fetching_transcript, .status-downloading, .status-transcribing, .status-harvesting_captions { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
-    .status-summarizing, .status-extracting_frames { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-light); }
+    .status-summarizing, .status-extracting_frames, .status-selecting_frames { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-light); }
     .status-ingesting { background: color-mix(in srgb, var(--status-warning) 20%, transparent); color: var(--status-warning); }
     .status-complete { background: color-mix(in srgb, var(--status-success) 20%, transparent); color: var(--status-success); }
     .status-error { background: color-mix(in srgb, var(--status-error) 20%, transparent); color: var(--status-error); }
@@ -280,6 +280,11 @@ export function sumJobCardScript(): string {
       downloading: 'Downloading',
       transcribing: 'Transcribing',
       extracting_frames: 'Extracting frames',
+      // The YouTube dense-scan path's first model call: it reads contact sheets
+      // and answers with which frames are worth a full-height grab. No text
+      // streams during it, so without a status of its own the card sits on
+      // "Extracting frames" through a whole model turn.
+      selecting_frames: 'Selecting frames',
       summarizing: 'Summarizing',
       ingesting: 'Indexing',
       complete: 'Complete',

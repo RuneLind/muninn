@@ -2,6 +2,8 @@ import { test, expect, describe } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
 import {
   buildSummarySystemPrompt,
+  captureTraceName,
+  createCaptureTracer,
   ingestSummary,
   ingestTimeoutFor,
   runCaptureOneShot,
@@ -416,6 +418,65 @@ describe("runCaptureOneShot", () => {
     // The run keeps the trace link even on the error path, so a failed capture is
     // still clickable from /agents into /traces.
     expect(h.attached[0]!.traceId).toBe("trace-1");
+  });
+
+  // ── a caller-owned root: `parentTracer` ────────────────────────────────────
+  //
+  // `Tracer.finish` has no idempotence guard, so a root finished by both the
+  // seam and its caller is written twice and the second write wins whether or
+  // not it is true. With `parentTracer` the seam does everything else and
+  // touches the root not at all.
+
+  test("`parentTracer` suppresses the seam's own finish on the SUCCESS path", async () => {
+    const { tracer, calls } = recordingTracer();
+    const h = harness({ parentTracer: tracer, tracer: undefined });
+    await runCaptureOneShot(h.opts);
+
+    expect(calls.some((c) => c.op === "start" && c.label === "claude")).toBe(true);
+    expect(calls.some((c) => c.op === "end" && c.label === "claude")).toBe(true);
+    expect(calls.filter((c) => c.op.startsWith("finish"))).toEqual([]);
+    // Its own `tracer` seam is untouched, i.e. `parentTracer` really is the root.
+    expect(h.calls).toEqual([]);
+  });
+
+  test("`parentTracer` suppresses it on the FAILURE path too, and still rethrows", async () => {
+    const { tracer, calls } = recordingTracer();
+    const h = harness({
+      parentTracer: tracer,
+      tracer: undefined,
+      oneShot: async () => { throw new Error("connector exploded"); },
+    });
+
+    await expect(runCaptureOneShot(h.opts)).rejects.toThrow("connector exploded");
+    expect(calls.some((c) => c.op === "end" && c.label === "claude")).toBe(true);
+    expect(calls.filter((c) => c.op.startsWith("finish"))).toEqual([]);
+  });
+
+  test("`pass` names the model span, so two calls under one root do not clobber", async () => {
+    const { tracer, calls } = recordingTracer();
+    const h = harness({ parentTracer: tracer, tracer: undefined, pass: "claude:select" });
+    await runCaptureOneShot(h.opts);
+
+    expect(calls.filter((c) => c.op === "start").map((c) => c.label)).toEqual(["claude:select"]);
+    expect(calls.filter((c) => c.op === "end").map((c) => c.label)).toEqual(["claude:select"]);
+  });
+
+  test("without `pass` the span is still `claude` — what the read-side fast paths join on", async () => {
+    const h = harness();
+    await runCaptureOneShot(h.opts);
+    expect(h.calls.filter((c) => c.op === "start").map((c) => c.label)).toEqual(["claude"]);
+  });
+
+  test("the capture trace root has ONE name, and the two-pass caller builds it with the same one", () => {
+    expect(captureTraceName("youtube")).toBe("capture:youtube");
+    // The NAME the tracer was constructed with, not merely that one was built.
+    // `createCaptureTracer` is the only other caller of the helper, so this is
+    // what stops a two-pass vertical opening a root under a name `/traces` does
+    // not group by — and asserting the traceId instead asserted `crypto`.
+    const tracer = createCaptureTracer("youtube", botConfig);
+    expect(tracer.name).toBe("capture:youtube");
+    expect(tracer.name).toBe(captureTraceName("youtube"));
+    expect(tracer.traceId).toMatch(/^[0-9a-f-]{36}$/);
   });
 });
 

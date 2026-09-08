@@ -74,6 +74,15 @@ const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
 // the same way to 9 840s = 2.73h. 12h is that worst case plus ~68% headroom —
 // picking 6h here left the very failure this guard exists to prevent reachable
 // on X video, which a review caught by driving the real store at 7.1h.
+//
+// Re-derived against the dense-scan path as it stands (every term read off the
+// function that bounds it, at YouTube's own 10800s cap). Its LONGEST path is a
+// dense attempt that falls back, because that pays for both samplers: 1800s
+// download + 360s scan + 360s sheets (ONE budget for all ten, not one each) +
+// 600s selection + 150s re-grab + 210s cadence extraction + 1320s cadence
+// summary = 4800s = 1.33h. The path that SUCCEEDS is shorter, at 4110s = 1.14h
+// (840s of synthesis in place of the last two terms). So X video's 7.13h is
+// still what this is sized against and the constant does not move.
 const IN_FLIGHT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -191,14 +200,42 @@ export function createJobStore<S extends string, F>(
       traceId !== undefined || inputTokens !== undefined || outputTokens !== undefined ||
       numTurns !== undefined || toolCount !== undefined || costUsd !== undefined
     ) {
+      const previous = jobRunMeta.get(jobId);
+      // The five SPEND fields ACCUMULATE; `traceId` (and the identity fields
+      // above) are last-write.
+      //
+      // A capture job used to be one model call, so overwriting was the same as
+      // summing. The YouTube dense-scan path makes two — a frame SELECTION pass
+      // and the summary itself, under one trace root and one `/agents` run — and
+      // an overwrite there reports the second call's tokens as the job's whole
+      // cost, which is the number a "what does Deep cost" question is asked of.
+      // `toolCount` sums for the same reason and answers a sharper question: it
+      // is the image READS, which is what the read cap bounds.
+      //
+      // Every single-pass vertical is unchanged by construction: with no previous
+      // value the sum IS the value. What it does require is that a caller reports
+      // each call's usage ONCE — `runCaptureOneShot` does, on its own success
+      // tail, and its start-of-call `attachRun` carries no spend fields at all.
+      const add = (next: number | undefined, before: number | undefined): number | undefined =>
+        next === undefined ? before : (before ?? 0) + next;
       jobRunMeta.set(jobId, {
-        ...jobRunMeta.get(jobId),
+        ...previous,
         ...(traceId !== undefined ? { traceId } : {}),
-        ...(inputTokens !== undefined ? { inputTokens } : {}),
-        ...(outputTokens !== undefined ? { outputTokens } : {}),
-        ...(numTurns !== undefined ? { numTurns } : {}),
-        ...(toolCount !== undefined ? { toolCount } : {}),
-        ...(costUsd !== undefined ? { costUsd } : {}),
+        ...(add(inputTokens, previous?.inputTokens) !== undefined
+          ? { inputTokens: add(inputTokens, previous?.inputTokens) }
+          : {}),
+        ...(add(outputTokens, previous?.outputTokens) !== undefined
+          ? { outputTokens: add(outputTokens, previous?.outputTokens) }
+          : {}),
+        ...(add(numTurns, previous?.numTurns) !== undefined
+          ? { numTurns: add(numTurns, previous?.numTurns) }
+          : {}),
+        ...(add(toolCount, previous?.toolCount) !== undefined
+          ? { toolCount: add(toolCount, previous?.toolCount) }
+          : {}),
+        ...(add(costUsd, previous?.costUsd) !== undefined
+          ? { costUsd: add(costUsd, previous?.costUsd) }
+          : {}),
       });
     }
   }

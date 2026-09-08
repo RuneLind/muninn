@@ -141,11 +141,22 @@ export function visualDetailCaps(detail: VisualDetail): { maxInline: number; max
  *
  * The address shape comes from {@link frameQuoteTemplate}, i.e. from the route's
  * own layout — never spelled a second time here.
+ *
+ * **`framesHaveNotes` is what the `detailed` must-quote rule rides on**, and it
+ * is a REQUIRED argument rather than a defaulted one: the rule names "the note
+ * above", so a prompt whose frame list carries no note at all states a MUST
+ * about a channel it does not have. Only the dense YouTube scan produces notes
+ * (the selection pass's own `<category>: <reason>`); the cadence sampler, every
+ * dense attempt that fell back to it and the `YOUTUBE_FRAME_SCAN=cadence` kill
+ * switch all hand over a bare list of paths. A default here would make the
+ * question answerable by omission, which is how the rule came to ship on those
+ * paths in the first place.
  */
 export function visualDetailPolicy(
   detail: VisualDetail,
   source: FrameSource,
   id: string,
+  framesHaveNotes: boolean,
 ): FramesPromptPolicy {
   const caps = visualDetailCaps(detail);
   const quote = frameQuoteTemplate(source, id);
@@ -168,6 +179,13 @@ export function visualDetailPolicy(
       rules: `${common}\n\nAt most ${caps.maxInline} distinct frames in the whole summary.`,
     };
   }
+  const mustQuoteNoted = framesHaveNotes
+    ? `\n\nWithin those limits, every frame whose note above calls it a chart or a diagram MUST appear ` +
+      `somewhere in the summary — inline where its point is made, otherwise in the ` +
+      `${VISUAL_REFERENCE_HEADING} section — unless it shows the same thing as one you have already ` +
+      `quoted. Those are the frames a reader cannot reconstruct from the words. If more of them are ` +
+      `offered than the limits allow, keep the clearest and leave the rest out silently.`
+    : "";
   return {
     ...caps,
     rules:
@@ -179,7 +197,8 @@ export function visualDetailPolicy(
       `${quote}\nOne sentence on what this frame is for.\n\n` +
       `At most ${caps.maxInline} frames inline and ${caps.maxTotal} distinct frames in the summary as a whole, ` +
       `the appendix included. Never repeat a frame between the body and the appendix, never pad toward the ` +
-      `limit, and never keep two frames of the same slide at slightly different scroll positions.`,
+      `limit, and never keep two frames of the same slide at slightly different scroll positions.` +
+      mustQuoteNoted,
   };
 }
 

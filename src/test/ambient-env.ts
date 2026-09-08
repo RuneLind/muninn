@@ -166,4 +166,11 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   // use it (e2e/summaries-vimeo.spec.ts) set it explicitly in the spawned env,
   // after the `e2eEnv()` spread.
   "MUNINN_BOTS_DIR",
+  // `YOUTUBE_FRAME_SCAN` — WHICH sampler that vertical's slides path runs
+  // (`dense` by default, `cadence` the kill switch). Same class of value as the
+  // rest: a developer who has turned the dense path off while debugging a
+  // capture would have every frames case in `src/youtube/summarizer.test.ts`
+  // exercise the cadence branch on that machine and the dense one on the other,
+  // which is this file's whole failure shape. That suite sets the mode per case.
+  "YOUTUBE_FRAME_SCAN",
 ];

@@ -421,10 +421,16 @@ function mapRow(r: Record<string, any>): SpanRow {
 
   // Backfill from the LATERAL JOIN in one pass — avoids 6 intermediate spreads
   // per row in the trace-list query.
+  //
+  // The ROOT's own value always wins, which is what keeps a two-pass capture's
+  // summed usage from being replaced by the `claude` child's — that child is one
+  // of its two model calls. The three USAGE fields test for absence rather than
+  // falsiness: a run whose connector reported no tokens stamps 0, and `!0` read
+  // that as "nothing here" and showed one inner call's numbers instead.
   const delta: Record<string, unknown> = {};
-  if (r.input_tokens != null && !attrs.inputTokens) delta.inputTokens = Number(r.input_tokens);
-  if (r.output_tokens != null && !attrs.outputTokens) delta.outputTokens = Number(r.output_tokens);
-  if (r.tool_count != null && !attrs.toolCount) delta.toolCount = Number(r.tool_count);
+  if (r.input_tokens != null && attrs.inputTokens === undefined) delta.inputTokens = Number(r.input_tokens);
+  if (r.output_tokens != null && attrs.outputTokens === undefined) delta.outputTokens = Number(r.output_tokens);
+  if (r.tool_count != null && attrs.toolCount === undefined) delta.toolCount = Number(r.tool_count);
   if (r.model != null && !attrs.model) delta.model = String(r.model);
   if (r.requested_model != null && !attrs.requestedModel) delta.requestedModel = String(r.requested_model);
   if (r.connector != null && !attrs.connector) delta.connector = String(r.connector);

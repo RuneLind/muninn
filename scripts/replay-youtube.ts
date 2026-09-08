@@ -41,10 +41,17 @@
  *   bun scripts/replay-youtube.ts \
  *     --video <local.mp4> --transcript <transcript.json> --video-id <11 chars> \
  *     --title "…" --kind standard|deep --frames \
- *     --visual-detail selected|detailed --runs 2 --out <dir>
+ *     --visual-detail selected|detailed --scan dense|cadence --runs 2 --out <dir>
  *
  * `--visual-detail` is the SLIDES policy and is read only where `--frames` is
- * on; it defaults to `selected`, the route's own default.
+ * on; it defaults to `selected`, the route's own default. `--scan` writes
+ * `YOUTUBE_FRAME_SCAN` — the env the summarizer actually reads — so a run can
+ * compare the dense two-pass path against the cadence one it replaced; absent,
+ * whatever that variable already says (unset ⇒ `dense`).
+ *
+ * On the dense path the harness drives the REAL ffmpeg scan, the REAL contact
+ * sheets and a REAL selection model call, and wraps each of those seams to time
+ * and count them.
  *
  * ## The trace half
  *
@@ -63,10 +70,27 @@
  * extracted / selected / referenced / retained — the seconds the stored text
  * quotes, and whether a `## Visual reference` appendix landed before
  * `## Transcript`).
+ *
+ * On a dense run `run.json` also carries the scan step by step — samples,
+ * candidates after the dedup, candidates after the cap, sheet count, the
+ * selection manifest — the two passes' spend SEPARATELY beside the accumulated
+ * total, each stage's wall time (with `ffmpegWallMs` and `selectionWallMs` kept
+ * apart, since a single extraction number mixes ffmpeg with a model turn that
+ * varies by minutes), `regrabParity`, and the peak DISK the two temp roots took
+ * (sampled while the job runs, because both are removed in its `finally`).
+ *
+ * `regrabParity` is the one measurement that is not about cost: for every
+ * candidate it compares the sheet cell labelled t against an `-ss t` seek of the
+ * same file, through the scan's own comparator. `matches` short of
+ * `candidates - skipped` means the sampler and every consumer of its names
+ * disagree about what second a frame shows — which no count, no dedup and no
+ * test inside the pipeline can see, because they all read the same names. A
+ * comparison that could not be made at all is `skipped`, never a difference.
  */
 
 import { mkdir, copyFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { configure, type LogRecord } from "@logtape/logtape";
 import { loadConfig } from "../src/config.ts";
@@ -97,6 +121,23 @@ import {
 } from "../src/summaries/visual-detail.ts";
 import { splitTranscript } from "../src/summaries/export.ts";
 import { inProtectedRegion, markdownCodeRegions } from "../src/format/markdown-ast.ts";
+import {
+  SCAN_CHANGE_THRESHOLD,
+  SCAN_SIGNATURE_BYTES,
+  SCAN_SIGNATURE_HEIGHT,
+  SCAN_SIGNATURE_WIDTH,
+  YOUTUBE_FRAME_SCAN_ENV,
+  blockChangeFraction,
+  capScanCandidates,
+  dedupeScanSamples,
+  resolveFrameScanMode,
+  type ScanCandidate,
+} from "../src/youtube/scan.ts";
+import {
+  buildContactSheets,
+  regrabFrames,
+  runDenseScan,
+} from "../src/youtube/scan-run.ts";
 import { summarizeVideo } from "../src/youtube/summarizer.ts";
 import { createJob, getJob } from "../src/youtube/state.ts";
 import type { DownloadResult, YtDlpInfo } from "../src/video/media.ts";
@@ -113,6 +154,8 @@ interface Args {
   visualDetail: VisualDetail;
   out: string;
   runs: number;
+  /** Which sampler to drive — written into the env the summarizer reads. */
+  scan: "dense" | "cadence";
 }
 
 function parseArgs(argv: string[]): Args {
@@ -135,6 +178,14 @@ function parseArgs(argv: string[]): Args {
   if (!isVisualDetail(visualDetail)) {
     die(`--visual-detail must be one of ${VISUAL_DETAIL_VALUES.join(", ")}`);
   }
+  // Set on the ENV rather than passed down, because that is the only channel the
+  // summarizer reads it on — a harness flag that took another route would be
+  // comparing a mode production cannot select.
+  const scan = flags.get("scan");
+  if (scan !== undefined) {
+    if (scan !== "dense" && scan !== "cadence") die("--scan must be dense or cadence");
+    process.env[YOUTUBE_FRAME_SCAN_ENV] = scan;
+  }
   return {
     video: resolve(need("video")),
     transcript: resolve(need("transcript")),
@@ -145,6 +196,7 @@ function parseArgs(argv: string[]): Args {
     visualDetail,
     out: resolve(flags.get("out") ?? "./replay-out"),
     runs,
+    scan: resolveFrameScanMode().mode,
   };
 }
 
@@ -341,6 +393,93 @@ console.log(
 
 await mkdir(args.out, { recursive: true });
 
+/**
+ * The size of a directory in bytes, or 0 when it is not there.
+ *
+ * `du -sk`, because the roots hold hundreds of small JPEGs and a recursive walk
+ * in-process would itself be slow enough to move the number it reports.
+ */
+/**
+ * The 32×18 gray signature of an image file — the plane the scan's own dedup
+ * compares, computed here for a file the scan did not write.
+ */
+async function signatureOf(file: string): Promise<Uint8Array> {
+  const proc = Bun.spawn(
+    ["ffmpeg", "-v", "error", "-i", file,
+      "-vf", `scale=${SCAN_SIGNATURE_WIDTH}:${SCAN_SIGNATURE_HEIGHT},format=gray`,
+      "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  const bytes = new Uint8Array(await new Response(proc.stdout).arrayBuffer());
+  if ((await proc.exited) !== 0 || bytes.length < SCAN_SIGNATURE_BYTES) {
+    throw new Error(`could not read a signature from ${file}`);
+  }
+  return bytes.subarray(0, SCAN_SIGNATURE_BYTES);
+}
+
+/**
+ * Does the sheet cell labelled `t` show the same picture as an `-ss t` seek?
+ *
+ * The whole dense path rests on one number meaning one thing in five places —
+ * the thumbnail's file name, the cell the selection prompt labels, the second
+ * the manifest answers with, the seek the re-grab performs and the URL the
+ * reader loads — and NOTHING in the product compares them. A sampler that
+ * emitted every frame half an interval late kept every count, every dedup and
+ * every test intact while the model read one picture and the reader was served
+ * another; that is what this measures, per candidate, with the scan's OWN
+ * comparator and threshold.
+ *
+ * `matches + skipped + differs.length === candidates`. A candidate whose
+ * thumbnail is gone or whose re-grab failed is SKIPPED, counted on its own:
+ * folded into neither total it read as a disagreement, which is the alarm this
+ * measurement exists to raise.
+ */
+async function regrabParity(
+  video: string,
+  thumbDir: string,
+  seconds: readonly number[],
+  scratch: string,
+): Promise<{ candidates: number; matches: number; skipped: number; differs: number[] }> {
+  await mkdir(scratch, { recursive: true });
+  const differs: number[] = [];
+  let matches = 0;
+  // A comparison that could not be MADE is neither a match nor a difference. Not
+  // counted, both reasons read as `matches < candidates`, which is the one thing
+  // this number exists to mean.
+  let skipped = 0;
+  for (const sec of seconds) {
+    const thumb = join(thumbDir, `${sec}.jpg`);
+    if (!existsSync(thumb)) {
+      skipped++;
+      continue;
+    }
+    const grabbed = join(scratch, `${sec}.jpg`);
+    // The scan's own thumbnail geometry, so the comparison is content and not
+    // a scaling artefact.
+    const proc = Bun.spawn(
+      ["ffmpeg", "-v", "error", "-y", "-ss", sec.toFixed(2), "-i", video,
+        "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "4", grabbed],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    if ((await proc.exited) !== 0) {
+      skipped++;
+      continue;
+    }
+    const moved = blockChangeFraction(await signatureOf(thumb), await signatureOf(grabbed));
+    if (moved < SCAN_CHANGE_THRESHOLD) matches++;
+    else differs.push(sec);
+  }
+  return { candidates: seconds.length, matches, skipped, differs };
+}
+
+async function dirBytes(dir: string): Promise<number> {
+  if (!existsSync(dir)) return 0;
+  const proc = Bun.spawn(["du", "-sk", dir], { stdout: "pipe", stderr: "ignore" });
+  const out = (await new Response(proc.stdout).text()).trim();
+  await proc.exited;
+  return (Number(out.split(/\s+/)[0]) || 0) * 1024;
+}
+
 for (let run = 1; run <= args.runs; run++) {
   const runDir = join(args.out, `${preset.id}-${args.visualDetail}-${run}`);
   await rm(runDir, { recursive: true, force: true });
@@ -351,6 +490,38 @@ for (let run = 1; run <= args.runs; run++) {
 
   const jobId = createJob(args.videoId, args.title, `https://www.youtube.com/watch?v=${args.videoId}`);
   const startedAt = Date.now();
+
+  // ── what the dense path did, measured around the SHIPPED seams ────────────
+  //
+  // Wrapped rather than reimplemented: `scanVideo`/`buildSheets`/`regrabFrames`
+  // are the real ones, and the dedup + cap below are the shipped functions over
+  // the scan's own signatures — so "candidates after dedup" is the number the
+  // capture itself computed, not a second opinion about it.
+  let extractionStartedAt = 0;
+  let extractionEndedAt = 0;
+  let scanWallMs: number | null = null;
+  let sheetWallMs: number | null = null;
+  let regrabWallMs: number | null = null;
+  let cadenceWallMs: number | null = null;
+  let scannedSamples: number | null = null;
+  let afterDedup: number | null = null;
+  let afterCap: number | null = null;
+  let sheetCount: number | null = null;
+  let candidateSeconds: number[] = [];
+  const scanThumbDir = join(runDir, "scan-thumbs");
+  let peakScratchDiskBytes = 0;
+  /** The last `du` sample in flight — awaited before `run.json` is written. */
+  let scratchSample: Promise<unknown> = Promise.resolve();
+  const workDir = join(tmpdir(), `muninn-youtube-${jobId}`);
+  const mediaDir = join(tmpdir(), `muninn-youtube-media-${jobId}`);
+  // Sampled WHILE the job runs: both roots are removed in its `finally`, so a
+  // measurement after it returns is always zero.
+  const scratchSampler = setInterval(() => {
+    scratchSample = Promise.all([dirBytes(workDir), dirBytes(mediaDir)]).then(([a, b]) => {
+      peakScratchDiskBytes = Math.max(peakScratchDiskBytes, a + b);
+    });
+  }, 2000);
+
   await summarizeVideo(jobId, args.videoId, args.title, config, botConfig, {
     frames: args.frames,
     preset,
@@ -369,6 +540,7 @@ for (let run = 1; run <= args.runs; run++) {
       // The summarizer UNLINKS what the download hands it, so the fixture is
       // copied into the work dir rather than handed over.
       downloadVideo: async (_url: string, workDir: string): Promise<DownloadResult> => {
+        extractionStartedAt = Date.now();
         await mkdir(workDir, { recursive: true });
         const target = join(workDir, basename(args.video));
         await copyFile(args.video, target);
@@ -383,21 +555,83 @@ for (let run = 1; run <= args.runs; run++) {
       },
       // The REAL extractor: the cadence and the frame count are what a live
       // capture of this video would get.
-      extractFrames: ({ file, durationSec: seconds, outDir }) =>
-        extractCadenceFramesFromFile(file, seconds, outDir, { height: CAPTURE_FRAME_HEIGHT }),
+      extractFrames: async ({ file, durationSec: seconds, outDir }) => {
+        const t0 = Date.now();
+        try {
+          return await extractCadenceFramesFromFile(file, seconds, outDir, { height: CAPTURE_FRAME_HEIGHT });
+        } finally {
+          cadenceWallMs = Date.now() - t0;
+          extractionEndedAt = Date.now();
+        }
+      },
+      // The REAL dense pass, timed and counted on the way through.
+      scanVideo: async (input) => {
+        const t0 = Date.now();
+        const result = await runDenseScan(input);
+        scanWallMs = Date.now() - t0;
+        scannedSamples = result.samples.length;
+        const deduped: ScanCandidate[] = dedupeScanSamples(
+          result.signatures,
+          result.samples.map((sample) => sample.tSeconds),
+        );
+        afterDedup = deduped.length;
+        afterCap = capScanCandidates(deduped).length;
+        return result;
+      },
+      buildSheets: async (input) => {
+        // The candidates' own thumbnails, copied out before the job's `finally`
+        // removes the scan dir — this is the only moment they exist, and the
+        // parity check below has nothing to compare without them.
+        candidateSeconds = input.candidates.map((c) => c.tSeconds);
+        await mkdir(scanThumbDir, { recursive: true });
+        for (const c of input.candidates) {
+          await copyFile(input.thumbPathFor(c.tSeconds), join(scanThumbDir, `${c.tSeconds}.jpg`));
+        }
+        const t0 = Date.now();
+        const plans = await buildContactSheets(input);
+        sheetWallMs = Date.now() - t0;
+        sheetCount = plans.length;
+        return plans;
+      },
+      regrabFrames: async (input) => {
+        const t0 = Date.now();
+        try {
+          return await regrabFrames(input);
+        } finally {
+          regrabWallMs = Date.now() - t0;
+          extractionEndedAt = Date.now();
+        }
+      },
       framesRoot,
     },
   });
+  clearInterval(scratchSampler);
+  // The last sample was started before the job returned but may not have
+  // landed; without this the reported peak is whatever the second-to-last
+  // sample saw.
+  await scratchSample;
   const elapsedMs = Date.now() - startedAt;
 
+  // After the job, against the ORIGINAL fixture: the summarizer unlinks its own
+  // copy, and this is a measurement of the video the capture actually read.
+  const parity = candidateSeconds.length > 0
+    ? await regrabParity(args.video, scanThumbDir, candidateSeconds, join(runDir, "regrab-check"))
+    : null;
+  await rm(join(runDir, "regrab-check"), { recursive: true, force: true });
+
   const job = getJob(jobId);
+  const runLogs = logs.slice(logsBefore).map((r) => r.properties as Record<string, unknown>);
   // The completion line is where the summarizer states what actually ran: the
   // connector's own `ClaudeExecResult.model`, and the effective thinking budget.
-  const summarized = logs
-    .slice(logsBefore)
-    .map((r) => r.properties as Record<string, unknown>)
-    .findLast((p) => typeof p.model === "string" && typeof p.summaryKind === "string");
-  // Token totals and cost land on the /agents run at the terminal transition.
+  //
+  // Matched on its own MARKER, never on "the last record carrying a model and a
+  // summaryKind": the dense path writes a SECOND line with a `model` on it (the
+  // selection pass's), so a shape-based match would report whichever came last.
+  const summarized = runLogs.find((p) => p.event === "capture_complete");
+  const selected = runLogs.find((p) => p.event === "selection_complete");
+  // Token totals and cost land on the /agents run at the terminal transition —
+  // SUMMED across both passes by the job store, which is why this is the total
+  // and the two per-pass numbers below are read off their own lines.
   const agentRun = agentStatus.getRecentCompleted().at(-1);
 
   await writeFile(join(runDir, "summary.md"), job?.summary ?? job?.text ?? "");
@@ -436,11 +670,77 @@ for (let run = 1; run <= args.runs; run++) {
     captureThinkingCap: CAPTURE_THINKING_MAX_TOKENS,
     botThinkingMaxTokens: runBot.thinkingMaxTokens ?? null,
     supportsThinkingBudget: connectorCapabilities(runBot).supportsThinkingBudget,
+    // The ACCUMULATED spend of the whole job — both passes where there were two.
     inputTokens: agentRun?.inputTokens ?? null,
     outputTokens: agentRun?.outputTokens ?? null,
     costUsd: agentRun?.costUsd ?? null,
     numTurns: agentRun?.numTurns ?? null,
     toolCount: agentRun?.toolCount ?? null,
+    // ── the two passes, apart ────────────────────────────────────────────────
+    scanMode: args.scan,
+    // WHICH sampler actually ran, and where a dense attempt gave up:
+    // `dense` · `cadence` · `scan_failed` · `selection_failed` · `regrab_failed`.
+    frameScan: (summarized?.frameScan as string | undefined) ?? null,
+    selectionPass: selected
+      ? {
+          model: selected.model ?? "unknown",
+          inputTokens: selected.inputTokens ?? null,
+          outputTokens: selected.outputTokens ?? null,
+          costUsd: selected.costUsd ?? null,
+          numTurns: selected.numTurns ?? null,
+          toolCount: selected.toolCount ?? null,
+          elapsedMs: selected.elapsedMs ?? null,
+          chose: selected.n ?? null,
+        }
+      : null,
+    synthesisPass: {
+      model: (summarized?.model as string | undefined) ?? "unknown",
+      // The summary call's own spend is the job total minus the selection
+      // pass's, which is the only place either is stated per call.
+      inputTokens:
+        typeof summarized?.totalInputTokens === "number" && typeof selected?.inputTokens === "number"
+          ? summarized.totalInputTokens - selected.inputTokens
+          : (agentRun?.inputTokens ?? null),
+      outputTokens:
+        typeof summarized?.totalOutputTokens === "number" && typeof selected?.outputTokens === "number"
+          ? summarized.totalOutputTokens - selected.outputTokens
+          : (agentRun?.outputTokens ?? null),
+      timeoutMs: (summarized?.synthesisTimeoutMs as number | null | undefined) ?? null,
+    },
+    // ── the scan, step by step ───────────────────────────────────────────────
+    scanSamples: scannedSamples,
+    candidatesAfterDedup: afterDedup,
+    candidatesAfterCap: afterCap,
+    sheetCount,
+    /**
+     * Whether the frame named `<t>.jpg` really is the video at second t, per
+     * candidate, against an `-ss t` seek of the same file. `matches` short of
+     * `candidates` means the sampler and every consumer of its names disagree.
+     */
+    regrabParity: parity,
+    /** The selection pass's manifest as it was parsed, entry by entry. */
+    selectionManifest: summarized?.selectionManifest
+      ? (JSON.parse(String(summarized.selectionManifest)) as unknown[])
+      : [],
+    // ── what it cost in wall time and disk ───────────────────────────────────
+    scanWallMs,
+    sheetWallMs,
+    regrabWallMs,
+    cadenceWallMs,
+    /**
+     * Download start to the last frame-producing pass returning, SPLIT at the
+     * model call — a single number mixes ffmpeg wall time with a selection turn
+     * that varies by minutes, so it compares nothing between runs.
+     */
+    ffmpegWallMs:
+      (scanWallMs ?? 0) + (sheetWallMs ?? 0) + (regrabWallMs ?? 0) + (cadenceWallMs ?? 0) || null,
+    selectionWallMs: (selected?.elapsedMs as number | undefined) ?? null,
+    extractionWallMs: extractionEndedAt > 0 ? extractionEndedAt - extractionStartedAt : null,
+    /**
+     * The largest both temp roots got together while the job ran — `du -sk`, so
+     * DISK usage (allocated blocks), not the sum of the file sizes.
+     */
+    peakScratchDiskBytes,
     elapsedMs,
     summaryChars: (job?.summary ?? "").length,
     ingestSummaryKind: ingestBody?.summary_kind ?? null,
