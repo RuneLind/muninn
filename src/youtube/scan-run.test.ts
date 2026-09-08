@@ -21,7 +21,7 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONTACT_SHEET, SCAN_SIGNATURE_BYTES, dedupeScanSamples } from "./scan.ts";
+import { CONTACT_SHEET, SCAN_SIGNATURE_BYTES, dedupeScanSamples, type ScanCandidate } from "./scan.ts";
 import { buildContactSheets, denseScanArgs, regrabFrames, runDenseScan } from "./scan-run.ts";
 
 const ffmpeg = Bun.which("ffmpeg");
@@ -161,6 +161,114 @@ describe("denseScanArgs", () => {
     expect(() =>
       denseScanArgs({ file: "/v.mp4", thumbPattern: "/o/%06d.jpg", signaturePath: "/o/s.gray", intervalSec: 0 }),
     ).toThrow(/positive integer/);
+  });
+});
+
+/** Burn `ms` of wall clock without yielding — a deadline test needs time to pass. */
+function burn(ms: number): void {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    /* spin */
+  }
+}
+
+// These two drive the seams (`grabFrame`, `run`) rather than ffmpeg, so they run
+// on CI: what they pin is that each pass has ONE budget for all of its work.
+
+describe("regrabFrames bounds the whole pass", () => {
+  test("one aggregate deadline, not one per frame", async () => {
+    const root = tmpRoot();
+    const grabbed: number[] = [];
+    await expect(
+      regrabFrames({
+        file: "/v.mp4",
+        seconds: [0, 5, 10, 15, 20, 25],
+        outDir: join(root, "frames"),
+        height: 720,
+        timeoutMs: 50,
+        grabFrame: async (_file, sec) => {
+          grabbed.push(sec);
+          burn(30);
+        },
+      }),
+    ).rejects.toThrow(/Frame re-grab timed out after 50ms/);
+    // It stopped rather than running all six: forty frames each allowed their
+    // own 15 s is ten minutes the job never announced.
+    expect(grabbed.length).toBeGreaterThan(0);
+    expect(grabbed.length).toBeLessThan(6);
+  });
+
+  test("a budget the pass fits inside grabs every second", async () => {
+    const root = tmpRoot();
+    const frames = await regrabFrames({
+      file: "/v.mp4",
+      seconds: [10, 0, 10],
+      outDir: join(root, "frames"),
+      height: 720,
+      timeoutMs: 60_000,
+      grabFrame: async () => {},
+    });
+    expect(frames.map((f) => f.tSeconds)).toEqual([0, 10]);
+  });
+});
+
+describe("buildContactSheets bounds the whole pass", () => {
+  /** Three sheets' worth of candidates, with a real file behind every thumbnail. */
+  async function threeSheets(root: string): Promise<{
+    candidates: ScanCandidate[];
+    thumbPathFor: (sec: number) => string;
+  }> {
+    const thumbs = join(root, "thumbs");
+    const candidates: ScanCandidate[] = [];
+    for (let i = 0; i < CONTACT_SHEET.cols * CONTACT_SHEET.rows * 2 + 1; i++) {
+      candidates.push({ index: i, tSeconds: i * 5, change: 1 });
+      await Bun.write(join(thumbs, `${i * 5}.jpg`), "not really a jpeg");
+    }
+    return { candidates, thumbPathFor: (sec) => join(thumbs, `${sec}.jpg`) };
+  }
+
+  test("ONE deadline for every sheet, not one budget each", async () => {
+    const root = tmpRoot();
+    const { candidates, thumbPathFor } = await threeSheets(root);
+    const handed: number[] = [];
+    const plans = await buildContactSheets({
+      candidates,
+      thumbPathFor,
+      outDir: join(root, "select"),
+      scratchDir: join(root, "scratch"),
+      timeoutMs: 10_000,
+      run: async (_argv, timeoutMs) => {
+        handed.push(timeoutMs);
+        burn(20);
+      },
+    });
+    expect(plans).toHaveLength(3);
+    expect(handed).toHaveLength(3);
+    expect(handed[0]!).toBeLessThanOrEqual(10_000);
+    // Each sheet gets what is LEFT. Handed the same number three times, the pass
+    // is bounded at three times the budget it was given.
+    expect(handed[1]!).toBeLessThan(handed[0]!);
+    expect(handed[2]!).toBeLessThan(handed[1]!);
+  });
+
+  test("a spent budget stops the pass rather than starting another sheet", async () => {
+    const root = tmpRoot();
+    const { candidates, thumbPathFor } = await threeSheets(root);
+    let runs = 0;
+    await expect(
+      buildContactSheets({
+        candidates,
+        thumbPathFor,
+        outDir: join(root, "select"),
+        scratchDir: join(root, "scratch"),
+        timeoutMs: 40,
+        run: async () => {
+          runs++;
+          burn(30);
+        },
+      }),
+    ).rejects.toThrow(/Contact sheets timed out after 40ms/);
+    expect(runs).toBeLessThan(3);
   });
 });
 

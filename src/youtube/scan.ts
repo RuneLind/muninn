@@ -35,7 +35,8 @@
  * seeks for the same work.
  */
 
-import { formatHms } from "../summaries/frames.ts";
+import { formatHms, framesTimeoutFor } from "../summaries/frames.ts";
+import { summarizeTimeoutFor } from "../video/media.ts";
 
 /**
  * Seconds between scan samples.
@@ -631,24 +632,25 @@ export function selectionTimeoutFor(sheetCount: number): number {
 
 /**
  * The WHOLE budget a two-pass capture states up front: the selection pass's own
- * timeout plus a full synthesis call at the policy's frame cap.
+ * timeout, the re-grab of what it picks, and a full synthesis call at the
+ * policy's frame cap.
  *
  * One number, decided before either call, because **nothing can abort an
  * in-flight connector call**: `executeOneShot` takes a `timeoutMs` and no
  * signal, so a deadline is arithmetic — a budget split between two calls and a
  * gate on the second — never a cancellation.
+ *
+ * The re-grab is IN the number rather than beside it: it is bounded work this
+ * job does between the two calls (`framesTimeoutFor`, the same budget the
+ * cadence extractor runs under), and a budget that announced only the two model
+ * calls would be a number the job cannot honour.
  */
 export function twoPassBudgetFor(sheetCount: number, maxFrames: number, floorMs: number): number {
-  return selectionTimeoutFor(sheetCount) + synthesisFloorFor(maxFrames, floorMs);
-}
-
-/**
- * The synthesis call's floor for a capture that may end up reading `maxFrames`
- * images — `summarizeTimeoutFor`'s answer, spelled through one helper so the
- * budget and the gate cannot use two different numbers.
- */
-function synthesisFloorFor(maxFrames: number, floorMs: number): number {
-  return Math.max(floorMs, 600_000 + Math.max(0, maxFrames - 30) * 24_000);
+  return (
+    selectionTimeoutFor(sheetCount) +
+    framesTimeoutFor(maxFrames) +
+    summarizeTimeoutFor(maxFrames, floorMs)
+  );
 }
 
 /** What the launch gate decided about the second pass. */
@@ -665,10 +667,22 @@ export interface TwoPassSplit {
  * Split what is LEFT of the whole budget between the two passes, and refuse to
  * launch the second when there is not enough left for it to finish.
  *
- * The gate is the point: with no way to abort a running call, a synthesis pass
- * launched with 40 s of budget left does not stop at 40 s — it runs its own
- * timeout and the job overruns the number it stated. Refusing is a visible
- * failure with the stage named; launching is an invisible one.
+ * **The summary call never gets MORE than a single-pass capture would.** Its
+ * budget is `summarizeTimeoutFor` — the same number the cadence path hands the
+ * one call it makes — capped again by what is actually left. Handing it the
+ * whole remainder instead made a two-pass capture's summary call the most
+ * generously bounded call in the vertical (measured: 1 398 000 ms against the
+ * 840 000 ms a single-pass capture of the same 40 frames gets), which is a
+ * hang budget that grew because a SECOND call was added.
+ *
+ * The gate stays, as defence in depth rather than as the only bound: with no
+ * way to abort a running call, a synthesis pass launched with 40 s of budget
+ * left does not stop at 40 s — it runs its own timeout and the job overruns the
+ * number it stated. It fires where the selection pass returned AFTER its own
+ * timeout, which is the case the cap above cannot see.
+ *
+ * `synthesisTimeoutMs` is only meaningful when `launch` is true; the caller
+ * throws otherwise.
  */
 export function splitTwoPassBudget(input: {
   wholeMs: number;
@@ -677,10 +691,10 @@ export function splitTwoPassBudget(input: {
   floorMs: number;
 }): TwoPassSplit {
   const remainingMs = Math.max(0, input.wholeMs - Math.max(0, input.selectionElapsedMs));
-  const floor = synthesisFloorFor(input.frameCount, input.floorMs);
+  const floor = summarizeTimeoutFor(input.frameCount, input.floorMs);
   return {
     launch: remainingMs >= floor,
-    synthesisTimeoutMs: Math.max(floor, remainingMs),
+    synthesisTimeoutMs: Math.min(remainingMs, floor),
     remainingMs,
   };
 }

@@ -777,22 +777,34 @@ export async function raceKill<T>(
   }
 }
 
+/**
+ * Spawn an ffmpeg argv, drain its stderr concurrently, and reject on a TIMEOUT
+ * rather than letting the kill surface as an exit code.
+ *
+ * The one spelling of that loop for every capture vertical — it was written out
+ * three times (here, and twice in the dense scan), each copy carrying the same
+ * two non-obvious rules: the drain STARTS before the exit is awaited, because
+ * awaiting `exited` behind a full stderr pipe deadlocks (the `runProc` fix) and
+ * an ffmpeg writing hundreds of files can produce a lot of it; and the drain can
+ * never reject the call on its own, since a killed process's partial stderr is
+ * not the failure being reported.
+ */
+export async function runFfmpegQuiet(argv: string[], timeoutMs: number, label: string): Promise<void> {
+  const proc = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe", stdin: "ignore" });
+  const stderrText = new Response(proc.stderr).text().catch(() => "");
+  const exitCode = await raceKill(proc, timeoutMs, label);
+  if (exitCode !== 0) {
+    throw new Error(`${label} failed (exit ${exitCode}): ${(await stderrText).slice(-300)}`);
+  }
+}
+
 /** One frame at `offsetSec` into `file`, scaled to at most `height`, as JPEG. */
 export const ffmpegGrabFrame: GrabFrame = async (file, offsetSec, outPath, height) => {
-  const proc = Bun.spawn(ffmpegFrameArgs(file, offsetSec, outPath, height), {
-    stdout: "ignore",
-    stderr: "pipe",
-    stdin: "ignore",
-  });
-  // The drain STARTS before the exit is awaited (awaiting `exited` behind a
-  // full stderr pipe deadlocks — the `runProc` fix), and it can never reject
-  // this call on its own: a killed process's partial stderr is not the failure
-  // being reported.
-  const stderrText = new Response(proc.stderr).text().catch(() => "");
-  const exitCode = await raceKill(proc, FRAME_FFMPEG_TIMEOUT_MS, "ffmpeg frame grab");
-  if (exitCode !== 0) {
-    throw new Error(`ffmpeg frame grab failed (exit ${exitCode}): ${(await stderrText).slice(-300)}`);
-  }
+  await runFfmpegQuiet(
+    ffmpegFrameArgs(file, offsetSec, outPath, height),
+    FRAME_FFMPEG_TIMEOUT_MS,
+    "ffmpeg frame grab",
+  );
   if (!(await Bun.file(outPath).exists())) {
     throw new Error(`ffmpeg wrote no frame at ${offsetSec.toFixed(2)}s of ${file}`);
   }

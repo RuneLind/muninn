@@ -41,6 +41,8 @@ import {
   twoPassBudgetFor,
   type ScanCandidate,
 } from "./scan.ts";
+import { framesTimeoutFor } from "../summaries/frames.ts";
+import { summarizeTimeoutFor } from "../video/media.ts";
 
 // --- signature fixtures, at the shipped geometry ----------------------------
 
@@ -475,12 +477,18 @@ describe("the two-pass budget", () => {
     expect(selectionTimeoutFor(10)).toBe(600_000);
   });
 
-  test("the whole budget is the selection call plus a full summary call", () => {
-    // 10 sheets ⇒ 600 s of selection; 40 frames ⇒ 600 s + 10 × 24 s of summary.
-    expect(twoPassBudgetFor(10, 40, FLOOR)).toBe(600_000 + 840_000);
+  test("the whole budget covers the selection call, the re-grab and a full summary call", () => {
+    // 10 sheets ⇒ 600 s of selection; 40 frames ⇒ 30 s + 40 × 3 s of re-grab and
+    // 600 s + 10 × 24 s of summary. The re-grab is bounded work this job does
+    // between the two calls, so a budget naming only the model calls is one the
+    // job cannot honour.
+    expect(twoPassBudgetFor(10, 40, FLOOR)).toBe(600_000 + 150_000 + 840_000);
+    expect(twoPassBudgetFor(10, 40, FLOOR)).toBe(
+      selectionTimeoutFor(10) + framesTimeoutFor(40) + summarizeTimeoutFor(40, FLOOR),
+    );
   });
 
-  test("a fast selection pass leaves the summary the rest of the budget", () => {
+  test("a fast selection pass does NOT hand the summary call the whole remainder", () => {
     const split = splitTwoPassBudget({
       wholeMs: twoPassBudgetFor(10, 40, FLOOR),
       selectionElapsedMs: 120_000,
@@ -488,8 +496,11 @@ describe("the two-pass budget", () => {
       floorMs: FLOOR,
     });
     expect(split.launch).toBe(true);
-    expect(split.remainingMs).toBe(1_320_000);
-    expect(split.synthesisTimeoutMs).toBe(1_320_000);
+    expect(split.remainingMs).toBe(1_470_000);
+    // The single-pass path's own number for the same 40 frames, and nothing
+    // more: a second model call must not buy the first one a longer hang.
+    expect(split.synthesisTimeoutMs).toBe(summarizeTimeoutFor(40, FLOOR));
+    expect(split.synthesisTimeoutMs).toBeLessThan(split.remainingMs);
   });
 
   test("a selection pass that ate the budget REFUSES the second call", () => {

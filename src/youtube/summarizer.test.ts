@@ -23,6 +23,7 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { CaptureFrame } from "../summaries/frames.ts";
 import type { VisualDetail } from "../summaries/visual-detail.ts";
+import { summarizeTimeoutFor } from "../video/media.ts";
 import type { DownloadOptions, DownloadResult, YtDlpInfo } from "../video/media.ts";
 
 const VIDEO_ID = "dQw4w9WgXcQ";
@@ -259,6 +260,8 @@ let atProbe: (() => void) | null = null;
 let downloadCalls: Array<{ url: string; workDir: string; opts: DownloadOptions }> = [];
 /** Same, for the download — the work dir has to exist by then. */
 let atDownload: ((workDir: string) => void) | null = null;
+/** Called as the CADENCE extractor starts, with the dir it is about to fill. */
+let atExtract: ((outDir: string) => void) | null = null;
 /** Held open by the concurrency case: a download parks here until it is released. */
 let downloadGate: Promise<void> | null = null;
 /** `download:start` / `download:end` in order, so an overlap is visible as interleaving. */
@@ -285,6 +288,8 @@ let sheetCalls: Array<{ candidates: number[]; outDir: string }> = [];
 let sheetsThrow: Error | null = null;
 let regrabCalls: Array<{ file: string; seconds: number[]; height: number }> = [];
 let regrabThrows: Error | null = null;
+/** How many frames a THROWING re-grab writes before it gives up — a partial pass. */
+let regrabPartial = 0;
 /** The path of the "downloaded video", so a case can check when it was unlinked. */
 let lastVideoPath = "";
 
@@ -316,6 +321,7 @@ function deps() {
     },
     extractFrames: async (input: { file: string; durationSec: number; outDir: string }): Promise<CaptureFrame[]> => {
       extractCalls.push(input);
+      atExtract?.(input.outDir);
       if (extractThrows) throw extractThrows;
       mkdirSync(input.outDir, { recursive: true });
       return extractTicks.map((t) => {
@@ -366,7 +372,13 @@ function deps() {
       height: number;
     }): Promise<CaptureFrame[]> => {
       regrabCalls.push({ file: input.file, seconds: [...input.seconds], height: input.height });
-      if (regrabThrows) throw regrabThrows;
+      if (regrabThrows) {
+        mkdirSync(input.outDir, { recursive: true });
+        for (const t of [...input.seconds].sort((a, b) => a - b).slice(0, regrabPartial)) {
+          writeFileSync(join(input.outDir, `${t}.jpg`), `jpeg-${t}`);
+        }
+        throw regrabThrows;
+      }
       mkdirSync(input.outDir, { recursive: true });
       return [...input.seconds].sort((a, b) => a - b).map((t) => {
         const path = join(input.outDir, `${t}.jpg`);
@@ -408,6 +420,7 @@ beforeEach(() => {
   probeCalls = [];
   atProbe = null;
   atDownload = null;
+  atExtract = null;
   downloadGate = null;
   downloadTrace = [];
   downloadCalls = [];
@@ -438,6 +451,7 @@ beforeEach(() => {
   sheetsThrow = null;
   regrabCalls = [];
   regrabThrows = null;
+  regrabPartial = 0;
   oneShotCalls = [];
   selectionAnswer = "[]";
   selectionThrows = null;
@@ -1221,7 +1235,11 @@ describe("the dense scan path", () => {
 
     // The sheet dir and nothing else: the frames do not exist yet and the video
     // lives in `mediaDir`, so this is the one call that can reach neither.
-    expect(select.extraDirs).toEqual([join(workDirFor(jobId), "select")]);
+    // Under `mediaDir`, NOT `workDir`: the sheets are for this pass alone, and
+    // leaving them in the dir the summary call reads as `--add-dir` hands the
+    // second pass 10 contact sheets of a scan it is not being asked about —
+    // and hands a CADENCE fallback the abandoned sheets of a dense attempt.
+    expect(select.extraDirs).toEqual([join(mediaDirFor(jobId), "select")]);
     // No text streams during it — a JSON manifest must not reach the job card.
     expect(select.hasProgress).toBe(false);
     // Capped EVEN ON `deep`, whose full thinking budget is for the summary.
@@ -1268,13 +1286,46 @@ describe("the dense scan path", () => {
     expect(existsSync(mediaDirFor(jobId))).toBe(false);
   });
 
-  test("the summary budget is what is LEFT of the whole two-pass one", async () => {
+  test("the summary call gets the SINGLE-PASS budget, never the whole remainder", async () => {
     await run({ frames: true });
     // 2 sheets over 13 candidates; the manifest picked 2 frames. The selection
-    // call is instant here, so the remainder is the whole budget minus ~nothing.
+    // call is instant here, so nearly the whole two-pass budget is left — and
+    // handing it over would make the summary call of a TWO-pass capture the
+    // most generously bounded call in the vertical.
     const whole = twoPassBudgetFor(2, 16, 600_000);
-    expect(lastTimeoutMs).toBeLessThanOrEqual(whole);
-    expect(lastTimeoutMs).toBeGreaterThan(whole - 10_000);
+    expect(lastTimeoutMs).toBe(summarizeTimeoutFor(2, 600_000));
+    expect(lastTimeoutMs).toBeLessThan(whole - 10_000);
+  });
+
+  test("a RE-GRAB failure puts the cadence summary back on the cadence budget", async () => {
+    regrabThrows = new Error("ffmpeg seek failed");
+    // Past the 30-frame floor, so the cadence budget and the two-pass split are
+    // different numbers and the assertion can tell them apart.
+    extractTicks = Array.from({ length: 45 }, (_, i) => i * 20);
+    await run({ frames: true });
+    // The fallback summary reads the CADENCE extractor's frames, so it runs on
+    // the budget that frame count implies. Left at the two-pass split's number,
+    // a shorter frame list bought a longer hang.
+    expect(extractCalls).toHaveLength(1);
+    expect(summarizeTimeoutFor(45, 600_000)).not.toBe(summarizeTimeoutFor(2, 600_000));
+    expect(lastTimeoutMs).toBe(summarizeTimeoutFor(45, 600_000));
+  });
+
+  test("a RE-GRAB failure clears its half-written frames before the cadence pass", async () => {
+    // The re-grab writes `<sec>.jpg` into the very dir the cadence extractor is
+    // about to fill, and both are read by the summary call as `--add-dir`. A
+    // partial re-grab left behind is a frame in the prompt's directory that no
+    // frame list names and no policy capped.
+    regrabThrows = new Error("ffmpeg seek failed");
+    regrabPartial = 1;
+    let leftovers: string[] = [];
+    atExtract = (outDir) => {
+      leftovers = existsSync(outDir) ? readdirSync(outDir) : [];
+    };
+    const jobId = await run({ frames: true });
+    expect(regrabCalls).toHaveLength(1);
+    expect(leftovers).toEqual([]);
+    expect(existsSync(workDirFor(jobId))).toBe(false);
   });
 
   test("the trace says which sampler ran, and what it cost to get there", async () => {
@@ -1320,6 +1371,39 @@ describe("the dense scan path", () => {
     expect(finishCalls).toHaveLength(1);
     expect(finishCalls[0]!.status).toBe("ok");
     expect(existsSync(mediaDirFor(jobId))).toBe(false);
+  });
+
+  test("SHEETS failure: its own stage, with the scan's real counts", async () => {
+    sheetsThrow = new Error("tile filter died");
+    const jobId = await run({ frames: true });
+
+    // The SCAN worked. Reported as `scan_failed` with samples=0, the numbers
+    // said the decode produced nothing — which is a different diagnosis and a
+    // different fix from "the tiling failed".
+    expect(logged("warning", "gave up at sheets_failed")).toBe(true);
+    expect(lastClaudeSpanAttrs).toMatchObject({
+      frameScan: "sheets_failed",
+      scanSamples: String(SAMPLED.length),
+      scanCandidates: "13",
+      scanSheets: "0",
+    });
+    // One download, one cadence fallback on it, no selection call.
+    expect(downloadCalls).toHaveLength(1);
+    expect(oneShotCalls.map((c) => c.pass)).toEqual(["summary"]);
+    expect(extractCalls).toHaveLength(1);
+    // And the sheets were asked for with the CAPPED candidate set, in time
+    // order — the content of the call, not just that it happened.
+    expect(sheetCalls).toHaveLength(1);
+    expect(sheetCalls[0]!.candidates).toEqual(SAMPLED);
+    expect(sheetCalls[0]!.outDir).toBe(join(mediaDirFor(jobId), "select"));
+  });
+
+  test("a frames failure BEFORE any sampler is not reported as `off`", async () => {
+    downloadThrows = new Error("yt-dlp exploded");
+    await run({ frames: true });
+
+    // `off` means the reader never asked. Here they did, and the path threw.
+    expect(lastClaudeSpanAttrs).toMatchObject({ frames: "failed", frameScan: "prep_failed" });
   });
 
   test("SELECTION throw: error-finish, cadence fallback, video removed", async () => {

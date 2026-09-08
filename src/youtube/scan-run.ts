@@ -27,7 +27,8 @@ import { join } from "node:path";
 import { getLog } from "../logging.ts";
 import {
   ffmpegGrabFrame,
-  raceKill,
+  framesTimeoutFor,
+  runFfmpegQuiet,
   type CaptureFrame,
   type GrabFrame,
 } from "../summaries/frames.ts";
@@ -127,18 +128,8 @@ export function denseScanArgs(input: {
   ];
 }
 
-/** Spawn ffmpeg, drain stderr concurrently, and reject on a timeout rather than an exit code. */
-async function runFfmpeg(argv: string[], timeoutMs: number, label: string): Promise<void> {
-  const proc = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe", stdin: "ignore" });
-  // Drain STARTS before the exit is awaited: awaiting `exited` behind a full
-  // stderr pipe deadlocks (the `runProc` fix), and a scan pass writing hundreds
-  // of files can produce a lot of it.
-  const stderrText = new Response(proc.stderr).text().catch(() => "");
-  const exitCode = await raceKill(proc, timeoutMs, label);
-  if (exitCode !== 0) {
-    throw new Error(`${label} failed (exit ${exitCode}): ${(await stderrText).slice(-300)}`);
-  }
-}
+/** One bounded ffmpeg run — the seam the sheet builder's tests drive in place of a spawn. */
+export type RunFfmpeg = (argv: string[], timeoutMs: number, label: string) => Promise<void>;
 
 /**
  * Sample the whole video every {@link YOUTUBE_SCAN_INTERVAL_SEC} seconds in one
@@ -166,7 +157,7 @@ export async function runDenseScan(input: {
   const interval = input.intervalSec ?? YOUTUBE_SCAN_INTERVAL_SEC;
   await mkdir(input.scanDir, { recursive: true });
   const signaturePath = join(input.scanDir, SIGNATURE_FILE);
-  await runFfmpeg(
+  await runFfmpegQuiet(
     denseScanArgs({
       file: input.file,
       thumbPattern: join(input.scanDir, RAW_THUMB_PATTERN),
@@ -217,6 +208,13 @@ export async function runDenseScan(input: {
  * A short last sheet is fine — `tile` pads the missing cells — and the prompt
  * lists only the cells that exist, so a padded cell is never a second the model
  * can name.
+ *
+ * **`timeoutMs` is the budget for the WHOLE pass, not for each sheet.** Handed
+ * to every sheet in turn it was a bound of `timeoutMs × sheetCount` — ten sheets
+ * of a 3 h video would have been ten times 360 s, an hour of hang budget inside
+ * a job whose whole stated budget is a quarter of that. The remainder is
+ * recomputed before each sheet and the pass gives up rather than starting one
+ * with nothing left.
  */
 export async function buildContactSheets(input: {
   candidates: readonly ScanCandidate[];
@@ -224,12 +222,24 @@ export async function buildContactSheets(input: {
   thumbPathFor: (tSeconds: number) => string;
   outDir: string;
   scratchDir: string;
+  /** The whole pass's budget, shared by every sheet. */
   timeoutMs: number;
+  /** Test seam for the ffmpeg run; production spawns. */
+  run?: RunFfmpeg;
 }): Promise<ContactSheetPlan[]> {
   const plans = contactSheetPlans(input.candidates);
   if (plans.length === 0) return [];
+  const run = input.run ?? runFfmpegQuiet;
+  const deadline = Date.now() + input.timeoutMs;
   await mkdir(input.outDir, { recursive: true });
   for (const plan of plans) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error(
+        `Contact sheets timed out after ${input.timeoutMs}ms ` +
+          `(${plan.number - 1}/${plans.length} sheets)`,
+      );
+    }
     const cellDir = join(input.scratchDir, `cells-${plan.number}`);
     await rm(cellDir, { recursive: true, force: true });
     await mkdir(cellDir, { recursive: true });
@@ -239,7 +249,7 @@ export async function buildContactSheets(input: {
         join(cellDir, `${String(i + 1).padStart(3, "0")}.jpg`),
       );
     }
-    await runFfmpeg(
+    await run(
       [
         "ffmpeg",
         "-v",
@@ -257,7 +267,7 @@ export async function buildContactSheets(input: {
         "4",
         join(input.outDir, plan.fileName),
       ],
-      input.timeoutMs,
+      remaining,
       `ffmpeg contact sheet ${plan.number}`,
     );
     await rm(cellDir, { recursive: true, force: true });
@@ -282,6 +292,12 @@ export async function buildContactSheets(input: {
  * A failure on ONE frame fails the whole re-grab, the cadence extractor's rule:
  * the caller degrades the capture rather than shipping a summary whose manifest
  * silently lost an entry.
+ *
+ * **One AGGREGATE deadline for the pass**, `framesTimeoutFor` by default — the
+ * same budget the cadence extractor runs under, and the same number
+ * `twoPassBudgetFor` reserves for this step, so the announced budget covers it.
+ * Per-frame timeouts alone bound no total: forty frames each allowed 15 s is ten
+ * minutes this job never said it might spend.
  */
 export async function regrabFrames(input: {
   file: string;
@@ -289,12 +305,22 @@ export async function regrabFrames(input: {
   outDir: string;
   height: number;
   grabFrame?: GrabFrame;
+  /** Whole-pass budget; default {@link framesTimeoutFor}. */
+  timeoutMs?: number;
 }): Promise<CaptureFrame[]> {
   if (input.seconds.length === 0) return [];
   const grab = input.grabFrame ?? ffmpegGrabFrame;
+  const seconds = [...new Set(input.seconds)].sort((a, b) => a - b);
+  const timeoutMs = input.timeoutMs ?? framesTimeoutFor(seconds.length);
+  const deadline = Date.now() + timeoutMs;
   await mkdir(input.outDir, { recursive: true });
   const frames: CaptureFrame[] = [];
-  for (const sec of [...new Set(input.seconds)].sort((a, b) => a - b)) {
+  for (const sec of seconds) {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Frame re-grab timed out after ${timeoutMs}ms (${frames.length}/${seconds.length} frames)`,
+      );
+    }
     const out = join(input.outDir, `${sec}.jpg`);
     await grab(input.file, sec, out, input.height);
     frames.push({ path: out, tSeconds: sec });

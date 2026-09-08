@@ -147,8 +147,16 @@ export type YouTubeScanOutcome =
   | "cadence"
   /** The dense scan, the selection pass and the re-grab all ran. */
   | "dense"
+  /**
+   * Slides were asked for and the frames path threw before any sampler produced
+   * a frame — the download, the work dirs, or the fallback extractor itself.
+   * Kept apart from `off`, which means the reader never asked.
+   */
+  | "prep_failed"
   /** The scan itself failed (ffmpeg, the timeout) — cadence ran on the same download. */
   | "scan_failed"
+  /** The scan worked and the TILING did not — cadence ran on the same download. */
+  | "sheets_failed"
   /** The selection pass threw or answered nothing parseable — cadence ran on the same download. */
   | "selection_failed"
   /**
@@ -322,9 +330,10 @@ export async function summarizeVideo(
   // TWO roots, and the split is what keeps a 90 MB mp4 and 350 scan thumbnails
   // out of the model's reach.
   //
-  // `workDir` is what the model is handed as `--add-dir`: the re-grabbed frames
-  // and the contact sheets, nothing else. `mediaDir` is the downloaded video and
-  // the scan's intermediates, and it is never named in any `extraDirs` — the
+  // `workDir` is what the SUMMARY call is handed as `--add-dir`: the re-grabbed
+  // (or cadence) frames, nothing else. `mediaDir` is the downloaded video, the
+  // scan's intermediates and the contact sheets — one subdirectory of it goes to
+  // the selection pass and the root itself is named in no `extraDirs` — the
   // video used to live in the dir the turn could read, which is why it had to be
   // unlinked the instant ffmpeg was done with it. On the dense path it cannot
   // be: the re-grab happens AFTER a model call, so the file has to survive one.
@@ -334,8 +343,17 @@ export async function summarizeVideo(
   const mediaDir = join(tmpdir(), `muninn-youtube-media-${jobId}`);
   /** Where the re-grabbed / cadence frames land — inside `workDir`, so the model reads them. */
   const framesDir = join(workDir, "frames");
-  /** The contact sheets, and the ONLY thing the selection pass is given. */
-  const selectDir = join(workDir, "select");
+  /**
+   * The contact sheets, and the ONLY thing the selection pass is given.
+   *
+   * Under `mediaDir`, so that `workDir` — the dir the SUMMARY call is handed as
+   * `--add-dir` — holds the frames and nothing else. A sheet dir inside it would
+   * put ten contact sheets of a scan in front of the second pass, and in front
+   * of a CADENCE fallback that was never told about a scan at all. `mediaDir`
+   * itself is still named in no `extraDirs`; this one subdirectory of it is
+   * handed to the selection pass alone.
+   */
+  const selectDir = join(mediaDir, "select");
   // The ONE url this capture states, built from the id the route validated.
   // Never the caller's `url`: a POST naming video X with a url for video Y
   // would otherwise put Y's address on X's document and make every later
@@ -560,16 +578,25 @@ export async function summarizeVideo(
           videoPath = dl.videoPath;
           if (scan.mode !== "dense") return null;
           updateStatus(jobId, "extracting_frames");
+          // Which PREP stage is running, so a failure names the one that failed.
+          // Reported as `scan_failed` with `samples=0`, a tiling error said the
+          // decode produced nothing — a different diagnosis and a different fix.
+          let prepStage: YouTubeScanOutcome = "scan_failed";
           try {
             const scanned = await resolved.scanVideo({
               file: dl.videoPath,
               scanDir: join(mediaDir, "scan"),
               timeoutMs: scanTimeoutFor(durationSec),
             });
+            // Stamped as they become known, so a later stage's failure still
+            // reports what the earlier ones really produced.
+            scanSamples = scanned.samples.length;
             const candidates = capScanCandidates(
               dedupeScanSamples(scanned.signatures, scanned.samples.map((s) => s.tSeconds)),
             );
+            scanCandidates = candidates.length;
             const thumbs = new Map(scanned.samples.map((s) => [s.tSeconds, s.path] as const));
+            prepStage = "sheets_failed";
             const sheets = await resolved.buildSheets({
               candidates,
               thumbPathFor: (sec) => {
@@ -579,14 +606,17 @@ export async function summarizeVideo(
               },
               outDir: selectDir,
               scratchDir: join(mediaDir, "cells"),
+              // ONE budget for every sheet, not one each: `buildContactSheets`
+              // spends what is left of it per sheet.
               timeoutMs: scanTimeoutFor(durationSec),
             });
-            return { samples: scanned.samples.length, candidates, sheets };
+            scanSheets = sheets.length;
+            return { candidates, sheets };
           } catch (err) {
             // The scan is an optimisation over the cadence sampler, not a
             // prerequisite for it — and the video is already here.
             denseFallback = {
-              stage: "scan_failed",
+              stage: prepStage,
               error: err instanceof Error ? err.message : String(err),
             };
             return null;
@@ -594,12 +624,12 @@ export async function summarizeVideo(
         });
 
         if (prepared === null) {
+          // Read through its declared type: the assignment happens inside the
+          // closure above, which TypeScript's control flow cannot see.
+          const prep = denseFallback as { stage: YouTubeScanOutcome; error: string } | null;
           frames = await cadenceFrames(videoPath!);
-          scanOutcome = denseFallback === null ? "cadence" : "scan_failed";
+          scanOutcome = prep === null ? "cadence" : prep.stage;
         } else {
-          scanSamples = prepared.samples;
-          scanCandidates = prepared.candidates.length;
-          scanSheets = prepared.sheets.length;
           // Which dense stage is in progress, so the catch below can name the
           // one that failed. Derived from a flag rather than from
           // `frames.length`, which is 0 both before the re-grab and after one
@@ -653,7 +683,7 @@ export async function summarizeVideo(
               extraTraceAttrs: {
                 summaryKind: preset.id,
                 visualDetail,
-                scanSamples: String(prepared.samples),
+                scanSamples: String(scanSamples),
                 candidates: String(prepared.candidates.length),
                 sheets: String(prepared.sheets.length),
                 selectionLimit: String(limit),
@@ -693,7 +723,7 @@ export async function summarizeVideo(
                 n: selection.length,
                 candidates: prepared.candidates.length,
                 sheets: prepared.sheets.length,
-                scanSamples: prepared.samples,
+                scanSamples,
                 model: picked.model ?? "unknown",
                 inputTokens: picked.inputTokens,
                 outputTokens: picked.outputTokens,
@@ -771,6 +801,17 @@ export async function summarizeVideo(
             const error = err instanceof Error ? err.message : String(err);
             denseFallback = { stage, error };
             finishParent("error", { source: "youtube", error, ...passUsage });
+            // Back on the CADENCE path's own budget. The split above was sized
+            // for the frames the selection pass picked; the summary call below
+            // reads what the cadence extractor produces instead, and keeping
+            // the two-pass number would hand a different frame list a longer
+            // hang than a single-pass capture of it ever gets.
+            synthesisTimeoutMs = null;
+            // A re-grab that threw may have written some of its frames into the
+            // very dir the cadence extractor is about to fill — and that dir is
+            // what the summary call reads as `--add-dir`. A leftover is a frame
+            // in the prompt's directory that no frame list names.
+            await rm(framesDir, { recursive: true, force: true }).catch(() => {});
             frames = await cadenceFrames(videoPath!);
             scanOutcome = stage;
           }
@@ -792,8 +833,12 @@ export async function summarizeVideo(
       } catch (err) {
         if (err instanceof TwoPassBudgetError) throw err;
         framesOutcome = "failed";
-        scanOutcome = "off";
+        // NOT `off`, which means the reader never asked: they did, and the path
+        // threw before any sampler produced a frame.
+        scanOutcome = "prep_failed";
         frames = [];
+        // Whatever the split decided is void — there are no frames to read.
+        synthesisTimeoutMs = null;
         log.warn("YouTube capture {jobId}: frames failed — transcript only: {error}", {
           jobId,
           videoId,

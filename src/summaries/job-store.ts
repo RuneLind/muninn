@@ -75,10 +75,14 @@ const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
 // picking 6h here left the very failure this guard exists to prevent reachable
 // on X video, which a review caught by driving the real store at 7.1h.
 //
-// Re-derived when YouTube grew a second model call (the dense-scan selection
-// pass): at its 10800s cap that vertical sums to 1800s download + 360s scan +
-// 600s selection + 840s synthesis + 600s worst-case re-grab = 4200s = 1.17h,
-// so X video is still what this is sized against and the constant does not move.
+// Re-derived against the dense-scan path as it stands (every term read off the
+// function that bounds it, at YouTube's own 10800s cap). Its LONGEST path is a
+// dense attempt that falls back, because that pays for both samplers: 1800s
+// download + 360s scan + 360s sheets (ONE budget for all ten, not one each) +
+// 600s selection + 150s re-grab + 210s cadence extraction + 1320s cadence
+// summary = 4800s = 1.33h. The path that SUCCEEDS is shorter, at 4110s = 1.14h
+// (840s of synthesis in place of the last two terms). So X video's 7.13h is
+// still what this is sized against and the constant does not move.
 const IN_FLIGHT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
