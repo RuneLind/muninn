@@ -284,6 +284,9 @@ describe("runCaptureOneShot", () => {
       finish(status: "ok" | "error", attrs?: Record<string, unknown>) {
         calls.push({ op: `finish:${status}`, attrs });
       },
+      event(label: string, attrs?: Record<string, unknown>) {
+        calls.push({ op: "event", label, attrs });
+      },
       addChildSpan() { return "child"; },
       addSubSpan() { return "sub"; },
     } as unknown as Tracer;
@@ -545,6 +548,36 @@ describe("runCaptureOneShot", () => {
     await runCaptureOneShot(h.opts);
     expect(calls).toBe(0);
     expect(h.calls.some((c) => String(c.label).includes("takeaway-check"))).toBe(false);
+  });
+
+  test("a grounded check returns the connector's result object itself", async () => {
+    const fake = fakeResult({ result: WITH_CLOSER });
+    const h = harness({
+      oneShot: async () => fake,
+      takeawayCheck: async () => verdictJson({ verdict: "grounded" }),
+    });
+    expect(await runCaptureOneShot(h.opts)).toBe(fake);
+  });
+
+  test("the check's spend is accumulated onto the run, its identity is not", async () => {
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async () => verdictJson({ verdict: "grounded" }),
+    });
+    await runCaptureOneShot(h.opts);
+    const spend = h.attached.find((m) => m.inputTokens === 4_000 && m.outputTokens === 200)!;
+    expect(spend).toBeDefined();
+    expect(spend.model).toBeUndefined();
+    expect(spend.botName).toBeUndefined();
+  });
+
+  test("a SUMMARY pass with no closer records the absence as an event; the selection pass stays silent", async () => {
+    const summary = harness({ oneShot: async () => fakeResult({ result: "CATEGORY: tech\n\nSUMMARY:\nno closer here" }) });
+    await runCaptureOneShot(summary.opts);
+    expect(summary.calls.find((c) => c.op === "event" && c.label === "claude:takeaway-check")!.attrs).toEqual({ takeaway: "no-takeaway" });
+    const select = harness({ pass: "claude:select", oneShot: async () => fakeResult({ result: "[3, 7]" }) });
+    await runCaptureOneShot(select.opts);
+    expect(select.calls.some((c) => c.op === "event")).toBe(false);
   });
 
   test("takeawayCheck: false skips the check", async () => {

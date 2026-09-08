@@ -233,9 +233,17 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
     // (the envelope parser runs after this in every vertical), so an
     // ungrounded closer never reaches the store, the ingest or the card. A
     // failed check keeps the text and stamps the outcome; it never fails the
-    // capture. A result with no closer (a selection pass) opens no span at all.
+    // capture. A result with no closer opens no span: the selection pass never
+    // has one, so it is silent there, while the SUMMARY pass records the
+    // absence as an event — a marker the model has drifted away from would
+    // otherwise look, on /traces, exactly like a check that passed everywhere.
+    // It runs AFTER the summary call and OUTSIDE the YouTube two-pass budget,
+    // bounded by the router's own timeout (and its CLI fallback); the usage is
+    // accumulated onto the run, since the run's spend fields are the whole job.
     let text = result.result;
-    if (opts.takeawayCheck !== false && splitClosingTakeaway(text) !== null) {
+    if (opts.takeawayCheck !== false && splitClosingTakeaway(text) === null) {
+      if (opts.pass === undefined) tracer.event("claude:takeaway-check", { takeaway: "no-takeaway" });
+    } else if (opts.takeawayCheck !== false) {
       const spanLabel = `${opts.pass ?? "claude"}:takeaway-check`;
       tracer.start(spanLabel, { source });
       const checked = await groundTakeaway(text, {
@@ -251,6 +259,8 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
         ...(checked.issues.length > 0 ? { takeawayIssues: checked.issues.join(" | ") } : {}),
         ...(checked.usage ?? {}),
       });
+      // Spend only: the run's model/connector identity is the summary call's.
+      if (checked.usage) attachRun(jobId, { inputTokens: checked.usage.inputTokens, outputTokens: checked.usage.outputTokens });
       if (checked.outcome === "rewritten") {
         captureLog.info("Capture {source} job {jobId}: closing takeaway rewritten ({count} unsupported clause(s))", {
           source,
