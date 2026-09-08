@@ -1373,6 +1373,25 @@ describe("the dense scan path", () => {
     expect(existsSync(mediaDirFor(jobId))).toBe(false);
   });
 
+  test("the summary prompt carries what the selection pass said each frame IS", async () => {
+    selectionAnswer = JSON.stringify([
+      { tSeconds: 10, category: "chart", reason: "the usage-growth chart" },
+      { tSeconds: 35, category: "diagram", reason: "" },
+    ]);
+    await run({ frames: true, visualDetail: "detailed" });
+
+    // One line per frame, the selection pass's own words. Without them the
+    // summary call gets a bare list of paths and has to re-derive from the
+    // pictures what a pass that already read them had written down.
+    expect(lastPrompt).toContain("t=00:00:10 ");
+    expect(lastPrompt).toContain(" — chart: the usage-growth chart");
+    // A reasonless entry keeps its category and no dangling colon.
+    expect(lastPrompt).toContain(" — diagram\n");
+    expect(lastPrompt).not.toContain("diagram: \n");
+    // And under `detailed` the rules ask for those categories by default.
+    expect(lastPrompt).toMatch(/chart or a diagram MUST appear/);
+  });
+
   test("SHEETS failure: its own stage, with the scan's real counts", async () => {
     sheetsThrow = new Error("tile filter died");
     const jobId = await run({ frames: true });

@@ -224,6 +224,27 @@ const REAL_DEPS: YouTubeSummarizerDeps = {
 };
 
 /**
+ * Label each re-grabbed frame with what the selection pass said it is.
+ *
+ * `<category>: <reason>`, or the category alone where the pass gave no reason —
+ * a bare colon reads as a truncated sentence. A frame with no matching entry
+ * keeps no note at all rather than an empty one, so the prompt line is exactly
+ * what it was before notes existed.
+ */
+function attachSelectionNotes(
+  frames: readonly CaptureFrame[],
+  selection: readonly SelectionEntry[],
+): CaptureFrame[] {
+  const bySecond = new Map(selection.map((e) => [e.tSeconds, e] as const));
+  return frames.map((frame) => {
+    const entry = bySecond.get(frame.tSeconds);
+    if (entry === undefined) return frame;
+    const note = entry.reason === "" ? entry.category : `${entry.category}: ${entry.reason}`;
+    return { ...frame, note };
+  });
+}
+
+/**
  * A two-pass capture whose SELECTION pass left too little of the stated budget
  * for the summary call to finish inside it.
  *
@@ -776,7 +797,7 @@ export async function summarizeVideo(
             // model call returned rather than held across it.
             stage = "regrab_failed";
             updateStatus(jobId, "extracting_frames");
-            frames = await framesQueue.run(FRAMES_QUEUE_KEY, () =>
+            const regrabbed = await framesQueue.run(FRAMES_QUEUE_KEY, () =>
               resolved.regrabFrames({
                 file: videoPath!,
                 seconds: selection.map((e) => e.tSeconds),
@@ -784,6 +805,13 @@ export async function summarizeVideo(
                 height: CAPTURE_FRAME_HEIGHT,
               }),
             );
+            // The selection pass's own answer, carried into the summary prompt:
+            // it has already looked at every one of these and said what it is
+            // and why it chose it, and a bare list of paths threw that away. The
+            // note is attached HERE rather than inside the re-grab, so the
+            // extractor stays a file operation and the manifest stays this
+            // vertical's business.
+            frames = attachSelectionNotes(regrabbed, selection);
             // Early release, and deliberately NOT in a `finally` around the
             // re-grab: a re-grab that threw falls back to the cadence extractor,
             // which needs the same file. It unlinks the video itself, and the

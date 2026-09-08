@@ -94,6 +94,14 @@ describe("the policy the prompt states", () => {
 
     const detailed = visualDetailPolicy("detailed", YOUTUBE_FRAME_SOURCE, YT_ID);
     expect(detailed.rules).toContain("## Visual reference");
+    // Detailed asks for the offered charts and diagrams by DEFAULT, because the
+    // measured gap was never selection — all three reference charts reached the
+    // manifest every run — but what the summary then chose to quote.
+    expect(detailed.rules).toContain("chart");
+    expect(detailed.rules).toContain("diagram");
+    expect(detailed.rules).toMatch(/MUST/);
+    // `selected` states no such rule: eight slots cannot absorb every chart.
+    expect(visualDetailPolicy("selected", YOUTUBE_FRAME_SOURCE, YT_ID).rules).not.toMatch(/MUST/);
     expect(detailed.rules).toContain(`${MAX_INLINE_SLIDES} frames inline`);
     expect(detailed.rules).toContain(`${MAX_DETAILED_VISUALS} distinct frames`);
   });

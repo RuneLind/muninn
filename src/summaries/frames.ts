@@ -185,6 +185,17 @@ export interface CaptureFrame {
   readonly path: string;
   /** The cadence time this frame was taken at, whole seconds — also its file name. */
   readonly tSeconds: number;
+  /**
+   * One clause about what this frame IS, appended to its line in
+   * {@link framesPromptSection}'s list — `<category>: <reason>` where a
+   * selection pass produced one.
+   *
+   * Optional and absent everywhere but the YouTube dense path, so every other
+   * vertical's prompt is byte-identical. It exists because that pass has already
+   * read the frame and decided why it is worth reading again, and handing the
+   * summary call a bare list of paths threw that answer away.
+   */
+  readonly note?: string;
 }
 
 /** Thrown when an id that cannot be part of an address is asked to become one. */
@@ -305,7 +316,9 @@ export function framesPromptSection(
       `A frames prompt policy may quote at most ${MAX_INLINE_SLIDES} frames inline, not ${policy.maxInline}`,
     );
   }
-  const list = frames.map((f) => `t=${formatHms(f.tSeconds)} ${f.path}`).join("\n");
+  const list = frames
+    .map((f) => `t=${formatHms(f.tSeconds)} ${f.path}${f.note ? ` — ${f.note}` : ""}`)
+    .join("\n");
   const spacing = medianGapSec(frames);
   const cadence = spacing === null ? "" : `, one every ~${spacing} s of the talk`;
   const rules =

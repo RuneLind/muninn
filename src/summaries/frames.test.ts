@@ -184,6 +184,21 @@ describe("framesPromptSection", () => {
     expect(s).toContain("t=00:23:10 is the file 1390.jpg");
   });
 
+  test("a frame's NOTE rides its list line, and a frame without one is unchanged", () => {
+    // The selection pass already decided what each frame IS and why it picked
+    // it, and that answer was thrown away: the summary call saw a bare list of
+    // paths and had to re-derive it from the pictures. One line per frame is the
+    // whole lever.
+    const noted = [
+      { path: "/tmp/w/frames/130.jpg", tSeconds: 130, note: "chart: the usage-growth chart" },
+      { path: "/tmp/w/frames/165.jpg", tSeconds: 165 },
+    ];
+    const s = framesPromptSection(YOUTUBE_FRAME_SOURCE, YT_ID, noted);
+    expect(s).toContain("t=00:02:10 /tmp/w/frames/130.jpg — chart: the usage-growth chart");
+    expect(s).toContain("t=00:02:45 /tmp/w/frames/165.jpg\n");
+    expect(s).not.toContain("165.jpg —");
+  });
+
   test("called with NO policy the section is byte-identical to the one that shipped before policies", () => {
     // The regression this pins is a refactor, not a feature: `framesPromptSection`
     // grew an optional policy argument for YouTube's Selected/Detailed choice,

@@ -179,7 +179,12 @@ export function visualDetailPolicy(
       `${quote}\nOne sentence on what this frame is for.\n\n` +
       `At most ${caps.maxInline} frames inline and ${caps.maxTotal} distinct frames in the summary as a whole, ` +
       `the appendix included. Never repeat a frame between the body and the appendix, never pad toward the ` +
-      `limit, and never keep two frames of the same slide at slightly different scroll positions.`,
+      `limit, and never keep two frames of the same slide at slightly different scroll positions.\n\n` +
+      `Within those limits, every frame whose note above calls it a chart or a diagram MUST appear somewhere ` +
+      `in the summary — inline where its point is made, otherwise in the ${VISUAL_REFERENCE_HEADING} section — ` +
+      `unless it shows the same thing as one you have already quoted. Those are the frames a reader cannot ` +
+      `reconstruct from the words. If more of them are offered than the limits allow, keep the clearest and ` +
+      `leave the rest out silently.`,
   };
 }
 
