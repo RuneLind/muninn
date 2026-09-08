@@ -92,12 +92,16 @@ export function splitClosingTakeaway(text: string): SplitTakeaway | null {
     if (!lines[i]!.trimStart().startsWith(TAKEAWAY_MARKER)) continue;
     if (inProtectedRegion(starts[i]!, code)) continue;
     // An INDENTED code block (four spaces or a tab) is code too, and
-    // `markdownCodeRegions` covers fences only. Enumerated (round 3) over
-    // (indent ≥ 4, previous non-blank line is a list item): four spaces under
-    // a list item is list CONTINUATION in CommonMark, not code, so only an
-    // indented line whose nearest non-blank predecessor is not a list item is
-    // skipped. A top-level closer, a two-space list closer and a nested-list
-    // closer are all found.
+    // `markdownCodeRegions` covers fences only. The rule is two-valued on
+    // purpose: an indented marker line is skipped unless its nearest non-blank
+    // predecessor is a list item, because four spaces under `- item` is list
+    // continuation in CommonMark, and a nested-list closer must still be
+    // checked. It does NOT measure the indent against that list's content
+    // indent, so an indented code block that sits under a list item (six or
+    // more spaces below `- item`), or a block whose first line is itself a
+    // bullet, is read as list content and its marker line can be taken as the
+    // closer. Accepted residual: the structure rules order every dictated
+    // artifact into a FENCED block, which this walk does protect.
     if (/^( {4}|\t)/.test(lines[i]!) && !precededByListItem(lines, i)) continue;
     start = i;
     break;
