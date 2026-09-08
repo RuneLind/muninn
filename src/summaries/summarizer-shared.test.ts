@@ -43,7 +43,7 @@ Instructions:
    - **Bold** for key terms; bullet lists for enumerations, prefixed with a fitting emoji (as in \`- 🧪 Evals catch…\`).
    - Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).
    - Keep it concise but comprehensive.
-   - End with a closing blockquote takeaway: \`> 💬 **Takeaway:** …\` — the 1–3 most surprising or headline revelations, distilled into one or two punchy sentences.`;
+   - End with a closing blockquote takeaway: \`> 💬 **Takeaway:** …\` — one or two sentences that COMPRESS the summary above into the source's own conclusion, in the source's own emphasis. Every clause must restate something the \`## Key takeaways\` bullets or the body already say; never add a cause, a ranking, a superlative or a reversal the source did not state, and prefer what the speaker actually concluded over a more memorable line. A reader who reads only this line must learn nothing the body would contradict.`;
   // Hardcoded literals on purpose: this test is the change-detector that forces
   // any edit to SUMMARY_STRUCTURE_BULLETS through an intentional review.
   expect(built).toBe(expected);
