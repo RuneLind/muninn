@@ -8,8 +8,9 @@ Chrome extension that sends YouTube videos to Muninn for AI-powered summarizatio
 2. Click the extension icon
 3. Pick a **Kind** — what the summary should be
 4. Tick **Slides** if you want the summary to quote what is on screen
-5. Click "Summarize"
-6. Muninn dashboard opens in a new tab with the summary streaming in real-time
+5. With Slides on, pick a **Visuals** policy — how much of the video to show
+6. Click "Summarize"
+7. Muninn dashboard opens in a new tab with the summary streaming in real-time
 
 The server fetches the transcript, summarizes it with Claude, categorizes it, and indexes it in the knowledge base for later search.
 
@@ -45,6 +46,27 @@ whose connector cannot read files answers 503 and the popup says so. Videos
 under a minute skip frames (there is nothing on screen a one-minute clip's
 transcript does not already carry); the cap is 3 hours.
 
+### Visuals
+
+A second axis, shown only while **Slides** is ticked and remembered under
+`visualDetail`. It says how much of the video the summary may show; the **Kind**
+still says how the summary is written, and the two combine freely.
+
+- **Selected** (the default) quotes up to 8 visuals inline, where they help
+  explain, compare, verify or revisit a point. A speaker talking through a chart
+  is a reason to show the chart.
+- **Detailed** keeps up to 20 in total — the same 8 inline, and the rest under a
+  `## Visual reference` section with a short caption each, ordered by timestamp.
+
+Muninn holds the answer to those numbers: it removes any image reference that
+names a frame this capture did not extract, repeats one, or goes past the
+policy's cap, so a stored summary never promises a picture the dashboard cannot
+serve. A Muninn that does not offer the choice shows no such control, and the
+capture runs Selected. When the options cannot be read at all, the picker offers
+**Selected** alone — the policy every Muninn runs: an instance too old to know
+the setting ignores it rather than refusing it, so a Detailed pick there would
+quietly produce a Selected capture.
+
 ## Install
 
 1. Open `chrome://extensions/`
@@ -75,9 +97,10 @@ Sends `VIDEO_PAGE` messages to the background worker on navigation.
 When clicked on a YouTube video page:
 1. Asks the background worker for cached video state (`GET_STATE`)
 2. Falls back to querying the content script directly (`GET_VIDEO_INFO`)
-3. Asks the worker for `GET_OPTIONS` and renders the **Kind** picker plus the
-   **Slides** tick from the answer, restoring the remembered choices against it
-   (`summaryKind` and `frames` in `chrome.storage.sync`)
+3. Asks the worker for `GET_OPTIONS` and renders the **Kind** picker, the
+   **Slides** tick and the **Visuals** picker from the answer, restoring the
+   remembered choices against it (`summaryKind`, `frames` and `visualDetail` in
+   `chrome.storage.sync`)
 4. Shows the video title and a "Summarize" button
 5. On click, sends `SUMMARIZE` to the background worker
 6. Background worker POSTs to the API and opens the dashboard
@@ -94,7 +117,9 @@ Caches video info per tab (used by the popup for fast access). Handles two actio
 
 `SUMMARIZE`:
 1. Reads `muninnUrl` from settings
-2. POSTs to `/api/youtube/summarize` with `{ title, url, video_id, kind, frames }`
+2. POSTs to `/api/youtube/summarize` with
+   `{ title, url, video_id, kind, frames, visual_detail? }` — `visual_detail` is
+   omitted entirely for a Muninn that does not offer the choice
 3. Opens the dashboard YouTube page with the job ID
 
 Declared `"type": "module"` in the manifest, since it imports `capture-rules.js`.
@@ -140,6 +165,9 @@ the worker or the manifest, reload the unpacked extension and confirm:
   bot), the **Slides** tick renders dimmed with the line "Slides are off: this
   Muninn's summarizer bot uses a connector that cannot read frames." — and
   **Deep** is absent from the **Kind** picker on that bot
+- **the Visuals picker appears only with Slides ticked**, keeps its value across
+  a close and reopen, and a **Detailed** capture's summary really carries a
+  `## Visual reference` section on `/summaries`
 - **remembering a kind this Muninn no longer offers**: pick Deep on a bot that
   offers it, then point **Muninn URL** at one that does not. The picker falls
   back and says so ("…is not offered here — using Standard.")
@@ -152,7 +180,12 @@ The extension talks to two endpoints. First, the picker:
 
 ```
 GET /api/youtube/options
-→ { kinds: [{ id, label }, …], default_kind, frames: { supported } }
+→ {
+    kinds: [{ id, label }, …],
+    default_kind,
+    frames: { supported },
+    visual_detail: { supported, default, options: [{ id, label }, …] }
+  }
 ```
 
 Then the capture:
@@ -165,7 +198,8 @@ Content-Type: application/json   (required — 415 otherwise)
   url: "https://www.youtube.com/watch?v=...",
   video_id: "dQw4w9WgXcQ",
   kind: "standard",
-  frames: false
+  frames: false,
+  visual_detail: "selected"    // optional; absent means "selected"
 }
 ```
 
@@ -178,6 +212,7 @@ Refusals carry a prose `error` and a machine `code` the popup renders as-is:
 | 400 `bad_video_id` | `video_id` is not 11 URL-safe base64 characters |
 | 400 `bad_frames` | `frames` was sent as something other than `true`/`false` |
 | 400 `bad_kind` | `kind` is not one of the kinds this Muninn offers |
+| 400 `bad_visual_detail` | `visual_detail` was present and was not `selected` or `detailed` — a blank string included |
 | 415 `bad_content_type` | the POST was not `application/json` (the extension always sends it) |
 | 503 `frames_unsupported` | the summarizer bot's connector cannot read the frames |
 | 200 `duplicate` | already captured — the body carries the existing document |

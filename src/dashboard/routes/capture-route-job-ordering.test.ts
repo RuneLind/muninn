@@ -72,7 +72,11 @@ mock.module("../../tiktok/summarizer.ts", () => ({
 let youtubeSummarizeCalls = 0;
 /** The options the LAST started YouTube capture was handed — `frames` and the
  *  resolved summary KIND ride on them. */
-let lastYouTubeOpts: { frames?: boolean; preset?: { id: string; instruction?: string } } | null = null;
+let lastYouTubeOpts: {
+  frames?: boolean;
+  preset?: { id: string; instruction?: string };
+  visualDetail?: string;
+} | null = null;
 /**
  * Held open by the in-flight cases: the route's claim lives exactly as long as
  * this promise, so a case that wants a SECOND POST to land while a capture is
@@ -906,6 +910,17 @@ describe("YouTube: the summary KIND (`/api/youtube/options` + `kind`)", () => {
       ],
       default_kind: "standard",
       frames: { supported: true },
+      // The visual-coverage axis is a property of THIS code, not of the bot, so
+      // it is offered whatever the connector — the popup renders its control
+      // from here rather than from a catalog of its own.
+      visual_detail: {
+        supported: true,
+        default: "selected",
+        options: [
+          { id: "selected", label: "Selected" },
+          { id: "detailed", label: "Detailed" },
+        ],
+      },
     });
   });
 
@@ -1066,6 +1081,206 @@ describe("YouTube: the summary KIND (`/api/youtube/options` + `kind`)", () => {
     expect(ytState.getRecentJobs().length).toBe(before);
     expect(youtubeSummarizeCalls).toBe(0);
   });
+});
+
+describe("YouTube: the VISUAL DETAIL policy (`visual_detail`)", () => {
+  const YT_ID = "dQw4w9WgXcQ";
+  const YT_URL = `https://www.youtube.com/watch?v=${YT_ID}`;
+
+  test("an absent value is `selected`, and it reaches the capture", async () => {
+    // The compatible default: every client written before this axis existed
+    // sends no such key, and must keep the capture it has always had.
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+    expect(res.status).toBe(200);
+    expect(lastYouTubeOpts?.visualDetail).toBe("selected");
+  });
+
+  test("`detailed` reaches the capture", async () => {
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      frames: true,
+      visual_detail: "detailed",
+    });
+    expect(res.status).toBe(200);
+    expect(lastYouTubeOpts?.visualDetail).toBe("detailed");
+  });
+
+  test("a non-string is 400 bad_visual_detail, before the listing and before a job", async () => {
+    let listingReads = 0;
+    knowledgeApiImpl = async () => { listingReads++; return { documents: [] }; };
+    const before = ytState.getRecentJobs().length;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      visual_detail: 42,
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "bad_visual_detail" });
+    expect(listingReads).toBe(0);
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("an unknown value is 400 bad_visual_detail, and its `error` is prose", async () => {
+    let listingReads = 0;
+    knowledgeApiImpl = async () => { listingReads++; return { documents: [] }; };
+    const before = ytState.getRecentJobs().length;
+
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      visual_detail: "nope",
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.code).toBe("bad_visual_detail");
+    // The popup renders `detail` then `error`, so `error` must not be the token.
+    expect(body.error).toBe('Unknown visual detail: "nope"');
+    expect(listingReads).toBe(0);
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("a PRESENT but blank value is refused too, never quietly the default", async () => {
+    // A blank string is a picker that failed to fill. Running the cheaper policy
+    // while the reader believes they asked for the fuller one is exactly the
+    // silent wrong answer the `kind` blank check exists for.
+    const before = ytState.getRecentJobs().length;
+    for (const blank of ["", "   "]) {
+      const res = await post(ytApp(), "/api/youtube/summarize", {
+        url: YT_URL,
+        video_id: YT_ID,
+        visual_detail: blank,
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()) as Record<string, unknown>).toMatchObject({
+        code: "bad_visual_detail",
+      });
+    }
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("`detailed` with slides OFF is accepted and inert — the policy is not a frames switch", async () => {
+    // Accepted because it is a value this instance offers; inert because the
+    // summarizer only consults it where frames came out. The options endpoint
+    // reports the capability unconditionally for the same reason: it is a
+    // property of this code, not of the connector.
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      visual_detail: "detailed",
+    });
+    expect(res.status).toBe(200);
+    expect(lastYouTubeOpts?.frames).toBe(false);
+    expect(lastYouTubeOpts?.visualDetail).toBe("detailed");
+  });
+
+  test("a good visual detail does not rescue a bad kind — one 400, no job", async () => {
+    const before = ytState.getRecentJobs().length;
+    const res = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL,
+      video_id: YT_ID,
+      kind: "should-i-watch",
+      visual_detail: "detailed",
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ code: "bad_kind" });
+    expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+});
+
+/**
+ * Read an open SSE response until `until` is satisfied or the budget runs out —
+ * the `summary-vertical.test.ts` helper, which cannot be imported from a test
+ * file, so it is spelled again here.
+ */
+async function readFrames(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  until: (text: string) => boolean,
+  budgetMs: number,
+): Promise<string> {
+  const dec = new TextDecoder();
+  let text = "";
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (until(text)) return text;
+    const chunk = await Promise.race([reader.read(), Bun.sleep(100).then(() => "timeout" as const)]);
+    if (chunk === "timeout") continue;
+    if (chunk.done) break;
+    text += dec.decode(chunk.value);
+  }
+  return text;
+}
+
+describe("YouTube: the REWRITTEN summary reaches the card, live and after a reload", () => {
+  const YT_ID = "dQw4w9WgXcQ";
+  const YT_URL = `https://www.youtube.com/watch?v=${YT_ID}`;
+
+  /**
+   * The two flags that carry the visual-reference rewrite to a live card and to
+   * a reloaded one — `completeReplacesText` (`src/youtube/state.ts`, which
+   * carries the reasoning) and `completeCarriesSummary` on this route's
+   * `registerSummaryVertical` call.
+   *
+   * Driven through the REAL route: a `Bun.serve` on an ephemeral port and a
+   * `fetch` of the SSE stream, read event by event. That is the only place the
+   * pair is observable together — the store answers one half and the route the
+   * other, and a test holding either in isolation passes with the other undone.
+   */
+  const STREAMED = `A point.\n\n![Slide at 00:16:39](/api/frames/youtube/${YT_ID}/999.jpg)\n\nSTREAMED-ONLY-LINE\n`;
+  const REWRITTEN = `A point.\n\nREWRITTEN-BODY\n`;
+
+  test("the live card is handed the rewritten body, and so is a card that reloads after it", async () => {
+    const server = Bun.serve({ port: 0, fetch: ytApp().fetch });
+    const base = `http://127.0.0.1:${server.port}`;
+    try {
+      const jobId = ytState.createJob(YT_ID, "A talk", YT_URL);
+      ytState.appendText(jobId, STREAMED);
+
+      // A card attached while the capture is still running — the ordinary case.
+      const liveCtl = new AbortController();
+      const live = await fetch(`${base}/api/youtube/stream/${jobId}`, { signal: liveCtl.signal });
+      const liveReader = live.body!.getReader();
+      const beforeComplete = await readFrames(liveReader, (t) => t.includes("STREAMED-ONLY-LINE"), 3000);
+      // What the reader is looking at when the model finishes: the stream, frame
+      // reference and all.
+      expect(beforeComplete).toContain("999.jpg");
+
+      ytState.completeJob(jobId, REWRITTEN, "ai/rag");
+
+      const terminal = await readFrames(liveReader, (t) => t.includes("event: complete"), 4000);
+      // The `complete` event CARRIES the rewritten body, which is what lets the
+      // live card swap out what it accumulated. Without `completeReplacesText`
+      // this is a bare `{}` and the card keeps quoting 999.jpg forever.
+      expect(terminal).toContain("event: complete");
+      expect(terminal).toContain("REWRITTEN-BODY");
+      liveCtl.abort();
+
+      // The reload: a second connection, after the job settled.
+      const again = await fetch(`${base}/api/youtube/stream/${jobId}`);
+      const replayReader = again.body!.getReader();
+      const replay = await readFrames(replayReader, (t) => t.includes("event: complete"), 3000);
+      // Both halves of the replay are the rewritten body: the `text_delta` that
+      // repaints the card, and the terminal event beside it.
+      expect(replay).toContain("REWRITTEN-BODY");
+      expect(replay).not.toContain("999.jpg");
+      expect(replay).not.toContain("STREAMED-ONLY-LINE");
+      // `completeCarriesSummary` is what puts it on the terminal event too — a
+      // bare `{}` there leaves a client that reads only the complete payload
+      // (the TikTok-shaped one) with nothing.
+      const completeFrame = replay.slice(replay.indexOf("event: complete"));
+      expect(completeFrame).toContain("REWRITTEN-BODY");
+      await replayReader.cancel();
+    } finally {
+      server.stop(true);
+    }
+  }, 20_000);
 });
 
 describe("Vimeo capture POST — nothing is created until a capture will run", () => {

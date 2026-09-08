@@ -27,6 +27,11 @@
  *    the Slides tick has `{frames: true|false}` and no `kind` at all. That is
  *    the default, not an error.
  *
+ * The visual-detail axis added later runs the same three rules, plus one of its
+ * own: a Muninn that does not offer the choice gets no such CONTROL and no such
+ * field. Its route would ignore the key rather than refuse it, so a control
+ * rendered there is a choice the reader makes and nothing acts on.
+ *
  * Pure and import-free by construction: it is bundled for a browser, where
  * nothing from `node:` or from the rest of `src/` exists.
  */
@@ -43,6 +48,13 @@ export interface CaptureOptions {
   readonly defaultKind: string;
   readonly framesSupported: boolean;
   /**
+   * How much of the video a slides capture may SHOW, or null on an instance
+   * that does not offer the choice at all (a Muninn from before it existed).
+   * Null means the popup renders no such control and sends no such field —
+   * which is exactly what that instance would ignore anyway.
+   */
+  readonly visualDetail: { options: CaptureKindOption[]; defaultDetail: string } | null;
+  /**
    * Whether these options came from the server. `false` ⇒ the fallback below,
    * and the popup MUST say so — the reader is looking at one kind because
    * Muninn could not be reached, not because Muninn offers one kind.
@@ -52,6 +64,27 @@ export interface CaptureOptions {
 
 /** The id every instance offers, and the one a client sends for "no pick". */
 export const FALLBACK_KIND_ID = "standard";
+
+/** The visual-coverage policy a client sends for "no pick" — and the route's own default. */
+export const FALLBACK_VISUAL_DETAIL_ID = "selected";
+
+/**
+ * The visual-coverage row the fallback offers: the one policy every instance
+ * runs, and nothing else.
+ *
+ * The `kinds` rule, not the `framesSupported` one, and the difference is what
+ * happens to a value the instance does not take. An over-offered Slides tick is
+ * REFUSED — the POST pre-flights the connector and answers 503 with a sentence
+ * the popup renders. `visual_detail` has no such refusal behind it: the instance
+ * that offers no choice is one from BEFORE the field existed, and it ignores the
+ * key, so a reader who picked Detailed against an unreachable options endpoint
+ * would get a Selected capture with nothing said. Offering only what every
+ * instance runs is the same shape as falling back to `standard` alone rather
+ * than to a catalog of every shipped preset.
+ */
+export const FALLBACK_VISUAL_DETAIL_OPTIONS: CaptureKindOption[] = [
+  { id: FALLBACK_VISUAL_DETAIL_ID, label: "Selected" },
+];
 
 /**
  * What the popup runs on when the options endpoint cannot be read: Standard
@@ -63,6 +96,10 @@ export const FALLBACK_CAPTURE_OPTIONS: CaptureOptions = {
   kinds: [{ id: FALLBACK_KIND_ID, label: "Standard" }],
   defaultKind: FALLBACK_KIND_ID,
   framesSupported: true,
+  visualDetail: {
+    options: FALLBACK_VISUAL_DETAIL_OPTIONS,
+    defaultDetail: FALLBACK_VISUAL_DETAIL_ID,
+  },
   fromServer: false,
 };
 
@@ -71,6 +108,50 @@ export const OPTIONS_UNREACHABLE_MESSAGE = "Could not reach Muninn options — S
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
+}
+
+/**
+ * `{id, label}` rows out of an untrusted list, or `[]`.
+ *
+ * Shared by the kind picker and the visual-detail picker, so a payload that is
+ * junk in one place cannot be read leniently in the other. A label that is
+ * missing or not a string falls back to the id, which is a usable picker row;
+ * an entry with no id is not a row at all and is dropped.
+ */
+function parseOptionRows(raw: unknown): CaptureKindOption[] {
+  if (!Array.isArray(raw)) return [];
+  const rows: CaptureKindOption[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { id, label } = entry as { id?: unknown; label?: unknown };
+    if (!isNonEmptyString(id)) continue;
+    rows.push({ id, label: isNonEmptyString(label) ? label : id });
+  }
+  return rows;
+}
+
+/**
+ * The visual-detail capability, or null.
+ *
+ * Null on every shape short of a usable one — the field absent (an older
+ * Muninn), `supported` explicitly false, or an options list that parsed to
+ * nothing — because the popup's answer to all three is the same: render no such
+ * control and send no such field, which is what those instances expect.
+ */
+function parseVisualDetail(raw: unknown): CaptureOptions["visualDetail"] {
+  if (typeof raw !== "object" || raw === null) return null;
+  const { supported, options, default: fallback } = raw as {
+    supported?: unknown;
+    options?: unknown;
+    default?: unknown;
+  };
+  if (supported === false) return null;
+  const rows = parseOptionRows(options);
+  if (rows.length === 0) return null;
+  const offered = new Set(rows.map((r) => r.id));
+  const defaultDetail =
+    isNonEmptyString(fallback) && offered.has(fallback) ? fallback : rows[0]!.id;
+  return { options: rows, defaultDetail };
 }
 
 /**
@@ -89,16 +170,15 @@ function isNonEmptyString(value: unknown): value is string {
  */
 export function parseCaptureOptions(payload: unknown): CaptureOptions | null {
   if (typeof payload !== "object" || payload === null) return null;
-  const raw = payload as { kinds?: unknown; default_kind?: unknown; frames?: unknown };
+  const raw = payload as {
+    kinds?: unknown;
+    default_kind?: unknown;
+    frames?: unknown;
+    visual_detail?: unknown;
+  };
   if (!Array.isArray(raw.kinds)) return null;
 
-  const kinds: CaptureKindOption[] = [];
-  for (const entry of raw.kinds) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const { id, label } = entry as { id?: unknown; label?: unknown };
-    if (!isNonEmptyString(id)) continue;
-    kinds.push({ id, label: isNonEmptyString(label) ? label : id });
-  }
+  const kinds = parseOptionRows(raw.kinds);
   if (kinds.length === 0) return null;
 
   const offered = new Set(kinds.map((k) => k.id));
@@ -113,7 +193,13 @@ export function parseCaptureOptions(payload: unknown): CaptureOptions | null {
       ? frames.supported
       : true;
 
-  return { kinds, defaultKind, framesSupported, fromServer: true };
+  return {
+    kinds,
+    defaultKind,
+    framesSupported,
+    visualDetail: parseVisualDetail(raw.visual_detail),
+    fromServer: true,
+  };
 }
 
 /**
@@ -175,13 +261,38 @@ export function pickFrames(stored: unknown, options: CaptureOptions): boolean {
 }
 
 /**
+ * The visual-detail value to SELECT — or null on an instance that does not
+ * offer the choice, which is also the signal to send no such field.
+ *
+ * The {@link pickKind} rule on the other axis: a remembered value the server no
+ * longer offers falls back to the server's default rather than being submitted
+ * blind, so the value the popup shows is always one the route accepts. Unlike
+ * the kind, a fallback here needs no note — the two policies are fixed by the
+ * server's code, so "no longer offered" is not a state a real instance reaches.
+ */
+export function pickVisualDetail(stored: unknown, options: CaptureOptions): string | null {
+  const capability = options.visualDetail;
+  if (!capability) return null;
+  if (isNonEmptyString(stored) && capability.options.some((o) => o.id === stored.trim())) {
+    return stored.trim();
+  }
+  return capability.defaultDetail;
+}
+
+/**
  * The body the background worker POSTs to `/api/youtube/summarize`.
  *
- * Built here rather than in the worker so the two coercions the route cares
+ * Built here rather than in the worker so the three coercions the route cares
  * about are pinned by a test: `frames` is always a real boolean (anything else
- * is 400 `bad_frames`) and `kind` is always a non-empty string (an unknown one
+ * is 400 `bad_frames`), `kind` is always a non-empty string (an unknown one
  * is 400 `bad_kind`, and `undefined` would be dropped by `JSON.stringify` —
- * which the route reads as "not picked", i.e. Standard, silently).
+ * which the route reads as "not picked", i.e. Standard, silently), and
+ * `visual_detail` is either a non-empty string or ABSENT.
+ *
+ * Absent is the load-bearing half of that last one: the route refuses a present
+ * key holding anything it does not offer — including a blank string, which is a
+ * picker that failed to fill — while an absent key is the documented default.
+ * So a popup with nothing to send omits the key rather than sending `""`.
  */
 export function buildSummarizeBody(input: {
   title?: unknown;
@@ -189,12 +300,23 @@ export function buildSummarizeBody(input: {
   videoId: string;
   kind?: unknown;
   frames?: unknown;
-}): { title: string; url: string; video_id: string; kind: string; frames: boolean } {
+  visualDetail?: unknown;
+}): {
+  title: string;
+  url: string;
+  video_id: string;
+  kind: string;
+  frames: boolean;
+  visual_detail?: string;
+} {
   return {
     title: typeof input.title === "string" ? input.title : "",
     url: input.url,
     video_id: input.videoId,
     kind: isNonEmptyString(input.kind) ? input.kind.trim() : FALLBACK_KIND_ID,
     frames: input.frames === true,
+    ...(isNonEmptyString(input.visualDetail)
+      ? { visual_detail: input.visualDetail.trim() }
+      : {}),
   };
 }

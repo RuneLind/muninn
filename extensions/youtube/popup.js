@@ -42,6 +42,7 @@ import {
   parseCaptureOptions,
   pickFrames,
   pickKind,
+  pickVisualDetail,
   restoredKindNote,
 } from './capture-rules.js';
 
@@ -53,6 +54,10 @@ const $ = (sel) => document.querySelector(sel);
 // whatever the server calls its default, which is Standard.
 const FRAMES_KEY = 'frames';
 const KIND_KEY = 'summaryKind';
+// How much of the video a slides capture may SHOW — a second axis, remembered
+// separately from the kind. It is only ever consulted with Slides ticked, so it
+// has no effect on a transcript-only capture and is remembered across both.
+const VISUAL_KEY = 'visualDetail';
 
 /**
  * The Slides label's ordinary tooltip, restored when the tick is usable — READ
@@ -86,7 +91,7 @@ const OPTIONS_READ_TIMEOUT_MS = 5000;
 
 /** Said when the remembered choices could not be read at all. */
 const STORAGE_LOST_MESSAGE =
-  "Could not read the remembered Kind and Slides tick — showing this Muninn's defaults.";
+  "Could not read the remembered Kind, Slides tick and Visuals choice — showing this Muninn's defaults.";
 
 /** Said when the controls themselves could not be painted. */
 const CONTROLS_BROKEN_MESSAGE =
@@ -129,6 +134,19 @@ function renderNotes() {
     el.textContent = panelShown ? text : '';
     el.classList.toggle('hidden', !panelShown || text === '');
   }
+}
+
+/**
+ * Show the Visuals row exactly while it means something: this instance offers
+ * the choice AND slides are ticked. With no frames there is nothing to choose
+ * between, and a control that is always there reads as a setting that always
+ * applies.
+ */
+function renderVisualRow() {
+  const label = $('#lbl-visual');
+  if (!label) return;
+  const ticked = $('#chk-frames')?.checked === true;
+  label.classList.toggle('hidden', !(ticked && captureOptions.visualDetail));
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -246,7 +264,14 @@ async function readControlState() {
   let read;
   try {
     read = await withTimeout(
-      Promise.resolve(chrome.storage.sync.get({ [FRAMES_KEY]: false, [KIND_KEY]: null })).catch(
+      // Every key this popup restores is NAMED here. The object form of
+      // `chrome.storage.sync.get` answers with the shape's keys and nothing
+      // else, so a key left out of it reads back `undefined` however much the
+      // profile has stored — a remembered choice silently replaced by this
+      // instance's default.
+      Promise.resolve(
+        chrome.storage.sync.get({ [FRAMES_KEY]: false, [KIND_KEY]: null, [VISUAL_KEY]: null }),
+      ).catch(
         (err) => {
           console.warn('Could not read the remembered capture settings', err);
           return STORAGE_FAILED;
@@ -365,6 +390,24 @@ function paintControls({ options, stored, notes }) {
   frames.disabled = !options.framesSupported;
   frames.checked = pickFrames(stored[FRAMES_KEY], options);
 
+  // The visuals picker, on the instances that offer one. Guarded rather than
+  // required, the `#lbl-frames` rule: a missing node must cost the reader that
+  // one control, never the whole popup.
+  const visualSelect = $('#sel-visual');
+  if (visualSelect && captureOptions.visualDetail) {
+    visualSelect.replaceChildren(
+      ...captureOptions.visualDetail.options.map((row) => {
+        const option = document.createElement('option');
+        option.value = row.id;
+        option.textContent = row.label;
+        return option;
+      }),
+    );
+    const detail = pickVisualDetail(stored[VISUAL_KEY], captureOptions);
+    if (detail) visualSelect.value = detail;
+  }
+  renderVisualRow();
+
   // A dimmed control with no explanation reads as a bug. The reason is the
   // summarizer bot's CONNECTOR, which is a server fact the reader cannot infer.
   framesNote = frames.disabled ? FRAMES_UNSUPPORTED_NOTE : '';
@@ -405,9 +448,21 @@ function attachControlListeners() {
       .catch((err) => console.warn('Could not save the summary kind', err));
   });
   frames.addEventListener('change', () => {
+    // Ticking Slides is what reveals the Visuals row, so the paint and this
+    // listener both go through `renderVisualRow` rather than each toggling the
+    // class on their own.
+    renderVisualRow();
     chrome.storage.sync
       .set({ [FRAMES_KEY]: frames.checked })
       .catch((err) => console.warn('Could not save the Slides preference', err));
+  });
+  const visualSelect = $('#sel-visual');
+  visualSelect?.addEventListener('change', () => {
+    // The element, not `ev.target` — the same shape the kind listener uses, and
+    // the one that does not depend on how the event was dispatched.
+    chrome.storage.sync
+      .set({ [VISUAL_KEY]: visualSelect.value })
+      .catch((err) => console.warn('Could not save the visual detail preference', err));
   });
 }
 
@@ -425,6 +480,10 @@ async function handleSummarize() {
   const status = $('#status');
   const kindSelect = $('#sel-kind');
   const frames = $('#chk-frames');
+  const visualSelect = $('#sel-visual');
+  // Read once: the frames answer decides both the field it is sent as and
+  // whether the visual-detail field is sent at all.
+  const wantsFrames = pickFrames(frames?.checked, captureOptions);
 
   if (btn) btn.disabled = true;
   if (status) {
@@ -456,7 +515,14 @@ async function handleSummarize() {
         // can only have narrowed since they were rendered, and the route 400s
         // an id it does not offer.
         kind: pickKind(kindSelect?.value, captureOptions),
-        frames: pickFrames(frames?.checked, captureOptions),
+        frames: wantsFrames,
+        // Null on an instance that does not offer the choice, and null with
+        // Slides OFF — the worker then sends no such field. The picker is
+        // hidden without frames, so its value there is whatever the last paint
+        // left in a hidden control, and the policy is consulted only where
+        // frames came out. Sending it anyway would put a value on the trace and
+        // in the 400 surface that nothing this capture did could depend on.
+        visualDetail: wantsFrames ? pickVisualDetail(visualSelect?.value, captureOptions) : null,
       }, (response) => {
         if (response?.error) {
           reject(new Error(response.error));

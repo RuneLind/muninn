@@ -30,10 +30,17 @@
         <!-- This title is the ONE copy of the usable-tick tooltip: popup.js
              reads it off the DOM at load and restores it after a dimmed tick,
              so editing it here is enough. -->
-        <label class="opt" id="lbl-frames" title="Pull one frame per cadence tick (~20s on a 10-minute video, ~180s at the 3-hour cap) and let the summary quote the slides that add something the transcript does not say. Adds a download and a few minutes.">
+        <label class="opt" id="lbl-frames" title="Pull one frame per cadence tick (~20s on a 10-minute video, ~180s at the 3-hour cap) and let the summary quote the frames that help explain, compare, verify or revisit a point. Adds a download and a few minutes.">
           <input type="checkbox" id="chk-frames"> Slides
         </label>
       </div>
+      <!-- How much of the video the summary may SHOW. Revealed only while
+           Slides is ticked, because with no frames there is nothing to choose
+           between. Its own axis, not a summary kind: Deep works with either. -->
+      <label class="opt kind hidden" id="lbl-visual" title="Selected quotes up to 8 visuals inline. Detailed keeps up to 20 in total — 8 inline and the rest under a Visual reference section with captions.">
+        Visuals
+        <select id="sel-visual"></select>
+      </label>
       <!-- Why the Slides tick is dimmed, when it is. -->
       <div id="frames-note" class="note hidden"></div>
       <div id="status" class="hidden"></div>

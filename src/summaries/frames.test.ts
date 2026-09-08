@@ -28,6 +28,7 @@ import {
   formatHms,
   frameSourceByName,
   frameUrlPath,
+  frameQuoteTemplate,
   framesPromptSection,
   framesRootHasEntries,
   framesRootMigrationRuns,
@@ -183,6 +184,67 @@ describe("framesPromptSection", () => {
     expect(s).toContain("t=00:23:10 is the file 1390.jpg");
   });
 
+  test("called with NO policy the section is byte-identical to the one that shipped before policies", () => {
+    // The regression this pins is a refactor, not a feature: `framesPromptSection`
+    // grew an optional policy argument for YouTube's Selected/Detailed choice,
+    // and every existing caller — Vimeo today — must keep the exact prompt it
+    // had. Spelled out in full rather than probed with `toContain`, because a
+    // `toContain` set cannot notice a sentence that went missing.
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", frames)).toBe(
+      "\n\nSlide frames, one every ~1364 s of the talk (read EVERY image below with the Read tool FIRST, " +
+        "batching many Read calls into one turn — never one frame per message):\n" +
+        "t=00:00:26 /work/26.jpg\nt=00:23:10 /work/1390.jpg\n\n" +
+        "When a frame shows a slide that ADDS something the transcript did not say — a diagram, code, a table, " +
+        "a number, a definition on screen — quote it as an image IN PLACE in the summary, right where the point " +
+        "it illustrates is made, using EXACTLY this markdown and nothing else in the alt text:\n" +
+        "![Slide at HH:MM:SS](/api/frames/vimeo/1223642971/<sec>.jpg)\n" +
+        "where <sec> is the integer in that frame's file name (t=00:23:10 is the file 1390.jpg) and HH:MM:SS is " +
+        "its time. At most 8 slides in the whole summary; a speaker-only frame, a title card " +
+        "or a slide the transcript already states in full is not quoted. Never invent a path.",
+    );
+  });
+
+  test("a policy replaces the RULES and nothing else — the frame list and cadence are the seam's", () => {
+    const withPolicy = framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", frames, {
+      maxInline: 8,
+      maxTotal: 20,
+      rules: "RULES FROM THE VERTICAL.",
+    });
+    expect(withPolicy).toContain("t=00:00:26 /work/26.jpg");
+    expect(withPolicy).toContain("one every ~1364 s of the talk");
+    expect(withPolicy.endsWith("\n\nRULES FROM THE VERTICAL.")).toBe(true);
+    expect(withPolicy).not.toContain("ADDS something the transcript did not say");
+  });
+
+  test("a policy may not raise the seam's inline bound", () => {
+    expect(() =>
+      framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", frames, {
+        maxInline: MAX_INLINE_SLIDES + 1,
+        maxTotal: 40,
+        rules: "x",
+      }),
+    ).toThrow(/at most 8 frames inline/i);
+    // The bound itself, not "more than the caller asked for": equal is fine.
+    expect(() =>
+      framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", frames, {
+        maxInline: MAX_INLINE_SLIDES,
+        maxTotal: 40,
+        rules: "x",
+      }),
+    ).not.toThrow();
+  });
+
+  test("frameQuoteTemplate is the ONE spelling of the address a policy may teach", () => {
+    expect(frameQuoteTemplate(YOUTUBE_FRAME_SOURCE, YT_ID)).toBe(
+      `![Slide at HH:MM:SS](/api/frames/youtube/${YT_ID}/<sec>.jpg)`,
+    );
+    // The default section is built from it, so the two can never disagree.
+    expect(framesPromptSection(YOUTUBE_FRAME_SOURCE, YT_ID, frames)).toContain(
+      frameQuoteTemplate(YOUTUBE_FRAME_SOURCE, YT_ID),
+    );
+    expect(() => frameQuoteTemplate(YOUTUBE_FRAME_SOURCE, "../x")).toThrow(FrameIdError);
+  });
+
   test("the quoted shape names the SOURCE, so a youtube prompt cannot ask for a vimeo path", () => {
     const s = framesPromptSection(YOUTUBE_FRAME_SOURCE, YT_ID, frames);
     expect(s).toContain(`![Slide at HH:MM:SS](/api/frames/youtube/${YT_ID}/<sec>.jpg)`);
@@ -312,6 +374,47 @@ describe("keepReferencedFrames", () => {
     expect(existsSync(join(root, "vimeo", "42", "777.jpg"))).toBe(false);
     // The source is a directory level, so two verticals never share an id space.
     expect(existsSync(join(root, "42"))).toBe(false);
+  });
+
+  test("a copy that fails costs THAT frame and nothing else", async () => {
+    // The frame is in the manifest and its file is gone — the work dir swept
+    // early, an EACCES, a full disk. Throwing on the first miss cost the whole
+    // capture its slides through the caller's catch, and left every JPEG copied
+    // before it under the served root with no reference left to serve it.
+    const work = dir();
+    const root = dir();
+    writeFileSync(join(work, "26.jpg"), "A");
+    writeFileSync(join(work, "1390.jpg"), "B");
+    const frames: CaptureFrame[] = [26, 900, 1390].map((t) => ({ path: join(work, `${t}.jpg`), tSeconds: t }));
+    const summary =
+      "![Slide](/api/frames/vimeo/42/26.jpg) ![Slide](/api/frames/vimeo/42/900.jpg) " +
+      "![Slide](/api/frames/vimeo/42/1390.jpg)";
+    expect(await keepReferencedFrames(summary, VIMEO_FRAME_SOURCE, "42", frames, root)).toEqual([26, 1390]);
+    expect(readdirSync(join(root, "vimeo", "42")).sort()).toEqual(["1390.jpg", "26.jpg"]);
+  });
+
+  test("the caller's OWN answer to what the text quotes is what is copied", async () => {
+    // The YouTube vertical's enforcement pass has already decided which quotes
+    // may be served, so the copy takes that list rather than parsing the summary
+    // a second time — two readings of one text is how they come to disagree.
+    const work = dir();
+    const root = dir();
+    writeFileSync(join(work, "26.jpg"), "A");
+    writeFileSync(join(work, "1390.jpg"), "B");
+    const frames: CaptureFrame[] = [26, 1390].map((t) => ({ path: join(work, `${t}.jpg`), tSeconds: t }));
+    const summary = "![Slide](/api/frames/vimeo/42/26.jpg) ![Slide](/api/frames/vimeo/42/1390.jpg)";
+    expect(await keepReferencedFrames(summary, VIMEO_FRAME_SOURCE, "42", frames, root, [1390])).toEqual([1390]);
+    expect(readdirSync(join(root, "vimeo", "42"))).toEqual(["1390.jpg"]);
+  });
+
+  test("a quote inside fenced code is source text, not a frame to keep", async () => {
+    const work = dir();
+    const root = dir();
+    writeFileSync(join(work, "26.jpg"), "A");
+    const frames: CaptureFrame[] = [{ path: join(work, "26.jpg"), tSeconds: 26 }];
+    const summary = "The shape is:\n\n```markdown\n![Slide](/api/frames/vimeo/42/26.jpg)\n```\n";
+    expect(await keepReferencedFrames(summary, VIMEO_FRAME_SOURCE, "42", frames, root)).toEqual([]);
+    expect(existsSync(join(root, "vimeo", "42"))).toBe(false);
   });
 
   test("a summary quoting nothing creates no directory", async () => {

@@ -286,7 +286,8 @@ const FACT_TAG_SCAN_RE = new RegExp(
 );
 const FACT_OPEN_TAG_SCAN_RE = new RegExp(FACT_OPEN_TAG_SOURCE, "g");
 
-interface ProtectedRegion {
+/** A half-open `[start, end)` byte range of a body that is not prose. */
+export interface ProtectedRegion {
   start: number;
   end: number;
 }
@@ -344,11 +345,31 @@ function pushInlineCodeSpans(line: string, base: number, out: ProtectedRegion[])
  * formatter and the bundled reader client already depend on.
  */
 function factProtectedRegions(body: string): ProtectedRegion[] {
-  const regions: ProtectedRegion[] = [];
   const fm = FRONTMATTER_BLOCK_RE.exec(body);
   const fmEnd = fm && fm.index === 0 ? fm[0].length : 0;
-  if (fmEnd > 0) regions.push({ start: 0, end: fmEnd });
+  const regions: ProtectedRegion[] = fmEnd > 0 ? [{ start: 0, end: fmEnd }] : [];
+  regions.push(...markdownCodeRegions(body, fmEnd));
+  return regions;
+}
 
+/**
+ * The regions of a markdown body where text is CODE rather than prose: fenced
+ * blocks (marker-matched, CommonMark closer-length rule, an unterminated fence
+ * running to EOF) and inline backtick spans.
+ *
+ * Exported because every pass that rewrites markdown needs the same answer and a
+ * second fence detector is how the two drift apart: the fact-check strip above
+ * reads it, and so does the frame-quote pass in `src/summaries/visual-detail.ts`,
+ * where a `![Slide …](/api/frames/…)` inside a fence is a documented example
+ * rather than a picture to count, cap and copy. Offsets are into `body`, so a
+ * caller that already knows a quote's index only has to ask
+ * {@link inProtectedRegion}.
+ *
+ * `from` skips everything before that offset, which must be a LINE boundary —
+ * the frontmatter block the caller has already claimed.
+ */
+export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
+  const regions: ProtectedRegion[] = [];
   let offset = 0;
   let fenceStart = -1;
   let fenceMarker = "";
@@ -356,7 +377,7 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
   for (const line of body.split("\n")) {
     const lineStart = offset;
     offset += line.length + 1;
-    if (lineStart < fmEnd) continue;
+    if (lineStart < from) continue;
     const m = /^\s*(`{3,}|~{3,})/.exec(line);
     if (m) {
       const run = m[1]!;
@@ -383,7 +404,8 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
   return regions;
 }
 
-function inProtectedRegion(pos: number, regions: ProtectedRegion[]): boolean {
+/** Whether this offset falls inside any of the regions {@link markdownCodeRegions} returned. */
+export function inProtectedRegion(pos: number, regions: readonly ProtectedRegion[]): boolean {
   return regions.some((r) => pos >= r.start && pos < r.end);
 }
 

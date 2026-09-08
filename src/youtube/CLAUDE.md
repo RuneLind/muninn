@@ -15,7 +15,8 @@ into huginn.
 | `kinds.ts` | `youtubeCaptureKinds` — the offer set this vertical narrows, called by the options route, the `bad_kind` check and the replay harness |
 | `extension-options-rules.ts` | The popup's rules, pure and import-free — payload validation, restore-and-revalidate, the restore NOTE, the POST body. Emitted into `extensions/youtube/capture-rules.js` by `bun run build:extension` |
 | `extension-build.ts` | That emitter. Bundles for the browser and normalizes bun's cwd-relative module banner, so the byte gate cannot depend on where it ran |
-| `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam this vertical uses whole — the cadence, the served root, the URL shape, the prompt section, the id gate, `keepReferencedFrames`, `removeKeptFramesForDocument`, `extractCadenceFramesFromFile`. See `src/vimeo/CLAUDE.md` for its full contract |
+| `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam this vertical uses whole — the cadence, the served root, the URL shape, the prompt section (and its optional `FramesPromptPolicy`), the id gate, `keepReferencedFrames`, `removeKeptFramesForDocument`, `extractCadenceFramesFromFile`. See `src/vimeo/CLAUDE.md` for its full contract |
+| `../summaries/visual-detail.ts` | The Selected/Detailed policy: the enum, the caps, the rubric the prompt states, and `enforceVisualReferences`/`dropFrameReferences`, the pass that holds the answer to it. See **Visual detail** below |
 
 The route is `src/dashboard/routes/youtube-routes.ts`; the huginn half is the
 `youtube` push source (`main/ingest/youtube.py`, `POST /api/youtube/ingest`,
@@ -289,12 +290,132 @@ its end), and a completion log line naming the kind, the connector's OWN
 reported model (`ClaudeExecResult.model`, `unknown` when it names none) and the
 requested one. Never infer the observed model from the request.
 
+## Visual detail
+
+**How much of the video a slides capture may SHOW is a second axis, orthogonal
+to the kind** — `visual_detail` on the route body, absent ⇒ `selected`. A
+non-string, an unknown id, or a PRESENT-but-blank string is **400
+`bad_visual_detail`**, raised beside the `frames` check and so above the bot
+resolution, the huginn listing read and `createJob` (the `bad_kind` ordering, for
+the `bad_kind` reasons). It is validated even with slides OFF, where it changes
+nothing: the value is still either one this instance offers or one it does not,
+and accepting a typo because of an unrelated field is worse than a 400. Deep
+combines with either policy; the kind says how the summary is WRITTEN.
+
+Both halves live in `src/summaries/visual-detail.ts` — the prompt states the
+caps, and the pass enforces exactly those numbers on the answer:
+
+| Policy | Inline | Total | Appendix |
+|---|---|---|---|
+| `selected` (default) | 8 | 8 | none |
+| `detailed` | 8 | 20 | `## Visual reference`, before `## Transcript` |
+
+**The rubric changed, and that is the point of the PR.** "A frame that ADDS
+something the transcript did not say" excluded exactly the frames a talk is
+about: a speaker reading their own chart aloud disqualified the chart. It is now
+"helps explain, compare, verify or revisit a substantive point", charts,
+diagrams, code, tables and legible article excerpts are visual evidence, and a
+presenter's face in the frame disqualifies nothing (the reference video is an
+article walkthrough with an inset presenter). Twenty is an initial product limit
+to evaluate, not a measured optimum, and `MAX_INLINE_SLIDES` is NOT raised —
+`framesPromptSection` throws on a policy that tries.
+
+**How the vertical opts in:** `framesPromptSection` (the source-neutral seam)
+grew an optional POLICY argument that replaces its rules paragraph and nothing
+else. Called without one it is byte-identical to what shipped before policies —
+Vimeo and every other caller — and a test pins that literally rather than by
+`toContain`. The policy is built only where frames CAME OUT, because building it
+needs an address and the seam's contract is that a frames-off capture never asks
+the id gate anything.
+
+**Then the answer is held to it.** `enforceVisualReferences` walks every quote of
+a frames address in the summary's PROSE and removes, deterministically and in
+document order: a second that was never extracted, another video's id, another
+source's frames, a non-canonical spelling (`047.jpg` — the file is `47.jpg` and
+the route serves exactly that), a repeat of a second already kept, and anything
+past `maxInline` (inline) or `maxTotal` (anywhere). Under `selected` there is no
+appendix, so every quote counts against the one cap. ⚠️ **It runs on every
+capture, frames on or off** — with nothing extracted, a frames address is by
+definition invented, and a transcript-only summary must not promise pictures.
+Four rules it lives by, each of them a way the first version disagreed with
+itself:
+
+- **A quote is what the COPY would serve, from one pattern.** `frameAddressRegExp`
+  (`src/summaries/frames.ts`) — a markdown image OR link whose target starts with
+  `/api/frames/` (any source) or this source's legacy prefix, any file name — is
+  what this pass parses, what `keepReferencedFrames` keeps by and what the
+  export rewrites by. A narrower pattern here left the link form and an alt
+  carrying `]` uncapped, unremovable and copied anyway. The canonical-address
+  check is one exported helper, `parseFrameAddress`.
+- **Fenced blocks and inline code are skipped** by all THREE readers of a quote —
+  this pass, the copy (`referencedFrameSeconds`) and the export's finder and
+  rewrite (`src/summaries/export.ts`) — from one region set
+  (`markdownCodeRegions`, `src/format/markdown-ast.ts` — the fact-check strip's
+  walk, not a second fence detector). A quote inside a fence is a documented
+  example; counting it spends a cap slot on a picture no reader sees, and a
+  fenced block near the top could exhaust the whole policy. The export was
+  fence-aware only for one round, and that is both halves of the disagreement in
+  one place: it packaged a JPEG for a quote inside a backtick span that nothing
+  else counted, and rewrote the address INSIDE the span — altered source text in
+  what the reader copies out of the page.
+- **The appendix is a SECTION, not one byte sequence.** The heading matches
+  case-insensitively at level 2 or 3, with or without bold decoration, a missing
+  space or a trailing colon, and is located fence-aware. It is cut WHOLE the
+  moment no image survives in it, under EITHER policy: `selected` has no
+  appendix at all, `detailed` loses one whose entries the pass removed, and both
+  lose one that never held an entry — a heading over captions the pass would
+  otherwise return verbatim, since the early return had been on the quote count
+  alone. That is what bounds the orphan-caption
+  residue: elsewhere a removed image's caption is left standing rather than
+  risking real prose, but a caption under a heading with no images left is the
+  whole section lying.
+- **A kept quote's alt says the time its own file does.** An alt naming another
+  time is corrected in place to the parsed second (words around it survive); the
+  pass is the one place that knows both numbers.
+
+A removed image takes its LINE when nothing else is on it — a bullet, a numbered
+item, a heading marker, a bold label like `**Figure:**` or a blockquote arrow is
+residue, not content — and a link WRAPPING an image (`[![alt](frame)](url)`) is
+one quote, removed whole.
+
+**Then the copy is checked.** `keepReferencedFrames` takes the pass's OWN
+`referenced` list rather than re-reading the text, and copies **per file**: one
+frame that cannot be copied costs its own reference and no other. It used to
+throw on the first miss, and the summarizer's catch then dropped every reference
+in the document while the JPEGs already copied stayed under the served root with
+nothing left to serve them. Whatever the copy did NOT keep is dropped from the
+text by `dropFrameReferences` before anything stores it; the stored summary, the
+ingest body and the source-page draft are all built from that repaired string.
+
+⚠️ **The rewrite happens AFTER the summary has streamed to the card**, so two
+store flags carry it to the reader — `completeReplacesText: true` in `state.ts`,
+which is where that reasoning lives, and `completeCarriesSummary: true` on this
+route's `registerSummaryVertical` call, its replay half. This vertical set
+NEITHER before. Driven in `capture-route-job-ordering.test.ts` through the real
+route — a `Bun.serve` on an ephemeral port and a `fetch` of the SSE stream —
+which is the only place the pair is observable together.
+
+**Four frame counts, kept separate** on the completion log line and in the replay
+harness's `run.json`: `extracted` (what the model was shown), `selected` (what it
+chose), `referenced` (what survived the caps and the manifest) and `retained`
+(what is on disk to serve). Collapsed into one number, a policy that over-quotes
+and a model that under-selects are indistinguishable.
+
+Two accepted limits, both plan-stated: the appendix rides the ingest body, which
+`appendTranscriptSection` does not bound (that cap is the TRANSCRIPT's), and
+huginn ranks `similar` on the first 2000 characters of the summary string, so a
+short summary's neighbours are ranked partly on image markdown and captions.
+
 ## The options endpoint, and the picker
 
 **`GET /api/youtube/options`** answers `{kinds: [{id, label}…], default_kind,
-frames: {supported}}` — the same resolution the POST validates against, so the
-extension renders its picker from the server instead of from a catalog of its
-own. Two rules:
+frames: {supported}, visual_detail: {supported, default, options: [{id,
+label}…]}}` — the same resolution the POST validates against, so the extension
+renders its picker from the server instead of from a catalog of its own. The
+visual-detail block is LABELLED rows for the same reason `kinds` is, and its
+`supported` is a constant `true`: nothing about that axis depends on the
+connector, so its ABSENCE is the whole signal (a Muninn from before it existed),
+and the popup then renders no such control and sends no such field. Two rules:
 
 - **`applyCors`, exactly like the POST.** This module applies CORS inside the
   summarize handler only and registers a preflight only for `/summarize`, while
@@ -311,7 +432,21 @@ proxy answering HTML, an empty list) becomes the Standard-only fallback AND a
 sentence saying so; a remembered `kind` is re-validated against the CURRENT
 options; a remembered Slides tick does not survive onto an instance that cannot
 read frames; and an install from before the picker (`{frames}` and no `kind`) is
-the default, not an error. `bun run build:extension` emits it into
+the default, not an error. `pickVisualDetail` runs the same re-validation on the
+second axis and answers **null** where the instance offers no such capability —
+which is what makes `buildSummarizeBody` omit the key rather than send a blank
+one the route would refuse, and the popup sends null with Slides OFF too, since
+the picker is hidden there and the policy is consulted only where frames came
+out. The unreachable fallback offers **`selected` alone** — the `kinds` rule, not
+the `framesSupported` one: an over-offered Slides tick is refused out loud (503 +
+a sentence), while an instance that does not know `visual_detail` IGNORES the
+key, so offering `detailed` there would be a choice that silently did nothing.
+Every key the popup restores is NAMED in its `chrome.storage.sync.get` shape:
+the object form answers with the shape's keys and nothing else, so a key left out
+reads back `undefined` however much the profile holds. The popup
+reveals the Visuals row only while Slides is ticked (`renderVisualRow`, called by
+both the paint and the tick's own listener), remembers it under `visualDetail`,
+and its settle path is driven in `popup-settle.test.ts`. `bun run build:extension` emits it into
 `extensions/youtube/capture-rules.js` (`src/youtube/extension-build.ts`, with
 `scripts/build-extension.ts` as the CLI wrapper and an `--out` override so the
 co-located test can re-run it), and that test
@@ -347,13 +482,18 @@ yt-dlp -f 'bv[height<=720][ext=mp4][vcodec^=avc1]/bv[height<=720][ext=mp4]/bv[he
   --no-playlist -o '<id>.mp4' 'https://www.youtube.com/watch?v=<id>'
 
 bun scripts/replay-youtube.ts --video <id>.mp4 --transcript transcript.json \
-  --video-id <id> --title "…" --kind deep --frames --runs 2 --out ./out
+  --video-id <id> --title "…" --kind deep --frames \
+  --visual-detail selected --runs 2 --out ./out
 ```
 
 Per run it writes `summary.md`, the recorded `ingest.json`, the kept frames and
 a `run.json` carrying requested vs observed model, the effective thinking
-budget, connector, tokens, cost and elapsed time. Keep the fixtures OUT of the
-repo — muninn is public.
+budget, connector, tokens, cost, elapsed time, the four frame counts
+(extracted / selected / referenced / retained), the seconds the STORED text
+quotes, and whether a `## Visual reference` appendix landed before
+`## Transcript`. `--visual-detail` is validated by the route's own
+`isVisualDetail`, so the harness cannot run a policy a capture could not.
+Keep the fixtures OUT of the repo — muninn is public.
 
 ## Testing
 

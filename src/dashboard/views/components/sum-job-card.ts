@@ -629,10 +629,12 @@ export function sumJobCardScript(): string {
           loadJobSimilar(currentJobTitle); // replace with scored results
         },
         complete: function(e) {
-          // Backward-compatible: only TikTok ships a parsed summary on the complete
-          // event (its multi-turn frame-reading session leaks tool chatter into the
-          // streamed deltas). youtube/x/anthropic send an empty payload, so this is
-          // a no-op for them and finalizeSummary renders the accumulated text.
+          // Backward-compatible: a vertical whose STORED summary differs from
+          // what streamed ships it on the complete event — TikTok (frame-reading
+          // chatter in the deltas), X-article (the same chatter on its video
+          // path) and YouTube (the visual-reference rewrite, which lands after
+          // the stream). anthropic, article and vimeo send an empty payload, so this
+          // is a no-op for them and finalizeSummary renders the accumulated text.
           if (e && e.data) {
             try {
               var payload = JSON.parse(e.data);

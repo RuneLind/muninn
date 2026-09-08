@@ -16,9 +16,10 @@ export interface SimilarArticle {
   id?: string;
 }
 
-// The `complete` event carries an optional `summary`. Only TikTok populates it
-// (see `completeReplacesText` below) — for the other verticals the key is
-// simply absent at runtime, matching their original `{ type: "complete" }`.
+// The `complete` event carries an optional `summary`. The verticals that set
+// `completeReplacesText` below populate it — `grep -rn "completeReplacesText:
+// true" src/`: TikTok, X-article and YouTube — and for the others the key is
+// absent at runtime, matching their original `{ type: "complete" }`.
 export type JobEvent<S extends string> =
   | { type: "status"; status: S }
   | { type: "text_delta"; text: string }
@@ -84,14 +85,20 @@ export interface JobStoreOptions<S extends string> {
   /** Status a freshly created job starts in (every vertical uses "pending"). */
   initialStatus: S;
   /**
-   * TikTok-only: on completeJob, overwrite `job.text` with the clean parsed
-   * summary and ship that summary on the `complete` event. TikTok's summarize
-   * is a multi-turn frame-reading session, so the accumulated text stream
-   * carries inter-turn "let me read frame N" chatter. Replacing it means an SSE
-   * *replay* of `job.text` shows only the summary; the summary on the `complete`
-   * event lets a *live* browser (which already accumulated the chatter) swap it
-   * out. For the other verticals `completeJob` leaves `job.text` untouched and
-   * publishes a bare `{ type: "complete" }`.
+   * On completeJob, overwrite `job.text` with the clean parsed summary and ship
+   * that summary on the `complete` event.
+   *
+   * For any vertical whose STORED summary is not what streamed — the three that
+   * set it (`grep -rn "completeReplacesText: true" src/`): TikTok, whose
+   * multi-turn frame-reading session leaks "let me read frame N" chatter into
+   * the deltas; X-article, whose video path is that same session pointed at an X
+   * status (its pasted-text path streams the summary itself, where the flag is
+   * no-op-equivalent, minus the CATEGORY header line); and YouTube, whose visual-reference pass rewrites the text after it
+   * has streamed (`src/youtube/state.ts` carries that reasoning). Replacing
+   * `job.text` means an SSE *replay* shows only the summary; the summary on the
+   * `complete` event lets a *live* browser, which already accumulated the
+   * superseded text, swap it out. Without the flag `completeJob` leaves
+   * `job.text` untouched and publishes a bare `{ type: "complete" }`.
    */
   completeReplacesText?: boolean;
   /** Overridable only for tests — production always uses the module defaults. */

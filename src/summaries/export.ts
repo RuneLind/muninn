@@ -29,9 +29,16 @@
 
 import { Marked, type Tokens } from "marked";
 import { escapeHtml } from "../format/markdown-core.ts";
+import { inProtectedRegion, markdownCodeRegions } from "../format/markdown-ast.ts";
 import { markdownContentStyles } from "../dashboard/views/components/doc-panel.ts";
 import { themeTokenStyles } from "../dashboard/views/shared-styles.ts";
-import { FRAME_SOURCES, frameQuoteRegExp, isFrameId, type FrameSource } from "./frames.ts";
+import {
+  FRAME_SOURCES,
+  frameAddressRegExp,
+  isFrameId,
+  parseFrameAddress,
+  type FrameSource,
+} from "./frames.ts";
 
 /** The folder the page's `<img>`s point into, beside `index.html` in the archive. */
 export const EXPORT_FRAMES_DIR = "frames";
@@ -47,51 +54,74 @@ export interface FrameReference {
 
 /**
  * The first served frame address in the markdown's PROSE — `/api/frames/
- * <source>/<id>/` or the source's legacy prefix, {@link frameQuoteRegExp} —
+ * <source>/<id>/` or the source's legacy prefix, {@link frameAddressRegExp} —
  * whose id passes that source's charset gate. With `source` given, only that
  * source's quotes count: the route passes the exporting vertical's own frame
  * source, so an `article` capture that pastes a Vimeo frame path cannot pull
- * another capture's slides into its archive. A quote inside fenced code is
- * source text, not a reference. `null` when nothing qualifies.
+ * another capture's slides into its archive. `null` when nothing qualifies.
+ *
+ * Prose is {@link markdownCodeRegions}, the region set the enforcement pass and
+ * {@link referencedFrameSeconds} read — fenced blocks AND backtick spans. A
+ * fence-only walk made the export the odd reader out in both directions at
+ * once: it packaged a frame for a quote inside `…` that nothing else counted,
+ * and {@link rewriteFrameUrls} then rewrote the address INSIDE that code span,
+ * which is altered source text in the copy the reader takes out of the page.
  */
 export function findFrameReference(markdown: string, source?: FrameSource): FrameReference | null {
   const sources = source ? [source] : FRAME_SOURCES;
+  const code = markdownCodeRegions(markdown);
   let found: FrameReference | null = null;
-  mapProseLines(markdown, (line) => {
-    if (found) return line;
-    for (const src of sources) {
-      const re = frameQuoteRegExp(src, null);
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(line)) !== null) {
-        if (isFrameId(src, m[1]!)) {
-          found = { source: src, id: m[1]! };
-          return line;
-        }
+  let foundAt = Number.POSITIVE_INFINITY;
+  for (const src of sources) {
+    const re = frameAddressRegExp(src);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(markdown)) !== null) {
+      // Matches ascend, so nothing after the best so far can beat it. A path
+      // parses under at most one source, so two sources never tie on an offset;
+      // with no source given, the earliest OFFSET wins (the line walk gave the
+      // earlier SOURCE the win within a line — the only caller passes a source,
+      // so that difference is unreachable in production).
+      if (m.index >= foundAt) break;
+      if (inProtectedRegion(m.index, code)) continue;
+      const address = parseFrameAddress(m[2]!, src);
+      if (address && isFrameId(src, address.id)) {
+        found = { source: src, id: address.id };
+        foundAt = m.index;
+        break;
       }
     }
-    return line;
-  });
+  }
   return found;
 }
 
 /**
- * Every served address of THIS reference's frames, outside fenced code →
+ * Every served address of THIS reference's frames, in PROSE →
  * `frames/<sec>.jpg` (a markdown title after the path is kept). Only canonical
  * seconds are rewritten (`047.jpg` is not an address the route serves, so it
  * is not one the folder holds either); returns the rewritten markdown and the
  * seconds it now points at, ascending and deduped.
+ *
+ * Prose is {@link findFrameReference}'s region set, for the reason stated
+ * there: inside a fence or a backtick span the address is text the reader
+ * copies, so rewriting it would hand back source that was never written.
+ * `replace` reports the offset into the ORIGINAL string, so the regions stay
+ * valid as the text shortens under them.
  */
 export function rewriteFrameUrls(
   markdown: string,
   ref: FrameReference,
 ): { markdown: string; seconds: number[] } {
   const seconds = new Set<number>();
-  const out = mapProseLines(markdown, (line) =>
-    line.replace(frameQuoteRegExp(ref.source, ref.id), (whole: string, _id: string, sec: string) => {
-      if (String(Number(sec)) !== sec) return whole;
-      seconds.add(Number(sec));
-      return whole.replace(/^\([^\s)]+/, `(${EXPORT_FRAMES_DIR}/${sec}.jpg`);
-    }),
+  const code = markdownCodeRegions(markdown);
+  const out = markdown.replace(
+    frameAddressRegExp(ref.source),
+    (whole: string, open: string, path: string, close: string, offset: number) => {
+      if (inProtectedRegion(offset, code)) return whole;
+      const address = parseFrameAddress(path, ref.source);
+      if (!address || address.id !== ref.id) return whole;
+      seconds.add(address.sec);
+      return `${open}${EXPORT_FRAMES_DIR}/${address.sec}.jpg${close}`;
+    },
   );
   return { markdown: out, seconds: [...seconds].sort((a, b) => a - b) };
 }
@@ -101,6 +131,13 @@ export function rewriteFrameUrls(
  * by its own marker character with at least the opening length — the client's
  * rule, kept because pairing ``` and ~~~ interchangeably linked inside a block
  * and de-linked everything after it.
+ *
+ * Only the two Vimeo transforms use this, and deliberately: what they promise
+ * is PARITY with the client's own copies, which are fence-aware and nothing
+ * else, so widening the region set here would break the property the fixtures
+ * pin. The frame quote finder and rewrite read {@link markdownCodeRegions}
+ * instead — they promise agreement with the pass and the copy, not with a
+ * browser.
  */
 function mapProseLines(markdown: string, fn: (line: string, i: number) => string): string {
   let fence: string | null = null;
