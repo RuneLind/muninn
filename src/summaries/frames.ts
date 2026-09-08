@@ -22,8 +22,11 @@
  * {@link removeKeptFrames}) by refusing to match or touch anything and saying
  * so. The route's charset gates are a second line, not the first: before this
  * module `referencedFrameSeconds` interpolated the id RAW into a `RegExp` and
- * only `removeKeptFrames` gated at all. The id is regex-escaped on top of the
- * gate, so the two failures are independent.
+ * only `removeKeptFrames` gated at all. No id reaches a pattern at all now —
+ * {@link frameAddressRegExp} matches the ADDRESS SHAPE and
+ * {@link parseFrameAddress} hands back the id it found, which the caller
+ * compares — so the gate and the match are independent by construction rather
+ * than by an escape.
  *
  * **The file name IS the integer second.** `<tick>.jpg`, no padding — the route
  * serves exactly that spelling, so `047.jpg` is an address that 404s and a
@@ -58,6 +61,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { copyFile, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
+import { inProtectedRegion, markdownCodeRegions } from "../format/markdown-ast.ts";
 import { frameBudgetFor } from "../video/media.ts";
 
 const log = getLog("summaries", "frames");
@@ -110,10 +114,11 @@ export const MAX_INLINE_SLIDES = 8;
  * A vertical's own rules for how many frames a summary may quote and how it is
  * told to quote them — the OPT-IN half of {@link framesPromptSection}.
  *
- * The default (no policy) is the wording every caller has always had, so Vimeo,
- * TikTok and a frames-off capture are byte-identical without one. YouTube opts
- * in (`src/summaries/visual-detail.ts`), because its Selected/Detailed choice is
- * two different rubrics over the same frame list.
+ * The default (no policy) is the wording every caller has always had, so Vimeo
+ * — the only other caller of {@link framesPromptSection}; TikTok builds its own
+ * frame prompt and never reaches here — is byte-identical without one. YouTube
+ * opts in (`src/summaries/visual-detail.ts`), because its Selected/Detailed
+ * choice is two different rubrics over the same frame list.
  *
  * `rules` is the paragraph that replaces the default one, spelled by the policy
  * rather than assembled here: a policy that stated its caps in prose and handed
@@ -341,23 +346,73 @@ export function escapeRegExp(s: string): string {
 }
 
 /**
- * The ONE pattern for "a markdown image quoting a served frame": the `(…)`
- * half of `![alt](<prefix><id>/<sec>.jpg)`, with an optional markdown title.
- * Group 1 is the id (the literal `id` when given, else any non-slash run for a
- * caller that wants to DISCOVER it), group 2 the seconds. Both spellings —
- * the current `/api/frames/<source>/` and the source's `legacyUrlPrefix` —
- * count. Shared by {@link referencedFrameSeconds} (what to keep) and the
- * export's rewrite (what to relocate), so the two can never disagree about
- * which addresses are references. Fresh `g` regex per call: these are reused
- * with `exec`.
+ * The ONE pattern for "the summary POINTS AT a frames address", and the only
+ * one any consumer may use.
+ *
+ * A markdown image or link whose target starts with `/api/frames/` — ANY
+ * source, not just this one — or with this source's `legacyUrlPrefix`. Three
+ * capture groups, so a caller can rewrite the target without re-parsing the
+ * line: 1 is everything up to and including the opening `(`, 2 is the target
+ * path VERBATIM, 3 is the optional markdown title and the closing `)`.
+ *
+ * It is wide on purpose, in the three directions the narrow `(…)`-only pattern
+ * it replaces was blind in — every one of which was a real disagreement between
+ * what the enforcement pass counted and what the copy served:
+ *
+ *  - **any file name**, not `<digits>.jpg`, so `047.jpg` and `slide.png` are
+ *    FOUND and then refused by {@link parseFrameAddress} rather than being
+ *    invisible. A quote nothing can serve has to be removable.
+ *  - **any source**, so a YouTube summary quoting a Vimeo frame is found (and
+ *    refused): that is a broken image in this document either way.
+ *  - **the link form and an alt carrying `]`** — `[text](/api/frames/…)` and
+ *    `![a]b](…)` are both quotes the copy would keep, so both must be quotes
+ *    the caps apply to.
+ *
+ * The alt/label run excludes `[` so a match cannot start at an earlier,
+ * unrelated `[label](target)` on the same line and swallow the prose between
+ * them. Fresh `g` regex per call: these are reused with `exec`.
  */
-export function frameQuoteRegExp(source: FrameSource, id: string | null): RegExp {
-  const prefixes = [`/api/frames/${source.name}/`, ...(source.legacyUrlPrefix ? [source.legacyUrlPrefix] : [])];
-  const idPart = id === null ? "([^/\\s)]+)" : `(${escapeRegExp(id)})`;
+export function frameAddressRegExp(source: FrameSource): RegExp {
+  const prefixes = ["/api/frames/", ...(source.legacyUrlPrefix ? [source.legacyUrlPrefix] : [])];
   return new RegExp(
-    `\\((?:${prefixes.map(escapeRegExp).join("|")})${idPart}/(\\d{1,6})\\.jpg(?:\\s+"[^"\\n]*")?\\)`,
+    `(!?\\[[^\\[\\n]*?\\]\\()((?:${prefixes.map(escapeRegExp).join("|")})[^)\\s]*)((?:[ \\t]+"[^"\\n]*")?\\))`,
     "g",
   );
+}
+
+/**
+ * The video and whole second a frames path addresses for THIS source, or null
+ * when it addresses nothing this capture could ever serve.
+ *
+ * The ONE canonical-address check, shared by everything that reads a quote —
+ * {@link referencedFrameSeconds}, the enforcement pass and the export's
+ * rewrite — so no two of them can disagree about what a servable reference is.
+ * Null covers all four ways a quote is a broken promise: another source's
+ * frames, a path that is not `<id>/<file>`, a file name outside
+ * {@link FRAME_FILE_RE}, and a NON-CANONICAL spelling — the file is `47.jpg`
+ * and the route serves exactly that, so `047.jpg` 404s and counting it would
+ * report a frame the reader never gets.
+ *
+ * The ID is returned rather than checked: a caller that wants only its own
+ * video compares it, and the export's discovery pass wants whichever id is
+ * there. Neither is a charset gate — {@link isFrameId} is, and both callers
+ * apply it.
+ */
+export function parseFrameAddress(path: string, source: FrameSource): { id: string; sec: number } | null {
+  const current = `/api/frames/${source.name}/`;
+  let tail: string | null = null;
+  if (path.startsWith(current)) tail = path.slice(current.length);
+  else if (source.legacyUrlPrefix && path.startsWith(source.legacyUrlPrefix)) {
+    tail = path.slice(source.legacyUrlPrefix.length);
+  }
+  if (tail === null) return null;
+  const parts = tail.split("/");
+  if (parts.length !== 2) return null;
+  const [id, file] = parts as [string, string];
+  if (id === "" || !FRAME_FILE_RE.test(file)) return null;
+  const digits = file.slice(0, -".jpg".length);
+  if (String(Number(digits)) !== digits) return null;
+  return { id, sec: Number(digits) };
 }
 
 /**
@@ -379,34 +434,54 @@ export function referencedFrameSeconds(summary: string, source: FrameSource, id:
     log.warn("Not a {source} video id, so nothing is a reference to its frames: {id}", { source: source.name, id });
     return [];
   }
-  const re = frameQuoteRegExp(source, id);
+  const re = frameAddressRegExp(source);
+  // A quote inside a fenced block or a backtick span is source text a reader
+  // copies, not a picture the page shows — so it is not a frame to keep, and the
+  // enforcement pass that decides what may be served skips it for the same
+  // reason. The two answering differently is a JPEG served with nothing left
+  // holding it.
+  const code = markdownCodeRegions(summary);
   const out = new Set<number>();
   let m: RegExpExecArray | null;
   while ((m = re.exec(summary)) !== null) {
-    // Only the CANONICAL spelling is a reference: the file is `47.jpg` and the
-    // route serves exactly that, so `047.jpg` is an address that will 404 —
-    // counting it as kept (via `Number`) would report a frame the reader never
-    // gets. Logged and dropped, like an invented path.
-    if (String(Number(m[2])) !== m[2]) {
-      log.warn("The {source} summary of {id} quotes a non-canonical frame path {path} — not a served address", {
+    if (inProtectedRegion(m.index, code)) continue;
+    const ref = parseFrameAddress(m[2]!, source);
+    if (ref === null) {
+      log.warn("The {source} summary of {id} quotes {path}, which is not a served address — not a reference", {
         source: source.name,
         id,
-        path: m[0],
+        path: m[2],
       });
       continue;
     }
-    out.add(Number(m[2]));
+    if (ref.id !== id) continue;
+    out.add(ref.sec);
   }
   return [...out].sort((a, b) => a - b);
 }
 
 /**
  * Copy the frames the summary references into the served root; everything
- * else stays in the work dir and dies with it. Returns the seconds kept. A
- * reference to a frame that was never extracted (the model invented a path)
- * is logged and skipped — the reader gets a broken image, not a served file
- * from nowhere. An id outside the source's charset keeps nothing and creates
- * no directory.
+ * else stays in the work dir and dies with it. Returns the seconds kept — what
+ * the caller then holds the TEXT to, dropping every reference not in the
+ * answer. An id outside the source's charset keeps nothing and creates no
+ * directory.
+ *
+ * **One frame's failure costs that frame and nothing else.** Each copy is its
+ * own attempt: a reference to a frame that was never extracted (the model
+ * invented a path) and a copy that throws (the work dir already swept, an
+ * EACCES, a full disk) are both logged and SKIPPED, and the seconds either side
+ * of it are still kept. Throwing on the first miss instead — which is what a
+ * bare loop does — cost the whole capture its slides through the caller's
+ * catch, and left every already-copied JPEG under the served root with no
+ * reference left to serve it: an orphan the delete listener never hears about,
+ * because it is keyed on a document that quotes nothing.
+ *
+ * `referenced` is the caller's own answer to "which seconds does this text
+ * quote", for a caller that has already computed it — the YouTube vertical's
+ * enforcement pass. Given one, the summary is not parsed again here, so the
+ * pass that decided what may be served and the copy that serves it cannot
+ * disagree. Without one the summary is parsed, which is every other caller.
  */
 export async function keepReferencedFrames(
   summary: string,
@@ -414,12 +489,13 @@ export async function keepReferencedFrames(
   id: string,
   frames: readonly CaptureFrame[],
   root: string = framesRootDir(),
+  referenced?: readonly number[],
 ): Promise<number[]> {
   if (!isFrameId(source, id)) {
     log.warn("Not a {source} video id — no frames kept for {id}", { source: source.name, id });
     return [];
   }
-  const wanted = referencedFrameSeconds(summary, source, id);
+  const wanted = referenced ?? referencedFrameSeconds(summary, source, id);
   if (wanted.length === 0) return [];
   const dir = frameDirFor(source, id, root);
   const bysecond = new Map(frames.map((f) => [f.tSeconds, f] as const));
@@ -435,7 +511,17 @@ export async function keepReferencedFrames(
       });
       continue;
     }
-    await copyFile(frame.path, join(dir, `${sec}.jpg`));
+    try {
+      await copyFile(frame.path, join(dir, `${sec}.jpg`));
+    } catch (err) {
+      log.warn("Could not keep frame {sec}.jpg of {source} {id} ({error}) — its reference is dropped instead", {
+        source: source.name,
+        id,
+        sec,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
     kept.push(sec);
   }
   return kept;

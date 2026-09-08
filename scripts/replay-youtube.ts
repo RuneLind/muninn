@@ -91,10 +91,11 @@ import {
 import {
   DEFAULT_VISUAL_DETAIL,
   VISUAL_DETAIL_VALUES,
+  VISUAL_REFERENCE_HEADING_RE,
   isVisualDetail,
-  visualDetailCaps,
   type VisualDetail,
 } from "../src/summaries/visual-detail.ts";
+import { splitTranscript } from "../src/summaries/export.ts";
 import { summarizeVideo } from "../src/youtube/summarizer.ts";
 import { createJob, getJob } from "../src/youtube/state.ts";
 import type { DownloadResult, YtDlpInfo } from "../src/video/media.ts";
@@ -155,16 +156,26 @@ function die(message: string): never {
  * Where the `## Visual reference` appendix sits relative to `## Transcript` in
  * the body that was ingested — the plan's placement rule, checkable per run.
  *
+ * Both halves are the SHIPPED readers, never a harness spelling of them:
+ * `VISUAL_REFERENCE_HEADING_RE` is the rule the enforcement pass locates the
+ * appendix by, and `splitTranscript` is the fence-aware cut the `/summaries`
+ * article view and the export both use. A harness with regexes of its own can
+ * report a placement the product does not see.
+ *
  * `null` when the body carries no appendix (every `selected` run, and a
  * `detailed` run whose model wrote none); otherwise true only when the appendix
  * heading really precedes the transcript heading.
  */
 function appendixOrder(ingested: string | null): boolean | null {
   if (ingested === null) return null;
-  const appendix = ingested.search(/^##[ \t]+Visual reference[ \t]*$/m);
-  if (appendix === -1) return null;
-  const transcript = ingested.search(/^##[ \t]+Transcript[ \t]*$/m);
-  return transcript === -1 || appendix < transcript;
+  const { body, transcript } = splitTranscript(ingested);
+  const inBody = body.split("\n").some((line) => VISUAL_REFERENCE_HEADING_RE.test(line));
+  if (inBody) return true;
+  if (transcript === null) return null;
+  // No appendix before the transcript: either there is none at all, or the
+  // model put it after — which is the placement rule failing, not a run with no
+  // appendix.
+  return transcript.split("\n").some((line) => VISUAL_REFERENCE_HEADING_RE.test(line)) ? false : null;
 }
 
 // --- the video's duration ---------------------------------------------------
@@ -393,7 +404,6 @@ for (let run = 1; run <= args.runs; run++) {
     kind: preset.id,
     framesRequested: args.frames,
     visualDetail: args.visualDetail,
-    visualCaps: visualDetailCaps(args.visualDetail),
     status: job?.status,
     error: job?.error ?? null,
     category: job?.category ?? null,

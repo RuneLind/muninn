@@ -31,7 +31,13 @@ import { Marked, type Tokens } from "marked";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { markdownContentStyles } from "../dashboard/views/components/doc-panel.ts";
 import { themeTokenStyles } from "../dashboard/views/shared-styles.ts";
-import { FRAME_SOURCES, frameQuoteRegExp, isFrameId, type FrameSource } from "./frames.ts";
+import {
+  FRAME_SOURCES,
+  frameAddressRegExp,
+  isFrameId,
+  parseFrameAddress,
+  type FrameSource,
+} from "./frames.ts";
 
 /** The folder the page's `<img>`s point into, beside `index.html` in the archive. */
 export const EXPORT_FRAMES_DIR = "frames";
@@ -47,7 +53,7 @@ export interface FrameReference {
 
 /**
  * The first served frame address in the markdown's PROSE — `/api/frames/
- * <source>/<id>/` or the source's legacy prefix, {@link frameQuoteRegExp} —
+ * <source>/<id>/` or the source's legacy prefix, {@link frameAddressRegExp} —
  * whose id passes that source's charset gate. With `source` given, only that
  * source's quotes count: the route passes the exporting vertical's own frame
  * source, so an `article` capture that pastes a Vimeo frame path cannot pull
@@ -60,11 +66,12 @@ export function findFrameReference(markdown: string, source?: FrameSource): Fram
   mapProseLines(markdown, (line) => {
     if (found) return line;
     for (const src of sources) {
-      const re = frameQuoteRegExp(src, null);
+      const re = frameAddressRegExp(src);
       let m: RegExpExecArray | null;
       while ((m = re.exec(line)) !== null) {
-        if (isFrameId(src, m[1]!)) {
-          found = { source: src, id: m[1]! };
+        const address = parseFrameAddress(m[2]!, src);
+        if (address && isFrameId(src, address.id)) {
+          found = { source: src, id: address.id };
           return line;
         }
       }
@@ -87,11 +94,15 @@ export function rewriteFrameUrls(
 ): { markdown: string; seconds: number[] } {
   const seconds = new Set<number>();
   const out = mapProseLines(markdown, (line) =>
-    line.replace(frameQuoteRegExp(ref.source, ref.id), (whole: string, _id: string, sec: string) => {
-      if (String(Number(sec)) !== sec) return whole;
-      seconds.add(Number(sec));
-      return whole.replace(/^\([^\s)]+/, `(${EXPORT_FRAMES_DIR}/${sec}.jpg`);
-    }),
+    line.replace(
+      frameAddressRegExp(ref.source),
+      (whole: string, open: string, path: string, close: string) => {
+        const address = parseFrameAddress(path, ref.source);
+        if (!address || address.id !== ref.id) return whole;
+        seconds.add(address.sec);
+        return `${open}${EXPORT_FRAMES_DIR}/${address.sec}.jpg${close}`;
+      },
+    ),
   );
   return { markdown: out, seconds: [...seconds].sort((a, b) => a - b) };
 }

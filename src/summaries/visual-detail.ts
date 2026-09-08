@@ -18,13 +18,23 @@
  * document, in the wiki source page drafted from it, and in the exported ZIP.
  * The model is asked not to invent paths; this is what makes that true.
  *
+ * What a quote IS has exactly one definition, and it is not this module's:
+ * {@link frameAddressRegExp} finds it and {@link parseFrameAddress} says what it
+ * addresses, both from `frames.ts`, so what this pass counts and caps is what
+ * {@link keepReferencedFrames} copies and the export rewrites. Two patterns for
+ * one idea disagreed in both directions — a link-form quote and an alt carrying
+ * `]` were served while being invisible here. Fenced blocks and inline code are
+ * skipped on both sides ({@link markdownCodeRegions}).
+ *
  * Two limits, stated rather than papered over:
  *
- *  - **A removed image can leave its caption behind.** The removal takes the
- *    image's own line when nothing else is on it; an appendix entry's following
- *    prose sentence stays. Eating the next line would risk eating real content,
- *    and a caption with no image is honest about what happened where a silently
- *    deleted paragraph would not be.
+ *  - **A removed image can leave its caption behind — outside the appendix.**
+ *    The removal takes the image's own line when nothing else is on it; a
+ *    following prose sentence stays, because eating the next line would risk
+ *    eating real content. Inside the appendix that residue is bounded instead:
+ *    a section no entry survived is removed whole, heading and captions
+ *    included, since a caption under a heading with no images left is not a
+ *    reference section but a lie about one.
  *  - **The appendix rides the ingest body.** `appendTranscriptSection` caps the
  *    TRANSCRIPT alone, so `## Visual reference` adds to the posted body beyond
  *    that bound (~20 image lines and captions — kilobytes, against a 2 MiB
@@ -34,11 +44,13 @@
  */
 
 import { getLog } from "../logging.ts";
+import { inProtectedRegion, markdownCodeRegions, type ProtectedRegion } from "../format/markdown-ast.ts";
 import {
-  FRAME_FILE_RE,
   MAX_INLINE_SLIDES,
-  escapeRegExp,
+  formatHms,
+  frameAddressRegExp,
   frameQuoteTemplate,
+  parseFrameAddress,
   type FrameSource,
   type FramesPromptPolicy,
 } from "./frames.ts";
@@ -83,8 +95,27 @@ export function visualDetailOptions(): Array<{ id: VisualDetail; label: string }
   return VISUAL_DETAIL_VALUES.map((id) => ({ id, label: VISUAL_DETAIL_LABELS[id] }));
 }
 
-/** That heading as the renderer sees it — its own line, nothing after it. */
-const VISUAL_REFERENCE_HEADING_RE = /^##[ \t]+Visual reference[ \t]*$/m;
+/**
+ * A line that IS the appendix heading, in every spelling a model reaches for.
+ *
+ * One exact byte sequence was the wrong predicate, and it failed in both
+ * directions at once: `## Visual References`, `##Visual reference`,
+ * `## **Visual reference**`, `### Visual reference` and `## Visual reference:`
+ * each left the pass believing there was no appendix — so under `detailed`
+ * every entry counted against the INLINE cap and the over-cap drops emptied a
+ * section whose heading and captions stayed — while under `selected` the
+ * section survived whole. Case, the level (2 or 3), bold decoration, a missing
+ * space and a trailing colon are all accepted; the heading must still be the
+ * whole line, because a sentence mentioning the appendix is not one.
+ *
+ * Exported so the replay harness reads the same rule the pass does rather than
+ * re-typing a third spelling of it.
+ */
+export const VISUAL_REFERENCE_HEADING_RE =
+  /^[ \t]{0,3}(#{2,3})[ \t]*(?:\*\*|__)?[ \t]*visual[ \t]+references?[ \t]*(?:\*\*|__)?[ \t]*:?[ \t]*$/i;
+
+/** Any ATX heading line, with its level — how the appendix section's END is found. */
+const ANY_HEADING_RE = /^[ \t]{0,3}(#{1,6})[ \t]/;
 
 export function isVisualDetail(value: unknown): value is VisualDetail {
   return typeof value === "string" && (VISUAL_DETAIL_VALUES as readonly string[]).includes(value);
@@ -173,93 +204,192 @@ interface FrameQuoteMatch {
   readonly start: number;
   readonly end: number;
   readonly path: string;
+  /** Where the alt text (or a link's label) sits, so a wrong timestamp can be corrected in place. */
+  readonly altStart: number;
+  readonly altEnd: number;
+  /** Whether this is an IMAGE (`![…]`) rather than a plain link to a frame. */
+  readonly isImage: boolean;
   /** Null when the path is not an address this capture could ever serve. */
   readonly ref: { id: string; sec: number } | null;
 }
 
-/**
- * Every markdown IMAGE whose target is a frames address — of this source or of
- * the legacy prefix its documents were written with.
- *
- * Deliberately wider than {@link frameQuoteRegExp}, which matches only the
- * `(…)` half of a quote of ONE known video: this has to FIND the references to
- * refuse, including a quote of another video and a quote of another source, both
- * of which are broken images in this document. The path is captured whole and
- * parsed in code rather than pulled apart by more regex.
- */
-function frameImagePattern(source: FrameSource): RegExp {
-  const prefixes = ["/api/frames/", ...(source.legacyUrlPrefix ? [source.legacyUrlPrefix] : [])];
-  return new RegExp(
-    `!\\[[^\\]\\n]*\\]\\(((?:${prefixes.map(escapeRegExp).join("|")})[^)\\s]*)(?:\\s+"[^"\\n]*")?\\)`,
-    "g",
-  );
-}
+/** A link WRAPPING an image — `[![alt](frame)](url)` — as seen from the image's end. */
+const LINK_WRAP_TAIL_RE = /^\]\([^)\s]*(?:[ \t]+"[^"\n]*")?\)/;
 
 /**
- * The video and whole second a frames path addresses, or null when it addresses
- * nothing servable.
+ * Every quote of a frames address in the summary's PROSE, in document order.
  *
- * Null covers all four ways a quote can be a broken promise: another source's
- * frames, a path that is not `<id>/<sec>.jpg`, a file name outside
- * {@link FRAME_FILE_RE}, and a NON-CANONICAL spelling — the file is `47.jpg` and
- * the route serves exactly that, so `047.jpg` 404s and counting it would report
- * a frame the reader never gets (the `referencedFrameSeconds` rule).
+ * The pattern is {@link frameAddressRegExp}, i.e. the same one
+ * {@link keepReferencedFrames} keeps by and the export rewrites by — so what
+ * this pass counts, caps and removes is exactly what would be copied and
+ * served. It was two patterns for one round, and they disagreed in both
+ * directions: a link-form quote and an alt carrying `]` were copied and served
+ * while being invisible here (uncapped, and an invented second the pass could
+ * not remove).
+ *
+ * Two things it does that the pattern alone cannot:
+ *
+ *  - **fenced blocks and inline code are skipped** ({@link markdownCodeRegions},
+ *    the fact-check strip's walk). A quote inside a fence is a documented
+ *    example — the model shown the address shape sometimes echoes it in one —
+ *    and counting it spends a cap slot on a picture no reader sees, copies a
+ *    JPEG for it, and lets a fenced block near the top exhaust the whole policy.
+ *  - **a link WRAPPING an image is one quote**, taken whole. `[![alt](frame)](url)`
+ *    removed at the image alone leaves `[](url)`, which renders as a live link
+ *    with no label.
  */
-export function parseFrameQuotePath(
-  path: string,
-  source: FrameSource,
-): { id: string; sec: number } | null {
-  const current = `/api/frames/${source.name}/`;
-  let tail: string | null = null;
-  if (path.startsWith(current)) tail = path.slice(current.length);
-  else if (source.legacyUrlPrefix && path.startsWith(source.legacyUrlPrefix)) {
-    tail = path.slice(source.legacyUrlPrefix.length);
-  }
-  if (tail === null) return null;
-  const parts = tail.split("/");
-  if (parts.length !== 2) return null;
-  const [id, file] = parts as [string, string];
-  if (id === "" || !FRAME_FILE_RE.test(file)) return null;
-  const digits = file.slice(0, -".jpg".length);
-  if (String(Number(digits)) !== digits) return null;
-  return { id, sec: Number(digits) };
-}
-
-function findFrameQuotes(summary: string, source: FrameSource): FrameQuoteMatch[] {
+function findFrameQuotes(summary: string, source: FrameSource, code: readonly ProtectedRegion[]): FrameQuoteMatch[] {
   const out: FrameQuoteMatch[] = [];
-  const re = frameImagePattern(source);
+  const re = frameAddressRegExp(source);
   let m: RegExpExecArray | null;
   while ((m = re.exec(summary)) !== null) {
-    const path = m[1]!;
-    out.push({ start: m.index, end: m.index + m[0].length, path, ref: parseFrameQuotePath(path, source) });
+    if (inProtectedRegion(m.index, code)) continue;
+    const [whole, open, path] = m as unknown as [string, string, string];
+    const isImage = open.startsWith("!");
+    let start = m.index;
+    let end = m.index + whole.length;
+    // `open` is `![` or `[` … `](`, so the label runs between them.
+    const altStart = start + open.indexOf("[") + 1;
+    const altEnd = start + open.length - "](".length;
+    if (isImage && summary[start - 1] === "[") {
+      const tail = LINK_WRAP_TAIL_RE.exec(summary.slice(end));
+      if (tail) {
+        start -= 1;
+        end += tail[0].length;
+      }
+    }
+    out.push({ start, end, path, altStart, altEnd, isImage, ref: parseFrameAddress(path, source) });
   }
   return out;
 }
 
+/** One splice this pass will make: a quote removal, a whole-section cut, or an alt correction. */
+type Edit =
+  | { kind: "quote"; start: number; end: number }
+  | { kind: "block"; start: number; end: number }
+  | { kind: "replace"; start: number; end: number; text: string };
+
 /**
- * Cut the given quotes out of the summary.
+ * What a line may hold BESIDES a quote and still count as holding nothing.
  *
- * A quote whose LINE holds nothing else — an image on its own line, or a list
- * bullet around one — takes the whole line with it, since a bullet with no
- * content is visible damage. Anything else loses just the image markdown.
- * Applied back to front so no offset moves under a later splice.
+ * The residue of a removed image, enumerated rather than guessed at, because
+ * each of these renders as visible damage on its own: a bullet or a numbered
+ * list marker with no item, a heading marker with no heading, a bold label
+ * (`**Figure:**`) with nothing to label, a blockquote arrow, and the dash or
+ * colon a caption was joined on with.
  */
-function removeQuotes(summary: string, quotes: readonly FrameQuoteMatch[]): string {
+const LINE_RESIDUE_RE =
+  /^[ \t]*(?:>[ \t]*)*(?:(?:[*+\-]|\d{1,3}[.)])[ \t]*)?(?:#{1,6}[ \t]*)?(?:\*\*[^*\n]*\*\*[ \t]*)?[\s:.\-—–]*$/;
+
+/**
+ * Apply the pass's splices back to front, so no offset moves under a later one.
+ *
+ * A `quote` whose LINE holds nothing else takes the whole line with it
+ * ({@link LINE_RESIDUE_RE}); anything else loses only the quote's own markdown,
+ * since eating the prose around it would eat real content. A `block` is already
+ * a line range and is cut as it stands.
+ */
+function applyEdits(summary: string, edits: readonly Edit[]): string {
   let text = summary;
-  for (const q of [...quotes].sort((a, b) => b.start - a.start)) {
-    const lineStart = text.lastIndexOf("\n", q.start - 1) + 1;
-    let lineEnd = text.indexOf("\n", q.end);
+  for (const e of [...edits].sort((a, b) => b.start - a.start)) {
+    if (e.kind === "replace") {
+      text = text.slice(0, e.start) + e.text + text.slice(e.end);
+      continue;
+    }
+    if (e.kind === "block") {
+      text = text.slice(0, e.start) + text.slice(e.end);
+      continue;
+    }
+    const lineStart = text.lastIndexOf("\n", e.start - 1) + 1;
+    let lineEnd = text.indexOf("\n", e.end);
     if (lineEnd === -1) lineEnd = text.length;
-    const rest = text.slice(lineStart, q.start) + text.slice(q.end, lineEnd);
-    // Whitespace, a list marker or a dangling dash is not content.
-    if (/^[\s>*+\-—–:.]*$/.test(rest)) {
+    const rest = text.slice(lineStart, e.start) + text.slice(e.end, lineEnd);
+    if (LINE_RESIDUE_RE.test(rest)) {
       const cut = lineEnd < text.length ? lineEnd + 1 : lineEnd;
       text = text.slice(0, lineStart) + text.slice(cut);
     } else {
-      text = text.slice(0, q.start) + text.slice(q.end);
+      text = text.slice(0, e.start) + text.slice(e.end);
     }
   }
   return text;
+}
+
+/** Where the appendix is: its heading line, and the whole section it opens. */
+interface AppendixSection {
+  /** Offset of the heading LINE's first character — the boundary inline/appendix is decided by. */
+  readonly start: number;
+  /** Offset just past the section, i.e. the start of the next heading of the same level or above. */
+  readonly end: number;
+}
+
+/**
+ * The `## Visual reference` section, located in PROSE.
+ *
+ * Fence-aware for the reason the quote walk is: a fenced block quoting the
+ * appendix's own shape — which the `detailed` rules paragraph shows the model —
+ * would otherwise be read as the appendix starting at the top of the summary,
+ * and every inline quote after it would be an "appendix" entry with the inline
+ * cap never applying at all.
+ *
+ * The section ENDS at the next heading of the same level or above (`## Transcript`
+ * is the one that follows it in a stored capture), or at the end of the text.
+ */
+function findAppendixSection(summary: string, code: readonly ProtectedRegion[]): AppendixSection | null {
+  const lines = summary.split("\n");
+  let offset = 0;
+  let start = -1;
+  let level = 0;
+  for (const line of lines) {
+    const lineStart = offset;
+    offset += line.length + 1;
+    if (inProtectedRegion(lineStart, code)) continue;
+    if (start < 0) {
+      const m = VISUAL_REFERENCE_HEADING_RE.exec(line);
+      if (m) {
+        start = lineStart;
+        level = m[1]!.length;
+      }
+      continue;
+    }
+    const heading = ANY_HEADING_RE.exec(line);
+    if (heading && heading[1]!.length <= level) return { start, end: lineStart };
+  }
+  return start < 0 ? null : { start, end: summary.length };
+}
+
+/**
+ * Every clock-shaped run in an alt text — what a quote CLAIMS its second is.
+ *
+ * Deliberately loose about the field widths and read by ARITHMETIC below rather
+ * than by the pattern: an alt is model-written, and `00:00:137` is a real thing
+ * to write for the file `137.jpg`. A `[0-5]\d`-strict pattern matched the
+ * `00:00` prefix of it, decided the quote claimed second 0, and rewrote the alt
+ * to `00:02:17:137` — a correction that invented a disagreement and then wrote
+ * it down. Read as `SS`, `MM:SS` or `HH:MM:SS`, so `00:00:137` and `00:02:17`
+ * are the same claim and neither is touched. Accepted consequence: a clock-
+ * shaped number in an alt that is NOT the frame's time is rewritten too; the alt
+ * of a frame quote is a caption for that frame, and the prompt's template for it
+ * is `Slide at HH:MM:SS`.
+ */
+const ALT_TIMESTAMP_RE = /\d{1,6}(?::\d{1,6}){1,2}/g;
+
+/**
+ * The alt text this quote should carry, or null when it already agrees.
+ *
+ * A `![Slide at 00:24:32](…/1472.jpg)` whose alt names a DIFFERENT time than the
+ * file is a caption that lies about the picture under it, and the pass is the
+ * one place that knows both numbers. The timestamp is corrected in place rather
+ * than the whole alt replaced, so any words the model wrote around it survive;
+ * an alt with no timestamp claims nothing and is left alone.
+ */
+function correctedAlt(alt: string, sec: number): string | null {
+  const want = formatHms(sec);
+  const fixed = alt.replace(ALT_TIMESTAMP_RE, (whole: string) => {
+    const parts = whole.split(":").map(Number);
+    const claimed = parts.reduce((total, part) => total * 60 + part, 0);
+    return claimed === sec ? whole : want;
+  });
+  return fixed === alt ? null : fixed;
 }
 
 /**
@@ -286,8 +416,10 @@ export function enforceVisualReferences(input: {
   const { summary, source, videoId, detail } = input;
   const caps = visualDetailCaps(detail);
   const available = new Set(input.extracted);
-  const quotes = findFrameQuotes(summary, source);
-  if (quotes.length === 0) {
+  const code = markdownCodeRegions(summary);
+  const quotes = findFrameQuotes(summary, source, code);
+  const appendix = findAppendixSection(summary, code);
+  if (quotes.length === 0 && !(appendix && detail === "selected")) {
     return {
       text: summary,
       selected: [],
@@ -298,12 +430,17 @@ export function enforceVisualReferences(input: {
     };
   }
 
-  // Where the appendix starts, when the policy has one. Everything at or past
-  // that offset is an appendix entry; everything before it is inline.
-  const headingMatch = detail === "detailed" ? VISUAL_REFERENCE_HEADING_RE.exec(summary) : null;
-  const appendixAt = headingMatch ? headingMatch.index : Number.POSITIVE_INFINITY;
+  // Where the appendix starts, when the policy HAS one. Everything at or past
+  // that offset is an appendix entry; everything before it is inline. Under
+  // `selected` there is no appendix at all: a section the model wrote anyway is
+  // cut whole below, so nothing in it is an entry to keep.
+  const appendixAt = detail === "detailed" && appendix ? appendix.start : Number.POSITIVE_INFINITY;
+  const cutAppendix = detail === "selected" && appendix !== null;
+  const inCutSection = (q: FrameQuoteMatch): boolean =>
+    cutAppendix && appendix !== null && q.start >= appendix.start && q.start < appendix.end;
 
   const drop: FrameQuoteMatch[] = [];
+  const edits: Edit[] = [];
   const selected = new Set<number>();
   const kept = new Set<number>();
   let inlineKept = 0;
@@ -318,6 +455,12 @@ export function enforceVisualReferences(input: {
       continue;
     }
     selected.add(q.ref.sec);
+    // An entry of a section that is about to go is over this policy's cap by
+    // definition — `selected` has no appendix, so there is no room for it.
+    if (inCutSection(q)) {
+      droppedOverCap++;
+      continue;
+    }
     if (kept.has(q.ref.sec)) {
       droppedDuplicate++;
       drop.push(q);
@@ -331,6 +474,39 @@ export function enforceVisualReferences(input: {
     }
     kept.add(q.ref.sec);
     if (inline) inlineKept++;
+    // A kept quote whose alt names a time other than its own file is corrected
+    // here, where both numbers are known.
+    if (q.isImage) {
+      const alt = correctedAlt(summary.slice(q.altStart, q.altEnd), q.ref.sec);
+      if (alt !== null) edits.push({ kind: "replace", start: q.altStart, end: q.altEnd, text: alt });
+    }
+  }
+
+  // The appendix section goes WHOLE — heading, entries and captions — in the
+  // two states where what is left of it is not a reference section: `selected`,
+  // which has no appendix, and a `detailed` appendix no entry survived. Bounding
+  // the orphan-caption residue to the appendix is the point: elsewhere a removed
+  // image's caption is left standing rather than risking real prose, but a
+  // caption under a heading with no images left is the whole section lying.
+  const appendixEmptied =
+    detail === "detailed" &&
+    appendix !== null &&
+    !quotes.some((q) => q.start >= appendix.start && q.start < appendix.end && !drop.includes(q));
+  if (appendix && (cutAppendix || appendixEmptied)) {
+    edits.push({ kind: "block", start: appendix.start, end: appendix.end });
+    log.info("Removed the {detail} summary's `{heading}` section of {source} {id} — {why}", {
+      detail,
+      heading: VISUAL_REFERENCE_HEADING,
+      source: source.name,
+      id: videoId,
+      why: cutAppendix ? "this policy has no appendix" : "no entry survived the pass",
+    });
+  }
+  // A quote inside a section that is being cut is already gone with it; a
+  // splice inside a `block` would be applied to text the block also removes.
+  for (const q of drop) {
+    if (appendix && (cutAppendix || appendixEmptied) && q.start >= appendix.start && q.start < appendix.end) continue;
+    edits.push({ kind: "quote", start: q.start, end: q.end });
   }
 
   if (drop.length > 0) {
@@ -350,7 +526,7 @@ export function enforceVisualReferences(input: {
   }
 
   return {
-    text: drop.length === 0 ? summary : removeQuotes(summary, drop),
+    text: edits.length === 0 ? summary : applyEdits(summary, edits),
     selected: [...selected].sort((a, b) => a - b),
     referenced: [...kept].sort((a, b) => a - b),
     droppedInvalid,
@@ -375,9 +551,15 @@ export function dropFrameReferences(
 ): { text: string; removed: number } {
   if (seconds.length === 0) return { text: summary, removed: 0 };
   const wanted = new Set(seconds);
-  const drop = findFrameQuotes(summary, source).filter(
+  const drop = findFrameQuotes(summary, source, markdownCodeRegions(summary)).filter(
     (q) => q.ref !== null && q.ref.id === videoId && wanted.has(q.ref.sec),
   );
   if (drop.length === 0) return { text: summary, removed: 0 };
-  return { text: removeQuotes(summary, drop), removed: drop.length };
+  return {
+    text: applyEdits(
+      summary,
+      drop.map((q) => ({ kind: "quote" as const, start: q.start, end: q.end })),
+    ),
+    removed: drop.length,
+  };
 }

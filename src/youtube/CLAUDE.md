@@ -328,34 +328,63 @@ Vimeo and every other caller — and a test pins that literally rather than by
 needs an address and the seam's contract is that a frames-off capture never asks
 the id gate anything.
 
-**Then the answer is held to it.** `enforceVisualReferences` walks every markdown
-image whose target is a frames address and removes, deterministically and in
+**Then the answer is held to it.** `enforceVisualReferences` walks every quote of
+a frames address in the summary's PROSE and removes, deterministically and in
 document order: a second that was never extracted, another video's id, another
 source's frames, a non-canonical spelling (`047.jpg` — the file is `47.jpg` and
 the route serves exactly that), a repeat of a second already kept, and anything
 past `maxInline` (inline) or `maxTotal` (anywhere). Under `selected` there is no
-appendix, so every quote counts against the one cap. A removed image takes its
-LINE when nothing else is on it; an appendix caption whose image went is left
-standing rather than risking a real paragraph. ⚠️ **It runs on every capture,
-frames on or off** — with nothing extracted, a frames address is by definition
-invented, and a transcript-only summary must not promise pictures.
+appendix, so every quote counts against the one cap. ⚠️ **It runs on every
+capture, frames on or off** — with nothing extracted, a frames address is by
+definition invented, and a transcript-only summary must not promise pictures.
+Four rules it lives by, each of them a way the first version disagreed with
+itself:
 
-**Then the copy is checked.** `keepReferencedFrames` is the last thing between a
-reference and a served file, so whatever it did NOT keep — including the case
-where it threw and kept nothing — is dropped from the text by
-`dropFrameReferences` before anything stores it. The stored summary, the ingest
-body and the source-page draft are all built from that repaired string.
+- **A quote is what the COPY would serve, from one pattern.** `frameAddressRegExp`
+  (`src/summaries/frames.ts`) — a markdown image OR link whose target starts with
+  `/api/frames/` (any source) or this source's legacy prefix, any file name — is
+  what this pass parses, what `keepReferencedFrames` keeps by and what the
+  export rewrites by. A narrower pattern here left the link form and an alt
+  carrying `]` uncapped, unremovable and copied anyway. The canonical-address
+  check is one exported helper, `parseFrameAddress`.
+- **Fenced blocks and inline code are skipped**, in this pass AND in the copy
+  (`markdownCodeRegions`, `src/format/markdown-ast.ts` — the fact-check strip's
+  walk, not a second fence detector). A quote inside a fence is a documented
+  example; counting it spends a cap slot on a picture no reader sees, and a
+  fenced block near the top could exhaust the whole policy.
+- **The appendix is a SECTION, not one byte sequence.** The heading matches
+  case-insensitively at level 2 or 3, with or without bold decoration, a missing
+  space or a trailing colon, and is located fence-aware. Under `selected` a
+  section the model wrote anyway is cut WHOLE; under `detailed` a section no
+  entry survived goes the same way. That is what bounds the orphan-caption
+  residue: elsewhere a removed image's caption is left standing rather than
+  risking real prose, but a caption under a heading with no images left is the
+  whole section lying.
+- **A kept quote's alt says the time its own file does.** An alt naming another
+  time is corrected in place to the parsed second (words around it survive); the
+  pass is the one place that knows both numbers.
+
+A removed image takes its LINE when nothing else is on it — a bullet, a numbered
+item, a heading marker, a bold label like `**Figure:**` or a blockquote arrow is
+residue, not content — and a link WRAPPING an image (`[![alt](frame)](url)`) is
+one quote, removed whole.
+
+**Then the copy is checked.** `keepReferencedFrames` takes the pass's OWN
+`referenced` list rather than re-reading the text, and copies **per file**: one
+frame that cannot be copied costs its own reference and no other. It used to
+throw on the first miss, and the summarizer's catch then dropped every reference
+in the document while the JPEGs already copied stayed under the served root with
+nothing left to serve them. Whatever the copy did NOT keep is dropped from the
+text by `dropFrameReferences` before anything stores it; the stored summary, the
+ingest body and the source-page draft are all built from that repaired string.
 
 ⚠️ **The rewrite happens AFTER the summary has streamed to the card**, so two
-store flags carry it to the reader — and this vertical set NEITHER before:
-`completeReplacesText: true` in `state.ts` (`job.text` becomes the final summary,
-which is what an SSE replay serves, and the `complete` event carries it, which is
-what a live browser swaps in) and `completeCarriesSummary: true` on this route's
-`registerSummaryVertical` call (the terminal REPLAY event). The TikTok precedent
-for both. Without them the live card and a reloaded card both keep the
-pre-rewrite stream, stripped references included. Driven over a real socket in
-`capture-route-job-ordering.test.ts`, the only place the pair is observable
-together.
+store flags carry it to the reader — `completeReplacesText: true` in `state.ts`,
+which is where that reasoning lives, and `completeCarriesSummary: true` on this
+route's `registerSummaryVertical` call, its replay half. This vertical set
+NEITHER before. Driven in `capture-route-job-ordering.test.ts` through the real
+route — a `Bun.serve` on an ephemeral port and a `fetch` of the SSE stream —
+which is the only place the pair is observable together.
 
 **Four frame counts, kept separate** on the completion log line and in the replay
 harness's `run.json`: `extracted` (what the model was shown), `selected` (what it
@@ -397,10 +426,15 @@ read frames; and an install from before the picker (`{frames}` and no `kind`) is
 the default, not an error. `pickVisualDetail` runs the same re-validation on the
 second axis and answers **null** where the instance offers no such capability —
 which is what makes `buildSummarizeBody` omit the key rather than send a blank
-one the route would refuse. The unreachable fallback still OFFERS the two
-policies, the `framesSupported` rule read the same way: hiding them whenever the
-options fetch fails removes a working control on every instance that has one, and
-these two are fixed by the server's code rather than narrowed per bot. The popup
+one the route would refuse, and the popup sends null with Slides OFF too, since
+the picker is hidden there and the policy is consulted only where frames came
+out. The unreachable fallback offers **`selected` alone** — the `kinds` rule, not
+the `framesSupported` one: an over-offered Slides tick is refused out loud (503 +
+a sentence), while an instance that does not know `visual_detail` IGNORES the
+key, so offering `detailed` there would be a choice that silently did nothing.
+Every key the popup restores is NAMED in its `chrome.storage.sync.get` shape:
+the object form answers with the shape's keys and nothing else, so a key left out
+reads back `undefined` however much the profile holds. The popup
 reveals the Visuals row only while Slides is ticked (`renderVisualRow`, called by
 both the paint and the tick's own listener), remembers it under `visualDetail`,
 and its settle path is driven in `popup-settle.test.ts`. `bun run build:extension` emits it into

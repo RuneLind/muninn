@@ -1223,14 +1223,15 @@ describe("YouTube: the REWRITTEN summary reaches the card, live and after a relo
   const YT_URL = `https://www.youtube.com/watch?v=${YT_ID}`;
 
   /**
-   * The visual-reference pass runs AFTER the summary has already streamed to
-   * the card delta by delta, so what the reader saw quotes frames the stored
-   * text no longer does. Two flags carry the rewrite to both surfaces —
-   * `completeReplacesText` in `src/youtube/state.ts` (the live swap and the
-   * replayed body) and `completeCarriesSummary` on this route's
-   * `registerSummaryVertical` call (the terminal replay) — and this drives the
-   * REAL route over a REAL socket, because that is the only place the pair is
-   * observable together.
+   * The two flags that carry the visual-reference rewrite to a live card and to
+   * a reloaded one — `completeReplacesText` (`src/youtube/state.ts`, which
+   * carries the reasoning) and `completeCarriesSummary` on this route's
+   * `registerSummaryVertical` call.
+   *
+   * Driven through the REAL route: a `Bun.serve` on an ephemeral port and a
+   * `fetch` of the SSE stream, read event by event. That is the only place the
+   * pair is observable together — the store answers one half and the route the
+   * other, and a test holding either in isolation passes with the other undone.
    */
   const STREAMED = `A point.\n\n![Slide at 00:16:39](/api/frames/youtube/${YT_ID}/999.jpg)\n\nSTREAMED-ONLY-LINE\n`;
   const REWRITTEN = `A point.\n\nREWRITTEN-BODY\n`;

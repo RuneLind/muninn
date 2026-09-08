@@ -376,6 +376,47 @@ describe("keepReferencedFrames", () => {
     expect(existsSync(join(root, "42"))).toBe(false);
   });
 
+  test("a copy that fails costs THAT frame and nothing else", async () => {
+    // The frame is in the manifest and its file is gone — the work dir swept
+    // early, an EACCES, a full disk. Throwing on the first miss cost the whole
+    // capture its slides through the caller's catch, and left every JPEG copied
+    // before it under the served root with no reference left to serve it.
+    const work = dir();
+    const root = dir();
+    writeFileSync(join(work, "26.jpg"), "A");
+    writeFileSync(join(work, "1390.jpg"), "B");
+    const frames: CaptureFrame[] = [26, 900, 1390].map((t) => ({ path: join(work, `${t}.jpg`), tSeconds: t }));
+    const summary =
+      "![Slide](/api/frames/vimeo/42/26.jpg) ![Slide](/api/frames/vimeo/42/900.jpg) " +
+      "![Slide](/api/frames/vimeo/42/1390.jpg)";
+    expect(await keepReferencedFrames(summary, VIMEO_FRAME_SOURCE, "42", frames, root)).toEqual([26, 1390]);
+    expect(readdirSync(join(root, "vimeo", "42")).sort()).toEqual(["1390.jpg", "26.jpg"]);
+  });
+
+  test("the caller's OWN answer to what the text quotes is what is copied", async () => {
+    // The YouTube vertical's enforcement pass has already decided which quotes
+    // may be served, so the copy takes that list rather than parsing the summary
+    // a second time — two readings of one text is how they come to disagree.
+    const work = dir();
+    const root = dir();
+    writeFileSync(join(work, "26.jpg"), "A");
+    writeFileSync(join(work, "1390.jpg"), "B");
+    const frames: CaptureFrame[] = [26, 1390].map((t) => ({ path: join(work, `${t}.jpg`), tSeconds: t }));
+    const summary = "![Slide](/api/frames/vimeo/42/26.jpg) ![Slide](/api/frames/vimeo/42/1390.jpg)";
+    expect(await keepReferencedFrames(summary, VIMEO_FRAME_SOURCE, "42", frames, root, [1390])).toEqual([1390]);
+    expect(readdirSync(join(root, "vimeo", "42"))).toEqual(["1390.jpg"]);
+  });
+
+  test("a quote inside fenced code is source text, not a frame to keep", async () => {
+    const work = dir();
+    const root = dir();
+    writeFileSync(join(work, "26.jpg"), "A");
+    const frames: CaptureFrame[] = [{ path: join(work, "26.jpg"), tSeconds: 26 }];
+    const summary = "The shape is:\n\n```markdown\n![Slide](/api/frames/vimeo/42/26.jpg)\n```\n";
+    expect(await keepReferencedFrames(summary, VIMEO_FRAME_SOURCE, "42", frames, root)).toEqual([]);
+    expect(existsSync(join(root, "vimeo", "42"))).toBe(false);
+  });
+
   test("a summary quoting nothing creates no directory", async () => {
     const root = dir();
     expect(await keepReferencedFrames("plain text", VIMEO_FRAME_SOURCE, "42", [], root)).toEqual([]);

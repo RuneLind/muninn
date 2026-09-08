@@ -16,7 +16,7 @@
  */
 import { test, expect, describe, beforeEach, beforeAll, afterAll, mock } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
@@ -805,6 +805,23 @@ describe("the VISUAL DETAIL policy", () => {
     expect(getJob(jobId)!.summary).not.toContain("600.jpg");
     expect(String(ingestBodies[0]!.summary)).not.toContain("600.jpg");
     expect(logged("warning", "were not copied")).toBe(true);
+  });
+
+  test("one frame the copy could not keep costs its own reference and no other", async () => {
+    // The failure that made this a per-file copy: one missing file threw, the
+    // catch zeroed the kept list, and every OTHER reference was dropped from the
+    // text while its JPEG stayed under the served root with nothing to serve it.
+    missingFrameFiles = [600];
+    claudeResult = summaryQuoting(30, 600, 1170);
+    const jobId = await run({ frames: true });
+
+    const stored = getJob(jobId)!.summary!;
+    expect(stored).toContain("30.jpg");
+    expect(stored).toContain("1170.jpg");
+    expect(stored).not.toContain("600.jpg");
+    // …and the served root holds exactly the two the text still names: a copied
+    // JPEG with no reference left is an orphan nothing ever deletes.
+    expect(readdirSync(join(framesRoot, "youtube", VIDEO_ID)).sort()).toEqual(["1170.jpg", "30.jpg"]);
   });
 
   test("the four frame counts are reported separately", async () => {

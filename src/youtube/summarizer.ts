@@ -499,14 +499,24 @@ Video URL: ${videoUrl}`;
     let summary = enforced.text;
 
     // The frames the summary QUOTES are copied out of the work dir to the
-    // served root before the work dir dies; the rest go with it. Inside its own
-    // try: a copy failure must not fail a capture whose text is already on the
-    // reader's screen.
+    // served root before the work dir dies; the rest go with it. The list is
+    // the enforcement pass's OWN answer, not a second reading of the text: the
+    // pass has just decided which quotes may be served, and a re-parse is how
+    // the two come to disagree. Inside its own try: a copy failure must not fail
+    // a capture whose text is already on the reader's screen — and the copy is
+    // per file, so one missing frame costs its own reference and no other.
     let keptFrames: number[] = [];
     let copyFailed = false;
     if (frames.length > 0) {
       try {
-        keptFrames = await keepReferencedFrames(summary, YOUTUBE_FRAME_SOURCE, videoId, frames, resolved.framesRoot);
+        keptFrames = await keepReferencedFrames(
+          summary,
+          YOUTUBE_FRAME_SOURCE,
+          videoId,
+          frames,
+          resolved.framesRoot,
+          enforced.referenced,
+        );
       } catch (err) {
         copyFailed = true;
         log.error("YouTube capture {jobId}: keeping quoted frames failed: {error}", {

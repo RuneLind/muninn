@@ -359,10 +359,8 @@ export function registerYouTubeRoutes(
   // Shared plumbing: bare-path redirect, CORS preflight, SSE stream, jobs,
   // document/similar proxies (the /youtube page merged into /summaries).
   //
-  // `completeCarriesSummary` is the REPLAY half of the pair `state.ts` explains:
-  // the summary is rewritten (dropped frame references) after it has already
-  // streamed to the card, so a reader who reloads must be replayed the rewritten
-  // body rather than the stream that still quotes frames nothing serves.
+  // `completeCarriesSummary` is the REPLAY half of the pair `src/youtube/state.ts`
+  // explains, on the flag that carries the reasoning.
   registerSummaryVertical(app, config, {
     apiBase: YT_SOURCE.apiBase,
     collection: YT_COLLECTION,
