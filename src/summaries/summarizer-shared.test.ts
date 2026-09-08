@@ -284,6 +284,9 @@ describe("runCaptureOneShot", () => {
       finish(status: "ok" | "error", attrs?: Record<string, unknown>) {
         calls.push({ op: `finish:${status}`, attrs });
       },
+      event(label: string, attrs?: Record<string, unknown>) {
+        calls.push({ op: "event", label, attrs });
+      },
       addChildSpan() { return "child"; },
       addSubSpan() { return "sub"; },
     } as unknown as Tracer;
@@ -477,6 +480,146 @@ describe("runCaptureOneShot", () => {
     expect(tracer.name).toBe("capture:youtube");
     expect(tracer.name).toBe(captureTraceName("youtube"));
     expect(tracer.traceId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+  // --- the closing-takeaway check (`takeaway-check.ts`, run in this seam) ----
+  const WITH_CLOSER =
+    "CATEGORY: tech\n\nSUMMARY:\n*ingress*\n\n## Key takeaways\n- 🧱 Stopping the project was healthy.\n\n## Body\nThe rollout of one line was delayed.\n\n> 💬 **Takeaway:** The cancelled project was the most valuable one.";
+  const verdictJson = (v: { verdict: string; issues?: string[]; rewrite?: string | null }) => ({
+    result: JSON.stringify({ issues: [], rewrite: null, ...v }),
+    model: "claude-sonnet-4-6",
+    inputTokens: 4_000,
+    outputTokens: 200,
+    backend: "anthropic" as const,
+  });
+
+  test("an ungrounded closer is rewritten in the RAW text the vertical parses", async () => {
+    const prompts: string[] = [];
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async (p) => {
+        prompts.push(p);
+        return verdictJson({ verdict: "ungrounded", issues: ["reversal"], rewrite: "Stopping the project was healthy." });
+      },
+    });
+    const result = await runCaptureOneShot(h.opts);
+    expect(result.result.endsWith("> 💬 **Takeaway:** Stopping the project was healthy.")).toBe(true);
+    expect(result.result).toContain("## Key takeaways"); // the body is untouched
+    expect(result.result).not.toContain("most valuable");
+    // The check sees the body and the closer, never the prompt/transcript.
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("The rollout of one line was delayed.");
+    expect(prompts[0]).not.toContain("transcript");
+    // A child span of the capture, labelled off the summary pass, stamped with the outcome.
+    const end = h.calls.find((c) => c.op === "end" && c.label === "claude:takeaway-check")!;
+    expect(end.attrs).toMatchObject({ takeaway: "rewritten", takeawayIssues: "reversal", model: "claude-sonnet-4-6" });
+    // The check runs BEFORE the root is finished, so its span lands inside it.
+    const idx = (op: string, label?: string) => h.calls.findIndex((c) => c.op === op && (label === undefined || c.label === label));
+    expect(idx("end", "claude:takeaway-check")).toBeLessThan(idx("finish:ok"));
+  });
+
+  test("a grounded closer leaves the result object untouched", async () => {
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async () => verdictJson({ verdict: "grounded" }),
+    });
+    const result = await runCaptureOneShot(h.opts);
+    expect(result.result).toBe(WITH_CLOSER);
+    expect(h.calls.find((c) => c.op === "end" && c.label === "claude:takeaway-check")!.attrs).toMatchObject({ takeaway: "grounded" });
+  });
+
+  test("a failing check keeps the closer as written and never fails the capture", async () => {
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async () => { throw new Error("router down"); },
+    });
+    const result = await runCaptureOneShot(h.opts);
+    expect(result.result).toBe(WITH_CLOSER);
+    expect(h.calls.find((c) => c.op === "end" && c.label === "claude:takeaway-check")!.attrs).toMatchObject({ takeaway: "check-failed" });
+    expect(h.calls.some((c) => c.op === "finish:ok")).toBe(true);
+  });
+
+  test("a result with no closer (the YouTube selection pass) opens no check span and makes no call", async () => {
+    let calls = 0;
+    const h = harness({
+      pass: "claude:select",
+      oneShot: async () => fakeResult({ result: "[3, 7, 11]" }),
+      takeawayCheck: async () => { calls++; return verdictJson({ verdict: "grounded" }); },
+    });
+    await runCaptureOneShot(h.opts);
+    expect(calls).toBe(0);
+    expect(h.calls.some((c) => String(c.label).includes("takeaway-check"))).toBe(false);
+  });
+
+  test("a grounded check returns the connector's result object itself", async () => {
+    const fake = fakeResult({ result: WITH_CLOSER });
+    const h = harness({
+      oneShot: async () => fake,
+      takeawayCheck: async () => verdictJson({ verdict: "grounded" }),
+    });
+    expect(await runCaptureOneShot(h.opts)).toBe(fake);
+  });
+
+  test("the check's spend is accumulated onto the run, its identity is not", async () => {
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async () => verdictJson({ verdict: "grounded" }),
+    });
+    await runCaptureOneShot(h.opts);
+    const spend = h.attached.find((m) => m.inputTokens === 4_000 && m.outputTokens === 200)!;
+    expect(spend).toBeDefined();
+    expect(spend.model).toBeUndefined();
+    expect(spend.botName).toBeUndefined();
+  });
+
+  test("a SUMMARY pass with no closer records the absence as an event; the selection pass stays silent", async () => {
+    const summary = harness({ oneShot: async () => fakeResult({ result: "CATEGORY: tech\n\nSUMMARY:\nno closer here" }) });
+    await runCaptureOneShot(summary.opts);
+    expect(summary.calls.find((c) => c.op === "event" && c.label === "claude:takeaway-check")!.attrs).toEqual({ takeaway: "no-takeaway" });
+    const select = harness({ pass: "claude:select", oneShot: async () => fakeResult({ result: "[3, 7]" }) });
+    await runCaptureOneShot(select.opts);
+    expect(select.calls.some((c) => c.op === "event")).toBe(false);
+  });
+
+  test("a REMOVED closer reaches the vertical without its block, and its spend still lands on the run", async () => {
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: async () => verdictJson({ verdict: "ungrounded", issues: ["reversal"], rewrite: "<b>bad</b>" }),
+    });
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+      ],
+      reset: true,
+    });
+    try {
+      const result = await runCaptureOneShot(h.opts);
+      expect(result.result).not.toContain("Takeaway");
+      expect(result.result).toContain("## Key takeaways");
+      const end = h.calls.find((c) => c.op === "end" && c.label === "claude:takeaway-check")!;
+      expect(end.attrs).toMatchObject({ takeaway: "removed", takeawayIssues: "reversal", inputTokens: 4_000 });
+      expect(h.attached.some((m) => m.inputTokens === 4_000 && m.outputTokens === 200)).toBe(true);
+      // The seam's own line names the outcome, so a removed closer is greppable in the capture log.
+      const line = records.find((r) => r.category.join("/") === "muninn/summaries/capture" && String(r.message.join("")).includes("closing takeaway"));
+      expect(line?.properties.outcome).toBe("removed");
+    } finally {
+      await configure({ sinks: {}, loggers: [{ category: ["logtape", "meta"], sinks: [], lowestLevel: "error" }], reset: true });
+    }
+  });
+
+  test("takeawayCheck: false skips the check", async () => {
+    let calls = 0;
+    const h = harness({
+      oneShot: async () => fakeResult({ result: WITH_CLOSER }),
+      takeawayCheck: false,
+    });
+    // A `false` cannot carry a stub, so the proof is the absence of the span.
+    const result = await runCaptureOneShot(h.opts);
+    expect(result.result).toBe(WITH_CLOSER);
+    expect(h.calls.some((c) => String(c.label).includes("takeaway-check"))).toBe(false);
+    expect(calls).toBe(0);
   });
 });
 

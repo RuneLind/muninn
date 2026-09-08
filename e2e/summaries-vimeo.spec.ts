@@ -758,10 +758,14 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     holdModel = null;
 
     // The stream was never re-opened, so the rest of the summary still arrives —
-    // and the WHOLE text is there, not just the part that came after the paste.
+    // and the WHOLE summary is there, not just the part that came after the
+    // paste. On complete the card swaps in the STORED summary (the vertical sets
+    // `completeReplacesText`, since the closing-takeaway check can rewrite the
+    // closer after it streamed), so the envelope line that streamed is gone.
     await expect(page.locator("#statusBadge .status-text")).toHaveText("Complete", { timeout: 60_000 });
-    await expect(page.locator("#summaryArea")).toContainText("CATEGORY: tech");
+    await expect(page.locator("#summaryArea")).toContainText("Key takeaways");
     await expect(page.locator("#summaryArea")).toContainText(SUMMARY_LINE);
+    await expect(page.locator("#summaryArea")).not.toContainText("CATEGORY: tech");
     // A completed capture does not sit under "Already being captured" — that
     // notice was about THIS job, and it is answered now.
     await expect(page.locator("#errorBanner")).not.toHaveClass(/visible/);

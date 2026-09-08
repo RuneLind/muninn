@@ -40,10 +40,16 @@ export type JobEvent = GenericJobEvent<JobStatus>;
 
 // --- Store ---
 
+// The closing-takeaway check in `runCaptureOneShot` (`summaries/takeaway-check.ts`)
+// can rewrite the closer AFTER it streamed, so the stored summary is no longer
+// what the card accumulated: `job.text` becomes the final summary (what a
+// replay serves) and the `complete` event carries it (what a live browser
+// swaps in). `completeCarriesSummary` on the route is the replay half.
 const store = createJobStore<JobStatus, { videoId: string }>({
   subsystem: "vimeo",
   label: "Vimeo",
   initialStatus: "pending",
+  completeReplacesText: true,
 });
 
 export const {

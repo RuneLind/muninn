@@ -68,6 +68,7 @@ export function registerAnthropicRoutes(
     apiBase: ANTHROPIC_SOURCE.apiBase,
     collection: ANTHROPIC_COLLECTION,
     store: { getJob, getRecentJobs, subscribe },
+    completeCarriesSummary: true,
   });
 
   // The ranked, pre-annotated candidate inbox. Returns the actionable + in-flight +
