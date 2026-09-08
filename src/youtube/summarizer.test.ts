@@ -1358,13 +1358,18 @@ describe("the dense scan path", () => {
     expect(finishCalls[0]!.attrs).toMatchObject({ inputTokens: 7, outputTokens: 3, toolCount: 2 });
   });
 
-  test("an EMPTY manifest is an answer: no frames, and no fallback", async () => {
+  test("an EMPTY manifest is an answer, but never a SILENT one", async () => {
     selectionAnswer = "[]";
     await run({ frames: true });
     expect(extractCalls).toEqual([]);
     expect(regrabCalls).toHaveLength(1);
     expect(regrabCalls[0]!.seconds).toEqual([]);
-    expect(lastClaudeSpanAttrs).toMatchObject({ frameScan: "dense", frameCount: "0" });
+    // A slides capture that ships no slides is reported like every other
+    // zero-slide outcome. Reported as `dense`, it read as a working slides
+    // capture of a video with nothing worth showing — which is the one reading
+    // a reader cannot check.
+    expect(lastClaudeSpanAttrs).toMatchObject({ frameScan: "selection_empty", frameCount: "0" });
+    expect(logged("warning", "chose no frames at all")).toBe(true);
   });
 
   test("RE-GRAB failure: cadence fallback on the same video, named as its own stage", async () => {

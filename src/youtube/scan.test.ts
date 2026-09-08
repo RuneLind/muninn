@@ -328,6 +328,54 @@ describe("parseSelectionManifest", () => {
     });
   });
 
+  test("EVERY fenced block is considered, not just the first", () => {
+    // A pass that restates the schema before answering — or opens with a fenced
+    // list of the sheets it read — used to have that first block taken as the
+    // answer, so a whole paid selection call was reported as "found nothing".
+    const answer =
+      "The schema I am following:\n\n```json\n[130, 165]\n```\n\nAnd my picks:\n\n```json\n" +
+      JSON.stringify([{ tSeconds: 150, category: "chart", reason: "the second chart" }]) +
+      "\n```\n";
+    const manifest = parseSelectionManifest(answer, available, 40)!;
+    expect(manifest.entries.map((e) => e.tSeconds)).toEqual([150]);
+  });
+
+  test("prose carrying its own brackets does not swallow the array", () => {
+    // First-`[`-to-last-`]` is not a parser: one bracketed phrase anywhere in
+    // the answer made the whole slice unparseable, which is a failed pass and a
+    // cadence fallback over a sentence.
+    const manifest = parseSelectionManifest(
+      'Looking at [sheet 1]: [{"tSeconds": 130, "category": "chart", "reason": "x"}] — that was [sheet 2].',
+      available,
+      40,
+    )!;
+    expect(manifest.entries.map((e) => e.tSeconds)).toEqual([130]);
+  });
+
+  test("an array with no OBJECT entries is a failed pass, not an empty manifest", () => {
+    // `[130, 145]` is a pass that answered in the wrong shape — there is no
+    // category and no reason in it — and reading it as "looked, found nothing"
+    // silently ships a slides capture with no slides. Only `[]` means that.
+    expect(parseSelectionManifest("[130, 145]", available, 40)).toBeNull();
+    expect(parseSelectionManifest("[null, null]", available, 40)).toBeNull();
+    expect(parseSelectionManifest('["130"]', available, 40)).toBeNull();
+  });
+
+  test("a fractional second snaps to the candidate grid", () => {
+    // The sheets only ever offered multiples of the scan interval, so a second
+    // read off a cell and written with a decimal is a candidate this capture
+    // CAN serve — rounding it to the nearest whole second and then dropping it
+    // spent a sheet read for nothing.
+    const manifest = parseSelectionManifest(
+      '[{"tSeconds": 131.2, "category": "chart", "reason": "x"},' +
+        ' {"tSeconds": 148.5, "category": "chart", "reason": "y"}]',
+      available,
+      40,
+    )!;
+    expect(manifest.entries.map((e) => e.tSeconds)).toEqual([130, 150]);
+    expect(manifest.dropped).toEqual([]);
+  });
+
   test("HH:MM:SS and MM:SS spellings resolve to the same second", () => {
     const manifest = parseSelectionManifest(
       '[{"tSeconds": "00:02:10", "category": "chart", "reason": "a"}, {"tSeconds": "2:30", "category": "chart", "reason": "b"}]',

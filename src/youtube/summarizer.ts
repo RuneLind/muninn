@@ -151,6 +151,14 @@ export type YouTubeScanOutcome =
   | "scan_failed"
   /** The selection pass threw or answered nothing parseable — cadence ran on the same download. */
   | "selection_failed"
+  /**
+   * The selection pass answered an EMPTY manifest — it read the sheets and
+   * chose nothing. Not a failure and not a fallback (there is nothing the
+   * cadence sampler would know that this pass did not), but never `dense`
+   * either: a slides capture that ships no slides is a zero-slide outcome and
+   * says so, here and in a warn.
+   */
+  | "selection_empty"
   /** The re-grab of the selected seconds failed — cadence ran on the same download. */
   | "regrab_failed";
 
@@ -698,6 +706,23 @@ export async function summarizeVideo(
               },
             );
 
+            if (selection.length === 0) {
+              // Not a failure — the pass read the sheets and answered — but a
+              // slides capture that ships no slides is a zero-slide outcome and
+              // is reported as one, rather than completing as an ordinary dense
+              // capture that happens to quote nothing.
+              log.warn(
+                "YouTube capture {jobId}: the selection pass chose no frames at all out of {candidates} " +
+                  "candidate(s) on {sheets} sheet(s) — the summary has no slides",
+                {
+                  jobId,
+                  videoId,
+                  candidates: prepared.candidates.length,
+                  sheets: prepared.sheets.length,
+                },
+              );
+            }
+
             // The launch gate. Nothing can abort an in-flight connector call, so
             // the second pass either starts with enough budget to finish or does
             // not start: a summary call launched on a spent budget does not stop
@@ -736,7 +761,7 @@ export async function summarizeVideo(
             // reaches neither.
             await unlink(videoPath!).catch(() => {});
             videoPath = null;
-            scanOutcome = "dense";
+            scanOutcome = selection.length === 0 ? "selection_empty" : "dense";
           } catch (err) {
             if (err instanceof TwoPassBudgetError) throw err;
             // The scan produced sheets but the pass over them did not produce

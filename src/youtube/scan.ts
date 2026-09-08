@@ -392,40 +392,103 @@ export function selectionLimitFor(maxTotal: number): number {
   return Math.min(YOUTUBE_FULL_READ_CAP, Math.max(1, maxTotal * 2));
 }
 
-/** A second in any spelling the answer may use: `137`, `"137"`, `"2:17"`, `"00:02:17"`. */
+/**
+ * A second in any spelling the answer may use: `137`, `137.5`, `"137"`, `"2:17"`,
+ * `"00:02:17"`. NOT rounded — {@link parseSelectionManifest} snaps it to the
+ * grid the sheets actually offered, which is a different question.
+ */
 function parseSecondsValue(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? Math.round(value) : null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
   const raw = value.trim().replace(/s$/i, "");
-  if (/^\d+$/.test(raw)) return Number(raw);
+  if (/^\d+(?:\.\d+)?$/.test(raw)) return Number(raw);
   if (!/^\d{1,6}(?::\d{1,6}){1,2}$/.test(raw)) return null;
   return raw.split(":").map(Number).reduce((total, part) => total * 60 + part, 0);
+}
+
+/** Every ```fenced``` block's body, in the order they appear. */
+function fencedBlocks(text: string): string[] {
+  const out: string[] = [];
+  for (const match of text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)) out.push(match[1]!);
+  return out;
+}
+
+/**
+ * The index of the `]` that closes the `[` at `from`, or `-1`.
+ *
+ * A BALANCED walk, string-aware, because `indexOf("[")` … `lastIndexOf("]")` is
+ * not a parser: one bracketed phrase in the prose around the answer — "reading
+ * [sheet 1]" — makes that slice unparseable and throws away a whole paid model
+ * call.
+ */
+function matchingBracket(text: string, from: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[" || ch === "{") depth++;
+    else if (ch === "]" || ch === "}") {
+      depth--;
+      if (depth <= 0) return depth === 0 && ch === "]" ? i : -1;
+    }
+  }
+  return -1;
+}
+
+/** Every well-formed JSON array in `text`, outermost first, in the order they appear. */
+function jsonArraysIn(text: string): unknown[][] {
+  const out: unknown[][] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "[") continue;
+    const end = matchingBracket(text, i);
+    if (end < 0) continue;
+    try {
+      const parsed: unknown = JSON.parse(text.slice(i, end + 1));
+      if (Array.isArray(parsed)) {
+        out.push(parsed);
+        i = end;
+      }
+    } catch {
+      // Not JSON from here; the next `[` may still be.
+    }
+  }
+  return out;
+}
+
+/** A JSON object — the only shape a manifest ENTRY can be. */
+function isManifestRow(row: unknown): boolean {
+  return row !== null && typeof row === "object" && !Array.isArray(row);
 }
 
 /**
  * The JSON array inside a model answer, however it wrapped it.
  *
- * A fenced ```json block first (what the prompt asks for), then the outermost
- * `[…]` run in the text — a model that adds a sentence before or after its JSON
- * has still answered, and re-running a selection pass to punish prose costs a
- * whole model call.
+ * EVERY fenced block is considered and then the whole text, and the first array
+ * carrying an OBJECT wins — not the first array found. Two answers made the old
+ * "first fence, else first-`[`-to-last-`]`" reading throw away a paid pass: one
+ * that restated the schema (or listed the sheets it read) in a fence before
+ * answering, and one whose prose carried a bracketed phrase of its own.
+ *
+ * An array with no objects in it — `[130, 145]`, `[null, null]` — is NOT an
+ * empty manifest: it is a pass that answered in the wrong shape, and reading it
+ * as "looked and found nothing" ships a slides capture with no slides and no
+ * signal. Only a genuinely empty array means that, and it is taken only when no
+ * array of objects was found anywhere.
  */
 function extractJsonArray(text: string): unknown[] | null {
-  const fenced = /```(?:json)?\s*\n([\s\S]*?)```/i.exec(text);
-  const candidates = [fenced?.[1], text];
-  for (const candidate of candidates) {
-    if (candidate === undefined) continue;
-    const start = candidate.indexOf("[");
-    const end = candidate.lastIndexOf("]");
-    if (start < 0 || end <= start) continue;
-    try {
-      const parsed: unknown = JSON.parse(candidate.slice(start, end + 1));
-      if (Array.isArray(parsed)) return parsed;
-    } catch {
-      continue;
-    }
-  }
-  return null;
+  const arrays: unknown[][] = [];
+  for (const candidate of [...fencedBlocks(text), text]) arrays.push(...jsonArraysIn(candidate));
+  const manifest = arrays.find((rows) => rows.some(isManifestRow));
+  if (manifest !== undefined) return manifest;
+  return arrays.some((rows) => rows.length === 0) ? [] : null;
 }
 
 /**
@@ -442,11 +505,19 @@ function extractJsonArray(text: string): unknown[] | null {
  * anything past `limit` is over the cap the prompt stated. An unknown category
  * becomes `other` rather than dropping the entry — the category is a label on
  * the reason, not a gate.
+ *
+ * A second that is not on the grid is SNAPPED to it before it is held to the
+ * candidate set: the sheets only ever offered multiples of `intervalSec`, so a
+ * decimal read off a cell names a candidate this capture can serve, and
+ * rounding it to the nearest whole second and then dropping it spends a sheet
+ * read for nothing. What is REPORTED as dropped is the second the answer
+ * actually named, so the warn says what the model said.
  */
 export function parseSelectionManifest(
   answer: string,
   available: readonly number[],
   limit: number,
+  intervalSec: number = YOUTUBE_SCAN_INTERVAL_SEC,
 ): SelectionManifest | null {
   const rows = extractJsonArray(answer);
   if (rows === null) return null;
@@ -456,11 +527,15 @@ export function parseSelectionManifest(
   const dropped: number[] = [];
   let droppedOverCap = 0;
   for (const row of rows) {
-    if (row === null || typeof row !== "object") continue;
+    if (!isManifestRow(row)) continue;
     const rec = row as Record<string, unknown>;
-    const sec = parseSecondsValue(rec.tSeconds ?? rec.t ?? rec.second ?? rec.seconds);
+    const named = parseSecondsValue(rec.tSeconds ?? rec.t ?? rec.second ?? rec.seconds);
+    const snapped = named === null || intervalSec <= 0
+      ? named
+      : Math.round(named / intervalSec) * intervalSec;
+    const sec = named !== null && offered.has(named) ? named : snapped;
     if (sec === null || !offered.has(sec)) {
-      if (sec !== null) dropped.push(sec);
+      if (named !== null) dropped.push(named);
       continue;
     }
     if (seen.has(sec)) continue;
