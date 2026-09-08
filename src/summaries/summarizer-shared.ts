@@ -93,9 +93,54 @@ export interface CaptureOneShotOptions {
    * verticals pass nothing and are unaffected.
    */
   extraTraceAttrs?: Record<string, string>;
+  /**
+   * The label of the model span this call opens. Defaults to `claude`, which is
+   * the label every read-side fast path keys off — `/models`' observed-model
+   * query and `src/db/traces.ts` both join on `c.name = 'claude'` — so a caller
+   * that makes TWO calls under one root labels only the SECONDARY one
+   * (`claude:select`) and leaves the summary call as `claude`. Two spans sharing
+   * a label would also clobber each other: `Tracer` keys its spans by label.
+   */
+  pass?: string;
+  /**
+   * A trace root the CALLER owns, for a job that makes more than one model call.
+   *
+   * With one set, this seam opens no root of its own and — the load-bearing half
+   * — calls no `tracer.finish`: `Tracer.finish` has no idempotence guard, so a
+   * root finished by both the seam and its caller is written twice, and the
+   * second write is whichever finished last rather than whichever is true. The
+   * caller then owns the root on EVERY exit path, success and failure alike.
+   *
+   * Passed ONLY on a genuinely multi-pass path. A frames-off capture, a
+   * cadence capture and every other vertical stay single-pass and keep the
+   * seam's own root — two trace-ownership paths, by design, because the
+   * alternative is every single-pass caller growing a `finish` it cannot forget.
+   */
+  parentTracer?: Tracer;
   /** Test seams — production callers pass neither. */
   oneShot?: typeof executeOneShot;
   tracer?: Tracer;
+}
+
+/**
+ * The trace root a capture job runs under — the name and the attributes spelled
+ * ONCE, so a two-pass caller that has to build its own root cannot build a
+ * differently-shaped one than {@link runCaptureOneShot} would have.
+ */
+export function createCaptureTracer(source: string, botConfig: BotConfig): Tracer {
+  return new Tracer(captureTraceName(source), {
+    botName: botConfig.name,
+    platform: "capture",
+  });
+}
+
+/**
+ * The trace-root NAME for a capture vertical. Its own function because a
+ * `Tracer` does not expose the name it was built with, so this is the only
+ * place the string is checkable — and it is what `/traces` rows are read by.
+ */
+export function captureTraceName(source: string): string {
+  return `capture:${source}`;
 }
 
 /**
@@ -115,10 +160,11 @@ export interface CaptureOneShotOptions {
 export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<ClaudeExecResult> {
   const { source, jobId, title, url, config, botConfig, attachRun } = opts;
 
-  const tracer = opts.tracer ?? new Tracer(`capture:${source}`, {
-    botName: botConfig.name,
-    platform: "capture",
-  });
+  // `parentTracer` first: a caller that owns the root has already opened it, and
+  // the test seam (`tracer`) is the single-pass shape. Whether this seam FINISHES
+  // the root is the same question, asked once here.
+  const tracer = opts.parentTracer ?? opts.tracer ?? createCaptureTracer(source, botConfig);
+  const ownsRoot = opts.parentTracer === undefined;
 
   const connectorLabel = getConnectorLabel(botConfig.connector ?? "claude-cli");
   // Bind what's already known so the *in-flight* card is truthful; the model
@@ -146,7 +192,7 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
     // The `claude` span (start/end + tool child spans) is owned by the shared
     // seam; this wrapper keeps only the capture-specific parts — the thinking cap
     // above, the job-store `attachRun` mirror, and the trace-root finish.
-    const result = await tracedOneShot(tracer, "claude", opts.prompt, config, botConfig, {
+    const result = await tracedOneShot(tracer, opts.pass ?? "claude", opts.prompt, config, botConfig, {
       systemPrompt: opts.systemPrompt,
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
@@ -172,12 +218,12 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
     };
 
     attachRun(jobId, usage);
-    tracer.finish("ok", { source, ...usage });
+    if (ownsRoot) tracer.finish("ok", { source, ...usage });
 
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    tracer.finish("error", { source, error: message });
+    if (ownsRoot) tracer.finish("error", { source, error: message });
     captureLog.warn("Capture summarize failed for {source} job {jobId}: {error}", {
       source,
       jobId,

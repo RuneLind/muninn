@@ -8,17 +8,24 @@ const log = getLog("youtube", "state");
 // --- Types ---
 
 /**
- * `downloading` and `extracting_frames` are the FRAMES path only (the reader
- * ticked Slides): the video comes down from yt-dlp and one JPEG per cadence
- * tick comes out of it. A transcript-only capture never leaves the three
- * statuses it always had. Both already have a label and a colour on the
+ * `downloading`, `extracting_frames` and `selecting_frames` are the FRAMES path
+ * only (the reader ticked Slides): the video comes down from yt-dlp and JPEGs
+ * come out of it. A transcript-only capture never leaves the three statuses it
+ * always had. The first two already have a label and a colour on the
  * /summaries job card — they were added for the Vimeo and X verticals.
+ *
+ * `selecting_frames` is the DENSE path's first model call, and it is a status
+ * rather than a longer `extracting_frames` because nothing streams during it:
+ * the pass reads contact sheets and answers with a JSON manifest, so a card left
+ * on "Extracting frames" would sit still through a whole model turn with no way
+ * to tell a slow pass from a stuck one.
  */
 export type JobStatus =
   | "pending"
   | "fetching_transcript"
   | "downloading"
   | "extracting_frames"
+  | "selecting_frames"
   | "summarizing"
   | "ingesting"
   | "complete"

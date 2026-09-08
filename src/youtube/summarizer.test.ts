@@ -52,6 +52,33 @@ mock.module("../ai/one-shot.ts", () => ({
       onProgress?: (e: { type: string; text: string }) => void;
     },
   ) => {
+    // Which of the two calls this is, by the SYSTEM prompt — the one thing that
+    // is different by construction rather than by coincidence. `lastPrompt` and
+    // its siblings keep meaning "the SUMMARY call", so every case written before
+    // the dense path reads what it always did.
+    const isSelection = opts?.systemPrompt === SELECTION_SYSTEM_PROMPT;
+    oneShotCalls.push({
+      pass: isSelection ? "select" : "summary",
+      prompt,
+      systemPrompt: opts?.systemPrompt,
+      extraDirs: opts?.extraDirs,
+      timeoutMs: opts?.timeoutMs,
+      thinkingMaxTokens: opts?.thinkingMaxTokens,
+      hasProgress: opts?.onProgress !== undefined,
+    });
+    if (isSelection) {
+      if (selectionThrows) throw selectionThrows;
+      await selectionGate;
+      return {
+        result: selectionAnswer,
+        outputTokens: 3,
+        inputTokens: 7,
+        numTurns: 2,
+        costUsd: 0.01,
+        toolCalls: [{ name: "Read" }, { name: "Read" }],
+        wallClockMs: 5,
+      };
+    }
     lastPrompt = prompt;
     lastBotConfig = botConfig;
     lastSystemPrompt = opts?.systemPrompt;
@@ -60,7 +87,15 @@ mock.module("../ai/one-shot.ts", () => ({
     lastTimeoutMs = opts?.timeoutMs;
     atModelCall?.();
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
-    return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
+    return {
+      result: claudeResult,
+      outputTokens: 42,
+      inputTokens: 10,
+      numTurns: 1,
+      costUsd: 0.05,
+      toolCalls: [{ name: "Read" }],
+      wallClockMs: 5,
+    };
   },
   connectorCapabilities: () => ({
     supportsExtraDirs: connectorSupportsExtraDirs,
@@ -70,6 +105,22 @@ mock.module("../ai/one-shot.ts", () => ({
 }));
 /** The one capability this file flips — the summarizer's second-line frames check. */
 let connectorSupportsExtraDirs = true;
+
+/** Every model call the job made, in order — the only way to see BOTH passes. */
+let oneShotCalls: Array<{
+  pass: "select" | "summary";
+  prompt: string;
+  systemPrompt?: string;
+  extraDirs?: string[];
+  timeoutMs?: number;
+  thinkingMaxTokens?: number;
+  hasProgress: boolean;
+}> = [];
+/** What the selection pass answers with, and how it fails when a case wants it to. */
+let selectionAnswer = "[]";
+let selectionThrows: Error | null = null;
+/** Held open by the budget-gate case: the selection call parks here. */
+let selectionGate: Promise<void> | undefined;
 
 let sourceDraftCalls: Array<Record<string, unknown>> = [];
 mock.module("../gardener/source-drafter-run.ts", () => ({
@@ -90,6 +141,18 @@ mock.module("../gardener/source-drafter-run.ts", () => ({
  * the patch cannot reach another suite.
  */
 let lastClaudeSpanAttrs: Record<string, unknown> | undefined;
+/** Every span label opened, in order — how the two-pass path's labels are seen. */
+let spanLabels: string[] = [];
+/**
+ * Every trace-root `finish`, with the id of the root it finished.
+ *
+ * The two-pass path moves root ownership from the shared seam to the summarizer,
+ * and `Tracer.finish` has no idempotence guard — so "exactly one finish per
+ * root" is a property that has to be OBSERVED rather than reasoned about, and
+ * the id is what makes a second finish of the same root distinguishable from one
+ * finish each of two roots.
+ */
+let finishCalls: Array<{ traceId: string; status: string; attrs?: Record<string, unknown> }> = [];
 const { Tracer } = await import("../tracing/tracer.ts");
 const realTracerStart = Tracer.prototype.start;
 Tracer.prototype.start = function patchedStart(
@@ -97,13 +160,30 @@ Tracer.prototype.start = function patchedStart(
   label: string,
   attributes?: Record<string, unknown>,
 ) {
+  spanLabels.push(label);
   if (label === "claude") lastClaudeSpanAttrs = attributes;
   return realTracerStart.call(this, label, attributes);
+};
+const realTracerFinish = Tracer.prototype.finish;
+Tracer.prototype.finish = function patchedFinish(
+  this: InstanceType<typeof Tracer>,
+  status: "ok" | "error" = "ok",
+  attributes?: Record<string, unknown>,
+) {
+  finishCalls.push({ traceId: this.traceId, status, attrs: attributes });
+  return realTracerFinish.call(this, status, attributes);
 };
 
 const { summarizeVideo } = await import("./summarizer.ts");
 const { createJob, getJob } = await import("./state.ts");
 const { YOUTUBE_FRAME_FORMAT_SELECTOR } = await import("./frames.ts");
+const {
+  SCAN_SIGNATURE_BYTES,
+  SELECTION_SYSTEM_PROMPT,
+  contactSheetPlans,
+  selectionTimeoutFor,
+  twoPassBudgetFor,
+} = await import("./scan.ts");
 const {
   CAPTURE_DEEP_MODEL,
   SHIPPED_CAPTURE_PRESETS,
@@ -196,6 +276,15 @@ let extractTicks: number[] = [30, 600, 1170];
 let missingFrameFiles: number[] = [];
 /** Where kept frames land — a throwaway root, never the developer's `~/.muninn`. */
 let framesRoot = "";
+// --- the dense-scan seams ---------------------------------------------------
+let scanCalls: Array<{ file: string; scanDir: string; timeoutMs: number }> = [];
+let scanThrows: Error | null = null;
+/** The seconds the fake scan reports having sampled. */
+let scanSampleSeconds: number[] = [];
+let sheetCalls: Array<{ candidates: number[]; outDir: string }> = [];
+let sheetsThrow: Error | null = null;
+let regrabCalls: Array<{ file: string; seconds: number[]; height: number }> = [];
+let regrabThrows: Error | null = null;
 /** The path of the "downloaded video", so a case can check when it was unlinked. */
 let lastVideoPath = "";
 
@@ -235,8 +324,66 @@ function deps() {
         return { path, tSeconds: t };
       });
     },
+    scanVideo: async (input: { file: string; scanDir: string; timeoutMs: number }) => {
+      scanCalls.push(input);
+      if (scanThrows) throw scanThrows;
+      mkdirSync(input.scanDir, { recursive: true });
+      // Real geometry, synthetic content: one all-`i` plane per sample, so
+      // consecutive samples differ in EVERY block and the shipped dedup keeps
+      // them all. The dedup's own behaviour is pinned in `scan.test.ts`.
+      return {
+        samples: scanSampleSeconds.map((t) => {
+          const path = join(input.scanDir, `${t}.jpg`);
+          writeFileSync(path, `thumb-${t}`);
+          return { path, tSeconds: t };
+        }),
+        signatures: scanSampleSeconds.map((_, i) =>
+          new Uint8Array(SCAN_SIGNATURE_BYTES).fill((i * 60) % 256),
+        ),
+      };
+    },
+    buildSheets: async (input: {
+      candidates: readonly { tSeconds: number }[];
+      thumbPathFor: (t: number) => string;
+      outDir: string;
+      scratchDir: string;
+      timeoutMs: number;
+    }) => {
+      sheetCalls.push({ candidates: input.candidates.map((c) => c.tSeconds), outDir: input.outDir });
+      if (sheetsThrow) throw sheetsThrow;
+      mkdirSync(input.outDir, { recursive: true });
+      // Through the shipped layout, so the prompt the selection pass gets lists
+      // the cells this test's candidates really produce.
+      return contactSheetPlans(input.candidates as never).map((plan) => {
+        writeFileSync(join(input.outDir, plan.fileName), "sheet");
+        return plan;
+      });
+    },
+    regrabFrames: async (input: {
+      file: string;
+      seconds: readonly number[];
+      outDir: string;
+      height: number;
+    }): Promise<CaptureFrame[]> => {
+      regrabCalls.push({ file: input.file, seconds: [...input.seconds], height: input.height });
+      if (regrabThrows) throw regrabThrows;
+      mkdirSync(input.outDir, { recursive: true });
+      return [...input.seconds].sort((a, b) => a - b).map((t) => {
+        const path = join(input.outDir, `${t}.jpg`);
+        writeFileSync(path, `jpeg-${t}`);
+        return { path, tSeconds: t };
+      });
+    },
     framesRoot,
   };
+}
+
+/** The two temp roots one job uses — the names `summarizeVideo` builds from its id. */
+function workDirFor(jobId: string): string {
+  return join(tmpdir(), `muninn-youtube-${jobId}`);
+}
+function mediaDirFor(jobId: string): string {
+  return join(tmpdir(), `muninn-youtube-media-${jobId}`);
 }
 
 // --- logs -------------------------------------------------------------------
@@ -284,6 +431,24 @@ beforeEach(() => {
   atModelCall = null;
   lastClaudeSpanAttrs = undefined;
   framesRoot = tmpRoot("yt-frames-root-");
+  scanCalls = [];
+  scanThrows = null;
+  scanSampleSeconds = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60];
+  sheetCalls = [];
+  sheetsThrow = null;
+  regrabCalls = [];
+  regrabThrows = null;
+  oneShotCalls = [];
+  selectionAnswer = "[]";
+  selectionThrows = null;
+  selectionGate = undefined;
+  spanLabels = [];
+  finishCalls = [];
+  // `YOUTUBE_FRAME_SCAN` is in `AMBIENT_INSTANCE_ENV`, so the preload deleted
+  // whatever the developer's `.env` says and every case states its own sampler.
+  // The cases written before the dense path existed are `cadence` by default;
+  // the dense suite sets `dense` on itself.
+  process.env.YOUTUBE_FRAME_SCAN = "cadence";
 });
 
 /** Run one capture and hand back its job id. */
@@ -377,10 +542,13 @@ describe("frames on", () => {
   });
 
   test("the frames go in a subdir of the work dir, at the frame height", async () => {
-    await run({ frames: true });
+    const jobId = await run({ frames: true });
     expect(extractCalls).toHaveLength(1);
     expect(extractCalls[0]!.durationSec).toBe(1200);
-    expect(extractCalls[0]!.outDir).toBe(join(downloadCalls[0]!.workDir, "frames"));
+    // The WORK dir, not the media dir the download went to: the model reads the
+    // former as `--add-dir` and never sees the latter.
+    expect(extractCalls[0]!.outDir).toBe(join(workDirFor(jobId), "frames"));
+    expect(downloadCalls[0]!.workDir).toBe(mediaDirFor(jobId));
     // The height itself is the SEAM's constant (`CAPTURE_FRAME_HEIGHT`), pinned
     // in `src/summaries/frames.test.ts` — this vertical no longer keeps a
     // second copy of it to assert against.
@@ -405,11 +573,11 @@ describe("frames on", () => {
     atModelCall = () => {
       existedAtModelCall = existsSync(lastVideoPath);
     };
-    await run({ frames: true });
-    // It must not sit through a ten-minute turn inside the directory the model
-    // is handed as `--add-dir`.
+    const jobId = await run({ frames: true });
+    // It must not sit through a ten-minute turn — and it was never inside the
+    // directory the model is handed as `--add-dir` in the first place.
     expect(existedAtModelCall).toBe(false);
-    expect(lastExtraDirs).toEqual([downloadCalls[0]!.workDir]);
+    expect(lastExtraDirs).toEqual([workDirFor(jobId)]);
   });
 
   test("the frame list is on the prompt and the thinking cap is lifted", async () => {
@@ -441,9 +609,10 @@ describe("frames on", () => {
     expect(existsSync(join(framesRoot, "youtube", VIDEO_ID, "30.jpg"))).toBe(false);
   });
 
-  test("the work dir is removed when the job is done", async () => {
-    await run({ frames: true });
-    expect(existsSync(downloadCalls[0]!.workDir)).toBe(false);
+  test("BOTH temp roots are removed when the job is done", async () => {
+    const jobId = await run({ frames: true });
+    expect(existsSync(workDirFor(jobId))).toBe(false);
+    expect(existsSync(mediaDirFor(jobId))).toBe(false);
   });
 
   test("the ingest body carries `## Transcript`, and nothing else does", async () => {
@@ -557,7 +726,7 @@ describe("what is WINDOWED is what huginn ANSWERED, not what we asked for", () =
     expect(String(ingestBodies[0]!.summary)).not.toContain("## Transcript");
     // Everything else about the capture is unchanged: frames still ran.
     expect(downloadCalls).toHaveLength(1);
-    expect(lastExtraDirs).toEqual([downloadCalls[0]!.workDir]);
+    expect(lastExtraDirs).toEqual([workDirFor(jobId)]);
     expect(getJob(jobId)?.status).toBe("complete");
   });
 
@@ -996,5 +1165,273 @@ describe("the summary KIND", () => {
     // Everything before it still happened: the capture completed and ingested.
     expect(getJob(jobId)?.status).toBe("complete");
     expect(ingestBodies).toHaveLength(2);
+  });
+});
+
+// ── the DENSE scan path: two model calls, one job record ─────────────────────
+//
+// Every case here sets `YOUTUBE_FRAME_SCAN=dense` on itself rather than relying
+// on the default. The default IS dense, but the ambient variable is blanked by
+// the preload, and a suite whose mode came from a default cannot tell "the
+// default moved" from "the case was written for the other one".
+
+describe("the dense scan path", () => {
+  /** The seconds the fake scan samples, which is also the candidate set. */
+  const SAMPLED = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60];
+
+  function pick(seconds: readonly number[]): string {
+    return JSON.stringify(
+      seconds.map((t) => ({ tSeconds: t, category: "chart", reason: "a chart" })),
+    );
+  }
+
+  beforeEach(() => {
+    process.env.YOUTUBE_FRAME_SCAN = "dense";
+    scanSampleSeconds = [...SAMPLED];
+    selectionAnswer = pick([10, 35]);
+  });
+
+  test("two model calls under ONE trace root, finished exactly once", async () => {
+    await run({ frames: true });
+
+    expect(oneShotCalls.map((c) => c.pass)).toEqual(["select", "summary"]);
+    // The selection span is NOT `claude`: the read-side fast paths join on that
+    // label, and two spans under one root sharing it clobber each other.
+    expect(spanLabels.filter((l) => l.startsWith("claude"))).toEqual(["claude:select", "claude"]);
+    expect(finishCalls).toHaveLength(1);
+    expect(finishCalls[0]!.status).toBe("ok");
+  });
+
+  test("the root's attributes SUM both passes' spend", async () => {
+    await run({ frames: true });
+    // 7 + 10 in, 3 + 42 out, 0.01 + 0.05, 2 + 1 turns, 2 + 1 tool reads.
+    expect(finishCalls[0]!.attrs).toMatchObject({
+      source: "youtube",
+      inputTokens: 17,
+      outputTokens: 45,
+      numTurns: 3,
+      toolCount: 3,
+    });
+    expect(finishCalls[0]!.attrs!.costUsd as number).toBeCloseTo(0.06, 10);
+  });
+
+  test("the selection pass gets ONLY the sheets, no streaming, and the capture thinking cap", async () => {
+    const jobId = await run({ frames: true, preset: findCapturePreset(SHIPPED_CAPTURE_PRESETS, "deep")! });
+    const select = oneShotCalls.find((c) => c.pass === "select")!;
+
+    // The sheet dir and nothing else: the frames do not exist yet and the video
+    // lives in `mediaDir`, so this is the one call that can reach neither.
+    expect(select.extraDirs).toEqual([join(workDirFor(jobId), "select")]);
+    // No text streams during it — a JSON manifest must not reach the job card.
+    expect(select.hasProgress).toBe(false);
+    // Capped EVEN ON `deep`, whose full thinking budget is for the summary.
+    expect(select.thinkingMaxTokens).toBe(8000);
+    // …while the summary call on the same capture inherits the bot's budget.
+    expect(lastThinking).toBeUndefined();
+    // 13 candidates over a 12-cell grid is two sheets.
+    expect(select.timeoutMs).toBe(selectionTimeoutFor(2));
+  });
+
+  test("the manifest drives the RE-GRAB, and only the chosen seconds are extracted", async () => {
+    const jobId = await run({ frames: true });
+
+    expect(scanCalls).toHaveLength(1);
+    expect(scanCalls[0]!.scanDir).toBe(join(mediaDirFor(jobId), "scan"));
+    // The cadence extractor never ran.
+    expect(extractCalls).toEqual([]);
+    expect(regrabCalls).toHaveLength(1);
+    expect(regrabCalls[0]!.seconds).toEqual([10, 35]);
+    expect(regrabCalls[0]!.height).toBe(720);
+    // And those are what the summary prompt is told about.
+    expect(lastPrompt).toContain("t=00:00:10");
+    expect(lastPrompt).toContain("t=00:00:35");
+    expect(lastPrompt).not.toContain("t=00:00:05");
+  });
+
+  test("a second the scan never sampled is refused rather than re-grabbed", async () => {
+    selectionAnswer = pick([10, 9999]);
+    await run({ frames: true });
+    expect(regrabCalls[0]!.seconds).toEqual([10]);
+    expect(logged("warning", "this scan never sampled")).toBe(true);
+  });
+
+  test("the video is gone before the summary call, and BOTH roots after the job", async () => {
+    let existedAtModelCall: boolean | null = null as boolean | null;
+    atModelCall = () => {
+      existedAtModelCall = existsSync(lastVideoPath);
+    };
+    const jobId = await run({ frames: true });
+
+    // It survived the SELECTION call (the re-grab needs it) and not the summary.
+    expect(existedAtModelCall).toBe(false);
+    expect(existsSync(workDirFor(jobId))).toBe(false);
+    expect(existsSync(mediaDirFor(jobId))).toBe(false);
+  });
+
+  test("the summary budget is what is LEFT of the whole two-pass one", async () => {
+    await run({ frames: true });
+    // 2 sheets over 13 candidates; the manifest picked 2 frames. The selection
+    // call is instant here, so the remainder is the whole budget minus ~nothing.
+    const whole = twoPassBudgetFor(2, 16, 600_000);
+    expect(lastTimeoutMs).toBeLessThanOrEqual(whole);
+    expect(lastTimeoutMs).toBeGreaterThan(whole - 10_000);
+  });
+
+  test("the trace says which sampler ran, and what it cost to get there", async () => {
+    await run({ frames: true });
+    expect(lastClaudeSpanAttrs).toMatchObject({
+      frames: "on",
+      frameScan: "dense",
+      scanSamples: String(SAMPLED.length),
+      scanCandidates: String(SAMPLED.length),
+      scanSheets: "2",
+      frameCount: "2",
+    });
+  });
+
+  test("the completion line is findable by its MARKER, not by carrying a model", async () => {
+    await run({ frames: true });
+    // Two lines now carry a `model`; only one is the capture's completion.
+    const withModel = logs.filter((r) => typeof (r.properties as Record<string, unknown>).model === "string");
+    expect(withModel.length).toBeGreaterThanOrEqual(2);
+    const complete = logs.filter(
+      (r) => (r.properties as Record<string, unknown>).event === "capture_complete",
+    );
+    expect(complete).toHaveLength(1);
+    expect(complete[0]!.properties).toMatchObject({
+      frameScan: "dense",
+      totalInputTokens: 17,
+      totalOutputTokens: 45,
+    });
+    expect(JSON.parse(String((complete[0]!.properties as Record<string, unknown>).selectionManifest))).toHaveLength(2);
+  });
+
+  test("SCAN failure: the cadence sampler runs on the same download, reported", async () => {
+    scanThrows = new Error("ffmpeg died");
+    const jobId = await run({ frames: true });
+
+    // No second download, and no selection call at all.
+    expect(downloadCalls).toHaveLength(1);
+    expect(oneShotCalls.map((c) => c.pass)).toEqual(["summary"]);
+    expect(extractCalls).toHaveLength(1);
+    expect(logged("warning", "gave up at scan_failed")).toBe(true);
+    expect(lastClaudeSpanAttrs).toMatchObject({ frames: "on", frameScan: "scan_failed" });
+    // Single-pass again, so the SEAM owns the root: one finish, and it is ok.
+    expect(finishCalls).toHaveLength(1);
+    expect(finishCalls[0]!.status).toBe("ok");
+    expect(existsSync(mediaDirFor(jobId))).toBe(false);
+  });
+
+  test("SELECTION throw: error-finish, cadence fallback, video removed", async () => {
+    selectionThrows = new Error("connector exploded");
+    const jobId = await run({ frames: true });
+
+    expect(extractCalls).toHaveLength(1);
+    expect(regrabCalls).toEqual([]);
+    expect(logged("warning", "gave up at selection_failed")).toBe(true);
+    // Two roots on this path, by design: the one this job opened for two passes
+    // is finished ERROR, and the fallback summary opens the seam's own.
+    expect(finishCalls.map((c) => c.status)).toEqual(["error", "ok"]);
+    expect(new Set(finishCalls.map((c) => c.traceId)).size).toBe(2);
+    // A pass that THREW reported no usage, so the root it belonged to says the
+    // job spent nothing on it — the honest answer, and what distinguishes this
+    // from the unparseable-manifest case below.
+    expect(finishCalls[0]!.attrs).toMatchObject({
+      error: "connector exploded",
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+    expect(getJob(jobId)!.status).toBe("complete");
+    expect(existsSync(mediaDirFor(jobId))).toBe(false);
+  });
+
+  test("an UNPARSEABLE manifest is a failed pass, not an empty one", async () => {
+    selectionAnswer = "I had trouble reading the sheets, sorry.";
+    await run({ frames: true });
+    expect(extractCalls).toHaveLength(1);
+    expect(regrabCalls).toEqual([]);
+    expect(logged("warning", "no parseable JSON manifest")).toBe(true);
+    expect(lastClaudeSpanAttrs).toMatchObject({ frameScan: "selection_failed" });
+    // The call itself SUCCEEDED and was paid for, so the abandoned root reports
+    // what it cost rather than reporting nothing.
+    expect(finishCalls[0]!.status).toBe("error");
+    expect(finishCalls[0]!.attrs).toMatchObject({ inputTokens: 7, outputTokens: 3, toolCount: 2 });
+  });
+
+  test("an EMPTY manifest is an answer: no frames, and no fallback", async () => {
+    selectionAnswer = "[]";
+    await run({ frames: true });
+    expect(extractCalls).toEqual([]);
+    expect(regrabCalls).toHaveLength(1);
+    expect(regrabCalls[0]!.seconds).toEqual([]);
+    expect(lastClaudeSpanAttrs).toMatchObject({ frameScan: "dense", frameCount: "0" });
+  });
+
+  test("RE-GRAB failure: cadence fallback on the same video, named as its own stage", async () => {
+    regrabThrows = new Error("ffmpeg seek failed");
+    const jobId = await run({ frames: true });
+
+    expect(extractCalls).toHaveLength(1);
+    expect(logged("warning", "gave up at regrab_failed")).toBe(true);
+    expect(lastClaudeSpanAttrs).toMatchObject({ frameScan: "regrab_failed" });
+    expect(getJob(jobId)!.status).toBe("complete");
+    expect(existsSync(mediaDirFor(jobId))).toBe(false);
+  });
+
+  test("the LAUNCH GATE refuses a summary call the budget cannot hold, and fails the job", async () => {
+    // Nothing can abort an in-flight connector call, so the only honest answer
+    // to a spent budget is to refuse the second one. The selection pass parks
+    // here past the whole budget; a real one would have hit its own timeout,
+    // which is why this is a gate and not a cancellation.
+    let release: (() => void) | undefined;
+    selectionGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const whole = twoPassBudgetFor(2, 16, 600_000);
+    const started = Date.now();
+    const spy = Date.now;
+    // Advance the clock rather than wait 24 minutes.
+    Date.now = () => (oneShotCalls.some((c) => c.pass === "select") ? started + whole + 1 : started);
+    release!();
+    let jobId = "";
+    try {
+      jobId = await run({ frames: true });
+    } finally {
+      Date.now = spy;
+    }
+
+    expect(oneShotCalls.map((c) => c.pass)).toEqual(["select"]);
+    expect(regrabCalls).toEqual([]);
+    expect(extractCalls).toEqual([]);
+    const job = getJob(jobId)!;
+    expect(job.status).toBe("error");
+    expect(job.error).toContain("refusing to start it");
+    // The root this job opened is finished ERROR, exactly once.
+    expect(finishCalls.map((c) => c.status)).toEqual(["error"]);
+    expect(existsSync(workDirFor(jobId))).toBe(false);
+    expect(existsSync(mediaDirFor(jobId))).toBe(false);
+  });
+
+  test("the switch set to `cadence` skips the scan entirely", async () => {
+    process.env.YOUTUBE_FRAME_SCAN = "cadence";
+    await run({ frames: true });
+    expect(scanCalls).toEqual([]);
+    expect(sheetCalls).toEqual([]);
+    expect(oneShotCalls.map((c) => c.pass)).toEqual(["summary"]);
+    expect(lastClaudeSpanAttrs).toMatchObject({ frameScan: "cadence", scanSamples: "0" });
+  });
+
+  test("an unrecognised switch value falls back to cadence, loudly", async () => {
+    process.env.YOUTUBE_FRAME_SCAN = "dence";
+    await run({ frames: true });
+    expect(scanCalls).toEqual([]);
+    expect(logged("warning", "is not a scan mode")).toBe(true);
+  });
+
+  test("frames OFF never reaches the scan, whatever the switch says", async () => {
+    await run();
+    expect(scanCalls).toEqual([]);
+    expect(downloadCalls).toEqual([]);
+    expect(oneShotCalls.map((c) => c.pass)).toEqual(["summary"]);
   });
 });

@@ -9,9 +9,11 @@ into huginn.
 
 | File | Role |
 |---|---|
-| `state.ts` | The job store. Statuses `pending · fetching_transcript · downloading · extracting_frames · summarizing · ingesting · complete · error` — the middle two are the FRAMES path only |
+| `state.ts` | The job store. Statuses `pending · fetching_transcript · downloading · extracting_frames · selecting_frames · summarizing · ingesting · complete · error` — the middle three are the FRAMES path only |
 | `frames.ts` | Everything the frames path DECIDES, all of it pure and import-free: `decideYouTubeFrames`, the format/cap/floor constants, `youtubeWatchUrl`, `transcriptUrl`, `youtubeDownloadTimeoutFor`, `capTranscriptWindows`, `appendTranscriptSection` |
-| `summarizer.ts` | The job: probe → transcript → download → frames → `runCaptureOneShot` → ingest → source-draft |
+| `scan.ts` | The DENSE scan's decision surface, pure: the 5 s grid, the block-signature dedup, the coverage-reserving cap, the contact-sheet layout, the selection prompt + manifest parse, the two-pass budget split, and the `YOUTUBE_FRAME_SCAN` switch |
+| `scan-run.ts` | Its ffmpeg half: one decode pass producing thumbnails + signatures, the tiled sheets, the full-height re-grab |
+| `summarizer.ts` | The job: probe → transcript → download → frames (dense two-pass, or cadence) → `runCaptureOneShot` → ingest → source-draft |
 | `kinds.ts` | `youtubeCaptureKinds` — the offer set this vertical narrows, called by the options route, the `bad_kind` check and the replay harness |
 | `extension-options-rules.ts` | The popup's rules, pure and import-free — payload validation, restore-and-revalidate, the restore NOTE, the POST body. Emitted into `extensions/youtube/capture-rules.js` by `bun run build:extension` |
 | `extension-build.ts` | That emitter. Bundles for the browser and normalizes bun's cwd-relative module banner, so the byte gate cannot depend on where it ran |
@@ -50,6 +52,11 @@ the "shorter than a minute" cut and be reported as a clip.
 modes, so handing yt-dlp a client-supplied URL would let any page spawn it
 against an arbitrary host.
 
+**The frames come from a DENSE SCAN and a SELECTION PASS, not from a cadence**
+(the default; `YOUTUBE_FRAME_SCAN=cadence` restores the old sampler). See
+**The dense scan** below — the cadence extractor is still what every failure
+falls back to, and it is still what runs behind the switch.
+
 **The download is VIDEO-ONLY** (`bv[height<=720][ext=mp4][vcodec^=avc1]/bv[height<=720][ext=mp4]/bv[height<=720]`),
 because the transcript comes from huginn and every byte of audio would be paid
 for and thrown away; there is no uncapped tail, so an upload with no ≤720p video
@@ -79,13 +86,19 @@ download + extract) and is never held across the transcript fetch or the model
 turn — what it guarantees is one yt-dlp / ffmpeg at a time, not one capture at a
 time.
 
-**The video file is unlinked the moment the ffmpeg pass returns**, in a
-`finally` so a failed pass unlinks too: `workDir` is what the model is handed as
-`--add-dir`, and a 90 MB mp4 sitting in it through a ten-minute turn is bytes
-the turn can read and nothing wants it to. The frames go in `workDir/frames`;
-only the ones the summary QUOTES are copied to
-`~/.muninn/frames/youtube/<videoId>/<sec>.jpg` (`keepReferencedFrames`), and the
-work dir dies in the job's own `finally`.
+**There are TWO temp roots, and the split is what keeps the video out of the
+model's reach.** `muninn-youtube-<jobId>` (`workDir`) holds the frames and the
+contact sheets and is what the model is handed as `--add-dir`;
+`muninn-youtube-media-<jobId>` (`mediaDir`) holds the downloaded rendition and
+the scan's several hundred 320 px thumbnails and is named in no `extraDirs` at
+all. The video used to live in `workDir`, which is why it had to be unlinked the
+instant ffmpeg was done with it — and on the dense path it cannot be, since the
+re-grab happens AFTER a model call. It is still released early (right after the
+re-grab, or in the cadence extractor's own `finally`), and the job's `finally`
+removes BOTH roots recursively, so a selection pass that threw before the
+re-grab still leaves no mp4 in `tmpdir()`. Only the frames the summary QUOTES
+are copied to `~/.muninn/frames/youtube/<videoId>/<sec>.jpg`
+(`keepReferencedFrames`).
 
 **Every frames failure is a WARN plus today's transcript-only capture, never a
 failed job** — a probe that says nothing, a live stream, a video under a minute,
@@ -100,6 +113,132 @@ what the cut ADMITS: `frameBudgetFor` hands out 15 ticks up to 60 s and **25** u
 to 180 s, so the line sits immediately below its densest sampling — a 61 s video,
 the shortest this admits, is measured at 25 frames, one every ~2.4 s. That is
 deliberate — a two-minute lightning talk does have slides.
+
+## The dense scan
+
+**A slides capture samples the whole video every 5 seconds and then decides what
+to look at properly.** The old shape was one frame per `frameBudgetFor` tick —
+30 frames over a 29-minute talk, one every ~59 s — and a chart on screen for
+four seconds simply fell between two of them.
+
+The path, in order, with what fails where:
+
+| Step | Where | On failure |
+|---|---|---|
+| download the ≤720p rendition into `mediaDir` | `framesQueue` section 1 | transcript-only (the existing rule) |
+| **scan** — one ffmpeg decode → 320 px thumbnails + a 32×18 gray signature each | same section, `scan-run.ts` | `scan_failed` ⇒ cadence on the SAME download |
+| **dedup + cap** — pure, over the signatures | `scan.ts` | — |
+| **contact sheets** — 4×3 tiles of 320 px cells | same section | `scan_failed` ⇒ cadence |
+| **selection pass** — a model call over the sheets, answering a JSON manifest | OUTSIDE every queue section | `selection_failed` ⇒ cadence |
+| **launch gate** — is there budget left for the summary call? | — | **fails the job**, stage named |
+| **re-grab** — the chosen seconds at 720p | `framesQueue` section 2 | `regrab_failed` ⇒ cadence |
+| **summary** — the ordinary capture call, over those frames | outside the queue | the existing failure path |
+
+**No model pass ever holds the media queue.** The two ffmpeg halves take their
+own sections, the second one AFTER the selection call returned; nothing calls
+`framesQueue.run` from inside a held section.
+
+**Why a uniform grid and not scene detection.** Measured on the reference video
+(1767 s, an article walkthrough with an inset presenter): plain
+`select='gt(scene,0.25)'` returns 27 candidates over the whole video and two in
+the 120–190 s window, missing two of the three named charts — the presenter
+inset moves constantly and swamps a whole-frame scene score. A 10 s grid catches
+two of the three; the third is on screen ~166–170 s and the 10 s grid's 170 s
+cell is already the next page. A 5 s grid catches all three, and one sequential
+decode over the whole file costs **6.7 s wall / 353 samples / 5.3 MB**. The
+change-aware detector (a stabilization window, region comparison) stays an
+experiment and is not built.
+
+**The signature is decoded by ffmpeg, never by Bun.** One `-filter_complex` with
+a `split` produces both outputs off the SAME decode — the 320 px thumbnail and a
+32×18 grayscale plane written as raw bytes — so the dedup compares 576-byte
+arrays and never opens a JPEG. One ffmpeg per sample would be 353 spawns and 353
+seeks for the same work.
+
+**The dedup is per BLOCK, and the comparison is against the previous KEPT
+sample.** A whole-frame mean cannot tell "the presenter's head moved in the
+corner inset" from "the slide changed"; splitting the plane into 8×6 blocks and
+counting how many moved by ≥12 gray levels separates them by construction — a
+talking head is 1 block of 48, a page turn is most of them. No block POSITION is
+ever given meaning. Comparing against the previous KEPT sample rather than the
+previous SAMPLE is what makes a slow scroll produce one candidate per screenful
+instead of none at all. The threshold is **0.15**, calibrated on the reference
+video: 353 samples → 110 candidates, with a frame inside all three chart
+windows; 0.10 keeps 158 (mostly the inset moving), 0.20 already loses the second
+chart's whole window.
+
+**The cap reserves coverage before it ranks change.** `YOUTUBE_CANDIDATE_CAP` is
+120; past it, a third of the cap goes to evenly-spaced anchors across the whole
+sequence and the rest to the highest-change survivors. Ranking by change alone
+hands the whole cap to whichever stretch cuts most, so a talk whose second half
+is one long screen-share would arrive at the selection pass with nothing from its
+second half.
+
+**The sheets carry no burned-in labels, and that is a build constraint rather
+than a preference:** `drawtext` needs font support this machine's ffmpeg and the
+container images are built without (`ffmpeg -filters | grep drawtext` finds
+nothing), so a labelled sheet is one that fails to build on the hosts that
+matter. `CONTACT_SHEET = {cols: 4, rows: 3, cellWidth: 320}` is the named
+benchmark variable; the cells are ROW-MAJOR and `selectionPrompt` names each
+sheet's cells in that order, with their integer seconds. A short last sheet is
+padded by `tile` and its padding cells are simply not listed.
+
+**The read arithmetic, once.** The selection pass reads ⌈120 / 12⌉ = **10**
+sheets. The synthesis pass reads the re-grabbed frames, which the manifest caps
+at 2 × the visual-detail policy's total — 16 under `selected`, **40** under
+`detailed`. Both are under `YOUTUBE_FULL_READ_CAP` (60).
+
+**The manifest is HELD, not trusted.** `parseSelectionManifest` reads a fenced
+```json block or the outermost `[…]` run, then drops a second the scan never
+sampled, a repeat, and anything past the limit; an unknown category becomes
+`other` rather than dropping the entry. It answers **`null`** when nothing parses
+at all — a failed pass, which falls back — as against an empty array, which is a
+pass that looked and found nothing.
+
+**The deadline is arithmetic, not machinery.** Nothing can abort an in-flight
+connector call: `executeOneShot` takes a `timeoutMs` and no signal. So the job
+states ONE budget up front (`twoPassBudgetFor` — the selection call's own
+timeout plus a full summary call at the policy's frame cap), gives the selection
+pass its own `timeoutMs`, and derives the summary call's from what is LEFT. When
+the remainder is under the summary call's own floor the second pass **does not
+start**: the job fails with the stage named. Launching it anyway would not stop
+early — it would run its own timeout and overrun the number the job announced.
+
+**Two trace-ownership paths, by design.** A dense capture makes two model calls,
+so `summarizeVideo` opens the root itself (`createCaptureTracer`) and hands it to
+both `runCaptureOneShot` calls as `parentTracer`, which makes the seam skip its
+own `finish` — `Tracer.finish` has no idempotence guard. The caller then finishes
+it exactly once on every exit path (`finishParent` nulls the field, so a second
+call is a no-op), with **both passes' spend summed**. Every other capture —
+frames off, the cadence switch, and every dense attempt that fell back — is
+single-pass and keeps the seam's own root, so a fallback run legitimately writes
+two roots: the abandoned two-pass one, finished `error` with what the selection
+pass cost, and the seam's own for the summary. The selection span is
+`claude:select`, never `claude`: `/models`' observed-model query and
+`src/db/traces.ts` both join on that label, and two spans under one root sharing
+it would clobber each other in the tracer's own map.
+
+**`attachRun` accumulates.** The job-store spend fields (`inputTokens`,
+`outputTokens`, `numTurns`, `toolCount`, `costUsd`) SUM across calls while the
+identity fields stay last-write, so the `/agents` card reports the whole job
+rather than its last call. Every single-pass vertical is unchanged by
+construction: the sum of one value is that value.
+
+**The switch is `YOUTUBE_FRAME_SCAN`** (`dense` by default, `cadence` the kill
+switch). An UNRECOGNISED value is `cadence` plus a warn — the opposite of
+`resolveServingProfile`'s refuse-to-boot rule and of `optionalEnvFlag`'s
+treat-as-off rule, because this variable exists to turn the dense path OFF and a
+typo that left it on would be the switch failing at its only job. It is in
+`AMBIENT_INSTANCE_ENV`, so no suite inherits it.
+
+**`selecting_frames` is a status of its own** because nothing streams during that
+pass: it reads sheets and answers JSON, so a card left on "Extracting frames"
+would sit still through a whole model turn.
+
+**The completion line is found by a MARKER.** This vertical now writes a second
+line carrying a `model` (the selection pass's), so `event: "capture_complete"` —
+not "the last record with a model and a summaryKind" — is what the replay
+harness matches; the selection line is `event: "selection_complete"`.
 
 ## The transcript with a clock
 
@@ -483,7 +622,7 @@ yt-dlp -f 'bv[height<=720][ext=mp4][vcodec^=avc1]/bv[height<=720][ext=mp4]/bv[he
 
 bun scripts/replay-youtube.ts --video <id>.mp4 --transcript transcript.json \
   --video-id <id> --title "…" --kind deep --frames \
-  --visual-detail selected --runs 2 --out ./out
+  --visual-detail selected --scan dense --runs 2 --out ./out
 ```
 
 Per run it writes `summary.md`, the recorded `ingest.json`, the kept frames and
@@ -494,6 +633,18 @@ quotes, and whether a `## Visual reference` appendix landed before
 `## Transcript`. `--visual-detail` is validated by the route's own
 `isVisualDetail`, so the harness cannot run a policy a capture could not.
 Keep the fixtures OUT of the repo — muninn is public.
+
+On the DENSE path it drives the real ffmpeg scan, the real sheets and a real
+selection call, and `run.json` grows: `scanMode` and `frameScan` (which sampler
+was asked for, and which one ran), `scanSamples` / `candidatesAfterDedup` /
+`candidatesAfterCap` / `sheetCount`, the parsed `selectionManifest`,
+`selectionPass` and `synthesisPass` as separate spend blocks beside the
+accumulated totals, `scanWallMs` / `sheetWallMs` / `regrabWallMs` /
+`cadenceWallMs` / `extractionWallMs`, and `peakScratchBytes` — sampled every 2 s
+WHILE the job runs, because both temp roots are removed in its `finally` and a
+measurement afterwards is always zero. `--scan` writes `YOUTUBE_FRAME_SCAN`
+rather than passing a flag down, since that env var is the only channel the
+summarizer reads it on.
 
 ## Testing
 
@@ -509,6 +660,15 @@ are injected through `SummarizeVideoOptions.deps`; nothing in the suite
 downloads or decodes anything. Route cases live in
 `src/dashboard/routes/capture-route-job-ordering.test.ts`, which runs in a
 process of its own for the same reason.
+
+`scan.test.ts` is the dense path's decision surface with no ffmpeg and no video
+— the signatures are built at the SHIPPED geometry (32×18, 8×6 blocks), because
+a test over 4-byte arrays would pass against a comparator that divides by the
+wrong number. `scan-run.test.ts` drives the real ffmpeg over a 30 s fixture it
+generates in-test with `-f lavfi` (a static colour, a cut, a moving pattern) and
+`test.skipIf`s itself with a PRINTED line when ffmpeg is absent — CI has no media
+binaries, and a silent skip reads as a pass. Neither mocks anything, so both sit
+in the shared chunk.
 
 ⚠️ **No chain globs `src/youtube/`**: both `test` and `test:unit` enumerate this
 directory's files one by one, and `src/test/mock-isolation.test.ts` checks

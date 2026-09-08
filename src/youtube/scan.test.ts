@@ -1,0 +1,504 @@
+/**
+ * The dense-scan decision surface: the grid, the dedup, the cap, the sheet
+ * layout, the manifest parse, the budget split and the kill switch.
+ *
+ * All of it pure — no ffmpeg, no video, no model. The signatures here are built
+ * at the SHIPPED geometry (32×18 gray, 8×6 blocks) rather than at a convenient
+ * one, because the block arithmetic is what the dedup is: a test over 4-byte
+ * arrays would pass against a comparator that divides by the wrong number.
+ *
+ * The ffmpeg half is `scan-run.test.ts`; the two-pass job is
+ * `summarizer.test.ts`.
+ */
+import { test, expect, describe } from "bun:test";
+import {
+  CONTACT_SHEET,
+  CONTACT_SHEET_CELLS,
+  SCAN_BLOCK_COLS,
+  SCAN_BLOCK_DELTA,
+  SCAN_BLOCK_ROWS,
+  SCAN_CHANGE_THRESHOLD,
+  SCAN_SIGNATURE_BYTES,
+  SCAN_SIGNATURE_HEIGHT,
+  SCAN_SIGNATURE_WIDTH,
+  SELECTION_CATEGORIES,
+  YOUTUBE_CANDIDATE_CAP,
+  YOUTUBE_FULL_READ_CAP,
+  YOUTUBE_SCAN_INTERVAL_SEC,
+  blockChangeFraction,
+  capScanCandidates,
+  contactSheetPlans,
+  dedupeScanSamples,
+  parseSelectionManifest,
+  resolveFrameScanMode,
+  scanTimeoutFor,
+  scanTimes,
+  selectionLimitFor,
+  selectionPrompt,
+  selectionTimeoutFor,
+  splitScanSignatures,
+  splitTwoPassBudget,
+  twoPassBudgetFor,
+  type ScanCandidate,
+} from "./scan.ts";
+
+// --- signature fixtures, at the shipped geometry ----------------------------
+
+const BLOCK_W = SCAN_SIGNATURE_WIDTH / SCAN_BLOCK_COLS;
+const BLOCK_H = SCAN_SIGNATURE_HEIGHT / SCAN_BLOCK_ROWS;
+
+function flat(value: number): Uint8Array {
+  return new Uint8Array(SCAN_SIGNATURE_BYTES).fill(value);
+}
+
+/** `base`, with the given blocks (row-major indices) set to `value`. */
+function withBlocks(base: number, blocks: readonly number[], value: number): Uint8Array {
+  const out = flat(base);
+  for (const b of blocks) {
+    const bx = b % SCAN_BLOCK_COLS;
+    const by = Math.floor(b / SCAN_BLOCK_COLS);
+    for (let y = 0; y < BLOCK_H; y++) {
+      const row = (by * BLOCK_H + y) * SCAN_SIGNATURE_WIDTH + bx * BLOCK_W;
+      for (let x = 0; x < BLOCK_W; x++) out[row + x] = value;
+    }
+  }
+  return out;
+}
+
+const TOTAL_BLOCKS = SCAN_BLOCK_COLS * SCAN_BLOCK_ROWS;
+
+// --- the grid ---------------------------------------------------------------
+
+describe("scanTimes", () => {
+  test("every interval up to but not including the duration", () => {
+    expect(scanTimes(23)).toEqual([0, 5, 10, 15, 20]);
+    expect(scanTimes(20)).toEqual([0, 5, 10, 15]);
+  });
+
+  test("a non-duration is no grid at all", () => {
+    expect(scanTimes(0)).toEqual([]);
+    expect(scanTimes(-5)).toEqual([]);
+    expect(scanTimes(Number.NaN)).toEqual([]);
+  });
+
+  test("the default interval is the shipped constant", () => {
+    expect(scanTimes(11)).toEqual(scanTimes(11, YOUTUBE_SCAN_INTERVAL_SEC));
+    expect(() => scanTimes(60, 0)).toThrow(/positive integer/);
+    expect(() => scanTimes(60, 2.5)).toThrow(/positive integer/);
+  });
+});
+
+describe("scanTimeoutFor", () => {
+  test("2 s per source minute, floored at 60 s", () => {
+    expect(scanTimeoutFor(60)).toBe(60_000);
+    expect(scanTimeoutFor(1767)).toBe(60_000);
+    // The 3 h frames cap: 180 minutes × 2 s.
+    expect(scanTimeoutFor(10_800)).toBe(360_000);
+  });
+
+  test("an order of magnitude over the measured ~0.18 s per source minute", () => {
+    const measuredMs = (1767 / 60) * 180;
+    expect(scanTimeoutFor(1767)).toBeGreaterThan(measuredMs * 10);
+  });
+});
+
+// --- signatures -------------------------------------------------------------
+
+describe("splitScanSignatures", () => {
+  test("splits a whole stream into planes of the shipped size", () => {
+    const planes = splitScanSignatures(new Uint8Array(SCAN_SIGNATURE_BYTES * 3));
+    expect(planes).toHaveLength(3);
+    expect(planes[0]!.length).toBe(SCAN_SIGNATURE_BYTES);
+  });
+
+  test("a stream that is not a multiple of the plane size THROWS", () => {
+    // Truncating instead would shift every later plane by a few bytes and turn
+    // the whole dedup into noise, silently.
+    expect(() => splitScanSignatures(new Uint8Array(SCAN_SIGNATURE_BYTES + 7))).toThrow(
+      /not a multiple/,
+    );
+  });
+});
+
+describe("blockChangeFraction", () => {
+  test("identical planes have changed nothing", () => {
+    expect(blockChangeFraction(flat(100), flat(100))).toBe(0);
+  });
+
+  test("a whole-frame jump past the block delta changes every block", () => {
+    expect(blockChangeFraction(flat(0), flat(SCAN_BLOCK_DELTA))).toBe(1);
+  });
+
+  test("a move UNDER the block delta changes nothing", () => {
+    expect(blockChangeFraction(flat(0), flat(SCAN_BLOCK_DELTA - 1))).toBe(0);
+  });
+
+  test("one moved block is one block of the total, wherever it is", () => {
+    const corner = blockChangeFraction(flat(100), withBlocks(100, [0], 250));
+    const middle = blockChangeFraction(flat(100), withBlocks(100, [20], 250));
+    expect(corner).toBeCloseTo(1 / TOTAL_BLOCKS, 10);
+    // No block POSITION is given meaning — the corner and the middle count the
+    // same, which is what "hardcode no region positions" means here.
+    expect(middle).toBe(corner);
+  });
+
+  test("mismatched geometry throws rather than comparing nothing", () => {
+    expect(() => blockChangeFraction(flat(0), new Uint8Array(10))).toThrow(/signature is/);
+  });
+});
+
+// --- the dedup --------------------------------------------------------------
+
+describe("dedupeScanSamples", () => {
+  test("a STATIC run keeps only its first sample", () => {
+    const sigs = [flat(100), flat(100), flat(100), flat(100)];
+    const kept = dedupeScanSamples(sigs, [0, 5, 10, 15]);
+    expect(kept.map((c) => c.tSeconds)).toEqual([0]);
+  });
+
+  test("a CUT is kept", () => {
+    const sigs = [flat(10), flat(10), flat(220), flat(220)];
+    const kept = dedupeScanSamples(sigs, [0, 5, 10, 15]);
+    expect(kept.map((c) => c.tSeconds)).toEqual([0, 10]);
+    expect(kept[1]!.change).toBe(1);
+  });
+
+  test("a TALKING HEAD in the corner is not a new frame", () => {
+    // One block of 48 moving, over and over: 1/48 is far under the threshold, so
+    // an inset presenter never produces a candidate on its own.
+    const sigs = [
+      flat(100),
+      withBlocks(100, [0], 250),
+      flat(100),
+      withBlocks(100, [0], 250),
+      withBlocks(100, [8], 250),
+    ];
+    expect(dedupeScanSamples(sigs, [0, 5, 10, 15, 20]).map((c) => c.tSeconds)).toEqual([0]);
+    expect(1 / TOTAL_BLOCKS).toBeLessThan(SCAN_CHANGE_THRESHOLD);
+  });
+
+  test("a SLOW SCROLL is kept once its accumulated change crosses, not once its step does", () => {
+    // Each step moves every block by 4 — under the 12-per-block delta, so no
+    // consecutive PAIR changes anything. The comparison is against the previous
+    // KEPT sample, so the third step (12 from the last kept one) crosses.
+    const sigs = [flat(0), flat(4), flat(8), flat(12), flat(16), flat(20), flat(24)];
+    const times = [0, 5, 10, 15, 20, 25, 30];
+    expect(dedupeScanSamples(sigs, times).map((c) => c.tSeconds)).toEqual([0, 15, 30]);
+    // Compared against the PREVIOUS SAMPLE instead, the page would never produce
+    // a candidate at all — the property this pins.
+    for (let i = 1; i < sigs.length; i++) {
+      expect(blockChangeFraction(sigs[i - 1]!, sigs[i]!)).toBe(0);
+    }
+  });
+
+  test("the first sample is always a candidate, and reports change 1", () => {
+    const kept = dedupeScanSamples([flat(50)], [0]);
+    expect(kept).toEqual([{ index: 0, tSeconds: 0, change: 1 }]);
+  });
+
+  test("no samples, no candidates", () => {
+    expect(dedupeScanSamples([], [])).toEqual([]);
+  });
+
+  test("a shorter time list bounds the walk (a scan that emitted fewer frames)", () => {
+    const sigs = [flat(0), flat(200), flat(0)];
+    expect(dedupeScanSamples(sigs, [0, 5]).map((c) => c.tSeconds)).toEqual([0, 5]);
+  });
+});
+
+// --- the cap ----------------------------------------------------------------
+
+function candidate(index: number, change: number): ScanCandidate {
+  return { index, tSeconds: index * YOUTUBE_SCAN_INTERVAL_SEC, change };
+}
+
+describe("capScanCandidates", () => {
+  test("under the cap, nothing moves", () => {
+    const cands = [candidate(0, 1), candidate(3, 0.4)];
+    expect(capScanCandidates(cands, 10)).toEqual(cands);
+  });
+
+  test("over the cap, the answer is exactly `cap` long and in TIME order", () => {
+    const cands = Array.from({ length: 300 }, (_, i) => candidate(i, (i % 7) / 10));
+    const capped = capScanCandidates(cands, YOUTUBE_CANDIDATE_CAP);
+    expect(capped).toHaveLength(YOUTUBE_CANDIDATE_CAP);
+    expect(capped.map((c) => c.tSeconds)).toEqual([...capped.map((c) => c.tSeconds)].sort((a, b) => a - b));
+  });
+
+  test("chronological coverage is RESERVED before change is ranked", () => {
+    // Every high-change candidate is in the first tenth; ranking by change alone
+    // would return nothing from the rest of the video.
+    const cands = Array.from({ length: 300 }, (_, i) => candidate(i, i < 30 ? 1 : 0.2));
+    const capped = capScanCandidates(cands, 60);
+    const lastIndex = cands[cands.length - 1]!.index;
+    expect(capped.at(-1)!.index).toBe(lastIndex);
+    // The second half of the video is represented, not swamped.
+    expect(capped.filter((c) => c.index >= 150).length).toBeGreaterThanOrEqual(9);
+  });
+
+  test("the anchors cover the whole sequence end to end", () => {
+    const cands = Array.from({ length: 500 }, (_, i) => candidate(i, 0.2));
+    const capped = capScanCandidates(cands, 12);
+    expect(capped[0]!.index).toBe(0);
+    expect(capped.at(-1)!.index).toBe(499);
+  });
+
+  test("deterministic: the same input twice gives the same answer", () => {
+    const cands = Array.from({ length: 200 }, (_, i) => candidate(i, ((i * 37) % 11) / 10));
+    expect(capScanCandidates(cands, 40)).toEqual(capScanCandidates(cands, 40));
+  });
+
+  test("a cap of zero keeps nothing", () => {
+    expect(capScanCandidates([candidate(0, 1)], 0)).toEqual([]);
+  });
+});
+
+// --- the sheets -------------------------------------------------------------
+
+describe("contactSheetPlans", () => {
+  test("the shipped cap is exactly ten sheets", () => {
+    const cands = Array.from({ length: YOUTUBE_CANDIDATE_CAP }, (_, i) => candidate(i, 1));
+    const plans = contactSheetPlans(cands);
+    expect(CONTACT_SHEET_CELLS).toBe(CONTACT_SHEET.cols * CONTACT_SHEET.rows);
+    expect(plans).toHaveLength(YOUTUBE_CANDIDATE_CAP / CONTACT_SHEET_CELLS);
+    expect(plans).toHaveLength(10);
+    // Ten reads for the selection pass, forty for the synthesis pass: both under
+    // the cap, which is the arithmetic `YOUTUBE_FULL_READ_CAP` documents.
+    expect(plans.length).toBeLessThanOrEqual(YOUTUBE_FULL_READ_CAP);
+  });
+
+  test("cells are in time order and every candidate lands in exactly one", () => {
+    const cands = Array.from({ length: 29 }, (_, i) => candidate(i, 1));
+    const plans = contactSheetPlans(cands);
+    expect(plans.map((p) => p.cells.length)).toEqual([12, 12, 5]);
+    expect(plans.flatMap((p) => p.cells.map((c) => c.tSeconds))).toEqual(
+      cands.map((c) => c.tSeconds),
+    );
+  });
+
+  test("file names are 1-based and zero-padded", () => {
+    const plans = contactSheetPlans(Array.from({ length: 13 }, (_, i) => candidate(i, 1)));
+    expect(plans.map((p) => p.fileName)).toEqual(["sheet-01.jpg", "sheet-02.jpg"]);
+    expect(plans.map((p) => p.number)).toEqual([1, 2]);
+  });
+
+  test("no candidates, no sheets", () => {
+    expect(contactSheetPlans([])).toEqual([]);
+  });
+});
+
+// --- the selection manifest -------------------------------------------------
+
+describe("parseSelectionManifest", () => {
+  const available = [0, 5, 130, 150, 165];
+
+  test("a fenced JSON array is read, and the answer is held to the candidates", () => {
+    const answer =
+      "Here is my pick.\n\n```json\n" +
+      JSON.stringify([
+        { tSeconds: 130, category: "chart", reason: "the growth chart" },
+        { tSeconds: 999, category: "chart", reason: "never sampled" },
+        { tSeconds: 165, category: "code", duplicateGroup: "velocity", reason: "the velocity chart" },
+      ]) +
+      "\n```\n";
+    const manifest = parseSelectionManifest(answer, available, 40)!;
+    expect(manifest.entries.map((e) => e.tSeconds)).toEqual([130, 165]);
+    expect(manifest.dropped).toEqual([999]);
+    expect(manifest.entries[1]!.duplicateGroup).toBe("velocity");
+  });
+
+  test("a bare array with prose around it still parses", () => {
+    const manifest = parseSelectionManifest(
+      'Sure — [{"tSeconds": 5, "category": "diagram", "reason": "x"}] is my answer.',
+      available,
+      40,
+    )!;
+    expect(manifest.entries.map((e) => e.tSeconds)).toEqual([5]);
+  });
+
+  test("nothing parseable is NULL, which is a failed pass rather than an empty one", () => {
+    expect(parseSelectionManifest("I could not read the sheets.", available, 40)).toBeNull();
+    expect(parseSelectionManifest("```json\n{not json}\n```", available, 40)).toBeNull();
+    // An empty array IS an answer: the pass looked and found nothing.
+    expect(parseSelectionManifest("[]", available, 40)).toEqual({
+      entries: [],
+      dropped: [],
+      droppedOverCap: 0,
+    });
+  });
+
+  test("HH:MM:SS and MM:SS spellings resolve to the same second", () => {
+    const manifest = parseSelectionManifest(
+      '[{"tSeconds": "00:02:10", "category": "chart", "reason": "a"}, {"tSeconds": "2:30", "category": "chart", "reason": "b"}]',
+      available,
+      40,
+    )!;
+    expect(manifest.entries.map((e) => e.tSeconds)).toEqual([130, 150]);
+  });
+
+  test("a repeat is one slot, not two", () => {
+    const manifest = parseSelectionManifest(
+      '[{"tSeconds":130,"category":"chart","reason":"a"},{"tSeconds":130,"category":"chart","reason":"b"}]',
+      available,
+      40,
+    )!;
+    expect(manifest.entries).toHaveLength(1);
+  });
+
+  test("entries past the limit are refused and counted", () => {
+    const manifest = parseSelectionManifest(
+      JSON.stringify(available.map((t) => ({ tSeconds: t, category: "chart", reason: "x" }))),
+      available,
+      2,
+    )!;
+    expect(manifest.entries).toHaveLength(2);
+    expect(manifest.droppedOverCap).toBe(3);
+  });
+
+  test("an unknown category becomes `other` rather than dropping the entry", () => {
+    const manifest = parseSelectionManifest(
+      '[{"tSeconds":130,"category":"photograph","reason":"x"},{"tSeconds":150,"reason":"y"}]',
+      available,
+      40,
+    )!;
+    expect(manifest.entries.map((e) => e.category)).toEqual(["other", "other"]);
+    expect(SELECTION_CATEGORIES).toContain("other");
+  });
+
+  test("the entries come back in time order whatever order the answer used", () => {
+    const manifest = parseSelectionManifest(
+      '[{"tSeconds":165,"category":"chart","reason":"c"},{"tSeconds":5,"category":"chart","reason":"a"}]',
+      available,
+      40,
+    )!;
+    expect(manifest.entries.map((e) => e.tSeconds)).toEqual([5, 165]);
+  });
+});
+
+describe("selectionLimitFor", () => {
+  test("twice the policy's total, bounded by the read cap", () => {
+    expect(selectionLimitFor(8)).toBe(16);
+    expect(selectionLimitFor(20)).toBe(40);
+    expect(selectionLimitFor(80)).toBe(YOUTUBE_FULL_READ_CAP);
+  });
+});
+
+describe("selectionPrompt", () => {
+  const sheets = contactSheetPlans([candidate(0, 1), candidate(1, 1), candidate(26, 1)]);
+
+  test("names every cell's second, in row-major order, per sheet", () => {
+    const prompt = selectionPrompt({
+      title: "A talk",
+      durationSec: 200,
+      sheets,
+      sheetDir: "/tmp/select",
+      limit: 16,
+    });
+    expect(prompt).toContain("/tmp/select/sheet-01.jpg — 3 cell(s):");
+    expect(prompt).toContain("1. t=00:00:00 (0)");
+    expect(prompt).toContain("3. t=00:02:10 (130)");
+    expect(prompt).toContain("at most 16 frames");
+  });
+
+  test("says the layout is row-major and that padding cells have no second", () => {
+    // The labels are PROSE because `drawtext` is not available in the ffmpeg
+    // builds this runs on, so this sentence is the whole labelling mechanism.
+    const prompt = selectionPrompt({
+      title: "A talk",
+      durationSec: 200,
+      sheets,
+      sheetDir: "/tmp/select",
+      limit: 16,
+    });
+    expect(prompt).toContain("ROW-MAJOR");
+    expect(prompt).toContain(`${CONTACT_SHEET.cols}×${CONTACT_SHEET.rows}`);
+    expect(prompt).toContain("padding and have no second");
+  });
+});
+
+// --- the budget -------------------------------------------------------------
+
+describe("the two-pass budget", () => {
+  const FLOOR = 600_000;
+
+  test("selectionTimeoutFor: 300 s plus 30 s a sheet", () => {
+    expect(selectionTimeoutFor(0)).toBe(300_000);
+    expect(selectionTimeoutFor(10)).toBe(600_000);
+  });
+
+  test("the whole budget is the selection call plus a full summary call", () => {
+    // 10 sheets ⇒ 600 s of selection; 40 frames ⇒ 600 s + 10 × 24 s of summary.
+    expect(twoPassBudgetFor(10, 40, FLOOR)).toBe(600_000 + 840_000);
+  });
+
+  test("a fast selection pass leaves the summary the rest of the budget", () => {
+    const split = splitTwoPassBudget({
+      wholeMs: twoPassBudgetFor(10, 40, FLOOR),
+      selectionElapsedMs: 120_000,
+      frameCount: 40,
+      floorMs: FLOOR,
+    });
+    expect(split.launch).toBe(true);
+    expect(split.remainingMs).toBe(1_320_000);
+    expect(split.synthesisTimeoutMs).toBe(1_320_000);
+  });
+
+  test("a selection pass that ate the budget REFUSES the second call", () => {
+    const whole = twoPassBudgetFor(10, 40, FLOOR);
+    const split = splitTwoPassBudget({
+      wholeMs: whole,
+      selectionElapsedMs: whole - 60_000,
+      frameCount: 40,
+      floorMs: FLOOR,
+    });
+    expect(split.launch).toBe(false);
+    expect(split.remainingMs).toBe(60_000);
+  });
+
+  test("the gate is exactly the summary call's own floor", () => {
+    const whole = twoPassBudgetFor(10, 40, FLOOR);
+    const floor = 600_000 + 10 * 24_000;
+    expect(
+      splitTwoPassBudget({ wholeMs: whole, selectionElapsedMs: whole - floor, frameCount: 40, floorMs: FLOOR })
+        .launch,
+    ).toBe(true);
+    expect(
+      splitTwoPassBudget({ wholeMs: whole, selectionElapsedMs: whole - floor + 1, frameCount: 40, floorMs: FLOOR })
+        .launch,
+    ).toBe(false);
+  });
+
+  test("an overrun never reports a negative remainder", () => {
+    const split = splitTwoPassBudget({
+      wholeMs: 100,
+      selectionElapsedMs: 5_000,
+      frameCount: 3,
+      floorMs: FLOOR,
+    });
+    expect(split.remainingMs).toBe(0);
+    expect(split.launch).toBe(false);
+  });
+});
+
+// --- the switch -------------------------------------------------------------
+
+describe("resolveFrameScanMode", () => {
+  test("unset is dense — the default this PR ships", () => {
+    expect(resolveFrameScanMode({})).toEqual({ mode: "dense", unrecognized: null });
+    expect(resolveFrameScanMode({ YOUTUBE_FRAME_SCAN: "  " })).toEqual({ mode: "dense", unrecognized: null });
+  });
+
+  test("both modes are recognised, case and padding insensitively", () => {
+    expect(resolveFrameScanMode({ YOUTUBE_FRAME_SCAN: "cadence" }).mode).toBe("cadence");
+    expect(resolveFrameScanMode({ YOUTUBE_FRAME_SCAN: " DENSE " }).mode).toBe("dense");
+  });
+
+  test("an UNRECOGNISED value is cadence, and says so", () => {
+    // The direction matters: this variable exists to turn the dense path OFF, so
+    // a typo that left it on would be the switch failing at its only job.
+    expect(resolveFrameScanMode({ YOUTUBE_FRAME_SCAN: "cadance" })).toEqual({
+      mode: "cadence",
+      unrecognized: "cadance",
+    });
+  });
+});

@@ -436,6 +436,91 @@ describe("createJobStore — attachRun", () => {
     expect(() => s.attachRun("no-such-job", { botName: "jarvis" })).not.toThrow();
   });
 
+  // ── spend ACCUMULATES; identity is last-write ─────────────────────────────
+  //
+  // A capture job used to be one model call, so overwriting was the same as
+  // summing. The YouTube dense-scan path makes two under one run, and an
+  // overwrite there reports the second call's tokens as the whole job's cost.
+
+  test("a SECOND call's spend is added to the first, not written over it", () => {
+    const s = store();
+    const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
+    s.attachRun(id, { inputTokens: 7, outputTokens: 3, numTurns: 2, toolCount: 2, costUsd: 0.01 });
+    s.attachRun(id, { inputTokens: 10, outputTokens: 42, numTurns: 1, toolCount: 1, costUsd: 0.05 });
+    s.completeJob(id, "summary", "cat");
+
+    const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+    expect(ring[0]!.inputTokens).toBe(17);
+    expect(ring[0]!.outputTokens).toBe(45);
+    expect(ring[0]!.numTurns).toBe(3);
+    expect(ring[0]!.toolCount).toBe(3);
+    expect(ring[0]!.costUsd).toBeCloseTo(0.06, 10);
+  });
+
+  test("the IDENTITY fields stay last-write, including the trace link", () => {
+    const s = store();
+    const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
+    s.attachRun(id, { botName: "jarvis", model: "sonnet", traceId: "trace-1", inputTokens: 5 });
+    s.attachRun(id, { botName: "jarvis2", model: "opus", traceId: "trace-2", inputTokens: 5 });
+    s.completeJob(id, "summary", "cat");
+
+    const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+    expect(ring[0]!.traceId).toBe("trace-2");
+    expect(ring[0]!.model).toBe("opus");
+    // …while the SPEND beside them summed.
+    expect(ring[0]!.inputTokens).toBe(10);
+  });
+
+  test("a SINGLE-pass vertical reports exactly what it reported before", () => {
+    // The five single-pass verticals (x-article, tiktok, anthropic, article, and
+    // every frames-off/cadence YouTube capture) call `attachRun` twice: once
+    // with identity only at the start of the model call, once with the spend at
+    // its end. The sum of one value is that value, which is what makes this
+    // change invisible to all of them.
+    for (const label of ["X Article", "TikTok", "Anthropic", "Article", "YouTube"]) {
+      agentStatus.clearRequest();
+      const s = createJobStore<Status, { videoId: string }>({
+        subsystem: "test",
+        label,
+        initialStatus: "pending",
+      });
+      const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
+      s.attachRun(id, { botName: "jarvis", connectorLabel: "Claude SDK", traceId: "t" });
+      s.attachRun(id, {
+        model: "claude-sonnet-5",
+        inputTokens: 12_000,
+        outputTokens: 900,
+        numTurns: 1,
+        toolCount: 3,
+        costUsd: 0.042,
+      });
+      s.completeJob(id, "summary", "cat");
+
+      const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+      expect(ring[0]!).toMatchObject({
+        traceId: "t",
+        model: "claude-sonnet-5",
+        inputTokens: 12_000,
+        outputTokens: 900,
+        numTurns: 1,
+        toolCount: 3,
+        costUsd: 0.042,
+      });
+    }
+  });
+
+  test("a zero is a value, not an absence — it does not clear what came before", () => {
+    const s = store();
+    const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
+    s.attachRun(id, { inputTokens: 12, toolCount: 4 });
+    s.attachRun(id, { inputTokens: 0, toolCount: 0 });
+    s.completeJob(id, "summary", "cat");
+
+    const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+    expect(ring[0]!.inputTokens).toBe(12);
+    expect(ring[0]!.toolCount).toBe(4);
+  });
+
   test("attachRun after the job settled does not resurrect the run", () => {
     const s = store();
     const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
