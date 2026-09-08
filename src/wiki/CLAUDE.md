@@ -488,3 +488,22 @@ Per-bot `wikiAutoCommit` config: `{ push?: boolean, catalogKinds?: string[] }`. 
 - **`catalogKinds`** — which page kinds get a `- [[Title]] — …` index.md catalog line when applied (default `["concept"]`; jarvis sets `["concept", "source"]` so source pages are cataloged under `## Sources`). **Entities are never cataloged** regardless of this list (their index is split People/Organizations/Products, not derivable).
 
 All commit failures are non-fatal (warn, never block the write). Never runs clean/checkout/restore/reset. Catalog code: `catalogPage`/`buildIndexEntry` in `src/gardener/wire.ts`. The `wiki-committer` daily watcher backstops the per-write commit seam by sweeping uncommitted wiki-subtree changes on the default branch.
+
+
+<!-- moved out of the root CLAUDE.md by /doctor on 2026-09-08 -->
+
+## `WIKI_DIR` — the full entry from the root `CLAUDE.md` env table
+
+Explicit override for the bare `/wiki` root. Per-bot `wikiDir` and `?wiki=`/`?bot=` still take precedence.
+
+## `MUNINN_WIKI_READONLY` — the full entry from the root `CLAUDE.md` env table
+
+Set to `1` on a SECOND muninn instance (e.g. the Mac mini) to forbid programmatic wiki **page content** writes: the three content seams (`writeWikiPage`, `applyWikiProposal`, `writePlanQueue`) return `forbidden` and the gardener/fact-check/atlas mutation routes 403. An INSTANCE switch — the per-wiki sibling is `WIKI_READONLY_ROOTS` below, and the two are independent. Deliberately does NOT gate git — `commitWikiChange` still commits/pushes, so the repo-sync loop keeps working. `SCHEDULER_ENABLED=false` is not a substitute: it gates the runner only, and every dashboard route stays registered. Surfaced on `/models` (Machine card). Details: `src/wiki/CLAUDE.md`.
+
+## `WIKI_EXTRA` — the full entry from the root `CLAUDE.md` env table
+
+Comma-separated `name=path[=coll1+coll2][=botpin]` pairs registering **standalone** wikis (owned by no bot) in the `/wiki` picker — e.g. `notes=/abs/path,team-wiki=../team-wiki=team-wiki`. A root muninn should only READ (e.g. `memory=~/.claude/projects`) must ALSO be listed in `WIKI_READONLY_ROOTS`: registration alone makes it writable and model-reachable over HTTP. A wiki root muninn does not own the layout of can scope its own scan with an `include` glob list in `.wiki-reader.json`. Full segment semantics: `src/wiki/CLAUDE.md`.
+
+## `WIKI_READONLY_ROOTS` — the full entry from the root `CLAUDE.md` env table
+
+Comma-separated wiki **ROOTS** (same `~`/relative/absolute dialect as `WIKI_EXTRA`, resolved through the same `resolveConfiguredPath`) that this instance may only READ — however many other wikis it owns. Keyed on the resolved root, not the registry name, because every enforcement point already holds the root: the three content seams refuse before opening anything, and a **per-wiki prologue** on every `?wiki=`-steerable EGRESS route (`/api/wiki/{digest,ask,explain,factcheck,factcheck/claim,share,remember,ask/chat,factcheck/integrate,atlas/draft-synthesis}`) 403s before any model call, DB thread seed or `/agents` run registration. Registration buys three surfaces, not two — file writes, local reads, and routes that spend a model call on page content, two of which reach the **live web** via the fact-check prompt's WebFetch/search instructions; `DASHBOARD_HOST=127.0.0.1` bounds only the second. An entry matching no registered wiki fails **closed for itself** (it names a root nothing writes) and is warned about loudly. Unknown roots are writable, so the mechanism is inert until used. **Matching is root-EXACT, not prefix** (normalized + realpath-aware, so a symlinked or differently-cased spelling of the same directory matches, but a wiki registered at a SUBDIRECTORY of a listed root is NOT covered — list each root you mean). Two read paths deliberately stay outside it: `POST /api/wiki/reindex` is guarded but collection-gated (a root with no `wikiCollections` never reaches huginn anyway), and `src/wiki/ingest-backlog.ts`'s `collectWikiRefs` sweep walks **every** `.md` under the root without honouring `.wiki-reader.json`'s `include` — harmless today because it is reached only through bot-wiki gardener routes, which a read-only root now refuses. Surfaced on `/models` (Machine card) and injected into the reader as `__WIKI_READONLY_WIKI__`, which dims + blocks the write AND egress affordances. Set on this laptop for `~/.claude/projects` — Claude Code's own auto-memory, loaded into a session's context at start, so an HTTP write there edits the developer's instructions. Details: `src/wiki/CLAUDE.md`.
