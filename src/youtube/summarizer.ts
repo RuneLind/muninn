@@ -694,13 +694,18 @@ export async function summarizeVideo(
               // The status is the whole progress signal it has.
               //
               // The sheets and NOTHING else. The re-grabbed frames do not exist
-              // yet and the video is in `mediaDir`, so this is the one call in
-              // the job that cannot reach either.
+              // yet, and the video sits BESIDE this directory rather than inside
+              // it (`mediaDir/<file>.mp4` against `mediaDir/select/`), so this is
+              // the one call in the job that can reach neither.
               extraDirs: [selectDir],
               timeoutMs: selectionTimeoutFor(prepared.sheets.length),
-              // No `thinkingMaxTokens`, i.e. the seam's 8k capture cap — even on
-              // `deep`, whose full budget is for the SUMMARY. This pass ranks
-              // pictures against a rubric; it is not the reasoning the kind sells.
+              // ⚠️ Only the THINKING budget is capped here. The MODEL is the
+              // kind's — `runBot`, so `deep` runs this pass on opus too, which is
+              // what "the same resolved kind config as the synthesis call" means
+              // and is where a third of a Deep capture's cost goes. What the cap
+              // says is that `deep`'s full thinking budget is for the SUMMARY:
+              // this pass ranks pictures against a rubric, which is not the
+              // reasoning the kind sells.
               extraTraceAttrs: {
                 summaryKind: preset.id,
                 visualDetail,
