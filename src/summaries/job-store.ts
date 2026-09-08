@@ -17,9 +17,9 @@ export interface SimilarArticle {
 }
 
 // The `complete` event carries an optional `summary`. The verticals that set
-// `completeReplacesText` below populate it — TikTok and YouTube today — and for
-// the others the key is absent at runtime, matching their original
-// `{ type: "complete" }`.
+// `completeReplacesText` below populate it — `grep -rn "completeReplacesText:
+// true" src/`: TikTok, X-article and YouTube — and for the others the key is
+// absent at runtime, matching their original `{ type: "complete" }`.
 export type JobEvent<S extends string> =
   | { type: "status"; status: S }
   | { type: "text_delta"; text: string }
@@ -88,10 +88,13 @@ export interface JobStoreOptions<S extends string> {
    * On completeJob, overwrite `job.text` with the clean parsed summary and ship
    * that summary on the `complete` event.
    *
-   * For any vertical whose STORED summary is not what streamed: TikTok, whose
+   * For any vertical whose STORED summary is not what streamed — the three that
+   * set it (`grep -rn "completeReplacesText: true" src/`): TikTok, whose
    * multi-turn frame-reading session leaks "let me read frame N" chatter into
-   * the deltas, and YouTube, whose visual-reference pass rewrites the text after
-   * it has streamed (`src/youtube/state.ts` carries that reasoning). Replacing
+   * the deltas; X-article, whose video path is that same session pointed at an X
+   * status (its pasted-text path streams the summary itself, where the flag is a
+   * no-op); and YouTube, whose visual-reference pass rewrites the text after it
+   * has streamed (`src/youtube/state.ts` carries that reasoning). Replacing
    * `job.text` means an SSE *replay* shows only the summary; the summary on the
    * `complete` event lets a *live* browser, which already accumulated the
    * superseded text, swap it out. Without the flag `completeJob` leaves

@@ -347,16 +347,25 @@ itself:
   export rewrites by. A narrower pattern here left the link form and an alt
   carrying `]` uncapped, unremovable and copied anyway. The canonical-address
   check is one exported helper, `parseFrameAddress`.
-- **Fenced blocks and inline code are skipped**, in this pass AND in the copy
+- **Fenced blocks and inline code are skipped** by all THREE readers of a quote —
+  this pass, the copy (`referencedFrameSeconds`) and the export's finder and
+  rewrite (`src/summaries/export.ts`) — from one region set
   (`markdownCodeRegions`, `src/format/markdown-ast.ts` — the fact-check strip's
   walk, not a second fence detector). A quote inside a fence is a documented
   example; counting it spends a cap slot on a picture no reader sees, and a
-  fenced block near the top could exhaust the whole policy.
+  fenced block near the top could exhaust the whole policy. The export was
+  fence-aware only for one round, and that is both halves of the disagreement in
+  one place: it packaged a JPEG for a quote inside a backtick span that nothing
+  else counted, and rewrote the address INSIDE the span — altered source text in
+  what the reader copies out of the page.
 - **The appendix is a SECTION, not one byte sequence.** The heading matches
   case-insensitively at level 2 or 3, with or without bold decoration, a missing
-  space or a trailing colon, and is located fence-aware. Under `selected` a
-  section the model wrote anyway is cut WHOLE; under `detailed` a section no
-  entry survived goes the same way. That is what bounds the orphan-caption
+  space or a trailing colon, and is located fence-aware. It is cut WHOLE the
+  moment no image survives in it, under EITHER policy: `selected` has no
+  appendix at all, `detailed` loses one whose entries the pass removed, and both
+  lose one that never held an entry — a heading over captions the pass would
+  otherwise return verbatim, since the early return had been on the quote count
+  alone. That is what bounds the orphan-caption
   residue: elsewhere a removed image's caption is left standing rather than
   risking real prose, but a caption under a heading with no images left is the
   whole section lying.

@@ -38,9 +38,11 @@ export interface SummaryVerticalConfig<S extends string, F> {
    * The replay half of the store's `completeReplacesText`: the terminal
    * `complete` *replay* event carries `{ summary: job.summary }`, so a card that
    * reloads after the job settled is handed the stored summary rather than the
-   * text that streamed. Set by the verticals whose two differ — TikTok
-   * (frame-reading chatter) and YouTube (the visual-reference rewrite). The
-   * others replay a bare `{}`, matching their runtime `{ type: "complete" }`.
+   * text that streamed. Set by the verticals whose two differ (`grep -rn
+   * "completeCarriesSummary: true" src/`) — TikTok (frame-reading chatter),
+   * X-article (the same chatter on its video path) and YouTube (the
+   * visual-reference rewrite). The others replay a bare `{}`, matching their
+   * runtime `{ type: "complete" }`.
    */
   completeCarriesSummary?: boolean;
 }

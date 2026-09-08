@@ -432,6 +432,20 @@ describe("the appendix is a SECTION, not one exact heading spelling", () => {
     expect(out.text).toContain(`/${extra[0]}.jpg`);
   });
 
+  test("an appendix that never held a quote is cut under EITHER policy", () => {
+    // The section is a heading over caption prose and nothing else. Under both
+    // policies what is left of it is a reference section with no references —
+    // the same lie as an appendix whose entries the pass removed.
+    const summary = "Body.\n\n## Visual reference\n\nSome caption prose.\n\n## Transcript\n\nx\n";
+    for (const detail of ["detailed", "selected"] as const) {
+      const out = run({ summary, extracted: [], detail });
+      expect(out.text).not.toContain("Visual reference");
+      expect(out.text).not.toContain("Some caption prose.");
+      expect(out.text).toContain("Body.");
+      expect(out.text).toContain("## Transcript");
+    }
+  });
+
   test("the section ends at the next heading of its own level or above", () => {
     const summary =
       `${quote(10)}\n\n## Visual reference\n\n${quote(999)}\nA caption.\n\n## Transcript\n\n### [00:00:00]\nWords.\n`;

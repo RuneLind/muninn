@@ -365,8 +365,10 @@ function findAppendixSection(summary: string, code: readonly ProtectedRegion[]):
  * to write for the file `137.jpg`. A `[0-5]\d`-strict pattern matched the
  * `00:00` prefix of it, decided the quote claimed second 0, and rewrote the alt
  * to `00:02:17:137` — a correction that invented a disagreement and then wrote
- * it down. Read as `SS`, `MM:SS` or `HH:MM:SS`, so `00:00:137` and `00:02:17`
- * are the same claim and neither is touched. Accepted consequence: a clock-
+ * it down. A run needs at least one colon — `MM:SS` or `HH:MM:SS`, never a bare
+ * `SS`, since an alt's lone number is as likely a slide or a figure number as a
+ * time — and is then read by its field count, so `00:00:137` and `00:02:17` are
+ * the same claim and neither is touched. Accepted consequence: a clock-
  * shaped number in an alt that is NOT the frame's time is rewritten too; the alt
  * of a frame quote is a caption for that frame, and the prompt's template for it
  * is `Slide at HH:MM:SS`.
@@ -419,7 +421,12 @@ export function enforceVisualReferences(input: {
   const code = markdownCodeRegions(summary);
   const quotes = findFrameQuotes(summary, source, code);
   const appendix = findAppendixSection(summary, code);
-  if (quotes.length === 0 && !(appendix && detail === "selected")) {
+  // Nothing to hold the summary to only when there is neither a quote nor a
+  // section. An appendix with NO quote in it at all is the emptied-appendix
+  // case one step earlier — a heading over captions for pictures that were
+  // never there — and it is cut under EITHER policy, so returning here on the
+  // quote count alone left `detailed` shipping it verbatim.
+  if (quotes.length === 0 && appendix === null) {
     return {
       text: summary,
       selected: [],

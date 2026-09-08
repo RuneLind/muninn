@@ -86,6 +86,44 @@ describe("rewriteFrameUrls", () => {
   });
 });
 
+describe("the export reads a quote the way the pass and the copy do", () => {
+  const ytRef = { source: YOUTUBE_FRAME_SOURCE, id: "dQw4w9WgXcQ" };
+  const address = (sec: number) => `/api/frames/youtube/dQw4w9WgXcQ/${sec}.jpg`;
+
+  test("a quote in INLINE code is neither packaged nor rewritten", () => {
+    const md = [
+      `Write it as \`![Slide](${address(10)})\`.`,
+      "```",
+      `![b](${address(20)})`,
+      "```",
+      `![c](${address(30)})`,
+    ].join("\n");
+    const out = rewriteFrameUrls(md, ytRef);
+    expect(out.seconds).toEqual([30]);
+    expect(out.markdown).toBe(
+      [
+        `Write it as \`![Slide](${address(10)})\`.`,
+        "```",
+        `![b](${address(20)})`,
+        "```",
+        "![c](frames/30.jpg)",
+      ].join("\n"),
+    );
+  });
+
+  test("an inline-code quote is not the reference the archive is built from", () => {
+    const md = `Write \`![a](/api/frames/vimeo/111/60.jpg)\` — the real one is ![b](/api/frames/vimeo/222/61.jpg).`;
+    expect(findFrameReference(md, VIMEO_FRAME_SOURCE)?.id).toBe("222");
+  });
+
+  test("the link form and a `]`-carrying alt ARE packaged and rewritten", () => {
+    const md = `[the chart](${address(40)})\n\n![Slide [the chart]](${address(50)})`;
+    const out = rewriteFrameUrls(md, ytRef);
+    expect(out.seconds).toEqual([40, 50]);
+    expect(out.markdown).toBe("[the chart](frames/40.jpg)\n\n![Slide [the chart]](frames/50.jpg)");
+  });
+});
+
 describe("Vimeo transforms match the client copies", () => {
   const client = clientTransforms();
   const url = "https://vimeo.com/1223642971";

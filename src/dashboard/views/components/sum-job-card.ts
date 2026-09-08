@@ -631,10 +631,10 @@ export function sumJobCardScript(): string {
         complete: function(e) {
           // Backward-compatible: a vertical whose STORED summary differs from
           // what streamed ships it on the complete event — TikTok (frame-reading
-          // chatter in the deltas) and YouTube (the visual-reference rewrite,
-          // which lands after the stream). x/anthropic/article send an empty
-          // payload, so this is a no-op for them and finalizeSummary renders the
-          // accumulated text.
+          // chatter in the deltas), X-article (the same chatter on its video
+          // path) and YouTube (the visual-reference rewrite, which lands after
+          // the stream). anthropic/article send an empty payload, so this is a
+          // no-op for them and finalizeSummary renders the accumulated text.
           if (e && e.data) {
             try {
               var payload = JSON.parse(e.data);
