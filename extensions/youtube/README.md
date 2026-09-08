@@ -62,7 +62,10 @@ Muninn holds the answer to those numbers: it removes any image reference that
 names a frame this capture did not extract, repeats one, or goes past the
 policy's cap, so a stored summary never promises a picture the dashboard cannot
 serve. A Muninn that does not offer the choice shows no such control, and the
-capture runs Selected.
+capture runs Selected. When the options cannot be read at all, the picker offers
+**Selected** alone — the policy every Muninn runs: an instance too old to know
+the setting ignores it rather than refusing it, so a Detailed pick there would
+quietly produce a Selected capture.
 
 ## Install
 

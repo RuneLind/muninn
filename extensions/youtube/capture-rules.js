@@ -2,8 +2,7 @@
 var FALLBACK_KIND_ID = "standard";
 var FALLBACK_VISUAL_DETAIL_ID = "selected";
 var FALLBACK_VISUAL_DETAIL_OPTIONS = [
-  { id: FALLBACK_VISUAL_DETAIL_ID, label: "Selected" },
-  { id: "detailed", label: "Detailed" }
+  { id: FALLBACK_VISUAL_DETAIL_ID, label: "Selected" }
 ];
 var FALLBACK_CAPTURE_OPTIONS = {
   kinds: [{ id: FALLBACK_KIND_ID, label: "Standard" }],

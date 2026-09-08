@@ -159,7 +159,7 @@ interface DriveOptions {
   /**
    * Which `document.createElement` calls throw, 1-based, counting EVERY option
    * element a paint builds — the kind rows and then the visual-detail rows. The
-   * synchronous fallback paint runs first (1 kind + 2 visual = calls 1-3), the
+   * synchronous fallback paint runs first (1 kind + 1 visual = calls 1-2), the
    * settle paint next, and the retry after that. Adding a picker moves these
    * indices, which is why the cases below say which paint they mean.
    */
@@ -271,10 +271,20 @@ async function drivePopup(opts: DriveOptions): Promise<Driven> {
     },
     storage: {
       sync: {
-        get: () => {
+        // Chrome's OBJECT form of `get` answers with the SHAPE's keys and
+        // nothing else: a key the caller did not name comes back `undefined`
+        // however much is in storage. Modelled rather than echoed, because a
+        // stub that returns whatever it was stored makes a key the popup forgot
+        // to ask for look restored — which is exactly the bug this file missed.
+        get: (shape: Record<string, unknown>) => {
           if (opts.storage === "hangs") return new Promise(() => {});
           if (opts.storage === "rejects") return Promise.reject(new Error("sync backend refused"));
-          return Promise.resolve({ frames: false, summaryKind: null, ...(opts.stored ?? {}) });
+          const stored: Record<string, unknown> = { frames: false, summaryKind: null, ...(opts.stored ?? {}) };
+          const out: Record<string, unknown> = {};
+          for (const key of Object.keys(shape ?? {})) {
+            out[key] = key in stored ? stored[key] : shape![key];
+          }
+          return Promise.resolve(out);
         },
         set: async (patch: Record<string, unknown>) => {
           saved.push(patch);
@@ -442,13 +452,13 @@ describe("the popup settles onto controls that match what a click submits", () =
   });
 
   test("a paint that throws is repainted from the fallback, enabled, with a note", async () => {
-    // Calls 1-3 are the synchronous fallback paint (Standard + the two visual
-    // rows); call 4 is the settle paint's first option element.
+    // Calls 1-2 are the synchronous fallback paint (Standard + the one visual
+    // row it offers); call 3 is the settle paint's first option element.
     const d = await drivePopup({
       options: "server",
       storage: "answers",
       stored: { summaryKind: "deep" },
-      throwOnCreateCalls: [4],
+      throwOnCreateCalls: [3],
     });
     d.fireDomReady();
     await d.settleTimers();
@@ -546,6 +556,33 @@ describe("the popup settles onto controls that match what a click submits", () =
     expect(d.sent.find((m) => m.type === "SUMMARIZE")).toMatchObject({
       frames: true,
       visualDetail: "detailed",
+    });
+  });
+
+  test("Slides unticked submits NO visual detail, whatever the hidden picker holds", async () => {
+    // The row is hidden without frames, so its value is whatever the last paint
+    // left there — and the policy is consulted only where frames came out. A
+    // value sent anyway lands on the trace and in the 400 surface of a capture
+    // nothing about it could change.
+    const d = await drivePopup({
+      options: "server",
+      storage: "answers",
+      stored: { frames: false, visualDetail: "detailed" },
+    });
+    d.fireDomReady();
+    await d.settleTimers();
+
+    expect(d.node("chk-frames").checked).toBe(false);
+    expect(d.node("lbl-visual").classes.has("hidden")).toBe(true);
+    // The remembered choice IS restored into the control — it is what the
+    // reader sees the moment they tick Slides — it is simply not submitted.
+    expect(d.node("sel-visual").value).toBe("detailed");
+
+    d.node("btn-summarize").fire("click");
+    await d.settleTimers();
+    expect(d.sent.find((m) => m.type === "SUMMARIZE")).toMatchObject({
+      frames: false,
+      visualDetail: null,
     });
   });
 

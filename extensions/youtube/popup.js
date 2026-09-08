@@ -91,7 +91,7 @@ const OPTIONS_READ_TIMEOUT_MS = 5000;
 
 /** Said when the remembered choices could not be read at all. */
 const STORAGE_LOST_MESSAGE =
-  "Could not read the remembered Kind and Slides tick — showing this Muninn's defaults.";
+  "Could not read the remembered Kind, Slides tick and Visuals choice — showing this Muninn's defaults.";
 
 /** Said when the controls themselves could not be painted. */
 const CONTROLS_BROKEN_MESSAGE =
@@ -264,7 +264,14 @@ async function readControlState() {
   let read;
   try {
     read = await withTimeout(
-      Promise.resolve(chrome.storage.sync.get({ [FRAMES_KEY]: false, [KIND_KEY]: null })).catch(
+      // Every key this popup restores is NAMED here. The object form of
+      // `chrome.storage.sync.get` answers with the shape's keys and nothing
+      // else, so a key left out of it reads back `undefined` however much the
+      // profile has stored — a remembered choice silently replaced by this
+      // instance's default.
+      Promise.resolve(
+        chrome.storage.sync.get({ [FRAMES_KEY]: false, [KIND_KEY]: null, [VISUAL_KEY]: null }),
+      ).catch(
         (err) => {
           console.warn('Could not read the remembered capture settings', err);
           return STORAGE_FAILED;
@@ -474,6 +481,9 @@ async function handleSummarize() {
   const kindSelect = $('#sel-kind');
   const frames = $('#chk-frames');
   const visualSelect = $('#sel-visual');
+  // Read once: the frames answer decides both the field it is sent as and
+  // whether the visual-detail field is sent at all.
+  const wantsFrames = pickFrames(frames?.checked, captureOptions);
 
   if (btn) btn.disabled = true;
   if (status) {
@@ -505,10 +515,14 @@ async function handleSummarize() {
         // can only have narrowed since they were rendered, and the route 400s
         // an id it does not offer.
         kind: pickKind(kindSelect?.value, captureOptions),
-        frames: pickFrames(frames?.checked, captureOptions),
-        // Null on an instance that does not offer the choice — the worker then
-        // sends no such field, which is what that instance reads as the default.
-        visualDetail: pickVisualDetail(visualSelect?.value, captureOptions),
+        frames: wantsFrames,
+        // Null on an instance that does not offer the choice, and null with
+        // Slides OFF — the worker then sends no such field. The picker is
+        // hidden without frames, so its value there is whatever the last paint
+        // left in a hidden control, and the policy is consulted only where
+        // frames came out. Sending it anyway would put a value on the trace and
+        // in the 400 surface that nothing this capture did could depend on.
+        visualDetail: wantsFrames ? pickVisualDetail(visualSelect?.value, captureOptions) : null,
       }, (response) => {
         if (response?.error) {
           reject(new Error(response.error));

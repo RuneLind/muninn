@@ -69,19 +69,21 @@ export const FALLBACK_KIND_ID = "standard";
 export const FALLBACK_VISUAL_DETAIL_ID = "selected";
 
 /**
- * The visual-coverage rows the fallback offers.
+ * The visual-coverage row the fallback offers: the one policy every instance
+ * runs, and nothing else.
  *
- * A second catalog, and deliberately so: unlike `kinds` — which are per-bot
- * presets an instance really can narrow — these two are fixed by the SERVER's
- * code, so the only instance that offers neither is one from before the feature,
- * which ignores the field. The alternative, hiding the control whenever the
- * options fetch fails, removes a working control on every instance that has it —
- * the same rule `framesSupported` below is built on. A value the server does not
- * take is a 400 whose sentence the popup renders.
+ * The `kinds` rule, not the `framesSupported` one, and the difference is what
+ * happens to a value the instance does not take. An over-offered Slides tick is
+ * REFUSED — the POST pre-flights the connector and answers 503 with a sentence
+ * the popup renders. `visual_detail` has no such refusal behind it: the instance
+ * that offers no choice is one from BEFORE the field existed, and it ignores the
+ * key, so a reader who picked Detailed against an unreachable options endpoint
+ * would get a Selected capture with nothing said. Offering only what every
+ * instance runs is the same shape as falling back to `standard` alone rather
+ * than to a catalog of every shipped preset.
  */
 export const FALLBACK_VISUAL_DETAIL_OPTIONS: CaptureKindOption[] = [
   { id: FALLBACK_VISUAL_DETAIL_ID, label: "Selected" },
-  { id: "detailed", label: "Detailed" },
 ];
 
 /**

@@ -167,14 +167,15 @@ describe("parseCaptureOptions", () => {
     expect(FALLBACK_CAPTURE_OPTIONS.defaultKind).toBe(FALLBACK_KIND_ID);
   });
 
-  test("the fallback still OFFERS the visual choice — the `framesSupported` rule", () => {
-    // Hiding it whenever the options fetch fails removes a working control on
-    // every instance that has one, and the two policies are fixed by the
-    // server's code rather than narrowed per bot.
-    expect(FALLBACK_CAPTURE_OPTIONS.visualDetail?.options.map((o) => o.id)).toEqual([
-      "selected",
-      "detailed",
-    ]);
+  test("the fallback offers ONLY the policy every instance runs — the `kinds` rule", () => {
+    // NOT the `framesSupported` rule: the POST re-checks the connector and
+    // answers 503 with a sentence, so an over-offered tick is refused out loud.
+    // `visual_detail` has no such refusal behind it — a Muninn from before this
+    // feature IGNORES the key — so offering `detailed` where the options could
+    // not be read offers a choice that may silently do nothing. The fallback
+    // therefore offers what every instance runs, exactly as `kinds` falls back
+    // to `standard` alone rather than to a catalog of every shipped preset.
+    expect(FALLBACK_CAPTURE_OPTIONS.visualDetail?.options.map((o) => o.id)).toEqual(["selected"]);
     expect(FALLBACK_CAPTURE_OPTIONS.visualDetail?.defaultDetail).toBe(FALLBACK_VISUAL_DETAIL_ID);
   });
 });
