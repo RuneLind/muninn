@@ -76,8 +76,11 @@ export function findFrameReference(markdown: string, source?: FrameSource): Fram
     const re = frameAddressRegExp(src);
     let m: RegExpExecArray | null;
     while ((m = re.exec(markdown)) !== null) {
-      // Matches ascend, so nothing after the best so far can beat it. A tie goes
-      // to the earlier source, which is what the line walk did within one line.
+      // Matches ascend, so nothing after the best so far can beat it. A path
+      // parses under at most one source, so two sources never tie on an offset;
+      // with no source given, the earliest OFFSET wins (the line walk gave the
+      // earlier SOURCE the win within a line — the only caller passes a source,
+      // so that difference is unreachable in production).
       if (m.index >= foundAt) break;
       if (inProtectedRegion(m.index, code)) continue;
       const address = parseFrameAddress(m[2]!, src);

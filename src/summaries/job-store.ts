@@ -92,8 +92,8 @@ export interface JobStoreOptions<S extends string> {
    * set it (`grep -rn "completeReplacesText: true" src/`): TikTok, whose
    * multi-turn frame-reading session leaks "let me read frame N" chatter into
    * the deltas; X-article, whose video path is that same session pointed at an X
-   * status (its pasted-text path streams the summary itself, where the flag is a
-   * no-op); and YouTube, whose visual-reference pass rewrites the text after it
+   * status (its pasted-text path streams the summary itself, where the flag is
+   * no-op-equivalent, minus the CATEGORY header line); and YouTube, whose visual-reference pass rewrites the text after it
    * has streamed (`src/youtube/state.ts` carries that reasoning). Replacing
    * `job.text` means an SSE *replay* shows only the summary; the summary on the
    * `complete` event lets a *live* browser, which already accumulated the
