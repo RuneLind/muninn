@@ -223,6 +223,68 @@ describe("traces", () => {
       expect(found.attributes.outputTokens).toBe(999);
     });
 
+    test("a two-pass capture root reports BOTH passes, not the summary call alone", async () => {
+      // The shape the dense YouTube path writes: one root, a `claude:select`
+      // span and a `claude` span, the root finished with the two summed. The
+      // `c` lateral matches the `claude` child alone, so anything that let it
+      // win would report the summary pass's spend as the whole job's — and
+      // `/traces` would disagree with the `/agents` card about one capture.
+      const root = makeRootSpan({ name: "capture:youtube", platform: "capture" });
+      await saveSpan(root);
+      await updateSpan(root.id, {
+        attributes: { inputTokens: 398449, outputTokens: 12927, toolCount: 50 },
+      });
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "claude:select",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { inputTokens: 67439, outputTokens: 3993, toolCount: 10 },
+      });
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "claude",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { inputTokens: 331010, outputTokens: 8934, toolCount: 40, model: "claude-opus-5" },
+      });
+
+      const found = (await getRecentTraces(10)).find((t) => t.id === root.id)!;
+      expect(found.attributes.inputTokens).toBe(398449);
+      expect(found.attributes.outputTokens).toBe(12927);
+      expect(found.attributes.toolCount).toBe(50);
+      // The MODEL still comes from the `claude` child, which is the synthesis
+      // pass — the one a reader means by "what model wrote this".
+      expect(found.attributes.model).toBe("claude-opus-5");
+    });
+
+    test("a root that stamped ZERO keeps its zero — an absence is not a 0", async () => {
+      // `!attrs.inputTokens` reads a stamped 0 as "nothing here" and backfills
+      // the child's number over it, so a job whose connector reported no usage
+      // was shown the usage of one call inside it.
+      const root = makeRootSpan({ name: "capture:youtube", platform: "capture" });
+      await saveSpan(root);
+      await updateSpan(root.id, { attributes: { inputTokens: 0, outputTokens: 0, toolCount: 0 } });
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "claude",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { inputTokens: 12, outputTokens: 3, toolCount: 4 },
+      });
+
+      const found = (await getRecentTraces(10)).find((t) => t.id === root.id)!;
+      expect(found.attributes.inputTokens).toBe(0);
+      expect(found.attributes.outputTokens).toBe(0);
+      expect(found.attributes.toolCount).toBe(0);
+    });
+
     test("aggregates watcher child telemetry onto scheduler_tick roots", async () => {
       const root = makeRootSpan({ name: "scheduler_tick", userId: null, username: null, platform: null });
       await saveSpan(root);
