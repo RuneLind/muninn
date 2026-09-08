@@ -290,10 +290,21 @@ export const SCAN_COVERAGE_RESERVE = 1 / 3;
  * Thin the candidates down to `cap`, reserving chronological coverage first.
  *
  * Two steps, both deterministic: `floor(cap × SCAN_COVERAGE_RESERVE)` anchors
- * spread evenly across the candidate sequence, then the remaining slots filled
+ * spread evenly across the video's DURATION, then the remaining slots filled
  * from the rest by descending change (ties broken by index, so the earlier
  * candidate wins). The answer is returned in TIME order — it is a list of
- * positions in a video, and every consumer reads it that way.
+ * positions in a video, and every consumer reads it that way. The input is
+ * assumed to be in time order too, which is what the dedup produces.
+ *
+ * **The anchors are evenly spaced in TIME, not over the candidate INDEX**, and
+ * the difference is the whole reserve. Uniform over index, the anchors follow
+ * the candidates rather than the video: a busy opening that survives the dedup
+ * as 300 candidates and a half-hour screen-share that survives as 30 puts 90% of
+ * the anchors in the first five minutes, because that is where 90% of the
+ * candidates are — measured, the tail of exactly that shape kept 4 of its 30.
+ * The reserve exists to stop precisely that, so it is anchored on the axis it is
+ * about. Each anchor takes the candidate NEAREST its target time, so a stretch
+ * with nothing in it costs the anchors that fall in it and no more.
  */
 export function capScanCandidates(
   candidates: readonly ScanCandidate[],
@@ -302,11 +313,15 @@ export function capScanCandidates(
   if (cap <= 0) return [];
   if (candidates.length <= cap) return [...candidates];
   const anchorCount = Math.min(cap, Math.max(1, Math.floor(cap * SCAN_COVERAGE_RESERVE)));
+  const first = candidates[0]!.tSeconds;
+  const last = candidates[candidates.length - 1]!.tSeconds;
   const keep = new Set<number>();
   for (let i = 0; i < anchorCount; i++) {
-    keep.add(
-      anchorCount === 1 ? 0 : Math.round((i * (candidates.length - 1)) / (anchorCount - 1)),
-    );
+    const target =
+      anchorCount === 1 || last === first
+        ? first
+        : first + ((last - first) * i) / (anchorCount - 1);
+    keep.add(nearestCandidateIndex(candidates, target));
   }
   const rest = candidates
     .map((c, i) => ({ c, i }))
@@ -317,6 +332,20 @@ export function capScanCandidates(
     keep.add(i);
   }
   return [...keep].sort((a, b) => a - b).map((i) => candidates[i]!);
+}
+
+/** The candidate closest in time to `target`; the EARLIER one on a tie. */
+function nearestCandidateIndex(candidates: readonly ScanCandidate[], target: number): number {
+  let best = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < candidates.length; i++) {
+    const distance = Math.abs(candidates[i]!.tSeconds - target);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = i;
+    }
+  }
+  return best;
 }
 
 /** One contact sheet: which sheet it is, and the candidates in its cells. */

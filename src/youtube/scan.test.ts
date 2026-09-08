@@ -239,6 +239,29 @@ describe("capScanCandidates", () => {
     expect(capped.filter((c) => c.index >= 150).length).toBeGreaterThanOrEqual(9);
   });
 
+  test("the reserve is spread over TIME, not over candidate index", () => {
+    // The shape the dedup really produces: a busy opening (a title animation, a
+    // demo recording) that survives as one candidate a second, then a long
+    // screen-share that moves once a minute. Uniform over INDEX, the reserve
+    // follows the candidates rather than the video — 90% of the anchors land in
+    // the first five minutes because that is where 90% of the candidates are,
+    // and the half-hour tail arrives at the selection pass almost unrepresented.
+    const head = Array.from({ length: 300 }, (_, i) => ({ index: i, tSeconds: i, change: 1 }));
+    const tail = Array.from({ length: 30 }, (_, i) => ({
+      index: 300 + i,
+      tSeconds: 300 + i * 60,
+      change: 0.2,
+    }));
+    const capped = capScanCandidates([...head, ...tail], 120);
+
+    expect(capped).toHaveLength(120);
+    // Every one of the 30 minutes after the opening is represented.
+    expect(capped.filter((c) => c.tSeconds >= 300)).toHaveLength(30);
+    expect(capped.map((c) => c.tSeconds)).toEqual(
+      [...capped.map((c) => c.tSeconds)].sort((a, b) => a - b),
+    );
+  });
+
   test("the anchors cover the whole sequence end to end", () => {
     const cands = Array.from({ length: 500 }, (_, i) => candidate(i, 0.2));
     const capped = capScanCandidates(cands, 12);
