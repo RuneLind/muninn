@@ -1038,12 +1038,27 @@ export async function summarizeVideo(
     // (`newest.id`) — otherwise a run-now click on a just-auto-drafted video would
     // mint a duplicate proposal under a different topic_key.
     let ingestedDocId: string | undefined;
-    // The windowed transcript rides the SUMMARY string, and only when huginn
-    // answered with windows — its YouTube ingest has no `transcript_markdown`
-    // field, so the summary IS the document body. See `appendTranscriptSection`;
-    // `completeJob`, the shelf card and the source draft get the summary alone.
-    const ingestSummaryBody = timestamped ? appendTranscriptSection(summary, transcriptText) : null;
-    if (ingestSummaryBody?.truncated) {
+    // The transcript rides the SUMMARY string — this ingest has no
+    // `transcript_markdown` field, so the summary IS the document body. See
+    // `appendTranscriptSection`; `completeJob`, the shelf card and the source
+    // draft get the summary alone.
+    //
+    // EVERY capture carries one now, not only the windowed ones. `timestamped`
+    // says which CAPPER applies — huginn's `### [HH:MM:SS]` buckets are cut at
+    // a window boundary, a FLAT transcript at a character boundary, and putting
+    // a flat one through the window capper throws a single-paragraph transcript
+    // away entirely — and no longer whether there is a transcript to file at
+    // all. `transcriptText` is non-empty by here on both paths (an empty one
+    // fails the job at the fetch), and a frames-off capture used to drop it on
+    // the floor, so a talk captured without slides was indexed on its summary
+    // alone and could not be cited at a timestamp.
+    const ingestSummaryBody = appendTranscriptSection(
+      summary,
+      transcriptText,
+      YOUTUBE_TRANSCRIPT_MAX_BYTES,
+      timestamped,
+    );
+    if (ingestSummaryBody.truncated) {
       // The one consumer of the cap's own answer: without it, a talk whose
       // second half never reached the document is invisible outside the file.
       log.warn(
@@ -1064,7 +1079,7 @@ export async function summarizeVideo(
       body: {
         title,
         url: videoUrl,
-        summary: ingestSummaryBody?.text ?? summary,
+        summary: ingestSummaryBody.text,
         category,
         date: new Date().toISOString().split("T")[0],
         // The SUMMARY's own provenance — which kind wrote this body — on the

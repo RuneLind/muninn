@@ -68,30 +68,76 @@ export function windowedTranscriptRider(noun: "talk" | "video"): string {
 }
 
 /**
+ * One numbered instruction a vertical slots into the shared envelope, either
+ * ahead of the CATEGORY/SUMMARY steps or after the structure bullets.
+ *
+ * `text` is the instruction's own words WITHOUT its number: the envelope owns
+ * the numbering, so a `before` entry renumbers the three shared steps rather
+ * than leaving a prompt with two step 1s. That is the whole reason the slot
+ * exists — the short-video verticals put their frame-reading rules first and
+ * their no-commentary rule last, which a vertical cannot express by
+ * concatenating around a fixed `1. / 2. / 3.` block.
+ */
+export interface EnvelopeInstruction {
+  /** Stable piece id — the tint class and the chip key, exactly as {@link PromptPiece}. */
+  readonly id: string;
+  readonly label: string;
+  /** The instruction, unnumbered and unterminated. */
+  readonly text: string;
+}
+
+/** The instructions a vertical slots around the shared envelope's own three. */
+export interface SummaryEnvelopeSlots {
+  /** Numbered 1..n, ahead of the CATEGORY step, which then starts at n+1. */
+  readonly before?: readonly EnvelopeInstruction[];
+  /** Numbered after the structure step, on its own line each. */
+  readonly after?: readonly EnvelopeInstruction[];
+}
+
+/**
  * The shared CATEGORY:/SUMMARY: scaffold, in three pieces: the vertical's own
  * intro sentence, the envelope the shared parser reads, and the KIND's structure
- * bullets.
+ * bullets — plus, where a vertical passes them, its own numbered instructions
+ * before and after those.
  *
  * {@link joinPromptPieces} over this is `buildSummarySystemPrompt`
  * (`summarizer-shared.ts`) byte for byte — that function is defined as this join,
  * so there is one template and not two.
+ *
+ * **With no slots the answer is byte-identical to what shipped before them, and
+ * so is the PIECE LIST** — same three ids, same three texts. That is not an
+ * accident of the arithmetic: the `Instructions:\n` header stays inside the
+ * `envelope` piece when there is no `before`, and becomes a piece of its own
+ * only when one arrives (a `before` entry has to sit between the header and the
+ * CATEGORY step, and a span cannot be split around another span). So the five
+ * callers that pass no slots — youtube, vimeo, x-article, article, anthropic —
+ * keep their prompts AND their `/summaries/prompts` chips unchanged.
  */
 export function summarySystemPromptPieces(
   intro: string,
   categories: readonly string[],
   structure: string = SUMMARY_STRUCTURE_BULLETS.join("\n"),
+  slots: SummaryEnvelopeSlots = {},
 ): PromptPiece[] {
+  const before = slots.before ?? [];
+  const after = slots.after ?? [];
+  // The envelope's own three steps start after whatever `before` numbered.
+  const first = before.length + 1;
   return [
     { id: "intro", label: "Intro", text: `${intro}\n\n` },
+    ...(before.length > 0
+      ? [{ id: "instructions", label: "Instructions", text: "Instructions:\n" }]
+      : []),
+    ...before.map((b, i) => ({ id: b.id, label: b.label, text: `${i + 1}. ${b.text}\n` })),
     {
       id: "envelope",
       label: "CATEGORY/SUMMARY envelope",
       text:
-        `Instructions:\n` +
-        `1. Start your response with EXACTLY this line: CATEGORY: <category>\n` +
+        (before.length > 0 ? "" : "Instructions:\n") +
+        `${first}. Start your response with EXACTLY this line: CATEGORY: <category>\n` +
         `   Choose from: ${categories.join(", ")}\n` +
-        `2. Then add a blank line, then SUMMARY: on its own line\n` +
-        `3. Then write a structured summary with:\n` +
+        `${first + 1}. Then add a blank line, then SUMMARY: on its own line\n` +
+        `${first + 2}. Then write a structured summary with:\n` +
         `   `,
     },
     {
@@ -99,5 +145,10 @@ export function summarySystemPromptPieces(
       label: "Structure bullets",
       text: structure.trim().split("\n").join("\n   "),
     },
+    ...after.map((a, i) => ({
+      id: a.id,
+      label: a.label,
+      text: `\n${first + 3 + i}. ${a.text}`,
+    })),
   ];
 }

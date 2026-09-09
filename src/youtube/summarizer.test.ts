@@ -512,11 +512,40 @@ describe("frames off — the capture that shipped before this PR", () => {
     expect(getJob(jobId)?.status).toBe("complete");
   });
 
-  test("the ingest body carries NO transcript section", async () => {
-    await run();
+  /**
+   * This used to assert the OPPOSITE — a frames-off capture carried no
+   * `## Transcript` at all, so the talk was indexed on its summary alone and a
+   * hit in it could not be cited at a timestamp. The transcript is always
+   * present by here (an empty one fails the job at the fetch), and it is filed
+   * FLAT: no `### [HH:MM:SS]` windows to cut at, so the flat capper applies.
+   */
+  test("the ingest body carries the FLAT transcript under `## Transcript`", async () => {
+    const jobId = await run();
     expect(ingestBodies).toHaveLength(1);
-    expect(ingestBodies[0]!.summary).toBe("### Heading\n- point");
-    expect(String(ingestBodies[0]!.summary)).not.toContain("## Transcript");
+    expect(ingestBodies[0]!.summary).toBe(
+      `### Heading\n- point\n\n## Transcript\n\n${transcriptBody.transcript}\n`,
+    );
+    // The section rides the INGEST body only — the card and the source draft get
+    // the summary alone, which is what `completeJob` was handed.
+    expect(getJob(jobId)?.summary).toBe("### Heading\n- point");
+  });
+
+  /**
+   * Which CAPPER a flat transcript takes, at the only budget where the two
+   * differ. Under the 2 MiB cap they agree, so `timestamped` could be ignored
+   * and every ordinary fixture would still pass — measured: the mutation
+   * survived until this case existed. Over the cap the window capper has no head
+   * to show for a paragraph whose only newline is past the budget, and answers
+   * with the truncation note alone.
+   */
+  test("an OVER-CAP flat transcript keeps a head, not the truncation note alone", async () => {
+    transcriptBody = { transcript: `${"word ".repeat(500_000)}end.\n` };
+    await run();
+    const body = String(ingestBodies[0]!.summary);
+    const section = body.slice(body.indexOf("## Transcript\n\n") + "## Transcript\n\n".length);
+    expect(section.startsWith("word word word")).toBe(true);
+    expect(section).toContain("transcript truncated");
+    expect(section.trimEnd()).not.toBe("_(transcript truncated — the talk continues past this point.)_");
   });
 
   test("the capture keeps the shared 8k thinking cap", async () => {
@@ -727,7 +756,7 @@ describe("what is WINDOWED is what huginn ANSWERED, not what we asked for", () =
     expect(String(ingestBodies[0]!.summary)).toContain("\n## Transcript\n");
   });
 
-  test("a pre-#129 huginn ignores the parameter — no rider and no section, frames or not", async () => {
+  test("a pre-#129 huginn ignores the parameter — no rider, and the section is FLAT", async () => {
     // The endpoint that ignores `?timestamps=1` answers a PLAIN transcript with
     // no `timestamps` key (127.0.0.1:8321 as this lands). Deriving "windowed"
     // from our own frames decision then puts a `### [HH:MM:SS]` rider on a
@@ -738,7 +767,11 @@ describe("what is WINDOWED is what huginn ANSWERED, not what we asked for", () =
 
     expect(transcriptRequests).toEqual([`/api/youtube/transcript/${VIDEO_ID}?timestamps=1`]);
     expect(lastSystemPrompt).not.toContain("### [HH:MM:SS]");
-    expect(String(ingestBodies[0]!.summary)).not.toContain("## Transcript");
+    // The section is still filed — what `timestamps` decides is the CAPPER and
+    // the rider, not whether the talk reaches the document at all.
+    expect(ingestBodies[0]!.summary).toBe(
+      `### Heading\n- point\n\n## Transcript\n\n${transcriptBody.transcript}\n`,
+    );
     // Everything else about the capture is unchanged: frames still ran.
     expect(downloadCalls).toHaveLength(1);
     expect(lastExtraDirs).toEqual([workDirFor(jobId)]);

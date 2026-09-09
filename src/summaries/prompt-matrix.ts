@@ -47,8 +47,12 @@ import type { Keyframe } from "../video/media.ts";
 
 import { buildYouTubeUserPrompt, youTubeSystemPromptPieces } from "../youtube/prompt.ts";
 import { buildVimeoUserPrompt, vimeoSystemPromptPieces } from "../vimeo/prompt.ts";
-import { buildTikTokUserPrompt, tikTokSystemPromptPieces } from "../tiktok/prompt.ts";
-import { buildXVideoUserPrompt, xVideoSystemPromptPieces } from "../x-article/video-prompt.ts";
+import {
+  TIKTOK_PROMPT_SPEC,
+  X_VIDEO_PROMPT_SPEC,
+  buildShortVideoUserPrompt,
+  shortVideoSystemPromptPieces,
+} from "../video/short-video-prompt.ts";
 import { xArticleSystemPromptPieces } from "../x-article/prompt.ts";
 import { articleSystemPromptPieces } from "../article/prompt.ts";
 import { anthropicSystemPromptPieces } from "../anthropic/prompt.ts";
@@ -90,6 +94,10 @@ export const PLACEHOLDER_AUTHOR = "placeholder-author";
 export const PLACEHOLDER_XARTICLE_URL = "https://x.com/placeholder/article/1234567890123456789";
 export const PLACEHOLDER_ARTICLE_URL = "https://example.invalid/placeholder-article";
 export const PLACEHOLDER_ANTHROPIC_URL = "https://example.invalid/placeholder-release";
+
+/** The two short-video placeholder URLs, exported for the same reason. */
+export const PLACEHOLDER_TIKTOK_URL = "https://www.tiktok.com/@placeholder/video/1234567890123456789";
+export const PLACEHOLDER_XVIDEO_URL = "https://x.com/placeholder/status/1234567890123456789";
 
 /**
  * The YouTube id is literally `placeholder` — eleven characters of the URL-safe
@@ -136,7 +144,13 @@ export const PLACEHOLDER_TAKEAWAY =
 // The sources
 // ---------------------------------------------------------------------------
 
-/** How a source's system prompt is scaffolded — the chip a no-kind cell shows. */
+/**
+ * How a source's system prompt is scaffolded — the chip a no-kind cell shows.
+ *
+ * No row is `hand-rolled` today: the two short-video verticals were, and the
+ * merge put them on the shared envelope's `before`/`after` slots. The value
+ * stays because the distinction is real and a new vertical can arrive with one.
+ */
 export type EnvelopeStyle = "shared" | "hand-rolled";
 
 export interface PromptMatrixSource {
@@ -207,7 +221,7 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     // the `detailed` branch and is therefore NOT in what this row shows.
     fixedAxes: [
       "windowed transcript: yes",
-      "frames: present",
+      "frames: two, so the cadence clause is present",
       "one frame carries a selection note",
       "visual detail: selected",
     ],
@@ -229,7 +243,7 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     fixedAxes: [
       "captions: auto-generated",
       "output language: English",
-      "frames: present",
+      "frames: two, so the cadence clause is present",
       "one frame carries a selection note",
     ],
     readsVisualDetail: false,
@@ -238,15 +252,19 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     id: "tiktok",
     label: "TikTok",
     medium: "video",
-    kinds: false,
-    envelope: "hand-rolled",
-    // Reading the keyframes IS the reasoning here, so the capture cap is waived.
-    run: { thinking: "inherit", model: "bot" },
+    kinds: true,
+    // The SHARED envelope since the short-video merge: the frame-reading rules
+    // ride its `before` slot and the no-commentary rule its `after` one, which
+    // is what the hand-rolled one spelled by hand.
+    envelope: "shared",
+    // Vestigial on a kind-ful row (`buildCell` takes the PRESET's run options);
+    // kept because `PromptMatrixSource` requires one.
+    run: { thinking: "capped", model: "bot" },
     framesNote: "keyframes read first, never quoted",
-    // Branch points, from `src/tiktok/prompt.ts`: the SYSTEM pieces have none —
-    // `buildTikTokUserPrompt` has both. `input.transcript ? … : "No speech
-    // detected — summarize from the frames."` (a music-only clip is a real
-    // capture) and `input.frames.length > 0`.
+    // Branch points, from `src/video/short-video-prompt.ts`: the SYSTEM pieces
+    // have none — `buildShortVideoUserPrompt` has both. `input.transcript ? …
+    // : "No speech detected — summarize from the frames."` (a music-only clip
+    // is a real capture) and `input.frames.length > 0`.
     fixedAxes: ["transcript: present", "keyframes: present"],
     readsVisualDetail: false,
   },
@@ -254,12 +272,12 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     id: "x-video",
     label: "X video",
     medium: "video",
-    kinds: false,
-    envelope: "hand-rolled",
-    run: { thinking: "inherit", model: "bot" },
+    kinds: true,
+    envelope: "shared",
+    run: { thinking: "capped", model: "bot" },
     framesNote: "keyframes read first, never quoted",
-    // The same two, in `buildXVideoUserPrompt` (`src/x-article/video-prompt.ts`)
-    // — a measured copy-paste twin of the TikTok builder.
+    // The same two, through the same builder — the X spec differs from the
+    // TikTok one in the platform noun and one clause, nothing else.
     fixedAxes: ["transcript: present", "keyframes: present"],
     readsVisualDetail: false,
   },
@@ -272,11 +290,12 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — pasted text",
     // Branch points, from `src/x-article/prompt.ts`: NONE — title, author and
-    // url are required and interpolated unconditionally, so the axis below is
-    // a statement of the placeholder, not a pinned branch (round-2 verify; PR 4
-    // removes it when it revisits these rows). There is no user builder — the
-    // pasted text is the prompt.
-    fixedAxes: ["author and url: both present"],
+    // url are required and interpolated unconditionally. The row used to
+    // declare "author and url: both present", which was a statement of the
+    // PLACEHOLDER rather than a pinned branch; it is gone. What is left is the
+    // one thing this builder does vary on: nothing, which is itself the fact
+    // worth showing. There is no user builder — the pasted text is the prompt.
+    fixedAxes: ["title, author and url: all required — nothing here varies"],
     readsVisualDetail: false,
   },
   {
@@ -461,24 +480,26 @@ function cellPrompts(
       };
     case "tiktok":
       return {
-        pieces: tikTokSystemPromptPieces({
+        pieces: shortVideoSystemPromptPieces(TIKTOK_PROMPT_SPEC, {
+          preset: preset!,
           title: PLACEHOLDER_TITLE,
-          url: "https://www.tiktok.com/@placeholder/video/1234567890123456789",
+          url: PLACEHOLDER_TIKTOK_URL,
           author: PLACEHOLDER_AUTHOR,
         }),
-        userPrompt: buildTikTokUserPrompt({
+        userPrompt: buildShortVideoUserPrompt({
           transcript: PLACEHOLDER_FLAT_TRANSCRIPT,
           frames: PLACEHOLDER_KEYFRAMES,
         }),
       };
     case "x-video":
       return {
-        pieces: xVideoSystemPromptPieces({
+        pieces: shortVideoSystemPromptPieces(X_VIDEO_PROMPT_SPEC, {
+          preset: preset!,
           title: PLACEHOLDER_TITLE,
-          url: "https://x.com/placeholder/status/1234567890123456789",
+          url: PLACEHOLDER_XVIDEO_URL,
           author: PLACEHOLDER_AUTHOR,
         }),
-        userPrompt: buildXVideoUserPrompt({
+        userPrompt: buildShortVideoUserPrompt({
           transcript: PLACEHOLDER_FLAT_TRANSCRIPT,
           frames: PLACEHOLDER_KEYFRAMES,
         }),

@@ -468,6 +468,12 @@ collection. What differs is how a capture is *started*.
 | Article | The "+ Paste article" form on `/summaries` (pasted text) | `article-summaries` |
 | Vimeo | **The URL field on `/summaries`** — paste the link, no extension | `vimeo-summaries` |
 
+TikTok and X video run ONE capture job (`src/video/short-video.ts`) under two
+specs, so they offer the same summary kinds as the rest — `kind` on the POST,
+listed by `GET /api/tiktok/options` and `GET /api/x-articles/video-options`. The
+extension popups do not render that picker yet, so a kind other than `standard`
+is reachable only by a hand-rolled POST for now.
+
 Vimeo is the one vertical with no browser extension: its capture drives a
 headless Chromium of muninn's own to harvest the video's captions, so a URL is
 the whole input. Pasting a Vimeo link into the article textarea works too — it is

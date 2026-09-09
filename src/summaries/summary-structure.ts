@@ -10,7 +10,10 @@
 
 /**
  * Shared structured-summary rules used by every capture vertical (youtube /
- * x-article / anthropic / article via `buildSummarySystemPrompt` in `summarizer-shared.ts`, and tiktok inline).
+ * vimeo / x-article / tiktok / x-video / anthropic / article) — every one of them
+ * through `buildSummarySystemPrompt` in `summarizer-shared.ts`; the two
+ * short-video verticals reached it via its `before`/`after` slots when their
+ * hand-rolled envelope was merged away.
  *
  * The contract is deliberately uniform so stored summaries read consistently on
  * /summaries AND make clean drafter input downstream: one italic ingress line

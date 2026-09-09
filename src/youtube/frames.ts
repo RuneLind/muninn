@@ -9,20 +9,20 @@
  * frames run at all, what yt-dlp is pointed at and asked for, how long each
  * step may take, and what the ingest body is allowed to carry.
  *
- * It holds the transcript rules too, and that is deliberate rather than
- * misfiled: both exist ONLY because frames exist. `?timestamps=1` is asked for
- * exactly when a slide has to be placed beside the passage it illustrates, and
- * the `## Transcript` append is the windowed transcript the same request
- * fetched. With frames off, nothing in this module is reached and the capture
- * is byte-identical to the one that shipped before it.
+ * It holds the transcript URL rule too, and that is deliberate rather than
+ * misfiled: `?timestamps=1` exists ONLY because frames exist — it is asked for
+ * exactly when a slide has to be placed beside the passage it illustrates. The
+ * `## Transcript` append is no longer this module's: it is source-neutral now
+ * (`src/summaries/transcript-appendix.ts`), because the short-video verticals
+ * file their whisper transcript the same way and `src/video/` may not import
+ * `src/youtube/`. The names are re-exported below, so no importer moved.
  *
- * No I/O, and its only import is the dependency-free `src/summaries/truncation.ts`
- * leaf (the truncation note and the byte-safe head, shared with the stored
- * prompt snapshot) — so it is unit-tested in the shared chunk, with no
- * `mock.module` and no yt-dlp.
+ * No I/O, and its only import is the dependency-free
+ * `src/summaries/transcript-appendix.ts` leaf — so it is unit-tested in the
+ * shared chunk, with no `mock.module` and no yt-dlp.
  */
 
-import { TRANSCRIPT_TRUNCATION_NOTE, headWithinBytes } from "../summaries/truncation.ts";
+import { TRANSCRIPT_MAX_BYTES } from "../summaries/transcript-appendix.ts";
 
 /**
  * The yt-dlp format selector for a frames download.
@@ -87,12 +87,14 @@ export const YOUTUBE_FRAMES_MAX_DURATION_SEC = 10_800;
 export const YOUTUBE_FRAMES_MIN_DURATION_SEC = 60;
 
 /**
- * The most bytes of windowed transcript the ingest body may carry — huginn's
- * own `VIMEO_TRANSCRIPT_MAX_BYTES`, restated here because the YouTube ingest
- * has no `transcript_markdown` field to validate it (see
- * {@link appendTranscriptSection}).
+ * The transcript cap, under its old name.
+ *
+ * The constant, the two cappers and the `## Transcript` append moved to the
+ * source-neutral `src/summaries/transcript-appendix.ts` when the short-video
+ * verticals became a second caller (`src/video/` may not import `src/youtube/`).
+ * Re-exported here under the spelling every existing importer already uses.
  */
-export const YOUTUBE_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024;
+export const YOUTUBE_TRANSCRIPT_MAX_BYTES = TRANSCRIPT_MAX_BYTES;
 
 /** The watch URL yt-dlp is pointed at, built from a video id and nothing else. */
 export function youtubeWatchUrl(videoId: string): string {
@@ -183,127 +185,24 @@ export function youtubeDownloadTimeoutFor(durationSec: number): number {
 }
 
 /**
- * The truncation note and the byte-safe head, re-exported so every existing
- * importer of this module keeps its import: both moved to the dependency-free
+ * The truncation note, re-exported so every existing importer of this module
+ * keeps its import: it moved to the dependency-free
  * `src/summaries/truncation.ts` when the stored prompt snapshot became a second
  * caller (`src/db` may not import a vertical).
  */
 export { TRANSCRIPT_TRUNCATION_NOTE } from "../summaries/truncation.ts";
 
-/** What {@link capTranscriptWindows} did, in the two numbers a caller can log. */
-export interface CappedTranscript {
-  readonly text: string;
-  readonly truncated: boolean;
-  /** UTF-8 bytes of the transcript handed in. */
-  readonly inputBytes: number;
-  /**
-   * UTF-8 bytes of {@link text}, the note included. Never above `maxBytes`
-   * EXCEPT in the note-alone band: a budget too small for even the heading
-   * answers with the note by itself, and the note is ~65 bytes.
-   */
-  readonly keptBytes: number;
-}
-
 /**
- * The windowed transcript, trimmed to `maxBytes` at a WINDOW boundary.
+ * The transcript cappers and the `## Transcript` append, re-exported.
  *
- * At a boundary rather than at a byte, because the windows are the contract: a
- * cut mid-window leaves a `### [HH:MM:SS]` heading over half a sentence, and
- * huginn's heading splitter would carry that timestamp into a chunk that ends
- * mid-word. A transcript over the cap keeps as many whole windows as fit and
- * says so in the text.
- *
- * Two things the first cut of this got wrong, both stated because they are
- * invisible until a real 3-hour talk arrives:
- *
- *  - **The note's bytes come out of the budget.** It is part of what is
- *    returned, so a budget that ignores it hands the caller a string over the
- *    cap it asked for — and the cap exists to keep the ingest body under
- *    huginn's own bound.
- *  - **A first window over the cap keeps a HEAD of it, never the note alone.**
- *    huginn windows at 120 s, but nothing guarantees the first window fits an
- *    arbitrary `maxBytes`, and answering with only the truncation note is a
- *    document that says a talk exists and nothing about it. The head keeps the
- *    `### [HH:MM:SS]` heading and cuts at the last boundary a reader can see
- *    ({@link headWithinBytes} — a line where the window has more than one, a
- *    word where it does not, which is huginn's real shape).
- *
- * **A truncated answer ALWAYS carries the note.** Below roughly a hundred bytes
- * not even the heading fits, and there the note is what goes, alone — a head
- * with no note is a fragment of a three-hour talk that reads as the whole of
- * it, which is what this returned before. The note may then be longer than
- * `maxBytes`: the cap bounds a transcript, and at that budget there is no
- * transcript left to bound. Every budget that fits any of the talk at all keeps
- * the result inside the cap.
- *
- * Pure. `truncated` and the byte counts are returned so a caller can say so —
- * `summarizeVideo` warns with them; without a consumer, a talk whose second
- * half never reached the document was invisible outside the stored file.
+ * They live in `src/summaries/transcript-appendix.ts` now — source-neutral,
+ * because the short-video verticals file their whisper transcript the same way
+ * and a vertical never imports another vertical. Every importer of this module
+ * keeps its import.
  */
-export function capTranscriptWindows(
-  transcript: string,
-  maxBytes: number = YOUTUBE_TRANSCRIPT_MAX_BYTES,
-): CappedTranscript {
-  const encoder = new TextEncoder();
-  const inputBytes = encoder.encode(transcript).length;
-  if (inputBytes <= maxBytes) {
-    return { text: transcript, truncated: false, inputBytes, keptBytes: inputBytes };
-  }
-
-  // The note plus the `\n\n` it is joined on is reserved up front.
-  const noteBytes = encoder.encode(TRANSCRIPT_TRUNCATION_NOTE).length + 2;
-  const budget = maxBytes - noteBytes;
-
-  const windows = transcript.split("\n\n");
-  const kept: string[] = [];
-  let bytes = 0;
-  for (const w of windows) {
-    // The separator is only paid for from the second window on.
-    const size = encoder.encode(w).length + (kept.length === 0 ? 0 : 2);
-    if (bytes + size > budget) break;
-    kept.push(w);
-    bytes += size;
-  }
-
-  // Not one whole window fits: keep a head of the first one instead. With no
-  // room even for its heading, the note is what goes — alone, because a head
-  // with no note reads as a complete transcript.
-  const body = kept.length > 0 ? kept.join("\n\n") : headWithinBytes(transcript, budget);
-  const text = body === "" ? TRANSCRIPT_TRUNCATION_NOTE : `${body}\n\n${TRANSCRIPT_TRUNCATION_NOTE}`;
-  return { text, truncated: true, inputBytes, keptBytes: encoder.encode(text).length };
-}
-
-/**
- * The ingest body's `summary` field with the windowed transcript appended under
- * a `## Transcript` heading.
- *
- * **Why the SUMMARY string and not a field of its own:** huginn's YouTube
- * ingest (`main/ingest/youtube.py`, `YouTubeIngestRequest`) has no
- * `transcript_markdown` — the Vimeo vertical's `body_suffix` route into
- * `write_summary` exists only for Vimeo — so the document body is exactly what
- * is posted as `summary`. Appending here is what puts the transcript in the
- * indexed document, which is what makes a hit inside a long talk citable to the
- * minute (huginn's `MarkdownHeadingSplitter` carries the nearest heading into
- * every chunk). A `transcript_markdown` field on the YouTube ingest is the
- * better shape and is filed as a follow-up.
- *
- * Only the INGEST body carries it: `completeJob`, the shelf card's text and the
- * source-page draft all get the summary alone. ⚠️ The `similar` list is NOT in
- * that group — huginn computes it from `result["summary"][:2000]`, i.e. from
- * the string this function returns, so a summary under 2 000 characters lets
- * the first transcript window into the similarity query (huginn
- * `main/ingest/registry.py`). It is a query, not stored content; the
- * `transcript_markdown` follow-up retires it.
- *
- * Returns what the cap did, so the caller can warn when a talk did not fit. The
- * byte counts describe the TRANSCRIPT (in, and what survived the cap) — not
- * `text`, which is the summary and the heading on top of it.
- */
-export function appendTranscriptSection(
-  summary: string,
-  transcript: string,
-  maxBytes: number = YOUTUBE_TRANSCRIPT_MAX_BYTES,
-): CappedTranscript {
-  const capped = capTranscriptWindows(transcript, maxBytes);
-  return { ...capped, text: `${summary.trimEnd()}\n\n## Transcript\n\n${capped.text}\n` };
-}
+export {
+  appendTranscriptSection,
+  capFlatTranscript,
+  capTranscriptWindows,
+  type CappedTranscript,
+} from "../summaries/transcript-appendix.ts";

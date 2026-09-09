@@ -21,9 +21,13 @@ import { resolveCapturePresets, SHIPPED_CAPTURE_PRESETS } from "./presets.ts";
 import { buildTakeawayCheckPrompt } from "./takeaway-check.ts";
 import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../youtube/prompt.ts";
 import { buildVimeoSystemPrompt, buildVimeoUserPrompt } from "../vimeo/prompt.ts";
-import { buildTikTokSystemPrompt, buildTikTokUserPrompt } from "../tiktok/prompt.ts";
-import { buildXVideoSystemPrompt, buildXVideoUserPrompt } from "../x-article/video-prompt.ts";
-import { buildXArticleSystemPrompt } from "../x-article/prompt.ts";
+import {
+  TIKTOK_PROMPT_SPEC,
+  X_VIDEO_PROMPT_SPEC,
+  buildShortVideoSystemPrompt,
+  buildShortVideoUserPrompt,
+} from "../video/short-video-prompt.ts";
+import { buildXArticleSystemPrompt, xArticleSystemPromptPieces } from "../x-article/prompt.ts";
 import { buildArticleSystemPrompt } from "../article/prompt.ts";
 import { buildAnthropicSystemPrompt } from "../anthropic/prompt.ts";
 import {
@@ -36,8 +40,10 @@ import {
   PLACEHOLDER_KEYFRAMES,
   PLACEHOLDER_SUMMARY_BODY,
   PLACEHOLDER_TAKEAWAY,
+  PLACEHOLDER_TIKTOK_URL,
   PLACEHOLDER_TITLE,
   PLACEHOLDER_VIMEO_ID,
+  PLACEHOLDER_XVIDEO_URL,
   PLACEHOLDER_WINDOWED_TRANSCRIPT,
   PLACEHOLDER_XARTICLE_URL,
   PLACEHOLDER_YOUTUBE_ID,
@@ -99,6 +105,16 @@ describe("the matrix's shape", () => {
       resolveCapturePresets(b.prompts, b.connector).map((p) => ({ id: p.id, label: p.label })),
     );
     expect(matrix.kinds.map((k) => k.id)).toEqual(["standard", "deep", "talk-notes"]);
+  });
+
+  test("the two short-video rows are kind-FUL now — the merge put them on the shared envelope", () => {
+    const matrix = buildPromptMatrix(bot(), [bot()]);
+    for (const id of ["tiktok", "x-video"]) {
+      const row = matrix.rows.find((r) => r.source.id === id)!;
+      expect(row.source.kinds).toBe(true);
+      expect(row.source.envelope).toBe("shared");
+      expect(row.cells.map((c) => c.kindId)).toEqual(["standard", "deep", "talk-notes"]);
+    }
   });
 
   test("a connector that cannot name the opus model loses the deep column AND its cells", () => {
@@ -205,16 +221,43 @@ describe("the chips", () => {
     expect(cell(matrix, "youtube", "standard").chips).toContain("windowed transcript rider");
   });
 
-  test("the short-video cells say 'hand-rolled envelope, no kind' and span the kinds", () => {
+  /**
+   * The FLIP, and the whole reason this assertion is spelled out per chip: these
+   * two cells used to open with `hand-rolled envelope, no kind` and carry four
+   * chips. They are shared-envelope, kind-ful cells now, and the two slotted
+   * instructions are chips of their own — which is what proves the page shows
+   * the frame rules as parts of the prompt rather than as an opaque envelope.
+   */
+  test("the short-video cells list the SHARED envelope's parts, slots included", () => {
     const matrix = buildPromptMatrix(bot(), [bot()]);
     for (const id of ["tiktok", "x-video"]) {
-      const c = cell(matrix, id, null);
-      expect(c.chips[0]).toBe("hand-rolled envelope, no kind");
-      expect(c.chips).toContain("thinking: the bot's own budget");
-      expect(c.chips).toContain("frames: keyframes read first, never quoted");
-      // No kind picker ⇒ no visual-detail axis and no override file.
+      const c = cell(matrix, id, "standard");
+      expect(c.chips).toEqual([
+        "intro",
+        "instructions",
+        "frame-reading rule",
+        "visual-only rule",
+        "category/summary envelope",
+        "structure bullets",
+        "no-commentary rule",
+        "video context",
+        "frames: keyframes read first, never quoted",
+        "model: the bot's own",
+        "thinking: capped at 8000",
+      ]);
+      // No `no kind` chip any more, in either wording.
+      expect(c.chips.some((chip) => chip.endsWith("no kind"))).toBe(false);
+      // Still no visual-detail axis: neither user builder reads a policy.
       expect(c.chips.some((chip) => chip.startsWith("visual detail:"))).toBe(false);
-      expect(c.override).toBeNull();
+      // A kind-ful cell names the file that would override it.
+      expect(c.override).toEqual({
+        path: "/bots/matrixbot/prompts/captureSummary.standard.md",
+        present: false,
+      });
+      // And `deep` still says what it buys — the budget the pre-merge run had.
+      const deep = cell(matrix, id, "deep").chips;
+      expect(deep).toContain("thinking: the bot's own budget");
+      expect(deep).toContain("model: claude-opus-5");
     }
   });
 
@@ -226,6 +269,7 @@ describe("the chips", () => {
       expect(c.chips).toContain("thinking: capped at 8000");
     }
     expect(noKindChip("shared")).toBe("shared envelope, no kind");
+    // No row is hand-rolled today; the wording stays for the next vertical that is.
     expect(noKindChip("hand-rolled")).toBe("hand-rolled envelope, no kind");
   });
 });
@@ -241,8 +285,8 @@ describe("the prompts", () => {
         checked++;
       }
     }
-    // 2 kind-ful sources × 3 kinds + 5 kind-less sources.
-    expect(checked).toBe(11);
+    // 4 kind-ful sources × 3 kinds + 3 kind-less sources.
+    expect(checked).toBe(15);
   });
 
   test("no cell's piece text is empty — an absent rider contributes no span to tint", () => {
@@ -289,25 +333,37 @@ describe("the prompts", () => {
         frames: PLACEHOLDER_FRAMES,
       }),
     );
-    expect(cell(matrix, "tiktok", null).systemPrompt).toBe(
-      buildTikTokSystemPrompt({
+    expect(cell(matrix, "tiktok", "standard").systemPrompt).toBe(
+      buildShortVideoSystemPrompt(TIKTOK_PROMPT_SPEC, {
+        preset: standard,
         title: PLACEHOLDER_TITLE,
-        url: "https://www.tiktok.com/@placeholder/video/1234567890123456789",
-        author: "placeholder-author",
+        url: PLACEHOLDER_TIKTOK_URL,
+        author: PLACEHOLDER_AUTHOR,
       }),
     );
-    expect(cell(matrix, "tiktok", null).userPrompt).toBe(
-      buildTikTokUserPrompt({ transcript: PLACEHOLDER_FLAT_TRANSCRIPT, frames: PLACEHOLDER_KEYFRAMES }),
-    );
-    expect(cell(matrix, "x-video", null).systemPrompt).toBe(
-      buildXVideoSystemPrompt({
-        title: PLACEHOLDER_TITLE,
-        url: "https://x.com/placeholder/status/1234567890123456789",
-        author: "placeholder-author",
+    expect(cell(matrix, "tiktok", "standard").userPrompt).toBe(
+      buildShortVideoUserPrompt({
+        transcript: PLACEHOLDER_FLAT_TRANSCRIPT,
+        frames: PLACEHOLDER_KEYFRAMES,
       }),
     );
-    expect(cell(matrix, "x-video", null).userPrompt).toBe(
-      buildXVideoUserPrompt({ transcript: PLACEHOLDER_FLAT_TRANSCRIPT, frames: PLACEHOLDER_KEYFRAMES }),
+    expect(cell(matrix, "x-video", "standard").systemPrompt).toBe(
+      buildShortVideoSystemPrompt(X_VIDEO_PROMPT_SPEC, {
+        preset: standard,
+        title: PLACEHOLDER_TITLE,
+        url: PLACEHOLDER_XVIDEO_URL,
+        author: PLACEHOLDER_AUTHOR,
+      }),
+    );
+    expect(cell(matrix, "x-video", "standard").userPrompt).toBe(
+      buildShortVideoUserPrompt({
+        transcript: PLACEHOLDER_FLAT_TRANSCRIPT,
+        frames: PLACEHOLDER_KEYFRAMES,
+      }),
+    );
+    // The two cells are NOT the same prompt — the spec's two clauses differ.
+    expect(cell(matrix, "tiktok", "standard").systemPrompt).not.toBe(
+      cell(matrix, "x-video", "standard").systemPrompt,
     );
   });
 
@@ -480,13 +536,15 @@ describe("the fixed axes the page pins", () => {
 
     expect(axes["youtube"]).toEqual([
       "windowed transcript: yes",
-      "frames: present",
+      "frames: two, so the cadence clause is present",
       "one frame carries a selection note",
       "visual detail: selected",
     ]);
     expect(cell(matrix, "youtube", "standard").systemPieces.map((p) => p.id)).toContain("rider-windowed");
     const youtubeUser = cell(matrix, "youtube", "standard").userPrompt;
-    expect(youtubeUser).toContain("Slide frames");
+    // TWO frames, 60 s apart, so `framesPromptSection` states the cadence — a
+    // clause a ONE-frame skeleton would not have, which is what the axis says.
+    expect(youtubeUser).toContain("Slide frames, one every ~60 s of the talk (read EVERY image");
     // The note channel: the 60 s frame's line carries it, the 120 s one does not.
     expect(youtubeUser).toContain(`${PLACEHOLDER_FRAMES[0]!.path} — ${noteText}`);
     expect(youtubeUser).toContain(`${PLACEHOLDER_FRAMES[1]!.path}\n`);
@@ -498,7 +556,7 @@ describe("the fixed axes the page pins", () => {
     expect(axes["vimeo"]).toEqual([
       "captions: auto-generated",
       "output language: English",
-      "frames: present",
+      "frames: two, so the cadence clause is present",
       "one frame carries a selection note",
     ]);
     const vimeoIds = cell(matrix, "vimeo", "standard").systemPieces.map((p) => p.id);
@@ -508,7 +566,7 @@ describe("the fixed axes the page pins", () => {
       "LANGUAGE: write the summary in English",
     );
     const vimeoUser = cell(matrix, "vimeo", "standard").userPrompt;
-    expect(vimeoUser).toContain("Slide frames");
+    expect(vimeoUser).toContain("Slide frames, one every ~60 s of the talk (read EVERY image");
     expect(vimeoUser).toContain(`${PLACEHOLDER_FRAMES[0]!.path} — ${noteText}`);
     expect(vimeoUser).not.toContain(`${PLACEHOLDER_FRAMES[1]!.path} —`);
 
@@ -516,17 +574,32 @@ describe("the fixed axes the page pins", () => {
     // present-transcript, present-frames form of both.
     for (const id of ["tiktok", "x-video"]) {
       expect(axes[id]).toEqual(["transcript: present", "keyframes: present"]);
-      const user = cell(matrix, id, null).userPrompt;
+      const user = cell(matrix, id, "standard").userPrompt;
       expect(user.startsWith("Transcript:\n")).toBe(true);
       expect(user).not.toContain("No speech detected");
       expect(user).toContain("Keyframes (read each image before summarizing):");
     }
 
-    for (const id of ["x-article", "article"]) {
-      expect(axes[id]).toEqual(["author and url: both present"]);
-      expect(cell(matrix, id, null).systemPrompt).toContain("Article author:");
-      expect(cell(matrix, id, null).systemPrompt).toContain("Article URL:");
-    }
+    // The x-article row's old "author and url: both present" axis is GONE: that
+    // builder interpolates all three fields unconditionally, so the line stated
+    // the placeholder rather than a branch the page took. Its replacement is the
+    // honest version of the same fact, and the `article` row keeps the real one
+    // (its two context lines ARE optional).
+    expect(axes["x-article"]).toEqual(["title, author and url: all required — nothing here varies"]);
+    // "Nothing varies" as a comparison rather than a claim: the same piece list
+    // over two unrelated inputs, so an optional rider added later fails here.
+    const ids = (i: { title: string; author: string; url: string }) =>
+      xArticleSystemPromptPieces(i).map((p) => p.id);
+    expect(ids({ title: "T", author: "A", url: "U" })).toEqual(
+      ids({ title: "other", author: "", url: "" }),
+    );
+    expect(ids({ title: "T", author: "A", url: "U" })).toEqual(
+      cell(matrix, "x-article", null).systemPieces.map((p) => p.id),
+    );
+
+    expect(axes["article"]).toEqual(["author and url: both present"]);
+    expect(cell(matrix, "article", null).systemPrompt).toContain("Article author:");
+    expect(cell(matrix, "article", null).systemPrompt).toContain("Article URL:");
 
     expect(axes["anthropic"]).toEqual(["framing: Anthropic release", "linked-content rider: absent"]);
     const anthropicIds = cell(matrix, "anthropic", null).systemPieces.map((p) => p.id);
