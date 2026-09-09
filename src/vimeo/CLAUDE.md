@@ -18,7 +18,9 @@ the metadata, the media seam, inline slides and the Whisper fallback.
 | `../summaries/frames.ts` | The SOURCE-NEUTRAL frames seam: `FrameSource` (vimeo/youtube + their id charsets), the id gate, `cadenceTimes` / `formatHms` / `frameUrlPath` / `framesPromptSection` (whose optional `FramesPromptPolicy` YouTube opts into for its Selected/Detailed rubric — called WITHOUT one, as Vimeo does, the section is byte-identical to what shipped before policies, and a test pins that literally) / `referencedFrameSeconds` (pure), `keepReferencedFrames` (the quoted ones → `~/.muninn/frames/<source>/<id>/<sec>.jpg`), `removeKeptFrames` + `removeKeptFramesForDocument` (a Delete's counterpart), `framesRootHasEntries`, `framesTimeoutFor`, the ffmpeg argv + grab (`raceKill` is the per-grab kill-and-reject, so a hang is reported as a timeout rather than as `exit 143`), `FRAME_MAX_DURATION_SEC` (the cadence refuses a duration whose ticks would not be servable file names), `extractCadenceFramesFromFile` (a vertical holding the whole video on disk), and the one-time root rename |
 | `whisper.ts` | The no-captions fallback (v2 PR 5): `transcribeOpusRendition` (the whole Opus rendition through `media.ts` → ffmpeg → `whisper-cli -l auto -ovtt` → a WebVTT `vttToSegments` windows like a caption track), `whisperUnavailableReason` (the pre-flight — binaries + model — BEFORE any download), `parseDetectedLanguage` / `isEnglishOnlyModel` / the two clocks (pure) |
 | `state.ts` | The job store (`createJobStore`), statuses `pending · harvesting_captions · downloading · transcribing · extracting_frames · summarizing · ingesting · complete · error` (`downloading`/`transcribing` only on the Whisper path) |
-| `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST |
+| `summarizer.ts` | The job: harvest → download → window → `runCaptureOneShot` → ingest → source-draft |
+| `prompt.ts` | The two prompts as PURE builders. `buildVimeoSystemPrompt` composes the envelope around the KIND's structure bullets, then the auto-caption rider, then the language rider LAST — **the rider order is the contract**; `buildVimeoUserPrompt` is the transcript plus `framesPromptSection` with NO policy argument. Re-exported from `summarizer.ts`, and its own module so a view can read it without playwright-core |
+| `finish.ts` | The post-model tail as ONE function (`finishVimeoSummary`): parse, then copy the frames the summary quotes. **No enforcement pass**, unlike YouTube's — a re-run must keep that shape |
 | `metadata.ts` | `speakerFromTitle` — the last ` - ` segment of a CONFERENCE account's title (`VIMEO_CONFERENCE_ACCOUNTS`, JavaZone today), undefined for everyone else — pure |
 | `../summaries/presets.ts` | The capture KINDS (`standard` · `deep` · `talk-notes`), per-bot `prompts/captureSummary.<id>.md` overrides, and the two run levers a kind can pull (`captureThinkingFor`, `captureBotConfigFor`) — pure |
 | `../summaries/language.ts` | `talk \| nb \| en`, `resolveOutputLang` (the `talk` rule: transcript text first via `detectTextLang`, caption base tag second via `langFromCaptionTag`), `captionBaseLang` (shared with `chooseTrack`) and the ONE spelling of the bokmål/English rider, which `src/share/prompt.ts` re-exports |
@@ -75,8 +77,9 @@ merged first).
 **The language rider is the LAST thing in the system prompt** — after the kind's
 structure and after the auto-caption rider — for the reason the share prompt puts
 its rider after the instruction: the language is the reader's pick (or the talk's
-own) and nothing a preset says may un-pick it. `buildVimeoSystemPrompt` is
-exported so a test can pin that order.
+own) and nothing a preset says may un-pick it. `buildVimeoSystemPrompt` lives in
+`prompt.ts` (re-exported from `summarizer.ts`) so a test can pin that order — and
+so `/summaries/prompts` can show it without importing the harvest pipeline.
 
 **A kind is instruction + run options, and a file on disk can only replace the
 instruction.** `deep` is `standard`'s structure on `claude-opus-5` with the

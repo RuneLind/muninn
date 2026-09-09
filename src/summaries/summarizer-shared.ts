@@ -9,6 +9,7 @@ import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { getConnectorLabel } from "../observability/agent-status.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 import { groundTakeaway, splitClosingTakeaway, type GroundTakeawayOptions } from "./takeaway-check.ts";
+import { joinPromptPieces, summarySystemPromptPieces } from "./prompt-pieces.ts";
 
 const log = getLog("summaries", "ingest");
 const captureLog = getLog("summaries", "capture");
@@ -303,6 +304,11 @@ import { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
  * unchanged. (TikTok's prompt is a bespoke multi-turn frame-reading variant
  * and doesn't use this — it interpolates {@link SUMMARY_STRUCTURE_BULLETS}
  * inline instead.)
+ *
+ * The template itself lives in {@link summarySystemPromptPieces}, and this is
+ * the join of it: `/summaries/prompts` tints the composed prompt by the piece
+ * that produced each line, and the only honest source for that is the
+ * construction. Two spellings of one scaffold would drift on the first reword.
  */
 export function buildSummarySystemPrompt(
   intro: string,
@@ -314,14 +320,7 @@ export function buildSummarySystemPrompt(
    */
   structure: string = SUMMARY_STRUCTURE_BULLETS.join("\n"),
 ): string {
-  return `${intro}
-
-Instructions:
-1. Start your response with EXACTLY this line: CATEGORY: <category>
-   Choose from: ${categories.join(", ")}
-2. Then add a blank line, then SUMMARY: on its own line
-3. Then write a structured summary with:
-   ${structure.trim().split("\n").join("\n   ")}`;
+  return joinPromptPieces(summarySystemPromptPieces(intro, categories, structure));
 }
 
 /** How long an ingest of a body this size may take. */

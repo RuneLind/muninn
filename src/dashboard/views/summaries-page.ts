@@ -144,8 +144,18 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
       margin: 0;
     }
     .sum-page-head .sum-presence-slot { display: inline-flex; }
-    .paste-toggle {
+    /* The margin-left:auto moved here from .paste-toggle: this link now sits
+       between the presence slot and the button, so the gap belongs to whichever
+       of the two comes first. */
+    .prompts-link {
       margin-left: auto;
+      font-size: 13px;
+      color: var(--text-muted);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .prompts-link:hover { color: var(--accent-light); }
+    .paste-toggle {
       display: inline-flex;
       align-items: center;
       gap: 7px;
@@ -202,6 +212,9 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     <div class="sum-page-head">
       <h2>Summaries</h2>
       <span class="sum-presence-slot">${agentPresenceHtml("sumPresence")}</span>
+      <!-- The only entry point to /summaries/prompts: it is a sub-page of this
+           one, and the top-level nav row already carries ten links. -->
+      <a class="prompts-link" id="promptsLink" href="/summaries/prompts">Prompts</a>
       <button class="paste-toggle" id="pasteToggleBtn" type="button" aria-expanded="false" aria-controls="pasteFormWrap">+ Paste article</button>
     </div>
 

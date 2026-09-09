@@ -84,6 +84,17 @@ export const E2E_PORTS = {
   "chat-fold": 3052,
   // A temp wiki carrying folds, in the reader.
   "wiki-fold": 3053,
+  // `/summaries/prompts`, against a throwaway `claude-cli` bot under
+  // MUNINN_BOTS_DIR (the connector decides which kinds are offered, and only a
+  // Claude one is offered `deep`). The server is restarted mid-file, because a
+  // per-bot `captureSummary.<id>.md` is read at bot DISCOVERY.
+  "summaries-prompts": 3054,
+  // Not bound by anything — the opposite, the `plans-write/dead-ledger` idiom.
+  // The spec points KNOWLEDGE_API_URL here so a page that reached for huginn
+  // would fail loudly instead of quietly answering off the developer's own
+  // instance on 8321. Registered so a future spec cannot bind it and turn that
+  // guarantee into a live call.
+  "summaries-prompts/dead-huginn": 8798,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

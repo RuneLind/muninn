@@ -2,8 +2,9 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
-import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { parseSummaryResponse } from "../utils/summary-parser.ts";
+import { ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { buildArticleSystemPrompt } from "./prompt.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
   attachRun,
@@ -16,11 +17,6 @@ import {
 } from "./state.ts";
 
 const log = getLog("article", "summarizer");
-
-const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
-  "You are a content analyst. Summarize the following article.",
-  VALID_CATEGORIES,
-);
 
 export async function summarizeArticle(
   jobId: string,
@@ -36,15 +32,12 @@ export async function summarizeArticle(
     updateStatus(jobId, "summarizing");
 
     // Only surface the context lines we actually have — a pasted article may
-    // carry no url and no author.
-    const contextLines = [
-      `Article title: ${title}`,
-      ...(author ? [`Article author: ${author}`] : []),
-      ...(url ? [`Article URL: ${url}`] : []),
-    ];
-    const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}
-
-${contextLines.join("\n")}`;
+    // carry no url and no author. The composition is `./prompt.ts`.
+    const systemPrompt = buildArticleSystemPrompt({
+      title,
+      ...(author ? { author } : {}),
+      ...(url ? { url } : {}),
+    });
 
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {

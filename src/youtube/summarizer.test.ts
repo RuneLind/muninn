@@ -176,6 +176,7 @@ Tracer.prototype.finish = function patchedFinish(
 };
 
 const { summarizeVideo } = await import("./summarizer.ts");
+const { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } = await import("./prompt.ts");
 const { createJob, getJob } = await import("./state.ts");
 const { YOUTUBE_FRAME_FORMAT_SELECTOR } = await import("./frames.ts");
 const {
@@ -1580,5 +1581,72 @@ describe("the dense scan path", () => {
     expect(scanCalls).toEqual([]);
     expect(downloadCalls).toEqual([]);
     expect(oneShotCalls.map((c) => c.pass)).toEqual(["summary"]);
+  });
+});
+
+/**
+ * The run uses the BUILDERS — the pin that lets PR 3's re-run and
+ * `/summaries/prompts` claim they send and show what a capture sends.
+ *
+ * Both directions are asserted as EQUALITY against the builder over the same
+ * inputs, so a run that composed its prompt any other way fails here even when
+ * the result happens to contain every substring the older cases check.
+ */
+describe("the run uses the prompt builders", () => {
+  test("frames off: both prompts are the builders' output, byte for byte", async () => {
+    await run();
+    expect(lastSystemPrompt).toBe(
+      buildYouTubeSystemPrompt(STANDARD_PRESET, {
+        // No frames ⇒ the plain transcript URL ⇒ huginn answers unwindowed.
+        windowed: false,
+        title: "A talk",
+        videoUrl: WATCH_URL,
+      }),
+    );
+    expect(lastPrompt).toBe(
+      buildYouTubeUserPrompt(transcriptBody.transcript!, {
+        videoId: VIDEO_ID,
+        frames: [],
+        visualDetail: "selected",
+      }),
+    );
+  });
+
+  test("frames on: the frame list and the policy come from the builder too", async () => {
+    const jobId = await run({ frames: true, visualDetail: "detailed" });
+    const frames = extractTicks.map((t) => ({
+      path: join(workDirFor(jobId), "frames", `${t}.jpg`),
+      tSeconds: t,
+    }));
+    expect(lastSystemPrompt).toBe(
+      buildYouTubeSystemPrompt(STANDARD_PRESET, { windowed: true, title: "A talk", videoUrl: WATCH_URL }),
+    );
+    expect(lastPrompt).toBe(
+      buildYouTubeUserPrompt(transcriptBody.transcript!, {
+        videoId: VIDEO_ID,
+        frames,
+        visualDetail: "detailed",
+      }),
+    );
+    // The pin is only worth something if the two arguments really move the
+    // string: a builder called with the other policy is a DIFFERENT prompt.
+    expect(lastPrompt).not.toBe(
+      buildYouTubeUserPrompt(transcriptBody.transcript!, {
+        videoId: VIDEO_ID,
+        frames,
+        visualDetail: "selected",
+      }),
+    );
+  });
+
+  test("the KIND reaches the model through the builder, not around it", async () => {
+    const talkNotes = findCapturePreset(SHIPPED_CAPTURE_PRESETS, "talk-notes")!;
+    await run({ preset: talkNotes });
+    expect(lastSystemPrompt).toBe(
+      buildYouTubeSystemPrompt(talkNotes, { windowed: false, title: "A talk", videoUrl: WATCH_URL }),
+    );
+    expect(lastSystemPrompt).not.toBe(
+      buildYouTubeSystemPrompt(STANDARD_PRESET, { windowed: false, title: "A talk", videoUrl: WATCH_URL }),
+    );
   });
 });

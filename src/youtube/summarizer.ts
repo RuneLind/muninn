@@ -5,17 +5,16 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
-import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import type { Tracer } from "../tracing/tracer.ts";
 import {
   CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
   CAPTURE_THINKING_MAX_TOKENS,
-  buildSummarySystemPrompt,
   createCaptureTracer,
   ingestSummary,
   runCaptureOneShot,
-  windowedTranscriptRider,
 } from "../summaries/summarizer-shared.ts";
+import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "./prompt.ts";
+import { finishYouTubeSummary } from "./finish.ts";
 import {
   captureBotConfigFor,
   captureThinkingFor,
@@ -26,18 +25,12 @@ import { connectorCapabilities } from "../ai/one-shot.ts";
 import { createQueue } from "../wiki/queue.ts";
 import {
   CAPTURE_FRAME_HEIGHT,
-  YOUTUBE_FRAME_SOURCE,
   extractCadenceFramesFromFile,
-  framesPromptSection,
-  keepReferencedFrames,
   type CaptureFrame,
 } from "../summaries/frames.ts";
 import {
   DEFAULT_VISUAL_DETAIL,
-  dropFrameReferences,
-  enforceVisualReferences,
   visualDetailCaps,
-  visualDetailPolicy,
   type VisualDetail,
 } from "../summaries/visual-detail.ts";
 import {
@@ -93,17 +86,6 @@ import {
 } from "./state.ts";
 
 const log = getLog("youtube", "summarizer");
-
-const SUMMARIZE_INTRO =
-  "You are a video content analyst. Summarize the following YouTube video transcript.";
-
-/**
- * The rider added when huginn ANSWERED with a windowed transcript. The sentence
- * is the seam's, shared with the Vimeo prompt (which says "talk"): a slide can
- * only be placed beside its passage if the model knows the headings are
- * positions.
- */
-const WINDOWED_TRANSCRIPT_RIDER = `\n\n${windowedTranscriptRider("video")}`;
 
 /**
  * ONE yt-dlp download and one ffmpeg pass at a time, process-wide.
@@ -884,13 +866,14 @@ export async function summarizeVideo(
     updateStatus(jobId, "summarizing");
 
     // Built per capture rather than as a module constant: the structure bullets
-    // are the PRESET's now, and a constant could only ever carry one kind's.
-    const systemPrompt = `${buildSummarySystemPrompt(SUMMARIZE_INTRO, VALID_CATEGORIES, preset.instruction)}${
-      timestamped ? WINDOWED_TRANSCRIPT_RIDER : ""
-    }
-
-Video title: ${title}
-Video URL: ${videoUrl}`;
+    // are the PRESET's now, and a constant could only ever carry one kind's. The
+    // composition itself is `./prompt.ts`, so the re-run and `/summaries/prompts`
+    // send and show exactly what this call does.
+    const systemPrompt = buildYouTubeSystemPrompt(preset, {
+      windowed: timestamped,
+      title,
+      videoUrl,
+    });
 
     // Whether this call INHERITS the bot's own thinking budget instead of the
     // 8k capture cap. Two independent reasons, either of which is enough:
@@ -926,31 +909,10 @@ Video URL: ${videoUrl}`;
       url: videoUrl,
       // The frame list rides the USER prompt after the transcript (the TikTok
       // and Vimeo shape); with no frames it contributes "" and the prompt is
-      // byte-identical to the one that shipped before slides existed.
-      //
-      // The POLICY is built only where frames came out, deliberately: building
-      // it needs an ADDRESS (`frameQuoteTemplate`), and `framesPromptSection`'s
-      // contract is that a frames-off capture never asks the id gate anything.
-      prompt:
-        transcriptText +
-        (frames.length > 0
-          ? framesPromptSection(
-              YOUTUBE_FRAME_SOURCE,
-              videoId,
-              frames,
-              // The `detailed` must-quote rule names "the note above": it is
-              // stated only where a frame actually carries one, which is the
-              // dense scan's selection pass and nothing else — the cadence
-              // sampler, every dense attempt that fell back to it and the kill
-              // switch all hand over a bare list of paths.
-              visualDetailPolicy(
-                visualDetail,
-                YOUTUBE_FRAME_SOURCE,
-                videoId,
-                frames.some((f) => (f.note ?? "") !== ""),
-              ),
-            )
-          : ""),
+      // byte-identical to the one that shipped before slides existed. The
+      // composition is `./prompt.ts` — see `buildYouTubeUserPrompt` for why the
+      // policy is built only where frames came out.
+      prompt: buildYouTubeUserPrompt(transcriptText, { videoId, frames, visualDetail }),
       systemPrompt,
       config,
       botConfig: runBot,
@@ -992,77 +954,22 @@ Video URL: ${videoUrl}`;
     // `parentTracer` was never set and the seam has already finished its own.
     finishParent("ok", { source: "youtube", model: result.model, ...passUsage });
 
-    // 3. Parse response, then hold its frame references to this capture's own
-    //    manifest and this policy's caps.
-    //
-    //    The summary STREAMED to the job card delta by delta while the model
-    //    wrote it, so this rewrite happens after the reader has already seen the
-    //    unrewritten text. That is what `completeReplacesText` +
-    //    `completeCarriesSummary` are for (`state.ts`, `youtube-routes.ts`): the
-    //    terminal event carries the rewritten body, so the live card swaps it in
-    //    and an SSE replay after a reload serves it too. Everything downstream —
-    //    the ingest body, the source draft, `completeJob` — is built from
-    //    `summary` below and never from `parsed`.
-    const { category, summary: parsed } = parseSummaryResponse(result.result);
-    setCategory(jobId, category);
-
-    const enforced = enforceVisualReferences({
-      summary: parsed,
-      source: YOUTUBE_FRAME_SOURCE,
+    // 3. The post-model tail: parse the envelope, hold the summary's frame
+    //    references to this capture's own manifest and this policy's caps, copy
+    //    what it quotes out of the dying work dir, and make the text true about
+    //    whatever the copy did not keep. ONE function (`./finish.ts`) because a
+    //    re-run must do exactly this and nothing else — see its header.
+    const finished = await finishYouTubeSummary({
+      raw: result.result,
+      jobId,
       videoId,
-      extracted: frames.map((f) => f.tSeconds),
-      detail: visualDetail,
+      frames,
+      visualDetail,
+      ...(resolved.framesRoot !== undefined ? { framesRoot: resolved.framesRoot } : {}),
+      onCategory: (c) => setCategory(jobId, c),
     });
-    let summary = enforced.text;
-
-    // The frames the summary QUOTES are copied out of the work dir to the
-    // served root before the work dir dies; the rest go with it. The list is
-    // the enforcement pass's OWN answer, not a second reading of the text: the
-    // pass has just decided which quotes may be served, and a re-parse is how
-    // the two come to disagree. Inside its own try: a copy failure must not fail
-    // a capture whose text is already on the reader's screen — and the copy is
-    // per file, so one missing frame costs its own reference and no other.
-    let keptFrames: number[] = [];
-    let copyFailed = false;
-    if (frames.length > 0) {
-      try {
-        keptFrames = await keepReferencedFrames(
-          summary,
-          YOUTUBE_FRAME_SOURCE,
-          videoId,
-          frames,
-          resolved.framesRoot,
-          enforced.referenced,
-        );
-      } catch (err) {
-        copyFailed = true;
-        log.error("YouTube capture {jobId}: keeping quoted frames failed: {error}", {
-          jobId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // The copy is the last thing between a reference and a served file, so
-    // whatever it did NOT keep is a promise of a picture the route will 404 —
-    // including the case where it threw and kept nothing at all. The text is
-    // made true before it is stored, ingested or drafted from.
-    const unserved = enforced.referenced.filter((sec) => !keptFrames.includes(sec));
-    if (unserved.length > 0) {
-      const repaired = dropFrameReferences(summary, YOUTUBE_FRAME_SOURCE, videoId, unserved);
-      summary = repaired.text;
-      log.warn(
-        "YouTube capture {jobId}: {n} quoted frame(s) were not copied ({seconds}) — their references were " +
-          "removed from the stored summary{because}",
-        {
-          jobId,
-          videoId,
-          n: repaired.removed,
-          seconds: unserved.join(", "),
-          because: copyFailed ? " (the copy failed)" : "",
-        },
-      );
-    }
+    const { summary, category } = finished;
+    const keptFrames = finished.kept;
 
     // The one line that says what actually ran. `model` is the connector's own
     // answer (`ClaudeExecResult.model`) rather than what was asked for, which is
@@ -1105,15 +1012,15 @@ Video URL: ${videoUrl}`;
         thinking: thinkingLabel,
         tokens: result.outputTokens,
         frames: frames.length,
-        selected: enforced.selected.length,
-        referenced: enforced.referenced.length,
+        selected: finished.selected.length,
+        referenced: finished.referenced.length,
         kept: keptFrames.length,
         // Not in the message, and the one part that is not a count: WHICH
         // seconds the model chose. `selected` minus what the stored text ends up
         // quoting is exactly the set the caps refused, which is the question a
         // policy is tuned on — a count alone cannot say whether the frame the
         // reader wanted was never chosen or was chosen and trimmed.
-        selectedSeconds: enforced.selected.join(","),
+        selectedSeconds: finished.selected.join(","),
         // What the SELECTION pass asked for, as JSON — a superset of the above
         // on a dense capture, empty on every other path. It is the only place a
         // rejected pick is inspectable: `selectedSeconds` is what the summary

@@ -472,6 +472,14 @@ headless Chromium of muninn's own to harvest the video's captions, so a URL is
 the whole input. Pasting a Vimeo link into the article textarea works too — it is
 forwarded to the same submit.
 
+What each of them actually sends the model is on **`/summaries/prompts`**
+(reached from the Prompts link in the `/summaries` header): one table, capture
+sources down and summary kinds across, with a drawer per combination carrying the
+composed system prompt, the user-prompt skeleton, the closing-takeaway check
+prompt, and the path a per-bot `prompts/captureSummary.<id>.md` override would
+live at. It composes those strings with the capture jobs' own prompt builders, so
+it cannot drift from what a capture sends; it calls no model and writes nothing.
+
 ### Dashboard API
 
 **Core data:**

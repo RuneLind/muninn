@@ -139,6 +139,7 @@ function installFetchMock() {
 }
 
 const { summarizeTikTok } = await import("./summarizer.ts");
+const { buildTikTokSystemPrompt, buildTikTokUserPrompt } = await import("./prompt.ts");
 const { createJob, getJob } = await import("./state.ts");
 
 const config = {
@@ -368,4 +369,36 @@ test("the system prompt carries the shared structure rules, incl. the verbatim-a
   // Named explicitly: a TikTok that reads a prompt out loud is the case the
   // verbatim rule exists for, and this vertical also sees on-screen text.
   expect(lastSystemPrompt).toContain("reproduce it VERBATIM inside a fenced code block");
+});
+
+/**
+ * The run uses the BUILDERS — the pin PR 3's re-run and `/summaries/prompts`
+ * stand on. The work dir the frame paths are under is the one the download was
+ * handed, so the expectation is built from what the run really produced rather
+ * than from a second guess at the temp-dir name.
+ */
+test("the run sends exactly the builders' output, system and user", async () => {
+  const jobId = createJob("7523456789", "My TikTok", SHORT_URL);
+  await summarizeTikTok(jobId, SHORT_URL, "My TikTok", config, bot);
+
+  const workDir = downloadCalls[0]!.workDir;
+  const frames = framesResult.map((f) => ({ path: join(workDir, f.path), tSeconds: f.tSeconds }));
+  expect(lastSystemPrompt).toBe(
+    buildTikTokSystemPrompt({ title: "My TikTok", url: CANONICAL_URL, author: "coolcoder" }),
+  );
+  expect(lastPrompt).toBe(buildTikTokUserPrompt({ transcript, frames }));
+  // The frame list is what makes the user prompt more than the transcript —
+  // otherwise the assertion above would pass on a run that sent no frames.
+  expect(lastPrompt).not.toBe(buildTikTokUserPrompt({ transcript, frames: [] }));
+});
+
+test("a speechless clip sends the builder's no-speech sentence, not an empty section", async () => {
+  transcript = "";
+  const jobId = createJob("7523456789", "My TikTok", SHORT_URL);
+  await summarizeTikTok(jobId, SHORT_URL, "My TikTok", config, bot);
+
+  const workDir = downloadCalls[0]!.workDir;
+  const frames = framesResult.map((f) => ({ path: join(workDir, f.path), tSeconds: f.tSeconds }));
+  expect(lastPrompt).toBe(buildTikTokUserPrompt({ transcript: "", frames }));
+  expect(lastPrompt).toContain("No speech detected — summarize from the frames.");
 });

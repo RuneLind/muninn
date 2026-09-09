@@ -5,8 +5,9 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
-import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { ingestSummary, runCaptureOneShot, SUMMARY_STRUCTURE_BULLETS } from "../summaries/summarizer-shared.ts";
+import { ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { buildTikTokSystemPrompt, buildTikTokUserPrompt } from "./prompt.ts";
+import { finishTikTokSummary } from "./finish.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
   downloadVideo,
@@ -38,49 +39,9 @@ const MAX_DURATION_SECONDS = 3600;
 // A 60-min download outruns the 120s short-clip default.
 const DOWNLOAD_TIMEOUT_MS = 600_000;
 
-// The summarizer reads each frame image before it writes the CATEGORY/SUMMARY —
-// a multi-turn agentic session. The "no commentary" line is load-bearing: without
-// it the model narrates ("let me look at frame 3…") between Read calls and that
-// chatter leaks into the streamed shelf card.
-const SUMMARIZE_SYSTEM_PROMPT = `You are a video content analyst. Summarize the following TikTok video, using BOTH its speech transcript and the extracted keyframe images.
-
-Instructions:
-1. Read ALL the frame images listed below (with the Read tool) FIRST, batching many Read tool calls into one turn (parallel tool calls) — do NOT read one frame per message. TikToks often carry most of their information on screen — capture diagrams, code, on-screen text, and visual demos.
-2. Note explicitly when key information is visual-only (not spoken).
-3. Start your response with EXACTLY this line: CATEGORY: <category>
-   Choose from: ${VALID_CATEGORIES.join(", ")}
-4. Then add a blank line, then SUMMARY: on its own line
-5. Then write a structured summary with:
-   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}
-6. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response. Do not narrate the frames as you read them.`;
-
 export interface SummarizeOptions {
   /** When false, skip keyframe extraction (transcript-only summary). Default true. */
   frames?: boolean;
-}
-
-/** Format a timestamp (seconds) as `M:SS` for the frame list. */
-function formatTimestamp(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds));
-  const mins = Math.floor(s / 60);
-  const secs = s % 60;
-  return `${mins}:${String(secs).padStart(2, "0")}`;
-}
-
-/** Build the `t=M:SS <path>` frame list block for the user prompt. */
-function frameListBlock(frames: Keyframe[]): string {
-  return frames.map((f) => `t=${formatTimestamp(f.tSeconds)} ${f.path}`).join("\n");
-}
-
-/**
- * Cheap heuristic: did a frames-on summary actually mention any visual content?
- * If not, the frame Reads likely silently degraded (permissions / --add-dir
- * regression) and we lost the whole visual-summary value — surface a warning.
- */
-function mentionsVisualContent(summary: string): boolean {
-  return /\b(frame|image|visual|screen|on-screen|diagram|slide|chart|shown|display|graphic|caption|text overlay)\b/i.test(
-    summary,
-  );
 }
 
 export async function summarizeTikTok(
@@ -156,20 +117,14 @@ export async function summarizeTikTok(
 
     const ingestTitle = title !== url ? title : dl.title || dl.canonicalUrl;
 
-    const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}
-
-Video title: ${ingestTitle}
-Video URL: ${dl.canonicalUrl}
-Author: ${dl.uploader}`;
-
-    const transcriptSection = transcript
-      ? `Transcript:\n${transcript}`
-      : "No speech detected — summarize from the frames.";
-    const framesSection =
-      frames.length > 0
-        ? `\n\nKeyframes (read each image before summarizing):\n${frameListBlock(frames)}`
-        : "";
-    const userPrompt = `${transcriptSection}${framesSection}`;
+    // Both compositions are `./prompt.ts`, so the re-run and `/summaries/prompts`
+    // send and show exactly what this call does.
+    const systemPrompt = buildTikTokSystemPrompt({
+      title: ingestTitle,
+      url: dl.canonicalUrl,
+      author: dl.uploader,
+    });
+    const userPrompt = buildTikTokUserPrompt({ transcript, frames });
 
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {
@@ -197,16 +152,15 @@ Author: ${dl.uploader}`;
       thinkingMaxTokens: null,
     });
 
-    // 5. Parse response.
-    const { category, summary } = parseSummaryResponse(result.result);
-    setCategory(jobId, category);
-
-    if (frames.length > 0 && !mentionsVisualContent(summary)) {
-      log.warn("Frames-on TikTok summary for job {jobId} mentions no visual content — frame Reads may have degraded", {
-        jobId,
-        videoId: dl.id,
-      });
-    }
+    // 5. The post-model tail, in ONE function (`./finish.ts`) so a re-run cannot
+    //    drop the degraded-frame-Reads warn.
+    const { category, summary } = finishTikTokSummary({
+      raw: result.result,
+      jobId,
+      videoId: dl.id,
+      frameCount: frames.length,
+      onCategory: (c) => setCategory(jobId, c),
+    });
 
     log.info("Summarized TikTok {videoId}: category={category}, {frames} frames, {tokens} output tokens", {
       videoId: dl.id,

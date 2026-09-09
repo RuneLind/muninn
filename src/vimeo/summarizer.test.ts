@@ -119,6 +119,7 @@ function installFetchMock() {
 const {
   summarizeVimeo,
   buildVimeoSystemPrompt,
+  buildVimeoUserPrompt,
   AUTO_CAPTION_RIDER,
   NO_CAPTIONS_ERROR,
   NO_SPEECH_ERROR,
@@ -1436,4 +1437,69 @@ test("the windowed-transcript sentence in the Vimeo prompt IS the shared seam's,
   // And the seam is what produces it, rather than a second copy that happens to
   // agree today.
   expect(shippedIntro.endsWith(windowedTranscriptRider("talk"))).toBe(true);
+});
+
+/**
+ * The run uses the BUILDERS — the pin PR 3's re-run and `/summaries/prompts`
+ * stand on.
+ *
+ * The transcript both assertions are built from comes off the INGEST body
+ * (`transcript_markdown`), not off `lastPrompt`: taking it from the prompt would
+ * make the user-prompt assertion compare the prompt with itself.
+ */
+test("frames off: the run sends exactly the builders' output", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, META, config, bot, deps());
+
+  const transcript = String(ingestPayload!.transcript_markdown);
+  expect(lastSystemPrompt).toBe(
+    buildVimeoSystemPrompt({
+      preset: STANDARD,
+      title: META.title,
+      url: META.url,
+      // The stub track is `en-x-autogen`, and `lang: "talk"` over an English
+      // transcript resolves to `en`.
+      captionKind: "auto",
+      outputLang: "en",
+    }),
+  );
+  expect(lastPrompt).toBe(buildVimeoUserPrompt(transcript, { videoId: VIDEO_ID, frames: [] }));
+});
+
+test("frames on: the frame section is the builder's, over the frames the extractor returned", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, FRAMES_META, config, bot, framesDeps());
+
+  const transcript = String(ingestPayload!.transcript_markdown);
+  const frames = [10, 30, 50].map((t) => ({
+    path: join(extractCalls[0]!.workDir, `${t}.jpg`),
+    tSeconds: t,
+  }));
+  expect(lastPrompt).toBe(buildVimeoUserPrompt(transcript, { videoId: VIDEO_ID, frames }));
+  // The frames really are what makes the two differ — otherwise the assertion
+  // above would pass on a run that sent no frame section at all.
+  expect(lastPrompt).not.toBe(buildVimeoUserPrompt(transcript, { videoId: VIDEO_ID, frames: [] }));
+});
+
+test("the KIND and the language reach the model through the builder", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(jobId, { ...META, preset: TALK_NOTES, lang: "nb" }, config, bot, deps());
+  expect(lastSystemPrompt).toBe(
+    buildVimeoSystemPrompt({
+      preset: TALK_NOTES,
+      title: META.title,
+      url: META.url,
+      captionKind: "auto",
+      outputLang: "nb",
+    }),
+  );
+  expect(lastSystemPrompt).not.toBe(
+    buildVimeoSystemPrompt({
+      preset: STANDARD,
+      title: META.title,
+      url: META.url,
+      captionKind: "auto",
+      outputLang: "nb",
+    }),
+  );
 });
