@@ -647,7 +647,15 @@ export function sumArticleLibraryScript(): string {
 
     function watchRerunJob(jobId, doc) {
       if (_rerunStream) { _rerunStream.close(); _rerunStream = null; }
-      if (typeof sseClient !== 'function') return;
+      if (typeof sseClient !== 'function') {
+        // A page that rendered the control without the SSE runtime is a wiring
+        // mistake, not a state the reader can cause — but the run IS under way,
+        // so the busy latch has to come off or the menu stays dead until the
+        // panel is retargeted.
+        _rerunBusy = false;
+        setRerunStatus('The re-run started, but this page cannot follow it — reload to see the result.');
+        return;
+      }
       _rerunStream = sseClient(docApiBase(doc.source) + '/stream/' + jobId, {
         status: function(e) {
           try {
