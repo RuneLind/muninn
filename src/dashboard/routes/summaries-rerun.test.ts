@@ -41,7 +41,24 @@ import {
   type SummariesRerunDeps,
   type RerunDocument,
 } from "./summaries-rerun.ts";
+import {
+  rerunLatchBudgetMs,
+  RERUN_LATCH_SLACK_MS,
+} from "./summaries-rerun.ts";
 import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
+import { buildShortVideoSystemPrompt } from "../../video/short-video-prompt.ts";
+import { shortVideoCaptureKinds, SHORT_VIDEO_THINKING } from "../../video/short-video-kinds.ts";
+import { TIKTOK_SPEC } from "../../tiktok/summarizer.ts";
+import { X_VIDEO_SPEC } from "../../x-article/video.ts";
+import {
+  capturePresetOptions,
+  resolveCapturePresets,
+  SHIPPED_CAPTURE_PRESETS,
+} from "../../summaries/presets.ts";
+import { TRANSCRIPT_MAX_BYTES, TRANSCRIPT_TRUNCATION_NOTE } from "../../summaries/transcript-appendix.ts";
+import { summarizeTimeoutFor } from "../../video/media.ts";
+import { CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS } from "../../summaries/summarizer-shared.ts";
+import { VIMEO_FRAME_SOURCE } from "../../summaries/frames.ts";
 import { YOUTUBE_FRAME_SOURCE, copyKeptFrame } from "../../summaries/frames.ts";
 import { getJob } from "../../youtube/state.ts";
 import type { BotConfig } from "../../bots/config.ts";
@@ -52,6 +69,13 @@ const BOT = { name: "testbot", dir: "/nowhere", connector: "claude-cli" } as unk
 
 const VIDEO_ID = "abcdefghijk"; // 11 URL-safe base64 characters, the seam's gate
 const DOC_ID = "ai/general/A Talk About Things.md";
+
+/** An invented TikTok post url — the shape yt-dlp's canonical answer has. */
+const TIKTOK_URL = "https://www.tiktok.com/@invented/video/7000000000000000000";
+/** Whisper's shape: prose with no `### [HH:MM:SS]` windows anywhere in it. */
+const FLAT_TRANSCRIPT =
+  "So the first thing you notice is that nothing here is real. " +
+  "Then the second thing, which is that this fixture was invented for a public repo.";
 
 /** A stored YouTube capture: full frontmatter, a windowed appendix. */
 function youtubeDoc(opts: { kind?: string; transcript?: string | null; body?: string } = {}): string {
@@ -80,6 +104,10 @@ interface Recorded {
     url: string;
     title: string;
     source: string;
+    /** The RUN options, so a re-run's budget can be compared with the capture's.
+     *  `undefined` here means the key was omitted, which is what
+     *  `runCaptureOneShot` reads as "apply the shared 8k cap". */
+    thinkingMaxTokens: number | null | undefined;
   }>;
 }
 
@@ -91,6 +119,8 @@ function makeDeps(
     bot?: BotConfig | null;
     /** Never resolves — the shape a second POST has to 409 against. */
     stall?: boolean;
+    /** The single-flight claim's own bound, so the EXPIRY is drivable. */
+    latchBudgetMs?: number;
   } = {},
 ): { deps: SummariesRerunDeps; rec: Recorded } {
   const rec: Recorded = { ingests: [], prompts: [] };
@@ -108,12 +138,14 @@ function makeDeps(
         url: o.url as string,
         title: o.title as string,
         source: o.source as string,
+        thinkingMaxTokens: o.thinkingMaxTokens as number | null | undefined,
       });
       if (opts.stall) await new Promise(() => {});
       return { result: opts.answer ?? "CATEGORY: ai/general\n\nSUMMARY:\n\nA fresh summary.", outputTokens: 1 };
     }) as unknown as SummariesRerunDeps["oneShot"],
     bots: () => (opts.bot === null ? [] : [opts.bot ?? BOT]),
     ...(opts.framesRoot !== undefined ? { framesRoot: opts.framesRoot } : {}),
+    ...(opts.latchBudgetMs !== undefined ? { latchBudgetMs: opts.latchBudgetMs } : {}),
   };
   return { deps, rec };
 }
@@ -474,19 +506,43 @@ describe("refusals", () => {
 });
 
 describe("the title round trip", () => {
-  // huginn's `sanitize_filename` STRIPS and only then truncates to 200, so a
-  // stem cut on a space comes back one character shorter on the next pass — a
-  // second file rather than an edit. Refused before any model spend.
-  test("a stem at or past the cap is refused, and a shorter one is not", () => {
+  // The check is the exact FIXED-POINT test over huginn's own rule
+  // (`sanitizeFilenameLikeHuginn`): a stem the rule would rewrite comes back as
+  // a different file name, and huginn keys the path on that name, so a re-run of
+  // it writes a second document. Refused before any model spend.
+  test("a clean stem passes, and one PAST the cap does not", () => {
     expect(titleRoundTripRefusal("A Talk About Things")).toBeNull();
     expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX - 1))).toBeNull();
-    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX))).toContain("file name is 200 characters");
-    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX + 40))).toContain("240 characters");
+    // At the cap huginn truncates nothing, so this really is a fixed point —
+    // the first cut of the guard refused it anyway, on a symptom rather than
+    // the rule. Past the cap it is not.
+    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX))).toBeNull();
+    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX + 40))).toContain("second document");
   });
 
-  test("a stem ending in whitespace is refused", () => {
-    expect(titleRoundTripRefusal("A Talk ")).toContain("ends in whitespace");
+  test("a stem ending in whitespace is refused — a tab as much as a space", () => {
+    expect(titleRoundTripRefusal("A Talk ")).toContain("second document");
+    expect(titleRoundTripRefusal("A Talk\t")).toContain("second document");
     expect(titleRoundTripRefusal("A Talk")).toBeNull();
+  });
+
+  // The half a symptom check cannot see, and the reason the rule is ported: the
+  // collapse class is `[\s_]+`, so an underscore or a double space is a stem
+  // huginn RENAMES. Measured on the live corpus 2026-09-09: 59 such stems, none
+  // of which the trailing-whitespace/length pair would have caught.
+  test("a stem carrying `_` or a double space is refused", () => {
+    expect(titleRoundTripRefusal("Invented Talk_ Part Two")).toContain(
+      'would file it as "Invented Talk Part Two"',
+    );
+    expect(titleRoundTripRefusal("Two  spaces")).toContain("second document");
+  });
+
+  test("a 200-CODE-POINT stem of astral characters is accepted", () => {
+    // 200 code points, 400 UTF-16 units: a `String.length` port refuses this,
+    // and huginn does not touch it.
+    const astral = "\u{1F600}".repeat(TITLE_ROUND_TRIP_MAX);
+    expect(astral.length).toBe(TITLE_ROUND_TRIP_MAX * 2);
+    expect(titleRoundTripRefusal(astral)).toBeNull();
   });
 
   test("the POST answers 409 and spends nothing", async () => {
@@ -891,6 +947,25 @@ describe("tags", () => {
     expect(extraTagsFromStored('"coding, rust,  , wasm"', "coding")).toEqual(["rust", "wasm"]);
   });
 
+  test("the LINE huginn rebuilds is category-first-deduped, and the second pass is a fixed point", () => {
+    // What the re-send preserves is the tag SET, not the stored line's bytes.
+    // `build_summary_tags` composes `category.split("/") + req.tags`, deduped,
+    // order preserved — so a HAND-EDITED line is rewritten into that shape on
+    // the FIRST re-run and is a fixed point from then on. Stating the stronger
+    // "byte for byte" (as the first comment here did) is false of exactly the
+    // lines a person touched.
+    const category = "ai/general";
+    const rebuild = (stored: string): string =>
+      [...category.split("/"), ...extraTagsFromStored(stored, category)].join(", ");
+
+    // Hand-edited: reordered, and carrying a duplicate.
+    expect(rebuild('"javascript, ai, general, javascript"')).toBe("ai, general, javascript");
+    // Feeding huginn's own answer back changes nothing — convergence, in one pass.
+    expect(rebuild('"ai, general, javascript"')).toBe("ai, general, javascript");
+    // A line huginn wrote comes back byte-identical on the first pass already.
+    expect(rebuild('"ai, general"')).toBe("ai, general");
+  });
+
   test("a hand-added tag survives a Vimeo re-run", async () => {
     const raw = [
       "---",
@@ -979,5 +1054,353 @@ describe("the Vimeo output language", () => {
     await post(appFor(deps), { source: "vimeo", docId: "ai/general/En Talk.md" });
     await settle();
     expect(rec.prompts[0]!.system).toContain("write the summary in English");
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// The SHORT-VIDEO pair, after muninn #544 merged their capture into one job
+// ---------------------------------------------------------------------------
+
+describe("the short-video verticals", () => {
+  /**
+   * A stored TikTok capture with the appendix PR 4 gives it — flat whisper
+   * prose, no `### [HH:MM:SS]` windows — and the full frontmatter huginn writes.
+   */
+  function tiktokDoc(opts: { transcript?: string; body?: string } = {}): string {
+    return [
+      "---",
+      'date: "2026-09-01"',
+      `url: "${TIKTOK_URL}"`,
+      'author: "an invented account"',
+      'summary_kind: "standard"',
+      'category: "ai/general"',
+      'tags: "ai, general"',
+      "---",
+      "",
+      opts.body ?? "The stored short-video summary.",
+      "",
+      "## Transcript",
+      "",
+      opts.transcript ?? FLAT_TRANSCRIPT,
+      "",
+    ].join("\n");
+  }
+
+  const TIKTOK_DOC_ID = "ai/general/An invented short video.md";
+
+  test("the acceptance sweep: same settings again re-sends every field but summary_kind", async () => {
+    const { deps, rec } = makeDeps(tiktokDoc());
+    const res = await post(appFor(deps), { source: "tiktok", docId: TIKTOK_DOC_ID });
+    expect(res.status).toBe(200);
+    await settle();
+
+    // ONE model call, ONE ingest — the whole run.
+    expect(rec.prompts).toHaveLength(1);
+    expect(rec.ingests).toHaveLength(1);
+    const { path, body } = rec.ingests[0]!;
+    expect(path).toBe("/api/tiktok/ingest");
+    // Every field the vertical's ingest model accepts, re-sent verbatim; the
+    // title from the file name and the category from its directory.
+    expect(body.title).toBe("An invented short video");
+    expect(body.category).toBe("ai/general");
+    expect(body.url).toBe(TIKTOK_URL);
+    expect(body.date).toBe("2026-09-01");
+    expect(body.author).toBe("an invented account");
+    expect(body.tags).toBeUndefined(); // `ai, general` IS the category, nothing extra
+    // The one field a re-run changes — here to the same value, because "same
+    // settings again" ran the stored kind. The POINT is that it was SENT.
+    expect(body.summary_kind).toBe("standard");
+
+    // The appendix comes back byte-equal after the trim, under its own heading.
+    const summary = String(body.summary);
+    expect(summary.endsWith(`\n\n## Transcript\n\n${FLAT_TRANSCRIPT}\n`)).toBe(true);
+    expect(summary).toContain("A fresh summary.");
+  });
+
+  test("the system prompt is the ZERO-FRAME form: it never mentions a frame", async () => {
+    // A re-run has no work dir and no JPEGs. The frames-present form orders the
+    // model to "Read ALL the frame images listed below" over a user prompt that
+    // lists none, and tells it not to narrate them — three instructions about
+    // material that is not there.
+    const { deps, rec } = makeDeps(tiktokDoc());
+    await post(appFor(deps), { source: "tiktok", docId: TIKTOK_DOC_ID });
+    await settle();
+    const system = rec.prompts[0]!.system;
+    expect(system).not.toMatch(/frames?/i);
+    expect(system).toContain("from its speech transcript");
+    // The rule about the whole ANSWER stays on both forms; only its
+    // frame-specific second sentence goes.
+    expect(system).toContain("produce NO commentary");
+    // And the CAPTURE's own form still mentions them, so this is a branch and
+    // not a builder that lost the clause.
+    const capture = buildShortVideoSystemPrompt(TIKTOK_SPEC, {
+      preset: SHIPPED_CAPTURE_PRESETS.find((p) => p.id === "standard")!,
+      title: "An invented short video",
+      url: TIKTOK_URL,
+      author: "an invented account",
+    });
+    expect(capture).toMatch(/frames?/i);
+  });
+
+  test("the run's thinking budget is the VERTICAL's, the same one the capture sends", async () => {
+    // `src/video/short-video.ts` passes `SHORT_VIDEO_THINKING` on every kind
+    // while the presets say `capped`, so deriving this from the preset would
+    // send an 8k cap where the capture it re-runs sends the bot's own budget.
+    const { deps, rec } = makeDeps(tiktokDoc());
+    await post(appFor(deps), { source: "tiktok", docId: TIKTOK_DOC_ID });
+    await settle();
+    expect(rec.prompts[0]!.thinkingMaxTokens).toBe(SHORT_VIDEO_THINKING);
+    // Not merely "null-ish": `undefined` is what `runCaptureOneShot` reads as
+    // the 8k cap, and that is the wrong answer this pins against.
+    expect(rec.prompts[0]!.thinkingMaxTokens).not.toBeUndefined();
+  });
+
+  async function optionKinds(bot: BotConfig): Promise<string[]> {
+    const app = appFor(makeDeps(tiktokDoc(), { bot }).deps);
+    const payload = (await (
+      await app.request(
+        `/api/summaries/rerun/options?source=tiktok&docId=${encodeURIComponent(TIKTOK_DOC_ID)}`,
+      )
+    ).json()) as { kinds: Array<{ id: string }> };
+    return payload.kinds.map((k) => k.id);
+  }
+
+  test("the menu offers the short-video kinds at all — the picker these two gained in #544", async () => {
+    expect(await optionKinds(BOT)).toEqual(capturePresetOptions(shortVideoCaptureKinds(BOT)).map((k) => k.id));
+    expect(await optionKinds(BOT)).toContain("deep");
+  });
+
+  test("it is the SHORT-VIDEO set, which a Copilot bot narrows and the shared one does not", async () => {
+    // The one connector where `requireThinkingControl` is observable: Copilot
+    // carries the opus id verbatim (so `resolveCapturePresets` keeps `deep`)
+    // but honours no thinking budget (so the short-video set drops it). On
+    // claude-cli the two sets are extensionally equal, which is why a
+    // claude-cli-only comparison could not tell the two resolvers apart.
+    const copilot = { ...BOT, connector: "copilot-sdk" } as BotConfig;
+    expect(resolveCapturePresets(copilot.prompts, copilot.connector).map((p) => p.id)).toContain("deep");
+    expect(shortVideoCaptureKinds(copilot).map((p) => p.id)).not.toContain("deep");
+    expect(await optionKinds(copilot)).not.toContain("deep");
+    expect(await optionKinds(copilot)).toEqual(
+      capturePresetOptions(shortVideoCaptureKinds(copilot)).map((k) => k.id),
+    );
+  });
+
+  test("the X twin runs on its OWN spec, warn and all", async () => {
+    // `visualWarning` is TRUE on TikTok and FALSE on X; handing either the
+    // neighbour's spec is how a re-run acquires or loses a warn its capture
+    // declared. Both are re-run with ZERO frames, so neither can fire here —
+    // what this pins is that the two specs reach their own entries at all.
+    expect(TIKTOK_SPEC.visualWarning).toBe(true);
+    expect(X_VIDEO_SPEC.visualWarning).toBe(false);
+    const xDoc = tiktokDoc().replace(TIKTOK_URL, "https://x.com/someone/status/1234567890");
+    const { deps, rec } = makeDeps(xDoc);
+    await post(appFor(deps), { source: "x-article", docId: TIKTOK_DOC_ID });
+    await settle();
+    // The X platform noun, not TikTok's — the one string the two prompt specs
+    // differ in on the zero-frame form.
+    expect(rec.prompts[0]!.system).toContain("X/Twitter");
+    expect(rec.prompts[0]!.system).not.toContain("TikTok");
+    // …and it is the ZERO-FRAME form here too. The flag is per ENTRY, so the
+    // TikTok assertion above says nothing about this one.
+    expect(rec.prompts[0]!.system).not.toMatch(/frames?/i);
+    expect(rec.prompts[0]!.system).toContain("from its speech transcript");
+    expect(rec.ingests[0]!.path).toBe("/api/x-articles/ingest");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Re-appending the appendix
+// ---------------------------------------------------------------------------
+
+describe("the transcript capper the re-append picks", () => {
+  /**
+   * A FLAT transcript over the cap must go through the FLAT capper.
+   *
+   * The window capper's unit is a `\n\n`-separated `### [HH:MM:SS]` bucket; a
+   * whisper transcript has none, so it is ONE element that fits no budget and
+   * the answer falls through to a head cut at whatever newline the layout
+   * offers — which for a first line longer than the budget is the ~64-byte
+   * truncation note ALONE. Measured in `transcript-appendix.ts`.
+   */
+  test("a flat over-cap transcript keeps its HEAD, not the note alone", async () => {
+    // One line longer than the cap, then more — the shape the window capper
+    // answers with the note by itself.
+    const flat = `${"a".repeat(TRANSCRIPT_MAX_BYTES + 10)}\nand a second line.`;
+    const raw = [
+      "---",
+      'date: "2026-09-01"',
+      `url: "${TIKTOK_URL}"`,
+      'author: "an invented account"',
+      'category: "ai/general"',
+      "---",
+      "",
+      "Body.",
+      "",
+      "## Transcript",
+      "",
+      flat,
+      "",
+    ].join("\n");
+    const { deps, rec } = makeDeps(raw);
+    await post(appFor(deps), { source: "tiktok", docId: "ai/general/A long flat one.md" });
+    await settle();
+    const summary = String(rec.ingests[0]!.body.summary);
+    const appendix = summary.slice(summary.indexOf("\n\n## Transcript\n\n") + "\n\n## Transcript\n\n".length);
+    expect(appendix).toContain(TRANSCRIPT_TRUNCATION_NOTE);
+    // The head survived: hundreds of thousands of bytes of talk, not 64.
+    expect(appendix.startsWith("aaaa")).toBe(true);
+    expect(Buffer.byteLength(appendix, "utf8")).toBeGreaterThan(TRANSCRIPT_MAX_BYTES / 2);
+  });
+
+  test("a WINDOWED over-cap transcript still cuts at a window boundary", async () => {
+    // The other half of the same decision: the window capper is right here, and
+    // a flat cut mid-window would leave a `### [HH:MM:SS]` heading over half a
+    // sentence for huginn's heading splitter to carry into a chunk.
+    const window = (i: number) =>
+      `### [0${Math.floor(i / 60)}:${String(i % 60).padStart(2, "0")}:00]\n\n${"w".repeat(4000)}`;
+    const windows: string[] = [];
+    for (let i = 0; Buffer.byteLength(windows.join("\n\n"), "utf8") < TRANSCRIPT_MAX_BYTES + 8000; i++) {
+      windows.push(window(i));
+    }
+    const transcript = windows.join("\n\n");
+    const raw = youtubeDoc({ transcript });
+    const { deps, rec } = makeDeps(raw);
+    await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    const summary = String(rec.ingests[0]!.body.summary);
+    const appendix = summary.slice(summary.indexOf("\n\n## Transcript\n\n") + "\n\n## Transcript\n\n".length);
+    expect(appendix).toContain(TRANSCRIPT_TRUNCATION_NOTE);
+    const body = appendix.slice(0, appendix.indexOf(`\n\n${TRANSCRIPT_TRUNCATION_NOTE}`));
+    // The cut is at a `\n\n` BOUNDARY of the original — the property the flat
+    // capper does not have: `capTextWithNote` cuts at the last code point inside
+    // the byte budget, which lands in the middle of a window's own text.
+    expect(transcript.startsWith(body)).toBe(true);
+    expect(transcript.slice(body.length).startsWith("\n\n")).toBe(true);
+    expect(body.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The single-flight claim's own bound
+// ---------------------------------------------------------------------------
+
+describe("the single-flight claim is bounded", () => {
+  test("a run that never settles releases its claim, and a later POST gets through", async () => {
+    // Without the bound this document is `409 in_flight` for the life of the
+    // process: `runRerunJob` awaits the model call, and a call that never
+    // settles never reaches the `finally`.
+    const { deps, rec } = makeDeps(youtubeDoc(), { stall: true, latchBudgetMs: 30 });
+    const app = appFor(deps);
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(409);
+    await Bun.sleep(60);
+    const third = await post(app, { source: "youtube", docId: DOC_ID });
+    expect(third.status).toBe(200);
+    // And it really did start a second run rather than reusing the first.
+    await settle();
+    expect(rec.prompts.length).toBe(2);
+  });
+
+  test("a run that settles AFTER its claim expired releases nothing", async () => {
+    // The token half. Once the timer has released a stalled run's claim and a
+    // SECOND run has taken the slot, the first run's `finally` must find a token
+    // that is no longer the one on the key and do nothing — a bare `delete`
+    // would open the second run's slot while it is still writing the file,
+    // which is the exact race the single flight exists to stop.
+    const gates: Array<() => void> = [];
+    const rec: Recorded = { ingests: [], prompts: [] };
+    const deps: SummariesRerunDeps = {
+      fetchRawDoc: async () => ({ raw: youtubeDoc() }),
+      ingest: async (o) => { rec.ingests.push({ path: o.ingestPath, body: o.body }); },
+      oneShot: (async (o: Record<string, unknown>) => {
+        rec.prompts.push({
+          system: o.systemPrompt as string,
+          user: o.prompt as string,
+          url: o.url as string,
+          title: o.title as string,
+          source: o.source as string,
+          thinkingMaxTokens: o.thinkingMaxTokens as number | null | undefined,
+        });
+        // Every call hangs until its own gate is opened, so run B is still in
+        // flight at the moment run A settles.
+        await new Promise<void>((r) => gates.push(r));
+        return { result: "CATEGORY: ai/general\n\nSUMMARY:\n\nA fresh summary.", outputTokens: 1 };
+      }) as unknown as SummariesRerunDeps["oneShot"],
+      bots: () => [BOT],
+      latchBudgetMs: 200,
+    };
+    const app = appFor(deps);
+
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200); // A claims
+    await Bun.sleep(260); // A's claim expires, untouched by A itself
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200); // B claims
+    expect(gates).toHaveLength(2);
+    gates[0]!(); // A settles, long after it lost the claim
+    await settle();
+
+    // B is still in flight and still holds the slot. With a token-less release,
+    // A's `finally` deleted B's key and this answers 200.
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(409);
+    // …and it really is B's own claim: it expires on B's timer, not A's.
+    await Bun.sleep(220);
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
+    for (const open of gates) open();
+    await settle();
+  });
+
+  test("the default bound outlives the model call it guards", () => {
+    // A latch that expired before the run would hand a second POST a slot while
+    // the first is still writing the file.
+    const zero = rerunLatchBudgetMs(0, BOT);
+    expect(zero).toBe(summarizeTimeoutFor(0, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS) + RERUN_LATCH_SLACK_MS);
+    expect(zero).toBeGreaterThan(summarizeTimeoutFor(0, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS));
+    // It grows with the frame count, exactly as the call's own budget does.
+    expect(rerunLatchBudgetMs(60, BOT)).toBeGreaterThan(zero);
+    // And a bot whose OWN timeout is longer than the capture budget wins.
+    const slow = { ...BOT, timeoutMs: 3_600_000 } as BotConfig;
+    expect(rerunLatchBudgetMs(0, slow)).toBe(3_600_000 + RERUN_LATCH_SLACK_MS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Vimeo half of the cadence opt-out
+// ---------------------------------------------------------------------------
+
+describe("the Vimeo frame list is not a cadence either", () => {
+  test("the prompt states no spacing over a list of survivors", async () => {
+    // `framesPromptSection` derives "one every ~N s of the talk" from the
+    // MEDIAN gap. True of a sampler, false of `listKeptFrames` — which is
+    // whatever the previous summary happened to QUOTE, so two survivors 30 s
+    // and 900 s apart would tell the model the talk is sampled every ~870 s.
+    const root = tempFramesRoot();
+    const dir = join(root, VIMEO_FRAME_SOURCE.name, "1234567");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "30.jpg"), "x");
+    writeFileSync(join(dir, "900.jpg"), "x");
+    const raw = [
+      "---",
+      'date: "2026-09-01"',
+      'url: "https://vimeo.com/1234567"',
+      'caption_lang: "en"',
+      'caption_kind: "manual"',
+      'summary_kind: "standard"',
+      'category: "ai/general"',
+      "---",
+      "",
+      "Body.",
+      "",
+      "## Transcript",
+      "",
+      "### [00:00:00]\n\nHello.",
+      "",
+    ].join("\n");
+    const { deps, rec } = makeDeps(raw, { framesRoot: root });
+    await post(appFor(deps), { source: "vimeo", docId: "ai/general/A Vimeo talk.md" });
+    await settle();
+    const user = rec.prompts[0]!.user;
+    // The frame list IS there — this is the opt-out, not a lost section.
+    expect(user).toContain("Slide frames (read EVERY image");
+    expect(user).not.toContain("one every ~");
   });
 });

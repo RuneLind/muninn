@@ -61,6 +61,7 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApiText, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
+import { sanitizeFilenameLikeHuginn, HUGINN_FILENAME_MAX } from "../../summaries/huginn-filename.ts";
 import {
   parseCaptureFrontmatter,
   decodeFrontmatterScalar,
@@ -113,10 +114,14 @@ import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../../youtube/
 import { finishYouTubeSummary } from "../../youtube/finish.ts";
 import { buildVimeoSystemPrompt, buildVimeoUserPrompt } from "../../vimeo/prompt.ts";
 import { finishVimeoSummary } from "../../vimeo/finish.ts";
-import { buildTikTokSystemPrompt, buildTikTokUserPrompt } from "../../tiktok/prompt.ts";
-import { finishTikTokSummary } from "../../tiktok/finish.ts";
-import { buildXVideoSystemPrompt, buildXVideoUserPrompt } from "../../x-article/video-prompt.ts";
-import { finishXVideoSummary } from "../../x-article/video-finish.ts";
+// The SHORT-VIDEO pair — TikTok and X video — run one job, one prompt builder
+// and one tail now (muninn #544), so a re-run of either passes that vertical's
+// own SPEC rather than importing a per-source module that no longer exists.
+import { buildShortVideoSystemPrompt, buildShortVideoUserPrompt } from "../../video/short-video-prompt.ts";
+import { finishShortVideoSummary } from "../../video/short-video-finish.ts";
+import { shortVideoCaptureKinds, SHORT_VIDEO_THINKING } from "../../video/short-video-kinds.ts";
+import { TIKTOK_SPEC } from "../../tiktok/summarizer.ts";
+import { X_VIDEO_SPEC } from "../../x-article/video.ts";
 import { extractVimeoVideoId } from "../../vimeo/url.ts";
 // The import-free `src/youtube/url.ts`, never `./youtube-routes.ts`, which
 // re-exports it: reading it there would pull the whole YouTube route graph —
@@ -150,6 +155,13 @@ export interface SummariesRerunDeps {
   oneShot: typeof runCaptureOneShot;
   /** Where kept frames live; default `framesRootDir()`. A test MUST pass one. */
   framesRoot?: string;
+  /**
+   * How long a single-flight claim may be held, ms — default
+   * {@link rerunLatchBudgetMs} over the run's own model-call budget, which is
+   * twelve minutes at the floor. A seam so a test can drive the EXPIRY without
+   * waiting for it; nothing in production passes one.
+   */
+  latchBudgetMs?: number;
   bots: () => BotConfig[];
 }
 
@@ -222,6 +234,20 @@ interface RerunVertical {
   readonly hasVisualDetail: boolean;
   /** The kinds this vertical narrows the shared set to. */
   kinds(bot: BotConfig): CapturePreset[];
+  /**
+   * The thinking budget this vertical's model call carries, in
+   * `runCaptureOneShot`'s own vocabulary: `null` is the bot's own budget,
+   * `undefined` is the shared `CAPTURE_THINKING_MAX_TOKENS` cap.
+   *
+   * A per-vertical seam rather than a bare `captureThinkingFor(preset)`, because
+   * the two SHORT-VIDEO verticals answer it from the VERTICAL and not from the
+   * kind: `src/video/short-video.ts` passes `SHORT_VIDEO_THINKING` (`null`) on
+   * every kind, while their presets say `capped` — so the shared derivation
+   * would have a TikTok re-run send an 8k cap where the capture it re-runs sends
+   * the bot's budget. Reading the keyframes IS the reasoning in that session,
+   * which is why the capture opted out; a re-run of it must not opt back in.
+   */
+  thinking(preset: CapturePreset): number | null | undefined;
   /** The video id a stored url names — the frames directory and the
    *  recent-ingest key. */
   videoId(url: string): string | null;
@@ -324,6 +350,7 @@ const VERTICALS: readonly RerunVertical[] = [
     hasKindPicker: true,
     hasVisualDetail: true,
     kinds: (bot) => youtubeCaptureKinds(bot),
+    thinking: (preset) => captureThinkingFor(preset),
     videoId: (url) => extractYouTubeVideoId(url),
     createJob: ({ videoId, title, url }) => youtubeState.createJob(videoId, title, url),
     store: youtubeState,
@@ -384,6 +411,7 @@ const VERTICALS: readonly RerunVertical[] = [
     hasKindPicker: true,
     hasVisualDetail: false,
     kinds: (bot) => resolveCapturePresets(bot.prompts, bot.connector),
+    thinking: (preset) => captureThinkingFor(preset),
     videoId: (url) => extractVimeoVideoId(url)?.id ?? null,
     createJob: ({ videoId, title, url }) => vimeoState.createJob(videoId, title, url),
     store: vimeoState,
@@ -415,13 +443,21 @@ const VERTICALS: readonly RerunVertical[] = [
   },
   {
     id: "tiktok",
-    captureSource: "tiktok",
-    ingestPath: "/api/tiktok/ingest",
+    // `spec.id` IS the capture's trace source, which is what keeps this entry
+    // and the job it re-runs under one span name without a second literal.
+    captureSource: TIKTOK_SPEC.id,
+    ingestPath: TIKTOK_SPEC.ingestPath,
     frontmatterFields: ["date", "url", "author"],
     acceptsTags: true,
-    hasKindPicker: false,
+    hasKindPicker: true,
     hasVisualDetail: false,
-    kinds: (bot) => resolveCapturePresets(bot.prompts, bot.connector),
+    // The SHORT-VIDEO set, through the module both capture routes resolve
+    // theirs from — `requireThinkingControl: true` is what makes it that set
+    // rather than the shared one, and a re-run offering a kind the capture
+    // route refuses is a menu item whose only outcome is a 400.
+    kinds: (bot) => shortVideoCaptureKinds(bot),
+    // The VERTICAL's answer, not the kind's — see `RerunVertical.thinking`.
+    thinking: () => SHORT_VIDEO_THINKING,
     // This vertical keeps no frames on disk (its keyframes are read out of a
     // temp dir and never quoted by address), so nothing needs a video id but
     // the recent-ingest key, which it does not maintain either.
@@ -429,18 +465,22 @@ const VERTICALS: readonly RerunVertical[] = [
     createJob: ({ videoId, title, url }) => tiktokState.createJob(videoId || url, title, url),
     store: tiktokState,
     prompts: (i) => ({
-      system: buildTikTokSystemPrompt({
+      system: buildShortVideoSystemPrompt(TIKTOK_SPEC, {
+        preset: i.preset,
         title: i.title,
         url: i.url,
         author: i.frontmatter.author ?? "unknown",
+        // NO frames: this vertical's keyframes lived in a temp dir the capture
+        // removed, so a re-run summarizes from the transcript alone. The
+        // zero-frame form of the system prompt is the one that ships here —
+        // the frames-present form orders the model to read images the user
+        // prompt lists none of, and tells it not to narrate them.
+        frames: false,
       }),
-      // NO frames: this vertical's keyframes lived in a temp dir the capture
-      // removed, so a re-run summarizes from the transcript alone. The builder's
-      // empty-frame branch is the one that ships.
-      user: buildTikTokUserPrompt({ transcript: i.transcript, frames: [] }),
+      user: buildShortVideoUserPrompt({ transcript: i.transcript, frames: [] }),
     }),
     finish: async (i) =>
-      finishTikTokSummary({
+      finishShortVideoSummary(TIKTOK_SPEC, {
         raw: i.raw,
         jobId: i.jobId,
         videoId: i.videoId,
@@ -455,25 +495,39 @@ const VERTICALS: readonly RerunVertical[] = [
     id: "x-article",
     // The X VIDEO capture (`src/x-article/video.ts`) traces `capture:x-video`,
     // and that is the run a re-run of one of these documents is compared with.
-    captureSource: "x-video",
-    ingestPath: "/api/x-articles/ingest",
+    // Read off the spec, so the shelf id and the trace source cannot drift.
+    captureSource: X_VIDEO_SPEC.id,
+    ingestPath: X_VIDEO_SPEC.ingestPath,
     frontmatterFields: ["date", "url", "author"],
     acceptsTags: true,
-    hasKindPicker: false,
+    hasKindPicker: true,
     hasVisualDetail: false,
-    kinds: (bot) => resolveCapturePresets(bot.prompts, bot.connector),
+    kinds: (bot) => shortVideoCaptureKinds(bot),
+    thinking: () => SHORT_VIDEO_THINKING,
     videoId: () => null,
     createJob: ({ videoId, title, url, author }) => xState.createJob(videoId || url, title, url, author),
     store: xState,
     prompts: (i) => ({
-      system: buildXVideoSystemPrompt({
+      system: buildShortVideoSystemPrompt(X_VIDEO_SPEC, {
+        preset: i.preset,
         title: i.title,
         url: i.url,
         author: i.frontmatter.author ?? "unknown",
+        frames: false,
       }),
-      user: buildXVideoUserPrompt({ transcript: i.transcript, frames: [] }),
+      user: buildShortVideoUserPrompt({ transcript: i.transcript, frames: [] }),
     }),
-    finish: async (i) => finishXVideoSummary({ raw: i.raw, onCategory: i.onCategory }),
+    // The SPEC's own tail: `visualWarning` is false on X and true on TikTok, and
+    // handing either the neighbour's spec is how a re-run acquires — or loses —
+    // a warn its capture declared.
+    finish: async (i) =>
+      finishShortVideoSummary(X_VIDEO_SPEC, {
+        raw: i.raw,
+        jobId: i.jobId,
+        videoId: i.videoId,
+        frameCount: 0,
+        onCategory: i.onCategory,
+      }),
     transcriptCarrier: "summary",
   },
 ];
@@ -562,30 +616,34 @@ export function categoryFromDocId(docId: string): string | null {
 }
 
 /**
- * huginn's `sanitize_filename` truncates to 200 characters, so a stem AT or
- * PAST that length is not guaranteed to survive a round trip.
+ * huginn's `sanitize_filename` truncates to 200 code points — restated from
+ * {@link HUGINN_FILENAME_MAX} so a reader of this module sees the number the
+ * refusal below is about.
  */
-export const TITLE_ROUND_TRIP_MAX = 200;
+export const TITLE_ROUND_TRIP_MAX = HUGINN_FILENAME_MAX;
 
 /**
  * Why a title read out of a doc id does NOT always post back to the same path.
  *
  * `titleFromDocId` rests on `sanitize_filename` being idempotent — post the
- * stem back, get the same file. It is not, and the order of its two last steps
- * is why (`main/utils/filename.py`): it collapses whitespace and **strips**,
- * and only THEN truncates to 200. So a stem longer than the cap is cut at
- * character 200 wherever that falls; when it falls on a space the result ends
- * in one, and the NEXT pass — the one this re-run's own POST triggers — strips
- * that space and produces a different name. huginn keys the file on
- * `<category>/<sanitized title>.md`, so a different name is a SECOND DOCUMENT,
- * not an edit. The live corpus carries two such stems.
+ * stem back, get the same file. It is not, so the check is the exact FIXED-POINT
+ * test: run huginn's own rule over the stem and refuse when the answer differs.
+ * huginn keys the file on `<category>/<sanitized title>.md`, so a different name
+ * is a SECOND DOCUMENT, not an edit.
  *
- * The refusal is deliberately wider than the failure: any stem `>=` the cap,
- * not only one that would land on a space. A stem exactly at 200 round-trips
- * today, but it is one character from not doing so, and "at the cap" is a rule
- * that can be stated to the reader; "at the cap and character 200 is a space"
- * is not. A trailing-whitespace stem is refused for the same reason from the
- * other end — the strip alone changes it, no truncation needed.
+ * **A port of the rule, and it had to be**, which is the tradeoff worth stating.
+ * The first cut of this guard checked two SYMPTOMS instead — trailing whitespace
+ * and a length at or past the cap — on the reasoning that a second
+ * implementation of huginn's rule in muninn has nothing keeping the two in step.
+ * It was measured against the live corpus on 2026-09-09 and it is too narrow by
+ * a wide margin: `sanitize_filename` also collapses `[\s_]+` to one space, so
+ * **59 live stems carrying a `_` or a double space pass the symptom check and
+ * would fork a second file**. (None of them carries a transcript today, so none
+ * is reachable through this route yet — the guard is for the next capture, not
+ * for the corpus as it stands.) The drift risk is real and answered directly:
+ * `huginn-filename.test.ts` runs a fixture set through the JS port and through
+ * the Python original in the same test, so a change on either side is a red
+ * test rather than a silent fork.
  *
  * Returns the reason to show the reader, or `null` when the title round-trips.
  * It runs BEFORE any model call, because the failure is a duplicate file rather
@@ -593,19 +651,12 @@ export const TITLE_ROUND_TRIP_MAX = 200;
  * fork AND the bill.
  */
 export function titleRoundTripRefusal(title: string): string | null {
-  if (title !== title.trim()) {
-    return (
-      "This document's file name ends in whitespace, which huginn's own file-name rule strips. " +
-      "Re-running it would write a second document instead of replacing this one."
-    );
-  }
-  if (title.length >= TITLE_ROUND_TRIP_MAX) {
-    return (
-      `This document's file name is ${title.length} characters, at or past the ${TITLE_ROUND_TRIP_MAX}-character ` +
-      "limit huginn truncates to. Re-running it could write a second document instead of replacing this one."
-    );
-  }
-  return null;
+  const sanitized = sanitizeFilenameLikeHuginn(title);
+  if (sanitized === title) return null;
+  return (
+    "This document's file name is not what huginn's own file-name rule would produce — a re-ingest " +
+    `would file it as "${sanitized}", a second document instead of a replacement.`
+  );
 }
 
 /**
@@ -734,7 +785,16 @@ function buildRerunIngestBody(input: {
   }
   let appended: CappedTranscript | null = null;
   if (vertical.transcriptCarrier === "summary") {
-    appended = appendTranscriptSection(input.summary, input.transcript);
+    // **`windowed` picks the CAPPER, and the wrong one is destructive rather
+    // than imprecise.** The window capper's unit is a `\n\n`-separated
+    // `### [HH:MM:SS]` bucket; a FLAT whisper transcript has none, so it is one
+    // element that fits no budget and the answer falls through to a head cut at
+    // whatever newline the layout happens to offer — measured, a flat transcript
+    // whose first line is longer than the budget comes back as the 64-byte
+    // truncation note ALONE. The value is derived from the stored text itself
+    // (`transcriptIsWindowed`), which is the same evidence the prompt's rider
+    // rests on, so the two cannot disagree about what this document carries.
+    appended = appendTranscriptSection(input.summary, input.transcript, undefined, stored.windowed);
     body.summary = appended.text;
   } else {
     body.summary = input.summary;
@@ -752,8 +812,17 @@ function buildRerunIngestBody(input: {
  * (`build_summary_tags`). So `ai/general` plus a hand-added `javascript` is
  * stored as `"ai, general, javascript"`, and an ingest that sends no `tags`
  * writes `"ai, general"` and the hand-added tag is GONE. Subtracting the
- * category parts and sending the remainder rebuilds the same line byte for
- * byte, and does so idempotently: the second re-run sends the same remainder.
+ * category parts and re-sending the remainder is what keeps it.
+ *
+ * **What it preserves is the tag SET, not the stored line's bytes**, and the
+ * difference is worth stating because the first version of this comment claimed
+ * the stronger thing. `build_summary_tags` always emits the category parts
+ * FIRST and deduped, so a line huginn wrote is already in that shape and comes
+ * back byte-identical — but a HAND-EDITED line need not be, and the re-run
+ * rewrites it into huginn's own shape on the first pass: `"javascript, ai,
+ * general"` is re-ingested as `"ai, general, javascript"`, and a duplicated tag
+ * is dropped. From that pass on it is a fixed point, which is the property that
+ * matters — a re-run must not keep churning the file.
  *
  * The subtraction is by VALUE, not by position: `build_summary_tags` dedupes,
  * so a hand-added tag that happens to equal a category part was never a
@@ -795,7 +864,7 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
     // swaps the model in BEFORE the call, so the `/agents` card says opus from
     // its first frame.
     const runBot = captureBotConfigFor(input.botConfig, preset);
-    const thinking = captureThinkingFor(preset);
+    const thinking = vertical.thinking(preset);
 
     store.updateStatus(jobId, "summarizing");
     const result = await deps.oneShot({
@@ -971,6 +1040,36 @@ export const FULL_RERUN_UNSUPPORTED =
   "document that exists, and re-running the downloader directly would not pin the title and " +
   "category, so a re-picked category writes a second file instead of replacing this one.";
 
+/**
+ * How long past the model call's own budget a re-run may hold its
+ * single-flight claim before the claim is released.
+ *
+ * Everything outside that call is bounded and short: the raw file was already
+ * read before the claim, the tail is synchronous, and the ingest is one POST to
+ * huginn. Two minutes covers all of it with room, and the number only ever
+ * matters on a run that has ALREADY outlived its own timeout — where the choice
+ * is between releasing the document and pinning it at 409 until a restart.
+ */
+export const RERUN_LATCH_SLACK_MS = 120_000;
+
+/**
+ * The budget the claim's timer is sized to: whatever this run's model call will
+ * actually be given, plus {@link RERUN_LATCH_SLACK_MS}.
+ *
+ * `summarizeTimeoutFor` is the value passed as `timeoutMs`, so it is what the
+ * connector enforces — but a bot whose OWN `timeoutMs` is longer is a
+ * configuration this cannot rule out, and a latch that expires before the call
+ * it is guarding would hand a second POST a slot while the first is still
+ * writing. The max of the two is the only safe reading.
+ */
+export function rerunLatchBudgetMs(frameCount: number, bot: BotConfig): number {
+  const callBudget = Math.max(
+    summarizeTimeoutFor(frameCount, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS),
+    bot.timeoutMs ?? 0,
+  );
+  return callBudget + RERUN_LATCH_SLACK_MS;
+}
+
 export function registerSummariesRerunRoutes(
   app: Hono,
   config: Config,
@@ -996,9 +1095,47 @@ export function registerSummariesRerunRoutes(
    * Released in a `finally` on the job, which is the only place that can know
    * it is over — `runRerunJob` catches its own failures, so a rejected run
    * still settles.
+   *
+   * **And it is BOUNDED, because "settles" is the connector's promise and not
+   * this module's.** `runRerunJob` awaits `deps.oneShot`; a call that never
+   * settles — a hung socket a connector's own timeout does not cover, a seam a
+   * test or a future caller injects — pins the document at `409 in_flight` for
+   * the life of the process, with no way back but a restart. Each claim
+   * therefore carries a timer sized to the budget that run actually sends
+   * ({@link rerunLatchBudgetMs}), and the expiry warns rather than passing
+   * silently: a claim reaching it means a model call outlived its own timeout.
+   *
+   * The claim is held as a TOKEN, not as a bare key, so an expiry followed by a
+   * fresh POST is safe: the stalled run's `finally` finds a token that is no
+   * longer the one on the key and releases nothing, where a `Set.delete` would
+   * have opened the SECOND run's slot on the first one's arrival.
    */
-  const inFlight = new Set<string>();
+  const inFlight = new Map<string, { token: symbol; timer: ReturnType<typeof setTimeout> }>();
   const flightKey = (sourceId: string, docId: string): string => JSON.stringify([sourceId, docId]);
+
+  function claimFlight(key: string, docId: string, budgetMs: number): symbol {
+    const token = Symbol(key);
+    const timer = setTimeout(() => {
+      if (inFlight.get(key)?.token !== token) return;
+      inFlight.delete(key);
+      log.warn(
+        "Re-run of {docId} did not settle within {budgetMs} ms — releasing the single-flight claim",
+        { docId, budgetMs },
+      );
+    }, budgetMs);
+    // A background bookkeeping timer must not hold the process open.
+    timer.unref?.();
+    inFlight.set(key, { token, timer });
+    return token;
+  }
+
+  function releaseFlight(key: string, token: symbol): void {
+    const held = inFlight.get(key);
+    // Not ours any more: the timer above expired and someone else claimed it.
+    if (!held || held.token !== token) return;
+    clearTimeout(held.timer);
+    inFlight.delete(key);
+  }
 
   /** Read + split one document, or the JSON error the caller gets. */
   async function loadStored(
@@ -1213,7 +1350,7 @@ export function registerSummariesRerunRoutes(
         409,
       );
     }
-    inFlight.add(key);
+    const token = claimFlight(key, docId, deps.latchBudgetMs ?? rerunLatchBudgetMs(frames.length, bot));
 
     let jobId: string;
     try {
@@ -1227,7 +1364,7 @@ export function registerSummariesRerunRoutes(
       // Nothing is running, so the slot must not stay held. `createJob` does not
       // throw today; a claim released only on the happy path is how it comes to
       // matter later.
-      inFlight.delete(key);
+      releaseFlight(key, token);
       throw err;
     }
 
@@ -1250,7 +1387,7 @@ export function registerSummariesRerunRoutes(
       config,
       deps,
     }).finally(() => {
-      inFlight.delete(key);
+      releaseFlight(key, token);
     });
 
     log.info("Re-run started for {docId} as {kind} (job {jobId})", { docId, kind: preset.id, jobId });

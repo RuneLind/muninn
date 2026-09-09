@@ -129,13 +129,25 @@ not one per run — and the `source` it traces under is the CAPTURE's, not the
 the `x-article` shelf), and comparing a re-run with the capture it re-runs is
 the one thing that attribute is for.
 
-**One run per document at a time.** A per-`(source, docId)` in-flight set in the
-route registration answers **409 `in_flight`** to a second POST. Two concurrent
-runs would spend two model calls and then race each other's ingest for one
-FILE — huginn rewrites the whole document from the request body, so the loser's
-summary is simply gone and which one loses is decided by the network. The claim
-is taken after every other refusal (a 409 has to mean a run is under way) and
-released in a `finally` on the job.
+**One run per document at a time, and the claim is BOUNDED.** A per-`(source,
+docId)` in-flight map in the route registration answers **409 `in_flight`** to a
+second POST. Two concurrent runs would spend two model calls and then race each
+other's ingest for one FILE — huginn rewrites the whole document from the request
+body, so the loser's summary is simply gone and which one loses is decided by the
+network. The claim is taken after every other refusal (a 409 has to mean a run is
+under way) and released in a `finally` on the job.
+
+"Settles" is the connector's promise and not this module's, though: `runRerunJob`
+awaits `deps.oneShot`, and a call that never settles pinned the document at 409
+for the life of the PROCESS, with no way back but a restart. Each claim therefore
+carries a timer sized to the budget that run actually sends —
+`rerunLatchBudgetMs` = `max(summarizeTimeoutFor(frames), bot.timeoutMs)` plus a
+2-minute slack for the tail and the ingest — and the expiry warns, because
+reaching it means a model call outlived its own timeout. The claim is held as a
+TOKEN rather than a bare key, so an expiry followed by a fresh POST is safe: the
+stalled run's `finally` finds a token that is no longer the one on the key and
+releases nothing, where a bare `delete` would open the SECOND run's slot on the
+first one's arrival.
 
 **Two refusals that cost nothing and run before any model call.**
 `POST /api/summaries/rerun` requires **`application/json` (415 otherwise)**, the
@@ -143,14 +155,62 @@ released in a `finally` on the job.
 the header says, and `text/plain` is a CORS *simple* request, so without the gate
 a cross-origin page could spend a model call and rewrite a stored document with
 the browser never asking. And a title that does not round-trip through huginn's
-own file-name rule is **409 `title_not_round_trippable`**: `sanitize_filename`
-strips and only THEN truncates to 200, so a stem cut at character 200 on a space
-comes back one character shorter on the next pass — a second document rather
-than an edit. Refused for a stem ending in whitespace or one at or past the cap
-(deliberately wider than the failure: "at the cap" is a rule that can be stated
-to the reader). Measured on the live corpus 2026-09-09: 10 of 1329 documents,
-all TikTok and X, two of them ending in a real space. The options payload
+own file-name rule is **409 `title_not_round_trippable`** — the exact FIXED-POINT
+test over a PORT of that rule (`src/summaries/huginn-filename.ts`,
+`sanitizeFilenameLikeHuginn`), refusing whenever `sanitize(stem) !== stem`.
+
+The port is the deliberate part. The first shape of this guard checked two
+SYMPTOMS instead — trailing whitespace, and a length at or past the 200
+truncation cap — on the reasoning that a second implementation of huginn's rule
+in muninn has nothing keeping the two in step. Measured against the live corpus
+on 2026-09-09, it is too narrow by a wide margin: `sanitize_filename` also
+collapses `[\s_]+` to ONE SPACE, so **59 live stems carrying a `_` or a double
+space passed it and would fork a second file** (0 of them carry a transcript
+today, so none is reachable through this route yet — the guard is for the next
+capture, not for the corpus as it stands). The drift risk is answered directly
+rather than accepted: `huginn-filename.test.ts` runs a 32-stem fixture set
+through the JS port AND through huginn's own interpreter in one test, so a change
+on either side is a red test. Three details a port gets wrong and that file pins:
+Python's `\s` matches `\x1c`–`\x1f` and NEL and does NOT match U+FEFF (JavaScript's
+is the exact opposite on those five); `.strip()` runs AFTER the collapse, so
+`String.trim()` — which eats a leading U+FEFF — is the wrong function; and `len()`
+counts CODE POINTS, so a 200-emoji stem is 200 to Python and 400 to
+`String.length`. The parity case SKIPS where huginn is not on disk (every CI
+runner); the fixture cases beside it are unconditional. The options payload
 carries the same verdict so the menu can disable the run items with the reason.
+
+The narrowing that comes with it is real and intended: a stem of exactly 200
+characters IS a fixed point, and is now accepted where the symptom check refused
+it.
+
+**The two SHORT-VIDEO verticals run on their own SPEC.** Since muninn #544 they
+are one capture job, one prompt builder and one tail
+(`src/video/short-video-{prompt,finish,kinds}.ts`), so their re-run entries pass
+`TIKTOK_SPEC` / `X_VIDEO_SPEC` rather than importing a per-source module. Four
+things ride on that and each is a way a re-run drifts from the capture it
+re-runs: the trace source and the ingest path are read OFF the spec (`spec.id` is
+`x-video` while the shelf id is `x-article`); the tail is the spec's, so
+`visualWarning` stays TRUE on TikTok and FALSE on X; the KINDS come from
+`shortVideoCaptureKinds`, the same `requireThinkingControl: true` set both
+capture routes resolve theirs from (extensionally equal to the shared set on a
+Claude connector, and NARROWER on Copilot, which carries the opus id but honours
+no thinking budget); and the thinking budget is the VERTICAL's
+(`SHORT_VIDEO_THINKING`, `null`), not the kind's — those presets say `capped`,
+so the shared derivation would have a re-run send an 8k cap where the capture
+sends the bot's own budget. The system prompt is built with **`frames: false`**,
+the zero-frame form: a re-run has no work dir and no JPEGs, and the
+frames-present form orders the model to read images the user prompt lists none
+of and then not to narrate them.
+
+**The re-append picks its CAPPER from the stored text.**
+`appendTranscriptSection`'s fourth argument is `windowed`, derived by
+`transcriptIsWindowed` over the appendix itself — the same evidence the prompt's
+own rider rests on. The wrong capper is destructive rather than imprecise: the
+window capper's unit is a `\n\n`-separated `### [HH:MM:SS]` bucket, and a FLAT
+whisper transcript (which is what the short-video verticals store) has none, so
+it is one element that fits no budget and the answer falls through to a head cut
+at whatever newline the layout offers — measured, a flat transcript whose first
+line is longer than the budget comes back as the ~64-byte truncation note ALONE.
 
 **The frame list is not a cadence.** `framesPromptSection` states the spacing it
 derives from the frames it is handed ("one every ~N s of the talk"), which is
@@ -186,7 +246,12 @@ talk re-summarized in English.
 **`tags` are re-sent where the ingest model accepts them.** huginn REBUILDS the
 line as `category.split("/") + req.tags`, deduped, so a hand-added tag is erased
 by any ingest that does not re-send it; the re-run sends the stored list minus
-the category parts, which round-trips the line byte for byte and is idempotent.
+the category parts. What that preserves is the tag SET, not the stored line's
+BYTES: `build_summary_tags` always emits the category parts first and deduped, so
+a line huginn wrote comes back byte-identical, while a HAND-EDITED one is
+rewritten into huginn's own shape on the first pass (`javascript, ai, general`
+is re-ingested as `ai, general, javascript`, and a duplicate is dropped) and is a
+fixed point from then on.
 Vimeo, TikTok and X accept the field; **YouTube's ingest model has none at all**
 and `write_summary` is called without one there, so a hand-added tag on a
 YouTube document is lost on every ingest, capture and re-run alike. Re-sending a

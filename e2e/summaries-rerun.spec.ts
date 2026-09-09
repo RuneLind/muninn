@@ -71,6 +71,28 @@ const DOC_FULL = "ai/general/E2E rerun talk.md";
 const DOC_BARE = "ai/general/E2E rerun no transcript.md";
 const DOC_CUT = "ai/general/E2E rerun truncated.md";
 
+/**
+ * The SHORT-VIDEO half, reachable since muninn #544 and PR 4's appendix: a
+ * stored TikTok capture whose transcript is FLAT whisper prose (no
+ * `### [HH:MM:SS]` windows) and whose frontmatter is the full set huginn writes.
+ */
+const TIKTOK_COLLECTION = "tiktok-summaries";
+const TIKTOK_DOC = "ai/general/E2E rerun short video.md";
+const TIKTOK_URL = "https://www.tiktok.com/@invented/video/7000000000000000000";
+const TIKTOK_TRANSCRIPT =
+  "So the first thing you notice is that nothing here is real. " +
+  "Then the second thing, which is that this fixture was invented for a public repo.";
+const TIKTOK_FRONTMATTER = [
+  "---",
+  'date: "2026-09-02"',
+  `url: "${TIKTOK_URL}"`,
+  'author: "an invented account"',
+  'summary_kind: "standard"',
+  'category: "ai/general"',
+  'tags: "ai, general"',
+  "---",
+].join("\n");
+
 /** The exact appendix bytes the re-ingest must hand back. */
 const TRANSCRIPT = "### [00:00:00]\n\nFirst window of invented speech.\n\n### [00:02:00]\n\nSecond window.";
 const TRUNCATION_NOTE = "_(transcript truncated — the talk continues past this point.)_";
@@ -88,16 +110,23 @@ const FULL_FRONTMATTER = [
 
 const BARE_FRONTMATTER = FULL_FRONTMATTER.replace(VIDEO_URL, BARE_VIDEO_URL);
 
-const SOURCE_FILES: Record<string, string> = {
-  [DOC_FULL]: `${FULL_FRONTMATTER}\n\nThe stored summary body.\n\n## Transcript\n\n${TRANSCRIPT}\n`,
-  [DOC_BARE]: `${BARE_FRONTMATTER}\n\nA summary with no stored transcript.\n`,
-  [DOC_CUT]: `${FULL_FRONTMATTER}\n\nA truncated capture.\n\n## Transcript\n\n${TRANSCRIPT}\n\n${TRUNCATION_NOTE}\n`,
+/** Per COLLECTION now, since the short-video case lives in another one. */
+const SOURCE_FILES: Record<string, Record<string, string>> = {
+  [COLLECTION]: {
+    [DOC_FULL]: `${FULL_FRONTMATTER}\n\nThe stored summary body.\n\n## Transcript\n\n${TRANSCRIPT}\n`,
+    [DOC_BARE]: `${BARE_FRONTMATTER}\n\nA summary with no stored transcript.\n`,
+    [DOC_CUT]: `${FULL_FRONTMATTER}\n\nA truncated capture.\n\n## Transcript\n\n${TRANSCRIPT}\n\n${TRUNCATION_NOTE}\n`,
+  },
+  [TIKTOK_COLLECTION]: {
+    [TIKTOK_DOC]: `${TIKTOK_FRONTMATTER}\n\nThe stored short-video summary.\n\n## Transcript\n\n${TIKTOK_TRANSCRIPT}\n`,
+  },
 };
 
 const DOC_URLS: Record<string, string> = {
   [DOC_FULL]: VIDEO_URL,
   [DOC_BARE]: BARE_VIDEO_URL,
   [DOC_CUT]: VIDEO_URL,
+  [TIKTOK_DOC]: TIKTOK_URL,
 };
 
 const NEW_SUMMARY_LINE = "A re-run summary of invented material.";
@@ -109,6 +138,9 @@ let sql: ReturnType<typeof postgres> | null = null;
 
 let ingests: Array<Record<string, unknown>> = [];
 let modelCalls = 0;
+/** Every system prompt the spawned muninn actually SENT. Recorded on the fake,
+ *  never through `page.route` — the model call leaves the server, not the tab. */
+let systemPrompts: string[] = [];
 let unexpected: string[] = [];
 /** Every path the fake was asked for, so a drafter or a wiki write is visible. */
 let paths: string[] = [];
@@ -170,6 +202,10 @@ async function startFake(): Promise<Server> {
 
       if (p === "/v1/chat/completions") {
         modelCalls += 1;
+        const body = JSON.parse((await readBody(req)) || "{}") as {
+          messages?: Array<{ role: string; content: string }>;
+        };
+        for (const m of body.messages ?? []) if (m.role === "system") systemPrompts.push(m.content);
         await modelGate;
         return writeCompletion(res);
       }
@@ -184,15 +220,27 @@ async function startFake(): Promise<Server> {
         return json({ file_path: DOC_FULL, similar: [] });
       }
 
+      // The SHORT-VIDEO ingest. No listing lag faked here — the lag itself is
+      // pinned on the YouTube path above, and repeating it would only make this
+      // case slower to fail.
+      if (p === "/api/tiktok/ingest") {
+        const body = JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>;
+        ingests.push(body);
+        SOURCE_FILES[TIKTOK_COLLECTION]![TIKTOK_DOC] =
+          `${TIKTOK_FRONTMATTER}\n\n${String(body.summary ?? "")}`;
+        return json({ file_path: TIKTOK_DOC, similar: [] });
+      }
+
       if (p.startsWith("/api/collection/") && p.endsWith("/documents")) {
         const collection = p.slice("/api/collection/".length, -"/documents".length);
-        if (collection !== COLLECTION) return json({ documents: [] });
+        const files = SOURCE_FILES[collection];
+        if (!files) return json({ documents: [] });
         // DELIBERATELY no `url` on any row: `findExistingByVideoId` needs one to
         // resolve a video id, so the listing can never answer `duplicate`. That
         // is what makes the duplicate assertion below evidence about
         // `recentIngests` rather than about the listing.
         return json({
-          documents: Object.keys(SOURCE_FILES).map((id) => ({
+          documents: Object.keys(files).map((id) => ({
             id,
             title: id.split("/").pop()!.replace(/\.md$/, ""),
             date: "2026-09-01",
@@ -200,33 +248,37 @@ async function startFake(): Promise<Server> {
         });
       }
 
-      // The RAW source file — the whole point of the vertical slice.
-      if (p.startsWith(`/api/document/${COLLECTION}/`) && url.searchParams.get("raw") === "1") {
-        const id = p.slice(`/api/document/${COLLECTION}/`.length);
-        const body = SOURCE_FILES[id];
-        if (body === undefined) return json({ detail: "not found" }, 404);
-        res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
-        return res.end(body);
-      }
+      const docMatch = /^\/api\/document\/([^/]+)\/(.+)$/.exec(p);
+      if (docMatch) {
+        const collection = docMatch[1]!;
+        const id = docMatch[2]!;
+        const files = SOURCE_FILES[collection];
+        if (!files) return json({ detail: "not found" }, 404);
 
-      // The CLEANED JSON form the doc panel renders from — a breadcrumb on top,
-      // exactly as huginn's converter writes it.
-      if (p.startsWith(`/api/document/${COLLECTION}/`)) {
-        const id = p.slice(`/api/document/${COLLECTION}/`.length);
+        // The RAW source file — the whole point of the vertical slice.
+        if (url.searchParams.get("raw") === "1") {
+          const raw = files[id];
+          if (raw === undefined) return json({ detail: "not found" }, 404);
+          res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
+          return res.end(raw);
+        }
+
+        // The CLEANED JSON form the doc panel renders from — a breadcrumb on
+        // top, exactly as huginn's converter writes it.
         if (id === DOC_FULL && pendingNewBody !== null) {
           if (staleReads > 0) staleReads -= 1;
           else {
-            SOURCE_FILES[DOC_FULL] = pendingNewBody;
+            files[DOC_FULL] = pendingNewBody;
             pendingNewBody = null;
           }
         }
-        const body = SOURCE_FILES[id];
+        const body = files[id];
         if (body === undefined) return json({ detail: "not found" }, 404);
         const withoutFrontmatter = body.split("\n---\n").slice(1).join("\n---\n");
         return json({
           id,
           url: DOC_URLS[id],
-          text: `[${COLLECTION} > ai/general]\n${withoutFrontmatter}`,
+          text: `[${collection} > ai/general]\n${withoutFrontmatter}`,
         });
       }
 
@@ -347,9 +399,17 @@ test.describe("Summaries: the doc panel's ↻ Re-run menu", () => {
   test.beforeEach(() => {
     ingests = [];
     modelCalls = 0;
+    systemPrompts = [];
     paths = [];
     pendingNewBody = null;
     staleReads = 0;
+    // Both re-run cases REWRITE their document in the fake, so the fixtures are
+    // restored between them — otherwise the second run of a file would read the
+    // first run's output as the stored capture.
+    SOURCE_FILES[COLLECTION]![DOC_FULL] =
+      `${FULL_FRONTMATTER}\n\nThe stored summary body.\n\n## Transcript\n\n${TRANSCRIPT}\n`;
+    SOURCE_FILES[TIKTOK_COLLECTION]![TIKTOK_DOC] =
+      `${TIKTOK_FRONTMATTER}\n\nThe stored short-video summary.\n\n## Transcript\n\n${TIKTOK_TRANSCRIPT}\n`;
     modelGate = new Promise<void>((resolve) => {
       releaseModel = resolve;
     });
@@ -444,6 +504,119 @@ test.describe("Summaries: the doc panel's ↻ Re-run menu", () => {
       SELECT count(*)::text AS n FROM prompt_snapshots WHERE kind = 'capture' AND source_url = ${VIDEO_URL}`;
     expect(Number(rows[0]!.n)).toBeGreaterThan(0);
     await sql!`DELETE FROM prompt_snapshots WHERE kind = 'capture' AND source_url = ${VIDEO_URL}`;
+  });
+
+
+  test("a SHORT-VIDEO document re-runs from its flat appendix, with a frameless prompt", async ({ page }) => {
+    // The half muninn #544 made reachable: TikTok and X video are one capture
+    // job now, and PR 4 files their whisper transcript under `## Transcript`.
+    // Everything about the re-run that is short-video-specific is here — the
+    // shared builders, the vertical's own spec, and the FLAT capper.
+    await page.goto(`${BASE}/summaries?source=tiktok&doc=${encodeURIComponent(TIKTOK_DOC)}`);
+    await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
+    await expect(page.locator("#sumArticleMain")).toContainText("The stored short-video summary.");
+
+    await page.locator("#docPanelRerun").click();
+    const menu = page.locator("#docPanelRerunMenu");
+    await expect(menu).toBeVisible();
+    const same = menu.getByRole("menuitem", { name: "Same settings again" });
+    await expect(same).toBeEnabled();
+    await same.click();
+    releaseModel();
+
+    await expect(page.locator("#docPanelRerunStatus")).toContainText(
+      "Re-run finished — the summary below is the new one.",
+      { timeout: 60_000 },
+    );
+
+    // ONE ingest, every field equal but `summary_kind` (which "same settings
+    // again" re-sends at its stored value — the point is that it was sent).
+    expect(ingests).toHaveLength(1);
+    const body = ingests[0]!;
+    expect(body.title).toBe("E2E rerun short video");
+    expect(body.category).toBe("ai/general");
+    expect(body.url).toBe(TIKTOK_URL);
+    expect(body.date).toBe("2026-09-02");
+    expect(body.author).toBe("an invented account");
+    expect(body.summary_kind).toBe("standard");
+
+    // The appendix, byte-equal after the trim.
+    const summary = String(body.summary);
+    expect(summary.endsWith(`\n\n## Transcript\n\n${TIKTOK_TRANSCRIPT}\n`)).toBe(true);
+    expect(summary).toContain(NEW_SUMMARY_LINE);
+
+    // The system prompt the model was actually sent is the ZERO-FRAME form:
+    // a re-run has no work dir and no JPEGs, so an instruction to read them —
+    // or not to narrate them — is an order about material that is not there.
+    expect(systemPrompts).toHaveLength(1);
+    expect(systemPrompts[0]).not.toMatch(/frames?/i);
+    expect(systemPrompts[0]).toContain("from its speech transcript");
+    expect(modelCalls).toBe(1);
+  });
+
+  test("exactly ONE stream per re-run, and it is handed to the shelf on close", async ({ page }) => {
+    // Two failures, one property: a second `connectSSE` at `startRerun` puts two
+    // EventSources on one job (the shelf card is behind a fixed scrim, so the
+    // second is fan-out nobody can see), and dropping the hand-off leaves the
+    // card dead once the panel closes.
+    const streamRequests: string[] = [];
+    page.on("request", (r) => {
+      const u = r.url();
+      if (u.includes("/stream/")) streamRequests.push(u);
+    });
+
+    await page.goto(`${BASE}/summaries?source=${SOURCE}&doc=${encodeURIComponent(DOC_FULL)}`);
+    await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
+    await page.locator("#docPanelRerun").click();
+    await page.locator("#docPanelRerunMenu").getByRole("menuitem", { name: "Same settings again" }).click();
+    await expect(page.locator("#docPanelRerunStatus")).toContainText("Re-run", { timeout: 15_000 });
+
+    // While the panel is open: the panel's own stream and nothing else.
+    await expect.poll(() => streamRequests.length, { timeout: 15_000 }).toBe(1);
+    releaseModel();
+    await expect(page.locator("#docPanelRerunStatus")).toContainText(
+      "Re-run finished — the summary below is the new one.",
+      { timeout: 60_000 },
+    );
+    // The job settled while the panel was open, so it closed its own stream and
+    // never needed the hand-off — still one.
+    expect(streamRequests).toHaveLength(1);
+  });
+
+  test("the menu is keyboard-operable: arrows walk it, Escape gives focus back", async ({ page }) => {
+    await page.goto(`${BASE}/summaries?source=${SOURCE}&doc=${encodeURIComponent(DOC_FULL)}`);
+    await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
+
+    const btn = page.locator("#docPanelRerun");
+    await btn.focus();
+    await btn.press("Enter");
+    const menu = page.locator("#docPanelRerunMenu");
+    await expect(menu).toBeVisible();
+
+    // Opening focuses the FIRST enabled item.
+    const focusedText = () => page.evaluate(() => document.activeElement?.textContent ?? "");
+    await expect.poll(focusedText).toContain("Same settings again");
+
+    // ArrowDown walks forward, ArrowUp comes back — the enabled items only.
+    await page.keyboard.press("ArrowDown");
+    const second = await focusedText();
+    expect(second).not.toContain("Same settings again");
+    expect(second.length).toBeGreaterThan(0);
+    await page.keyboard.press("ArrowUp");
+    await expect.poll(focusedText).toContain("Same settings again");
+
+    // Escape closes the menu and puts the caret back on the button that opened
+    // it. Without that, dismissing drops focus on <body> behind a still-open
+    // scrim, which for a keyboard reader is the end of the road.
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
+    const focusedId = await page.evaluate(() => document.activeElement?.id ?? "");
+    expect(focusedId).toBe("docPanelRerun");
+    // …and the panel itself is still open: the menu's Escape is handled first.
+    await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
+
+    expect(modelCalls).toBe(0);
+    expect(ingests).toHaveLength(0);
   });
 
   test("a document with no appendix disables the transcript items and says why", async ({ page }) => {

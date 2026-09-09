@@ -293,24 +293,33 @@ interface RerunHarness {
   rerunSameLabel: (opts: Record<string, unknown>) => string;
   rerunPanelShows: (doc: unknown) => boolean;
   showRerunPrompt: () => void;
+  startRerun: (extra: Record<string, unknown>) => void;
+  resetRerunControl: (source: string) => void;
   setDoc: (doc: unknown) => void;
   setOpts: (opts: unknown) => void;
   menu: FakeNode;
   status: FakeNode;
   overlay: FakeNode;
+  wrap: FakeNode;
   snapshots: unknown[];
+  shownJobs: unknown[][];
+  streams: string[];
 }
 
 function loadRerun(): RerunHarness {
   const menu = fakeNode("div");
   const status = fakeNode("div");
   const overlay = fakeNode("div");
+  const wrap = fakeNode("span");
   const byId: Record<string, FakeNode> = {
     docPanelRerunMenu: menu,
     docPanelRerunStatus: status,
     docOverlay: overlay,
+    docPanelRerunWrap: wrap,
   };
   const snapshots: unknown[] = [];
+  const shownJobs: unknown[][] = [];
+  const streams: string[] = [];
   const ctx = {
     document: {
       addEventListener() {},
@@ -323,6 +332,8 @@ function loadRerun(): RerunHarness {
       article: { apiBase: "/api/articles", collection: "article-summaries", rerun: false },
     },
     snapshots,
+    shownJobs,
+    streams,
   };
   const harness = new Function(
     "ctx",
@@ -330,17 +341,25 @@ function loadRerun(): RerunHarness {
      var SOURCES = ctx.SOURCES;
      var renderMarkdown = function(t) { return t; };
      var showPromptSnapshot = function(data, key, opts) { ctx.snapshots.push({ data: data, key: key, opts: opts }); };
+     var showJob = function() { ctx.shownJobs.push(Array.prototype.slice.call(arguments)); };
+     var connectSSE = function(jobId, source) { ctx.streams.push('shelf:' + jobId + ':' + source); };
+     var sseClient = function(url) { ctx.streams.push('panel:' + url); return { close: function() {} }; };
      ${sumArticleLibraryScript()}
      return {
        renderRerunMenu: renderRerunMenu,
        rerunSameLabel: rerunSameLabel,
        rerunPanelShows: rerunPanelShows,
        showRerunPrompt: showRerunPrompt,
+       startRerun: startRerun,
+       resetRerunControl: resetRerunControl,
        setDoc: function(d) { _shareDoc = d; },
        setOpts: function(o) { _rerunOpts = o; },
      };`,
-  )(ctx) as Omit<RerunHarness, "menu" | "status" | "overlay" | "snapshots">;
-  return { ...harness, menu, status, overlay, snapshots };
+  )(ctx) as Omit<
+    RerunHarness,
+    "menu" | "status" | "overlay" | "wrap" | "snapshots" | "shownJobs" | "streams"
+  >;
+  return { ...harness, menu, status, overlay, wrap, snapshots, shownJobs, streams };
 }
 
 /** Every item, its label and whether it is offered. */
@@ -543,5 +562,141 @@ describe("showRerunPrompt after a retarget", () => {
     } finally {
       (globalThis as { fetch: unknown }).fetch = originalFetch;
     }
+  });
+});
+
+
+/**
+ * The four client behaviours the round-1 mutation survey found UNPINNED — each
+ * one survived both this file and the e2e. Two more of the six (focus restore
+ * on close, and the arrow keys) need a real focus model and are pinned in
+ * `e2e/summaries-rerun.spec.ts` instead; the `aria-haspopup` markup is pinned
+ * in `doc-panel.test.ts`.
+ */
+describe("the re-run client's unpinned halves", () => {
+  const DOC = {
+    docId: "ai/general/A.md",
+    source: "youtube",
+    title: "A talk",
+    url: "https://www.youtube.com/watch?v=abcdefghijk",
+    text: "the body on screen",
+  };
+
+  test("startRerun hands the shelf card the document's URL", () => {
+    // Without it the live card's title links nowhere, where a capture's links
+    // back to the source. `''` is the deliberate fallback for a doc with none —
+    // `undefined` would render the string "undefined" as an href.
+    const h = loadRerun();
+    h.overlay.classList.add("visible");
+    h.setDoc(DOC);
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ job_id: "job-1" }),
+    });
+    try {
+      h.startRerun({});
+      return new Promise<void>((resolve) => {
+        setTimeout(() => {
+          expect(h.shownJobs).toHaveLength(1);
+          expect(h.shownJobs[0]).toEqual(["job-1", DOC.title, DOC.url, DOC.source]);
+          resolve();
+        }, 5);
+      });
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+  });
+
+  test("a doc with no stored url passes the empty string, never undefined", async () => {
+    const h = loadRerun();
+    h.overlay.classList.add("visible");
+    h.setDoc({ ...DOC, url: "" });
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ job_id: "job-2" }),
+    });
+    try {
+      h.startRerun({});
+      await new Promise((r) => setTimeout(r, 5));
+      expect(h.shownJobs[0]![2]).toBe("");
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+  });
+
+  test("ONE stream per re-run: the panel opens it, and the retarget hands it to the shelf", async () => {
+    // Two failures, one property. Opening `connectSSE` at `startRerun` as well
+    // puts TWO EventSources on one job — the card is behind a fixed scrim, so
+    // the second is fan-out nobody can see. Dropping the hand-off leaves the
+    // shelf card dead once the panel closes.
+    const h = loadRerun();
+    h.overlay.classList.add("visible");
+    h.setDoc(DOC);
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ job_id: "job-3" }),
+    });
+    try {
+      h.startRerun({});
+      await new Promise((r) => setTimeout(r, 5));
+      // While the panel is open: exactly the panel's own stream.
+      expect(h.streams).toEqual(["panel:/api/youtube/stream/job-3"]);
+      // Retargeting the panel is the hand-off — the job is real either way.
+      h.resetRerunControl("youtube");
+      expect(h.streams).toEqual(["panel:/api/youtube/stream/job-3", "shelf:job-3:youtube"]);
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+  });
+
+  test("a superseded prompt fetch that REJECTS is silent too", async () => {
+    // The `.then` half of this guard is pinned above. Dropping only the `.catch`
+    // half survived that test: the panel then reports a network error against a
+    // document the reader has already left.
+    const h = loadRerun();
+    h.overlay.classList.add("visible");
+    h.setDoc(DOC);
+    h.setOpts({ promptUrl: DOC.url });
+    let rejectFetch: (e: unknown) => void = () => {};
+    const pending = new Promise((_r, rej) => { rejectFetch = rej; });
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = () => pending;
+    try {
+      h.showRerunPrompt();
+      h.setDoc({ ...DOC, docId: "ai/general/B.md" });
+      h.setOpts(null);
+      rejectFetch(new Error("network went away"));
+      await new Promise((r) => setTimeout(r, 5));
+      expect(h.status.classes.has("err")).toBe(false);
+      expect(h.status.textContent).not.toContain("network went away");
+      expect(h.status.textContent).not.toContain("Could not load the prompt");
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+  });
+
+  test("the ↻ control is hidden on a source the registry does not flag `rerun`", () => {
+    // `rerunSupported` reads `SOURCES[source].rerun`, the projection the server
+    // emits from the ONE registry the route asserts against at module load. A
+    // control rendered on `article` could only ever 400.
+    const h = loadRerun();
+    h.setDoc(DOC);
+    h.resetRerunControl("youtube");
+    expect(h.wrap.hidden).toBe(false);
+    h.resetRerunControl("article");
+    expect(h.wrap.hidden).toBe(true);
+    // An unregistered id is hidden too, rather than throwing on the lookup.
+    h.resetRerunControl("bogus");
+    expect(h.wrap.hidden).toBe(true);
+    // …and with no document open there is nothing to re-run whatever the source.
+    h.setDoc(null);
+    h.resetRerunControl("youtube");
+    expect(h.wrap.hidden).toBe(true);
   });
 });
