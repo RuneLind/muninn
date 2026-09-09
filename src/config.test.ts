@@ -236,11 +236,16 @@ describe("resolveServingProfile", () => {
  * scheduler's next tick run `created_at < NOW() - 0 days` over every row in
  * `prompt_snapshots`, and a negative value deletes rows from the future too.
  *
- * They therefore clamp instead of parsing straight through: below 1 the value
- * is refused, warned about once and replaced by the default. Refusing rather
- * than throwing, because the degrade direction here is the safe one — a typo
- * that keeps prompts three days too long costs disk, and one that empties the
- * archive is unrecoverable.
+ * They therefore clamp instead of parsing straight through: a value that PARSES
+ * and is below 1 is refused, warned about once and replaced by the default.
+ * Refusing rather than throwing for that band, because the degrade direction
+ * there is the safe one — a typo that keeps prompts three days too long costs
+ * disk, and one that empties the archive is unrecoverable.
+ *
+ * A value that does not parse as an integer at all is the OTHER band and still
+ * throws out of `optionalEnvInt`, refusing the boot. Both are pinned below,
+ * because the docblocks describe two answers and a reader who tried `=ninety`
+ * expecting a warning would find the process gone.
  */
 describe("prompt-snapshot retention clamps", () => {
   const CHAT = "PROMPT_SNAPSHOTS_RETENTION_DAYS";
@@ -309,6 +314,13 @@ describe("prompt-snapshot retention clamps", () => {
     set(CAPTURE, "-7");
     const c = config();
     expect([c.promptSnapshotsRetentionDays, c.promptSnapshotsCaptureRetentionDays]).toEqual([3, 90]);
+  });
+
+  test("a NON-INTEGER refuses the boot instead of warning — the other band", () => {
+    // `positiveEnvInt` delegates to `optionalEnvInt`, which throws on a value
+    // that names no number at all. The clamp above never sees it.
+    set(CAPTURE, "ninety");
+    expect(() => config()).toThrow(/PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS/);
   });
 
   test("the refusal is warned about, naming the variable and the value", async () => {

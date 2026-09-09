@@ -318,6 +318,12 @@ export function tracesPromptModalScript(): string {
       activePromptKey = key;
       if (passLabel) passLabel.textContent = '';
 
+      // A 5xx on THIS open. The reader is told a different thing then: the row
+      // may well exist and the server could not say, while "expired or not
+      // captured" is a statement about the archive that ends the search. Kept
+      // per-open rather than in the cache, which stores only 2xx bodies.
+      let serverFailed = false;
+
       try {
         if (promptCache[key] === undefined) {
           const url = '/api/prompts/' + currentWaterfallTraceId +
@@ -326,6 +332,7 @@ export function tracesPromptModalScript(): string {
           if (res.ok) {
             promptCache[key] = await res.json();
           } else if (res.status !== 404) {
+            serverFailed = res.status >= 500;
             console.warn('Prompt snapshot request failed', res.status, url);
           }
         }
@@ -336,7 +343,9 @@ export function tracesPromptModalScript(): string {
         if (activePromptKey !== key) return;
         const data = promptCache[key];
         if (!data) {
-          contentEl.innerHTML = '<div class="prompt-unavailable">Prompt snapshot not available (expired or not captured)</div>';
+          contentEl.innerHTML = serverFailed
+            ? '<div class="prompt-unavailable">Could not load the prompt snapshot (server error) — retry</div>'
+            : '<div class="prompt-unavailable">Prompt snapshot not available (expired or not captured)</div>';
           document.getElementById('systemCharCount').textContent = '';
           document.getElementById('userCharCount').textContent = '';
           return;
@@ -570,6 +579,15 @@ export function tracesPromptModalScript(): string {
     function closePromptModal(event) {
       if (event && event.target !== event.currentTarget) return;
       document.getElementById('promptModalBackdrop').classList.remove('visible');
+      // activePromptKey means "the prompt currently on screen", and after a
+      // close there is none — left set, it kept switchPromptTab and
+      // jumpToSection able to repaint a dismissed prompt from a stale key.
+      // NOT reachable by pointer today: both entry points are buttons inside
+      // the backdrop, which is display:none while hidden. This is the state
+      // staying honest, so the next affordance on those functions inherits a
+      // cleared key rather than the last trace's. The cache is untouched.
+      // (No backticks in this string: it lives inside a template literal.)
+      activePromptKey = null;
     }
 
     function fmtCharCount(n) {

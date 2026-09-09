@@ -196,7 +196,7 @@ test("a 500 is not stored as a prompt, and is retried", async () => {
   nextResponse = { status: 500, body: { error: "Failed to fetch prompt snapshot" } };
   await ctx.openPromptModal();
   // The error object must not reach the renderer as a body.
-  expect(body()).toContain("not available");
+  expect(body()).toContain("server error");
   expect(label()).toBe("");
 
   nextResponse = { status: 200, body: { systemPrompt: "s", userPrompt: "u", pass: "claude" } };
@@ -205,13 +205,65 @@ test("a 500 is not stored as a prompt, and is retried", async () => {
   expect(body()).toContain("u");
 });
 
-test("a 403 is not stored as a prompt either", async () => {
+/**
+ * A 5xx and a miss are different answers and must not read alike.
+ *
+ * "Expired or not captured" is a statement about the ARCHIVE — nothing here, do
+ * not come back. A 500 says the opposite: the row may well exist and the server
+ * could not say. Told the first thing, a reader stops looking; the only trace of
+ * the truth was a `console.warn` nobody has open.
+ */
+test("a 5xx says the SERVER failed, not that the snapshot is gone", async () => {
+  nextResponse = { status: 503, body: { error: "upstream down" } };
+  await ctx.openPromptModal();
+  expect(body()).toContain("server error");
+  expect(body()).toContain("retry");
+  // Not the archive's wording: that is the sentence this case exists to avoid.
+  expect(body()).not.toContain("expired or not captured");
+});
+
+test("a 404 keeps the archive's wording — the snapshot really is not there", async () => {
+  nextResponse = { status: 404, body: { error: "Prompt snapshot not found" } };
+  await ctx.openPromptModal();
+  expect(body()).toContain("expired or not captured");
+  expect(body()).not.toContain("server error");
+});
+
+test("a 403 is not stored as a prompt either, and is not called a server error", async () => {
   nextResponse = { status: 403, body: { error: "forbidden" } };
   await ctx.openPromptModal();
-  expect(body()).toContain("not available");
+  expect(body()).toContain("expired or not captured");
+  expect(body()).not.toContain("server error");
   nextResponse = { status: 200, body: { systemPrompt: "s", userPrompt: "u", pass: "claude" } };
   await ctx.openPromptModal();
   expect(fetched).toHaveLength(2);
+});
+
+/**
+ * Closing the modal drops the active key.
+ *
+ * `activePromptKey` means "the prompt on screen", and it outlived the modal:
+ * after a close it still named the dismissed prompt, so `switchPromptTab` and
+ * `jumpToSection` would repaint it into a panel the reader had dismissed —
+ * possibly for a trace they have since navigated away from.
+ *
+ * **Not reachable by pointer today** (verified in a real browser): both entry
+ * points are buttons inside `.prompt-modal-backdrop`, which is `display: none`
+ * while hidden, so Playwright cannot click them either. This pins the STATE, so
+ * the next affordance on those two functions inherits a cleared key rather than
+ * the last trace's — and it is driven the way the closed modal's own code would
+ * reach it, by calling the function.
+ */
+test("closing the modal forgets which prompt was open", async () => {
+  await ctx.openPromptModal();
+  expect(body()).toContain("user text");
+
+  (ctx as unknown as { closePromptModal: (e?: unknown) => void }).closePromptModal();
+  const el = (ctx.document as { getElementById: (id: string) => { innerHTML: string } }).getElementById("promptContent");
+  el.innerHTML = "";
+
+  (ctx as unknown as { switchPromptTab: (t: string) => void }).switchPromptTab("system");
+  expect(el.innerHTML).toBe("");
 });
 
 test("switching tabs after a PASS-scoped open renders that pass's body", async () => {

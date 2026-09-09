@@ -72,9 +72,10 @@ export function headWithinBytes(text: string, maxBytes: number): string {
  * — is right for a transcript whose first line is a `### [HH:MM:SS]` heading and
  * catastrophic for a prompt: a capture prompt may be one paragraph with its only
  * newline at the very end, and inheriting the rule threw the whole prompt away.
- * Measured on a 300 KB single-paragraph article with a trailing newline: the
- * stored row was the 62-byte note alone, while the SAME text with the newline
- * removed stored 262,140 bytes. So the cut here is the last UTF-8 character
+ * Measured on a 300 KB single-paragraph article with a trailing newline, under
+ * the 256 KiB capture cap: the stored row was the 64-byte note alone (62
+ * characters — the em dash is three bytes), while the SAME text with the newline
+ * removed stored the full 262,144. So the cut here is the last UTF-8 character
  * boundary inside the budget, whatever the newline layout — the answer is never
  * shorter than the budget minus one code point.
  *

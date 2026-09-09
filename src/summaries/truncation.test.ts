@@ -1,5 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import { TRANSCRIPT_TRUNCATION_NOTE, byteLength, capTextWithNote, headWithinBytes } from "./truncation.ts";
+// The REAL cap the measurement below was taken at, not a re-typed 256 KiB —
+// the point of the case is that the figures in the docblocks are checkable.
+import { CAPTURE_PROMPT_MAX_BYTES as CAPTURE_CAP } from "../db/prompt-snapshots.ts";
 
 /**
  * The two cappers in this leaf answer different questions, and the whole point
@@ -12,8 +15,12 @@ import { TRANSCRIPT_TRUNCATION_NOTE, byteLength, capTextWithNote, headWithinByte
  * system scaffold with a transcript pasted into it and may be one paragraph
  * with no newline until the very end. Inheriting the window rule there deleted
  * the prompt: measured on a 300 KB single-paragraph article with a trailing
- * newline, the stored row was the 62-byte note and nothing else, while the same
- * text with the newline removed stored 262,140 bytes.
+ * newline, under the 256 KiB capture cap, the stored row was the 64-byte note
+ * and nothing else (62 characters — the em dash is three bytes), while the same
+ * text with the newline removed stored the full 262,144.
+ *
+ * The numbers below are DERIVED from the note and the budget rather than typed,
+ * so the two figures in this paragraph are prose only.
  */
 const NOTE_BYTES = byteLength(TRANSCRIPT_TRUNCATION_NOTE);
 /** What `capTextWithNote` reserves: the note plus the `\n\n` it is joined on. */
@@ -84,6 +91,21 @@ describe("capTextWithNote", () => {
     // The documented band: there is no text left to bound, so the answer is
     // over the caller's cap rather than empty.
     expect(capTextWithNote("x".repeat(1000), RESERVED - 1)).toBe(TRANSCRIPT_TRUNCATION_NOTE);
+  });
+
+  /**
+   * The two figures the docblocks quote, made mechanical.
+   *
+   * They were quoted wrong for a round — "62-byte note" and "262,140 bytes" —
+   * and a measurement nothing checks is a sentence, not a measurement. The note
+   * is 62 CHARACTERS and 64 bytes, because the em dash is three of them; the
+   * capped answer spends the whole cap.
+   */
+  test("the note is 62 characters and 64 bytes, and the capped answer fills the cap exactly", () => {
+    expect(TRANSCRIPT_TRUNCATION_NOTE.length).toBe(62);
+    expect(byteLength(TRANSCRIPT_TRUNCATION_NOTE)).toBe(64);
+    expect(byteLength(capTextWithNote(`${"a".repeat(300_000)}\n`, CAPTURE_CAP))).toBe(CAPTURE_CAP);
+    expect(CAPTURE_CAP).toBe(262_144);
   });
 });
 

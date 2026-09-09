@@ -554,12 +554,18 @@ export function optionalEnvInt(name: string, defaultValue: number): number {
  * and does the same. Neither is recoverable, and neither looks like a mistake
  * in a `.env`.
  *
- * Warn-and-default rather than throw, which is the opposite of
- * `resolveServingProfile`'s rule and for the same reason read the other way:
- * there the degrade direction was "serve everything", here it is "delete
- * everything", so the safe answer is the shipped window plus a line saying the
- * value was refused. Warned once per `<name>=<value>`, since `loadConfig` runs
- * more than once in a process.
+ * **Two bands, two answers.** A value that PARSES and is below 1 (`=0`, `=-7`)
+ * is warn-and-defaulted — the opposite of `resolveServingProfile`'s rule and for
+ * the same reason read the other way: there the degrade direction was "serve
+ * everything", here it is "delete everything", so the safe answer is the shipped
+ * window plus a line saying the value was refused. Warned once per
+ * `<name>=<value>`, since `loadConfig` runs more than once in a process. A value
+ * that does not parse as an integer at all (`=ninety`) still throws
+ * `ConfigError` from {@link optionalEnvInt} and refuses the boot, which this
+ * function deliberately does not soften: an unparseable retention names no
+ * window, so there is nothing to be lenient ABOUT, and refusing is the same
+ * answer every other `optionalEnvInt` caller gets. An empty or unset value is
+ * the default, as everywhere.
  */
 export function positiveEnvInt(name: string, defaultValue: number): number {
   const parsed = optionalEnvInt(name, defaultValue);

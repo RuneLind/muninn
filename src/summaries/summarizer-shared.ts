@@ -131,10 +131,11 @@ export interface CaptureOneShotOptions {
    * Handed the in-flight prompt-snapshot write, synchronously, right after it
    * is started.
    *
-   * The write is deliberately NOT awaited (see `saveCapturePromptSnapshot`), so
-   * a test that reads the row straight after this function resolves would be
-   * racing the insert. This is the only handle on it; production callers pass
-   * nothing, and the promise never rejects — the writer catches and warns.
+   * The seam waits for that write only up to {@link SNAPSHOT_WRITE_BUDGET_MS}
+   * (see `saveCapturePromptSnapshot`), so a test that read the row straight
+   * after this function resolves would be racing a write that outran the
+   * budget. This is the only handle on the whole promise; production callers
+   * pass nothing, and it never rejects — the writer catches and warns.
    */
   onSnapshotSettled?: (pending: Promise<void>) => void;
   /** Test seams — production callers pass neither. */
@@ -228,13 +229,14 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       },
     });
 
-    // Started, never awaited — see `saveCapturePromptSnapshot`. The call is on
-    // its OWN line rather than inside `opts.onSnapshotSettled?.(…)`: optional
-    // CALL short-circuits its arguments, so the inline form would skip the
-    // write entirely whenever the seam is absent, which is every production
-    // caller.
+    // Started here, waited for only within the budget — see
+    // `saveCapturePromptSnapshot`. The call is on its OWN line rather than
+    // inside `opts.onSnapshotSettled?.(…)`: optional CALL short-circuits its
+    // arguments, so the inline form would skip the write entirely whenever the
+    // seam is absent, which is every production caller.
     const snapshotWrite = saveCapturePromptSnapshot(tracer.traceId, opts);
     opts.onSnapshotSettled?.(snapshotWrite);
+    await withinSnapshotBudget(snapshotWrite);
 
     const usage = {
       model: result.model,
@@ -313,13 +315,24 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
  * seam twice under one trace root and the two prompts are different questions
  * (which frames to look at; how to summarize what came back).
  *
- * **NOT awaited by the caller.** The summary is already produced by the time
- * this runs; a Postgres that is slow, locked or gone must not hold a capture job
- * open behind a debugging artefact — every capture, on every pass. The chat
- * caller has always worked this way (`src/core/prompt-assembly.ts` calls
- * `savePromptSnapshot(…).catch(…)`), and the warn below is this path's version
- * of that `.catch`. `CaptureOneShotOptions.onSnapshotSettled` is how a TEST gets
- * hold of the in-flight promise; production callers pass nothing.
+ * **Awaited only within {@link SNAPSHOT_WRITE_BUDGET_MS}.** The summary is
+ * already produced by the time this runs, so a Postgres that is slow, locked or
+ * gone must not hold a capture job open behind a debugging artefact — every
+ * capture, on every pass. But a write left entirely unattended settles WHEREVER
+ * the event loop next goes, and in a single-process `bun test` chunk that is
+ * inside somebody else's test: a capture case with a made-up trace id fired an
+ * INSERT Postgres rejected a turn later, and the warn below landed inside
+ * `src/summaries/frames.test.ts`'s log capture, whose assertion is that its own
+ * warning list is empty. Nineteen minutes of CI red for a line belonging to a
+ * test that had already passed.
+ *
+ * The budget buys back both: a write that answers or fails FAST — which is
+ * every rejected one, and every healthy INSERT — settles inside the call that
+ * started it, and a write that is genuinely stuck costs the capture the budget
+ * and no more. Past it the promise is simply abandoned by this caller; it keeps
+ * running with the `catch` below still attached, so a late failure is still
+ * said out loud. `CaptureOneShotOptions.onSnapshotSettled` is how a TEST gets
+ * hold of the WHOLE promise; production callers pass nothing.
  *
  * Gated on tracing, because the row is keyed on a trace id: a `Tracer` mints one
  * even with `TRACING_ENABLED=false`, and a snapshot under an id no trace was
@@ -328,21 +341,23 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
  * instance with tracing off would grow prompt rows nothing can place.
  *
  * Fail-soft, like the ingest below it: a capture that summarized correctly must
- * not fail because a debugging artefact could not be stored.
+ * not fail because a debugging artefact could not be stored. The tracing gate is
+ * INSIDE the `try` for that reason — it dereferences `opts.config`, and this
+ * promise is documented as one that never rejects.
  *
  * The import is LAZY so this seam — which every vertical and most of their unit
  * tests load — does not pull `db/client.ts` and the postgres driver into its
  * import graph for the sake of one optional write.
  */
 async function saveCapturePromptSnapshot(traceId: string, opts: CaptureOneShotOptions): Promise<void> {
-  if (!opts.config.tracingEnabled) {
-    log.debug("Tracing off — no prompt snapshot for {source} job {jobId}", {
-      source: opts.source,
-      jobId: opts.jobId,
-    });
-    return;
-  }
   try {
+    if (!opts.config.tracingEnabled) {
+      log.debug("Tracing off — no prompt snapshot for {source} job {jobId}", {
+        source: opts.source,
+        jobId: opts.jobId,
+      });
+      return;
+    }
     const { savePromptSnapshot } = await import("../db/prompt-snapshots.ts");
     await savePromptSnapshot({
       traceId,
@@ -358,6 +373,32 @@ async function saveCapturePromptSnapshot(traceId: string, opts: CaptureOneShotOp
       jobId: opts.jobId,
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+}
+
+/**
+ * How long a capture waits for its own prompt snapshot before walking away.
+ *
+ * Sized as "long enough that no healthy write is ever abandoned, short enough
+ * that a stuck one is not worth noticing": the INSERT is a single row on an
+ * indexed table and measures in single-digit milliseconds locally, so 1.5 s is
+ * three orders of magnitude of headroom and still a delay a user would not
+ * attribute to the capture.
+ */
+export const SNAPSHOT_WRITE_BUDGET_MS = 1_500;
+
+/** {@link SNAPSHOT_WRITE_BUDGET_MS}, applied. Never rejects: neither branch can. */
+async function withinSnapshotBudget(write: Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, SNAPSHOT_WRITE_BUDGET_MS);
+  });
+  try {
+    await Promise.race([write, budget]);
+  } finally {
+    // Or a capture that finished in 20 ms would hold the process open for the
+    // rest of the budget — which, in a `bun test` file, is the whole run.
+    clearTimeout(timer);
   }
 }
 

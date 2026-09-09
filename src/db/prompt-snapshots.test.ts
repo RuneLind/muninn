@@ -11,11 +11,12 @@ import {
   savePromptSnapshot,
 } from "./prompt-snapshots.ts";
 import { TRANSCRIPT_TRUNCATION_NOTE } from "../summaries/truncation.ts";
-import { runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { runCaptureOneShot, SNAPSHOT_WRITE_BUDGET_MS } from "../summaries/summarizer-shared.ts";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { Tracer } from "../tracing/tracer.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
+import type { Sql } from "postgres";
 
 setupTestDb();
 
@@ -24,10 +25,11 @@ const bytes = (s: string) => new TextEncoder().encode(s).length;
 /**
  * `runCaptureOneShot`, with the snapshot write awaited BY THE TEST.
  *
- * The seam does not await it — a slow Postgres must not stall a capture that
- * has already produced its summary — so a test that read the row straight after
- * the call would be racing the insert. `onSnapshotSettled` is the seam's test
- * handle on that in-flight promise; production callers pass nothing.
+ * The seam waits for the write only up to `SNAPSHOT_WRITE_BUDGET_MS` — a slow
+ * Postgres must not stall a capture that has already produced its summary — so
+ * a test that read the row straight after the call would be racing any write
+ * that outran the budget. `onSnapshotSettled` is the seam's test handle on the
+ * whole promise; production callers pass nothing.
  */
 async function captureAndSettle(
   opts: Omit<Parameters<typeof runCaptureOneShot>[0], "onSnapshotSettled">,
@@ -402,57 +404,114 @@ function fakeResult(): ClaudeExecResult {
 }
 
 /**
- * The write is FIRE-AND-FORGET, and this is what says so.
+ * The write is BOUNDED — waited for, but only up to a budget — and this is what
+ * says so.
  *
- * A capture's summary is already produced by the time the prompt is stored; a
- * Postgres that is slow, locked or gone must not hold the job open behind a
- * debugging artefact. (The chat caller has always been fire-and-forget —
- * `src/core/prompt-assembly.ts` calls `savePromptSnapshot(…).catch(…)`.)
+ * A capture's summary is already produced by the time the prompt is stored, so
+ * a Postgres that is slow, locked or gone must not hold the job open behind a
+ * debugging artefact. But an entirely unattended write settles wherever the
+ * event loop next goes, and in a single-process `bun test` chunk that is inside
+ * somebody else's test: a rejected INSERT logged its warn into
+ * `src/summaries/frames.test.ts`'s log capture, whose assertion is that its own
+ * warning list is empty. So the seam waits `SNAPSHOT_WRITE_BUDGET_MS` and no
+ * longer — which is unbounded headroom for a write that answers, and a bounded
+ * bill for one that never does.
+ *
+ * Both halves are here, because either alone is satisfied by the wrong code: a
+ * write that is always awaited passes the first, and one that is never awaited
+ * passes the second.
  */
-describe("prompt snapshots: the capture is not held open by the write", () => {
-  test("runCaptureOneShot resolves while the snapshot insert is still in flight", async () => {
+describe("prompt snapshots: the capture waits for the write, but only so long", () => {
+  const captureOpts = (traceId: string, jobId: string) => ({
+    source: "youtube",
+    jobId,
+    title: "A talk",
+    url: `https://example.test/watch?v=${jobId}`,
+    prompt: "the transcript",
+    systemPrompt: "summarize it",
+    config: { tracingEnabled: true, tracingCaptureToolOutputs: false } as unknown as Config,
+    botConfig: { name: "testbot", connector: "claude-sdk" } as unknown as BotConfig,
+    parentTracer: fakeTracer(traceId),
+    // No takeaway check, so NOTHING between the write and the return awaits on
+    // its own account: what these cases read is decided by the seam's own wait,
+    // not by how many turns of the loop happened to pass afterwards.
+    takeawayCheck: false as const,
+    attachRun: () => {},
+    oneShot: async () => fakeResult(),
+  });
+
+  test("a write that ANSWERS has landed by the time runCaptureOneShot resolves", async () => {
     const traceId = crypto.randomUUID();
     let settled: Promise<void> | null = null;
-    // Flipped by a continuation registered INSIDE the seam, i.e. before any
-    // `await` the production code might put on the same promise — so if the
-    // write were awaited, this would already be true by the time
-    // `runCaptureOneShot` resolves.
+    // Flipped by a continuation registered INSIDE the seam, i.e. before the
+    // seam's own wait subscribes to the same promise — so this is true on
+    // return if and only if the seam waited for the write.
     let writeFinished = false;
     await runCaptureOneShot({
-      source: "youtube",
-      jobId: "job-inflight",
-      title: "A talk",
-      url: "https://example.test/watch?v=inflight",
-      prompt: "the transcript",
-      systemPrompt: "summarize it",
-      config: { tracingEnabled: true, tracingCaptureToolOutputs: false } as unknown as Config,
-      botConfig: { name: "testbot", connector: "claude-sdk" } as unknown as BotConfig,
-      parentTracer: fakeTracer(traceId),
-      // No takeaway check, so NOTHING between the write and the return awaits:
-      // the race below is decided by whether the write itself was awaited, not
-      // by how many turns of the loop happened to pass afterwards.
-      takeawayCheck: false,
-      attachRun: () => {},
-      oneShot: async () => fakeResult(),
+      ...captureOpts(traceId, "job-bounded"),
       onSnapshotSettled: (p) => { settled = p; p.then(() => { writeFinished = true; }); },
     });
 
     expect(settled).not.toBeNull();
-    // A round trip to Postgres cannot finish inside the one microtask between
-    // the seam and this line, so `false` here means the write was NOT awaited.
-    // (Deliberately not a `Promise.race` against `Promise.resolve(…)`: race
-    // subscribes to an already-resolved promise in a LATER microtask than the
-    // one it schedules for the settled branch, so that comparison answers
-    // "in-flight" even for an awaited write — measured, it survived the
-    // mutation.)
-    expect(writeFinished).toBe(false);
+    expect(writeFinished).toBe(true);
+    // Read WITHOUT awaiting `settled`: the row is there because the capture
+    // waited for it, not because this line did.
+    expect((await getPromptSnapshot(traceId))!.systemPrompt).toBe("summarize it");
+  });
 
-    // …and it does land, so the non-blocking read above is not passing because
-    // the write was skipped.
+  test("a write BLOCKED past the budget does not hold the capture open", async () => {
+    const traceId = crypto.randomUUID();
+    let releaseLock!: () => void;
+    let lockTaken!: () => void;
+    const lockHeld = new Promise<void>((r) => { lockTaken = r; });
+    const releaseRequested = new Promise<void>((r) => { releaseLock = r; });
+
+    // A stalled database, without one: `EXCLUSIVE` conflicts with the
+    // `ROW EXCLUSIVE` an INSERT takes, so the snapshot write blocks inside
+    // Postgres for as long as this transaction stays open.
+    // `TransactionSql` loses its call signatures in the types (the documented
+    // `src/db/CLAUDE.md` pitfall), so the tagged-template form needs the cast.
+    const lockTx = getDb().begin(async (tx) => {
+      await (tx as unknown as Sql)`LOCK TABLE prompt_snapshots IN EXCLUSIVE MODE`;
+      lockTaken();
+      await releaseRequested;
+    });
+    await lockHeld;
+    // A lock nothing can release is a hung SUITE, not a failed test: the
+    // `finally` below is only reached once the capture returns, so a seam that
+    // waits for the write forever would also hold this transaction — and every
+    // later `setupTestDb` TRUNCATE — open. The safety release turns that into
+    // an ordinary assertion failure on the elapsed bound.
+    const safetyRelease = setTimeout(() => releaseLock(), 10_000);
+
+    let settled: Promise<void> | null = null;
+    let writeFinished = false;
+    const startedAt = Date.now();
+    try {
+      const result = await runCaptureOneShot({
+        ...captureOpts(traceId, "job-blocked"),
+        onSnapshotSettled: (p) => { settled = p; p.then(() => { writeFinished = true; }); },
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      // The capture answered, with its summary, while the write was still stuck.
+      expect(result.result).toContain("SUMMARY:");
+      expect(writeFinished).toBe(false);
+      // It DID wait — the budget is a bound, not a skip…
+      expect(elapsedMs).toBeGreaterThanOrEqual(SNAPSHOT_WRITE_BUDGET_MS - 50);
+      // …and it waited only that long, rather than for the lock.
+      expect(elapsedMs).toBeLessThan(SNAPSHOT_WRITE_BUDGET_MS + 1_000);
+    } finally {
+      clearTimeout(safetyRelease);
+      releaseLock();
+      await lockTx;
+    }
+
+    // Abandoned, not cancelled: released, the write still lands.
     await settled;
     expect(writeFinished).toBe(true);
     expect((await getPromptSnapshot(traceId))!.systemPrompt).toBe("summarize it");
-  });
+  }, 20_000);
 });
 
 describe("prompt snapshots: a url-less capture stores NULL", () => {

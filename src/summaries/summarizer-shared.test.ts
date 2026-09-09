@@ -10,6 +10,7 @@ import {
   windowedTranscriptRider,
   CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
   CAPTURE_THINKING_MAX_TOKENS,
+  SNAPSHOT_WRITE_BUDGET_MS,
   SUMMARY_STRUCTURE_BULLETS,
 } from "./summarizer-shared.ts";
 import { summarizeTimeoutFor } from "../video/media.ts";
@@ -268,11 +269,23 @@ describe("runCaptureOneShot", () => {
     thinkingMaxTokens: 40_000, // the bot's CHAT budget — must not leak into a capture
   } as unknown as BotConfig;
 
+  /**
+   * The fake root's trace id.
+   *
+   * A REAL uuid, because `prompt_snapshots.trace_id` is a `uuid` column and this
+   * seam now writes to it: with a database initialised in the same `bun test`
+   * process (`src/test/mock-isolation.test.ts` does that in the first
+   * `test:unit` chunk), a made-up `trace-1` reached Postgres and came back as
+   * `invalid input syntax for type uuid`. The refused id belongs in the ONE
+   * case that is about a refused write, not under every case in the file.
+   */
+  const TRACE_ID = crypto.randomUUID();
+
   /** Records the span calls runCaptureOneShot makes, without touching the DB. */
-  function recordingTracer() {
+  function recordingTracer(traceId: string = TRACE_ID) {
     const calls: Array<{ op: string; label?: string; attrs?: Record<string, unknown> }> = [];
     const tracer = {
-      traceId: "trace-1",
+      traceId,
       start(label: string, attrs?: Record<string, unknown>) {
         calls.push({ op: "start", label, attrs });
         return "span-1";
@@ -373,7 +386,7 @@ describe("runCaptureOneShot", () => {
     expect(h.attached[0]).toMatchObject({
       botName: "jarvis",
       connectorLabel: "Claude SDK",
-      traceId: "trace-1",
+      traceId: TRACE_ID,
     });
   });
 
@@ -420,7 +433,7 @@ describe("runCaptureOneShot", () => {
     expect(finish.attrs).toMatchObject({ source: "youtube", error: "connector exploded" });
     // The run keeps the trace link even on the error path, so a failed capture is
     // still clickable from /agents into /traces.
-    expect(h.attached[0]!.traceId).toBe("trace-1");
+    expect(h.attached[0]!.traceId).toBe(TRACE_ID);
   });
 
   // ── a caller-owned root: `parentTracer` ────────────────────────────────────
@@ -481,6 +494,70 @@ describe("runCaptureOneShot", () => {
     expect(tracer.name).toBe(captureTraceName("youtube"));
     expect(tracer.traceId).toMatch(/^[0-9a-f-]{36}$/);
   });
+
+  // --- the prompt-snapshot write's lifetime -------------------------------
+  //
+  // The write is bounded, not unbounded: `runCaptureOneShot` waits up to
+  // `SNAPSHOT_WRITE_BUDGET_MS` for it and then walks away. The half pinned here
+  // is the fast one — a write that FAILS fails immediately, so its warn has to
+  // land inside the call that started it.
+  //
+  // Unbounded, it did not. In CI's single-process `test:unit` chunk a database
+  // is initialised by an earlier file, so a capture case with a made-up trace id
+  // fired an INSERT that Postgres rejected on a later turn of the loop, and the
+  // warn arrived inside whichever test was capturing logs NEXT —
+  // `src/summaries/frames.test.ts`'s `a refused id is also SAID OUT LOUD`,
+  // which asserts its own warning list is `[]`. Nineteen minutes of unrelated
+  // red for a line belonging to a test that had already passed.
+
+  /**
+   * A trace id `savePromptSnapshot` cannot store, whether or not this process
+   * has a database: with none, `getDb()` throws `Database not initialized`; with
+   * one, Postgres refuses it for the `uuid` column. Either way the write rejects
+   * on its first turn, which is the case the leak was made of.
+   */
+  const REFUSED_TRACE_ID = "not-a-uuid";
+
+  test("a REFUSED snapshot write warns inside the call, not inside whatever runs next", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+      ],
+      reset: true,
+    });
+    try {
+      const { tracer } = recordingTracer(REFUSED_TRACE_ID);
+      // No takeaway check: nothing between the write and the return may await
+      // on its own account, or the leak would be hidden by an unrelated turn.
+      const h = harness({ tracer, takeawayCheck: false });
+      await runCaptureOneShot(h.opts);
+
+      const snapshotWarns = records.filter(
+        (r) => r.level === "warning" && String(r.message.join("")).includes("Prompt snapshot failed"),
+      );
+      expect(snapshotWarns).toHaveLength(1);
+
+      // …and nothing arrives after the call has returned. Several turns of the
+      // loop, which is more than the rejected write ever needed.
+      records.length = 0;
+      await new Promise((r) => setTimeout(r, 50));
+      expect(records).toEqual([]);
+    } finally {
+      await configure({ sinks: {}, loggers: [{ category: ["logtape", "meta"], sinks: [], lowestLevel: "error" }], reset: true });
+    }
+  });
+
+  test("the budget is short enough that a hung Postgres cannot own the capture", () => {
+    // The summary is already produced when the write starts, so this is what a
+    // stalled instance pays per pass for a debugging artefact. Two seconds is
+    // the ceiling a reader would still read as "the capture finished".
+    expect(SNAPSHOT_WRITE_BUDGET_MS).toBeGreaterThan(0);
+    expect(SNAPSHOT_WRITE_BUDGET_MS).toBeLessThanOrEqual(2_000);
+  });
+
   // --- the closing-takeaway check (`takeaway-check.ts`, run in this seam) ----
   const WITH_CLOSER =
     "CATEGORY: tech\n\nSUMMARY:\n*ingress*\n\n## Key takeaways\n- 🧱 Stopping the project was healthy.\n\n## Body\nThe rollout of one line was delayed.\n\n> 💬 **Takeaway:** The cancelled project was the most valuable one.";
