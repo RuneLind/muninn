@@ -218,7 +218,9 @@ interface RerunVertical {
    * `main/ingest/_summary_ingest.py`), so a tag a person added by hand is
    * ERASED by any ingest that does not re-send it. Where the model accepts the
    * field, {@link buildRerunIngestBody} re-sends the stored list minus the
-   * category parts, which round-trips the line byte for byte.
+   * category parts. huginn then rebuilds the line category-first and deduped
+   * (`build_summary_tags`), so a hand-edited line converges to huginn's own
+   * shape on the first re-run rather than round-tripping byte for byte.
    *
    * `false` for YouTube, whose `YouTubeIngestRequest` has no `tags` field at
    * all and whose `write_summary` call passes none — pydantic's default
@@ -517,9 +519,10 @@ const VERTICALS: readonly RerunVertical[] = [
       }),
       user: buildShortVideoUserPrompt({ transcript: i.transcript, frames: [] }),
     }),
-    // The SPEC's own tail: `visualWarning` is false on X and true on TikTok, and
-    // handing either the neighbour's spec is how a re-run acquires — or loses —
-    // a warn its capture declared.
+    // The SPEC's own tail, so the two entries cannot drift apart. `visualWarning`
+    // is false on X and true on TikTok, but with `frameCount: 0` the warn is
+    // gated off on both (`short-video-finish.ts`), exactly as the TikTok entry
+    // says: a transcript-only re-run read no frames and must not claim to.
     finish: async (i) =>
       finishShortVideoSummary(X_VIDEO_SPEC, {
         raw: i.raw,
