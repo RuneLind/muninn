@@ -6,20 +6,19 @@ import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { resolveServingProfile } from "../config.ts";
-import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import {
   CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
-  buildSummarySystemPrompt,
   ingestSummary,
   runCaptureOneShot,
-  windowedTranscriptRider,
 } from "../summaries/summarizer-shared.ts";
+import { buildVimeoSystemPrompt, buildVimeoUserPrompt } from "./prompt.ts";
+import { finishVimeoSummary } from "./finish.ts";
 import {
   captureBotConfigFor,
   captureThinkingFor,
   type CapturePreset,
 } from "../summaries/presets.ts";
-import { languageRider, langFromCaptionTag, resolveOutputLang, type CaptureLang } from "../summaries/language.ts";
+import { langFromCaptionTag, resolveOutputLang, type CaptureLang } from "../summaries/language.ts";
 import { getSummarySource } from "../summaries/sources.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { createQueue } from "../wiki/queue.ts";
@@ -27,12 +26,7 @@ import { summarizeTimeoutFor } from "../video/media.ts";
 import { canonicalVimeoUrl } from "./url.ts";
 import { fetchVimeoManifest as realFetchManifest, type VimeoManifest } from "./media.ts";
 import { extractCadenceFrames as realExtractFrames } from "./frames.ts";
-import {
-  VIMEO_FRAME_SOURCE,
-  framesPromptSection,
-  keepReferencedFrames,
-  type CaptureFrame,
-} from "../summaries/frames.ts";
+import { type CaptureFrame } from "../summaries/frames.ts";
 import {
   chooseTrack,
   downloadVtt as realDownloadVtt,
@@ -97,47 +91,17 @@ export const WHISPER_UNAVAILABLE_ERROR = "whisper_unavailable";
 export const TRANSCRIPTION_FAILED_ERROR = "transcription_failed";
 export const NO_SPEECH_ERROR = "no_speech";
 
-const SUMMARIZE_INTRO =
-  "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
-  // The windowed-transcript sentence is the seam's, shared with the YouTube
-  // prompt (which says "video"). Byte-identical to what shipped.
-  windowedTranscriptRider("talk");
-
 /**
- * The system prompt for one capture: the shared envelope around the KIND's
- * structure bullets, then the video, then the riders — language LAST, after
- * the auto-caption one, for the reason the share prompt puts its rider after
- * the instruction: the language is the reader's explicit pick (or the talk's
- * own), and nothing a preset says may un-pick it.
+ * The prompt builders live in `./prompt.ts` — a module a dashboard view and the
+ * re-run can import without playwright-core and the harvest pipeline behind it.
+ * Re-exported here because this is the path every existing importer uses.
  */
-export function buildVimeoSystemPrompt(input: {
-  preset: CapturePreset;
-  title: string;
-  url: string;
-  captionKind: "manual" | "auto";
-  outputLang: "nb" | "en";
-}): string {
-  return `${buildSummarySystemPrompt(SUMMARIZE_INTRO, VALID_CATEGORIES, input.preset.instruction)}
-
-Video title: ${input.title}
-Video URL: ${input.url}${input.captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}
-
-${languageRider(input.outputLang, "summary")}`;
-}
-
-/**
- * The rider appended when the chosen track is machine-generated.
- *
- * Vimeo's auto-captions garble proper nouns — measured on a real JavaZone talk,
- * "JavaBin" comes through as "JavaBeen" — and the failure mode that matters is
- * a summary confidently naming a library, product or person that was never
- * said. The instruction is to describe rather than to assert, not to omit.
- */
-export const AUTO_CAPTION_RIDER =
-  "\n\nIMPORTANT: this transcript is MACHINE-GENERATED and garbles proper nouns " +
-  "(measured: \"JavaBeen\" for JavaBin). Do not assert the spelling of any name, " +
-  "product, library or acronym the captions cannot corroborate — describe it " +
-  "(\"a JVM testing library\") or mark it uncertain rather than guessing a spelling.";
+export {
+  AUTO_CAPTION_RIDER,
+  buildVimeoSystemPrompt,
+  buildVimeoUserPrompt,
+  SUMMARIZE_INTRO,
+} from "./prompt.ts";
 
 /**
  * ONE Chromium at a time, process-wide.
@@ -655,8 +619,8 @@ export async function summarizeVimeo(
       // The frame list rides on the USER prompt after the transcript (the
       // TikTok shape); the system prompt is the kind + riders and says nothing
       // about frames, so a transcript-only capture's prompt is byte-identical
-      // to before.
-      prompt: transcript + framesPromptSection(VIMEO_FRAME_SOURCE, meta.videoId, frames),
+      // to before. The composition is `./prompt.ts`.
+      prompt: buildVimeoUserPrompt(transcript, { videoId: meta.videoId, frames }),
       systemPrompt,
       config,
       botConfig: runBot,
@@ -677,24 +641,17 @@ export async function summarizeVimeo(
       },
     });
 
-    const { category, summary } = parseSummaryResponse(result.result);
-    setCategory(jobId, category);
-
-    // The frames the summary QUOTES are copied out of the work dir to the
-    // served root before the work dir dies; the rest go with it. Inside its
-    // own try: a copy failure must not fail a capture whose text is already
-    // on the reader's screen — the reader gets broken images and a log line.
-    let keptFrames: number[] = [];
-    if (frames.length > 0) {
-      try {
-        keptFrames = await keepReferencedFrames(summary, VIMEO_FRAME_SOURCE, meta.videoId, frames, resolved.framesRoot);
-      } catch (err) {
-        log.error("Vimeo capture {jobId}: keeping quoted frames failed: {error}", {
-          jobId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    // The post-model tail, in ONE function (`./finish.ts`) so a re-run cannot do
+    // it differently — see its header for the step this vertical deliberately
+    // does NOT have.
+    const { category, summary, kept: keptFrames } = await finishVimeoSummary({
+      raw: result.result,
+      jobId,
+      videoId: meta.videoId,
+      frames,
+      ...(resolved.framesRoot !== undefined ? { framesRoot: resolved.framesRoot } : {}),
+      onCategory: (c) => setCategory(jobId, c),
+    });
 
     log.info("Summarized {videoId}: category={category}, {tokens} output tokens, {frames} frames read, {kept} quoted", {
       videoId: meta.videoId,

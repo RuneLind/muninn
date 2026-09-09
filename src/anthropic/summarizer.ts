@@ -4,7 +4,8 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { getLog } from "../logging.ts";
 import { AI_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { buildSummarySystemPrompt, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { buildAnthropicSystemPrompt } from "./prompt.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { setCandidateStatus, type SummaryCandidateKind } from "../db/summary-candidates.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
@@ -71,21 +72,8 @@ function collectionRelativeId(filePath: string): string {
 // SUMMARY_STRUCTURE_BULLETS (key-takeaways-first, tables-for-comparative,
 // consistent ## headings, plain markdown), so it steers the `## Key takeaways`
 // section instead of duplicating the whole bullet list per vertical.
-const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
-  "You are an analyst summarizing a new Anthropic / Claude ecosystem release (a docs page, blog post, changelog, or commit) for a personal learning shelf. Lead the Key takeaways with what changed and why it matters.",
-  AI_CATEGORIES,
-);
-
-/**
- * X variant of the summarize system prompt — for a captured long-form X post/article
- * (borrows the framing of `src/x-article/summarizer.ts`). Same CATEGORY:/SUMMARY:
- * contract + AI_CATEGORIES clamp as the anthropic prompt, so the parser is unchanged;
- * only the framing (a personal note, not an Anthropic release) differs.
- */
-const X_SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
-  "You are an analyst summarizing a long-form X (Twitter) post or article for a personal learning shelf. The content below is one author's note/thread — distill its argument and takeaways for a senior AI engineer. Lead the Key takeaways with the author's main point and why it matters.",
-  AI_CATEGORIES,
-);
+// The two framings and the linked-content rider now live in `./prompt.ts`, so
+// `/summaries/prompts` and a re-run compose the same string this job sends.
 
 /**
  * Which link-enrichment path ran on the X source-doc branch, for the capture
@@ -400,22 +388,6 @@ async function fetchEnrichmentContent(
 }
 
 /**
- * Kind-scoped framing appended to the system prompt when the tweet's linked
- * content was folded in. `x-link` (arrives with PR 3) treats the destination as
- * the PRIMARY subject; every other kind (`x-post`, the pre-PR-3 long-form
- * population) treats it as SUPPORTING CONTEXT only, keeping the post the subject.
- */
-function enrichmentFraming(kind: string | null | undefined, destinationOnly = false): string {
-  if (destinationOnly) {
-    return "The content below is the destination artifact itself, fetched directly — the pointer post that surfaced it could not be resolved and is NOT included. Summarize the destination on its own terms; do not refer to a post.";
-  }
-  if (kind === "x-link") {
-    return "The content below includes a `--- LINKED CONTENT ---` section fetched from the link this tweet points to. Treat that linked content as the PRIMARY subject — summarize what the destination says; the tweet itself is just the pointer and context.";
-  }
-  return "The content below includes a `--- LINKED CONTENT ---` section fetched from a link in the post. Treat it as SUPPORTING CONTEXT only — the author's own post stays the subject of the summary.";
-}
-
-/**
  * Background pipeline for one candidate: resolve content → summarize → ingest
  * into `anthropic-summaries` → flip the candidate to `summarized` (+ doc_id) or
  * `error`. The route/auto-promote caller is responsible for setting the
@@ -453,12 +425,13 @@ export async function summarizeCandidate(
     // is the destination-keyed stale-doc fallback: the body is pure article/transcript
     // content with no tweet in it, so the tweet framing ("one author's note/thread")
     // would misdescribe what the model is reading.
-    const basePrompt =
-      sourceDocId && !content.destinationOnly ? X_SUMMARIZE_SYSTEM_PROMPT : SUMMARIZE_SYSTEM_PROMPT;
-    const systemPrompt = `${basePrompt}
-
-Title: ${title}
-URL: ${url}${enriched ? `\n\n${enrichmentFraming(kind, content.destinationOnly)}` : ""}`;
+    const framing = sourceDocId && !content.destinationOnly ? "x-post" : "anthropic";
+    const systemPrompt = buildAnthropicSystemPrompt({
+      framing,
+      title,
+      url,
+      ...(enriched ? { enrichment: { kind, destinationOnly: content.destinationOnly } } : {}),
+    });
 
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {

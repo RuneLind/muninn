@@ -15,6 +15,8 @@ into huginn.
 | `label.ts` | The FONT-FREE label renderer, import-free: a 5×7 glyph table, integer scaling, and a binary PGM strip. `drawtext` needs a libfreetype build the hosts do not have |
 | `scan-run.ts` | Its ffmpeg half: one decode pass producing thumbnails + signatures, the labelled tiled sheets (`contactSheetArgs`), the full-height re-grab |
 | `summarizer.ts` | The job: probe → transcript → download → frames (dense two-pass, or cadence) → `runCaptureOneShot` → ingest → source-draft |
+| `prompt.ts` | The two prompts as PURE builders (`buildYouTubeSystemPrompt` / `buildYouTubeUserPrompt`, plus the piece split `/summaries/prompts` tints by). Its own module so a view and the re-run can compose a prompt without yt-dlp, ffmpeg and the wiki queue behind it |
+| `finish.ts` | The post-model tail as ONE function (`finishYouTubeSummary`): parse → `enforceVisualReferences` → `keepReferencedFrames` → `dropFrameReferences` for whatever the copy could not serve. **A re-run must call this**, or it stores model-invented slide addresses the route 404s |
 | `kinds.ts` | `youtubeCaptureKinds` — the offer set this vertical narrows, called by the options route, the `bad_kind` check and the replay harness |
 | `extension-options-rules.ts` | The popup's rules, pure and import-free — payload validation, restore-and-revalidate, the restore NOTE, the POST body. Emitted into `extensions/youtube/capture-rules.js` by `bun run build:extension` |
 | `extension-build.ts` | That emitter. Bundles for the browser and normalizes bun's cwd-relative module banner, so the byte gate cannot depend on where it ran |

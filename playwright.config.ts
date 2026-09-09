@@ -10,11 +10,13 @@ export default defineConfig({
   testMatch: "**/*.spec.ts",
   timeout: 30_000,
   retries: 0,
-  // Spec FILES run in parallel, and FIFTEEN of them boot a muninn of their own
-  // — 18 muninn processes, since `plans-write` boots 3 and `auth-zones` 2
-  // (`summaries-share` and `entra-identity` each boot one muninn plus an
-  // IN-PROCESS `node:http` stub — a huginn and a Texas — not a second process),
-  // on top of this config's own shared server on 3011. Each is a Bun process that
+  // Spec FILES run in parallel, and TWENTY-SEVEN of them boot a muninn of their
+  // own — 30 CONCURRENT muninn processes, since `plans-write` boots 3 and
+  // `auth-zones` 2 (`summaries-share`, `summaries-delete`, `summaries-vimeo` and
+  // `entra-identity` each boot one muninn plus an IN-PROCESS `node:http` stub —
+  // a huginn or a Texas — not a second process), on top of this config's own
+  // shared server on 3011. 31 cumulative: `summaries-prompts` restarts its one
+  // server mid-file, since a bot's `prompts/` dir is read at discovery. Each is a Bun process that
   // bundles the client with `Bun.build` and tries to start its MCP adapters. On a developer's machine that fits; on a 2-core runner it
   // does not, and the way it fails is not a bind error but a CLICK LANDING BEFORE
   // THE PAGE'S INLINE SCRIPT ATTACHED ITS LISTENER — a different spec each run.

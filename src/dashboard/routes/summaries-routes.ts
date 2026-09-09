@@ -2,6 +2,8 @@ import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderSummariesPage } from "../views/summaries-page.ts";
+import { renderSummariesPromptsPage } from "../views/summaries-prompts-page.ts";
+import { buildPromptMatrix } from "../../summaries/prompt-matrix.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { capturePresetOptions, resolveCapturePresets } from "../../summaries/presets.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
@@ -146,6 +148,29 @@ export function registerSummariesRoutes(
     // The Slides checkbox is live only where the Vimeo route would not 503 it.
     const framesSupported = summarizerBot ? connectorCapabilities(summarizerBot).supportsExtraDirs : false;
     return c.html(await renderSummariesPage({ captureKinds, framesSupported }));
+  });
+
+  /**
+   * `/summaries/prompts` — what every capture combination sends the model.
+   *
+   * Pure rendering: `buildPromptMatrix` calls the verticals' own prompt builders
+   * over one fixed placeholder input, so the page spends no model call, writes
+   * nothing, and reads nothing but the bot roster. `?bot=` picks whose kinds and
+   * whose `prompts/captureSummary.<id>.md` paths the table is about; an unknown
+   * or absent name falls back to the summarizer bot, which is the bot the capture
+   * jobs would actually run on.
+   *
+   * No bots at all ⇒ a plain 503 rather than an empty grid: with no bot there is
+   * no kind set and no override path, so every cell would be a lie by omission.
+   */
+  app.get("/summaries/prompts", (c) => {
+    const bots = discoverAllBots();
+    const wanted = c.req.query("bot")?.trim().toLowerCase();
+    const bot =
+      (wanted ? bots.find((b) => b.name.toLowerCase() === wanted) : undefined) ??
+      resolveSummarizerBot(bots);
+    if (!bot) return c.text("No bots are configured, so there are no capture prompts to show.", 503);
+    return c.html(renderSummariesPromptsPage(buildPromptMatrix(bot, bots)));
   });
 
   // Share: `POST /api/summaries/share` (SSE) + its preset list — the doc panel's

@@ -127,6 +127,7 @@ function installFetchMock() {
 }
 
 const { summarizeXVideo } = await import("./video.ts");
+const { buildXVideoSystemPrompt, buildXVideoUserPrompt } = await import("./video-prompt.ts");
 const { createJob, getJob } = await import("./state.ts");
 
 const config = {
@@ -283,4 +284,38 @@ test("the system prompt carries the shared structure rules, incl. the verbatim-a
   // Named explicitly: an X video that reads a prompt out loud is the case the
   // verbatim rule exists for, and this vertical also sees on-screen text.
   expect(lastSystemPrompt).toContain("reproduce it VERBATIM inside a fenced code block");
+});
+
+/**
+ * The run uses the BUILDERS — the pin PR 3's re-run and `/summaries/prompts`
+ * stand on. The URL on the prompt is the BARE status url, the same one the
+ * ingest keys on, never yt-dlp's `/video/1` media-slot spelling.
+ */
+test("the run sends exactly the builders' output, system and user", async () => {
+  const jobId = createJob("2081279674966044799", "My X video", SLOT_URL, "");
+  await summarizeXVideo(jobId, SLOT_URL, "My X video", config, bot);
+
+  const workDir = downloadCalls[0]!.workDir;
+  const frames = framesResult.map((f) => ({ path: join(workDir, f.path), tSeconds: f.tSeconds }));
+  expect(lastSystemPrompt).toBe(
+    buildXVideoSystemPrompt({ title: "My X video", url: BARE_STATUS_URL, author: "coolcoder" }),
+  );
+  expect(lastPrompt).toBe(buildXVideoUserPrompt({ transcript, frames }));
+  expect(lastPrompt).not.toBe(buildXVideoUserPrompt({ transcript, frames: [] }));
+  // Not the media-slot url — a prompt built from `dl.canonicalUrl` would say
+  // `/video/1` and disagree with the document the capture writes.
+  expect(lastSystemPrompt).not.toBe(
+    buildXVideoSystemPrompt({ title: "My X video", url: SLOT_URL, author: "coolcoder" }),
+  );
+});
+
+test("a speechless clip sends the builder's no-speech sentence, not an empty section", async () => {
+  transcript = "";
+  const jobId = createJob("2081279674966044799", "My X video", SLOT_URL, "");
+  await summarizeXVideo(jobId, SLOT_URL, "My X video", config, bot);
+
+  const workDir = downloadCalls[0]!.workDir;
+  const frames = framesResult.map((f) => ({ path: join(workDir, f.path), tSeconds: f.tSeconds }));
+  expect(lastPrompt).toBe(buildXVideoUserPrompt({ transcript: "", frames }));
+  expect(lastPrompt).toContain("No speech detected — summarize from the frames.");
 });

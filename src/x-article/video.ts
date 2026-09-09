@@ -5,8 +5,9 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
-import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { ingestSummary, runCaptureOneShot, SUMMARY_STRUCTURE_BULLETS } from "../summaries/summarizer-shared.ts";
+import { ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { buildXVideoSystemPrompt, buildXVideoUserPrompt } from "./video-prompt.ts";
+import { finishXVideoSummary } from "./video-finish.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
   downloadVideo,
@@ -39,37 +40,9 @@ const MAX_DURATION_SECONDS = 10800;
 // Gigabyte-scale downloads outrun the 120s short-clip default.
 const DOWNLOAD_TIMEOUT_MS = 600_000;
 
-// Mirrors the TikTok prompt — the "no commentary" line is load-bearing (see
-// src/tiktok/summarizer.ts): without it the model narrates between frame Reads
-// and the chatter leaks into the streamed shelf card.
-const SUMMARIZE_SYSTEM_PROMPT = `You are a video content analyst. Summarize the following X/Twitter video, using BOTH its speech transcript and the extracted keyframe images.
-
-Instructions:
-1. Read ALL the frame images listed below (with the Read tool) FIRST, batching many Read tool calls into one turn (parallel tool calls) — do NOT read one frame per message. X videos often carry key information on screen — capture slides, charts, code, captions, and visual demos.
-2. Note explicitly when key information is visual-only (not spoken).
-3. Start your response with EXACTLY this line: CATEGORY: <category>
-   Choose from: ${VALID_CATEGORIES.join(", ")}
-4. Then add a blank line, then SUMMARY: on its own line
-5. Then write a structured summary with:
-   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}
-6. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response. Do not narrate the frames as you read them.`;
-
 export interface SummarizeVideoOptions {
   /** When false, skip keyframe extraction (transcript-only summary). Default true. */
   frames?: boolean;
-}
-
-/** Format a timestamp (seconds) as `M:SS` for the frame list. */
-function formatTimestamp(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds));
-  const mins = Math.floor(s / 60);
-  const secs = s % 60;
-  return `${mins}:${String(secs).padStart(2, "0")}`;
-}
-
-/** Build the `t=M:SS <path>` frame list block for the user prompt. */
-function frameListBlock(frames: Keyframe[]): string {
-  return frames.map((f) => `t=${formatTimestamp(f.tSeconds)} ${f.path}`).join("\n");
 }
 
 /**
@@ -145,20 +118,14 @@ export async function summarizeXVideo(
 
     const ingestTitle = title !== url ? title : dl.title || canonicalUrl;
 
-    const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}
-
-Video title: ${ingestTitle}
-Video URL: ${canonicalUrl}
-Author: ${dl.uploader}`;
-
-    const transcriptSection = transcript
-      ? `Transcript:\n${transcript}`
-      : "No speech detected — summarize from the frames.";
-    const framesSection =
-      frames.length > 0
-        ? `\n\nKeyframes (read each image before summarizing):\n${frameListBlock(frames)}`
-        : "";
-    const userPrompt = `${transcriptSection}${framesSection}`;
+    // Both compositions are `./video-prompt.ts`, so the re-run and
+    // `/summaries/prompts` send and show exactly what this call does.
+    const systemPrompt = buildXVideoSystemPrompt({
+      title: ingestTitle,
+      url: canonicalUrl,
+      author: dl.uploader,
+    });
+    const userPrompt = buildXVideoUserPrompt({ transcript, frames });
 
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {
@@ -182,9 +149,12 @@ Author: ${dl.uploader}`;
       thinkingMaxTokens: null,
     });
 
-    // 5. Parse response.
-    const { category, summary } = parseSummaryResponse(result.result);
-    setCategory(jobId, category);
+    // 5. The post-model tail, in ONE function (`./video-finish.ts`) so a re-run
+    //    calls the vertical's tail rather than deciding what it is.
+    const { category, summary } = finishXVideoSummary({
+      raw: result.result,
+      onCategory: (c) => setCategory(jobId, c),
+    });
 
     log.info("Summarized X video {statusId}: category={category}, {frames} frames, {tokens} output tokens", {
       statusId: extractXStatusId(canonicalUrl) ?? dl.id,

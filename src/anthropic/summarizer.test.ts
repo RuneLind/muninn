@@ -155,6 +155,9 @@ mock.module("node:dns/promises", () => ({
 }));
 
 const { summarizeCandidate } = await import("./summarizer.ts");
+const { buildAnthropicSystemPrompt } = await import("./prompt.ts");
+const { buildArticleSystemPrompt } = await import("../article/prompt.ts");
+const { buildXArticleSystemPrompt } = await import("../x-article/prompt.ts");
 const { createJob, getJob } = await import("./state.ts");
 
 const config = { knowledgeApiUrl: "http://kb.test" } as unknown as Config;
@@ -544,4 +547,52 @@ test("X candidate: a doc with no external link is byte-identical tweet-only cont
   const job = getJob(jobId)!;
   expect(job.status).toBe("complete");
   expect(lastPrompt).not.toContain("LINKED CONTENT");
+});
+
+/**
+ * The run uses ITS OWN builder, over the right arguments.
+ *
+ * Three text verticals compose their system prompt out of the same shared
+ * scaffold, so a call site pointed at the neighbour's builder still produces a
+ * plausible prompt and still parses — and the two FRAMINGS are a fork nothing
+ * but an equality can hold, since both spell the same envelope around a
+ * different first sentence.
+ */
+test("the anthropic framing is this builder's output, not a neighbouring vertical's", async () => {
+  const jobId = createJob("cand-pin", "Update claude-api skill", CAND_URL);
+  await summarizeCandidate(jobId, "cand-pin", "Update claude-api skill", CAND_URL, config, bot);
+
+  expect(lastSystemPrompt).toBe(
+    buildAnthropicSystemPrompt({ framing: "anthropic", title: "Update claude-api skill", url: CAND_URL }),
+  );
+  // The OTHER framing is a different prompt, so the equality pins the branch.
+  expect(lastSystemPrompt).not.toBe(
+    buildAnthropicSystemPrompt({ framing: "x-post", title: "Update claude-api skill", url: CAND_URL }),
+  );
+  // Neither neighbour's builder, over the same title and url.
+  expect(lastSystemPrompt).not.toBe(
+    buildArticleSystemPrompt({ title: "Update claude-api skill", url: CAND_URL }),
+  );
+  expect(lastSystemPrompt).not.toBe(
+    buildXArticleSystemPrompt({ title: "Update claude-api skill", author: "someone", url: CAND_URL }),
+  );
+  // The context lines themselves — a builder that dropped one moves both sides.
+  expect(lastSystemPrompt).toContain("Title: Update claude-api skill");
+  expect(lastSystemPrompt).toContain(`URL: ${CAND_URL}`);
+  // No linked content was folded in, so there is no enrichment rider at all.
+  expect(lastSystemPrompt).not.toContain("LINKED CONTENT");
+});
+
+test("an X candidate takes the x-post framing through the same builder", async () => {
+  docListing = [];
+  docText = "# @karpathy — Andrej Karpathy\n\nA long note on agent design and evals…";
+  const jobId = createJob("x-pin", "@karpathy: a long note", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-pin", "@karpathy: a long note", X_TWEET_URL, config, bot, X_DOC_ID);
+
+  expect(lastSystemPrompt).toBe(
+    buildAnthropicSystemPrompt({ framing: "x-post", title: "@karpathy: a long note", url: X_TWEET_URL }),
+  );
+  expect(lastSystemPrompt).not.toBe(
+    buildAnthropicSystemPrompt({ framing: "anthropic", title: "@karpathy: a long note", url: X_TWEET_URL }),
+  );
 });
