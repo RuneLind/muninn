@@ -16,6 +16,7 @@ import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
+import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
 
 const log = getLog("dashboard");
 
@@ -218,15 +219,17 @@ export function registerVimeoRoutes(
   const recentIngests = new Map<string, VimeoRecentIngest>();
 
   function rememberIngest(videoId: string, documentId: string, existingUrl: string): void {
-    // A plain `set`, and that is only correct because this key is NEVER already
-    // present — `Map.set` on an existing key keeps its ORIGINAL insertion
-    // position, so a re-insert would age wrongly under the eviction below.
-    //
-    // Enumerated rather than assumed: this runs only from the ingest hook of a
-    // capture, a capture starts only past `recentIngest(videoId)` returning null
-    // (which DELETES an entry it found expired), and `inFlight` admits one
-    // capture per video at a time — so no live entry can exist here. A change
-    // that breaks any of those three needs a `delete` before this line.
+    // DELETE then set, the `rememberDelete` shape. It used to be a plain `set`,
+    // enumerating why the key could never already be present: this ran only from
+    // the ingest hook of a capture, a capture starts only past
+    // `recentIngest(videoId)` returning null (which drops an expired entry), and
+    // `inFlight` admits one capture per video at a time. The capture RE-RUN
+    // (`POST /api/summaries/rerun`) is the change that breaks all three — it
+    // re-ingests a document this process may have captured minutes ago and takes
+    // no in-flight claim — and `Map.set` on an existing key keeps its ORIGINAL
+    // insertion position, so the refreshed entry would age out first under the
+    // insertion-ordered eviction below.
+    recentIngests.delete(videoId);
     recentIngests.set(videoId, { documentId, existingUrl, at: now() });
     // The listing's row under this id is a real document again.
     recentDeletes.delete(documentId);
@@ -236,6 +239,12 @@ export function registerVimeoRoutes(
       recentIngests.delete(oldest.value);
     }
   }
+
+  // The capture RE-RUN ingests without going through `summarizeVimeo`'s
+  // `onIngested` hook, so it announces its document here instead — the map is
+  // closure-private and this registration is the only way in. Never
+  // unsubscribed, exactly like the delete listener below.
+  registerRecentIngestSink("vimeo", rememberIngest);
 
   // The one invalidation the map has: a `/summaries` Delete goes through
   // `backlog-doc-delete`, which announces the document AFTER huginn confirmed

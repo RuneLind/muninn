@@ -89,6 +89,15 @@ export interface YouTubeUserPromptInput {
   readonly videoId: string;
   readonly frames: readonly CaptureFrame[];
   readonly visualDetail: VisualDetail;
+  /**
+   * Does this frame list have a CADENCE the prompt may state? Absent ⇒ yes,
+   * which is every capture: the frames came off one sampler, evenly spaced.
+   *
+   * The capture RE-RUN passes `false`. Its list is whatever the previous
+   * summary happened to quote, so the median gap between two survivors is not a
+   * sampling interval — see `framesPromptSection`.
+   */
+  readonly cadence?: boolean;
 }
 
 /**
@@ -119,6 +128,7 @@ export function buildYouTubeUserPrompt(transcript: string, input: YouTubeUserPro
             videoId,
             frames.some((f) => (f.note ?? "") !== ""),
           ),
+          input.cadence === false ? { cadence: false } : undefined,
         )
       : "")
   );

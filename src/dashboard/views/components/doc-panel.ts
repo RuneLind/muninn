@@ -130,6 +130,79 @@ export function docPanelStyles(animationName = "slideIn"): string {
        reads as the danger colour on hover and never as an accent link. */
     button.doc-panel-danger:hover { border-color: var(--status-error); color: var(--status-error); }
     button.doc-panel-danger:disabled { opacity: 0.5; cursor: progress; }
+    /* --- ↻ Re-run ▾ : one header button that opens a small dropdown. The
+       button is the same shape as its flat neighbours; the popup is the only
+       new furniture, and it is positioned against a wrapper rather than the
+       header row so it cannot be clipped by the row's own overflow. --- */
+    .doc-panel-menu { position: relative; flex-shrink: 0; }
+    .doc-panel-menu[hidden] { display: none; }
+    .doc-panel-menu-pop {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      z-index: 5;
+      min-width: 240px;
+      max-width: 340px;
+      padding: 6px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-secondary);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      text-align: left;
+    }
+    .doc-panel-menu-pop[hidden] { display: none; }
+    .doc-panel-menu-item {
+      background: none;
+      border: none;
+      font: inherit;
+      font-size: 13px;
+      color: var(--text-secondary);
+      text-align: left;
+      padding: 6px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: normal;
+    }
+    .doc-panel-menu-item:hover:not(:disabled) { background: var(--bg-surface); color: var(--text-primary); }
+    .doc-panel-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    /* --text-muted, NOT --text-dim, on both of the next two rules. Measured
+       against --bg-panel, the popup's own ground: --text-dim is 3.24:1 dark and
+       3.74:1 light, i.e. under AA in both themes, and --text-muted is 5.26:1 and
+       4.94:1. It matters more here than the numbers alone suggest — a disabled
+       item and the notes beside it are where this menu says WHY a run is not on
+       offer, so the text that fails contrast is the text carrying the reason. */
+    .doc-panel-menu-item:disabled { color: var(--text-muted); cursor: not-allowed; }
+    .doc-panel-menu-rule { height: 1px; background: var(--border-primary); margin: 4px 2px; }
+    .doc-panel-menu-note {
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--text-muted);
+      padding: 4px 10px 6px;
+      white-space: normal;
+    }
+    /* The re-run's own status line, under the header and above the body: the
+       menu closes on the click that starts a run, and the job card behind the
+       overlay is not visible while the panel is open. */
+    .doc-panel-notice {
+      flex-shrink: 0;
+      padding: 8px 20px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-secondary);
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-primary);
+    }
+    .doc-panel-notice[hidden] { display: none; }
+    .doc-panel-notice.err { color: var(--status-error); }
+    /* The notice's one link (the "waterfall ↗" a stored prompt offers) had NO
+       rule, so it fell through to the user agent's own #0000EE — 1.82:1 on
+       --bg-surface in dark mode, effectively invisible. --accent-light measures
+       7.37:1 dark and 5.77:1 light on that ground. */
+    .doc-panel-notice a { color: var(--accent-light); text-decoration: underline; }
+    .doc-panel-notice a:hover { color: var(--accent); }
     .doc-panel-body {
       flex: 1;
       overflow-y: auto;
@@ -153,6 +226,16 @@ export const DOC_PANEL_DELETE_BTN_ID = "docPanelDelete";
 /** The ⬇ Export link's id — a plain download anchor the opener points at
  *  `GET /api/summaries/export?source=&docId=` for the document it shows. */
 export const DOC_PANEL_EXPORT_LINK_ID = "docPanelExport";
+
+/** The `↻ Re-run ▾` control: the wrapper (hidden for a source the re-run route
+ *  cannot serve), the button that opens the menu, the popup the client fills
+ *  from `GET /api/summaries/rerun/options`, and the status line under the
+ *  header. Four ids rather than one, because the click handler, the click-away
+ *  test and the SSE progress each address a different node. */
+export const DOC_PANEL_RERUN_WRAP_ID = "docPanelRerunWrap";
+export const DOC_PANEL_RERUN_BTN_ID = "docPanelRerun";
+export const DOC_PANEL_RERUN_MENU_ID = "docPanelRerunMenu";
+export const DOC_PANEL_RERUN_STATUS_ID = "docPanelRerunStatus";
 
 /**
  * HTML markup for the slide-in doc panel overlay.
@@ -187,14 +270,27 @@ export function docPanelHtml(
     share = false,
     remove = false,
     exportPage = false,
-  }: { askFollowUp?: boolean; share?: boolean; remove?: boolean; exportPage?: boolean } = {},
+    rerun = false,
+  }: {
+    askFollowUp?: boolean;
+    share?: boolean;
+    remove?: boolean;
+    exportPage?: boolean;
+    rerun?: boolean;
+  } = {},
 ): string {
   return `
   <div class="doc-overlay" id="docOverlay" onclick="if(event.target===this)closeDocPanel()">
     <div class="doc-panel">
       <div class="doc-panel-header">
         <button class="doc-panel-close" onclick="closeDocPanel()">&larr; Back</button>
-        <span class="doc-panel-title" id="docPanelTitle"></span>${share ? `
+        <span class="doc-panel-title" id="docPanelTitle"></span>${rerun ? `
+        <span class="doc-panel-menu" id="${DOC_PANEL_RERUN_WRAP_ID}" hidden>
+          <button class="doc-panel-followup" id="${DOC_PANEL_RERUN_BTN_ID}" type="button"
+            aria-haspopup="menu" aria-expanded="false" aria-controls="${DOC_PANEL_RERUN_MENU_ID}"
+            title="Summarize this document again from the transcript it stored">&#8635; Re-run &#9662;</button>
+          <div class="doc-panel-menu-pop" id="${DOC_PANEL_RERUN_MENU_ID}" role="menu" hidden></div>
+        </span>` : ""}${share ? `
         <button class="doc-panel-followup" id="${DOC_PANEL_SHARE_BTN_ID}" type="button"
           title="Turn this summary into a post you can paste into Slack or an email">&#128228; Share</button>` : ""}${remove ? `
         <button class="doc-panel-followup doc-panel-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button"
@@ -203,7 +299,8 @@ export function docPanelHtml(
           title="Download this summary as a standalone HTML page, with its slides in a folder beside it">&#11015; Export</a>` : ""}${askFollowUp ? `
         <a class="doc-panel-followup" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}
         <div class="doc-panel-links" id="docPanelLinks"></div>
-      </div>
+      </div>${rerun ? `
+      <div class="doc-panel-notice" id="${DOC_PANEL_RERUN_STATUS_ID}" hidden></div>` : ""}
       <div class="doc-panel-body" id="docPanelBody"></div>
     </div>
   </div>`;

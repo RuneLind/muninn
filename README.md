@@ -484,6 +484,16 @@ headless Chromium of muninn's own to harvest the video's captions, so a URL is
 the whole input. Pasting a Vimeo link into the article textarea works too — it is
 forwarded to the same submit.
 
+A stored summary can be **re-run** without re-fetching the source: the
+`↻ Re-run ▾` menu in the `/summaries` doc panel re-summarizes the document from
+the `## Transcript` appendix it already carries, in the same kind or another one,
+and writes the result back over the SAME file — every frontmatter field re-sent
+verbatim, with only `summary_kind` changed. Only the slides the previous summary
+quoted are available to it (nothing is downloaded again), and a document that
+stored no transcript says so instead of offering the run. The menu's "Show
+prompt" opens the prompt the capture's summary pass was sent
+(`GET /api/summaries/prompt?url=`).
+
 What each of them actually sends the model is on **`/summaries/prompts`**
 (reached from the Prompts link in the `/summaries` header): one table, capture
 sources down and summary kinds across, with a drawer per combination carrying the

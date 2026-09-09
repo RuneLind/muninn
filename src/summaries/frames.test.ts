@@ -294,6 +294,32 @@ describe("framesPromptSection", () => {
     const irregular: CaptureFrame[] = [0, 5, 25, 50].map((t) => ({ path: `/work/${t}.jpg`, tSeconds: t }));
     expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", irregular)).toContain("one every ~20 s");
   });
+
+  test("`cadence: false` drops the spacing clause and changes nothing else", () => {
+    // For a caller whose frame list is not a sample of the video: the capture
+    // RE-RUN lists whatever the previous summary QUOTED, so the median gap
+    // between two survivors is not a sampling interval and stating one invents
+    // a measurement. Omitted, never zeroed — "one every ~0 s" would be worse.
+    const spread: CaptureFrame[] = [30, 900].map((t) => ({ path: `/work/${t}.jpg`, tSeconds: t }));
+    const stated = framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", spread);
+    expect(stated).toContain("one every ~870 s");
+
+    const silent = framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", spread, undefined, { cadence: false });
+    expect(silent).not.toContain("one every");
+    // Everything BUT the clause is the same string, which is what makes the
+    // opt-out a removal rather than a second prompt.
+    expect(silent).toBe(stated.replace(", one every ~870 s of the talk", ""));
+  });
+
+  test("the CAPTURE path is byte-identical: no option, and an explicit `cadence: true`", () => {
+    // The pin the opt-out needs: every existing caller passes no fifth argument,
+    // and adding one must not have moved a byte of what they get.
+    const spread: CaptureFrame[] = [30, 900].map((t) => ({ path: `/work/${t}.jpg`, tSeconds: t }));
+    const bare = framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", spread);
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", spread, undefined, {})).toBe(bare);
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", spread, undefined, { cadence: true })).toBe(bare);
+    expect(framesPromptSection(VIMEO_FRAME_SOURCE, "1223642971", spread, undefined, undefined)).toBe(bare);
+  });
 });
 
 describe("referencedFrameSeconds", () => {

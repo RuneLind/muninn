@@ -57,6 +57,7 @@
  * from then on, which writes plain files it copied itself.
  */
 
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { copyFile, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
@@ -302,12 +303,22 @@ export function frameUrlPath(source: FrameSource, id: string, tSeconds: number):
  * raise the inline cap: {@link MAX_INLINE_SLIDES} is the seam's bound, and a
  * vertical asking for more is a THROW rather than a summary that is a slide
  * deck.
+ *
+ * **`opts.cadence: false` drops the spacing clause**, for a caller whose frame
+ * list is not a cadence. Every CAPTURE hands over frames laid down by one — so
+ * the median gap really is "one every ~N s" — but the capture RE-RUN lists
+ * whatever the previous summary happened to QUOTE, where two surviving frames
+ * 30 s and 900 s apart would tell the model the talk is sampled every ~870 s.
+ * A fabricated number the model then reasons from. Omitted, not zeroed: the
+ * honest answer is that this list has no cadence. Called without `opts` (or
+ * with `cadence` unset) the section is byte-identical, which a test pins.
  */
 export function framesPromptSection(
   source: FrameSource,
   id: string,
   frames: readonly CaptureFrame[],
   policy?: FramesPromptPolicy,
+  opts?: { cadence?: boolean },
 ): string {
   if (frames.length === 0) return "";
   assertFrameId(source, id);
@@ -319,7 +330,7 @@ export function framesPromptSection(
   const list = frames
     .map((f) => `t=${formatHms(f.tSeconds)} ${f.path}${f.note ? ` — ${f.note}` : ""}`)
     .join("\n");
-  const spacing = medianGapSec(frames);
+  const spacing = opts?.cadence === false ? null : medianGapSec(frames);
   const cadence = spacing === null ? "" : `, one every ~${spacing} s of the talk`;
   const rules =
     policy?.rules ??
@@ -525,7 +536,7 @@ export async function keepReferencedFrames(
       continue;
     }
     try {
-      await copyFile(frame.path, join(dir, `${sec}.jpg`));
+      await copyKeptFrame(frame.path, join(dir, `${sec}.jpg`));
     } catch (err) {
       log.warn("Could not keep frame {sec}.jpg of {source} {id} ({error}) — its reference is dropped instead", {
         source: source.name,
@@ -538,6 +549,49 @@ export async function keepReferencedFrames(
     kept.push(sec);
   }
   return kept;
+}
+
+/**
+ * What {@link keepReferencedFrames} does with ONE frame: copy it to the served
+ * root, or — when it is already exactly there — leave it alone.
+ *
+ * **A frame already AT its destination is kept, not copied.** Every CAPTURE
+ * hands frames over in a dying work dir, so source and destination always
+ * differ there; the capture RE-RUN lists the frames the first capture already
+ * kept, i.e. the root IS where they live and `src` IS `dest`. `copyFile(p, p)`
+ * is measured harmless on macOS/Bun (resolves, file intact) and is unproven on
+ * Linux — POSIX leaves a self-copy undefined and the plausible failure is a
+ * truncate-then-write that destroys the only copy of the frame.
+ *
+ * **"The same path" is decided by `realpathSync` when both ends exist**, and by
+ * a lexical {@link resolve} otherwise. `resolve` alone is a purely textual
+ * answer: it normalizes `..` and `.` and nothing else, so a served root reached
+ * through a symlink — the shape `wikiWriteQueueKey` exists for, and the shape
+ * `/tmp` → `/private/tmp` gives every macOS temp dir — spells the same file two
+ * ways and the guard misses. The fallback is not a degradation: `realpathSync`
+ * throws for a path that does not exist, and a `dest` that does not exist yet
+ * is the ordinary capture case, where the two are different files anyway.
+ *
+ * Its own exported function, with the copy injectable, because the guard is
+ * INVISIBLE from the filesystem on the platform this is developed on: without a
+ * seam, a test of the same-path case passes whether the guard is there or not.
+ */
+export async function copyKeptFrame(
+  src: string,
+  dest: string,
+  copy: (from: string, to: string) => Promise<void> = copyFile,
+): Promise<void> {
+  if (samePath(src, dest)) return;
+  await copy(src, dest);
+}
+
+/** `realpathSync` on both ends when both exist, else a lexical `resolve`. */
+function samePath(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return resolve(a) === resolve(b);
+  }
 }
 
 /**

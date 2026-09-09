@@ -16,8 +16,11 @@ import {
   renderExportMarkdown,
   renderExportPage,
   rewriteFrameUrls,
-  splitTranscript,
 } from "./export.ts";
+// The split's DECLARATION site, not the export's re-export of it: it moved to
+// `transcript-split.ts` when the capture re-run became its third server-side
+// reader, and this file's whole job on it is the parity with the client copy.
+import { splitTranscript } from "./transcript-split.ts";
 import { VIMEO_FRAME_SOURCE, YOUTUBE_FRAME_SOURCE } from "./frames.ts";
 import { sumArticleLibraryScript } from "../dashboard/views/components/sum-article-library.ts";
 

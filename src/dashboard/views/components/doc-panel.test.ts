@@ -1,5 +1,12 @@
 import { describe, test, expect } from "bun:test";
-import { docPanelHtml, docPanelScript, DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID } from "./doc-panel.ts";
+import {
+  docPanelHtml,
+  docPanelScript,
+  DOC_PANEL_SHARE_BTN_ID,
+  DOC_PANEL_DELETE_BTN_ID,
+  DOC_PANEL_RERUN_BTN_ID,
+  DOC_PANEL_RERUN_MENU_ID,
+} from "./doc-panel.ts";
 import { MARKED_CDN_SCRIPT } from "./doc-panel.ts";
 
 describe("docPanelHtml askFollowUp", () => {
@@ -42,6 +49,21 @@ describe("docPanelHtml askFollowUp", () => {
     expect(html).toContain("Delete");
     expect(html).not.toContain(DOC_PANEL_SHARE_BTN_ID);
     expect(html).not.toContain("docPanelFollowUp");
+  });
+
+  test("the re-run control is a real MENU button, so a screen reader announces the popup", () => {
+    // `aria-haspopup="menu"` (not the default `true`, which announces a plain
+    // menu-less popup) plus the `aria-controls` pointing at the `role="menu"`
+    // node and an initial `aria-expanded="false"` the script toggles. Every one
+    // of them is invisible on screen, so nothing but this asserts them.
+    const html = docPanelHtml({ rerun: true });
+    expect(html).toContain(`id="${DOC_PANEL_RERUN_BTN_ID}"`);
+    expect(html).toContain('aria-haspopup="menu"');
+    expect(html).toContain(`aria-controls="${DOC_PANEL_RERUN_MENU_ID}"`);
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain(`id="${DOC_PANEL_RERUN_MENU_ID}" role="menu"`);
+    // Opt-in like its three siblings: /search, /research and chat render none.
+    expect(docPanelHtml()).not.toContain(DOC_PANEL_RERUN_BTN_ID);
   });
 
   test("the shared opener seeds the follow-up href from the doc title", () => {

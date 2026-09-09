@@ -16,6 +16,7 @@ import { DEFAULT_COVERAGE_DEPS, type CoverageDeps } from "../../db/wiki-proposal
 import { registerSummariesShareRoutes } from "./summaries-share.ts";
 import { registerSummariesExportRoutes } from "./summaries-export.ts";
 import { registerSummariesPromptRoutes } from "./summaries-prompt.ts";
+import { registerSummariesRerunRoutes } from "./summaries-rerun.ts";
 import { registerFramesRoutes } from "./frames-routes.ts";
 
 const log = getLog("dashboard");
@@ -188,6 +189,13 @@ export function registerSummariesRoutes(
   // will call; that control is PR 3's and does not exist yet. Its own module for
   // the reason share has one: an adapter with injectable lookups.
   registerSummariesPromptRoutes(app);
+
+  // Re-run: `POST /api/summaries/rerun` + `GET /api/summaries/rerun/options` —
+  // the doc panel's `↻ Re-run ▾` menu. Its own module for the reason share and
+  // prompt have one: an adapter over the capture verticals, with every
+  // side-effecting seam injectable so its route tests need no huginn and no
+  // model call.
+  registerSummariesRerunRoutes(app, config);
 
   // The quoted slide frames of every capture vertical, plus the pre-seam Vimeo
   // alias. Here rather than in a group of its own: `summaries`, `vimeo` and

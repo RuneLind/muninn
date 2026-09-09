@@ -95,6 +95,13 @@ export const E2E_PORTS = {
   // instance on 8321. Registered so a future spec cannot bind it and turn that
   // guarantee into a live call.
   "summaries-prompts/dead-huginn": 8798,
+  // The doc panel's ↻ Re-run menu, end to end. ONE fake `node:http` server plays
+  // BOTH halves again: huginn (KNOWLEDGE_API_URL — including `?raw=1`, which is
+  // the whole point: the re-run reads the SOURCE FILE, not the cleaned JSON) and
+  // the OpenAI-compatible endpoint the spec's throwaway summarizer bot is
+  // pointed at, so the re-summarize spends no model call.
+  "summaries-rerun": 3055,
+  "summaries-rerun/fake": 3056,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

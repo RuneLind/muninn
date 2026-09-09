@@ -46,9 +46,18 @@ export interface CappedTranscript {
   /** UTF-8 bytes of the transcript handed in. */
   readonly inputBytes: number;
   /**
-   * UTF-8 bytes of {@link text}, the note included. Never above `maxBytes`
-   * EXCEPT in the note-alone band: a budget too small for even the heading
-   * answers with the note by itself, and the note is ~65 bytes.
+   * UTF-8 bytes of the CAPPED TRANSCRIPT, the truncation note included — the
+   * pair `inputBytes`/`keptBytes` is what a caller logs to say how much of the
+   * talk survived. Never above `maxBytes` EXCEPT in the note-alone band: a
+   * budget too small for even the heading answers with the note by itself, and
+   * the note is ~65 bytes.
+   *
+   * **Not the length of {@link text}, on every path.** It is, out of the two
+   * cappers, whose `text` IS the capped transcript. It is not out of
+   * {@link appendTranscriptSection}, whose `text` is the whole ingest body —
+   * the summary, the heading and the transcript. Reading this as "bytes of
+   * `text`" is how a caller comes to log the document's size as the
+   * transcript's.
    */
   readonly keptBytes: number;
 }

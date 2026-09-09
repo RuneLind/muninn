@@ -13,8 +13,32 @@
  * each doc carries its `source` so opens/similar/original-link route to the right
  * collection (SOURCES[source].apiBase). */
 
-import { docPanelStyles, DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID, DOC_PANEL_EXPORT_LINK_ID } from "./doc-panel.ts";
+import {
+  docPanelStyles,
+  DOC_PANEL_SHARE_BTN_ID,
+  DOC_PANEL_DELETE_BTN_ID,
+  DOC_PANEL_EXPORT_LINK_ID,
+  DOC_PANEL_RERUN_WRAP_ID,
+  DOC_PANEL_RERUN_BTN_ID,
+  DOC_PANEL_RERUN_MENU_ID,
+  DOC_PANEL_RERUN_STATUS_ID,
+} from "./doc-panel.ts";
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
+
+/**
+ * How many times, and how far apart, the doc panel re-reads a document after a
+ * re-run's job reports `complete`.
+ *
+ * huginn's ingest returns when the FILE is written; its document endpoint
+ * serves the re-indexed copy some seconds later — the listing-lag class this
+ * repo has been bitten by in four other verticals. ~5 tries at 2 s is ~10 s,
+ * which covers the lag observed on a single-document reindex and is short
+ * enough that a reader who is watching does not think the page has hung. Past
+ * it the panel SAYS the document has not re-indexed rather than claiming the
+ * body below is the new one.
+ */
+const RERUN_RELOAD_TRIES = 5;
+const RERUN_RELOAD_DELAY_MS = 2000;
 
 /** The whole /summaries share target as a browser expression — URLs, surface
  *  copy AND the two identity field NAMES, all emitted by the shared builder so
@@ -369,6 +393,12 @@ export function sumArticleLibraryScript(): string {
       // showing, and Generate would still summarize it. Same seam (and same
       // reason) as the reader's closeShareDialogOnNavigate.
       if (typeof closeShareDialog === 'function') closeShareDialog();
+      // A re-run started from this panel keeps running. Its ONE stream moves to
+      // the shelf's job card, which is the surface the reader can now see; the
+      // menu and its status line go with the panel.
+      handOffRerunStream();
+      closeRerunMenu();
+      setRerunStatus('');
       document.getElementById('docOverlay').classList.remove('visible');
       document.body.style.overflow = '';
     }
@@ -381,6 +411,14 @@ export function sumArticleLibraryScript(): string {
       // page load and the dialog's lazily on first open, so ours runs first: the
       // guard is what actually holds today.)
       if (document.getElementById('${SHARE_DIALOG_ID}')) return;
+      // The re-run menu and the prompt modal are both dismissed by Escape
+      // before the panel is: closing the panel out from under either one takes
+      // away the thing the reader was reading. The prompt modal has its own
+      // document-level Escape listener (traces-prompt-modal.ts) and this one is
+      // wired first, so returning here lets that one run.
+      var promptBackdrop = document.getElementById('promptModalBackdrop');
+      if (promptBackdrop && promptBackdrop.classList.contains('visible')) return;
+      if (rerunMenuOpen()) { closeRerunMenu(); return; }
       if (document.getElementById('docOverlay').classList.contains('visible')) {
         closeDocPanel();
       }
@@ -449,6 +487,435 @@ export function sumArticleLibraryScript(): string {
       });
       var notice = document.getElementById('deleteNotice');
       if (notice) notice.addEventListener('click', function() { notice.classList.remove('visible'); });
+    })();
+
+    // --- ↻ Re-run ▾ (opt-in: docPanelHtml({rerun:true}), /summaries only).
+    // Re-summarizes the OPEN document from the '## Transcript' appendix it
+    // stored — no download, no re-fetch. (Single quotes around that heading, not
+    // backticks: this comment lives inside a template literal.) Everything the
+    // menu needs beyond {source, docId} is a property of the FILE (is there a
+    // transcript at all, which kind wrote it, how many slides survived, does its
+    // file name round-trip), so it comes from ONE fetch of
+    // /api/summaries/rerun/options rather than from five guesses here.
+    var _rerunOpts = null;    // the options payload for the doc in the panel
+    var _rerunFor = null;     // '<source>|<docId>' those options describe
+    var _rerunStream = null;  // the panel's OWN stream on a running re-run
+    var _rerunJob = null;     // {jobId, source} of that run, for the hand-off
+    var _rerunBusy = false;
+    var _rerunOpener = null;  // the node focus returns to when the menu closes
+
+    function rerunSupported(source) {
+      var s = SOURCES[source];
+      return !!(s && s.rerun);
+    }
+
+    function rerunDocKey(doc) { return doc ? doc.source + '|' + doc.docId : ''; }
+
+    /** Is the panel still open on the document this re-run was started from? */
+    function rerunPanelShows(doc) {
+      var overlay = document.getElementById('docOverlay');
+      if (!overlay || !overlay.classList.contains('visible')) return false;
+      return rerunDocKey(_shareDoc) === rerunDocKey(doc);
+    }
+
+    /** The line under the panel header. The menu closes on the click that
+     *  starts a run and the shelf's job card sits BEHIND this overlay, so this
+     *  is the only progress the reader can see while the panel is open. */
+    function setRerunStatus(text, tone) {
+      var el = document.getElementById('${DOC_PANEL_RERUN_STATUS_ID}');
+      if (!el) return;
+      el.classList.toggle('err', tone === 'err');
+      if (!text) { el.hidden = true; el.textContent = ''; return; }
+      el.textContent = text;
+      el.hidden = false;
+    }
+
+    function rerunMenuEl() { return document.getElementById('${DOC_PANEL_RERUN_MENU_ID}'); }
+    function rerunBtnEl() { return document.getElementById('${DOC_PANEL_RERUN_BTN_ID}'); }
+    function rerunMenuOpen() { var p = rerunMenuEl(); return !!p && !p.hidden; }
+    function closeRerunMenu() {
+      var pop = rerunMenuEl();
+      if (pop) pop.hidden = true;
+      var btn = rerunBtnEl();
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+      // Focus goes back where it came from. Without this, dismissing the menu
+      // drops the caret on <body> behind a still-open scrim, which for a
+      // keyboard reader is the end of the road.
+      if (_rerunOpener && typeof _rerunOpener.focus === 'function') _rerunOpener.focus();
+      _rerunOpener = null;
+    }
+
+    /** Every enabled item, in DOM order — what the arrow keys walk. */
+    function rerunMenuItems() {
+      var pop = rerunMenuEl();
+      if (!pop) return [];
+      return Array.prototype.filter.call(
+        pop.querySelectorAll('.doc-panel-menu-item'),
+        function(b) { return !b.disabled; }
+      );
+    }
+
+    function focusRerunItem(delta) {
+      var items = rerunMenuItems();
+      if (items.length === 0) return;
+      var at = items.indexOf(document.activeElement);
+      var next = at === -1 ? 0 : (at + delta + items.length) % items.length;
+      items[next].focus();
+    }
+
+    /** Called from openSummaryDoc: the panel is being retargeted, so the cached
+     *  options, the menu and the status line belong to a document that is no
+     *  longer on screen. A stream still running is handed to the shelf rather
+     *  than dropped — the job is real either way. */
+    function resetRerunControl(source) {
+      handOffRerunStream();
+      _rerunOpts = null;
+      _rerunFor = null;
+      _rerunBusy = false;
+      closeRerunMenu();
+      setRerunStatus('');
+      var wrap = document.getElementById('${DOC_PANEL_RERUN_WRAP_ID}');
+      if (wrap) wrap.hidden = !(_shareDoc && rerunSupported(source));
+    }
+
+    /**
+     * ONE stream per re-run. While the panel is open it is the PANEL's (the
+     * overlay is a fixed scrim over the shelf card, so the card's own stream
+     * would be progress nobody can see); when the panel closes or retargets, the
+     * job is handed to the shelf's connectSSE, which is the surface that IS
+     * visible then. Opening both from the start is what this replaces: two
+     * EventSources on one job, doubling the server's SSE fan-out for a card
+     * behind a scrim.
+     */
+    function handOffRerunStream() {
+      if (!_rerunStream) return;
+      _rerunStream.close();
+      _rerunStream = null;
+      if (_rerunJob && typeof connectSSE === 'function') {
+        connectSSE(_rerunJob.jobId, _rerunJob.source);
+      }
+      _rerunJob = null;
+    }
+
+    function closeRerunStream() {
+      if (_rerunStream) { _rerunStream.close(); _rerunStream = null; }
+      _rerunJob = null;
+    }
+
+    function rerunMenuItem(label, onClick, opts) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'doc-panel-menu-item';
+      b.setAttribute('role', 'menuitem');
+      // textContent, never innerHTML: every label here is server text (a
+      // preset's own label) and the panel is an operator surface.
+      b.textContent = label;
+      if (opts && opts.title) b.title = opts.title;
+      if (opts && opts.disabled) b.disabled = true;
+      b.addEventListener('click', function() { if (!b.disabled) onClick(); });
+      return b;
+    }
+    function rerunMenuNote(text) {
+      var d = document.createElement('div');
+      d.className = 'doc-panel-menu-note';
+      // Only the items are menuitems. A note or a rule left as a bare child of
+      // role="menu" is an element the ARIA contract has no place for, and a
+      // screen reader announces the group's size counting it.
+      d.setAttribute('role', 'presentation');
+      d.textContent = text;
+      return d;
+    }
+    function rerunMenuRule() {
+      var d = document.createElement('div');
+      d.className = 'doc-panel-menu-rule';
+      d.setAttribute('role', 'presentation');
+      return d;
+    }
+
+    /** The label of "Same settings again", which has to say what those settings
+     *  ARE when the document cannot: a capture written before summary kinds
+     *  existed carries no summary_kind, and the run will use the server's own
+     *  default. Naming it is the difference between an honest label and a claim
+     *  about a decision nobody made. */
+    function rerunSameLabel(opts) {
+      if (opts.storedKind) return 'Same settings again';
+      return 'Same settings again (' + (opts.defaultKind || 'standard') + '; written before kinds existed)';
+    }
+
+    function renderRerunMenu(opts) {
+      var pop = rerunMenuEl();
+      if (!pop) return;
+      pop.textContent = '';
+      var titleBad = opts.titleRoundTrip && opts.titleRoundTrip.ok === false
+        ? (opts.titleRoundTrip.reason || 'This document cannot be re-run in place.')
+        : '';
+      var blocked = !opts.hasTranscript || !!titleBad || _rerunBusy;
+      // The kind the run uses when the document names none — what "Same
+      // settings again" already offers, so it is not offered a second time.
+      var effectiveKind = opts.storedKind || opts.defaultKind;
+      pop.appendChild(rerunMenuItem(rerunSameLabel(opts), function() {
+        startRerun({});
+      }, { disabled: blocked, title: titleBad }));
+      (opts.kinds || []).forEach(function(k) {
+        if (k.id === effectiveKind) return;
+        pop.appendChild(rerunMenuItem('As ' + k.label, function() {
+          startRerun({ kind: k.id });
+        }, { disabled: blocked, title: titleBad }));
+      });
+      pop.appendChild(rerunMenuRule());
+      // Full re-fetch is disabled on every vertical today (the server answers
+      // 501), so there is no enabled branch and no confirm to run: the item
+      // exists to say the option is known and why it is not on offer. Its reason
+      // is rendered ONCE, as a note DIRECTLY under the item — not as a tooltip
+      // (invisible on touch, and this menu's whole job is to explain itself) and
+      // not as a second copy three nodes further down, where it read as a
+      // sentence about the menu rather than about that item.
+      var fullReason = (opts.full && opts.full.reason) || '';
+      pop.appendChild(rerunMenuItem('Full re-fetch — download the source again', function() {}, {
+        disabled: true,
+      }));
+      if (fullReason) pop.appendChild(rerunMenuNote(fullReason));
+      // "Show prompt" needs a url to ask the snapshot route with, and a document
+      // that stored none has nothing to look up. Disabled with the reason rather
+      // than silently returning on the click.
+      var hasPromptUrl = !!opts.promptUrl;
+      pop.appendChild(rerunMenuItem('Show prompt', showRerunPrompt, {
+        disabled: !hasPromptUrl,
+        title: hasPromptUrl ? '' : 'This document stores no URL, so there is no prompt snapshot to look up.',
+      }));
+      if (titleBad) pop.appendChild(rerunMenuNote(titleBad));
+      if (!opts.hasTranscript) {
+        pop.appendChild(rerunMenuNote('This summary stored no transcript. Re-running needs one; a full re-fetch is a follow-up.'));
+      } else {
+        pop.appendChild(rerunMenuNote(opts.framesKept > 0
+          ? 'No media is re-fetched: only the ' + opts.framesKept + ' frame(s) the previous summary quoted are available, and the selection pass’s notes about them are not — the result can differ for those reasons alone.'
+          : 'No media is re-fetched: this runs on the stored transcript alone, so the result can differ for that reason alone.'));
+        if (opts.truncated) {
+          pop.appendChild(rerunMenuNote('The transcript was truncated at capture, so the tail of the talk is not in the document and cannot be summarized from it.'));
+        }
+        if (opts.storedVisualDetail) {
+          pop.appendChild(rerunMenuNote('Visual detail: ' + opts.storedVisualDetail + ' (derived from the stored summary, not a field it carries).'));
+        }
+      }
+    }
+
+    async function openRerunMenu() {
+      var pop = rerunMenuEl();
+      var btn = rerunBtnEl();
+      if (!pop || !_shareDoc) return;
+      _rerunOpener = document.activeElement === btn ? btn : null;
+      pop.hidden = false;
+      if (btn) btn.setAttribute('aria-expanded', 'true');
+      var key = rerunDocKey(_shareDoc);
+      if (_rerunOpts && _rerunFor === key) { renderRerunMenu(_rerunOpts); focusRerunItem(0); return; }
+      pop.textContent = '';
+      pop.appendChild(rerunMenuNote('Loading…'));
+      var doc = _shareDoc;
+      try {
+        var res = await fetch('/api/summaries/rerun/options?source=' + encodeURIComponent(doc.source) +
+          '&docId=' + encodeURIComponent(doc.docId));
+        var data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        // Superseded: the reader retargeted the panel while this was in flight.
+        if (rerunDocKey(_shareDoc) !== key) return;
+        _rerunOpts = data;
+        _rerunFor = key;
+        renderRerunMenu(data);
+        focusRerunItem(0);
+      } catch (err) {
+        if (rerunDocKey(_shareDoc) !== key) return;
+        pop.textContent = '';
+        pop.appendChild(rerunMenuNote('Could not read this document: ' + err.message));
+      }
+    }
+
+    function startRerun(extra) {
+      if (_rerunBusy || !_shareDoc) return;
+      var doc = _shareDoc;
+      var body = { source: doc.source, docId: doc.docId };
+      if (extra.kind) body.kind = extra.kind;
+      // Visual detail is orthogonal to the kind, so every re-run carries the
+      // stored one — the axis a document cannot state is the one the reader
+      // would silently lose.
+      if (_rerunOpts && _rerunOpts.storedVisualDetail) body.visual_detail = _rerunOpts.storedVisualDetail;
+      // The body the panel is showing RIGHT NOW, so the reload below can tell a
+      // re-indexed document from huginn still serving the old one.
+      var before = doc.text || '';
+      _rerunBusy = true;
+      closeRerunMenu();
+      setRerunStatus('Re-running…');
+      fetch('/api/summaries/rerun', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(async function(res) {
+        var data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        return data;
+      }).then(function(data) {
+        // The shelf's own card, so the run is there once the panel is closed —
+        // with the document's url, so the card's title links back to the source
+        // exactly as a capture's does. Its STREAM is not opened here: the panel
+        // owns the one connection until it closes (handOffRerunStream).
+        if (typeof showJob === 'function') showJob(data.job_id, doc.title, doc.url || '', doc.source);
+        watchRerunJob(data.job_id, doc, before);
+      }).catch(function(err) {
+        _rerunBusy = false;
+        setRerunStatus(err.message, 'err');
+      });
+    }
+
+    function watchRerunJob(jobId, doc, before) {
+      closeRerunStream();
+      if (typeof sseClient !== 'function') {
+        // A page that rendered the control without the SSE runtime is a wiring
+        // mistake, not a state the reader can cause — but the run IS under way,
+        // so the busy latch has to come off or the menu stays dead until the
+        // panel is retargeted.
+        _rerunBusy = false;
+        setRerunStatus('The re-run started, but this page cannot follow it — reload to see the result.');
+        return;
+      }
+      _rerunJob = { jobId: jobId, source: doc.source };
+      _rerunStream = sseClient(docApiBase(doc.source) + '/stream/' + jobId, {
+        status: function(e) {
+          try {
+            var d = JSON.parse(e.data);
+            setRerunStatus('Re-running — ' + String(d.status).replace(/_/g, ' ') + '…');
+          } catch (err) {}
+        },
+        complete: function() {
+          closeRerunStream();
+          _rerunBusy = false;
+          // The panel may be closed or on another document by now — the run
+          // takes minutes. Re-opening it would put a scrim back over a page the
+          // reader deliberately left, and lock its scroll.
+          if (!rerunPanelShows(doc)) return;
+          confirmRerunLanded(doc, before, 0);
+        },
+        error: function(e) {
+          closeRerunStream();
+          _rerunBusy = false;
+          var message = 'The re-run failed.';
+          if (e && e.data) { try { message = JSON.parse(e.data).message || message; } catch (err) {} }
+          if (rerunPanelShows(doc)) setRerunStatus(message, 'err');
+        },
+      });
+    }
+
+    /**
+     * "The summary below is the new one" is a claim, so it is CHECKED.
+     *
+     * huginn's ingest returns as soon as the file is written; its document
+     * endpoint serves the re-indexed copy some seconds later. Re-opening the
+     * panel the instant the job completes therefore renders the OLD body about
+     * half the time — the listing-lag class — under a line saying it is the new
+     * one. So the body is re-fetched and compared with what was on screen when
+     * the run started, ~5 times over ~10s, and if it never changes the reader is
+     * told that instead.
+     */
+    function confirmRerunLanded(doc, before, attempt) {
+      if (!rerunPanelShows(doc)) return;
+      setRerunStatus('Re-run finished — reloading the summary…');
+      var encodedId = doc.docId.split('/').map(encodeURIComponent).join('/');
+      fetch(docApiBase(doc.source) + '/document/' + encodedId)
+        .then(function(res) { return res.ok ? res.json() : null; })
+        .then(function(fresh) {
+          if (!rerunPanelShows(doc)) return;
+          var text = (fresh && fresh.text) || '';
+          if (text && text !== before) {
+            openSummaryDoc(doc.docId, '', doc.source);
+            setRerunStatus('Re-run finished — the summary below is the new one.');
+            return;
+          }
+          if (attempt >= ${RERUN_RELOAD_TRIES} - 1) {
+            setRerunStatus('Re-run finished — huginn has not re-indexed yet; reopen to refresh.');
+            return;
+          }
+          setTimeout(function() { confirmRerunLanded(doc, before, attempt + 1); }, ${RERUN_RELOAD_DELAY_MS});
+        })
+        .catch(function() {
+          if (rerunPanelShows(doc)) {
+            setRerunStatus('Re-run finished — could not reload the summary; reopen to refresh.');
+          }
+        });
+    }
+
+    /** "Show prompt": the snapshot the capture's summary pass stored, found by
+     *  the DOCUMENT's url (a capture's trace is swept long before its snapshot),
+     *  rendered in the shared prompt modal rather than a second copy of it. */
+    function showRerunPrompt() {
+      // Captured BEFORE the await, the rule openRerunMenu already follows: the
+      // panel can be retargeted mid-fetch, and re-reading _rerunOpts in the
+      // continuation threw on the null resetRerunControl had just written.
+      var doc = _shareDoc;
+      var key = rerunDocKey(doc);
+      var promptUrl = _rerunOpts && _rerunOpts.promptUrl;
+      if (!promptUrl) return;
+      closeRerunMenu();
+      setRerunStatus('Loading the prompt…');
+      fetch('/api/summaries/prompt?url=' + encodeURIComponent(promptUrl))
+        .then(async function(res) {
+          if (res.status === 404) return { missing: true };
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        })
+        .then(function(data) {
+          // Superseded: bail silently, the panel belongs to another document.
+          if (rerunDocKey(_shareDoc) !== key) return;
+          if (data && data.missing) { setRerunStatus('No snapshot for this document.'); return; }
+          if (typeof showPromptSnapshot !== 'function') {
+            setRerunStatus('The prompt viewer is not loaded on this page.', 'err');
+            return;
+          }
+          // hidePass: this surface opens the modal from a DOCUMENT and the route
+          // picks the summary pass itself, so a "pass: claude" chip labels a
+          // choice the reader was never offered.
+          showPromptSnapshot(data, promptUrl, { hidePass: true });
+          var el = document.getElementById('${DOC_PANEL_RERUN_STATUS_ID}');
+          var when = new Date(data.createdAt).toLocaleString();
+          if (el && data.traceExists) {
+            el.classList.remove('err');
+            el.innerHTML = 'Prompt captured ' + esc(when) +
+              ' — <a href="/traces#' + encodeURIComponent(data.traceId) + '/prompt/' +
+              encodeURIComponent(data.pass) + '" target="_blank" rel="noopener">waterfall ↗</a>';
+            el.hidden = false;
+          } else {
+            setRerunStatus('Prompt captured ' + when + ' — its trace has been swept, so there is no waterfall to open.');
+          }
+        })
+        .catch(function(err) {
+          if (rerunDocKey(_shareDoc) !== key) return;
+          setRerunStatus('Could not load the prompt: ' + err.message, 'err');
+        });
+    }
+
+    (function() {
+      var btn = document.getElementById('${DOC_PANEL_RERUN_BTN_ID}');
+      if (!btn) return;
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        if (rerunMenuOpen()) closeRerunMenu(); else openRerunMenu();
+      });
+      // Click-away, on the DOCUMENT: the menu floats above the panel header and
+      // a click anywhere else — inside the panel, on the overlay's own scrim —
+      // should dismiss it. The overlay swallows clicks on the page behind it, so
+      // in practice this listener sees the panel and the scrim.
+      document.addEventListener('click', function(e) {
+        if (!rerunMenuOpen()) return;
+        var pop = rerunMenuEl();
+        if (pop && !pop.contains(e.target) && e.target !== btn) closeRerunMenu();
+      });
+      // Arrow keys walk the enabled items; the menu's own Escape is handled by
+      // the panel's document-level keydown listener above, which closes the menu
+      // before it closes the panel.
+      var pop = rerunMenuEl();
+      if (pop) {
+        pop.addEventListener('keydown', function(e) {
+          if (e.key === 'ArrowDown') { e.preventDefault(); focusRerunItem(1); }
+          else if (e.key === 'ArrowUp') { e.preventDefault(); focusRerunItem(-1); }
+        });
+      }
     })();
 
     function showDeleteNotice(text, tone) {
@@ -807,8 +1274,12 @@ export function sumArticleLibraryScript(): string {
       // Shareable only when the source is REGISTERED: docApiBase falls back to
       // /api/youtube for an unknown one, so a hand-edited ?source=bogus deep link
       // would otherwise render a live button whose POST can only 400.
+      // url and text are filled in below from the DOCUMENT's own fetch: the
+      // re-run's shelf card links to the source, and its post-complete reload
+      // compares the body it is handed against the one that was on screen when
+      // the run started. Both start empty, which is what a deep link has anyway.
       _shareDoc = SOURCES[source]
-        ? { docId: docId, source: source, title: docTitle(docId) }
+        ? { docId: docId, source: source, title: docTitle(docId), url: url || '', text: '' }
         : null;
       var shareBtnEl = document.getElementById('${DOC_PANEL_SHARE_BTN_ID}');
       if (shareBtnEl) shareBtnEl.hidden = !_shareDoc;
@@ -825,6 +1296,11 @@ export function sumArticleLibraryScript(): string {
           : '#';
       }
       if (typeof closeShareDialogOnNavigate === 'function') closeShareDialogOnNavigate(docId);
+      // The ↻ Re-run control belongs to the doc the panel is SHOWING: its
+      // options describe that file, and a stream still running belongs to the
+      // job that was started from it. Reset unconditionally, then reveal the
+      // control only for a registered source the re-run route can serve.
+      resetRerunControl(source);
 
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');
@@ -877,6 +1353,14 @@ export function sumArticleLibraryScript(): string {
         // link (the duplicate answer's own link, a bookmark) opens with '' —
         // measured, that path rendered plain text.
         var videoUrl = doc.url || url;
+        // The panel's own record of what it is showing — read by the re-run's
+        // shelf card (the source link) and by its reload check (the body it must
+        // differ from). Written inside the superseded guard above, so a slow
+        // fetch for a document the reader has left cannot stamp this one.
+        if (_shareDoc && _shareDoc.docId === docId && _shareDoc.source === source) {
+          _shareDoc.url = videoUrl || '';
+          _shareDoc.text = text;
+        }
         // The header's own source link, for the same reason: built from the
         // parameter before the fetch, the ?doc= path had no link at all —
         // for every vertical, since they all hand out that shape on a

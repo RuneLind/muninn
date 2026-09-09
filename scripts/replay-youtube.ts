@@ -119,7 +119,7 @@ import {
   isVisualDetail,
   type VisualDetail,
 } from "../src/summaries/visual-detail.ts";
-import { splitTranscript } from "../src/summaries/export.ts";
+import { splitTranscript } from "../src/summaries/transcript-split.ts";
 import { inProtectedRegion, markdownCodeRegions } from "../src/format/markdown-ast.ts";
 import {
   SCAN_CHANGE_THRESHOLD,

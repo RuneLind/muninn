@@ -346,16 +346,15 @@ export function tracesPromptModalScript(): string {
           contentEl.innerHTML = serverFailed
             ? '<div class="prompt-unavailable">Could not load the prompt snapshot (server error) — retry</div>'
             : '<div class="prompt-unavailable">Prompt snapshot not available (expired or not captured)</div>';
-          document.getElementById('systemCharCount').textContent = '';
-          document.getElementById('userCharCount').textContent = '';
+          const emptySys = document.getElementById('systemCharCount');
+          if (emptySys) emptySys.textContent = '';
+          const emptyUser = document.getElementById('userCharCount');
+          if (emptyUser) emptyUser.textContent = '';
           return;
         }
         // The pass the ROUTE answered with, never the one asked for: with no
         // pass in the request the answer is whichever row the default read won.
-        if (passLabel) passLabel.textContent = passLabelText(data.pass);
-        document.getElementById('systemCharCount').textContent = '(' + fmtCharCount(data.systemPrompt.length) + ')';
-        document.getElementById('userCharCount').textContent = '(' + fmtCharCount(data.userPrompt.length) + ')';
-        renderPromptTab(data);
+        paintPromptBody(data, true);
       } catch (e) {
         contentEl.innerHTML = '<div class="prompt-unavailable">Failed to load prompt snapshot</div>';
         console.error('Failed to load prompt', e);
@@ -371,9 +370,68 @@ export function tracesPromptModalScript(): string {
       }
     }
 
+    /**
+     * Paint a snapshot the CALLER already has — no fetch, no waterfall, no
+     * trace id.
+     *
+     * The /summaries doc panel's "Show prompt" fetches
+     * \`GET /api/summaries/prompt?url=\` (which finds the row by DOCUMENT, since
+     * a capture's trace is swept long before its snapshot) and hands the body
+     * here, so the two surfaces render one modal and not two. Its cache key is
+     * the document's own url, namespaced away from the "<traceId>|<pass>" keys
+     * so the two cannot collide.
+     */
+    function showPromptSnapshot(data, key, opts) {
+      const backdrop = document.getElementById('promptModalBackdrop');
+      const contentEl = document.getElementById('promptContent');
+      if (!backdrop || !contentEl) return;
+      const cacheKey = 'doc|' + (key || '');
+      promptCache[cacheKey] = data;
+      activePromptKey = cacheKey;
+      activePromptTab = 'user';
+      var sysTab = document.getElementById('tabSystem');
+      var userTab = document.getElementById('tabUser');
+      if (sysTab) sysTab.classList.remove('active');
+      if (userTab) userTab.classList.add('active');
+      renderPromptStats();
+      backdrop.classList.add('visible');
+      // The pass chip names ONE of a capture's two model calls, which is a
+      // /traces question. On /summaries the modal is opened from a document, the
+      // route picks the summary pass on the reader's behalf and never offers the
+      // other, so a chip reading "pass: claude" is a label for a choice this
+      // surface does not have. Off by default here, on everywhere else.
+      paintPromptBody(data, !(opts && opts.hidePass === true));
+    }
+
+    /**
+     * The three writes both openers do once they hold a snapshot: the pass chip,
+     * the two character counts, and the tab body.
+     *
+     * ONE function because the two callers drifted the moment there were two —
+     * showPromptSnapshot was a hand-copied paste of the block inside
+     * openPromptModal. Every getElementById here is guarded: this modal is
+     * mounted on /summaries as well now, and a page that renders it without one
+     * of these nodes must degrade to a prompt with no chip, not to a
+     * TypeError before the prompt paints.
+     */
+    function paintPromptBody(data, showPass) {
+      const passLabel = document.getElementById('promptPassLabel');
+      if (passLabel) passLabel.textContent = showPass ? passLabelText(data.pass) : '';
+      const sysCount = document.getElementById('systemCharCount');
+      if (sysCount) sysCount.textContent = '(' + fmtCharCount(data.systemPrompt.length) + ')';
+      const userCount = document.getElementById('userCharCount');
+      if (userCount) userCount.textContent = '(' + fmtCharCount(data.userPrompt.length) + ')';
+      renderPromptTab(data);
+    }
+
     function renderPromptStats() {
       const el = document.getElementById('promptStats');
       if (!el) return;
+      // The stats row is derived from the TRACE's own \`prompt_build\` span, which
+      // only the /traces page has. On a page that mounts this modal without a
+      // waterfall (the /summaries doc panel) there is no such global at all, and
+      // a bare read would throw a ReferenceError before the prompt ever painted.
+      if (typeof waterfallSpans === 'undefined' || !Array.isArray(waterfallSpans)) { el.innerHTML = ''; return; }
       const buildSpan = waterfallSpans.find(function(s) { return s.name === 'prompt_build'; });
       if (!buildSpan || !buildSpan.attributes) { el.innerHTML = ''; return; }
       var a = buildSpan.attributes;

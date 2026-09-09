@@ -33,6 +33,20 @@ export interface SummarySource {
   apiBase: string;
   /** Link text for the "open original" anchor on a row (when the doc has a url). */
   linkLabel: string;
+  /**
+   * Can `POST /api/summaries/rerun` act on this source? (Absent ⇒ no.)
+   *
+   * The doc panel's `↻ Re-run ▾` control is rendered from this flag, which is
+   * why it is a field on the registry rather than a list of its own: the panel
+   * already reads `SOURCES[source]`, and a second array of four strings is a
+   * second place for the answer to be wrong. `summaries-rerun.ts` asserts at
+   * load that its per-vertical table names exactly the sources flagged here.
+   *
+   * `x-article` is flagged for its VIDEO documents: an X video capture stores a
+   * transcript, a pasted X article does not, so the route's own `no_transcript`
+   * refusal is what tells the two apart — the client does not have to.
+   */
+  rerun?: boolean;
 }
 
 export const SUMMARY_SOURCES: SummarySource[] = [
@@ -43,6 +57,7 @@ export const SUMMARY_SOURCES: SummarySource[] = [
     collection: "youtube-summaries",
     apiBase: "/api/youtube",
     linkLabel: "YouTube ↗",
+    rerun: true,
   },
   {
     id: "x-article",
@@ -51,6 +66,7 @@ export const SUMMARY_SOURCES: SummarySource[] = [
     collection: "x-articles",
     apiBase: "/api/x-articles",
     linkLabel: "View on X ↗",
+    rerun: true,
   },
   {
     id: "anthropic",
@@ -67,6 +83,7 @@ export const SUMMARY_SOURCES: SummarySource[] = [
     collection: "tiktok-summaries",
     apiBase: "/api/tiktok",
     linkLabel: "View on TikTok ↗",
+    rerun: true,
   },
   {
     id: "article",
@@ -83,6 +100,7 @@ export const SUMMARY_SOURCES: SummarySource[] = [
     collection: "vimeo-summaries",
     apiBase: "/api/vimeo",
     linkLabel: "Watch on Vimeo ↗",
+    rerun: true,
   },
 ];
 
@@ -104,24 +122,50 @@ export function getSummarySource(id: string): SummarySource | undefined {
 }
 
 /**
+ * A doc id as ONE path fragment of a huginn document URL: every `/` kept as a
+ * separator, everything inside a segment percent-encoded.
+ *
+ * The bare interpolation this replaces truncates at `#`, and a real id carries
+ * `/`, spaces and non-ASCII. It lived as three byte-identical copies — the
+ * share adapter, the export route and the re-run route — which is three places
+ * for one rule to be forgotten. Not a safety gate: {@link isSafeDocId} is, and
+ * every caller runs it first.
+ */
+export function encodeDocIdPath(docId: string): string {
+  return docId.split("/").map(encodeURIComponent).join("/");
+}
+
+/**
  * Minimal registry projection for the browser. Keyed by source id so client
  * code can do `SOURCES[doc.source].apiBase` without a lookup helper.
  */
 export function clientSourcesJson(): string {
   const map: Record<
     string,
-    { label: string; badge: string; apiBase: string; linkLabel: string; collection: string }
+    {
+      label: string;
+      badge: string;
+      apiBase: string;
+      linkLabel: string;
+      collection: string;
+      rerun: boolean;
+    }
   > = {};
   for (const s of SUMMARY_SOURCES) {
     // `collection` is what the doc panel's 🗑 Delete posts to the gardener's
     // backlog-doc-delete route, which is keyed on the huginn collection, not the
     // source id (the two diverge: `x-article` → `x-articles`).
+    //
+    // `rerun` is projected as a real boolean rather than passed through as
+    // `true | undefined`: the panel reads `SOURCES[source].rerun` directly, and
+    // an absent key and `false` are the same answer there.
     map[s.id] = {
       label: s.label,
       badge: s.badge,
       apiBase: s.apiBase,
       linkLabel: s.linkLabel,
       collection: s.collection,
+      rerun: s.rerun === true,
     };
   }
   return JSON.stringify(map);
