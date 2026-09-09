@@ -271,8 +271,11 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — pasted text",
-    // Branch points, from `src/x-article/prompt.ts`: the optional author and url
-    // context lines. There is no user builder — the pasted text is the prompt.
+    // Branch points, from `src/x-article/prompt.ts`: NONE — title, author and
+    // url are required and interpolated unconditionally, so the axis below is
+    // a statement of the placeholder, not a pinned branch (round-2 verify; PR 4
+    // removes it when it revisits these rows). There is no user builder — the
+    // pasted text is the prompt.
     fixedAxes: ["author and url: both present"],
     readsVisualDetail: false,
   },
