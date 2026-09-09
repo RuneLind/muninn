@@ -33,15 +33,16 @@ import { join } from "node:path";
 import { buildTakeawayCheckPrompt } from "./takeaway-check.ts";
 import {
   CAPTURE_DEEP_MODEL,
+  CAPTURE_THINKING_MAX_TOKENS,
   TALK_NOTES_STRUCTURE_BULLETS,
+  captureVariantIsPresent,
   resolveCapturePresets,
   type CaptureRunOptions,
   type CapturePreset,
 } from "./presets.ts";
-import { CAPTURE_THINKING_MAX_TOKENS } from "./summarizer-shared.ts";
 import type { CaptureFrame } from "./frames.ts";
 import { DEFAULT_VISUAL_DETAIL, VISUAL_DETAIL_LABELS } from "./visual-detail.ts";
-import type { PromptPiece } from "./prompt-pieces.ts";
+import { joinPromptPieces, type PromptPiece } from "./prompt-pieces.ts";
 import type { Keyframe } from "../video/media.ts";
 
 import { buildYouTubeUserPrompt, youTubeSystemPromptPieces } from "../youtube/prompt.ts";
@@ -79,6 +80,16 @@ export const PLACEHOLDER_ARTICLE_TEXT =
 
 export const PLACEHOLDER_TITLE = "A placeholder capture";
 export const PLACEHOLDER_AUTHOR = "placeholder-author";
+
+/**
+ * The three text verticals' placeholder URLs. Exported rather than left inline
+ * because the tests compare each cell against its OWN vertical's builder, and a
+ * second spelling of the url on the test side would make that comparison agree
+ * with itself.
+ */
+export const PLACEHOLDER_XARTICLE_URL = "https://x.com/placeholder/article/1234567890123456789";
+export const PLACEHOLDER_ARTICLE_URL = "https://example.invalid/placeholder-article";
+export const PLACEHOLDER_ANTHROPIC_URL = "https://example.invalid/placeholder-release";
 
 /**
  * The YouTube id is literally `placeholder` — eleven characters of the URL-safe
@@ -144,6 +155,18 @@ export interface PromptMatrixSource {
   readonly run: CaptureRunOptions;
   /** One clause about the frames (or the absence of them) this capture sends. */
   readonly framesNote: string;
+  /**
+   * The axes THIS PAGE pins, in the reader's words — the choices `cellPrompts`
+   * made that a real capture makes per run.
+   *
+   * A skeleton is only honest if it says which branch it took: the Vimeo cell
+   * shows the auto-caption rider and an English summary, the Anthropic cell the
+   * release framing with no linked-content rider, and a reader who is not told
+   * that reads a page that quietly omits half of each vertical. Empty where the
+   * prompt has no branch to pin (the two short-video verticals). Every claim is
+   * checked against the composed prompt in `prompt-matrix.test.ts`.
+   */
+  readonly fixedAxes: readonly string[];
 }
 
 /**
@@ -164,6 +187,7 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "slides quoted inline by address",
+    fixedAxes: ["windowed transcript: yes", "visual detail: selected"],
   },
   {
     id: "vimeo",
@@ -173,6 +197,11 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "slides quoted inline by address",
+    fixedAxes: [
+      "captions: auto-generated",
+      "output language: English",
+      "visual detail: selected",
+    ],
   },
   {
     id: "tiktok",
@@ -183,6 +212,7 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     // Reading the keyframes IS the reasoning here, so the capture cap is waived.
     run: { thinking: "inherit", model: "bot" },
     framesNote: "keyframes read first, never quoted",
+    fixedAxes: [],
   },
   {
     id: "x-video",
@@ -192,6 +222,7 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "hand-rolled",
     run: { thinking: "inherit", model: "bot" },
     framesNote: "keyframes read first, never quoted",
+    fixedAxes: [],
   },
   {
     id: "x-article",
@@ -201,6 +232,7 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — pasted text",
+    fixedAxes: ["author and url: both present"],
   },
   {
     id: "article",
@@ -210,6 +242,7 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — pasted text",
+    fixedAxes: ["author and url: both present"],
   },
   {
     id: "anthropic",
@@ -219,6 +252,7 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — fetched text",
+    fixedAxes: ["framing: Anthropic release", "linked-content rider: absent"],
   },
 ];
 
@@ -309,15 +343,16 @@ function pieceChips(pieces: readonly PromptPiece[], preset: CapturePreset | null
   );
 }
 
-function joinPieces(pieces: readonly PromptPiece[]): string {
-  return pieces.map((p) => p.text).join("");
-}
-
 /** Where a per-bot override of this kind would live, and whether it is there. */
 function overrideFor(bot: BotConfig, kindId: string): PromptMatrixOverride {
   return {
     path: join(bot.dir, "prompts", `captureSummary.${kindId}.md`),
-    present: (bot.prompts?.captureSummaryVariants ?? []).some((v) => v.id === kindId),
+    // The SAME predicate `resolveCapturePresets` applies, not a second reading
+    // of it: a variant with blank content is ignored by the resolver, so a
+    // marker that called it "present" would name a file the capture does not use.
+    present: (bot.prompts?.captureSummaryVariants ?? []).some(
+      (v) => v.id === kindId && captureVariantIsPresent(v),
+    ),
   };
 }
 
@@ -393,7 +428,7 @@ function cellPrompts(
         pieces: xArticleSystemPromptPieces({
           title: PLACEHOLDER_TITLE,
           author: PLACEHOLDER_AUTHOR,
-          url: "https://x.com/placeholder/article/1234567890123456789",
+          url: PLACEHOLDER_XARTICLE_URL,
         }),
         // The pasted article IS the user prompt — there is no builder to call,
         // so the skeleton is the placeholder body itself rather than an
@@ -405,7 +440,7 @@ function cellPrompts(
         pieces: articleSystemPromptPieces({
           title: PLACEHOLDER_TITLE,
           author: PLACEHOLDER_AUTHOR,
-          url: "https://example.invalid/placeholder-article",
+          url: PLACEHOLDER_ARTICLE_URL,
         }),
         userPrompt: PLACEHOLDER_ARTICLE_TEXT,
       };
@@ -414,7 +449,7 @@ function cellPrompts(
         pieces: anthropicSystemPromptPieces({
           framing: "anthropic",
           title: PLACEHOLDER_TITLE,
-          url: "https://example.invalid/placeholder-release",
+          url: PLACEHOLDER_ANTHROPIC_URL,
         }),
         userPrompt: PLACEHOLDER_ARTICLE_TEXT,
       };
@@ -445,7 +480,7 @@ function buildCell(
     kindLabel: preset?.label ?? null,
     chips,
     systemPieces: pieces,
-    systemPrompt: joinPieces(pieces),
+    systemPrompt: joinPromptPieces(pieces),
     userPrompt,
     takeawayPrompt: buildTakeawayCheckPrompt(PLACEHOLDER_SUMMARY_BODY, PLACEHOLDER_TAKEAWAY),
     override: preset === null ? null : overrideFor(bot, preset.id),

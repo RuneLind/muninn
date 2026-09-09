@@ -45,6 +45,29 @@ export function optionalPiece(when: boolean, piece: PromptPiece): PromptPiece[] 
 }
 
 /**
+ * The rider a capture adds when its transcript came back WINDOWED — huginn's
+ * `### [HH:MM:SS]`-headed buckets, the shape both video verticals ingest.
+ *
+ * A slide can only be placed beside its passage if the model knows the headings
+ * are positions rather than speech. The two verticals carried the same sentence
+ * twice, differing in one noun; `noun` is that word ("talk" for a conference
+ * recording, "video" for anything else), and nothing else about the sentence is
+ * per-vertical.
+ *
+ * It lives HERE rather than in `summarizer-shared.ts` (which re-exports it, so
+ * no importer moved) because both video verticals' PROMPT modules need it, and
+ * a value import of the seam drags `executeOneShot` and the tracer into the
+ * graph of a page whose whole job is composing strings.
+ */
+export function windowedTranscriptRider(noun: "talk" | "video"): string {
+  return (
+    "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
+    `carrying its absolute position in the ${noun}; those headings are positions, not content — ` +
+    "never quote one as if it were speech."
+  );
+}
+
+/**
  * The shared CATEGORY:/SUMMARY: scaffold, in three pieces: the vertical's own
  * intro sentence, the envelope the shared parser reads, and the KIND's structure
  * bullets.

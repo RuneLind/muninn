@@ -16,11 +16,11 @@
  */
 
 import { VALID_CATEGORIES } from "../utils/summary-parser.ts";
-import { windowedTranscriptRider } from "../summaries/summarizer-shared.ts";
 import {
   joinPromptPieces,
   optionalPiece,
   summarySystemPromptPieces,
+  windowedTranscriptRider,
   type PromptPiece,
 } from "../summaries/prompt-pieces.ts";
 import type { CapturePreset } from "../summaries/presets.ts";

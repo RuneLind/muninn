@@ -258,6 +258,142 @@ test.describe("Summaries: the capture-prompt matrix", () => {
     await page.screenshot({ path: testInfo.outputPath("tiktok.png"), fullPage: true });
   });
 
+  test("every row names the axes the page pinned, and the Vimeo cell shows its windowed rider", async ({ page }) => {
+    await page.goto(`${BASE}/summaries/prompts`);
+
+    // A skeleton is only honest if it says which branch it took.
+    await expect(page.locator('[data-fixed="youtube"]')).toContainText("windowed transcript: yes");
+    await expect(page.locator('[data-fixed="vimeo"]')).toContainText("captions: auto-generated");
+    await expect(page.locator('[data-fixed="vimeo"]')).toContainText("output language: English");
+    await expect(page.locator('[data-fixed="anthropic"]')).toContainText("framing: Anthropic release");
+    await expect(page.locator('[data-fixed="anthropic"]')).toContainText("linked-content rider: absent");
+    await expect(page.locator('[data-fixed="article"]')).toContainText("author and url: both present");
+    await expect(page.locator('[data-fixed="tiktok"]')).toContainText("no branch");
+
+    // Vimeo's windowed rider is a span of its own, tinted as a rider rather than
+    // buried in the intro — and the cell carries the chip that names it.
+    const vimeo = await openCell(page, "vimeo", "standard");
+    const pieceIds = await vimeo
+      .locator(".pm-system .pm-piece")
+      .evaluateAll((els) => els.map((e) => e.getAttribute("data-piece")));
+    expect(pieceIds).toEqual([
+      "intro",
+      "rider-windowed",
+      "envelope",
+      "structure",
+      "context",
+      "rider-auto-caption",
+      "rider-language",
+    ]);
+    const joined = await vimeo
+      .locator(".pm-system .pm-piece")
+      .evaluateAll((els) => els.map((e) => e.textContent).join(""));
+    expect(joined).toBe(await vimeo.locator(".pm-system").textContent());
+    // One per kind column — the chip belongs to the CELL, and this bot offers three.
+    await expect(page.locator('tr[data-source="vimeo"] td.pm-cell')).toHaveCount(3);
+    await expect(
+      page.locator('tr[data-source="vimeo"] .pm-chip', { hasText: "windowed transcript rider" }),
+    ).toHaveCount(3);
+  });
+
+  test("the table is labelled, and every cell button has a name a chip bag cannot give it", async ({ page }) => {
+    await page.goto(`${BASE}/summaries/prompts`);
+    await expect(page.locator("table.pm-table caption")).toContainText("Capture sources down");
+    expect(
+      await page
+        .locator(".pm-cell-btn")
+        .evaluateAll((els) => els.map((e) => e.getAttribute("aria-label"))),
+    ).toEqual([
+      "Open the youtube/standard prompt",
+      "Open the youtube/deep prompt",
+      "Open the youtube/talk-notes prompt",
+      "Open the vimeo/standard prompt",
+      "Open the vimeo/deep prompt",
+      "Open the vimeo/talk-notes prompt",
+      "Open the tiktok/no kind prompt",
+      "Open the x-video/no kind prompt",
+      "Open the x-article/no kind prompt",
+      "Open the article/no kind prompt",
+      "Open the anthropic/no kind prompt",
+    ]);
+  });
+
+  /**
+   * The whole document must never scroll sideways: the table has its own
+   * scroller, but the drawer's `<code class="pm-path">` is a single unbreakable
+   * ~70-character bot path OUTSIDE it, and without `overflow-wrap` it pushed the
+   * page wider than the viewport on a phone.
+   */
+  test("at 390 px, with a drawer open, the document does not scroll sideways", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 780 });
+    await page.goto(`${BASE}/summaries/prompts`);
+    await openCell(page, "youtube", "deep");
+    // The path really is on the page and really is long — otherwise this passes
+    // for want of anything to overflow.
+    const pathText = (await page.locator(".pm-drawer:not([hidden]) .pm-path").textContent()) ?? "";
+    expect(pathText.length).toBeGreaterThan(40);
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
+  });
+
+  /**
+   * Every tinted span and the "not present" badge, as CONTRAST RATIOS computed
+   * from what the browser resolved — never a comparison of a token against a
+   * re-typed literal, which passes whatever the value is. Both themes: the tint
+   * ramp this page started on read fine on dark and failed AA on light.
+   */
+  for (const scheme of ["dark", "light"] as const) {
+    test(`every prompt tint and the absent badge clear 4.5:1 — ${scheme}`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto(`${BASE}/summaries/prompts`);
+      await openCell(page, "vimeo", "standard");
+
+      const ratios = await page.evaluate(() => {
+        const lum = (css: string): number => {
+          const [r, g, b] = css.match(/[\d.]+/g)!.slice(0, 3).map((n) => Number(n) / 255);
+          const f = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+          return 0.2126 * f(r!) + 0.7152 * f(g!) + 0.0722 * f(b!);
+        };
+        const ratio = (fg: string, bg: string): number => {
+          const [hi, lo] = [lum(fg), lum(bg)].sort((a, b) => b - a);
+          return (hi! + 0.05) / (lo! + 0.05);
+        };
+        const out: Record<string, number> = {};
+        // The background is read off the one VISIBLE prompt block (every drawer
+        // shares the rule); the spans come from every drawer on the page, so a
+        // piece that only appears in a closed one is measured too.
+        const pre = document.querySelector(".pm-drawer:not([hidden]) .pm-system")!;
+        const preBg = getComputedStyle(pre).backgroundColor;
+        for (const span of Array.from(document.querySelectorAll<HTMLElement>(".pm-system .pm-piece"))) {
+          out[span.dataset["piece"]!] = ratio(getComputedStyle(span).color, preBg);
+        }
+        const badge = document.querySelector<HTMLElement>(".pm-drawer:not([hidden]) .pm-badge-off")!;
+        const bs = getComputedStyle(badge);
+        out["badge-off"] = ratio(bs.color, bs.backgroundColor);
+        return out;
+      });
+
+      // The probe found real elements, not an empty set that trivially passes.
+      expect(Object.keys(ratios).sort()).toEqual([
+        "badge-off",
+        "context",
+        "envelope",
+        "intro",
+        "no-commentary",
+        "rider-auto-caption",
+        "rider-language",
+        "rider-windowed",
+        "structure",
+      ]);
+      for (const [name, value] of Object.entries(ratios)) {
+        expect(value, `${name} on ${scheme}`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  }
+
   test("a per-bot captureSummary.deep.md becomes the deep cell's structure, marked present", async ({ page }) => {
     test.setTimeout(90_000);
     mkdirSync(path.dirname(overridePath()), { recursive: true });

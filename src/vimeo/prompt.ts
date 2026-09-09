@@ -14,22 +14,30 @@
  */
 
 import { VALID_CATEGORIES } from "../utils/summary-parser.ts";
-import { windowedTranscriptRider } from "../summaries/summarizer-shared.ts";
 import {
   joinPromptPieces,
   optionalPiece,
   summarySystemPromptPieces,
+  windowedTranscriptRider,
   type PromptPiece,
 } from "../summaries/prompt-pieces.ts";
 import type { CapturePreset } from "../summaries/presets.ts";
 import { languageRider } from "../summaries/language.ts";
 import { VIMEO_FRAME_SOURCE, framesPromptSection, type CaptureFrame } from "../summaries/frames.ts";
 
-export const SUMMARIZE_INTRO =
-  "You are a conference-talk analyst. Summarize the following Vimeo video transcript. " +
-  // The windowed-transcript sentence is the seam's, shared with the YouTube
-  // prompt (which says "video"). Byte-identical to what shipped.
-  windowedTranscriptRider("talk");
+/** The vertical's own opening sentence, WITHOUT the shared rider after it. */
+const INTRO_LEAD = "You are a conference-talk analyst. Summarize the following Vimeo video transcript. ";
+
+/**
+ * The windowed-transcript sentence — the seam's, shared with the YouTube prompt
+ * (which says "video"). This vertical bakes it into the intro STRING rather than
+ * appending it as a separate rider, because a Vimeo transcript is always
+ * windowed; YouTube's is conditional and therefore a piece of its own.
+ */
+const WINDOWED_RIDER = windowedTranscriptRider("talk");
+
+/** Byte-identical to what shipped: the lead sentence and the rider, in order. */
+export const SUMMARIZE_INTRO = INTRO_LEAD + WINDOWED_RIDER;
 
 /**
  * The rider appended when the chosen track is machine-generated.
@@ -53,10 +61,33 @@ export interface VimeoSystemPromptInput {
   readonly outputLang: "nb" | "en";
 }
 
-/** The system prompt's pieces, in the contract's order. */
+/**
+ * The system prompt's pieces, in the contract's order.
+ *
+ * The scaffold's single `intro` piece is SPLIT in two here, at the boundary
+ * between this vertical's own sentence and the shared windowed rider: the rider
+ * is a rider wherever it appears, and tinting it as "Intro" told the reader the
+ * Vimeo prompt lacks a sentence the YouTube prompt shows. It is a split and not
+ * a rewrite — the second text is the remainder of the first (`slice`), so the
+ * two concatenate to the piece they replaced and no byte of the prompt moves.
+ */
 export function vimeoSystemPromptPieces(input: VimeoSystemPromptInput): PromptPiece[] {
   return [
-    ...summarySystemPromptPieces(SUMMARIZE_INTRO, VALID_CATEGORIES, input.preset.instruction),
+    ...summarySystemPromptPieces(SUMMARIZE_INTRO, VALID_CATEGORIES, input.preset.instruction).flatMap(
+      (piece): PromptPiece[] =>
+        piece.id === "intro"
+          ? [
+              { id: "intro", label: piece.label, text: INTRO_LEAD },
+              {
+                id: "rider-windowed",
+                // The label the YouTube prompt gives the same sentence, so the
+                // two rows show one chip and not two spellings of it.
+                label: "Windowed transcript rider",
+                text: piece.text.slice(INTRO_LEAD.length),
+              },
+            ]
+          : [piece],
+    ),
     {
       id: "context",
       label: "Video context",

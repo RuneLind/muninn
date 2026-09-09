@@ -8,7 +8,8 @@
  * rewrite that depends on what the copy managed.
  */
 
-import { test, expect, describe, afterAll } from "bun:test";
+import { test, expect, describe, beforeEach, afterAll } from "bun:test";
+import { configure, reset as resetLogging, type LogRecord } from "@logtape/logtape";
 import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,9 +18,34 @@ import type { CaptureFrame } from "../summaries/frames.ts";
 
 const VIDEO_ID = "dQw4w9WgXcQ";
 const roots: string[] = [];
-afterAll(() => {
+afterAll(async () => {
   for (const r of roots) rmSync(r, { recursive: true, force: true });
+  await resetLogging();
 });
+
+/**
+ * Configured PER TEST with `reset: true`, the `src/tiktok/finish.test.ts` shape:
+ * `bun test` runs many files in one process and any of them may have configured
+ * logtape first, so a once-per-file `configure` is a sink another file can take
+ * away.
+ */
+let logs: LogRecord[] = [];
+beforeEach(async () => {
+  logs = [];
+  await configure({
+    sinks: { capture: (r: LogRecord) => logs.push(r) },
+    loggers: [
+      { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+      { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+    ],
+    reset: true,
+  });
+});
+
+/** Every record this TAIL wrote — not the frames seam's, which has its own category. */
+function tailLogs(): LogRecord[] {
+  return logs.filter((r) => r.category[1] === "youtube");
+}
 
 function tmpRoot(prefix: string): string {
   const d = mkdtempSync(join(tmpdir(), prefix));
@@ -152,6 +178,83 @@ describe("finishYouTubeSummary", () => {
     expect(detailed.referenced).toEqual([...inline, ...appendix]);
     expect(detailed.summary).toContain("## Visual reference");
     expect(detailed.summary).not.toBe(selected.summary);
+  });
+
+  test("the category is announced BEFORE the frame copy, not after it", async () => {
+    // The ORDER is the property: the live card is told while the copies are
+    // still pending, exactly as it was when this tail was inline. The injected
+    // root starts empty, so what the callback sees IS the answer — a callback
+    // moved below `await keepReferencedFrames` would see the copied file.
+    const root = tmpRoot("yt-finish-root-");
+    const { frames: fs } = frames([30]);
+    // An ARRAY of snapshots, not one: it pins that the callback fired exactly
+    // once as well as what it saw.
+    const rootAtCategory: string[][] = [];
+    const out = await finishYouTubeSummary({
+      raw: `CATEGORY: ai/rag\n\nSUMMARY:\n${quote(30)}`,
+      jobId: "j7",
+      videoId: VIDEO_ID,
+      frames: fs,
+      visualDetail: "selected",
+      framesRoot: root,
+      onCategory: () => {
+        rootAtCategory.push(readdirSync(root));
+      },
+    });
+    expect(rootAtCategory).toEqual([[]]);
+    // …and the copy really did land afterwards, so the emptiness above is an
+    // ordering fact and not a run that copied nothing.
+    expect(out.kept).toEqual([30]);
+    expect(readdirSync(root)).toEqual(["youtube"]);
+    expect(readdirSync(join(root, "youtube", VIDEO_ID))).toEqual(["30.jpg"]);
+  });
+
+  test("a copy failure does not fail the capture: the text comes back repaired, with a log line", async () => {
+    // A regular FILE where the served root should be: `mkdir` inside the copy
+    // fails with ENOTDIR, so the whole seam throws rather than one file failing.
+    // The capture's text is already on the reader's screen at this point — a
+    // throw here would turn a served-picture problem into a failed job.
+    const rootFile = join(tmpRoot("yt-finish-root-"), "not-a-dir");
+    writeFileSync(rootFile, "not a directory");
+    const { frames: fs } = frames([30]);
+    const out = await finishYouTubeSummary({
+      raw: `CATEGORY: ai/rag\n\nSUMMARY:\nbefore\n\n${quote(30)}\n\nafter`,
+      jobId: "j8",
+      videoId: VIDEO_ID,
+      frames: fs,
+      visualDetail: "selected",
+      framesRoot: rootFile,
+    });
+    expect(out.category).toBe("ai/rag");
+    expect(out.kept).toEqual([]);
+    expect(out.unserved).toEqual([30]);
+    // The promise of a picture is removed rather than stored and then 404'd.
+    expect(out.summary).not.toContain(`/${VIDEO_ID}/30.jpg`);
+    expect(out.summary).toContain("before");
+    expect(out.summary).toContain("after");
+    expect(
+      tailLogs().some(
+        (r) => r.level === "error" && String(r.message).includes("keeping quoted frames failed"),
+      ),
+    ).toBe(true);
+  });
+
+  test("the tail logs under the VERTICAL's category, `muninn.youtube.summarizer`", async () => {
+    // The searchable field, not the file name: the JSONL sink is queried by
+    // category, and moving this code into `finish.ts` must not move the records
+    // a saved query already selects.
+    await finishYouTubeSummary({
+      raw: `CATEGORY: ai/rag\n\nSUMMARY:\n${quote(30)}`,
+      jobId: "j9",
+      videoId: VIDEO_ID,
+      // Listed but never written ⇒ the copy skips it ⇒ the repair warns.
+      frames: frames([30], [30]).frames,
+      visualDetail: "selected",
+      framesRoot: tmpRoot("yt-finish-root-"),
+    });
+    const warn = tailLogs().find((r) => String(r.message).includes("were not copied"));
+    expect(warn).toBeDefined();
+    expect(warn!.category).toEqual(["muninn", "youtube", "summarizer"]);
   });
 
   test("nothing is copied for a transcript-only summary, and no directory is made", async () => {

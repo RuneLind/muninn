@@ -22,17 +22,27 @@ import type { PromptMatrix, PromptMatrixCell } from "../../summaries/prompt-matr
  * moved underneath it.
  */
 
-/** Every piece id the tint has a colour for, in the order the legend lists them. */
+/**
+ * Every piece id the tint has a colour for, in the order the legend lists them.
+ *
+ * The `--tok-*` ramp, not the `--status-*` one it started on: these spans are
+ * text on `--bg-inset`, and that is the exact pair the syntax-highlight ramp is
+ * tuned for in BOTH themes (`shared-styles.ts`). The plain status colours read
+ * fine on dark and failed AA on light — measured 2026-09-09 against
+ * `--bg-inset` #eceef3: success 2.84:1, warning 2.74:1, cyan 3.17:1,
+ * `--text-muted` 4.26:1, info 4.45:1. The ramp's worst case is 4.62:1 light and
+ * 5.34:1 dark. Same six hues, so the legend still reads as the same vocabulary.
+ */
 const PIECE_TINTS: ReadonlyArray<{ id: string; label: string; color: string }> = [
-  { id: "intro", label: "Intro", color: "var(--status-info)" },
-  { id: "envelope", label: "Envelope", color: "var(--text-muted)" },
-  { id: "structure", label: "Structure", color: "var(--status-success)" },
-  { id: "context", label: "Context", color: "var(--status-cyan)" },
-  { id: "no-commentary", label: "No-commentary rule", color: "var(--status-warning)" },
-  { id: "rider-windowed", label: "Rider", color: "var(--status-magenta)" },
-  { id: "rider-auto-caption", label: "Rider", color: "var(--status-magenta)" },
-  { id: "rider-language", label: "Rider", color: "var(--status-magenta)" },
-  { id: "rider-enrichment", label: "Rider", color: "var(--status-magenta)" },
+  { id: "intro", label: "Intro", color: "var(--tok-fn)" },
+  { id: "envelope", label: "Envelope", color: "var(--tok-com)" },
+  { id: "structure", label: "Structure", color: "var(--tok-str)" },
+  { id: "context", label: "Context", color: "var(--tok-typ)" },
+  { id: "no-commentary", label: "No-commentary rule", color: "var(--tok-num)" },
+  { id: "rider-windowed", label: "Rider", color: "var(--tok-kw)" },
+  { id: "rider-auto-caption", label: "Rider", color: "var(--tok-kw)" },
+  { id: "rider-language", label: "Rider", color: "var(--tok-kw)" },
+  { id: "rider-enrichment", label: "Rider", color: "var(--tok-kw)" },
 ];
 
 /** The tint rules, one per piece id — the page's whole colour vocabulary. */
@@ -86,9 +96,19 @@ function drawerHtml(cell: PromptMatrixCell): string {
       </section>`;
 }
 
+/**
+ * The button's accessible NAME. Its visible content is a bag of chips, which
+ * reads out as one long run of fragments with no subject — a screen-reader user
+ * has no way to tell which combination they are opening.
+ */
+function cellLabel(cell: PromptMatrixCell): string {
+  return `Open the ${cell.sourceId}/${cell.kindId ?? "no kind"} prompt`;
+}
+
 function cellHtml(cell: PromptMatrixCell, span: number): string {
   return `<td class="pm-cell"${span > 1 ? ` colspan="${span}"` : ""}>
             <button type="button" class="pm-cell-btn" data-drawer="${escHtml(drawerId(cell))}"
+                    aria-label="${escHtml(cellLabel(cell))}"
                     aria-controls="${escHtml(drawerId(cell))}" aria-expanded="false">
               ${chipsHtml(cell.chips)}
             </button>
@@ -102,10 +122,17 @@ export function renderSummariesPromptsPage(matrix: PromptMatrix): string {
       const cells = row.source.kinds
         ? row.cells.map((c) => cellHtml(c, 1)).join("\n          ")
         : cellHtml(row.cells[0]!, kindCount);
+      const fixed =
+        row.source.fixedAxes.length > 0
+          ? `<span class="pm-fixed" data-fixed="${escHtml(row.source.id)}"><b>fixed:</b> ${row.source.fixedAxes
+              .map(escHtml)
+              .join(" · ")}</span>`
+          : `<span class="pm-fixed" data-fixed="${escHtml(row.source.id)}"><b>fixed:</b> nothing — this prompt has no branch</span>`;
       return `<tr data-source="${escHtml(row.source.id)}">
           <th scope="row" class="pm-source">
             <span class="pm-source-label">${escHtml(row.source.label)}</span>
             <span class="pm-source-medium">${escHtml(row.source.medium)}</span>
+            ${fixed}
           </th>
           ${cells}
         </tr>`;
@@ -151,14 +178,17 @@ export function renderSummariesPromptsPage(matrix: PromptMatrix): string {
 
     .pm-table-wrap { overflow-x: auto; }
     table.pm-table { border-collapse: collapse; width: 100%; }
+    .pm-caption { caption-side: top; text-align: left; font-size: 12px; color: var(--text-muted); padding: 0 0 8px; }
     .pm-table th, .pm-table td { border: 1px solid var(--border-primary); vertical-align: top; text-align: left; }
     .pm-table thead th {
       padding: 8px 10px; font-size: 12px; font-weight: 600; color: var(--text-soft);
       background: var(--bg-panel); white-space: nowrap;
     }
-    .pm-source { padding: 10px; width: 132px; background: var(--bg-panel); }
+    .pm-source { padding: 10px; width: 168px; background: var(--bg-panel); }
     .pm-source-label { display: block; font-size: 13px; font-weight: 600; color: var(--text-primary); }
     .pm-source-medium { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-top: 2px; }
+    .pm-fixed { display: block; font-size: 10.5px; line-height: 1.5; color: var(--text-muted); margin-top: 6px; overflow-wrap: anywhere; }
+    .pm-fixed b { font-weight: 600; color: var(--text-soft); }
     .pm-cell { padding: 0; }
     .pm-cell-btn {
       display: block; width: 100%; text-align: left; padding: 9px 10px;
@@ -184,11 +214,20 @@ export function renderSummariesPromptsPage(matrix: PromptMatrix): string {
     .pm-drawer-title { margin: 0 0 8px; font-size: 14px; color: var(--text-primary); }
     .pm-h4 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-soft); }
     .pm-h4-note { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text-dim); }
-    .pm-note { margin: 0; font-size: 12px; color: var(--text-muted); }
-    .pm-path { font-size: 11.5px; color: var(--text-soft); }
+    /* A bot dir is one unbreakable ~70-char token, and this sits OUTSIDE the
+       table's own scroller — without this the whole document scrolled sideways
+       at 390 px (measured 427 CSS px against a 390 viewport). overflow-wrap
+       INHERITS, so either rule below carries the property on its own and each is
+       redundant given the other; both are kept so a .pm-path moved out of a
+       .pm-note keeps wrapping. Pinned in e2e/summaries-prompts.spec.ts. */
+    .pm-note { margin: 0; font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
+    .pm-path { font-size: 11.5px; color: var(--text-soft); overflow-wrap: anywhere; }
     .pm-badge { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
     .pm-badge-on { background: color-mix(in srgb, var(--status-success) 16%, transparent); color: var(--status-success); }
-    .pm-badge-off { background: var(--tint-neutral); color: var(--text-disabled); }
+    /* --text-disabled on --tint-neutral measured 1.79:1 dark / 1.64:1 light —
+       "not present" is a STATE the reader has to read, not decoration.
+       --text-soft is 7.49:1 / 5.59:1 on the same fill. */
+    .pm-badge-off { background: var(--tint-neutral); color: var(--text-soft); }
 
     .pm-prompt {
       margin: 0; padding: 12px; border-radius: 6px; overflow-x: auto;
@@ -213,13 +252,19 @@ export function renderSummariesPromptsPage(matrix: PromptMatrix): string {
     <p class="pm-sub">
       Every capture combination, as the model receives it — built by the same prompt builders the
       capture jobs call. Kinds are what <strong>${escHtml(matrix.botName)}</strong> offers.
-      Video cells use the <strong>${escHtml(matrix.visualDetail)}</strong> visual-detail policy and a fixed
-      placeholder transcript, two placeholder frames and one placeholder selection note.
+      Every skeleton is built from ONE fixed input: a two-window placeholder transcript, two
+      placeholder frames, one of them carrying a selection note. A real capture decides some of
+      what these cells pin — each row's <strong>fixed:</strong> line says which axes this page
+      chose for that source, and everything not listed there is the capture's own.
       <a href="/summaries">← Summaries</a>
     </p>
 
     <div class="pm-table-wrap">
       <table class="pm-table">
+        <caption class="pm-caption">
+          Capture sources down, summary kinds across — one cell per combination. Choosing a cell
+          opens the prompts it sends, under the table.
+        </caption>
         <thead>
           <tr>
             <th scope="col">Source</th>

@@ -9,27 +9,22 @@ import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { getConnectorLabel } from "../observability/agent-status.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 import { groundTakeaway, splitClosingTakeaway, type GroundTakeawayOptions } from "./takeaway-check.ts";
-import { joinPromptPieces, summarySystemPromptPieces } from "./prompt-pieces.ts";
+import { joinPromptPieces, summarySystemPromptPieces, windowedTranscriptRider } from "./prompt-pieces.ts";
+import { CAPTURE_THINKING_MAX_TOKENS } from "./presets.ts";
+
+/**
+ * Two values this seam OWNED and two leaves now hold, re-exported so no importer
+ * moved: `CAPTURE_THINKING_MAX_TOKENS` is what a preset's `thinking: "capped"`
+ * MEANS (`./presets.ts`), and the windowed rider is a prompt fragment both video
+ * verticals' builders need (`./prompt-pieces.ts`). Reading either from here is a
+ * value import of a module that pulls in `executeOneShot` and the tracer, which
+ * is not a dependency a page composing strings may acquire.
+ */
+export { CAPTURE_THINKING_MAX_TOKENS, windowedTranscriptRider };
 
 const log = getLog("summaries", "ingest");
 const captureLog = getLog("summaries", "capture");
 
-/**
- * Thinking budget for a capture summarization.
- *
- * A capture job inherits its bot's CHAT thinking budget (jarvis: 40k), which on
- * a batch transform is spent as silent dead-air before the first streamed token.
- * Measured against a real 2.3k-word YouTube transcript on jarvis/claude-sdk:
- *
- *   40k thinking → 9.5s to first token, 23.8s total
- *    8k thinking → 2.5s to first token, 17.2s total
- *    0  thinking → 2.5s to first token, 17.4s total
- *
- * 8k is the knee: it buys back the dead-air (identical to disabling thinking
- * outright) while leaving headroom for a messy transcript — and it matches the
- * cap the gardener already puts on its drafts.
- */
-export const CAPTURE_THINKING_MAX_TOKENS = 8000;
 
 /**
  * The floor every capture's summarize call is given, before the per-frame term
@@ -47,23 +42,6 @@ export const CAPTURE_THINKING_MAX_TOKENS = 8000;
  */
 export const CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS = 600_000;
 
-/**
- * The rider a capture adds when its transcript came back WINDOWED — huginn's
- * `### [HH:MM:SS]`-headed buckets, the shape both video verticals ingest.
- *
- * A slide can only be placed beside its passage if the model knows the headings
- * are positions rather than speech. The two verticals carried the same sentence
- * twice, differing in one noun; `noun` is that word ("talk" for a conference
- * recording, "video" for anything else), and nothing else about the sentence is
- * per-vertical.
- */
-export function windowedTranscriptRider(noun: "talk" | "video"): string {
-  return (
-    "The transcript is grouped into windows, each opened by a `### [HH:MM:SS]` heading " +
-    `carrying its absolute position in the ${noun}; those headings are positions, not content — ` +
-    "never quote one as if it were speech."
-  );
-}
 
 export interface CaptureOneShotOptions {
   /** Vertical id — names the trace root span, e.g. `capture:youtube`. */

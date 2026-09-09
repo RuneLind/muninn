@@ -15,7 +15,9 @@
 import { getLog } from "../logging.ts";
 import { parseSummaryResponse } from "../utils/summary-parser.ts";
 
-const log = getLog("tiktok", "finish");
+// The CATEGORY stays the vertical's own, not this file's — see the note in
+// `src/youtube/finish.ts`. Pinned in `finish.test.ts`.
+const log = getLog("tiktok", "summarizer");
 
 /**
  * Cheap heuristic: did a frames-on summary actually mention any visual content?

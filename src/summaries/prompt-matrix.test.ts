@@ -12,6 +12,8 @@
  */
 
 import { test, expect, describe } from "bun:test";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { BotConfig } from "../bots/config.ts";
 import { SUMMARY_SOURCES } from "./sources.ts";
 import { joinPromptPieces } from "./prompt-pieces.ts";
@@ -21,7 +23,14 @@ import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../youtube/pro
 import { buildVimeoSystemPrompt, buildVimeoUserPrompt } from "../vimeo/prompt.ts";
 import { buildTikTokSystemPrompt, buildTikTokUserPrompt } from "../tiktok/prompt.ts";
 import { buildXVideoSystemPrompt, buildXVideoUserPrompt } from "../x-article/video-prompt.ts";
+import { buildXArticleSystemPrompt } from "../x-article/prompt.ts";
+import { buildArticleSystemPrompt } from "../article/prompt.ts";
+import { buildAnthropicSystemPrompt } from "../anthropic/prompt.ts";
 import {
+  PLACEHOLDER_ARTICLE_TEXT,
+  PLACEHOLDER_ARTICLE_URL,
+  PLACEHOLDER_ANTHROPIC_URL,
+  PLACEHOLDER_AUTHOR,
   PLACEHOLDER_FLAT_TRANSCRIPT,
   PLACEHOLDER_FRAMES,
   PLACEHOLDER_KEYFRAMES,
@@ -30,6 +39,7 @@ import {
   PLACEHOLDER_TITLE,
   PLACEHOLDER_VIMEO_ID,
   PLACEHOLDER_WINDOWED_TRANSCRIPT,
+  PLACEHOLDER_XARTICLE_URL,
   PLACEHOLDER_YOUTUBE_ID,
   PROMPT_MATRIX_SOURCES,
   buildPromptMatrix,
@@ -162,11 +172,15 @@ describe("the chips", () => {
     expect(chips).not.toContain("timeline bullets");
   });
 
-  test("the Vimeo cell carries BOTH riders, in the contract's order", () => {
+  test("the Vimeo cell carries ALL THREE riders, in the contract's order", () => {
     const matrix = buildPromptMatrix(bot(), [bot()]);
     const chips = cell(matrix, "vimeo", "standard").chips;
+    // The windowed rider is baked into this vertical's intro SENTENCE, so it is
+    // a span of its own rather than a piece appended after the structure — but
+    // the reader is owed the same chip YouTube shows for the same sentence.
     expect(chips).toEqual([
       "intro",
+      "windowed transcript rider",
       "category/summary envelope",
       "structure bullets",
       "video context",
@@ -178,6 +192,8 @@ describe("the chips", () => {
       "thinking: capped at 8000",
     ]);
     expect(chips.indexOf("auto-caption rider")).toBeLessThan(chips.indexOf("language rider"));
+    // The same chip text as the YouTube row's, since it is the same sentence.
+    expect(cell(matrix, "youtube", "standard").chips).toContain("windowed transcript rider");
   });
 
   test("the short-video cells say 'hand-rolled envelope, no kind' and span the kinds", () => {
@@ -376,5 +392,183 @@ describe("the override files", () => {
     const prompt = cell(buildPromptMatrix(b, [b]), "youtube", "standard").systemPrompt;
     expect(prompt).toContain(TINY_INSTRUCTION);
     expect(prompt).not.toContain(shippedStandard.instruction.split("\n")[0]!);
+  });
+});
+
+describe("the text cells", () => {
+  /**
+   * The three text verticals share the CATEGORY/SUMMARY scaffold, so a cell
+   * pointed at a neighbour's builder still renders a plausible prompt. Equality
+   * against the vertical's own builder is what catches that; the set-size
+   * assertion below is what makes the equality worth something.
+   */
+  test("each text cell's system prompt is its OWN vertical's builder", () => {
+    const matrix = buildPromptMatrix(bot(), [bot()]);
+    expect(cell(matrix, "x-article", null).systemPrompt).toBe(
+      buildXArticleSystemPrompt({
+        title: PLACEHOLDER_TITLE,
+        author: PLACEHOLDER_AUTHOR,
+        url: PLACEHOLDER_XARTICLE_URL,
+      }),
+    );
+    expect(cell(matrix, "article", null).systemPrompt).toBe(
+      buildArticleSystemPrompt({
+        title: PLACEHOLDER_TITLE,
+        author: PLACEHOLDER_AUTHOR,
+        url: PLACEHOLDER_ARTICLE_URL,
+      }),
+    );
+    expect(cell(matrix, "anthropic", null).systemPrompt).toBe(
+      buildAnthropicSystemPrompt({
+        framing: "anthropic",
+        title: PLACEHOLDER_TITLE,
+        url: PLACEHOLDER_ANTHROPIC_URL,
+      }),
+    );
+    // The pasted body IS the user prompt for all three — no builder to call.
+    for (const id of ["x-article", "article", "anthropic"]) {
+      expect(cell(matrix, id, null).userPrompt).toBe(PLACEHOLDER_ARTICLE_TEXT);
+    }
+  });
+
+  test("the three text builders really differ over one common input", () => {
+    // Without this, the three equalities above would all still pass if two
+    // builders happened to compose the same string.
+    const three = [
+      buildXArticleSystemPrompt({ title: "T", author: "A", url: "U" }),
+      buildArticleSystemPrompt({ title: "T", author: "A", url: "U" }),
+      buildAnthropicSystemPrompt({ framing: "anthropic", title: "T", url: "U" }),
+    ];
+    expect(new Set(three).size).toBe(3);
+  });
+});
+
+describe("the fixed axes the page pins", () => {
+  /**
+   * Every source names the axes this page CHOSE, and the claim is checked
+   * against the composed prompt rather than trusted: a row that says
+   * "captions: auto" while the cell was built with `manual` is a page lying
+   * about the thing it exists to show.
+   */
+  test("every source states its fixed axes, and each claim matches the composed prompt", () => {
+    const matrix = buildPromptMatrix(bot(), [bot()]);
+    const axes = Object.fromEntries(
+      matrix.rows.map((r) => [r.source.id, r.source.fixedAxes]),
+    ) as Record<string, readonly string[]>;
+
+    expect(axes["youtube"]).toEqual(["windowed transcript: yes", "visual detail: selected"]);
+    expect(cell(matrix, "youtube", "standard").systemPieces.map((p) => p.id)).toContain("rider-windowed");
+    expect(cell(matrix, "youtube", "standard").userPrompt).toContain("At most 8 distinct frames");
+
+    expect(axes["vimeo"]).toEqual([
+      "captions: auto-generated",
+      "output language: English",
+      "visual detail: selected",
+    ]);
+    const vimeoIds = cell(matrix, "vimeo", "standard").systemPieces.map((p) => p.id);
+    expect(vimeoIds).toContain("rider-auto-caption");
+    expect(vimeoIds).toContain("rider-language");
+    expect(cell(matrix, "vimeo", "standard").systemPrompt).toContain(
+      "LANGUAGE: write the summary in English",
+    );
+
+    expect(axes["tiktok"]).toEqual([]);
+    expect(axes["x-video"]).toEqual([]);
+
+    for (const id of ["x-article", "article"]) {
+      expect(axes[id]).toEqual(["author and url: both present"]);
+      expect(cell(matrix, id, null).systemPrompt).toContain("Article author:");
+      expect(cell(matrix, id, null).systemPrompt).toContain("Article URL:");
+    }
+
+    expect(axes["anthropic"]).toEqual(["framing: Anthropic release", "linked-content rider: absent"]);
+    const anthropicIds = cell(matrix, "anthropic", null).systemPieces.map((p) => p.id);
+    expect(anthropicIds).not.toContain("rider-enrichment");
+    expect(cell(matrix, "anthropic", null).systemPrompt).toContain("Anthropic / Claude ecosystem release");
+  });
+});
+
+describe("a per-bot variant with BLANK content", () => {
+  /**
+   * `resolveCapturePresets` skips a variant whose content is blank (the loader
+   * already warns and the shipped default still applies). The override marker
+   * has to agree, or the page says "present" about a file the capture ignores —
+   * one predicate, used by both.
+   */
+  test("is 'not present' on the marker AND absent from the resolved kinds", () => {
+    const shippedDeep = SHIPPED_CAPTURE_PRESETS.find((p) => p.id === "deep")!;
+    const b = bot({
+      prompts: { captureSummaryVariants: [{ id: "deep", label: "Deep", content: "   \n\t " }] },
+    });
+    const matrix = buildPromptMatrix(b, [b]);
+    expect(cell(matrix, "youtube", "deep").override).toEqual({
+      path: "/bots/matrixbot/prompts/captureSummary.deep.md",
+      present: false,
+    });
+    // The resolver ignored it too — the shipped instruction is what is sent.
+    expect(cell(matrix, "youtube", "deep").systemPrompt).toContain(
+      shippedDeep.instruction.split("\n")[0]!,
+    );
+
+    // A blank NEW id is no kind at all, and so has no column and no cell.
+    const c = bot({
+      prompts: { captureSummaryVariants: [{ id: "blankkind", label: "Blank", content: "" }] },
+    });
+    expect(buildPromptMatrix(c, [c]).kinds.map((k) => k.id)).not.toContain("blankkind");
+
+    // …and a NON-blank variant of the same id is still present, so the
+    // assertions above are about blankness and not about the id.
+    const d = bot({
+      prompts: { captureSummaryVariants: [{ id: "deep", label: "Deep", content: TINY_INSTRUCTION }] },
+    });
+    expect(cell(buildPromptMatrix(d, [d]), "youtube", "deep").override!.present).toBe(true);
+  });
+});
+
+describe("the module graph", () => {
+  /**
+   * The page's payload is composed by a dashboard VIEW's import graph, so this
+   * module may not drag a summarizer's world in behind it. `executeOneShot` and
+   * the tracer are the two that matter: pulling them in gives a server-rendered
+   * page a transitive dependency on the model client.
+   */
+  const SRC = resolve(dirname(new URL(import.meta.url).pathname), "..");
+
+  /**
+   * The RUNTIME graph: `import type` is erased by the compiler, so a type-only
+   * edge costs a reader nothing and is not what this test is about. Comments are
+   * stripped first, so a path written in prose is not mistaken for an edge.
+   */
+  function reachableFrom(entry: string): Set<string> {
+    const seen = new Set<string>();
+    const queue = [resolve(entry)];
+    while (queue.length > 0) {
+      const file = queue.pop()!;
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const text = readFileSync(file, "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|\n)\s*\/\/[^\n]*/g, "$1");
+      for (const m of text.matchAll(/(?:^|\n)\s*(?:import|export)\s+([\s\S]*?)\s*from\s+"(\.[^"]+)"/g)) {
+        if (/^type\b/.test(m[1]!)) continue;
+        queue.push(resolve(dirname(file), m[2]!));
+      }
+    }
+    return seen;
+  }
+
+  test("prompt-matrix.ts does not reach the one-shot client, the tracer, or summarizer-shared", () => {
+    const reached = reachableFrom(resolve(SRC, "summaries/prompt-matrix.ts"));
+    for (const forbidden of [
+      "ai/one-shot.ts",
+      "core/traced-one-shot.ts",
+      "tracing/tracer.ts",
+      "summaries/summarizer-shared.ts",
+    ]) {
+      expect([...reached]).not.toContain(resolve(SRC, forbidden));
+    }
+    // The walk really walked: the verticals' builders are on the far side of it.
+    expect([...reached]).toContain(resolve(SRC, "youtube/prompt.ts"));
+    expect([...reached]).toContain(resolve(SRC, "summaries/prompt-pieces.ts"));
   });
 });

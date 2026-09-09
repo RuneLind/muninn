@@ -65,6 +65,16 @@ describe("finishTikTokSummary", () => {
     finishTikTokSummary({ raw: NO_VISUAL, jobId: "t3", videoId: "7523456789", frameCount: 0 });
     expect(warned()).toBe(false);
   });
+
+  test("the tail logs under the VERTICAL's category, `muninn.tiktok.summarizer`", () => {
+    // The searchable field, not the file name: the JSONL sink is queried by
+    // category, and moving this code into `finish.ts` must not move the records
+    // a saved query already selects.
+    finishTikTokSummary({ raw: NO_VISUAL, jobId: "t4", videoId: "7523456789", frameCount: 2 });
+    const warn = logs.find((r) => String(r.message).includes("mentions no visual content"));
+    expect(warn).toBeDefined();
+    expect(warn!.category).toEqual(["muninn", "tiktok", "summarizer"]);
+  });
 });
 
 describe("mentionsVisualContent", () => {

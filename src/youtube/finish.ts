@@ -31,7 +31,10 @@ import {
   type VisualDetail,
 } from "../summaries/visual-detail.ts";
 
-const log = getLog("youtube", "finish");
+// The CATEGORY stays the vertical's own, not this file's: the JSONL sink is
+// queried by category, and moving code between files must not move the records
+// a saved query already selects. Pinned in `finish.test.ts`.
+const log = getLog("youtube", "summarizer");
 
 export interface FinishYouTubeSummaryInput {
   /** The RAW model text, envelope and all. */

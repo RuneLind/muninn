@@ -34,10 +34,29 @@ import type { BotConfig, BotPrompts, ConnectorType } from "../bots/config.ts";
 import { capabilitiesForConnectorType } from "../ai/connector-capabilities.ts";
 import { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
 
+/**
+ * Thinking budget for a capture summarization — what `thinking: "capped"` below
+ * MEANS, which is why it lives here rather than in the seam that applies it
+ * (`summarizer-shared.ts` re-exports it, so no importer moved).
+ *
+ * A capture job inherits its bot's CHAT thinking budget (jarvis: 40k), which on
+ * a batch transform is spent as silent dead-air before the first streamed token.
+ * Measured against a real 2.3k-word YouTube transcript on jarvis/claude-sdk:
+ *
+ *   40k thinking → 9.5s to first token, 23.8s total
+ *    8k thinking → 2.5s to first token, 17.2s total
+ *    0  thinking → 2.5s to first token, 17.4s total
+ *
+ * 8k is the knee: it buys back the dead-air (identical to disabling thinking
+ * outright) while leaving headroom for a messy transcript — and it matches the
+ * cap the gardener already puts on its drafts.
+ */
+export const CAPTURE_THINKING_MAX_TOKENS = 8000;
+
 /** How a kind's model call differs from the default capture call. */
 export interface CaptureRunOptions {
   /**
-   * `capped` — the 8k `CAPTURE_THINKING_MAX_TOKENS` first-token budget every
+   * `capped` — the 8k {@link CAPTURE_THINKING_MAX_TOKENS} first-token budget every
    * capture gets; `inherit` — the bot's own budget (jarvis: 40k), the TikTok
    * mechanism, for a kind whose reader has opted into waiting.
    */
@@ -172,6 +191,19 @@ export interface ResolveCapturePresetsOptions {
   readonly requireThinkingControl?: boolean;
 }
 
+/**
+ * Whether a per-bot `captureSummary.<id>.md` variant COUNTS.
+ *
+ * A file that is empty (or carries only its `<!-- label: … -->` line) is
+ * treated as absent — the loader warns and the shipped default still applies.
+ * Exported because two places answer this question and they must not disagree:
+ * the resolver below, and `/summaries/prompts`' override marker, which would
+ * otherwise report "present" about a file the capture ignores.
+ */
+export function captureVariantIsPresent(variant: { readonly content: string }): boolean {
+  return variant.content.trim() !== "";
+}
+
 export function resolveCapturePresets(
   prompts: BotPrompts | undefined,
   connector?: ConnectorType,
@@ -179,7 +211,7 @@ export function resolveCapturePresets(
 ): CapturePreset[] {
   const overrides = new Map<string, { label: string; content: string }>();
   for (const v of prompts?.captureSummaryVariants ?? []) {
-    if (v.content.trim() === "") continue;
+    if (!captureVariantIsPresent(v)) continue;
     overrides.set(v.id, { label: v.label, content: v.content });
   }
 

@@ -7,10 +7,14 @@
 import { test, expect, describe } from "bun:test";
 import { VALID_CATEGORIES } from "../utils/summary-parser.ts";
 import { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
-import { buildSummarySystemPrompt } from "./summarizer-shared.ts";
+import { buildSummarySystemPrompt, windowedTranscriptRider } from "./summarizer-shared.ts";
 import { joinPromptPieces, optionalPiece, summarySystemPromptPieces } from "./prompt-pieces.ts";
 import { youTubeSystemPromptPieces, buildYouTubeSystemPrompt } from "../youtube/prompt.ts";
-import { vimeoSystemPromptPieces, buildVimeoSystemPrompt } from "../vimeo/prompt.ts";
+import {
+  vimeoSystemPromptPieces,
+  buildVimeoSystemPrompt,
+  SUMMARIZE_INTRO as VIMEO_SUMMARIZE_INTRO,
+} from "../vimeo/prompt.ts";
 import { tikTokSystemPromptPieces, buildTikTokSystemPrompt } from "../tiktok/prompt.ts";
 import { xVideoSystemPromptPieces, buildXVideoSystemPrompt } from "../x-article/video-prompt.ts";
 import { xArticleSystemPromptPieces, buildXArticleSystemPrompt } from "../x-article/prompt.ts";
@@ -165,8 +169,52 @@ describe("the pieces each vertical contributes", () => {
       captionKind: "auto",
       outputLang: "nb",
     }).map((p) => p.id);
-    expect(ids).toEqual(["intro", "envelope", "structure", "context", "rider-auto-caption", "rider-language"]);
+    expect(ids).toEqual([
+      "intro",
+      "rider-windowed",
+      "envelope",
+      "structure",
+      "context",
+      "rider-auto-caption",
+      "rider-language",
+    ]);
     expect(ids.indexOf("rider-auto-caption")).toBeLessThan(ids.indexOf("rider-language"));
+  });
+
+  /**
+   * Vimeo bakes the windowed-transcript sentence into its intro STRING (unlike
+   * YouTube, which appends it as a piece), so the page tinted it as "Intro" and
+   * the cell omitted the chip the contract names. It is its own span now — and
+   * the split is a SPLIT: the two texts concatenate to the piece they replaced,
+   * so not one byte of the prompt moved.
+   */
+  test("Vimeo's windowed rider is its own span, and splitting it changed no byte", () => {
+    const input = {
+      preset: STANDARD,
+      title: "T",
+      url: "U",
+      captionKind: "auto" as const,
+      outputLang: "en" as const,
+    };
+    const pieces = vimeoSystemPromptPieces(input);
+    expect(pieces[0]!.id).toBe("intro");
+    expect(pieces[1]!.id).toBe("rider-windowed");
+    // The scaffold's single intro piece, as it was before the split.
+    const scaffoldIntro = summarySystemPromptPieces(
+      VIMEO_SUMMARIZE_INTRO,
+      VALID_CATEGORIES,
+      STANDARD.instruction,
+    )[0]!;
+    expect(pieces[0]!.text + pieces[1]!.text).toBe(scaffoldIntro.text);
+    // The rider really is the shared seam's sentence — the one YouTube tints.
+    expect(pieces[1]!.text).toContain(windowedTranscriptRider("talk"));
+    expect(pieces[0]!.text).not.toContain(windowedTranscriptRider("talk"));
+    // The chip label is the one the YouTube row shows for the same sentence.
+    expect(pieces[1]!.label).toBe(
+      youTubeSystemPromptPieces(STANDARD, { windowed: true, title: "T", videoUrl: "U" }).find(
+        (p) => p.id === "rider-windowed",
+      )!.label,
+    );
   });
 
   test("the short-video envelopes keep their own no-commentary piece", () => {

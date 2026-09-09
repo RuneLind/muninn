@@ -10,14 +10,19 @@ let claudeResult = "CATEGORY: ai/general\n\nSUMMARY:\n### Heading\n- point";
 let ingestOk = true;
 let ingestFilePath: string | undefined;
 let ingestPayload: Record<string, unknown> | undefined;
+/** What the run actually sent — the builder pin at the bottom compares against these. */
+let lastPrompt = "";
+let lastSystemPrompt = "";
 
 mock.module("../ai/one-shot.ts", () => ({
   executeOneShot: async (
-    _prompt: string,
+    prompt: string,
     _c: unknown,
     _b: unknown,
-    opts?: { onProgress?: (e: { type: string; text: string }) => void },
+    opts?: { systemPrompt?: string; onProgress?: (e: { type: string; text: string }) => void },
   ) => {
+    lastPrompt = prompt;
+    lastSystemPrompt = opts?.systemPrompt ?? "";
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
@@ -54,6 +59,9 @@ function installFetchMock() {
 }
 
 const { summarizeArticle } = await import("./summarizer.ts");
+const { buildArticleSystemPrompt } = await import("./prompt.ts");
+const { buildXArticleSystemPrompt } = await import("../x-article/prompt.ts");
+const { buildAnthropicSystemPrompt } = await import("../anthropic/prompt.ts");
 const { createJob, getJob } = await import("./state.ts");
 
 const config = { knowledgeApiUrl: "http://kb.test", claudeTimeoutMs: 120_000 } as unknown as Config;
@@ -66,6 +74,8 @@ beforeEach(() => {
   ingestOk = true;
   ingestFilePath = undefined;
   ingestPayload = undefined;
+  lastPrompt = "";
+  lastSystemPrompt = "";
   sourceDraftCalls = [];
   installFetchMock();
 });
@@ -111,4 +121,55 @@ test("URL-less pasted article still triggers when a file_path exists — url is 
     docId: "ai/general/No URL Article.md",
     url: "",
   });
+});
+
+/**
+ * The run uses ITS OWN builder, over the right arguments.
+ *
+ * Three text verticals compose their system prompt out of the same shared
+ * scaffold, so a call site pointed at the neighbour's builder — or one that
+ * stopped passing `author` — still produces a plausible prompt and still parses.
+ * Equality against the builder catches the first; DISTINCT values plus the
+ * explicit context lines catch the second.
+ */
+const PIN_TITLE = "Pasted Article";
+const PIN_AUTHOR = "Someone";
+const PIN_BODY = "a long pasted article body";
+
+test("the run sends article's OWN system prompt, carrying both optional context lines", async () => {
+  const jobId = createJob(PIN_TITLE, ART_URL, PIN_AUTHOR);
+  await summarizeArticle(jobId, PIN_TITLE, ART_URL, PIN_AUTHOR, PIN_BODY, config, bot);
+
+  expect(lastSystemPrompt).toBe(
+    buildArticleSystemPrompt({ title: PIN_TITLE, author: PIN_AUTHOR, url: ART_URL }),
+  );
+  // A run that stopped passing the author is a DIFFERENT prompt, so the
+  // equality above pins the argument and not only the builder.
+  expect(lastSystemPrompt).not.toBe(buildArticleSystemPrompt({ title: PIN_TITLE, url: ART_URL }));
+  expect(lastSystemPrompt).not.toBe(
+    buildArticleSystemPrompt({ title: PIN_TITLE, author: ART_URL, url: PIN_AUTHOR }),
+  );
+  // Neither neighbour's builder, over the same inputs.
+  expect(lastSystemPrompt).not.toBe(
+    buildXArticleSystemPrompt({ title: PIN_TITLE, author: PIN_AUTHOR, url: ART_URL }),
+  );
+  expect(lastSystemPrompt).not.toBe(
+    buildAnthropicSystemPrompt({ framing: "anthropic", title: PIN_TITLE, url: ART_URL }),
+  );
+  // The lines themselves — a builder that dropped one would move both sides of
+  // the equality and nothing else here would notice.
+  expect(lastSystemPrompt).toContain(`Article title: ${PIN_TITLE}`);
+  expect(lastSystemPrompt).toContain(`Article author: ${PIN_AUTHOR}`);
+  expect(lastSystemPrompt).toContain(`Article URL: ${ART_URL}`);
+  // The pasted body IS the user prompt — this vertical has no user-prompt builder.
+  expect(lastPrompt).toBe(PIN_BODY);
+});
+
+test("a paste with no url and no author omits those lines rather than sending blank ones", async () => {
+  const jobId = createJob("No URL Article");
+  await summarizeArticle(jobId, "No URL Article", "", "", PIN_BODY, config, bot);
+
+  expect(lastSystemPrompt).toBe(buildArticleSystemPrompt({ title: "No URL Article" }));
+  expect(lastSystemPrompt).not.toContain("Article author:");
+  expect(lastSystemPrompt).not.toContain("Article URL:");
 });
