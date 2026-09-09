@@ -31,8 +31,45 @@ export interface PromptPiece {
   readonly text: string;
 }
 
+/**
+ * Every content-bearing piece carries an id, and no two carry the same one —
+ * refused with the offending id named.
+ *
+ * The envelope's own check ({@link assertEnvelopeInstructions}) sees the four
+ * ids it emits plus the slot entries, which is everything the ENVELOPE knows
+ * about and nothing about the pieces a vertical appends around it. A slot entry
+ * spelled `{ id: "context" }` therefore passed it and collided with the
+ * vertical's own context piece one line later — two different parts claiming one
+ * tint class and one chip name, with a page that renders both and says nothing.
+ * The whole list only exists at the join, so the whole-list check lives here.
+ *
+ * A WHITESPACE-only span is exempt, and the exemption is Vimeo's: its intro is
+ * split around the windowed rider, and the trailing slice is the `\n\n` before
+ * the envelope — one part in two spans with a separator between them. It
+ * contributes no chip (`pieceChips` filters it) and has no visible tint, so it
+ * is not a second part claiming the name.
+ */
+export function assertUniquePieceIds(pieces: readonly PromptPiece[]): void {
+  const seen = new Set<string>();
+  for (const piece of pieces) {
+    if (piece.text.trim() === "") continue;
+    if (piece.id.trim() === "") {
+      throw new Error(
+        `Prompt piece "${piece.label}" has an empty piece id — /summaries/prompts tints and chips by id, so every part needs one.`,
+      );
+    }
+    if (seen.has(piece.id)) {
+      throw new Error(
+        `Two prompt pieces share the piece id "${piece.id}" — /summaries/prompts tints and chips by id, so two parts cannot claim one.`,
+      );
+    }
+    seen.add(piece.id);
+  }
+}
+
 /** The composed prompt: every piece's bytes, in order, and nothing else. */
 export function joinPromptPieces(pieces: readonly PromptPiece[]): string {
+  assertUniquePieceIds(pieces);
   return pieces.map((p) => p.text).join("");
 }
 
@@ -108,9 +145,13 @@ const ENVELOPE_OWN_PIECE_IDS = ["intro", "instructions", "envelope", "structure"
  *
  * A slot entry is written once, in code, by the author of a vertical — so a
  * shape the envelope cannot number is a mistake to report, never one to paper
- * over. A duplicate id is here for the PAGE's sake rather than the prompt's:
+ * over. The id rules are here for the PAGE's sake rather than the prompt's:
  * `/summaries/prompts` keys its tint and its chip on the id, so two spans
- * sharing one claim to be the same piece.
+ * sharing one claim to be the same piece and a span with no id claims nothing.
+ *
+ * This sees the envelope's own ids and the slot entries only — a collision with
+ * a piece the VERTICAL appends around the envelope is caught at the join
+ * ({@link assertUniquePieceIds}), which is where the whole list exists.
  */
 function assertEnvelopeInstructions(
   before: readonly EnvelopeInstruction[],
@@ -123,6 +164,11 @@ function assertEnvelopeInstructions(
   ] as const) {
     for (const inst of list) {
       const where = `Envelope \`${slot}\` instruction "${inst.id}"`;
+      if (inst.id.trim() === "") {
+        throw new Error(
+          `Envelope \`${slot}\` instruction "${inst.label}" has an empty piece id — /summaries/prompts tints and chips by id, so every instruction needs one.`,
+        );
+      }
       if (inst.text.trim() === "") {
         throw new Error(`${where} has no text — an empty slot entry composes a bare number.`);
       }

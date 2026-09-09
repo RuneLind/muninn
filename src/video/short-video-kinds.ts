@@ -1,6 +1,38 @@
 import type { BotPrompts, ConnectorType } from "../bots/config.ts";
 import { capabilitiesForConnectorType } from "../ai/connector-capabilities.ts";
-import { resolveCapturePresets, type CapturePreset } from "../summaries/presets.ts";
+import {
+  CAPTURE_THINKING_MAX_TOKENS,
+  resolveCapturePresets,
+  type CapturePreset,
+  type CaptureRunOptions,
+} from "../summaries/presets.ts";
+
+/**
+ * The thinking budget a SHORT-VIDEO capture sends, on every kind — `null`, the
+ * bot's own, which is this vertical's answer since before the picker existed.
+ *
+ * A named constant because it has a SECOND reader: `/summaries/prompts` shows a
+ * run chip per cell and derives it from the kind's preset, which says `capped`
+ * on three of the four short-video cells. Both sides read this, so the page
+ * cannot advertise a budget the job does not send. Why the value is `null` is
+ * documented where it is spent — the model call in `./short-video.ts`.
+ *
+ * The TYPE is the two values a run chip can say and no others: `capped` means
+ * exactly {@link CAPTURE_THINKING_MAX_TOKENS}, so a third budget would be shown
+ * as one of these two rather than as itself. A number this vocabulary cannot
+ * express is a tsc error here rather than a wrong chip on the page.
+ */
+export const SHORT_VIDEO_THINKING: null | typeof CAPTURE_THINKING_MAX_TOKENS = null;
+
+/**
+ * The same budget in the vocabulary a preset's run options speak — what the
+ * prompts page's two short-video rows override their kinds' `thinking` with.
+ * `null` at the seam IS `inherit`: `runCaptureOneShot` omits the key, so the
+ * connector sees the bot's own budget.
+ */
+export const SHORT_VIDEO_RUN_OVERRIDE: Pick<CaptureRunOptions, "thinking"> = {
+  thinking: SHORT_VIDEO_THINKING === null ? "inherit" : "capped",
+};
 
 /**
  * Why this summarizer bot cannot run a short-video capture AT ALL, or null when

@@ -41,6 +41,7 @@ import {
   type ShortVideoPromptSpec,
 } from "./short-video-prompt.ts";
 import { finishShortVideoSummary, type ShortVideoFinishSpec } from "./short-video-finish.ts";
+import { SHORT_VIDEO_THINKING } from "./short-video-kinds.ts";
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
   downloadVideo,
@@ -229,13 +230,22 @@ export async function summarizeShortVideo(
 
     const ingestTitle = title !== url ? title : dl.title || canonicalUrl;
 
-    // Both compositions are `./short-video-prompt.ts`, so the re-run and
-    // `/summaries/prompts` send and show exactly what this call does.
+    // Both prompts are composed by `./short-video-prompt.ts` — one module, so a
+    // second caller (the prompts page today, a re-run later) can compose the
+    // same bytes from the same inputs.
+    //
+    // `frames` is one of those inputs and is stated from what this run actually
+    // has, never from `framesEnabled`: the list is empty on a frames-off capture
+    // AND on a capture whose extraction failed above, and the frames-present
+    // prompt over an empty list orders the model to read images the user prompt
+    // does not list, says it is using BOTH, and asks it to mark what is
+    // visual-only.
     const systemPrompt = buildShortVideoSystemPrompt(spec, {
       preset,
       title: ingestTitle,
       url: canonicalUrl,
       author: dl.uploader,
+      frames: frames.length > 0,
     });
     const userPrompt = buildShortVideoUserPrompt({ transcript, frames });
 
@@ -273,7 +283,11 @@ export async function summarizeShortVideo(
       // ordinary capture here onto an unmeasured budget, and no kind would have
       // reproduced the old default — `deep` swaps the MODEL to opus as well, so
       // it is a different call, not the previous one under another name.
-      thinkingMaxTokens: null,
+      //
+      // A named constant (`./short-video-kinds.ts`) rather than the literal,
+      // because `/summaries/prompts` shows this budget as a chip and would
+      // otherwise read it off the PRESET — which says `capped`.
+      thinkingMaxTokens: SHORT_VIDEO_THINKING,
     });
 
     // 5. The post-model tail, in ONE function (`./short-video-finish.ts`) so a

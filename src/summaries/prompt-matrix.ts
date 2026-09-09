@@ -53,6 +53,7 @@ import {
   buildShortVideoUserPrompt,
   shortVideoSystemPromptPieces,
 } from "../video/short-video-prompt.ts";
+import { SHORT_VIDEO_RUN_OVERRIDE } from "../video/short-video-kinds.ts";
 import { xArticleSystemPromptPieces } from "../x-article/prompt.ts";
 import { articleSystemPromptPieces } from "../article/prompt.ts";
 import { anthropicSystemPromptPieces } from "../anthropic/prompt.ts";
@@ -167,6 +168,17 @@ export interface PromptMatrixSource {
    * from the preset instead.
    */
   readonly run: CaptureRunOptions;
+  /**
+   * What this vertical decides for ITSELF, whatever the kind says — merged over
+   * the preset's run options, per row.
+   *
+   * The two short-video rows are the case it exists for: that job sends
+   * `SHORT_VIDEO_THINKING` on every kind, so reading `thinking` off the preset
+   * showed "capped at 8000" on three of its four cells while the capture ran on
+   * the bot's own budget. A page that shows the run has to show the run —
+   * including the half a preset does not decide.
+   */
+  readonly runOverride?: Partial<CaptureRunOptions>;
   /** One clause about the frames (or the absence of them) this capture sends. */
   readonly framesNote: string;
   /**
@@ -260,6 +272,8 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     // Vestigial on a kind-ful row (`buildCell` takes the PRESET's run options);
     // kept because `PromptMatrixSource` requires one.
     run: { thinking: "capped", model: "bot" },
+    // The one thing this vertical decides for itself, on every kind.
+    runOverride: SHORT_VIDEO_RUN_OVERRIDE,
     framesNote: "keyframes read first, never quoted",
     // Branch points, from `src/video/short-video-prompt.ts`. SYSTEM: the
     // `frames` axis — `false` drops the frame-reading and visual-only rules and
@@ -281,6 +295,8 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     kinds: true,
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
+    // The same job, so the same override.
+    runOverride: SHORT_VIDEO_RUN_OVERRIDE,
     framesNote: "keyframes read first, never quoted",
     // The same three, through the same builder — the X spec differs from the
     // TikTok one in the platform noun and one clause, nothing else.
@@ -555,7 +571,10 @@ function buildCell(
   bot: BotConfig,
 ): PromptMatrixCell {
   const { pieces, userPrompt } = cellPrompts(source, preset);
-  const run = preset?.run ?? source.run;
+  // The kind decides the run, EXCEPT where the vertical overrides it — see
+  // `runOverride`. Merged rather than replaced: the short-video rows override
+  // the budget and leave `deep`'s opus swap alone.
+  const run = { ...(preset?.run ?? source.run), ...(source.runOverride ?? {}) };
   const chips = [
     ...(preset === null ? [noKindChip(source.envelope)] : []),
     ...pieceChips(pieces, preset),

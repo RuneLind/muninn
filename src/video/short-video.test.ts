@@ -24,6 +24,7 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { SUMMARY_STRUCTURE_BULLETS } from "../summaries/summarizer-shared.ts";
 import { SHIPPED_CAPTURE_PRESETS, type CapturePreset } from "../summaries/presets.ts";
+import { SHORT_VIDEO_THINKING } from "./short-video-kinds.ts";
 
 // --- Module mocks (registered before the dynamic imports below) ---
 // The media pipeline (yt-dlp / whisper / ffmpeg) and the Claude call are mocked
@@ -175,6 +176,8 @@ mock.module("../ai/one-shot.ts", () => ({
  * filed under the neighbour's name with no test to say so.
  */
 let lastCaptureSource: string | undefined;
+/** What the job asked the seam for, before the seam's own inherit rule. */
+let lastCaptureThinking: number | null | undefined;
 const realShared = await import("../summaries/summarizer-shared.ts");
 // The real function is captured into a CONST here, not read off `realShared`
 // inside the wrapper: `mock.module` rewrites the live namespace object, so
@@ -185,6 +188,7 @@ mock.module("../summaries/summarizer-shared.ts", () => ({
   ...realShared,
   runCaptureOneShot: (opts: Parameters<typeof realRunCaptureOneShot>[0]) => {
     lastCaptureSource = opts.source;
+    lastCaptureThinking = opts.thinkingMaxTokens;
     return realRunCaptureOneShot(opts);
   },
 }));
@@ -464,6 +468,54 @@ for (const v of VERTICALS) {
       expect(executorCalls).toBe(1);
       expect(lastPrompt).toContain("We ship a new CLI feature today.");
       expect(lastPrompt).not.toContain("Keyframes");
+      // The SYSTEM prompt degrades with it. This is the path the two candidate
+      // spellings of the axis disagree on: `framesEnabled` is still true here,
+      // and only the frame LIST knows there is nothing to read.
+      expect(lastSystemPrompt).toBe(
+        buildShortVideoSystemPrompt(v.spec, {
+          preset: STANDARD,
+          title: v.title,
+          url: v.canonicalUrl,
+          author: "coolcoder",
+          frames: false,
+        }),
+      );
+    });
+
+    /**
+     * The `frames` AXIS, at the only caller that has one.
+     *
+     * `frames: false` is not a prompt-module curiosity: the route sends it, and
+     * the job reaches the model call with an empty frame list. Asserting the
+     * builder's zero-frame answer here — rather than a substring of it — is what
+     * pins the axis to the RUN: the prompt module's own suite proves the two
+     * forms differ, and only this file can prove which one a capture sends.
+     */
+    test("a frames-off capture sends the ZERO-frame system prompt and a transcript-only user prompt", async () => {
+      const jobId = await capture(v.title, v.canonicalUrl, { frames: false });
+
+      expect(v.getJob(jobId)!.status).toBe("complete");
+      expect(extractCalls).toBe(0);
+      expect(lastSystemPrompt).toBe(
+        buildShortVideoSystemPrompt(v.spec, {
+          preset: STANDARD,
+          title: v.title,
+          url: v.canonicalUrl,
+          author: "coolcoder",
+          frames: false,
+        }),
+      );
+      // The frames-PRESENT form is what shipped here, so name it: an equality
+      // against the builder alone would pass on a run that sent either.
+      expect(lastSystemPrompt).not.toBe(
+        buildShortVideoSystemPrompt(v.spec, {
+          preset: STANDARD,
+          title: v.title,
+          url: v.canonicalUrl,
+          author: "coolcoder",
+        }),
+      );
+      expect(lastPrompt).toBe(buildShortVideoUserPrompt({ transcript, frames: [] }));
     });
 
     test("empty transcript with frames disabled fails the job (nothing to summarize)", async () => {
@@ -563,6 +615,10 @@ for (const v of VERTICALS) {
       await capture();
       expect("thinkingMaxTokens" in lastOpts!).toBe(false);
       expect(lastBotConfig!.model).toBe("sonnet");
+      // The budget the job ASKS for, before the seam's inherit rule — the same
+      // constant `/summaries/prompts` builds its run chip from, so the page
+      // cannot advertise a budget this call does not send.
+      expect(lastCaptureThinking).toBe(SHORT_VIDEO_THINKING);
 
       await capture(v.title, v.submitUrl, { preset: DEEP });
       expect("thinkingMaxTokens" in lastOpts!).toBe(false);

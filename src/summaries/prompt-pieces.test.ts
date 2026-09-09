@@ -44,6 +44,72 @@ describe("joinPromptPieces", () => {
     expect(optionalPiece(true, piece)).toEqual([piece]);
     expect(optionalPiece(false, piece)).toEqual([]);
   });
+
+  /**
+   * The id guard over the WHOLE list.
+   *
+   * `assertEnvelopeInstructions` sees the envelope's own four ids and the slot
+   * entries, which is everything the envelope knows about — and nothing about
+   * the pieces the vertical appends AROUND it. So a slot entry could take the id
+   * of the vertical's own `context` piece, and the page would tint two different
+   * parts as one and chip the name twice. The join is where the whole list
+   * exists, so that is where the check lives.
+   */
+  test("two content pieces sharing an id are refused at the join", () => {
+    const collide = () =>
+      joinPromptPieces([
+        ...summarySystemPromptPieces("I.", ["a"], "- one", {
+          after: [{ id: "context", label: "No-commentary rule", text: "Say nothing else." }],
+        }),
+        { id: "context", label: "Video context", text: "\n\nVideo URL: u" },
+      ]);
+    expect(collide).toThrow(/share the piece id "context"/);
+  });
+
+  test("an empty id on a content piece is refused at the join", () => {
+    expect(() => joinPromptPieces([{ id: "", label: "X", text: "words" }])).toThrow(
+      /empty piece id/,
+    );
+  });
+
+  /**
+   * A WHITESPACE-only span may repeat an id, and that exemption is Vimeo's: its
+   * intro is split around the windowed rider, and the trailing slice is the
+   * `\n\n` before the envelope — the same piece, in two spans, with a separator
+   * between them. It contributes no chip (`pieceChips` filters it) and has no
+   * visible tint, so it is not a second part claiming the name.
+   */
+  test("a whitespace-only span may repeat an id — the separator is not a part", () => {
+    expect(() =>
+      joinPromptPieces([
+        { id: "intro", label: "Intro", text: "You are an analyst." },
+        { id: "rider-windowed", label: "Windowed transcript rider", text: " The windows are positions." },
+        { id: "intro", label: "Intro", text: "\n\n" },
+      ]),
+    ).not.toThrow();
+  });
+
+  /** Every shipped builder still joins — the guard must not refuse production. */
+  test("the shipped builders' piece lists all pass the id guard", () => {
+    // Vimeo first: it is the only shipped builder whose list repeats an id.
+    expect(() =>
+      buildVimeoSystemPrompt({
+        preset: STANDARD,
+        title: "T",
+        url: "U",
+        captionKind: "auto",
+        outputLang: "en",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildShortVideoSystemPrompt(TIKTOK_PROMPT_SPEC, {
+        preset: STANDARD,
+        title: "T",
+        url: "https://www.tiktok.com/@a/video/1",
+        author: "a",
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("the shared scaffold", () => {
@@ -213,6 +279,13 @@ Instructions:
     test("an id that collides with a piece the envelope itself emits is refused", () => {
       for (const id of ["intro", "instructions", "envelope", "structure"]) {
         expect(withEntry("before", { ...ok, id })).toThrow(new RegExp(`duplicate piece id "${id}"`));
+      }
+    });
+
+    test("an empty id is refused — a span with no id is a span the page cannot tint", () => {
+      for (const slot of ["before", "after"] as const) {
+        expect(withEntry(slot, { ...ok, id: "" })).toThrow(/empty piece id/);
+        expect(withEntry(slot, { ...ok, id: "  " })).toThrow(/empty piece id/);
       }
     });
 

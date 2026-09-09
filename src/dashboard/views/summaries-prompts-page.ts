@@ -43,8 +43,9 @@ import type { PromptMatrix, PromptMatrixCell } from "../../summaries/prompt-matr
  * Contrast against `--bg-inset`, measured 2026-09-09 from resolved computed
  * styles in both themes (`e2e/summaries-prompts.spec.ts`, which also asserts
  * every span's colour DIFFERS from the inherited one): worst case 4.62:1 light
- * (`context`) and 5.23:1 dark (`envelope`). The rows added here measure
- * 5.23:1 light / 5.34:1 dark (`instructions`, on the envelope's own hue) and
+ * (`context`) and 5.34:1 dark (`envelope`). The rows added here measure
+ * 5.23:1 light / 5.34:1 dark (`instructions`, on the envelope's own hue — the
+ * same two numbers as `envelope`, which is what sharing a hue means) and
  * 5.33:1 light / 11.60:1 dark (the three numbered rules, on `--tok-num`).
  */
 const PIECE_TINTS: ReadonlyArray<{ id: string; label: string; color: string }> = [

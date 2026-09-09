@@ -100,9 +100,10 @@ export interface ShortVideoSystemPromptInput {
    * that is not there. `false` drops the two frame rules — so the envelope's own
    * steps renumber from 1 — and names the transcript alone in the intro.
    *
-   * The no-commentary rule is NOT on this axis and stays in both forms: its
-   * load-bearing clause is "your only text output is the final CATEGORY/SUMMARY
-   * response", a rule about the whole answer rather than about frames.
+   * The no-commentary rule STAYS in both forms — its load-bearing clause is
+   * "your only text output is the final CATEGORY/SUMMARY response", a rule about
+   * the whole answer — but loses its second sentence, which is an order about
+   * frames. See {@link NO_COMMENTARY_CLAUSE}.
    */
   readonly frames?: boolean;
 }
@@ -135,14 +136,26 @@ const VISUAL_ONLY_INSTRUCTION: EnvelopeInstruction = {
  * numbered after the structure step rather than folded into the frame-reading
  * one. Without it the model narrates its Reads and the chatter streams into the
  * shelf card ahead of the summary.
+ *
+ * TWO sentences, and only the first is on every form. The rule about the whole
+ * ANSWER ("your only text output is …") holds whatever this pass was given; the
+ * second sentence is an order about frames, and a pass that has none would be
+ * told not to narrate images it was never handed — the same three-instructions-
+ * about-absent-material defect the `frames` axis exists to remove. The
+ * zero-frame form is a PREFIX of the frames-present one, so the two cannot drift.
  */
-const NO_COMMENTARY_INSTRUCTION: EnvelopeInstruction = {
-  id: "no-commentary",
-  label: "No-commentary rule",
-  text:
-    "CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response. " +
-    "Do not narrate the frames as you read them.",
-};
+const NO_COMMENTARY_CLAUSE =
+  "CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response.";
+
+function noCommentaryInstruction(withFrames: boolean): EnvelopeInstruction {
+  return {
+    id: "no-commentary",
+    label: "No-commentary rule",
+    text: withFrames
+      ? `${NO_COMMENTARY_CLAUSE} Do not narrate the frames as you read them.`
+      : NO_COMMENTARY_CLAUSE,
+  };
+}
 
 /** The system prompt's pieces — the spans `/summaries/prompts` tints by. */
 export function shortVideoSystemPromptPieces(
@@ -159,7 +172,7 @@ export function shortVideoSystemPromptPieces(
       input.preset.instruction,
       {
         before: withFrames ? [readFramesInstruction(spec), VISUAL_ONLY_INSTRUCTION] : [],
-        after: [NO_COMMENTARY_INSTRUCTION],
+        after: [noCommentaryInstruction(withFrames)],
       },
     ),
     {

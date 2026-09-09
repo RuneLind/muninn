@@ -137,10 +137,10 @@ Author: placeholder-author`);
    * no JPEGs), and the frames-present prompt then orders the model to "Read ALL
    * the frame images listed below" over a user prompt that lists none, says
    * "using BOTH its transcript and the keyframe images", and asks it to note
-   * what is visual-only. `frames: false` is that axis, and it is the ONLY thing
-   * it changes: the numbering closes up, the intro names the transcript alone,
-   * and everything else — envelope, kind, no-commentary rule, context — is the
-   * same builder.
+   * what is visual-only. `frames: false` is that axis: the numbering closes up,
+   * the intro names the transcript alone, and the no-commentary rule keeps the
+   * clause about the whole ANSWER while dropping its second sentence, which is
+   * an order about frames — so a prompt sent with no frames never mentions one.
    */
   test("`frames: false` drops the two frame rules, renumbers, and names the transcript alone", () => {
     expect(
@@ -159,7 +159,7 @@ Instructions:
 2. Then add a blank line, then SUMMARY: on its own line
 3. Then write a structured summary with:
    - One bullet, and nothing else.
-4. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response. Do not narrate the frames as you read them.
+4. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response.
 
 Video title: A placeholder capture
 Video URL: https://www.tiktok.com/@placeholder/video/1234567890123456789
@@ -181,6 +181,27 @@ Author: placeholder-author`);
     expect(prompt).not.toContain("Read ALL the frame images");
     expect(prompt).not.toContain("visual-only");
     expect(prompt).not.toContain(X_VIDEO_PROMPT_SPEC.frameClause);
+    // The whole word, anywhere: the no-commentary rule's second sentence is an
+    // order about frames, and it survived the two `toContain`s above. A prompt
+    // that mentions frames it was not given is the defect this axis exists to
+    // remove, wherever the mention lives.
+    expect(prompt).not.toMatch(/frames?/i);
+  });
+
+  /**
+   * The frames-PRESENT no-commentary rule is untouched — the clause the
+   * zero-frame form drops is a suffix of it, so the two forms cannot drift
+   * apart. (The whole-prompt literal at the top of this file is the byte-level
+   * pin; this states the relationship the two texts stand in.)
+   */
+  test("the zero-frame no-commentary rule is the frames-present one MINUS the frame sentence", () => {
+    const base = { preset: TINY, title: "T", url: "U", author: "A" };
+    const withFrames = buildShortVideoSystemPrompt(TIKTOK_PROMPT_SPEC, base);
+    const without = buildShortVideoSystemPrompt(TIKTOK_PROMPT_SPEC, { ...base, frames: false });
+    const shared =
+      "CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response.";
+    expect(withFrames).toContain(`${shared} Do not narrate the frames as you read them.`);
+    expect(without).toContain(`${shared}\n`);
   });
 
   /**

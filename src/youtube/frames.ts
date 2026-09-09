@@ -17,9 +17,10 @@
  * file their whisper transcript the same way and `src/video/` may not import
  * `src/youtube/`. The names are re-exported below, so no importer moved.
  *
- * No I/O, and its only import is the dependency-free
- * `src/summaries/transcript-appendix.ts` leaf — so it is unit-tested in the
- * shared chunk, with no `mock.module` and no yt-dlp.
+ * No I/O, and its only edges are two dependency-free leaves:
+ * `src/summaries/transcript-appendix.ts` and — through the re-export at the
+ * bottom of this file — `src/summaries/truncation.ts`. So it is unit-tested in
+ * the shared chunk, with no `mock.module` and no yt-dlp.
  */
 
 import { TRANSCRIPT_MAX_BYTES } from "../summaries/transcript-appendix.ts";
@@ -52,9 +53,9 @@ import { TRANSCRIPT_MAX_BYTES } from "../summaries/transcript-appendix.ts";
  * path. The preference is a preference: tiers 2 and 3 drop it, so a video with
  * no H.264 rendition still gets frames.
  *
- * The `720` is `CAPTURE_FRAME_HEIGHT` spelled out: this module's only import is
- * the dependency-free `transcript-appendix.ts` leaf (see the file header), and
- * the seam's constant is what the extractor actually scales to.
+ * The `720` is `CAPTURE_FRAME_HEIGHT` spelled out: this module imports neither
+ * the seam nor anything but the two dependency-free leaves the file header
+ * names, and the seam's constant is what the extractor actually scales to.
  */
 export const YOUTUBE_FRAME_FORMAT_SELECTOR =
   "bv[height<=720][ext=mp4][vcodec^=avc1]/bv[height<=720][ext=mp4]/bv[height<=720]";

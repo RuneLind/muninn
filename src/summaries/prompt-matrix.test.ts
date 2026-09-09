@@ -17,7 +17,12 @@ import { dirname, resolve } from "node:path";
 import type { BotConfig } from "../bots/config.ts";
 import { SUMMARY_SOURCES } from "./sources.ts";
 import { joinPromptPieces } from "./prompt-pieces.ts";
-import { resolveCapturePresets, SHIPPED_CAPTURE_PRESETS } from "./presets.ts";
+import {
+  CAPTURE_THINKING_MAX_TOKENS,
+  resolveCapturePresets,
+  SHIPPED_CAPTURE_PRESETS,
+} from "./presets.ts";
+import { SHORT_VIDEO_THINKING } from "../video/short-video-kinds.ts";
 import { buildTakeawayCheckPrompt } from "./takeaway-check.ts";
 import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../youtube/prompt.ts";
 import { buildVimeoSystemPrompt, buildVimeoUserPrompt } from "../vimeo/prompt.ts";
@@ -244,7 +249,9 @@ describe("the chips", () => {
         "video context",
         "frames: keyframes read first, never quoted",
         "model: the bot's own",
-        "thinking: capped at 8000",
+        // NOT the preset's `capped`: this vertical sends the bot's own budget on
+        // every kind, and the row says so — see the test below.
+        "thinking: the bot's own budget",
       ]);
       // No `no kind` chip any more, in either wording.
       expect(c.chips.some((chip) => chip.endsWith("no kind"))).toBe(false);
@@ -260,6 +267,39 @@ describe("the chips", () => {
       expect(deep).toContain("thinking: the bot's own budget");
       expect(deep).toContain("model: claude-opus-5");
     }
+  });
+
+  /**
+   * The thinking chip against the RUN, not against the preset.
+   *
+   * `buildCell` reads the run options off the KIND, which is right everywhere
+   * else and wrong here: the short-video job passes {@link SHORT_VIDEO_THINKING}
+   * on every kind, so three of these four cells advertised a cap the capture
+   * does not apply. The expectation is DERIVED from that constant — the page and
+   * the job read one value, and this is the assertion that says so.
+   */
+  test("every short-video cell's thinking chip is the budget the capture really sends", () => {
+    const matrix = buildPromptMatrix(bot(), [bot()]);
+    const expected =
+      SHORT_VIDEO_THINKING === null
+        ? "thinking: the bot's own budget"
+        : `thinking: capped at ${SHORT_VIDEO_THINKING}`;
+    for (const id of ["tiktok", "x-video"]) {
+      const row = matrix.rows.find((r) => r.source.id === id)!;
+      // More than one cell, or "every kind" says nothing.
+      expect(row.cells.length).toBeGreaterThan(1);
+      for (const c of row.cells) {
+        expect(c.chips).toContain(expected);
+        expect(c.chips.filter((chip) => chip.startsWith("thinking:"))).toHaveLength(1);
+      }
+      // The MODEL chip is still the kind's own — the override is the budget only.
+      expect(cell(matrix, id, "deep").chips).toContain("model: claude-opus-5");
+      expect(cell(matrix, id, "standard").chips).toContain("model: the bot's own");
+    }
+    // Per ROW: a vertical that does take the cap still shows it.
+    expect(cell(matrix, "youtube", "standard").chips).toContain(
+      `thinking: capped at ${CAPTURE_THINKING_MAX_TOKENS}`,
+    );
   });
 
   test("the text cells say 'shared envelope, no kind' — a different sentence from the video ones", () => {
