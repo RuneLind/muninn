@@ -174,7 +174,7 @@ export interface PromptMatrixSource {
    *
    * The two short-video rows are the case it exists for: that job sends
    * `SHORT_VIDEO_THINKING` on every kind, so reading `thinking` off the preset
-   * showed "capped at 8000" on three of its four cells while the capture ran on
+   * showed "capped at 8000" on four of its six cells (the two `deep` cells already inherited) while the capture ran on
    * the bot's own budget. A page that shows the run has to show the run —
    * including the half a preset does not decide.
    */

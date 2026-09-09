@@ -274,7 +274,7 @@ describe("the chips", () => {
    *
    * `buildCell` reads the run options off the KIND, which is right everywhere
    * else and wrong here: the short-video job passes {@link SHORT_VIDEO_THINKING}
-   * on every kind, so three of these four cells advertised a cap the capture
+   * on every kind, so four of these six cells advertised a cap the capture
    * does not apply. The expectation is DERIVED from that constant — the page and
    * the job read one value, and this is the assertion that says so.
    */

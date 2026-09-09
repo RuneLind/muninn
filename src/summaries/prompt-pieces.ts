@@ -48,6 +48,13 @@ export interface PromptPiece {
  * the envelope — one part in two spans with a separator between them. It
  * contributes no chip (`pieceChips` filters it) and has no visible tint, so it
  * is not a second part claiming the name.
+ *
+ * Blast radius, stated on purpose: this runs inside {@link joinPromptPieces},
+ * which is on every capture's path, so a builder that repeats an id does not
+ * render a mis-tinted page — it THROWS, the capture's catch `failJob`s it, and
+ * `/summaries/prompts` 500s. That is the intended shape for a code-authored
+ * invariant (it cannot happen from user input), and it is what makes the page
+ * trustworthy; it is also why the builders' own tests pin this at construction.
  */
 export function assertUniquePieceIds(pieces: readonly PromptPiece[]): void {
   const seen = new Set<string>();

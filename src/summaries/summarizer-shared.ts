@@ -67,11 +67,13 @@ export interface CaptureOneShotOptions {
   /**
    * Thinking budget. Defaults to {@link CAPTURE_THINKING_MAX_TOKENS}; pass
    * `null` to inherit the bot's own budget, which is what the `deep` KIND asks
-   * for (`captureThinkingFor`). The two short-video verticals used to pass it
-   * unconditionally — their multi-turn frame reading is genuine visual
-   * reasoning, and a ~10-min background job has no first-token latency to
-   * protect — and now take the cap on `standard` like every other capture, with
-   * `deep` as the way back to the bot's own budget.
+   * for (`captureThinkingFor`). The two short-video verticals pass `null` on
+   * EVERY kind (`SHORT_VIDEO_THINKING` in `src/video/short-video-kinds.ts`):
+   * their multi-turn frame reading is genuine visual reasoning, and a ~10-min
+   * background job has no first-token latency to protect. The 8k knee was
+   * measured on a text-only transcript, not on a frame-reading session, so
+   * they keep the budget they always had; the prompts page reads the same
+   * constant for its chip.
    */
   thinkingMaxTokens?: number | null;
   /**

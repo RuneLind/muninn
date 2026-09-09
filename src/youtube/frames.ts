@@ -17,7 +17,7 @@
  * file their whisper transcript the same way and `src/video/` may not import
  * `src/youtube/`. The names are re-exported below, so no importer moved.
  *
- * No I/O, and its only edges are two dependency-free leaves:
+ * No I/O, and its only edges are two leaves with no edges beyond each other:
  * `src/summaries/transcript-appendix.ts` and — through the re-export at the
  * bottom of this file — `src/summaries/truncation.ts`. So it is unit-tested in
  * the shared chunk, with no `mock.module` and no yt-dlp.
