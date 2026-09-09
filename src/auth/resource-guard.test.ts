@@ -1,6 +1,7 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { Hono } from "hono";
 import {
+  decideCaptureSnapshotAccess,
   decideResourceAccess,
   requireOwnedResource,
   filterToOwner,
@@ -265,5 +266,37 @@ describe("filterToOwner", () => {
   test("admin sees every row — the operator surface stays whole", async () => {
     const res = await appWith({ ...A, userId: "op" }, "admin").request("/collection");
     expect((await res.json() as { rows: unknown[] }).rows).toHaveLength(3);
+  });
+});
+
+/**
+ * The capture-snapshot gate, which is NOT an owner check.
+ *
+ * A capture trace has no `user_id` (nothing about a YouTube summary belongs to
+ * one person), so `requireOwnedResource("trace", …)` cannot be reused for the
+ * prompt behind it: past the 7-day trace sweep it would answer `missing` for
+ * every stored capture prompt, and the snapshot is kept for 90 days precisely
+ * so it outlives the trace. The set it admits is the set a NULL-owner trace
+ * admits today — auth off, an admin, or a `local` instance's single human.
+ */
+describe("decideCaptureSnapshotAccess", () => {
+  test("auth off admits any reader — today's muninn is unchanged", () => {
+    expect(decideCaptureSnapshotAccess({ authenticating: false, role: null, localPinned: false })).toBe(true);
+  });
+
+  test("an admin reads it on an authenticating instance", () => {
+    expect(decideCaptureSnapshotAccess({ authenticating: true, role: "admin", localPinned: false })).toBe(true);
+  });
+
+  test("a `local` instance's single human reads it at the default role", () => {
+    expect(decideCaptureSnapshotAccess({ authenticating: true, role: "user", localPinned: true })).toBe(true);
+  });
+
+  test("a plain user on a multi-identity instance does not", () => {
+    expect(decideCaptureSnapshotAccess({ authenticating: true, role: "user", localPinned: false })).toBe(false);
+  });
+
+  test("no resolved identity on an authenticating instance fails closed", () => {
+    expect(decideCaptureSnapshotAccess({ authenticating: true, role: null, localPinned: true })).toBe(false);
   });
 });

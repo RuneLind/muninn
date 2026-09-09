@@ -9,6 +9,10 @@ const ALL_TABLES = [
   "research_citations",
   "search_signals",
   "traces",
+  // Added with the capture-snapshot slice: rows here accumulated across every
+  // run, which is invisible to id-scoped assertions and makes any
+  // whole-table property depend on how often the suite has been run.
+  "prompt_snapshots",
   "haiku_usage",
   "summary_candidates",
   "x_link_amplifiers",

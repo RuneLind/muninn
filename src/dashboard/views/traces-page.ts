@@ -100,15 +100,26 @@ export async function renderTracesPage(): Promise<string> {
       if (pill) selectBot(pill.dataset.bot);
     });
 
-    // Deep-link: /traces#<traceId> opens that trace's waterfall. loadWaterfall
-    // fetches the trace by id directly, so it works even when the row isn't on
-    // the loaded first page (placeWaterfallAfterRow then parks the panel at the
-    // top); when the row IS present we also scroll it into view.
+    // Deep-link: /traces#<traceId> opens that trace's waterfall, and
+    // #<traceId>/prompt[/<pass>] opens the prompt modal on top of it — the link
+    // the /summaries doc panel offers while a capture's trace is still alive.
+    // loadWaterfall fetches the trace by id directly, so it works even when the
+    // row isn't on the loaded first page (placeWaterfallAfterRow then parks the
+    // panel at the top); when the row IS present we also scroll it into view.
+    //
+    // The modal is opened only AFTER loadWaterfall resolves: it reads
+    // currentWaterfallTraceId, which that call is what sets.
+    //
+    // Read-only. Nothing on this page WRITES location.hash — the fragment
+    // arrives from an external link — and this stays a reader.
     function openTraceFromHash() {
-      var id = (location.hash || '').replace(/^#/, '').trim();
-      if (!id) return;
-      loadWaterfall(id);
-      var row = document.querySelector('tr[data-trace="' + id + '"]');
+      var target = parseTraceHash(location.hash || '');
+      if (!target) return;
+      var loaded = loadWaterfall(target.traceId);
+      if (target.prompt) {
+        Promise.resolve(loaded).then(function () { openPromptModal(target.pass); });
+      }
+      var row = document.querySelector('tr[data-trace="' + target.traceId + '"]');
       if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center' });
     }
 

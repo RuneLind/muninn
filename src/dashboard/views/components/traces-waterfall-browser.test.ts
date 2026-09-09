@@ -283,3 +283,47 @@ test("closeWaterfall + closeSpanDetails don't throw against the stub DOM", () =>
   ctx.closeSpanDetails();
   ctx.closeWaterfall();
 });
+
+/**
+ * `/traces#<traceId>` opens a waterfall; `#<traceId>/prompt/<pass>` opens the
+ * prompt modal on that pass on top of it, which is the link the /summaries doc
+ * panel offers while a capture's trace is still alive.
+ *
+ * The parse lives in the bundle rather than in the page's inline script so it
+ * can be driven here: a `#` fragment is not URL-decoded by the browser, the
+ * pass itself contains a `:` (`claude:select`), and both halves are easy to get
+ * wrong invisibly — a mis-parse leaves the modal shut with no error anywhere.
+ */
+const parseHash = (hash: string) =>
+  (ctx as unknown as { parseTraceHash: (h: string) => unknown }).parseTraceHash(hash);
+
+test("a bare trace hash asks for no prompt", () => {
+  expect(parseHash("#abc-123")).toEqual({ traceId: "abc-123", prompt: false });
+});
+
+test("an empty hash yields no trace", () => {
+  expect(parseHash("")).toBeNull();
+  expect(parseHash("#")).toBeNull();
+});
+
+test("#<id>/prompt asks for the DEFAULT pass", () => {
+  expect(parseHash("#abc-123/prompt")).toEqual({ traceId: "abc-123", prompt: true });
+});
+
+test("#<id>/prompt/<pass> carries the url-decoded pass", () => {
+  expect(parseHash("#abc-123/prompt/claude%3Aselect")).toEqual({
+    traceId: "abc-123",
+    prompt: true,
+    pass: "claude:select",
+  });
+});
+
+test("an undecodable pass still opens the trace on the default pass", () => {
+  // decodeURIComponent throws on a lone `%`; a bad link must not take the
+  // waterfall down with it.
+  expect(parseHash("#abc-123/prompt/%")).toEqual({ traceId: "abc-123", prompt: true });
+});
+
+test("a trailing slash after prompt is the default pass, not an empty one", () => {
+  expect(parseHash("#abc-123/prompt/")).toEqual({ traceId: "abc-123", prompt: true });
+});

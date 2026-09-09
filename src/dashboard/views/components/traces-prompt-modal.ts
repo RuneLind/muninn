@@ -30,6 +30,14 @@ export function tracesPromptModalStyles(): string {
       border-bottom: 1px solid var(--border-primary);
     }
     .prompt-modal-header h3 { font-size: 14px; color: var(--text-primary); }
+    .prompt-modal-title { display: flex; align-items: baseline; gap: 8px; }
+    /* Which PASS is on screen. A capture trace holds more than one prompt
+       (a selection pass and a summary pass), so an unnamed modal is ambiguous. */
+    .prompt-pass-label {
+      font-size: 11px;
+      color: var(--text-faint);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
     .prompt-modal-close {
       background: none;
       border: none;
@@ -241,7 +249,10 @@ export function tracesPromptModalHtml(): string {
   <div class="prompt-modal-backdrop" id="promptModalBackdrop" onclick="closePromptModal(event)">
     <div class="prompt-modal" onclick="event.stopPropagation()">
       <div class="prompt-modal-header">
-        <h3>Prompt Snapshot</h3>
+        <div class="prompt-modal-title">
+          <h3>Prompt Snapshot</h3>
+          <span class="prompt-pass-label" id="promptPassLabel"></span>
+        </div>
         <button class="prompt-modal-close" onclick="closePromptModal()">&times;</button>
       </div>
       <div class="prompt-stats" id="promptStats"></div>
@@ -258,13 +269,33 @@ export function tracesPromptModalHtml(): string {
 
 export function tracesPromptModalScript(): string {
   return `
-    let promptCache = {};  // traceId -> { systemPrompt, userPrompt } | null
+    // Keyed on traceId AND pass: one capture trace holds a selection prompt and
+    // a summary prompt, and a traceId-only key served the second opener the
+    // first one's body. A null entry is a remembered 404.
+    let promptCache = {};  // "<traceId>|<pass>" -> { systemPrompt, userPrompt, pass } | null
     let activePromptTab = 'system';
+    let activePromptKey = null;
 
-    async function openPromptModal() {
+    function promptCacheKey(traceId, pass) {
+      return traceId + '|' + (pass || '');
+    }
+
+    /** What the header says a prompt is. A chat turn has one pass, labelled with
+     *  the empty string, which as a chip would read as a missing value. */
+    function passLabelText(pass) {
+      if (pass === undefined || pass === null) return '';
+      return pass === '' ? 'chat' : 'pass: ' + pass;
+    }
+
+    /**
+     * @param pass optional — the pass to open on, e.g. the selection one. Omitted, the
+     *   route picks the summary pass, which is what a trace row means.
+     */
+    async function openPromptModal(pass) {
       if (!currentWaterfallTraceId) return;
       const backdrop = document.getElementById('promptModalBackdrop');
       const contentEl = document.getElementById('promptContent');
+      const passLabel = document.getElementById('promptPassLabel');
       contentEl.innerHTML = '<div class="prompt-unavailable">Loading...</div>';
       backdrop.classList.add('visible');
       activePromptTab = 'user';
@@ -272,22 +303,31 @@ export function tracesPromptModalScript(): string {
       document.getElementById('tabUser').classList.add('active');
       renderPromptStats();
 
+      const key = promptCacheKey(currentWaterfallTraceId, pass);
+      activePromptKey = key;
+      if (passLabel) passLabel.textContent = '';
+
       try {
-        if (!promptCache[currentWaterfallTraceId]) {
-          const res = await fetch('/api/prompts/' + currentWaterfallTraceId);
+        if (promptCache[key] === undefined) {
+          const url = '/api/prompts/' + currentWaterfallTraceId +
+            (pass ? '?pass=' + encodeURIComponent(pass) : '');
+          const res = await fetch(url);
           if (res.status === 404) {
-            promptCache[currentWaterfallTraceId] = null;
+            promptCache[key] = null;
           } else {
-            promptCache[currentWaterfallTraceId] = await res.json();
+            promptCache[key] = await res.json();
           }
         }
-        const data = promptCache[currentWaterfallTraceId];
+        const data = promptCache[key];
         if (!data) {
           contentEl.innerHTML = '<div class="prompt-unavailable">Prompt snapshot not available (expired or not captured)</div>';
           document.getElementById('systemCharCount').textContent = '';
           document.getElementById('userCharCount').textContent = '';
           return;
         }
+        // The pass the ROUTE answered with, never the one asked for: with no
+        // pass in the request the answer is whichever row the default read won.
+        if (passLabel) passLabel.textContent = passLabelText(data.pass);
         document.getElementById('systemCharCount').textContent = '(' + fmtCharCount(data.systemPrompt.length) + ')';
         document.getElementById('userCharCount').textContent = '(' + fmtCharCount(data.userPrompt.length) + ')';
         renderPromptTab(data);
@@ -503,7 +543,7 @@ export function tracesPromptModalScript(): string {
       activePromptTab = tab;
       document.getElementById('tabSystem').classList.toggle('active', tab === 'system');
       document.getElementById('tabUser').classList.toggle('active', tab === 'user');
-      const data = promptCache[currentWaterfallTraceId];
+      const data = activePromptKey ? promptCache[activePromptKey] : null;
       if (data) renderPromptTab(data);
     }
 

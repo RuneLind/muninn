@@ -597,6 +597,10 @@ export function loadConfig() {
     tracingRetentionDays: optionalEnvInt("TRACING_RETENTION_DAYS", 7),
     tracingCaptureToolOutputs: optionalEnv("TRACING_CAPTURE_TOOL_OUTPUTS", "true") === "true",
     promptSnapshotsRetentionDays: optionalEnvInt("PROMPT_SNAPSHOTS_RETENTION_DAYS", 3),
+    // Capture prompts outlive both their chat siblings and their own traces: the
+    // summary they produced is read months later, and "what was this written
+    // from?" is the question the /summaries doc panel answers from this row.
+    promptSnapshotsCaptureRetentionDays: optionalEnvInt("PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS", 90),
   } as const;
 }
 

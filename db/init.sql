@@ -589,20 +589,33 @@ CREATE INDEX idx_traces_root ON traces (started_at DESC) WHERE parent_id IS NULL
 CREATE INDEX idx_traces_bot ON traces (bot_name, started_at DESC) WHERE parent_id IS NULL;
 
 -- ============================================================================
--- Prompt snapshots: full system + user prompts per trace for inspection
--- No FK on trace_id — snapshots have shorter retention (3d) than traces (7d),
--- so traces may be deleted while snapshots still exist, and vice versa.
+-- Prompt snapshots: full system + user prompts per trace PASS, for inspection.
+-- No FK on trace_id — a chat snapshot is swept sooner than its trace (3d vs 7d)
+-- and a CAPTURE snapshot outlives it (90d), so either side may be gone first.
+--
+-- One row per (trace_id, pass): a YouTube dense-scan capture runs the capture
+-- seam twice under one root — `claude:select` then `claude` — and a key on
+-- trace_id alone let the first pass win the trace. `kind` is what splits the two
+-- retentions ('chat' | 'capture'); `source_url` is the capture's own address,
+-- which is how the /summaries doc panel finds a prompt whose trace is long gone.
 -- ============================================================================
 CREATE TABLE prompt_snapshots (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   trace_id UUID NOT NULL,
   system_prompt TEXT NOT NULL,
   user_prompt TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  pass TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'chat',
+  source_url TEXT
 );
 
-CREATE UNIQUE INDEX idx_prompt_snapshots_trace ON prompt_snapshots (trace_id);
+CREATE UNIQUE INDEX idx_prompt_snapshots_trace_pass ON prompt_snapshots (trace_id, pass);
 CREATE INDEX idx_prompt_snapshots_created ON prompt_snapshots (created_at DESC);
+-- PARTIAL, on the kind it serves: chat rows carry no source_url.
+CREATE INDEX idx_prompt_snapshots_capture_url
+  ON prompt_snapshots (source_url, created_at DESC)
+  WHERE kind = 'capture';
 
 -- ============================================================================
 -- Spec-driven dev loop: control/state plane for the closed ATDD loop.

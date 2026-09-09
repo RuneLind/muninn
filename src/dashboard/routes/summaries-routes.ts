@@ -13,6 +13,7 @@ import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import { DEFAULT_COVERAGE_DEPS, type CoverageDeps } from "../../db/wiki-proposals.ts";
 import { registerSummariesShareRoutes } from "./summaries-share.ts";
 import { registerSummariesExportRoutes } from "./summaries-export.ts";
+import { registerSummariesPromptRoutes } from "./summaries-prompt.ts";
 import { registerFramesRoutes } from "./frames-routes.ts";
 
 const log = getLog("dashboard");
@@ -155,6 +156,12 @@ export function registerSummariesRoutes(
   // Export: `GET /api/summaries/export` — the doc panel's ⬇ Export link. One
   // summary as a ZIP of a standalone page plus its quoted slides.
   registerSummariesExportRoutes(app, config);
+
+  // Show prompt: `GET /api/summaries/prompt?url=` — the prompt the doc panel's
+  // summary was written from, found by the document's url because the capture's
+  // trace is swept long before its snapshot is. Its own module for the reason
+  // share has one: an adapter with injectable lookups.
+  registerSummariesPromptRoutes(app);
 
   // The quoted slide frames of every capture vertical, plus the pre-seam Vimeo
   // alias. Here rather than in a group of its own: `summaries`, `vimeo` and

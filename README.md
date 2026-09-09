@@ -96,7 +96,8 @@ graph LR
 | `SCHEDULER_ENABLED` | No | `true` | Enable/disable unified scheduler |
 | `TRACING_ENABLED` | No | `true` | Enable request tracing |
 | `TRACING_RETENTION_DAYS` | No | `7` | Days to keep trace data |
-| `PROMPT_SNAPSHOTS_RETENTION_DAYS` | No | `3` | Days to keep prompt snapshots |
+| `PROMPT_SNAPSHOTS_RETENTION_DAYS` | No | `3` | Days to keep CHAT prompt snapshots |
+| `PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS` | No | `90` | Days to keep CAPTURE prompt snapshots — the prompt a stored summary was written from, which `/summaries` shows and which therefore has to outlive both the 3-day chat window and the 7-day trace sweep |
 | `HUGINN_TRACE_POINTER` | No | — | `1` enables Huginn's out-of-band trace channel (recommended). The Huginn MCP adapter is `stdio`-spawned by muninn, so this var propagates to it from muninn's env. Adapter emits a `huginn-trace-url:` line; Muninn fetches the trace via HTTP and attaches it as `searchTracePointer`. |
 | `HUGINN_TRACE_DEFAULT` | No | `1` (forced) | Legacy inline-fence Huginn trace mode. Muninn forces this on for spawned MCP children regardless of `.env`, so it is always active as a fallback when pointer mode does not engage. |
 | `LOG_DIR` | No | `./logs` | Log file directory (set `none` to disable) |

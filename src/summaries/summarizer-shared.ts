@@ -218,6 +218,8 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       },
     });
 
+    await saveCapturePromptSnapshot(tracer.traceId, opts);
+
     const usage = {
       model: result.model,
       inputTokens: result.inputTokens,
@@ -284,6 +286,54 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       error: message,
     });
     throw err;
+  }
+}
+
+/**
+ * Store what this pass was actually sent, keyed on (trace, pass).
+ *
+ * AFTER the model call rather than before it, so a snapshot exists only for a
+ * pass that ran — and per PASS, because a YouTube dense-scan capture runs this
+ * seam twice under one trace root and the two prompts are different questions
+ * (which frames to look at; how to summarize what came back).
+ *
+ * Gated on tracing, because the row is keyed on a trace id: a `Tracer` mints one
+ * even with `TRACING_ENABLED=false`, and a snapshot under an id no trace was
+ * ever written for is unreachable from every reader that starts at `/traces`.
+ * The by-url lookup would still find it, which is exactly the confusion — an
+ * instance with tracing off would grow prompt rows nothing can place.
+ *
+ * Fail-soft, like the ingest below it: a capture that summarized correctly must
+ * not fail because a debugging artefact could not be stored.
+ *
+ * The import is LAZY so this seam — which every vertical and most of their unit
+ * tests load — does not pull `db/client.ts` and the postgres driver into its
+ * import graph for the sake of one optional write.
+ */
+async function saveCapturePromptSnapshot(traceId: string, opts: CaptureOneShotOptions): Promise<void> {
+  if (!opts.config.tracingEnabled) {
+    log.debug("Tracing off — no prompt snapshot for {source} job {jobId}", {
+      source: opts.source,
+      jobId: opts.jobId,
+    });
+    return;
+  }
+  try {
+    const { savePromptSnapshot } = await import("../db/prompt-snapshots.ts");
+    await savePromptSnapshot({
+      traceId,
+      pass: opts.pass ?? "claude",
+      systemPrompt: opts.systemPrompt,
+      userPrompt: opts.prompt,
+      kind: "capture",
+      sourceUrl: opts.url,
+    });
+  } catch (err) {
+    captureLog.warn("Prompt snapshot failed for {source} job {jobId}: {error}", {
+      source: opts.source,
+      jobId: opts.jobId,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

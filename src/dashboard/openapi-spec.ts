@@ -498,7 +498,17 @@ export const spec = {
         summary: "Get prompt snapshot",
         description: "The full prompt snapshot (persona, memories, goals, history) used for a trace.",
         operationId: "getPromptSnapshot",
-        parameters: [pathId("traceId", "Trace ID (UUID)")],
+        parameters: [
+          pathId("traceId", "Trace ID (UUID)"),
+          {
+            name: "pass",
+            in: "query",
+            required: false,
+            schema: { type: "string" },
+            description:
+              "One pass of a multi-pass trace — a capture stores a row per model call (`claude`, and `claude:select` for the YouTube selection pass). Absent, the summary pass wins, then the chat pass.",
+          },
+        ],
         responses: {
           "200": { description: "Prompt snapshot object" },
           "404": errorResponse,
@@ -962,6 +972,32 @@ export const spec = {
         operationId: "getSummariesDocuments",
         responses: {
           "200": { description: "Merged, source-tagged documents list" },
+        },
+      },
+    },
+
+    "/api/summaries/prompt": {
+      get: {
+        tags: ["Summaries"],
+        summary: "The prompt a stored summary was written from",
+        description:
+          "The capture's summary-pass prompt snapshot for `?url=`, as `{traceId, pass, systemPrompt, userPrompt, createdAt, traceExists}`. Addressed by the document url rather than by a trace id, because the trace is swept after 7 days while the snapshot is kept for 90 — `traceExists` is what says whether the `/traces#<traceId>/prompt/<pass>` waterfall link is still worth offering. 400 without `url`, 404 when the document has no snapshot (captured before this shipped, or past retention).",
+        operationId: "getSummaryPromptSnapshot",
+        parameters: [
+          {
+            name: "url",
+            in: "query",
+            required: true,
+            schema: { type: "string" },
+            description: "The captured document's source url, as stored on the summary.",
+          },
+        ],
+        responses: {
+          "200": { description: "The stored prompt" },
+          "400": errorResponse,
+          "403": errorResponse,
+          "404": errorResponse,
+          "500": errorResponse,
         },
       },
     },
