@@ -33,7 +33,7 @@ import type { Config } from "../../config.ts";
 import { readFile, realpath } from "node:fs/promises";
 import { join, sep as pathSep } from "node:path";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
-import { getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
+import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
 import { frameDirFor, frameSourceByName, framesRootDir } from "../../summaries/frames.ts";
 import {
@@ -78,11 +78,10 @@ const DOC_FETCH_TIMEOUT_MS = 10_000;
 export function defaultSummariesExportDeps(knowledgeApiUrl: string): SummariesExportDeps {
   return {
     fetchDoc: async (collection, docId) => {
-      const encoded = docId.split("/").map(encodeURIComponent).join("/");
       try {
         return (await fetchKnowledgeApi(
           knowledgeApiUrl,
-          `/api/document/${encodeURIComponent(collection)}/${encoded}`,
+          `/api/document/${encodeURIComponent(collection)}/${encodeDocIdPath(docId)}`,
           { timeoutMs: DOC_FETCH_TIMEOUT_MS },
         )) as SummaryExportDoc;
       } catch (err) {

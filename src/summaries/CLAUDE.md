@@ -38,8 +38,10 @@ refactor away from reading `.documents` off it.
 **The split contract.** `src/summaries/transcript-split.ts` owns
 `splitTranscript` — the first level-2 `## Transcript` heading OUTSIDE fenced
 code, the export's own rule, moved when the re-run became its third server-side
-reader (`export.ts` re-exports it, and `scripts/eval-takeaway.ts`'s naive
-`indexOf` was replaced by it). The CLIENT keeps its copy inside
+reader. There is ONE declaration site and every reader addresses it there:
+`export.ts` imports it (the shim re-export it briefly carried is gone),
+`scripts/replay-youtube.ts` imports it, and `scripts/eval-takeaway.ts`'s naive
+`indexOf` was replaced by it. The CLIENT keeps its copy inside
 `sum-article-library.ts`'s template literal, and `export.test.ts` still pins the
 two against shared fixtures. The appendix comes back TRIMMED: `appendTranscriptSection`
 and huginn's Vimeo `body_suffix` add their own separator and trailing newline, so
@@ -79,6 +81,18 @@ than a no-op: a quoted `caption_lang: "2026"` decodes to `2026`, and decoding
 THAT again makes it the NUMBER 2026, which huginn's `Optional[str]` model
 refuses. The decoded map can no longer tell a quoted numeral from a bare one.
 
+**Reuse the route rests on, so nothing here is a second copy.** The doc panel
+renders the `↻ Re-run ▾` control from a `rerun` FLAG on `SUMMARY_SOURCES`
+(projected by `clientSourcesJson`), not from a list of four strings beside it,
+and the route asserts at load that the two agree. `encodeDocIdPath`
+(`src/summaries/sources.ts`) is the one spelling of "a doc id as a URL path
+fragment", read by the share adapter, the export route and this one.
+`fetchKnowledgeApi` and `fetchKnowledgeApiText` share their whole request half
+through a private core, so a timeout or a status mapping cannot change on one of
+them alone. And `extractYouTubeVideoId` lives in the import-free
+`src/youtube/url.ts` (`youtube-routes.ts` re-exports it), so reading it does not
+drag the YouTube route graph into this module.
+
 **The frames listing hazard.** `finishYouTubeSummary` strips every quote of a
 frame that is NOT in the list it is handed, so an incomplete listing silently
 narrows what the re-summary may show. `listKeptFrames` therefore lists the WHOLE
@@ -103,14 +117,81 @@ same-path case passes whether the guard is there or not.
 **The vertical's own builders and its own tail, and its own JOB.** The prompts
 come from `src/<vertical>/prompt.ts` and the post-model tail from
 `src/<vertical>/finish.ts` — never re-implemented (CAPPED item 2). The job is
-created in the SOURCE vertical's store flagged `rerun: true` (a field on the
-shared `BaseJob`, because the X-article store is shared between text captures and
-video ones so no identity field can tell them apart), so it streams over that
-vertical's existing `<apiBase>/stream/:jobId` seam and shows up on the shelf and
-on `/agents` like any capture. On its `complete` the doc panel reloads the body.
+created in the SOURCE vertical's store, so it streams over that vertical's
+existing `<apiBase>/stream/:jobId` seam and shows up on the shelf and on
+`/agents` like any capture. **Nothing marks it as a re-run on the JOB** — the
+trace carries `rerun: "true"`, which is where the question is ever asked; a
+shelf badge would be the reason to add a job field, and there is none.
 `runCaptureOneShot` is handed the STORED url, so the prompt snapshot lands under
 the key `GET /api/summaries/prompt?url=` already reads — one row per document,
-not one per run.
+not one per run — and the `source` it traces under is the CAPTURE's, not the
+`/summaries` source id: the two differ for X video (`capture:x-video` against
+the `x-article` shelf), and comparing a re-run with the capture it re-runs is
+the one thing that attribute is for.
+
+**One run per document at a time.** A per-`(source, docId)` in-flight set in the
+route registration answers **409 `in_flight`** to a second POST. Two concurrent
+runs would spend two model calls and then race each other's ingest for one
+FILE — huginn rewrites the whole document from the request body, so the loser's
+summary is simply gone and which one loses is decided by the network. The claim
+is taken after every other refusal (a 409 has to mean a run is under way) and
+released in a `finally` on the job.
+
+**Two refusals that cost nothing and run before any model call.**
+`POST /api/summaries/rerun` requires **`application/json` (415 otherwise)**, the
+`jira-routes.ts` / `youtube-routes.ts` precedent: Hono parses any body whatever
+the header says, and `text/plain` is a CORS *simple* request, so without the gate
+a cross-origin page could spend a model call and rewrite a stored document with
+the browser never asking. And a title that does not round-trip through huginn's
+own file-name rule is **409 `title_not_round_trippable`**: `sanitize_filename`
+strips and only THEN truncates to 200, so a stem cut at character 200 on a space
+comes back one character shorter on the next pass — a second document rather
+than an edit. Refused for a stem ending in whitespace or one at or past the cap
+(deliberately wider than the failure: "at the cap" is a rule that can be stated
+to the reader). Measured on the live corpus 2026-09-09: 10 of 1329 documents,
+all TikTok and X, two of them ending in a real space. The options payload
+carries the same verdict so the menu can disable the run items with the reason.
+
+**The frame list is not a cadence.** `framesPromptSection` states the spacing it
+derives from the frames it is handed ("one every ~N s of the talk"), which is
+true of a capture and false here: a re-run lists whatever the previous summary
+QUOTED, so two survivors 30 s and 900 s apart would announce ~870 s — a number
+nothing measured, in a sentence the model reasons from. Every vertical's re-run
+prompt passes `cadence: false`, which OMITS the clause (never zeroes it); the
+capture path is byte-identical without the option and a test pins that.
+
+**`storedVisualDetail` reads the CANONICAL heading pattern.** It is
+`VISUAL_REFERENCE_HEADING_RE` — the one the visual-detail pass itself matches on
+— walked over prose lines via `mapProseLines`. A stricter local re-spelling read
+`## Visual References`, `## **Visual reference**` and an indented heading as "no
+appendix", so "Same settings again" silently downgraded a `detailed` document
+from 20 visuals to 8 and cut its appendix; without the fence walk a summary
+QUOTING the heading inside a code block reads as `detailed`.
+
+**A kind-less document reports `storedKind: null`.** Absent `summary_kind` means
+"written before kinds existed", which is not the claim `standard` makes. The
+ingest still stamps the default (it IS what runs) and the payload names it as
+`defaultKind`, so the menu can say *Same settings again (standard; written
+before kinds existed)* without spelling a constant of its own. 1300 of the live
+corpus's 1329 documents are in this state.
+
+**Vimeo's output language is resolved, not defaulted.** The stored
+`summary_lang` wins; absent (or not a language), it is `resolveOutputLang` over
+the stored `caption_lang` AND the transcript text — the same pair the capture
+uses, and the text is the deciding evidence because Vimeo really does mis-tag
+(an `en-x-autogen` Norwegian talk, measured 2026-09-05). What this replaced was
+`summary_lang === "nb" ? "nb" : "en"`, i.e. every pre-`summary_lang` Norwegian
+talk re-summarized in English.
+
+**`tags` are re-sent where the ingest model accepts them.** huginn REBUILDS the
+line as `category.split("/") + req.tags`, deduped, so a hand-added tag is erased
+by any ingest that does not re-send it; the re-run sends the stored list minus
+the category parts, which round-trips the line byte for byte and is idempotent.
+Vimeo, TikTok and X accept the field; **YouTube's ingest model has none at all**
+and `write_summary` is called without one there, so a hand-added tag on a
+YouTube document is lost on every ingest, capture and re-run alike. Re-sending a
+key pydantic's `extra='ignore'` drops would look like a fix and be inert, so the
+loss is stated rather than worked around.
 
 **`recentIngests` is told through a seam** (`src/summaries/recent-ingests.ts`):
 each route registration hands over the `rememberIngest` it already has, and the

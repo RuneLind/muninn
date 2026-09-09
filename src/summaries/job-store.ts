@@ -42,18 +42,6 @@ export interface BaseJob<S extends string> {
   summary?: string;
   error?: string;
   similar?: SimilarArticle[];
-  /**
-   * Set only by `POST /api/summaries/rerun`: this job re-summarizes a document
-   * that is already in the corpus, from its stored `## Transcript` appendix,
-   * rather than capturing a new one.
-   *
-   * It lives on the SHARED job rather than on a vertical's identity fields
-   * because every vertical's re-run is the same fact, and because the one place
-   * it has to be readable is the vertical-agnostic shelf card — the X-article
-   * store is shared between text captures and video ones, so `videoId` cannot
-   * tell a re-run apart from an ordinary job there.
-   */
-  rerun?: boolean;
 }
 
 export type Job<S extends string, F> = BaseJob<S> & F;
@@ -153,7 +141,7 @@ export interface RunMeta extends CompletedRunMeta {
 }
 
 export interface JobStore<S extends string, F> {
-  createJob(fields: F & { title: string; url: string; rerun?: boolean }): string;
+  createJob(fields: F & { title: string; url: string }): string;
   /** Late-bind bot/model/trace/token telemetry onto the job's `/agents` run.
    *  Unknown jobId (or a job whose run already completed) is a silent no-op. */
   attachRun(jobId: string, meta: RunMeta): void;
@@ -317,7 +305,7 @@ export function createJobStore<S extends string, F>(
 
   // --- Job management ---
 
-  function createJob(fields: F & { title: string; url: string; rerun?: boolean }): string {
+  function createJob(fields: F & { title: string; url: string }): string {
     const id = crypto.randomUUID();
     const job = {
       id,

@@ -23,8 +23,9 @@
  */
 
 import { test, expect, describe, beforeEach, afterAll } from "bun:test";
+import { configure, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -33,6 +34,9 @@ import {
   titleFromDocId,
   categoryFromDocId,
   listKeptFrames,
+  extraTagsFromStored,
+  titleRoundTripRefusal,
+  TITLE_ROUND_TRIP_MAX,
   FULL_RERUN_UNSUPPORTED,
   type SummariesRerunDeps,
   type RerunDocument,
@@ -69,12 +73,25 @@ function youtubeDoc(opts: { kind?: string; transcript?: string | null; body?: st
 
 interface Recorded {
   ingests: Array<{ path: string; body: Record<string, unknown> }>;
-  prompts: Array<{ system: string; user: string; extraDirs?: string[]; url: string; title: string }>;
+  prompts: Array<{
+    system: string;
+    user: string;
+    extraDirs?: string[];
+    url: string;
+    title: string;
+    source: string;
+  }>;
 }
 
 function makeDeps(
   raw: string | null,
-  opts: { framesRoot?: string; answer?: string; bot?: BotConfig | null } = {},
+  opts: {
+    framesRoot?: string;
+    answer?: string;
+    bot?: BotConfig | null;
+    /** Never resolves — the shape a second POST has to 409 against. */
+    stall?: boolean;
+  } = {},
 ): { deps: SummariesRerunDeps; rec: Recorded } {
   const rec: Recorded = { ingests: [], prompts: [] };
   const deps: SummariesRerunDeps = {
@@ -90,7 +107,9 @@ function makeDeps(
         ...(o.extraDirs ? { extraDirs: o.extraDirs as string[] } : {}),
         url: o.url as string,
         title: o.title as string,
+        source: o.source as string,
       });
+      if (opts.stall) await new Promise(() => {});
       return { result: opts.answer ?? "CATEGORY: ai/general\n\nSUMMARY:\n\nA fresh summary.", outputTokens: 1 };
     }) as unknown as SummariesRerunDeps["oneShot"],
     bots: () => (opts.bot === null ? [] : [opts.bot ?? BOT]),
@@ -109,6 +128,20 @@ async function post(app: Hono, body: unknown): Promise<{ status: number; json: R
   const res = await app.request("/api/summaries/rerun", {
     method: "POST",
     headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+}
+
+/** A POST with a caller-chosen content type — the 415 gate's own axis. */
+async function postWithType(
+  app: Hono,
+  contentType: string,
+  body: unknown,
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const res = await app.request("/api/summaries/rerun", {
+    method: "POST",
+    headers: { "content-type": contentType },
     body: JSON.stringify(body),
   });
   return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, unknown> };
@@ -286,13 +319,48 @@ describe("the ingest body", () => {
 
 describe("the pinned title and category", () => {
   test("a disagreeing model CATEGORY: line does not move the document", async () => {
+    // `coding` and not `dev/tools`: the latter is not in huginn's `CATEGORIES`,
+    // so a tail that clamps an unknown category answers `ai/general` — the same
+    // string the pin produces — and the assertion passes whichever value won.
+    // A VALID category the document is not filed under is the only input that
+    // can tell the two apart.
     const { deps, rec } = makeDeps(youtubeDoc(), {
-      answer: "CATEGORY: dev/tools\n\nSUMMARY:\n\nA fresh summary.",
+      answer: "CATEGORY: coding\n\nSUMMARY:\n\nA fresh summary.",
     });
     await post(appFor(deps), { source: "youtube", docId: DOC_ID });
     await settle();
     expect(rec.ingests[0]!.body.category).toBe("ai/general");
     expect(rec.ingests[0]!.body.title).toBe("A Talk About Things");
+  });
+
+  test("the disagreement is LOGGED, or a re-filed document moves silently", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+      ],
+      reset: true,
+    });
+    try {
+      const { deps } = makeDeps(youtubeDoc(), {
+        answer: "CATEGORY: coding\n\nSUMMARY:\n\nA fresh summary.",
+      });
+      await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+      await settle();
+      const line = records.find(
+        (r) => r.properties.modelCategory === "coding" && r.properties.category === "ai/general",
+      );
+      expect(line).toBeDefined();
+      expect(line!.properties.docId).toBe(DOC_ID);
+    } finally {
+      await configure({
+        sinks: {},
+        loggers: [{ category: ["logtape", "meta"], sinks: [], lowestLevel: "error" }],
+        reset: true,
+      });
+    }
   });
 });
 
@@ -342,6 +410,153 @@ describe("refusals", () => {
     const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
     expect(res.status).toBe(404);
   });
+
+  test("a non-JSON content type is 415 and reads nothing", async () => {
+    // `text/plain` is a CORS *simple* request: no preflight, so without the gate
+    // a cross-origin page spends a model call and rewrites a stored document
+    // while the browser never asks. Hono parses the body whatever the header
+    // says, which is what makes the header the only thing that can refuse.
+    const { deps, rec } = makeDeps(youtubeDoc());
+    const app = appFor(deps);
+    const res = await postWithType(app, "text/plain;charset=UTF-8", { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(415);
+    expect(res.json.code).toBe("bad_content_type");
+    await settle();
+    expect(rec.prompts.length).toBe(0);
+    expect(rec.ingests.length).toBe(0);
+  });
+
+  test("a charset parameter on application/json is fine", async () => {
+    const { deps } = makeDeps(youtubeDoc());
+    const res = await postWithType(appFor(deps), "application/json; charset=utf-8", {
+      source: "youtube",
+      docId: DOC_ID,
+    });
+    expect(res.status).toBe(200);
+    await settle();
+  });
+
+  test("a document with no url is 400 before a job exists", async () => {
+    const raw = youtubeDoc().replace(`url: "https://www.youtube.com/watch?v=${VIDEO_ID}"\n`, "");
+    const { deps, rec } = makeDeps(raw);
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(400);
+    expect(res.json.code).toBe("no_url");
+    await settle();
+    expect(rec.prompts.length).toBe(0);
+  });
+
+  test("a document filed under no category is 400", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc());
+    const res = await post(appFor(deps), { source: "youtube", docId: "loose.md" });
+    expect(res.status).toBe(400);
+    expect(res.json.code).toBe("no_category");
+    await settle();
+    expect(rec.prompts.length).toBe(0);
+  });
+
+  test("kept frames plus a connector that cannot read files is 503, before a job", async () => {
+    const root = tempFramesRoot();
+    const dir = join(root, "youtube", VIDEO_ID);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "30.jpg"), "x");
+    const copilot = { ...BOT, connector: "copilot-sdk" } as unknown as BotConfig;
+    const { deps, rec } = makeDeps(youtubeDoc(), { framesRoot: root, bot: copilot });
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(503);
+    expect(res.json.code).toBe("frames_unsupported");
+    await settle();
+    // The refusal is the point: a run would have produced a summary whose slide
+    // quotes the tail then stripped, i.e. pictures gone with no error anywhere.
+    expect(rec.prompts.length).toBe(0);
+    expect(rec.ingests.length).toBe(0);
+  });
+});
+
+describe("the title round trip", () => {
+  // huginn's `sanitize_filename` STRIPS and only then truncates to 200, so a
+  // stem cut on a space comes back one character shorter on the next pass — a
+  // second file rather than an edit. Refused before any model spend.
+  test("a stem at or past the cap is refused, and a shorter one is not", () => {
+    expect(titleRoundTripRefusal("A Talk About Things")).toBeNull();
+    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX - 1))).toBeNull();
+    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX))).toContain("file name is 200 characters");
+    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX + 40))).toContain("240 characters");
+  });
+
+  test("a stem ending in whitespace is refused", () => {
+    expect(titleRoundTripRefusal("A Talk ")).toContain("ends in whitespace");
+    expect(titleRoundTripRefusal("A Talk")).toBeNull();
+  });
+
+  test("the POST answers 409 and spends nothing", async () => {
+    const longTitle = "L".repeat(TITLE_ROUND_TRIP_MAX + 5);
+    const { deps, rec } = makeDeps(youtubeDoc());
+    const res = await post(appFor(deps), { source: "youtube", docId: `ai/general/${longTitle}.md` });
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe("title_not_round_trippable");
+    await settle();
+    expect(rec.prompts.length).toBe(0);
+    expect(rec.ingests.length).toBe(0);
+  });
+
+  test("the options payload carries the same verdict, so the menu can disable the items", async () => {
+    const longTitle = "L".repeat(TITLE_ROUND_TRIP_MAX + 5);
+    const app = appFor(makeDeps(youtubeDoc()).deps);
+    const bad = (await (
+      await app.request(
+        `/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(`ai/general/${longTitle}.md`)}`,
+      )
+    ).json()) as { titleRoundTrip: { ok: boolean; reason: string | null } };
+    expect(bad.titleRoundTrip.ok).toBe(false);
+    expect(bad.titleRoundTrip.reason).toContain("second document");
+
+    const good = (await (
+      await app.request(`/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`)
+    ).json()) as { titleRoundTrip: { ok: boolean; reason: string | null } };
+    expect(good.titleRoundTrip).toEqual({ ok: true, reason: null });
+  });
+});
+
+describe("single flight", () => {
+  test("a second POST for the same document is 409 while the first is running", async () => {
+    // A stalled `oneShot` holds the first run open. Without the latch both runs
+    // spend a model call and then race each other's ingest for ONE FILE, which
+    // huginn rewrites whole from the request body — so the loser's summary is
+    // simply gone, and which one loses is decided by the network.
+    const { deps, rec } = makeDeps(youtubeDoc(), { stall: true });
+    const app = appFor(deps);
+    const first = await post(app, { source: "youtube", docId: DOC_ID });
+    expect(first.status).toBe(200);
+    await settle();
+
+    const second = await post(app, { source: "youtube", docId: DOC_ID });
+    expect(second.status).toBe(409);
+    expect(second.json.code).toBe("in_flight");
+    await settle();
+    expect(rec.prompts.length).toBe(1);
+  });
+
+  test("the latch is per document, not per route", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc(), { stall: true });
+    const app = appFor(deps);
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
+    await settle();
+    const other = await post(app, { source: "youtube", docId: "ai/general/Another Talk.md" });
+    expect(other.status).toBe(200);
+    await settle();
+    expect(rec.prompts.length).toBe(2);
+  });
+
+  test("the latch is released when the run settles", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc());
+    const app = appFor(deps);
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
+    await settle();
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
+    await settle();
+    expect(rec.prompts.length).toBe(2);
+  });
 });
 
 describe("the frames listing", () => {
@@ -350,9 +565,18 @@ describe("the frames listing", () => {
     const dir = join(root, "youtube", VIDEO_ID);
     mkdirSync(dir, { recursive: true });
     for (const sec of [120, 60, 30]) writeFileSync(join(dir, `${sec}.jpg`), "x");
+    // Three strays, and the last two are the ones that matter: `notes.txt` fails
+    // on the digit prefix, so it can never tell whether the EXTENSION half of
+    // the pattern is anchored. `30.jpg.tmp` (a half-written copy) and `45.png`
+    // both begin with digits, and a rule that took the digits and stopped would
+    // list them — putting an address in the prompt that the frames route, which
+    // serves exactly `<digits>.jpg`, answers 404 for.
     writeFileSync(join(dir, "notes.txt"), "x");
+    writeFileSync(join(dir, "30.jpg.tmp"), "x");
+    writeFileSync(join(dir, "45.png"), "x");
     const frames = await listKeptFrames(YOUTUBE_FRAME_SOURCE, VIDEO_ID, root);
     expect(frames.map((f) => f.tSeconds)).toEqual([30, 60, 120]);
+    expect(frames.map((f) => f.path).some((x) => x.endsWith(".tmp") || x.endsWith(".png"))).toBe(false);
     expect(frames.every((f) => f.note === "")).toBe(true);
     expect(frames[0]!.path).toBe(join(dir, "30.jpg"));
   });
@@ -415,6 +639,32 @@ describe("copyKeptFrame", () => {
     });
     expect(calls).toEqual([["/work/30.jpg", "/kept/30.jpg"]]);
   });
+
+  test("a SYMLINKED root is the same file, which a lexical resolve cannot see", async () => {
+    // The case `resolve` misses: it normalizes `..` and `.` and nothing else, so
+    // a served root reached through a symlink spells one file two ways and the
+    // guard falls through to `copyFile(p, p)` — undefined by POSIX, and the
+    // plausible Linux failure is a truncate-then-write that destroys the only
+    // copy of the frame. `/tmp` -> `/private/tmp` gives every macOS temp dir
+    // this shape for free.
+    const root = tempFramesRoot();
+    const real = join(root, "real");
+    mkdirSync(real, { recursive: true });
+    writeFileSync(join(real, "30.jpg"), "thirty");
+    const link = join(root, "link");
+    symlinkSync(real, link, "dir");
+
+    const calls: Array<[string, string]> = [];
+    await copyKeptFrame(join(link, "30.jpg"), join(real, "30.jpg"), async (from, to) => {
+      calls.push([from, to]);
+    });
+    expect(calls).toEqual([]);
+    // And a real pair through the same symlinked root still copies.
+    await copyKeptFrame(join(link, "30.jpg"), join(real, "60.jpg"), async (from, to) => {
+      calls.push([from, to]);
+    });
+    expect(calls).toEqual([[join(link, "30.jpg"), join(real, "60.jpg")]]);
+  });
 });
 
 describe("the reindex-window memory", () => {
@@ -435,13 +685,14 @@ describe("the reindex-window memory", () => {
 });
 
 describe("the job", () => {
-  test("is created in the SOURCE vertical's store and flagged as a re-run", async () => {
+  test("is created in the SOURCE vertical's store", async () => {
     const { deps } = makeDeps(youtubeDoc());
     const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
     expect(res.status).toBe(200);
     const job = getJob(String(res.json.job_id));
     expect(job).toBeDefined();
-    expect(job!.rerun).toBe(true);
+    // No `rerun` flag on the JOB: nothing reads one (there is no shelf badge),
+    // and the question is asked on the TRACE, which the attribute below carries.
     expect(job!.videoId).toBe(VIDEO_ID);
     expect(res.json.dashboard_url).toBe(`/summaries?source=youtube&job=${res.json.job_id}`);
     await settle();
@@ -511,8 +762,222 @@ describe("GET /api/summaries/rerun/options", () => {
     expect(b.storedVisualDetail).toBe("selected");
   });
 
+  test("every spelling the visual-detail pass accepts is read the same way here", async () => {
+    // The both-directions failure a local re-spelling of the heading pattern
+    // reintroduces: each of these is a real appendix the pass itself matches, so
+    // reading it as "no appendix" answers `selected` and "Same settings again"
+    // silently DOWNGRADES a `detailed` document — caps 20 to 8, appendix cut.
+    const spellings = [
+      "## Visual References",
+      "## **Visual reference**",
+      "  ### Visual reference:",
+    ];
+    for (const heading of spellings) {
+      const one = appFor(makeDeps(youtubeDoc({ body: `Body.\n\n${heading}\n\ncaptions\n` })).deps);
+      const data = (await (
+        await one.request(`/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`)
+      ).json()) as { storedVisualDetail: string };
+      expect([heading, data.storedVisualDetail]).toEqual([heading, "detailed"]);
+    }
+  });
+
+  test("a heading QUOTED inside a fence is not an appendix", async () => {
+    const fenced = appFor(
+      makeDeps(
+        youtubeDoc({ body: "Body.\n\n```md\n## Visual reference\n\ncaptions\n```\n" }),
+      ).deps,
+    );
+    const data = (await (
+      await fenced.request(`/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`)
+    ).json()) as { storedVisualDetail: string };
+    expect(data.storedVisualDetail).toBe("selected");
+  });
+
+  test("a kind-less document reports storedKind null beside the default that will run", async () => {
+    // Absent `summary_kind` means "written before kinds existed", which is NOT
+    // the same claim as `standard`. The ingest still stamps the default (it IS
+    // what ran); the menu has to be able to say which.
+    const raw = youtubeDoc().replace('summary_kind: "standard"\n', "");
+    const bare = appFor(makeDeps(raw).deps);
+    const data = (await (
+      await bare.request(`/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`)
+    ).json()) as { storedKind: string | null; defaultKind: string };
+    expect(data.storedKind).toBeNull();
+    expect(data.defaultKind).toBe("standard");
+  });
+
   test("a blank docId is a 400", async () => {
     const res = await app.request("/api/summaries/rerun/options?source=youtube&docId=");
     expect(res.status).toBe(400);
+  });
+});
+
+describe("a kind-less document still gets the default STAMPED", () => {
+  test("the ingest carries summary_kind, because that is what ran", async () => {
+    const raw = youtubeDoc().replace('summary_kind: "standard"\n', "");
+    const { deps, rec } = makeDeps(raw);
+    await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    expect(rec.ingests[0]!.body.summary_kind).toBe("standard");
+  });
+});
+
+describe("the frame list is not a cadence", () => {
+  test("the prompt states no spacing, because the survivors are not a sample", async () => {
+    // A re-run lists whatever the PREVIOUS summary quoted. Two survivors 30 s and
+    // 900 s apart would make `framesPromptSection` announce "one every ~870 s of
+    // the talk" — a number nothing measured, in a sentence the model reasons
+    // from. The clause is omitted, not zeroed.
+    const root = tempFramesRoot();
+    const dir = join(root, "youtube", VIDEO_ID);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "30.jpg"), "x");
+    writeFileSync(join(dir, "900.jpg"), "x");
+    const { deps, rec } = makeDeps(youtubeDoc(), { framesRoot: root });
+    await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    expect(rec.prompts[0]!.user).toContain("Slide frames (read EVERY image");
+    expect(rec.prompts[0]!.user).not.toContain("one every ~");
+  });
+});
+
+describe("the trace source", () => {
+  test("an x-article re-run traces under the X VIDEO capture's name", async () => {
+    // The documents live on the `x-article` shelf; the capture that wrote them
+    // is `src/x-article/video.ts`, which traces `capture:x-video`. A re-run
+    // tracing `capture:x-article` puts the two runs under different span names,
+    // which is the one comparison the attribute exists for.
+    const raw = [
+      "---",
+      'date: "2026-09-01"',
+      'url: "https://x.com/someone/status/1234567890"',
+      'author: "someone"',
+      'category: "ai/general"',
+      'tags: "ai, general"',
+      "---",
+      "",
+      "Body.",
+      "",
+      "## Transcript",
+      "",
+      "Spoken words.",
+      "",
+    ].join("\n");
+    const { deps, rec } = makeDeps(raw);
+    await post(appFor(deps), { source: "x-article", docId: "ai/general/An X video.md" });
+    await settle();
+    expect(rec.prompts[0]!.source).toBe("x-video");
+  });
+
+  test("the three others trace under their own name", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc());
+    await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    expect(rec.prompts[0]!.source).toBe("youtube");
+  });
+});
+
+describe("tags", () => {
+  test("the stored line minus the category parts is what round-trips", () => {
+    // huginn REBUILDS the line as `category.split("/") + req.tags`, deduped, so
+    // the remainder is exactly what has to be re-sent for the stored line to
+    // come back byte-equal — and re-sending it is idempotent.
+    expect(extraTagsFromStored('"ai, general, javascript"', "ai/general")).toEqual(["javascript"]);
+    expect(extraTagsFromStored('"ai, general"', "ai/general")).toEqual([]);
+    expect(extraTagsFromStored(undefined, "ai/general")).toEqual([]);
+    // A hand-added tag EQUAL to a category part was never a separate entry.
+    expect(extraTagsFromStored('"coding, coding"', "coding")).toEqual([]);
+    // A single-segment category, and a tag list carrying blanks.
+    expect(extraTagsFromStored('"coding, rust,  , wasm"', "coding")).toEqual(["rust", "wasm"]);
+  });
+
+  test("a hand-added tag survives a Vimeo re-run", async () => {
+    const raw = [
+      "---",
+      'date: "2026-09-01"',
+      'url: "https://vimeo.com/1234567"',
+      'summary_kind: "standard"',
+      'category: "ai/general"',
+      'tags: "ai, general, javazone"',
+      "---",
+      "",
+      "Body.",
+      "",
+      "## Transcript",
+      "",
+      "Hei.",
+      "",
+    ].join("\n");
+    const { deps, rec } = makeDeps(raw);
+    await post(appFor(deps), { source: "vimeo", docId: "ai/general/En Talk.md" });
+    await settle();
+    expect(rec.ingests[0]!.body.tags).toEqual(["javazone"]);
+  });
+
+  test("YouTube sends none, because its ingest model has no such field", async () => {
+    // Re-sending a key pydantic drops (`extra='ignore'`) would look like a fix
+    // and be inert. The loss is huginn's; it is stated, not worked around.
+    const raw = youtubeDoc().replace('tags: "ai, general"', 'tags: "ai, general, javascript"');
+    const { deps, rec } = makeDeps(raw);
+    await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    expect(rec.ingests[0]!.body).not.toHaveProperty("tags");
+  });
+});
+
+describe("the Vimeo output language", () => {
+  function vimeoDoc(opts: { summaryLang?: string; captionLang?: string; transcript: string }): string {
+    return [
+      "---",
+      'date: "2026-09-01"',
+      'url: "https://vimeo.com/1234567"',
+      `caption_lang: "${opts.captionLang ?? "en-x-autogen"}"`,
+      'caption_kind: "auto"',
+      'summary_kind: "standard"',
+      ...(opts.summaryLang === undefined ? [] : [`summary_lang: "${opts.summaryLang}"`]),
+      'category: "ai/general"',
+      'tags: "ai, general"',
+      "---",
+      "",
+      "Body.",
+      "",
+      "## Transcript",
+      "",
+      opts.transcript,
+      "",
+    ].join("\n");
+  }
+
+  /** Enough Norwegian function words to clear `detectTextLang`'s floors. */
+  const NORWEGIAN =
+    "og det er som ikke på til et jeg vi har med av den kan skal var også om så her da " +
+    "når hva hvordan litt veldig bare noe mye eller fra seg man denne dette være blir";
+
+  test("a stored summary_lang wins", async () => {
+    const { deps, rec } = makeDeps(vimeoDoc({ summaryLang: "nb", transcript: "the and is to of that it in you" }));
+    await post(appFor(deps), { source: "vimeo", docId: "ai/general/En Talk.md" });
+    await settle();
+    expect(rec.prompts[0]!.system).toContain("Norwegian (bokm");
+  });
+
+  test("with the field ABSENT the language is resolved the way the capture resolves it", async () => {
+    // What this replaces answered English for every document written before
+    // `summary_lang` existed — a Norwegian talk re-summarized in English under a
+    // reader who asked for the same settings again. The caption TAG here says
+    // English (Vimeo really does mis-tag: measured 2026-09-05), so the TEXT is
+    // what has to decide.
+    const { deps, rec } = makeDeps(vimeoDoc({ transcript: NORWEGIAN }));
+    await post(appFor(deps), { source: "vimeo", docId: "ai/general/En Talk.md" });
+    await settle();
+    expect(rec.prompts[0]!.system).toContain("Norwegian (bokm");
+  });
+
+  test("an English transcript with no stored language still resolves English", async () => {
+    const english =
+      "the and is to of that it in you this are was with have we be on not they what can so but do if";
+    const { deps, rec } = makeDeps(vimeoDoc({ captionLang: "no-x-autogen", transcript: english }));
+    await post(appFor(deps), { source: "vimeo", docId: "ai/general/En Talk.md" });
+    await settle();
+    expect(rec.prompts[0]!.system).toContain("write the summary in English");
   });
 });

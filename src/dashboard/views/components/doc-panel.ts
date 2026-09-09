@@ -168,12 +168,18 @@ export function docPanelStyles(animationName = "slideIn"): string {
     }
     .doc-panel-menu-item:hover:not(:disabled) { background: var(--bg-surface); color: var(--text-primary); }
     .doc-panel-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-    .doc-panel-menu-item:disabled { color: var(--text-dim); cursor: not-allowed; }
+    /* --text-muted, NOT --text-dim, on both of the next two rules. Measured
+       against --bg-panel, the popup's own ground: --text-dim is 3.24:1 dark and
+       3.74:1 light, i.e. under AA in both themes, and --text-muted is 5.26:1 and
+       4.94:1. It matters more here than the numbers alone suggest — a disabled
+       item and the notes beside it are where this menu says WHY a run is not on
+       offer, so the text that fails contrast is the text carrying the reason. */
+    .doc-panel-menu-item:disabled { color: var(--text-muted); cursor: not-allowed; }
     .doc-panel-menu-rule { height: 1px; background: var(--border-primary); margin: 4px 2px; }
     .doc-panel-menu-note {
       font-size: 11px;
       line-height: 1.45;
-      color: var(--text-dim);
+      color: var(--text-muted);
       padding: 4px 10px 6px;
       white-space: normal;
     }
@@ -191,6 +197,12 @@ export function docPanelStyles(animationName = "slideIn"): string {
     }
     .doc-panel-notice[hidden] { display: none; }
     .doc-panel-notice.err { color: var(--status-error); }
+    /* The notice's one link (the "waterfall ↗" a stored prompt offers) had NO
+       rule, so it fell through to the user agent's own #0000EE — 1.82:1 on
+       --bg-surface in dark mode, effectively invisible. --accent-light measures
+       7.37:1 dark and 5.77:1 light on that ground. */
+    .doc-panel-notice a { color: var(--accent-light); text-decoration: underline; }
+    .doc-panel-notice a:hover { color: var(--accent); }
     .doc-panel-body {
       flex: 1;
       overflow-y: auto;
@@ -275,7 +287,7 @@ export function docPanelHtml(
         <span class="doc-panel-title" id="docPanelTitle"></span>${rerun ? `
         <span class="doc-panel-menu" id="${DOC_PANEL_RERUN_WRAP_ID}" hidden>
           <button class="doc-panel-followup" id="${DOC_PANEL_RERUN_BTN_ID}" type="button"
-            aria-haspopup="true" aria-expanded="false" aria-controls="${DOC_PANEL_RERUN_MENU_ID}"
+            aria-haspopup="menu" aria-expanded="false" aria-controls="${DOC_PANEL_RERUN_MENU_ID}"
             title="Summarize this document again from the transcript it stored">&#8635; Re-run &#9662;</button>
           <div class="doc-panel-menu-pop" id="${DOC_PANEL_RERUN_MENU_ID}" role="menu" hidden></div>
         </span>` : ""}${share ? `

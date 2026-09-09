@@ -48,6 +48,13 @@ export const TRANSCRIPT_WINDOW_RE = /^### \[\d{1,2}:\d{2}:\d{2}\]\s*$/;
  * Exported because `src/summaries/export.ts`'s Vimeo timestamp transform reads
  * the same region set and promises PARITY with the client's own copy, which is
  * fence-aware and nothing else.
+ *
+ * **Do not widen the region set here.** What the Vimeo transforms promise is
+ * parity with those client copies, so teaching this walker about inline code or
+ * indented blocks would break the property their fixtures pin. The frame quote
+ * finder and the rewrite in `export.ts` read `markdownCodeRegions` instead —
+ * they promise agreement with the visual-detail pass and the frame copy, not
+ * with a browser.
  */
 export function mapProseLines(markdown: string, fn: (line: string, i: number) => string): string {
   let fence: string | null = null;

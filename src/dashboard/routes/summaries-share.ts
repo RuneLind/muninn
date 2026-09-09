@@ -49,7 +49,7 @@ import type { Config } from "../../config.ts";
 import type { executeOneShot } from "../../ai/one-shot.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
-import { getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
+import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { findSharePreset, resolveSharePresets, type SharePreset } from "../../share/presets.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
 import { buildShareSystemPrompt, buildShareUserPrompt } from "../../share/prompt.ts";
@@ -86,16 +86,15 @@ export interface SummariesShareDeps {
  *  are file reads on huginn's Python server, not a model call. */
 const DOC_FETCH_TIMEOUT_MS = 10_000;
 
-/** The real fetcher: huginn's document endpoint, path-segment-encoded exactly as
- *  the summaries client encodes it (a real doc id carries `/`, spaces and
- *  non-ASCII, and a bare interpolation truncates at `#`). */
+/** The real fetcher: huginn's document endpoint, path-segment-encoded by the
+ *  shared `encodeDocIdPath` (a real doc id carries `/`, spaces and non-ASCII,
+ *  and a bare interpolation truncates at `#`). */
 export function defaultSummariesShareDeps(knowledgeApiUrl: string): SummariesShareDeps {
   return {
     fetchDoc: async (collection, docId) => {
-      const encoded = docId.split("/").map(encodeURIComponent).join("/");
       return (await fetchKnowledgeApi(
         knowledgeApiUrl,
-        `/api/document/${encodeURIComponent(collection)}/${encoded}`,
+        `/api/document/${encodeURIComponent(collection)}/${encodeDocIdPath(docId)}`,
         { timeoutMs: DOC_FETCH_TIMEOUT_MS },
       )) as SummaryShareDoc | null;
     },

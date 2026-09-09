@@ -21,6 +21,7 @@ import {
   visualDetailOptions,
 } from "../../summaries/visual-detail.ts";
 import { youtubeWatchUrl } from "../../youtube/frames.ts";
+import { extractYouTubeVideoId } from "../../youtube/url.ts";
 import { youtubeCaptureKinds } from "../../youtube/kinds.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
@@ -80,26 +81,13 @@ export interface YouTubeRouteOptions {
 /**
  * The video id in a YouTube URL, or null.
  *
- * Exported for the delete listener, which resolves the video behind a deleted
- * DOCUMENT out of the listing row huginn still serves — the same rule this
- * route's own dedup applies, so the two can never disagree about which video a
- * row is.
+ * Re-exported rather than declared: it now lives in the import-free
+ * `src/youtube/url.ts`, so the capture re-run can read it without acquiring
+ * this module's graph (the job store, the summarizer, every capture route).
+ * Kept exported here for the delete listener and this route's own dedup, which
+ * address it at this module.
  */
-export function extractYouTubeVideoId(url: string): string | null {
-  try {
-    const u = new URL(url);
-    // Exact host or a real SUBDOMAIN of it, never a suffix match: `endsWith`
-    // also accepts `evilyoutube.com`, so one document ingested from such a url
-    // answered `duplicate` for the real video — and, through the delete
-    // listener, named the video whose kept frames get removed.
-    const host = u.hostname.toLowerCase();
-    if (host === "youtu.be") return u.pathname.slice(1) || null;
-    if (host === "youtube.com" || host.endsWith(".youtube.com")) return u.searchParams.get("v");
-    return null;
-  } catch {
-    return null;
-  }
-}
+export { extractYouTubeVideoId };
 
 /**
  * The longest title this route stores.

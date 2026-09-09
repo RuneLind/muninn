@@ -127,6 +127,9 @@ export function buildVimeoSystemPrompt(input: VimeoSystemPromptInput): string {
 export interface VimeoUserPromptInput {
   readonly videoId: string;
   readonly frames: readonly CaptureFrame[];
+  /** Absent ⇒ the list is a cadence and the prompt may state its spacing (every
+   *  capture). The capture RE-RUN passes `false` — see `framesPromptSection`. */
+  readonly cadence?: boolean;
 }
 
 /**
@@ -139,5 +142,17 @@ export interface VimeoUserPromptInput {
  * transcript alone (the section returns "" before it looks at the id).
  */
 export function buildVimeoUserPrompt(transcript: string, input: VimeoUserPromptInput): string {
-  return transcript + framesPromptSection(VIMEO_FRAME_SOURCE, input.videoId, input.frames);
+  return (
+    transcript +
+    framesPromptSection(
+      VIMEO_FRAME_SOURCE,
+      input.videoId,
+      input.frames,
+      // No policy — this vertical takes the default rules paragraph, and the
+      // explicit `undefined` is only there so the cadence opt-out can be the
+      // fifth argument.
+      undefined,
+      input.cadence === false ? { cadence: false } : undefined,
+    )
+  );
 }

@@ -20,11 +20,12 @@
  *     pipeline is deliberately NOT used here: it has no image rule at all —
  *     measured, `![Slide](…)` renders as a bare `!` followed by the alt text.
  *
- * The two Vimeo transforms the article view applies in the browser
- * ({@link linkVimeoTimestamps}, {@link splitTranscript}) are ported here
- * verbatim in behaviour; `sum-article-library.ts` keeps its copies inside a
- * template literal, which nothing can import. Both copies are pinned against
- * the same fixtures in `export.test.ts`.
+ * The two Vimeo transforms the article view applies in the browser are ported
+ * verbatim in behaviour: {@link linkVimeoTimestamps} here, and the split in
+ * `./transcript-split.ts` (which this module reads) since the capture re-run
+ * became its third server-side reader. `sum-article-library.ts` keeps its
+ * copies inside a template literal, which nothing can import; both pairs are
+ * pinned against the same fixtures in `export.test.ts`.
  */
 
 import { Marked, type Tokens } from "marked";
@@ -40,11 +41,9 @@ import {
   type FrameSource,
 } from "./frames.ts";
 // The split and its fence walk moved to `./transcript-split.ts` when the capture
-// re-run became their third server-side reader. Re-exported here because
-// `export.test.ts` (and the client-parity fixtures it pins) address them at this
-// module — the behaviour is unchanged, the declaration site is not.
+// re-run became their third server-side reader. Imported, never re-exported:
+// one declaration site, and every reader addresses it there.
 import { mapProseLines, splitTranscript } from "./transcript-split.ts";
-export { splitTranscript };
 
 /** The folder the page's `<img>`s point into, beside `index.html` in the archive. */
 export const EXPORT_FRAMES_DIR = "frames";

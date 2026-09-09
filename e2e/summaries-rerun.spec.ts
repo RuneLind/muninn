@@ -14,7 +14,10 @@
  *      ones except `summary_kind` — the rule huginn's "no document id, rewrite
  *      the whole file, fork `(2)` on a differing url" ingest makes load-bearing.
  *   2. **The appendix comes back byte-equal**, trimmed, under its own heading.
- *   3. **The panel body reloads** on the job's `complete`.
+ *   3. **The panel body reloads with the NEW summary** on the job's `complete`,
+ *      through a fake that reproduces huginn's listing lag — it goes on serving
+ *      the pre-ingest copy for two more reads, so a panel that reloads once and
+ *      announces the result renders the old body under a line calling it new.
  *   4. **No source-drafter run**: exactly ONE model call for the whole re-run.
  *      A drafter would spend a second.
  *   5. **The vertical's reindex-window memory was told** — a `summarize` POST
@@ -110,6 +113,29 @@ let unexpected: string[] = [];
 /** Every path the fake was asked for, so a drafter or a wiki write is visible. */
 let paths: string[] = [];
 
+/**
+ * Held until the test says otherwise, so the model call — and with it the whole
+ * job — cannot finish before an assertion about the RUNNING state is made.
+ *
+ * Without it "the menu closed" is unfalsifiable: the job settles in
+ * milliseconds against this fake, and the `complete` handler closes the menu
+ * too, so the assertion passes whether the click closed it or not.
+ */
+let releaseModel: () => void = () => {};
+let modelGate: Promise<void> = Promise.resolve();
+
+/**
+ * huginn's LISTING LAG, faked: the ingest writes the file, and the document
+ * endpoint keeps serving the pre-ingest copy for a few reads afterwards. This is
+ * the real behaviour (the re-index is a background job) and it is what the
+ * panel's post-`complete` reload has to survive — reloading immediately renders
+ * the OLD body under a line claiming it is the new one.
+ */
+let pendingNewBody: string | null = null;
+let staleReads = 0;
+/** Fewer than the client's own retry budget, so the reload really does land. */
+const STALE_READS = 2;
+
 const SNAPSHOT_TRACE_ID = "5f6e7d8c-9a0b-4c1d-8e2f-3a4b5c6d7e8f";
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -144,11 +170,17 @@ async function startFake(): Promise<Server> {
 
       if (p === "/v1/chat/completions") {
         modelCalls += 1;
+        await modelGate;
         return writeCompletion(res);
       }
 
       if (p === "/api/youtube/ingest") {
-        ingests.push(JSON.parse((await readBody(req)) || "{}"));
+        const body = JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>;
+        ingests.push(body);
+        // The file really is rewritten — and the document endpoint goes on
+        // serving the old copy for `STALE_READS` more reads, which is the lag.
+        pendingNewBody = `${FULL_FRONTMATTER}\n\n${String(body.summary ?? "")}`;
+        staleReads = STALE_READS;
         return json({ file_path: DOC_FULL, similar: [] });
       }
 
@@ -181,6 +213,13 @@ async function startFake(): Promise<Server> {
       // exactly as huginn's converter writes it.
       if (p.startsWith(`/api/document/${COLLECTION}/`)) {
         const id = p.slice(`/api/document/${COLLECTION}/`.length);
+        if (id === DOC_FULL && pendingNewBody !== null) {
+          if (staleReads > 0) staleReads -= 1;
+          else {
+            SOURCE_FILES[DOC_FULL] = pendingNewBody;
+            pendingNewBody = null;
+          }
+        }
         const body = SOURCE_FILES[id];
         if (body === undefined) return json({ detail: "not found" }, 404);
         const withoutFrontmatter = body.split("\n---\n").slice(1).join("\n---\n");
@@ -215,6 +254,44 @@ function writeBot(): string {
   return root;
 }
 
+function removeBotsRoot(): void {
+  if (botsRoot) rmSync(botsRoot, { recursive: true, force: true });
+  botsRoot = undefined;
+}
+
+/**
+ * A hard kill (Ctrl-C, a CI cancel) skips `afterAll`, and this file leaves three
+ * things behind: a spawned muninn holding PORT, a `node:http` fake holding
+ * FAKE_PORT, and a temp bots root. The `summaries-vimeo.spec.ts` shape, for the
+ * two reasons measured there:
+ *
+ * 1. **It RE-RAISES.** Registering ANY listener for SIGINT/SIGTERM suppresses
+ *    Node's default termination, so the handler removes itself and re-sends the
+ *    same signal, which now finds no listener.
+ * 2. **Registered in `beforeAll`, removed in `afterAll`,** never at import: a
+ *    Playwright worker is reused across spec files, so import-time registration
+ *    accumulates one handler per file for the worker's whole lifetime, each
+ *    pointing at a `botsRoot` it no longer owns.
+ */
+function handleSignal(signal: NodeJS.Signals): void {
+  server?.kill("SIGTERM");
+  fake?.close();
+  removeBotsRoot();
+  removeSignalHandlers();
+  process.kill(process.pid, signal);
+}
+const onSigint = () => handleSignal("SIGINT");
+const onSigterm = () => handleSignal("SIGTERM");
+
+function addSignalHandlers(): void {
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+}
+function removeSignalHandlers(): void {
+  process.off("SIGINT", onSigint);
+  process.off("SIGTERM", onSigterm);
+}
+
 test.beforeAll(async () => {
   sql = postgres(TEST_DB, { max: 2 });
   await sql`DELETE FROM prompt_snapshots WHERE trace_id = ${SNAPSHOT_TRACE_ID}`;
@@ -225,6 +302,7 @@ test.beforeAll(async () => {
 
   fake = await startFake();
   const root = writeBot();
+  addSignalHandlers();
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -255,7 +333,8 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   fake?.close();
-  if (botsRoot) rmSync(botsRoot, { recursive: true, force: true });
+  removeBotsRoot();
+  removeSignalHandlers();
   try {
     if (sql) await sql`DELETE FROM prompt_snapshots WHERE trace_id = ${SNAPSHOT_TRACE_ID}`;
   } finally {
@@ -269,6 +348,17 @@ test.describe("Summaries: the doc panel's ↻ Re-run menu", () => {
     ingests = [];
     modelCalls = 0;
     paths = [];
+    pendingNewBody = null;
+    staleReads = 0;
+    modelGate = new Promise<void>((resolve) => {
+      releaseModel = resolve;
+    });
+  });
+
+  test.afterEach(() => {
+    // A test that never released the gate must not leave a spawned muninn's
+    // request hanging into the next one.
+    releaseModel();
   });
 
   test("re-runs from the stored transcript and rewrites the SAME document", async ({ page }) => {
@@ -295,12 +385,25 @@ test.describe("Summaries: the doc panel's ↻ Re-run menu", () => {
     await expect(menu).toContainText("No media is re-fetched");
     await same.click();
 
-    // The menu closes and the status line takes over.
-    await expect(menu).toBeHidden();
+    // The menu closes on the CLICK that starts the run, and the status line
+    // takes over — both asserted while the model call is still held open by the
+    // fake. Asserted after the job settles instead, "the menu is hidden" is
+    // unfalsifiable: the `complete` handler closes it too.
     await expect(page.locator("#docPanelRerunStatus")).toContainText("Re-run", { timeout: 15_000 });
+    await expect(menu).toBeHidden();
+    expect(ingests).toHaveLength(0);
+    releaseModel();
 
-    // 3. The panel body reloads with the new summary on `complete`.
-    await expect(page.locator("#docPanelRerunStatus")).toContainText("Re-run finished", { timeout: 60_000 });
+    // 3. The panel body reloads with the new summary on `complete` — and the
+    //    fake serves the PRE-INGEST body for the first two reads afterwards, the
+    //    listing lag, so this only passes if the client re-reads until the
+    //    document really has changed rather than reloading once and claiming it.
+    await expect(page.locator("#docPanelRerunStatus")).toContainText(
+      "Re-run finished — the summary below is the new one.",
+      { timeout: 60_000 },
+    );
+    await expect(page.locator("#sumArticleMain")).toContainText(NEW_SUMMARY_LINE);
+    await expect(page.locator("#sumArticleMain")).not.toContainText("The stored summary body.");
 
     // 1. ONE re-ingest, every frontmatter field byte-equal but `summary_kind`.
     expect(ingests).toHaveLength(1);

@@ -346,16 +346,15 @@ export function tracesPromptModalScript(): string {
           contentEl.innerHTML = serverFailed
             ? '<div class="prompt-unavailable">Could not load the prompt snapshot (server error) — retry</div>'
             : '<div class="prompt-unavailable">Prompt snapshot not available (expired or not captured)</div>';
-          document.getElementById('systemCharCount').textContent = '';
-          document.getElementById('userCharCount').textContent = '';
+          const emptySys = document.getElementById('systemCharCount');
+          if (emptySys) emptySys.textContent = '';
+          const emptyUser = document.getElementById('userCharCount');
+          if (emptyUser) emptyUser.textContent = '';
           return;
         }
         // The pass the ROUTE answered with, never the one asked for: with no
         // pass in the request the answer is whichever row the default read won.
-        if (passLabel) passLabel.textContent = passLabelText(data.pass);
-        document.getElementById('systemCharCount').textContent = '(' + fmtCharCount(data.systemPrompt.length) + ')';
-        document.getElementById('userCharCount').textContent = '(' + fmtCharCount(data.userPrompt.length) + ')';
-        renderPromptTab(data);
+        paintPromptBody(data, true);
       } catch (e) {
         contentEl.innerHTML = '<div class="prompt-unavailable">Failed to load prompt snapshot</div>';
         console.error('Failed to load prompt', e);
@@ -382,22 +381,46 @@ export function tracesPromptModalScript(): string {
      * the document's own url, namespaced away from the "<traceId>|<pass>" keys
      * so the two cannot collide.
      */
-    function showPromptSnapshot(data, key) {
+    function showPromptSnapshot(data, key, opts) {
       const backdrop = document.getElementById('promptModalBackdrop');
       const contentEl = document.getElementById('promptContent');
-      const passLabel = document.getElementById('promptPassLabel');
       if (!backdrop || !contentEl) return;
       const cacheKey = 'doc|' + (key || '');
       promptCache[cacheKey] = data;
       activePromptKey = cacheKey;
       activePromptTab = 'user';
-      document.getElementById('tabSystem').classList.remove('active');
-      document.getElementById('tabUser').classList.add('active');
+      var sysTab = document.getElementById('tabSystem');
+      var userTab = document.getElementById('tabUser');
+      if (sysTab) sysTab.classList.remove('active');
+      if (userTab) userTab.classList.add('active');
       renderPromptStats();
-      if (passLabel) passLabel.textContent = passLabelText(data.pass);
-      document.getElementById('systemCharCount').textContent = '(' + fmtCharCount(data.systemPrompt.length) + ')';
-      document.getElementById('userCharCount').textContent = '(' + fmtCharCount(data.userPrompt.length) + ')';
       backdrop.classList.add('visible');
+      // The pass chip names ONE of a capture's two model calls, which is a
+      // /traces question. On /summaries the modal is opened from a document, the
+      // route picks the summary pass on the reader's behalf and never offers the
+      // other, so a chip reading "pass: claude" is a label for a choice this
+      // surface does not have. Off by default here, on everywhere else.
+      paintPromptBody(data, !(opts && opts.hidePass === true));
+    }
+
+    /**
+     * The three writes both openers do once they hold a snapshot: the pass chip,
+     * the two character counts, and the tab body.
+     *
+     * ONE function because the two callers drifted the moment there were two —
+     * showPromptSnapshot was a hand-copied paste of the block inside
+     * openPromptModal. Every getElementById here is guarded: this modal is
+     * mounted on /summaries as well now, and a page that renders it without one
+     * of these nodes must degrade to a prompt with no chip, not to a
+     * TypeError before the prompt paints.
+     */
+    function paintPromptBody(data, showPass) {
+      const passLabel = document.getElementById('promptPassLabel');
+      if (passLabel) passLabel.textContent = showPass ? passLabelText(data.pass) : '';
+      const sysCount = document.getElementById('systemCharCount');
+      if (sysCount) sysCount.textContent = '(' + fmtCharCount(data.systemPrompt.length) + ')';
+      const userCount = document.getElementById('userCharCount');
+      if (userCount) userCount.textContent = '(' + fmtCharCount(data.userPrompt.length) + ')';
       renderPromptTab(data);
     }
 

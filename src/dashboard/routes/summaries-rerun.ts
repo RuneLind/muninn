@@ -40,9 +40,17 @@
  *    nothing here prunes or overwrites that directory (`removeKeptFrames` belongs
  *    to document delete).
  *
- * The job is the SOURCE vertical's own (`src/<vertical>/state.ts`), flagged
- * `rerun: true`, so it streams over that vertical's existing SSE seam and shows
- * up on the shelf and on `/agents` like any capture.
+ * The job is the SOURCE vertical's own (`src/<vertical>/state.ts`), so it
+ * streams over that vertical's existing SSE seam and shows up on the shelf and
+ * on `/agents` like any capture. Nothing marks it as a re-run on the job
+ * itself — the trace carries `rerun: "true"`, which is where the question is
+ * ever asked. A shelf badge would be the reason to add a job field, and there
+ * is none.
+ *
+ * One run per document at a time (`inFlight` in the registration below): two
+ * concurrent POSTs would spend two model calls and then race each other's
+ * ingest for one FILE, and huginn rewrites the whole document from the request
+ * body, so the loser's summary is simply gone.
  */
 
 import type { Hono } from "hono";
@@ -52,10 +60,11 @@ import { getLog } from "../../logging.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApiText, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
-import { getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
+import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import {
   parseCaptureFrontmatter,
   decodeFrontmatterScalar,
+  mapProseLines,
   splitTranscript,
   transcriptIsWindowed,
 } from "../../summaries/transcript-split.ts";
@@ -71,11 +80,14 @@ import {
 import { youtubeCaptureKinds } from "../../youtube/kinds.ts";
 import {
   DEFAULT_VISUAL_DETAIL,
+  VISUAL_REFERENCE_HEADING_RE,
   isVisualDetail,
   visualDetailOptions,
   type VisualDetail,
 } from "../../summaries/visual-detail.ts";
+import { isOutputLang, resolveOutputLang, type OutputLang } from "../../summaries/language.ts";
 import {
+  FRAME_FILE_RE,
   VIMEO_FRAME_SOURCE,
   YOUTUBE_FRAME_SOURCE,
   frameDirFor,
@@ -90,7 +102,13 @@ import {
   CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
 } from "../../summaries/summarizer-shared.ts";
 import { summarizeTimeoutFor } from "../../video/media.ts";
-import { appendTranscriptSection, TRANSCRIPT_TRUNCATION_NOTE, youtubeWatchUrl } from "../../youtube/frames.ts";
+import {
+  appendTranscriptSection,
+  TRANSCRIPT_TRUNCATION_NOTE,
+  YOUTUBE_TRANSCRIPT_MAX_BYTES,
+  youtubeWatchUrl,
+  type CappedTranscript,
+} from "../../youtube/frames.ts";
 import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../../youtube/prompt.ts";
 import { finishYouTubeSummary } from "../../youtube/finish.ts";
 import { buildVimeoSystemPrompt, buildVimeoUserPrompt } from "../../vimeo/prompt.ts";
@@ -100,9 +118,11 @@ import { finishTikTokSummary } from "../../tiktok/finish.ts";
 import { buildXVideoSystemPrompt, buildXVideoUserPrompt } from "../../x-article/video-prompt.ts";
 import { finishXVideoSummary } from "../../x-article/video-finish.ts";
 import { extractVimeoVideoId } from "../../vimeo/url.ts";
-import { extractYouTubeVideoId } from "./youtube-routes.ts";
+// The import-free `src/youtube/url.ts`, never `./youtube-routes.ts`, which
+// re-exports it: reading it there would pull the whole YouTube route graph —
+// the job store, the summarizer, every capture route — into this module.
+import { extractYouTubeVideoId } from "../../youtube/url.ts";
 import { notifyCaptureIngest } from "../../summaries/recent-ingests.ts";
-import { RERUN_SOURCES } from "../../summaries/rerun-sources.ts";
 import * as youtubeState from "../../youtube/state.ts";
 import * as vimeoState from "../../vimeo/state.ts";
 import * as tiktokState from "../../tiktok/state.ts";
@@ -120,8 +140,6 @@ const RAW_FETCH_TIMEOUT_MS = 10_000;
 export interface RerunDocument {
   /** The raw file's bytes. */
   readonly raw: string;
-  /** The path header huginn reports, when it sent one — logged, never trusted. */
-  readonly sourcePath?: string;
 }
 
 /** The side-effecting seams, injected so the unit tests drive the whole route
@@ -137,14 +155,14 @@ export interface SummariesRerunDeps {
 
 export function defaultSummariesRerunDeps(knowledgeApiUrl: string): SummariesRerunDeps {
   return {
-    // Segment-encoded exactly as `summaries-share.ts`'s `fetchDoc` encodes it —
-    // a real doc id carries `/`, spaces and non-ASCII, and a bare interpolation
-    // truncates at `#`.
+    // `encodeDocIdPath` (`src/summaries/sources.ts`) — the one spelling the
+    // share adapter and the export route also read now, since a real doc id
+    // carries `/`, spaces and non-ASCII and a bare interpolation truncates at
+    // `#`.
     fetchRawDoc: async (collection, docId) => {
-      const encoded = docId.split("/").map(encodeURIComponent).join("/");
       const raw = await fetchKnowledgeApiText(
         knowledgeApiUrl,
-        `/api/document/${encodeURIComponent(collection)}/${encoded}?raw=1`,
+        `/api/document/${encodeURIComponent(collection)}/${encodeDocIdPath(docId)}?raw=1`,
         { timeoutMs: RAW_FETCH_TIMEOUT_MS },
       );
       return { raw };
@@ -163,6 +181,15 @@ export function defaultSummariesRerunDeps(knowledgeApiUrl: string): SummariesRer
 interface RerunVertical {
   /** The `/summaries` source id the client posts. */
   readonly id: string;
+  /**
+   * The `source` the CAPTURE traces this vertical's model call under, which is
+   * not always the `/summaries` source id: an X VIDEO capture traces
+   * `capture:x-video` while its documents live on the `x-article` shelf. A
+   * re-run has to trace under the capture's name, or the one comparison this
+   * attribute exists for — a run against the capture it re-runs — silently
+   * spans two span names.
+   */
+  readonly captureSource: string;
   /** huginn's ingest path for this vertical. */
   readonly ingestPath: string;
   /** The frames seam's source, where this vertical keeps quoted slides. */
@@ -171,6 +198,24 @@ interface RerunVertical {
    *  included — the RE-SEND list. `summary_kind` is here and is the one field
    *  the re-run overwrites. */
   readonly frontmatterFields: readonly string[];
+  /**
+   * Does this vertical's huginn ingest model carry a `tags` list?
+   *
+   * huginn REBUILDS the frontmatter `tags` line on every ingest as
+   * `category.split("/") + req.tags`, deduped (`build_summary_tags`,
+   * `main/ingest/_summary_ingest.py`), so a tag a person added by hand is
+   * ERASED by any ingest that does not re-send it. Where the model accepts the
+   * field, {@link buildRerunIngestBody} re-sends the stored list minus the
+   * category parts, which round-trips the line byte for byte.
+   *
+   * `false` for YouTube, whose `YouTubeIngestRequest` has no `tags` field at
+   * all and whose `write_summary` call passes none — pydantic's default
+   * `extra='ignore'` would drop the key silently, so re-sending it would look
+   * like a fix and be inert. A hand-added tag on a YouTube document is lost on
+   * every ingest, capture and re-run alike; that is huginn's, and it is stated
+   * in the PR body rather than worked around here.
+   */
+  readonly acceptsTags: boolean;
   /** Does this vertical offer a kind picker? (`false` ⇒ `standard` only.) */
   readonly hasKindPicker: boolean;
   /** Does it offer the visual-detail axis? (YouTube alone.) */
@@ -180,7 +225,7 @@ interface RerunVertical {
   /** The video id a stored url names — the frames directory and the
    *  recent-ingest key. */
   videoId(url: string): string | null;
-  /** Create the job in this vertical's own store, flagged `rerun`. */
+  /** Create the job in this vertical's own store. */
   createJob(input: { videoId: string; title: string; url: string; author: string }): string;
   /** The store's write surface, so the job streams like a capture. */
   readonly store: {
@@ -215,6 +260,16 @@ interface RerunPromptInput {
   readonly frontmatter: Record<string, string>;
 }
 
+// **Why every vertical's `prompts` below passes `cadence: false`.**
+// `framesPromptSection` states the frame list's spacing ("one every ~N s of the
+// talk") from the MEDIAN gap between consecutive frames. That is true of a
+// capture — the frames came off one sampler — and false here: a re-run's list is
+// `listKeptFrames`, i.e. whatever the previous summary happened to QUOTE, so two
+// survivors 30 s and 900 s apart would tell the model the talk is sampled every
+// ~870 s. A number nothing measured, in a sentence the model then reasons from.
+// The clause is OMITTED rather than zeroed, because the honest answer is that
+// this list has no cadence at all.
+
 interface RerunFinishInput {
   readonly raw: string;
   readonly jobId: string;
@@ -232,17 +287,45 @@ function vimeoCaptionKind(value: string | undefined): "manual" | "auto" {
   return value === "manual" ? "manual" : "auto";
 }
 
+/**
+ * The language a Vimeo re-run writes in.
+ *
+ * The document's own `summary_lang` wins — it is the RESOLVED answer the first
+ * capture reached, and re-deriving it would let the summary's language flip
+ * under a reader who asked for the same settings again.
+ *
+ * When the field is ABSENT (every Vimeo document ingested before it existed) or
+ * carries something that is not a language, this resolves it exactly as the
+ * capture does: {@link resolveOutputLang} over the stored `caption_lang` and
+ * the transcript text, which is the pair that made `talk` reliable in the first
+ * place (Vimeo tagged a Norwegian talk's auto-captions `en-x-autogen`, measured
+ * 2026-09-05, so the text — not the tag — is the deciding evidence). What this
+ * replaces was `summary_lang === "nb" ? "nb" : "en"`, i.e. every kind-less
+ * Norwegian talk re-summarized in English.
+ */
+function vimeoOutputLang(
+  frontmatter: Record<string, string>,
+  transcript: string,
+): OutputLang {
+  const stored = frontmatter.summary_lang;
+  if (isOutputLang(stored)) return stored;
+  return resolveOutputLang("talk", frontmatter.caption_lang ?? "", transcript);
+}
+
 const VERTICALS: readonly RerunVertical[] = [
   {
     id: "youtube",
+    captureSource: "youtube",
     ingestPath: "/api/youtube/ingest",
     frameSource: YOUTUBE_FRAME_SOURCE,
     frontmatterFields: ["date", "url", "summary_kind"],
+    // `YouTubeIngestRequest` has no `tags` field — see `acceptsTags`.
+    acceptsTags: false,
     hasKindPicker: true,
     hasVisualDetail: true,
     kinds: (bot) => youtubeCaptureKinds(bot),
     videoId: (url) => extractYouTubeVideoId(url),
-    createJob: ({ videoId, title, url }) => youtubeState.createJob(videoId, title, url, { rerun: true }),
+    createJob: ({ videoId, title, url }) => youtubeState.createJob(videoId, title, url),
     store: youtubeState,
     prompts: (i) => ({
       system: buildYouTubeSystemPrompt(i.preset, {
@@ -257,6 +340,8 @@ const VERTICALS: readonly RerunVertical[] = [
         videoId: i.videoId,
         frames: i.frames,
         visualDetail: i.visualDetail,
+        // See `RerunPromptInput.cadence`.
+        cadence: false,
       }),
     }),
     finish: (i) =>
@@ -273,10 +358,15 @@ const VERTICALS: readonly RerunVertical[] = [
   },
   {
     id: "vimeo",
+    captureSource: "vimeo",
     ingestPath: "/api/vimeo/ingest",
     frameSource: VIMEO_FRAME_SOURCE,
-    // `vimeo_video_id` is DERIVED by huginn from the url and is not a request
-    // field, so it is deliberately absent: sending it would 422.
+    // `vimeo_video_id` is DERIVED by huginn from the url and is no request
+    // field, so it is deliberately absent. Not because sending it would fail:
+    // `VimeoIngestRequest` is an ordinary pydantic model, i.e. `extra='ignore'`,
+    // so an unknown key is dropped SILENTLY. That is the reason to leave it out
+    // rather than a reason it does not matter — a key that looks re-sent and is
+    // discarded is the shape a later reader mistakes for a round trip.
     frontmatterFields: [
       "date",
       "url",
@@ -290,11 +380,12 @@ const VERTICALS: readonly RerunVertical[] = [
       "thumbnail_url",
       "duration_sec",
     ],
+    acceptsTags: true,
     hasKindPicker: true,
     hasVisualDetail: false,
     kinds: (bot) => resolveCapturePresets(bot.prompts, bot.connector),
     videoId: (url) => extractVimeoVideoId(url)?.id ?? null,
-    createJob: ({ videoId, title, url }) => vimeoState.createJob(videoId, title, url, { rerun: true }),
+    createJob: ({ videoId, title, url }) => vimeoState.createJob(videoId, title, url),
     store: vimeoState,
     prompts: (i) => ({
       system: buildVimeoSystemPrompt({
@@ -302,13 +393,14 @@ const VERTICALS: readonly RerunVertical[] = [
         title: i.title,
         url: i.url,
         captionKind: vimeoCaptionKind(i.frontmatter.caption_kind),
-        // The RESOLVED language the document already carries. A re-run never
-        // re-resolves `talk`: the first capture's answer is on the document, and
-        // re-deriving it from the transcript could flip the summary's language
-        // under a reader who asked for the same settings again.
-        outputLang: i.frontmatter.summary_lang === "nb" ? "nb" : "en",
+        outputLang: vimeoOutputLang(i.frontmatter, i.transcript),
       }),
-      user: buildVimeoUserPrompt(i.transcript, { videoId: i.videoId, frames: i.frames }),
+      user: buildVimeoUserPrompt(i.transcript, {
+        videoId: i.videoId,
+        frames: i.frames,
+        // See `RerunPromptInput.cadence`.
+        cadence: false,
+      }),
     }),
     finish: (i) =>
       finishVimeoSummary({
@@ -323,8 +415,10 @@ const VERTICALS: readonly RerunVertical[] = [
   },
   {
     id: "tiktok",
+    captureSource: "tiktok",
     ingestPath: "/api/tiktok/ingest",
     frontmatterFields: ["date", "url", "author"],
+    acceptsTags: true,
     hasKindPicker: false,
     hasVisualDetail: false,
     kinds: (bot) => resolveCapturePresets(bot.prompts, bot.connector),
@@ -332,8 +426,7 @@ const VERTICALS: readonly RerunVertical[] = [
     // temp dir and never quoted by address), so nothing needs a video id but
     // the recent-ingest key, which it does not maintain either.
     videoId: () => null,
-    createJob: ({ videoId, title, url }) =>
-      tiktokState.createJob(videoId || url, title, url, { rerun: true }),
+    createJob: ({ videoId, title, url }) => tiktokState.createJob(videoId || url, title, url),
     store: tiktokState,
     prompts: (i) => ({
       system: buildTikTokSystemPrompt({
@@ -360,14 +453,17 @@ const VERTICALS: readonly RerunVertical[] = [
   },
   {
     id: "x-article",
+    // The X VIDEO capture (`src/x-article/video.ts`) traces `capture:x-video`,
+    // and that is the run a re-run of one of these documents is compared with.
+    captureSource: "x-video",
     ingestPath: "/api/x-articles/ingest",
     frontmatterFields: ["date", "url", "author"],
+    acceptsTags: true,
     hasKindPicker: false,
     hasVisualDetail: false,
     kinds: (bot) => resolveCapturePresets(bot.prompts, bot.connector),
     videoId: () => null,
-    createJob: ({ videoId, title, url, author }) =>
-      xState.createJob(videoId || url, title, url, author, { rerun: true }),
+    createJob: ({ videoId, title, url, author }) => xState.createJob(videoId || url, title, url, author),
     store: xState,
     prompts: (i) => ({
       system: buildXVideoSystemPrompt({
@@ -466,14 +562,64 @@ export function categoryFromDocId(docId: string): string | null {
 }
 
 /**
+ * huginn's `sanitize_filename` truncates to 200 characters, so a stem AT or
+ * PAST that length is not guaranteed to survive a round trip.
+ */
+export const TITLE_ROUND_TRIP_MAX = 200;
+
+/**
+ * Why a title read out of a doc id does NOT always post back to the same path.
+ *
+ * `titleFromDocId` rests on `sanitize_filename` being idempotent — post the
+ * stem back, get the same file. It is not, and the order of its two last steps
+ * is why (`main/utils/filename.py`): it collapses whitespace and **strips**,
+ * and only THEN truncates to 200. So a stem longer than the cap is cut at
+ * character 200 wherever that falls; when it falls on a space the result ends
+ * in one, and the NEXT pass — the one this re-run's own POST triggers — strips
+ * that space and produces a different name. huginn keys the file on
+ * `<category>/<sanitized title>.md`, so a different name is a SECOND DOCUMENT,
+ * not an edit. The live corpus carries two such stems.
+ *
+ * The refusal is deliberately wider than the failure: any stem `>=` the cap,
+ * not only one that would land on a space. A stem exactly at 200 round-trips
+ * today, but it is one character from not doing so, and "at the cap" is a rule
+ * that can be stated to the reader; "at the cap and character 200 is a space"
+ * is not. A trailing-whitespace stem is refused for the same reason from the
+ * other end — the strip alone changes it, no truncation needed.
+ *
+ * Returns the reason to show the reader, or `null` when the title round-trips.
+ * It runs BEFORE any model call, because the failure is a duplicate file rather
+ * than a bad summary: spending the run first would leave the corpus with the
+ * fork AND the bill.
+ */
+export function titleRoundTripRefusal(title: string): string | null {
+  if (title !== title.trim()) {
+    return (
+      "This document's file name ends in whitespace, which huginn's own file-name rule strips. " +
+      "Re-running it would write a second document instead of replacing this one."
+    );
+  }
+  if (title.length >= TITLE_ROUND_TRIP_MAX) {
+    return (
+      `This document's file name is ${title.length} characters, at or past the ${TITLE_ROUND_TRIP_MAX}-character ` +
+      "limit huginn truncates to. Re-running it could write a second document instead of replacing this one."
+    );
+  }
+  return null;
+}
+
+/**
  * Every kept frame of one video, as a COMPLETE `CaptureFrame[]`.
  *
  * Complete is the contract: `finishYouTubeSummary` removes every quote of a
  * frame absent from the list it is handed, so a listing that missed one would
  * silently delete that slide from the re-summary. Seconds come from the file
- * names — the frames route serves exactly `<digits>.jpg` — and there are no
- * selection notes to recover, so every frame carries `note: ""`.
+ * names, matched by the seam's own {@link FRAME_FILE_RE} rather than by a
+ * second spelling of it here — the frames ROUTE serves exactly that shape, so a
+ * name this accepted and the route does not would put an address in the prompt
+ * that 404s for the reader.
  *
+ * There are no selection notes to recover, so every frame carries `note: ""`.
  * Ascending by second, so the prompt's list reads in talk order.
  */
 export async function listKeptFrames(
@@ -491,11 +637,41 @@ export async function listKeptFrames(
   }
   const frames: CaptureFrame[] = [];
   for (const name of names) {
-    const m = /^(\d{1,6})\.jpg$/.exec(name);
-    if (!m) continue;
-    frames.push({ path: join(dir, name), tSeconds: Number(m[1]), note: "" });
+    if (!FRAME_FILE_RE.test(name)) continue;
+    frames.push({
+      path: join(dir, name),
+      // The pattern is anchored and the extension is fixed, so the digits are
+      // everything before the last four characters.
+      tSeconds: Number(name.slice(0, -".jpg".length)),
+      note: "",
+    });
   }
   return frames.sort((a, b) => a.tSeconds - b.tSeconds);
+}
+
+/**
+ * Does the stored summary carry a `## Visual reference` appendix?
+ *
+ * The CANONICAL heading pattern (`VISUAL_REFERENCE_HEADING_RE`, the one the
+ * visual-detail pass itself matches on), walked over PROSE lines only. Both
+ * halves are load-bearing and each was wrong before:
+ *
+ *  - A stricter local re-spelling read `## Visual References`,
+ *    `## **Visual reference**` and an indented heading as "no appendix", i.e.
+ *    `selected` — so "Same settings again" silently DOWNGRADED a `detailed`
+ *    document from 20 visuals to 8 and cut the appendix. That is the exact
+ *    both-directions failure the shared pattern was written for; a second
+ *    spelling of it here is the way that fix comes undone.
+ *  - Without the fence walk, a summary QUOTING the heading inside a code block
+ *    (an export's own markdown, a talk about this feature) reads as `detailed`.
+ */
+function storedVisualDetail(body: string): VisualDetail {
+  let found = false;
+  mapProseLines(body, (line) => {
+    if (VISUAL_REFERENCE_HEADING_RE.test(line)) found = true;
+    return line;
+  });
+  return found ? "detailed" : DEFAULT_VISUAL_DETAIL;
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +714,7 @@ function buildRerunIngestBody(input: {
   summary: string;
   transcript: string;
   kindId: string;
-}): Record<string, unknown> {
+}): { body: Record<string, unknown>; appended: CappedTranscript | null } {
   const { vertical, stored } = input;
   const body: Record<string, unknown> = { title: input.title, category: input.category };
   for (const key of vertical.frontmatterFields) {
@@ -552,14 +728,50 @@ function buildRerunIngestBody(input: {
     body[key] = decodeFrontmatterScalar(raw);
   }
   body.summary_kind = input.kindId;
+  if (vertical.acceptsTags) {
+    const tags = extraTagsFromStored(stored.frontmatterRaw.tags, input.category);
+    if (tags.length > 0) body.tags = tags;
+  }
+  let appended: CappedTranscript | null = null;
   if (vertical.transcriptCarrier === "summary") {
-    const appended = appendTranscriptSection(input.summary, input.transcript);
+    appended = appendTranscriptSection(input.summary, input.transcript);
     body.summary = appended.text;
   } else {
     body.summary = input.summary;
     body.transcript_markdown = input.transcript;
   }
-  return body;
+  return { body, appended };
+}
+
+/**
+ * The tags to RE-SEND: the stored `tags` line minus the parts huginn will
+ * rebuild from the category itself.
+ *
+ * huginn does not store the request's tags — it composes the line as
+ * `category.split("/") + req.tags`, deduped, order preserved
+ * (`build_summary_tags`). So `ai/general` plus a hand-added `javascript` is
+ * stored as `"ai, general, javascript"`, and an ingest that sends no `tags`
+ * writes `"ai, general"` and the hand-added tag is GONE. Subtracting the
+ * category parts and sending the remainder rebuilds the same line byte for
+ * byte, and does so idempotently: the second re-run sends the same remainder.
+ *
+ * The subtraction is by VALUE, not by position: `build_summary_tags` dedupes,
+ * so a hand-added tag that happens to equal a category part was never a
+ * separate entry and must not become one.
+ */
+export function extraTagsFromStored(rawTags: string | undefined, category: string): string[] {
+  if (rawTags === undefined) return [];
+  const stored = String(decodeFrontmatterScalar(rawTags))
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t !== "");
+  const fromCategory = new Set(category.split("/"));
+  const out: string[] = [];
+  for (const tag of stored) {
+    if (fromCategory.has(tag) || out.includes(tag)) continue;
+    out.push(tag);
+  }
+  return out;
 }
 
 async function runRerunJob(input: RerunJobInput): Promise<void> {
@@ -587,7 +799,10 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
 
     store.updateStatus(jobId, "summarizing");
     const result = await deps.oneShot({
-      source: vertical.id,
+      // The CAPTURE's own trace source, not the `/summaries` source id — the two
+      // differ for X video (`capture:x-video` vs the `x-article` shelf), and
+      // this attribute exists to be compared with the capture it re-runs.
+      source: vertical.captureSource,
       jobId,
       title,
       // The url the FIRST capture stored under — so the prompt snapshot lands
@@ -667,7 +882,7 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
     }
 
     store.updateStatus(jobId, "ingesting");
-    const body = buildRerunIngestBody({
+    const { body, appended } = buildRerunIngestBody({
       vertical,
       stored,
       title,
@@ -676,6 +891,24 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
       transcript,
       kindId: preset.id,
     });
+    if (appended?.truncated) {
+      // The same line `src/youtube/summarizer.ts` writes for a capture, and for
+      // the same reason: past this bound the second half of the talk never
+      // reached the document, and nothing outside the file says so. A re-run can
+      // hit it where the capture did not — the appendix it re-appends is the
+      // stored one plus whatever the new summary is.
+      log.warn(
+        "Re-run {jobId} of {docId}: transcript truncated at the {maxBytes}-byte bound " +
+          "({transcriptBytes} bytes in, {keptBytes} kept) — the document ends mid-talk",
+        {
+          jobId,
+          docId: input.docId,
+          maxBytes: YOUTUBE_TRANSCRIPT_MAX_BYTES,
+          transcriptBytes: appended.inputBytes,
+          keptBytes: appended.keptBytes,
+        },
+      );
+    }
     let ingestedDocId: string | undefined;
     await deps.ingest({
       knowledgeApiUrl: input.config.knowledgeApiUrl,
@@ -720,12 +953,18 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
  * Why `full: true` answers 501 on every vertical today, stated once.
  *
  * The obvious implementation — POST the vertical's own `/summarize` with the
- * stored url — is unreachable BY CONSTRUCTION: every one of those four routes
- * answers `duplicate` for a document that is already in the collection, which a
- * re-run's target always is. Calling the vertical's summarizer FUNCTION directly
- * gets past that and past something else too: it pins neither `title` nor
- * `category`, so a model that re-picked a different category writes a SECOND
- * file under a second path — the exact fork rule 2 above exists to prevent.
+ * stored url — is blocked in the ordinary case: every one of those four routes
+ * answers `duplicate` for a document already in the collection, which a re-run's
+ * target always is. Not BY CONSTRUCTION, though, and the distinction is the
+ * reason this is prose and not a claim: each of those routes DEGRADES a failed
+ * listing read to not-a-duplicate (`findExistingByVideoId` returns null from its
+ * catch), so a huginn hiccup at the wrong moment lets the capture run. That is
+ * an unreliable escape hatch, not a feature.
+ *
+ * Calling the vertical's summarizer FUNCTION directly gets past the dedup on
+ * purpose, and past something else too: it pins neither `title` nor `category`,
+ * so a model that re-picked a different category writes a SECOND file under a
+ * second path — the exact fork rule 2 above exists to prevent.
  */
 export const FULL_RERUN_UNSUPPORTED =
   "A full re-fetch is not available yet: the capture routes answer \"already captured\" for a " +
@@ -737,6 +976,30 @@ export function registerSummariesRerunRoutes(
   config: Config,
   deps: SummariesRerunDeps = defaultSummariesRerunDeps(config.knowledgeApiUrl),
 ): void {
+  /**
+   * The re-runs this registration has started and not yet settled, keyed on
+   * `<source>\0<docId>`.
+   *
+   * Without it two clicks — a double-click on "Same settings again", two open
+   * tabs on one document — spend two model calls and then race each other's
+   * ingest for one FILE: huginn rewrites the whole document from the request
+   * body, so the loser's summary is simply gone and which one wins is decided
+   * by the network. The second POST is `409 in_flight` instead.
+   *
+   * Per-REGISTRATION rather than module state, the `recentIngests` rule: one
+   * app is one instance's worth of in-flight work, and module state would leak
+   * a stalled job from one test into the next. The key is `JSON.stringify` over
+   * the PAIR rather than a joined string: a separator character is a guess about
+   * what a doc id cannot contain, and this one is injective by construction and
+   * still printable in a log line.
+   *
+   * Released in a `finally` on the job, which is the only place that can know
+   * it is over — `runRerunJob` catches its own failures, so a rejected run
+   * still settles.
+   */
+  const inFlight = new Set<string>();
+  const flightKey = (sourceId: string, docId: string): string => JSON.stringify([sourceId, docId]);
+
   /** Read + split one document, or the JSON error the caller gets. */
   async function loadStored(
     sourceId: string,
@@ -787,7 +1050,11 @@ export function registerSummariesRerunRoutes(
 
     const bot = resolveSummarizerBot(deps.bots());
     const kinds = bot && vertical.hasKindPicker ? capturePresetOptions(vertical.kinds(bot)) : [];
-    const storedKind = stored.frontmatter.summary_kind || DEFAULT_CAPTURE_KIND;
+    // NULL, not the default, for a document written before kinds existed. The
+    // ingest still STAMPS `defaultKind` (it is what runs), but the menu has to
+    // be able to say so — "Same settings again" over a `standard` the document
+    // never asked for is a claim about a decision nobody made.
+    const storedKind = stored.frontmatter.summary_kind || null;
 
     const url = stored.frontmatter.url ?? "";
     const videoId = vertical.videoId(url) ?? "";
@@ -802,15 +1069,23 @@ export function registerSummariesRerunRoutes(
       windowed: stored.windowed,
       kinds,
       storedKind,
+      // The kind a run with no `kind` will actually use — what `storedKind: null`
+      // resolves to. Sent so the menu can NAME it without spelling a constant of
+      // its own.
+      defaultKind: DEFAULT_CAPTURE_KIND,
+      // The title round trip, checked here too so the menu can disable the run
+      // items with the reason rather than offering a click that 409s.
+      titleRoundTrip: (() => {
+        const reason = titleRoundTripRefusal(titleFromDocId(docId));
+        return { ok: reason === null, reason };
+      })(),
       // NOT stored anywhere: `visual_detail` is a request axis, not a document
       // field. A `## Visual reference` appendix is the one piece of evidence the
       // file carries, and it only ever appears under `detailed` — so the answer
-      // is `detailed` when it is there and the route's own default otherwise.
+      // is DERIVED from the body (`storedVisualDetail`), never read off it.
       ...(vertical.hasVisualDetail
         ? {
-            storedVisualDetail: /^#{2,3}\s*Visual reference\b/im.test(stored.body)
-              ? "detailed"
-              : DEFAULT_VISUAL_DETAIL,
+            storedVisualDetail: storedVisualDetail(stored.body),
             visualDetailOptions: visualDetailOptions(),
           }
         : {}),
@@ -826,6 +1101,18 @@ export function registerSummariesRerunRoutes(
   });
 
   app.post("/api/summaries/rerun", async (c) => {
+    // **`application/json` is REQUIRED** (the `jira-routes.ts` / `youtube-routes.ts`
+    // precedent). Hono parses any body whatever the header says, and `text/plain`
+    // is a CORS *simple* request — no preflight at all — so without this gate a
+    // cross-origin page could spend a model call AND rewrite a stored document,
+    // with the browser never asking permission. This route carries no CORS
+    // headers, which stops such a page reading the RESPONSE and does nothing
+    // about the write. A `charset` parameter is fine.
+    const contentType = (c.req.header("content-type") ?? "").trim();
+    if (!/^application\/json\s*(;|$)/i.test(contentType)) {
+      return c.json({ error: "This endpoint takes application/json.", code: "bad_content_type" }, 415);
+    }
+
     type Body = { source?: string; docId?: string; kind?: unknown; visual_detail?: unknown; full?: unknown };
     const body = await c.req.json<Body>().catch(() => ({}) as Body);
     const sourceId = typeof body.source === "string" ? body.source.trim() : "";
@@ -881,6 +1168,13 @@ export function registerSummariesRerunRoutes(
       return c.json({ error: "The stored document is not filed under a category.", code: "no_category" }, 400);
     }
     const title = titleFromDocId(docId);
+    // Before any model spend: a title that does not round-trip through huginn's
+    // own file-name rule writes a SECOND document rather than replacing this one.
+    // See `titleRoundTripRefusal`.
+    const titleRefusal = titleRoundTripRefusal(title);
+    if (titleRefusal) {
+      return c.json({ error: titleRefusal, code: "title_not_round_trippable" }, 409);
+    }
     const videoId = vertical.videoId(url) ?? "";
 
     const frames =
@@ -906,15 +1200,40 @@ export function registerSummariesRerunRoutes(
       ? body.visual_detail
       : DEFAULT_VISUAL_DETAIL;
 
-    const jobId = vertical.createJob({
-      videoId,
-      title,
-      url,
-      author: stored.frontmatter.author ?? "unknown",
-    });
+    // The claim is taken LAST, after every refusal above: a 409 has to mean "a
+    // run is under way", and claiming earlier would let a request that then 400s
+    // hold the slot until its own return path released it.
+    const key = flightKey(vertical.id, docId);
+    if (inFlight.has(key)) {
+      return c.json(
+        {
+          error: "This document is being re-run already. Wait for that run to finish.",
+          code: "in_flight",
+        },
+        409,
+      );
+    }
+    inFlight.add(key);
+
+    let jobId: string;
+    try {
+      jobId = vertical.createJob({
+        videoId,
+        title,
+        url,
+        author: stored.frontmatter.author ?? "unknown",
+      });
+    } catch (err) {
+      // Nothing is running, so the slot must not stay held. `createJob` does not
+      // throw today; a claim released only on the happy path is how it comes to
+      // matter later.
+      inFlight.delete(key);
+      throw err;
+    }
 
     // Fire and forget: the job streams over the vertical's own SSE seam, and the
-    // route answers with the id the client attaches to.
+    // route answers with the id the client attaches to. `runRerunJob` catches its
+    // own failures, so the `finally` runs on every path.
     void runRerunJob({
       vertical,
       jobId,
@@ -930,6 +1249,8 @@ export function registerSummariesRerunRoutes(
       botConfig: bot,
       config,
       deps,
+    }).finally(() => {
+      inFlight.delete(key);
     });
 
     log.info("Re-run started for {docId} as {kind} (job {jobId})", { docId, kind: preset.id, jobId });
@@ -941,23 +1262,22 @@ export function registerSummariesRerunRoutes(
 }
 
 /**
- * Module-load assertions, so the three lists that must agree cannot drift:
- * every vertical here names a REGISTERED summary source, and the import-free
- * {@link RERUN_SOURCES} the doc-panel view renders its control from names
- * exactly these verticals.
+ * Module-load assertion, so the two lists that must agree cannot drift: the
+ * verticals here are EXACTLY the summary sources flagged `rerun` in the
+ * registry, which is what the doc panel renders its control from.
  *
- * At load rather than in a test alone: the view's list is what decides whether
- * the reader is offered a control, and an id present in one list and absent
- * from the other is either a dead menu or a missing one.
+ * At load rather than in a test alone: the registry's flag is what decides
+ * whether the reader is offered a control at all, and an id flagged there and
+ * missing here is a dead menu, while one here and unflagged there is a feature
+ * nobody can reach.
  */
-for (const v of VERTICALS) {
-  if (!SUMMARY_SOURCES.some((s) => s.id === v.id)) {
-    throw new Error(`Re-run vertical "${v.id}" is not a registered summary source`);
+{
+  const flagged = SUMMARY_SOURCES.filter((s) => s.rerun).map((s) => s.id).sort();
+  const declared = VERTICALS.map((v) => v.id).sort();
+  if (flagged.join(",") !== declared.join(",")) {
+    throw new Error(
+      `The re-run vertical table (${declared.join(", ")}) and the sources flagged rerun ` +
+        `(${flagged.join(", ")}) disagree`,
+    );
   }
-}
-if (
-  RERUN_SOURCES.length !== VERTICALS.length ||
-  !VERTICALS.every((v) => RERUN_SOURCES.includes(v.id))
-) {
-  throw new Error("RERUN_SOURCES and the re-run vertical table disagree");
 }

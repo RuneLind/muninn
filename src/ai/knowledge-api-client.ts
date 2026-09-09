@@ -19,25 +19,33 @@ export class KnowledgeApiError extends Error {
   }
 }
 
+interface KnowledgeApiOptions {
+  timeoutMs?: number;
+  method?: string;
+  body?: string;
+  headers?: Record<string, string>;
+}
+
 /**
- * Fetch from the Knowledge API with AbortController timeout and error handling.
+ * The request half both public fetchers share: AbortController timeout, the
+ * optional method/body/headers, and the 502/503 mapping.
  *
- * @param baseUrl  The Knowledge API base URL (e.g. "http://localhost:8321")
- * @param path     The API path (e.g. "/api/tags?collection=foo")
- * @param options  Optional: timeoutMs (default 5000), method, body, headers
- * @returns        Parsed JSON response
- * @throws         KnowledgeApiError with statusCode 502 (upstream error) or 503 (unreachable)
+ * PRIVATE, and it hands back the `Response` rather than a body — the two
+ * exported wrappers below differ in exactly one line (`.json()` vs `.text()`)
+ * and everything before that line is the contract. It used to be two
+ * byte-identical copies, which is two places for a timeout or a status mapping
+ * to change on its own.
+ *
+ * The body read stays INSIDE each wrapper's own try, because a `.json()` on a
+ * malformed body must map to the same 503 the transport failure does; that is
+ * the behaviour both copies had.
  */
-export async function fetchKnowledgeApi(
+async function fetchKnowledgeApiRes(
   baseUrl: string,
   path: string,
-  options?: {
-    timeoutMs?: number;
-    method?: string;
-    body?: string;
-    headers?: Record<string, string>;
-  },
-): Promise<any> {
+  options: KnowledgeApiOptions | undefined,
+  readBody: (res: Response) => Promise<unknown>,
+): Promise<unknown> {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -52,12 +60,29 @@ export async function fetchKnowledgeApi(
     if (!res.ok) {
       throw new KnowledgeApiError("API returned " + res.status, 502, res.status);
     }
-    return await res.json();
+    return await readBody(res);
   } catch (err) {
     clearTimeout(timeout);
     if (err instanceof KnowledgeApiError) throw err;
     throw new KnowledgeApiError("Knowledge API unreachable", 503);
   }
+}
+
+/**
+ * Fetch from the Knowledge API with AbortController timeout and error handling.
+ *
+ * @param baseUrl  The Knowledge API base URL (e.g. "http://localhost:8321")
+ * @param path     The API path (e.g. "/api/tags?collection=foo")
+ * @param options  Optional: timeoutMs (default 5000), method, body, headers
+ * @returns        Parsed JSON response
+ * @throws         KnowledgeApiError with statusCode 502 (upstream error) or 503 (unreachable)
+ */
+export async function fetchKnowledgeApi(
+  baseUrl: string,
+  path: string,
+  options?: KnowledgeApiOptions,
+): Promise<any> {
+  return await fetchKnowledgeApiRes(baseUrl, path, options, (res) => res.json());
 }
 
 /**
@@ -74,38 +99,15 @@ export async function fetchKnowledgeApi(
  * Deliberately a sibling rather than an option on `fetchKnowledgeApi`: that
  * function's contract is "parsed JSON", and a caller that got a string back
  * from it because of a flag is one refactor away from a `.documents` read on a
- * string.
+ * string. The two share their whole request half through
+ * `fetchKnowledgeApiRes`, so being siblings costs no duplication.
  */
 export async function fetchKnowledgeApiText(
   baseUrl: string,
   path: string,
-  options?: {
-    timeoutMs?: number;
-    method?: string;
-    body?: string;
-    headers?: Record<string, string>;
-  },
+  options?: KnowledgeApiOptions,
 ): Promise<string> {
-  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const fetchOptions: RequestInit = { signal: controller.signal };
-    if (options?.method) fetchOptions.method = options.method;
-    if (options?.body) fetchOptions.body = options.body;
-    if (options?.headers) fetchOptions.headers = options.headers;
-
-    const res = await fetch(`${baseUrl}${path}`, fetchOptions);
-    clearTimeout(timeout);
-    if (!res.ok) {
-      throw new KnowledgeApiError("API returned " + res.status, 502, res.status);
-    }
-    return await res.text();
-  } catch (err) {
-    clearTimeout(timeout);
-    if (err instanceof KnowledgeApiError) throw err;
-    throw new KnowledgeApiError("Knowledge API unreachable", 503);
-  }
+  return (await fetchKnowledgeApiRes(baseUrl, path, options, (res) => res.text())) as string;
 }
 
 /**

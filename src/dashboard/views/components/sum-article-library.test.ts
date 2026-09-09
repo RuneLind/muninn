@@ -222,3 +222,326 @@ describe("renderArticleHtml", () => {
     );
   });
 });
+
+/**
+ * The `↻ Re-run ▾` menu, driven through the REAL script.
+ *
+ * A tiny fake DOM rather than a browser: what is worth pinning here is the
+ * DECISIONS the client makes — which items it disables and why, what the copy
+ * says, and the two guards that only fire on a race — and none of that needs
+ * layout. The end-to-end behaviour is `e2e/summaries-rerun.spec.ts`.
+ */
+
+interface FakeNode {
+  tag: string;
+  className: string;
+  textContent: string;
+  title: string;
+  disabled: boolean;
+  hidden: boolean;
+  innerHTML: string;
+  attrs: Record<string, string>;
+  children: FakeNode[];
+  classes: Set<string>;
+  classList: { add(c: string): void; remove(c: string): void; toggle(c: string, on?: boolean): void; contains(c: string): boolean };
+  setAttribute(name: string, value: string): void;
+  getAttribute(name: string): string | null;
+  appendChild(child: FakeNode): FakeNode;
+  addEventListener(): void;
+  focus(): void;
+  querySelectorAll(sel: string): FakeNode[];
+  contains(): boolean;
+}
+
+function fakeNode(tag: string): FakeNode {
+  const classes = new Set<string>();
+  const node: FakeNode = {
+    tag,
+    className: "",
+    textContent: "",
+    title: "",
+    disabled: false,
+    hidden: false,
+    innerHTML: "",
+    attrs: {},
+    children: [],
+    classes,
+    classList: {
+      add: (c) => void classes.add(c),
+      remove: (c) => void classes.delete(c),
+      toggle: (c, on) => void (on ? classes.add(c) : classes.delete(c)),
+      contains: (c) => classes.has(c),
+    },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    getAttribute(name) { return this.attrs[name] ?? null; },
+    appendChild(child) {
+      // `textContent = ''` is how the script empties the popup, so the children
+      // list has to be cleared with it or every render would stack.
+      this.children.push(child);
+      return child;
+    },
+    addEventListener() {},
+    focus() {},
+    querySelectorAll() { return []; },
+    contains() { return false; },
+  };
+  return node;
+}
+
+interface RerunHarness {
+  renderRerunMenu: (opts: Record<string, unknown>) => void;
+  rerunSameLabel: (opts: Record<string, unknown>) => string;
+  rerunPanelShows: (doc: unknown) => boolean;
+  showRerunPrompt: () => void;
+  setDoc: (doc: unknown) => void;
+  setOpts: (opts: unknown) => void;
+  menu: FakeNode;
+  status: FakeNode;
+  overlay: FakeNode;
+  snapshots: unknown[];
+}
+
+function loadRerun(): RerunHarness {
+  const menu = fakeNode("div");
+  const status = fakeNode("div");
+  const overlay = fakeNode("div");
+  const byId: Record<string, FakeNode> = {
+    docPanelRerunMenu: menu,
+    docPanelRerunStatus: status,
+    docOverlay: overlay,
+  };
+  const snapshots: unknown[] = [];
+  const ctx = {
+    document: {
+      addEventListener() {},
+      getElementById: (id: string) => byId[id] ?? null,
+      createElement: (tag: string) => fakeNode(tag),
+      activeElement: null,
+    },
+    SOURCES: {
+      youtube: { apiBase: "/api/youtube", collection: "youtube-summaries", rerun: true },
+      article: { apiBase: "/api/articles", collection: "article-summaries", rerun: false },
+    },
+    snapshots,
+  };
+  const harness = new Function(
+    "ctx",
+    `var document = ctx.document;
+     var SOURCES = ctx.SOURCES;
+     var renderMarkdown = function(t) { return t; };
+     var showPromptSnapshot = function(data, key, opts) { ctx.snapshots.push({ data: data, key: key, opts: opts }); };
+     ${sumArticleLibraryScript()}
+     return {
+       renderRerunMenu: renderRerunMenu,
+       rerunSameLabel: rerunSameLabel,
+       rerunPanelShows: rerunPanelShows,
+       showRerunPrompt: showRerunPrompt,
+       setDoc: function(d) { _shareDoc = d; },
+       setOpts: function(o) { _rerunOpts = o; },
+     };`,
+  )(ctx) as Omit<RerunHarness, "menu" | "status" | "overlay" | "snapshots">;
+  return { ...harness, menu, status, overlay, snapshots };
+}
+
+/** Every item, its label and whether it is offered. */
+function menuItems(menu: FakeNode): Array<{ label: string; disabled: boolean; title: string }> {
+  return menu.children
+    .filter((c) => c.className === "doc-panel-menu-item")
+    .map((c) => ({ label: c.textContent, disabled: c.disabled, title: c.title }));
+}
+function menuNotes(menu: FakeNode): string[] {
+  return menu.children.filter((c) => c.className === "doc-panel-menu-note").map((c) => c.textContent);
+}
+
+const READY_OPTS = {
+  hasTranscript: true,
+  truncated: false,
+  windowed: true,
+  kinds: [
+    { id: "standard", label: "Standard" },
+    { id: "talk-notes", label: "Talk notes (timeline)" },
+  ],
+  storedKind: "standard",
+  defaultKind: "standard",
+  titleRoundTrip: { ok: true, reason: null },
+  framesKept: 0,
+  promptUrl: "https://www.youtube.com/watch?v=abcdefghijk",
+  full: { supported: false, reason: "A full re-fetch is not available yet: …" },
+};
+
+describe("renderRerunMenu", () => {
+  test("the stored kind is not offered twice, and the others are", () => {
+    const h = loadRerun();
+    h.renderRerunMenu({ ...READY_OPTS });
+    const items = menuItems(h.menu);
+    expect(items.map((i) => i.label)).toEqual([
+      "Same settings again",
+      "As Talk notes (timeline)",
+      "Full re-fetch — download the source again",
+      "Show prompt",
+    ]);
+    expect(items[0]!.disabled).toBe(false);
+    expect(items[1]!.disabled).toBe(false);
+  });
+
+  test("a kind-less document names the kind that will run, and hides that kind's own item", () => {
+    const h = loadRerun();
+    h.renderRerunMenu({ ...READY_OPTS, storedKind: null });
+    const items = menuItems(h.menu);
+    expect(items[0]!.label).toBe("Same settings again (standard; written before kinds existed)");
+    // `standard` IS "Same settings again" here, so offering it again would read
+    // as two different actions.
+    expect(items.map((i) => i.label)).not.toContain("As Standard");
+  });
+
+  test("no transcript disables every run item and says what is needed", () => {
+    const h = loadRerun();
+    h.renderRerunMenu({ ...READY_OPTS, hasTranscript: false });
+    const items = menuItems(h.menu);
+    expect(items[0]!.disabled).toBe(true);
+    expect(items[1]!.disabled).toBe(true);
+    const notes = menuNotes(h.menu).join(" ");
+    expect(notes).toContain("This summary stored no transcript. Re-running needs one; a full re-fetch is a follow-up.");
+    // The claim the old copy made — that a full re-fetch is the way out — while
+    // that item is disabled everywhere.
+    expect(notes).not.toContain("can only be re-run by downloading the source again");
+  });
+
+  test("a title that does not round-trip disables the run items and carries the reason", () => {
+    const h = loadRerun();
+    const reason = "This document's file name is 240 characters…";
+    h.renderRerunMenu({ ...READY_OPTS, titleRoundTrip: { ok: false, reason } });
+    const items = menuItems(h.menu);
+    expect(items[0]).toEqual({ label: "Same settings again", disabled: true, title: reason });
+    expect(items[1]!.disabled).toBe(true);
+    expect(menuNotes(h.menu)).toContain(reason);
+    // "Show prompt" is about the PREVIOUS run and is unaffected.
+    expect(items[3]).toEqual({ label: "Show prompt", disabled: false, title: "" });
+  });
+
+  test("Full re-fetch is disabled and its reason rides ONE node, directly under it", () => {
+    const h = loadRerun();
+    h.renderRerunMenu({ ...READY_OPTS });
+    const full = menuItems(h.menu).find((i) => i.label.startsWith("Full re-fetch"))!;
+    expect(full.disabled).toBe(true);
+    // It rode BOTH the item's tooltip and a note three nodes below it — the
+    // same sentence twice, and the copy furthest from the item was the one a
+    // reader saw, where it read as a statement about the whole menu.
+    expect(full.title).toBe("");
+    const idx = h.menu.children.findIndex((c) => c.textContent.startsWith("Full re-fetch"));
+    expect(h.menu.children[idx + 1]!.textContent).toBe(READY_OPTS.full.reason);
+    expect(h.menu.children.filter((c) => c.textContent === READY_OPTS.full.reason)).toHaveLength(1);
+  });
+
+  test("a document with no stored url disables Show prompt with the reason", () => {
+    const h = loadRerun();
+    h.renderRerunMenu({ ...READY_OPTS, promptUrl: "" });
+    const show = menuItems(h.menu).find((i) => i.label === "Show prompt")!;
+    expect(show.disabled).toBe(true);
+    expect(show.title).toContain("stores no URL");
+  });
+
+  test("the visual-detail line says the answer is DERIVED, because it is", () => {
+    const h = loadRerun();
+    h.renderRerunMenu({ ...READY_OPTS, storedVisualDetail: "detailed" });
+    const line = menuNotes(h.menu).find((n) => n.startsWith("Visual detail:"))!;
+    expect(line).toBe("Visual detail: detailed (derived from the stored summary, not a field it carries).");
+    expect(line).not.toContain("as stored");
+  });
+
+  test("the frames and truncation notes report what the run will actually have", () => {
+    const h = loadRerun();
+    h.renderRerunMenu({ ...READY_OPTS, framesKept: 5, truncated: true });
+    const notes = menuNotes(h.menu).join(" ");
+    expect(notes).toContain("only the 5 frame(s) the previous summary quoted");
+    expect(notes).toContain("truncated at capture");
+  });
+
+  test("rules and notes are role=presentation, so role=menu holds only menuitems", () => {
+    const h = loadRerun();
+    h.renderRerunMenu({ ...READY_OPTS });
+    for (const child of h.menu.children) {
+      const role = child.getAttribute("role");
+      expect([child.className, role]).toEqual([
+        child.className,
+        child.className === "doc-panel-menu-item" ? "menuitem" : "presentation",
+      ]);
+    }
+  });
+});
+
+describe("the panel-still-visible check", () => {
+  test("a closed panel is not reloaded into, and neither is one on another document", () => {
+    const h = loadRerun();
+    const doc = { docId: "ai/general/A.md", source: "youtube", title: "A", url: "", text: "old" };
+    h.setDoc(doc);
+    // Panel closed: `complete` used to call openSummaryDoc unconditionally, which
+    // re-opened a scrim over a page the reader had left and locked its scroll.
+    expect(h.rerunPanelShows(doc)).toBe(false);
+    h.overlay.classList.add("visible");
+    expect(h.rerunPanelShows(doc)).toBe(true);
+    // Retargeted to a different document while the run was going.
+    h.setDoc({ docId: "ai/general/B.md", source: "youtube", title: "B", url: "", text: "" });
+    expect(h.rerunPanelShows(doc)).toBe(false);
+  });
+});
+
+describe("showRerunPrompt after a retarget", () => {
+  test("a superseded fetch bails silently instead of reading a nulled _rerunOpts", async () => {
+    const h = loadRerun();
+    h.overlay.classList.add("visible");
+    h.setDoc({ docId: "ai/general/A.md", source: "youtube", title: "A", url: "", text: "" });
+    h.setOpts({ promptUrl: "https://www.youtube.com/watch?v=abcdefghijk" });
+
+    let resolveFetch: (v: unknown) => void = () => {};
+    const pending = new Promise((r) => { resolveFetch = r; });
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = () => pending;
+    try {
+      h.showRerunPrompt();
+      // The reader retargets the panel mid-flight — exactly what
+      // `resetRerunControl` does, `_rerunOpts` included.
+      h.setDoc({ docId: "ai/general/B.md", source: "youtube", title: "B", url: "", text: "" });
+      h.setOpts(null);
+      resolveFetch({
+        ok: true,
+        status: 200,
+        json: async () => ({ systemPrompt: "s", userPrompt: "u", pass: "claude", createdAt: 0, traceExists: false }),
+      });
+      await new Promise((r) => setTimeout(r, 5));
+      // Nothing painted: the modal belongs to a document no longer on screen.
+      expect(h.snapshots).toEqual([]);
+      // And nothing REPORTED either. Re-reading `_rerunOpts` in the continuation
+      // threw `Cannot read properties of null`, which the promise chain's own
+      // catch turned into an error line on a panel showing another document —
+      // so "snapshots is empty" alone cannot tell the guard from the crash.
+      expect(h.status.classes.has("err")).toBe(false);
+      expect(h.status.textContent).not.toContain("Could not load the prompt");
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+  });
+
+  test("the prompt modal is opened with the pass chip suppressed", async () => {
+    const h = loadRerun();
+    h.overlay.classList.add("visible");
+    h.setDoc({ docId: "ai/general/A.md", source: "youtube", title: "A", url: "", text: "" });
+    h.setOpts({ promptUrl: "https://www.youtube.com/watch?v=abcdefghijk" });
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ systemPrompt: "s", userPrompt: "u", pass: "claude", createdAt: 0, traceExists: false }),
+    });
+    try {
+      h.showRerunPrompt();
+      await new Promise((r) => setTimeout(r, 5));
+      expect(h.snapshots).toHaveLength(1);
+      // The chip names one of a CAPTURE's two model calls, which this surface
+      // never offers a choice between.
+      expect((h.snapshots[0] as { opts: unknown }).opts).toEqual({ hidePass: true });
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+  });
+});

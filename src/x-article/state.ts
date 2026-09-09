@@ -47,15 +47,8 @@ export const {
   subscribe,
 } = store;
 
-export function createJob(
-  articleId: string,
-  title: string,
-  url: string,
-  author: string,
-  /** `{rerun: true}` from `POST /api/summaries/rerun` — see `BaseJob.rerun`. */
-  opts: { rerun?: boolean } = {},
-): string {
-  const id = store.createJob({ articleId, title, url, author, ...(opts.rerun ? { rerun: true } : {}) });
+export function createJob(articleId: string, title: string, url: string, author: string): string {
+  const id = store.createJob({ articleId, title, url, author });
   log.info("Created X article job {jobId} for article {articleId} by @{author}", { jobId: id, articleId, author });
   return id;
 }
