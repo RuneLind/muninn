@@ -524,9 +524,13 @@ interface RerunJobInput {
  * verbatim, with `summary_kind` set to the kind this run used and `title` /
  * `category` pinned to the stored document.
  *
- * Exported for the unit test that proves the round trip on a fixture document.
+ * Its own function rather than an expression inside the job, so the per-vertical
+ * `frontmatterFields` list is applied in ONE place and the round trip is
+ * readable next to the rule it implements. Not exported: the tests drive it
+ * through the real route, which is the only way the per-vertical table is under
+ * test rather than a copy of it.
  */
-export function buildRerunIngestBody(input: {
+function buildRerunIngestBody(input: {
   vertical: RerunVertical;
   stored: StoredCapture;
   title: string;
@@ -541,10 +545,9 @@ export function buildRerunIngestBody(input: {
     // The RAW text, never the decoded map — see `StoredCapture.frontmatterRaw`.
     const raw = stored.frontmatterRaw[key];
     if (raw === undefined) continue;
-    // `summary_kind` is the one field a re-run changes. Everything else goes
-    // back exactly as it came off disk — decoded through the raw-text reader, so
-    // a bare `duration_sec: 3180` is a NUMBER again and not the string that
-    // would re-render as `"3180"`.
+    // `summary_kind` is the one field a re-run changes. Everything else is
+    // decoded from the RAW on-disk text, so a bare `duration_sec: 3180` is a
+    // NUMBER again rather than a string huginn would re-render as `"3180"`.
     if (key === "summary_kind") continue;
     body[key] = decodeFrontmatterScalar(raw);
   }
