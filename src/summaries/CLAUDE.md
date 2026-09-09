@@ -14,3 +14,121 @@ Shared seam for the capture verticals (youtube / x-article / tiktok / anthropic 
 **The POST-MODEL TAIL is one function per vertical, and a RE-RUN MUST CALL IT** — `finishYouTubeSummary` (`src/youtube/finish.ts`), `finishVimeoSummary` (`src/vimeo/finish.ts`), `finishTikTokSummary` (`src/tiktok/finish.ts`), `finishXVideoSummary` (`src/x-article/video-finish.ts`). The tail is everything between the model's answer and the ingest EXCEPT the vertical's completion log line, which stays in the summarizer because it reports on the whole JOB (its model, its token totals, its frame counts) — a re-run must therefore write that record itself. Only YouTube's is a structured record: `src/youtube/summarizer.ts` is the single `event: "capture_complete"` emitter and `scripts/replay-youtube.ts` parses it for its `run.json`, so a YouTube re-run that skipped it would leave the replay harness with no run to read. The other three log a plain `Summarized …` line. What the tail does own is not bookkeeping: YouTube's parses the envelope, holds the summary's frame references to that capture's own manifest and the policy's caps (`enforceVisualReferences`), copies what the text quotes out of the dying work dir (`keepReferencedFrames`) and then removes the references the copy could not serve (`dropFrameReferences`). A re-run that re-implemented any of that would store model-invented slide addresses the route 404s, and the model's answer looks fine either way. The differences between the four are deliberate and documented in each header — **Vimeo runs NO enforcement pass** (its copy parses the summary itself), TikTok carries the degraded-frame-Reads warn, X-video has neither — so a re-run must call the vertical's own tail rather than the one it read first. **Four verticals have a tail; three deliberately do not.** The four are the ones above. `x-article`, `article` and `anthropic` parse the envelope inline and have nothing else to do between the answer and the ingest — except `anthropic`, whose one extra step is the `AI_CATEGORIES` clamp, and that stays in its summarizer on purpose: it is a rule about the COLLECTION the job ingests into (huginn's allowlist), not about the model's text, so a re-run that ingested elsewhere must not inherit it. What a tail does NOT do is the JOB's: the ingest, `completeJob`, the source draft and the status moves stay in the summarizer, because a re-run writes into a different job. The one job-store touch it owns the TIMING of is the category, which is why it is an `onCategory` callback: the live card is told before the frame copies are awaited, exactly as it was when the tail was inline.
 
 **`/summaries/prompts`** is the read-side of both: one table, capture sources down and summary kinds across, a cell per combination listing the pieces it receives as chips, and a drawer under the table with the composed system prompt (tinted per span by the piece that produced it), the user-prompt skeleton, the closing-takeaway check prompt, and the `<botDir>/prompts/captureSummary.<id>.md` path with a present / not-present marker. `src/summaries/prompt-matrix.ts` builds the payload (pure — no model call, no write, no DB) and `src/dashboard/views/summaries-prompts-page.ts` renders it, server-side and whole: every drawer is in the HTML from the first byte and the script only toggles `hidden`. **Two rules it lives by.** Nothing on the page spells a prompt — a second copy would agree with itself forever while the captures moved. And the tint is BUILT rather than parsed: the cell carries the pieces, so a line's colour is the piece that produced it by construction, where a regex over the finished text would go wrong on the first reworded rider and go wrong silently. The kinds are `resolveCapturePresets(bot.prompts, bot.connector)` for the `?bot=` bot (default `resolveSummarizerBot`), so a `deep` column is absent exactly where the connector cannot name the opus model. A source with no kind picker gets ONE cell spanning the kinds, carrying `hand-rolled envelope, no kind` (TikTok, X video) or `shared envelope, no kind` (the text verticals). The page is reached from a small **Prompts** link in `/summaries`' header — its only entry point, since the top-level nav row already carries ten links. Every skeleton is built from ONE fixed placeholder input (a two-window transcript, two frames at 60 s and 120 s with one selection note, invented text — this repo is public). A skeleton also has to STATE the branches it took, or it silently shows half of each vertical: every row carries a `fixed:` line (`PromptMatrixSource.fixedAxes`) naming the axes the page pinned — YouTube windowed + frames + a noted frame + `selected` visual detail, Vimeo auto-captions + English + frames + a noted frame, the two short-video verticals a present transcript and present keyframes, the two text-article verticals author-and-url present, Anthropic the release framing with no linked-content rider. **No row is empty**, and there is one wording for the line: the short-video rows read "no branch" until 2026-09-09, which was true of their SYSTEM prompts and false of their user builders (`buildTikTokUserPrompt`/`buildXVideoUserPrompt` branch on an empty transcript and on an empty frame list). Only YouTube's user builder takes a visual-detail policy, so only its row and cell name one. The check in `prompt-matrix.test.ts` is ONE-DIRECTIONAL and worth reading as such: every DECLARED axis is verified against the composed prompt, and an axis a builder branches on that no row declares is invisible to it — the lists are maintained by hand from the branch points named in the comment above each row. The tints are the `--tok-*` ramp rather than `--status-*`: these spans are text on `--bg-inset`, the exact pair that ramp is tuned for in both themes, and the status colours failed AA on light (measured 2.74–4.45:1). Acceptance: `src/summaries/prompt-matrix.test.ts` and `e2e/summaries-prompts.spec.ts`.
+
+## The capture RE-RUN (`POST /api/summaries/rerun`)
+
+**A stored document, summarized again from its own `## Transcript` appendix —
+no download, no re-fetch.** The reader's entry point is the `↻ Re-run ▾` menu in
+the `/summaries` doc panel; the server half is
+`src/dashboard/routes/summaries-rerun.ts`, registered inside the `summaries`
+route group (so the `nais` drop is inherited) beside share, export and the
+prompt route, for the reason those have their own modules: an adapter over
+another layer, with every side-effecting seam injectable so its route tests need
+no huginn and no model call.
+
+**The source of truth is the RAW FILE.** huginn's document JSON `text` is a
+CLEANED copy — fenced code removed, images rewritten, a breadcrumb prepended —
+so a re-run built from it shrinks the document a little on every pass. It reads
+`GET /api/document/<c>/<id>?raw=1` (huginn #131) through
+`fetchKnowledgeApiText` (`src/ai/knowledge-api-client.ts`), which is
+`fetchKnowledgeApi`'s twin with the JSON parse taken out — a sibling and not a
+flag, because a caller that got a string back from the JSON function is one
+refactor away from reading `.documents` off it.
+
+**The split contract.** `src/summaries/transcript-split.ts` owns
+`splitTranscript` — the first level-2 `## Transcript` heading OUTSIDE fenced
+code, the export's own rule, moved when the re-run became its third server-side
+reader (`export.ts` re-exports it, and `scripts/eval-takeaway.ts`'s naive
+`indexOf` was replaced by it). The CLIENT keeps its copy inside
+`sum-article-library.ts`'s template literal, and `export.test.ts` still pins the
+two against shared fixtures. The appendix comes back TRIMMED: `appendTranscriptSection`
+and huginn's Vimeo `body_suffix` add their own separator and trailing newline, so
+re-appending an untrimmed one grows the file by a blank line on every pass.
+`transcriptIsWindowed` derives the windowed rider from the transcript's OWN
+`### [HH:MM:SS]` headings — never from anything the document claims — the same
+rule the YouTube capture applies to huginn's answer rather than to its frames
+decision.
+
+**The frontmatter re-send rule.** huginn's ingest takes no document id: it
+rewrites the whole file from the request body, keys the path on
+`<category>/<sanitized title>.md`, and forks a `(2)` sibling when the stored
+`url` differs. So a field left out is a field ERASED and a differing url is a
+shadow copy of the talk. The re-run therefore RE-SENDS every frontmatter field
+the vertical's ingest model accepts, `url` and `date` included, with only
+`summary_kind` changed — the per-vertical list is `frontmatterFields` in the
+route's own table (Vimeo's nine extras plus `duration_sec`; `vimeo_video_id` is
+DERIVED by huginn from the url and is deliberately absent, since it is no request
+field). `title` comes from the FILE NAME (no capture vertical writes a `title:`
+key, and `sanitize_filename` is idempotent, so a title read out of the path and
+posted back resolves to the same path) and `category` from the id's directory,
+both PINNED over the model's own `CATEGORY:` line with a log line when they
+disagree — either one moving is a second file rather than an edit.
+
+**`parseCaptureFrontmatter`, and why not `parseFrontmatter`.** The wiki store's
+parser answers `Record<string, string | string[]>`, which cannot tell huginn's
+BARE integer (`duration_sec: 3180`, written bare so the converter serves it as a
+number) from a quoted `"3180"` — re-sending the string writes
+`duration_sec: "3180"` on the next pass, a frontmatter diff on a run that is
+supposed to change one field. The re-run's reader keeps each value's RAW TEXT and
+decodes it the way huginn's `frontmatter_scalar` encodes it, and the test asserts
+`encode(decode(raw)) === raw` for EVERY value of a full Vimeo document.
+`StoredCapture` therefore carries TWO maps — `frontmatter` (decoded, what the
+route reads when it needs a value) and `frontmatterRaw` (the on-disk text, what
+the ingest body is built from) — because decoding twice is a wrong answer rather
+than a no-op: a quoted `caption_lang: "2026"` decodes to `2026`, and decoding
+THAT again makes it the NUMBER 2026, which huginn's `Optional[str]` model
+refuses. The decoded map can no longer tell a quoted numeral from a bare one.
+
+**The frames listing hazard.** `finishYouTubeSummary` strips every quote of a
+frame that is NOT in the list it is handed, so an incomplete listing silently
+narrows what the re-summary may show. `listKeptFrames` therefore lists the WHOLE
+kept-frames directory (`~/.muninn/frames/<source>/<id>/`, seconds from the file
+names, `note: ""` — no selection notes survive a capture), and that same list
+goes to the user-prompt builder and to the tail. The write is UNION-ONLY: nothing
+in this path prunes or overwrites that directory, since `removeKeptFrames` is
+document-delete's. A connector that cannot read files is refused with **503
+`frames_unsupported`** before a job exists (the TikTok/YouTube precedent) rather
+than producing a re-run whose slides quietly vanish.
+
+**The same-path copy guard.** On a capture the frames live in a dying work dir,
+so source and destination always differ; on a re-run `framesRoot` IS where they
+live and `frame.path` IS the destination. `copyKeptFrame`
+(`src/summaries/frames.ts`) skips the copy when the two RESOLVE to one path —
+`copyFile(p, p)` is measured harmless on macOS/Bun and is unproven on Linux,
+where the plausible failure is a truncate-then-write that destroys the only copy
+of the frame. It is its own exported function with an injectable copy BECAUSE the
+guard is invisible from the filesystem here: without the seam, a test of the
+same-path case passes whether the guard is there or not.
+
+**The vertical's own builders and its own tail, and its own JOB.** The prompts
+come from `src/<vertical>/prompt.ts` and the post-model tail from
+`src/<vertical>/finish.ts` — never re-implemented (CAPPED item 2). The job is
+created in the SOURCE vertical's store flagged `rerun: true` (a field on the
+shared `BaseJob`, because the X-article store is shared between text captures and
+video ones so no identity field can tell them apart), so it streams over that
+vertical's existing `<apiBase>/stream/:jobId` seam and shows up on the shelf and
+on `/agents` like any capture. On its `complete` the doc panel reloads the body.
+`runCaptureOneShot` is handed the STORED url, so the prompt snapshot lands under
+the key `GET /api/summaries/prompt?url=` already reads — one row per document,
+not one per run.
+
+**`recentIngests` is told through a seam** (`src/summaries/recent-ingests.ts`):
+each route registration hands over the `rememberIngest` it already has, and the
+re-run calls it by source name after a successful ingest. Without it a paste of
+the same video right after a re-run is captured a SECOND time, and on YouTube
+that forks a shadow copy rather than only doubling the spend. Both verticals'
+`rememberIngest` became DELETE-then-set with this PR: their old comment
+enumerated why the key could never already be present, and a re-run breaks every
+clause of that enumeration.
+
+**No source draft.** A capture fires one from its summarizer; the re-run calls no
+summarizer, and drafting a second wiki proposal for a document that already has
+one is a duplicate the gate has to reject by hand. Pinned in the e2e by the model
+call COUNT (exactly one for a whole re-run), which a drafter would double.
+
+**`full: true` answers 501 on every vertical**, and the menu renders the item
+disabled with the reason. The obvious implementation is unreachable by
+construction — every vertical's own `POST /summarize` answers `duplicate` for a
+document that exists, which a re-run's target always is — and calling the
+summarizer function directly gets past that and past the title/category pin as
+well, so a model that re-picked a different category would write a SECOND file.

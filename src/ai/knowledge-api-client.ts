@@ -61,6 +61,54 @@ export async function fetchKnowledgeApi(
 }
 
 /**
+ * The same fetch as {@link fetchKnowledgeApi} — same timeout, same 502/503
+ * mapping — for an endpoint that answers with TEXT rather than JSON.
+ *
+ * It exists for huginn's `GET /api/document/<c>/<id>?raw=1` (huginn #131),
+ * which serves a capture's source file as `text/markdown`. That body is what
+ * the capture re-run splits at `## Transcript`, and it MUST NOT be parsed: the
+ * JSON form is a cleaned copy (fences removed, images rewritten, a breadcrumb
+ * prepended), so a re-run built from it shrinks the document a little on every
+ * pass.
+ *
+ * Deliberately a sibling rather than an option on `fetchKnowledgeApi`: that
+ * function's contract is "parsed JSON", and a caller that got a string back
+ * from it because of a flag is one refactor away from a `.documents` read on a
+ * string.
+ */
+export async function fetchKnowledgeApiText(
+  baseUrl: string,
+  path: string,
+  options?: {
+    timeoutMs?: number;
+    method?: string;
+    body?: string;
+    headers?: Record<string, string>;
+  },
+): Promise<string> {
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const fetchOptions: RequestInit = { signal: controller.signal };
+    if (options?.method) fetchOptions.method = options.method;
+    if (options?.body) fetchOptions.body = options.body;
+    if (options?.headers) fetchOptions.headers = options.headers;
+
+    const res = await fetch(`${baseUrl}${path}`, fetchOptions);
+    clearTimeout(timeout);
+    if (!res.ok) {
+      throw new KnowledgeApiError("API returned " + res.status, 502, res.status);
+    }
+    return await res.text();
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err instanceof KnowledgeApiError) throw err;
+    throw new KnowledgeApiError("Knowledge API unreachable", 503);
+  }
+}
+
+/**
  * Hono handler helper: fetches from the Knowledge API and returns a JSON response.
  * On success returns the API's JSON with status 200.
  * On upstream error returns `{ error: "API returned <status>" }` with status 502.

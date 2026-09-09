@@ -496,6 +496,33 @@ export function referencedFrameSeconds(summary: string, source: FrameSource, id:
  * pass that decided what may be served and the copy that serves it cannot
  * disagree. Without one the summary is parsed, which is every other caller.
  */
+/**
+ * What {@link keepReferencedFrames} does with ONE frame: copy it to the served
+ * root, or — when it is already exactly there — leave it alone.
+ *
+ * **A frame already AT its destination is kept, not copied.** Every CAPTURE
+ * hands frames over in a dying work dir, so source and destination always
+ * differ there; the capture RE-RUN lists the frames the first capture already
+ * kept, i.e. the root IS where they live and `src` IS `dest`. `copyFile(p, p)`
+ * is measured harmless on macOS/Bun (resolves, file intact) and is unproven on
+ * Linux — POSIX leaves a self-copy undefined and the plausible failure is a
+ * truncate-then-write that destroys the only copy of the frame. Compared on the
+ * RESOLVED paths, so a listing built from a differently-spelled root still
+ * matches.
+ *
+ * Its own exported function, with the copy injectable, because the guard is
+ * INVISIBLE from the filesystem on the platform this is developed on: without a
+ * seam, a test of the same-path case passes whether the guard is there or not.
+ */
+export async function copyKeptFrame(
+  src: string,
+  dest: string,
+  copy: (from: string, to: string) => Promise<void> = copyFile,
+): Promise<void> {
+  if (resolve(src) === resolve(dest)) return;
+  await copy(src, dest);
+}
+
 export async function keepReferencedFrames(
   summary: string,
   source: FrameSource,
@@ -525,7 +552,7 @@ export async function keepReferencedFrames(
       continue;
     }
     try {
-      await copyFile(frame.path, join(dir, `${sec}.jpg`));
+      await copyKeptFrame(frame.path, join(dir, `${sec}.jpg`));
     } catch (err) {
       log.warn("Could not keep frame {sec}.jpg of {source} {id} ({error}) — its reference is dropped instead", {
         source: source.name,

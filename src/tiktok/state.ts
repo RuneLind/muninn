@@ -47,8 +47,14 @@ export const {
   subscribe,
 } = store;
 
-export function createJob(videoId: string, title: string, url: string): string {
-  const id = store.createJob({ videoId, title, url });
+export function createJob(
+  videoId: string,
+  title: string,
+  url: string,
+  /** `{rerun: true}` from `POST /api/summaries/rerun` — see `BaseJob.rerun`. */
+  opts: { rerun?: boolean } = {},
+): string {
+  const id = store.createJob({ videoId, title, url, ...(opts.rerun ? { rerun: true } : {}) });
   log.info("Created TikTok job {jobId} for video {videoId}", { jobId: id, videoId });
   return id;
 }

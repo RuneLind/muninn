@@ -1,5 +1,10 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { docPanelHtml, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
+import {
+  tracesPromptModalStyles,
+  tracesPromptModalHtml,
+  tracesPromptModalScript,
+} from "./components/traces-prompt-modal.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { clientSourcesJson } from "../../summaries/sources.ts";
 import { resolveSummariesDeleteTarget } from "../../summaries/delete-target.ts";
@@ -130,6 +135,13 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     .wiki-share-scrim { z-index: 1001; }
     .wiki-share { z-index: 1002; }
 
+    /* The prompt-snapshot modal the ↻ Re-run menu's "Show prompt" opens. Same
+       two rules as the share dialog above: its CSS is rendered server-side, and
+       it ships z-index 1000 for /traces (which has no overlay) so it has to be
+       raised above the doc panel it opens over. */
+    ${tracesPromptModalStyles()}
+    .prompt-modal-backdrop { z-index: 1003; }
+
     /* Page head: title + live presence + the collapsed paste-article affordance. */
     .sum-page-head {
       display: flex;
@@ -248,7 +260,8 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     </div>
   </div>
 
-  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null, exportPage: true })}
+  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null, exportPage: true, rerun: true })}
+  ${tracesPromptModalHtml()}
 
   ${MARKED_CDN_SCRIPT}
   <!-- Publishes openShareDialog/closeShareDialog on globalThis. Loaded BEFORE
@@ -277,6 +290,9 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     ${sumCandidatesScript()}
     ${sumShelfScript()}
     ${sumArticleLibraryScript()}
+    // AFTER the library's own Escape listener, deliberately: that one returns
+    // early while this modal is visible, so this listener is what closes it.
+    ${tracesPromptModalScript()}
     ${sumOutcomesScript()}
     ${sumStatsScript()}
     ${sumSubmitFormScript()}

@@ -23,6 +23,7 @@ import {
 import { youtubeWatchUrl } from "../../youtube/frames.ts";
 import { youtubeCaptureKinds } from "../../youtube/kinds.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
+import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
 
 const log = getLog("dashboard");
 
@@ -236,13 +237,16 @@ export function registerYouTubeRoutes(
   const recentIngests = new Map<string, YouTubeRecentIngest>();
 
   function rememberIngest(videoId: string, documentId: string, existingUrl: string): void {
-    // A plain `set`, and that is only correct because this key is NEVER already
-    // present — `Map.set` on an existing key keeps its ORIGINAL insertion
-    // position, so a re-insert would age wrongly under the eviction below.
-    // Enumerated: this runs only from the ingest hook of a capture, a capture
-    // starts only past `recentIngest(videoId)` returning null (which DELETES an
-    // entry it found expired), and `inFlight` admits one capture per video at a
-    // time.
+    // DELETE then set, the `rememberDelete` shape. It used to be a plain `set`,
+    // and the comment there enumerated why the key could never already be
+    // present: a capture starts only past `recentIngest(videoId)` returning null
+    // (which drops an expired entry) and `inFlight` admits one capture per video
+    // at a time. The capture RE-RUN breaks that enumeration — it re-ingests a
+    // document this process may have captured minutes ago, and it takes no
+    // in-flight claim — and `Map.set` on an existing key keeps its ORIGINAL
+    // insertion position, so the refreshed entry would age out first under the
+    // insertion-ordered eviction below.
+    recentIngests.delete(videoId);
     recentIngests.set(videoId, { documentId, existingUrl, at: now() });
     // The listing's row under this id is a real document again.
     recentDeletes.delete(documentId);
@@ -252,6 +256,13 @@ export function registerYouTubeRoutes(
       recentIngests.delete(oldest.value);
     }
   }
+
+  // The capture RE-RUN ingests without going through `summarizeVideo`'s
+  // `onIngested` hook, so it announces its document here instead — the map is
+  // closure-private and this registration is the only way in. Never
+  // unsubscribed, exactly like the delete listener below and for the same
+  // reason: a registration lives as long as the process.
+  registerRecentIngestSink("youtube", rememberIngest);
 
   // The one invalidation the map has: a `/summaries` Delete goes through
   // `backlog-doc-delete`, which announces the document AFTER huginn confirmed

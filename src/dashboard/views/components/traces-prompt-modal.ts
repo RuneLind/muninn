@@ -371,9 +371,44 @@ export function tracesPromptModalScript(): string {
       }
     }
 
+    /**
+     * Paint a snapshot the CALLER already has — no fetch, no waterfall, no
+     * trace id.
+     *
+     * The /summaries doc panel's "Show prompt" fetches
+     * \`GET /api/summaries/prompt?url=\` (which finds the row by DOCUMENT, since
+     * a capture's trace is swept long before its snapshot) and hands the body
+     * here, so the two surfaces render one modal and not two. Its cache key is
+     * the document's own url, namespaced away from the "<traceId>|<pass>" keys
+     * so the two cannot collide.
+     */
+    function showPromptSnapshot(data, key) {
+      const backdrop = document.getElementById('promptModalBackdrop');
+      const contentEl = document.getElementById('promptContent');
+      const passLabel = document.getElementById('promptPassLabel');
+      if (!backdrop || !contentEl) return;
+      const cacheKey = 'doc|' + (key || '');
+      promptCache[cacheKey] = data;
+      activePromptKey = cacheKey;
+      activePromptTab = 'user';
+      document.getElementById('tabSystem').classList.remove('active');
+      document.getElementById('tabUser').classList.add('active');
+      renderPromptStats();
+      if (passLabel) passLabel.textContent = passLabelText(data.pass);
+      document.getElementById('systemCharCount').textContent = '(' + fmtCharCount(data.systemPrompt.length) + ')';
+      document.getElementById('userCharCount').textContent = '(' + fmtCharCount(data.userPrompt.length) + ')';
+      backdrop.classList.add('visible');
+      renderPromptTab(data);
+    }
+
     function renderPromptStats() {
       const el = document.getElementById('promptStats');
       if (!el) return;
+      // The stats row is derived from the TRACE's own \`prompt_build\` span, which
+      // only the /traces page has. On a page that mounts this modal without a
+      // waterfall (the /summaries doc panel) there is no such global at all, and
+      // a bare read would throw a ReferenceError before the prompt ever painted.
+      if (typeof waterfallSpans === 'undefined' || !Array.isArray(waterfallSpans)) { el.innerHTML = ''; return; }
       const buildSpan = waterfallSpans.find(function(s) { return s.name === 'prompt_build'; });
       if (!buildSpan || !buildSpan.attributes) { el.innerHTML = ''; return; }
       var a = buildSpan.attributes;

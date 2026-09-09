@@ -39,6 +39,12 @@ import {
   parseFrameAddress,
   type FrameSource,
 } from "./frames.ts";
+// The split and its fence walk moved to `./transcript-split.ts` when the capture
+// re-run became their third server-side reader. Re-exported here because
+// `export.test.ts` (and the client-parity fixtures it pins) address them at this
+// module — the behaviour is unchanged, the declaration site is not.
+import { mapProseLines, splitTranscript } from "./transcript-split.ts";
+export { splitTranscript };
 
 /** The folder the page's `<img>`s point into, beside `index.html` in the archive. */
 export const EXPORT_FRAMES_DIR = "frames";
@@ -127,37 +133,6 @@ export function rewriteFrameUrls(
 }
 
 /**
- * Apply `fn` to every line OUTSIDE a fenced code block. A fence is closed only
- * by its own marker character with at least the opening length — the client's
- * rule, kept because pairing ``` and ~~~ interchangeably linked inside a block
- * and de-linked everything after it.
- *
- * Only the two Vimeo transforms use this, and deliberately: what they promise
- * is PARITY with the client's own copies, which are fence-aware and nothing
- * else, so widening the region set here would break the property the fixtures
- * pin. The frame quote finder and rewrite read {@link markdownCodeRegions}
- * instead — they promise agreement with the pass and the copy, not with a
- * browser.
- */
-function mapProseLines(markdown: string, fn: (line: string, i: number) => string): string {
-  let fence: string | null = null;
-  return markdown.split("\n").map((line, i) => {
-    const m = /^\s*(`{3,}|~{3,})/.exec(line);
-    if (m) {
-      if (fence === null) {
-        fence = m[1]!;
-        return line;
-      }
-      if (m[1]!.charAt(0) === fence.charAt(0) && m[1]!.length >= fence.length) {
-        fence = null;
-        return line;
-      }
-    }
-    return fence === null ? fn(line, i) : line;
-  }).join("\n");
-}
-
-/**
  * Every `[HH:MM:SS]` / `[MM:SS]` outside fenced code and not already a link
  * label → `[\[HH:MM:SS\]](https://vimeo.com/<id>#t=<sec>s)`. No id ⇒ untouched.
  * The port of the article view's transform, byte-for-byte in its output.
@@ -184,21 +159,6 @@ export function linkVimeoTimestamps(markdown: string, videoUrl: string | undefin
       return `[\\[${whole.slice(1, -1)}\\]](${base}${sec}s)`;
     }),
   );
-}
-
-/**
- * Split at the first level-2 `## Transcript` heading outside fenced code: the
- * summary before it, the transcript after. No heading ⇒ transcript is `null`.
- */
-export function splitTranscript(markdown: string): { body: string; transcript: string | null } {
-  let at = -1;
-  mapProseLines(markdown, (line, i) => {
-    if (at === -1 && /^## Transcript\s*$/.test(line)) at = i;
-    return line;
-  });
-  if (at === -1) return { body: markdown, transcript: null };
-  const lines = markdown.split("\n");
-  return { body: lines.slice(0, at).join("\n"), transcript: lines.slice(at + 1).join("\n") };
 }
 
 /**

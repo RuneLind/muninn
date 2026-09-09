@@ -13,7 +13,17 @@
  * each doc carries its `source` so opens/similar/original-link route to the right
  * collection (SOURCES[source].apiBase). */
 
-import { docPanelStyles, DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID, DOC_PANEL_EXPORT_LINK_ID } from "./doc-panel.ts";
+import {
+  docPanelStyles,
+  DOC_PANEL_SHARE_BTN_ID,
+  DOC_PANEL_DELETE_BTN_ID,
+  DOC_PANEL_EXPORT_LINK_ID,
+  DOC_PANEL_RERUN_WRAP_ID,
+  DOC_PANEL_RERUN_BTN_ID,
+  DOC_PANEL_RERUN_MENU_ID,
+  DOC_PANEL_RERUN_STATUS_ID,
+} from "./doc-panel.ts";
+import { RERUN_SOURCES } from "../../../summaries/rerun-sources.ts";
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
 
 /** The whole /summaries share target as a browser expression — URLs, surface
@@ -381,6 +391,14 @@ export function sumArticleLibraryScript(): string {
       // page load and the dialog's lazily on first open, so ours runs first: the
       // guard is what actually holds today.)
       if (document.getElementById('${SHARE_DIALOG_ID}')) return;
+      // The re-run menu and the prompt modal are both dismissed by Escape
+      // before the panel is: closing the panel out from under either one takes
+      // away the thing the reader was reading. The prompt modal has its own
+      // document-level Escape listener (traces-prompt-modal.ts) and this one is
+      // wired first, so returning here lets that one run.
+      var promptBackdrop = document.getElementById('promptModalBackdrop');
+      if (promptBackdrop && promptBackdrop.classList.contains('visible')) return;
+      if (rerunMenuOpen()) { closeRerunMenu(); return; }
       if (document.getElementById('docOverlay').classList.contains('visible')) {
         closeDocPanel();
       }
@@ -449,6 +467,264 @@ export function sumArticleLibraryScript(): string {
       });
       var notice = document.getElementById('deleteNotice');
       if (notice) notice.addEventListener('click', function() { notice.classList.remove('visible'); });
+    })();
+
+    // --- ↻ Re-run ▾ (opt-in: docPanelHtml({rerun:true}), /summaries only).
+    // Re-summarizes the OPEN document from the '## Transcript' appendix it
+    // (no backticks in this string: it lives inside a template literal)
+    // stored — no download, no re-fetch. Everything the menu needs beyond
+    // {source, docId} is a property of the FILE (is there a transcript at all,
+    // which kind wrote it, how many slides survived), so it comes from ONE
+    // fetch of /api/summaries/rerun/options rather than from four guesses here.
+    var RERUN_SOURCES = ${JSON.stringify(RERUN_SOURCES)};
+    var _rerunOpts = null;    // the options payload for the doc in the panel
+    var _rerunFor = null;     // '<source>|<docId>' those options describe
+    var _rerunStream = null;  // the panel's OWN stream on a running re-run
+    var _rerunBusy = false;
+
+    function rerunSupported(source) { return RERUN_SOURCES.indexOf(source) !== -1; }
+
+    /** The line under the panel header. The menu closes on the click that
+     *  starts a run and the shelf's job card sits BEHIND this overlay, so this
+     *  is the only progress the reader can see while the panel is open. */
+    function setRerunStatus(text, tone) {
+      var el = document.getElementById('${DOC_PANEL_RERUN_STATUS_ID}');
+      if (!el) return;
+      el.classList.toggle('err', tone === 'err');
+      if (!text) { el.hidden = true; el.textContent = ''; return; }
+      el.textContent = text;
+      el.hidden = false;
+    }
+
+    function rerunMenuEl() { return document.getElementById('${DOC_PANEL_RERUN_MENU_ID}'); }
+    function rerunMenuOpen() { var p = rerunMenuEl(); return !!p && !p.hidden; }
+    function closeRerunMenu() {
+      var pop = rerunMenuEl();
+      if (pop) pop.hidden = true;
+      var btn = document.getElementById('${DOC_PANEL_RERUN_BTN_ID}');
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    }
+
+    /** Called from openSummaryDoc: the panel is being retargeted, so the cached
+     *  options, the menu, the status line and any stream belong to a document
+     *  that is no longer on screen. */
+    function resetRerunControl(source) {
+      _rerunOpts = null;
+      _rerunFor = null;
+      _rerunBusy = false;
+      if (_rerunStream) { _rerunStream.close(); _rerunStream = null; }
+      closeRerunMenu();
+      setRerunStatus('');
+      var wrap = document.getElementById('${DOC_PANEL_RERUN_WRAP_ID}');
+      if (wrap) wrap.hidden = !(_shareDoc && rerunSupported(source));
+    }
+
+    function rerunMenuItem(label, onClick, opts) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'doc-panel-menu-item';
+      b.setAttribute('role', 'menuitem');
+      // textContent, never innerHTML: every label here is server text (a
+      // preset's own label) and the panel is an operator surface.
+      b.textContent = label;
+      if (opts && opts.title) b.title = opts.title;
+      if (opts && opts.disabled) b.disabled = true;
+      b.addEventListener('click', function() { if (!b.disabled) onClick(); });
+      return b;
+    }
+    function rerunMenuNote(text) {
+      var d = document.createElement('div');
+      d.className = 'doc-panel-menu-note';
+      d.textContent = text;
+      return d;
+    }
+    function rerunMenuRule() {
+      var d = document.createElement('div');
+      d.className = 'doc-panel-menu-rule';
+      return d;
+    }
+
+    function renderRerunMenu(opts) {
+      var pop = rerunMenuEl();
+      if (!pop) return;
+      pop.textContent = '';
+      var noTranscript = !opts.hasTranscript;
+      var vd = opts.storedVisualDetail;
+      pop.appendChild(rerunMenuItem('Same settings again', function() {
+        startRerun({});
+      }, { disabled: noTranscript || _rerunBusy }));
+      (opts.kinds || []).forEach(function(k) {
+        // The stored kind IS "Same settings again"; offering it twice reads as
+        // two different actions.
+        if (k.id === opts.storedKind) return;
+        pop.appendChild(rerunMenuItem('As ' + k.label, function() {
+          startRerun({ kind: k.id });
+        }, { disabled: noTranscript || _rerunBusy }));
+      });
+      pop.appendChild(rerunMenuRule());
+      var fullOk = !!(opts.full && opts.full.supported);
+      pop.appendChild(rerunMenuItem('Full re-fetch — download the source again', function() {
+        if (!window.confirm('Download and re-process the source again?\\n\\nThis re-runs the whole capture: the download, the transcription and the frame extraction, which costs minutes of machine time and a full model call.')) return;
+        startRerun({ full: true });
+      }, { disabled: !fullOk, title: fullOk ? '' : ((opts.full && opts.full.reason) || '') }));
+      pop.appendChild(rerunMenuItem('Show prompt', showRerunPrompt, {}));
+      if (noTranscript) {
+        pop.appendChild(rerunMenuNote('This summary stored no transcript, so it can only be re-run by downloading the source again.'));
+      } else {
+        pop.appendChild(rerunMenuNote(opts.framesKept > 0
+          ? 'No media is re-fetched: only the ' + opts.framesKept + ' frame(s) the previous summary quoted are available, and the selection pass’s notes about them are not — the result can differ for those reasons alone.'
+          : 'No media is re-fetched: this runs on the stored transcript alone, so the result can differ for that reason alone.'));
+        if (opts.truncated) {
+          pop.appendChild(rerunMenuNote('The transcript was truncated at capture, so the tail of the talk is not in the document and cannot be summarized from it.'));
+        }
+        if (vd) pop.appendChild(rerunMenuNote('Visual detail: ' + vd + ' (as stored).'));
+      }
+      if (!fullOk && opts.full && opts.full.reason) pop.appendChild(rerunMenuNote(opts.full.reason));
+    }
+
+    async function openRerunMenu() {
+      var pop = rerunMenuEl();
+      var btn = document.getElementById('${DOC_PANEL_RERUN_BTN_ID}');
+      if (!pop || !_shareDoc) return;
+      pop.hidden = false;
+      if (btn) btn.setAttribute('aria-expanded', 'true');
+      var key = _shareDoc.source + '|' + _shareDoc.docId;
+      if (_rerunOpts && _rerunFor === key) { renderRerunMenu(_rerunOpts); return; }
+      pop.textContent = '';
+      pop.appendChild(rerunMenuNote('Loading…'));
+      var doc = _shareDoc;
+      try {
+        var res = await fetch('/api/summaries/rerun/options?source=' + encodeURIComponent(doc.source) +
+          '&docId=' + encodeURIComponent(doc.docId));
+        var data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        // Superseded: the reader retargeted the panel while this was in flight.
+        if (!_shareDoc || (_shareDoc.source + '|' + _shareDoc.docId) !== key) return;
+        _rerunOpts = data;
+        _rerunFor = key;
+        renderRerunMenu(data);
+      } catch (err) {
+        if (!_shareDoc || (_shareDoc.source + '|' + _shareDoc.docId) !== key) return;
+        pop.textContent = '';
+        pop.appendChild(rerunMenuNote('Could not read this document: ' + err.message));
+      }
+    }
+
+    function startRerun(extra) {
+      if (_rerunBusy || !_shareDoc) return;
+      var doc = _shareDoc;
+      var body = { source: doc.source, docId: doc.docId };
+      if (extra.kind) body.kind = extra.kind;
+      if (extra.full) body.full = true;
+      // Visual detail is orthogonal to the kind, so every re-run carries the
+      // stored one — the axis a document cannot state is the one the reader
+      // would silently lose.
+      if (_rerunOpts && _rerunOpts.storedVisualDetail && !extra.full) body.visual_detail = _rerunOpts.storedVisualDetail;
+      _rerunBusy = true;
+      closeRerunMenu();
+      setRerunStatus('Re-running…');
+      fetch('/api/summaries/rerun', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(async function(res) {
+        var data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        return data;
+      }).then(function(data) {
+        // The shelf's own job card, so the run is visible once the panel is
+        // closed; the panel gets its own stream below, because this overlay
+        // covers that card entirely.
+        if (typeof showJob === 'function') showJob(data.job_id, doc.title, '', doc.source);
+        if (typeof connectSSE === 'function') connectSSE(data.job_id, doc.source);
+        watchRerunJob(data.job_id, doc);
+      }).catch(function(err) {
+        _rerunBusy = false;
+        setRerunStatus(err.message, 'err');
+      });
+    }
+
+    function watchRerunJob(jobId, doc) {
+      if (_rerunStream) { _rerunStream.close(); _rerunStream = null; }
+      if (typeof sseClient !== 'function') return;
+      _rerunStream = sseClient(docApiBase(doc.source) + '/stream/' + jobId, {
+        status: function(e) {
+          try {
+            var d = JSON.parse(e.data);
+            setRerunStatus('Re-running — ' + String(d.status).replace(/_/g, ' ') + '…');
+          } catch (err) {}
+        },
+        complete: function() {
+          if (_rerunStream) { _rerunStream.close(); _rerunStream = null; }
+          _rerunBusy = false;
+          // Reload the panel body from the freshly written document. The url
+          // argument is empty on purpose: openSummaryDoc reads the stored
+          // document's own url out of the fetch, which is the ?doc= deep-link
+          // path's rule too.
+          openSummaryDoc(doc.docId, '', doc.source);
+          setRerunStatus('Re-run finished — the summary below is the new one.');
+        },
+        error: function(e) {
+          if (_rerunStream) { _rerunStream.close(); _rerunStream = null; }
+          _rerunBusy = false;
+          var message = 'The re-run failed.';
+          if (e && e.data) { try { message = JSON.parse(e.data).message || message; } catch (err) {} }
+          setRerunStatus(message, 'err');
+        },
+      });
+    }
+
+    /** "Show prompt": the snapshot the capture's summary pass stored, found by
+     *  the DOCUMENT's url (a capture's trace is swept long before its snapshot),
+     *  rendered in the shared prompt modal rather than a second copy of it. */
+    function showRerunPrompt() {
+      if (!_rerunOpts || !_rerunOpts.promptUrl) return;
+      closeRerunMenu();
+      setRerunStatus('Loading the prompt…');
+      fetch('/api/summaries/prompt?url=' + encodeURIComponent(_rerunOpts.promptUrl))
+        .then(async function(res) {
+          if (res.status === 404) return { missing: true };
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        })
+        .then(function(data) {
+          if (data && data.missing) { setRerunStatus('No snapshot for this document.'); return; }
+          if (typeof showPromptSnapshot !== 'function') {
+            setRerunStatus('The prompt viewer is not loaded on this page.', 'err');
+            return;
+          }
+          showPromptSnapshot(data, _rerunOpts.promptUrl);
+          var el = document.getElementById('${DOC_PANEL_RERUN_STATUS_ID}');
+          var when = new Date(data.createdAt).toLocaleString();
+          if (el && data.traceExists) {
+            el.classList.remove('err');
+            el.innerHTML = 'Prompt captured ' + esc(when) +
+              ' — <a href="/traces#' + encodeURIComponent(data.traceId) + '/prompt/' +
+              encodeURIComponent(data.pass) + '" target="_blank" rel="noopener">waterfall ↗</a>';
+            el.hidden = false;
+          } else {
+            setRerunStatus('Prompt captured ' + when + ' — its trace has been swept, so there is no waterfall to open.');
+          }
+        })
+        .catch(function(err) {
+          setRerunStatus('Could not load the prompt: ' + err.message, 'err');
+        });
+    }
+
+    (function() {
+      var btn = document.getElementById('${DOC_PANEL_RERUN_BTN_ID}');
+      if (!btn) return;
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        if (rerunMenuOpen()) closeRerunMenu(); else openRerunMenu();
+      });
+      // Click-away. Scoped to the panel's own overlay so a click on the page
+      // behind it (which the overlay swallows anyway) is not a second path.
+      document.addEventListener('click', function(e) {
+        if (!rerunMenuOpen()) return;
+        var pop = rerunMenuEl();
+        if (pop && !pop.contains(e.target) && e.target !== btn) closeRerunMenu();
+      });
     })();
 
     function showDeleteNotice(text, tone) {
@@ -825,6 +1101,11 @@ export function sumArticleLibraryScript(): string {
           : '#';
       }
       if (typeof closeShareDialogOnNavigate === 'function') closeShareDialogOnNavigate(docId);
+      // The ↻ Re-run control belongs to the doc the panel is SHOWING: its
+      // options describe that file, and a stream still running belongs to the
+      // job that was started from it. Reset unconditionally, then reveal the
+      // control only for a registered source the re-run route can serve.
+      resetRerunControl(source);
 
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');

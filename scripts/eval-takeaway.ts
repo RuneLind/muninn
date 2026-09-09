@@ -37,6 +37,7 @@ import { captureBotConfigFor, captureThinkingFor, findCapturePreset, resolveCapt
 import { SUMMARY_STRUCTURE_BULLETS } from "../src/summaries/summary-structure.ts";
 import { CAPTURE_THINKING_MAX_TOKENS } from "../src/summaries/summarizer-shared.ts";
 import { groundTakeaway, splitClosingTakeaway } from "../src/summaries/takeaway-check.ts";
+import { splitTranscript } from "../src/summaries/transcript-split.ts";
 
 const OLD_CLOSER =
   "- End with a closing blockquote takeaway: `> 💬 **Takeaway:** …` — the 1–3 most surprising or headline revelations, distilled into one or two punchy sentences.";
@@ -83,12 +84,20 @@ async function loadDocument(): Promise<{ title: string; url: string; text: strin
   return { title: docId.replace(/^.*\//, "").replace(/\.md$/, ""), url: doc.url ?? "", text: doc.text };
 }
 
+/**
+ * The stored document's two halves. The split itself is the shared, fence-aware
+ * {@link splitTranscript} — the same rule the export page and the capture re-run
+ * read, so this script cannot regenerate from a boundary the product does not
+ * use. The naive `indexOf` it replaced took a `## Transcript` line quoted inside
+ * a fenced code block as the boundary.
+ *
+ * The breadcrumb strip stays here: it is huginn's JSON `text` form that carries
+ * one (`[collection > path]`), and this script reads that form.
+ */
 function splitStored(text: string): { body: string; transcript: string } {
-  const i = text.indexOf("\n## Transcript");
-  if (i < 0) return { body: text, transcript: "" };
-  const body = text.slice(0, i).replace(/^\[[^\]]*\]\n\n/, "");
-  const transcript = text.slice(i + "\n## Transcript".length).trim();
-  return { body, transcript };
+  const parts = splitTranscript(text);
+  const body = parts.body.replace(/^\[[^\]]*\]\n\n/, "");
+  return { body, transcript: (parts.transcript ?? "").trim() };
 }
 
 const call = checkModel
