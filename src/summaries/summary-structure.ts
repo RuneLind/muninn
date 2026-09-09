@@ -10,7 +10,17 @@
 
 /**
  * Shared structured-summary rules used by every capture vertical (youtube /
- * x-article / anthropic / article via `buildSummarySystemPrompt` in `summarizer-shared.ts`, and tiktok inline).
+ * vimeo / x-article / tiktok / x-video / anthropic / article).
+ *
+ * Every one of them reaches these bullets through `summarySystemPromptPieces`
+ * (`./prompt-pieces.ts`) — the PIECES, not the joined string: each vertical
+ * exposes a `…Pieces` function so `/summaries/prompts` can tint the composed
+ * prompt by the part that produced each line, and its `build…` builder is
+ * `joinPromptPieces` over it. `buildSummarySystemPrompt` in
+ * `summarizer-shared.ts` is that same join and has no production caller left;
+ * it survives as the tests' change-detector. The two short-video verticals
+ * reach the bullets through the envelope's `before`/`after` slots, which is
+ * what replaced their hand-rolled numbering.
  *
  * The contract is deliberately uniform so stored summaries read consistently on
  * /summaries AND make clean drafter input downstream: one italic ingress line

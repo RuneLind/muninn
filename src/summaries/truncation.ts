@@ -63,9 +63,11 @@ export function headWithinBytes(text: string, maxBytes: number): string {
  *
  * The plain byte-budget capper, for text with no window structure to respect —
  * a stored prompt, which is a system-prompt scaffold with a transcript pasted
- * into the middle of it. `capTranscriptWindows` (in `src/youtube/frames.ts`) is
- * the window-aware version and stays there, because only the ingest body it
- * builds has windows to keep whole.
+ * into the middle of it, and (since the short-video merge) a FLAT whisper
+ * transcript on its way into a `## Transcript` section. `capTranscriptWindows`
+ * (in `src/summaries/transcript-appendix.ts`, beside its flat sibling
+ * `capFlatTranscript`, which is this function wrapped) is the window-aware
+ * version, for a transcript huginn already cut into `### [HH:MM:SS]` buckets.
  *
  * ⚠️ **It deliberately does NOT call `headWithinBytes`.** That function's window
  * rule — "a budget that does not reach past the first line has no head to show"

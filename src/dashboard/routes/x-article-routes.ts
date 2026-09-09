@@ -6,17 +6,28 @@ import { summarizeArticle } from "../../x-article/summarizer.ts";
 import { summarizeXVideo } from "../../x-article/video.ts";
 import { extractXStatusId } from "../../video/media.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
-import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
 import { applyCors, corsHeaders } from "../../auth/cors.ts";
+import {
+  shortVideoCaptureBlocker,
+  shortVideoCaptureKinds,
+} from "../../video/short-video-kinds.ts";
+import {
+  DEFAULT_CAPTURE_KIND,
+  capturePresetOptions,
+  findCapturePreset,
+} from "../../summaries/presets.ts";
 
 const log = getLog("dashboard");
 
 // Single source of truth for the collection name lives in the registry.
 const XA_SOURCE = getSummarySource("x-article")!;
 const XA_COLLECTION = XA_SOURCE.collection;
+
+/** This vertical's word for the frames in the capture-blocked sentence. */
+const XV_FRAME_NOUN = "video frames";
 
 interface XaDocumentMeta { id: string; url?: string }
 
@@ -138,10 +149,43 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
     });
   });
 
+  /**
+   * The kinds this instance offers for an X VIDEO capture — the short-video
+   * set, the same resolution `/api/x-articles/summarize-video` validates
+   * against, and the same payload shape `/api/tiktok/options` answers. Named
+   * `video-options` because the sibling POST on this base is the TEXT path,
+   * which has no kind picker.
+   *
+   * `applyCors` and no preflight, for the reasons the TikTok twin states — and
+   * `capture` beside `frames` for the reason it states too.
+   */
+  app.get("/api/x-articles/video-options", (c) => {
+    applyCors(c);
+    const summarizerBot = resolveSummarizerBot(discoverAllBots());
+    if (!summarizerBot) {
+      return c.json({ error: "No bots configured", code: "no_bot" }, 500);
+    }
+    const blocker = shortVideoCaptureBlocker(summarizerBot, XV_FRAME_NOUN);
+    return c.json({
+      kinds: capturePresetOptions(shortVideoCaptureKinds(summarizerBot)),
+      default_kind: DEFAULT_CAPTURE_KIND,
+      frames: { supported: blocker === null },
+      capture: blocker === null ? { supported: true } : { supported: false, reason: blocker },
+    });
+  });
+
   app.post("/api/x-articles/summarize-video", async (c) => {
     applyCors(c);
 
-    const body = await c.req.json<{ title?: string; url?: string; frames?: boolean }>();
+    // `kind` is `unknown`, not `string?`: typed as a string, the `typeof` guard
+    // below narrows to `never` and the shape it exists to refuse is the one
+    // TypeScript says cannot happen. `youtube-routes.ts` has the same.
+    const body = await c.req.json<{
+      title?: string;
+      url?: string;
+      frames?: boolean;
+      kind?: unknown;
+    }>();
     const { title, url, frames } = body;
 
     if (!url) {
@@ -164,6 +208,35 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
       );
     }
 
+    // The summary KIND, validated ABOVE the duplicate lookup and above
+    // `createJob` — the TikTok/YouTube/Vimeo ordering, for the same reason: a
+    // picker value this instance does not offer is a 400 whatever the video,
+    // and it must cost neither a huginn listing read nor a job row. Absent is
+    // the default; PRESENT BUT BLANK is refused with the unknown ones, since
+    // `findCapturePreset` reads a blank id as absent — right for a key that is
+    // not there, wrong for a picker that failed to fill. The bot is resolved
+    // here because the offered set is the bot's.
+    const summarizerBot = resolveSummarizerBot(discoverAllBots());
+    if (!summarizerBot) {
+      return c.json({ error: "No bots configured" }, 500);
+    }
+    if (body.kind !== undefined && typeof body.kind !== "string") {
+      return c.json({ error: "Summary kind must be a string", code: "bad_kind" }, 400);
+    }
+    if (typeof body.kind === "string" && body.kind.trim() === "") {
+      return c.json(
+        { error: "Summary kind must not be blank", code: "bad_kind", kind: body.kind },
+        400,
+      );
+    }
+    const preset = findCapturePreset(shortVideoCaptureKinds(summarizerBot), body.kind);
+    if (!preset) {
+      return c.json(
+        { error: `Unknown summary kind: ${body.kind}`, code: "bad_kind", kind: body.kind },
+        400,
+      );
+    }
+
     const existing = await findExistingByStatusId(KNOWLEDGE_API_URL, statusId);
     if (existing) {
       log.info("X video duplicate detected for status {statusId}: {docId}", {
@@ -178,28 +251,19 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
       });
     }
 
-    const summarizerBot = resolveSummarizerBot(discoverAllBots());
-    if (!summarizerBot) {
-      return c.json({ error: "No bots configured" }, 500);
-    }
-
     // Same pre-flight as TikTok: the frame-reading flow needs --add-dir, which
     // only the claude-cli/claude-sdk connectors express. Reject before the
     // expensive download + whisper work.
-    if (!connectorCapabilities(summarizerBot).supportsExtraDirs) {
-      return c.json(
-        {
-          error: `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector}", which cannot read the extracted video frames (no extra-dirs support). Set SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
-        },
-        503,
-      );
+    const blocker = shortVideoCaptureBlocker(summarizerBot, XV_FRAME_NOUN);
+    if (blocker !== null) {
+      return c.json({ error: blocker }, 503);
     }
 
     // Author is resolved from yt-dlp metadata inside the job.
     const jobId = createJob(statusId, title || url, url, "");
 
     // Fire and forget — background summarization
-    summarizeXVideo(jobId, url, title || url, config, summarizerBot, { frames }).catch((err) => {
+    summarizeXVideo(jobId, url, title || url, config, summarizerBot, { frames, preset }).catch((err) => {
       log.error("X video summarization failed: {error}", { error: err instanceof Error ? err.message : String(err) });
     });
 

@@ -69,11 +69,12 @@ test("the default structure leads with a `## Key takeaways` section and forbids 
 // later rules by referring to them as "below", and a reorder that keeps every
 // string intact leaves a dangling reference the snapshot happily accepts.
 //
-// The other blind spot — the two video verticals, which interpolate the array
-// instead of calling buildSummarySystemPrompt — is NOT pinnable from here at
-// all. It is pinned end-to-end in src/tiktok/summarizer.test.ts and
-// src/x-article/video.test.ts, against the system prompt those modules
-// actually hand to the executor.
+// The other blind spot USED to be the two short-video verticals, which
+// interpolated the array into a numbered prompt of their own instead of calling
+// buildSummarySystemPrompt. They call it now, through its `before`/`after`
+// slots, so the snapshot above covers their bullets too — and the end-to-end
+// pin against the prompt the real job hands the executor is still there, in
+// src/video/short-video.test.ts.
 describe("the verbatim-artifact rule", () => {
   const idxOf = (needle: string) => SUMMARY_STRUCTURE_BULLETS.findIndex((b) => b.includes(needle));
 

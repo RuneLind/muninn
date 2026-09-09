@@ -15,8 +15,12 @@ import {
   buildVimeoSystemPrompt,
   SUMMARIZE_INTRO as VIMEO_SUMMARIZE_INTRO,
 } from "../vimeo/prompt.ts";
-import { tikTokSystemPromptPieces, buildTikTokSystemPrompt } from "../tiktok/prompt.ts";
-import { xVideoSystemPromptPieces, buildXVideoSystemPrompt } from "../x-article/video-prompt.ts";
+import {
+  TIKTOK_PROMPT_SPEC,
+  X_VIDEO_PROMPT_SPEC,
+  buildShortVideoSystemPrompt,
+  shortVideoSystemPromptPieces,
+} from "../video/short-video-prompt.ts";
 import { xArticleSystemPromptPieces, buildXArticleSystemPrompt } from "../x-article/prompt.ts";
 import { articleSystemPromptPieces, buildArticleSystemPrompt } from "../article/prompt.ts";
 import { anthropicSystemPromptPieces, buildAnthropicSystemPrompt } from "../anthropic/prompt.ts";
@@ -39,6 +43,72 @@ describe("joinPromptPieces", () => {
     const piece = { id: "r", label: "R", text: "x" };
     expect(optionalPiece(true, piece)).toEqual([piece]);
     expect(optionalPiece(false, piece)).toEqual([]);
+  });
+
+  /**
+   * The id guard over the WHOLE list.
+   *
+   * `assertEnvelopeInstructions` sees the envelope's own four ids and the slot
+   * entries, which is everything the envelope knows about — and nothing about
+   * the pieces the vertical appends AROUND it. So a slot entry could take the id
+   * of the vertical's own `context` piece, and the page would tint two different
+   * parts as one and chip the name twice. The join is where the whole list
+   * exists, so that is where the check lives.
+   */
+  test("two content pieces sharing an id are refused at the join", () => {
+    const collide = () =>
+      joinPromptPieces([
+        ...summarySystemPromptPieces("I.", ["a"], "- one", {
+          after: [{ id: "context", label: "No-commentary rule", text: "Say nothing else." }],
+        }),
+        { id: "context", label: "Video context", text: "\n\nVideo URL: u" },
+      ]);
+    expect(collide).toThrow(/share the piece id "context"/);
+  });
+
+  test("an empty id on a content piece is refused at the join", () => {
+    expect(() => joinPromptPieces([{ id: "", label: "X", text: "words" }])).toThrow(
+      /empty piece id/,
+    );
+  });
+
+  /**
+   * A WHITESPACE-only span may repeat an id, and that exemption is Vimeo's: its
+   * intro is split around the windowed rider, and the trailing slice is the
+   * `\n\n` before the envelope — the same piece, in two spans, with a separator
+   * between them. It contributes no chip (`pieceChips` filters it) and has no
+   * visible tint, so it is not a second part claiming the name.
+   */
+  test("a whitespace-only span may repeat an id — the separator is not a part", () => {
+    expect(() =>
+      joinPromptPieces([
+        { id: "intro", label: "Intro", text: "You are an analyst." },
+        { id: "rider-windowed", label: "Windowed transcript rider", text: " The windows are positions." },
+        { id: "intro", label: "Intro", text: "\n\n" },
+      ]),
+    ).not.toThrow();
+  });
+
+  /** Every shipped builder still joins — the guard must not refuse production. */
+  test("the shipped builders' piece lists all pass the id guard", () => {
+    // Vimeo first: it is the only shipped builder whose list repeats an id.
+    expect(() =>
+      buildVimeoSystemPrompt({
+        preset: STANDARD,
+        title: "T",
+        url: "U",
+        captionKind: "auto",
+        outputLang: "en",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildShortVideoSystemPrompt(TIKTOK_PROMPT_SPEC, {
+        preset: STANDARD,
+        title: "T",
+        url: "https://www.tiktok.com/@a/video/1",
+        author: "a",
+      }),
+    ).not.toThrow();
   });
 });
 
@@ -66,6 +136,210 @@ describe("the shared scaffold", () => {
     // structure's own re-indent, exactly as the template spelled it.
     expect(pieces[1]!.text.endsWith("3. Then write a structured summary with:\n   ")).toBe(true);
     expect(pieces[2]!.text).toBe("- one\n   - two");
+  });
+});
+
+/**
+ * The `before`/`after` slots — the short-video verticals' way onto the shared
+ * envelope, and the reason they could not take it before.
+ *
+ * The slots NUMBER what they hold, which is the whole point: a `before` entry
+ * renumbers the envelope's own three steps rather than leaving a prompt with two
+ * step 1s.
+ */
+describe("the envelope's before/after slots", () => {
+  const BEFORE = [
+    { id: "read-frames", label: "Frame-reading rule", text: "Read the frames first." },
+    { id: "visual-only", label: "Visual-only rule", text: "Say when a point is visual-only." },
+  ];
+  const AFTER = [{ id: "no-commentary", label: "No-commentary rule", text: "Produce NO commentary." }];
+
+  test("the slotted shape is EXACTLY this — a second literal, like the scaffold's own", () => {
+    expect(
+      joinPromptPieces(
+        summarySystemPromptPieces("Intro.", ["a", "b"], "- one\n- two", {
+          before: BEFORE,
+          after: AFTER,
+        }),
+      ),
+    ).toBe(`Intro.
+
+Instructions:
+1. Read the frames first.
+2. Say when a point is visual-only.
+3. Start your response with EXACTLY this line: CATEGORY: <category>
+   Choose from: a, b
+4. Then add a blank line, then SUMMARY: on its own line
+5. Then write a structured summary with:
+   - one
+   - two
+6. Produce NO commentary.`);
+  });
+
+  test("each slotted instruction is its OWN piece, so the page tints it as itself", () => {
+    const pieces = summarySystemPromptPieces("Intro.", ["a"], "- one", {
+      before: BEFORE,
+      after: AFTER,
+    });
+    expect(pieces.map((p) => p.id)).toEqual([
+      "intro",
+      // `Instructions:` becomes a span of its own only when a `before` entry has
+      // to sit between it and the CATEGORY step — a span cannot be split around
+      // another span.
+      "instructions",
+      "read-frames",
+      "visual-only",
+      "envelope",
+      "structure",
+      "no-commentary",
+    ]);
+    expect(pieces.find((p) => p.id === "instructions")!.text).toBe("Instructions:\n");
+    expect(pieces.find((p) => p.id === "read-frames")!.text).toBe("1. Read the frames first.\n");
+    expect(pieces.find((p) => p.id === "no-commentary")!.text).toBe("\n6. Produce NO commentary.");
+    expect(pieces.find((p) => p.id === "read-frames")!.label).toBe("Frame-reading rule");
+  });
+
+  test("a `before` entry RENUMBERS the envelope's own steps", () => {
+    const none = joinPromptPieces(summarySystemPromptPieces("I.", ["a"], "- one"));
+    const one = joinPromptPieces(
+      summarySystemPromptPieces("I.", ["a"], "- one", { before: [BEFORE[0]!] }),
+    );
+    expect(none).toContain("1. Start your response with EXACTLY this line");
+    expect(one).toContain("2. Start your response with EXACTLY this line");
+    expect(one).toContain("3. Then add a blank line");
+    expect(one).toContain("4. Then write a structured summary with:");
+    // …and there is exactly ONE step 1, which is the slotted one. Counted with
+    // `g`, because `/^1\. /m` finds the first match and `[0]` is then the
+    // pattern's own literal text — an assertion that cannot fail whatever the
+    // prompt says, and that survived a renumbering mutation.
+    expect(one.match(/^1\. /gm)).toHaveLength(1);
+    expect(one).toContain("1. Read the frames first.");
+  });
+
+  test("`after` numbers on from the structure step, one line each", () => {
+    const two = joinPromptPieces(
+      summarySystemPromptPieces("I.", ["a"], "- one", {
+        after: [AFTER[0]!, { id: "x", label: "X", text: "And this." }],
+      }),
+    );
+    expect(two.endsWith("3. Then write a structured summary with:\n   - one\n4. Produce NO commentary.\n5. And this.")).toBe(
+      true,
+    );
+  });
+
+  /**
+   * The slot's CONTRACT, refused at construction.
+   *
+   * `text` is documented as "the instruction, unnumbered and unterminated", and
+   * every shape below silently produced a malformed prompt or a wrong tint
+   * instead of an error. The measured one: `after: [{ text: "\n6. legacy" }]`
+   * composed a step 4 with no words after its number and an orphan `6.` on the
+   * next line, and the page tinted both as the same piece. A slot entry is
+   * written once, in code, by a vertical author — so the honest answer to a
+   * shape the envelope cannot number is a throw, not a best effort.
+   */
+  describe("the slot contract", () => {
+    const ok = { id: "r", label: "R", text: "Do the thing." };
+    /** Compose with one slot entry replaced by `bad`, in whichever slot. */
+    const withEntry = (slot: "before" | "after", bad: { id: string; label: string; text: string }) =>
+      () => summarySystemPromptPieces("I.", ["a"], "- one", { [slot]: [bad] });
+
+    for (const slot of ["before", "after"] as const) {
+      test(`${slot}: empty text is refused`, () => {
+        expect(withEntry(slot, { ...ok, text: "" })).toThrow(/no text/);
+        expect(withEntry(slot, { ...ok, text: "   \n " })).toThrow(/no text/);
+      });
+
+      test(`${slot}: text that carries its own leading newline or spacing is refused`, () => {
+        // The measured probe: a legacy instruction pasted in with the newline
+        // and the number the envelope is supposed to add.
+        expect(withEntry(slot, { ...ok, text: "\n6. legacy" })).toThrow(/leading or trailing whitespace/);
+        expect(withEntry(slot, { ...ok, text: "Do the thing. " })).toThrow(/leading or trailing whitespace/);
+      });
+
+      test(`${slot}: multi-line text is refused`, () => {
+        expect(withEntry(slot, { ...ok, text: "First line.\nSecond line." })).toThrow(/one line/);
+      });
+
+      test(`${slot}: text that numbers itself is refused`, () => {
+        expect(withEntry(slot, { ...ok, text: "6. legacy" })).toThrow(/numbers itself/);
+        expect(withEntry(slot, { ...ok, text: "1) legacy" })).toThrow(/numbers itself/);
+      });
+    }
+
+    test("a duplicate id across the slots is refused", () => {
+      expect(() =>
+        summarySystemPromptPieces("I.", ["a"], "- one", {
+          before: [{ ...ok, id: "twice" }],
+          after: [{ ...ok, id: "twice" }],
+        }),
+      ).toThrow(/duplicate piece id "twice"/);
+    });
+
+    test("an id that collides with a piece the envelope itself emits is refused", () => {
+      for (const id of ["intro", "instructions", "envelope", "structure"]) {
+        expect(withEntry("before", { ...ok, id })).toThrow(new RegExp(`duplicate piece id "${id}"`));
+      }
+    });
+
+    test("an empty id is refused — a span with no id is a span the page cannot tint", () => {
+      for (const slot of ["before", "after"] as const) {
+        expect(withEntry(slot, { ...ok, id: "" })).toThrow(/empty piece id/);
+        expect(withEntry(slot, { ...ok, id: "  " })).toThrow(/empty piece id/);
+      }
+    });
+
+    test("the shapes the two short-video verticals really send are accepted", () => {
+      // The guard must not refuse the production callers — the one thing a
+      // validation round can break that no other case here would notice.
+      expect(() =>
+        shortVideoSystemPromptPieces(TIKTOK_PROMPT_SPEC, {
+          preset: STANDARD,
+          title: "T",
+          url: "https://www.tiktok.com/@a/video/1",
+          author: "a",
+        }),
+      ).not.toThrow();
+      expect(() =>
+        shortVideoSystemPromptPieces(X_VIDEO_PROMPT_SPEC, {
+          preset: STANDARD,
+          title: "T",
+          url: "https://x.com/a/status/1",
+          author: "a",
+        }),
+      ).not.toThrow();
+    });
+  });
+
+  /**
+   * The five callers that pass no slots — youtube, vimeo, x-article, article,
+   * anthropic — must be unchanged in BOTH directions: the composed bytes AND the
+   * piece list, since the second is what `/summaries/prompts` renders chips from.
+   */
+  test("no slots ⇒ byte-identical output AND an identical piece list to passing none", () => {
+    for (const structure of [undefined, "- only this", SUMMARY_STRUCTURE_BULLETS.join("\n")]) {
+      const bare =
+        structure === undefined
+          ? summarySystemPromptPieces("Intro.", VALID_CATEGORIES)
+          : summarySystemPromptPieces("Intro.", VALID_CATEGORIES, structure);
+      const empty =
+        structure === undefined
+          ? summarySystemPromptPieces("Intro.", VALID_CATEGORIES, undefined, {})
+          : summarySystemPromptPieces("Intro.", VALID_CATEGORIES, structure, { before: [], after: [] });
+      expect(empty).toEqual(bare);
+      expect(bare.map((p) => p.id)).toEqual(["intro", "envelope", "structure"]);
+      expect(bare[1]!.text.startsWith("Instructions:\n1. Start your response")).toBe(true);
+    }
+  });
+
+  test("buildSummarySystemPrompt passes the slots through to the pieces", () => {
+    const slots = { before: BEFORE, after: AFTER };
+    expect(buildSummarySystemPrompt("Intro.", ["a"], "- one", slots)).toBe(
+      joinPromptPieces(summarySystemPromptPieces("Intro.", ["a"], "- one", slots)),
+    );
+    expect(buildSummarySystemPrompt("Intro.", ["a"], "- one", slots)).not.toBe(
+      buildSummarySystemPrompt("Intro.", ["a"], "- one"),
+    );
   });
 });
 
@@ -101,13 +375,41 @@ describe("every vertical's builder is the join of its pieces", () => {
     ],
     [
       "tiktok",
-      () => buildTikTokSystemPrompt({ title: "T", url: "U", author: "A" }),
-      () => joinPromptPieces(tikTokSystemPromptPieces({ title: "T", url: "U", author: "A" })),
+      () =>
+        buildShortVideoSystemPrompt(TIKTOK_PROMPT_SPEC, {
+          preset: STANDARD,
+          title: "T",
+          url: "U",
+          author: "A",
+        }),
+      () =>
+        joinPromptPieces(
+          shortVideoSystemPromptPieces(TIKTOK_PROMPT_SPEC, {
+            preset: STANDARD,
+            title: "T",
+            url: "U",
+            author: "A",
+          }),
+        ),
     ],
     [
       "x-video",
-      () => buildXVideoSystemPrompt({ title: "T", url: "U", author: "A" }),
-      () => joinPromptPieces(xVideoSystemPromptPieces({ title: "T", url: "U", author: "A" })),
+      () =>
+        buildShortVideoSystemPrompt(X_VIDEO_PROMPT_SPEC, {
+          preset: STANDARD,
+          title: "T",
+          url: "U",
+          author: "A",
+        }),
+      () =>
+        joinPromptPieces(
+          shortVideoSystemPromptPieces(X_VIDEO_PROMPT_SPEC, {
+            preset: STANDARD,
+            title: "T",
+            url: "U",
+            author: "A",
+          }),
+        ),
     ],
     [
       "x-article",
@@ -227,12 +529,24 @@ describe("the pieces each vertical contributes", () => {
     );
   });
 
-  test("the short-video envelopes keep their own no-commentary piece", () => {
-    for (const pieces of [
-      tikTokSystemPromptPieces({ title: "T", url: "U", author: "A" }),
-      xVideoSystemPromptPieces({ title: "T", url: "U", author: "A" }),
-    ]) {
-      expect(pieces.map((p) => p.id)).toEqual(["envelope", "structure", "no-commentary", "context"]);
+  test("the short-video envelopes are the SHARED one, with their rules in its slots", () => {
+    for (const spec of [TIKTOK_PROMPT_SPEC, X_VIDEO_PROMPT_SPEC]) {
+      const pieces = shortVideoSystemPromptPieces(spec, {
+        preset: STANDARD,
+        title: "T",
+        url: "U",
+        author: "A",
+      });
+      expect(pieces.map((p) => p.id)).toEqual([
+        "intro",
+        "instructions",
+        "read-frames",
+        "visual-only",
+        "envelope",
+        "structure",
+        "no-commentary",
+        "context",
+      ]);
       expect(pieces.find((p) => p.id === "no-commentary")!.text).toContain("produce NO commentary");
     }
   });
