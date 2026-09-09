@@ -597,7 +597,7 @@ CREATE INDEX idx_traces_bot ON traces (bot_name, started_at DESC) WHERE parent_i
 -- seam twice under one root — `claude:select` then `claude` — and a key on
 -- trace_id alone let the first pass win the trace. `kind` is what splits the two
 -- retentions ('chat' | 'capture'); `source_url` is the capture's own address,
--- which is how the /summaries doc panel finds a prompt whose trace is long gone.
+-- which is how GET /api/summaries/prompt finds a prompt whose trace is long gone.
 -- ============================================================================
 CREATE TABLE prompt_snapshots (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -606,7 +606,11 @@ CREATE TABLE prompt_snapshots (
   user_prompt TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   pass TEXT NOT NULL DEFAULT '',
-  kind TEXT NOT NULL DEFAULT 'chat',
+  -- CHECKed because both readers split on the VALUE, not on a type: the sweeper's
+  -- second branch is `kind <> 'capture'` and the by-url lookup's predicate is
+  -- `kind = 'capture'`, so a row spelled 'Capture' is swept on the 3-day chat
+  -- window AND unreachable by url, silently. Added by migration 076.
+  kind TEXT NOT NULL DEFAULT 'chat' CONSTRAINT prompt_snapshots_kind_check CHECK (kind IN ('chat', 'capture')),
   source_url TEXT
 );
 

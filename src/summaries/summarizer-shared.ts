@@ -127,6 +127,16 @@ export interface CaptureOneShotOptions {
    * alternative is every single-pass caller growing a `finish` it cannot forget.
    */
   parentTracer?: Tracer;
+  /**
+   * Handed the in-flight prompt-snapshot write, synchronously, right after it
+   * is started.
+   *
+   * The write is deliberately NOT awaited (see `saveCapturePromptSnapshot`), so
+   * a test that reads the row straight after this function resolves would be
+   * racing the insert. This is the only handle on it; production callers pass
+   * nothing, and the promise never rejects — the writer catches and warns.
+   */
+  onSnapshotSettled?: (pending: Promise<void>) => void;
   /** Test seams — production callers pass neither. */
   oneShot?: typeof executeOneShot;
   tracer?: Tracer;
@@ -218,7 +228,13 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       },
     });
 
-    await saveCapturePromptSnapshot(tracer.traceId, opts);
+    // Started, never awaited — see `saveCapturePromptSnapshot`. The call is on
+    // its OWN line rather than inside `opts.onSnapshotSettled?.(…)`: optional
+    // CALL short-circuits its arguments, so the inline form would skip the
+    // write entirely whenever the seam is absent, which is every production
+    // caller.
+    const snapshotWrite = saveCapturePromptSnapshot(tracer.traceId, opts);
+    opts.onSnapshotSettled?.(snapshotWrite);
 
     const usage = {
       model: result.model,
@@ -296,6 +312,14 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
  * pass that ran — and per PASS, because a YouTube dense-scan capture runs this
  * seam twice under one trace root and the two prompts are different questions
  * (which frames to look at; how to summarize what came back).
+ *
+ * **NOT awaited by the caller.** The summary is already produced by the time
+ * this runs; a Postgres that is slow, locked or gone must not hold a capture job
+ * open behind a debugging artefact — every capture, on every pass. The chat
+ * caller has always worked this way (`src/core/prompt-assembly.ts` calls
+ * `savePromptSnapshot(…).catch(…)`), and the warn below is this path's version
+ * of that `.catch`. `CaptureOneShotOptions.onSnapshotSettled` is how a TEST gets
+ * hold of the in-flight promise; production callers pass nothing.
  *
  * Gated on tracing, because the row is keyed on a trace id: a `Tracer` mints one
  * even with `TRACING_ENABLED=false`, and a snapshot under an id no trace was

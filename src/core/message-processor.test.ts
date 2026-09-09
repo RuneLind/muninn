@@ -86,8 +86,9 @@ mock.module("../observability/agent-status.ts", () => ({
   getConnectorLabel: mock(() => "Claude Code"),
 }));
 
+const mockSavePromptSnapshot = mock((_params: Record<string, unknown>) => Promise.resolve());
 mock.module("../db/prompt-snapshots.ts", () => ({
-  savePromptSnapshot: mock(() => Promise.resolve()),
+  savePromptSnapshot: mockSavePromptSnapshot,
 }));
 
 // Captures the most recent addChildSpan call args so tests can assert on them.
@@ -182,6 +183,7 @@ describe("processMessage", () => {
     mockExtractMemory.mockClear();
     mockExtractGoal.mockClear();
     mockExtractSchedule.mockClear();
+    mockSavePromptSnapshot.mockClear();
     capturedChildSpans.length = 0;
     capturedSubSpans.length = 0;
     _mockSpanCounter = 0;
@@ -205,6 +207,33 @@ describe("processMessage", () => {
     expect(mockExecuteClaudePrompt).toHaveBeenCalledTimes(1);
     expect(result).toBeDefined();
     expect(result!.traceId).toBe("mock-trace-id");
+  });
+
+  /**
+   * The chat caller writes a `chat` row, and it does that by passing NEITHER
+   * `pass` nor `kind` — `savePromptSnapshot` defaults them to `''` and `'chat'`.
+   * Those two defaults are what put the row on the 3-day retention and keep it
+   * out of `getLatestCaptureSnapshotByUrl`, so a `kind: "capture"` added here
+   * would quietly give every chat turn the 90-day window and make a chat prompt
+   * answerable by url. Nothing else in the suite reads the ARGS.
+   */
+  test("the chat snapshot is written with no pass and no kind", async () => {
+    await processMessage({
+      text: "hello",
+      userId: "U123",
+      username: "testuser",
+      platform: "slack_dm",
+      botConfig,
+      config,
+      say: sayMock,
+    });
+
+    expect(mockSavePromptSnapshot).toHaveBeenCalledTimes(1);
+    const params = (mockSavePromptSnapshot.mock.calls[0] as unknown[])[0] as Record<string, unknown>;
+    expect(Object.keys(params).sort()).toEqual(["systemPrompt", "traceId", "userPrompt"]);
+    expect("pass" in params).toBe(false);
+    expect("kind" in params).toBe(false);
+    expect("sourceUrl" in params).toBe(false);
   });
 
   test("returns undefined on Claude error and sends error via say", async () => {

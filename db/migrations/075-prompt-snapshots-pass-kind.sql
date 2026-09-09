@@ -23,7 +23,9 @@ ALTER TABLE prompt_snapshots
 DROP INDEX idx_prompt_snapshots_trace;
 CREATE UNIQUE INDEX idx_prompt_snapshots_trace_pass ON prompt_snapshots (trace_id, pass);
 
--- The /summaries doc panel's lookup: newest capture snapshot for a source url.
+-- The by-url lookup behind GET /api/summaries/prompt: newest capture snapshot
+-- for a source url. (The /summaries doc-panel control that will call it is a
+-- later PR; the index serves the route.)
 -- PARTIAL, on the kind it serves — chat rows carry no source_url and would be
 -- dead weight in it.
 CREATE INDEX idx_prompt_snapshots_capture_url

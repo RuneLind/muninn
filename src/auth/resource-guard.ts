@@ -50,7 +50,7 @@
 import type { Context } from "hono";
 import { getLog } from "../logging.ts";
 import { sessionIdentity, sessionRole } from "./guard.ts";
-import { authMode, isAuthenticatingInstance, pinnedLocalUserId } from "./policy.ts";
+import { authMode, pinnedLocalUserId } from "./policy.ts";
 import { auditAdminPassthrough } from "./audit.ts";
 import type { AuthRole } from "./role.ts";
 
@@ -135,8 +135,19 @@ export function decideResourceAccess(input: ResourceAccessInput): OwnedResult {
 }
 
 export interface CaptureSnapshotAccessInput {
-  /** `isAuthenticatingInstance()` — false is today's `MUNINN_AUTH=off` muninn. */
-  readonly authenticating: boolean;
+  /**
+   * Whether the REQUEST carried a resolved identity — `sessionIdentity(c) !==
+   * null`, the same question `decideResourceAccess` asks with its
+   * `sessionUserId`. False is "no middleware ran", i.e. auth off.
+   *
+   * Deliberately NOT `isAuthenticatingInstance()`. That reads module state, and
+   * the two answers diverge in both directions with no signal: with the
+   * middleware mounted but `setAuthPolicy` never called, the module says "off"
+   * while the request carries a plain `user` — and this guard then admitted a
+   * reader `requireOwnedResource`, on the same request, refuses. Every other
+   * guard in this file derives from the request; so does this one now.
+   */
+  readonly identified: boolean;
   /** The resolved role, or `null` when no identity was resolved. */
   readonly role: AuthRole | null;
   /** `pinnedLocalUserId() !== null` — a `local` instance's single human. */
@@ -156,15 +167,18 @@ export interface CaptureSnapshotAccessInput {
  *
  * It stands on its own rather than leaning on the zone model. `/api/summaries/*`
  * is admin-zone by default-deny today, which would make this redundant — but
- * "redundant" is a property of a list the doc panel's route may move onto (the
- * user zone) later, and a guard that was only ever the zone's shadow would open
- * silently on that day.
+ * "redundant" is a property of a list this route may move onto (the user zone)
+ * later, and a guard that was only ever the zone's shadow would open silently on
+ * that day.
  */
 export function decideCaptureSnapshotAccess(input: CaptureSnapshotAccessInput): boolean {
-  if (!input.authenticating) return true;
+  // Auth off: no middleware ran, so there is nothing to compare against and
+  // today's muninn is unchanged — the same first line `decideResourceAccess`
+  // has, asked of the same request.
+  if (!input.identified) return true;
   if (input.role === "admin") return true;
-  // Fail closed: on an authenticating instance an unresolved role means the
-  // middleware granted nothing, and this route is not one it excludes.
+  // Fail closed: an identity with no resolved role means the middleware granted
+  // nothing, and this route is not one it excludes.
   if (input.role === null) return false;
   return input.localPinned;
 }
@@ -174,7 +188,7 @@ export function decideCaptureSnapshotAccess(input: CaptureSnapshotAccessInput): 
  *  from a plain 403 and the 404-shaped denial above does not apply). */
 export function allowsCaptureSnapshotRead(c: Context): boolean {
   return decideCaptureSnapshotAccess({
-    authenticating: isAuthenticatingInstance(),
+    identified: sessionIdentity(c) !== null,
     role: sessionRole(c),
     localPinned: pinnedLocalUserId() !== null,
   });

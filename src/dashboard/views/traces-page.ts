@@ -102,7 +102,8 @@ export async function renderTracesPage(): Promise<string> {
 
     // Deep-link: /traces#<traceId> opens that trace's waterfall, and
     // #<traceId>/prompt[/<pass>] opens the prompt modal on top of it — the link
-    // the /summaries doc panel offers while a capture's trace is still alive.
+    // shape a /summaries doc-panel control will offer while a capture's trace is
+    // still alive (that control is a later PR; nothing links here yet).
     // loadWaterfall fetches the trace by id directly, so it works even when the
     // row isn't on the loaded first page (placeWaterfallAfterRow then parks the
     // panel at the top); when the row IS present we also scroll it into view.
@@ -110,14 +111,23 @@ export async function renderTracesPage(): Promise<string> {
     // The modal is opened only AFTER loadWaterfall resolves: it reads
     // currentWaterfallTraceId, which that call is what sets.
     //
+    // Every branch says what the modal should be, including the ones that open
+    // nothing — this runs on every hashchange, so BACK from
+    // #<id>/prompt/<pass> to #<id> arrives here asking for no prompt, and a
+    // branch that only ever opened left the modal standing over a fragment that
+    // no longer mentions it. A fragment that parses to nothing (a junk id, an
+    // empty hash) is the same case: it asks for no modal.
+    //
     // Read-only. Nothing on this page WRITES location.hash — the fragment
     // arrives from an external link — and this stays a reader.
     function openTraceFromHash() {
       var target = parseTraceHash(location.hash || '');
-      if (!target) return;
+      if (!target) { closePromptModal(); return; }
       var loaded = loadWaterfall(target.traceId);
       if (target.prompt) {
         Promise.resolve(loaded).then(function () { openPromptModal(target.pass); });
+      } else {
+        closePromptModal();
       }
       var row = document.querySelector('tr[data-trace="' + target.traceId + '"]');
       if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center' });

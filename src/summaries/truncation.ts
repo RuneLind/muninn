@@ -67,13 +67,40 @@ export function headWithinBytes(text: string, maxBytes: number): string {
  * the window-aware version and stays there, because only the ingest body it
  * builds has windows to keep whole.
  *
+ * ⚠️ **It deliberately does NOT call `headWithinBytes`.** That function's window
+ * rule — "a budget that does not reach past the first line has no head to show"
+ * — is right for a transcript whose first line is a `### [HH:MM:SS]` heading and
+ * catastrophic for a prompt: a capture prompt may be one paragraph with its only
+ * newline at the very end, and inheriting the rule threw the whole prompt away.
+ * Measured on a 300 KB single-paragraph article with a trailing newline: the
+ * stored row was the 62-byte note alone, while the SAME text with the newline
+ * removed stored 262,140 bytes. So the cut here is the last UTF-8 character
+ * boundary inside the budget, whatever the newline layout — the answer is never
+ * shorter than the budget minus one code point.
+ *
  * The note's bytes come out of the budget, so the answer is never over the cap
- * the caller asked for — except in the note-alone band, where the budget did not
- * fit even the first line and there is no text left to bound.
+ * the caller asked for — except in the note-alone band, where the budget cannot
+ * fit even the note and there is nothing left to bound.
  */
 export function capTextWithNote(text: string, maxBytes: number): string {
   if (byteLength(text) <= maxBytes) return text;
   // The note plus the `\n\n` it is joined on is reserved up front.
-  const head = headWithinBytes(text, maxBytes - byteLength(TRANSCRIPT_TRUNCATION_NOTE) - 2);
+  const budget = maxBytes - byteLength(TRANSCRIPT_TRUNCATION_NOTE) - 2;
+  if (budget <= 0) return TRANSCRIPT_TRUNCATION_NOTE;
+  const head = headAtCharBoundary(text, budget);
   return head === "" ? TRANSCRIPT_TRUNCATION_NOTE : `${head}\n\n${TRANSCRIPT_TRUNCATION_NOTE}`;
+}
+
+/**
+ * The longest prefix of `text` that fits in `maxBytes` and ends on a code point.
+ *
+ * Byte-safe by construction rather than by counting: the slice is decoded, and a
+ * multi-byte sequence cut in half decodes to a single trailing U+FFFD, which is
+ * dropped. (A text whose kept tail is a GENUINE U+FFFD loses that one character
+ * — the same trade `headWithinBytes` makes, and a replacement character is not
+ * content anyone is reading a prompt for.)
+ */
+function headAtCharBoundary(text: string, maxBytes: number): string {
+  const sliced = new TextDecoder().decode(new TextEncoder().encode(text).slice(0, maxBytes));
+  return sliced.endsWith("�") ? sliced.slice(0, -1) : sliced;
 }

@@ -150,7 +150,7 @@ PostgreSQL + pgvector via Docker (single container).
 | `TRACING_ENABLED` | No | `true` | Enable request tracing |
 | `TRACING_RETENTION_DAYS` | No | `7` | Days to keep trace data |
 | `PROMPT_SNAPSHOTS_RETENTION_DAYS` | No | `3` | Days to keep CHAT prompt snapshots |
-| `PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS` | No | `90` | Days to keep CAPTURE prompt snapshots — the prompt a stored summary was written from, which `/summaries` shows and which therefore has to outlive both the 3-day chat window and the 7-day trace sweep |
+| `PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS` | No | `90` | Days to keep CAPTURE prompt snapshots — the prompt the summary PASS was sent (not necessarily the prompt that produced the stored summary: the closing-takeaway check can rewrite the closer afterwards, and that call stores no snapshot). Read back by `GET /api/summaries/prompt?url=`, so it has to outlive both the 3-day chat window and the 7-day trace sweep. Below 1 the value is refused with a warning and the default applies — `NOW() - 0 days` would delete the archive on the next tick |
 | `HUGINN_TRACE_POINTER` | No | — | Set to `1` (recommended) for Huginn's out-of-band trace channel — adapter emits a `huginn-trace-url:` line, muninn fetches the trace via HTTP, avoiding the oversized-inline-trace divert. **NB:** stale long-lived adapters won't pick up env changes — run `bun run cleanup` after restarts if traces look wrong (`docs/stale-mcp-cleanup.md`). |
 | `HUGINN_TRACE_DEFAULT` | No | `1` (forced) | Huginn inline-fence trace mode. Muninn forces this on for spawned MCP children so it is always active as a fallback. |
 | `SLACK_BOT_TOKEN_<NAME>` | No | — | Slack bot token (per bot) |

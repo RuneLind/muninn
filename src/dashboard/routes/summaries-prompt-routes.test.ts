@@ -4,7 +4,8 @@ import { registerSummariesPromptRoutes, type SummariesPromptDeps } from "./summa
 import { __setAuthPolicyForTest } from "../../auth/policy.ts";
 
 /**
- * `GET /api/summaries/prompt?url=` — the doc panel's "Show prompt".
+ * `GET /api/summaries/prompt?url=` — the seam a /summaries doc-panel
+ * "Show prompt" control will call. No such control exists yet (PR 3).
  *
  * It answers from the SNAPSHOT, never from the trace: a capture's trace is
  * swept after 7 days and its prompt is kept for 90, so a route that resolved
@@ -77,19 +78,80 @@ describe("GET /api/summaries/prompt", () => {
   });
 
   test("never reaches the lookup when the guard refuses", async () => {
-    // An authenticating instance with no resolved identity: the middleware
-    // would refuse first in production, so this is the fail-closed direction.
+    // A plain `user` on a multi-identity instance. The guard is REQUEST-derived
+    // (`sessionIdentity(c)`), so the refusal has to be driven with an identity
+    // on the request — setting the policy module alone leaves the request
+    // unidentified, which is "auth off" and correctly admits.
     __setAuthPolicyForTest({ authenticating: true });
     let looked = 0;
-    const app = appWith(deps({ loadSnapshot: async () => { looked++; return SNAPSHOT; } }));
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("identity", {
+        userId: "user-a", displayName: "A", navIdent: null, oid: null,
+        provider: "entra", expiresAt: null,
+      });
+      c.set("role", "user");
+      await next();
+    });
+    registerSummariesPromptRoutes(app, deps({ loadSnapshot: async () => { looked++; return SNAPSHOT; } }));
     const res = await app.request("/api/summaries/prompt?url=https%3A%2F%2Fexample.test%2Ftalk");
     expect(res.status).toBe(403);
     expect(looked).toBe(0);
+  });
+
+  test("an admin identity is admitted", async () => {
+    __setAuthPolicyForTest({ authenticating: true });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("identity", {
+        userId: "user-a", displayName: "A", navIdent: null, oid: null,
+        provider: "entra", expiresAt: null,
+      });
+      c.set("role", "admin");
+      await next();
+    });
+    registerSummariesPromptRoutes(app, deps());
+    const res = await app.request("/api/summaries/prompt?url=https%3A%2F%2Fexample.test%2Ftalk");
+    expect(res.status).toBe(200);
   });
 
   test("auth off answers any reader", async () => {
     __setAuthPolicyForTest(null);
     const res = await appWith(deps()).request("/api/summaries/prompt?url=https%3A%2F%2Fexample.test%2Ftalk");
     expect(res.status).toBe(200);
+  });
+});
+
+describe("GET /api/summaries/prompt — hygiene", () => {
+  test("400s when url is whitespace only", async () => {
+    // Reached the lookup untrimmed before, which then 404'd with a message
+    // about the DOCUMENT — a malformed request reported as a missing one.
+    let looked: string | null = null;
+    const app = appWith(deps({ loadSnapshot: async (u) => { looked = u; return null; } }));
+    const res = await app.request("/api/summaries/prompt?url=%20%20");
+    expect(res.status).toBe(400);
+    expect(looked).toBeNull();
+  });
+
+  test("a url with surrounding whitespace is looked up trimmed", async () => {
+    const res = await appWith(deps()).request("/api/summaries/prompt?url=%20https%3A%2F%2Fexample.test%2Ftalk%20");
+    expect(res.status).toBe(200);
+  });
+
+  test("a throwing trace lookup still answers the prompt, with traceExists=false", async () => {
+    // The trace lookup decides ONE thing: whether to offer the waterfall link.
+    // A 500 over it would withhold the body the route exists to serve.
+    const app = appWith(deps({ traceExists: async () => { throw new Error("traces table is gone"); } }));
+    const res = await app.request("/api/summaries/prompt?url=https%3A%2F%2Fexample.test%2Ftalk");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { traceExists: boolean; systemPrompt: string };
+    expect(body.traceExists).toBe(false);
+    expect(body.systemPrompt).toBe("summarize the talk");
+  });
+
+  test("a throwing SNAPSHOT lookup is still a 500 — that one is the body", async () => {
+    const app = appWith(deps({ loadSnapshot: async () => { throw new Error("db down"); } }));
+    const res = await app.request("/api/summaries/prompt?url=https%3A%2F%2Fexample.test%2Ftalk");
+    expect(res.status).toBe(500);
   });
 });

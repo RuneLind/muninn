@@ -58,6 +58,12 @@ export interface TraceHashTarget {
 }
 
 /**
+ * A `traces.trace_id`. Every id this page links to is one, so anything else is
+ * a malformed fragment.
+ */
+const TRACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
  * Parse `#<traceId>`, `#<traceId>/prompt` and `#<traceId>/prompt/<pass>`.
  *
  * In the bundle rather than in the page's inline script so it can be unit
@@ -66,12 +72,20 @@ export interface TraceHashTarget {
  * mis-parse is silent — the modal simply does not open. A pass that will not
  * decode (a lone `%`) falls back to the default rather than throwing, which
  * would take the waterfall down with it.
+ *
+ * **The trace id must be a UUID**, and that is a gate rather than tidiness: a
+ * fragment is not url-decoded by the browser, and the id reaches BOTH a fetch
+ * url and a `querySelector` attribute selector verbatim.
+ * `#<id>?x=1/prompt/claude` built `/api/prompts/<id>?x=1?pass=claude` — a second
+ * `?`, i.e. a request nobody wrote — and `#a"]x/prompt` threw inside
+ * `querySelector` and took the whole deep-link handler down with it. A junk id
+ * is answered `null`, which the page reads as "this fragment asks for nothing".
  */
 export function parseTraceHash(hash: string): TraceHashTarget | null {
   const raw = (hash || "").replace(/^#/, "").trim();
   if (!raw) return null;
   const [traceId, marker, ...rest] = raw.split("/");
-  if (!traceId) return null;
+  if (!traceId || !TRACE_ID_RE.test(traceId)) return null;
   if (marker !== "prompt") return { traceId, prompt: false };
   const encoded = rest.join("/");
   if (!encoded) return { traceId, prompt: true };

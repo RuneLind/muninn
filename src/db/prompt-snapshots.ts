@@ -67,6 +67,11 @@ export async function savePromptSnapshot(params: SavePromptSnapshotParams): Prom
   const userPrompt = params.kind === "capture"
     ? capTextWithNote(params.userPrompt, CAPTURE_PROMPT_MAX_BYTES)
     : params.userPrompt;
+  // `||`, not `??`: `src/article/summarizer.ts` passes `url: ""` for a pasted
+  // article with no source link. Stored verbatim, every one of those rows shares
+  // the key `''`, and `getLatestCaptureSnapshotByUrl("")` would then answer one
+  // arbitrary article's prompt for all of them.
+  const sourceUrl = params.sourceUrl || null;
   await sql`
     INSERT INTO prompt_snapshots (trace_id, system_prompt, user_prompt, pass, kind, source_url)
     VALUES (
@@ -75,7 +80,7 @@ export async function savePromptSnapshot(params: SavePromptSnapshotParams): Prom
       ${userPrompt},
       ${params.pass ?? ""},
       ${params.kind ?? "chat"},
-      ${params.sourceUrl ?? null}
+      ${sourceUrl}
     )
     ON CONFLICT (trace_id, pass) DO NOTHING
   `;
@@ -111,9 +116,15 @@ export async function getPromptSnapshot(traceId: string, pass?: string): Promise
 }
 
 /**
- * The newest SUMMARY-pass capture snapshot for a document's url — what the
- * /summaries doc panel shows, and the only lookup that does not start from a
- * trace id (the trace is swept after 7 days; this row lives 90).
+ * The newest SUMMARY-pass capture snapshot for a document's url — the only
+ * lookup that does not start from a trace id (the trace is swept after 7 days;
+ * this row lives 90).
+ *
+ * It backs `GET /api/summaries/prompt?url=`, which is the SEAM a /summaries doc
+ * panel control will call. There is no such control yet — that half is PR 3's.
+ *
+ * The match is EXACT on the stored string; nothing is normalized on either
+ * side. See the route's docblock for which string each vertical stores.
  */
 export async function getLatestCaptureSnapshotByUrl(url: string): Promise<CaptureSnapshot | null> {
   const sql = getDb();
@@ -146,11 +157,29 @@ function toSnapshot(r: Record<string, unknown>): PromptSnapshot {
  * capture prompt is what a stored summary was written from and is asked for
  * long after the capture. A single number would delete the second with the
  * first.
+ *
+ * ⚠️ **Both windows must be at least 1 day, and anything smaller THROWS.** These
+ * numbers go into `NOW() - make_interval(days => n)`, so `0` resolves to `NOW()`
+ * — the next scheduler tick would empty the table — and a negative one reaches
+ * into the future and does the same. `src/config.ts` clamps the two env vars
+ * (`positiveEnvInt`), but this function is exported and takes two plain numbers,
+ * so a caller that COMPUTES a window would bypass that clamp silently. Refusing
+ * here is loud and deletes nothing.
  */
 export async function cleanupOldSnapshots(retention: {
   chatDays: number;
   captureDays: number;
 }): Promise<number> {
+  for (const [name, days] of [
+    ["chatDays", retention.chatDays],
+    ["captureDays", retention.captureDays],
+  ] as const) {
+    if (!Number.isFinite(days) || days < 1) {
+      throw new Error(
+        `cleanupOldSnapshots: ${name} must be at least 1 day, got ${days} — that window deletes every snapshot`,
+      );
+    }
+  }
   const sql = getDb();
   const result = await sql`
     DELETE FROM prompt_snapshots

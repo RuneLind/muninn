@@ -157,10 +157,11 @@ export function registerSummariesRoutes(
   // summary as a ZIP of a standalone page plus its quoted slides.
   registerSummariesExportRoutes(app, config);
 
-  // Show prompt: `GET /api/summaries/prompt?url=` — the prompt the doc panel's
-  // summary was written from, found by the document's url because the capture's
-  // trace is swept long before its snapshot is. Its own module for the reason
-  // share has one: an adapter with injectable lookups.
+  // `GET /api/summaries/prompt?url=` — the prompt a capture's summary pass was
+  // sent, found by the document's url because the capture's trace is swept long
+  // before its snapshot is. This is the SEAM a doc-panel "Show prompt" control
+  // will call; that control is PR 3's and does not exist yet. Its own module for
+  // the reason share has one: an adapter with injectable lookups.
   registerSummariesPromptRoutes(app);
 
   // The quoted slide frames of every capture vertical, plus the pre-seam Vimeo

@@ -21,6 +21,22 @@ setupTestDb();
 
 const bytes = (s: string) => new TextEncoder().encode(s).length;
 
+/**
+ * `runCaptureOneShot`, with the snapshot write awaited BY THE TEST.
+ *
+ * The seam does not await it — a slow Postgres must not stall a capture that
+ * has already produced its summary — so a test that read the row straight after
+ * the call would be racing the insert. `onSnapshotSettled` is the seam's test
+ * handle on that in-flight promise; production callers pass nothing.
+ */
+async function captureAndSettle(
+  opts: Omit<Parameters<typeof runCaptureOneShot>[0], "onSnapshotSettled">,
+): Promise<void> {
+  const pending: Promise<void>[] = [];
+  await runCaptureOneShot({ ...opts, onSnapshotSettled: (p) => pending.push(p) });
+  await Promise.all(pending);
+}
+
 /** Age a row so a retention window can be driven without waiting days. */
 async function ageSnapshot(traceId: string, days: number): Promise<void> {
   await getDb()`
@@ -52,7 +68,7 @@ describe("prompt snapshots: the capture pass a reader gets by default", () => {
     const botConfig = { name: "testbot", connector: "claude-sdk" } as unknown as BotConfig;
 
     for (const pass of ["claude:select", "claude"]) {
-      await runCaptureOneShot({
+      await captureAndSettle({
         source: "youtube",
         jobId: "job-1",
         title: "A talk",
@@ -113,7 +129,7 @@ describe("prompt snapshots: the capture pass a reader gets by default", () => {
   test("a capture row carries the source url, so the doc panel can find it", async () => {
     const traceId = crypto.randomUUID();
     const url = "https://example.test/watch?v=by-url";
-    await runCaptureOneShot({
+    await captureAndSettle({
       source: "vimeo",
       jobId: "job-2",
       title: "A talk",
@@ -137,7 +153,7 @@ describe("prompt snapshots: the capture pass a reader gets by default", () => {
 
   test("writes nothing when tracing is off — there is no trace to key the row on", async () => {
     const traceId = crypto.randomUUID();
-    await runCaptureOneShot({
+    await captureAndSettle({
       source: "youtube",
       jobId: "job-3",
       title: "A talk",
@@ -384,3 +400,179 @@ function fakeResult(): ClaudeExecResult {
     durationMs: 10,
   } as ClaudeExecResult;
 }
+
+/**
+ * The write is FIRE-AND-FORGET, and this is what says so.
+ *
+ * A capture's summary is already produced by the time the prompt is stored; a
+ * Postgres that is slow, locked or gone must not hold the job open behind a
+ * debugging artefact. (The chat caller has always been fire-and-forget —
+ * `src/core/prompt-assembly.ts` calls `savePromptSnapshot(…).catch(…)`.)
+ */
+describe("prompt snapshots: the capture is not held open by the write", () => {
+  test("runCaptureOneShot resolves while the snapshot insert is still in flight", async () => {
+    const traceId = crypto.randomUUID();
+    let settled: Promise<void> | null = null;
+    // Flipped by a continuation registered INSIDE the seam, i.e. before any
+    // `await` the production code might put on the same promise — so if the
+    // write were awaited, this would already be true by the time
+    // `runCaptureOneShot` resolves.
+    let writeFinished = false;
+    await runCaptureOneShot({
+      source: "youtube",
+      jobId: "job-inflight",
+      title: "A talk",
+      url: "https://example.test/watch?v=inflight",
+      prompt: "the transcript",
+      systemPrompt: "summarize it",
+      config: { tracingEnabled: true, tracingCaptureToolOutputs: false } as unknown as Config,
+      botConfig: { name: "testbot", connector: "claude-sdk" } as unknown as BotConfig,
+      parentTracer: fakeTracer(traceId),
+      // No takeaway check, so NOTHING between the write and the return awaits:
+      // the race below is decided by whether the write itself was awaited, not
+      // by how many turns of the loop happened to pass afterwards.
+      takeawayCheck: false,
+      attachRun: () => {},
+      oneShot: async () => fakeResult(),
+      onSnapshotSettled: (p) => { settled = p; p.then(() => { writeFinished = true; }); },
+    });
+
+    expect(settled).not.toBeNull();
+    // A round trip to Postgres cannot finish inside the one microtask between
+    // the seam and this line, so `false` here means the write was NOT awaited.
+    // (Deliberately not a `Promise.race` against `Promise.resolve(…)`: race
+    // subscribes to an already-resolved promise in a LATER microtask than the
+    // one it schedules for the settled branch, so that comparison answers
+    // "in-flight" even for an awaited write — measured, it survived the
+    // mutation.)
+    expect(writeFinished).toBe(false);
+
+    // …and it does land, so the non-blocking read above is not passing because
+    // the write was skipped.
+    await settled;
+    expect(writeFinished).toBe(true);
+    expect((await getPromptSnapshot(traceId))!.systemPrompt).toBe("summarize it");
+  });
+});
+
+describe("prompt snapshots: a url-less capture stores NULL", () => {
+  /**
+   * `src/article/summarizer.ts` passes `url: ""` for a pasted article with no
+   * source link. Stored verbatim, every one of those rows shares the key `''`
+   * — and `getLatestCaptureSnapshotByUrl('')` would then answer one arbitrary
+   * article's prompt for all of them.
+   */
+  test("an empty source url is stored as NULL, not as an empty string", async () => {
+    const traceId = crypto.randomUUID();
+    await savePromptSnapshot({
+      traceId,
+      systemPrompt: "summarize the pasted text",
+      userPrompt: "u",
+      pass: "claude",
+      kind: "capture",
+      sourceUrl: "",
+    });
+    const [row] = await getDb()`SELECT source_url FROM prompt_snapshots WHERE trace_id = ${traceId}`;
+    expect(row!.source_url).toBeNull();
+  });
+
+  test("and the by-url lookup finds nothing for the empty string", async () => {
+    const traceId = crypto.randomUUID();
+    await savePromptSnapshot({
+      traceId,
+      systemPrompt: "summarize the pasted text",
+      userPrompt: "u",
+      pass: "claude",
+      kind: "capture",
+      sourceUrl: "",
+    });
+    expect(await getLatestCaptureSnapshotByUrl("")).toBeNull();
+  });
+
+  test("an absent source url is NULL too — the chat caller's shape", async () => {
+    const traceId = crypto.randomUUID();
+    await savePromptSnapshot({ traceId, systemPrompt: "persona", userPrompt: "hello" });
+    const [row] = await getDb()`SELECT source_url FROM prompt_snapshots WHERE trace_id = ${traceId}`;
+    expect(row!.source_url).toBeNull();
+  });
+});
+
+describe("cleanupOldSnapshots refuses a non-positive window", () => {
+  /**
+   * `NOW() - 0 days` is NOW, so a retention of 0 deletes the whole table on the
+   * next scheduler tick. `src/config.ts` clamps the env vars, but this function
+   * is exported and called with two numbers — the guard is here as well so a
+   * caller that computes a window cannot bypass the clamp.
+   */
+  async function seedOne(): Promise<string> {
+    const traceId = crypto.randomUUID();
+    await savePromptSnapshot({
+      traceId,
+      systemPrompt: "summarize",
+      userPrompt: "transcript",
+      pass: "claude",
+      kind: "capture",
+      sourceUrl: `https://example.test/watch?v=${traceId}`,
+    });
+    return traceId;
+  }
+
+  test("chatDays 0 throws and deletes nothing", async () => {
+    const traceId = await seedOne();
+    await expect(cleanupOldSnapshots({ chatDays: 0, captureDays: 90 })).rejects.toThrow(/at least 1 day/);
+    expect(await getPromptSnapshot(traceId)).not.toBeNull();
+  });
+
+  test("captureDays 0 throws and deletes nothing", async () => {
+    const traceId = await seedOne();
+    await expect(cleanupOldSnapshots({ chatDays: 3, captureDays: 0 })).rejects.toThrow(/at least 1 day/);
+    expect(await getPromptSnapshot(traceId)).not.toBeNull();
+  });
+
+  test("a negative window throws too", async () => {
+    const traceId = await seedOne();
+    await expect(cleanupOldSnapshots({ chatDays: 3, captureDays: -1 })).rejects.toThrow(/at least 1 day/);
+    expect(await getPromptSnapshot(traceId)).not.toBeNull();
+  });
+
+  test("1 day is allowed — the floor is a floor, not a ban", async () => {
+    const traceId = await seedOne();
+    await ageSnapshot(traceId, 5);
+    expect(await cleanupOldSnapshots({ chatDays: 1, captureDays: 1 })).toBe(1);
+  });
+});
+
+describe("getLatestCaptureSnapshotByUrl is scoped to capture rows", () => {
+  /**
+   * The `kind = 'capture'` predicate has no other test standing on it: dropping
+   * it left the whole suite green, because nothing else writes a CHAT row that
+   * carries a source url. A chat row can carry one — the column is nullable,
+   * not kind-constrained — so the filter is pinned directly here, against a row
+   * inserted past `savePromptSnapshot`.
+   */
+  const url = "https://example.test/watch?v=kind-scope";
+
+  test("a chat row with the same source url is never answered", async () => {
+    const chatTrace = crypto.randomUUID();
+    await getDb()`
+      INSERT INTO prompt_snapshots (trace_id, system_prompt, user_prompt, pass, kind, source_url)
+      VALUES (${chatTrace}, 'a chat prompt', 'u', 'claude', 'chat', ${url})
+    `;
+    expect(await getLatestCaptureSnapshotByUrl(url)).toBeNull();
+
+    // And once a real capture row exists for that url, THAT is what comes back
+    // — so the null above is the filter, not an empty table.
+    const captureTrace = crypto.randomUUID();
+    await savePromptSnapshot({
+      traceId: captureTrace,
+      systemPrompt: "a capture prompt",
+      userPrompt: "u",
+      pass: "claude",
+      kind: "capture",
+      sourceUrl: url,
+    });
+    const found = await getLatestCaptureSnapshotByUrl(url);
+    expect(found!.systemPrompt).toBe("a capture prompt");
+    expect(found!.traceId).toBe(captureTrace);
+  });
+});

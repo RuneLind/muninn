@@ -1,6 +1,7 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { Hono } from "hono";
 import {
+  allowsCaptureSnapshotRead,
   decideCaptureSnapshotAccess,
   decideResourceAccess,
   requireOwnedResource,
@@ -280,23 +281,94 @@ describe("filterToOwner", () => {
  * admits today — auth off, an admin, or a `local` instance's single human.
  */
 describe("decideCaptureSnapshotAccess", () => {
-  test("auth off admits any reader — today's muninn is unchanged", () => {
-    expect(decideCaptureSnapshotAccess({ authenticating: false, role: null, localPinned: false })).toBe(true);
+  test("an unidentified request is auth-off and admits any reader", () => {
+    expect(decideCaptureSnapshotAccess({ identified: false, role: null, localPinned: false })).toBe(true);
   });
 
-  test("an admin reads it on an authenticating instance", () => {
-    expect(decideCaptureSnapshotAccess({ authenticating: true, role: "admin", localPinned: false })).toBe(true);
+  test("an admin reads it", () => {
+    expect(decideCaptureSnapshotAccess({ identified: true, role: "admin", localPinned: false })).toBe(true);
   });
 
   test("a `local` instance's single human reads it at the default role", () => {
-    expect(decideCaptureSnapshotAccess({ authenticating: true, role: "user", localPinned: true })).toBe(true);
+    expect(decideCaptureSnapshotAccess({ identified: true, role: "user", localPinned: true })).toBe(true);
   });
 
   test("a plain user on a multi-identity instance does not", () => {
-    expect(decideCaptureSnapshotAccess({ authenticating: true, role: "user", localPinned: false })).toBe(false);
+    expect(decideCaptureSnapshotAccess({ identified: true, role: "user", localPinned: false })).toBe(false);
   });
 
-  test("no resolved identity on an authenticating instance fails closed", () => {
-    expect(decideCaptureSnapshotAccess({ authenticating: true, role: null, localPinned: true })).toBe(false);
+  test("an identity with no resolved role fails closed", () => {
+    expect(decideCaptureSnapshotAccess({ identified: true, role: null, localPinned: true })).toBe(false);
+  });
+});
+
+/**
+ * The same gate, driven over a REQUEST — which is the only place the divergence
+ * shows.
+ *
+ * It used to derive "is this instance authenticating?" from module state
+ * (`isAuthenticatingInstance()`) while every other guard in this file derives it
+ * from `sessionIdentity(c)`. The two disagree in both directions, and the
+ * disagreement is silent: with the middleware mounted but the policy never set
+ * (a route test, a partially-wired boot, a middleware that resolves an identity
+ * before `setAuthPolicy` runs) the old guard read "auth off" and admitted a
+ * plain `user` that `requireOwnedResource` — three functions up, on the same
+ * request — refuses. The request is the authority; the module is not.
+ */
+describe("allowsCaptureSnapshotRead — derived from the REQUEST", () => {
+  function app(identity: Identity | null, role: AuthRole | null): Hono {
+    const a = new Hono();
+    a.use("*", async (c, next) => {
+      if (identity) c.set("identity", identity);
+      if (role) c.set("role", role);
+      await next();
+    });
+    a.get("/snap", (c) => c.json({ allowed: allowsCaptureSnapshotRead(c) }));
+    return a;
+  }
+
+  async function allowed(identity: Identity | null, role: AuthRole | null): Promise<boolean> {
+    const res = await app(identity, role).request("/snap");
+    return (await res.json() as { allowed: boolean }).allowed;
+  }
+
+  test("no identity on the request ⇒ auth off ⇒ admitted, whatever the policy says", async () => {
+    __setAuthPolicyForTest({ authenticating: true });
+    expect(await allowed(null, null)).toBe(true);
+  });
+
+  test("an identified plain user is REFUSED even with the policy unset", async () => {
+    // The divergence case. Module-derived, this answered `true` — the guard
+    // admitting a reader the owner guard beside it turns away.
+    __setAuthPolicyForTest(null);
+    expect(await allowed(A, "user")).toBe(false);
+  });
+
+  test("an identified admin is admitted with the policy unset", async () => {
+    __setAuthPolicyForTest(null);
+    expect(await allowed(A, "admin")).toBe(true);
+  });
+
+  test("a `local` instance's single human is admitted at the default role", async () => {
+    __setAuthPolicyForTest({ authenticating: true, pinnedUserId: "user-a" });
+    expect(await allowed(A, "user")).toBe(true);
+  });
+
+  test("an identity with no resolved role fails closed", async () => {
+    __setAuthPolicyForTest({ authenticating: true, pinnedUserId: "user-a" });
+    expect(await allowed(A, null)).toBe(false);
+  });
+
+  test("it agrees with requireOwnedResource on who is 'off'", async () => {
+    // The property the module read broke: both guards answer "auth off" for
+    // exactly the same requests.
+    __setAuthPolicyForTest({ authenticating: true });
+    __setOwnerLookupForTest(async () => FOUND_B);
+    const a = new Hono();
+    a.get("/both", async (c) => c.json({
+      snapshot: allowsCaptureSnapshotRead(c),
+      owned: (await requireOwnedResource(c, "trace", "some-id")).ok,
+    }));
+    expect(await (await a.request("/both")).json()).toEqual({ snapshot: true, owned: true });
   });
 });

@@ -543,6 +543,38 @@ export function optionalEnvInt(name: string, defaultValue: number): number {
   return parsed;
 }
 
+/**
+ * {@link optionalEnvInt} for a value that has to be at least 1, refusing rather
+ * than passing a wipe through.
+ *
+ * The RETENTION windows are what this exists for. They are day counts the
+ * sweeper subtracts from `NOW()`, so `0` is not "keep nothing new" — it is
+ * `created_at < NOW() - 0 days`, which matches every row, and the next
+ * scheduler tick empties the table. A negative value reaches into the future
+ * and does the same. Neither is recoverable, and neither looks like a mistake
+ * in a `.env`.
+ *
+ * Warn-and-default rather than throw, which is the opposite of
+ * `resolveServingProfile`'s rule and for the same reason read the other way:
+ * there the degrade direction was "serve everything", here it is "delete
+ * everything", so the safe answer is the shipped window plus a line saying the
+ * value was refused. Warned once per `<name>=<value>`, since `loadConfig` runs
+ * more than once in a process.
+ */
+export function positiveEnvInt(name: string, defaultValue: number): number {
+  const parsed = optionalEnvInt(name, defaultValue);
+  if (parsed >= 1) return parsed;
+  const key = `${name}=${parsed}`;
+  if (!warnedEnvFlagValues.has(key)) {
+    warnedEnvFlagValues.add(key);
+    log.warn(
+      "{name} is {value}, which would delete every row on the next sweep — refused, using the default of {fallback} day(s)",
+      { name, value: parsed, fallback: defaultValue },
+    );
+  }
+  return defaultValue;
+}
+
 export function loadConfig() {
   const whisperModelPath = optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin");
   return {
@@ -596,11 +628,13 @@ export function loadConfig() {
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
     tracingRetentionDays: optionalEnvInt("TRACING_RETENTION_DAYS", 7),
     tracingCaptureToolOutputs: optionalEnv("TRACING_CAPTURE_TOOL_OUTPUTS", "true") === "true",
-    promptSnapshotsRetentionDays: optionalEnvInt("PROMPT_SNAPSHOTS_RETENTION_DAYS", 3),
+    // `positiveEnvInt`, not `optionalEnvInt`: a retention of 0 or less is a
+    // WIPE, not a short window — see the helper.
+    promptSnapshotsRetentionDays: positiveEnvInt("PROMPT_SNAPSHOTS_RETENTION_DAYS", 3),
     // Capture prompts outlive both their chat siblings and their own traces: the
     // summary they produced is read months later, and "what was this written
-    // from?" is the question the /summaries doc panel answers from this row.
-    promptSnapshotsCaptureRetentionDays: optionalEnvInt("PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS", 90),
+    // from?" is the question `GET /api/summaries/prompt?url=` answers from this row.
+    promptSnapshotsCaptureRetentionDays: positiveEnvInt("PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS", 90),
   } as const;
 }
 

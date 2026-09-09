@@ -35,7 +35,10 @@ export function tracesPromptModalStyles(): string {
        (a selection pass and a summary pass), so an unnamed modal is ambiguous. */
     .prompt-pass-label {
       font-size: 11px;
-      color: var(--text-faint);
+      /* --text-muted, not --text-faint: measured against --bg-panel, faint is
+         2.50:1 (dark) / 2.62:1 (light) and dim 3.24 / 3.74, while muted is
+         5.26 / 4.94. At 11px this is the label least able to afford 2.5:1. */
+      color: var(--text-muted);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .prompt-modal-close {
@@ -271,8 +274,16 @@ export function tracesPromptModalScript(): string {
   return `
     // Keyed on traceId AND pass: one capture trace holds a selection prompt and
     // a summary prompt, and a traceId-only key served the second opener the
-    // first one's body. A null entry is a remembered 404.
-    let promptCache = {};  // "<traceId>|<pass>" -> { systemPrompt, userPrompt, pass } | null
+    // first one's body.
+    //
+    // ONLY a 2xx body is ever stored. A miss is left ABSENT, so the next open
+    // asks again — three reasons, and each was a defect: a capture's snapshot is
+    // written after the model call, so a 404 is "not yet" and caching it made
+    // the prompt unreachable for the life of the page; a 500 or a 403 stored the
+    // error OBJECT, which is truthy, so renderPromptTab was handed {error}
+    // and read .systemPrompt.length off undefined, outside any try/catch; and
+    // a retry after a restart or a login had nothing to re-ask.
+    let promptCache = {};  // "<traceId>|<pass>" -> { systemPrompt, userPrompt, pass }
     let activePromptTab = 'system';
     let activePromptKey = null;
 
@@ -312,12 +323,17 @@ export function tracesPromptModalScript(): string {
           const url = '/api/prompts/' + currentWaterfallTraceId +
             (pass ? '?pass=' + encodeURIComponent(pass) : '');
           const res = await fetch(url);
-          if (res.status === 404) {
-            promptCache[key] = null;
-          } else {
+          if (res.ok) {
             promptCache[key] = await res.json();
+          } else if (res.status !== 404) {
+            console.warn('Prompt snapshot request failed', res.status, url);
           }
         }
+        // Superseded: a second open (or a hashchange) started while this fetch
+        // was in flight, and that call owns the modal now. The body above is
+        // still cached under its OWN key — only the paint is abandoned, so a
+        // slow answer to an abandoned open cannot overwrite the newer one.
+        if (activePromptKey !== key) return;
         const data = promptCache[key];
         if (!data) {
           contentEl.innerHTML = '<div class="prompt-unavailable">Prompt snapshot not available (expired or not captured)</div>';
@@ -543,6 +559,10 @@ export function tracesPromptModalScript(): string {
       activePromptTab = tab;
       document.getElementById('tabSystem').classList.toggle('active', tab === 'system');
       document.getElementById('tabUser').classList.toggle('active', tab === 'user');
+      // The ACTIVE KEY, never currentWaterfallTraceId: a pass-scoped entry is
+      // stored under "<trace>|<pass>", so keying the re-render on the bare trace
+      // id renders whichever pass happened to be cached under "<trace>|" — or
+      // nothing at all, silently leaving the other tab's body on screen.
       const data = activePromptKey ? promptCache[activePromptKey] : null;
       if (data) renderPromptTab(data);
     }
