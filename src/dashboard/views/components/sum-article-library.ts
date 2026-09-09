@@ -471,11 +471,12 @@ export function sumArticleLibraryScript(): string {
 
     // --- ↻ Re-run ▾ (opt-in: docPanelHtml({rerun:true}), /summaries only).
     // Re-summarizes the OPEN document from the '## Transcript' appendix it
-    // (no backticks in this string: it lives inside a template literal)
-    // stored — no download, no re-fetch. Everything the menu needs beyond
-    // {source, docId} is a property of the FILE (is there a transcript at all,
-    // which kind wrote it, how many slides survived), so it comes from ONE
-    // fetch of /api/summaries/rerun/options rather than from four guesses here.
+    // stored — no download, no re-fetch. (Single quotes around that heading, not
+    // backticks: this comment lives inside a template literal.) Everything the
+    // menu needs beyond {source, docId} is a property of the FILE (is there a
+    // transcript at all, which kind wrote it, how many slides survived), so it
+    // comes from ONE fetch of /api/summaries/rerun/options rather than from
+    // four guesses here.
     var RERUN_SOURCES = ${JSON.stringify(RERUN_SOURCES)};
     var _rerunOpts = null;    // the options payload for the doc in the panel
     var _rerunFor = null;     // '<source>|<docId>' those options describe
