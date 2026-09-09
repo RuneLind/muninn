@@ -1245,12 +1245,64 @@ export const spec = {
 
     // ===================== TikTok =====================
 
+    "/api/tiktok/options": {
+      get: {
+        tags: ["TikTok"],
+        summary: "Capture options this instance offers",
+        description:
+          "The summary kinds `POST /api/tiktok/summarize` accepts on this instance, and whether that POST can run at all — one resolution, so a client's picker and the POST's 400 and 503 cannot disagree. The kinds are `SUMMARIZER_BOT`'s resolved preset set narrowed to those whose model AND thinking budget its connector can honour, so `deep` is absent on a `copilot-sdk` bot; `GET /api/x-articles/video-options` answers the same shape for the X-video half of the same capture job. `capture.supported` is the POST's own 503 pre-flight asked ahead of time, and `capture.reason` is that response's sentence: the job grants the model read access to its tmp frame dir on EVERY path, so a bot whose connector cannot express that runs no short-video capture, `frames: false` included. `frames.supported` is the same verdict under its older name, kept so an already-installed extension keeps reading the field it knows. Read-only, with the same CORS disposition the POST applies, and a CORS-simple request, so no preflight is registered. No summarizer bot at all is 500 `no_bot`, not an empty picker.",
+        operationId: "getTiktokOptions",
+        responses: {
+          "200": {
+            description: "OK",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    kinds: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: { id: { type: "string" }, label: { type: "string" } },
+                      },
+                    },
+                    default_kind: {
+                      type: "string",
+                      description: "The id a client sends for \"no pick\" — named, so no client assumes an order.",
+                    },
+                    frames: {
+                      type: "object",
+                      properties: { supported: { type: "boolean" } },
+                      description: "The older spelling of `capture.supported`, kept for installed clients.",
+                    },
+                    capture: {
+                      type: "object",
+                      properties: {
+                        supported: { type: "boolean" },
+                        reason: {
+                          type: "string",
+                          description:
+                            "Present only when unsupported — the sentence the 503 carries.",
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "500": errorResponse,
+        },
+      },
+    },
+
     "/api/tiktok/summarize": {
       post: {
         tags: ["TikTok"],
         summary: "Summarize a TikTok video",
         description:
-          "Starts a background summarization job for a TikTok video (yt-dlp download → whisper transcript → ffmpeg keyframes → Claude vision summary). Requires yt-dlp on PATH.",
+          "Starts a background summarization job for a TikTok video (yt-dlp download → whisper transcript → ffmpeg keyframes → Claude vision summary). Requires yt-dlp on PATH. The job itself is shared with the X-video vertical (`POST /api/x-articles/summarize-video`); the two differ only in their spec.",
         operationId: "postTiktokSummarize",
         requestBody: {
           required: true,
@@ -1265,6 +1317,11 @@ export const spec = {
                     type: "boolean",
                     description: "Extract keyframes for visual summarization (default true).",
                   },
+                  kind: {
+                    type: "string",
+                    description:
+                      "The summary kind, from `GET /api/tiktok/options`. Absent is `standard`; a non-string, a blank string or an id this instance does not offer is 400 `bad_kind`, refused above the duplicate lookup and above the job row. It lands on the ingest body as `summary_kind`.",
+                  },
                 },
                 required: ["url"],
               },
@@ -1275,6 +1332,11 @@ export const spec = {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { job_id: { type: "string" }, dashboard_url: { type: "string" } } } } } },
           "400": errorResponse,
           "500": errorResponse,
+          "503": {
+            ...errorResponse,
+            description:
+              "The summarizer bot's connector cannot grant read access outside the bot folder (`--add-dir`), which this capture needs on EVERY path — `frames: false` included, since the job hands the model its tmp work dir either way. `GET /api/tiktok/options` answers the same verdict ahead of time as `capture.supported`, with this response's sentence as `capture.reason`.",
+          },
         },
       },
     },

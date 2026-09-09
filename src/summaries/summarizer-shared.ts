@@ -9,7 +9,12 @@ import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { getConnectorLabel } from "../observability/agent-status.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 import { groundTakeaway, splitClosingTakeaway, type GroundTakeawayOptions } from "./takeaway-check.ts";
-import { joinPromptPieces, summarySystemPromptPieces, windowedTranscriptRider } from "./prompt-pieces.ts";
+import {
+  joinPromptPieces,
+  summarySystemPromptPieces,
+  windowedTranscriptRider,
+  type SummaryEnvelopeSlots,
+} from "./prompt-pieces.ts";
 import { CAPTURE_THINKING_MAX_TOKENS } from "./presets.ts";
 
 /**
@@ -30,7 +35,7 @@ const captureLog = getLog("summaries", "capture");
  * The floor every capture's summarize call is given, before the per-frame term
  * {@link summarizeTimeoutFor} adds on top of it.
  *
- * 600 s is what that function gives a 30-frame TikTok, and it is the right
+ * 600 s is what that function gives a 30-frame short video, and it is the right
  * floor for a transcript-only capture too: the whole input is one transcript,
  * and a 3-hour talk's is ~200 KB of text — large for a prompt, but nothing like
  * multi-turn image reading. It bounds a background job nothing waits on.
@@ -61,9 +66,14 @@ export interface CaptureOneShotOptions {
   extraDirs?: string[];
   /**
    * Thinking budget. Defaults to {@link CAPTURE_THINKING_MAX_TOKENS}; pass
-   * `null` to inherit the bot's own budget (TikTok does — its multi-turn frame
-   * reading is genuine visual reasoning, and as a ~10-min background job it has
-   * no first-token latency to protect).
+   * `null` to inherit the bot's own budget, which is what the `deep` KIND asks
+   * for (`captureThinkingFor`). The two short-video verticals pass `null` on
+   * EVERY kind (`SHORT_VIDEO_THINKING` in `src/video/short-video-kinds.ts`):
+   * their multi-turn frame reading is genuine visual reasoning, and a ~10-min
+   * background job has no first-token latency to protect. The 8k knee was
+   * measured on a text-only transcript, not on a frame-reading session, so
+   * they keep the budget they always had; the prompts page reads the same
+   * constant for its chip.
    */
   thinkingMaxTokens?: number | null;
   /**
@@ -146,12 +156,12 @@ export function captureTraceName(source: string): string {
 /**
  * Run a capture vertical's model call with observability attached.
  *
- * The capture summarizers (youtube / x-article / tiktok / anthropic / article)
+ * The capture summarizers (youtube / vimeo / x-article / short-video / anthropic / article)
  * used to call `executeOneShot` bare: no `Tracer`, so a user-triggered summarize left
  * NOTHING on `/traces`, and its `/agents` row carried no bot, model, tokens or
  * trace link. This is the one seam they all route through, so a capture job now
  * traces like a chat turn does — a `capture:<source>` root with a `claude` child
- * span carrying model + tokens + cost, tool child spans underneath it (TikTok's
+ * span carrying model + tokens + cost, tool child spans underneath it (the short-video verticals'
  * frame Reads), and the same telemetry mirrored onto the `/agents` card.
  *
  * Fail-soft by construction: the trace is stamped `error` and re-thrown, so the
@@ -396,18 +406,27 @@ export { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
 import { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
 
 /**
- * Build the shared CATEGORY:/SUMMARY: system-prompt scaffold used by the
- * youtube / x-article / anthropic / article summarizers. Only the intro sentence and the
- * category allowlist vary; the CATEGORY-line + blank-line + SUMMARY-line
- * contract is identical so the shared `parseSummaryResponse` parser works
- * unchanged. (TikTok's prompt is a bespoke multi-turn frame-reading variant
- * and doesn't use this — it interpolates {@link SUMMARY_STRUCTURE_BULLETS}
- * inline instead.)
+ * {@link summarySystemPromptPieces}, JOINED — the shared CATEGORY:/SUMMARY:
+ * scaffold as one string.
  *
- * The template itself lives in {@link summarySystemPromptPieces}, and this is
- * the join of it: `/summaries/prompts` tints the composed prompt by the piece
- * that produced each line, and the only honest source for that is the
- * construction. Two spellings of one scaffold would drift on the first reword.
+ * **No production caller, deliberately.** Every vertical composes its system
+ * prompt from the PIECES instead (`src/<vertical>/prompt.ts` →
+ * `…SystemPromptPieces` → `joinPromptPieces`), because `/summaries/prompts`
+ * tints each line of a composed prompt by the part that produced it and the only
+ * honest source for that is the construction. What this function is for is the
+ * TESTS: `prompt-pieces.test.ts` and `summarizer-shared.test.ts` pin the joined
+ * scaffold against a literal, which is the change-detector for a reword nobody
+ * meant. Keeping the join defined AS the join is what keeps that one template
+ * rather than two.
+ *
+ * The scaffold itself: only the intro sentence and the category allowlist vary,
+ * and the CATEGORY-line + blank-line + SUMMARY-line contract is identical
+ * everywhere so the shared `parseSummaryResponse` works unchanged. The
+ * short-video verticals sit on the `before`/`after` SLOTS
+ * ({@link SummaryEnvelopeSlots}) — frame-reading rules numbered ahead of the
+ * CATEGORY step, no-commentary rule after the structure — which is what their
+ * hand-rolled envelope used to spell out. A caller that passes no slots gets
+ * exactly what it got before the slots existed, bytes and pieces alike.
  */
 export function buildSummarySystemPrompt(
   intro: string,
@@ -418,8 +437,9 @@ export function buildSummarySystemPrompt(
    * vertical that has no kind picker is unchanged.
    */
   structure: string = SUMMARY_STRUCTURE_BULLETS.join("\n"),
+  slots: SummaryEnvelopeSlots = {},
 ): string {
-  return joinPromptPieces(summarySystemPromptPieces(intro, categories, structure));
+  return joinPromptPieces(summarySystemPromptPieces(intro, categories, structure, slots));
 }
 
 /** How long an ingest of a body this size may take. */
@@ -452,7 +472,7 @@ export function ingestTimeoutFor(bodyBytes: number): number {
 
 /**
  * Best-effort POST of a finished summary to a Huginn `<vertical>/ingest`
- * endpoint, shared by the youtube / x-article / tiktok / article summarizers. A failure
+ * endpoint, shared by every capture summarizer. A failure
  * here never fails the job (the summary already streamed to the client) — it
  * logs a warn and skips the "similar" enrichment. On success, any returned
  * `similar` articles are handed back via `onSimilar`.

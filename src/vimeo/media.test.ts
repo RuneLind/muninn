@@ -359,24 +359,50 @@ describe("downloadRendition", () => {
     expect(existsSync(out)).toBe(false);
   });
 
+  /**
+   * The budget is spent BETWEEN segments, and the error names the operation's
+   * own clock rather than the sliver the last segment was handed.
+   *
+   * **The budget is 400 ms against a 300 ms fetch, and the ratio is the point.**
+   * This case used to race a 15 ms fetch against a 20 ms budget — 5 ms of slack,
+   * which is inside the noise of a loaded 2-core runner, and this PR changed
+   * which files share this file's `bun test` process (it added three to link 0),
+   * so "a file this PR does not touch" is not a reason to leave it. 100 ms of
+   * slack is what makes the outcome below a fact: segment 0 completes at ~300 ms
+   * (setTimeout never fires early), leaving ~100 ms for segment 1, whose own
+   * budget is therefore `remaining` and whose abort lands at or after the
+   * deadline. Measured on this machine: segment 0 completes at 301 ms and the
+   * failure lands at 401 ms — 100 ms clear of the 300 ms fetch it races.
+   *
+   * Three assertions, and none of them is a wall-clock reading:
+   *
+   *  - `2` fetches issued — the budget bound between segment 0 and segment 1,
+   *    not inside segment 0. A per-segment budget would issue more.
+   *  - `1/6 segments` — exactly one made it, for the same reason.
+   *  - the message names the RENDITION clock and NOT a segment one:
+   *    "Segment download timed out after 2ms" is true and useless.
+   */
   test("the whole-operation budget binds across segments, not only inside one", async () => {
     const m = fixture();
     const rep = rep4(m);
-    // Each fetch is fast; the budget is spent between them.
+    let fetches = 0;
     const impl = (async (input: string | URL | Request) => {
+      fetches++;
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 300));
       return new Response(segmentBody(url), { status: 200 });
     }) as unknown as typeof fetch;
     const out = join(dir(), "slow.mp4");
     const outcome = await downloadRendition(MANIFEST_URL, m, rep, [0, 1, 2, 3, 4, 5], out, {
       fetchImpl: impl,
-      timeoutMs: 20,
+      timeoutMs: 400,
     }).catch((e) => e);
     expect(outcome).toBeInstanceOf(VimeoMediaDownloadError);
-    // The WHOLE operation's budget is named, not the sliver the last segment
-    // was handed — "Segment download timed out after 2ms" is true and useless.
-    expect((outcome as Error).message).toMatch(/Rendition download timed out after 20ms \(\d\/6 segments\)/);
+    expect(fetches).toBe(2);
+    expect((outcome as Error).message).toBe(
+      "Rendition download timed out after 400ms (1/6 segments)",
+    );
+    expect((outcome as Error).message).not.toMatch(/Segment download timed out/);
     expect(existsSync(out)).toBe(false);
   });
 });
