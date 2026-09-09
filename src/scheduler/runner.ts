@@ -172,7 +172,10 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
       if (deleted > 0) {
         log.info("Cleaned up {count} old traces", { botName, count: deleted });
       }
-      const deletedSnapshots = await cleanupOldSnapshots(config.promptSnapshotsRetentionDays);
+      const deletedSnapshots = await cleanupOldSnapshots({
+        chatDays: config.promptSnapshotsRetentionDays,
+        captureDays: config.promptSnapshotsCaptureRetentionDays,
+      });
       if (deletedSnapshots > 0) {
         log.info("Cleaned up {count} old prompt snapshots", { botName, count: deletedSnapshots });
       }

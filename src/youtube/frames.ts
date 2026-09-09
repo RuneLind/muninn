@@ -16,9 +16,13 @@
  * fetched. With frames off, nothing in this module is reached and the capture
  * is byte-identical to the one that shipped before it.
  *
- * No I/O and no imports at all — so it is unit-tested in the shared chunk, with
- * no `mock.module` and no yt-dlp.
+ * No I/O, and its only import is the dependency-free `src/summaries/truncation.ts`
+ * leaf (the truncation note and the byte-safe head, shared with the stored
+ * prompt snapshot) — so it is unit-tested in the shared chunk, with no
+ * `mock.module` and no yt-dlp.
  */
+
+import { TRANSCRIPT_TRUNCATION_NOTE, headWithinBytes } from "../summaries/truncation.ts";
 
 /**
  * The yt-dlp format selector for a frames download.
@@ -178,9 +182,13 @@ export function youtubeDownloadTimeoutFor(durationSec: number): number {
   return Math.min(1_800_000, Math.max(300_000, scaled));
 }
 
-/** The line a truncated transcript ends on, so a reader never takes the cut for the end of the talk. */
-export const TRANSCRIPT_TRUNCATION_NOTE =
-  "_(transcript truncated — the talk continues past this point.)_";
+/**
+ * The truncation note and the byte-safe head, re-exported so every existing
+ * importer of this module keeps its import: both moved to the dependency-free
+ * `src/summaries/truncation.ts` when the stored prompt snapshot became a second
+ * caller (`src/db` may not import a vertical).
+ */
+export { TRANSCRIPT_TRUNCATION_NOTE } from "../summaries/truncation.ts";
 
 /** What {@link capTranscriptWindows} did, in the two numbers a caller can log. */
 export interface CappedTranscript {
@@ -194,44 +202,6 @@ export interface CappedTranscript {
    * answers with the note by itself, and the note is ~65 bytes.
    */
   readonly keptBytes: number;
-}
-
-/**
- * The longest prefix of `text` that fits in `maxBytes`, cut at a boundary a
- * reader can see and never inside a code point.
- *
- * **The window shape this has to survive is TWO lines**, not many:
- * huginn's `format_transcript_windows` emits `### [HH:MM:SS]\n<the window's
- * 120 s of speech as ONE unbroken line>`. So a cut taken at the last NEWLINE
- * finds only the newline under the heading, and the "head of the first window"
- * comes out as a timestamp with nothing beneath it — inert on the exact input
- * this function exists for. The rule is therefore:
- *
- *  - **A newline PAST the heading** ⇒ cut there, so no half-line survives. This
- *    is the many-line case (a whisper transcript, a hand-written fixture).
- *  - **Otherwise** ⇒ cut at the last SPACE inside the budget, keeping the
- *    heading line, so no half-WORD survives.
- *  - **No space either** — a CJK run has neither — ⇒ the byte cut stands, and
- *    the U+FFFD trim below is the only thing between it and a `�` in the stored
- *    document. That trim is load-bearing exactly here.
- *
- * Byte-safe by construction: the slice is decoded, and a multi-byte sequence
- * cut in half decodes to a single trailing U+FFFD, which is dropped.
- *
- * Returns `""` when the budget did not even reach the end of the transcript's
- * FIRST line — that line is the `### [HH:MM:SS]` heading, and a fragment of a
- * timestamp is not a head of the talk. The caller answers with the note alone.
- */
-function headWithinBytes(text: string, maxBytes: number): string {
-  if (maxBytes <= 0) return "";
-  const sliced = new TextDecoder().decode(new TextEncoder().encode(text).slice(0, maxBytes));
-  const head = sliced.endsWith("�") ? sliced.slice(0, -1) : sliced;
-  const firstNewline = head.indexOf("\n");
-  if (firstNewline === -1 && text.includes("\n")) return "";
-  const lastNewline = head.lastIndexOf("\n");
-  if (lastNewline > firstNewline) return head.slice(0, lastNewline).trimEnd();
-  const lastSpace = head.lastIndexOf(" ");
-  return (lastSpace > firstNewline ? head.slice(0, lastSpace) : head).trimEnd();
 }
 
 /**

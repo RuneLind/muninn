@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
+import { getDb } from "./client.ts";
 import {
   saveSpan,
   updateSpan,
@@ -7,6 +8,7 @@ import {
   getTrace,
   getTraceFilterOptions,
   cleanupOldTraces,
+  traceExists,
 } from "./traces.ts";
 
 setupTestDb();
@@ -1107,5 +1109,33 @@ describe("traces", () => {
       expect(remaining.find((t) => t.id === oldId)).toBeUndefined();
       expect(remaining.find((t) => t.id === newSpan.id)).toBeTruthy();
     });
+  });
+});
+
+/**
+ * The yes/no the summaries prompt route asks.
+ *
+ * `getTraceOwner` answers it as a side effect, but it sorts to find the ROOT —
+ * work a caller that only wants "is the waterfall still there?" does not need.
+ */
+describe("traceExists", () => {
+  test("true once any span of the trace is stored", async () => {
+    const span = makeRootSpan();
+    expect(await traceExists(span.traceId)).toBe(false);
+    await saveSpan(span as never);
+    expect(await traceExists(span.traceId)).toBe(true);
+  });
+
+  test("false after the trace is swept, which is the case it exists for", async () => {
+    const span = makeRootSpan();
+    await saveSpan(span as never);
+    // `cleanupOldTraces` sweeps on created_at, not started_at.
+    await getDb()`UPDATE traces SET created_at = NOW() - INTERVAL '90 days' WHERE trace_id = ${span.traceId}`;
+    await cleanupOldTraces(7);
+    expect(await traceExists(span.traceId)).toBe(false);
+  });
+
+  test("false for an id nothing was ever written under", async () => {
+    expect(await traceExists(crypto.randomUUID())).toBe(false);
   });
 });

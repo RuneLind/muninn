@@ -30,6 +30,17 @@ export function tracesPromptModalStyles(): string {
       border-bottom: 1px solid var(--border-primary);
     }
     .prompt-modal-header h3 { font-size: 14px; color: var(--text-primary); }
+    .prompt-modal-title { display: flex; align-items: baseline; gap: 8px; }
+    /* Which PASS is on screen. A capture trace holds more than one prompt
+       (a selection pass and a summary pass), so an unnamed modal is ambiguous. */
+    .prompt-pass-label {
+      font-size: 11px;
+      /* --text-muted, not --text-faint: measured against --bg-panel, faint is
+         2.50:1 (dark) / 2.62:1 (light) and dim 3.24 / 3.74, while muted is
+         5.26 / 4.94. At 11px this is the label least able to afford 2.5:1. */
+      color: var(--text-muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
     .prompt-modal-close {
       background: none;
       border: none;
@@ -241,7 +252,10 @@ export function tracesPromptModalHtml(): string {
   <div class="prompt-modal-backdrop" id="promptModalBackdrop" onclick="closePromptModal(event)">
     <div class="prompt-modal" onclick="event.stopPropagation()">
       <div class="prompt-modal-header">
-        <h3>Prompt Snapshot</h3>
+        <div class="prompt-modal-title">
+          <h3>Prompt Snapshot</h3>
+          <span class="prompt-pass-label" id="promptPassLabel"></span>
+        </div>
         <button class="prompt-modal-close" onclick="closePromptModal()">&times;</button>
       </div>
       <div class="prompt-stats" id="promptStats"></div>
@@ -258,13 +272,41 @@ export function tracesPromptModalHtml(): string {
 
 export function tracesPromptModalScript(): string {
   return `
-    let promptCache = {};  // traceId -> { systemPrompt, userPrompt } | null
+    // Keyed on traceId AND pass: one capture trace holds a selection prompt and
+    // a summary prompt, and a traceId-only key served the second opener the
+    // first one's body.
+    //
+    // ONLY a 2xx body is ever stored. A miss is left ABSENT, so the next open
+    // asks again — three reasons, and each was a defect: a capture's snapshot is
+    // written after the model call, so a 404 is "not yet" and caching it made
+    // the prompt unreachable for the life of the page; a 500 or a 403 stored the
+    // error OBJECT, which is truthy, so renderPromptTab was handed {error}
+    // and read .systemPrompt.length off undefined, outside any try/catch; and
+    // a retry after a restart or a login had nothing to re-ask.
+    let promptCache = {};  // "<traceId>|<pass>" -> { systemPrompt, userPrompt, pass }
     let activePromptTab = 'system';
+    let activePromptKey = null;
 
-    async function openPromptModal() {
+    function promptCacheKey(traceId, pass) {
+      return traceId + '|' + (pass || '');
+    }
+
+    /** What the header says a prompt is. A chat turn has one pass, labelled with
+     *  the empty string, which as a chip would read as a missing value. */
+    function passLabelText(pass) {
+      if (pass === undefined || pass === null) return '';
+      return pass === '' ? 'chat' : 'pass: ' + pass;
+    }
+
+    /**
+     * @param pass optional — the pass to open on, e.g. the selection one. Omitted, the
+     *   route picks the summary pass, which is what a trace row means.
+     */
+    async function openPromptModal(pass) {
       if (!currentWaterfallTraceId) return;
       const backdrop = document.getElementById('promptModalBackdrop');
       const contentEl = document.getElementById('promptContent');
+      const passLabel = document.getElementById('promptPassLabel');
       contentEl.innerHTML = '<div class="prompt-unavailable">Loading...</div>';
       backdrop.classList.add('visible');
       activePromptTab = 'user';
@@ -272,22 +314,45 @@ export function tracesPromptModalScript(): string {
       document.getElementById('tabUser').classList.add('active');
       renderPromptStats();
 
+      const key = promptCacheKey(currentWaterfallTraceId, pass);
+      activePromptKey = key;
+      if (passLabel) passLabel.textContent = '';
+
+      // A 5xx on THIS open. The reader is told a different thing then: the row
+      // may well exist and the server could not say, while "expired or not
+      // captured" is a statement about the archive that ends the search. Kept
+      // per-open rather than in the cache, which stores only 2xx bodies.
+      let serverFailed = false;
+
       try {
-        if (!promptCache[currentWaterfallTraceId]) {
-          const res = await fetch('/api/prompts/' + currentWaterfallTraceId);
-          if (res.status === 404) {
-            promptCache[currentWaterfallTraceId] = null;
-          } else {
-            promptCache[currentWaterfallTraceId] = await res.json();
+        if (promptCache[key] === undefined) {
+          const url = '/api/prompts/' + currentWaterfallTraceId +
+            (pass ? '?pass=' + encodeURIComponent(pass) : '');
+          const res = await fetch(url);
+          if (res.ok) {
+            promptCache[key] = await res.json();
+          } else if (res.status !== 404) {
+            serverFailed = res.status >= 500;
+            console.warn('Prompt snapshot request failed', res.status, url);
           }
         }
-        const data = promptCache[currentWaterfallTraceId];
+        // Superseded: a second open (or a hashchange) started while this fetch
+        // was in flight, and that call owns the modal now. The body above is
+        // still cached under its OWN key — only the paint is abandoned, so a
+        // slow answer to an abandoned open cannot overwrite the newer one.
+        if (activePromptKey !== key) return;
+        const data = promptCache[key];
         if (!data) {
-          contentEl.innerHTML = '<div class="prompt-unavailable">Prompt snapshot not available (expired or not captured)</div>';
+          contentEl.innerHTML = serverFailed
+            ? '<div class="prompt-unavailable">Could not load the prompt snapshot (server error) — retry</div>'
+            : '<div class="prompt-unavailable">Prompt snapshot not available (expired or not captured)</div>';
           document.getElementById('systemCharCount').textContent = '';
           document.getElementById('userCharCount').textContent = '';
           return;
         }
+        // The pass the ROUTE answered with, never the one asked for: with no
+        // pass in the request the answer is whichever row the default read won.
+        if (passLabel) passLabel.textContent = passLabelText(data.pass);
         document.getElementById('systemCharCount').textContent = '(' + fmtCharCount(data.systemPrompt.length) + ')';
         document.getElementById('userCharCount').textContent = '(' + fmtCharCount(data.userPrompt.length) + ')';
         renderPromptTab(data);
@@ -503,13 +568,26 @@ export function tracesPromptModalScript(): string {
       activePromptTab = tab;
       document.getElementById('tabSystem').classList.toggle('active', tab === 'system');
       document.getElementById('tabUser').classList.toggle('active', tab === 'user');
-      const data = promptCache[currentWaterfallTraceId];
+      // The ACTIVE KEY, never currentWaterfallTraceId: a pass-scoped entry is
+      // stored under "<trace>|<pass>", so keying the re-render on the bare trace
+      // id renders whichever pass happened to be cached under "<trace>|" — or
+      // nothing at all, silently leaving the other tab's body on screen.
+      const data = activePromptKey ? promptCache[activePromptKey] : null;
       if (data) renderPromptTab(data);
     }
 
     function closePromptModal(event) {
       if (event && event.target !== event.currentTarget) return;
       document.getElementById('promptModalBackdrop').classList.remove('visible');
+      // activePromptKey means "the prompt currently on screen", and after a
+      // close there is none — left set, it kept switchPromptTab and
+      // jumpToSection able to repaint a dismissed prompt from a stale key.
+      // NOT reachable by pointer today: both entry points are buttons inside
+      // the backdrop, which is display:none while hidden. This is the state
+      // staying honest, so the next affordance on those functions inherits a
+      // cleared key rather than the last trace's. The cache is untouched.
+      // (No backticks in this string: it lives inside a template literal.)
+      activePromptKey = null;
     }
 
     function fmtCharCount(n) {

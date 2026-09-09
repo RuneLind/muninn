@@ -283,3 +283,165 @@ test("closeWaterfall + closeSpanDetails don't throw against the stub DOM", () =>
   ctx.closeSpanDetails();
   ctx.closeWaterfall();
 });
+
+/**
+ * `/traces#<traceId>` opens a waterfall; `#<traceId>/prompt/<pass>` opens the
+ * prompt modal on that pass on top of it — the link shape a /summaries doc-panel
+ * control will offer while a capture's trace is still alive (that control is a
+ * later PR; nothing links here yet).
+ *
+ * The parse lives in the bundle rather than in the page's inline script so it
+ * can be driven here: a `#` fragment is not URL-decoded by the browser, the
+ * pass itself contains a `:` (`claude:select`), and both halves are easy to get
+ * wrong invisibly — a mis-parse leaves the modal shut with no error anywhere.
+ */
+const parseHash = (hash: string) =>
+  (ctx as unknown as { parseTraceHash: (h: string) => unknown }).parseTraceHash(hash);
+
+test("a bare trace hash asks for no prompt", () => {
+  expect(parseHash("#11111111-2222-3333-4444-555555555555")).toEqual({ traceId: "11111111-2222-3333-4444-555555555555", prompt: false });
+});
+
+test("an empty hash yields no trace", () => {
+  expect(parseHash("")).toBeNull();
+  expect(parseHash("#")).toBeNull();
+});
+
+test("#<id>/prompt asks for the DEFAULT pass", () => {
+  expect(parseHash("#11111111-2222-3333-4444-555555555555/prompt")).toEqual({ traceId: "11111111-2222-3333-4444-555555555555", prompt: true });
+});
+
+test("#<id>/prompt/<pass> carries the url-decoded pass", () => {
+  expect(parseHash("#11111111-2222-3333-4444-555555555555/prompt/claude%3Aselect")).toEqual({
+    traceId: "11111111-2222-3333-4444-555555555555",
+    prompt: true,
+    pass: "claude:select",
+  });
+});
+
+test("an undecodable pass still opens the trace on the default pass", () => {
+  // decodeURIComponent throws on a lone `%`; a bad link must not take the
+  // waterfall down with it.
+  expect(parseHash("#11111111-2222-3333-4444-555555555555/prompt/%")).toEqual({ traceId: "11111111-2222-3333-4444-555555555555", prompt: true });
+});
+
+test("a trailing slash after prompt is the default pass, not an empty one", () => {
+  expect(parseHash("#11111111-2222-3333-4444-555555555555/prompt/")).toEqual({ traceId: "11111111-2222-3333-4444-555555555555", prompt: true });
+});
+
+/**
+ * The trace id is a UUID, and the parse says so.
+ *
+ * It is interpolated into a fetch url and into a `querySelector` attribute
+ * selector, and a fragment is not url-decoded by the browser — so a junk id
+ * reaches both verbatim. `#<id>?x=1/prompt/claude` builds
+ * `/api/prompts/<id>?x=1?pass=claude` (a second `?`, i.e. a request nobody
+ * wrote), and `#a"]x/prompt` throws inside `querySelector` and takes the whole
+ * deep-link handler with it. Every id this page links to is a `traces.trace_id`
+ * UUID, so anything else is a malformed link and the right answer is to ignore
+ * the fragment and render the ordinary list.
+ */
+const VALID_ID = "11111111-2222-3333-4444-555555555555";
+
+test("a query string smuggled into the id is rejected, not passed to the fetch", () => {
+  expect(parseHash("#" + VALID_ID + "?x=1/prompt/claude")).toBeNull();
+});
+
+test("an id carrying selector syntax is rejected", () => {
+  expect(parseHash('#a"]x/prompt')).toBeNull();
+  expect(parseHash('#' + VALID_ID + '"]/prompt')).toBeNull();
+});
+
+test("a short non-UUID id is rejected", () => {
+  expect(parseHash("#abc-123")).toBeNull();
+  expect(parseHash("#abc-123/prompt")).toBeNull();
+});
+
+test("an uppercase UUID is still a UUID", () => {
+  expect(parseHash("#" + VALID_ID.toUpperCase())).toEqual({
+    traceId: VALID_ID.toUpperCase(),
+    prompt: false,
+  });
+});
+
+/**
+ * The page's own deep-link handler, lifted out of `traces-page.ts` and run.
+ *
+ * It lives in an inline `<script>` with no bundle, so the only honest way to
+ * test it is to evaluate the real text (the `connector-selector.test.ts`
+ * precedent). What it has to get right is the BACK button: `hashchange` fires
+ * on every fragment change, and going back from `#<id>/prompt/<pass>` to
+ * `#<id>` used to take the non-prompt branch, which did nothing at all — so the
+ * modal the fragment no longer asks for stayed open over the waterfall.
+ */
+import { renderTracesPage } from "../traces-page.ts";
+
+interface HashCtx {
+  openTraceFromHash: () => void;
+  location: { hash: string };
+  [k: string]: unknown;
+}
+
+async function hashHandlerCtx(): Promise<{ ctx: HashCtx; calls: string[] }> {
+  const page = await renderTracesPage();
+  const match = page.match(/function openTraceFromHash\(\) \{[\s\S]*?\n {4}\}/);
+  if (!match) throw new Error("openTraceFromHash not found in the rendered page");
+  const calls: string[] = [];
+  const c = {
+    location: { hash: "" },
+    parseTraceHash: (h: string) => (globalThis as unknown as {
+      __parse: (h: string) => unknown;
+    }).__parse(h),
+    loadWaterfall: (id: string) => { calls.push("load:" + id); return Promise.resolve(); },
+    openPromptModal: (pass?: string) => { calls.push("open:" + (pass ?? "")); },
+    closePromptModal: () => { calls.push("close"); },
+    document: { querySelector: () => null },
+    Promise,
+    console,
+  } as unknown as HashCtx;
+  vm.createContext(c);
+  vm.runInContext(match[0], c);
+  return { ctx: c, calls };
+}
+
+// The real parser, reachable from the vm context above.
+(globalThis as unknown as { __parse: (h: string) => unknown }).__parse = (h) =>
+  (ctx as unknown as { parseTraceHash: (h: string) => unknown }).parseTraceHash(h);
+
+test("the page's hash handler opens the modal for #<id>/prompt/<pass>", async () => {
+  const { ctx: c, calls } = await hashHandlerCtx();
+  c.location.hash = "#" + VALID_ID + "/prompt/claude%3Aselect";
+  c.openTraceFromHash();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(calls).toEqual(["load:" + VALID_ID, "open:claude:select"]);
+});
+
+test("going BACK to the bare trace hash closes the modal", async () => {
+  const { ctx: c, calls } = await hashHandlerCtx();
+  c.location.hash = "#" + VALID_ID + "/prompt";
+  c.openTraceFromHash();
+  await Promise.resolve();
+  await Promise.resolve();
+  calls.length = 0;
+
+  // Back: the fragment no longer asks for a prompt, so the modal must go.
+  c.location.hash = "#" + VALID_ID;
+  c.openTraceFromHash();
+  expect(calls).toEqual(["load:" + VALID_ID, "close"]);
+});
+
+test("a junk fragment closes the modal too, rather than stranding it", async () => {
+  const { ctx: c, calls } = await hashHandlerCtx();
+  c.location.hash = "#" + VALID_ID + "/prompt";
+  c.openTraceFromHash();
+  await Promise.resolve();
+  await Promise.resolve();
+  calls.length = 0;
+
+  // A malformed id parses to null — the fragment asks for nothing, and the
+  // modal is not what "nothing" looks like.
+  c.location.hash = "#not-a-uuid";
+  c.openTraceFromHash();
+  expect(calls).toEqual(["close"]);
+});
