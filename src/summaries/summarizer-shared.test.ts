@@ -507,8 +507,11 @@ describe("runCaptureOneShot", () => {
   // fired an INSERT that Postgres rejected on a later turn of the loop, and the
   // warn arrived inside whichever test was capturing logs NEXT —
   // `src/summaries/frames.test.ts`'s `a refused id is also SAID OUT LOUD`,
-  // which asserts its own warning list is `[]`. Nineteen minutes of unrelated
-  // red for a line belonging to a test that had already passed.
+  // which asserts its own warning list is `[]` (four such records in the failed
+  // run). A CI red for a line belonging to a test that had already passed. The
+  // budget makes a FAST rejection land here; one arriving after the budget
+  // still leaks, so the capture cases below use real UUIDs and only the case
+  // about a refused write sends an id Postgres rejects.
 
   /**
    * A trace id `savePromptSnapshot` cannot store, whether or not this process

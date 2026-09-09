@@ -323,15 +323,21 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
  * inside somebody else's test: a capture case with a made-up trace id fired an
  * INSERT Postgres rejected a turn later, and the warn below landed inside
  * `src/summaries/frames.test.ts`'s log capture, whose assertion is that its own
- * warning list is empty. Nineteen minutes of CI red for a line belonging to a
- * test that had already passed.
+ * warning list is empty (four such records in the failed run) — a CI red for a
+ * line belonging to a test that had already passed.
  *
- * The budget buys back both: a write that answers or fails FAST — which is
- * every rejected one, and every healthy INSERT — settles inside the call that
- * started it, and a write that is genuinely stuck costs the capture the budget
- * and no more. Past it the promise is simply abandoned by this caller; it keeps
- * running with the `catch` below still attached, so a late failure is still
- * said out loud. `CaptureOneShotOptions.onSnapshotSettled` is how a TEST gets
+ * The budget buys back both: a write that answers or fails INSIDE the budget —
+ * every healthy INSERT, and a rejection that arrives fast, which is what an
+ * unparseable id or a refused column gives — settles inside the call that
+ * started it, and a write that is genuinely stuck costs that pass the budget
+ * and no more (a two-pass capture can pay it twice). Past it the promise is
+ * simply abandoned by this caller; it keeps running with the `catch` below
+ * still attached, so a late failure is still said out loud — and lands wherever
+ * the loop is by then. That residual is real: a `statement_timeout`, a
+ * `lock_timeout` or a reset connection rejects AFTER the budget, and in a
+ * single-process test chunk that warn can still reach another test. What closed
+ * the measured red was the tests using real UUIDs; the budget bounds the
+ * production cost. `CaptureOneShotOptions.onSnapshotSettled` is how a TEST gets
  * hold of the WHOLE promise; production callers pass nothing.
  *
  * Gated on tracing, because the row is keyed on a trace id: a `Tracer` mints one
