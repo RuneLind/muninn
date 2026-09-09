@@ -187,10 +187,19 @@ describe("the chips", () => {
       "auto-caption rider",
       "language rider",
       "frames: slides quoted inline by address",
-      "visual detail: selected",
+      // NO visual-detail chip: `buildVimeoUserPrompt` takes no policy argument,
+      // so nothing in a Vimeo prompt varies with that picker. Only YouTube's
+      // user builder reads one.
       "model: the bot's own",
       "thinking: capped at 8000",
     ]);
+    expect(chips.some((chip) => chip.startsWith("visual detail:"))).toBe(false);
+    // The intro split leaves TWO intro spans — the lead and the separator that
+    // follows the rider — and the separator is whitespace, so it is a span to
+    // tint and not a part to list. One chip, two spans.
+    const vimeoPieceIds = cell(matrix, "vimeo", "standard").systemPieces.map((p) => p.id);
+    expect(vimeoPieceIds.filter((id) => id === "intro")).toHaveLength(2);
+    expect(chips.filter((chip) => chip === "intro")).toHaveLength(1);
     expect(chips.indexOf("auto-caption rider")).toBeLessThan(chips.indexOf("language rider"));
     // The same chip text as the YouTube row's, since it is the same sentence.
     expect(cell(matrix, "youtube", "standard").chips).toContain("windowed transcript rider");
@@ -445,25 +454,52 @@ describe("the text cells", () => {
 
 describe("the fixed axes the page pins", () => {
   /**
-   * Every source names the axes this page CHOSE, and the claim is checked
-   * against the composed prompt rather than trusted: a row that says
-   * "captions: auto" while the cell was built with `manual` is a page lying
-   * about the thing it exists to show.
+   * What this check IS and what it is NOT, stated because the difference is the
+   * whole value of it.
+   *
+   * It is ONE-DIRECTIONAL. For every axis a row DECLARES it asserts the matching
+   * property of the composed prompt, so a row that says "captions: auto" while
+   * the cell was built with `manual` fails here. It cannot do the other
+   * direction: an axis a builder branches on and no row declares is INVISIBLE to
+   * it, because nothing enumerates a builder's branch points mechanically. That
+   * list is maintained BY HAND, from the branch points named in the comment
+   * beside each row's `fixedAxes` — and it was wrong once already: the two
+   * short-video rows declared nothing while their user builders branch on an
+   * empty transcript and on an empty frame list, and this test pinned the
+   * omission with `toEqual([])`.
+   *
+   * So: adding a branch to a builder without adding its axis here still passes.
+   * The defence against that is the comment beside each row, not this test.
    */
-  test("every source states its fixed axes, and each claim matches the composed prompt", () => {
+  test("every declared axis agrees with the composed prompt", () => {
     const matrix = buildPromptMatrix(bot(), [bot()]);
     const axes = Object.fromEntries(
       matrix.rows.map((r) => [r.source.id, r.source.fixedAxes]),
     ) as Record<string, readonly string[]>;
+    const noteText = PLACEHOLDER_FRAMES[0]!.note!;
 
-    expect(axes["youtube"]).toEqual(["windowed transcript: yes", "visual detail: selected"]);
+    expect(axes["youtube"]).toEqual([
+      "windowed transcript: yes",
+      "frames: present",
+      "one frame carries a selection note",
+      "visual detail: selected",
+    ]);
     expect(cell(matrix, "youtube", "standard").systemPieces.map((p) => p.id)).toContain("rider-windowed");
-    expect(cell(matrix, "youtube", "standard").userPrompt).toContain("At most 8 distinct frames");
+    const youtubeUser = cell(matrix, "youtube", "standard").userPrompt;
+    expect(youtubeUser).toContain("Slide frames");
+    // The note channel: the 60 s frame's line carries it, the 120 s one does not.
+    expect(youtubeUser).toContain(`${PLACEHOLDER_FRAMES[0]!.path} — ${noteText}`);
+    expect(youtubeUser).toContain(`${PLACEHOLDER_FRAMES[1]!.path}\n`);
+    expect(youtubeUser).not.toContain(`${PLACEHOLDER_FRAMES[1]!.path} —`);
+    // `selected` states one cap and no appendix; `detailed` would say both.
+    expect(youtubeUser).toContain("At most 8 distinct frames");
+    expect(youtubeUser).not.toContain("## Visual reference");
 
     expect(axes["vimeo"]).toEqual([
       "captions: auto-generated",
       "output language: English",
-      "visual detail: selected",
+      "frames: present",
+      "one frame carries a selection note",
     ]);
     const vimeoIds = cell(matrix, "vimeo", "standard").systemPieces.map((p) => p.id);
     expect(vimeoIds).toContain("rider-auto-caption");
@@ -471,9 +507,20 @@ describe("the fixed axes the page pins", () => {
     expect(cell(matrix, "vimeo", "standard").systemPrompt).toContain(
       "LANGUAGE: write the summary in English",
     );
+    const vimeoUser = cell(matrix, "vimeo", "standard").userPrompt;
+    expect(vimeoUser).toContain("Slide frames");
+    expect(vimeoUser).toContain(`${PLACEHOLDER_FRAMES[0]!.path} — ${noteText}`);
+    expect(vimeoUser).not.toContain(`${PLACEHOLDER_FRAMES[1]!.path} —`);
 
-    expect(axes["tiktok"]).toEqual([]);
-    expect(axes["x-video"]).toEqual([]);
+    // The two short-video user builders branch twice each, and the page pins the
+    // present-transcript, present-frames form of both.
+    for (const id of ["tiktok", "x-video"]) {
+      expect(axes[id]).toEqual(["transcript: present", "keyframes: present"]);
+      const user = cell(matrix, id, null).userPrompt;
+      expect(user.startsWith("Transcript:\n")).toBe(true);
+      expect(user).not.toContain("No speech detected");
+      expect(user).toContain("Keyframes (read each image before summarizing):");
+    }
 
     for (const id of ["x-article", "article"]) {
       expect(axes[id]).toEqual(["author and url: both present"]);
@@ -485,6 +532,17 @@ describe("the fixed axes the page pins", () => {
     const anthropicIds = cell(matrix, "anthropic", null).systemPieces.map((p) => p.id);
     expect(anthropicIds).not.toContain("rider-enrichment");
     expect(cell(matrix, "anthropic", null).systemPrompt).toContain("Anthropic / Claude ecosystem release");
+  });
+
+  /**
+   * The renderer has ONE `fixed:` wording now, because every row has an axis to
+   * name. A row that lost its axes would render `fixed:` followed by nothing —
+   * so the emptiness is caught here rather than on the page.
+   */
+  test("no row declares an empty axis list", () => {
+    for (const row of buildPromptMatrix(bot(), [bot()]).rows) {
+      expect(row.source.fixedAxes.length).toBeGreaterThan(0);
+    }
   });
 });
 

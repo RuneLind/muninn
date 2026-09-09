@@ -64,27 +64,34 @@ export interface VimeoSystemPromptInput {
 /**
  * The system prompt's pieces, in the contract's order.
  *
- * The scaffold's single `intro` piece is SPLIT in two here, at the boundary
- * between this vertical's own sentence and the shared windowed rider: the rider
- * is a rider wherever it appears, and tinting it as "Intro" told the reader the
- * Vimeo prompt lacks a sentence the YouTube prompt shows. It is a split and not
- * a rewrite — the second text is the remainder of the first (`slice`), so the
- * two concatenate to the piece they replaced and no byte of the prompt moves.
+ * The scaffold's single `intro` piece is SPLIT here, at the boundary between
+ * this vertical's own sentence and the shared windowed rider: the rider is a
+ * rider wherever it appears, and tinting it as "Intro" told the reader the Vimeo
+ * prompt lacks a sentence the YouTube prompt shows. It is a split and not a
+ * rewrite — each text is a `slice` of the piece it replaces, taken at offsets
+ * that leave no gap, so the three concatenate to it and no byte of the prompt
+ * moves.
+ *
+ * THREE spans and not two, because that piece ends in the `\n\n` separating the
+ * intro block from the envelope. Those bytes are the intro's — leaving them on
+ * the rider span tints a rider that runs to the blank line.
  */
 export function vimeoSystemPromptPieces(input: VimeoSystemPromptInput): PromptPiece[] {
+  const riderEnd = INTRO_LEAD.length + WINDOWED_RIDER.length;
   return [
     ...summarySystemPromptPieces(SUMMARIZE_INTRO, VALID_CATEGORIES, input.preset.instruction).flatMap(
       (piece): PromptPiece[] =>
         piece.id === "intro"
           ? [
-              { id: "intro", label: piece.label, text: INTRO_LEAD },
+              { id: "intro", label: piece.label, text: piece.text.slice(0, INTRO_LEAD.length) },
               {
                 id: "rider-windowed",
                 // The label the YouTube prompt gives the same sentence, so the
                 // two rows show one chip and not two spellings of it.
                 label: "Windowed transcript rider",
-                text: piece.text.slice(INTRO_LEAD.length),
+                text: piece.text.slice(INTRO_LEAD.length, riderEnd),
               },
+              { id: "intro", label: piece.label, text: piece.text.slice(riderEnd) },
             ]
           : [piece],
     ),

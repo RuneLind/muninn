@@ -268,7 +268,15 @@ test.describe("Summaries: the capture-prompt matrix", () => {
     await expect(page.locator('[data-fixed="anthropic"]')).toContainText("framing: Anthropic release");
     await expect(page.locator('[data-fixed="anthropic"]')).toContainText("linked-content rider: absent");
     await expect(page.locator('[data-fixed="article"]')).toContainText("author and url: both present");
-    await expect(page.locator('[data-fixed="tiktok"]')).toContainText("no branch");
+    // The two short-video rows: their SYSTEM prompt has no branch, but both user
+    // builders branch on an empty transcript and on an empty frame list, and the
+    // page pins the present form of each. The row said "no branch" until then.
+    for (const id of ["tiktok", "x-video"]) {
+      await expect(page.locator(`[data-fixed="${id}"]`)).toContainText("transcript: present");
+      await expect(page.locator(`[data-fixed="${id}"]`)).toContainText("keyframes: present");
+    }
+    // No row renders the old empty-axes wording any more.
+    await expect(page.locator(".pm-fixed", { hasText: "no branch" })).toHaveCount(0);
 
     // Vimeo's windowed rider is a span of its own, tinted as a rider rather than
     // buried in the intro — and the cell carries the chip that names it.
@@ -279,6 +287,8 @@ test.describe("Summaries: the capture-prompt matrix", () => {
     expect(pieceIds).toEqual([
       "intro",
       "rider-windowed",
+      // The intro block's own trailing separator — intro bytes, intro span.
+      "intro",
       "envelope",
       "structure",
       "context",

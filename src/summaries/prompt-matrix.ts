@@ -156,15 +156,28 @@ export interface PromptMatrixSource {
   /** One clause about the frames (or the absence of them) this capture sends. */
   readonly framesNote: string;
   /**
+   * Whether this vertical's USER-prompt builder takes a visual-detail policy.
+   * Only YouTube's does — `buildVimeoUserPrompt` takes the frames section's
+   * default rules — so a Vimeo cell claiming one would name a picker nothing in
+   * its prompt reads.
+   */
+  readonly readsVisualDetail: boolean;
+  /**
    * The axes THIS PAGE pins, in the reader's words — the choices `cellPrompts`
    * made that a real capture makes per run.
    *
    * A skeleton is only honest if it says which branch it took: the Vimeo cell
    * shows the auto-caption rider and an English summary, the Anthropic cell the
    * release framing with no linked-content rider, and a reader who is not told
-   * that reads a page that quietly omits half of each vertical. Empty where the
-   * prompt has no branch to pin (the two short-video verticals). Every claim is
-   * checked against the composed prompt in `prompt-matrix.test.ts`.
+   * that reads a page that quietly omits half of each vertical.
+   *
+   * **The list is maintained BY HAND**, from the branch points named in the
+   * comment above each row. `prompt-matrix.test.ts` checks every DECLARED axis
+   * against the composed prompt; it cannot find an axis a builder branches on
+   * and no row declares, because nothing enumerates a builder's branch points
+   * mechanically — so a builder that gains a branch has to come back here.
+   * NEVER empty: the renderer has one wording, and a row with no axis renders a
+   * `fixed:` line naming nothing.
    */
   readonly fixedAxes: readonly string[];
 }
@@ -187,7 +200,18 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "slides quoted inline by address",
-    fixedAxes: ["windowed transcript: yes", "visual detail: selected"],
+    // Branch points, from `src/youtube/prompt.ts`: `optionalPiece(input.windowed,
+    // …)` in the system pieces; `frames.length > 0`, the `visualDetail` argument
+    // and `frames.some((f) => (f.note ?? "") !== "")` in `buildYouTubeUserPrompt`.
+    // The note also feeds `visualDetailPolicy`'s must-quote rule, which lives in
+    // the `detailed` branch and is therefore NOT in what this row shows.
+    fixedAxes: [
+      "windowed transcript: yes",
+      "frames: present",
+      "one frame carries a selection note",
+      "visual detail: selected",
+    ],
+    readsVisualDetail: true,
   },
   {
     id: "vimeo",
@@ -197,11 +221,18 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "slides quoted inline by address",
+    // Branch points, from `src/vimeo/prompt.ts`: `optionalPiece(input.captionKind
+    // === "auto", …)` and `languageRider(input.outputLang)` in the system pieces;
+    // `buildVimeoUserPrompt` passes the frames straight to `framesPromptSection`,
+    // which returns "" on an empty list and appends `— <note>` per noted frame.
+    // NO visual-detail axis: that builder takes no policy argument.
     fixedAxes: [
       "captions: auto-generated",
       "output language: English",
-      "visual detail: selected",
+      "frames: present",
+      "one frame carries a selection note",
     ],
+    readsVisualDetail: false,
   },
   {
     id: "tiktok",
@@ -212,7 +243,12 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     // Reading the keyframes IS the reasoning here, so the capture cap is waived.
     run: { thinking: "inherit", model: "bot" },
     framesNote: "keyframes read first, never quoted",
-    fixedAxes: [],
+    // Branch points, from `src/tiktok/prompt.ts`: the SYSTEM pieces have none —
+    // `buildTikTokUserPrompt` has both. `input.transcript ? … : "No speech
+    // detected — summarize from the frames."` (a music-only clip is a real
+    // capture) and `input.frames.length > 0`.
+    fixedAxes: ["transcript: present", "keyframes: present"],
+    readsVisualDetail: false,
   },
   {
     id: "x-video",
@@ -222,7 +258,10 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "hand-rolled",
     run: { thinking: "inherit", model: "bot" },
     framesNote: "keyframes read first, never quoted",
-    fixedAxes: [],
+    // The same two, in `buildXVideoUserPrompt` (`src/x-article/video-prompt.ts`)
+    // — a measured copy-paste twin of the TikTok builder.
+    fixedAxes: ["transcript: present", "keyframes: present"],
+    readsVisualDetail: false,
   },
   {
     id: "x-article",
@@ -232,7 +271,10 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — pasted text",
+    // Branch points, from `src/x-article/prompt.ts`: the optional author and url
+    // context lines. There is no user builder — the pasted text is the prompt.
     fixedAxes: ["author and url: both present"],
+    readsVisualDetail: false,
   },
   {
     id: "article",
@@ -242,7 +284,9 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — pasted text",
+    // The same two optional context lines, in `src/article/prompt.ts`.
     fixedAxes: ["author and url: both present"],
+    readsVisualDetail: false,
   },
   {
     id: "anthropic",
@@ -252,7 +296,11 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "no frames — fetched text",
+    // Branch points, from `src/anthropic/prompt.ts`: the `framing` fork
+    // (`anthropic` / `x-post`) and the enrichment rider. Both are pinned to the
+    // form above; the unshown half is in "Landed as-is" on the PR.
     fixedAxes: ["framing: Anthropic release", "linked-content rider: absent"],
+    readsVisualDetail: false,
   },
 ];
 
@@ -336,11 +384,20 @@ function structureChip(preset: CapturePreset): string {
     : "structure bullets";
 }
 
-/** The chips the system prompt's own pieces contribute, minus the structure one. */
+/**
+ * The chips the system prompt's own pieces contribute, minus the structure one.
+ *
+ * A piece whose text is only whitespace contributes NO chip: it is a separator
+ * between two parts, not a part. The Vimeo intro split produces one (the `\n\n`
+ * between the intro block and the envelope), and without this the cell listed
+ * "intro" twice.
+ */
 function pieceChips(pieces: readonly PromptPiece[], preset: CapturePreset | null): string[] {
-  return pieces.map((p) =>
-    p.id === "structure" && preset !== null ? structureChip(preset) : p.label.toLowerCase(),
-  );
+  return pieces
+    .filter((p) => p.text.trim() !== "")
+    .map((p) =>
+      p.id === "structure" && preset !== null ? structureChip(preset) : p.label.toLowerCase(),
+    );
 }
 
 /** Where a per-bot override of this kind would live, and whether it is there. */
@@ -469,7 +526,7 @@ function buildCell(
     ...(preset === null ? [noKindChip(source.envelope)] : []),
     ...pieceChips(pieces, preset),
     `frames: ${source.framesNote}`,
-    ...(source.medium === "video" && source.kinds
+    ...(source.readsVisualDetail
       ? [`visual detail: ${VISUAL_DETAIL_LABELS[DEFAULT_VISUAL_DETAIL].toLowerCase()}`]
       : []),
     ...runChips(run),

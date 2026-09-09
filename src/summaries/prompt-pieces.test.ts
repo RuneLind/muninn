@@ -172,6 +172,9 @@ describe("the pieces each vertical contributes", () => {
     expect(ids).toEqual([
       "intro",
       "rider-windowed",
+      // The scaffold's own separator between the intro block and the envelope —
+      // the intro's bytes, so an intro span, not a second rider span.
+      "intro",
       "envelope",
       "structure",
       "context",
@@ -185,8 +188,13 @@ describe("the pieces each vertical contributes", () => {
    * Vimeo bakes the windowed-transcript sentence into its intro STRING (unlike
    * YouTube, which appends it as a piece), so the page tinted it as "Intro" and
    * the cell omitted the chip the contract names. It is its own span now — and
-   * the split is a SPLIT: the two texts concatenate to the piece they replaced,
-   * so not one byte of the prompt moved.
+   * the split is a SPLIT: the three texts concatenate to the piece they
+   * replaced, so not one byte of the prompt moved.
+   *
+   * THREE and not two, because the scaffold's intro piece ends in the `\n\n`
+   * that separates the intro block from the envelope. Those bytes are the
+   * intro's; a two-way split hands them to the rider span, which then reads as a
+   * rider running to the blank line.
    */
   test("Vimeo's windowed rider is its own span, and splitting it changed no byte", () => {
     const input = {
@@ -199,16 +207,18 @@ describe("the pieces each vertical contributes", () => {
     const pieces = vimeoSystemPromptPieces(input);
     expect(pieces[0]!.id).toBe("intro");
     expect(pieces[1]!.id).toBe("rider-windowed");
+    expect(pieces[2]!.id).toBe("intro");
     // The scaffold's single intro piece, as it was before the split.
     const scaffoldIntro = summarySystemPromptPieces(
       VIMEO_SUMMARIZE_INTRO,
       VALID_CATEGORIES,
       STANDARD.instruction,
     )[0]!;
-    expect(pieces[0]!.text + pieces[1]!.text).toBe(scaffoldIntro.text);
-    // The rider really is the shared seam's sentence — the one YouTube tints.
-    expect(pieces[1]!.text).toContain(windowedTranscriptRider("talk"));
+    expect(pieces[0]!.text + pieces[1]!.text + pieces[2]!.text).toBe(scaffoldIntro.text);
+    // The rider span is the seam's sentence and NOTHING else — no separator.
+    expect(pieces[1]!.text).toBe(windowedTranscriptRider("talk"));
     expect(pieces[0]!.text).not.toContain(windowedTranscriptRider("talk"));
+    expect(pieces[2]!.text).toBe("\n\n");
     // The chip label is the one the YouTube row shows for the same sentence.
     expect(pieces[1]!.label).toBe(
       youTubeSystemPromptPieces(STANDARD, { windowed: true, title: "T", videoUrl: "U" }).find(

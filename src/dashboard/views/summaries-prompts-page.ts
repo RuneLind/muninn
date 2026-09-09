@@ -122,12 +122,14 @@ export function renderSummariesPromptsPage(matrix: PromptMatrix): string {
       const cells = row.source.kinds
         ? row.cells.map((c) => cellHtml(c, 1)).join("\n          ")
         : cellHtml(row.cells[0]!, kindCount);
-      const fixed =
-        row.source.fixedAxes.length > 0
-          ? `<span class="pm-fixed" data-fixed="${escHtml(row.source.id)}"><b>fixed:</b> ${row.source.fixedAxes
-              .map(escHtml)
-              .join(" · ")}</span>`
-          : `<span class="pm-fixed" data-fixed="${escHtml(row.source.id)}"><b>fixed:</b> nothing — this prompt has no branch</span>`;
+      // ONE wording, because every row has an axis to name. The alternative that
+      // used to live here — "nothing — this prompt has no branch" — was false
+      // exactly where it fired: the two short-video SYSTEM prompts have no
+      // branch, but both user builders branch on an empty transcript and on an
+      // empty frame list. `prompt-matrix.test.ts` pins that no list is empty.
+      const fixed = `<span class="pm-fixed" data-fixed="${escHtml(row.source.id)}"><b>fixed:</b> ${row.source.fixedAxes
+        .map(escHtml)
+        .join(" · ")}</span>`;
       return `<tr data-source="${escHtml(row.source.id)}">
           <th scope="row" class="pm-source">
             <span class="pm-source-label">${escHtml(row.source.label)}</span>
