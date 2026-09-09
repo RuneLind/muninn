@@ -124,6 +124,21 @@ export async function getTraceOwner(
   return { found: true, userId: (row.user_id as string | null) ?? null };
 }
 
+/**
+ * Does this trace still have any span at all?
+ *
+ * `getTraceOwner` answers the same question as a side effect, but it orders by
+ * `(parent_id IS NULL) DESC, started_at ASC` to find the ROOT — work a caller
+ * that only wants a yes/no does not need. `GET /api/summaries/prompt` is that
+ * caller: the prompt snapshot outlives its trace by 83 days, and the only thing
+ * the trace decides there is whether the `/traces` deep link is worth offering.
+ */
+export async function traceExists(traceId: string): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql`SELECT 1 FROM traces WHERE trace_id = ${traceId} LIMIT 1`;
+  return rows.length > 0;
+}
+
 export async function getRecentTraces(
   limit = 50,
   offset = 0,

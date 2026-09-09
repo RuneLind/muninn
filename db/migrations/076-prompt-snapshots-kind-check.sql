@@ -1,0 +1,21 @@
+-- `prompt_snapshots.kind` is a closed set: 'chat' | 'capture'.
+--
+-- The column shipped in 075 with a default and no constraint, so any string was
+-- storable — and the two readers split on the value, not on a type. A row
+-- carrying 'Capture' or 'captures' is retained by the CHAT window (the sweeper's
+-- second branch is `kind <> 'capture'`, so a typo shortens a capture prompt's
+-- life from 90 days to 3 and nothing reports it) and is invisible to
+-- `getLatestCaptureSnapshotByUrl`, whose predicate is `kind = 'capture'`. The
+-- values are matched as literals in both places; the database should enforce
+-- what those places assume.
+--
+-- Its OWN migration rather than an edit to 075, which is already applied on the
+-- dev and test databases: a migration is re-run nowhere once recorded, so an
+-- amended 075 would be a constraint that exists only on a database provisioned
+-- from `db/init.sql`. Both files carry it (the schema-drift guard compares them).
+--
+-- No backfill: every existing row was written by `savePromptSnapshot`, which
+-- passes `params.kind ?? 'chat'` with the type `'chat' | 'capture'`, so the
+-- constraint is already satisfied by construction.
+ALTER TABLE prompt_snapshots
+  ADD CONSTRAINT prompt_snapshots_kind_check CHECK (kind IN ('chat', 'capture'));

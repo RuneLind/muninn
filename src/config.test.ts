@@ -229,3 +229,106 @@ describe("resolveServingProfile", () => {
     expect(message).toContain("default, nais");
   });
 });
+
+/**
+ * Retention windows are DAY COUNTS the sweeper subtracts from `NOW()`, so a
+ * non-positive one is not a shorter window — it is a wipe. `= 0` makes the
+ * scheduler's next tick run `created_at < NOW() - 0 days` over every row in
+ * `prompt_snapshots`, and a negative value deletes rows from the future too.
+ *
+ * They therefore clamp instead of parsing straight through: a value that PARSES
+ * and is below 1 is refused, warned about once and replaced by the default.
+ * Refusing rather than throwing for that band, because the degrade direction
+ * there is the safe one — a typo that keeps prompts three days too long costs
+ * disk, and one that empties the archive is unrecoverable.
+ *
+ * A value that does not parse as an integer at all is the OTHER band and still
+ * throws out of `optionalEnvInt`, refusing the boot. Both are pinned below,
+ * because the docblocks describe two answers and a reader who tried `=ninety`
+ * expecting a warning would find the process gone.
+ */
+describe("prompt-snapshot retention clamps", () => {
+  const CHAT = "PROMPT_SNAPSHOTS_RETENTION_DAYS";
+  const CAPTURE = "PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS";
+  const saved: Record<string, string | undefined> = {};
+
+  function config() {
+    const prevDb = process.env.DATABASE_URL;
+    process.env.DATABASE_URL ??= "postgresql://x@127.0.0.1:5432/x";
+    try {
+      return loadConfig();
+    } finally {
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+    }
+  }
+
+  async function capture(): Promise<LogRecord[]> {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    return records;
+  }
+
+  function set(name: string, value: string | undefined) {
+    if (!(name in saved)) saved[name] = process.env[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+
+  afterEach(async () => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+      delete saved[name];
+    }
+    __resetEnvFlagWarningsForTest();
+    await reset();
+  });
+
+  test("unset ⇒ the shipped windows", () => {
+    set(CHAT, undefined);
+    set(CAPTURE, undefined);
+    const c = config();
+    expect([c.promptSnapshotsRetentionDays, c.promptSnapshotsCaptureRetentionDays]).toEqual([3, 90]);
+  });
+
+  test("a positive value is honoured on both windows", () => {
+    set(CHAT, "1");
+    set(CAPTURE, "14");
+    const c = config();
+    expect([c.promptSnapshotsRetentionDays, c.promptSnapshotsCaptureRetentionDays]).toEqual([1, 14]);
+  });
+
+  test("0 falls back to the default rather than wiping the archive", () => {
+    set(CHAT, "0");
+    set(CAPTURE, "0");
+    const c = config();
+    expect([c.promptSnapshotsRetentionDays, c.promptSnapshotsCaptureRetentionDays]).toEqual([3, 90]);
+  });
+
+  test("a negative value falls back too", () => {
+    set(CHAT, "-1");
+    set(CAPTURE, "-7");
+    const c = config();
+    expect([c.promptSnapshotsRetentionDays, c.promptSnapshotsCaptureRetentionDays]).toEqual([3, 90]);
+  });
+
+  test("a NON-INTEGER refuses the boot instead of warning — the other band", () => {
+    // `positiveEnvInt` delegates to `optionalEnvInt`, which throws on a value
+    // that names no number at all. The clamp above never sees it.
+    set(CAPTURE, "ninety");
+    expect(() => config()).toThrow(/PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS/);
+  });
+
+  test("the refusal is warned about, naming the variable and the value", async () => {
+    const records = await capture();
+    set(CAPTURE, "0");
+    config();
+    const warning = records.find((r) => r.level === "warning" && String(r.message.join("")).includes(CAPTURE));
+    expect(warning).toBeDefined();
+    expect(String(warning!.message.join("") + JSON.stringify(warning!.properties))).toContain("0");
+  });
+});

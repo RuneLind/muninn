@@ -66,7 +66,12 @@ export function registerTracesRoutes(app: Hono): void {
       const owned = await requireOwnedResource(c, "trace", traceId);
       // The route's own miss, so a denial cannot be told from an absent snapshot.
       if (!owned.ok) return c.json({ error: "Prompt snapshot not found" }, 404);
-      const snapshot = await getPromptSnapshot(traceId);
+      // `?pass=` addresses ONE pass of a multi-pass capture (`claude:select`);
+      // absent, the read prefers the summary pass, which is what a reader who
+      // opened the modal off a trace row means. A blank value is absent — the
+      // deep link's default form is `#<traceId>/prompt` with no pass at all.
+      const pass = c.req.query("pass") || undefined;
+      const snapshot = await getPromptSnapshot(traceId, pass);
       if (!snapshot) {
         return c.json({ error: "Prompt snapshot not found" }, 404);
       }

@@ -17,7 +17,7 @@
 | `traces.ts` | Trace span storage, waterfall queries, tool usage stats |
 | `connectors.ts` | Named AI connector configurations (DB-persisted) |
 | `chat-preferences.ts` | Per-user+bot preferred connector |
-| `prompt-snapshots.ts` | Prompt snapshot storage with retention cleanup |
+| `prompt-snapshots.ts` | Prompt snapshot storage, one row per (trace, **pass**) — a capture writes here too, and a YouTube dense-scan capture makes two model calls under one trace root, so a key on `trace_id` alone threw one prompt away. `kind` (`chat`/`capture`) splits retention (3 days vs 90) and the `getPromptSnapshot` default read prefers the summary pass; a `capture` row's `user_prompt` is capped at 256 KiB with the shared truncation note, since it carries a transcript |
 | `user-settings.ts` | Per-user settings (quiet hours, timezone, preferences) |
 | `stats.ts` | Aggregate usage statistics |
 
