@@ -74,7 +74,22 @@ let ingestOk = true;
 let ingestPayload: Record<string, unknown> | undefined;
 let ingestPath: string | undefined;
 
+/**
+ * The REAL media module, imported before the mock replaces it, so the pure URL
+ * helpers below are the SHIPPED ones rather than mirrors of them.
+ *
+ * A mirror owes the original nothing: this file's `extractTikTokVideoId`
+ * stand-in was `url.match(/\/video\/(\d+)/)` with no host gate, which answers
+ * `"1"` for X's `/status/<id>/video/1` media-slot URL where the shipped helper —
+ * host-gated exactly because of that collision — answers null. The three
+ * subprocess calls stay mocked (they spawn yt-dlp, whisper and ffmpeg) and
+ * `summarizeTimeoutFor` stays a spy; the URL PARSING does not, because parsing
+ * is what these two specs' `canonicalUrl`/`idFor` fields are made of.
+ */
+const realMedia = await import("./media.ts");
+
 mock.module("./media.ts", () => ({
+  ...realMedia,
   downloadVideo: async (
     url: string,
     workDir: string,
@@ -117,12 +132,6 @@ mock.module("./media.ts", () => ({
     summarizeTimeoutArgs = { frameCount, floorMs };
     return 1_234_000;
   },
-  // Real implementations (pure URL parsing) — inline mirrors to keep the mock
-  // self-contained without importing the mocked-out module.
-  extractTikTokVideoId: (url: string) => url.match(/\/video\/(\d+)/)?.[1] ?? null,
-  extractXStatusId: (url: string) => url.match(/\/status\/(\d+)/)?.[1] ?? null,
-  canonicalXStatusUrl: (url: string) =>
-    url.match(/^(https?:\/\/[^/]+\/[^/]+\/status\/\d+)/)?.[1] ?? null,
 }));
 
 mock.module("../ai/one-shot.ts", () => ({
@@ -151,6 +160,32 @@ mock.module("../ai/one-shot.ts", () => ({
   connectorCapabilities: (b: { connector?: string }) => {
     const isClaude = (b.connector ?? "claude-cli") === "claude-cli" || b.connector === "claude-sdk";
     return { supportsExtraDirs: isClaude, supportsThinkingBudget: isClaude };
+  },
+}));
+
+/**
+ * The capture seam, DELEGATING — the real `runCaptureOneShot` still runs, so the
+ * thinking-cap gate, the `extraDirs` pass-through and the trace root are the
+ * shipped ones; the wrapper only records the options it was handed.
+ *
+ * It exists for ONE field: `source`, which is what stamps `capture:<id>` on the
+ * trace root and the `source` attribute on the model span, and which nothing
+ * else in this file can see. Mutating `source: spec.id` to the literal
+ * `"tiktok"` survived all 44 cases — so the X vertical's traces could have been
+ * filed under the neighbour's name with no test to say so.
+ */
+let lastCaptureSource: string | undefined;
+const realShared = await import("../summaries/summarizer-shared.ts");
+// The real function is captured into a CONST here, not read off `realShared`
+// inside the wrapper: `mock.module` rewrites the live namespace object, so
+// `realShared.runCaptureOneShot` becomes the wrapper itself and the delegation
+// is an infinite recursion (measured — the file hung rather than failing).
+const realRunCaptureOneShot = realShared.runCaptureOneShot;
+mock.module("../summaries/summarizer-shared.ts", () => ({
+  ...realShared,
+  runCaptureOneShot: (opts: Parameters<typeof realRunCaptureOneShot>[0]) => {
+    lastCaptureSource = opts.source;
+    return realRunCaptureOneShot(opts);
   },
 }));
 
@@ -194,6 +229,7 @@ const xaState = await import("../x-article/state.ts");
 
 const STANDARD = SHIPPED_CAPTURE_PRESETS.find((p) => p.id === "standard")!;
 const DEEP = SHIPPED_CAPTURE_PRESETS.find((p) => p.id === "deep")!;
+const TALK_NOTES = SHIPPED_CAPTURE_PRESETS.find((p) => p.id === "talk-notes")!;
 
 const config = {
   knowledgeApiUrl: "http://kb.test",
@@ -221,6 +257,9 @@ const VERTICALS = [
     dlId: "7523456789",
     // yt-dlp's id IS what this vertical logs.
     loggedId: "7523456789",
+    traceSource: "tiktok",
+    idLogKey: "videoId",
+    absentIdLogKey: "statusId",
     dlCanonicalUrl: TT_CANONICAL_URL,
     submitUrl: TT_SHORT_URL,
     canonicalUrl: TT_CANONICAL_URL,
@@ -241,6 +280,10 @@ const VERTICALS = [
     // NOT yt-dlp's id: this vertical logs the STATUS id parsed out of the bare
     // url, and the fixture makes the two different numbers on purpose.
     loggedId: "2081279674966044799",
+    traceSource: "x-video",
+    // The key this vertical shipped with, before the merge — see the assertion.
+    idLogKey: "statusId",
+    absentIdLogKey: "videoId",
     // yt-dlp's webpage_url keeps the /video/1 media-slot suffix.
     dlCanonicalUrl: X_SLOT_URL,
     submitUrl: X_SLOT_URL,
@@ -318,7 +361,9 @@ for (const v of VERTICALS) {
       dlCanonicalUrl = v.dlCanonicalUrl;
       dlId = v.dlId;
       const jobId = v.createJob(title, url);
-      await v.run(jobId, url, title, config, bot, opts);
+      // `preset` is REQUIRED at the seam — the route always resolves one — so
+      // the helper names the default rather than the summarizer inventing it.
+      await v.run(jobId, url, title, config, bot, { preset: STANDARD, ...opts });
       return jobId;
     }
 
@@ -507,21 +552,39 @@ for (const v of VERTICALS) {
     });
 
     /**
-     * The KIND's two run levers, at the seam that applies them. Before the
-     * picker existed these verticals hardcoded `thinkingMaxTokens: null`; it is
-     * `captureThinkingFor(preset)` now, so `standard` takes the shared capture
-     * cap and `deep` is what buys the bot's own budget back.
+     * The kind drives the MODEL and only the model. The thinking budget is this
+     * vertical's own `null` on every kind — reading the keyframes IS the
+     * reasoning here, and the 8k knee was measured on a text-only transcript.
+     *
+     * `null` reaches the seam as "inherit", and the seam then OMITS the key, so
+     * the bot's own budget is what the connector sees rather than a number.
      */
-    test("the kind drives the thinking budget and the model", async () => {
+    test("every kind keeps the bot's own thinking budget; the kind drives the model", async () => {
       await capture();
-      expect(lastOpts!.thinkingMaxTokens).toBe(8000);
+      expect("thinkingMaxTokens" in lastOpts!).toBe(false);
       expect(lastBotConfig!.model).toBe("sonnet");
 
       await capture(v.title, v.submitUrl, { preset: DEEP });
-      // `null` reaches the seam as "inherit", and the seam then OMITS the key —
-      // the bot's own budget is what the connector sees, not a number.
       expect("thinkingMaxTokens" in lastOpts!).toBe(false);
       expect(lastBotConfig!.model).toBe("claude-opus-5");
+
+      // `talk-notes` too, so the assertion is about the VERTICAL rather than
+      // about the two kinds whose run options happen to differ.
+      await capture(v.title, v.submitUrl, { preset: TALK_NOTES });
+      expect("thinkingMaxTokens" in lastOpts!).toBe(false);
+      expect(lastBotConfig!.model).toBe("sonnet");
+    });
+
+    /**
+     * The trace root's own name. `capture:<source>` and the model span's
+     * `source` attribute are the only place a capture says which vertical it
+     * was, and `/traces` is filtered on it — so the X vertical filing under
+     * `tiktok` would be invisible everywhere except the trace list.
+     */
+    test("the trace source is THIS spec's id", async () => {
+      await capture();
+      expect(lastCaptureSource).toBe(v.spec.id);
+      expect(lastCaptureSource).toBe(v.traceSource);
     });
 
     // The short-video verticals used to interpolate SUMMARY_STRUCTURE_BULLETS
@@ -582,13 +645,19 @@ for (const v of VERTICALS) {
      * STATUS id parsed out of the bare url, and on the X fixture those two are
      * different numbers on purpose.
      */
-    test("the completion line names this vertical's own id, its kind and its frame count", async () => {
+    test("the completion line names this vertical's own id, under its own KEY", async () => {
       await capture();
       const line = logs.find((r) => String(r.message).startsWith(`Summarized ${v.spec.noun} `));
       expect(line).toBeDefined();
       expect(line!.category).toEqual(["muninn", ...v.spec.logCategory]);
+      // The KEY is the vertical's own: the JSONL sink is searched by field, and
+      // `statusId: 2081…` is a saved query the X vertical shipped with. A merge
+      // that renamed it to `videoId` would change what a search matches with no
+      // other signal — so it is a spec field, and it is asserted as one.
+      expect(line!.properties[v.spec.idLogKey]).toBe(v.loggedId);
+      expect(Object.keys(line!.properties)).toContain(v.idLogKey);
+      expect(Object.keys(line!.properties)).not.toContain(v.absentIdLogKey);
       expect(line!.properties).toMatchObject({
-        videoId: v.loggedId,
         category: "ai/claude-code",
         kind: "standard",
         frames: 2,
@@ -622,7 +691,7 @@ describe("what the two specs do NOT share", () => {
     dlCanonicalUrl = X_SLOT_URL;
     dlId = "2081276996567326720";
     const jobId = xaState.createJob("2081279674966044799", "My X video", X_SLOT_URL, "");
-    await summarizeXVideo(jobId, X_SLOT_URL, "My X video", config, bot);
+    await summarizeXVideo(jobId, X_SLOT_URL, "My X video", config, bot, { preset: STANDARD });
 
     expect(lastSystemPrompt).toBe(
       buildShortVideoSystemPrompt(X_VIDEO_SPEC, {
@@ -646,11 +715,57 @@ describe("what the two specs do NOT share", () => {
     expect(lastSystemPrompt).not.toContain("TikTok");
   });
 
+  /**
+   * The X spec's canonical url is a THREE-branch chain —
+   * `canonicalXStatusUrl(dl.canonicalUrl) ?? canonicalXStatusUrl(submitted) ??
+   * submitted` — and only the first branch had a fixture. Deleting either
+   * fallback survived every other case in this file, so a yt-dlp answer that is
+   * not a status URL (a short link it resolved elsewhere, an `i/broadcasts`
+   * page, an error page it still reports a `webpage_url` for) would have keyed
+   * the document on a url the shelf cannot dedup.
+   *
+   * The helpers are the REAL ones here, so "not a status URL" means what
+   * `canonicalXStatusUrl` means by it, not what a mirror in this file does.
+   */
+  describe("the X canonical-url chain, branch by branch", () => {
+    /** Run the X capture with a given yt-dlp answer and submitted url. */
+    async function xCapture(dlUrl: string, submitted: string): Promise<void> {
+      dlCanonicalUrl = dlUrl;
+      dlId = "2081276996567326720";
+      const jobId = xaState.createJob("2081279674966044799", "My X video", submitted, "");
+      await summarizeXVideo(jobId, submitted, "My X video", config, bot, { preset: STANDARD });
+    }
+
+    test("branch 1: yt-dlp's answer IS a status url — the media-slot suffix is stripped", async () => {
+      await xCapture(X_SLOT_URL, X_SLOT_URL);
+      expect(ingestPayload!.url).toBe(X_BARE_STATUS_URL);
+    });
+
+    test("branch 2: yt-dlp's answer is not a status url — the SUBMITTED one is used", async () => {
+      // `t.co` short links and `i/broadcasts` pages both reach yt-dlp; neither
+      // carries `/status/<id>`, so `canonicalXStatusUrl` answers null for them.
+      const dlUrl = "https://x.com/i/broadcasts/1YpKdgLzqBvGj";
+      expect(realMedia.canonicalXStatusUrl(dlUrl)).toBeNull();
+      await xCapture(dlUrl, X_SLOT_URL);
+      expect(ingestPayload!.url).toBe(X_BARE_STATUS_URL);
+    });
+
+    test("branch 3: neither is a status url — the submitted url is kept verbatim", async () => {
+      const submitted = "https://x.com/i/broadcasts/1YpKdgLzqBvGj";
+      expect(realMedia.canonicalXStatusUrl(submitted)).toBeNull();
+      await xCapture("https://x.com/i/status-less", submitted);
+      // Verbatim: not null, not the yt-dlp answer, and not a rewritten form.
+      expect(ingestPayload!.url).toBe(submitted);
+      // …and the id falls back to yt-dlp's, since there is no status id to parse.
+      expect(sourceDraftCalls[0]!.input.docId).toBe("2081276996567326720");
+    });
+  });
+
   test("the TikTok prompt names TikTok and its own frame clause", async () => {
     dlCanonicalUrl = TT_CANONICAL_URL;
     dlId = "7523456789";
     const jobId = ttState.createJob("7523456789", "My TikTok", TT_SHORT_URL);
-    await summarizeTikTok(jobId, TT_SHORT_URL, "My TikTok", config, bot);
+    await summarizeTikTok(jobId, TT_SHORT_URL, "My TikTok", config, bot, { preset: STANDARD });
 
     expect(lastSystemPrompt).toContain("Summarize the following TikTok video");
     expect(lastSystemPrompt).toContain("TikToks often carry most of their information on screen");
@@ -669,6 +784,7 @@ describe("what the two specs do NOT share", () => {
       "frameClause",
       "id",
       "idFor",
+      "idLogKey",
       "ingestPath",
       "logCategory",
       "maxDurationSeconds",
@@ -691,5 +807,30 @@ describe("what the two specs do NOT share", () => {
     });
     expect(ttState.getJob(jobId)!.status).toBe("complete");
     expect(ingestPath).toBe("/api/tiktok/ingest");
+  });
+
+  /**
+   * `preset` is REQUIRED, and the pin is a TYPE error rather than a runtime one
+   * — `bunx tsc --noEmit` is what fails here, since `bun test` strips types.
+   *
+   * The rule is `src/youtube/summarizer.ts`' and `src/vimeo/summarizer.ts`':
+   * a default resolved inside the job would read the SHIPPED preset set, which
+   * silently ignores a bot's own `prompts/captureSummary.standard.md` override
+   * — an override `/summaries/prompts` shows as present, over a capture that
+   * never used it. The routes always resolve one (that is what their
+   * `bad_kind` check is), so there is no caller for the default to serve.
+   */
+  test("the seam takes no preset-less call — a type error, not a silent default", () => {
+    // @ts-expect-error — `preset` is required: omitting the options entirely.
+    const noOpts = () => summarizeShortVideo(TIKTOK_SPEC, "j", "u", "t", config, bot);
+    // @ts-expect-error — `preset` is required: options present, preset absent.
+    const noPreset = () => summarizeShortVideo(TIKTOK_SPEC, "j", "u", "t", config, bot, { frames: false });
+    // @ts-expect-error — and the same on both public wrappers.
+    const noWrapperPreset = () => summarizeTikTok("j", "u", "t", config, bot, { frames: false });
+    // @ts-expect-error
+    const noXWrapperPreset = () => summarizeXVideo("j", "u", "t", config, bot, {});
+    // The four are referenced so this is a compile-time case rather than dead
+    // code a linter could drop; none of them is CALLED.
+    expect([noOpts, noPreset, noWrapperPreset, noXWrapperPreset]).toHaveLength(4);
   });
 });

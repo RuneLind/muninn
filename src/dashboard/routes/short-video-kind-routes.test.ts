@@ -19,6 +19,7 @@
 import { test, expect, describe, mock, beforeAll, afterAll, beforeEach } from "bun:test";
 import { Hono } from "hono";
 import type { Config } from "../../config.ts";
+import { resolveCapturePresets } from "../../summaries/presets.ts";
 
 let botsResult: Array<Record<string, unknown>> = [];
 let summarizerBot: Record<string, unknown> | null = null;
@@ -163,6 +164,7 @@ for (const p of POSTS) {
         kinds: { id: string; label: string }[];
         default_kind: string;
         frames: { supported: boolean };
+        capture: { supported: boolean; reason?: string };
       };
       expect(body.kinds.map((k) => k.id)).toEqual(["standard", "deep", "talk-notes"]);
       // Labelled rows, not bare ids — a client that had to name them would be a
@@ -172,15 +174,19 @@ for (const p of POSTS) {
       // assume an order.
       expect(body.default_kind).toBe("standard");
       expect(body.frames).toEqual({ supported: true });
+      // What the POST will actually do, said in the payload. On this bot it runs.
+      expect(body.capture).toEqual({ supported: true });
       // CORS: the entry point is a Chrome extension whose muninnUrl is editable
       // past the manifest's localhost grant, so without this header the picker
       // silently falls back to Standard-only.
       expect(res.headers.get("access-control-allow-origin")).toBeTruthy();
     });
 
-    test("a connector that cannot name the opus model loses the deep kind", async () => {
-      // `requireThinkingControl` — the short-video set is the YouTube one, and
-      // the rationale for the narrowing lives on that option in presets.ts.
+    test("a connector that cannot name the opus MODEL loses the deep kind", async () => {
+      // `connectorRunsOpus` is what drops it here — an openai-compat endpoint
+      // serves whatever model it serves, and a Claude id is a 400 from it. This
+      // case says NOTHING about `requireThinkingControl`; the copilot one below
+      // is the case that does.
       summarizerBot = { name: "olly", connector: "openai-compat", dir: "/tmp/olly" };
       botsResult = [summarizerBot];
       const body = (await (await app().request(p.optionsPath)).json()) as {
@@ -189,6 +195,59 @@ for (const p of POSTS) {
       };
       expect(body.kinds.map((k) => k.id)).toEqual(["standard", "talk-notes"]);
       expect(body.frames.supported).toBe(false);
+    });
+
+    /**
+     * The `requireThinkingControl: true` this set passes
+     * (`src/video/short-video-kinds.ts`), on the ONE connector that isolates it.
+     *
+     * `copilot-sdk` CAN name the opus model — `connectorRunsOpus` admits it, so
+     * the model gate leaves `deep` in — and cannot honour a thinking budget, so
+     * only the thinking gate can drop it. Every other connector is decided by
+     * the model gate first, which is why flipping the flag survived the whole
+     * suite until this case existed. The rationale for the narrowing lives on
+     * the option's docblock in `src/summaries/presets.ts`.
+     */
+    test("a copilot bot loses `deep` to the THINKING gate, which nothing else tests", async () => {
+      summarizerBot = { name: "copper", connector: "copilot-sdk", dir: "/tmp/copper" };
+      botsResult = [summarizerBot];
+      const body = (await (await app().request(p.optionsPath)).json()) as {
+        kinds: { id: string }[];
+        capture: { supported: boolean };
+      };
+      expect(body.kinds.map((k) => k.id)).toEqual(["standard", "talk-notes"]);
+      // The model half is NOT what dropped it: this connector carries the opus
+      // id verbatim, and the shared set (no narrowing) still offers `deep` here.
+      expect(
+        resolveCapturePresets(undefined, "copilot-sdk").map((k) => k.id),
+      ).toEqual(["standard", "deep", "talk-notes"]);
+      // …and the capture itself is refused on this bot, frames or no frames.
+      expect(body.capture.supported).toBe(false);
+    });
+
+    /**
+     * The payload and the POST agreeing.
+     *
+     * `frames: { supported: false }` reads as "no keyframes, but a capture",
+     * and the POST 503s a connector without `supportsExtraDirs` UNCONDITIONALLY
+     * — `frames: false` included, because the job hands `extraDirs` to
+     * `executeOneShot` either way and that throws on such a connector. So the
+     * payload says `capture: { supported: false }` with the reason, and a client
+     * can grey out the button instead of discovering it at submit time.
+     */
+    test("a connector without extra-dirs says the CAPTURE is unsupported, with the reason", async () => {
+      summarizerBot = { name: "olly", connector: "openai-compat", dir: "/tmp/olly" };
+      botsResult = [summarizerBot];
+      const body = (await (await app().request(p.optionsPath)).json()) as {
+        frames: { supported: boolean };
+        capture: { supported: boolean; reason?: string };
+      };
+      expect(body.frames.supported).toBe(false);
+      expect(body.capture.supported).toBe(false);
+      expect(body.capture.reason).toContain("olly");
+      expect(body.capture.reason).toContain("openai-compat");
+      // A sentence a popup can render, not a machine token.
+      expect(body.capture.reason).not.toContain("frames_unsupported");
     });
 
     test("no bots configured is a 500 with a machine token", async () => {
@@ -218,6 +277,10 @@ for (const p of POSTS) {
       ["an unknown id", "bogus"],
       ["a PRESENT-but-blank string", "   "],
       ["a non-string", 7],
+      // `null` is a SENT key with nothing in it — a picker that failed to fill,
+      // exactly like the blank string — so it is refused rather than read as
+      // absent. Matches `POST /api/youtube/summarize`.
+      ["an explicit null", null],
     ] as const) {
       test(`${label} is 400 bad_kind, above the listing read and above createJob`, async () => {
         const before = p.jobCount();
@@ -244,6 +307,21 @@ for (const p of POSTS) {
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe("bad_kind");
       expect(p.calls()).toBe(0);
+    });
+
+    /**
+     * The other half of the options payload's honesty: the 503 does not depend
+     * on `frames`, which is why the payload names the CAPTURE rather than only
+     * the keyframes.
+     */
+    test("a connector without extra-dirs 503s even with frames off", async () => {
+      summarizerBot = { name: "olly", connector: "openai-compat", dir: "/tmp/olly" };
+      botsResult = [summarizerBot];
+      for (const body of [{ url: p.url }, { url: p.url, frames: false }]) {
+        const res = await post(app(), p.path, body);
+        expect(res.status).toBe(503);
+        expect(p.calls()).toBe(0);
+      }
     });
   });
 }

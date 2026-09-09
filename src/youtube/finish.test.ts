@@ -24,7 +24,7 @@ afterAll(async () => {
 });
 
 /**
- * Configured PER TEST with `reset: true`, the `src/tiktok/finish.test.ts` shape:
+ * Configured PER TEST with `reset: true`, the `src/video/short-video-finish.test.ts` shape:
  * `bun test` runs many files in one process and any of them may have configured
  * logtape first, so a once-per-file `configure` is a sink another file can take
  * away.

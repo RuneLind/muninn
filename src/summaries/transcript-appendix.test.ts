@@ -21,15 +21,32 @@ import * as youtubeFrames from "../youtube/frames.ts";
 const bytesOf = (s: string) => new TextEncoder().encode(s).length;
 
 /**
- * Whisper's real shape: one unbroken paragraph that ENDS in a newline.
+ * Whisper's real shapes — all three of them, because which capper is right is a
+ * statement about the newline layout and this producer emits three layouts.
  *
- * The trailing newline is the fixture's whole point, not decoration. The window
- * capper's rule is "a budget that does not reach past the text's FIRST newline
- * has no head to show" — so a paragraph with a newline anywhere past the budget
- * is thrown away in full, while a text with no newline at all falls through to
- * its word-boundary cut and survives. A whisper transcript has the newline.
+ * `transcribeVideo` returns a `.trim()`ed string, so NONE of them can carry the
+ * trailing newline a fixture can manufacture; what whisper does emit is one line
+ * per SEGMENT, which is where the newlines come from. Measured at a 500-byte cap
+ * (the numbers are in `capFlatTranscript`'s docblock): the window capper answers
+ * 495, 487 and 64 bytes for the three, and the flat capper 500 for all three.
+ * Only the third is destructive — and it is the one nothing pinned.
  */
-const FLAT = `${"word ".repeat(400)}end.\n`;
+const FLAT_ONE_LINE = `${"word ".repeat(400)}end.`;
+/** One line per whisper segment: single newlines, no blank line anywhere. */
+const FLAT_SEGMENTED = Array.from(
+  { length: 120 },
+  (_, i) => `segment ${i} of the spoken transcript`,
+).join("\n");
+/**
+ * A first line LONGER than the budget, with segments after it — the layout
+ * `headWithinBytes` answers with `""`, because its rule is "a budget that does
+ * not reach past the text's FIRST newline has no head to show". Reachable
+ * rather than theoretical: `maxBytes` is the caller's argument, so "the budget
+ * does not reach the first newline" is a claim about the two together.
+ */
+const FLAT_LONG_FIRST_LINE = `${"word ".repeat(400)}end.\nand one more segment.`;
+/** The one this file's older cases used, kept as the default flat fixture. */
+const FLAT = FLAT_ONE_LINE;
 /** huginn's shape: `### [HH:MM:SS]` over one long line, windows split by a blank line. */
 const WINDOWED = ["### [00:00:00]", "", "first window speech", "", "### [00:02:00]", "", "second window speech"]
   .join("\n")
@@ -53,18 +70,40 @@ describe("capFlatTranscript", () => {
   });
 
   /**
-   * The failure the split exists for, as an inequality rather than a claim: run
-   * a flat transcript through the WINDOW capper and the answer is the note and
-   * nothing else. `headWithinBytes` returns `""` when the budget does not reach
-   * past the text's first line, which for a one-paragraph transcript is the
-   * whole thing — so a 2 MiB whisper transcript would be stored as 65 bytes of
-   * apology.
+   * The three layouts side by side — the whole case for the split, as measured
+   * numbers rather than as a claim about one manufactured fixture.
+   *
+   * The flat capper answers the SAME way for all three, because its cut is
+   * decided by the budget. The window capper answers three different ways,
+   * because its cut is decided by the newlines: a word boundary, a line
+   * boundary, and — on the third — the truncation note ALONE, which is a
+   * transcript stored as 64 bytes of apology.
    */
-  test("the WINDOW capper would have thrown this transcript away entirely", () => {
+  test("the flat capper's cut is the budget's; the window capper's is the newlines'", () => {
     const cap = 500;
-    expect(capTranscriptWindows(FLAT, cap).text).toBe(TRANSCRIPT_TRUNCATION_NOTE);
-    expect(capFlatTranscript(FLAT, cap).text).not.toBe(TRANSCRIPT_TRUNCATION_NOTE);
-    expect(bytesOf(capFlatTranscript(FLAT, cap).text)).toBeGreaterThan(400);
+    for (const [name, text] of [
+      ["one unbroken line", FLAT_ONE_LINE],
+      ["one line per segment", FLAT_SEGMENTED],
+      ["a first line past the budget", FLAT_LONG_FIRST_LINE],
+    ] as const) {
+      const flat = capFlatTranscript(text, cap);
+      // Same answer whatever the layout: the head the budget allows, and never
+      // the note alone.
+      expect(flat.keptBytes, name).toBe(cap);
+      expect(flat.text.startsWith(text.slice(0, 40)), name).toBe(true);
+      expect(flat.text.endsWith(TRANSCRIPT_TRUNCATION_NOTE), name).toBe(true);
+    }
+
+    // The window capper, layout by layout — a different answer each time.
+    expect(capTranscriptWindows(FLAT_ONE_LINE, cap).text).not.toBe(TRANSCRIPT_TRUNCATION_NOTE);
+    const segmented = capTranscriptWindows(FLAT_SEGMENTED, cap);
+    expect(segmented.text).not.toBe(TRANSCRIPT_TRUNCATION_NOTE);
+    // Cut at a LINE boundary, which is a structure this text does not have.
+    expect(segmented.text.slice(0, -`\n\n${TRANSCRIPT_TRUNCATION_NOTE}`.length).endsWith("transcript")).toBe(true);
+    // …and the destructive one: nothing of the transcript survives.
+    expect(capTranscriptWindows(FLAT_LONG_FIRST_LINE, cap).text).toBe(TRANSCRIPT_TRUNCATION_NOTE);
+    expect(capFlatTranscript(FLAT_LONG_FIRST_LINE, cap).text).not.toBe(TRANSCRIPT_TRUNCATION_NOTE);
+    expect(bytesOf(capFlatTranscript(FLAT_LONG_FIRST_LINE, cap).text)).toBeGreaterThan(400);
   });
 
   test("and the WINDOWED capper is still the right one for windowed text", () => {
@@ -103,8 +142,8 @@ describe("appendTranscriptSection", () => {
     // Three spellings of the same call: the two-argument one every caller used
     // before the flag, the explicit-cap one the tests used, and the explicit
     // `true`. All windowed.
-    const a = appendTranscriptSection("S", FLAT, cap);
-    const b = appendTranscriptSection("S", FLAT, cap, true);
+    const a = appendTranscriptSection("S", FLAT_LONG_FIRST_LINE, cap);
+    const b = appendTranscriptSection("S", FLAT_LONG_FIRST_LINE, cap, true);
     expect(a.text).toBe(b.text);
     expect(a.text).toBe(`S\n\n## Transcript\n\n${TRANSCRIPT_TRUNCATION_NOTE}\n`);
   });
@@ -117,8 +156,9 @@ describe("appendTranscriptSection", () => {
 
   test("`windowed: false` over the cap keeps a head where `true` keeps nothing", () => {
     const cap = 500;
-    const flat = appendTranscriptSection("S", FLAT, cap, false);
-    const windowed = appendTranscriptSection("S", FLAT, cap, true);
+    // The layout on which the two really diverge — see the capper cases above.
+    const flat = appendTranscriptSection("S", FLAT_LONG_FIRST_LINE, cap, false);
+    const windowed = appendTranscriptSection("S", FLAT_LONG_FIRST_LINE, cap, true);
     expect(flat.truncated).toBe(true);
     expect(flat.text).toContain("word word");
     expect(windowed.text).not.toContain("word word");

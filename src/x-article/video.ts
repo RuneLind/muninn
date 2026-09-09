@@ -43,6 +43,9 @@ export const X_VIDEO_SPEC: ShortVideoSpec = {
   canonicalUrl: (dlCanonicalUrl, submittedUrl) =>
     canonicalXStatusUrl(dlCanonicalUrl) ?? canonicalXStatusUrl(submittedUrl) ?? submittedUrl,
   idFor: (canonicalUrl, dlId) => extractXStatusId(canonicalUrl) ?? dlId,
+  // `statusId`, NOT the TikTok twin's `videoId`: this vertical shipped with that
+  // key and the JSONL sink is searched by field, so the merge must not rename it.
+  idLogKey: "statusId",
   // NO degraded-frame-Reads warn: this vertical has never had one, and the
   // merge must not hand it the neighbour's second step.
   visualWarning: false,
@@ -63,7 +66,7 @@ export function summarizeXVideo(
   title: string,
   config: Config,
   botConfig: BotConfig,
-  opts: SummarizeVideoOptions = {},
+  opts: SummarizeVideoOptions,
 ): Promise<void> {
   return summarizeShortVideo(X_VIDEO_SPEC, jobId, url, title, config, botConfig, opts);
 }

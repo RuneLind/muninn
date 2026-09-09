@@ -26,6 +26,7 @@ import {
   X_VIDEO_PROMPT_SPEC,
   buildShortVideoSystemPrompt,
   buildShortVideoUserPrompt,
+  shortVideoSystemPromptPieces,
 } from "../video/short-video-prompt.ts";
 import { buildXArticleSystemPrompt, xArticleSystemPromptPieces } from "../x-article/prompt.ts";
 import { buildArticleSystemPrompt } from "../article/prompt.ts";
@@ -573,11 +574,34 @@ describe("the fixed axes the page pins", () => {
     // The two short-video user builders branch twice each, and the page pins the
     // present-transcript, present-frames form of both.
     for (const id of ["tiktok", "x-video"]) {
-      expect(axes[id]).toEqual(["transcript: present", "keyframes: present"]);
+      expect(axes[id]).toEqual([
+        "system prompt: the frames-present form",
+        "transcript: present",
+        "keyframes: present",
+      ]);
       const user = cell(matrix, id, "standard").userPrompt;
       expect(user.startsWith("Transcript:\n")).toBe(true);
       expect(user).not.toContain("No speech detected");
       expect(user).toContain("Keyframes (read each image before summarizing):");
+
+      // The SYSTEM axis, as the difference it names rather than as a claim: the
+      // cell carries the two frame-rule spans, and the other form of the same
+      // builder does not. A page that showed the frames-OFF prompt while
+      // declaring this line would fail here.
+      const spec = id === "tiktok" ? TIKTOK_PROMPT_SPEC : X_VIDEO_PROMPT_SPEC;
+      const standardPreset = SHIPPED_CAPTURE_PRESETS.find((p) => p.id === "standard")!;
+      const shown = cell(matrix, id, "standard");
+      expect(shown.systemPieces.map((p) => p.id)).toContain("read-frames");
+      expect(shown.systemPieces.map((p) => p.id)).toContain("visual-only");
+      const framesOff = shortVideoSystemPromptPieces(spec, {
+        preset: standardPreset,
+        title: PLACEHOLDER_TITLE,
+        url: id === "tiktok" ? PLACEHOLDER_TIKTOK_URL : PLACEHOLDER_XVIDEO_URL,
+        author: PLACEHOLDER_AUTHOR,
+        frames: false,
+      });
+      expect(framesOff.map((p) => p.id)).not.toContain("read-frames");
+      expect(joinPromptPieces(framesOff)).not.toBe(shown.systemPrompt);
     }
 
     // The x-article row's old "author and url: both present" axis is GONE: that

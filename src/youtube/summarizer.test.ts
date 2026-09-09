@@ -498,6 +498,26 @@ async function run(
 }
 
 describe("frames off — the capture that shipped before this PR", () => {
+  /**
+   * A WHITESPACE-only transcript is an empty one.
+   *
+   * huginn answering `{ "transcript": "\n \n" }` passed `if (!transcriptText)`
+   * — a non-empty string — and the capture then summarized nothing and filed an
+   * empty `## Transcript` section into the indexed document, which is a talk
+   * that reads as captured and is not. The fetch is where a transcript is
+   * judged, so the trim is there.
+   */
+  test("a whitespace-only transcript fails the job, and files no empty section", async () => {
+    transcriptBody = { transcript: "  \n\t \n " };
+    const jobId = await run();
+    const job = getJob(jobId);
+    expect(job?.status).toBe("error");
+    expect(job?.error).toContain("Empty transcript");
+    // Nothing was spent and nothing was written.
+    expect(ingestBodies).toEqual([]);
+    expect(lastPrompt).toBeUndefined();
+  });
+
   test("no probe, no download, plain transcript URL, byte-identical prompt", async () => {
     const jobId = await run();
 

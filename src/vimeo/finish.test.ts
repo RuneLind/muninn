@@ -23,7 +23,7 @@ afterAll(async () => {
   await resetLogging();
 });
 
-/** Per test with `reset: true` — the `src/tiktok/finish.test.ts` shape. */
+/** Per test with `reset: true` — the `src/video/short-video-finish.test.ts` shape. */
 let logs: LogRecord[] = [];
 beforeEach(async () => {
   logs = [];

@@ -30,15 +30,44 @@ import type { PromptMatrix, PromptMatrixCell } from "../../summaries/prompt-matr
  * tuned for in BOTH themes (`shared-styles.ts`). The plain status colours read
  * fine on dark and failed AA on light — measured 2026-09-09 against
  * `--bg-inset` #eceef3: success 2.84:1, warning 2.74:1, cyan 3.17:1,
- * `--text-muted` 4.26:1, info 4.45:1. The ramp's worst case is 4.62:1 light and
- * 5.34:1 dark. Same six hues, so the legend still reads as the same vocabulary.
+ * `--text-muted` 4.26:1, info 4.45:1.
+ *
+ * EVERY id a piece can carry needs a row, and the short-video merge is what
+ * proved it: the three ids its envelope slots introduced (`instructions`,
+ * `read-frames`, `visual-only`) had none, so eighteen spans rendered in the
+ * `<pre>`'s inherited colour and the legend named neither rule — while
+ * `src/summaries/CLAUDE.md` promises "a line's colour is the piece that
+ * produced it". A missing row is invisible: an untinted span still reads
+ * correctly, and a contrast check passes on the inherited colour.
+ *
+ * Contrast against `--bg-inset`, measured 2026-09-09 from resolved computed
+ * styles in both themes (`e2e/summaries-prompts.spec.ts`, which also asserts
+ * every span's colour DIFFERS from the inherited one): worst case 4.62:1 light
+ * (`context`) and 5.23:1 dark (`envelope`). The rows added here measure
+ * 5.23:1 light / 5.34:1 dark (`instructions`, on the envelope's own hue) and
+ * 5.33:1 light / 11.60:1 dark (the three numbered rules, on `--tok-num`).
  */
 const PIECE_TINTS: ReadonlyArray<{ id: string; label: string; color: string }> = [
   { id: "intro", label: "Intro", color: "var(--tok-fn)" },
+  // The `Instructions:` header is the ENVELOPE's own byte, and takes its colour:
+  // with no `before` slot it lives INSIDE the envelope piece and becomes a span
+  // of its own only when a slotted instruction has to sit between it and the
+  // CATEGORY step (`summarySystemPromptPieces`). One part, one hue — so the
+  // drawer looks the same whether or not the split happened. (`--tok-pun` was
+  // the first choice and is wrong: it resolves to the SAME #5e6270 as
+  // `--tok-com` on light, so the two adjacent spans would be one colour by
+  // accident rather than by intent.)
+  { id: "instructions", label: "Envelope", color: "var(--tok-com)" },
   { id: "envelope", label: "Envelope", color: "var(--tok-com)" },
   { id: "structure", label: "Structure", color: "var(--tok-str)" },
   { id: "context", label: "Context", color: "var(--tok-typ)" },
-  { id: "no-commentary", label: "No-commentary rule", color: "var(--tok-num)" },
+  // The envelope's SLOTTED instructions — the short-video verticals' frame
+  // rules and their no-commentary rule. One hue and one legend entry for the
+  // three, the way the four riders below share theirs: they are the same KIND
+  // of part, and the drawer names each span in its cell's chips anyway.
+  { id: "read-frames", label: "Numbered rule", color: "var(--tok-num)" },
+  { id: "visual-only", label: "Numbered rule", color: "var(--tok-num)" },
+  { id: "no-commentary", label: "Numbered rule", color: "var(--tok-num)" },
   { id: "rider-windowed", label: "Rider", color: "var(--tok-kw)" },
   { id: "rider-auto-caption", label: "Rider", color: "var(--tok-kw)" },
   { id: "rider-language", label: "Rider", color: "var(--tok-kw)" },

@@ -21,10 +21,12 @@
  * chatter leaks into the streamed shelf card. The summarizer reads each frame
  * image before it writes the CATEGORY/SUMMARY — a multi-turn agentic session.
  *
- * PURE, and deliberately importing `../video/media.ts` for its `Keyframe` TYPE
- * only: `/summaries/prompts` composes these strings inside a server-rendered
- * page, and a value edge to the media engine would put yt-dlp's spawner in that
- * page's graph. `../summaries/presets.ts` is a value import and is IO-free.
+ * PURE, and both of its non-shared imports are TYPE-only: `./media.ts` for
+ * `Keyframe` and `../summaries/presets.ts` for `CapturePreset`.
+ * `/summaries/prompts` composes these strings inside a server-rendered page, and
+ * a value edge to the media engine would put yt-dlp's spawner in that page's
+ * graph. The only value imports are `../utils/summary-parser.ts`'s category
+ * list and the dependency-free `../summaries/prompt-pieces.ts` envelope.
  */
 
 import { VALID_CATEGORIES } from "../utils/summary-parser.ts";
@@ -86,6 +88,23 @@ export interface ShortVideoSystemPromptInput {
   readonly title: string;
   readonly url: string;
   readonly author: string;
+  /**
+   * Whether this pass has keyframes to read. Default `true`, which is the
+   * CAPTURE path and byte-identical to what shipped before this axis existed.
+   *
+   * `false` is the RE-RUN's shape: a replay has no work dir and no JPEGs, so it
+   * calls this builder with none — and the frames-present prompt then orders the
+   * model to "Read ALL the frame images listed below" over a user prompt that
+   * lists none, opens by saying it uses "BOTH" the transcript and the images,
+   * and asks it to mark what is visual-only. Three instructions about material
+   * that is not there. `false` drops the two frame rules — so the envelope's own
+   * steps renumber from 1 — and names the transcript alone in the intro.
+   *
+   * The no-commentary rule is NOT on this axis and stays in both forms: its
+   * load-bearing clause is "your only text output is the final CATEGORY/SUMMARY
+   * response", a rule about the whole answer rather than about frames.
+   */
+  readonly frames?: boolean;
 }
 
 /**
@@ -130,13 +149,16 @@ export function shortVideoSystemPromptPieces(
   spec: ShortVideoPromptSpec,
   input: ShortVideoSystemPromptInput,
 ): PromptPiece[] {
+  const withFrames = input.frames !== false;
   return [
     ...summarySystemPromptPieces(
-      `You are a video content analyst. Summarize the following ${spec.platform} video, using BOTH its speech transcript and the extracted keyframe images.`,
+      withFrames
+        ? `You are a video content analyst. Summarize the following ${spec.platform} video, using BOTH its speech transcript and the extracted keyframe images.`
+        : `You are a video content analyst. Summarize the following ${spec.platform} video from its speech transcript.`,
       VALID_CATEGORIES,
       input.preset.instruction,
       {
-        before: [readFramesInstruction(spec), VISUAL_ONLY_INSTRUCTION],
+        before: withFrames ? [readFramesInstruction(spec), VISUAL_ONLY_INSTRUCTION] : [],
         after: [NO_COMMENTARY_INSTRUCTION],
       },
     ),

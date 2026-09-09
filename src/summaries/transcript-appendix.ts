@@ -10,14 +10,11 @@
  *
  * **Two shapes of transcript, two cappers, one heading.** huginn's windowed
  * transcript is `### [HH:MM:SS]`-headed buckets and must be cut at a WINDOW
- * boundary ({@link capTranscriptWindows}); whisper's is one flat run of prose
- * with no structure to respect, and putting it through the window capper is not
- * merely imprecise — `headWithinBytes`' "a budget that does not reach past the
- * first line has no head to show" rule throws the WHOLE transcript away for a
- * single-paragraph text, which is the failure `capTextWithNote`
- * (`./truncation.ts`) was written for. {@link capFlatTranscript} is the flat
- * path, and {@link appendTranscriptSection}'s `windowed` argument picks between
- * them.
+ * boundary ({@link capTranscriptWindows}); whisper's is prose with no window
+ * structure at all, so the window capper's answer for it is decided by where
+ * the newlines happen to fall rather than by the budget — see
+ * {@link capFlatTranscript}, which is the flat path.
+ * {@link appendTranscriptSection}'s `windowed` argument picks between them.
  *
  * Dependency-free but for the `./truncation.ts` leaf, so anything may import it.
  */
@@ -128,15 +125,28 @@ export function capTranscriptWindows(
  * The FLAT transcript — whisper's plain prose — trimmed to `maxBytes`.
  *
  * It is {@link capTextWithNote}, wrapped so both paths answer the same shape.
- * The window capper is the wrong tool here and not just a blunt one: a flat
- * transcript has no `\n\n` windows, so `split("\n\n")` yields ONE element that
- * is the whole text, nothing fits the budget, and the answer falls through to
- * `headWithinBytes` — whose first rule is "a budget that does not reach past
- * the text's first line has no head to show". A whisper transcript is
- * frequently one unbroken line, so that rule returns `""` and the stored
- * document becomes the truncation note and nothing else. `capTextWithNote`
- * cuts at the last code-point boundary inside the budget instead, which is the
- * right cut for text with no structure to keep whole.
+ *
+ * The window capper is the wrong tool here because its unit is a `\n\n`-
+ * separated WINDOW and this text has none: `split("\n\n")` yields ONE element
+ * that is the whole transcript, nothing fits the budget, and the answer falls
+ * through to `headWithinBytes` — whose cut is decided by the NEWLINE LAYOUT
+ * rather than by the budget. Measured at a 500-byte cap over three real whisper
+ * shapes (`transcribeVideo` returns a `.trim()`ed string, so none of them can
+ * carry a trailing newline; what it does emit is one line per whisper SEGMENT,
+ * which makes the layout whisper's and not ours):
+ *
+ *  - one unbroken line — window capper 495 bytes, flat 500;
+ *  - one line per segment — window capper 487 bytes, cut at the last line
+ *    boundary inside the budget, flat 500;
+ *  - a first line LONGER than the budget with segments after it — window capper
+ *    **64 bytes, the truncation note alone**, flat 500.
+ *
+ * That third row is the destructive one and it is reachable rather than
+ * theoretical: `maxBytes` is the caller's argument, and "the budget does not
+ * reach this transcript's first newline" is a statement about the two together.
+ * `capTextWithNote` cuts at the last code-point boundary inside the budget —
+ * the same answer for all three, which is the right cut for text with no
+ * structure to keep whole.
  */
 export function capFlatTranscript(
   transcript: string,
@@ -171,10 +181,11 @@ export function capFlatTranscript(
  *
  * Only the INGEST body carries it: `completeJob`, the shelf card's text and the
  * source-page draft all get the summary alone. ⚠️ The `similar` list is NOT in
- * that group — huginn computes it from `result["summary"][:2000]`, i.e. from
- * the string this function returns, so a summary under 2 000 characters lets
- * the head of the transcript into the similarity query (huginn
- * `main/ingest/registry.py`). It is a query, not stored content; the
+ * that group — huginn computes it from the first 2 000 characters of this same
+ * string (huginn `main/ingest/registry.py`: `req.summary[:2000]` for the
+ * tiktok and x-articles ingests, `result["summary"][:2000]` for youtube), so a
+ * summary under 2 000 characters lets the head of the transcript into the
+ * similarity query. It is a query, not stored content; the
  * `transcript_markdown` follow-up retires it.
  *
  * Returns what the cap did, so the caller can warn when a talk did not fit. The

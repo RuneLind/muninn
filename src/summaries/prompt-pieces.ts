@@ -77,6 +77,12 @@ export function windowedTranscriptRider(noun: "talk" | "video"): string {
  * exists — the short-video verticals put their frame-reading rules first and
  * their no-commentary rule last, which a vertical cannot express by
  * concatenating around a fixed `1. / 2. / 3.` block.
+ *
+ * That contract is CHECKED ({@link assertEnvelopeInstructions}) rather than
+ * documented: every way of breaking it composed a malformed prompt in silence.
+ * `{ text: "\n6. legacy" }` in the `after` slot produced a step 4 with no words
+ * after its number and an orphan `6.` on the line below — and the page tinted
+ * both as one piece, since a piece is a contiguous span.
  */
 export interface EnvelopeInstruction {
   /** Stable piece id — the tint class and the chip key, exactly as {@link PromptPiece}. */
@@ -92,6 +98,57 @@ export interface SummaryEnvelopeSlots {
   readonly before?: readonly EnvelopeInstruction[];
   /** Numbered after the structure step, on its own line each. */
   readonly after?: readonly EnvelopeInstruction[];
+}
+
+/** The piece ids {@link summarySystemPromptPieces} emits itself, in every shape. */
+const ENVELOPE_OWN_PIECE_IDS = ["intro", "instructions", "envelope", "structure"] as const;
+
+/**
+ * The slot contract, refused at construction with the offending id named.
+ *
+ * A slot entry is written once, in code, by the author of a vertical — so a
+ * shape the envelope cannot number is a mistake to report, never one to paper
+ * over. A duplicate id is here for the PAGE's sake rather than the prompt's:
+ * `/summaries/prompts` keys its tint and its chip on the id, so two spans
+ * sharing one claim to be the same piece.
+ */
+function assertEnvelopeInstructions(
+  before: readonly EnvelopeInstruction[],
+  after: readonly EnvelopeInstruction[],
+): void {
+  const seen = new Set<string>(ENVELOPE_OWN_PIECE_IDS);
+  for (const [slot, list] of [
+    ["before", before],
+    ["after", after],
+  ] as const) {
+    for (const inst of list) {
+      const where = `Envelope \`${slot}\` instruction "${inst.id}"`;
+      if (inst.text.trim() === "") {
+        throw new Error(`${where} has no text — an empty slot entry composes a bare number.`);
+      }
+      if (inst.text !== inst.text.trim()) {
+        throw new Error(
+          `${where} has leading or trailing whitespace — the envelope owns the separators, so the text is its words alone.`,
+        );
+      }
+      if (inst.text.includes("\n")) {
+        throw new Error(
+          `${where} spans more than one line — a slotted instruction is one line, because the envelope numbers it as one step.`,
+        );
+      }
+      if (/^\d+[.)]/.test(inst.text)) {
+        throw new Error(
+          `${where} numbers itself — the envelope owns the numbering, and a second number renumbers nothing.`,
+        );
+      }
+      if (seen.has(inst.id)) {
+        throw new Error(
+          `${where} has a duplicate piece id "${inst.id}" — /summaries/prompts tints and chips by id, so two spans cannot share one.`,
+        );
+      }
+      seen.add(inst.id);
+    }
+  }
 }
 
 /**
@@ -121,8 +178,18 @@ export function summarySystemPromptPieces(
 ): PromptPiece[] {
   const before = slots.before ?? [];
   const after = slots.after ?? [];
-  // The envelope's own three steps start after whatever `before` numbered.
+  assertEnvelopeInstructions(before, after);
+  // The envelope's own steps start after whatever `before` numbered.
   const first = before.length + 1;
+  // The steps THEMSELVES, so `after` numbers on from however many there are
+  // rather than from a hardcoded 3 that a fourth step would silently orphan.
+  // The first two end their line; the third ends with the continuation indent
+  // the structure piece is re-indented against.
+  const envelopeSteps: readonly string[] = [
+    `Start your response with EXACTLY this line: CATEGORY: <category>\n   Choose from: ${categories.join(", ")}`,
+    "Then add a blank line, then SUMMARY: on its own line",
+    "Then write a structured summary with:",
+  ];
   return [
     { id: "intro", label: "Intro", text: `${intro}\n\n` },
     ...(before.length > 0
@@ -134,10 +201,7 @@ export function summarySystemPromptPieces(
       label: "CATEGORY/SUMMARY envelope",
       text:
         (before.length > 0 ? "" : "Instructions:\n") +
-        `${first}. Start your response with EXACTLY this line: CATEGORY: <category>\n` +
-        `   Choose from: ${categories.join(", ")}\n` +
-        `${first + 1}. Then add a blank line, then SUMMARY: on its own line\n` +
-        `${first + 2}. Then write a structured summary with:\n` +
+        envelopeSteps.map((step, i) => `${first + i}. ${step}\n`).join("") +
         `   `,
     },
     {
@@ -148,7 +212,7 @@ export function summarySystemPromptPieces(
     ...after.map((a, i) => ({
       id: a.id,
       label: a.label,
-      text: `\n${first + 3 + i}. ${a.text}`,
+      text: `\n${first + envelopeSteps.length + i}. ${a.text}`,
     })),
   ];
 }

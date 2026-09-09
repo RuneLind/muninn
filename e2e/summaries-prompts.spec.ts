@@ -300,6 +300,16 @@ test.describe("Summaries: the capture-prompt matrix", () => {
     for (const id of ["tiktok", "x-video"]) {
       await expect(page.locator(`[data-fixed="${id}"]`)).toContainText("transcript: present");
       await expect(page.locator(`[data-fixed="${id}"]`)).toContainText("keyframes: present");
+      // The SYSTEM prompt has an axis too since the re-run seam arrived: the
+      // builder takes `frames`, and this page shows the frames-PRESENT form.
+      await expect(page.locator(`[data-fixed="${id}"]`)).toContainText(
+        "system prompt: the frames-present form",
+      );
+      // …and the drawer really shows that form — the frame-reading span is there.
+      const cell = await openCell(page, id, "standard");
+      await expect(cell.locator(".pm-system .pm-piece-read-frames")).toContainText(
+        "Read ALL the frame images",
+      );
     }
     // No row renders the old empty-axes wording any more.
     await expect(page.locator(".pm-fixed", { hasText: "no branch" })).toHaveCount(0);
@@ -384,14 +394,22 @@ test.describe("Summaries: the capture-prompt matrix", () => {
    * from what the browser resolved — never a comparison of a token against a
    * re-typed literal, which passes whatever the value is. Both themes: the tint
    * ramp this page started on read fine on dark and failed AA on light.
+   *
+   * Contrast ALONE is not enough, and the short-video merge is what proved it:
+   * three new piece ids arrived with no `PIECE_TINTS` row, so eighteen spans
+   * rendered in the `<pre>`'s own inherited colour — which of course cleared
+   * 4.5:1, because that colour is the page's body text. So each span's resolved
+   * colour is also compared with the INHERITED one, read off a `.pm-prompt`
+   * that has no piece spans at all (the user-prompt block). A piece with no
+   * tint fails that comparison and passes every other check on the page.
    */
   for (const scheme of ["dark", "light"] as const) {
-    test(`every prompt tint and the absent badge clear 4.5:1 — ${scheme}`, async ({ page }) => {
+    test(`every prompt tint clears 4.5:1 and is a tint at all — ${scheme}`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
       await page.goto(`${BASE}/summaries/prompts`);
       await openCell(page, "vimeo", "standard");
 
-      const ratios = await page.evaluate(() => {
+      const probe = await page.evaluate(() => {
         const lum = (css: string): number => {
           const [r, g, b] = css.match(/[\d.]+/g)!.slice(0, 3).map((n) => Number(n) / 255);
           const f = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
@@ -407,17 +425,27 @@ test.describe("Summaries: the capture-prompt matrix", () => {
         // piece that only appears in a closed one is measured too.
         const pre = document.querySelector(".pm-drawer:not([hidden]) .pm-system")!;
         const preBg = getComputedStyle(pre).backgroundColor;
+        // The INHERITED colour: a `.pm-prompt` block with no piece spans in it
+        // (the user prompt), so an untinted `.pm-piece` resolves to exactly this.
+        const plain = Array.from(
+          document.querySelectorAll<HTMLElement>(".pm-drawer:not([hidden]) .pm-prompt"),
+        ).find((el) => el.querySelector(".pm-piece") === null)!;
+        const inherited = getComputedStyle(plain).color;
+        const untinted: string[] = [];
         for (const span of Array.from(document.querySelectorAll<HTMLElement>(".pm-system .pm-piece"))) {
-          out[span.dataset["piece"]!] = ratio(getComputedStyle(span).color, preBg);
+          const color = getComputedStyle(span).color;
+          const id = span.dataset["piece"]!;
+          out[id] = ratio(color, preBg);
+          if (color === inherited && !untinted.includes(id)) untinted.push(id);
         }
         const badge = document.querySelector<HTMLElement>(".pm-drawer:not([hidden]) .pm-badge-off")!;
         const bs = getComputedStyle(badge);
         out["badge-off"] = ratio(bs.color, bs.backgroundColor);
-        return out;
+        return { ratios: out, untinted, inherited };
       });
 
       // The probe found real elements, not an empty set that trivially passes.
-      expect(Object.keys(ratios).sort()).toEqual([
+      expect(Object.keys(probe.ratios).sort()).toEqual([
         "badge-off",
         "context",
         "envelope",
@@ -432,9 +460,17 @@ test.describe("Summaries: the capture-prompt matrix", () => {
         "structure",
         "visual-only",
       ]);
-      for (const [name, value] of Object.entries(ratios)) {
+      // The inherited colour really resolved to something, so the comparison
+      // below is a comparison rather than two undefineds.
+      expect(probe.inherited).toMatch(/^rgb/);
+      // EVERY piece id is tinted — none falls through to the block's own colour.
+      expect(probe.untinted, `untinted piece ids on ${scheme}`).toEqual([]);
+      for (const [name, value] of Object.entries(probe.ratios)) {
         expect(value, `${name} on ${scheme}`).toBeGreaterThanOrEqual(4.5);
       }
+      // Printed so the numbers in `summaries-prompts-page.ts`' docblock are
+      // re-derivable from a run rather than trusted.
+      console.log(`[contrast ${scheme}]`, JSON.stringify(probe.ratios));
     });
   }
 

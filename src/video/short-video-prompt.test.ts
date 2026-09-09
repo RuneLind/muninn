@@ -130,6 +130,75 @@ Author: placeholder-author`);
     expect(prompt.indexOf("6. CRITICAL")).toBeGreaterThan(prompt.indexOf("3. Start your response"));
   });
 
+  /**
+   * The ZERO-FRAME form — the shape a re-run asks for.
+   *
+   * A re-run replays a stored capture with `frames: []` (it has no work dir and
+   * no JPEGs), and the frames-present prompt then orders the model to "Read ALL
+   * the frame images listed below" over a user prompt that lists none, says
+   * "using BOTH its transcript and the keyframe images", and asks it to note
+   * what is visual-only. `frames: false` is that axis, and it is the ONLY thing
+   * it changes: the numbering closes up, the intro names the transcript alone,
+   * and everything else — envelope, kind, no-commentary rule, context — is the
+   * same builder.
+   */
+  test("`frames: false` drops the two frame rules, renumbers, and names the transcript alone", () => {
+    expect(
+      buildShortVideoSystemPrompt(TIKTOK_PROMPT_SPEC, {
+        preset: TINY,
+        title: "A placeholder capture",
+        url: "https://www.tiktok.com/@placeholder/video/1234567890123456789",
+        author: "placeholder-author",
+        frames: false,
+      }),
+    ).toBe(`You are a video content analyst. Summarize the following TikTok video from its speech transcript.
+
+Instructions:
+1. Start your response with EXACTLY this line: CATEGORY: <category>
+   Choose from: ${VALID_CATEGORIES.join(", ")}
+2. Then add a blank line, then SUMMARY: on its own line
+3. Then write a structured summary with:
+   - One bullet, and nothing else.
+4. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response. Do not narrate the frames as you read them.
+
+Video title: A placeholder capture
+Video URL: https://www.tiktok.com/@placeholder/video/1234567890123456789
+Author: placeholder-author`);
+  });
+
+  test("`frames: false` drops the frame spans, so the page has nothing frame-shaped to tint", () => {
+    const input = { preset: STANDARD, title: "T", url: "U", author: "A", frames: false } as const;
+    const pieces = shortVideoSystemPromptPieces(X_VIDEO_PROMPT_SPEC, input);
+    expect(pieces.map((p) => p.id)).toEqual([
+      "intro",
+      "envelope",
+      "structure",
+      "no-commentary",
+      "context",
+    ]);
+    const prompt = joinPromptPieces(pieces);
+    expect(prompt).toBe(buildShortVideoSystemPrompt(X_VIDEO_PROMPT_SPEC, input));
+    expect(prompt).not.toContain("Read ALL the frame images");
+    expect(prompt).not.toContain("visual-only");
+    expect(prompt).not.toContain(X_VIDEO_PROMPT_SPEC.frameClause);
+  });
+
+  /**
+   * The CAPTURE path is unchanged, in the only form that proves it: the default
+   * and the explicit `true` are the same bytes, and the default is still the
+   * frames-present prompt the literal at the top of this file pins.
+   */
+  test("frames default to PRESENT, so the capture path is byte-identical to before the axis", () => {
+    for (const spec of [TIKTOK_PROMPT_SPEC, X_VIDEO_PROMPT_SPEC]) {
+      const base = { preset: STANDARD, title: "T", url: "U", author: "A" };
+      const dflt = buildShortVideoSystemPrompt(spec, base);
+      expect(dflt).toBe(buildShortVideoSystemPrompt(spec, { ...base, frames: true }));
+      expect(dflt).toContain("using BOTH its speech transcript and the extracted keyframe images");
+      expect(dflt).toContain("1. Read ALL the frame images listed below");
+      expect(dflt).not.toBe(buildShortVideoSystemPrompt(spec, { ...base, frames: false }));
+    }
+  });
+
   test("the KIND's instruction is what the structure step carries", () => {
     const talkNotes = SHIPPED_CAPTURE_PRESETS.find((p) => p.id === "talk-notes")!;
     const prompt = buildShortVideoSystemPrompt(X_VIDEO_PROMPT_SPEC, {

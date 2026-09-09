@@ -142,8 +142,11 @@ Instructions:
     expect(one).toContain("2. Start your response with EXACTLY this line");
     expect(one).toContain("3. Then add a blank line");
     expect(one).toContain("4. Then write a structured summary with:");
-    // …and there is exactly one step 1, which is the slotted one.
-    expect(one.match(/^1\. /m)![0]).toBe("1. ");
+    // …and there is exactly ONE step 1, which is the slotted one. Counted with
+    // `g`, because `/^1\. /m` finds the first match and `[0]` is then the
+    // pattern's own literal text — an assertion that cannot fail whatever the
+    // prompt says, and that survived a renumbering mutation.
+    expect(one.match(/^1\. /gm)).toHaveLength(1);
     expect(one).toContain("1. Read the frames first.");
   });
 
@@ -156,6 +159,83 @@ Instructions:
     expect(two.endsWith("3. Then write a structured summary with:\n   - one\n4. Produce NO commentary.\n5. And this.")).toBe(
       true,
     );
+  });
+
+  /**
+   * The slot's CONTRACT, refused at construction.
+   *
+   * `text` is documented as "the instruction, unnumbered and unterminated", and
+   * every shape below silently produced a malformed prompt or a wrong tint
+   * instead of an error. The measured one: `after: [{ text: "\n6. legacy" }]`
+   * composed a step 4 with no words after its number and an orphan `6.` on the
+   * next line, and the page tinted both as the same piece. A slot entry is
+   * written once, in code, by a vertical author — so the honest answer to a
+   * shape the envelope cannot number is a throw, not a best effort.
+   */
+  describe("the slot contract", () => {
+    const ok = { id: "r", label: "R", text: "Do the thing." };
+    /** Compose with one slot entry replaced by `bad`, in whichever slot. */
+    const withEntry = (slot: "before" | "after", bad: { id: string; label: string; text: string }) =>
+      () => summarySystemPromptPieces("I.", ["a"], "- one", { [slot]: [bad] });
+
+    for (const slot of ["before", "after"] as const) {
+      test(`${slot}: empty text is refused`, () => {
+        expect(withEntry(slot, { ...ok, text: "" })).toThrow(/no text/);
+        expect(withEntry(slot, { ...ok, text: "   \n " })).toThrow(/no text/);
+      });
+
+      test(`${slot}: text that carries its own leading newline or spacing is refused`, () => {
+        // The measured probe: a legacy instruction pasted in with the newline
+        // and the number the envelope is supposed to add.
+        expect(withEntry(slot, { ...ok, text: "\n6. legacy" })).toThrow(/leading or trailing whitespace/);
+        expect(withEntry(slot, { ...ok, text: "Do the thing. " })).toThrow(/leading or trailing whitespace/);
+      });
+
+      test(`${slot}: multi-line text is refused`, () => {
+        expect(withEntry(slot, { ...ok, text: "First line.\nSecond line." })).toThrow(/one line/);
+      });
+
+      test(`${slot}: text that numbers itself is refused`, () => {
+        expect(withEntry(slot, { ...ok, text: "6. legacy" })).toThrow(/numbers itself/);
+        expect(withEntry(slot, { ...ok, text: "1) legacy" })).toThrow(/numbers itself/);
+      });
+    }
+
+    test("a duplicate id across the slots is refused", () => {
+      expect(() =>
+        summarySystemPromptPieces("I.", ["a"], "- one", {
+          before: [{ ...ok, id: "twice" }],
+          after: [{ ...ok, id: "twice" }],
+        }),
+      ).toThrow(/duplicate piece id "twice"/);
+    });
+
+    test("an id that collides with a piece the envelope itself emits is refused", () => {
+      for (const id of ["intro", "instructions", "envelope", "structure"]) {
+        expect(withEntry("before", { ...ok, id })).toThrow(new RegExp(`duplicate piece id "${id}"`));
+      }
+    });
+
+    test("the shapes the two short-video verticals really send are accepted", () => {
+      // The guard must not refuse the production callers — the one thing a
+      // validation round can break that no other case here would notice.
+      expect(() =>
+        shortVideoSystemPromptPieces(TIKTOK_PROMPT_SPEC, {
+          preset: STANDARD,
+          title: "T",
+          url: "https://www.tiktok.com/@a/video/1",
+          author: "a",
+        }),
+      ).not.toThrow();
+      expect(() =>
+        shortVideoSystemPromptPieces(X_VIDEO_PROMPT_SPEC, {
+          preset: STANDARD,
+          title: "T",
+          url: "https://x.com/a/status/1",
+          author: "a",
+        }),
+      ).not.toThrow();
+    });
   });
 
   /**

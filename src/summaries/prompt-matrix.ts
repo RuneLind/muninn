@@ -261,11 +261,17 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     // kept because `PromptMatrixSource` requires one.
     run: { thinking: "capped", model: "bot" },
     framesNote: "keyframes read first, never quoted",
-    // Branch points, from `src/video/short-video-prompt.ts`: the SYSTEM pieces
-    // have none — `buildShortVideoUserPrompt` has both. `input.transcript ? …
-    // : "No speech detected — summarize from the frames."` (a music-only clip
-    // is a real capture) and `input.frames.length > 0`.
-    fixedAxes: ["transcript: present", "keyframes: present"],
+    // Branch points, from `src/video/short-video-prompt.ts`. SYSTEM: the
+    // `frames` axis — `false` drops the frame-reading and visual-only rules and
+    // names the transcript alone in the intro, which is the form a re-run of a
+    // stored capture asks for. USER: `input.transcript ? … : "No speech
+    // detected — summarize from the frames."` (a music-only clip is a real
+    // capture) and `input.frames.length > 0`.
+    fixedAxes: [
+      "system prompt: the frames-present form",
+      "transcript: present",
+      "keyframes: present",
+    ],
     readsVisualDetail: false,
   },
   {
@@ -276,9 +282,13 @@ export const PROMPT_MATRIX_SOURCES: readonly PromptMatrixSource[] = [
     envelope: "shared",
     run: { thinking: "capped", model: "bot" },
     framesNote: "keyframes read first, never quoted",
-    // The same two, through the same builder — the X spec differs from the
+    // The same three, through the same builder — the X spec differs from the
     // TikTok one in the platform noun and one clause, nothing else.
-    fixedAxes: ["transcript: present", "keyframes: present"],
+    fixedAxes: [
+      "system prompt: the frames-present form",
+      "transcript: present",
+      "keyframes: present",
+    ],
     readsVisualDetail: false,
   },
   {

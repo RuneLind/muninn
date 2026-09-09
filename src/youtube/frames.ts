@@ -52,9 +52,9 @@ import { TRANSCRIPT_MAX_BYTES } from "../summaries/transcript-appendix.ts";
  * path. The preference is a preference: tiers 2 and 3 drop it, so a video with
  * no H.264 rendition still gets frames.
  *
- * The `720` is `CAPTURE_FRAME_HEIGHT` spelled out: this module imports nothing
- * by design (see the file header), and the seam's constant is what the
- * extractor actually scales to.
+ * The `720` is `CAPTURE_FRAME_HEIGHT` spelled out: this module's only import is
+ * the dependency-free `transcript-appendix.ts` leaf (see the file header), and
+ * the seam's constant is what the extractor actually scales to.
  */
 export const YOUTUBE_FRAME_FORMAT_SELECTOR =
   "bv[height<=720][ext=mp4][vcodec^=avc1]/bv[height<=720][ext=mp4]/bv[height<=720]";

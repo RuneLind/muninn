@@ -6,12 +6,14 @@ import { summarizeArticle } from "../../x-article/summarizer.ts";
 import { summarizeXVideo } from "../../x-article/video.ts";
 import { extractXStatusId } from "../../video/media.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
-import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
 import { applyCors, corsHeaders } from "../../auth/cors.ts";
-import { shortVideoCaptureKinds } from "../../video/short-video-kinds.ts";
+import {
+  shortVideoCaptureBlocker,
+  shortVideoCaptureKinds,
+} from "../../video/short-video-kinds.ts";
 import {
   DEFAULT_CAPTURE_KIND,
   capturePresetOptions,
@@ -23,6 +25,9 @@ const log = getLog("dashboard");
 // Single source of truth for the collection name lives in the registry.
 const XA_SOURCE = getSummarySource("x-article")!;
 const XA_COLLECTION = XA_SOURCE.collection;
+
+/** This vertical's word for the frames in the capture-blocked sentence. */
+const XV_FRAME_NOUN = "video frames";
 
 interface XaDocumentMeta { id: string; url?: string }
 
@@ -151,7 +156,8 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
    * `video-options` because the sibling POST on this base is the TEXT path,
    * which has no kind picker.
    *
-   * `applyCors` and no preflight, for the reasons the TikTok twin states.
+   * `applyCors` and no preflight, for the reasons the TikTok twin states — and
+   * `capture` beside `frames` for the reason it states too.
    */
   app.get("/api/x-articles/video-options", (c) => {
     applyCors(c);
@@ -159,21 +165,26 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
     if (!summarizerBot) {
       return c.json({ error: "No bots configured", code: "no_bot" }, 500);
     }
+    const blocker = shortVideoCaptureBlocker(summarizerBot, XV_FRAME_NOUN);
     return c.json({
       kinds: capturePresetOptions(shortVideoCaptureKinds(summarizerBot)),
       default_kind: DEFAULT_CAPTURE_KIND,
-      frames: { supported: connectorCapabilities(summarizerBot).supportsExtraDirs },
+      frames: { supported: blocker === null },
+      capture: blocker === null ? { supported: true } : { supported: false, reason: blocker },
     });
   });
 
   app.post("/api/x-articles/summarize-video", async (c) => {
     applyCors(c);
 
+    // `kind` is `unknown`, not `string?`: typed as a string, the `typeof` guard
+    // below narrows to `never` and the shape it exists to refuse is the one
+    // TypeScript says cannot happen. `youtube-routes.ts` has the same.
     const body = await c.req.json<{
       title?: string;
       url?: string;
       frames?: boolean;
-      kind?: string;
+      kind?: unknown;
     }>();
     const { title, url, frames } = body;
 
@@ -243,13 +254,9 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
     // Same pre-flight as TikTok: the frame-reading flow needs --add-dir, which
     // only the claude-cli/claude-sdk connectors express. Reject before the
     // expensive download + whisper work.
-    if (!connectorCapabilities(summarizerBot).supportsExtraDirs) {
-      return c.json(
-        {
-          error: `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector}", which cannot read the extracted video frames (no extra-dirs support). Set SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
-        },
-        503,
-      );
+    const blocker = shortVideoCaptureBlocker(summarizerBot, XV_FRAME_NOUN);
+    if (blocker !== null) {
+      return c.json({ error: blocker }, 503);
     }
 
     // Author is resolved from yt-dlp metadata inside the job.

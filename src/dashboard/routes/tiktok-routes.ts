@@ -5,12 +5,14 @@ import { createJob, getJob, getRecentJobs, subscribe } from "../../tiktok/state.
 import { summarizeTikTok } from "../../tiktok/summarizer.ts";
 import { extractTikTokVideoId } from "../../video/media.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
-import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
 import { applyCors } from "../../auth/cors.ts";
-import { shortVideoCaptureKinds } from "../../video/short-video-kinds.ts";
+import {
+  shortVideoCaptureBlocker,
+  shortVideoCaptureKinds,
+} from "../../video/short-video-kinds.ts";
 import {
   DEFAULT_CAPTURE_KIND,
   capturePresetOptions,
@@ -22,6 +24,9 @@ const log = getLog("dashboard");
 // Single source of truth for the collection name lives in the registry.
 const TT_SOURCE = getSummarySource("tiktok")!;
 const TT_COLLECTION = TT_SOURCE.collection;
+
+/** This vertical's word for the frames in the capture-blocked sentence. */
+const TT_FRAME_NOUN = "TikTok frames";
 
 // A browser-like UA so the short-link HEAD isn't met with TikTok's anti-bot wall.
 const BROWSER_UA =
@@ -118,7 +123,11 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
    * CORS *simple* request — a `GET` with no custom headers — so no preflight is
    * needed and none is registered.
    *
-   * `frames.supported` is the same `supportsExtraDirs` answer the POST 503s on.
+   * `capture.supported` is the POST's own 503 pre-flight, asked ahead of time
+   * and carrying the same sentence — the honest field, because that pre-flight
+   * does not depend on `frames` (see `shortVideoCaptureBlocker`).
+   * `frames.supported` is the same answer under its older name, kept so an
+   * already-installed extension keeps reading the field it knows.
    */
   app.get("/api/tiktok/options", (c) => {
     applyCors(c);
@@ -126,23 +135,28 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
     if (!summarizerBot) {
       return c.json({ error: "No bots configured", code: "no_bot" }, 500);
     }
+    const blocker = shortVideoCaptureBlocker(summarizerBot, TT_FRAME_NOUN);
     return c.json({
       kinds: capturePresetOptions(shortVideoCaptureKinds(summarizerBot)),
       // The id a client sends when the reader picks nothing. Named rather than
       // left as "the first entry", so a picker never has to assume an order.
       default_kind: DEFAULT_CAPTURE_KIND,
-      frames: { supported: connectorCapabilities(summarizerBot).supportsExtraDirs },
+      frames: { supported: blocker === null },
+      capture: blocker === null ? { supported: true } : { supported: false, reason: blocker },
     });
   });
 
   app.post("/api/tiktok/summarize", async (c) => {
     applyCors(c);
 
+    // `kind` is `unknown`, not `string?`: typed as a string, the `typeof`
+    // guard below narrows to `never` and the shape it exists to refuse is the
+    // one TypeScript says cannot happen. `youtube-routes.ts` has the same.
     const body = await c.req.json<{
       title?: string;
       url?: string;
       frames?: boolean;
-      kind?: string;
+      kind?: unknown;
     }>();
     const { title, url, frames } = body;
 
@@ -217,13 +231,9 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
     // the multi-turn flow Reads frame JPEGs from a tmp dir, which only the
     // Claude CLI connector can express. Reject here, before the expensive
     // download + whisper pre-work.
-    if (!connectorCapabilities(summarizerBot).supportsExtraDirs) {
-      return c.json(
-        {
-          error: `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector}", which cannot read the extracted TikTok frames (no extra-dirs support). Set SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
-        },
-        503,
-      );
+    const blocker = shortVideoCaptureBlocker(summarizerBot, TT_FRAME_NOUN);
+    if (blocker !== null) {
+      return c.json({ error: blocker }, 503);
     }
 
     const jobId = createJob(videoId ?? "", title || url, url);

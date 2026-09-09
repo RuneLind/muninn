@@ -404,23 +404,27 @@ export { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
 import { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
 
 /**
- * Build the shared CATEGORY:/SUMMARY: system-prompt scaffold used by the
- * youtube / vimeo / x-article / anthropic / article summarizers, and — since the
- * short-video merge — the TikTok and X-video one too. Only the intro sentence and
- * the category allowlist vary; the CATEGORY-line + blank-line + SUMMARY-line
- * contract is identical so the shared `parseSummaryResponse` parser works
- * unchanged.
+ * {@link summarySystemPromptPieces}, JOINED — the shared CATEGORY:/SUMMARY:
+ * scaffold as one string.
  *
- * The short-video verticals reach it through the `before`/`after` SLOTS
- * ({@link SummaryEnvelopeSlots}): their frame-reading rules are numbered ahead
- * of the CATEGORY step and their no-commentary rule after the structure, which
- * is what their hand-rolled envelope spelled by hand. A caller that passes no
- * slots gets exactly what it got before they existed, bytes and pieces alike.
+ * **No production caller, deliberately.** Every vertical composes its system
+ * prompt from the PIECES instead (`src/<vertical>/prompt.ts` →
+ * `…SystemPromptPieces` → `joinPromptPieces`), because `/summaries/prompts`
+ * tints each line of a composed prompt by the part that produced it and the only
+ * honest source for that is the construction. What this function is for is the
+ * TESTS: `prompt-pieces.test.ts` and `summarizer-shared.test.ts` pin the joined
+ * scaffold against a literal, which is the change-detector for a reword nobody
+ * meant. Keeping the join defined AS the join is what keeps that one template
+ * rather than two.
  *
- * The template itself lives in {@link summarySystemPromptPieces}, and this is
- * the join of it: `/summaries/prompts` tints the composed prompt by the piece
- * that produced each line, and the only honest source for that is the
- * construction. Two spellings of one scaffold would drift on the first reword.
+ * The scaffold itself: only the intro sentence and the category allowlist vary,
+ * and the CATEGORY-line + blank-line + SUMMARY-line contract is identical
+ * everywhere so the shared `parseSummaryResponse` works unchanged. The
+ * short-video verticals sit on the `before`/`after` SLOTS
+ * ({@link SummaryEnvelopeSlots}) — frame-reading rules numbered ahead of the
+ * CATEGORY step, no-commentary rule after the structure — which is what their
+ * hand-rolled envelope used to spell out. A caller that passes no slots gets
+ * exactly what it got before the slots existed, bytes and pieces alike.
  */
 export function buildSummarySystemPrompt(
   intro: string,

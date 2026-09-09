@@ -40,6 +40,9 @@ export const TIKTOK_SPEC: ShortVideoSpec = {
   // yt-dlp's canonical `/video/<id>` URL is already the dedup key here.
   canonicalUrl: (dlCanonicalUrl) => dlCanonicalUrl,
   idFor: (_canonicalUrl, dlId) => dlId,
+  // The key this vertical's completion line has always used; the JSONL sink is
+  // searched by field, so it is the spec's to declare, not the job's.
+  idLogKey: "videoId",
   // This vertical warns when a frames-ON summary mentions nothing visual: the
   // frame Reads can degrade silently (a permissions or `--add-dir` regression)
   // and the warn is the only place that failure is visible.
@@ -61,7 +64,7 @@ export function summarizeTikTok(
   title: string,
   config: Config,
   botConfig: BotConfig,
-  opts: SummarizeOptions = {},
+  opts: SummarizeOptions,
 ): Promise<void> {
   return summarizeShortVideo(TIKTOK_SPEC, jobId, url, title, config, botConfig, opts);
 }

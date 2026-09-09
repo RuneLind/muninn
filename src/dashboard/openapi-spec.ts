@@ -1250,7 +1250,7 @@ export const spec = {
         tags: ["TikTok"],
         summary: "Capture options this instance offers",
         description:
-          "The summary kinds `POST /api/tiktok/summarize` accepts on this instance, and whether it can read keyframes at all — one resolution, so a client's picker and the POST's 400 cannot disagree. The kinds are `SUMMARIZER_BOT`'s resolved preset set narrowed to those whose model AND thinking budget its connector can honour, so `deep` is absent on a `copilot-sdk` bot; `GET /api/x-articles/video-options` answers the same shape for the X-video half of the same capture job. `frames.supported` mirrors that bot's `supportsExtraDirs`. Read-only, with the same CORS disposition the POST applies, and a CORS-simple request, so no preflight is registered. No summarizer bot at all is 500 `no_bot`, not an empty picker.",
+          "The summary kinds `POST /api/tiktok/summarize` accepts on this instance, and whether that POST can run at all — one resolution, so a client's picker and the POST's 400 and 503 cannot disagree. The kinds are `SUMMARIZER_BOT`'s resolved preset set narrowed to those whose model AND thinking budget its connector can honour, so `deep` is absent on a `copilot-sdk` bot; `GET /api/x-articles/video-options` answers the same shape for the X-video half of the same capture job. `capture.supported` is the POST's own 503 pre-flight asked ahead of time, and `capture.reason` is that response's sentence: the job grants the model read access to its tmp frame dir on EVERY path, so a bot whose connector cannot express that runs no short-video capture, `frames: false` included. `frames.supported` is the same verdict under its older name, kept so an already-installed extension keeps reading the field it knows. Read-only, with the same CORS disposition the POST applies, and a CORS-simple request, so no preflight is registered. No summarizer bot at all is 500 `no_bot`, not an empty picker.",
         operationId: "getTiktokOptions",
         responses: {
           "200": {
@@ -1274,6 +1274,18 @@ export const spec = {
                     frames: {
                       type: "object",
                       properties: { supported: { type: "boolean" } },
+                      description: "The older spelling of `capture.supported`, kept for installed clients.",
+                    },
+                    capture: {
+                      type: "object",
+                      properties: {
+                        supported: { type: "boolean" },
+                        reason: {
+                          type: "string",
+                          description:
+                            "Present only when unsupported — the sentence the 503 carries.",
+                        },
+                      },
                     },
                   },
                 },
@@ -1320,6 +1332,11 @@ export const spec = {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { job_id: { type: "string" }, dashboard_url: { type: "string" } } } } } },
           "400": errorResponse,
           "500": errorResponse,
+          "503": {
+            ...errorResponse,
+            description:
+              "The summarizer bot's connector cannot grant read access outside the bot folder (`--add-dir`), which this capture needs on EVERY path — `frames: false` included, since the job hands the model its tmp work dir either way. `GET /api/tiktok/options` answers the same verdict ahead of time as `capture.supported`, with this response's sentence as `capture.reason`.",
+          },
         },
       },
     },

@@ -469,7 +469,11 @@ export async function summarizeVideo(
         return;
       }
       const data = await res.json() as { transcript?: string; timestamps?: boolean };
-      transcriptText = data.transcript ?? "";
+      // TRIMMED before the check: huginn answering `"\n \n"` is a non-empty
+      // string that passes `!transcriptText`, and the capture would then
+      // summarize nothing and file an empty `## Transcript` section into the
+      // indexed document — a talk that reads as captured and is not.
+      transcriptText = (data.transcript ?? "").trim();
       timestamped = data.timestamps === true;
       if (!transcriptText) {
         failJob(jobId, "Empty transcript returned");
@@ -1048,10 +1052,10 @@ export async function summarizeVideo(
     // a window boundary, a FLAT transcript at a character boundary, and putting
     // a flat one through the window capper throws a single-paragraph transcript
     // away entirely — and no longer whether there is a transcript to file at
-    // all. `transcriptText` is non-empty by here on both paths (an empty one
-    // fails the job at the fetch), and a frames-off capture used to drop it on
-    // the floor, so a talk captured without slides was indexed on its summary
-    // alone and could not be cited at a timestamp.
+    // all. `transcriptText` is non-blank by here on both paths — it is TRIMMED
+    // at the fetch and an empty result fails the job there — and a frames-off
+    // capture used to drop it on the floor, so a talk captured without slides
+    // was indexed on its summary alone and could not be cited at a timestamp.
     const ingestSummaryBody = appendTranscriptSection(
       summary,
       transcriptText,

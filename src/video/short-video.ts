@@ -34,13 +34,7 @@ import type { RunMeta, SimilarArticle } from "../summaries/job-store.ts";
 import { getLog } from "../logging.ts";
 import { ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
 import { appendTranscriptSection } from "../summaries/transcript-appendix.ts";
-import {
-  DEFAULT_CAPTURE_KIND,
-  SHIPPED_CAPTURE_PRESETS,
-  captureBotConfigFor,
-  captureThinkingFor,
-  type CapturePreset,
-} from "../summaries/presets.ts";
+import { captureBotConfigFor, type CapturePreset } from "../summaries/presets.ts";
 import {
   buildShortVideoSystemPrompt,
   buildShortVideoUserPrompt,
@@ -118,6 +112,17 @@ export interface ShortVideoSpec extends ShortVideoPromptSpec, ShortVideoFinishSp
   readonly canonicalUrl: (dlCanonicalUrl: string, submittedUrl: string) => string;
   /** The id the completion log line names, from the canonical url and yt-dlp's id. */
   readonly idFor: (canonicalUrl: string, dlId: string) => string;
+  /**
+   * The structured-log KEY that id is recorded under — `videoId` for TikTok,
+   * `statusId` for X video.
+   *
+   * A spec field for the reason `logCategory` is one: the JSONL sink is searched
+   * by FIELD, so `statusId` is part of what the X vertical shipped and a merge
+   * that quietly renamed it to the neighbour's spelling would change what a
+   * saved search matches, with nothing else to notice. Pinned per spec in
+   * `short-video.test.ts`.
+   */
+  readonly idLogKey: string;
   readonly store: ShortVideoStore;
 }
 
@@ -125,16 +130,23 @@ export interface ShortVideoOptions {
   /** When false, skip keyframe extraction (transcript-only summary). Default true. */
   frames?: boolean;
   /**
-   * The summary KIND this capture writes. The route resolves it (absent ⇒
-   * `standard`); a direct caller that omits it gets `standard` too, so nothing
-   * has to know the shipped set to call this.
+   * The summary KIND this capture writes, resolved by the ROUTE against the
+   * summarizer bot's preset set (`findCapturePreset` — an unknown id is a 400
+   * there, so a job that gets here carries a real preset).
+   *
+   * REQUIRED, the YouTube and Vimeo precedent (`src/youtube/summarizer.ts`,
+   * `src/vimeo/summarizer.ts`), and for the same measured reason: a default
+   * resolved here reads `SHIPPED_CAPTURE_PRESETS`, so a bot whose
+   * `prompts/captureSummary.standard.md` overrides the standard kind would have
+   * that file silently ignored on any preset-less call — while
+   * `/summaries/prompts` shows the override as present. Every caller resolves a
+   * preset already; there is nobody for the default to serve.
+   *
+   * It decides the structure bullets in the system prompt and the model the
+   * call runs on (`captureBotConfigFor`). It does NOT decide the thinking
+   * budget here — see the `thinkingMaxTokens` note at the model call.
    */
-  preset?: CapturePreset;
-}
-
-/** `standard`, for a caller that named no kind. */
-function defaultPreset(): CapturePreset {
-  return SHIPPED_CAPTURE_PRESETS.find((p) => p.id === DEFAULT_CAPTURE_KIND)!;
+  preset: CapturePreset;
 }
 
 export async function summarizeShortVideo(
@@ -144,13 +156,13 @@ export async function summarizeShortVideo(
   title: string,
   config: Config,
   botConfig: BotConfig,
-  opts: ShortVideoOptions = {},
+  opts: ShortVideoOptions,
 ): Promise<void> {
   const log = getLog(spec.logCategory[0], spec.logCategory[1]);
   const { updateStatus, appendText, setSimilar, setCategory, completeJob, failJob, attachRun } =
     spec.store;
   const framesEnabled = opts.frames !== false;
-  const preset = opts.preset ?? defaultPreset();
+  const { preset } = opts;
   const workDir = join(tmpdir(), `${spec.workDirPrefix}${jobId}`);
 
   try {
@@ -248,13 +260,20 @@ export async function summarizeShortVideo(
       onProgress,
       extraDirs: [workDir],
       timeoutMs: summarizeTimeoutFor(frames.length, botConfig.timeoutMs ?? config.claudeTimeoutMs),
-      // The KIND says how the call is made, exactly as it does on every other
-      // vertical: `captureThinkingFor` is `undefined` (the shared 8k capture
-      // cap) for `standard` and `talk-notes`, `null` (the bot's own budget) for
-      // `deep`. Before the picker existed this was hardcoded `null` — reading
-      // the keyframes IS the reasoning here — so `standard` moves onto the
-      // capped call and `deep` is the kind that buys the old behaviour back.
-      thinkingMaxTokens: captureThinkingFor(preset),
+      // The bot's OWN thinking budget, on every kind — this vertical's answer
+      // since before the picker existed, and unchanged by it.
+      //
+      // Reading the keyframes (up to `FRAME_BUDGET_MAX` of them) IS the
+      // reasoning in a short-video capture, and as a background job with no
+      // reader waiting on the first token there is no dead-air to buy back. The
+      // 8k knee `CAPTURE_THINKING_MAX_TOKENS` names was measured on a TEXT-ONLY
+      // YouTube transcript (2.3k words, jarvis/claude-sdk); nothing has measured
+      // it against a multi-turn frame-reading session, which is the only work
+      // this call does. Routing `standard` through the cap would have moved every
+      // ordinary capture here onto an unmeasured budget, and no kind would have
+      // reproduced the old default — `deep` swaps the MODEL to opus as well, so
+      // it is a different call, not the previous one under another name.
+      thinkingMaxTokens: null,
     });
 
     // 5. The post-model tail, in ONE function (`./short-video-finish.ts`) so a
@@ -269,9 +288,9 @@ export async function summarizeShortVideo(
     });
 
     log.info(
-      `Summarized ${spec.noun} {videoId}: category={category}, kind={kind}, {frames} frames, {tokens} output tokens`,
+      `Summarized ${spec.noun} {${spec.idLogKey}}: category={category}, kind={kind}, {frames} frames, {tokens} output tokens`,
       {
-        videoId: spec.idFor(canonicalUrl, dl.id),
+        [spec.idLogKey]: spec.idFor(canonicalUrl, dl.id),
         category,
         kind: preset.id,
         frames: frames.length,
