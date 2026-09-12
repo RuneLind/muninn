@@ -918,8 +918,8 @@ function renderList(): void {
     const active = isActivePage(p, { name: currentName, relPath: currentRelPath });
     html +=
       `<div class="wiki-list-item${active ? " active" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
-      // The derivation on the ROW, not on the title: it explains the ROW's
-      // placement, and the title's own `title=` is the untruncated title.
+      // The derivation on the ROW, and again on the title element below:
+      // the child's own `title=` wins the hover over most of the row's width.
       (entry.activity ? ` title="${esc(entry.activity.why)}"` : "") +
       `>` +
       (entry.activity

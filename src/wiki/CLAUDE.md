@@ -147,10 +147,12 @@ plans (in-flight and proposed most) and, at a third of a plan's share, blogs. Th
 moves every mtime in the wiki, and ranking on that is the "148 plans edited this
 minute" failure those functions exist to absorb. ⚠️ A **change means the update signal's own KIND is `updated`** (`pageDateKind`),
 never a gap between two dates: `updatedSignal` falls back to the git CREATION
-date for a page whose every commit was a sweep, and read as a date that made 165
-jarvis pages "changed <the day they were created>", outranking the creation they
-were made of. A page with NO creation signal at all (a plain non-git
-`WIKI_EXTRA` dir, where mtime is the only date) is eligible as a change with its
+date for a page whose every commit was a sweep, and read as a date it makes
+such a page "changed <the day it was created>", outranking the creation it is
+made of (534 jarvis pages have the shape; all are old enough to sit under the
+floor today, so it bites when the floor is recent — a re-clone, an import). A
+page with NO creation signal at all (no git history, no birthtime, no
+frontmatter `created:`; mtime is its only date) is eligible as a change with its
 age factor at 1 — an unknown age is not evidence of an old page — and its `why`
 says `created ?`. Bookkeeping pages are excluded
 (`isMetaPage`), and so is anything below `ACTIVITY_MIN_SCORE` — which is what lets

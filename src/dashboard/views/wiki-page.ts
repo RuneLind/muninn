@@ -341,12 +341,12 @@ export async function renderWikiPage(opts?: {
        monospace slot so the titles below it still line up, and theme tokens
        rather than a raw hex.
        The green is --tok-str, NOT --status-success: measured against the rail's
-       --bg-page, the plain status green is 3.00:1 in the light theme, under AA
-       for 11px bold text. --tok-str is the same ramp darkened for exactly that
-       reason (shared-styles.ts says so where it is declared) and measures
-       5.77:1 light; in the DARK theme the two tokens are the same value, so
-       nothing moves there. --accent-light needed no such swap: 5.87:1 light,
-       8.53:1 dark. */
+       ground (.wiki-pane paints --bg-panel), the plain status green is 3.30:1
+       in the light theme, under AA for 11px bold text. --tok-str is the same
+       ramp darkened for exactly that reason (shared-styles.ts says so where it
+       is declared) and measures 6.34:1 light; in the DARK theme the two tokens
+       are the same value, so nothing moves there. --accent-light needed no such
+       swap: 6.46:1 light, 8.53:1 dark. */
     .wiki-act-glyph {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 11px; font-weight: 700; line-height: 1.45;

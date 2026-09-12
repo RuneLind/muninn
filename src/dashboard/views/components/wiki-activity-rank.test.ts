@@ -43,7 +43,8 @@ function page(over: {
    *  makes a creation date older than the git floor, and so the field that
    *  opens the sweep-floor gap below. */
   birthtimeDaysAgo?: number;
-  /** mtime, the ONLY signal a page in a plain non-git directory has. */
+  /** mtime — the only date left when a page has no git history, no
+   *  birthtime (a filesystem that reports none) and no frontmatter `created:`. */
   mtimeDaysAgo?: number;
   backlinkCount?: number;
   type?: string;
@@ -305,8 +306,9 @@ describe("rankActivity — the updated signal has to be a real EDIT", () => {
    * Taken as an edit that reads as "changed <the day it was created>" — and it
    * outranks the creation it is made of whenever the creation signal is older
    * still (a birthtime or a frontmatter `created:` predating the git floor).
-   * Measured on the jarvis wiki: 165 pages, `concepts/Cognitive Debt.md` among
-   * them at changed 0.63 over created 0.50.
+   * On the live jarvis wiki (2026-09-12) 534 pages have this shape, all over 50
+   * days old and so under the floor today; this fixture builds the RECENT floor
+   * (a re-clone or an import) where the phantom would rank.
    */
   const sweptOnly = page({
     relPath: "concepts/swept.md",
@@ -335,7 +337,7 @@ describe("rankActivity — the updated signal has to be a real EDIT", () => {
 });
 
 describe("rankActivity — a page with no CREATION signal", () => {
-  // A plain (non-git) directory registered through WIKI_EXTRA: mtime is the only
+  // No git history, no birthtime, no frontmatter `created:` — mtime is the only
   // date the store has, and `pageAddedMs` answers 0. The page really was edited
   // an hour ago; nothing is known about when it was made.
   const mtimeOnly = page({ relPath: "notes/only-mtime.md", mtimeDaysAgo: 1 / 24 });

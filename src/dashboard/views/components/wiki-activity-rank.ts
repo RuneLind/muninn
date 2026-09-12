@@ -79,7 +79,8 @@ export interface ActivityWeights {
 
 /**
  * One rejected knob: the dotted key and what happened to it, kept APART so a
- * caller logs them as separate LogTape properties (`activity.{key} {reason}`)
+ * caller logs them as separate LogTape properties (`{key} {reason}`, the key
+ * already dotted)
  * and the JSONL sink can group a wiki's warnings by cause. One pre-joined
  * sentence per warning grouped by nothing.
  */
@@ -125,12 +126,12 @@ const MS_PER_DAY = 86_400_000;
  *
  * 0.02 is the point where a creation stops being news. Measured against the
  * DEFAULT weights (2026-09-12): a page reaches it **28.2 days** after it was
- * created, and a change reaches it at **most 15.4 days** after the edit — an
- * upper bound rather than a typical one, since it assumes every other factor at
- * 1. Backlinks and page age only pull it in, which is the intent: a much-linked
- * old page's edit leaves the section sooner. The bound is exactly reached in one
- * real case, the page with NO creation signal, whose unknown age is not
- * discounted (see `scorePage`).
+ * created; a change with every penalty at 1 and no type boost reaches it 15.4
+ * days after the edit, and the latest any change can stay is **~17.4 days** —
+ * an in-flight or proposed plan (type ×1.6) with no backlinks and no creation
+ * signal, whose unknown age is not discounted (see `scorePage`); measured at
+ * 0.0206 at 17.3 d, dropped at 17.5 d. Backlinks and page age only pull it in,
+ * which is the intent: a much-linked old page's edit leaves the section sooner.
  */
 export const ACTIVITY_MIN_SCORE = 0.02;
 
@@ -338,13 +339,18 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
    * gap against `pageAddedMs`, which takes the OLDEST of its three inputs — so a
    * birthtime or a frontmatter `created:` older than the git floor made the page
    * "changed <the day it was created>", scoring ABOVE the creation it is made
-   * of. Measured on the jarvis wiki: 165 pages, `concepts/Cognitive Debt.md`
-   * among them at changed 0.63 over created 0.50. The gate is the signal's own
-   * kind, never a threshold on the two dates.
+   * of. Measured on the jarvis wiki (2026-09-12, 1242 pages): 611 pages carry
+   * the floor as their date and 534 of those open such a gap; none clears the
+   * floor TODAY, because every one is over 50 days old — the shape bites when
+   * the floor is recent (a re-clone, an import), which is what the unit fixture
+   * builds. The gate is the signal's own kind, never a threshold on the dates.
    */
   const isEdit = updatedMs > 0 && pageDateKind(page, now) === "updated";
   // With a known creation date the edit must also be late enough to be a
-  // separate event; with none there is nothing to be late relative to.
+  // separate event. The `!knownAge` clause is defensive only: with no creation
+  // signal `createdDays` counts from epoch 0, so the gap test would fail solely
+  // for an update stamped within half a day of 1970-01-01, which nothing
+  // produces — the clause is unpinned and the rule is the same without it.
   const isChange =
     isEdit && (!knownAge || createdDays - updatedDays > CHANGE_MIN_DAYS_AFTER_CREATION);
   let changedScore = 0;
