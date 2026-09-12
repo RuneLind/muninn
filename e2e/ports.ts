@@ -63,6 +63,11 @@ export const E2E_PORTS = {
   // Two wikis, ONE process: the recents/pins keys are per wiki, and a spec with
   // one root cannot tell a per-wiki key from a global one.
   "wiki-rail-recents": 3040,
+  // Two wikis, ONE process: a git-backed one whose commits are BACKDATED (the
+  // Activity ranking reads git creation/touch dates) and a plain one carrying a
+  // `.wiki-reader.json` `activity` override, which is only provable against a
+  // wiki whose row count differs from the default.
+  "wiki-rail-activity": 3057,
   // Two wikis, ONE process: "remember the last wiki" is only provable when a
   // bare /wiki can land on a wiki OTHER than the one the server defaults to.
   "wiki-home": 3044,

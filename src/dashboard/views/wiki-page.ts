@@ -337,6 +337,28 @@ export async function renderWikiPage(opts?: {
       color: var(--text-dim);
     }
     .wiki-sec-clear:hover { color: var(--status-error); }
+    /* Activity's per-row glyph: "+" created, "~" changed. A fixed-width
+       monospace slot so the titles below it still line up, and the only two
+       colors this rail uses for a state — success for "new", the accent for
+       "changed" — never a raw hex, which would not follow the theme. */
+    .wiki-act-glyph {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; font-weight: 700; line-height: 1.45;
+      width: 10px; text-align: center; flex-shrink: 0; margin-top: 2px;
+    }
+    .wiki-act-glyph.new { color: var(--status-success); }
+    .wiki-act-glyph.changed { color: var(--accent-light); }
+    /* "Recently opened" folds. The default marker is replaced by a ▸ on the
+       section header itself, so the row reads as one piece of furniture rather
+       than a header with a disclosure triangle bolted to its left. The "clear"
+       button still sits inside the summary and still works: its handler calls
+       preventDefault, which is what stops the click ALSO toggling the fold. */
+    .wiki-rail-fold > summary { list-style: none; cursor: pointer; }
+    .wiki-rail-fold > summary::-webkit-details-marker { display: none; }
+    .wiki-rail-fold > summary .wiki-list-sec::before {
+      content: "▸"; font-size: 9px; display: inline-block; transition: transform .15s;
+    }
+    .wiki-rail-fold[open] > summary .wiki-list-sec::before { transform: rotate(90deg); }
     /* ★ and the date share one flex slot, so the ★ costs the row its own width
        and NOT the row's 8px gap as well: as a sibling of the title the pair
        measured 21px off .wiki-list-title on every row — 42px of title left at

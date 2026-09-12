@@ -30,6 +30,7 @@ import {
   type RailSection,
 } from "./wiki-recents.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
+import type { ActivityRow } from "./wiki-activity-rank.ts";
 
 function page(over: Partial<WikiListing> & { relPath: string }): WikiListing {
   return {
@@ -619,6 +620,170 @@ describe("buildRail", () => {
 
   test("shown counts DISTINCT pages — a page in a section and in the listing is one", () => {
     expect(build({ recents: ["a.md"], pins: ["b.md"] }).shown).toBe(3);
+  });
+
+  describe("Activity", () => {
+    // Ranked by the caller, so these cases state the ranking's OUTPUT directly
+    // and pin `buildRail`'s half: placement, claim order and the fold.
+    const row = (p: WikiListing, kind: "new" | "changed" = "new"): ActivityRow => ({
+      page: p,
+      kind,
+      score: 1,
+      why: `${kind} — because`,
+      ageMs: 2 * 86_400_000,
+    });
+
+    test("Activity leads the rail, above Pinned and Recently opened", () => {
+      const rail = build({ activity: [row(c)], recents: ["b.md"], pins: ["a.md"] });
+      expect(headers(rail.entries)).toEqual(["Activity", "Pinned", "Recently opened"]);
+      expect(rows(rail.entries).filter((r) => r.section === "activity").map((r) => r.page)).toEqual([c]);
+    });
+
+    test("Activity CLAIMS its pages, so Pinned, Recent and the remainder skip them", () => {
+      const rail = build({ activity: [row(a), row(b), row(c)], recents: ["b.md"], pins: ["a.md"] });
+      expect(headers(rail.entries)).toEqual(["Activity"]);
+      expect(rows(rail.entries).map((r) => [r.section, r.page.relPath])).toEqual([
+        ["activity", "a.md"],
+        ["activity", "b.md"],
+        ["activity", "c.md"],
+      ]);
+      expect(rail.shown).toBe(3);
+    });
+
+    test("a page Activity lifted still carries its pinned flag", () => {
+      const rail = build({ activity: [row(a)], pins: ["a.md"] });
+      const lifted = rows(rail.entries).find((r) => r.page === a)!;
+      expect(lifted.section).toBe("activity");
+      expect(lifted.pinned).toBe(true);
+    });
+
+    test("the kind and the reason ride the row", () => {
+      const rail = build({ activity: [row(a, "changed")] });
+      expect(rows(rail.entries)[0]!.activity).toEqual({
+        kind: "changed",
+        why: "changed — because",
+        ageMs: 2 * 86_400_000,
+      });
+      // Only Activity rows carry it — a listing row must not grow a glyph.
+      expect(rows(rail.entries).find((r) => r.section === "all")!.activity).toBeUndefined();
+    });
+
+    test("an empty ranking renders no header", () => {
+      expect(headers(build({ activity: [] }).entries)).toEqual([]);
+      expect(headers(build({}).entries)).toEqual([]);
+    });
+
+    test("a query hides it, exactly like the other two sections", () => {
+      const rail = buildRail({
+        filtered: [a],
+        facetOnly: [a],
+        filters: { ...INERT, q: "alph" },
+        recents: [],
+        pins: [],
+        activity: [row(a)],
+      });
+      expect(headers(rail.entries)).toEqual([]);
+      expect(rows(rail.entries)[0]!.section).toBe("all");
+    });
+
+    test("a facet NARROWS it — the caller ranks the filtered pages", () => {
+      // What a facet does to Activity is decided upstream, by WHICH pages are
+      // ranked; this pins that `buildRail` renders whatever it is handed under a
+      // facet rather than hiding the section the way a query does.
+      const rail = buildRail({
+        filtered: [a, c],
+        facetOnly: [a, c],
+        filters: { ...INERT, type: "plan" },
+        recents: [],
+        pins: [],
+        activity: [row(a)],
+      });
+      expect(headers(rail.entries)).toEqual(["Activity", "Other pages"]);
+      expect(rows(rail.entries).map((r) => [r.section, r.page.relPath])).toEqual([
+        ["activity", "a.md"],
+        ["all", "c.md"],
+      ]);
+      expect(rail.shown).toBe(2);
+    });
+
+    test("shown still counts distinct pages with Activity in the rail", () => {
+      expect(build({ activity: [row(a)], recents: ["b.md"], pins: ["c.md"] }).shown).toBe(3);
+    });
+
+    test("a duplicate in the ranking renders once", () => {
+      const rail = build({ activity: [row(a), row(a)] });
+      expect(rows(rail.entries).filter((r) => r.page === a)).toHaveLength(1);
+    });
+  });
+
+  describe("the page being read", () => {
+    // `Recently opened` is folded, so a row lifted into it is off screen — and
+    // the one row that must never be off screen is the one the reader is on:
+    // it carries the `.active` highlight. A recall aid lists pages you might
+    // return to, not the one you are reading.
+    test("the active page is NOT lifted into Recently opened — it stays in the listing", () => {
+      const rail = build({ recents: ["a.md", "c.md"], active: { relPath: "a.md" } });
+      const rs = rows(rail.entries);
+      expect(rs.filter((r) => r.section === "recent").map((r) => r.page)).toEqual([c]);
+      expect(rs.filter((r) => r.section === "all").map((r) => r.page)).toEqual([a, b]);
+      // Still exactly once, and still counted once.
+      expect(rs.filter((r) => r.page === a)).toHaveLength(1);
+      expect(rail.shown).toBe(3);
+    });
+
+    test("…and the header still renders while other recents remain", () => {
+      const rail = build({ recents: ["a.md", "c.md"], active: { relPath: "a.md" } });
+      expect(headers(rail.entries)).toEqual(["Recently opened", "Other pages"]);
+    });
+
+    test("…and there is no header at all when the active page was the only recent", () => {
+      const rail = build({ recents: ["a.md"], active: { relPath: "a.md" } });
+      expect(headers(rail.entries)).toEqual([]);
+      expect(rows(rail.entries).map((r) => [r.section, r.page.relPath])).toEqual([
+        ["all", "a.md"],
+        ["all", "b.md"],
+        ["all", "c.md"],
+      ]);
+    });
+
+    test("the rule is Recently-opened ONLY — Pinned and Activity still lift it", () => {
+      const pinned = build({ recents: ["a.md"], pins: ["a.md"], active: { relPath: "a.md" } });
+      expect(rows(pinned.entries).find((r) => r.page === a)!.section).toBe("pinned");
+      const lifted = build({
+        recents: ["a.md"],
+        activity: [{ page: a, kind: "new", score: 1, why: "new — because", ageMs: 0 }],
+        active: { relPath: "a.md" },
+      });
+      expect(rows(lifted.entries).find((r) => r.page === a)!.section).toBe("activity");
+    });
+
+    test("identity is relPath-then-name, the reader's own test", () => {
+      // Before the page response lands the reader holds only a name.
+      const byName = build({ recents: ["a.md"], active: { name: "a" } });
+      expect(rows(byName.entries).find((r) => r.page === a)!.section).toBe("all");
+      // A differently-cased relPath is the same page (the `?relPath=` deep link).
+      const cased = build({ recents: ["a.md"], active: { relPath: "A.MD" } });
+      expect(rows(cased.entries).find((r) => r.page === a)!.section).toBe("all");
+      // …and nothing open lifts it as before.
+      const none = build({ recents: ["a.md"] });
+      expect(rows(none.entries).find((r) => r.page === a)!.section).toBe("recent");
+    });
+  });
+
+  test("Recently opened is the one folded header", () => {
+    const rail = build({ activity: [], recents: ["b.md"], pins: ["a.md"] });
+    const folded = rail.entries
+      .filter((e) => e.kind === "header" && (e as { fold?: true }).fold)
+      .map((e) => (e as { section: RailSection }).section);
+    expect(folded).toEqual(["recent"]);
+  });
+
+  test("the folded header still carries `clear` when every facet is inert", () => {
+    const head = build({ recents: ["b.md"] }).entries.find(
+      (e) => e.kind === "header" && e.section === "recent",
+    ) as { fold?: true; clear?: true };
+    expect(head.fold).toBe(true);
+    expect(head.clear).toBe(true);
   });
 
   describe("with a key in the query", () => {
