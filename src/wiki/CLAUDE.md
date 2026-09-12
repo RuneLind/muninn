@@ -11,6 +11,8 @@ Bare `/wiki` defaults to jarvis, or the `WIKI_DIR` env override (which shows a d
 
 An optional **`.wiki-reader.json`** at the wiki root (`typeMap` folder→type + `typeLabels`) gives the wiki its own page-type ontology — e.g. mimir's `projects/`→subsystem, `plans/`→plan. Resolution: frontmatter `type:` → typeMap on first path segment → standard folder fallback → `note`. Read once per index build (5-min TTL); malformed ⇒ warn + ignore. No-config wikis keep the standard five types byte-identically.
 
+An eighth key, **`activity`** (an object of seven optional numbers), tunes the page rail's **Activity** ranking for this wiki: `rows` (1–12, how many the section renders), `halfLifeNewDays`/`halfLifeChangedDays` (how fast a creation and a change fade) and the four 0–100 knobs `agePenalty`/`hubPenalty`/`planBoost`/`changedWeight`. Absent ⇒ `DEFAULT_ACTIVITY_WEIGHTS` (`views/components/wiki-activity-rank.ts`), the numbers the prototype was tuned to over the real mimir listing. Same validate-warn-**degrade** shape as its siblings, one level finer: a knob whose value is not a finite number of the right magnitude is dropped ALONE and the rest of the block stands, so a typo costs one weight rather than the section; an unknown key warns, since it is invisible in every other way; and `rows` CLAMPS rather than drops, because "as many as you can" is unambiguous. The resolved set is always COMPLETE on `WikiReaderConfig.activity` and rides `/api/wiki/pages` as `activity`, so the browser — where the ranking runs — never has to MERGE anything; it re-runs the same `parseActivityWeights` over the resolved block (one validator, and an older or degraded server cannot put a bad number into the ranking) and takes the defaults whole when the field is absent.
+
 A seventh key, **`project`** (an object, six optional sub-fields), is how a wiki says which PROJECT a page belongs to — the per-page `project` on `/api/wiki/pages` and the reader's Project facet. Resolved by the pure `resolveProject` (`store.ts`) in a fixed precedence, most-structural first, first rule that answers wins: **(1) `pathFolders`** (string[]) — under a declared first segment, the SECOND segment is the project, ≥3 segments only (a dated file sitting directly in the folder has a second segment too, and reading it as a project mints one facet value per file); **(2) `pageFolder`** (string) — the file stem of a direct child, the page-per-project folder; **(3) `filePrefixFolders`** (string[]) — the LONGEST *known* project that prefixes the file stem before a `-`, so an unknown prefix stays a filename rather than a new project; **(4) `frontmatter`** (string[]) — the first declared key carrying a value, a string or an array's first non-blank element, unguarded (an authored key IS the author saying so); **(5) `tagFallback`** (boolean) — the page's first tag, but ONLY when `aliases` names it or the known set holds the result; otherwise `undefined`, which is the honest answer for most of a wiki. **`aliases`** (short name → project) applies to rules 4 and 5 alone — the two whose input is authored free text, where a short form and the project name genuinely differ; rules 1–3 read directory names the filesystem already agrees on. **The KNOWN set is pageFolder stems ∪ every `pathFolders` project directory**, collected in a first pass over the scanned paths (before any page resolves: every rule reads the set — rules 3 and 5 as a GUARD that can reject, rules 1, 2 and 4 only to pick the spelling — so a page resolved mid-walk would answer differently depending on which read finished first); every lookup in it is **NFC+lowercase folded**, and **every rule ANSWERS with the known project's own spelling** — the first the sorted walk saw — where the set holds the name; when it does not, rules 1/2 answer the raw segment, rule 4 the alias's value, and rule 5 the alias's value only if the alias map names the tag, else `undefined` (rule 4 is unguarded by design; the two share one alias map, so a known value files under one bucket whichever rule carried it) — folding the test alone still splits the facet, one layer down: the page is admitted and then filed under the spelling it was written in. **Rules 3 and 5 are the two that need a known set** — a rule declaring `filePrefixFolders` or a `tagFallback` with no aliases while declaring neither `pageFolder` nor `pathFolders` can never match, and warns once naming the dead field. Same validate-warn-**degrade** shape as its siblings, per FIELD: a `project` that is not an object drops the whole rule; a wrong-typed sub-field warns and drops **only itself** (the six fields are independent rules, not one setting); list entries and alias keys/values are trimmed with blanks dropped (a blank alias value would ship a page a `project: ""` the facet cannot name), and an alias keyed `__proto__`/`constructor`/`prototype` is refused through that same warn — `map["__proto__"] = value` on a plain object hits the SETTER and creates no own key, so that entry would otherwise be dropped in silence; `constructor`/`prototype` DO assign as own keys and every read is `Object.hasOwn`-guarded, so they are refused as hygiene (an alias named after an object-model word is a typo, not a project), not as protection. Absent ⇒ every page `undefined` and the listing's `projects` map `{}`, byte-identical to a wiki that never declared one. Explainers resolve through the path rules and their `<meta name="keywords">` tags (which ARE that page's `tags`); they carry no frontmatter, so rule 4 never fires for them.
 
 A third key, **`include`** (string[] of globs, relative to the root), scopes the SCAN itself: a page is kept when it matches ANY entry (union — an all-must-match rule has no useful spelling for "these two subtrees"). It exists for a root muninn does not own the layout of — `~/.claude/projects` holds 289 markdown files under per-project `memory/` dirs plus a *growing* pile of `<uuid>/session-memory/summary.md` and `tool-results/artifact-*.html` strays that would arrive as ten identically-named `summary` pages. Two mechanics matter: the config read was **moved AHEAD of the glob** (`buildWikiIndex`) — it depends on nothing but `root`, and after the glob it could not scope the glob — and the key follows the same validate-warn-**degrade** shape as `typeMap`/`typeLabels`, so a bad value ⇒ unscoped scan, never an offline wiki. That degrade is exactly why `include` may live in this file while the read-only guard may **not**: losing the config re-admits eleven cosmetic strays; losing a guard that lived here would silently make the root writable. Entries are normalized before use — trimmed, a leading `./` stripped (the scan matches wiki-relative paths carrying none, so `./x/**` matched nothing while looking correct), and BLANK entries dropped rather than invalidating the whole list, which is the loudest possible consequence for the quietest possible typo. Two warns: an `include` that matches ZERO files (an empty reader is indistinguishable from a missing directory), and — the one place the store needs to know a root is read-only — a `WIKI_READONLY_ROOTS` root whose EFFECTIVE glob list is empty. That second test is the effective list, not the presence of the file: `{}`, `[]`, a wrong-typed `"include": "x"` and a list of blanks all leave the scan just as unscoped, and measured, a `{}` config silently re-admitted all eleven strays with no warn at all.
@@ -129,7 +131,60 @@ Five things about it are deliberate and easy to undo by accident:
 
 Acceptance: `e2e/wiki-copy-path.spec.ts` (two temp wikis in ONE process, the second registered read-only).
 
-## The page rail's recall aids (Recently opened · Pinned · Jira-key jump)
+## The page rail's recall aids (Activity · Recently opened · Pinned · Jira-key jump)
+
+**Activity** leads the rail: pages recently CREATED, then pages meaningfully
+CHANGED, in one list ranked by one score (`views/components/wiki-activity-rank.ts`,
+pure and DOM-free; `renderList` calls it once per render over the FILTERED pages,
+so a facet narrows it exactly as it narrows Pinned and Recent). Five factors,
+all read off the listing muninn already ships: creation recency and change
+recency (exponential decay, `halfLifeNewDays` / the shorter `halfLifeChangedDays`,
+which is one of the two terms separating a creation from a change of equal age, `changedWeight` being the other), a **page-age**
+discount and a **backlink** discount on a change — together the reason a touch to
+`log.md`-shaped traffic or to an old hub never leads — and a **type** boost for
+plans (in-flight and proposed most) and, at a third of a plan's share, blogs. The two signals are the sweep-aware
+`pageAddedMs`/`pageTimeMs`, never raw `mtimeMs`/`gitCreatedMs`: a mechanical pass
+moves every mtime in the wiki, and ranking on that is the "148 plans edited this
+minute" failure those functions exist to absorb. ⚠️ A **change means the update signal's own KIND is `updated`** (`pageDateKind`),
+never a gap between two dates: `updatedSignal` falls back to the git CREATION
+date for a page whose every commit was a sweep, and read as a date it makes
+such a page "changed <the day it was created>", outranking the creation it is
+made of (534 jarvis pages have the shape; all are old enough to sit under the
+floor today, so it bites when the floor is recent — a re-clone, an import). A
+page with NO creation signal at all (no git history, no birthtime, no
+frontmatter `created:`; mtime is its only date) is eligible as a change with its
+age factor at 1 — an unknown age is not evidence of an old page — and its `why`
+says `created ?`. Bookkeeping pages are excluded
+(`isMetaPage`), and so is anything below `ACTIVITY_MIN_SCORE` — which is what lets
+the section be EMPTY on a wiki where nothing has happened, instead of filling six
+rows with `+` glyphs reading "created 2.1y ago". The weights live in
+`DEFAULT_ACTIVITY_WEIGHTS` and a wiki overrides them in its `.wiki-reader.json`
+`activity` block (above); each row carries a `+`/`~` glyph, the age of the signal
+that placed it, and its full derivation in the row's `title=`.
+
+⚠️ **Activity CLAIMS its pages before Pinned and Recent do**, so a page that is
+both new and pinned renders once, at the top, under Activity. Claim ORDER is the
+only thing deciding that — see `buildRail`. ⚠️ **The page being READ is never
+lifted into `Recently opened`**: that section is folded, so a row in it is off
+screen, and the one row that must stay on screen is the one carrying `.active`.
+It is skipped there WITHOUT being claimed (`resolve`'s `skip` predicate), so it
+renders at its sorted place in the listing; the store is untouched, so it joins
+the section the moment the reader leaves the article. Pinned and Activity still
+lift it — neither is folded. Identity is `buildRail`'s new `active` input run
+through the painter's own `isActivePage`, so "which row is highlighted" and
+"which row may not be lifted" cannot disagree. **`Recently opened` is now FOLDED**
+under it (`fold` on its header; the painter owns the `<details>`, closed by
+default and not persisted across a reload, but carried across a re-render exactly
+as the list's scroll offset is — otherwise expanding it and clicking a row slams
+it shut). Its `clear` button still sits inside the `<summary>` and needs no guard: a
+`<button>` is its own activation target, so the click never reaches the
+`<details>` as a toggle — only a non-activatable descendant (the header's label
+span) opens the fold. The e2e case pins that OUTCOME, not a mechanism of ours.
+Acceptance: `e2e/wiki-rail-activity.spec.ts`, whose fixture wiki is a real git
+repo with backdated commits — the dates are git's, so a fixture written a
+millisecond ago proves nothing. The inverse holds for every OTHER fixture wiki:
+written all at once, every page is brand new and Activity claims six arbitrary
+rows, which is why `e2e/settled-wiki.ts` exists.
 
 Client-only, per browser, per wiki. The rule is one pure function —
 `buildRail` in `views/components/wiki-recents.ts` returns the whole ordered list

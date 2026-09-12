@@ -43,6 +43,10 @@ export interface WikiPagesResponse {
    *  the client reads as "no Project facet". Also the membership set
    *  `resolveProjectParam` judges a `?project=` deep link against. */
   projects?: Record<string, number>;
+  /** The wiki's Activity weights, fully resolved server-side (its
+   *  `.wiki-reader.json` `activity` block over the defaults). Absent on an older
+   *  server ⇒ the client's own defaults. */
+  activity?: Record<string, unknown>;
   error?: string;
 }
 

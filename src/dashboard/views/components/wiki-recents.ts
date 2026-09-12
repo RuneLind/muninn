@@ -1,8 +1,9 @@
 /**
  * The /wiki page rail's recall aids, DOM-free so the whole rule is unit-testable:
- * the **Recently opened** and **Pinned** sections, the ★ pin state, and the
- * **Jira-key jump**. The localStorage half is `wiki-recents-store.ts`; the paint
- * is `renderList` in `wiki-browser.ts`.
+ * the **Activity**, **Recently opened** and **Pinned** sections, the ★ pin state,
+ * and the **Jira-key jump**. The localStorage half is `wiki-recents-store.ts`;
+ * the ranking behind Activity is `wiki-activity-rank.ts` (the caller hands the
+ * result in); the paint is `renderList` in `wiki-browser.ts`.
  *
  * Why: the rail is a flat listing of every page, and most re-finds are of a page
  * the reader opened this week — on the melosys wiki they are also addressed by
@@ -18,7 +19,8 @@
  */
 
 import { displayTitleOf, isMetaPage, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
-import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
+import type { ActivityRow } from "./wiki-activity-rank.ts";
+import { findPageByRelPath, isActivePage, normalizeRel } from "./wiki-nav.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
  *  wiki) is appended, so two wikis in one browser never share a list. Versioned
@@ -310,11 +312,20 @@ export function jumpHeaderLabel(jump: JiraKeyJump): string {
 
 // ── The rail ──────────────────────────────────────────────────────────
 
-export type RailSection = "jump" | "pinned" | "recent" | "all" | "meta";
+export type RailSection = "jump" | "activity" | "pinned" | "recent" | "all" | "meta";
 
 export type RailEntry =
-  | { kind: "header"; section: RailSection; label: string; clear?: true }
-  | { kind: "row"; section: RailSection; page: WikiListing; pinned: boolean };
+  | { kind: "header"; section: RailSection; label: string; clear?: true; fold?: true }
+  | {
+      kind: "row";
+      section: RailSection;
+      page: WikiListing;
+      pinned: boolean;
+      /** Set on Activity rows only: which signal put the page there, how old
+       *  that signal is, and the sentence explaining the placement. The painter
+       *  draws the glyph, the date cell and the row's `title=` from it. */
+      activity?: { kind: "new" | "changed"; why: string; ageMs: number };
+    };
 
 export interface RailInput {
   /** The pages the current facets AND query select, already sorted — today's
@@ -329,6 +340,24 @@ export interface RailInput {
   /** Stored relPaths, most recent / most recently pinned first. */
   recents: string[];
   pins: string[];
+  /**
+   * The Activity ranking over the FILTERED pages, already truncated to the
+   * wiki's row count (`rankActivity`). Ranked by the caller rather than here so
+   * this module stays free of the scoring rule and of the clock it needs — and
+   * because ranking the filtered set is what makes a facet NARROW the section
+   * exactly as it narrows Pinned and Recent.
+   */
+  activity?: ActivityRow[];
+  /**
+   * The page the reader has open, as they hold it — `relPath` decides wherever
+   * both sides have one, the `name` is the fallback for the window before the
+   * page response lands (the painter's own `isActivePage` test, so the rail and
+   * the `.active` highlight can never disagree about which row that is).
+   *
+   * It exists for ONE rule: the active page is never lifted into `Recently
+   * opened`. See `buildRail`.
+   */
+  active?: { name?: string | null; relPath?: string | null };
   /** Recency sort modes only: `sortPages` has sunk the bookkeeping pages
    *  (index/log/CLAUDE) to the tail, so the remainder's trailing meta rows get
    *  a `Bookkeeping` header. Without it the date column jumps back to today at
@@ -424,11 +453,23 @@ export function railFacetsInert(filters: WikiFilters): boolean {
  *
  *  Deliberately does not report the misses: an entry is unresolvable both when
  *  its page was deleted and when the listing has not arrived yet, and pruning
- *  storage on the second would erase the reader's pins on every slow load. */
-function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): WikiListing[] {
+ *  storage on the second would erase the reader's pins on every slow load.
+ *
+ *  `skip` drops a resolved page from THIS section without claiming it, so it
+ *  falls through to whatever comes after — used for the one page `Recently
+ *  opened` must not lift (see `buildRail`). Skipping by not claiming is the
+ *  whole mechanism: filtering the rows afterwards would leave the page claimed
+ *  and therefore on screen nowhere. */
+function resolve(
+  relPaths: string[],
+  pages: WikiListing[],
+  seen: Set<string>,
+  skip?: (p: WikiListing) => boolean,
+): WikiListing[] {
   const out: WikiListing[] = [];
   for (const rel of relPaths) {
     const p = findPageByRelPath(pages, rel);
+    if (p && skip?.(p)) continue;
     // Deduped by the PAGE, not by the stored string. Storage is normalized at
     // its own boundary, but this is `buildRail`'s invariant — "every page
     // appears exactly ONCE" — and it must not depend on an upstream that a key
@@ -456,18 +497,34 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  * The states, enumerated:
  *
  *  - **A query, no key** — the rows exactly as today, with no headers at all.
- *  - **No query, nothing stored** — also exactly as today. A fresh browser must
+ *  - **No query, nothing stored** — `Activity` alone (the wiki's own news needs
+ *    nothing stored), and on an undated wiki not even that. A fresh browser must
  *    not grow furniture it has nothing to put in.
- *  - **No query, something stored** — `Pinned`, then `Recently opened`, then
- *    `Other pages`: the listing MINUS what the two sections lifted out of it. A
- *    page that is both pinned and recent renders under Pinned only; it stays in
- *    the recents storage, so unpinning returns it to its place in that list.
- *    When the sections lift every page, there is no remainder and no third
- *    header. A facet NARROWS both sections (they resolve from the filtered
+ *  - **No query, something stored** — `Activity`, `Pinned`, `Recently opened`,
+ *    then `Other pages`: the listing MINUS what the three sections lifted out of
+ *    it. **Claim order is the precedence**, and Activity claims FIRST: a page
+ *    that is both new and pinned renders under Activity, because the reader's
+ *    question at the top of the rail is "what happened", and a row repeated
+ *    under Pinned would break the one-row-per-page invariant above. Pinned then
+ *    beats Recent, as before; a page lifted by any of the three stays in its
+ *    storage, so unpinning or a week's decay returns it to its place.
+ *    When the sections lift every page, there is no remainder and no fourth
+ *    header. A facet NARROWS all three (they resolve from the filtered
  *    list); the clear affordance on `Recently opened` exists only with every
  *    facet inert, because `clearRecents` empties the STORE and under a facet
  *    the section is a subset of it — a clear there would destroy rows the
  *    reader never saw.
+ *  - **The page being READ is never under `Recently opened`.** The section is
+ *    folded, so a row in it is off screen, and the `.active` highlight would go
+ *    with it — while the reader's own question ("where am I in this wiki?") is
+ *    exactly what that highlight answers. It is skipped there without being
+ *    claimed, so it renders at its sorted place in the listing. Pinned and
+ *    Activity still lift it: neither is folded, and both are on screen.
+ *  - **`Recently opened` is FOLDED** (`fold` on its header): Activity answers
+ *    the question the top of the rail is read for, and two open sections above
+ *    the listing is more furniture than a 300px rail has room for. The fold is
+ *    a render instruction, not state — `buildRail` says which header folds and
+ *    the painter owns the `<details>`.
  *  - **`metaTail`** (recency sorts, no query) — the remainder's sunk
  *    bookkeeping pages render last under a `Bookkeeping` header, so their
  *    fresh dates at the bottom of a descending list are explained rather than
@@ -484,7 +541,7 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  * query and the sections need an empty one.
  */
 export function buildRail(input: RailInput): RailModel {
-  const { filtered, facetOnly, filters, recents, pins, metaTail } = input;
+  const { filtered, facetOnly, filters, recents, pins, metaTail, activity, active } = input;
   const entries: RailEntry[] = [];
   const isPinned = (p: WikiListing): boolean => isPinnedRelPath(pins, p.relPath);
 
@@ -512,6 +569,32 @@ export function buildRail(input: RailInput): RailModel {
   }
 
   if (railSectionsVisible(filters)) {
+    // ⚠️ Activity claims BEFORE the two stored lists, so a page it lifts is
+    // skipped by Pinned, Recent and the remainder alike. Moving this block below
+    // them silently changes which section a new pinned page renders under, and
+    // nothing but this ordering decides it.
+    // Deduped by PAGE, like `resolve` and for the same reason: the
+    // one-row-per-page invariant must not depend on the caller's input being
+    // duplicate-free.
+    const activityRows: ActivityRow[] = [];
+    for (const row of activity ?? []) {
+      const rel = normalizeRel(row.page.relPath);
+      if (claimed.has(rel) || activityRows.some((r) => normalizeRel(r.page.relPath) === rel)) continue;
+      activityRows.push(row);
+    }
+    if (activityRows.length) {
+      entries.push({ kind: "header", section: "activity", label: "Activity" });
+      for (const row of activityRows) {
+        claim(row.page);
+        entries.push({
+          kind: "row",
+          section: "activity",
+          page: row.page,
+          pinned: isPinned(row.page),
+          activity: { kind: row.kind, why: row.why, ageMs: row.ageMs },
+        });
+      }
+    }
     const pinned = resolve(pins, filtered, claimed);
     // Pinned wins the overlap because `claimed` is SHARED: a page the pin pass
     // already rendered is skipped here, whatever spelling either list holds it
@@ -519,7 +602,16 @@ export function buildRail(input: RailInput): RailModel {
     // having two mechanisms for one outcome meant NEITHER was pinned — a review
     // survey found that unsharing the set and dropping the filter each survived
     // the whole suite, while doing both together failed.
-    const recent = resolve(recents, filtered, claimed);
+    // ⚠️ The page the reader is ON is never lifted into `Recently opened`.
+    // That section is FOLDED, so a row inside it is off screen — and the one row
+    // that must not be off screen is the one carrying `.active`. A recall aid
+    // lists the pages you might go back to, not the one you are reading. It is
+    // skipped WITHOUT being claimed, so it falls through to its sorted place in
+    // the listing below and the highlight is visible there. Only this section:
+    // Pinned and Activity still lift it, because neither is folded.
+    const recent = resolve(recents, filtered, claimed, (p) =>
+      !!active && isActivePage(p, { name: active.name ?? null, relPath: active.relPath ?? null }),
+    );
     if (pinned.length) {
       entries.push({ kind: "header", section: "pinned", label: "Pinned" });
       for (const p of pinned) {
@@ -531,6 +623,7 @@ export function buildRail(input: RailInput): RailModel {
         kind: "header",
         section: "recent",
         label: "Recently opened",
+        fold: true as const,
         ...(railFacetsInert(filters) ? { clear: true as const } : {}),
       });
       for (const p of recent) {

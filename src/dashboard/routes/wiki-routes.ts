@@ -90,6 +90,7 @@ import {
 // dialog's own conflict line are the same sentence, and a reword that touched
 // only one of them would split the route from the screen it answers.
 import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
+import { DEFAULT_ACTIVITY_WEIGHTS } from "../views/components/wiki-activity-rank.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
@@ -1275,6 +1276,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // it: `types.order` lists a declared defaultType exactly like any other
       // custom type.
       defaultType: index.readerConfig?.defaultType ?? "",
+      // The rail's Activity weights, fully RESOLVED — the wiki's declared
+      // `.wiki-reader.json` `activity` block merged over the defaults, or the
+      // defaults outright. Shipped resolved for the same reason `folderLabels`
+      // is: the ranking runs in the browser, so the numbers have to travel with
+      // the pages, and a partial block would make the client the second place
+      // that knows what a missing knob means.
+      activity: index.readerConfig?.activity ?? DEFAULT_ACTIVITY_WEIGHTS,
     });
   });
 

@@ -41,6 +41,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 
 const PORT = e2ePort("wiki-project-facet");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -79,7 +80,22 @@ const HUB_REL = `units/${PROJECT}.md`;
 
 function mdPage(title: string, tags?: string[]): string {
   const fm = tags ? [`tags: [${tags.join(", ")}]`] : [];
-  return ["---", `title: ${title}`, ...fm, "---", "", `# ${title}`, "", "Body.", ""].join("\n");
+  // `created:` + the mtime backdate in `beforeAll` keep this fixture out of the
+  // rail's Activity section, which would otherwise claim six of these eight
+  // pages and empty the Recently-opened section this file asserts about. See
+  // `settled-wiki.ts`.
+  return [
+    "---",
+    `title: ${title}`,
+    SETTLED_CREATED_LINE,
+    ...fm,
+    "---",
+    "",
+    `# ${title}`,
+    "",
+    "Body.",
+    "",
+  ].join("\n");
 }
 
 /**
@@ -113,6 +129,21 @@ const PROJECT_RELPATHS = [
 ];
 const TOTAL_PAGES = Object.keys(WITH_PAGES).length; // 8
 
+/**
+ * Click a rail row, expanding the `Recently opened` fold first.
+ *
+ * That section renders inside a CLOSED `<details>` since the rail grew its
+ * Activity section, so a row the reader has already opened is hidden until the
+ * fold is expanded — and Playwright will not click a hidden element. Setting
+ * `open` directly rather than clicking the summary keeps it idempotent.
+ */
+async function clickRow(page: import("@playwright/test").Page, rel: string): Promise<void> {
+  await page
+    .locator(".wiki-rail-fold")
+    .evaluateAll((els) => els.forEach((el) => ((el as HTMLDetailsElement).open = true)));
+  await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).click();
+}
+
 let server: ChildProcess | undefined;
 let rootWith = "";
 let rootWithout = "";
@@ -132,6 +163,8 @@ test.beforeAll(async () => {
   await writePages(rootWithout, WITH_PAGES);
   // The ONLY difference between the two roots.
   await writeFile(path.join(rootWith, ".wiki-reader.json"), READER_CONFIG, "utf8");
+  await settleWikiMtimes(rootWith);
+  await settleWikiMtimes(rootWithout);
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -220,7 +253,7 @@ test.describe("Wiki reader: project facet", () => {
     await expect(page.locator("#projectChips")).toBeEmpty();
     // …and the article header's hub chip is gone with it, on the very page that
     // carries it on the declaring wiki.
-    await page.locator(`.wiki-list-item[data-relpath="${HUB_REL}"]`).click();
+    await clickRow(page, HUB_REL);
     await expect(page.locator(".wiki-article-head")).toBeVisible();
     await expect(page.locator("[data-project-hub]")).toHaveCount(0);
   });
@@ -261,7 +294,7 @@ test.describe("Wiki reader: project facet", () => {
 
   test("the hub page offers 'N pages about <project>' and it filters", async ({ page }) => {
     await openReader(page, `wiki=${WIKI_WITH}`);
-    await page.locator(`.wiki-list-item[data-relpath="${HUB_REL}"]`).click();
+    await clickRow(page, HUB_REL);
     const hub = page.locator("[data-project-hub]");
     await expect(hub).toHaveText(`5 pages about ${PROJECT}`);
     // A member page of the same project is NOT a hub — the chip is the landing
@@ -270,7 +303,7 @@ test.describe("Wiki reader: project facet", () => {
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Alpha");
     await expect(page.locator("[data-project-hub]")).toHaveCount(0);
 
-    await page.locator(`.wiki-list-item[data-relpath="${HUB_REL}"]`).click();
+    await clickRow(page, HUB_REL);
     await expect(hub).toBeVisible();
     await hub.click();
     expect(await relPathsOf(page)).toEqual([...PROJECT_RELPATHS].sort());
@@ -292,8 +325,13 @@ test.describe("Wiki reader: project facet", () => {
     // Two recents in two different projects.
     await page.locator(`.wiki-list-item[data-relpath="areas/${OTHER}/z.md"]`).click();
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Zeta");
-    await page.locator(`.wiki-list-item[data-relpath="areas/${PROJECT}/a.md"]`).click();
+    await clickRow(page, `areas/${PROJECT}/a.md`);
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Alpha");
+    // Back to the overview: the page being READ is deliberately kept out of
+    // `Recently opened` (its `.active` row must stay on screen, and that section
+    // is folded), so both recents are in the section only once none is open.
+    await page.locator(".wiki-bc-wiki").click();
+    await expect(page.locator(".wiki-start")).toBeVisible();
 
     const recentRows = page.locator('.wiki-list-item[data-section="recent"]');
     await expect(recentRows).toHaveCount(2);
@@ -349,7 +387,7 @@ test.describe("Wiki reader: project facet", () => {
     await openReader(page, `wiki=${WIKI_WITH}&project=${PROJECT}`);
     await expect(page.locator("#wikiCount")).toHaveText(`5 / ${TOTAL_PAGES}`);
     // A push: this overview entry keeps its own project.
-    await page.locator(`.wiki-list-item[data-relpath="${HUB_REL}"]`).click();
+    await clickRow(page, HUB_REL);
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Pomme Core");
     // A chip REPLACES the article entry, so Back is a project change and nothing
     // else — the one state the reader can reach where the URL and the list can
@@ -366,7 +404,7 @@ test.describe("Wiki reader: project facet", () => {
 
   test("the breadcrumb crumb's href follows the project filter", async ({ page }) => {
     await openReader(page, `wiki=${WIKI_WITH}`);
-    await page.locator(`.wiki-list-item[data-relpath="${HUB_REL}"]`).click();
+    await clickRow(page, HUB_REL);
     const crumb = page.locator("a.wiki-bc-wiki");
     await expect(crumb).toBeVisible();
     const crumbProject = async () =>
@@ -396,7 +434,7 @@ test.describe("Wiki reader: project facet", () => {
     await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
     // An ARTICLE entry, so the chip below REPLACES it and Back is a project move
     // and nothing else — the one popstate branch that repaints the facet.
-    await page.locator(`.wiki-list-item[data-relpath="${HUB_REL}"]`).click();
+    await clickRow(page, HUB_REL);
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Pomme Core");
     await page.locator(`#projectChips [data-project="${OTHER}"]`).click();
     await expect(page.locator("#wikiCount")).toHaveText(`2 / ${TOTAL_PAGES}`);

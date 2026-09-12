@@ -92,7 +92,14 @@ import {
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
-import { buildRail, isPinnedRelPath, type RailEntry } from "./wiki-recents.ts";
+import { buildRail, isPinnedRelPath, railSectionsVisible, type RailEntry } from "./wiki-recents.ts";
+import {
+  DEFAULT_ACTIVITY_WEIGHTS,
+  formatRelativeAge,
+  parseActivityWeights,
+  rankActivity,
+  type ActivityWeights,
+} from "./wiki-activity-rank.ts";
 import {
   clearRecents,
   readPins,
@@ -240,6 +247,18 @@ let folderLabels: Record<string, string> = {};
  *  exactly one call — `hubTypeList`, which keeps that bucket out of the start
  *  view's "Top … by connections" sections. */
 let defaultType = "";
+
+/** The wiki's Activity weights (its `.wiki-reader.json` `activity` block merged
+ *  over the defaults, server-side), stored at boot from the /api/wiki/pages
+ *  response and read by the one `rankActivity` call in `renderList`. The
+ *  defaults until a payload lands, and after one that carries no such field —
+ *  an older server must render the section, not lose it. */
+let activityWeights: ActivityWeights = DEFAULT_ACTIVITY_WEIGHTS;
+
+/** Whether the reader has expanded the `Recently opened` fold in THIS page
+ *  session. Held here, not in localStorage: a reload starts closed (v1), but a
+ *  re-render must not close what the reader just opened — see `renderList`. */
+let recentFoldOpen = false;
 /**
  * The wiki's project → page-count map from `/api/wiki/pages`. `{}` for a wiki
  * declaring no project rule (and until the first payload lands), which is what
@@ -837,23 +856,57 @@ function renderList(): void {
     recents,
     pins,
     metaTail: mode === "updated" || mode === "created",
+    // Ranked over the FILTERED pages and on the same anchored instant as the
+    // sort, so a facet narrows Activity exactly as it narrows Pinned/Recent and
+    // a row's date cannot disagree with the score that placed it. Skipped
+    // entirely under a query, where `buildRail` renders no sections and would
+    // throw the ranking away — that is a scan of every page on every keystroke.
+    activity: railSectionsVisible(filters) ? rankActivity(filtered, activityWeights, now) : [],
+    // The SAME identity the row loop's `isActivePage` reads, so "which row is
+    // active" and "which row Recently opened may not lift" cannot disagree.
+    active: { name: currentName, relPath: currentRelPath },
   });
   let html = "";
+  // `Recently opened` renders inside a `<details>`, so a header carrying `fold`
+  // OPENS one and the next header (or the end of the list) closes it. Tracked
+  // rather than nested because `rail.entries` is a flat list by contract.
+  let foldOpen = false;
+  const closeFold = (): void => {
+    if (foldOpen) {
+      html += `</details>`;
+      foldOpen = false;
+    }
+  };
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
-      html +=
+      closeFold();
+      const head =
         `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
         `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
         (entry.clear ? `<button type="button" class="wiki-sec-clear" data-clear-recents="1">clear</button>` : "") +
         `</div>`;
+      if (entry.fold) {
+        // Closed by default and deliberately NOT persisted in v1: the section is
+        // one click away, and a remembered-open fold would put the reader back
+        // where the Activity section was written to move them on.
+        html += `<details class="wiki-rail-fold"><summary>${head}</summary>`;
+        foldOpen = true;
+      } else {
+        html += head;
+      }
       return;
     }
     const p = entry.page;
     // In recency modes show the date we actually sorted on (mtime/birthtime or
     // frontmatter) — otherwise a frontmatter-less page would show nothing while
     // sitting at the top, which is exactly what looked broken before.
-    const meta =
-      mode === "backlinks"
+    // An Activity row shows the age of the signal that PUT it there — a
+    // relative one, because "2d" beside a `+` reads as news where a calendar day
+    // reads as a sort key, and because the row's date must be the date its
+    // placement was argued from whatever the list is sorted by.
+    const meta = entry.activity
+      ? formatRelativeAge(entry.activity.ageMs)
+      : mode === "backlinks"
         ? p.backlinkCount + " ←"
         : mode === "created"
           ? pageAddedLabel(p, now)
@@ -864,11 +917,21 @@ function renderList(): void {
     // while no relPath is known — see `wiki-nav.ts`.
     const active = isActivePage(p, { name: currentName, relPath: currentRelPath });
     html +=
-      `<div class="wiki-list-item${active ? " active" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
+      `<div class="wiki-list-item${active ? " active" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      // The derivation on the ROW, and again on the title element below:
+      // the child's own `title=` wins the hover over most of the row's width.
+      (entry.activity ? ` title="${esc(entry.activity.why)}"` : "") +
+      `>` +
+      (entry.activity
+        ? `<span class="wiki-act-glyph ${esc(entry.activity.kind)}">${entry.activity.kind === "new" ? "+" : "~"}</span>`
+        : "") +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       // `title=` carries the full name: the row ellipsizes, and a status pill +
-      // ⚑ flag eat enough width that plan titles routinely clip.
-      `<div class="wiki-list-title" title="${esc(displayTitleOf(p))}">${esc(displayTitleOf(p))}</div>` +
+      // ⚑ flag eat enough width that plan titles routinely clip. On an Activity
+      // row it carries the derivation UNDER the name as well — this element is
+      // two thirds of the row, and its own `title` is what the pointer lands on
+      // there, so the row's attribute alone is unreachable over most of the row.
+      `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (entry.activity ? "\n" + entry.activity.why : ""))}">${esc(displayTitleOf(p))}</div>` +
       // Pill THEN flag, the same order as the article header's `badgeHtml` — the
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
@@ -883,6 +946,7 @@ function renderList(): void {
       `</div>` +
       `</div>`;
   });
+  closeFold();
   // Scroll restore lives HERE, not at the refresh call site (the `renderBacklog`
   // precedent): every deferred-apply path ends in its caller's own renderList, so
   // a capture/restore wrapped around the adopt was undone a frame later. Owning it
@@ -890,7 +954,19 @@ function renderList(): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
+  // The fold's open state is captured and re-applied around the swap, for the
+  // same reason the scroll offset is: `renderList` replaces the rows on every
+  // keystroke, pin and navigation, and a `<details>` rebuilt from markup comes
+  // back closed. Without this, expanding `Recently opened` and then clicking one
+  // of its rows slams it shut under the reader. Read from the LIVE element, so a
+  // toggle the browser performed on its own is what gets carried; it survives a
+  // render that has no such section (a query hides it) and is not stored, so a
+  // reload starts closed.
+  const liveFold = listEl.querySelector(".wiki-rail-fold") as HTMLDetailsElement | null;
+  if (liveFold) recentFoldOpen = liveFold.open;
   listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
+  const nextFold = listEl.querySelector(".wiki-rail-fold") as HTMLDetailsElement | null;
+  if (nextFold) nextFold.open = recentFoldOpen;
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
   // is shorter the browser clamps to the new maximum and re-assigning the saved
@@ -1849,7 +1925,11 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
   if (target.closest("[data-clear-recents]")) {
-    e.preventDefault();
+    // No `preventDefault` — measured in this repo's Chromium, a click on a
+    // <button> inside the fold's <summary> does not toggle the <details> at
+    // all: the button is its own activation target. (A non-activatable
+    // descendant, the header's label span, is what toggles.) The call was here
+    // as a guard against a mechanism that does not exist.
     recents = clearRecents(WIKI);
     renderList();
     return;
@@ -4766,6 +4846,12 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // known value rather than re-admitting the leftovers bucket mid-session.
   if (typeof data.defaultType === "string") {
     defaultType = data.defaultType;
+  }
+  // Same degrade rule again. Re-parsed rather than trusted: the route already
+  // resolves the block, but `parseActivityWeights` is the one place that knows
+  // what a knob may be, and running it here costs nothing and cannot be wrong.
+  if (data.activity && typeof data.activity === "object") {
+    activityWeights = parseActivityWeights(data.activity).weights;
   }
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one

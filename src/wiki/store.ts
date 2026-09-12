@@ -15,6 +15,10 @@ import path from "node:path";
 import { stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { sanitizeColorToken } from "../dashboard/views/components/wiki-filter.ts";
+import {
+  parseActivityWeights,
+  type ActivityWeights,
+} from "../dashboard/views/components/wiki-activity-rank.ts";
 import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
 import { buildWikiGitDates } from "./git-dates.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
@@ -127,6 +131,15 @@ export interface WikiReaderConfig {
    * folder rules that were working.
    */
   project: WikiProjectRule | null;
+  /**
+   * Weights for the page rail's **Activity** ranking — how loudly a newly
+   * created page, and a change to an old or much-linked one, count. Always a
+   * COMPLETE set: a wiki declaring no `activity` block, a partial one, or a bad
+   * value for one knob gets {@link DEFAULT_ACTIVITY_WEIGHTS} in its place, so no
+   * consumer has to merge. See {@link parseActivityWeights} for the per-knob
+   * validate-warn-degrade rule and `wiki-activity-rank.ts` for what each does.
+   */
+  activity: ActivityWeights;
 }
 
 /**
@@ -1400,6 +1413,15 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
       root,
     });
   }
+  // Same shape once more, one level down: `parseActivityWeights` drops a knob
+  // whose value is not a finite number of the right magnitude and keeps the rest
+  // of the block, so a typo costs one weight rather than the section.
+  const activity = parseActivityWeights(obj.activity);
+  for (const { key, reason } of activity.warnings) {
+    // The KEY is its own property, not part of a pre-joined sentence: the JSONL
+    // sink groups a wiki's warnings by cause only if the cause is a field.
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
+  }
   return {
     typeMap: isStringRecord(obj.typeMap) ? obj.typeMap : {},
     typeLabels: isStringRecord(obj.typeLabels) ? obj.typeLabels : {},
@@ -1410,6 +1432,7 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     defaultType: defaultTypeOk ? defaultTypeRaw : "",
     folderLabels: isStringRecord(obj.folderLabels) ? obj.folderLabels : {},
     project: parseProjectRule(obj.project, root),
+    activity: activity.weights,
   };
 }
 

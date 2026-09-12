@@ -26,6 +26,7 @@ import {
   type WikiProjectRule,
 } from "./store.ts";
 import { SWEEP_THRESHOLD } from "./git-dates.ts";
+import { DEFAULT_ACTIVITY_WEIGHTS } from "../dashboard/views/components/wiki-activity-rank.ts";
 
 describe("parseFrontmatter", () => {
   test("parses scalars, quoted strings, and inline arrays", () => {
@@ -986,6 +987,36 @@ describe("buildWikiIndex", () => {
     expect(index.readerConfig?.typeMap).toEqual({});
     expect(index.readerConfig?.typeLabels.plan).toBe("Plans");
     expect(index.resolve("p")!.type).toBe("note"); // no typeMap → plans/ isn't standard
+  });
+
+  test(".wiki-reader.json activity: a partial block merges over the rail's defaults", async () => {
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ typeLabels: { plan: "Plans" }, activity: { rows: 3, hubPenalty: 0 } }),
+    );
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig?.activity).toEqual({
+      ...DEFAULT_ACTIVITY_WEIGHTS,
+      rows: 3,
+      hubPenalty: 0,
+    });
+    // The sibling key in the same file is untouched.
+    expect(index.readerConfig?.typeLabels.plan).toBe("Plans");
+  });
+
+  test(".wiki-reader.json activity: a bad knob is dropped, the rest of the block kept", async () => {
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ activity: { hubPenalty: "lots", planBoost: 10, nonsense: 1 } }),
+    );
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig?.activity).toEqual({ ...DEFAULT_ACTIVITY_WEIGHTS, planBoost: 10 });
+  });
+
+  test(".wiki-reader.json with no activity block ⇒ the defaults, so no consumer merges", async () => {
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ typeMap: { plans: "plan" } }));
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig?.activity).toEqual(DEFAULT_ACTIVITY_WEIGHTS);
   });
 
   test("no .wiki-reader.json ⇒ readerConfig null, unchanged five-type behavior", async () => {
