@@ -731,11 +731,6 @@ describe("buildRail", () => {
       expect(rail.shown).toBe(3);
     });
 
-    test("…and the header still renders while other recents remain", () => {
-      const rail = build({ recents: ["a.md", "c.md"], active: { relPath: "a.md" } });
-      expect(headers(rail.entries)).toEqual(["Recently opened", "Other pages"]);
-    });
-
     test("…and there is no header at all when the active page was the only recent", () => {
       const rail = build({ recents: ["a.md"], active: { relPath: "a.md" } });
       expect(headers(rail.entries)).toEqual([]);
@@ -768,6 +763,14 @@ describe("buildRail", () => {
       const none = build({ recents: ["a.md"] });
       expect(rows(none.entries).find((r) => r.page === a)!.section).toBe("recent");
     });
+  });
+
+  // A GUARD, not a regression case: it passes with or without the active-page
+  // rule, and exists so that rule cannot be implemented by dropping the header
+  // along with the row.
+  test("the Recently opened header survives its active row being left out", () => {
+    const rail = build({ recents: ["a.md", "c.md"], active: { relPath: "a.md" } });
+    expect(headers(rail.entries)).toEqual(["Recently opened", "Other pages"]);
   });
 
   test("Recently opened is the one folded header", () => {

@@ -17,9 +17,10 @@
  *     and the symptom is a section that never appears — or one that ignores the
  *     wiki's own row count.
  *  3. **`clear` still works from inside a `<summary>`.** The button now sits in
- *     the fold's summary, where a click's DEFAULT action is "toggle the
- *     details". Only `preventDefault` in the list's own handler keeps the two
- *     apart, and that is invisible from either module.
+ *     the fold's summary, and whether that costs anything is a browser question
+ *     no unit test can ask. (It does not: a <button> is its own activation
+ *     target, so the click never reaches the <details> as a toggle — measured
+ *     here, and the case below is what keeps measuring it.)
  *
  * No model calls: nothing here leaves the process.
  *
@@ -258,6 +259,14 @@ test.describe("Wiki rail: Activity", () => {
     await expect(changedRow.locator(".wiki-act-glyph.changed")).toHaveText("~");
     await expect(changedRow).toHaveAttribute("title", /^changed .* created .* hub ×/);
 
+    // The TITLE element is two thirds of the row and carries a `title=` of its
+    // own, which wins over the row's wherever the pointer actually lands — so
+    // the derivation has to be on it too, under the page's own name.
+    await expect(changedRow.locator(".wiki-list-title")).toHaveAttribute(
+      "title",
+      /^Young plan\nchanged .* hub ×/s,
+    );
+
     // A listing row carries no glyph — the mark means "this is in Activity".
     await expect(
       page.locator(`.wiki-list-item[data-relpath="${HUB}"] .wiki-act-glyph`),
@@ -266,6 +275,29 @@ test.describe("Wiki rail: Activity", () => {
     // The date cell is the age of the winning signal, relative.
     await expect(newRow.locator(".wiki-list-meta")).toHaveText("now");
     await expect(changedRow.locator(".wiki-list-meta")).toHaveText("1d");
+
+    // The glyphs resolve to the TOKENS they are declared with, compared against
+    // the same tokens read off a probe in this document — a literal colour here
+    // would pass against any theme and pin nothing. `--tok-str` rather than
+    // `--status-success` is a contrast decision (see the CSS comment); a revert
+    // to the plain status green has to fail something. The last line holds
+    // because Playwright's default colorScheme is LIGHT, which is the theme the
+    // swap was made for; in dark the two tokens are the same value.
+    const token = (name: string) =>
+      page.evaluate((n) => {
+        const probe = document.createElement("span");
+        probe.style.color = `var(${n})`;
+        document.body.appendChild(probe);
+        const c = getComputedStyle(probe).color;
+        probe.remove();
+        return c;
+      }, name);
+    await expect(newRow.locator(".wiki-act-glyph.new")).toHaveCSS("color", await token("--tok-str"));
+    await expect(changedRow.locator(".wiki-act-glyph.changed")).toHaveCSS(
+      "color",
+      await token("--accent-light"),
+    );
+    expect(await token("--tok-str")).not.toBe(await token("--status-success"));
   });
 
   test("Recently opened is folded under Activity, closed, and opens on click", async ({ page }) => {
@@ -304,9 +336,10 @@ test.describe("Wiki rail: Activity", () => {
 
     // The `<details>` is captured BEFORE the click and read AFTER it: the list
     // re-renders synchronously, so the element is detached by then — and a
-    // detached node still reports whether the click's default action toggled
-    // it. That is the only way to tell "preventDefault held" from "the fold
-    // toggled and the re-render hid the evidence".
+    // detached node still reports whether the click toggled it. That is the
+    // only way to tell "the fold stayed shut" from "it toggled and the
+    // re-render hid the evidence". It pins the OUTCOME; the mechanism is the
+    // browser's own activation-target rule, not a call in our handler.
     const outcome = await page.evaluate(() => {
       const el = document.querySelector(".wiki-rail-fold") as HTMLDetailsElement;
       const before = el.open;
@@ -327,8 +360,10 @@ test.describe("Wiki rail: Activity", () => {
   test("the page being read is never folded away — its .active row stays visible", async ({
     page,
   }) => {
-    // Two pages, neither of them news (both 60 days old, far under the score
-    // floor), so both are ordinary recents rather than Activity rows.
+    // Two pages, neither of them in Activity: the linker is 60 days old and
+    // untouched, so it really is under the score floor — the hub is not (it was
+    // touched today and scores 0.185), it is simply ranked 7th and cut by
+    // `rows`. Either way both are ordinary recents rather than Activity rows.
     await openRail(page);
     await page.locator(`.wiki-list-item[data-relpath="${LINKERS[0]}"]`).click();
     await expect(page.locator(".wiki-article")).toContainText("See");

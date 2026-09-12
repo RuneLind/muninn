@@ -16,13 +16,16 @@
  *  - **creation recency** — exponential decay on `pageAddedMs`, half-life
  *    `halfLifeNewDays`.
  *  - **change recency** — the same decay on `pageTimeMs`, half-life
- *    `halfLifeChangedDays` (shorter by default, so a creation outranks a change
- *    of equal age).
+ *    `halfLifeChangedDays`. TWO defaults separate it from a creation of equal
+ *    age, and they do about equal shares of the work: the half-life is shorter
+ *    (3 d against 5 d) and the whole change term is scaled by `changedWeight`
+ *    (0.70).
  *  - **page age** — a change to an old page counts for less (`agePenalty`).
  *  - **hub weight** — a change to a page many pages link to counts for less
  *    (`hubPenalty`), which is what keeps `log.md`-shaped traffic out.
- *  - **type** — plans, and in-flight/proposed plans more, count for more
- *    (`planBoost`).
+ *  - **type** — plans count for more (`planBoost`), in-flight and proposed
+ *    plans most; a blog gets a smaller share of the same knob (0.2 against a
+ *    plan's 0.6, or 1.2 when it is live).
  *
  * The two signals are the sweep-aware `pageAddedMs`/`pageTimeMs` from
  * `wiki-filter.ts`, never raw `mtimeMs`/`gitCreatedMs`: a mechanical pass over
@@ -38,6 +41,7 @@ import {
   displayTitleOf,
   isMetaPage,
   pageAddedMs,
+  pageDateKind,
   pageTimeMs,
   type WikiListing,
 } from "./wiki-filter.ts";
@@ -64,8 +68,27 @@ export interface ActivityWeights {
   /** How much a plan (more when in-flight/proposed) and a blog outrank other
    *  changed pages. */
   planBoost: number;
-  /** A fresh change against a fresh creation. 100 = equal. */
+  /**
+   * How much of its raw recency a change keeps — the whole change term is
+   * multiplied by this. At 100 it keeps all of it, which still does not make a
+   * change and a creation of equal age equal: the change decays on the shorter
+   * `halfLifeChangedDays` and carries the age/hub discounts too.
+   */
   changedWeight: number;
+}
+
+/**
+ * One rejected knob: the dotted key and what happened to it, kept APART so a
+ * caller logs them as separate LogTape properties (`activity.{key} {reason}`)
+ * and the JSONL sink can group a wiki's warnings by cause. One pre-joined
+ * sentence per warning grouped by nothing.
+ */
+export interface ActivityWeightWarning {
+  /** Dotted and fully qualified — `activity.hubPenalty`, or `activity` for a
+   *  block that is not an object at all. */
+  key: string;
+  /** Reads as the predicate after the key: "is not a finite number — ignoring it". */
+  reason: string;
 }
 
 /** The prototype's defaults. */
@@ -102,9 +125,12 @@ const MS_PER_DAY = 86_400_000;
  *
  * 0.02 is the point where a creation stops being news. Measured against the
  * DEFAULT weights (2026-09-12): a page reaches it **28.2 days** after it was
- * created, and a change to an unpenalised page — no backlinks, no age discount —
- * reaches it **15.4 days** after the edit. Every penalty pulls that in, which is
- * the intent: a much-linked old page's edit leaves the section sooner.
+ * created, and a change reaches it at **most 15.4 days** after the edit — an
+ * upper bound rather than a typical one, since it assumes every other factor at
+ * 1. Backlinks and page age only pull it in, which is the intent: a much-linked
+ * old page's edit leaves the section sooner. The bound is exactly reached in one
+ * real case, the page with NO creation signal, whose unknown age is not
+ * discounted (see `scorePage`).
  */
 export const ACTIVITY_MIN_SCORE = 0.02;
 
@@ -137,12 +163,16 @@ const HALF_LIFE_KEYS = ["halfLifeNewDays", "halfLifeChangedDays"] as const;
  * `rows` is the one knob that CLAMPS rather than drops (see
  * {@link ACTIVITY_ROWS_MIN}); a non-integer is rounded.
  */
-export function parseActivityWeights(raw: unknown): { weights: ActivityWeights; warnings: string[] } {
+export function parseActivityWeights(raw: unknown): {
+  weights: ActivityWeights;
+  warnings: ActivityWeightWarning[];
+} {
   const weights: ActivityWeights = { ...DEFAULT_ACTIVITY_WEIGHTS };
-  const warnings: string[] = [];
+  const warnings: ActivityWeightWarning[] = [];
+  const warn = (key: string, reason: string): void => void warnings.push({ key, reason });
   if (raw === undefined || raw === null) return { weights, warnings };
   if (typeof raw !== "object" || Array.isArray(raw)) {
-    warnings.push("activity is not an object — ignoring it");
+    warn("activity", "is not an object — ignoring it");
     return { weights, warnings };
   }
   const obj = raw as Record<string, unknown>;
@@ -150,7 +180,7 @@ export function parseActivityWeights(raw: unknown): { weights: ActivityWeights; 
     const v = obj[key];
     if (v === undefined) return null;
     if (typeof v !== "number" || !Number.isFinite(v)) {
-      warnings.push(`activity.${key} is not a finite number — ignoring it`);
+      warn(`activity.${key}`, "is not a finite number — ignoring it");
       return null;
     }
     return v;
@@ -159,7 +189,7 @@ export function parseActivityWeights(raw: unknown): { weights: ActivityWeights; 
     const v = num(key);
     if (v === null) continue;
     if (v < 0 || v > 100) {
-      warnings.push(`activity.${key} is outside 0–100 — ignoring it`);
+      warn(`activity.${key}`, "is outside 0–100 — ignoring it");
       continue;
     }
     weights[key] = v;
@@ -168,7 +198,7 @@ export function parseActivityWeights(raw: unknown): { weights: ActivityWeights; 
     const v = num(key);
     if (v === null) continue;
     if (v <= 0 || v > HALF_LIFE_MAX_DAYS) {
-      warnings.push(`activity.${key} is outside 0–${HALF_LIFE_MAX_DAYS} days — ignoring it`);
+      warn(`activity.${key}`, `is outside 0–${HALF_LIFE_MAX_DAYS} days — ignoring it`);
       continue;
     }
     weights[key] = v;
@@ -176,10 +206,12 @@ export function parseActivityWeights(raw: unknown): { weights: ActivityWeights; 
   const rows = num("rows");
   if (rows !== null) {
     const clamped = Math.min(ACTIVITY_ROWS_MAX, Math.max(ACTIVITY_ROWS_MIN, Math.round(rows)));
-    if (clamped !== rows) {
-      warnings.push(
-        `activity.rows ${rows} is outside ${ACTIVITY_ROWS_MIN}–${ACTIVITY_ROWS_MAX} — using ${clamped}`,
-      );
+    // Two different things happened to the value, and one warning text for both
+    // told an author who wrote 6.4 that 6.4 is "outside 1–12".
+    if (rows < ACTIVITY_ROWS_MIN || rows > ACTIVITY_ROWS_MAX) {
+      warn("activity.rows", `is outside ${ACTIVITY_ROWS_MIN}–${ACTIVITY_ROWS_MAX} — using ${clamped}`);
+    } else if (clamped !== rows) {
+      warn("activity.rows", `rounded to ${clamped}`);
     }
     weights.rows = clamped;
   }
@@ -187,7 +219,7 @@ export function parseActivityWeights(raw: unknown): { weights: ActivityWeights; 
   // looks exactly as it did.
   const known = new Set<string>(Object.keys(DEFAULT_ACTIVITY_WEIGHTS));
   for (const key of Object.keys(obj)) {
-    if (!known.has(key)) warnings.push(`activity.${key} is not a known weight — ignoring it`);
+    if (!known.has(key)) warn(`activity.${key}`, "is not a known weight — ignoring it");
   }
   return { weights, warnings };
 }
@@ -196,20 +228,39 @@ export function parseActivityWeights(raw: unknown): { weights: ActivityWeights; 
  * A duration as the rail renders it: `now` · `Nh` · `Nd` · `Nmo` · `N.Ny`.
  *
  * Takes an AGE in ms rather than a timestamp, so the caller owns the clock read
- * (the rail anchors its instant to the server's scan — see `recencyNow`).
- * A non-positive or non-finite age renders as `""`: a page with no usable date
- * signal must show no date rather than a number derived from epoch 0.
+ * (the rail anchors its instant to the server's scan — see `recencyNow`). Only a
+ * NON-FINITE age renders as `""`; 0 and a negative age both read "now", which is
+ * what a stamp a few minutes ahead of the anchor deserves.
+ *
+ * Not one of the repo's other relative-time helpers, and deliberately: this one
+ * takes an age rather than a timestamp (so it reads no clock and stays pure
+ * inside a comparator) and it carries `mo`/`y` buckets, which a chat-scale
+ * "N min ago" formatter has no use for.
+ *
+ * **Each bucket is promoted on its own ROUNDED value, not on the raw one**, so
+ * two buckets never print the same duration: at 29.6 days the day bucket rounds
+ * to 30 and the label would have been "30d" beside a "1mo" that starts at 30.0.
+ * Same seam at 24h/1d and at 12mo/1.0y.
  */
 export function formatRelativeAge(ageMs: number): string {
   if (!Number.isFinite(ageMs)) return "";
+  const hours = ageMs / 3_600_000;
+  if (hours < 1) return "now";
+  const h = Math.round(hours);
+  if (h < 24) return h + "h";
   const days = ageMs / MS_PER_DAY;
-  // Negative falls in here too: a stamp a few minutes ahead of the anchor is
-  // clock skew, and "now" is the honest reading of it.
-  if (days < 1 / 24) return "now";
-  if (days < 1) return Math.round(days * 24) + "h";
-  if (days < 30) return Math.round(days) + "d";
-  if (days < 365) return Math.round(days / 30) + "mo";
+  const d = Math.round(days);
+  if (d < 30) return d + "d";
+  const mo = Math.round(days / 30);
+  if (mo < 12) return mo + "mo";
   return (days / 365).toFixed(1) + "y";
+}
+
+/** The age as the `why` sentence says it: "just now" reads as a moment, where
+ *  "now ago" reads as a bug. */
+function agePhrase(ageMs: number): string {
+  const label = formatRelativeAge(ageMs);
+  return label === "now" ? "just now" : label + " ago";
 }
 
 /**
@@ -251,31 +302,61 @@ export function rankActivity(
   for (const page of pages) {
     if (isMetaPage(page)) continue;
     const row = scorePage(page, weights, now);
-    if (row && row.score >= ACTIVITY_MIN_SCORE) rows.push(row);
+    if (row.score >= ACTIVITY_MIN_SCORE) rows.push(row);
   }
   rows.sort((a, b) => b.score - a.score || displayTitleOf(a.page).localeCompare(displayTitleOf(b.page)));
   return rows.slice(0, weights.rows);
 }
 
-/** One page's score, or null when it carries no usable date signal at all. */
-function scorePage(page: WikiListing, w: ActivityWeights, now: number): ActivityRow | null {
+/**
+ * One page's score.
+ *
+ * A page with NO date signal at all scores 0 and the floor drops it — there is
+ * no separate guard, because the two gates below already answer for it: with no
+ * creation signal there is no `newScore`, and with no update signal there is no
+ * change. An `if (both absent) return null` line sat here and was untestable by
+ * construction, which is its own kind of wrong.
+ */
+function scorePage(page: WikiListing, w: ActivityWeights, now: number): ActivityRow {
   const createdMs = pageAddedMs(page, now);
   const updatedMs = pageTimeMs(page, now);
-  if (createdMs <= 0 && updatedMs <= 0) return null;
   // Ages in DAYS, which is the unit every knob below is expressed in. A page
-  // with no creation signal is treated as maximally old rather than as new:
-  // `createdDays` then runs from epoch 0 and the decay answers ~0.
+  // with no creation signal has no `createdDays` at all — see `knownAge`.
+  const knownAge = createdMs > 0;
   const createdDays = (now - createdMs) / MS_PER_DAY;
   const updatedDays = (now - updatedMs) / MS_PER_DAY;
 
-  const newScore = Math.pow(0.5, createdDays / w.halfLifeNewDays);
+  // No creation signal ⇒ the page cannot be NEW. (It can still be a change; the
+  // branch below says so.)
+  const newScore = knownAge ? Math.pow(0.5, createdDays / w.halfLifeNewDays) : 0;
 
-  const isChange = createdMs > 0 && updatedMs > 0 && createdDays - updatedDays > CHANGE_MIN_DAYS_AFTER_CREATION;
+  /**
+   * ⚠️ **An update signal is not the same thing as an EDIT.** `updatedSignal`
+   * falls back to the git CREATION date for a page whose every commit was a
+   * sweep, and flags that fallback `kind: "added"` precisely because nothing is
+   * known about when the page was last edited. Read as a date alone it opens a
+   * gap against `pageAddedMs`, which takes the OLDEST of its three inputs — so a
+   * birthtime or a frontmatter `created:` older than the git floor made the page
+   * "changed <the day it was created>", scoring ABOVE the creation it is made
+   * of. Measured on the jarvis wiki: 165 pages, `concepts/Cognitive Debt.md`
+   * among them at changed 0.63 over created 0.50. The gate is the signal's own
+   * kind, never a threshold on the two dates.
+   */
+  const isEdit = updatedMs > 0 && pageDateKind(page, now) === "updated";
+  // With a known creation date the edit must also be late enough to be a
+  // separate event; with none there is nothing to be late relative to.
+  const isChange =
+    isEdit && (!knownAge || createdDays - updatedDays > CHANGE_MIN_DAYS_AFTER_CREATION);
   let changedScore = 0;
   const parts: string[] = [];
   if (isChange) {
     const recency = Math.pow(0.5, updatedDays / w.halfLifeChangedDays);
-    const age = 1 / (1 + (w.agePenalty / 100) * (createdDays / AGE_PENALTY_REFERENCE_DAYS));
+    // An UNKNOWN age is not evidence of an old page, so it is not discounted:
+    // the penalty exists to say "this page has been around a long time", which
+    // is a claim no signal here supports.
+    const age = knownAge
+      ? 1 / (1 + (w.agePenalty / 100) * (createdDays / AGE_PENALTY_REFERENCE_DAYS))
+      : 1;
     const backlinks = page.backlinkCount || 0;
     const hub = 1 / (1 + (w.hubPenalty / 100) * (backlinks / HUB_PENALTY_REFERENCE_BACKLINKS));
     let boost = 1;
@@ -284,7 +365,11 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
     }
     if (page.type === "blog") boost += (w.planBoost / 100) * 0.2;
     changedScore = (w.changedWeight / 100) * recency * age * hub * boost;
+    // `weight` leads the list because it leads the product: without it the
+    // factors a reader multiplies come out 1/0.7 too high against the score
+    // printed beside them.
     parts.push(
+      `weight ×${(w.changedWeight / 100).toFixed(2)}`,
       `recency ${recency.toFixed(2)}`,
       `age ×${age.toFixed(2)}`,
       `hub ×${hub.toFixed(2)} (${backlinks}←)`,
@@ -294,10 +379,11 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
 
   const kind: "new" | "changed" = newScore >= changedScore ? "new" : "changed";
   const score = Math.max(newScore, changedScore);
+  const createdPhrase = knownAge ? agePhrase(now - createdMs) : "?";
   const why =
     kind === "new"
-      ? `created ${formatRelativeAge(now - createdMs)} ago → ${newScore.toFixed(2)}`
-      : `changed ${formatRelativeAge(now - updatedMs)} ago, created ${formatRelativeAge(now - createdMs)} ago: ` +
+      ? `created ${createdPhrase} → ${newScore.toFixed(2)}`
+      : `changed ${agePhrase(now - updatedMs)}, created ${createdPhrase}: ` +
         `${parts.join(", ")} → ${changedScore.toFixed(2)}`;
   return { page, kind, score, why, ageMs: kind === "new" ? now - createdMs : now - updatedMs };
 }

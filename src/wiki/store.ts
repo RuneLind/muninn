@@ -1417,8 +1417,10 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
   // whose value is not a finite number of the right magnitude and keeps the rest
   // of the block, so a typo costs one weight rather than the section.
   const activity = parseActivityWeights(obj.activity);
-  for (const warning of activity.warnings) {
-    log.warn("{file} at {root}: {warning}", { file: WIKI_READER_CONFIG_FILE, root, warning });
+  for (const { key, reason } of activity.warnings) {
+    // The KEY is its own property, not part of a pre-joined sentence: the JSONL
+    // sink groups a wiki's warnings by cause only if the cause is a field.
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
   }
   return {
     typeMap: isStringRecord(obj.typeMap) ? obj.typeMap : {},

@@ -92,7 +92,7 @@ import {
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
-import { buildRail, isPinnedRelPath, type RailEntry } from "./wiki-recents.ts";
+import { buildRail, isPinnedRelPath, railSectionsVisible, type RailEntry } from "./wiki-recents.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRelativeAge,
@@ -858,8 +858,10 @@ function renderList(): void {
     metaTail: mode === "updated" || mode === "created",
     // Ranked over the FILTERED pages and on the same anchored instant as the
     // sort, so a facet narrows Activity exactly as it narrows Pinned/Recent and
-    // a row's date cannot disagree with the score that placed it.
-    activity: rankActivity(filtered, activityWeights, now),
+    // a row's date cannot disagree with the score that placed it. Skipped
+    // entirely under a query, where `buildRail` renders no sections and would
+    // throw the ranking away — that is a scan of every page on every keystroke.
+    activity: railSectionsVisible(filters) ? rankActivity(filtered, activityWeights, now) : [],
     // The SAME identity the row loop's `isActivePage` reads, so "which row is
     // active" and "which row Recently opened may not lift" cannot disagree.
     active: { name: currentName, relPath: currentRelPath },
@@ -925,8 +927,11 @@ function renderList(): void {
         : "") +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       // `title=` carries the full name: the row ellipsizes, and a status pill +
-      // ⚑ flag eat enough width that plan titles routinely clip.
-      `<div class="wiki-list-title" title="${esc(displayTitleOf(p))}">${esc(displayTitleOf(p))}</div>` +
+      // ⚑ flag eat enough width that plan titles routinely clip. On an Activity
+      // row it carries the derivation UNDER the name as well — this element is
+      // two thirds of the row, and its own `title` is what the pointer lands on
+      // there, so the row's attribute alone is unreachable over most of the row.
+      `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (entry.activity ? "\n" + entry.activity.why : ""))}">${esc(displayTitleOf(p))}</div>` +
       // Pill THEN flag, the same order as the article header's `badgeHtml` — the
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
@@ -1920,7 +1925,11 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
   if (target.closest("[data-clear-recents]")) {
-    e.preventDefault();
+    // No `preventDefault` — measured in this repo's Chromium, a click on a
+    // <button> inside the fold's <summary> does not toggle the <details> at
+    // all: the button is its own activation target. (A non-activatable
+    // descendant, the header's label span, is what toggles.) The call was here
+    // as a guard against a mechanism that does not exist.
     recents = clearRecents(WIKI);
     renderList();
     return;

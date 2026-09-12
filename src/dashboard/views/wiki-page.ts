@@ -338,21 +338,29 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-sec-clear:hover { color: var(--status-error); }
     /* Activity's per-row glyph: "+" created, "~" changed. A fixed-width
-       monospace slot so the titles below it still line up, and the only two
-       colors this rail uses for a state — success for "new", the accent for
-       "changed" — never a raw hex, which would not follow the theme. */
+       monospace slot so the titles below it still line up, and theme tokens
+       rather than a raw hex.
+       The green is --tok-str, NOT --status-success: measured against the rail's
+       --bg-page, the plain status green is 3.00:1 in the light theme, under AA
+       for 11px bold text. --tok-str is the same ramp darkened for exactly that
+       reason (shared-styles.ts says so where it is declared) and measures
+       5.77:1 light; in the DARK theme the two tokens are the same value, so
+       nothing moves there. --accent-light needed no such swap: 5.87:1 light,
+       8.53:1 dark. */
     .wiki-act-glyph {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 11px; font-weight: 700; line-height: 1.45;
       width: 10px; text-align: center; flex-shrink: 0; margin-top: 2px;
     }
-    .wiki-act-glyph.new { color: var(--status-success); }
+    .wiki-act-glyph.new { color: var(--tok-str); }
     .wiki-act-glyph.changed { color: var(--accent-light); }
     /* "Recently opened" folds. The default marker is replaced by a ▸ on the
        section header itself, so the row reads as one piece of furniture rather
        than a header with a disclosure triangle bolted to its left. The "clear"
-       button still sits inside the summary and still works: its handler calls
-       preventDefault, which is what stops the click ALSO toggling the fold. */
+       button still sits inside the summary and still works, and needs no
+       guard to: a <button> is its own activation target, so a click on it
+       never reaches the <details> as a toggle — only a non-activatable
+       descendant, like the label span beside it, opens the fold. */
     .wiki-rail-fold > summary { list-style: none; cursor: pointer; }
     .wiki-rail-fold > summary::-webkit-details-marker { display: none; }
     .wiki-rail-fold > summary .wiki-list-sec::before {
