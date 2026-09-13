@@ -12,16 +12,39 @@ import {
   ACTIVITY_ROWS_MAX,
   ACTIVITY_ROWS_MIN,
   DEFAULT_ACTIVITY_WEIGHTS,
-  formatRelativeAge,
+  formatRailAge,
   parseActivityWeights,
+  RAIL_AGE_MAX_DAYS,
   rankActivity,
   type ActivityWeights,
 } from "./wiki-activity-rank.ts";
-import type { WikiListing } from "./wiki-filter.ts";
+import { localDay, type WikiListing } from "./wiki-filter.ts";
 
 const NOW = Date.UTC(2026, 8, 12, 12, 0, 0);
 const DAY = 86_400_000;
 const ago = (days: number): number => NOW - days * DAY;
+
+/**
+ * Run `body` with the process on `tz`.
+ *
+ * The two properties this file has to pin — that a bare authored day is echoed
+ * verbatim, and that the calendar branch names the stamp's LOCAL day — are both
+ * invisible in UTC: `localDay(ms)` and `new Date(ms).toISOString().slice(0, 10)`
+ * are the same string there, so every mutation of that choice passes on a CI
+ * runner. Bun honours a `process.env.TZ` written at runtime (measured: the next
+ * `new Date(ms).getDate()` moves), and the zone is restored from `Intl` rather
+ * than by deleting the variable — a `delete` leaves the process on the zone last
+ * assigned (measured), which would leak into every later case in this process.
+ */
+function inTimeZone(tz: string, body: () => void): void {
+  const original = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  process.env.TZ = tz;
+  try {
+    body();
+  } finally {
+    process.env.TZ = original;
+  }
+}
 
 /**
  * A page whose two date signals are stated DIRECTLY, via the fields
@@ -50,6 +73,10 @@ function page(over: {
   type?: string;
   plan_status?: string;
   title?: string;
+  /** Frontmatter `created:` — the one signal whose LABEL is the authored string
+   *  rather than a derived local day, so it is the only way to build the page
+   *  whose date the rail may not re-derive. */
+  createdFm?: string;
 }): WikiListing {
   const created = over.createdDaysAgo;
   const updated = over.updatedDaysAgo === null ? undefined : (over.updatedDaysAgo ?? over.createdDaysAgo);
@@ -64,6 +91,7 @@ function page(over: {
     linkCount: 0,
     backlinkCount: over.backlinkCount ?? 0,
     ...(over.plan_status ? { plan_status: over.plan_status } : {}),
+    ...(over.createdFm === undefined ? {} : { created: over.createdFm }),
     ...(created === undefined ? {} : { gitCreatedMs: ago(created) }),
     ...(updated === undefined ? {} : { gitTouchedMs: ago(updated) }),
     ...(over.birthtimeDaysAgo === undefined ? {} : { birthtimeMs: ago(over.birthtimeDaysAgo) }),
@@ -256,46 +284,153 @@ describe("rankActivity — the `why` sentence", () => {
       NOW,
     );
     expect(rows[0]!.why).toBe(
-      "changed 3h ago, created 2mo ago: weight ×0.70, recency 0.97, age ×0.52, hub ×0.25 (25←), type ×1.00 → 0.09",
+      "changed 3h ago, created 46d ago: weight ×0.70, recency 0.97, age ×0.52, hub ×0.25 (25←), type ×1.00 → 0.09",
     );
   });
 });
 
 describe("age labels", () => {
+  /** The rail calls it with a STAMP, so every case here states an age in days and
+   *  lets the helper subtract — `NOW` is fixed, so the two are interchangeable. */
+  const age = (days: number, dayLabel?: string): string =>
+    formatRailAge(NOW - days * DAY, NOW, dayLabel);
+  /** The local day of a stamp this many days back — what the helper falls back to
+   *  past the relative window when the caller hands it no authored label. Derived
+   *  through the same `localDay` rather than hardcoded, or the case would fail on
+   *  every machine outside one timezone; the cases that are ABOUT that choice
+   *  assert against the UTC spelling too, so none of them can go vacuous. */
+  const localDayAgo = (days: number): string => localDay(new Date(NOW - days * DAY));
+
   test("no two buckets can print the same duration", () => {
     // Each bucket promotes on its OWN rounded value. Promoting on the raw one
-    // makes 29.6 days print "30d" beside a month bucket that starts at 30.0,
-    // and the same seam exists at 24h/1d and 12mo/1.0y.
-    expect(formatRelativeAge(23.6 * 3_600_000)).toBe("1d");
-    expect(formatRelativeAge(23.4 * 3_600_000)).toBe("23h");
-    expect(formatRelativeAge(29.6 * DAY)).toBe("1mo");
-    expect(formatRelativeAge(29.4 * DAY)).toBe("29d");
-    expect(formatRelativeAge(350 * DAY)).toBe("1.0y");
-    expect(formatRelativeAge(340 * DAY)).toBe("11mo");
+    // makes 23.6h print "24h" beside a day bucket that starts at 24.
+    expect(age(23.6 / 24)).toBe("1d");
+    expect(age(23.4 / 24)).toBe("23h");
   });
 
-  test("every bucket of the relative scale", () => {
-    expect(formatRelativeAge(0)).toBe("now");
-    expect(formatRelativeAge(30 * 60_000)).toBe("now"); // 30 min
-    expect(formatRelativeAge(3 * 3_600_000)).toBe("3h");
-    expect(formatRelativeAge(2 * DAY)).toBe("2d");
-    expect(formatRelativeAge(46 * DAY)).toBe("2mo");
-    expect(formatRelativeAge(400 * DAY)).toBe("1.1y");
+  test("every bucket of the scale", () => {
+    expect(age(0)).toBe("now");
+    expect(age(59 / 1440)).toBe("now"); // 59 min
+    expect(age(60 / 1440)).toBe("1h"); // 60 min exactly promotes
+    expect(age(3 / 24)).toBe("3h");
+    expect(age(2)).toBe("2d");
+    expect(age(46)).toBe("46d");
     // Clock skew ahead of the anchor reads as "now", never as a negative age.
-    expect(formatRelativeAge(-60_000)).toBe("now");
-    expect(formatRelativeAge(Number.NaN)).toBe("");
+    expect(age(-1)).toBe("now");
+    expect(formatRailAge(Number.NaN, NOW)).toBe("");
+    // A page with NO date signal at all arrives as a stamp of 0 and renders
+    // nothing, exactly as `pageDateLabel` does for it.
+    expect(formatRailAge(0, NOW)).toBe("");
+    // A non-finite ANCHOR is as unusable as a non-finite stamp: there is no age
+    // to count and no day to name, so the cell is empty rather than `NaNd`.
+    expect(formatRailAge(NOW - 2 * DAY, Number.NaN)).toBe("");
+  });
+
+  test(`the day scale stops at ${RAIL_AGE_MAX_DAYS} days and the date takes over`, () => {
+    expect(age(RAIL_AGE_MAX_DAYS)).toBe(`${RAIL_AGE_MAX_DAYS}d`);
+    // Promotion is on the ROUNDED day count here too, so the seam is at 99.5.
+    expect(age(99.4)).toBe("99d");
+    expect(age(99.6)).toBe(localDayAgo(99.6));
+    expect(age(400)).toBe(localDayAgo(400));
+  });
+
+  test("past the day scale an authored day label WINS over the local day", () => {
+    // `pageAddedLabel` echoes a frontmatter `created:` verbatim, and a bare
+    // `2026-01-15` parses as UTC midnight — so west of UTC the helper's own
+    // `localDay(ms)` is the 14th while the header says the 15th. The label wins,
+    // or one page carries two different dates on two surfaces.
+    expect(age(400, "2020-01-15")).toBe("2020-01-15");
+    // A blank label is not a date and must not blank the cell.
+    expect(age(400, "")).toBe(localDayAgo(400));
+    // Inside the relative window the label is irrelevant — the age is the answer.
+    expect(age(2, "2020-01-15")).toBe("2d");
+  });
+
+  test("only a BARE day label wins — a label carrying a TIME has a real instant", () => {
+    // `store.ts` passes any STRING `created:` through and `addedSignal` echoes
+    // whatever `Date.parse` accepted, so a timestamp label would land verbatim in
+    // a `flex-shrink: 0` cell — 19 glyphs. A bare day is the only label with no
+    // instant of its own, so it is the only one the helper may prefer. (No live
+    // page carries a timestamp today; this is the guard's own case.)
+    for (const tz of ["America/Los_Angeles", "Europe/Oslo"]) {
+      inTimeZone(tz, () => {
+        const stamped = "2026-03-30T14:20:00";
+        expect(formatRailAge(Date.parse(stamped), NOW, stamped)).toBe("2026-03-30");
+        // A bare day, whose UTC midnight renders as the PREVIOUS day west of UTC
+        // — the authored spelling is the only right answer for it.
+        expect(formatRailAge(Date.parse("2026-02-25"), NOW, "2026-02-25")).toBe("2026-02-25");
+        // Whitespace is not a date and must not blank the cell.
+        expect(age(400, "   ")).toBe(localDayAgo(400));
+      });
+    }
+  });
+
+  test("the calendar day is the LOCAL day of the stamp, never its UTC day", () => {
+    // Every other fixture here is mid-day UTC, where `localDay(ms)` and
+    // `new Date(ms).toISOString().slice(0, 10)` are the same string in every zone
+    // anyone runs this in — so the choice was unpinned. These stamps sit half an
+    // hour from LOCAL midnight, on each side of it: 00:30 in a zone AHEAD of UTC
+    // is the previous UTC day, 23:30 in a zone BEHIND it is the next.
+    for (const [tz, hour] of [
+      ["Europe/Oslo", 0],
+      ["America/Los_Angeles", 23],
+    ] as const) {
+      inTimeZone(tz, () => {
+        const back = new Date(NOW - 400 * DAY);
+        // Built from LOCAL getters, so the instant really is 00:30 / 23:30 in
+        // `tz` whatever zone the runner itself is on.
+        const stamp = new Date(back.getFullYear(), back.getMonth(), back.getDate(), hour, 30);
+        const day = localDay(stamp);
+        // The case only says something where the two spellings disagree.
+        expect(new Date(stamp).toISOString().slice(0, 10)).not.toBe(day);
+        expect(formatRailAge(stamp.getTime(), NOW)).toBe(day);
+      });
+    }
   });
 
   test("the row label is the age of the signal that WON", () => {
     const [created] = rankActivity([page({ relPath: "a.md", createdDaysAgo: 2 })], wide, NOW);
-    expect(formatRelativeAge(created!.ageMs)).toBe("2d");
+    expect(formatRailAge(NOW - created!.ageMs, NOW)).toBe("2d");
     const [changed] = rankActivity(
       [page({ relPath: "b.md", createdDaysAgo: 46, updatedDaysAgo: 3 / 24 })],
       wide,
       NOW,
     );
     expect(changed!.kind).toBe("changed");
-    expect(formatRelativeAge(changed!.ageMs)).toBe("3h");
+    expect(formatRailAge(NOW - changed!.ageMs, NOW)).toBe("3h");
+  });
+
+  test("the `why` sentence says `on <day>` past the day scale, never `ago`", () => {
+    // A page created 200 days ago and edited yesterday: the creation phrase is
+    // past the window, the change phrase is not.
+    const [row] = rankActivity(
+      [page({ relPath: "old.md", createdDaysAgo: 200, updatedDaysAgo: 1 })],
+      wide,
+      NOW,
+    );
+    expect(row!.why).toContain(`created on ${localDayAgo(200)}`);
+    expect(row!.why).toContain("changed 1d ago");
+  });
+
+  test("the `why` sentence names the AUTHORED day, exactly as the cell does", () => {
+    // The page: frontmatter `created: 2026-02-25` (the oldest creation signal, so
+    // `addedSignal` echoes it verbatim) plus a git touch two days ago, which makes
+    // it a `changed` row whose creation phrase is past the relative window.
+    // Under a zone west of UTC the bare day's UTC midnight is the 24th, so the
+    // cell (which prefers the label) and the `why` (which re-derived the local
+    // day) named two different days for one page.
+    inTimeZone("America/Los_Angeles", () => {
+      const authored = "2026-02-25";
+      const p = page({ relPath: "authored.md", createdDaysAgo: 150, updatedDaysAgo: 2, createdFm: authored });
+      const [row] = rankActivity([p], wide, NOW);
+      expect(row!.kind).toBe("changed");
+      // The trap is live in this zone — otherwise the assertion below is vacuous.
+      expect(localDay(new Date(Date.parse(authored)))).toBe("2026-02-24");
+      expect(row!.why).toContain(`created on ${authored}`);
+      expect(row!.why).not.toContain("2026-02-24");
+      // …and it is the same day the cell shows, from the same label.
+      expect(formatRailAge(Date.parse(authored), NOW, authored)).toBe(authored);
+    });
   });
 });
 
@@ -453,6 +588,12 @@ describe("parseActivityWeights", () => {
   });
 
   test("rows is CLAMPED, not dropped, and rounded", () => {
+    // The literal, not the constant: a revert of the raise has to fail a case in
+    // `bun run test`, and every assertion below spelled through the constant
+    // would follow it down to 12.
+    expect(ACTIVITY_ROWS_MAX).toBe(20);
+    expect(parseActivityWeights({ rows: 20 }).weights.rows).toBe(20);
+    expect(parseActivityWeights({ rows: 20 }).warnings).toEqual([]);
     expect(parseActivityWeights({ rows: 0 }).weights.rows).toBe(ACTIVITY_ROWS_MIN);
     expect(parseActivityWeights({ rows: 99 }).weights.rows).toBe(ACTIVITY_ROWS_MAX);
     expect(parseActivityWeights({ rows: 4.4 }).weights.rows).toBe(4);
@@ -466,7 +607,9 @@ describe("parseActivityWeights", () => {
     expect(rounded[0]!.reason).toBe("rounded to 6");
     const breached = parseActivityWeights({ rows: 99 }).warnings;
     expect(breached[0]!.reason).toContain("outside");
-    expect(breached[0]!.reason).toContain("using 12");
+    // The literal again — `using ${ACTIVITY_ROWS_MAX}` asserted the code against
+    // itself and passed at any ceiling.
+    expect(breached[0]!.reason).toContain("using 20");
   });
 
   test("every warning names its key separately, so a log sink can group by cause", () => {

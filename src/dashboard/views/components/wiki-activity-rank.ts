@@ -37,14 +37,7 @@
  * wiki can override them in its `.wiki-reader.json` `activity` block.
  */
 
-import {
-  displayTitleOf,
-  isMetaPage,
-  pageAddedMs,
-  pageDateKind,
-  pageTimeMs,
-  type WikiListing,
-} from "./wiki-filter.ts";
+import { displayTitleOf, isMetaPage, localDay, pageDateSignal, type WikiListing } from "./wiki-filter.ts";
 
 /**
  * The ranking's knobs. The four percent knobs are 0–100 with the prototype
@@ -53,7 +46,7 @@ import {
  * the section renders.
  */
 export interface ActivityWeights {
-  /** Rows the Activity section renders, 1–12. */
+  /** Rows the Activity section renders, 1–20. */
   rows: number;
   /** Days for a newly created page's score to halve. */
   halfLifeNewDays: number;
@@ -103,11 +96,14 @@ export const DEFAULT_ACTIVITY_WEIGHTS: ActivityWeights = {
   changedWeight: 70,
 };
 
-/** Bounds on `rows`: below 1 the section cannot render and above 12 it is the
- *  listing with extra furniture. A number outside them is CLAMPED rather than
- *  dropped — the author's intent ("as many as you can") is unambiguous. */
+/** Bounds on `rows`: below 1 the section cannot render, past 20 it is the listing
+ *  with extra furniture, and a number outside them is CLAMPED rather than dropped
+ *  ("as many as you can" is unambiguous). The configured `rows` is the only cut —
+ *  measured 2026-09-13 over the full listings, mimir (528 pages), melosys-kode-wiki
+ *  (396) and jarvis (1261) clear `ACTIVITY_MIN_SCORE` on about 120 / 46 / 202 rows,
+ *  so the floor never binds at 20; today those wikis ask for 10, 6 and 6. */
 export const ACTIVITY_ROWS_MIN = 1;
-export const ACTIVITY_ROWS_MAX = 12;
+export const ACTIVITY_ROWS_MAX = 20;
 /** Upper bound on a half-life. A year of half-life is a constant, not a decay,
  *  and a value past it is a units mistake (ms for days) rather than a choice. */
 const HALF_LIFE_MAX_DAYS = 365;
@@ -120,9 +116,9 @@ const MS_PER_DAY = 86_400_000;
  * Without a floor the section is never empty: the scores are exponentials, which
  * decay towards zero but reach it only on underflow, so a wiki where nothing has
  * happened in two years still fills six rows — with `+` glyphs reading "created
- * 2.1y ago" under a header that says Activity. The floor is a membership rule
- * like the `isMetaPage` exclusion, not a change to the score: a dormant wiki
- * renders no section and the rail looks exactly as it did before.
+ * on" a day two years back, under a header that says Activity. The floor is a
+ * membership rule like the `isMetaPage` exclusion, not a change to the score: a
+ * dormant wiki renders no section and the rail looks exactly as it did before.
  *
  * 0.02 is the point where a creation stops being news. Measured against the
  * DEFAULT weights (2026-09-12): a page reaches it **28.2 days** after it was
@@ -208,7 +204,7 @@ export function parseActivityWeights(raw: unknown): {
   if (rows !== null) {
     const clamped = Math.min(ACTIVITY_ROWS_MAX, Math.max(ACTIVITY_ROWS_MIN, Math.round(rows)));
     // Two different things happened to the value, and one warning text for both
-    // told an author who wrote 6.4 that 6.4 is "outside 1–12".
+    // told an author who wrote 6.4 that 6.4 is "outside 1–20".
     if (rows < ACTIVITY_ROWS_MIN || rows > ACTIVITY_ROWS_MAX) {
       warn("activity.rows", `is outside ${ACTIVITY_ROWS_MIN}–${ACTIVITY_ROWS_MAX} — using ${clamped}`);
     } else if (clamped !== rows) {
@@ -225,43 +221,103 @@ export function parseActivityWeights(raw: unknown): {
   return { weights, warnings };
 }
 
+/** Past this many days the rail stops counting days and names the day instead.
+ *  A `4mo`/`1.2y` reading answers "roughly how long ago" for a page nobody is
+ *  ranking by recency any more, where the date answers it exactly — at ten glyphs
+ *  against three, which is why the seam is late rather than at a month. */
+export const RAIL_AGE_MAX_DAYS = 99;
+
 /**
- * A duration as the rail renders it: `now` · `Nh` · `Nd` · `Nmo` · `N.Ny`.
+ * The rail's age scale, discriminated so no caller has to sniff the text:
+ * `relative` is one of `now` · `Nh` · `Nd`, and `false` is a calendar day.
+ * `null` means "no usable stamp" — the same answer `pageDateLabel` gives for a
+ * page carrying no date signal at all, which the callers render as `""` / `?`.
  *
- * Takes an AGE in ms rather than a timestamp, so the caller owns the clock read
- * (the rail anchors its instant to the server's scan — see `recencyNow`). Only a
- * NON-FINITE age renders as `""`; 0 and a negative age both read "now", which is
- * what a stamp a few minutes ahead of the anchor deserves.
+ * Takes the STAMP plus the anchored instant rather than an age: the calendar
+ * branch has to name a day, and an age cannot. The instant is the caller's
+ * (`recencyNow()`, server-anchored — see `anchorNow`), so this reads no clock
+ * and stays pure inside a render or a comparator.
  *
- * Not one of the repo's other relative-time helpers, and deliberately: this one
- * takes an age rather than a timestamp (so it reads no clock and stays pure
- * inside a comparator) and it carries `mo`/`y` buckets, which a chat-scale
- * "N min ago" formatter has no use for.
+ * **Each bucket promotes on its own ROUNDED value, not on the raw one**, so two
+ * buckets never print the same duration: at 23.6h the hour bucket would round to
+ * "24h" beside a day bucket that starts at 24. Same seam at 99d and the date.
  *
- * **Each bucket is promoted on its own ROUNDED value, not on the raw one**, so
- * two buckets never print the same duration: at 29.6 days the day bucket rounds
- * to 30 and the label would have been "30d" beside a "1mo" that starts at 30.0.
- * Same seam at 24h/1d and at 12mo/1.0y.
+ * `dayLabel` is the winning signal's own label, preferred for the calendar branch
+ * under the one rule {@link calendarDay} states. Resolving it HERE is what keeps
+ * the cell and the `why` sentence agreeing: both callers below read one answer.
  */
-export function formatRelativeAge(ageMs: number): string {
-  if (!Number.isFinite(ageMs)) return "";
+function railAge(ms: number, now: number, dayLabel?: string): { relative: boolean; text: string } | null {
+  if (!Number.isFinite(ms) || ms <= 0 || !Number.isFinite(now)) return null;
+  const ageMs = now - ms;
   const hours = ageMs / 3_600_000;
-  if (hours < 1) return "now";
+  // 0 and a NEGATIVE age both read "now": a stamp a few minutes ahead of the
+  // anchored instant is clock skew, not the future.
+  if (hours < 1) return { relative: true, text: "now" };
   const h = Math.round(hours);
-  if (h < 24) return h + "h";
-  const days = ageMs / MS_PER_DAY;
-  const d = Math.round(days);
-  if (d < 30) return d + "d";
-  const mo = Math.round(days / 30);
-  if (mo < 12) return mo + "mo";
-  return (days / 365).toFixed(1) + "y";
+  if (h < 24) return { relative: true, text: h + "h" };
+  const d = Math.round(ageMs / MS_PER_DAY);
+  if (d <= RAIL_AGE_MAX_DAYS) return { relative: true, text: d + "d" };
+  return { relative: false, text: calendarDay(ms, dayLabel) };
 }
 
-/** The age as the `why` sentence says it: "just now" reads as a moment, where
- *  "now ago" reads as a bug. */
-function agePhrase(ageMs: number): string {
-  const label = formatRelativeAge(ageMs);
-  return label === "now" ? "just now" : label + " ago";
+/**
+ * A label the rail may show INSTEAD of the stamp's own local day: exactly a bare
+ * `YYYY-MM-DD`.
+ *
+ * That is the one spelling with no instant behind it — `Date.parse` reads it as
+ * UTC midnight, so re-deriving the day renders the 14th for an authored
+ * `created: 2026-01-15` anywhere west of UTC, and the rail would name a different
+ * day than the article header. Any other label (a timestamp, a zone suffix) DOES
+ * have an instant, so `localDay(ms)` is both the right day and ten glyphs wide in
+ * a `flex-shrink: 0` cell.
+ *
+ * It is a guard on an input muninn does not validate, not a repair of live data:
+ * `store.ts` passes any STRING `created:`/`updated:` through and `addedSignal`
+ * echoes whatever `Date.parse` accepted as the label. Measured 2026-09-13 over
+ * all three registered wikis (mimir 528 pages, melosys-kode-wiki 395, jarvis
+ * 1261): every frontmatter date is already a bare day, so today the branch is
+ * reached zero times.
+ */
+const BARE_DAY_LABEL = /^\d{4}-\d{2}-\d{2}$/;
+function calendarDay(ms: number, dayLabel?: string): string {
+  return dayLabel && BARE_DAY_LABEL.test(dayLabel) ? dayLabel : localDay(new Date(ms));
+}
+
+/**
+ * A page's date as EVERY rail row renders it: `now` · `Nh` · `Nd` up to
+ * {@link RAIL_AGE_MAX_DAYS} days, then a plain `YYYY-MM-DD`.
+ *
+ * A relative age is what the rail needs of a recent page — "2d" reads as news
+ * where a calendar day reads as a sort key — and the reverse holds for an old
+ * one, where the count has stopped being a duration anyone subtracts. The full
+ * date stays one hover away on every row (`renderList` puts it on the meta
+ * element's own `title=`) and the ARTICLE header still shows both dates in full:
+ * this is the rail's compact spelling, not a change to what is known.
+ *
+ * `dayLabel` is the day the caller ALREADY has for this stamp — the winning
+ * signal's own label (`pageDateSignal().label`). Past the relative window it wins
+ * over this function's own `localDay(ms)` when, and only when, it is a bare day:
+ * see {@link calendarDay}. Omitted, blank or time-bearing ⇒ the local day of the
+ * stamp.
+ */
+export function formatRailAge(ms: number, now: number, dayLabel?: string): string {
+  return railAge(ms, now, dayLabel)?.text ?? "";
+}
+
+/** The age as the `why` sentence says it: "just now" reads as a moment where
+ *  "now ago" reads as a bug, and past {@link RAIL_AGE_MAX_DAYS} the calendar day
+ *  takes "on" rather than "ago" for the same reason. `?` for a page with no
+ *  stamp, which is the sentence's own spelling for an unknown age (a page with
+ *  no creation signal reaches here through exactly that branch).
+ *
+ *  It takes the signal's `dayLabel` for the same reason the cell does, and reads
+ *  the SAME resolved text: a sentence explaining a row must not name a different
+ *  day than the row. */
+function agePhrase(ms: number, now: number, dayLabel?: string): string {
+  const age = railAge(ms, now, dayLabel);
+  if (!age) return "?";
+  if (!age.relative) return "on " + age.text;
+  return age.text === "now" ? "just now" : age.text + " ago";
 }
 
 /**
@@ -319,8 +375,13 @@ export function rankActivity(
  * construction, which is its own kind of wrong.
  */
 function scorePage(page: WikiListing, w: ActivityWeights, now: number): ActivityRow {
-  const createdMs = pageAddedMs(page, now);
-  const updatedMs = pageTimeMs(page, now);
+  // ONE derivation per signal, because each carries three facts this function
+  // needs: the stamp, the label the `why` sentence must quote, and (for the update
+  // signal) the kind the `isEdit` gate reads.
+  const created = pageDateSignal(page, "added", now);
+  const updated = pageDateSignal(page, "updated", now);
+  const createdMs = created?.ms ?? 0;
+  const updatedMs = updated?.ms ?? 0;
   // Ages in DAYS, which is the unit every knob below is expressed in. A page
   // with no creation signal has no `createdDays` at all — see `knownAge`.
   const knownAge = createdMs > 0;
@@ -345,7 +406,7 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
    * the floor is recent (a re-clone, an import), which is what the unit fixture
    * builds. The gate is the signal's own kind, never a threshold on the dates.
    */
-  const isEdit = updatedMs > 0 && pageDateKind(page, now) === "updated";
+  const isEdit = updated?.kind === "updated";
   // With a known creation date the edit must also be late enough to be a
   // separate event. The `!knownAge` clause is defensive only: with no creation
   // signal `createdDays` counts from epoch 0, so the gap test would fail solely
@@ -385,11 +446,18 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
 
   const kind: "new" | "changed" = newScore >= changedScore ? "new" : "changed";
   const score = Math.max(newScore, changedScore);
-  const createdPhrase = knownAge ? agePhrase(now - createdMs) : "?";
+  // `agePhrase` answers "?" for a stamp of 0 on its own, which is exactly what
+  // `!knownAge` means here. Both phrases get their signal's LABEL, so a sentence
+  // explaining a row names the same day the row's cell shows — for the creation
+  // phrase that is the reachable case (a change to an old page), while the change
+  // phrase's calendar branch is UNPINNED: at default weights a change survives the
+  // floor for ~13 days, so it is reachable only under a configured
+  // `halfLifeChangedDays` (365 keeps a 550-day-old change); no test covers it.
+  const createdPhrase = agePhrase(createdMs, now, created?.label);
   const why =
     kind === "new"
       ? `created ${createdPhrase} → ${newScore.toFixed(2)}`
-      : `changed ${agePhrase(now - updatedMs)}, created ${createdPhrase}: ` +
+      : `changed ${agePhrase(updatedMs, now, updated?.label)}, created ${createdPhrase}: ` +
         `${parts.join(", ")} → ${changedScore.toFixed(2)}`;
   return { page, kind, score, why, ageMs: kind === "new" ? now - createdMs : now - updatedMs };
 }
