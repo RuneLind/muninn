@@ -724,6 +724,39 @@ export function pageAddedLabel(p: WikiListing, now?: number): string {
   return addedSignal(p, now).label;
 }
 
+/** One page's winning date signal of one kind: the stamp, the label that explains
+ *  it, and which question it answers (`"added"` for a creation signal and for the
+ *  sweep-floor fallback — see {@link WikiDateKind}). */
+export interface WikiDateSignal {
+  ms: number;
+  label: string;
+  kind: WikiDateKind;
+}
+
+/**
+ * A page's date signal in ONE call — `null` when the page carries no usable signal
+ * of that kind, which is what `pageAddedMs`/`pageTimeMs` report as 0.
+ *
+ * Every real consumer needs two or three of those facts about the same signal at
+ * once, and the per-field wrappers re-derive the whole signal each time: a rail
+ * row ran `pageAddedMs` + `pageAddedLabel` (two derivations per row on every
+ * keystroke over jarvis's 1261 rows) and `scorePage` ran three. Reading them off
+ * one call is also what keeps a row's cell, its hover title and its `why`
+ * sentence talking about the same signal by construction rather than by three
+ * matching call sites.
+ */
+export function pageDateSignal(
+  p: WikiListing,
+  which: "added" | "updated",
+  now?: number,
+): WikiDateSignal | null {
+  const signal =
+    which === "added"
+      ? { ...addedSignal(p, now), kind: "added" as WikiDateKind }
+      : updatedSignal(p, now);
+  return signal.ms > 0 ? signal : null;
+}
+
 /** `YYYY-MM-DD` in the viewer's timezone (no UTC shift). */
 export function localDay(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");

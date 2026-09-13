@@ -195,11 +195,9 @@ import {
   followupCount,
   hasTypedHubs,
   hubTypeList,
-  pageAddedLabel,
-  pageAddedMs,
   pageDateLabel,
+  pageDateSignal,
   pageHeaderDates,
-  pageTimeMs,
   pageFolder,
   pageFollowups,
   projectCounts,
@@ -914,29 +912,18 @@ function renderList(): void {
         : mode === "created"
           ? "added"
           : "updated";
+    // ONE signal derivation per row — the stamp AND the label in a single call,
+    // because this runs for every row on every keystroke (1261 of them on jarvis).
+    const dateSignal = signal === null ? null : pageDateSignal(p, signal, now);
     // The STAMP the age counts from. For an Activity row it is the one the
     // ranking already derived (`now - ageMs`, off the same anchored instant), so
     // the row's date and its `why` sentence cannot disagree about the age; for a
     // listing row it is the sort key itself.
-    const stampMs = entry.activity
-      ? now - entry.activity.ageMs
-      : signal === "added"
-        ? pageAddedMs(p, now)
-        : signal === "updated"
-          ? pageTimeMs(p, now)
-          : 0;
-    // The full date, from the SAME signal — kept one hover away below, and the
-    // authored spelling `formatRailAge` prefers past its relative window.
-    const fullDate =
-      signal === "added"
-        ? pageAddedLabel(p, now)
-        : signal === "updated"
-          ? pageDateLabel(p, now)
-          : "";
-    // Every rail row shows a COMPACT age — `now`/`Nh`/`Nd`, then the day — because
-    // "2d" reads as news where a calendar day reads as a sort key, and because
-    // three glyphs leave the title the width the rail is short of. The article
-    // header still shows both dates in full.
+    const stampMs = entry.activity ? now - entry.activity.ageMs : (dateSignal?.ms ?? 0);
+    // The full date, from the SAME signal — kept one hover away below.
+    const fullDate = dateSignal?.label ?? "";
+    // Every rail row shows a COMPACT age (`formatRailAge`, whose docblock has the
+    // why), the backlinks sort its link count instead.
     const meta = signal === null ? p.backlinkCount + " ←" : formatRailAge(stampMs, now, fullDate);
     // Both keys on every row: `data-relpath` is what the click delegate and the
     // active test use (it names ONE page), `data-page` stays for anything still
@@ -969,11 +956,9 @@ function renderList(): void {
       // reader who never pins anything.
       `<div class="wiki-list-end">` +
       pinBtnHtml(entry.pinned) +
-      // The full date on the META element itself, never on the row: a child's own
-      // `title=` wins the hover over the width it covers, which is the same
-      // reason the Activity derivation is repeated onto `.wiki-list-title` above.
-      // Left on the row it would be unreachable over the cell it describes, and
-      // the compact age would be the only date the rail can say.
+      // The full date on the META element, never on the row — same reason the
+      // derivation is repeated onto `.wiki-list-title` above. It carries the
+      // signal's label verbatim, time and all, since a hover has room for it.
       `<div class="wiki-list-meta"${fullDate ? ` title="${esc(fullDate)}"` : ""}>${esc(meta)}</div>` +
       `</div>` +
       `</div>`;
