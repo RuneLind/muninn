@@ -8,8 +8,7 @@
  * at the top and the Activity section claims six arbitrary rows. That is correct
  * for a wiki whose pages really were just written and wrong for a fixture
  * standing in for a corpus somebody has had for a year — and it would otherwise
- * lift the very rows a spec about Pinned, Recently opened or a facet is asserting
- * about.
+ * lift the very rows a spec about Pinned or a facet is asserting about.
  *
  * Two things are needed together, because the two signals have different
  * fallbacks:

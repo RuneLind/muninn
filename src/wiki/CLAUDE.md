@@ -131,12 +131,12 @@ Five things about it are deliberate and easy to undo by accident:
 
 Acceptance: `e2e/wiki-copy-path.spec.ts` (two temp wikis in ONE process, the second registered read-only).
 
-## The page rail's recall aids (Activity · Recently opened · Pinned · Jira-key jump)
+## The page rail's recall aids (Activity · Pinned · Jira-key jump)
 
 **Activity** leads the rail: pages recently CREATED, then pages meaningfully
 CHANGED, in one list ranked by one score (`views/components/wiki-activity-rank.ts`,
 pure and DOM-free; `renderList` calls it once per render over the FILTERED pages,
-so a facet narrows it exactly as it narrows Pinned and Recent). Five factors,
+so a facet narrows it exactly as it narrows Pinned). Five factors,
 all read off the listing muninn already ships: creation recency and change
 recency (exponential decay, `halfLifeNewDays` / the shorter `halfLifeChangedDays`,
 which is one of the two terms separating a creation from a change of equal age, `changedWeight` being the other), a **page-age**
@@ -164,7 +164,7 @@ that placed it, and its full derivation in the row's `title=`.
 
 **Every rail row shows a COMPACT age**, not a calendar date — `now` / `Nh` / `Nd`
 up to `RAIL_AGE_MAX_DAYS` (99), then the day (`formatRailAge`, the one spelling
-Activity rows, Pinned, Recently opened and the listing all use; the backlinks sort
+Activity rows, Pinned and the listing all use; the backlinks sort
 still counts links). The full date stays one hover away on the `.wiki-list-meta`
 element's own `title=` — on the element, because a child's `title=` wins the
 hover over the width it covers — and the ARTICLE header is untouched, still
@@ -182,24 +182,24 @@ date on all three registered wikis is already a bare day. The hover
 `title=` is the exception by design: it shows the label verbatim whatever its
 shape, since it is where the full date belongs.
 
-⚠️ **Activity CLAIMS its pages before Pinned and Recent do**, so a page that is
+⚠️ **Activity CLAIMS its pages before Pinned does**, so a page that is
 both new and pinned renders once, at the top, under Activity. Claim ORDER is the
-only thing deciding that — see `buildRail`. ⚠️ **The page being READ is never
-lifted into `Recently opened`**: that section is folded, so a row in it is off
-screen, and the one row that must stay on screen is the one carrying `.active`.
-It is skipped there WITHOUT being claimed (`resolve`'s `skip` predicate), so it
-renders at its sorted place in the listing; the store is untouched, so it joins
-the section the moment the reader leaves the article. Pinned and Activity still
-lift it — neither is folded. Identity is `buildRail`'s new `active` input run
-through the painter's own `isActivePage`, so "which row is highlighted" and
-"which row may not be lifted" cannot disagree. **`Recently opened` is now FOLDED**
-under it (`fold` on its header; the painter owns the `<details>`, closed by
-default and not persisted across a reload, but carried across a re-render exactly
-as the list's scroll offset is — otherwise expanding it and clicking a row slams
-it shut). Its `clear` button still sits inside the `<summary>` and needs no guard: a
-`<button>` is its own activation target, so the click never reaches the
-`<details>` as a toggle — only a non-activatable descendant (the header's label
-span) opens the fold. The e2e case pins that OUTCOME, not a mechanism of ours.
+only thing deciding that — see `buildRail`.
+
+⚠️ **`Recently opened` is GONE** (2026-09-13). It was a folded third section
+holding the last six pages the reader opened, and it carried a rule set of its
+own — the page being READ was skipped there (its `.active` row must not be inside
+a closed `<details>`), the fold's open state was carried across re-renders, a
+`clear` affordance was gated on every facet being inert, and every navigation
+bumped a token so a response that lost a race could not write itself to the head
+of a persistent list. All of it is deleted, along with the `recent` section, the
+`fold`/`clear` header fields, `resolve`'s `skip` predicate, `buildRail`'s `active`
+input, `railFacetsInert`, `pushRecent` and `navToken`. The rail is Activity, then
+Pinned, then the listing: Activity answers "what happened here" from the wiki's
+own dates, and a ★ answers "keep this" deliberately — an automatic list between
+them said neither, folded away where nobody read it. A ★ is how a reader keeps a
+page now. The dead `muninn.wiki.recents.v1:*` keys are dropped by a boot-time
+`purgeRecentsKeys()` (below).
 Acceptance: `e2e/wiki-rail-activity.spec.ts`, whose fixture wiki is a real git
 repo with backdated commits — the dates are git's, so a fixture written a
 millisecond ago proves nothing. The inverse holds for every OTHER fixture wiki:
@@ -212,9 +212,17 @@ of headers and rows and `renderList` only paints it — with the localStorage ha
 in `wiki-recents-store.ts`, the same pure/DOM split as the rail's drag handle
 (`wiki-rail-width.ts` + `wiki-rail-resize.ts`).
 
-Keys, both suffixed with the wiki's canonical name (`""` for the default wiki),
-so a browser reading two wikis keeps two lists: `muninn.wiki.recents.v1:<wiki>`
-(last 6 opened) and `muninn.wiki.pins.v1:<wiki>`. The rail's third key is
+The pin key is suffixed with the wiki's canonical name (`""` for the default
+wiki), so a browser reading two wikis keeps two lists:
+`muninn.wiki.pins.v1:<wiki>`. Its dead sibling `muninn.wiki.recents.v1:<wiki>` is
+REMOVED once per rail boot by `purgeRecentsKeys()` (`wiki-recents-store.ts`) —
+idempotent, so it needs no "have I run this?" flag, which would itself be a key
+nothing ever removes; backwards over `localStorage.key(i)`, since `removeItem`
+re-indexes the store and a forward walk skips the key that slides into the index
+just removed; and matching `RECENTS_KEY_PREFIX` and nothing looser, because
+`muninn.wiki.` would take the pins key and `muninn.wiki.last.v1` with it.
+`RECENTS_KEY_PREFIX` survives in `wiki-recents.ts` for exactly that one reader.
+The rail's third key is
 `muninn.wiki.railWidth.v1` (PR #501), which is NOT per wiki — a width is a
 property of the reader's screen, not of the wiki. Same rule for the fourth,
 `muninn.wiki.panes.v1` (`wiki-panes.ts` rules + `wiki-pane-toggle.ts` DOM):
@@ -255,7 +263,7 @@ not a property of the reader. Back/Forward that moves the project repaints with
 `autoOpen=false`, so a deliberately collapsed Filters stack stays collapsed.
 
 ⚠️ **relPath identity has ONE boundary: entries are normalized on the way into
-storage** (`parseRelPathList` on read, `pushRecent` and `togglePin` on write), so
+storage** (`parseRelPathList` on read, `togglePin` on write), so
 every comparison downstream is exact by construction. Leaving it to each
 comparison was the bug five times over — and fixing only the two READ halves
 (`buildRail` and the DOM painter) left it alive with a worse label: the star read
@@ -278,16 +286,11 @@ Six things are deliberate and easy to undo by accident:
   specs), the open page got two `.active` highlights, `#wikiCount` disagreed
   with the rows on screen, `e2e/wiki-refresh` went red counting rows, and the
   rail grew a row on every article view.
-- **A facet NARROWS Pinned/Recent, only a query hides them** (`railSectionsVisible`,
-  PR #504). Both lists resolve from the filtered pages, so under `type=plan` the
-  section is exactly the plans the reader pinned. The first cut hid both on any
+- **A facet NARROWS Pinned, only a query hides it** (`railSectionsVisible`,
+  PR #504). The pins resolve from the filtered pages, so under `type=plan` the
+  section is exactly the plans the reader pinned. The first cut hid it on any
   facet — the reader lost their pins the moment they picked a type, for a
-  contradiction (a recent row from outside the filter) that could never render.
-  ⚠️ The **clear** affordance on `Recently opened` is gated separately, on
-  `railFacetsInert` (no query AND no facet): `clearRecents` empties the STORE,
-  and under a facet the section is a subset of it — measured, `type=plan` over
-  six stored recents rendered two rows whose clear would have destroyed four the
-  reader never saw.
+  contradiction (a row from outside the filter) that could never render.
 - **Meta pages (`index`/`log`/`CLAUDE`, any folder, by stem) sink to the bottom
   of BOTH recency sorts** (`isMetaPage` in `wiki-filter.ts`), and `buildRail`
   renders the sunk run under a `Bookkeeping` header (`metaTail`, set by
@@ -300,8 +303,8 @@ Six things are deliberate and easy to undo by accident:
   affordance only: under a query the rows are exactly as today, and a rail that
   is meta pages ALONE has no tail to explain and renders plain — lifted rows
   count as "above", so a meta-only remainder under Pinned keeps the header
-  (fix round 2 shipped it under "Other pages"; the split's reachable cells,
-  pin-lifted and recent-lifted both, are a table in the test). The sink is by
+  (fix round 2 shipped it under "Other pages"; the split's reachable cells are a
+  table in the test). The sink is by
   stem, so a hand-edited CLAUDE.md goes with them — accepted, the header says
   where.
 - **`#wikiCount` counts DISTINCT rendered rows**, not query matches. Under a key
@@ -366,9 +369,10 @@ refresh rather than one the reader caused, and the section then appears on a
 repaint nothing on screen explains — measured at ~50px on top of the ~46px that
 refresh already shifts content by, which is pre-existing and unrelated to pins.
 
-Acceptance: `views/components/wiki-recents.test.ts` (the state space, enumerated)
-and `e2e/wiki-rail-recents.spec.ts` (two temp wikis in ONE process, so a
-globally-keyed store cannot pass).
+Acceptance: `views/components/wiki-recents.test.ts` (the state space, enumerated),
+`views/components/wiki-recents-store.test.ts` (the purge, against a fake storage —
+what it removes AND what it must not) and `e2e/wiki-rail-pins.spec.ts` (two temp
+wikis in ONE process, so a globally-keyed store cannot pass).
 
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 

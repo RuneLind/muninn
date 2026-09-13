@@ -60,9 +60,9 @@ export const E2E_PORTS = {
   "wiki-copy-path": 3038,
   "wiki-rail-width": 3039,
   "wiki-pane-toggles": 3048,
-  // Two wikis, ONE process: the recents/pins keys are per wiki, and a spec with
-  // one root cannot tell a per-wiki key from a global one.
-  "wiki-rail-recents": 3040,
+  // Two wikis, ONE process: the pins key is per wiki, and a spec with one root
+  // cannot tell a per-wiki key from a global one.
+  "wiki-rail-pins": 3040,
   // Two wikis, ONE process: a git-backed one whose commits are BACKDATED (the
   // Activity ranking reads git creation/touch dates) and a plain one carrying a
   // `.wiki-reader.json` `activity` override, which is only provable against a

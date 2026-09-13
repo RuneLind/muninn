@@ -1,23 +1,29 @@
 /**
- * Recently opened · Pinned · the Jira-key jump, in the /wiki reader's page rail.
+ * Pinned · the Jira-key jump, in the /wiki reader's page rail. (Named for the
+ * pins; the key jump rides along because it is the rail's other head-of-list
+ * rule and the two share this fixture — an issue page, its references, and 50
+ * filler rows past the pin cap.)
  *
  * What the unit tests cannot reach, and the reason this file exists:
  *
- *  1. **The chain that records a recent.** `pushRecent` is a pure list splice;
- *     whether the reader ever calls it depends on a page load resolving a
- *     relPath, `recordRecent` reaching localStorage, and `renderList` repainting
- *     afterwards. Every unit test in that chain is green with the chain broken,
- *     and the symptom is a section that never appears.
- *  2. **It survives a reload.** That is the whole promise of "recently opened" —
- *     a section that only lives until the tab closes is not a recall aid.
+ *  1. **The chain that records a pin.** `togglePin` is a pure list splice;
+ *     whether the reader ever calls it depends on the ★ click reaching
+ *     `togglePinned`, localStorage accepting the write, and the next render
+ *     rebuilding the section. Every unit test in that chain is green with the
+ *     chain broken, and the symptom is a section that never appears.
+ *  2. **It survives a reload.** That is the whole promise of a pin — a star that
+ *     only lives until the tab closes keeps nothing.
  *  3. **The key is per WIKI.** Both wikis here are temp directories registered
  *     through `WIKI_EXTRA` in ONE process; a globally-keyed store would leak the
- *     first wiki's recents into the second and every single-root assertion above
+ *     first wiki's pins into the second and every single-root assertion above
  *     would still pass.
  *  4. **The ★ must not navigate.** The pin sits inside `.wiki-list-item`, which
  *     the body-level nav delegate opens on any click. Only the ordering of the
- *     two listeners plus `stopPropagation` keeps them apart, and that ordering
- *     is invisible from either module on its own.
+ *     two listeners plus the delegate's own skip keeps them apart, and that
+ *     ordering is invisible from either module on its own.
+ *  5. **The dead recents keys are purged.** `Recently opened` is gone; the one
+ *     thing left of it is a boot-time cleanup, and whether it reaches the
+ *     browser's own storage is not a question a unit test can answer.
  *
  * No model calls: nothing here leaves the process.
  *
@@ -39,8 +45,9 @@ import {
   PINS_KEY_PREFIX,
   PINS_MAX,
 } from "../src/dashboard/views/components/wiki-recents.ts";
+import { LAST_WIKI_KEY } from "../src/dashboard/views/components/wiki-home.ts";
 
-const PORT = e2ePort("wiki-rail-recents");
+const PORT = e2ePort("wiki-rail-pins");
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 
@@ -49,9 +56,8 @@ const OTHER_WIKI = "e2e-rail-other";
 
 /** Every fixture page carries a `created:` in the past and (via `beforeAll`) a
  *  backdated mtime, so the rail's Activity section is EMPTY on this wiki. Left
- *  fresh, the ranking would claim six of these rows and this file's Pinned /
- *  Recently-opened assertions would be about whatever it left behind. See
- *  `settled-wiki.ts`. */
+ *  fresh, the ranking would claim six of these rows and this file's Pinned
+ *  assertions would be about whatever it left behind. See `settled-wiki.ts`. */
 function md(title: string, tags: string[] = [], body = "Body."): string {
   return [
     "---",
@@ -161,54 +167,24 @@ type Page = import("@playwright/test").Page;
  */
 async function openRail(page: Page, wiki = WIKI): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${wiki}`);
-  // ATTACHED, not visible: with a stored recent the first row in the list is
-  // inside the closed `Recently opened` fold, and a hidden row is still a
-  // rendered list.
   await expect(page.locator(".wiki-list-item").first()).toBeAttached();
 }
 
 /** A second visit, in the same context — the store is whatever the first left. */
 const reloadKeepingStore = openRail;
-/**
- * Click a rail row, expanding the `Recently opened` fold first.
- *
- * That section renders inside a CLOSED `<details>` since the Activity section
- * landed above it, so a row the reader has already opened is hidden until the
- * fold is expanded — and Playwright will not click a hidden element. Setting
- * `open` directly rather than clicking the summary keeps it idempotent; the
- * reader's own expansion survives a re-render, so once is enough per test.
- */
-async function clickRow(page: Page, rel: string): Promise<void> {
-  await expandRecents(page);
-  await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).click();
-}
 
-/**
- * Back to the overview, so NO page is active.
- *
- * The page being read is deliberately kept out of `Recently opened` (it is the
- * one row whose `.active` highlight must stay on screen, and that section is
- * folded), so a test about what the section HOLDS has to leave the article
- * first — which is also what the reader does.
- */
-async function backToStart(page: Page): Promise<void> {
-  await page.locator(".wiki-bc-wiki").click();
-  await expect(page.locator(".wiki-start")).toBeVisible();
-}
-
-/** Expand the fold, idempotently — setting `open` rather than clicking the
- *  summary, which would toggle. The reader's expansion survives a re-render, so
- *  one call covers a whole test. */
-async function expandRecents(page: Page): Promise<void> {
-  await page
-    .locator(".wiki-rail-fold")
-    .evaluateAll((els) => els.forEach((el) => ((el as HTMLDetailsElement).open = true)));
-}
-
-
-/** The section headers' LABELS — `.wiki-sec-label`, not the header element, so
- *  the `clear` button's own text does not ride along. */
+/** The section headers' LABELS — `.wiki-sec-label`, not the header element. */
 const sectionLabels = (page: Page) => page.locator(".wiki-sec-label").allTextContents();
+
+/** Pin one row by its ★, hovering first — the star is hidden until the row is
+ *  hovered on a pointer device. The click paints the star and nothing else, so
+ *  the caller asks for the next render itself (`rerender`). */
+async function pinRow(page: Page, rel: string): Promise<void> {
+  const row = page.locator(`.wiki-list-item[data-relpath="${rel}"]`);
+  await row.hover();
+  await row.locator(".wiki-pin").click();
+  await expect(row.locator(".wiki-pin")).toHaveAttribute("aria-pressed", "true");
+}
 
 /** Cause a render without changing what is on screen. The ★ toggle deliberately
  *  paints buttons and nothing else, so a section appears at the reader's NEXT
@@ -229,7 +205,7 @@ async function relPathsIn(page: Page, section: string): Promise<string[]> {
   );
 }
 
-test.describe("Wiki rail: recents, pins, key jump", () => {
+test.describe("Wiki rail: pins, key jump", () => {
   test("a fresh browser gets the rail it has always had — no headers", async ({ page }) => {
     await openRail(page);
     expect(await sectionLabels(page)).toEqual([]);
@@ -237,71 +213,6 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     // The ★ is on every row, and invisible until the row is hovered.
     expect(await page.locator(".wiki-pin").count()).toBe(ALL_PAGES);
     await expect(page.locator(".wiki-pin").first()).toHaveCSS("opacity", "0");
-  });
-
-  test("opening a page records it, and the record survives a reload", async ({ page }) => {
-    await openRail(page);
-    await clickRow(page, ARSAVREGNING);
-    await expect(page.locator(".wiki-article")).toContainText("Body.");
-
-    // While it is the page being READ it stays in the listing, highlighted —
-    // the section it was recorded into is folded, and that row must not be.
-    await expect(page.locator(".wiki-list-item.active")).toHaveCount(1);
-    await expect(page.locator(".wiki-list-item.active")).toHaveAttribute(
-      "data-relpath",
-      ARSAVREGNING,
-    );
-    expect(await relPathsIn(page, "recent")).toEqual([]);
-    // It was recorded all the same: leaving the article shows it.
-    await backToStart(page);
-    expect(await sectionLabels(page)).toEqual(["Recently opened", "Other pages"]);
-    expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
-
-    // The section MOVED the row: every page is on screen exactly once, so the
-    // count still describes the rows, `[data-relpath=…]` still names ONE
-    // element, and the open page is highlighted in one place.
-    expect(await relPathsIn(page, "all")).toHaveLength(ALL_PAGES - 1);
-    expect(await page.locator(".wiki-list-item").count()).toBe(ALL_PAGES);
-    await expect(page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`)).toHaveCount(1);
-    await expect(page.locator("#wikiCount")).toHaveText(`${ALL_PAGES} / ${ALL_PAGES}`);
-
-    // …and it is there on the next visit, which is the whole promise.
-    await reloadKeepingStore(page);
-    expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
-  });
-
-  test("the most recently opened page comes first, without duplicating", async ({ page }) => {
-    await openRail(page);
-    // Wait for the page JUST clicked, by name. `.wiki-article` is already
-    // visible from the previous click, so waiting on it returns immediately and
-    // the next click can land while the last response is still in flight —
-    // which the nav-token guard then correctly drops from recents. One failure
-    // in seven local runs, green in isolation every time.
-    const titles: Record<string, string> = {
-      [ARSAVREGNING]: "Årsavregning",
-      [KILDESKATT]: "Kildeskatt",
-    };
-    for (const rel of [ARSAVREGNING, KILDESKATT, ARSAVREGNING]) {
-      await clickRow(page, rel);
-      await expect(page.locator(".wiki-bc-cur")).toHaveText(titles[rel]!);
-    }
-    // Off the article, so the page just read joins the section it was recorded
-    // into rather than staying highlighted in the listing.
-    await backToStart(page);
-    expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING, KILDESKATT]);
-  });
-
-  test("clear empties the section and the store", async ({ page }) => {
-    await openRail(page);
-    await clickRow(page, ARSAVREGNING);
-    await backToStart(page);
-    await expect(rowsIn(page, "recent")).toHaveCount(1);
-
-    await page.locator(".wiki-sec-clear").click();
-    expect(await sectionLabels(page)).toEqual([]);
-    // Cleared in storage, not just on screen.
-    await reloadKeepingStore(page);
-    expect(await sectionLabels(page)).toEqual([]);
   });
 
   test("★ pins a page WITHOUT opening it", async ({ page }) => {
@@ -343,76 +254,47 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     expect(await sectionLabels(page)).toEqual([]);
   });
 
-  test("a pinned page is not repeated under Recently opened", async ({ page }) => {
+  test("a search hides the section; a facet NARROWS it to the filtered pages", async ({ page }) => {
     await openRail(page);
-    await clickRow(page, ARSAVREGNING);
-    await backToStart(page);
-    await expect(rowsIn(page, "recent")).toHaveCount(1);
-
-    const row = page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"][data-section="recent"]`);
-    await expandRecents(page);
-    await row.hover();
-    await row.locator(".wiki-pin").click();
+    await pinRow(page, KILDESKATT);
+    await pinRow(page, ARSAVREGNING);
     await rerender(page);
-
-    expect(await sectionLabels(page)).toEqual(["Pinned", "Other pages"]);
-    expect(await relPathsIn(page, "pinned")).toEqual([ARSAVREGNING]);
-    expect(await rowsIn(page, "recent").count()).toBe(0);
-
-    // …and un-pinning gives it back to the recents section.
-    await page.locator(`.wiki-list-item[data-section="pinned"] .wiki-pin`).click();
-    await rerender(page);
-    expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
-  });
-
-  test("a search hides the sections; a facet NARROWS them to the filtered pages", async ({ page }) => {
-    await openRail(page);
-    await clickRow(page, KILDESKATT);
-    // Settle between clicks: the first re-renders the rail, and a click on a
-    // row mid-replacement is lost. The settle is the breadcrumb rather than the
-    // section, because the page just opened is deliberately NOT in it.
-    await expect(page.locator(".wiki-bc-cur")).toHaveText("Kildeskatt");
-    await clickRow(page, ARSAVREGNING);
-    await expect(page.locator(".wiki-bc-cur")).toHaveText("Årsavregning");
-    await backToStart(page);
-    await expect.poll(() => relPathsIn(page, "recent")).toEqual([ARSAVREGNING, KILDESKATT]);
+    await expect(rowsIn(page, "pinned")).toHaveCount(2);
 
     await page.fill("#wikiSearch", "kilde");
     expect(await sectionLabels(page)).toEqual([]);
 
     await page.fill("#wikiSearch", "");
-    await expect(rowsIn(page, "recent")).toHaveCount(2);
+    await expect(rowsIn(page, "pinned")).toHaveCount(2);
 
-    // A facet keeps the section and drops the recent that is outside it: the
-    // reader who picked a type still has the pages they pinned/opened IN it.
+    // A facet keeps the section and drops the pin that is outside it: the reader
+    // who picked a tag still has the pages they pinned IN it.
     await page.locator("#wikiFilters summary").click();
     await page.locator('#tagChips .wiki-chip[data-tag="avregning"]').click();
-    expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
-    expect(await sectionLabels(page)).toEqual(["Recently opened"]);
-    // …and no clear: the section is a subset of the store, and clear empties the store.
-    await expect(page.locator(".wiki-sec-clear")).toHaveCount(0);
+    expect(await relPathsIn(page, "pinned")).toEqual([ARSAVREGNING]);
+    expect(await sectionLabels(page)).toEqual(["Pinned"]);
   });
 
-  test("the store is per wiki — one wiki's recents never show on another", async ({ page }) => {
+  test("the store is per wiki — one wiki's pins never show on another", async ({ page }) => {
     await openRail(page);
-    await clickRow(page, ARSAVREGNING);
-    await backToStart(page);
-    await expect(rowsIn(page, "recent")).toHaveCount(1);
+    await pinRow(page, ARSAVREGNING);
+    await rerender(page);
+    await expect(rowsIn(page, "pinned")).toHaveCount(1);
 
     await reloadKeepingStore(page, OTHER_WIKI);
     expect(await sectionLabels(page)).toEqual([]);
 
-    // Both keys really are present, under two different names.
+    // The key really is per wiki, and it is the ONLY rail key in the store.
     const keys = await page.evaluate(
       ([r, p]: [string, string]) =>
         Object.keys(localStorage).filter((k) => k.startsWith(r) || k.startsWith(p)).sort(),
       [RECENTS_KEY_PREFIX, PINS_KEY_PREFIX] as [string, string],
     );
-    expect(keys).toEqual([`${RECENTS_KEY_PREFIX}${WIKI}`]);
+    expect(keys).toEqual([`${PINS_KEY_PREFIX}${WIKI}`]);
 
     // …and the first wiki still has it.
     await reloadKeepingStore(page, WIKI);
-    expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
+    expect(await relPathsIn(page, "pinned")).toEqual([ARSAVREGNING]);
   });
 
   test("a bare Jira number jumps to the issue page, then what references it", async ({ page }) => {
@@ -590,35 +472,6 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
   });
 
   /**
-   * The mirror of the case above, and a defect one fix round injected: bumping
-   * the navigation token inside `renderStart` also fired for the start view's
-   * OWN controls — the Hubs / Timeline / Atlas tabs and the coverage link — which
-   * the reader clicks while still ON the start view with a navigation in flight.
-   * The page then rendered and was silently absent from Recently opened
-   * (measured: articleRendered=1, recents=[]).
-   */
-  test("a start-view tab click does not discard the navigation in flight", async ({ page }) => {
-    await openRail(page);
-    let release: (() => void) | undefined;
-    const held = new Promise<void>((r) => (release = r));
-    await page.route(`**/api/wiki/page?relPath=${encodeURIComponent(KILDESKATT)}*`, async (route) => {
-      await held;
-      await route.continue();
-    });
-
-    await clickRow(page, KILDESKATT);
-    // Still on the start view, response still in flight: switch tabs.
-    await page.locator('.wiki-tab[data-tab="timeline"]').click();
-    release!();
-
-    // The reader ends up on the page and reads it, so it IS recently opened —
-    // visible in the section once they leave the article.
-    await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
-    await backToStart(page);
-    expect(await relPathsIn(page, "recent")).toEqual([KILDESKATT]);
-  });
-
-  /**
    * A toggle at the pin cap flips TWO pages, and the second one's ★ has to know.
    *
    * `togglePin` displaces the oldest pin at `PINS_MAX`, so "repaint the row that
@@ -708,24 +561,6 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     expect(await page.locator(".wiki-list-item").count()).toBe(ALL_PAGES);
   });
 
-  /** The same hole on the recents side, where no click is needed at all — just
-   *  opening the page a differently-cased entry already names. */
-  test("a differently-cased stored recent is not a second recent", async ({ page }) => {
-    await openRail(page);
-    await page.evaluate(
-      ([key, rel]: [string, string]) => localStorage.setItem(key, JSON.stringify([rel])),
-      [`${RECENTS_KEY_PREFIX}${WIKI}`, KILDESKATT.toUpperCase()] as [string, string],
-    );
-    await reloadKeepingStore(page);
-    await clickRow(page, KILDESKATT);
-    await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
-    await backToStart(page);
-
-    expect(await relPathsIn(page, "recent")).toEqual([KILDESKATT]);
-    expect(await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).count()).toBe(1);
-    expect(await page.locator(".wiki-list-item").count()).toBe(ALL_PAGES);
-  });
-
   /** An `aria-label` overrides a button's text, so it is the string a screen
    *  reader actually announces — and the one that must move with the state. */
   test("the ★'s accessible name follows the pin state", async ({ page }) => {
@@ -758,64 +593,74 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
   });
 
   /**
-   * A response that lands after a newer navigation started must not write itself
-   * to the head of a PERSISTENT list. The pre-existing clobber of `currentRelPath`
-   * was transient; recording a recent from it would outlive the session.
+   * The one-time cleanup that ships with the removal of `Recently opened`.
+   *
+   * A reader who used the rail before this carries a `muninn.wiki.recents.v1:*`
+   * key per wiki, which nothing will ever read again. The rail's boot purges
+   * every one of them — and NOTHING else: the pins key beside it is the feature
+   * that replaces the section, and `muninn.wiki.last.v1` is what makes a bare
+   * `/wiki` open the wiki last read, so a prefix match that reached either would
+   * be a silent data loss on an unrelated feature.
+   *
+   * The seeded recent names a DIFFERENT page from the pin on purpose, so the two
+   * halves of the assertion cannot be satisfied by one row: the pinned page has
+   * to stay lifted while the page the dead key named drops into the listing.
    */
-  test("a slow response that loses the race does not become the newest recent", async ({
+  test("the boot purges dead recents keys and leaves pins and the last-wiki key", async ({
     page,
   }) => {
     await openRail(page);
-    // Hold the FIRST page's response until the second navigation has finished.
-    let release: (() => void) | undefined;
-    const held = new Promise<void>((r) => (release = r));
-    await page.route(`**/api/wiki/page?relPath=${encodeURIComponent(ARSAVREGNING)}*`, async (route) => {
-      await held;
-      await route.continue();
-    });
+    await page.evaluate(
+      ([recentsPrefix, pinsPrefix, lastKey, wiki, otherWiki, recentRel, pinRel]: [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ]) => {
+        localStorage.setItem(recentsPrefix + wiki, JSON.stringify([recentRel]));
+        localStorage.setItem(recentsPrefix + otherWiki, JSON.stringify([recentRel]));
+        localStorage.setItem(pinsPrefix + wiki, JSON.stringify([pinRel]));
+        localStorage.setItem(lastKey, wiki);
+      },
+      [
+        RECENTS_KEY_PREFIX,
+        PINS_KEY_PREFIX,
+        LAST_WIKI_KEY,
+        WIKI,
+        OTHER_WIKI,
+        ARSAVREGNING,
+        KILDESKATT,
+      ] as [string, string, string, string, string, string, string],
+    );
 
-    await clickRow(page, ARSAVREGNING);
-    await clickRow(page, KILDESKATT);
-    await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
+    await reloadKeepingStore(page);
 
-    release!();
-    await page.waitForTimeout(400);
+    // The section is gone from the rail: no fold, no clear affordance, no header.
+    await expect(page.locator(".wiki-rail-fold")).toHaveCount(0);
+    await expect(page.locator("[data-clear-recents]")).toHaveCount(0);
+    expect(await sectionLabels(page)).toEqual(["Pinned", "Other pages"]);
+    expect(await relPathsIn(page, "recent")).toEqual([]);
+    // The page the dead key named is an ordinary listing row again.
+    expect(await relPathsIn(page, "all")).toContain(ARSAVREGNING);
 
-    // The page the reader actually settled on is the newest recent.
-    expect((await relPathsIn(page, "recent"))[0]).toBe(KILDESKATT);
-  });
-
-  /**
-   * A navigation the reader ABANDONS must not write itself to the persistent
-   * recents list. `loadExplainer` and `fetchAndRenderPage` bump the token; the
-   * return-to-start path did not, so a slow response for a page the reader
-   * backed out of still won the top of Recently opened.
-   */
-  test("backing out to the start view before the response lands records nothing", async ({
-    page,
-  }) => {
-    await openRail(page);
-    // One page opened for real first: a HELD navigation pushes no history entry,
-    // so without this `goBack` leaves the reader page entirely and the popstate
-    // path — the one that calls `renderStart` — is never exercised.
-    await clickRow(page, KILDESKATT);
-    await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
-
-    let release: (() => void) | undefined;
-    const held = new Promise<void>((r) => (release = r));
-    await page.route(`**/api/wiki/page?relPath=${encodeURIComponent(ARSAVREGNING)}*`, async (route) => {
-      await held;
-      await route.continue();
-    });
-
-    await clickRow(page, ARSAVREGNING);
-    await page.goBack();
-    await expect(page.locator(".wiki-start")).toBeVisible();
-
-    release!();
-    await page.waitForTimeout(400);
-    // The abandoned page is NOT at the head — only the one actually read is there.
-    expect(await relPathsIn(page, "recent")).toEqual([KILDESKATT]);
+    // Every recents key is gone — both wikis', not just this one's…
+    const state = await page.evaluate(
+      ([recentsPrefix, pinsPrefix, lastKey, wiki]: [string, string, string, string]) => ({
+        recents: Object.keys(localStorage).filter((k) => k.startsWith(recentsPrefix)),
+        pins: localStorage.getItem(pinsPrefix + wiki),
+        last: localStorage.getItem(lastKey),
+      }),
+      [RECENTS_KEY_PREFIX, PINS_KEY_PREFIX, LAST_WIKI_KEY, WIKI] as [string, string, string, string],
+    );
+    expect(state.recents).toEqual([]);
+    // …and the two keys it must not touch are byte-identical.
+    expect(state.pins).toBe(JSON.stringify([KILDESKATT]));
+    expect(state.last).toBe(WIKI);
+    // The pin still works, which is the point of keeping that key.
+    expect(await relPathsIn(page, "pinned")).toEqual([KILDESKATT]);
   });
 });
 

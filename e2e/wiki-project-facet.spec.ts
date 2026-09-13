@@ -129,18 +129,8 @@ const PROJECT_RELPATHS = [
 ];
 const TOTAL_PAGES = Object.keys(WITH_PAGES).length; // 8
 
-/**
- * Click a rail row, expanding the `Recently opened` fold first.
- *
- * That section renders inside a CLOSED `<details>` since the rail grew its
- * Activity section, so a row the reader has already opened is hidden until the
- * fold is expanded — and Playwright will not click a hidden element. Setting
- * `open` directly rather than clicking the summary keeps it idempotent.
- */
+/** Click a rail row. No rail section folds, so every row is a plain visible row. */
 async function clickRow(page: import("@playwright/test").Page, rel: string): Promise<void> {
-  await page
-    .locator(".wiki-rail-fold")
-    .evaluateAll((els) => els.forEach((el) => ((el as HTMLDetailsElement).open = true)));
   await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).click();
 }
 
@@ -316,45 +306,6 @@ test.describe("Wiki reader: project facet", () => {
     // …and the Filters disclosure opened, so the chip row explains the narrowing.
     await expect(page.locator("#wikiFilters")).toHaveAttribute("open", "");
     await expect(page.locator(`#projectChips [data-project="${PROJECT}"]`)).toHaveClass(/active/);
-  });
-
-  test("Recently opened narrows under the filter, and loses its clear affordance", async ({
-    page,
-  }) => {
-    await openReader(page, `wiki=${WIKI_WITH}`);
-    // Two recents in two different projects.
-    await page.locator(`.wiki-list-item[data-relpath="areas/${OTHER}/z.md"]`).click();
-    await expect(page.locator(".wiki-article-head h1")).toHaveText("Zeta");
-    await clickRow(page, `areas/${PROJECT}/a.md`);
-    await expect(page.locator(".wiki-article-head h1")).toHaveText("Alpha");
-    // Back to the overview: the page being READ is deliberately kept out of
-    // `Recently opened` (its `.active` row must stay on screen, and that section
-    // is folded), so both recents are in the section only once none is open.
-    await page.locator(".wiki-bc-wiki").click();
-    await expect(page.locator(".wiki-start")).toBeVisible();
-
-    const recentRows = page.locator('.wiki-list-item[data-section="recent"]');
-    await expect(recentRows).toHaveCount(2);
-    // With every facet inert the clear affordance is offered.
-    await expect(page.locator("[data-clear-recents]")).toHaveCount(1);
-
-    await page.locator("#wikiFilters summary").click();
-    await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
-    // The out-of-project recent no longer resolves against the filtered list.
-    await expect(recentRows).toHaveCount(1);
-    await expect(recentRows).toHaveAttribute("data-relpath", `areas/${PROJECT}/a.md`);
-    /**
-     * The load-bearing one (`railFacetsInert`). `clearRecents` empties the STORE,
-     * and under a facet the section on screen is a SUBSET of it — so a clear
-     * offered here destroys recents for pages the reader never saw. Leaving
-     * `project` off that predicate is invisible in every other way.
-     */
-    await expect(page.locator("[data-clear-recents]")).toHaveCount(0);
-
-    // Clearing the filter brings both the other recent and the affordance back.
-    await page.locator('#projectChips [data-project=""]').click();
-    await expect(recentRows).toHaveCount(2);
-    await expect(page.locator("[data-clear-recents]")).toHaveCount(1);
   });
 
   test("an article opened under the filter keeps it — in the URL and across a reload", async ({
