@@ -95,7 +95,7 @@ import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import { buildRail, isPinnedRelPath, railSectionsVisible, type RailEntry } from "./wiki-recents.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
-  formatRelativeAge,
+  formatRailAge,
   parseActivityWeights,
   rankActivity,
   type ActivityWeights,
@@ -196,8 +196,10 @@ import {
   hasTypedHubs,
   hubTypeList,
   pageAddedLabel,
+  pageAddedMs,
   pageDateLabel,
   pageHeaderDates,
+  pageTimeMs,
   pageFolder,
   pageFollowups,
   projectCounts,
@@ -897,20 +899,45 @@ function renderList(): void {
       return;
     }
     const p = entry.page;
-    // In recency modes show the date we actually sorted on (mtime/birthtime or
+    // WHICH SIGNAL this row's date comes from: the one that PUT an Activity row
+    // there, the one the list SORTED on for every other row. `null` is the
+    // backlinks mode, whose rows count links rather than days. In every recency
+    // mode the date shown is the one actually sorted on (mtime/birthtime or
     // frontmatter) — otherwise a frontmatter-less page would show nothing while
     // sitting at the top, which is exactly what looked broken before.
-    // An Activity row shows the age of the signal that PUT it there — a
-    // relative one, because "2d" beside a `+` reads as news where a calendar day
-    // reads as a sort key, and because the row's date must be the date its
-    // placement was argued from whatever the list is sorted by.
-    const meta = entry.activity
-      ? formatRelativeAge(entry.activity.ageMs)
+    const signal: "added" | "updated" | null = entry.activity
+      ? entry.activity.kind === "new"
+        ? "added"
+        : "updated"
       : mode === "backlinks"
-        ? p.backlinkCount + " ←"
+        ? null
         : mode === "created"
-          ? pageAddedLabel(p, now)
-          : pageDateLabel(p, now);
+          ? "added"
+          : "updated";
+    // The STAMP the age counts from. For an Activity row it is the one the
+    // ranking already derived (`now - ageMs`, off the same anchored instant), so
+    // the row's date and its `why` sentence cannot disagree about the age; for a
+    // listing row it is the sort key itself.
+    const stampMs = entry.activity
+      ? now - entry.activity.ageMs
+      : signal === "added"
+        ? pageAddedMs(p, now)
+        : signal === "updated"
+          ? pageTimeMs(p, now)
+          : 0;
+    // The full date, from the SAME signal — kept one hover away below, and the
+    // authored spelling `formatRailAge` prefers past its relative window.
+    const fullDate =
+      signal === "added"
+        ? pageAddedLabel(p, now)
+        : signal === "updated"
+          ? pageDateLabel(p, now)
+          : "";
+    // Every rail row shows a COMPACT age — `now`/`Nh`/`Nd`, then the day — because
+    // "2d" reads as news where a calendar day reads as a sort key, and because
+    // three glyphs leave the title the width the rail is short of. The article
+    // header still shows both dates in full.
+    const meta = signal === null ? p.backlinkCount + " ←" : formatRailAge(stampMs, now, fullDate);
     // Both keys on every row: `data-relpath` is what the click delegate and the
     // active test use (it names ONE page), `data-page` stays for anything still
     // reading the name. `isActivePage` falls back to the name comparison only
@@ -942,7 +969,12 @@ function renderList(): void {
       // reader who never pins anything.
       `<div class="wiki-list-end">` +
       pinBtnHtml(entry.pinned) +
-      `<div class="wiki-list-meta">${esc(meta)}</div>` +
+      // The full date on the META element itself, never on the row: a child's own
+      // `title=` wins the hover over the width it covers, which is the same
+      // reason the Activity derivation is repeated onto `.wiki-list-title` above.
+      // Left on the row it would be unreachable over the cell it describes, and
+      // the compact age would be the only date the rail can say.
+      `<div class="wiki-list-meta"${fullDate ? ` title="${esc(fullDate)}"` : ""}>${esc(meta)}</div>` +
       `</div>` +
       `</div>`;
   });

@@ -40,6 +40,7 @@
 import {
   displayTitleOf,
   isMetaPage,
+  localDay,
   pageAddedMs,
   pageDateKind,
   pageTimeMs,
@@ -53,7 +54,7 @@ import {
  * the section renders.
  */
 export interface ActivityWeights {
-  /** Rows the Activity section renders, 1–12. */
+  /** Rows the Activity section renders, 1–20. */
   rows: number;
   /** Days for a newly created page's score to halve. */
   halfLifeNewDays: number;
@@ -103,11 +104,15 @@ export const DEFAULT_ACTIVITY_WEIGHTS: ActivityWeights = {
   changedWeight: 70,
 };
 
-/** Bounds on `rows`: below 1 the section cannot render and above 12 it is the
- *  listing with extra furniture. A number outside them is CLAMPED rather than
+/** Bounds on `rows`: below 1 the section cannot render, and past 20 the section
+ *  is the listing with extra furniture. 12 was the first ceiling and it, not the
+ *  score floor, was what cut the list: measured 2026-09-13, all three active
+ *  wikis (mimir 527 pages, melosys-kode-wiki 392, jarvis 1261) filled 12 of 12
+ *  rows with their oldest row only 3–5 days old, so `ACTIVITY_MIN_SCORE` never
+ *  bound on any of them. A number outside the bounds is CLAMPED rather than
  *  dropped — the author's intent ("as many as you can") is unambiguous. */
 export const ACTIVITY_ROWS_MIN = 1;
-export const ACTIVITY_ROWS_MAX = 12;
+export const ACTIVITY_ROWS_MAX = 20;
 /** Upper bound on a half-life. A year of half-life is a constant, not a decay,
  *  and a value past it is a units mistake (ms for days) rather than a choice. */
 const HALF_LIFE_MAX_DAYS = 365;
@@ -208,7 +213,7 @@ export function parseActivityWeights(raw: unknown): {
   if (rows !== null) {
     const clamped = Math.min(ACTIVITY_ROWS_MAX, Math.max(ACTIVITY_ROWS_MIN, Math.round(rows)));
     // Two different things happened to the value, and one warning text for both
-    // told an author who wrote 6.4 that 6.4 is "outside 1–12".
+    // told an author who wrote 6.4 that 6.4 is "outside 1–20".
     if (rows < ACTIVITY_ROWS_MIN || rows > ACTIVITY_ROWS_MAX) {
       warn("activity.rows", `is outside ${ACTIVITY_ROWS_MIN}–${ACTIVITY_ROWS_MAX} — using ${clamped}`);
     } else if (clamped !== rows) {
@@ -225,43 +230,76 @@ export function parseActivityWeights(raw: unknown): {
   return { weights, warnings };
 }
 
+/** Past this many days the rail stops counting days and names the day instead.
+ *  A `4mo`/`1.2y` reading answers "roughly how long ago" for a page nobody is
+ *  ranking by recency any more, where the date answers it exactly and in the
+ *  same width. */
+export const RAIL_AGE_MAX_DAYS = 99;
+
 /**
- * A duration as the rail renders it: `now` · `Nh` · `Nd` · `Nmo` · `N.Ny`.
+ * The rail's age scale, discriminated so no caller has to sniff the text:
+ * `relative` is one of `now` · `Nh` · `Nd`, and `false` is a calendar day.
+ * `null` means "no usable stamp" — the same answer `pageDateLabel` gives for a
+ * page carrying no date signal at all, which the callers render as `""` / `?`.
  *
- * Takes an AGE in ms rather than a timestamp, so the caller owns the clock read
- * (the rail anchors its instant to the server's scan — see `recencyNow`). Only a
- * NON-FINITE age renders as `""`; 0 and a negative age both read "now", which is
- * what a stamp a few minutes ahead of the anchor deserves.
+ * Takes the STAMP plus the anchored instant rather than an age: the calendar
+ * branch has to name a day, and an age cannot. The instant is the caller's
+ * (`recencyNow()`, server-anchored — see `anchorNow`), so this reads no clock
+ * and stays pure inside a render or a comparator.
  *
- * Not one of the repo's other relative-time helpers, and deliberately: this one
- * takes an age rather than a timestamp (so it reads no clock and stays pure
- * inside a comparator) and it carries `mo`/`y` buckets, which a chat-scale
- * "N min ago" formatter has no use for.
- *
- * **Each bucket is promoted on its own ROUNDED value, not on the raw one**, so
- * two buckets never print the same duration: at 29.6 days the day bucket rounds
- * to 30 and the label would have been "30d" beside a "1mo" that starts at 30.0.
- * Same seam at 24h/1d and at 12mo/1.0y.
+ * **Each bucket promotes on its own ROUNDED value, not on the raw one**, so two
+ * buckets never print the same duration: at 23.6h the hour bucket would round to
+ * "24h" beside a day bucket that starts at 24. Same seam at 99d and the date.
  */
-export function formatRelativeAge(ageMs: number): string {
-  if (!Number.isFinite(ageMs)) return "";
+function railAge(ms: number, now: number): { relative: boolean; text: string } | null {
+  if (!Number.isFinite(ms) || ms <= 0 || !Number.isFinite(now)) return null;
+  const ageMs = now - ms;
   const hours = ageMs / 3_600_000;
-  if (hours < 1) return "now";
+  // 0 and a NEGATIVE age both read "now": a stamp a few minutes ahead of the
+  // anchored instant is clock skew, not the future.
+  if (hours < 1) return { relative: true, text: "now" };
   const h = Math.round(hours);
-  if (h < 24) return h + "h";
-  const days = ageMs / MS_PER_DAY;
-  const d = Math.round(days);
-  if (d < 30) return d + "d";
-  const mo = Math.round(days / 30);
-  if (mo < 12) return mo + "mo";
-  return (days / 365).toFixed(1) + "y";
+  if (h < 24) return { relative: true, text: h + "h" };
+  const d = Math.round(ageMs / MS_PER_DAY);
+  if (d <= RAIL_AGE_MAX_DAYS) return { relative: true, text: d + "d" };
+  return { relative: false, text: localDay(new Date(ms)) };
 }
 
-/** The age as the `why` sentence says it: "just now" reads as a moment, where
- *  "now ago" reads as a bug. */
-function agePhrase(ageMs: number): string {
-  const label = formatRelativeAge(ageMs);
-  return label === "now" ? "just now" : label + " ago";
+/**
+ * A page's date as EVERY rail row renders it: `now` · `Nh` · `Nd` up to
+ * {@link RAIL_AGE_MAX_DAYS} days, then a plain `YYYY-MM-DD`.
+ *
+ * A relative age is what the rail needs of a recent page — "2d" reads as news
+ * where a calendar day reads as a sort key — and the reverse holds for an old
+ * one, where the count has stopped being a duration anyone subtracts. The full
+ * date stays one hover away on every row (`renderList` puts it on the meta
+ * element's own `title=`) and the ARTICLE header still shows both dates in full:
+ * this is the rail's compact spelling, not a change to what is known.
+ *
+ * `dayLabel` is the day the caller ALREADY has for this stamp — the winning
+ * signal's own label (`pageDateLabel` / `pageAddedLabel`), which echoes an
+ * authored frontmatter date verbatim. Past the relative window that spelling
+ * wins over this function's `localDay(ms)`, because a bare `created: 2026-01-15`
+ * parses as UTC midnight and renders as the 14th anywhere west of UTC — the rail
+ * and the article header would then name two different days for one page.
+ * Omitted or blank ⇒ the local day of the stamp.
+ */
+export function formatRailAge(ms: number, now: number, dayLabel?: string): string {
+  const age = railAge(ms, now);
+  if (!age) return "";
+  return age.relative ? age.text : dayLabel || age.text;
+}
+
+/** The age as the `why` sentence says it: "just now" reads as a moment where
+ *  "now ago" reads as a bug, and past {@link RAIL_AGE_MAX_DAYS} the calendar day
+ *  takes "on" rather than "ago" for the same reason. `?` for a page with no
+ *  stamp, which is the sentence's own spelling for an unknown age (a page with
+ *  no creation signal reaches here through exactly that branch). */
+function agePhrase(ms: number, now: number): string {
+  const age = railAge(ms, now);
+  if (!age) return "?";
+  if (!age.relative) return "on " + age.text;
+  return age.text === "now" ? "just now" : age.text + " ago";
 }
 
 /**
@@ -385,11 +423,13 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
 
   const kind: "new" | "changed" = newScore >= changedScore ? "new" : "changed";
   const score = Math.max(newScore, changedScore);
-  const createdPhrase = knownAge ? agePhrase(now - createdMs) : "?";
+  // `agePhrase` answers "?" for a stamp of 0 on its own, which is exactly what
+  // `!knownAge` means here.
+  const createdPhrase = agePhrase(createdMs, now);
   const why =
     kind === "new"
       ? `created ${createdPhrase} → ${newScore.toFixed(2)}`
-      : `changed ${agePhrase(now - updatedMs)}, created ${createdPhrase}: ` +
+      : `changed ${agePhrase(updatedMs, now)}, created ${createdPhrase}: ` +
         `${parts.join(", ")} → ${changedScore.toFixed(2)}`;
   return { page, kind, score, why, ageMs: kind === "new" ? now - createdMs : now - updatedMs };
 }

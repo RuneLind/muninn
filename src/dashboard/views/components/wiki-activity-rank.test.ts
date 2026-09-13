@@ -12,8 +12,9 @@ import {
   ACTIVITY_ROWS_MAX,
   ACTIVITY_ROWS_MIN,
   DEFAULT_ACTIVITY_WEIGHTS,
-  formatRelativeAge,
+  formatRailAge,
   parseActivityWeights,
+  RAIL_AGE_MAX_DAYS,
   rankActivity,
   type ActivityWeights,
 } from "./wiki-activity-rank.ts";
@@ -256,46 +257,90 @@ describe("rankActivity — the `why` sentence", () => {
       NOW,
     );
     expect(rows[0]!.why).toBe(
-      "changed 3h ago, created 2mo ago: weight ×0.70, recency 0.97, age ×0.52, hub ×0.25 (25←), type ×1.00 → 0.09",
+      "changed 3h ago, created 46d ago: weight ×0.70, recency 0.97, age ×0.52, hub ×0.25 (25←), type ×1.00 → 0.09",
     );
   });
 });
 
 describe("age labels", () => {
+  /** The rail calls it with a STAMP, so every case here states an age in days and
+   *  lets the helper subtract — `NOW` is fixed, so the two are interchangeable. */
+  const age = (days: number, dayLabel?: string): string =>
+    formatRailAge(NOW - days * DAY, NOW, dayLabel);
+  /** The local day of a stamp this many days back — what the helper falls back to
+   *  past the relative window when the caller hands it no authored label.
+   *  Rebuilt the way the helper does rather than hardcoded, or the case would
+   *  fail on every machine outside one timezone. */
+  const localDayAgo = (days: number): string => {
+    const d = new Date(NOW - days * DAY);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+
   test("no two buckets can print the same duration", () => {
     // Each bucket promotes on its OWN rounded value. Promoting on the raw one
-    // makes 29.6 days print "30d" beside a month bucket that starts at 30.0,
-    // and the same seam exists at 24h/1d and 12mo/1.0y.
-    expect(formatRelativeAge(23.6 * 3_600_000)).toBe("1d");
-    expect(formatRelativeAge(23.4 * 3_600_000)).toBe("23h");
-    expect(formatRelativeAge(29.6 * DAY)).toBe("1mo");
-    expect(formatRelativeAge(29.4 * DAY)).toBe("29d");
-    expect(formatRelativeAge(350 * DAY)).toBe("1.0y");
-    expect(formatRelativeAge(340 * DAY)).toBe("11mo");
+    // makes 23.6h print "24h" beside a day bucket that starts at 24.
+    expect(age(23.6 / 24)).toBe("1d");
+    expect(age(23.4 / 24)).toBe("23h");
   });
 
-  test("every bucket of the relative scale", () => {
-    expect(formatRelativeAge(0)).toBe("now");
-    expect(formatRelativeAge(30 * 60_000)).toBe("now"); // 30 min
-    expect(formatRelativeAge(3 * 3_600_000)).toBe("3h");
-    expect(formatRelativeAge(2 * DAY)).toBe("2d");
-    expect(formatRelativeAge(46 * DAY)).toBe("2mo");
-    expect(formatRelativeAge(400 * DAY)).toBe("1.1y");
+  test("every bucket of the scale", () => {
+    expect(age(0)).toBe("now");
+    expect(age(59 / 1440)).toBe("now"); // 59 min
+    expect(age(60 / 1440)).toBe("1h"); // 60 min exactly promotes
+    expect(age(3 / 24)).toBe("3h");
+    expect(age(2)).toBe("2d");
+    expect(age(46)).toBe("46d");
     // Clock skew ahead of the anchor reads as "now", never as a negative age.
-    expect(formatRelativeAge(-60_000)).toBe("now");
-    expect(formatRelativeAge(Number.NaN)).toBe("");
+    expect(age(-1)).toBe("now");
+    expect(formatRailAge(Number.NaN, NOW)).toBe("");
+    // A page with NO date signal at all arrives as a stamp of 0 and renders
+    // nothing, exactly as `pageDateLabel` does for it.
+    expect(formatRailAge(0, NOW)).toBe("");
+  });
+
+  test(`the day scale stops at ${RAIL_AGE_MAX_DAYS} days and the date takes over`, () => {
+    expect(age(RAIL_AGE_MAX_DAYS)).toBe(`${RAIL_AGE_MAX_DAYS}d`);
+    // Promotion is on the ROUNDED day count here too, so the seam is at 99.5.
+    expect(age(99.4)).toBe("99d");
+    expect(age(99.6)).toBe(localDayAgo(99.6));
+    expect(age(400)).toBe(localDayAgo(400));
+  });
+
+  test("past the day scale an authored day label WINS over the local day", () => {
+    // `pageAddedLabel` echoes a frontmatter `created:` verbatim, and a bare
+    // `2026-01-15` parses as UTC midnight — so west of UTC the helper's own
+    // `localDay(ms)` is the 14th while the header says the 15th. The label wins,
+    // or one page carries two different dates on two surfaces.
+    expect(age(400, "2020-01-15")).toBe("2020-01-15");
+    // A blank label is not a date and must not blank the cell.
+    expect(age(400, "")).toBe(localDayAgo(400));
+    // Inside the relative window the label is irrelevant — the age is the answer.
+    expect(age(2, "2020-01-15")).toBe("2d");
   });
 
   test("the row label is the age of the signal that WON", () => {
     const [created] = rankActivity([page({ relPath: "a.md", createdDaysAgo: 2 })], wide, NOW);
-    expect(formatRelativeAge(created!.ageMs)).toBe("2d");
+    expect(formatRailAge(NOW - created!.ageMs, NOW)).toBe("2d");
     const [changed] = rankActivity(
       [page({ relPath: "b.md", createdDaysAgo: 46, updatedDaysAgo: 3 / 24 })],
       wide,
       NOW,
     );
     expect(changed!.kind).toBe("changed");
-    expect(formatRelativeAge(changed!.ageMs)).toBe("3h");
+    expect(formatRailAge(NOW - changed!.ageMs, NOW)).toBe("3h");
+  });
+
+  test("the `why` sentence says `on <day>` past the day scale, never `ago`", () => {
+    // A page created 200 days ago and edited yesterday: the creation phrase is
+    // past the window, the change phrase is not.
+    const [row] = rankActivity(
+      [page({ relPath: "old.md", createdDaysAgo: 200, updatedDaysAgo: 1 })],
+      wide,
+      NOW,
+    );
+    expect(row!.why).toContain(`created on ${localDayAgo(200)}`);
+    expect(row!.why).toContain("changed 1d ago");
   });
 });
 
@@ -466,7 +511,7 @@ describe("parseActivityWeights", () => {
     expect(rounded[0]!.reason).toBe("rounded to 6");
     const breached = parseActivityWeights({ rows: 99 }).warnings;
     expect(breached[0]!.reason).toContain("outside");
-    expect(breached[0]!.reason).toContain("using 12");
+    expect(breached[0]!.reason).toContain(`using ${ACTIVITY_ROWS_MAX}`);
   });
 
   test("every warning names its key separately, so a log sink can group by cause", () => {

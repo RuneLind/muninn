@@ -45,9 +45,20 @@ const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-activity";
 /** The plain wiki, which exists only to prove the `.wiki-reader.json` override. */
 const OTHER_WIKI = "e2e-activity-rows";
+/** A third plain wiki asking for MORE rows than the first ceiling allowed, so the
+ *  raised `ACTIVITY_ROWS_MAX` is proved through the whole chain rather than only
+ *  in the parser: `.wiki-reader.json` → the resolved payload → the client's own
+ *  re-parse → the rendered rows. */
+const MANY_WIKI = "e2e-activity-many";
+const MANY_ROWS = 20;
+const MANY_PAGES = 22;
 
 const DAY = 86_400_000;
 
+/** Older than the rail's relative window (99 days), so its row can only render a
+ *  calendar date. The one page here whose date is past that seam. */
+const ANCIENT = "notes/ancient.md";
+const ANCIENT_DAYS = 200;
 const HUB = "concepts/hub.md";
 const PLAN = "plans/young-plan.md";
 const BRAND_NEW = "notes/brand-new.md";
@@ -55,7 +66,7 @@ const FRESH = [0, 1, 2, 3].map((i) => `notes/fresh-${i}.md`);
 const LINKERS = [1, 2, 3, 4, 5, 6].map((i) => `concepts/link-${i}.md`);
 
 /** Every page of the git wiki, so a count assertion says what it means. */
-const ALL_PAGES = 1 + 1 + 1 + FRESH.length + LINKERS.length;
+const ALL_PAGES = 1 + 1 + 1 + 1 + FRESH.length + LINKERS.length;
 /** The default `rows`, which this wiki does not override. */
 const DEFAULT_ROWS = 6;
 
@@ -66,6 +77,7 @@ function md(title: string, body: string, extra: string[] = []): string {
 let server: ChildProcess | undefined;
 let root = "";
 let otherRoot = "";
+let manyRoot = "";
 
 /** `git` in the fixture repo, with BOTH date variables pinned — `git-dates.ts`
  *  reads the AUTHOR date (`%at`), and setting only one leaves the other on the
@@ -102,6 +114,7 @@ function commit(atMs: number, message: string): void {
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-activity-"));
   otherRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-activity-rows-"));
+  manyRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-activity-many-"));
   const now = Date.now();
 
   // `plan` is not one of the built-in types, so the wiki declares it — which is
@@ -113,6 +126,12 @@ test.beforeAll(async () => {
   );
 
   git(["init", "-q", "-b", "main"]);
+
+  // T-200d — one page older than the rail's relative window, committed FIRST so
+  // history order matches date order. Nothing ever touches it again, so it scores
+  // under the floor and stays a plain listing row.
+  await write(ANCIENT, md("Ancient note", "Written long ago."));
+  commit(now - ANCIENT_DAYS * DAY, "the ancient note");
 
   // T-60d — an old hub and the six pages that link to it. Its backlink count is
   // what the hub penalty acts on.
@@ -154,6 +173,17 @@ test.beforeAll(async () => {
     await writeFile(path.join(otherRoot, `p-${i}.md`), md(`Page ${i}`, "Body."), "utf8");
   }
 
+  // The third wiki, same all-brand-new shape, with MORE pages than the rows it
+  // asks for — so the rendered count can only be the wiki's own number.
+  await writeFile(
+    path.join(manyRoot, ".wiki-reader.json"),
+    JSON.stringify({ activity: { rows: MANY_ROWS } }),
+    "utf8",
+  );
+  for (let i = 1; i <= MANY_PAGES; i++) {
+    await writeFile(path.join(manyRoot, `m-${i}.md`), md(`Many ${i}`, "Body."), "utf8");
+  }
+
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -162,7 +192,7 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root},${OTHER_WIKI}=${otherRoot}`,
+      WIKI_EXTRA: `${WIKI}=${root},${OTHER_WIKI}=${otherRoot},${MANY_WIKI}=${manyRoot}`,
     },
     stdio: "ignore",
   });
@@ -184,6 +214,7 @@ test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
   if (otherRoot) await rm(otherRoot, { recursive: true, force: true });
+  if (manyRoot) await rm(manyRoot, { recursive: true, force: true });
 });
 
 type Page = import("@playwright/test").Page;
@@ -207,6 +238,29 @@ async function readPages(page: Page, rels: string[]): Promise<void> {
     await expect(page.locator(".wiki-bc-cur")).toBeVisible();
     await expect(page.locator(".wiki-list-item.active")).toHaveAttribute("data-relpath", rel);
   }
+}
+
+/** `YYYY-MM-DD` in the runner's own timezone, the way `localDay` builds it. Derived
+ *  from the stamp the payload reports rather than from a literal, or the case would
+ *  pass only in one timezone and only on one day. */
+function localDay(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** The update stamp the listing carries for a page — the signal the default
+ *  `Recently updated` sort, and so every rail row's date, is derived from. */
+async function updateStampOf(relPath: string): Promise<number> {
+  const res = await fetch(`${BASE}/api/wiki/pages?wiki=${WIKI}`);
+  const data = (await res.json()) as {
+    pages: Array<{ relPath: string; gitTouchedMs?: number; gitCreatedMs?: number }>;
+  };
+  const p = data.pages.find((x) => x.relPath === relPath);
+  if (!p) throw new Error(`no listing row for ${relPath}`);
+  const ms = p.gitTouchedMs ?? p.gitCreatedMs;
+  if (!ms) throw new Error(`no git stamp for ${relPath}`);
+  return ms;
 }
 
 test.describe("Wiki rail: Activity", () => {
@@ -389,6 +443,62 @@ test.describe("Wiki rail: Activity", () => {
     await expect(rowsIn(page, "activity")).toHaveCount(DEFAULT_ROWS);
   });
 
+  test("a row past 99 days shows its DATE, and the meta keeps the full date on hover", async ({
+    page,
+  }) => {
+    // The seam this case exists for: `formatRailAge` counts days up to 99 and
+    // names the day after that. A unit test pins the arithmetic; only a real
+    // backdated repo proves the rail asks it about the same stamp the listing
+    // sorted on — and that the date survives the trip through the payload.
+    const stamp = await updateStampOf(ANCIENT);
+    expect(Math.round((Date.now() - stamp) / DAY)).toBe(ANCIENT_DAYS);
+    const day = localDay(stamp);
+
+    await openRail(page);
+    const meta = page.locator(`.wiki-list-item[data-relpath="${ANCIENT}"] .wiki-list-meta`);
+    await expect(meta).toHaveText(day);
+    // The hover date is on the META element, not the row: a child's own `title=`
+    // wins over its ancestors' wherever the pointer lands, so a title left on the
+    // row would be unreachable over the cell it describes.
+    await expect(meta).toHaveAttribute("title", day);
+  });
+
+  test("a row inside the window shows `Nd` and carries the full date as its title", async ({
+    page,
+  }) => {
+    // 60 days old and never touched since — inside the 99-day window, so the cell
+    // counts days while the tooltip still says which day.
+    const stamp = await updateStampOf(LINKERS[0]!);
+    expect(Math.round((Date.now() - stamp) / DAY)).toBe(60);
+
+    await openRail(page);
+    const meta = page.locator(`.wiki-list-item[data-relpath="${LINKERS[0]}"] .wiki-list-meta`);
+    await expect(meta).toHaveText("60d");
+    await expect(meta).toHaveAttribute("title", localDay(stamp));
+  });
+
+  test("a Pinned row shows the compact age too, not a bare date", async ({ page }) => {
+    // Pinned is a different claim path through `buildRail` than Activity and the
+    // listing, and it used to render `pageDateLabel` directly — so the compact age
+    // has to be proved on a row the rail LIFTED, not only on a listing row.
+    const stamp = await updateStampOf(LINKERS[1]!);
+    await openRail(page);
+    // ★ is hover-only on an unpinned row, and the section it creates appears on the
+    // NEXT render — both the `wiki-rail-recents` spec's rules, not this feature's.
+    const row = page.locator(`.wiki-list-item[data-relpath="${LINKERS[1]}"]`);
+    await row.hover();
+    await row.locator(".wiki-pin").click();
+    await expect(row.locator(".wiki-pin")).toHaveAttribute("aria-pressed", "true");
+    await page.fill("#wikiSearch", "zzz-no-such-page");
+    await page.fill("#wikiSearch", "");
+
+    const pinned = page.locator(`.wiki-list-item[data-section="pinned"]`);
+    await expect(pinned).toHaveCount(1);
+    await expect(pinned).toHaveAttribute("data-relpath", LINKERS[1]!);
+    await expect(pinned.locator(".wiki-list-meta")).toHaveText("60d");
+    await expect(pinned.locator(".wiki-list-meta")).toHaveAttribute("title", localDay(stamp));
+  });
+
   test("a wiki's `.wiki-reader.json` row count reaches the rail", async ({ page }) => {
     // Four pages, all equally new; the only thing that can decide how many rows
     // the section renders is the wiki's own `activity.rows`.
@@ -400,5 +510,18 @@ test.describe("Wiki rail: Activity", () => {
     await openRail(page, OTHER_WIKI);
     await expect(rowsIn(page, "activity")).toHaveCount(2);
     await expect(page.locator(".wiki-list-item")).toHaveCount(4);
+  });
+
+  test(`a wiki may ask for ${MANY_ROWS} rows, past the first ceiling of 12`, async ({ page }) => {
+    // 22 equally-new pages and a wiki asking for 20: the count rendered can only
+    // come from the wiki's own `rows`, and a clamp still set to 12 fails here.
+    const res = await fetch(`${BASE}/api/wiki/pages?wiki=${MANY_WIKI}`);
+    const data = (await res.json()) as { pages: unknown[]; activity?: Record<string, number> };
+    expect(data.pages).toHaveLength(MANY_PAGES);
+    expect(data.activity?.rows).toBe(MANY_ROWS);
+
+    await openRail(page, MANY_WIKI);
+    await expect(rowsIn(page, "activity")).toHaveCount(MANY_ROWS);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(MANY_PAGES);
   });
 });
