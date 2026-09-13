@@ -99,9 +99,9 @@ export const DEFAULT_ACTIVITY_WEIGHTS: ActivityWeights = {
 /** Bounds on `rows`: below 1 the section cannot render, past 20 it is the listing
  *  with extra furniture, and a number outside them is CLAMPED rather than dropped
  *  ("as many as you can" is unambiguous). The configured `rows` is the only cut —
- *  measured 2026-09-13 at rows 20, mimir (528 pages), melosys-kode-wiki (395) and
- *  jarvis (1261) clear `ACTIVITY_MIN_SCORE` on 113 / 43 / 194 rows each, so the
- *  floor never binds; today those wikis ask for 10, 6 and 6. */
+ *  measured 2026-09-13 over the full listings, mimir (528 pages), melosys-kode-wiki
+ *  (396) and jarvis (1261) clear `ACTIVITY_MIN_SCORE` on about 120 / 46 / 202 rows,
+ *  so the floor never binds at 20; today those wikis ask for 10, 6 and 6. */
 export const ACTIVITY_ROWS_MIN = 1;
 export const ACTIVITY_ROWS_MAX = 20;
 /** Upper bound on a half-life. A year of half-life is a constant, not a decay,
@@ -450,9 +450,9 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
   // `!knownAge` means here. Both phrases get their signal's LABEL, so a sentence
   // explaining a row names the same day the row's cell shows — for the creation
   // phrase that is the reachable case (a change to an old page), while the change
-  // phrase's own calendar branch is unpinned by construction: no change past 99
-  // days can clear `ACTIVITY_MIN_SCORE` (~17.4 d is the latest one survives), so
-  // the argument is symmetry, and the rule is the same without it.
+  // phrase's calendar branch is UNPINNED: at default weights a change survives the
+  // floor for ~13 days, so it is reachable only under a configured
+  // `halfLifeChangedDays` (365 keeps a 550-day-old change); no test covers it.
   const createdPhrase = agePhrase(createdMs, now, created?.label);
   const why =
     kind === "new"
