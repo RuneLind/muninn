@@ -100,13 +100,7 @@ import {
   rankActivity,
   type ActivityWeights,
 } from "./wiki-activity-rank.ts";
-import {
-  clearRecents,
-  readPins,
-  readRecents,
-  recordRecent,
-  togglePinned,
-} from "./wiki-recents-store.ts";
+import { purgeRecentsKeys, readPins, togglePinned } from "./wiki-recents-store.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
@@ -255,10 +249,6 @@ let defaultType = "";
  *  an older server must render the section, not lose it. */
 let activityWeights: ActivityWeights = DEFAULT_ACTIVITY_WEIGHTS;
 
-/** Whether the reader has expanded the `Recently opened` fold in THIS page
- *  session. Held here, not in localStorage: a reload starts closed (v1), but a
- *  re-render must not close what the reader just opened — see `renderList`. */
-let recentFoldOpen = false;
 /**
  * The wiki's project → page-count map from `/api/wiki/pages`. `{}` for a wiki
  * declaring no project rule (and until the first payload lands), which is what
@@ -456,9 +446,7 @@ function refreshCrumbHref(): void {
 }
 /**
  * Return to the overview from wherever the reader is — the breadcrumb's wiki
- * crumb and the rail's coverage footer. Bumps `navToken` so a page load still
- * in flight does not record itself as a recent (the popstate branch spells out
- * why; the load's own paint is not cancelled, same as there), and pushes the
+ * crumb and the rail's coverage footer. Pushes the
  * overview URL so the address bar stops showing the article just left. The
  * guard is on what the URL DENOTES (`sameStartUrl`), not on the view state and
  * not on the string: an Ask answer shows with the overview URL already in place
@@ -471,7 +459,6 @@ function refreshCrumbHref(): void {
  * is the one already there.
  */
 function goToStart(): void {
-  navToken++;
   const target = currentStartUrl();
   if (
     !sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI)) &&
@@ -779,14 +766,16 @@ function syncFilters(autoOpen = true): void {
   if (autoOpen && details && count && !details.open) details.open = true;
 }
 
-/** The reader's own recall lists for THIS wiki, read once at boot and kept in
- *  step by the two writers below — re-reading localStorage inside `renderList`
- *  would put a synchronous storage hit on every keystroke in the search box. */
-let recents: string[] = readRecents(WIKI);
+// The one-time cleanup that ships with the removal of `Recently opened`: the
+// `muninn.wiki.recents.v1:*` keys a reader already carries are dropped here,
+// before the first render, and nothing writes one again. Boot-time and
+// idempotent — see `purgeRecentsKeys` for why the prefix is the whole contract.
+purgeRecentsKeys();
+
+/** The reader's own pin list for THIS wiki, read once at boot and kept in step by
+ *  the writer below — re-reading localStorage inside `renderList` would put a
+ *  synchronous storage hit on every keystroke in the search box. */
 let pins: string[] = readPins(WIKI);
-/** Bumped by every navigation, so a response that lands after a newer one has
- *  started cannot write itself to the head of Recently opened. */
-let navToken = 0;
 
 /**
  * ★ — hidden until the row is hovered, always shown once pinned.
@@ -853,47 +842,22 @@ function renderList(): void {
     filtered,
     facetOnly,
     filters,
-    recents,
     pins,
     metaTail: mode === "updated" || mode === "created",
     // Ranked over the FILTERED pages and on the same anchored instant as the
-    // sort, so a facet narrows Activity exactly as it narrows Pinned/Recent and
-    // a row's date cannot disagree with the score that placed it. Skipped
-    // entirely under a query, where `buildRail` renders no sections and would
-    // throw the ranking away — that is a scan of every page on every keystroke.
+    // sort, so a facet narrows Activity exactly as it narrows Pinned and a row's
+    // date cannot disagree with the score that placed it. Skipped entirely under
+    // a query, where `buildRail` renders no sections and would throw the ranking
+    // away — that is a scan of every page on every keystroke.
     activity: railSectionsVisible(filters) ? rankActivity(filtered, activityWeights, now) : [],
-    // The SAME identity the row loop's `isActivePage` reads, so "which row is
-    // active" and "which row Recently opened may not lift" cannot disagree.
-    active: { name: currentName, relPath: currentRelPath },
   });
   let html = "";
-  // `Recently opened` renders inside a `<details>`, so a header carrying `fold`
-  // OPENS one and the next header (or the end of the list) closes it. Tracked
-  // rather than nested because `rail.entries` is a flat list by contract.
-  let foldOpen = false;
-  const closeFold = (): void => {
-    if (foldOpen) {
-      html += `</details>`;
-      foldOpen = false;
-    }
-  };
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
-      closeFold();
-      const head =
+      html +=
         `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
         `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
-        (entry.clear ? `<button type="button" class="wiki-sec-clear" data-clear-recents="1">clear</button>` : "") +
         `</div>`;
-      if (entry.fold) {
-        // Closed by default and deliberately NOT persisted in v1: the section is
-        // one click away, and a remembered-open fold would put the reader back
-        // where the Activity section was written to move them on.
-        html += `<details class="wiki-rail-fold"><summary>${head}</summary>`;
-        foldOpen = true;
-      } else {
-        html += head;
-      }
       return;
     }
     const p = entry.page;
@@ -963,7 +927,6 @@ function renderList(): void {
       `</div>` +
       `</div>`;
   });
-  closeFold();
   // Scroll restore lives HERE, not at the refresh call site (the `renderBacklog`
   // precedent): every deferred-apply path ends in its caller's own renderList, so
   // a capture/restore wrapped around the adopt was undone a frame later. Owning it
@@ -971,19 +934,7 @@ function renderList(): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
-  // The fold's open state is captured and re-applied around the swap, for the
-  // same reason the scroll offset is: `renderList` replaces the rows on every
-  // keystroke, pin and navigation, and a `<details>` rebuilt from markup comes
-  // back closed. Without this, expanding `Recently opened` and then clicking one
-  // of its rows slams it shut under the reader. Read from the LIVE element, so a
-  // toggle the browser performed on its own is what gets carried; it survives a
-  // render that has no such section (a query hides it) and is not stored, so a
-  // reload starts closed.
-  const liveFold = listEl.querySelector(".wiki-rail-fold") as HTMLDetailsElement | null;
-  if (liveFold) recentFoldOpen = liveFold.open;
   listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
-  const nextFold = listEl.querySelector(".wiki-rail-fold") as HTMLDetailsElement | null;
-  if (nextFold) nextFold.open = recentFoldOpen;
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
   // is shorter the browser clamps to the new maximum and re-assigning the saved
@@ -1634,11 +1585,6 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   // The listing IS the identity here (no page response to wait for), so the
   // active-row test gets its relPath immediately.
   currentRelPath = m.relPath;
-  // Same rule as `fetchAndRenderPage`: an explainer opened is an explainer
-  // recently opened. Its own `renderList()` at the end of this function repaints.
-  // No token check needed — nothing is awaited between here and the render.
-  navToken++;
-  recents = recordRecent(WIKI, m.relPath);
   navInFlight = false; // `currentName` now carries the "article" signal on its own
   if (push) {
     history.pushState({ relPath: m.relPath }, "", pageUrlByRelPath(m.relPath));
@@ -1757,7 +1703,6 @@ function loadPageByRelPath(relPath: string, push = true): void {
  *  the round-trip survives Back/reload/share even where stems collide; a response
  *  carrying no relPath at all falls back to the name-based `?page=<name>` URL. */
 function fetchAndRenderPage(url: string, push: boolean): void {
-  const token = ++navToken;
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -1820,13 +1765,6 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
       loadSimilar(data.meta);
-      // Recorded HERE, past everything that can throw: an article whose render
-      // blows up lands in the `.catch` below showing "Failed to load page", and
-      // pushing it to the front of a PERSISTENT list would outlive the failure.
-      // The token check is the same reason `loadExplainer` compares
-      // `currentRelPath`: on a fast A→B flip whose responses land out of order,
-      // A must not win the top of Recently opened for good.
-      if (currentRelPath && token === navToken) recents = recordRecent(WIKI, currentRelPath);
       renderList();
     })
     .catch((err: Error) => {
@@ -1887,12 +1825,12 @@ document.body.addEventListener("click", (e) => {
     switchConnTab(connTab.getAttribute("data-conntab") || "conn", true);
     return;
   }
-  // The rail's ★ and `clear` live inside a `[data-relpath]` row; they are the
-  // list's own listener's business, and opening the page as well is not what a
-  // click on either means. Skipped HERE rather than by stopping propagation in
-  // that listener, so one widget's handler cannot silence document-level
-  // listeners that have nothing to do with it.
-  if (target.closest && target.closest("[data-pin], [data-clear-recents]")) return;
+  // The rail's ★ lives inside a `[data-relpath]` row; it is the list's own
+  // listener's business, and opening the page as well is not what a click on it
+  // means. Skipped HERE rather than by stopping propagation in that listener, so
+  // one widget's handler cannot silence document-level listeners that have
+  // nothing to do with it.
+  if (target.closest && target.closest("[data-pin]")) return;
   // The article header's project hub chip. Delegated here rather than bound at
   // render time because `#articleWrap`'s innerHTML is replaced on every page
   // load — and checked BEFORE the nav-link branch, since the chip sits inside the
@@ -1916,16 +1854,14 @@ document.body.addEventListener("click", (e) => {
 });
 
 /**
- * The rail's two own controls: the ★ pin on every row, and `clear` on the
- * Recently-opened header.
+ * The rail's own control: the ★ pin on every row.
  *
- * On `#wikiList`, not on the body delegate above — both controls sit INSIDE a
- * `.wiki-list-item` (or a header inside the list), and that delegate opens
- * whatever `[data-relpath]` a click landed in. A listener on the list runs
- * first because it is deeper in the tree.
+ * On `#wikiList`, not on the body delegate above — the control sits INSIDE a
+ * `.wiki-list-item`, and that delegate opens whatever `[data-relpath]` a click
+ * landed in. A listener on the list runs first because it is deeper in the tree.
  *
  * ⚠️ It deliberately does NOT call `stopPropagation`; the body delegate skips
- * these two controls by selector instead, so a handler on ONE widget cannot
+ * this control by selector instead, so a handler on ONE widget cannot
  * silence unrelated document-level listeners.
  *
  * **Correcting the claim this comment first carried**, which a verify pass
@@ -1941,16 +1877,6 @@ document.body.addEventListener("click", (e) => {
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
-  if (target.closest("[data-clear-recents]")) {
-    // No `preventDefault` — measured in this repo's Chromium, a click on a
-    // <button> inside the fold's <summary> does not toggle the <details> at
-    // all: the button is its own activation target. (A non-activatable
-    // descendant, the header's label span, is what toggles.) The call was here
-    // as a guard against a mechanism that does not exist.
-    recents = clearRecents(WIKI);
-    renderList();
-    return;
-  }
   const pin = target.closest("[data-pin]");
   if (!pin) return;
   e.preventDefault();
@@ -2104,16 +2030,6 @@ window.addEventListener("popstate", () => {
   const page = params.get("page");
   if (page) loadPage(page, false);
   else {
-    // Back/forward to the start view ABANDONS any navigation still in flight:
-    // its response must not write itself to the head of the PERSISTENT recents
-    // list. The bump belongs HERE and not inside `renderStart`, which the Hubs /
-    // Timeline / Atlas tabs also call while the reader is still ON the start
-    // view with a click of theirs in flight — and which the coverage-footer link
-    // calls from the ARTICLE view too, since `#wikiCoverageFoot` is a sibling of
-    // `#wikiList` in the rail rather than part of the start view. Putting the
-    // bump there dropped the recent for a page the reader then sat and read
-    // (measured: articleRendered=1, recents=[]).
-    navToken++;
     syncStartTabFromUrl();
     renderStart();
   }

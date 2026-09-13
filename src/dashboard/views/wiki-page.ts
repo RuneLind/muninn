@@ -316,8 +316,8 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item .wiki-status { margin-top: 1px; }
     .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
 
-    /* Recall sections (Pinned · Recently opened · Other pages · Bookkeeping)
-       and the Jira-key jump header. One rule for all five — they are the same
+    /* Recall sections (Activity · Pinned · Other pages · Bookkeeping) and the
+       Jira-key jump header. One rule for all five — they are the same
        furniture, and the jump differs only by its tinted background. */
     .wiki-list-sec {
       display: flex; align-items: center; gap: 6px;
@@ -329,14 +329,6 @@ export async function renderWikiPage(opts?: {
       color: var(--text-dim); background: var(--bg-surface);
       border-radius: 6px; margin: 2px 0 3px; padding: 6px 10px;
     }
-    /* The same two tokens as .wiki-ask-hist-clear, the rail's other "clear":
-       one word, one tab away, so they must not read as different controls. */
-    .wiki-sec-clear {
-      margin-left: auto; background: none; border: 0; padding: 0; cursor: pointer;
-      font: inherit; letter-spacing: inherit; text-transform: inherit;
-      color: var(--text-dim);
-    }
-    .wiki-sec-clear:hover { color: var(--status-error); }
     /* Activity's per-row glyph: "+" created, "~" changed. A fixed-width
        monospace slot so the titles below it still line up, and theme tokens
        rather than a raw hex.
@@ -354,19 +346,6 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-act-glyph.new { color: var(--tok-str); }
     .wiki-act-glyph.changed { color: var(--accent-light); }
-    /* "Recently opened" folds. The default marker is replaced by a ▸ on the
-       section header itself, so the row reads as one piece of furniture rather
-       than a header with a disclosure triangle bolted to its left. The "clear"
-       button still sits inside the summary and still works, and needs no
-       guard to: a <button> is its own activation target, so a click on it
-       never reaches the <details> as a toggle — only a non-activatable
-       descendant, like the label span beside it, opens the fold. */
-    .wiki-rail-fold > summary { list-style: none; cursor: pointer; }
-    .wiki-rail-fold > summary::-webkit-details-marker { display: none; }
-    .wiki-rail-fold > summary .wiki-list-sec::before {
-      content: "▸"; font-size: 9px; display: inline-block; transition: transform .15s;
-    }
-    .wiki-rail-fold[open] > summary .wiki-list-sec::before { transform: rotate(90deg); }
     /* ★ and the date share one flex slot, so the ★ costs the row its own width
        and NOT the row's 8px gap as well: as a sibling of the title the pair
        measured 21px off .wiki-list-title on every row — 42px of title left at

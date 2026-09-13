@@ -1,7 +1,8 @@
 /// <reference lib="dom" />
 /**
- * The localStorage half of the /wiki rail's recents and pins. Every rule lives in
- * `wiki-recents.ts`; this file only reads, writes and swallows.
+ * The localStorage half of the /wiki rail's pins. The pin rules live in
+ * `wiki-recents.ts`; this file reads, writes and swallows — and owns the one
+ * rule of its own, the recents purge below.
  *
  * Storage is best-effort, the same settlement `wiki-rail-resize.ts` and the
  * Ask-session persistence make: in a private window or a browser with site data
@@ -10,20 +11,26 @@
  * returns the list it decided on even when the write failed — the caller renders
  * from the return value, not from a re-read.
  *
- * Both keys are per WIKI — the caller passes the canonical name (`""` for the
+ * The key is per WIKI — the caller passes the canonical name (`""` for the
  * default one; `wiki-browser.ts` resolves it once at boot through
  * `readActiveWikiName`), so a browser that reads two wikis keeps two lists.
  */
 import {
   PINS_MAX,
-  RECENTS_MAX,
+  RECENTS_KEY_PREFIX,
   parseRelPathList,
   pinsKey,
-  pushRecent,
-  recentsKey,
   serializeRelPathList,
   togglePin,
 } from "./wiki-recents.ts";
+
+/** The slice of `Storage` the purge below needs, so a unit test can hand it a
+ *  fake instead of a browser. */
+export interface RecentsPurgeStorage {
+  readonly length: number;
+  key(index: number): string | null;
+  removeItem(key: string): void;
+}
 
 function read(key: string, max: number): string[] {
   try {
@@ -42,19 +49,8 @@ function write(key: string, list: string[]): void {
   }
 }
 
-export function readRecents(wiki: string): string[] {
-  return read(recentsKey(wiki), RECENTS_MAX);
-}
-
 export function readPins(wiki: string): string[] {
   return read(pinsKey(wiki), PINS_MAX);
-}
-
-/** Record a page as opened and return the new list. */
-export function recordRecent(wiki: string, relPath: string): string[] {
-  const next = pushRecent(readRecents(wiki), relPath);
-  write(recentsKey(wiki), next);
-  return next;
 }
 
 /** Flip one page's pin and return the new list. */
@@ -64,8 +60,33 @@ export function togglePinned(wiki: string, relPath: string): string[] {
   return next;
 }
 
-/** The "clear" affordance on the Recently opened header. */
-export function clearRecents(wiki: string): string[] {
-  write(recentsKey(wiki), []);
-  return [];
+/**
+ * Drop every `muninn.wiki.recents.v1:*` key left behind by the removed
+ * `Recently opened` section. Runs on every rail boot, for good: it is a walk
+ * over the origin's keys and idempotent, so no "have I run this?" flag is
+ * needed — which is the point, since such a flag would itself be a key nothing
+ * ever removes.
+ *
+ * **The prefix is the whole contract.** `muninn.wiki.pins.v1:*` is the feature
+ * that replaces the section and `muninn.wiki.last.v1` is what makes a bare
+ * `/wiki` open the wiki last read, so a looser match — `muninn.wiki.` — would
+ * silently destroy both.
+ *
+ * Iterating BACKWARDS matters: `removeItem` re-indexes the store, so a forward
+ * walk skips the key that slides into the index just removed.
+ *
+ * Wrapped like every other accessor here: in a private window, or a browser with
+ * site data blocked, `localStorage` itself throws, and a boot must not take the
+ * rail down over a cleanup.
+ */
+export function purgeRecentsKeys(store?: RecentsPurgeStorage): void {
+  try {
+    const s = store ?? localStorage;
+    for (let i = s.length - 1; i >= 0; i--) {
+      const key = s.key(i);
+      if (key && key.startsWith(RECENTS_KEY_PREFIX)) s.removeItem(key);
+    }
+  } catch {
+    /* best-effort */
+  }
 }

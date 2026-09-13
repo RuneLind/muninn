@@ -230,16 +230,6 @@ const rowsIn = (page: Page, section: string) =>
 const relPathsIn = (page: Page, section: string): Promise<string[]> =>
   rowsIn(page, section).evaluateAll((els) => els.map((el) => el.getAttribute("data-relpath") || ""));
 
-/** Open each page in turn, waiting for its article. The LAST one is the page
- *  being read, and so the one `Recently opened` will not hold. */
-async function readPages(page: Page, rels: string[]): Promise<void> {
-  for (const rel of rels) {
-    await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).click();
-    await expect(page.locator(".wiki-bc-cur")).toBeVisible();
-    await expect(page.locator(".wiki-list-item.active")).toHaveAttribute("data-relpath", rel);
-  }
-}
-
 /** `YYYY-MM-DD` in the runner's own timezone, the way `localDay` builds it. Derived
  *  from the stamp the payload reports rather than from a literal, or the case would
  *  pass only in one timezone and only on one day. */
@@ -354,87 +344,7 @@ test.describe("Wiki rail: Activity", () => {
     expect(await token("--tok-str")).not.toBe(await token("--status-success"));
   });
 
-  test("Recently opened is folded under Activity, closed, and opens on click", async ({ page }) => {
-    await openRail(page);
-    // TWO pages the ranking does NOT lift, so opening them really produces a
-    // `Recently opened` section rather than more Activity rows — and two,
-    // because the page being READ is deliberately kept out of that section, so
-    // one visit leaves nothing in it to fold.
-    await readPages(page, [HUB, LINKERS[0]!]);
-
-    const fold = page.locator(".wiki-rail-fold");
-    await expect(fold).toHaveCount(1);
-    await expect(fold).not.toHaveAttribute("open", /.*/);
-    // The folded header is `Recently opened`, and it is the only fold.
-    await expect(fold.locator("summary .wiki-sec-label")).toHaveText("Recently opened");
-    expect(await relPathsIn(page, "recent")).toEqual([HUB]);
-    // The page on screen is NOT in there — it is in the listing, highlighted.
-
-    await fold.locator("summary .wiki-sec-label").click();
-    await expect(fold).toHaveAttribute("open", /.*/);
-
-    // …and it STAYS open across a re-render. `renderList` replaces the rows on
-    // every keystroke and every navigation, so without the capture/re-apply the
-    // reader's expansion is undone by their very next action.
-    await page.fill("#wikiSearch", "hub");
-    await page.fill("#wikiSearch", "");
-    await expect(page.locator(".wiki-rail-fold")).toHaveAttribute("open", /.*/);
-  });
-
-  test("clear still clears from inside the summary, and does not toggle the fold", async ({
-    page,
-  }) => {
-    await openRail(page);
-    await readPages(page, [HUB, LINKERS[0]!]);
-    await expect(page.locator(".wiki-rail-fold")).toHaveCount(1);
-
-    // The `<details>` is captured BEFORE the click and read AFTER it: the list
-    // re-renders synchronously, so the element is detached by then — and a
-    // detached node still reports whether the click toggled it. That is the
-    // only way to tell "the fold stayed shut" from "it toggled and the
-    // re-render hid the evidence". It pins the OUTCOME; the mechanism is the
-    // browser's own activation-target rule, not a call in our handler.
-    const outcome = await page.evaluate(() => {
-      const el = document.querySelector(".wiki-rail-fold") as HTMLDetailsElement;
-      const before = el.open;
-      (el.querySelector("[data-clear-recents]") as HTMLElement).click();
-      return { before, after: el.open, stillMounted: document.body.contains(el) };
-    });
-    expect(outcome.before).toBe(false);
-    expect(outcome.after).toBe(false);
-    expect(outcome.stillMounted).toBe(false);
-
-    // The clear itself landed: the section is gone and so is the store entry.
-    await expect(page.locator(".wiki-rail-fold")).toHaveCount(0);
-    expect(await relPathsIn(page, "recent")).toEqual([]);
-    // …and Activity is untouched by it.
-    expect(await relPathsIn(page, "activity")).toHaveLength(DEFAULT_ROWS);
-  });
-
-  test("the page being read is never folded away — its .active row stays visible", async ({
-    page,
-  }) => {
-    // Two pages, neither of them in Activity: the linker is 60 days old and
-    // untouched, so it really is under the score floor — the hub is not (it was
-    // touched today and scores 0.185), it is simply ranked 7th and cut by
-    // `rows`. Either way both are ordinary recents rather than Activity rows.
-    await openRail(page);
-    await page.locator(`.wiki-list-item[data-relpath="${LINKERS[0]}"]`).click();
-    await expect(page.locator(".wiki-article")).toContainText("See");
-    await page.locator(`.wiki-list-item[data-relpath="${HUB}"]`).click();
-    await expect(page.locator(".wiki-article")).toContainText("Everything points here");
-
-    // The one the reader is ON is in the listing, highlighted and on screen…
-    const active = page.locator(".wiki-list-item.active");
-    await expect(active).toHaveCount(1);
-    await expect(active).toHaveAttribute("data-relpath", HUB);
-    await expect(active).toBeVisible();
-    expect(await active.evaluate((el) => !!el.closest("details.wiki-rail-fold"))).toBe(false);
-    // …and the one they read BEFORE is the recall aid, inside the fold.
-    expect(await relPathsIn(page, "recent")).toEqual([LINKERS[0]]);
-  });
-
-  test("a query hides Activity, exactly as it hides the other sections", async ({ page }) => {
+  test("a query hides Activity, exactly as it hides Pinned", async ({ page }) => {
     await openRail(page);
     await page.fill("#wikiSearch", "fresh");
     await expect(rowsIn(page, "activity")).toHaveCount(0);
@@ -484,7 +394,7 @@ test.describe("Wiki rail: Activity", () => {
     const stamp = await updateStampOf(LINKERS[1]!);
     await openRail(page);
     // ★ is hover-only on an unpinned row, and the section it creates appears on the
-    // NEXT render — both the `wiki-rail-recents` spec's rules, not this feature's.
+    // NEXT render — both the `wiki-rail-pins` spec's rules, not this feature's.
     const row = page.locator(`.wiki-list-item[data-relpath="${LINKERS[1]}"]`);
     await row.hover();
     await row.locator(".wiki-pin").click();
