@@ -5,10 +5,10 @@
  * Activity is `wiki-activity-rank.ts` (the caller hands the result in); the paint
  * is `renderList` in `wiki-browser.ts`.
  *
- * Why: the rail is a flat listing of every page, and most re-finds are of a page
- * the reader opened this week — on the melosys wiki they are also addressed by
- * Jira key, which the substring search matches in title order rather than in
- * "the issue first, then what talks about it" order.
+ * Why: the rail is a flat listing of every page. Activity lifts what changed,
+ * a star keeps what the reader chose, and on the melosys wiki pages are also
+ * addressed by Jira key, which the substring search matches in title order
+ * rather than in "the issue first, then what talks about it" order.
  *
  * **`Recently opened` is gone** (PR 2 of the rail-tuning slate). Activity answers
  * "what happened here" from the wiki's own dates, and a star answers "keep this"
@@ -339,7 +339,7 @@ export interface RailInput {
    * wiki's row count (`rankActivity`). Ranked by the caller rather than here so
    * this module stays free of the scoring rule and of the clock it needs — and
    * because ranking the filtered set is what makes a facet NARROW the section
-   * exactly as it narrows Pinned and Recent.
+   * exactly as it narrows Pinned.
    */
   activity?: ActivityRow[];
   /** Recency sort modes only: `sortPages` has sunk the bookkeeping pages

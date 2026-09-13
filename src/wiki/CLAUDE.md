@@ -221,7 +221,7 @@ nothing ever removes; backwards over `localStorage.key(i)`, since `removeItem`
 re-indexes the store and a forward walk skips the key that slides into the index
 just removed; and matching `RECENTS_KEY_PREFIX` and nothing looser, because
 `muninn.wiki.` would take the pins key and `muninn.wiki.last.v1` with it.
-`RECENTS_KEY_PREFIX` survives in `wiki-recents.ts` for exactly that one reader.
+`RECENTS_KEY_PREFIX` survives in `wiki-recents.ts` for the purge (its one production reader) and the e2e fixture that seeds a dead key. The modules keep the `wiki-recents` name: a rename touches every import for no behaviour change. The purge is pinned by `e2e/wiki-rail-pins.spec.ts`, not by the activity spec.
 The rail's third key is
 `muninn.wiki.railWidth.v1` (PR #501), which is NOT per wiki — a width is a
 property of the reader's screen, not of the wiki. Same rule for the fourth,

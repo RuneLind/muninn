@@ -638,11 +638,8 @@ test.describe("Wiki rail: pins, key jump", () => {
 
     await reloadKeepingStore(page);
 
-    // The section is gone from the rail: no fold, no clear affordance, no header.
-    await expect(page.locator(".wiki-rail-fold")).toHaveCount(0);
-    await expect(page.locator("[data-clear-recents]")).toHaveCount(0);
+    // The section is gone from the rail; the header list is the live assertion.
     expect(await sectionLabels(page)).toEqual(["Pinned", "Other pages"]);
-    expect(await relPathsIn(page, "recent")).toEqual([]);
     // The page the dead key named is an ordinary listing row again.
     expect(await relPathsIn(page, "all")).toContain(ARSAVREGNING);
 

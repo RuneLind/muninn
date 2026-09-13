@@ -1,7 +1,8 @@
 /// <reference lib="dom" />
 /**
- * The localStorage half of the /wiki rail's pins. Every rule lives in
- * `wiki-recents.ts`; this file only reads, writes and swallows.
+ * The localStorage half of the /wiki rail's pins. The pin rules live in
+ * `wiki-recents.ts`; this file reads, writes and swallows — and owns the one
+ * rule of its own, the recents purge below.
  *
  * Storage is best-effort, the same settlement `wiki-rail-resize.ts` and the
  * Ask-session persistence make: in a private window or a browser with site data
@@ -60,11 +61,11 @@ export function togglePinned(wiki: string, relPath: string): string[] {
 }
 
 /**
- * Drop every `muninn.wiki.recents.v1:*` key — the ONE-TIME cleanup that ships
- * with the removal of `Recently opened`. Called once per rail boot: it is cheap
- * (a `length` walk over a handful of keys) and idempotent, so no "have I run
- * this?" flag is needed — which is the point, since such a flag would itself be
- * a key nothing ever removes.
+ * Drop every `muninn.wiki.recents.v1:*` key left behind by the removed
+ * `Recently opened` section. Runs on every rail boot, for good: it is a walk
+ * over the origin's keys and idempotent, so no "have I run this?" flag is
+ * needed — which is the point, since such a flag would itself be a key nothing
+ * ever removes.
  *
  * **The prefix is the whole contract.** `muninn.wiki.pins.v1:*` is the feature
  * that replaces the section and `muninn.wiki.last.v1` is what makes a bare

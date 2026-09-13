@@ -670,7 +670,6 @@ describe("buildRail", () => {
         pins: ["b.md"],
       });
       expect(headers(rail.entries)).not.toContain("Pinned");
-      expect(headers(rail.entries)).not.toContain("Recently opened");
     });
 
     test("a key that resolves to nothing renders no header at all", () => {
