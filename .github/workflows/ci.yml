@@ -37,6 +37,72 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
 
+  # The lockfile is a result, not a promise. Nothing else in this repo stops a
+  # later `bun install` from resolving a dependency back under a published fix,
+  # and almost nothing here is a DIRECT dependency — axios, tar, protobufjs and
+  # the rest arrive under `@slack/bolt`, `@modelcontextprotocol/sdk` and
+  # `@huggingface/transformers`, which own their own ranges. The image this
+  # repo's deployment was running in September 2026 carried 42 npm
+  # Critical/High findings across 14 packages, and 41 of them across 13
+  # packages were there for exactly that reason: `bun install
+  # --frozen-lockfile` in the Dockerfile faithfully rebuilt the versions the
+  # lockfile was written with. This step is red on all 41.
+  #
+  # The 42nd is the shape of finding this CANNOT see, and it is worth knowing
+  # before trusting a green: `adm-zip@0.5.17` sat at
+  # `@github/copilot-linux-x64/foundry-local-sdk/node_modules/adm-zip`, vendored
+  # inside a platform binary that npm ships as one artifact. No lockfile places
+  # it, so no lockfile audit can find it — it took an image scan. Same blind spot
+  # for OS packages and native libraries. A green here means "the dependency tree
+  # the lockfile describes is clean", not "the image is clean" — scanning the
+  # image belongs to whatever pipeline builds and deploys it.
+  #
+  # `bun audit` re-derives its answer from a live advisory database on every run,
+  # which is the property that matters and the one a hand-written floor list in
+  # the repo cannot have. Measured: a list of minimum versions built from Docker
+  # Scout's data put axios at 1.16.0 and would have waved through
+  # GHSA-gcfj-64vw-6mp9 (High, fixed in 1.18.0), which Scout does not report and
+  # this step does.
+  #
+  # ⚠️ Do not read a floor off this step's output. It prints the range of the
+  # ONE advisory it is describing, not the union across the package — on
+  # `origin/main` it says `axios >=1.0.0 <1.15.2`, and 1.15.2 is not safe; the
+  # real floor is 1.18.0. Reading the printed boundary as the fix is precisely
+  # the mistake the deleted floor list was made of. Take the fix from `bun
+  # update`, or from every advisory the package has, never from one line.
+  #
+  # `--audit-level=high` and not the default: the threshold is the one the deploy
+  # plan stops on — Critical and High — and a `moderate` gate would eventually go
+  # red on an advisory nobody intends to act on, which is how a check earns a
+  # habit of being re-run rather than read. `high` does NOT suppress Critical;
+  # the flag is "greater than or equal to". Measured 2026-09-14: this tree is
+  # clean at EVERY level, default included, so the choice costs nothing today and
+  # is about which future red is worth a conversation.
+  #
+  # This job CAN go red without anyone touching the tree, when a new advisory
+  # lands against a version already in the lockfile. That is the point rather
+  # than a flaw. (`docker-build` and `e2e` can too, for a duller reason — a
+  # floating `oven/bun:1-debian` and a chromium download. The distinction worth
+  # holding is that a red here is a fact about this repo's dependencies, not
+  # infrastructure noise.) It also fails CLOSED when the advisory endpoint is
+  # unreachable, which is the right way round.
+  #
+  # So a red on an unrelated PR is a real finding: fix it, or suppress that one
+  # advisory by name. ⚠️ `--ignore` takes **GHSA ids only**, whatever
+  # `bun audit --help` says about CVE ids — measured on bun 1.3.10, a CVE id is
+  # silently discarded and the job stays red with no warning:
+  # `--ignore=GHSA-gcfj-64vw-6mp9` exits 0, `--ignore=CVE-2026-67320` — the same
+  # advisory — exits 1. The GHSA id is in this step's own output.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun audit --audit-level=high
+
   test:
     runs-on: ubuntu-latest
     services:
