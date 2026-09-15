@@ -35,6 +35,7 @@ import { join, sep as pathSep } from "node:path";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
+import { readSummarySourceText, withSourceText } from "../../summaries/source-text.ts";
 import { frameDirFor, frameSourceByName, framesRootDir } from "../../summaries/frames.ts";
 import {
   EXPORT_FRAMES_DIR,
@@ -78,12 +79,14 @@ const DOC_FETCH_TIMEOUT_MS = 10_000;
 export function defaultSummariesExportDeps(knowledgeApiUrl: string): SummariesExportDeps {
   return {
     fetchDoc: async (collection, docId) => {
+      const source = readSummarySourceText(knowledgeApiUrl, collection, encodeDocIdPath(docId), DOC_FETCH_TIMEOUT_MS);
       try {
-        return (await fetchKnowledgeApi(
+        const doc = (await fetchKnowledgeApi(
           knowledgeApiUrl,
           `/api/document/${encodeURIComponent(collection)}/${encodeDocIdPath(docId)}`,
           { timeoutMs: DOC_FETCH_TIMEOUT_MS },
         )) as SummaryExportDoc;
+        return withSourceText(doc, await source);
       } catch (err) {
         if (err instanceof KnowledgeApiError && err.upstreamStatus === 404) return null;
         throw err;

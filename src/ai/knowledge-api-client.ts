@@ -111,6 +111,21 @@ export async function fetchKnowledgeApiText(
 }
 
 /**
+ * {@link fetchKnowledgeApiText}, but `null` unless the answer is a `text/*`
+ * body. A huginn older than #131 ignores `?raw=1` and answers the JSON form, so
+ * a caller that wants the source file cannot trust the status alone.
+ */
+export async function fetchKnowledgeApiSourceText(
+  baseUrl: string,
+  path: string,
+  options?: KnowledgeApiOptions,
+): Promise<string | null> {
+  return (await fetchKnowledgeApiRes(baseUrl, path, options, async (res) =>
+    (res.headers.get("content-type") ?? "").startsWith("text/") ? res.text() : null,
+  )) as string | null;
+}
+
+/**
  * Hono handler helper: fetches from the Knowledge API and returns a JSON response.
  * On success returns the API's JSON with status 200.
  * On upstream error returns `{ error: "API returned <status>" }` with status 502.
@@ -121,10 +136,12 @@ export async function knowledgeApiHandler(
   baseUrl: string,
   path: string,
   timeoutMs?: number,
+  /** Reshapes the parsed JSON before it is sent; must not throw. */
+  transform?: (data: unknown) => unknown | Promise<unknown>,
 ): Promise<Response> {
   try {
     const data = await fetchKnowledgeApi(baseUrl, path, { timeoutMs });
-    return c.json(data);
+    return c.json((transform ? await transform(data) : data) as object);
   } catch (err) {
     if (err instanceof KnowledgeApiError) {
       log.warn("Knowledge API error on {path}: {error}", { path, error: err.message });
