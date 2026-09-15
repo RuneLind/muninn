@@ -487,18 +487,23 @@ down". That last case is why `asked` rides the ledger client's own result
 (`SessionLedgerResult.asked`) rather than being derived from "a lookup
 returned something" at the caller — `fetchSessionsById` returns a result for an
 all-invalid page too, and reading THAT as "asked" put "claude-usage
-unreachable" on a page whose only problem was one mangled frontmatter line. `partial` is the fourth fact — some batch answered and some did
-not, so `totalCost` is over a SUBSET — because `reachable: true` alone presents a
+unreachable" on a page whose only problem was one mangled frontmatter line.
+
+`partial` is the fourth fact — some batch answered and some did not, so
+`totalCost` is over a SUBSET — because `reachable: true` alone presents a
 200-of-250 answer as complete. An UNCONFIGURED host never fetches at all
 (`ledger: {asked:false, reachable:false, partial:false, configured:false}`, no
-`baseUrl` — the frozen `LEDGER_NOT_ASKED`, handed out by reference to every such
-page open, so it must not be mutable). "Configured" has exactly ONE source,
-`ProvenanceContext.sessionLedger.urlConfigured`: it decides both whether the
-ledger is fetched and what the payload reports, and a second context field
-beside it was two spellings of one fact, free to disagree everywhere the route
-did not wire them together: the `/models` card's "left unset and unreachable, hide it" rule, one
+`baseUrl`): the `/models` card's "left unset and unreachable, hide it" rule, one
 layer down, so an instance nobody pointed at a claude-usage does not pay a
-connection refusal on every stamped page open.
+connection refusal on every stamped page open. That answer is the FROZEN
+`LEDGER_NOT_ASKED`, handed out by reference to every such page open, so it must
+not be mutable.
+
+**"Configured" has exactly ONE source: `sessionLedger.urlConfigured` on the
+`ProvenanceContext`.** It decides both whether the ledger is fetched and what
+the payload reports. A second context field beside it was two spellings of one
+fact, wired from one expression at the route and free to disagree anywhere
+else — including in a test, where the disagreement is invisible.
 
 **Cost is labelled honestly.** `totalCost` is the sum over the sessions the ledger
 PRICED and is never a per-page share — a session that wrote four pages cost what

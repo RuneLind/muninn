@@ -48,10 +48,10 @@ Rules, in order of importance:
   while a concurrent `writeWikiPage` waited 2 s on the file lock and answered
   `locked` — muninn 409ing against its own sync, where queueing had made it wait
   and then succeed (pinned by `wiki-file-lock.test.ts`, both directions).
-  `runWikiWriteExclusive` says
-  nothing about another process, and `git rebase` is the one operation here that
-  rewrites a working tree wholesale: a stamper that read a page before the rebase
-  and renamed its replacement over it afterwards REVERTS whatever the rebase
+  `runWikiWriteExclusive` says nothing about another process, and `git rebase`
+  is the one operation here that rewrites a working tree wholesale: a stamper
+  that read a page before the rebase and renamed its replacement over it
+  afterwards REVERTS whatever the rebase
   pulled in, and the next tick commits and pushes that revert as if a human had
   made it. Held over the local section only, so it holds no network I/O. A held
   lock is a hard `deferred` carrying **`sectionSkipped`**, which withholds the
@@ -62,11 +62,10 @@ Rules, in order of importance:
   since the lock is held across the loop's own `git status`), so it is neither
   staged nor reported as `denied`.
 - **The locks are taken in a PINNED ORDER: commit first, wiki-write second, the
-  lockfile inside that.** So a
-  hung push (which holds only the commit queue) can park the sync, never a page
-  write. Multiple wiki roots — a `plain` repo CONTAINING registered wikis, see
-  below — nest in SORTED order, because an arbitrary order between two repos
-  sharing two wikis is a deadlock.
+  lockfile inside that.** So a hung push (which holds only the commit queue) can
+  park the sync, never a page write. Multiple wiki roots — a `plain` repo
+  CONTAINING registered wikis, see below — nest in SORTED order, because an
+  arbitrary order between two repos sharing two wikis is a deadlock.
 - **Deadlock invariant:** commit-first/write-second is safe ONLY because every
   current writer keeps its commit tail OUTSIDE its write section (stated in
   `src/wiki/queue.ts` and `src/gardener/CLAUDE.md`). A future writer that commits
