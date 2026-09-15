@@ -43,6 +43,28 @@ test("the corpus's own image shapes are kept exactly as huginn keeps them", () =
   }
 });
 
+test("alt text survives only as ASCII caption words, narrower than huginn by design", () => {
+  expect(documentTextImage("![Slide at 00:01:33](/x.png)")).toBe("![Slide at 00:01:33](/x.png)");
+  expect(documentTextImage("![æøå bilde](/x.png)")).toBe("![](/x.png)");
+});
+
+test("the default budget reads a real server's source file", async () => {
+  // A short delay, so a zero or near-zero default aborts where a real budget
+  // does not: a loopback answer otherwise lands before a 0 ms timer fires.
+  const server = Bun.serve({
+    port: 0,
+    fetch: async () => {
+      await Bun.sleep(50);
+      return new Response("---\nx: 1\n---\n# Whole\n", { headers: { "content-type": "text/markdown" } });
+    },
+  });
+  try {
+    expect(await readSummarySourceText(`http://127.0.0.1:${server.port}`, "c", "d.md")).toBe("# Whole\n");
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("a source body that stalls after its headers is abandoned within the budget", async () => {
   const server = Bun.serve({
     port: 0,
