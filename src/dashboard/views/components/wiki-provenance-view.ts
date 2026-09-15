@@ -12,7 +12,7 @@
  * `bun test` cannot load (it touches `document` at import time), so anything
  * shaped there is provable only through Playwright. Everything here is a string
  * builder over a plain payload, which is how the copy family below —
- * seven ledger states that must not collapse into each other — gets enumerated
+ * eight ledger states that must not collapse into each other — gets enumerated
  * in a table test instead of being spot-checked in one e2e run.
  *
  * Imports the SERVER's `bareChipReason` rather than re-deriving the precedence

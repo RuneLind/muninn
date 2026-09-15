@@ -1,7 +1,7 @@
 /**
  * The provenance view's copy family, enumerated.
  *
- * The seven cost lines are a TABLE rather than seven spot checks because the
+ * The eight cost lines are a TABLE rather than eight spot checks because the
  * defect this module exists to prevent is two states collapsing into one
  * sentence — "claude-usage unreachable" on a host that was never pointed at one,
  * or on a page whose only problem is a damaged frontmatter line. A table makes

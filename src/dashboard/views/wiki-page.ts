@@ -831,9 +831,10 @@ export async function renderWikiPage(opts?: {
     /* ── Provenance ──────────────────────────────────────────────────────
        Placement C: the strip under the title is the SUMMARY (Jira row + one
        line of cost), the rail's Sessions section is the DETAIL. Both are
-       secondary to the article, so everything here sits at --text-dim or
-       quieter and takes its colour from the page's own tokens — no literal
-       hex, so both themes follow the same declarations. */
+       secondary to the article: text a reader must READ sits at --text-muted
+       (measured below), only the provider glyph dimmer, and every colour comes
+       from the page's own tokens — no literal hex, so both themes follow the
+       same declarations. */
     .wiki-prov-strip {
       display: flex; flex-direction: column; gap: 4px;
       margin-top: 8px; padding-top: 7px;
@@ -868,7 +869,7 @@ export async function renderWikiPage(opts?: {
     .wiki-prov-known { color: var(--status-success); font-size: 10px; }
     /* Contrast, measured: --text-faint is 2.50:1 dark / 2.62:1 light and
        --text-dim 3.24/3.74 at these sizes, both under the 4.5:1 floor and the
-       first under even 3:1. --text-muted measures 4.94/5.26, which is what the
+       first under even 3:1. --text-muted measures 5.26/4.94, which is what the
        session title beside them already uses — so every line a reader has to
        READ (the cost, the date, the host, a bare chip's reason, the id, the copy
        control) sits there. Only the provider glyph stays dimmer: it is a mark
