@@ -629,6 +629,14 @@ export function loadConfig() {
     // lives with the feature (`CLAUDE_USAGE_DEFAULT_URL`, applied at the route),
     // so this layer never has to carry a second field that can contradict it.
     claudeUsageUrl: nullableEnv("CLAUDE_USAGE_URL"),
+    // The one claude-usage URL a BROWSER is ever given: the base of a session
+    // drill-down link on a wiki page's provenance chips. Separate from the field
+    // above on purpose — that one is a server-side loopback/tailnet address this
+    // process fetches, and handing it to a viewer's browser is the mixed-content
+    // and wrong-host failure the server-side proxy exists to avoid. Null ⇒ the
+    // chips carry the session id as copyable text and no link, which is the
+    // default and is fine: the id is what a search takes.
+    claudeUsagePublicUrl: nullableEnv("CLAUDE_USAGE_PUBLIC_URL"),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

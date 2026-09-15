@@ -197,7 +197,8 @@ describe("verifyJiraKeys — the three states", () => {
 
 // ── The key index: url quality and one shared key shape ──────────────────────
 
-import { loadJiraKeyIndex } from "./verify-keys.ts";
+import { loadJiraKeyIndex, JIRA_KEY_INDEX_FAIL_TTL_MS, JIRA_KEY_INDEX_TTL_MS } from "./verify-keys.ts";
+import type { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { jiraKeyFromDocId } from "./retrieval.ts";
 
 describe("indexFromListing — the url on a verdict must be usable", () => {
@@ -255,4 +256,82 @@ describe("the listing cache is keyed on the huginn base url", () => {
     expect(b!.byKey.has("MELOSYS-2")).toBe(true);
     expect(b!.byKey.has("MELOSYS-1")).toBe(false);
   });
+});
+
+// ── The NEGATIVE cache (fix round 1) ────────────────────────────────────────
+
+describe("a FAILED listing lookup is remembered too", () => {
+  /** A huginn that is down, counting how many times it was asked. */
+  function down(): { fetchApi: typeof fetchKnowledgeApi; calls: () => number } {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      fetchApi: (async () => {
+        calls += 1;
+        throw new Error("connect ECONNREFUSED");
+      }) as unknown as typeof fetchKnowledgeApi,
+    };
+  }
+
+  test("a second lookup inside the TTL does not pay the 15 s timeout again", async () => {
+    const { fetchApi, calls } = down();
+    const t0 = 1_000_000;
+    expect(await loadJiraKeyIndex("http://huginn.test", fetchApi, t0)).toBeNull();
+    expect(calls()).toBe(1);
+    // The provenance block asks on every stamped page OPEN, so without this the
+    // reader pays a fresh 15 s for each one while huginn is down.
+    expect(await loadJiraKeyIndex("http://huginn.test", fetchApi, t0 + 1_000)).toBeNull();
+    expect(await loadJiraKeyIndex("http://huginn.test", fetchApi, t0 + JIRA_KEY_INDEX_FAIL_TTL_MS - 1)).toBeNull();
+    expect(calls()).toBe(1);
+  });
+
+  test("past the TTL it tries again — the degrade is short-lived, not sticky", async () => {
+    const { fetchApi, calls } = down();
+    const t0 = 2_000_000;
+    await loadJiraKeyIndex("http://huginn.test", fetchApi, t0);
+    await loadJiraKeyIndex("http://huginn.test", fetchApi, t0 + JIRA_KEY_INDEX_FAIL_TTL_MS + 1);
+    expect(calls()).toBe(2);
+  });
+
+  test("an EMPTY listing is a failure, and is cached as one", async () => {
+    let calls = 0;
+    const empty = (async () => {
+      calls += 1;
+      return { documents: [] };
+    }) as unknown as typeof fetchKnowledgeApi;
+    const t0 = 3_000_000;
+    expect(await loadJiraKeyIndex("http://huginn.test", empty, t0)).toBeNull();
+    expect(await loadJiraKeyIndex("http://huginn.test", empty, t0 + 1_000)).toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  test("the negative entry is per HOST, so one down instance does not mute another", async () => {
+    const { fetchApi } = down();
+    const t0 = 4_000_000;
+    await loadJiraKeyIndex("http://a.test", fetchApi, t0);
+    const b = await loadJiraKeyIndex("http://b.test", listing(["MELOSYS-9_b.md"]), t0 + 1);
+    expect(b!.byKey.has("MELOSYS-9")).toBe(true);
+  });
+
+  test("recovery is not delayed: a success past the TTL is served and re-cached", async () => {
+    const { fetchApi } = down();
+    const t0 = 5_000_000;
+    await loadJiraKeyIndex("http://huginn.test", fetchApi, t0);
+    const past = t0 + JIRA_KEY_INDEX_FAIL_TTL_MS + 1;
+    const ok = await loadJiraKeyIndex("http://huginn.test", listing(["MELOSYS-7_a.md"]), past);
+    expect(ok!.byKey.has("MELOSYS-7")).toBe(true);
+    // …and served from the POSITIVE cache afterwards, without re-asking.
+    const { fetchApi: again, calls } = down();
+    expect((await loadJiraKeyIndex("http://huginn.test", again, past + 1))!.byKey.has("MELOSYS-7")).toBe(true);
+    expect(calls()).toBe(0);
+  });
+
+  // NOT asserted, deliberately: the success path also DELETES the negative
+  // entry, and no test can distinguish that. Enumerated rather than sampled —
+  // the negative entry is consulted ONLY when the positive one is absent or
+  // stale (10 min) while its own TTL is 60 s, so any stamp still present at
+  // that moment is necessarily already expired and the delete cannot change an
+  // outcome. It is hygiene, and the source says so. The `warnedFailure` delete
+  // beside it has one observable effect — the log LEVEL of the next failure —
+  // which nothing here reads.
 });

@@ -22,6 +22,7 @@ import {
 import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
 import { buildWikiGitDates } from "./git-dates.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
+import { normalizeJiraKey } from "./provenance.ts";
 
 const log = getLog("wiki", "store");
 
@@ -502,6 +503,38 @@ export interface WikiPageMeta {
    * One short string per page.
    */
   project?: string;
+  /**
+   * WHICH AGENT SESSIONS WROTE THIS PAGE — the frontmatter `sessions:` flow list,
+   * verbatim and in file order (arrival order, never sorted). Each entry is
+   * `provider:id` (`claude-code:<uuid>`, `opencode:ses_…`) or a bare id.
+   *
+   * Written ONLY by claude-usage's `wiki-stamp` CLI — muninn reads them and never
+   * writes them (see `provenance.ts`). Absent, not `[]`, on a page carrying none:
+   * these four keys are absent from all but a handful of pages, and an empty
+   * array per page is payload on the hot listing that says nothing.
+   *
+   * STRIPPED by `toListing` unless `includeProvenance` is passed, i.e. it reaches
+   * the single-page response and not `/api/wiki/pages`. A session id is ~45 bytes
+   * and a stamped page accumulates them; nothing in a LIST renders them.
+   */
+  sessions?: string[];
+  /** `sessions_backfilled: YYYY-MM-DD` — the marker saying the `sessions` list
+   *  came from a history sweep rather than from live stamps. Only a pass that
+   *  APPENDS an id removes it. Page-route only, like `sessions`. */
+  sessionsBackfilled?: string;
+  /**
+   * Jira keys this page serves — the frontmatter `jira:` flow list, normalized
+   * to trimmed UPPERCASE at parse time so a page's spelling and a query's cannot
+   * disagree. Not shape-filtered: a value that is not a key shape is a typo worth
+   * seeing in the facet, not one worth hiding.
+   *
+   * Deliberately NOT stripped by `toListing` — the Jira facet is a LISTING facet
+   * (the twin of `project`), so the hot payload is exactly where it belongs.
+   */
+  jira?: string[];
+  /** Pull requests this page's work landed as — the frontmatter `prs:` flow list,
+   *  `owner/repo#number`, verbatim. Page-route only, like `sessions`. */
+  prs?: string[];
   /** When `plan_status` was last affirmed (`YYYY-MM-DD`). A value that isn't that
    *  exact shape — or is that shape but not a real calendar day, e.g. `2026-02-31`
    *  — is dropped at parse time. See `isCalendarDay`. */
@@ -829,7 +862,17 @@ export function parseFrontmatter(content: string): Record<string, string | strin
   // child is depth ≥ 2).
   let parent: string | null = null;
   let childIndent: number | null = null;
-  for (const line of body.split("\n")) {
+  for (const rawLine of body.split("\n")) {
+    // A CRLF file's every line ends in `\r`, which `.` does NOT match — so the
+    // key regex below failed on every line and a CRLF page parsed to `{}`: no
+    // type, no tags, no title, and (since the provenance keys landed) no
+    // sessions or Jira keys either. It was cosmetic while every writer was
+    // muninn's own; it is load-bearing now that an EXTERNAL process
+    // (claude-usage's `wiki-stamp`) owns four of these keys and a page can
+    // arrive from a Windows checkout or a CRLF-normalizing editor. Stripped per
+    // LINE rather than from the whole document, so a lone `\r` inside a value is
+    // left alone.
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     const trimmed = line.trim();
     // A blank line neither closes a block nor parses. Nor does a comment, at ANY
     // indent: a column-0 `#` is not a dedent out of the block, and reading it as
@@ -2011,6 +2054,33 @@ function asStringArray(v: string | string[] | undefined): string[] {
   return [];
 }
 
+/**
+ * The same read as `asStringArray`, answering UNDEFINED rather than `[]` when a
+ * page declares nothing — for the optional provenance fields, where `[]` on every
+ * page of a wiki that stamps none would be three empty arrays × ~800 pages of
+ * listing payload asserting nothing. `tags`/`aliases` stay required arrays; every
+ * consumer of those already indexes them unconditionally.
+ */
+function asOptionalStringArray(
+  v: string | string[] | undefined,
+  map?: (s: string) => string,
+): string[] | undefined {
+  // DEDUPED, first spelling wins, order otherwise preserved. A repeated value is
+  // an append the stamper made twice (or a hand edit beside one), and it reached
+  // three surfaces as a real second entry: a duplicate session chip, a duplicate
+  // session PRICED twice into a page's `totalCost`, and a `jira` row rendered
+  // twice. The facet was already immune — `jiraCounts` folds each page through a
+  // Set — which is exactly why this was invisible from there.
+  const values = [
+    ...new Set(
+      asStringArray(v)
+        .map((s) => (map ? map(s) : s.trim()))
+        .filter(Boolean),
+    ),
+  ];
+  return values.length > 0 ? values : undefined;
+}
+
 /** Bounded prefix (bytes) read from an .html explainer to sniff its <title>. */
 const HTML_TITLE_SNIFF_BYTES = 4096;
 const HTML_TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
@@ -2316,10 +2386,6 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       } catch {
         return; // unreadable file — skip, keep the rest of the wiki browsable
       }
-      // NB (pre-existing, wider than the plan fields): `parseFrontmatter`'s
-      // line regex ends in `(.*)$`, which does not match a trailing `\r`, so a
-      // CRLF-line-ending page parses to `{}` and loses title/tags/type/accent
-      // along with the plan fields. Not fixed here — it belongs with the parser.
       const fm = parseFrontmatter(content);
       // Native `.mdx` pages take the same branch as `.md` — same frontmatter,
       // same wikilink extraction, same graph membership. The only difference is
@@ -2357,6 +2423,17 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         // The Project facet. Undefined on every wiki that declares no rule, and
         // on any page inside one that no rule matched.
         project: resolveProject(relPath, fm, tags, projectRule, knownProjects),
+        // Provenance (`src/wiki/provenance.ts`): who wrote this page and what it
+        // serves. Written by claude-usage's `wiki-stamp`, never by muninn. All
+        // four are absent — not empty — on a page that declares none, which is
+        // every page of every wiki until the stamper has run on it.
+        sessions: asOptionalStringArray(fm.sessions),
+        sessionsBackfilled:
+          typeof fm.sessions_backfilled === "string" && fm.sessions_backfilled.trim()
+            ? fm.sessions_backfilled.trim()
+            : undefined,
+        jira: asOptionalStringArray(fm.jira, normalizeJiraKey),
+        prs: asOptionalStringArray(fm.prs),
         // Plan lifecycle fields. Wiki-agnostic (any page may declare them) and
         // strictly validated — an invalid value is dropped here and only ever
         // surfaces as a count in the aggregated warn below.

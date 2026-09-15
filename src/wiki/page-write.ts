@@ -49,6 +49,7 @@ import { isPathConfined } from "../gardener/draft.ts";
 import { insertLogEntry } from "../gardener/apply.ts";
 import { sha256, todayOslo } from "../gardener/util.ts";
 import { runWikiWriteExclusive } from "./queue.ts";
+import { takeWikiWriteLock } from "./lockfile.ts";
 import { getWikiIndex } from "./store.ts";
 import {
   isReadonlyWikiRoot,
@@ -72,6 +73,13 @@ export type PageWriteOutcome =
    * generic `error` earns. Nothing was read, written or logged.
    */
   | { outcome: "forbidden"; reason: string }
+  /**
+   * Another PROCESS held `<root>/.wiki-write.lock` for the whole wait —
+   * claude-usage's `wiki-stamp` CLI is the other holder (see `lockfile.ts`).
+   * Its own variant rather than `error` because nothing failed and nothing was
+   * written: the caller retries, and the route answers 409 like `stale`.
+   */
+  | { outcome: "locked"; reason: string }
   | { outcome: "error"; reason: string };
 
 export interface PageWriteCommonOptions {
@@ -117,6 +125,12 @@ export interface PageWriteCommonOptions {
    * call site added later is guarded by default.
    */
   isReadonlyRoot?: (root: string) => boolean;
+  /**
+   * How long to wait for the cross-process lockfile before answering `locked`.
+   * Defaults to {@link WIKI_LOCK_WAIT_MS}; a test shortens it so the refusal
+   * path costs milliseconds rather than the two seconds a human click may.
+   */
+  lockWaitMs?: number;
 }
 
 /**
@@ -277,49 +291,80 @@ export async function writeWikiPage(
   const absTarget = path.join(wikiDir, relPath);
 
   // 2–5. read → CAS → transform → write → log.md, serialized per WIKI ROOT.
+  //
+  // Two locks, in this order and no other. The in-process QUEUE first (it
+  // serializes muninn's own writers and is what the chain is keyed on), then the
+  // cross-process LOCKFILE inside it, held for exactly the read→write span and
+  // released before the section returns — so the commit tail below, which
+  // enqueues on a different chain, never runs holding it. Taking the file lock
+  // OUTSIDE the queue would make every queued writer wait on the lock in turn
+  // while the one ahead of it held the chain, which is a deadlock shape rather
+  // than a wait.
   const sectionResult = await runWikiWriteExclusive(
     wikiDir,
     async (): Promise<PageWriteOutcome> => {
-      const current = await opts.readFile(absTarget);
-      if (current === null) return { outcome: "stale", reason: "target file no longer exists" };
-      if (!baseHash || sha256(current) !== baseHash) {
-        return { outcome: "stale", reason: opts.staleReason ?? "page changed since the fact check" };
-      }
-
-      let updated: string | null;
-      try {
-        updated = opts.transform(current);
-      } catch (err) {
-        return { outcome: "error", reason: `transform failed: ${errMsg(err)}` };
-      }
-      if (updated === null) return { outcome: "noop" };
-
-      try {
-        await opts.writeFile(absTarget, updated);
-      } catch (err) {
-        return { outcome: "error", reason: `write failed: ${errMsg(err)}` };
-      }
-
-      // log.md entry (reverse-chron). A log hiccup must not undo the page write.
-      // Skipped wholesale in no-log mode — see `PageWriteNoLogOptions`.
-      try {
-        if (logging) {
-          const logPath = path.join(wikiDir, "log.md");
-          const existingLog = await opts.readFile(logPath);
-          const entry = `## [${todayOslo(opts.now())}] ${logging.logKind} | ${logging.logTitle}\n- ${resolveLate(logging.logLine)}`;
-          await opts.writeFile(logPath, insertLogEntry(existingLog, entry));
-        }
-      } catch (err) {
-        log.warn("Wiki page write: log.md update failed for {path}: {error}", {
+      const lock = await takeWikiWriteLock(wikiDir, {
+        waitMs: opts.lockWaitMs,
+        op: `page-write:${opts.logKind ?? "no-log"}`,
+      });
+      if (!lock.ok) {
+        log.warn("Wiki page write refused — wiki write lock held: {path}: {reason}", {
           kind: opts.logKind,
           path: relPath,
-          error: errMsg(err),
+          reason: lock.reason,
         });
+        return { outcome: "locked", reason: lock.reason };
       }
-
-      return { outcome: "written", writtenPath: relPath };
+      try {
+        return await writeSection();
+      } finally {
+        lock.lock?.release();
+      }
     },
   );
+
+  /** Steps 2–5 themselves. Split out only so the two locks above read as a
+   *  prologue; the body is unchanged from when it was the callback. */
+  async function writeSection(): Promise<PageWriteOutcome> {
+    const current = await opts.readFile(absTarget);
+    if (current === null) return { outcome: "stale", reason: "target file no longer exists" };
+    if (!baseHash || sha256(current) !== baseHash) {
+      return { outcome: "stale", reason: opts.staleReason ?? "page changed since the fact check" };
+    }
+
+    let updated: string | null;
+    try {
+      updated = opts.transform(current);
+    } catch (err) {
+      return { outcome: "error", reason: `transform failed: ${errMsg(err)}` };
+    }
+    if (updated === null) return { outcome: "noop" };
+
+    try {
+      await opts.writeFile(absTarget, updated);
+    } catch (err) {
+      return { outcome: "error", reason: `write failed: ${errMsg(err)}` };
+    }
+
+    // log.md entry (reverse-chron). A log hiccup must not undo the page write.
+    // Skipped wholesale in no-log mode — see `PageWriteNoLogOptions`.
+    try {
+      if (logging) {
+        const logPath = path.join(wikiDir, "log.md");
+        const existingLog = await opts.readFile(logPath);
+        const entry = `## [${todayOslo(opts.now())}] ${logging.logKind} | ${logging.logTitle}\n- ${resolveLate(logging.logLine)}`;
+        await opts.writeFile(logPath, insertLogEntry(existingLog, entry));
+      }
+    } catch (err) {
+      log.warn("Wiki page write: log.md update failed for {path}: {error}", {
+        kind: opts.logKind,
+        path: relPath,
+        error: errMsg(err),
+      });
+    }
+
+    return { outcome: "written", writtenPath: relPath };
+  }
 
   if (sectionResult.outcome !== "written") return sectionResult;
 

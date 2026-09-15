@@ -11,6 +11,7 @@ import {
   archiveControlState,
   ARCHIVE_READONLY_TITLE,
   classifyWriteFailure,
+  LOCKED_MESSAGE,
   foldRefusedPriority,
   isRankableColumn,
   NUDGE_OFF_SORT,
@@ -425,6 +426,26 @@ describe("classifyWriteFailure", () => {
       reload: true,
     });
     expect(classifyWriteFailure(409, {}, "order").message).toBe(ORDER_STALE_MESSAGE);
+  });
+
+  test("a LOCKED 409 is a retry, not a reload — the board is not stale", () => {
+    // Two conditions answer 409 and they need opposite recoveries. Branching on
+    // the status alone told a reader whose only problem was a two-second wiki
+    // write lock that their plan had changed on disk, and disabled the card
+    // until they reloaded a board that was never stale.
+    for (const surface of ["priority", "order", "status"] as const) {
+      expect(
+        classifyWriteFailure(409, { error: "another process holds the lock", locked: true }, surface),
+      ).toEqual({ kind: "locked", message: LOCKED_MESSAGE, reload: false });
+    }
+  });
+
+  test("`locked` only counts on a 409, and only when it is literally true", () => {
+    // The flag is the write seam's, not free-form: a 500 carrying it is not a
+    // lock outcome, and `"true"` is not `true`.
+    expect(classifyWriteFailure(500, { locked: true }, "priority").kind).toBe("error");
+    expect(classifyWriteFailure(409, { locked: "true" }, "priority").kind).toBe("stale");
+    expect(classifyWriteFailure(409, { locked: false }, "priority").kind).toBe("stale");
   });
 
   test("403 is the readonly flip, 422 keeps the server's text verbatim", () => {

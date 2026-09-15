@@ -132,6 +132,11 @@ export interface PlanBoardDeps {
   ledger: PlanLedgerDeps;
   loadSource: () => Promise<PlanSourceResult>;
   renderPage?: (payload: BoardPayload) => Promise<string>;
+  /** How long a write waits for the cross-process wiki lockfile. Production
+   *  passes nothing (`WIKI_LOCK_WAIT_MS`, 2 s); a test shortens it so the
+   *  `locked` refusal costs milliseconds rather than the two seconds a human
+   *  click may. */
+  lockWaitMs?: number;
 }
 
 export function defaultPlanBoardDeps(config: Config): PlanBoardDeps {
@@ -325,6 +330,7 @@ export function registerPlansRoutes(
         relPath: plan.relPath,
         baseHash,
         staleReason: `${plan.relPath} changed since the board was loaded`,
+        ...(deps.lockWaitMs !== undefined ? { lockWaitMs: deps.lockWaitMs } : {}),
         // No-log mode skips the reindex fan-out anyway; `[]` says the same thing
         // where the call is read.
         collections: [],
@@ -355,6 +361,12 @@ export function registerPlansRoutes(
       }
       if (result.outcome === "stale") {
         return c.json({ error: result.reason, stale: true }, 409);
+      }
+      // The cross-process wiki lockfile was held throughout (claude-usage's
+      // `wiki-stamp` is the other holder). Nothing was written — a retryable
+      // conflict, so 409 beside `stale` rather than a 500 or a silent 200.
+      if (result.outcome === "locked") {
+        return c.json({ error: result.reason, locked: true }, 409);
       }
       if (result.outcome === "error") {
         log.error("plan priority: write failed for {slug}: {error}", { slug, error: result.reason });
@@ -425,6 +437,7 @@ export function registerPlansRoutes(
         relPath: plan.relPath,
         baseHash,
         staleReason: `${plan.relPath} changed since the board was loaded`,
+        ...(deps.lockWaitMs !== undefined ? { lockWaitMs: deps.lockWaitMs } : {}),
         collections: [],
         logKind: null,
         now: () => Date.now(),
@@ -448,6 +461,10 @@ export function registerPlansRoutes(
       }
       if (result.outcome === "stale") {
         return c.json({ error: result.reason, stale: true }, 409);
+      }
+      // Same 409 as `/priority` above, for the same held lockfile.
+      if (result.outcome === "locked") {
+        return c.json({ error: result.reason, locked: true }, 409);
       }
       if (result.outcome === "error") {
         log.error("plan status: write failed for {slug}: {error}", { slug, error: result.reason });

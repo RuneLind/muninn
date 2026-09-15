@@ -37,6 +37,7 @@
  */
 
 import path from "node:path";
+import { isWikiWriteArtifact } from "./lockfile.ts";
 import { realpath, stat } from "node:fs/promises";
 import { createQueue } from "./queue.ts";
 import { getLog } from "../logging.ts";
@@ -627,7 +628,14 @@ export async function listDirtyEntries(
     log.warn("Dirty listing: git status failed in {top}: {error}", { top, error: r.stderr });
     return [];
   }
-  return parsePorcelainZWithStatus(r.stdout);
+  // The write interlock's own files are not work — see `isWikiWriteArtifact`.
+  // Filtered at the ENUMERATION rather than by a denylist entry, because the
+  // sync loop holds that lock across its own `git status`: the file is there by
+  // construction on every tick, and a denied path is still REPORTED (it turns up
+  // in the card's `denied` list as work somebody should look at).
+  return parsePorcelainZWithStatus(r.stdout).filter(
+    (e) => !isWikiWriteArtifact(path.basename(e.path)),
+  );
 }
 
 /**
@@ -672,6 +680,10 @@ export async function listWikiSubtreeDirty(
     const rel = path.relative(canonicalWiki, abs);
     if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue; // outside the subtree
     const wikiRel = rel.split(path.sep).join("/");
+    // The write interlock's own files are never work — see `isWikiWriteArtifact`.
+    // Left in, the sweeper commits a LIVE lockfile (and deletes it next sweep,
+    // forever), on any wiki root whose repo does not ignore it.
+    if (isWikiWriteArtifact(path.basename(wikiRel))) continue;
     dirty.push(wikiRel);
     if (!(await pathExists(abs))) deletions.push(wikiRel);
   }

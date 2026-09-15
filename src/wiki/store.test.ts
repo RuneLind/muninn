@@ -2740,19 +2740,65 @@ describe("buildWikiIndex — project", () => {
     expect(meta.project).toBe("pomme-core");
   });
 
-  test("a CRLF page keeps the path rule after losing its frontmatter", async () => {
+  test("a CRLF page's frontmatter PARSES — it used to be lost wholesale", async () => {
     // `parseFrontmatter`'s line regex ends in `(.*)$`, which does not match a
-    // trailing `\r`, so a CRLF page parses to `{}` — no title, no tags. The
-    // project must still resolve, because the path rule never reads the body.
+    // trailing `\r`, so every line of a CRLF page failed the key match and the
+    // whole fence parsed to `{}` — no title, no tags, no type. Cosmetic while
+    // every writer was muninn's own; load-bearing since an EXTERNAL process
+    // (claude-usage's `wiki-stamp`) owns four of these keys, and a page can
+    // arrive from a Windows checkout or a CRLF-normalizing editor.
     await declare(fullRule);
     await Bun.write(
       path.join(root, "areas/pomme-core/crlf.md"),
-      "---\r\ntitle: CRLF Page\r\ntags: [quill]\r\n---\r\n\r\nBody.\r\n",
+      "---\r\ntitle: CRLF Page\r\ntags: [quill]\r\njira: [MELOSYS-8045]\r\n---\r\n\r\nBody.\r\n",
     );
     const index = await buildWikiIndex(root);
     const meta = index.pages.find((p) => p.relPath === "areas/pomme-core/crlf.md")!;
-    expect(meta.title).toBe("crlf"); // frontmatter genuinely lost
+    expect(meta.title).toBe("CRLF Page");
+    expect(meta.tags).toEqual(["quill"]);
+    expect(meta.jira).toEqual(["MELOSYS-8045"]);
+    // The path rule never read the body, so it resolved even while the fence
+    // was being lost — which is exactly why the loss stayed invisible here.
     expect(meta.project).toBe("pomme-core");
+  });
+
+  /**
+   * The list keys are DEDUPED at the index, first spelling wins, order
+   * otherwise preserved. Pinned here beside the CRLF test because both are
+   * properties of the same frontmatter → `WikiPageMeta` pass, and a repeated
+   * value is what an external stamper that appended twice leaves behind. It
+   * reached three surfaces as a real second entry: a duplicate session chip, a
+   * session PRICED twice into a page's `totalCost`, and a Jira row rendered
+   * twice. The `jira` FACET was already immune (`jiraCounts` folds each page
+   * through a Set), which is exactly why it was invisible from there.
+   */
+  test("repeated session / jira / pr entries are deduped, first spelling kept", async () => {
+    await declare(fullRule);
+    await Bun.write(
+      path.join(root, "areas/pomme-core/dupes.md"),
+      [
+        "---",
+        "title: Dupes",
+        "sessions: [claude-code:abc, claude-code:abc, ses_zzz]",
+        "jira: [MELOSYS-8045, melosys-8045]",
+        "prs: [navikt/melosys-api#1234, navikt/melosys-api#1234]",
+        "tags: [quill, quill, ink]",
+        "---",
+        "",
+        "Body.",
+      ].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    const meta = index.pages.find((p) => p.relPath === "areas/pomme-core/dupes.md")!;
+    expect(meta.sessions).toEqual(["claude-code:abc", "ses_zzz"]);
+    // `jira` normalizes to UPPERCASE first, so the two spellings ARE one key.
+    expect(meta.jira).toEqual(["MELOSYS-8045"]);
+    expect(meta.prs).toEqual(["navikt/melosys-api#1234"]);
+    // `tags`/`aliases` take the OTHER path (`asStringArray` at the call site,
+    // not `asOptionalStringArray`) and are NOT deduped. Pre-existing, out of
+    // this fix's scope, and asserted so the difference reads as a fact rather
+    // than as an oversight in the test.
+    expect(meta.tags).toEqual(["quill", "quill", "ink"]);
   });
 
   test("no project declaration ⇒ undefined on every page", async () => {

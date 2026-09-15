@@ -48,6 +48,8 @@ import {
 } from "../../wiki/factcheck-context.ts";
 import { spliceSentinelBlock, withTrailingNewline } from "../../wiki/append-block.ts";
 import { todayOslo } from "../../gardener/util.ts";
+import { WIKI_LOCK_BASENAME } from "../../wiki/lockfile.ts";
+import { __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
 
 /**
  * Route-level tests for the explainer-serving seam `/api/wiki/html`. Uses the
@@ -3957,5 +3959,95 @@ describe("project + projects map on /api/wiki/pages", () => {
     const row = data.outgoing.find((p) => p.name === "setup");
     expect(row).toBeDefined();
     expect(row!.project).toBe("pomme-core");
+  });
+});
+
+// ── The `locked` → 409 mapping on the two fact-check write routes ───────────
+// (fix round 1) — the mapping shipped untested: mutating all four `locked`
+// branches (these two plus the two `/plans` ones) to 200 left the suite green.
+
+describe("a HELD wiki write lock at the fact-check write routes", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  const post = (path_: string, body: unknown) =>
+    app.request(path_, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const hashOf = async (rel: string) =>
+    createHash("sha256").update(await Bun.file(path.join(root, rel)).text()).digest("hex");
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-lock-route-"));
+    await Bun.write(path.join(root, "Widgets.md"), "# Widgets\n\nThe device ships 4M units.\n");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `lockwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetWikiWriteQueueForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  /** Another PROCESS is mid-write on this wiki root. */
+  async function holdLock(): Promise<void> {
+    await Bun.write(
+      path.join(root, WIKI_LOCK_BASENAME),
+      '{"pid":999999,"host":"other","op":"wiki-stamp","at":"now"}\n',
+    );
+  }
+
+  test("factcheck/append answers 409 {locked:true} and the page is byte-untouched", async () => {
+    const before = await Bun.file(path.join(root, "Widgets.md")).text();
+    const baseHash = await hashOf("Widgets.md");
+    await holdLock();
+    const res = await post("/api/wiki/factcheck/append?wiki=lockwiki", {
+      page: "Widgets",
+      answer: "### ✅ Claim 1/1 — Right\n\nAll good.",
+      baseHash,
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { locked?: boolean; stale?: boolean };
+    expect(body.locked).toBe(true);
+    // NOT `stale`: the client's recovery for the two is opposite (retry vs
+    // re-run the fact check), so the flag is the whole difference.
+    expect(body.stale).toBeUndefined();
+    expect(await Bun.file(path.join(root, "Widgets.md")).text()).toBe(before);
+    expect(await Bun.file(path.join(root, "log.md")).exists()).toBe(false);
+  });
+
+  test("factcheck/integrate/apply answers the same 409", async () => {
+    const before = await Bun.file(path.join(root, "Widgets.md")).text();
+    const baseHash = await hashOf("Widgets.md");
+    await holdLock();
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=lockwiki", {
+      page: "Widgets",
+      baseHash,
+      edits: [{ claimIndex: 1, verdict: "❌", old: "4M units", new: "5M units", reason: "filing" }],
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { locked?: boolean }).locked).toBe(true);
+    expect(await Bun.file(path.join(root, "Widgets.md")).text()).toBe(before);
+  });
+
+  test("with the lock FREE the same append succeeds — the 409 is the lock", async () => {
+    const res = await post("/api/wiki/factcheck/append?wiki=lockwiki", {
+      page: "Widgets",
+      answer: "### ✅ Claim 1/1 — Right\n\nAll good.",
+      baseHash: await hashOf("Widgets.md"),
+    });
+    expect(res.status).toBe(200);
+    expect(await Bun.file(path.join(root, "Widgets.md")).text()).toContain("[!factcheck]");
   });
 });

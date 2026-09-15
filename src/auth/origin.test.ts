@@ -141,6 +141,26 @@ describe("decideOrigin — the pure rule", () => {
     expect(isSideEffectingRequest("GET", "/api/research/askx")).toBe(false);
     expect(isSideEffectingRequest("DELETE", "/chat/conversations/x")).toBe(true);
   });
+
+  test("the provenance reverse lookup is listed — it AMPLIFIES a cross-site GET", () => {
+    // Neither a model call nor a write, which is why it was missed. One GET
+    // walks every registered wiki's index and fans out into up to
+    // `PROVENANCE_REFS_MAX / 200` requests to claude-usage plus one to huginn,
+    // from this host's network position — the property §4 cares about.
+    expect(SIDE_EFFECTING_GETS).toContain("/api/wiki/provenance");
+    expect(isSideEffectingRequest("GET", "/api/wiki/provenance")).toBe(true);
+    expect(
+      decideOrigin({
+        ...base,
+        method: "GET",
+        path: "/api/wiki/provenance",
+        secFetchSite: "cross-site",
+      }).allowed,
+    ).toBe(false);
+    // Listed as an exact path, not a prefix — a neighbouring route must not
+    // inherit the rule by accident.
+    expect(isSideEffectingRequest("GET", "/api/wiki/provenancex")).toBe(false);
+  });
 });
 
 /**

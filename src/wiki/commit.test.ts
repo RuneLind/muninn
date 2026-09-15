@@ -9,8 +9,11 @@ import {
   gitToplevel,
   parsePorcelainZWithStatus,
   runGit,
+  wikiDirtyStat,
   __resetForTest,
 } from "./commit.ts";
+import { existsSync } from "node:fs";
+import { isWikiWriteArtifact, WIKI_LOCK_BASENAME } from "./lockfile.ts";
 
 /**
  * A barrier over the async-push seam: `onPushSettled` resolves `done`, so a test
@@ -584,5 +587,64 @@ describe("runGit timeout", () => {
     } finally {
       await rm(base, { recursive: true, force: true });
     }
+  });
+});
+
+// ── The write interlock's own files are not work (fix round 1) ──────────────
+
+describe("the wiki write lock is never swept, staged or counted", () => {
+  let base: string;
+
+  beforeEach(async () => {
+    __resetForTest();
+    base = await mkdtemp(path.join(tmpdir(), "wiki-artifact-"));
+  });
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("isWikiWriteArtifact names exactly the two transient files", () => {
+    expect(isWikiWriteArtifact(WIKI_LOCK_BASENAME)).toBe(true);
+    expect(isWikiWriteArtifact(".wiki-stamp.a1b2.tmp")).toBe(true);
+    // Not an artifact: a real page, and near-misses that are content.
+    expect(isWikiWriteArtifact("plan.md")).toBe(false);
+    expect(isWikiWriteArtifact(".wiki-write.lock.md")).toBe(false);
+    expect(isWikiWriteArtifact(".wiki-stamp.notes")).toBe(false);
+  });
+
+  test("listWikiSubtreeDirty skips them, so the daily sweeper cannot commit a LIVE lock", async () => {
+    // The jarvis wiki's own repo (`huginn-jarvis`) ignores neither file, and the
+    // lock is taken on EVERY registered root a writer touches — not on the two
+    // whose `.gitignore` happens to name it. Left in, the sweeper commits a
+    // lockfile that is being HELD, then deletes it on the next sweep, forever.
+    const { repo, wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, WIKI_LOCK_BASENAME), '{"pid":1,"op":"x"}\n');
+    await writeFile(path.join(wikiDir, ".wiki-stamp.abc.tmp"), "half a page\n");
+    await writeFile(path.join(wikiDir, "concepts", "Real.md"), "# Real\n");
+
+    const top = await gitToplevel(wikiDir);
+    const { dirty } = await listWikiSubtreeDirty(top!, wikiDir);
+    expect(dirty).toEqual(["concepts/Real.md"]);
+
+    // And a sweep over that list leaves both files exactly where they were.
+    await commitWikiChange(wikiDir, dirty, "[sweep] daily wiki sweep", { push: false });
+    expect(existsSync(path.join(wikiDir, WIKI_LOCK_BASENAME))).toBe(true);
+    const names = await git(repo, ["show", "--name-only", "--format=", "HEAD"]);
+    expect(names.out).toBe("data/wiki/concepts/Real.md");
+  });
+
+  test("listDirtyEntries skips them too — the sync loop holds one across its own status", async () => {
+    const { wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, WIKI_LOCK_BASENAME), "");
+    await writeFile(path.join(wikiDir, "concepts", "Real.md"), "# Real\n");
+    const top = await gitToplevel(wikiDir);
+    const entries = await listDirtyEntries(top!, wikiDir);
+    expect(entries.map((e) => e.path)).toEqual(["data/wiki/concepts/Real.md"]);
+  });
+
+  test("wikiDirtyStat does not count a two-second lock as an uncommitted change", async () => {
+    const { wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, WIKI_LOCK_BASENAME), "");
+    expect((await wikiDirtyStat(wikiDir)).dirtyCount).toBe(0);
   });
 });
