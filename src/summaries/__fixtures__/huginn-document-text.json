@@ -1,0 +1,275 @@
+{
+  "_source": "huginn main/sources/files/files_document_converter.py FilesDocumentConverter._document_text_image and the image + S3 half of _clean_document_text (fence removal left out), run with huginn's .venv. Regenerate, never hand-edit.",
+  "images": [
+    {
+      "input": "![a](/x.png)",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](/x.png)",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](https://b.s3.amazonaws.com:443/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.s3.amazonaws.com：443/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://user＠evil.com/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.amazonaws.com／/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](//[abc/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](//abc]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://[::1]/x.png)",
+      "expected": "![a](https://[::1]/x.png)"
+    },
+    {
+      "input": "![a](https://[amazonaws.com]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://evil.com\\@b.s3.amazonaws.com/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.s3.amazonaws.com\\x.png)",
+      "expected": "![a](https://b.s3.amazonaws.com\\x.png)"
+    },
+    {
+      "input": "![a](/x.png#a?X-Amz-Signature=1)",
+      "expected": "![a](/x.png#a?X-Amz-Signature=1)"
+    },
+    {
+      "input": "![a](/x.png;sig=1?q=1)",
+      "expected": null
+    },
+    {
+      "input": "![a](/x.png?q=1;X-Goog-Signature=1)",
+      "expected": null
+    },
+    {
+      "input": "![a](HTTPS://B.S3.AMAZONAWS.COM/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](<https://ex.com/a b.png>)",
+      "expected": "![a](<https://ex.com/a b.png>)"
+    },
+    {
+      "input": "![a](<https://ex.com/a.png> extra)",
+      "expected": null
+    },
+    {
+      "input": "![a](localhost:8080/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](a.png:80)",
+      "expected": null
+    },
+    {
+      "input": "![a](path:123)",
+      "expected": null
+    },
+    {
+      "input": "![été](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![ab](/x.png)",
+      "expected": "![a b](/x.png)"
+    },
+    {
+      "input": "![a\u001cb](/x.png)",
+      "expected": "![a b](/x.png)"
+    },
+    {
+      "input": "![Ⅰ²](/x.png)",
+      "expected": "![Ⅰ²](/x.png)"
+    },
+    {
+      "input": "![٠١](/x.png)",
+      "expected": "![٠١](/x.png)"
+    },
+    {
+      "input": "![a‍b](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![Kelvin K:x](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![ſtp:x](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![a](https://b.amazonaws.com。/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.amazonaws.com%2e/x.png)",
+      "expected": "![a](https://b.amazonaws.com%2e/x.png)"
+    },
+    {
+      "input": "![a](https:example.com/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com:99999/x.png)",
+      "expected": "![a](https://ex.com:99999/x.png)"
+    },
+    {
+      "input": "![a](https://ex.com:abc/x.png)",
+      "expected": "![a](https://ex.com:abc/x.png)"
+    },
+    {
+      "input": "![a](https://b.s3.amazonaws.com.:443/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](//b.amazonaws.com)",
+      "expected": null
+    },
+    {
+      "input": "![a](  /x.png  \"t\")",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](/x.png 'title')",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](/x.png )",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](﻿/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com/é.png)",
+      "expected": "![a](https://ex.com/é.png)"
+    },
+    {
+      "input": "![a](https://éx.com/x.png)",
+      "expected": "![a](https://éx.com/x.png)"
+    },
+    {
+      "input": "![a](https://a.b@c/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com/x.png?SIG=1)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com/x.png?asig=1)",
+      "expected": "![a](https://ex.com/x.png?asig=1)"
+    },
+    {
+      "input": "![a](mailto:x@y)",
+      "expected": null
+    },
+    {
+      "input": "![a](1http://x/y.png)",
+      "expected": "![a](1http://x/y.png)"
+    },
+    {
+      "input": "![a](<>)",
+      "expected": null
+    },
+    {
+      "input": "![a](<x>y>)",
+      "expected": null
+    },
+    {
+      "input": "![Diagram: the 3-step loop](/x.png)",
+      "expected": "![Diagram: the 3-step loop](/x.png)"
+    },
+    {
+      "input": "![http:x](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![ a　b](/x.png)",
+      "expected": "![a b](/x.png)"
+    },
+    {
+      "input": "![a](https://℀.amazonaws.com/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.AMAZONAWS.coⅿ/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.amazonaws.com­/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![x·y](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![ʰ](/x.png)",
+      "expected": "![ʰ](/x.png)"
+    },
+    {
+      "input": "![⁰](/x.png)",
+      "expected": "![⁰](/x.png)"
+    },
+    {
+      "input": "![aःb](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![a](<https://b.s3.amazonaws.com:443/k.png>)\"\n",
+      "expected": null
+    }
+  ],
+  "texts": [
+    {
+      "input": "p ![`x`](data:image/png;base64,AAAA) q",
+      "expected": "p  q"
+    },
+    {
+      "input": "p ![a](data:image/png;base64,AA`b`A) q",
+      "expected": "p  q"
+    },
+    {
+      "input": "p ![a](https://ex.com/k.png?X-Amz-Signature=`1`) q",
+      "expected": "p  q"
+    },
+    {
+      "input": "```bash``` inline\n![a](data:image/png;base64,AAAA)\nend",
+      "expected": "```bash``` inline\n\nend"
+    },
+    {
+      "input": "text\n~~~\n![a](data:x)\n~~~\n![b](data:y)",
+      "expected": "text\n~~~\n\n~~~\n"
+    },
+    {
+      "input": "See https://b.s3.eu-west-1.amazonaws.com/r.pdf and ![c](https://b.s3.eu-west-1.amazonaws.com/k.png)",
+      "expected": "See [file] and "
+    },
+    {
+      "input": "![a](https://ex.com/https://b.s3.x.amazonaws.com/k.png)",
+      "expected": "![a](https://ex.com/[file])"
+    }
+  ]
+}

@@ -38,13 +38,18 @@ refactor away from reading `.documents` off it.
 **Every surface that SHOWS a summary reads the raw file too** (#551): the
 `<apiBase>/document/*` proxy (the doc panel), Export and Share overlay `text`
 with `readSummarySourceText` (`src/summaries/source-text.ts`) — frontmatter
-stripped, huginn's document-text IMAGE rules re-applied outside fenced code
-(the whitelist from `FilesDocumentConverter._document_text_image`, plus S3 URLs
-→ `[file]`), fenced code kept. It answers `null` on any failure or a non-`text/*`
-body (a huginn without #131 answers JSON), and the proxy then serves the cleaned
-copy unchanged; only an overlaid body carries `textSource: "file"`, which the
-re-run reload check uses so a file-form and an index-form body are never
-compared.
+stripped, huginn's document-text IMAGE rules re-applied to the WHOLE body, code
+included (the whitelist from `FilesDocumentConverter._document_text_image`, plus
+S3 URLs → `[file]`), fenced code kept. Whole-body on purpose: cutting the body at
+code spans let an image with a backtick in its alt or URL skip the filter while
+marked still rendered it. The port is pinned to huginn's own answers by
+`__fixtures__/huginn-document-text.json` — regenerate it with huginn's `.venv`,
+never hand-edit. It answers `null` on any failure, a stall past its budget (the
+bound covers the body, not only the headers) or a non-`text/*` body (a huginn
+without #131 answers JSON), and the proxy then serves the cleaned copy
+unchanged; only an overlaid body carries `textSource: "file"`, and the re-run
+reload check reloads without a claim when the two reads came from different
+forms.
 
 **The split contract.** `src/summaries/transcript-split.ts` owns
 `splitTranscript` — the first level-2 `## Transcript` heading OUTSIDE fenced

@@ -1,5 +1,46 @@
 import { afterEach, expect, test } from "bun:test";
-import { readSummarySourceText } from "./source-text.ts";
+import { documentTextImage, filterDocumentText, readSummarySourceText } from "./source-text.ts";
+import huginnAnswers from "./__fixtures__/huginn-document-text.json";
+
+test("each image matches huginn's own _document_text_image answer", () => {
+  const diverging = huginnAnswers.images
+    .map(({ input, expected }) => ({ input, expected, actual: documentTextImage(input) }))
+    .filter((c) => c.actual !== c.expected);
+  expect(diverging).toEqual([]);
+});
+
+test("whole bodies match huginn's image + S3 rules, backticks included", () => {
+  const diverging = huginnAnswers.texts
+    .map(({ input, expected }) => ({ input, expected, actual: filterDocumentText(input) }))
+    .filter((c) => c.actual !== c.expected);
+  expect(diverging).toEqual([]);
+});
+
+test("a source body that stalls after its headers is abandoned within the budget", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("---\nx: 1\n---\n# partial"));
+          },
+        }),
+        { headers: { "content-type": "text/markdown" } },
+      ),
+  });
+  try {
+    const started = Date.now();
+    const result = await Promise.race([
+      readSummarySourceText(`http://127.0.0.1:${server.port}`, "c", "d.md", 200),
+      new Promise((resolve) => setTimeout(() => resolve("still pending"), 1_500)),
+    ]);
+    expect(result).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  } finally {
+    server.stop(true);
+  }
+});
 
 const origFetch = globalThis.fetch;
 afterEach(() => {
@@ -23,7 +64,7 @@ test("reads ?raw=1 for the encoded path and strips the frontmatter", async () =>
   expect(seen).toEqual(["http://kb.test/api/document/youtube-summaries/ai/T%20x.md?raw=1"]);
 });
 
-test("applies huginn's document-text image rules outside fenced code", async () => {
+test("applies huginn's document-text image rules to the whole body, code included", async () => {
   const body = [
     "# T",
     "![Slide at 00:01:33](/api/frames/vimeo/1/93.jpg)",
@@ -34,7 +75,7 @@ test("applies huginn's document-text image rules outside fenced code", async () 
     "![user](https://me:pw@example.com/k.png)",
     "See https://b.s3.eu-west-1.amazonaws.com/report.pdf for the file.",
     "```",
-    "![kept verbatim](data:image/png;base64,AAAA)",
+    "![filtered too](data:image/png;base64,AAAA)",
     "```",
   ].join("\n");
   answer(() => new Response(`---\nx: 1\n---\n${body}`, { headers: { "content-type": "text/markdown" } }));
@@ -49,7 +90,7 @@ test("applies huginn's document-text image rules outside fenced code", async () 
       "",
       "See [file] for the file.",
       "```",
-      "![kept verbatim](data:image/png;base64,AAAA)",
+      "",
       "```",
     ].join("\n"),
   );

@@ -812,8 +812,8 @@ export function sumArticleLibraryScript(): string {
      * re-indexes some seconds later. So the body is re-fetched and compared with
      * what was on screen when the run started, ~5 times over ~10s, and if it
      * never changes the reader is told that instead. A body from the OTHER form
-     * always differs (breadcrumb, fences) and proves nothing, so it only counts
-     * when both reads came from the same form.
+     * always differs (breadcrumb, fences) and proves nothing, so a form change
+     * reloads the panel without claiming the new summary landed.
      */
     function confirmRerunLanded(doc, before, attempt) {
       if (!rerunPanelShows(doc)) return;
@@ -824,7 +824,14 @@ export function sumArticleLibraryScript(): string {
         .then(function(fresh) {
           if (!rerunPanelShows(doc)) return;
           var text = (fresh && fresh.text) || '';
-          if (text && text !== before && (fresh.textSource || '') === (doc.textSource || '')) {
+          if (text && (fresh.textSource || '') !== (doc.textSource || '')) {
+            // One read came from the file and the other from the cleaned copy,
+            // so the bodies cannot be compared: reload without claiming either way.
+            openSummaryDoc(doc.docId, '', doc.source);
+            setRerunStatus('Re-run finished — reloaded the summary.');
+            return;
+          }
+          if (text && text !== before) {
             openSummaryDoc(doc.docId, '', doc.source);
             setRerunStatus('Re-run finished — the summary below is the new one.');
             return;
@@ -1351,7 +1358,9 @@ export function sumArticleLibraryScript(): string {
         // Both strips are HEAD-anchored (body-prep.ts's rules): the source-file
         // body has no breadcrumb, and an unanchored tags: match deleted a line
         // inside a restored code block.
-        var cleaned = text.replace(/^\\[[^\\n]* > [^\\n]*\\][ \\t]*\\r?\\n\\s*/, '').replace(/^tags:[^\\n]*\\n*/, '');
+        var cleaned = doc.textSource === 'file'
+          ? text
+          : text.replace(/^\\[[^\\n]* > [^\\n]*\\][ \\t]*\\r?\\n\\s*/, '').replace(/^tags:[^\\n]*\\n*/, '');
         // A Vimeo capture's timestamps become clicks into the video. The
         // DOCUMENT's url, not this function's url parameter: a ?doc= deep
         // link (the duplicate answer's own link, a bookmark) opens with '' —
