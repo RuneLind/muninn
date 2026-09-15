@@ -487,6 +487,13 @@ describe("defaultSourceBacklogDeps.fetchDoc — the body a re-draft is built fro
     expect(body).toBe("# Routing files\n\nThe video walks through a routing file.");
   });
 
+  test("a stalled source read falls back on its own 5 s budget, not the doc fetch's 15 s", async () => {
+    const started = Date.now();
+    const body = await draftedBody(() => new Promise<Response>(() => {}) as unknown as Response);
+    expect(body).toBe("# Routing files\n\nThe video walks through a routing file.");
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 20_000);
+
   test("a failed source read drafts from the cleaned copy, transcript cut", async () => {
     const body = await draftedBody(() => new Response("not found", { status: 404, headers: { "content-type": "text/plain" } }));
     expect(body).toBe("# Routing files\n\nThe video walks through a routing file.");

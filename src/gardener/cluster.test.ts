@@ -290,6 +290,10 @@ describe("excerptOf", () => {
     const text = "Lead sentence.\n\n```python\n# a comment\nx = 1\n```\n\nMore prose.";
     expect(excerptOf(text)).toBe("Lead sentence. More prose.");
   });
+
+  test("skips an indented line inside fenced code", () => {
+    expect(excerptOf("Lead sentence.\n\n```python\n    x = 1\n```")).toBe("Lead sentence.");
+  });
 });
 
 describe("buildClusterPrompt", () => {

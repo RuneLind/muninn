@@ -249,6 +249,14 @@ describe("buildDraftPrompt", () => {
     expect(p).toContain("\n````\n\n[… truncated for length]");
   });
 
+  test("a tilde fence line does not close a backtick block before the cut", () => {
+    const docs: HarvestedDoc[] = [
+      { key: "c/1", collection: "c", id: "1", url: "", title: "Mixed", text: `\`\`\`text\n~~~\n${"key: value\n".repeat(600)}\`\`\`\n` },
+    ];
+    const p = buildDraftPrompt({ cluster, mode: "create", docs, today: "2026-09-15" });
+    expect(p).toContain("\n```\n\n[… truncated for length]");
+  });
+
   test("a doc cut in prose after a closed fenced block adds no fence", () => {
     const docs: HarvestedDoc[] = [
       { key: "c/1", collection: "c", id: "1", url: "", title: "Closed", text: `\`\`\`yaml\nkey: value\n\`\`\`\n\n${"word ".repeat(1500)}` },
