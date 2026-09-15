@@ -241,6 +241,14 @@ describe("buildDraftPrompt", () => {
     expect((fenced.match(/^```/gm) ?? []).length % 2).toBe(0);
   });
 
+  test("a shorter inner fence does not close a four-backtick block before the cut", () => {
+    const docs: HarvestedDoc[] = [
+      { key: "c/1", collection: "c", id: "1", url: "", title: "Nested", text: `\`\`\`\`markdown\n\`\`\`\n${"key: value\n".repeat(600)}\`\`\`\`\n` },
+    ];
+    const p = buildDraftPrompt({ cluster, mode: "create", docs, today: "2026-09-15" });
+    expect(p).toContain("\n````\n\n[… truncated for length]");
+  });
+
   test("a doc cut in prose after a closed fenced block adds no fence", () => {
     const docs: HarvestedDoc[] = [
       { key: "c/1", collection: "c", id: "1", url: "", title: "Closed", text: `\`\`\`yaml\nkey: value\n\`\`\`\n\n${"word ".repeat(1500)}` },

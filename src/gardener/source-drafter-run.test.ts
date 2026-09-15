@@ -443,10 +443,17 @@ describe("defaultSourceBacklogDeps.fetchDoc — the body a re-draft is built fro
     metadata: { url: "https://youtu.be/routing0001" },
   };
 
+  const rawPaths: string[] = [];
+
   async function draftedBody(raw: () => Response): Promise<string> {
     const server = Bun.serve({
       port: 0,
-      fetch: (req) => (new URL(req.url).searchParams.has("raw") ? raw() : Response.json(CLEANED)),
+      fetch: (req) => {
+        const u = new URL(req.url);
+        if (!u.searchParams.has("raw")) return Response.json(CLEANED);
+        rawPaths.push(u.pathname);
+        return raw();
+      },
     });
     try {
       const seen: SourceDraftInput[] = [];
@@ -471,6 +478,8 @@ describe("defaultSourceBacklogDeps.fetchDoc — the body a re-draft is built fro
     expect(body).toContain("```markdown\n| Task | Model |\n| planning | opus-5 |\n```");
     expect(body).not.toContain("url: https://youtu.be/routing0001");
     expect(body).not.toContain("spoken words");
+    // Each id segment encoded on its own, slashes kept: the form huginn's route matches.
+    expect(rawPaths.at(-1)).toBe("/api/document/youtube-summaries/ai/claude-code/Routing%20files.md");
   });
 
   test("an older huginn answering ?raw=1 with JSON drafts from the cleaned copy, transcript cut", async () => {

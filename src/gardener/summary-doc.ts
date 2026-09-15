@@ -10,6 +10,10 @@
  * `/summaries` surfaces do (`readSummarySourceText`, which falls back to the
  * cleaned copy on any failure), and cut the appendix so they see the same body a
  * capture draft saw. The cut applies to the fallback copy too.
+ *
+ * The source read keeps `readSummarySourceText`'s own 5 s budget rather than
+ * `timeoutMs`, so a stalled `?raw=1` costs a harvested doc 5 s before the
+ * fallback, not the JSON read's whole budget.
  */
 import type { RawFetchedDoc } from "./types.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
@@ -23,7 +27,7 @@ export async function fetchSummaryDoc(
   id: string,
   timeoutMs: number,
 ): Promise<RawFetchedDoc> {
-  const source = readSummarySourceText(apiUrl, collection, encodeDocIdPath(id), timeoutMs);
+  const source = readSummarySourceText(apiUrl, collection, encodeDocIdPath(id));
   const doc: RawFetchedDoc = withSourceText(
     await fetchKnowledgeApi(apiUrl, `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, {
       timeoutMs,

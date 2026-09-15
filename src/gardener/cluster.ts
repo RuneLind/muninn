@@ -14,14 +14,15 @@ import type { WikiIndex } from "../wiki/store.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
+import { stripFencedCode } from "../summaries/transcript-split.ts";
 import { hasForbiddenBasename } from "./draft.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "cluster");
 
-/** First ~2 lines / 200 chars of the doc body, heading + frontmatter stripped. */
+/** First ~2 lines / 200 chars of the doc body, heading + frontmatter + fenced code stripped. */
 export function excerptOf(text: string, maxChars = 200): string {
-  const body = stripFrontmatter(text);
+  const body = stripFencedCode(stripFrontmatter(text));
   // Drop leading markdown headings + blank lines.
   const lines = body
     .split("\n")

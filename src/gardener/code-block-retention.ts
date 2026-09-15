@@ -35,9 +35,11 @@ function normalize(text: string): string {
 }
 
 /**
- * Fenced blocks outside the `## Transcript` appendix, with the closing rule
- * `mapProseLines` uses: a fence closes only on its own marker character at the
- * opening length or longer.
+ * Fenced blocks outside the `## Transcript` appendix, with CommonMark's closing
+ * rule: a fence closes only on its own marker character, at the opening length
+ * or longer, with no info string. `mapProseLines` also closes on a fence line
+ * carrying an info string, so on that one shape this walker ends a block later
+ * than the drafter paths do.
  */
 export function summaryCodeBlocks(summary: string): { lang: string; lines: string[] }[] {
   const blocks: { lang: string; lines: string[] }[] = [];

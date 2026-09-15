@@ -31,6 +31,11 @@ describe("summaryCodeBlocks", () => {
     expect(blocks.map((b) => b.lang)).toEqual(["markdown", "yaml"]);
     expect(blocks[1]!.lines).toEqual(["```", "routing: fallback-to-local"]);
   });
+
+  test("a fence line carrying an info string does not close a block (CommonMark)", () => {
+    const blocks = summaryCodeBlocks("```\nline one long enough\n```yaml\nline two long enough\n```");
+    expect(blocks).toEqual([{ lang: "", lines: ["line one long enough", "```yaml", "line two long enough"] }]);
+  });
 });
 
 describe("measureCodeRetention", () => {
