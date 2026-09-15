@@ -181,7 +181,9 @@ export function registerSummaryVertical<S extends string, F>(
     if (!encodedDocId) return c.json({ error: "Missing document ID" }, 400);
     // The JSON copy has its fenced code stripped; the body comes from the
     // source file when huginn can serve it. Started first so both run at once.
-    const source = readSummarySourceText(KNOWLEDGE_API_URL, collection, encodedDocId);
+    // 2 s, not the 5 s default: a stalled source read holds back a JSON copy
+    // that is already there (live reads measure ~0.04 s).
+    const source = readSummarySourceText(KNOWLEDGE_API_URL, collection, encodedDocId, 2_000);
     return knowledgeApiHandler(
       c,
       KNOWLEDGE_API_URL,

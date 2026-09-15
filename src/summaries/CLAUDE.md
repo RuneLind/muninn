@@ -35,6 +35,17 @@ so a re-run built from it shrinks the document a little on every pass. It reads
 flag, because a caller that got a string back from the JSON function is one
 refactor away from reading `.documents` off it.
 
+**Every surface that SHOWS a summary reads the raw file too** (#551): the
+`<apiBase>/document/*` proxy (the doc panel), Export and Share overlay `text`
+with `readSummarySourceText` (`src/summaries/source-text.ts`) — frontmatter
+stripped, huginn's document-text IMAGE rules re-applied outside fenced code
+(the whitelist from `FilesDocumentConverter._document_text_image`, plus S3 URLs
+→ `[file]`), fenced code kept. It answers `null` on any failure or a non-`text/*`
+body (a huginn without #131 answers JSON), and the proxy then serves the cleaned
+copy unchanged; only an overlaid body carries `textSource: "file"`, which the
+re-run reload check uses so a file-form and an index-form body are never
+compared.
+
 **The split contract.** `src/summaries/transcript-split.ts` owns
 `splitTranscript` — the first level-2 `## Transcript` heading OUTSIDE fenced
 code, the export's own rule, moved when the re-run became its third server-side

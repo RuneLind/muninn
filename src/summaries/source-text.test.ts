@@ -23,6 +23,38 @@ test("reads ?raw=1 for the encoded path and strips the frontmatter", async () =>
   expect(seen).toEqual(["http://kb.test/api/document/youtube-summaries/ai/T%20x.md?raw=1"]);
 });
 
+test("applies huginn's document-text image rules outside fenced code", async () => {
+  const body = [
+    "# T",
+    "![Slide at 00:01:33](/api/frames/vimeo/1/93.jpg)",
+    "![chart](https://example.com/c.png \"a title\")",
+    "![signed](https://cdn.example.com/k.png?X-Amz-Signature=abc)",
+    "![bucket](https://b.s3.eu-west-1.amazonaws.com/k.png)",
+    "![blob](data:image/png;base64,AAAA)",
+    "![user](https://me:pw@example.com/k.png)",
+    "See https://b.s3.eu-west-1.amazonaws.com/report.pdf for the file.",
+    "```",
+    "![kept verbatim](data:image/png;base64,AAAA)",
+    "```",
+  ].join("\n");
+  answer(() => new Response(`---\nx: 1\n---\n${body}`, { headers: { "content-type": "text/markdown" } }));
+  expect(await readSummarySourceText("http://kb.test", "c", "d.md")).toBe(
+    [
+      "# T",
+      "![Slide at 00:01:33](/api/frames/vimeo/1/93.jpg)",
+      "![chart](https://example.com/c.png)",
+      "",
+      "",
+      "",
+      "",
+      "See [file] for the file.",
+      "```",
+      "![kept verbatim](data:image/png;base64,AAAA)",
+      "```",
+    ].join("\n"),
+  );
+});
+
 test("answers null for a JSON body, an error status and an unreachable huginn", async () => {
   answer(() => new Response("{}", { headers: { "content-type": "application/json" } }));
   expect(await readSummarySourceText("http://kb.test", "c", "d.md")).toBeNull();

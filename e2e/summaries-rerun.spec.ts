@@ -157,11 +157,11 @@ let releaseModel: () => void = () => {};
 let modelGate: Promise<void> = Promise.resolve();
 
 /**
- * huginn's LISTING LAG, faked: the ingest writes the file, and the document
- * endpoint keeps serving the pre-ingest copy for a few reads afterwards. This is
- * the real behaviour (the re-index is a background job) and it is what the
- * panel's post-`complete` reload has to survive — reloading immediately renders
- * the OLD body under a line claiming it is the new one.
+ * A LAG before the new body shows, faked on the `?raw=1` branch the panel's body
+ * comes from: the document endpoint keeps serving the pre-ingest copy for a few
+ * reads afterwards. Real huginn serves the new file at once, but a panel whose
+ * source read fell back to the re-indexed JSON copy sees exactly this lag, and
+ * reloading immediately would render the OLD body under a line calling it new.
  */
 let pendingNewBody: string | null = null;
 let staleReads = 0;
@@ -255,23 +255,24 @@ async function startFake(): Promise<Server> {
         const files = SOURCE_FILES[collection];
         if (!files) return json({ detail: "not found" }, 404);
 
-        // The RAW source file — the whole point of the vertical slice.
+        // The RAW source file — the whole point of the vertical slice, and
+        // since #551 also what the doc panel renders, so the lag lives here.
         if (url.searchParams.get("raw") === "1") {
+          if (id === DOC_FULL && pendingNewBody !== null) {
+            if (staleReads > 0) staleReads -= 1;
+            else {
+              files[DOC_FULL] = pendingNewBody;
+              pendingNewBody = null;
+            }
+          }
           const raw = files[id];
           if (raw === undefined) return json({ detail: "not found" }, 404);
           res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
           return res.end(raw);
         }
 
-        // The CLEANED JSON form the doc panel renders from — a breadcrumb on
-        // top, exactly as huginn's converter writes it.
-        if (id === DOC_FULL && pendingNewBody !== null) {
-          if (staleReads > 0) staleReads -= 1;
-          else {
-            files[DOC_FULL] = pendingNewBody;
-            pendingNewBody = null;
-          }
-        }
+        // The CLEANED JSON form — a breadcrumb on top, exactly as huginn's
+        // converter writes it. The panel takes only url/metadata from it now.
         const body = files[id];
         if (body === undefined) return json({ detail: "not found" }, 404);
         const withoutFrontmatter = body.split("\n---\n").slice(1).join("\n---\n");

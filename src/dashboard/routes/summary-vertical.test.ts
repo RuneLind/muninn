@@ -171,21 +171,26 @@ test("document: the body is the source file, so fenced code survives huginn's cl
   try {
     const res = await appFor(fixedStore(makeJob({}))).request("/api/test/document/Talk.md");
     expect(res.status).toBe(200);
-    const doc = (await res.json()) as { text: string; url: string };
+    const doc = (await res.json()) as { text: string; url: string; textSource?: string };
     expect(doc.text).toBe("# Talk\n\nThe routing file:\n\n```\n| role | model |\n```\n\nAfter the file.");
     expect(doc.url).toBe("https://example.com/v");
+    expect(doc.textSource).toBe("file");
   } finally {
     restore();
   }
 });
 
-test("document: keeps the JSON copy when ?raw=1 is not markdown (a huginn without raw support answers JSON)", async () => {
+test("document: keeps the JSON copy when ?raw=1 is not a text/* body (a huginn without raw support answers JSON)", async () => {
   const restore = stubHuginn(
     () => new Response(JSON.stringify({ text: "not a source file" }), { status: 200, headers: { "content-type": "application/json" } }),
   );
   try {
-    const doc = (await (await appFor(fixedStore(makeJob({}))).request("/api/test/document/Talk.md")).json()) as { text: string };
+    const doc = (await (await appFor(fixedStore(makeJob({}))).request("/api/test/document/Talk.md")).json()) as {
+      text: string;
+      textSource?: string;
+    };
     expect(doc.text).toBe(CLEANED_TEXT);
+    expect(doc.textSource).toBeUndefined();
   } finally {
     restore();
   }

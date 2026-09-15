@@ -806,13 +806,14 @@ export function sumArticleLibraryScript(): string {
     /**
      * "The summary below is the new one" is a claim, so it is CHECKED.
      *
-     * huginn's ingest returns as soon as the file is written; its document
-     * endpoint serves the re-indexed copy some seconds later. Re-opening the
-     * panel the instant the job completes therefore renders the OLD body about
-     * half the time — the listing-lag class — under a line saying it is the new
-     * one. So the body is re-fetched and compared with what was on screen when
-     * the run started, ~5 times over ~10s, and if it never changes the reader is
-     * told that instead.
+     * huginn's ingest returns as soon as the file is written. The body normally
+     * comes from that file (textSource "file") and changes at once, but when the
+     * source read fails the route falls back to the cleaned copy, which huginn
+     * re-indexes some seconds later. So the body is re-fetched and compared with
+     * what was on screen when the run started, ~5 times over ~10s, and if it
+     * never changes the reader is told that instead. A body from the OTHER form
+     * always differs (breadcrumb, fences) and proves nothing, so it only counts
+     * when both reads came from the same form.
      */
     function confirmRerunLanded(doc, before, attempt) {
       if (!rerunPanelShows(doc)) return;
@@ -823,7 +824,7 @@ export function sumArticleLibraryScript(): string {
         .then(function(fresh) {
           if (!rerunPanelShows(doc)) return;
           var text = (fresh && fresh.text) || '';
-          if (text && text !== before) {
+          if (text && text !== before && (fresh.textSource || '') === (doc.textSource || '')) {
             openSummaryDoc(doc.docId, '', doc.source);
             setRerunStatus('Re-run finished — the summary below is the new one.');
             return;
@@ -1346,8 +1347,11 @@ export function sumArticleLibraryScript(): string {
         if (myRequest !== _docRequestId) return;  // superseded
 
         var text = doc.text || '';
-        // Strip breadcrumb prefix [collection > path] and tags line
-        var cleaned = text.replace(/^\\[.*?\\]\\n*/, '').replace(/^tags:.*\\n*/m, '');
+        // The cleaned fallback copy opens with a [collection > path] breadcrumb.
+        // Both strips are HEAD-anchored (body-prep.ts's rules): the source-file
+        // body has no breadcrumb, and an unanchored tags: match deleted a line
+        // inside a restored code block.
+        var cleaned = text.replace(/^\\[[^\\n]* > [^\\n]*\\][ \\t]*\\r?\\n\\s*/, '').replace(/^tags:[^\\n]*\\n*/, '');
         // A Vimeo capture's timestamps become clicks into the video. The
         // DOCUMENT's url, not this function's url parameter: a ?doc= deep
         // link (the duplicate answer's own link, a bookmark) opens with '' —
@@ -1360,6 +1364,7 @@ export function sumArticleLibraryScript(): string {
         if (_shareDoc && _shareDoc.docId === docId && _shareDoc.source === source) {
           _shareDoc.url = videoUrl || '';
           _shareDoc.text = text;
+          _shareDoc.textSource = doc.textSource || '';
         }
         // The header's own source link, for the same reason: built from the
         // parameter before the fetch, the ?doc= path had no link at all —
