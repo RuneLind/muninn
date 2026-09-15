@@ -114,6 +114,30 @@ export interface WikiListing {
    * the facet's chip list needs no folding of its own.
    */
   project?: string;
+  /**
+   * Jira keys this page serves, normalized to trimmed UPPERCASE server-side
+   * (`src/wiki/provenance.ts`). Written by claude-usage's `wiki-stamp` CLI, never
+   * by muninn.
+   *
+   * **Listing field**, the `project` twin: it backs the Jira facet, so it rides
+   * the hot `/api/wiki/pages` payload and is NOT stripped by `toListing`. Absent
+   * — never `[]` — on a page carrying no key, which is most pages.
+   */
+  jira?: string[];
+  /**
+   * The agent sessions that wrote this page (`provider:id`, in arrival order).
+   *
+   * **Single-page payloads only**, exactly like `desc`: `/api/wiki/pages` strips
+   * it (see `toListing`'s `includeProvenance`), and so do the outgoing/backlink
+   * arrays on `/api/wiki/page`. Any consumer must tolerate its absence.
+   */
+  sessions?: string[];
+  /** `YYYY-MM-DD` — the `sessions` list came from a history sweep rather than
+   *  live stamps. Single-page only, like `sessions`. */
+  sessionsBackfilled?: string;
+  /** Pull requests this page's work landed as (`owner/repo#number`). Single-page
+   *  only, like `sessions`. */
+  prs?: string[];
   linkCount: number;
   backlinkCount: number;
 }

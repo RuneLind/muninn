@@ -25,6 +25,12 @@ import {
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
+import { jiraCounts } from "../../wiki/provenance.ts";
+import { pageProvenance } from "../../wiki/provenance-service.ts";
+import {
+  defaultProvenanceContext,
+  registerWikiProvenanceRoutes,
+} from "./wiki-provenance.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
@@ -998,7 +1004,7 @@ interface WikiPageListing extends WikiPageMeta {
 function toListing(
   index: WikiIndex,
   meta: WikiPageMeta,
-  opts: { includeDesc?: boolean } = {},
+  opts: { includeDesc?: boolean; includeProvenance?: boolean } = {},
 ): WikiPageListing {
   // `desc` + `pubDate` are stripped by default: they are page-body fields no
   // LISTING consumer reads, and on jarvis they add ~100 KB to the hot
@@ -1019,11 +1025,25 @@ function toListing(
   // single-page response is the only place the reader's own page arrives.
   // `pubDate` stays Atlas-only (`GET /api/wiki/atlas` reads it directly off the
   // index, never through here).
-  const { desc, pubDate, ...rest } = meta;
+  //
+  // `includeProvenance` is the SECOND opt-in, passed only by caller 2 for the
+  // same reason: `sessions`/`prs`/`sessions_backfilled` are page-body facts the
+  // reader's provenance strip renders for the ONE open page, and a session id is
+  // ~45 bytes on a listing nothing renders them in. `jira` is deliberately NOT
+  // in this strip — it is a listing FACET (the `project` twin), so the hot
+  // payload is exactly where it has to be.
+  const { desc, pubDate, sessions, prs, sessionsBackfilled, ...rest } = meta;
   void pubDate;
   return {
     ...rest,
     ...(opts.includeDesc && desc ? { desc } : {}),
+    ...(opts.includeProvenance
+      ? {
+          ...(sessions ? { sessions } : {}),
+          ...(prs ? { prs } : {}),
+          ...(sessionsBackfilled ? { sessionsBackfilled } : {}),
+        }
+      : {}),
     linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
     backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
   };
@@ -1141,6 +1161,17 @@ async function getCollectionUpdateStatus(
  *  (jarvis if registered, else the first) — unless `WIKI_DIR` is set, which
  *  stays an explicit legacy override with no wiki claimed in the picker. */
 export function registerWikiRoutes(app: Hono, config: Config): void {
+  // Built once per process: `defaultSessionLedgerDeps` closes over the resolved
+  // claude-usage base URL, and rebuilding it per request would re-derive the
+  // same three values on every page open.
+  const provenanceCtx = defaultProvenanceContext(config);
+
+  // The reverse lookups live in their own module (they iterate the whole wiki
+  // registry rather than resolving one wiki) but register INSIDE this group, so
+  // `MUNINN_PROFILE=nais` drops them with the rest of the filesystem-bound wiki
+  // surface — see `route-groups.ts`.
+  registerWikiProvenanceRoutes(app, config, provenanceCtx);
+
   app.get("/wiki", async (c) => {
     const registry = getWikiRegistry();
     const wikis = listWikis(registry);
@@ -1270,6 +1301,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // is how the client knows to render no Project facet at all, rather than
       // one empty option.
       projects: projectCounts(index.pages),
+      // Jira key → page count, over the SAME page array, for the Jira facet —
+      // the `projects` twin in every respect including the empty answer: `{}` on
+      // a wiki nothing has stamped, which is how the client knows to render no
+      // facet rather than one empty control. The chips themselves are PR 4b.
+      jira: jiraCounts(index.pages),
       // The wiki's `defaultType`, "" when it declares none. The client needs it
       // for exactly one decision — `hubTypeList` excludes the leftovers bucket
       // from the start view's "Top … by connections" sections — and cannot derive
@@ -1748,10 +1784,18 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         .filter((m): m is WikiPageMeta => m !== undefined)
         .map((m) => toListing(index, m));
 
+    // The provenance strip's data: who wrote this page, which issue it serves,
+    // which PRs it landed as, and what those sessions cost. ABSENT (not empty)
+    // on a page carrying none of the keys, which is most pages. One
+    // `/api/sessions-by-id` call for the whole page; an unreachable claude-usage
+    // degrades to bare chips rather than failing the page open.
+    const provenance = await pageProvenance(meta, provenanceCtx);
+
     return c.json({
-      // The one caller that opts `desc` in — see `toListing`. Deliberately NOT
+      // The two callers that opt fields in — see `toListing`. Deliberately NOT
       // `listings()` below, whose arrays are the link-heavy pages' bulk.
-      meta: toListing(index, meta, { includeDesc: true }),
+      meta: toListing(index, meta, { includeDesc: true, includeProvenance: true }),
+      ...(provenance ? { provenance } : {}),
       // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
       // a link opened on a non-default wiki lands on the DEFAULT one.
       html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title, wiki: entry?.name }),
@@ -3569,6 +3613,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (result.outcome === "stale") {
         return c.json({ error: result.reason, stale: true }, 409);
       }
+      // Another PROCESS (claude-usage's `wiki-stamp`) held the wiki lockfile for
+      // the whole wait. Nothing was read or written, so it is a retryable
+      // conflict — 409 beside `stale`, not the 500 a write failure earns.
+      if (result.outcome === "locked") {
+        return c.json({ error: result.reason, locked: true }, 409);
+      }
       if (result.outcome === "error") {
         log.warn("Fact-check append failed for wiki={wiki} page={page}: {reason}", {
           wiki: entry.name,
@@ -4121,6 +4171,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       }
       if (result.outcome === "stale") {
         return c.json({ error: result.reason, stale: true }, 409);
+      }
+      // The wiki lockfile was held by another process for the whole wait — see
+      // the append route's twin of this line.
+      if (result.outcome === "locked") {
+        return c.json({ error: result.reason, locked: true }, 409);
       }
       // A budget breach declines the transform, so it surfaces as `noop` — but it
       // is a client-caused 400 naming the bound, not a silent "nothing applied".

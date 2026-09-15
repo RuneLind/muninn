@@ -31,6 +31,9 @@ export type AppendOutcome =
   /** Propagated from `writeWikiPage` on a wiki-readonly instance — a refusal the
    *  caller maps to 403, deliberately NOT collapsed into `error` (⇒ 500). */
   | { outcome: "forbidden"; reason: string }
+  /** Propagated from `writeWikiPage`: another process held the wiki write
+   *  lockfile. A retryable conflict the caller maps to 409, like `stale`. */
+  | { outcome: "locked"; reason: string }
   | { outcome: "error"; reason: string };
 
 export interface AppendBlockOptions

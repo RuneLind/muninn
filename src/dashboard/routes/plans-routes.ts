@@ -356,6 +356,12 @@ export function registerPlansRoutes(
       if (result.outcome === "stale") {
         return c.json({ error: result.reason, stale: true }, 409);
       }
+      // The cross-process wiki lockfile was held throughout (claude-usage's
+      // `wiki-stamp` is the other holder). Nothing was written — a retryable
+      // conflict, so 409 beside `stale` rather than a 500 or a silent 200.
+      if (result.outcome === "locked") {
+        return c.json({ error: result.reason, locked: true }, 409);
+      }
       if (result.outcome === "error") {
         log.error("plan priority: write failed for {slug}: {error}", { slug, error: result.reason });
         return c.json({ error: result.reason }, 500);
@@ -448,6 +454,10 @@ export function registerPlansRoutes(
       }
       if (result.outcome === "stale") {
         return c.json({ error: result.reason, stale: true }, 409);
+      }
+      // Same 409 as `/priority` above, for the same held lockfile.
+      if (result.outcome === "locked") {
+        return c.json({ error: result.reason, locked: true }, 409);
       }
       if (result.outcome === "error") {
         log.error("plan status: write failed for {slug}: {error}", { slug, error: result.reason });

@@ -391,6 +391,146 @@ Turns one wiki page into a pasteable post — the reader's **📤 Share** breadc
 - **`GET /api/wiki/share/presets?wiki=`** serves the merged preset list WITH its content (the dialog shows and edits the prompt) plus the language list. Read-only, model-free, 404 on an unknown wiki; a bot-less wiki still gets the shipped set with `bot: null`.
 - **One dialog module, one copy per page.** `share-dialog.ts` owns the state and the document listeners; `share-dialog-browser.ts` publishes `openShareDialog` on `globalThis` for pages that cannot import (the `/summaries` mount). The /wiki reader IMPORTS it from inside `wiki-browser.ts`'s bundle and never loads the standalone script — doing both would put two module states and two listener sets on one page.
 
+## Provenance (`provenance.ts`, `provenance-service.ts`, `session-ledger.ts`, `lockfile.ts`)
+
+Which agent sessions wrote a page, which Jira issue it serves, which PRs its work
+landed as — four frontmatter keys, one flow list per line:
+
+```yaml
+sessions: [claude-code:5a2ee3f0-…, opencode:ses_7f3a9b2c1d]
+sessions_backfilled: 2026-10-14
+jira: [MELOSYS-8045]
+prs: [navikt/melosys-api#1234, RuneLind/muninn#543]
+```
+
+**muninn NEVER writes them.** There is exactly ONE line-upsert implementation and
+it lives in claude-usage (`src/wiki-stamp.ts`, driven by `scripts/wiki-stamp.ts`);
+the Claude Code `PostToolUse` hook and the opencode plugin call it today, and
+muninn's own Link Jira is to shell out to the same CLI (`WIKI_STAMP_BIN`, a later
+PR) rather than grow a second writer. Two writers of one frontmatter line lose
+each other's appends — which is what the lockfile below exists for.
+
+**The shape is checked in TWICE, byte for byte** —
+`src/wiki/__fixtures__/wiki-stamp-shape.md` here,
+`test/fixtures/wiki-stamp/shape.md` in claude-usage. Each repo's suite pins its
+own side (`provenance.test.ts`'s first describe block reads the file and asserts
+the four keys), so a shape change without the other repo fails loudly on one side
+instead of degrading a reader in silence.
+
+**What the store does with them** (`buildWikiIndex`, beside `project`): `sessions`
+and `prs` verbatim and in FILE order (arrival order, never sorted), `jira`
+normalized to trimmed UPPERCASE so a page's spelling and a query's cannot
+disagree, `sessions_backfilled` as a trimmed string. All four are **absent, not
+`[]`**, on a page carrying none — which is every page of every wiki until the
+stamper has run on it, and an empty array per page is listing payload asserting
+nothing. Jira keys are deliberately NOT shape-filtered: a value that is not a key
+shape is a typo worth seeing in the facet, not one worth hiding.
+
+**What reaches which payload** is a deliberate split, and `toListing` is where it
+is made: `jira` is a listing FACET (the `project` twin) and rides the hot
+`/api/wiki/pages` payload, with `jiraCounts(index.pages)` beside `projects:` —
+`{}` on a wiki nothing has stamped, which is how the client knows to render no
+facet at all. `sessions`/`prs`/`sessions_backfilled` are stripped by default and
+opted in by the SINGLE-PAGE caller alone, through `includeProvenance` (the
+`includeDesc` mechanism, whose comment names all three callers of that one
+function).
+
+**The reader's block** rides `GET /api/wiki/page` beside `meta`, and only when the
+page carries any of the keys — `{sessions, jira, prs, totalCost, costedSessions,
+backfilled?, ledger}`. Sessions are enriched SERVER-side in ONE
+`GET <CLAUDE_USAGE_URL>/api/sessions-by-id?ids=…` call through the bounded reader
+(`utils/bounded-fetch.ts`, 10 s / 8 MiB — the plans board's degrade shape and its
+warn-once-then-info key): the `provider:` prefix is muninn's, so the ids go BARE
+and the prefix is kept in the response for the glyph. The browser never reaches
+port 8787 (tailnet viewers, mixed content under `tailscale serve`), so the
+drill-down is the session id as copyable text plus an optional
+`CLAUDE_USAGE_PUBLIC_URL` link.
+
+**Cost is labelled honestly.** `totalCost` is the sum over the sessions the ledger
+PRICED and is never a per-page share — a session that wrote four pages cost what
+it cost, and dividing it four ways would invent a number — with `costedSessions`
+as the denominator that total is over. A session the ledger does not hold is a
+`missing: true` chip contributing nothing, and is not a $0 session either;
+`ledger.reachable` is what tells "this session is gone" from "I could not ask",
+because the chip cannot.
+
+**Two reverse lookups**, `GET /api/wiki/provenance` (`routes/wiki-provenance.ts`,
+registered INSIDE the `wiki` route group so `MUNINN_PROFILE=nais` drops it with
+the rest of the filesystem-bound surface):
+
+| Query | Answer |
+|---|---|
+| `?jira=<KEY>` | every page in EVERY registered wiki serving that issue |
+| `?session=<provider:id or bare id>` | every page that session wrote |
+
+They are the one `/api/wiki/*` family that iterates the whole REGISTRY rather
+than resolving one wiki — an issue is served by a page in the kode-wiki and
+discussed in a mimir plan, and "which pages serve MELOSYS-8045" has no useful
+per-wiki answer — so each row names its own `wiki`. The key is normalized before
+matching (`melosys-8045` is what a shared URL carries) and a non-key shape is a
+400 (`^[A-Z][A-Z0-9]+-[0-9]+$`); both params at once is a 400 rather than a
+silent preference; a key nothing serves is an empty list, not a 404. A degraded
+ledger never 5xxes either route.
+
+**Neither route carries the per-wiki egress prologue, deliberately.** The whole
+request is a list of session ids and Jira keys going to a LOCAL ledger and a
+local knowledge API — no page content leaves the machine and no model call is
+spent — so a read-only INSTANCE (`MUNINN_WIKI_READONLY=1`, the mini serving
+mimir) and a read-only ROOT both answer them in full. Provenance is a READ; only
+the lock below touches a write seam.
+
+### The cross-process lockfile (`lockfile.ts`)
+
+`runWikiWriteExclusive` serializes muninn's own writers against each other. It
+cannot serialize muninn against ANOTHER PROCESS, and there is one: `wiki-stamp`,
+spawned from a `PostToolUse` hook, appends a session id to a page's `sessions:`
+line while the model is mid-turn on that same file. So both sides take
+`<root>/.wiki-write.lock` with `openSync(path, "wx")` (`O_CREAT|O_EXCL`),
+gitignored in both wikis.
+
+| | wiki-stamp | muninn |
+|---|---|---|
+| wait | 250 ms | `WIKI_LOCK_WAIT_MS` (2 s) |
+| stale takeover | 10 s | `WIKI_LOCK_STALE_MS` (10 s, the same) |
+| on timeout | skip the stamp, record it | `locked` outcome, nothing written |
+
+muninn waits eight times longer because it is the LONG holder — its section spans
+read → CAS → write → log.md, while the stamp is a read-modify-write of four
+lines — and because a hook is synchronous on a tool call while a human clicking ➕
+can wait. The stale window is the same on both sides: shorter here and muninn
+seizes a lock the stamper still holds; longer and muninn waits behind an
+interrupted stamp longer than the stamper would wait for itself.
+
+Three rules are load-bearing:
+
+- **Two locks, in this order.** The in-process QUEUE first (it is what the chain
+  is keyed on), the FILE lock inside it, released before the section returns — so
+  the commit tail, which enqueues on a different chain, never runs holding it.
+  Taking the file lock outside the queue would make every queued writer wait on
+  it in turn while the one ahead held the chain: a deadlock shape, not a wait.
+- **Only a HELD lock refuses a write.** EEXIST means someone has it: wait, poll,
+  take over once stale. Any OTHER errno — ENOENT on a root that does not exist,
+  EACCES on a 0555 checkout, EROFS on a read-only mount — means waiting cannot
+  help, so muninn proceeds with a warn. The lock is an advisory interlock with a
+  best-effort stamper (which records `lock-unavailable` and skips on the same
+  errnos); a root muninn genuinely cannot write to fails at the WRITE, which is
+  where that failure belongs.
+- **`locked` is its own `PageWriteOutcome` variant**, not `error`: nothing failed
+  and nothing was written, so every route maps it to **409 `{error, locked:
+  true}`** beside `stale` — the fact-check append, the integrate apply and both
+  `/plans` writes. Those routes map outcomes with `if` chains whose fall-through
+  is success, so a new variant that is not named there reports a write that never
+  happened.
+
+`applyWikiProposal` and `writePlanQueue` route through `runWikiWriteExclusive`
+but NOT through `writeWikiPage`, so they take the in-process queue and **not** the
+file lock. Stated rather than fixed: their outcome unions have no `locked`
+variant, and mapping a 2-second lock contention onto `applyWikiProposal`'s
+`error` flips the proposal row to a terminal `error` state — a worse failure than
+the narrow race (the stamper only ever appends frontmatter to a page that already
+exists). Adding the lock there means adding the variant and its route mapping
+first.
+
 ## Write queue (`queue.ts`)
 
 Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, so every read-modify-writer of it (gardener apply, fact-check append/integrate, `writeWikiPage`) must serialize on this one chain. `writePlanQueue` joins it too — it writes no `log.md`, but it shares mimir's working tree with the page writers and the sync loop's staging.

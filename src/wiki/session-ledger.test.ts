@@ -1,0 +1,154 @@
+/**
+ * The claude-usage `/api/sessions-by-id` client: batching against both bounds,
+ * and the degrade shape a page with bare chips is built from.
+ */
+
+import { test, expect, describe, beforeEach } from "bun:test";
+import {
+  batchSessionIds,
+  fetchSessionsById,
+  SESSION_IDS_PER_CALL,
+  SESSION_IDS_QUERY_MAX_BYTES,
+  __resetSessionLedgerWarnsForTest,
+  type SessionLedgerDeps,
+} from "./session-ledger.ts";
+
+beforeEach(() => __resetSessionLedgerWarnsForTest());
+
+function deps(
+  fetchSessions: SessionLedgerDeps["fetchSessions"],
+  urlConfigured = true,
+): SessionLedgerDeps {
+  return { fetchSessions, urlConfigured, baseUrl: "http://127.0.0.1:8787" };
+}
+
+const facts = (id: string, cost: number) => ({
+  sessionId: id,
+  title: `s-${id}`,
+  provider: "claude-code",
+  host: "mini",
+  hosts: ["mini"],
+  first: null,
+  last: null,
+  cost,
+  messages: 3,
+});
+
+describe("batchSessionIds", () => {
+  test("pages at the id cap", () => {
+    const ids = Array.from({ length: 450 }, (_, i) => `id-${i}`);
+    const batches = batchSessionIds(ids);
+    expect(batches.map((b) => b.length)).toEqual([SESSION_IDS_PER_CALL, SESSION_IDS_PER_CALL, 50]);
+    expect(batches.flat()).toEqual(ids);
+  });
+
+  test("pages at the QUERY BYTE budget too, which the id cap alone does not bound", () => {
+    // 200 ids of this length are ~20 KB of query — past the 16,321-byte request
+    // LINE limit upstream answers with an empty-bodied 431 before any handler.
+    const long = Array.from({ length: 200 }, (_, i) => `${"x".repeat(100)}-${i}`);
+    const batches = batchSessionIds(long);
+    expect(batches.length).toBeGreaterThan(1);
+    for (const batch of batches) {
+      const bytes = batch.map((id) => encodeURIComponent(id)).join(",").length;
+      expect(bytes).toBeLessThanOrEqual(SESSION_IDS_QUERY_MAX_BYTES);
+    }
+    expect(batches.flat()).toEqual(long);
+  });
+
+  test("an id larger than the whole budget still goes out alone rather than being dropped", () => {
+    const huge = "y".repeat(SESSION_IDS_QUERY_MAX_BYTES + 10);
+    expect(batchSessionIds([huge, "small"])).toEqual([[huge], ["small"]]);
+  });
+});
+
+describe("fetchSessionsById", () => {
+  test("holds the facts it was given and reports reachable", async () => {
+    const res = await fetchSessionsById(
+      deps(async (ids) => ({ sessions: ids.map((id) => facts(id, 1)), limit: 200, truncated: false })),
+      ["a", "b"],
+    );
+    expect(res.reachable).toBe(true);
+    expect(res.facts.get("a")?.cost).toBe(1);
+    expect(res.errors).toBeUndefined();
+  });
+
+  test("a `missing: true` row never enters the map — it is not a $0 session", async () => {
+    const res = await fetchSessionsById(
+      deps(async () => ({ sessions: [facts("a", 2), { sessionId: "b", missing: true }] })),
+      ["a", "b"],
+    );
+    expect(res.reachable).toBe(true);
+    expect(res.facts.has("a")).toBe(true);
+    expect(res.facts.has("b")).toBe(false);
+  });
+
+  test("ids are deduped and trimmed before the call", async () => {
+    const seen: string[][] = [];
+    await fetchSessionsById(
+      deps(async (ids) => {
+        seen.push(ids);
+        return { sessions: [] };
+      }),
+      [" a ", "a", "b", ""],
+    );
+    expect(seen).toEqual([["a", "b"]]);
+  });
+
+  test("an empty list asks nothing and reports unreachable with no error", async () => {
+    let called = false;
+    const res = await fetchSessionsById(
+      deps(async () => {
+        called = true;
+        return { sessions: [] };
+      }),
+      [],
+    );
+    expect(called).toBe(false);
+    expect(res.reachable).toBe(false);
+    expect(res.errors).toBeUndefined();
+  });
+
+  test("a rejecting fetch degrades to unreachable + an error naming the base URL", async () => {
+    const res = await fetchSessionsById(
+      deps(async () => {
+        throw new Error("connect ECONNREFUSED (http://127.0.0.1:8787)");
+      }),
+      ["a"],
+    );
+    expect(res.reachable).toBe(false);
+    expect(res.facts.size).toBe(0);
+    expect(res.errors?.[0]).toContain("http://127.0.0.1:8787");
+  });
+
+  test("a body that is not an object, or carries no sessions array, is a wrong service — not an empty ledger", async () => {
+    const arr = await fetchSessionsById(deps(async () => [1, 2, 3]), ["a"]);
+    expect(arr.reachable).toBe(false);
+    expect(arr.errors?.[0]).toContain("not a JSON object");
+
+    const noArray = await fetchSessionsById(deps(async () => ({ sessions: "nope" })), ["a"]);
+    expect(noArray.reachable).toBe(false);
+    expect(noArray.errors?.[0]).toContain("no `sessions` array");
+  });
+
+  test("one failing batch leaves the other batch's facts in hand", async () => {
+    const ids = Array.from({ length: 250 }, (_, i) => `id-${i}`);
+    const res = await fetchSessionsById(
+      deps(async (batch) => {
+        if (batch.length === SESSION_IDS_PER_CALL) throw new Error("boom");
+        return { sessions: batch.map((id) => facts(id, 0.5)) };
+      }),
+      ids,
+    );
+    expect(res.reachable).toBe(true); // the second batch answered
+    expect(res.facts.size).toBe(50);
+    expect(res.errors?.length).toBe(1);
+  });
+
+  test("upstream's own truncation flag is reported rather than assumed away", async () => {
+    const res = await fetchSessionsById(
+      deps(async () => ({ sessions: [], truncated: true })),
+      ["a"],
+    );
+    expect(res.truncated).toBe(true);
+  });
+});
