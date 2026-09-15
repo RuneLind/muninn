@@ -13,6 +13,7 @@
 import type { BotConfig } from "../bots/config.ts";
 import type { ListedDoc, RawFetchedDoc } from "./types.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
+import { fetchSummaryDoc } from "./summary-doc.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import {
   collectWikiRefs,
@@ -210,11 +211,7 @@ export async function runSourceDraftForNewest(
 
   let doc: RawFetchedDoc | null;
   try {
-    doc = await fetchKnowledgeApi(
-      apiUrl,
-      `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(newest.id)}`,
-      { timeoutMs: DOC_FETCH_TIMEOUT_MS },
-    );
+    doc = await fetchSummaryDoc(apiUrl, collection, newest.id, DOC_FETCH_TIMEOUT_MS);
   } catch (err) {
     return preModel("error", `fetching ${collection}/${newest.id} failed: ${errMsg(err)}`);
   }
@@ -366,12 +363,7 @@ export function defaultSourceBacklogDeps(
     sweepWikiRefs: collectWikiRefs,
     getConsumed: DEFAULT_COVERAGE_DEPS.getConsumed,
     getPending: DEFAULT_COVERAGE_DEPS.getPending,
-    fetchDoc: (collection, id) =>
-      fetchKnowledgeApi(
-        apiUrl,
-        `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
-        { timeoutMs: DOC_FETCH_TIMEOUT_MS },
-      ),
+    fetchDoc: (collection, id) => fetchSummaryDoc(apiUrl, collection, id, DOC_FETCH_TIMEOUT_MS),
     draftInput: (input) => runSourceDraftForInput(botConfig, wikiDir, input, trigger),
     recordAttempt: (collection, docId, outcome) =>
       recordSourceDraftAttempt({

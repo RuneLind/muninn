@@ -6,6 +6,7 @@ import {
   runSourceDraftBacklog,
   runSourceDraftForNewest,
   draftOneBacklogDoc,
+  defaultSourceBacklogDeps,
   triggerSourceDraftFromCapture,
   SOURCE_BACKLOG_DEFAULT_LIMIT,
   SOURCE_BACKLOG_MAX_LIMIT,
@@ -399,6 +400,87 @@ describe("runSourceDraftForNewest — the dismissed seam", () => {
     } finally {
       globalThis.fetch = orig;
     }
+  });
+
+  test("reads the newest doc's source file, not only huginn's cleaned copy", async () => {
+    const calls: string[] = [];
+    const orig = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls);
+    try {
+      await runSourceDraftForNewest(fakeBot, "/tmp/does-not-matter", "youtube-summaries", "http://huginn.test");
+      expect(calls.filter((u) => u.includes("/api/document/youtube-summaries/newest?raw=1"))).toHaveLength(1);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+});
+
+// huginn's JSON `text` has every fenced block removed, so a re-draft from it cannot
+// keep the code a summary quotes. The backlog, per-doc (`source-draft-doc`) and
+// backlog-drain fallback paths all read through this `fetchDoc`.
+describe("defaultSourceBacklogDeps.fetchDoc — the body a re-draft is built from", () => {
+  const RAW = [
+    "---",
+    "title: Routing files",
+    "url: https://youtu.be/routing0001",
+    "---",
+    "",
+    "# Routing files",
+    "",
+    "The video walks through a routing file.",
+    "",
+    "```markdown",
+    "| Task | Model |",
+    "| planning | opus-5 |",
+    "```",
+    "",
+    "## Transcript",
+    "",
+    "spoken words from the video",
+  ].join("\n");
+  const CLEANED = {
+    text: "# Routing files\n\nThe video walks through a routing file.\n\n## Transcript\n\nspoken words from the video",
+    metadata: { url: "https://youtu.be/routing0001" },
+  };
+
+  async function draftedBody(raw: () => Response): Promise<string> {
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req) => (new URL(req.url).searchParams.has("raw") ? raw() : Response.json(CLEANED)),
+    });
+    try {
+      const seen: SourceDraftInput[] = [];
+      const deps: SourceBacklogDeps = {
+        ...defaultSourceBacklogDeps(fakeBot, "/tmp/does-not-matter", `http://127.0.0.1:${server.port}`),
+        draftInput: async (input) => {
+          seen.push(input);
+          return { outcome: "drafted", proposalId: "p", targetPath: "sources/x.mdx", title: "X" };
+        },
+        recordAttempt: undefined,
+      };
+      const out = await draftOneBacklogDoc({ collection: "youtube-summaries", id: "ai/claude-code/Routing files.md", url: "" }, deps);
+      expect(out.outcome).toBe("drafted");
+      return seen[0]!.body;
+    } finally {
+      server.stop(true);
+    }
+  }
+
+  test("a fenced source file reaches the drafter with its fence, without frontmatter or transcript", async () => {
+    const body = await draftedBody(() => new Response(RAW, { headers: { "content-type": "text/markdown; charset=utf-8" } }));
+    expect(body).toContain("```markdown\n| Task | Model |\n| planning | opus-5 |\n```");
+    expect(body).not.toContain("url: https://youtu.be/routing0001");
+    expect(body).not.toContain("spoken words");
+  });
+
+  test("an older huginn answering ?raw=1 with JSON drafts from the cleaned copy, transcript cut", async () => {
+    const body = await draftedBody(() => Response.json(CLEANED));
+    expect(body).toBe("# Routing files\n\nThe video walks through a routing file.");
+  });
+
+  test("a failed source read drafts from the cleaned copy, transcript cut", async () => {
+    const body = await draftedBody(() => new Response("not found", { status: 404, headers: { "content-type": "text/plain" } }));
+    expect(body).toBe("# Routing files\n\nThe video walks through a routing file.");
   });
 });
 

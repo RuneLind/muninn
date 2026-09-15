@@ -230,6 +230,26 @@ describe("buildDraftPrompt", () => {
     expect(p).not.toContain("x".repeat(4500));
   });
 
+  test("a doc cut inside a fenced block closes the fence before the next summary", () => {
+    const docs: HarvestedDoc[] = [
+      { key: "c/2", collection: "c", id: "2", url: "", title: "Fenced", text: `intro\n\n\`\`\`yaml\n${"key: value\n".repeat(600)}\`\`\`\n` },
+      { key: "c/1", collection: "c", id: "1", url: "", title: "Next", text: "next body" },
+    ];
+    const p = buildDraftPrompt({ cluster, mode: "create", docs, today: "2026-09-15" });
+    const fenced = p.slice(p.indexOf("### Summary 1: Fenced"), p.indexOf("### Summary 2: Next"));
+    expect(fenced).toContain("[… truncated for length]");
+    expect((fenced.match(/^```/gm) ?? []).length % 2).toBe(0);
+  });
+
+  test("a doc cut in prose after a closed fenced block adds no fence", () => {
+    const docs: HarvestedDoc[] = [
+      { key: "c/1", collection: "c", id: "1", url: "", title: "Closed", text: `\`\`\`yaml\nkey: value\n\`\`\`\n\n${"word ".repeat(1500)}` },
+    ];
+    const p = buildDraftPrompt({ cluster, mode: "create", docs, today: "2026-09-15" });
+    expect(p).toContain("[… truncated for length]");
+    expect(p.slice(p.indexOf("### Summary 1: Closed")).match(/^```/gm) ?? []).toHaveLength(2);
+  });
+
   test("summary header omits a non-http(s) URL, keeps an http(s) one", () => {
     // ids sort descending (recency): id "2" (Web) becomes Summary 1, id "1" (Local) Summary 2.
     const mixed: HarvestedDoc[] = [
