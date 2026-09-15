@@ -65,12 +65,13 @@ export const PROVENANCE_ECHO_MAX = 64;
  * The production context, wired from `Config`.
  *
  * The `CLAUDE_USAGE_URL` default is applied HERE, not in `config.ts` — config
- * reports only whether the operator set it (null ⇒ unset) and `ledgerConfigured`
- * is derived from that one fact at this layer. The `src/sync/` idiom, and the
- * same line `registerClaudeUsageRoutes` uses. Unset, the ledger is never
- * FETCHED: the `/models` card's "left unset and unreachable, hide it" rule, one
- * layer down — an instance nobody pointed at a claude-usage should not be paying
- * a connection refusal on every stamped page open.
+ * reports only whether the operator set it (null ⇒ unset), and that one fact
+ * becomes `sessionLedger.urlConfigured`, which is the only place the join reads
+ * it from. The `src/sync/` idiom, and the same line `registerClaudeUsageRoutes`
+ * uses. Unset, the ledger is never FETCHED: the `/models` card's "left unset and
+ * unreachable, hide it" rule, one layer down — an instance nobody pointed at a
+ * claude-usage should not be paying a connection refusal on every stamped page
+ * open.
  */
 export function defaultProvenanceContext(config: Config): ProvenanceContext {
   return {
@@ -78,7 +79,6 @@ export function defaultProvenanceContext(config: Config): ProvenanceContext {
       config.claudeUsageUrl ?? CLAUDE_USAGE_DEFAULT_URL,
       config.claudeUsageUrl != null,
     ),
-    ledgerConfigured: config.claudeUsageUrl != null,
     knowledgeApiUrl: config.knowledgeApiUrl,
     publicUrl: config.claudeUsagePublicUrl?.trim() || null,
   };

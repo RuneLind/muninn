@@ -11,6 +11,7 @@
 
 import { test, expect, describe, afterEach } from "bun:test";
 import { resolveProvenance, type ProvenanceContext } from "./provenance-service.ts";
+import { LEDGER_NOT_ASKED } from "./provenance.ts";
 import {
   fetchSessionsById,
   isSessionIdShape,
@@ -44,7 +45,6 @@ function deps(over: Partial<SessionLedgerDeps> = {}): SessionLedgerDeps {
 function ctx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
   return {
     sessionLedger: deps(),
-    ledgerConfigured: true,
     knowledgeApiUrl: "http://localhost:8321",
     publicUrl: null,
     loadJiraIndex: async () => ({ byKey: new Map([["MELOSYS-8045", undefined]]), fetchedAtMs: 0 }),
@@ -142,8 +142,8 @@ describe("ledger.asked", () => {
     const res = await resolveProvenance(
       { refs: [SESSION_A], keys: [] },
       ctx({
-        ledgerConfigured: false,
         sessionLedger: deps({
+          urlConfigured: false,
           fetchSessions: async () => {
             calls += 1;
             return { sessions: [] };
@@ -163,6 +163,106 @@ describe("ledger.asked", () => {
     const res = await resolveProvenance({ refs: [SESSION_A], keys: [] }, ctx());
     expect(res.ledger.asked).toBe(true);
     expect(res.ledger.baseUrl).toBe("http://127.0.0.1:8787");
+  });
+
+  /**
+   * Fix round 2. `asked` was keyed on "the lookup returned a result", and
+   * `fetchSessionsById` returns one even when every id was refused before
+   * batching — so a page whose ONE session line is damaged reported
+   * `asked: true, reachable: false`, which the reader renders as "claude-usage
+   * unreachable". The service was never called and is, as far as this page
+   * knows, perfectly healthy. `asked` is now "a request was SENT".
+   */
+  test("a page whose every session id is damaged reports asked: false, not unreachable", async () => {
+    let calls = 0;
+    const res = await resolveProvenance(
+      { refs: ["claude-code:not a session id", "bare/slash"], keys: [] },
+      ctx({
+        sessionLedger: deps({
+          fetchSessions: async () => {
+            calls += 1;
+            return { sessions: [] };
+          },
+        }),
+      }),
+    );
+    expect(calls).toBe(0); // nothing was askable, so nothing was asked
+    expect(res.ledger.asked).toBe(false);
+    expect(res.ledger.reachable).toBe(false);
+    // Configured, and the endpoint is still named — the host IS pointed at one.
+    expect(res.ledger.configured).toBe(true);
+    expect(res.ledger.baseUrl).toBe("http://127.0.0.1:8787");
+    // The chips say what is actually wrong: the ids, not the service.
+    expect(res.sessions.map((s) => s.invalid)).toEqual([true, true]);
+  });
+
+  test("one damaged id BESIDE a good one still asks — the state is about the batch sent", async () => {
+    let calls = 0;
+    const res = await resolveProvenance(
+      { refs: [SESSION_A, "claude-code:not a session id"], keys: [] },
+      ctx({
+        sessionLedger: deps({
+          fetchSessions: async (ids) => {
+            calls += 1;
+            return { sessions: ids.map((id) => facts(id, 1)) };
+          },
+        }),
+      }),
+    );
+    expect(calls).toBe(1);
+    expect(res.ledger.asked).toBe(true);
+    expect(res.ledger.reachable).toBe(true);
+  });
+});
+
+// ── One source of truth for "is a claude-usage configured here" ─────────────
+
+describe("ledger.configured", () => {
+  /**
+   * Fix round 2. The context carried `ledgerConfigured` AND the ledger client
+   * carried `urlConfigured`, both wired from `config.claudeUsageUrl != null` at
+   * the route — two fields for one fact, free to disagree everywhere else, with
+   * `ledgerState` hardcoding `configured: true` beside them. The join now reads
+   * the client's field and only the client's field.
+   */
+  test("the ledger client's own flag decides BOTH whether we fetch and what we report", async () => {
+    let calls = 0;
+    const counting = (urlConfigured: boolean) =>
+      ctx({
+        sessionLedger: deps({
+          urlConfigured,
+          fetchSessions: async (ids) => {
+            calls += 1;
+            return { sessions: ids.map((id) => facts(id, 1)) };
+          },
+        }),
+      });
+
+    const off = await resolveProvenance({ refs: [SESSION_A], keys: [] }, counting(false));
+    expect(calls).toBe(0);
+    expect(off.ledger.configured).toBe(false);
+    expect(off.ledger.asked).toBe(false);
+
+    const on = await resolveProvenance({ refs: [SESSION_A], keys: [] }, counting(true));
+    expect(calls).toBe(1);
+    expect(on.ledger.configured).toBe(true);
+    expect(on.ledger.asked).toBe(true);
+  });
+
+  test("the unconfigured answer is FROZEN — it is handed out by reference", async () => {
+    const res = await resolveProvenance(
+      { refs: [SESSION_A], keys: [] },
+      ctx({ sessionLedger: deps({ urlConfigured: false }) }),
+    );
+    // Every unconfigured page open on this host gets the SAME object. One caller
+    // writing a field onto "its" copy would write it onto every answer already
+    // returned and every one still to come.
+    expect(res.ledger).toBe(LEDGER_NOT_ASKED);
+    expect(Object.isFrozen(LEDGER_NOT_ASKED)).toBe(true);
+    expect(() => {
+      (res.ledger as { asked: boolean }).asked = true;
+    }).toThrow();
+    expect(LEDGER_NOT_ASKED.asked).toBe(false);
   });
 });
 
@@ -220,14 +320,34 @@ describe("the shared budget", () => {
 describe("ids refused before batching", () => {
   const LONG = "y".repeat(SESSION_ID_MAX_CHARS + 1);
 
-  test("the shape gate is claude-usage's own column cap and alphabet", () => {
+  test("the shape gate is the stamper's own alphabet", () => {
     expect(isSessionIdShape(ID_A)).toBe(true);
     expect(isSessionIdShape("ses_7f3a9b2c1d")).toBe(true);
-    expect(isSessionIdShape("y".repeat(SESSION_ID_MAX_CHARS))).toBe(true);
-    expect(isSessionIdShape(LONG)).toBe(false);
     expect(isSessionIdShape("has space")).toBe(false);
     expect(isSessionIdShape("has/slash")).toBe(false);
     expect(isSessionIdShape("")).toBe(false);
+  });
+
+  /**
+   * The LENGTH bound, pinned to a LITERAL 128 rather than to the constant.
+   *
+   * Fix round 2. The previous spelling was `"y".repeat(SESSION_ID_MAX_CHARS + 1)`
+   * on both sides, which is self-referential: raise the constant to 128000 and
+   * the fixtures grow with it and every assertion still passes. The number is a
+   * contract with claude-usage's `wiki-stamp` (`SESSION_REF_RE`,
+   * `/^[a-z][a-z0-9-]*:[A-Za-z0-9._-]{1,128}$/`, `src/wiki-stamp.ts:47`), so a
+   * test that cannot see it move is not pinning it.
+   */
+  test("128 characters is askable and 129 is not — the bound itself, not the constant", () => {
+    const at128 = "a".repeat(128);
+    const at129 = "a".repeat(129);
+    expect(at128.length).toBe(128); // the fixture, spelled out
+    expect(at129.length).toBe(129);
+    expect(isSessionIdShape(at128)).toBe(true);
+    expect(isSessionIdShape(at129)).toBe(false);
+    // And the exported constant IS that bound, so a caller reading it (the
+    // route's 400 message) quotes the same number the gate enforces.
+    expect(SESSION_ID_MAX_CHARS).toBe(128);
   });
 
   test("an over-long id never reaches the wire, and does not take its batch with it", async () => {

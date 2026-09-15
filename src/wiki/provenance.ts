@@ -272,14 +272,21 @@ export interface ProvenanceLedgerState {
   errors?: string[];
 }
 
-/** The ledger state for a host that was never pointed at claude-usage, or a page
- *  that named no session: one spelling, so the two callers cannot disagree. */
-export const LEDGER_NOT_ASKED: ProvenanceLedgerState = {
+/**
+ * The ledger state for a host that was never pointed at claude-usage: one
+ * spelling, so the callers cannot disagree.
+ *
+ * FROZEN, because it is handed out by REFERENCE — it rides straight onto an
+ * answer payload, and every unconfigured host's every page open gets the same
+ * object. One caller adding a field to "its" copy would have added it to every
+ * answer this process has already returned and every one it returns next.
+ */
+export const LEDGER_NOT_ASKED: ProvenanceLedgerState = Object.freeze({
   asked: false,
   reachable: false,
   partial: false,
   configured: false,
-};
+});
 
 export interface ProvenancePayload {
   sessions: ProvenanceSessionChip[];

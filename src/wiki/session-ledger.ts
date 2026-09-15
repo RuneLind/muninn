@@ -78,10 +78,17 @@ export const SESSION_IDS_PER_CALL = 200;
 export const SESSION_IDS_QUERY_MAX_BYTES = 12_000;
 
 /**
- * The longest session id muninn will ask about — claude-usage's own
- * `session_id` column cap. A longer value on a page cannot BE a session id, and
- * sending it is how ONE malformed frontmatter entry takes out the whole batch
- * it rides in (a 431 has no body naming the offender).
+ * The longest session id muninn will ask about. A longer value on a page cannot
+ * BE a session id, and sending it is how ONE malformed frontmatter entry takes
+ * out the whole batch it rides in (a 431 has no body naming the offender).
+ *
+ * 128 because that is the cap the WRITER enforces: claude-usage's `wiki-stamp`
+ * only ever stamps a ref matching `SESSION_REF_RE`
+ * (`/^[a-z][a-z0-9-]*:[A-Za-z0-9._-]{1,128}$/`, `src/wiki-stamp.ts:47`), so no
+ * id that pipeline put on a page can exceed it. It is NOT a storage limit —
+ * every `session_id` column in claude-usage's sqlite schema (`src/store.ts`) is
+ * a bare `TEXT`, which sqlite does not bound — so a longer value is refused
+ * here as frontmatter damage, not because the ledger could not hold it.
  */
 export const SESSION_ID_MAX_CHARS = 128;
 
@@ -100,6 +107,15 @@ export function isSessionIdShape(id: string): boolean {
 }
 
 export interface SessionLedgerResult {
+  /**
+   * At least one request was SENT. False when every id on the page was refused
+   * before batching, which is the one way this returns having asked nothing —
+   * and the reason it is a field rather than `result !== null` at the caller:
+   * `reachable: false` beside `asked: false` is "nobody asked", while beside
+   * `asked: true` it is "the ledger is down", and a page whose only session line
+   * is damaged reported the second.
+   */
+  asked: boolean;
   /** At least one batch answered with a readable payload. */
   reachable: boolean;
   /** Some batch answered and some did not — the total is over a SUBSET. */
@@ -241,6 +257,7 @@ export async function fetchSessionsById(
 
   if (askable.length === 0) {
     return {
+      asked: false,
       reachable: false,
       partial: false,
       baseUrl: deps.baseUrl,
@@ -294,6 +311,11 @@ export async function fetchSessionsById(
   }
 
   return {
+    // Unconditionally true HERE, and provably so: the `askable.length === 0`
+    // early return above is the only path that sends nothing, and
+    // `batchSessionIds` of a non-empty list always yields at least one batch.
+    // A counter would read as a condition and could not be made to fail.
+    asked: true,
     reachable: answered,
     partial: answered && failed,
     baseUrl: deps.baseUrl,

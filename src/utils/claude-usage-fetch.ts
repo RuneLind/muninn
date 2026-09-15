@@ -98,8 +98,22 @@ function named(err: unknown, label: string): string {
  * wrong one is a wrong answer, and the reason because a caller that collapses
  * volatile parts of a message out of its key (the plans board's digit collapse)
  * must keep doing so.
+ *
+ * ── One registry PER CALLER, keyed on `what` ────────────────────────────────
+ * The three proxies churn at wildly different rates. The `/models` card polls a
+ * fixed endpoint every 5 minutes; the provenance chips fire on every page open
+ * and their keys carry the failing endpoint, so a bad afternoon mints a steady
+ * stream of distinct ones. Sharing ONE 100-entry set that is cleared WHOLESALE
+ * at the cap meant the noisy caller evicted the quiet one's single key and the
+ * `/models` card re-warned — a "first sighting" warn for an outage in its tenth
+ * hour. Each caller now gets its own capped set, so one caller's volume cannot
+ * reset another's dedup, and a caller can only ever evict itself.
  */
-const warnedClaudeUsage = new Set<string>();
+const warnedClaudeUsage = new Map<string, Set<string>>();
+
+/** Entries one caller's registry holds before it is cleared. Per caller, so the
+ *  budget is not a shared resource three callers compete for. */
+const WARN_REGISTRY_MAX = 100;
 
 export function claudeUsageWarnOnce(opts: {
   log: Logger;
@@ -108,16 +122,22 @@ export function claudeUsageWarnOnce(opts: {
   key: string;
   /** The full message, logged verbatim. */
   error: string;
-  /** Lead of the log line, e.g. `"plan ledger"`. */
+  /** Lead of the log line, e.g. `"plan ledger"`. ALSO the registry key: two
+   *  callers with different `what` values never share a dedup budget. */
   what: string;
 }): void {
+  let seen = warnedClaudeUsage.get(opts.what);
+  if (!seen) {
+    seen = new Set<string>();
+    warnedClaudeUsage.set(opts.what, seen);
+  }
   const key = `${opts.baseUrl}\0${opts.key}`;
-  if (warnedClaudeUsage.has(key)) {
+  if (seen.has(key)) {
     opts.log.info("{what} still degraded: {error}", { what: opts.what, error: opts.error });
     return;
   }
-  if (warnedClaudeUsage.size > 100) warnedClaudeUsage.clear();
-  warnedClaudeUsage.add(key);
+  if (seen.size >= WARN_REGISTRY_MAX) seen.clear();
+  seen.add(key);
   opts.log.warn("{what} degraded: {error}", { what: opts.what, error: opts.error });
 }
 

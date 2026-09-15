@@ -2762,6 +2762,45 @@ describe("buildWikiIndex — project", () => {
     expect(meta.project).toBe("pomme-core");
   });
 
+  /**
+   * The list keys are DEDUPED at the index, first spelling wins, order
+   * otherwise preserved. Pinned here beside the CRLF test because both are
+   * properties of the same frontmatter → `WikiPageMeta` pass, and a repeated
+   * value is what an external stamper that appended twice leaves behind. It
+   * reached three surfaces as a real second entry: a duplicate session chip, a
+   * session PRICED twice into a page's `totalCost`, and a Jira row rendered
+   * twice. The `jira` FACET was already immune (`jiraCounts` folds each page
+   * through a Set), which is exactly why it was invisible from there.
+   */
+  test("repeated session / jira / pr entries are deduped, first spelling kept", async () => {
+    await declare(fullRule);
+    await Bun.write(
+      path.join(root, "areas/pomme-core/dupes.md"),
+      [
+        "---",
+        "title: Dupes",
+        "sessions: [claude-code:abc, claude-code:abc, ses_zzz]",
+        "jira: [MELOSYS-8045, melosys-8045]",
+        "prs: [navikt/melosys-api#1234, navikt/melosys-api#1234]",
+        "tags: [quill, quill, ink]",
+        "---",
+        "",
+        "Body.",
+      ].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    const meta = index.pages.find((p) => p.relPath === "areas/pomme-core/dupes.md")!;
+    expect(meta.sessions).toEqual(["claude-code:abc", "ses_zzz"]);
+    // `jira` normalizes to UPPERCASE first, so the two spellings ARE one key.
+    expect(meta.jira).toEqual(["MELOSYS-8045"]);
+    expect(meta.prs).toEqual(["navikt/melosys-api#1234"]);
+    // `tags`/`aliases` take the OTHER path (`asStringArray` at the call site,
+    // not `asOptionalStringArray`) and are NOT deduped. Pre-existing, out of
+    // this fix's scope, and asserted so the difference reads as a fact rather
+    // than as an oversight in the test.
+    expect(meta.tags).toEqual(["quill", "quill", "ink"]);
+  });
+
   test("no project declaration ⇒ undefined on every page", async () => {
     await Bun.write(
       path.join(root, ".wiki-reader.json"),

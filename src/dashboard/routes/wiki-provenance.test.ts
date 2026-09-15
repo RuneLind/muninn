@@ -50,7 +50,6 @@ function testCtx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
         ),
       }),
     },
-    ledgerConfigured: true,
     knowledgeApiUrl: "http://localhost:8321",
     publicUrl: null,
     loadJiraIndex: async () => null,
@@ -408,7 +407,6 @@ describe("an unconfigured host", () => {
           },
         },
       }),
-      ledgerConfigured: false,
     });
     const body = await (await quiet.request("/api/wiki/page?wiki=mimir&relPath=plan.md")).json();
     expect(calls).toBe(0);

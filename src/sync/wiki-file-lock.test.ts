@@ -20,8 +20,10 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetForTest } from "../wiki/commit.ts";
-import { __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
+import { runWikiWriteExclusive, __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import { WIKI_LOCK_BASENAME, WIKI_LOCK_STALE_MS } from "../wiki/lockfile.ts";
+import { writeWikiPage, type PageWriteNoLogOptions } from "../wiki/page-write.ts";
+import { sha256 } from "../gardener/util.ts";
 import { syncRepo, syncSubsumesSweeper, __resetSyncStateForTest, type SyncDeps } from "./run.ts";
 import { SYNC_QUIET_MS } from "./decide.ts";
 import type { SyncRepo } from "./config.ts";
@@ -200,6 +202,98 @@ describe("the sync loop and the wiki write lock", () => {
     const cover = { repos: [wikiRepo(f)], now: Date.now() };
     expect((await syncSubsumesSweeper(f.A, cover)).subsumed).toBe(true);
   });
+
+  // ── The lockfile is taken INSIDE the in-process queue, never instead of it ──
+  //
+  // Fix round 2. Round 1 replaced `runWikiWriteExclusive(root, inner)` with the
+  // lockfile call in `withLocks`, leaving the queue imported and never called.
+  // The two answer different questions and neither substitutes for the other:
+  // the queue serializes this loop against muninn's OWN writers, and it is the
+  // one of the two that always holds — `takeWikiWriteLock` degrades to
+  // `{ ok: true, lock: null }` on every errno but EEXIST, so on that path the
+  // local section ran with no exclusion at all.
+
+  test(
+    "the local section QUEUES behind an in-process wiki write — the queue is not replaced",
+    async () => {
+      const f = await makeFixture(base);
+      const page = path.join(f.wikiA, "concepts", "Settled.md");
+      await writeFile(page, "# Settled\n");
+      await ageFile(page);
+
+      // A muninn writer already inside its write section — a gardener apply, a
+      // factcheck write, a plan queue append. It holds the QUEUE and no
+      // lockfile, which is exactly the holder the lockfile cannot see.
+      const HOLD_MS = 1_500;
+      let releasedAt = 0;
+      const holder = runWikiWriteExclusive(f.wikiA, async () => {
+        await Bun.sleep(HOLD_MS);
+        releasedAt = Date.now();
+      });
+      await Bun.sleep(50); // let it enter the section before the tick starts
+
+      const startedAt = Date.now();
+      const r = await syncRepo(wikiRepo(f), deps());
+      const finishedAt = Date.now();
+      await holder;
+
+      expect(r.state).toBe("ok");
+      expect(r.committed).toEqual(["wiki/concepts/Settled.md"]);
+      // The ordering IS the property: the tick cannot have finished before the
+      // holder let go of the chain.
+      expect(releasedAt).toBeGreaterThan(0);
+      expect(finishedAt).toBeGreaterThanOrEqual(releasedAt);
+      // …and it really waited, rather than the holder having finished early.
+      expect(finishedAt - startedAt).toBeGreaterThanOrEqual(HOLD_MS - 150);
+    },
+    30_000,
+  );
+
+  test(
+    "a page write DURING the local section queues and is WRITTEN — muninn does not 409 against itself",
+    async () => {
+      const f = await makeFixture(base);
+      const page = path.join(f.wikiA, "concepts", "Settled.md");
+      await writeFile(page, "# Settled\n");
+      await ageFile(page);
+      const target = path.join(f.wikiA, "concepts", "Seed.md");
+      const before = await Bun.file(target).text();
+
+      // A slow `pre-commit` hook holds the local section open for longer than
+      // `WIKI_LOCK_WAIT_MS` (2 s), which is what makes the two outcomes
+      // distinguishable: a writer that only waits on the LOCKFILE gives up and
+      // answers `locked`, while a writer that is queued waits as long as the
+      // section takes and then writes.
+      const hook = path.join(f.A, ".git", "hooks", "pre-commit");
+      await writeFile(hook, "#!/bin/sh\nsleep 4\n", { mode: 0o755 });
+
+      const tick = syncRepo(wikiRepo(f), deps());
+      await Bun.sleep(800); // inside the section, mid-commit
+
+      const pageWrite: PageWriteNoLogOptions = {
+        wikiDir: f.wikiA,
+        relPath: "concepts/Seed.md",
+        baseHash: sha256(before),
+        transform: (current: string) => `${current}appended\n`,
+        collections: [],
+        logKind: null,
+        now: () => Date.UTC(2026, 8, 15, 12, 0, 0),
+        readFile: async (p: string) => (existsSync(p) ? await Bun.file(p).text() : null),
+        writeFile: async (p: string, content: string) => {
+          await Bun.write(p, content);
+        },
+        refreshIndex: async () => {},
+        reindex: async () => {},
+      };
+      const write = writeWikiPage(pageWrite);
+
+      const [r, w] = await Promise.all([tick, write]);
+      expect(r.state).toBe("ok");
+      expect(w.outcome).toBe("written");
+      expect(await Bun.file(target).text()).toContain("appended");
+    },
+    30_000,
+  );
 
   test("a lockfile in the tree never reaches the report or the commit", async () => {
     const f = await makeFixture(base);

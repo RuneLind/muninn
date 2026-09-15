@@ -119,7 +119,10 @@ const POLL_MS = 10;
 export interface WikiLockOwner {
   pid: number;
   host: string;
-  /** What this holder is doing — `page-write`, `sync-rebase`, a log kind. */
+  /** What this holder is doing, as the holder spells it: `page-write:<log kind>`
+   *  (`page-write.ts`) or `sync-local-section` (`sync/run.ts`). Written for an
+   *  operator reading the file, so it names the SECTION being held, not the one
+   *  git command inside it that the lock exists for. */
   op: string;
   /** ISO timestamp of the acquire. */
   at: string;
@@ -143,7 +146,9 @@ export type WikiLockOutcome =
   | { ok: false; reason: string };
 
 export interface WikiLockOptions {
-  /** How long to wait for a held lock. */
+  /** How long to wait for a held lock. Must be a finite, non-negative number —
+   *  see {@link takeWikiWriteLock}, which REFUSES anything else rather than
+   *  computing a deadline out of it. */
   waitMs?: number;
   /** What to record as this holder's `op`. */
   op?: string;
@@ -171,12 +176,27 @@ export function __resetWikiLockWarnsForTest(): void {
  * Returns `{ ok: true, lock: null }` for the degrade path described in the
  * module header — the caller proceeds and holds nothing, so its `finally` must
  * tolerate a null handle.
+ *
+ * THROWS on a `waitMs` that is not a finite, non-negative number. The whole wait
+ * is `now() + waitMs` compared against `now()`, and `NaN` makes every such
+ * comparison false: the poll loop then never reaches its deadline and spins on a
+ * held lock forever, holding whatever its caller holds. Measured, not
+ * hypothesized — an options object passed where the old positional `waitMs`
+ * used to go produced exactly that, and the symptom was a test that timed out
+ * rather than an error naming the argument. A programmer error that cannot be
+ * degraded past is refused loudly at the door; the degrade direction here is an
+ * unkillable loop.
  */
 export async function takeWikiWriteLock(
   root: string,
   opts: WikiLockOptions = {},
 ): Promise<WikiLockOutcome> {
   const waitMs = opts.waitMs ?? WIKI_LOCK_WAIT_MS;
+  if (!Number.isFinite(waitMs) || waitMs < 0) {
+    throw new TypeError(
+      `takeWikiWriteLock: waitMs must be a finite, non-negative number (got ${String(opts.waitMs)})`,
+    );
+  }
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms));
   const lockPath = path.join(root, WIKI_LOCK_BASENAME);

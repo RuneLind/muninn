@@ -913,7 +913,9 @@ export function sortedLockRoots(repo: SyncRepo): string[] {
 
 /**
  * Take EVERY lock this repo's local section needs, in the pinned order: the
- * commit queue first, then each affected wiki's write queue.
+ * commit queue first, then each affected wiki's write queue, and inside each of
+ * those that wiki's cross-process lockfile ({@link withWikiFileLock}) — three
+ * locks per wiki root, as the locking contract in `src/sync/CLAUDE.md` says.
  *
  * A `plain`/`status-only` entry over a repo that CONTAINS a registered wiki
  * (`containedWikiRoots`) takes those wikis' write locks too: its rebase rewrites
@@ -931,8 +933,20 @@ function withLocks(
   const roots = sortedLockRoots(repo);
   // No wiki root ⇒ no page writes to serialize against; the commit queue alone
   // is the repo's lock.
+  //
+  // Each root contributes BOTH of its locks, nested in the `writeWikiPage`
+  // order: the in-process queue outside, the cross-process lockfile inside it.
+  // They answer different questions and neither substitutes for the other —
+  // the queue is what serializes this loop against muninn's OWN writers
+  // (`writeWikiPage`, the gardener, the plan queue), and it is the only one of
+  // the two that always holds, since `takeWikiWriteLock` degrades to
+  // `{ ok: true, lock: null }` on any errno but EEXIST. Dropping the queue for
+  // the lockfile left the local section with no in-process exclusion at all on
+  // that degrade path, and made a page write CONCURRENT with a rebase wait 2 s
+  // on the file lock and then answer `locked` — muninn 409ing against itself,
+  // where queueing had made it wait and then succeed.
   const nested = roots.reduceRight<() => Promise<LocalSectionOutcome>>(
-    (inner, root) => () => withWikiFileLock(root, inner),
+    (inner, root) => () => runWikiWriteExclusive(root, () => withWikiFileLock(root, inner)),
     work,
   );
   return runExclusiveQueued(top, nested);
@@ -944,7 +958,8 @@ function withLocks(
  * there: queue first, file lock inside it, so a queued writer never waits on the
  * file lock while holding the chain another holder needs.
  *
- * `runWikiWriteExclusive` serializes muninn against muninn. It says nothing
+ * `runWikiWriteExclusive` — which {@link withLocks} takes AROUND this, and which
+ * this never replaces — serializes muninn against muninn. It says nothing
  * about claude-usage's `wiki-stamp`, and the rebase below is the one operation
  * in this file that REWRITES a working tree wholesale: a stamper that read a
  * page before the rebase and renamed its replacement over it afterwards reverts

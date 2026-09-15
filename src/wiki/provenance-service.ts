@@ -63,15 +63,19 @@ export const PROVENANCE_BUDGET_MS = 10_000;
 /** Everything the resolution needs from the process, injected so the whole join
  *  unit-tests with no live claude-usage and no live huginn. */
 export interface ProvenanceContext {
-  sessionLedger: SessionLedgerDeps;
   /**
-   * `CLAUDE_USAGE_URL` was set on this host. FALSE ⇒ the ledger is never
-   * fetched at all — not fetched-and-degraded. An instance nobody pointed at a
-   * claude-usage would otherwise pay a connection refusal on the default
+   * The ledger client, and the ONE place "is a claude-usage configured on this
+   * host" is recorded: `sessionLedger.urlConfigured`. FALSE ⇒ the ledger is
+   * never fetched at all — not fetched-and-degraded. An instance nobody pointed
+   * at a claude-usage would otherwise pay a connection refusal on the default
    * loopback port on every stamped page open, and report an "unreachable"
    * service it was never meant to run.
+   *
+   * A second `ledgerConfigured` field beside it was two sources of truth for one
+   * fact, wired from one expression at the route and free to disagree anywhere
+   * else — including in a test, where the disagreement is invisible.
    */
-  ledgerConfigured: boolean;
+  sessionLedger: SessionLedgerDeps;
   /** huginn's base URL — `config.knowledgeApiUrl`. */
   knowledgeApiUrl: string;
   /** `CLAUDE_USAGE_PUBLIC_URL`, or null. The ONE claude-usage URL the browser
@@ -109,7 +113,7 @@ export async function resolveProvenance(
   const refs = dedupeSessionRefs(input.refs);
   const keys = [...new Set(input.keys)];
 
-  const askLedger = refs.length > 0 && ctx.ledgerConfigured;
+  const askLedger = refs.length > 0 && ctx.sessionLedger.urlConfigured;
   // ONE deadline, shared by both legs. Created only when something is actually
   // fetched, so a page with neither key does not arm a timer.
   const signal =
@@ -149,24 +153,28 @@ function ledgerState(
   result: SessionLedgerResult | null,
   ctx: ProvenanceContext,
 ): ProvenanceLedgerState {
+  const configured = ctx.sessionLedger.urlConfigured;
   // Not configured ⇒ nothing was fetched and there is no endpoint to name.
-  if (!ctx.ledgerConfigured) return LEDGER_NOT_ASKED;
-  // Configured but nothing to ask about (a `jira`-only page). `reachable: false`
-  // here would be a claim about a call that did not happen.
-  if (!result) {
+  if (!configured) return LEDGER_NOT_ASKED;
+  // Configured but nothing was SENT — either this page named no session at all
+  // (a `jira`-only page, `result === null`), or every ref it named was refused
+  // before batching as damage (`asked: false`). Both are "nobody asked", and
+  // reporting the second as `reachable: false` put "claude-usage unreachable" on
+  // a page whose only real problem was one mangled frontmatter line.
+  if (!result || !result.asked) {
     return {
       asked: false,
       reachable: false,
       partial: false,
-      configured: true,
-      baseUrl: ctx.sessionLedger.baseUrl,
+      configured,
+      baseUrl: result?.baseUrl ?? ctx.sessionLedger.baseUrl,
     };
   }
   return {
     asked: true,
     reachable: result.reachable,
     partial: result.partial,
-    configured: true,
+    configured,
     baseUrl: result.baseUrl,
     ...(result.truncated ? { truncated: true } : {}),
     ...(result.errors ? { errors: result.errors } : {}),

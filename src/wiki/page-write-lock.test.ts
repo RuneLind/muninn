@@ -57,6 +57,36 @@ describe("takeWikiWriteLock", () => {
     expect(existsSync(lockPath)).toBe(true); // the other holder's file is untouched
   });
 
+  /**
+   * Fix round 2. `waitMs` becomes a deadline (`now() + waitMs`), and every
+   * `now() >= until` comparison against a NaN deadline is FALSE — so a held
+   * lock is polled forever, holding whatever the caller holds. It is not
+   * hypothetical: round 1 changed this function's second argument from a
+   * positional `waitMs` to an options object and one call site kept passing the
+   * object positionally. The symptom was a test that hung, not an error naming
+   * the argument.
+   */
+  test("a non-numeric wait is REFUSED, never polled — a NaN deadline cannot end", async () => {
+    await writeFile(lockPath, ""); // held, so the wait is the thing under test
+    let polls = 0;
+    const sleep = async () => {
+      polls += 1;
+      if (polls > 20) throw new Error("SPUN: the NaN deadline polled without end");
+    };
+    await expect(
+      takeWikiWriteLock(root, { waitMs: Number.NaN, sleep }),
+    ).rejects.toThrow(/waitMs/);
+    // Refused at the door: not one poll, so nothing can have spun.
+    expect(polls).toBe(0);
+    // The object-passed-positionally shape, which is what actually happened.
+    await expect(
+      takeWikiWriteLock(root, { waitMs: { waitMs: 60 } as unknown as number, sleep }),
+    ).rejects.toThrow(/waitMs/);
+    await expect(takeWikiWriteLock(root, { waitMs: -1, sleep })).rejects.toThrow(/waitMs/);
+    expect(polls).toBe(0);
+    expect(existsSync(lockPath)).toBe(true); // the other holder's file is untouched
+  });
+
   test("a lock older than the stale window is taken over", async () => {
     await writeFile(lockPath, "");
     const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);

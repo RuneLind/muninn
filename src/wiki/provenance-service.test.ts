@@ -31,7 +31,6 @@ function ctx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
   };
   return {
     sessionLedger: ledger,
-    ledgerConfigured: true,
     knowledgeApiUrl: "http://localhost:8321",
     publicUrl: null,
     loadJiraIndex: async () => ({ byKey: new Map([["MELOSYS-8045", "https://x/MELOSYS-8045"]]), fetchedAtMs: 0 }),
@@ -67,7 +66,11 @@ describe("resolveProvenance", () => {
       ctx({
         sessionLedger: {
           baseUrl: "b",
-          urlConfigured: false,
+          // TRUE, and it has to be: `urlConfigured` is the ONE flag deciding
+          // whether the ledger is fetched. It read `false` here while a second
+          // context field drove the fetch — the disagreement that fix round 2
+          // removed, sitting in a test the whole time.
+          urlConfigured: true,
           fetchSessions: async (ids) => {
             asked.push(ids);
             return { sessions: [] };

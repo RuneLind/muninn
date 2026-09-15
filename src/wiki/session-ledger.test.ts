@@ -159,3 +159,51 @@ describe("fetchSessionsById", () => {
     expect(res.truncated).toBe(true);
   });
 });
+
+// ── `asked` — whether a request was SENT (fix round 2) ──────────────────────
+
+describe("fetchSessionsById — asked", () => {
+  test("a page whose every id is unaskable sends NOTHING and says so", async () => {
+    let calls = 0;
+    const res = await fetchSessionsById(
+      deps(async () => {
+        calls += 1;
+        return { sessions: [] };
+      }),
+      ["not a session id", "has/slash"],
+    );
+    expect(calls).toBe(0);
+    expect(res.asked).toBe(false);
+    // `reachable: false` is true here but means nothing on its own — the caller
+    // reads it beside `asked`, and beside `asked: true` it means the service is
+    // down. On its own it rendered "claude-usage unreachable" for a page whose
+    // only problem was a mangled frontmatter line.
+    expect(res.reachable).toBe(false);
+    expect(res.invalid.size).toBe(2);
+  });
+
+  test("a batch that was sent and FAILED still counts as asked", async () => {
+    const res = await fetchSessionsById(
+      deps(async () => {
+        throw new Error("connect ECONNREFUSED");
+      }),
+      ["a"],
+    );
+    expect(res.asked).toBe(true);
+    expect(res.reachable).toBe(false);
+  });
+
+  test("one askable id beside two damaged ones is asked", async () => {
+    let calls = 0;
+    const res = await fetchSessionsById(
+      deps(async (batch) => {
+        calls += 1;
+        return { sessions: batch.map((id) => facts(id, 1)) };
+      }),
+      ["not a session id", "a", "has/slash"],
+    );
+    expect(calls).toBe(1);
+    expect(res.asked).toBe(true);
+    expect(res.invalid.size).toBe(2);
+  });
+});

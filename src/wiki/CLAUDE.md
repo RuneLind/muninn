@@ -447,7 +447,11 @@ opens nothing: it is a marker about a list that is not there. The payload is
 Sessions are enriched SERVER-side in BATCHES of `SESSION_IDS_PER_CALL` (200)
 against `GET <CLAUDE_USAGE_URL>/api/sessions-by-id?ids=…`, through the shared
 `utils/claude-usage-fetch.ts` (the one fetch helper all three claude-usage
-proxies use — the `/models` ledger card, the `/plans` board, this). One call for
+proxies use — the `/models` ledger card, the `/plans` board, this). Its
+warn-once registry is keyed PER CALLER (`what`): the three churn at very
+different rates, and one capped set cleared wholesale let this caller — once per
+page open, with the failing endpoint in its key — evict the `/models` card's
+single key and make it re-warn an outage in its tenth hour. One call for
 every page anyone has actually stamped, but **not one by contract**: the batch
 size is the cap, and a page naming 250 sessions makes two. Every batch and the
 huginn Jira lookup share ONE `PROVENANCE_BUDGET_MS` (10 s) deadline and run
@@ -474,14 +478,25 @@ whole puts the request over claude-usage's 16 KiB header block, and the 431 that
 comes back has no body naming the offender — so it takes every legitimate id in
 its batch with it.
 
-**`ledger` has three states, not two.** `asked` is the explicit third: a
-`jira`-only page, or a host with no `CLAUDE_USAGE_URL`, was never asked, and
-reporting `reachable: false` about a call that did not happen reads as "the
-ledger is down". `partial` is the fourth fact — some batch answered and some did
+**`ledger` has three states, not two.** `asked` is the explicit third, and it
+means a request was SENT: a `jira`-only page, a host with no
+`CLAUDE_USAGE_URL`, and a page whose every session id was refused before
+batching (all of them damaged) were never asked, and reporting
+`reachable: false` about a call that did not happen reads as "the ledger is
+down". That last case is why `asked` rides the ledger client's own result
+(`SessionLedgerResult.asked`) rather than being derived from "a lookup
+returned something" at the caller — `fetchSessionsById` returns a result for an
+all-invalid page too, and reading THAT as "asked" put "claude-usage
+unreachable" on a page whose only problem was one mangled frontmatter line. `partial` is the fourth fact — some batch answered and some did
 not, so `totalCost` is over a SUBSET — because `reachable: true` alone presents a
 200-of-250 answer as complete. An UNCONFIGURED host never fetches at all
 (`ledger: {asked:false, reachable:false, partial:false, configured:false}`, no
-`baseUrl`): the `/models` card's "left unset and unreachable, hide it" rule, one
+`baseUrl` — the frozen `LEDGER_NOT_ASKED`, handed out by reference to every such
+page open, so it must not be mutable). "Configured" has exactly ONE source,
+`ProvenanceContext.sessionLedger.urlConfigured`: it decides both whether the
+ledger is fetched and what the payload reports, and a second context field
+beside it was two spellings of one fact, free to disagree everywhere the route
+did not wire them together: the `/models` card's "left unset and unreachable, hide it" rule, one
 layer down, so an instance nobody pointed at a claude-usage does not pay a
 connection refusal on every stamped page open.
 
@@ -613,6 +628,13 @@ Three rules are load-bearing:
   the commit tail, which enqueues on a different chain, never runs holding it.
   Taking the file lock outside the queue would make every queued writer wait on
   it in turn while the one ahead held the chain: a deadlock shape, not a wait.
+- **A non-numeric `waitMs` is REFUSED, not defaulted.** The wait becomes a
+  deadline (`now() + waitMs`) and every `now() >= until` test against NaN is
+  false, so a held lock would be polled without end while the caller holds
+  whatever it holds. `takeWikiWriteLock` throws a `TypeError` on anything that is
+  not a finite, non-negative number. Not hypothetical: this function's second
+  argument changed from a positional `waitMs` to an options object and one call
+  site kept passing the object positionally.
 - **Only a HELD lock refuses a write.** EEXIST means someone has it: wait, poll,
   take over once stale. Any OTHER errno — ENOENT on a root that does not exist,
   EACCES on a 0555 checkout, EROFS on a read-only mount — means waiting cannot
