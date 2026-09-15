@@ -43,6 +43,32 @@ test("the corpus's own image shapes are kept exactly as huginn keeps them", () =
   }
 });
 
+test("an image on the bare amazonaws.com host is dropped", () => {
+  expect(documentTextImage("![a](https://amazonaws.com/x.png)")).toBeNull();
+});
+
+test("a refused answer (non-ok, stalled body) is aborted, not left open", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("not found"));
+          },
+        }),
+        { status: 404, headers: { "content-type": "text/plain" } },
+      ),
+  });
+  try {
+    expect(await readSummarySourceText(`http://127.0.0.1:${server.port}`, "c", "d.md", 2_000)).toBeNull();
+    await Bun.sleep(150);
+    expect(server.pendingRequests).toBe(0);
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("alt text survives only as ASCII caption words, narrower than huginn by design", () => {
   expect(documentTextImage("![Slide at 00:01:33](/x.png)")).toBe("![Slide at 00:01:33](/x.png)");
   expect(documentTextImage("![æøå bilde](/x.png)")).toBe("![](/x.png)");
