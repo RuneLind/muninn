@@ -2,18 +2,45 @@ import { afterEach, expect, test } from "bun:test";
 import { documentTextImage, filterDocumentText, readSummarySourceText } from "./source-text.ts";
 import huginnAnswers from "./__fixtures__/huginn-document-text.json";
 
-test("each image matches huginn's own _document_text_image answer", () => {
-  const diverging = huginnAnswers.images
+// The filter is NARROWER than huginn by construction, so the contract checked
+// against huginn's own answers is one-directional: an image the port keeps is
+// huginn's answer (or that answer with its alt cleared), never one huginn drops.
+const withoutAlt = (image: string) => image.replace(/^!\[[^\]]*\]/, "![]");
+const IMAGE_RE = /!\[[^\]]*\]\([^)]+\)/g;
+
+test("no image huginn drops is kept, and a kept image is huginn's own answer", () => {
+  const widening = huginnAnswers.images
     .map(({ input, expected }) => ({ input, expected, actual: documentTextImage(input) }))
-    .filter((c) => c.actual !== c.expected);
-  expect(diverging).toEqual([]);
+    .filter(
+      (c) =>
+        c.actual !== null && (c.expected === null || (c.actual !== c.expected && c.actual !== withoutAlt(c.expected))),
+    );
+  expect(widening).toEqual([]);
 });
 
-test("whole bodies match huginn's image + S3 rules, backticks included", () => {
-  const diverging = huginnAnswers.texts
+test("whole bodies keep no image or S3 link huginn removes, backticks included", () => {
+  const widening = huginnAnswers.texts
     .map(({ input, expected }) => ({ input, expected, actual: filterDocumentText(input) }))
-    .filter((c) => c.actual !== c.expected);
-  expect(diverging).toEqual([]);
+    .filter((c) => {
+      const allowed = new Set((c.expected.match(IMAGE_RE) ?? []).flatMap((i) => [i, withoutAlt(i)]));
+      const extraImage = (c.actual.match(IMAGE_RE) ?? []).some((i) => !allowed.has(i));
+      // Images aside, the prose must be huginn's to the byte — that is what
+      // pins the S3 rewrite, whose leftovers need not contain "amazonaws.com".
+      const prose = (s: string) => s.replace(IMAGE_RE, "");
+      return extraImage || prose(c.actual) !== prose(c.expected);
+    });
+  expect(widening).toEqual([]);
+});
+
+test("the corpus's own image shapes are kept exactly as huginn keeps them", () => {
+  for (const image of [
+    "![Slide at 00:01:33](/api/frames/vimeo/1/93.jpg)",
+    "![Slide at 00:12:30](/api/frames/youtube/abc_DEF-1/750.jpg)",
+    "![chart](https://example.com/c.png)",
+    "![diagram](http://example.com:8080/a/b-c_d.png?w=1&h=2)",
+  ]) {
+    expect(documentTextImage(image)).toBe(image);
+  }
 });
 
 test("a source body that stalls after its headers is abandoned within the budget", async () => {
@@ -37,6 +64,10 @@ test("a source body that stalls after its headers is abandoned within the budget
     ]);
     expect(result).toBeNull();
     expect(Date.now() - started).toBeLessThan(1_000);
+    // Abandoned is not enough: the request itself must be aborted, or every
+    // stalled read leaves a connection open.
+    await Bun.sleep(150);
+    expect(server.pendingRequests).toBe(0);
   } finally {
     server.stop(true);
   }

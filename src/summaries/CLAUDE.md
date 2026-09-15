@@ -38,18 +38,30 @@ refactor away from reading `.documents` off it.
 **Every surface that SHOWS a summary reads the raw file too** (#551): the
 `<apiBase>/document/*` proxy (the doc panel), Export and Share overlay `text`
 with `readSummarySourceText` (`src/summaries/source-text.ts`) — frontmatter
-stripped, huginn's document-text IMAGE rules re-applied to the WHOLE body, code
-included (the whitelist from `FilesDocumentConverter._document_text_image`, plus
-S3 URLs → `[file]`), fenced code kept. Whole-body on purpose: cutting the body at
+stripped, fenced code kept as code, and an image filter plus huginn's S3 → `[file]`
+rewrite run over the WHOLE body, code blocks included (so an image or S3 link
+quoted inside a fence is filtered too). Whole-body on purpose: cutting the body at
 code spans let an image with a backtick in its alt or URL skip the filter while
-marked still rendered it. The port is pinned to huginn's own answers by
-`__fixtures__/huginn-document-text.json` — regenerate it with huginn's `.venv`,
-never hand-edit. It answers `null` on any failure, a stall past its budget (the
-bound covers the body, not only the headers) or a non-`text/*` body (a huginn
-without #131 answers JSON), and the proxy then serves the cleaned copy
-unchanged; only an overlaid body carries `textSource: "file"`, and the re-run
-reload check reloads without a claim when the two reads came from different
-forms.
+marked still rendered it. **The image filter is an ALLOWLIST narrower than
+huginn's `FilesDocumentConverter._document_text_image`, not a port of it** — an
+image survives only with a plain ASCII relative path or an http(s) URL on a plain
+DNS host (no userinfo, brackets, fragment, `;` params, signed query or
+`amazonaws.com`), and its alt only as ASCII caption words. Two verify rounds of a
+clause-by-clause port kept finding inputs (urlsplit's netloc and IPv6 rules,
+Python's Unicode tables) where it kept images huginn drops. The contract against
+huginn is therefore ONE-DIRECTIONAL and checked on huginn's own answers in
+`__fixtures__/huginn-document-text.json`: a kept image is huginn's answer, or that
+answer with its alt cleared, and the prose around images is huginn's to the byte.
+Regenerate the answers with `<huginn>/.venv/bin/python
+scripts/regen-huginn-document-text-fixture.py <huginn> [extra-inputs.json]`,
+never by hand. Shapes both filters miss and marked still renders as an image
+(reference-style `![x][r]` with a `data:` definition, a `]` inside the alt) are
+huginn's behaviour too and are not handled here. The read answers `null` on any
+failure, a non-`text/*` body (a huginn without #131 answers JSON) or a stall past
+its budget — one AbortController covers the body, so the request is aborted, not
+abandoned — and the proxy then serves the cleaned copy unchanged. Only an
+overlaid body carries `textSource: "file"`, and the re-run reload check reloads
+without a claim when its two reads came from different forms.
 
 **The split contract.** `src/summaries/transcript-split.ts` owns
 `splitTranscript` — the first level-2 `## Transcript` heading OUTSIDE fenced
