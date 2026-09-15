@@ -197,13 +197,20 @@ import {
   pageFolder,
   pageFollowups,
   projectCounts,
+  jiraChipCounts,
+  jiraFacetVisible,
+  jiraFilterAfterListing,
+  JIRA_PARAM,
+  jiraParamNeedsRewrite,
   projectFacetVisible,
   projectFilterAfterListing,
   projectHubPage,
   PROJECT_PARAM,
   projectParamNeedsRewrite,
+  resolveJiraParam,
   ROOT_FOLDER,
   sanitizeColorToken,
+  searchWithJira,
   searchWithProject,
   sortPages,
   statusCounts,
@@ -214,11 +221,26 @@ import {
   typeCounts,
   TYPE_LABEL,
   TYPE_ORDER,
+  urlWithJira,
   urlWithProject,
   type WikiFilters,
   type WikiListing,
   type WikiSortMode,
 } from "./wiki-filter.ts";
+// The provenance strip + the rail's Sessions section. Every string and every
+// fragment of markup lives in that module (pure, `bun test`-covered); this file
+// only decides WHERE it goes and wires the two controls it carries.
+import {
+  provStripHtml,
+  railListHtml,
+  SESSION_COPY_FAIL,
+  SESSION_COPY_IDLE,
+  SESSION_COPY_OK,
+  sessionCopyAriaLabel,
+  sessionsRailHtml,
+  sessionsSectionVisible,
+} from "./wiki-provenance-view.ts";
+import type { ProvenancePayload } from "../../../wiki/provenance.ts";
 
 // The wiki's merged type list (built-in defaults + `.wiki-reader.json` customs),
 // stored at boot from the /api/wiki/pages response and used by every type-keyed
@@ -263,12 +285,38 @@ let activityWeights: ActivityWeights = DEFAULT_ACTIVITY_WEIGHTS;
  */
 let projects: Record<string, number> = {};
 
+/**
+ * The wiki's Jira key → page-count map from `/api/wiki/pages` — the `projects`
+ * twin, and the same two jobs: the Jira chip row's whole-wiki gate, and the
+ * MEMBERSHIP set a `?jira=` deep link is judged against. `{}` until a payload
+ * lands, on a wiki nothing has stamped, and on an older server — all three of
+ * which mean "no Jira facet".
+ */
+let jiraKeys: Record<string, number> = {};
+
+/**
+ * The open page's provenance block, or `null` on an unstamped page (the server
+ * omits the key entirely) and on every non-article view.
+ *
+ * Kept in module state because the strip and the RAIL read it at different
+ * moments: the strip is built once from the `/api/wiki/page` response, while the
+ * rail repaints on every filter keystroke and background listing refresh, long
+ * after that response is gone. Cleared on every navigation BEFORE the new
+ * response lands, so a slow page load cannot leave the previous page's sessions
+ * standing over the new article.
+ */
+let currentProvenance: ProvenancePayload | null = null;
+
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
   meta: WikiListing;
   html: string;
   outgoing: WikiListing[];
   backlinks: WikiListing[];
+  /** Who wrote this page, which issue it serves, what it cost. ABSENT on a page
+   *  carrying none of the frontmatter keys — never `{}` — so the client's one
+   *  gate is "is this key here at all". */
+  provenance?: ProvenancePayload;
   error?: string;
 }
 
@@ -290,17 +338,17 @@ function withWiki(url: string): string {
   return withWikiParam(url, WIKI);
 }
 /** Build a shareable in-page URL that preserves the active wiki AND the active
- *  project filter (`articleUrl`) — the rail stays narrowed when an article
- *  opens, so a URL without the project would describe a different screen. */
+ *  facet filters (`articleUrl`) — the rail stays narrowed when an article
+ *  opens, so a URL without them would describe a different screen. */
 function pageUrl(name: string): string {
-  return articleUrl(WIKI, "page", name, filters.project);
+  return articleUrl(WIKI, "page", name, filters.project, filters.jira);
 }
 /** Collision-proof shareable URL keyed by the page's exact relPath — used for
  *  pages opened via the Atlas tab so Back/reload/share re-resolve the SAME page
  *  even on a wiki with same-stem pages in different folders (the `?page=` name
- *  route resolves first-stem-match). Carries the project for the same reason. */
+ *  route resolves first-stem-match). Carries both facets for the same reason. */
 function pageUrlByRelPath(relPath: string): string {
-  return articleUrl(WIKI, "relPath", relPath, filters.project);
+  return articleUrl(WIKI, "relPath", relPath, filters.project, filters.jira);
 }
 
 let allPages: WikiListing[] = [];
@@ -367,6 +415,7 @@ const filters: WikiFilters = {
   status: "",
   followups: "",
   project: "",
+  jira: "",
 };
 /** Which overview tab is showing. Set from the URL's `view=` (else the per-wiki
  *  stored value) at boot — on EVERY boot, an article deep link included, since
@@ -388,7 +437,7 @@ function syncStartTabFromUrl(): void {
  *  stores the wiki's NAME, never a URL, so the nav's Wiki link keeps opening the
  *  whole wiki. */
 function currentStartUrl(): string {
-  return urlWithProject(startUrl(WIKI, startTab), filters.project);
+  return urlWithJira(urlWithProject(startUrl(WIKI, startTab), filters.project), filters.jira);
 }
 
 /**
@@ -437,6 +486,26 @@ function adoptProjectFilter(boot: boolean): void {
   const raw = new URLSearchParams(location.search).get(PROJECT_PARAM);
   filters.project = projectFilterAfterListing(boot, raw, filters.project, projects);
   writeProjectParam();
+}
+
+/** `writeProjectParam`'s twin for `?jira=` — same in-place `replaceState`, same
+ *  guard on the param's CURRENT value, same hash preservation. */
+function writeJiraParam(): void {
+  if (!jiraParamNeedsRewrite(location.search, filters.jira)) return;
+  history.replaceState(
+    history.state,
+    "",
+    location.pathname + searchWithJira(location.search, filters.jira) + location.hash,
+  );
+}
+
+/** `adoptProjectFilter`'s twin: the address bar leads at BOOT (and on popstate),
+ *  the reader's own filter is re-validated on every later listing, and a key this
+ *  wiki does not know is cleared AND dropped from the URL. */
+function adoptJiraFilter(boot: boolean): void {
+  const raw = new URLSearchParams(location.search).get(JIRA_PARAM);
+  filters.jira = jiraFilterAfterListing(boot, raw, filters.jira, jiraKeys);
+  writeJiraParam();
 }
 
 /** Keep the breadcrumb's wiki-crumb href in step with the project filter. It is
@@ -718,6 +787,82 @@ function applyProjectFilter(project: string): void {
   repaintForProject();
 }
 
+/**
+ * The Jira chip row — `renderProjectChips`' twin, with one difference worth
+ * naming: the whole-wiki gate reads the PAYLOAD's `jiraKeys` map rather than the
+ * pages, because that is the contract the server states (`{}` on a wiki nothing
+ * has stamped ⇒ no facet) and because the map is shape-filtered while a page's
+ * own `jira` array deliberately keeps a typo.
+ *
+ * Everything else is the same decision: the gate going false takes the filter
+ * with it, an empty CURRENT scope hides the row unless a filter is active, the
+ * active key joins the list even at count 0, and the order is count DESC then
+ * key.
+ */
+function renderJiraChips(): void {
+  const row = document.getElementById("jiraChips");
+  if (!row) return;
+  const hide = () => {
+    row.innerHTML = "";
+    row.style.display = "none";
+  };
+  if (!jiraFacetVisible(jiraKeys)) {
+    if (filters.jira) {
+      filters.jira = "";
+      writeJiraParam();
+    }
+    hide();
+    return;
+  }
+  const counts = jiraChipCounts(allPages, jiraKeys, filters.domain, filters.type, filters.folder);
+  if (!Object.keys(counts).length && !filters.jira) {
+    hide();
+    return;
+  }
+  let html = `<button class="wiki-chip${filters.jira === "" ? " active" : ""}" data-jira="">All issues</button>`;
+  facetKeys(counts, filters.jira)
+    .sort((a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b))
+    .forEach((k) => {
+      html +=
+        `<button class="wiki-chip${filters.jira === k ? " active" : ""}" data-jira="${esc(k)}">` +
+        `${esc(k)} ${counts[k] || 0}</button>`;
+    });
+  row.innerHTML = html;
+  row.style.display = "";
+}
+
+/** Everything a jira change repaints — `repaintForProject`'s twin, same
+ *  ordering rule (the chip render may CLEAR the filter, so the crumb is
+ *  rewritten after it) and the same `autoOpen` contract. */
+function repaintForJira(autoOpen = true): void {
+  renderJiraChips();
+  refreshCrumbHref();
+  renderList();
+  refreshStartBody();
+  syncFilters(autoOpen);
+}
+
+/**
+ * Set the jira filter, write it to the URL and repaint.
+ *
+ * **A key this wiki's facet map does not hold is REFUSED, not set.** Unlike the
+ * project row, this filter has a second entry point — the article strip's key —
+ * and the strip renders whatever the page's frontmatter carries while the map is
+ * shape-filtered server-side. A filter `resolveJiraParam` would drop is a dead
+ * param: the chip row renders it at count 0 (contradicting "the count is the
+ * rows a click leaves"), every link built while it is live carries it, and a
+ * reload silently loses it. Running the value THROUGH `resolveJiraParam` also
+ * normalizes case, so `?jira=melosys-8045` from a shared link behaves like the
+ * chip's own click. Clearing (`""`) always goes through.
+ */
+function applyJiraFilter(jira: string): void {
+  const next = resolveJiraParam(jira, jiraKeys);
+  if (jira && !next) return;
+  filters.jira = next;
+  writeJiraParam();
+  repaintForJira();
+}
+
 function renderTagChips(): void {
   const counts = tagCounts(allPages, filters.domain, filters.type);
   const tags = Object.keys(counts).sort((a, b) => counts[b]! - counts[a]! || a.localeCompare(b));
@@ -735,10 +880,10 @@ function renderTagChips(): void {
 }
 
 /** Count of active secondary filters (folder + type + tag + status + follow-ups +
- *  project) — drives the Filters disclosure's badge and its auto-open. Status and
- *  follow-ups count separately because they ARE separate axes, and so does
- *  project. Domain lives in the compact head, so it is deliberately excluded
- *  here. */
+ *  project + jira) — drives the Filters disclosure's badge and its auto-open.
+ *  Status and follow-ups count separately because they ARE separate axes, and so
+ *  do project and jira. Domain lives in the compact head, so it is deliberately
+ *  excluded here. */
 function activeFilterCount(): number {
   let n = 0;
   if (filters.folder) n++;
@@ -747,6 +892,7 @@ function activeFilterCount(): number {
   if (filters.status) n++;
   if (filters.followups) n++;
   if (filters.project) n++;
+  if (filters.jira) n++;
   return n;
 }
 
@@ -853,6 +999,20 @@ function renderList(): void {
     // away — that is a scan of every page on every keystroke.
     activity: railSectionsVisible(filters) ? rankActivity(filtered, activityWeights, now) : [],
   });
+  // The open page's Sessions section, ABOVE everything the rail built. Not folded
+  // into `buildRail`: its model is pages and its invariant is one row per page,
+  // while these rows are sessions carrying no `data-relpath` — see
+  // `sessionsRailHtml`. The visibility rule reuses `railSectionsVisible` through
+  // `sessionsSectionVisible`, so a search query clears the head of the rail for
+  // the Jira-key jump exactly as it does for Activity and Pinned.
+  //
+  // Held in its OWN buffer, never seeded into `html`: the empty state below is
+  // decided on the page rows alone (`railListHtml`), or a page with sessions
+  // would answer a facet that matches nothing with session rows and no
+  // "No pages match." at all.
+  const sessionsHtml = sessionsSectionVisible(filters, currentProvenance?.sessions)
+    ? sessionsRailHtml(currentProvenance!.sessions, currentProvenance!.ledger)
+    : "";
   let html = "";
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
@@ -936,7 +1096,7 @@ function renderList(): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
-  listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
+  listEl.innerHTML = railListHtml(sessionsHtml, html);
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
   // is shorter the browser clamps to the new maximum and re-assigning the saved
@@ -960,6 +1120,7 @@ function renderPageFacets(autoOpen: boolean): void {
   renderTypeChips();
   renderStatusChips();
   renderProjectChips();
+  renderJiraChips();
   renderTagChips();
   syncFilters(autoOpen);
 }
@@ -1037,6 +1198,35 @@ function copyArticlePath(btn: HTMLButtonElement): void {
   };
   if (!full) return flashCopyResult(btn, false, idle);
   void copyText(full).then((ok) => flashCopyResult(btn, ok, idle));
+}
+
+/**
+ * Copy one session id off a rail row — the ⧉ Copy path control's twin, and
+ * through the same `copyText`/`flashCopyResult` pair rather than a second
+ * clipboard write.
+ *
+ * That matters more here than on the breadcrumb: the reader most likely to want
+ * a session id is on the tailnet over plain HTTP, where `navigator.clipboard` is
+ * simply absent and the `execCommand` fallback is the ONLY path — and the flash
+ * is the only report either path can give. The id is the whole reason the chip
+ * is copyable text: the browser cannot reach claude-usage (see the strip's own
+ * comment), so a search for this string is what a reader does with it.
+ */
+function copySessionId(btn: HTMLButtonElement): void {
+  const id = btn.getAttribute("data-sess-copy") || "";
+  const idle = {
+    text: SESSION_COPY_IDLE,
+    // The SAME spelling the button was rendered with — two copies meant the
+    // button quietly renamed itself the first time a reader pressed it.
+    ariaLabel: sessionCopyAriaLabel(id),
+    okText: SESSION_COPY_OK,
+    failText: SESSION_COPY_FAIL,
+  };
+  // An empty id reports a failure rather than returning silently: `writeText("")`
+  // RESOLVES, so copying nothing would report success while emptying the
+  // reader's clipboard (the ⧉ Copy path reasoning, verbatim).
+  if (!id) return flashCopyResult(btn, false, idle);
+  void copyText(id).then((ok) => flashCopyResult(btn, ok, idle));
 }
 
 // ── Breadcrumb bar (above the article) ────────────────────────────────
@@ -1137,6 +1327,9 @@ function hideBreadcrumb(): void {
   // would still be handed a page the reader is no longer on.
   currentArticle = null;
   currentOutgoingTitles = [];
+  // Same rule, and it reaches further: the rail's Sessions section is rendered
+  // from this, and the rail stays on screen on the start view.
+  currentProvenance = null;
 }
 
 // ── Middle pane: article / start view ─────────────────────────────────
@@ -1544,9 +1737,18 @@ function projectHubChipHtml(m: WikiListing): string {
   );
 }
 
-/** Article-head block (title, badges, tags, dates, source link) — shared by
- *  markdown pages and HTML explainers. */
-function articleHeadHtml(m: WikiListing): string {
+/**
+ * Article-head block (title, badges, tags, dates, source link) — shared by
+ * markdown pages and HTML explainers.
+ *
+ * `provenance` is the SINGLE-PAGE payload's block and is therefore optional: the
+ * explainer path renders this head before its `/api/wiki/page` response lands
+ * (and an HTML explainer carries no frontmatter to stamp in the first place), so
+ * it passes nothing and renders no strip. A page the stamper has not touched
+ * carries no `provenance` key at all, which is the one gate — never an empty
+ * object, so there is no "is it empty" question to get wrong.
+ */
+function articleHeadHtml(m: WikiListing, provenance?: ProvenancePayload): string {
   // Explainer-style subtitle under the H1 for blog pages that declared a
   // `description` (user text → escaped into innerHTML). Non-blog pages are unchanged.
   const subtitle =
@@ -1570,7 +1772,14 @@ function articleHeadHtml(m: WikiListing): string {
     head += `<a class="wiki-source-url" href="${esc(m.url)}" target="_blank" rel="noopener">Open source ↗</a>`;
   }
   head += projectHubChipHtml(m);
-  head += "</div></div>";
+  // The meta row closes first: the strip is a BLOCK under it (the Jira row plus
+  // one line of cost), not another chip competing with the tags and dates.
+  head += "</div>";
+  // `jiraKeys` is the facet's membership set, and the strip's key is a SECOND
+  // way into that facet — so the strip renders a control only for a key the
+  // facet can actually serve (see `provStripHtml`).
+  if (provenance) head += provStripHtml(provenance, jiraKeys);
+  head += "</div>";
   return head;
 }
 
@@ -1582,6 +1791,10 @@ function articleHeadHtml(m: WikiListing): string {
  *  the link graph, plus the lazy Similar section; outgoing links stay empty. */
 function loadExplainer(m: WikiListing, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
+  // An explainer is HTML on disk and carries no frontmatter to stamp, so this is
+  // a clear and never a set — but it still has to happen, or the markdown page
+  // the reader came FROM keeps its strip and its rail rows here.
+  currentProvenance = null;
   setAtlasFull(false);
   currentName = m.name;
   // The listing IS the identity here (no page response to wait for), so the
@@ -1660,6 +1873,10 @@ function openNavTarget(target: NavTarget, push: boolean): void {
 
 function loadPage(name: string, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
+  // The PREVIOUS page's sessions, dropped before the round-trip rather than when
+  // the next response lands: a slow load would otherwise leave the rail claiming
+  // the new article was written by the old one's sessions.
+  currentProvenance = null;
   // Raised BEFORE anything else: `currentName` is only set from the response, so
   // without this signal the whole round-trip reads as the "start" view and a
   // refetch resolving mid-click would re-sort the list under the row just clicked.
@@ -1683,6 +1900,7 @@ function loadPage(name: string, push: boolean): void {
  *  `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true): void {
   hideExplainPill();
+  currentProvenance = null; // same drop-before-the-round-trip rule as `loadPage`
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
   // The explainer branch is `loadPage`'s, and it has to exist here too now that
@@ -1724,6 +1942,11 @@ function fetchAndRenderPage(url: string, push: boolean): void {
         return;
       }
       currentName = data.meta.name;
+      // The open page's provenance, for BOTH halves of the feature: the strip is
+      // built from it once, a few lines down, and the rail re-reads it on every
+      // later repaint (a filter keystroke, a background listing refresh) long
+      // after this response is gone.
+      currentProvenance = data.provenance ?? null;
       // The RESPONSE's relPath, not the requested one: a by-name navigation
       // resolves server-side, and the active row must key on the page that
       // actually came back.
@@ -1746,7 +1969,9 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       const articleClass = isBlog ? "wiki-article wiki-article-blog" : "wiki-article";
       const accentBlock = isBlog ? blogAccentStyleBlock(data.meta) : "";
       document.getElementById("articleWrap")!.innerHTML =
-        accentBlock + articleHeadHtml(data.meta) + `<div class="${articleClass}">${data.html}</div>`;
+        accentBlock +
+        articleHeadHtml(data.meta, data.provenance) +
+        `<div class="${articleClass}">${data.html}</div>`;
       document.getElementById("articleWrap")!.scrollTop = 0;
       // Client-side enhancement: upgrade any ```mermaid fences to inline SVG.
       // No-op (zero mermaid bytes) for pages without a mermaid fence. Covers
@@ -1842,6 +2067,27 @@ document.body.addEventListener("click", (e) => {
   if (hubChip) {
     e.preventDefault();
     applyProjectFilter(hubChip.getAttribute("data-project-hub") || "");
+    return;
+  }
+  // The provenance strip's Jira key: the key itself narrows the page list to the
+  // pages serving that issue. Delegated here for the hub chip's reason — the
+  // strip lives inside `#articleWrap`, whose innerHTML is replaced on every load.
+  const provJira = target.closest ? target.closest("[data-prov-jira]") : null;
+  if (provJira) {
+    e.preventDefault();
+    const key = provJira.getAttribute("data-prov-jira") || "";
+    // Re-clicking the active key clears it, the chip row's own convention — so a
+    // reader who filtered from the strip can undo it from the same control.
+    applyJiraFilter(filters.jira === key ? "" : key);
+    return;
+  }
+  // The rail's ⧉ copy button on a session row. The id is carried ON the button
+  // rather than re-read from the row at click time, the ⧉ Copy path rule: the
+  // string reported and the string copied cannot then be different sessions.
+  const sessCopy = target.closest ? target.closest<HTMLButtonElement>("[data-sess-copy]") : null;
+  if (sessCopy) {
+    e.preventDefault();
+    copySessionId(sessCopy);
     return;
   }
   const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;
@@ -1985,6 +2231,16 @@ document.getElementById("projectChips")!.addEventListener("click", (e) => {
   applyProjectFilter(filters.project === project ? "" : project);
 });
 
+// Jira facet. The project row's twin, and URL state for the same reason, so
+// every path through it likewise goes via `applyJiraFilter`.
+document.getElementById("jiraChips")!.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  const chip = target.closest ? target.closest(".wiki-chip") : null;
+  if (!chip) return;
+  const key = chip.getAttribute("data-jira") || "";
+  applyJiraFilter(filters.jira === key ? "" : key);
+});
+
 document.getElementById("tagChips")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   const chip = target.closest ? target.closest(".wiki-chip") : null;
@@ -2022,6 +2278,11 @@ window.addEventListener("popstate", () => {
   const projectBefore = filters.project;
   adoptProjectFilter(true);
   if (filters.project !== projectBefore) repaintForProject(false);
+  // Same for the jira facet — same reason, same `false` (Back/Forward is not a
+  // filter click, so a collapsed Filters stack stays collapsed).
+  const jiraBefore = filters.jira;
+  adoptJiraFilter(true);
+  if (filters.jira !== jiraBefore) repaintForJira(false);
   // A relPath URL round-trips collision-proof (and is what every in-reader
   // navigation now pushes); check it first, `?page=` stays for older links.
   const relPath = params.get("relPath");
@@ -4796,9 +5057,14 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // an absent field means "this server tells me nothing about projects", which is
   // exactly `{}` — no facet, no filter.
   projects = data.projects && typeof data.projects === "object" ? data.projects : {};
+  // Same rule, same reason, for the Jira facet: `{}` is both "no facet" and the
+  // membership set a `?jira=` deep link is judged against, so a stale map would
+  // admit a key the listing on screen no longer carries.
+  jiraKeys = data.jira && typeof data.jira === "object" ? data.jira : {};
   // Before the first `renderPageFacets` on every path that reaches one, so the
   // boot render already paints the chip the URL asked for as active.
   adoptProjectFilter(boot);
+  adoptJiraFilter(boot);
 }
 
 /** Adopt a fresh page set and repaint everything derived from it. Filters, the

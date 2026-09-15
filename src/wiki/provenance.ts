@@ -333,9 +333,12 @@ export function enrichSessions(
   return refs.map((raw) => {
     const ref = parseSessionRef(raw);
     const facts = ledger.facts.get(ref.id);
-    // The drill-down is a HASH route (`#/session/<id>`), so the link is built
-    // even for an id the ledger does not hold: the page it opens is claude-usage's
-    // answer about that id, which is the question a reader clicking it is asking.
+    // The drill-down is a HASH route (`#/session/<id>`), so the SERVER builds it
+    // for every id, held or not; the CLIENT decides per chip whether to render
+    // it (`chipView`, `dashboard/views/components/wiki-provenance-view.ts`, which
+    // suppresses it on every BARE chip — for `missing`/`invalid` the link is a
+    // dead end by construction). Building it here regardless keeps that a
+    // rendering decision rather than one baked into the payload.
     const url = base ? `${base}/#/session/${encodeURIComponent(ref.id)}` : undefined;
     const invalid = ledger.invalid?.has(ref.id) ?? false;
     const unresolved = !invalid && (ledger.unresolved?.has(ref.id) ?? false);
