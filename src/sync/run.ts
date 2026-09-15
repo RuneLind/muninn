@@ -25,6 +25,7 @@ import {
   type PorcelainStatusEntry,
 } from "../wiki/commit.ts";
 import { runWikiWriteExclusive, wikiWriteQueueKey } from "../wiki/queue.ts";
+import { takeWikiWriteLock, type WikiLockHandle } from "../wiki/lockfile.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { buildReindexResponse, postCollectionUpdate } from "../wiki/reindex.ts";
 import {
@@ -514,6 +515,15 @@ interface LocalSectionOutcome {
   conflicts?: string[];
   error?: string;
   /**
+   * NOTHING in the section ran — it was refused before the first `git status`,
+   * because another PROCESS holds the wiki write lock. Distinguished from an
+   * ordinary hard `deferred`, where status, add/commit and the rebase gate all
+   * ran and the loop chose to wait: only that one is evidence the commit path
+   * works, and `syncSubsumesSweeper` reads the stamp it leaves to stand the
+   * daily sweeper down.
+   */
+  sectionSkipped?: true;
+  /**
    * A SOFT deferral: real work happened (commit / rebase / push all still run),
    * but something was held back, so the tick must not report `ok`. Quiet-held
    * files live here — reporting them as `ok` with streak 0 meant a new page could
@@ -913,15 +923,70 @@ export function sortedLockRoots(repo: SyncRepo): string[] {
  * wikis is a deadlock, and a shared total order is the cheapest thing both sides
  * can agree on without coordination.
  */
-function withLocks<T>(repo: SyncRepo, top: string, work: () => Promise<T>): Promise<T> {
+function withLocks(
+  repo: SyncRepo,
+  top: string,
+  work: () => Promise<LocalSectionOutcome>,
+): Promise<LocalSectionOutcome> {
   const roots = sortedLockRoots(repo);
   // No wiki root ⇒ no page writes to serialize against; the commit queue alone
   // is the repo's lock.
-  const nested = roots.reduceRight<() => Promise<T>>(
-    (inner, root) => () => runWikiWriteExclusive(root, inner),
+  const nested = roots.reduceRight<() => Promise<LocalSectionOutcome>>(
+    (inner, root) => () => withWikiFileLock(root, inner),
     work,
   );
   return runExclusiveQueued(top, nested);
+}
+
+/**
+ * The CROSS-PROCESS half of one wiki root's lock, taken INSIDE that root's
+ * in-process queue — the `writeWikiPage` order, for the deadlock reason stated
+ * there: queue first, file lock inside it, so a queued writer never waits on the
+ * file lock while holding the chain another holder needs.
+ *
+ * `runWikiWriteExclusive` serializes muninn against muninn. It says nothing
+ * about claude-usage's `wiki-stamp`, and the rebase below is the one operation
+ * in this file that REWRITES a working tree wholesale: a stamper that read a
+ * page before the rebase and renamed its replacement over it afterwards reverts
+ * whatever the rebase pulled in, and the next tick commits and pushes that
+ * revert as if a human had made it. The queue could not see it, because the
+ * stamper is not on the queue.
+ *
+ * Held over the local section only — status, add/commit, rebase — which is
+ * entirely local git work. The fetch ran before either lock and the push runs
+ * after both, so this holds no network I/O, per the locking contract in
+ * `src/sync/CLAUDE.md`.
+ *
+ * A held lock is a HARD `deferred`: the loop's own vocabulary for "the design
+ * working, wait for the next tick". It carries `sectionSkipped` so the sweeper
+ * evidence stamp knows the commit path did not merely choose to wait — it never
+ * ran at all.
+ */
+async function withWikiFileLock(
+  root: string,
+  work: () => Promise<LocalSectionOutcome>,
+): Promise<LocalSectionOutcome> {
+  const lock = await takeWikiWriteLock(root, { op: "sync-local-section" });
+  if (!lock.ok) {
+    log.info("sync: local section deferred — {reason}", { reason: lock.reason });
+    return {
+      committed: [],
+      deferredFiles: [],
+      denied: [],
+      rebased: false,
+      headMoved: false,
+      state: "deferred",
+      reason: `another process holds the wiki write lock for ${path.basename(root)}`,
+      sectionSkipped: true,
+      actions: ["local section deferred — another process holds the wiki write lock"],
+    };
+  }
+  const held: WikiLockHandle | null = lock.lock;
+  try {
+    return await work();
+  } finally {
+    held?.release();
+  }
 }
 
 /** Sync ONE repo. Never throws — every failure becomes a card state. */
@@ -1104,7 +1169,12 @@ export async function syncRepo(
       //     that a wiki nobody is converging must keep getting.
       //   - `error` / `transient` — `git add` or `git commit` refused, or the
       //     rebase never started. Nothing was committed. NOT evidence.
-      const commitPathOk = local.state === "deferred";
+      //   - a `deferred` carrying `sectionSkipped` — the wiki write lock was
+      //     held by another process and the section never started. NOT evidence:
+      //     nothing ran, so nothing was proved, and stamping it would renew the
+      //     sweeper stand-down off a tick that did strictly less than a tick
+      //     which errored at the fetch.
+      const commitPathOk = local.state === "deferred" && !local.sectionSkipped;
       return finish(
         after,
         local.state,
@@ -1171,7 +1241,12 @@ export async function syncRepo(
         // tick: a page it committed belongs in the report, and — load-bearing —
         // a page it PULLED must invalidate the reader's 5-minute index cache,
         // which the first pass's `headMoved` alone cannot know about.
-        if (res.local?.state && res.local.state !== "deferred") commitPathOk = false;
+        // A `deferred` from the retry stamps for the same reason the first
+        // pass's does — UNLESS it is the lock-held one, where the section never
+        // ran (see `sectionSkipped`).
+        if (res.local?.state && (res.local.state !== "deferred" || res.local.sectionSkipped)) {
+          commitPathOk = false;
+        }
         if (res.local) {
           carry.committed = [...carry.committed, ...res.local.committed];
           carry.rebased = carry.rebased || res.local.rebased;

@@ -412,10 +412,13 @@ each other's appends — which is what the lockfile below exists for.
 
 **The shape is checked in TWICE, byte for byte** —
 `src/wiki/__fixtures__/wiki-stamp-shape.md` here,
-`test/fixtures/wiki-stamp/shape.md` in claude-usage. Each repo's suite pins its
-own side (`provenance.test.ts`'s first describe block reads the file and asserts
-the four keys), so a shape change without the other repo fails loudly on one side
-instead of degrading a reader in silence.
+`test/fixtures/wiki-stamp/shape.md` in claude-usage. **Each side pins its OWN
+copy** — `provenance.test.ts`'s first describe block reads this file and asserts
+the keys it READS, claude-usage's suite asserts the keys it WRITES — and neither
+assertion can see the other file, so the two are compared by hand. One
+opportunistic test here diffs them when a claude-usage checkout happens to sit at
+`../claude-usage`, and SKIPS otherwise by design: CI clones one repo, and a
+machine without the sibling must not go red over a file it does not have.
 
 **What the store does with them** (`buildWikiIndex`, beside `project`): `sessions`
 and `prs` verbatim and in FILE order (arrival order, never sorted), `jira`
@@ -435,21 +438,60 @@ opted in by the SINGLE-PAGE caller alone, through `includeProvenance` (the
 `includeDesc` mechanism, whose comment names all three callers of that one
 function).
 
-**The reader's block** rides `GET /api/wiki/page` beside `meta`, and only when the
-page carries any of the keys — `{sessions, jira, prs, totalCost, costedSessions,
-backfilled?, ledger}`. Sessions are enriched SERVER-side in ONE
-`GET <CLAUDE_USAGE_URL>/api/sessions-by-id?ids=…` call through the bounded reader
-(`utils/bounded-fetch.ts`, 10 s / 8 MiB — the plans board's degrade shape and its
-warn-once-then-info key): the `provider:` prefix is muninn's, so the ids go BARE
-and the prefix is kept in the response for the glyph. The browser never reaches
-port 8787 (tailnet viewers, mixed content under `tailscale serve`), so the
-drill-down is the session id as copyable text plus an optional
-`CLAUDE_USAGE_PUBLIC_URL` link.
+**The reader's block** rides `GET /api/wiki/page` beside `meta`, and only when
+`hasProvenance(meta)` — the ONE gate, shared with the store's other callers —
+says the page carries any of the three LIST keys. `sessions_backfilled` alone
+opens nothing: it is a marker about a list that is not there. The payload is
+`{sessions, jira, prs, totalCost, costedSessions, backfilled?, ledger}`.
+
+Sessions are enriched SERVER-side in BATCHES of `SESSION_IDS_PER_CALL` (200)
+against `GET <CLAUDE_USAGE_URL>/api/sessions-by-id?ids=…`, through the shared
+`utils/claude-usage-fetch.ts` (the one fetch helper all three claude-usage
+proxies use — the `/models` ledger card, the `/plans` board, this). One call for
+every page anyone has actually stamped, but **not one by contract**: the batch
+size is the cap, and a page naming 250 sessions makes two. Every batch and the
+huginn Jira lookup share ONE `PROVENANCE_BUDGET_MS` (10 s) deadline and run
+concurrently, so a page open costs one budget rather than the sum of its legs.
+The `provider:` prefix is muninn's, so the ids go BARE; a bare ref takes the
+LEDGER's provider for its glyph, a prefixed one keeps the page's own spelling.
+The browser never reaches port 8787 (tailnet viewers, mixed content under
+`tailscale serve`), so the drill-down is the session id as copyable text plus an
+optional `CLAUDE_USAGE_PUBLIC_URL` link.
+
+**A bare chip has FOUR possible reasons and they are not interchangeable.** The
+chip carries three booleans, at most one of them true (`bareChipReason` owns the
+precedence), and every chip carries the SAME key set with an explicit `null`
+where a fact is unknown:
+
+| flag | meaning |
+|---|---|
+| `missing` | the ledger ANSWERED and does not hold this id — reaped, or another host's |
+| `unresolved` | nobody asked: the batch carrying it failed, or this host is not pointed at a claude-usage |
+| `invalid` | the value cannot BE a session id (over 128 chars, or outside `[A-Za-z0-9._-]`) and was refused before batching |
+
+That third one is a bound, not fussiness: one malformed frontmatter entry sent
+whole puts the request over claude-usage's 16 KiB header block, and the 431 that
+comes back has no body naming the offender — so it takes every legitimate id in
+its batch with it.
+
+**`ledger` has three states, not two.** `asked` is the explicit third: a
+`jira`-only page, or a host with no `CLAUDE_USAGE_URL`, was never asked, and
+reporting `reachable: false` about a call that did not happen reads as "the
+ledger is down". `partial` is the fourth fact — some batch answered and some did
+not, so `totalCost` is over a SUBSET — because `reachable: true` alone presents a
+200-of-250 answer as complete. An UNCONFIGURED host never fetches at all
+(`ledger: {asked:false, reachable:false, partial:false, configured:false}`, no
+`baseUrl`): the `/models` card's "left unset and unreachable, hide it" rule, one
+layer down, so an instance nobody pointed at a claude-usage does not pay a
+connection refusal on every stamped page open.
 
 **Cost is labelled honestly.** `totalCost` is the sum over the sessions the ledger
 PRICED and is never a per-page share — a session that wrote four pages cost what
 it cost, and dividing it four ways would invent a number — with `costedSessions`
-as the denominator that total is over. A session the ledger does not hold is a
+as the denominator that total is over. It is **rounded to cents at the seam**,
+not at the renderer: the ledger's per-session costs carry full float precision
+and summing them produces the `5.350000000000001` shape on a wire payload more
+than one client renders. A session the ledger does not hold is a
 `missing: true` chip contributing nothing, and is not a $0 session either;
 `ledger.reachable` is what tells "this session is gone" from "I could not ask",
 because the chip cannot.
@@ -468,16 +510,53 @@ than resolving one wiki — an issue is served by a page in the kode-wiki and
 discussed in a mimir plan, and "which pages serve MELOSYS-8045" has no useful
 per-wiki answer — so each row names its own `wiki`. The key is normalized before
 matching (`melosys-8045` is what a shared URL carries) and a non-key shape is a
-400 (`^[A-Z][A-Z0-9]+-[0-9]+$`); both params at once is a 400 rather than a
-silent preference; a key nothing serves is an empty list, not a 404. A degraded
-ledger never 5xxes either route.
+400; both params at once is a 400 rather than a silent preference; a key nothing
+serves is an empty list, not a 404. A degraded ledger never 5xxes either route.
+
+Four rules the route's SHAPE depends on:
+
+- **The Jira key shape is `^[A-Z][A-Z0-9]*-[0-9]+$`** — byte for byte what
+  claude-usage's `/api/jira-sessions` validates with. The `*` is load-bearing:
+  upstream accepts a one-character project prefix, and requiring two made `X-1` a
+  400 on the muninn side of a key the stamper had happily written. `jiraCounts`
+  filters the LISTING facet to that shape for the same reason — the store keeps a
+  typo (worth seeing on the page's own row), but a facet chip whose only
+  behaviour is to 400 when clicked is not worth rendering.
+- **`?session=` is validated too**, against claude-usage's own `session_id`
+  shape, so a value that cannot be an id is refused before walking every wiki to
+  match nothing.
+- **Both 400 bodies echo the NORMALIZED key, clipped to 64 chars** — a 400 that
+  reflects arbitrary caller bytes is a payload nobody asked this route to carry.
+- **Both halves of the answer are CAPPED** — `PROVENANCE_PAGES_MAX` (500) page
+  rows and `PROVENANCE_REFS_MAX` (1000) distinct session refs, with a top-level
+  `truncated: true` saying the answer is a prefix. The second cap is the one that
+  matters: at 200 ids per call it bounds the claude-usage fan-out ONE GET buys.
+  That amplification is also why the route is on `SIDE_EFFECTING_GETS`
+  (`src/auth/origin.ts`) — not a model call and not a write, but a cross-site GET
+  that drives this host's outbound calls.
+
+**`?session=` prices the session ASKED ABOUT**, not every session sharing a page
+with it (`costOver`): summing those answers "what did these pages cost" under a
+heading that says "what did this session cost". The page rows keep their own full
+`sessions` lists. And the queried spelling is UPGRADED — `dedupeSessionRefs`
+keeps the query's position at the head but prefers a matched page's prefixed
+spelling, so a reader who pasted the bare id still gets the provider glyph on the
+one chip the answer is about.
 
 **Neither route carries the per-wiki egress prologue, deliberately.** The whole
 request is a list of session ids and Jira keys going to a LOCAL ledger and a
 local knowledge API — no page content leaves the machine and no model call is
 spent — so a read-only INSTANCE (`MUNINN_WIKI_READONLY=1`, the mini serving
 mimir) and a read-only ROOT both answer them in full. Provenance is a READ; only
-the lock below touches a write seam.
+the lock below touches a write seam. The amplification the route DOES have is
+handled by the caps + `SIDE_EFFECTING_GETS` above, which is a cross-site-origin
+question rather than an egress one.
+
+**huginn's Jira corpus lookup NEGATIVELY caches a failure** for
+`JIRA_KEY_INDEX_FAIL_TTL_MS` (60 s, `src/jira/verify-keys.ts`). The fetch carries
+a 15 s timeout and nothing remembered that it had just expired, so a down huginn
+cost every caller 15 s — and on this path that is once per stamped page open.
+Short deliberately: the answer it suppresses is a degrade rather than a result.
 
 ### The cross-process lockfile (`lockfile.ts`)
 
@@ -485,8 +564,21 @@ the lock below touches a write seam.
 cannot serialize muninn against ANOTHER PROCESS, and there is one: `wiki-stamp`,
 spawned from a `PostToolUse` hook, appends a session id to a page's `sessions:`
 line while the model is mid-turn on that same file. So both sides take
-`<root>/.wiki-write.lock` with `openSync(path, "wx")` (`O_CREAT|O_EXCL`),
-gitignored in both wikis.
+`<root>/.wiki-write.lock` with `openSync(path, "wx")` (`O_CREAT|O_EXCL`).
+
+**The lock is taken on EVERY registered wiki root a writer touches**, not on two
+named ones — so every root has to tolerate the file. mimir's `.gitignore` names
+both it and `.wiki-stamp.*.tmp`; the jarvis wiki's own repo (`huginn-jarvis`,
+which is a repo of its own — the outer `huginn` checkout's directory rule is a
+different repo answering a different question) ignores NEITHER, and muninn does
+not edit that repo. So `isWikiWriteArtifact` (`lockfile.ts`) skips both by
+BASENAME at the three places that enumerate a wiki's dirty files —
+`listWikiSubtreeDirty` (the daily `wiki-committer` sweeper, which would otherwise
+commit a LIVE lockfile and delete it again on the next sweep, forever),
+`listDirtyEntries` (the repo-sync loop, which holds the lock across its own
+`git status`, so the file is dirty by construction on every tick) and
+`wikiDirtyStat` (the Index card's badge, which would report a wiki as having
+uncommitted changes for the two seconds a write holds it).
 
 | | wiki-stamp | muninn |
 |---|---|---|
@@ -500,6 +592,19 @@ lines — and because a hook is synchronous on a tool call while a human clickin
 can wait. The stale window is the same on both sides: shorter here and muninn
 seizes a lock the stamper still holds; longer and muninn waits behind an
 interrupted stamp longer than the stamper would wait for itself.
+
+**On acquire muninn writes ONE JSON line into the file** — `{pid, host, op, at}`.
+For an operator it answers "who is holding this, and since when" from a file that
+was otherwise zero bytes. For the code it is a FENCE: `release()` unlinks only
+while the file still carries OUR line, so a lockfile a third process took over as
+stale — and is now holding for its own write — is never deleted by our late
+release; acquire verifies the same way, re-reading after the write, because a
+stale takeover elsewhere can unlink and recreate the file between our `O_EXCL`
+create and our write. ⚠️ **The fence is ONE-SIDED today**: `wiki-stamp` writes an
+empty lockfile and unlinks unconditionally, so it can still drop a lock muninn
+holds once muninn's has aged past the stale window. Follow-up in claude-usage
+(write an owner line, verify before unlinking); until then this half stops muninn
+from being the one that does it.
 
 Three rules are load-bearing:
 
@@ -522,14 +627,54 @@ Three rules are load-bearing:
   is success, so a new variant that is not named there reports a write that never
   happened.
 
+**The `locked` 409 is a RETRY, not a reload — and the clients say so.** Two
+conditions answer 409 at these routes and their recoveries are opposite, so the
+body's `locked` flag decides, never the status: the `/plans` board renders a
+retry sentence with `reload: false` (`classifyWriteFailure`), and the reader's ➕
+and ✎ bars show `WIKI_LOCKED_COPY` instead of the stale copy (`isLockedResponse`,
+one reader of the flag shared by both). Branching on the status alone told a
+reader whose only problem was a two-second lock contention that their page had
+changed on disk, and disabled the control until they reloaded something that was
+never stale.
+
+**The repo-sync loop takes it too** (`src/sync/run.ts`, `withWikiFileLock`), per
+affected root, INSIDE that root's in-process queue and held over the local
+section only — status → add/commit → rebase, all local git, so it holds no
+network I/O. `git rebase` is the one operation in that file that rewrites a
+working tree wholesale, and a stamper that read a page before the rebase and
+renamed its replacement over it afterwards reverts whatever the rebase pulled in;
+the NEXT tick commits and pushes that revert as if a human had made it. A held
+lock is a hard `deferred` carrying `sectionSkipped`, which withholds the sweeper
+evidence stamp — an ordinary `deferred` means "the commit path ran and the loop
+chose to wait", and this one means nothing ran at all.
+
 `applyWikiProposal` and `writePlanQueue` route through `runWikiWriteExclusive`
 but NOT through `writeWikiPage`, so they take the in-process queue and **not** the
-file lock. Stated rather than fixed: their outcome unions have no `locked`
-variant, and mapping a 2-second lock contention onto `applyWikiProposal`'s
-`error` flips the proposal row to a terminal `error` state — a worse failure than
-the narrow race (the stamper only ever appends frontmatter to a page that already
-exists). Adding the lock there means adding the variant and its route mapping
-first.
+file lock. Stated rather than fixed, with the justification corrected:
+
+- `writePlanQueue` is genuinely SAFE — it writes `plans/queue.yaml`, which is not
+  a page and carries no frontmatter, so the stamper will never touch it.
+- `applyWikiProposal` is NOT. Its update mode rewrites an EXISTING page, which is
+  exactly what the stamper appends to; the earlier claim that "the stamper only
+  ever appends frontmatter to a page that already exists" describes the race
+  rather than excluding it. The decision to leave it unlocked still stands,
+  because its outcome union has no `locked` variant and mapping a 2 s contention
+  onto `error` flips the proposal row to a TERMINAL state — a worse failure than
+  the narrow race. **The residual is a lost apply or a lost stamp** on a page
+  being applied and stamped in the same instant. Adding the lock means adding the
+  variant and its route mapping first.
+
+**A read-only INSTANCE does not hold this lock at all** — on the mini
+(`MUNINN_WIKI_READONLY=1`) `writeWikiPage` refuses at its `forbidden` guard,
+which runs BEFORE the lock is taken, so nothing is created and nothing is waited
+on there. The sync loop and the sweeper still run on that host and still take it;
+they are git operations, which neither read-only mechanism gates.
+
+⚠️ **`WIKI_STAMP_ROOTS` (claude-usage) and muninn's registered roots must name the
+SAME directories.** The lock is per ROOT, so two processes configured with
+different roots lock at different paths and share nothing. In particular a wiki
+registered at a strict SUBDIRECTORY of a stamp root gets no mutual exclusion:
+the stamper locks the parent, muninn locks the child, and both writes proceed.
 
 ## Write queue (`queue.ts`)
 

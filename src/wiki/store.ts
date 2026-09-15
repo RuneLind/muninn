@@ -862,7 +862,17 @@ export function parseFrontmatter(content: string): Record<string, string | strin
   // child is depth ≥ 2).
   let parent: string | null = null;
   let childIndent: number | null = null;
-  for (const line of body.split("\n")) {
+  for (const rawLine of body.split("\n")) {
+    // A CRLF file's every line ends in `\r`, which `.` does NOT match — so the
+    // key regex below failed on every line and a CRLF page parsed to `{}`: no
+    // type, no tags, no title, and (since the provenance keys landed) no
+    // sessions or Jira keys either. It was cosmetic while every writer was
+    // muninn's own; it is load-bearing now that an EXTERNAL process
+    // (claude-usage's `wiki-stamp`) owns four of these keys and a page can
+    // arrive from a Windows checkout or a CRLF-normalizing editor. Stripped per
+    // LINE rather than from the whole document, so a lone `\r` inside a value is
+    // left alone.
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     const trimmed = line.trim();
     // A blank line neither closes a block nor parses. Nor does a comment, at ANY
     // indent: a column-0 `#` is not a dedent out of the block, and reading it as
@@ -2055,9 +2065,19 @@ function asOptionalStringArray(
   v: string | string[] | undefined,
   map?: (s: string) => string,
 ): string[] | undefined {
-  const values = asStringArray(v)
-    .map((s) => (map ? map(s) : s.trim()))
-    .filter(Boolean);
+  // DEDUPED, first spelling wins, order otherwise preserved. A repeated value is
+  // an append the stamper made twice (or a hand edit beside one), and it reached
+  // three surfaces as a real second entry: a duplicate session chip, a duplicate
+  // session PRICED twice into a page's `totalCost`, and a `jira` row rendered
+  // twice. The facet was already immune — `jiraCounts` folds each page through a
+  // Set — which is exactly why this was invisible from there.
+  const values = [
+    ...new Set(
+      asStringArray(v)
+        .map((s) => (map ? map(s) : s.trim()))
+        .filter(Boolean),
+    ),
+  ];
   return values.length > 0 ? values : undefined;
 }
 
@@ -2366,10 +2386,6 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       } catch {
         return; // unreadable file — skip, keep the rest of the wiki browsable
       }
-      // NB (pre-existing, wider than the plan fields): `parseFrontmatter`'s
-      // line regex ends in `(.*)$`, which does not match a trailing `\r`, so a
-      // CRLF-line-ending page parses to `{}` and loses title/tags/type/accent
-      // along with the plan fields. Not fixed here — it belongs with the parser.
       const fm = parseFrontmatter(content);
       // Native `.mdx` pages take the same branch as `.md` — same frontmatter,
       // same wikilink extraction, same graph membership. The only difference is

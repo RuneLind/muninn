@@ -132,6 +132,11 @@ export interface PlanBoardDeps {
   ledger: PlanLedgerDeps;
   loadSource: () => Promise<PlanSourceResult>;
   renderPage?: (payload: BoardPayload) => Promise<string>;
+  /** How long a write waits for the cross-process wiki lockfile. Production
+   *  passes nothing (`WIKI_LOCK_WAIT_MS`, 2 s); a test shortens it so the
+   *  `locked` refusal costs milliseconds rather than the two seconds a human
+   *  click may. */
+  lockWaitMs?: number;
 }
 
 export function defaultPlanBoardDeps(config: Config): PlanBoardDeps {
@@ -325,6 +330,7 @@ export function registerPlansRoutes(
         relPath: plan.relPath,
         baseHash,
         staleReason: `${plan.relPath} changed since the board was loaded`,
+        ...(deps.lockWaitMs !== undefined ? { lockWaitMs: deps.lockWaitMs } : {}),
         // No-log mode skips the reindex fan-out anyway; `[]` says the same thing
         // where the call is read.
         collections: [],
@@ -431,6 +437,7 @@ export function registerPlansRoutes(
         relPath: plan.relPath,
         baseHash,
         staleReason: `${plan.relPath} changed since the board was loaded`,
+        ...(deps.lockWaitMs !== undefined ? { lockWaitMs: deps.lockWaitMs } : {}),
         collections: [],
         logKind: null,
         now: () => Date.now(),

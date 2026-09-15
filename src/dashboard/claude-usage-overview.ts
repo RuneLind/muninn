@@ -31,11 +31,8 @@
 
 import { getLog } from "../logging.ts";
 import { formatRelative, parseTs } from "./indexing-overview.ts";
-import {
-  readBounded,
-  BOUNDED_FETCH_TIMEOUT_MS,
-  BOUNDED_FETCH_MAX_BYTES,
-} from "../utils/bounded-fetch.ts";
+import { BOUNDED_FETCH_TIMEOUT_MS, BOUNDED_FETCH_MAX_BYTES } from "../utils/bounded-fetch.ts";
+import { claudeUsageJson, claudeUsageWarnOnce } from "../utils/claude-usage-fetch.ts";
 
 const log = getLog("dashboard", "claude-usage");
 
@@ -169,38 +166,16 @@ export function defaultClaudeUsageDeps(
   return {
     configured,
     baseUrl: root,
-    fetchPipeline: async (days: number) => {
-      const url = `${root}/api/pipeline?days=${days}`;
-      // Every failure names the URL: the operator's first question about a
-      // degraded card is whether it was even pointed at the right host, and
-      // "fetch failed" alone cannot answer it.
-      let res: Response;
-      try {
-        res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-      } catch (err) {
-        throw new Error(`${err instanceof Error ? err.message : String(err)} (${url})`);
-      }
-      if (!res.ok) {
-        throw new Error(`claude-usage returned HTTP ${res.status} for ${url}`);
-      }
-      // The bounded read fails too (a timeout that fires AFTER headers, a
-      // mid-stream socket error) — those must name the URL like every other
-      // failure here, or exactly the slow/wrong-service case loses it.
-      let text: string;
-      try {
-        text = await readBounded(res, maxBytes, url);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(msg.includes(url) ? msg : `${msg} (${url})`);
-      }
-      // A non-JSON body (an HTML error page from something else on the port) must
-      // read as a degraded source, not as an empty ledger.
-      try {
-        return JSON.parse(text) as PipelinePayload;
-      } catch (err) {
-        throw new Error(`${err instanceof Error ? err.message : String(err)} (${url})`);
-      }
-    },
+    // The shared claude-usage reader (`utils/claude-usage-fetch.ts`): fetch →
+    // bounded read → `JSON.parse`, every failure naming the URL, because the
+    // operator's first question about a degraded card is whether this host was
+    // even pointed at the right service. One copy, so a timeout that fires AFTER
+    // the headers cannot lose that URL on one caller and keep it on another.
+    fetchPipeline: (days: number) =>
+      claudeUsageJson(root, `/api/pipeline?days=${days}`, {
+        timeoutMs,
+        maxBytes,
+      }) as Promise<PipelinePayload>,
   };
 }
 
@@ -344,15 +319,6 @@ export function buildRows(payload: PipelinePayload, days: number, now: number): 
 }
 
 /**
- * Errors already warned about, keyed by message. A configured-but-down service
- * is polled every 5 minutes by every open `/models` tab, so the same sentence
- * would otherwise fill the log forever. First sighting warns, repeats drop to
- * info — the `warnedEnvFlagValues` pattern in `config.ts`. Cleared wholesale
- * past a sane size so a message carrying a varying detail cannot leak.
- */
-const warnedClaudeUsageErrors = new Set<string>();
-
-/**
  * Assemble the overview. Pure over its injected `fetchPipeline` — the route
  * wires the HTTP-backed default, the test wires a fabricated one. Never throws.
  */
@@ -374,15 +340,19 @@ export async function assembleClaudeUsageOverview(
     errors.push(`claude-usage pipeline: ${message}`);
   }
 
+  // Warn-once through the shared registry (`utils/claude-usage-fetch.ts`), keyed
+  // per (base URL, message): a configured-but-down service is polled every 5
+  // minutes by every open `/models` tab, so the same sentence would otherwise
+  // fill the log forever. First sighting warns, repeats drop to info.
   if (errors.length > 0) {
     const first = errors[0]!;
-    if (warnedClaudeUsageErrors.has(first)) {
-      log.info("claude-usage overview still degraded: {error}", { error: first });
-    } else {
-      if (warnedClaudeUsageErrors.size > 100) warnedClaudeUsageErrors.clear();
-      warnedClaudeUsageErrors.add(first);
-      log.warn("claude-usage overview degraded: {error}", { error: first });
-    }
+    claudeUsageWarnOnce({
+      log,
+      baseUrl: deps.baseUrl,
+      key: first,
+      error: first,
+      what: "claude-usage overview",
+    });
   }
 
   return {

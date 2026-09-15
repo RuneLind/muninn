@@ -9,7 +9,7 @@
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, writeFile, stat, utimes } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -38,7 +38,7 @@ afterEach(async () => {
 
 describe("takeWikiWriteLock", () => {
   test("takes the lock, names the shared file, and releases it", async () => {
-    const res = await takeWikiWriteLock(root, 50);
+    const res = await takeWikiWriteLock(root, { waitMs: 50 });
     expect(res.ok).toBe(true);
     expect(res.ok && res.lock?.path).toBe(lockPath);
     expect(existsSync(lockPath)).toBe(true);
@@ -49,7 +49,7 @@ describe("takeWikiWriteLock", () => {
   test("a lock held by another process times out rather than proceeding unlocked", async () => {
     await writeFile(lockPath, "");
     const started = Date.now();
-    const res = await takeWikiWriteLock(root, 60);
+    const res = await takeWikiWriteLock(root, { waitMs: 60 });
     expect(res.ok).toBe(false);
     expect(res.ok === false && res.reason).toContain(lockPath);
     // It really waited — a bounded wait, not an instant refusal.
@@ -61,7 +61,7 @@ describe("takeWikiWriteLock", () => {
     await writeFile(lockPath, "");
     const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);
     await utimes(lockPath, old, old);
-    const res = await takeWikiWriteLock(root, 50);
+    const res = await takeWikiWriteLock(root, { waitMs: 50 });
     expect(res.ok).toBe(true);
     // Taken over means a FRESH file, not the abandoned one.
     expect((await stat(lockPath)).mtimeMs).toBeGreaterThan(old.getTime());
@@ -71,7 +71,7 @@ describe("takeWikiWriteLock", () => {
   test("a lock released mid-wait is acquired without waiting the full budget", async () => {
     await writeFile(lockPath, "");
     setTimeout(() => rm(lockPath, { force: true }), 20);
-    const res = await takeWikiWriteLock(root, 2_000);
+    const res = await takeWikiWriteLock(root, { waitMs: 2_000 });
     expect(res.ok).toBe(true);
     if (res.ok) res.lock?.release();
   });
@@ -79,7 +79,7 @@ describe("takeWikiWriteLock", () => {
   test("a root whose lockfile cannot be created is written UNLOCKED, never refused", async () => {
     // ENOENT: the errno class that means "waiting cannot help". The caller
     // proceeds holding nothing, so its `finally` must tolerate a null handle.
-    const res = await takeWikiWriteLock(path.join(root, "does-not-exist"), 50);
+    const res = await takeWikiWriteLock(path.join(root, "does-not-exist"), { waitMs: 50 });
     expect(res.ok).toBe(true);
     expect(res.ok && res.lock).toBeNull();
   });
@@ -159,6 +159,147 @@ describe("writeWikiPage under the lock", () => {
   test("a refusal that precedes the section never creates the lockfile", async () => {
     const res = await writeWikiPage(await opts({ isReadonly: () => true }));
     expect(res.outcome).toBe("forbidden");
+    expect(existsSync(lockPath)).toBe(false);
+  });
+});
+
+// ── The owner line (fix round 1) ────────────────────────────────────────────
+
+describe("the lockfile's owner line", () => {
+  test("acquire writes one JSON line naming who holds it and since when", async () => {
+    const res = await takeWikiWriteLock(root, { waitMs: 50, op: "page-write:factcheck" });
+    expect(res.ok).toBe(true);
+    try {
+      // The file was zero bytes before this, so an operator finding a wedged
+      // wiki had nothing to go on — not even which process to look for.
+      const raw = await Bun.file(lockPath).text();
+      expect(raw.endsWith("\n")).toBe(true);
+      const owner = JSON.parse(raw.trim());
+      expect(owner.pid).toBe(process.pid);
+      expect(owner.op).toBe("page-write:factcheck");
+      expect(typeof owner.host).toBe("string");
+      expect(Number.isFinite(Date.parse(owner.at))).toBe(true);
+    } finally {
+      if (res.ok) res.lock?.release();
+    }
+  });
+
+  test("release LEAVES a lockfile that another process has taken over", async () => {
+    const res = await takeWikiWriteLock(root, { waitMs: 50 });
+    expect(res.ok).toBe(true);
+    // Our hold aged past the stale window, someone else took it over, and their
+    // write is in flight. An unconditional unlink here deletes a LIVE lock.
+    await writeFile(lockPath, '{"pid":999999,"host":"other","op":"wiki-stamp","at":"x"}\n');
+    if (res.ok) res.lock?.release();
+    expect(existsSync(lockPath)).toBe(true);
+    expect(await Bun.file(lockPath).text()).toContain("999999");
+  });
+
+  test("release still removes OUR own lockfile, and is idempotent", async () => {
+    const res = await takeWikiWriteLock(root, { waitMs: 50 });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      res.lock?.release();
+      expect(existsSync(lockPath)).toBe(false);
+      res.lock?.release(); // a second release must not throw
+    }
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  test("the empty lockfile wiki-stamp writes is left alone too", async () => {
+    // The stamper's release is still unconditional (a follow-up in that repo),
+    // but muninn must not be the process that drops a lock it does not hold.
+    const res = await takeWikiWriteLock(root, { waitMs: 50 });
+    expect(res.ok).toBe(true);
+    await writeFile(lockPath, "");
+    if (res.ok) res.lock?.release();
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  test("the vanished-lockfile retry SLEEPS rather than spinning", async () => {
+    // The branch: the lockfile EXISTS at `openSync` and is gone by the
+    // `statSync`. A dangling symlink is that state deterministically —
+    // `O_CREAT|O_EXCL` refuses it with EEXIST (it will not follow the link),
+    // while `statSync` follows it and throws ENOENT. Before the fix this branch
+    // `continue`d with no sleep: a hot loop for the whole wait, at exactly the
+    // moment another process is doing filesystem work we are competing for.
+    symlinkSync(path.join(root, "nothing-here"), lockPath);
+    let slept = 0;
+    // A REAL clock, so the loop terminates either way: without the sleep it
+    // spins the whole deadline out and reports zero sleeps, which is the
+    // failure. A stubbed clock that only advances inside `sleep` would hang
+    // instead of failing, and a hanging test proves nothing.
+    const res = await takeWikiWriteLock(root, {
+      waitMs: 50,
+      sleep: async (ms) => {
+        slept += 1;
+        await Bun.sleep(ms);
+      },
+    });
+    expect(res.ok).toBe(false);
+    expect(slept).toBeGreaterThan(0);
+  });
+});
+
+// ── The HOLD WINDOW ────────────────────────────────────────────────────────
+
+describe("the lock is held across the write, not merely acquired", () => {
+  test("the lockfile exists at the moment `writeFile` runs", async () => {
+    // Moving `release()` to right after the acquire passes every other test in
+    // this file: the outcome is the same, the file is gone at the end, and the
+    // window nobody looks at is exactly the window the lock exists for.
+    const seen: boolean[] = [];
+    const rel = "page.md";
+    const abs = path.join(root, rel);
+    await writeFile(abs, "# Page\n\nBody.\n");
+    const res = await writeWikiPage({
+      wikiDir: root,
+      relPath: rel,
+      baseHash: sha256(await Bun.file(abs).text()),
+      transform: (current) => `${current}appended\n`,
+      collections: [],
+      logKind: "factcheck",
+      logTitle: "Page",
+      logLine: "line",
+      now: () => Date.UTC(2026, 6, 29, 12, 0, 0),
+      readFile: async (p) => (existsSync(p) ? await Bun.file(p).text() : null),
+      writeFile: async (p, content) => {
+        seen.push(existsSync(lockPath));
+        await Bun.write(p, content);
+      },
+      refreshIndex: async () => {},
+      reindex: async () => {},
+      lockWaitMs: 60,
+    } as PageWriteOptions);
+    expect(res.outcome).toBe("written");
+    // Both writes — the page and `log.md` — happen inside the section.
+    expect(seen.length).toBeGreaterThanOrEqual(1);
+    expect(seen.every((held) => held)).toBe(true);
+  });
+
+  test("a write that THROWS still releases the lock", async () => {
+    const rel = "page.md";
+    const abs = path.join(root, rel);
+    await writeFile(abs, "# Page\n\nBody.\n");
+    const res = await writeWikiPage({
+      wikiDir: root,
+      relPath: rel,
+      baseHash: sha256(await Bun.file(abs).text()),
+      transform: (current) => `${current}appended\n`,
+      collections: [],
+      logKind: "factcheck",
+      logTitle: "Page",
+      logLine: "line",
+      now: () => Date.UTC(2026, 6, 29, 12, 0, 0),
+      readFile: async (p) => (existsSync(p) ? await Bun.file(p).text() : null),
+      writeFile: async () => {
+        throw new Error("EIO");
+      },
+      refreshIndex: async () => {},
+      reindex: async () => {},
+      lockWaitMs: 60,
+    } as PageWriteOptions);
+    expect(res.outcome).toBe("error");
     expect(existsSync(lockPath)).toBe(false);
   });
 });

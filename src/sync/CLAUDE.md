@@ -37,6 +37,22 @@ Rules, in order of importance:
   recorded in `src/gardener/apply.ts` (the "measured: a 3s push stall blocked a
   concurrent append for 3s" sentence). A remote that hangs must never park a page
   write.
+- **There are THREE locks per wiki root, not two.** Inside each root's in-process
+  write queue the local section also takes the CROSS-PROCESS lockfile,
+  `<root>/.wiki-write.lock` (`src/wiki/lockfile.ts`, `withWikiFileLock`) — the
+  same file claude-usage's `wiki-stamp` CLI takes. `runWikiWriteExclusive` says
+  nothing about another process, and `git rebase` is the one operation here that
+  rewrites a working tree wholesale: a stamper that read a page before the rebase
+  and renamed its replacement over it afterwards REVERTS whatever the rebase
+  pulled in, and the next tick commits and pushes that revert as if a human had
+  made it. Held over the local section only, so it holds no network I/O. A held
+  lock is a hard `deferred` carrying **`sectionSkipped`**, which withholds the
+  sweeper evidence stamp — an ordinary hard `deferred` means "status, add/commit
+  and the rebase gate all ran and the loop chose to wait", and this one means
+  nothing ran at all. The loop's own lockfile is filtered out of
+  `listDirtyEntries` by basename (it is dirty by construction on every tick,
+  since the lock is held across the loop's own `git status`), so it is neither
+  staged nor reported as `denied`.
 - **The locks are taken in a PINNED ORDER: commit first, wiki-write second.** So a
   hung push (which holds only the commit queue) can park the sync, never a page
   write. Multiple wiki roots — a `plain` repo CONTAINING registered wikis, see

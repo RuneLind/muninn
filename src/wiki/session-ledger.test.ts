@@ -43,8 +43,9 @@ describe("batchSessionIds", () => {
   });
 
   test("pages at the QUERY BYTE budget too, which the id cap alone does not bound", () => {
-    // 200 ids of this length are ~20 KB of query — past the 16,321-byte request
-    // LINE limit upstream answers with an empty-bodied 431 before any handler.
+    // 200 ids of this length are ~20 kB of query — past the 16 KiB HEADER BLOCK
+    // Bun answers with an empty-bodied 431 before any handler runs (measured:
+    // see `SESSION_IDS_QUERY_MAX_BYTES`).
     const long = Array.from({ length: 200 }, (_, i) => `${"x".repeat(100)}-${i}`);
     const batches = batchSessionIds(long);
     expect(batches.length).toBeGreaterThan(1);
@@ -56,6 +57,12 @@ describe("batchSessionIds", () => {
   });
 
   test("an id larger than the whole budget still goes out alone rather than being dropped", () => {
+    // The pure function's own property. `fetchSessionsById` is what guarantees
+    // this input can never occur in production — an id over
+    // `SESSION_ID_MAX_CHARS` is refused as `invalid` BEFORE batching, because a
+    // batch carrying one fails whole and takes every legitimate id with it
+    // (a 431 has no body naming the offender). Dropping it here instead would
+    // lose an id silently, which is worse than either.
     const huge = "y".repeat(SESSION_IDS_QUERY_MAX_BYTES + 10);
     expect(batchSessionIds([huge, "small"])).toEqual([[huge], ["small"]]);
   });

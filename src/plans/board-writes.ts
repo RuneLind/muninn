@@ -102,6 +102,15 @@ export const COLUMN_SAVING = "saving…";
 export const PRIORITY_STALE_MESSAGE = "this plan changed on disk — reload";
 export const ORDER_STALE_MESSAGE = "the queue changed on disk — reload";
 
+/**
+ * The OTHER 409: another process holds the wiki write lock (`src/wiki/lockfile.ts`
+ * — claude-usage's `wiki-stamp`, or muninn's own sync loop mid-rebase). Nothing
+ * changed on disk and nothing was written, so the recovery is to click again in
+ * a moment, NOT to reload: the board is not stale, and `reload: true` disabled
+ * the card behind a sentence that was simply false.
+ */
+export const LOCKED_MESSAGE = "another process is writing to the wiki — try again in a moment";
+
 /** The archive control's two targets, and the way back. `abandoned` is the
  *  closest thing the lifecycle has to delete — the FILE stays in mimir, the
  *  card leaves the active board. */
@@ -644,7 +653,7 @@ export function applyStatusResult<
 
 // ---------------------------------------------------------------- failures
 
-export type WriteFailureKind = "stale" | "readonly" | "refused" | "error";
+export type WriteFailureKind = "stale" | "locked" | "readonly" | "refused" | "error";
 
 export interface WriteFailure {
   kind: WriteFailureKind;
@@ -658,8 +667,11 @@ export interface WriteFailure {
  *
  * A 409 gets the board's own sentence rather than the server's, because the
  * server names the file (`plans/foo.mdx changed since the board was loaded`)
- * and the reader needs the action. A 422 keeps the server's text verbatim: it
- * is the one status that means a human must go and fix a file by hand.
+ * and the reader needs the action — but WHICH sentence depends on the body's
+ * `locked` flag, since a held wiki write lock and a lost CAS are the same status
+ * with opposite recoveries (retry vs reload). A 422 keeps the server's text
+ * verbatim: it is the one status that means a human must go and fix a file by
+ * hand.
  *
  * **400 and 404 offer Reload too** (rule 6). Both routes answer `no plan named
  * "x"` — a 404 on the priority route, a 400 on the order route — for a plan
@@ -675,6 +687,14 @@ export function classifyWriteFailure(
 ): WriteFailure {
   const parsed = record(body);
   const error = typeof parsed?.error === "string" && parsed.error.trim() ? parsed.error.trim() : null;
+  // TWO conditions answer 409 and they need opposite recoveries, so the body's
+  // `locked` flag — not the status — is what decides. Branching on the status
+  // alone told a reader whose only problem was a two-second lock contention that
+  // their plan had changed on disk, and disabled the card until they reloaded a
+  // board that was never stale.
+  if (status === 409 && parsed?.locked === true) {
+    return { kind: "locked", message: LOCKED_MESSAGE, reload: false };
+  }
   if (status === 409) {
     return {
       kind: "stale",

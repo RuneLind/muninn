@@ -19,6 +19,7 @@ import { serializeQueue } from "../../plans/queue.ts";
 import { __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import { __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
 import { sha256 } from "../../gardener/util.ts";
+import { WIKI_LOCK_BASENAME } from "../../wiki/lockfile.ts";
 
 const CONFIG = { claudeUsageUrl: null } as unknown as Config;
 
@@ -702,5 +703,69 @@ describe("POST /api/plans/status", () => {
     expect(res.status).toBe(403);
     expect((await res.json()).readonly).toBe(true);
     expect(await pageText(root, "alpha-plan")).toBe(plan("alpha-plan"));
+  });
+});
+
+// ── The `locked` → 409 mapping (fix round 1) ───────────────────────────────
+
+describe("a HELD wiki write lock at the two plan write routes", () => {
+  /** Another PROCESS is mid-write on this wiki root. */
+  async function holdLock(root: string): Promise<string> {
+    const lock = path.join(root, WIKI_LOCK_BASENAME);
+    await writeFile(lock, '{"pid":999999,"host":"other","op":"wiki-stamp","at":"now"}\n');
+    return lock;
+  }
+
+  test("POST /api/plans/priority answers 409 {locked:true} and writes nothing", async () => {
+    // The mapping shipped untested: mutating all four `locked` branches to 200
+    // left the suite green, which is the only reason this file exists.
+    const root = await makeWiki();
+    const a = app(root, { lockWaitMs: 20 });
+    const before = await Bun.file(path.join(root, "plans", "alpha-plan.mdx")).text();
+    await holdLock(root);
+
+    const res = await post(a, "/api/plans/priority", {
+      slug: "alpha-plan",
+      priority: "p1",
+      baseHash: await hashOf(root, "alpha-plan"),
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.locked).toBe(true);
+    // NOT `stale` — the board is not out of date, and the client's recovery for
+    // the two is opposite (retry vs reload).
+    expect(body.stale).toBeUndefined();
+    expect(await Bun.file(path.join(root, "plans", "alpha-plan.mdx")).text()).toBe(before);
+    expect(await Bun.file(path.join(root, "log.md")).exists()).toBe(false);
+  });
+
+  test("POST /api/plans/status answers the same 409", async () => {
+    const root = await makeWiki();
+    const a = app(root, { lockWaitMs: 20 });
+    const before = await Bun.file(path.join(root, "plans", "beta-plan.mdx")).text();
+    await holdLock(root);
+
+    const res = await post(a, "/api/plans/status", {
+      slug: "beta-plan",
+      status: "in-flight",
+      baseHash: await hashOf(root, "beta-plan"),
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).locked).toBe(true);
+    expect(await Bun.file(path.join(root, "plans", "beta-plan.mdx")).text()).toBe(before);
+  });
+
+  test("with the lock FREE the same posts succeed — the 409 is the lock, not the fixture", async () => {
+    const root = await makeWiki();
+    const a = app(root, { lockWaitMs: 20 });
+    const res = await post(a, "/api/plans/priority", {
+      slug: "alpha-plan",
+      priority: "p1",
+      baseHash: await hashOf(root, "alpha-plan"),
+    });
+    expect(res.status).toBe(200);
+    expect(await Bun.file(path.join(root, "plans", "alpha-plan.mdx")).text()).toContain("priority: p1");
   });
 });

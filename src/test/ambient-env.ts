@@ -129,6 +129,19 @@ const VERTEX_FLAGS = [
  *  developer's multilingual model would otherwise satisfy on one machine only. */
 const VIMEO_FLAGS = ["VIMEO_OEMBED_BASE", "VIMEO_HARVEST_STUB", "VIMEO_WHISPER_MODEL_PATH"];
 
+/** The two claude-usage endpoints, and they are this file's failure shape exactly.
+ *  `CLAUDE_USAGE_URL` says WHETHER this instance prices anything at all — the
+ *  wiki provenance block and the /plans board both derive `configured` from
+ *  whether it is set, and both skip the fetch entirely when it is not. This
+ *  laptop's `.env` sets it and the mini's does not, so a suite (or a spawned e2e
+ *  server) that inherited it took the fetching branch on one machine and the
+ *  unconfigured branch on the other — green here, red there, from a name no
+ *  assertion mentions. `CLAUDE_USAGE_PUBLIC_URL` is the same class one field
+ *  over: set, every session chip carries a `url`; unset, none does. The tests
+ *  that exercise either pass an explicit context or set the variable themselves,
+ *  per this file's convention. */
+const CLAUDE_USAGE_FLAGS = ["CLAUDE_USAGE_URL", "CLAUDE_USAGE_PUBLIC_URL"];
+
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.
  *
@@ -150,6 +163,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...AUTH_FLAGS,
   ...VERTEX_FLAGS,
   ...VIMEO_FLAGS,
+  ...CLAUDE_USAGE_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
   // fourteen route groups and turns every Claude-CLI spawn into a throw, so the

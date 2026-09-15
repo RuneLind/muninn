@@ -26,7 +26,7 @@ import {
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { jiraCounts } from "../../wiki/provenance.ts";
-import { pageProvenance } from "../../wiki/provenance-service.ts";
+import { pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import {
   defaultProvenanceContext,
   registerWikiProvenanceRoutes,
@@ -1160,11 +1160,19 @@ async function getCollectionUpdateStatus(
  *  `?bot=<name>` is a legacy alias. A bare `/wiki` renders the default wiki
  *  (jarvis if registered, else the first) — unless `WIKI_DIR` is set, which
  *  stays an explicit legacy override with no wiki claimed in the picker. */
-export function registerWikiRoutes(app: Hono, config: Config): void {
+export function registerWikiRoutes(
+  app: Hono,
+  config: Config,
+  /** Test seam: the provenance join's context. Production passes nothing and
+   *  gets {@link defaultProvenanceContext}; a test injects a counting or
+   *  throwing ledger so a page-route assertion never depends on whether a real
+   *  claude-usage happens to be listening on this machine. */
+  provenanceCtxOverride?: ProvenanceContext,
+): void {
   // Built once per process: `defaultSessionLedgerDeps` closes over the resolved
   // claude-usage base URL, and rebuilding it per request would re-derive the
   // same three values on every page open.
-  const provenanceCtx = defaultProvenanceContext(config);
+  const provenanceCtx = provenanceCtxOverride ?? defaultProvenanceContext(config);
 
   // The reverse lookups live in their own module (they iterate the whole wiki
   // registry rather than resolving one wiki) but register INSIDE this group, so
@@ -1786,9 +1794,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
 
     // The provenance strip's data: who wrote this page, which issue it serves,
     // which PRs it landed as, and what those sessions cost. ABSENT (not empty)
-    // on a page carrying none of the keys, which is most pages. One
-    // `/api/sessions-by-id` call for the whole page; an unreachable claude-usage
-    // degrades to bare chips rather than failing the page open.
+    // on a page carrying none of the keys, which is most pages. The sessions go
+    // to claude-usage in BATCHES of `SESSION_IDS_PER_CALL` (200) — one call for
+    // every page anyone has actually stamped, but not one by contract — and the
+    // whole enrichment, huginn's Jira corpus included, shares ONE
+    // `PROVENANCE_BUDGET_MS` deadline so a page open cannot cost the sum of its
+    // legs. An unreachable claude-usage degrades to bare chips rather than
+    // failing the page open.
     const provenance = await pageProvenance(meta, provenanceCtx);
 
     return c.json({

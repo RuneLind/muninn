@@ -120,10 +120,49 @@ interface KeyIndex {
 const cached = new Map<string, KeyIndex>();
 const inFlight = new Map<string, Promise<KeyIndex | null>>();
 
-/** Test-only: drop every cached listing. */
+/**
+ * How long a FAILED lookup is remembered before another is attempted.
+ *
+ * Failure had no cache at all, so every caller paid the full 15 s timeout while
+ * huginn was down — and the provenance block made this a per-PAGE-OPEN cost on
+ * a route a reader clicks through. Short, because the answer this suppresses is
+ * a degrade rather than a result: a huginn that comes back is at most a minute
+ * from being asked again, and a minute of bare Jira rows is the same degrade the
+ * failed fetch already produced.
+ */
+export const JIRA_KEY_INDEX_FAIL_TTL_MS = 60_000;
+
+/** base URL → when its last lookup failed. Cleared on the next success. */
+const failedAt = new Map<string, number>();
+/** base URLs already warned about, so an outage does not fill the log. */
+const warnedFailure = new Set<string>();
+
+/** Test-only: drop every cached listing, negative entries included. */
 export function __resetJiraKeyIndexForTest(): void {
   cached.clear();
   inFlight.clear();
+  failedAt.clear();
+  warnedFailure.clear();
+}
+
+/** Record a failed lookup and say so — loudly the first time for a given host,
+ *  quietly while it lasts. */
+function noteJiraIndexFailure(knowledgeApiUrl: string, now: number, reason: string): null {
+  failedAt.set(knowledgeApiUrl, now);
+  if (warnedFailure.has(knowledgeApiUrl)) {
+    log.info("jira key index still unavailable ({url}): {error}", {
+      url: knowledgeApiUrl,
+      error: reason,
+    });
+  } else {
+    warnedFailure.add(knowledgeApiUrl);
+    log.warn("jira key index unavailable ({url}): {error} — not retried for {ttl} ms", {
+      url: knowledgeApiUrl,
+      error: reason,
+      ttl: JIRA_KEY_INDEX_FAIL_TTL_MS,
+    });
+  }
+  return null;
 }
 
 interface ListedDoc { id?: unknown; url?: unknown }
@@ -161,6 +200,10 @@ export function indexFromListing(docs: ListedDoc[]): Map<string, string | undefi
  * UNDEFINED rather than `false`, because "huginn is down" and "this key is
  * fabricated" are opposite conclusions and rendering the first as the second is
  * how a red row stops meaning anything.
+ *
+ * A failure is NEGATIVELY CACHED for {@link JIRA_KEY_INDEX_FAIL_TTL_MS}: the
+ * fetch carries a 15 s timeout and nothing remembered that it had just expired,
+ * so a down huginn cost every caller 15 s, every time.
  */
 export async function loadJiraKeyIndex(
   knowledgeApiUrl: string,
@@ -169,6 +212,11 @@ export async function loadJiraKeyIndex(
 ): Promise<KeyIndex | null> {
   const held = cached.get(knowledgeApiUrl);
   if (held && now - held.fetchedAtMs < JIRA_KEY_INDEX_TTL_MS) return held;
+  // A recent FAILURE is remembered too. Without it every caller paid the 15 s
+  // timeout again while huginn was down — on the provenance path, once per page
+  // open.
+  const failed = failedAt.get(knowledgeApiUrl);
+  if (failed !== undefined && now - failed < JIRA_KEY_INDEX_FAIL_TTL_MS) return null;
   const running = inFlight.get(knowledgeApiUrl);
   if (running) return running;
 
@@ -184,17 +232,24 @@ export async function loadJiraKeyIndex(
         // An EMPTY listing is treated as a failed lookup, not as "no issue
         // exists": it is indistinguishable from a mis-named collection, and
         // believing it would mark every real key in the draft as fabricated.
-        log.warn("jira key index came back empty — treating as unavailable");
-        return null;
+        return noteJiraIndexFailure(knowledgeApiUrl, now, "listing came back empty");
       }
       const index: KeyIndex = { byKey: indexFromListing(docs), fetchedAtMs: now };
       cached.set(knowledgeApiUrl, index);
+      // HYGIENE, not a behaviour: the negative entry is read only when the
+      // positive one is absent or stale (10 min) and its own TTL is 60 s, so a
+      // surviving stamp is necessarily expired by then and could not change an
+      // outcome. `warnedFailure` is the half that does something — it decides
+      // whether the NEXT failure warns or only logs info.
+      failedAt.delete(knowledgeApiUrl);
+      warnedFailure.delete(knowledgeApiUrl);
       return index;
     } catch (err) {
-      log.warn("jira key index fetch failed error={error}", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
+      return noteJiraIndexFailure(
+        knowledgeApiUrl,
+        now,
+        err instanceof Error ? err.message : String(err),
+      );
     } finally {
       inFlight.delete(knowledgeApiUrl);
     }

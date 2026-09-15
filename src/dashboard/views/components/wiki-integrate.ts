@@ -1019,6 +1019,30 @@ export function appendBlockedByIntegrate(turn: IntegrateGateTurn): boolean {
 export const INTEGRATE_STALE_COPY =
   "The page changed since the check — re-run the fact check, then add it.";
 
+/**
+ * The OTHER 409 both write routes can answer with: another PROCESS holds the
+ * wiki write lock (`src/wiki/lockfile.ts` — claude-usage's `wiki-stamp`, or
+ * muninn's own sync loop mid-rebase). Nothing changed and nothing was written,
+ * so the fact check is still valid and the action is to click again — the
+ * opposite of what {@link INTEGRATE_STALE_COPY} tells the reader to do.
+ *
+ * Both bars use this ONE sentence: the condition is identical and the recovery
+ * is identical, and the stale pair only differs because one of them sits in a
+ * narrower bar.
+ */
+export const WIKI_LOCKED_COPY =
+  "Another process is writing to this wiki — try again in a moment.";
+
+/** Does this 409 body mean "the lock was held" rather than "the page moved"? The
+ *  ONE place the flag is read, so the three call sites cannot drift. */
+export function isLockedResponse(body: unknown): boolean {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { locked?: unknown }).locked === true
+  );
+}
+
 /** What the ➕ bar says once an INTEGRATE write has retired it, when that write
  *  actually persisted the `.mdx` `<FactCheck>` appendix. */
 export const INTEGRATE_WROTE_APPENDIX_COPY =

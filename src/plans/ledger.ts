@@ -32,8 +32,8 @@
  */
 
 import { getLog } from "../logging.ts";
+import { claudeUsageJson, claudeUsageWarnOnce } from "../utils/claude-usage-fetch.ts";
 import {
-  readBounded,
   BOUNDED_FETCH_TIMEOUT_MS,
   BOUNDED_FETCH_MAX_BYTES,
 } from "../utils/bounded-fetch.ts";
@@ -144,30 +144,12 @@ export function defaultPlanLedgerDeps(
   return {
     urlConfigured,
     baseUrl: root,
-    fetchPlans: async () => {
-      const url = `${root}/api/plans`;
-      // Every failure names the URL — the operator's first question about a
-      // degraded board is whether it was pointed at the right host at all.
-      let res: Response;
-      try {
-        res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-      } catch (err) {
-        throw new Error(`${err instanceof Error ? err.message : String(err)} (${url})`);
-      }
-      if (!res.ok) throw new Error(`claude-usage returned HTTP ${res.status} for ${url}`);
-      let text: string;
-      try {
-        text = await readBounded(res, maxBytes, url);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(msg.includes(url) ? msg : `${msg} (${url})`);
-      }
-      try {
-        return JSON.parse(text) as PlanLedgerPayload;
-      } catch (err) {
-        throw new Error(`${err instanceof Error ? err.message : String(err)} (${url})`);
-      }
-    },
+    // The shared claude-usage reader (`utils/claude-usage-fetch.ts`) — one copy
+    // of fetch → bounded read → `JSON.parse`, every failure naming the URL,
+    // because the operator's first question about a degraded board is whether
+    // this host was pointed at the right one at all.
+    fetchPlans: () =>
+      claudeUsageJson(root, "/api/plans", { timeoutMs, maxBytes }) as Promise<PlanLedgerPayload>,
   };
 }
 
@@ -182,11 +164,6 @@ function isLedgerPlan(v: unknown): v is LedgerPlan {
     (v as { slug: string }).slug.trim() !== ""
   );
 }
-
-/** Errors already warned about — same reason as the overview's: a
- *  configured-but-down service is polled by every open tab, so the first
- *  sighting warns and repeats drop to info. */
-const warnedLedgerErrors = new Set<string>();
 
 /** Marker after which a message is upstream's own words plus our timestamp tail
  *  — everything past it is normalized, see {@link ledgerWarnKey}. */
@@ -287,16 +264,19 @@ export async function fetchPlanLedger(
     }
   }
 
+  // Warn-once through the shared registry (`utils/claude-usage-fetch.ts`), keyed
+  // per (base URL, `ledgerWarnKey`) — this caller keeps its OWN key derivation,
+  // which collapses the volatile digits out of a message, so a corpus in flux
+  // does not warn on every poll.
   if (errors.length > 0) {
     const first = errors[0]!;
-    const key = ledgerWarnKey(first);
-    if (warnedLedgerErrors.has(key)) {
-      log.info("plan ledger still degraded: {error}", { error: first });
-    } else {
-      if (warnedLedgerErrors.size > 100) warnedLedgerErrors.clear();
-      warnedLedgerErrors.add(key);
-      log.warn("plan ledger degraded: {error}", { error: first });
-    }
+    claudeUsageWarnOnce({
+      log,
+      baseUrl: deps.baseUrl,
+      key: ledgerWarnKey(first),
+      error: first,
+      what: "plan ledger",
+    });
   }
 
   return {

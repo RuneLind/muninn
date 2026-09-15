@@ -164,6 +164,8 @@ import {
   appendBlockedTone,
   shouldOpenDroppedList,
   INTEGRATE_STALE_COPY_EDIT,
+  WIKI_LOCKED_COPY,
+  isLockedResponse,
   type DroppedEditRow,
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
@@ -3951,7 +3953,9 @@ async function submitFactcheckAppend(): Promise<void> {
     if (res.status === 409 || data.stale) {
       btn.disabled = false;
       btn.textContent = prevLabel;
-      showErr(INTEGRATE_STALE_COPY);
+      // A held wiki write lock is the same status with the opposite recovery:
+      // nothing moved, so the fact check still stands and the reader retries.
+      showErr(isLockedResponse(data) ? WIKI_LOCKED_COPY : INTEGRATE_STALE_COPY);
       return;
     }
     if (!res.ok || !data.written) {
@@ -4236,7 +4240,7 @@ async function acceptFactcheckIntegrate(): Promise<void> {
     };
     if (res.status === 409 || data.stale) {
       state.applying = false;
-      showErr(INTEGRATE_STALE_COPY_EDIT);
+      showErr(isLockedResponse(data) ? WIKI_LOCKED_COPY : INTEGRATE_STALE_COPY_EDIT);
       return;
     }
     if (!res.ok) throw new Error(data.error || "HTTP " + res.status);

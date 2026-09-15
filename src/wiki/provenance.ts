@@ -17,9 +17,14 @@
  * appends, which is the whole reason the interlock in `lockfile.ts` exists.
  *
  * The shape both repos are pinned to is checked in twice — here as
- * `fixtures/wiki-stamp-shape.md`, there as
- * `test/fixtures/wiki-stamp/shape.md` — byte for byte, so a drift on either side
- * fails a test on that side rather than degrading a reader in silence.
+ * `src/wiki/__fixtures__/wiki-stamp-shape.md`, there as
+ * `test/fixtures/wiki-stamp/shape.md` — byte for byte. **Each side pins its own
+ * copy**: this repo's suite asserts the keys it reads, claude-usage's asserts the
+ * keys it writes. Neither assertion can see the other file, so the two are
+ * compared by hand — plus one opportunistic test here that diffs them when a
+ * claude-usage checkout happens to sit at `../claude-usage` and SKIPS otherwise
+ * (a machine without the sibling repo must not go red over a file it does not
+ * have).
  *
  * Everything in this file is PURE. The claude-usage lookup lives in
  * `session-ledger.ts`; the routes are `dashboard/routes/wiki-provenance.ts` and
@@ -37,15 +42,19 @@ export const PROVENANCE_FRONTMATTER_KEYS = [
 ] as const;
 
 /**
- * The Jira key shape a reverse lookup accepts: one uppercase letter, at least
- * one more prefix character, a hyphen, digits. The SAME shape claude-usage's
- * `/api/jira-sessions` normalizes to, so a key that reaches one service reaches
- * the other. Deliberately NOT `src/jira/verify-keys.ts`'s `KEY_RE`, which is a
- * SCANNER over prose (word-boundary anchored, denylisted for `UTF-8`): this one
- * validates a whole query parameter, where an anchored match is the question and
- * a denylist would refuse a project that happens to be called `SED`.
+ * The Jira key shape a reverse lookup accepts: an uppercase letter, any further
+ * prefix characters, a hyphen, digits. Byte for byte the regex claude-usage's
+ * `/api/jira-sessions` validates with (`src/routes.ts`, `jiraKey`), so a key that
+ * reaches one service reaches the other — the `*` is load-bearing: upstream
+ * accepts a ONE-character project prefix, and requiring two here made `X-1` a
+ * 400 on the muninn side of a key the stamper had happily written.
+ *
+ * Deliberately NOT `src/jira/verify-keys.ts`'s `KEY_RE`, which is a SCANNER over
+ * prose (word-boundary anchored, denylisted for `UTF-8`): this one validates a
+ * whole query parameter, where an anchored match is the question and a denylist
+ * would refuse a project that happens to be called `SED`.
  */
-export const JIRA_KEY_SHAPE = /^[A-Z][A-Z0-9]+-[0-9]+$/;
+export const JIRA_KEY_SHAPE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
 
 /** Where a Jira key is read by a human. Same base as the chat card's links
  *  (`chat/views/components/knowledge-links.ts`). */
@@ -127,12 +136,19 @@ export function parsePrRef(raw: string): PrRef {
  *
  * A page listing one key twice counts ONCE: the facet counts pages, and the
  * count beside a chip must match the number of rows clicking it leaves.
+ *
+ * **Only KEY-SHAPED values become chips.** The store keeps whatever the page
+ * declared (a typo is worth seeing), but the reverse lookup REFUSES a value that
+ * is not a key with a 400 — so an unfiltered facet renders a chip whose only
+ * behaviour is to fail when clicked. The page's own row still carries the raw
+ * value; the facet is the one surface that promises a working click.
  */
 export function jiraCounts(pages: readonly WikiPageMeta[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const p of pages) {
     if (!p.jira?.length) continue;
     for (const key of new Set(p.jira)) {
+      if (!isJiraKeyShape(key)) continue;
       counts[key] = (counts[key] ?? 0) + 1;
     }
   }
@@ -147,47 +163,123 @@ export function hasProvenance(meta: WikiPageMeta): boolean {
 
 // ── Shaping the answer ───────────────────────────────────────────────────────
 
-/** One session, as the reader renders it. */
+/**
+ * One session, as the reader renders it.
+ *
+ * **Every chip carries the SAME key set**, with an explicit `null` where a fact
+ * is unknown, rather than a priced chip carrying six fields and a bare one
+ * carrying two. A client that indexes `chip.cost` gets `null` on a bare chip
+ * instead of `undefined`, and a JSON reader can see at a glance that the answer
+ * is "unknown", not "this key was forgotten".
+ *
+ * A chip is BARE — no money, no title — for three distinguishable reasons, and
+ * exactly one of the three flags is set (see {@link bareChipReason}).
+ */
 export interface ProvenanceSessionChip extends SessionRef {
-  title?: string;
-  host?: string | null;
-  first?: string | null;
-  last?: string | null;
+  title: string | null;
+  host: string | null;
+  first: string | null;
+  last: string | null;
   /** USD for the WHOLE session — never this page's share of it. Null when the
    *  ledger priced nothing for it. */
-  cost?: number | null;
-  messages?: number | null;
+  cost: number | null;
+  messages: number | null;
   /**
-   * The ledger does not hold this id — it was reaped, it belongs to another
-   * host, or the ledger was unreachable. A BARE CHIP either way; `ledger` on the
-   * payload is what says which, because "this session is gone" and "I could not
-   * ask" are opposite conclusions and the chip cannot tell them apart.
+   * The ledger ANSWERED and does not hold this id — it was reaped, or it belongs
+   * to another host. A conclusion about the session, so it is set only when the
+   * batch carrying this id came back.
    */
   missing: boolean;
+  /**
+   * Nobody ever asked about this id — the batch carrying it FAILED, or this host
+   * is not pointed at a claude-usage at all. The opposite conclusion from
+   * `missing`, which is why it is a separate flag: a partial outage rendering as
+   * "these sessions were reaped" tells the reader something that is not true,
+   * and the under-reported `totalCost` beside it looks like a fact.
+   */
+  unresolved: boolean;
+  /**
+   * The value on the page cannot BE a session id (too long, or characters
+   * outside claude-usage's `[A-Za-z0-9._-]{1,128}`), so it was refused before
+   * batching — one malformed frontmatter entry must not 431 the batch it rides
+   * in. Frontmatter damage, reported rather than hidden.
+   */
+  invalid: boolean;
   /** Deep link into claude-usage's session drill-down, present only when the
    *  operator set `CLAUDE_USAGE_PUBLIC_URL` on this instance. */
   url?: string;
+}
+
+/** Which of the three bare reasons applies, or null for a priced chip. The one
+ *  place the precedence between the flags is decided. */
+export function bareChipReason(
+  chip: ProvenanceSessionChip,
+): "invalid" | "unresolved" | "missing" | null {
+  if (chip.invalid) return "invalid";
+  if (chip.unresolved) return "unresolved";
+  if (chip.missing) return "missing";
+  return null;
 }
 
 export interface ProvenanceJira {
   key: string;
   /** Where a human reads it. Built from the key, always. */
   url: string;
-  /** The issue's own URL as huginn's `jira-issues` corpus holds it, when the
-   *  corpus holds the key at all. Absent ⇒ either not in the corpus or the
-   *  lookup degraded — the same rule `verifyJiraKeys` states: a down huginn must
-   *  not render as "this key is fabricated". */
-  huginnUrl?: string;
+  /**
+   * huginn's `jira-issues` corpus holds this key.
+   *
+   * A BOOLEAN rather than the corpus's own URL: measured over the live corpus,
+   * every url `loadJiraKeyIndex` returns for a key is the same
+   * `…/browse/<KEY>` this row already built from the key itself, so a second
+   * field carried a duplicate string and invited a reader to render two links to
+   * one page. What the corpus actually adds is the one fact the key cannot
+   * supply — whether huginn has heard of this issue.
+   *
+   * Absent (not `false`) when the corpus was not asked or the lookup degraded:
+   * the same rule `verifyJiraKeys` states, that a down huginn must not render as
+   * "this key is fabricated".
+   */
+  huginnKnown?: boolean;
 }
 
 export interface ProvenanceLedgerState {
+  /**
+   * The ledger was ASKED — this page named at least one session AND this host is
+   * pointed at a claude-usage. The third state the first cut did not have: a
+   * `jira`-only page, or a `?jira=` matching pages nobody stamped a session on,
+   * reported `reachable: false` about a call that never happened, which reads as
+   * "claude-usage is down" on a page that simply has no sessions.
+   *
+   * **`reachable`, `partial` and `errors` are meaningful only when this is
+   * true.** Unasked, they are all their empty values.
+   */
+  asked: boolean;
+  /** At least one batch answered. */
   reachable: boolean;
-  /** `CLAUDE_USAGE_URL` was set on this host. False + unreachable ⇒ this
-   *  instance was never meant to price anything. */
+  /** Some batch answered and some did not, so `totalCost` is over a SUBSET of
+   *  the page's sessions and the unanswered ones are `unresolved` chips. */
+  partial: boolean;
+  /** `CLAUDE_USAGE_URL` was set on this host. False ⇒ this instance was never
+   *  meant to price anything, and nothing was fetched. */
   configured: boolean;
-  baseUrl: string;
+  /** The base URL that was (or would be) read. Absent when unconfigured: naming
+   *  a default endpoint nobody pointed this host at invites an operator to go
+   *  and check a service that was never meant to run here. */
+  baseUrl?: string;
+  /** Upstream cut a batch at its own id cap. Should not happen — muninn pages at
+   *  the same cap — so it is carried rather than assumed away. */
+  truncated?: boolean;
   errors?: string[];
 }
+
+/** The ledger state for a host that was never pointed at claude-usage, or a page
+ *  that named no session: one spelling, so the two callers cannot disagree. */
+export const LEDGER_NOT_ASKED: ProvenanceLedgerState = {
+  asked: false,
+  reachable: false,
+  partial: false,
+  configured: false,
+};
 
 export interface ProvenancePayload {
   sessions: ProvenanceSessionChip[];
@@ -203,12 +295,31 @@ export interface ProvenancePayload {
   ledger: ProvenanceLedgerState;
 }
 
+/** What `enrichSessions` needs of a ledger answer — the narrowest shape, so the
+ *  pure layer does not import the client. */
+export interface LedgerFactsView {
+  facts: Map<
+    string,
+    {
+      title?: string | null;
+      provider?: string | null;
+      host?: string | null;
+      first?: string | null;
+      last?: string | null;
+      cost?: number | null;
+      messages?: number | null;
+    }
+  >;
+  /** Ids whose batch never answered. */
+  unresolved?: ReadonlySet<string>;
+  /** Ids refused before batching. */
+  invalid?: ReadonlySet<string>;
+}
+
 /** Build the session chips for a list of refs, in the order given. */
 export function enrichSessions(
   refs: readonly string[],
-  ledger: {
-    facts: Map<string, { title?: string | null; host?: string | null; first?: string | null; last?: string | null; cost?: number | null; messages?: number | null }>;
-  },
+  ledger: LedgerFactsView,
   publicUrl?: string | null,
 ): ProvenanceSessionChip[] {
   const base = publicUrl?.replace(/\/+$/, "");
@@ -219,11 +330,37 @@ export function enrichSessions(
     // even for an id the ledger does not hold: the page it opens is claude-usage's
     // answer about that id, which is the question a reader clicking it is asking.
     const url = base ? `${base}/#/session/${encodeURIComponent(ref.id)}` : undefined;
-    if (!facts) return { ...ref, missing: true, ...(url ? { url } : {}) };
+    const invalid = ledger.invalid?.has(ref.id) ?? false;
+    const unresolved = !invalid && (ledger.unresolved?.has(ref.id) ?? false);
+    if (!facts) {
+      return {
+        ...ref,
+        title: null,
+        host: null,
+        first: null,
+        last: null,
+        cost: null,
+        messages: null,
+        // A bare chip is `missing` only when the ledger actually answered about
+        // it. `invalid` and `unresolved` are the two ways it never did.
+        missing: !invalid && !unresolved,
+        unresolved,
+        invalid,
+        ...(url ? { url } : {}),
+      };
+    }
     return {
       ...ref,
+      // A BARE ref takes the ledger's own provider — the ledger knows which tool
+      // recorded the session, the page only knows what the stamper wrote, and an
+      // older stamp (or a hand-written line) carries no prefix at all. A ref that
+      // DOES name a provider keeps its own: that spelling is what the page says
+      // and what a `?session=` link round-trips.
+      provider: ref.provider ?? (typeof facts.provider === "string" ? facts.provider : null),
       missing: false,
-      ...(typeof facts.title === "string" ? { title: facts.title } : {}),
+      unresolved: false,
+      invalid: false,
+      title: typeof facts.title === "string" ? facts.title : null,
       host: facts.host ?? null,
       first: facts.first ?? null,
       last: facts.last ?? null,
@@ -234,8 +371,16 @@ export function enrichSessions(
   });
 }
 
-/** The money line: the total over the sessions that were actually priced, and
- *  the count that total is over. A `missing` chip contributes neither. */
+/**
+ * The money line: the total over the sessions that were actually priced, and the
+ * count that total is over. A chip with no `cost` contributes neither.
+ *
+ * **Rounded to cents at this seam**, not at the renderer. The ledger's per-session
+ * costs carry full float precision (`164.18199995`), and summing them produces
+ * the `5.350000000000001` shape — a number that is wrong in the only way a money
+ * figure can be read, on a wire payload that more than one client will render.
+ * Rounding once, where the sum is made, is what keeps every reader agreeing.
+ */
 export function costOfSessions(chips: readonly ProvenanceSessionChip[]): {
   totalCost: number;
   costedSessions: number;
@@ -243,22 +388,28 @@ export function costOfSessions(chips: readonly ProvenanceSessionChip[]): {
   let totalCost = 0;
   let costedSessions = 0;
   for (const chip of chips) {
-    if (chip.missing || typeof chip.cost !== "number") continue;
+    if (typeof chip.cost !== "number") continue;
     totalCost += chip.cost;
     costedSessions += 1;
   }
-  return { totalCost, costedSessions };
+  return { totalCost: Math.round(totalCost * 100) / 100, costedSessions };
 }
 
 /** Jira rows for a page's keys, with huginn's own issue URL where the corpus
- *  index (`src/jira/verify-keys.ts`) holds one. `corpus` null ⇒ degraded or not
- *  asked; every row then carries the browse URL alone. */
+ *  index (`src/jira/verify-keys.ts`) has heard of the key. `corpus` null ⇒
+ *  degraded or not asked, and every row then carries the browse URL alone with
+ *  NO `huginnKnown` — absent is "I could not ask", `false` is "huginn does not
+ *  have it", and those are different answers. */
 export function jiraRows(
   keys: readonly string[],
   corpus: Map<string, string | undefined> | null,
 ): ProvenanceJira[] {
-  return keys.map((key) => {
-    const huginnUrl = corpus?.get(key);
-    return { key, url: jiraBrowseUrl(key), ...(huginnUrl ? { huginnUrl } : {}) };
-  });
+  return keys.map((key) => ({
+    key,
+    url: jiraBrowseUrl(key),
+    // `has`, not `get`: the corpus maps a key to a url that may legitimately be
+    // undefined (a doc with no `url:` field), and reading the VALUE would report
+    // a key huginn holds as one it does not.
+    ...(corpus ? { huginnKnown: corpus.has(key) } : {}),
+  }));
 }

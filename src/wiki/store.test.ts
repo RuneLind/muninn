@@ -2740,18 +2740,25 @@ describe("buildWikiIndex — project", () => {
     expect(meta.project).toBe("pomme-core");
   });
 
-  test("a CRLF page keeps the path rule after losing its frontmatter", async () => {
+  test("a CRLF page's frontmatter PARSES — it used to be lost wholesale", async () => {
     // `parseFrontmatter`'s line regex ends in `(.*)$`, which does not match a
-    // trailing `\r`, so a CRLF page parses to `{}` — no title, no tags. The
-    // project must still resolve, because the path rule never reads the body.
+    // trailing `\r`, so every line of a CRLF page failed the key match and the
+    // whole fence parsed to `{}` — no title, no tags, no type. Cosmetic while
+    // every writer was muninn's own; load-bearing since an EXTERNAL process
+    // (claude-usage's `wiki-stamp`) owns four of these keys, and a page can
+    // arrive from a Windows checkout or a CRLF-normalizing editor.
     await declare(fullRule);
     await Bun.write(
       path.join(root, "areas/pomme-core/crlf.md"),
-      "---\r\ntitle: CRLF Page\r\ntags: [quill]\r\n---\r\n\r\nBody.\r\n",
+      "---\r\ntitle: CRLF Page\r\ntags: [quill]\r\njira: [MELOSYS-8045]\r\n---\r\n\r\nBody.\r\n",
     );
     const index = await buildWikiIndex(root);
     const meta = index.pages.find((p) => p.relPath === "areas/pomme-core/crlf.md")!;
-    expect(meta.title).toBe("crlf"); // frontmatter genuinely lost
+    expect(meta.title).toBe("CRLF Page");
+    expect(meta.tags).toEqual(["quill"]);
+    expect(meta.jira).toEqual(["MELOSYS-8045"]);
+    // The path rule never read the body, so it resolved even while the fence
+    // was being lost — which is exactly why the loss stayed invisible here.
     expect(meta.project).toBe("pomme-core");
   });
 

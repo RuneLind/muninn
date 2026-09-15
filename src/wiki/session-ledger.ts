@@ -2,17 +2,27 @@
  * The claude-usage `GET /api/sessions-by-id` client — what turns the session ids
  * on a wiki page into "the N sessions that wrote this page cost $X in total".
  *
- * The third server-side proxy of that service, and it is deliberately built like
- * the first two (`dashboard/claude-usage-overview.ts`, `plans/ledger.ts`): the
- * BROWSER never reaches port 8787, because the dashboard is viewed over the
- * tailnet where a client-side loopback fetch hits the viewer's own machine and a
- * cross-host one is mixed content under `tailscale serve`. So the reader gets the
- * money from muninn, and the only thing it gets of claude-usage's own is the
- * optional `CLAUDE_USAGE_PUBLIC_URL` link.
+ * The third server-side proxy of that service, and it shares the ONE fetch
+ * helper with the other two (`utils/claude-usage-fetch.ts`, used by
+ * `dashboard/claude-usage-overview.ts` and `plans/ledger.ts`): the BROWSER never
+ * reaches port 8787, because the dashboard is viewed over the tailnet where a
+ * client-side loopback fetch hits the viewer's own machine and a cross-host one
+ * is mixed content under `tailscale serve`. So the reader gets the money from
+ * muninn, and the only thing it gets of claude-usage's own is the optional
+ * `CLAUDE_USAGE_PUBLIC_URL` link.
  *
- * Reads go through `utils/bounded-fetch.ts` (10 s, 8 MiB) and NEVER throw: an
+ * Reads are bounded (`utils/bounded-fetch.ts`, 8 MiB) and NEVER throw: an
  * unreachable ledger is `{ reachable: false, errors: [...] }` and a page whose
  * chips carry no money, which is the plans board's degrade exactly.
+ *
+ * ── Four states, not two ────────────────────────────────────────────────────
+ * A chip is bare for FOUR different reasons and they are not interchangeable:
+ * the ledger answered and does not hold the id (`missing`), a batch failed so
+ * nobody ever asked (`unresolved`), the id could never be asked about at all
+ * (`invalid`), or the whole enrichment was never attempted. Collapsing the
+ * second into the first is how a partial outage renders as "these sessions were
+ * reaped" — the reader's conclusion is the opposite of the truth, and
+ * `totalCost` silently under-reports beside it.
  *
  * ── What "cost" means here, and what it does not ─────────────────────────────
  * `totalCost` is the sum over the sessions the ledger PRICED. It is not this
@@ -22,7 +32,8 @@
  * reaped id contributes nothing and is not a $0 session either.
  */
 
-import { readBounded, BOUNDED_FETCH_TIMEOUT_MS, BOUNDED_FETCH_MAX_BYTES } from "../utils/bounded-fetch.ts";
+import { BOUNDED_FETCH_TIMEOUT_MS, BOUNDED_FETCH_MAX_BYTES } from "../utils/bounded-fetch.ts";
+import { claudeUsageJson, claudeUsageWarnOnce } from "../utils/claude-usage-fetch.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("wiki", "session-ledger");
@@ -45,25 +56,64 @@ export interface LedgerSessionFacts {
 export const SESSION_IDS_PER_CALL = 200;
 
 /**
- * A second, LOWER bound that is not ours and is quoted in BYTES: a request LINE
- * — method, path, query and HTTP version — of 16,321 bytes or more is answered
- * with an empty-bodied 431 before any handler runs (bisected upstream). The id
- * count is not the unit, because it moves with how long the ids happen to be, so
- * this budget is over the QUERY and is held well under the bound: 200 Claude
- * Code uuids are ~7.4 KiB, and a provider whose ids are three times longer would
- * reach the 431 on a full batch without it.
+ * A second, LOWER bound that is not ours and is quoted in BYTES.
+ *
+ * claude-usage is a `Bun.serve()`, and Bun refuses a request whose whole HEADER
+ * BLOCK — request line plus every header plus the terminating CRLFs — reaches
+ * **16,385 bytes**, answering an empty-bodied 431 before any handler runs. So
+ * the limit is exactly 16 KiB of headers. Bisected 2026-09-15 against a local
+ * `Bun.serve()` on bun 1.3.10 with raw sockets (`fetch` will not build a request
+ * line that long): with a `Host:` and a `Connection:` header the largest request
+ * LINE answered is 16,338 bytes and 16,339 is refused — and the line figure
+ * moves with whatever other headers the caller and any proxy add, which is
+ * precisely why the budget below is not set at it.
+ *
+ * The id COUNT is not the unit either, because it moves with how long the ids
+ * happen to be. So this budget is over the QUERY and is held well under the
+ * bound: 200 Claude Code uuids are ~7.4 kB (200 × 37 bytes with commas), and a
+ * provider whose ids are three times longer would reach the 431 on a full batch
+ * without it. The remaining ~4 kB of headroom is what absorbs the headers this
+ * process does not choose.
  */
 export const SESSION_IDS_QUERY_MAX_BYTES = 12_000;
 
+/**
+ * The longest session id muninn will ask about — claude-usage's own
+ * `session_id` column cap. A longer value on a page cannot BE a session id, and
+ * sending it is how ONE malformed frontmatter entry takes out the whole batch
+ * it rides in (a 431 has no body naming the offender).
+ */
+export const SESSION_ID_MAX_CHARS = 128;
+
+/**
+ * The characters a session id is made of, across every provider that stamps
+ * one: Claude Code uuids, opencode's `ses_…`, and anything else built from the
+ * same alphabet. Anything outside it — a space, a slash, a `%` — is frontmatter
+ * damage rather than an id, and refusing it here is what keeps a query string
+ * from carrying something that is not one.
+ */
+export const SESSION_ID_SHAPE = /^[A-Za-z0-9._-]+$/;
+
+/** Is this a value claude-usage could hold at all? */
+export function isSessionIdShape(id: string): boolean {
+  return id.length > 0 && id.length <= SESSION_ID_MAX_CHARS && SESSION_ID_SHAPE.test(id);
+}
+
 export interface SessionLedgerResult {
-  /** The ledger answered with a readable payload. False ⇒ bare chips. */
+  /** At least one batch answered with a readable payload. */
   reachable: boolean;
+  /** Some batch answered and some did not — the total is over a SUBSET. */
+  partial: boolean;
   /** The base URL actually tried, so a degraded reader can name its endpoint. */
   baseUrl: string;
   /** `CLAUDE_USAGE_URL` was set explicitly on THIS host (vs the default). */
   urlConfigured: boolean;
   /** id → facts, for every id the ledger held. Keyed on the BARE id. */
   facts: Map<string, LedgerSessionFacts>;
+  /** Bare ids whose batch never answered. NOT missing — nobody asked. */
+  unresolved: Set<string>;
+  /** Bare ids refused before batching (too long, or not an id shape). */
+  invalid: Set<string>;
   /** Upstream cut a batch at its own cap — should not happen, since we page at
    *  the same cap, but it is reported rather than assumed away. */
   truncated: boolean;
@@ -73,13 +123,19 @@ export interface SessionLedgerResult {
 /** Injectable seam so tests drive the join without a live claude-usage. */
 export interface SessionLedgerDeps {
   /** Must reject on timeout / non-200 / over-cap / malformed JSON. */
-  fetchSessions: (ids: string[]) => Promise<unknown>;
+  fetchSessions: (ids: string[], signal?: AbortSignal) => Promise<unknown>;
   urlConfigured: boolean;
   baseUrl: string;
 }
 
-/** Production deps hitting the live claude-usage. The bounds are parameters for
- *  the same reason the plans board's are: both are testable against a real socket. */
+/**
+ * Production deps hitting the live claude-usage. The bounds are parameters for
+ * the same reason the plans board's are: both are testable against a real socket.
+ *
+ * A `signal` handed to `fetchSessions` REPLACES the per-call timeout — the
+ * caller owns a deadline over the whole enrichment, and two budgets on one fetch
+ * means the looser one never applies (see `provenance-service.ts`).
+ */
 export function defaultSessionLedgerDeps(
   baseUrl: string,
   urlConfigured: boolean,
@@ -90,36 +146,27 @@ export function defaultSessionLedgerDeps(
   return {
     urlConfigured,
     baseUrl: root,
-    fetchSessions: async (ids) => {
-      const url = `${root}/api/sessions-by-id?ids=${ids.map(encodeURIComponent).join(",")}`;
-      // Every failure names the base URL — the operator's first question about a
-      // degraded chip is whether this host was pointed at the right service. The
-      // full URL carries the ids, so the SHORT form is what the message shows.
-      let res: Response;
-      try {
-        res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-      } catch (err) {
-        throw new Error(`${err instanceof Error ? err.message : String(err)} (${root})`);
-      }
-      if (!res.ok) throw new Error(`claude-usage returned HTTP ${res.status} (${root})`);
-      let text: string;
-      try {
-        text = await readBounded(res, maxBytes, root);
-      } catch (err) {
-        throw new Error(err instanceof Error ? err.message : String(err));
-      }
-      try {
-        return JSON.parse(text) as unknown;
-      } catch (err) {
-        throw new Error(`${err instanceof Error ? err.message : String(err)} (${root})`);
-      }
-    },
+    fetchSessions: (ids, signal) =>
+      claudeUsageJson(root, `/api/sessions-by-id?ids=${ids.map(encodeURIComponent).join(",")}`, {
+        timeoutMs,
+        maxBytes,
+        signal,
+        // The full URL carries every id, so the SHORT form is what a log line
+        // and a degrade message name. The operator's first question about a
+        // degraded chip is whether this host was pointed at the right service.
+        label: root,
+      }),
   };
 }
 
 /**
  * Split ids into calls that satisfy BOTH bounds — the 200-id cap and the query
  * byte budget. Pure, so the byte arithmetic is testable without a socket.
+ *
+ * Every id reaching here has already passed {@link isSessionIdShape}, so no
+ * single id can exceed the budget on its own; the caller is what guarantees it,
+ * because a batch carrying one over-long id fails as a whole and takes every
+ * legitimate id beside it down with it.
  */
 export function batchSessionIds(
   ids: readonly string[],
@@ -144,24 +191,8 @@ export function batchSessionIds(
   return batches;
 }
 
-/** Errors already warned about. Same reason as the plans board's: a
- *  configured-but-down service is polled by every open reader tab. */
-const warnedLedgerErrors = new Set<string>();
-
-function warnOnce(message: string): void {
-  if (warnedLedgerErrors.has(message)) {
-    log.info("session ledger still degraded: {error}", { error: message });
-    return;
-  }
-  if (warnedLedgerErrors.size > 100) warnedLedgerErrors.clear();
-  warnedLedgerErrors.add(message);
-  log.warn("session ledger degraded: {error}", { error: message });
-}
-
 /** Test-only: forget which errors have already warned. */
-export function __resetSessionLedgerWarnsForTest(): void {
-  warnedLedgerErrors.clear();
-}
+export { __resetClaudeUsageWarnsForTest as __resetSessionLedgerWarnsForTest } from "../utils/claude-usage-fetch.ts";
 
 function isFacts(v: unknown): v is LedgerSessionFacts & { missing?: boolean } {
   return (
@@ -174,48 +205,75 @@ function isFacts(v: unknown): v is LedgerSessionFacts & { missing?: boolean } {
 
 /**
  * Look up every id, paged. Never throws; a batch that fails leaves its ids
- * unpriced and the reason in `errors`, while batches that answered still count.
+ * `unresolved` and the reason in `errors`, while batches that answered still
+ * count — and `partial` is what says the total is over a subset.
  *
  * `ids` are BARE — the `provider:` prefix is muninn's, not the ledger's, and a
  * prefixed id would come back `missing` for every session that exists.
+ *
+ * `signal` is a deadline over the WHOLE lookup, batches included. Without it a
+ * page naming 600 sessions could spend three sequential per-call budgets.
  */
 export async function fetchSessionsById(
   deps: SessionLedgerDeps,
   ids: readonly string[],
+  signal?: AbortSignal,
 ): Promise<SessionLedgerResult> {
   const facts = new Map<string, LedgerSessionFacts>();
+  const unresolved = new Set<string>();
+  const invalid = new Set<string>();
   const errors: string[] = [];
   let answered = false;
+  let failed = false;
   let truncated = false;
 
   const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
-  if (unique.length === 0) {
+  const askable: string[] = [];
+  for (const id of unique) {
+    if (isSessionIdShape(id)) askable.push(id);
+    else invalid.add(id);
+  }
+  if (invalid.size > 0) {
+    log.debug("{n} session id(s) on a page are not askable — refused before batching", {
+      n: invalid.size,
+    });
+  }
+
+  if (askable.length === 0) {
     return {
       reachable: false,
+      partial: false,
       baseUrl: deps.baseUrl,
       urlConfigured: deps.urlConfigured,
       facts,
+      unresolved,
+      invalid,
       truncated: false,
     };
   }
 
-  for (const batch of batchSessionIds(unique)) {
+  for (const batch of batchSessionIds(askable)) {
+    const fail = (reason: string) => {
+      failed = true;
+      for (const id of batch) unresolved.add(id);
+      errors.push(`claude-usage sessions: ${reason}`);
+    };
     let payload: unknown;
     try {
-      payload = await deps.fetchSessions(batch);
+      payload = await deps.fetchSessions(batch, signal);
     } catch (err) {
-      errors.push(`claude-usage sessions: ${err instanceof Error ? err.message : String(err)}`);
+      fail(err instanceof Error ? err.message : String(err));
       continue;
     }
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
       // A body that is not an object is a wrong service on the port, not an
       // empty ledger — and WHICH port is the operator's first question.
-      errors.push(`claude-usage sessions: response was not a JSON object (${deps.baseUrl})`);
+      fail(`response was not a JSON object (${deps.baseUrl})`);
       continue;
     }
     const rows = (payload as { sessions?: unknown }).sessions;
     if (!Array.isArray(rows)) {
-      errors.push(`claude-usage sessions: payload carried no \`sessions\` array (${deps.baseUrl})`);
+      fail(`payload carried no \`sessions\` array (${deps.baseUrl})`);
       continue;
     }
     answered = true;
@@ -228,13 +286,21 @@ export async function fetchSessionsById(
     }
   }
 
-  if (errors.length > 0) warnOnce(errors[0]!);
+  // EVERY distinct error warns, not only the first: with several batches the
+  // first failure is not in general the only condition, and a warn-once keyed on
+  // the message already stops a repeating one from filling the log.
+  for (const error of new Set(errors)) {
+    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "session ledger" });
+  }
 
   return {
     reachable: answered,
+    partial: answered && failed,
     baseUrl: deps.baseUrl,
     urlConfigured: deps.urlConfigured,
     facts,
+    unresolved,
+    invalid,
     truncated,
     ...(errors.length > 0 ? { errors } : {}),
   };

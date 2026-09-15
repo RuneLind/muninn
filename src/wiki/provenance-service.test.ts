@@ -31,6 +31,7 @@ function ctx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
   };
   return {
     sessionLedger: ledger,
+    ledgerConfigured: true,
     knowledgeApiUrl: "http://localhost:8321",
     publicUrl: null,
     loadJiraIndex: async () => ({ byKey: new Map([["MELOSYS-8045", "https://x/MELOSYS-8045"]]), fetchedAtMs: 0 }),
@@ -89,18 +90,24 @@ describe("resolveProvenance", () => {
       ctx({
         sessionLedger: {
           baseUrl: "http://127.0.0.1:8787",
-          urlConfigured: false,
+          urlConfigured: true,
           fetchSessions: async () => {
             throw new Error("connect ECONNREFUSED");
           },
         },
       }),
     );
-    expect(res.sessions[0]!.missing).toBe(true);
+    // UNRESOLVED, not missing: the batch failed, so nobody ever asked. "This
+    // session was reaped" is the opposite conclusion.
+    expect(res.sessions[0]!.unresolved).toBe(true);
+    expect(res.sessions[0]!.missing).toBe(false);
     expect(res.totalCost).toBe(0);
     expect(res.costedSessions).toBe(0);
+    expect(res.ledger.asked).toBe(true);
     expect(res.ledger.reachable).toBe(false);
-    expect(res.ledger.configured).toBe(false);
+    // CONFIGURED and asked and unreachable — the three facts are separate, and
+    // only together do they say "this host should be pricing and cannot".
+    expect(res.ledger.configured).toBe(true);
     expect(res.ledger.errors?.length).toBe(1);
   });
 
@@ -162,7 +169,7 @@ describe("pageProvenance", () => {
       ctx(),
     );
     expect(res!.backfilled).toBe("2026-10-14");
-    expect(res!.jira[0]!.huginnUrl).toBe("https://x/MELOSYS-8045");
+    expect(res!.jira[0]!.huginnKnown).toBe(true);
     expect(res!.totalCost).toBe(3);
     expect(res!.costedSessions).toBe(1);
   });

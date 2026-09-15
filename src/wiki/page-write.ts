@@ -303,7 +303,10 @@ export async function writeWikiPage(
   const sectionResult = await runWikiWriteExclusive(
     wikiDir,
     async (): Promise<PageWriteOutcome> => {
-      const lock = await takeWikiWriteLock(wikiDir, opts.lockWaitMs);
+      const lock = await takeWikiWriteLock(wikiDir, {
+        waitMs: opts.lockWaitMs,
+        op: `page-write:${opts.logKind ?? "no-log"}`,
+      });
       if (!lock.ok) {
         log.warn("Wiki page write refused — wiki write lock held: {path}: {reason}", {
           kind: opts.logKind,

@@ -83,6 +83,13 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   "/api/wiki/explain",
   "/api/wiki/factcheck",
   "/api/wiki/factcheck/claim",
+  // Not a model call and not a write — an AMPLIFIER. One GET walks every
+  // registered wiki's index and fans out into up to `PROVENANCE_REFS_MAX / 200`
+  // requests to claude-usage plus one to huginn, all from this host's network
+  // position. That is the property §4 cares about: an `<img src>` on any page
+  // the admin's browser visits should not be able to drive this host's outbound
+  // calls, however bounded each one is.
+  "/api/wiki/provenance",
   // The two WebSocket upgrades. They never reach this middleware — `src/index.ts`
   // handles them inside `Bun.serve`'s `fetch`, before `app.fetch` — and the
   // enforcement point is `src/auth/ws-upgrade.ts`, which consults this same
