@@ -1,0 +1,687 @@
+{
+  "_source": "huginn main/sources/files/files_document_converter.py FilesDocumentConverter._document_text_image and the image + S3 half of _clean_document_text (fence removal left out), run with huginn's .venv. Regenerate, never hand-edit.",
+  "images": [
+    {
+      "input": "![a](/x.png)",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](/x.png)",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](https://b.s3.amazonaws.com:443/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.s3.amazonaws.com：443/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://user＠evil.com/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.amazonaws.com／/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](//[abc/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](//abc]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://[::1]/x.png)",
+      "expected": "![a](https://[::1]/x.png)"
+    },
+    {
+      "input": "![a](https://[amazonaws.com]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://evil.com\\@b.s3.amazonaws.com/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.s3.amazonaws.com\\x.png)",
+      "expected": "![a](https://b.s3.amazonaws.com\\x.png)"
+    },
+    {
+      "input": "![a](/x.png#a?X-Amz-Signature=1)",
+      "expected": "![a](/x.png#a?X-Amz-Signature=1)"
+    },
+    {
+      "input": "![a](/x.png;sig=1?q=1)",
+      "expected": null
+    },
+    {
+      "input": "![a](/x.png?q=1;X-Goog-Signature=1)",
+      "expected": null
+    },
+    {
+      "input": "![a](HTTPS://B.S3.AMAZONAWS.COM/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](<https://ex.com/a b.png>)",
+      "expected": "![a](<https://ex.com/a b.png>)"
+    },
+    {
+      "input": "![a](<https://ex.com/a.png> extra)",
+      "expected": null
+    },
+    {
+      "input": "![a](localhost:8080/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](a.png:80)",
+      "expected": null
+    },
+    {
+      "input": "![a](path:123)",
+      "expected": null
+    },
+    {
+      "input": "![été](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![ab](/x.png)",
+      "expected": "![a b](/x.png)"
+    },
+    {
+      "input": "![a\u001cb](/x.png)",
+      "expected": "![a b](/x.png)"
+    },
+    {
+      "input": "![Ⅰ²](/x.png)",
+      "expected": "![Ⅰ²](/x.png)"
+    },
+    {
+      "input": "![٠١](/x.png)",
+      "expected": "![٠١](/x.png)"
+    },
+    {
+      "input": "![a‍b](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![Kelvin K:x](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![ſtp:x](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![a](https://b.amazonaws.com。/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.amazonaws.com%2e/x.png)",
+      "expected": "![a](https://b.amazonaws.com%2e/x.png)"
+    },
+    {
+      "input": "![a](https:example.com/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com:99999/x.png)",
+      "expected": "![a](https://ex.com:99999/x.png)"
+    },
+    {
+      "input": "![a](https://ex.com:abc/x.png)",
+      "expected": "![a](https://ex.com:abc/x.png)"
+    },
+    {
+      "input": "![a](https://b.s3.amazonaws.com.:443/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](//b.amazonaws.com)",
+      "expected": null
+    },
+    {
+      "input": "![a](  /x.png  \"t\")",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](/x.png 'title')",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](/x.png )",
+      "expected": "![a](/x.png)"
+    },
+    {
+      "input": "![a](﻿/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com/é.png)",
+      "expected": "![a](https://ex.com/é.png)"
+    },
+    {
+      "input": "![a](https://éx.com/x.png)",
+      "expected": "![a](https://éx.com/x.png)"
+    },
+    {
+      "input": "![a](https://a.b@c/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com/x.png?SIG=1)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com/x.png?asig=1)",
+      "expected": "![a](https://ex.com/x.png?asig=1)"
+    },
+    {
+      "input": "![a](mailto:x@y)",
+      "expected": null
+    },
+    {
+      "input": "![a](1http://x/y.png)",
+      "expected": "![a](1http://x/y.png)"
+    },
+    {
+      "input": "![a](<>)",
+      "expected": null
+    },
+    {
+      "input": "![a](<x>y>)",
+      "expected": null
+    },
+    {
+      "input": "![Diagram: the 3-step loop](/x.png)",
+      "expected": "![Diagram: the 3-step loop](/x.png)"
+    },
+    {
+      "input": "![http:x](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![ a　b](/x.png)",
+      "expected": "![a b](/x.png)"
+    },
+    {
+      "input": "![a](https://℀.amazonaws.com/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.AMAZONAWS.coⅿ/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://b.amazonaws.com­/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![x·y](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![ʰ](/x.png)",
+      "expected": "![ʰ](/x.png)"
+    },
+    {
+      "input": "![⁰](/x.png)",
+      "expected": "![⁰](/x.png)"
+    },
+    {
+      "input": "![aःb](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![a](<https://b.s3.amazonaws.com:443/k.png>)\"\n",
+      "expected": null
+    },
+    {
+      "input": "![a](/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](ftp://example.com/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![word word word word word word word word word word word word word word word word word](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![Kx:y](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![ſx:y](/x.png)",
+      "expected": "![](/x.png)"
+    },
+    {
+      "input": "![a](http://[1.2.3.4]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[1::2::3]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[v1.x]/x.png)",
+      "expected": "![a](http://[v1.x]/x.png)"
+    },
+    {
+      "input": "![a](http://[::1%25eth0]/x.png)",
+      "expected": "![a](http://[::1%25eth0]/x.png)"
+    },
+    {
+      "input": "![a](http://[::1]:80/x.png)",
+      "expected": "![a](http://[::1]:80/x.png)"
+    },
+    {
+      "input": "![a](http://[::1]x/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://u@[::1]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[::ffff:1.2.3.4]/x.png)",
+      "expected": "![a](http://[::ffff:1.2.3.4]/x.png)"
+    },
+    {
+      "input": "![a](http://[12345::]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[:]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[fe80::1]:ab/x.png)",
+      "expected": "![a](http://[fe80::1]:ab/x.png)"
+    },
+    {
+      "input": "![a](//[::1]/x.png)",
+      "expected": "![a](//[::1]/x.png)"
+    },
+    {
+      "input": "![a](http://h]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[::1]]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[1:2:3:4:5:6:7:8:9]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[::g]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[1.2.3.4:]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[::1.2.3]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[:::1]/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](http://[1:2:3:4:5:6:7:8]/x.png)",
+      "expected": "![a](http://[1:2:3:4:5:6:7:8]/x.png)"
+    },
+    {
+      "input": "![a](http://[::]/x.png)",
+      "expected": "![a](http://[::]/x.png)"
+    },
+    {
+      "input": "![a](https://s3.amazonaws.com./x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://S3.AMAZONAWS.COM:443/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://x.amazonaws.com%2e/x.png)",
+      "expected": "![a](https://x.amazonaws.com%2e/x.png)"
+    },
+    {
+      "input": "![a](https://amazonaws.com。/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](HTTPS://s3.amazonaws.com/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com/x.png;X-Amz-Signature=1)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com/x;a=b/c.png?q=1#sig=1)",
+      "expected": "![a](https://ex.com/x;a=b/c.png?q=1#sig=1)"
+    },
+    {
+      "input": "![a](x.png?&sig=1)",
+      "expected": null
+    },
+    {
+      "input": "![a](x.png#?sig=1)",
+      "expected": "![a](x.png#?sig=1)"
+    },
+    {
+      "input": "![a](https://ex.com?sig=1)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com#x?sig=1)",
+      "expected": "![a](https://ex.com#x?sig=1)"
+    },
+    {
+      "input": "![a](https:/ex.com/x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](//ex.com)",
+      "expected": "![a](//ex.com)"
+    },
+    {
+      "input": "![a](///x.png)",
+      "expected": "![a](///x.png)"
+    },
+    {
+      "input": "![a](http:///x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://amazonaws.com:x/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com:99999/k.png)",
+      "expected": "![a](https://ex.com:99999/k.png)"
+    },
+    {
+      "input": "![a](https://ａmazonaws.com/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://s3.amazonaws.com．/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex.com℀/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](https://ex⑴.com/k.png)",
+      "expected": "![a](https://ex⑴.com/k.png)"
+    },
+    {
+      "input": "![a](https://amazonaws.com﹗/k.png)",
+      "expected": "![a](https://amazonaws.com﹗/k.png)"
+    },
+    {
+      "input": "![a](https://s3.amazonaws.com․/k.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](x.png \"t\")",
+      "expected": "![a](x.png)"
+    },
+    {
+      "input": "![a](<x.png> 't')",
+      "expected": "![a](<x.png>)"
+    },
+    {
+      "input": "![a](<x.png>)",
+      "expected": "![a](<x.png>)"
+    },
+    {
+      "input": "![a](< >)",
+      "expected": null
+    },
+    {
+      "input": "![a](<a>b.png>)",
+      "expected": null
+    },
+    {
+      "input": "![a](x.png\u000b)",
+      "expected": "![a](x.png)"
+    },
+    {
+      "input": "![a](﻿x.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](x y.png)",
+      "expected": null
+    },
+    {
+      "input": "![a](x.png　\"t\")",
+      "expected": "![a](x.png)"
+    },
+    {
+      "input": "![a](<x\ny.png>)",
+      "expected": null
+    },
+    {
+      "input": "![a](x.png\u001f'q')",
+      "expected": "![a](x.png)"
+    },
+    {
+      "input": "![a](x.png᠎)",
+      "expected": null
+    },
+    {
+      "input": "![a](x.png​)",
+      "expected": null
+    },
+    {
+      "input": "![Ｋ:x](y.png)",
+      "expected": "![Ｋ:x](y.png)"
+    },
+    {
+      "input": "![K:x](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![ſ:x](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![ﬀ:x](y.png)",
+      "expected": "![ﬀ:x](y.png)"
+    },
+    {
+      "input": "![ǅ:x](y.png)",
+      "expected": "![ǅ:x](y.png)"
+    },
+    {
+      "input": "![a1: ](y.png)",
+      "expected": "![a1:](y.png)"
+    },
+    {
+      "input": "![1a:x](y.png)",
+      "expected": "![1a:x](y.png)"
+    },
+    {
+      "input": "![a:b](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![a::](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![ⅷ](y.png)",
+      "expected": "![ⅷ](y.png)"
+    },
+    {
+      "input": "![²](y.png)",
+      "expected": "![²](y.png)"
+    },
+    {
+      "input": "![·](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![a‍b](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![𝔘:x](y.png)",
+      "expected": "![𝔘:x](y.png)"
+    },
+    {
+      "input": "![İ:x](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![ı:x](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![aK:x](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![x-ſ:y](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![ẞ:x](y.png)",
+      "expected": "![ẞ:x](y.png)"
+    },
+    {
+      "input": "![ß:x](y.png)",
+      "expected": "![ß:x](y.png)"
+    },
+    {
+      "input": "![Ǳ:x](y.png)",
+      "expected": "![Ǳ:x](y.png)"
+    },
+    {
+      "input": "![ς:x](y.png)",
+      "expected": "![ς:x](y.png)"
+    },
+    {
+      "input": "![a\u001cb](y.png)",
+      "expected": "![a b](y.png)"
+    },
+    {
+      "input": "![xxxxxxxxxxxxxxxxxxxx](y.png)",
+      "expected": "![xxxxxxxxxxxxxxxxxxxx](y.png)"
+    },
+    {
+      "input": "![xxxxxxxxxxxxxxxxxxxxx](y.png)",
+      "expected": "![](y.png)"
+    },
+    {
+      "input": "![xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxxxx](y.png)",
+      "expected": "![](y.png)"
+    }
+  ],
+  "texts": [
+    {
+      "input": "p ![`x`](data:image/png;base64,AAAA) q",
+      "expected": "p  q"
+    },
+    {
+      "input": "p ![a](data:image/png;base64,AA`b`A) q",
+      "expected": "p  q"
+    },
+    {
+      "input": "p ![a](https://ex.com/k.png?X-Amz-Signature=`1`) q",
+      "expected": "p  q"
+    },
+    {
+      "input": "```bash``` inline\n![a](data:image/png;base64,AAAA)\nend",
+      "expected": "```bash``` inline\n\nend"
+    },
+    {
+      "input": "text\n~~~\n![a](data:x)\n~~~\n![b](data:y)",
+      "expected": "text\n~~~\n\n~~~\n"
+    },
+    {
+      "input": "See https://b.s3.eu-west-1.amazonaws.com/r.pdf and ![c](https://b.s3.eu-west-1.amazonaws.com/k.png)",
+      "expected": "See [file] and "
+    },
+    {
+      "input": "![a](https://ex.com/https://b.s3.x.amazonaws.com/k.png)",
+      "expected": "![a](https://ex.com/[file])"
+    },
+    {
+      "input": "pre https://b.s3.x.amazonaws.com/k.png﻿?X-Amz-Signature=abc post",
+      "expected": "pre [file] post"
+    },
+    {
+      "input": "pre https://b.s3.x.amazonaws.com/k.pngrest post",
+      "expected": "pre [file]rest post"
+    },
+    {
+      "input": "pre https://b.s3.x.amazonaws.com/k\u001crest",
+      "expected": "pre [file]\u001crest"
+    },
+    {
+      "input": "pre https://b.s3.x.amazonaws.com/k rest",
+      "expected": "pre [file] rest"
+    },
+    {
+      "input": "pre https://b.s3.x.amazonaws.com/k　rest",
+      "expected": "pre [file]　rest"
+    },
+    {
+      "input": "![a](x.png) ![b](data:q)\n![c](<y z.png>)",
+      "expected": "![a](x.png) \n![c](<y z.png>)"
+    },
+    {
+      "input": "![a\n](x.png)",
+      "expected": "![a](x.png)"
+    },
+    {
+      "input": "![a](https://b.s3.eu.amazonaws.com/k.png)",
+      "expected": ""
+    },
+    {
+      "input": "![a [b] c](data:image/png;base64,AAAA)",
+      "expected": "![a [b] c](data:image/png;base64,AAAA)"
+    },
+    {
+      "input": "![a\\]b](data:image/png;base64,AAAA)",
+      "expected": "![a\\]b](data:image/png;base64,AAAA)"
+    },
+    {
+      "input": "![a](data:x \"t)\")",
+      "expected": "\")"
+    },
+    {
+      "input": "![a](x.png))",
+      "expected": "![a](x.png))"
+    },
+    {
+      "input": "!![a](data:x)",
+      "expected": "!"
+    },
+    {
+      "input": "![![b](data:y)](x.png)",
+      "expected": "](x.png)"
+    },
+    {
+      "input": "```\n![a](data:x)\n```\nhttps://b.s3.x.amazonaws.com/secret.pdf",
+      "expected": "```\n\n```\n[file]"
+    }
+  ]
+}

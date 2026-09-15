@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { knowledgeApiHandler } from "../../ai/knowledge-api-client.ts";
+import { readSummarySourceText, withSourceText } from "../../summaries/source-text.ts";
 import { isTerminalStatus, type Job, type JobEvent } from "../../summaries/job-store.ts";
 import { corsHeaders } from "../../auth/cors.ts";
 
@@ -178,7 +179,18 @@ export function registerSummaryVertical<S extends string, F>(
     // encodeURIComponent'd each segment, so forward that encoding verbatim.
     const encodedDocId = new URL(c.req.url).pathname.replace(`${apiBase}/document/`, "");
     if (!encodedDocId) return c.json({ error: "Missing document ID" }, 400);
-    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/document/${collection}/${encodedDocId}`);
+    // The JSON copy has its fenced code stripped; the body comes from the
+    // source file when huginn can serve it. Started first so both run at once.
+    // 2 s, not the 5 s default: a stalled source read holds back a JSON copy
+    // that is already there (live reads measure ~0.04 s).
+    const source = readSummarySourceText(KNOWLEDGE_API_URL, collection, encodedDocId, 2_000);
+    return knowledgeApiHandler(
+      c,
+      KNOWLEDGE_API_URL,
+      `/api/document/${collection}/${encodedDocId}`,
+      undefined,
+      async (doc) => withSourceText(doc, await source),
+    );
   });
 
   app.get(`${apiBase}/similar`, async (c) => {

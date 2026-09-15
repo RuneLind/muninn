@@ -121,10 +121,12 @@ export async function knowledgeApiHandler(
   baseUrl: string,
   path: string,
   timeoutMs?: number,
+  /** Reshapes the parsed JSON before it is sent; must not throw. */
+  transform?: (data: unknown) => unknown | Promise<unknown>,
 ): Promise<Response> {
   try {
     const data = await fetchKnowledgeApi(baseUrl, path, { timeoutMs });
-    return c.json(data);
+    return c.json((transform ? await transform(data) : data) as object);
   } catch (err) {
     if (err instanceof KnowledgeApiError) {
       log.warn("Knowledge API error on {path}: {error}", { path, error: err.message });

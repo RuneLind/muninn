@@ -123,9 +123,9 @@ test("jobs: clamps the limit into [1, 100] and defaults to 20", async () => {
 
 test("document: forwards the still-encoded doc id verbatim (no lossy re-decode)", async () => {
   const origFetch = globalThis.fetch;
-  let capturedUrl = "";
+  const capturedUrls: string[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
-    capturedUrl = String(input);
+    capturedUrls.push(String(input));
     return new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -136,9 +136,74 @@ test("document: forwards the still-encoded doc id verbatim (no lossy re-decode)"
     // Reserved chars stay percent-encoded (%2C comma, %2F slash, %24 dollar).
     const res = await app.request("/api/test/document/ai%2Cclaude%2FFoo%24.md");
     expect(res.status).toBe(200);
-    expect(capturedUrl).toBe("http://kb.test/api/document/test-summaries/ai%2Cclaude%2FFoo%24.md");
+    expect(capturedUrls).toContain("http://kb.test/api/document/test-summaries/ai%2Cclaude%2FFoo%24.md");
+    for (const url of capturedUrls) {
+      expect(url.startsWith("http://kb.test/api/document/test-summaries/ai%2Cclaude%2FFoo%24.md")).toBe(true);
+    }
   } finally {
     globalThis.fetch = origFetch;
+  }
+});
+
+/** huginn's two document forms: the JSON copy has its fenced code removed and a
+ *  breadcrumb prepended; `?raw=1` is the file on disk. */
+const CLEANED_TEXT = "[test > ai > Talk]\n\n# Talk\n\nThe routing file:\n\nAfter the file.";
+const RAW_SOURCE = '---\ndate: "2026-09-15"\nurl: "https://example.com/v"\n---\n# Talk\n\nThe routing file:\n\n```\n| role | model |\n```\n\nAfter the file.';
+
+function stubHuginn(raw: () => Response): () => void {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (String(input).endsWith("?raw=1")) return raw();
+    return new Response(JSON.stringify({ id: "Talk.md", url: "https://example.com/v", text: CLEANED_TEXT }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = origFetch;
+  };
+}
+
+test("document: the body is the source file, so fenced code survives huginn's cleaned copy", async () => {
+  const restore = stubHuginn(
+    () => new Response(RAW_SOURCE, { status: 200, headers: { "content-type": "text/markdown; charset=utf-8" } }),
+  );
+  try {
+    const res = await appFor(fixedStore(makeJob({}))).request("/api/test/document/Talk.md");
+    expect(res.status).toBe(200);
+    const doc = (await res.json()) as { text: string; url: string; textSource?: string };
+    expect(doc.text).toBe("# Talk\n\nThe routing file:\n\n```\n| role | model |\n```\n\nAfter the file.");
+    expect(doc.url).toBe("https://example.com/v");
+    expect(doc.textSource).toBe("file");
+  } finally {
+    restore();
+  }
+});
+
+test("document: keeps the JSON copy when ?raw=1 is not a text/* body (a huginn without raw support answers JSON)", async () => {
+  const restore = stubHuginn(
+    () => new Response(JSON.stringify({ text: "not a source file" }), { status: 200, headers: { "content-type": "application/json" } }),
+  );
+  try {
+    const doc = (await (await appFor(fixedStore(makeJob({}))).request("/api/test/document/Talk.md")).json()) as {
+      text: string;
+      textSource?: string;
+    };
+    expect(doc.text).toBe(CLEANED_TEXT);
+    expect(doc.textSource).toBeUndefined();
+  } finally {
+    restore();
+  }
+});
+
+test("document: keeps the JSON copy when the source read fails", async () => {
+  const restore = stubHuginn(() => new Response("not found", { status: 404 }));
+  try {
+    const res = await appFor(fixedStore(makeJob({}))).request("/api/test/document/Talk.md");
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { text: string }).text).toBe(CLEANED_TEXT);
+  } finally {
+    restore();
   }
 });
 

@@ -52,6 +52,7 @@ import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { findSharePreset, resolveSharePresets, type SharePreset } from "../../share/presets.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
+import { readSummarySourceText, withSourceText } from "../../summaries/source-text.ts";
 import { buildShareSystemPrompt, buildShareUserPrompt } from "../../share/prompt.ts";
 import { parseShareRequestBody, SHARE_LANGS } from "../../share/wire.ts";
 // The dialog's surface copy — imported, never re-spelled: the 409 below and the
@@ -92,11 +93,13 @@ const DOC_FETCH_TIMEOUT_MS = 10_000;
 export function defaultSummariesShareDeps(knowledgeApiUrl: string): SummariesShareDeps {
   return {
     fetchDoc: async (collection, docId) => {
-      return (await fetchKnowledgeApi(
+      const source = readSummarySourceText(knowledgeApiUrl, collection, encodeDocIdPath(docId), DOC_FETCH_TIMEOUT_MS);
+      const doc = (await fetchKnowledgeApi(
         knowledgeApiUrl,
         `/api/document/${encodeURIComponent(collection)}/${encodeDocIdPath(docId)}`,
         { timeoutMs: DOC_FETCH_TIMEOUT_MS },
       )) as SummaryShareDoc | null;
+      return withSourceText(doc, await source);
     },
   };
 }
