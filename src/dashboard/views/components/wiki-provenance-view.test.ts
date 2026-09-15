@@ -18,6 +18,7 @@ import {
   money,
   providerGlyph,
   provStripHtml,
+  railListHtml,
   sessionsRailHtml,
   sessionsSectionVisible,
 } from "./wiki-provenance-view.ts";
@@ -150,6 +151,45 @@ describe("costLine", () => {
     expect(costLine(payload())).toBeNull();
   });
 
+  test("a reachable ledger that priced NOTHING says so — never `$0.00 over 0 of N`", () => {
+    // The `m < n` line would render "cost $0.00 in total over 0 of 1": "we don't
+    // know" spelled as "it was free", on the one figure that must not read that
+    // way.
+    const one = payload({
+      sessions: [chip({ missing: true })],
+      totalCost: 0,
+      costedSessions: 0,
+      ledger: { asked: true, reachable: true, partial: false, configured: true },
+    });
+    expect(costLine(one)).toBe("1 session wrote this page — the ledger holds none of them");
+    expect(costLine(one)).not.toContain("$0.00");
+
+    const many = payload({
+      sessions: [chip({ missing: true }), chip({ id: "def", missing: true })],
+      totalCost: 0,
+      costedSessions: 0,
+      ledger: { asked: true, reachable: true, partial: false, configured: true },
+    });
+    expect(costLine(many)).toBe("2 sessions wrote this page — the ledger holds none of them");
+  });
+
+  test("a PARTIAL run keeps its own line even at zero priced — a batch FAILED there", () => {
+    // "the ledger holds none of them" is a claim about an answer; `partial` is
+    // the state where one never came, so the two must not merge.
+    expect(
+      costLine(
+        payload({
+          sessions: [chip({ unresolved: true }), chip({ id: "def", unresolved: true })],
+          totalCost: 0,
+          costedSessions: 0,
+          ledger: { asked: true, reachable: true, partial: true, configured: true },
+        }),
+      ),
+    ).toBe(
+      "the 2 sessions that wrote this page cost at least $0.00 — the ledger answered for 0 of 2",
+    );
+  });
+
   test("backfilled rides every state, including the degraded ones", () => {
     const base = {
       sessions: [chip({ cost: 1 })],
@@ -243,6 +283,67 @@ describe("chipView", () => {
     expect(v.bareCopy).toBeNull();
   });
 
+  test("an ABSENT `cost` is the same as null — it must not throw the whole rail down", () => {
+    // The payload crosses the wire, and `JSON.parse` drops a key the server left
+    // undefined. `cost === null` missed that and `money(undefined)` threw out of
+    // the loop, so ONE malformed chip painted no Sessions section at all.
+    //
+    // What this pins is the OUTCOME, not the `== null` spelling: `fmtCost`
+    // answers `—` for an absent value on its own, so the two spellings are
+    // indistinguishable from here. The mutation it catches is reverting the
+    // renderer to `money` (verified).
+    const partial = { ...chip(), cost: undefined } as unknown as ProvenanceSessionChip;
+    expect(() => chipView(partial)).not.toThrow();
+    expect(chipView(partial).costLabel).toBe("—");
+    // And through the renderer, which is where the blast radius was.
+    expect(() => sessionsRailHtml([partial])).not.toThrow();
+    expect(sessionsRailHtml([partial])).toContain("wiki-sess-row");
+  });
+
+  test("a SUB-CENT cost keeps its digits instead of flattening to $0.00", () => {
+    // `costOfSessions` rounds only the SUM; a per-chip `cost` arrives raw, so a
+    // two-decimal render turns a real $0.0043 session into the `$0.00` that
+    // means "free" on every other surface (`fmtCost`'s own rule).
+    expect(chipView(chip({ cost: 0.0043 })).costLabel).toBe("$0.0043");
+    expect(chipView(chip({ cost: 0.003 })).costLabel).toBe("$0.0030");
+    // A real zero still reads as a real zero, and cents still render as cents.
+    expect(chipView(chip({ cost: 0 })).costLabel).toBe("$0.00");
+    expect(chipView(chip({ cost: 1.5 })).costLabel).toBe("$1.50");
+  });
+
+  test("the only date the ledger returned is shown, whichever end of the range it is", () => {
+    // `dateTitle` was built for the first-less case and the renderer shows a
+    // title only BESIDE a label, so the one date came back and was dropped.
+    const lastOnly = chipView(chip({ first: null, last: "2026-09-03" }));
+    expect(lastOnly.dateLabel).toBe("2026-09-03");
+    expect(lastOnly.dateTitle).toBe("");
+    expect(sessionsRailHtml([chip({ first: null, last: "2026-09-03" })])).toContain("2026-09-03");
+
+    const firstOnly = chipView(chip({ first: "2026-09-01", last: null }));
+    expect(firstOnly.dateLabel).toBe("2026-09-01");
+    expect(firstOnly.dateTitle).toBe("");
+    // Neither end: nothing to show and nothing to hover.
+    expect(chipView(chip()).dateLabel).toBe("");
+    expect(chipView(chip()).dateTitle).toBe("");
+  });
+
+  test("`unresolved` on an UNCONFIGURED host does not blame a service that isn't there", () => {
+    const unconfigured = { asked: false, reachable: false, partial: false, configured: false };
+    const configured = { asked: true, reachable: true, partial: true, configured: true };
+    expect(chipView(chip({ unresolved: true }), unconfigured).bareCopy).toBe(
+      "not looked up — no claude-usage on this host",
+    );
+    // …and the configured copy is untouched, or the split buys nothing.
+    expect(chipView(chip({ unresolved: true }), configured).bareCopy).toBe(
+      BARE_CHIP_COPY.unresolved,
+    );
+    // No ledger at all ⇒ the default, never a claim about a host we know nothing of.
+    expect(chipView(chip({ unresolved: true })).bareCopy).toBe(BARE_CHIP_COPY.unresolved);
+    // The OTHER two reasons are facts about the id, not about the host.
+    expect(chipView(chip({ invalid: true }), unconfigured).bareCopy).toBe(BARE_CHIP_COPY.invalid);
+    expect(chipView(chip({ missing: true }), unconfigured).bareCopy).toBe(BARE_CHIP_COPY.missing);
+  });
+
   test("the drill-down url rides through only when the server built one", () => {
     expect(chipView(chip({ url: "https://usage.example.test/#/session/abc" })).url).toBe(
       "https://usage.example.test/#/session/abc",
@@ -294,28 +395,82 @@ describe("provStripHtml", () => {
     ledger: { asked: true, reachable: true, partial: false, configured: true },
   });
 
+  const known = { "MELOSYS-8045": 1 };
+
   test("renders the Jira link, the filter affordance and the cost line", () => {
-    const html = provStripHtml(priced);
+    const html = provStripHtml(priced, known);
     expect(html).toContain(`href="https://nav.atlassian.net/browse/MELOSYS-8045"`);
     expect(html).toContain(`data-prov-jira="MELOSYS-8045"`);
     expect(html).toContain("wiki-prov-known");
     expect(html).toContain("cost $1.00 in total");
   });
 
+  test("a key the facet map does not hold is TEXT — no filter, no browse link", () => {
+    // The store keeps a malformed key on the page's own row while `jiraCounts`
+    // shape-filters the facet map, so this key was rendered as a button whose
+    // click set a filter `resolveJiraParam` drops: the chip row read
+    // `NOT-A-KEY 0`, links built while it was live carried a dead param, and a
+    // reload lost it silently.
+    const mixed = payload({
+      jira: [
+        { key: "MELOSYS-9001", url: "https://nav.atlassian.net/browse/MELOSYS-9001" },
+        { key: "NOT-A-KEY", url: "https://nav.atlassian.net/browse/NOT-A-KEY" },
+      ],
+    });
+    const html = provStripHtml(mixed, { "MELOSYS-9001": 1 });
+    // The good key keeps both controls…
+    expect(html).toContain(`data-prov-jira="MELOSYS-9001"`);
+    expect(html).toContain(`href="https://nav.atlassian.net/browse/MELOSYS-9001"`);
+    // …and the malformed one gets neither, while still being SHOWN: it is on the
+    // page, and hiding it would hide the frontmatter damage too.
+    expect(html).toContain("NOT-A-KEY");
+    expect(html).not.toContain(`data-prov-jira="NOT-A-KEY"`);
+    expect(html).not.toContain("browse/NOT-A-KEY");
+    expect(html).toContain("NOT-A-KEY is not a Jira key");
+  });
+
+  test("a well-SHAPED key the listing has not caught up with is not called malformed", () => {
+    // Two causes, two sentences: a value that cannot BE a key is frontmatter the
+    // reader can fix; a real key missing from a stale listing is not.
+    const html = provStripHtml(
+      payload({ jira: [{ key: "MELOSYS-9999", url: "https://nav.atlassian.net/browse/MELOSYS-9999" }] }),
+      {},
+    );
+    expect(html).not.toContain(`data-prov-jira=`);
+    // The apostrophe in "wiki's" is escaped into the attribute, so match around it.
+    expect(html).toContain("Jira index — no filter and no link");
+    expect(html).not.toContain("is not a Jira key");
+  });
+
+  test("with NO known map nothing is a control — a dead button is worse than text", () => {
+    const html = provStripHtml(priced, null);
+    expect(html).not.toContain(`data-prov-jira=`);
+    expect(html).not.toContain("wiki-prov-jira-link");
+    // The cost line is independent of the facet and still renders.
+    expect(html).toContain("cost $1.00 in total");
+  });
+
   test("renders NOTHING for `prs` — the PR row ships with campaign 2", () => {
-    expect(provStripHtml(priced)).not.toContain("1234");
-    expect(provStripHtml(priced)).not.toContain("melosys-api");
+    expect(provStripHtml(priced, known)).not.toContain("1234");
+    expect(provStripHtml(priced, known)).not.toContain("melosys-api");
+    expect(provStripHtml(priced, known)).not.toContain("github.com");
   });
 
   test("a payload with no jira and no cost line renders no strip at all", () => {
-    expect(provStripHtml(payload({ prs: [{ ref: "a/b#1", url: null }] }))).toBe("");
+    expect(provStripHtml(payload({ prs: [{ ref: "a/b#1", url: null }] }), known)).toBe("");
   });
 
   test("user-controlled values are escaped", () => {
-    const html = provStripHtml(
-      payload({ jira: [{ key: `A-1"><img src=x>`, url: `https://x/"><img src=x>` }] }),
-    );
-    expect(html).not.toContain("<img");
+    const evil = `A-1"><img src=x>`;
+    // Both branches: the key is a sink in the button AND in the inert `title=`.
+    expect(
+      provStripHtml(payload({ jira: [{ key: evil, url: `https://x/"><img src=x>` }] }), {
+        [evil]: 1,
+      }),
+    ).not.toContain("<img");
+    expect(
+      provStripHtml(payload({ jira: [{ key: evil, url: `https://x/"><img src=x>` }] }), {}),
+    ).not.toContain("<img");
   });
 });
 
@@ -364,6 +519,45 @@ describe("sessionsRailHtml", () => {
   test("a ledger-supplied title is escaped", () => {
     const html = sessionsRailHtml([chip({ title: `<img src=x onerror=1>` })]);
     expect(html).not.toContain("<img");
+  });
+
+  test("the ⧉ button is RENDERED with the same accessible name its press reverts to", () => {
+    // `copySessionId` flashes a result and reverts to `Copy the session id <id>`,
+    // so a button rendered with the bare label silently renamed itself the first
+    // time it was pressed.
+    const html = sessionsRailHtml([chip({ id: "5a2ee3f0" })]);
+    expect(html).toContain(`aria-label="Copy the session id 5a2ee3f0"`);
+  });
+
+  test("the ledger rides through to the bare rows", () => {
+    const unconfigured = { asked: false, reachable: false, partial: false, configured: false };
+    const html = sessionsRailHtml([chip({ unresolved: true })], unconfigured);
+    expect(html).toContain("not looked up — no claude-usage on this host");
+    expect(html).not.toContain("claude-usage did not answer");
+  });
+});
+
+describe("railListHtml", () => {
+  const sessions = `<div class="wiki-list-sec" data-section="sessions"></div>`;
+
+  test("a facet matching nothing still says so, even under a Sessions section", () => {
+    // Seeding one buffer with the Sessions block made `html || EMPTY` true, so a
+    // stamped page answered "no page matches this facet" with session rows and
+    // nothing else.
+    const out = railListHtml(sessions, "");
+    expect(out).toContain("No pages match.");
+    expect(out).toContain(`data-section="sessions"`);
+    // Order: the open page's block sits ABOVE the answer about the filter.
+    expect(out.indexOf("sessions")).toBeLessThan(out.indexOf("No pages match."));
+  });
+
+  test("real rows suppress the empty state, sessions or not", () => {
+    expect(railListHtml(sessions, "<div>row</div>")).toBe(sessions + "<div>row</div>");
+    expect(railListHtml("", "<div>row</div>")).toBe("<div>row</div>");
+  });
+
+  test("no sessions and no rows is the plain empty state", () => {
+    expect(railListHtml("", "")).toContain("No pages match.");
   });
 });
 

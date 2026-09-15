@@ -207,6 +207,7 @@ import {
   projectHubPage,
   PROJECT_PARAM,
   projectParamNeedsRewrite,
+  resolveJiraParam,
   ROOT_FOLDER,
   sanitizeColorToken,
   searchWithJira,
@@ -231,9 +232,11 @@ import {
 // only decides WHERE it goes and wires the two controls it carries.
 import {
   provStripHtml,
+  railListHtml,
   SESSION_COPY_FAIL,
   SESSION_COPY_IDLE,
   SESSION_COPY_OK,
+  sessionCopyAriaLabel,
   sessionsRailHtml,
   sessionsSectionVisible,
 } from "./wiki-provenance-view.ts";
@@ -839,9 +842,23 @@ function repaintForJira(autoOpen = true): void {
   syncFilters(autoOpen);
 }
 
-/** Set the jira filter, write it to the URL and repaint. */
+/**
+ * Set the jira filter, write it to the URL and repaint.
+ *
+ * **A key this wiki's facet map does not hold is REFUSED, not set.** Unlike the
+ * project row, this filter has a second entry point — the article strip's key —
+ * and the strip renders whatever the page's frontmatter carries while the map is
+ * shape-filtered server-side. A filter `resolveJiraParam` would drop is a dead
+ * param: the chip row renders it at count 0 (contradicting "the count is the
+ * rows a click leaves"), every link built while it is live carries it, and a
+ * reload silently loses it. Running the value THROUGH `resolveJiraParam` also
+ * normalizes case, so `?jira=melosys-8045` from a shared link behaves like the
+ * chip's own click. Clearing (`""`) always goes through.
+ */
 function applyJiraFilter(jira: string): void {
-  filters.jira = jira;
+  const next = resolveJiraParam(jira, jiraKeys);
+  if (jira && !next) return;
+  filters.jira = next;
   writeJiraParam();
   repaintForJira();
 }
@@ -988,9 +1005,15 @@ function renderList(): void {
   // `sessionsRailHtml`. The visibility rule reuses `railSectionsVisible` through
   // `sessionsSectionVisible`, so a search query clears the head of the rail for
   // the Jira-key jump exactly as it does for Activity and Pinned.
-  let html = sessionsSectionVisible(filters, currentProvenance?.sessions)
-    ? sessionsRailHtml(currentProvenance!.sessions)
+  //
+  // Held in its OWN buffer, never seeded into `html`: the empty state below is
+  // decided on the page rows alone (`railListHtml`), or a page with sessions
+  // would answer a facet that matches nothing with session rows and no
+  // "No pages match." at all.
+  const sessionsHtml = sessionsSectionVisible(filters, currentProvenance?.sessions)
+    ? sessionsRailHtml(currentProvenance!.sessions, currentProvenance!.ledger)
     : "";
+  let html = "";
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
       html +=
@@ -1073,7 +1096,7 @@ function renderList(): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
-  listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
+  listEl.innerHTML = railListHtml(sessionsHtml, html);
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
   // is shorter the browser clamps to the new maximum and re-assigning the saved
@@ -1191,10 +1214,11 @@ function copyArticlePath(btn: HTMLButtonElement): void {
  */
 function copySessionId(btn: HTMLButtonElement): void {
   const id = btn.getAttribute("data-sess-copy") || "";
-  const aria = id ? `Copy the session id ${id}` : "Copy the session id";
   const idle = {
     text: SESSION_COPY_IDLE,
-    ariaLabel: aria,
+    // The SAME spelling the button was rendered with — two copies meant the
+    // button quietly renamed itself the first time a reader pressed it.
+    ariaLabel: sessionCopyAriaLabel(id),
     okText: SESSION_COPY_OK,
     failText: SESSION_COPY_FAIL,
   };
@@ -1751,7 +1775,10 @@ function articleHeadHtml(m: WikiListing, provenance?: ProvenancePayload): string
   // The meta row closes first: the strip is a BLOCK under it (the Jira row plus
   // one line of cost), not another chip competing with the tags and dates.
   head += "</div>";
-  if (provenance) head += provStripHtml(provenance);
+  // `jiraKeys` is the facet's membership set, and the strip's key is a SECOND
+  // way into that facet — so the strip renders a control only for a key the
+  // facet can actually serve (see `provStripHtml`).
+  if (provenance) head += provStripHtml(provenance, jiraKeys);
   head += "</div>";
   return head;
 }

@@ -593,18 +593,32 @@ with campaign 2, and a half-built control is worse than none.
 Every string and every fragment of markup lives in **one pure module** — no DOM,
 no import from `wiki-browser.ts` — because that entrypoint touches `document` at
 import time and `bun test` cannot load it, so anything shaped there is provable
-only through Playwright. `costLine` has **seven outcomes**, enumerated in a table
+only through Playwright. `costLine` has **eight outcomes**, enumerated in a table
 test, and the pair that must never collapse is *asked and unreachable*
 ("claude-usage unreachable, cost unknown") against *never asked and unconfigured*
 ("no claude-usage on this host") — plus the third the server's `asked` flag exists
 for, a page whose every id is damaged ("N session refs — none could be looked
-up"). `backfilled` appends `· inferred from history YYYY-MM-DD` to whichever line
+up"), and the fourth degrade the "over M of N" line used to swallow: a reachable
+ledger that priced NOTHING says "the ledger holds none of them" rather than
+`cost $0.00 in total over 0 of 1`, which is "we don't know" spelled as "it was
+free". `backfilled` appends `· inferred from history YYYY-MM-DD` to whichever line
 was built, degraded ones included: it qualifies the LIST, not the money. The bare
 reasons come from the server's own `bareChipReason`, imported rather than
 re-derived, and each of the three gets its own sentence — `missing` is a session
-that is gone, `unresolved` one nobody asked about. A bare chip carries the id and
-its reason and NO `CLAUDE_USAGE_PUBLIC_URL` drill-down: for `missing`/`invalid`
-that link is a dead end by construction.
+that is gone, `unresolved` one nobody asked about. **`unresolved` splits on
+`ledger.configured`** (`bareChipCopy`), for the reason `costLine`'s fourth and
+fifth rows split: on a host with no `CLAUDE_USAGE_URL` the default sentence
+blames a service that does not exist, under a strip already saying so. A bare
+chip carries the id and its reason and NO `CLAUDE_USAGE_PUBLIC_URL` drill-down:
+for `missing`/`invalid` that link is a dead end by construction — the SERVER
+builds the url for every chip and the client decides per chip.
+
+The rail's empty state is decided on the PAGE rows alone (`railListHtml`): the
+Sessions block is about the OPEN PAGE and "No pages match." is about the FILTER,
+so composing them into one buffer let a stamped page answer a facet matching
+nothing with session rows and no empty state at all. **The explainer path renders
+neither half** — `loadExplainer` sets `currentProvenance = null`, since a
+standalone `.html` carries no frontmatter to stamp.
 
 The rail rows are a PREFIX to the page list, not `buildRail` entries — that
 function's model is pages and its invariant is one row per page, while a session
@@ -619,13 +633,23 @@ the tailnet-over-plain-HTTP deployment `navigator.clipboard` is absent and the
 state, a chip row inside the Filters disclosure, `resolveJiraParam` /
 `jiraFilterAfterListing` / `searchWithJira` / `urlWithJira` beside their project
 counterparts in `wiki-filter.ts`, and the same rule that a key this wiki does not
-know is cleared AND dropped from the URL. Two differences: a page has ONE project
-and SEVERAL Jira keys, so `filterPages` matches list membership; and the
+know is cleared AND dropped from the URL. Three differences: a page has ONE
+project and SEVERAL Jira keys, so `filterPages` matches list membership; the
 whole-wiki gate reads the LISTING PAYLOAD's `jira` map rather than the pages,
 because that map is shape-filtered server-side while the store deliberately keeps
 a typo on the page's own row — counting off the pages would render a chip whose
-only behaviour, once clicked, is a 400 from the reverse-lookup route. The strip's
-Jira key sets the same facet. Smoked end to end in `e2e/wiki-provenance.spec.ts`,
+only behaviour, once clicked, is a 400 from the reverse-lookup route; and
+`resolveJiraParam` UPPER-CASES before its membership test (`resolveProjectParam`
+matches exactly), because the store normalizes every key and a shared link
+routinely carries `?jira=melosys-8045`.
+
+A Jira key has **two behaviours in the reader, and they are different controls**:
+the rail search box JUMPS to the pages serving a key typed into it
+(`e2e/wiki-rail-pins.spec.ts`), while the chip row and the strip's key FILTER the
+listing through `?jira=`. The strip's key sets that facet — and renders as a
+control at all only for a key the facet map holds, with `applyJiraFilter`
+refusing anything `resolveJiraParam` would drop, so no entry point can set a
+filter a reload would silently lose. Smoked end to end in `e2e/wiki-provenance.spec.ts`,
 whose `node:http` stub plays claude-usage and prices ONE of the shape fixture's
 two sessions, which is what drives the `missing` chip and the "over M of N" line
 in a real browser.

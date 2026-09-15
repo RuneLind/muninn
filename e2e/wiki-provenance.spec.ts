@@ -3,7 +3,7 @@
  * facet, end to end.
  *
  * Placement C: the strip under the title is the SUMMARY (the Jira row plus one
- * line of cost), the rail panel is the DETAIL (one row per session). Four things
+ * line of cost), the rail panel is the DETAIL (one row per session). Six things
  * only a real browser against a real server can answer, and every one of them is
  * a degrade:
  *
@@ -21,8 +21,16 @@
  *  4. **`?jira=` as URL state**, the `?project=` recipe: chip click → the param
  *     written in place, a reload restoring the active chip, an unknown key
  *     clearing itself and leaving the whole wiki.
+ *  5. **A malformed `jira:` value is not a control.** `mixed.md` carries one the
+ *     store keeps on the page's own row and `jiraCounts` shape-filters out of
+ *     the facet map — the one state where the strip and the facet disagree about
+ *     what a key is, and only a real listing produces it.
+ *  6. **The empty state survives a Sessions section.** Two ANDed facets matching
+ *     nothing, under a stamped page: "No pages match." is about the FILTER and
+ *     the session rows are about the OPEN PAGE, and neither may stand in for the
+ *     other.
  *
- * The clipboard is the fifth: the session id is COPYABLE TEXT because the
+ * The clipboard is the seventh: the session id is COPYABLE TEXT because the
  * browser cannot reach claude-usage at all (tailnet viewers, mixed content under
  * `tailscale serve`), so the copy button is the feature rather than a
  * convenience, and `navigator.clipboard` only works under granted permissions.
@@ -69,6 +77,10 @@ const SHAPE_REL = "shape.md";
 const DAMAGED_REL = "damaged.md";
 const PLAIN_REL = "plain.md";
 const OTHER_REL = "other.md";
+const MIXED_REL = "mixed.md";
+
+/** How many pages the temp wiki holds — every "the whole wiki" assertion below. */
+const ALL_PAGES = 5;
 
 const DAMAGED = [
   "---",
@@ -105,6 +117,34 @@ const OTHER = [
   "# Other issue",
   "",
   "A page serving a different issue, so the facet has two chips.",
+  "",
+].join("\n");
+
+/**
+ * The mixed-key page: one good key, one the store UPPER-CASES into a good key,
+ * and one that cannot be a Jira key at all.
+ *
+ * `jiraCounts` shape-filters the listing's `jira` map while the store keeps every
+ * value on the page's own row (`normalizeJiraKey` = trim + uppercase, nothing
+ * else), so `not-a-key` reaches the strip as `NOT-A-KEY` and is the one value
+ * the facet can never serve. Its own keys, deliberately not the two above: this
+ * page must not move the other tests' chip counts.
+ */
+const MIXED = [
+  "---",
+  "type: plan",
+  "title: Mixed keys",
+  "jira: [MELOSYS-9001, melosys-9002, not-a-key]",
+  // The ONE page carrying this tag, and it carries none of shape.md's keys — so
+  // `?jira=MELOSYS-8045` AND `#mixedonly` is a pair of live controls that can
+  // match nothing. (The type facet cannot do it: a `WIKI_EXTRA` wiki declares no
+  // ontology, so every page here resolves to `note`.)
+  "tags: [mixedonly]",
+  "---",
+  "",
+  "# Mixed keys",
+  "",
+  "Two real keys and one that is not a key.",
   "",
 ].join("\n");
 
@@ -164,6 +204,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, DAMAGED_REL), DAMAGED, "utf8");
   await writeFile(path.join(root, PLAIN_REL), PLAIN, "utf8");
   await writeFile(path.join(root, OTHER_REL), OTHER, "utf8");
+  await writeFile(path.join(root, MIXED_REL), MIXED, "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -229,7 +270,12 @@ test.describe("Wiki reader: provenance", () => {
     await expect(cost).not.toContainText("unreachable");
 
     // `prs` rides the payload and renders NOTHING: the PR row ships with
-    // campaign 2, and a half-built control is worse than none.
+    // campaign 2, and a half-built control is worse than none. The text tests
+    // below can only miss a pill whose label was shortened, so the LOAD-BEARING
+    // pin is the anchor count: a PR row's whole point is a github.com link, and
+    // there is none in either half of the feature.
+    await expect(strip.locator('a[href*="github.com"]')).toHaveCount(0);
+    await expect(page.locator('#wikiList a[href*="github.com"]')).toHaveCount(0);
     await expect(strip).not.toContainText("melosys-api");
     await expect(strip).not.toContainText("1234");
   });
@@ -326,7 +372,7 @@ test.describe("Wiki reader: provenance", () => {
 
   test("the Jira facet filters the list and round-trips through the URL", async ({ page }) => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
-    await expect(page.locator(".wiki-list-item")).toHaveCount(4);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(ALL_PAGES);
     // The facet lives inside the Filters disclosure, closed until a filter is
     // set — the `project` row's own placement.
     await page.locator("#wikiFilters summary").click();
@@ -353,13 +399,13 @@ test.describe("Wiki reader: provenance", () => {
     // chip is on screen without a second summary click.)
     await expect(page.locator("#wikiFilters")).toHaveAttribute("open", "");
     await page.locator('#jiraChips .wiki-chip[data-jira="MELOSYS-8045"]').click();
-    await expect(page.locator(".wiki-list-item")).toHaveCount(4);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(ALL_PAGES);
     await expect.poll(() => new URL(page.url()).searchParams.get("jira")).toBeNull();
   });
 
   test("a key this wiki does not know opens the whole wiki and drops the param", async ({ page }) => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&jira=NOPE`);
-    await expect(page.locator(".wiki-list-item")).toHaveCount(4);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(ALL_PAGES);
     // No filter survived, so nothing auto-opened the stack — open it by hand to
     // see that the row is there and nothing in it is highlighted.
     await page.locator("#wikiFilters summary").click();
@@ -374,5 +420,82 @@ test.describe("Wiki reader: provenance", () => {
     await expect.poll(() => new URL(page.url()).searchParams.get("jira")).toBe("MELOSYS-8045");
     // Written IN PLACE: the article being read must survive a chip click.
     await expect.poll(() => new URL(page.url()).searchParams.get("relPath")).toBe(SHAPE_REL);
+  });
+
+  /**
+   * The strip may only offer a filter the facet can serve.
+   *
+   * The store keeps every frontmatter value on the page's own row (uppercased,
+   * nothing else) while the listing's `jira` map is shape-filtered, so a
+   * malformed key used to render as a live button whose click set a filter
+   * `resolveJiraParam` drops: the list narrowed, the facet chip rendered
+   * `NOT-A-KEY 0` beside it, every link built while it was live carried a dead
+   * param, a reload silently lost it, and the ↗ opened a browse URL for a
+   * non-key.
+   */
+  test("a malformed Jira key on the page is text, not a filter", async ({ page }) => {
+    await open_(page, MIXED_REL);
+    const strip = page.locator(".wiki-prov-strip");
+    await expect(strip).toBeVisible();
+
+    // The two real keys are controls — `melosys-9002` included, which the store
+    // normalized on the way in.
+    const keys = strip.locator("[data-prov-jira]");
+    await expect(keys).toHaveCount(2);
+    await expect(keys.nth(0)).toHaveText("MELOSYS-9001");
+    await expect(keys.nth(1)).toHaveText("MELOSYS-9002");
+
+    // The third is SHOWN — it is really on the page, and hiding it would hide
+    // the frontmatter damage — but it is neither a filter nor a Jira link.
+    await expect(strip).toContainText("NOT-A-KEY");
+    await expect(strip.locator('[data-prov-jira="NOT-A-KEY"]')).toHaveCount(0);
+    await expect(strip.locator('a[href*="NOT-A-KEY"]')).toHaveCount(0);
+    await expect(strip.locator(".wiki-prov-jira-inert")).toHaveCount(1);
+    // It is not even a button, so there is nothing to press.
+    await expect(strip.locator("button")).toHaveCount(2);
+
+    // And the working key's count IS the rows its click leaves.
+    await keys.nth(0).click();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(1);
+    await expect(page.locator(`.wiki-list-item[data-relpath="${MIXED_REL}"]`)).toHaveCount(1);
+    await expect.poll(() => new URL(page.url()).searchParams.get("jira")).toBe("MELOSYS-9001");
+    await expect(page.locator('#jiraChips .wiki-chip[data-jira="MELOSYS-9001"]')).toHaveText(
+      "MELOSYS-9001 1",
+    );
+  });
+
+  /**
+   * "No pages match." is about the FILTER; the Sessions block is about the OPEN
+   * PAGE. Composing them into one buffer made the empty state the `||` fallback
+   * of a string the Sessions block had already filled, so a stamped page
+   * answered a facet matching nothing with session rows and no answer at all.
+   *
+   * Two ANDed facets are what produce zero rows from live controls: `shape.md` is
+   * the only page carrying MELOSYS-8045, and `mixed.md` is the only page tagged
+   * `mixedonly`, so the intersection is empty. Jira FIRST — the tag row counts
+   * within the domain/type scope and not within the Jira one, so its chip is
+   * there either way, while a Jira row scoped to nothing would hide itself.
+   * Deliberately not the TYPE facet: a `WIKI_EXTRA` wiki declares no ontology,
+   * so every page here resolves to `note` and that chip narrows nothing.
+   */
+  test("a facet matching nothing says so, even with a Sessions section on screen", async ({
+    page,
+  }) => {
+    await open_(page, SHAPE_REL);
+    await expect(page.locator(".wiki-sess-row")).toHaveCount(2);
+
+    await page.locator(".wiki-prov-jira-key").click();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(1);
+    await page.locator('#tagChips .wiki-chip[data-tag="mixedonly"]').click();
+
+    await expect(page.locator(".wiki-list-item")).toHaveCount(0);
+    // Scoped to the list: `.wiki-conn-empty` is the shared empty-row class and
+    // the Connections panel renders its own, hidden, siblings.
+    const empty = page.locator("#wikiList .wiki-conn-empty");
+    await expect(empty).toBeVisible();
+    await expect(empty).toHaveText("No pages match.");
+    // The open page's sessions are still there — they were never the answer to
+    // the filter, and dropping them would be the opposite defect.
+    await expect(page.locator(".wiki-sess-row")).toHaveCount(2);
   });
 });

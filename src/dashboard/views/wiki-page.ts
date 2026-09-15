@@ -857,8 +857,23 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-prov-jira-link { color: var(--accent-light); text-decoration: none; font-size: 10.5px; }
     .wiki-prov-jira-link:hover { text-decoration: underline; }
+    /* A key the facet cannot serve renders as text, not as a chip: no accent
+       border to promise a control, no pointer, and a title saying why. */
+    .wiki-prov-jira-inert {
+      border-color: var(--border-secondary);
+      background: none;
+    }
+    .wiki-prov-jira-inert:hover { background: none; }
+    .wiki-prov-jira-inert .wiki-prov-jira-key { color: var(--text-muted); cursor: default; }
     .wiki-prov-known { color: var(--status-success); font-size: 10px; }
-    .wiki-prov-cost { font-size: 11.5px; color: var(--text-dim); }
+    /* Contrast, measured: --text-faint is 2.50:1 dark / 2.62:1 light and
+       --text-dim 3.24/3.74 at these sizes, both under the 4.5:1 floor and the
+       first under even 3:1. --text-muted measures 4.94/5.26, which is what the
+       session title beside them already uses — so every line a reader has to
+       READ (the cost, the date, the host, a bare chip's reason, the id, the copy
+       control) sits there. Only the provider glyph stays dimmer: it is a mark
+       with a title attribute, not text. */
+    .wiki-prov-cost { font-size: 11.5px; color: var(--text-muted); }
     /* One rail row per session. A three-line block rather than a single line:
        the rail is narrow and resizable, and a date + host + price + title + id
        on one line truncates whichever of them the reader came for. */
@@ -868,31 +883,33 @@ export async function renderWikiPage(opts?: {
       border-left: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
       margin: 0 0 2px 8px;
     }
-    /* A bare chip is a session with no money and no title — quieter, and the
-       muted rule below is what keeps its reason from reading as a price. */
+    /* A bare chip is a session with no money and no title. The ONE thing it says
+       is its reason, so the border is the whole difference — the reason renders
+       at the same weight as everything else here (see the contrast note above),
+       because a sentence nobody can read is a row with nothing on it. */
     .wiki-sess-bare { border-left-color: var(--border-secondary); }
     .wiki-sess-head { display: flex; align-items: baseline; gap: 6px; font-size: 11px; }
     .wiki-sess-glyph { color: var(--text-dim); }
-    .wiki-sess-date { color: var(--text-dim); }
-    .wiki-sess-host { color: var(--text-faint); }
+    .wiki-sess-date { color: var(--text-muted); }
+    .wiki-sess-host { color: var(--text-muted); }
     .wiki-sess-cost { margin-left: auto; color: var(--text-muted); }
     .wiki-sess-title {
       font-size: 11.5px; color: var(--text-muted); line-height: 1.35;
       overflow-wrap: anywhere;
     }
-    .wiki-sess-reason { font-size: 11px; color: var(--text-faint); line-height: 1.35; }
+    .wiki-sess-reason { font-size: 11px; color: var(--text-muted); line-height: 1.35; }
     .wiki-sess-idrow { display: flex; align-items: center; gap: 5px; }
     /* The id is the drill-down on a host the browser cannot reach, so it is
        selectable text first and a link only where CLAUDE_USAGE_PUBLIC_URL is
        set. Wrapping rather than clipping: a truncated session id is useless. */
     .wiki-sess-id {
       font-family: var(--font-mono, ui-monospace, monospace);
-      font-size: 10px; color: var(--text-faint);
+      font-size: 10px; color: var(--text-muted);
       overflow-wrap: anywhere; user-select: all;
     }
     .wiki-sess-copy {
       border: none; background: none; padding: 0 2px;
-      color: var(--text-dim); font-size: 11px; font-family: inherit; cursor: pointer;
+      color: var(--text-muted); font-size: 11px; font-family: inherit; cursor: pointer;
       flex-shrink: 0;
     }
     .wiki-sess-copy:hover { color: var(--text-primary); }
