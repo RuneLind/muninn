@@ -134,6 +134,11 @@ describe("mapExcerptOf", () => {
     expect(ex).toContain("Nvidia & Chips");
   });
 
+  test("# comment lines inside fenced code are neither sections nor prose", () => {
+    const doc = "# Prompting Guide\n\nLead prose about prompts.\n\n```text\n# Less Effective\nfix the bug\n# More Effective\nfix the null check in auth.ts\n```";
+    expect(mapExcerptOf(doc)).toBe("Lead prose about prompts.");
+  });
+
   test("a single-heading / heading-less doc is just its lead prose (no Sections: prefix)", () => {
     const doc = "# One Topic\n\nA single focused explanation of one idea, no sub-sections.";
     const ex = mapExcerptOf(doc);

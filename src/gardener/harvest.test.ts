@@ -38,6 +38,9 @@ describe("deriveTitle", () => {
   test("falls back to filename stem, stripping date prefix", () => {
     expect(deriveTitle("2026-07-01_context_compaction.md", "no heading here")).toBe("context compaction");
   });
+  test("a # comment inside fenced code is not the title", () => {
+    expect(deriveTitle("2026-07-01_setup_notes.md", "Intro prose.\n\n```bash\n# install the cli\nbun i\n```")).toBe("setup notes");
+  });
 });
 
 describe("harvestDocs", () => {

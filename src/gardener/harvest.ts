@@ -8,6 +8,7 @@
  */
 
 import type { HarvestedDoc, ListedDoc, RawFetchedDoc } from "./types.ts";
+import { stripFencedCode } from "../summaries/transcript-split.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "harvest");
@@ -54,7 +55,7 @@ export function filterWindow(
  * humanized).
  */
 export function deriveTitle(id: string, text: string): string {
-  const headingMatch = text.match(/^#\s+(.+?)\s*$/m);
+  const headingMatch = stripFencedCode(text).match(/^#\s+(.+?)\s*$/m);
   if (headingMatch && headingMatch[1]!.trim()) return headingMatch[1]!.trim();
 
   let stem = id.replace(/\.md$/i, "");

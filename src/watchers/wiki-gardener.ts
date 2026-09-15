@@ -32,6 +32,7 @@ import {
 } from "../db/wiki-proposals.ts";
 import { resolveGardenerConfig, GARDENER_DEFAULTS } from "../gardener/types.ts";
 import { runGardener, type GardenerDeps } from "../gardener/runner.ts";
+import { fetchSummaryDoc } from "../gardener/summary-doc.ts";
 import {
   DRAFT_TIMEOUT_MS,
   runExclusive,
@@ -199,12 +200,7 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
   const name = botConfig.name;
   const collections = (botConfig.wikiCollections ?? []).filter((c) => c && c.trim());
   const seams: SharedGardenerSeams = {
-    fetchDoc: async (collection, id) =>
-      fetchKnowledgeApi(
-        apiUrl,
-        `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
-        { timeoutMs: DOC_FETCH_TIMEOUT_MS },
-      ),
+    fetchDoc: (collection, id) => fetchSummaryDoc(apiUrl, collection, id, DOC_FETCH_TIMEOUT_MS),
     callCluster: async (prompt) => {
       const { result, backend } = await callHaikuWithFallback(prompt, {
         source: "wiki_gardener_cluster",

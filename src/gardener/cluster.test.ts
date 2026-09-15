@@ -285,6 +285,15 @@ describe("excerptOf", () => {
     const text = "---\ntype: concept\n---\n# Heading\n\nThe actual body sentence.";
     expect(excerptOf(text)).toBe("The actual body sentence.");
   });
+
+  test("skips fenced code, whose # comments are not headings", () => {
+    const text = "Lead sentence.\n\n```python\n# a comment\nx = 1\n```\n\nMore prose.";
+    expect(excerptOf(text)).toBe("Lead sentence. More prose.");
+  });
+
+  test("skips an indented line inside fenced code", () => {
+    expect(excerptOf("Lead sentence.\n\n```python\n    x = 1\n```")).toBe("Lead sentence.");
+  });
 });
 
 describe("buildClusterPrompt", () => {

@@ -75,6 +75,20 @@ export function mapProseLines(markdown: string, fn: (line: string, i: number) =>
 }
 
 /**
+ * `markdown` with every fenced code block removed, fence lines included — the
+ * region set {@link mapProseLines} walks. For readers that look for headings or
+ * lead prose: a `# comment` inside a code block is neither.
+ */
+export function stripFencedCode(markdown: string): string {
+  const PROSE = "\u0000";
+  return mapProseLines(markdown, (line) => PROSE + line)
+    .split("\n")
+    .filter((line) => line.startsWith(PROSE))
+    .map((line) => line.slice(PROSE.length))
+    .join("\n");
+}
+
+/**
  * Split at the first level-2 `## Transcript` heading outside fenced code: the
  * summary before it, the transcript after. No heading ⇒ transcript is `null`.
  *

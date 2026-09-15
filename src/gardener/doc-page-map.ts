@@ -17,6 +17,7 @@ import type { Cluster, ClusterDomain, ClusterKind, HarvestedDoc } from "./types.
 import type { WikiIndex } from "../wiki/store.ts";
 import type { ClusterDropEntry, ResolvedCluster } from "./cluster.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
+import { stripFencedCode } from "../summaries/transcript-split.ts";
 import { GARDENER_DEFAULTS } from "./types.ts";
 import { normalizeLabel, resolveTarget } from "./target-resolve.ts";
 import { hasForbiddenBasename } from "./draft.ts";
@@ -96,7 +97,8 @@ export function mappablePages(index: WikiIndex | null | undefined): MappablePage
  * the cluster excerpt for single-topic docs). Capped at {@link maxChars}.
  */
 export function mapExcerptOf(text: string, maxChars = 600): string {
-  const body = stripFrontmatter(text);
+  // Fenced code goes first: a `# comment` in a quoted snippet is not a section.
+  const body = stripFencedCode(stripFrontmatter(text));
   const lines = body
     .split("\n")
     .map((l) => l.trim())

@@ -9,6 +9,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { Config } from "../config.ts";
 import type { Tracer } from "../tracing/index.ts";
 import type { ClusterDropEntry, ClusterDropTally } from "../gardener/cluster.ts";
+import { harvestDocs } from "../gardener/harvest.ts";
 
 const CONFIG = {} as Config;
 
@@ -43,6 +44,33 @@ describe("buildGardenerSeams — searchRelated threading (silent no-op regressio
     const seams = buildGardenerSeams(ctx(["wiki"], tracer));
     expect(typeof seams.callDraft).toBe("function");
     expect(typeof seams.callCluster).toBe("function");
+  });
+});
+
+describe("buildGardenerSeams.fetchDoc — the weekly harvest's body", () => {
+  test("a fenced summary is harvested with its fence and without the transcript appendix", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req) =>
+        new URL(req.url).searchParams.has("raw")
+          ? new Response("---\ntitle: Routing\n---\n\n# Routing\n\n```yaml\nplanning: opus-5\n```\n\n## Transcript\n\nspoken words", {
+              headers: { "content-type": "text/markdown; charset=utf-8" },
+            })
+          : Response.json({ text: "# Routing\n\n## Transcript\n\nspoken words", metadata: { url: "https://youtu.be/r" } }),
+    });
+    try {
+      const seams = buildGardenerSeams({ ...ctx(["wiki"]), apiUrl: `http://127.0.0.1:${server.port}` });
+      const docs = await harvestDocs(
+        ["youtube-summaries"],
+        { listDocs: async () => [{ id: "ai/Routing.md" }], fetchDoc: seams.fetchDoc },
+        { lookbackDays: 14, consumed: new Set(), now: Date.now() },
+      );
+      expect(docs).toHaveLength(1);
+      expect(docs[0]!.text).toContain("```yaml\nplanning: opus-5\n```");
+      expect(docs[0]!.text).not.toContain("spoken words");
+    } finally {
+      server.stop(true);
+    }
   });
 });
 

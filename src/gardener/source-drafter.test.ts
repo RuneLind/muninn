@@ -131,6 +131,13 @@ describe("buildSourceDraftPrompt", () => {
     expect(prompt).toContain("BEGIN SOURCE SUMMARY");
     expect(prompt).toContain('"type:" MUST be exactly "source"');
   });
+
+  test("tells the drafter to carry quoted material verbatim in fences, with a size bound", () => {
+    const prompt = buildSourceDraftPrompt({ input: baseDeps().input, today: "2026-09-15", existingPages: [] });
+    expect(prompt).toContain("VERBATIM MATERIAL");
+    expect(prompt).toContain("up to 40 lines is copied whole");
+    expect(prompt).toContain("its lead says it is an excerpt");
+  });
 });
 
 describe("draftSourcePage", () => {

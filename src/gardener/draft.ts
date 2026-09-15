@@ -123,7 +123,11 @@ export function buildDraftPrompt(opts: {
       let text = d.text.trim();
       if (text.length > MAX_DOC_CHARS) {
         const cut = text.lastIndexOf(" ", MAX_DOC_CHARS);
-        text = `${text.slice(0, cut > 0 ? cut : MAX_DOC_CHARS)}\n\n[… truncated for length]`;
+        text = text.slice(0, cut > 0 ? cut : MAX_DOC_CHARS);
+        // Harvested summaries carry their fenced code; a cut inside a block would
+        // leave it open over the next summary's header.
+        const open = openFenceMarker(text);
+        text = `${text}${open ? `\n${open}` : ""}\n\n[… truncated for length]`;
         log.info("Draft prompt for {topic}: truncated doc {docId} to {cap} chars", {
           topic: cluster.topicKey,
           docId: d.key,
@@ -591,6 +595,18 @@ export function normalizeDraftOutput(raw: string): string {
   }
 
   return text;
+}
+
+/** The marker of a fenced block still open at the end of `text`, or null — `mapProseLines`' close rule. */
+function openFenceMarker(text: string): string | null {
+  let fence: string | null = null;
+  for (const line of text.split("\n")) {
+    const m = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (!m) continue;
+    if (fence === null) fence = m[1]!;
+    else if (m[1]!.charAt(0) === fence.charAt(0) && m[1]!.length >= fence.length) fence = null;
+  }
+  return fence;
 }
 
 /** Normalize a relative path to posix separators, no leading `./`. */
