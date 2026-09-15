@@ -51,6 +51,7 @@ const INERT: WikiFilters = {
   status: "",
   followups: "",
   project: "",
+  jira: "",
 };
 
 describe("storage keys", () => {

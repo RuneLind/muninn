@@ -161,6 +161,11 @@ export interface WikiFilters {
    *  see `resolveProjectParam` for what happens to a value this wiki doesn't
    *  know. */
   project: string;
+  /** Exact `jira` key, "" for all — the `project` twin in every respect: URL
+   *  state (`?jira=`), matched exactly against the page's own normalized keys,
+   *  and cleared when the listing does not know the value. A page serves several
+   *  issues, so unlike `project` this matches membership of a LIST. */
+  jira: string;
 }
 
 /**
@@ -837,6 +842,10 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
     // `netgate-monitoring` must never also select a hypothetical
     // `netgate-monitoring-v2`.
     if (filters.project && p.project !== filters.project) return false;
+    // Membership of a LIST, and exact: the store normalizes every key to trimmed
+    // UPPERCASE, so a page's spelling and the chip's cannot disagree and a
+    // case-folded compare would only ever admit a spelling no chip carries.
+    if (filters.jira && (p.jira ?? []).indexOf(filters.jira) === -1) return false;
     if (!q) return true;
     if (p.title.toLowerCase().indexOf(q) !== -1) return true;
     if (displayTitleOf(p).toLowerCase().indexOf(q) !== -1) return true;
@@ -1131,9 +1140,15 @@ export function urlWithProject(url: string, project: string): string {
  * the rail is still narrowed by, so the pushed entry (and any reload or share of
  * it) describes a screen nobody is looking at.
  */
-export function articleUrl(wiki: string, key: "page" | "relPath", value: string, project: string): string {
+export function articleUrl(
+  wiki: string,
+  key: "page" | "relPath",
+  value: string,
+  project: string,
+  jira = "",
+): string {
   const w = wiki ? "wiki=" + encodeURIComponent(wiki) + "&" : "";
-  return urlWithProject("/wiki?" + w + key + "=" + encodeURIComponent(value), project);
+  return urlWithJira(urlWithProject("/wiki?" + w + key + "=" + encodeURIComponent(value), project), jira);
 }
 
 /**
@@ -1189,6 +1204,121 @@ export function searchWithProject(search: string, project: string): string {
   else params.delete(PROJECT_PARAM);
   const q = params.toString();
   return q ? "?" + q : "";
+}
+
+// ── The Jira facet ───────────────────────────────────────────────────────────
+// The `project` facet's twin, and written as a deliberate mirror rather than a
+// generalisation of it: the two axes differ in the one place that matters — a
+// page has ONE project and SEVERAL Jira keys — and a shared implementation
+// parameterised over "the field" would have to carry that difference anyway,
+// while making both harder to read. Everything else (URL state, the
+// boot-vs-later adopt, the drop-what-the-wiki-doesn't-know rule) is the same
+// decision for the same reason, and the doc comments there are the authority.
+
+/** Query param naming the active Jira filter. */
+export const JIRA_PARAM = "jira";
+
+/**
+ * The Jira filter a `?jira=` value should actually produce, given the listing's
+ * own `jira` count map — `resolveProjectParam`'s twin, including the own-keys
+ * test that keeps `?jira=toString` off `Object.prototype`.
+ *
+ * Case is folded UP before the membership test, and only here: the store
+ * normalizes every key it indexes to trimmed uppercase, while a shared link is
+ * routinely `?jira=melosys-8045` (the reverse-lookup route normalizes for the
+ * same reason). A value the listing does not know still answers `""`, so a stale
+ * link opens the whole wiki with the param dropped.
+ */
+export function resolveJiraParam(
+  value: string | null | undefined,
+  jira: Record<string, number> | null | undefined,
+): string {
+  const v = (value ?? "").trim().toUpperCase();
+  if (!v || !jira) return "";
+  return Object.prototype.hasOwnProperty.call(jira, v) && jira[v] ? v : "";
+}
+
+/** Append `?jira=`/`&jira=` to a URL known to carry none. `""` leaves it
+ *  untouched — `urlWithProject`'s twin. */
+export function urlWithJira(url: string, jira: string): string {
+  if (!jira) return url;
+  return url + (url.indexOf("?") === -1 ? "?" : "&") + JIRA_PARAM + "=" + encodeURIComponent(jira);
+}
+
+/** Must the address bar's jira param be rewritten? `projectParamNeedsRewrite`'s
+ *  twin, blank-param clause included. */
+export function jiraParamNeedsRewrite(search: string, jira: string): boolean {
+  const raw = new URLSearchParams(search).get(JIRA_PARAM);
+  if (raw === null) return jira !== "";
+  if (jira === "") return true;
+  return raw !== jira;
+}
+
+/** The jira filter a freshly landed listing should leave in place —
+ *  `projectFilterAfterListing`'s twin: the address bar leads at BOOT, the
+ *  reader's own filter is merely re-validated on every later listing. */
+export function jiraFilterAfterListing(
+  boot: boolean,
+  rawParam: string | null | undefined,
+  current: string,
+  jira: Record<string, number> | null | undefined,
+): string {
+  return resolveJiraParam(boot ? rawParam : current, jira);
+}
+
+/** `location.search` with the jira param set (or removed), every OTHER param
+ *  preserved — `searchWithProject`'s twin, written in PLACE for the same reason:
+ *  the chip row is on screen while an article is open. */
+export function searchWithJira(search: string, jira: string): string {
+  const params = new URLSearchParams(search);
+  if (jira) params.set(JIRA_PARAM, jira);
+  else params.delete(JIRA_PARAM);
+  const q = params.toString();
+  return q ? "?" + q : "";
+}
+
+/**
+ * Count pages per Jira key within the active domain + type + folder scope —
+ * `projectCounts`' twin, with one extra argument and one extra rule.
+ *
+ * `known` is the listing payload's own `jira` map, and a key not in it is NOT
+ * counted. That map is shape-filtered server-side (`jiraCounts` keeps only
+ * `^[A-Z][A-Z0-9]*-[0-9]+$`) while the store deliberately keeps a typo on the
+ * page's own row — so counting straight off the pages would render a chip for a
+ * malformed key whose only behaviour, once clicked, is a 400 from the
+ * reverse-lookup route. Membership and counts therefore come from the same set,
+ * exactly as `projects` is both the chip row's gate and `resolveJiraParam`'s
+ * membership test.
+ */
+export function jiraChipCounts(
+  pages: WikiListing[],
+  known: Record<string, number> | null | undefined,
+  domain: string,
+  type: string,
+  folder: string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  if (!known) return counts;
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if (folder && pageFolder(p) !== folder) return;
+    (p.jira ?? []).forEach((key) => {
+      if (!Object.prototype.hasOwnProperty.call(known, key)) return;
+      counts[key] = (counts[key] || 0) + 1;
+    });
+  });
+  return counts;
+}
+
+/** Whether to render the Jira chip row at all — the whole-wiki gate.
+ *
+ *  Unlike `projectFacetVisible` this reads the PAYLOAD's map rather than the
+ *  pages, because that is the contract the server states: `{}` on a wiki nothing
+ *  has stamped is how the client knows to render no facet, and the pages'
+ *  own `jira` arrays include keys the map has filtered out by shape. */
+export function jiraFacetVisible(known: Record<string, number> | null | undefined): boolean {
+  return !!known && Object.keys(known).length > 0;
 }
 
 /**

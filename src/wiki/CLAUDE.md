@@ -578,6 +578,58 @@ a 15 s timeout and nothing remembered that it had just expired, so a down huginn
 cost every caller 15 s — and on this path that is once per stamped page open.
 Short deliberately: the answer it suppresses is a degrade rather than a result.
 
+### The client (`views/components/wiki-provenance-view.ts`)
+
+**Placement C: the strip is the SUMMARY, the rail panel is the DETAIL.** Under
+the page title, below `.wiki-meta-row`, a `.wiki-prov-strip` carries the Jira row
+and ONE line of cost; in the left rail, above the page-list sections, a
+`Sessions` section carries one row per chip. Both are rendered only from the
+single-page payload's `provenance` key — absent on an unstamped page, which is
+the one gate, and cleared at the START of every navigation rather than when the
+next response lands, so a slow load cannot leave the previous page's sessions
+standing over the new article. **`prs` renders nothing at all**: the PR row ships
+with campaign 2, and a half-built control is worse than none.
+
+Every string and every fragment of markup lives in **one pure module** — no DOM,
+no import from `wiki-browser.ts` — because that entrypoint touches `document` at
+import time and `bun test` cannot load it, so anything shaped there is provable
+only through Playwright. `costLine` has **seven outcomes**, enumerated in a table
+test, and the pair that must never collapse is *asked and unreachable*
+("claude-usage unreachable, cost unknown") against *never asked and unconfigured*
+("no claude-usage on this host") — plus the third the server's `asked` flag exists
+for, a page whose every id is damaged ("N session refs — none could be looked
+up"). `backfilled` appends `· inferred from history YYYY-MM-DD` to whichever line
+was built, degraded ones included: it qualifies the LIST, not the money. The bare
+reasons come from the server's own `bareChipReason`, imported rather than
+re-derived, and each of the three gets its own sentence — `missing` is a session
+that is gone, `unresolved` one nobody asked about. A bare chip carries the id and
+its reason and NO `CLAUDE_USAGE_PUBLIC_URL` drill-down: for `missing`/`invalid`
+that link is a dead end by construction.
+
+The rail rows are a PREFIX to the page list, not `buildRail` entries — that
+function's model is pages and its invariant is one row per page, while a session
+carries no `relPath`. They are hidden under a search query (through
+`railSectionsVisible`, so the Jira-key jump keeps the head of the rail) and each
+row's ⧉ copies the bare id through the shared `copyText`/`flashCopyResult` pair:
+the browser cannot reach claude-usage, so copyable text IS the drill-down, and on
+the tailnet-over-plain-HTTP deployment `navigator.clipboard` is absent and the
+`execCommand` fallback is the only path.
+
+**The Jira facet** is the `project` facet's twin, mirror for mirror — `?jira=` URL
+state, a chip row inside the Filters disclosure, `resolveJiraParam` /
+`jiraFilterAfterListing` / `searchWithJira` / `urlWithJira` beside their project
+counterparts in `wiki-filter.ts`, and the same rule that a key this wiki does not
+know is cleared AND dropped from the URL. Two differences: a page has ONE project
+and SEVERAL Jira keys, so `filterPages` matches list membership; and the
+whole-wiki gate reads the LISTING PAYLOAD's `jira` map rather than the pages,
+because that map is shape-filtered server-side while the store deliberately keeps
+a typo on the page's own row — counting off the pages would render a chip whose
+only behaviour, once clicked, is a 400 from the reverse-lookup route. The strip's
+Jira key sets the same facet. Smoked end to end in `e2e/wiki-provenance.spec.ts`,
+whose `node:http` stub plays claude-usage and prices ONE of the shape fixture's
+two sessions, which is what drives the `missing` chip and the "over M of N" line
+in a real browser.
+
 ### The cross-process lockfile (`lockfile.ts`)
 
 `runWikiWriteExclusive` serializes muninn's own writers against each other. It

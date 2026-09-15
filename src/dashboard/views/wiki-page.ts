@@ -828,6 +828,76 @@ export async function renderWikiPage(opts?: {
       transition: all 0.15s;
     }
     .wiki-project-hub:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+    /* ── Provenance ──────────────────────────────────────────────────────
+       Placement C: the strip under the title is the SUMMARY (Jira row + one
+       line of cost), the rail's Sessions section is the DETAIL. Both are
+       secondary to the article, so everything here sits at --text-dim or
+       quieter and takes its colour from the page's own tokens — no literal
+       hex, so both themes follow the same declarations. */
+    .wiki-prov-strip {
+      display: flex; flex-direction: column; gap: 4px;
+      margin-top: 8px; padding-top: 7px;
+      border-top: 1px solid var(--border-primary);
+    }
+    .wiki-prov-jira-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    /* The key and its ↗ read as ONE chip: the key filters the list, the arrow
+       opens Jira. Shaped like .wiki-project-hub — it sets a facet, so it must
+       not read like the neutral .wiki-tag beside it. */
+    .wiki-prov-jira {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 8px; border-radius: 999px;
+      border: 1px solid var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      font-size: 11px;
+    }
+    .wiki-prov-jira:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+    .wiki-prov-jira-key {
+      border: none; background: none; padding: 0;
+      color: var(--accent-light); font-size: 11px; font-family: inherit; cursor: pointer;
+    }
+    .wiki-prov-jira-link { color: var(--accent-light); text-decoration: none; font-size: 10.5px; }
+    .wiki-prov-jira-link:hover { text-decoration: underline; }
+    .wiki-prov-known { color: var(--status-success); font-size: 10px; }
+    .wiki-prov-cost { font-size: 11.5px; color: var(--text-dim); }
+    /* One rail row per session. A three-line block rather than a single line:
+       the rail is narrow and resizable, and a date + host + price + title + id
+       on one line truncates whichever of them the reader came for. */
+    .wiki-sess-row {
+      display: flex; flex-direction: column; gap: 2px;
+      padding: 5px 10px 6px;
+      border-left: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+      margin: 0 0 2px 8px;
+    }
+    /* A bare chip is a session with no money and no title — quieter, and the
+       muted rule below is what keeps its reason from reading as a price. */
+    .wiki-sess-bare { border-left-color: var(--border-secondary); }
+    .wiki-sess-head { display: flex; align-items: baseline; gap: 6px; font-size: 11px; }
+    .wiki-sess-glyph { color: var(--text-dim); }
+    .wiki-sess-date { color: var(--text-dim); }
+    .wiki-sess-host { color: var(--text-faint); }
+    .wiki-sess-cost { margin-left: auto; color: var(--text-muted); }
+    .wiki-sess-title {
+      font-size: 11.5px; color: var(--text-muted); line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .wiki-sess-reason { font-size: 11px; color: var(--text-faint); line-height: 1.35; }
+    .wiki-sess-idrow { display: flex; align-items: center; gap: 5px; }
+    /* The id is the drill-down on a host the browser cannot reach, so it is
+       selectable text first and a link only where CLAUDE_USAGE_PUBLIC_URL is
+       set. Wrapping rather than clipping: a truncated session id is useless. */
+    .wiki-sess-id {
+      font-family: var(--font-mono, ui-monospace, monospace);
+      font-size: 10px; color: var(--text-faint);
+      overflow-wrap: anywhere; user-select: all;
+    }
+    .wiki-sess-copy {
+      border: none; background: none; padding: 0 2px;
+      color: var(--text-dim); font-size: 11px; font-family: inherit; cursor: pointer;
+      flex-shrink: 0;
+    }
+    .wiki-sess-copy:hover { color: var(--text-primary); }
+    .wiki-sess-link { color: var(--status-info); text-decoration: none; font-size: 11px; flex-shrink: 0; }
+    .wiki-sess-link:hover { text-decoration: underline; }
     .wiki-dates { font-size: 11.5px; color: var(--text-dim); }
     .wiki-source-url { font-size: 11.5px; color: var(--status-info); text-decoration: none; }
     .wiki-source-url:hover { text-decoration: underline; }
@@ -1526,6 +1596,9 @@ export async function renderWikiPage(opts?: {
                  .wiki-reader.json declares a project rule that resolved at least
                  one page. -->
             <div class="wiki-chip-row" id="projectChips" style="display:none"></div>
+            <!-- Jira facet — populated (and un-hidden) only on wikis the
+                 claude-usage stamper has written a jira: key to. -->
+            <div class="wiki-chip-row" id="jiraChips" style="display:none"></div>
             <div class="wiki-chip-row" id="tagChips"></div>
           </div>
         </details>

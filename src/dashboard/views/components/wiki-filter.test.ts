@@ -6,6 +6,14 @@ import {
   connectionTypeOrder,
   facetKeys,
   filterPages,
+  jiraChipCounts,
+  jiraFacetVisible,
+  jiraFilterAfterListing,
+  JIRA_PARAM,
+  jiraParamNeedsRewrite,
+  resolveJiraParam,
+  searchWithJira,
+  urlWithJira,
   folderCounts,
   FUTURE_DATE_SKEW_MS,
   followupCount,
@@ -77,6 +85,7 @@ const NO_FILTER: WikiFilters = {
   status: "",
   followups: "",
   project: "",
+  jira: "",
 };
 
 const PAGES: WikiListing[] = [
@@ -1338,4 +1347,124 @@ test("projectFilterAfterListing adopts the URL at boot and only re-validates lat
   expect(projectFilterAfterListing(false, null, "quill", { "pomme-core": 3 })).toBe("");
   expect(projectFilterAfterListing(false, null, "quill", {})).toBe("");
   expect(projectFilterAfterListing(false, null, "", projects)).toBe("");
+});
+
+// ── The Jira facet (the `project` twin) ──────────────────────────────────────
+
+test("filterPages matches a jira key against the page's OWN list, exactly", () => {
+  const pages = [
+    page({ name: "a", jira: ["MELOSYS-8045", "MELOSYS-1"] }),
+    page({ name: "b", jira: ["MELOSYS-1"] }),
+    page({ name: "c" }),
+  ];
+  const f = { ...NO_FILTER };
+  expect(filterPages(pages, { ...f, jira: "MELOSYS-8045" }).map((p) => p.name)).toEqual(["a"]);
+  // Membership of a LIST, not equality with one value.
+  expect(filterPages(pages, { ...f, jira: "MELOSYS-1" }).map((p) => p.name)).toEqual(["a", "b"]);
+  // A page carrying no `jira` at all is simply not a member.
+  expect(filterPages(pages, { ...f, jira: "NOPE-1" })).toEqual([]);
+  // Exact, never a prefix: `MELOSYS-1` must not also select `MELOSYS-10`.
+  expect(
+    filterPages([page({ name: "d", jira: ["MELOSYS-10"] })], { ...f, jira: "MELOSYS-1" }),
+  ).toEqual([]);
+  // No filter ⇒ every page, unchanged.
+  expect(filterPages(pages, f).length).toBe(3);
+});
+
+test("jiraFacetVisible gates on the PAYLOAD's map, not on the pages", () => {
+  // The server's contract: `{}` on a wiki nothing has stamped ⇒ no facet at all.
+  expect(jiraFacetVisible({})).toBe(false);
+  expect(jiraFacetVisible(undefined)).toBe(false);
+  expect(jiraFacetVisible(null)).toBe(false);
+  expect(jiraFacetVisible({ "MELOSYS-1": 2 })).toBe(true);
+});
+
+test("jiraChipCounts counts only keys the listing payload knows, within the scope", () => {
+  const pages = [
+    page({ name: "a", domain: "ai", type: "plan", relPath: "plans/a.md", jira: ["MELOSYS-1"] }),
+    page({ name: "b", domain: "ai", type: "note", relPath: "notes/b.md", jira: ["MELOSYS-1", "MELOSYS-2"] }),
+    page({ name: "c", domain: "life", type: "note", relPath: "notes/c.md", jira: ["MELOSYS-2"] }),
+    // A typo key the STORE keeps on the page's own row but `jiraCounts` filters
+    // out of the facet map: a chip whose only behaviour is a 400 when clicked.
+    page({ name: "d", domain: "ai", type: "note", relPath: "notes/d.md", jira: ["melosys-3"] }),
+  ];
+  const known = { "MELOSYS-1": 2, "MELOSYS-2": 2 };
+  expect(jiraChipCounts(pages, known, "", "", "")).toEqual({ "MELOSYS-1": 2, "MELOSYS-2": 2 });
+  // The typo contributes nothing, so the row cannot offer it.
+  expect(jiraChipCounts(pages, known, "", "", "")["melosys-3"]).toBeUndefined();
+  // Scoped by domain + type + folder, the `projectCounts` rule.
+  expect(jiraChipCounts(pages, known, "ai", "", "")).toEqual({ "MELOSYS-1": 2, "MELOSYS-2": 1 });
+  expect(jiraChipCounts(pages, known, "", "plan", "")).toEqual({ "MELOSYS-1": 1 });
+  expect(jiraChipCounts(pages, known, "", "", "notes")).toEqual({ "MELOSYS-1": 1, "MELOSYS-2": 2 });
+  // No map ⇒ nothing to count, whatever the pages carry.
+  expect(jiraChipCounts(pages, undefined, "", "", "")).toEqual({});
+});
+
+test("resolveJiraParam admits only a key the listing holds, case-folded up", () => {
+  const known = { "MELOSYS-8045": 1 };
+  expect(resolveJiraParam("MELOSYS-8045", known)).toBe("MELOSYS-8045");
+  // A shared URL routinely carries the lowercase spelling; the store indexes
+  // uppercase, so the resolver is what makes the two agree.
+  expect(resolveJiraParam("melosys-8045", known)).toBe("MELOSYS-8045");
+  expect(resolveJiraParam("  melosys-8045  ", known)).toBe("MELOSYS-8045");
+  // Unknown ⇒ open the whole wiki with the param dropped.
+  expect(resolveJiraParam("NOPE-1", known)).toBe("");
+  expect(resolveJiraParam("", known)).toBe("");
+  expect(resolveJiraParam(null, known)).toBe("");
+  expect(resolveJiraParam("MELOSYS-8045", {})).toBe("");
+  expect(resolveJiraParam("MELOSYS-8045", undefined)).toBe("");
+  // A zero count is not membership either.
+  expect(resolveJiraParam("MELOSYS-8045", { "MELOSYS-8045": 0 })).toBe("");
+  // Own keys only, so a prototype name cannot inherit a truthy answer.
+  expect(resolveJiraParam("toString", known)).toBe("");
+});
+
+test("urlWithJira / searchWithJira / jiraParamNeedsRewrite mirror the project trio", () => {
+  expect(JIRA_PARAM).toBe("jira");
+  expect(urlWithJira("/wiki", "")).toBe("/wiki");
+  expect(urlWithJira("/wiki", "MELOSYS-1")).toBe("/wiki?jira=MELOSYS-1");
+  expect(urlWithJira("/wiki?wiki=mimir", "MELOSYS-1")).toBe("/wiki?wiki=mimir&jira=MELOSYS-1");
+
+  // Rewritten in PLACE, so the relPath of the page being read survives.
+  expect(searchWithJira("?wiki=mimir&relPath=units%2Fx.md", "MELOSYS-1")).toBe(
+    "?wiki=mimir&relPath=units%2Fx.md&jira=MELOSYS-1",
+  );
+  expect(searchWithJira("?jira=OLD-1", "NEW-1")).toBe("?jira=NEW-1");
+  expect(searchWithJira("?wiki=mimir&jira=OLD-1", "")).toBe("?wiki=mimir");
+  expect(searchWithJira("?jira=OLD-1", "")).toBe("");
+
+  expect(jiraParamNeedsRewrite("?wiki=mimir", "")).toBe(false);
+  expect(jiraParamNeedsRewrite("?wiki=mimir", "MELOSYS-1")).toBe(true);
+  expect(jiraParamNeedsRewrite("?jira=MELOSYS-1", "MELOSYS-1")).toBe(false);
+  expect(jiraParamNeedsRewrite("?jira=OLD-1", "NEW-1")).toBe(true);
+  // The blank-param clause: `?jira=` compared equal to "" and stayed in the URL.
+  expect(jiraParamNeedsRewrite("?jira=", "")).toBe(true);
+  // A lowercase deep link is rewritten to the spelling the chip carries.
+  expect(jiraParamNeedsRewrite("?jira=melosys-1", "MELOSYS-1")).toBe(true);
+});
+
+test("jiraFilterAfterListing reads the URL at boot and the reader's filter after", () => {
+  const known = { "MELOSYS-1": 1, "MELOSYS-2": 1 };
+  // Boot: the deep link is what the reader asked for.
+  expect(jiraFilterAfterListing(true, "MELOSYS-1", "", known)).toBe("MELOSYS-1");
+  // Later: the URL is IGNORED and the current filter re-validated — re-reading
+  // the address bar on every background refresh is a wipe.
+  expect(jiraFilterAfterListing(false, "MELOSYS-1", "MELOSYS-2", known)).toBe("MELOSYS-2");
+  // Both directions drop a key this listing no longer knows.
+  expect(jiraFilterAfterListing(true, "GONE-1", "", known)).toBe("");
+  expect(jiraFilterAfterListing(false, null, "GONE-1", known)).toBe("");
+});
+
+test("articleUrl carries the jira facet alongside the project one", () => {
+  expect(articleUrl("mimir", "relPath", "units/x.md", "", "MELOSYS-1")).toBe(
+    "/wiki?wiki=mimir&relPath=units%2Fx.md&jira=MELOSYS-1",
+  );
+  expect(articleUrl("mimir", "page", "Alpha", "pomme-core", "MELOSYS-1")).toBe(
+    "/wiki?wiki=mimir&page=Alpha&project=pomme-core&jira=MELOSYS-1",
+  );
+  // Absent ⇒ byte-identical to the pre-facet URL, which is what keeps every
+  // existing caller and its shared links unchanged.
+  expect(articleUrl("mimir", "relPath", "units/x.md", "pomme-core")).toBe(
+    "/wiki?wiki=mimir&relPath=units%2Fx.md&project=pomme-core",
+  );
 });
