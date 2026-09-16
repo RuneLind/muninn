@@ -87,26 +87,28 @@ export type BackfillVerdict = { ok: true; reason: string } | { ok: false; reason
  * paragraph in two).
  */
 /**
- * Prose as the comparison sees it: wikilink and bold syntax reduced to the words
- * they carry.
+ * The page's prose, as the comparison sees it: frontmatter and fenced code gone,
+ * wikilink and bold syntax reduced to the words they carry, whitespace collapsed.
  *
- * The draft handed to the score has already been through persist-time containment
- * (`containDraftBodyLinks` turns an unresolvable `[[Foo]]` into `**Foo**`,
- * `replaceUnresolvedSourceLinks` rewrites `sources:` links), and every one of those
- * rewrites happens INSIDE prose. Compared raw, a sentence whose only change is a
- * link the containment step delinked reads as deleted prose — the guard would then
- * refuse a revision that changed nothing, on exactly the pages whose links do not
- * resolve.
+ * **BOTH sides of the comparison run this, and that is the whole design.** Two
+ * rounds of this guard shipped a defect of one shape — the two sides normalized
+ * differently — and each was a different instance of it: first the page was
+ * compared raw against a draft the containment step had rewritten
+ * (`containDraftBodyLinks` turns an unresolvable `[[Foo]]` into `**Foo**`, and that
+ * one does rewrite prose — its sibling `replaceUnresolvedSourceLinks` touches only
+ * the frontmatter `sources:` line, which never reaches this comparison); then the page was split into sentences BEFORE normalizing while the draft
+ * was normalized whole, so a `[[…]]` or `**…**` span crossing a sentence boundary
+ * left a dangling marker in the sentence and none in the haystack. That second one
+ * made 17 of the jarvis wiki's 932 source pages score 0.0 against THEMSELVES — the
+ * trigger is as ordinary as `[[Coding vs. Software Engineering Distinction]]`,
+ * whose `vs. ` splits inside the link.
+ *
+ * With one pipeline the class is closed by construction rather than by patch: the
+ * sentences are substrings of the normalized text they were split out of, so a page
+ * always retains itself, whatever the markup does. Any future normalization rule
+ * added here is added for both sides at once.
  */
-function normalizeProse(text: string): string {
-  return text
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\s+/g, " ");
-}
-
-export function proseSentences(page: string): string[] {
+function proseText(page: string): string {
   const withoutFrontmatter = page.startsWith("---")
     ? page.slice(Math.max(0, page.indexOf("\n---", 3) + 4))
     : page;
@@ -121,10 +123,37 @@ export function proseSentences(page: string): string[] {
     }
     if (fence === null) lines.push(line);
   }
-  return lines
-    .join("\n")
-    .split(/(?<=[.!?])\s+|\n{2,}/)
-    .map((s) => normalizeProse(s).trim())
+  return (
+    lines
+      .join("\n")
+      // Paragraph breaks survive the whitespace collapse as a sentinel, so the
+      // split below can still see them after normalization.
+      .replace(/\n{2,}/g, " ¶ ")
+      .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
+      .replace(/\[\[([^\]]+)\]\]/g, "$1")
+      // `**` only: that is what `containDraftBodyLinks` emits for a de-linked
+      // wikilink, and it is the one rewrite that happens to prose between the page
+      // and the draft. An underscore rule would be a normalization nothing produces
+      // — and emphasis the two sides spell differently is a real difference.
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/\s+/g, " ")
+  );
+}
+
+/**
+ * Sentences of the page's PROSE, each long enough that a heading, a list marker or
+ * a lone wikilink cannot match by accident.
+ *
+ * Sentences, not lines: a reviser that splits one paragraph around a restored block
+ * keeps every sentence word for word but writes three lines where there was one, and
+ * a line-level check would refuse exactly the revision the design asks for (measured
+ * on `sources/Software Minimalism.mdx`, whose good revision splits a paragraph in
+ * two).
+ */
+export function proseSentences(page: string): string[] {
+  return proseText(page)
+    .split(/(?<=[.!?])\s+|\s¶\s/)
+    .map((s) => s.trim())
     .filter((s) => s.length >= MIN_PROSE_SENTENCE_CHARS);
 }
 
@@ -143,9 +172,15 @@ export const MIN_PROSE_SENTENCE_CHARS = 40;
  * re-draft of the same doc scored 0/29 on the same page. The floor only has to
  * separate "kept every sentence but one" from "kept none", so it is not a tuned
  * number.
+ *
+ * Known and accepted, in the direction that does NOT refuse a good revision: the
+ * normalization also makes markup the reviser ADDS invisible, so a page whose plain
+ * prose comes back peppered with `[[wikilinks]]` scores 1.0. That is a markup-only
+ * change a human sees in the gate's diff, and an unresolvable link is de-linked at
+ * persist time anyway.
  */
 export function proseRetention(currentPage: string, draft: string): { total: number; found: number; ratio: number } {
-  const haystack = normalizeProse(draft);
+  const haystack = proseText(draft);
   const sentences = proseSentences(currentPage);
   const found = sentences.filter((s) => haystack.includes(s)).length;
   return { total: sentences.length, found, ratio: sentences.length === 0 ? 1 : found / sentences.length };
@@ -203,6 +238,12 @@ export function judgeBackfill(opts: {
  * answering null because a live draft or approved proposal already exists for this
  * doc (`ON CONFLICT … WHERE status IN ('draft','approved')`). Reporting the last as
  * a refusal beside a PASSING score tells the operator a working page was rejected.
+ *
+ * **The refusal is reported ahead of the dry run**, so a dry run whose score was
+ * refused says `refused`. That state is reachable — operator step 2 dry-runs a
+ * batch before running it for real — and the guard's verdict is the thing the
+ * operator is dry-running to learn; "dry-run, not persisted" would hide it until
+ * the real run said the same.
  */
 export function backfillOutcomeLabel(state: {
   /** The id `insertWikiProposal` returned, if it inserted a row. */

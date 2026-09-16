@@ -1272,6 +1272,13 @@ describe("buildSourceRevisePrompt", () => {
     expect(prompt).not.toContain("The source URL is");
   });
 
+  test("a SHORT non-url is dropped too — the cap is not doing the isHttpUrl check's job", () => {
+    // Three of the four non-http source-doc urls in the wiki today are empty; a
+    // short non-url is the shape neither the length cap nor a 600-char fixture pins.
+    expect(revise({ input: { ...baseDeps().input, url: "pasted note" } })).not.toContain("The source URL is");
+    expect(revise({ input: { ...baseDeps().input, url: "" } })).not.toContain("The source URL is");
+  });
+
   test("an over-long url is dropped even when it IS a link — the cap is not the isHttpUrl check", () => {
     // The one non-http `source_docs[0].url` in the wiki today is 5421 characters of
     // pasted article; nothing stops a vertical writing an equally long http one.

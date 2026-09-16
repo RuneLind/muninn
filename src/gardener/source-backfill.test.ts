@@ -121,6 +121,60 @@ describe("proseSentences", () => {
   });
 });
 
+/**
+ * The class check (round 3 on this surface): every defect this guard has shipped was
+ * one shape — the two sides of the comparison normalized differently — so the
+ * property, not another per-finding fixture, is what is pinned here. A page always
+ * retains itself, whatever markup it carries, because both sides run one pipeline
+ * and the sentences are substrings of the text they were split out of.
+ *
+ * The shapes below are the ones that actually broke it, kept as a synthetic corpus
+ * rather than real pages (this repo is public). The `vs. ` inside a wikilink is not
+ * hypothetical: it made 17 of 932 live source pages score 0.0 against themselves.
+ */
+describe("proseRetention is reflexive — the class check", () => {
+  const shapes: [string, string][] = [
+    ["a wikilink whose text ends a sentence", "The debate is covered in [[Coding vs. Software Engineering Distinction]] at length, with examples."],
+    ["a bold span crossing a sentence boundary", "It matters here **because the running cost is entirely real. The claimed benefit is not** for most teams of this size."],
+    ["a question mark inside a wikilink", "See [[Is Dependency Injection Worth It?]] for the argument, which is made at some length."],
+    ["a piped wikilink spanning punctuation", "Read [[Hexagonal Architecture vs. Layers|hexagonal architecture vs. plain layers]] before choosing a structure for this."],
+    ["an abbreviation mid-sentence", "The service is cheap, i.e. it costs almost nothing to run, and it is easy to operate."],
+    ["a decimal number", "Throughput rose to 12.5 requests per second under the same hardware and the same load."],
+    ["an ellipsis", "The answer is… complicated, and the rest of this page explains why it is complicated."],
+    ["underscore emphasis", "The point is _that the page keeps its own sentences_ whatever emphasis style it uses."],
+  ];
+
+  for (const [name, sentence] of shapes) {
+    test(name, () => {
+      const page = `---\ntype: source\ntitle: T\n---\n\n# T\n\n${sentence}\n`;
+      const r = proseRetention(page, page);
+      expect(r.total).toBeGreaterThan(0);
+      expect(r.ratio).toBe(1);
+    });
+  }
+
+  test("and a page of every shape at once, fenced code included", () => {
+    const page = [
+      "---",
+      "type: source",
+      "title: T",
+      "---",
+      "",
+      "# T",
+      "",
+      ...shapes.map(([, sentence]) => `${sentence}\n`),
+      "```yaml",
+      "services:",
+      "  postgres: { image: postgres:latest }",
+      "```",
+    ].join("\n");
+    const r = proseRetention(page, page);
+    // Some shapes split into two measurable sentences; every one of them is found.
+    expect(r.total).toBeGreaterThanOrEqual(shapes.length);
+    expect(r.found).toBe(r.total);
+  });
+});
+
 describe("proseRetention", () => {
   test("a page against itself retains everything", () => {
     expect(proseRetention(PAGE, PAGE)).toEqual({ total: 3, found: 3, ratio: 1 });
@@ -273,10 +327,26 @@ describe("backfillOutcomeLabel", () => {
     );
   });
 
-  test("a dry run says dry run, not refused", () => {
+  test("a REFUSED dry run says refused — the verdict is what a dry run is for", () => {
+    // The fourth state, and the one a branch-order swap silently flips: operator
+    // step 2 dry-runs a batch of 5 before the real run.
+    expect(backfillOutcomeLabel({ proposalId: undefined, dryRun: true, judgedOk: false })).toBe(
+      "refused, not persisted",
+    );
+  });
+
+  test("a dry run whose score passed says dry run, not refused", () => {
     expect(backfillOutcomeLabel({ proposalId: undefined, dryRun: true, judgedOk: true })).toBe(
       "dry-run, not persisted",
     );
+  });
+
+  test("the floor sits between a re-draft and the one sentence a good revision splits", () => {
+    // Pins the VALUE, not just the clause that reads it: 28/29 is the measured good
+    // revision, and a floor below ~0.75 would accept a page that lost a quarter of
+    // its prose.
+    expect(MIN_PROSE_RETENTION).toBeGreaterThan(0.75);
+    expect(MIN_PROSE_RETENTION).toBeLessThan(28 / 29);
   });
 
   test("a passing score with no row is an INSERT CONFLICT, never a refusal", () => {
