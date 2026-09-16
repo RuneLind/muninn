@@ -2,11 +2,15 @@
  * The reader's provenance VIEW — every string and every fragment of markup the
  * browser shows for `/api/wiki/page`'s `provenance` block, with no DOM in sight.
  *
- * **Placement C**, decided in the plan: the strip under the page title is the
- * SUMMARY (the Jira row plus ONE line of cost), the rail panel is the DETAIL
- * (one row per session). The two halves read the same payload, so they live in
- * one module — a cost line that disagreed with the chips below it would be two
- * renderers disagreeing about one object.
+ * **One surface, under the title.** The strip is a collapsed LINE — the Jira
+ * row, then one sentence of cost plus a mark per event — that opens in place
+ * into the CHAIN: every session that wrote the page and every PR those sessions
+ * merged, on one spine in time order. The rail's Sessions section was the same
+ * facts in a 340 px column and is gone.
+ *
+ * The line and the chain read one payload and live in one module, because a
+ * sentence that disagreed with the rows it opens into would be two renderers
+ * disagreeing about one object.
  *
  * Pure on purpose. `wiki-browser.ts` is a 5,000-line browser entrypoint that
  * `bun test` cannot load (it touches `document` at import time), so anything
@@ -27,11 +31,11 @@ import {
   isJiraKeyShape,
   type ProvenanceJira,
   type ProvenanceLedgerState,
+  type ProvenanceMerge,
+  type ProvenanceMergesState,
   type ProvenancePayload,
   type ProvenanceSessionChip,
 } from "../../../wiki/provenance.ts";
-import type { WikiFilters } from "./wiki-filter.ts";
-import { railSectionsVisible } from "./wiki-recents.ts";
 import { escHtml as esc } from "./escape.ts";
 import { fmtCost } from "./fmt-cost.ts";
 
@@ -167,11 +171,6 @@ export interface SessionChipView {
   /** `title=` on the glyph, so the mark is never the only thing naming the
    *  provider. */
   providerLabel: string;
-  /** `first`, else `last`, else "" — whichever date the ledger returned. */
-  dateLabel: string;
-  /** `first → last` when the ledger returned BOTH and they differ — the hover
-   *  that says a session ran across days. "" otherwise. */
-  dateTitle: string;
   host: string;
   /** Clipped for the row; `titleFull` is the hover. */
   title: string;
@@ -204,20 +203,9 @@ export function chipView(
 ): SessionChipView {
   const reason = bareChipReason(chip);
   const title = chip.title ?? "";
-  // Both halves through `?? null`, so an ABSENT field and an explicit null are
-  // the same thing: this payload crosses the wire, and `JSON.parse` drops a key
-  // the server left undefined.
-  const first = chip.first ?? null;
-  const last = chip.last ?? null;
   return {
     glyph: providerGlyph(chip.provider),
     providerLabel: chip.provider || "unknown provider",
-    // The date the ledger DID return, whichever end of the range it is. Reading
-    // `first` alone dropped a chip's only date on the ground — `dateTitle` was
-    // built for that case and the renderer shows a title only beside a label.
-    dateLabel: first ?? last ?? "",
-    // The hover exists to say a session ran across days, which needs BOTH ends.
-    dateTitle: first && last && first !== last ? `${first} → ${last}` : "",
     host: chip.host ?? "",
     title: clipTitle(title),
     titleFull: title,
@@ -288,12 +276,18 @@ function jiraKeyFilterable(key: string, known?: Record<string, number> | null): 
 }
 
 /**
- * The strip under `.wiki-meta-row`: the Jira row, then the cost line.
+ * The strip under `.wiki-meta-row`: the Jira row, then the disclosure line and
+ * the chain it opens.
  *
- * `""` when the page carries neither — a payload can exist for a `prs`-only
- * page, and an empty bordered strip is furniture. **`prs` renders nothing here
- * at all**: the PR row ships with campaign 2, and a half-built control is worse
- * than none.
+ * `""` when the page carries neither a Jira key nor a line — a payload can exist
+ * for a `prs`-only page, and an empty bordered strip is furniture. **`prs`
+ * renders nothing here at all**: the PR row ships with campaign 2, and a
+ * half-built control is worse than none.
+ *
+ * The early return is keyed on the LINE rather than on `sessions.length`, which
+ * is what keeps it extensible: a later state that has something to say about a
+ * page naming no session (a ledger-linked session the page never stamped) says
+ * it by answering from `costLine`, not by adding a second condition here.
  *
  * The key itself is the filter affordance (`data-prov-jira`), not a second
  * control beside the link: the chip already names one thing, and a reader who
@@ -304,9 +298,10 @@ function jiraKeyFilterable(key: string, known?: Record<string, number> | null): 
 export function provStripHtml(
   p: ProvenancePayload,
   known?: Record<string, number> | null,
+  opts: ChainRenderOptions = {},
 ): string {
-  const cost = costLine(p);
-  if (!p.jira.length && !cost) return "";
+  const line = provLineHtml(p);
+  if (!p.jira.length && !line) return "";
   let html = `<div class="wiki-prov-strip">`;
   if (p.jira.length) {
     html += `<div class="wiki-prov-jira-row">`;
@@ -337,7 +332,324 @@ export function provStripHtml(
     }
     html += `</div>`;
   }
-  if (cost) html += `<div class="wiki-prov-cost">${esc(cost)}</div>`;
+  if (line) html += line + chainHtml(p, opts);
+  return html + `</div>`;
+}
+
+// ── The chain ────────────────────────────────────────────────────────────────
+
+/**
+ * One event on the page's spine: a session that wrote it, or a PR one of those
+ * sessions merged.
+ *
+ * `at` is the instant the event is SORTED on, carried on the event so a renderer
+ * and a test read the same field the comparator did — `null` for an event the
+ * ledger gave no date for.
+ */
+export interface ChainSessionEvent {
+  kind: "session";
+  at: string | null;
+  chip: ProvenanceSessionChip;
+}
+export interface ChainMergeEvent {
+  kind: "merge";
+  at: string | null;
+  merge: ProvenanceMerge;
+}
+export type ChainEvent = ChainSessionEvent | ChainMergeEvent;
+
+/**
+ * The union of sessions and merges, ascending.
+ *
+ * A session is dated by `first ?? last` — the fallback `chipView` already uses,
+ * because the ledger returns one end of the range for a session that ran inside
+ * a minute and the other for one that did not.
+ *
+ * **A dateless event sorts LAST, in the page's own `sessions:` order.** Every
+ * bare chip has `first: null` (`enrichSessions` fills the whole key set with
+ * nulls when the ledger holds no facts), so the shape fixture's `missing`
+ * session and a damaged ref's `invalid` chip would otherwise land wherever the
+ * comparator happened to leave them — which is a different place per engine, and
+ * the reason the rule is stated rather than inherited from a sort.
+ *
+ * Ties keep input order (sessions before merges), through an explicit index
+ * rather than by relying on the sort being stable.
+ */
+export function chainEvents(p: ProvenancePayload): ChainEvent[] {
+  const events: ChainEvent[] = [
+    ...p.sessions.map((chip): ChainEvent => ({
+      kind: "session",
+      at: chip.first ?? chip.last ?? null,
+      chip,
+    })),
+    // `?? []` because this crosses the wire: a payload a server built before the
+    // merges leg existed simply has no key, and the reader must not index into
+    // it.
+    ...(p.merges ?? []).map((merge): ChainEvent => ({
+      kind: "merge",
+      at: merge.mergedAt ?? null,
+      merge,
+    })),
+  ];
+  return events
+    .map((event, i) => ({ event, i, ms: stampMs(event.at) }))
+    .sort((a, b) => {
+      // Undated means "no position of its own", so it goes after everything
+      // that has one — including an `at` the ledger sent that does not parse,
+      // which cannot be placed either.
+      if (a.ms === null || b.ms === null) {
+        if (a.ms === b.ms) return a.i - b.i;
+        return a.ms === null ? 1 : -1;
+      }
+      return a.ms === b.ms ? a.i - b.i : a.ms - b.ms;
+    })
+    .map(({ event }) => event);
+}
+
+/** Epoch ms for a ledger stamp, or null when there is nothing to place. Parsed
+ *  rather than string-compared: the ledger spells its stamps in UTC today, and a
+ *  lexicographic order would be wrong the day one carries an offset. */
+function stampMs(at: string | null): number | null {
+  if (!at) return null;
+  const ms = Date.parse(at);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** What a chain row shows of a date. The runtime default is the VIEWER's own
+ *  zone; tests pass one explicitly, or every assertion on an hour becomes a fact
+ *  about the machine the suite ran on. */
+export interface ChainRenderOptions {
+  timeZone?: string;
+}
+
+/**
+ * `MM-DD HH:MM` from the ledger's ISO stamp.
+ *
+ * Assembled from `formatToParts` rather than from a format string: the order of
+ * a locale's date parts is the locale's business (`09/15` before the time in
+ * en-US, after it elsewhere), and this row's layout is not.
+ *
+ * `hourCycle: "h23"` is stated rather than left to the locale. Measured on bun
+ * 1.3.10 for midnight UTC under `en-GB`: `h23` and `hour12: false` both give
+ * `00`, the locale's own default gives `00`, `h24` gives `24` and `h12` gives
+ * `12`. So the two wrong answers are reachable through an option, and naming the
+ * cycle is what keeps a midnight row from reading as the end of the day before
+ * or as noon.
+ */
+export function fmtChainStamp(at: string | null | undefined, timeZone?: string): string {
+  if (!at) return "";
+  const ms = Date.parse(at);
+  if (!Number.isFinite(ms)) return "";
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(ms));
+  const at_ = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${at_("month")}-${at_("day")} ${at_("hour")}:${at_("minute")}`;
+}
+
+/** The span a session covers: both ends when the ledger returned two different
+ *  instants, one otherwise. */
+function sessionWhen(chip: ProvenanceSessionChip, timeZone?: string): string {
+  const first = fmtChainStamp(chip.first, timeZone);
+  const last = fmtChainStamp(chip.last, timeZone);
+  if (first && last && first !== last) return `${first} → ${last}`;
+  return first || last;
+}
+
+/**
+ * The GitHub coordinate a merge row is titled with, or null.
+ *
+ * Read off the URL the ledger resolved, never off `repo`: that column is a
+ * CHECKOUT PATH on this corpus, and turning one into an `owner/repo` is the
+ * guess upstream refuses to make. A URL that is not a github.com pull request is
+ * treated as no URL at all — this row renders one kind of link, and an arbitrary
+ * href out of a ledger row is not it.
+ */
+const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\/pull\/([0-9]+)$/;
+
+export function mergeCoordinate(url: string | null): { repo: string; number: string } | null {
+  if (!url) return null;
+  const m = PR_URL.exec(url);
+  return m ? { repo: m[1]!, number: m[2]! } : null;
+}
+
+/** The last segment of a checkout path — what an unlinked row hovers, so the
+ *  reader can tell WHICH checkout without being shown a coordinate nobody
+ *  resolved. */
+export function repoBasename(repo: string): string {
+  const parts = repo.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1]! : repo;
+}
+
+/** What a merge row says when the ledger's own result was never paired with a
+ *  confirmation. Qualified, never dropped: false has three causes and two of
+ *  them are ordinary (a UI merge, an unpaired `gh pr merge`). */
+export const MERGE_UNCONFIRMED_COPY = "merge unconfirmed";
+
+/** The merges leg failed. One line, at the foot of the chain — the cost sentence
+ *  is about the FACTS leg and must not move for this. */
+export const MERGES_UNREACHABLE_NOTE = "merges not shown: claude-usage did not answer";
+
+/** Upstream cut the list at its own id cap (200, `SESSION_IDS_PER_CALL` — this
+ *  module is browser-safe and does not import the ledger client to say so). */
+export const MERGES_CUT_NOTE = "merges not shown: list cut at 200";
+
+/** The footer line for the merges leg, or null when it has nothing to report.
+ *  An UNASKED leg says nothing: a host with no claude-usage has no merges call
+ *  to have failed. */
+export function mergesNote(state?: ProvenanceMergesState | null): string | null {
+  if (!state?.asked) return null;
+  if (!state.reachable) return MERGES_UNREACHABLE_NOTE;
+  if (state.truncated) return MERGES_CUT_NOTE;
+  return null;
+}
+
+/** The marks after the sentence: one per session, then one per merge. The
+ *  vocabulary is open — `data-mark` names the kind, so a later kind (a session
+ *  the ledger links but the page never stamped) is a value, not a rewrite. */
+function marksHtml(p: ProvenancePayload, opts: ChainRenderOptions): string {
+  let html = `<span class="wiki-prov-marks">`;
+  for (const chip of p.sessions) {
+    const v = chipView(chip, p.ledger);
+    const when = sessionWhen(chip, opts.timeZone);
+    const what = v.bareCopy ?? `${v.titleFull || chip.id}${v.costLabel ? ` — ${v.costLabel}` : ""}`;
+    html +=
+      `<span class="wiki-prov-mark wiki-prov-mark-session" data-mark="session"` +
+      ` title="${esc(when ? `${when} · ${what}` : what)}">○</span>`;
+  }
+  for (const merge of p.merges ?? []) {
+    const coordinate = mergeCoordinate(merge.url);
+    const label = merge.prNumber === null ? "a merge" : `#${merge.prNumber}`;
+    const where = coordinate ? `${coordinate.repo} ` : "";
+    html +=
+      `<span class="wiki-prov-mark wiki-prov-mark-merge" data-mark="merge"` +
+      ` title="merged ${esc(where + label)}">▪</span>`;
+  }
+  return html + `</span>`;
+}
+
+/** The id of the chain element, and what the line's `aria-controls` points at.
+ *  One strip per page, so one id. */
+export const CHAIN_ID = "wikiProvChain";
+
+/**
+ * The collapsed line: the cost sentence and the marks, as ONE disclosure
+ * button.
+ *
+ * A real `<button aria-expanded>` rather than a `<summary>` or a clickable
+ * `<div>`: the reader on a keyboard gets it for free, and the state is readable
+ * by anything that asks. `""` when there is no sentence — a page carrying only a
+ * Jira key has nothing to open.
+ */
+export function provLineHtml(p: ProvenancePayload, opts: ChainRenderOptions = {}): string {
+  const sentence = costLine(p);
+  if (!sentence) return "";
+  return (
+    `<button type="button" class="wiki-prov-line" data-prov-toggle` +
+    ` aria-expanded="false" aria-controls="${CHAIN_ID}">` +
+    `<span class="wiki-prov-cost">${esc(sentence)}</span>` +
+    marksHtml(p, opts) +
+    `<span class="wiki-prov-caret" aria-hidden="true">▾</span>` +
+    `</button>`
+  );
+}
+
+/** One session's row. The copy button keeps the `data-sess-copy` contract the
+ *  rail rows had — the client's delegate and `copySessionId` are unchanged. */
+function sessionRowHtml(
+  chip: ProvenanceSessionChip,
+  ledger: ProvenanceLedgerState | null | undefined,
+  opts: ChainRenderOptions,
+): string {
+  const v = chipView(chip, ledger);
+  const when = sessionWhen(chip, opts.timeZone);
+  // The hover carries the ledger's own stamps, so the row's local-time label is
+  // never the only spelling of the instant.
+  const whenTitle = [chip.first, chip.last].filter(Boolean).join(" → ");
+  const messages = typeof chip.messages === "number" ? plural(chip.messages, "message") : "";
+  let html =
+    `<div class="wiki-chain-row wiki-chain-session${v.bareCopy ? " wiki-chain-bare" : ""}"` +
+    ` data-chain="${esc(chip.id)}"${messages ? ` title="${esc(messages)}"` : ""}>`;
+  html += `<div class="wiki-chain-head">`;
+  html += `<span class="wiki-chain-glyph" title="${esc(v.providerLabel)}">${esc(v.glyph)}</span>`;
+  if (when) {
+    html +=
+      `<span class="wiki-chain-when"${whenTitle ? ` title="${esc(whenTitle)}"` : ""}>${esc(when)}</span>`;
+  }
+  if (v.host) html += `<span class="wiki-chain-host">· ${esc(v.host)}</span>`;
+  if (v.costLabel) html += `<span class="wiki-chain-cost">${esc(v.costLabel)}</span>`;
+  html += `</div>`;
+  if (v.title) {
+    html += `<div class="wiki-chain-title" title="${esc(v.titleFull)}">${esc(v.title)}</div>`;
+  }
+  if (v.bareCopy) html += `<div class="wiki-chain-reason">${esc(v.bareCopy)}</div>`;
+  html += `<div class="wiki-chain-idrow">`;
+  html += `<code class="wiki-chain-id">${esc(chip.id)}</code>`;
+  html +=
+    `<button type="button" class="wiki-chain-copy" data-sess-copy="${esc(chip.id)}"` +
+    ` title="Copy the session id" aria-label="${esc(sessionCopyAriaLabel(chip.id))}">` +
+    `${SESSION_COPY_IDLE}</button>`;
+  if (v.url) {
+    html +=
+      `<a class="wiki-chain-link" href="${esc(v.url)}" target="_blank" rel="noopener"` +
+      ` title="Open this session in claude-usage">↗</a>`;
+  }
+  return html + `</div></div>`;
+}
+
+/** One merged PR. The title is omitted: `subject` is null on every merge
+ *  measured — it comes from the confirm side, not the merge event. */
+function mergeRowHtml(merge: ProvenanceMerge, opts: ChainRenderOptions): string {
+  const coordinate = mergeCoordinate(merge.url);
+  const number = merge.prNumber === null ? "" : `#${merge.prNumber}`;
+  const when = fmtChainStamp(merge.mergedAt, opts.timeZone);
+  let html =
+    `<div class="wiki-chain-row wiki-chain-merge" data-chain="${esc(number || "merge")}">`;
+  html += `<span class="wiki-chain-glyph" title="a merged pull request">▪</span>`;
+  if (coordinate) {
+    html +=
+      `<a class="wiki-chain-pr" href="${esc(merge.url!)}" target="_blank" rel="noopener">` +
+      `${esc(coordinate.repo)} ${esc(number || `#${coordinate.number}`)}</a>`;
+  } else if (number || merge.repo) {
+    // No coordinate: the number alone, with the checkout's basename as the
+    // hover. Never a link — a plausible-looking link to somebody else's
+    // repository is the worst output this row can have.
+    html +=
+      `<span class="wiki-chain-pr"${merge.repo ? ` title="${esc(repoBasename(merge.repo))}"` : ""}>` +
+      `${esc(number || "a merge")}</span>`;
+  }
+  if (when) html += `<span class="wiki-chain-when">merged ${esc(when)}</span>`;
+  if (!merge.mergeOk) {
+    html +=
+      `<span class="wiki-chain-unconfirmed"` +
+      ` title="the merge command's own result was never paired with a confirmation">` +
+      `${MERGE_UNCONFIRMED_COPY}</span>`;
+  }
+  return html + `</div>`;
+}
+
+/**
+ * The chain itself — hidden until the line is pressed.
+ *
+ * `hidden` on the element rather than a class, so the collapsed state is the
+ * DOM's own and a reader with no CSS (or a stylesheet that failed to load) does
+ * not get every row of every page expanded.
+ */
+export function chainHtml(p: ProvenancePayload, opts: ChainRenderOptions = {}): string {
+  let html = `<div class="wiki-prov-chain" id="${CHAIN_ID}" hidden>`;
+  for (const event of chainEvents(p)) {
+    html +=
+      event.kind === "session"
+        ? sessionRowHtml(event.chip, p.ledger, opts)
+        : mergeRowHtml(event.merge, opts);
+  }
+  const note = mergesNote(p.mergesLedger);
+  if (note) html += `<div class="wiki-chain-note">${esc(note)}</div>`;
   return html + `</div>`;
 }
 
@@ -355,96 +667,21 @@ export function sessionCopyAriaLabel(id: string): string {
   return id ? `Copy the session id ${id}` : "Copy the session id";
 }
 
-/**
- * The rail's `Sessions` section — the header plus one row per chip.
- *
- * Rendered as a PREFIX to the page list rather than through `buildRail`, and the
- * reason is that function's own invariant: its model is pages ("every page
- * appears exactly ONCE"), `rail.shown` counts distinct pages among its rows, and
- * eight e2e specs key on `.wiki-list-item[data-relpath]` (`grep -rl data-relpath
- * e2e/`). A session is not a page, so folding these rows into that model would
- * mean teaching every one of those to ignore a row kind — while the visible
- * result is identical.
- *
- * Rows carry no `data-relpath`, so the reader's navigation delegate never claims
- * them; the only controls are the ⧉ copy button and, where the instance sets
- * `CLAUDE_USAGE_PUBLIC_URL`, the ↗ link.
- *
- * `ledger` rides along for the bare rows alone: `unresolved` means "nobody
- * asked", and only `configured` says whether that was an outage or a host with
- * no claude-usage at all (see `bareChipCopy`).
- */
-export function sessionsRailHtml(
-  sessions: ProvenanceSessionChip[],
-  ledger?: ProvenanceLedgerState | null,
-): string {
-  if (!sessions.length) return "";
-  let html =
-    `<div class="wiki-list-sec" data-section="sessions">` +
-    `<span class="wiki-sec-label">Sessions</span></div>`;
-  for (const v of sessions.map((c) => chipView(c, ledger))) {
-    html += `<div class="wiki-sess-row${v.bareCopy ? " wiki-sess-bare" : ""}">`;
-    html += `<div class="wiki-sess-head">`;
-    html += `<span class="wiki-sess-glyph" title="${esc(v.providerLabel)}">${esc(v.glyph)}</span>`;
-    if (v.dateLabel) {
-      html +=
-        `<span class="wiki-sess-date"${v.dateTitle ? ` title="${esc(v.dateTitle)}"` : ""}>` +
-        `${esc(v.dateLabel)}</span>`;
-    }
-    if (v.host) html += `<span class="wiki-sess-host">${esc(v.host)}</span>`;
-    if (v.costLabel) html += `<span class="wiki-sess-cost">${esc(v.costLabel)}</span>`;
-    html += `</div>`;
-    if (v.title) {
-      html += `<div class="wiki-sess-title" title="${esc(v.titleFull)}">${esc(v.title)}</div>`;
-    }
-    if (v.bareCopy) html += `<div class="wiki-sess-reason">${esc(v.bareCopy)}</div>`;
-    html += `<div class="wiki-sess-idrow">`;
-    html += `<code class="wiki-sess-id">${esc(v.id)}</code>`;
-    html +=
-      `<button type="button" class="wiki-sess-copy" data-sess-copy="${esc(v.id)}"` +
-      ` title="Copy the session id" aria-label="${esc(sessionCopyAriaLabel(v.id))}">` +
-      `${SESSION_COPY_IDLE}</button>`;
-    if (v.url) {
-      html +=
-        `<a class="wiki-sess-link" href="${esc(v.url)}" target="_blank" rel="noopener"` +
-        ` title="Open this session in claude-usage">↗</a>`;
-    }
-    html += `</div></div>`;
-  }
-  return html;
-}
-
-/**
- * Is the rail's `Sessions` section on screen?
- *
- * Two conditions, and the second is borrowed rather than re-decided: the open
- * page must name a session, and the rail's recall sections must be allowed at
- * all (`railSectionsVisible` — i.e. no search query). A search is "find this",
- * and the Jira-key jump owns the head of the rail while one is running; a
- * Sessions block sitting above it would be answering a question nobody asked.
- */
-export function sessionsSectionVisible(
-  filters: WikiFilters,
-  sessions: ProvenanceSessionChip[] | null | undefined,
-): boolean {
-  return Boolean(sessions?.length) && railSectionsVisible(filters);
-}
-
 /** The rail's empty state — what `#wikiList` says when no page matches. */
 export const LIST_EMPTY_HTML = '<div class="wiki-conn-empty">No pages match.</div>';
 
 /**
- * Compose the rail: the open page's Sessions block, then the page rows — or the
- * empty state when there are none.
+ * Compose the rail: the page rows, or the empty state when there are none.
  *
- * **The empty state is decided on the PAGE html alone.** Seeding one buffer with
- * the Sessions block and falling back with `html || EMPTY` made a non-empty
- * Sessions section suppress "No pages match." entirely: open a stamped page,
- * pick a facet matching nothing, and the rail showed session rows and no answer
- * to the question the reader had just asked. The Sessions block is about the
- * OPEN PAGE and the empty state is about the FILTER — two facts, so neither may
- * stand in for the other.
+ * **The empty state is decided on the PAGE html alone**, and the function stays
+ * after the Sessions section left the rail because that is the rule it carries.
+ * Seeding the buffer with something else and falling back with `html || EMPTY`
+ * is what made a non-empty prefix suppress "No pages match." entirely: open a
+ * stamped page, pick a facet matching nothing, and the rail showed session rows
+ * and no answer to the question the reader had just asked. Whatever a later
+ * change wants to put above the rows, it may not stand in for the answer about
+ * the filter.
  */
-export function railListHtml(sessionsHtml: string, pagesHtml: string): string {
-  return sessionsHtml + (pagesHtml || LIST_EMPTY_HTML);
+export function railListHtml(pagesHtml: string): string {
+  return pagesHtml || LIST_EMPTY_HTML;
 }

@@ -288,10 +288,81 @@ export const LEDGER_NOT_ASKED: ProvenanceLedgerState = Object.freeze({
   configured: false,
 });
 
+/**
+ * One PR a stamped session merged, as claude-usage's `/api/merges` reports it.
+ *
+ * Carried VERBATIM from the route rather than reshaped: every field here is one
+ * the reader renders, and the two that look redundant are not.
+ *
+ *  - `repo` is a CHECKOUT PATH on this corpus (`/Users/rune/source/private/…`),
+ *    not a GitHub coordinate. It is the hover on an unlinked row and nothing
+ *    else — turning it into an `owner/repo` is the guess upstream's `planPrUrl`
+ *    refuses to make, because most of the corpus's path-shaped repo keys name
+ *    directories that no longer exist.
+ *  - `url` is the coordinate, resolved upstream through its own `repoUrls` map,
+ *    and **null is a normal answer** for a repo that map does not name.
+ *
+ * `subject` is null on every merge measured (the confirm side is what carries
+ * one), so the row renders without it; the field rides along because it is the
+ * ledger's own shape and dropping it here would make a later reader re-fetch.
+ */
+export interface ProvenanceMerge {
+  /** The stamped session that merged it — the join back onto a chip. */
+  sessionId: string;
+  /** The ledger's repo key. A checkout path, not a coordinate. */
+  repo: string;
+  /** Null for a bare `gh pr merge` with no PR number in the event. */
+  prNumber: number | null;
+  /** `https://github.com/owner/repo/pull/n`, or null — never guessed. */
+  url: string | null;
+  subject: string | null;
+  mergedAt: string | null;
+  /**
+   * The merge command's own result said it merged.
+   *
+   * FALSE IS NOT "did not merge": measured 20 of 179 rows false on 2026-09-16,
+   * of which 11 were squash messages composed for a UI merge and 9 were a
+   * `gh pr merge` whose result was never paired — so a row is qualified, never
+   * dropped. Dropping them would hide the NAV flow's merges entirely.
+   */
+  mergeOk: boolean;
+}
+
+/**
+ * Whether the merges leg ran and what it got — deliberately NOT folded into
+ * `ProvenanceLedgerState`.
+ *
+ * The two legs hit the same service and fail independently, and the one thing
+ * the reader must be able to tell apart is "this page has no merges" from "the
+ * merges call did not answer". A shared `reachable` would have made the second
+ * unsayable, and would also have pushed the cost sentence — which is about the
+ * FACTS leg alone — into a state the money it reports never came from.
+ */
+export interface ProvenanceMergesState {
+  /** A request was SENT: the page names a session, this host is pointed at a
+   *  claude-usage, and at least one id survived the shape gate. */
+  asked: boolean;
+  /** At least one batch answered with a readable payload. */
+  reachable: boolean;
+  /** Upstream cut the list at its own cap, so `merges` is a SUBSET. */
+  truncated: boolean;
+}
+
+/** The merges state for a leg that never ran. Frozen for `LEDGER_NOT_ASKED`'s
+ *  reason: it is handed out by reference on every unasked page open. */
+export const MERGES_NOT_ASKED: ProvenanceMergesState = Object.freeze({
+  asked: false,
+  reachable: false,
+  truncated: false,
+});
+
 export interface ProvenancePayload {
   sessions: ProvenanceSessionChip[];
   jira: ProvenanceJira[];
   prs: PrRef[];
+  /** The PRs the page's sessions merged, in the ledger's own order. Empty when
+   *  the leg was not asked or did not answer — `mergesLedger` says which. */
+  merges: ProvenanceMerge[];
   /** Sum over the sessions the ledger PRICED. Never a per-page share. */
   totalCost: number;
   /** How many sessions that total is over — the denominator, so a reader can
@@ -300,6 +371,8 @@ export interface ProvenancePayload {
   /** `sessions_backfilled` — the list came from a history sweep. */
   backfilled?: string;
   ledger: ProvenanceLedgerState;
+  /** The merges leg's own state. See {@link ProvenanceMergesState}. */
+  mergesLedger: ProvenanceMergesState;
 }
 
 /** What `enrichSessions` needs of a ledger answer — the narrowest shape, so the

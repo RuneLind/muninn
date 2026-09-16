@@ -28,6 +28,7 @@ function ctx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
           : { sessionId: id, missing: true },
       ),
     }),
+    fetchMerges: async () => ({ merges: [] }),
   };
   return {
     sessionLedger: ledger,
@@ -75,6 +76,7 @@ describe("resolveProvenance", () => {
             asked.push(ids);
             return { sessions: [] };
           },
+          fetchMerges: async () => ({ merges: [] }),
         },
       }),
     );
@@ -97,6 +99,7 @@ describe("resolveProvenance", () => {
           fetchSessions: async () => {
             throw new Error("connect ECONNREFUSED");
           },
+          fetchMerges: async () => ({ merges: [] }),
         },
       }),
     );
@@ -126,6 +129,7 @@ describe("resolveProvenance", () => {
             called = true;
             return { sessions: [] };
           },
+          fetchMerges: async () => ({ merges: [] }),
         },
       }),
     );
@@ -180,5 +184,117 @@ describe("pageProvenance", () => {
   test("no marker ⇒ no field (absent, not an empty string)", async () => {
     const res = await pageProvenance(page({ sessions: [SESSION_A] }), ctx());
     expect("backfilled" in res!).toBe(false);
+  });
+});
+
+// ── The merges leg ──────────────────────────────────────────────────────────
+// It lives in `pageProvenance` and NOT in `resolveProvenance`: the two reverse
+// lookups (`?session=`, `?key=`) share the latter over up to 1,000 refs, and a
+// fan-out there would multiply the calls a single GET buys.
+
+describe("the merges leg", () => {
+  const MERGE = {
+    sessionId: ID_A,
+    repo: "/Users/rune/source/private/muninn",
+    prNumber: 553,
+    url: "https://github.com/RuneLind/muninn/pull/553",
+    subject: null,
+    mergedAt: "2026-09-16T10:30:00.000Z",
+    mergeOk: true,
+  };
+
+  test("a page's merges ride the block, keyed on the sessions that merged them", async () => {
+    const res = await pageProvenance(
+      page({ sessions: [SESSION_A] }),
+      ctx({
+        sessionLedger: {
+          baseUrl: "b",
+          urlConfigured: true,
+          fetchSessions: async (ids) => ({ sessions: ids.map((id) => ({ sessionId: id, cost: 3 })) }),
+          fetchMerges: async () => ({ merges: [MERGE] }),
+        },
+      }),
+    );
+    expect(res!.merges).toEqual([MERGE]);
+    expect(res!.mergesLedger).toEqual({ asked: true, reachable: true, truncated: false });
+  });
+
+  test("the merges leg is asked with BARE ids, the same ones the facts leg gets", async () => {
+    const asked: string[][] = [];
+    await pageProvenance(
+      page({ sessions: [SESSION_A] }),
+      ctx({
+        sessionLedger: {
+          baseUrl: "b",
+          urlConfigured: true,
+          fetchSessions: async () => ({ sessions: [] }),
+          fetchMerges: async (ids) => {
+            asked.push(ids);
+            return { merges: [] };
+          },
+        },
+      }),
+    );
+    expect(asked).toEqual([[ID_A]]);
+  });
+
+  test("a reverse lookup never fans out — `resolveProvenance` has no merges leg", async () => {
+    let called = false;
+    await resolveProvenance(
+      { refs: [SESSION_A], keys: [] },
+      ctx({
+        sessionLedger: {
+          baseUrl: "b",
+          urlConfigured: true,
+          fetchSessions: async () => ({ sessions: [] }),
+          fetchMerges: async () => {
+            called = true;
+            return { merges: [] };
+          },
+        },
+      }),
+    );
+    expect(called).toBe(false);
+  });
+
+  test("an unconfigured host asks nothing, and the block says `asked: false`", async () => {
+    let called = false;
+    const res = await pageProvenance(
+      page({ sessions: [SESSION_A] }),
+      ctx({
+        sessionLedger: {
+          baseUrl: "b",
+          urlConfigured: false,
+          fetchSessions: async () => ({ sessions: [] }),
+          fetchMerges: async () => {
+            called = true;
+            return { merges: [] };
+          },
+        },
+      }),
+    );
+    expect(called).toBe(false);
+    expect(res!.merges).toEqual([]);
+    expect(res!.mergesLedger.asked).toBe(false);
+  });
+
+  test("a page naming no session asks nothing of the merges route either", async () => {
+    let called = false;
+    const res = await pageProvenance(
+      page({ jira: ["MELOSYS-8045"] }),
+      ctx({
+        sessionLedger: {
+          baseUrl: "b",
+          urlConfigured: true,
+          fetchSessions: async () => ({ sessions: [] }),
+          fetchMerges: async () => {
+            called = true;
+            return { merges: [] };
+          },
+        },
+      }),
+    );
+    expect(called).toBe(false);
+    expect(res!.mergesLedger.asked).toBe(false);
   });
 });

@@ -19,7 +19,14 @@ function deps(
   fetchSessions: SessionLedgerDeps["fetchSessions"],
   urlConfigured = true,
 ): SessionLedgerDeps {
-  return { fetchSessions, urlConfigured, baseUrl: "http://127.0.0.1:8787" };
+  return {
+    fetchSessions,
+    // This file tests the FACTS leg; a merges stub that answered rows would be
+    // asserting about a leg no case here calls.
+    fetchMerges: async () => ({ merges: [] }),
+    urlConfigured,
+    baseUrl: "http://127.0.0.1:8787",
+  };
 }
 
 const facts = (id: string, cost: number) => ({

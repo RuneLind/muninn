@@ -227,9 +227,10 @@ import {
   type WikiListing,
   type WikiSortMode,
 } from "./wiki-filter.ts";
-// The provenance strip + the rail's Sessions section. Every string and every
-// fragment of markup lives in that module (pure, `bun test`-covered); this file
-// only decides WHERE it goes and wires the two controls it carries.
+// The provenance strip: one collapsed line under the title that opens into the
+// chain. Every string and every fragment of markup lives in that module (pure,
+// `bun test`-covered); this file only decides WHERE it goes and wires the three
+// controls it carries — the Jira key, the disclosure and the ⧉ copy button.
 import {
   provStripHtml,
   railListHtml,
@@ -237,8 +238,6 @@ import {
   SESSION_COPY_IDLE,
   SESSION_COPY_OK,
   sessionCopyAriaLabel,
-  sessionsRailHtml,
-  sessionsSectionVisible,
 } from "./wiki-provenance-view.ts";
 import type { ProvenancePayload } from "../../../wiki/provenance.ts";
 
@@ -999,20 +998,10 @@ function renderList(): void {
     // away — that is a scan of every page on every keystroke.
     activity: railSectionsVisible(filters) ? rankActivity(filtered, activityWeights, now) : [],
   });
-  // The open page's Sessions section, ABOVE everything the rail built. Not folded
-  // into `buildRail`: its model is pages and its invariant is one row per page,
-  // while these rows are sessions carrying no `data-relpath` — see
-  // `sessionsRailHtml`. The visibility rule reuses `railSectionsVisible` through
-  // `sessionsSectionVisible`, so a search query clears the head of the rail for
-  // the Jira-key jump exactly as it does for Activity and Pinned.
-  //
-  // Held in its OWN buffer, never seeded into `html`: the empty state below is
-  // decided on the page rows alone (`railListHtml`), or a page with sessions
-  // would answer a facet that matches nothing with session rows and no
-  // "No pages match." at all.
-  const sessionsHtml = sessionsSectionVisible(filters, currentProvenance?.sessions)
-    ? sessionsRailHtml(currentProvenance!.sessions, currentProvenance!.ledger)
-    : "";
+  // The open page's sessions used to be a section at the head of this rail. They
+  // are now rows in the chain under the page title, which is where they have
+  // room; `railListHtml` below still owns the empty state, because the rule that
+  // made it a function of the PAGE ROWS alone outlives the prefix that broke it.
   let html = "";
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
@@ -1096,7 +1085,7 @@ function renderList(): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
-  listEl.innerHTML = railListHtml(sessionsHtml, html);
+  listEl.innerHTML = railListHtml(html);
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
   // is shorter the browser clamps to the new maximum and re-assigning the saved
@@ -1201,7 +1190,7 @@ function copyArticlePath(btn: HTMLButtonElement): void {
 }
 
 /**
- * Copy one session id off a rail row — the ⧉ Copy path control's twin, and
+ * Copy one session id off a chain row — the ⧉ Copy path control's twin, and
  * through the same `copyText`/`flashCopyResult` pair rather than a second
  * clipboard write.
  *
@@ -1227,6 +1216,29 @@ function copySessionId(btn: HTMLButtonElement): void {
   // reader's clipboard (the ⧉ Copy path reasoning, verbatim).
   if (!id) return flashCopyResult(btn, false, idle);
   void copyText(id).then((ok) => flashCopyResult(btn, ok, idle));
+}
+
+/**
+ * Open or close the provenance chain under the page title.
+ *
+ * The button's `aria-expanded` and the chain's `hidden` are flipped TOGETHER and
+ * both read off the DOM rather than a module-level flag: the strip is re-rendered
+ * from scratch on every page load (collapsed, by the renderer), so a flag here
+ * would outlive the element it described and report the wrong state on the next
+ * page.
+ *
+ * `aria-controls` names the chain, so the element is found through the button
+ * rather than by a second selector that could drift from the markup.
+ */
+function toggleProvChain(btn: HTMLButtonElement): void {
+  const id = btn.getAttribute("aria-controls") || "";
+  const chain = id ? document.getElementById(id) : null;
+  if (!chain) return;
+  const open = btn.getAttribute("aria-expanded") === "true";
+  btn.setAttribute("aria-expanded", open ? "false" : "true");
+  // `hidden`, not a display style: it is what the renderer ships the element
+  // with, so one property is the whole state.
+  chain.hidden = open;
 }
 
 // ── Breadcrumb bar (above the article) ────────────────────────────────
@@ -2081,13 +2093,28 @@ document.body.addEventListener("click", (e) => {
     applyJiraFilter(filters.jira === key ? "" : key);
     return;
   }
-  // The rail's ⧉ copy button on a session row. The id is carried ON the button
-  // rather than re-read from the row at click time, the ⧉ Copy path rule: the
-  // string reported and the string copied cannot then be different sessions.
+  // The ⧉ copy button on a chain row. The id is carried ON the button rather
+  // than re-read from the row at click time, the ⧉ Copy path rule: the string
+  // reported and the string copied cannot then be different sessions. Checked
+  // BEFORE the disclosure below, because the button sits INSIDE the chain the
+  // line opens — the outer `closest` would otherwise never be reached, but the
+  // order is what makes that a decision rather than a coincidence of markup.
   const sessCopy = target.closest ? target.closest<HTMLButtonElement>("[data-sess-copy]") : null;
   if (sessCopy) {
     e.preventDefault();
     copySessionId(sessCopy);
+    return;
+  }
+  // The provenance line itself: one disclosure over the chain under the title.
+  // Delegated for the same reason as the two above — `#articleWrap`'s innerHTML
+  // is replaced on every page load, so a listener bound at render time would be
+  // re-bound per page and lost on the next one.
+  const provToggle = target.closest
+    ? target.closest<HTMLButtonElement>("[data-prov-toggle]")
+    : null;
+  if (provToggle) {
+    e.preventDefault();
+    toggleProvChain(provToggle);
     return;
   }
   const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;

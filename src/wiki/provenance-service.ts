@@ -41,11 +41,17 @@ import {
   jiraRows,
   parsePrRef,
   LEDGER_NOT_ASKED,
+  MERGES_NOT_ASKED,
   type ProvenanceLedgerState,
   type ProvenancePayload,
   type ProvenanceSessionChip,
 } from "./provenance.ts";
-import { fetchSessionsById, type SessionLedgerDeps, type SessionLedgerResult } from "./session-ledger.ts";
+import {
+  fetchMergesForSessions,
+  fetchSessionsById,
+  type SessionLedgerDeps,
+  type SessionLedgerResult,
+} from "./session-ledger.ts";
 import { loadJiraKeyIndex } from "../jira/verify-keys.ts";
 
 /**
@@ -109,15 +115,27 @@ export interface ResolvedProvenance {
 export async function resolveProvenance(
   input: { refs: readonly string[]; keys: readonly string[]; costOver?: (chip: ProvenanceSessionChip) => boolean },
   ctx: ProvenanceContext,
+  /**
+   * The deadline, when a CALLER owns one.
+   *
+   * `pageProvenance` runs a third leg (merges) beside these two and has to hold
+   * the timer itself: a signal created down here and never returned would leave
+   * that leg either unbounded or armed with a second timer of its own, and
+   * awaiting this function before starting it would make the page open
+   * sequential. Absent — the two reverse lookups — this creates its own, under
+   * the same condition as before.
+   */
+  outerSignal?: AbortSignal,
 ): Promise<ResolvedProvenance> {
   const refs = dedupeSessionRefs(input.refs);
   const keys = [...new Set(input.keys)];
 
   const askLedger = refs.length > 0 && ctx.sessionLedger.urlConfigured;
-  // ONE deadline, shared by both legs. Created only when something is actually
+  // ONE deadline, shared by every leg. Created only when something is actually
   // fetched, so a page with neither key does not arm a timer.
   const signal =
-    askLedger || keys.length > 0 ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS) : undefined;
+    outerSignal ??
+    (askLedger || keys.length > 0 ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS) : undefined);
 
   // Concurrent: the two reads are independent services and running them in
   // sequence made the page open cost their SUM. `Promise.all` over two never-
@@ -181,7 +199,18 @@ function ledgerState(
   };
 }
 
-/** The whole `provenance` block for one page, or null when it carries none. */
+/**
+ * The whole `provenance` block for one page, or null when it carries none.
+ *
+ * THREE legs, ONE deadline, all started together: the session facts and the
+ * huginn corpus (inside `resolveProvenance`) and the merges route beside them.
+ * The merges leg lives HERE rather than in `resolveProvenance` because the two
+ * reverse lookups share that function over up to 1,000 refs — a fan-out there
+ * would multiply the calls one GET buys, on a route that renders no merge.
+ *
+ * The timer is created here, once, and handed down. Creating one per leg is how
+ * a page open whose legs are each "bounded at 10 s" comes to take thirty.
+ */
 export async function pageProvenance(
   meta: WikiPageMeta,
   ctx: ProvenanceContext,
@@ -189,13 +218,38 @@ export async function pageProvenance(
   // ONE gate, `hasProvenance` — the same predicate the store's own callers use,
   // so "does this page carry provenance" has a single answer.
   if (!hasProvenance(meta)) return null;
-  const resolved = await resolveProvenance(
-    { refs: meta.sessions ?? [], keys: meta.jira ?? [] },
-    ctx,
-  );
+
+  const refs = meta.sessions ?? [];
+  const keys = meta.jira ?? [];
+  // Exactly `resolveProvenance`'s own condition, hoisted: a page with nothing to
+  // ask still arms no timer.
+  const askLedger = refs.length > 0 && ctx.sessionLedger.urlConfigured;
+  const signal =
+    askLedger || keys.length > 0
+      ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS)
+      : undefined;
+
+  const [resolved, mergeResult] = await Promise.all([
+    resolveProvenance({ refs, keys }, ctx, signal),
+    // The SAME dedup the facts leg pages over, so one session listed twice is
+    // one id here too — and the same bare ids, since the `provider:` prefix is
+    // muninn's and the ledger is keyed on neither.
+    askLedger
+      ? fetchMergesForSessions(
+          ctx.sessionLedger,
+          dedupeSessionRefs(refs).map((r) => bareId(r)),
+          signal,
+        )
+      : null,
+  ]);
+
   return {
     ...resolved,
     prs: (meta.prs ?? []).map(parsePrRef),
+    merges: mergeResult?.merges ?? [],
+    mergesLedger: mergeResult
+      ? { asked: mergeResult.asked, reachable: mergeResult.reachable, truncated: mergeResult.truncated }
+      : MERGES_NOT_ASKED,
     ...(meta.sessionsBackfilled ? { backfilled: meta.sessionsBackfilled } : {}),
   };
 }

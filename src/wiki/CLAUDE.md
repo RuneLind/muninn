@@ -442,7 +442,8 @@ function).
 `hasProvenance(meta)` — the ONE gate, shared with the store's other callers —
 says the page carries any of the three LIST keys. `sessions_backfilled` alone
 opens nothing: it is a marker about a list that is not there. The payload is
-`{sessions, jira, prs, totalCost, costedSessions, backfilled?, ledger}`.
+`{sessions, jira, prs, merges, totalCost, costedSessions, backfilled?, ledger,
+mergesLedger}`.
 
 Sessions are enriched SERVER-side in BATCHES of `SESSION_IDS_PER_CALL` (200)
 against `GET <CLAUDE_USAGE_URL>/api/sessions-by-id?ids=…`, through the shared
@@ -453,9 +454,45 @@ different rates, and one capped set cleared wholesale let this caller — once p
 page open, with the failing endpoint in its key — evict the `/models` card's
 single key and make it re-warn an outage in its tenth hour. One call for
 every page anyone has actually stamped, but **not one by contract**: the batch
-size is the cap, and a page naming 250 sessions makes two. Every batch and the
-huginn Jira lookup share ONE `PROVENANCE_BUDGET_MS` (10 s) deadline and run
-concurrently, so a page open costs one budget rather than the sum of its legs.
+size is the cap, and a page naming 250 sessions makes two.
+
+**THREE legs, ONE deadline, all started together.** Beside the session facts and
+the huginn Jira lookup, a page open asks `GET <CLAUDE_USAGE_URL>/api/merges?sessions=…`
+for the PRs those sessions merged (`fetchMergesForSessions`, the same batching,
+the same id-shape gate, the same `SESSION_IDS_QUERY_MAX_BYTES` budget — the
+16 KiB header block is a property of the SERVICE, not of one route). Every leg
+shares one `PROVENANCE_BUDGET_MS` (10 s) `AbortSignal`, so a page open costs one
+budget rather than the sum of its legs.
+
+That signal is created in **`pageProvenance`** and passed down. It used to be
+created inside `resolveProvenance` and never returned, which leaves a leg added
+beside it either unbounded or armed with a second timer — and awaiting that
+function before starting the new leg would make the page open sequential. The
+conditional creation is unchanged: a page with nothing to ask still arms no
+timer.
+
+**The merges leg lives in `pageProvenance`, NOT in `resolveProvenance`.** The two
+reverse lookups share that function over up to `PROVENANCE_REFS_MAX` (1000)
+refs, and a fan-out there would multiply the claude-usage calls one GET buys on a
+route that renders no merge row. A test pins it, and it is the one test in that
+file which is vacuous until someone moves the call — which is exactly why it is
+there.
+
+`mergesLedger` is `{asked, reachable, truncated}` and is deliberately NOT folded
+into `ledger`: the two legs hit the same service and fail independently, and the
+reader must be able to tell "this page has no merges" from "the merges call did
+not answer". A shared `reachable` would make the second unsayable, and would push
+the cost sentence — which is about the FACTS leg — into a state the money it
+reports never came from. A merge row with no `sessionId` is dropped (it is the
+join back onto a chip); `mergeOk` is read as false only when EXPLICITLY false, so
+an older ledger that does not send the field cannot turn every merge on the page
+into `merge unconfirmed`.
+
+`fetchMerges` is a REQUIRED member of `SessionLedgerDeps` rather than an optional
+one: an absent leg would be indistinguishable from a leg that answered nothing,
+so a wiring mistake would render as "these sessions merged nothing" on every
+page. Every construction site states what its merges leg does, and the compiler
+is what enforces it.
 The `provider:` prefix is muninn's, so the ids go BARE; a bare ref takes the
 LEDGER's provider for its glyph, a prefixed one keeps the page's own spelling.
 The browser never reaches port 8787 (tailnet viewers, mixed content under
@@ -580,15 +617,17 @@ Short deliberately: the answer it suppresses is a degrade rather than a result.
 
 ### The client (`views/components/wiki-provenance-view.ts`)
 
-**Placement C: the strip is the SUMMARY, the rail panel is the DETAIL.** Under
-the page title, below `.wiki-meta-row`, a `.wiki-prov-strip` carries the Jira row
-and ONE line of cost; in the left rail, above the page-list sections, a
-`Sessions` section carries one row per chip. Both are rendered only from the
-single-page payload's `provenance` key — absent on an unstamped page, which is
-the one gate, and cleared at the START of every navigation rather than when the
-next response lands, so a slow load cannot leave the previous page's sessions
-standing over the new article. **`prs` renders nothing at all**: the PR row ships
-with campaign 2, and a half-built control is worse than none.
+**One surface: a collapsed line under the title that opens into the chain.**
+Below `.wiki-meta-row`, a `.wiki-prov-strip` carries the Jira row, then a
+`.wiki-prov-line` — the cost sentence plus one mark per event — and the
+`.wiki-prov-chain` it discloses. The rail's `Sessions` section is GONE: it
+repeated the strip in a 340 px column, and its two controls (⧉ and ↗) moved into
+the chain rows. Both halves render only from the single-page payload's
+`provenance` key — absent on an unstamped page, which is the one gate, and
+cleared at the START of every navigation rather than when the next response
+lands, so a slow load cannot leave the previous page's chain standing over the
+new article. **`prs` renders nothing at all**: the frontmatter PR row ships with
+campaign 2, and a half-built control is worse than none.
 
 Every string and every fragment of markup lives in **one pure module** — no DOM,
 no import from `wiki-browser.ts` — because that entrypoint touches `document` at
@@ -609,25 +648,87 @@ that is gone, `unresolved` one nobody asked about. **`unresolved` splits on
 `ledger.configured`** (`bareChipCopy`), for the reason `costLine`'s fourth and
 fifth rows split: on a host with no `CLAUDE_USAGE_URL` the default sentence
 blames a service that does not exist, under a strip already saying so. A bare
-chip carries the id and its reason and NO `CLAUDE_USAGE_PUBLIC_URL` drill-down:
+row carries the id and its reason and NO `CLAUDE_USAGE_PUBLIC_URL` drill-down:
 for `missing`/`invalid` that link is a dead end by construction — the SERVER
-builds the url for every chip and the client decides per chip.
+builds the url for every chip and the client decides per row.
 
-The rail's empty state is decided on the PAGE rows alone (`railListHtml`): the
-Sessions block is about the OPEN PAGE and "No pages match." is about the FILTER,
-so composing them into one buffer let a stamped page answer a facet matching
-nothing with session rows and no empty state at all. **The explainer path renders
-neither half** — `loadExplainer` sets `currentProvenance = null`, since a
-standalone `.html` carries no frontmatter to stamp.
+**The line is a real `<button aria-expanded>`**, not a `<summary>` and not a
+clickable `<div>`: the keyboard reader gets it for free and the state is readable
+by anything that asks. It ships collapsed, with no per-viewer memory; the chain
+is `hidden` on the ELEMENT rather than behind a class, so a stylesheet that
+failed to load leaves the chain closed rather than every row of every page
+expanded. ⚠️ **A `display` declaration on a class beats the user agent's own
+`[hidden]` rule** — measured: the first cut rendered the chain fully expanded
+while the attribute said `hidden`, green through every unit test and caught by
+the e2e — so `.wiki-prov-chain[hidden] { display: none; }` rides beside the
+`display: flex`, and any later `display` on that element needs it too.
 
-The rail rows are a PREFIX to the page list, not `buildRail` entries — that
-function's model is pages and its invariant is one row per page, while a session
-carries no `relPath`. They are hidden under a search query (through
-`railSectionsVisible`, so the Jira-key jump keeps the head of the rail) and each
-row's ⧉ copies the bare id through the shared `copyText`/`flashCopyResult` pair:
-the browser cannot reach claude-usage, so copyable text IS the drill-down, and on
-the tailnet-over-plain-HTTP deployment `navigator.clipboard` is absent and the
-`execCommand` fallback is the only path.
+**The chain is `chainEvents`: sessions and merges on ONE spine, ascending.** A
+session is dated by `first ?? last` (the ledger returns one end of the range for
+a session that ran inside a minute and the other for one that did not) and a
+merge by `mergedAt`; a DATELESS event sorts LAST, in the page's own `sessions:`
+order. That rule is stated rather than inherited from a sort because every bare
+chip has `first: null` — `enrichSessions` fills the whole key set with nulls when
+the ledger holds no facts — so the shape fixture's `missing` session and a
+damaged ref's `invalid` chip would otherwise land wherever the comparator left
+them. Ties keep input order (sessions before merges) through an explicit index,
+not by relying on the sort being stable, and a stamp that does not parse is
+treated as dateless rather than placed at epoch zero.
+
+Stamps render `MM-DD HH:MM` **in the VIEWER's zone**, assembled from
+`formatToParts` (a locale decides the order of its own date parts; this row's
+layout is not the locale's business) with `hourCycle: "h23"` stated, since `h24`
+renders midnight as `24` and `h12` as `12`. The row's `title` carries the
+ledger's own ISO stamps, so the local-time label is never the only spelling of
+the instant — and every test and spec that asserts an hour pins a zone
+explicitly, or the assertion is a fact about the machine that ran it.
+
+**A merge row is rendered from the merge's `url`, never from `repo`.** That
+column is a CHECKOUT PATH on this corpus, and turning one into an `owner/repo` is
+the guess claude-usage's own `planPrUrl` refuses to make; `url` is null for any
+repo its `repoUrls` map does not name, and such a row renders `#n merged …` with
+the checkout's BASENAME as a hover and no link at all. Only a `https://github.com/<owner>/<repo>/pull/<n>`
+url is linked — an arbitrary href out of a ledger row is not this control. The PR
+title is omitted (`subject` is null on every merge measured; it comes from the
+confirm side). A **`mergeOk: false` row is QUALIFIED with `merge unconfirmed`,
+never dropped**: false has three causes and the common two are ordinary — a UI
+merge whose squash message was composed here, and a `gh pr merge` whose result
+was never paired — so dropping them would hide the NAV flow's merges entirely
+(measured 20 of 179 rows false, 2026-09-16).
+
+**The merges leg fails on its own, and says so in one footer line.** `mergesNote`
+answers `merges not shown: claude-usage did not answer` for a leg that was asked
+and did not answer, `merges not shown: list cut at 200` for upstream's own
+`truncated`, and NOTHING for a leg that was never asked — a host with no
+claude-usage has no merges call to have failed. The cost sentence is about the
+FACTS leg and does not move for any of it.
+
+The rail's empty state is still decided on the PAGE rows alone (`railListHtml`,
+now one argument): the rows that motivated the rule have moved into the chain,
+but "No pages match." is about the FILTER and nothing above it may stand in for
+that answer. **The explainer path renders nothing** — `loadExplainer` sets
+`currentProvenance = null`, since a standalone `.html` carries no frontmatter to
+stamp.
+
+`wiki-browser.ts` wires three delegated controls on the document, all delegated
+because `#articleWrap`'s innerHTML is replaced on every page load: the Jira key
+(`[data-prov-jira]`), the ⧉ copy button (`[data-sess-copy]`, which keeps its
+contract from the rail rows) and the disclosure (`[data-prov-toggle]`). The copy
+button is checked BEFORE the disclosure, since it sits inside the chain the line
+opens. `toggleProvChain` reads and writes the DOM only — `aria-expanded` on the
+button, `hidden` on the element `aria-controls` names — rather than a module
+flag, which would outlive the element it described and report the wrong state on
+the next page. Each ⧉ copies the bare id through the shared
+`copyText`/`flashCopyResult` pair: the browser cannot reach claude-usage, so
+copyable text IS the drill-down, and on the tailnet-over-plain-HTTP deployment
+`navigator.clipboard` is absent and the `execCommand` fallback is the only path.
+
+**Contrast**, measured on a body probe in both themes at these sizes:
+`--text-faint` is 2.50:1 dark / 2.62:1 light and `--text-dim` 3.24 / 3.74, both
+under the 4.5:1 floor. Every line a reader has to READ — the sentence, the dates,
+the host, a bare row's reason, the title, the id, the copy control, the footer —
+sits at `--text-muted` (5.26 dark / 4.94 light). Only the marks and the provider
+glyph sit lower, and each carries a `title`: they are marks, not text.
 
 **The Jira facet** is the `project` facet's twin, mirror for mirror — `?jira=` URL
 state, a chip row inside the Filters disclosure, `resolveJiraParam` /
@@ -650,9 +751,12 @@ listing through `?jira=`. The strip's key sets that facet — and renders as a
 control at all only for a key the facet map holds, with `applyJiraFilter`
 refusing anything `resolveJiraParam` would drop, so no entry point can set a
 filter a reload would silently lose. Smoked end to end in `e2e/wiki-provenance.spec.ts`,
-whose `node:http` stub plays claude-usage and prices ONE of the shape fixture's
-two sessions, which is what drives the `missing` chip and the "over M of N" line
-in a real browser.
+whose `node:http` stub plays claude-usage: it prices ONE of the shape fixture's
+two sessions (which drives the `missing` row and the "over M of N" line in a real
+browser), answers three merges covering the linked / unlinked / unconfirmed
+shapes, and refuses `/api/merges` for one page's session so the footer degrade is
+driven through a real page open. The spec pins `timezoneId`, since every rendered
+stamp it asserts is otherwise a fact about the machine.
 
 ### The cross-process lockfile (`lockfile.ts`)
 

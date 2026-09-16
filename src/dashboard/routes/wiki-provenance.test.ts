@@ -49,6 +49,9 @@ function testCtx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
             : { sessionId: id, missing: true },
         ),
       }),
+      // No merges by default: every case in this file is about the two reverse
+      // lookups, which do not run that leg at all.
+      fetchMerges: async () => ({ merges: [] }),
     },
     knowledgeApiUrl: "http://localhost:8321",
     publicUrl: null,
@@ -168,6 +171,7 @@ describe("the two query params", () => {
           fetchSessions: async () => {
             throw new Error("connect ECONNREFUSED");
           },
+          fetchMerges: async () => ({ merges: [] }),
         },
       }),
     );
@@ -295,6 +299,7 @@ describe("the answer is BOUNDED — the caller picks its size", () => {
         sessionLedger: {
           baseUrl: "http://127.0.0.1:8787",
           urlConfigured: true,
+          fetchMerges: async () => ({ merges: [] }),
           fetchSessions: async (ids) => {
             calls.push(ids.length);
             return { sessions: ids.map((id) => ({ sessionId: id, missing: true })) };
@@ -354,6 +359,7 @@ describe("?session= prices the session ASKED ABOUT", () => {
         sessionLedger: {
           baseUrl: "http://127.0.0.1:8787",
           urlConfigured: true,
+          fetchMerges: async () => ({ merges: [] }),
           fetchSessions: async (ids) => ({
             sessions: ids.map((id) => ({
               sessionId: id,
@@ -401,6 +407,7 @@ describe("an unconfigured host", () => {
         sessionLedger: {
           baseUrl: "http://127.0.0.1:8787",
           urlConfigured: false,
+          fetchMerges: async () => ({ merges: [] }),
           fetchSessions: async () => {
             calls += 1;
             return { sessions: [] };
