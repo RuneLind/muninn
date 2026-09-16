@@ -367,9 +367,21 @@ export interface MergeLedgerResult {
   asked: boolean;
   /** At least one batch answered with a readable payload. */
   reachable: boolean;
+  /**
+   * Some batches answered and some did not, so `merges` is a SUBSET of what the
+   * service holds for these sessions.
+   *
+   * The same third state the facts leg carries, and it exists for the same
+   * reason: with more than one batch, `reachable` alone reports a half-answer as
+   * a whole one — measured on 250 ids (batches of 200 + 50, the second
+   * throwing), which rendered one merge under a footer that said nothing.
+   */
+  partial: boolean;
   merges: LedgerMerge[];
   /** Upstream cut a batch at its own cap. */
   truncated: boolean;
+  /** The cap upstream reports alongside `truncated` — its number, not ours. */
+  limit?: number;
   errors?: string[];
 }
 
@@ -404,9 +416,11 @@ function toMerge(v: unknown): LedgerMerge | null {
  * leg pages by — the 200-id cap and the query byte budget, both of which are
  * properties of the service and of Bun's 16 KiB header block, not of a route.
  *
- * Never throws. A failed batch leaves its rows out and the reason in `errors`;
- * the reader's degrade is one footer line, and the page's cost sentence — which
- * is about the FACTS leg — is untouched either way.
+ * Never throws. A failed batch leaves its rows out and the reason in `errors`,
+ * and — when another batch DID answer — sets `partial`, which is the difference
+ * between "no merges" and "some of the merges". The reader's degrade is one
+ * footer line, and the page's cost sentence — which is about the FACTS leg — is
+ * untouched either way.
  *
  * `signal` is the caller's deadline over the whole page open, shared with the
  * facts leg. Two budgets on one page open means the looser one never applies.
@@ -419,16 +433,21 @@ export async function fetchMergesForSessions(
   const merges: LedgerMerge[] = [];
   const errors: string[] = [];
   let answered = false;
+  let failed = false;
   let truncated = false;
+  let limit: number | undefined;
 
   const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
   const askable = unique.filter((id) => isSessionIdShape(id));
   if (askable.length === 0) {
-    return { asked: false, reachable: false, merges, truncated: false };
+    return { asked: false, reachable: false, partial: false, merges, truncated: false };
   }
 
   for (const batch of batchSessionIds(askable)) {
-    const fail = (reason: string) => errors.push(`claude-usage merges: ${reason}`);
+    const fail = (reason: string) => {
+      failed = true;
+      errors.push(`claude-usage merges: ${reason}`);
+    };
     let payload: unknown;
     try {
       payload = await deps.fetchMerges(batch, signal);
@@ -448,7 +467,15 @@ export async function fetchMergesForSessions(
       continue;
     }
     answered = true;
-    if ((payload as { truncated?: unknown }).truncated === true) truncated = true;
+    if ((payload as { truncated?: unknown }).truncated === true) {
+      truncated = true;
+      // Upstream's OWN cap, carried rather than re-stated here: `truncated` is
+      // `ids.length > SESSION_IDS_MAX` per CALL over there, and a number typed
+      // into a note on this side is a second spelling of a constant that lives
+      // in another repo.
+      const l = (payload as { limit?: unknown }).limit;
+      if (typeof l === "number" && Number.isFinite(l) && l > 0) limit = l;
+    }
     for (const row of rows) {
       const merge = toMerge(row);
       if (merge) merges.push(merge);
@@ -462,8 +489,10 @@ export async function fetchMergesForSessions(
   return {
     asked: true,
     reachable: answered,
+    partial: answered && failed,
     merges,
     truncated,
+    ...(limit !== undefined ? { limit } : {}),
     ...(errors.length > 0 ? { errors } : {}),
   };
 }

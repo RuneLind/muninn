@@ -221,9 +221,15 @@ export async function pageProvenance(
 
   const refs = meta.sessions ?? [];
   const keys = meta.jira ?? [];
+  // The DEDUPED list, which is exactly what `resolveProvenance` asks over — and
+  // the reason the gate reads it rather than `refs.length`: `dedupeSessionRefs`
+  // drops a blank entry, so a page whose only `sessions:` line is whitespace
+  // reaches the ledger with nothing to ask while a raw-length gate arms a timer
+  // and starts two legs for it.
+  const askRefs = dedupeSessionRefs(refs).map((r) => bareId(r));
   // Exactly `resolveProvenance`'s own condition, hoisted: a page with nothing to
   // ask still arms no timer.
-  const askLedger = refs.length > 0 && ctx.sessionLedger.urlConfigured;
+  const askLedger = askRefs.length > 0 && ctx.sessionLedger.urlConfigured;
   const signal =
     askLedger || keys.length > 0
       ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS)
@@ -231,16 +237,9 @@ export async function pageProvenance(
 
   const [resolved, mergeResult] = await Promise.all([
     resolveProvenance({ refs, keys }, ctx, signal),
-    // The SAME dedup the facts leg pages over, so one session listed twice is
-    // one id here too — and the same bare ids, since the `provider:` prefix is
-    // muninn's and the ledger is keyed on neither.
-    askLedger
-      ? fetchMergesForSessions(
-          ctx.sessionLedger,
-          dedupeSessionRefs(refs).map((r) => bareId(r)),
-          signal,
-        )
-      : null,
+    // The SAME list the facts leg pages over — deduped, bare ids, since the
+    // `provider:` prefix is muninn's and the ledger is keyed on neither.
+    askLedger ? fetchMergesForSessions(ctx.sessionLedger, askRefs, signal) : null,
   ]);
 
   return {
@@ -248,7 +247,14 @@ export async function pageProvenance(
     prs: (meta.prs ?? []).map(parsePrRef),
     merges: mergeResult?.merges ?? [],
     mergesLedger: mergeResult
-      ? { asked: mergeResult.asked, reachable: mergeResult.reachable, truncated: mergeResult.truncated }
+      ? {
+          asked: mergeResult.asked,
+          reachable: mergeResult.reachable,
+          partial: mergeResult.partial,
+          truncated: mergeResult.truncated,
+          ...(mergeResult.limit !== undefined ? { limit: mergeResult.limit } : {}),
+          ...(mergeResult.errors ? { errors: mergeResult.errors } : {}),
+        }
       : MERGES_NOT_ASKED,
     ...(meta.sessionsBackfilled ? { backfilled: meta.sessionsBackfilled } : {}),
   };

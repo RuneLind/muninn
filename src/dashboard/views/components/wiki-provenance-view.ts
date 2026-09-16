@@ -180,8 +180,6 @@ export interface SessionChipView {
   costLabel: string | null;
   /** The copy that REPLACES the money on a bare chip, `null` on a priced one. */
   bareCopy: string | null;
-  /** The bare id, always — it is what the copy button puts on the clipboard. */
-  id: string;
   /** The claude-usage drill-down, present only where `CLAUDE_USAGE_PUBLIC_URL`
    *  is set on this instance. */
   url: string | null;
@@ -223,7 +221,6 @@ export function chipView(
     // tell them apart — the OBSERVABLE fix here is the renderer.
     costLabel: reason ? null : chip.cost == null ? "—" : fmtCost(chip.cost),
     bareCopy: reason ? bareChipCopy(reason, ledger) : null,
-    id: chip.id,
     // A BARE chip gets no drill-down, even where the server built one: for
     // `missing` and `invalid` the link is a dead end by construction (the
     // service answered that it does not hold the id, or the id cannot be one),
@@ -300,7 +297,10 @@ export function provStripHtml(
   known?: Record<string, number> | null,
   opts: ChainRenderOptions = {},
 ): string {
-  const line = provLineHtml(p);
+  // `opts` reaches BOTH halves: the marks' hovers carry the same stamps the
+  // chain rows do, and a zone passed to one and not the other renders a session
+  // at two different hours on one page.
+  const line = provLineHtml(p, opts);
   if (!p.jira.length && !line) return "";
   let html = `<div class="wiki-prov-strip">`;
   if (p.jira.length) {
@@ -418,7 +418,7 @@ function stampMs(at: string | null): number | null {
 /** What a chain row shows of a date. The runtime default is the VIEWER's own
  *  zone; tests pass one explicitly, or every assertion on an hour becomes a fact
  *  about the machine the suite ran on. */
-export interface ChainRenderOptions {
+interface ChainRenderOptions {
   timeZone?: string;
 }
 
@@ -435,9 +435,19 @@ export interface ChainRenderOptions {
  * `12`. So the two wrong answers are reachable through an option, and naming the
  * cycle is what keeps a midnight row from reading as the end of the day before
  * or as noon.
+ *
+ * A DATE-ONLY value (`2026-09-15`) is answered `MM-DD` from its own digits and
+ * never converted: `Date.parse` reads it as UTC midnight, so formatting it in
+ * any zone west of UTC renders the day BEFORE — and there is no hour in the
+ * input to render anyway. The ledger spells full stamps today; a date-only one
+ * reaches here from hand-written frontmatter.
  */
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
 export function fmtChainStamp(at: string | null | undefined, timeZone?: string): string {
   if (!at) return "";
+  const dateOnly = DATE_ONLY.exec(at);
+  if (dateOnly) return `${dateOnly[2]}-${dateOnly[3]}`;
   const ms = Date.parse(at);
   if (!Number.isFinite(ms)) return "";
   const parts = new Intl.DateTimeFormat("en-GB", {
@@ -472,7 +482,7 @@ function sessionWhen(chip: ProvenanceSessionChip, timeZone?: string): string {
  */
 const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\/pull\/([0-9]+)$/;
 
-export function mergeCoordinate(url: string | null): { repo: string; number: string } | null {
+function mergeCoordinate(url: string | null): { repo: string; number: string } | null {
   if (!url) return null;
   const m = PR_URL.exec(url);
   return m ? { repo: m[1]!, number: m[2]! } : null;
@@ -481,7 +491,7 @@ export function mergeCoordinate(url: string | null): { repo: string; number: str
 /** The last segment of a checkout path — what an unlinked row hovers, so the
  *  reader can tell WHICH checkout without being shown a coordinate nobody
  *  resolved. */
-export function repoBasename(repo: string): string {
+function repoBasename(repo: string): string {
   const parts = repo.split("/").filter(Boolean);
   return parts.length ? parts[parts.length - 1]! : repo;
 }
@@ -495,40 +505,94 @@ export const MERGE_UNCONFIRMED_COPY = "merge unconfirmed";
  *  is about the FACTS leg and must not move for this. */
 export const MERGES_UNREACHABLE_NOTE = "merges not shown: claude-usage did not answer";
 
-/** Upstream cut the list at its own id cap (200, `SESSION_IDS_PER_CALL` — this
- *  module is browser-safe and does not import the ledger client to say so). */
-export const MERGES_CUT_NOTE = "merges not shown: list cut at 200";
+/** Some batches answered and some did not. The rows above are real and there
+ *  are more of them — which is why this does not say "not shown". */
+export const MERGES_PARTIAL_NOTE =
+  "merges may be incomplete: claude-usage answered for some sessions only";
+
+/**
+ * Upstream cut the list at ITS own cap, reported with the cap it used.
+ *
+ * The number is the payload's `limit`, never a literal here: upstream's
+ * `truncated` is `ids.length > SESSION_IDS_MAX` per CALL (claude-usage
+ * `src/routes.ts`), and this module is browser-safe and cannot import the
+ * ledger client to name a constant that lives in another repo anyway.
+ *
+ * ⚠️ UNREACHABLE TODAY, deliberately kept: `fetchMergesForSessions` batches at
+ * exactly `SESSION_IDS_PER_CALL` (200) = upstream's own cap, so no call this
+ * side makes can exceed it. It is upstream's cap that decides, and it can move
+ * in a release muninn does not ship — at which point this is the only thing
+ * standing between a reader and a silently short list.
+ *
+ * "list cut", not "not shown": the rows beside this note are rendered, and the
+ * previous wording told the reader to disbelieve what was on screen.
+ */
+export function mergesCutNote(limit?: number | null): string {
+  return typeof limit === "number" && limit > 0
+    ? `merges list cut at ${limit} by claude-usage`
+    : "merges list cut by claude-usage";
+}
 
 /** The footer line for the merges leg, or null when it has nothing to report.
  *  An UNASKED leg says nothing: a host with no claude-usage has no merges call
- *  to have failed. */
+ *  to have failed. Most-severe first: a leg that answered nothing, then one that
+ *  answered for some sessions, then a list upstream cut. */
 export function mergesNote(state?: ProvenanceMergesState | null): string | null {
   if (!state?.asked) return null;
   if (!state.reachable) return MERGES_UNREACHABLE_NOTE;
-  if (state.truncated) return MERGES_CUT_NOTE;
+  if (state.partial) return MERGES_PARTIAL_NOTE;
+  if (state.truncated) return mergesCutNote(state.limit);
   return null;
 }
 
-/** The marks after the sentence: one per session, then one per merge. The
- *  vocabulary is open — `data-mark` names the kind, so a later kind (a session
- *  the ledger links but the page never stamped) is a value, not a rewrite. */
+/**
+ * Most marks the line renders before it stops and counts the rest.
+ *
+ * MEASURED on a 60-session page in a 1100 px window: the uncapped run painted
+ * 60 marks, ending 44 px past the article column and taking the caret with them
+ * (the review that found this measured 213 px at its own width). The marks are
+ * one inline-flex run beside a sentence, in a column a reader is reading an
+ * ARTICLE in. Two dozen 9 px glyphs with a 3 px gap is ~150 px, which sits
+ * beside the cost sentence down to a 760 px window; past two dozen the count
+ * says more than the glyphs do. The CSS wraps them as well (see
+ * `.wiki-prov-marks` in `wiki-page.ts`), so the cap is the legibility bound and
+ * the wrap is the containment one — neither alone.
+ */
+export const MARKS_MAX = 24;
+
+/** The marks after the sentence: one per session, then one per merge, and one
+ *  `+N` when there are more than {@link MARKS_MAX}. The vocabulary is open —
+ *  `data-mark` names the kind, so a later kind (a session the ledger links but
+ *  the page never stamped) is a value, not a rewrite. */
 function marksHtml(p: ProvenancePayload, opts: ChainRenderOptions): string {
-  let html = `<span class="wiki-prov-marks">`;
+  const marks: string[] = [];
   for (const chip of p.sessions) {
     const v = chipView(chip, p.ledger);
     const when = sessionWhen(chip, opts.timeZone);
     const what = v.bareCopy ?? `${v.titleFull || chip.id}${v.costLabel ? ` — ${v.costLabel}` : ""}`;
-    html +=
+    marks.push(
       `<span class="wiki-prov-mark wiki-prov-mark-session" data-mark="session"` +
-      ` title="${esc(when ? `${when} · ${what}` : what)}">○</span>`;
+        ` title="${esc(when ? `${when} · ${what}` : what)}">○</span>`,
+    );
   }
   for (const merge of p.merges ?? []) {
     const coordinate = mergeCoordinate(merge.url);
     const label = merge.prNumber === null ? "a merge" : `#${merge.prNumber}`;
     const where = coordinate ? `${coordinate.repo} ` : "";
-    html +=
+    marks.push(
       `<span class="wiki-prov-mark wiki-prov-mark-merge" data-mark="merge"` +
-      ` title="merged ${esc(where + label)}">▪</span>`;
+        ` title="merged ${esc(where + label)}">▪</span>`,
+    );
+  }
+  let html = `<span class="wiki-prov-marks">` + marks.slice(0, MARKS_MAX).join("");
+  const rest = marks.length - MARKS_MAX;
+  if (rest > 0) {
+    // A mark like the others — it carries a title, so the number is never the
+    // only thing it says — and the chain below lists every one of them.
+    html +=
+      `<span class="wiki-prov-mark wiki-prov-mark-more" data-mark="more"` +
+      ` title="${esc(`${plural(rest, "more event")} — open the line to see ${rest === 1 ? "it" : "them"}`)}">` +
+      `+${rest}</span>`;
   }
   return html + `</span>`;
 }
@@ -569,19 +633,23 @@ function sessionRowHtml(
   const v = chipView(chip, ledger);
   const when = sessionWhen(chip, opts.timeZone);
   // The hover carries the ledger's own stamps, so the row's local-time label is
-  // never the only spelling of the instant.
-  const whenTitle = [chip.first, chip.last].filter(Boolean).join(" → ");
+  // never the only spelling of the instant. DEDUPED: the ledger returns the same
+  // instant twice for a session that ran inside a minute, and `X → X` reads as a
+  // range of zero rather than as one moment.
+  const whenTitle = [...new Set([chip.first, chip.last].filter(Boolean))].join(" → ");
   const messages = typeof chip.messages === "number" ? plural(chip.messages, "message") : "";
   let html =
     `<div class="wiki-chain-row wiki-chain-session${v.bareCopy ? " wiki-chain-bare" : ""}"` +
-    ` data-chain="${esc(chip.id)}"${messages ? ` title="${esc(messages)}"` : ""}>`;
+    `${messages ? ` title="${esc(messages)}"` : ""}>`;
   html += `<div class="wiki-chain-head">`;
   html += `<span class="wiki-chain-glyph" title="${esc(v.providerLabel)}">${esc(v.glyph)}</span>`;
   if (when) {
     html +=
       `<span class="wiki-chain-when"${whenTitle ? ` title="${esc(whenTitle)}"` : ""}>${esc(when)}</span>`;
   }
-  if (v.host) html += `<span class="wiki-chain-host">· ${esc(v.host)}</span>`;
+  // The `·` SEPARATES the host from the date before it; with no date there is
+  // nothing to separate it from, and the row opened `◇ · macmini`.
+  if (v.host) html += `<span class="wiki-chain-host">${when ? "· " : ""}${esc(v.host)}</span>`;
   if (v.costLabel) html += `<span class="wiki-chain-cost">${esc(v.costLabel)}</span>`;
   html += `</div>`;
   if (v.title) {
@@ -608,17 +676,19 @@ function mergeRowHtml(merge: ProvenanceMerge, opts: ChainRenderOptions): string 
   const coordinate = mergeCoordinate(merge.url);
   const number = merge.prNumber === null ? "" : `#${merge.prNumber}`;
   const when = fmtChainStamp(merge.mergedAt, opts.timeZone);
-  let html =
-    `<div class="wiki-chain-row wiki-chain-merge" data-chain="${esc(number || "merge")}">`;
+  let html = `<div class="wiki-chain-row wiki-chain-merge">`;
   html += `<span class="wiki-chain-glyph" title="a merged pull request">▪</span>`;
   if (coordinate) {
     html +=
       `<a class="wiki-chain-pr" href="${esc(merge.url!)}" target="_blank" rel="noopener">` +
       `${esc(coordinate.repo)} ${esc(number || `#${coordinate.number}`)}</a>`;
-  } else if (number || merge.repo) {
+  } else {
     // No coordinate: the number alone, with the checkout's basename as the
     // hover. Never a link — a plausible-looking link to somebody else's
-    // repository is the worst output this row can have.
+    // repository is the worst output this row can have. NO third branch: a row
+    // with neither a number nor a repo (the ledger holds a `sessionId` and
+    // nothing else) still says `a merge`, where the guard this replaced left a
+    // row carrying one glyph and no words at all.
     html +=
       `<span class="wiki-chain-pr"${merge.repo ? ` title="${esc(repoBasename(merge.repo))}"` : ""}>` +
       `${esc(number || "a merge")}</span>`;
@@ -653,7 +723,7 @@ export function chainHtml(p: ProvenancePayload, opts: ChainRenderOptions = {}): 
   return html + `</div>`;
 }
 
-/** Label on the rail's copy button, and what it flips to. Short because the
+/** Label on a chain row's copy button, and what it flips to. Short because the
  *  button sits at the end of a row that already carries a date, a host, a title
  *  and a price. */
 export const SESSION_COPY_IDLE = "⧉";

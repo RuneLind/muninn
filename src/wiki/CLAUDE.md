@@ -478,8 +478,8 @@ route that renders no merge row. A test pins it, and it is the one test in that
 file which is vacuous until someone moves the call — which is exactly why it is
 there.
 
-`mergesLedger` is `{asked, reachable, truncated}` and is deliberately NOT folded
-into `ledger`: the two legs hit the same service and fail independently, and the
+`mergesLedger` is `{asked, reachable, partial, truncated, limit?, errors?}` and
+is deliberately NOT folded into `ledger`: the two legs hit the same service and fail independently, and the
 reader must be able to tell "this page has no merges" from "the merges call did
 not answer". A shared `reachable` would make the second unsayable, and would push
 the cost sentence — which is about the FACTS leg — into a state the money it
@@ -487,6 +487,13 @@ reports never came from. A merge row with no `sessionId` is dropped (it is the
 join back onto a chip); `mergeOk` is read as false only when EXPLICITLY false, so
 an older ledger that does not send the field cannot turn every merge on the page
 into `merge unconfirmed`.
+
+`partial` is the THIRD state, the same one the facts leg has carried since #549:
+some batches answered and some did not, so the rows on screen are real and there
+are more of them. It matters exactly when there is more than one batch — measured
+on 250 ids (batches of 200 + 50, the second throwing), which rendered one merge
+under a silent footer. `reachable` alone cannot say it, and a half-answer read as
+a whole one is the failure this whole block exists to prevent.
 
 `fetchMerges` is a REQUIRED member of `SessionLedgerDeps` rather than an optional
 one: an absent leg would be indistinguishable from a leg that answered nothing,
@@ -697,18 +704,44 @@ was never paired — so dropping them would hide the NAV flow's merges entirely
 (measured 20 of 179 rows false, 2026-09-16).
 
 **The merges leg fails on its own, and says so in one footer line.** `mergesNote`
-answers `merges not shown: claude-usage did not answer` for a leg that was asked
-and did not answer, `merges not shown: list cut at 200` for upstream's own
-`truncated`, and NOTHING for a leg that was never asked — a host with no
-claude-usage has no merges call to have failed. The cost sentence is about the
-FACTS leg and does not move for any of it.
+answers most-severe first: `merges not shown: claude-usage did not answer` for a
+leg that was asked and got nothing, `merges may be incomplete: claude-usage
+answered for some sessions only` for a PARTIAL one, `merges list cut at <limit>
+by claude-usage` for upstream's own `truncated`, and NOTHING for a leg that was
+never asked — a host with no claude-usage has no merges call to have failed. The
+cost sentence is about the FACTS leg and does not move for any of it.
+
+The cut note names UPSTREAM's cap, off the payload's own `limit`, and says "list
+cut" rather than "not shown": the rows it stands under ARE rendered. ⚠️ That
+state is **unreachable today** and kept deliberately — `fetchMergesForSessions`
+batches at exactly `SESSION_IDS_PER_CALL` (200), which is upstream's own
+`SESSION_IDS_MAX`, and `truncated` over there is `ids.length > SESSION_IDS_MAX`
+per CALL, so no call this side makes can trip it. It is upstream's cap that
+decides, and it can move in a release muninn does not ship.
+
+**The marks on the collapsed line are capped at `MARKS_MAX` (24), with one `+N`
+tail mark carrying the rest on a hover.** MEASURED on a 60-session page in a
+1100 px window: the marks are one inline-flex run beside the sentence, and
+uncapped they ended 44 px past the article column and took the caret with them.
+The cap is the LEGIBILITY bound; the containment bound is CSS — `flex-wrap` on
+the line, `flex-shrink: 0` + `max-width: 100%` on the marks, `min-width: 0` +
+`overflow-wrap` on the cost — and neither alone is enough. The chain below still
+lists every event.
 
 The rail's empty state is still decided on the PAGE rows alone (`railListHtml`,
 now one argument): the rows that motivated the rule have moved into the chain,
 but "No pages match." is about the FILTER and nothing above it may stand in for
-that answer. **The explainer path renders nothing** — `loadExplainer` sets
-`currentProvenance = null`, since a standalone `.html` carries no frontmatter to
-stamp.
+that answer. **The explainer path renders nothing** — a standalone `.html`
+carries no frontmatter to stamp.
+
+**The strip holds no client state at all.** It is re-rendered from each page's
+own payload inside `articleHeadHtml`, which runs on every navigation as part of
+replacing `#articleWrap`, so a page that carries no `provenance` key renders no
+strip and the previous page's chain goes with the markup it lived in. The client
+kept a `currentProvenance` module variable while the rail had a Sessions section
+to repaint from it; with that section gone nothing read it, and a cleared-on-
+navigation variable nobody reads is a stale-state trap waiting for its first
+reader.
 
 `wiki-browser.ts` wires three delegated controls on the document, all delegated
 because `#articleWrap`'s innerHTML is replaced on every page load: the Jira key

@@ -216,7 +216,12 @@ describe("the merges leg", () => {
       }),
     );
     expect(res!.merges).toEqual([MERGE]);
-    expect(res!.mergesLedger).toEqual({ asked: true, reachable: true, truncated: false });
+    expect(res!.mergesLedger).toEqual({
+      asked: true,
+      reachable: true,
+      partial: false,
+      truncated: false,
+    });
   });
 
   test("the merges leg is asked with BARE ids, the same ones the facts leg gets", async () => {

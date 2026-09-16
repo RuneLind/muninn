@@ -549,7 +549,15 @@ describe("merges", () => {
     expect(res!.ledger.errors).toBeUndefined();
     // …and the merges half says, separately, that it got nothing.
     expect(res!.merges).toEqual([]);
-    expect(res!.mergesLedger).toEqual({ asked: true, reachable: false, truncated: false });
+    // `partial` is FALSE here: nothing answered, so there is no half-answer to
+    // qualify — and the reason rides along, the way the facts leg's does.
+    expect(res!.mergesLedger).toEqual({
+      asked: true,
+      reachable: false,
+      partial: false,
+      truncated: false,
+      errors: ["claude-usage merges: connect ECONNREFUSED"],
+    });
   });
 
   test("a body that is not this service's shape is unreachable, not an empty merge list", async () => {
@@ -608,6 +616,47 @@ describe("merges", () => {
     expect(res!.merges.map((m) => m.mergeOk)).toEqual([true, false]);
   });
 
+  test("a half-answered merges leg reaches the payload as PARTIAL, with its reason", async () => {
+    // Two batches, the second one down — the shape a page naming 250 sessions
+    // produces, and the only shape in which "some of the merges" exists.
+    const ids = Array.from({ length: SESSION_IDS_PER_CALL + 50 }, (_, i) => `id-${String(i).padStart(4, "0")}`);
+    let call = 0;
+    const res = await pageProvenance(
+      meta(ids),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async (batch) => {
+            call += 1;
+            if (call === 2) throw new Error("connect ECONNREFUSED");
+            return { merges: [{ sessionId: batch[0], repo: "/r", prNumber: 7, url: null, subject: null, mergedAt: null, mergeOk: true }] };
+          },
+        }),
+      }),
+    );
+    expect(call).toBe(2);
+    // One merge on screen, out of an unknown number — which the state now says.
+    expect(res!.merges.length).toBe(1);
+    expect(res!.mergesLedger.reachable).toBe(true);
+    expect(res!.mergesLedger.partial).toBe(true);
+    expect(res!.mergesLedger.errors).toEqual(["claude-usage merges: connect ECONNREFUSED"]);
+    // The FACTS leg answered in full and its own state does not move for this.
+    expect(res!.ledger.partial).toBe(false);
+    expect(res!.ledger.reachable).toBe(true);
+  });
+
+  test("upstream's `limit` rides the state, so the footer can name ITS cap", async () => {
+    const res = await pageProvenance(
+      meta([SESSION_A]),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async () => ({ merges: [], truncated: true, limit: 500 }),
+        }),
+      }),
+    );
+    expect(res!.mergesLedger.truncated).toBe(true);
+    expect(res!.mergesLedger.limit).toBe(500);
+  });
+
   test("ids are batched by the SAME bounds the facts leg uses", async () => {
     const ids = Array.from({ length: SESSION_IDS_PER_CALL + 1 }, (_, i) => `id-${i}`);
     const batches: number[] = [];
@@ -623,6 +672,49 @@ describe("merges", () => {
       }),
     );
     expect(batches).toEqual([SESSION_IDS_PER_CALL, 1]);
+  });
+
+  test("a whitespace-only `sessions:` entry arms no timer — the gate reads the DEDUPED list", async () => {
+    // `pageProvenance` hoisted `resolveProvenance`'s gate so both legs could
+    // share one deadline, and hoisted it off the RAW list: `dedupeSessionRefs`
+    // drops a blank entry, so this page asks nothing and — before this — armed a
+    // 10 s timer to bound the nothing.
+    //
+    // The timer is the only observable, so it is what is counted. Patched and
+    // restored in-process; no other case in this file creates one concurrently.
+    const realTimeout = AbortSignal.timeout;
+    let armed = 0;
+    (AbortSignal as unknown as { timeout: typeof AbortSignal.timeout }).timeout = ((ms: number) => {
+      armed += 1;
+      return realTimeout.call(AbortSignal, ms);
+    }) as typeof AbortSignal.timeout;
+    const asked: string[][] = [];
+    try {
+      const res = await pageProvenance(
+        // No `jira:` key: a huginn lookup is its own reason to arm one.
+        meta(["   ", "\t"]),
+        ctx({
+          sessionLedger: deps({
+            fetchSessions: async (batch) => {
+              asked.push(batch);
+              return { sessions: [] };
+            },
+            fetchMerges: async (batch) => {
+              asked.push(batch);
+              return { merges: [] };
+            },
+          }),
+        }),
+      );
+      // The page still HAS provenance — two refs, neither of them askable.
+      expect(res).not.toBeNull();
+      expect(asked).toEqual([]);
+      expect(armed).toBe(0);
+      // And the merges half says "nobody asked", not "the service failed".
+      expect(res!.mergesLedger.asked).toBe(false);
+    } finally {
+      (AbortSignal as unknown as { timeout: typeof AbortSignal.timeout }).timeout = realTimeout;
+    }
   });
 
   test("an id that cannot BE an id is not sent to this route either", async () => {
@@ -669,7 +761,6 @@ describe("merges", () => {
 
   test("ONE deadline covers both legs — a hanging merges route cannot add a second", async () => {
     const seen: (AbortSignal | undefined)[] = [];
-    const started = Date.now();
     const res = await pageProvenance(
       meta([SESSION_A]),
       ctx({
@@ -690,10 +781,10 @@ describe("merges", () => {
         }),
       }),
     );
-    // Two timers would be ≥ 240 ms only if the legs ran in sequence; the
-    // load-bearing assertion is the SIGNAL IDENTITY below, which is what makes
-    // "one timer" provable rather than inferred from a stopwatch.
-    expect(Date.now() - started).toBeLessThan(220);
+    // "One timer" is proved by SIGNAL IDENTITY, not by a stopwatch: the elapsed
+    // time of two 120 ms legs on a loaded CI runner is a fact about the runner,
+    // and a wall-clock bound that passes on this laptop is exactly the assertion
+    // that goes red for nobody's fault.
     expect(seen.length).toBe(2);
     expect(seen[0]).toBeDefined();
     expect(seen[0]).toBe(seen[1]);

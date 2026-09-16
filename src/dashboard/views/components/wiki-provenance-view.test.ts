@@ -50,7 +50,7 @@ function payload(over: Partial<ProvenancePayload> = {}): ProvenancePayload {
     totalCost: 0,
     costedSessions: 0,
     ledger: { asked: false, reachable: false, partial: false, configured: false },
-    mergesLedger: { asked: false, reachable: false, truncated: false },
+    mergesLedger: { asked: false, reachable: false, partial: false, truncated: false },
     ...over,
   };
 }
@@ -231,7 +231,6 @@ describe("chipView", () => {
       title: "Wiki provenance — PR 4a",
       costLabel: "$12.34",
       bareCopy: null,
-      id: "5a2e",
       url: null,
     });
   });
@@ -296,8 +295,10 @@ describe("chipView", () => {
     // is not a fact about the machine that ran it.
     const only = (over: Partial<ProvenanceSessionChip>) =>
       chainHtml(payload({ sessions: [chip(over)] }), { timeZone: "UTC" });
-    expect(only({ first: null, last: "2026-09-03" })).toContain("09-03 00:00");
-    expect(only({ first: "2026-09-01", last: null })).toContain("09-01 00:00");
+    // DATE-ONLY inputs, so they render as dates: a `00:00` here was the hour
+    // `Date.parse` invented, and west of UTC it also moved the day.
+    expect(only({ first: null, last: "2026-09-03" })).toContain(">09-03<");
+    expect(only({ first: "2026-09-01", last: null })).toContain(">09-01<");
     // Neither end: no element at all, rather than an empty one holding a gap.
     expect(only({})).not.toContain("wiki-chain-when");
   });

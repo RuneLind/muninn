@@ -6,6 +6,7 @@
 import { test, expect, describe, beforeEach } from "bun:test";
 import {
   batchSessionIds,
+  fetchMergesForSessions,
   fetchSessionsById,
   SESSION_IDS_PER_CALL,
   SESSION_IDS_QUERY_MAX_BYTES,
@@ -212,5 +213,105 @@ describe("fetchSessionsById — asked", () => {
     expect(calls).toBe(1);
     expect(res.asked).toBe(true);
     expect(res.invalid.size).toBe(2);
+  });
+});
+
+/**
+ * The MERGES leg, at its own seam.
+ *
+ * It was reachable only through `pageProvenance` before, which is a one-batch
+ * caller in every fixture — and one batch is exactly the shape in which "some
+ * batches answered" cannot happen.
+ */
+describe("fetchMergesForSessions", () => {
+  /** The same deps shape, with the merges half stubbed instead of the facts
+   *  half. */
+  function mergeDeps(
+    fetchMerges: SessionLedgerDeps["fetchMerges"],
+    urlConfigured = true,
+  ): SessionLedgerDeps {
+    return {
+      fetchSessions: async () => ({ sessions: [] }),
+      fetchMerges,
+      urlConfigured,
+      baseUrl: "http://127.0.0.1:8787",
+    };
+  }
+
+  const row = (id: string, prNumber: number) => ({
+    sessionId: id,
+    repo: "/Users/synthetic/source/muninn",
+    prNumber,
+    url: `https://github.com/Synthetic/muninn/pull/${prNumber}`,
+    subject: null,
+    mergedAt: "2026-09-16T10:30:00.000Z",
+    mergeOk: true,
+  });
+
+  /** 250 askable ids — two batches (200 + 50) against `SESSION_IDS_PER_CALL`. */
+  const many = Array.from({ length: 250 }, (_, i) => `ses-${String(i).padStart(3, "0")}`);
+
+  test("one batch answering and one failing is PARTIAL, not a clean answer", async () => {
+    let call = 0;
+    const res = await fetchMergesForSessions(
+      mergeDeps(async (batch) => {
+        call += 1;
+        if (call === 2) throw new Error("connect ECONNREFUSED");
+        return { merges: [row(batch[0]!, 553)] };
+      }),
+      many,
+    );
+    expect(call).toBe(2);
+    // The half that answered is real and is rendered…
+    expect(res.reachable).toBe(true);
+    expect(res.merges.map((m) => m.prNumber)).toEqual([553]);
+    // …and the half that did not is SAID, which is the whole point: with
+    // `reachable` alone this page reports one merge as if it were all of them.
+    expect(res.partial).toBe(true);
+    expect(res.errors).toEqual(["claude-usage merges: connect ECONNREFUSED"]);
+  });
+
+  test("every batch answering is not partial", async () => {
+    const res = await fetchMergesForSessions(
+      mergeDeps(async (batch) => ({ merges: [row(batch[0]!, 1)] })),
+      many,
+    );
+    expect(res.reachable).toBe(true);
+    expect(res.partial).toBe(false);
+    expect(res.errors).toBeUndefined();
+  });
+
+  test("every batch failing is unreachable, and not partial either", async () => {
+    const res = await fetchMergesForSessions(
+      mergeDeps(async () => {
+        throw new Error("connect ECONNREFUSED");
+      }),
+      many,
+    );
+    expect(res.asked).toBe(true);
+    expect(res.reachable).toBe(false);
+    // Nothing answered, so there is no half to be missing FROM — the footer says
+    // "did not answer", which is a different sentence.
+    expect(res.partial).toBe(false);
+  });
+
+  test("upstream's own cap rides the result — never a number typed on this side", async () => {
+    const res = await fetchMergesForSessions(
+      mergeDeps(async () => ({ merges: [], truncated: true, limit: 500 })),
+      ["ses-a"],
+    );
+    expect(res.truncated).toBe(true);
+    expect(res.limit).toBe(500);
+  });
+
+  test("a `truncated` with no usable limit leaves the field absent", async () => {
+    for (const limit of [undefined, 0, -1, "200", null]) {
+      const res = await fetchMergesForSessions(
+        mergeDeps(async () => ({ merges: [], truncated: true, limit })),
+        ["ses-a"],
+      );
+      expect(res.truncated).toBe(true);
+      expect(res.limit).toBeUndefined();
+    }
   });
 });

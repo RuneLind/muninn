@@ -107,12 +107,14 @@ export const E2E_PORTS = {
   // pointed at, so the re-summarize spends no model call.
   "summaries-rerun": 3055,
   "summaries-rerun/fake": 3056,
-  // The reader's provenance strip + rail, end to end. ONE fake `node:http`
-  // server plays claude-usage's `GET /api/sessions-by-id`, pricing one of the
-  // fixture's two sessions and OMITTING the other — which is the only way to
-  // drive the `missing` bare chip and the "over M of N" cost line against a real
-  // browser. The muninn also gets a `CLAUDE_USAGE_PUBLIC_URL` the ↗ links are
-  // built from; nothing binds that host, and nothing needs to.
+  // The reader's provenance strip and the chain it opens, end to end. ONE fake
+  // `node:http` server plays claude-usage's `GET /api/sessions-by-id` and
+  // `GET /api/merges` — pricing one of the fixture's two sessions and OMITTING
+  // the other, which is the only way to drive the `missing` bare row and the
+  // "over M of N" cost line against a real browser, and refusing the merges call
+  // for one page's session so the footer degrade has a real page open behind it.
+  // The muninn also gets a `CLAUDE_USAGE_PUBLIC_URL` the ↗ links are built from;
+  // nothing binds that host, and nothing needs to.
   "wiki-provenance": 3058,
   "wiki-provenance/ledger": 3059,
   "plans-write": 3041,

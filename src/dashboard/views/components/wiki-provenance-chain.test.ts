@@ -22,12 +22,17 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  CHAIN_ID,
   chainEvents,
   chainHtml,
   fmtChainStamp,
-  MERGES_CUT_NOTE,
+  MARKS_MAX,
+  MERGE_UNCONFIRMED_COPY,
+  MERGES_PARTIAL_NOTE,
   MERGES_UNREACHABLE_NOTE,
+  mergesCutNote,
   provLineHtml,
+  provStripHtml,
   railListHtml,
 } from "./wiki-provenance-view.ts";
 import type {
@@ -78,7 +83,7 @@ function payload(over: Partial<ProvenancePayload> = {}): ProvenancePayload {
     totalCost: 0,
     costedSessions: 0,
     ledger: { asked: true, reachable: true, partial: false, configured: true },
-    mergesLedger: { asked: true, reachable: true, truncated: false },
+    mergesLedger: { asked: true, reachable: true, partial: false, truncated: false },
     ...over,
   };
 }
@@ -105,6 +110,26 @@ function mixed(): ProvenancePayload {
     totalCost: 86.65,
     costedSessions: 2,
   });
+}
+
+/**
+ * The chain's rows in order, each named the way the reader sees it: a session by
+ * the id in its `<code>`, a merge by the text of its PR element.
+ *
+ * Split on the row class rather than matched with one pattern, so a row that
+ * renders NEITHER (the shape a missing final `else` used to produce) shows up as
+ * an empty string instead of vanishing from the list.
+ */
+function rowLabels(html: string): string[] {
+  return html
+    .split(`<div class="wiki-chain-row`)
+    .slice(1)
+    .map((row) => {
+      const id = /<code class="wiki-chain-id">([^<]*)<\/code>/.exec(row);
+      if (id) return id[1]!;
+      const pr = /<(?:a|span) class="wiki-chain-pr"[^>]*>([^<]*)</.exec(row);
+      return pr ? pr[1]! : "";
+    });
 }
 
 describe("fmtChainStamp", () => {
@@ -213,7 +238,7 @@ describe("provLineHtml", () => {
     const unconfigured = payload({
       sessions: [chip({ id: "a", unresolved: true }), chip({ id: "b", unresolved: true })],
       ledger: { asked: false, reachable: false, partial: false, configured: false },
-      mergesLedger: { asked: false, reachable: false, truncated: false },
+      mergesLedger: { asked: false, reachable: false, partial: false, truncated: false },
     });
     const html = provLineHtml(unconfigured);
     expect(html).toContain("2 sessions wrote this page — no claude-usage on this host");
@@ -327,8 +352,17 @@ describe("chainHtml", () => {
 
   test("rows come out in the chain's order, merges interleaved", () => {
     const html = chainHtml(mixed(), UTC);
-    const order = [...html.matchAll(/data-chain="([^"]+)"/g)].map((m) => m[1]);
-    expect(order).toEqual(["first", "second", "#552", "#553", "bare-a", "bare-b"]);
+    // Read off the rows THEMSELVES — a session by the id it prints, a merge by
+    // the coordinate it prints. The rows carried a `data-chain` attribute for
+    // this once, which put a test hook in every reader's markup.
+    expect(rowLabels(html)).toEqual([
+      "first",
+      "second",
+      "RuneLind/muninn #552",
+      "RuneLind/muninn #553",
+      "bare-a",
+      "bare-b",
+    ]);
   });
 
   test("the merges footer names the leg that failed, and only when it failed", () => {
@@ -338,7 +372,7 @@ describe("chainHtml", () => {
     const down = chainHtml(
       payload({
         sessions: [chip({ id: "a", cost: 1 })],
-        mergesLedger: { asked: true, reachable: false, truncated: false },
+        mergesLedger: { asked: true, reachable: false, partial: false, truncated: false },
       }),
       UTC,
     );
@@ -349,12 +383,15 @@ describe("chainHtml", () => {
       payload({
         sessions: [chip({ id: "a", cost: 1 })],
         merges: [merge()],
-        mergesLedger: { asked: true, reachable: true, truncated: true },
+        mergesLedger: { asked: true, reachable: true, partial: false, truncated: true, limit: 500 },
       }),
       UTC,
     );
-    expect(cut).toContain(MERGES_CUT_NOTE);
-    expect(MERGES_CUT_NOTE).toBe("merges not shown: list cut at 200");
+    // The cap is UPSTREAM's own number, off the payload — and the note does not
+    // say "not shown" beside the rows it is standing under.
+    expect(cut).toContain("merges list cut at 500 by claude-usage");
+    expect(mergesCutNote(500)).toBe("merges list cut at 500 by claude-usage");
+    expect(mergesCutNote(undefined)).toBe("merges list cut by claude-usage");
   });
 
   test("a host with no claude-usage has no merges footer — nothing was asked", () => {
@@ -362,7 +399,7 @@ describe("chainHtml", () => {
       payload({
         sessions: [chip({ id: "a", unresolved: true })],
         ledger: { asked: false, reachable: false, partial: false, configured: false },
-        mergesLedger: { asked: false, reachable: false, truncated: false },
+        mergesLedger: { asked: false, reachable: false, partial: false, truncated: false },
       }),
       UTC,
     );
@@ -380,6 +417,197 @@ describe("chainHtml", () => {
     expect(html).not.toContain("<img");
     expect(html).not.toContain("<svg>");
     expect(html).not.toContain("<b>");
+  });
+});
+
+describe("the marks are bounded", () => {
+  /** N sessions, every one of them dated and priced. */
+  function manySessions(n: number): ProvenancePayload {
+    return payload({
+      sessions: Array.from({ length: n }, (_, i) =>
+        chip({ id: `s${i}`, first: `2026-09-15T${String(i % 24).padStart(2, "0")}:00:00.000Z`, cost: 1 }),
+      ),
+      totalCost: n,
+      costedSessions: n,
+    });
+  }
+
+  const markCount = (html: string) => [...html.matchAll(/<span class="wiki-prov-mark /g)].length;
+
+  test(`no more than ${MARKS_MAX} marks, however many events the page has`, () => {
+    // MEASURED before the cap: 61 marks painted 213 px past the article column
+    // and took the caret out of it.
+    const html = provLineHtml(manySessions(60), UTC);
+    expect(markCount(html)).toBe(MARKS_MAX + 1); // the cap, plus the `+N` tail
+    expect([...html.matchAll(/data-mark="session"/g)].length).toBe(MARKS_MAX);
+  });
+
+  test("the tail mark counts what it hid, and says so on hover", () => {
+    const html = provLineHtml(manySessions(60), UTC);
+    expect(html).toContain(`data-mark="more"`);
+    expect(html).toContain(`>+36</span>`);
+    expect(html).toContain("36 more events");
+  });
+
+  test("one event past the cap is `+1`, singular", () => {
+    const html = provLineHtml(manySessions(MARKS_MAX + 1), UTC);
+    expect(html).toContain(`>+1</span>`);
+    expect(html).toContain("1 more event — open the line to see it");
+  });
+
+  test("exactly the cap renders no tail at all", () => {
+    const html = provLineHtml(manySessions(MARKS_MAX), UTC);
+    expect(markCount(html)).toBe(MARKS_MAX);
+    expect(html).not.toContain(`data-mark="more"`);
+  });
+
+  test("the chain below still lists EVERY event — the cap is on the marks alone", () => {
+    expect(rowLabels(chainHtml(manySessions(60), UTC)).length).toBe(60);
+  });
+});
+
+describe("the strip hands its render options to BOTH halves", () => {
+  // Two zones either side of the date line, so a dropped `opts` cannot pass by
+  // coincidence on whichever machine runs the suite.
+  const AT = "2026-09-15T14:00:00.000Z";
+  const FAR_EAST = "Pacific/Kiritimati"; // UTC+14
+
+  test("a session mark's hover renders in the REQUESTED zone, like the row below it", () => {
+    expect(fmtChainStamp(AT, FAR_EAST)).toBe("09-16 04:00");
+    const p = payload({ sessions: [chip({ id: "s", first: AT, cost: 1 })], totalCost: 1, costedSessions: 1 });
+    const html = provStripHtml(p, null, { timeZone: FAR_EAST });
+    const mark = /<span class="wiki-prov-mark [^>]*title="([^"]*)"/.exec(html);
+    expect(mark).not.toBeNull();
+    // The mark and the row are two spellings of ONE instant; rendering them in
+    // different zones is the one way this line can contradict itself.
+    expect(mark![1]).toContain("09-16 04:00");
+    expect(html).toMatch(/class="wiki-chain-when"[^>]*>09-16 04:00</);
+  });
+});
+
+describe("row cosmetics", () => {
+  test("a priced session with no date does not open with a stray separator", () => {
+    const html = chainHtml(payload({ sessions: [chip({ id: "s", host: "macmini", cost: 1 })] }), UTC);
+    // The `·` separates the host from the date BEFORE it; with no date it read
+    // `◇ · macmini`.
+    expect(html).toContain(`<span class="wiki-chain-host">macmini</span>`);
+    expect(html).not.toContain("· macmini");
+  });
+
+  test("a dated session still separates its host from the date", () => {
+    const html = chainHtml(
+      payload({ sessions: [chip({ id: "s", host: "macmini", first: "2026-09-15T10:00:00.000Z", cost: 1 })] }),
+      UTC,
+    );
+    expect(html).toContain(`<span class="wiki-chain-host">· macmini</span>`);
+  });
+
+  test("a session that ran inside a minute hovers ONE stamp, not `X → X`", () => {
+    const at = "2026-09-15T10:00:00.000Z";
+    const html = chainHtml(payload({ sessions: [chip({ id: "s", first: at, last: at, cost: 1 })] }), UTC);
+    expect(html).toContain(`title="${at}"`);
+    expect(html).not.toContain(`${at} → ${at}`);
+  });
+
+  test("two different instants still hover both ends", () => {
+    const html = chainHtml(
+      payload({
+        sessions: [chip({ id: "s", first: "2026-09-15T10:00:00.000Z", last: "2026-09-15T11:00:00.000Z", cost: 1 })],
+      }),
+      UTC,
+    );
+    expect(html).toContain(`title="2026-09-15T10:00:00.000Z → 2026-09-15T11:00:00.000Z"`);
+  });
+
+  test("a merge the ledger holds nothing but a session id for still says what it is", () => {
+    // No number, no url, no repo — the shape the removed `else if` dropped on
+    // the floor, leaving a row that was one glyph and no words.
+    const html = chainHtml(
+      payload({ merges: [merge({ prNumber: null, url: null, repo: "", mergedAt: null })] }),
+      UTC,
+    );
+    expect(rowLabels(html)).toEqual(["a merge"]);
+    expect(html).not.toContain("<a ");
+  });
+
+  test("a date-only stamp is a DATE — never a time, and never the day before", () => {
+    // `Date.parse("2026-09-15")` is UTC midnight, so formatting it anywhere west
+    // of UTC rendered `09-14`. There is no hour in the input to render anyway.
+    expect(fmtChainStamp("2026-09-15", "Pacific/Midway")).toBe("09-15");
+    expect(fmtChainStamp("2026-09-15", "Pacific/Kiritimati")).toBe("09-15");
+    expect(fmtChainStamp("2026-09-15", UTC.timeZone)).toBe("09-15");
+    // A full stamp is unchanged — it carries the hour the reader asked for.
+    expect(fmtChainStamp("2026-09-15T18:10:00.000Z", UTC.timeZone)).toBe("09-15 18:10");
+  });
+
+  test("a url that is not a github pull request is never turned into a link", () => {
+    // A REGRESSION GUARD, green before this round: `mergeCoordinate` matched
+    // github.com only, and nothing proved it — mutating the pattern to accept
+    // any url left the file green.
+    const html = chainHtml(
+      payload({ merges: [merge({ url: "https://gitlab.com/acme/widget/-/merge_requests/9" })] }),
+      UTC,
+    );
+    expect(html).not.toContain("<a ");
+    expect(html).not.toContain("gitlab.com");
+    expect(html).toContain("#553");
+  });
+});
+
+describe("the merges footer's third state", () => {
+  const partial = (over: Partial<ProvenancePayload> = {}) =>
+    payload({
+      sessions: [chip({ id: "a", cost: 1 })],
+      merges: [merge()],
+      mergesLedger: { asked: true, reachable: true, partial: true, truncated: false },
+      totalCost: 1,
+      costedSessions: 1,
+      ...over,
+    });
+
+  test("a leg that answered for SOME sessions says so — the rows are real, and incomplete", () => {
+    const html = chainHtml(partial(), UTC);
+    expect(html).toContain(MERGES_PARTIAL_NOTE);
+    expect(MERGES_PARTIAL_NOTE).toBe(
+      "merges may be incomplete: claude-usage answered for some sessions only",
+    );
+    // NOT the sentence for a leg that answered nothing: this page is showing a
+    // merge row while it says it.
+    expect(html).not.toContain(MERGES_UNREACHABLE_NOTE);
+    expect(html).toContain("RuneLind/muninn #553");
+  });
+
+  test("a leg that answered NOTHING outranks partial", () => {
+    const html = chainHtml(
+      partial({ mergesLedger: { asked: true, reachable: false, partial: true, truncated: false } }),
+      UTC,
+    );
+    expect(html).toContain(MERGES_UNREACHABLE_NOTE);
+    expect(html).not.toContain(MERGES_PARTIAL_NOTE);
+  });
+
+  test("partial outranks a cut list — a missing batch is the bigger hole", () => {
+    const html = chainHtml(
+      partial({ mergesLedger: { asked: true, reachable: true, partial: true, truncated: true, limit: 200 } }),
+      UTC,
+    );
+    expect(html).toContain(MERGES_PARTIAL_NOTE);
+    expect(html).not.toContain("list cut");
+  });
+});
+
+describe("the module's own contracts", () => {
+  test("the disclosure points at the chain it opens, by the id the chain carries", () => {
+    const p = payload({ sessions: [chip({ id: "a", cost: 1 })], totalCost: 1, costedSessions: 1 });
+    expect(provLineHtml(p, UTC)).toContain(`aria-controls="${CHAIN_ID}"`);
+    expect(chainHtml(p, UTC)).toContain(`id="${CHAIN_ID}"`);
+  });
+
+  test("the unconfirmed qualifier is ONE string, shared by the row and its reader", () => {
+    expect(chainHtml(payload({ merges: [merge({ mergeOk: false })] }), UTC)).toContain(
+      MERGE_UNCONFIRMED_COPY,
+    );
+    expect(MERGE_UNCONFIRMED_COPY).toBe("merge unconfirmed");
   });
 });
 

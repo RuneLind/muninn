@@ -293,19 +293,6 @@ let projects: Record<string, number> = {};
  */
 let jiraKeys: Record<string, number> = {};
 
-/**
- * The open page's provenance block, or `null` on an unstamped page (the server
- * omits the key entirely) and on every non-article view.
- *
- * Kept in module state because the strip and the RAIL read it at different
- * moments: the strip is built once from the `/api/wiki/page` response, while the
- * rail repaints on every filter keystroke and background listing refresh, long
- * after that response is gone. Cleared on every navigation BEFORE the new
- * response lands, so a slow page load cannot leave the previous page's sessions
- * standing over the new article.
- */
-let currentProvenance: ProvenancePayload | null = null;
-
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
   meta: WikiListing;
@@ -1339,9 +1326,6 @@ function hideBreadcrumb(): void {
   // would still be handed a page the reader is no longer on.
   currentArticle = null;
   currentOutgoingTitles = [];
-  // Same rule, and it reaches further: the rail's Sessions section is rendered
-  // from this, and the rail stays on screen on the start view.
-  currentProvenance = null;
 }
 
 // ── Middle pane: article / start view ─────────────────────────────────
@@ -1803,10 +1787,6 @@ function articleHeadHtml(m: WikiListing, provenance?: ProvenancePayload): string
  *  the link graph, plus the lazy Similar section; outgoing links stay empty. */
 function loadExplainer(m: WikiListing, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
-  // An explainer is HTML on disk and carries no frontmatter to stamp, so this is
-  // a clear and never a set — but it still has to happen, or the markdown page
-  // the reader came FROM keeps its strip and its rail rows here.
-  currentProvenance = null;
   setAtlasFull(false);
   currentName = m.name;
   // The listing IS the identity here (no page response to wait for), so the
@@ -1885,10 +1865,6 @@ function openNavTarget(target: NavTarget, push: boolean): void {
 
 function loadPage(name: string, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
-  // The PREVIOUS page's sessions, dropped before the round-trip rather than when
-  // the next response lands: a slow load would otherwise leave the rail claiming
-  // the new article was written by the old one's sessions.
-  currentProvenance = null;
   // Raised BEFORE anything else: `currentName` is only set from the response, so
   // without this signal the whole round-trip reads as the "start" view and a
   // refetch resolving mid-click would re-sort the list under the row just clicked.
@@ -1912,7 +1888,6 @@ function loadPage(name: string, push: boolean): void {
  *  `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true): void {
   hideExplainPill();
-  currentProvenance = null; // same drop-before-the-round-trip rule as `loadPage`
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
   // The explainer branch is `loadPage`'s, and it has to exist here too now that
@@ -1954,11 +1929,6 @@ function fetchAndRenderPage(url: string, push: boolean): void {
         return;
       }
       currentName = data.meta.name;
-      // The open page's provenance, for BOTH halves of the feature: the strip is
-      // built from it once, a few lines down, and the rail re-reads it on every
-      // later repaint (a filter keystroke, a background listing refresh) long
-      // after this response is gone.
-      currentProvenance = data.provenance ?? null;
       // The RESPONSE's relPath, not the requested one: a by-name navigation
       // resolves server-side, and the active row must key on the page that
       // actually came back.

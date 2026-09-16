@@ -344,8 +344,23 @@ export interface ProvenanceMergesState {
   asked: boolean;
   /** At least one batch answered with a readable payload. */
   reachable: boolean;
+  /**
+   * Some batches answered and some did not — `merges` is a SUBSET and the
+   * reader is told so.
+   *
+   * The facts leg has carried this third state since #549 and the merges leg
+   * shipped without it: with `reachable` alone, a page naming 250 sessions whose
+   * second batch fails renders its one surviving merge under a silent footer.
+   */
+  partial: boolean;
   /** Upstream cut the list at its own cap, so `merges` is a SUBSET. */
   truncated: boolean;
+  /** The cap upstream reported with `truncated` — its number, never one of
+   *  ours. Absent when the leg never reported one. */
+  limit?: number;
+  /** Why a batch failed, one entry per failed batch — the same field, and the
+   *  same purpose, the facts leg's state carries. */
+  errors?: string[];
 }
 
 /** The merges state for a leg that never ran. Frozen for `LEDGER_NOT_ASKED`'s
@@ -353,6 +368,7 @@ export interface ProvenanceMergesState {
 export const MERGES_NOT_ASKED: ProvenanceMergesState = Object.freeze({
   asked: false,
   reachable: false,
+  partial: false,
   truncated: false,
 });
 
