@@ -10,6 +10,7 @@ import {
   backlogDocLabel,
   sortBacklogDocsNewestFirst,
   attachDraftAttempts,
+  indexSkipFor,
   getIngestBacklogCached,
   invalidateIngestBacklogCache,
   mergeBacklogLiveFields,
@@ -2398,5 +2399,35 @@ describe("approve — the in-queue collision refusal returns the row to draft", 
     expect(reverted).toEqual([]);
     expect(row.status).toBe("rejected");
     expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+});
+
+/**
+ * The "Wiring on approve" preview on an UPDATE row.
+ *
+ * `runWireStage`'s index step is create-only (`apply.ts`), but the preview computed
+ * `buildIndexEntry` for every reviewable row — so an update card promised a
+ * `- [[Title]] — …` line the apply never writes. Latent while updates were rare;
+ * the 39-page source backfill (mimir `plans/muninn-summary-code-in-wiki.mdx`) puts
+ * 39 such cards in front of a reviewer at once.
+ */
+describe("indexSkipFor", () => {
+  test("a create row in policy plans a line", () => {
+    expect(indexSkipFor("create", "concept", ["concept", "source"])).toBeNull();
+  });
+
+  test("an update row skips whatever the catalog policy says — the wire stage is create-only", () => {
+    // jarvis catalogs `source`, so this is exactly the 39 backfill cards.
+    expect(indexSkipFor("update", "source", ["concept", "source"])).toBe("update");
+    expect(indexSkipFor("update", "concept", ["concept"])).toBe("update");
+  });
+
+  test("mode is read BEFORE the policy — an entity update is not reported as the entity skip", () => {
+    expect(indexSkipFor("create", "entity", ["concept"])).toBe("entity");
+    expect(indexSkipFor("update", "entity", ["concept"])).toBe("update");
+  });
+
+  test("a create row outside the policy is still the policy skip", () => {
+    expect(indexSkipFor("create", "source", ["concept"])).toBe("not-in-policy");
   });
 });

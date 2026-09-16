@@ -58,7 +58,10 @@ export function appliedSourcePages(proposals: WikiProposal[]): AppliedSourcePage
       appliedAt: at,
     });
   }
-  return [...byPath.values()].sort((a, b) => b.appliedAt - a.appliedAt);
+  // Already newest-first: the scan above runs in descending `at` and a Map keeps
+  // insertion order, so each path enters at its own newest apply, in order. A second
+  // sort here would be dead code — and dead code no test can kill.
+  return [...byPath.values()];
 }
 
 /** Blocks kept whole, and total summary lines found anywhere on the page. */
@@ -73,24 +76,98 @@ export function retentionScore(blocks: BlockRetention[]): { kept: number; found:
 export type BackfillVerdict = { ok: true; reason: string } | { ok: false; reason: string };
 
 /**
+ * Sentences of the page's PROSE — frontmatter and fenced code removed, each
+ * whitespace-normalized. Long enough that a heading, a list marker or a lone
+ * wikilink cannot match by accident.
+ *
+ * Sentences, not lines: a reviser that splits one paragraph around a restored
+ * block keeps every sentence word for word but writes three lines where there was
+ * one, and a line-level check would refuse exactly the revision the design asks
+ * for (measured on `sources/Software Minimalism.mdx`, whose good revision splits a
+ * paragraph in two).
+ */
+export function proseSentences(page: string): string[] {
+  const withoutFrontmatter = page.startsWith("---")
+    ? page.slice(Math.max(0, page.indexOf("\n---", 3) + 4))
+    : page;
+  const lines: string[] = [];
+  let fence: string | null = null;
+  for (const line of withoutFrontmatter.split("\n")) {
+    const m = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (m) {
+      if (fence === null) fence = m[1]!.charAt(0);
+      else if (m[1]!.charAt(0) === fence) fence = null;
+      continue;
+    }
+    if (fence === null) lines.push(line);
+  }
+  return lines
+    .join("\n")
+    .split(/(?<=[.!?])\s+|\n{2,}/)
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .filter((s) => s.length >= MIN_PROSE_SENTENCE_CHARS);
+}
+
+/**
+ * A sentence shorter than this is a heading, a bullet stub or a link line, and
+ * short strings match by accident inside longer ones.
+ */
+export const MIN_PROSE_SENTENCE_CHARS = 40;
+
+/**
+ * The fraction of the page's prose sentences that survive verbatim in the draft.
+ *
+ * Measured on the five revisions that proved this mechanism (2026-09-16): 1.0 on
+ * four of them (30/30, 21/21, 22/22, 35/35) and 28/29 on `Software Minimalism`,
+ * whose reviser split one sentence in two to introduce a restored block. A full
+ * re-draft of the same doc scored 0/29 on the same page — the two shapes this
+ * guard has to tell apart are three orders of magnitude apart, so
+ * {@link MIN_PROSE_RETENTION} is not a tuned number.
+ */
+export function proseRetention(currentPage: string, draft: string): { total: number; found: number; ratio: number } {
+  const haystack = draft.replace(/\s+/g, " ");
+  const sentences = proseSentences(currentPage);
+  const found = sentences.filter((s) => haystack.includes(s)).length;
+  return { total: sentences.length, found, ratio: sentences.length === 0 ? 1 : found / sentences.length };
+}
+
+/** Below this fraction of surviving prose sentences, the revision is a re-draft. */
+export const MIN_PROSE_RETENTION = 0.9;
+
+/**
  * Is this revision worth a reviewer's time — i.e. may it be persisted as a proposal?
  *
- * The plan's rule is "a re-draft that scores worse should not be applied", and the
- * cheapest place to enforce it is before the insert: a proposal that recovers
- * nothing costs a human a diff to read and an approve to regret. Both halves of the
- * score matter, and a block-count drop alone is not enough — a revision can keep
- * the same three blocks whole and quietly drop half the lines of a fourth, which
- * reads as unchanged by `kept` and as a loss by `found`.
+ * Two independent properties, because the design makes two promises and a score
+ * over code blocks alone can only see one of them.
  *
- * Equal-on-both is refused too, deliberately: the reviser is told to output the
- * page unchanged when nothing is missing, so "no block recovered" is its honest
- * no-op answer, not a diff to review.
+ * **It put the code back.** The plan's rule is "a re-draft that scores worse should
+ * not be applied", and the cheapest place to enforce it is before the insert: a
+ * proposal that recovers nothing costs a human a diff to read and an approve to
+ * regret. Both halves of the score matter, and a block-count drop alone is not
+ * enough — a revision can keep the same three blocks whole and quietly drop half
+ * the lines of a fourth, which reads as unchanged by `kept` and as a loss by
+ * `found`. Equal-on-both is refused too: a revision that recovers nothing is not a
+ * diff to review.
+ *
+ * **It changed nothing else.** Nothing else checks this. The reviser is ASKED to
+ * leave the prose alone, and a model that adds the two missing blocks and also
+ * rewrites two paragraphs or drops the `## See also` section scores perfectly on
+ * code retention. That is the failure this whole design chose update-in-place to
+ * avoid, so it is refused mechanically rather than left to a reviewer reading 39
+ * diffs ({@link proseRetention}).
  */
-export function judgeBackfill(before: BlockRetention[], after: BlockRetention[]): BackfillVerdict {
-  const b = retentionScore(before);
-  const a = retentionScore(after);
-  const score = `${a.kept}/${a.blocks} kept, ${a.found} lines (was ${b.kept}/${b.blocks}, ${b.found})`;
+export function judgeBackfill(opts: {
+  before: BlockRetention[];
+  after: BlockRetention[];
+  currentPage: string;
+  draft: string;
+}): BackfillVerdict {
+  const b = retentionScore(opts.before);
+  const a = retentionScore(opts.after);
+  const prose = proseRetention(opts.currentPage, opts.draft);
+  const score = `${a.kept}/${a.blocks} kept, ${a.found} lines (was ${b.kept}/${b.blocks}, ${b.found}), prose ${prose.found}/${prose.total}`;
   if (a.kept < b.kept || a.found < b.found) return { ok: false, reason: `scores worse — ${score}` };
   if (a.kept === b.kept && a.found === b.found) return { ok: false, reason: `no block recovered — ${score}` };
+  if (prose.ratio < MIN_PROSE_RETENTION) return { ok: false, reason: `rewrote the page — ${score}` };
   return { ok: true, reason: score };
 }

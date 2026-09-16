@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import type { BlockRetention } from "./code-block-retention.ts";
-import { appliedSourcePages, judgeBackfill, retentionScore } from "./source-backfill.ts";
+import {
+  appliedSourcePages,
+  judgeBackfill,
+  MIN_PROSE_RETENTION,
+  proseRetention,
+  proseSentences,
+  retentionScore,
+} from "./source-backfill.ts";
 
 function proposal(over: Partial<WikiProposal>): WikiProposal {
   return {
@@ -68,18 +75,87 @@ describe("appliedSourcePages", () => {
   });
 });
 
+const PAGE = [
+  "---",
+  "type: source",
+  "title: Software Minimalism",
+  "---",
+  "",
+  "# Software Minimalism",
+  "",
+  "Dependency injection frameworks are described as mostly harmless but rarely as necessary as their ubiquity suggests.",
+  "",
+  "## The critique",
+  "",
+  "The legitimate problem they solve is the testability of code that calls external services.",
+  "",
+  "```java",
+  "@Component public class PersonService { }",
+  "```",
+  "",
+  "## See also",
+  "- [[Cognitive Debt]]",
+].join("\n");
+
+describe("proseSentences", () => {
+  test("skips frontmatter, fenced code, headings and link lines", () => {
+    const sentences = proseSentences(PAGE);
+    expect(sentences).toEqual([
+      "Dependency injection frameworks are described as mostly harmless but rarely as necessary as their ubiquity suggests.",
+      "The legitimate problem they solve is the testability of code that calls external services.",
+    ]);
+  });
+
+  test("a sentence split in two around a restored block still counts both halves", () => {
+    // The shape a GOOD revision produces (measured on `sources/Software Minimalism.mdx`).
+    const revised = PAGE.replace(
+      "The legitimate problem they solve is the testability of code that calls external services.",
+      "The legitimate problem they solve is the testability of code that calls external services. The Java example shown buries the work:\n\n```java\n@Component public class Example { }\n```",
+    );
+    expect(proseRetention(PAGE, revised).ratio).toBe(1);
+  });
+});
+
+describe("proseRetention", () => {
+  test("a page against itself retains everything", () => {
+    expect(proseRetention(PAGE, PAGE)).toEqual({ total: 2, found: 2, ratio: 1 });
+  });
+
+  test("a rewritten paragraph is a loss the code score cannot see", () => {
+    const rewritten = PAGE.replace(
+      "Dependency injection frameworks are described as mostly harmless",
+      "DI frameworks are mostly harmless",
+    );
+    expect(proseRetention(PAGE, rewritten)).toMatchObject({ total: 2, found: 1 });
+  });
+
+  test("a page with no prose at all retains everything rather than dividing by zero", () => {
+    expect(proseRetention("---\ntype: source\n---\n\n# Title\n", "anything")).toEqual({
+      total: 0,
+      found: 0,
+      ratio: 1,
+    });
+  });
+});
+
 describe("judgeBackfill", () => {
   const twoLost = blocks([
     { found: 0, lines: 10 },
     { found: 0, lines: 6 },
   ]);
+  /** Prose held constant, so each case below is about the code score alone. */
+  const judge = (before: BlockRetention[], after: BlockRetention[]) =>
+    judgeBackfill({ before, after, currentPage: PAGE, draft: PAGE });
 
   test("a recovered block passes", () => {
     const after = blocks([
       { found: 10, lines: 10 },
       { found: 0, lines: 6 },
     ]);
-    expect(judgeBackfill(twoLost, after)).toEqual({ ok: true, reason: "1/2 kept, 10 lines (was 0/2, 0)" });
+    expect(judge(twoLost, after)).toEqual({
+      ok: true,
+      reason: "1/2 kept, 10 lines (was 0/2, 0), prose 2/2",
+    });
   });
 
   test("more lines of a still-partial block passes — progress the kept count can't see", () => {
@@ -87,11 +163,11 @@ describe("judgeBackfill", () => {
       { found: 4, lines: 10 },
       { found: 0, lines: 6 },
     ]);
-    expect(judgeBackfill(twoLost, after).ok).toBe(true);
+    expect(judge(twoLost, after).ok).toBe(true);
   });
 
   test("an unchanged page is refused as a no-op, not queued for review", () => {
-    const verdict = judgeBackfill(twoLost, twoLost);
+    const verdict = judge(twoLost, twoLost);
     expect(verdict.ok).toBe(false);
     expect(verdict.reason).toContain("no block recovered");
   });
@@ -102,21 +178,58 @@ describe("judgeBackfill", () => {
     const before = blocks([{ found: 9, lines: 10 }]);
     const after = blocks([{ found: 8, lines: 10 }]);
     expect(retentionScore(before).kept).toBe(retentionScore(after).kept);
-    const verdict = judgeBackfill(before, after);
+    const verdict = judge(before, after);
     expect(verdict.ok).toBe(false);
     expect(verdict.reason).toContain("scores worse");
   });
 
-  test("losing a whole block refuses", () => {
-    const before = blocks([{ found: 10, lines: 10 }]);
-    expect(judgeBackfill(before, blocks([{ found: 0, lines: 10 }])).ok).toBe(false);
+  test("destroying a whole block refuses even when MORE lines are found overall", () => {
+    // The case only the `kept` clause can see: one block whole plus one lost, for
+    // two half-quoted blocks. Lines go UP, a whole quoted artefact is gone.
+    const before = blocks([
+      { found: 10, lines: 10 },
+      { found: 0, lines: 10 },
+    ]);
+    const after = blocks([
+      { found: 7, lines: 10 },
+      { found: 5, lines: 10 },
+    ]);
+    expect(retentionScore(after).found).toBeGreaterThan(retentionScore(before).found);
+    expect(judge(before, after).ok).toBe(false);
+  });
+
+  test("recovering every block still refuses when the prose was rewritten", () => {
+    // The whole reason this backfill revises instead of re-drafting: a fresh
+    // re-draft of `sources/Software Minimalism.mdx` measured 3/3 blocks kept and
+    // 0 of 29 prose sentences surviving (2026-09-16).
+    const verdict = judgeBackfill({
+      before: twoLost,
+      after: blocks([
+        { found: 10, lines: 10 },
+        { found: 6, lines: 6 },
+      ]),
+      currentPage: PAGE,
+      draft: "---\ntype: source\ntitle: Software Minimalism\n---\n\n# Software Minimalism\n\nA completely different article about the same subject, saying none of the same sentences.\n",
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toContain("rewrote the page");
+  });
+
+  test("the prose floor leaves room for the one sentence a good revision splits", () => {
+    expect(MIN_PROSE_RETENTION).toBeLessThan(28 / 29);
   });
 });
 
-test("retentionScore counts kept blocks and found lines", () => {
-  expect(retentionScore(blocks([{ found: 10, lines: 10 }, { found: 1, lines: 8 }]))).toEqual({
-    kept: 1,
-    found: 11,
-    blocks: 2,
+describe("retentionScore", () => {
+  test("counts kept blocks and found lines", () => {
+    expect(retentionScore(blocks([{ found: 10, lines: 10 }, { found: 1, lines: 8 }]))).toEqual({
+      kept: 1,
+      found: 11,
+      blocks: 2,
+    });
+  });
+
+  test("a partial block is NOT counted as kept — else judgeBackfill reads it as recovered", () => {
+    expect(retentionScore(blocks([{ found: 5, lines: 10 }])).kept).toBe(0);
   });
 });

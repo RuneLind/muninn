@@ -35,6 +35,12 @@ describe("wiringHtml", () => {
     expect(html).not.toContain("<code>");
   });
 
+  test("an update row says the index is unchanged — the wire stage's index step is create-only", () => {
+    const html = wiringHtml(model({ indexSkip: "update", indexLine: null }));
+    expect(html).toContain("unchanged (the page is already in the index)");
+    expect(html).not.toContain("<code>");
+  });
+
   test("legacy row (null related_pages) → pre-migration note", () => {
     const html = wiringHtml(model({ legacyNoRelated: true, seeAlso: [] }));
     expect(html).toContain("no related-pages data (pre-migration proposal)");

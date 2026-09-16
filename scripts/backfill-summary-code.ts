@@ -43,7 +43,6 @@ import {
   type InsertWikiProposalParams,
   type WikiProposal,
 } from "../src/db/wiki-proposals.ts";
-import { recordSourceDraftAttempt } from "../src/db/source-draft-attempts.ts";
 import { draftSourcePage } from "../src/gardener/source-drafter.ts";
 import { runDrafterOneShot } from "../src/gardener/drafter-oneshot.ts";
 import { DRAFT_TIMEOUT_MS } from "../src/gardener/backlog.ts";
@@ -149,7 +148,7 @@ async function backfill(target: AppliedSourcePage): Promise<Result> {
   // recovered" (muninn #551/#552).
   const source = await readSummarySourceText(API_URL, collection, encodeDocIdPath(docId), 15_000);
   if (source === null) return { ...base, verdict: "huginn served no source file (?raw=1)" };
-  const body = splitTranscript(source).body.trim();
+  const body = splitTranscript(source).body;
 
   const before = measureCodeRetention(body, currentText);
   if (before.length === 0) return { ...base, verdict: "summary quotes no code" };
@@ -184,41 +183,48 @@ async function backfill(target: AppliedSourcePage): Promise<Result> {
         })
       ).result,
     // The score guard sits INSIDE the insert seam: it is the last point where the
-    // draft is in hand and no row exists yet. A refusal returns a row that was never
-    // written, so the drafter still reports `drafted` and this script reports why
-    // nothing was persisted — returning null would make it answer "a live source
-    // proposal already exists", which is a lie about a different mechanism.
+    // draft is in hand and no row exists yet. A refusal returns NULL rather than a
+    // fake row — a fake row makes the drafter log "persisted proposal refused →
+    // <path>", which is the opposite of what happened, on the one surface an
+    // operator greps during a 39-page run. Null costs the drafter's `covered`
+    // outcome, which this function then declines to report (see below); nothing
+    // else reads it, because no ledger row is written either.
     insertProposal: async (params: InsertWikiProposalParams) => {
       draft = params.draft;
       after = measureCodeRetention(body, params.draft);
-      const judged = judgeBackfill(before, after);
+      const judged = judgeBackfill({ before, after, currentPage: currentText, draft: params.draft });
       verdict = judged.reason;
-      if (!judged.ok) return { id: "refused" } as WikiProposal;
-      if (dryRun) return { id: "dry-run" } as WikiProposal;
+      if (!judged.ok || dryRun) return null;
       const row = await insertWikiProposal(params);
       proposalId = row?.id;
       return row;
     },
   });
 
-  await recordSourceDraftAttempt({
-    botName: botConfig!.name,
-    collection,
-    docId,
-    outcome: outcome.outcome,
-    degraded: outcome.outcome === "skipped" && outcome.degraded === true,
-    reason: "reason" in outcome ? outcome.reason : verdict,
-    title: outcome.outcome === "drafted" ? outcome.title : null,
-    collidingPath: null,
-    proposalId: proposalId ?? null,
-    trigger: "backfill",
-  });
-
-  const persisted = proposalId ? "persisted" : dryRun ? "dry-run" : "not persisted";
+  // Deliberately NO `source_draft_attempts` write. That ledger answers "why does
+  // this doc have no page", is keyed `(bot, collection, doc)` and upserts every
+  // column — so a row written here REPLACES the capture attempt that links the doc
+  // to its applied proposal, for a doc that demonstrably HAS a page. Measured: the
+  // five-page batch that proved this mechanism erased five capture rows, including
+  // their `proposal_id`, which `deleteSourceDraftAttemptForProposal` needs on
+  // reject. This script's record is its own `--out` file and the proposal it
+  // persists.
+  const persisted = proposalId
+    ? "persisted"
+    : dryRun
+      ? "dry-run, not persisted"
+      : after
+        ? "refused, not persisted"
+        : "no draft";
+  // The drafter's own outcome is reported only when the draft never reached the
+  // score: once it did, the decision is THIS script's, and the drafter answers
+  // `covered` for a refusal (see `insertProposal` above).
   return {
     relPath,
     doc: `${collection}/${docId}`,
-    outcome: outcome.outcome === "drafted" ? `drafted (${persisted})` : `${outcome.outcome}: ${"reason" in outcome ? outcome.reason : ""}`,
+    outcome: after
+      ? `drafted (${persisted})`
+      : `${outcome.outcome}: ${"reason" in outcome ? outcome.reason : ""}`,
     verdict,
     before,
     ...(after ? { after } : {}),

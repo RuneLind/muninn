@@ -81,6 +81,25 @@ describe("missingCodeBlocks", () => {
     expect(missing[0]!.text).toContain("image: postgres:latest");
   });
 
+  test("a PARTIAL block is asked for again — the same 80% threshold the score uses", () => {
+    // A page carrying 2 of the yaml block's 3 lines (67%) scores `partial`, not
+    // `kept`. Asking for it again is what lets a half-quoted block be completed;
+    // a `lost`-only filter would leave it half-quoted forever and then report
+    // "no block recovered".
+    // Three measurable lines (12+ chars each); the page carries two of them.
+    const threeLines = [
+      "Prose.",
+      "```yaml",
+      "    image: postgres:latest",
+      "    container_name: adoptions-db",
+      "    restart: unless-stopped",
+      "```",
+    ].join("\n");
+    const partial = "# Page\n\n```yaml\n    image: postgres:latest\n    container_name: adoptions-db\n```\n";
+    expect(measureCodeRetention(threeLines, partial)[0]).toMatchObject({ found: 2, lines: 3, verdict: "partial" });
+    expect(missingCodeBlocks(threeLines, partial).map((m) => m.lang)).toEqual(["yaml"]);
+  });
+
   test("a page carrying every block asks for nothing", () => {
     expect(missingCodeBlocks(summary, summary)).toEqual([]);
   });
