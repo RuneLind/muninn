@@ -671,8 +671,8 @@ the e2e — so `.wiki-prov-chain[hidden] { display: none; }` rides beside the
 `display: flex`, and any later `display` on that element needs it too.
 
 **The chain is `chainEvents`: sessions and merges on ONE spine, ascending.** A
-session is dated by `first ?? last` (the ledger returns one end of the range for
-a session that ran inside a minute and the other for one that did not) and a
+session is dated by `first ?? last` (either end can be the only one the ledger
+holds — both are optional in its answer and both default to `null`) and a
 merge by `mergedAt`; a DATELESS event sorts LAST, in the page's own `sessions:`
 order. That rule is stated rather than inherited from a sort because every bare
 chip has `first: null` — `enrichSessions` fills the whole key set with nulls when
@@ -720,7 +720,12 @@ per CALL, so no call this side makes can trip it. It is upstream's cap that
 decides, and it can move in a release muninn does not ship.
 
 **The marks on the collapsed line are capped at `MARKS_MAX` (24), with one `+N`
-tail mark carrying the rest on a hover.** MEASURED on a 60-session page in a
+tail mark carrying the rest on a hover.** Over the cap, the slots are reserved
+PER KIND before they are filled: every kind present gets `floor(24 / kinds)`, and
+what a kind does not need of its share passes on in render order (sessions, then
+merges). That reservation is why a page of 250 sessions and one merge still shows
+the merge — sliced off one sessions-then-merges run it showed `session=24,
+merge=0`, deleting the merges leg's whole contribution to the line. MEASURED on a 60-session page in a
 1100 px window: the marks are one inline-flex run beside the sentence, and
 uncapped they ended 44 px past the article column and took the caret with them.
 The cap is the LEGIBILITY bound; the containment bound is CSS — `flex-wrap` on

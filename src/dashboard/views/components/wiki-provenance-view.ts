@@ -439,15 +439,31 @@ interface ChainRenderOptions {
  * A DATE-ONLY value (`2026-09-15`) is answered `MM-DD` from its own digits and
  * never converted: `Date.parse` reads it as UTC midnight, so formatting it in
  * any zone west of UTC renders the day BEFORE — and there is no hour in the
- * input to render anyway. The ledger spells full stamps today; a date-only one
- * reaches here from hand-written frontmatter.
+ * input to render anyway. Nothing on this page produces one today — `chip.first`
+ * and `chip.last` are ledger facts and `mergedAt` comes off the merges payload,
+ * all three full ISO stamps, and the only date-only value in the repo is a test
+ * fixture. The branch is defence against an upstream that starts spelling a
+ * day, so that it renders as a day rather than as yesterday.
+ *
+ * The digits are ROUND-TRIPPED before they are echoed: the shape pattern alone
+ * accepts `2026-99-99` and `0000-00-00`, and answering those `99-99` / `00-00`
+ * puts a non-date in front of the reader where the pre-branch code put nothing.
+ * `setUTCFullYear` rather than `Date.UTC` for the trip: `Date.UTC` maps a year
+ * of 0–99 onto 1900+year, which would refuse a year below 100 as out of range.
  */
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 export function fmtChainStamp(at: string | null | undefined, timeZone?: string): string {
   if (!at) return "";
   const dateOnly = DATE_ONLY.exec(at);
-  if (dateOnly) return `${dateOnly[2]}-${dateOnly[3]}`;
+  if (dateOnly) {
+    const [year, month, day] = [Number(dateOnly[1]), Number(dateOnly[2]), Number(dateOnly[3])];
+    const trip = new Date(0);
+    trip.setUTCFullYear(year, month - 1, day);
+    const survived =
+      trip.getUTCFullYear() === year && trip.getUTCMonth() + 1 === month && trip.getUTCDate() === day;
+    return survived ? `${dateOnly[2]}-${dateOnly[3]}` : "";
+  }
   const ms = Date.parse(at);
   if (!Number.isFinite(ms)) return "";
   const parts = new Intl.DateTimeFormat("en-GB", {
@@ -560,17 +576,51 @@ export function mergesNote(state?: ProvenanceMergesState | null): string | null 
  */
 export const MARKS_MAX = 24;
 
-/** The marks after the sentence: one per session, then one per merge, and one
- *  `+N` when there are more than {@link MARKS_MAX}. The vocabulary is open —
- *  `data-mark` names the kind, so a later kind (a session the ledger links but
- *  the page never stamped) is a value, not a rewrite. */
+/**
+ * How many marks each kind renders when the page has more than {@link MARKS_MAX}
+ * of them, given one count per kind in render order.
+ *
+ * Every kind PRESENT is reserved an equal share of the cap first
+ * (`floor(cap / kinds present)`), and whatever a kind does not need of its share
+ * is handed on to the kinds in render order. So a page of 250 sessions and one
+ * merge spends one slot on the merge and the other 23 on sessions, and a page of
+ * 30 and 30 splits 12/12 — while a page with only sessions is unchanged, because
+ * one kind present means one share worth the whole cap.
+ *
+ * The reservation is the point: MEASURED on 3f019ea4, which built the run
+ * sessions-then-merges and sliced it, a page of 250 sessions and one merge
+ * rendered `session=24, merge=0, +227` — the merges leg's whole contribution to
+ * the line deleted by a page's session count.
+ */
+function markQuotas(counts: number[], cap: number): number[] {
+  const total = counts.reduce((sum, n) => sum + n, 0);
+  if (total <= cap) return counts.slice();
+  const present = counts.filter((n) => n > 0).length;
+  const share = Math.floor(cap / present);
+  const quotas = counts.map((n) => Math.min(n, share));
+  let spare = cap - quotas.reduce((sum, n) => sum + n, 0);
+  for (let i = 0; i < quotas.length && spare > 0; i++) {
+    const take = Math.min(spare, counts[i]! - quotas[i]!);
+    quotas[i]! += take;
+    spare -= take;
+  }
+  return quotas;
+}
+
+/** The marks after the sentence: sessions first, then merges, and one `+N`
+ *  counting everything dropped of BOTH kinds when there are more than
+ *  {@link MARKS_MAX}. Each kind present keeps a reserved share of the cap — see
+ *  {@link markQuotas}. The vocabulary is open — `data-mark` names the kind, so a
+ *  later kind (a session the ledger links but the page never stamped) is a
+ *  value, not a rewrite: it joins the counts array and gets a share of its own. */
 function marksHtml(p: ProvenancePayload, opts: ChainRenderOptions): string {
-  const marks: string[] = [];
+  const sessionMarks: string[] = [];
+  const mergeMarks: string[] = [];
   for (const chip of p.sessions) {
     const v = chipView(chip, p.ledger);
     const when = sessionWhen(chip, opts.timeZone);
     const what = v.bareCopy ?? `${v.titleFull || chip.id}${v.costLabel ? ` — ${v.costLabel}` : ""}`;
-    marks.push(
+    sessionMarks.push(
       `<span class="wiki-prov-mark wiki-prov-mark-session" data-mark="session"` +
         ` title="${esc(when ? `${when} · ${what}` : what)}">○</span>`,
     );
@@ -579,13 +629,19 @@ function marksHtml(p: ProvenancePayload, opts: ChainRenderOptions): string {
     const coordinate = mergeCoordinate(merge.url);
     const label = merge.prNumber === null ? "a merge" : `#${merge.prNumber}`;
     const where = coordinate ? `${coordinate.repo} ` : "";
-    marks.push(
+    mergeMarks.push(
       `<span class="wiki-prov-mark wiki-prov-mark-merge" data-mark="merge"` +
         ` title="merged ${esc(where + label)}">▪</span>`,
     );
   }
-  let html = `<span class="wiki-prov-marks">` + marks.slice(0, MARKS_MAX).join("");
-  const rest = marks.length - MARKS_MAX;
+  const byKind = [sessionMarks, mergeMarks];
+  const quotas = markQuotas(
+    byKind.map((kind) => kind.length),
+    MARKS_MAX,
+  );
+  const shown = byKind.flatMap((kind, i) => kind.slice(0, quotas[i]!));
+  let html = `<span class="wiki-prov-marks">` + shown.join("");
+  const rest = byKind.reduce((sum, kind) => sum + kind.length, 0) - shown.length;
   if (rest > 0) {
     // A mark like the others — it carries a title, so the number is never the
     // only thing it says — and the chain below lists every one of them.
@@ -633,9 +689,11 @@ function sessionRowHtml(
   const v = chipView(chip, ledger);
   const when = sessionWhen(chip, opts.timeZone);
   // The hover carries the ledger's own stamps, so the row's local-time label is
-  // never the only spelling of the instant. DEDUPED: the ledger returns the same
-  // instant twice for a session that ran inside a minute, and `X → X` reads as a
-  // range of zero rather than as one moment.
+  // never the only spelling of the instant. DEDUPED on the RAW stamps: a session
+  // the ledger answered one timestamp for has `first === last`, and `X → X`
+  // reads as a range of zero rather than as one moment. (The other collapse —
+  // two stamps inside the same minute rendering one label — is `sessionWhen`'s,
+  // on the FORMATTED pair, and leaves both raw stamps in this hover.)
   const whenTitle = [...new Set([chip.first, chip.last].filter(Boolean))].join(" → ");
   const messages = typeof chip.messages === "number" ? plural(chip.messages, "message") : "";
   let html =

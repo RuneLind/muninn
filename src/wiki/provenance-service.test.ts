@@ -11,6 +11,7 @@ import {
   type ProvenanceContext,
 } from "./provenance-service.ts";
 import { __resetSessionLedgerWarnsForTest, type SessionLedgerDeps } from "./session-ledger.ts";
+import { MERGES_NOT_ASKED } from "./provenance.ts";
 import type { WikiPageMeta } from "./store.ts";
 
 const ID_A = "5a2ee3f0-c7ea-42f4-8082-1b2c3d4e5f60";
@@ -280,7 +281,17 @@ describe("the merges leg", () => {
     );
     expect(called).toBe(false);
     expect(res!.merges).toEqual([]);
-    expect(res!.mergesLedger.asked).toBe(false);
+    // The WHOLE shape, not just `asked`. Every other field is what the note
+    // reads next (`mergesNote` returns on `!asked` today, so a wrong `partial`
+    // or `truncated` here is inert until the day that early return moves) —
+    // which is exactly the kind of constant a `.asked` assertion leaves free.
+    expect(res!.mergesLedger).toEqual({
+      asked: false,
+      reachable: false,
+      partial: false,
+      truncated: false,
+    });
+    expect(res!.mergesLedger).toBe(MERGES_NOT_ASKED);
   });
 
   test("a page naming no session asks nothing of the merges route either", async () => {

@@ -502,7 +502,10 @@ describe("row cosmetics", () => {
     expect(html).toContain(`<span class="wiki-chain-host">· macmini</span>`);
   });
 
-  test("a session that ran inside a minute hovers ONE stamp, not `X → X`", () => {
+  test("a session the ledger answered ONE stamp for hovers `first`, not `X → X`", () => {
+    // `first === last`: the shape upstream answers for a session with a single
+    // timestamp. (Two stamps inside one minute is a different collapse — the
+    // LABEL's, in `sessionWhen`; this hover still shows both raw stamps.)
     const at = "2026-09-15T10:00:00.000Z";
     const html = chainHtml(payload({ sessions: [chip({ id: "s", first: at, last: at, cost: 1 })] }), UTC);
     expect(html).toContain(`title="${at}"`);
@@ -617,5 +620,80 @@ describe("railListHtml", () => {
     // left the rail: nothing else may stand in for "No pages match."
     expect(railListHtml("")).toContain("No pages match.");
     expect(railListHtml("<div>row</div>")).toBe("<div>row</div>");
+  });
+});
+
+describe("the cap keeps a slot for every kind on the page", () => {
+  /** N sessions, every one of them dated and priced. */
+  function manySessions(n: number): ProvenancePayload {
+    return payload({
+      sessions: Array.from({ length: n }, (_, i) =>
+        chip({ id: `s${i}`, first: `2026-09-15T${String(i % 24).padStart(2, "0")}:00:00.000Z`, cost: 1 }),
+      ),
+      totalCost: n,
+      costedSessions: n,
+    });
+  }
+  const kindCount = (html: string, kind: string) =>
+    [...html.matchAll(new RegExp(`data-mark="${kind}"`, "g"))].length;
+
+  test("250 sessions and ONE merge still render that merge", () => {
+    // MEASURED on 3f019ea4: the run was built sessions-then-merges and sliced
+    // at the cap, so this page rendered `session=24, merge=0, more=+227` — the
+    // one fact the merges leg exists to show was the one the cap dropped.
+    const p = manySessions(250);
+    p.merges = [merge({ prNumber: 553 })];
+    const html = provLineHtml(p, UTC);
+    expect(kindCount(html, "merge")).toBe(1);
+    expect(kindCount(html, "session")).toBe(MARKS_MAX - 1);
+    expect(html).toContain(`>+${251 - MARKS_MAX}</span>`);
+  });
+
+  test("30 sessions and 30 merges split the cap evenly, and `+N` counts both kinds", () => {
+    const p = manySessions(30);
+    p.merges = Array.from({ length: 30 }, (_, i) => merge({ prNumber: 500 + i }));
+    const html = provLineHtml(p, UTC);
+    expect(kindCount(html, "session")).toBe(MARKS_MAX / 2);
+    expect(kindCount(html, "merge")).toBe(MARKS_MAX / 2);
+    // 60 events, 24 rendered: the tail counts what was dropped of BOTH kinds.
+    expect(html).toContain(`>+${60 - MARKS_MAX}</span>`);
+  });
+
+  test("sessions still fill the whole cap when the page has no merge at all", () => {
+    // The reservation is per kind PRESENT: one kind, one quota, and the
+    // sessions-only page is unchanged from before this round.
+    const html = provLineHtml(manySessions(60), UTC);
+    expect(kindCount(html, "session")).toBe(MARKS_MAX);
+    expect(kindCount(html, "merge")).toBe(0);
+  });
+
+  test("the marks stay in kind order — every session mark before every merge mark", () => {
+    const p = manySessions(30);
+    p.merges = Array.from({ length: 30 }, (_, i) => merge({ prNumber: 500 + i }));
+    const kinds = [...provLineHtml(p, UTC).matchAll(/data-mark="(\w+)"/g)].map((m) => m[1]);
+    expect(kinds).toEqual([
+      ...Array(MARKS_MAX / 2).fill("session"),
+      ...Array(MARKS_MAX / 2).fill("merge"),
+      "more",
+    ]);
+  });
+});
+
+describe("a date-only stamp must be a real date", () => {
+  test("an out-of-range date-only value renders nothing", () => {
+    // `2026-99-99` matched the shape and was echoed back as `99-99`, which is
+    // not a date any reader can place. Same for the all-zero stamp a damaged
+    // frontmatter line spells.
+    expect(fmtChainStamp("2026-99-99", UTC.timeZone)).toBe("");
+    expect(fmtChainStamp("0000-00-00", UTC.timeZone)).toBe("");
+    expect(fmtChainStamp("2026-02-30", UTC.timeZone)).toBe("");
+    expect(fmtChainStamp("2026-13-01", UTC.timeZone)).toBe("");
+    expect(fmtChainStamp("2026-02-29", UTC.timeZone)).toBe(""); // 2026 is not a leap year
+  });
+
+  test("a real date-only value is still answered from its own digits", () => {
+    expect(fmtChainStamp("2024-02-29", UTC.timeZone)).toBe("02-29"); // 2024 IS a leap year
+    expect(fmtChainStamp("2026-12-31", "Pacific/Midway")).toBe("12-31");
+    expect(fmtChainStamp("0099-01-01", UTC.timeZone)).toBe("01-01");
   });
 });
