@@ -10,7 +10,8 @@
  */
 
 import { test, expect, describe, afterEach } from "bun:test";
-import { resolveProvenance, type ProvenanceContext } from "./provenance-service.ts";
+import { pageProvenance, resolveProvenance, type ProvenanceContext } from "./provenance-service.ts";
+import type { WikiPageMeta } from "./store.ts";
 import { LEDGER_NOT_ASKED } from "./provenance.ts";
 import {
   fetchSessionsById,
@@ -38,6 +39,9 @@ function deps(over: Partial<SessionLedgerDeps> = {}): SessionLedgerDeps {
     baseUrl: "http://127.0.0.1:8787",
     urlConfigured: true,
     fetchSessions: async (ids) => ({ sessions: ids.map((id) => facts(id, 1)) }),
+    // Answers nothing by default: a case about the FACTS leg must not also be
+    // asserting something about merges by accident.
+    fetchMerges: async () => ({ merges: [] }),
     ...over,
   };
 }
@@ -504,6 +508,288 @@ describe("claudeUsageJson", () => {
       bad.stop(true);
       html.stop(true);
     }
+  });
+});
+
+// ── The merges leg degrades on its own ──────────────────────────────────────
+//
+// It is a SECOND service call on the page open, so the two things it must never
+// do are move the cost sentence and cost a second deadline.
+
+describe("merges", () => {
+  function meta(sessions: string[]): WikiPageMeta {
+    return {
+      name: "p",
+      title: "P",
+      type: "plan",
+      domain: "ai",
+      tags: [],
+      aliases: [],
+      relPath: "p.md",
+      sessions,
+    } as WikiPageMeta;
+  }
+
+  test("an unreachable merges route leaves the cost line's inputs untouched", async () => {
+    const res = await pageProvenance(
+      meta([SESSION_A]),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async () => {
+            throw new Error("connect ECONNREFUSED");
+          },
+        }),
+      }),
+    );
+    // The facts leg answered, so the money is exactly what it was without the
+    // second leg at all.
+    expect(res!.totalCost).toBe(1);
+    expect(res!.costedSessions).toBe(1);
+    expect(res!.ledger.reachable).toBe(true);
+    expect(res!.ledger.errors).toBeUndefined();
+    // …and the merges half says, separately, that it got nothing.
+    expect(res!.merges).toEqual([]);
+    // `partial` is FALSE here: nothing answered, so there is no half-answer to
+    // qualify — and the reason rides along, the way the facts leg's does.
+    expect(res!.mergesLedger).toEqual({
+      asked: true,
+      reachable: false,
+      partial: false,
+      truncated: false,
+      errors: ["claude-usage merges: connect ECONNREFUSED"],
+    });
+  });
+
+  test("a body that is not this service's shape is unreachable, not an empty merge list", async () => {
+    const res = await pageProvenance(
+      meta([SESSION_A]),
+      ctx({ sessionLedger: deps({ fetchMerges: async () => ({ nope: true }) }) }),
+    );
+    expect(res!.mergesLedger.reachable).toBe(false);
+    expect(res!.merges).toEqual([]);
+  });
+
+  test("upstream cutting the list is CARRIED, not assumed away", async () => {
+    const res = await pageProvenance(
+      meta([SESSION_A]),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async () => ({ merges: [], limit: 200, truncated: true }),
+        }),
+      }),
+    );
+    expect(res!.mergesLedger.truncated).toBe(true);
+    expect(res!.mergesLedger.reachable).toBe(true);
+  });
+
+  test("a row missing its `sessionId` is dropped rather than rendered as a merge of nothing", async () => {
+    const res = await pageProvenance(
+      meta([SESSION_A]),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async () => ({
+            merges: [
+              { repo: "r", prNumber: 1, url: null, subject: null, mergedAt: "2026-09-16T10:00:00Z", mergeOk: true },
+              { sessionId: ID_A, repo: "r", prNumber: 2, url: null, subject: null, mergedAt: "2026-09-16T11:00:00Z", mergeOk: true },
+            ],
+          }),
+        }),
+      }),
+    );
+    expect(res!.merges.map((m) => m.prNumber)).toEqual([2]);
+  });
+
+  test("`mergeOk` absent is NOT unconfirmed — only an explicit false is", async () => {
+    const res = await pageProvenance(
+      meta([SESSION_A]),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async () => ({
+            merges: [
+              { sessionId: ID_A, repo: "r", prNumber: 1, url: null, subject: null, mergedAt: "2026-09-16T10:00:00Z" },
+              { sessionId: ID_A, repo: "r", prNumber: 2, url: null, subject: null, mergedAt: "2026-09-16T11:00:00Z", mergeOk: false },
+            ],
+          }),
+        }),
+      }),
+    );
+    expect(res!.merges.map((m) => m.mergeOk)).toEqual([true, false]);
+  });
+
+  test("a half-answered merges leg reaches the payload as PARTIAL, with its reason", async () => {
+    // Two batches, the second one down — the shape a page naming 250 sessions
+    // produces, and the only shape in which "some of the merges" exists.
+    const ids = Array.from({ length: SESSION_IDS_PER_CALL + 50 }, (_, i) => `id-${String(i).padStart(4, "0")}`);
+    let call = 0;
+    const res = await pageProvenance(
+      meta(ids),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async (batch) => {
+            call += 1;
+            if (call === 2) throw new Error("connect ECONNREFUSED");
+            return { merges: [{ sessionId: batch[0], repo: "/r", prNumber: 7, url: null, subject: null, mergedAt: null, mergeOk: true }] };
+          },
+        }),
+      }),
+    );
+    expect(call).toBe(2);
+    // One merge on screen, out of an unknown number — which the state now says.
+    expect(res!.merges.length).toBe(1);
+    expect(res!.mergesLedger.reachable).toBe(true);
+    expect(res!.mergesLedger.partial).toBe(true);
+    expect(res!.mergesLedger.errors).toEqual(["claude-usage merges: connect ECONNREFUSED"]);
+    // The FACTS leg answered in full and its own state does not move for this.
+    expect(res!.ledger.partial).toBe(false);
+    expect(res!.ledger.reachable).toBe(true);
+  });
+
+  test("upstream's `limit` rides the state, so the footer can name ITS cap", async () => {
+    const res = await pageProvenance(
+      meta([SESSION_A]),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async () => ({ merges: [], truncated: true, limit: 500 }),
+        }),
+      }),
+    );
+    expect(res!.mergesLedger.truncated).toBe(true);
+    expect(res!.mergesLedger.limit).toBe(500);
+  });
+
+  test("ids are batched by the SAME bounds the facts leg uses", async () => {
+    const ids = Array.from({ length: SESSION_IDS_PER_CALL + 1 }, (_, i) => `id-${i}`);
+    const batches: number[] = [];
+    await pageProvenance(
+      meta(ids),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async (batch) => {
+            batches.push(batch.length);
+            return { merges: [] };
+          },
+        }),
+      }),
+    );
+    expect(batches).toEqual([SESSION_IDS_PER_CALL, 1]);
+  });
+
+  test("a whitespace-only `sessions:` entry arms no timer — the gate reads the DEDUPED list", async () => {
+    // `pageProvenance` hoisted `resolveProvenance`'s gate so both legs could
+    // share one deadline, and hoisted it off the RAW list: `dedupeSessionRefs`
+    // drops a blank entry, so this page asks nothing and — before this — armed a
+    // 10 s timer to bound the nothing.
+    //
+    // The timer is the only observable, so it is what is counted. Patched and
+    // restored in-process; no other case in this file creates one concurrently.
+    const realTimeout = AbortSignal.timeout;
+    let armed = 0;
+    (AbortSignal as unknown as { timeout: typeof AbortSignal.timeout }).timeout = ((ms: number) => {
+      armed += 1;
+      return realTimeout.call(AbortSignal, ms);
+    }) as typeof AbortSignal.timeout;
+    const asked: string[][] = [];
+    try {
+      const res = await pageProvenance(
+        // No `jira:` key: a huginn lookup is its own reason to arm one.
+        meta(["   ", "\t"]),
+        ctx({
+          sessionLedger: deps({
+            fetchSessions: async (batch) => {
+              asked.push(batch);
+              return { sessions: [] };
+            },
+            fetchMerges: async (batch) => {
+              asked.push(batch);
+              return { merges: [] };
+            },
+          }),
+        }),
+      );
+      // The page still HAS provenance — two refs, neither of them askable.
+      expect(res).not.toBeNull();
+      expect(asked).toEqual([]);
+      expect(armed).toBe(0);
+      // And the merges half says "nobody asked", not "the service failed".
+      expect(res!.mergesLedger.asked).toBe(false);
+    } finally {
+      (AbortSignal as unknown as { timeout: typeof AbortSignal.timeout }).timeout = realTimeout;
+    }
+  });
+
+  test("an id that cannot BE an id is not sent to this route either", async () => {
+    const asked: string[][] = [];
+    await pageProvenance(
+      meta([SESSION_A, `claude-code:${"y".repeat(SESSION_ID_MAX_CHARS + 1)}`]),
+      ctx({
+        sessionLedger: deps({
+          fetchMerges: async (batch) => {
+            asked.push(batch);
+            return { merges: [] };
+          },
+        }),
+      }),
+    );
+    expect(asked).toEqual([[ID_A]]);
+  });
+
+  test("the two legs START together — the page open is not their sum", async () => {
+    const order: string[] = [];
+    let releaseSessions = () => {};
+    const gate = new Promise<void>((r) => (releaseSessions = r));
+    await pageProvenance(
+      meta([SESSION_A]),
+      ctx({
+        sessionLedger: deps({
+          fetchSessions: async (ids) => {
+            order.push("sessions");
+            // The merges leg must already be in flight while this one waits; a
+            // sequential `await` would deadlock this test rather than slow it.
+            await gate;
+            return { sessions: ids.map((id) => facts(id, 1)) };
+          },
+          fetchMerges: async () => {
+            order.push("merges");
+            releaseSessions();
+            return { merges: [] };
+          },
+        }),
+      }),
+    );
+    expect(order).toEqual(["sessions", "merges"]);
+  });
+
+  test("ONE deadline covers both legs — a hanging merges route cannot add a second", async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const res = await pageProvenance(
+      meta([SESSION_A]),
+      ctx({
+        budgetMs: 120,
+        sessionLedger: deps({
+          fetchSessions: (_ids, signal) => {
+            seen.push(signal);
+            return new Promise((_resolve, reject) => {
+              signal?.addEventListener("abort", () => reject(new Error("TimeoutError")), { once: true });
+            });
+          },
+          fetchMerges: (_ids, signal) => {
+            seen.push(signal);
+            return new Promise((_resolve, reject) => {
+              signal?.addEventListener("abort", () => reject(new Error("TimeoutError")), { once: true });
+            });
+          },
+        }),
+      }),
+    );
+    // "One timer" is proved by SIGNAL IDENTITY, not by a stopwatch: the elapsed
+    // time of two 120 ms legs on a loaded CI runner is a fact about the runner,
+    // and a wall-clock bound that passes on this laptop is exactly the assertion
+    // that goes red for nobody's fault.
+    expect(seen.length).toBe(2);
+    expect(seen[0]).toBeDefined();
+    expect(seen[0]).toBe(seen[1]);
+    expect(res!.ledger.reachable).toBe(false);
+    expect(res!.mergesLedger.reachable).toBe(false);
   });
 });
 

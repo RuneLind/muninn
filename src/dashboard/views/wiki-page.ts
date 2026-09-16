@@ -829,9 +829,11 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-project-hub:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
     /* ── Provenance ──────────────────────────────────────────────────────
-       Placement C: the strip under the title is the SUMMARY (Jira row + one
-       line of cost), the rail's Sessions section is the DETAIL. Both are
-       secondary to the article: text a reader must READ sits at --text-muted
+       ONE surface under the title: a collapsed line (Jira row + one sentence of
+       cost + a mark per event) that opens in place into the chain. The rail
+       carries no Sessions section — it was the second half of this and said
+       less. Everything here is secondary to the article: text a reader must
+       READ sits at --text-muted
        (measured below), only the provider glyph dimmer, and every colour comes
        from the page's own tokens — no literal hex, so both themes follow the
        same declarations. */
@@ -874,48 +876,124 @@ export async function renderWikiPage(opts?: {
        READ (the cost, the date, the host, a bare chip's reason, the id, the copy
        control) sits there. Only the provider glyph stays dimmer: it is a mark
        with a title attribute, not text. */
-    .wiki-prov-cost { font-size: 11.5px; color: var(--text-muted); }
-    /* One rail row per session. A three-line block rather than a single line:
-       the rail is narrow and resizable, and a date + host + price + title + id
-       on one line truncates whichever of them the reader came for. */
-    .wiki-sess-row {
-      display: flex; flex-direction: column; gap: 2px;
-      padding: 5px 10px 6px;
-      border-left: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
-      margin: 0 0 2px 8px;
+    /* min-width:0 + overflow-wrap for the same reason the marks carry them: this
+       is a flex item whose min-content width is a long sentence. */
+    .wiki-prov-cost {
+      font-size: 11.5px; color: var(--text-muted);
+      min-width: 0; overflow-wrap: anywhere;
     }
-    /* A bare chip is a session with no money and no title. The ONE thing it says
-       is its reason, so the border is the whole difference — the reason renders
-       at the same weight as everything else here (see the contrast note above),
-       because a sentence nobody can read is a row with nothing on it. */
-    .wiki-sess-bare { border-left-color: var(--border-secondary); }
-    .wiki-sess-head { display: flex; align-items: baseline; gap: 6px; font-size: 11px; }
-    .wiki-sess-glyph { color: var(--text-dim); }
-    .wiki-sess-date { color: var(--text-muted); }
-    .wiki-sess-host { color: var(--text-muted); }
-    .wiki-sess-cost { margin-left: auto; color: var(--text-muted); }
-    .wiki-sess-title {
+    /* The whole sentence is the disclosure, so the button carries no chrome of
+       its own: a border or a background here would make one line of the article
+       header look like a control bar. It is still a real <button>, so focus,
+       Enter and Space come for free. */
+    .wiki-prov-line {
+      display: flex; align-items: center; gap: 7px;
+      /* Wraps, so that a marks run which no longer shrinks has somewhere to go
+         when the sentence beside it fills the row. */
+      flex-wrap: wrap;
+      width: 100%; min-width: 0; text-align: left;
+      border: none; background: none; padding: 1px 0;
+      font-family: inherit; cursor: pointer;
+    }
+    .wiki-prov-line:hover .wiki-prov-cost { color: var(--text-primary); }
+    /* MEASURED on a 60-session page: uncapped, the marks ended 44 px past the
+       article column in a 1100 px window and pushed the caret out with them. The
+       renderer's MARKS_MAX is the legibility bound; these three declarations are
+       the containment one, at any count the renderer might grow to. */
+    .wiki-prov-marks {
+      display: inline-flex; align-items: center; gap: 3px;
+      /* flex-shrink: 0 + max-width: 100% is the pair that matters. Shrinking
+         squeezed the run into three stacked rows beside the sentence even at
+         1100 px; refusing to shrink keeps it on one row and lets the LINE wrap
+         instead, and the max-width is the floor under that — at a column
+         narrower than the run itself the marks wrap among themselves rather than
+         painting outside it (measured: 0 px past the column at 1100, 900, 760
+         and 400 px, in both themes). */
+      flex-wrap: wrap; flex-shrink: 0; max-width: 100%;
+    }
+    /* Marks, not text: each carries a title attribute naming the event, which is
+       what lets them sit below the text floor. */
+    .wiki-prov-mark { font-size: 9px; line-height: 1; color: var(--text-dim); }
+    .wiki-prov-mark-merge { color: var(--accent-light); }
+    /* The +N tail mark. Same size and colour as the glyphs it counts, so it
+       reads as one of them rather than as a control. */
+    .wiki-prov-mark-more { font-size: 9.5px; }
+    .wiki-prov-caret {
+      margin-left: auto; font-size: 9px; color: var(--text-muted);
+      transition: transform 0.15s;
+    }
+    .wiki-prov-line[aria-expanded="true"] .wiki-prov-caret { transform: rotate(180deg); }
+    /* The chain: one spine of events under the line. Indented against a rule, so
+       a reader can see at a glance where the page's own text resumes. */
+    .wiki-prov-chain {
+      display: flex; flex-direction: column; gap: 6px;
+      margin: 6px 0 2px; padding: 2px 0 2px 10px;
+      border-left: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    }
+    /* MEASURED, not defensive: a display declaration on a CLASS beats the user
+       agent's own [hidden] rule, so the collapsed chain rendered fully expanded
+       while the attribute said otherwise — green in every unit test, caught by
+       the e2e. Any later display on this element needs this line beside it. */
+    .wiki-prov-chain[hidden] { display: none; }
+    .wiki-chain-row { display: flex; flex-direction: column; gap: 2px; }
+    /* A bare row is a session the ledger could not price, and it is marked on
+       the SPINE rather than by dimming its text: the ONE thing such a row says
+       is its reason, and the reason renders at the same weight as everything
+       else here (see the contrast note above) — a sentence nobody can read is a
+       row with nothing on it. The negative margin is exactly the chain's own
+       border + padding (2 + 10), so this rule paints over that segment of the
+       spine instead of beside it, and the row's text stays on the same x as
+       every other row. Replaces .wiki-sess-bare, which said the same thing
+       about the rail rows these replaced. */
+    .wiki-chain-bare {
+      margin-left: -12px; padding-left: 10px;
+      border-left: 2px solid var(--border-secondary);
+    }
+    .wiki-chain-head { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; }
+    .wiki-chain-glyph { color: var(--text-dim); flex-shrink: 0; }
+    .wiki-chain-when { color: var(--text-muted); }
+    .wiki-chain-host { color: var(--text-muted); }
+    .wiki-chain-cost { margin-left: auto; color: var(--text-muted); }
+    .wiki-chain-title {
       font-size: 11.5px; color: var(--text-muted); line-height: 1.35;
       overflow-wrap: anywhere;
     }
-    .wiki-sess-reason { font-size: 11px; color: var(--text-muted); line-height: 1.35; }
-    .wiki-sess-idrow { display: flex; align-items: center; gap: 5px; }
+    .wiki-chain-reason { font-size: 11.5px; color: var(--text-muted); line-height: 1.35; }
+    .wiki-chain-idrow { display: flex; align-items: center; gap: 5px; }
     /* The id is the drill-down on a host the browser cannot reach, so it is
        selectable text first and a link only where CLAUDE_USAGE_PUBLIC_URL is
        set. Wrapping rather than clipping: a truncated session id is useless. */
-    .wiki-sess-id {
+    .wiki-chain-id {
       font-family: var(--font-mono, ui-monospace, monospace);
-      font-size: 10px; color: var(--text-muted);
+      font-size: 10.5px; color: var(--text-muted);
       overflow-wrap: anywhere; user-select: all;
     }
-    .wiki-sess-copy {
+    .wiki-chain-copy {
       border: none; background: none; padding: 0 2px;
-      color: var(--text-muted); font-size: 11px; font-family: inherit; cursor: pointer;
+      color: var(--text-muted); font-size: 11.5px; font-family: inherit; cursor: pointer;
       flex-shrink: 0;
     }
-    .wiki-sess-copy:hover { color: var(--text-primary); }
-    .wiki-sess-link { color: var(--status-info); text-decoration: none; font-size: 11px; flex-shrink: 0; }
-    .wiki-sess-link:hover { text-decoration: underline; }
+    .wiki-chain-copy:hover { color: var(--text-primary); }
+    .wiki-chain-link { color: var(--status-info); text-decoration: none; font-size: 11.5px; flex-shrink: 0; }
+    .wiki-chain-link:hover { text-decoration: underline; }
+    /* A merge is ONE line — a coordinate, a time, and a qualifier when the
+       ledger never paired the merge with a confirmation. */
+    .wiki-chain-merge {
+      flex-direction: row; align-items: baseline; gap: 6px; flex-wrap: wrap;
+      font-size: 11.5px;
+    }
+    a.wiki-chain-pr { color: var(--accent-light); text-decoration: none; }
+    a.wiki-chain-pr:hover { text-decoration: underline; }
+    /* The SAME class on a <span> when no coordinate could be resolved, and it
+       must not look clickable: the accent colour is this page's promise that
+       something opens. Muted is the row's own text colour (5.26 dark / 4.94
+       light, over the 4.5:1 floor), so the row still reads — it just does not
+       advertise a link that is not there. */
+    span.wiki-chain-pr { color: var(--text-muted); }
+    .wiki-chain-unconfirmed { color: var(--text-muted); font-style: italic; }
+    /* A leg that did not answer. Never a silent absence: "this page has no
+       merges" and "the merges call failed" are different facts. */
+    .wiki-chain-note { font-size: 11px; color: var(--text-muted); }
     .wiki-dates { font-size: 11.5px; color: var(--text-dim); }
     .wiki-source-url { font-size: 11.5px; color: var(--status-info); text-decoration: none; }
     .wiki-source-url:hover { text-decoration: underline; }

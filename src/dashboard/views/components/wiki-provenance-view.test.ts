@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   BARE_CHIP_COPY,
+  chainHtml,
   chipView,
   clipTitle,
   costLine,
@@ -19,11 +20,8 @@ import {
   providerGlyph,
   provStripHtml,
   railListHtml,
-  sessionsRailHtml,
-  sessionsSectionVisible,
 } from "./wiki-provenance-view.ts";
 import type { ProvenancePayload, ProvenanceSessionChip } from "../../../wiki/provenance.ts";
-import type { WikiFilters } from "./wiki-filter.ts";
 
 function chip(over: Partial<ProvenanceSessionChip> = {}): ProvenanceSessionChip {
   return {
@@ -48,24 +46,14 @@ function payload(over: Partial<ProvenancePayload> = {}): ProvenancePayload {
     sessions: [],
     jira: [],
     prs: [],
+    merges: [],
     totalCost: 0,
     costedSessions: 0,
     ledger: { asked: false, reachable: false, partial: false, configured: false },
+    mergesLedger: { asked: false, reachable: false, partial: false, truncated: false },
     ...over,
   };
 }
-
-const noFilters: WikiFilters = {
-  q: "",
-  domain: "",
-  folder: "",
-  type: "",
-  tag: "",
-  status: "",
-  followups: "",
-  project: "",
-  jira: "",
-};
 
 describe("costLine", () => {
   // Every row is (name, payload, expected). `null` means "say nothing".
@@ -239,22 +227,12 @@ describe("chipView", () => {
     expect(v).toMatchObject({
       glyph: "◆",
       providerLabel: "claude-code",
-      dateLabel: "2026-09-15",
-      dateTitle: "",
       host: "macmini",
       title: "Wiki provenance — PR 4a",
       costLabel: "$12.34",
       bareCopy: null,
-      id: "5a2e",
       url: null,
     });
-  });
-
-  test("`last` becomes a hover only when it differs from `first`", () => {
-    expect(chipView(chip({ first: "2026-09-01", last: "2026-09-03" })).dateTitle).toBe(
-      "2026-09-01 → 2026-09-03",
-    );
-    expect(chipView(chip({ first: "2026-09-01", last: "2026-09-01" })).dateTitle).toBe("");
   });
 
   test("each bare reason gets its OWN copy, and never money", () => {
@@ -296,8 +274,8 @@ describe("chipView", () => {
     expect(() => chipView(partial)).not.toThrow();
     expect(chipView(partial).costLabel).toBe("—");
     // And through the renderer, which is where the blast radius was.
-    expect(() => sessionsRailHtml([partial])).not.toThrow();
-    expect(sessionsRailHtml([partial])).toContain("wiki-sess-row");
+    expect(() => chainHtml(payload({ sessions: [partial] }))).not.toThrow();
+    expect(chainHtml(payload({ sessions: [partial] }))).toContain("wiki-chain-row");
   });
 
   test("a SUB-CENT cost keeps its digits instead of flattening to $0.00", () => {
@@ -312,19 +290,17 @@ describe("chipView", () => {
   });
 
   test("the only date the ledger returned is shown, whichever end of the range it is", () => {
-    // `dateTitle` was built for the first-less case and the renderer shows a
-    // title only BESIDE a label, so the one date came back and was dropped.
-    const lastOnly = chipView(chip({ first: null, last: "2026-09-03" }));
-    expect(lastOnly.dateLabel).toBe("2026-09-03");
-    expect(lastOnly.dateTitle).toBe("");
-    expect(sessionsRailHtml([chip({ first: null, last: "2026-09-03" })])).toContain("2026-09-03");
-
-    const firstOnly = chipView(chip({ first: "2026-09-01", last: null }));
-    expect(firstOnly.dateLabel).toBe("2026-09-01");
-    expect(firstOnly.dateTitle).toBe("");
-    // Neither end: nothing to show and nothing to hover.
-    expect(chipView(chip()).dateLabel).toBe("");
-    expect(chipView(chip()).dateTitle).toBe("");
+    // Reading `first` alone dropped a chip's only date on the ground. The chain
+    // dates a session by `first ?? last`, in an EXPLICIT zone, so the assertion
+    // is not a fact about the machine that ran it.
+    const only = (over: Partial<ProvenanceSessionChip>) =>
+      chainHtml(payload({ sessions: [chip(over)] }), { timeZone: "UTC" });
+    // DATE-ONLY inputs, so they render as dates: a `00:00` here was the hour
+    // `Date.parse` invented, and west of UTC it also moved the day.
+    expect(only({ first: null, last: "2026-09-03" })).toContain(">09-03<");
+    expect(only({ first: "2026-09-01", last: null })).toContain(">09-01<");
+    // Neither end: no element at all, rather than an empty one holding a gap.
+    expect(only({})).not.toContain("wiki-chain-when");
   });
 
   test("`unresolved` on an UNCONFIGURED host does not blame a service that isn't there", () => {
@@ -474,105 +450,16 @@ describe("provStripHtml", () => {
   });
 });
 
-describe("sessionsRailHtml", () => {
-  test("a priced row carries glyph, date, host, title, money and the id", () => {
-    const html = sessionsRailHtml([
-      chip({
-        id: "5a2ee3f0",
-        provider: "claude-code",
-        host: "macmini",
-        title: "Wiki provenance — PR 4a",
-        first: "2026-09-15",
-        cost: 12.34,
-        url: "https://usage.example.test/#/session/5a2ee3f0",
-      }),
-    ]);
-    expect(html).toContain(`data-section="sessions"`);
-    expect(html).toContain("◆");
-    expect(html).toContain("2026-09-15");
-    expect(html).toContain("macmini");
-    expect(html).toContain("$12.34");
-    expect(html).toContain("<code class=\"wiki-sess-id\">5a2ee3f0</code>");
-    expect(html).toContain(`data-sess-copy="5a2ee3f0"`);
-    expect(html).toContain(`href="https://usage.example.test/#/session/5a2ee3f0"`);
-  });
-
-  test("a bare row carries the id and its reason, and NO link", () => {
-    const html = sessionsRailHtml([chip({ id: "ses_7f3a", missing: true })]);
-    expect(html).toContain("wiki-sess-bare");
-    expect(html).toContain(BARE_CHIP_COPY.missing);
-    expect(html).toContain(`data-sess-copy="ses_7f3a"`);
-    expect(html).not.toContain("wiki-sess-link");
-    expect(html).not.toContain("$");
-  });
-
-  test("no sessions, no section", () => {
-    expect(sessionsRailHtml([])).toBe("");
-  });
-
-  test("rows carry no `data-relpath` — the navigation delegate must not claim them", () => {
-    const html = sessionsRailHtml([chip({ id: "a", title: "t", cost: 1 })]);
-    expect(html).not.toContain("data-relpath");
-    expect(html).not.toContain("wiki-list-item");
-  });
-
-  test("a ledger-supplied title is escaped", () => {
-    const html = sessionsRailHtml([chip({ title: `<img src=x onerror=1>` })]);
-    expect(html).not.toContain("<img");
-  });
-
-  test("the ⧉ button is RENDERED with the same accessible name its press reverts to", () => {
-    // `copySessionId` flashes a result and reverts to `Copy the session id <id>`,
-    // so a button rendered with the bare label silently renamed itself the first
-    // time it was pressed.
-    const html = sessionsRailHtml([chip({ id: "5a2ee3f0" })]);
-    expect(html).toContain(`aria-label="Copy the session id 5a2ee3f0"`);
-  });
-
-  test("the ledger rides through to the bare rows", () => {
-    const unconfigured = { asked: false, reachable: false, partial: false, configured: false };
-    const html = sessionsRailHtml([chip({ unresolved: true })], unconfigured);
-    expect(html).toContain("not looked up — no claude-usage on this host");
-    expect(html).not.toContain("claude-usage did not answer");
-  });
-});
-
 describe("railListHtml", () => {
-  const sessions = `<div class="wiki-list-sec" data-section="sessions"></div>`;
-
-  test("a facet matching nothing still says so, even under a Sessions section", () => {
-    // Seeding one buffer with the Sessions block made `html || EMPTY` true, so a
-    // stamped page answered "no page matches this facet" with session rows and
-    // nothing else.
-    const out = railListHtml(sessions, "");
-    expect(out).toContain("No pages match.");
-    expect(out).toContain(`data-section="sessions"`);
-    // Order: the open page's block sits ABOVE the answer about the filter.
-    expect(out.indexOf("sessions")).toBeLessThan(out.indexOf("No pages match."));
+  test("a facet matching nothing still says so", () => {
+    // The rule #550's fix round established. The Sessions prefix that motivated
+    // it is gone, but the composition stays: nothing above the rows may stand in
+    // for the answer about the filter.
+    expect(railListHtml("")).toContain("No pages match.");
   });
 
-  test("real rows suppress the empty state, sessions or not", () => {
-    expect(railListHtml(sessions, "<div>row</div>")).toBe(sessions + "<div>row</div>");
-    expect(railListHtml("", "<div>row</div>")).toBe("<div>row</div>");
-  });
-
-  test("no sessions and no rows is the plain empty state", () => {
-    expect(railListHtml("", "")).toContain("No pages match.");
-  });
-});
-
-describe("sessionsSectionVisible", () => {
-  test("needs sessions AND an empty query", () => {
-    expect(sessionsSectionVisible(noFilters, [chip()])).toBe(true);
-    expect(sessionsSectionVisible(noFilters, [])).toBe(false);
-    expect(sessionsSectionVisible(noFilters, null)).toBe(false);
-    expect(sessionsSectionVisible({ ...noFilters, q: "provenance" }, [chip()])).toBe(false);
-    // A whitespace-only query is not a query — `railSectionsVisible`'s rule.
-    expect(sessionsSectionVisible({ ...noFilters, q: "  " }, [chip()])).toBe(true);
-  });
-
-  test("a facet narrows the page list but does not hide the open page's sessions", () => {
-    expect(sessionsSectionVisible({ ...noFilters, type: "plan", jira: "MELOSYS-1" }, [chip()])).toBe(true);
+  test("real rows suppress the empty state", () => {
+    expect(railListHtml("<div>row</div>")).toBe("<div>row</div>");
   });
 });
 

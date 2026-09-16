@@ -140,6 +140,17 @@ export interface SessionLedgerResult {
 export interface SessionLedgerDeps {
   /** Must reject on timeout / non-200 / over-cap / malformed JSON. */
   fetchSessions: (ids: string[], signal?: AbortSignal) => Promise<unknown>;
+  /**
+   * `GET /api/merges?sessions=` — same contract, same bounds, same rejection
+   * rules as `fetchSessions`.
+   *
+   * REQUIRED rather than optional on purpose: an absent leg would be
+   * indistinguishable from a leg that answered nothing, so a wiring mistake
+   * would render as "these sessions merged nothing" on every page. Every
+   * construction site states what its merges leg does, and the compiler is what
+   * enforces it.
+   */
+  fetchMerges: (ids: string[], signal?: AbortSignal) => Promise<unknown>;
   urlConfigured: boolean;
   baseUrl: string;
 }
@@ -170,6 +181,15 @@ export function defaultSessionLedgerDeps(
         // The full URL carries every id, so the SHORT form is what a log line
         // and a degrade message name. The operator's first question about a
         // degraded chip is whether this host was pointed at the right service.
+        label: root,
+      }),
+    // `?sessions=`, not `?ids=` — this route names the parameter after what it
+    // is keyed on, and the wrong name is a 400 saying `sessions is required`.
+    fetchMerges: (ids, signal) =>
+      claudeUsageJson(root, `/api/merges?sessions=${ids.map(encodeURIComponent).join(",")}`, {
+        timeoutMs,
+        maxBytes,
+        signal,
         label: root,
       }),
   };
@@ -324,6 +344,155 @@ export async function fetchSessionsById(
     unresolved,
     invalid,
     truncated,
+    ...(errors.length > 0 ? { errors } : {}),
+  };
+}
+
+// ── The merges leg ──────────────────────────────────────────────────────────
+
+/** One `/api/merges` row, as muninn keeps it. Mirrors the route's own shape;
+ *  the payload type the reader renders is `ProvenanceMerge`. */
+export interface LedgerMerge {
+  sessionId: string;
+  repo: string;
+  prNumber: number | null;
+  url: string | null;
+  subject: string | null;
+  mergedAt: string | null;
+  mergeOk: boolean;
+}
+
+export interface MergeLedgerResult {
+  /** At least one request was SENT — false when every id was refused first. */
+  asked: boolean;
+  /** At least one batch answered with a readable payload. */
+  reachable: boolean;
+  /**
+   * Some batches answered and some did not, so `merges` is a SUBSET of what the
+   * service holds for these sessions.
+   *
+   * The same third state the facts leg carries, and it exists for the same
+   * reason: with more than one batch, `reachable` alone reports a half-answer as
+   * a whole one — measured on 250 ids (batches of 200 + 50, the second
+   * throwing), which rendered one merge under a footer that said nothing.
+   */
+  partial: boolean;
+  merges: LedgerMerge[];
+  /** Upstream cut a batch at its own cap. */
+  truncated: boolean;
+  /** The cap upstream reports alongside `truncated` — its number, not ours. */
+  limit?: number;
+  errors?: string[];
+}
+
+/**
+ * A row, defensively.
+ *
+ * `sessionId` is the only field a row cannot be rendered without — it is the
+ * join back onto a chip — so a row missing it is dropped rather than shown as a
+ * merge belonging to nothing. Everything else degrades to its own null.
+ *
+ * `mergeOk` is read as "false only when explicitly false": an older ledger that
+ * does not send the field must not turn every merge on the page into
+ * `merge unconfirmed`, which is a claim about the merge, not about the payload.
+ */
+function toMerge(v: unknown): LedgerMerge | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const row = v as Record<string, unknown>;
+  if (typeof row.sessionId !== "string" || !row.sessionId) return null;
+  return {
+    sessionId: row.sessionId,
+    repo: typeof row.repo === "string" ? row.repo : "",
+    prNumber: typeof row.prNumber === "number" ? row.prNumber : null,
+    url: typeof row.url === "string" ? row.url : null,
+    subject: typeof row.subject === "string" ? row.subject : null,
+    mergedAt: typeof row.mergedAt === "string" ? row.mergedAt : null,
+    mergeOk: row.mergeOk !== false,
+  };
+}
+
+/**
+ * Every merge the given sessions made, paged by the SAME two bounds the facts
+ * leg pages by — the 200-id cap and the query byte budget, both of which are
+ * properties of the service and of Bun's 16 KiB header block, not of a route.
+ *
+ * Never throws. A failed batch leaves its rows out and the reason in `errors`,
+ * and — when another batch DID answer — sets `partial`, which is the difference
+ * between "no merges" and "some of the merges". The reader's degrade is one
+ * footer line, and the page's cost sentence — which is about the FACTS leg — is
+ * untouched either way.
+ *
+ * `signal` is the caller's deadline over the whole page open, shared with the
+ * facts leg. Two budgets on one page open means the looser one never applies.
+ */
+export async function fetchMergesForSessions(
+  deps: SessionLedgerDeps,
+  ids: readonly string[],
+  signal?: AbortSignal,
+): Promise<MergeLedgerResult> {
+  const merges: LedgerMerge[] = [];
+  const errors: string[] = [];
+  let answered = false;
+  let failed = false;
+  let truncated = false;
+  let limit: number | undefined;
+
+  const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
+  const askable = unique.filter((id) => isSessionIdShape(id));
+  if (askable.length === 0) {
+    return { asked: false, reachable: false, partial: false, merges, truncated: false };
+  }
+
+  for (const batch of batchSessionIds(askable)) {
+    const fail = (reason: string) => {
+      failed = true;
+      errors.push(`claude-usage merges: ${reason}`);
+    };
+    let payload: unknown;
+    try {
+      payload = await deps.fetchMerges(batch, signal);
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+      continue;
+    }
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+      fail(`response was not a JSON object (${deps.baseUrl})`);
+      continue;
+    }
+    const rows = (payload as { merges?: unknown }).merges;
+    if (!Array.isArray(rows)) {
+      // A payload with no `merges` array is a wrong service or a route that
+      // answered an error body — NOT a session that merged nothing.
+      fail(`payload carried no \`merges\` array (${deps.baseUrl})`);
+      continue;
+    }
+    answered = true;
+    if ((payload as { truncated?: unknown }).truncated === true) {
+      truncated = true;
+      // Upstream's OWN cap, carried rather than re-stated here: `truncated` is
+      // `ids.length > SESSION_IDS_MAX` per CALL over there, and a number typed
+      // into a note on this side is a second spelling of a constant that lives
+      // in another repo.
+      const l = (payload as { limit?: unknown }).limit;
+      if (typeof l === "number" && Number.isFinite(l) && l > 0) limit = l;
+    }
+    for (const row of rows) {
+      const merge = toMerge(row);
+      if (merge) merges.push(merge);
+    }
+  }
+
+  for (const error of new Set(errors)) {
+    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "merge ledger" });
+  }
+
+  return {
+    asked: true,
+    reachable: answered,
+    partial: answered && failed,
+    merges,
+    truncated,
+    ...(limit !== undefined ? { limit } : {}),
     ...(errors.length > 0 ? { errors } : {}),
   };
 }

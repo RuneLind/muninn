@@ -227,9 +227,10 @@ import {
   type WikiListing,
   type WikiSortMode,
 } from "./wiki-filter.ts";
-// The provenance strip + the rail's Sessions section. Every string and every
-// fragment of markup lives in that module (pure, `bun test`-covered); this file
-// only decides WHERE it goes and wires the two controls it carries.
+// The provenance strip: one collapsed line under the title that opens into the
+// chain. Every string and every fragment of markup lives in that module (pure,
+// `bun test`-covered); this file only decides WHERE it goes and wires the three
+// controls it carries — the Jira key, the disclosure and the ⧉ copy button.
 import {
   provStripHtml,
   railListHtml,
@@ -237,8 +238,6 @@ import {
   SESSION_COPY_IDLE,
   SESSION_COPY_OK,
   sessionCopyAriaLabel,
-  sessionsRailHtml,
-  sessionsSectionVisible,
 } from "./wiki-provenance-view.ts";
 import type { ProvenancePayload } from "../../../wiki/provenance.ts";
 
@@ -293,19 +292,6 @@ let projects: Record<string, number> = {};
  * which mean "no Jira facet".
  */
 let jiraKeys: Record<string, number> = {};
-
-/**
- * The open page's provenance block, or `null` on an unstamped page (the server
- * omits the key entirely) and on every non-article view.
- *
- * Kept in module state because the strip and the RAIL read it at different
- * moments: the strip is built once from the `/api/wiki/page` response, while the
- * rail repaints on every filter keystroke and background listing refresh, long
- * after that response is gone. Cleared on every navigation BEFORE the new
- * response lands, so a slow page load cannot leave the previous page's sessions
- * standing over the new article.
- */
-let currentProvenance: ProvenancePayload | null = null;
 
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
@@ -999,20 +985,10 @@ function renderList(): void {
     // away — that is a scan of every page on every keystroke.
     activity: railSectionsVisible(filters) ? rankActivity(filtered, activityWeights, now) : [],
   });
-  // The open page's Sessions section, ABOVE everything the rail built. Not folded
-  // into `buildRail`: its model is pages and its invariant is one row per page,
-  // while these rows are sessions carrying no `data-relpath` — see
-  // `sessionsRailHtml`. The visibility rule reuses `railSectionsVisible` through
-  // `sessionsSectionVisible`, so a search query clears the head of the rail for
-  // the Jira-key jump exactly as it does for Activity and Pinned.
-  //
-  // Held in its OWN buffer, never seeded into `html`: the empty state below is
-  // decided on the page rows alone (`railListHtml`), or a page with sessions
-  // would answer a facet that matches nothing with session rows and no
-  // "No pages match." at all.
-  const sessionsHtml = sessionsSectionVisible(filters, currentProvenance?.sessions)
-    ? sessionsRailHtml(currentProvenance!.sessions, currentProvenance!.ledger)
-    : "";
+  // The open page's sessions used to be a section at the head of this rail. They
+  // are now rows in the chain under the page title, which is where they have
+  // room; `railListHtml` below still owns the empty state, because the rule that
+  // made it a function of the PAGE ROWS alone outlives the prefix that broke it.
   let html = "";
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
@@ -1096,7 +1072,7 @@ function renderList(): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
-  listEl.innerHTML = railListHtml(sessionsHtml, html);
+  listEl.innerHTML = railListHtml(html);
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
   // is shorter the browser clamps to the new maximum and re-assigning the saved
@@ -1201,7 +1177,7 @@ function copyArticlePath(btn: HTMLButtonElement): void {
 }
 
 /**
- * Copy one session id off a rail row — the ⧉ Copy path control's twin, and
+ * Copy one session id off a chain row — the ⧉ Copy path control's twin, and
  * through the same `copyText`/`flashCopyResult` pair rather than a second
  * clipboard write.
  *
@@ -1227,6 +1203,29 @@ function copySessionId(btn: HTMLButtonElement): void {
   // reader's clipboard (the ⧉ Copy path reasoning, verbatim).
   if (!id) return flashCopyResult(btn, false, idle);
   void copyText(id).then((ok) => flashCopyResult(btn, ok, idle));
+}
+
+/**
+ * Open or close the provenance chain under the page title.
+ *
+ * The button's `aria-expanded` and the chain's `hidden` are flipped TOGETHER and
+ * both read off the DOM rather than a module-level flag: the strip is re-rendered
+ * from scratch on every page load (collapsed, by the renderer), so a flag here
+ * would outlive the element it described and report the wrong state on the next
+ * page.
+ *
+ * `aria-controls` names the chain, so the element is found through the button
+ * rather than by a second selector that could drift from the markup.
+ */
+function toggleProvChain(btn: HTMLButtonElement): void {
+  const id = btn.getAttribute("aria-controls") || "";
+  const chain = id ? document.getElementById(id) : null;
+  if (!chain) return;
+  const open = btn.getAttribute("aria-expanded") === "true";
+  btn.setAttribute("aria-expanded", open ? "false" : "true");
+  // `hidden`, not a display style: it is what the renderer ships the element
+  // with, so one property is the whole state.
+  chain.hidden = open;
 }
 
 // ── Breadcrumb bar (above the article) ────────────────────────────────
@@ -1327,9 +1326,6 @@ function hideBreadcrumb(): void {
   // would still be handed a page the reader is no longer on.
   currentArticle = null;
   currentOutgoingTitles = [];
-  // Same rule, and it reaches further: the rail's Sessions section is rendered
-  // from this, and the rail stays on screen on the start view.
-  currentProvenance = null;
 }
 
 // ── Middle pane: article / start view ─────────────────────────────────
@@ -1791,10 +1787,6 @@ function articleHeadHtml(m: WikiListing, provenance?: ProvenancePayload): string
  *  the link graph, plus the lazy Similar section; outgoing links stay empty. */
 function loadExplainer(m: WikiListing, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
-  // An explainer is HTML on disk and carries no frontmatter to stamp, so this is
-  // a clear and never a set — but it still has to happen, or the markdown page
-  // the reader came FROM keeps its strip and its rail rows here.
-  currentProvenance = null;
   setAtlasFull(false);
   currentName = m.name;
   // The listing IS the identity here (no page response to wait for), so the
@@ -1873,10 +1865,6 @@ function openNavTarget(target: NavTarget, push: boolean): void {
 
 function loadPage(name: string, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
-  // The PREVIOUS page's sessions, dropped before the round-trip rather than when
-  // the next response lands: a slow load would otherwise leave the rail claiming
-  // the new article was written by the old one's sessions.
-  currentProvenance = null;
   // Raised BEFORE anything else: `currentName` is only set from the response, so
   // without this signal the whole round-trip reads as the "start" view and a
   // refetch resolving mid-click would re-sort the list under the row just clicked.
@@ -1900,7 +1888,6 @@ function loadPage(name: string, push: boolean): void {
  *  `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true): void {
   hideExplainPill();
-  currentProvenance = null; // same drop-before-the-round-trip rule as `loadPage`
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
   // The explainer branch is `loadPage`'s, and it has to exist here too now that
@@ -1942,11 +1929,6 @@ function fetchAndRenderPage(url: string, push: boolean): void {
         return;
       }
       currentName = data.meta.name;
-      // The open page's provenance, for BOTH halves of the feature: the strip is
-      // built from it once, a few lines down, and the rail re-reads it on every
-      // later repaint (a filter keystroke, a background listing refresh) long
-      // after this response is gone.
-      currentProvenance = data.provenance ?? null;
       // The RESPONSE's relPath, not the requested one: a by-name navigation
       // resolves server-side, and the active row must key on the page that
       // actually came back.
@@ -2081,13 +2063,28 @@ document.body.addEventListener("click", (e) => {
     applyJiraFilter(filters.jira === key ? "" : key);
     return;
   }
-  // The rail's ⧉ copy button on a session row. The id is carried ON the button
-  // rather than re-read from the row at click time, the ⧉ Copy path rule: the
-  // string reported and the string copied cannot then be different sessions.
+  // The ⧉ copy button on a chain row. The id is carried ON the button rather
+  // than re-read from the row at click time, the ⧉ Copy path rule: the string
+  // reported and the string copied cannot then be different sessions. Checked
+  // BEFORE the disclosure below, because the button sits INSIDE the chain the
+  // line opens — the outer `closest` would otherwise never be reached, but the
+  // order is what makes that a decision rather than a coincidence of markup.
   const sessCopy = target.closest ? target.closest<HTMLButtonElement>("[data-sess-copy]") : null;
   if (sessCopy) {
     e.preventDefault();
     copySessionId(sessCopy);
+    return;
+  }
+  // The provenance line itself: one disclosure over the chain under the title.
+  // Delegated for the same reason as the two above — `#articleWrap`'s innerHTML
+  // is replaced on every page load, so a listener bound at render time would be
+  // re-bound per page and lost on the next one.
+  const provToggle = target.closest
+    ? target.closest<HTMLButtonElement>("[data-prov-toggle]")
+    : null;
+  if (provToggle) {
+    e.preventDefault();
+    toggleProvChain(provToggle);
     return;
   }
   const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;

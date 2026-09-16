@@ -1,11 +1,12 @@
 /**
- * /wiki reader — the provenance strip, the rail's Sessions section and the Jira
- * facet, end to end.
+ * /wiki reader — the provenance strip, the chain it opens and the Jira facet,
+ * end to end.
  *
- * Placement C: the strip under the title is the SUMMARY (the Jira row plus one
- * line of cost), the rail panel is the DETAIL (one row per session). Six things
- * only a real browser against a real server can answer, and every one of them is
- * a degrade:
+ * ONE surface under the title: a collapsed line (the Jira row plus one sentence
+ * of cost and a mark per event) that opens in place into the chain — every
+ * session that wrote the page and every PR those sessions merged, in time order.
+ * Seven things only a real browser against a real server can answer, and almost
+ * every one of them is a degrade:
  *
  *  1. **A priced session and a MISSING one, side by side.** The ledger stub
  *     prices one of the fixture's two sessions and omits the other, which is the
@@ -16,8 +17,8 @@
  *     one session ref is too long to BE a session id, so nothing is ever asked —
  *     and the strip must say so rather than "claude-usage unreachable", which is
  *     the exact sentence the server's own `asked` flag exists to prevent.
- *  3. **An unstamped page renders byte-identically to before.** No strip, no
- *     Sessions section — the payload simply has no `provenance` key.
+ *  3. **An unstamped page renders no strip at all** — the payload simply has no
+ *     `provenance` key.
  *  4. **`?jira=` as URL state**, the `?project=` recipe: chip click → the param
  *     written in place, a reload restoring the active chip, an unknown key
  *     clearing itself and leaving the whole wiki.
@@ -25,12 +26,14 @@
  *     store keeps on the page's own row and `jiraCounts` shape-filters out of
  *     the facet map — the one state where the strip and the facet disagree about
  *     what a key is, and only a real listing produces it.
- *  6. **The empty state survives a Sessions section.** Two ANDed facets matching
+ *  6. **The empty state survives an open chain.** Two ANDed facets matching
  *     nothing, under a stamped page: "No pages match." is about the FILTER and
- *     the session rows are about the OPEN PAGE, and neither may stand in for the
+ *     the chain rows are about the OPEN PAGE, and neither may stand in for the
  *     other.
+ *  7. **A merges leg that did not answer says so**, in one footer line, while
+ *     the cost sentence — which is about the OTHER leg — does not move.
  *
- * The clipboard is the seventh: the session id is COPYABLE TEXT because the
+ * The clipboard is the eighth: the session id is COPYABLE TEXT because the
  * browser cannot reach claude-usage at all (tailnet viewers, mixed content under
  * `tailscale serve`), so the copy button is the feature rather than a
  * convenience, and `navigator.clipboard` only works under granted permissions.
@@ -73,14 +76,20 @@ const MISSING_ID = "ses_7f3a9b2c1d";
  *  batching and the ledger is never asked at all. */
 const DAMAGED_ID = "x".repeat(129);
 
+/** The stub refuses `/api/merges` for this id and answers `/api/sessions-by-id`
+ *  normally — the only way to drive "the facts leg worked and the merges leg did
+ *  not" through a real page open. Synthetic, like every id in this file. */
+const MERGES_DOWN_ID = "11111111-2222-3333-4444-555555555555";
+
 const SHAPE_REL = "shape.md";
+const MERGESDOWN_REL = "merges-down.md";
 const DAMAGED_REL = "damaged.md";
 const PLAIN_REL = "plain.md";
 const OTHER_REL = "other.md";
 const MIXED_REL = "mixed.md";
 
 /** How many pages the temp wiki holds — every "the whole wiki" assertion below. */
-const ALL_PAGES = 5;
+const ALL_PAGES = 6;
 
 const DAMAGED = [
   "---",
@@ -92,6 +101,19 @@ const DAMAGED = [
   "# Damaged provenance",
   "",
   "One frontmatter entry that cannot be a session id.",
+  "",
+].join("\n");
+
+const MERGES_DOWN = [
+  "---",
+  "type: plan",
+  "title: Merges leg down",
+  `sessions: [claude-code:${MERGES_DOWN_ID}]`,
+  "---",
+  "",
+  "# Merges leg down",
+  "",
+  "The ledger prices this session and refuses to list its merges.",
   "",
 ].join("\n");
 
@@ -154,25 +176,86 @@ let root = "";
 /** Every `ids=` query the stub was asked, so a test can prove the browser never
  *  reached the service itself and that a damaged page asked nothing. */
 let asked: string[] = [];
+/** The same, for the merges leg. */
+let askedMerges: string[] = [];
 
 const open_ = (page: import("@playwright/test").Page, rel: string) =>
   page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}`);
 
 /**
  * claude-usage, as `src/wiki/session-ledger.ts` parses it: `{sessions: [...]}`
- * keyed on the BARE id. `MISSING_ID` is deliberately absent from the answer —
- * that is what makes the chip `missing` ("the ledger answered and does not hold
- * it") rather than `unresolved` ("nobody asked").
+ * and `{merges: [...]}`, both keyed on the BARE id. `MISSING_ID` is deliberately
+ * absent from the first answer — that is what makes the chip `missing` ("the
+ * ledger answered and does not hold it") rather than `unresolved` ("nobody
+ * asked").
+ *
+ * The three merge rows are the three shapes the row renderer has to tell apart,
+ * and they are SYNTHETIC — invented numbers and stamps, never rows out of the
+ * live ledger, because this repo is public.
+ *
+ * Every stamp is midday so the rendered date is the same in any plausible zone;
+ * the spec pins `timezoneId` besides, so the hours below are exact rather than a
+ * fact about the machine running the suite.
  */
 function startLedger(): Promise<Server> {
   const srv = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
+    const ids = url.searchParams.get("sessions") ?? url.searchParams.get("ids") ?? "";
+    if (url.pathname === "/api/merges") {
+      askedMerges.push(ids);
+      // One page's session is the "merges leg is down" case; the facts leg for
+      // that same id still answers, which is the split the footer exists for.
+      if (ids.includes(MERGES_DOWN_ID)) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "merges unavailable" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          limit: 200,
+          truncated: false,
+          merges: [
+            {
+              sessionId: PRICED_ID,
+              repo: "/Users/synthetic/source/muninn",
+              prNumber: 553,
+              url: "https://github.com/RuneLind/muninn/pull/553",
+              subject: null,
+              mergedAt: "2026-09-15T14:00:00.000Z",
+              mergeOk: true,
+            },
+            {
+              // No `repoUrls` entry upstream ⇒ no coordinate, so this row
+              // renders unlinked with the checkout's basename as its hover.
+              sessionId: PRICED_ID,
+              repo: "/Users/synthetic/source/side-project",
+              prNumber: 77,
+              url: null,
+              subject: null,
+              mergedAt: "2026-09-15T15:00:00.000Z",
+              mergeOk: true,
+            },
+            {
+              sessionId: PRICED_ID,
+              repo: "/Users/synthetic/source/muninn",
+              prNumber: 88,
+              url: "https://github.com/RuneLind/muninn/pull/88",
+              subject: null,
+              mergedAt: "2026-09-15T16:00:00.000Z",
+              mergeOk: false,
+            },
+          ],
+        }),
+      );
+      return;
+    }
     if (url.pathname !== "/api/sessions-by-id") {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "unexpected path", path: url.pathname }));
       return;
     }
-    asked.push(url.searchParams.get("ids") ?? "");
+    asked.push(ids);
     res.writeHead(200, { "content-type": "application/json" });
     res.end(
       JSON.stringify({
@@ -182,16 +265,37 @@ function startLedger(): Promise<Server> {
             provider: "claude-code",
             host: "macmini",
             title: "Wiki provenance — PR 4a",
-            first: "2026-09-15",
-            last: "2026-09-15",
+            first: "2026-09-15T12:00:00.000Z",
+            last: "2026-09-15T13:30:00.000Z",
             cost: 12.34,
             messages: 148,
+          },
+          {
+            sessionId: MERGES_DOWN_ID,
+            provider: "claude-code",
+            host: "macmini",
+            title: "A session whose merges cannot be listed",
+            first: "2026-09-15T12:00:00.000Z",
+            last: "2026-09-15T12:00:00.000Z",
+            cost: 1.5,
+            messages: 9,
           },
         ],
       }),
     );
   });
   return new Promise((resolve) => srv.listen(LEDGER_PORT, "127.0.0.1", () => resolve(srv)));
+}
+
+/** Open the chain under the title and return its rows. Collapsed is the default,
+ *  so every row assertion presses the line first — which is itself the check
+ *  that the disclosure works. */
+async function openChain(page: import("@playwright/test").Page) {
+  const line = page.locator(".wiki-prov-line");
+  await expect(line).toHaveAttribute("aria-expanded", "false");
+  await line.click();
+  await expect(line).toHaveAttribute("aria-expanded", "true");
+  return page.locator(".wiki-chain-row");
 }
 
 test.beforeAll(async () => {
@@ -205,6 +309,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, PLAIN_REL), PLAIN, "utf8");
   await writeFile(path.join(root, OTHER_REL), OTHER, "utf8");
   await writeFile(path.join(root, MIXED_REL), MIXED, "utf8");
+  await writeFile(path.join(root, MERGESDOWN_REL), MERGES_DOWN, "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -242,6 +347,12 @@ test.afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
+// Every rendered stamp below is exact rather than a regex, which needs the
+// browser's zone pinned: the renderer formats in the VIEWER's zone, so an
+// assertion on an hour is otherwise a fact about the machine — Oslo on this
+// laptop, UTC on a CI runner.
+test.use({ timezoneId: "UTC" });
+
 test.describe("Wiki reader: provenance", () => {
   test("the strip shows the Jira key and one honest line of cost", async ({ page }) => {
     await open_(page, SHAPE_REL);
@@ -269,59 +380,67 @@ test.describe("Wiki reader: provenance", () => {
     // The degrade sentences must NOT be here — this ledger answered.
     await expect(cost).not.toContainText("unreachable");
 
-    // `prs` rides the payload and renders NOTHING: the PR row ships with
-    // campaign 2, and a half-built control is worse than none. The text tests
-    // below can only miss a pill whose label was shortened, so the LOAD-BEARING
-    // pin is the anchor count: a PR row's whole point is a github.com link, and
-    // there is none in either half of the feature.
-    await expect(strip.locator('a[href*="github.com"]')).toHaveCount(0);
+    // `prs` rides the payload and renders NOTHING: the frontmatter PR row ships
+    // with campaign 2, and a half-built control is worse than none. The chain's
+    // merge rows DO carry github.com links, so the pin is on the two
+    // coordinates only `prs:` could have produced — neither of which any merge
+    // in the stub names.
+    await expect(strip.locator('a[href*="/pull/1234"]')).toHaveCount(0);
+    await expect(strip.locator('a[href*="/pull/543"]')).toHaveCount(0);
     await expect(page.locator('#wikiList a[href*="github.com"]')).toHaveCount(0);
     await expect(strip).not.toContainText("melosys-api");
     await expect(strip).not.toContainText("1234");
   });
 
-  test("the rail lists both sessions — one priced with a drill-down, one bare", async ({ page }) => {
+  test("the chain lists both sessions — one priced with a drill-down, one bare", async ({ page }) => {
     await open_(page, SHAPE_REL);
-    await expect(page.locator('.wiki-list-sec[data-section="sessions"]')).toBeVisible();
-    const rows = page.locator(".wiki-sess-row");
-    await expect(rows).toHaveCount(2);
+    const rows = await openChain(page);
+    // Two sessions and three merges, on one spine.
+    await expect(rows).toHaveCount(5);
 
     const priced = rows.nth(0);
-    await expect(priced).not.toHaveClass(/wiki-sess-bare/);
-    await expect(priced.locator(".wiki-sess-glyph")).toHaveText("◆");
-    await expect(priced.locator(".wiki-sess-glyph")).toHaveAttribute("title", "claude-code");
-    await expect(priced.locator(".wiki-sess-date")).toHaveText("2026-09-15");
-    await expect(priced.locator(".wiki-sess-host")).toHaveText("macmini");
-    await expect(priced.locator(".wiki-sess-title")).toHaveText("Wiki provenance — PR 4a");
-    await expect(priced.locator(".wiki-sess-cost")).toHaveText("$12.34");
-    await expect(priced.locator(".wiki-sess-id")).toHaveText(PRICED_ID);
-    await expect(priced.locator(".wiki-sess-link")).toHaveAttribute(
+    await expect(priced).not.toHaveClass(/wiki-chain-bare/);
+    await expect(priced.locator(".wiki-chain-glyph")).toHaveText("◆");
+    await expect(priced.locator(".wiki-chain-glyph")).toHaveAttribute("title", "claude-code");
+    // `first → last`, formatted from the ledger's ISO stamps.
+    await expect(priced.locator(".wiki-chain-when")).toHaveText("09-15 12:00 → 09-15 13:30");
+    await expect(priced.locator(".wiki-chain-host")).toHaveText("· macmini");
+    await expect(priced.locator(".wiki-chain-title")).toHaveText("Wiki provenance — PR 4a");
+    await expect(priced.locator(".wiki-chain-cost")).toHaveText("$12.34");
+    await expect(priced.locator(".wiki-chain-id")).toHaveText(PRICED_ID);
+    // The message count is a hover on the row, never a column.
+    await expect(priced).toHaveAttribute("title", "148 messages");
+    await expect(priced.locator(".wiki-chain-link")).toHaveAttribute(
       "href",
       `${PUBLIC_BASE}/#/session/${PRICED_ID}`,
     );
 
     // The ledger ANSWERED and does not hold the second id: no money, no title,
     // its own sentence — and NO drill-down, since a link to a session the
-    // service does not have is a dead end.
-    const bare = rows.nth(1);
-    await expect(bare).toHaveClass(/wiki-sess-bare/);
-    await expect(bare.locator(".wiki-sess-reason")).toHaveText(
+    // service does not have is a dead end. Dateless, so it sorts LAST, after
+    // every merge.
+    const bare = rows.nth(4);
+    await expect(bare).toHaveClass(/wiki-chain-bare/);
+    await expect(bare.locator(".wiki-chain-reason")).toHaveText(
       "not in the ledger — reaped, or from another host",
     );
-    await expect(bare.locator(".wiki-sess-id")).toHaveText(MISSING_ID);
-    await expect(bare.locator(".wiki-sess-cost")).toHaveCount(0);
-    await expect(bare.locator(".wiki-sess-link")).toHaveCount(0);
+    await expect(bare.locator(".wiki-chain-id")).toHaveText(MISSING_ID);
+    await expect(bare.locator(".wiki-chain-cost")).toHaveCount(0);
+    await expect(bare.locator(".wiki-chain-link")).toHaveCount(0);
 
     // Both ids really were asked about, bare (the `provider:` prefix is
-    // muninn's, and a prefixed id comes back missing for every real session).
+    // muninn's, and a prefixed id comes back missing for every real session) —
+    // and BOTH legs got the same pair.
     expect(asked.some((q) => q.includes(PRICED_ID) && q.includes(MISSING_ID))).toBe(true);
+    expect(askedMerges.some((q) => q.includes(PRICED_ID) && q.includes(MISSING_ID))).toBe(true);
   });
 
   test("the ⧉ button puts the bare session id on the clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await open_(page, SHAPE_REL);
-    const bare = page.locator(".wiki-sess-row").nth(1);
-    await bare.locator(".wiki-sess-copy").click();
+    const rows = await openChain(page);
+    const bare = rows.nth(4);
+    await bare.locator(".wiki-chain-copy").click();
     // The id ALONE — it is what a search for this session takes, and the reader
     // cannot reach the service to look it up any other way.
     await expect
@@ -329,11 +448,12 @@ test.describe("Wiki reader: provenance", () => {
       .toBe(MISSING_ID);
     // The button reports the result in place; that flash is the only feedback a
     // clipboard write can give.
-    await expect(bare.locator(".wiki-sess-copy")).toHaveText("✓");
+    await expect(bare.locator(".wiki-chain-copy")).toHaveText("✓");
   });
 
   test("a damaged session ref reads as damage, never as an outage", async ({ page }) => {
     const before = asked.length;
+    const beforeMerges = askedMerges.length;
     await open_(page, DAMAGED_REL);
     const cost = page.locator(".wiki-prov-strip .wiki-prov-cost");
     await expect(cost).toHaveText("1 session ref — none could be looked up");
@@ -341,33 +461,117 @@ test.describe("Wiki reader: provenance", () => {
     await expect(cost).not.toContainText("unreachable");
     await expect(cost).not.toContainText("no claude-usage on this host");
     // One invalid chip, with its own reason and no money.
-    const rows = page.locator(".wiki-sess-row");
+    const rows = await openChain(page);
     await expect(rows).toHaveCount(1);
-    await expect(rows.first().locator(".wiki-sess-reason")).toHaveText(
+    await expect(rows.first().locator(".wiki-chain-reason")).toHaveText(
       "not a session id — frontmatter damage",
     );
-    await expect(rows.first().locator(".wiki-sess-cost")).toHaveCount(0);
-    // And nothing was asked: the id was refused before batching, which is the
-    // whole reason the page must not blame the service.
+    await expect(rows.first().locator(".wiki-chain-cost")).toHaveCount(0);
+    // And nothing was asked of EITHER leg: the id was refused before batching,
+    // which is the whole reason the page must not blame the service — and the
+    // merges footer is absent for the same reason.
     expect(asked.length).toBe(before);
+    expect(askedMerges.length).toBe(beforeMerges);
+    await expect(page.locator(".wiki-chain-note")).toHaveCount(0);
   });
 
-  test("an unstamped page renders no strip and no Sessions section", async ({ page }) => {
+  test("an unstamped page renders no strip at all", async ({ page }) => {
     await open_(page, PLAIN_REL);
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
     await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
-    await expect(page.locator('.wiki-list-sec[data-section="sessions"]')).toHaveCount(0);
-    await expect(page.locator(".wiki-sess-row")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(0);
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(0);
   });
 
-  test("navigating from a stamped page to an unstamped one drops the rail rows", async ({ page }) => {
+  test("navigating from a stamped page to an unstamped one takes the chain with it", async ({ page }) => {
     await open_(page, SHAPE_REL);
-    await expect(page.locator(".wiki-sess-row")).toHaveCount(2);
-    // The stale-state trap: the rail repaints on every listing refresh and
-    // keystroke, long after the response that filled it.
+    await openChain(page);
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(5);
+    // The stale-state trap: an OPEN chain is the state most likely to survive a
+    // navigation, since the strip is re-rendered from a payload the next page
+    // does not have.
     await page.locator(`.wiki-list-item[data-relpath="${PLAIN_REL}"]`).click();
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
-    await expect(page.locator(".wiki-sess-row")).toHaveCount(0);
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(0);
+  });
+
+  test("the chain is collapsed until the line is pressed, and closes again", async ({ page }) => {
+    await open_(page, SHAPE_REL);
+    const line = page.locator(".wiki-prov-line");
+    const chain = page.locator(".wiki-prov-chain");
+    // Rendered, and hidden: the rows exist in the DOM but nothing is on screen.
+    await expect(line).toHaveAttribute("aria-expanded", "false");
+    await expect(chain).toBeHidden();
+    await expect(line).toHaveAttribute("aria-controls", "wikiProvChain");
+
+    await line.click();
+    await expect(chain).toBeVisible();
+    await expect(line).toHaveAttribute("aria-expanded", "true");
+
+    await line.click();
+    await expect(chain).toBeHidden();
+    await expect(line).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("the line carries one mark per session and one per merge, rings first", async ({ page }) => {
+    await open_(page, SHAPE_REL);
+    const marks = page.locator(".wiki-prov-marks .wiki-prov-mark");
+    await expect(marks).toHaveCount(5);
+    await expect(marks.nth(0)).toHaveAttribute("data-mark", "session");
+    await expect(marks.nth(1)).toHaveAttribute("data-mark", "session");
+    await expect(marks.nth(2)).toHaveAttribute("data-mark", "merge");
+    await expect(marks.nth(4)).toHaveAttribute("data-mark", "merge");
+    // A mark is a mark only if it says what it marks.
+    await expect(marks.nth(2)).toHaveAttribute("title", /#553/);
+  });
+
+  test("the merge rows render in time order — linked, unlinked and unconfirmed", async ({ page }) => {
+    await open_(page, SHAPE_REL);
+    const rows = await openChain(page);
+    const merges = page.locator(".wiki-chain-merge");
+    await expect(merges).toHaveCount(3);
+
+    // 1. A repo the ledger could resolve: the coordinate, linked.
+    const linked = merges.nth(0);
+    await expect(linked.locator(".wiki-chain-pr")).toHaveText("RuneLind/muninn #553");
+    await expect(linked.locator("a.wiki-chain-pr")).toHaveAttribute(
+      "href",
+      "https://github.com/RuneLind/muninn/pull/553",
+    );
+    await expect(linked.locator(".wiki-chain-when")).toHaveText("merged 09-15 14:00");
+    await expect(linked.locator(".wiki-chain-unconfirmed")).toHaveCount(0);
+
+    // 2. A repo it could not: the number alone, the checkout's basename as the
+    //    hover, and NO link — a guessed coordinate is the worst output here.
+    const unlinked = merges.nth(1);
+    await expect(unlinked.locator(".wiki-chain-pr")).toHaveText("#77");
+    await expect(unlinked.locator("a")).toHaveCount(0);
+    await expect(unlinked.locator(".wiki-chain-pr")).toHaveAttribute("title", "side-project");
+    await expect(unlinked).not.toContainText("/Users/");
+
+    // 3. `mergeOk: false` is QUALIFIED, never dropped.
+    const unconfirmed = merges.nth(2);
+    await expect(unconfirmed.locator(".wiki-chain-pr")).toHaveText("RuneLind/muninn #88");
+    await expect(unconfirmed.locator(".wiki-chain-unconfirmed")).toHaveText("merge unconfirmed");
+
+    // And they sit BETWEEN the priced session and the dateless bare one.
+    await expect(rows.nth(0)).toHaveClass(/wiki-chain-session/);
+    await expect(rows.nth(4)).toHaveClass(/wiki-chain-bare/);
+  });
+
+  test("a merges leg that did not answer says so, and the cost sentence does not move", async ({ page }) => {
+    await open_(page, MERGESDOWN_REL);
+    // The FACTS leg answered, so the money is exactly what it priced.
+    await expect(page.locator(".wiki-prov-cost")).toHaveText(
+      "the 1 session that wrote this page cost $1.50 in total",
+    );
+    const rows = await openChain(page);
+    await expect(rows).toHaveCount(1);
+    await expect(page.locator(".wiki-chain-merge")).toHaveCount(0);
+    await expect(page.locator(".wiki-chain-note")).toHaveText(
+      "merges not shown: claude-usage did not answer",
+    );
   });
 
   test("the Jira facet filters the list and round-trips through the URL", async ({ page }) => {
@@ -478,11 +682,12 @@ test.describe("Wiki reader: provenance", () => {
    * Deliberately not the TYPE facet: a `WIKI_EXTRA` wiki declares no ontology,
    * so every page here resolves to `note` and that chip narrows nothing.
    */
-  test("a facet matching nothing says so, even with a Sessions section on screen", async ({
+  test("a facet matching nothing says so, even with the chain open", async ({
     page,
   }) => {
     await open_(page, SHAPE_REL);
-    await expect(page.locator(".wiki-sess-row")).toHaveCount(2);
+    await openChain(page);
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(5);
 
     await page.locator(".wiki-prov-jira-key").click();
     await expect(page.locator(".wiki-list-item")).toHaveCount(1);
@@ -494,8 +699,8 @@ test.describe("Wiki reader: provenance", () => {
     const empty = page.locator("#wikiList .wiki-conn-empty");
     await expect(empty).toBeVisible();
     await expect(empty).toHaveText("No pages match.");
-    // The open page's sessions are still there — they were never the answer to
-    // the filter, and dropping them would be the opposite defect.
-    await expect(page.locator(".wiki-sess-row")).toHaveCount(2);
+    // The open page's chain is still there — it was never the answer to the
+    // filter, and dropping it would be the opposite defect.
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(5);
   });
 });

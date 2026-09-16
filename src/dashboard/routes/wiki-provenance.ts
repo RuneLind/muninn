@@ -39,6 +39,7 @@ import {
   normalizeJiraKey,
   parseSessionRef,
   sessionRefMatches,
+  type ProvenancePayload,
 } from "../../wiki/provenance.ts";
 import { isSessionIdShape, SESSION_ID_MAX_CHARS } from "../../wiki/session-ledger.ts";
 import {
@@ -96,6 +97,28 @@ export interface ProvenancePageRow {
   /** This page's own session refs, verbatim — so a row can say "this page, by
    *  these two sessions" without a second call. */
   sessions: string[];
+}
+
+/**
+ * What a reverse lookup answers: the page rows plus the session/Jira halves
+ * `resolveProvenance` builds.
+ *
+ * Stated as an `Omit` of the READER's payload rather than re-listed, so a field
+ * added there lands here as a compile error instead of as drift — and the three
+ * omitted members are the three this route deliberately does not produce.
+ * `merges`/`mergesLedger` are `pageProvenance`'s: one lookup spans up to
+ * `PROVENANCE_REFS_MAX` refs, and fanning the merges leg out over them would
+ * multiply the claude-usage calls one GET buys on a route that renders no merge
+ * row. `prs` comes off ONE page's frontmatter and a lookup answers about many.
+ */
+interface ProvenanceLookupBody extends Omit<ProvenancePayload, "merges" | "mergesLedger" | "prs"> {
+  /** The normalized key, on a `?jira=` lookup. */
+  key?: string;
+  /** The parsed ref, on a `?session=` lookup. */
+  session?: string;
+  pages: ProvenancePageRow[];
+  /** The answer is a PREFIX — of the page rows, of the priced refs, or both. */
+  truncated?: true;
 }
 
 /** The caller's own input, echoed back in a 400 — normalized and bounded.
@@ -206,12 +229,13 @@ export function registerWikiProvenanceRoutes(
       pages: rows.length,
     });
 
-    return c.json({
+    const body: ProvenanceLookupBody = {
       ...(key ? { key } : { session: parseSessionRef(sessionQ).ref }),
       pages: rows,
       ...(truncated ? { truncated: true } : {}),
       ...resolved,
-    });
+    };
+    return c.json(body);
   });
 }
 
