@@ -76,38 +76,31 @@ export function retentionScore(blocks: BlockRetention[]): { kept: number; found:
 export type BackfillVerdict = { ok: true; reason: string } | { ok: false; reason: string };
 
 /**
- * Sentences of the page's PROSE — frontmatter and fenced code removed, each
- * whitespace-normalized. Long enough that a heading, a list marker or a lone
- * wikilink cannot match by accident.
- *
- * Sentences, not lines: a reviser that splits one paragraph around a restored
- * block keeps every sentence word for word but writes three lines where there was
- * one, and a line-level check would refuse exactly the revision the design asks
- * for (measured on `sources/Software Minimalism.mdx`, whose good revision splits a
- * paragraph in two).
- */
-/**
  * The page's prose, as the comparison sees it: frontmatter and fenced code gone,
  * wikilink and bold syntax reduced to the words they carry, whitespace collapsed.
  *
  * **BOTH sides of the comparison run this, and that is the whole design.** Two
  * rounds of this guard shipped a defect of one shape — the two sides normalized
- * differently — and each was a different instance of it: first the page was
+ * differently — and each was a different instance of it. First the page was
  * compared raw against a draft the containment step had rewritten
  * (`containDraftBodyLinks` turns an unresolvable `[[Foo]]` into `**Foo**`, and that
  * one does rewrite prose — its sibling `replaceUnresolvedSourceLinks` touches only
- * the frontmatter `sources:` line, which never reaches this comparison); then the page was split into sentences BEFORE normalizing while the draft
- * was normalized whole, so a `[[…]]` or `**…**` span crossing a sentence boundary
- * left a dangling marker in the sentence and none in the haystack. That second one
- * made 17 of the jarvis wiki's 932 source pages score 0.0 against THEMSELVES — the
- * trigger is as ordinary as `[[Coding vs. Software Engineering Distinction]]`,
- * whose `vs. ` splits inside the link.
+ * the frontmatter `sources:` line, which never reaches this comparison). Then the
+ * page was split into sentences BEFORE normalizing while the draft was normalized
+ * whole, so a `[[…]]` or `**…**` span crossing a sentence boundary left a dangling
+ * marker in the sentence and none in the haystack. Measured over the jarvis wiki's
+ * 932 source pages: **17 scored below the 0.9 floor against THEMSELVES**, the worst
+ * at 0.750 — 10 of the 17 through a bold span crossing a boundary, 3 through a
+ * wikilink whose text contains sentence punctuation (`[[Coding vs. Software
+ * Engineering Distinction]]`), 4 through both.
  *
  * With one pipeline the class is closed by construction rather than by patch: the
  * sentences are substrings of the normalized text they were split out of, so a page
  * always retains itself, whatever the markup does. Any future normalization rule
  * added here is added for both sides at once.
  */
+const PARAGRAPH_SENTINEL = " ¶ ";
+
 function proseText(page: string): string {
   const withoutFrontmatter = page.startsWith("---")
     ? page.slice(Math.max(0, page.indexOf("\n---", 3) + 4))
@@ -128,7 +121,7 @@ function proseText(page: string): string {
       .join("\n")
       // Paragraph breaks survive the whitespace collapse as a sentinel, so the
       // split below can still see them after normalization.
-      .replace(/\n{2,}/g, " ¶ ")
+      .replace(/\n{2,}/g, PARAGRAPH_SENTINEL)
       .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
       .replace(/\[\[([^\]]+)\]\]/g, "$1")
       // `**` only: that is what `containDraftBodyLinks` emits for a de-linked
@@ -151,10 +144,14 @@ function proseText(page: string): string {
  * two).
  */
 export function proseSentences(page: string): string[] {
+  // Paragraphs first, then sentences within each: one regex with both alternatives
+  // let the sentence-end branch consume the space BEFORE the sentinel, leaving a
+  // piece that still carried a leading `¶` and so matched nothing.
   return proseText(page)
-    .split(/(?<=[.!?])\s+|\s¶\s/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= MIN_PROSE_SENTENCE_CHARS);
+    .split(PARAGRAPH_SENTINEL.trim())
+    .flatMap((paragraph) => paragraph.split(/(?<=[.!?])\s+/))
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length >= MIN_PROSE_SENTENCE_CHARS);
 }
 
 /**
@@ -180,7 +177,13 @@ export const MIN_PROSE_SENTENCE_CHARS = 40;
  * persist time anyway.
  */
 export function proseRetention(currentPage: string, draft: string): { total: number; found: number; ratio: number } {
-  const haystack = proseText(draft);
+  // The sentinel is a SPLIT marker, so only the page side needs it: dropping it
+  // from the haystack closes the last member of the class above. A page whose
+  // paragraph is hard-wrapped over two lines, with the restored block inserted
+  // between them — the design's own output — otherwise has `A B` on the page side
+  // and `A ¶ B` in the haystack, and the sentence reads as deleted. Reflexivity is
+  // untouched: no sentence can contain the sentinel it was split on.
+  const haystack = proseText(draft).replaceAll(PARAGRAPH_SENTINEL, " ");
   const sentences = proseSentences(currentPage);
   const found = sentences.filter((s) => haystack.includes(s)).length;
   return { total: sentences.length, found, ratio: sentences.length === 0 ? 1 : found / sentences.length };

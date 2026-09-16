@@ -128,9 +128,13 @@ describe("proseSentences", () => {
  * retains itself, whatever markup it carries, because both sides run one pipeline
  * and the sentences are substrings of the text they were split out of.
  *
- * The shapes below are the ones that actually broke it, kept as a synthetic corpus
- * rather than real pages (this repo is public). The `vs. ` inside a wikilink is not
- * hypothetical: it made 17 of 932 live source pages score 0.0 against themselves.
+ * The corpus is synthetic rather than real pages (this repo is public). Two of the
+ * shapes are the ones that actually broke it — a bold span crossing a sentence
+ * boundary and a wikilink whose text contains sentence punctuation, which together
+ * put 17 of 932 live source pages below the floor against themselves, the worst at
+ * 0.750. The rest (a `?` inside a link, an abbreviation, a decimal, an ellipsis)
+ * document the corpus: they pass against the broken version too, and are here
+ * because they are what a reader would try first.
  */
 describe("proseRetention is reflexive — the class check", () => {
   const shapes: [string, string][] = [
@@ -152,6 +156,16 @@ describe("proseRetention is reflexive — the class check", () => {
       expect(r.ratio).toBe(1);
     });
   }
+
+  test("a paragraph break the DRAFT introduces does not read as prose loss", () => {
+    // The last member of the class, and the design's own output: a hard-wrapped
+    // paragraph with the restored block inserted between its two lines. The page
+    // side sees one paragraph, the draft side two — so the sentinel must not reach
+    // the haystack.
+    const page = "---\ntype: source\ntitle: T\n---\n\n# T\n\nA hard-wrapped paragraph whose first line runs on\nand whose second line finishes the same sentence.\n";
+    const revised = "---\ntype: source\ntitle: T\n---\n\n# T\n\nA hard-wrapped paragraph whose first line runs on\n\n```yaml\nservices: { postgres: {} }\n```\n\nand whose second line finishes the same sentence.\n";
+    expect(proseRetention(page, revised).ratio).toBe(1);
+  });
 
   test("and a page of every shape at once, fenced code included", () => {
     const page = [
@@ -293,7 +307,11 @@ describe("judgeBackfill", () => {
     expect(verdict.reason).toContain("rewrote the page");
   });
 
-  test("the prose floor leaves room for the one sentence a good revision splits", () => {
+  test("the prose floor sits between a re-draft and the sentence a good revision splits", () => {
+    // Pins the VALUE, not only the clause that reads it. Deliberately loose: 0.8 and
+    // 0.95 both satisfy it, because the floor separates "kept all but one sentence"
+    // from "kept none" and no measurement justifies a tighter number.
+    expect(MIN_PROSE_RETENTION).toBeGreaterThan(0.75);
     expect(MIN_PROSE_RETENTION).toBeLessThan(28 / 29);
   });
 });
@@ -341,13 +359,6 @@ describe("backfillOutcomeLabel", () => {
     );
   });
 
-  test("the floor sits between a re-draft and the one sentence a good revision splits", () => {
-    // Pins the VALUE, not just the clause that reads it: 28/29 is the measured good
-    // revision, and a floor below ~0.75 would accept a page that lost a quarter of
-    // its prose.
-    expect(MIN_PROSE_RETENTION).toBeGreaterThan(0.75);
-    expect(MIN_PROSE_RETENTION).toBeLessThan(28 / 29);
-  });
 
   test("a passing score with no row is an INSERT CONFLICT, never a refusal", () => {
     // `insertWikiProposal` answers null when a live draft/approved proposal already
