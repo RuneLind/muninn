@@ -93,6 +93,14 @@ export class Tracer {
   start(label: string, attributes?: Record<string, unknown>): string {
     this.timing.start(label);
     const id = crypto.randomUUID();
+    // ONE clock read for both copies of this span. Two `new Date()` calls can
+    // straddle a millisecond boundary, and then the span PERSISTED for this label
+    // and the span `addChildSpan` anchors its `startOffsetMs` against start a
+    // millisecond apart — so a tool span renders 1 ms off its parent in the
+    // waterfall. Caught as a CI-only test failure (`Expected 1789551516298,
+    // Received …299`); the race needs the two reads to land either side of a tick,
+    // which a loaded runner hits and a developer's machine essentially never does.
+    const startedAt = new Date();
 
     let insertPromise: Promise<unknown> = Promise.resolve();
     if (this.enabled) {
@@ -104,7 +112,7 @@ export class Tracer {
         kind: "span",
         botName: this.opts.botName,
         userId: this.opts.userId,
-        startedAt: new Date(),
+        startedAt,
         attributes,
       });
       // Same deliberate double-log tradeoff as the root insert above: a span
@@ -112,7 +120,7 @@ export class Tracer {
       insertPromise.catch(logError);
     }
 
-    this.spans.set(label, { id, startedAt: new Date(), insertPromise });
+    this.spans.set(label, { id, startedAt, insertPromise });
 
     return id;
   }

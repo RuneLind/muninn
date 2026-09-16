@@ -34,6 +34,8 @@ import {
   DEFAULT_COVERAGE_DEPS,
   type CoverageDeps,
   type WikiProposal,
+  type WikiProposalKind,
+  type WikiProposalMode,
   deleteSourceProposalsForDoc,
   type DeletedSourceProposal,
 } from "../../db/wiki-proposals.ts";
@@ -744,6 +746,28 @@ export function sortBacklogDocsNewestFirst(docs: BacklogDocRow[]): BacklogDocRow
 }
 
 /**
+ * Why the gate card's "Wiring on approve" preview shows no index line for a
+ * proposal — or null when a line IS planned.
+ *
+ * **Mode is read first, and that is the point.** `runWireStage`'s index step runs
+ * `if (proposal.mode === "create")` (`apply.ts`), so an update writes no index line
+ * whatever the wiki's catalog policy says — the page was catalogued when it was
+ * created. The preview claims to show what the apply step WILL do, and it used to
+ * compute `buildIndexEntry` for every reviewable row, promising a line on every
+ * update card.
+ */
+export function indexSkipFor(
+  mode: WikiProposalMode,
+  kind: WikiProposalKind,
+  catalogKinds: string[] | undefined,
+): "entity" | "not-in-policy" | "update" | null {
+  if (mode === "update") return "update";
+  if (catalogPage(kind, catalogKinds)) return null;
+  return kind === "entity" ? "entity" : "not-in-policy";
+}
+
+
+/**
  * Row label for the inspector: the doc id's basename with its extension stripped.
  * Huginn's listing endpoint carries NO usable `title` (its `title?` field is never
  * populated), and ids ARE human-readable source paths (`career/Why 2026 Is the
@@ -1204,13 +1228,9 @@ export function registerWikiGardenerRoutes(
           // Derive the skip cause from the real policy: entities are hard-skipped
           // (split index, file manually); any other uncataloged kind is out of this
           // wiki's `catalogKinds` policy (e.g. a source page on a concept-only wiki).
-          const indexSkip = catalogPage(p.kind, catalogKinds)
-            ? null
-            : p.kind === "entity"
-              ? "entity"
-              : "not-in-policy";
+          const indexSkip = indexSkipFor(p.mode, p.kind, catalogKinds);
           wiring = {
-            indexLine: entry ? entry.line : null,
+            indexLine: indexSkip === null && entry ? entry.line : null,
             indexSkip,
             seeAlso,
             legacyNoRelated: p.relatedPages === null,

@@ -19,9 +19,13 @@ export interface WiringPreview {
    *  - `"entity"` — an entity page (the Entities index is split People /
    *    Organizations / Products, which one isn't derivable — file manually);
    *  - `"not-in-policy"` — the kind isn't in this wiki's cataloging policy
-   *    (`catalogKinds`), e.g. a `source` page on a concept-only wiki.
+   *    (`catalogKinds`), e.g. a `source` page on a concept-only wiki;
+   *  - `"update"` — the row rewrites an existing page, and the wire stage's index
+   *    step is create-only (`runWireStage`, `apply.ts`), because the page was
+   *    catalogued when it was created. Without this the card promised a line the
+   *    apply never writes, on every update row.
    */
-  indexSkip: "entity" | "not-in-policy" | null;
+  indexSkip: "entity" | "not-in-policy" | "update" | null;
   /** Titles of related pages that will gain an inbound See-also link (resolved, ≤3). */
   seeAlso: string[];
   /** True on a pre-migration row (`related_pages` NULL) — no inbound-link data. */
@@ -35,6 +39,8 @@ export function wiringHtml(w: WiringPreview | null | undefined): string {
   let indexItem: string;
   if (w.indexSkip === "entity") {
     indexItem = "skipped (entity — file manually)";
+  } else if (w.indexSkip === "update") {
+    indexItem = "unchanged (the page is already in the index)";
   } else if (w.indexSkip === "not-in-policy") {
     indexItem = "skipped (not in this wiki's cataloging policy)";
   } else if (w.indexLine) {

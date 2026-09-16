@@ -232,6 +232,21 @@ describe("Tracer", () => {
       expect(saveSpanCalls[0]!.parentId).toBe(rootId);
     });
 
+    test("the persisted span and the child-offset anchor share one start time", () => {
+      // Two `new Date()` reads in `start()` could straddle a millisecond, so the
+      // span written to the DB and the span children are anchored to disagreed by
+      // 1 ms. Green on a developer's machine either way; it surfaced as a CI-only
+      // failure of the test below.
+      const tracer = new Tracer("request");
+      tracer.start("claude");
+      const persisted = (saveSpanCalls[1]!.startedAt as Date).getTime();
+      saveSpanCalls.length = 0;
+
+      // A zero offset makes the child's start the anchor itself.
+      tracer.addChildSpan("claude", "tool:Write", 200, undefined, 0);
+      expect((saveSpanCalls[0]!.startedAt as Date).getTime()).toBe(persisted);
+    });
+
     test("addChildSpan with startOffsetMs sets correct start time", () => {
       const tracer = new Tracer("request");
       tracer.start("claude");
