@@ -77,9 +77,25 @@ export type BackfillVerdict = { ok: true; reason: string } | { ok: false; reason
 
 /**
  * Marks a paragraph break through the whitespace collapse, so the split below can
- * still see one. Any string absent from the corpus behaves identically — `¶` is
- * chosen because prose never contains it (0 of the jarvis wiki's 932 source
- * pages), not because anything depends on this character.
+ * still see one. Written in `proseText` and read at two places — the split in
+ * `proseSentences` and the haystack strip in `proseRetention`.
+ *
+ * `¶` is chosen because prose never contains it (0 of the jarvis wiki's 932 source
+ * pages, 0 of 2090 across both wikis). **Its value is UNPINNED, not irrelevant:**
+ * a mutation to another absent marker survives the suite, but both its length and
+ * its spacing are observable through the dangling-marker path below — a longer
+ * marker riding into a sentence can push it over `MIN_PROSE_SENTENCE_CHARS`, and
+ * the spacing is what fix round 5 was about.
+ *
+ * **Known, not fixed:** `split` on a spaced marker is non-overlapping, so two
+ * sentinels emitted back to back (from `\n\n<whitespace>\n\n` — a blank line
+ * carrying a space) leave the second `¶` glued to the next sentence, which then
+ * fails to match a haystack that has none. Reachability is 0 of 2090 live pages and
+ * the direction is fail-safe (it can only refuse a good revision, never admit a bad
+ * one), so it is recorded rather than patched: this guard's measured base rate is
+ * about one injected defect per production round, and that is a worse trade than an
+ * unreachable refusal. The one-line closure, for whoever needs it:
+ * `.replace(/(?: ¶ )+/g, PARAGRAPH_SENTINEL)` after the whitespace collapse.
  */
 const PARAGRAPH_SENTINEL = " ¶ ";
 
@@ -98,11 +114,11 @@ const PARAGRAPH_SENTINEL = " ¶ ";
  * whole, so a `[[…]]` or `**…**` span crossing a sentence boundary left a dangling
  * marker in the sentence and none in the haystack. Measured over the jarvis wiki's
  * 932 source pages: **17 scored below the 0.9 floor against THEMSELVES**, the worst
- * at 0.750. Classified by the marker actually left dangling in each lost sentence,
- * rather than by what the page contains somewhere: **10 through a bold span
- * crossing a boundary, 7 through a wikilink** whose text carries sentence
- * punctuation (`[[Coding vs. Software Engineering Distinction]]`), none through
- * both.
+ * at 0.750. Partitioned by the FIRST marker found dangling in a lost sentence:
+ * **10 through a bold span crossing a boundary, 7 through a wikilink** whose text
+ * carries sentence punctuation (`[[Coding vs. Software Engineering Distinction]]`),
+ * none through both. Two of the 17 also lose a sentence neither marker explains, so
+ * this is a partition of the pages, not a complete account of every lost sentence.
  *
  * With one pipeline the class is closed by construction rather than by patch: the
  * sentences are substrings of the normalized text they were split out of, so a page
