@@ -51,6 +51,7 @@ import { todayOslo } from "../src/gardener/util.ts";
 import { measureCodeRetention, type BlockRetention } from "../src/gardener/code-block-retention.ts";
 import {
   appliedSourcePages,
+  backfillOutcomeLabel,
   judgeBackfill,
   retentionScore,
   type AppliedSourcePage,
@@ -159,6 +160,7 @@ async function backfill(target: AppliedSourcePage): Promise<Result> {
   let after: BlockRetention[] | undefined;
   let draft: string | undefined;
   let verdict = "";
+  let judgedOk = false;
   let proposalId: string | undefined;
   const index = await getWikiIndex({ root: wikiDir! });
   const outcome = await draftSourcePage({
@@ -194,6 +196,7 @@ async function backfill(target: AppliedSourcePage): Promise<Result> {
       after = measureCodeRetention(body, params.draft);
       const judged = judgeBackfill({ before, after, currentPage: currentText, draft: params.draft });
       verdict = judged.reason;
+      judgedOk = judged.ok;
       if (!judged.ok || dryRun) return null;
       const row = await insertWikiProposal(params);
       proposalId = row?.id;
@@ -209,13 +212,7 @@ async function backfill(target: AppliedSourcePage): Promise<Result> {
   // their `proposal_id`, which `deleteSourceDraftAttemptForProposal` needs on
   // reject. This script's record is its own `--out` file and the proposal it
   // persists.
-  const persisted = proposalId
-    ? "persisted"
-    : dryRun
-      ? "dry-run, not persisted"
-      : after
-        ? "refused, not persisted"
-        : "no draft";
+  const persisted = backfillOutcomeLabel({ proposalId, dryRun, judgedOk });
   // The drafter's own outcome is reported only when the draft never reached the
   // score: once it did, the decision is THIS script's, and the drafter answers
   // `covered` for a refusal (see `insertProposal` above).

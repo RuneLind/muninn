@@ -86,6 +86,26 @@ export type BackfillVerdict = { ok: true; reason: string } | { ok: false; reason
  * for (measured on `sources/Software Minimalism.mdx`, whose good revision splits a
  * paragraph in two).
  */
+/**
+ * Prose as the comparison sees it: wikilink and bold syntax reduced to the words
+ * they carry.
+ *
+ * The draft handed to the score has already been through persist-time containment
+ * (`containDraftBodyLinks` turns an unresolvable `[[Foo]]` into `**Foo**`,
+ * `replaceUnresolvedSourceLinks` rewrites `sources:` links), and every one of those
+ * rewrites happens INSIDE prose. Compared raw, a sentence whose only change is a
+ * link the containment step delinked reads as deleted prose — the guard would then
+ * refuse a revision that changed nothing, on exactly the pages whose links do not
+ * resolve.
+ */
+function normalizeProse(text: string): string {
+  return text
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
+    .replace(/\[\[([^\]]+)\]\]/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\s+/g, " ");
+}
+
 export function proseSentences(page: string): string[] {
   const withoutFrontmatter = page.startsWith("---")
     ? page.slice(Math.max(0, page.indexOf("\n---", 3) + 4))
@@ -104,7 +124,7 @@ export function proseSentences(page: string): string[] {
   return lines
     .join("\n")
     .split(/(?<=[.!?])\s+|\n{2,}/)
-    .map((s) => s.replace(/\s+/g, " ").trim())
+    .map((s) => normalizeProse(s).trim())
     .filter((s) => s.length >= MIN_PROSE_SENTENCE_CHARS);
 }
 
@@ -120,12 +140,12 @@ export const MIN_PROSE_SENTENCE_CHARS = 40;
  * Measured on the five revisions that proved this mechanism (2026-09-16): 1.0 on
  * four of them (30/30, 21/21, 22/22, 35/35) and 28/29 on `Software Minimalism`,
  * whose reviser split one sentence in two to introduce a restored block. A full
- * re-draft of the same doc scored 0/29 on the same page — the two shapes this
- * guard has to tell apart are three orders of magnitude apart, so
- * {@link MIN_PROSE_RETENTION} is not a tuned number.
+ * re-draft of the same doc scored 0/29 on the same page. The floor only has to
+ * separate "kept every sentence but one" from "kept none", so it is not a tuned
+ * number.
  */
 export function proseRetention(currentPage: string, draft: string): { total: number; found: number; ratio: number } {
-  const haystack = draft.replace(/\s+/g, " ");
+  const haystack = normalizeProse(draft);
   const sentences = proseSentences(currentPage);
   const found = sentences.filter((s) => haystack.includes(s)).length;
   return { total: sentences.length, found, ratio: sentences.length === 0 ? 1 : found / sentences.length };
@@ -149,12 +169,14 @@ export const MIN_PROSE_RETENTION = 0.9;
  * `found`. Equal-on-both is refused too: a revision that recovers nothing is not a
  * diff to review.
  *
- * **It changed nothing else.** Nothing else checks this. The reviser is ASKED to
- * leave the prose alone, and a model that adds the two missing blocks and also
- * rewrites two paragraphs or drops the `## See also` section scores perfectly on
- * code retention. That is the failure this whole design chose update-in-place to
- * avoid, so it is refused mechanically rather than left to a reviewer reading 39
- * diffs ({@link proseRetention}).
+ * **It deleted nothing.** Precisely that, not "it changed nothing else": the guard
+ * measures how much of the page's prose SURVIVES, so a rewrite or a dropped
+ * `## See also` is refused, while prose the reviser ADDS is invisible to it. The
+ * asymmetry is deliberate — every restored block is introduced by a one-line lead
+ * the prompt asks for, so added prose is the designed output and a bound on it
+ * would refuse good revisions. What it catches is the failure this whole design
+ * chose update-in-place to avoid: a model that restores the blocks and rewrites the
+ * page around them scores perfectly on code retention ({@link proseRetention}).
  */
 export function judgeBackfill(opts: {
   before: BlockRetention[];
@@ -170,4 +192,27 @@ export function judgeBackfill(opts: {
   if (a.kept === b.kept && a.found === b.found) return { ok: false, reason: `no block recovered — ${score}` };
   if (prose.ratio < MIN_PROSE_RETENTION) return { ok: false, reason: `rewrote the page — ${score}` };
   return { ok: true, reason: score };
+}
+
+/**
+ * What a backfill run did with one page, for the operator's line — and in
+ * particular, WHY nothing was persisted.
+ *
+ * Three different non-persisting outcomes reach this point and only one of them is
+ * the guard's doing: a dry run, the score guard's refusal, and `insertWikiProposal`
+ * answering null because a live draft or approved proposal already exists for this
+ * doc (`ON CONFLICT … WHERE status IN ('draft','approved')`). Reporting the last as
+ * a refusal beside a PASSING score tells the operator a working page was rejected.
+ */
+export function backfillOutcomeLabel(state: {
+  /** The id `insertWikiProposal` returned, if it inserted a row. */
+  proposalId: string | undefined;
+  dryRun: boolean;
+  /** Whether {@link judgeBackfill} passed — false when the score guard refused. */
+  judgedOk: boolean;
+}): string {
+  if (state.proposalId) return "persisted";
+  if (!state.judgedOk) return "refused, not persisted";
+  if (state.dryRun) return "dry-run, not persisted";
+  return "insert conflict — a live proposal already exists for this doc";
 }

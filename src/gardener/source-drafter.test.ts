@@ -1118,6 +1118,22 @@ describe("draftSourcePage — update mode", () => {
     expect(captured!.draft).toContain("title: Retrieval-Augmented Generation");
   });
 
+  test("stamps a FRESH nonce on every call — a constant token can be guessed from one prompt", async () => {
+    const prompts: string[] = [];
+    const deps = () =>
+      updateDeps({
+        callDrafter: async (p) => {
+          prompts.push(p);
+          return mdxDraft();
+        },
+      });
+    await draftSourcePage(deps());
+    await draftSourcePage(deps());
+    const token = (p: string) => /--- BEGIN CURRENT PAGE ([0-9a-f]+) ---/.exec(p)?.[1];
+    expect(token(prompts[0]!)).toBeTruthy();
+    expect(token(prompts[0]!)).not.toBe(token(prompts[1]!));
+  });
+
   test("hands the reviser the blocks the page is missing, measured from the two texts", async () => {
     // The drafter computes the checklist itself, so no caller can prompt for one
     // set of blocks and score another.
@@ -1254,5 +1270,16 @@ describe("buildSourceRevisePrompt", () => {
     const prompt = revise({ input: { ...baseDeps().input, url: pasted } });
     expect(prompt).not.toContain("rm -rf /");
     expect(prompt).not.toContain("The source URL is");
+  });
+
+  test("an over-long url is dropped even when it IS a link — the cap is not the isHttpUrl check", () => {
+    // The one non-http `source_docs[0].url` in the wiki today is 5421 characters of
+    // pasted article; nothing stops a vertical writing an equally long http one.
+    const long = `https://example.invalid/${"p".repeat(500)}`;
+    expect(long.length).toBeGreaterThan(500);
+    expect(revise({ input: { ...baseDeps().input, url: long } })).not.toContain("The source URL is");
+    const short = `https://example.invalid/${"p".repeat(470)}`;
+    expect(short.length).toBeLessThanOrEqual(500);
+    expect(revise({ input: { ...baseDeps().input, url: short } })).toContain("The source URL is");
   });
 });
