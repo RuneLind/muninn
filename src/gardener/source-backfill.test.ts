@@ -157,6 +157,22 @@ describe("proseRetention is reflexive — the class check", () => {
     });
   }
 
+  test("a pilcrow in the page's own prose is text, not a paragraph break", () => {
+    // The sentinel is spelled the same way on both sides; splitting on a BARE `¶`
+    // would cut the page's sentence in two while the haystack kept it whole, and the
+    // short fragment would then drop under the length floor — prose silently exempt
+    // from the survival check. No live page contains a pilcrow; the spellings
+    // disagreeing is the bug.
+    const page = "---\ntype: source\ntitle: T\n---\n\n# T\n\nA sentence long enough to be measured¶by the guard here and then some more words.\n";
+    const sentences = proseSentences(page);
+    expect(sentences).toHaveLength(1);
+    // The half before the pilcrow is 37 characters — under the length floor — so a
+    // bare-pilcrow split drops it from the denominator and nothing checks whether
+    // the reviser deleted it.
+    expect(sentences[0]).toContain("A sentence long enough to be measured");
+    expect(proseRetention(page, page).ratio).toBe(1);
+  });
+
   test("a paragraph break the DRAFT introduces does not read as prose loss", () => {
     // The last member of the class, and the design's own output: a hard-wrapped
     // paragraph with the restored block inserted between its two lines. The page

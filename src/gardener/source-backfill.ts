@@ -76,6 +76,14 @@ export function retentionScore(blocks: BlockRetention[]): { kept: number; found:
 export type BackfillVerdict = { ok: true; reason: string } | { ok: false; reason: string };
 
 /**
+ * Marks a paragraph break through the whitespace collapse, so the split below can
+ * still see one. Any string absent from the corpus behaves identically — `¶` is
+ * chosen because prose never contains it (0 of the jarvis wiki's 932 source
+ * pages), not because anything depends on this character.
+ */
+const PARAGRAPH_SENTINEL = " ¶ ";
+
+/**
  * The page's prose, as the comparison sees it: frontmatter and fenced code gone,
  * wikilink and bold syntax reduced to the words they carry, whitespace collapsed.
  *
@@ -90,17 +98,17 @@ export type BackfillVerdict = { ok: true; reason: string } | { ok: false; reason
  * whole, so a `[[…]]` or `**…**` span crossing a sentence boundary left a dangling
  * marker in the sentence and none in the haystack. Measured over the jarvis wiki's
  * 932 source pages: **17 scored below the 0.9 floor against THEMSELVES**, the worst
- * at 0.750 — 10 of the 17 through a bold span crossing a boundary, 3 through a
- * wikilink whose text contains sentence punctuation (`[[Coding vs. Software
- * Engineering Distinction]]`), 4 through both.
+ * at 0.750. Classified by the marker actually left dangling in each lost sentence,
+ * rather than by what the page contains somewhere: **10 through a bold span
+ * crossing a boundary, 7 through a wikilink** whose text carries sentence
+ * punctuation (`[[Coding vs. Software Engineering Distinction]]`), none through
+ * both.
  *
  * With one pipeline the class is closed by construction rather than by patch: the
  * sentences are substrings of the normalized text they were split out of, so a page
  * always retains itself, whatever the markup does. Any future normalization rule
  * added here is added for both sides at once.
  */
-const PARAGRAPH_SENTINEL = " ¶ ";
-
 function proseText(page: string): string {
   const withoutFrontmatter = page.startsWith("---")
     ? page.slice(Math.max(0, page.indexOf("\n---", 3) + 4))
@@ -146,9 +154,18 @@ function proseText(page: string): string {
 export function proseSentences(page: string): string[] {
   // Paragraphs first, then sentences within each: one regex with both alternatives
   // let the sentence-end branch consume the space BEFORE the sentinel, leaving a
-  // piece that still carried a leading `¶` and so matched nothing.
+  // piece with a leading `¶`. Those pieces matched while the haystack still carried
+  // the sentinel too; once it stopped, they matched nothing — and they inflate the
+  // denominator either way (a `¶ ## Heading` fragment clears the length floor where
+  // the bare heading does not).
   return proseText(page)
-    .split(PARAGRAPH_SENTINEL.trim())
+    // The SPACED sentinel, the same spelling the haystack strips. Splitting on a
+    // bare `¶` would also split on a pilcrow the page's own prose contains, while
+    // the haystack kept it — the short left fragment then falls under the length
+    // floor and that prose leaves the denominator entirely, exempt from the
+    // survival check. No live page contains one; the two spellings disagreeing is
+    // the bug, not the pilcrow.
+    .split(PARAGRAPH_SENTINEL)
     .flatMap((paragraph) => paragraph.split(/(?<=[.!?])\s+/))
     .map((sentence) => sentence.trim())
     .filter((sentence) => sentence.length >= MIN_PROSE_SENTENCE_CHARS);
