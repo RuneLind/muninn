@@ -23,7 +23,9 @@ const log = getLog("db", "source-draft-attempts");
 export type SourceDraftAttemptOutcome = "drafted" | "covered" | "skipped" | "error";
 
 /** Which entry point ran the drafter — the four callers of `runSourceDraftForInput`. */
-export type SourceDraftTrigger = "capture" | "run-now" | "backlog" | "doc";
+/** Which entry point spent the model call. `backfill` is the one-off revise-in-place
+ *  driver (`scripts/backfill-summary-code.ts`), which re-drafts an ALREADY APPLIED page. */
+export type SourceDraftTrigger = "capture" | "run-now" | "backlog" | "doc" | "backfill";
 
 export interface SourceDraftAttempt {
   collection: string;

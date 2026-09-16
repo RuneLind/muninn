@@ -60,10 +60,16 @@ export function summaryCodeBlocks(summary: string): { lang: string; lines: strin
   return blocks;
 }
 
-/** One entry per summary block that has at least one measurable line. */
-export function measureCodeRetention(summary: string, page: string): BlockRetention[] {
+/**
+ * One entry per summary block that has at least one measurable line, with the
+ * block's own text beside the score. The text is what a revise prompt needs and the
+ * measurement is what decides which blocks that prompt gets, so the two are
+ * produced by ONE walk: a second walk that disagreed about where a block starts
+ * would hand the reviser a block the score then reports as still missing.
+ */
+export function measureCodeBlocks(summary: string, page: string): (BlockRetention & { text: string })[] {
   const haystack = normalize(page);
-  const out: BlockRetention[] = [];
+  const out: (BlockRetention & { text: string })[] = [];
   for (const block of summaryCodeBlocks(summary)) {
     const lines = block.lines.map(normalize).filter((l) => l.length >= MIN_MEASURED_LINE_CHARS);
     if (lines.length === 0) continue;
@@ -75,7 +81,25 @@ export function measureCodeRetention(summary: string, page: string): BlockRetent
       lines: lines.length,
       found,
       verdict: ratio >= 0.8 ? "kept" : ratio >= 0.3 ? "partial" : "lost",
+      text: block.lines.join("\n"),
     });
   }
   return out;
+}
+
+/** One entry per summary block that has at least one measurable line. */
+export function measureCodeRetention(summary: string, page: string): BlockRetention[] {
+  return measureCodeBlocks(summary, page).map(({ text: _text, ...rest }) => rest);
+}
+
+/**
+ * The summary's fenced blocks the page does NOT already carry whole — what a
+ * backfill has to restore. `kept` is the same 80%-of-lines threshold the score
+ * uses: a block the page carries but for a line or two is not worth a reviewer's
+ * diff, and asking for it back is how a reviser starts rewriting prose.
+ */
+export function missingCodeBlocks(summary: string, page: string): { lang: string; text: string }[] {
+  return measureCodeBlocks(summary, page)
+    .filter((b) => b.verdict !== "kept")
+    .map((b) => ({ lang: b.lang, text: b.text }));
 }

@@ -5,6 +5,8 @@
  *
  *   bun scripts/measure-summary-code.ts --redraft <collection>/<docId> [--redraft …] [--out file.json]
  *   bun scripts/measure-summary-code.ts --proposal <wiki_proposals.id> [--proposal …]
+ *   bun scripts/measure-summary-code.ts --page "sources/Some Page.mdx" [--page …]
+ *   bun scripts/measure-summary-code.ts --survey [--out survey.json]
  *
  * `--redraft` runs the REAL source drafter (the bot's connector, the current
  * `SOURCE_CONVENTIONS_DIGEST`) on the summary's source file with the transcript
@@ -18,9 +20,19 @@
  * `--proposal` measures a stored draft against its source summary, with no model
  * call.
  *
+ * `--page` measures the page ON DISK against the summary its applied proposal
+ * names — the draft as it was persisted is not the same artefact as the file after
+ * apply-time containment and any later write, and a backfill has to be judged
+ * against the file a reader opens. `--survey` runs that over every applied source
+ * page, newest first, and is how the candidate list is regenerated rather than
+ * trusted: it prints one line per page whose summary quotes code, and with `--out`
+ * writes the rows a backfill run reads back (`scripts/backfill-summary-code.ts
+ * --from`). Neither costs a model call.
+ *
  * `--bot` (default `jarvis`) picks the drafting bot and its wiki.
  */
 import { writeFileSync } from "node:fs";
+import path from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { initDb } from "../src/db/client.ts";
 import { discoverAllBots } from "../src/bots/config.ts";
@@ -30,7 +42,8 @@ import { encodeDocIdPath } from "../src/summaries/sources.ts";
 import { splitTranscript } from "../src/summaries/transcript-split.ts";
 import { getWikiIndex } from "../src/wiki/store.ts";
 import { normalizeUrl } from "../src/wiki/ingest-backlog.ts";
-import { getWikiProposalById, type WikiProposal } from "../src/db/wiki-proposals.ts";
+import { getWikiProposalById, listAllWikiProposals, type WikiProposal } from "../src/db/wiki-proposals.ts";
+import { appliedSourcePages, retentionScore } from "../src/gardener/source-backfill.ts";
 import { draftSourcePage } from "../src/gardener/source-drafter.ts";
 import { runDrafterOneShot } from "../src/gardener/drafter-oneshot.ts";
 import { DRAFT_TIMEOUT_MS } from "../src/gardener/backlog.ts";
@@ -55,9 +68,12 @@ function all(name: string): string[] {
 
 const redrafts = all("redraft");
 const proposals = all("proposal");
+const pages = all("page");
+const survey = process.argv.includes("--survey");
 const outFile = all("out")[0];
 const botName = all("bot")[0] ?? "jarvis";
-if (redrafts.length === 0 && proposals.length === 0) die("--redraft <collection>/<docId> or --proposal <id> is required");
+if (redrafts.length === 0 && proposals.length === 0 && pages.length === 0 && !survey)
+  die("one of --redraft <collection>/<docId>, --proposal <id>, --page <relPath> or --survey is required");
 
 const config = loadConfig();
 initDb(config);
@@ -68,6 +84,8 @@ interface Row {
   doc: string;
   outcome: string;
   title?: string;
+  /** Wiki-relative path, on a `--page` / `--survey` row. */
+  relPath?: string;
   blocks: BlockRetention[];
   draft?: string;
 }
@@ -138,9 +156,70 @@ async function stored(id: string): Promise<Row> {
   };
 }
 
+/**
+ * The applied source pages of this bot's wiki, newest apply first, each with the
+ * summary doc it was drafted from.
+ */
+async function appliedPages() {
+  return appliedSourcePages(await listAllWikiProposals(botConfig!.name));
+}
+
+function wikiRoot(): string {
+  const dir = botConfig!.wikiDir;
+  if (!dir) die(`bot ${botConfig!.name} has no wikiDir`);
+  return dir;
+}
+
+/** Measure one page ON DISK against the summary its applied proposal names. */
+async function onDisk(relPath: string, known?: { collection: string; docId: string }): Promise<Row> {
+  let src = known;
+  if (!src) {
+    const hit = (await appliedPages()).find((p) => p.relPath === relPath);
+    if (!hit) die(`no applied source proposal targets "${relPath}"`);
+    src = { collection: hit.collection, docId: hit.docId };
+  }
+  const file = Bun.file(path.join(wikiRoot(), relPath));
+  if (!(await file.exists())) die(`page "${relPath}" is not on disk`);
+  const { body } = await readSummary(src.collection, src.docId);
+  return {
+    doc: `${src.collection}/${src.docId}`,
+    outcome: "applied",
+    relPath,
+    blocks: measureCodeRetention(body, await file.text()),
+  };
+}
+
 const rows: Row[] = [];
 for (const ref of redrafts) rows.push(await redraft(ref));
 for (const id of proposals) rows.push(await stored(id));
+for (const relPath of pages) rows.push(await onDisk(relPath));
+if (survey) {
+  const applied = await appliedPages();
+  const root = wikiRoot();
+  console.log(`surveying ${applied.length} applied source pages…`);
+  // Bounded concurrency: one huginn source read per page, and a 469-page sweep
+  // serially is minutes of round-trips for a measurement that has no model call.
+  const queue = [...applied];
+  const found: Row[] = [];
+  await Promise.all(
+    Array.from({ length: 8 }, async () => {
+      for (;;) {
+        const next = queue.shift();
+        if (!next) return;
+        const file = Bun.file(path.join(root, next.relPath));
+        if (!(await file.exists())) continue; // page deleted since it was applied
+        const source = await readSummarySourceText(API_URL, next.collection, encodeDocIdPath(next.docId), 15_000);
+        if (source === null) continue; // no source file to measure against
+        const blocks = measureCodeRetention(splitTranscript(source).body, await file.text());
+        if (blocks.length > 0) {
+          found.push({ doc: `${next.collection}/${next.docId}`, outcome: "applied", relPath: next.relPath, blocks });
+        }
+      }
+    }),
+  );
+  found.sort((a, b) => retentionScore(a.blocks).kept - retentionScore(b.blocks).kept);
+  rows.push(...found);
+}
 
 let blocks = 0;
 let kept = 0;
@@ -149,7 +228,7 @@ for (const r of rows) {
   const p = r.blocks.filter((b) => b.verdict === "partial").length;
   blocks += r.blocks.length;
   kept += k;
-  console.log(`${k}/${r.blocks.length} kept, ${p} partial — ${r.outcome} — ${r.title ?? ""} — ${r.doc}`);
+  console.log(`${k}/${r.blocks.length} kept, ${p} partial — ${r.outcome} — ${r.relPath ?? r.title ?? ""} — ${r.doc}`);
   for (const b of r.blocks) console.log(`    block ${b.index} ${b.lang || "-"}: ${b.found}/${b.lines} lines → ${b.verdict}`);
 }
 console.log(`TOTAL: ${kept}/${blocks} blocks kept (${blocks ? Math.round((100 * kept) / blocks) : 0}%)`);

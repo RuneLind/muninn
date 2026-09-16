@@ -4,6 +4,8 @@ import {
   sourceTopicKey,
   sourceWikilinkTargets,
   buildSourceDraftPrompt,
+  buildSourceRevisePrompt,
+  VERBATIM_MATERIAL_RULE,
   MIN_SOURCE_BODY_CHARS,
   COLLISION_SKIP_SENTINEL,
   sanitizeTitleOverride,
@@ -14,6 +16,7 @@ import {
   type SourceDraftInput,
 } from "./source-drafter.ts";
 import { sanitizeFilename } from "./target-resolve.ts";
+import { sha256 } from "./util.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
@@ -976,5 +979,221 @@ describe("source drafter — which twins reach the existing collision retry", ()
     );
     expect(out.outcome).toBe("drafted");
     expect(inserted[0]?.targetPath).toBe("sources/Aurora Ledger Protocol.mdx");
+  });
+});
+
+/**
+ * Update mode — the backfill path (mimir `plans/muninn-summary-code-in-wiki.mdx`,
+ * PR 2). Each case here is a create-mode rule that is WRONG when the page being
+ * written is the one the doc already has.
+ */
+describe("draftSourcePage — update mode", () => {
+  const RELPATH = "sources/Retrieval-Augmented Generation.mdx";
+  const CURRENT = mdxDraft({
+    body: "# Retrieval-Augmented Generation\n\nThe page as a reviewer approved it, with the quoted config paraphrased away.",
+  });
+  /** The index as it is for a backfill: the page exists, and its url is in the wiki. */
+  const coveredIndex = () =>
+    fakeIndex([
+      page({
+        title: "Retrieval-Augmented Generation",
+        name: "Retrieval-Augmented Generation",
+        type: "source",
+        relPath: RELPATH,
+        aliases: ["RAG"],
+      }),
+    ]);
+  const coveredRefs: WikiRefs = { urls: new Set([SOURCE_URL]), idTokens: new Set(["abc12345678"]) };
+
+  function updateDeps(over: Partial<DraftSourcePageDeps> = {}): DraftSourcePageDeps {
+    return baseDeps({
+      index: coveredIndex(),
+      collectWikiRefs: async () => coveredRefs,
+      update: { relPath: RELPATH, currentText: CURRENT },
+      ...over,
+    });
+  }
+
+  test("drafts although the doc's url is already in the wiki — that is the reason to run", async () => {
+    // Create mode answers `covered` here; every page worth backfilling does.
+    expect((await draftSourcePage(baseDeps({ collectWikiRefs: async () => coveredRefs }))).outcome).toBe("covered");
+    expect((await draftSourcePage(updateDeps())).outcome).toBe("drafted");
+  });
+
+  test("persists mode update + the current page's hash at the page's own path", async () => {
+    let captured: InsertWikiProposalParams | null = null;
+    const out = await draftSourcePage(
+      updateDeps({
+        insertProposal: async (params) => {
+          captured = params;
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    expect(captured!.mode).toBe("update");
+    expect(captured!.targetPath).toBe(RELPATH);
+    expect(captured!.baseHash).toBe(sha256(CURRENT));
+  });
+
+  test("keeps the page's OWN aliases — the index owns them for this very page", async () => {
+    // Without `selfRelPath`, `stripOwnedAliases` reads `RAG` as hijacked from the
+    // page it belongs to and the backfill silently strips it.
+    let captured: InsertWikiProposalParams | null = null;
+    await draftSourcePage(
+      updateDeps({
+        insertProposal: async (params) => {
+          captured = params;
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(captured!.draft).toContain("aliases: [RAG]");
+  });
+
+  test("the page at the target path is the update target, not a collision", async () => {
+    let calls = 0;
+    const out = await draftSourcePage(
+      updateDeps({
+        callDrafter: async () => {
+          calls++;
+          return mdxDraft();
+        },
+      }),
+    );
+    // Create mode would burn a second call on the distinct-title nudge and then skip.
+    expect(out.outcome).toBe("drafted");
+    expect(calls).toBe(1);
+  });
+
+  test("writes to a life/ page's own path instead of moving it under sources/", async () => {
+    const lifePath = "life/sources/Retrieval-Augmented Generation.mdx";
+    let captured: InsertWikiProposalParams | null = null;
+    const out = await draftSourcePage(
+      updateDeps({
+        // The capture's category says `ai`; the page lives under `life/`.
+        index: fakeIndex([
+          page({ title: "Retrieval-Augmented Generation", name: "Retrieval-Augmented Generation", type: "source", relPath: lifePath }),
+        ]),
+        update: { relPath: lifePath, currentText: CURRENT },
+        insertProposal: async (params) => {
+          captured = params;
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    expect(captured!.targetPath).toBe(lifePath);
+  });
+
+  test("refuses a reviser that renamed the page, with no proposal written", async () => {
+    let inserts = 0;
+    const out = await draftSourcePage(
+      updateDeps({
+        callDrafter: async () => mdxDraft({ title: "Something Else Entirely" }),
+        insertProposal: async (params) => {
+          inserts++;
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(out.outcome).toBe("skipped");
+    expect("reason" in out && out.reason).toContain("renamed");
+    expect(inserts).toBe(0);
+  });
+
+  test("typography drift is not a rename — the page's own spelling is pinned back", async () => {
+    const curly = mdxDraft({ title: "Retrieval–Augmented Generation" }); // en dash
+    let captured: InsertWikiProposalParams | null = null;
+    const out = await draftSourcePage(
+      updateDeps({
+        callDrafter: async () => curly,
+        insertProposal: async (params) => {
+          captured = params;
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    expect(captured!.draft).toContain("title: Retrieval-Augmented Generation");
+  });
+
+  test("hands the reviser the blocks the page is missing, measured from the two texts", async () => {
+    // The drafter computes the checklist itself, so no caller can prompt for one
+    // set of blocks and score another.
+    const quoted = "services:\n  postgres:\n    image: postgres:latest\n    ports: [5432]";
+    let prompt = "";
+    const out = await draftSourcePage(
+      updateDeps({
+        input: { ...baseDeps().input, body: `${BODY_OVER_THRESHOLD}\n\n\`\`\`yaml\n${quoted}\n\`\`\`\n` },
+        callDrafter: async (p) => {
+          prompt = p;
+          return mdxDraft();
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    expect(prompt).toContain("MISSING BLOCK 1 (language: yaml)");
+    expect(prompt).toContain(quoted);
+  });
+
+  test("a live proposal for the doc still blocks — a pending draft is a real duplicate", async () => {
+    const out = await draftSourcePage(
+      updateDeps({ liveTopicKeys: async () => [sourceTopicKey("youtube-summaries", "abc12345678")] }),
+    );
+    expect(out.outcome).toBe("covered");
+  });
+});
+
+describe("buildSourceRevisePrompt", () => {
+  test("carries the current page, the summary, and the one verbatim rule", () => {
+    const prompt = buildSourceRevisePrompt({
+      input: baseDeps().input,
+      today: "2026-09-16",
+      currentPage: "---\ntype: source\ntitle: RAG\n---\n\n# RAG\n\nProse.",
+      missingBlocks: [],
+    });
+    expect(prompt).toContain("BEGIN CURRENT PAGE");
+    expect(prompt).toContain("BEGIN SOURCE SUMMARY");
+    expect(prompt).toContain(VERBATIM_MATERIAL_RULE);
+    expect(prompt).toContain('Set "updated:" to 2026-09-16');
+  });
+
+  test("tells the reviser to change nothing else and to output the whole file", () => {
+    const prompt = buildSourceRevisePrompt({
+      input: baseDeps().input,
+      today: "2026-09-16",
+      currentPage: "page",
+      missingBlocks: [],
+    });
+    expect(prompt).toContain("CHANGE NOTHING ELSE");
+    expect(prompt).toContain("complete revised .mdx file");
+  });
+
+  test("names every missing block verbatim — the measurement's checklist, not the model's judgement", () => {
+    const prompt = buildSourceRevisePrompt({
+      input: baseDeps().input,
+      today: "2026-09-16",
+      currentPage: "page",
+      missingBlocks: [
+        { lang: "yaml", text: "services:\n  postgres:\n    image: postgres" },
+        { lang: "", text: "spring.threads.virtual.enabled=true" },
+      ],
+    });
+    expect(prompt).toContain("These 2 fenced block(s)");
+    expect(prompt).toContain("MISSING BLOCK 1 (language: yaml)");
+    expect(prompt).toContain("services:\n  postgres:\n    image: postgres");
+    expect(prompt).toContain("MISSING BLOCK 2 ---");
+    expect(prompt).toContain("spring.threads.virtual.enabled=true");
+  });
+
+  test("no missing block ⇒ no checklist section at all", () => {
+    const prompt = buildSourceRevisePrompt({
+      input: baseDeps().input,
+      today: "2026-09-16",
+      currentPage: "page",
+      missingBlocks: [],
+    });
+    expect(prompt).not.toContain("MISSING BLOCK");
   });
 });
