@@ -725,8 +725,9 @@ PER KIND before they are filled: every kind present gets `floor(24 / kinds)`, an
 what a kind does not need of its share passes on in render order (sessions, then
 merges). That reservation is why a page of 250 sessions and one merge still shows
 the merge — sliced off one sessions-then-merges run it showed `session=24,
-merge=0`, deleting the merges leg's whole contribution to the line. MEASURED on a 60-session page in a
-1100 px window: the marks are one inline-flex run beside the sentence, and
+merge=0`, deleting the merges leg's whole contribution to the line. MEASURED on
+a 60-session page in a 1100 px window: the marks are one inline-flex run beside
+the sentence, and
 uncapped they ended 44 px past the article column and took the caret with them.
 The cap is the LEGIBILITY bound; the containment bound is CSS — `flex-wrap` on
 the line, `flex-shrink: 0` + `max-width: 100%` on the marks, `min-width: 0` +

@@ -441,9 +441,9 @@ interface ChainRenderOptions {
  * any zone west of UTC renders the day BEFORE — and there is no hour in the
  * input to render anyway. Nothing on this page produces one today — `chip.first`
  * and `chip.last` are ledger facts and `mergedAt` comes off the merges payload,
- * all three full ISO stamps, and the only date-only value in the repo is a test
- * fixture. The branch is defence against an upstream that starts spelling a
- * day, so that it renders as a day rather than as yesterday.
+ * all three full ISO stamps, and the only date-only value that reaches this
+ * function is a test fixture. The branch is defence against an upstream that
+ * starts spelling a day, so that it renders as a day rather than as yesterday.
  *
  * The digits are ROUND-TRIPPED before they are echoed: the shape pattern alone
  * accepts `2026-99-99` and `0000-00-00`, and answering those `99-99` / `00-00`
