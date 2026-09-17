@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { countDeclarations } from "../../scripts/count-tests.ts";
+import { classify, countDeclarations } from "../../scripts/count-tests.ts";
 
 /**
  * The declaration counter behind `bun run test:count`.
@@ -64,8 +64,84 @@ describe("what counts as a test", () => {
     expect(countDeclarations(src).tests).toBe(1);
   });
 
+  test("a curried conditional declares a test: the name is in the second call", () => {
+    const src = [
+      `test.skipIf(process.getuid?.() === 0)("skipped as root", fn);`,
+      `test.if(hasDocker)("needs docker", fn);`,
+      `it.todoIf(isCi)("later", fn);`,
+      `test.skipIf(`,
+      `  !process.env.RUN_SLOW,`,
+      `)("wrapped curried name", fn);`,
+      `test.if(label !== "a)b")("a paren inside the condition's string", fn);`,
+    ].join("\n");
+    expect(countDeclarations(src).tests).toBe(5);
+  });
+
+  test("a curried call whose second call has no name declares nothing", () => {
+    expect(countDeclarations(`test.skipIf(cond)(someFactory());`).tests).toBe(0);
+  });
+
+  test("a modifier's name counts in every quote style", () => {
+    const src = [`test.skip('single', fn);`, "test.only(`backtick ${x}`, fn);", `test.todo("double");`].join("\n");
+    expect(countDeclarations(src).tests).toBe(3);
+  });
+
   test("a bare modifier call inside a body declares nothing", () => {
     const src = [`test("real", async () => {`, `  test.fail();`, `  test.slow();`, `});`].join("\n");
     expect(countDeclarations(src).tests).toBe(1);
+  });
+});
+
+describe("how the chains group the files", () => {
+  const testFiles = [
+    "db/unit-only.test.ts",
+    "src/db/needs-pg.test.ts",
+    "src/watchers/shared.test.ts",
+    "src/watchers/unit-only.test.ts",
+    "src/hivemind/router.test.ts",
+    "src/only-ci.test.ts",
+    "src/no-chain.test.ts",
+    "src/unmapped.test.ts",
+  ];
+  const specFiles = ["e2e/chat.spec.ts"];
+  const scripts = {
+    test: "bun test db/unit-only.test.ts src/watchers/ src/only-ci.test.ts && bun test src/db/",
+    "test:unit": "bun test db/unit-only.test.ts src/watchers/",
+    "test:handlers": "bun test src/watchers/shared.test.ts",
+    "test:db": "bun test src/db/",
+    "test:hivemind": "bun test src/hivemind/",
+    "test:foo": "bun test src/unmapped.test.ts",
+    "test:coverage": "bun test --coverage",
+    "test:e2e": "bunx playwright test",
+  };
+  const c = classify(scripts, testFiles, specFiles);
+
+  test("a chain's files join its group; specs are e2e; the rest are ungrouped", () => {
+    expect(c.members.unit).toEqual(["db/unit-only.test.ts", "src/watchers/shared.test.ts", "src/watchers/unit-only.test.ts"]);
+    expect(c.members.integration).toEqual(["src/db/needs-pg.test.ts", "src/hivemind/router.test.ts"]);
+    expect(c.members.e2e).toEqual(["e2e/chat.spec.ts"]);
+    expect(c.members.ungrouped).toEqual(["src/no-chain.test.ts", "src/only-ci.test.ts", "src/unmapped.test.ts"]);
+  });
+
+  test("a file two chains of one group run is a repeat, so --run can subtract it", () => {
+    expect([...c.repeats.entries()]).toEqual([["src/watchers/shared.test.ts", 2]]);
+  });
+
+  test("the drift lists: no chain, only the CI chain, and outside the CI chain", () => {
+    expect(c.unrun).toEqual(["src/no-chain.test.ts"]);
+    expect(c.ciOnly).toEqual(["src/only-ci.test.ts"]);
+    expect(c.outsideCi).toEqual(["src/hivemind/router.test.ts"]);
+  });
+
+  test("a file only an unmapped chain runs is in no drift list, and the chain is warned about", () => {
+    expect(c.unrun).not.toContain("src/unmapped.test.ts");
+    expect(c.ciOnly).not.toContain("src/unmapped.test.ts");
+    expect(c.warnings.some((w) => w.startsWith("test:foo:"))).toBe(true);
+  });
+
+  test("a chain naming a file that is not on disk is warned about, not counted", () => {
+    const missing = classify({ "test:unit": "bun test src/gone.test.ts" }, testFiles, specFiles);
+    expect(missing.members.unit).toEqual([]);
+    expect(missing.warnings).toContain("test:unit: names src/gone.test.ts, which is not a test file on disk");
   });
 });

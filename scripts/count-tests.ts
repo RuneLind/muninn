@@ -1,193 +1,247 @@
 #!/usr/bin/env bun
 /**
- * Count this repo's tests, grouped unit / integration / e2e.
+ * Count this repo's tests, grouped unit / integration / e2e. `--help` lists the modes.
  *
- *   bun run test:count            # static declaration count, no services needed
- *   bun run test:count -- --run   # measured: runs the chains, reads their totals
- *   bun run test:count -- --files # per-file static count
- *   bun run test:count -- --json  # machine-readable
+ * Grouping follows the `test*` chains in package.json, parsed with the same
+ * `bunTestLinks`/`expandLink` the mock-isolation guard uses, because a chain is
+ * where the repo decides what a test needs in order to run. The directory tree
+ * cannot say it: `db/postgres-connection.test.ts` runs in `test:unit` and opens no
+ * connection, while `db/provision.test.ts` beside it runs in `test:db` and needs an
+ * admin Postgres. A chain the mapping does not name is reported, not dropped.
  *
- * Grouping comes from the `test*` chains in package.json, parsed with the same
- * `bunTestLinks`/`expandLink` the mock-isolation guard uses — not from the
- * directory tree. The tree cannot answer it: `src/db/threads.test.ts` needs
- * Postgres and `src/db/migrate-db-url.test.ts` does not, and only the chain that
- * runs a file says which. A chain the mapping does not name is reported rather
- * than silently dropped, so adding one shows up here.
- *
- * The two modes disagree by design. The static count reads declarations, so a
- * table-driven `test.each([...])` counts once however many cases it expands to;
- * measured mode asks bun and Playwright what they ran. Measured is the number to
- * quote; static is the one that runs anywhere in under a second.
+ * The static count reads declarations, so it reads low: a test declared inside a
+ * loop, or a `.each` table, counts once. `--run` measures instead.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { bunTestLinks, expandLink } from "../src/test/mock-isolation.ts";
+import {
+  SINGLE_PROCESS_SCRIPTS,
+  TEST_FILE_DIRS,
+  TEST_FILE_GLOB,
+  bunTestLinks,
+  expandLink,
+} from "../src/test/mock-isolation.ts";
 
 const ROOT = join(import.meta.dir, "..");
 
 type Group = "unit" | "integration" | "e2e" | "ungrouped";
-const GROUPS: Group[] = ["unit", "integration", "e2e", "ungrouped"];
+const GROUPS: readonly Group[] = ["unit", "integration", "e2e", "ungrouped"];
 
 /**
- * A test is *integration* when it needs something outside its own process — the
- * Postgres container, or a booted server. Everything else is *unit*, including the
- * handler chain, which mocks every dependency it touches. `test:e2e` is absent
- * because it runs Playwright, not bun: its files are the `e2e/*.spec.ts` glob.
+ * A chain is *integration* when running it needs something outside its own process —
+ * the Postgres container or a live server — and *unit* otherwise. The chain is the
+ * unit of grouping, so a chain that mixes both counts as the kind that needs the
+ * service: `test:hivemind` is integration because most of its files open the test
+ * database. `test:handlers` is unit because it mocks every dependency it touches.
+ * `test:e2e` is absent because it runs Playwright, not bun; its files are the
+ * `e2e/*.spec.ts` glob.
  */
 const GROUP_OF_SCRIPT: Record<string, Group> = {
   "test:unit": "unit",
   "test:handlers": "unit",
-  "test:hivemind": "unit",
+  "test:hivemind": "integration",
   "test:db": "integration",
   "test:integration": "integration",
 };
 
-/**
- * Chains that group nothing. `test:coverage` is bun's whole-repo single-process run,
- * and `test` is the chain CI runs — measured 2026-09-16, it is NOT the union of the
- * five grouped chains: 15 files only it runs and 14 only they run. So it grades
- * membership instead of defining it, and a test file no grouped chain runs lands in
- * `ungrouped` rather than going missing from the total.
- */
-const AGGREGATE_SCRIPTS = new Set(["test", "test:coverage"]);
+/** The chain CI runs. It is not the union of the grouped chains, so it grades membership rather than defining it. */
 const CI_SCRIPT = "test";
 
-/** Modifiers that declare no test: bun and Playwright hooks, and Playwright's structure calls. */
-const HOOKS = new Set([
-  "describe",
-  "beforeAll",
-  "beforeEach",
-  "afterAll",
-  "afterEach",
-  "use",
-  "setTimeout",
-  "step",
-  "slow",
-  "info",
-  "extend",
-]);
+/**
+ * Chains `--run` leaves out and counts statically. `src/chat/integration.test.ts`
+ * drives the developer's own `bun run dev` on port 3010 and makes real Claude calls,
+ * which a counting command must not do as a side effect.
+ */
+const LIVE_SCRIPTS: ReadonlySet<string> = new Set(["test:integration"]);
 
+/** A declaration call at the start of a line: `it(`, `test(`, or either with one modifier. */
 const DECL = /^[ \t]*(?:it|test)(?:\.(?<mod>[A-Za-z]+))?[ \t]*\(/gm;
+
+/**
+ * Modifiers that take a name yet declare no test. Every other non-test call —
+ * `beforeAll`, `use`, `setTimeout`, a bare `test.fail()` — takes no name, so the name
+ * rule in `countDeclarations` already skips it.
+ */
+const NAMED_NON_TESTS: ReadonlySet<string> = new Set(["describe", "step"]);
 
 interface FileCount {
   tests: number;
-  /** `test.each([...])` tables, which the static count reads as one test each. */
+  /** `.each` tables, which the static count reads as one test each. */
   tables: number;
+}
+
+function nextNonSpace(src: string, at: number): number {
+  let i = at;
+  while (i < src.length && /\s/.test(src[i] ?? "")) i++;
+  return i;
+}
+
+function isStringAt(src: string, at: number): boolean {
+  const c = src[nextNonSpace(src, at)];
+  return c === '"' || c === "'" || c === "`";
+}
+
+/** Index of the `)` that closes the call opened just before `open`, skipping string literals; -1 if none nearby. */
+function closingParen(src: string, open: number): number {
+  let depth = 1;
+  const end = Math.min(src.length, open + 4000);
+  for (let i = open; i < end; i++) {
+    const c = src[i];
+    if (c === '"' || c === "'" || c === "`") {
+      for (i++; i < end && src[i] !== c; i++) if (src[i] === "\\") i++;
+    } else if (c === "(") {
+      depth++;
+    } else if (c === ")" && --depth === 0) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 /**
  * Count test declarations in one source file.
  *
- * A modifier only counts when its first argument is a string literal, which is
- * what separates a declaration from a condition: `test.skip("name", fn)` is a
- * skipped test, `test.skip(cond, "reason")` skips the file, and a bare
- * `test.fail()` inside a body marks the test around it.
+ * A modifier declares a test only when a name follows. The name is the first
+ * argument (`test.skip("name", fn)`) or, in bun's conditional forms, the first
+ * argument of a second call (`test.skipIf(cond)("name", fn)`). That rule separates
+ * a declaration from Playwright's `test.skip(cond, "reason")`, which skips a file.
  */
 export function countDeclarations(src: string): FileCount {
   let tests = 0;
   let tables = 0;
   for (const m of src.matchAll(DECL)) {
     const mod = m.groups?.mod;
-    if (mod && HOOKS.has(mod)) continue;
+    if (!mod) {
+      tests++;
+      continue;
+    }
+    if (NAMED_NON_TESTS.has(mod)) continue;
     if (mod === "each") {
       tests++;
       tables++;
       continue;
     }
-    if (!mod) {
+    const open = m.index + m[0].length;
+    if (isStringAt(src, open)) {
       tests++;
       continue;
     }
-    // The name can sit on the next line, so look past the newline, not just the match.
-    const rest = src.slice(m.index + m[0].length).trimStart();
-    if (rest.startsWith('"') || rest.startsWith("'") || rest.startsWith("`")) tests++;
+    const close = closingParen(src, open);
+    if (close === -1) continue;
+    const second = nextNonSpace(src, close + 1);
+    if (src[second] === "(" && isStringAt(src, second + 1)) tests++;
   }
   return { tests, tables };
 }
 
-function glob(dir: string, pattern: string): string[] {
-  const out: string[] = [];
-  for (const rel of new Bun.Glob(pattern).scanSync({ cwd: join(ROOT, dir) })) out.push(`${dir}/${rel}`);
-  return out.sort();
-}
-
-function bunTestFiles(): string[] {
-  return ["src", "db", "e2e"].flatMap((d) => glob(d, "**/*.test.ts")).sort();
-}
-
-interface StaticReport {
-  groups: Record<Group, { files: string[]; tests: number; tables: number }>;
-  /** Test files no chain runs at all, so only `bun test --coverage` ever loads them. */
+export interface Classification {
+  /** The files in each group, sorted. A file counts in one group per chain group that runs it. */
+  members: Record<Group, string[]>;
+  /** The files each grouped chain runs, one entry per link, so a file two links run appears twice. */
+  chains: Map<string, string[]>;
+  /** Files the chains of one group run more than once, and how many times, so `--run` can subtract the repeats. */
+  repeats: Map<string, number>;
+  /** Test files no chain runs, so only `bun test --coverage` loads them. */
   unrun: string[];
-  /** Test files only the CI chain runs, which is why they are ungrouped. */
+  /** Test files only the CI chain runs, so no group claims them. */
   ciOnly: string[];
-  /** Test files a grouped chain runs and the CI chain does not, so CI never runs them. */
+  /** Grouped test files the CI chain skips, so CI never runs them. */
   outsideCi: string[];
   warnings: string[];
 }
 
-function staticReport(): StaticReport {
-  const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
-    scripts: Record<string, string>;
-  };
-  const all = bunTestFiles();
-  const warnings: string[] = [];
+/** Sort every test file into a group, from the chains alone. Pure, so it runs on fixtures. */
+export function classify(
+  scripts: Record<string, string>,
+  testFiles: readonly string[],
+  specFiles: readonly string[],
+): Classification {
+  const onDisk = new Set(testFiles);
+  const warnings = new Set<string>();
   const members = new Map<Group, Set<string>>(GROUPS.map((g) => [g, new Set<string>()]));
+  const chains = new Map<string, string[]>();
+  const runs = new Map<Group, Map<string, number>>(GROUPS.map((g) => [g, new Map<string, number>()]));
   const anyChain = new Set<string>();
   const ciChain = new Set<string>();
 
-  for (const link of bunTestLinks(pkg.scripts)) {
-    const files = expandLink(link.args, all);
-    if (link.script === CI_SCRIPT) for (const f of files) ciChain.add(f);
-    if (link.script !== "test:coverage") for (const f of files) anyChain.add(f);
-    if (AGGREGATE_SCRIPTS.has(link.script)) continue;
-    const group = GROUP_OF_SCRIPT[link.script];
-    if (!group) {
-      warnings.push(`${link.script}: chain is in no group — add it to GROUP_OF_SCRIPT or AGGREGATE_SCRIPTS`);
+  for (const { script, args } of bunTestLinks(scripts)) {
+    if (SINGLE_PROCESS_SCRIPTS.has(script)) continue;
+    const files: string[] = [];
+    for (const f of expandLink(args, testFiles)) {
+      if (onDisk.has(f)) files.push(f);
+      else warnings.add(`${script}: names ${f}, which is not a test file on disk`);
+    }
+    for (const f of files) anyChain.add(f);
+    if (script === CI_SCRIPT) {
+      for (const f of files) ciChain.add(f);
       continue;
     }
-    for (const f of files) members.get(group)!.add(f);
+    const group = GROUP_OF_SCRIPT[script];
+    if (!group) {
+      warnings.add(`${script}: chain is in no group — add it to GROUP_OF_SCRIPT in scripts/count-tests.ts`);
+      continue;
+    }
+    chains.set(script, [...(chains.get(script) ?? []), ...files]);
+    for (const f of files) {
+      members.get(group)!.add(f);
+      const inGroup = runs.get(group)!;
+      inGroup.set(f, (inGroup.get(f) ?? 0) + 1);
+    }
   }
-  for (const f of glob("e2e", "**/*.spec.ts")) members.get("e2e")!.add(f);
+  for (const f of specFiles) members.get("e2e")!.add(f);
 
-  const grouped = new Set([...members.values()].flatMap((s) => [...s]));
-  for (const f of all) if (!grouped.has(f)) members.get("ungrouped")!.add(f);
+  const grouped = new Set(GROUPS.flatMap((g) => [...members.get(g)!]));
+  for (const f of testFiles) if (!grouped.has(f)) members.get("ungrouped")!.add(f);
   for (const f of grouped) {
     const inGroups = GROUPS.filter((g) => members.get(g)!.has(f));
-    if (inGroups.length > 1) warnings.push(`${f}: counted in ${inGroups.join(" and ")}`);
+    if (inGroups.length > 1) warnings.add(`${f}: counted in ${inGroups.join(" and ")}`);
   }
 
-  const groups = {} as StaticReport["groups"];
-  for (const g of GROUPS) {
-    const files = [...members.get(g)!].sort();
-    let tests = 0;
-    let tables = 0;
-    for (const f of files) {
-      const c = countDeclarations(readFileSync(join(ROOT, f), "utf8"));
-      tests += c.tests;
-      tables += c.tables;
-    }
-    groups[g] = { files, tests, tables };
+  const repeats = new Map<string, number>();
+  for (const inGroup of runs.values()) {
+    for (const [f, times] of inGroup) if (times > 1) repeats.set(f, times);
   }
-  const ungrouped = groups.ungrouped.files;
+  const sorted = Object.fromEntries(GROUPS.map((g) => [g, [...members.get(g)!].sort()])) as Record<Group, string[]>;
+  const specs = new Set(specFiles);
   return {
-    groups,
-    unrun: ungrouped.filter((f) => !anyChain.has(f)),
-    ciOnly: ungrouped.filter((f) => anyChain.has(f)),
-    outsideCi: [...grouped].filter((f) => f.endsWith(".test.ts") && !ciChain.has(f)).sort(),
-    warnings,
+    members: sorted,
+    chains,
+    repeats,
+    unrun: sorted.ungrouped.filter((f) => !anyChain.has(f)),
+    ciOnly: sorted.ungrouped.filter((f) => ciChain.has(f)),
+    outsideCi: [...grouped].filter((f) => !specs.has(f) && !ciChain.has(f)).sort(),
+    warnings: [...warnings],
   };
 }
 
-interface RunRow {
-  group: Group;
-  label: string;
-  tests: number;
-  files: number;
-  ok: boolean;
+interface FileRow extends FileCount {
+  path: string;
 }
 
-async function measure(cmd: string[], re: RegExp): Promise<{ tests: number; files: number; ok: boolean }> {
+const sum = <T>(xs: readonly T[], f: (x: T) => number) => xs.reduce((s, x) => s + f(x), 0);
+const n = (v: number) => v.toLocaleString("en-US");
+
+function glob(dir: string, pattern: string): string[] {
+  return [...new Bun.Glob(pattern).scanSync({ cwd: join(ROOT, dir) })].map((rel) => `${dir}/${rel}`).sort();
+}
+
+function staticReport() {
+  const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  const testFiles = TEST_FILE_DIRS.flatMap((d) => glob(d, TEST_FILE_GLOB)).sort();
+  const c = classify(pkg.scripts, testFiles, glob("e2e", "**/*.spec.ts"));
+  const counts = new Map<string, FileCount>();
+  const count = (path: string) => {
+    let hit = counts.get(path);
+    if (!hit) counts.set(path, (hit = countDeclarations(readFileSync(join(ROOT, path), "utf8"))));
+    return hit;
+  };
+  const rows = Object.fromEntries(
+    GROUPS.map((g) => [g, c.members[g].map((path): FileRow => ({ path, ...count(path) }))]),
+  ) as Record<Group, FileRow[]>;
+  return { c, rows, count };
+}
+
+async function measure(cmd: string[], re: RegExp) {
   const proc = Bun.spawn(cmd, { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -196,32 +250,54 @@ async function measure(cmd: string[], re: RegExp): Promise<{ tests: number; file
   ]);
   let tests = 0;
   let files = 0;
+  let totals = 0;
   for (const m of `${out}\n${err}`.matchAll(re)) {
     tests += Number(m[1]);
     files += Number(m[2]);
+    totals++;
   }
-  return { tests, files, ok: code === 0 };
+  return { tests, files, ok: code === 0, totals };
 }
 
 /** One summary line per `bun test` process, so a chain of N links prints N of them. */
 const BUN_TOTAL = /Ran (\d+) tests? across (\d+) files?/g;
-/** Playwright's `--list` footer. Listing is enough: it collects every test without running one. */
+/** Playwright's `--list` footer. Listing collects every test without running one. */
 const PW_TOTAL = /Total: (\d+) tests? in (\d+) files?/g;
 
-async function runReport(): Promise<RunRow[]> {
+type RunRow = { label: string; group: Group; files: number; tests: number; result: string; ok: boolean };
+
+async function runReport({ c, count }: ReturnType<typeof staticReport>) {
   const rows: RunRow[] = [];
+  const notes: string[] = [];
   for (const [script, group] of Object.entries(GROUP_OF_SCRIPT)) {
+    const files = c.chains.get(script) ?? [];
+    if (LIVE_SCRIPTS.has(script)) {
+      rows.push({ label: script, group, files: files.length, tests: sum(files, (f) => count(f).tests), result: "static", ok: true });
+      notes.push(`\`${script}\` was not run: it needs \`bun run dev\` on port 3010 and makes real Claude calls. Its row is the static count.`);
+      continue;
+    }
     process.stderr.write(`running ${script}…\n`);
     const r = await measure(["bun", "run", script], BUN_TOTAL);
-    rows.push({ group, label: script, ...r });
+    rows.push({ label: script, group, files: r.files, tests: r.tests, result: r.ok ? "pass" : "FAIL (partial)", ok: r.ok });
+    if (r.ok && r.totals === 0) notes.push(`\`${script}\` passed but printed no test total; bun's summary line may have changed.`);
   }
+
+  // A file two chains of one group run is counted by both; measure it once and take the extra runs back out.
+  for (const [file, times] of c.repeats) {
+    const group = GROUPS.find((g) => c.members[g].includes(file))!;
+    const inLive = [...LIVE_SCRIPTS].some((s) => c.chains.get(s)?.includes(file));
+    if (inLive) continue;
+    process.stderr.write(`measuring repeat ${file}…\n`);
+    const r = await measure(["bun", "test", file], BUN_TOTAL);
+    const extra = times - 1;
+    rows.push({ label: `repeat ${file}`, group, files: -extra, tests: -extra * r.tests, result: r.ok ? "subtracted" : "FAIL", ok: r.ok });
+  }
+
   process.stderr.write("listing e2e specs…\n");
   const pw = await measure(["bunx", "playwright", "test", "--list"], PW_TOTAL);
-  rows.push({ group: "e2e", label: "test:e2e (--list)", ...pw });
-  return rows;
+  rows.push({ label: "test:e2e (--list)", group: "e2e", files: pw.files, tests: pw.tests, result: pw.ok ? "listed" : "FAIL", ok: pw.ok });
+  return { rows, notes };
 }
-
-const n = (v: number) => v.toLocaleString("en-US");
 
 function printTable(header: readonly string[], rows: readonly (readonly string[])[]) {
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)));
@@ -231,149 +307,124 @@ function printTable(header: readonly string[], rows: readonly (readonly string[]
   for (const r of rows) console.log(line(r));
 }
 
+const HELP = `Count this repo's tests, grouped unit / integration / e2e.
+
+  bun run test:count                   count declarations; needs no services
+  bun run test:count -- --files        also list every file and the drift lists
+  bun run test:count -- --json         machine-readable; add --files for per-file rows
+  bun run test:count -- --run          measure: run the bun chains, list the e2e specs
+
+--run needs the Postgres container (bun run db:up) and takes a few minutes. It does
+not run test:integration, which needs a live dev server and makes real Claude calls;
+that chain's row is its static count. --run cannot be combined with --files.`;
+
+const FLAGS = new Set(["--run", "--files", "--json", "--help", "-h"]);
+
 /**
- * The CLI. Guarded so importing `countDeclarations` — from a test, or another
- * script — does not print a report as a side effect.
+ * The CLI. Guarded so importing `countDeclarations` or `classify` — from a test, or
+ * another script — does not print a report as a side effect.
  */
 async function main() {
   const args = Bun.argv.slice(2);
+  const unknown = args.filter((a) => !FLAGS.has(a));
   if (args.includes("--help") || args.includes("-h")) {
-    console.log(
-      [
-        "Count the tests in this repo, grouped unit / integration / e2e.",
-        "",
-        "  bun run test:count                 static declaration count",
-        "  bun run test:count -- --run        measured: runs the bun chains, lists the e2e specs",
-        "  bun run test:count -- --files      per-file static count",
-        "  bun run test:count -- --json       machine-readable",
-        "",
-        "--run needs the Postgres container for the integration chain: bun run db:up",
-      ].join("\n"),
-    );
-    process.exit(0);
+    console.log(HELP);
+    return 0;
   }
-
+  if (unknown.length || (args.includes("--run") && args.includes("--files"))) {
+    console.error(unknown.length ? `Unknown option: ${unknown.join(" ")}\n` : "--run cannot be combined with --files.\n");
+    console.error(HELP);
+    return 2;
+  }
   const json = args.includes("--json");
+  const files = args.includes("--files");
   const report = staticReport();
+  const { c, rows } = report;
 
   if (args.includes("--run")) {
-    const rows = await runReport();
-    const byGroup = GROUPS.map((g) => {
-      const mine = rows.filter((r) => r.group === g);
-      return {
-        group: g,
-        tests: mine.reduce((s, r) => s + r.tests, 0),
-        files: mine.reduce((s, r) => s + r.files, 0),
-        failed: mine.filter((r) => !r.ok).map((r) => r.label),
-      };
+    const run = await runReport(report);
+    const groups = GROUPS.filter((g) => g !== "ungrouped").map((g) => {
+      const mine = run.rows.filter((r) => r.group === g);
+      return { group: g, files: sum(mine, (r) => r.files), tests: sum(mine, (r) => r.tests) };
     });
-    const total = byGroup.reduce((s, g) => s + g.tests, 0);
+    const total = { files: sum(groups, (g) => g.files), tests: sum(groups, (g) => g.tests) };
+    const failed = run.rows.filter((r) => !r.ok).map((r) => r.label);
+    const ungrouped = { files: rows.ungrouped.length, tests: sum(rows.ungrouped, (r) => r.tests) };
     if (json) {
-      console.log(JSON.stringify({ mode: "run", chains: rows, groups: byGroup, total }, null, 2));
+      console.log(JSON.stringify({ mode: "run", chains: run.rows, groups, total, ungrouped, notes: run.notes, warnings: c.warnings }, null, 2));
     } else {
       printTable(
         ["chain", "group", "files", "tests", "result"],
-        rows.map((r) => [r.label, r.group, n(r.files), n(r.tests), r.ok ? "pass" : "FAIL"]),
+        run.rows.map((r) => [r.label, r.group, n(r.files), n(r.tests), r.result]),
       );
       console.log("");
-      printTable(
-        ["group", "files", "tests"],
-        [
-          // `ungrouped` has no chain to measure, so it is absent here rather than a zero.
-          ...byGroup.filter((g) => g.group !== "ungrouped").map((g) => [g.group, n(g.files), n(g.tests)]),
-          ["total", n(byGroup.reduce((s, g) => s + g.files, 0)), n(total)],
-        ],
-      );
-      console.log("");
-      console.log("Files count once per bun test process, so a file in two chains counts twice.");
-      if (report.groups.ungrouped.files.length) {
-        console.log(
-          `No chain measures ${report.groups.ungrouped.files.length} test file(s) carrying ` +
-            `~${n(report.groups.ungrouped.tests)} declarations. Run without --run to count them.`,
-        );
-      }
-      const failed = byGroup.flatMap((g) => g.failed);
-      if (failed.length) console.log(`Chains that failed: ${failed.join(", ")}. Counts above are still what ran.`);
+      printTable(["group", "files", "tests"], [
+        ...groups.map((g) => [g.group, n(g.files), n(g.tests)]),
+        ["total", n(total.files), n(total.tests)],
+      ]);
+      const lines = [
+        ...run.notes,
+        ...(ungrouped.files
+          ? [`No chain measures ${ungrouped.files} test file(s) carrying ~${n(ungrouped.tests)} declarations. Run without --run to count them.`]
+          : []),
+        ...c.warnings,
+        ...(failed.length ? [`Failed: ${failed.join(", ")}. A failed chain stops at its failing link, so its count is partial.`] : []),
+      ];
+      if (lines.length) console.log(`\n${lines.join("\n")}`);
     }
-    process.exit(0);
+    return failed.length ? 1 : 0;
   }
+
+  const groupTotals = GROUPS.map((g) => ({ group: g, files: rows[g].length, tests: sum(rows[g], (r) => r.tests), tables: sum(rows[g], (r) => r.tables) }));
+  const total = { files: sum(groupTotals, (g) => g.files), tests: sum(groupTotals, (g) => g.tests) };
 
   if (json) {
-    console.log(
-      JSON.stringify(
-        {
-          mode: "static",
-          groups: Object.fromEntries(
-            GROUPS.map((g) => [
-              g,
-              { files: report.groups[g].files.length, tests: report.groups[g].tests, tables: report.groups[g].tables },
-            ]),
-          ),
-          total: GROUPS.reduce((s, g) => s + report.groups[g].tests, 0),
-          unrun: report.unrun,
-          ciOnly: report.ciOnly,
-          outsideCi: report.outsideCi,
-          warnings: report.warnings,
-        },
-        null,
-        2,
-      ),
-    );
-    process.exit(0);
+    const out = {
+      mode: "static",
+      groups: Object.fromEntries(groupTotals.map(({ group, ...rest }) => [group, files ? { ...rest, rows: rows[group] } : rest])),
+      total,
+      unrun: c.unrun,
+      ciOnly: c.ciOnly,
+      outsideCi: c.outsideCi,
+      warnings: c.warnings,
+    };
+    console.log(JSON.stringify(out, null, 2));
+    return 0;
   }
 
-  if (args.includes("--files")) {
+  if (files) {
     for (const g of GROUPS) {
       console.log(`\n${g}`);
-      printTable(
-        ["file", "tests"],
-        report.groups[g].files.map((f) => [f, n(countDeclarations(readFileSync(join(ROOT, f), "utf8")).tests)]),
-      );
+      printTable(["file", "tests"], rows[g].map((r) => [r.path, n(r.tests)]));
     }
-    for (const [label, files] of [
-      ["no chain runs these", report.unrun],
-      ["only the `test` chain runs these", report.ciOnly],
-      ["the `test` chain skips these, so CI does too", report.outsideCi],
+    for (const [label, list] of [
+      ["no chain runs these", c.unrun],
+      ["only the `test` chain runs these", c.ciOnly],
+      ["the `test` chain skips these, so CI does too", c.outsideCi],
     ] as const) {
-      if (!files.length) continue;
-      console.log(`\n${label}`);
-      for (const f of files) console.log(`  ${f}`);
+      if (list.length) console.log(`\n${label}\n${list.map((f) => `  ${f}`).join("\n")}`);
     }
     console.log("");
   }
 
-  printTable(
-    ["group", "files", "tests"],
-    [
-      ...GROUPS.map((g) => [g, n(report.groups[g].files.length), n(report.groups[g].tests)]),
-      [
-        "total",
-        n(GROUPS.reduce((s, g) => s + report.groups[g].files.length, 0)),
-        n(GROUPS.reduce((s, g) => s + report.groups[g].tests, 0)),
-      ],
-    ],
-  );
-
-  const tables = GROUPS.reduce((s, g) => s + report.groups[g].tables, 0);
-  console.log("");
+  printTable(["group", "files", "tests"], [
+    ...groupTotals.map((g) => [g.group, n(g.files), n(g.tests)]),
+    ["total", n(total.files), n(total.tests)],
+  ]);
   console.log(
-    `Static declaration count. ${n(tables)} table-driven declarations count once each, so this reads a little low; ` +
-      "`--run` reports what bun and Playwright actually ran.",
+    "\nStatic count of declarations. A test declared inside a loop, or a `.each` table, counts once, so this reads low; `--run` measures.",
   );
   const drift = [
-    report.unrun.length ? `${report.unrun.length} file(s) no chain runs — only \`bun test --coverage\` loads them` : "",
-    report.ciOnly.length ? `${report.ciOnly.length} file(s) only the \`test\` chain runs, so no group claims them` : "",
-    report.outsideCi.length
-      ? `${report.outsideCi.length} file(s) a grouped chain runs and \`test\` does not, so CI never runs them`
-      : "",
-    ...report.warnings,
+    c.unrun.length ? `${c.unrun.length} file(s) no chain runs — only \`bun test --coverage\` loads them` : "",
+    c.ciOnly.length ? `${c.ciOnly.length} file(s) only the \`test\` chain runs, so no group claims them` : "",
+    c.outsideCi.length ? `${c.outsideCi.length} file(s) a grouped chain runs and \`test\` does not, so CI never runs them` : "",
+    ...c.warnings,
   ].filter(Boolean);
   if (drift.length) {
-    console.log("");
-    console.log("Drift between the chains:");
-    for (const d of drift) console.log(`  ${d}`);
-    console.log("  Run with --files for the file lists.");
+    console.log(`\nDrift between the chains:\n${drift.map((d) => `  ${d}`).join("\n")}`);
+    if (!files) console.log("  Run with --files for the file lists.");
   }
+  return 0;
 }
 
-if (import.meta.main) await main();
+if (import.meta.main) process.exit(await main());

@@ -5,6 +5,9 @@ import {
   MOCK_ALIAS_IMPORT,
   MOCK_MODULE_CALL,
   MOCK_MODULE_SUBSTRING,
+  SINGLE_PROCESS_SCRIPTS,
+  TEST_FILE_DIRS,
+  TEST_FILE_GLOB,
   bunTestLinks,
   expandLink,
   sharedLinkOffenders,
@@ -38,8 +41,8 @@ const ROOT = join(import.meta.dir, "..", "..");
 
 function allTestFiles(): string[] {
   const out: string[] = [];
-  for (const dir of ["src", "db", "e2e"]) {
-    for (const rel of new Bun.Glob("**/*.test.ts").scanSync({ cwd: join(ROOT, dir) })) {
+  for (const dir of TEST_FILE_DIRS) {
+    for (const rel of new Bun.Glob(TEST_FILE_GLOB).scanSync({ cwd: join(ROOT, dir) })) {
       out.push(`${dir}/${rel}`);
     }
   }
@@ -49,15 +52,6 @@ function allTestFiles(): string[] {
 function mockFiles(files: readonly string[]): string[] {
   return files.filter((f) => MOCK_MODULE_CALL.test(readFileSync(join(ROOT, f), "utf8")));
 }
-
-/**
- * `bun test --coverage` is bun's whole-repo, single-process run: every mock in the
- * tree leaks into every other file there, and coverage cannot be collected across
- * processes. It is a developer-only script whose numbers are known to be
- * mock-contaminated; it is exempted BY NAME so the exemption is visible here rather
- * than falling out of a zero-argument link the rule never saw.
- */
-const SINGLE_PROCESS_SCRIPTS = new Set(["test:coverage"]);
 
 /**
  * The live chains, with the single-process scripts ALREADY removed from `links` —
