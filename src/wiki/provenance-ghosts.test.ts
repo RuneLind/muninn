@@ -16,6 +16,7 @@ import {
   ghostCandidates,
   handoffLinks,
   mapLedgerProvider,
+  STAMPABLE_PROVIDERS,
   stampRefFor,
   type ProvenanceHandoff,
   type ProvenanceMerge,
@@ -68,6 +69,19 @@ describe("stampRefFor", () => {
   test("the RAW ledger spelling is not a ref — the mapping runs first", () => {
     // `claude` reaches a chip only through `enrichSessions`, which maps it.
     expect(stampRefFor({ provider: "claude", id: "abc" })).toBeNull();
+  });
+
+  test("the accepted set IS the mapping's range, and every member is ref-shaped", () => {
+    // The set is exported so there is ONE answer to "which providers does this
+    // pipeline stamp"; asserted through the export rather than by re-typing the
+    // two names, which would be green against a second spelling. Each one must
+    // also satisfy the CLI's own `SESSION_REF_RE` provider half — a member that
+    // did not would render a button whose every click is a 400 `bad-ref`.
+    expect([...STAMPABLE_PROVIDERS].sort()).toEqual(["claude-code", "opencode"]);
+    for (const provider of STAMPABLE_PROVIDERS) {
+      expect(provider).toMatch(/^[a-z][a-z0-9-]*$/);
+      expect(stampRefFor({ provider, id: "abc" })).toBe(`${provider}:abc`);
+    }
   });
 });
 

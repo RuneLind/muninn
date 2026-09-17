@@ -104,7 +104,11 @@ export function costLine(p: ProvenancePayload): string | null {
   // before the ghost legs existed simply has no key.
   const ghosts = p.ghosts ?? [];
   if (n === 0 && ghosts.length > 0) {
-    return `the ledger links ${plural(ghosts.length, "session")}${ghostLinkTail(p)}`;
+    // Through `with_` like every other branch. `backfilled` qualifies the LIST —
+    // "this page's `sessions:` line was inferred from history" — and this is the
+    // one state where that list is EMPTY, which makes the marker MORE relevant,
+    // not less: it is why the page names no session of its own.
+    return with_(`the ledger links ${plural(ghosts.length, "session")}${ghostLinkTail(p)}`);
   }
 
   if (!p.ledger.asked) {
@@ -144,25 +148,56 @@ export function costLine(p: ProvenancePayload): string | null {
 /**
  * `through #553 — $101.72`, the tail both ghost sentences share.
  *
- * The link named is the FIRST ghost's, and `ghostCandidates` puts the PR ghosts
- * first — so a page that has one says which PR, and a page whose only ghosts came
- * through handoffs says `a handoff` rather than naming a session id the reader
- * has no way to place. The money is the sum over the ghosts the ledger PRICED;
- * with none priced (leg 5 failed) the sentence counts them and states no amount,
- * because a ghost with no cost is not a $0 session.
+ * TWO claims, and an earlier cut got both wrong on the same line. It read
+ * `links 3 sessions through #553 — $15.00` for a page whose three ghosts came
+ * through two PRs and a handoff and of which the ledger had priced two: the
+ * link named was the FIRST ghost's alone, and the money read as the total for
+ * all three.
+ *
+ *  - **The sources are counted, not sampled.** One PR is named (`through #553`);
+ *    several are counted (`through 2 PRs`), because naming one of them is how
+ *    the sentence claims the others do not exist. Handoffs are appended rather
+ *    than dropped — `through #553 and a handoff` — since a handoff is the weaker
+ *    evidence of the two and the sentence must not hide which kind it rests on.
+ *    A session id is never named: a reader has no way to place one.
+ *  - **The money says its denominator.** `— $15.00` only when every ghost is
+ *    priced; `— $15.00 over 2 of 3` otherwise. With none priced (leg 5 failed)
+ *    there is no amount at all, because a ghost with no cost is not a $0 session.
+ *
+ * Rounding happens in ONE place, `money`'s own `toFixed(2)`. The local
+ * `Math.round(total * 100) / 100` that used to sit here was a second rounding of
+ * a number about to be rounded — inert, and exactly the kind of duplicate that
+ * survives a change to the first one.
  */
 function ghostLinkTail(p: ProvenancePayload): string {
   const ghosts = p.ghosts ?? [];
-  const first = ghosts[0]?.ghost;
-  const through = !first ? "" : first.via === "pr" ? ` through ${first.through}` : " through a handoff";
+  const prs: string[] = [];
+  let handoffs = 0;
   let total = 0;
   let priced = 0;
   for (const ghost of ghosts) {
-    if (typeof ghost.cost !== "number") continue;
-    total += ghost.cost;
-    priced += 1;
+    const link = ghost.ghost;
+    if (link?.via === "pr") {
+      if (!prs.includes(link.through)) prs.push(link.through);
+    } else if (link?.via === "handoff") {
+      handoffs += 1;
+    }
+    if (typeof ghost.cost === "number") {
+      total += ghost.cost;
+      priced += 1;
+    }
   }
-  return priced > 0 ? `${through} — ${money(Math.round(total * 100) / 100)}` : through;
+
+  const parts: string[] = [];
+  if (prs.length === 1) parts.push(prs[0]!);
+  else if (prs.length > 1) parts.push(plural(prs.length, "PR"));
+  if (handoffs === 1) parts.push("a handoff");
+  else if (handoffs > 1) parts.push(plural(handoffs, "handoff"));
+  const through = parts.length ? ` through ${parts.join(" and ")}` : "";
+
+  if (priced === 0) return through;
+  const over = priced < ghosts.length ? ` over ${priced} of ${ghosts.length}` : "";
+  return `${through} — ${money(total)}${over}`;
 }
 
 /**
@@ -859,11 +894,28 @@ function ghostReason(link: ProvenanceGhostLink): string {
     : `merged ${link.through} — this page does not stamp it`;
 }
 
-/** Why a ghost has no Stamp button even on a stamping instance. */
-function noStampReason(chip: ProvenanceSessionChip): string {
-  return chip.provider
-    ? `no Stamp — the ledger reports provider "${chip.provider}", which this pipeline does not stamp`
-    : "no Stamp — the ledger named no provider for this session";
+/**
+ * Why a ghost has no Stamp button even on a stamping instance, or `null` when
+ * the row already says it.
+ *
+ * A chip the ledger never answered for (`unresolved`, `missing`, `invalid`)
+ * already carries its own reason line from `bareChipCopy`, and it is the TRUE
+ * one: leg 5 failed, or the ledger does not hold this id. Adding "the ledger
+ * named no provider for this session" beside it put two contradicting sentences
+ * on one row — one saying the lookup never answered, the other reporting what
+ * the answer contained. `bareChipReason` is the same predicate `chipView` uses
+ * to decide the bare copy, so the two can never disagree about which state the
+ * chip is in.
+ *
+ * The provider sentence stays exactly where it was earned: a chip the ledger DID
+ * answer for, naming a provider this pipeline does not stamp.
+ */
+function noStampReason(chip: ProvenanceSessionChip): string | null {
+  if (chip.provider) {
+    return `no Stamp — the ledger reports provider "${chip.provider}", which this pipeline does not stamp`;
+  }
+  if (bareChipReason(chip)) return null;
+  return "no Stamp — the ledger named no provider for this session";
 }
 
 function sessionRowHtml(
@@ -939,7 +991,8 @@ function sessionRowHtml(
       // Nothing: `stampable` is an instance-and-wiki fact, and repeating it on
       // every ghost row of a read-only reader is noise, not information.
     } else if (!ghost.stampRef) {
-      html += `<span class="wiki-chain-nostamp">${esc(noStampReason(chip))}</span>`;
+      const why = noStampReason(chip);
+      if (why) html += `<span class="wiki-chain-nostamp">${esc(why)}</span>`;
     } else {
       html +=
         `<button type="button" class="wiki-chain-stamp"` +
@@ -948,7 +1001,14 @@ function sessionRowHtml(
         // claim the reader has to affirm. The client swaps the label on the
         // first click; the attribute is what tells it to.
         `${ghost.via === "handoff" ? ` data-prov-stamp-confirm="1"` : ""}` +
-        ` title="Record this session on the page's sessions: line">${STAMP_LABEL}</button>`;
+        ` title="Record this session on the page's sessions: line">${STAMP_LABEL}</button>` +
+        // Where a refusal goes. Rendered EMPTY and hidden rather than created by
+        // the client, so the class and the hook are one spelling shared by the
+        // renderer and `wiki-browser.ts` — and so the reason never has to be put
+        // into the button's own label, which is what made a failed Stamp rename
+        // the control to a sentence. The client writes `textContent`, so the
+        // route's copy is escaped by the DOM rather than by a second escaper.
+        `<span class="wiki-chain-stamp-msg" data-prov-stamp-msg hidden></span>`;
     }
   }
   return html + `</div></div>`;

@@ -46,6 +46,40 @@ export interface ClaudeUsageJsonOptions {
  * every caller validates its own payload shape, because a wrong service on the
  * port answers 200 with JSON that is not the contract.
  */
+/**
+ * A non-200 from claude-usage, carrying the STATUS as a field.
+ *
+ * The message is byte-identical to the string this used to throw, because it is
+ * what every degrade footer and warn-once key already spells. What is new is
+ * that a caller can ask WHICH status without parsing prose: claude-usage
+ * documents 404 on `/api/session-handoff` and `/api/session-prompts` as "no such
+ * session", which is an ANSWER about a session the ledger does not hold — not an
+ * outage — and the handoff leg has to tell the two apart (`session-ledger.ts`).
+ */
+export class ClaudeUsageHttpError extends Error {
+  readonly status: number;
+  constructor(status: number, label: string) {
+    super(`claude-usage returned HTTP ${status} for ${label}`);
+    this.name = "ClaudeUsageHttpError";
+    this.status = status;
+  }
+}
+
+/**
+ * The HTTP status an error carries, or null.
+ *
+ * Duck-typed on a numeric `status` rather than on `instanceof`, because every
+ * ledger leg is reached through an injectable `deps` seam a test supplies: a
+ * fake that throws `Object.assign(new Error(...), { status: 404 })` has to be
+ * able to drive the same branch the live fetch does, or the branch is pinned
+ * only by a test that cannot exist.
+ */
+export function claudeUsageHttpStatus(err: unknown): number | null {
+  if (typeof err !== "object" || err === null) return null;
+  const status = (err as { status?: unknown }).status;
+  return typeof status === "number" && Number.isFinite(status) ? status : null;
+}
+
 export async function claudeUsageJson(
   root: string,
   path: string,
@@ -62,7 +96,7 @@ export async function claudeUsageJson(
   } catch (err) {
     throw new Error(named(err, label));
   }
-  if (!res.ok) throw new Error(`claude-usage returned HTTP ${res.status} for ${label}`);
+  if (!res.ok) throw new ClaudeUsageHttpError(res.status, label);
 
   let text: string;
   try {

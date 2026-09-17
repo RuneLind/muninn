@@ -315,6 +315,26 @@ describe("legs 5 and 6 — enriching the ghosts", () => {
     expect(p!.rulesStandardizedDate).toBe("2026-07-30");
   });
 
+  test("the date is read off WHICHEVER leg answered — leg 2 alone is enough", async () => {
+    // The `??` chain is leg 2, then leg 4, then leg 6. The case above has the
+    // date on two of them, so it cannot tell which one is being read: a
+    // one-leg-only implementation passes it.
+    const p = await pageProvenance(
+      meta({ prs: ["acme/widget#553"] }),
+      ctx({
+        sessionLedger: deps({
+          fetchHandoff: async () => ranBy(GHOST),
+          fetchMerges: async (ids) =>
+            ids.includes(GHOST)
+              ? { merges: [] }
+              : { merges: [], rulesStandardizedDate: "2026-07-30" },
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
+        }),
+      }),
+    );
+    expect(p!.rulesStandardizedDate).toBe("2026-07-30");
+  });
+
   test("leg 5 failing leaves the ghost id-only — no cost, no title, no Stamp ref", async () => {
     const p = await pageProvenance(
       meta(),
@@ -385,6 +405,107 @@ describe("legs 5 and 6 — enriching the ghosts", () => {
     );
     expect(p!.merges).toHaveLength(1);
   });
+
+  test("two BARE merges from DIFFERENT repos are two rows, not one", async () => {
+    // The key was (session, prNumber, mergedAt). A bare `gh pr merge` carries
+    // neither a number nor an instant, so two of them from different
+    // repositories collapsed into one — a merge the page made, in a repository
+    // the reader never sees named. `repo` is the field that tells them apart.
+    const bare = (repo: string) => ({
+      sessionId: GHOST,
+      repo,
+      prNumber: null,
+      url: null,
+      subject: null,
+      mergedAt: null,
+      mergeOk: true,
+      gate: null,
+      preStandardization: false,
+    });
+    const p = await pageProvenance(
+      meta({ sessions: [], prs: ["acme/widget#553"] }),
+      ctx({
+        sessionLedger: deps({
+          fetchMergesForPrs: async () => ({
+            merges: [bare("/src/muninn"), bare("/src/huginn")],
+            unmapped: [],
+          }),
+        }),
+      }),
+    );
+    expect(p!.merges.map((m) => m.repo)).toEqual(["/src/muninn", "/src/huginn"]);
+  });
+
+  test("a merge reported TWICE from the same repo is still one row", async () => {
+    const bare = {
+      sessionId: GHOST,
+      repo: "/src/muninn",
+      prNumber: null,
+      url: null,
+      subject: null,
+      mergedAt: null,
+      mergeOk: true,
+      gate: null,
+      preStandardization: false,
+    };
+    const p = await pageProvenance(
+      meta({ sessions: [], prs: ["acme/widget#553"] }),
+      ctx({
+        sessionLedger: deps({
+          fetchMergesForPrs: async () => ({ merges: [bare, { ...bare }], unmapped: [] }),
+        }),
+      }),
+    );
+    expect(p!.merges).toHaveLength(1);
+  });
+
+  test("`?sessions=` beats `?prs=` when the two forms disagree — before AND after a stamp", async () => {
+    // The two forms can answer different rows for the same merge: `?prs=`
+    // prefers the confirmed `merge-cmd` row where `?sessions=` may answer the
+    // `squash-composed` one. With the `?prs=` rows in the MIDDLE of the dedup
+    // input, stamping a ghost moved its merge from third place to first and
+    // flipped the rendered gate verdict on the same page.
+    const base = {
+      sessionId: GHOST,
+      repo: "/src/muninn",
+      prNumber: 553,
+      url: "https://github.com/acme/widget/pull/553",
+      subject: null,
+      mergedAt: "2026-09-16T11:44:55.071Z",
+      preStandardization: false,
+    };
+    const fromSessions = { ...base, mergeOk: false, gate: { matched: false } };
+    const fromPrs = {
+      ...base,
+      mergeOk: true,
+      gate: { matched: true, gated: true, kinds: ["gate-review-floor"] },
+    };
+    const ledger = (over = {}) =>
+      deps({
+        fetchMergesForPrs: async () => ({ merges: [fromPrs], unmapped: [] }),
+        fetchMerges: async () => ({ merges: [fromSessions] }),
+        fetchHandoff: async () => ({ available: false }),
+        ...over,
+      });
+
+    // As a GHOST: the session's row comes from leg 6, which is a `?sessions=`
+    // read, so it must win over leg 4's.
+    const asGhost = await pageProvenance(
+      meta({ sessions: [], prs: ["acme/widget#553"] }),
+      ctx({ sessionLedger: ledger() }),
+    );
+    expect(asGhost!.merges).toHaveLength(1);
+    expect(asGhost!.merges[0]!.mergeOk).toBe(false);
+
+    // STAMPED: now leg 2 answers for it. Same source form, same winner — the
+    // verdict on the page does not move because someone pressed Stamp.
+    const stamped = await pageProvenance(
+      meta({ sessions: [`claude-code:${GHOST}`], prs: ["acme/widget#553"] }),
+      ctx({ sessionLedger: ledger() }),
+    );
+    expect(stamped!.merges).toHaveLength(1);
+    expect(stamped!.merges[0]!.mergeOk).toBe(false);
+  });
 });
 
 describe("the whole fan-out", () => {
@@ -415,6 +536,78 @@ describe("the whole fan-out", () => {
     );
     expect(order.slice(0, 4).sort()).toEqual(["facts:stamped", "handoff", "merges:stamped", "prs"]);
     expect(order.slice(4).sort()).toEqual(["facts:ghost", "merges:ghost"]);
+  });
+
+  test("legs 5 and 6 hang off 3 and 4 ONLY — a slow Jira corpus does not hold them", async () => {
+    // The measured bug: legs 5 and 6 were awaited behind ONE `Promise.all` that
+    // also held leg 1 (`resolveProvenance`, whose `loadCorpus` gives up only at
+    // the shared deadline). So on a page with a `jira:` key and a slow huginn the
+    // hop started on an already-aborted signal — leg 1's latency became leg 5's.
+    // The `meta()` the ordering case above uses has NO `jira`, which is exactly
+    // why it could not see this.
+    const CORPUS_MS = 300;
+    const started = Date.now();
+    let ghostAt = -1;
+    let corpusAt = -1;
+    const p = await pageProvenance(
+      meta({ jira: ["MELOSYS-8045"] }),
+      ctx({
+        // Comfortably longer than the corpus, so the ONLY thing under test is
+        // whether the hop waited for it.
+        budgetMs: 5_000,
+        loadJiraIndex: async () => {
+          await new Promise((r) => setTimeout(r, CORPUS_MS));
+          corpusAt = Date.now() - started;
+          return null;
+        },
+        sessionLedger: deps({
+          fetchHandoff: async () => ranBy(GHOST),
+          fetchSessions: async (ids) => {
+            if (ids.includes(GHOST) && ghostAt < 0) ghostAt = Date.now() - started;
+            return { sessions: [] };
+          },
+        }),
+      }),
+    );
+    expect(corpusAt).toBeGreaterThanOrEqual(CORPUS_MS - 20);
+    // The hop fired; it fired BEFORE the corpus answered.
+    expect(ghostAt).toBeGreaterThanOrEqual(0);
+    expect(ghostAt).toBeLessThan(corpusAt);
+    // And the page still carries the ghost the hop went looking for.
+    expect(p!.ghosts.map((g) => g.id)).toEqual([GHOST]);
+  });
+
+  test("and the ghost legs still REACH the ledger when the corpus eats the budget", async () => {
+    // The visible half of the same bug: at a 25 ms budget with a 300 ms corpus,
+    // both ghost legs came back `reachable: false` against a claude-usage that
+    // was answering instantly.
+    const p = await pageProvenance(
+      meta({ jira: ["MELOSYS-8045"] }),
+      ctx({
+        budgetMs: 25,
+        loadJiraIndex: async () => {
+          await new Promise((r) => setTimeout(r, 300));
+          return null;
+        },
+        sessionLedger: deps({
+          fetchHandoff: async () => ranBy(GHOST),
+          // The fakes HONOUR the signal, the way a real `fetch` does. Without
+          // this the case is vacuous: a stub that answers whatever the deadline
+          // says reports `reachable: true` on the broken code too, so the test
+          // could not tell the two apart.
+          fetchSessions: async (_ids, signal) => {
+            if (signal?.aborted) throw new Error("aborted");
+            return { sessions: [] };
+          },
+          fetchMerges: async (_ids, signal) => {
+            if (signal?.aborted) throw new Error("aborted");
+            return { merges: [] };
+          },
+        }),
+      }),
+    );
+    expect(p!.links.ghostFacts).toEqual({ asked: true, reachable: true });
+    expect(p!.links.ghostMerges).toEqual({ asked: true, reachable: true });
   });
 
   test("the deadline firing mid-fan-out is reported, and the chain still renders what arrived", async () => {

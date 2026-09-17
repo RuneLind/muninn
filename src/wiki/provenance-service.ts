@@ -276,32 +276,61 @@ export async function pageProvenance(
       ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS)
       : undefined;
 
-  const [resolved, mergeResult, handoffResult, prResult] = await Promise.all([
-    resolveProvenance({ refs, keys }, ctx, signal),
-    // The SAME list the facts leg pages over — deduped, bare ids, since the
-    // `provider:` prefix is muninn's and the ledger is keyed on neither.
-    askLedger ? fetchMergesForSessions(ctx.sessionLedger, askRefs, signal) : null,
-    askHandoffs ? fetchHandoffs(ctx.sessionLedger, askRefs, signal) : null,
-    askPrs ? fetchMergesForPrs(ctx.sessionLedger, coordinates.slice(0, PR_READS_MAX), signal) : null,
-  ]);
+  // Legs 1-4, started together. Held as PROMISES rather than awaited in one
+  // `Promise.all`, because the second hop must not wait on leg 1.
+  const resolvedP = resolveProvenance({ refs, keys }, ctx, signal);
+  // The SAME list the facts leg pages over — deduped, bare ids, since the
+  // `provider:` prefix is muninn's and the ledger is keyed on neither.
+  const mergeP = askLedger
+    ? fetchMergesForSessions(ctx.sessionLedger, askRefs, signal)
+    : Promise.resolve(null);
+  const handoffP = askHandoffs ? fetchHandoffs(ctx.sessionLedger, askRefs, signal) : Promise.resolve(null);
+  const prP = askPrs
+    ? fetchMergesForPrs(ctx.sessionLedger, coordinates.slice(0, PR_READS_MAX), signal)
+    : Promise.resolve(null);
 
   // ── The second hop: the ghosts legs 3 and 4 found ─────────────────────────
   //
   // ONE hop, deliberately: a ghost's own handoff is not read, so a chain of
   // ghosts shows its first link only. Reading further would make the page open's
   // depth a property of the corpus.
-  const handoffs: ProvenanceHandoff[] = handoffLinks(handoffResult?.ranBy ?? new Map());
-  const candidates = ghostCandidates({
-    stampedIds: askRefs,
-    prMerges: prResult?.merges ?? [],
-    handoffs,
-  });
-  const ghostIds = candidates.map((c) => c.id);
-  const askGhosts = ghostIds.length > 0 && ctx.sessionLedger.urlConfigured;
-  const [ghostFacts, ghostMerges] = await Promise.all([
-    askGhosts ? fetchSessionsById(ctx.sessionLedger, ghostIds, signal) : null,
-    askGhosts ? fetchMergesForSessions(ctx.sessionLedger, ghostIds, signal) : null,
+  //
+  // IT HANGS OFF LEGS 3 AND 4 ONLY. An earlier cut awaited one `Promise.all`
+  // over all four legs, which put leg 1 — the huginn Jira corpus, which gives up
+  // only at the SHARED deadline — on the hop's critical path: on a page with a
+  // `jira:` key and a slow corpus the ghost legs started on an already-aborted
+  // signal and reported `reachable: false` against a claude-usage that was never
+  // asked. Measured at a 300 ms corpus: the hop fired at 302 ms. The two legs it
+  // actually needs are the two it now waits for.
+  const ghostStageP = (async () => {
+    const [handoffLeg, prLeg] = await Promise.all([handoffP, prP]);
+    const handoffs: ProvenanceHandoff[] = handoffLinks(handoffLeg?.ranBy ?? new Map());
+    const candidates = ghostCandidates({
+      stampedIds: askRefs,
+      prMerges: prLeg?.merges ?? [],
+      handoffs,
+    });
+    const ghostIds = candidates.map((c) => c.id);
+    const askGhosts = ghostIds.length > 0 && ctx.sessionLedger.urlConfigured;
+    const [ghostFacts, ghostMerges] = await Promise.all([
+      askGhosts ? fetchSessionsById(ctx.sessionLedger, ghostIds, signal) : null,
+      askGhosts ? fetchMergesForSessions(ctx.sessionLedger, ghostIds, signal) : null,
+    ]);
+    return { handoffs, candidates, ghostIds, ghostFacts, ghostMerges };
+  })();
+
+  const [resolved, mergeResult, handoffResult, prResult, ghostStage] = await Promise.all([
+    resolvedP,
+    mergeP,
+    handoffP,
+    prP,
+    ghostStageP,
   ]);
+  const { handoffs, candidates, ghostIds, ghostFacts, ghostMerges } = ghostStage;
+  const standardizedDate =
+    mergeResult?.rulesStandardizedDate ??
+    prResult?.rulesStandardizedDate ??
+    ghostMerges?.rulesStandardizedDate;
 
   // A ghost with no facts is an id-only row — no cost, no title, a neutral
   // glyph and no Stamp, because there is no provider to map into a ref.
@@ -327,10 +356,21 @@ export async function pageProvenance(
     // Three sources, one spine: the stamped sessions' merges, the `?prs=` rows
     // and the ghosts' own. Deduped, because a PR the page names AND the ghost
     // merged is reported by two of them.
+    // ORDER IS THE PRECEDENCE RULE, and it is `?sessions=` before `?prs=`.
+    // Both `mergeResult` and `ghostMerges` are `?sessions=` reads; `prResult` is
+    // the `?prs=` one. The two forms can DISAGREE about the same merge (the
+    // `?prs=` side prefers the confirmed `merge-cmd` row where `?sessions=` may
+    // answer the `squash-composed` one), and the disagreement is visible: on a
+    // fixture where the forms differ the gate verdict read `✓ review floor` from
+    // one and `no gate line` from the other. With the `?prs=` rows in the
+    // middle, stamping a ghost MOVED its merge from third place to first and
+    // flipped the rendered verdict — the same page, two answers, because of
+    // which list a session happened to be on. Both `?sessions=` lists now sit
+    // ahead of `?prs=`, so a stamp cannot change which row wins.
     merges: dedupeMerges([
       ...(mergeResult?.merges ?? []),
-      ...(prResult?.merges ?? []),
       ...(ghostMerges?.merges ?? []),
+      ...(prResult?.merges ?? []),
     ]),
     mergesLedger: mergeResult
       ? {
@@ -356,16 +396,11 @@ export async function pageProvenance(
     },
     // Whichever leg answered first. The date is upstream's own constant and is
     // the same on every envelope; carrying it rather than restating it is what
-    // keeps muninn from holding a second spelling of it.
-    ...(mergeResult?.rulesStandardizedDate ??
-    prResult?.rulesStandardizedDate ??
-    ghostMerges?.rulesStandardizedDate
-      ? {
-          rulesStandardizedDate: (mergeResult?.rulesStandardizedDate ??
-            prResult?.rulesStandardizedDate ??
-            ghostMerges?.rulesStandardizedDate)!,
-        }
-      : {}),
+    // keeps muninn from holding a second spelling of it. Read ONCE into
+    // `standardizedDate` above — the chain used to be written out twice, once as
+    // the condition and once as the value, which is two places for the leg order
+    // to drift.
+    ...(standardizedDate ? { rulesStandardizedDate: standardizedDate } : {}),
     ...(meta.sessionsBackfilled ? { backfilled: meta.sessionsBackfilled } : {}),
   };
 }
@@ -385,17 +420,28 @@ function legState(result: { asked: boolean; reachable: boolean } | null): Proven
 /**
  * One row per merge across the three sources that can report it.
  *
- * Keyed on (session, PR number, instant) rather than on the whole row: the
- * `?prs=` form prefers the confirmed `merge-cmd` row where `?sessions=` may
+ * Keyed on (session, PR number, instant, repo) rather than on the whole row:
+ * the `?prs=` form prefers the confirmed `merge-cmd` row where `?sessions=` may
  * answer the `squash-composed` one, so two reports of one merge can differ in
- * `mergeOk` while naming the same event. First wins, and the order above puts
- * the stamped sessions' own rows first.
+ * `mergeOk` while naming the same event. First wins, and the caller's order —
+ * both `?sessions=` lists ahead of the `?prs=` one — is the precedence rule.
+ *
+ * `repo` is in the key because without it two BARE merges (`prNumber` null,
+ * `mergedAt` null) from different repositories share one key and the second
+ * disappears — a merge the page made, in a repository the reader never sees
+ * named.
+ *
+ * `JSON.stringify` rather than a template with a separator: the separator was a
+ * literal NUL, which made this line invisible to `grep`/`rg` and the whole file
+ * read as `data` to `file(1)`. Any printable separator can in principle occur
+ * inside `repo` (a checkout path); the array form cannot be ambiguous and can be
+ * read.
  */
 function dedupeMerges(merges: readonly ProvenanceMerge[]): ProvenanceMerge[] {
   const seen = new Set<string>();
   const out: ProvenanceMerge[] = [];
   for (const merge of merges) {
-    const key = `${merge.sessionId} ${merge.prNumber ?? ""} ${merge.mergedAt ?? ""}`;
+    const key = JSON.stringify([merge.sessionId, merge.prNumber, merge.mergedAt, merge.repo]);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(merge);

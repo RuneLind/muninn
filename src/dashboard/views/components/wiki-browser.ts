@@ -1212,24 +1212,95 @@ function copySessionId(btn: HTMLButtonElement): void {
  * feature makes, and it is a POST to a route that shells out to claude-usage's
  * `wiki-stamp` CLI. muninn writes no frontmatter line here or anywhere.
  *
- * **A handoff ghost asks twice.** Its button carries `data-prov-stamp-confirm`,
- * and the first press only re-labels it: a handoff link says a later session
- * pasted this one's prompt, which is not the same as saying it wrote the page,
- * and the write is a permanent claim. The armed state lives on the BUTTON (the
- * label plus the dropped attribute), not in a module flag, for
- * `toggleProvChain`'s reason — the strip is re-rendered from scratch on every
- * page load, so a flag would outlive the element it described.
+ * ── The two-step confirm, and the three ways the first cut lost it ──────────
+ *
+ * A handoff ghost's button carries `data-prov-stamp-confirm`: a handoff link
+ * says a later session pasted this one's prompt, which is not the same as saying
+ * it wrote the page, and the write is a permanent claim. So the first press only
+ * ARMS; a second, separate press writes.
+ *
+ *  1. **A double-click delivered both presses.** `dblclick` fires two `click`
+ *     events milliseconds apart, so the confirm label was set and consumed
+ *     inside one gesture and the write happened with the confirmation never on
+ *     screen. Arming therefore DISABLES the button for {@link STAMP_ARM_MS};
+ *     the second click of a double-click lands on a disabled button and is
+ *     dropped, while a deliberate second press half a second later is not.
+ *  2. **A failed attempt disarmed the button permanently.** The confirm state
+ *     lived in the ATTRIBUTE, which the first press removed — so after a 409 the
+ *     row said `not stamped: …` and the NEXT single click wrote with no
+ *     confirmation at all. The attribute is now a static fact from the server
+ *     ("this ghost needs confirming") and the armed state is
+ *     `data-prov-stamp-armed`, which every failure path clears along with the
+ *     label.
+ *  3. **A 200 carrying no `provenance` disabled the button forever.** The
+ *     re-resolve can legitimately answer nothing (the index lost the page, the
+ *     ledger context is absent), and the row was left with a dead `…` button.
+ *     It now re-enables and re-reads the page's payload.
+ *
+ * The state lives on the BUTTON, never in a module flag, for `toggleProvChain`'s
+ * reason — the strip is re-rendered from scratch on every page load, so a flag
+ * would outlive the element it described.
+ *
+ * The REASON goes in its own `.wiki-chain-stamp-msg` span, not into the label:
+ * a label is what the control does, and `not stamped: not-a-stamp-root` as a
+ * label is a button that renamed itself to a sentence. `textContent` is the
+ * escape — the reason is server copy and a route can echo a `ref` inside it.
  */
+
+/** How long an armed Stamp button stays disabled. Long enough to swallow a
+ *  double-click's second event (a system double-click threshold is ~500 ms),
+ *  short enough that a reader who meant it is not made to wait. */
+const STAMP_ARM_MS = 500;
+
+/** The message span beside one Stamp button, if the row has one. */
+function stampMsgSpan(btn: HTMLButtonElement): HTMLElement | null {
+  const row = btn.closest(".wiki-chain-row");
+  return row ? row.querySelector<HTMLElement>("[data-prov-stamp-msg]") : null;
+}
+
+function showStampMsg(btn: HTMLButtonElement, text: string): void {
+  const span = stampMsgSpan(btn);
+  if (!span) return;
+  span.textContent = text;
+  span.hidden = false;
+}
+
+function clearStampMsg(btn: HTMLButtonElement): void {
+  const span = stampMsgSpan(btn);
+  if (!span) return;
+  span.textContent = "";
+  span.hidden = true;
+}
+
+/** Back to an offerable Stamp: the label restored, the confirm re-armable, the
+ *  button live. Every non-success path ends here. */
+function resetStampButton(btn: HTMLButtonElement): void {
+  btn.disabled = false;
+  btn.textContent = STAMP_LABEL;
+  btn.removeAttribute("data-prov-stamp-armed");
+}
+
 async function stampGhost(btn: HTMLButtonElement): Promise<void> {
   const ref = btn.getAttribute("data-prov-stamp") || "";
   if (!ref || !currentRelPath || btn.disabled) return;
-  if (btn.getAttribute("data-prov-stamp-confirm")) {
-    btn.removeAttribute("data-prov-stamp-confirm");
+  // ARM. `data-prov-stamp-confirm` says this ghost needs confirming and is never
+  // removed; `data-prov-stamp-armed` is the press that answered it.
+  if (btn.getAttribute("data-prov-stamp-confirm") && !btn.hasAttribute("data-prov-stamp-armed")) {
+    btn.setAttribute("data-prov-stamp-armed", "1");
     btn.textContent = STAMP_CONFIRM_LABEL;
+    clearStampMsg(btn);
+    // See (1) above: the gap is what makes the confirm a separate gesture.
+    btn.disabled = true;
+    setTimeout(() => {
+      // Only re-enable a button still waiting for its confirm — a redraw may
+      // have replaced the row, and a POST cannot have started from here.
+      if (btn.hasAttribute("data-prov-stamp-armed")) btn.disabled = false;
+    }, STAMP_ARM_MS);
     return;
   }
   btn.disabled = true;
   btn.textContent = "…";
+  clearStampMsg(btn);
   try {
     const res = await fetch("/api/wiki/provenance/stamp", {
       method: "POST",
@@ -1240,21 +1311,44 @@ async function stampGhost(btn: HTMLButtonElement): Promise<void> {
       | { provenance?: ProvenancePayload; reason?: string; error?: string }
       | null;
     if (!res.ok) {
-      // The route's own reason, verbatim — `outside-roots`, `lock-timeout`, a
+      // The route's own reason, verbatim — `not-a-stamp-root`, `lock-timeout`, a
       // 403 from the read-only guards. A refusal the reader can act on beats a
-      // button that silently goes back to saying "Stamp".
-      btn.disabled = false;
-      btn.textContent = `not stamped: ${body?.reason || body?.error || res.status}`;
+      // button that silently goes back to saying "Stamp" — but it goes back to
+      // saying "Stamp" all the same, so a retry asks again.
+      resetStampButton(btn);
+      showStampMsg(btn, `not stamped: ${body?.reason || body?.error || res.status}`);
       return;
     }
     // The route answers with the RE-RESOLVED block, so the strip redraws with no
     // second fetch — and with the chain left open, since the reader was reading
     // it when they pressed the button.
-    if (body?.provenance) redrawProvStrip(body.provenance);
-    else btn.textContent = STAMP_LABEL;
+    if (body?.provenance) {
+      redrawProvStrip(body.provenance);
+      return;
+    }
+    // A 200 with no block: the write happened, the re-resolve did not answer.
+    // Re-read the page's own payload rather than leaving a dead button.
+    resetStampButton(btn);
+    void refetchProvStrip();
   } catch {
-    btn.disabled = false;
-    btn.textContent = "not stamped: the request failed";
+    resetStampButton(btn);
+    showStampMsg(btn, "not stamped: the request failed");
+  }
+}
+
+/** Re-read the open page's provenance block and redraw the strip from it.
+ *  Best effort: a failure leaves the strip exactly as it was. */
+async function refetchProvStrip(): Promise<void> {
+  const relPath = currentRelPath;
+  if (!relPath) return;
+  try {
+    const res = await fetch(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)));
+    if (!res.ok) return;
+    const data = (await res.json()) as { provenance?: ProvenancePayload } | null;
+    // The reader may have navigated while this was in flight.
+    if (data?.provenance && currentRelPath === relPath) redrawProvStrip(data.provenance);
+  } catch {
+    /* the strip stays as it is */
   }
 }
 

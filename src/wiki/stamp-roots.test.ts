@@ -24,6 +24,7 @@ import {
   stampConfigFromEnv,
   stampableFor,
   WIKI_STAMP_BIN_ENV,
+  WIKI_STAMP_BUN_ENV,
   WIKI_STAMP_ROOTS_ENV,
 } from "./stamp-roots.ts";
 
@@ -97,7 +98,10 @@ describe("stampConfigFromEnv", () => {
     const c = stampConfigFromEnv({
       [WIKI_STAMP_BIN_ENV]: " /src/claude-usage/scripts/wiki-stamp.ts ",
       [WIKI_STAMP_ROOTS_ENV]: "/src/mimir",
-      WIKI_STAMP_BUN: "/opt/bun",
+      // The NAME through its export: the module owns the spelling so the docs,
+      // the error copy and the reader agree on it, and a test that re-types the
+      // literal is green against a second spelling.
+      [WIKI_STAMP_BUN_ENV]: "/opt/bun",
     });
     expect(c.bin).toBe("/src/claude-usage/scripts/wiki-stamp.ts");
     expect(c.roots).toEqual(["/src/mimir"]);

@@ -52,7 +52,7 @@
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
@@ -65,6 +65,9 @@ const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-provenance";
 /** The read-only wiki, registered at a root `WIKI_READONLY_ROOTS` names. */
 const WIKI_RO = "e2e-provenance-ro";
+/** A writable wiki registered one level BELOW a stamp root — refused by the
+ *  root-EQUALITY rule, not by any permission. */
+const WIKI_NESTED = "e2e-provenance-nested";
 
 /** The claude-usage address handed to the BROWSER. Nothing binds it, and nothing
  *  needs to — the client only ever builds an href from it. */
@@ -102,6 +105,7 @@ const SHAPE_REL = "shape.md";
 const CHAIN_REL = "chain.md";
 const STAMP_REL = "stampme.md";
 const RO_REL = "readonly.md";
+const NEST_REL = "nested.md";
 const MERGESDOWN_REL = "merges-down.md";
 const DAMAGED_REL = "damaged.md";
 const PLAIN_REL = "plain.md";
@@ -271,6 +275,11 @@ let askedPrs: string[] = [];
 /** The read-only wiki's root, and the stub CLI `WIKI_STAMP_BIN` points at. */
 let roRoot = "";
 let stampBin = "";
+/** A stamp root with the wiki registered one level BELOW it — the nesting the
+ *  root-equality rule refuses. Kept outside `root` so the main wiki's own index
+ *  never sees its page. */
+let nestParent = "";
+let nestRoot = "";
 
 const open_ = (page: import("@playwright/test").Page, rel: string) =>
   page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}`);
@@ -565,6 +574,17 @@ test.beforeAll(async () => {
   roRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-prov-ro-"));
   await writeFile(path.join(roRoot, RO_REL), STAMPME, "utf8");
 
+  // A THIRD wiki, registered at `<stamp root>/sub` — writable, covered by the
+  // CLI, and refused all the same. The rule is EQUALITY: the CLI would lock
+  // `nestParent` while muninn's own writers lock `nestRoot`, which is two lock
+  // files over one file and the lost append the single-writer rule exists to
+  // prevent. Measured before the server-side check existed: this shape answered
+  // `200 written` while the same instance's payload said `stampable: false`.
+  nestParent = await mkdtemp(path.join(tmpdir(), "muninn-e2e-prov-nest-"));
+  nestRoot = path.join(nestParent, "sub");
+  await mkdir(nestRoot);
+  await writeFile(path.join(nestRoot, NEST_REL), STAMPME, "utf8");
+
   // The stub stamper: it does what the real CLI does to the four frontmatter
   // lines and prints the same one-line `--report`, so the spec needs no
   // claude-usage checkout. The retirement RULE is pinned by claude-usage's own
@@ -580,15 +600,18 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root},${WIKI_RO}=${roRoot}`,
+      WIKI_EXTRA: `${WIKI}=${root},${WIKI_RO}=${roRoot},${WIKI_NESTED}=${nestRoot}`,
       WIKI_READONLY_ROOTS: roRoot,
       // The stamper. `WIKI_STAMP_BUN` is bash because the stub is a shell
       // script; production runs the CLI's `.ts` source through bun.
       WIKI_STAMP_BIN: stampBin,
-      WIKI_STAMP_ROOTS: `${root}:${roRoot}`,
+      // `nestParent`, NOT `nestRoot`: the third wiki sits one level under a
+      // stamp root, which is the nesting the equality rule refuses.
+      WIKI_STAMP_ROOTS: `${root}:${roRoot}:${nestParent}`,
       WIKI_STAMP_BUN: "/bin/bash",
-      // AFTER `e2eEnv()`: both names are in `AMBIENT_INSTANCE_ENV`, so the blank
-      // set would otherwise unset exactly what this spec is about.
+      // AFTER `e2eEnv()`: all five names are in `AMBIENT_INSTANCE_ENV` (the three
+      // `WIKI_STAMP_*` above included), so the blank set would otherwise unset
+      // exactly what this spec is about.
       CLAUDE_USAGE_URL: `http://127.0.0.1:${LEDGER_PORT}`,
       CLAUDE_USAGE_PUBLIC_URL: PUBLIC_BASE,
     },
@@ -613,6 +636,7 @@ test.afterAll(async () => {
   await new Promise<void>((resolve) => (ledger ? ledger.close(() => resolve()) : resolve()));
   if (root) await rm(root, { recursive: true, force: true });
   if (roRoot) await rm(roRoot, { recursive: true, force: true });
+  if (nestParent) await rm(nestParent, { recursive: true, force: true });
   if (stampBin) await rm(stampBin, { force: true });
 });
 
@@ -1102,6 +1126,141 @@ test.describe("Wiki reader: provenance", () => {
     const after = await readFile(path.join(root, STAMP_REL), "utf8");
     expect(after).toContain(`claude-code:${STAMP_GHOST}`);
     expect(after).not.toContain("sessions_backfilled");
+  });
+
+  test("a double-click cannot slip past the confirm", async ({ page }) => {
+    // `dblclick` delivers TWO click events milliseconds apart. Arming used to
+    // only swap the label, so the second click of one gesture wrote — with the
+    // confirmation never on screen. Arming now disables the button for
+    // STAMP_ARM_MS, which drops that second click.
+    await open_(page, CHAIN_REL);
+    const rows = await openChain(page);
+    const btn = rows.nth(5).locator(".wiki-chain-stamp");
+    await btn.dblclick();
+    await expect(btn).toHaveText("Confirm: this session wrote the page");
+    expect(await readFile(path.join(root, CHAIN_REL), "utf8")).not.toContain(CHAIN_GHOST);
+    // The WINDOW, not just the flag. Playwright dispatches a dblclick's two
+    // events without yielding the event loop between them, so a 0 ms window
+    // passes the assertion above too — measured. This one is read a CDP
+    // round-trip (single-digit ms) after the gesture, which a 0 ms `setTimeout`
+    // has already outrun and a 500 ms one has not.
+    //
+    // Read through `evaluate`, NOT `expect(btn).toBeDisabled()`: measured, that
+    // matcher passes on this button whatever `disabled` says, so it is a
+    // can't-fail assertion — the 0 ms mutant survived it while the same probe
+    // reported `disabled === false`.
+    expect(await btn.evaluate((b) => (b as HTMLButtonElement).disabled)).toBe(true);
+  });
+
+  test("a FAILED Stamp restores the button, shows the reason beside it, and re-arms", async ({
+    page,
+  }) => {
+    // Three bugs in one gesture before this: the reason went into the LABEL
+    // (renaming the control to a sentence), the confirm attribute had already
+    // been consumed, and so the NEXT single click wrote with no confirmation.
+    await open_(page, CHAIN_REL);
+    const rows = await openChain(page);
+    const btn = rows.nth(5).locator(".wiki-chain-stamp");
+    const msg = rows.nth(5).locator(".wiki-chain-stamp-msg");
+
+    await page.route("**/api/wiki/provenance/stamp", (route) =>
+      route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "the stamp was skipped", reason: "lock-timeout" }),
+      }),
+    );
+    await btn.click(); // arm
+    await expect(btn).toBeEnabled();
+    await btn.click(); // and now the POST, which fails
+    await expect(msg).toHaveText("not stamped: lock-timeout");
+    await expect(btn).toHaveText("Stamp");
+    await expect(btn).toBeEnabled();
+    await page.unroute("**/api/wiki/provenance/stamp");
+
+    // RE-ARMED: the next single click asks again rather than writing.
+    await btn.click();
+    await expect(btn).toHaveText("Confirm: this session wrote the page");
+    expect(await readFile(path.join(root, CHAIN_REL), "utf8")).not.toContain(CHAIN_GHOST);
+  });
+
+  test("a 200 carrying no provenance re-enables the button rather than killing it", async ({
+    page,
+  }) => {
+    await open_(page, SHAPE_REL);
+    const rows = await openChain(page);
+    const btn = rows.nth(4).locator(".wiki-chain-stamp");
+    await page.route("**/api/wiki/provenance/stamp", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ outcome: "written" }),
+      }),
+    );
+    // The re-read is ABORTED too. Without it the refetch redraws the strip from
+    // a fresh payload, which builds a new button and would make this case green
+    // whether or not the old one was ever restored — measured: the mutation that
+    // deletes the restore survived until this route was added.
+    await page.route("**/api/wiki/page**", (route) => route.abort());
+    await btn.click(); // a PR ghost: one click, straight to the POST
+    await expect(btn).toHaveText("Stamp");
+    await expect(btn).toBeEnabled();
+    await page.unroute("**/api/wiki/page**");
+    await page.unroute("**/api/wiki/provenance/stamp");
+  });
+
+  test("a wiki NESTED under a stamp root offers no Stamp and the POST is 409", async ({
+    page,
+    request,
+  }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_NESTED}&relPath=${encodeURIComponent(NEST_REL)}`);
+    const rows = await openChain(page);
+    await expect(rows.filter({ hasText: STAMP_GHOST })).toHaveClass(/wiki-chain-ghost/);
+    await expect(page.locator(".wiki-chain-stamp")).toHaveCount(0);
+
+    // And the SERVER refuses it, which is the half `stampable` cannot enforce.
+    const res = await request.post(`${BASE}/api/wiki/provenance/stamp`, {
+      data: { wiki: WIKI_NESTED, relPath: NEST_REL, ref: `claude-code:${STAMP_GHOST}` },
+    });
+    expect(res.status()).toBe(409);
+    expect((await res.json()).reason).toBe("not-a-stamp-root");
+    expect(await readFile(path.join(nestRoot, NEST_REL), "utf8")).not.toContain(STAMP_GHOST);
+  });
+
+  test("the route refuses a cross-origin POST and a text/plain body, on an auth-OFF instance", async ({
+    request,
+  }) => {
+    // This server runs `MUNINN_AUTH=off`, where `src/index.ts` mounts no origin
+    // middleware at all — so the refusal here is the ROUTE's own, and the page
+    // it protects is one a click would really write.
+    const cross = await request.post(`${BASE}/api/wiki/provenance/stamp`, {
+      headers: { origin: "http://evil.example", "content-type": "application/json" },
+      data: { wiki: WIKI, relPath: STAMP_REL, ref: `claude-code:${CHAIN_GHOST}` },
+    });
+    expect(cross.status()).toBe(403);
+    expect((await cross.json()).reason).toBe("cross-origin");
+
+    const plain = await request.post(`${BASE}/api/wiki/provenance/stamp`, {
+      headers: { "content-type": "text/plain" },
+      data: JSON.stringify({ wiki: WIKI, relPath: STAMP_REL, ref: `claude-code:${CHAIN_GHOST}` }),
+    });
+    expect(plain.status()).toBe(415);
+
+    const site = await request.post(`${BASE}/api/wiki/provenance/stamp`, {
+      headers: { "sec-fetch-site": "cross-site", "content-type": "application/json" },
+      data: { wiki: WIKI, relPath: STAMP_REL, ref: `claude-code:${CHAIN_GHOST}` },
+    });
+    expect(site.status()).toBe(403);
+
+    expect(await readFile(path.join(root, STAMP_REL), "utf8")).not.toContain(CHAIN_GHOST);
+  });
+
+  test("a ref the CLI's own regex refuses is 400 before any spawn", async ({ request }) => {
+    const res = await request.post(`${BASE}/api/wiki/provenance/stamp`, {
+      data: { wiki: WIKI, relPath: STAMP_REL, ref: "Claude-Code:not a ref" },
+    });
+    expect(res.status()).toBe(400);
+    expect((await res.json()).reason).toBe("bad-ref");
   });
 
   test("a read-only ROOT offers no Stamp and refuses the POST", async ({ page, request }) => {

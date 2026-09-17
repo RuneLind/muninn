@@ -1806,7 +1806,14 @@ export function registerWikiRoutes(
     // `PROVENANCE_BUDGET_MS` deadline so a page open cannot cost the sum of its
     // legs. An unreachable claude-usage degrades to bare chips rather than
     // failing the page open.
-    const provenance = await pageProvenance(meta, provenanceCtx, entry?.root);
+    // `resolveWikiRoot`, not `entry?.root`: `resolveWikiRequest` returns NO entry
+    // for the `WIKI_DIR` env-override shape, and `stampable` is computed from the
+    // wiki dir — so `undefined` here reported "not stampable" on exactly the
+    // instances configured with `WIKI_DIR`, hiding every Stamp button on a wiki
+    // the CLI covers. The read half above already resolves the same way
+    // (`getWikiIndex` calls `resolveWikiRoot` on the value it is handed), so this
+    // makes the two halves name one root.
+    const provenance = await pageProvenance(meta, provenanceCtx, resolveWikiRoot(entry?.root));
 
     return c.json({
       // The two callers that opt fields in — see `toListing`. Deliberately NOT

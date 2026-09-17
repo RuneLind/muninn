@@ -11,13 +11,21 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest, getWikiIndex } from "../../wiki/store.ts";
-import { registerWikiStampRoute, type StampRouteDeps } from "./wiki-stamp.ts";
+import {
+  decideStampRequest,
+  registerWikiStampRoute,
+  stampChildEnv,
+  STAMP_CHILD_ENV_NAMES,
+  type StampRouteDeps,
+} from "./wiki-stamp.ts";
+import { ProcTimeoutError } from "../../utils/run-proc.ts";
 import type { ProvenanceContext } from "../../wiki/provenance-service.ts";
 import type { StampConfig } from "../../wiki/stamp-roots.ts";
 
@@ -85,10 +93,10 @@ function appWith(deps: StampRouteDeps = {}): Hono {
   return app;
 }
 
-const post = (app: Hono, body: unknown) =>
+const post = (app: Hono, body: unknown, headers: Record<string, string> = {}) =>
   app.request("/api/wiki/provenance/stamp", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 
@@ -118,30 +126,79 @@ afterAll(async () => {
 
 describe("the spawn", () => {
   test("is exactly the hook's own command line, plus --report", async () => {
-    await fakeCli(`printf '%s\\n' "$@" > "${argvFile}"\n echo '{"outcome":"unchanged","reason":"already-stamped","path":"x"}'`);
+    await fakeCli(`printf '%s\\n' "$@" > "${argvFile}"\n echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`);
     const res = await stamp(appWith());
     expect(res.status).toBe(200);
     expect((await readFile(argvFile, "utf8")).trim().split("\n")).toEqual([
       "--session",
       NEW_REF,
       "--file",
-      path.join(root, REL),
+      // The REALPATH, not `path.join(root, REL)`: on macOS a `mkdtemp` under
+      // `/var/folders` is itself a symlink to `/private/var/folders`, and the
+      // route resolves before it spawns so its gate and the CLI's classification
+      // are asking about the same bytes.
+      path.join(realpathSync(root), REL),
       "--report",
     ]);
   });
 
-  test("the child environment carries BOTH PATH and WIKI_STAMP_ROOTS", async () => {
-    // The trap: `{ WIKI_STAMP_ROOTS }` alone replaces the environment, drops
-    // PATH, and lands every Stamp in the 502 bucket with an empty stderr.
-    await fakeCli(
-      `printf 'PATH=%s\\nROOTS=%s\\nHOME=%s\\n' "\${PATH:-missing}" "\${WIKI_STAMP_ROOTS:-missing}" "\${HOME:-missing}" > "${argvFile}"\n` +
-        `echo '{"outcome":"unchanged","reason":"already-stamped","path":"x"}'`,
+  test("the child environment is an ALLOWLIST: PATH and WIKI_STAMP_ROOTS in, DATABASE_URL out", async () => {
+    // TWO failures in one assertion, and they pull in opposite directions.
+    // `{ WIKI_STAMP_ROOTS }` alone REPLACES the environment, drops PATH, and
+    // lands every Stamp in the 502 bucket with an empty stderr — so PATH has to
+    // be there. `{ ...process.env, … }` hands a `.ts` file chosen by an env var
+    // everything muninn holds — measured 106 names including DATABASE_URL, and
+    // on a real instance every bot token — so the rest must not be.
+    const prior = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
+    try {
+      await fakeCli(
+        `printf 'PATH=%s\\nROOTS=%s\\nHOME=%s\\nDB=%s\\n' "\${PATH:-missing}" "\${WIKI_STAMP_ROOTS:-missing}" "\${HOME:-missing}" "\${DATABASE_URL:-ABSENT}" > "${argvFile}"\n` +
+          `echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`,
+      );
+      await stamp(appWith());
+      const seen = await readFile(argvFile, "utf8");
+      expect(seen).toContain(`ROOTS=${root}`);
+      expect(seen).not.toContain("PATH=missing");
+      expect(seen).not.toContain("HOME=missing");
+      // The one that matters: the name is SET in this process and absent in the
+      // child. Asserted on the sentinel rather than on `not.toContain("muninn")`,
+      // which the roots line would satisfy on its own.
+      expect(seen).toContain("DB=ABSENT");
+    } finally {
+      if (prior === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prior;
+    }
+  });
+
+  test("a spawn that THROWS is 502, not the timeout's 409", async () => {
+    // `Bun.spawn` throws synchronously for an argv it cannot build. The two used
+    // to share a catch, so a NUL in `ref` — which fails in ~10 ms — was reported
+    // as "the stamp CLI did not return" and sent an operator looking for a
+    // wedged child that never existed.
+    const res = await stamp(
+      appWith({
+        runProc: async () => {
+          throw new TypeError("Invalid argument: contains a null byte");
+        },
+      }),
     );
-    await stamp(appWith());
-    const seen = await readFile(argvFile, "utf8");
-    expect(seen).toContain(`ROOTS=${root}`);
-    expect(seen).not.toContain("PATH=missing");
-    expect(seen).not.toContain("HOME=missing");
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.exitCode).toBeNull();
+    expect(body.error).toContain("null byte");
+  });
+
+  test("and the timeout keeps its own 409 — the two are told apart by TYPE", async () => {
+    const res = await stamp(
+      appWith({
+        runProc: async () => {
+          throw new ProcTimeoutError("wiki-stamp", 15_000);
+        },
+      }),
+    );
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toBe("stamp-timeout");
   });
 });
 
@@ -154,7 +211,7 @@ describe("the answer table", () => {
         `sed -i.bak "s|sessions: \\[claude-code:${STAMPED}\\]|sessions: [claude-code:${STAMPED}, ${NEW_REF}]|" "$f"\n` +
         `sed -i.bak "/^sessions_backfilled:/d" "$f"\n` +
         `rm -f "$f.bak"\n` +
-        `echo '{"outcome":"written","path":"'"$f"'"}'`,
+        `echo '{"outcome":"written","path":"'"$4"'"}'`,
     );
     const res = await stamp(appWith());
     expect(res.status).toBe(200);
@@ -174,14 +231,14 @@ describe("the answer table", () => {
       `f="${path.join(root, REL)}"\n` +
         `sed -i.bak "s|sessions: \\[claude-code:${STAMPED}\\]|sessions: [claude-code:${STAMPED}, ${NEW_REF}]|" "$f"\n` +
         `rm -f "$f.bak"\n` +
-        `echo '{"outcome":"written","path":"'"$f"'"}'`,
+        `echo '{"outcome":"written","path":"'"$4"'"}'`,
     );
     const body = await (await stamp(appWith())).json();
     expect(body.provenance.sessions.map((s: { id: string }) => s.id)).toContain(NEW_ID);
   });
 
   test("an `unchanged` report is the same 200 — the append is idempotent", async () => {
-    await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped","path":"x"}'`);
+    await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`);
     const res = await stamp(appWith());
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -190,14 +247,14 @@ describe("the answer table", () => {
   });
 
   test("a `skipped` report is 409 with the CLI's reason VERBATIM", async () => {
-    await fakeCli(`echo '{"outcome":"skipped","reason":"outside-roots","path":"x"}'`);
+    await fakeCli(`echo '{"outcome":"skipped","reason":"outside-roots","path":"'"$4"'"}'`);
     const res = await stamp(appWith());
     expect(res.status).toBe(409);
     expect((await res.json()).reason).toBe("outside-roots");
   });
 
   test("a skipped report with no reason still answers 409 rather than 200", async () => {
-    await fakeCli(`echo '{"outcome":"skipped","path":"x"}'`);
+    await fakeCli(`echo '{"outcome":"skipped","path":"'"$4"'"}'`);
     const res = await stamp(appWith());
     expect(res.status).toBe(409);
     expect((await res.json()).reason).toBe("skipped");
@@ -205,7 +262,7 @@ describe("the answer table", () => {
 
   test("a non-JSON line before the report does not hide it", async () => {
     await fakeCli(
-      `echo 'some warning from the runtime'\necho '{"outcome":"skipped","reason":"bom","path":"x"}'`,
+      `echo 'some warning from the runtime'\necho '{"outcome":"skipped","reason":"bom","path":"'"$4"'"}'`,
     );
     expect((await (await stamp(appWith())).json()).reason).toBe("bom");
   });
@@ -216,7 +273,7 @@ describe("the answer table", () => {
     // happens to be a report-shaped JSON object.
     await fakeCli(
       `echo '{"outcome":"written","path":"stale"}'\n` +
-        `echo '{"outcome":"skipped","reason":"lock-timeout","path":"x"}'`,
+        `echo '{"outcome":"skipped","reason":"lock-timeout","path":"'"$4"'"}'`,
     );
     const res = await stamp(appWith());
     expect(res.status).toBe(409);
@@ -249,7 +306,7 @@ describe("the answer table", () => {
 
 describe("the checks, in order, each BEFORE any spawn", () => {
   /** A CLI that must never run. */
-  const explode = () => fakeCli(`echo '{"outcome":"written","path":"x"}' ; touch "${argvFile}"`);
+  const explode = () => fakeCli(`echo '{"outcome":"written","path":"'"$4"'"}' ; touch "${argvFile}"`);
 
   test("a traversal `relPath` is 400 and never spawns", async () => {
     await explode();
@@ -279,7 +336,7 @@ describe("the checks, in order, each BEFORE any spawn", () => {
   });
 
   test("an omitted `wiki` means the DEFAULT wiki, as on every other /api/wiki route", async () => {
-    await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped","path":"x"}'`);
+    await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`);
     const res = await post(appWith(), { relPath: REL, ref: NEW_REF });
     expect(res.status).toBe(200);
   });
@@ -324,5 +381,331 @@ describe("the checks, in order, each BEFORE any spawn", () => {
       appWith({ isReadonly: () => true, stampConfig: () => config({ bin: null }) }),
     );
     expect(res.status).toBe(403);
+  });
+});
+
+describe("the root-equality rule, SERVER-side", () => {
+  /** A CLI that must never run. */
+  const explode = () => fakeCli(`echo '{"outcome":"written","path":"'"$4"'"}' ; touch "${argvFile}"`);
+
+  test("a wiki NESTED under a stamp root is refused 409 and never spawns", async () => {
+    // The measured hole: with WIKI_STAMP_ROOTS = <parent> and the wiki
+    // registered at <parent>/sub, the route answered `200 written` while the
+    // same instance's payload said `stampable: false`. Two writers of one
+    // frontmatter line, holding two different lock files.
+    await explode();
+    const parent = path.dirname(root);
+    const res = await stamp(
+      appWith({ stampConfig: () => config({ rootsRaw: parent, roots: [parent] }) }),
+    );
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toBe("not-a-stamp-root");
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("a sibling root with a shared PREFIX is refused too", async () => {
+    await explode();
+    const sibling = `${root}-old`;
+    const res = await stamp(
+      appWith({ stampConfig: () => config({ rootsRaw: sibling, roots: [sibling] }) }),
+    );
+    expect(res.status).toBe(409);
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("the 409 comes AFTER the 501s — a missing variable is still named first", async () => {
+    const parent = path.dirname(root);
+    const res = await stamp(
+      appWith({ stampConfig: () => config({ bin: null, rootsRaw: parent, roots: [parent] }) }),
+    );
+    expect(res.status).toBe(501);
+  });
+
+  test("the wiki's own root passes, spelled through a SYMLINK to it", async () => {
+    // `isStampRoot` goes through `sameWikiRoot`, so a stamp root spelled as a
+    // link to the wiki root is the same root. On macOS this is not hypothetical:
+    // every `mkdtemp` under `/var/folders` is reached through one.
+    await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`);
+    const real = realpathSync(root);
+    const res = await stamp(appWith({ stampConfig: () => config({ rootsRaw: real, roots: [real] }) }));
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("the route-local CSRF check", () => {
+  const explode = () => fakeCli(`echo '{"outcome":"written","path":"'"$4"'"}' ; touch "${argvFile}"`);
+
+  test("decideStampRequest: same-origin JSON passes", () => {
+    expect(
+      decideStampRequest({
+        contentType: "application/json",
+        secFetchSite: "same-origin",
+        origin: "http://127.0.0.1:3010",
+        host: "127.0.0.1:3010",
+      }),
+    ).toBeNull();
+  });
+
+  test("decideStampRequest: a charset parameter is still application/json", () => {
+    expect(
+      decideStampRequest({ contentType: "application/json; charset=utf-8", host: "x" }),
+    ).toBeNull();
+  });
+
+  test("decideStampRequest: no browser headers at all passes — curl and the health check send none", () => {
+    expect(decideStampRequest({ contentType: "application/json" })).toBeNull();
+  });
+
+  test("decideStampRequest refuses the three types a no-cors fetch MAY set", () => {
+    for (const type of [
+      "text/plain",
+      "multipart/form-data; boundary=x",
+      "application/x-www-form-urlencoded",
+      "",
+    ]) {
+      const out = decideStampRequest({ contentType: type, host: "x" });
+      expect(out?.status).toBe(415);
+      expect(out?.reason).toBe("unsupported-content-type");
+    }
+  });
+
+  test("decideStampRequest refuses cross-site and same-site Sec-Fetch-Site", () => {
+    for (const site of ["cross-site", "same-site", "Cross-Site"]) {
+      const out = decideStampRequest({
+        contentType: "application/json",
+        secFetchSite: site,
+        host: "127.0.0.1:3010",
+      });
+      expect(out?.status).toBe(403);
+      expect(out?.reason).toBe("cross-origin");
+    }
+    // `none` is a user-initiated navigation and `same-origin` is this page.
+    expect(
+      decideStampRequest({ contentType: "application/json", secFetchSite: "none", host: "x" }),
+    ).toBeNull();
+  });
+
+  test("decideStampRequest refuses an Origin that is not the request's own authority", () => {
+    const out = decideStampRequest({
+      contentType: "application/json",
+      origin: "http://evil.example",
+      host: "127.0.0.1:3010",
+    });
+    expect(out?.status).toBe(403);
+    // `Origin: null` — a sandboxed iframe, a redirected cross-origin POST.
+    expect(
+      decideStampRequest({ contentType: "application/json", origin: "null", host: "127.0.0.1:3010" })
+        ?.status,
+    ).toBe(403);
+    // The scheme is NOT compared: a reverse proxy terminates TLS, so the
+    // browser's https says nothing about muninn's own http.
+    expect(
+      decideStampRequest({
+        contentType: "application/json",
+        origin: "https://muninn.tailnet.ts.net",
+        host: "muninn.tailnet.ts.net",
+      }),
+    ).toBeNull();
+  });
+
+  test("the ROUTE refuses a cross-origin Origin with 403 and never spawns", async () => {
+    await explode();
+    const res = await post(
+      appWith(),
+      { wiki: "w", relPath: REL, ref: NEW_REF },
+      { origin: "http://evil.example", host: "127.0.0.1:3010" },
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).reason).toBe("cross-origin");
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("the ROUTE refuses a text/plain body with 415 and never spawns", async () => {
+    // The measured attack under MUNINN_AUTH=off, verbatim: a no-cors fetch needs
+    // no preflight and this is the content type it is allowed to set.
+    await explode();
+    const res = await appWith().request("/api/wiki/provenance/stamp", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ wiki: "w", relPath: REL, ref: NEW_REF }),
+    });
+    expect(res.status).toBe(415);
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("the ROUTE proceeds on same-origin JSON", async () => {
+    await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`);
+    const res = await post(
+      appWith(),
+      { wiki: "w", relPath: REL, ref: NEW_REF },
+      { origin: "http://127.0.0.1:3010", host: "127.0.0.1:3010", "sec-fetch-site": "same-origin" },
+    );
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("the ref shape pre-check", () => {
+  const explode = () => fakeCli(`echo '{"outcome":"written","path":"'"$4"'"}' ; touch "${argvFile}"`);
+
+  test("a ref the CLI's own regex would refuse is 400 and never spawns", async () => {
+    await explode();
+    for (const bad of [
+      "claude-code", // no colon
+      "Claude-Code:abc", // the provider is lowercase
+      "claude-code:has space",
+      `claude-code:${"x".repeat(129)}`,
+      "claude-code:has\nnewline", // would split this route's own log line
+      "claude-code:has\u0000nul", // Bun.spawn throws SYNCHRONOUSLY for this
+    ]) {
+      const res = await post(appWith(), { wiki: "w", relPath: REL, ref: bad });
+      expect(res.status).toBe(400);
+      expect((await res.json()).reason).toBe("bad-ref");
+    }
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("the shapes the CLI accepts pass the pre-check", async () => {
+    await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`);
+    for (const ok of [`claude-code:${NEW_ID}`, "opencode:ses_7f3a9b2c1d", "x:a"]) {
+      expect((await post(appWith(), { wiki: "w", relPath: REL, ref: ok })).status).toBe(200);
+    }
+  });
+});
+
+describe("realpath containment", () => {
+  const explode = () => fakeCli(`echo '{"outcome":"written","path":"'"$4"'"}' ; touch "${argvFile}"`);
+
+  test("a symlink inside the wiki pointing OUTSIDE it is 400 and never spawns", async () => {
+    // `isPathConfined` is lexical, so this page passes it. The CLI would then
+    // read the target and rename over the link — destroying the link and copying
+    // an outside page in.
+    const outsideDir = await mkdtemp(path.join(tmpdir(), "muninn-stamp-outside-"));
+    const outside = path.join(outsideDir, "secret.md");
+    await writeFile(outside, "---\ntype: plan\ntitle: Outside\n---\n", "utf8");
+    const link = path.join(root, "link.md");
+    await symlink(outside, link);
+    try {
+      await explode();
+      const res = await post(appWith(), { wiki: "w", relPath: "link.md", ref: NEW_REF });
+      expect(res.status).toBe(400);
+      expect((await res.json()).reason).toBe("outside-root");
+      expect(await Bun.file(argvFile).exists()).toBe(false);
+    } finally {
+      await rm(link, { force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a symlink to a SIBLING directory sharing the root's prefix is refused", async () => {
+    // The containment test is a prefix test, and a prefix test with no
+    // separator lets `<root>-evil/x.md` through — a directory whose NAME starts
+    // with the root's. Lexical confinement cannot reach it, a symlink can.
+    const sibling = `${realpathSync(root)}-evil`;
+    await mkdir(sibling, { recursive: true });
+    const outside = path.join(sibling, "x.md");
+    await writeFile(outside, "---\ntype: plan\ntitle: Sibling\n---\n", "utf8");
+    const link = path.join(root, "sibling.md");
+    await symlink(outside, link);
+    try {
+      await explode();
+      const res = await post(appWith(), { wiki: "w", relPath: "sibling.md", ref: NEW_REF });
+      expect(res.status).toBe(400);
+      expect((await res.json()).reason).toBe("outside-root");
+      expect(await Bun.file(argvFile).exists()).toBe(false);
+    } finally {
+      await rm(link, { force: true });
+      await rm(sibling, { recursive: true, force: true });
+    }
+  });
+
+  test("a symlink to a page INSIDE the wiki is fine, and the CLI is handed the target", async () => {
+    const link = path.join(root, "alias.md");
+    await symlink(path.join(root, REL), link);
+    try {
+      await fakeCli(
+        `printf '%s\\n' "$@" > "${argvFile}"\n` +
+          `echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`,
+      );
+      const res = await post(appWith(), { wiki: "w", relPath: "alias.md", ref: NEW_REF });
+      expect(res.status).toBe(200);
+      const argv = (await readFile(argvFile, "utf8")).trim().split("\n");
+      expect(argv[3]).toBe(path.join(realpathSync(root), REL));
+    } finally {
+      await rm(link, { force: true });
+    }
+  });
+});
+
+describe("resolving which wiki", () => {
+  test("a non-string `wiki` is 400, never a silent write to the DEFAULT wiki", async () => {
+    for (const bad of [3, true, { name: "w" }, ["w"]]) {
+      const res = await post(appWith(), { wiki: bad, relPath: REL, ref: NEW_REF });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toContain("wiki must be a string");
+    }
+  });
+
+  test("the WIKI_DIR env-override shape resolves rather than 404ing", async () => {
+    // `resolveWikiRequest` returns `{envOverride: true, entry: undefined}` here,
+    // so a guard keyed on the entry answered "no wiki configured for that name"
+    // on an instance where no name was sent.
+    __setWikiRegistryForTest([]);
+    const prior = process.env.WIKI_DIR;
+    process.env.WIKI_DIR = root;
+    try {
+      __resetWikiCacheForTest();
+      await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`);
+      const res = await post(appWith(), { relPath: REL, ref: NEW_REF });
+      expect(res.status).toBe(200);
+      expect((await res.json()).outcome).toBe("unchanged");
+    } finally {
+      if (prior === undefined) delete process.env.WIKI_DIR;
+      else process.env.WIKI_DIR = prior;
+      __setWikiRegistryForTest([{ name: "w", root, source: "extra" }]);
+      __resetWikiCacheForTest();
+    }
+  });
+});
+
+describe("the report's own path", () => {
+  test("a report naming a DIFFERENT file is 502, not a green Stamp", async () => {
+    await fakeCli(`echo '{"outcome":"written","path":"/somewhere/else.md"}'`);
+    const res = await stamp(appWith());
+    expect(res.status).toBe(502);
+    expect((await res.json()).reason).toBe("path-mismatch");
+  });
+
+  test("a report with NO path is tolerated — an older CLI printed none", async () => {
+    await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped"}'`);
+    expect((await stamp(appWith())).status).toBe(200);
+  });
+});
+
+describe("stampChildEnv", () => {
+  test("keeps only the three runtime names plus WIKI_STAMP_ROOTS", () => {
+    const env = stampChildEnv("/a:/b", {
+      PATH: "/usr/bin",
+      HOME: "/home/x",
+      TMPDIR: "/tmp/",
+      DATABASE_URL: "postgresql://…",
+      TELEGRAM_BOT_TOKEN_JARVIS: "secret",
+      ANTHROPIC_API_KEY: "sk-…",
+    });
+    expect(Object.keys(env).sort()).toEqual(["HOME", "PATH", "TMPDIR", "WIKI_STAMP_ROOTS"]);
+    expect(env.WIKI_STAMP_ROOTS).toBe("/a:/b");
+  });
+
+  test("an unset inherited name is simply absent — never an undefined value", () => {
+    // `{TMPDIR: undefined}` reaching `Bun.spawn` is not the same as omitting the
+    // key. Asserted on KEYS: `toEqual` treats `{a: 1, b: undefined}` and
+    // `{a: 1}` as equal, so an object comparison here is a can't-fail assertion
+    // — measured, the mutant that writes every name through survived it.
+    const env = stampChildEnv("/a", { PATH: "/usr/bin" });
+    expect(Object.keys(env).sort()).toEqual(["PATH", "WIKI_STAMP_ROOTS"]);
+    expect(env).toEqual({ PATH: "/usr/bin", WIKI_STAMP_ROOTS: "/a" });
+  });
+
+  test("the allowlist is the one in STAMP_CHILD_ENV_NAMES", () => {
+    expect([...STAMP_CHILD_ENV_NAMES]).toEqual(["PATH", "HOME", "TMPDIR"]);
   });
 });

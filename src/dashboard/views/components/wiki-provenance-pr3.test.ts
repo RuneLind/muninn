@@ -15,6 +15,14 @@ import {
   chainHtml,
   costLine,
   gateVerdict,
+  // Imported, not re-typed. The module exports these BECAUSE there must be one
+  // spelling of each — an assertion that quotes the string instead is green
+  // against a second spelling, which is the whole thing the export prevents.
+  GATE_NOT_MATCHED_COPY,
+  HANDOFFS_UNREAD_NOTE,
+  LINKS_TIMED_OUT_NOTE,
+  NO_GATE_LINE_COPY,
+  PR_LINKS_UNREAD_NOTE,
   ghostHint,
   linksNotes,
   modelLabel,
@@ -127,11 +135,11 @@ describe("gateVerdict", () => {
   test("a matched merge with no gate says so — never nothing", () => {
     expect(
       gateVerdict(merge({ gate: { matched: true, gated: false, gatedBy: null, gates: [] } }), "2026-07-30"),
-    ).toBe("no gate line");
+    ).toBe(NO_GATE_LINE_COPY);
   });
 
   test("a row the join did not match reads as unmatched, not as ungated", () => {
-    expect(gateVerdict(merge({ gate: { matched: false } }), "2026-07-30")).toBe("gate not matched");
+    expect(gateVerdict(merge({ gate: { matched: false } }), "2026-07-30")).toBe(GATE_NOT_MATCHED_COPY);
   });
 
   test("a merge older than the standardized phrases names the date instead", () => {
@@ -246,7 +254,7 @@ describe("the gate verdict on a merge row", () => {
       }),
       UTC,
     );
-    expect(html).toContain(">no gate line</span>");
+    expect(html).toContain(`>${NO_GATE_LINE_COPY}</span>`);
     expect(html).not.toContain("wiki-chain-gate-ok");
   });
 
@@ -502,13 +510,13 @@ describe("the marks gain a third kind", () => {
 describe("linksNotes — one footer line per leg that has something to report", () => {
   test("a handoff leg that answered nothing", () => {
     expect(linksNotes(links({ handoffs: { asked: true, reachable: false } }))).toEqual([
-      "handoffs not read",
+      HANDOFFS_UNREAD_NOTE,
     ]);
   });
 
   test("a PR leg that answered nothing", () => {
     expect(linksNotes(links({ prs: { asked: true, reachable: false } }))).toEqual([
-      "PR links not read: claude-usage did not answer",
+      PR_LINKS_UNREAD_NOTE,
     ]);
   });
 
@@ -525,7 +533,7 @@ describe("linksNotes — one footer line per leg that has something to report", 
   });
 
   test("the deadline firing mid-fan-out is its own line", () => {
-    expect(linksNotes(links({ timedOut: true }))).toEqual(["some ledger reads timed out"]);
+    expect(linksNotes(links({ timedOut: true }))).toEqual([LINKS_TIMED_OUT_NOTE]);
   });
 
   test("a leg that was never asked says nothing", () => {
@@ -537,6 +545,161 @@ describe("linksNotes — one footer line per leg that has something to report", 
       payload({ links: links({ handoffs: { asked: true, reachable: false } }) }),
       UTC,
     );
-    expect(html).toContain("handoffs not read");
+    expect(html).toContain(HANDOFFS_UNREAD_NOTE);
+  });
+});
+
+describe("the ghost hint counts its sources and states its denominator", () => {
+  const ghost = (
+    id: string,
+    cost: number | null,
+    via: "pr" | "handoff",
+    through: string,
+  ) => ({
+    ...chip({ id, ref: id, cost }),
+    ghost: { via, through, stampRef: null },
+  });
+
+  test("M < N says `over M of N` — the money is never presented as the whole", () => {
+    // The measured line: `links 3 sessions through #553 — $15.00`, on a page
+    // whose three ghosts came through two PRs and a handoff and of which the
+    // ledger had priced two. Both halves were wrong.
+    const p = payload({
+      ghosts: [
+        ghost("g1", 10, "pr", "#553"),
+        ghost("g2", 5, "pr", "#554"),
+        ghost("g3", null, "handoff", "a"),
+      ],
+    });
+    expect(ghostHint(p)).toBe(
+      "the ledger links 3 more sessions through 2 PRs and a handoff — $15.00 over 2 of 3",
+    );
+  });
+
+  test("every ghost priced ⇒ no denominator clause", () => {
+    const p = payload({ ghosts: [ghost("g1", 10, "pr", "#553"), ghost("g2", 5, "pr", "#553")] });
+    // Two ghosts through the SAME PR is one distinct source, so it is named.
+    expect(ghostHint(p)).toBe("the ledger links 2 more sessions through #553 — $15.00");
+  });
+
+  test("a handoff beside a single named PR is named too, never dropped", () => {
+    const p = payload({ ghosts: [ghost("g1", 10, "pr", "#553"), ghost("g2", 5, "handoff", "a")] });
+    expect(ghostHint(p)).toBe(
+      "the ledger links 2 more sessions through #553 and a handoff — $15.00",
+    );
+  });
+
+  test("two handoffs and no PR are counted", () => {
+    const p = payload({
+      ghosts: [ghost("g1", 10, "handoff", "a"), ghost("g2", 5, "handoff", "b")],
+    });
+    expect(ghostHint(p)).toBe("the ledger links 2 more sessions through 2 handoffs — $15.00");
+  });
+
+  test("nothing priced ⇒ no amount and no denominator", () => {
+    const p = payload({
+      ghosts: [ghost("g1", null, "pr", "#553"), ghost("g2", null, "handoff", "a")],
+    });
+    expect(ghostHint(p)).toBe("the ledger links 2 more sessions through #553 and a handoff");
+  });
+
+  test("the sum is rounded ONCE, by money's own toFixed", () => {
+    const p = payload({ ghosts: [ghost("g1", 0.005, "pr", "#553"), ghost("g2", 0.005, "pr", "#553")] });
+    expect(ghostHint(p)).toBe("the ledger links 2 more sessions through #553 — $0.01");
+  });
+});
+
+describe("the ninth costLine state keeps the backfilled tail", () => {
+  const ghostOnly = (over: Partial<ProvenancePayload> = {}) =>
+    payload({
+      sessions: [],
+      totalCost: 0,
+      costedSessions: 0,
+      ledger: LEDGER_NOT_ASKED,
+      mergesLedger: MERGES_NOT_ASKED,
+      ghosts: [
+        {
+          ...chip({ id: "g", ref: "g", cost: 40 }),
+          ghost: { via: "pr", through: "#553", stampRef: "claude-code:g" },
+        },
+      ],
+      ...over,
+    });
+
+  test("`· inferred from history` rides this state like the other eight", () => {
+    // It qualifies the LIST, and this is the state where the list is EMPTY —
+    // which makes the marker the reason the page names no session of its own.
+    expect(costLine(ghostOnly({ backfilled: "2026-09-01" }))).toBe(
+      "the ledger links 1 session through #553 — $40.00 · inferred from history 2026-09-01",
+    );
+  });
+
+  test("and is still absent when the page carries no marker", () => {
+    expect(costLine(ghostOnly())).toBe("the ledger links 1 session through #553 — $40.00");
+  });
+});
+
+describe("a ghost with no provider defers to the chip's own reason", () => {
+  const unresolvedGhost = {
+    ...chip({ id: "g", ref: "g", provider: "", title: null, cost: null, unresolved: true }),
+    ghost: { via: "pr" as const, through: "#553", stampRef: null },
+  };
+
+  test("an UNRESOLVED chip says the lookup failed ONCE, not twice contradicting itself", () => {
+    // Leg 5 never answered, so the row already carries `bareChipCopy`'s reason.
+    // "the ledger named no provider for this session" beside it is a claim about
+    // an answer nobody got.
+    const html = chainHtml(payload({ ghosts: [unresolvedGhost], stampable: true }), UTC);
+    expect(html).not.toContain("the ledger named no provider");
+    expect(html).toContain("wiki-chain-bare");
+  });
+
+  test("a MISSING chip defers the same way", () => {
+    const missing = {
+      ...chip({ id: "g", ref: "g", provider: "", title: null, cost: null, missing: true }),
+      ghost: { via: "pr" as const, through: "#553", stampRef: null },
+    };
+    const html = chainHtml(payload({ ghosts: [missing], stampable: true }), UTC);
+    expect(html).not.toContain("the ledger named no provider");
+  });
+
+  test("a chip the ledger DID answer for, with no provider, still says so", () => {
+    const answered = {
+      ...chip({ id: "g", ref: "g", provider: "", title: "Known", cost: 1 }),
+      ghost: { via: "pr" as const, through: "#553", stampRef: null },
+    };
+    const html = chainHtml(payload({ ghosts: [answered], stampable: true }), UTC);
+    expect(html).toContain("no Stamp — the ledger named no provider for this session");
+  });
+
+  test("and a NAMED provider this pipeline does not stamp is unchanged", () => {
+    const copilot = {
+      ...chip({ id: "g", ref: "g", provider: "copilot", unresolved: true }),
+      ghost: { via: "pr" as const, through: "#553", stampRef: null },
+    };
+    const html = chainHtml(payload({ ghosts: [copilot], stampable: true }), UTC);
+    expect(html).toContain("no Stamp — the ledger reports provider &quot;copilot&quot;");
+  });
+});
+
+describe("the Stamp button's message span", () => {
+  const prGhost = {
+    ...chip({ id: "g", ref: "g", title: "The ghost", cost: 101.72 }),
+    ghost: { via: "pr" as const, through: "#553", stampRef: "claude-code:g" },
+  };
+
+  test("is rendered empty and hidden beside every Stamp", () => {
+    // The client writes `textContent` into it. Without a span the reason went
+    // into the button's LABEL, which renamed the control to a sentence and left
+    // it renamed for the next click.
+    const html = chainHtml(payload({ ghosts: [prGhost], stampable: true }), UTC);
+    expect(html).toContain(
+      '<span class="wiki-chain-stamp-msg" data-prov-stamp-msg hidden></span>',
+    );
+  });
+
+  test("and is absent where there is no Stamp to explain", () => {
+    const html = chainHtml(payload({ ghosts: [prGhost], stampable: false }), UTC);
+    expect(html).not.toContain("data-prov-stamp-msg");
   });
 });

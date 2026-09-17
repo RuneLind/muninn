@@ -33,7 +33,11 @@
  */
 
 import { BOUNDED_FETCH_TIMEOUT_MS, BOUNDED_FETCH_MAX_BYTES } from "../utils/bounded-fetch.ts";
-import { claudeUsageJson, claudeUsageWarnOnce } from "../utils/claude-usage-fetch.ts";
+import {
+  claudeUsageHttpStatus,
+  claudeUsageJson,
+  claudeUsageWarnOnce,
+} from "../utils/claude-usage-fetch.ts";
 import { getLog } from "../logging.ts";
 import { HANDOFF_READS_MAX, PR_READS_MAX, type HandoffRun, type ProvenanceMerge } from "./provenance.ts";
 
@@ -607,7 +611,10 @@ function toRun(v: unknown): HandoffRun | null {
  * `errors`; `available: false` (the ordinary answer — most sessions never run
  * the skill) is a successful read with nothing to report, NOT a failure, so a
  * page of sessions that never handed off reports `reachable: true` and renders
- * no footer line.
+ * no footer line. A **404** is the same kind of answer one status code over:
+ * upstream documents it for a session it does not hold, which is the ordinary
+ * state of a page whose ids predate this ledger, so it counts as a read with no
+ * handoff rather than as an outage.
  */
 export async function fetchHandoffs(
   deps: SessionLedgerDeps,
@@ -630,6 +637,17 @@ export async function fetchHandoffs(
       try {
         payload = await deps.fetchHandoff(id, signal);
       } catch (err) {
+        // 404 is upstream's DOCUMENTED answer for a session it does not hold
+        // (`claude-usage/src/routes.ts`: "400 without an id, 404 for an unknown
+        // session, and every other outcome a 200"), and the ids this leg is
+        // handed routinely include ones the ledger never saw — that is exactly
+        // the `missing` chip state. Treating it as a failed call rendered
+        // "handoffs not read" against a HEALTHY service and minted a warn per
+        // id. It is an answer: this id has no handoff.
+        if (claudeUsageHttpStatus(err) === 404) {
+          answered = true;
+          return;
+        }
         errors.push(`claude-usage handoff: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
