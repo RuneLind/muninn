@@ -27,7 +27,7 @@ import { existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { getLog } from "../logging.ts";
-import { runProc, type ProcResult } from "../video/media.ts";
+import { runProc, type ProcResult } from "../utils/run-proc.ts";
 import {
   chooseRepresentation,
   downloadRendition,

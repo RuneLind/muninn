@@ -21,6 +21,7 @@ import {
   provStripHtml,
   railListHtml,
 } from "./wiki-provenance-view.ts";
+import { LINKS_NOT_ASKED } from "../../../wiki/provenance.ts";
 import type { ProvenancePayload, ProvenanceSessionChip } from "../../../wiki/provenance.ts";
 
 function chip(over: Partial<ProvenanceSessionChip> = {}): ProvenanceSessionChip {
@@ -34,6 +35,8 @@ function chip(over: Partial<ProvenanceSessionChip> = {}): ProvenanceSessionChip 
     last: null,
     cost: null,
     messages: null,
+    model: null,
+    delegatedCost: null,
     missing: false,
     unresolved: false,
     invalid: false,
@@ -44,6 +47,10 @@ function chip(over: Partial<ProvenanceSessionChip> = {}): ProvenanceSessionChip 
 function payload(over: Partial<ProvenancePayload> = {}): ProvenancePayload {
   return {
     sessions: [],
+    ghosts: [],
+    handoffs: [],
+    stampable: false,
+    links: LINKS_NOT_ASKED,
     jira: [],
     prs: [],
     merges: [],

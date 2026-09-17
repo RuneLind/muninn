@@ -915,6 +915,39 @@ export async function renderWikiPage(opts?: {
        what lets them sit below the text floor. */
     .wiki-prov-mark { font-size: 9px; line-height: 1; color: var(--text-dim); }
     .wiki-prov-mark-merge { color: var(--accent-light); }
+    /* THE GHOST WARNING COLOUR, as a local token.
+       MEASURED 2026-09-17 in a real browser, on the background the strip
+       ACTUALLY paints on — walked up from .wiki-prov-strip to the first
+       non-transparent ancestor, which is --bg-panel: #ffffff light, #12121a
+       dark, NOT --bg-page. On that background the shared --status-warning is
+       3.19:1 in light — over the 3:1 floor for a non-text graphical object, but
+       by 6%, and the ring below is the ONLY signal a ghost exists while the
+       chain is collapsed. (Against --bg-page it is 2.90:1; that is the page
+       behind the panel, and quoting it would be measuring the wrong surface.)
+       Light therefore gets a darker amber, #b45309 = 5.02:1; dark is 11.16:1 on
+       the token already and keeps it.
+       The three selectors MIRROR shared-styles.ts exactly — dark at :root, light
+       in the media query, and both forced forms — so the theme toggle wins in
+       either direction and no colour is defined only inside a media block. */
+    :root { --wiki-prov-warn: var(--status-warning); }
+    @media (prefers-color-scheme: light) { :root { --wiki-prov-warn: #b45309; } }
+    html[data-theme="dark"] { --wiki-prov-warn: var(--status-warning); }
+    html[data-theme="light"] { --wiki-prov-warn: #b45309; }
+    /* A ghost's ring is DASHED — the same glyph as a stamped session, in the
+       state that says the ledger links it and the page does not claim it. A ring
+       cannot carry a border-style, so the dash is drawn as a ring around a
+       hollow mark: the glyph is hidden from the box and the box is the ring.
+       box-sizing: border-box because the width/height ARE the mark's size: the
+       default content-box added the 1 px border on each side and painted an 11 px
+       ring among 9 px siblings, which reads as a different KIND of mark rather
+       than as the same mark in another state. */
+    .wiki-prov-mark-ghost {
+      color: transparent;
+      box-sizing: border-box;
+      width: 9px; height: 9px; border-radius: 50%;
+      border: 1px dashed var(--wiki-prov-warn);
+      display: inline-block;
+    }
     /* The +N tail mark. Same size and colour as the glyphs it counts, so it
        reads as one of them rather than as a control. */
     .wiki-prov-mark-more { font-size: 9.5px; }
@@ -949,7 +982,9 @@ export async function renderWikiPage(opts?: {
       margin-left: -12px; padding-left: 10px;
       border-left: 2px solid var(--border-secondary);
     }
-    .wiki-chain-head { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; }
+    /* Wraps. The model and delegated-cost suffixes add ~108 px to this row, and
+       at a 640 px article column the un-wrapped row painted past it. */
+    .wiki-chain-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 11.5px; }
     .wiki-chain-glyph { color: var(--text-dim); flex-shrink: 0; }
     .wiki-chain-when { color: var(--text-muted); }
     .wiki-chain-host { color: var(--text-muted); }
@@ -959,7 +994,9 @@ export async function renderWikiPage(opts?: {
       overflow-wrap: anywhere;
     }
     .wiki-chain-reason { font-size: 11.5px; color: var(--text-muted); line-height: 1.35; }
-    .wiki-chain-idrow { display: flex; align-items: center; gap: 5px; }
+    /* Wraps, so the Stamp button and its message have somewhere to go: the
+       confirm label alone is 38 characters beside a 36-character id. */
+    .wiki-chain-idrow { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
     /* The id is the drill-down on a host the browser cannot reach, so it is
        selectable text first and a link only where CLAUDE_USAGE_PUBLIC_URL is
        set. Wrapping rather than clipping: a truncated session id is useless. */
@@ -994,6 +1031,67 @@ export async function renderWikiPage(opts?: {
     /* A leg that did not answer. Never a silent absence: "this page has no
        merges" and "the merges call failed" are different facts. */
     .wiki-chain-note { font-size: 11px; color: var(--text-muted); }
+    /* The model and the delegated slice are qualifiers on facts already in the
+       row, so they read at the row's own colour and never compete with the cost
+       beside them. --text-muted measured 2026-09-17 in a real browser, on the
+       background the strip actually paints on (--bg-panel: #ffffff light,
+       #12121a dark): 4.94 light / 5.26 dark, both over the 4.5:1 text floor.
+       Same token as the cost sentence and the rest of the chain text — see the
+       contrast note above. */
+    .wiki-chain-model { color: var(--text-muted); }
+    .wiki-chain-delegated { color: var(--text-muted); }
+    /* The gate verdict sits at the end of a merge row. A gated merge is the only
+       one that takes a colour: the three other spellings are statements about
+       missing data, and colouring them would read as a verdict. */
+    .wiki-chain-gate { color: var(--text-muted); }
+    /* Only the ✓ takes the success colour: --status-success measures 3.0:1 in
+       the light theme, under the 4.5:1 floor, and a gate verdict is a line a
+       reader has to READ. The mark carries the distinction; the words carry the
+       meaning, at the row's own colour. */
+    .wiki-chain-gate-ok { color: var(--status-success); }
+    /* A handoff is a QUIET line between two sessions — one row, no title, no id
+       — so it is laid out like a merge row and coloured like a note. */
+    .wiki-chain-handoff {
+      flex-direction: row; align-items: baseline; gap: 6px;
+      font-size: 11.5px;
+    }
+    /* A ghost row: amber on the spine, the way .wiki-chain-bare is grey on it.
+       Same geometry (the negative margin is the chain's own border + padding),
+       so the row's text stays on the same x as every other row. */
+    .wiki-chain-ghost {
+      margin-left: -12px; padding-left: 10px;
+      border-left: 2px solid var(--wiki-prov-warn);
+    }
+    .wiki-chain-nostamp { font-size: 11px; color: var(--text-muted); }
+    /* The Stamp control. A real button with a border, because it is the ONE
+       thing on this strip that writes: everything else here reads.
+       NOT flex-shrink: 0 — the confirm label is 38 characters, and a button that
+       refuses to shrink pushed the id and its copy control out of the row at the
+       widths this reader is actually used at. The id row wraps instead (see
+       .wiki-chain-idrow), so the button keeps its full label on a line of its
+       own rather than taking the row with it. */
+    .wiki-chain-stamp {
+      border: 1px solid var(--wiki-prov-warn);
+      background: none; border-radius: 4px; padding: 1px 7px;
+      color: var(--text-muted); font-size: 11px; font-family: inherit; cursor: pointer;
+      text-align: left;
+    }
+    .wiki-chain-stamp:hover { color: var(--text-primary); }
+    .wiki-chain-stamp:disabled { cursor: default; opacity: 0.7; }
+    /* A refusal from the Stamp route. Its own span, never the button's label —
+       see stampGhost() in wiki-browser.ts. Hidden until there is something to
+       say; the [hidden] rule is spelled out for .wiki-prov-chain[hidden]'s reason. */
+    .wiki-chain-stamp-msg {
+      font-size: 11px; color: var(--text-muted);
+      min-width: 0; overflow-wrap: anywhere;
+    }
+    .wiki-chain-stamp-msg[hidden] { display: none; }
+    /* The line's ghost hint, after the marks. Same size and colour as the cost
+       sentence it follows — it is a second clause of the same line, not a badge. */
+    .wiki-prov-ghost-hint {
+      font-size: 11.5px; color: var(--text-muted);
+      min-width: 0; overflow-wrap: anywhere;
+    }
     .wiki-dates { font-size: 11.5px; color: var(--text-dim); }
     .wiki-source-url { font-size: 11.5px; color: var(--status-info); text-decoration: none; }
     .wiki-source-url:hover { text-decoration: underline; }

@@ -405,10 +405,11 @@ prs: [navikt/melosys-api#1234, RuneLind/muninn#543]
 
 **muninn NEVER writes them.** There is exactly ONE line-upsert implementation and
 it lives in claude-usage (`src/wiki-stamp.ts`, driven by `scripts/wiki-stamp.ts`);
-the Claude Code `PostToolUse` hook and the opencode plugin call it today, and
-muninn's own Link Jira is to shell out to the same CLI (`WIKI_STAMP_BIN`, a later
-PR) rather than grow a second writer. Two writers of one frontmatter line lose
-each other's appends — which is what the lockfile below exists for.
+the Claude Code `PostToolUse` hook and the opencode plugin call it, and muninn's
+**Stamp** route is its third caller — it SHELLS OUT to the same CLI
+(`WIKI_STAMP_BIN`, see the Stamp section below) rather than growing a second
+writer. Two writers of one frontmatter line lose each other's appends — which is
+what the lockfile below exists for.
 
 **The shape is checked in TWICE, byte for byte** —
 `src/wiki/__fixtures__/wiki-stamp-shape.md` here,
@@ -456,7 +457,7 @@ single key and make it re-warn an outage in its tenth hour. One call for
 every page anyone has actually stamped, but **not one by contract**: the batch
 size is the cap, and a page naming 250 sessions makes two.
 
-**THREE legs, ONE deadline, all started together.** Beside the session facts and
+**SIX legs, ONE deadline, TWO dependent hops at worst.** Beside the session facts and
 the huginn Jira lookup, a page open asks `GET <CLAUDE_USAGE_URL>/api/merges?sessions=…`
 for the PRs those sessions merged (`fetchMergesForSessions`, the same batching,
 the same id-shape gate, the same `SESSION_IDS_QUERY_MAX_BYTES` budget — the
@@ -470,6 +471,66 @@ beside it either unbounded or armed with a second timer — and awaiting that
 function before starting the new leg would make the page open sequential. The
 conditional creation is unchanged: a page with nothing to ask still arms no
 timer.
+
+The other four legs are PR 3's, and they all live in `pageProvenance` for the
+merges leg's reason:
+
+| Leg | Route | Input | Degrade |
+|---|---|---|---|
+| 3 | `/api/session-handoff?id=` ×N | each stamped id, in parallel | no handoff lines, no handoff ghosts; footer `handoffs not read` |
+| | | | ⚠️ a **404** is upstream's documented "no such session" and counts as an ANSWER with no handoff — `reachable` stays true and nothing warns. It used to read as a failed call, so a page whose ids the ledger does not hold (the `missing` chip state) rendered `handoffs not read` against a healthy service and minted one warn per id. |
+| 4 | `/api/merges?prs=` | the page's own `prs:` entries | no PR ghosts; footer `PR links not read: …` |
+| 5 | `/api/sessions-by-id` | the ghost ids legs 3+4 found | ghost rows id-only: no cost, no title, neutral glyph, no Stamp |
+| 6 | `/api/merges?sessions=` | the same ghost ids | ghost rows without their merge rows |
+
+Legs 1–4 start together; 5 and 6 hang off the **leg-3 and leg-4 promises
+only**, never off a `Promise.all` that also holds leg 1. Leg 1 is the huginn Jira
+corpus and gives up only at the SHARED deadline, so awaiting all four put it on
+the hop's critical path: on a page with a `jira:` key and a slow corpus the ghost
+legs started on an already-aborted signal and reported `reachable: false` against
+a claude-usage nobody asked. Measured at a 300 ms corpus, the hop fired at
+302 ms; at a 25 ms budget both ghost legs came back unreachable. **Leg 3 has no
+batch form** — `/api/session-handoff` takes one id — so it is N calls and is
+capped at `HANDOFF_READS_MAX` (10): a page past the cap reads NO handoff at all
+and the footer says so, rather than showing the first ten and being short for a
+reason nothing states. Ten measured 0.14–0.56 s wall for the whole parallel set.
+Leg 4's list is capped at `PR_READS_MAX` (10) client-side and filtered to the
+coordinate shape first — a malformed coordinate is a 400 for the WHOLE request
+upstream, so one typo in `prs:` must not take the leg down. `links`
+(`{handoffs, prs, ghostFacts, ghostMerges, handoffsCapped, prsCapped, timedOut}`)
+is what the footer reads; `timedOut` is the shared signal's own `aborted`, read
+once after the awaits rather than raced per leg.
+
+**A GHOST is a session the ledger links to the page that `sessions:` does not
+name**, and the two sources are not interchangeable. Through a HANDOFF: a stamped
+session's `ranBy` names it, which says only that it pasted the prompt — so the row
+says `ran this session's handoff — may not have touched this page` and its Stamp
+is a two-step confirm. Through a PR: `/api/merges?prs=` names the session that
+merged a PR the page itself lists — real evidence, so a one-click Stamp.
+Discovery is ONE hop (a ghost's own handoff is not read), ghosts ride their own
+`ghosts` array and are **never in the cost sentence's denominator**, and their
+`provider` goes through the ONE `claude → claude-code` mapping in
+`enrichSessions` so a bare stamped ref, a ghost glyph and a Stamp ref all agree.
+A provider the mapping's range does not hold renders the row with no Stamp and
+says which provider it was — but only when the ledger actually NAMED one. A chip
+the ledger never answered for (`unresolved`/`missing`/`invalid`) already carries
+its own reason from `bareChipCopy`, and `noStampReason` returns `null` there
+rather than adding "the ledger named no provider for this session" beside it: two
+sentences on one row, one saying the lookup never answered and the other
+reporting what the answer contained. `bareChipReason` is the predicate both use,
+so they cannot disagree about which state the chip is in.
+
+**The three sources of merge rows are deduped with `?sessions=` ahead of
+`?prs=`.** `dedupeMerges` is first-wins on
+`(sessionId, prNumber, mergedAt, repo)`; the caller's order is the stamped
+sessions' rows, then the GHOSTS' rows (also a `?sessions=` read), then the
+`?prs=` ones. The two forms can disagree about one merge — `?prs=` prefers the
+confirmed `merge-cmd` row where `?sessions=` may answer the `squash-composed` one
+— and with the `?prs=` rows in the middle, STAMPING a ghost moved its merge from
+third place to first and flipped the rendered gate verdict (`✓ review floor` →
+`no gate line` on a fixture where the forms differ). `repo` is in the key because
+without it two BARE merges (`prNumber` null, `mergedAt` null) from different
+repositories collapse into one.
 
 **The merges leg lives in `pageProvenance`, NOT in `resolveProvenance`.** The two
 reverse lookups share that function over up to `PROVENANCE_REFS_MAX` (1000)
@@ -639,7 +700,7 @@ campaign 2, and a half-built control is worse than none.
 Every string and every fragment of markup lives in **one pure module** — no DOM,
 no import from `wiki-browser.ts` — because that entrypoint touches `document` at
 import time and `bun test` cannot load it, so anything shaped there is provable
-only through Playwright. `costLine` has **eight outcomes**, enumerated in a table
+only through Playwright. `costLine` has **nine outcomes**, enumerated in a table
 test, and the pair that must never collapse is *asked and unreachable*
 ("claude-usage unreachable, cost unknown") against *never asked and unconfigured*
 ("no claude-usage on this host") — plus the third the server's `asked` flag exists
@@ -647,8 +708,29 @@ for, a page whose every id is damaged ("N session refs — none could be looked
 up"), and the fourth degrade the "over M of N" line used to swallow: a reachable
 ledger that priced NOTHING says "the ledger holds none of them" rather than
 `cost $0.00 in total over 0 of 1`, which is "we don't know" spelled as "it was
-free". `backfilled` appends `· inferred from history YYYY-MM-DD` to whichever line
-was built, degraded ones included: it qualifies the LIST, not the money. The bare
+free". The ninth is PR 3's: a page with NO stamped session but a ghost the ledger links
+says `the ledger links N sessions through #553 — $X`, which is what makes a
+`prs:`-only page render a strip at all (`provStripHtml`'s early return is keyed on
+the LINE, which is what let that state be added here rather than as a second
+condition there). It rides `with_` like the other eight, so `backfilled` is not
+dropped from the one state where it explains the most — why the page names no
+session of its own. A page that HAS stamped sessions says it as a separate hint
+after the marks instead (`ghostHint`), because the cost sentence is about the
+sessions the page stamped.
+
+**Both ghost sentences share `ghostLinkTail`, which COUNTS its sources and states
+its denominator.** An earlier cut read `links 3 sessions through #553 — $15.00`
+for a page whose three ghosts came through two PRs and a handoff, two of them
+priced: it named the FIRST ghost's link as if it were the only one, and the money
+read as the total for all three. Now: one PR is named (`through #553`), several
+are counted (`through 2 PRs`), handoffs are appended rather than dropped
+(`through #553 and a handoff`) since a handoff is the weaker evidence and the
+sentence must not hide which kind it rests on, and a session id is never named
+(the reader has no way to place one). The money carries ` over M of N` whenever
+`M < N`, and no amount at all when nothing is priced — a ghost with no cost is not
+a $0 session. Rounding happens once, in `money`'s own `toFixed(2)`. `backfilled` appends `· inferred from history YYYY-MM-DD`
+to whichever line was built, degraded ones included: it qualifies the LIST, not the
+money. The bare
 reasons come from the server's own `bareChipReason`, imported rather than
 re-derived, and each of the three gets its own sentence — `missing` is a session
 that is gone, `unresolved` one nobody asked about. **`unresolved` splits on
@@ -703,6 +785,14 @@ merge whose squash message was composed here, and a `gh pr merge` whose result
 was never paired — so dropping them would hide the NAV flow's merges entirely
 (measured 20 of 179 rows false, 2026-09-16).
 
+**Each of PR 3's legs fails on its own too**, and `linksNotes` adds one footer
+line per leg that has something to report: `handoffs not read`, `PR links not read:
+claude-usage did not answer`, `handoff lines not shown: this page names more than
+10 sessions`, `PR links read for the first 10 entries only`, and `some ledger reads
+timed out` when the shared deadline fired mid-fan-out. Legs 5 and 6 report nothing
+there: their degrade is already on screen as an id-only ghost row, and a footer
+line about it would describe a row the reader can see.
+
 **The merges leg fails on its own, and says so in one footer line.** `mergesNote`
 answers most-severe first: `merges not shown: claude-usage did not answer` for a
 leg that was asked and got nothing, `merges may be incomplete: claude-usage
@@ -719,11 +809,36 @@ batches at exactly `SESSION_IDS_PER_CALL` (200), which is upstream's own
 per CALL, so no call this side makes can trip it. It is upstream's cap that
 decides, and it can move in a release muninn does not ship.
 
+**A session row also carries `· <model>` after the host and `· $Y delegated`
+after the cost** where the ledger sent them. The model renders SHORT — one rule,
+`modelLabel`: drop a trailing `-YYYYMMDD` release stamp and keep the family — with
+the raw id on the row's `title`, because which build answered is a fact worth
+reading exactly. `delegatedCost` is a SLICE of the total, never an addition, so it
+renders only beside a cost.
+
+**A merge row carries the pipeline ledger's own gate verdict**, `gateVerdict`,
+five outcomes in this order: nothing at all for a `gate: null` row (a bare
+`gh pr merge`, where upstream deliberately left the data out), `gate not matched`
+for `{matched: false}` (the join found no ledger row, which is not "ungated"),
+`✓ review floor + split check` for a gated one (the kinds it carried, in the
+ledger's own `ASSOCIABLE_GATE_KINDS` order, with an unknown kind named raw rather
+than dropped), `no gate data before <date>` for a `preStandardization` row, and
+`no gate line` otherwise. `preStandardization` sits BELOW gated and ABOVE
+`no gate line` because it qualifies an ABSENCE — a 2026-06 merge has no gate data
+to be missing, and calling it `no gate line` reads as a verdict about the merge.
+The date is the merges envelope's own `rulesStandardizedDate`, carried rather than
+restated.
+
+**A handoff is a quiet row between two sessions**, sorted on the instant the later
+session typed the prompt — which is what puts it between them — with both ids on
+the hover. A GHOST row is amber on the spine the way a bare row is grey, says what
+its evidence is, and carries the Stamp (see above) when `stampable`.
+
 **The marks on the collapsed line are capped at `MARKS_MAX` (24), with one `+N`
 tail mark carrying the rest on a hover.** Over the cap, the slots are reserved
 PER KIND before they are filled: every kind present gets `floor(24 / kinds)`, and
 what a kind does not need of its share passes on in render order (sessions, then
-merges). That reservation is why a page of 250 sessions and one merge still shows
+GHOSTS — a dashed ring — then merges). That reservation is why a page of 250 sessions and one merge still shows
 the merge — sliced off one sessions-then-merges run it showed `session=24,
 merge=0`, deleting the merges leg's whole contribution to the line. MEASURED on
 a 60-session page in a 1100 px window: the marks are one inline-flex run beside
@@ -749,12 +864,38 @@ to repaint from it; with that section gone nothing read it, and a cleared-on-
 navigation variable nobody reads is a stale-state trap waiting for its first
 reader.
 
-`wiki-browser.ts` wires three delegated controls on the document, all delegated
+`wiki-browser.ts` wires four delegated controls on the document, all delegated
 because `#articleWrap`'s innerHTML is replaced on every page load: the Jira key
 (`[data-prov-jira]`), the ⧉ copy button (`[data-sess-copy]`, which keeps its
-contract from the rail rows) and the disclosure (`[data-prov-toggle]`). The copy
-button is checked BEFORE the disclosure, since it sits inside the chain the line
-opens. `toggleProvChain` reads and writes the DOM only — `aria-expanded` on the
+contract from the rail rows), the Stamp (`[data-prov-stamp]`) and the disclosure
+(`[data-prov-toggle]`). The copy button and the Stamp are checked BEFORE the
+disclosure, since both sit inside the chain the line opens. The two-step confirm
+for a handoff ghost lives on the BUTTON rather than in a module flag, for
+`toggleProvChain`'s reason: the strip is re-rendered from scratch on every page
+load, so a flag would outlive the element it described. `data-prov-stamp-confirm`
+is the SERVER's static fact ("this ghost needs confirming") and
+`data-prov-stamp-armed` is the press that answered it — three failures came from
+having only the first:
+
+- **A double-click delivered both presses.** `dblclick` fires two `click` events
+  milliseconds apart, so the confirm was armed and consumed inside one gesture
+  and the write happened with the confirmation never on screen. Arming now
+  DISABLES the button for `STAMP_ARM_MS` (500 ms), which drops the second click
+  of a double-click and not a deliberate second press.
+- **A failure disarmed it permanently.** The first press REMOVED the attribute,
+  so after a 409 the next single click wrote with no confirmation at all. Every
+  non-success path now runs `resetStampButton` — label back to `Stamp`, armed
+  flag cleared, button live — so a retry asks again.
+- **A 200 with no `provenance` disabled it forever.** The re-resolve can
+  legitimately answer nothing; the button now re-enables and `refetchProvStrip`
+  re-reads `GET /api/wiki/page`.
+
+A 200 WITH a block redraws the strip in place from the route's own re-resolved
+payload, with the chain left OPEN since the reader was reading it. A refusal goes
+into its own `.wiki-chain-stamp-msg` span (`[data-prov-stamp-msg]`, rendered empty
+and `hidden` by the view so the class is one spelling), written with
+`textContent` — never into the button's LABEL, which is what made a failed Stamp
+rename the control to a sentence. `toggleProvChain` reads and writes the DOM only — `aria-expanded` on the
 button, `hidden` on the element `aria-controls` names — rather than a module
 flag, which would outlive the element it described and report the wrong state on
 the next page. Each ⧉ copies the bare id through the shared
@@ -796,6 +937,206 @@ browser), answers three merges covering the linked / unlinked / unconfirmed
 shapes, and refuses `/api/merges` for one page's session so the footer degrade is
 driven through a real page open. The spec pins `timezoneId`, since every rendered
 stamp it asserts is otherwise a fact about the machine.
+
+### Stamp (`POST /api/wiki/provenance/stamp`, `routes/wiki-stamp.ts`, `stamp-roots.ts`)
+
+The ONE write the provenance feature makes, and muninn still writes no
+frontmatter line: the route spawns claude-usage's CLI exactly as the hook does,
+plus `--report`:
+
+```
+<WIKI_STAMP_BUN|bun> <WIKI_STAMP_BIN> --session <ref> --file <abs> --report
+```
+
+through the shared bounded spawn helper (`src/utils/run-proc.ts`, hoisted out of
+`src/video/media.ts` so a wiki route does not import the capture-vertical graph;
+both its streams are capped at `RUN_PROC_MAX_OUTPUT_BYTES` (8 MB, the
+claude-usage read cap) because the drain buffers the whole stream in this
+process).
+
+**The child env is an ALLOWLIST** — `PATH`, `HOME`, `TMPDIR` and
+`WIKI_STAMP_ROOTS`, built by `stampChildEnv`. `WIKI_STAMP_BIN` names a `.ts` file
+chosen by an environment variable, so the child is as trusted as whoever set that
+variable and no more; `{ ...process.env, … }` handed it everything muninn holds
+— how much is measured ONCE, in `stampChildEnv`'s docstring, which is the only
+place that count lives (it is a fact about one machine at one moment, and two
+independent counts of it disagreed). The three
+inherited names are what the CLI needs to RUN — `PATH` so the interpreter is
+findable (a bare `{ WIKI_STAMP_ROOTS }` drops it and lands every Stamp in the 502
+bucket with an empty stderr), `HOME` for its skip record, `TMPDIR` for
+`writeAtomic`'s sibling temp file. A test asserts `PATH` and `WIKI_STAMP_ROOTS`
+present and `DATABASE_URL` absent.
+
+Checks, in order, each BEFORE any spawn:
+
+0. **The request itself**, `decideStampRequest` — see "Route-local CSRF" below.
+1. `ref` against a copy of the CLI's `SESSION_REF_RE`
+   (`/^[a-z][a-z0-9-]*:[A-Za-z0-9._-]{1,128}$/`) ⇒ **400** `bad-ref`. SHAPE only;
+   the CLI stays the authority on meaning. It removes a wasted spawn, a NUL in
+   `ref` (which `Bun.spawn` throws SYNCHRONOUSLY for, and which used to be
+   reported as `stamp-timeout`) and a newline splitting this route's own success
+   log line.
+2. `wiki` present but not a string ⇒ **400**. `typeof` alone read it as `""`,
+   which means "the default wiki" — a write to a page the caller never named.
+3. `isPathConfined(relPath, { domain: "ai", kind: "concept", existingRelPath: relPath })`
+   against the resolved root — the exact form `writeWikiPage` uses; without
+   `existingRelPath` the helper refuses every page outside `expectedDir`, the
+   acceptance page included. Outside ⇒ **400**.
+4. **Realpath containment** ⇒ **400** `outside-root`. `isPathConfined` is
+   LEXICAL, so a symlink inside the wiki that points outside it passes it:
+   measured, `<root>/link.md -> /tmp/x.md` reached the CLI. Both sides are
+   resolved the way the CLI's own `realOf` resolves them (the directory always,
+   the file itself when it is a link), and the RESOLVED path is what is handed
+   down — so muninn's gate and the CLI's classification ask about the same bytes,
+   and nothing downstream re-derives a path from `relPath`. A page whose
+   DIRECTORY is not on disk is **not** an escape: `realPageOf` resolves the
+   deepest ancestor that exists and re-appends the spelled tail, so a typo'd
+   folder reaches the CLI and comes back as **409 `missing-file`** — "no such
+   page", which is what it is. (muninn resolves one step FURTHER than the CLI's
+   `realOf`, which gives up at the first unresolvable directory; resolving more
+   is the safe direction, and it is what keeps a wiki under a symlinked
+   `/var/folders/…` root from being refused as outside its own root.) One
+   branch this resolves LESS strictly than round 1 did: a DANGLING symlinked
+   directory inside the wiki (`<root>/d -> /outside/nodir`) has no real path to
+   resolve, so the spelled tail is re-appended under the root and the request
+   reaches the CLI, which refuses it itself — `outside-roots` if the target ever
+   exists, `missing-file` otherwise (`scripts/wiki-stamp.ts` `classifyPath`).
+   muninn's gate is not the last check on that branch; the CLI's is.
+5. `isWikiReadonly()` / `isReadonlyWikiRoot(root)` ⇒ **403**. AFTER the
+   confinement, unlike `writeWikiPage`: deliberate, so a traversal never reaches
+   the read-only test with an unresolved root.
+6. `WIKI_STAMP_BIN` or `WIKI_STAMP_ROOTS` unset ⇒ **501** naming the variable.
+   Below the 403, because an instance that must not write is unwritable however
+   it is configured.
+7. `isStampRoot(root, config.roots)` ⇒ **409** `not-a-stamp-root`. The equality
+   rule below, enforced SERVER-SIDE. `stampable` on the payload is the same
+   predicate, but it only hides a button: without this check a wiki registered at
+   `<stamproot>/sub` answered `200 written` while the same instance's payload said
+   `stampable: false` — two writers, two lock files, the lost append. A 409 rather
+   than a 403 because the request is well-formed and permitted and the
+   instance's CONFIGURATION is what refuses it.
+
+**The `wiki` name resolves the way the READ routes resolve it.**
+`resolveWikiRequest` returns no registry entry for the `WIKI_DIR` env-override
+shape (`{envOverride: true, entry: undefined, unknownWiki: false}`), so a guard
+keyed on the entry answered "no wiki configured for that name" on an instance
+where no name was sent. The root is `entry?.root ?? resolveWikiRoot(undefined)`,
+which is what `getWikiIndex` resolves through — and `wiki-routes.ts` passes the
+same `resolveWikiRoot(entry?.root)` into `pageProvenance`, so `stampable` is
+computed against the root that is actually served rather than `undefined`.
+
+#### Route-local CSRF (`decideStampRequest`)
+
+The route is **admin-zone by default-deny** (no `zones.ts` entry) and covered by
+the global side-effect check in `auth/origin.ts` — **in an authenticating mode**.
+With `MUNINN_AUTH=off` it is covered by nothing: `src/index.ts` mounts the auth,
+origin and zone middlewares only when `isAuthenticatingMode(auth.mode)`, and
+`off` is the one instance shape that can actually write. Measured against a live
+`off` server: a page on another origin appended a ref with
+`fetch(url, {mode: "no-cors", headers: {"content-type": "text/plain"}})`, which
+needs no preflight. So the route carries its own pure check, independent of the
+mode, with three rules:
+
+| rule | refusal |
+|---|---|
+| `content-type` is not `application/json` (parameters allowed) | **415** `unsupported-content-type` |
+| `Sec-Fetch-Site: cross-site` or `same-site` | **403** `cross-origin` |
+| an `Origin` that is not the request's own `Host` authority | **403** `cross-origin` |
+
+Rule 1 is the one that closes it: a cross-origin `fetch` cannot set that header
+without a CORS preflight, muninn answers no CORS headers, and the three types a
+no-cors request or a `<form>` MAY set are exactly the three this refuses — the
+same 415 `jira-routes.ts` mitigated its own measured cross-origin `text/plain`
+POST with. ⚠️ Rule 3 compares `Origin` to `Host`, which `auth/origin.ts`
+explicitly REFUSES to do for the global middleware (a DNS-rebound name the
+attacker owns satisfies it). That argument holds here too: rule 3 is not the
+defence, rules 1 and 2 are. It is kept because it refuses the plain cross-origin
+POST one step earlier with a readable reason, and under `off` there is no
+`MUNINN_ALLOWED_ORIGINS` to check against at all. **The other muninn write routes
+share this exposure under `off`** — a class follow-up, out of this route's scope.
+
+**Behind `tailscale serve`, rule 3 passes as written — MEASURED** (2026-09-17,
+the author's laptop): the proxy passes `Host:` through UNCHANGED as the tailnet
+name (`rune-macbook-pro-m4-max.tail7b311e.ts.net`), adds `X-Forwarded-Host` with
+the same value and `X-Forwarded-Proto: https`, and a browser on that page sends
+`Origin: https://<that host>`. So `Origin` and `Host` name one authority under
+two schemes, which is exactly what `originMatchesHost` compares host+port for.
+Nothing reads `X-Forwarded-*`: a forwarding header is client-settable on a direct
+request, so trusting one would hand the comparison to the caller. No code change
+came of the measurement; the proxied shape is a unit case.
+
+**A refusal warns ONCE per reason, then logs `info`.** These refusals are
+precisely what a cross-origin page produces, and nothing rate-limits it. The
+change is to the CONSOLE only: the JSONL file sink writes `info` as well, so it
+still receives one line per refused POST (measured 2026-09-17: 120 POSTs, 114
+lines). A request-rate cap for refused writes is a follow-up shared with every
+muninn write route reachable under `MUNINN_AUTH=off`; `ws-upgrade.ts` and
+`introspect.ts` return without logging, a different discipline.
+
+The CLI **always exits 0 and prints nothing without `--report`** (its banner
+invariant), but only once it runs — so the route parses the LAST stdout line as
+JSON and treats the exit code as information only when there is no report line:
+
+| CLI result | Route |
+|---|---|
+| `written` | 200 + the RE-RESOLVED `provenance` block, so the client redraws with no second fetch |
+| `unchanged` (`already-stamped`) | 200, same body — the append is idempotent |
+| `skipped` | 409 `{reason}`, the CLI's own reason verbatim (`outside-roots`, `lock-timeout`, …) |
+| no parseable report line | 502 `{exitCode, stderr: <first line>}` |
+| the CLI printed more than `RUN_PROC_MAX_OUTPUT_BYTES` (8 MB) BEFORE its report line | 502, as "no parseable report line" — a stated limitation, see below |
+| a report naming a different `path` than the one asked for | 502 `{reason: "path-mismatch"}` |
+| muninn's own spawn timeout (`ProcTimeoutError`) | 409 `{reason: "stamp-timeout"}` |
+| any OTHER throw out of the spawn | 502 `{error, exitCode: null}` |
+
+The last two rows used to be one. `Bun.spawn` throws SYNCHRONOUSLY for an argv it
+cannot build or a binary it cannot execute — a NUL in `ref` failed in ~10 ms —
+and reporting that as "the CLI did not return" sends an operator looking for a
+wedged child that never existed. `runProc` rejects with a typed `ProcTimeoutError`
+so the two are told apart by type rather than by matching a message string.
+**The 8 MB cap can eat the answer, and that is the accepted trade.** `runProc`
+CANCELS a stream at the cap rather than draining it, so a CLI that printed 8 MB
+before its report line loses the report and the Stamp answers 502 — a write that
+may well have happened, reported as a failure. The cap is not negotiable (the
+drain buffers in the dashboard's event loop and a fast writer reaches gigabytes
+inside the 15 s budget), and the CLI's own banner invariant is that `--report`
+prints ONE line and nothing else, so 8 MB of preamble is already a bug in the
+child. The retry is safe: the append is idempotent and answers `unchanged`.
+
+The `path-mismatch` row reads back the report's own `path`: the CLI was given one
+file and nothing else, so a different one means the two sides do not agree about
+which page was just written, which is the one thing a success must never hide. An
+ABSENT `path` is tolerated (an older CLI printed none).
+
+**After a `written` report the wiki index is REFRESHED before the re-resolve**
+(`getWikiIndex({ root, refresh: true })`, the step `defaultPageWriteIo` runs for
+muninn's own writes): `pageProvenance` reads `sessions:` off the TTL-cached index,
+so without it the cache answers the pre-stamp frontmatter and the row stays amber
+— the inert-fix shape, green in every test that does not open the page.
+
+**No `baseHash` crosses the wire**: the append is idempotent
+and the CLI holds the same per-root lock muninn's writers take across its whole
+read-modify-write. A Stamp retires `sessions_backfilled` (the CLI does it), so the
+`· inferred from history` tail leaves the cost line on the re-resolve.
+
+**`stampable`** is a boolean on the payload beside `ledger`, and false hides every
+Stamp button:
+
+```
+WIKI_STAMP_BIN && WIKI_STAMP_ROOTS && wikiDir EQUALS one of the parsed roots
+  && !isWikiReadonly() && !isReadonlyWikiRoot(wikiDir)
+```
+
+**EQUALITY, not containment** (`stamp-roots.ts`): the CLI locks the longest
+matching STAMP root and muninn locks the WIKI root, so a wiki registered at a
+strict subdirectory of a stamp root gets two different lock files and no mutual
+exclusion — the lost-append the single-writer rule exists to prevent, and what
+makes "nothing for a hash to protect" true. `…/mimir-old` is not `…/mimir` and
+`…/mimir/plans` is not `…/mimir`; both are false, and both would be true under
+the prefix tests this replaces. muninn re-implements the roots parse rather than
+importing it (`:`-separated like `PATH`, relative entries dropped, `/` refused,
+normalized, deduped — `claude-usage/src/wiki-stamp.ts`'s `parseRoots` semantics).
+The mini — a stamping host with both variables set AND `MUNINN_WIKI_READONLY=1` —
+is the case that makes the read-only half necessary.
 
 ### The cross-process lockfile (`lockfile.ts`)
 
@@ -843,7 +1184,13 @@ create and our write. ⚠️ **The fence is ONE-SIDED today**: `wiki-stamp` writ
 empty lockfile and unlinks unconditionally, so it can still drop a lock muninn
 holds once muninn's has aged past the stale window. Follow-up in claude-usage
 (write an owner line, verify before unlinking); until then this half stops muninn
-from being the one that does it.
+from being the one that does it. ⚠️ **The Stamp route makes that one-sidedness
+READER-TRIGGERABLE**: until PR 3 the CLI only ran from a `PostToolUse` hook on
+this machine's own tool calls, and it now also runs whenever a reader presses
+Stamp. The exposure is unchanged in KIND (the same CLI, the same unconditional
+unlink) and landed as-is; what changed is who can time it. The window needs
+muninn's own lock to have aged past `WIKI_LOCK_STALE_MS` (10 s) first, which a
+wiki write does not do in normal operation.
 
 Three rules are load-bearing:
 

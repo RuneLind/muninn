@@ -100,6 +100,49 @@ export function parseSessionRef(raw: string): SessionRef {
   return { ref, provider: ref.slice(0, at), id: ref.slice(at + 1) };
 }
 
+/**
+ * The ledger's `provider` → the `provider:` prefix the stamper writes.
+ *
+ * ONE mapping, applied in {@link enrichSessions} and nowhere else, so a bare
+ * stamped ref, a ghost row and a Stamp ref all agree about which provider a
+ * session belongs to. The ledger spells Claude Code `claude`; the frontmatter
+ * spells it `claude-code`, which is what `providerGlyph` knows and what
+ * `wiki-stamp`'s `SESSION_REF_RE` accepts.
+ *
+ * An UNKNOWN provider is passed through rather than dropped: the row still says
+ * what the ledger reported, it simply gets the neutral glyph and no Stamp.
+ */
+export const LEDGER_PROVIDER_PREFIX: Readonly<Record<string, string>> = Object.freeze({
+  claude: "claude-code",
+  opencode: "opencode",
+});
+
+/** The prefixes `wiki-stamp` is ever asked to write — the mapping's RANGE, so a
+ *  value the mapping does not produce can never become a ref. */
+export const STAMPABLE_PROVIDERS: ReadonlySet<string> = new Set(
+  Object.values(LEDGER_PROVIDER_PREFIX),
+);
+
+/** The mapped provider, or null when the ledger named none. */
+export function mapLedgerProvider(provider: string | null | undefined): string | null {
+  if (typeof provider !== "string" || !provider) return null;
+  return LEDGER_PROVIDER_PREFIX[provider] ?? provider;
+}
+
+/**
+ * The ref a Stamp would write for this chip, or null when there is no prefix
+ * this pipeline stamps.
+ *
+ * Null is a rendered outcome, not a failure: the row says which provider the
+ * ledger reported and offers no button, because a ref the CLI refuses
+ * (`bad-ref`) is a click that can only ever 409.
+ */
+export function stampRefFor(chip: { provider: string | null; id: string }): string | null {
+  return chip.provider && STAMPABLE_PROVIDERS.has(chip.provider)
+    ? `${chip.provider}:${chip.id}`
+    : null;
+}
+
 /** Does a `sessions:` entry name this session? Accepts either form of the
  *  query — `provider:id` or the bare id — so a reader pasting what it copied
  *  from a chip and a caller holding a ledger id both resolve. */
@@ -185,6 +228,24 @@ export interface ProvenanceSessionChip extends SessionRef {
   cost: number | null;
   messages: number | null;
   /**
+   * The ledger's top priced model for the session, RAW (`claude-opus-5`,
+   * `claude-sonnet-4-5-20250929`). The renderer shortens it and keeps the raw id
+   * on the hover — a model id is a fact worth being able to read exactly.
+   */
+  model: string | null;
+  /**
+   * USD spent by this session's SUBAGENTS — every agent that is not the main
+   * loop, implementers included, which is why it is named delegated rather than
+   * review. A SLICE of {@link cost}, never an addition to it.
+   */
+  delegatedCost: number | null;
+  /**
+   * Set only on a GHOST — a session the ledger links to this page that the
+   * page's `sessions:` list does not name. Absent on every stamped chip, which
+   * is what the renderer keys the amber row and the Stamp button on.
+   */
+  ghost?: ProvenanceGhostLink;
+  /**
    * The ledger ANSWERED and does not hold this id — it was reaped, or it belongs
    * to another host. A conclusion about the session, so it is set only when the
    * batch carrying this id came back.
@@ -208,6 +269,120 @@ export interface ProvenanceSessionChip extends SessionRef {
   /** Deep link into claude-usage's session drill-down, present only when the
    *  operator set `CLAUDE_USAGE_PUBLIC_URL` on this instance. */
   url?: string;
+}
+
+/** How the ledger linked a ghost to this page. */
+export type GhostVia = "handoff" | "pr";
+
+/**
+ * A ghost's evidence, carried on its chip.
+ *
+ * The two sources are NOT interchangeable and the renderer must be able to tell
+ * them apart: a PR ghost merged a pull request the page's `prs:` line names,
+ * which is evidence about this page; a handoff ghost only pasted a stamped
+ * session's handoff prompt, which says nothing about whether it touched the
+ * page at all — so its Stamp is a two-step confirmation.
+ */
+export interface ProvenanceGhostLink {
+  via: GhostVia;
+  /**
+   * What the link is THROUGH, already in display form: `#553` (or `a merged PR`
+   * for a row the ledger gave no number) for a PR ghost, and the bare id of the
+   * stamped session whose handoff it ran for a handoff ghost.
+   */
+  through: string;
+  /** The ref a Stamp would write, or null when the ledger's provider is not one
+   *  this pipeline stamps (see {@link stampRefFor}). */
+  stampRef: string | null;
+}
+
+/** One session handing off to the next: the earlier session's handoff prompt was
+ *  run by the later one (`ranBy`, claude-usage `/api/session-handoff`). */
+export interface ProvenanceHandoff {
+  /** Bare id of the session whose handoff was run. */
+  from: string;
+  /** Bare id of the session that ran it. */
+  to: string;
+  /** When the later session typed it, or null when the ledger gave no instant. */
+  at: string | null;
+  host: string | null;
+}
+
+/** One `ranBy` entry, as narrowly as this layer needs it. */
+export interface HandoffRun {
+  sessionId: string;
+  at?: string | null;
+  host?: string | null;
+}
+
+/**
+ * Flatten `id → ranBy[]` into links, oldest first.
+ *
+ * A self-link is dropped: a transcript that replays its own handoff prompt names
+ * itself, and "this session handed off to itself" is a line about nothing.
+ * A DATELESS link sorts last, the same rule `chainEvents` states for an undated
+ * event — an instant is the only thing that gives a link a position.
+ */
+export function handoffLinks(
+  perSession: ReadonlyMap<string, readonly HandoffRun[]>,
+): ProvenanceHandoff[] {
+  const links: ProvenanceHandoff[] = [];
+  for (const [from, runs] of perSession) {
+    for (const run of runs ?? []) {
+      if (!run?.sessionId || run.sessionId === from) continue;
+      links.push({
+        from,
+        to: run.sessionId,
+        at: typeof run.at === "string" ? run.at : null,
+        host: typeof run.host === "string" ? run.host : null,
+      });
+    }
+  }
+  return links
+    .map((link, i) => ({ link, i, ms: link.at ? Date.parse(link.at) : NaN }))
+    .sort((a, b) => {
+      const av = Number.isFinite(a.ms);
+      const bv = Number.isFinite(b.ms);
+      if (!av || !bv) return av === bv ? a.i - b.i : av ? -1 : 1;
+      return a.ms === b.ms ? a.i - b.i : a.ms - b.ms;
+    })
+    .map(({ link }) => link);
+}
+
+/** An id the ledger links to this page that `sessions:` does not name. */
+export interface GhostCandidate {
+  /** Bare session id. */
+  id: string;
+  via: GhostVia;
+  through: string;
+}
+
+/**
+ * Which ids are ghosts, in render order.
+ *
+ * **PR ghosts first.** A merge is evidence about this page (it landed a PR the
+ * page names); a handoff is evidence about a prompt. An id reachable both ways
+ * therefore keeps the PR link — first-wins over a list that puts the PR rows
+ * first is what decides it, rather than a precedence rule stated twice.
+ */
+export function ghostCandidates(opts: {
+  stampedIds: readonly string[];
+  prMerges: readonly ProvenanceMerge[];
+  handoffs: readonly ProvenanceHandoff[];
+}): GhostCandidate[] {
+  const stamped = new Set(opts.stampedIds);
+  const seen = new Set<string>();
+  const out: GhostCandidate[] = [];
+  const add = (id: string, via: GhostVia, through: string) => {
+    if (!id || stamped.has(id) || seen.has(id)) return;
+    seen.add(id);
+    out.push({ id, via, through });
+  };
+  for (const merge of opts.prMerges) {
+    add(merge.sessionId, "pr", merge.prNumber === null ? "a merged PR" : `#${merge.prNumber}`);
+  }
+  for (const link of opts.handoffs) add(link.to, "handoff", link.from);
+  return out;
 }
 
 /** Which of the three bare reasons applies, or null for a priced chip. The one
@@ -326,7 +501,34 @@ export interface ProvenanceMerge {
    * dropped. Dropping them would hide the NAV flow's merges entirely.
    */
   mergeOk: boolean;
+  /**
+   * The pipeline ledger's own gate verdict for this merge, as one union:
+   *
+   *  - `null` — the row has no PR number (a bare `gh pr merge`). Upstream's own
+   *    deliberate simplification, so this renders NOTHING rather than a verdict
+   *    about data that was left out.
+   *  - `{matched: false}` — a PR-numbered row no ledger row claimed. Rendered as
+   *    `gate not matched`, never as nothing: "no gate was stated" and "the join
+   *    found no row to ask" are different facts.
+   *  - `{matched: true, …}` — the verdict `/api/pipeline` shows.
+   *
+   * `gates` is the KINDS the ledger associated, in its own order; muninn keeps
+   * the keys and drops the quotes, which are a transcript excerpt no row renders.
+   */
+  gate: ProvenanceMergeGate;
+  /**
+   * The merge predates the standardized gate phrases, DECIDED UPSTREAM against
+   * its own constant. It is what lets a row say "no gate data before <date>"
+   * instead of rendering a 2026-06 merge as ungated.
+   */
+  preStandardization: boolean;
 }
+
+/** See {@link ProvenanceMerge.gate}. */
+export type ProvenanceMergeGate =
+  | { matched: true; gated: boolean; gatedBy: string | null; gates: string[] }
+  | { matched: false }
+  | null;
 
 /**
  * Whether the merges leg ran and what it got — deliberately NOT folded into
@@ -372,8 +574,80 @@ export const MERGES_NOT_ASKED: ProvenanceMergesState = Object.freeze({
   truncated: false,
 });
 
+/**
+ * How many of a page's stamped sessions leg 3 reads a handoff for.
+ *
+ * `/api/session-handoff` is ONE call per session — the route has no batch form —
+ * so this is the only bound on that fan-out. Ten measured 0.14–0.56 s wall for
+ * the whole parallel set from the laptop (per call 0.08–0.37 s warm, ~1 s cold),
+ * which sits inside the page's own 10 s budget with room for the other legs. A
+ * page past it renders the chain WITHOUT handoff lines and says so, rather than
+ * rendering the first ten silently.
+ */
+export const HANDOFF_READS_MAX = 10;
+
+/** How many `prs:` entries leg 4 asks about. The route caps at 200 of its own
+ *  and reports `truncated`; this is the client-side bound on a page that lists
+ *  more coordinates than a reader can act on. */
+export const PR_READS_MAX = 10;
+
+/** One optional leg's outcome: whether it was sent, and whether anything came
+ *  back. The same `asked` / `reachable` split the two batched legs carry, at the
+ *  size the chain's footer actually reads. */
+export interface ProvenanceLegState {
+  asked: boolean;
+  reachable: boolean;
+}
+
+/** A leg that never ran. Frozen for `LEDGER_NOT_ASKED`'s reason — handed out by
+ *  reference on every page open that skips it. */
+export const LEG_NOT_ASKED: ProvenanceLegState = Object.freeze({ asked: false, reachable: false });
+
+/** How the four PR-3 legs went, and the two bounds a reader has to be told about. */
+export interface ProvenanceLinksState {
+  /** Leg 3 — `/api/session-handoff?id=` per stamped session. */
+  handoffs: ProvenanceLegState;
+  /** Leg 4 — `/api/merges?prs=` over the page's own `prs:` list. */
+  prs: ProvenanceLegState;
+  /** Leg 5 — `/api/sessions-by-id` over the ghost ids. */
+  ghostFacts: ProvenanceLegState;
+  /** Leg 6 — `/api/merges?sessions=` over the ghost ids. */
+  ghostMerges: ProvenanceLegState;
+  /** The page names more stamped sessions than leg 3 reads, so the handoff lines
+   *  are a subset — said out loud rather than silently short. */
+  handoffsCapped: boolean;
+  /** The page's `prs:` list is longer than leg 4 asks about. */
+  prsCapped: boolean;
+  /** The shared deadline fired while a leg was still in flight. */
+  timedOut: boolean;
+}
+
+/** The links state for a page open that ran none of the four legs. */
+export const LINKS_NOT_ASKED: ProvenanceLinksState = Object.freeze({
+  handoffs: LEG_NOT_ASKED,
+  prs: LEG_NOT_ASKED,
+  ghostFacts: LEG_NOT_ASKED,
+  ghostMerges: LEG_NOT_ASKED,
+  handoffsCapped: false,
+  prsCapped: false,
+  timedOut: false,
+});
+
 export interface ProvenancePayload {
   sessions: ProvenanceSessionChip[];
+  /**
+   * Sessions the LEDGER links to this page that `sessions:` does not name, in
+   * render order (PR ghosts first). Never in the cost sentence's denominator —
+   * `costOfSessions` is over `sessions` alone — because a ghost is a link, not a
+   * claim that it wrote the page.
+   */
+  ghosts: ProvenanceSessionChip[];
+  /** The handoff links between the page's sessions and the ghosts, oldest
+   *  first. */
+  handoffs: ProvenanceHandoff[];
+  /** Whether this instance may offer a Stamp for this page at all — see
+   *  `stamp-roots.ts`. False hides every Stamp button. */
+  stampable: boolean;
   jira: ProvenanceJira[];
   prs: PrRef[];
   /** The PRs the page's sessions merged, in the ledger's own order. Empty when
@@ -389,6 +663,15 @@ export interface ProvenancePayload {
   ledger: ProvenanceLedgerState;
   /** The merges leg's own state. See {@link ProvenanceMergesState}. */
   mergesLedger: ProvenanceMergesState;
+  /** The four PR-3 legs. See {@link ProvenanceLinksState}. */
+  links: ProvenanceLinksState;
+  /**
+   * The Oslo date from which the gate phrases are machine-parsed, straight off
+   * the merges envelope. It is what a `preStandardization` row names, so it is
+   * carried rather than restated — a date typed into muninn would be a second
+   * spelling of a constant that lives in claude-usage.
+   */
+  rulesStandardizedDate?: string;
 }
 
 /** What `enrichSessions` needs of a ledger answer — the narrowest shape, so the
@@ -404,6 +687,8 @@ export interface LedgerFactsView {
       last?: string | null;
       cost?: number | null;
       messages?: number | null;
+      model?: string | null;
+      delegatedCost?: number | null;
     }
   >;
   /** Ids whose batch never answered. */
@@ -440,6 +725,8 @@ export function enrichSessions(
         last: null,
         cost: null,
         messages: null,
+        model: null,
+        delegatedCost: null,
         // A bare chip is `missing` only when the ledger actually answered about
         // it. `invalid` and `unresolved` are the two ways it never did.
         missing: !invalid && !unresolved,
@@ -455,7 +742,11 @@ export function enrichSessions(
       // older stamp (or a hand-written line) carries no prefix at all. A ref that
       // DOES name a provider keeps its own: that spelling is what the page says
       // and what a `?session=` link round-trips.
-      provider: ref.provider ?? (typeof facts.provider === "string" ? facts.provider : null),
+      // ...through the ONE ledger-provider mapping, so `claude` — the only
+      // spelling the real ledger emits — reaches the glyph and the Stamp ref as
+      // `claude-code`. Applied here rather than per caller: a ghost, a bare
+      // stamped ref and a Stamp ref must agree.
+      provider: ref.provider ?? mapLedgerProvider(facts.provider),
       missing: false,
       unresolved: false,
       invalid: false,
@@ -465,6 +756,10 @@ export function enrichSessions(
       last: facts.last ?? null,
       cost: typeof facts.cost === "number" ? facts.cost : null,
       messages: typeof facts.messages === "number" ? facts.messages : null,
+      // PR 2's two facts. An older ledger simply does not send them, and a chip
+      // with `model: null` renders without the suffix rather than with a blank.
+      model: typeof facts.model === "string" && facts.model ? facts.model : null,
+      delegatedCost: typeof facts.delegatedCost === "number" ? facts.delegatedCost : null,
       ...(url ? { url } : {}),
     };
   });

@@ -50,8 +50,10 @@ function testCtx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
         ),
       }),
       // No merges by default: every case in this file is about the two reverse
-      // lookups, which do not run that leg at all.
+      // lookups, which do not run that leg, nor any of PR 3's four.
       fetchMerges: async () => ({ merges: [] }),
+      fetchHandoff: async () => ({ available: false }),
+      fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
     },
     knowledgeApiUrl: "http://localhost:8321",
     publicUrl: null,
@@ -166,6 +168,8 @@ describe("the two query params", () => {
       {} as Config,
       testCtx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "http://127.0.0.1:8787",
           urlConfigured: false,
           fetchSessions: async () => {
@@ -297,6 +301,8 @@ describe("the answer is BOUNDED — the caller picks its size", () => {
       {} as Config,
       testCtx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "http://127.0.0.1:8787",
           urlConfigured: true,
           fetchMerges: async () => ({ merges: [] }),
@@ -357,6 +363,8 @@ describe("?session= prices the session ASKED ABOUT", () => {
       {} as Config,
       testCtx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "http://127.0.0.1:8787",
           urlConfigured: true,
           fetchMerges: async () => ({ merges: [] }),
@@ -405,6 +413,8 @@ describe("an unconfigured host", () => {
     registerWikiRoutes(quiet, { knowledgeApiUrl: "http://localhost:8321", claudeUsageUrl: null, claudeUsagePublicUrl: null } as Config, {
       ...testCtx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "http://127.0.0.1:8787",
           urlConfigured: false,
           fetchMerges: async () => ({ merges: [] }),

@@ -6,6 +6,7 @@
 import { test, expect, describe, beforeEach } from "bun:test";
 import {
   batchSessionIds,
+  fetchHandoffs,
   fetchMergesForSessions,
   fetchSessionsById,
   SESSION_IDS_PER_CALL,
@@ -13,6 +14,7 @@ import {
   __resetSessionLedgerWarnsForTest,
   type SessionLedgerDeps,
 } from "./session-ledger.ts";
+import { ClaudeUsageHttpError, claudeUsageHttpStatus } from "../utils/claude-usage-fetch.ts";
 
 beforeEach(() => __resetSessionLedgerWarnsForTest());
 
@@ -25,6 +27,8 @@ function deps(
     // This file tests the FACTS leg; a merges stub that answered rows would be
     // asserting about a leg no case here calls.
     fetchMerges: async () => ({ merges: [] }),
+    fetchHandoff: async () => ({ available: false }),
+    fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
     urlConfigured,
     baseUrl: "http://127.0.0.1:8787",
   };
@@ -233,6 +237,8 @@ describe("fetchMergesForSessions", () => {
     return {
       fetchSessions: async () => ({ sessions: [] }),
       fetchMerges,
+      fetchHandoff: async () => ({ available: false }),
+      fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
       urlConfigured,
       baseUrl: "http://127.0.0.1:8787",
     };
@@ -313,5 +319,86 @@ describe("fetchMergesForSessions", () => {
       expect(res.truncated).toBe(true);
       expect(res.limit).toBeUndefined();
     }
+  });
+});
+
+describe("fetchHandoffs — a 404 is an ANSWER, not an outage", () => {
+  /** Deps whose handoff leg is the only one under test. */
+  function handoffDeps(fetchHandoff: SessionLedgerDeps["fetchHandoff"]): SessionLedgerDeps {
+    return {
+      fetchSessions: async () => ({ sessions: [] }),
+      fetchMerges: async () => ({ merges: [] }),
+      fetchHandoff,
+      fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
+      urlConfigured: true,
+      baseUrl: "http://127.0.0.1:8787",
+    };
+  }
+
+  const ID_A = "5a2ee3f0-c7ea-42f4-8082-1b2c3d4e5f60";
+  const ID_B = "617e67b3-13d7-4407-a2fe-37ce79df9634";
+
+  test("upstream's documented 404 reads as `no handoff for this id`", async () => {
+    // claude-usage's own contract for this route: "400 without an id, 404 for an
+    // unknown session, and every other outcome a 200". A page whose ids the
+    // ledger does not hold — the `missing` chip state — is the ORDINARY case,
+    // and it used to render `handoffs not read` against a healthy service.
+    const r = await fetchHandoffs(
+      handoffDeps(async () => {
+        throw new ClaudeUsageHttpError(404, "http://127.0.0.1:8787");
+      }),
+      [ID_A, ID_B],
+    );
+    expect(r.asked).toBe(true);
+    expect(r.reachable).toBe(true);
+    expect(r.errors).toBeUndefined();
+    expect(r.ranBy.size).toBe(0);
+  });
+
+  test("any OTHER status is still a failed call", async () => {
+    for (const status of [500, 502, 400]) {
+      const r = await fetchHandoffs(
+        handoffDeps(async () => {
+          throw new ClaudeUsageHttpError(status, "http://127.0.0.1:8787");
+        }),
+        [ID_A],
+      );
+      expect(r.reachable).toBe(false);
+      expect(r.errors?.length).toBe(1);
+    }
+  });
+
+  test("a transport failure with no status is still a failed call", async () => {
+    const r = await fetchHandoffs(
+      handoffDeps(async () => {
+        throw new Error("connect ECONNREFUSED");
+      }),
+      [ID_A],
+    );
+    expect(r.reachable).toBe(false);
+    expect(r.errors?.[0]).toContain("ECONNREFUSED");
+  });
+
+  test("one id 404s and another answers: reachable, no error, the answer kept", async () => {
+    const r = await fetchHandoffs(
+      handoffDeps(async (id) => {
+        if (id === ID_A) throw new ClaudeUsageHttpError(404, "http://127.0.0.1:8787");
+        return {
+          available: true,
+          ranBy: [{ sessionId: ID_A, at: "2026-09-16T07:24:41.216Z", host: "macpro" }],
+        };
+      }),
+      [ID_A, ID_B],
+    );
+    expect(r.reachable).toBe(true);
+    expect(r.errors).toBeUndefined();
+    expect(r.ranBy.get(ID_B)).toHaveLength(1);
+  });
+
+  test("claudeUsageHttpStatus is duck-typed, so a test seam can drive the branch", () => {
+    expect(claudeUsageHttpStatus(Object.assign(new Error("x"), { status: 404 }))).toBe(404);
+    expect(claudeUsageHttpStatus(new Error("claude-usage returned HTTP 404 for x"))).toBeNull();
+    expect(claudeUsageHttpStatus(null)).toBeNull();
+    expect(claudeUsageHttpStatus("404")).toBeNull();
   });
 });

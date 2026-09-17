@@ -111,7 +111,21 @@ export interface ProvenancePageRow {
  * multiply the claude-usage calls one GET buys on a route that renders no merge
  * row. `prs` comes off ONE page's frontmatter and a lookup answers about many.
  */
-interface ProvenanceLookupBody extends Omit<ProvenancePayload, "merges" | "mergesLedger" | "prs"> {
+interface ProvenanceLookupBody
+  extends Omit<
+    ProvenancePayload,
+    | "merges"
+    | "mergesLedger"
+    | "prs"
+    // PR 3's four legs are `pageProvenance`'s for the same reason the merges leg
+    // is: one lookup spans up to `PROVENANCE_REFS_MAX` refs, and a per-session
+    // handoff read over them would be a thousand calls behind one GET.
+    | "ghosts"
+    | "handoffs"
+    | "links"
+    | "stampable"
+    | "rulesStandardizedDate"
+  > {
   /** The normalized key, on a `?jira=` lookup. */
   key?: string;
   /** The parsed ref, on a `?session=` lookup. */

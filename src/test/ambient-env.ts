@@ -142,6 +142,20 @@ const VIMEO_FLAGS = ["VIMEO_OEMBED_BASE", "VIMEO_HARVEST_STUB", "VIMEO_WHISPER_M
  *  per this file's convention. */
 const CLAUDE_USAGE_FLAGS = ["CLAUDE_USAGE_URL", "CLAUDE_USAGE_PUBLIC_URL"];
 
+/** The wiki Stamp seam — WHETHER this instance can write a provenance line at
+ *  all, and WHICH roots it may write into. `WIKI_STAMP_BIN` and
+ *  `WIKI_STAMP_ROOTS` are read at REQUEST time by `stampConfigFromEnv`, and
+ *  `stampableFor` derives the payload's `stampable` flag from both — so a
+ *  developer whose `.env` points at a real claude-usage checkout would have the
+ *  route's 501 cases take the spawn branch on that machine and the refusal
+ *  branch on the other, and every `stampable` assertion answer differently on
+ *  each. That is this file's failure shape exactly, and it is worse here than
+ *  elsewhere: the branch these names select is the one that WRITES. The tests
+ *  that exercise the seam pass an explicit `StampConfig` or set the variables
+ *  themselves. `WIKI_STAMP_BUN` (the interpreter) rides with them: it decides
+ *  what a spawn actually runs. */
+const WIKI_STAMP_FLAGS = ["WIKI_STAMP_BIN", "WIKI_STAMP_ROOTS", "WIKI_STAMP_BUN"];
+
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.
  *
@@ -164,6 +178,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...VERTEX_FLAGS,
   ...VIMEO_FLAGS,
   ...CLAUDE_USAGE_FLAGS,
+  ...WIKI_STAMP_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
   // fourteen route groups and turns every Claude-CLI spawn into a throw, so the
