@@ -35,6 +35,7 @@
 import { BOUNDED_FETCH_TIMEOUT_MS, BOUNDED_FETCH_MAX_BYTES } from "../utils/bounded-fetch.ts";
 import { claudeUsageJson, claudeUsageWarnOnce } from "../utils/claude-usage-fetch.ts";
 import { getLog } from "../logging.ts";
+import { HANDOFF_READS_MAX, PR_READS_MAX, type HandoffRun, type ProvenanceMerge } from "./provenance.ts";
 
 const log = getLog("wiki", "session-ledger");
 
@@ -49,6 +50,11 @@ export interface LedgerSessionFacts {
   last?: string | null;
   cost?: number | null;
   messages?: number | null;
+  /** The session's top priced model, raw. Absent on a ledger before PR 2. */
+  model?: string | null;
+  /** USD spent by this session's SUBAGENTS — a slice of `cost`, never an
+   *  addition to it. Absent on a ledger before PR 2. */
+  delegatedCost?: number | null;
 }
 
 /** Upstream's own per-call id cap, mirrored so muninn pages rather than losing
@@ -151,6 +157,19 @@ export interface SessionLedgerDeps {
    * enforces it.
    */
   fetchMerges: (ids: string[], signal?: AbortSignal) => Promise<unknown>;
+  /**
+   * `GET /api/session-handoff?id=` for ONE session — the route has no batch
+   * form, which is the whole reason leg 3 is capped at
+   * {@link HANDOFF_READS_MAX} calls.
+   *
+   * REQUIRED for `fetchMerges`'s reason: an absent leg is indistinguishable from
+   * a leg that answered nothing, and would render as "nobody ran these sessions'
+   * handoffs" on every page.
+   */
+  fetchHandoff: (id: string, signal?: AbortSignal) => Promise<unknown>;
+  /** `GET /api/merges?prs=owner/repo#n,…` — the page's own `prs:` list, which
+   *  names the merging session even when the page never stamped it. */
+  fetchMergesForPrs: (coordinates: string[], signal?: AbortSignal) => Promise<unknown>;
   urlConfigured: boolean;
   baseUrl: string;
 }
@@ -192,6 +211,21 @@ export function defaultSessionLedgerDeps(
         signal,
         label: root,
       }),
+    fetchHandoff: (id, signal) =>
+      claudeUsageJson(root, `/api/session-handoff?id=${encodeURIComponent(id)}`, {
+        timeoutMs,
+        maxBytes,
+        signal,
+        label: root,
+      }),
+    // `?prs=` and `?sessions=` are mutually exclusive upstream, tested by
+    // parameter PRESENCE — so this builds one or the other, never both.
+    fetchMergesForPrs: (coordinates, signal) =>
+      claudeUsageJson(
+        root,
+        `/api/merges?prs=${coordinates.map(encodeURIComponent).join(",")}`,
+        { timeoutMs, maxBytes, signal, label: root },
+      ),
   };
 }
 
@@ -350,17 +384,10 @@ export async function fetchSessionsById(
 
 // ── The merges leg ──────────────────────────────────────────────────────────
 
-/** One `/api/merges` row, as muninn keeps it. Mirrors the route's own shape;
- *  the payload type the reader renders is `ProvenanceMerge`. */
-export interface LedgerMerge {
-  sessionId: string;
-  repo: string;
-  prNumber: number | null;
-  url: string | null;
-  subject: string | null;
-  mergedAt: string | null;
-  mergeOk: boolean;
-}
+/** One `/api/merges` row, as muninn keeps it — the SAME type the reader renders,
+ *  since every field of it is one a row shows and a second declaration of the
+ *  shape is a second place for it to drift. */
+export type LedgerMerge = ProvenanceMerge;
 
 export interface MergeLedgerResult {
   /** At least one request was SENT — false when every id was refused first. */
@@ -378,6 +405,9 @@ export interface MergeLedgerResult {
    */
   partial: boolean;
   merges: LedgerMerge[];
+  /** The Oslo date from which the gate phrases are machine-parsed, off the
+   *  envelope — carried, never restated, since the constant lives upstream. */
+  rulesStandardizedDate?: string;
   /** Upstream cut a batch at its own cap. */
   truncated: boolean;
   /** The cap upstream reports alongside `truncated` — its number, not ours. */
@@ -408,7 +438,43 @@ function toMerge(v: unknown): LedgerMerge | null {
     subject: typeof row.subject === "string" ? row.subject : null,
     mergedAt: typeof row.mergedAt === "string" ? row.mergedAt : null,
     mergeOk: row.mergeOk !== false,
+    gate: toGate(row.gate),
+    // Defaults FALSE, not true: an older ledger that does not send the field
+    // must not turn every merge on the page into "no gate data before …",
+    // which is a claim about the corpus rather than about the payload.
+    preStandardization: row.preStandardization === true,
   };
+}
+
+/**
+ * The gate block, defensively — the three shapes upstream documents, and
+ * anything else read as "no gate data at all" rather than as a verdict.
+ *
+ * `gates` arrives as a MAP of kind → associated event (kind, quote, deltaSec,
+ * campaignIndex); muninn keeps the KEYS and drops the quotes, which are
+ * transcript excerpts no row renders and which would put a session's prose on
+ * every page open.
+ */
+function toGate(v: unknown): ProvenanceMerge["gate"] {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const gate = v as Record<string, unknown>;
+  if (gate.matched !== true) return gate.matched === false ? { matched: false } : null;
+  const gates = gate.gates;
+  return {
+    matched: true,
+    gated: gate.gated === true,
+    gatedBy: typeof gate.gatedBy === "string" ? gate.gatedBy : null,
+    gates:
+      typeof gates === "object" && gates !== null && !Array.isArray(gates)
+        ? Object.keys(gates as Record<string, unknown>)
+        : [],
+  };
+}
+
+/** The Oslo date from a merges envelope, or undefined. */
+function rulesDate(payload: object): string | undefined {
+  const date = (payload as { rulesStandardizedDate?: unknown }).rulesStandardizedDate;
+  return typeof date === "string" && date ? date : undefined;
 }
 
 /**
@@ -436,6 +502,7 @@ export async function fetchMergesForSessions(
   let failed = false;
   let truncated = false;
   let limit: number | undefined;
+  let rulesStandardizedDate: string | undefined;
 
   const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
   const askable = unique.filter((id) => isSessionIdShape(id));
@@ -467,6 +534,7 @@ export async function fetchMergesForSessions(
       continue;
     }
     answered = true;
+    rulesStandardizedDate = rulesStandardizedDate ?? rulesDate(payload);
     if ((payload as { truncated?: unknown }).truncated === true) {
       truncated = true;
       // Upstream's OWN cap, carried rather than re-stated here: `truncated` is
@@ -492,7 +560,173 @@ export async function fetchMergesForSessions(
     partial: answered && failed,
     merges,
     truncated,
+    ...(rulesStandardizedDate ? { rulesStandardizedDate } : {}),
     ...(limit !== undefined ? { limit } : {}),
     ...(errors.length > 0 ? { errors } : {}),
+  };
+}
+
+// ── Leg 3: the handoff reads ────────────────────────────────────────────────
+
+export interface HandoffLedgerResult {
+  /** At least one request was SENT. False when the page named nothing askable,
+   *  or when the caller declined to read at all (the cap). */
+  asked: boolean;
+  /** At least one call answered with a readable payload. */
+  reachable: boolean;
+  /** Bare id → who ran that session's handoff, as the ledger reports it. Only
+   *  ids that answered appear; an id whose call failed is simply absent, which
+   *  is why `reachable` is the flag the footer reads. */
+  ranBy: Map<string, HandoffRun[]>;
+  errors?: string[];
+}
+
+/** One `ranBy` row, defensively — a row with no `sessionId` is a link to
+ *  nothing and is dropped rather than rendered as a handoff. */
+function toRun(v: unknown): HandoffRun | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const row = v as Record<string, unknown>;
+  if (typeof row.sessionId !== "string" || !row.sessionId) return null;
+  return {
+    sessionId: row.sessionId,
+    at: typeof row.at === "string" ? row.at : null,
+    host: typeof row.host === "string" ? row.host : null,
+  };
+}
+
+/**
+ * Read `ranBy` for each of these sessions, in PARALLEL, under the caller's
+ * deadline.
+ *
+ * `/api/session-handoff` takes ONE id — there is no batch form — so this is N
+ * calls, which is why the caller caps N at {@link HANDOFF_READS_MAX} before
+ * calling and why a page past that cap is told its chain has no handoff lines
+ * rather than being shown the first ten.
+ *
+ * Never throws. A call that fails leaves its id out of `ranBy` and its reason in
+ * `errors`; `available: false` (the ordinary answer — most sessions never run
+ * the skill) is a successful read with nothing to report, NOT a failure, so a
+ * page of sessions that never handed off reports `reachable: true` and renders
+ * no footer line.
+ */
+export async function fetchHandoffs(
+  deps: SessionLedgerDeps,
+  ids: readonly string[],
+  signal?: AbortSignal,
+): Promise<HandoffLedgerResult> {
+  const ranBy = new Map<string, HandoffRun[]>();
+  const errors: string[] = [];
+  const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))].filter((id) =>
+    isSessionIdShape(id),
+  );
+  if (unique.length === 0) {
+    return { asked: false, reachable: false, ranBy };
+  }
+
+  let answered = false;
+  await Promise.all(
+    unique.map(async (id) => {
+      let payload: unknown;
+      try {
+        payload = await deps.fetchHandoff(id, signal);
+      } catch (err) {
+        errors.push(`claude-usage handoff: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+      if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+        errors.push(`claude-usage handoff: response was not a JSON object (${deps.baseUrl})`);
+        return;
+      }
+      answered = true;
+      const rows = (payload as { ranBy?: unknown }).ranBy;
+      // `ranBy` rides the SUCCESS branch only; its absence on an
+      // `available: false` answer is the normal case, not a malformed payload.
+      if (!Array.isArray(rows)) return;
+      const runs = rows.map(toRun).filter((r): r is HandoffRun => r !== null);
+      if (runs.length) ranBy.set(id, runs);
+    }),
+  );
+
+  for (const error of new Set(errors)) {
+    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "handoff ledger" });
+  }
+
+  return {
+    asked: true,
+    reachable: answered,
+    ranBy,
+    ...(errors.length > 0 ? { errors } : {}),
+  };
+}
+
+// ── Leg 4: `/api/merges?prs=` ───────────────────────────────────────────────
+
+export interface PrMergeLedgerResult {
+  asked: boolean;
+  reachable: boolean;
+  merges: LedgerMerge[];
+  /** Coordinates upstream could not map to a repo it knows. Carried so a later
+   *  surface can say which — nothing renders them today. */
+  unmapped: string[];
+  rulesStandardizedDate?: string;
+  /** Upstream cut the coordinate list at its own cap. */
+  truncated: boolean;
+  errors?: string[];
+}
+
+/**
+ * Which sessions merged the PRs this page names.
+ *
+ * ONE call: the coordinates are already capped by the caller at
+ * {@link PR_READS_MAX}, far below upstream's own 200, so there is nothing to
+ * page. A malformed coordinate is a 400 for the WHOLE request upstream, which is
+ * why the caller filters to the coordinate shape before calling — a typo in one
+ * `prs:` entry must not take the leg down.
+ *
+ * Never throws; a failed call is `reachable: false` and one footer line.
+ */
+export async function fetchMergesForPrs(
+  deps: SessionLedgerDeps,
+  coordinates: readonly string[],
+  signal?: AbortSignal,
+): Promise<PrMergeLedgerResult> {
+  const merges: LedgerMerge[] = [];
+  const unique = [...new Set(coordinates.map((c) => c.trim()).filter(Boolean))];
+  if (unique.length === 0) {
+    return { asked: false, reachable: false, merges, unmapped: [], truncated: false };
+  }
+
+  let payload: unknown;
+  try {
+    payload = await deps.fetchMergesForPrs([...unique], signal);
+  } catch (err) {
+    const error = `claude-usage merges?prs: ${err instanceof Error ? err.message : String(err)}`;
+    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "pr merge ledger" });
+    return { asked: true, reachable: false, merges, unmapped: [], truncated: false, errors: [error] };
+  }
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    const error = `claude-usage merges?prs: response was not a JSON object (${deps.baseUrl})`;
+    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "pr merge ledger" });
+    return { asked: true, reachable: false, merges, unmapped: [], truncated: false, errors: [error] };
+  }
+  const rows = (payload as { merges?: unknown }).merges;
+  if (!Array.isArray(rows)) {
+    const error = `claude-usage merges?prs: payload carried no \`merges\` array (${deps.baseUrl})`;
+    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "pr merge ledger" });
+    return { asked: true, reachable: false, merges, unmapped: [], truncated: false, errors: [error] };
+  }
+  for (const row of rows) {
+    const merge = toMerge(row);
+    if (merge) merges.push(merge);
+  }
+  const unmappedRaw = (payload as { unmapped?: unknown }).unmapped;
+  const rules = rulesDate(payload);
+  return {
+    asked: true,
+    reachable: true,
+    merges,
+    unmapped: Array.isArray(unmappedRaw) ? unmappedRaw.filter((u): u is string => typeof u === "string") : [],
+    ...(rules ? { rulesStandardizedDate: rules } : {}),
+    truncated: (payload as { truncated?: unknown }).truncated === true,
   };
 }

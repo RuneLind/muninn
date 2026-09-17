@@ -238,6 +238,8 @@ import {
   SESSION_COPY_IDLE,
   SESSION_COPY_OK,
   sessionCopyAriaLabel,
+  STAMP_CONFIRM_LABEL,
+  STAMP_LABEL,
 } from "./wiki-provenance-view.ts";
 import type { ProvenancePayload } from "../../../wiki/provenance.ts";
 
@@ -1206,6 +1208,70 @@ function copySessionId(btn: HTMLButtonElement): void {
 }
 
 /**
+ * Stamp a ghost session onto the open page — the ONE write the provenance
+ * feature makes, and it is a POST to a route that shells out to claude-usage's
+ * `wiki-stamp` CLI. muninn writes no frontmatter line here or anywhere.
+ *
+ * **A handoff ghost asks twice.** Its button carries `data-prov-stamp-confirm`,
+ * and the first press only re-labels it: a handoff link says a later session
+ * pasted this one's prompt, which is not the same as saying it wrote the page,
+ * and the write is a permanent claim. The armed state lives on the BUTTON (the
+ * label plus the dropped attribute), not in a module flag, for
+ * `toggleProvChain`'s reason — the strip is re-rendered from scratch on every
+ * page load, so a flag would outlive the element it described.
+ */
+async function stampGhost(btn: HTMLButtonElement): Promise<void> {
+  const ref = btn.getAttribute("data-prov-stamp") || "";
+  if (!ref || !currentRelPath || btn.disabled) return;
+  if (btn.getAttribute("data-prov-stamp-confirm")) {
+    btn.removeAttribute("data-prov-stamp-confirm");
+    btn.textContent = STAMP_CONFIRM_LABEL;
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const res = await fetch("/api/wiki/provenance/stamp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wiki: WIKI, relPath: currentRelPath, ref }),
+    });
+    const body = (await res.json().catch(() => null)) as
+      | { provenance?: ProvenancePayload; reason?: string; error?: string }
+      | null;
+    if (!res.ok) {
+      // The route's own reason, verbatim — `outside-roots`, `lock-timeout`, a
+      // 403 from the read-only guards. A refusal the reader can act on beats a
+      // button that silently goes back to saying "Stamp".
+      btn.disabled = false;
+      btn.textContent = `not stamped: ${body?.reason || body?.error || res.status}`;
+      return;
+    }
+    // The route answers with the RE-RESOLVED block, so the strip redraws with no
+    // second fetch — and with the chain left open, since the reader was reading
+    // it when they pressed the button.
+    if (body?.provenance) redrawProvStrip(body.provenance);
+    else btn.textContent = STAMP_LABEL;
+  } catch {
+    btn.disabled = false;
+    btn.textContent = "not stamped: the request failed";
+  }
+}
+
+/** Replace the strip in place from a fresh payload, preserving the open/closed
+ *  state of the chain the reader was looking at. */
+function redrawProvStrip(provenance: ProvenancePayload): void {
+  const strip = document.querySelector(".wiki-prov-strip");
+  if (!strip) return;
+  const wasOpen =
+    strip.querySelector("[data-prov-toggle]")?.getAttribute("aria-expanded") === "true";
+  strip.outerHTML = provStripHtml(provenance, jiraKeys);
+  if (!wasOpen) return;
+  const line = document.querySelector<HTMLButtonElement>("[data-prov-toggle]");
+  if (line) toggleProvChain(line);
+}
+
+/**
  * Open or close the provenance chain under the page title.
  *
  * The button's `aria-expanded` and the chain's `hidden` are flipped TOGETHER and
@@ -2073,6 +2139,16 @@ document.body.addEventListener("click", (e) => {
   if (sessCopy) {
     e.preventDefault();
     copySessionId(sessCopy);
+    return;
+  }
+  // The Stamp button on a ghost row. BEFORE the disclosure, for the ⧉ button's
+  // reason: it sits inside the chain the line opens.
+  const provStamp = target.closest
+    ? target.closest<HTMLButtonElement>("[data-prov-stamp]")
+    : null;
+  if (provStamp) {
+    e.preventDefault();
+    void stampGhost(provStamp);
     return;
   }
   // The provenance line itself: one disclosure over the chain under the title.

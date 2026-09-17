@@ -42,6 +42,8 @@ function deps(over: Partial<SessionLedgerDeps> = {}): SessionLedgerDeps {
     // Answers nothing by default: a case about the FACTS leg must not also be
     // asserting something about merges by accident.
     fetchMerges: async () => ({ merges: [] }),
+    fetchHandoff: async () => ({ available: false }),
+    fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
     ...over,
   };
 }

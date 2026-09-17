@@ -30,6 +30,10 @@ function ctx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
       ),
     }),
     fetchMerges: async () => ({ merges: [] }),
+    // The four PR-3 legs answer nothing by default: a case about the facts or
+    // merges legs must not assert about a leg it never meant to drive.
+    fetchHandoff: async () => ({ available: false }),
+    fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
   };
   return {
     sessionLedger: ledger,
@@ -67,6 +71,8 @@ describe("resolveProvenance", () => {
       { refs: [SESSION_A], keys: [] },
       ctx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "b",
           // TRUE, and it has to be: `urlConfigured` is the ONE flag deciding
           // whether the ledger is fetched. It read `false` here while a second
@@ -95,6 +101,8 @@ describe("resolveProvenance", () => {
       { refs: [SESSION_A], keys: [] },
       ctx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "http://127.0.0.1:8787",
           urlConfigured: true,
           fetchSessions: async () => {
@@ -124,6 +132,8 @@ describe("resolveProvenance", () => {
       { refs: [], keys: ["MELOSYS-8045"] },
       ctx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "b",
           urlConfigured: true,
           fetchSessions: async () => {
@@ -209,6 +219,8 @@ describe("the merges leg", () => {
       page({ sessions: [SESSION_A] }),
       ctx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "b",
           urlConfigured: true,
           fetchSessions: async (ids) => ({ sessions: ids.map((id) => ({ sessionId: id, cost: 3 })) }),
@@ -216,7 +228,9 @@ describe("the merges leg", () => {
         },
       }),
     );
-    expect(res!.merges).toEqual([MERGE]);
+    // PR 3's two fields DEFAULT rather than being echoed: a ledger that sends
+    // neither must not read as "gate not matched" or as pre-standardization.
+    expect(res!.merges).toEqual([{ ...MERGE, gate: null, preStandardization: false }]);
     expect(res!.mergesLedger).toEqual({
       asked: true,
       reachable: true,
@@ -231,6 +245,8 @@ describe("the merges leg", () => {
       page({ sessions: [SESSION_A] }),
       ctx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "b",
           urlConfigured: true,
           fetchSessions: async () => ({ sessions: [] }),
@@ -250,6 +266,8 @@ describe("the merges leg", () => {
       { refs: [SESSION_A], keys: [] },
       ctx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "b",
           urlConfigured: true,
           fetchSessions: async () => ({ sessions: [] }),
@@ -269,6 +287,8 @@ describe("the merges leg", () => {
       page({ sessions: [SESSION_A] }),
       ctx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "b",
           urlConfigured: false,
           fetchSessions: async () => ({ sessions: [] }),
@@ -300,6 +320,8 @@ describe("the merges leg", () => {
       page({ jira: ["MELOSYS-8045"] }),
       ctx({
         sessionLedger: {
+          fetchHandoff: async () => ({ available: false }),
+          fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
           baseUrl: "b",
           urlConfigured: true,
           fetchSessions: async () => ({ sessions: [] }),

@@ -217,6 +217,8 @@ function chip(id: string, cost: number | null): ProvenanceSessionChip {
     id,
     title: null,
     host: null,
+    model: null,
+    delegatedCost: null,
     first: null,
     last: null,
     cost,

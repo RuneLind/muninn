@@ -35,6 +35,7 @@ import {
   provStripHtml,
   railListHtml,
 } from "./wiki-provenance-view.ts";
+import { LINKS_NOT_ASKED } from "../../../wiki/provenance.ts";
 import type {
   ProvenanceMerge,
   ProvenancePayload,
@@ -54,6 +55,8 @@ function chip(over: Partial<ProvenanceSessionChip> = {}): ProvenanceSessionChip 
     last: null,
     cost: null,
     messages: null,
+    model: null,
+    delegatedCost: null,
     missing: false,
     unresolved: false,
     invalid: false,
@@ -70,6 +73,8 @@ function merge(over: Partial<ProvenanceMerge> = {}): ProvenanceMerge {
     subject: null,
     mergedAt: "2026-09-16T10:30:00.000Z",
     mergeOk: true,
+    gate: null,
+    preStandardization: false,
     ...over,
   };
 }
@@ -77,6 +82,10 @@ function merge(over: Partial<ProvenanceMerge> = {}): ProvenanceMerge {
 function payload(over: Partial<ProvenancePayload> = {}): ProvenancePayload {
   return {
     sessions: [],
+    ghosts: [],
+    handoffs: [],
+    stampable: false,
+    links: LINKS_NOT_ASKED,
     jira: [],
     prs: [],
     merges: [],
@@ -156,7 +165,11 @@ describe("fmtChainStamp", () => {
 describe("chainEvents", () => {
   test("ascending by date, sessions and merges on ONE spine", () => {
     const events = chainEvents(mixed());
-    expect(events.map((e) => (e.kind === "session" ? e.chip.id : `#${e.merge.prNumber}`))).toEqual([
+    expect(
+      events.map((e) =>
+        e.kind === "session" ? e.chip.id : e.kind === "merge" ? `#${e.merge.prNumber}` : "handoff",
+      ),
+    ).toEqual([
       "first", // 09-15 18:10
       "second", // 09-15 20:22
       "#552", // 09-15 20:55

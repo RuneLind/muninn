@@ -31,6 +31,7 @@ import {
   defaultProvenanceContext,
   registerWikiProvenanceRoutes,
 } from "./wiki-provenance.ts";
+import { registerWikiStampRoute } from "./wiki-stamp.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
@@ -1179,6 +1180,10 @@ export function registerWikiRoutes(
   // `MUNINN_PROFILE=nais` drops them with the rest of the filesystem-bound wiki
   // surface — see `route-groups.ts`.
   registerWikiProvenanceRoutes(app, config, provenanceCtx);
+  // The Stamp write, in the same group for the same reason — it resolves a
+  // registered wiki root on this machine's filesystem, so `MUNINN_PROFILE=nais`
+  // must drop it with everything else bound to a working tree.
+  registerWikiStampRoute(app, provenanceCtx);
 
   app.get("/wiki", async (c) => {
     const registry = getWikiRegistry();
@@ -1801,7 +1806,7 @@ export function registerWikiRoutes(
     // `PROVENANCE_BUDGET_MS` deadline so a page open cannot cost the sum of its
     // legs. An unreachable claude-usage degrades to bare chips rather than
     // failing the page open.
-    const provenance = await pageProvenance(meta, provenanceCtx);
+    const provenance = await pageProvenance(meta, provenanceCtx, entry?.root);
 
     return c.json({
       // The two callers that opt fields in — see `toListing`. Deliberately NOT

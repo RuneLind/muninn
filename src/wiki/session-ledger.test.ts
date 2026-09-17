@@ -25,6 +25,8 @@ function deps(
     // This file tests the FACTS leg; a merges stub that answered rows would be
     // asserting about a leg no case here calls.
     fetchMerges: async () => ({ merges: [] }),
+    fetchHandoff: async () => ({ available: false }),
+    fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
     urlConfigured,
     baseUrl: "http://127.0.0.1:8787",
   };
@@ -233,6 +235,8 @@ describe("fetchMergesForSessions", () => {
     return {
       fetchSessions: async () => ({ sessions: [] }),
       fetchMerges,
+      fetchHandoff: async () => ({ available: false }),
+      fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
       urlConfigured,
       baseUrl: "http://127.0.0.1:8787",
     };

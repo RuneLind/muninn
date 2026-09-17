@@ -63,6 +63,8 @@ const LEDGER_PORT = e2ePort("wiki-provenance/ledger");
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-provenance";
+/** The read-only wiki, registered at a root `WIKI_READONLY_ROOTS` names. */
+const WIKI_RO = "e2e-provenance-ro";
 
 /** The claude-usage address handed to the BROWSER. Nothing binds it, and nothing
  *  needs to — the client only ever builds an href from it. */
@@ -81,7 +83,25 @@ const DAMAGED_ID = "x".repeat(129);
  *  not" through a real page open. Synthetic, like every id in this file. */
 const MERGES_DOWN_ID = "11111111-2222-3333-4444-555555555555";
 
+/**
+ * The handoff chain: A hands off to B, B hands off to a session the page never
+ * stamps. Every id, title, host and figure below is INVENTED — this repo is
+ * public, so a fixture copies the SHAPE of the ledger's answers and none of its
+ * values.
+ */
+const CHAIN_A = "aaaaaaaa-1111-2222-3333-444444444444";
+const CHAIN_B = "bbbbbbbb-1111-2222-3333-444444444444";
+const CHAIN_GHOST = "cccccccc-1111-2222-3333-444444444444";
+/** The session the shape fixture's `prs:` line leads to — a PR ghost. */
+const PR_GHOST = "dddddddd-1111-2222-3333-444444444444";
+/** The page the Stamp test writes to, and the ghost it stamps. */
+const STAMP_HOST = "eeeeeeee-1111-2222-3333-444444444444";
+const STAMP_GHOST = "ffffffff-1111-2222-3333-444444444444";
+
 const SHAPE_REL = "shape.md";
+const CHAIN_REL = "chain.md";
+const STAMP_REL = "stampme.md";
+const RO_REL = "readonly.md";
 const MERGESDOWN_REL = "merges-down.md";
 const DAMAGED_REL = "damaged.md";
 const PLAIN_REL = "plain.md";
@@ -89,7 +109,7 @@ const OTHER_REL = "other.md";
 const MIXED_REL = "mixed.md";
 
 /** How many pages the temp wiki holds — every "the whole wiki" assertion below. */
-const ALL_PAGES = 6;
+const ALL_PAGES = 8;
 
 const DAMAGED = [
   "---",
@@ -114,6 +134,39 @@ const MERGES_DOWN = [
   "# Merges leg down",
   "",
   "The ledger prices this session and refuses to list its merges.",
+  "",
+].join("\n");
+
+/** The acceptance-shaped page: two stamped sessions whose handoffs chain into a
+ *  third the page never stamps. */
+const CHAIN = [
+  "---",
+  "type: plan",
+  "title: The handoff chain",
+  `sessions: [claude-code:${CHAIN_A}, claude-code:${CHAIN_B}]`,
+  "---",
+  "",
+  "# The handoff chain",
+  "",
+  "Two stamped sessions and one the ledger links through a handoff.",
+  "",
+].join("\n");
+
+/** A page whose `prs:` line names a PR one unstamped session merged — the
+ *  one-click Stamp case. `sessions_backfilled` is here so the Stamp can be seen
+ *  retiring it. */
+const STAMPME = [
+  "---",
+  "type: plan",
+  "title: Stamp me",
+  `sessions: [claude-code:${STAMP_HOST}]`,
+  "sessions_backfilled: 2026-09-01",
+  "prs: [acme/widget#777]",
+  "---",
+  "",
+  "# Stamp me",
+  "",
+  "A page with a PR ghost to stamp.",
   "",
 ].join("\n");
 
@@ -170,6 +223,40 @@ const MIXED = [
   "",
 ].join("\n");
 
+/**
+ * The stub `WIKI_STAMP_BIN`.
+ *
+ * It does to the frontmatter exactly what the real CLI does — append the ref to
+ * the `sessions:` flow list, retire `sessions_backfilled`, answer `unchanged`
+ * when the ref is already there — and prints the same ONE-LINE `--report`, so
+ * this spec needs no claude-usage checkout. What it proves is muninn's WIRING
+ * and the re-render; the upsert rule itself is pinned by claude-usage's own
+ * suite and by the shape fixture both repos check in.
+ */
+const STUB_STAMPER = [
+  "#!/bin/bash",
+  'ref=""; file=""',
+  'while [ $# -gt 0 ]; do',
+  '  case "$1" in',
+  '    --session) ref="$2"; shift 2;;',
+  '    --file) file="$2"; shift 2;;',
+  '    *) shift;;',
+  "  esac",
+  "done",
+  '[ -f "$file" ] || { printf \'{"outcome":"skipped","reason":"missing-file","path":"%s"}\\n\' "$file"; exit 0; }',
+  'if grep -q -- "$ref" "$file"; then',
+  '  printf \'{"outcome":"unchanged","reason":"already-stamped","path":"%s"}\\n\' "$file"',
+  "  exit 0",
+  "fi",
+  // `&` is the whole match, so no capture group has to survive two levels of
+  // escaping: the match stops before the `]`, and the replacement re-adds it.
+  'sed -i.bak "s|^sessions: \\[[^]]*|&, $ref|" "$file"',
+  'sed -i.bak "/^sessions_backfilled:/d" "$file"',
+  'rm -f "$file.bak"',
+  'printf \'{"outcome":"written","path":"%s"}\\n\' "$file"',
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let ledger: Server | undefined;
 let root = "";
@@ -178,6 +265,12 @@ let root = "";
 let asked: string[] = [];
 /** The same, for the merges leg. */
 let askedMerges: string[] = [];
+/** And for the two PR-3 legs, so a test can prove a cap was honoured. */
+let askedHandoffs: string[] = [];
+let askedPrs: string[] = [];
+/** The read-only wiki's root, and the stub CLI `WIKI_STAMP_BIN` points at. */
+let roRoot = "";
+let stampBin = "";
 
 const open_ = (page: import("@playwright/test").Page, rel: string) =>
   page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}`);
@@ -198,91 +291,244 @@ const open_ = (page: import("@playwright/test").Page, rel: string) =>
  * fact about the machine running the suite.
  */
 function startLedger(): Promise<Server> {
+  /** Every session the stub knows, keyed on the BARE id. */
+  const FACTS: Record<string, Record<string, unknown>> = {
+    [PRICED_ID]: {
+      provider: "claude-code",
+      host: "macmini",
+      title: "Wiki provenance — PR 4a",
+      first: "2026-09-15T12:00:00.000Z",
+      last: "2026-09-15T13:30:00.000Z",
+      cost: 12.34,
+      messages: 148,
+    },
+    [MERGES_DOWN_ID]: {
+      provider: "claude-code",
+      host: "macmini",
+      title: "A session whose merges cannot be listed",
+      first: "2026-09-15T12:00:00.000Z",
+      last: "2026-09-15T12:00:00.000Z",
+      cost: 1.5,
+      messages: 9,
+    },
+    // The ledger spells Claude Code `claude`; the frontmatter spells it
+    // `claude-code`. These three exercise the mapping on a stamped ref, on a
+    // ghost glyph and on a Stamp ref at once.
+    [CHAIN_A]: {
+      provider: "claude",
+      host: "workshop",
+      title: "First leg of the chain",
+      first: "2026-09-15T09:00:00.000Z",
+      last: "2026-09-15T11:00:00.000Z",
+      cost: 21,
+      messages: 60,
+      model: "claude-sonnet-4-5-20250929",
+      delegatedCost: 5.5,
+    },
+    [CHAIN_B]: {
+      provider: "claude",
+      host: "workshop",
+      title: "Second leg of the chain",
+      first: "2026-09-15T14:00:00.000Z",
+      last: "2026-09-15T16:00:00.000Z",
+      cost: 30,
+      messages: 90,
+      model: "claude-opus-5",
+      delegatedCost: 8.25,
+    },
+    [CHAIN_GHOST]: {
+      provider: "claude",
+      host: "workshop",
+      title: "The session nobody stamped",
+      first: "2026-09-15T18:00:00.000Z",
+      last: "2026-09-15T20:00:00.000Z",
+      cost: 44,
+      messages: 120,
+      model: "claude-opus-5",
+      delegatedCost: 12,
+    },
+    [PR_GHOST]: {
+      provider: "claude",
+      host: "workshop",
+      title: "The session that merged #543",
+      first: "2026-09-15T18:00:00.000Z",
+      last: "2026-09-15T18:30:00.000Z",
+      cost: 7,
+      messages: 20,
+    },
+    [STAMP_HOST]: {
+      provider: "claude",
+      host: "workshop",
+      title: "The stamped session",
+      first: "2026-09-15T08:00:00.000Z",
+      last: "2026-09-15T08:30:00.000Z",
+      cost: 3,
+      messages: 11,
+    },
+    [STAMP_GHOST]: {
+      provider: "claude",
+      host: "workshop",
+      title: "The session that merged #777",
+      first: "2026-09-15T09:00:00.000Z",
+      last: "2026-09-15T09:30:00.000Z",
+      cost: 9,
+      messages: 30,
+    },
+  };
+
+  /**
+   * Every merge row the stub holds. The three PRICED_ID rows are the three
+   * shapes a merge row has to tell apart (linked / unlinked / unconfirmed); the
+   * rest carry the gate block, whose four spellings are what PR 3 renders.
+   */
+  const MERGES: Record<string, unknown>[] = [
+    {
+      sessionId: PRICED_ID,
+      repo: "/Users/synthetic/source/muninn",
+      prNumber: 553,
+      url: "https://github.com/RuneLind/muninn/pull/553",
+      subject: null,
+      mergedAt: "2026-09-15T14:00:00.000Z",
+      mergeOk: true,
+      gate: null,
+      preStandardization: false,
+    },
+    {
+      // No `repoUrls` entry upstream ⇒ no coordinate, so this row
+      // renders unlinked with the checkout's basename as its hover.
+      sessionId: PRICED_ID,
+      repo: "/Users/synthetic/source/side-project",
+      prNumber: 77,
+      url: null,
+      subject: null,
+      mergedAt: "2026-09-15T15:00:00.000Z",
+      mergeOk: true,
+      gate: { matched: false },
+      preStandardization: false,
+    },
+    {
+      sessionId: PRICED_ID,
+      repo: "/Users/synthetic/source/muninn",
+      prNumber: 88,
+      url: "https://github.com/RuneLind/muninn/pull/88",
+      subject: null,
+      mergedAt: "2026-09-15T16:00:00.000Z",
+      mergeOk: false,
+      gate: { matched: true, gated: false, gatedBy: null, gates: {} },
+      preStandardization: true,
+    },
+    {
+      // The shape fixture's own `prs:` coordinate, merged by a session the page
+      // never stamped — the PR ghost.
+      sessionId: PR_GHOST,
+      repo: "/Users/synthetic/source/muninn",
+      prNumber: 543,
+      url: "https://github.com/RuneLind/muninn/pull/543",
+      subject: null,
+      mergedAt: "2026-09-15T19:00:00.000Z",
+      mergeOk: true,
+      gate: { matched: true, gated: true, gatedBy: "gate", gates: { "gate-review-floor": {} } },
+      preStandardization: false,
+    },
+    {
+      sessionId: CHAIN_B,
+      repo: "/Users/synthetic/source/muninn",
+      prNumber: 321,
+      url: "https://github.com/RuneLind/muninn/pull/321",
+      subject: null,
+      mergedAt: "2026-09-15T15:30:00.000Z",
+      mergeOk: true,
+      gate: { matched: true, gated: false, gatedBy: null, gates: {} },
+      preStandardization: false,
+    },
+    {
+      // Reachable ONLY under the ghost's own id — the whole reason leg 6 exists.
+      sessionId: CHAIN_GHOST,
+      repo: "/Users/synthetic/source/muninn",
+      prNumber: 322,
+      url: "https://github.com/RuneLind/muninn/pull/322",
+      subject: null,
+      mergedAt: "2026-09-15T19:30:00.000Z",
+      mergeOk: true,
+      gate: {
+        matched: true,
+        gated: true,
+        gatedBy: "gate",
+        gates: { "gate-review-floor": {}, "gate-split-check": {} },
+      },
+      preStandardization: false,
+    },
+    {
+      sessionId: STAMP_GHOST,
+      repo: "/Users/synthetic/source/muninn",
+      prNumber: 777,
+      url: "https://github.com/acme/widget/pull/777",
+      subject: null,
+      mergedAt: "2026-09-15T09:15:00.000Z",
+      mergeOk: true,
+      gate: { matched: true, gated: true, gatedBy: "gate", gates: { "gate-review-floor": {} } },
+      preStandardization: false,
+    },
+  ];
+
+  /** Who ran whose handoff. One hop each, which is all the reader reads. */
+  const RAN_BY: Record<string, { sessionId: string; at: string; host: string }[]> = {
+    [CHAIN_A]: [{ sessionId: CHAIN_B, at: "2026-09-15T13:45:00.000Z", host: "workshop" }],
+    [CHAIN_B]: [{ sessionId: CHAIN_GHOST, at: "2026-09-15T17:45:00.000Z", host: "workshop" }],
+  };
+
   const srv = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
-    const ids = url.searchParams.get("sessions") ?? url.searchParams.get("ids") ?? "";
+    const json = (code: number, body: unknown) => {
+      res.writeHead(code, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    if (url.pathname === "/api/session-handoff") {
+      const id = url.searchParams.get("id") ?? "";
+      askedHandoffs.push(id);
+      const runs = RAN_BY[id];
+      // `available: false` with no `ranBy` is the ORDINARY answer — most
+      // sessions never ran the skill — and must not read as a failed leg.
+      return json(200, runs ? { available: true, handoff: "…", ranBy: runs } : { available: false, reason: "no-handoff" });
+    }
     if (url.pathname === "/api/merges") {
+      const prs = url.searchParams.get("prs");
+      const ids = url.searchParams.get("sessions") ?? "";
+      const envelope = {
+        limit: 200,
+        truncated: false,
+        rulesStandardizedDate: "2026-07-30",
+        rulesStandardized: "2026-07-29T22:00:00.000Z",
+      };
+      if (prs !== null) {
+        askedPrs.push(prs);
+        const wanted = prs.split(",");
+        const rows = MERGES.filter((m) =>
+          wanted.includes(`RuneLind/muninn#${m.prNumber}`) || wanted.includes(`acme/widget#${m.prNumber}`),
+        );
+        return json(200, { ...envelope, unmapped: [], merges: rows });
+      }
       askedMerges.push(ids);
       // One page's session is the "merges leg is down" case; the facts leg for
       // that same id still answers, which is the split the footer exists for.
-      if (ids.includes(MERGES_DOWN_ID)) {
-        res.writeHead(503, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "merges unavailable" }));
-        return;
-      }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(
-        JSON.stringify({
-          limit: 200,
-          truncated: false,
-          merges: [
-            {
-              sessionId: PRICED_ID,
-              repo: "/Users/synthetic/source/muninn",
-              prNumber: 553,
-              url: "https://github.com/RuneLind/muninn/pull/553",
-              subject: null,
-              mergedAt: "2026-09-15T14:00:00.000Z",
-              mergeOk: true,
-            },
-            {
-              // No `repoUrls` entry upstream ⇒ no coordinate, so this row
-              // renders unlinked with the checkout's basename as its hover.
-              sessionId: PRICED_ID,
-              repo: "/Users/synthetic/source/side-project",
-              prNumber: 77,
-              url: null,
-              subject: null,
-              mergedAt: "2026-09-15T15:00:00.000Z",
-              mergeOk: true,
-            },
-            {
-              sessionId: PRICED_ID,
-              repo: "/Users/synthetic/source/muninn",
-              prNumber: 88,
-              url: "https://github.com/RuneLind/muninn/pull/88",
-              subject: null,
-              mergedAt: "2026-09-15T16:00:00.000Z",
-              mergeOk: false,
-            },
-          ],
-        }),
-      );
-      return;
+      if (ids.includes(MERGES_DOWN_ID)) return json(503, { error: "merges unavailable" });
+      const wanted = new Set(ids.split(","));
+      return json(200, { ...envelope, merges: MERGES.filter((m) => wanted.has(m.sessionId as string)) });
     }
     if (url.pathname !== "/api/sessions-by-id") {
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "unexpected path", path: url.pathname }));
-      return;
+      return json(404, { error: "unexpected path", path: url.pathname });
     }
+    const ids = url.searchParams.get("ids") ?? "";
     asked.push(ids);
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(
-      JSON.stringify({
-        sessions: [
-          {
-            sessionId: PRICED_ID,
-            provider: "claude-code",
-            host: "macmini",
-            title: "Wiki provenance — PR 4a",
-            first: "2026-09-15T12:00:00.000Z",
-            last: "2026-09-15T13:30:00.000Z",
-            cost: 12.34,
-            messages: 148,
-          },
-          {
-            sessionId: MERGES_DOWN_ID,
-            provider: "claude-code",
-            host: "macmini",
-            title: "A session whose merges cannot be listed",
-            first: "2026-09-15T12:00:00.000Z",
-            last: "2026-09-15T12:00:00.000Z",
-            cost: 1.5,
-            messages: 9,
-          },
-        ],
-      }),
-    );
+    // MISSING_ID is deliberately absent from FACTS — that is what makes its chip
+    // `missing` ("the ledger answered and does not hold it") rather than
+    // `unresolved` ("nobody asked").
+    return json(200, {
+      sessions: ids
+        .split(",")
+        .filter((id) => FACTS[id])
+        .map((id) => ({ sessionId: id, ...FACTS[id] })),
+    });
   });
   return new Promise((resolve) => srv.listen(LEDGER_PORT, "127.0.0.1", () => resolve(srv)));
 }
@@ -310,6 +556,21 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, OTHER_REL), OTHER, "utf8");
   await writeFile(path.join(root, MIXED_REL), MIXED, "utf8");
   await writeFile(path.join(root, MERGESDOWN_REL), MERGES_DOWN, "utf8");
+  await writeFile(path.join(root, CHAIN_REL), CHAIN, "utf8");
+  await writeFile(path.join(root, STAMP_REL), STAMPME, "utf8");
+
+  // A SECOND wiki, registered read-only through `WIKI_READONLY_ROOTS` while
+  // still inside `WIKI_STAMP_ROOTS` — the mini's exact shape, and the one case
+  // that proves the read-only half of `stampable` is load-bearing.
+  roRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-prov-ro-"));
+  await writeFile(path.join(roRoot, RO_REL), STAMPME, "utf8");
+
+  // The stub stamper: it does what the real CLI does to the four frontmatter
+  // lines and prints the same one-line `--report`, so the spec needs no
+  // claude-usage checkout. The retirement RULE is pinned by claude-usage's own
+  // suite; what this proves is muninn's wiring and the re-render.
+  stampBin = path.join(root, "..", `e2e-wiki-stamp-${process.pid}.sh`);
+  await writeFile(stampBin, STUB_STAMPER, { mode: 0o755 });
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -319,7 +580,13 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root}`,
+      WIKI_EXTRA: `${WIKI}=${root},${WIKI_RO}=${roRoot}`,
+      WIKI_READONLY_ROOTS: roRoot,
+      // The stamper. `WIKI_STAMP_BUN` is bash because the stub is a shell
+      // script; production runs the CLI's `.ts` source through bun.
+      WIKI_STAMP_BIN: stampBin,
+      WIKI_STAMP_ROOTS: `${root}:${roRoot}`,
+      WIKI_STAMP_BUN: "/bin/bash",
       // AFTER `e2eEnv()`: both names are in `AMBIENT_INSTANCE_ENV`, so the blank
       // set would otherwise unset exactly what this spec is about.
       CLAUDE_USAGE_URL: `http://127.0.0.1:${LEDGER_PORT}`,
@@ -345,6 +612,8 @@ test.afterAll(async () => {
   server?.kill("SIGTERM");
   await new Promise<void>((resolve) => (ledger ? ledger.close(() => resolve()) : resolve()));
   if (root) await rm(root, { recursive: true, force: true });
+  if (roRoot) await rm(roRoot, { recursive: true, force: true });
+  if (stampBin) await rm(stampBin, { force: true });
 });
 
 // Every rendered stamp below is exact rather than a regex, which needs the
@@ -380,23 +649,25 @@ test.describe("Wiki reader: provenance", () => {
     // The degrade sentences must NOT be here — this ledger answered.
     await expect(cost).not.toContainText("unreachable");
 
-    // `prs` rides the payload and renders NOTHING: the frontmatter PR row ships
-    // with campaign 2, and a half-built control is worse than none. The chain's
-    // merge rows DO carry github.com links, so the pin is on the two
-    // coordinates only `prs:` could have produced — neither of which any merge
-    // in the stub names.
+    // The frontmatter `prs:` list still renders NO row of its own. What it does
+    // is feed `?prs=` — so #543 appears only because the LEDGER reported a merge
+    // for it, as a merge row on the chain, while #1234 (which the ledger holds
+    // nothing for) leaves no trace at all.
     await expect(strip.locator('a[href*="/pull/1234"]')).toHaveCount(0);
-    await expect(strip.locator('a[href*="/pull/543"]')).toHaveCount(0);
-    await expect(page.locator('#wikiList a[href*="github.com"]')).toHaveCount(0);
     await expect(strip).not.toContainText("melosys-api");
     await expect(strip).not.toContainText("1234");
+    await expect(page.locator('#wikiList a[href*="github.com"]')).toHaveCount(0);
+    // The one #543 link is a MERGE row, inside the chain, not a `prs:` chip.
+    await expect(strip.locator('.wiki-chain-merge a[href*="/pull/543"]')).toHaveCount(1);
+    await expect(strip.locator('a[href*="/pull/543"]')).toHaveCount(1);
   });
 
   test("the chain lists both sessions — one priced with a drill-down, one bare", async ({ page }) => {
     await open_(page, SHAPE_REL);
     const rows = await openChain(page);
-    // Two sessions and three merges, on one spine.
-    await expect(rows).toHaveCount(5);
+    // Two stamped sessions, three of their merges, the PR ghost `?prs=` found
+    // and the merge it made — one spine, seven rows.
+    await expect(rows).toHaveCount(7);
 
     const priced = rows.nth(0);
     await expect(priced).not.toHaveClass(/wiki-chain-bare/);
@@ -419,7 +690,7 @@ test.describe("Wiki reader: provenance", () => {
     // its own sentence — and NO drill-down, since a link to a session the
     // service does not have is a dead end. Dateless, so it sorts LAST, after
     // every merge.
-    const bare = rows.nth(4);
+    const bare = rows.nth(6);
     await expect(bare).toHaveClass(/wiki-chain-bare/);
     await expect(bare.locator(".wiki-chain-reason")).toHaveText(
       "not in the ledger — reaped, or from another host",
@@ -439,7 +710,7 @@ test.describe("Wiki reader: provenance", () => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await open_(page, SHAPE_REL);
     const rows = await openChain(page);
-    const bare = rows.nth(4);
+    const bare = rows.nth(6);
     await bare.locator(".wiki-chain-copy").click();
     // The id ALONE — it is what a search for this session takes, and the reader
     // cannot reach the service to look it up any other way.
@@ -486,7 +757,7 @@ test.describe("Wiki reader: provenance", () => {
   test("navigating from a stamped page to an unstamped one takes the chain with it", async ({ page }) => {
     await open_(page, SHAPE_REL);
     await openChain(page);
-    await expect(page.locator(".wiki-chain-row")).toHaveCount(5);
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(7);
     // The stale-state trap: an OPEN chain is the state most likely to survive a
     // navigation, since the strip is re-rendered from a payload the next page
     // does not have.
@@ -517,20 +788,24 @@ test.describe("Wiki reader: provenance", () => {
   test("the line carries one mark per session and one per merge, rings first", async ({ page }) => {
     await open_(page, SHAPE_REL);
     const marks = page.locator(".wiki-prov-marks .wiki-prov-mark");
-    await expect(marks).toHaveCount(5);
+    // Two stamped sessions, one DASHED ghost ring, four merges — one per event,
+    // in the order the kinds render: sessions, ghosts, merges.
+    await expect(marks).toHaveCount(7);
     await expect(marks.nth(0)).toHaveAttribute("data-mark", "session");
     await expect(marks.nth(1)).toHaveAttribute("data-mark", "session");
-    await expect(marks.nth(2)).toHaveAttribute("data-mark", "merge");
-    await expect(marks.nth(4)).toHaveAttribute("data-mark", "merge");
+    await expect(marks.nth(2)).toHaveAttribute("data-mark", "ghost");
+    await expect(marks.nth(3)).toHaveAttribute("data-mark", "merge");
+    await expect(marks.nth(6)).toHaveAttribute("data-mark", "merge");
     // A mark is a mark only if it says what it marks.
-    await expect(marks.nth(2)).toHaveAttribute("title", /#553/);
+    await expect(marks.nth(3)).toHaveAttribute("title", /#553/);
+    await expect(marks.nth(2)).toHaveAttribute("title", /linked by the ledger/);
   });
 
   test("the merge rows render in time order — linked, unlinked and unconfirmed", async ({ page }) => {
     await open_(page, SHAPE_REL);
     const rows = await openChain(page);
     const merges = page.locator(".wiki-chain-merge");
-    await expect(merges).toHaveCount(3);
+    await expect(merges).toHaveCount(4);
 
     // 1. A repo the ledger could resolve: the coordinate, linked.
     const linked = merges.nth(0);
@@ -557,7 +832,7 @@ test.describe("Wiki reader: provenance", () => {
 
     // And they sit BETWEEN the priced session and the dateless bare one.
     await expect(rows.nth(0)).toHaveClass(/wiki-chain-session/);
-    await expect(rows.nth(4)).toHaveClass(/wiki-chain-bare/);
+    await expect(rows.nth(6)).toHaveClass(/wiki-chain-bare/);
   });
 
   test("a merges leg that did not answer says so, and the cost sentence does not move", async ({ page }) => {
@@ -687,7 +962,7 @@ test.describe("Wiki reader: provenance", () => {
   }) => {
     await open_(page, SHAPE_REL);
     await openChain(page);
-    await expect(page.locator(".wiki-chain-row")).toHaveCount(5);
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(7);
 
     await page.locator(".wiki-prov-jira-key").click();
     await expect(page.locator(".wiki-list-item")).toHaveCount(1);
@@ -701,6 +976,148 @@ test.describe("Wiki reader: provenance", () => {
     await expect(empty).toHaveText("No pages match.");
     // The open page's chain is still there — it was never the answer to the
     // filter, and dropping it would be the opposite defect.
-    await expect(page.locator(".wiki-chain-row")).toHaveCount(5);
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(7);
+  });
+
+  // ── PR 3: handoffs, ghosts, gates and the Stamp ──────────────────────────
+
+  test("the handoff chain renders three sessions, two handoff lines and two gated merges", async ({
+    page,
+  }) => {
+    await open_(page, CHAIN_REL);
+    // The cost sentence is about the STAMPED sessions only — a ghost is a link,
+    // never a denominator — and the ghost rides a hint of its own after it.
+    await expect(page.locator(".wiki-prov-cost")).toHaveText(
+      "the 2 sessions that wrote this page cost $51.00 in total",
+    );
+    await expect(page.locator(".wiki-prov-ghost-hint")).toHaveText(
+      "the ledger links 1 more session through a handoff — $44.00",
+    );
+    // Two rings, one dashed ring, two squares.
+    const marks = page.locator(".wiki-prov-marks .wiki-prov-mark");
+    await expect(marks).toHaveCount(5);
+    await expect(marks.nth(2)).toHaveAttribute("data-mark", "ghost");
+
+    const rows = await openChain(page);
+    // A(09:00) → handoff(13:45) → B(14:00) → #321(15:30) → handoff(17:45) →
+    // ghost(18:00) → #322(19:30). Time order, one spine.
+    await expect(rows).toHaveCount(7);
+    await expect(page.locator(".wiki-chain-handoff")).toHaveCount(2);
+    await expect(rows.nth(1)).toHaveClass(/wiki-chain-handoff/);
+    await expect(rows.nth(1).locator(".wiki-chain-when")).toHaveText(
+      "handoff · 09-15 13:45 · workshop",
+    );
+    await expect(rows.nth(1)).toHaveAttribute("title", `${CHAIN_A} → ${CHAIN_B}`);
+
+    // The model reads short with the raw id on the hover, and the delegated
+    // slice sits after the total.
+    await expect(rows.nth(0).locator(".wiki-chain-model")).toHaveText("· claude-sonnet-4-5");
+    await expect(rows.nth(0).locator(".wiki-chain-model")).toHaveAttribute(
+      "title",
+      "claude-sonnet-4-5-20250929",
+    );
+    await expect(rows.nth(0).locator(".wiki-chain-delegated")).toHaveText("· $5.50 delegated");
+
+    // The gate verdicts: one merge stated none, the other stated both.
+    const merges = page.locator(".wiki-chain-merge");
+    await expect(merges).toHaveCount(2);
+    await expect(merges.nth(0).locator(".wiki-chain-gate")).toHaveText("no gate line");
+    await expect(merges.nth(1).locator(".wiki-chain-gate")).toHaveText(
+      "✓ review floor + split check",
+    );
+
+    // The ghost itself: amber, its evidence named, and — since the ledger's
+    // `claude` maps to the prefix the stamper writes — a glyph and a Stamp.
+    const ghost = rows.nth(5);
+    await expect(ghost).toHaveClass(/wiki-chain-ghost/);
+    await expect(ghost.locator(".wiki-chain-glyph")).toHaveText("◆");
+    await expect(ghost.locator(".wiki-chain-reason")).toHaveText(
+      "ran this session's handoff — may not have touched this page",
+    );
+    await expect(ghost.locator(".wiki-chain-id")).toHaveText(CHAIN_GHOST);
+  });
+
+  test("a handoff ghost's first click asks for a confirmation", async ({ page }) => {
+    await open_(page, CHAIN_REL);
+    const rows = await openChain(page);
+    const btn = rows.nth(5).locator(".wiki-chain-stamp");
+    await expect(btn).toHaveText("Stamp");
+    await btn.click();
+    // Nothing was written: the label is the whole first step.
+    await expect(btn).toHaveText("Confirm: this session wrote the page");
+    await expect(rows.nth(5)).toHaveClass(/wiki-chain-ghost/);
+    const after = await readFile(path.join(root, CHAIN_REL), "utf8");
+    expect(after).not.toContain(CHAIN_GHOST);
+  });
+
+  test("the shape fixture finds its ghost through `prs:`", async ({ page }) => {
+    const before = askedPrs.length;
+    await open_(page, SHAPE_REL);
+    const rows = await openChain(page);
+    expect(askedPrs.length).toBeGreaterThan(before);
+    // The page's own two coordinates were the query.
+    expect(askedPrs[askedPrs.length - 1]).toContain("RuneLind/muninn#543");
+
+    const ghost = rows.nth(4);
+    await expect(ghost).toHaveClass(/wiki-chain-ghost/);
+    await expect(ghost.locator(".wiki-chain-reason")).toHaveText(
+      "merged #543 — this page does not stamp it",
+    );
+    // Real evidence, so the Stamp is ONE click — no confirm attribute.
+    const btn = ghost.locator(".wiki-chain-stamp");
+    await expect(btn).toHaveAttribute("data-prov-stamp", `claude-code:${PR_GHOST}`);
+    await expect(btn).not.toHaveAttribute("data-prov-stamp-confirm", /.*/);
+    // A pre-standardization merge says so instead of reading as ungated.
+    await expect(page.locator(".wiki-chain-merge").nth(2).locator(".wiki-chain-gate")).toHaveText(
+      "no gate data before 2026-07-30",
+    );
+    // ...and a row the join did not match says THAT, never nothing.
+    await expect(page.locator(".wiki-chain-merge").nth(1).locator(".wiki-chain-gate")).toHaveText(
+      "gate not matched",
+    );
+  });
+
+  test("Stamp writes the frontmatter through the CLI and the row turns solid", async ({ page }) => {
+    await open_(page, STAMP_REL);
+    // Before: one stamped session, one PR ghost, and the backfilled tail.
+    await expect(page.locator(".wiki-prov-cost")).toContainText(
+      "· inferred from history 2026-09-01",
+    );
+    const rows = await openChain(page);
+    await expect(rows.filter({ hasText: STAMP_GHOST })).toHaveClass(/wiki-chain-ghost/);
+
+    await page.locator(".wiki-chain-stamp").click();
+
+    // After: the ghost is a stamped session, the cost sentence counts two, and
+    // the CLI retired `sessions_backfilled` so the tail is gone. The strip
+    // redraws from the route's own re-resolved payload — no second page load.
+    await expect(page.locator(".wiki-prov-cost")).toHaveText(
+      "the 2 sessions that wrote this page cost $12.00 in total",
+    );
+    await expect(page.locator(".wiki-prov-cost")).not.toContainText("inferred from history");
+    await expect(page.locator(".wiki-chain-ghost")).toHaveCount(0);
+    // The chain the reader had open is still open after the redraw.
+    await expect(page.locator(".wiki-prov-chain")).toBeVisible();
+
+    const after = await readFile(path.join(root, STAMP_REL), "utf8");
+    expect(after).toContain(`claude-code:${STAMP_GHOST}`);
+    expect(after).not.toContain("sessions_backfilled");
+  });
+
+  test("a read-only ROOT offers no Stamp and refuses the POST", async ({ page, request }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_RO}&relPath=${encodeURIComponent(RO_REL)}`);
+    const rows = await openChain(page);
+    // The ghost is there — provenance is a READ, and the mini serves it in full.
+    await expect(rows.filter({ hasText: STAMP_GHOST })).toHaveClass(/wiki-chain-ghost/);
+    // ...and there is no button on it, because `stampable` is false.
+    await expect(page.locator(".wiki-chain-stamp")).toHaveCount(0);
+
+    const res = await request.post(`${BASE}/api/wiki/provenance/stamp`, {
+      data: { wiki: WIKI_RO, relPath: RO_REL, ref: `claude-code:${STAMP_GHOST}` },
+    });
+    expect(res.status()).toBe(403);
+    expect((await res.json()).error).toContain("WIKI_READONLY_ROOTS");
+    const after = await readFile(path.join(roRoot, RO_REL), "utf8");
+    expect(after).not.toContain(STAMP_GHOST);
   });
 });

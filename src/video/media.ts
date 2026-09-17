@@ -3,6 +3,10 @@ import { unlink } from "node:fs/promises";
 import { Glob } from "bun";
 import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
+// The bounded spawn helper moved to `src/utils/run-proc.ts` when the wiki Stamp
+// route became its second caller: a wiki route must not import this module's
+// graph (yt-dlp, whisper, ffmpeg) to get a spawn.
+import { runProc } from "../utils/run-proc.ts";
 
 const log = getLog("video", "media");
 
@@ -253,57 +257,6 @@ function thinEvenly<T>(items: T[], max: number): T[] {
     out.push(items[idx]!);
   }
   return out;
-}
-
-// ---------------------------------------------------------------------------
-// Spawn helper — concurrent stdout/stderr/exit drain + hard timeout
-// ---------------------------------------------------------------------------
-
-export interface ProcResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
-/**
- * Spawn a process, draining stdout AND stderr concurrently with exit (awaiting
- * `exited` first can deadlock if the pipe buffer fills — same fix as stt.ts),
- * and kill it if it runs past `timeoutMs` (mirrors executor.ts's timeout).
- */
-export async function runProc(
-  cmd: string[],
-  timeoutMs: number,
-  label: string,
-): Promise<ProcResult> {
-  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-
-  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutTimer = setTimeout(() => {
-      log.error("{label} timed out after {timeoutMs}ms — killing PID {pid}", {
-        label,
-        timeoutMs,
-        pid: proc.pid,
-      });
-      proc.kill();
-      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-
-  const workPromise = (async (): Promise<ProcResult> => {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    return { stdout, stderr, exitCode };
-  })();
-
-  try {
-    return await Promise.race([workPromise, timeoutPromise]);
-  } finally {
-    if (timeoutTimer) clearTimeout(timeoutTimer);
-  }
 }
 
 /**

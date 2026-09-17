@@ -29,8 +29,13 @@
 import {
   bareChipReason,
   isJiraKeyShape,
+  HANDOFF_READS_MAX,
+  PR_READS_MAX,
+  type ProvenanceGhostLink,
+  type ProvenanceHandoff,
   type ProvenanceJira,
   type ProvenanceLedgerState,
+  type ProvenanceLinksState,
   type ProvenanceMerge,
   type ProvenanceMergesState,
   type ProvenancePayload,
@@ -90,6 +95,18 @@ export function costLine(p: ProvenancePayload): string | null {
   const tail = p.backfilled ? ` · inferred from history ${p.backfilled}` : "";
   const with_ = (line: string): string => line + tail;
 
+  // THE NINTH STATE: no session on the page, but the ledger links one. A
+  // `prs:`-only page produced no line at all — and therefore no strip — while a
+  // PR ghost is exactly the thing such a page has to say. It is a state of THIS
+  // function rather than a second condition in `provStripHtml`, which is what
+  // keying that early return on the LINE was for.
+  // `?? []` throughout, because this crosses the wire: a payload a server built
+  // before the ghost legs existed simply has no key.
+  const ghosts = p.ghosts ?? [];
+  if (n === 0 && ghosts.length > 0) {
+    return `the ledger links ${plural(ghosts.length, "session")}${ghostLinkTail(p)}`;
+  }
+
   if (!p.ledger.asked) {
     if (n === 0) return null;
     if (!p.ledger.configured) {
@@ -122,6 +139,129 @@ export function costLine(p: ProvenancePayload): string | null {
     return with_(`the ${plural(n, "session")} that wrote this page cost ${money(p.totalCost)} in total over ${m} of ${n}`);
   }
   return with_(`the ${plural(n, "session")} that wrote this page cost ${money(p.totalCost)} in total`);
+}
+
+/**
+ * `through #553 — $101.72`, the tail both ghost sentences share.
+ *
+ * The link named is the FIRST ghost's, and `ghostCandidates` puts the PR ghosts
+ * first — so a page that has one says which PR, and a page whose only ghosts came
+ * through handoffs says `a handoff` rather than naming a session id the reader
+ * has no way to place. The money is the sum over the ghosts the ledger PRICED;
+ * with none priced (leg 5 failed) the sentence counts them and states no amount,
+ * because a ghost with no cost is not a $0 session.
+ */
+function ghostLinkTail(p: ProvenancePayload): string {
+  const ghosts = p.ghosts ?? [];
+  const first = ghosts[0]?.ghost;
+  const through = !first ? "" : first.via === "pr" ? ` through ${first.through}` : " through a handoff";
+  let total = 0;
+  let priced = 0;
+  for (const ghost of ghosts) {
+    if (typeof ghost.cost !== "number") continue;
+    total += ghost.cost;
+    priced += 1;
+  }
+  return priced > 0 ? `${through} — ${money(Math.round(total * 100) / 100)}` : through;
+}
+
+/**
+ * The hint after the marks when the page HAS stamped sessions and the ledger
+ * links more — `the ledger links 1 more session through #553 — $101.72`.
+ *
+ * A separate sentence rather than a clause of `costLine`, because the cost
+ * sentence is about the sessions the page STAMPED and a ghost is never in its
+ * denominator. `null` when there is no ghost, or when the page has no stamped
+ * session at all — there the ninth `costLine` state says it instead, and two
+ * sentences saying the same thing on one line is worse than either.
+ */
+export function ghostHint(p: ProvenancePayload): string | null {
+  const ghosts = p.ghosts ?? [];
+  if (!ghosts.length || !p.sessions.length) return null;
+  return `the ledger links ${plural(ghosts.length, "more session")}${ghostLinkTail(p)}`;
+}
+
+/**
+ * What a gate kind is called in a row. The ledger's kinds are its own spelling
+ * (`gate-review-floor`); an UNKNOWN one is named raw rather than dropped, so a
+ * kind claude-usage adds shows up as a fact the reader can look up instead of
+ * silently thinning the verdict.
+ */
+export const GATE_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  "gate-review-floor": "review floor",
+  "gate-split-check": "split check",
+  "gate-campaign": "campaign gate",
+  "gate-closing": "closing gate",
+  triviality: "review skipped",
+  "ceremony-check": "ceremony check",
+});
+
+/** Render order — the ledger's own `ASSOCIABLE_GATE_KINDS`, so two merges with
+ *  the same gates read the same way whatever order the payload listed them in. */
+export const GATE_ORDER: readonly string[] = Object.keys(GATE_LABELS);
+
+/**
+ * The gate verdict for one merge row, or null when there is nothing to say.
+ *
+ * Five outcomes, and the order they are tried in is the whole content:
+ *
+ * | gate | verdict |
+ * |---|---|
+ * | `null` (a bare `gh pr merge`) | nothing — upstream left the data out, so this states no opinion |
+ * | `{matched: false}` | `gate not matched` — the join found no ledger row, which is not "ungated" |
+ * | `gated` | `✓ <the gates it carried>` |
+ * | `preStandardization` | `no gate data before <date>` |
+ * | otherwise | `no gate line` |
+ *
+ * `preStandardization` sits BELOW `gated` and ABOVE `no gate line`: it qualifies
+ * an ABSENCE. A merge from before the phrases were machine-parsed has no gate
+ * data to be missing, and rendering it as `no gate line` reads as a verdict
+ * about the merge rather than about the corpus.
+ */
+/** The mark a gated verdict opens with — one spelling, shared by the builder and
+ *  by the renderer that splits it back out. */
+export const GATE_OK_MARK = "✓";
+
+export function gateVerdict(
+  merge: ProvenanceMerge,
+  rulesStandardizedDate?: string | null,
+): string | null {
+  const gate = merge.gate;
+  if (!gate) return null;
+  if (!gate.matched) return GATE_NOT_MATCHED_COPY;
+  if (gate.gated) {
+    const kinds = gate.gates ?? [];
+    const known = GATE_ORDER.filter((k) => kinds.includes(k));
+    const rest = kinds.filter((k) => !GATE_ORDER.includes(k));
+    const labels = [...known.map((k) => GATE_LABELS[k]!), ...rest];
+    // Gated through a shape that associated no KIND (a campaign session's
+    // closing gate covering its sole merge) still says so: the ledger's verdict
+    // is the fact, and the kinds are how it is spelled out when it has them.
+    return `${GATE_OK_MARK} ${labels.length ? labels.join(" + ") : "gated"}`;
+  }
+  if (merge.preStandardization) {
+    return rulesStandardizedDate
+      ? `no gate data before ${rulesStandardizedDate}`
+      : "no gate data before the gate phrases were standardized";
+  }
+  return NO_GATE_LINE_COPY;
+}
+
+/** The two gate sentences that are not built from a date or a kind list. */
+export const GATE_NOT_MATCHED_COPY = "gate not matched";
+export const NO_GATE_LINE_COPY = "no gate line";
+
+/**
+ * A model id, shortened for the row.
+ *
+ * ONE rule: drop a trailing `-YYYYMMDD` release stamp and keep the family, so
+ * `claude-sonnet-4-5-20250929` reads as `claude-sonnet-4-5` while
+ * `claude-opus-5` is unchanged. Eight digits is the whole test — a seven-digit
+ * tail is a version, not a day — and the RAW id rides the row's `title`, because
+ * which build answered is a fact worth being able to read exactly.
+ */
+export function modelLabel(raw: string): string {
+  return raw.replace(/-\d{8}$/, "");
 }
 
 /** Per-provider glyph for a session row. `claude-code` and `opencode` are the
@@ -356,7 +496,15 @@ export interface ChainMergeEvent {
   at: string | null;
   merge: ProvenanceMerge;
 }
-export type ChainEvent = ChainSessionEvent | ChainMergeEvent;
+/** One session's handoff being run by another — a quiet line BETWEEN the two
+ *  sessions, which is where sorting it on the instant the later session typed it
+ *  puts it. */
+export interface ChainHandoffEvent {
+  kind: "handoff";
+  at: string | null;
+  handoff: ProvenanceHandoff;
+}
+export type ChainEvent = ChainSessionEvent | ChainMergeEvent | ChainHandoffEvent;
 
 /**
  * The union of sessions and merges, ascending.
@@ -377,10 +525,18 @@ export type ChainEvent = ChainSessionEvent | ChainMergeEvent;
  */
 export function chainEvents(p: ProvenancePayload): ChainEvent[] {
   const events: ChainEvent[] = [
-    ...p.sessions.map((chip): ChainEvent => ({
+    // A ghost is a session event like any other and takes the SAME dating rule:
+    // dated from its own facts when leg 5 priced it, and dateless — therefore
+    // last — when that leg failed. `?? []` for the same wire reason as `merges`.
+    ...[...p.sessions, ...(p.ghosts ?? [])].map((chip): ChainEvent => ({
       kind: "session",
       at: chip.first ?? chip.last ?? null,
       chip,
+    })),
+    ...(p.handoffs ?? []).map((handoff): ChainEvent => ({
+      kind: "handoff",
+      at: handoff.at ?? null,
+      handoff,
     })),
     // `?? []` because this crosses the wire: a payload a server built before the
     // merges leg existed simply has no key, and the reader must not index into
@@ -615,16 +771,23 @@ function markQuotas(counts: number[], cap: number): number[] {
  *  value, not a rewrite: it joins the counts array and gets a share of its own. */
 function marksHtml(p: ProvenancePayload, opts: ChainRenderOptions): string {
   const sessionMarks: string[] = [];
+  const ghostMarks: string[] = [];
   const mergeMarks: string[] = [];
-  for (const chip of p.sessions) {
+  const sessionMark = (chip: ProvenanceSessionChip, ghost: boolean): string => {
     const v = chipView(chip, p.ledger);
     const when = sessionWhen(chip, opts.timeZone);
     const what = v.bareCopy ?? `${v.titleFull || chip.id}${v.costLabel ? ` — ${v.costLabel}` : ""}`;
-    sessionMarks.push(
-      `<span class="wiki-prov-mark wiki-prov-mark-session" data-mark="session"` +
-        ` title="${esc(when ? `${when} · ${what}` : what)}">○</span>`,
+    const why = ghost ? "linked by the ledger, not stamped on this page · " : "";
+    return (
+      `<span class="wiki-prov-mark wiki-prov-mark-${ghost ? "ghost" : "session"}"` +
+      ` data-mark="${ghost ? "ghost" : "session"}"` +
+      ` title="${esc(why + (when ? `${when} · ${what}` : what))}">○</span>`
     );
-  }
+  };
+  for (const chip of p.sessions) sessionMarks.push(sessionMark(chip, false));
+  // A DASHED ring — the same glyph, a different class, so the two kinds read as
+  // the same thing in two states rather than as two vocabularies.
+  for (const chip of p.ghosts ?? []) ghostMarks.push(sessionMark(chip, true));
   for (const merge of p.merges ?? []) {
     const coordinate = mergeCoordinate(merge.url);
     const label = merge.prNumber === null ? "a merge" : `#${merge.prNumber}`;
@@ -634,7 +797,7 @@ function marksHtml(p: ProvenancePayload, opts: ChainRenderOptions): string {
         ` title="merged ${esc(where + label)}">▪</span>`,
     );
   }
-  const byKind = [sessionMarks, mergeMarks];
+  const byKind = [sessionMarks, ghostMarks, mergeMarks];
   const quotas = markQuotas(
     byKind.map((kind) => kind.length),
     MARKS_MAX,
@@ -669,11 +832,13 @@ export const CHAIN_ID = "wikiProvChain";
 export function provLineHtml(p: ProvenancePayload, opts: ChainRenderOptions = {}): string {
   const sentence = costLine(p);
   if (!sentence) return "";
+  const hint = ghostHint(p);
   return (
     `<button type="button" class="wiki-prov-line" data-prov-toggle` +
     ` aria-expanded="false" aria-controls="${CHAIN_ID}">` +
     `<span class="wiki-prov-cost">${esc(sentence)}</span>` +
     marksHtml(p, opts) +
+    (hint ? `<span class="wiki-prov-ghost-hint">${esc(hint)}</span>` : "") +
     `<span class="wiki-prov-caret" aria-hidden="true">▾</span>` +
     `</button>`
   );
@@ -681,10 +846,31 @@ export function provLineHtml(p: ProvenancePayload, opts: ChainRenderOptions = {}
 
 /** One session's row. The copy button keeps the `data-sess-copy` contract the
  *  rail rows had — the client's delegate and `copySessionId` are unchanged. */
+/** The Stamp control's two labels. ONE spelling each, shared with the client's
+ *  two-step confirm — two spellings is how a button silently renames itself. */
+export const STAMP_LABEL = "Stamp";
+export const STAMP_CONFIRM_LABEL = "Confirm: this session wrote the page";
+
+/** What a ghost row says its evidence is. A handoff is a pasted PROMPT and says
+ *  nothing about this page, which is why its Stamp asks twice. */
+function ghostReason(link: ProvenanceGhostLink): string {
+  return link.via === "handoff"
+    ? "ran this session's handoff — may not have touched this page"
+    : `merged ${link.through} — this page does not stamp it`;
+}
+
+/** Why a ghost has no Stamp button even on a stamping instance. */
+function noStampReason(chip: ProvenanceSessionChip): string {
+  return chip.provider
+    ? `no Stamp — the ledger reports provider "${chip.provider}", which this pipeline does not stamp`
+    : "no Stamp — the ledger named no provider for this session";
+}
+
 function sessionRowHtml(
   chip: ProvenanceSessionChip,
   ledger: ProvenanceLedgerState | null | undefined,
   opts: ChainRenderOptions,
+  stampable = false,
 ): string {
   const v = chipView(chip, ledger);
   const when = sessionWhen(chip, opts.timeZone);
@@ -696,8 +882,10 @@ function sessionRowHtml(
   // on the FORMATTED pair, and leaves both raw stamps in this hover.)
   const whenTitle = [...new Set([chip.first, chip.last].filter(Boolean))].join(" → ");
   const messages = typeof chip.messages === "number" ? plural(chip.messages, "message") : "";
+  const ghost = chip.ghost;
   let html =
-    `<div class="wiki-chain-row wiki-chain-session${v.bareCopy ? " wiki-chain-bare" : ""}"` +
+    `<div class="wiki-chain-row wiki-chain-session${v.bareCopy ? " wiki-chain-bare" : ""}` +
+    `${ghost ? " wiki-chain-ghost" : ""}"` +
     `${messages ? ` title="${esc(messages)}"` : ""}>`;
   html += `<div class="wiki-chain-head">`;
   html += `<span class="wiki-chain-glyph" title="${esc(v.providerLabel)}">${esc(v.glyph)}</span>`;
@@ -708,12 +896,28 @@ function sessionRowHtml(
   // The `·` SEPARATES the host from the date before it; with no date there is
   // nothing to separate it from, and the row opened `◇ · macmini`.
   if (v.host) html += `<span class="wiki-chain-host">${when ? "· " : ""}${esc(v.host)}</span>`;
+  // The model after the host, shortened, with the raw id on the hover. The `·`
+  // separates it from whatever is before it, and with neither date nor host
+  // there is nothing to separate it from.
+  if (chip.model) {
+    html +=
+      `<span class="wiki-chain-model" title="${esc(chip.model)}">` +
+      `${when || v.host ? "· " : ""}${esc(modelLabel(chip.model))}</span>`;
+  }
   if (v.costLabel) html += `<span class="wiki-chain-cost">${esc(v.costLabel)}</span>`;
+  // The delegated SLICE of that total, never an addition to it. Rendered only
+  // beside a cost, since "of what" is the whole meaning of the number.
+  if (v.costLabel && typeof chip.delegatedCost === "number") {
+    html +=
+      `<span class="wiki-chain-delegated" title="spent by this session's subagents">` +
+      `· ${esc(fmtCost(chip.delegatedCost))} delegated</span>`;
+  }
   html += `</div>`;
   if (v.title) {
     html += `<div class="wiki-chain-title" title="${esc(v.titleFull)}">${esc(v.title)}</div>`;
   }
   if (v.bareCopy) html += `<div class="wiki-chain-reason">${esc(v.bareCopy)}</div>`;
+  if (ghost) html += `<div class="wiki-chain-reason">${esc(ghostReason(ghost))}</div>`;
   html += `<div class="wiki-chain-idrow">`;
   html += `<code class="wiki-chain-id">${esc(chip.id)}</code>`;
   html +=
@@ -725,12 +929,53 @@ function sessionRowHtml(
       `<a class="wiki-chain-link" href="${esc(v.url)}" target="_blank" rel="noopener"` +
       ` title="Open this session in claude-usage">↗</a>`;
   }
+  // The Stamp, on a ghost only. THREE conditions, each with its own outcome:
+  // this instance may stamp at all (`stampable`, which is false on the mini and
+  // on any wiki the CLI's roots do not cover), and the ledger's provider maps to
+  // a prefix the CLI will accept — otherwise the row says why rather than
+  // offering a click that can only 409.
+  if (ghost) {
+    if (!stampable) {
+      // Nothing: `stampable` is an instance-and-wiki fact, and repeating it on
+      // every ghost row of a read-only reader is noise, not information.
+    } else if (!ghost.stampRef) {
+      html += `<span class="wiki-chain-nostamp">${esc(noStampReason(chip))}</span>`;
+    } else {
+      html +=
+        `<button type="button" class="wiki-chain-stamp"` +
+        ` data-prov-stamp="${esc(ghost.stampRef)}"` +
+        // A handoff is evidence about a PROMPT, so the write it would make is a
+        // claim the reader has to affirm. The client swaps the label on the
+        // first click; the attribute is what tells it to.
+        `${ghost.via === "handoff" ? ` data-prov-stamp-confirm="1"` : ""}` +
+        ` title="Record this session on the page's sessions: line">${STAMP_LABEL}</button>`;
+    }
+  }
   return html + `</div></div>`;
+}
+
+/** One handoff: the quiet line between the session that wrote a handoff prompt
+ *  and the one that ran it. Both ends on the hover — the ids are what a reader
+ *  would paste into claude-usage, and the row has no room for two of them. */
+function handoffRowHtml(handoff: ProvenanceHandoff, opts: ChainRenderOptions): string {
+  const when = fmtChainStamp(handoff.at, opts.timeZone);
+  return (
+    `<div class="wiki-chain-row wiki-chain-handoff"` +
+    ` title="${esc(`${handoff.from} → ${handoff.to}`)}">` +
+    `<span class="wiki-chain-glyph" aria-hidden="true">↳</span>` +
+    `<span class="wiki-chain-when">handoff${when ? ` · ${esc(when)}` : ""}` +
+    `${handoff.host ? ` · ${esc(handoff.host)}` : ""}</span>` +
+    `</div>`
+  );
 }
 
 /** One merged PR. The title is omitted: `subject` is null on every merge
  *  measured — it comes from the confirm side, not the merge event. */
-function mergeRowHtml(merge: ProvenanceMerge, opts: ChainRenderOptions): string {
+function mergeRowHtml(
+  merge: ProvenanceMerge,
+  opts: ChainRenderOptions,
+  rulesStandardizedDate?: string | null,
+): string {
   const coordinate = mergeCoordinate(merge.url);
   const number = merge.prNumber === null ? "" : `#${merge.prNumber}`;
   const when = fmtChainStamp(merge.mergedAt, opts.timeZone);
@@ -758,6 +1003,20 @@ function mergeRowHtml(merge: ProvenanceMerge, opts: ChainRenderOptions): string 
       ` title="the merge command's own result was never paired with a confirmation">` +
       `${MERGE_UNCONFIRMED_COPY}</span>`;
   }
+  const verdict = gateVerdict(merge, rulesStandardizedDate);
+  if (verdict) {
+    // The ✓ is a MARK and takes the only colour on this row; the WORDS beside it
+    // stay at the row's own text colour. Measured on a body probe: the success
+    // token is 3.0:1 in the light theme, under the 4.5:1 floor every line a
+    // reader has to READ sits at — and a verdict is a line to read.
+    const gated = verdict.startsWith(GATE_OK_MARK);
+    const body = gated ? verdict.slice(GATE_OK_MARK.length).trimStart() : verdict;
+    html +=
+      `<span class="wiki-chain-gate"` +
+      ` title="the pipeline ledger's own gate verdict for this merge">` +
+      (gated ? `<span class="wiki-chain-gate-ok">${GATE_OK_MARK}</span> ` : "") +
+      `${esc(body)}</span>`;
+  }
   return html + `</div>`;
 }
 
@@ -771,15 +1030,49 @@ function mergeRowHtml(merge: ProvenanceMerge, opts: ChainRenderOptions): string 
 export function chainHtml(p: ProvenancePayload, opts: ChainRenderOptions = {}): string {
   let html = `<div class="wiki-prov-chain" id="${CHAIN_ID}" hidden>`;
   for (const event of chainEvents(p)) {
-    html +=
-      event.kind === "session"
-        ? sessionRowHtml(event.chip, p.ledger, opts)
-        : mergeRowHtml(event.merge, opts);
+    if (event.kind === "session") {
+      html += sessionRowHtml(event.chip, p.ledger, opts, p.stampable === true);
+    } else if (event.kind === "merge") {
+      html += mergeRowHtml(event.merge, opts, p.rulesStandardizedDate);
+    } else {
+      html += handoffRowHtml(event.handoff, opts);
+    }
   }
-  const note = mergesNote(p.mergesLedger);
-  if (note) html += `<div class="wiki-chain-note">${esc(note)}</div>`;
+  // The merges leg first (it is the one the rows above came from), then the four
+  // PR-3 legs. Every one of them is a footer line rather than a missing row: a
+  // leg that did not answer and a page that has nothing to show are different
+  // facts, and the cost sentence moves for neither.
+  for (const note of [mergesNote(p.mergesLedger), ...linksNotes(p.links)]) {
+    if (note) html += `<div class="wiki-chain-note">${esc(note)}</div>`;
+  }
   return html + `</div>`;
 }
+
+/**
+ * The footer lines for the four PR-3 legs, most-severe first.
+ *
+ * A leg that was never ASKED says nothing — a page naming no `prs:` has no PR
+ * call to have failed, exactly as `mergesNote` treats an unasked merges leg.
+ * Legs 5 and 6 report nothing here either: their degrade is already on screen
+ * as an id-only ghost row, and a footer line about it would describe a row the
+ * reader can see.
+ */
+export function linksNotes(links?: ProvenanceLinksState | null): string[] {
+  if (!links) return [];
+  const notes: string[] = [];
+  if (links.handoffs.asked && !links.handoffs.reachable) notes.push(HANDOFFS_UNREAD_NOTE);
+  if (links.prs.asked && !links.prs.reachable) notes.push(PR_LINKS_UNREAD_NOTE);
+  if (links.handoffsCapped) {
+    notes.push(`handoff lines not shown: this page names more than ${HANDOFF_READS_MAX} sessions`);
+  }
+  if (links.prsCapped) notes.push(`PR links read for the first ${PR_READS_MAX} entries only`);
+  if (links.timedOut) notes.push(LINKS_TIMED_OUT_NOTE);
+  return notes;
+}
+
+export const HANDOFFS_UNREAD_NOTE = "handoffs not read";
+export const PR_LINKS_UNREAD_NOTE = "PR links not read: claude-usage did not answer";
+export const LINKS_TIMED_OUT_NOTE = "some ledger reads timed out";
 
 /** Label on a chain row's copy button, and what it flips to. Short because the
  *  button sits at the end of a row that already carries a date, a host, a title

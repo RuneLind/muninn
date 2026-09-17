@@ -37,21 +37,33 @@ import type { WikiPageMeta } from "./store.ts";
 import {
   costOfSessions,
   enrichSessions,
+  ghostCandidates,
+  handoffLinks,
   hasProvenance,
   jiraRows,
   parsePrRef,
+  stampRefFor,
+  HANDOFF_READS_MAX,
   LEDGER_NOT_ASKED,
+  LEG_NOT_ASKED,
   MERGES_NOT_ASKED,
+  PR_READS_MAX,
+  type ProvenanceHandoff,
   type ProvenanceLedgerState,
+  type ProvenanceLegState,
+  type ProvenanceMerge,
   type ProvenancePayload,
   type ProvenanceSessionChip,
 } from "./provenance.ts";
 import {
+  fetchHandoffs,
+  fetchMergesForPrs,
   fetchMergesForSessions,
   fetchSessionsById,
   type SessionLedgerDeps,
   type SessionLedgerResult,
 } from "./session-ledger.ts";
+import { stampableFor, stampConfigFromEnv } from "./stamp-roots.ts";
 import { loadJiraKeyIndex } from "../jira/verify-keys.ts";
 
 /**
@@ -89,6 +101,13 @@ export interface ProvenanceContext {
   publicUrl: string | null;
   /** Test seam for the huginn corpus read. */
   loadJiraIndex?: typeof loadJiraKeyIndex;
+  /**
+   * May this instance offer a Stamp for a page in this wiki? The ONE predicate,
+   * injected so a test drives it without the environment; production reads
+   * `WIKI_STAMP_BIN`/`WIKI_STAMP_ROOTS` and both read-only guards through
+   * `stampableFor`. A page with no wiki root in hand is never stampable.
+   */
+  stampable?: (wikiDir: string | undefined) => boolean;
   /** Test seam for the deadline, so a hanging-stub case costs milliseconds. */
   budgetMs?: number;
 }
@@ -214,6 +233,9 @@ function ledgerState(
 export async function pageProvenance(
   meta: WikiPageMeta,
   ctx: ProvenanceContext,
+  /** The wiki's resolved root — the ONE input `stampable` needs. Absent (a
+   *  caller that has no root in hand) ⇒ no Stamp is offered. */
+  wikiDir?: string,
 ): Promise<ProvenancePayload | null> {
   // ONE gate, `hasProvenance` — the same predicate the store's own callers use,
   // so "does this page carry provenance" has a single answer.
@@ -230,22 +252,86 @@ export async function pageProvenance(
   // Exactly `resolveProvenance`'s own condition, hoisted: a page with nothing to
   // ask still arms no timer.
   const askLedger = askRefs.length > 0 && ctx.sessionLedger.urlConfigured;
+
+  // Leg 3's own gate. A page past the cap reads NO handoff at all — rendering
+  // the first ten silently would be a chain that is short for a reason nothing
+  // states — and the footer says so instead.
+  const handoffsCapped = askLedger && askRefs.length > HANDOFF_READS_MAX;
+  const askHandoffs = askLedger && !handoffsCapped;
+
+  // Leg 4's input: the page's OWN `prs:` list, filtered to the coordinate shape
+  // (a malformed one is a 400 for the whole request upstream, so a typo in one
+  // entry must not take the leg down) and capped client-side.
+  const prRefs = (meta.prs ?? []).map(parsePrRef);
+  const coordinates = prRefs.filter((pr) => pr.url !== null).map((pr) => pr.ref);
+  const prsCapped = coordinates.length > PR_READS_MAX;
+  const askPrs = ctx.sessionLedger.urlConfigured && coordinates.length > 0;
+
+  // ONE timer for every leg, armed only when something is actually fetched — a
+  // `prs:`-only page asks nothing of the ledger's session routes and everything
+  // of `?prs=`, so that leg is part of the condition rather than riding a timer
+  // armed for somebody else.
   const signal =
-    askLedger || keys.length > 0
+    askLedger || askPrs || keys.length > 0
       ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS)
       : undefined;
 
-  const [resolved, mergeResult] = await Promise.all([
+  const [resolved, mergeResult, handoffResult, prResult] = await Promise.all([
     resolveProvenance({ refs, keys }, ctx, signal),
     // The SAME list the facts leg pages over — deduped, bare ids, since the
     // `provider:` prefix is muninn's and the ledger is keyed on neither.
     askLedger ? fetchMergesForSessions(ctx.sessionLedger, askRefs, signal) : null,
+    askHandoffs ? fetchHandoffs(ctx.sessionLedger, askRefs, signal) : null,
+    askPrs ? fetchMergesForPrs(ctx.sessionLedger, coordinates.slice(0, PR_READS_MAX), signal) : null,
   ]);
+
+  // ── The second hop: the ghosts legs 3 and 4 found ─────────────────────────
+  //
+  // ONE hop, deliberately: a ghost's own handoff is not read, so a chain of
+  // ghosts shows its first link only. Reading further would make the page open's
+  // depth a property of the corpus.
+  const handoffs: ProvenanceHandoff[] = handoffLinks(handoffResult?.ranBy ?? new Map());
+  const candidates = ghostCandidates({
+    stampedIds: askRefs,
+    prMerges: prResult?.merges ?? [],
+    handoffs,
+  });
+  const ghostIds = candidates.map((c) => c.id);
+  const askGhosts = ghostIds.length > 0 && ctx.sessionLedger.urlConfigured;
+  const [ghostFacts, ghostMerges] = await Promise.all([
+    askGhosts ? fetchSessionsById(ctx.sessionLedger, ghostIds, signal) : null,
+    askGhosts ? fetchMergesForSessions(ctx.sessionLedger, ghostIds, signal) : null,
+  ]);
+
+  // A ghost with no facts is an id-only row — no cost, no title, a neutral
+  // glyph and no Stamp, because there is no provider to map into a ref.
+  const ghosts = enrichSessions(
+    ghostIds,
+    ghostFacts ?? { facts: new Map(), unresolved: new Set(ghostIds) },
+    ctx.publicUrl,
+  ).map((chip, i) => ({
+    ...chip,
+    ghost: {
+      via: candidates[i]!.via,
+      through: candidates[i]!.through,
+      stampRef: stampRefFor(chip),
+    },
+  }));
 
   return {
     ...resolved,
-    prs: (meta.prs ?? []).map(parsePrRef),
-    merges: mergeResult?.merges ?? [],
+    ghosts,
+    handoffs,
+    stampable: (ctx.stampable ?? defaultStampable)(wikiDir),
+    prs: prRefs,
+    // Three sources, one spine: the stamped sessions' merges, the `?prs=` rows
+    // and the ghosts' own. Deduped, because a PR the page names AND the ghost
+    // merged is reported by two of them.
+    merges: dedupeMerges([
+      ...(mergeResult?.merges ?? []),
+      ...(prResult?.merges ?? []),
+      ...(ghostMerges?.merges ?? []),
+    ]),
     mergesLedger: mergeResult
       ? {
           asked: mergeResult.asked,
@@ -256,8 +342,65 @@ export async function pageProvenance(
           ...(mergeResult.errors ? { errors: mergeResult.errors } : {}),
         }
       : MERGES_NOT_ASKED,
+    links: {
+      handoffs: legState(handoffResult),
+      prs: legState(prResult),
+      ghostFacts: legState(ghostFacts),
+      ghostMerges: legState(ghostMerges),
+      handoffsCapped,
+      prsCapped,
+      // The shared deadline fired while a leg was still in flight. Read off the
+      // signal AFTER the awaits rather than raced per leg: one deadline, one
+      // answer about it.
+      timedOut: signal?.aborted === true,
+    },
+    // Whichever leg answered first. The date is upstream's own constant and is
+    // the same on every envelope; carrying it rather than restating it is what
+    // keeps muninn from holding a second spelling of it.
+    ...(mergeResult?.rulesStandardizedDate ??
+    prResult?.rulesStandardizedDate ??
+    ghostMerges?.rulesStandardizedDate
+      ? {
+          rulesStandardizedDate: (mergeResult?.rulesStandardizedDate ??
+            prResult?.rulesStandardizedDate ??
+            ghostMerges?.rulesStandardizedDate)!,
+        }
+      : {}),
     ...(meta.sessionsBackfilled ? { backfilled: meta.sessionsBackfilled } : {}),
   };
+}
+
+/** The production `stampable` predicate: the env, both read-only guards, and the
+ *  equality rule — see `stamp-roots.ts`. */
+function defaultStampable(wikiDir: string | undefined): boolean {
+  return !!wikiDir && stampableFor({ wikiDir, config: stampConfigFromEnv() });
+}
+
+/** `{asked, reachable}` for a leg, or the frozen unasked state for one that did
+ *  not run. */
+function legState(result: { asked: boolean; reachable: boolean } | null): ProvenanceLegState {
+  return result ? { asked: result.asked, reachable: result.reachable } : LEG_NOT_ASKED;
+}
+
+/**
+ * One row per merge across the three sources that can report it.
+ *
+ * Keyed on (session, PR number, instant) rather than on the whole row: the
+ * `?prs=` form prefers the confirmed `merge-cmd` row where `?sessions=` may
+ * answer the `squash-composed` one, so two reports of one merge can differ in
+ * `mergeOk` while naming the same event. First wins, and the order above puts
+ * the stamped sessions' own rows first.
+ */
+function dedupeMerges(merges: readonly ProvenanceMerge[]): ProvenanceMerge[] {
+  const seen = new Set<string>();
+  const out: ProvenanceMerge[] = [];
+  for (const merge of merges) {
+    const key = `${merge.sessionId} ${merge.prNumber ?? ""} ${merge.mergedAt ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(merge);
+  }
+  return out;
 }
 
 /**

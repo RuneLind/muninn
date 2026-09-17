@@ -915,6 +915,16 @@ export async function renderWikiPage(opts?: {
        what lets them sit below the text floor. */
     .wiki-prov-mark { font-size: 9px; line-height: 1; color: var(--text-dim); }
     .wiki-prov-mark-merge { color: var(--accent-light); }
+    /* A ghost's ring is DASHED — the same glyph as a stamped session, in the
+       state that says the ledger links it and the page does not claim it. A ring
+       cannot carry a border-style, so the dash is drawn as a ring around a
+       hollow mark: the glyph is hidden from the box and the box is the ring. */
+    .wiki-prov-mark-ghost {
+      color: transparent;
+      width: 9px; height: 9px; border-radius: 50%;
+      border: 1px dashed var(--status-warning);
+      display: inline-block;
+    }
     /* The +N tail mark. Same size and colour as the glyphs it counts, so it
        reads as one of them rather than as a control. */
     .wiki-prov-mark-more { font-size: 9.5px; }
@@ -994,6 +1004,50 @@ export async function renderWikiPage(opts?: {
     /* A leg that did not answer. Never a silent absence: "this page has no
        merges" and "the merges call failed" are different facts. */
     .wiki-chain-note { font-size: 11px; color: var(--text-muted); }
+    /* The model and the delegated slice are qualifiers on facts already in the
+       row, so they read at the row's own colour and never compete with the cost
+       beside them. --text-muted measures 5.26 dark / 4.94 light, over the floor. */
+    .wiki-chain-model { color: var(--text-muted); }
+    .wiki-chain-delegated { color: var(--text-muted); }
+    /* The gate verdict sits at the end of a merge row. A gated merge is the only
+       one that takes a colour: the three other spellings are statements about
+       missing data, and colouring them would read as a verdict. */
+    .wiki-chain-gate { color: var(--text-muted); }
+    /* Only the ✓ takes the success colour: --status-success measures 3.0:1 in
+       the light theme, under the 4.5:1 floor, and a gate verdict is a line a
+       reader has to READ. The mark carries the distinction; the words carry the
+       meaning, at the row's own colour. */
+    .wiki-chain-gate-ok { color: var(--status-success); }
+    /* A handoff is a QUIET line between two sessions — one row, no title, no id
+       — so it is laid out like a merge row and coloured like a note. */
+    .wiki-chain-handoff {
+      flex-direction: row; align-items: baseline; gap: 6px;
+      font-size: 11.5px;
+    }
+    /* A ghost row: amber on the spine, the way .wiki-chain-bare is grey on it.
+       Same geometry (the negative margin is the chain's own border + padding),
+       so the row's text stays on the same x as every other row. */
+    .wiki-chain-ghost {
+      margin-left: -12px; padding-left: 10px;
+      border-left: 2px solid var(--status-warning);
+    }
+    .wiki-chain-nostamp { font-size: 11px; color: var(--text-muted); }
+    /* The Stamp control. A real button with a border, because it is the ONE
+       thing on this strip that writes: everything else here reads. */
+    .wiki-chain-stamp {
+      border: 1px solid var(--status-warning);
+      background: none; border-radius: 4px; padding: 1px 7px;
+      color: var(--text-muted); font-size: 11px; font-family: inherit; cursor: pointer;
+      flex-shrink: 0;
+    }
+    .wiki-chain-stamp:hover { color: var(--text-primary); }
+    .wiki-chain-stamp:disabled { cursor: default; opacity: 0.7; }
+    /* The line's ghost hint, after the marks. Same size and colour as the cost
+       sentence it follows — it is a second clause of the same line, not a badge. */
+    .wiki-prov-ghost-hint {
+      font-size: 11.5px; color: var(--text-muted);
+      min-width: 0; overflow-wrap: anywhere;
+    }
     .wiki-dates { font-size: 11.5px; color: var(--text-dim); }
     .wiki-source-url { font-size: 11.5px; color: var(--status-info); text-decoration: none; }
     .wiki-source-url:hover { text-decoration: underline; }
