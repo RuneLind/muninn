@@ -324,6 +324,57 @@ export async function renderWikiPage(opts?: {
       padding: 10px 10px 3px; font-size: 10px; letter-spacing: .07em;
       text-transform: uppercase; color: var(--text-faint);
     }
+    /* A FOLDABLE section header (Bookkeeping) is a button, so it inherits none
+       of the header's own styling — it re-states it rather than layering, and
+       the row's padding moves onto the button so the whole strip is the target. */
+    .wiki-list-sec:has(> .wiki-sec-fold) { padding: 0; }
+    .wiki-sec-fold {
+      display: flex; align-items: center; gap: 6px; width: 100%;
+      background: none; border: 0; cursor: pointer; text-align: left;
+      padding: 10px 10px 3px;
+      font-family: inherit; font-size: 10px; letter-spacing: .07em;
+      text-transform: uppercase; color: var(--text-muted);
+    }
+    .wiki-sec-fold:hover { color: var(--text-secondary); }
+    .wiki-sec-count {
+      font-size: 10px; letter-spacing: 0; color: var(--text-muted);
+      background: var(--bg-surface); border-radius: 999px; padding: 0 6px;
+    }
+    /* The caret is the ONE shape both fold controls share, so the chip and the
+       section header cannot come to point different ways for one state. */
+    .wiki-fold-caret {
+      display: inline-block; font-size: 9px; line-height: 1;
+      transform: rotate(90deg); transition: transform .12s;
+    }
+    .folded > .wiki-fold-caret { transform: rotate(0deg); }
+    /* The group chip on a parent row: what folds under it, and the control that
+       opens it. --text-muted, not --text-dim: measured on a body probe against
+       the rail's ground, dim is 3.24:1 dark / 3.74:1 light, under the 4.5:1 floor
+       for text a reader has to READ — and this one carries a count.
+       The background is TRANSPARENT rather than --bg-surface, and that is the
+       measured half: over the surface token the same text reads 4.42:1 in the
+       light theme (the row's own hover paints it, which is the state a reader
+       clicks in), while over the pane it is 4.94:1. The border is what makes it
+       a chip; the fill was costing legibility for nothing. Pinned by the spec's
+       both-themes contrast case, which measures against whatever actually
+       paints behind it. */
+    .wiki-fold-chip {
+      display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+      background: transparent; border: 1px solid var(--border-primary);
+      border-radius: 999px; padding: 0 7px; margin-top: 1px;
+      font-family: inherit; font-size: 10.5px; line-height: 16px;
+      color: var(--text-muted); cursor: pointer; white-space: nowrap;
+    }
+    .wiki-fold-chip:hover { color: var(--text-secondary); border-color: var(--accent); }
+    /* A child row: indented under its parent, with a rail on the left so the
+       group reads as one block rather than as rows that happen to be adjacent.
+       The indent is on the ROW, so the row stays a full-width click target. */
+    .wiki-list-item.child { padding-left: 20px; position: relative; }
+    .wiki-list-item.child::before {
+      content: ""; position: absolute; left: 10px; top: 4px; bottom: 4px;
+      width: 2px; border-radius: 1px; background: var(--border-primary);
+    }
+    .wiki-list-item.child:hover::before { background: var(--accent); }
     .wiki-list-sec[data-section="jump"] {
       text-transform: none; letter-spacing: 0; font-size: 11.5px;
       color: var(--text-dim); background: var(--bg-surface);

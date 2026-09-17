@@ -136,6 +136,12 @@ re-check all call it. A twin BLOCKS on exactly two conditions:
 2. **It sits in the SAME FOLDER under the same stem** — today implied by (1), stated
    because it is the rule a reader expects.
 
+**The twin it NAMES is the lowest-`extRank` one.** Any twin refuses, so the
+outcome does not move — but `index.pages` is relPath-sorted and, since the rail's
+attachment groups (`src/wiki/CLAUDE.md`), a same-folder same-stem `.html` is IN it
+rather than dropped, so a first-match started naming `x.html` where the reviewer
+needs `x.md`: the html is that page's own diagram, and renaming it fixes nothing.
+
 **A SAME-EXTENSION twin in a DIFFERENT folder is ALLOWED**, deliberately narrowing
 the first cut (which refused every same-stem markdown pair on a "one title
 namespace" argument). `store.ts` supports that shape on purpose — it keeps both

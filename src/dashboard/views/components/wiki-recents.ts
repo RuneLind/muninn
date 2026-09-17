@@ -38,6 +38,10 @@ import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
  *  parse, the writer and `recentsKey()` went with the section. */
 export const RECENTS_KEY_PREFIX = "muninn.wiki.recents.v1:";
 export const PINS_KEY_PREFIX = "muninn.wiki.pins.v1:";
+/** Which groups this reader has OPENED, per wiki. Default is CLOSED, so the
+ *  stored list is the exceptions — which is also why a reader who has never
+ *  touched the rail carries no key at all. */
+export const FOLDS_KEY_PREFIX = "muninn.wiki.folds.v1:";
 
 /** Pins are the reader's own choice, so the cap is only a bound on the stored
  *  string — but it is enforced on READ as well as on write, so a hand-edited or
@@ -51,6 +55,88 @@ export const JUMP_MAX = 8;
 
 export function pinsKey(wiki: string): string {
   return PINS_KEY_PREFIX + wiki;
+}
+
+/**
+ * How many fold keys are stored. A bound on the stored string, nothing else —
+ * the same settlement `PINS_MAX` makes, enforced on read as well as on write so
+ * a hand-edited key cannot make the rail unusable.
+ */
+export const FOLDS_MAX = 200;
+
+export function foldsKey(wiki: string): string {
+  return FOLDS_KEY_PREFIX + wiki;
+}
+
+/**
+ * The fold key space, deliberately ONE flat string namespace rather than two
+ * stores: a page group is keyed by the parent's normalized relPath, a SECTION by
+ * a `section:` sentinel. PR 2's family keys join it as a third spelling with no
+ * change to the store, the toggle or the parse — which is why the keys go
+ * through `normalizeRel` on the way in (as pins do): the sentinels are already
+ * lowercase and separator-free, so one normalization serves both kinds and every
+ * comparison downstream is exact by construction.
+ */
+export const SECTION_META_FOLD_KEY = "section:meta";
+
+/** The fold key for a parent page's group. */
+export function foldKeyForPage(relPath: string): string {
+  return normalizeRel((relPath || "").trim());
+}
+
+/** Is this group open? Everything not stored is CLOSED — the default the whole
+ *  feature is built around, since a rail of open groups is the flat list again. */
+export function isFoldOpen(open: readonly string[], key: string): boolean {
+  const want = normalizeRel(key);
+  return open.some((k) => normalizeRel(k) === want);
+}
+
+/** Flip one group and return the new list. A blank key is a no-op. */
+export function toggleFold(open: string[], key: string): string[] {
+  const v = normalizeRel((key || "").trim());
+  if (!v) return open.slice();
+  if (isFoldOpen(open, v)) return open.filter((k) => normalizeRel(k) !== v);
+  return [v, ...open].slice(0, FOLDS_MAX);
+}
+
+/**
+ * What a CHILD row says on hover: why it folds, and under which page. The rail
+ * has no other place to state a relation the file names do not carry — two of
+ * the four rules (an embed, a `superseded_by:`) are invisible from the listing.
+ */
+export function pairedByWhy(pairedBy: string, parentTitle: string): string {
+  const under = ` under "${parentTitle}"`;
+  switch (pairedBy) {
+    case "stem":
+      return `Attached${under} — same name, same folder`;
+    case "suffix":
+      return `Attached${under} — a prototype of it`;
+    case "link":
+      return `Attached${under} — embedded in the page`;
+    case "superseded":
+      return `Superseded by "${parentTitle}"`;
+    default:
+      return `Attached${under}`;
+  }
+}
+
+/**
+ * What a group's chip SAYS — `3 attached`, `1 superseded`, or both joined with
+ * ` · ` when a page carries attachments and a retired sibling at once. The count
+ * is the rows the chip stands for, so a child lifted into Activity has already
+ * been taken out of the list this is given.
+ */
+export function foldChipLabel(children: readonly WikiListing[]): string {
+  let attached = 0;
+  let superseded = 0;
+  for (const c of children) {
+    if (c.pairedBy === "superseded") superseded++;
+    else attached++;
+  }
+  const parts: string[] = [];
+  if (attached) parts.push(attached + " attached");
+  if (superseded) parts.push(superseded + " superseded");
+  return parts.join(" · ");
 }
 
 /**
@@ -310,7 +396,18 @@ export function jumpHeaderLabel(jump: JiraKeyJump): string {
 export type RailSection = "jump" | "activity" | "pinned" | "all" | "meta";
 
 export type RailEntry =
-  | { kind: "header"; section: RailSection; label: string }
+  | {
+      kind: "header";
+      section: RailSection;
+      label: string;
+      /** Set on a FOLDABLE header (today: `Bookkeeping`). The painter renders the
+       *  count and the toggle from these; `foldKey` is what a click flips. */
+      foldKey?: string;
+      folded?: boolean;
+      /** How many rows the header stands for — rendered whether or not they are
+       *  on screen, so a collapsed section still says how much it holds. */
+      count?: number;
+    }
   | {
       kind: "row";
       section: RailSection;
@@ -320,6 +417,20 @@ export type RailEntry =
        *  that signal is, and the sentence explaining the placement. The painter
        *  draws the glyph, the date cell and the row's `title=` from it. */
       activity?: { kind: "new" | "changed"; why: string; ageMs: number };
+      /**
+       * Set on a PARENT row: the children this row stands for — the ones not
+       * emitted anywhere else in this render, which is exactly what the chip
+       * counts. Absent on a page with no attachments, and on a parent whose
+       * every child was lifted into another section.
+       */
+      children?: WikiListing[];
+      /** Set on a parent row: true when its group is CLOSED, so `children` are
+       *  not emitted. The chip says how many are hidden either way. */
+      folded?: boolean;
+      /** Set on a CHILD row: the page it folds under and why. The painter draws
+       *  the indent and the hover sentence from it; the row is otherwise an
+       *  ordinary row, pin and Activity glyph included. */
+      child?: { parent: WikiListing; pairedBy: string };
     };
 
 export interface RailInput {
@@ -347,6 +458,19 @@ export interface RailInput {
    *  a `Bookkeeping` header. Without it the date column jumps back to today at
    *  the bottom of a descending list and reads as a broken sort. */
   metaTail?: boolean;
+  /**
+   * The fold keys this reader has OPENED (`wiki-recents-store.ts`). Everything
+   * else is closed — including every group on a browser that has never stored
+   * anything, which is the default the feature is built around.
+   */
+  openFolds?: readonly string[];
+  /**
+   * The page the reader currently has OPEN, if any. Its group is expanded
+   * whatever the store says: a reader is never on a page the rail hides, and a
+   * collapsed group holding the `.active` row reads as the rail losing the page.
+   * It is not persisted — leaving the page re-collapses the group.
+   */
+  openRelPath?: string;
 }
 
 export interface RailModel {
@@ -471,6 +595,23 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  *
  * Sections and the jump are mutually exclusive by construction: the jump needs a
  * query and the sections need an empty one.
+ *
+ * **GROUPS (attachments) obey the same invariant, which is what makes them
+ * safe.** A page the store paired (`parent`/`children`) renders under its parent
+ * — or, in a closed group, not at all — and never twice:
+ *
+ *  - **Activity ranks PAGES, not groups.** A child Activity lifts is emitted
+ *    there as itself, carrying its `child` info, and leaves its parent's chip
+ *    count. A parent Activity lifts takes its open group with it, so a group is
+ *    never split across two sections.
+ *  - **A closed group emits no child rows**, so `shown` — and with it
+ *    `#wikiCount` — goes DOWN, and the chip says by how much. A count that
+ *    disagreed with the rows on screen is the failure this whole module is
+ *    written around.
+ *  - **A query flattens everything.** No groups, no chips, no hidden rows.
+ *  - **The open page's group is forced open**, whatever the store holds.
+ *  - **A child whose PARENT the facets filtered away is an ordinary row.**
+ *    Folding it under a page that is not on screen would delete it from the rail.
  */
 export function buildRail(input: RailInput): RailModel {
   const { filtered, facetOnly, filters, pins, metaTail, activity } = input;
@@ -480,6 +621,72 @@ export function buildRail(input: RailInput): RailModel {
   /** Every page already rendered above, so the remainder can drop it. */
   const claimed = new Set<string>();
   const claim = (p: WikiListing): void => void claimed.add(normalizeRel(p.relPath));
+
+  // ── Groups ────────────────────────────────────────────────────────────
+  // A query FLATTENS everything (the Jira jump's rule, extended): a search is
+  // "find this", and a hit hidden inside a closed group is a result the reader
+  // asked for and cannot see. Groups are for browsing.
+  const grouped = railSectionsVisible(filters);
+  const byRel = new Map<string, WikiListing>();
+  for (const p of filtered) byRel.set(normalizeRel(p.relPath), p);
+  /** parent key → the children of that parent PRESENT in this filtered set. */
+  const childrenOf = new Map<string, WikiListing[]>();
+  /** child key → its parent page. A child whose parent the facets filtered away
+   *  is NOT in here: it renders as an ordinary row rather than vanishing with a
+   *  group that is not on screen. */
+  const parentOf = new Map<string, WikiListing>();
+  if (grouped) {
+    for (const p of filtered) {
+      if (!p.parent) continue;
+      const parent = byRel.get(normalizeRel(p.parent));
+      if (!parent || parent === p) continue;
+      const key = normalizeRel(parent.relPath);
+      const arr = childrenOf.get(key);
+      if (arr) arr.push(p);
+      else childrenOf.set(key, [p]);
+      parentOf.set(normalizeRel(p.relPath), parent);
+    }
+  }
+  const open = input.openFolds ?? [];
+  // The open page forces ITS group open — the group it is in when it is a child,
+  // its own when it is a parent, and `Bookkeeping` when it is a meta page.
+  const forced = new Set<string>();
+  if (grouped && input.openRelPath) {
+    const openKey = normalizeRel(input.openRelPath);
+    const openPage = byRel.get(openKey);
+    const openParent = parentOf.get(openKey);
+    if (openParent) forced.add(normalizeRel(openParent.relPath));
+    if (childrenOf.has(openKey)) forced.add(openKey);
+    if (openPage && isMetaPage(openPage)) forced.add(SECTION_META_FOLD_KEY);
+  }
+  const isOpen = (key: string): boolean => forced.has(key) || isFoldOpen(open, key);
+
+  /** Emit one row, claiming the page. A PARENT row takes its unclaimed children
+   *  with it — under it when the group is open, into the chip's count when it is
+   *  closed — so a group is never split across two sections. */
+  const emitRow = (
+    page: WikiListing,
+    section: RailSection,
+    extra: { activity?: { kind: "new" | "changed"; why: string; ageMs: number } } = {},
+  ): void => {
+    const key = normalizeRel(page.relPath);
+    const parent = parentOf.get(key);
+    const mine = (childrenOf.get(key) ?? []).filter((c) => !claimed.has(normalizeRel(c.relPath)));
+    const folded = mine.length > 0 ? !isOpen(key) : undefined;
+    claim(page);
+    entries.push({
+      kind: "row",
+      section,
+      page,
+      pinned: isPinned(page),
+      ...(extra.activity ? { activity: extra.activity } : {}),
+      ...(mine.length ? { children: mine, folded } : {}),
+      ...(parent ? { child: { parent, pairedBy: page.pairedBy ?? "" } } : {}),
+    });
+    if (mine.length && !folded) {
+      for (const c of mine) emitRow(c, section);
+    }
+  };
 
   // The first candidate key that names a page on this wiki wins; a candidate
   // resolving to nothing costs nothing and yields to the next.
@@ -500,7 +707,7 @@ export function buildRail(input: RailInput): RailModel {
     }
   }
 
-  if (railSectionsVisible(filters)) {
+  if (grouped) {
     // ⚠️ Activity claims BEFORE the pin list, so a page it lifts is skipped by
     // Pinned and the remainder alike. Moving this block below it silently changes
     // which section a new pinned page renders under, and nothing but this
@@ -517,12 +724,12 @@ export function buildRail(input: RailInput): RailModel {
     if (activityRows.length) {
       entries.push({ kind: "header", section: "activity", label: "Activity" });
       for (const row of activityRows) {
-        claim(row.page);
-        entries.push({
-          kind: "row",
-          section: "activity",
-          page: row.page,
-          pinned: isPinned(row.page),
+        // ⚠️ Re-tested against `claimed` HERE, not only at collection time: a
+        // PARENT emitted earlier in this same section takes its open group's
+        // children with it, so a child Activity also ranked is already on screen
+        // — emitting it again is the one-row invariant broken inside one section.
+        if (claimed.has(normalizeRel(row.page.relPath))) continue;
+        emitRow(row.page, "activity", {
           activity: { kind: row.kind, why: row.why, ageMs: row.ageMs },
         });
       }
@@ -537,12 +744,19 @@ export function buildRail(input: RailInput): RailModel {
     if (pinned.length) {
       entries.push({ kind: "header", section: "pinned", label: "Pinned" });
       for (const p of pinned) {
-        entries.push({ kind: "row", section: "pinned", page: p, pinned: true });
+        // A pinned CHILD is lifted here exactly as Activity lifts one — the ★ is
+        // the reader's own choice, and a row they asked to keep at hand must not
+        // sit inside a closed group. No `claimed` re-test: `resolve` above both
+        // skipped what an earlier section took AND claimed what it returned, so
+        // testing it here would skip every pinned row (measured — it did).
+        emitRow(p, "pinned");
       }
     }
   }
 
-  const remainder = claimed.size ? filtered.filter((p) => !claimed.has(normalizeRel(p.relPath))) : filtered;
+  const remainder = filtered.filter(
+    (p) => !claimed.has(normalizeRel(p.relPath)) && !parentOf.has(normalizeRel(p.relPath)),
+  );
   // The Bookkeeping split is a recency-list affordance and nothing else: under
   // a query the rows are exactly as today (a result list grows no furniture),
   // and a header explains a TAIL — it needs rows ABOVE it, lifted (Activity /
@@ -551,21 +765,34 @@ export function buildRail(input: RailInput): RailModel {
   // here: with every non-meta row lifted, the meta-only remainder fell through
   // to the `Other pages` header instead — labelled, and wrongly.
   const split =
-    !!metaTail &&
-    railSectionsVisible(filters) &&
-    (claimed.size > 0 || remainder.some((p) => !isMetaPage(p)));
+    !!metaTail && grouped && (claimed.size > 0 || remainder.some((p) => !isMetaPage(p)));
   const rest = split ? remainder.filter((p) => !isMetaPage(p)) : remainder;
   const meta = split ? remainder.filter((p) => isMetaPage(p)) : [];
   if (claimed.size && rest.length) {
     entries.push({ kind: "header", section: "all", label: jump ? "Other matches" : "Other pages" });
   }
   for (const p of rest) {
-    entries.push({ kind: "row", section: "all", page: p, pinned: isPinned(p) });
+    if (claimed.has(normalizeRel(p.relPath))) continue; // lifted as someone's child
+    emitRow(p, "all");
   }
   if (meta.length) {
-    entries.push({ kind: "header", section: "meta", label: "Bookkeeping" });
-    for (const p of meta) {
-      entries.push({ kind: "row", section: "meta", page: p, pinned: isPinned(p) });
+    // Bookkeeping starts COLLAPSED — it is the one section whose whole point is
+    // that nobody is looking for it. The header stays and carries its count, so
+    // the rows are one click away and the list below the fold is not a mystery.
+    const metaFolded = !isOpen(SECTION_META_FOLD_KEY);
+    entries.push({
+      kind: "header",
+      section: "meta",
+      label: "Bookkeeping",
+      foldKey: SECTION_META_FOLD_KEY,
+      folded: metaFolded,
+      count: meta.length,
+    });
+    if (!metaFolded) {
+      for (const p of meta) {
+        if (claimed.has(normalizeRel(p.relPath))) continue;
+        emitRow(p, "meta");
+      }
     }
   }
 

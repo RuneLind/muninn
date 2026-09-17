@@ -374,6 +374,101 @@ Acceptance: `views/components/wiki-recents.test.ts` (the state space, enumerated
 what it removes AND what it must not) and `e2e/wiki-rail-pins.spec.ts` (two temp
 wikis in ONE process, so a globally-keyed store cannot pass).
 
+## Attachments — the rail's groups (`pairAttachments`, `store.ts`)
+
+A wiki page is not always one file. A plan carries its prototypes, an `.mdx`
+carries the diagram it embeds, a superseded plan sits beside its successor — and
+the rail listed every one of them as a peer row, or (for a same-stem `.html`)
+did not list it at all. The store now PAIRS them and the rail FOLDS them.
+
+**Four rules, all scoped to ONE FOLDER, first match wins**, recorded on the child
+as `pairedBy` so the rail can say why on hover:
+
+| rule | shape | `pairedBy` |
+|---|---|---|
+| 1 | `x.html` beside `x.md`/`x.mdx` | `stem` |
+| 2 | `x-prototype.html` / `x-prototype-N.html` beside a page at `x` | `suffix` |
+| 3 | the markdown page carries `<Embed src="./child.html">` | `link` |
+| 4 | the child's frontmatter names `superseded_by: [[successor]]` | `superseded` |
+
+The child keeps its own row identity — its own `relPath`, page route, pin,
+Activity glyph and backlinks. `children`/`parent`/`pairedBy` ride
+`/api/wiki/pages` (they are ordinary `WikiPageMeta` fields, so `toListing`
+carries them with everything else it does not strip).
+
+⚠️ **Rule 1 changes the same-stem DROP, and only in one direction.** A same-stem
+`.html` in the SAME folder is no longer dropped: it stays in `pages` as a child,
+and `index.shadowed` no longer lists it. Measured on the live wikis, that is
+`shadowed` 6 → 1 on one and 7 → 0 on the other. Everything else about the
+precedence rule is unchanged — a same-stem `.html` in ANOTHER folder is still a
+collision and still dropped with its `shadowed` entry (the 1 that remains), and
+`.md` still shadows a same-folder `.mdx`, which is an authoring mistake rather
+than an attachment.
+
+**The markdown page keeps the name, and two mechanisms hold that.** Name and
+alias registration runs in **`extRank` order** (markdown before html) with
+relPath as the tie-break — `y.html` sorts before `y.md`, so the relPath order
+that was correct while every cross-extension loser was dropped would now hand
+`[[y]]` and `?name=y` to the html — and a rule-1 child additionally registers no
+stem key at all. Measured over both live wikis, old vs new: **0 changed key
+resolutions and 0 changed `displayTitle`s**; the only difference is the new
+titles the un-dropped pages add. Two more places read the pairing for the same
+reason: `stemCounts` (the display-title disambiguation) skips a rule-1 child, or
+its parent would grow a folder prefix; and `stemIsUnique` (`wiki-routes.ts`)
+skips it too, or `resolvePageRef`'s stale-relPath fallback 404s explain, share
+and fact-check on every page that has an attachment.
+
+**Rule 3 reads embeds, not links.** `extractEmbedTargets` masks fenced and inline
+code first (a plan page QUOTING an `<Embed>` adopts nothing), runs each tag's
+attributes through `parseEmbedAttrs` and `resolveEmbedRelPath` — the same accept
+and resolve rules the reader renders with, so a `src` the renderer refuses pairs
+nothing — and feeds the pairing pass ONLY: `index.outgoing`, the backlinks, the
+Atlas graph and the lint checks are untouched, because an embedded diagram is
+part of the page while a cited one is a peer. A meta page (`index`/`log`/`CLAUDE`)
+is never a parent, and an html embedded by two or more pages belongs to neither.
+
+**The pass is one level deep, both directions closed.** An html child can never
+collect children (every rule needs a markdown parent), and a rule-4 pair is
+DROPPED when it would nest — when the child carries attachments of its own, or
+when the successor is itself superseded. The rail renders one level; a
+grandchild would be hidden inside a fold nothing opens. The rule-4 candidates are
+collected before any of them is applied, so the outcome does not depend on the
+walk order.
+
+### In the rail
+
+`buildRail` emits a child under its parent (open) or not at all (closed), and the
+one-row invariant is unchanged — sections MOVE a row, never copy it:
+
+- **Activity ranks PAGES, not groups.** A child it ranks is emitted in Activity
+  as itself (with its `pairedBy` and its parent's title in the hover) and leaves
+  the parent's chip count; a parent it ranks takes its open group with it, so a
+  group is never split across two sections. A pinned child is lifted the same
+  way — the ★ is the reader's own choice.
+- **A closed group emits no child rows**, so `rail.shown` — and with it
+  `#wikiCount` — goes DOWN, and the chip says by how much (`3 attached`,
+  `1 superseded`, joined with ` · ` when mixed).
+- **A query flattens everything.** Groups are for browsing; a hit inside a closed
+  group is a result the reader asked for and cannot see.
+- **The open page's group is forced open**, whatever the store holds.
+- **A child whose PARENT the facets filtered away is an ordinary row** — folding
+  it under a page that is not on screen would delete it from the rail.
+
+**Fold state is per wiki**, in `muninn.wiki.folds.v1:<wiki>` beside the pins key,
+same storage discipline (try/catch everywhere, normalized at the boundary, capped
+on read and write). The key space is ONE flat namespace — a parent's normalized
+relPath, or a `section:` sentinel — so PR 2's family keys join it with no change
+to the store, the toggle or the parse. **Default is CLOSED**, which is why the
+stored list is the OPEN keys: a reader who has never touched the rail carries no
+key at all. **Bookkeeping starts collapsed** under the same store
+(`section:meta`); its header stays and carries its count.
+
+Acceptance: `store.test.ts` (the four rules, the nesting guards, the drop that
+stays), `wiki-recents.test.ts` (the sections, with a child in every one of them
+at once), `wiki-routes.test.ts` (the listing, `?name=`, `resolvePageRef`) and
+`e2e/wiki-rail-attachments.spec.ts` (the chip, the fold, the count, the reload,
+the flatten, and the contrast in both themes).
+
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 
 Turns one wiki page into a pasteable post — the reader's **📤 Share** breadcrumb action, beside 💬 Discuss. One fenced one-shot on the wiki's synthesis bot (`resolveWikiSynthesisBot`, same routing as Ask), streamed as markdown, and on completion three server-rendered strings. Prompt/preset/body-prep layers live in `src/share/` (see the Share row in the repo `CLAUDE.md`); the SSE runner is `dashboard/routes/share-sse.ts`, the dialog `dashboard/views/components/share-dialog.ts` (+ its pure half `wiki-share-dialog.ts`).

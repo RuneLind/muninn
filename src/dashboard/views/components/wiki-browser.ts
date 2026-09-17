@@ -92,7 +92,15 @@ import {
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
-import { buildRail, isPinnedRelPath, railSectionsVisible, type RailEntry } from "./wiki-recents.ts";
+import {
+  buildRail,
+  foldChipLabel,
+  foldKeyForPage,
+  isPinnedRelPath,
+  pairedByWhy,
+  railSectionsVisible,
+  type RailEntry,
+} from "./wiki-recents.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
@@ -100,7 +108,7 @@ import {
   rankActivity,
   type ActivityWeights,
 } from "./wiki-activity-rank.ts";
-import { purgeRecentsKeys, readPins, togglePinned } from "./wiki-recents-store.ts";
+import { purgeRecentsKeys, readFolds, readPins, toggleFolded, togglePinned } from "./wiki-recents-store.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
@@ -913,6 +921,10 @@ purgeRecentsKeys();
  *  synchronous storage hit on every keystroke in the search box. */
 let pins: string[] = readPins(WIKI);
 
+/** Which GROUPS this reader has opened on this wiki — same discipline as `pins`:
+ *  read once at boot, kept in step by the toggle, never re-read per render. */
+let openFolds: string[] = readFolds(WIKI);
+
 /**
  * ★ — hidden until the row is hovered, always shown once pinned.
  *
@@ -986,6 +998,10 @@ function renderList(): void {
     // a query, where `buildRail` renders no sections and would throw the ranking
     // away — that is a scan of every page on every keystroke.
     activity: railSectionsVisible(filters) ? rankActivity(filtered, activityWeights, now) : [],
+    openFolds,
+    // The page the reader has open — its group is expanded whatever the store
+    // says, so the `.active` row is never inside a closed fold.
+    openRelPath: currentRelPath || undefined,
   });
   // The open page's sessions used to be a section at the head of this rail. They
   // are now rows in the chain under the page title, which is where they have
@@ -994,6 +1010,22 @@ function renderList(): void {
   let html = "";
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
+      // A FOLDABLE header (today: Bookkeeping) is a real button: it carries the
+      // count whether open or closed, so a collapsed section says how much it
+      // holds rather than reading as an empty heading.
+      if (entry.foldKey) {
+        const label = entry.folded ? "Show" : "Hide";
+        html +=
+          `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
+          `<button type="button" class="wiki-sec-fold${entry.folded ? " folded" : ""}"` +
+          ` data-fold-key="${esc(entry.foldKey)}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+          ` title="${esc(label + " the " + entry.label.toLowerCase() + " pages")}">` +
+          `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
+          `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
+          `<span class="wiki-sec-count">${entry.count ?? 0}</span>` +
+          `</button></div>`;
+        return;
+      }
       html +=
         `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
         `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
@@ -1034,11 +1066,21 @@ function renderList(): void {
     // reading the name. `isActivePage` falls back to the name comparison only
     // while no relPath is known — see `wiki-nav.ts`.
     const active = isActivePage(p, { name: currentName, relPath: currentRelPath });
+    // A CHILD row says on hover why it folds and under which page — the rail's
+    // only place to state a relation the file names cannot. An Activity row's own
+    // derivation wins the attribute (it explains the placement, which is the
+    // stranger fact of the two) and the `why` line carries the parent instead.
+    const childWhy = entry.child
+      ? pairedByWhy(entry.child.pairedBy, displayTitleOf(entry.child.parent))
+      : "";
+    const rowTitle = entry.activity
+      ? entry.activity.why + (childWhy ? "\n" + childWhy : "")
+      : childWhy;
     html +=
-      `<div class="wiki-list-item${active ? " active" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      `<div class="wiki-list-item${active ? " active" : ""}${entry.child ? " child" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
       // The derivation on the ROW, and again on the title element below:
       // the child's own `title=` wins the hover over most of the row's width.
-      (entry.activity ? ` title="${esc(entry.activity.why)}"` : "") +
+      (rowTitle ? ` title="${esc(rowTitle)}"` : "") +
       `>` +
       (entry.activity
         ? `<span class="wiki-act-glyph ${esc(entry.activity.kind)}">${entry.activity.kind === "new" ? "+" : "~"}</span>`
@@ -1049,7 +1091,18 @@ function renderList(): void {
       // row it carries the derivation UNDER the name as well — this element is
       // two thirds of the row, and its own `title` is what the pointer lands on
       // there, so the row's attribute alone is unreachable over most of the row.
-      `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (entry.activity ? "\n" + entry.activity.why : ""))}">${esc(displayTitleOf(p))}</div>` +
+      `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">${esc(displayTitleOf(p))}</div>` +
+      // The group CHIP: what is folded under this row, and the control that
+      // opens it. A click here toggles; a click anywhere else on the row opens
+      // the page, as it always has.
+      (entry.children?.length
+        ? `<button type="button" class="wiki-fold-chip${entry.folded ? " folded" : ""}"` +
+          ` data-fold-key="${esc(foldKeyForPage(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+          ` title="${esc((entry.folded ? "Show" : "Hide") + " what folds under this page")}">` +
+          `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
+          esc(foldChipLabel(entry.children)) +
+          `</button>`
+        : "") +
       // Pill THEN flag, the same order as the article header's `badgeHtml` — the
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
@@ -2200,6 +2253,10 @@ document.body.addEventListener("click", (e) => {
   // one widget's handler cannot silence document-level listeners that have
   // nothing to do with it.
   if (target.closest && target.closest("[data-pin]")) return;
+  // Same rule for the group chip and the section fold: both live inside a
+  // `[data-relpath]` row, both belong to the list's own listener, and a click on
+  // either means "show me what is folded here", never "open this page".
+  if (target.closest && target.closest("[data-fold-key]")) return;
   // The article header's project hub chip. Delegated here rather than bound at
   // render time because `#articleWrap`'s innerHTML is replaced on every page
   // load — and checked BEFORE the nav-link branch, since the chip sits inside the
@@ -2292,6 +2349,20 @@ document.body.addEventListener("click", (e) => {
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
+  // The group chip and the section fold — the rail's second control, on the same
+  // listener and BEFORE the pin, since both sit inside a row the body delegate
+  // would otherwise open. A fold DOES re-render (`renderList`): unlike the ★,
+  // which paints one button, this one adds and removes rows, so there is nothing
+  // to paint in place.
+  const fold = target.closest("[data-fold-key]");
+  if (fold) {
+    e.preventDefault();
+    const key = fold.getAttribute("data-fold-key");
+    if (!key) return;
+    openFolds = toggleFolded(WIKI, key);
+    renderList();
+    return;
+  }
   const pin = target.closest("[data-pin]");
   if (!pin) return;
   e.preventDefault();

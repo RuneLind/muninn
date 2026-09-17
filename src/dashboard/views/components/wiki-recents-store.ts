@@ -16,12 +16,15 @@
  * `readActiveWikiName`), so a browser that reads two wikis keeps two lists.
  */
 import {
+  FOLDS_MAX,
   PINS_MAX,
   RECENTS_KEY_PREFIX,
+  foldsKey,
   parseRelPathList,
   pinsKey,
   serializeRelPathList,
   togglePin,
+  toggleFold,
 } from "./wiki-recents.ts";
 
 /** The slice of `Storage` the purge below needs, so a unit test can hand it a
@@ -57,6 +60,28 @@ export function readPins(wiki: string): string[] {
 export function togglePinned(wiki: string, relPath: string): string[] {
   const next = togglePin(readPins(wiki), relPath);
   write(pinsKey(wiki), next);
+  return next;
+}
+
+/**
+ * The groups this reader has OPENED on this wiki. Default is CLOSED, so an
+ * unreadable or absent key is simply "everything closed" — the state the rail is
+ * designed around, which is why this degrades to the rail still working rather
+ * than to a rail that hides things it should not.
+ *
+ * Entries are the flat fold-key namespace (`wiki-recents.ts`): a parent page's
+ * normalized relPath, or a `section:` sentinel. `parseRelPathList` is reused
+ * verbatim — it normalizes, dedupes and caps the same way for both kinds, and
+ * the sentinels are unchanged by its normalization.
+ */
+export function readFolds(wiki: string): string[] {
+  return read(foldsKey(wiki), FOLDS_MAX);
+}
+
+/** Flip one group open/closed and return the new list. */
+export function toggleFolded(wiki: string, key: string): string[] {
+  const next = toggleFold(readFolds(wiki), key);
+  write(foldsKey(wiki), next);
   return next;
 }
 

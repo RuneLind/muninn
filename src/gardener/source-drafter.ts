@@ -22,7 +22,7 @@
 
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { WikiIndex } from "../wiki/store.ts";
+import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import { extRank, normalizeRelPath, parseFrontmatter, stemKey } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
 import { normalizeUrl, docIdFromUrl } from "../wiki/ingest-backlog.ts";
@@ -484,13 +484,22 @@ export function findStemTwin(
   const self = pathKey(targetPath);
   const selfDir = path.posix.dirname(self);
   const selfRank = extRank(targetPath);
-  const twin = index.pages.find((p) => {
+  const twins = index.pages.filter((p) => {
     if (stemKey(p.name) !== s) return false;
     const key = pathKey(p.relPath);
     if (key === self) return false;
     if (hasForbiddenBasename(p.relPath)) return false;
     return extRank(p.relPath) !== selfRank || path.posix.dirname(key) === selfDir;
   });
+  // The LOWEST-rank twin is the one NAMED — `.md` over `.mdx` over `.html`. The
+  // outcome does not move (any twin refuses), but `index.pages` is relPath-sorted
+  // and now carries attachments, so a first-match would have started naming
+  // `x.html` where the reviewer needs `x.md`: the html is the page's own diagram
+  // and renaming it fixes nothing.
+  let twin: WikiPageMeta | undefined;
+  for (const p of twins) {
+    if (!twin || extRank(p.relPath) < extRank(twin.relPath)) twin = p;
+  }
   return twin ? { title: twin.title, relPath: twin.relPath } : null;
 }
 

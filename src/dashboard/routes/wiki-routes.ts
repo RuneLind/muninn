@@ -304,8 +304,11 @@ function egressRefusal(
  * answer about a page they never opened and can then act on it. A 404 naming the
  * path they sent is the honest answer; the rename case keeps its fallback because
  * a unique stem still says which page is meant.
+ *
+ * Exported for its own test: every caller is an SSE or a write route, so driving
+ * the stale-relPath branch through one of them costs a model call.
  */
-function resolvePageRef(
+export function resolvePageRef(
   index: WikiIndex,
   relPath: string | undefined,
   name: string | undefined,
@@ -327,11 +330,18 @@ function resolvePageRef(
 /** Is `name` the filename stem of exactly ONE page in this wiki? `index.resolve`
  *  is first-registration-wins on the lowercased stem, so this is the test for
  *  "the stem actually identifies a page". Compared against the RESOLVED page's
- *  own `name`, since the caller's reference may have matched a title or alias. */
+ *  own `name`, since the caller's reference may have matched a title or alias.
+ *
+ *  ⚠️ An ATTACHMENT paired by stem does not count, for the same reason the
+ *  store's own `stemCounts` skips it: it shares its parent's stem by definition
+ *  and registers no key of its own, so counting it would report every `x.mdx`
+ *  with an `x.html` beside it as ambiguous — and a stale `relPath` would then
+ *  404 explain, share and fact-check on a page whose name resolves perfectly. */
 function stemIsUnique(index: WikiIndex, name: string): boolean {
   const key = name.toLowerCase();
   let seen = 0;
   for (const p of index.pages) {
+    if (p.pairedBy === "stem") continue;
     if (p.name.toLowerCase() === key && ++seen > 1) return false;
   }
   return true;

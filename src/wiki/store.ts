@@ -14,12 +14,21 @@
 import path from "node:path";
 import { stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
-import { sanitizeColorToken } from "../dashboard/views/components/wiki-filter.ts";
+import {
+  isMetaStem,
+  pageStemOf,
+  sanitizeColorToken,
+} from "../dashboard/views/components/wiki-filter.ts";
 import {
   parseActivityWeights,
   type ActivityWeights,
 } from "../dashboard/views/components/wiki-activity-rank.ts";
-import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
+import {
+  COMPONENT_TAG_SOURCE,
+  inProtectedRegion,
+  markdownCodeRegions,
+} from "../format/markdown-ast.ts";
+import { parseEmbedAttrs, resolveEmbedRelPath } from "../format/embed.ts";
 import { buildWikiGitDates } from "./git-dates.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
@@ -366,6 +375,17 @@ function parsePlanFields(
   return { plan_status, status_date, followups, status_note: note || undefined };
 }
 
+/**
+ * WHY a page folds under another, in the pairing pass's own precedence order:
+ *
+ *  - `stem` — the same bare stem in the same folder (`x.html` beside `x.mdx`).
+ *  - `suffix` — `x-prototype.html` / `x-prototype-2.html` beside a page at `x`.
+ *  - `link` — the markdown page EMBEDS it (`<Embed src="./child.html">`).
+ *  - `superseded` — the child's frontmatter names its successor in
+ *    `superseded_by:`. The only rule that makes a MARKDOWN page a child.
+ */
+export type PairedBy = "stem" | "suffix" | "link" | "superseded";
+
 export interface WikiPageMeta {
   /** Canonical page name — the filename stem; what [[wikilinks]] resolve against. */
   name: string;
@@ -542,6 +562,25 @@ export interface WikiPageMeta {
   /** Whether the plan has open follow-ups. Absent ⇒ consumers treat it as `none`;
    *  an unrecognized value is dropped at parse time (also ⇒ absent). */
   followups?: PlanFollowups;
+  /**
+   * ATTACHMENTS — the pages that fold under this one in the reader's rail, as
+   * wiki-relative paths in the order the pairing pass found them. Absent (never
+   * `[]`) on a page that adopted nothing, which is almost every page of every
+   * wiki: an empty array per page is listing payload that says nothing.
+   *
+   * A child keeps its own row identity — its own `relPath`, pin, Activity glyph
+   * and page route — so this is a RENDERING relation, not containment. See
+   * {@link pairAttachments} for the four rules and what each one costs.
+   */
+  children?: string[];
+  /** The relPath of the page this one folds under, set on a CHILD. Absent on a
+   *  page that pairs with nothing. Exactly one parent: the first rule that
+   *  matches wins, and the pass is one level deep (a child never collects
+   *  children of its own). */
+  parent?: string;
+  /** WHICH rule paired this page with its {@link parent} — what the rail says on
+   *  hover. Absent exactly when `parent` is. */
+  pairedBy?: PairedBy;
   /** One line of free prose qualifying the status. No vocabulary, so nothing to
    *  validate — only an empty value (or a bare YAML block-scalar indicator, whose
    *  body the frontmatter parser never read) is dropped. Deliberately NOT stripped
@@ -689,6 +728,17 @@ export function stemKey(stem: string): string {
  */
 export function wikiPageStem(relPath: string): string {
   return path.posix.basename(relPath).replace(/\.mdx?$/i, "");
+}
+
+/**
+ * The pairing pass's identity for "this stem, in this folder" — the key every
+ * rule below is scoped by, since an attachment is a page sitting BESIDE its
+ * parent and a same-stem page one directory over is the shadow case instead.
+ * `path.posix.dirname` answers `"."` for a root-level page, which is a folder
+ * like any other here.
+ */
+function folderStemKey(relPath: string, stem?: string): string {
+  return path.posix.dirname(relPath) + "\u0000" + stemKey(stem ?? pageStemOf(relPath));
 }
 
 /**
@@ -1028,6 +1078,66 @@ export function extractMarkdownLinks(content: string): string[] {
     targets.add(decoded);
   }
   return [...targets];
+}
+
+/**
+ * An `<Embed …>` tag at the head of a (trimmed) line, with double-quoted
+ * attributes — exactly the shape `tryParseComponent` accepts, since `Embed` is a
+ * BLOCK component and nothing renders a mid-sentence one. Anchored per line
+ * through the `m` flag; the attribute tail refuses a newline for the same reason
+ * `COMPONENT_TAG_SOURCE_SINGLE_LINE` does, so a tag missing its `>` cannot
+ * swallow the prose below it.
+ */
+const EMBED_TAG_RE = /^[ \t]*<Embed((?:\s+[A-Za-z][\w-]*="[^"\n]*")*)\s*\/?>/gm;
+const EMBED_ATTR_RE = /([A-Za-z][\w-]*)="([^"]*)"/g;
+
+/**
+ * The `.html` pages a markdown page EMBEDS, resolved to wiki-relative paths —
+ * the input to the pairing pass's rule 3, and nothing else. It deliberately does
+ * NOT feed `index.outgoing`: an embedded diagram is part of the page, while a
+ * link to one is a citation, and folding every cited explainer under its citer
+ * would move pages the author never attached.
+ *
+ * Three rules, each one a way a naive scan pairs something the reader never sees:
+ *
+ *  - **Fenced and inline code is masked** (`markdownCodeRegions`), so a page
+ *    DOCUMENTING this feature — a plan page quoting `<Embed src="./x.html">` in
+ *    a fence — adopts nothing. mimir's own plan pages carry such quotes.
+ *  - **The attribute set goes through `parseEmbedAttrs`**, the server render's
+ *    own gate: a scheme, a leading slash, a query, a non-`.html` target and a
+ *    malformed `height` are all refused there, so a `src` the reader would
+ *    render as its fallback line pairs nothing here either.
+ *  - **The path is joined by `resolveEmbedRelPath`**, the same join the client
+ *    does, `..` included — so a target escaping the wiki root (`null`) is
+ *    dropped rather than clamped to something inside it.
+ *
+ * Returns normalized (lowercased) relPaths, deduped, in first-occurrence order.
+ */
+export function extractEmbedTargets(content: string, fromRelPath: string): string[] {
+  if (!content.includes("<Embed")) return [];
+  const regions = markdownCodeRegions(content);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  EMBED_TAG_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = EMBED_TAG_RE.exec(content)) !== null) {
+    // The tag's own offset, not the line's: the region test asks about the `<`.
+    const tagAt = m.index + m[0].indexOf("<");
+    if (inProtectedRegion(tagAt, regions)) continue;
+    const attrs: Record<string, string> = {};
+    EMBED_ATTR_RE.lastIndex = 0;
+    let a: RegExpExecArray | null;
+    while ((a = EMBED_ATTR_RE.exec(m[1] ?? "")) !== null) attrs[a[1]!] = a[2]!;
+    const parsed = parseEmbedAttrs(attrs);
+    if (!parsed) continue;
+    const resolved = resolveEmbedRelPath(fromRelPath, parsed.src);
+    if (resolved === null) continue;
+    const key = normalizeRelPath(resolved);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
 }
 
 /**
@@ -2233,6 +2343,145 @@ async function buildExplainerMeta(
   };
 }
 
+/** `x-prototype.html`, `x-prototype-2.html` — the ONE suffix rule 2 knows. The
+ *  trailing `-N` is what an iteration adds, and nothing else is a prototype. */
+const PROTOTYPE_SUFFIX_RE = /^(.+)-prototype(?:-\d+)?$/i;
+
+/** What the pairing pass reads off each markdown page's body and frontmatter,
+ *  keyed by normalized relPath. Collected in the ONE read pass that already has
+ *  the body in hand. */
+export interface PairingInputs {
+  /** `<Embed src>` targets, resolved and normalized (`extractEmbedTargets`). */
+  embeds: Map<string, string[]>;
+  /** The raw `superseded_by:` frontmatter value — a wikilink or a bare stem. */
+  supersededBy: Map<string, string>;
+}
+
+/**
+ * The stem a `superseded_by:` value names: `[[a/b|Label]]#frag` ⇒ `b`. Answers
+ * `""` for a value that names nothing.
+ *
+ * The brackets are stripped as RUNS rather than matched as a `[[…]]` pair,
+ * because `parseFrontmatter` gets there first: a bare `superseded_by: [[x]]`
+ * reads as an inline ARRAY and arrives here as the single element `[x]`, so a
+ * pair-anchored regex matched nothing on the spelling the plan pages actually
+ * use (measured — it is what the first cut of this function did).
+ */
+function supersededTargetStem(raw: string): string {
+  let v = raw.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
+  v = v.split("|")[0]!.split("#")[0]!.trim();
+  if (!v) return "";
+  return pageStemOf(v.replace(/\\/g, "/"));
+}
+
+/**
+ * FOLD the wiki's attachments: set `parent`/`pairedBy` on each child and
+ * `children` on each parent, in place, over the pages that survived the
+ * same-stem drop. Four rules, all scoped to ONE FOLDER, first match wins:
+ *
+ *  1. **Same stem** — `x.html` beside `x.md`/`x.mdx`. The markdown page keeps the
+ *     name: this child registers no stem key, so `[[x]]` and `?name=x` answer
+ *     exactly as they did when the html was dropped.
+ *  2. **Prototype suffix** — `x-prototype.html` / `x-prototype-2.html` beside a
+ *     page at `x`. Only that suffix.
+ *  3. **Embedded** — the markdown page carries `<Embed src="./child.html">`. An
+ *     EMBEDDED html is part of the page; a LINKED one is a peer, so a markdown
+ *     link pairs nothing. Two guards make it safe: a meta page (`index`, `log`,
+ *     `CLAUDE`) is never a parent (a wiki whose `log.md` quotes an embed would
+ *     otherwise adopt the diagram), and an html embedded by TWO OR MORE pages
+ *     stays a sibling — it belongs to no one page.
+ *  4. **Superseded** — a page whose frontmatter names `superseded_by:` folds
+ *     under its successor. The only rule that makes a MARKDOWN page a child.
+ *
+ * **The pass is one level deep, and both directions are closed.** An html child
+ * can never collect children (every rule needs a markdown parent), and a rule-4
+ * pair is dropped when it would nest — when the child carries attachments of its
+ * own, or when the successor is itself superseded. The rail renders one level,
+ * and a grandchild would either be hidden inside a fold nothing opens or drawn
+ * twice; dropping the pair leaves both pages as ordinary rows, which is the
+ * honest degrade. The rule-4 candidate set is computed BEFORE any of it is
+ * applied, so the outcome does not depend on the order pages are walked in.
+ */
+export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): void {
+  const byRel = new Map<string, WikiPageMeta>();
+  for (const p of pages) byRel.set(normalizeRelPath(p.relPath), p);
+  /** Markdown pages by `<folder>\0<stem>`, first-wins in the caller's (relPath)
+   *  order — the same page `resolve()` answers with for that stem. */
+  const mdByFolderStem = new Map<string, WikiPageMeta>();
+  for (const p of pages) {
+    if (extRank(p.relPath) === 2) continue;
+    const key = folderStemKey(p.relPath, p.name);
+    if (!mdByFolderStem.has(key)) mdByFolderStem.set(key, p);
+  }
+  // How many pages embed each html, wiki-wide — the "belongs to no one page"
+  // test. Counted over every embedder, not only same-folder ones: an html two
+  // pages in different folders both embed is still shared.
+  const embedders = new Map<string, WikiPageMeta[]>();
+  for (const p of pages) {
+    for (const target of inputs.embeds.get(normalizeRelPath(p.relPath)) ?? []) {
+      const arr = embedders.get(target);
+      if (arr) arr.push(p);
+      else embedders.set(target, [p]);
+    }
+  }
+
+  const adopt = (child: WikiPageMeta, parent: WikiPageMeta, by: PairedBy): void => {
+    child.parent = parent.relPath;
+    child.pairedBy = by;
+  };
+
+  for (const p of pages) {
+    if (extRank(p.relPath) !== 2) continue; // rules 1–3 pair `.html` only
+    const dir = path.posix.dirname(p.relPath);
+    const stemTwin = mdByFolderStem.get(folderStemKey(p.relPath, p.name));
+    if (stemTwin) {
+      adopt(p, stemTwin, "stem");
+      continue;
+    }
+    const proto = PROTOTYPE_SUFFIX_RE.exec(p.name);
+    const protoParent = proto ? mdByFolderStem.get(dir + "\u0000" + stemKey(proto[1]!)) : undefined;
+    if (protoParent) {
+      adopt(p, protoParent, "suffix");
+      continue;
+    }
+    const embedding = embedders.get(normalizeRelPath(p.relPath)) ?? [];
+    if (embedding.length !== 1) continue;
+    const parent = embedding[0]!;
+    if (path.posix.dirname(parent.relPath) !== dir) continue;
+    if (isMetaStem(parent.name)) continue;
+    adopt(p, parent, "link");
+  }
+
+  // Rule 4, in two steps so the outcome cannot depend on the walk order: collect
+  // every candidate pair first, then apply the ones that would not nest.
+  const superseded: { child: WikiPageMeta; parent: WikiPageMeta }[] = [];
+  const supersededChildren = new Set<WikiPageMeta>();
+  for (const p of pages) {
+    const raw = inputs.supersededBy.get(normalizeRelPath(p.relPath));
+    if (!raw) continue;
+    const stem = supersededTargetStem(raw);
+    if (!stem) continue;
+    const parent = mdByFolderStem.get(folderStemKey(p.relPath, stem));
+    if (!parent || parent === p) continue;
+    superseded.push({ child: p, parent });
+    supersededChildren.add(p);
+  }
+  const hasChildren = new Set<string>();
+  for (const p of pages) if (p.parent) hasChildren.add(p.parent);
+  for (const { child, parent } of superseded) {
+    if (hasChildren.has(child.relPath)) continue; // child is itself a parent
+    if (supersededChildren.has(parent)) continue; // successor is itself superseded
+    adopt(child, parent, "superseded");
+  }
+
+  for (const p of pages) {
+    if (!p.parent) continue;
+    const parent = byRel.get(normalizeRelPath(p.parent));
+    if (!parent) continue; // unreachable: every parent came out of `pages`
+    (parent.children ??= []).push(p.relPath);
+  }
+}
+
 /**
  * Build the index by scanning every .md, .mdx, and .html file under the wiki
  * root (dot-dirs like .obsidian excluded). ~700 small files — a full scan is
@@ -2354,6 +2603,11 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   const rawOutgoing = new Map<string, string[]>();
   /** Per-page resolved relative-markdown-link targets (normalized relPaths). */
   const rawMdTargets = new Map<string, string[]>();
+  /** The attachment pass's inputs, keyed by NORMALIZED relPath (the two maps
+   *  above are keyed by the raw one — these are compared against resolved embed
+   *  targets, which are normalized by construction). */
+  const pairingEmbeds = new Map<string, string[]>();
+  const pairingSuperseded = new Map<string, string>();
 
   // Git date signals — ONE `git log` walk (plus a cheap concurrent `git status`) per
   // index build, inheriting the 5-min TTL, kicked off here so it overlaps the
@@ -2442,6 +2696,17 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
       rawMdTargets.set(relPath, resolveMarkdownTargets(relPath, extractMarkdownLinks(content)));
+      // The attachment pass's two inputs, read here where the body is already in
+      // hand. Both feed `pairAttachments` and NOTHING else: an `<Embed>` target
+      // is deliberately not a link (see `extractEmbedTargets`), so `outgoing`,
+      // the backlinks, the Atlas graph and the lint checks are untouched.
+      const embeds = extractEmbedTargets(content, relPath);
+      if (embeds.length) pairingEmbeds.set(normalizeRelPath(relPath), embeds);
+      const supersededRaw =
+        typeof fm.superseded_by === "string"
+          ? fm.superseded_by.trim()
+          : (asStringArray(fm.superseded_by)[0] ?? "").trim();
+      if (supersededRaw) pairingSuperseded.set(normalizeRelPath(relPath), supersededRaw);
     }),
   );
 
@@ -2578,6 +2843,16 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       winnerByStem.set(key, p);
     }
   }
+  // Every markdown page's `<folder>\0<stem>` — what tells a same-folder twin (an
+  // ATTACHMENT, kept and folded under its page) from a cross-folder one (a
+  // shadow, dropped as before). Built over the pre-drop set on purpose: a `.md`
+  // and a `.mdx` in one folder still resolve by precedence, and whichever of them
+  // wins is in this set either way.
+  const mdStemsByFolder = new Set<string>();
+  for (const p of pages) {
+    if (extRank(p.relPath) === 2) continue; // `.html`
+    mdStemsByFolder.add(folderStemKey(p.relPath));
+  }
   // The drop is recorded, not just warned about: a log line reaches nobody the
   // next morning, and the dropped page is gone from every consumer's view of the
   // wiki — including the linter's, which is exactly the check that should report
@@ -2587,6 +2862,13 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     const p = pages[i]!;
     const key = stemKey(p.name);
     const best = bestRankByStem.get(key)!;
+    // An `.html` beside its OWN markdown page is the attachment case, not the
+    // shadow case: `x.mdx` + `x.html` is one page and its diagram, and dropping
+    // the diagram is what made it unreachable in the reader while `/api/wiki/html`
+    // still served it by path. It stays in `pages` and `pairAttachments` folds it
+    // under the markdown page below. A same-stem `.html` in ANOTHER folder is a
+    // genuine collision and keeps the drop, `index.shadowed` entry included.
+    if (extRank(p.relPath) === 2 && mdStemsByFolder.has(folderStemKey(p.relPath))) continue;
     if (extRank(p.relPath) > best) {
       log.warn("wiki page {relPath} shadowed by a higher-precedence same-stem page — dropped", {
         relPath: p.relPath,
@@ -2605,6 +2887,12 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // on the loop direction of the code above it.
   shadowed.sort((a, b) => a.relPath.localeCompare(b.relPath));
 
+  // FOLD the attachments — before the display-title pass and the registration
+  // below, both of which read the result (`stemCounts` skips a rule-1 child, and
+  // a rule-1 child registers no stem key). `pages` is relPath-sorted here, which
+  // is the order `pairAttachments` resolves its same-folder twins in.
+  pairAttachments(pages, { embeds: pairingEmbeds, supersededBy: pairingSuperseded });
+
   // Same-EXTENSION same-stem pages in different folders are NOT dropped above —
   // they are two real pages that simply share a filename, and on the `memory`
   // wiki they are the 30 per-project `MEMORY.md` hubs. Give each one a
@@ -2617,13 +2905,21 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     [...new Set(pages.filter((p) => p.relPath.includes("/")).map((p) => p.relPath.split("/")[0]!))],
     readerConfig?.folderLabels ?? {},
   );
+  // ⚠️ A rule-1 child does NOT count here. It shares its parent's stem by
+  // definition, so counting it would make every attached `x.html` + `x.mdx` pair
+  // a "collision" and grow a folder prefix onto the PARENT's rail label — a
+  // visible change to a page nobody touched, caused by a file that used to be
+  // dropped. Children paired by the other three rules have stems of their own and
+  // count like any page.
   const stemCounts = new Map<string, number>();
   for (const p of pages) {
+    if (p.pairedBy === "stem") continue;
     const k = p.name.toLowerCase();
     stemCounts.set(k, (stemCounts.get(k) ?? 0) + 1);
   }
   const stamped: WikiPageMeta[] = [];
   for (const p of pages) {
+    if (p.pairedBy === "stem") continue;
     if ((stemCounts.get(p.name.toLowerCase()) ?? 0) < 2) continue;
     // An AUTHORED title already distinguishes the page; only a title that is the
     // bare stem (no `title:`, no `titleFrom` hit) needs the prefix.
@@ -2669,11 +2965,31 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     if (!widened) break;
   }
 
-  // Registration order decides stem-collision winners: root AI pages sort before
-  // life/ and register first, matching Obsidian's ambiguous-link behavior closely
-  // enough for a read-only viewer.
-  for (const meta of pages) register(meta.name, meta);
-  for (const meta of pages) {
+  // Registration order decides stem-collision winners, and it is EXTENSION RANK
+  // first, relPath second — not relPath alone.
+  //
+  // The relPath order was correct while a same-stem `.html` was always dropped:
+  // every page left shared its stem only with same-extension siblings, where the
+  // rank tie-break leaves the order byte-identical (root AI pages still sort
+  // before `life/`, as they always did). It stops being correct the moment an
+  // attachment survives — `y.html` sorts before `y.md`, so first-wins would have
+  // handed `[[y]]` and `?name=y` to the html. Ranking first gives the markdown
+  // page the name, which is what the reader had when the html was dropped.
+  //
+  // A rule-1 child additionally registers NO stem key: the key is its parent's by
+  // definition, and a second lock costs nothing where the failure is silent. Its
+  // title and aliases still register (first-wins, so the parent's name already
+  // holds the stem key by the time the title pass runs). Children paired by the
+  // other three rules have distinct stems and keep every key they registered
+  // before this pass existed.
+  const registrationOrder = [...pages].sort(
+    (a, b) => extRank(a.relPath) - extRank(b.relPath) || a.relPath.localeCompare(b.relPath),
+  );
+  for (const meta of registrationOrder) {
+    if (meta.pairedBy === "stem") continue;
+    register(meta.name, meta);
+  }
+  for (const meta of registrationOrder) {
     register(meta.title, meta);
     for (const alias of meta.aliases) register(alias, meta);
   }
