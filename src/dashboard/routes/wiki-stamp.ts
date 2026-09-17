@@ -38,7 +38,10 @@
  *     reached the CLI. Both sides are resolved the way the CLI resolves them
  *     (`realOf`: the directory always, the file itself when it is a link) and
  *     the RESOLVED path is what is handed down, so muninn's gate and the CLI's
- *     classification are asking about the same file. Escape ⇒ 400.
+ *     classification are asking about the same file. Escape ⇒ 400. A page whose
+ *     DIRECTORY is not on disk is NOT an escape: it resolves as far as the
+ *     filesystem allows and goes to the CLI, which answers `missing-file` ⇒ 409.
+ *     See {@link realPageOf}.
  *  5. `isWikiReadonly()` / `isReadonlyWikiRoot()` ⇒ 403. AFTER the confinement,
  *     unlike `writeWikiPage` (which checks read-only first): deliberate, so a
  *     traversal never reaches the read-only test with an unresolved root.
@@ -150,10 +153,16 @@ export const STAMP_CHILD_ENV_NAMES: readonly string[] = ["PATH", "HOME", "TMPDIR
  * `WIKI_STAMP_BIN` names a `.ts` file that this process runs through an
  * interpreter, and it is chosen by an environment variable — so the child is as
  * trusted as whoever set that variable, and no more. Spreading `process.env`
- * handed it everything muninn holds: measured 2026-09-17 on this laptop's own
- * checkout, 119 names, seven of them credential-shaped — `DATABASE_URL`, two
- * `TELEGRAM_BOT_TOKEN_*`, a `SLACK_BOT_TOKEN_*`/`SLACK_APP_TOKEN_*` pair and
- * `CLAUDE_CODE_OAUTH_TOKEN`.
+ * handed it everything muninn holds.
+ *
+ * **This docstring is the ONE place that measurement is written down**, and the
+ * test and `src/wiki/CLAUDE.md` point here rather than counting again: the size
+ * of `process.env` is a fact about one machine at one moment, and two
+ * independent counts of it disagreed. Measured 2026-09-17 on the author's
+ * laptop with the repo's own `.env` loaded: **119 names, seven of them
+ * credential-shaped** — `DATABASE_URL`, two `TELEGRAM_BOT_TOKEN_*`, a
+ * `SLACK_BOT_TOKEN_*`/`SLACK_APP_TOKEN_*` pair, `CLAUDE_CODE_OAUTH_TOKEN` and
+ * `CLAUDE_CODE_MESSAGING_TOKEN`.
  *
  * The three inherited names are what the CLI needs to RUN: `PATH` so the
  * interpreter is findable (a child with none lands every Stamp in the 502 bucket
@@ -212,6 +221,18 @@ export interface StampRequestRefusal {
  * authenticating mode the real origin allowlist has already run upstream of
  * this, against `MUNINN_ALLOWED_ORIGINS`; under `off` there is no allowlist
  * configured at all, which is exactly why this check cannot be one.
+ *
+ * **Rule 3 behind `tailscale serve`, MEASURED rather than reasoned about**
+ * (2026-09-17, the author's laptop): the proxy passes `Host:` through
+ * UNCHANGED as the tailnet name (`rune-macbook-pro-m4-max.tail7b311e.ts.net`),
+ * adds `X-Forwarded-Host` carrying the same value and `X-Forwarded-Proto:
+ * https`, and a browser on that page sends `Origin:
+ * https://rune-macbook-pro-m4-max.tail7b311e.ts.net`. So `Origin` and `Host`
+ * name the same authority and rule 3 passes as written — the scheme is the only
+ * thing that differs, and {@link originMatchesHost} compares host+port only for
+ * exactly this reason. Nothing here reads `X-Forwarded-*`: a forwarding header
+ * is client-settable on a direct request, so trusting one would hand an attacker
+ * the comparison. The proxied shape is a unit case in `wiki-stamp.test.ts`.
  */
 export function decideStampRequest(req: {
   contentType?: string | null;
@@ -256,22 +277,57 @@ function originMatchesHost(origin: string, host: string): boolean {
 }
 
 /**
- * The page's path with symlinks resolved, or null when it is not on disk.
+ * A directory resolved as far as the filesystem allows: the deepest ancestor
+ * that IS on disk, with the spelled tail re-appended.
  *
- * MIRRORS `claude-usage/src/wiki-stamp.ts`'s `realOf` deliberately — the
- * directory always, plus the file itself when it is a symlink — because the two
- * gates have to classify the same bytes. Resolving only the directory left
+ * `realpathSync` is all-or-nothing — one missing segment and it throws — but a
+ * page under a directory that does not exist is a TYPO, not a traversal, and
+ * the two must not answer the same way. Walking up gives a path that is still
+ * anchored in resolved bytes, so {@link within} keeps comparing like with like:
+ * on macOS a wiki under `/var/folders/…` really lives at `/private/var/…`, and
+ * classifying the spelled `/var/…` form (which is what the CLI's own `realOf`
+ * falls back to) would refuse the page for being outside its own root.
+ *
+ * The loop terminates: `path.dirname` is strictly shorter until it reaches the
+ * filesystem root, where `dirname(x) === x` returns the path as spelled.
+ */
+function realDirOf(dir: string): string {
+  const missing: string[] = [];
+  let here = dir;
+  for (;;) {
+    try {
+      return path.join(realpathSync(here), ...missing);
+    } catch {
+      const parent = path.dirname(here);
+      if (parent === here) return dir;
+      missing.unshift(path.basename(here));
+      here = parent;
+    }
+  }
+}
+
+/**
+ * The page's path with symlinks resolved.
+ *
+ * MIRRORS `claude-usage/src/wiki-stamp.ts`'s `realOf` — the directory always,
+ * plus the file itself when it is a symlink — because the two gates have to
+ * classify the same bytes. Resolving only the directory left
  * `<root>/page.md -> /elsewhere/secret.md` inside the root by every lexical
  * test, and the CLI's own `writeAtomic` renames over the link, which REPLACES it
  * with a regular file: the link destroyed and an outside page copied in.
+ *
+ * **It never gives up on a path.** An earlier cut returned `null` when the
+ * page's DIRECTORY was not on disk, which the caller turned into
+ * `400 outside-root` — so a typo'd folder read as a traversal attempt. The CLI
+ * keeps the spelled path and lets `existsSync` answer `missing-file`; this does
+ * the same thing through {@link realDirOf}, so a typo lands on `409
+ * missing-file` with the CLI as the authority on "no such page". Resolving MORE
+ * than the CLI does is the safe direction: every segment that exists is
+ * resolved before {@link within} judges it, and the missing tail carries no
+ * `..` — `isPathConfined` has already refused those.
  */
-function realPageOf(abs: string): string | null {
-  let here: string;
-  try {
-    here = path.join(realpathSync(path.dirname(abs)), path.basename(abs));
-  } catch {
-    return null;
-  }
+function realPageOf(abs: string): string {
+  const here = path.join(realDirOf(path.dirname(abs)), path.basename(abs));
   try {
     if (lstatSync(here).isSymbolicLink()) return realpathSync(here);
   } catch {
@@ -325,6 +381,40 @@ function firstLine(stderr: string): string {
   return stderr.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
 }
 
+/**
+ * Refusal reasons that have already warned. See {@link logRefusal}.
+ *
+ * ⚠️ The keys come from a CLOSED set — the two `reason` strings
+ * {@link decideStampRequest} returns — the `introspect.ts` rule: this Set never
+ * sweeps, so a key carrying a caller-supplied value would be a memory-growth
+ * path an unauthenticated caller drives.
+ */
+const warnedRefusals = new Set<string>();
+
+/**
+ * One `warn` per refusal REASON, then `info` — the `ws-upgrade.ts` /
+ * `introspect.ts` discipline.
+ *
+ * Every refusal used to mint a `warn`. The refusals are exactly the ones a
+ * cross-origin page reaches (that is what the check is FOR), and nothing rate-
+ * limits it: a loop on another origin filled the JSONL sink with a line per
+ * POST. The reason still reaches the caller in the response body and every
+ * refusal is still logged — the level drops, the line does not disappear.
+ */
+function logRefusal(reason: string): void {
+  if (warnedRefusals.has(reason)) {
+    log.info("wiki-stamp refused a request: {reason}", { reason });
+    return;
+  }
+  warnedRefusals.add(reason);
+  log.warn("wiki-stamp refused a request: {reason}", { reason });
+}
+
+/** Test-only: forget which refusal reasons have already warned. */
+export function __resetStampRefusalWarnsForTest(): void {
+  warnedRefusals.clear();
+}
+
 export function registerWikiStampRoute(
   app: Hono,
   ctx: ProvenanceContext,
@@ -340,7 +430,7 @@ export function registerWikiStampRoute(
       host: c.req.header("host"),
     });
     if (refusal) {
-      log.warn("wiki-stamp refused a request: {reason}", { reason: refusal.reason });
+      logRefusal(refusal.reason);
       return c.json({ error: refusal.error, reason: refusal.reason }, refusal.status);
     }
 
@@ -415,7 +505,7 @@ export function registerWikiStampRoute(
       }
     })();
     const realPath = realPageOf(absPath);
-    if (!realRoot || !realPath || !within(realRoot, realPath)) {
+    if (!realRoot || !within(realRoot, realPath)) {
       return c.json(
         { error: `path confinement failed for "${relPath}"`, reason: "outside-root" },
         400,

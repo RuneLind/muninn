@@ -18,11 +18,13 @@ import path from "node:path";
 import { Hono } from "hono";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest, getWikiIndex } from "../../wiki/store.ts";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import {
   decideStampRequest,
   registerWikiStampRoute,
   stampChildEnv,
   STAMP_CHILD_ENV_NAMES,
+  __resetStampRefusalWarnsForTest,
   type StampRouteDeps,
 } from "./wiki-stamp.ts";
 import { ProcTimeoutError } from "../../utils/run-proc.ts";
@@ -147,8 +149,10 @@ describe("the spawn", () => {
     // `{ WIKI_STAMP_ROOTS }` alone REPLACES the environment, drops PATH, and
     // lands every Stamp in the 502 bucket with an empty stderr — so PATH has to
     // be there. `{ ...process.env, … }` hands a `.ts` file chosen by an env var
-    // everything muninn holds — measured 106 names including DATABASE_URL, and
-    // on a real instance every bot token — so the rest must not be.
+    // everything muninn holds — how much is measured once, in `stampChildEnv`'s
+    // docstring, and this comment carries no count of its own: two independent
+    // counts of one machine's `process.env` disagreed, which is how a second
+    // number gets into the repo.
     const prior = process.env.DATABASE_URL;
     process.env.DATABASE_URL = "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
     try {
@@ -542,6 +546,74 @@ describe("the route-local CSRF check", () => {
     );
     expect(res.status).toBe(200);
   });
+
+  test("the shape `tailscale serve` actually produces passes — measured, not assumed", async () => {
+    // MEASURED 2026-09-17 on the author's laptop: the proxy passes `Host:`
+    // through UNCHANGED as the tailnet name, adds `X-Forwarded-Host` carrying
+    // the same value and `X-Forwarded-Proto: https`, and the browser's `Origin`
+    // is `https://<that host>`. So rule 3 sees one authority under two schemes,
+    // which is the case `originMatchesHost` compares host+port for. Asserted at
+    // BOTH levels: the pure decision, and a real request through the route, so
+    // a header muninn reads differently from the way it is spelled here cannot
+    // hide behind the unit call.
+    const proxied = {
+      host: "rune-macbook-pro-m4-max.tail7b311e.ts.net",
+      origin: "https://rune-macbook-pro-m4-max.tail7b311e.ts.net",
+      "x-forwarded-host": "rune-macbook-pro-m4-max.tail7b311e.ts.net",
+      "x-forwarded-proto": "https",
+      "sec-fetch-site": "same-origin",
+    };
+    expect(
+      decideStampRequest({
+        contentType: "application/json",
+        secFetchSite: proxied["sec-fetch-site"],
+        origin: proxied.origin,
+        host: proxied.host,
+      }),
+    ).toBeNull();
+    await fakeCli(`echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`);
+    const res = await post(appWith(), { wiki: "w", relPath: REL, ref: NEW_REF }, proxied);
+    expect(res.status).toBe(200);
+  });
+
+  test("a REFUSED request warns ONCE per reason and drops to info after that", async () => {
+    // Every refusal used to mint a `warn`, and these are exactly the requests a
+    // cross-origin page makes — a loop on another origin filled the JSONL sink.
+    // The line must not disappear either, so the second one is asserted as an
+    // `info` rather than as an absence.
+    __resetStampRefusalWarnsForTest();
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      const app = appWith();
+      const body = { wiki: "w", relPath: REL, ref: NEW_REF };
+      const evil = { origin: "http://evil.example", host: "127.0.0.1:3010" };
+      expect((await post(app, body, evil)).status).toBe(403);
+      expect((await post(app, body, evil)).status).toBe(403);
+      const mine = records.filter((r) => r.category.join("/") === "muninn/wiki/stamp");
+      expect(mine.map((r) => r.level)).toEqual(["warning", "info"]);
+      // A DIFFERENT reason gets its own warn — the key is the reason, not a
+      // single global "this route has warned once".
+      const res = await app.request("/api/wiki/provenance/stamp", {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(415);
+      expect(
+        records
+          .filter((r) => r.category.join("/") === "muninn/wiki/stamp" && r.level === "warning")
+          .map((r) => (r.properties as { reason?: string }).reason),
+      ).toEqual(["cross-origin", "unsupported-content-type"]);
+    } finally {
+      await reset();
+      __resetStampRefusalWarnsForTest();
+    }
+  });
 });
 
 describe("the ref shape pre-check", () => {
@@ -616,6 +688,27 @@ describe("realpath containment", () => {
       await rm(link, { force: true });
       await rm(sibling, { recursive: true, force: true });
     }
+  });
+
+  test("a page whose DIRECTORY is not on disk reads as `no such page`, not as a traversal", async () => {
+    // The CLI's own `realOf` keeps a path whose directory does not resolve and
+    // lets `existsSync` answer `missing-file`; muninn used to answer
+    // `400 outside-root` for it, so a typo'd folder read as an escape attempt.
+    // The CLI is still the authority on "no such page" — muninn spawns it and
+    // relays the 409.
+    await fakeCli(
+      `printf '%s\\n' "$@" > "${argvFile}"\n` +
+        `echo '{"outcome":"skipped","reason":"missing-file","path":"'"$4"'"}'`,
+    );
+    const res = await post(appWith(), { wiki: "w", relPath: "nosuchdir/page.md", ref: NEW_REF });
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toBe("missing-file");
+    // …and the path it was handed is anchored in the RESOLVED root, with the
+    // missing tail re-appended: on macOS the wiki really lives under
+    // `/private/var/…`, and handing over the spelled `/var/…` form would make
+    // the CLI's own containment test refuse the page for being outside its root.
+    const argv = (await readFile(argvFile, "utf8")).trim().split("\n");
+    expect(argv[3]).toBe(path.join(realpathSync(root), "nosuchdir/page.md"));
   });
 
   test("a symlink to a page INSIDE the wiki is fine, and the CLI is handed the target", async () => {

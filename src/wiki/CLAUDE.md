@@ -958,9 +958,9 @@ process).
 `WIKI_STAMP_ROOTS`, built by `stampChildEnv`. `WIKI_STAMP_BIN` names a `.ts` file
 chosen by an environment variable, so the child is as trusted as whoever set that
 variable and no more; `{ ...process.env, … }` handed it everything muninn holds
-(measured 2026-09-17 on this laptop's checkout: 119 names, seven of them
-credential-shaped — `DATABASE_URL`, two `TELEGRAM_BOT_TOKEN_*`, a Slack
-bot/app token pair and `CLAUDE_CODE_OAUTH_TOKEN`). The three
+— how much is measured ONCE, in `stampChildEnv`'s docstring, which is the only
+place that count lives (it is a fact about one machine at one moment, and two
+independent counts of it disagreed). The three
 inherited names are what the CLI needs to RUN — `PATH` so the interpreter is
 findable (a bare `{ WIKI_STAMP_ROOTS }` drops it and lands every Stamp in the 502
 bucket with an empty stderr), `HOME` for its skip record, `TMPDIR` for
@@ -988,7 +988,14 @@ Checks, in order, each BEFORE any spawn:
    resolved the way the CLI's own `realOf` resolves them (the directory always,
    the file itself when it is a link), and the RESOLVED path is what is handed
    down — so muninn's gate and the CLI's classification ask about the same bytes,
-   and nothing downstream re-derives a path from `relPath`.
+   and nothing downstream re-derives a path from `relPath`. A page whose
+   DIRECTORY is not on disk is **not** an escape: `realPageOf` resolves the
+   deepest ancestor that exists and re-appends the spelled tail, so a typo'd
+   folder reaches the CLI and comes back as **409 `missing-file`** — "no such
+   page", which is what it is. (muninn resolves one step FURTHER than the CLI's
+   `realOf`, which gives up at the first unresolvable directory; resolving more
+   is the safe direction, and it is what keeps a wiki under a symlinked
+   `/var/folders/…` root from being refused as outside its own root.)
 5. `isWikiReadonly()` / `isReadonlyWikiRoot(root)` ⇒ **403**. AFTER the
    confinement, unlike `writeWikiPage`: deliberate, so a traversal never reaches
    the read-only test with an unresolved root.
@@ -1042,6 +1049,23 @@ POST one step earlier with a readable reason, and under `off` there is no
 `MUNINN_ALLOWED_ORIGINS` to check against at all. **The other muninn write routes
 share this exposure under `off`** — a class follow-up, out of this route's scope.
 
+**Behind `tailscale serve`, rule 3 passes as written — MEASURED** (2026-09-17,
+the author's laptop): the proxy passes `Host:` through UNCHANGED as the tailnet
+name (`rune-macbook-pro-m4-max.tail7b311e.ts.net`), adds `X-Forwarded-Host` with
+the same value and `X-Forwarded-Proto: https`, and a browser on that page sends
+`Origin: https://<that host>`. So `Origin` and `Host` name one authority under
+two schemes, which is exactly what `originMatchesHost` compares host+port for.
+Nothing reads `X-Forwarded-*`: a forwarding header is client-settable on a direct
+request, so trusting one would hand the comparison to the caller. No code change
+came of the measurement; the proxied shape is a unit case.
+
+**A refusal warns ONCE per reason, then logs `info`** — the `ws-upgrade.ts` /
+`introspect.ts` discipline. These refusals are precisely what a cross-origin page
+produces, and nothing rate-limits it, so one `warn` per POST let a loop on
+another origin fill the JSONL sink. The key set is CLOSED (the two `reason`
+strings `decideStampRequest` returns), so it cannot grow with caller-supplied
+values; `__resetStampRefusalWarnsForTest` clears it.
+
 The CLI **always exits 0 and prints nothing without `--report`** (its banner
 invariant), but only once it runs — so the route parses the LAST stdout line as
 JSON and treats the exit code as information only when there is no report line:
@@ -1052,6 +1076,7 @@ JSON and treats the exit code as information only when there is no report line:
 | `unchanged` (`already-stamped`) | 200, same body — the append is idempotent |
 | `skipped` | 409 `{reason}`, the CLI's own reason verbatim (`outside-roots`, `lock-timeout`, …) |
 | no parseable report line | 502 `{exitCode, stderr: <first line>}` |
+| the CLI printed more than `RUN_PROC_MAX_OUTPUT_BYTES` (8 MB) BEFORE its report line | 502, as "no parseable report line" — a stated limitation, see below |
 | a report naming a different `path` than the one asked for | 502 `{reason: "path-mismatch"}` |
 | muninn's own spawn timeout (`ProcTimeoutError`) | 409 `{reason: "stamp-timeout"}` |
 | any OTHER throw out of the spawn | 502 `{error, exitCode: null}` |
@@ -1061,6 +1086,15 @@ cannot build or a binary it cannot execute — a NUL in `ref` failed in ~10 ms �
 and reporting that as "the CLI did not return" sends an operator looking for a
 wedged child that never existed. `runProc` rejects with a typed `ProcTimeoutError`
 so the two are told apart by type rather than by matching a message string.
+**The 8 MB cap can eat the answer, and that is the accepted trade.** `runProc`
+CANCELS a stream at the cap rather than draining it, so a CLI that printed 8 MB
+before its report line loses the report and the Stamp answers 502 — a write that
+may well have happened, reported as a failure. The cap is not negotiable (the
+drain buffers in the dashboard's event loop and a fast writer reaches gigabytes
+inside the 15 s budget), and the CLI's own banner invariant is that `--report`
+prints ONE line and nothing else, so 8 MB of preamble is already a bug in the
+child. The retry is safe: the append is idempotent and answers `unchanged`.
+
 The `path-mismatch` row reads back the report's own `path`: the CLI was given one
 file and nothing else, so a different one means the two sides do not agree about
 which page was just written, which is the one thing a success must never hide. An

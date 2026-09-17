@@ -21,7 +21,10 @@
  * real reverse proxy stamps and what takes a request out of it.
  * `ws-scope.spec.ts` carries the same idiom.
  *
- * No model calls, no writes: it reads status lines. `SCHEDULER_ENABLED=false`.
+ * No model calls and nothing written: it reads status lines. The two Stamp rows
+ * POST, but with an EMPTY body, which the route refuses on its own first content
+ * check — so no wiki page is ever named, let alone touched.
+ * `SCHEDULER_ENABLED=false`.
  *
  * SPAWN ENV: `e2eEnv()` blanks the platform tokens and the instance-profile
  * flags (the `MUNINN_AUTH` family, `MUNINN_LOCAL_ROLE` included), and this spec
@@ -48,6 +51,12 @@ const PINNED_USER = "e2e-zone-user";
  *  loopback bypass, which is the only way `MUNINN_LOCAL_ROLE` can apply. */
 const VIA_PROXY = { "x-forwarded-for": "203.0.113.9" };
 const TOKEN = { "x-muninn-token": SECRET };
+
+/** The one WRITE this file probes, asserted from both roles. The body is
+ *  deliberately incomplete: an admin must get the ROUTE's own 400 rather than a
+ *  zone 403, and a body that could reach the CLI would make this spec a writer. */
+const STAMP_PATH = "/api/wiki/provenance/stamp";
+const STAMP_BODY = {};
 
 const servers: ChildProcess[] = [];
 
@@ -156,6 +165,25 @@ test.describe("role `user` — the default", () => {
       expect(await status(USER_BASE, p, as), p).toBe(403);
     }
   });
+
+  test("the wiki Stamp WRITE is 403 — default-deny, with no `zones.ts` entry of its own", async () => {
+    // `POST /api/wiki/provenance/stamp` appends to a page's frontmatter through
+    // claude-usage's CLI. Its route header calls itself "admin-zone by muninn's
+    // default-deny", and default-deny is spelled as the ABSENCE of an entry — so
+    // nothing in `zones.ts` names the route and no unit test there would fail if
+    // a `/api/wiki/` prefix joined the user zone one day. This is the assertion
+    // that would.
+    const res = await fetch(`${USER_BASE}${STAMP_PATH}`, {
+      method: "POST",
+      headers: { ...as, "content-type": "application/json" },
+      body: JSON.stringify(STAMP_BODY),
+    });
+    expect(res.status).toBe(403);
+    // The zone middleware's OWN body, not the route's: proof the refusal came
+    // from the zone rather than from `decideStampRequest`, a read-only guard or
+    // a route that is simply not registered.
+    expect(await res.json()).toEqual({ error: "forbidden", reason: "admin-only route" });
+  });
 });
 
 test.describe("role `admin` — MUNINN_LOCAL_ROLE, and the channel it applies to", () => {
@@ -163,6 +191,21 @@ test.describe("role `admin` — MUNINN_LOCAL_ROLE, and the channel it applies to
     for (const p of ["/traces", "/models", "/plans"]) {
       expect(await status(ADMIN_BASE, p, { ...VIA_PROXY, ...TOKEN }), p).toBe(200);
     }
+  });
+
+  test("…and the same wiki Stamp WRITE PASSES the zone, so the route's own checks answer", async () => {
+    // The other half of the pin: 403 for a `user` is only evidence about the
+    // zone if an admin is NOT 403'd at the same URL. The answer is the route's
+    // first content check — which is also proof the route is registered and
+    // that neither `decideStampRequest` nor the global origin middleware
+    // refuses a same-process POST carrying no browser headers.
+    const res = await fetch(`${ADMIN_BASE}${STAMP_PATH}`, {
+      method: "POST",
+      headers: { ...VIA_PROXY, ...TOKEN, "content-type": "application/json" },
+      body: JSON.stringify(STAMP_BODY),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "relPath and ref are required" });
   });
 
   test("GET / is the dashboard, not a redirect", async () => {
