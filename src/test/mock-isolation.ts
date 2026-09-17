@@ -37,6 +37,20 @@ export const MOCK_ALIAS_IMPORT = /import\s*\{[^}]*\bmock\s+as\s+\w+[^}]*\}/;
 /** The substring every call form contains — what MOCK_MODULE_CALL must agree with, file by file. */
 export const MOCK_MODULE_SUBSTRING = /\bmock\.module\(/;
 
+/** Where the bun test files live, relative to the repo root, and the pattern they match. */
+export const TEST_FILE_DIRS = ["src", "db", "e2e"] as const;
+export const TEST_FILE_GLOB = "**/*.test.ts";
+
+/**
+ * `bun test --coverage` is bun's whole-repo, single-process run: every mock in the
+ * tree leaks into every other file there, and coverage cannot be collected across
+ * processes. It is a developer-only script whose numbers are known to be
+ * mock-contaminated; it is exempted BY NAME so the exemption is visible rather
+ * than falling out of a zero-argument link the rule never saw. `scripts/count-tests.ts`
+ * reads the same set, so a second single-process chain added here is excluded there too.
+ */
+export const SINGLE_PROCESS_SCRIPTS: ReadonlySet<string> = new Set(["test:coverage"]);
+
 export interface BunTestLink {
   script: string;
   /** The link's positional arguments, flags removed. */
