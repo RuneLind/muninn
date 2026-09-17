@@ -29,9 +29,16 @@ const SESSION_A = `claude-code:${ID_A}`;
 
 afterEach(() => __resetSessionLedgerWarnsForTest());
 
-/** Facts for one priced session, in claude-usage's own shape. */
+/**
+ * Facts for one priced session, in claude-usage's own shape.
+ *
+ * `provider: "claude"` because that is what the REAL ledger emits — the
+ * frontmatter's `claude-code` is muninn's spelling, and `enrichSessions` is the
+ * one place the two are joined. The fixture said `claude-code` until PR 3 added
+ * that mapping, which made it a fixture pinning a value the service never sends.
+ */
 function facts(id: string, cost: number, over: Record<string, unknown> = {}) {
-  return { sessionId: id, title: "T", provider: "claude-code", host: "mini", cost, messages: 4, ...over };
+  return { sessionId: id, title: "T", provider: "claude", host: "mini", cost, messages: 4, ...over };
 }
 
 function deps(over: Partial<SessionLedgerDeps> = {}): SessionLedgerDeps {
