@@ -392,14 +392,18 @@ function firstLine(stderr: string): string {
 const warnedRefusals = new Set<string>();
 
 /**
- * One `warn` per refusal REASON, then `info` — the `ws-upgrade.ts` /
- * `introspect.ts` discipline.
+ * One `warn` per refusal REASON, then `info`.
  *
  * Every refusal used to mint a `warn`. The refusals are exactly the ones a
  * cross-origin page reaches (that is what the check is FOR), and nothing rate-
- * limits it: a loop on another origin filled the JSONL sink with a line per
- * POST. The reason still reaches the caller in the response body and every
- * refusal is still logged — the level drops, the line does not disappear.
+ * limits it. What this changes is the CONSOLE: a loop on another origin no
+ * longer paints a warning per POST. It does NOT reduce the JSONL sink's volume
+ * — the file sink writes `info` too (`src/logging.ts`, `lowestLevel: "info"`),
+ * so it still gets one line per refused POST (measured 2026-09-17: 120 POSTs,
+ * 114 lines). A request-rate cap for refused writes is a follow-up shared with
+ * every muninn write route that is reachable under `MUNINN_AUTH=off`;
+ * `ws-upgrade.ts` and `introspect.ts` return WITHOUT logging, which is a
+ * different discipline from this one.
  */
 function logRefusal(reason: string): void {
   if (warnedRefusals.has(reason)) {

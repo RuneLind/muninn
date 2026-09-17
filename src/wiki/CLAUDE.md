@@ -995,7 +995,13 @@ Checks, in order, each BEFORE any spawn:
    page", which is what it is. (muninn resolves one step FURTHER than the CLI's
    `realOf`, which gives up at the first unresolvable directory; resolving more
    is the safe direction, and it is what keeps a wiki under a symlinked
-   `/var/folders/…` root from being refused as outside its own root.)
+   `/var/folders/…` root from being refused as outside its own root.) One
+   branch this resolves LESS strictly than round 1 did: a DANGLING symlinked
+   directory inside the wiki (`<root>/d -> /outside/nodir`) has no real path to
+   resolve, so the spelled tail is re-appended under the root and the request
+   reaches the CLI, which refuses it itself — `outside-roots` if the target ever
+   exists, `missing-file` otherwise (`scripts/wiki-stamp.ts` `classifyPath`).
+   muninn's gate is not the last check on that branch; the CLI's is.
 5. `isWikiReadonly()` / `isReadonlyWikiRoot(root)` ⇒ **403**. AFTER the
    confinement, unlike `writeWikiPage`: deliberate, so a traversal never reaches
    the read-only test with an unresolved root.
@@ -1059,12 +1065,13 @@ Nothing reads `X-Forwarded-*`: a forwarding header is client-settable on a direc
 request, so trusting one would hand the comparison to the caller. No code change
 came of the measurement; the proxied shape is a unit case.
 
-**A refusal warns ONCE per reason, then logs `info`** — the `ws-upgrade.ts` /
-`introspect.ts` discipline. These refusals are precisely what a cross-origin page
-produces, and nothing rate-limits it, so one `warn` per POST let a loop on
-another origin fill the JSONL sink. The key set is CLOSED (the two `reason`
-strings `decideStampRequest` returns), so it cannot grow with caller-supplied
-values; `__resetStampRefusalWarnsForTest` clears it.
+**A refusal warns ONCE per reason, then logs `info`.** These refusals are
+precisely what a cross-origin page produces, and nothing rate-limits it. The
+change is to the CONSOLE only: the JSONL file sink writes `info` as well, so it
+still receives one line per refused POST (measured 2026-09-17: 120 POSTs, 114
+lines). A request-rate cap for refused writes is a follow-up shared with every
+muninn write route reachable under `MUNINN_AUTH=off`; `ws-upgrade.ts` and
+`introspect.ts` return without logging, a different discipline.
 
 The CLI **always exits 0 and prints nothing without `--report`** (its banner
 invariant), but only once it runs — so the route parses the LAST stdout line as
