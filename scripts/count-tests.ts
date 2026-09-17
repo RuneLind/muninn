@@ -134,13 +134,20 @@ export function countDeclarations(src: string): FileCount {
   return { tests, tables };
 }
 
+export interface Repeat {
+  group: Group;
+  file: string;
+  /** How many links of each chain in the group run the file. */
+  runs: Record<string, number>;
+}
+
 export interface Classification {
   /** The files in each group, sorted. A file counts in one group per chain group that runs it. */
   members: Record<Group, string[]>;
   /** The files each grouped chain runs, one entry per link, so a file two links run appears twice. */
   chains: Map<string, string[]>;
-  /** Files the chains of one group run more than once, and how many times, so `--run` can subtract the repeats. */
-  repeats: Map<string, number>;
+  /** Files one group's chains run more than once, one entry per group, so `--run` can take the repeats back out. */
+  repeats: Repeat[];
   /** Test files no chain runs, so only `bun test --coverage` loads them. */
   unrun: string[];
   /** Test files only the CI chain runs, so no group claims them. */
@@ -160,7 +167,7 @@ export function classify(
   const warnings = new Set<string>();
   const members = new Map<Group, Set<string>>(GROUPS.map((g) => [g, new Set<string>()]));
   const chains = new Map<string, string[]>();
-  const runs = new Map<Group, Map<string, number>>(GROUPS.map((g) => [g, new Map<string, number>()]));
+  const runs = new Map<Group, Map<string, Record<string, number>>>(GROUPS.map((g) => [g, new Map()]));
   const anyChain = new Set<string>();
   const ciChain = new Set<string>();
 
@@ -185,7 +192,9 @@ export function classify(
     for (const f of files) {
       members.get(group)!.add(f);
       const inGroup = runs.get(group)!;
-      inGroup.set(f, (inGroup.get(f) ?? 0) + 1);
+      const perScript = inGroup.get(f) ?? {};
+      perScript[script] = (perScript[script] ?? 0) + 1;
+      inGroup.set(f, perScript);
     }
   }
   for (const f of specFiles) members.get("e2e")!.add(f);
@@ -197,9 +206,11 @@ export function classify(
     if (inGroups.length > 1) warnings.add(`${f}: counted in ${inGroups.join(" and ")}`);
   }
 
-  const repeats = new Map<string, number>();
-  for (const inGroup of runs.values()) {
-    for (const [f, times] of inGroup) if (times > 1) repeats.set(f, times);
+  const repeats: Repeat[] = [];
+  for (const g of GROUPS) {
+    for (const [file, perScript] of [...runs.get(g)!].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      if (sum(Object.values(perScript), (times) => times) > 1) repeats.push({ group: g, file, runs: perScript });
+    }
   }
   const sorted = Object.fromEntries(GROUPS.map((g) => [g, [...members.get(g)!].sort()])) as Record<Group, string[]>;
   const specs = new Set(specFiles);
@@ -212,6 +223,38 @@ export function classify(
     outsideCi: [...grouped].filter((f) => !specs.has(f) && !ciChain.has(f)).sort(),
     warnings: [...warnings],
   };
+}
+
+/**
+ * What `--run` takes back out for one repeated file. Each chain row counted the file once per link: a
+ * measured chain with the file's measured tests, a live chain with its static count. The file should count
+ * once, as a measured run whenever a measured chain runs it. A failed chain stops at its failing link and
+ * may never have reached the file, so subtracting would undercount; then nothing is taken back.
+ */
+export function repeatAdjustment(
+  repeat: Repeat,
+  { live, failed, staticTests, measuredTests }: {
+    live: ReadonlySet<string>;
+    failed: ReadonlySet<string>;
+    staticTests: number;
+    /** The file's own measured run, or null when it was not measured or failed. */
+    measuredTests: number | null;
+  },
+): { files: number; tests: number } | { skipped: string } {
+  const failedHere = Object.keys(repeat.runs).filter((script) => failed.has(script));
+  if (failedHere.length) {
+    return { skipped: `${repeat.file}: not deduplicated, because ${failedHere.join(" and ")} failed and may not have reached it` };
+  }
+  let liveRuns = 0;
+  let measuredRuns = 0;
+  for (const [script, times] of Object.entries(repeat.runs)) {
+    if (live.has(script)) liveRuns += times;
+    else measuredRuns += times;
+  }
+  const files = liveRuns + measuredRuns - 1;
+  if (measuredRuns === 0) return { files, tests: (liveRuns - 1) * staticTests };
+  if (measuredTests === null) return { skipped: `${repeat.file}: not deduplicated, because its own run failed` };
+  return { files, tests: liveRuns * staticTests + (measuredRuns - 1) * measuredTests };
 }
 
 interface FileRow extends FileCount {
@@ -282,15 +325,21 @@ async function runReport({ c, count }: ReturnType<typeof staticReport>) {
     if (r.ok && r.totals === 0) notes.push(`\`${script}\` passed but printed no test total; bun's summary line may have changed.`);
   }
 
-  // A file two chains of one group run is counted by both; measure it once and take the extra runs back out.
-  for (const [file, times] of c.repeats) {
-    const group = GROUPS.find((g) => c.members[g].includes(file))!;
-    const inLive = [...LIVE_SCRIPTS].some((s) => c.chains.get(s)?.includes(file));
-    if (inLive) continue;
-    process.stderr.write(`measuring repeat ${file}…\n`);
-    const r = await measure(["bun", "test", file], BUN_TOTAL);
-    const extra = times - 1;
-    rows.push({ label: `repeat ${file}`, group, files: -extra, tests: -extra * r.tests, result: r.ok ? "subtracted" : "FAIL", ok: r.ok });
+  const failed = new Set(rows.filter((r) => !r.ok).map((r) => r.label));
+  for (const repeat of c.repeats) {
+    const scripts = Object.keys(repeat.runs);
+    let measuredTests: number | null = null;
+    if (scripts.some((s) => !LIVE_SCRIPTS.has(s)) && !scripts.some((s) => failed.has(s))) {
+      process.stderr.write(`measuring repeat ${repeat.file}…\n`);
+      const r = await measure(["bun", "test", repeat.file], BUN_TOTAL);
+      if (r.ok) measuredTests = r.tests;
+    }
+    const adj = repeatAdjustment(repeat, { live: LIVE_SCRIPTS, failed, staticTests: count(repeat.file).tests, measuredTests });
+    if ("skipped" in adj) {
+      notes.push(adj.skipped);
+      continue;
+    }
+    rows.push({ label: `repeat ${repeat.file}`, group: repeat.group, files: -adj.files, tests: -adj.tests, result: "subtracted", ok: true });
   }
 
   process.stderr.write("listing e2e specs…\n");
