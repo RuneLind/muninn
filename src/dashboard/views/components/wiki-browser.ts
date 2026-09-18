@@ -92,7 +92,17 @@ import {
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
-import { buildRail, isPinnedRelPath, railSectionsVisible, type RailEntry } from "./wiki-recents.ts";
+import {
+  buildRail,
+  foldChipCompactLabel,
+  foldChipKinds,
+  foldChipLabel,
+  foldKeyForPage,
+  isPinnedRelPath,
+  pairedByWhy,
+  railSectionsVisible,
+  type RailEntry,
+} from "./wiki-recents.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
@@ -100,7 +110,7 @@ import {
   rankActivity,
   type ActivityWeights,
 } from "./wiki-activity-rank.ts";
-import { purgeRecentsKeys, readPins, togglePinned } from "./wiki-recents-store.ts";
+import { purgeRecentsKeys, readFolds, readPins, toggleFolded, togglePinned } from "./wiki-recents-store.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
@@ -170,6 +180,7 @@ import {
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
 import {
+  findPageByName,
   findPageByRelPath,
   isActivePage,
   navTargetFrom,
@@ -913,6 +924,10 @@ purgeRecentsKeys();
  *  synchronous storage hit on every keystroke in the search box. */
 let pins: string[] = readPins(WIKI);
 
+/** Which GROUPS this reader has opened on this wiki — same discipline as `pins`:
+ *  read once at boot, kept in step by the toggle, never re-read per render. */
+let openFolds: string[] = readFolds(WIKI);
+
 /**
  * ★ — hidden until the row is hovered, always shown once pinned.
  *
@@ -986,6 +1001,10 @@ function renderList(): void {
     // a query, where `buildRail` renders no sections and would throw the ranking
     // away — that is a scan of every page on every keystroke.
     activity: railSectionsVisible(filters) ? rankActivity(filtered, activityWeights, now) : [],
+    openFolds,
+    // The page the reader has open — its group is expanded whatever the store
+    // says, so the `.active` row is never inside a closed fold.
+    openRelPath: currentRelPath || undefined,
   });
   // The open page's sessions used to be a section at the head of this rail. They
   // are now rows in the chain under the page title, which is where they have
@@ -994,6 +1013,27 @@ function renderList(): void {
   let html = "";
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
+      // A FOLDABLE header (today: Bookkeeping) is a real button: it carries the
+      // count whether open or closed, so a collapsed section says how much it
+      // holds rather than reading as an empty heading.
+      if (entry.foldKey) {
+        const label = entry.folded ? "Show" : "Hide";
+        html +=
+          `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
+          `<button type="button" class="wiki-sec-fold${entry.folded ? " folded" : ""}"` +
+          ` data-fold-key="${esc(entry.foldKey)}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+          // Forced open by the reader being on a page inside it: a click could
+          // only write a stored key nothing on screen reflects, so the control
+          // says what it is instead of behaving like a broken toggle. `disabled`
+          // is what makes that true — a disabled button dispatches no click.
+          (entry.forcedOpen ? ` disabled` : "") +
+          ` title="${esc(entry.forcedOpen ? "the open page is in this section" : label + " the " + entry.label.toLowerCase() + " pages")}">` +
+          `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
+          `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
+          `<span class="wiki-sec-count">${entry.count ?? 0}</span>` +
+          `</button></div>`;
+        return;
+      }
       html +=
         `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
         `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
@@ -1034,22 +1074,82 @@ function renderList(): void {
     // reading the name. `isActivePage` falls back to the name comparison only
     // while no relPath is known — see `wiki-nav.ts`.
     const active = isActivePage(p, { name: currentName, relPath: currentRelPath });
+    // A CHILD row says on hover why it folds and under which page — the rail's
+    // only place to state a relation the file names cannot. An Activity row's own
+    // derivation wins the attribute (it explains the placement, which is the
+    // stranger fact of the two) and the `why` line carries the parent instead.
+    const childWhy = entry.child
+      ? pairedByWhy(entry.child.pairedBy, displayTitleOf(entry.child.parent))
+      : "";
+    const rowTitle = entry.activity
+      ? entry.activity.why + (childWhy ? "\n" + childWhy : "")
+      : childWhy;
     html +=
-      `<div class="wiki-list-item${active ? " active" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      // The indent is for a row drawn INSIDE its parent's group. A lifted child
+      // (Activity ranked it, or the reader pinned it) sits under an unrelated
+      // row, where an indent + left rule claims a parentage the rail invented;
+      // it keeps the hover sentence, which is the true statement of the two.
+      `<div class="wiki-list-item${active ? " active" : ""}${entry.child && !entry.lifted ? " child" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
       // The derivation on the ROW, and again on the title element below:
       // the child's own `title=` wins the hover over most of the row's width.
-      (entry.activity ? ` title="${esc(entry.activity.why)}"` : "") +
+      (rowTitle ? ` title="${esc(rowTitle)}"` : "") +
       `>` +
       (entry.activity
         ? `<span class="wiki-act-glyph ${esc(entry.activity.kind)}">${entry.activity.kind === "new" ? "+" : "~"}</span>`
         : "") +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
+      // Title and chip share ONE box, `.wiki-list-mid`, and that box is what is
+      // left of the row after the dot, the pill, the ⚑ and the ★+date have taken
+      // their intrinsic widths. It is a wrapper for two reasons, both measured:
+      // it gives the pair a single floor the row can wrap against, and its own
+      // width IS "the space left on this row", which is the only thing a CSS
+      // query can ask that tells a plain row from one carrying a pill and a ⚑.
+      `<div class="wiki-list-mid">` +
       // `title=` carries the full name: the row ellipsizes, and a status pill +
       // ⚑ flag eat enough width that plan titles routinely clip. On an Activity
       // row it carries the derivation UNDER the name as well — this element is
       // two thirds of the row, and its own `title` is what the pointer lands on
       // there, so the row's attribute alone is unreachable over most of the row.
-      `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (entry.activity ? "\n" + entry.activity.why : ""))}">${esc(displayTitleOf(p))}</div>` +
+      `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">${esc(displayTitleOf(p))}</div>` +
+      // The group CHIP: what is folded under this row, and the control that
+      // opens it. A click here toggles; a click anywhere else on the row opens
+      // the page, as it always has.
+      (entry.children?.length
+        ? (() => {
+            const full = foldChipLabel(entry.children);
+            const kinds = foldChipKinds(entry.children);
+            // `is-wide` is the LABEL's size class, not the group's: the widest
+            // one-kind label is about half the width of the widest two-kind one,
+            // and one breakpoint sized for the long form would take the words off
+            // every `1 attached` chip at the default rail width.
+            const wide = kinds.attached > 0 && kinds.superseded > 0;
+            const why = entry.forcedOpen
+              ? "the open page is in this group"
+              : (entry.folded ? "Show" : "Hide") + " what folds under this page";
+            // The full label rides BOTH attributes whichever form is painted —
+            // the compact form is the words moved to the hover, not dropped, and
+            // `aria-label` is what makes that true for a screen reader as well
+            // (a `display:none` span is out of the accessible name).
+            const hover = `${full} — ${why}`;
+            return (
+              `<button type="button" class="wiki-fold-chip${wide ? " is-wide" : ""}${entry.folded ? " folded" : ""}"` +
+              ` data-fold-key="${esc(foldKeyForPage(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+              // Forced open because the reader is ON a page in this group: the same
+              // inert control the section header renders, for the same reason.
+              (entry.forcedOpen ? ` disabled` : "") +
+              ` aria-label="${esc(hover)}" title="${esc(hover)}">` +
+              `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
+              // Both forms are rendered and CSS picks one (`wiki-page.ts`): which
+              // fits is a question about the row's remaining space, which the
+              // server does not have and the client would have to recompute on
+              // every rail drag.
+              `<span class="wiki-fold-chip-label">${esc(full)}</span>` +
+              `<span class="wiki-fold-chip-counts">${esc(foldChipCompactLabel(entry.children))}</span>` +
+              `</button>`
+            );
+          })()
+        : "") +
+      `</div>` +
       // Pill THEN flag, the same order as the article header's `badgeHtml` — the
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
@@ -2032,7 +2132,13 @@ function loadPage(name: string, push: boolean): void {
   // A navigation is a re-render anyway, so a stashed page set lands here too —
   // and it must land BEFORE the explainer lookup below reads `allPages`.
   applyPendingPages();
-  const listing = allPages.find((p) => p.name === name);
+  // `findPageByName`, not a raw `name ===` scan: the listing is relPath-ordered,
+  // so a page's own same-stem diagram (`plans/y.html` before `plans/y.md`) was
+  // the first match and this branch opened the DIAGRAM for `?page=y`, for an Ask
+  // citation and for a chat wiki citation. The server's `index.resolve(name)`
+  // answers the markdown page — an attachment registers no stem key — so the
+  // route below would have loaded the page the iframe was covering.
+  const listing = findPageByName(allPages, name);
   if (listing && listing.type === "explainer") {
     loadExplainer(listing, push);
     return;
@@ -2200,6 +2306,10 @@ document.body.addEventListener("click", (e) => {
   // one widget's handler cannot silence document-level listeners that have
   // nothing to do with it.
   if (target.closest && target.closest("[data-pin]")) return;
+  // Same rule for the group chip and the section fold: both live inside a
+  // `[data-relpath]` row, both belong to the list's own listener, and a click on
+  // either means "show me what is folded here", never "open this page".
+  if (target.closest && target.closest("[data-fold-key]")) return;
   // The article header's project hub chip. Delegated here rather than bound at
   // render time because `#articleWrap`'s innerHTML is replaced on every page
   // load — and checked BEFORE the nav-link branch, since the chip sits inside the
@@ -2292,6 +2402,20 @@ document.body.addEventListener("click", (e) => {
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
+  // The group chip and the section fold — the rail's second control, on the same
+  // listener and BEFORE the pin, since both sit inside a row the body delegate
+  // would otherwise open. A fold DOES re-render (`renderList`): unlike the ★,
+  // which paints one button, this one adds and removes rows, so there is nothing
+  // to paint in place.
+  const fold = target.closest("[data-fold-key]");
+  if (fold) {
+    e.preventDefault();
+    const key = fold.getAttribute("data-fold-key");
+    if (!key) return;
+    openFolds = toggleFolded(WIKI, key);
+    renderList();
+    return;
+  }
   const pin = target.closest("[data-pin]");
   if (!pin) return;
   e.preventDefault();

@@ -779,6 +779,25 @@ describe("stripOwnedAliases", () => {
     expect(out.draft).toContain("aliases: [Mine]");
   });
 
+  test("an ATTACHMENT's <title> is not an owned alias", () => {
+    // A rule-1 `.html` child registers its `<title>` last and never beats a page
+    // that already held the key (`store.ts`), so it does not OWN the name — and
+    // reserving one here silently deletes a legitimate alias from every draft.
+    const idx = index([
+      page({
+        title: "Agent Loops",
+        name: "Agent Loops",
+        type: "explainer",
+        relPath: "concepts/Agent Loops.html",
+        parent: "concepts/Agent Loops.md",
+        pairedBy: "stem",
+      }),
+    ]);
+    const out = stripOwnedAliases(draftWith("Agent Loops, Mine"), { index: idx });
+    expect(out.stripped).toEqual([]);
+    expect(out.draft).toContain("aliases: [Agent Loops, Mine]");
+  });
+
   test("update mode keeps the page's OWN aliases via selfRelPath", () => {
     const idx = index([
       page({ title: "Agent Loops", aliases: ["Loops"], relPath: "concepts/Agent Loops.md" }),

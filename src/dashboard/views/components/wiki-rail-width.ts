@@ -24,6 +24,56 @@ export const RAIL_WIDTH_DEFAULT = 300;
 export const RAIL_WIDTH_DEFAULT_NARROW = 260;
 /** Pixels one arrow-key press moves the rail. */
 export const RAIL_WIDTH_KEY_STEP = 16;
+
+/**
+ * The page title's FLOOR inside a rail row, in px — the one number the row's
+ * other rules are sized against, and the reason they exist. A row is a flex
+ * line of six things (type dot · title · group chip · status pill · ⚑ · ★+date)
+ * and only the title is elastic, so before this floor existed the title was
+ * whatever the others left: measured at the 260px rail on a row carrying all
+ * six, 10.0px — a named page with no name on it, and a hover target Playwright
+ * reports as "element is not visible".
+ *
+ * 72px is ~9 characters at the row's 12.5px type: enough to tell two plans
+ * apart, and the width at which a two-line clamp still reads as a title rather
+ * than as a column of syllables. Nothing below the floor is served by shrinking
+ * further — the row takes a second line instead (`flex-wrap`, `wiki-page.ts`).
+ */
+export const RAIL_TITLE_MIN = 72;
+
+/**
+ * The floor for `.wiki-list-mid` — the title + chip pair — when the row carries
+ * a group chip: the title's floor, the row's 8px gap, and 60px for the widest
+ * COMPACT chip. Measured in Chromium on the reader's own rows: `1` is 29.4px of
+ * chip, `2 · 1` 45.1px and `10 · 10` 57.1px, so 60 covers every count a wiki
+ * folder can realistically produce. Under this the pair cannot hold both at
+ * their floors, so the row takes a second line rather than starving one.
+ *
+ * What it costs, stated: a group row needs 268.7px of rail to keep its ★+date on
+ * the first line (7 dot + 8 + 140 + 8 + 73.7, plus 32px of row/list padding), so
+ * between `RAIL_WIDTH_MIN` and ~269 every group row is two lines. At the 300px
+ * default it is one.
+ */
+export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + 60;
+
+/**
+ * The two container breakpoints, in px of REMAINING row space (`.wiki-list-mid`),
+ * at or under which a chip swaps its words for its counts. Two of them because
+ * the full label's width is a fact about the LABEL and not about the row:
+ * measured, `1 attached` is 76.9px of chip and `10 attached · 10 superseded`
+ * 166.9px, so one threshold sized for the long form would take the words off
+ * every short chip at the default rail width — where they fit with room to
+ * spare (169.3px of remaining space on a plain group row).
+ *
+ * Each is the title's floor + the gap + that class's widest chip: 84 for a
+ * one-kind label (76.9 measured, +7 for the second digit) and 174 for a two-kind
+ * one (166.9, same slack). So whenever the words are shown the title still has
+ * its floor and nothing overflows — and when the measurement is off by a pixel
+ * on another machine, the chip degrades to its compact form rather than to a
+ * clipped one.
+ */
+export const RAIL_CHIP_SWITCH_SHORT = RAIL_TITLE_MIN + 8 + 84;
+export const RAIL_CHIP_SWITCH_WIDE = RAIL_TITLE_MIN + 8 + 174;
 /** The share of the window a stored width may take at apply time. */
 export const RAIL_VIEWPORT_SHARE = 0.45;
 

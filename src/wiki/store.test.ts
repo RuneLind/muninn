@@ -8,6 +8,7 @@ import {
   splitInlineArray,
   extractWikilinks,
   extractMarkdownLinks,
+  extractEmbedTargets,
   firstDanglingWikilinkOpen,
   isMarkdownWikiPath,
   buildWikiIndex,
@@ -22,9 +23,11 @@ import {
   resolveProject,
   collectKnownProjects,
   PLAN_STATUS_VALUES,
+  stripFrontmatter,
   __resetWikiCacheForTest,
   type WikiProjectRule,
 } from "./store.ts";
+import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { SWEEP_THRESHOLD } from "./git-dates.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "../dashboard/views/components/wiki-activity-rank.ts";
 
@@ -1648,6 +1651,509 @@ describe("buildWikiIndex", () => {
       else process.env.WIKI_DIR = prev;
       __resetWikiCacheForTest();
     }
+  });
+});
+
+describe("attachments — the pairing pass", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-pair-"));
+    await mkdir(path.join(root, "plans"), { recursive: true });
+    await mkdir(path.join(root, "blogs"), { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const html = (title: string, body = "Diagram.") =>
+    `<!doctype html><html><head><title>${title}</title></head><body>${body}</body></html>`;
+
+  test("rule 1: a same-folder same-stem .html is a CHILD, and the markdown page keeps the name", async () => {
+    await Bun.write(path.join(root, "plans/x.mdx"), "---\ntitle: X plan\n---\n\nProse.");
+    await Bun.write(path.join(root, "plans/x.html"), html("X diagram"));
+    const index = await buildWikiIndex(root);
+
+    // The html is IN the index (it used to be dropped)…
+    const child = index.pages.find((p) => p.relPath === "plans/x.html")!;
+    expect(child).toBeDefined();
+    expect(child.parent).toBe("plans/x.mdx");
+    expect(child.pairedBy).toBe("stem");
+    // …and the markdown page owns the stem key, exactly as before.
+    expect(index.resolve("x")!.relPath).toBe("plans/x.mdx");
+    const parent = index.pages.find((p) => p.relPath === "plans/x.mdx")!;
+    expect(parent.children).toEqual(["plans/x.html"]);
+    // Nothing is recorded as shadowed for a stem that is now an attachment.
+    expect((index.shadowed ?? []).some((s) => s.stem.toLowerCase() === "x")).toBe(false);
+  });
+
+  test("rule 1 is SAME-FOLDER only: a cross-folder twin keeps the drop and the shadowed entry", async () => {
+    await Bun.write(path.join(root, "plans/y.md"), "---\ntitle: Y\n---\n\nProse.");
+    await Bun.write(path.join(root, "blogs/y.html"), html("Y elsewhere"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.some((p) => p.relPath === "blogs/y.html")).toBe(false);
+    const entry = (index.shadowed ?? []).find((s) => s.relPath === "blogs/y.html")!;
+    expect(entry.shadowedBy).toBe("plans/y.md");
+    expect(index.resolve("y")!.relPath).toBe("plans/y.md");
+  });
+
+  test("rule 1 does not move .md > .mdx: a same-folder .mdx is still shadowed, not attached", async () => {
+    await Bun.write(path.join(root, "plans/dup.md"), "---\ntitle: Dup\n---\n\nWinner.");
+    await Bun.write(path.join(root, "plans/dup.mdx"), "---\ntitle: Dup mdx\n---\n\nLoser.");
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.some((p) => p.relPath === "plans/dup.mdx")).toBe(false);
+    expect((index.shadowed ?? []).some((s) => s.relPath === "plans/dup.mdx")).toBe(true);
+  });
+
+  test("rule 2: -prototype and -prototype-N fold under the page, and still resolve by their OWN stem", async () => {
+    await Bun.write(path.join(root, "plans/rail.mdx"), "---\ntitle: Rail\n---\n\nProse.");
+    await Bun.write(path.join(root, "plans/rail-prototype.html"), html("Rail prototype"));
+    await Bun.write(path.join(root, "plans/rail-prototype-2.html"), html("Rail prototype 2"));
+    await Bun.write(path.join(root, "plans/rail-notes.html"), html("Rail notes"));
+    const index = await buildWikiIndex(root);
+
+    const parent = index.pages.find((p) => p.relPath === "plans/rail.mdx")!;
+    expect(parent.children).toEqual(["plans/rail-prototype-2.html", "plans/rail-prototype.html"]);
+    for (const rel of ["plans/rail-prototype.html", "plans/rail-prototype-2.html"]) {
+      expect(index.pages.find((p) => p.relPath === rel)!.pairedBy).toBe("suffix");
+    }
+    // Only THAT suffix pairs — an arbitrarily-named sibling stays a peer.
+    expect(index.pages.find((p) => p.relPath === "plans/rail-notes.html")!.parent).toBeUndefined();
+    // A distinctly-named child keeps its own name resolution.
+    expect(index.resolve("rail-prototype")!.relPath).toBe("plans/rail-prototype.html");
+    expect(index.resolve("rail-prototype-2")!.relPath).toBe("plans/rail-prototype-2.html");
+  });
+
+  test("rule 3: an EMBEDDED html pairs, and does NOT join outgoing/backlinks", async () => {
+    await Bun.write(
+      path.join(root, "plans/embedder.mdx"),
+      '---\ntitle: Embedder\n---\n\n<Embed src="./diagram.html" height="400" />\n',
+    );
+    await Bun.write(path.join(root, "plans/diagram.html"), html("Diagram"));
+    const index = await buildWikiIndex(root);
+
+    const child = index.pages.find((p) => p.relPath === "plans/diagram.html")!;
+    expect(child.parent).toBe("plans/embedder.mdx");
+    expect(child.pairedBy).toBe("link");
+    // The embed is not a LINK: the graph is byte-identical to a page with none.
+    expect(index.outgoing.get("plans/embedder.mdx")).toEqual([]);
+    expect(index.backlinks.get("plans/diagram.html")).toBeUndefined();
+  });
+
+  test("rule 3: an html embedded by TWO pages belongs to neither", async () => {
+    await Bun.write(
+      path.join(root, "plans/one.mdx"),
+      '---\ntitle: One\n---\n\n<Embed src="./shared.html" />\n',
+    );
+    await Bun.write(
+      path.join(root, "plans/two.mdx"),
+      '---\ntitle: Two\n---\n\n<Embed src="./shared.html" />\n',
+    );
+    await Bun.write(path.join(root, "plans/shared.html"), html("Shared"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/shared.html")!.parent).toBeUndefined();
+  });
+
+  test("rule 3: a meta page is never a parent", async () => {
+    await Bun.write(
+      path.join(root, "plans/log.md"),
+      '---\ntitle: Log\n---\n\n<Embed src="./chart.html" />\n',
+    );
+    await Bun.write(path.join(root, "plans/chart.html"), html("Chart"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/chart.html")!.parent).toBeUndefined();
+  });
+
+  test("rule 3: a src the renderer refuses pairs nothing", async () => {
+    // Absolute path, a scheme, and a query — each refused by `parseEmbedAttrs`,
+    // so each renders as the embed's fallback line and can pair nothing here.
+    await Bun.write(
+      path.join(root, "plans/bad.mdx"),
+      [
+        "---",
+        "title: Bad",
+        "---",
+        "",
+        '<Embed src="/plans/abs.html" />',
+        '<Embed src="https://example.com/remote.html" />',
+        '<Embed src="./query.html?v=1" />',
+      ].join("\n"),
+    );
+    await Bun.write(path.join(root, "plans/abs.html"), html("Abs"));
+    await Bun.write(path.join(root, "plans/remote.html"), html("Remote"));
+    await Bun.write(path.join(root, "plans/query.html"), html("Query"));
+    const index = await buildWikiIndex(root);
+
+    for (const rel of ["plans/abs.html", "plans/remote.html", "plans/query.html"]) {
+      expect(index.pages.find((p) => p.relPath === rel)!.parent).toBeUndefined();
+    }
+  });
+
+  test("rule 3: an Embed inside code pairs nothing — and does not disqualify a real embed of the same target", async () => {
+    // The QUOTING page documents the feature; the other page really embeds it.
+    // Counting the quote would make this a two-embedder target and unpair both.
+    await Bun.write(
+      path.join(root, "plans/quoting.mdx"),
+      [
+        "---",
+        "title: Quoting",
+        "---",
+        "",
+        "Write it as `<Embed src=\"./real.html\" />` inline, or:",
+        "",
+        "```mdx",
+        '<Embed src="./real.html" />',
+        "```",
+      ].join("\n"),
+    );
+    await Bun.write(
+      path.join(root, "plans/real-user.mdx"),
+      '---\ntitle: Real user\n---\n\n<Embed src="./real.html" />\n',
+    );
+    await Bun.write(path.join(root, "plans/real.html"), html("Real"));
+    const index = await buildWikiIndex(root);
+
+    const child = index.pages.find((p) => p.relPath === "plans/real.html")!;
+    expect(child.parent).toBe("plans/real-user.mdx");
+    expect(child.pairedBy).toBe("link");
+  });
+
+  test("rule 4: superseded_by folds a MARKDOWN page under its successor, wikilink or bare stem", async () => {
+    await Bun.write(path.join(root, "plans/new.mdx"), "---\ntitle: New\n---\n\nThe successor.");
+    await Bun.write(
+      path.join(root, "plans/old.mdx"),
+      "---\ntitle: Old\nsuperseded_by: [[new]]\n---\n\nRetired.",
+    );
+    await Bun.write(
+      path.join(root, "plans/older.mdx"),
+      "---\ntitle: Older\nsuperseded_by: new\n---\n\nRetired too.",
+    );
+    const index = await buildWikiIndex(root);
+
+    for (const rel of ["plans/old.mdx", "plans/older.mdx"]) {
+      const child = index.pages.find((p) => p.relPath === rel)!;
+      expect(child.parent).toBe("plans/new.mdx");
+      expect(child.pairedBy).toBe("superseded");
+      // A rule-4 child keeps its own stem, its own page and its own resolution.
+      expect(index.resolve(child.name)!.relPath).toBe(rel);
+    }
+    expect(index.pages.find((p) => p.relPath === "plans/new.mdx")!.children).toEqual([
+      "plans/old.mdx",
+      "plans/older.mdx",
+    ]);
+  });
+
+  test("rule 4 never nests: a superseded page that carries attachments of its own stays top-level", async () => {
+    await Bun.write(path.join(root, "plans/succ.mdx"), "---\ntitle: Succ\n---\n\nSuccessor.");
+    await Bun.write(
+      path.join(root, "plans/prev.mdx"),
+      "---\ntitle: Prev\nsuperseded_by: [[succ]]\n---\n\nRetired.",
+    );
+    await Bun.write(path.join(root, "plans/prev.html"), html("Prev diagram"));
+    const index = await buildWikiIndex(root);
+
+    const prev = index.pages.find((p) => p.relPath === "plans/prev.mdx")!;
+    expect(prev.parent).toBeUndefined();
+    expect(prev.children).toEqual(["plans/prev.html"]);
+    expect(index.pages.find((p) => p.relPath === "plans/succ.mdx")!.children).toBeUndefined();
+  });
+
+  test("rule 4 never nests: a chain a → b → c drops the pair whose parent is itself superseded", async () => {
+    await Bun.write(path.join(root, "plans/c.mdx"), "---\ntitle: C\n---\n\nNewest.");
+    await Bun.write(
+      path.join(root, "plans/b.mdx"),
+      "---\ntitle: B\nsuperseded_by: [[c]]\n---\n\nMiddle.",
+    );
+    await Bun.write(
+      path.join(root, "plans/a.mdx"),
+      "---\ntitle: A\nsuperseded_by: [[b]]\n---\n\nOldest.",
+    );
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/b.mdx")!.parent).toBe("plans/c.mdx");
+    // `a` would become a grandchild — the rail renders one level, so the pair is
+    // dropped and `a` stays an ordinary row.
+    expect(index.pages.find((p) => p.relPath === "plans/a.mdx")!.parent).toBeUndefined();
+  });
+
+  test("a paired page leaves the display-title disambiguation alone", async () => {
+    // Two same-stem markdown pages in different folders DO collide and get a
+    // prefix; the attachment beside one of them must not add a third "collision".
+    //
+    // The attachment carries NO `<title>`, deliberately: with one, its title
+    // already differs from its stem and the stamping loop skips it for that
+    // reason alone — the `pairedBy === "stem"` skip this case exists for was
+    // never reached, and deleting it kept the test green.
+    await Bun.write(path.join(root, "plans/arch.md"), "---\ntype: plan\n---\n\nOne.");
+    await Bun.write(path.join(root, "blogs/arch.md"), "---\ntype: blog\n---\n\nTwo.");
+    await Bun.write(
+      path.join(root, "plans/arch.html"),
+      "<!doctype html><html><head></head><body>Diagram.</body></html>",
+    );
+    const index = await buildWikiIndex(root);
+
+    const plansArch = index.pages.find((p) => p.relPath === "plans/arch.md")!;
+    const blogsArch = index.pages.find((p) => p.relPath === "blogs/arch.md")!;
+    expect(plansArch.displayTitle).toBe("plans/arch");
+    expect(blogsArch.displayTitle).toBe("blogs/arch");
+    // The attachment carries no display title of its own — it is not a collision.
+    expect(index.pages.find((p) => p.relPath === "plans/arch.html")!.displayTitle).toBeUndefined();
+  });
+
+  test("a lone attachment does not give its PARENT a folder prefix", async () => {
+    await Bun.write(path.join(root, "plans/solo.mdx"), "---\ntype: plan\n---\n\nOnly one.");
+    await Bun.write(path.join(root, "plans/solo.html"), html("Solo"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/solo.mdx")!.displayTitle).toBeUndefined();
+  });
+});
+
+describe("extractEmbedTargets", () => {
+  test("resolves relative srcs against the page's folder, `..` included", () => {
+    expect(extractEmbedTargets('<Embed src="./a.html" />', "plans/p.mdx")).toEqual(["plans/a.html"]);
+    expect(extractEmbedTargets('<Embed src="../blogs/b.html" />', "plans/p.mdx")).toEqual([
+      "blogs/b.html",
+    ]);
+    // Escaping the root is `resolveEmbedRelPath`'s `null` — dropped, never clamped.
+    expect(extractEmbedTargets('<Embed src="../../x.html" />', "plans/p.mdx")).toEqual([]);
+  });
+
+  test("dedupes, keeps first-occurrence order, and ignores non-Embed component tags", () => {
+    const body = [
+      '<Embed src="./b.html" />',
+      '<Callout tone="info" title="x">not an embed</Callout>',
+      '<Embed src="./a.html" height="300" />',
+      '<Embed src="./b.html" />',
+    ].join("\n");
+    expect(extractEmbedTargets(body, "p.mdx")).toEqual(["b.html", "a.html"]);
+  });
+
+  test("a mid-sentence Embed is not a block component and pairs nothing", () => {
+    // `Embed` renders only as a BLOCK (line-anchored, trimmed) — a prose mention
+    // must not adopt a page.
+    expect(extractEmbedTargets('see <Embed src="./a.html" /> here', "p.mdx")).toEqual([]);
+    expect(extractEmbedTargets('   <Embed src="./a.html" />', "p.mdx")).toEqual(["a.html"]);
+  });
+
+  test("a malformed height is refused with the src (the renderer's own gate)", () => {
+    expect(extractEmbedTargets('<Embed src="./a.html" height="tall" />', "p.mdx")).toEqual([]);
+  });
+});
+
+/**
+ * Fix round 1 — the edges the first cut of the pairing pass got wrong. Each case
+ * is one finding: a page the drop left behind, a key the un-drop moved, a
+ * cross-folder target that paired anyway, a meta page that adopted, and the four
+ * shapes the embed scan accepted that the renderer does not.
+ */
+describe("attachments — fix round 1", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-pair2-"));
+    for (const dir of ["plans", "blogs", "archive", "zz"]) {
+      await mkdir(path.join(root, dir), { recursive: true });
+    }
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const html = (title: string | null, body = "Diagram.") =>
+    `<!doctype html><html><head>${title === null ? "" : `<title>${title}</title>`}</head><body>${body}</body></html>`;
+
+  // S2 — the un-drop exception must read the POST-drop set. Built over the
+  // pre-drop one, an `.html` whose only same-folder markdown twin is ITSELF
+  // dropped by a cross-folder winner survives as a top-level orphan: absent from
+  // `shadowed`, counted as a stem collision, and giving the real winner a folder
+  // prefix it never had.
+  test("a same-folder twin that is itself dropped takes its .html with it", async () => {
+    await Bun.write(path.join(root, "plans/x.mdx"), "---\ntitle: X plan\n---\n\nLoser.");
+    await Bun.write(path.join(root, "plans/x.html"), html("X diagram"));
+    await Bun.write(path.join(root, "blogs/x.md"), "---\ntype: blog\n---\n\nWinner.");
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.map((p) => p.relPath)).toEqual(["blogs/x.md"]);
+    const entry = (index.shadowed ?? []).find((s) => s.relPath === "plans/x.html")!;
+    expect(entry).toBeDefined();
+    expect(entry.shadowedBy).toBe("blogs/x.md");
+    expect(index.resolve("x")!.relPath).toBe("blogs/x.md");
+    // …and the surviving winner is not a "collision" with the pages it displaced.
+    expect(index.pages[0]!.displayTitle).toBeUndefined();
+  });
+
+  // S3 — only the STEM pass needed the extension-rank order. Applied to the
+  // title/alias pass as well, it re-orders two pages that merely share an
+  // authored title, which is a resolution the un-drop has nothing to do with.
+  test("a shared authored title still resolves in relPath order", async () => {
+    await Bun.write(path.join(root, "plans/aa.mdx"), "---\ntitle: Shared Title\n---\n\nFirst.");
+    await Bun.write(path.join(root, "plans/bb.md"), "---\ntitle: Shared Title\n---\n\nSecond.");
+    const index = await buildWikiIndex(root);
+
+    expect(index.resolve("Shared Title")!.relPath).toBe("plans/aa.mdx");
+  });
+
+  test("a shared ALIAS still resolves in relPath order", async () => {
+    await Bun.write(
+      path.join(root, "plans/aa.mdx"),
+      '---\ntitle: Aa\naliases: ["Shared Alias"]\n---\n\nFirst.',
+    );
+    await Bun.write(
+      path.join(root, "plans/bb.md"),
+      '---\ntitle: Bb\naliases: ["Shared Alias"]\n---\n\nSecond.',
+    );
+    const index = await buildWikiIndex(root);
+
+    expect(index.resolve("Shared Alias")!.relPath).toBe("plans/aa.mdx");
+  });
+
+  // S4 — a rule-1 child's `<title>` is a key that did not exist before the
+  // un-drop, so it must not take one from a page that was already reachable by
+  // it. It registers LAST, which keeps every pre-existing title resolution
+  // byte-identical while still letting a diagram be found by its own name.
+  test("an attachment's <title> never beats a page that registered it before", async () => {
+    await Bun.write(path.join(root, "plans/x.md"), "---\ntitle: X page\n---\n\nProse.");
+    await Bun.write(path.join(root, "plans/x.html"), html("Shared Html Title"));
+    await Bun.write(path.join(root, "zz/y.html"), html("Shared Html Title"));
+    const index = await buildWikiIndex(root);
+
+    // Both html pages are in the index; the one that is nobody's attachment owns
+    // the title key, exactly as it did while the attachment was dropped.
+    expect(index.resolve("Shared Html Title")!.relPath).toBe("zz/y.html");
+  });
+
+  test("an attachment KEEPS a title key no other page claims", async () => {
+    await Bun.write(path.join(root, "plans/q.md"), "---\ntitle: Q page\n---\n\nProse.");
+    await Bun.write(path.join(root, "plans/q.html"), html("Only Diagram"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.resolve("Only Diagram")!.relPath).toBe("plans/q.html");
+  });
+
+  // S5 — `superseded_by: [[archive/old-plan]]` names a page in `archive/`. The
+  // first cut threw the folder away and re-scoped the bare stem to the child's
+  // own folder, pairing it under an unrelated same-stem page.
+  test("a superseded_by naming ANOTHER folder pairs nothing", async () => {
+    await Bun.write(
+      path.join(root, "plans/p.md"),
+      "---\ntitle: P\nsuperseded_by: [[archive/old-plan]]\n---\n\nRetired.",
+    );
+    await Bun.write(path.join(root, "plans/old-plan.md"), "---\ntitle: Old here\n---\n\nUnrelated.");
+    await Bun.write(path.join(root, "archive/old-plan.md"), "---\ntitle: Old there\n---\n\nTarget.");
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/p.md")!.parent).toBeUndefined();
+    expect(index.pages.find((p) => p.relPath === "plans/old-plan.md")!.children).toBeUndefined();
+    expect(index.pages.find((p) => p.relPath === "archive/old-plan.md")!.children).toBeUndefined();
+  });
+
+  test("a superseded_by naming the child's OWN folder still pairs", async () => {
+    await Bun.write(
+      path.join(root, "plans/p.md"),
+      "---\ntitle: P\nsuperseded_by: [[plans/successor]]\n---\n\nRetired.",
+    );
+    await Bun.write(path.join(root, "plans/successor.md"), "---\ntitle: S\n---\n\nTarget.");
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/p.md")!.parent).toBe("plans/successor.md");
+  });
+
+  // S6 — a meta page is never a parent under ANY rule. Under rule 1 that means
+  // the same-stem `.html` keeps its pre-attachment DROP (there is no page for it
+  // to fold under), and under rules 2 and 4 it means an ordinary top-level row.
+  test("rule 1: an index.html beside index.md keeps the drop", async () => {
+    await Bun.write(path.join(root, "plans/index.md"), "---\ntitle: Plans\n---\n\nCatalog.");
+    await Bun.write(path.join(root, "plans/index.html"), html("Plans index"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.some((p) => p.relPath === "plans/index.html")).toBe(false);
+    const entry = (index.shadowed ?? []).find((s) => s.relPath === "plans/index.html")!;
+    expect(entry).toBeDefined();
+    expect(entry.shadowedBy).toBe("plans/index.md");
+  });
+
+  test("rule 2: a log-prototype.html beside log.md is a plain row", async () => {
+    await Bun.write(path.join(root, "plans/log.md"), "---\ntitle: Log\n---\n\nEntries.");
+    await Bun.write(path.join(root, "plans/log-prototype.html"), html("Log prototype"));
+    const index = await buildWikiIndex(root);
+
+    const proto = index.pages.find((p) => p.relPath === "plans/log-prototype.html")!;
+    expect(proto).toBeDefined();
+    expect(proto.parent).toBeUndefined();
+    expect(index.pages.find((p) => p.relPath === "plans/log.md")!.children).toBeUndefined();
+  });
+
+  test("rule 4: a page superseded by a meta page pairs nothing", async () => {
+    await Bun.write(path.join(root, "plans/index.md"), "---\ntitle: Plans\n---\n\nCatalog.");
+    await Bun.write(
+      path.join(root, "plans/retired.md"),
+      "---\ntitle: Retired\nsuperseded_by: [[index]]\n---\n\nRetired.",
+    );
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans/retired.md")!.parent).toBeUndefined();
+    expect(index.pages.find((p) => p.relPath === "plans/index.md")!.children).toBeUndefined();
+  });
+
+  // S9 (iii) — rule 3 is same-folder like the other three. Nothing pinned it.
+  test("rule 3: an embed of ANOTHER folder's html pairs nothing", async () => {
+    await Bun.write(
+      path.join(root, "plans/embedder.mdx"),
+      '---\ntitle: Embedder\n---\n\n<Embed src="../blogs/far.html" />\n',
+    );
+    await Bun.write(path.join(root, "blogs/far.html"), html("Far diagram"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "blogs/far.html")!.parent).toBeUndefined();
+  });
+});
+
+/**
+ * S7 — the embed scan must accept exactly what the renderer renders. Each case
+ * below is a shape the first cut adopted a page on and `parseBlocks` refuses, so
+ * the reader saw a fallback line while the rail folded the target away.
+ */
+describe("extractEmbedTargets — fix round 1", () => {
+  /** Does the block parser really see an `Embed` here? The agreement the scan is
+   *  written against, walked recursively (an embed inside a `<Callout>` counts). */
+  const parsesAsEmbed = (body: string): boolean => {
+    const walk = (blocks: Block[]): boolean =>
+      blocks.some(
+        (b) =>
+          b.type === "component" &&
+          (b.name === "Embed" || walk((b as { children?: Block[] }).children ?? [])),
+      );
+    return walk(parseBlocks(stripFrontmatter(body)));
+  };
+
+  const CASES: Array<[string, string, boolean]> = [
+    ["self-closing", '<Embed src="./a.html" />', true],
+    ["immediately closed pair", '<Embed src="./a.html"></Embed>', true],
+    ["no slash, never closed", '<Embed src="./a.html" >', false],
+    ["no slash, no space", '<Embed src="./a.html">', false],
+    ["tag name split across lines", '<Embed\n src="./a.html" />', false],
+    ["closing bracket on the next line", '<Embed src="./a.html"\n/>', false],
+    ["trailing prose on the line", '<Embed src="./a.html" /> and more', false],
+  ];
+
+  for (const [name, body, embeds] of CASES) {
+    test(`${name}: pairs ${embeds ? "the target" : "nothing"}, agreeing with parseBlocks`, () => {
+      expect(parsesAsEmbed(body)).toBe(embeds);
+      expect(extractEmbedTargets(body, "p.mdx")).toEqual(embeds ? ["a.html"] : []);
+    });
+  }
+
+  test("frontmatter is not body: an Embed inside it pairs nothing", () => {
+    // A block scalar is the one frontmatter shape whose lines can START with the
+    // tag — which is exactly what the line-anchored scan matches.
+    const body = ["---", "title: Documenting the feature", "note: |", '  <Embed src="./a.html" />', "---", "", "Prose."].join("\n");
+    expect(parsesAsEmbed(body)).toBe(false);
+    expect(extractEmbedTargets(body, "p.mdx")).toEqual([]);
   });
 });
 

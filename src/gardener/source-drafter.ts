@@ -22,7 +22,7 @@
 
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { WikiIndex } from "../wiki/store.ts";
+import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import { extRank, normalizeRelPath, parseFrontmatter, stemKey } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
 import { normalizeUrl, docIdFromUrl } from "../wiki/ingest-backlog.ts";
@@ -449,9 +449,11 @@ function pathKey(relPath: string): string {
  * `Blåbær` query and the guard is silently inert on any non-ASCII stem.
  *
  * **Known residual, landed as-is:** this reads `index.pages`, and `buildWikiIndex`
- * has ALREADY removed every page its precedence rule shadowed (they survive only
- * on `index.shadowed`, which the linter reads). So a page that is currently
- * shadowed — today that is only the `.md`-over-`.html` shape — is invisible here.
+ * has already removed every page its precedence rule shadowed AND DID NOT UN-DROP
+ * (since the rail's attachment groups, a same-stem `.html` beside its own markdown
+ * page is kept as a child — see `src/wiki/CLAUDE.md`; a cross-folder one is still
+ * dropped, and so is one whose own markdown twin was dropped). A page that is
+ * currently shadowed is invisible here.
  * No wrong ALLOW is reachable through it: a shadowed page has a same-stem WINNER
  * by construction, and that winner is itself in `pages` and is itself a blocking
  * twin under condition (1) or (2), so the write is refused anyway. What is lost is
@@ -484,13 +486,22 @@ export function findStemTwin(
   const self = pathKey(targetPath);
   const selfDir = path.posix.dirname(self);
   const selfRank = extRank(targetPath);
-  const twin = index.pages.find((p) => {
+  const twins = index.pages.filter((p) => {
     if (stemKey(p.name) !== s) return false;
     const key = pathKey(p.relPath);
     if (key === self) return false;
     if (hasForbiddenBasename(p.relPath)) return false;
     return extRank(p.relPath) !== selfRank || path.posix.dirname(key) === selfDir;
   });
+  // The LOWEST-rank twin is the one NAMED — `.md` over `.mdx` over `.html`. The
+  // outcome does not move (any twin refuses), but `index.pages` is relPath-sorted
+  // and now carries attachments, so a first-match would have started naming
+  // `x.html` where the reviewer needs `x.md`: the html is the page's own diagram
+  // and renaming it fixes nothing.
+  let twin: WikiPageMeta | undefined;
+  for (const p of twins) {
+    if (!twin || extRank(p.relPath) < extRank(twin.relPath)) twin = p;
+  }
   return twin ? { title: twin.title, relPath: twin.relPath } : null;
 }
 

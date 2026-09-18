@@ -760,6 +760,27 @@ describe("findStemTwin / findCollidingPage — which same-stem pages count", () 
     ).toBeNull();
   });
 
+  test("the LOWEST-rank twin is the one named, whatever order pages arrive in", () => {
+    // `index.pages` is relPath-sorted and now carries attachments (`x.html` beside
+    // `x.mdx` is kept, not dropped), so a first-match would name the html — the
+    // page's own diagram, which renaming does not fix. Both orders, because the
+    // sort is what put the html first in the live case.
+    const htmlFirst = fakeIndex([
+      src("blogs/Aurora Ledger Protocol.html", "Aurora Ledger Protocol"),
+      src("blogs/Aurora Ledger Protocol.md", "Aurora Ledger Protocol"),
+    ]);
+    expect(findStemTwin(htmlFirst, "Aurora Ledger Protocol", "sources/Aurora Ledger Protocol.mdx")?.relPath).toBe(
+      "blogs/Aurora Ledger Protocol.md",
+    );
+    const mdFirst = fakeIndex([
+      src("blogs/Aurora Ledger Protocol.md", "Aurora Ledger Protocol"),
+      src("blogs/Aurora Ledger Protocol.html", "Aurora Ledger Protocol"),
+    ]);
+    expect(findStemTwin(mdFirst, "Aurora Ledger Protocol", "sources/Aurora Ledger Protocol.mdx")?.relPath).toBe(
+      "blogs/Aurora Ledger Protocol.md",
+    );
+  });
+
   test("a near-miss stem is not a twin", () => {
     const index = fakeIndex([src("sources/Aurora Ledger Protocols.mdx", "Aurora Ledger Protocols")]);
     expect(

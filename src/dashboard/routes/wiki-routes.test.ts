@@ -20,6 +20,7 @@ import {
   isAnnotatablePage,
   resolveExplainPreflight,
   resolveFactcheckPreflight,
+  resolvePageRef,
   stripSupersededMarks,
   fetchSavedNotes,
   fetchSavedNotesBlock,
@@ -36,7 +37,7 @@ import { integrateBodyLen, pageHasComponentVocabulary } from "../../wiki/integra
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
-import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { __resetWikiCacheForTest, getWikiIndex } from "../../wiki/store.ts";
 import { readLogMtimeMs, type WikiDigest } from "../../wiki/digest.ts";
 import { EXPLAINER_BRIDGE_MARKER } from "../../wiki/explainer-bridge.ts";
 import { ASK_CHAT_SEED_MAX } from "../../wiki/ask-chat.ts";
@@ -138,13 +139,15 @@ describe("GET /api/wiki/html", () => {
     expect(res.status).toBe(404);
   });
 
-  // `<Embed src>`: a page embedding its OWN diagram (`x.mdx` + `x.html`) shadows
-  // the `.html` out of the index (`.md` > `.mdx` > `.html`), so the route serves
-  // an unlisted `.html` by exact relPath — under the root only.
-  test("serves a same-stem .html the index dropped, by relPath", async () => {
+  // The fallback's case is now the CROSS-FOLDER twin: a same-stem `.md` one
+  // directory over still shadows the `.html` out of the index, and the route
+  // still serves it by exact relPath, under the root only. (A same-FOLDER twin
+  // is an attachment since the pairing pass — see the test below, where the
+  // index path serves it and the fallback is never reached.)
+  test("serves a cross-folder same-stem .html the index dropped, by relPath", async () => {
     await Bun.write(
-      path.join(root, "blogs/Explainer One.mdx"),
-      '---\ntitle: Explainer One\n---\n\n<Embed src="./Explainer One.html" />\n',
+      path.join(root, "concepts/Explainer One.md"),
+      "---\ntype: concept\ntitle: Explainer One\n---\n\nThe markdown page, one folder over.",
     );
     __resetWikiCacheForTest();
     // Precondition: the index really did drop the .html.
@@ -155,6 +158,59 @@ describe("GET /api/wiki/html", () => {
     const body = await res.text();
     expect(body).toContain("<title>Explainer One</title>");
     expect(body).toContain(EXPLAINER_BRIDGE_MARKER);
+  });
+
+  // The same-folder pair (`x.mdx` + `x.html`, the `<Embed src>` shape) is an
+  // ATTACHMENT: the `.html` is in the index, so `/api/wiki/page` opens it and
+  // `/api/wiki/html` serves it off its index entry rather than the fallback.
+  test("a same-folder same-stem .html is INDEXED — the page route opens it and the name stays the markdown page's", async () => {
+    await Bun.write(
+      path.join(root, "blogs/Explainer One.mdx"),
+      '---\ntitle: Explainer One Plan\n---\n\n<Embed src="./Explainer One.html" />\n',
+    );
+    __resetWikiCacheForTest();
+    const page = await app.request("/api/wiki/page?relPath=" + encodeURIComponent("blogs/Explainer One.html"));
+    expect(page.status).toBe(200);
+    const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/Explainer One.html"));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<title>Explainer One</title>");
+    // `?name=` still answers with the markdown page — the html registers no stem
+    // key, so the reader's [[Explainer One]] is unchanged by the un-drop.
+    const byName = await app.request("/api/wiki/page?name=" + encodeURIComponent("Explainer One"));
+    expect(byName.status).toBe(200);
+    expect(((await byName.json()) as { meta: { relPath: string } }).meta.relPath).toBe(
+      "blogs/Explainer One.mdx",
+    );
+  });
+
+  // A STALE relPath falls back onto an UNAMBIGUOUS stem — and an attachment must
+  // not make the stem ambiguous. Without the `pairedBy === "stem"` skip in
+  // `stemIsUnique`, explain / share / fact-check 404 on every page that has a
+  // same-stem `.html` beside it, on a path with no CAS to catch it.
+  test("resolvePageRef: a stale relPath still resolves by name on a page that has an attachment", async () => {
+    await Bun.write(
+      path.join(root, "blogs/Explainer One.mdx"),
+      '---\ntitle: Explainer One Plan\n---\n\n<Embed src="./Explainer One.html" />\n',
+    );
+    __resetWikiCacheForTest();
+    const index = (await getWikiIndex({ root }))!;
+    // Precondition: the attachment really is in `pages`.
+    expect(index.pages.some((p) => p.relPath === "blogs/Explainer One.html")).toBe(true);
+    expect(resolvePageRef(index, "blogs/moved-away.mdx", "Explainer One")?.relPath).toBe(
+      "blogs/Explainer One.mdx",
+    );
+    // A genuinely ambiguous stem still refuses. Same EXTENSION, deliberately:
+    // two `.mdx` pages in different folders both survive, which is what makes the
+    // stem ambiguous. A `.md` here would SHADOW the `.mdx` — and take its `.html`
+    // with it, since an attachment whose own page is dropped is dropped too — so
+    // the stem would be unique again and the case would be measuring the drop.
+    await Bun.write(
+      path.join(root, "concepts/Explainer One.mdx"),
+      "---\ntype: concept\n---\n\nA real same-stem collision.",
+    );
+    __resetWikiCacheForTest();
+    const ambiguous = (await getWikiIndex({ root }))!;
+    expect(resolvePageRef(ambiguous, "blogs/moved-away.mdx", "Explainer One")).toBeUndefined();
   });
 
   test("the unlisted-.html fallback never leaves the root and never serves markdown", async () => {

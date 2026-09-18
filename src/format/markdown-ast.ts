@@ -117,7 +117,15 @@ const MAX_COMPONENT_DEPTH = 3;
 // common case (a line not starting with `<`) fails the match cheaply — the
 // parser runs on every chat delta re-render, so this stays single-pass.
 const COMPONENT_OPEN_RE = /^<([A-Za-z][A-Za-z0-9]*)((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*(\/?)>(.*)$/;
-const ATTR_RE = /([A-Za-z][\w-]*)="([^"]*)"/g;
+/**
+ * One double-quoted attribute of a component tag. **Global, so every caller
+ * resets `lastIndex` before its own scan** — exported anyway, because the wiki
+ * store's embed scan (`extractEmbedTargets`) has to read a tag's attributes
+ * exactly as {@link parseAttrs} does: a second copy of this pattern is how the
+ * scan comes to accept an attribute shape the parser drops, and then pairs a
+ * page the reader only ever sees as a fallback line.
+ */
+export const ATTR_RE = /([A-Za-z][\w-]*)="([^"]*)"/g;
 
 /**
  * Regex SOURCE (not a compiled regex — callers pick their own flags/anchors) for

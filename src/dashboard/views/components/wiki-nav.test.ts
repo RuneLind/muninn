@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import {
+  findPageByName,
   findPageByRelPath,
   isActivePage,
   navTargetFrom,
@@ -112,5 +113,41 @@ describe("findPageByRelPath", () => {
     expect(findPageByRelPath(pages, "-Users-x-muninn/memory/MEMORY.md")?.name).toBe("MEMORY");
     expect(findPageByRelPath(pages, "nope/nope.md")).toBeUndefined();
     expect(findPageByRelPath(pages, "")).toBeUndefined();
+  });
+});
+
+describe("findPageByName", () => {
+  // relPath-ordered, exactly as `/api/wiki/pages` sends it: the `.html` sorts
+  // BEFORE its own markdown page, which is what made the first-match lookup
+  // open the diagram.
+  const pages = [
+    { name: "y", relPath: "plans/y.html", type: "explainer", parent: "plans/y.md", pairedBy: "stem" },
+    { name: "y", relPath: "plans/y.md", type: "plan" },
+    { name: "solo", relPath: "plans/solo.html", type: "explainer" },
+    { name: "MEMORY", relPath: "b/MEMORY.md", type: "note" },
+    { name: "MEMORY", relPath: "a/MEMORY.md", type: "note" },
+  ];
+
+  test("never answers with a rule-1 attachment — the markdown page owns the name", () => {
+    // `?page=<stem>` at boot and on popstate, the reader's no-relPath fallback,
+    // an Ask citation and a chat wiki citation all land here, and the server's
+    // own `index.resolve` answers the markdown page for every one of them.
+    expect(findPageByName(pages, "y")?.relPath).toBe("plans/y.md");
+  });
+
+  test("an explainer nothing paired still resolves — it is a page of its own", () => {
+    expect(findPageByName(pages, "solo")?.relPath).toBe("plans/solo.html");
+  });
+
+  test("a genuine same-stem collision answers by relPath, whatever order it arrives in", () => {
+    // The server registers first-wins in relPath order, so the answer must not
+    // depend on the payload's order.
+    expect(findPageByName(pages, "MEMORY")?.relPath).toBe("a/MEMORY.md");
+    expect(findPageByName([...pages].reverse(), "MEMORY")?.relPath).toBe("a/MEMORY.md");
+  });
+
+  test("a miss is undefined", () => {
+    expect(findPageByName(pages, "nope")).toBeUndefined();
+    expect(findPageByName(pages, "")).toBeUndefined();
   });
 });

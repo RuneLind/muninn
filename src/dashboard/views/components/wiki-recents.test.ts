@@ -11,12 +11,21 @@ import { describe, expect, test } from "bun:test";
 import {
   JUMP_MAX,
   PINS_MAX,
+  SECTION_META_FOLD_KEY,
   buildRail,
+  foldChipCompactLabel,
+  foldChipKinds,
+  foldChipLabel,
+  foldKeyForPage,
+  foldsKey,
+  isFoldOpen,
+  toggleFold,
   jiraKeyJump,
   jumpHeaderLabel,
   parseJiraKey,
   parseJiraKeyCandidates,
   isPinnedRelPath,
+  pairedByWhy,
   parseRelPathList,
   pinsKey,
   railSectionsVisible,
@@ -413,7 +422,20 @@ describe("buildRail", () => {
     // broken sort.
     const log = page({ relPath: "log.md", title: "Log" });
     const idx = page({ relPath: "plans/index.md", title: "Index" });
-    const m = buildRail({ filtered: [a, b, log, idx], facetOnly: [a, b, log, idx], filters: INERT, pins: [], metaTail: true });
+    // COLLAPSED by default (rail-grouping PR 1): the header stays and carries
+    // its count, the rows are not emitted, and `shown` says so.
+    const collapsed = buildRail({ filtered: [a, b, log, idx], facetOnly: [a, b, log, idx], filters: INERT, pins: [], metaTail: true });
+    expect(headers(collapsed.entries)).toEqual(["Bookkeeping"]);
+    const metaHeader = collapsed.entries.find((e) => e.kind === "header" && e.section === "meta")!;
+    expect(metaHeader).toMatchObject({ folded: true, count: 2, foldKey: SECTION_META_FOLD_KEY });
+    expect(rows(collapsed.entries).map((r) => [r.section, r.page.relPath])).toEqual([
+      ["all", "a.md"],
+      ["all", "b.md"],
+    ]);
+    expect(collapsed.shown).toBe(2);
+
+    // Opened, it is the pre-fold rail exactly.
+    const m = buildRail({ filtered: [a, b, log, idx], facetOnly: [a, b, log, idx], filters: INERT, pins: [], metaTail: true, openFolds: [SECTION_META_FOLD_KEY] });
     expect(headers(m.entries)).toEqual(["Bookkeeping"]);
     expect(rows(m.entries).map((r) => [r.section, r.page.relPath])).toEqual([
       ["all", "a.md"],
@@ -422,6 +444,9 @@ describe("buildRail", () => {
       ["meta", "plans/index.md"],
     ]);
     expect(m.shown).toBe(4);
+    // A reader ON a bookkeeping page sees it, whatever the store says.
+    const onMeta = buildRail({ filtered: [a, b, log, idx], facetOnly: [a, b, log, idx], filters: INERT, pins: [], metaTail: true, openRelPath: "log.md" });
+    expect(rows(onMeta.entries).some((r) => r.page.relPath === "log.md")).toBe(true);
     // Off (title / backlinks modes), they are ordinary rows wherever the sort put them.
     const off = buildRail({ filtered: [log, a], facetOnly: [log, a], filters: INERT, pins: [] });
     expect(headers(off.entries)).toEqual([]);
@@ -443,8 +468,10 @@ describe("buildRail", () => {
       { name: "no meta at all", q: "", pins: ["a.md"], filtered: [a, b], headers: ["Pinned", "Other pages"], sections: ["pinned", "all"] },
     ];
     for (const c of cases) {
-      // The query case has no key, so the jump never fires; `q` only gates the split.
-      const m = buildRail({ filtered: c.filtered, facetOnly: c.filtered, filters: { ...INERT, q: c.q }, pins: c.pins ?? [], metaTail: true });
+      // The query case has no key, so the jump never fires; `q` only gates the
+      // split. `openFolds` holds Bookkeeping open throughout, so this table keeps
+      // measuring the SPLIT rather than the fold (which has its own cases above).
+      const m = buildRail({ filtered: c.filtered, facetOnly: c.filtered, filters: { ...INERT, q: c.q }, pins: c.pins ?? [], metaTail: true, openFolds: [SECTION_META_FOLD_KEY] });
       expect(headers(m.entries), c.name).toEqual(c.headers);
       expect(rows(m.entries).map((r) => r.section), c.name).toEqual(c.sections);
       expect(m.shown, c.name).toBe(c.filtered.length);
@@ -996,5 +1023,462 @@ describe("fix round 6 — relPath identity has ONE boundary", () => {
       activity: [{ page: p, kind: "new", score: 1, why: "new — because", ageMs: 0 }],
     });
     expect(rail.entries.filter((e) => e.kind === "row")).toHaveLength(1);
+  });
+});
+
+/**
+ * Attachments — the rail half of the store's pairing pass. The one-row invariant
+ * is the thing under test, so the fixture puts a child in EVERY section at once
+ * and the last case asserts the invariant over all of them together.
+ */
+describe("groups (attachments)", () => {
+  // NB no `children` field: the wire carries the PARENT link only, and
+  // `buildRail` rebuilds each group from the pages it was handed.
+  const parent = page({ relPath: "plans/x.mdx", title: "X plan" });
+  const stemChild = page({
+    relPath: "plans/x.html",
+    title: "X diagram",
+    parent: "plans/x.mdx",
+    pairedBy: "stem",
+  });
+  const protoChild = page({
+    relPath: "plans/x-prototype.html",
+    title: "X prototype",
+    parent: "plans/x.mdx",
+    pairedBy: "suffix",
+  });
+  const supersededChild = page({
+    relPath: "plans/old.mdx",
+    title: "Old plan",
+    parent: "plans/x.mdx",
+    pairedBy: "superseded",
+  });
+  const loner = page({ relPath: "plans/z.mdx", title: "Zeta" });
+  const family = [parent, stemChild, protoChild, supersededChild, loner];
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const headersOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "header").map((e) => (e as { label: string }).label);
+  const rail = (over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+    buildRail({ filtered: family, facetOnly: family, filters: INERT, pins: [], ...over });
+
+  test("closed by default: the children are not emitted and `shown` says so", () => {
+    const m = rail();
+    const rs = rowsOf(m);
+    expect(rs.map((r) => r.page.relPath)).toEqual(["plans/x.mdx", "plans/z.mdx"]);
+    expect(m.shown).toBe(2); // NOT 5 — a closed fold lowers the count
+    const parentRow = rs[0]!;
+    expect(parentRow.folded).toBe(true);
+    expect(parentRow.children!.map((c) => c.relPath)).toEqual([
+      "plans/x.html",
+      "plans/x-prototype.html",
+      "plans/old.mdx",
+    ]);
+    expect(foldChipLabel(parentRow.children!)).toBe("2 attached · 1 superseded");
+  });
+
+  test("open: the children render under the parent, in order, as child rows", () => {
+    const m = rail({ openFolds: [foldKeyForPage("plans/x.mdx")] });
+    const rs = rowsOf(m);
+    expect(rs.map((r) => r.page.relPath)).toEqual([
+      "plans/x.mdx",
+      "plans/x.html",
+      "plans/x-prototype.html",
+      "plans/old.mdx",
+      "plans/z.mdx",
+    ]);
+    expect(rs[0]!.folded).toBe(false);
+    expect(rs[1]!.child).toEqual({ parent, pairedBy: "stem" });
+    expect(rs[3]!.child).toEqual({ parent, pairedBy: "superseded" });
+    expect(rs[4]!.child).toBeUndefined();
+    expect(m.shown).toBe(5);
+  });
+
+  test("the OPEN PAGE's group is expanded whatever the store holds — parent or child", () => {
+    for (const openRelPath of ["plans/x.mdx", "PLANS/X.HTML"]) {
+      const m = rail({ openRelPath });
+      expect(rowsOf(m).map((r) => r.page.relPath), openRelPath).toContain("plans/x.html");
+    }
+    // …and a page in ANOTHER group leaves this one closed.
+    expect(rowsOf(rail({ openRelPath: "plans/z.mdx" })).map((r) => r.page.relPath)).toEqual([
+      "plans/x.mdx",
+      "plans/z.mdx",
+    ]);
+  });
+
+  test("a query FLATTENS: every page is a plain row, no chips, nothing hidden", () => {
+    const m = rail({ filters: { ...INERT, q: "x" } });
+    const rs = rowsOf(m);
+    expect(rs.map((r) => r.page.relPath)).toEqual(family.map((p) => p.relPath));
+    expect(rs.some((r) => r.children || r.child || r.folded !== undefined)).toBe(false);
+    expect(m.shown).toBe(5);
+  });
+
+  test("Activity ranks PAGES: a lifted child leaves the chip's count and renders once", () => {
+    const m = rail({
+      activity: [{ page: stemChild, kind: "new", score: 1, why: "new — because", ageMs: 0 }],
+    });
+    const rs = rowsOf(m);
+    expect(headersOf(m)).toEqual(["Activity", "Other pages"]);
+    const lifted = rs.filter((r) => r.page.relPath === "plans/x.html");
+    expect(lifted).toHaveLength(1);
+    expect(lifted[0]!.section).toBe("activity");
+    // It still says WHY it folds, and the parent's chip is one shorter.
+    expect(lifted[0]!.child).toEqual({ parent, pairedBy: "stem" });
+    const parentRow = rs.find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.children!.map((c) => c.relPath)).toEqual([
+      "plans/x-prototype.html",
+      "plans/old.mdx",
+    ]);
+    expect(foldChipLabel(parentRow.children!)).toBe("1 attached · 1 superseded");
+  });
+
+  test("Activity ranking the PARENT moves the whole open group with it", () => {
+    const m = rail({
+      openFolds: [foldKeyForPage("plans/x.mdx")],
+      activity: [{ page: parent, kind: "changed", score: 1, why: "changed — because", ageMs: 0 }],
+    });
+    const rs = rowsOf(m);
+    expect(rs.map((r) => [r.section, r.page.relPath])).toEqual([
+      ["activity", "plans/x.mdx"],
+      ["activity", "plans/x.html"],
+      ["activity", "plans/x-prototype.html"],
+      ["activity", "plans/old.mdx"],
+      ["all", "plans/z.mdx"],
+    ]);
+  });
+
+  test("a parent and a child BOTH ranked by Activity still render one row each", () => {
+    const m = rail({
+      openFolds: [foldKeyForPage("plans/x.mdx")],
+      activity: [
+        { page: parent, kind: "changed", score: 2, why: "changed — because", ageMs: 0 },
+        { page: stemChild, kind: "new", score: 1, why: "new — because", ageMs: 0 },
+      ],
+    });
+    const rs = rowsOf(m);
+    expect(rs.filter((r) => r.page.relPath === "plans/x.html")).toHaveLength(1);
+    expect(m.shown).toBe(5);
+  });
+
+  test("a pinned child is lifted into Pinned, once, and leaves the chip's count", () => {
+    const m = rail({ pins: ["plans/old.mdx"] });
+    const rs = rowsOf(m);
+    expect(headersOf(m)).toEqual(["Pinned", "Other pages"]);
+    expect(rs.filter((r) => r.page.relPath === "plans/old.mdx").map((r) => r.section)).toEqual([
+      "pinned",
+    ]);
+    const parentRow = rs.find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(foldChipLabel(parentRow.children!)).toBe("2 attached");
+  });
+
+  test("a child whose PARENT the facet filtered away is an ordinary row, never hidden", () => {
+    const filtered = [stemChild, loner];
+    const m = buildRail({ filtered, facetOnly: filtered, filters: INERT, pins: [] });
+    const rs = rowsOf(m);
+    expect(rs.map((r) => r.page.relPath)).toEqual(["plans/x.html", "plans/z.mdx"]);
+    expect(rs[0]!.child).toBeUndefined();
+    expect(m.shown).toBe(2);
+  });
+
+  test("the one-row invariant holds with children in EVERY section at once", () => {
+    const logPage = page({ relPath: "log.md", title: "Log" });
+    const filtered = [...family, logPage];
+    const m = buildRail({
+      filtered,
+      facetOnly: filtered,
+      filters: INERT,
+      pins: ["plans/old.mdx"],
+      metaTail: true,
+      openFolds: [foldKeyForPage("plans/x.mdx"), SECTION_META_FOLD_KEY],
+      activity: [{ page: stemChild, kind: "new", score: 1, why: "new — because", ageMs: 0 }],
+    });
+    const rs = rowsOf(m);
+    const seen = new Map<string, number>();
+    for (const r of rs) seen.set(r.page.relPath, (seen.get(r.page.relPath) ?? 0) + 1);
+    // Every page exactly once, `shown` equal to the row count, and every page of
+    // the input on screen (nothing folded away here — all three folds are open).
+    expect([...seen.values()].every((n) => n === 1)).toBe(true);
+    expect(m.shown).toBe(rs.length);
+    expect(seen.size).toBe(filtered.length);
+    // …and the sections are the ones each rule dictates.
+    expect(rs.find((r) => r.page.relPath === "plans/x.html")!.section).toBe("activity");
+    expect(rs.find((r) => r.page.relPath === "plans/old.mdx")!.section).toBe("pinned");
+    expect(rs.find((r) => r.page.relPath === "plans/x-prototype.html")!.section).toBe("all");
+    expect(rs.find((r) => r.page.relPath === "log.md")!.section).toBe("meta");
+  });
+});
+
+describe("the fold store's rules", () => {
+  test("keys are per wiki, beside the pins key", () => {
+    expect(foldsKey("mimir")).toBe("muninn.wiki.folds.v1:mimir");
+    expect(foldsKey("")).toBe("muninn.wiki.folds.v1:");
+    expect(foldsKey("a")).not.toBe(foldsKey("b"));
+  });
+  test("everything not stored is CLOSED", () => {
+    expect(isFoldOpen([], "plans/x.mdx")).toBe(false);
+    expect(isFoldOpen(["plans/y.mdx"], "plans/x.mdx")).toBe(false);
+    expect(isFoldOpen(["plans/x.mdx"], "plans/x.mdx")).toBe(true);
+  });
+  test("comparison is normalized on both sides, like the pins key", () => {
+    expect(isFoldOpen(["PLANS\\X.MDX"], "plans/x.mdx")).toBe(true);
+    expect(foldKeyForPage(" PLANS/X.MDX ")).toBe("plans/x.mdx");
+  });
+  test("toggle is its own inverse and never duplicates an entry", () => {
+    expect(toggleFold([], "plans/x.mdx")).toEqual(["plans/x.mdx"]);
+    expect(toggleFold(["plans/x.mdx"], "PLANS/X.MDX")).toEqual([]);
+    expect(toggleFold(["plans/x.mdx"], "")).toEqual(["plans/x.mdx"]);
+  });
+  test("the section sentinel shares the namespace and survives normalization", () => {
+    expect(toggleFold([], SECTION_META_FOLD_KEY)).toEqual([SECTION_META_FOLD_KEY]);
+    expect(isFoldOpen([SECTION_META_FOLD_KEY], SECTION_META_FOLD_KEY)).toBe(true);
+  });
+  test("chip copy: attached, superseded, and both", () => {
+    const attach = (n: number) =>
+      Array.from({ length: n }, (_, i) => page({ relPath: `c${i}.html`, pairedBy: "stem" }));
+    expect(foldChipLabel(attach(3))).toBe("3 attached");
+    expect(foldChipLabel([page({ relPath: "o.mdx", pairedBy: "superseded" })])).toBe(
+      "1 superseded",
+    );
+    expect(foldChipLabel([...attach(1), page({ relPath: "o.mdx", pairedBy: "superseded" })])).toBe(
+      "1 attached · 1 superseded",
+    );
+    expect(foldChipLabel([])).toBe("");
+  });
+});
+
+/**
+ * Fix round 1 — what the first cut of the groups got wrong, all of it about the
+ * ONE number the rail promises: the chip stands for the rows that are NOT on
+ * screen, and every page it was handed is on screen exactly once.
+ */
+describe("groups — fix round 1", () => {
+  const parent = page({ relPath: "plans/x.mdx", title: "X plan" });
+  const child = page({
+    relPath: "plans/x.html",
+    title: "X diagram",
+    parent: "plans/x.mdx",
+    pairedBy: "stem",
+  });
+  const sibling = page({
+    relPath: "plans/x-prototype.html",
+    title: "X prototype",
+    parent: "plans/x.mdx",
+    pairedBy: "suffix",
+  });
+  const loner = page({ relPath: "plans/z.mdx", title: "Zeta" });
+  const family = [parent, child, sibling, loner];
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const act = (p: WikiListing, score: number): ActivityRow => ({
+    page: p,
+    kind: "new",
+    score,
+    why: "new — because",
+    ageMs: 0,
+  });
+  const rail = (over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+    buildRail({ filtered: family, facetOnly: family, filters: INERT, pins: [], ...over });
+
+  test("a child Activity ranks BELOW its parent is still out of the chip's count", () => {
+    // Activity runs before Pinned and emits in rank order, so when the parent
+    // comes first the child is not yet claimed — the chip counted a row the
+    // very next iteration then drew.
+    const m = rail({ activity: [act(parent, 2), act(child, 1)] });
+    const rs = rowsOf(m);
+    const parentRow = rs.find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.children?.map((c) => c.relPath)).toEqual(["plans/x-prototype.html"]);
+    expect(foldChipLabel(parentRow.children ?? [])).toBe("1 attached");
+    expect(rs.filter((r) => r.page.relPath === "plans/x.html")).toHaveLength(1);
+    expect(m.shown).toBe(3); // parent, lifted child, loner — the sibling is folded
+  });
+
+  test("a PINNED child of an Activity-ranked parent is out of the count too", () => {
+    const m = rail({ activity: [act(parent, 2)], pins: ["plans/x.html"] });
+    const rs = rowsOf(m);
+    const parentRow = rs.find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.children?.map((c) => c.relPath)).toEqual(["plans/x-prototype.html"]);
+    expect(rs.find((r) => r.page.relPath === "plans/x.html")!.section).toBe("pinned");
+  });
+
+  test("a child with NO child of its own left keeps no chip at all", () => {
+    const two = [parent, child, loner];
+    const m = buildRail({
+      filtered: two,
+      facetOnly: two,
+      filters: INERT,
+      pins: [],
+      activity: [act(parent, 2), act(child, 1)],
+    });
+    const parentRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.children).toBeUndefined();
+    expect(parentRow.folded).toBeUndefined();
+  });
+
+  test("Activity ranks PAGES: a ranked child is lifted even out of an OPEN group", () => {
+    const m = rail({
+      openFolds: [foldKeyForPage("plans/x.mdx")],
+      activity: [act(child, 2), act(parent, 1)],
+    });
+    const rs = rowsOf(m);
+    const lifted = rs.filter((r) => r.page.relPath === "plans/x.html");
+    expect(lifted).toHaveLength(1);
+    // It carries its OWN derivation — the reason it was lifted — and says so.
+    expect(lifted[0]!.activity?.why).toBe("new — because");
+    expect(lifted[0]!.section).toBe("activity");
+    // …and it is NOT drawn as an indented child of a row it does not sit under.
+    expect(lifted[0]!.lifted).toBe(true);
+    expect(lifted[0]!.child).toEqual({ parent, pairedBy: "stem" });
+    // The sibling that Activity did not rank IS drawn inside the group.
+    const inGroup = rs.find((r) => r.page.relPath === "plans/x-prototype.html")!;
+    expect(inGroup.lifted).toBeUndefined();
+    expect(m.shown).toBe(4);
+  });
+
+  test("a parent chain that cycles renders BOTH pages, never zero", () => {
+    // `parent` is payload. One level deep is the store's invariant, not this
+    // module's guarantee, and a group whose parent is itself a child renders
+    // nowhere at all: two rows silently vanished from the rail.
+    const a = page({ relPath: "a.md", parent: "b.md", pairedBy: "superseded" });
+    const b = page({ relPath: "b.md", parent: "a.md", pairedBy: "superseded" });
+    const m = buildRail({ filtered: [a, b], facetOnly: [a, b], filters: INERT, pins: [] });
+    const rs = rowsOf(m);
+    expect(rs.map((r) => r.page.relPath).sort()).toEqual(["a.md", "b.md"]);
+    expect(m.shown).toBe(2);
+    // Neither is drawn as anyone's child — the group it named is not on screen.
+    expect(rs.every((r) => !r.child && !r.children)).toBe(true);
+  });
+
+  test("Bookkeeping's header count is exactly what opening it reveals", () => {
+    const log = page({ relPath: "log.md", title: "Log" });
+    const idx = page({ relPath: "plans/index.md", title: "Index" });
+    const pages = [loner, log, idx];
+    const opts = { filtered: pages, facetOnly: pages, filters: INERT, pins: [], metaTail: true };
+    const closed = buildRail(opts);
+    const header = closed.entries.find((e) => e.kind === "header" && e.section === "meta")!;
+    const opened = buildRail({ ...opts, openFolds: [SECTION_META_FOLD_KEY] });
+    const revealed = rowsOf(opened).filter((r) => r.section === "meta");
+    expect(revealed).toHaveLength((header as { count?: number }).count!);
+    expect(opened.shown - closed.shown).toBe((header as { count?: number }).count!);
+  });
+
+  test("a group forced open by the OPEN PAGE says so, so the chip can stop toggling", () => {
+    // `isOpen` is `forced || stored`, so a click on this chip flips a stored key
+    // with no visible effect — a dead control the reader can only read as broken.
+    const m = rail({ openRelPath: "plans/x.html" });
+    const parentRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.folded).toBe(false);
+    expect(parentRow.forcedOpen).toBe(true);
+    // A group the STORE opened is an ordinary toggle.
+    const stored = rail({ openFolds: [foldKeyForPage("plans/x.mdx")] });
+    expect(rowsOf(stored).find((r) => r.page.relPath === "plans/x.mdx")!.forcedOpen).toBeUndefined();
+  });
+
+  test("Bookkeeping forced open by the open page says so too", () => {
+    const log = page({ relPath: "log.md", title: "Log" });
+    const pages = [loner, log];
+    const m = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: [],
+      metaTail: true,
+      openRelPath: "log.md",
+    });
+    const header = m.entries.find((e) => e.kind === "header" && e.section === "meta")!;
+    expect(header).toMatchObject({ folded: false, forcedOpen: true });
+  });
+});
+
+describe("pairedByWhy", () => {
+  // Every branch, because the sentence is the rail's ONLY statement of a relation
+  // two of the four rules leave invisible in the file names.
+  test("names the rule and the parent", () => {
+    expect(pairedByWhy("stem", "X plan")).toBe('Attached under "X plan" — same name, same folder');
+    expect(pairedByWhy("suffix", "X plan")).toBe('Attached under "X plan" — a prototype of it');
+    expect(pairedByWhy("link", "X plan")).toBe('Attached under "X plan" — embedded in the page');
+  });
+  test("superseded reads from the CHILD's side — it is not an attachment", () => {
+    expect(pairedByWhy("superseded", "X plan")).toBe('Superseded by "X plan"');
+  });
+  test("an unknown or absent rule still names the parent", () => {
+    expect(pairedByWhy("", "X plan")).toBe('Attached under "X plan"');
+    expect(pairedByWhy("future-rule", "X plan")).toBe('Attached under "X plan"');
+  });
+});
+
+/**
+ * Fix round 3 — the chip's COMPACT form, and the one arrangement that pins
+ * `mine`'s `!claimed` filter.
+ *
+ * The filter had no case of its own across the whole suite (dropping it left
+ * 1544 unit tests and 44 e2e specs green), and `!lifted` beside it covers every
+ * arrangement Activity and Pinned can produce. Enumerating what else can put a
+ * child in `claimed`: the Jira jump claims rows, but it needs a query and a
+ * query turns grouping off, so `childrenOf` is empty there; `remainder` and the
+ * `Bookkeeping` tail are both filtered on `!parentOf.has(...)`, so no child ever
+ * reaches them; `resolve` writes to a COPY of `claimed`, not to it. That leaves
+ * exactly one: a parent emitted TWICE, which claims its children on the first
+ * pass. A listing carrying one page twice is not hypothetical here — this module
+ * dedupes the activity rows and the pin list against precisely that, on the
+ * stated ground that the one-row invariant "must not depend on the caller's
+ * input being duplicate-free".
+ */
+describe("groups — fix round 3", () => {
+  const parent = page({ relPath: "plans/x.mdx", title: "X plan" });
+  const child = page({
+    relPath: "plans/x.html",
+    title: "X diagram",
+    parent: "plans/x.mdx",
+    pairedBy: "stem",
+  });
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+
+  test("a listing carrying the parent TWICE renders its child once, under the first", () => {
+    // OPEN, because that is what makes the first row CLAIM the child — a closed
+    // group emits no child rows and claims nothing.
+    const filtered = [parent, child, parent];
+    const m = buildRail({
+      filtered,
+      facetOnly: filtered,
+      filters: INERT,
+      pins: [],
+      openFolds: [foldKeyForPage("plans/x.mdx")],
+    });
+    const rs = rowsOf(m);
+    expect(rs.map((r) => r.page.relPath)).toEqual([
+      "plans/x.mdx",
+      "plans/x.html",
+      "plans/x.mdx",
+    ]);
+    // The second parent row stands for nothing: its child is already on screen.
+    expect(rs[0]!.children!.map((c) => c.relPath)).toEqual(["plans/x.html"]);
+    expect(rs[2]!.children).toBeUndefined();
+  });
+
+  test("compact chip copy: the counts alone, in the full label's order", () => {
+    const attach = (n: number) =>
+      Array.from({ length: n }, (_, i) => page({ relPath: `c${i}.html`, pairedBy: "stem" }));
+    const retired = (n: number) =>
+      Array.from({ length: n }, (_, i) => page({ relPath: `o${i}.mdx`, pairedBy: "superseded" }));
+    expect(foldChipCompactLabel(attach(3))).toBe("3");
+    expect(foldChipCompactLabel(retired(1))).toBe("1");
+    expect(foldChipCompactLabel([...attach(10), ...retired(10)])).toBe("10 · 10");
+    expect(foldChipCompactLabel([])).toBe("");
+    // Same split, same order, same separator as the words it replaces.
+    expect(foldChipLabel([...attach(10), ...retired(10)])).toBe("10 attached · 10 superseded");
+  });
+
+  test("foldChipKinds counts anything that is not `superseded` as attached", () => {
+    expect(
+      foldChipKinds([
+        page({ relPath: "a.html", pairedBy: "stem" }),
+        page({ relPath: "b.html", pairedBy: "suffix" }),
+        page({ relPath: "c.html", pairedBy: "link" }),
+        page({ relPath: "d.html", pairedBy: "future-rule" }),
+        page({ relPath: "e.mdx", pairedBy: "superseded" }),
+      ]),
+    ).toEqual({ attached: 4, superseded: 1 });
   });
 });

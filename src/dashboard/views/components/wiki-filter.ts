@@ -53,6 +53,26 @@ export interface WikiListing {
    *  sanitization. Absent ⇒ the light `accent` is used in both themes. */
   accentDark?: string;
   relPath: string;
+  /**
+   * ATTACHMENTS — the relPath of the page this one folds under in the rail, set
+   * by the store's pairing pass (`src/wiki/store.ts`). Absent on a top-level
+   * page, which is almost every page of every wiki.
+   *
+   * A rendering relation, not containment: a child is still a page of its own in
+   * this listing, with its own row, pin, Activity ranking and page route.
+   *
+   * The store's matching `children` array is deliberately NOT on the wire
+   * (`toListing` strips it): `buildRail` rebuilds each group from the `parent`
+   * links of the pages it was handed, because a group is only ever the children
+   * the FACETS left on screen — so a `children` list would be payload no
+   * consumer may believe.
+   */
+  parent?: string;
+  /** WHICH rule paired this page with its `parent` — `stem` | `suffix` | `link` |
+   *  `superseded` (see the store's `PairedBy`). Absent exactly when `parent` is.
+   *  Kept a plain `string` for the same reason `WikiPageType` is: this file stays
+   *  server-dep-free. */
+  pairedBy?: string;
   /** File mtime (epoch ms) — the recency signal for frontmatter-less wikis. */
   mtimeMs?: number;
   /** File birthtime (epoch ms) — a WEAK "Recently added" signal: `git mv`, a
@@ -740,7 +760,29 @@ export function pageAddedMs(p: WikiListing, now?: number): number {
  *  under a `Bookkeeping` header. A hand-edited CLAUDE.md sinks with them —
  *  accepted, since the header says where it went. */
 export function isMetaPage(p: WikiListing): boolean {
-  const stem = (p.relPath || "").replace(/\\/g, "/").split("/").pop()!.replace(/\.[^.]+$/, "");
+  return isMetaStem(pageStemOf(p.relPath));
+}
+
+/** The bare stem of a wiki-relative path — the one spelling {@link isMetaPage}
+ *  and the store's pairing pass both take their stem from. */
+export function pageStemOf(relPath: string): string {
+  return (relPath || "").replace(/\\/g, "/").split("/").pop()!.replace(/\.[^.]+$/, "");
+}
+
+/**
+ * Is this stem a bookkeeping page (`index`, `log`, `CLAUDE`)? The stem half of
+ * {@link isMetaPage}, exported because `src/wiki/store.ts`'s pairing pass needs
+ * the same test for a page it holds as a `WikiPageMeta` rather than a listing:
+ * a meta page is never an attachment PARENT, since `log.md` embedding a diagram
+ * would otherwise adopt it.
+ *
+ * ⚠️ The dependency runs one way only — `store.ts` imports from here (as it
+ * already does for `sanitizeColorToken`), never the reverse. This module is
+ * bundled into the browser, and a `store.ts` import pulls `node:os` in through
+ * `lockfile.ts`: the build fails and the memoized bundle accessor then serves
+ * `/wiki` no client script at all.
+ */
+export function isMetaStem(stem: string): boolean {
   return stem === "index" || stem === "log" || stem === "CLAUDE";
 }
 

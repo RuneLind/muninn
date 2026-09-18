@@ -89,6 +89,10 @@ export const E2E_PORTS = {
   "chat-fold": 3052,
   // A temp wiki carrying folds, in the reader.
   "wiki-fold": 3053,
+  // The rail's ATTACHMENT groups: a page with two prototypes, a same-stem `.html`
+  // twin and a superseded sibling, so the chip, the fold, the count and the
+  // flatten-under-a-query rule are all driven against one wiki.
+  "wiki-rail-attachments": 3060,
   // `/summaries/prompts`, against a throwaway `claude-cli` bot under
   // MUNINN_BOTS_DIR (the connector decides which kinds are offered, and only a
   // Claude one is offered `deep`). The server is restarted mid-file, because a

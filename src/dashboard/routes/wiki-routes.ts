@@ -304,8 +304,11 @@ function egressRefusal(
  * answer about a page they never opened and can then act on it. A 404 naming the
  * path they sent is the honest answer; the rename case keeps its fallback because
  * a unique stem still says which page is meant.
+ *
+ * Exported for its own test: every caller is an SSE or a write route, so driving
+ * the stale-relPath branch through one of them costs a model call.
  */
-function resolvePageRef(
+export function resolvePageRef(
   index: WikiIndex,
   relPath: string | undefined,
   name: string | undefined,
@@ -327,11 +330,18 @@ function resolvePageRef(
 /** Is `name` the filename stem of exactly ONE page in this wiki? `index.resolve`
  *  is first-registration-wins on the lowercased stem, so this is the test for
  *  "the stem actually identifies a page". Compared against the RESOLVED page's
- *  own `name`, since the caller's reference may have matched a title or alias. */
+ *  own `name`, since the caller's reference may have matched a title or alias.
+ *
+ *  ⚠️ An ATTACHMENT paired by stem does not count, for the same reason the
+ *  store's own `stemCounts` skips it: it shares its parent's stem by definition
+ *  and registers no key of its own, so counting it would report every `x.mdx`
+ *  with an `x.html` beside it as ambiguous — and a stale `relPath` would then
+ *  404 explain, share and fact-check on a page whose name resolves perfectly. */
 function stemIsUnique(index: WikiIndex, name: string): boolean {
   const key = name.toLowerCase();
   let seen = 0;
   for (const p of index.pages) {
+    if (p.pairedBy === "stem") continue;
     if (p.name.toLowerCase() === key && ++seen > 1) return false;
   }
   return true;
@@ -1033,8 +1043,15 @@ function toListing(
   // ~45 bytes on a listing nothing renders them in. `jira` is deliberately NOT
   // in this strip — it is a listing FACET (the `project` twin), so the hot
   // payload is exactly where it has to be.
-  const { desc, pubDate, sessions, prs, sessionsBackfilled, ...rest } = meta;
+  //
+  // `children` is stripped on ALL THREE callers and opted in by none: the rail
+  // rebuilds every group from the `parent` links of the pages the facets left on
+  // screen, so a server-side child list is payload nothing may believe (and a
+  // second spelling of the same relation to keep in step). `parent`/`pairedBy`
+  // DO ride along — they are what the rail reads, one short string each.
+  const { desc, pubDate, sessions, prs, sessionsBackfilled, children, ...rest } = meta;
   void pubDate;
+  void children;
   return {
     ...rest,
     ...(opts.includeDesc && desc ? { desc } : {}),
@@ -1907,11 +1924,14 @@ export function registerWikiRoutes(
     if (!index) return c.text("wiki directory not found", 503);
     const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
     // An `.html` the index does NOT list is still servable by exact relPath — for
-    // `<Embed src>`. The index drops a same-stem `.html` when a `.md`/`.mdx` page
-    // shadows it (`.md` > `.mdx` > `.html`), and a page embedding its own
-    // diagram (`x.mdx` + `x.html`) is exactly that shape. The index's stored
-    // relPath is preferred when it exists; the fallback resolves the query as a
-    // path, and the containment check below is what makes that safe.
+    // `<Embed src>`. The index still drops a same-stem `.html` that a `.md`/`.mdx`
+    // page shadows from ANOTHER folder (`.md` > `.mdx` > `.html`), and one whose
+    // own same-folder markdown twin was itself dropped. The SAME-folder pair
+    // (`x.mdx` + `x.html`, the embed shape) is an attachment since the rail's
+    // groups: it is in the index, so it is served off its own entry and this
+    // fallback is not reached for it. The index's stored relPath is preferred
+    // when it exists; the fallback resolves the query as a path, and the
+    // containment check below is what makes that safe.
     if (relPathQ && relPathQ.includes("\u0000")) return c.text("invalid path", 400);
     const shadowed = !meta && !!relPathQ && /\.html$/i.test(relPathQ);
     if (!shadowed && (!meta || meta.type !== "explainer")) {

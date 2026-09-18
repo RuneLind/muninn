@@ -6,12 +6,14 @@
  *
  *  1. **The frame actually loads the file.** `enhanceEmbeds` builds a URL from
  *     three parts — the page's relPath (from the /api/wiki/page payload), the
- *     resolver, and `withWiki` — and the route's shadowed-html fallback has to
- *     answer it. Every unit test in that chain is green with the chain broken,
- *     and the symptom is a frame showing the reader's 404 text.
- *  2. **The natural naming works.** `post.mdx` beside `post.html`: the index
- *     drops the `.html` (stem precedence), so a route resolving strictly through
- *     the index 404s exactly the shape a person writes first.
+ *     resolver, and `withWiki` — and `/api/wiki/html` has to answer it. Every
+ *     unit test in that chain is green with the chain broken, and the symptom is
+ *     a frame showing the reader's 404 text.
+ *  2. **The natural naming works.** `post.mdx` beside `post.html` — the shape a
+ *     person writes first. Since the rail's grouping PR the `.html` is an
+ *     ATTACHMENT of the page rather than a page the index drops, so this spec is
+ *     also what pins the embed's own behaviour across that change (the route's
+ *     unlisted-html fallback still exists, for the CROSS-folder twin).
  *  3. **Sandbox is on.** The frame carries the explainer view's sandbox and
  *     nothing more.
  *  4. **An escaping src stays a fallback line** — no frame, no request.
@@ -101,14 +103,20 @@ test.afterAll(async () => {
 });
 
 test.describe("Wiki reader: <Embed src>", () => {
-  test("the same-stem .html is dropped from the index but still embeds", async ({ page }) => {
-    // Precondition for the whole spec: the shape under test IS the shadowed one.
+  test("the same-stem .html is an ATTACHMENT of the page and still embeds", async ({ page }) => {
+    // Precondition for the whole spec: the shape under test is the same-folder
+    // same-stem pair. Since the rail's grouping PR it is an ATTACHMENT — in the
+    // index, folded under its page — where it used to be dropped outright; the
+    // embed itself is unchanged either way, which is what the rest asserts.
     const listing = (await (await fetch(`${BASE}/api/wiki/pages?wiki=${WIKI}`)).json()) as {
-      pages?: Array<{ relPath: string }>;
-    } | Array<{ relPath: string }>;
+      pages?: Array<{ relPath: string; parent?: string; pairedBy?: string }>;
+    } | Array<{ relPath: string; parent?: string; pairedBy?: string }>;
     const pages = Array.isArray(listing) ? listing : (listing.pages ?? []);
     expect(pages.map((p) => p.relPath)).toContain(PAGE_REL);
-    expect(pages.map((p) => p.relPath)).not.toContain(HTML_REL);
+    expect(pages.find((p) => p.relPath === HTML_REL)).toMatchObject({
+      parent: PAGE_REL,
+      pairedBy: "stem",
+    });
 
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PAGE_REL)}`);
     const frame = page.locator(FRAME);
@@ -123,8 +131,8 @@ test.describe("Wiki reader: <Embed src>", () => {
     // The acceptance: the file's own content is on screen inside the frame.
     await expect(page.frameLocator(FRAME).locator("h1")).toHaveText(MARKER);
     // An "open in new tab" link beside the frame, pointing at the SAME url the
-    // frame loads — the html is shadowed out of the page list, so this link is
-    // the only way a reader reaches the standalone viewer.
+    // frame loads — the standalone viewer, from inside the page that embeds it.
+    // (The rail's group is the other way in, since the grouping PR.)
     const open = page.locator(".embed-open");
     await expect(open).toHaveCount(1);
     await expect(open).toHaveAttribute("target", "_blank");
