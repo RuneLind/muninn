@@ -15,8 +15,10 @@ import {
   SECTION_META_FOLD_KEY,
   buildRail,
   foldChipCompactLabel,
+  foldChipCountsClass,
   foldChipKinds,
   foldChipLabel,
+  foldChipLabelClass,
   normalizeFoldKey,
   foldsKey,
   isFoldOpen,
@@ -1246,6 +1248,29 @@ describe("the fold store's rules", () => {
       "1 attached · 1 superseded",
     );
     expect(foldChipLabel([])).toBe("");
+  });
+  // The chip's two size classes are the label's WORDS and its DIGITS, judged
+  // apart: the words decide when the full form yields to the compact one, the
+  // digits decide how much of the row the compact form is guaranteed. Each
+  // bucket is the set of labels one measured budget covers (`wiki-rail-width.ts`).
+  test("label class: attached-only is the default, superseded-only and both each have their own", () => {
+    expect(foldChipLabelClass({ attached: 1, superseded: 0 })).toBe("");
+    expect(foldChipLabelClass({ attached: 99, superseded: 0 })).toBe("");
+    expect(foldChipLabelClass({ attached: 0, superseded: 1 })).toBe("is-superseded-only");
+    expect(foldChipLabelClass({ attached: 0, superseded: 99 })).toBe("is-superseded-only");
+    expect(foldChipLabelClass({ attached: 1, superseded: 1 })).toBe("is-wide");
+    expect(foldChipLabelClass({ attached: 0, superseded: 0 })).toBe("");
+  });
+  test("counts class: one count is narrow, two of up to two digits is the default, anything wider is wide", () => {
+    expect(foldChipCountsClass("1")).toBe("counts-narrow");
+    expect(foldChipCountsClass("999")).toBe("counts-narrow");
+    expect(foldChipCountsClass("1 · 1")).toBe("");
+    expect(foldChipCountsClass("99 · 99")).toBe("");
+    expect(foldChipCountsClass("120 · 100")).toBe("counts-wide");
+    expect(foldChipCountsClass("999 · 99")).toBe("counts-wide");
+    // A family roll-up can carry three or four counts; they share the wide bucket.
+    expect(foldChipCountsClass("3 · 3 · 3 · 3")).toBe("counts-wide");
+    expect(foldChipCountsClass("")).toBe("");
   });
 });
 

@@ -19,12 +19,14 @@
 
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 import {
+  RAIL_TITLE_MIN,
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_DEFAULT_NARROW,
   RAIL_WIDTH_KEY,
@@ -44,6 +46,56 @@ const LONG_TITLE = "MELOSYS-7588/7969 — Nullable trygdesperiode-FK i grunnlag 
 const LONG_REL = "long-title.md";
 const SHORT_REL = "short.md";
 
+/**
+ * The row-layout edge cases the round-3 verify pass of #557 found, each a page
+ * whose chip or fixed parts sit at the edge of one width budget. Settled (a
+ * fixed `created:` and old mtimes) so Activity lifts none of the children out
+ * and the chips read their full counts.
+ *  - `sup10`: a superseded-only chip, `10 superseded` — the widest one-kind
+ *    label, which the attached-only budget did not cover;
+ *  - `big`: three-digit counts, `120 · 100`, beside a pill and a ⚑ — a compact
+ *    chip wider than the mid box's floor allowed for;
+ *  - `three`: `3 attached` beside a pill and a ⚑ at the DEFAULT rail — the one
+ *    chip row on mimir that wrapped at 300px;
+ *  - `bare`: a pill and a ⚑ with no chip — the row shape that wraps at the
+ *    260px rail, where the title floor is what the second line buys.
+ */
+const SUP10 = "plans/sup10.mdx";
+const BIG = "plans/big.mdx";
+const THREE = "plans/three.mdx";
+const BARE = "plans/bare.mdx";
+const BIG_ATTACHED = 120;
+const BIG_SUPERSEDED = 100;
+const md = (title: string, extra: string[] = []) =>
+  ["---", `title: ${title}`, SETTLED_CREATED_LINE, ...extra, "---", "", `# ${title}`, "", "Body.", ""].join("\n");
+const html = (title: string) =>
+  `<!doctype html><html><head><title>${title}</title></head><body><p>${title}</p></body></html>`;
+const PILL_AND_FLAG = ["plan_status: shipped", "followups: open"];
+const EDGE_PAGES: Array<[string, string]> = [
+  [SUP10, md("Sup ten parent plan")],
+  ...Array.from({ length: 10 }, (_, i): [string, string] => [
+    `plans/sup10-old-${i + 1}.md`,
+    md(`Sup ten retired ${i + 1}`, ["superseded_by: [[sup10]]"]),
+  ]),
+  [BIG, md("Big parent plan with a long enough title", PILL_AND_FLAG)],
+  ...Array.from({ length: BIG_ATTACHED }, (_, i): [string, string] => [
+    `plans/big-prototype-${i + 1}.html`,
+    html(`Big mock ${i + 1}`),
+  ]),
+  ...Array.from({ length: BIG_SUPERSEDED }, (_, i): [string, string] => [
+    `plans/big-old-${i + 1}.md`,
+    md(`Big retired ${i + 1}`, ["superseded_by: [[big]]"]),
+  ]),
+  [THREE, md("Three attached plan title", PILL_AND_FLAG)],
+  ...Array.from({ length: 3 }, (_, i): [string, string] => [
+    `plans/three-prototype-${i + 1}.html`,
+    html(`Three mock ${i + 1}`),
+  ]),
+  [BARE, md("Bare plan with a pill and a flag", PILL_AND_FLAG)],
+];
+/** Rows on screen with every group closed: the two title pages + four parents. */
+const CLOSED_ROWS = 2 + 4;
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -55,6 +107,11 @@ test.beforeAll(async () => {
     "utf8",
   );
   await writeFile(path.join(root, SHORT_REL), ["---", "title: Short", "---", "", "# Short", "", "Body.", ""].join("\n"), "utf8");
+  for (const [rel, body] of EDGE_PAGES) {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), body, "utf8");
+  }
+  await settleWikiMtimes(root);
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -93,7 +150,7 @@ const HANDLE = "#wikiRailResizer";
 async function open(page: import("@playwright/test").Page): Promise<void> {
   await page.setViewportSize({ width: 1400, height: 900 });
   await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
-  await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+  await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
 }
 
 async function railWidth(page: import("@playwright/test").Page): Promise<number> {
@@ -141,7 +198,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     expect(Number(stored)).toBe(after);
 
     await page.reload();
-    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
     expect(await railWidth(page)).toBe(after);
   });
 
@@ -150,7 +207,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await page.evaluate((k) => localStorage.setItem(k, "560"), RAIL_WIDTH_KEY);
     await page.setViewportSize({ width: 700, height: 900 });
     await page.reload();
-    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
     // 45% of 700 = 315: the stored value is bounded at APPLY time, never
     // rewritten — widening the window again gets the stored width back.
     expect(await railWidth(page)).toBe(315);
@@ -198,7 +255,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await page.evaluate((k) => localStorage.setItem(k, "560"), RAIL_WIDTH_KEY);
     await page.setViewportSize({ width: 700, height: 900 });
     await page.reload();
-    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
     expect(await railWidth(page)).toBe(315);
     // Stepping from the STORED 560 moved nothing press after press while
     // rewriting the stored value (measured in review); the base is what is shown.
@@ -250,7 +307,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await open(page);
     await page.setViewportSize({ width: 700, height: 900 });
     await page.reload();
-    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
     const rb = await page.locator(RAIL).boundingBox();
     if (!rb) throw new Error("rail not laid out");
     const hb = await page.locator(HANDLE).boundingBox();
@@ -298,7 +355,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await open(page);
     await page.setViewportSize({ width: 1000, height: 900 });
     await page.reload();
-    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
     expect(await railWidth(page)).toBe(RAIL_WIDTH_DEFAULT_NARROW);
     await page.locator(HANDLE).focus();
     await page.keyboard.press("ArrowRight");
@@ -364,11 +421,118 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await open(page);
     await page.evaluate((k) => localStorage.setItem(k, "480"), RAIL_WIDTH_KEY);
     await page.reload();
-    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
     expect(await railWidth(page)).toBe(480);
 
     await page.locator(HANDLE).dblclick();
     expect(await railWidth(page)).toBe(RAIL_WIDTH_DEFAULT);
     expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBeNull();
+  });
+});
+
+/**
+ * The row's width budgets, driven at the widths where the round-3 verify pass
+ * of #557 measured them failing. Every case asserts a PROPERTY (nothing clipped,
+ * nothing overflowing its box, the title at its floor) and never a form or a
+ * pixel count, so a font-metric drift on another machine degrades the chip to
+ * its compact form rather than failing the case. The rail width is set the way
+ * a reader sets it: the stored value.
+ */
+test.describe("Wiki rail: row layout at the width budgets", () => {
+  type Page = import("@playwright/test").Page;
+  async function openAt(page: Page, width: number): Promise<void> {
+    await page.addInitScript(
+      ([key, w]) => localStorage.setItem(key as string, String(w)),
+      [RAIL_WIDTH_KEY, width] as const,
+    );
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
+    expect(await railWidth(page)).toBe(width);
+  }
+  const rowOf = (page: Page, rel: string) => page.locator(`.wiki-list-item[data-relpath="${rel}"]`);
+  /** The geometry every case reads: which chip form is painted and whether it is
+   *  whole, whether the title+chip pair overflows its box, the title's width,
+   *  and whether the ★+date slot sits on the title's line or under it. */
+  function geometry(page: Page, rel: string) {
+    return rowOf(page, rel).evaluate((el) => {
+      const q = (s: string) => el.querySelector(s) as HTMLElement | null;
+      const full = q(".wiki-fold-chip-label");
+      const counts = q(".wiki-fold-chip-counts");
+      const shown = full && getComputedStyle(full).display !== "none" ? full : counts;
+      const chip = q(".wiki-fold-chip");
+      const mid = q(".wiki-list-mid")!;
+      const title = q(".wiki-list-title")!;
+      const end = q(".wiki-list-end")!;
+      return {
+        label: shown?.textContent ?? "",
+        // scrollWidth and clientWidth are rounded apart on a fractional span, so a
+        // whole 98.4px label can read 99 > 98; a real clip here is 5px or more.
+        labelClipped: shown ? shown.scrollWidth - shown.clientWidth > 1 : false,
+        chipPastMid: chip ? chip.getBoundingClientRect().right - mid.getBoundingClientRect().right : 0,
+        midOverflow: mid.scrollWidth - mid.clientWidth,
+        title: title.getBoundingClientRect().width,
+        wrapped: end.getBoundingClientRect().top > title.getBoundingClientRect().top + 8,
+        endGap: el.getBoundingClientRect().right - 10 - end.getBoundingClientRect().right,
+        kids: Array.from(el.children).map((c) => [c.className.slice(0, 24), Math.round(c.getBoundingClientRect().width), Math.round(c.getBoundingClientRect().top)]),
+        item: el.clientWidth,
+      };
+    });
+  }
+
+  test("a superseded-only chip is never painted clipped, at the narrow rail and the default", async ({ page }) => {
+    for (const width of [260, 270, 300]) {
+      await openAt(page, width);
+      const g = await geometry(page, SUP10);
+      expect(g.label.replace(/\s+/g, " "), `counts intact at ${width}`).toContain("10");
+      expect(g.labelClipped, `label whole at ${width}: "${g.label}"`).toBe(false);
+      expect(g.chipPastMid, `chip inside its box at ${width}`).toBeLessThanOrEqual(0.5);
+      expect(g.title, `title floor at ${width}`).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
+    }
+  });
+
+  test("a three-digit chip beside a pill and a ⚑ stays inside the title+chip box at every width under 270", async ({ page }) => {
+    for (const width of [260, 265, 269, 270, 300]) {
+      await openAt(page, width);
+      const g = await geometry(page, BIG);
+      expect(g.label.replace(/\s+/g, " "), `counts intact at ${width}`).toContain(String(BIG_ATTACHED));
+      expect(g.labelClipped, `label whole at ${width}`).toBe(false);
+      expect(g.midOverflow, `pair fits its box at ${width}`).toBeLessThanOrEqual(0);
+      expect(g.chipPastMid, `chip inside its box at ${width}`).toBeLessThanOrEqual(0.5);
+      expect(g.title, `title floor at ${width}`).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
+      expect(g.endGap, `end slot flush right at ${width}`).toBeLessThanOrEqual(1);
+    }
+  });
+
+  /**
+   * The narrow floor, pinned where this fixture can pin it. On mimir the row
+   * this is about (`3 attached` + pill + ⚑ + a compact age) was the one chip row
+   * that wrapped at the 300px default and keeps one line on the narrow floor
+   * (measured: 0 wrapped rows at 300 after, 1 before). This fixture's row is
+   * settled, so its date is the wide form (74px against mimir's 26px) and the
+   * same row needs ~336px for one line under the narrow floor and ~350px under
+   * the default one — so 342 is the width at which the two floors differ, with
+   * ~6px of margin to either side.
+   */
+  test("a one-count chip beside a pill and a ⚑ keeps ONE line where only the narrow floor fits", async ({ page }) => {
+    await openAt(page, 342);
+    const g = await geometry(page, THREE);
+    expect(g.wrapped, `one line: ${JSON.stringify(g)}`).toBe(false);
+    expect(g.labelClipped).toBe(false);
+    expect(g.title).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
+  });
+
+  test("a chipless pill + ⚑ row at the narrow rail keeps the title floor, and its second line is flush right", async ({ page }) => {
+    await openAt(page, 260);
+    const g = await geometry(page, BARE);
+    // Whether it wraps is the row's business (measured: it does, at 260 — the
+    // fixed parts leave under the floor); what it must not do is starve the
+    // title or leave the ★+date hanging mid-row.
+    expect(g.title).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
+    expect(g.endGap).toBeLessThanOrEqual(1);
+    await openAt(page, 300);
+    const h = await geometry(page, BARE);
+    expect(h.wrapped, `one line at 300: ${JSON.stringify(h)}`).toBe(false);
+    expect(h.title).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
   });
 });

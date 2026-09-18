@@ -42,37 +42,58 @@ export const RAIL_WIDTH_KEY_STEP = 16;
 export const RAIL_TITLE_MIN = 72;
 
 /**
- * The floor for `.wiki-list-mid` — the title + chip pair — when the row carries
- * a group chip: the title's floor, the row's 8px gap, and 60px for the widest
- * COMPACT chip. Measured in Chromium on the reader's own rows: `1` is 29.4px of
- * chip, `2 · 1` 45.1px and `10 · 10` 57.1px, so 60 covers every count a wiki
- * folder can realistically produce. Under this the pair cannot hold both at
- * their floors, so the row takes a second line rather than starving one.
+ * The floors for `.wiki-list-mid` — the title + chip pair — when the row carries
+ * a group chip: the title's floor, the row's 8px gap, and the widest COMPACT chip
+ * of the chip's digit class. Under the floor the pair cannot hold both at their
+ * floors, so the row takes a second line rather than starving one — and the
+ * floor is ALSO what decides when a row wraps, which is why it is three numbers
+ * and not one. Measured in Chromium on the reader's own rows (the caret
+ * included):
+ *   - one count, `counts-narrow`: `9` 31.2px, `99` 38.0, `999` 44.8 → 46;
+ *   - two counts of up to two digits, the default: `9 · 9` 47.3, `99 · 99`
+ *     60.9 → 62 (#557 budgeted 60 from `10 · 10` at 57.1, which `88 · 88` at
+ *     60.9 already exceeds);
+ *   - anything wider, `counts-wide`: `120 · 100` 70.2, `999 · 999` 74.5 → 76.
+ * A four-digit count (`1000`, 49.5px) and a four-status family roll-up
+ * (`10 · 10 · 10 · 10`, ~91px) exceed their bucket and fall to the backstops —
+ * the title's own `min-width` and the compact chip's `flex-shrink: 0` — which
+ * a group row never reaches (its mid is the rail minus 46.4px, 213.6px at the
+ * narrowest) and a page row reaches only with a four-digit count.
  *
- * What it costs, stated: a group row needs 268.7px of rail to keep its ★+date on
- * the first line (7 dot + 8 + 140 + 8 + 73.7, plus 32px of row/list padding), so
- * between `RAIL_WIDTH_MIN` and ~269 every group row is two lines. At the 300px
- * default it is one.
+ * What the buckets buy, stated: with one 140px floor a `3 attached` row carrying
+ * a pill and a ⚑ needed 274.5px of rail for one line, so it wrapped at the 300px
+ * default (fixed parts 133.3px < 140 — measured on mimir, 1 of 8 chip rows);
+ * the narrow floor (126) keeps it on one line. And a three-digit compact chip
+ * (70.2px) overflowed the default floor's 60px by up to 10px onto the status
+ * pill at rails 260–270; the wide floor (156) makes that row wrap instead.
  */
-export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + 60;
+export const RAIL_MID_MIN_CHIP_NARROW = RAIL_TITLE_MIN + 8 + 46;
+export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + 62;
+export const RAIL_MID_MIN_CHIP_WIDE = RAIL_TITLE_MIN + 8 + 76;
 
 /**
- * The two container breakpoints, in px of REMAINING row space (`.wiki-list-mid`),
- * at or under which a chip swaps its words for its counts. Two of them because
+ * The three container breakpoints, in px of REMAINING row space (`.wiki-list-mid`),
+ * at or under which a chip swaps its words for its counts. Three of them because
  * the full label's width is a fact about the LABEL and not about the row:
- * measured, `1 attached` is 76.9px of chip and `10 attached · 10 superseded`
- * 166.9px, so one threshold sized for the long form would take the words off
- * every short chip at the default rail width — where they fit with room to
- * spare (169.3px of remaining space on a plain group row).
+ * measured (the caret included), `99 attached` is 85.5px of chip,
+ * `99 superseded` 100.3px and `99 attached · 99 superseded` 170.6px, so one
+ * threshold sized for the long form would take the words off every short chip at
+ * the default rail width — where they fit with room to spare (210px of remaining
+ * space on a plain group row).
  *
- * Each is the title's floor + the gap + that class's widest chip: 84 for a
- * one-kind label (76.9 measured, +7 for the second digit) and 174 for a two-kind
- * one (166.9, same slack). So whenever the words are shown the title still has
- * its floor and nothing overflows — and when the measurement is off by a pixel
- * on another machine, the chip degrades to its compact form rather than to a
- * clipped one.
+ * Each is the title's floor + the gap + that class's widest label, rounded up:
+ * 88 for an attached-only label, 103 for a superseded-only one and 174 for a
+ * two-kind one (166.9 measured at `10 · 10`, 170.6 at `99 · 99`). #557 sized
+ * the one-kind class from `1 attached` (76.9 + 7 = 84), which `1 superseded`
+ * at 91.7 already exceeds — so a superseded-only chip painted its word
+ * clipped (`10 supersede…`, 90 of 98.4px) at the 260px rail, and a live
+ * `1 superseded` row on mimir clipped by 4px at 281. So whenever the words are
+ * shown the title still has its floor and nothing overflows — and when the
+ * measurement is off by a pixel on another machine, the chip degrades to its
+ * compact form rather than to a clipped one.
  */
-export const RAIL_CHIP_SWITCH_SHORT = RAIL_TITLE_MIN + 8 + 84;
+export const RAIL_CHIP_SWITCH_SHORT = RAIL_TITLE_MIN + 8 + 88;
+export const RAIL_CHIP_SWITCH_SUPERSEDED = RAIL_TITLE_MIN + 8 + 103;
 export const RAIL_CHIP_SWITCH_WIDE = RAIL_TITLE_MIN + 8 + 174;
 
 /**
@@ -97,9 +118,10 @@ export const RAIL_CHIP_SWITCH_WIDE = RAIL_TITLE_MIN + 8 + 174;
  * attachment label does; it is a backstop, not a fourth breakpoint.
  *
  * There is deliberately no group-specific SHORT constant: a one-kind roll-up
- * measures 61–80.3px (`12 pages`, `10 shipped`, `12 unmarked`), which is what
- * `RAIL_CHIP_SWITCH_SHORT`'s 84 was already sized for, so a month chip keeps its
- * words down to the 260px rail.
+ * measures 61–80.3px (`12 pages`, `10 shipped`, `12 unmarked`), which
+ * `RAIL_CHIP_SWITCH_SHORT`'s budget already covers, so a month chip keeps its
+ * words down to the 260px rail; a one-status `N superseded` slate carries the
+ * page chip's superseded-only class and its breakpoint.
  */
 export const RAIL_GROUP_CHIP_SWITCH = RAIL_TITLE_MIN + 8 + 155;
 /** The share of the window a stored width may take at apply time. */

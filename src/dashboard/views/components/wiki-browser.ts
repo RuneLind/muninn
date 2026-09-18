@@ -95,6 +95,8 @@ import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
   buildRail,
   foldChipCompactLabel,
+  foldChipCountsClass,
+  foldChipLabelClass,
   foldChipKinds,
   foldChipLabel,
   isFoldOpen,
@@ -635,6 +637,9 @@ function statusPillHtml(p: WikiListing): string {
   return `<span class="wiki-status plan-${esc(p.plan_status)}"${title}>${esc(p.plan_status)}</span>`;
 }
 
+/** A class-list fragment: the class with its leading space, or nothing. */
+const cls = (c: string): string => (c ? " " + c : "");
+
 /** The open-follow-ups marker — deliberately separate from the status pill so the
  *  two axes stay distinguishable, and independent of `plan_status` (a page can
  *  declare follow-ups without a status). */
@@ -1101,7 +1106,11 @@ function renderList(): void {
         `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
         `<div class="wiki-list-mid">` +
         `<div class="wiki-group-label">${esc(entry.group.label)}</div>` +
-        `<span class="wiki-fold-chip is-group${roll.wide ? " is-wide" : ""} static">` +
+        // The same two size classes as a page chip — the roll-up's words and its
+        // digits are judged by the same budgets (a one-status `10 superseded`
+        // slate is the superseded-only shape; a four-status roll-up is wide).
+        `<span class="wiki-fold-chip is-group${roll.wide ? " is-wide" : roll.label.endsWith(" superseded") ? " is-superseded-only" : ""}` +
+        `${cls(foldChipCountsClass(roll.compact))} static">` +
         `<span class="wiki-fold-chip-label">${esc(roll.label)}</span>` +
         `<span class="wiki-fold-chip-counts">${esc(roll.compact)}</span>` +
         `</span>` +
@@ -1196,11 +1205,13 @@ function renderList(): void {
         ? (() => {
             const full = foldChipLabel(entry.children);
             const kinds = foldChipKinds(entry.children);
-            // `is-wide` is the LABEL's size class, not the group's: the widest
-            // one-kind label is about half the width of the widest two-kind one,
-            // and one breakpoint sized for the long form would take the words off
-            // every `1 attached` chip at the default rail width.
-            const wide = kinds.attached > 0 && kinds.superseded > 0;
+            // The chip's two size classes are the LABEL's, not the group's: the
+            // words pick the breakpoint at which they yield to the counts (three
+            // shapes, three measured budgets), and the digits pick how much row
+            // the compact form is guaranteed — see `foldChipLabelClass` and
+            // `foldChipCountsClass`.
+            const compact = foldChipCompactLabel(entry.children);
+            const sizeClasses = cls(foldChipLabelClass(kinds)) + cls(foldChipCountsClass(compact));
             const why = entry.forcedOpen
               ? "the open page is in this group"
               : (entry.folded ? "Show" : "Hide") + " what folds under this page";
@@ -1210,7 +1221,7 @@ function renderList(): void {
             // (a `display:none` span is out of the accessible name).
             const hover = `${full} — ${why}`;
             return (
-              `<button type="button" class="wiki-fold-chip${wide ? " is-wide" : ""}${entry.folded ? " folded" : ""}"` +
+              `<button type="button" class="wiki-fold-chip${sizeClasses}${entry.folded ? " folded" : ""}"` +
               ` data-fold-key="${esc(normalizeFoldKey(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
               // Forced open because the reader is ON a page in this group: the same
               // inert control the section header renders, for the same reason.
@@ -1222,7 +1233,7 @@ function renderList(): void {
               // server does not have and the client would have to recompute on
               // every rail drag.
               `<span class="wiki-fold-chip-label">${esc(full)}</span>` +
-              `<span class="wiki-fold-chip-counts">${esc(foldChipCompactLabel(entry.children))}</span>` +
+              `<span class="wiki-fold-chip-counts">${esc(compact)}</span>` +
               `</button>`
             );
           })()

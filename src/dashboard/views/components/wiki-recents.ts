@@ -254,6 +254,45 @@ export function foldChipCompactLabel(children: readonly WikiListing[]): string {
 }
 
 /**
+ * The chip's WORD-size class — which container breakpoint decides when its
+ * words yield to the counts (`wiki-page.ts`, the three `@container railmid`
+ * rules; budgets in `wiki-rail-width.ts`). A class per label shape because the
+ * full label's width is a fact about the label: `99 attached` is 85.5px of
+ * chip, `99 superseded` 100.3px and `99 attached · 99 superseded` 170.6px, and
+ * one threshold sized for the widest takes the words off every short chip at
+ * the default rail. #557 budgeted the one-kind class from `1 attached` alone,
+ * so a superseded-only chip painted clipped (`10 supersede…`) at the 260px rail
+ * — hence the third class.
+ */
+export function foldChipLabelClass(kinds: {
+  attached: number;
+  superseded: number;
+}): "" | "is-superseded-only" | "is-wide" {
+  if (kinds.attached > 0 && kinds.superseded > 0) return "is-wide";
+  if (kinds.superseded > 0) return "is-superseded-only";
+  return "";
+}
+
+/**
+ * The chip's DIGIT-size class — how much of the row the COMPACT form is
+ * guaranteed, i.e. the `.wiki-list-mid` floor that makes the row wrap before the
+ * counts can overflow onto the status pill. Judged on the compact label alone:
+ * one count (`999`, 44.8px) is narrow; two counts of up to two digits
+ * (`99 · 99`, 60.9px) is the default the floor was sized for; anything wider
+ * (`120 · 100` at 70.2px, `999 · 999` at 74.5px, a family roll-up of three or
+ * four statuses) is wide. The narrow bucket is what keeps a `3 attached` row
+ * with a pill and a ⚑ on one line at the default rail; the wide one is what
+ * stops a three-digit chip overflowing its box by 3–9px at rails 260–270.
+ */
+export function foldChipCountsClass(compact: string): "" | "counts-narrow" | "counts-wide" {
+  if (!compact) return "";
+  const counts = compact.split(" · ");
+  if (counts.length === 1) return "counts-narrow";
+  if (counts.length === 2 && counts.every((c) => c.length <= 2)) return "";
+  return "counts-wide";
+}
+
+/**
  * Read a stored list of relPaths back. Everything that is not a JSON array of
  * strings is `[]` — an absent key, an old format, a hand-edited string, `null`,
  * an object. Non-string and blank entries are dropped, duplicates collapse to
