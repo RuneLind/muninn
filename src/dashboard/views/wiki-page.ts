@@ -336,8 +336,14 @@ export async function renderWikiPage(opts?: {
       text-transform: uppercase; color: var(--text-muted);
     }
     .wiki-sec-fold:hover { color: var(--text-secondary); }
+    .wiki-sec-fold[disabled] { cursor: default; }
+    /* --text-secondary, not --text-muted: this pill paints its own --bg-surface
+       background, where muted measures 4.42:1 in the LIGHT theme (9.7:1 here) —
+       under the 4.5:1 floor for a number the reader has to read. Measured on a
+       body probe by the spec's contrast case, which reads whatever actually
+       paints behind it rather than a token named in this file. */
     .wiki-sec-count {
-      font-size: 10px; letter-spacing: 0; color: var(--text-muted);
+      font-size: 10px; letter-spacing: 0; color: var(--text-secondary);
       background: var(--bg-surface); border-radius: 999px; padding: 0 6px;
     }
     /* The caret is the ONE shape both fold controls share, so the chip and the
@@ -359,13 +365,26 @@ export async function renderWikiPage(opts?: {
        both-themes contrast case, which measures against whatever actually
        paints behind it. */
     .wiki-fold-chip {
-      display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+      display: inline-flex; align-items: center; gap: 4px;
       background: transparent; border: 1px solid var(--border-primary);
       border-radius: 999px; padding: 0 7px; margin-top: 1px;
       font-family: inherit; font-size: 10.5px; line-height: 16px;
       color: var(--text-muted); cursor: pointer; white-space: nowrap;
+      /* SHRINKABLE, and the label clips rather than the row scrolling: nowrap +
+         flex-shrink:0 made the page list scroll horizontally at the rail's own
+         minimum width (measured 258px). The caret and the border survive any
+         width, so the chip stays recognisable as the control it is. */
+      min-width: 0; flex-shrink: 1;
     }
+    .wiki-fold-chip-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
     .wiki-fold-chip:hover { color: var(--text-secondary); border-color: var(--accent); }
+    /* The ROW's hover paints --bg-surface behind this transparent chip, where
+       --text-muted measures 4.42:1 in the light theme — and hovering the row is
+       the state the reader clicks the chip in. Secondary in both themes. */
+    .wiki-list-item:hover .wiki-fold-chip { color: var(--text-secondary); }
+    /* Forced open because the open page is inside: not a toggle, and it says so
+       rather than reading as a control that does nothing. */
+    .wiki-fold-chip[disabled] { cursor: default; opacity: .85; }
     /* A child row: indented under its parent, with a rail on the left so the
        group reads as one block rather than as rows that happen to be adjacent.
        The indent is on the ROW, so the row stays a full-width click target. */

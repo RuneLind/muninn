@@ -163,7 +163,12 @@ test.describe("Wiki rail: attachments", () => {
     };
     const by = new Map(data.pages.map((p) => [p.relPath, p]));
     expect(by.size).toBe(ALL_PAGES);
-    expect(by.get(X)!.children).toEqual([PROTO2, PROTO, Z]);
+    // The PARENT link is what rides the wire; the store's `children` array is
+    // stripped, since the rail rebuilds each group from the pages the facets left.
+    expect(by.get(X)!.children).toBeUndefined();
+    expect(data.pages.filter((p) => p.parent === X).map((p) => p.relPath).sort()).toEqual(
+      [PROTO, PROTO2, Z].sort(),
+    );
     expect(by.get(PROTO)!).toMatchObject({ parent: X, pairedBy: "suffix" });
     expect(by.get(Z)!).toMatchObject({ parent: X, pairedBy: "superseded" });
     expect(by.get(Y_HTML)!).toMatchObject({ parent: Y, pairedBy: "stem" });
@@ -173,6 +178,35 @@ test.describe("Wiki rail: attachments", () => {
     // …and the STEM still answers with the markdown page.
     const byName = await fetch(`${BASE}/api/wiki/page?wiki=${WIKI}&name=y`);
     expect(((await byName.json()) as { meta: { relPath: string } }).meta.relPath).toBe(Y);
+  });
+
+  // A name-only navigation — `?page=<stem>` at boot and on popstate, the click
+  // delegate's no-relPath fallback, an Ask citation, a chat wiki citation — used
+  // to open the DIAGRAM: the listing is relPath-ordered, so `plans/y.html` was
+  // the first `name === "y"` match and the explainer branch took it. The server
+  // never agreed: an attachment registers no stem key, so `?name=y` answers the
+  // markdown page.
+  test("a name-only navigation opens the PAGE, never its attachment", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=y`);
+    await expect(page.locator(".wiki-list-item").first()).toBeAttached();
+    await expect(page.locator("#articleWrap")).toContainText("Y page");
+    await expect(page.locator(".wiki-explainer-frame")).toHaveCount(0);
+    await expect(row(page, Y)).toHaveClass(/active/);
+
+    // The same lookup, reached the way an Ask citation reaches it: a link
+    // carrying `data-page` and no `data-relpath`, handled by the shell's own
+    // click delegate. (Driving a real Ask answer would cost a model call.)
+    await openRail(page);
+    await page.evaluate(() => {
+      const a = document.createElement("a");
+      a.setAttribute("data-page", "y");
+      a.id = "e2e-citation";
+      a.textContent = "Y";
+      document.getElementById("articleWrap")!.appendChild(a);
+    });
+    await page.click("#e2e-citation");
+    await expect(page.locator("#articleWrap")).toContainText("Y page");
+    await expect(page.locator(".wiki-explainer-frame")).toHaveCount(0);
   });
 
   test("groups start CLOSED: chips say what is inside, and the count agrees with the rows", async ({
@@ -223,6 +257,30 @@ test.describe("Wiki rail: attachments", () => {
     // The reader is ON the attachment — the rail must not be hiding it.
     await expect(row(page, Y_HTML)).toHaveClass(/active/);
     expect(await relPaths(page)).toContain(Y_HTML);
+    // …and the chip on that group is not a toggle: `isOpen` is `forced || stored`,
+    // so a click could only write a stored key with nothing on screen to show for
+    // it. It is disabled (a disabled button dispatches no click at all) and says
+    // why on hover.
+    const chip = row(page, Y).locator(".wiki-fold-chip");
+    await expect(chip).toHaveAttribute("aria-expanded", "true");
+    await expect(chip).toBeDisabled();
+    await expect(chip).toHaveAttribute("title", /open page is in this group/);
+    await chip.click({ force: true });
+    expect(await relPaths(page)).toContain(Y_HTML);
+  });
+
+  // The rail's own minimum width. `#wikiList` scrolling sideways hides the ★, the
+  // date and half the title behind a scrollbar nothing tells the reader about.
+  test("the chip does not push the rail into a horizontal scroll", async ({ page }) => {
+    await page.setViewportSize({ width: 420, height: 900 });
+    await openRail(page);
+    const overflow = await page.locator("#wikiList").evaluate((el) => ({
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      chip: !!el.querySelector(".wiki-fold-chip"),
+    }));
+    expect(overflow.chip).toBe(true); // the case is only about a rail WITH a chip
+    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
   });
 
   test("a query FLATTENS the rail — every match is a row, none folded away", async ({ page }) => {
@@ -257,62 +315,77 @@ test.describe("Wiki rail: attachments", () => {
     }
   });
 
-  // Both themes, and the contrast measured rather than eyeballed: the chip
-  // carries a COUNT the reader has to read, so it sits at --text-muted like the
-  // provenance strip's own lines and not at the dimmer tokens beside it
-  // (--text-dim is 3.24:1 dark / 3.74:1 light, under the 4.5:1 floor). The
-  // expected colour is resolved on a body probe rather than written as a
-  // literal — a literal passes against the wrong rule.
+  // Both themes, every state the text is READ in, and measured rather than
+  // eyeballed: these are counts, so 4.5:1 is the floor, and the background is
+  // whatever actually paints behind the element — which is the half a
+  // `toHaveCSS("color", <token>)` assertion cannot see. The row's own HOVER is
+  // the state a reader clicks the chip in, and it paints --bg-surface behind a
+  // transparent chip, where --text-muted measures 4.42:1 in the light theme.
   for (const scheme of ["light", "dark"] as const) {
-    test(`the chip and the child rail are legible in the ${scheme} theme`, async ({ page }) => {
+    test(`the chip, the count pill and the child rail are legible in the ${scheme} theme`, async ({
+      page,
+    }) => {
       await page.emulateMedia({ colorScheme: scheme });
-      await openRail(page);
-      const chip = row(page, X).locator(".wiki-fold-chip");
-      const muted = await page.evaluate(() => {
-        const probe = document.createElement("span");
-        probe.style.color = "var(--text-muted)";
-        document.body.appendChild(probe);
-        const c = getComputedStyle(probe).color;
-        probe.remove();
-        return c;
-      });
-      await expect(chip).toHaveCSS("color", muted);
+      // A bookkeeping page, so the section header's count pill is on screen too.
+      // Written here and removed after, like the Bookkeeping case below.
+      await writeFile(path.join(root, "plans/index.md"), md("Plans index"), "utf8");
+      await settleWikiMtimes(root);
+      try {
+        await fetch(`${BASE}/api/wiki/pages?wiki=${WIKI}&refresh=1`);
+        await openRail(page);
+        const chip = row(page, X).locator(".wiki-fold-chip");
 
-      // …and that colour really clears the floor against what is BEHIND it.
-      const ratio = await chip.evaluate((el) => {
-        const lum = (c: string): number => {
-          const [r, g, b] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number) as [number, number, number];
-          const ch = (v: number) => {
-            const s = v / 255;
-            return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-          };
-          return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
-        };
-        // The nearest ancestor that actually paints — the chip's own background
-        // is a token over the pane's.
-        let node: HTMLElement | null = el as HTMLElement;
-        let bg = "rgba(0, 0, 0, 0)";
-        while (node) {
-          const c = getComputedStyle(node).backgroundColor;
-          if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) {
-            bg = c;
-            break;
-          }
-          node = node.parentElement;
-        }
-        const a = lum(getComputedStyle(el).color);
-        const b = lum(bg);
-        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-      });
-      expect(ratio).toBeGreaterThanOrEqual(4.5);
+        expect(await contrastOf(chip)).toBeGreaterThanOrEqual(4.5);
+        // …in the state the reader clicks it in: the ROW hovered, which paints
+        // --bg-surface behind a transparent chip. Hovered on the TITLE, not on the
+        // row box — Playwright aims at an element.s centre, and the row.s centre
+        // lands ON the chip, where the chip.s OWN :hover rule answers and this
+        // case measures nothing (measured: it did).
+        await row(page, X).locator(".wiki-list-title").hover();
+        expect(await chip.evaluate((el) => el.matches(":hover"))).toBe(false);
+        expect(await contrastOf(chip)).toBeGreaterThanOrEqual(4.5);
+        // …and the section header's count, which paints its own background.
+        expect(await contrastOf(page.locator(".wiki-sec-fold .wiki-sec-count"))).toBeGreaterThanOrEqual(4.5);
 
-      // The child rail: a CHILD row carries the left rule that makes the group
-      // read as one block. Open the fold first — closed, there is no child row.
-      await row(page, X).locator(".wiki-fold-chip").click();
-      const railColor = await row(page, PROTO).evaluate(
-        (el) => getComputedStyle(el, "::before").backgroundColor,
-      );
-      expect(railColor).not.toBe("rgba(0, 0, 0, 0)");
+        // The child rail: a CHILD row carries the left rule that makes the group
+        // read as one block. Open the fold first — closed, there is no child row.
+        await chip.click();
+        const railColor = await row(page, PROTO).evaluate(
+          (el) => getComputedStyle(el, "::before").backgroundColor,
+        );
+        expect(railColor).not.toBe("rgba(0, 0, 0, 0)");
+      } finally {
+        await rm(path.join(root, "plans/index.md"), { force: true });
+        await fetch(`${BASE}/api/wiki/pages?wiki=${WIKI}&refresh=1`);
+      }
     });
   }
 });
+
+/** WCAG contrast of an element's text against the nearest ancestor that really
+ *  paints a background — including whatever a `:hover` has put there. */
+async function contrastOf(locator: import("@playwright/test").Locator): Promise<number> {
+  return locator.evaluate((el) => {
+    const lum = (c: string): number => {
+      const [r, g, b] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number) as [number, number, number];
+      const ch = (v: number) => {
+        const s = v / 255;
+        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
+    };
+    let node: HTMLElement | null = el as HTMLElement;
+    let bg = "rgba(0, 0, 0, 0)";
+    while (node) {
+      const c = getComputedStyle(node).backgroundColor;
+      if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) {
+        bg = c;
+        break;
+      }
+      node = node.parentElement;
+    }
+    const a = lum(getComputedStyle(el).color);
+    const b = lum(bg);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  });
+}

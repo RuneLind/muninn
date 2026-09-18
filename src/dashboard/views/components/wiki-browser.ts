@@ -178,6 +178,7 @@ import {
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
 import {
+  findPageByName,
   findPageByRelPath,
   isActivePage,
   navTargetFrom,
@@ -1019,7 +1020,12 @@ function renderList(): void {
           `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
           `<button type="button" class="wiki-sec-fold${entry.folded ? " folded" : ""}"` +
           ` data-fold-key="${esc(entry.foldKey)}" aria-expanded="${entry.folded ? "false" : "true"}"` +
-          ` title="${esc(label + " the " + entry.label.toLowerCase() + " pages")}">` +
+          // Forced open by the reader being on a page inside it: a click could
+          // only write a stored key nothing on screen reflects, so the control
+          // says what it is instead of behaving like a broken toggle. `disabled`
+          // is what makes that true — a disabled button dispatches no click.
+          (entry.forcedOpen ? ` disabled` : "") +
+          ` title="${esc(entry.forcedOpen ? "the open page is in this section" : label + " the " + entry.label.toLowerCase() + " pages")}">` +
           `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
           `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
           `<span class="wiki-sec-count">${entry.count ?? 0}</span>` +
@@ -1077,7 +1083,11 @@ function renderList(): void {
       ? entry.activity.why + (childWhy ? "\n" + childWhy : "")
       : childWhy;
     html +=
-      `<div class="wiki-list-item${active ? " active" : ""}${entry.child ? " child" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      // The indent is for a row drawn INSIDE its parent's group. A lifted child
+      // (Activity ranked it, or the reader pinned it) sits under an unrelated
+      // row, where an indent + left rule claims a parentage the rail invented;
+      // it keeps the hover sentence, which is the true statement of the two.
+      `<div class="wiki-list-item${active ? " active" : ""}${entry.child && !entry.lifted ? " child" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
       // The derivation on the ROW, and again on the title element below:
       // the child's own `title=` wins the hover over most of the row's width.
       (rowTitle ? ` title="${esc(rowTitle)}"` : "") +
@@ -1098,9 +1108,16 @@ function renderList(): void {
       (entry.children?.length
         ? `<button type="button" class="wiki-fold-chip${entry.folded ? " folded" : ""}"` +
           ` data-fold-key="${esc(foldKeyForPage(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
-          ` title="${esc((entry.folded ? "Show" : "Hide") + " what folds under this page")}">` +
+          // Forced open because the reader is ON a page in this group: the same
+          // inert control the section header renders, for the same reason.
+          (entry.forcedOpen ? ` disabled` : "") +
+          ` title="${esc(entry.forcedOpen ? "the open page is in this group" : (entry.folded ? "Show" : "Hide") + " what folds under this page")}">` +
           `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
-          esc(foldChipLabel(entry.children)) +
+          // The label is its own element so it can ELLIPSIZE: nowrap and
+          // unshrinkable, the chip pushed `#wikiList` into a horizontal scroll at
+          // the rail's own minimum width (measured at 258px, `2 attached · 1
+          // superseded` beside a status pill).
+          `<span class="wiki-fold-chip-label">${esc(foldChipLabel(entry.children))}</span>` +
           `</button>`
         : "") +
       // Pill THEN flag, the same order as the article header's `badgeHtml` — the
@@ -2085,7 +2102,13 @@ function loadPage(name: string, push: boolean): void {
   // A navigation is a re-render anyway, so a stashed page set lands here too —
   // and it must land BEFORE the explainer lookup below reads `allPages`.
   applyPendingPages();
-  const listing = allPages.find((p) => p.name === name);
+  // `findPageByName`, not a raw `name ===` scan: the listing is relPath-ordered,
+  // so a page's own same-stem diagram (`plans/y.html` before `plans/y.md`) was
+  // the first match and this branch opened the DIAGRAM for `?page=y`, for an Ask
+  // citation and for a chat wiki citation. The server's `index.resolve(name)`
+  // answers the markdown page — an attachment registers no stem key — so the
+  // route below would have loaded the page the iframe was covering.
+  const listing = findPageByName(allPages, name);
   if (listing && listing.type === "explainer") {
     loadExplainer(listing, push);
     return;

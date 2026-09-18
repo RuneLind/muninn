@@ -83,6 +83,46 @@ export function findPageByRelPath<T extends { relPath: string }>(
 }
 
 /**
+ * Find the listing a page NAME identifies — the reader's route whenever no
+ * relPath is in hand: `?page=<stem>` at boot and on popstate, the no-relPath
+ * fallback in the click delegate, an Ask citation (`data-page` with no
+ * `data-relpath`) and a chat wiki citation.
+ *
+ * It exists because a raw `pages.find(p => p.name === name)` over the
+ * relPath-ordered listing answers `x.html` for a page whose diagram sits beside
+ * it — `plans/y.html` sorts before `plans/y.md` — and the caller's explainer
+ * branch then opens the diagram in the iframe. The server never does that: a
+ * rule-1 attachment registers NO stem key, so `index.resolve(name)` answers the
+ * markdown page, and `/api/wiki/page?name=` with it.
+ *
+ * It mirrors that registration in ONE rule, so the answer does not depend on the
+ * order the listing arrives in — which is the point, since nothing on the wire
+ * promises one: **a `pairedBy === "stem"` child is never the answer, and among
+ * the rest the LOWEST relPath wins**, which is what "first-wins over a
+ * relPath-sorted `pages`" resolves to on the server.
+ *
+ * Deliberately ONE rule and not two. An extension-rank preference beside the
+ * skip reads like a second lock, but after the same-stem drop no two SURVIVING
+ * pages of different extensions can share a stem by any other route — so it can
+ * never decide anything the skip has not already decided, and two mechanisms for
+ * one outcome is how NEITHER ends up pinned (measured: with both here, deleting
+ * either one kept this module's tests green).
+ */
+export function findPageByName<T extends { name: string; relPath: string; pairedBy?: string }>(
+  pages: readonly T[],
+  name: string,
+): T | undefined {
+  const want = (name || "").trim();
+  if (!want) return undefined;
+  let best: T | undefined;
+  for (const p of pages) {
+    if (p.name !== want || p.pairedBy === "stem") continue;
+    if (!best || normalizeRel(p.relPath) < normalizeRel(best.relPath)) best = p;
+  }
+  return best;
+}
+
+/**
  * Is this list row / card the page currently open?
  *
  * relPath decides whenever BOTH sides have one — that is the only test that
