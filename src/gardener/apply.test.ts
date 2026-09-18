@@ -451,6 +451,32 @@ describe("applyWikiProposal", () => {
     expect(res.outcome).toBe("error");
   });
 
+  test("update-mode target that is an ATTACHMENT ⇒ error, no write", async () => {
+    // A same-stem `.html` is in the index since the rail's attachment groups, so
+    // "is it an indexed page?" stopped being the whole question: writing a
+    // markdown draft over a diagram destroys the file the page embeds.
+    const target = path.join(wikiDir, "concepts/Paired.html");
+    await mkdir(path.dirname(target), { recursive: true });
+    const current = "<!doctype html><html><head><title>Paired</title></head><body>d</body></html>";
+    await writeFile(target, current);
+    await writeFile(path.join(wikiDir, "concepts/Paired.md"), "---\ntitle: Paired\n---\n\nProse.\n");
+
+    const proposal = makeProposal({
+      mode: "update",
+      targetPath: "concepts/Paired.html",
+      baseHash: sha256(current),
+      draft: DRAFT_BODY,
+    });
+    const res = await applyWikiProposal(proposal, deps());
+    expect(res.outcome).toBe("error");
+    // …and it is refused as an EXPLAINER, not incidentally by the markdown-only
+    // path-confinement rule one step below (which also refuses it, and says so in
+    // a sentence about paths that tells the reviewer nothing about the page).
+    expect(res.outcome === "error" && res.reason).toContain("explainer");
+    expect(await readFile(target, "utf8")).toBe(current);
+    expect(reindexed).toEqual([]);
+  });
+
   test("path-confinement rejection at apply (escaping target) ⇒ error, no write", async () => {
     const proposal = makeProposal({ targetPath: "../escape.md" });
     const res = await applyWikiProposal(proposal, deps());

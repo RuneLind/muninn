@@ -307,6 +307,20 @@ async function applyInner(
         reason: `update target "${proposal.targetPath}" is not an indexed wiki page`,
       };
     }
+    // …and it must be a MARKDOWN page. Since the rail's attachment groups a
+    // same-stem `.html` is in `index.pages` rather than dropped, so "indexed" no
+    // longer implies "writable": every draft here is markdown, and writing one
+    // over an explainer destroys the diagram its page embeds. The markdown-only
+    // rule in `isPathConfined` below refuses it too — this says WHICH page it is,
+    // which is the sentence the reviewer of a failed apply reads. A rule-4
+    // (`superseded`) child is markdown and stays updatable, like any page with a
+    // twin elsewhere.
+    if (page.type === "explainer") {
+      return {
+        outcome: "error",
+        reason: `update target "${proposal.targetPath}" is an explainer page, not a markdown page`,
+      };
+    }
     existingRelPath = page.relPath;
   }
 

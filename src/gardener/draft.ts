@@ -190,6 +190,12 @@ export function stripOwnedAliases(
   const owned = new Set<string>();
   for (const page of opts.index.pages) {
     if (opts.selfRelPath && page.relPath === opts.selfRelPath) continue;
+    // An ATTACHMENT owns none of its labels. A rule-1 `.html` child registers no
+    // stem key at all and registers its `<title>` last, behind every page that
+    // already held it (`store.ts`), so "this page owns the name" is false for it
+    // — and reserving the name here would silently delete a legitimate alias
+    // from every draft on a wiki where a page carries a same-stem diagram.
+    if (page.pairedBy === "stem") continue;
     for (const c of [page.title, page.name, ...page.aliases]) owned.add(normalizeLabel(c));
   }
 
