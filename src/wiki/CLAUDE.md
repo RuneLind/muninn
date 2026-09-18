@@ -719,13 +719,14 @@ was already sized for. The two page-row constants are untouched.
 is last in source order and flex wraps from the end, and `#wikiCount` carries
 `margin-left: auto`, so the select and the count keep the line they shared before
 this row grew a third control. The count's box is on the select's line at every
-width. **The width at which the toggle joins them is a fact about the LISTING,
-not a constant**: it moves with the count pill's own digits and the folder
-select's chosen option. Measured at a 1400px viewport, walking the rail one pixel
-at a time — mimir under `folder=plans` (`149 / 545`) wraps through 321 and shares
-one line from 322; the same wiki with no folder filter (`440 / 545`, the wider
-"All folders" option) from 324; the e2e fixture wiki (`22 / 22`) from 305. Any
-single number quoted here without its listing is one of those three.
+width. **The width at which the toggle joins them is a fact about the COUNT,
+not a constant**: it moves with the rendered glyph width of `#wikiCount`'s text
+(a narrow `1` buys two pixels), and with nothing else on that row — the folder
+select lives in the `#wikiFilters` details block, not here. Measured at a 1400px
+viewport, walking the rail one pixel at a time — a listing reading `149 / 545`
+wraps through 321 and shares one line from 322; `440 / 545` from 324; the e2e
+fixture wiki reading `17 / 18` (grouping off) from 305 and `8 / 18` (grouping on)
+from 301. Any single number quoted here without its count text is one of those.
 
 Acceptance: `wiki-groups.test.ts` (the rule's state space, on synthetic names —
 a private wiki's file names are a disclosure in a public repo),
