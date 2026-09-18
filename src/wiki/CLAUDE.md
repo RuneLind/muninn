@@ -511,8 +511,18 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
 
 A rail row is six things — type dot · title · group chip · status pill · ⚑ ·
 ★+date — and only the title is elastic. At the 260px rail (`RAIL_WIDTH_MIN`, i.e.
-any window under 1100px) the other five measure 143.4px plus 40px of gaps inside
-a 226px content box, so **42.6px is left for the title and the chip together**.
+any window under 1100px) the title gets what the 226px content box leaves after
+the row's other parts and one 8px gap per part after the first. Measured on
+mimir 2026-09-18 (the reviewer re-derived every term): dot 7; status pill
+44–76.3 (`superseded` is the widest); ⚑ 6.3; ★+date 25.7 as an age or 74 as a
+full date; an Activity row adds a 10px glyph and its gap; a chip row adds the
+compact chip (29.4–74.5) and its gap. So a chipless pill + ⚑ + age row keeps
+72–99px of title (the floor exactly on the `superseded` + age row: 226 − 32 −
+7 − 76.3 − 6.3 − 32.5 = 71.9), an Activity row 80, and a full-date row ~50 —
+under the floor, which is the shape that wraps at 260 (17 of 18 wrapped
+chipless rows; the 18th is the widest pill beside an age). #557's comment said
+"143.4px plus 40px of gaps, 42.6px left" and #559's first two drafts each
+replaced it with another single sum; the terms above are what re-derives.
 Two rounds of distributing that proportionally (the chip shrinkable, then the
 title on a 40% basis) each produced a 10px title and a count clipped to `10 · 1`.
 A share of too little is still too little, so each element has a rule instead:
@@ -523,9 +533,21 @@ A share of too little is still too little, so each element has a rule instead:
   `1 atta…` beside a comfortable title;
 - the **chip** never clips its digits: below a measured breakpoint it swaps its
   words for its counts (a container query on the row's REMAINING space), and one
-  breakpoint per label-length class (`is-wide` = both kinds), since `1 attached`
-  and `10 attached · 10 superseded` differ by 90px and a single threshold sized
-  for the long form strips the words off every short chip;
+  breakpoint per label-WIDTH class — a short one-kind label (the default:
+  `N attached`, `N shipped`, `N pages` at up to two digits), a long one-kind
+  label (`is-long`: the word `superseded` at any count, or any one-kind word at
+  three digits) and a two-kind label (`is-wide`) — since `99 attached`,
+  `99 superseded` and `99 attached · 99 superseded` are 85.5, 100.3 and 170.6px
+  of chip and a single threshold sized for the long form strips the words off
+  every short chip, while one sized for `1 attached` (what #557 shipped) paints
+  `10 supersede…` at the 260px rail. The painter also sets a DIGIT class from the
+  compact label (`counts-narrow` for one count of up to three digits,
+  `counts-wide` for a four-digit, three-digit-pair or three-plus-count one),
+  which picks the `.wiki-list-mid` floor — 46, 62 or
+  76px of compact chip beside the title's 72 — so a `3 attached` row with a pill
+  and a ⚑ keeps one line at the 300px rail and a `120 · 100` chip wraps its row
+  instead of overflowing onto the pill (`foldChipLabelClass`,
+  `foldChipCountsClass` in `wiki-recents.ts`; budgets in `wiki-rail-width.ts`);
 - the **pill and the ⚑** keep their intrinsic width — they are already the
   shortest form of themselves;
 - and when the floors still do not fit, the **row wraps** to a second line
@@ -713,7 +735,10 @@ are shorter than "attached", so a two-count roll-up priced at the ATTACHMENT
 chip's worst case went `display:none` at a mid of 253.6px — exactly the 300px
 shipped rail, which left `9 shipped · 1 superseded` hover-only on every rail
 anybody has. A one-kind roll-up keeps `RAIL_CHIP_SWITCH_SHORT`, which its 61–80px
-was already sized for. The two page-row constants are untouched.
+was already sized for — except a one-status `N superseded` slate, which carries
+the page chip's `is-long` class and breakpoint (inert there: a group row's mid
+is ≥ 213px). The page-row
+constants were re-budgeted by the layout follow-up (above), not by this change.
 
 **The sort row's third control wraps, and it is the TOGGLE.** `group families`
 is last in source order and flex wraps from the end, and `#wikiCount` carries

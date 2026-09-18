@@ -15,8 +15,10 @@ import {
   SECTION_META_FOLD_KEY,
   buildRail,
   foldChipCompactLabel,
+  foldChipCountsClass,
   foldChipKinds,
   foldChipLabel,
+  foldChipLabelClass,
   normalizeFoldKey,
   foldsKey,
   isFoldOpen,
@@ -1246,6 +1248,42 @@ describe("the fold store's rules", () => {
       "1 attached · 1 superseded",
     );
     expect(foldChipLabel([])).toBe("");
+  });
+  // The chip's two size classes are the label's WORDS and its DIGITS, judged
+  // apart: the words decide when the full form yields to the compact one, the
+  // digits decide how much of the row the compact form is guaranteed. Each
+  // bucket is the set of labels one measured budget covers (`wiki-rail-width.ts`).
+  test("label class: a short one-kind label is the default, a long one-kind label and a two-kind label each have their own", () => {
+    // Judged on the LABEL both painters build, so the page chip and the family
+    // roll-up cannot classify the same words differently.
+    expect(foldChipLabelClass("1 attached")).toBe("");
+    expect(foldChipLabelClass("99 attached")).toBe("");
+    expect(foldChipLabelClass("12 pages")).toBe("");
+    expect(foldChipLabelClass("10 shipped")).toBe("");
+    // The word "superseded" is wider than the short budget at any count…
+    expect(foldChipLabelClass("1 superseded")).toBe("is-long");
+    expect(foldChipLabelClass("99 superseded")).toBe("is-long");
+    // …and a three-digit count pushes any one-kind label past it.
+    expect(foldChipLabelClass("120 attached")).toBe("is-long");
+    expect(foldChipLabelClass("999 attached")).toBe("is-long");
+    expect(foldChipLabelClass("100 shipped")).toBe("is-long");
+    expect(foldChipLabelClass("1 attached · 1 superseded")).toBe("is-wide");
+    expect(foldChipLabelClass("9 shipped · 1 superseded")).toBe("is-wide");
+    expect(foldChipLabelClass("")).toBe("");
+  });
+  test("counts class: one count of up to three digits is narrow, two of up to two digits is the default, anything wider is wide", () => {
+    expect(foldChipCountsClass("1")).toBe("counts-narrow");
+    expect(foldChipCountsClass("999")).toBe("counts-narrow");
+    // Past three digits the narrow budget is exceeded; the wide floor takes it.
+    expect(foldChipCountsClass("1000")).toBe("counts-wide");
+    expect(foldChipCountsClass("9999")).toBe("counts-wide");
+    expect(foldChipCountsClass("1 · 1")).toBe("");
+    expect(foldChipCountsClass("99 · 99")).toBe("");
+    expect(foldChipCountsClass("120 · 100")).toBe("counts-wide");
+    expect(foldChipCountsClass("999 · 99")).toBe("counts-wide");
+    // A family roll-up can carry three or four counts; they share the wide bucket.
+    expect(foldChipCountsClass("3 · 3 · 3 · 3")).toBe("counts-wide");
+    expect(foldChipCountsClass("")).toBe("");
   });
 });
 
