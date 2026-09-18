@@ -2426,7 +2426,12 @@ function supersededTargetRef(raw: string, fromDir: string): { dir: string; stem:
  *  3. **Embedded** — the markdown page carries `<Embed src="./child.html">`. An
  *     EMBEDDED html is part of the page; a LINKED one is a peer, so a markdown
  *     link pairs nothing. One more guard makes it safe: an html embedded by TWO
- *     OR MORE pages stays a sibling — it belongs to no one page.
+ *     OR MORE pages stays a sibling — it belongs to no one page. A META-stemmed
+ *     html beside its own meta markdown page (`index.html` + `index.md`) is
+ *     dropped one layer above this pass and never reaches it, so rule 3 cannot
+ *     pair it whoever embeds it — unchanged from before attachments existed, and
+ *     `/api/wiki/html` still serves the dropped file by path, so the embed on the
+ *     page renders.
  *  4. **Superseded** — a page whose frontmatter names `superseded_by:` folds
  *     under its successor, and only when the successor is in its OWN folder (the
  *     value may name one: `[[archive/old-plan]]`).

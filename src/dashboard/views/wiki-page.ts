@@ -303,9 +303,16 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
     /* Two lines, then clip: this wiki's titles carry their meaning in the second
        half, so a one-line ellipsis made sibling pages indistinguishable. The dot
-       and the date sit on the first line. */
+       and the date sit on the first line.
+       A basis of 40%, NOT a bare flex:1: a 0 basis takes the title out of the shrink
+       distribution entirely, so it gets only the space its siblings leave — and a
+       group chip is wide enough to leave none. Measured on this row (title +
+       chip + ★/date): 0px of title at the 260px rail, 6.4px at 300px, i.e. a
+       named page with no name on it, and a hover that Playwright reports as "not
+       visible". With a basis the pair shrinks together and the title keeps ~37%
+       of what they share. */
     .wiki-list-title {
-      font-size: 12.5px; line-height: 1.3; color: var(--text-secondary); flex: 1; min-width: 0;
+      font-size: 12.5px; line-height: 1.3; color: var(--text-secondary); flex: 1 1 40%; min-width: 0;
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; overflow-wrap: anywhere;
     }

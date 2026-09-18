@@ -391,6 +391,12 @@ as `pairedBy` so the rail can say why on hover:
 | 3 | the markdown page carries `<Embed src="./child.html">` | `link` |
 | 4 | the child's frontmatter names `superseded_by: [[successor]]` | `superseded` |
 
+A META-stemmed `.html` beside its own meta markdown page (`index.html` +
+`index.md`) is dropped one layer ABOVE the pairing pass and never reaches it, so
+rule 3 cannot pair it however many pages embed it — unchanged from before
+attachments existed, and `/api/wiki/html` still serves the dropped file by path,
+so the embed on the page renders.
+
 The child keeps its own row identity — its own `relPath`, page route, pin,
 Activity glyph and backlinks. `parent`/`pairedBy` ride `/api/wiki/pages` (they
 are ordinary `WikiPageMeta` fields, one short string each). The store's matching

@@ -283,6 +283,61 @@ test.describe("Wiki rail: attachments", () => {
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
   });
 
+  // The other half of that width: the row fits, and the TITLE is what pays for
+  // it. `flex: 1` gives the title a 0 basis, so shrinkage lands entirely on the
+  // chip until the free space runs out — and the moment it does, the title's
+  // share is the remainder, i.e. nothing. Measured on the 260px rail (any window
+  // under 1100px): title 0px, chip 121px, a row whose page has no name on it.
+  // At the 300px rail it was 6.4px — which is why this shipped green on a
+  // developer's machine and timed out on the runner, where the same row's chip
+  // renders a few px wider and takes the last of it.
+  test("the chip never starves the title at the rail's minimum width", async ({ page }) => {
+    await page.setViewportSize({ width: 420, height: 900 });
+    await openRail(page);
+    const title = row(page, X).locator(".wiki-list-title");
+    const box = await title.boundingBox();
+    // A 0-width box is invisible to a reader and to Playwright alike — this is
+    // the exact shape of the CI failure, which was a `hover` on this element
+    // timing out with "element is not visible".
+    expect(box?.width ?? 0).toBeGreaterThan(24);
+    await expect(title).toBeVisible();
+    await title.hover({ timeout: 2_000 });
+    // …and the chip yielding first must not be paid for with a sideways scroll.
+    const overflow = await page.locator("#wikiList").evaluate((el) => ({
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+    }));
+    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
+  });
+
+  // A LIFTED child: the reader pinned it, so it renders under Pinned rather than
+  // inside its parent's group. It keeps the hover sentence (still true) and loses
+  // the indent + left rule (they would claim a parentage the rail invented at
+  // that spot), and the parent's chip stops counting it — it is on screen.
+  test("a PINNED child is lifted out of the group: no indent, the sentence stays, the chip drops it", async ({
+    page,
+  }) => {
+    await openRail(page);
+    await row(page, X).locator(".wiki-fold-chip").click();
+    // Hovered first: the ★ is hidden — and pointer-events:none — until the row
+    // is hovered on a pointer device.
+    await row(page, PROTO).hover();
+    await row(page, PROTO).locator(".wiki-pin").click();
+    await expect(row(page, PROTO).locator(".wiki-pin")).toHaveAttribute("aria-pressed", "true");
+    // Closed again, and reloaded: the pin and the fold both come back from
+    // localStorage, so this is the state a returning reader is in.
+    await row(page, X).locator(".wiki-fold-chip").click();
+    await openRail(page);
+
+    const pinned = page.locator(`.wiki-list-item[data-section="pinned"][data-relpath="${PROTO}"]`);
+    await expect(pinned).toHaveCount(1);
+    expect(await pinned.evaluate((el) => el.classList.contains("child"))).toBe(false);
+    await expect(pinned).toHaveAttribute("title", /Attached under "X plan"/);
+    // The group is closed and the child is NOT in it — the chip says so.
+    expect(await relPaths(page)).toEqual([PROTO, LONE, X, Y]);
+    await expect(row(page, X).locator(".wiki-fold-chip")).toContainText("1 attached · 1 superseded");
+  });
+
   test("a query FLATTENS the rail — every match is a row, none folded away", async ({ page }) => {
     await openRail(page);
     await page.fill("#wikiSearch", "prototype");
@@ -337,11 +392,15 @@ test.describe("Wiki rail: attachments", () => {
 
         expect(await contrastOf(chip)).toBeGreaterThanOrEqual(4.5);
         // …in the state the reader clicks it in: the ROW hovered, which paints
-        // --bg-surface behind a transparent chip. Hovered on the TITLE, not on the
-        // row box — Playwright aims at an element.s centre, and the row.s centre
-        // lands ON the chip, where the chip.s OWN :hover rule answers and this
-        // case measures nothing (measured: it did).
-        await row(page, X).locator(".wiki-list-title").hover();
+        // --bg-surface behind a transparent chip. Aimed LEFT OF THE CHIP, not at
+        // the row box — Playwright aims at an element.s centre, and the row.s
+        // centre lands ON the chip, where the chip.s OWN :hover rule answers and
+        // this case measures nothing (measured: it did). The point is computed
+        // from the two boxes and moved to with the mouse rather than hovering the
+        // title element, so a title the layout has squeezed narrow still leaves a
+        // reachable point (on the runner it had squeezed it to ZERO, and hovering
+        // it timed out on "element is not visible").
+        await hoverRowLeftOfChip(page, X);
         expect(await chip.evaluate((el) => el.matches(":hover"))).toBe(false);
         expect(await contrastOf(chip)).toBeGreaterThanOrEqual(4.5);
         // …and the section header's count, which paints its own background.
@@ -361,6 +420,18 @@ test.describe("Wiki rail: attachments", () => {
     });
   }
 });
+
+/** Hover a group row at a point the CHIP does not occupy: halfway between the
+ *  row's left edge and the chip's, on the row's own centre line. The chip paints
+ *  its own `:hover`, so any point inside it measures that rule instead of the
+ *  row's — and an element-centred hover on the title is at the mercy of how wide
+ *  the layout left the title. */
+async function hoverRowLeftOfChip(page: Page, rel: string): Promise<void> {
+  const rowBox = await row(page, rel).boundingBox();
+  const chipBox = await row(page, rel).locator(".wiki-fold-chip").boundingBox();
+  if (!rowBox || !chipBox) throw new Error(`no box for ${rel} (row or chip)`);
+  await page.mouse.move((rowBox.x + chipBox.x) / 2, rowBox.y + rowBox.height / 2);
+}
 
 /** WCAG contrast of an element's text against the nearest ancestor that really
  *  paints a background — including whatever a `:hover` has put there. */
