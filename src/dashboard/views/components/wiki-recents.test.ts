@@ -13,6 +13,8 @@ import {
   PINS_MAX,
   SECTION_META_FOLD_KEY,
   buildRail,
+  foldChipCompactLabel,
+  foldChipKinds,
   foldChipLabel,
   foldKeyForPage,
   foldsKey,
@@ -1402,5 +1404,81 @@ describe("pairedByWhy", () => {
   test("an unknown or absent rule still names the parent", () => {
     expect(pairedByWhy("", "X plan")).toBe('Attached under "X plan"');
     expect(pairedByWhy("future-rule", "X plan")).toBe('Attached under "X plan"');
+  });
+});
+
+/**
+ * Fix round 3 — the chip's COMPACT form, and the one arrangement that pins
+ * `mine`'s `!claimed` filter.
+ *
+ * The filter had no case of its own across the whole suite (dropping it left
+ * 1544 unit tests and 44 e2e specs green), and `!lifted` beside it covers every
+ * arrangement Activity and Pinned can produce. Enumerating what else can put a
+ * child in `claimed`: the Jira jump claims rows, but it needs a query and a
+ * query turns grouping off, so `childrenOf` is empty there; `remainder` and the
+ * `Bookkeeping` tail are both filtered on `!parentOf.has(...)`, so no child ever
+ * reaches them; `resolve` writes to a COPY of `claimed`, not to it. That leaves
+ * exactly one: a parent emitted TWICE, which claims its children on the first
+ * pass. A listing carrying one page twice is not hypothetical here — this module
+ * dedupes the activity rows and the pin list against precisely that, on the
+ * stated ground that the one-row invariant "must not depend on the caller's
+ * input being duplicate-free".
+ */
+describe("groups — fix round 3", () => {
+  const parent = page({ relPath: "plans/x.mdx", title: "X plan" });
+  const child = page({
+    relPath: "plans/x.html",
+    title: "X diagram",
+    parent: "plans/x.mdx",
+    pairedBy: "stem",
+  });
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+
+  test("a listing carrying the parent TWICE renders its child once, under the first", () => {
+    // OPEN, because that is what makes the first row CLAIM the child — a closed
+    // group emits no child rows and claims nothing.
+    const filtered = [parent, child, parent];
+    const m = buildRail({
+      filtered,
+      facetOnly: filtered,
+      filters: INERT,
+      pins: [],
+      openFolds: [foldKeyForPage("plans/x.mdx")],
+    });
+    const rs = rowsOf(m);
+    expect(rs.map((r) => r.page.relPath)).toEqual([
+      "plans/x.mdx",
+      "plans/x.html",
+      "plans/x.mdx",
+    ]);
+    // The second parent row stands for nothing: its child is already on screen.
+    expect(rs[0]!.children!.map((c) => c.relPath)).toEqual(["plans/x.html"]);
+    expect(rs[2]!.children).toBeUndefined();
+  });
+
+  test("compact chip copy: the counts alone, in the full label's order", () => {
+    const attach = (n: number) =>
+      Array.from({ length: n }, (_, i) => page({ relPath: `c${i}.html`, pairedBy: "stem" }));
+    const retired = (n: number) =>
+      Array.from({ length: n }, (_, i) => page({ relPath: `o${i}.mdx`, pairedBy: "superseded" }));
+    expect(foldChipCompactLabel(attach(3))).toBe("3");
+    expect(foldChipCompactLabel(retired(1))).toBe("1");
+    expect(foldChipCompactLabel([...attach(10), ...retired(10)])).toBe("10 · 10");
+    expect(foldChipCompactLabel([])).toBe("");
+    // Same split, same order, same separator as the words it replaces.
+    expect(foldChipLabel([...attach(10), ...retired(10)])).toBe("10 attached · 10 superseded");
+  });
+
+  test("foldChipKinds counts anything that is not `superseded` as attached", () => {
+    expect(
+      foldChipKinds([
+        page({ relPath: "a.html", pairedBy: "stem" }),
+        page({ relPath: "b.html", pairedBy: "suffix" }),
+        page({ relPath: "c.html", pairedBy: "link" }),
+        page({ relPath: "d.html", pairedBy: "future-rule" }),
+        page({ relPath: "e.mdx", pairedBy: "superseded" }),
+      ]),
+    ).toEqual({ attached: 4, superseded: 1 });
   });
 });

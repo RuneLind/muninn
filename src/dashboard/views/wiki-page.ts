@@ -6,7 +6,14 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 // The share dialog's CSS lives WITH the dialog (exported from its pure half) so
 // the /summaries mount in PR C cannot end up with a hand-copied second copy.
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
-import { RAIL_WIDTH_DEFAULT, RAIL_WIDTH_DEFAULT_NARROW } from "./components/wiki-rail-width.ts";
+import {
+  RAIL_CHIP_SWITCH_SHORT,
+  RAIL_CHIP_SWITCH_WIDE,
+  RAIL_MID_MIN_CHIP,
+  RAIL_TITLE_MIN,
+  RAIL_WIDTH_DEFAULT,
+  RAIL_WIDTH_DEFAULT_NARROW,
+} from "./components/wiki-rail-width.ts";
 import { STRIP_WIDTH } from "./components/wiki-panes.ts";
 import {
   wikiReadonlyStyles,
@@ -291,6 +298,16 @@ export async function renderWikiPage(opts?: {
     .wiki-cov-link:hover { color: var(--accent-light); }
 
     .wiki-list { flex: 1; overflow-y: auto; padding: 6px; }
+    /* ONE flex line until the row's floors no longer fit it, and then TWO.
+       The row is six things — type dot · title · group chip · status pill · ⚑ ·
+       ★+date — and at the 260px rail (RAIL_WIDTH_MIN, i.e. any window under
+       1100px) the five that are not the title measure 143.4px plus 40px of gaps,
+       leaving 42.6px for the title AND the chip together. No distribution of
+       42.6px satisfies a readable title and an unclipped count, so at that width
+       the row stops trying: \`.wiki-list-end\` is last in source order and wraps,
+       and the line it leaves holds the title's floor with room to spare
+       (measured 132.3px of title). Nothing is hidden and nothing scrolls
+       sideways — the two failure modes the previous two rounds picked between. */
     .wiki-list-item {
       padding: 7px 10px;
       border-radius: 7px;
@@ -298,21 +315,40 @@ export async function renderWikiPage(opts?: {
       display: flex;
       align-items: flex-start;
       gap: 8px;
+      flex-wrap: wrap;
     }
     .wiki-list-item:hover { background: var(--bg-surface); }
     .wiki-list-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+    /* The title and the group chip, in the space the row's fixed parts leave.
+       Its own width is therefore "what is left on this row", which is the ONE
+       question a CSS query can ask that tells a plain row from one carrying a
+       status pill and a ⚑ — every row is the rail's width, so a query on the row
+       could not. \`container-type: inline-size\` is Chromium 105+ / Safari 16 /
+       Firefox 110, and this UI is Chromium; \`:has()\` below is the same era.
+       \`flex: 1 1 0\` so the pair's HYPOTHETICAL size — what the row breaks lines
+       on — is its floor rather than the length of the title text. */
+    .wiki-list-mid {
+      display: flex; align-items: flex-start; gap: 8px;
+      flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
+      container-type: inline-size; container-name: railmid;
+    }
+    /* With a chip the pair needs the title's floor, the gap and the widest
+       COMPACT chip; under that the row wraps instead. Only when a chip is really
+       there — a plan row carrying a pill and a ⚑ but no chip has 90.6px at the
+       300px rail, fits its title in it, and must not start wrapping. */
+    .wiki-list-mid:has(.wiki-fold-chip) { min-width: ${RAIL_MID_MIN_CHIP}px; }
     /* Two lines, then clip: this wiki's titles carry their meaning in the second
        half, so a one-line ellipsis made sibling pages indistinguishable. The dot
        and the date sit on the first line.
-       A basis of 40%, NOT a bare flex:1: a 0 basis takes the title out of the shrink
-       distribution entirely, so it gets only the space its siblings leave — and a
-       group chip is wide enough to leave none. Measured on this row (title +
-       chip + ★/date): 0px of title at the 260px rail, 6.4px at 300px, i.e. a
-       named page with no name on it, and a hover that Playwright reports as "not
-       visible". With a basis the pair shrinks together and the title keeps ~37%
-       of what they share. */
+       A real FLOOR, not a share: round 1 gave the chip \`flex-shrink: 1\` and round
+       2 gave the title a 40% basis, and both are proportional — at the 260px rail
+       the worst row still measured 10.0px of title and a chip label clipped to
+       8.3px of its 142px. A proportion of too little is too little. The floor is
+       absolute (\`RAIL_TITLE_MIN\`), the chip's compact form below is what makes it
+       payable, and \`flex-wrap\` on the row is what happens when it is not. */
     .wiki-list-title {
-      font-size: 12.5px; line-height: 1.3; color: var(--text-secondary); flex: 1 1 40%; min-width: 0;
+      font-size: 12.5px; line-height: 1.3; color: var(--text-secondary);
+      flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; overflow-wrap: anywhere;
     }
@@ -377,13 +413,32 @@ export async function renderWikiPage(opts?: {
       border-radius: 999px; padding: 0 7px; margin-top: 1px;
       font-family: inherit; font-size: 10.5px; line-height: 16px;
       color: var(--text-muted); cursor: pointer; white-space: nowrap;
-      /* SHRINKABLE, and the label clips rather than the row scrolling: nowrap +
-         flex-shrink:0 made the page list scroll horizontally at the rail's own
-         minimum width (measured 258px). The caret and the border survive any
-         width, so the chip stays recognisable as the control it is. */
+      /* Shrinkable only in the FULL form, and only as a backstop: the container
+         rules below hand the chip its compact form long before the words would
+         have to clip, so this ellipsis is what a label wider than its class's
+         measured worst case falls back to instead of overflowing the rail. */
       min-width: 0; flex-shrink: 1;
     }
     .wiki-fold-chip-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    /* The COMPACT form — the counts alone, \`▸ 10 · 10\`. Rendered on every chip
+       and hidden until the space left beside the title cannot hold the words,
+       which both attributes keep carrying either way. Two breakpoints because
+       the full label's width is a fact about the label and not about the row:
+       \`1 attached\` and \`10 attached · 10 superseded\` differ by ~85px, and one
+       threshold sized for the long one strips the words off every short chip at
+       the default rail width. NEVER shrinks: a clipped count is a wrong count,
+       and \`10 · 1\` is what \`10 · 10\` clips to. */
+    .wiki-fold-chip-counts { display: none; }
+    @container railmid (max-width: ${RAIL_CHIP_SWITCH_SHORT}px) {
+      .wiki-fold-chip:not(.is-wide) { flex-shrink: 0; }
+      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-counts { display: inline; }
+    }
+    @container railmid (max-width: ${RAIL_CHIP_SWITCH_WIDE}px) {
+      .wiki-fold-chip.is-wide { flex-shrink: 0; }
+      .wiki-fold-chip.is-wide .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-wide .wiki-fold-chip-counts { display: inline; }
+    }
     .wiki-fold-chip:hover { color: var(--text-secondary); border-color: var(--accent); }
     /* The ROW's hover paints --bg-surface behind this transparent chip, where
        --text-muted measures 4.42:1 in the light theme — and hovering the row is
@@ -428,7 +483,13 @@ export async function renderWikiPage(opts?: {
        measured 21px off .wiki-list-title on every row — 42px of title left at
        RAIL_WIDTH_MIN with a status pill and a ⚑ — paid permanently by a reader
        who never pins anything. */
-    .wiki-list-end { display: flex; align-items: flex-start; gap: 2px; flex-shrink: 0; }
+    /* \`margin-left: auto\` is inert on a row that fits — \`.wiki-list-mid\` grows
+       first and leaves no free space for an auto margin to take — and is what
+       right-aligns this slot on the SECOND line of a row that wrapped, where
+       nothing grows. Rule 3's other half: the pill (\`.wiki-status\`) and the ⚑
+       are already \`flex-shrink: 0\` where they are declared; they are the
+       shortest form of themselves and have nothing to yield. */
+    .wiki-list-end { display: flex; align-items: flex-start; gap: 2px; flex-shrink: 0; margin-left: auto; }
     /* The star is VISIBLE by default, and hidden-until-hover only where hover
        really exists. pointer-events:none alone was INERT for the case it was
        written for: Chromium applies :hover on touchstart, so an invisible star

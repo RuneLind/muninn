@@ -33,6 +33,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import {
+  RAIL_TITLE_MIN,
+  RAIL_WIDTH_KEY,
+} from "../src/dashboard/views/components/wiki-rail-width.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 
 const PORT = e2ePort("wiki-rail-attachments");
@@ -59,8 +63,19 @@ function html(title: string): string {
  *    both;
  *  - `y.md` with a same-stem `y.html` (rule 1) — the case that used to be
  *    dropped from the index outright;
- *  - `lone.md`, attached to nothing, so "every row is in a group" cannot pass.
+ *  - `lone.md`, attached to nothing, so "every row is in a group" cannot pass;
+ *  - `w.mdx`, the WORST row the rail can be asked to draw: a status pill, a ⚑
+ *    follow-up flag and a chip whose label carries two-digit counts of BOTH
+ *    kinds (`10 attached · 10 superseded`). Every optional element of a row at
+ *    once, which is the shape the layout rules below are sized against;
+ *  - `v.mdx`, a LONG-titled group row. Every other fixture page has a short
+ *    title, and that is what hid the defect the sweep over the real wiki found:
+ *    with the title flexing from its CONTENT width it out-weighs the chip in the
+ *    shrink distribution, so 6 of mimir's 8 real group rows rendered `1 atta…`
+ *    while their titles sat comfortably above the floor.
  */
+const WORST_CHILDREN = 10;
+
 const PAGES: Array<[string, string]> = [
   ["plans/x.mdx", md("X plan")],
   ["plans/x-prototype.html", html("X prototype")],
@@ -69,9 +84,22 @@ const PAGES: Array<[string, string]> = [
   ["plans/y.md", md("Y page")],
   ["plans/y.html", html("Y diagram")],
   ["plans/lone.md", md("Lone page")],
+  ["plans/w.mdx", md("W worst row plan", ["plan_status: shipped", "followups: open"])],
+  ["plans/v.mdx", md("Zz a rail title long enough to out-weigh its own group chip")],
+  ["plans/v-prototype.html", html("Zz mock")],
+  ...Array.from({ length: WORST_CHILDREN }, (_, i): [string, string] => [
+    `plans/w-prototype-${i + 1}.html`,
+    html(`W mock ${i + 1}`),
+  ]),
+  ...Array.from({ length: WORST_CHILDREN }, (_, i): [string, string] => [
+    `plans/w-old-${i + 1}.md`,
+    md(`W retired ${i + 1}`, ["superseded_by: [[w]]"]),
+  ]),
 ];
 
 const X = "plans/x.mdx";
+const W = "plans/w.mdx";
+const V = "plans/v.mdx";
 const Y = "plans/y.md";
 const Y_HTML = "plans/y.html";
 const PROTO = "plans/x-prototype.html";
@@ -87,9 +115,9 @@ const ALL_PAGES = PAGES.length;
  * default "Recently updated" sort falls through to its title tie-break — which
  * is why these are written out rather than assumed to follow the file list.
  */
-const CLOSED_ORDER = [LONE, X, Y];
+const CLOSED_ORDER = [LONE, W, X, Y, V];
 /** …and with `x`'s group open: its children follow it, in the same sort. */
-const OPEN_ORDER = [LONE, X, PROTO, PROTO2, Z, Y];
+const OPEN_ORDER = [LONE, W, X, PROTO, PROTO2, Z, Y, V];
 /** Rows on screen with both groups CLOSED: the two parents plus the loner. */
 const CLOSED_ROWS = CLOSED_ORDER.length;
 
@@ -225,7 +253,7 @@ test.describe("Wiki rail: attachments", () => {
     await openRail(page);
     await row(page, X).locator(".wiki-fold-chip").click();
     expect(await relPaths(page)).toEqual(OPEN_ORDER);
-    expect(await countText(page)).toBe(`6 / ${ALL_PAGES}`);
+    expect(await countText(page)).toBe(`${CLOSED_ROWS + 3} / ${ALL_PAGES}`);
     await expect(row(page, X).locator(".wiki-fold-chip")).toHaveAttribute("aria-expanded", "true");
     // The children are child rows, and they say why they fold.
     await expect(row(page, PROTO)).toHaveClass(/child/);
@@ -283,31 +311,127 @@ test.describe("Wiki rail: attachments", () => {
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
   });
 
-  // The other half of that width: the row fits, and the TITLE is what pays for
-  // it. `flex: 1` gives the title a 0 basis, so shrinkage lands entirely on the
-  // chip until the free space runs out — and the moment it does, the title's
-  // share is the remainder, i.e. nothing. Measured on the 260px rail (any window
-  // under 1100px): title 0px, chip 121px, a row whose page has no name on it.
-  // At the 300px rail it was 6.4px — which is why this shipped green on a
-  // developer's machine and timed out on the runner, where the same row's chip
-  // renders a few px wider and takes the last of it.
-  test("the chip never starves the title at the rail's minimum width", async ({ page }) => {
-    await page.setViewportSize({ width: 420, height: 900 });
+  /**
+   * The row's layout rules, over BOTH row shapes and BOTH rail widths, asserted
+   * as the three properties they exist to guarantee rather than as the numbers
+   * one machine produced:
+   *
+   *  - the TITLE never goes under its floor (`RAIL_TITLE_MIN`). Rounds 1 and 2
+   *    both distributed the shortfall proportionally — the chip shrank, then the
+   *    title got a 40% basis — and a proportion of too little is still too
+   *    little: at the 260px rail the worst row measured 10.0px of title, which
+   *    is a named page with no name on it and the hover Playwright reports as
+   *    "element is not visible";
+   *  - whichever chip label is PAINTED is whole. `10 · 1` is what `10 · 10`
+   *    clips to, so a clipped count is not a smaller count, it is a wrong one;
+   *  - and neither is bought with a sideways scroll of `#wikiList`.
+   *
+   * Which FORM the chip is in is deliberately NOT asserted: it is a measurement
+   * about this machine's font metrics, and the degrade (full → compact) is the
+   * safe direction. The three properties above hold in either form.
+   */
+  test("both row shapes keep the title floor and an unclipped count, at both rail widths", async ({
+    page,
+  }) => {
+    for (const [width, height] of [
+      [1280, 720],
+      [420, 900],
+    ] as const) {
+      await page.setViewportSize({ width, height });
+      await openRail(page);
+      // X is an ordinary group row; W carries every optional element a row can
+      // have at once — status pill, ⚑ follow-up flag, and two-digit counts of
+      // both kinds in the chip; V carries a title long enough to compete with
+      // the chip for the pair's width.
+      for (const [rel, words] of [
+        [X, "2 attached · 1 superseded"],
+        [W, "10 attached · 10 superseded"],
+        [V, "1 attached"],
+      ] as const) {
+        const m = await row(page, rel).evaluate((el) => {
+          const q = (s: string) => el.querySelector(s) as HTMLElement | null;
+          const full = q(".wiki-fold-chip-label");
+          const counts = q(".wiki-fold-chip-counts");
+          const shown = full && getComputedStyle(full).display !== "none" ? full : counts;
+          const mid = q(".wiki-list-mid")!;
+          const end = q(".wiki-list-end")!;
+          return {
+            title: q(".wiki-list-title")!.getBoundingClientRect().width,
+            label: shown?.textContent ?? "",
+            labelWidth: shown ? shown.getBoundingClientRect().width : 0,
+            labelScroll: shown ? shown.scrollWidth : 0,
+            labelClient: shown ? shown.clientWidth : 0,
+            hover: q(".wiki-fold-chip")?.getAttribute("title") ?? "",
+            aria: q(".wiki-fold-chip")?.getAttribute("aria-label") ?? "",
+            midScroll: mid.scrollWidth,
+            midClient: mid.clientWidth,
+            // How far the ★+date slot's right edge sits from the row's own
+            // content edge — 0 when it is flush right, whichever line it is on.
+            endGap:
+              el.getBoundingClientRect().right - 10 - end.getBoundingClientRect().right,
+          };
+        });
+        const where = `${rel} at ${width}px`;
+        expect(m.title, `title floor, ${where}`).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
+        expect(m.labelWidth, `chip label painted, ${where}`).toBeGreaterThan(0);
+        expect(m.labelScroll, `chip label unclipped, ${where}`).toBeLessThanOrEqual(m.labelClient);
+        // The counts themselves, whichever form is on screen — the full label
+        // opens with them, so one assertion covers both.
+        expect(m.label.replace(/\s+/g, " "), `counts intact, ${where}`).toContain(
+          words.split(" ")[0]!,
+        );
+        // The compact form is the words MOVED, not dropped: both the hover and
+        // the accessible name carry the full label in either form.
+        expect(m.hover, `hover carries the words, ${where}`).toContain(words);
+        expect(m.aria, `accessible name carries the words, ${where}`).toContain(words);
+        // The pair itself must fit the space it was given — a chip overflowing
+        // `.wiki-list-mid` lands on the status pill and is invisible to a check
+        // on `#wikiList`, which the row's own padding absorbs.
+        expect(m.midScroll, `title+chip fit their box, ${where}`).toBeLessThanOrEqual(m.midClient);
+        // …and the ★+date stay flush right, including on the second line of a
+        // row that wrapped, where nothing grows to push them there.
+        expect(m.endGap, `end slot flush right, ${where}`).toBeLessThanOrEqual(1);
+      }
+      // The title is also a HOVER target — the CI failure this class produced was
+      // a `hover` timing out on a 0-width element, not a wrong number.
+      const title = row(page, W).locator(".wiki-list-title");
+      await expect(title).toBeVisible();
+      await title.hover({ timeout: 2_000 });
+      const overflow = await page.locator("#wikiList").evaluate((el) => ({
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
+      }));
+      expect(overflow.scrollWidth, `no sideways scroll at ${width}px`).toBeLessThanOrEqual(
+        overflow.clientWidth,
+      );
+    }
+  });
+
+  /**
+   * The two breakpoints are one design decision, and this is it: a chip whose
+   * label is short keeps its WORDS where a long one has already had to give them
+   * up. Driven at a rail width between the two thresholds (330px, set the way a
+   * reader sets it — the stored width), so the reading is ~35px clear of either
+   * one rather than riding the 5px margin the default rail leaves.
+   */
+  test("at a mid-width rail the short chip keeps its words and the long one does not", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.addInitScript(
+      ([key, width]) => localStorage.setItem(key as string, String(width)),
+      [RAIL_WIDTH_KEY, 330] as const,
+    );
     await openRail(page);
-    const title = row(page, X).locator(".wiki-list-title");
-    const box = await title.boundingBox();
-    // A 0-width box is invisible to a reader and to Playwright alike — this is
-    // the exact shape of the CI failure, which was a `hover` on this element
-    // timing out with "element is not visible".
-    expect(box?.width ?? 0).toBeGreaterThan(24);
-    await expect(title).toBeVisible();
-    await title.hover({ timeout: 2_000 });
-    // …and the chip yielding first must not be paid for with a sideways scroll.
-    const overflow = await page.locator("#wikiList").evaluate((el) => ({
-      scrollWidth: el.scrollWidth,
-      clientWidth: el.clientWidth,
-    }));
-    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
+    const formOf = (rel: string) =>
+      row(page, rel).evaluate((el) => {
+        const full = el.querySelector(".wiki-fold-chip-label") as HTMLElement;
+        return getComputedStyle(full).display !== "none" ? "full" : "compact";
+      });
+    // `1 attached` fits beside the title floor here…
+    expect(await formOf(V)).toBe("full");
+    // …and `2 attached · 1 superseded`, twice the width, does not.
+    expect(await formOf(X)).toBe("compact");
   });
 
   // A LIFTED child: the reader pinned it, so it renders under Pinned rather than
@@ -334,13 +458,15 @@ test.describe("Wiki rail: attachments", () => {
     expect(await pinned.evaluate((el) => el.classList.contains("child"))).toBe(false);
     await expect(pinned).toHaveAttribute("title", /Attached under "X plan"/);
     // The group is closed and the child is NOT in it — the chip says so.
-    expect(await relPaths(page)).toEqual([PROTO, LONE, X, Y]);
+    expect(await relPaths(page)).toEqual([PROTO, LONE, W, X, Y, V]);
     await expect(row(page, X).locator(".wiki-fold-chip")).toContainText("1 attached · 1 superseded");
   });
 
   test("a query FLATTENS the rail — every match is a row, none folded away", async ({ page }) => {
     await openRail(page);
-    await page.fill("#wikiSearch", "prototype");
+    // "x prototype" and not "prototype": the worst-shape group's ten mocks are
+    // named `w-prototype-N`, which the query matches on `name`.
+    await page.fill("#wikiSearch", "x prototype");
     expect(await relPaths(page)).toEqual([PROTO, PROTO2]);
     await expect(page.locator(".wiki-fold-chip")).toHaveCount(0);
     await page.fill("#wikiSearch", "");
@@ -422,15 +548,27 @@ test.describe("Wiki rail: attachments", () => {
 });
 
 /** Hover a group row at a point the CHIP does not occupy: halfway between the
- *  row's left edge and the chip's, on the row's own centre line. The chip paints
+ *  row's left edge and the chip's, on the row's own FIRST line. The chip paints
  *  its own `:hover`, so any point inside it measures that rule instead of the
  *  row's — and an element-centred hover on the title is at the mercy of how wide
- *  the layout left the title. */
+ *  the layout left the title.
+ *
+ *  It asserts the ROW really took the hover, not merely that the chip did not:
+ *  "the point is left of the chip" is arithmetic, true whether or not a pointer
+ *  ever arrived, so a `matches(":hover") === false` on the chip alone is
+ *  satisfied by the mouse never having moved. The row is scrolled into view
+ *  first, since `mouse.move` takes VIEWPORT coordinates and a box below the fold
+ *  would be hovered at a point on some other row. */
 async function hoverRowLeftOfChip(page: Page, rel: string): Promise<void> {
-  const rowBox = await row(page, rel).boundingBox();
-  const chipBox = await row(page, rel).locator(".wiki-fold-chip").boundingBox();
+  const target = row(page, rel);
+  await target.scrollIntoViewIfNeeded();
+  const rowBox = await target.boundingBox();
+  const chipBox = await target.locator(".wiki-fold-chip").boundingBox();
   if (!rowBox || !chipBox) throw new Error(`no box for ${rel} (row or chip)`);
-  await page.mouse.move((rowBox.x + chipBox.x) / 2, rowBox.y + rowBox.height / 2);
+  // The chip's own centre line, not the row's: a row that wrapped to two lines
+  // has its centre between them, where the chip is not and neither is the title.
+  await page.mouse.move((rowBox.x + chipBox.x) / 2, chipBox.y + chipBox.height / 2);
+  expect(await target.evaluate((el) => el.matches(":hover"))).toBe(true);
 }
 
 /** WCAG contrast of an element's text against the nearest ancestor that really

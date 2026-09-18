@@ -121,21 +121,49 @@ export function pairedByWhy(pairedBy: string, parentTitle: string): string {
 }
 
 /**
- * What a group's chip SAYS — `3 attached`, `1 superseded`, or both joined with
- * ` · ` when a page carries attachments and a retired sibling at once. The count
- * is the rows the chip stands for, so a child lifted into Activity has already
- * been taken out of the list this is given.
+ * The two numbers both chip labels are built from — the rows the chip stands
+ * for, split by kind. A child lifted into Activity or Pinned has already been
+ * taken out of the list this is given.
  */
-export function foldChipLabel(children: readonly WikiListing[]): string {
+export function foldChipKinds(children: readonly WikiListing[]): {
+  attached: number;
+  superseded: number;
+} {
   let attached = 0;
   let superseded = 0;
   for (const c of children) {
     if (c.pairedBy === "superseded") superseded++;
     else attached++;
   }
+  return { attached, superseded };
+}
+
+/**
+ * What a group's chip SAYS — `3 attached`, `1 superseded`, or both joined with
+ * ` · ` when a page carries attachments and a retired sibling at once.
+ */
+export function foldChipLabel(children: readonly WikiListing[]): string {
+  const { attached, superseded } = foldChipKinds(children);
   const parts: string[] = [];
   if (attached) parts.push(attached + " attached");
   if (superseded) parts.push(superseded + " superseded");
+  return parts.join(" · ");
+}
+
+/**
+ * The same chip, COMPACT: the counts alone (`3 · 1`, or `4` when one kind), in
+ * the same order and with the same separator as the full label above. It is what
+ * the row renders when the space left beside the title cannot hold the words —
+ * the words then ride the chip's `title=`/`aria-label`, which carry the full
+ * label either way, so nothing is lost but the reading distance. The digits are
+ * the part that must never clip: `10 attached · 1…` and `1 attached · 10…` are
+ * the same string where it matters.
+ */
+export function foldChipCompactLabel(children: readonly WikiListing[]): string {
+  const { attached, superseded } = foldChipKinds(children);
+  const parts: string[] = [];
+  if (attached) parts.push(String(attached));
+  if (superseded) parts.push(String(superseded));
   return parts.join(" · ");
 }
 

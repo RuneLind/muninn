@@ -94,6 +94,8 @@ import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
   buildRail,
+  foldChipCompactLabel,
+  foldChipKinds,
   foldChipLabel,
   foldKeyForPage,
   isPinnedRelPath,
@@ -1096,6 +1098,13 @@ function renderList(): void {
         ? `<span class="wiki-act-glyph ${esc(entry.activity.kind)}">${entry.activity.kind === "new" ? "+" : "~"}</span>`
         : "") +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
+      // Title and chip share ONE box, `.wiki-list-mid`, and that box is what is
+      // left of the row after the dot, the pill, the ⚑ and the ★+date have taken
+      // their intrinsic widths. It is a wrapper for two reasons, both measured:
+      // it gives the pair a single floor the row can wrap against, and its own
+      // width IS "the space left on this row", which is the only thing a CSS
+      // query can ask that tells a plain row from one carrying a pill and a ⚑.
+      `<div class="wiki-list-mid">` +
       // `title=` carries the full name: the row ellipsizes, and a status pill +
       // ⚑ flag eat enough width that plan titles routinely clip. On an Activity
       // row it carries the derivation UNDER the name as well — this element is
@@ -1106,20 +1115,41 @@ function renderList(): void {
       // opens it. A click here toggles; a click anywhere else on the row opens
       // the page, as it always has.
       (entry.children?.length
-        ? `<button type="button" class="wiki-fold-chip${entry.folded ? " folded" : ""}"` +
-          ` data-fold-key="${esc(foldKeyForPage(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
-          // Forced open because the reader is ON a page in this group: the same
-          // inert control the section header renders, for the same reason.
-          (entry.forcedOpen ? ` disabled` : "") +
-          ` title="${esc(entry.forcedOpen ? "the open page is in this group" : (entry.folded ? "Show" : "Hide") + " what folds under this page")}">` +
-          `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
-          // The label is its own element so it can ELLIPSIZE: nowrap and
-          // unshrinkable, the chip pushed `#wikiList` into a horizontal scroll at
-          // the rail's own minimum width (measured at 258px, `2 attached · 1
-          // superseded` beside a status pill).
-          `<span class="wiki-fold-chip-label">${esc(foldChipLabel(entry.children))}</span>` +
-          `</button>`
+        ? (() => {
+            const full = foldChipLabel(entry.children);
+            const kinds = foldChipKinds(entry.children);
+            // `is-wide` is the LABEL's size class, not the group's: the widest
+            // one-kind label is about half the width of the widest two-kind one,
+            // and one breakpoint sized for the long form would take the words off
+            // every `1 attached` chip at the default rail width.
+            const wide = kinds.attached > 0 && kinds.superseded > 0;
+            const why = entry.forcedOpen
+              ? "the open page is in this group"
+              : (entry.folded ? "Show" : "Hide") + " what folds under this page";
+            // The full label rides BOTH attributes whichever form is painted —
+            // the compact form is the words moved to the hover, not dropped, and
+            // `aria-label` is what makes that true for a screen reader as well
+            // (a `display:none` span is out of the accessible name).
+            const hover = `${full} — ${why}`;
+            return (
+              `<button type="button" class="wiki-fold-chip${wide ? " is-wide" : ""}${entry.folded ? " folded" : ""}"` +
+              ` data-fold-key="${esc(foldKeyForPage(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+              // Forced open because the reader is ON a page in this group: the same
+              // inert control the section header renders, for the same reason.
+              (entry.forcedOpen ? ` disabled` : "") +
+              ` aria-label="${esc(hover)}" title="${esc(hover)}">` +
+              `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
+              // Both forms are rendered and CSS picks one (`wiki-page.ts`): which
+              // fits is a question about the row's remaining space, which the
+              // server does not have and the client would have to recompute on
+              // every rail drag.
+              `<span class="wiki-fold-chip-label">${esc(full)}</span>` +
+              `<span class="wiki-fold-chip-counts">${esc(foldChipCompactLabel(entry.children))}</span>` +
+              `</button>`
+            );
+          })()
         : "") +
+      `</div>` +
       // Pill THEN flag, the same order as the article header's `badgeHtml` — the
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +

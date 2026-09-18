@@ -345,8 +345,9 @@ Six things are deliberate and easy to undo by accident:
   block and shows the star on every row — which is the benign direction. It also shares
   one flex slot with the date (`.wiki-list-end`) so it costs the row its own
   width and not the row's 8px gap as well — as a sibling of the title the pair
-  measured 21px off `.wiki-list-title` on every row, 42px of title left at
-  `RAIL_WIDTH_MIN` with a status pill and a ⚑.
+  measured 21px off `.wiki-list-title` on every row. That slot is also the one
+  that WRAPS when a row's floors no longer fit it (see the row-layout rules under
+  Attachments); it is last in source order for exactly that reason.
 
 ⚠️ **The ★ toggle does NOT re-render the list.** It repaints that one button
 (`paintPinState`) and the sections rebuild at the reader's next render. This is a
@@ -491,7 +492,11 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
   neither of which was emitted — two rows silently gone.
 - **A closed group emits no child rows**, so `rail.shown` — and with it
   `#wikiCount` — goes DOWN, and the chip says by how much (`3 attached`,
-  `1 superseded`, joined with ` · ` when mixed).
+  `1 superseded`, joined with ` · ` when mixed). **The chip has TWO forms and
+  renders both**, one hidden by CSS: the full label above, and a COMPACT
+  `3 · 1` that the row falls back to when the space left beside the title cannot
+  hold the words. The words are moved, not dropped — `title=` and `aria-label`
+  carry the full label in either form. See the row-layout rules below.
 - **A query flattens everything.** Groups are for browsing; a hit inside a closed
   group is a result the reader asked for and cannot see.
 - **The open page's group is forced open**, whatever the store holds — and its
@@ -501,6 +506,37 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
   control, which is also what stops the click reaching the store at all.
 - **A child whose PARENT the facets filtered away is an ordinary row** — folding
   it under a page that is not on screen would delete it from the rail.
+
+### The row's layout rules (`wiki-page.ts`, constants in `wiki-rail-width.ts`)
+
+A rail row is six things — type dot · title · group chip · status pill · ⚑ ·
+★+date — and only the title is elastic. At the 260px rail (`RAIL_WIDTH_MIN`, i.e.
+any window under 1100px) the other five measure 143.4px plus 40px of gaps inside
+a 226px content box, so **42.6px is left for the title and the chip together**.
+Two rounds of distributing that proportionally (the chip shrinkable, then the
+title on a 40% basis) each produced a 10px title and a count clipped to `10 · 1`.
+A share of too little is still too little, so each element has a rule instead:
+
+- the **title** has an absolute floor, `RAIL_TITLE_MIN` (72px ≈ 9 characters),
+  and flexes from a 0 basis — from its CONTENT width it out-weighs the chip in
+  the shrink distribution, which is how 6 of mimir's 8 real group rows rendered
+  `1 atta…` beside a comfortable title;
+- the **chip** never clips its digits: below a measured breakpoint it swaps its
+  words for its counts (a container query on the row's REMAINING space), and one
+  breakpoint per label-length class (`is-wide` = both kinds), since `1 attached`
+  and `10 attached · 10 superseded` differ by 90px and a single threshold sized
+  for the long form strips the words off every short chip;
+- the **pill and the ⚑** keep their intrinsic width — they are already the
+  shortest form of themselves;
+- and when the floors still do not fit, the **row wraps** to a second line
+  (`flex-wrap`, with the ★+date slot last in source order and `margin-left:auto`
+  so it stays flush right on the line it lands on). Nothing is hidden and
+  `#wikiList` never scrolls sideways — the two failure modes the proportional
+  rounds were choosing between.
+
+`.wiki-list-mid` is the wrapper that makes this expressible: title + chip in one
+box whose width IS "what is left on this row", which a query on the ROW could not
+ask (every row is the rail's width; only some carry a pill and a ⚑).
 
 **Fold state is per wiki**, in `muninn.wiki.folds.v1:<wiki>` beside the pins key,
 same storage discipline (try/catch everywhere, normalized at the boundary, capped
