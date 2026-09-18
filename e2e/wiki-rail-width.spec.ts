@@ -489,7 +489,6 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
       expect(g.label.replace(/\s+/g, " "), `counts intact at ${width}`).toContain("10");
       expect(g.labelClipped, `label whole at ${width}: "${g.label}"`).toBe(false);
       expect(g.chipPastMid, `chip inside its box at ${width}`).toBeLessThanOrEqual(0.5);
-      expect(g.title, `title floor at ${width}`).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
     }
   });
 
@@ -501,7 +500,6 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
       expect(g.labelClipped, `label whole at ${width}`).toBe(false);
       expect(g.midOverflow, `pair fits its box at ${width}`).toBeLessThanOrEqual(0);
       expect(g.chipPastMid, `chip inside its box at ${width}`).toBeLessThanOrEqual(0.5);
-      expect(g.title, `title floor at ${width}`).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
       expect(g.endGap, `end slot flush right at ${width}`).toBeLessThanOrEqual(1);
     }
   });
@@ -539,9 +537,12 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     const g = await geometry(page, THREE);
     expect(g.wrapped, `one line at ${width}: ${JSON.stringify(g)}`).toBe(false);
     expect(g.labelClipped).toBe(false);
-    expect(g.title).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
   });
 
+  // The ONE case where the title floor itself is what holds the width: on the
+  // chip rows above it is the mid floor plus the compact chip that does (a
+  // mutation setting both min-widths to 10px leaves them green), so the floor
+  // assertion lives here and nowhere else in this block.
   test("a chipless pill + ⚑ row at the narrow rail keeps the title floor, and its second line is flush right", async ({ page }) => {
     await openAt(page, 260);
     const g = await geometry(page, BARE);

@@ -8,7 +8,7 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import {
   RAIL_CHIP_SWITCH_SHORT,
-  RAIL_CHIP_SWITCH_SUPERSEDED,
+  RAIL_CHIP_SWITCH_LONG,
   RAIL_CHIP_SWITCH_WIDE,
   RAIL_GROUP_CHIP_SWITCH,
   RAIL_MID_MIN_CHIP,
@@ -361,9 +361,9 @@ export async function renderWikiPage(opts?: {
       container-type: inline-size; container-name: railmid;
     }
     /* With a chip the pair needs the title's floor, the gap and the widest
-       COMPACT chip of the chip's digit class (\`counts-narrow\` for one count,
-       \`counts-wide\` for a three-digit or three-plus-count one, the default in
-       between — the painter sets it from the compact label); under that the row
+       COMPACT chip of the chip's digit class (\`counts-narrow\` for one count of up to
+       three digits, \`counts-wide\` for a four-digit, three-digit-pair or
+       three-plus-count one, the default in between — the painter sets it from the compact label); under that the row
        wraps instead. Only when a chip is really there — a plan row carrying a
        pill and a ⚑ but no chip has 90.6px at the 300px rail, fits its title in
        it, and must not start wrapping. */
@@ -464,15 +464,19 @@ export async function renderWikiPage(opts?: {
        clipped. NEVER shrinks: a clipped count is a wrong count, and \`10 · 1\`
        is what \`10 · 10\` clips to. */
     .wiki-fold-chip-counts { display: none; }
+    /* Every one-kind chip swaps at SHORT; a LONG one (\`is-long\`: the word
+       \`superseded\`, or three digits) swaps earlier as well, at LONG > SHORT —
+       so the LONG rule is an extension of the band, not an exclusion from it,
+       and needs no \`:not()\` on the rule below. */
     @container railmid (max-width: ${RAIL_CHIP_SWITCH_SHORT}px) {
-      .wiki-fold-chip:not(.is-wide):not(.is-superseded-only) { flex-shrink: 0; }
-      .wiki-fold-chip:not(.is-wide):not(.is-superseded-only) .wiki-fold-chip-label { display: none; }
-      .wiki-fold-chip:not(.is-wide):not(.is-superseded-only) .wiki-fold-chip-counts { display: inline; }
+      .wiki-fold-chip:not(.is-wide) { flex-shrink: 0; }
+      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-counts { display: inline; }
     }
-    @container railmid (max-width: ${RAIL_CHIP_SWITCH_SUPERSEDED}px) {
-      .wiki-fold-chip.is-superseded-only { flex-shrink: 0; }
-      .wiki-fold-chip.is-superseded-only .wiki-fold-chip-label { display: none; }
-      .wiki-fold-chip.is-superseded-only .wiki-fold-chip-counts { display: inline; }
+    @container railmid (max-width: ${RAIL_CHIP_SWITCH_LONG}px) {
+      .wiki-fold-chip.is-long { flex-shrink: 0; }
+      .wiki-fold-chip.is-long .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-long .wiki-fold-chip-counts { display: inline; }
     }
     @container railmid (max-width: ${RAIL_CHIP_SWITCH_WIDE}px) {
       .wiki-fold-chip.is-wide:not(.is-group) { flex-shrink: 0; }
@@ -484,8 +488,9 @@ export async function renderWikiPage(opts?: {
        "attached", so a chip priced at the attachment worst case went
        \`display:none\` at a mid of 253.6px — which is exactly the 300px shipped
        rail, leaving \`9 shipped · 1 superseded\` hover-only on every rail anybody
-       has. A one-kind roll-up keeps the SHORT rule above: 61–80.3px of chip is
-       what that 84 was already sized for. See RAIL_GROUP_CHIP_SWITCH. */
+       has. A one-kind roll-up keeps the SHORT rule above (61–80.3px of chip,
+       under its 88 budget) or the LONG one for \`N superseded\` — neither can
+       bind on a group row, whose mid is ≥ 213px. See RAIL_GROUP_CHIP_SWITCH. */
     @container railmid (max-width: ${RAIL_GROUP_CHIP_SWITCH}px) {
       .wiki-fold-chip.is-wide.is-group { flex-shrink: 0; }
       .wiki-fold-chip.is-wide.is-group .wiki-fold-chip-label { display: none; }

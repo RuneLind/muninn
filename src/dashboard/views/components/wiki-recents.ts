@@ -256,38 +256,46 @@ export function foldChipCompactLabel(children: readonly WikiListing[]): string {
 /**
  * The chip's WORD-size class — which container breakpoint decides when its
  * words yield to the counts (`wiki-page.ts`, the three `@container railmid`
- * rules; budgets in `wiki-rail-width.ts`). A class per label shape because the
- * full label's width is a fact about the label: `99 attached` is 85.5px of
- * chip, `99 superseded` 100.3px and `99 attached · 99 superseded` 170.6px, and
- * one threshold sized for the widest takes the words off every short chip at
- * the default rail. #557 budgeted the one-kind class from `1 attached` alone,
- * so a superseded-only chip painted clipped (`10 supersede…`) at the 260px rail
- * — hence the third class.
+ * rules; budgets in `wiki-rail-width.ts`). Judged on the LABEL both painters
+ * build (a page chip's `N attached`, a family roll-up's `N shipped`), so the two
+ * cannot classify the same words differently. Three classes because the full
+ * label's width is a fact about the label: measured, `99 attached` is 85.5px
+ * of chip, `99 superseded` 100.3px and `99 attached · 99 superseded` 170.6px,
+ * and one threshold sized for the widest takes the words off every short chip
+ * at the default rail. #557 budgeted the one-kind class from `1 attached`
+ * alone, so a superseded-only chip painted clipped (`10 supersede…`) at the
+ * 260px rail. A one-kind label is LONG when its word is `superseded` (91.7px at
+ * one digit) or its count has three digits (`120 attached` 90.0, `999 attached`
+ * 92.3 — past the short budget of 88, within the long one of 103).
  */
-export function foldChipLabelClass(kinds: {
-  attached: number;
-  superseded: number;
-}): "" | "is-superseded-only" | "is-wide" {
-  if (kinds.attached > 0 && kinds.superseded > 0) return "is-wide";
-  if (kinds.superseded > 0) return "is-superseded-only";
-  return "";
+export function foldChipLabelClass(label: string): "" | "is-long" | "is-wide" {
+  if (label.includes(" · ")) return "is-wide";
+  const m = /^(\d+) (\S+)$/.exec(label);
+  if (!m) return "";
+  return m[2] === "superseded" || m[1]!.length >= 3 ? "is-long" : "";
 }
 
 /**
  * The chip's DIGIT-size class — how much of the row the COMPACT form is
  * guaranteed, i.e. the `.wiki-list-mid` floor that makes the row wrap before the
  * counts can overflow onto the status pill. Judged on the compact label alone:
- * one count (`999`, 44.8px) is narrow; two counts of up to two digits
- * (`99 · 99`, 60.9px) is the default the floor was sized for; anything wider
- * (`120 · 100` at 70.2px, `999 · 999` at 74.5px, a family roll-up of three or
- * four statuses) is wide. The narrow bucket is what keeps a `3 attached` row
+ * one count of up to three digits (`999`, 44.8px) is narrow; two counts of up
+ * to two digits (`99 · 99`, 60.9px) is the default the floor was sized for;
+ * anything wider (`120 · 100` at 70.2px, `999 · 999` at 74.5px, a four-digit
+ * single count — `9999` is 51.5px, past the narrow budget — or a family
+ * roll-up of three or four statuses) is wide. Four digits go WIDE rather than
+ * widening the narrow budget: the 6px that would cover `9999` cost the 260px
+ * rail three chip rows on one line (measured 6 wrapped against 3), for a
+ * count no page has. The narrow bucket is what keeps a `3 attached` row
  * with a pill and a ⚑ on one line at the default rail; the wide one is what
  * stops a three-digit chip overflowing its box by 3–9px at rails 260–270.
+ * On a family or month row neither class can fire: a group row's mid is the
+ * rail minus 46.4px, 213.6px at the narrowest, above every floor here.
  */
 export function foldChipCountsClass(compact: string): "" | "counts-narrow" | "counts-wide" {
   if (!compact) return "";
   const counts = compact.split(" · ");
-  if (counts.length === 1) return "counts-narrow";
+  if (counts.length === 1) return counts[0]!.length <= 3 ? "counts-narrow" : "counts-wide";
   if (counts.length === 2 && counts.every((c) => c.length <= 2)) return "";
   return "counts-wide";
 }

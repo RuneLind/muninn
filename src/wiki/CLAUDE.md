@@ -511,11 +511,14 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
 
 A rail row is six things — type dot · title · group chip · status pill · ⚑ ·
 ★+date — and only the title is elastic. At the 260px rail (`RAIL_WIDTH_MIN`, i.e.
-any window under 1100px) the other five measure 132–173px (a compact `1` chip,
-a `shipped` pill, the ⚑ and a ★+date that is 33px as an age and 74px as a full
-date) plus 40px of gaps inside a 226px content box, so **13–54px is left for
-the title and the chip together** (re-measured 2026-09-18; #557's comment said
-143.4 and 42.6, which the round-3 verify pass flagged as unmeasured arithmetic).
+any window under 1100px) a chipless row's four fixed parts — dot 7, a status
+pill 56–64, the ⚑ 6.3 and a ★+age 25.7 — plus four 8px gaps leave **80–99px of
+title** inside the 226px content box (measured 2026-09-18 on four mimir rows;
+none wraps), and a full date (74px) in place of the age leaves ~50px, under the
+floor, which is the row shape that wraps at 260. A chip row adds the compact
+chip and a fifth gap on top. #557's comment said "143.4px plus 40px of gaps,
+42.6px left", which the round-3 verify pass flagged as unmeasured arithmetic and
+#559's first draft replaced with a second wrong sum; these are measured.
 Two rounds of distributing that proportionally (the chip shrinkable, then the
 title on a 40% basis) each produced a 10px title and a count clipped to `10 · 1`.
 A share of too little is still too little, so each element has a rule instead:
@@ -527,13 +530,14 @@ A share of too little is still too little, so each element has a rule instead:
 - the **chip** never clips its digits: below a measured breakpoint it swaps its
   words for its counts (a container query on the row's REMAINING space), and one
   breakpoint per label-shape class — attached-only (the default), superseded-only
-  (`is-superseded-only`) and both kinds (`is-wide`) — since `99 attached`,
+  (`is-long`, which also takes any one-kind label at three digits) and both kinds (`is-wide`) — since `99 attached`,
   `99 superseded` and `99 attached · 99 superseded` are 85.5, 100.3 and 170.6px
   of chip and a single threshold sized for the long form strips the words off
   every short chip, while one sized for `1 attached` (what #557 shipped) paints
   `10 supersede…` at the 260px rail. The painter also sets a DIGIT class from the
-  compact label (`counts-narrow` for one count, `counts-wide` for a three-digit
-  or three-plus-count one), which picks the `.wiki-list-mid` floor — 46, 62 or
+  compact label (`counts-narrow` for one count of up to three digits,
+  `counts-wide` for a four-digit, three-digit-pair or three-plus-count one),
+  which picks the `.wiki-list-mid` floor — 46, 62 or
   76px of compact chip beside the title's 72 — so a `3 attached` row with a pill
   and a ⚑ keeps one line at the 300px rail and a `120 · 100` chip wraps its row
   instead of overflowing onto the pill (`foldChipLabelClass`,
@@ -726,7 +730,8 @@ chip's worst case went `display:none` at a mid of 253.6px — exactly the 300px
 shipped rail, which left `9 shipped · 1 superseded` hover-only on every rail
 anybody has. A one-kind roll-up keeps `RAIL_CHIP_SWITCH_SHORT`, which its 61–80px
 was already sized for — except a one-status `N superseded` slate, which carries
-the page chip's `is-superseded-only` class and breakpoint. The page-row
+the page chip's `is-long` class and breakpoint (inert there: a group row's mid
+is ≥ 213px). The page-row
 constants were re-budgeted by the layout follow-up (above), not by this change.
 
 **The sort row's third control wraps, and it is the TOGGLE.** `group families`

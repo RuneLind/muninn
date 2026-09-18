@@ -97,7 +97,6 @@ import {
   foldChipCompactLabel,
   foldChipCountsClass,
   foldChipLabelClass,
-  foldChipKinds,
   foldChipLabel,
   isFoldOpen,
   normalizeFoldKey,
@@ -1106,10 +1105,11 @@ function renderList(): void {
         `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
         `<div class="wiki-list-mid">` +
         `<div class="wiki-group-label">${esc(entry.group.label)}</div>` +
-        // The same two size classes as a page chip — the roll-up's words and its
-        // digits are judged by the same budgets (a one-status `10 superseded`
-        // slate is the superseded-only shape; a four-status roll-up is wide).
-        `<span class="wiki-fold-chip is-group${roll.wide ? " is-wide" : roll.label.endsWith(" superseded") ? " is-superseded-only" : ""}` +
+        // The same two size classes as a page chip, from the same functions —
+        // inert on a group row today (its mid is ≥ 213px at the narrowest rail,
+        // above every breakpoint and floor they select), carried so the two
+        // painters can never classify one label two ways.
+        `<span class="wiki-fold-chip is-group${cls(foldChipLabelClass(roll.label))}` +
         `${cls(foldChipCountsClass(roll.compact))} static">` +
         `<span class="wiki-fold-chip-label">${esc(roll.label)}</span>` +
         `<span class="wiki-fold-chip-counts">${esc(roll.compact)}</span>` +
@@ -1204,14 +1204,13 @@ function renderList(): void {
       (entry.children?.length
         ? (() => {
             const full = foldChipLabel(entry.children);
-            const kinds = foldChipKinds(entry.children);
             // The chip's two size classes are the LABEL's, not the group's: the
             // words pick the breakpoint at which they yield to the counts (three
             // shapes, three measured budgets), and the digits pick how much row
             // the compact form is guaranteed — see `foldChipLabelClass` and
             // `foldChipCountsClass`.
             const compact = foldChipCompactLabel(entry.children);
-            const sizeClasses = cls(foldChipLabelClass(kinds)) + cls(foldChipCountsClass(compact));
+            const sizeClasses = cls(foldChipLabelClass(full)) + cls(foldChipCountsClass(compact));
             const why = entry.forcedOpen
               ? "the open page is in this group"
               : (entry.folded ? "Show" : "Hide") + " what folds under this page";
