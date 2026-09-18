@@ -553,6 +553,112 @@ at once), `wiki-routes.test.ts` (the listing, `?name=`, `resolvePageRef`) and
 `e2e/wiki-rail-attachments.spec.ts` (the chip, the fold, the count, the reload,
 the flatten, and the contrast in both themes).
 
+### Families and months (`wiki-groups.ts`)
+
+The rail's SECOND grouping layer, behind one checkbox in the rail head —
+`group families`, **off by default** and remembered per wiki. It is client-only:
+a pure function over the listing's `relPath`s, the pairing the store already
+made, and the wiki's own project names. On:
+
+- **stem families** fold to one row with a status ROLL-UP (`9 shipped ·
+  1 superseded`), and
+- **the archive folds by month** instead, whenever the folder facet is `archive`
+  and the sort is a date sort.
+
+**The family rule, in full.** A family is the SHORTEST dash-separated stem prefix
+of **two or more segments** that **three or more and at most twelve** pages in
+the **same folder** share (folder = the whole directory part of `relPath`, not
+the facet's first segment), excluding a prefix equal to a **project name**, with
+**no nesting in either direction**: once `alpha-beta` qualifies,
+`alpha-beta-north` is not a second family, and no family forms under a prefix
+that is itself a family CANDIDATE (two or more segments, not a project name) and
+exceeded the cap. So a 3-member `alpha-wiki-ask` does not fold under a 16-member
+`alpha-wiki`, while a 10-member `alpha-tools-live` still forms under the over-cap
+PROJECT name `alpha-tools`, which is never a candidate at all.
+
+Four things about WHICH ROWS COUNT, each of them load-bearing:
+
+- **The cap and the over-cap ban are judged on the prefix's TOTAL member count**
+  — parents plus rule-4 children — so a slate does not start folding because part
+  of it was superseded; **only the three-member formation threshold is judged on
+  PARENT rows**, or a page plus its predecessor would read as a slate.
+- **Families are computed over parent rows only**: `.md`/`.mdx` pages that are
+  nobody's child. A child of any kind renders under its parent and never in a
+  family body, only rule-4 children count toward a roll-up and the cap, and an
+  `.html` page never counts at all. Meta pages are out — they sink to
+  `Bookkeeping`.
+- **The `<YYYY-MM-DD>-<n>-fix-rounds-<prs>` filename shape is never a member and
+  never a family.** Those pages audit a PR rather than carrying a piece of the
+  work, and they share a date prefix with every other archive page of that month.
+- **Prefixes are matched lower-cased**, like every other relPath comparison in the
+  rail, so `Mac-mini-*` and `mac-mini-*` are one family (measured: they are, on a
+  real wiki) and the label is the lower-case spelling.
+
+⚠️ **The rule has no other date-shape exemption, and on a dated folder that
+shows.** In a folder of `YYYY-MM-DD-*` names, `2026-08` is an ordinary
+two-segment prefix: three such pages in one subfolder DO fold, under a sort that
+is not the month grouping's. Measured on the live wiki: four such families
+(`archive/*/2026-07`, `archive/claude-usage/2026-08`, `blogs/2026-09`), each of
+them a month of one folder, which is a fair thing for the rail to say — it is
+just said by the family rule rather than by the month one. Two folders can also
+produce the same LABEL (`2026-07-*` twice); the fold KEY carries the folder, so
+they open independently.
+
+**Months** key on `YYYY-MM` from the filename's date prefix, falling back to the
+date the rail is sorting on when the name carries none — the filename first
+because that is the date the page is ABOUT, while its `updated` stamp moves on
+every typo fix and a grouping that reshuffles on an edit is not one a reader can
+navigate by. A page with neither joins no month and stays an ordinary row.
+**Months come back newest-first and the rows are re-ordered to match**
+(`orderPagesForGroups`): the rail's ordinary rule puts a group where its first
+remaining member sorts, which on a real archive ordered the months
+08 · 05 · 07 · 09 · 06 — an old page edited last week pulls its whole month to
+the top. Families keep the ordinary rule: a slate interleaves with single pages
+by age, which is the reader's own sort speaking.
+
+**The keys, all three in the one folds store** (`muninn.wiki.folds.v1:<wiki>`,
+the flat namespace the attachment section describes): `family:<folder>/<prefix>`,
+`month:<YYYY-MM>`, and `toggle:families` for the toggle itself — a sentinel
+beside `section:meta`. The plan wrote `family:<prefix>`; the FOLDER is in the key
+because two folders hold a family of the same prefix on a real wiki, and a bare
+key would make one reader's click open both.
+
+**Two defaults in that one namespace** (`isGroupOpen`): presence means OPEN for
+an ordinary group and **CLOSED for the newest month**, which is the only group
+that starts open. The store still holds exactly the exceptions, a click still
+flips the key, and the state is still remembered — the `defaultOpen` flag is the
+whole mechanism.
+
+**In the rail** (`buildRail`), the one-row invariant is unchanged and a group row
+is **not a page**: it has no `relPath`, opens nothing and is not counted by
+`#wikiCount`, so a closed family lowers that count by exactly its members.
+A member the Activity ranking or the reader's pin lifted leaves the group for
+that render and leaves the roll-up with it; a member that is itself a PARENT
+keeps its own attachment group inside the family body, one indent further in
+(`.wiki-list-item.member.child`); the open page's group is forced open — through
+its attachment parent when the reader is on a CHILD — and renders the same
+disabled control an attachment chip does; and a query flattens groups exactly as
+it flattens attachments.
+
+The roll-up is a CENSUS of the slate, not a count of hidden rows: it is
+`plan_status` counts in the facet's order, superseded children included wherever
+the rail happens to draw them, with the pages declaring no status last under one
+neutral word (`unmarked`). The attachment chip is the one that counts rows. A
+month's chip counts pages instead — every page in it says the same thing about
+itself.
+
+The group row reuses the parent row's furniture — the same caret, the same chip
+with both label forms and the same `.wiki-list-mid` container the width rules
+measure — so a group row and a group chip can never come to disagree about when
+the words no longer fit (`wiki-rail-width.ts` is untouched by this layer).
+
+Acceptance: `wiki-groups.test.ts` (the rule's state space, on synthetic names —
+a private wiki's file names are a disclosure in a public repo),
+`wiki-recents.test.ts` (the arrangement: the lift, the forced-open family, the
+one-row invariant with both layers at once) and
+`e2e/wiki-rail-families.spec.ts` (the toggle, the roll-up, the count, the
+reload, the flatten, the month defaults and the contrast in both themes).
+
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 
 Turns one wiki page into a pasteable post — the reader's **📤 Share** breadcrumb action, beside 💬 Discuss. One fenced one-shot on the wiki's synthesis bot (`resolveWikiSynthesisBot`, same routing as Ask), streamed as markdown, and on completion three server-rendered strings. Prompt/preset/body-prep layers live in `src/share/` (see the Share row in the repo `CLAUDE.md`); the SSE runner is `dashboard/routes/share-sse.ts`, the dialog `dashboard/views/components/share-dialog.ts` (+ its pure half `wiki-share-dialog.ts`).

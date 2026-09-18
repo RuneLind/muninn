@@ -26,6 +26,7 @@
 
 import { displayTitleOf, isMetaPage, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
 import type { ActivityRow } from "./wiki-activity-rank.ts";
+import { isGroupOpen, type RailGroup, type RailGroupKind } from "./wiki-groups.ts";
 import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
@@ -78,6 +79,14 @@ export function foldsKey(wiki: string): string {
  * comparison downstream is exact by construction.
  */
 export const SECTION_META_FOLD_KEY = "section:meta";
+
+/** The fold key for a family or month group — its own key, already in the flat
+ *  namespace (`family:…` / `month:…`, built by `wiki-groups.ts`) and normalized
+ *  here for the same reason a page's is: every comparison downstream is a plain
+ *  `===` and must be exact by construction. */
+export function foldKeyForGroup(key: string): string {
+  return normalizeRel((key || "").trim());
+}
 
 /** The fold key for a parent page's group. */
 export function foldKeyForPage(relPath: string): string {
@@ -471,6 +480,35 @@ export type RailEntry =
        *  indent: a row indented under whatever happens to be above it reads as
        *  that row's child, which is a relation the rail would be inventing. */
       lifted?: boolean;
+      /** Set on a row drawn inside an open FAMILY or MONTH group: the group's
+       *  label, for the painter's indent and the row's hover. A member lifted
+       *  into Activity or Pinned does not carry it — it is not in the group's
+       *  body there, exactly as a lifted attachment child loses its indent. */
+      member?: { label: string; kind: RailGroupKind };
+    }
+  | {
+      /**
+       * A FAMILY or MONTH row — the one entry that is not a page. It carries no
+       * `relPath` and is not counted by `shown`, because nothing about it is a
+       * page the reader could open; it is a fold control with a roll-up on it.
+       */
+      kind: "group";
+      section: RailSection;
+      group: RailGroup;
+      /** The fold key a click flips, normalized. */
+      foldKey: string;
+      /** The members this row stands for: the ones not emitted anywhere else in
+       *  this render, which is what the roll-up counts. */
+      members: WikiListing[];
+      /** The rule-4 children counted with them (families only) — on screen under
+       *  their own successor, or hidden with it, but members of the slate either
+       *  way. */
+      superseded: WikiListing[];
+      /** True when the group is CLOSED, so its members are not emitted. */
+      folded: boolean;
+      /** Set when the group is open because the reader is ON a page inside it.
+       *  The painter renders a control that does not pretend to toggle. */
+      forcedOpen?: boolean;
     };
 
 export interface RailInput {
@@ -504,6 +542,17 @@ export interface RailInput {
    * anything, which is the default the feature is built around.
    */
   openFolds?: readonly string[];
+  /**
+   * The FAMILY and MONTH groups for this render (`wiki-groups.ts`), or nothing
+   * when the reader has the `group families` toggle off. Computed by the caller
+   * for the reason `activity` is: this module arranges the rail and owns no
+   * grouping rule of its own, and a grouping is testable without one.
+   *
+   * A group is ignored under a query — a search flattens everything — and a
+   * member Activity ranked or the reader pinned leaves its group for that
+   * render, the same lift the attachment layer makes.
+   */
+  groups?: readonly RailGroup[];
   /**
    * The page the reader currently has OPEN, if any. Its group is expanded
    * whatever the store says: a reader is never on a page the rail hides, and a
@@ -652,6 +701,22 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  *  - **The open page's group is forced open**, whatever the store holds.
  *  - **A child whose PARENT the facets filtered away is an ordinary row.**
  *    Folding it under a page that is not on screen would delete it from the rail.
+ *
+ * **FAMILIES and MONTHS (`groups`) are the same invariant one layer up**, and
+ * the caller computes them (`wiki-groups.ts`) exactly as it ranks Activity:
+ *
+ *  - a group row is NOT a page: it carries no relPath, `shown` does not count
+ *    it, and a closed group emits none of its members — so `#wikiCount` goes
+ *    down and the roll-up says what is behind it;
+ *  - **a member Activity ranked or the reader pinned leaves the group** for
+ *    that render, and the roll-up drops it: it is on screen, one section up;
+ *  - a member that is itself a PARENT keeps its own attachment group inside the
+ *    family body, one indent further in;
+ *  - the group takes the position of its first remaining member, so the reader's
+ *    own sort places it;
+ *  - **the open page's group is forced open**, including when the reader is on
+ *    an attachment child of a member;
+ *  - and a query flattens groups exactly as it flattens attachments.
  */
 export function buildRail(input: RailInput): RailModel {
   const { filtered, facetOnly, filters, pins, metaTail, activity } = input;
@@ -704,6 +769,31 @@ export function buildRail(input: RailInput): RailModel {
       parentOf.set(normalizeRel(p.relPath), parent);
     }
   }
+  // ── Families and months ───────────────────────────────────────────────
+  // The second grouping layer, and it obeys the same invariant: a group MOVES
+  // its members into its own block, it never copies them, and a member the
+  // Activity ranking or the reader's pin took is not in the block at all.
+  /** page key → the family/month group it belongs to in this render. */
+  const groupOf = new Map<string, RailGroup>();
+  /** group key → its members PRESENT in this filtered set, in the sort's order. */
+  const groupMembers = new Map<string, WikiListing[]>();
+  if (grouped) {
+    for (const g of input.groups ?? []) {
+      const key = foldKeyForGroup(g.key);
+      const present: WikiListing[] = [];
+      for (const m of g.members) {
+        const mk = normalizeRel(m.relPath);
+        // ⚠️ A page that is an attachment CHILD here is not a group member,
+        // whatever the grouping said: it renders under its parent, and claiming
+        // it for a family as well would put one page in two blocks.
+        if (!byRel.has(mk) || parentOf.has(mk) || groupOf.has(mk)) continue;
+        groupOf.set(mk, g);
+        present.push(m);
+      }
+      if (present.length) groupMembers.set(key, present);
+    }
+  }
+
   const open = input.openFolds ?? [];
   // The open page forces ITS group open — the group it is in when it is a child,
   // its own when it is a parent, and `Bookkeeping` when it is a meta page.
@@ -715,8 +805,19 @@ export function buildRail(input: RailInput): RailModel {
     if (openParent) forced.add(normalizeRel(openParent.relPath));
     if (childrenOf.has(openKey)) forced.add(openKey);
     if (openPage && isMetaPage(openPage)) forced.add(SECTION_META_FOLD_KEY);
+    // …and the family or month holding it — reached through the attachment
+    // parent when the reader is on a CHILD, since a child inside a closed family
+    // is a row the rail is hiding while the reader stands on it.
+    const holder = groupOf.get(openKey) ?? (openParent ? groupOf.get(normalizeRel(openParent.relPath)) : undefined);
+    if (holder) forced.add(foldKeyForGroup(holder.key));
   }
   const isOpen = (key: string): boolean => forced.has(key) || isFoldOpen(open, key);
+  /** A GROUP's open state. Same store, but the newest month defaults to OPEN, so
+   *  presence of its key means closed — see `isGroupOpen`. */
+  const isGroupExpanded = (g: RailGroup): boolean => {
+    const key = foldKeyForGroup(g.key);
+    return forced.has(key) || isGroupOpen(g, isFoldOpen(open, key));
+  };
 
   /**
    * The children LIFTED out of their groups by this render — the ones Activity
@@ -743,6 +844,10 @@ export function buildRail(input: RailInput): RailModel {
       /** True only on the recursive call below, i.e. the row really is drawn
        *  inside its parent's group. A row emitted anywhere else is `lifted`. */
       underParent?: boolean;
+      /** Set only by the family/month block below, i.e. the row really is drawn
+       *  inside that group's body. A member lifted into Activity or Pinned is
+       *  emitted without it, and so without the indent. */
+      inGroup?: RailGroup;
     } = {},
   ): void => {
     const key = normalizeRel(page.relPath);
@@ -768,9 +873,16 @@ export function buildRail(input: RailInput): RailModel {
             ...(extra.underParent ? {} : { lifted: true }),
           }
         : {}),
+      ...(extra.inGroup
+        ? { member: { label: extra.inGroup.label, kind: extra.inGroup.kind } }
+        : {}),
     });
     if (mine.length && !folded) {
-      for (const c of mine) emitRow(c, section, { underParent: true });
+      // A child of a group MEMBER stays inside its own parent's group and
+      // inherits the membership, so the painter can indent it one level further
+      // rather than drawing it at the family's own depth — where it would read
+      // as a sibling of the page it belongs to.
+      for (const c of mine) emitRow(c, section, { underParent: true, inGroup: extra.inGroup });
     }
   };
 
@@ -872,7 +984,49 @@ export function buildRail(input: RailInput): RailModel {
   // No `claimed` re-test: `remainder` is computed from `claimed` a few lines up
   // and nothing between them emits, and a page in it has no parent here, so no
   // earlier group could have taken it.
-  for (const p of rest) emitRow(p, "all");
+  //
+  // A FAMILY or MONTH takes the position of its first remaining member, so the
+  // sort the reader chose is what places it: under a date sort that is the
+  // newest member (which is the family's age), under Title A–Z the member whose
+  // title sorts first, and under Most linked the most-linked one. A group is
+  // emitted once, at that position; its other members are skipped when the loop
+  // reaches them.
+  const groupsEmitted = new Set<string>();
+  for (const p of rest) {
+    const g = groupOf.get(normalizeRel(p.relPath));
+    if (!g) {
+      emitRow(p, "all");
+      continue;
+    }
+    const foldKey = foldKeyForGroup(g.key);
+    if (groupsEmitted.has(foldKey)) continue;
+    groupsEmitted.add(foldKey);
+    // The members this row stands for: the ones no section lifted. With every
+    // member lifted there is no group left to draw — a row reading `0 pages`
+    // above nothing is furniture standing for an empty set.
+    const members = (groupMembers.get(foldKey) ?? []).filter(
+      (m) => !claimed.has(normalizeRel(m.relPath)),
+    );
+    if (!members.length) continue;
+    // The rule-4 children counted with them. Not filtered by `claimed` beyond
+    // the lift: a superseded child rendered under its own successor INSIDE this
+    // body is still a member of the slate, and the roll-up is a census of the
+    // slate rather than a count of hidden rows (the attachment chip is the one
+    // that counts rows).
+    const superseded = g.supersededChildren.filter((c) => !claimed.has(normalizeRel(c.relPath)));
+    const expanded = isGroupExpanded(g);
+    entries.push({
+      kind: "group",
+      section: "all",
+      group: g,
+      foldKey,
+      members,
+      superseded,
+      folded: !expanded,
+      ...(forced.has(foldKey) ? { forcedOpen: true } : {}),
+    });
+    if (expanded) for (const m of members) emitRow(m, "all", { inGroup: g });
+  }
   if (meta.length) {
     // Bookkeeping starts COLLAPSED — it is the one section whose whole point is
     // that nobody is looking for it. The header stays and carries its count, so
