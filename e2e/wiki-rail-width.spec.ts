@@ -26,6 +26,8 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 import {
+  RAIL_MID_MIN_CHIP,
+  RAIL_MID_MIN_CHIP_NARROW,
   RAIL_TITLE_MIN,
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_DEFAULT_NARROW,
@@ -505,19 +507,37 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
   });
 
   /**
-   * The narrow floor, pinned where this fixture can pin it. On mimir the row
-   * this is about (`3 attached` + pill + ⚑ + a compact age) was the one chip row
-   * that wrapped at the 300px default and keeps one line on the narrow floor
-   * (measured: 0 wrapped rows at 300 after, 1 before). This fixture's row is
-   * settled, so its date is the wide form (74px against mimir's 26px) and the
-   * same row needs ~336px for one line under the narrow floor and ~350px under
-   * the default one — so 342 is the width at which the two floors differ, with
-   * ~6px of margin to either side.
+   * The narrow floor, pinned as a COUNTERFACTUAL rather than at a width: the
+   * row's fixed parts are platform font metrics (CI's Linux paints the pill at
+   * 61px, the ⚑ at 9 and the date at 73 against 56/6/74 on macOS, and a rail
+   * picked by hand here summed to exactly the content box there and wrapped).
+   * So the case measures the fixed parts on the row itself, computes the rail at
+   * which the narrow floor fits with 4px to spare, asserts one line there, and
+   * asserts the same rail is under what the DEFAULT floor would need — which is
+   * what makes it evidence about the floor and not about the machine. On mimir
+   * the row this stands for (`3 attached` + pill + ⚑ + a compact age) was the
+   * one chip row wrapping at the 300px default; measured 0 after, 1 before.
    */
   test("a one-count chip beside a pill and a ⚑ keeps ONE line where only the narrow floor fits", async ({ page }) => {
-    await openAt(page, 342);
+    await openAt(page, 300);
+    const fixed = await rowOf(page, THREE).evaluate((el) => {
+      const w = (s: string) => (el.querySelector(s) as HTMLElement).getBoundingClientRect().width;
+      const cs = getComputedStyle(el);
+      const gap = parseFloat(cs.gap) || 8;
+      const content = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      // dot · [mid] · pill · ⚑ · ★+date, and the four gaps between five items.
+      return { parts: w(".wiki-type-dot") + w(".wiki-status") + w(".wiki-followup-flag") + w(".wiki-list-end") + 4 * gap, content };
+    });
+    // Rail px per content px is 1:1; the offset is whatever the pane, list and
+    // row paddings take, read from this machine rather than assumed.
+    const offset = 300 - fixed.content;
+    const railFor = (floor: number) => Math.ceil(fixed.parts + floor + offset);
+    const width = railFor(RAIL_MID_MIN_CHIP_NARROW) + 4;
+    // The counterfactual: at this rail the default floor would NOT fit.
+    expect(width, `narrow ${railFor(RAIL_MID_MIN_CHIP_NARROW)} vs default ${railFor(RAIL_MID_MIN_CHIP)}`).toBeLessThan(railFor(RAIL_MID_MIN_CHIP));
+    await openAt(page, width);
     const g = await geometry(page, THREE);
-    expect(g.wrapped, `one line: ${JSON.stringify(g)}`).toBe(false);
+    expect(g.wrapped, `one line at ${width}: ${JSON.stringify(g)}`).toBe(false);
     expect(g.labelClipped).toBe(false);
     expect(g.title).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
   });
