@@ -72,6 +72,30 @@ export const MONTH_FOLDER = "archive";
  */
 export const GROUP_FAMILIES_TOGGLE_KEY = "toggle:families";
 
+/**
+ * The second spelling a GROUP key can take in the folds store: `closed:<key>`.
+ *
+ * The store holds the reader's exceptions, and a group has two possible
+ * defaults — closed for every family and every month but one, open for the
+ * newest month that renders. One key cannot carry both without changing meaning
+ * when the default moves, which is exactly what the first cut did: the newest
+ * month's key meant CLOSED, so the day a new month landed (or a facet filtered
+ * the newest away) the reader's deliberate close silently became an open.
+ *
+ * So each spelling means ONE thing forever: `month:2026-09` is OPEN,
+ * `closed:month:2026-09` is CLOSED, and a key of the spelling that does not
+ * match the group's current default is ignored rather than reinterpreted. The
+ * `closed:` form is only ever WRITTEN for the group that defaults open — the
+ * painter puts that spelling in its `data-fold-key`, so the one generic toggle
+ * handler flips the right key with no branch of its own.
+ */
+export const CLOSED_FOLD_PREFIX = "closed:";
+
+/** The CLOSED spelling of a group's fold key. */
+export function closedFoldKey(key: string): string {
+  return CLOSED_FOLD_PREFIX + key;
+}
+
 /** The word a page carrying no `plan_status` counts under in a family roll-up.
  *  Not "other" (which reads as another status) and not "unknown" (which reads as
  *  a failure): the page simply never declared one, which is true of most pages
@@ -100,15 +124,18 @@ export interface RailGroup {
   /** The rows this group folds, in the order the caller's sort gave them. */
   members: WikiListing[];
   /**
-   * Rule-4 children (`pairedBy: "superseded"`) whose own stem carries the
-   * family's prefix. They render under their successor — never in the family
-   * body, which is where the store's one-level-deep invariant puts them — and
-   * count toward the roll-up and toward the cap. Always empty for a month.
+   * Rule-4 children (`pairedBy: "superseded"`) whose SUCCESSOR is a member of
+   * this family. They render inside the family body, under that successor — one
+   * indent further in, which is where the store's one-level-deep invariant puts
+   * them — and count toward the roll-up and toward the cap. Always empty for a
+   * month.
+   *
+   * The successor decides membership, not the child's own name: a retired page
+   * whose successor sits in another folder (or in another family) is a piece of
+   * THAT work, and counting it here would put one page in two slates while it
+   * renders in neither's body.
    */
   supersededChildren: WikiListing[];
-  /** Open unless the reader stored the key: the newest month, and nothing else.
-   *  See `isGroupOpen` for how the store's one namespace expresses both defaults. */
-  defaultOpen?: boolean;
 }
 
 /** The fold key for a family in one folder. */
@@ -122,16 +149,25 @@ export function monthFoldKey(month: string): string {
 }
 
 /**
- * Is this group open, given the reader's stored OPEN keys?
+ * The group that defaults to OPEN in one render: the newest month among the
+ * groups that actually RENDER, or `null` when none of them is a month.
  *
- * Two defaults in one flat key namespace, and this is the whole mechanism:
- * presence in the store means OPEN for an ordinary group and CLOSED for one
- * whose `defaultOpen` is set. The store still holds exactly the exceptions — a
- * reader who has never touched the rail carries no key — and a click still
- * flips the key, so the toggle behaves and is remembered either way.
+ * Computed over the rendered set, after the Activity/Pinned lift, and that is
+ * the whole fix: choosing the newest month up front meant that on a real
+ * archive — where every page of the newest month is also the freshest thing on
+ * the wiki, so Activity lifts all of it — the group carrying the default was
+ * not on screen and NO month was open (measured under "Recently added").
+ *
+ * Families never default open: a slate is one piece of work among many, while
+ * an archive is read from the near end.
  */
-export function isGroupOpen(group: { defaultOpen?: boolean }, stored: boolean): boolean {
-  return group.defaultOpen ? !stored : stored;
+export function defaultOpenGroupKey(rendered: readonly RailGroup[]): string | null {
+  let best: string | null = null;
+  for (const g of rendered) {
+    if (g.kind !== "month") continue;
+    if (best === null || g.label.localeCompare(best) > 0) best = g.label;
+  }
+  return best === null ? null : monthFoldKey(best);
 }
 
 /** The directory part of a relPath — the family scope. `""` for a page sitting
@@ -160,17 +196,51 @@ function isMarkdown(relPath: string): boolean {
  */
 const FIX_ROUNDS_RE = /^\d{4}-\d{2}-\d{2}-.+-fix-rounds(?:-|$)/i;
 
-/** The leading `YYYY-MM-DD-` an archive page carries in its filename. */
-const DATED_NAME_RE = /^(\d{4})-(\d{2})-\d{2}-/;
+/**
+ * The leading `YYYY-MM-DD` an archive page carries in its filename.
+ *
+ * The month and the day are VALIDATED, because an invalid one is not a date:
+ * `2026-13-02-topic` is a name that happens to start with digits, and reading a
+ * month `13` off it files the page under a bucket no other page can join. It
+ * falls back to the date the rail is sorting on instead.
+ *
+ * The tail is `-` OR END, so `archive/2026-09-02.md` — a page whose whole name
+ * is the day — still buckets by its filename rather than by its stamp.
+ */
+const DATED_NAME_RE = /^(\d{4})-(0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?:-|$)/;
+
+/**
+ * A prefix that is nothing but a date (`2026-07`, `2026-07-15`) is never a
+ * family candidate. A month is what `groupMonths` owns, and letting the family
+ * rule mint one too was wrong in three measured ways on the live wiki: the same
+ * label formed TWICE (two subfolders of one month), a 13-page month went over
+ * the cap and BANNED a genuine 3-page slate nested under it, and the rail said
+ * "these pages were written in July", which is the one thing a date sort already
+ * says on every row.
+ *
+ * Deliberately permissive about the numbers (unlike `DATED_NAME_RE`, which has
+ * to pick a real bucket): "this prefix is not a family" is the safe direction,
+ * so `9999-99` is excluded too.
+ */
+const DATE_PREFIX_RE = /^\d{4}-\d{2}(?:-\d{2})?$/;
 
 /** Every dash-separated prefix of `stem` with at least `minSegments` segments,
  *  the whole stem included — a page named exactly `alpha-beta` shares the prefix
  *  `alpha-beta` with its siblings, and leaving it out would count a slate one
- *  member short. Shortest first. */
+ *  member short. Shortest first.
+ *
+ *  An EMPTY segment ends the walk: `a--b` and `-x` are the only shapes that
+ *  produce one, and the prefixes they used to mint (`a-`, `-x`) are not names —
+ *  they rendered as malformed labels (`a--*`) over families whose own members
+ *  could not carry them. Everything BEFORE the empty segment is still a real
+ *  prefix of the stem, so `a-b--c` keeps `a-b`. */
 function prefixesOf(stem: string, minSegments: number): string[] {
   const parts = stem.split("-");
   const out: string[] = [];
-  for (let n = minSegments; n <= parts.length; n++) out.push(parts.slice(0, n).join("-"));
+  for (let n = minSegments; n <= parts.length; n++) {
+    if (parts.slice(0, n).some((s) => s === "")) break;
+    out.push(parts.slice(0, n).join("-"));
+  }
   return out;
 }
 
@@ -205,6 +275,8 @@ function projectNameSet(projects: Record<string, number> | readonly string[]): S
  *    from `alpha-search-*`, a real slate of 8. The project list is the wiki's own
  *    (`/api/wiki/pages` `projects`), so a wiki that declares none loses only this
  *    exclusion.
+ *  - **Not a bare DATE** (`2026-07`, `2026-07-15`): a month is what `groupMonths`
+ *    owns. See `DATE_PREFIX_RE` for the three things that went wrong without it.
  *  - **Three or more PARENT rows**, judged on parents alone: two pages plus a
  *    retired one is not a slate, it is a page and its predecessor, which the
  *    attachment layer already folds.
@@ -219,25 +291,33 @@ function projectNameSet(projects: Record<string, number> | readonly string[]): S
  *    `alpha-wiki` while a 10-member `alpha-tools-live` still forms under the
  *    over-cap PROJECT name `alpha-tools`, which is never a candidate.
  *
- * **Computed over parent rows only** — `.md`/`.mdx` pages that are nobody's
- * child. A child of any kind renders under its parent (the store's rule) and
- * never in a family body; only rule-4 children count toward a roll-up and the
- * cap, and an `.html` page never counts at all. Meta pages (`index`, `log`,
- * `CLAUDE`) are out: they are per-folder plumbing and the rail sinks them under
+ * **Formed over parent rows only** — `.md`/`.mdx` pages that are nobody's child.
+ * Every child renders under its own parent (the store's rule); only a rule-4
+ * child whose SUCCESSOR is a member counts toward that family's roll-up and cap,
+ * and an `.html` page never counts at all. Meta pages (`index`, `log`, `CLAUDE`)
+ * are out: they are per-folder plumbing and the rail sinks them under
  * `Bookkeeping`.
  *
  * Member order is the input order, so the caller's sort decides what the family
  * opens into and where the rail puts it.
+ *
+ * **Labels are disambiguated last**, across every folder at once: see the pass
+ * at the bottom of this function.
  */
 export function groupFamilies(
   pages: readonly WikiListing[],
   projects: Record<string, number> | readonly string[],
 ): RailGroup[] {
   const projectNames = projectNameSet(projects);
-  /** folder → the rows that may FORM a family (parents) and the rows that COUNT
-   *  toward one (parents + rule-4 children). */
-  const byFolder = new Map<string, { parents: WikiListing[]; counted: WikiListing[] }>();
+  /** folder → the rows that may FORM a family (parents) and the rule-4 children
+   *  that COUNT with one of them. */
+  const byFolder = new Map<string, { parents: WikiListing[]; children: WikiListing[] }>();
   for (const p of pages) {
+    // The meta test is a BELT-AND-BRACES mirror of the rail's own `Bookkeeping`
+    // section, and it is unobservable today: every meta stem (`index`, `log`,
+    // `CLAUDE`) is one segment, so it mints no two-segment prefix and carries
+    // none either. That is a fact about `isMetaStem` in another module, not
+    // about this rule, which is why the guard stays rather than being tested.
     if (!isMarkdown(p.relPath) || isMetaPage(p)) continue;
     const stem = pageStemOf(p.relPath);
     if (FIX_ROUNDS_RE.test(stem)) continue;
@@ -247,30 +327,48 @@ export function groupFamilies(
     if (p.parent && !isSuperseded) continue;
     const folder = folderOf(p.relPath);
     let bucket = byFolder.get(folder);
-    if (!bucket) byFolder.set(folder, (bucket = { parents: [], counted: [] }));
-    bucket.counted.push(p);
-    if (!p.parent) bucket.parents.push(p);
+    if (!bucket) byFolder.set(folder, (bucket = { parents: [], children: [] }));
+    if (p.parent) bucket.children.push(p);
+    else bucket.parents.push(p);
   }
 
-  const groups: RailGroup[] = [];
+  const groups: Array<RailGroup & { folder: string; prefix: string }> = [];
   for (const [folder, bucket] of byFolder) {
-    if (bucket.parents.length < FAMILY_MIN) continue;
+    /** normalized relPath → the PARENT row at it, so a rule-4 child can be
+     *  resolved to its successor. Only this folder's parents: a successor
+     *  somewhere else is outside every family here, by the rule below. */
+    const parentByRel = new Map<string, WikiListing>();
+    for (const p of bucket.parents) parentByRel.set(normalizeRel(p.relPath), p);
     /** prefix → how many PARENT rows carry it (the formation threshold). */
     const parentCount = new Map<string, number>();
     /** prefix → how many members carry it in total (the cap, and the ban). */
     const totalCount = new Map<string, number>();
     const bump = (m: Map<string, number>, key: string) => m.set(key, (m.get(key) ?? 0) + 1);
-    for (const p of bucket.counted) {
+    for (const p of bucket.parents) {
       for (const prefix of prefixesOf(pageStemOf(p.relPath).toLowerCase(), 2)) {
         bump(totalCount, prefix);
-        if (!p.parent) bump(parentCount, prefix);
+        bump(parentCount, prefix);
+      }
+    }
+    // ⚠️ A rule-4 child counts under its SUCCESSOR's prefixes, never its own.
+    // Membership is "my successor is in this family" (see `supersededChildren`),
+    // so counting the child's own name would let it push a prefix over the cap
+    // that it is not a member of — and leave the prefix it IS a member of one
+    // short. A child whose successor is not a parent here counts nowhere.
+    for (const c of bucket.children) {
+      const successor = parentByRel.get(normalizeRel(c.parent ?? ""));
+      if (!successor) continue;
+      for (const prefix of prefixesOf(pageStemOf(successor.relPath).toLowerCase(), 2)) {
+        bump(totalCount, prefix);
       }
     }
     /** A prefix the rule would ever consider — the test the over-cap BAN is
      *  judged with too, which is why it is its own predicate: `alpha-tools` is
      *  over the cap and bans nothing, because a project name is never a family
-     *  candidate in the first place. */
-    const isCandidate = (prefix: string): boolean => !projectNames.has(prefix);
+     *  candidate in the first place. A pure DATE prefix is excluded the same way
+     *  and for the same reason — it is the month grouping's unit, not a slate. */
+    const isCandidate = (prefix: string): boolean =>
+      !projectNames.has(prefix) && !DATE_PREFIX_RE.test(prefix);
     const overCapAncestor = (prefix: string): boolean => {
       for (const ancestor of prefixesOf(prefix, 2)) {
         if (ancestor === prefix) continue;
@@ -297,16 +395,40 @@ export function groupFamilies(
         const stem = pageStemOf(p.relPath).toLowerCase();
         return stem === prefix || stem.startsWith(prefix + "-");
       };
+      const members = bucket.parents.filter(carries);
+      const memberKeys = new Set(members.map((m) => normalizeRel(m.relPath)));
       groups.push({
         kind: "family",
+        folder,
+        prefix,
         key: familyFoldKey(folder, prefix),
         label: prefix + "-*",
-        members: bucket.parents.filter(carries),
-        supersededChildren: bucket.counted.filter((p) => p.parent && carries(p)),
+        members,
+        // Membership by SUCCESSOR: the child belongs to the slate its successor
+        // belongs to, wherever its own name points.
+        supersededChildren: bucket.children.filter((c) =>
+          memberKeys.has(normalizeRel(c.parent ?? "")),
+        ),
       });
     }
   }
-  return groups;
+  // ⚠️ The LABEL is only unique per folder, and the rail renders every folder at
+  // once on the whole-wiki view. Two `beta-flow-*` rows with identical labels,
+  // identical `title=` and identical `aria-label` are two controls a reader — or
+  // a screen reader — cannot tell apart, so an ambiguous prefix takes its folder
+  // with it, exactly as the store's display titles disambiguate a duplicate page
+  // name. A unique prefix is unchanged: most wikis never hit this.
+  const prefixUses = new Map<string, number>();
+  for (const g of groups) prefixUses.set(g.prefix, (prefixUses.get(g.prefix) ?? 0) + 1);
+  return groups.map(({ folder, prefix, ...g }) => ({
+    ...g,
+    label:
+      (prefixUses.get(prefix) ?? 0) > 1
+        ? // The wiki ROOT has no folder name; `/` is what the folder facet calls
+          // it (`ROOT_FOLDER`), so a root family reads `/beta-flow-*`.
+          (folder ? folder + "/" : "/") + prefix + "-*"
+        : prefix + "-*",
+  }));
 }
 
 /**
@@ -323,7 +445,8 @@ export function groupFamilies(
  * row — an "undated" bucket would be a group whose only rule is that the rail
  * knows nothing about its members.
  *
- * The NEWEST month carries `defaultOpen`: an archive is read from the near end.
+ * Which month starts OPEN is not decided here: it is the newest month that
+ * really RENDERS, which only the rail knows (see `defaultOpenGroupKey`).
  */
 export function groupMonths(
   pages: readonly WikiListing[],
@@ -361,15 +484,12 @@ export function groupMonths(
   // its whole month to the top. `orderPagesForGroups` is what makes this order
   // the rendered one.
   order.sort((a, b) => b.localeCompare(a));
-  return order.map((month, i) => ({
+  return order.map((month) => ({
     kind: "month" as const,
     key: monthFoldKey(month),
     label: month,
     members: members.get(month)!,
     supersededChildren: [],
-    // The newest is the first, by the sort above. An archive is read from the
-    // near end, so that one is open with nothing stored.
-    ...(i === 0 ? { defaultOpen: true } : {}),
   }));
 }
 
@@ -398,7 +518,6 @@ export function orderPagesForGroups(
       if (!rank.has(key)) rank.set(key, i);
     }
   });
-  if (!rank.size) return pages.slice();
   const last = groups.length;
   return pages
     .map((p, i) => ({ p, i, rank: rank.get(normalizeRel(p.relPath)) ?? last }))
@@ -425,10 +544,25 @@ export function railGroups(
   },
 ): RailGroup[] {
   const dateSort = opts.sort === "updated" || opts.sort === "created";
-  if (opts.folder === MONTH_FOLDER && dateSort) {
+  // Lower-cased on both sides, like `folderOf` and every other relPath
+  // comparison in the rail: a facet value of `Archive` is the same folder.
+  if ((opts.folder || "").toLowerCase() === MONTH_FOLDER && dateSort) {
     return groupMonths(pages, opts.sort === "created" ? "added" : "updated", opts.now);
   }
   return groupFamilies(pages, opts.projects);
+}
+
+/**
+ * Is this render's grouping the MONTH one? The question `orderPagesForGroups`
+ * answers for — months decide their own order and the rows are re-sorted to
+ * match, families take their position from their members.
+ *
+ * Exported so the caller asks the grouping rather than sniffing
+ * `groups[0]?.kind`, which silently stops applying the day a family can precede
+ * a month in the array.
+ */
+export function isMonthGrouping(groups: readonly RailGroup[]): boolean {
+  return groups.some((g) => g.kind === "month");
 }
 
 /**
@@ -438,8 +572,10 @@ export function railGroups(
  * question a folded slate raises is "is this finished?", and a bare count
  * answers it with a number the reader then has to open the fold to read. The
  * counts are `plan_status` verbatim, in the facet's own order, with the pages
- * declaring none last under one neutral word. Superseded children are included:
- * they are members of the slate wherever the rail happens to draw them.
+ * declaring none last — unknown words, that neutral one included, after the
+ * known statuses in their own alphabetical order. Superseded children count
+ * wherever the rail happens to draw them; `buildRail` decides which of them this
+ * render is a census OF (only the LIFT takes one out).
  *
  * A month carries the count, because every page in it says the same thing about
  * itself — that it happened that month.

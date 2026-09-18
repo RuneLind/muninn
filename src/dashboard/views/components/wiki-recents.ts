@@ -26,7 +26,13 @@
 
 import { displayTitleOf, isMetaPage, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
 import type { ActivityRow } from "./wiki-activity-rank.ts";
-import { isGroupOpen, type RailGroup, type RailGroupKind } from "./wiki-groups.ts";
+import {
+  CLOSED_FOLD_PREFIX,
+  closedFoldKey,
+  defaultOpenGroupKey,
+  type RailGroup,
+  type RailGroupKind,
+} from "./wiki-groups.ts";
 import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
@@ -80,17 +86,18 @@ export function foldsKey(wiki: string): string {
  */
 export const SECTION_META_FOLD_KEY = "section:meta";
 
-/** The fold key for a family or month group — its own key, already in the flat
- *  namespace (`family:…` / `month:…`, built by `wiki-groups.ts`) and normalized
- *  here for the same reason a page's is: every comparison downstream is a plain
- *  `===` and must be exact by construction. */
-export function foldKeyForGroup(key: string): string {
+/**
+ * A key in that namespace, normalized: a parent page's relPath, a `section:` or
+ * `toggle:` sentinel, or a group's own `family:…` / `month:…` / `closed:…` key.
+ *
+ * ONE function for all of them on purpose — the page half and the group half
+ * were byte-identical twins, and two spellings of one normalization is how the
+ * two halves of a comparison come to disagree (the `isPinnedRelPath` story, one
+ * layer down). Every comparison downstream is a plain `===` and must be exact by
+ * construction.
+ */
+export function normalizeFoldKey(key: string): string {
   return normalizeRel((key || "").trim());
-}
-
-/** The fold key for a parent page's group. */
-export function foldKeyForPage(relPath: string): string {
-  return normalizeRel((relPath || "").trim());
 }
 
 /** Is this group open? Everything not stored is CLOSED — the default the whole
@@ -100,12 +107,58 @@ export function isFoldOpen(open: readonly string[], key: string): boolean {
   return open.some((k) => normalizeRel(k) === want);
 }
 
-/** Flip one group and return the new list. A blank key is a no-op. */
+/**
+ * Is this a MODE key rather than one of the fold exceptions `FOLDS_MAX` bounds?
+ * Today exactly one: `toggle:families`.
+ *
+ * A mode says how the whole rail is arranged; a fold key says which single group
+ * this reader opened. Capping them together meant the sentinel was evicted after
+ * ~200 fold opens and the feature turned itself off with no way to tell that
+ * from the reader never having enabled it.
+ */
+export function isModeFoldKey(key: string): boolean {
+  return normalizeFoldKey(key).startsWith("toggle:");
+}
+
+/** Flip one group and return the new list. A blank key is a no-op.
+ *
+ *  Mode keys are EXEMPT from the cap and hoisted to the front, which is what
+ *  keeps them exempt on the way back IN too: `readFolds` caps at `FOLDS_MAX` as
+ *  well, so a sentinel left at the tail would simply fall off on the next boot. */
 export function toggleFold(open: string[], key: string): string[] {
-  const v = normalizeRel((key || "").trim());
+  const v = normalizeFoldKey(key);
   if (!v) return open.slice();
-  if (isFoldOpen(open, v)) return open.filter((k) => normalizeRel(k) !== v);
-  return [v, ...open].slice(0, FOLDS_MAX);
+  if (isFoldOpen(open, v)) return open.filter((k) => normalizeFoldKey(k) !== v);
+  const next = [v, ...open];
+  const modes = next.filter((k) => isModeFoldKey(k));
+  const folds = next.filter((k) => !isModeFoldKey(k)).slice(0, FOLDS_MAX);
+  return [...modes, ...folds];
+}
+
+/**
+ * What the store SAYS about one group, in the two-spelling key space
+ * (`wiki-groups.ts`'s `CLOSED_FOLD_PREFIX`): `"open"`, `"closed"`, or
+ * `undefined` when the reader has never touched it and the default decides.
+ *
+ * **The most recent click wins**, which is what the walk order buys: `toggleFold`
+ * PREPENDS, so the first of the two spellings found is the one the reader wrote
+ * last. Both can be present at once — the painter offers the `closed:` spelling
+ * only while the group is the one that defaults open, so a group that moves in
+ * and out of that role collects both — and "whichever was clicked last" is the
+ * only reading of that pair a reader would recognise.
+ */
+export function groupFoldState(
+  open: readonly string[],
+  key: string,
+): "open" | "closed" | undefined {
+  const want = normalizeFoldKey(key);
+  const closed = CLOSED_FOLD_PREFIX + want;
+  for (const k of open) {
+    const v = normalizeFoldKey(k);
+    if (v === want) return "open";
+    if (v === closed) return "closed";
+  }
+  return undefined;
 }
 
 /**
@@ -495,8 +548,16 @@ export type RailEntry =
       kind: "group";
       section: RailSection;
       group: RailGroup;
-      /** The fold key a click flips, normalized. */
+      /** The group's IDENTITY in the fold namespace, normalized — what the row
+       *  is addressed by (`data-group`), never what a click writes. */
       foldKey: string;
+      /**
+       * The key a click FLIPS. The group's own key for every group but the one
+       * that defaults open, which offers the `closed:` spelling instead so the
+       * one generic toggle handler writes a key that means CLOSED forever
+       * (`CLOSED_FOLD_PREFIX`).
+       */
+      toggleKey: string;
       /** The members this row stands for: the ones not emitted anywhere else in
        *  this render, which is what the roll-up counts. */
       members: WikiListing[];
@@ -554,10 +615,14 @@ export interface RailInput {
    */
   groups?: readonly RailGroup[];
   /**
-   * The page the reader currently has OPEN, if any. Its group is expanded
-   * whatever the store says: a reader is never on a page the rail hides, and a
-   * collapsed group holding the `.active` row reads as the rail losing the page.
-   * It is not persisted — leaving the page re-collapses the group.
+   * The page the reader currently has OPEN, if any. The group HOLDING it is
+   * expanded whatever the store says — a reader is never on a page the rail
+   * hides, and a collapsed group carrying the `.active` row reads as the rail
+   * losing the page. It is not persisted: leaving the page re-collapses it.
+   *
+   * "Holding it" is judged after the lift. A page Activity ranked or the reader
+   * pinned is drawn one section up, so its family is not hiding it and renders
+   * on the reader's own stored state instead.
    */
   openRelPath?: string;
 }
@@ -714,8 +779,15 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  *    family body, one indent further in;
  *  - the group takes the position of its first remaining member, so the reader's
  *    own sort places it;
- *  - **the open page's group is forced open**, including when the reader is on
- *    an attachment child of a member;
+ *  - **the open page's group is forced open** — including when the reader is on
+ *    an attachment child of a member — but only while that page is still one of
+ *    the members this group DRAWS: lifted into Activity or Pinned it is already
+ *    on screen, and forcing the group open would hide the reader's own stored
+ *    state behind a disabled chip for nothing;
+ *  - **one group may default to OPEN**: the newest month among the groups that
+ *    render (`defaultOpenGroupKey`), chosen after the lift for the same reason,
+ *    and expressed with the `closed:` key spelling so neither key's meaning can
+ *    move when the default does;
  *  - and a query flattens groups exactly as it flattens attachments.
  */
 export function buildRail(input: RailInput): RailModel {
@@ -779,7 +851,7 @@ export function buildRail(input: RailInput): RailModel {
   const groupMembers = new Map<string, WikiListing[]>();
   if (grouped) {
     for (const g of input.groups ?? []) {
-      const key = foldKeyForGroup(g.key);
+      const key = normalizeFoldKey(g.key);
       const present: WikiListing[] = [];
       for (const m of g.members) {
         const mk = normalizeRel(m.relPath);
@@ -805,19 +877,11 @@ export function buildRail(input: RailInput): RailModel {
     if (openParent) forced.add(normalizeRel(openParent.relPath));
     if (childrenOf.has(openKey)) forced.add(openKey);
     if (openPage && isMetaPage(openPage)) forced.add(SECTION_META_FOLD_KEY);
-    // …and the family or month holding it — reached through the attachment
-    // parent when the reader is on a CHILD, since a child inside a closed family
-    // is a row the rail is hiding while the reader stands on it.
-    const holder = groupOf.get(openKey) ?? (openParent ? groupOf.get(normalizeRel(openParent.relPath)) : undefined);
-    if (holder) forced.add(foldKeyForGroup(holder.key));
+    // NB the FAMILY or MONTH holding the open page is NOT forced here: whether
+    // it should be depends on the lift, which has not happened yet. See
+    // `forcedGroupKey` below.
   }
   const isOpen = (key: string): boolean => forced.has(key) || isFoldOpen(open, key);
-  /** A GROUP's open state. Same store, but the newest month defaults to OPEN, so
-   *  presence of its key means closed — see `isGroupOpen`. */
-  const isGroupExpanded = (g: RailGroup): boolean => {
-    const key = foldKeyForGroup(g.key);
-    return forced.has(key) || isGroupOpen(g, isFoldOpen(open, key));
-  };
 
   /**
    * The children LIFTED out of their groups by this render — the ones Activity
@@ -832,6 +896,22 @@ export function buildRail(input: RailInput): RailModel {
    * `2 attached` and the render then drew one of the two, one row further down.
    */
   const lifted = new Set<string>();
+
+  /**
+   * EVERY page the recall sections took for this render — Activity's rows and
+   * the resolved pins, members and children alike. `lifted` above is the subset
+   * the attachment chips need (children only); this is the set the family/month
+   * census and the forced-open rule are computed from.
+   *
+   * ⚠️ Not `claimed`, and that distinction is the bug it closes. `claimed` grows
+   * as the rail paints, so "is this row still in the family?" answered from it
+   * depends on what the SORT happened to put above the family: a successor that
+   * sorted above it with its attachment fold open had already claimed its
+   * retired child, and the same slate then read `3 shipped` there and
+   * `3 shipped · 1 superseded` one sort order later. A census is a fact about
+   * the slate, so it may only be a function of the lift.
+   */
+  const sectionLifted = new Set<string>();
 
   /** Emit one row, claiming the page. A PARENT row takes its unclaimed, unlifted
    *  children with it — under it when the group is open, into the chip's count
@@ -934,6 +1014,7 @@ export function buildRail(input: RailInput): RailModel {
     const pinned = resolve(pins, filtered, pinSeen);
     for (const p of [...activityRows.map((r) => r.page), ...pinned]) {
       const key = normalizeRel(p.relPath);
+      sectionLifted.add(key);
       if (parentOf.has(key)) lifted.add(key);
     }
 
@@ -981,6 +1062,48 @@ export function buildRail(input: RailInput): RailModel {
   if (claimed.size && rest.length) {
     entries.push({ kind: "header", section: "all", label: jump ? "Other matches" : "Other pages" });
   }
+
+  // ── The groups' open state, decided AFTER the lift ────────────────────
+  /** The members of one group that the recall sections did not take. */
+  const unlifted = (g: RailGroup): WikiListing[] =>
+    (groupMembers.get(normalizeFoldKey(g.key)) ?? []).filter(
+      (m) => !sectionLifted.has(normalizeRel(m.relPath)),
+    );
+  /** The groups this render really DRAWS — the ones with a member left. Both
+   *  rules below are functions of this set rather than of the grouping, because
+   *  a group nothing draws can neither hold the open page nor carry a default. */
+  const renderedGroups = (input.groups ?? []).filter((g) => unlifted(g).length > 0);
+  const defaultOpenKey = defaultOpenGroupKey(renderedGroups);
+  /**
+   * The group forced open by the reader being ON a page inside it — and only
+   * while that page (or, for an attachment child, its successor) is still one of
+   * the members this group is going to DRAW. With the page lifted into Activity
+   * or Pinned it is already on screen one section up, so forcing the group open
+   * hid the reader's own stored state behind a disabled chip for nothing.
+   */
+  let forcedGroupKey: string | null = null;
+  if (grouped && input.openRelPath) {
+    const openKey = normalizeRel(input.openRelPath);
+    const openParent = parentOf.get(openKey);
+    const holderKey = groupOf.has(openKey)
+      ? openKey
+      : openParent && groupOf.has(normalizeRel(openParent.relPath))
+        ? normalizeRel(openParent.relPath)
+        : null;
+    if (holderKey && !sectionLifted.has(holderKey)) {
+      forcedGroupKey = normalizeFoldKey(groupOf.get(holderKey)!.key);
+    }
+  }
+  /** A GROUP's open state: forced, else whichever spelling the reader wrote
+   *  last, else this render's default (the newest month that draws). */
+  const isGroupExpanded = (key: string): boolean => {
+    if (forcedGroupKey === key) return true;
+    const stored = groupFoldState(open, key);
+    if (stored) return stored === "open";
+    return key === defaultOpenKey;
+  };
+
+
   // No `claimed` re-test: `remainder` is computed from `claimed` a few lines up
   // and nothing between them emits, and a page in it has no parent here, so no
   // earlier group could have taken it.
@@ -998,32 +1121,35 @@ export function buildRail(input: RailInput): RailModel {
       emitRow(p, "all");
       continue;
     }
-    const foldKey = foldKeyForGroup(g.key);
+    const foldKey = normalizeFoldKey(g.key);
     if (groupsEmitted.has(foldKey)) continue;
     groupsEmitted.add(foldKey);
-    // The members this row stands for: the ones no section lifted. With every
-    // member lifted there is no group left to draw — a row reading `0 pages`
-    // above nothing is furniture standing for an empty set.
-    const members = (groupMembers.get(foldKey) ?? []).filter(
-      (m) => !claimed.has(normalizeRel(m.relPath)),
+    // The members this row stands for: the ones no recall section lifted. `p` is
+    // one of them (it is in `rest`, so nothing took it), so this is never empty.
+    const members = unlifted(g);
+    // The rule-4 children counted with them — a CENSUS of the slate, so a child
+    // rendered under its own successor inside this body still counts and only
+    // the LIFT removes one. A child is out when the reader is looking at it (or
+    // at its successor) one section up, and in every other case in.
+    const superseded = g.supersededChildren.filter(
+      (c) =>
+        !sectionLifted.has(normalizeRel(c.relPath)) &&
+        !sectionLifted.has(normalizeRel(c.parent ?? "")),
     );
-    if (!members.length) continue;
-    // The rule-4 children counted with them. Not filtered by `claimed` beyond
-    // the lift: a superseded child rendered under its own successor INSIDE this
-    // body is still a member of the slate, and the roll-up is a census of the
-    // slate rather than a count of hidden rows (the attachment chip is the one
-    // that counts rows).
-    const superseded = g.supersededChildren.filter((c) => !claimed.has(normalizeRel(c.relPath)));
-    const expanded = isGroupExpanded(g);
+    const expanded = isGroupExpanded(foldKey);
     entries.push({
       kind: "group",
       section: "all",
       group: g,
       foldKey,
+      // The `closed:` spelling is offered ONLY by the group that defaults open,
+      // and only then — so that key is written for nothing else and can never be
+      // read back as a statement about a group whose default has moved.
+      toggleKey: foldKey === defaultOpenKey ? closedFoldKey(foldKey) : foldKey,
       members,
       superseded,
       folded: !expanded,
-      ...(forced.has(foldKey) ? { forcedOpen: true } : {}),
+      ...(forcedGroupKey === foldKey ? { forcedOpen: true } : {}),
     });
     if (expanded) for (const m of members) emitRow(m, "all", { inGroup: g });
   }

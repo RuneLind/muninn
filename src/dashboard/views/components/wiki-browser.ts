@@ -97,8 +97,8 @@ import {
   foldChipCompactLabel,
   foldChipKinds,
   foldChipLabel,
-  foldKeyForPage,
   isFoldOpen,
+  normalizeFoldKey,
   isPinnedRelPath,
   pairedByWhy,
   railSectionsVisible,
@@ -107,6 +107,7 @@ import {
 import {
   GROUP_FAMILIES_TOGGLE_KEY,
   groupRollup,
+  isMonthGrouping,
   orderPagesForGroups,
   railGroups,
 } from "./wiki-groups.ts";
@@ -1019,7 +1020,7 @@ function renderList(): void {
   // match before the rail places each group at its first member. Families are
   // left alone: they interleave with single pages by age, which is the reader's
   // own sort speaking. See `orderPagesForGroups`.
-  const rows = groups[0]?.kind === "month" ? orderPagesForGroups(filtered, groups) : filtered;
+  const rows = isMonthGrouping(groups) ? orderPagesForGroups(filtered, groups) : filtered;
   const rail = buildRail({
     filtered: rows,
     facetOnly,
@@ -1074,10 +1075,17 @@ function renderList(): void {
     }
     // A FAMILY or MONTH row: a fold control with a roll-up on it, and the one
     // row in this list that is not a page — no `data-relpath`, nothing to open,
-    // and `#wikiCount` does not count it. It reuses the group chip's own markup
-    // (both label forms, `is-wide`, the caret) inside a `.wiki-list-mid`, so the
-    // container-query breakpoints in `wiki-rail-width.ts` measure it exactly as
-    // they measure a parent row's chip, with no second set of constants.
+    // and `#wikiCount` does not count it. It reuses the parent row's furniture
+    // (the caret, both chip label forms, the `.wiki-list-mid` container) but
+    // takes its OWN breakpoint (`.is-group`, `RAIL_GROUP_CHIP_SWITCH`): this
+    // row's mid holds a label and a chip and nothing else — no type dot, no
+    // status pill, no ⚑, no ★+date — so the width at which the words stop
+    // fitting is a different number, and borrowing the parent row's hid the
+    // roll-up behind a hover at the shipped 300px default.
+    //
+    // `data-fold-key` is the entry's `toggleKey`, which is the group's own key
+    // for every group but the one that defaults open — that one offers the
+    // `closed:` spelling, so this one generic handler writes the right key.
     if (entry.kind === "group") {
       const roll = groupRollup(entry.group.kind, entry.members, entry.superseded);
       const why = entry.forcedOpen
@@ -1087,13 +1095,13 @@ function renderList(): void {
       html +=
         `<div class="wiki-list-group" data-section="${esc(entry.section)}" data-group="${esc(entry.foldKey)}">` +
         `<button type="button" class="wiki-group-fold${entry.folded ? " folded" : ""}"` +
-        ` data-fold-key="${esc(entry.foldKey)}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+        ` data-fold-key="${esc(entry.toggleKey)}" aria-expanded="${entry.folded ? "false" : "true"}"` +
         (entry.forcedOpen ? ` disabled` : "") +
         ` aria-label="${esc(entry.group.label + " · " + hover)}" title="${esc(hover)}">` +
         `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
         `<div class="wiki-list-mid">` +
         `<div class="wiki-group-label">${esc(entry.group.label)}</div>` +
-        `<span class="wiki-fold-chip${roll.wide ? " is-wide" : ""} static">` +
+        `<span class="wiki-fold-chip is-group${roll.wide ? " is-wide" : ""} static">` +
         `<span class="wiki-fold-chip-label">${esc(roll.label)}</span>` +
         `<span class="wiki-fold-chip-counts">${esc(roll.compact)}</span>` +
         `</span>` +
@@ -1203,7 +1211,7 @@ function renderList(): void {
             const hover = `${full} — ${why}`;
             return (
               `<button type="button" class="wiki-fold-chip${wide ? " is-wide" : ""}${entry.folded ? " folded" : ""}"` +
-              ` data-fold-key="${esc(foldKeyForPage(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+              ` data-fold-key="${esc(normalizeFoldKey(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
               // Forced open because the reader is ON a page in this group: the same
               // inert control the section header renders, for the same reason.
               (entry.forcedOpen ? ` disabled` : "") +
