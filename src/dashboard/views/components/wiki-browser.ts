@@ -97,12 +97,20 @@ import {
   foldChipCompactLabel,
   foldChipKinds,
   foldChipLabel,
-  foldKeyForPage,
+  isFoldOpen,
+  normalizeFoldKey,
   isPinnedRelPath,
   pairedByWhy,
   railSectionsVisible,
   type RailEntry,
 } from "./wiki-recents.ts";
+import {
+  GROUP_FAMILIES_TOGGLE_KEY,
+  groupRollup,
+  isMonthGrouping,
+  orderPagesForGroups,
+  railGroups,
+} from "./wiki-groups.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
@@ -925,8 +933,19 @@ purgeRecentsKeys();
 let pins: string[] = readPins(WIKI);
 
 /** Which GROUPS this reader has opened on this wiki — same discipline as `pins`:
- *  read once at boot, kept in step by the toggle, never re-read per render. */
+ *  read once at boot, kept in step by the toggle, never re-read per render. It
+ *  also carries the `group families` toggle itself (`GROUP_FAMILIES_TOGGLE_KEY`),
+ *  a sentinel in the same flat key namespace as `section:meta`, so the toggle is
+ *  remembered per wiki with no second store. */
 let openFolds: string[] = readFolds(WIKI);
+
+/** Is the reader grouping this wiki's rail into families and months? OFF by
+ *  default: the finder-rail retro found the rail is scanned more than browsed,
+ *  and a fold that hides a row the reader expected costs more than ten rows they
+ *  skim past. */
+function familiesOn(): boolean {
+  return isFoldOpen(openFolds, GROUP_FAMILIES_TOGGLE_KEY);
+}
 
 /**
  * ★ — hidden until the row is hovered, always shown once pinned.
@@ -989,8 +1008,21 @@ function renderList(): void {
   const facetOnly = /[0-9]/.test(filters.q)
     ? sortPages(filterPages(allPages, { ...filters, q: "" }), mode, now)
     : filtered;
+  // Computed here for `activity`'s reason — `buildRail` arranges, it does not
+  // group — and only when the toggle is on AND the rail is not under a query,
+  // which flattens everything. `projects` is the wiki's own name list, the one
+  // thing the family rule needs that the page rows do not carry.
+  const groups =
+    familiesOn() && railSectionsVisible(filters)
+      ? railGroups(filtered, { folder: filters.folder, sort: mode, projects, now })
+      : [];
+  // MONTHS decide their own order (newest first), so the rows are re-ordered to
+  // match before the rail places each group at its first member. Families are
+  // left alone: they interleave with single pages by age, which is the reader's
+  // own sort speaking. See `orderPagesForGroups`.
+  const rows = isMonthGrouping(groups) ? orderPagesForGroups(filtered, groups) : filtered;
   const rail = buildRail({
-    filtered,
+    filtered: rows,
     facetOnly,
     filters,
     pins,
@@ -1000,7 +1032,8 @@ function renderList(): void {
     // date cannot disagree with the score that placed it. Skipped entirely under
     // a query, where `buildRail` renders no sections and would throw the ranking
     // away — that is a scan of every page on every keystroke.
-    activity: railSectionsVisible(filters) ? rankActivity(filtered, activityWeights, now) : [],
+    activity: railSectionsVisible(filters) ? rankActivity(rows, activityWeights, now) : [],
+    groups,
     openFolds,
     // The page the reader has open — its group is expanded whatever the store
     // says, so the `.active` row is never inside a closed fold.
@@ -1038,6 +1071,42 @@ function renderList(): void {
         `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
         `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
         `</div>`;
+      return;
+    }
+    // A FAMILY or MONTH row: a fold control with a roll-up on it, and the one
+    // row in this list that is not a page — no `data-relpath`, nothing to open,
+    // and `#wikiCount` does not count it. It reuses the parent row's furniture
+    // (the caret, both chip label forms, the `.wiki-list-mid` container) but
+    // takes its OWN breakpoint (`.is-group`, `RAIL_GROUP_CHIP_SWITCH`): this
+    // row's mid holds a label and a chip and nothing else — no type dot, no
+    // status pill, no ⚑, no ★+date — so the width at which the words stop
+    // fitting is a different number, and borrowing the parent row's hid the
+    // roll-up behind a hover at the shipped 300px default.
+    //
+    // `data-fold-key` is the entry's `toggleKey`, which is the group's own key
+    // for every group but the one that defaults open — that one offers the
+    // `closed:` spelling, so this one generic handler writes the right key.
+    if (entry.kind === "group") {
+      const roll = groupRollup(entry.group.kind, entry.members, entry.superseded);
+      const why = entry.forcedOpen
+        ? "the open page is in this group"
+        : (entry.folded ? "Show" : "Hide") + " the " + entry.group.label + " pages";
+      const hover = `${roll.label} — ${why}`;
+      html +=
+        `<div class="wiki-list-group" data-section="${esc(entry.section)}" data-group="${esc(entry.foldKey)}">` +
+        `<button type="button" class="wiki-group-fold${entry.folded ? " folded" : ""}"` +
+        ` data-fold-key="${esc(entry.toggleKey)}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+        (entry.forcedOpen ? ` disabled` : "") +
+        ` aria-label="${esc(entry.group.label + " · " + hover)}" title="${esc(hover)}">` +
+        `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
+        `<div class="wiki-list-mid">` +
+        `<div class="wiki-group-label">${esc(entry.group.label)}</div>` +
+        `<span class="wiki-fold-chip is-group${roll.wide ? " is-wide" : ""} static">` +
+        `<span class="wiki-fold-chip-label">${esc(roll.label)}</span>` +
+        `<span class="wiki-fold-chip-counts">${esc(roll.compact)}</span>` +
+        `</span>` +
+        `</div>` +
+        `</button></div>`;
       return;
     }
     const p = entry.page;
@@ -1081,15 +1150,24 @@ function renderList(): void {
     const childWhy = entry.child
       ? pairedByWhy(entry.child.pairedBy, displayTitleOf(entry.child.parent))
       : "";
-    const rowTitle = entry.activity
-      ? entry.activity.why + (childWhy ? "\n" + childWhy : "")
-      : childWhy;
+    // A row inside a family or month says which one on hover — the group's own
+    // row carries the label, and a reader scrolling past the top of a long open
+    // group has nothing else to read it from.
+    const memberWhy = entry.member
+      ? entry.member.kind === "month"
+        ? `In ${entry.member.label}`
+        : `In the ${entry.member.label} family`
+      : "";
+    const rowTitle = [entry.activity?.why ?? "", childWhy, memberWhy].filter(Boolean).join("\n");
     html +=
       // The indent is for a row drawn INSIDE its parent's group. A lifted child
       // (Activity ranked it, or the reader pinned it) sits under an unrelated
       // row, where an indent + left rule claims a parentage the rail invented;
       // it keeps the hover sentence, which is the true statement of the two.
-      `<div class="wiki-list-item${active ? " active" : ""}${entry.child && !entry.lifted ? " child" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      // A group MEMBER is indented under its group's row, and a member's own
+      // attachment child indents one level further (`.member.child`) — at the
+      // family's own depth it would read as a sibling of the page it belongs to.
+      `<div class="wiki-list-item${active ? " active" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
       // The derivation on the ROW, and again on the title element below:
       // the child's own `title=` wins the hover over most of the row's width.
       (rowTitle ? ` title="${esc(rowTitle)}"` : "") +
@@ -1133,7 +1211,7 @@ function renderList(): void {
             const hover = `${full} — ${why}`;
             return (
               `<button type="button" class="wiki-fold-chip${wide ? " is-wide" : ""}${entry.folded ? " folded" : ""}"` +
-              ` data-fold-key="${esc(foldKeyForPage(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+              ` data-fold-key="${esc(normalizeFoldKey(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
               // Forced open because the reader is ON a page in this group: the same
               // inert control the section header renders, for the same reason.
               (entry.forcedOpen ? ` disabled` : "") +
@@ -2550,6 +2628,23 @@ document.getElementById("tagChips")!.addEventListener("click", (e) => {
 });
 
 document.getElementById("wikiSort")!.addEventListener("change", renderList);
+
+// `group families`, per wiki. The control is painted from the STORE at boot (the
+// server has no idea what this browser remembers) and written back through the
+// same `toggleFolded` every fold uses — the toggle is a sentinel key in that one
+// flat namespace, so nothing about the store changes to hold it.
+const familiesBox = document.getElementById("wikiGroupFamilies") as HTMLInputElement | null;
+if (familiesBox) {
+  familiesBox.checked = familiesOn();
+  familiesBox.addEventListener("change", () => {
+    openFolds = toggleFolded(WIKI, GROUP_FAMILIES_TOGGLE_KEY);
+    // Painted from the store rather than trusted from the event: a write that
+    // localStorage refused still has to leave the box saying what the rail is
+    // about to render.
+    familiesBox.checked = familiesOn();
+    renderList();
+  });
+}
 
 // Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
 const wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;

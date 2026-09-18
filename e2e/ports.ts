@@ -93,6 +93,12 @@ export const E2E_PORTS = {
   // twin and a superseded sibling, so the chip, the fold, the count and the
   // flatten-under-a-query rule are all driven against one wiki.
   "wiki-rail-attachments": 3060,
+  // The rail's FAMILY and MONTH groups: one temp wiki holding a ten-page stem
+  // family (one of them superseded, so the roll-up has both words), a two-page
+  // prefix that must NOT fold, and a dated archive spanning two months — the
+  // toggle, the roll-up, the forced-open family and the month default all drive
+  // against the one fixture.
+  "wiki-rail-families": 3061,
   // `/summaries/prompts`, against a throwaway `claude-cli` bot under
   // MUNINN_BOTS_DIR (the connector decides which kinds are offered, and only a
   // Claude one is offered `deep`). The server is restarted mid-file, because a

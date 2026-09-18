@@ -9,6 +9,7 @@ import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import {
   RAIL_CHIP_SWITCH_SHORT,
   RAIL_CHIP_SWITCH_WIDE,
+  RAIL_GROUP_CHIP_SWITCH,
   RAIL_MID_MIN_CHIP,
   RAIL_TITLE_MIN,
   RAIL_WIDTH_DEFAULT,
@@ -236,6 +237,30 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-folder { flex: 1; }
     .wiki-count { font-size: 11.5px; color: var(--text-dim); }
+    /* The sort row carries three controls once the grouping toggle is in it, and
+       at the narrow rail they do not fit on one line. The TOGGLE is the one that
+       wraps — it is last in source order and flex wraps from the end — so the
+       select and the count keep the line they shared before this row grew a
+       third control. \`margin-left: auto\` on the count is what holds it flush
+       right on that line whether or not the toggle is beside it (the row's own
+       \`justify-content: space-between\` would otherwise centre it between the
+       two). Measured in Chromium at a 1400px viewport: at rail 260 the toggle
+       takes its own line, at 300 and 312 the three share one; the count's box
+       sits on the select's line at every width. Scoped to this row — the folder
+       and presence rows hold one control each. */
+    .wiki-sort-row-main { flex-wrap: wrap; }
+    .wiki-sort-row-main .wiki-count { margin-left: auto; }
+    /* --text-secondary, not --text-dim: this is a control's label, and dim
+       measures 3.24:1 dark / 3.74:1 light against the rail's ground (the same
+       measurement the group chip's own comment records), under the 4.5:1 floor.
+       Pinned by the spec's both-themes contrast case, which measures against
+       whatever actually paints behind it. */
+    .wiki-group-toggle {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 11.5px; color: var(--text-secondary); cursor: pointer;
+      user-select: none;
+    }
+    .wiki-group-toggle input { margin: 0; accent-color: var(--accent); cursor: pointer; }
 
     .wiki-gardener-badge {
       background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 600;
@@ -435,9 +460,21 @@ export async function renderWikiPage(opts?: {
       .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-counts { display: inline; }
     }
     @container railmid (max-width: ${RAIL_CHIP_SWITCH_WIDE}px) {
-      .wiki-fold-chip.is-wide { flex-shrink: 0; }
-      .wiki-fold-chip.is-wide .wiki-fold-chip-label { display: none; }
-      .wiki-fold-chip.is-wide .wiki-fold-chip-counts { display: inline; }
+      .wiki-fold-chip.is-wide:not(.is-group) { flex-shrink: 0; }
+      .wiki-fold-chip.is-wide:not(.is-group) .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-wide:not(.is-group) .wiki-fold-chip-counts { display: inline; }
+    }
+    /* A WIDE roll-up has its own breakpoint, and the \`:not(.is-group)\` above is
+       what keeps the two from both firing: status words are shorter than
+       "attached", so a chip priced at the attachment worst case went
+       \`display:none\` at a mid of 253.6px — which is exactly the 300px shipped
+       rail, leaving \`9 shipped · 1 superseded\` hover-only on every rail anybody
+       has. A one-kind roll-up keeps the SHORT rule above: 61–80.3px of chip is
+       what that 84 was already sized for. See RAIL_GROUP_CHIP_SWITCH. */
+    @container railmid (max-width: ${RAIL_GROUP_CHIP_SWITCH}px) {
+      .wiki-fold-chip.is-wide.is-group { flex-shrink: 0; }
+      .wiki-fold-chip.is-wide.is-group .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-wide.is-group .wiki-fold-chip-counts { display: inline; }
     }
     .wiki-fold-chip:hover { color: var(--text-secondary); border-color: var(--accent); }
     /* The ROW's hover paints --bg-surface behind this transparent chip, where
@@ -449,13 +486,49 @@ export async function renderWikiPage(opts?: {
     .wiki-fold-chip[disabled] { cursor: default; opacity: .85; }
     /* A child row: indented under its parent, with a rail on the left so the
        group reads as one block rather than as rows that happen to be adjacent.
-       The indent is on the ROW, so the row stays a full-width click target. */
-    .wiki-list-item.child { padding-left: 20px; position: relative; }
-    .wiki-list-item.child::before {
+       The indent is on the ROW, so the row stays a full-width click target.
+       A family/month MEMBER is drawn the same way and at the same depth — it is
+       one page inside one block, which is the same statement — and a member's
+       own attachment child indents one level further, where it reads as that
+       page's child rather than as its sibling. */
+    .wiki-list-item.child, .wiki-list-item.member { padding-left: 20px; position: relative; }
+    .wiki-list-item.child::before, .wiki-list-item.member::before {
       content: ""; position: absolute; left: 10px; top: 4px; bottom: 4px;
       width: 2px; border-radius: 1px; background: var(--border-primary);
     }
-    .wiki-list-item.child:hover::before { background: var(--accent); }
+    .wiki-list-item.child:hover::before, .wiki-list-item.member:hover::before { background: var(--accent); }
+    .wiki-list-item.member.child { padding-left: 34px; }
+    .wiki-list-item.member.child::before { left: 24px; }
+    /* A family or month row. Not a rail ROW at all: it names no page, opens
+       nothing and is not counted by \`#wikiCount\` — it is the fold control for
+       the block under it, with a roll-up of what is in there. The furniture is
+       the parent row's, deliberately: the same caret, the same chip with both
+       label forms, and the same \`.wiki-list-mid\` container the width rules
+       measure, so a group row and a group chip can never come to disagree about
+       when the words no longer fit. */
+    .wiki-list-group { padding: 0; }
+    .wiki-group-fold {
+      display: flex; align-items: flex-start; gap: 8px; width: 100%;
+      background: none; border: 0; cursor: pointer; text-align: left;
+      padding: 6px 10px 5px; font-family: inherit;
+    }
+    .wiki-group-fold[disabled] { cursor: default; }
+    .wiki-group-fold .wiki-fold-caret { margin-top: 5px; color: var(--text-muted); }
+    .wiki-group-fold:hover .wiki-fold-caret { color: var(--text-secondary); }
+    /* The label is the prefix, and it is a NAME: same size and weight rules as a
+       row title, so a folded slate reads as one entry in the list rather than as
+       a section heading over it. */
+    .wiki-group-label {
+      font-size: 12.5px; line-height: 1.3; font-weight: 600;
+      color: var(--text-secondary); flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .wiki-group-fold:hover .wiki-group-label { color: var(--text-primary); }
+    /* The roll-up rides a chip that is NOT a control of its own — the whole row
+       is the button — so it drops the pointer affordance and keeps the legible
+       colour. */
+    .wiki-fold-chip.static { cursor: inherit; }
+    .wiki-group-fold:hover .wiki-fold-chip.static { color: var(--text-secondary); border-color: var(--accent); }
     .wiki-list-sec[data-section="jump"] {
       text-transform: none; letter-spacing: 0; font-size: 11.5px;
       color: var(--text-dim); background: var(--bg-surface);
@@ -1905,7 +1978,7 @@ export async function renderWikiPage(opts?: {
           <button class="wiki-chip" data-domain="ai">AI</button>
           <button class="wiki-chip" data-domain="life">Life</button>
         </div>
-        <div class="wiki-sort-row">
+        <div class="wiki-sort-row wiki-sort-row-main">
           <select id="wikiSort" class="wiki-sort">
             <option value="updated" selected>Recently updated</option>
             <option value="created">Recently added</option>
@@ -1913,6 +1986,17 @@ export async function renderWikiPage(opts?: {
             <option value="title">Title A–Z</option>
           </select>
           <span class="wiki-count" id="wikiCount"></span>
+          <!-- Families and archive months, per wiki. Unchecked here and set from
+               the folds store at boot: the server does not know what this browser
+               remembers, and rendering it checked would flash a grouped rail on
+               every reader who has it off.
+               LAST in source order, which is what decides WHICH element wraps:
+               flex wraps from the end, so the toggle takes the second line and
+               the select + count keep the first one they had before this row
+               grew a third control. -->
+          <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
+            <input type="checkbox" id="wikiGroupFamilies">group families
+          </label>
         </div>
         <details class="wiki-filters" id="wikiFilters">
           <summary class="wiki-filters-summary">Filters<span class="wiki-filter-count" id="wikiFilterCount" style="display:none"></span></summary>

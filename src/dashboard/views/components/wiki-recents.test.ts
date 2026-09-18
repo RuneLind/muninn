@@ -9,6 +9,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  FOLDS_MAX,
   JUMP_MAX,
   PINS_MAX,
   SECTION_META_FOLD_KEY,
@@ -16,7 +17,7 @@ import {
   foldChipCompactLabel,
   foldChipKinds,
   foldChipLabel,
-  foldKeyForPage,
+  normalizeFoldKey,
   foldsKey,
   isFoldOpen,
   toggleFold,
@@ -34,6 +35,7 @@ import {
   type RailEntry,
   type RailSection,
 } from "./wiki-recents.ts";
+import { GROUP_FAMILIES_TOGGLE_KEY, groupRollup, railGroups } from "./wiki-groups.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { ActivityRow } from "./wiki-activity-rank.ts";
 
@@ -1078,7 +1080,7 @@ describe("groups (attachments)", () => {
   });
 
   test("open: the children render under the parent, in order, as child rows", () => {
-    const m = rail({ openFolds: [foldKeyForPage("plans/x.mdx")] });
+    const m = rail({ openFolds: [normalizeFoldKey("plans/x.mdx")] });
     const rs = rowsOf(m);
     expect(rs.map((r) => r.page.relPath)).toEqual([
       "plans/x.mdx",
@@ -1135,7 +1137,7 @@ describe("groups (attachments)", () => {
 
   test("Activity ranking the PARENT moves the whole open group with it", () => {
     const m = rail({
-      openFolds: [foldKeyForPage("plans/x.mdx")],
+      openFolds: [normalizeFoldKey("plans/x.mdx")],
       activity: [{ page: parent, kind: "changed", score: 1, why: "changed — because", ageMs: 0 }],
     });
     const rs = rowsOf(m);
@@ -1150,7 +1152,7 @@ describe("groups (attachments)", () => {
 
   test("a parent and a child BOTH ranked by Activity still render one row each", () => {
     const m = rail({
-      openFolds: [foldKeyForPage("plans/x.mdx")],
+      openFolds: [normalizeFoldKey("plans/x.mdx")],
       activity: [
         { page: parent, kind: "changed", score: 2, why: "changed — because", ageMs: 0 },
         { page: stemChild, kind: "new", score: 1, why: "new — because", ageMs: 0 },
@@ -1190,7 +1192,7 @@ describe("groups (attachments)", () => {
       filters: INERT,
       pins: ["plans/old.mdx"],
       metaTail: true,
-      openFolds: [foldKeyForPage("plans/x.mdx"), SECTION_META_FOLD_KEY],
+      openFolds: [normalizeFoldKey("plans/x.mdx"), SECTION_META_FOLD_KEY],
       activity: [{ page: stemChild, kind: "new", score: 1, why: "new — because", ageMs: 0 }],
     });
     const rs = rowsOf(m);
@@ -1222,7 +1224,7 @@ describe("the fold store's rules", () => {
   });
   test("comparison is normalized on both sides, like the pins key", () => {
     expect(isFoldOpen(["PLANS\\X.MDX"], "plans/x.mdx")).toBe(true);
-    expect(foldKeyForPage(" PLANS/X.MDX ")).toBe("plans/x.mdx");
+    expect(normalizeFoldKey(" PLANS/X.MDX ")).toBe("plans/x.mdx");
   });
   test("toggle is its own inverse and never duplicates an entry", () => {
     expect(toggleFold([], "plans/x.mdx")).toEqual(["plans/x.mdx"]);
@@ -1317,7 +1319,7 @@ describe("groups — fix round 1", () => {
 
   test("Activity ranks PAGES: a ranked child is lifted even out of an OPEN group", () => {
     const m = rail({
-      openFolds: [foldKeyForPage("plans/x.mdx")],
+      openFolds: [normalizeFoldKey("plans/x.mdx")],
       activity: [act(child, 2), act(parent, 1)],
     });
     const rs = rowsOf(m);
@@ -1370,7 +1372,7 @@ describe("groups — fix round 1", () => {
     expect(parentRow.folded).toBe(false);
     expect(parentRow.forcedOpen).toBe(true);
     // A group the STORE opened is an ordinary toggle.
-    const stored = rail({ openFolds: [foldKeyForPage("plans/x.mdx")] });
+    const stored = rail({ openFolds: [normalizeFoldKey("plans/x.mdx")] });
     expect(rowsOf(stored).find((r) => r.page.relPath === "plans/x.mdx")!.forcedOpen).toBeUndefined();
   });
 
@@ -1444,7 +1446,7 @@ describe("groups — fix round 3", () => {
       facetOnly: filtered,
       filters: INERT,
       pins: [],
-      openFolds: [foldKeyForPage("plans/x.mdx")],
+      openFolds: [normalizeFoldKey("plans/x.mdx")],
     });
     const rs = rowsOf(m);
     expect(rs.map((r) => r.page.relPath)).toEqual([
@@ -1480,5 +1482,662 @@ describe("groups — fix round 3", () => {
         page({ relPath: "e.mdx", pairedBy: "superseded" }),
       ]),
     ).toEqual({ attached: 4, superseded: 1 });
+  });
+});
+
+/**
+ * FAMILIES and MONTHS in the rail (PR 2). The grouping rule itself is
+ * `wiki-groups.test.ts`; these are the arrangement rules — which rows the group
+ * stands for, what a lift takes out of it, and the one-row invariant with a
+ * second layer of folds on top of the first.
+ */
+describe("groups (families and months)", () => {
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const groupsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "group") as Array<Extract<RailEntry, { kind: "group" }>>;
+
+  const members = [1, 2, 3].map((i) =>
+    page({ relPath: `plans/fam-one-${i}.mdx`, title: `Fam ${i}`, plan_status: "shipped" }),
+  );
+  const retired = page({
+    relPath: "plans/fam-one-old.mdx",
+    title: "Retired",
+    plan_status: "superseded",
+    parent: "plans/fam-one-1.mdx",
+    pairedBy: "superseded",
+  });
+  const loner = page({ relPath: "plans/zeta.mdx", title: "Zeta" });
+  const listing = [...members, retired, loner];
+  const family = railGroups(listing, { folder: "", sort: "updated", projects: {} });
+  const famKey = normalizeFoldKey(family[0]!.key);
+
+  const rail = (over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+    buildRail({
+      filtered: listing,
+      facetOnly: listing,
+      filters: INERT,
+      pins: [],
+      groups: family,
+      ...over,
+    });
+
+  test("the grouping the rail is handed is the family the rule found", () => {
+    expect(family).toHaveLength(1);
+    expect(family[0]!.label).toBe("fam-one-*");
+    expect(family[0]!.members).toHaveLength(3);
+    expect(family[0]!.supersededChildren.map((c) => c.relPath)).toEqual(["plans/fam-one-old.mdx"]);
+  });
+
+  test("closed by default: no member is a row, and `shown` says so", () => {
+    const m = rail();
+    expect(rowsOf(m).map((r) => r.page.relPath)).toEqual(["plans/zeta.mdx"]);
+    expect(m.shown).toBe(1); // NOT 5 — the group row is not a page
+    const g = groupsOf(m)[0]!;
+    expect(g.folded).toBe(true);
+    expect(g.members.map((p) => p.relPath)).toEqual(members.map((p) => p.relPath));
+    expect(groupRollup("family", g.members, g.superseded).label).toBe("3 shipped · 1 superseded");
+  });
+
+  test("open: the members render under it as member rows, in the sort's order", () => {
+    const m = rail({ openFolds: [famKey] });
+    expect(rowsOf(m).map((r) => r.page.relPath)).toEqual([
+      "plans/fam-one-1.mdx",
+      "plans/fam-one-2.mdx",
+      "plans/fam-one-3.mdx",
+      "plans/zeta.mdx",
+    ]);
+    expect(groupsOf(m)[0]!.folded).toBe(false);
+    expect(rowsOf(m)[0]!.member).toEqual({ label: "fam-one-*", kind: "family" });
+    expect(rowsOf(m)[3]!.member).toBeUndefined();
+    expect(m.shown).toBe(4);
+  });
+
+  test("a member's own attachment group opens INSIDE the family, one level in", () => {
+    const m = rail({ openFolds: [famKey, normalizeFoldKey("plans/fam-one-1.mdx")] });
+    const rs = rowsOf(m);
+    const child = rs.find((r) => r.page.relPath === "plans/fam-one-old.mdx")!;
+    // It is a CHILD of its own parent AND a member of the family, which is what
+    // the painter indents one level further than either alone.
+    expect(child.child!.pairedBy).toBe("superseded");
+    expect(child.member).toEqual({ label: "fam-one-*", kind: "family" });
+    expect(rs.map((r) => r.page.relPath)).toEqual([
+      "plans/fam-one-1.mdx",
+      "plans/fam-one-old.mdx",
+      "plans/fam-one-2.mdx",
+      "plans/fam-one-3.mdx",
+      "plans/zeta.mdx",
+    ]);
+  });
+
+  test("a member Activity ranked leaves the family, and the roll-up drops it", () => {
+    const m = rail({
+      activity: [{ page: members[0]!, kind: "changed", score: 1, why: "changed — because", ageMs: 0 }],
+    });
+    const lifted = rowsOf(m).filter((r) => r.page.relPath === "plans/fam-one-1.mdx");
+    expect(lifted).toHaveLength(1);
+    expect(lifted[0]!.section).toBe("activity");
+    // It is not in the family's body, so it carries no member marker there…
+    expect(lifted[0]!.member).toBeUndefined();
+    const g = groupsOf(m)[0]!;
+    expect(g.members.map((p) => p.relPath)).toEqual(["plans/fam-one-2.mdx", "plans/fam-one-3.mdx"]);
+    // …and the retired page goes WITH it: its successor is the lifted member, so
+    // the reader is looking at that whole strand one section up.
+    expect(groupRollup("family", g.members, g.superseded).label).toBe("2 shipped");
+  });
+
+  test("a PINNED member leaves it the same way", () => {
+    const m = rail({ pins: ["plans/fam-one-2.mdx"] });
+    expect(
+      rowsOf(m).filter((r) => r.page.relPath === "plans/fam-one-2.mdx").map((r) => r.section),
+    ).toEqual(["pinned"]);
+    expect(groupsOf(m)[0]!.members).toHaveLength(2);
+  });
+
+  test("a family whose every member was lifted emits no group row at all", () => {
+    const m = rail({
+      activity: members.map((p, i) => ({
+        page: p,
+        kind: "new" as const,
+        score: 3 - i,
+        why: "new — because",
+        ageMs: 0,
+      })),
+    });
+    expect(groupsOf(m)).toHaveLength(0);
+    expect(m.shown).toBe(4);
+  });
+
+  test("the OPEN page's family is expanded, whatever the store holds", () => {
+    const m = rail({ openRelPath: "plans/fam-one-3.mdx" });
+    expect(rowsOf(m).map((r) => r.page.relPath)).toContain("plans/fam-one-3.mdx");
+    expect(groupsOf(m)[0]!.forcedOpen).toBe(true);
+    expect(groupsOf(m)[0]!.folded).toBe(false);
+  });
+
+  test("…including when the reader is on an ATTACHMENT of a member", () => {
+    const m = rail({ openRelPath: "plans/fam-one-old.mdx" });
+    const rs = rowsOf(m).map((r) => r.page.relPath);
+    // The family opened, and so did the member's own group inside it.
+    expect(rs).toContain("plans/fam-one-1.mdx");
+    expect(rs).toContain("plans/fam-one-old.mdx");
+  });
+
+  test("a query flattens the groups exactly as it flattens attachments", () => {
+    const m = rail({ filters: { ...INERT, q: "fam" } });
+    expect(groupsOf(m)).toHaveLength(0);
+    expect(rowsOf(m).some((r) => r.member)).toBe(false);
+    expect(m.shown).toBe(listing.length);
+  });
+
+  test("the one-row invariant holds with a family, an attachment and every section at once", () => {
+    const logPage = page({ relPath: "log.md", title: "Log" });
+    const filtered = [...listing, logPage];
+    const m = buildRail({
+      filtered,
+      facetOnly: filtered,
+      filters: INERT,
+      pins: ["plans/fam-one-2.mdx"],
+      metaTail: true,
+      groups: railGroups(filtered, { folder: "", sort: "updated", projects: {} }),
+      openFolds: [famKey, normalizeFoldKey("plans/fam-one-1.mdx"), SECTION_META_FOLD_KEY],
+      activity: [{ page: members[0]!, kind: "new", score: 1, why: "new — because", ageMs: 0 }],
+    });
+    const rs = rowsOf(m);
+    const seen = new Map<string, number>();
+    for (const r of rs) seen.set(r.page.relPath, (seen.get(r.page.relPath) ?? 0) + 1);
+    expect([...seen.values()].every((n) => n === 1)).toBe(true);
+    expect(m.shown).toBe(rs.length);
+    expect(seen.size).toBe(filtered.length);
+    // The lifted parent took its open attachment group with it, out of the family.
+    expect(rs.find((r) => r.page.relPath === "plans/fam-one-1.mdx")!.section).toBe("activity");
+    expect(rs.find((r) => r.page.relPath === "plans/fam-one-old.mdx")!.section).toBe("activity");
+    expect(rs.find((r) => r.page.relPath === "plans/fam-one-2.mdx")!.section).toBe("pinned");
+    expect(rs.find((r) => r.page.relPath === "log.md")!.section).toBe("meta");
+    // …and the family still stands for the one member nothing lifted.
+    expect(groupsOf(m)[0]!.members.map((p) => p.relPath)).toEqual(["plans/fam-one-3.mdx"]);
+  });
+
+  test("a group takes the position of its first remaining member in the sort", () => {
+    const first = page({ relPath: "plans/aaa.mdx", title: "Aaa" });
+    const filtered = [first, ...members, retired, loner];
+    const m = buildRail({
+      filtered,
+      facetOnly: filtered,
+      filters: INERT,
+      pins: [],
+      groups: railGroups(filtered, { folder: "", sort: "updated", projects: {} }),
+    });
+    const order = m.entries
+      .filter((e) => e.kind !== "header")
+      .map((e) => (e.kind === "group" ? e.group.label : e.page.relPath));
+    expect(order).toEqual(["plans/aaa.mdx", "fam-one-*", "plans/zeta.mdx"]);
+  });
+
+  test("months: the newest is open by default, and its stored key CLOSES it", () => {
+    const pages = [
+      page({ relPath: "archive/2026-09-02-topic.mdx", title: "Newer" }),
+      page({ relPath: "archive/2026-08-30-topic.mdx", title: "Older" }),
+    ];
+    const months = railGroups(pages, { folder: "archive", sort: "updated", projects: {} });
+    const open = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: { ...INERT, folder: "archive" },
+      pins: [],
+      groups: months,
+    });
+    expect(groupsOf(open).map((g) => [g.group.label, g.folded])).toEqual([
+      ["2026-09", false],
+      ["2026-08", true],
+    ]);
+    expect(rowsOf(open).map((r) => r.page.relPath)).toEqual(["archive/2026-09-02-topic.mdx"]);
+
+    // The row that defaults open offers the `closed:` spelling, and every other
+    // row its own key — each spelling meaning ONE thing, forever.
+    expect(groupsOf(open).map((g) => g.toggleKey)).toEqual(["closed:month:2026-09", "month:2026-08"]);
+
+    const flipped = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: { ...INERT, folder: "archive" },
+      pins: [],
+      groups: months,
+      openFolds: ["closed:month:2026-09", "month:2026-08"],
+    });
+    expect(groupsOf(flipped).map((g) => [g.group.label, g.folded])).toEqual([
+      ["2026-09", true],
+      ["2026-08", false],
+    ]);
+    expect(rowsOf(flipped).map((r) => r.page.relPath)).toEqual(["archive/2026-08-30-topic.mdx"]);
+  });
+
+  test("no `groups` at all is the toggle OFF: today's flat rail, unchanged", () => {
+    const m = buildRail({ filtered: listing, facetOnly: listing, filters: INERT, pins: [] });
+    expect(groupsOf(m)).toHaveLength(0);
+    // The attachment group is still folded — layer 1 does not depend on layer 2.
+    expect(rowsOf(m).map((r) => r.page.relPath)).toEqual([
+      "plans/fam-one-1.mdx",
+      "plans/fam-one-2.mdx",
+      "plans/fam-one-3.mdx",
+      "plans/zeta.mdx",
+    ]);
+  });
+});
+
+describe("groups (families and months) — fix round 1", () => {
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const groupsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "group") as Array<Extract<RailEntry, { kind: "group" }>>;
+  const rollupOf = (m: ReturnType<typeof buildRail>, i = 0): string => {
+    const g = groupsOf(m)[i]!;
+    return groupRollup(g.group.kind, g.members, g.superseded).label;
+  };
+
+  const shipped = [1, 2, 3].map((i) =>
+    page({ relPath: `plans/fam-one-${i}.mdx`, title: `Fam ${i}`, plan_status: "shipped" }),
+  );
+  const retired = page({
+    relPath: "plans/fam-one-old.mdx",
+    title: "Retired",
+    plan_status: "superseded",
+    parent: "plans/fam-one-1.mdx",
+    pairedBy: "superseded",
+  });
+  const famKey = "family:plans/fam-one";
+
+  const railOf = (
+    filtered: WikiListing[],
+    over: Partial<Parameters<typeof buildRail>[0]> = {},
+  ) =>
+    buildRail({
+      filtered,
+      facetOnly: filtered,
+      filters: INERT,
+      pins: [],
+      groups: railGroups(filtered, { folder: "", sort: "updated", projects: {} }),
+      ...over,
+    });
+
+  describe("the roll-up is a census, computed from the LIFT and not from `claimed`", () => {
+    test("a superseded child rendered inside the family body still counts", () => {
+      const listing = [...shipped, retired];
+      const m = railOf(listing, { openFolds: [famKey, "plans/fam-one-1.mdx"] });
+      // The child really is on screen, under its successor, one indent further.
+      expect(rowsOf(m).map((r) => r.page.relPath)).toContain("plans/fam-one-old.mdx");
+      expect(rollupOf(m)).toBe("3 shipped · 1 superseded");
+    });
+
+    test("the census does not depend on where the sort put a child's successor", () => {
+      // A retired page NAMED for the family, superseded by the loner. Read off
+      // `claimed`, the answer moved with the SORT: with the loner above the
+      // family and its attachment fold open, the child was already claimed when
+      // the census was taken and the slate read `3 shipped`; with the loner
+      // below, the same slate read `3 shipped · 1 superseded`. One slate, one
+      // number — and after the successor rule it is the loner's strand anyway.
+      const loner = page({ relPath: "plans/zeta.mdx", title: "Zeta" });
+      const stray = page({
+        relPath: "plans/fam-one-retired.mdx",
+        title: "Stray",
+        plan_status: "superseded",
+        parent: "plans/zeta.mdx",
+        pairedBy: "superseded",
+      });
+      const folds = [famKey, "plans/zeta.mdx"];
+      const above = rollupOf(railOf([loner, stray, ...shipped], { openFolds: folds }));
+      const below = rollupOf(railOf([...shipped, loner, stray], { openFolds: folds }));
+      expect(above).toBe(below);
+      expect(above).toBe("3 shipped");
+    });
+
+    test("a child the reader PINNED leaves the census", () => {
+      const listing = [...shipped, retired];
+      const m = railOf(listing, { pins: ["plans/fam-one-old.mdx"] });
+      expect(
+        rowsOf(m).filter((r) => r.page.relPath === "plans/fam-one-old.mdx").map((r) => r.section),
+      ).toEqual(["pinned"]);
+      expect(rollupOf(m)).toBe("3 shipped");
+    });
+
+    test("a child whose SUCCESSOR was pinned leaves it too", () => {
+      const listing = [...shipped, retired];
+      const m = railOf(listing, { pins: ["plans/fam-one-1.mdx"] });
+      expect(rollupOf(m)).toBe("2 shipped");
+    });
+
+    test("a child whose successor is outside the family never reaches the census", () => {
+      const loner = page({ relPath: "plans/zeta.mdx", title: "Zeta" });
+      const strayChild = page({
+        relPath: "plans/fam-one-retired.mdx",
+        title: "Stray",
+        plan_status: "superseded",
+        parent: "plans/zeta.mdx",
+        pairedBy: "superseded",
+      });
+      const listing = [...shipped, loner, strayChild];
+      const m = railOf(listing, { openFolds: [famKey] });
+      expect(rollupOf(m)).toBe("3 shipped");
+      // It renders under the loner, which is where it belongs.
+      const row = rowsOf(m).find((r) => r.page.relPath === "plans/fam-one-retired.mdx");
+      expect(row?.member).toBeUndefined();
+    });
+  });
+
+  describe("forced open only while the open page is still a member this render draws", () => {
+    test("the open page in the family body forces it open with a dead control", () => {
+      const listing = [...shipped, retired];
+      const m = railOf(listing, { openRelPath: "plans/fam-one-3.mdx" });
+      expect(groupsOf(m)[0]!.forcedOpen).toBe(true);
+      expect(groupsOf(m)[0]!.folded).toBe(false);
+    });
+
+    test("the open page LIFTED into Activity leaves the family on its stored state", () => {
+      const listing = [...shipped, retired];
+      const m = railOf(listing, {
+        openRelPath: "plans/fam-one-3.mdx",
+        activity: [
+          { page: shipped[2]!, kind: "changed", score: 1, why: "changed — because", ageMs: 0 },
+        ],
+      });
+      // The reader can see the page: it is a row in Activity.
+      expect(
+        rowsOf(m).filter((r) => r.page.relPath === "plans/fam-one-3.mdx").map((r) => r.section),
+      ).toEqual(["activity"]);
+      const g = groupsOf(m)[0]!;
+      expect(g.forcedOpen).toBeUndefined();
+      expect(g.folded).toBe(true);
+    });
+
+    test("…and PINNED is the same", () => {
+      const listing = [...shipped, retired];
+      const m = railOf(listing, {
+        openRelPath: "plans/fam-one-3.mdx",
+        pins: ["plans/fam-one-3.mdx"],
+      });
+      const g = groupsOf(m)[0]!;
+      expect(g.forcedOpen).toBeUndefined();
+      expect(g.folded).toBe(true);
+    });
+
+    test("a lifted open page whose stored key says OPEN still renders open, undisabled", () => {
+      const listing = [...shipped, retired];
+      const m = railOf(listing, {
+        openRelPath: "plans/fam-one-3.mdx",
+        openFolds: [famKey],
+        pins: ["plans/fam-one-3.mdx"],
+      });
+      const g = groupsOf(m)[0]!;
+      expect(g.folded).toBe(false);
+      expect(g.forcedOpen).toBeUndefined();
+    });
+  });
+
+  describe("the default-open month is chosen among the groups that RENDER", () => {
+    const dated = (day: string) =>
+      page({ relPath: `archive/${day}-topic.mdx`, title: `Page ${day}` });
+    const sept = [dated("2026-09-11"), dated("2026-09-02")];
+    const aug = [dated("2026-08-28"), dated("2026-08-04")];
+    const archive = (pages: WikiListing[], over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+      buildRail({
+        filtered: pages,
+        facetOnly: pages,
+        filters: { ...INERT, folder: "archive" },
+        pins: [],
+        groups: railGroups(pages, { folder: "archive", sort: "updated", projects: {} }),
+        ...over,
+      });
+
+    test("with the newest month FULLY LIFTED, the next month is the one that opens", () => {
+      const pages = [...sept, ...aug];
+      const m = archive(pages, {
+        activity: sept.map((p, i) => ({
+          page: p,
+          kind: "changed" as const,
+          score: 2 - i,
+          why: "changed — because",
+          ageMs: 0,
+        })),
+      });
+      // September has no group row left at all — every page of it is in Activity.
+      expect(groupsOf(m).map((g) => [g.group.label, g.folded])).toEqual([["2026-08", false]]);
+      expect(rowsOf(m).filter((r) => r.section === "all").map((r) => r.page.relPath)).toEqual([
+        "archive/2026-08-28-topic.mdx",
+        "archive/2026-08-04-topic.mdx",
+      ]);
+    });
+
+    test("a reader's close SURVIVES a newer month arriving", () => {
+      const stored = ["closed:month:2026-09"];
+      const before = archive([...sept, ...aug], { openFolds: stored });
+      expect(groupsOf(before).map((g) => [g.group.label, g.folded])).toEqual([
+        ["2026-09", true],
+        ["2026-08", true],
+      ]);
+      // October lands. The stored key still means CLOSED — it cannot mean
+      // anything else — and September does not silently spring open.
+      const after = archive([dated("2026-10-01"), ...sept, ...aug], { openFolds: stored });
+      expect(groupsOf(after).map((g) => [g.group.label, g.folded])).toEqual([
+        ["2026-10", false],
+        ["2026-09", true],
+        ["2026-08", true],
+      ]);
+    });
+
+    test("a facet that removes the newest month does not flip a stored key", () => {
+      // The reader closed August back when it was the newest thing rendering.
+      const stored = ["closed:month:2026-08"];
+      const withSept = archive([...sept, ...aug], { openFolds: stored });
+      expect(groupsOf(withSept).map((g) => [g.group.label, g.folded])).toEqual([
+        ["2026-09", false],
+        ["2026-08", true],
+      ]);
+      // A facet narrows the listing to August alone: it is now the default-open
+      // month, and the stored key still says the reader closed it.
+      const augOnly = archive(aug, { openFolds: stored });
+      expect(groupsOf(augOnly).map((g) => [g.group.label, g.folded])).toEqual([["2026-08", true]]);
+    });
+
+    test("a plain month key always means OPEN, wherever the default sits", () => {
+      const m = archive([...sept, ...aug], { openFolds: ["month:2026-08"] });
+      expect(groupsOf(m).map((g) => [g.group.label, g.folded])).toEqual([
+        ["2026-09", false],
+        ["2026-08", false],
+      ]);
+    });
+
+    test("the most recently clicked spelling wins when a group has collected both", () => {
+      // `toggleFold` prepends, so the head of the list is the reader's last act.
+      const augFirst = archive(aug, { openFolds: ["month:2026-08", "closed:month:2026-08"] });
+      expect(groupsOf(augFirst)[0]!.folded).toBe(false);
+      const closedFirst = archive(aug, { openFolds: ["closed:month:2026-08", "month:2026-08"] });
+      expect(groupsOf(closedFirst)[0]!.folded).toBe(true);
+    });
+
+    test("a FAMILY never defaults open, and never offers the closed spelling", () => {
+      const listing = [...shipped, retired];
+      const m = railOf(listing);
+      expect(groupsOf(m)[0]!.folded).toBe(true);
+      expect(groupsOf(m)[0]!.toggleKey).toBe(famKey);
+    });
+  });
+
+  describe("the fold store's two group spellings round-trip", () => {
+    test("`closed:` survives the store's normalization untouched", () => {
+      // Not a red→green case: it pins the property the new key space RESTS on —
+      // `normalizeRel` lower-cases and swaps separators, and the prefix has
+      // neither, so the key that goes in is the key that comes back.
+      const key = "closed:month:2026-09";
+      expect(normalizeFoldKey(key)).toBe(key);
+      expect(parseRelPathList(serializeRelPathList([key, famKey]), FOLDS_MAX)).toEqual([
+        key,
+        famKey,
+      ]);
+    });
+
+    test("toggling the closed spelling is its own inverse", () => {
+      const key = "closed:month:2026-09";
+      const on = toggleFold([], key);
+      expect(on).toEqual([key]);
+      expect(toggleFold(on, key)).toEqual([]);
+    });
+  });
+
+  describe("the `toggle:` sentinel is a MODE, not one of the capped exceptions", () => {
+    test("it survives more fold opens than the cap holds", () => {
+      let folds = toggleFold([], GROUP_FAMILIES_TOGGLE_KEY);
+      for (let i = 0; i < FOLDS_MAX + 5; i++) folds = toggleFold(folds, `plans/p-${i}.mdx`);
+      expect(isFoldOpen(folds, GROUP_FAMILIES_TOGGLE_KEY)).toBe(true);
+      // …and the fold keys themselves are still capped.
+      expect(folds.filter((k) => !k.startsWith("toggle:"))).toHaveLength(FOLDS_MAX);
+    });
+
+    test("…and it survives the READ cap too, which is what a boot applies", () => {
+      let folds = toggleFold([], GROUP_FAMILIES_TOGGLE_KEY);
+      for (let i = 0; i < FOLDS_MAX + 5; i++) folds = toggleFold(folds, `plans/p-${i}.mdx`);
+      const reread = parseRelPathList(serializeRelPathList(folds), FOLDS_MAX);
+      expect(isFoldOpen(reread, GROUP_FAMILIES_TOGGLE_KEY)).toBe(true);
+    });
+
+    test("turning the mode off still removes it", () => {
+      const on = toggleFold(["plans/p-1.mdx"], GROUP_FAMILIES_TOGGLE_KEY);
+      expect(isFoldOpen(on, GROUP_FAMILIES_TOGGLE_KEY)).toBe(true);
+      const off = toggleFold(on, GROUP_FAMILIES_TOGGLE_KEY);
+      expect(isFoldOpen(off, GROUP_FAMILIES_TOGGLE_KEY)).toBe(false);
+      expect(off).toEqual(["plans/p-1.mdx"]);
+    });
+  });
+});
+
+describe("groups (families and months) — fix round 2", () => {
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const groupsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "group") as Array<Extract<RailEntry, { kind: "group" }>>;
+
+  describe("a group toggle flips the RENDERED state, whichever spellings the store holds", () => {
+    const dated = (day: string) =>
+      page({ relPath: `archive/${day}-topic.mdx`, title: `Page ${day}` });
+    const aug = dated("2026-08-28");
+    const sept = dated("2026-09-11");
+    /** August alone is the newest month that renders, so it DEFAULTS OPEN. */
+    const alone = [aug];
+    /** With September on screen August is an ordinary row, defaulting closed. */
+    const withSept = [sept, aug];
+
+    const archiveRail = (pages: WikiListing[], openFolds: string[]) =>
+      buildRail({
+        filtered: pages,
+        facetOnly: pages,
+        filters: { ...INERT, folder: "archive" },
+        pins: [],
+        groups: railGroups(pages, { folder: "archive", sort: "updated", projects: {} }),
+        openFolds,
+      });
+    const augRow = (pages: WikiListing[], store: string[]) =>
+      groupsOf(archiveRail(pages, store)).find((g) => g.group.label === "2026-08")!;
+
+    // The store is built by `toggleFold` calls ALONE — never hand-written — because
+    // what the bug turns on is exactly what a sequence of clicks leaves behind.
+    const clicker = () => {
+      let store: string[] = [];
+      return {
+        click: (pages: WikiListing[]): void => {
+          store = toggleFold(store, augRow(pages, store).toggleKey);
+        },
+        folded: (pages: WikiListing[]): boolean | undefined => augRow(pages, store).folded,
+        store: () => store,
+      };
+    };
+
+    test("closed first, as the default-open row: every later click still moves it", () => {
+      const s = clicker();
+      expect(s.folded(alone)).toBe(false);
+      s.click(alone);
+      expect(s.folded(alone)).toBe(true);
+
+      // September arrives: same stored state, read through the plain spelling.
+      expect(s.folded(withSept)).toBe(true);
+      s.click(withSept);
+      expect(s.folded(withSept)).toBe(false);
+
+      // September filtered away: August is the default-open row again, and its
+      // chip offers `closed:` once more. This is the click that did nothing.
+      expect(s.folded(alone)).toBe(false);
+      s.click(alone);
+      expect(s.folded(alone)).toBe(true);
+    });
+
+    test("opened first, as an ordinary row: the mirror sequence moves on every click too", () => {
+      const s = clicker();
+      expect(s.folded(withSept)).toBe(true);
+      s.click(withSept);
+      expect(s.folded(withSept)).toBe(false);
+
+      expect(s.folded(alone)).toBe(false);
+      s.click(alone);
+      expect(s.folded(alone)).toBe(true);
+
+      // Back to an ordinary row, carrying a `closed:` key its chip cannot write.
+      expect(s.folded(withSept)).toBe(true);
+      s.click(withSept);
+      expect(s.folded(withSept)).toBe(false);
+    });
+
+    test("a click leaves ONE spelling of the group's key, never both", () => {
+      const s = clicker();
+      s.click(alone); // writes `closed:month:2026-08`
+      expect(s.store()).toEqual(["closed:month:2026-08"]);
+      s.click(withSept); // the plain spelling replaces it
+      expect(s.store()).toEqual(["month:2026-08"]);
+      s.click(alone); // …and back, still one entry
+      expect(s.store()).toEqual(["closed:month:2026-08"]);
+    });
+  });
+
+  describe("a group is forced open only while NEITHER the open page nor its holder is lifted", () => {
+    const shipped = [1, 2, 3].map((i) =>
+      page({ relPath: `plans/fam-two-${i}.mdx`, title: `Fam ${i}`, plan_status: "shipped" }),
+    );
+    const retired = page({
+      relPath: "plans/fam-two-old.mdx",
+      title: "Retired",
+      plan_status: "superseded",
+      parent: "plans/fam-two-1.mdx",
+      pairedBy: "superseded",
+    });
+    const listing = [...shipped, retired];
+    const railOf = (over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+      buildRail({
+        filtered: listing,
+        facetOnly: listing,
+        filters: INERT,
+        pins: [],
+        groups: railGroups(listing, { folder: "", sort: "updated", projects: {} }),
+        ...over,
+      });
+
+    test("the open page is a PINNED superseded child: stored state, live chip", () => {
+      const m = railOf({
+        openRelPath: "plans/fam-two-old.mdx",
+        pins: ["plans/fam-two-old.mdx"],
+      });
+      // The reader can see the page: it is a row in Pinned, one section up.
+      expect(
+        rowsOf(m)
+          .filter((r) => r.page.relPath === "plans/fam-two-old.mdx")
+          .map((r) => r.section),
+      ).toEqual(["pinned"]);
+      const g = groupsOf(m)[0]!;
+      expect(g.forcedOpen).toBeUndefined();
+      expect(g.folded).toBe(true);
+    });
+
+    test("…un-pinned, the same open child still forces its SUCCESSOR's family open", () => {
+      const m = railOf({ openRelPath: "plans/fam-two-old.mdx" });
+      const g = groupsOf(m)[0]!;
+      expect(g.forcedOpen).toBe(true);
+      expect(g.folded).toBe(false);
+    });
   });
 });
