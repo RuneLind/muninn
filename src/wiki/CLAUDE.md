@@ -511,14 +511,18 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
 
 A rail row is six things — type dot · title · group chip · status pill · ⚑ ·
 ★+date — and only the title is elastic. At the 260px rail (`RAIL_WIDTH_MIN`, i.e.
-any window under 1100px) a chipless row's four fixed parts — dot 7, a status
-pill 56–64, the ⚑ 6.3 and a ★+age 25.7 — plus four 8px gaps leave **80–99px of
-title** inside the 226px content box (measured 2026-09-18 on four mimir rows;
-none wraps), and a full date (74px) in place of the age leaves ~50px, under the
-floor, which is the row shape that wraps at 260. A chip row adds the compact
-chip and a fifth gap on top. #557's comment said "143.4px plus 40px of gaps,
-42.6px left", which the round-3 verify pass flagged as unmeasured arithmetic and
-#559's first draft replaced with a second wrong sum; these are measured.
+any window under 1100px) the title gets what the 226px content box leaves after
+the row's other parts and one 8px gap per part after the first. Measured on
+mimir 2026-09-18 (the reviewer re-derived every term): dot 7; status pill
+44–76.3 (`superseded` is the widest); ⚑ 6.3; ★+date 25.7 as an age or 74 as a
+full date; an Activity row adds a 10px glyph and its gap; a chip row adds the
+compact chip (29.4–74.5) and its gap. So a chipless pill + ⚑ + age row keeps
+72–99px of title (the floor exactly on the `superseded` + age row: 226 − 32 −
+7 − 76.3 − 6.3 − 32.5 = 71.9), an Activity row 80, and a full-date row ~50 —
+under the floor, which is the shape that wraps at 260 (17 of 18 wrapped
+chipless rows; the 18th is the widest pill beside an age). #557's comment said
+"143.4px plus 40px of gaps, 42.6px left" and #559's first two drafts each
+replaced it with another single sum; the terms above are what re-derives.
 Two rounds of distributing that proportionally (the chip shrinkable, then the
 title on a 40% basis) each produced a 10px title and a count clipped to `10 · 1`.
 A share of too little is still too little, so each element has a rule instead:
@@ -529,8 +533,10 @@ A share of too little is still too little, so each element has a rule instead:
   `1 atta…` beside a comfortable title;
 - the **chip** never clips its digits: below a measured breakpoint it swaps its
   words for its counts (a container query on the row's REMAINING space), and one
-  breakpoint per label-shape class — attached-only (the default), superseded-only
-  (`is-long`, which also takes any one-kind label at three digits) and both kinds (`is-wide`) — since `99 attached`,
+  breakpoint per label-WIDTH class — a short one-kind label (the default:
+  `N attached`, `N shipped`, `N pages` at up to two digits), a long one-kind
+  label (`is-long`: the word `superseded` at any count, or any one-kind word at
+  three digits) and a two-kind label (`is-wide`) — since `99 attached`,
   `99 superseded` and `99 attached · 99 superseded` are 85.5, 100.3 and 170.6px
   of chip and a single threshold sized for the long form strips the words off
   every short chip, while one sized for `1 attached` (what #557 shipped) paints

@@ -1105,10 +1105,12 @@ function renderList(): void {
         `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
         `<div class="wiki-list-mid">` +
         `<div class="wiki-group-label">${esc(entry.group.label)}</div>` +
-        // The same two size classes as a page chip, from the same functions —
-        // inert on a group row today (its mid is ≥ 213px at the narrowest rail,
-        // above every breakpoint and floor they select), carried so the two
-        // painters can never classify one label two ways.
+        // The same two size classes as a page chip, from the same functions, so
+        // the two painters can never classify one label two ways. On a group row
+        // (mid ≥ 213.6px at the narrowest rail) only `is-wide` is load-bearing —
+        // it selects RAIL_GROUP_CHIP_SWITCH (235) and fires at the 260px rail;
+        // `is-long` (183) and the counts floors (≤ 156) cannot bind there.
+        // `groupRollup`'s `wide` field says the same thing as the label test.
         `<span class="wiki-fold-chip is-group${cls(foldChipLabelClass(roll.label))}` +
         `${cls(foldChipCountsClass(roll.compact))} static">` +
         `<span class="wiki-fold-chip-label">${esc(roll.label)}</span>` +
