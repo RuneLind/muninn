@@ -11,8 +11,20 @@
  * `e2e/wiki-rail-pins.spec.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { purgeRecentsKeys, type RecentsPurgeStorage } from "./wiki-recents-store.ts";
-import { PINS_KEY_PREFIX, RECENTS_KEY_PREFIX } from "./wiki-recents.ts";
+import {
+  purgeRecentsKeys,
+  readFolds,
+  toggleFolded,
+  type RecentsPurgeStorage,
+} from "./wiki-recents-store.ts";
+import {
+  FOLDS_MAX,
+  PINS_KEY_PREFIX,
+  RECENTS_KEY_PREFIX,
+  SECTION_META_FOLD_KEY,
+  foldsKey,
+  isFoldOpen,
+} from "./wiki-recents.ts";
 import { LAST_WIKI_KEY } from "./wiki-home.ts";
 
 /** A `Storage`-shaped map: `key(i)` reads the insertion order and `removeItem`
@@ -101,5 +113,117 @@ describe("purgeRecentsKeys", () => {
     };
     expect(() => purgeRecentsKeys(midWalk)).not.toThrow();
     expect(removed).toBe(1);
+  });
+});
+
+/**
+ * The FOLD half of this module — the groups a reader has opened, per wiki.
+ *
+ * Worth its own cases for the reason the purge is: the rules live next door in
+ * `wiki-recents.ts`, but the DEGRADE is here, and the whole feature is built
+ * around "not stored means closed" — so a store that throws, or holds something
+ * that is not a list, has to read as a rail with every group closed rather than
+ * as an exception on boot.
+ */
+describe("the fold store", () => {
+  /** A Storage-shaped fake installed as the global the module reads. `throws`
+   *  is the private-window / blocked-site-data case, where EVERY accessor
+   *  throws — not just `setItem`. */
+  function withStorage<T>(
+    initial: Record<string, string>,
+    fn: (map: Map<string, string>) => T,
+    opts: { throws?: boolean } = {},
+  ): T {
+    const map = new Map(Object.entries(initial));
+    const original = (globalThis as { localStorage?: unknown }).localStorage;
+    const fake = {
+      getItem: (k: string) => {
+        if (opts.throws) throw new Error("SecurityError");
+        return map.get(k) ?? null;
+      },
+      setItem: (k: string, v: string) => {
+        if (opts.throws) throw new Error("SecurityError");
+        map.set(k, v);
+      },
+      removeItem: (k: string) => {
+        if (opts.throws) throw new Error("SecurityError");
+        map.delete(k);
+      },
+    };
+    Object.defineProperty(globalThis, "localStorage", { value: fake, configurable: true });
+    try {
+      return fn(map);
+    } finally {
+      Object.defineProperty(globalThis, "localStorage", { value: original, configurable: true });
+    }
+  }
+
+  test("round-trips per wiki, and an untouched wiki holds nothing", () => {
+    withStorage({}, (map) => {
+      expect(readFolds("mimir")).toEqual([]);
+      expect(toggleFolded("mimir", "plans/x.mdx")).toEqual(["plans/x.mdx"]);
+      expect(readFolds("mimir")).toEqual(["plans/x.mdx"]);
+      // …and the OTHER wiki is untouched: one key per wiki, like the pins.
+      expect(readFolds("melosys")).toEqual([]);
+      expect(map.has(foldsKey("mimir"))).toBe(true);
+      expect(map.has(foldsKey("melosys"))).toBe(false);
+    });
+  });
+
+  test("closing again REMOVES the key rather than storing an empty list", () => {
+    withStorage({}, (map) => {
+      toggleFolded("mimir", "plans/x.mdx");
+      expect(toggleFolded("mimir", "plans/x.mdx")).toEqual([]);
+      expect(readFolds("mimir")).toEqual([]);
+      expect(map.has(foldsKey("mimir"))).toBe(false);
+    });
+  });
+
+  test("the section sentinel travels the same namespace as a page key", () => {
+    withStorage({}, () => {
+      expect(toggleFolded("mimir", SECTION_META_FOLD_KEY)).toEqual([SECTION_META_FOLD_KEY]);
+      expect(readFolds("mimir")).toEqual([SECTION_META_FOLD_KEY]);
+      // Normalization must not damage it — it is why the sentinel is lowercase
+      // and separator-free in the first place.
+      expect(isFoldOpen(readFolds("mimir"), SECTION_META_FOLD_KEY)).toBe(true);
+    });
+  });
+
+  test("the cap is enforced on READ, so a hand-edited key cannot grow unbounded", () => {
+    const many = Array.from({ length: FOLDS_MAX + 25 }, (_, i) => `plans/p${i}.mdx`);
+    withStorage({ [foldsKey("mimir")]: JSON.stringify(many) }, () => {
+      expect(readFolds("mimir")).toHaveLength(FOLDS_MAX);
+      expect(readFolds("mimir")[0]).toBe("plans/p0.mdx");
+    });
+  });
+
+  test("the cap is enforced on WRITE too — measured on the STORED string", () => {
+    withStorage({}, (map) => {
+      for (let i = 0; i < FOLDS_MAX + 5; i++) toggleFolded("mimir", `plans/p${i}.mdx`);
+      // Read back through `readFolds` this would pass with no write cap at all —
+      // the read cap truncates either way. What the write cap owns is the size of
+      // the string in storage, so that is what this measures.
+      const stored = JSON.parse(map.get(foldsKey("mimir"))!) as string[];
+      expect(stored).toHaveLength(FOLDS_MAX);
+      expect(stored[0]).toBe(`plans/p${FOLDS_MAX + 4}.mdx`); // newest first
+      expect(readFolds("mimir")).toHaveLength(FOLDS_MAX);
+    });
+  });
+
+  test("anything that is not a list of strings reads as EVERYTHING CLOSED", () => {
+    for (const stored of ["{not json", '{"a":1}', '"a string"', "null", '[1,2]', ""]) {
+      withStorage({ [foldsKey("mimir")]: stored }, () => {
+        expect(readFolds("mimir"), stored).toEqual([]);
+      });
+    }
+  });
+
+  test("a storage that throws degrades to closed, and the toggle still answers", () => {
+    withStorage({}, () => {
+      expect(readFolds("mimir")).toEqual([]);
+      // The caller renders from the RETURN value, so a failed write still opens
+      // the group for this session instead of doing nothing visible.
+      expect(toggleFolded("mimir", "plans/x.mdx")).toEqual(["plans/x.mdx"]);
+    }, { throws: true });
   });
 });

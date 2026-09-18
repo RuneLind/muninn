@@ -23,6 +23,7 @@ import {
   parseJiraKey,
   parseJiraKeyCandidates,
   isPinnedRelPath,
+  pairedByWhy,
   parseRelPathList,
   pinsKey,
   railSectionsVisible,
@@ -1029,11 +1030,9 @@ describe("fix round 6 — relPath identity has ONE boundary", () => {
  * and the last case asserts the invariant over all of them together.
  */
 describe("groups (attachments)", () => {
-  const parent = page({
-    relPath: "plans/x.mdx",
-    title: "X plan",
-    children: ["plans/x.html", "plans/x-prototype.html", "plans/old.mdx"],
-  });
+  // NB no `children` field: the wire carries the PARENT link only, and
+  // `buildRail` rebuilds each group from the pages it was handed.
+  const parent = page({ relPath: "plans/x.mdx", title: "X plan" });
   const stemChild = page({
     relPath: "plans/x.html",
     title: "X diagram",
@@ -1243,5 +1242,165 @@ describe("the fold store's rules", () => {
       "1 attached · 1 superseded",
     );
     expect(foldChipLabel([])).toBe("");
+  });
+});
+
+/**
+ * Fix round 1 — what the first cut of the groups got wrong, all of it about the
+ * ONE number the rail promises: the chip stands for the rows that are NOT on
+ * screen, and every page it was handed is on screen exactly once.
+ */
+describe("groups — fix round 1", () => {
+  const parent = page({ relPath: "plans/x.mdx", title: "X plan" });
+  const child = page({
+    relPath: "plans/x.html",
+    title: "X diagram",
+    parent: "plans/x.mdx",
+    pairedBy: "stem",
+  });
+  const sibling = page({
+    relPath: "plans/x-prototype.html",
+    title: "X prototype",
+    parent: "plans/x.mdx",
+    pairedBy: "suffix",
+  });
+  const loner = page({ relPath: "plans/z.mdx", title: "Zeta" });
+  const family = [parent, child, sibling, loner];
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const act = (p: WikiListing, score: number): ActivityRow => ({
+    page: p,
+    kind: "new",
+    score,
+    why: "new — because",
+    ageMs: 0,
+  });
+  const rail = (over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+    buildRail({ filtered: family, facetOnly: family, filters: INERT, pins: [], ...over });
+
+  test("a child Activity ranks BELOW its parent is still out of the chip's count", () => {
+    // Activity runs before Pinned and emits in rank order, so when the parent
+    // comes first the child is not yet claimed — the chip counted a row the
+    // very next iteration then drew.
+    const m = rail({ activity: [act(parent, 2), act(child, 1)] });
+    const rs = rowsOf(m);
+    const parentRow = rs.find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.children?.map((c) => c.relPath)).toEqual(["plans/x-prototype.html"]);
+    expect(foldChipLabel(parentRow.children ?? [])).toBe("1 attached");
+    expect(rs.filter((r) => r.page.relPath === "plans/x.html")).toHaveLength(1);
+    expect(m.shown).toBe(3); // parent, lifted child, loner — the sibling is folded
+  });
+
+  test("a PINNED child of an Activity-ranked parent is out of the count too", () => {
+    const m = rail({ activity: [act(parent, 2)], pins: ["plans/x.html"] });
+    const rs = rowsOf(m);
+    const parentRow = rs.find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.children?.map((c) => c.relPath)).toEqual(["plans/x-prototype.html"]);
+    expect(rs.find((r) => r.page.relPath === "plans/x.html")!.section).toBe("pinned");
+  });
+
+  test("a child with NO child of its own left keeps no chip at all", () => {
+    const two = [parent, child, loner];
+    const m = buildRail({
+      filtered: two,
+      facetOnly: two,
+      filters: INERT,
+      pins: [],
+      activity: [act(parent, 2), act(child, 1)],
+    });
+    const parentRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.children).toBeUndefined();
+    expect(parentRow.folded).toBeUndefined();
+  });
+
+  test("Activity ranks PAGES: a ranked child is lifted even out of an OPEN group", () => {
+    const m = rail({
+      openFolds: [foldKeyForPage("plans/x.mdx")],
+      activity: [act(child, 2), act(parent, 1)],
+    });
+    const rs = rowsOf(m);
+    const lifted = rs.filter((r) => r.page.relPath === "plans/x.html");
+    expect(lifted).toHaveLength(1);
+    // It carries its OWN derivation — the reason it was lifted — and says so.
+    expect(lifted[0]!.activity?.why).toBe("new — because");
+    expect(lifted[0]!.section).toBe("activity");
+    // …and it is NOT drawn as an indented child of a row it does not sit under.
+    expect(lifted[0]!.lifted).toBe(true);
+    expect(lifted[0]!.child).toEqual({ parent, pairedBy: "stem" });
+    // The sibling that Activity did not rank IS drawn inside the group.
+    const inGroup = rs.find((r) => r.page.relPath === "plans/x-prototype.html")!;
+    expect(inGroup.lifted).toBeUndefined();
+    expect(m.shown).toBe(4);
+  });
+
+  test("a parent chain that cycles renders BOTH pages, never zero", () => {
+    // `parent` is payload. One level deep is the store's invariant, not this
+    // module's guarantee, and a group whose parent is itself a child renders
+    // nowhere at all: two rows silently vanished from the rail.
+    const a = page({ relPath: "a.md", parent: "b.md", pairedBy: "superseded" });
+    const b = page({ relPath: "b.md", parent: "a.md", pairedBy: "superseded" });
+    const m = buildRail({ filtered: [a, b], facetOnly: [a, b], filters: INERT, pins: [] });
+    const rs = rowsOf(m);
+    expect(rs.map((r) => r.page.relPath).sort()).toEqual(["a.md", "b.md"]);
+    expect(m.shown).toBe(2);
+    // Neither is drawn as anyone's child — the group it named is not on screen.
+    expect(rs.every((r) => !r.child && !r.children)).toBe(true);
+  });
+
+  test("Bookkeeping's header count is exactly what opening it reveals", () => {
+    const log = page({ relPath: "log.md", title: "Log" });
+    const idx = page({ relPath: "plans/index.md", title: "Index" });
+    const pages = [loner, log, idx];
+    const opts = { filtered: pages, facetOnly: pages, filters: INERT, pins: [], metaTail: true };
+    const closed = buildRail(opts);
+    const header = closed.entries.find((e) => e.kind === "header" && e.section === "meta")!;
+    const opened = buildRail({ ...opts, openFolds: [SECTION_META_FOLD_KEY] });
+    const revealed = rowsOf(opened).filter((r) => r.section === "meta");
+    expect(revealed).toHaveLength((header as { count?: number }).count!);
+    expect(opened.shown - closed.shown).toBe((header as { count?: number }).count!);
+  });
+
+  test("a group forced open by the OPEN PAGE says so, so the chip can stop toggling", () => {
+    // `isOpen` is `forced || stored`, so a click on this chip flips a stored key
+    // with no visible effect — a dead control the reader can only read as broken.
+    const m = rail({ openRelPath: "plans/x.html" });
+    const parentRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.folded).toBe(false);
+    expect(parentRow.forcedOpen).toBe(true);
+    // A group the STORE opened is an ordinary toggle.
+    const stored = rail({ openFolds: [foldKeyForPage("plans/x.mdx")] });
+    expect(rowsOf(stored).find((r) => r.page.relPath === "plans/x.mdx")!.forcedOpen).toBeUndefined();
+  });
+
+  test("Bookkeeping forced open by the open page says so too", () => {
+    const log = page({ relPath: "log.md", title: "Log" });
+    const pages = [loner, log];
+    const m = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: [],
+      metaTail: true,
+      openRelPath: "log.md",
+    });
+    const header = m.entries.find((e) => e.kind === "header" && e.section === "meta")!;
+    expect(header).toMatchObject({ folded: false, forcedOpen: true });
+  });
+});
+
+describe("pairedByWhy", () => {
+  // Every branch, because the sentence is the rail's ONLY statement of a relation
+  // two of the four rules leave invisible in the file names.
+  test("names the rule and the parent", () => {
+    expect(pairedByWhy("stem", "X plan")).toBe('Attached under "X plan" — same name, same folder');
+    expect(pairedByWhy("suffix", "X plan")).toBe('Attached under "X plan" — a prototype of it');
+    expect(pairedByWhy("link", "X plan")).toBe('Attached under "X plan" — embedded in the page');
+  });
+  test("superseded reads from the CHILD's side — it is not an attachment", () => {
+    expect(pairedByWhy("superseded", "X plan")).toBe('Superseded by "X plan"');
+  });
+  test("an unknown or absent rule still names the parent", () => {
+    expect(pairedByWhy("", "X plan")).toBe('Attached under "X plan"');
+    expect(pairedByWhy("future-rule", "X plan")).toBe('Attached under "X plan"');
   });
 });

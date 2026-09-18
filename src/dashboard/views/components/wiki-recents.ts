@@ -404,6 +404,9 @@ export type RailEntry =
        *  count and the toggle from these; `foldKey` is what a click flips. */
       foldKey?: string;
       folded?: boolean;
+      /** Set when the section is open because the reader is ON a page inside it.
+       *  The painter renders a control that does not pretend to toggle. */
+      forcedOpen?: boolean;
       /** How many rows the header stands for — rendered whether or not they are
        *  on screen, so a collapsed section still says how much it holds. */
       count?: number;
@@ -427,10 +430,19 @@ export type RailEntry =
       /** Set on a parent row: true when its group is CLOSED, so `children` are
        *  not emitted. The chip says how many are hidden either way. */
       folded?: boolean;
+      /** Set on a parent row whose group is open because the OPEN PAGE is inside
+       *  it. Its chip is not a toggle — flipping the stored key changes nothing
+       *  on screen — so the painter renders it inert rather than dead. */
+      forcedOpen?: boolean;
       /** Set on a CHILD row: the page it folds under and why. The painter draws
-       *  the indent and the hover sentence from it; the row is otherwise an
-       *  ordinary row, pin and Activity glyph included. */
+       *  the hover sentence from it; the row is otherwise an ordinary row, pin
+       *  and Activity glyph included. */
       child?: { parent: WikiListing; pairedBy: string };
+      /** Set on a child row emitted OUTSIDE its parent's group (Activity ranked
+       *  it, or the reader pinned it). It keeps the hover sentence and loses the
+       *  indent: a row indented under whatever happens to be above it reads as
+       *  that row's child, which is a relation the rail would be inventing. */
+      lifted?: boolean;
     };
 
 export interface RailInput {
@@ -636,10 +648,27 @@ export function buildRail(input: RailInput): RailModel {
    *  group that is not on screen. */
   const parentOf = new Map<string, WikiListing>();
   if (grouped) {
+    /** Every page here that names a parent PRESENT here — the test for "is this
+     *  page itself a child", which is how a group two levels deep is refused. */
+    const isChild = new Set<string>();
     for (const p of filtered) {
       if (!p.parent) continue;
       const parent = byRel.get(normalizeRel(p.parent));
       if (!parent || parent === p) continue;
+      isChild.add(normalizeRel(p.relPath));
+    }
+    for (const p of filtered) {
+      if (!p.parent) continue;
+      const parent = byRel.get(normalizeRel(p.parent));
+      if (!parent || parent === p) continue;
+      // ⚠️ A parent that is ITSELF a child pairs nothing here. One level deep is
+      // the STORE's invariant, not a guarantee about the payload this function is
+      // handed — and a two-level chain (or a cycle: `a.parent=b`, `b.parent=a`)
+      // put every page of it inside a group whose own row was inside another
+      // group, so neither was emitted and both vanished from the rail with no
+      // count to show for them. Dropping the pairing leaves ordinary rows, which
+      // is the one degrade that cannot lose a page.
+      if (isChild.has(normalizeRel(parent.relPath))) continue;
       const key = normalizeRel(parent.relPath);
       const arr = childrenOf.get(key);
       if (arr) arr.push(p);
@@ -661,17 +690,38 @@ export function buildRail(input: RailInput): RailModel {
   }
   const isOpen = (key: string): boolean => forced.has(key) || isFoldOpen(open, key);
 
-  /** Emit one row, claiming the page. A PARENT row takes its unclaimed children
-   *  with it — under it when the group is open, into the chip's count when it is
-   *  closed — so a group is never split across two sections. */
+  /**
+   * The children LIFTED out of their groups by this render — the ones Activity
+   * ranked or the reader pinned, which are emitted as rows of their own wherever
+   * that section puts them.
+   *
+   * ⚠️ Filled BEFORE the first row is emitted, and that is the whole point. The
+   * chip stands for "the rows this group is hiding", so it has to be counted
+   * against the FINAL placement of every child — and `claimed` only knows about
+   * the rows drawn SO FAR. Activity emits in rank order, so a parent ranked above
+   * its own child was drawn while that child was still unclaimed: the chip said
+   * `2 attached` and the render then drew one of the two, one row further down.
+   */
+  const lifted = new Set<string>();
+
+  /** Emit one row, claiming the page. A PARENT row takes its unclaimed, unlifted
+   *  children with it — under it when the group is open, into the chip's count
+   *  when it is closed — so a group is never split across two sections. */
   const emitRow = (
     page: WikiListing,
     section: RailSection,
-    extra: { activity?: { kind: "new" | "changed"; why: string; ageMs: number } } = {},
+    extra: {
+      activity?: { kind: "new" | "changed"; why: string; ageMs: number };
+      /** True only on the recursive call below, i.e. the row really is drawn
+       *  inside its parent's group. A row emitted anywhere else is `lifted`. */
+      underParent?: boolean;
+    } = {},
   ): void => {
     const key = normalizeRel(page.relPath);
     const parent = parentOf.get(key);
-    const mine = (childrenOf.get(key) ?? []).filter((c) => !claimed.has(normalizeRel(c.relPath)));
+    const mine = (childrenOf.get(key) ?? []).filter(
+      (c) => !claimed.has(normalizeRel(c.relPath)) && !lifted.has(normalizeRel(c.relPath)),
+    );
     const folded = mine.length > 0 ? !isOpen(key) : undefined;
     claim(page);
     entries.push({
@@ -680,11 +730,19 @@ export function buildRail(input: RailInput): RailModel {
       page,
       pinned: isPinned(page),
       ...(extra.activity ? { activity: extra.activity } : {}),
-      ...(mine.length ? { children: mine, folded } : {}),
-      ...(parent ? { child: { parent, pairedBy: page.pairedBy ?? "" } } : {}),
+      // `forcedOpen` rides the row so the painter can render a chip that does not
+      // pretend to toggle: this group is open because the reader is ON a page
+      // inside it, and a click can only write a stored key with no visible effect.
+      ...(mine.length ? { children: mine, folded, ...(forced.has(key) ? { forcedOpen: true } : {}) } : {}),
+      ...(parent
+        ? {
+            child: { parent, pairedBy: page.pairedBy ?? "" },
+            ...(extra.underParent ? {} : { lifted: true }),
+          }
+        : {}),
     });
     if (mine.length && !folded) {
-      for (const c of mine) emitRow(c, section);
+      for (const c of mine) emitRow(c, section, { underParent: true });
     }
   };
 
@@ -721,26 +779,38 @@ export function buildRail(input: RailInput): RailModel {
       if (claimed.has(rel) || activityRows.some((r) => normalizeRel(r.page.relPath) === rel)) continue;
       activityRows.push(row);
     }
+    // Activity wins the overlap because the SEEN set is shared: a page it already
+    // took is skipped here, whatever spelling the pin list holds it under. There
+    // used to be a `!isPinned` filter on this line as well, and having two
+    // mechanisms for one outcome meant NEITHER was pinned — a review survey found
+    // that unsharing the set and dropping the filter each survived the whole
+    // suite, while doing both together failed.
+    //
+    // Resolved BEFORE the Activity rows are emitted (against a COPY of `claimed`,
+    // since nothing is drawn yet) for the two-pass reason above: both sections'
+    // placements have to be known before the first chip is counted.
+    const pinSeen = new Set(claimed);
+    for (const row of activityRows) pinSeen.add(normalizeRel(row.page.relPath));
+    const pinned = resolve(pins, filtered, pinSeen);
+    for (const p of [...activityRows.map((r) => r.page), ...pinned]) {
+      const key = normalizeRel(p.relPath);
+      if (parentOf.has(key)) lifted.add(key);
+    }
+
     if (activityRows.length) {
       entries.push({ kind: "header", section: "activity", label: "Activity" });
       for (const row of activityRows) {
         // ⚠️ Re-tested against `claimed` HERE, not only at collection time: a
         // PARENT emitted earlier in this same section takes its open group's
-        // children with it, so a child Activity also ranked is already on screen
-        // — emitting it again is the one-row invariant broken inside one section.
+        // children with it. Every child Activity ranked is `lifted`, so this is a
+        // belt-and-braces re-test of the one-row invariant rather than the
+        // mechanism — the mechanism is the lift.
         if (claimed.has(normalizeRel(row.page.relPath))) continue;
         emitRow(row.page, "activity", {
           activity: { kind: row.kind, why: row.why, ageMs: row.ageMs },
         });
       }
     }
-    // Activity wins the overlap because `claimed` is SHARED: a page it already
-    // rendered is skipped here, whatever spelling the pin list holds it under.
-    // There used to be a `!isPinned` filter on this line as well, and having two
-    // mechanisms for one outcome meant NEITHER was pinned — a review survey found
-    // that unsharing the set and dropping the filter each survived the whole
-    // suite, while doing both together failed.
-    const pinned = resolve(pins, filtered, claimed);
     if (pinned.length) {
       entries.push({ kind: "header", section: "pinned", label: "Pinned" });
       for (const p of pinned) {
@@ -771,10 +841,10 @@ export function buildRail(input: RailInput): RailModel {
   if (claimed.size && rest.length) {
     entries.push({ kind: "header", section: "all", label: jump ? "Other matches" : "Other pages" });
   }
-  for (const p of rest) {
-    if (claimed.has(normalizeRel(p.relPath))) continue; // lifted as someone's child
-    emitRow(p, "all");
-  }
+  // No `claimed` re-test: `remainder` is computed from `claimed` a few lines up
+  // and nothing between them emits, and a page in it has no parent here, so no
+  // earlier group could have taken it.
+  for (const p of rest) emitRow(p, "all");
   if (meta.length) {
     // Bookkeeping starts COLLAPSED — it is the one section whose whole point is
     // that nobody is looking for it. The header stays and carries its count, so
@@ -786,6 +856,12 @@ export function buildRail(input: RailInput): RailModel {
       label: "Bookkeeping",
       foldKey: SECTION_META_FOLD_KEY,
       folded: metaFolded,
+      // Forced open by the reader being ON a bookkeeping page — the same dead
+      // toggle a forced-open GROUP has, and the painter answers it the same way.
+      ...(forced.has(SECTION_META_FOLD_KEY) ? { forcedOpen: true } : {}),
+      // Every row the fold reveals, counted from the same list the loop below
+      // emits — a meta page is never a PARENT (`pairAttachments`), so there is no
+      // group inside this section whose own children could go uncounted.
       count: meta.length,
     });
     if (!metaFolded) {
