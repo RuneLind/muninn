@@ -9,6 +9,7 @@ import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import {
   RAIL_CHIP_SWITCH_SHORT,
   RAIL_CHIP_SWITCH_WIDE,
+  RAIL_GROUP_CHIP_SWITCH,
   RAIL_MID_MIN_CHIP,
   RAIL_TITLE_MIN,
   RAIL_WIDTH_DEFAULT,
@@ -237,10 +238,18 @@ export async function renderWikiPage(opts?: {
     .wiki-folder { flex: 1; }
     .wiki-count { font-size: 11.5px; color: var(--text-dim); }
     /* The sort row carries three controls once the grouping toggle is in it, and
-       at RAIL_WIDTH_MIN they do not fit on one line: the toggle takes a line of
-       its own there rather than pushing the count off the rail. Scoped to this
-       row — the folder and presence rows hold one control each. */
+       at the narrow rail they do not fit on one line. The TOGGLE is the one that
+       wraps — it is last in source order and flex wraps from the end — so the
+       select and the count keep the line they shared before this row grew a
+       third control. \`margin-left: auto\` on the count is what holds it flush
+       right on that line whether or not the toggle is beside it (the row's own
+       \`justify-content: space-between\` would otherwise centre it between the
+       two). Measured in Chromium at a 1400px viewport: at rail 260 the toggle
+       takes its own line, at 300 and 312 the three share one; the count's box
+       sits on the select's line at every width. Scoped to this row — the folder
+       and presence rows hold one control each. */
     .wiki-sort-row-main { flex-wrap: wrap; }
+    .wiki-sort-row-main .wiki-count { margin-left: auto; }
     /* --text-secondary, not --text-dim: this is a control's label, and dim
        measures 3.24:1 dark / 3.74:1 light against the rail's ground (the same
        measurement the group chip's own comment records), under the 4.5:1 floor.
@@ -451,9 +460,21 @@ export async function renderWikiPage(opts?: {
       .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-counts { display: inline; }
     }
     @container railmid (max-width: ${RAIL_CHIP_SWITCH_WIDE}px) {
-      .wiki-fold-chip.is-wide { flex-shrink: 0; }
-      .wiki-fold-chip.is-wide .wiki-fold-chip-label { display: none; }
-      .wiki-fold-chip.is-wide .wiki-fold-chip-counts { display: inline; }
+      .wiki-fold-chip.is-wide:not(.is-group) { flex-shrink: 0; }
+      .wiki-fold-chip.is-wide:not(.is-group) .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-wide:not(.is-group) .wiki-fold-chip-counts { display: inline; }
+    }
+    /* A WIDE roll-up has its own breakpoint, and the \`:not(.is-group)\` above is
+       what keeps the two from both firing: status words are shorter than
+       "attached", so a chip priced at the attachment worst case went
+       \`display:none\` at a mid of 253.6px — which is exactly the 300px shipped
+       rail, leaving \`9 shipped · 1 superseded\` hover-only on every rail anybody
+       has. A one-kind roll-up keeps the SHORT rule above: 61–80.3px of chip is
+       what that 84 was already sized for. See RAIL_GROUP_CHIP_SWITCH. */
+    @container railmid (max-width: ${RAIL_GROUP_CHIP_SWITCH}px) {
+      .wiki-fold-chip.is-wide.is-group { flex-shrink: 0; }
+      .wiki-fold-chip.is-wide.is-group .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-wide.is-group .wiki-fold-chip-counts { display: inline; }
     }
     .wiki-fold-chip:hover { color: var(--text-secondary); border-color: var(--accent); }
     /* The ROW's hover paints --bg-surface behind this transparent chip, where
@@ -1964,14 +1985,18 @@ export async function renderWikiPage(opts?: {
             <option value="backlinks">Most linked</option>
             <option value="title">Title A–Z</option>
           </select>
+          <span class="wiki-count" id="wikiCount"></span>
           <!-- Families and archive months, per wiki. Unchecked here and set from
                the folds store at boot: the server does not know what this browser
                remembers, and rendering it checked would flash a grouped rail on
-               every reader who has it off. -->
+               every reader who has it off.
+               LAST in source order, which is what decides WHICH element wraps:
+               flex wraps from the end, so the toggle takes the second line and
+               the select + count keep the first one they had before this row
+               grew a third control. -->
           <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
             <input type="checkbox" id="wikiGroupFamilies">group families
           </label>
-          <span class="wiki-count" id="wikiCount"></span>
         </div>
         <details class="wiki-filters" id="wikiFilters">
           <summary class="wiki-filters-summary">Filters<span class="wiki-filter-count" id="wikiFilterCount" style="display:none"></span></summary>

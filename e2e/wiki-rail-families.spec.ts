@@ -36,6 +36,11 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
+import {
+  RAIL_WIDTH_DEFAULT,
+  RAIL_WIDTH_KEY,
+  RAIL_WIDTH_MIN,
+} from "../src/dashboard/views/components/wiki-rail-width.ts";
 
 const PORT = e2ePort("wiki-rail-families");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -181,6 +186,14 @@ async function countText(page: Page): Promise<string> {
 async function selectFolder(page: Page, folder: string): Promise<void> {
   await page.locator("#wikiFilters").evaluate((el) => ((el as HTMLDetailsElement).open = true));
   await page.selectOption("#wikiFolder", folder);
+}
+
+/** Store a rail width. It is applied at boot, so the caller reloads after it. */
+async function setRailWidth(page: Page, width: number): Promise<void> {
+  await page.evaluate(
+    (arg: { key: string; width: string }) => localStorage.setItem(arg.key, arg.width),
+    { key: RAIL_WIDTH_KEY, width: String(width) },
+  );
 }
 
 async function turnGroupingOn(page: Page): Promise<void> {
@@ -331,20 +344,19 @@ test.describe("Wiki rail: families and months", () => {
     ]);
 
     // …and under a NON-date sort the archive is FAMILIES again — which in a
-    // folder of dated names means the date prefix itself is the family, since
-    // the rule excludes only the fix-round report shape. `2024-08` has three
-    // parents and folds; `2024-09` has two and does not. Stated here rather than
-    // filtered out: it is the rule doing what it says, and the month grouping
-    // above is what the archive gets under the sort a reader actually browses it
-    // with.
+    // folder of nothing but dated names means NO group at all: a bare date is
+    // never a family candidate (a month is what the month grouping owns), so the
+    // five rows render flat rather than under a `2024-08-*` row that says what
+    // the date column already says.
     await page.selectOption("#wikiSort", "title");
-    const titleSorted = await page
-      .locator(".wiki-group-label")
-      .evaluateAll((els) => els.map((el) => el.textContent));
-    expect(titleSorted).toEqual(["2024-08-*"]);
+    await expect(page.locator(".wiki-list-group")).toHaveCount(0);
+    // Title A–Z: Earlier · Early · Later · Latest · Mid.
     expect(await relPaths(page)).toEqual([
+      "archive/2024-08-04-earlier.mdx",
+      "archive/2024-08-19-early.mdx",
       "archive/2024-09-02-later.mdx",
       "archive/2024-09-11-latest.mdx",
+      "archive/2024-08-28-mid.mdx",
     ]);
   });
 
@@ -366,6 +378,62 @@ test.describe("Wiki rail: families and months", () => {
     }));
     expect(list.group).toBe(true);
     expect(list.scrollWidth).toBeLessThanOrEqual(list.clientWidth);
+  });
+
+  test("the roll-up's WORDS are readable at the shipped rail width", async ({ page }) => {
+    // The whole point of a roll-up is the words: `9 shipped · 1 superseded`
+    // answers "is this slate finished?" and `9 · 1` does not. Priced at the
+    // ATTACHMENT chip's breakpoint it was `display:none` at a mid of 253.6px,
+    // which is exactly the 300px default — hover-only on every rail anybody has.
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await openRail(page);
+    await setRailWidth(page, RAIL_WIDTH_DEFAULT);
+    await openRail(page);
+    await selectFolder(page, "plans");
+    await turnGroupingOn(page);
+    const label = groupRow(page, FAMILY_KEY).locator(".wiki-fold-chip-label");
+    await expect(label).toBeVisible();
+    await expect(label).toHaveText(ROLLUP);
+    await expect(groupRow(page, FAMILY_KEY).locator(".wiki-fold-chip-counts")).toBeHidden();
+
+    // …and at the narrow rail the counts take over rather than the words
+    // clipping, which is the rule the two page-row breakpoints already state.
+    await setRailWidth(page, RAIL_WIDTH_MIN);
+    await openRail(page);
+    await selectFolder(page, "plans");
+    await expect(groupRow(page, FAMILY_KEY).locator(".wiki-fold-chip-label")).toBeHidden();
+    await expect(groupRow(page, FAMILY_KEY).locator(".wiki-fold-chip-counts")).toBeVisible();
+  });
+
+  test("the sort row wraps the TOGGLE, never the count", async ({ page }) => {
+    // Measured, because the first cut claimed the toggle wrapped and it was
+    // `#wikiCount` that did — alone, left-aligned under the select. The rule:
+    // the select and the count keep line one at every rail width, and the toggle
+    // is what takes a second line when it does not fit.
+    await page.setViewportSize({ width: 1400, height: 900 });
+    for (const width of [RAIL_WIDTH_MIN, RAIL_WIDTH_DEFAULT, 312]) {
+      await openRail(page);
+      await setRailWidth(page, width);
+      await openRail(page);
+      const box = await page.evaluate(() => {
+        const r = (sel: string) => {
+          const b = document.querySelector(sel)!.getBoundingClientRect();
+          return { top: b.top, bottom: b.bottom, left: b.left, right: b.right };
+        };
+        return { sort: r("#wikiSort"), count: r("#wikiCount"), toggle: r(".wiki-group-toggle") };
+      });
+      const sameLine = (a: { top: number; bottom: number }, b: { top: number; bottom: number }) =>
+        a.top < b.bottom && b.top < a.bottom;
+      // The count shares the select's line at every width, and stays to its right.
+      expect(sameLine(box.sort, box.count), `count on the select's line at ${width}`).toBe(true);
+      expect(box.count.left).toBeGreaterThanOrEqual(box.sort.right);
+      // The toggle is on that line or under it — never overlapping either.
+      if (sameLine(box.sort, box.toggle)) {
+        expect(box.toggle.left).toBeGreaterThanOrEqual(box.count.right);
+      } else {
+        expect(box.toggle.top).toBeGreaterThanOrEqual(box.sort.bottom);
+      }
+    }
   });
 
   // Both themes, measured rather than eyeballed — these are a label, a count and

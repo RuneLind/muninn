@@ -74,6 +74,34 @@ export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + 60;
  */
 export const RAIL_CHIP_SWITCH_SHORT = RAIL_TITLE_MIN + 8 + 84;
 export const RAIL_CHIP_SWITCH_WIDE = RAIL_TITLE_MIN + 8 + 174;
+
+/**
+ * The same swap for a family/month row's WIDE roll-up chip — its own number,
+ * because a group row's chip is not a parent row's chip.
+ *
+ * `RAIL_CHIP_SWITCH_WIDE` is sized for `10 attached · 10 superseded`, the widest
+ * label an ATTACHMENT chip can hold. A roll-up says `9 shipped · 1 superseded`
+ * instead, and status words are shorter than "attached": measured in Chromium on
+ * the reader's own rows, `9 shipped · 1 superseded` is **142.6px** of chip and
+ * `10 shipped · 10 superseded` **154.2px**, against 158.4px for the attachment
+ * worst case. Borrowing the parent's 254 therefore hid the roll-up at a mid of
+ * 253.6px — which is EXACTLY the 300px shipped default (a group row's mid is the
+ * rail minus 46.4px), so the acceptance artifact `9 shipped · 1 superseded` was
+ * hover-only on every rail anybody has and appeared at 302.
+ *
+ * 155 is the widest measured two-count roll-up plus the same rounding slack the
+ * other two carry, so the words show from a mid of 236px (rail ~282) and the
+ * label still has its floor when they do. A roll-up wider than that — three or
+ * four statuses in one slate, `3 draft · 3 ready · 3 shipped · 3 superseded` at
+ * 234.8px — falls back to the chip's own ellipsis exactly as an over-long
+ * attachment label does; it is a backstop, not a fourth breakpoint.
+ *
+ * There is deliberately no group-specific SHORT constant: a one-kind roll-up
+ * measures 61–80.3px (`12 pages`, `10 shipped`, `12 unmarked`), which is what
+ * `RAIL_CHIP_SWITCH_SHORT`'s 84 was already sized for, so a month chip keeps its
+ * words down to the 260px rail.
+ */
+export const RAIL_GROUP_CHIP_SWITCH = RAIL_TITLE_MIN + 8 + 155;
 /** The share of the window a stored width may take at apply time. */
 export const RAIL_VIEWPORT_SHARE = 0.45;
 

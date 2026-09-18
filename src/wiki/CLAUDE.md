@@ -576,39 +576,60 @@ exceeded the cap. So a 3-member `alpha-wiki-ask` does not fold under a 16-member
 `alpha-wiki`, while a 10-member `alpha-tools-live` still forms under the over-cap
 PROJECT name `alpha-tools`, which is never a candidate at all.
 
-Four things about WHICH ROWS COUNT, each of them load-bearing:
+Six things about WHICH ROWS COUNT, each of them load-bearing:
 
 - **The cap and the over-cap ban are judged on the prefix's TOTAL member count**
   — parents plus rule-4 children — so a slate does not start folding because part
   of it was superseded; **only the three-member formation threshold is judged on
   PARENT rows**, or a page plus its predecessor would read as a slate.
-- **Families are computed over parent rows only**: `.md`/`.mdx` pages that are
-  nobody's child. A child of any kind renders under its parent and never in a
-  family body, only rule-4 children count toward a roll-up and the cap, and an
-  `.html` page never counts at all. Meta pages are out — they sink to
-  `Bookkeeping`.
+- **Families are FORMED over parent rows only**: `.md`/`.mdx` pages that are
+  nobody's child. An `.html` page never counts at all, and meta pages are out —
+  they sink to `Bookkeeping`.
+- **A rule-4 child belongs to the family its SUCCESSOR belongs to**, never the one
+  its own name points at. It then counts toward that family's cap and roll-up and
+  renders inside its body, under that successor, one indent further in. A retired
+  page whose successor sits in another folder — or in another family — is a piece
+  of THAT work: counting it here would put one page in two slates while it renders
+  in neither's body, and it would let a name push a prefix over the cap it is no
+  member of. (A child of any OTHER pairing rule counts nowhere: it is an
+  attachment of its parent.)
+- **A bare DATE is never a family candidate** — `2026-07` and `2026-07-15` alike.
+  A month is what the month grouping owns, and measured on the live wiki the
+  family rule minting one did three wrong things at once: the same label formed
+  TWICE (two subfolders of one month, indistinguishable on screen), a 13-page
+  month went over the cap and BANNED a genuine 3-page slate nested under it, and
+  the row said "these pages were written in July", which is what a date sort
+  already says on every row. Being a non-candidate is also what stops it banning
+  anything, exactly as a project name does not.
 - **The `<YYYY-MM-DD>-<n>-fix-rounds-<prs>` filename shape is never a member and
   never a family.** Those pages audit a PR rather than carrying a piece of the
-  work, and they share a date prefix with every other archive page of that month.
-- **Prefixes are matched lower-cased**, like every other relPath comparison in the
-  rail, so `Mac-mini-*` and `mac-mini-*` are one family (measured: they are, on a
-  real wiki) and the label is the lower-case spelling.
+  work. (That exemption stays: it is about the SHAPE, not the date.)
+- **Prefixes AND folders are matched lower-cased**, like every other relPath
+  comparison in the rail, so `alpha-Foo-*` and `alpha-foo-*` are one family and
+  the label is the lower-case spelling; `Notes/` and `notes/` are one folder.
 
-⚠️ **The rule has no other date-shape exemption, and on a dated folder that
-shows.** In a folder of `YYYY-MM-DD-*` names, `2026-08` is an ordinary
-two-segment prefix: three such pages in one subfolder DO fold, under a sort that
-is not the month grouping's. Measured on the live wiki: four such families
-(`archive/*/2026-07`, `archive/claude-usage/2026-08`, `blogs/2026-09`), each of
-them a month of one folder, which is a fair thing for the rail to say — it is
-just said by the family rule rather than by the month one. Two folders can also
-produce the same LABEL (`2026-07-*` twice); the fold KEY carries the folder, so
-they open independently.
+**Labels are disambiguated across the whole render.** A prefix is unique only
+within its folder, and the whole-wiki view draws every folder at once — two
+`beta-flow-*` rows with identical label, `title=` and `aria-label` are two
+controls nobody can tell apart. So when a prefix is used by more than one family
+in the SAME render, each label carries its folder (`notes/beta-flow-*`); a unique
+prefix is unchanged. A wiki-root family in such a pair reads `/beta-flow-*`, the
+spelling the folder facet already uses for the root. The KEYS never move.
+
+A month is the looser grouping of the two, deliberately: the exclusions above are
+the FAMILY rule's. A month takes any dated rail row that is not a child and not a
+meta page — an `.html` explainer and a fix-round report included — because "this
+page is filed under August" is true of them whatever their shape.
 
 **Months** key on `YYYY-MM` from the filename's date prefix, falling back to the
-date the rail is sorting on when the name carries none — the filename first
+date the rail is sorting on when the name carries none. The filename first
 because that is the date the page is ABOUT, while its `updated` stamp moves on
 every typo fix and a grouping that reshuffles on an edit is not one a reader can
-navigate by. A page with neither joins no month and stays an ordinary row.
+navigate by. The month (`01`–`12`) and the day (`01`–`31`) are VALIDATED, because
+an impossible one is not a date and files the page under a bucket nothing else
+can join; and the prefix ends at a dash OR at the end of the stem, so
+`archive/2026-09-02.mdx` buckets by its filename too. A page with neither signal
+joins no month and stays an ordinary row.
 **Months come back newest-first and the rows are re-ordered to match**
 (`orderPagesForGroups`): the rail's ordinary rule puts a group where its first
 remaining member sorts, which on a real archive ordered the months
@@ -623,11 +644,36 @@ beside `section:meta`. The plan wrote `family:<prefix>`; the FOLDER is in the ke
 because two folders hold a family of the same prefix on a real wiki, and a bare
 key would make one reader's click open both.
 
-**Two defaults in that one namespace** (`isGroupOpen`): presence means OPEN for
-an ordinary group and **CLOSED for the newest month**, which is the only group
-that starts open. The store still holds exactly the exceptions, a click still
-flips the key, and the state is still remembered — the `defaultOpen` flag is the
-whole mechanism.
+A family key in the wiki ROOT has no folder segment: `familyFoldKey("", p)` is
+`family:<prefix>`. Nothing else in the namespace can collide with it — a page key
+is a relPath and every sentinel carries its own prefix — so the root is left
+unnamed rather than given a spelling of its own.
+
+**Two defaults, and each key spelling means ONE thing.** Every family and every
+month starts CLOSED except one: the **newest month among the groups that actually
+render**, chosen after the Activity/Pinned lift (`defaultOpenGroupKey`). So a
+stored `month:<YYYY-MM>` always means OPEN and a stored
+`closed:month:<YYYY-MM>` always means CLOSED, and the `closed:` spelling is only
+ever WRITTEN for the group that defaults open — that row's `data-fold-key` IS the
+`closed:` form, so the one generic toggle handler flips the right key with no
+branch of its own. A key of the spelling that does not match a group's current
+default is ignored, never reinterpreted; where a group has collected both (it
+moved in and out of the default role), the one the reader wrote LAST wins, which
+is the head of the list since `toggleFold` prepends.
+
+Two things this replaced, both measured: the default-open month was chosen BEFORE
+the lift, so on a real archive under "Recently added" — where every page of the
+newest month is also the freshest thing on the wiki — Activity lifted all of it
+and NO month was open; and the one key spelling meant CLOSED for the default
+group and OPEN for everything else, so the day a new month landed (or a facet
+filtered the newest away) a reader's deliberate close silently became an open.
+
+**The `toggle:` sentinel is exempt from `FOLDS_MAX`** and hoisted to the front of
+the stored list. It is a MODE, not one of the fold exceptions the cap bounds:
+capped with them it was evicted after ~200 fold opens and the feature turned
+itself off, indistinguishable from never having been enabled. Hoisting is what
+makes the exemption hold on the way back IN, since the READ caps at the same
+number.
 
 **In the rail** (`buildRail`), the one-row invariant is unchanged and a group row
 is **not a page**: it has no `relPath`, opens nothing and is not counted by
@@ -635,22 +681,43 @@ is **not a page**: it has no `relPath`, opens nothing and is not counted by
 A member the Activity ranking or the reader's pin lifted leaves the group for
 that render and leaves the roll-up with it; a member that is itself a PARENT
 keeps its own attachment group inside the family body, one indent further in
-(`.wiki-list-item.member.child`); the open page's group is forced open — through
-its attachment parent when the reader is on a CHILD — and renders the same
-disabled control an attachment chip does; and a query flattens groups exactly as
-it flattens attachments.
+(`.wiki-list-item.member.child`); and a query flattens groups exactly as it
+flattens attachments.
+
+**The open page's group is forced open** — through its attachment parent when the
+reader is on a CHILD — and renders the same disabled control an attachment chip
+does, but **only while that page is still one of the members this render DRAWS**.
+Lifted into Activity or Pinned it is already on screen one section up, so the
+family is not hiding it and renders on the reader's own stored state with a live
+chip instead.
 
 The roll-up is a CENSUS of the slate, not a count of hidden rows: it is
-`plan_status` counts in the facet's order, superseded children included wherever
-the rail happens to draw them, with the pages declaring no status last under one
-neutral word (`unmarked`). The attachment chip is the one that counts rows. A
-month's chip counts pages instead — every page in it says the same thing about
-itself.
+`plan_status` counts in the facet's order (unknown words, the neutral `unmarked`
+included, after the known statuses in their own alphabetical order), superseded
+children included wherever the rail happens to draw them — a child rendered under
+its own successor inside the body still counts. **Only the LIFT takes one out**:
+Activity or a pin took the member, the child, or the child's successor. It is
+computed from the lift and never from "what has been painted so far", because the
+latter made the number a function of the SORT — one unchanged slate measured
+`3 shipped` with a successor above the family and `3 shipped · 1 superseded`
+below it. The attachment chip is the one that counts rows. A month's chip counts
+pages instead — every page in it says the same thing about itself.
 
 The group row reuses the parent row's furniture — the same caret, the same chip
 with both label forms and the same `.wiki-list-mid` container the width rules
-measure — so a group row and a group chip can never come to disagree about when
-the words no longer fit (`wiki-rail-width.ts` is untouched by this layer).
+measure. It takes ONE number of its own, `RAIL_GROUP_CHIP_SWITCH`: status words
+are shorter than "attached", so a two-count roll-up priced at the ATTACHMENT
+chip's worst case went `display:none` at a mid of 253.6px — exactly the 300px
+shipped rail, which left `9 shipped · 1 superseded` hover-only on every rail
+anybody has. A one-kind roll-up keeps `RAIL_CHIP_SWITCH_SHORT`, which its 61–80px
+was already sized for. The two page-row constants are untouched.
+
+**The sort row's third control wraps, and it is the TOGGLE.** `group families`
+is last in source order and flex wraps from the end, and `#wikiCount` carries
+`margin-left: auto`, so the select and the count keep the line they shared before
+this row grew a third control. Measured at a 1400px viewport: at rails 260 and
+300 the toggle takes its own line, from ~308 the three share one, and the count's
+box is on the select's line at every width.
 
 Acceptance: `wiki-groups.test.ts` (the rule's state space, on synthetic names —
 a private wiki's file names are a disclosure in a public repo),
