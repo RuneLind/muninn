@@ -2008,3 +2008,136 @@ describe("groups (families and months) — fix round 1", () => {
     });
   });
 });
+
+describe("groups (families and months) — fix round 2", () => {
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const groupsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "group") as Array<Extract<RailEntry, { kind: "group" }>>;
+
+  describe("a group toggle flips the RENDERED state, whichever spellings the store holds", () => {
+    const dated = (day: string) =>
+      page({ relPath: `archive/${day}-topic.mdx`, title: `Page ${day}` });
+    const aug = dated("2026-08-28");
+    const sept = dated("2026-09-11");
+    /** August alone is the newest month that renders, so it DEFAULTS OPEN. */
+    const alone = [aug];
+    /** With September on screen August is an ordinary row, defaulting closed. */
+    const withSept = [sept, aug];
+
+    const archiveRail = (pages: WikiListing[], openFolds: string[]) =>
+      buildRail({
+        filtered: pages,
+        facetOnly: pages,
+        filters: { ...INERT, folder: "archive" },
+        pins: [],
+        groups: railGroups(pages, { folder: "archive", sort: "updated", projects: {} }),
+        openFolds,
+      });
+    const augRow = (pages: WikiListing[], store: string[]) =>
+      groupsOf(archiveRail(pages, store)).find((g) => g.group.label === "2026-08")!;
+
+    // The store is built by `toggleFold` calls ALONE — never hand-written — because
+    // what the bug turns on is exactly what a sequence of clicks leaves behind.
+    const clicker = () => {
+      let store: string[] = [];
+      return {
+        click: (pages: WikiListing[]): void => {
+          store = toggleFold(store, augRow(pages, store).toggleKey);
+        },
+        folded: (pages: WikiListing[]): boolean | undefined => augRow(pages, store).folded,
+        store: () => store,
+      };
+    };
+
+    test("closed first, as the default-open row: every later click still moves it", () => {
+      const s = clicker();
+      expect(s.folded(alone)).toBe(false);
+      s.click(alone);
+      expect(s.folded(alone)).toBe(true);
+
+      // September arrives: same stored state, read through the plain spelling.
+      expect(s.folded(withSept)).toBe(true);
+      s.click(withSept);
+      expect(s.folded(withSept)).toBe(false);
+
+      // September filtered away: August is the default-open row again, and its
+      // chip offers `closed:` once more. This is the click that did nothing.
+      expect(s.folded(alone)).toBe(false);
+      s.click(alone);
+      expect(s.folded(alone)).toBe(true);
+    });
+
+    test("opened first, as an ordinary row: the mirror sequence moves on every click too", () => {
+      const s = clicker();
+      expect(s.folded(withSept)).toBe(true);
+      s.click(withSept);
+      expect(s.folded(withSept)).toBe(false);
+
+      expect(s.folded(alone)).toBe(false);
+      s.click(alone);
+      expect(s.folded(alone)).toBe(true);
+
+      // Back to an ordinary row, carrying a `closed:` key its chip cannot write.
+      expect(s.folded(withSept)).toBe(true);
+      s.click(withSept);
+      expect(s.folded(withSept)).toBe(false);
+    });
+
+    test("a click leaves ONE spelling of the group's key, never both", () => {
+      const s = clicker();
+      s.click(alone); // writes `closed:month:2026-08`
+      expect(s.store()).toEqual(["closed:month:2026-08"]);
+      s.click(withSept); // the plain spelling replaces it
+      expect(s.store()).toEqual(["month:2026-08"]);
+      s.click(alone); // …and back, still one entry
+      expect(s.store()).toEqual(["closed:month:2026-08"]);
+    });
+  });
+
+  describe("a group is forced open only while NEITHER the open page nor its holder is lifted", () => {
+    const shipped = [1, 2, 3].map((i) =>
+      page({ relPath: `plans/fam-two-${i}.mdx`, title: `Fam ${i}`, plan_status: "shipped" }),
+    );
+    const retired = page({
+      relPath: "plans/fam-two-old.mdx",
+      title: "Retired",
+      plan_status: "superseded",
+      parent: "plans/fam-two-1.mdx",
+      pairedBy: "superseded",
+    });
+    const listing = [...shipped, retired];
+    const railOf = (over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+      buildRail({
+        filtered: listing,
+        facetOnly: listing,
+        filters: INERT,
+        pins: [],
+        groups: railGroups(listing, { folder: "", sort: "updated", projects: {} }),
+        ...over,
+      });
+
+    test("the open page is a PINNED superseded child: stored state, live chip", () => {
+      const m = railOf({
+        openRelPath: "plans/fam-two-old.mdx",
+        pins: ["plans/fam-two-old.mdx"],
+      });
+      // The reader can see the page: it is a row in Pinned, one section up.
+      expect(
+        rowsOf(m)
+          .filter((r) => r.page.relPath === "plans/fam-two-old.mdx")
+          .map((r) => r.section),
+      ).toEqual(["pinned"]);
+      const g = groupsOf(m)[0]!;
+      expect(g.forcedOpen).toBeUndefined();
+      expect(g.folded).toBe(true);
+    });
+
+    test("…un-pinned, the same open child still forces its SUCCESSOR's family open", () => {
+      const m = railOf({ openRelPath: "plans/fam-two-old.mdx" });
+      const g = groupsOf(m)[0]!;
+      expect(g.forcedOpen).toBe(true);
+      expect(g.folded).toBe(false);
+    });
+  });
+});

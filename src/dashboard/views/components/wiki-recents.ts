@@ -122,14 +122,38 @@ export function isModeFoldKey(key: string): boolean {
 
 /** Flip one group and return the new list. A blank key is a no-op.
  *
+ *  ⚠️ **The flip is computed from the RENDERED state, not from the presence of
+ *  the spelling handed in.** A group key has two spellings (`month:X` = open,
+ *  `closed:month:X` = closed) and the painter offers whichever one flips the
+ *  default it is drawing under — so the key also SAYS what that default is: the
+ *  `closed:` spelling is only ever offered by the row that defaults open. Both
+ *  spellings can already be in the store, because a group moves in and out of
+ *  that role as its neighbours arrive and leave. Toggling on presence alone was
+ *  then a DEAD CLICK: the entry was removed while `groupFoldState` went on
+ *  reading the other spelling, so the row did not move and the second click did
+ *  the work. Both spellings are therefore dropped first, and only the exception
+ *  to the default is written back — which is also why a plain page or section
+ *  key behaves exactly as it always did (its default is closed, so "open" writes
+ *  the key and "closed" is its absence).
+ *
  *  Mode keys are EXEMPT from the cap and hoisted to the front, which is what
  *  keeps them exempt on the way back IN too: `readFolds` caps at `FOLDS_MAX` as
  *  well, so a sentinel left at the tail would simply fall off on the next boot. */
 export function toggleFold(open: string[], key: string): string[] {
-  const v = normalizeFoldKey(key);
-  if (!v) return open.slice();
-  if (isFoldOpen(open, v)) return open.filter((k) => normalizeFoldKey(k) !== v);
-  const next = [v, ...open];
+  const raw = normalizeFoldKey(key);
+  if (!raw) return open.slice();
+  const defaultsOpen = raw.startsWith(CLOSED_FOLD_PREFIX);
+  const base = defaultsOpen ? raw.slice(CLOSED_FOLD_PREFIX.length) : raw;
+  if (!base) return open.slice();
+  const closed = closedFoldKey(base);
+  const stored = groupFoldState(open, base);
+  const openNow = stored ? stored === "open" : defaultsOpen;
+  const rest = open.filter((k) => {
+    const v = normalizeFoldKey(k);
+    return v !== base && v !== closed;
+  });
+  const wantOpen = !openNow;
+  const next = wantOpen === defaultsOpen ? rest : [wantOpen ? base : closed, ...rest];
   const modes = next.filter((k) => isModeFoldKey(k));
   const folds = next.filter((k) => !isModeFoldKey(k)).slice(0, FOLDS_MAX);
   return [...modes, ...folds];
@@ -142,10 +166,10 @@ export function toggleFold(open: string[], key: string): string[] {
  *
  * **The most recent click wins**, which is what the walk order buys: `toggleFold`
  * PREPENDS, so the first of the two spellings found is the one the reader wrote
- * last. Both can be present at once — the painter offers the `closed:` spelling
- * only while the group is the one that defaults open, so a group that moves in
- * and out of that role collects both — and "whichever was clicked last" is the
- * only reading of that pair a reader would recognise.
+ * last. A click no longer LEAVES both in the store (it drops both spellings and
+ * writes one), but a store this browser already carries can hold both, and
+ * "whichever was clicked last" is the only reading of that pair a reader would
+ * recognise.
  */
 export function groupFoldState(
   open: readonly string[],
@@ -903,13 +927,19 @@ export function buildRail(input: RailInput): RailModel {
    * the attachment chips need (children only); this is the set the family/month
    * census and the forced-open rule are computed from.
    *
-   * ⚠️ Not `claimed`, and that distinction is the bug it closes. `claimed` grows
-   * as the rail paints, so "is this row still in the family?" answered from it
-   * depends on what the SORT happened to put above the family: a successor that
-   * sorted above it with its attachment fold open had already claimed its
-   * retired child, and the same slate then read `3 shipped` there and
-   * `3 shipped · 1 superseded` one sort order later. A census is a fact about
-   * the slate, so it may only be a function of the lift.
+   * ⚠️ Not `claimed`: a census is a fact about the SLATE, so it may only be a
+   * function of the lift — "what has been painted so far" is a fact about the
+   * sort. That is the rule this set STATES; it is not what closed the
+   * sort-dependent roll-up. The measured bug (one slate reading `3 shipped`
+   * with its successor above the family and `3 shipped · 1 superseded` below)
+   * was a child belonging to the wrong family, and it is closed by SUCCESSOR
+   * membership in `groupFamilies` — a rule-4 child belongs to the slate its
+   * successor belongs to, so a stray retired page never reaches this census at
+   * all. With that in place `claimed` and `sectionLifted` cannot disagree HERE
+   * (a page in `claimed` but not `sectionLifted` was painted by an earlier
+   * group or the remainder, and neither can hold this family's member or the
+   * successor of its rule-4 child), so the choice is one of intent, not of
+   * behaviour.
    */
   const sectionLifted = new Set<string>();
 
@@ -1080,6 +1110,12 @@ export function buildRail(input: RailInput): RailModel {
    * the members this group is going to DRAW. With the page lifted into Activity
    * or Pinned it is already on screen one section up, so forcing the group open
    * hid the reader's own stored state behind a disabled chip for nothing.
+   *
+   * ⚠️ NEITHER of them may be lifted, and the open page's OWN lift is the half
+   * that is easy to miss: when the open page is an attachment CHILD, the holder
+   * is its successor, which is an ordinary unlifted member — so pinning the
+   * child the reader is looking at put it in Pinned AND forced its successor's
+   * family open behind a dead control.
    */
   let forcedGroupKey: string | null = null;
   if (grouped && input.openRelPath) {
@@ -1090,7 +1126,7 @@ export function buildRail(input: RailInput): RailModel {
       : openParent && groupOf.has(normalizeRel(openParent.relPath))
         ? normalizeRel(openParent.relPath)
         : null;
-    if (holderKey && !sectionLifted.has(holderKey)) {
+    if (holderKey && !sectionLifted.has(openKey) && !sectionLifted.has(holderKey)) {
       forcedGroupKey = normalizeFoldKey(groupOf.get(holderKey)!.key);
     }
   }
@@ -1130,7 +1166,11 @@ export function buildRail(input: RailInput): RailModel {
     // The rule-4 children counted with them — a CENSUS of the slate, so a child
     // rendered under its own successor inside this body still counts and only
     // the LIFT removes one. A child is out when the reader is looking at it (or
-    // at its successor) one section up, and in every other case in.
+    // at its successor) one section up, and in every other case in. `groupFamilies`
+    // has already decided WHICH children are this slate's (by successor, never by
+    // the child's own name — the half that closed the sort-dependent roll-up);
+    // reading `sectionLifted` rather than `claimed` states the census rule, and
+    // at this point the two cannot disagree.
     const superseded = g.supersededChildren.filter(
       (c) =>
         !sectionLifted.has(normalizeRel(c.relPath)) &&

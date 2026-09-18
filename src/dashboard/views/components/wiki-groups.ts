@@ -424,9 +424,9 @@ export function groupFamilies(
     ...g,
     label:
       (prefixUses.get(prefix) ?? 0) > 1
-        ? // The wiki ROOT has no folder name; `/` is what the folder facet calls
-          // it (`ROOT_FOLDER`), so a root family reads `/beta-flow-*`.
-          (folder ? folder + "/" : "/") + prefix + "-*"
+        ? // The wiki ROOT has no folder name, so its `""` gives `/beta-flow-*` —
+          // which is what the folder facet calls the root (`ROOT_FOLDER`) anyway.
+          folder + "/" + prefix + "-*"
         : prefix + "-*",
   }));
 }

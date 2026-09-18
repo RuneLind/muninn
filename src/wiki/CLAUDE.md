@@ -696,12 +696,15 @@ The roll-up is a CENSUS of the slate, not a count of hidden rows: it is
 included, after the known statuses in their own alphabetical order), superseded
 children included wherever the rail happens to draw them — a child rendered under
 its own successor inside the body still counts. **Only the LIFT takes one out**:
-Activity or a pin took the member, the child, or the child's successor. It is
-computed from the lift and never from "what has been painted so far", because the
-latter made the number a function of the SORT — one unchanged slate measured
+Activity or a pin took the member, the child, or the child's successor — so the
+census reads the lift and never "what has been painted so far", which is a fact
+about the sort rather than about the slate. That is the rule the code states; the
+sort-dependent roll-up it was found beside — one unchanged slate measuring
 `3 shipped` with a successor above the family and `3 shipped · 1 superseded`
-below it. The attachment chip is the one that counts rows. A month's chip counts
-pages instead — every page in it says the same thing about itself.
+below it — was a child counted in the wrong family, and **SUCCESSOR membership is
+what closed it**: a retired page whose successor is not a member never reaches
+this census at all. The attachment chip is the one that counts rows. A month's
+chip counts pages instead — every page in it says the same thing about itself.
 
 The group row reuses the parent row's furniture — the same caret, the same chip
 with both label forms and the same `.wiki-list-mid` container the width rules
@@ -715,9 +718,14 @@ was already sized for. The two page-row constants are untouched.
 **The sort row's third control wraps, and it is the TOGGLE.** `group families`
 is last in source order and flex wraps from the end, and `#wikiCount` carries
 `margin-left: auto`, so the select and the count keep the line they shared before
-this row grew a third control. Measured at a 1400px viewport: at rails 260 and
-300 the toggle takes its own line, from ~308 the three share one, and the count's
-box is on the select's line at every width.
+this row grew a third control. The count's box is on the select's line at every
+width. **The width at which the toggle joins them is a fact about the LISTING,
+not a constant**: it moves with the count pill's own digits and the folder
+select's chosen option. Measured at a 1400px viewport, walking the rail one pixel
+at a time — mimir under `folder=plans` (`149 / 545`) wraps through 321 and shares
+one line from 322; the same wiki with no folder filter (`440 / 545`, the wider
+"All folders" option) from 324; the e2e fixture wiki (`22 / 22`) from 305. Any
+single number quoted here without its listing is one of those three.
 
 Acceptance: `wiki-groups.test.ts` (the rule's state space, on synthetic names —
 a private wiki's file names are a disclosure in a public repo),
