@@ -199,9 +199,13 @@ describe("GET /api/wiki/html", () => {
     expect(resolvePageRef(index, "blogs/moved-away.mdx", "Explainer One")?.relPath).toBe(
       "blogs/Explainer One.mdx",
     );
-    // A genuinely ambiguous stem (two markdown pages) still refuses.
+    // A genuinely ambiguous stem still refuses. Same EXTENSION, deliberately:
+    // two `.mdx` pages in different folders both survive, which is what makes the
+    // stem ambiguous. A `.md` here would SHADOW the `.mdx` — and take its `.html`
+    // with it, since an attachment whose own page is dropped is dropped too — so
+    // the stem would be unique again and the case would be measuring the drop.
     await Bun.write(
-      path.join(root, "concepts/Explainer One.md"),
+      path.join(root, "concepts/Explainer One.mdx"),
       "---\ntype: concept\n---\n\nA real same-stem collision.",
     );
     __resetWikiCacheForTest();

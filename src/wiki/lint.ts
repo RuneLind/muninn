@@ -454,6 +454,12 @@ function checkOrphans(index: WikiIndex): LintFinding[] {
  *    is exactly the measured 2026-08-29 failure (`sources/<Stem>.mdx` displaced by an
  *    applied `entities/<Stem>.md`). The dropped page is not in `index.pages` at all,
  *    so this check reads `index.shadowed` — the store's own record of what it removed.
+ *    **One shape is no longer a drop and so is no longer reported:** a same-stem
+ *    `.html` in the SAME folder as its markdown page is an ATTACHMENT since the
+ *    rail's groups (`src/wiki/CLAUDE.md`) — it stays in `index.pages` as a child,
+ *    reachable and rendered, and it is absent from `index.shadowed` by
+ *    construction. Measured on the live wikis, that took this check's findings
+ *    from 6 → 1 and 7 → 0. The cross-folder twin still drops and still reports.
  *  - **Same-extension (NOT reported).** `store.ts` calls these "two real pages that
  *    simply share a filename" and keeps BOTH, disambiguating them with a
  *    `displayTitle` prefix — they are not in `index.shadowed` at all, so this is a

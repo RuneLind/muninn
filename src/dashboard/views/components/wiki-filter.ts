@@ -54,15 +54,19 @@ export interface WikiListing {
   accentDark?: string;
   relPath: string;
   /**
-   * ATTACHMENTS — the relPaths of the pages that fold under this one in the rail,
-   * set by the store's pairing pass (`src/wiki/store.ts`). Absent, never `[]`, on
-   * a page that adopted nothing.
+   * ATTACHMENTS — the relPath of the page this one folds under in the rail, set
+   * by the store's pairing pass (`src/wiki/store.ts`). Absent on a top-level
+   * page, which is almost every page of every wiki.
    *
-   * A rendering relation, not containment: each child is still a page of its own
-   * in this listing, with its own row, pin, Activity ranking and page route.
+   * A rendering relation, not containment: a child is still a page of its own in
+   * this listing, with its own row, pin, Activity ranking and page route.
+   *
+   * The store's matching `children` array is deliberately NOT on the wire
+   * (`toListing` strips it): `buildRail` rebuilds each group from the `parent`
+   * links of the pages it was handed, because a group is only ever the children
+   * the FACETS left on screen — so a `children` list would be payload no
+   * consumer may believe.
    */
-  children?: string[];
-  /** The relPath of the page this one folds under. Absent on a top-level page. */
   parent?: string;
   /** WHICH rule paired this page with its `parent` — `stem` | `suffix` | `link` |
    *  `superseded` (see the store's `PairedBy`). Absent exactly when `parent` is.

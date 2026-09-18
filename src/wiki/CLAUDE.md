@@ -21,7 +21,7 @@ A fourth key, **`titleFrom`** (string[] of frontmatter keys), names the keys tri
 
 It is **opt-in per wiki rather than a global `name:` fallback**, and the reason is measured. The `memory` wiki's files carry `name:` and no `title:` — 155 of its 289 pages have a `name:` that differs from the stem (a 156th carries `name: ""` and keeps its stem), so without it every one of them reads as `feedback_nav_create_pr` in the reader. But `name:`-without-`title:` also occurs on 7 pages spread across the five other registered roots (6 in melosys-kode-wiki, plus mimir's `archive/muninn/repo-health-arc.md`), two of them melosys-kode-wiki archive plans whose `name:` drops the date prefix the filename carries — and because `buildWikiIndex` registers `meta.title` into `byKey`, a global fallback would quietly change what a `[[wikilink]]` in someone else's wiki resolves to. Opt-in makes the blast radius on a wiki that does not ask for it exactly zero (measured: 0 title changes on the other five roots). On the wiki that DOES ask, the `byKey` registration is the point rather than a side effect — 58 previously-broken memory wikilinks written in the dashed `name:` spelling now resolve to their underscore-stemmed file, 0 newly broken.
 
-Registration order bounds what a derived title can do, and the bound is worth stating exactly: **names register in their own pass first** and `register` is first-wins, so a derived title can never displace a page's own NAME. It does, however, register in the SAME `relPath`-ordered pass as authored titles and aliases — so it can shadow another page's authored title or alias exactly as one more authored title would. Landed as-is (identical to the pre-existing authored-title semantics; measured, none of the memory wiki's 155 changed titles collides with another page's title, alias or name).
+Registration order bounds what a derived title can do, and the bound is worth stating exactly: **names register in their own pass first** and `register` is first-wins, so a derived title can never displace a page's own NAME. It does, however, register in the SAME `relPath`-ordered pass as authored titles and aliases — so it can shadow another page's authored title or alias exactly as one more authored title would. (That pass is relPath-ordered still: only the attachment pass's rule-1 CHILDREN are moved, to the END of it — see the Attachments section.) Landed as-is (identical to the pre-existing authored-title semantics; measured, none of the memory wiki's 155 changed titles collides with another page's title, alias or name).
 
 A fifth key, **`defaultType`** (string), replaces the final `note` fallback in `typeFromFrontmatter` — and ONLY that fallback: an authored `type:`/`metadata.type:`, a `typeMap` folder hit and the four standard folder names all still win ahead of it. Absent/blank/wrong-typed ⇒ `note`, i.e. today's behaviour byte for byte; same validate-warn-degrade shape as its siblings. Two values are refused rather than accepted: **`explainer`** (warn + drop) is the one type that changes how a page is SERVED rather than labelled — the reader renders an explainer in a sandboxed iframe off `/api/wiki/html`, which streams the file's raw bytes as `text/html`, so a wiki declaring it would serve its whole untyped markdown corpus as HTML documents — and **`note`** warns as a no-op, since it IS the built-in fallback (`typeLabels: {note: …}` is the knob that was probably meant). A declared `defaultType` also joins `acceptDeclaredType`'s vocabulary, so a page AUTHORING that value is honoured: without it the authored key was rejected and, inside a `typeMap` folder, the folder's type silently won. It exists because `note` is one of the two types `atlas.ts` refuses a column (`EXCLUDED_TYPES`), so an untyped page is invisible on the Atlas tab and indistinguishable on the type facet. On the memory wiki that is **32** pages — the 30 per-project `MEMORY.md` hubs (no frontmatter at all) plus two strays (`melosys-api/memory/pr-3231-twfa-review.md`, no frontmatter; `muninn/memory/project_user_disappears_peer_clobber.md`, frontmatter with no type) — which now carry `memory-index` / "Memory index" and get a real Atlas column. `mergeWikiTypes` takes `defaultType` as a candidate alongside `typeLabels` keys and `typeMap` values, so a wiki declaring one without a label still gets an ordered-list entry (title-cased slug).
 
@@ -392,9 +392,11 @@ as `pairedBy` so the rail can say why on hover:
 | 4 | the child's frontmatter names `superseded_by: [[successor]]` | `superseded` |
 
 The child keeps its own row identity — its own `relPath`, page route, pin,
-Activity glyph and backlinks. `children`/`parent`/`pairedBy` ride
-`/api/wiki/pages` (they are ordinary `WikiPageMeta` fields, so `toListing`
-carries them with everything else it does not strip).
+Activity glyph and backlinks. `parent`/`pairedBy` ride `/api/wiki/pages` (they
+are ordinary `WikiPageMeta` fields, one short string each). The store's matching
+`children` array does NOT: `toListing` strips it, because `buildRail` rebuilds
+every group from the `parent` links of the pages the FACETS left on screen, so a
+server-side child list is payload no consumer may believe.
 
 ⚠️ **Rule 1 changes the same-stem DROP, and only in one direction.** A same-stem
 `.html` in the SAME folder is no longer dropped: it stays in `pages` as a child,
@@ -405,27 +407,54 @@ collision and still dropped with its `shadowed` entry (the 1 that remains), and
 `.md` still shadows a same-folder `.mdx`, which is an authoring mistake rather
 than an attachment.
 
-**The markdown page keeps the name, and two mechanisms hold that.** Name and
-alias registration runs in **`extRank` order** (markdown before html) with
-relPath as the tie-break — `y.html` sorts before `y.md`, so the relPath order
-that was correct while every cross-extension loser was dropped would now hand
-`[[y]]` and `?name=y` to the html — and a rule-1 child additionally registers no
-stem key at all. Measured over both live wikis, old vs new: **0 changed key
-resolutions and 0 changed `displayTitle`s**; the only difference is the new
-titles the un-dropped pages add. Two more places read the pairing for the same
-reason: `stemCounts` (the display-title disambiguation) skips a rule-1 child, or
-its parent would grow a folder prefix; and `stemIsUnique` (`wiki-routes.ts`)
-skips it too, or `resolvePageRef`'s stale-relPath fallback 404s explain, share
-and fact-check on every page that has an attachment.
+**The un-drop reads the POST-drop set, and that is load-bearing.** The exception
+applies only when the same-folder markdown twin itself SURVIVES: with
+`a/x.mdx` + `a/x.html` + `b/x.md`, the `.mdx` is dropped by the cross-folder
+winner, so the `.html` is dropped with it and keeps its `shadowed` entry
+(`shadowedBy: b/x.md`). Judged pre-drop it survived as a top-level orphan —
+absent from `shadowed`, counted as a stem collision, and growing a folder prefix
+onto `b/x.md`.
 
-**Rule 3 reads embeds, not links.** `extractEmbedTargets` masks fenced and inline
-code first (a plan page QUOTING an `<Embed>` adopts nothing), runs each tag's
-attributes through `parseEmbedAttrs` and `resolveEmbedRelPath` — the same accept
-and resolve rules the reader renders with, so a `src` the renderer refuses pairs
-nothing — and feeds the pairing pass ONLY: `index.outgoing`, the backlinks, the
-Atlas graph and the lint checks are untouched, because an embedded diagram is
-part of the page while a cited one is a peer. A meta page (`index`/`log`/`CLAUDE`)
-is never a parent, and an html embedded by two or more pages belongs to neither.
+**The markdown page keeps the name, through ONE mechanism: a rule-1 child
+registers no stem key at all.** Registration order is unchanged (relPath, first
+wins) — after the drop, no two SURVIVING pages of different extensions can share
+a stem by any other route, so an extension-rank sort over that pass could decide
+nothing the skip has not, while it DID re-order the title/alias pass and flip
+resolutions between two pages that merely share an authored title. The title pass
+therefore stays in relPath order, with rule-1 children registering **last**: an
+attachment's `<title>` is a key that did not exist before the un-drop, so it
+never takes one from a page already reachable by it, and still names the diagram
+where nothing else claims it. Measured over both live wikis, old vs new: **0
+changed key resolutions and 0 changed `displayTitle`s**; the only difference is
+the new titles the un-dropped pages add. Three more places read the pairing:
+`stemCounts` and the display-title stamping loop both skip a rule-1 child (or its
+parent grows a folder prefix), and `stemIsUnique` (`wiki-routes.ts`) skips it too
+(or `resolvePageRef`'s stale-relPath fallback 404s explain, share and fact-check
+on every page that has an attachment).
+
+**Rule 3 reads embeds, not links.** `extractEmbedTargets` reads the BODY
+(`stripFrontmatter`) with fenced and inline code masked (a plan page QUOTING an
+`<Embed>`, in prose or in a frontmatter block scalar, adopts nothing), matches
+only the two line-owning spellings `tryParseComponent` accepts (`<Embed … />` and
+`<Embed …></Embed>` — a bare `>` never closes, a tag or a `>` on the next line is
+not a tag, and trailing prose makes it not a block), runs each tag's attributes
+through the parser's own `ATTR_RE` and then `parseEmbedAttrs` and
+`resolveEmbedRelPath` — the same accept and resolve rules the reader renders
+with, so a `src` the renderer refuses pairs nothing — and feeds the pairing pass
+ONLY: `index.outgoing`, the backlinks, the Atlas graph and the lint checks are
+untouched, because an embedded diagram is part of the page while a cited one is a
+peer. An html embedded by two or more pages belongs to neither.
+
+**Rule 4 is same-folder too, and the folder is RESOLVED, not discarded.**
+`superseded_by: [[archive/old-plan]]` names a page in `archive/`; re-scoping that
+bare stem to the child's own folder pairs it under whatever same-stem page lives
+there. A target naming another folder — or nothing — pairs nothing.
+
+**A META page (`index`/`log`/`CLAUDE`) is never a parent, under any rule.** They
+are per-folder plumbing, and one lookup enforces it for all four rules at once.
+Under rule 1 that means a same-stem `index.html` keeps its pre-attachment DROP
+(there is no page for it to fold under); under rule 2 a `log-prototype.html` is an
+ordinary top-level row.
 
 **The pass is one level deep, both directions closed.** An html child can never
 collect children (every rule needs a markdown parent), and a rule-4 pair is
@@ -444,13 +473,26 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
   as itself (with its `pairedBy` and its parent's title in the hover) and leaves
   the parent's chip count; a parent it ranks takes its open group with it, so a
   group is never split across two sections. A pinned child is lifted the same
-  way — the ★ is the reader's own choice.
+  way — the ★ is the reader's own choice. **Both lifts are computed BEFORE the
+  first row is emitted**: the chip stands for the rows the group is hiding, so it
+  has to be counted against every child's FINAL placement, and a child ranked
+  BELOW its own parent was still unclaimed when the parent's chip was counted. A
+  lifted row keeps the hover sentence and loses the INDENT — drawn under whatever
+  happens to be above it, an indent claims a parentage the rail invented.
+- **A child whose parent is itself a child renders as an ordinary row.** One
+  level deep is the store's invariant, not a promise about the payload the rail
+  is handed, and a two-level chain (or a cycle) put both pages inside groups
+  neither of which was emitted — two rows silently gone.
 - **A closed group emits no child rows**, so `rail.shown` — and with it
   `#wikiCount` — goes DOWN, and the chip says by how much (`3 attached`,
   `1 superseded`, joined with ` · ` when mixed).
 - **A query flattens everything.** Groups are for browsing; a hit inside a closed
   group is a result the reader asked for and cannot see.
-- **The open page's group is forced open**, whatever the store holds.
+- **The open page's group is forced open**, whatever the store holds — and its
+  chip says so rather than toggling: `isOpen` is `forced || stored`, so a click
+  could only write a stored key nothing on screen reflects. The row (and the
+  `Bookkeeping` header) carries `forcedOpen`, and the painter renders a disabled
+  control, which is also what stops the click reaching the store at all.
 - **A child whose PARENT the facets filtered away is an ordinary row** — folding
   it under a page that is not on screen would delete it from the rail.
 
