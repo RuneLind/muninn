@@ -1284,7 +1284,9 @@ function renderList(): void {
       // not beside it: the row is six flex items and `wiki-rail-width.ts` budgets
       // every one of them, so a seventh would cost the title its floor and wrap
       // the row. An inline span inside the line clamp costs the title's own text
-      // an 11px glyph plus its 4px margin and costs the row's layout nothing.
+      // 9.3px — measured on mimir: a 5.3px glyph at 11px type plus its 4px
+      // margin — and costs the row's layout nothing. (The 11px this comment used
+      // to name is the font SIZE, not a width.)
       `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
       (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
       `${esc(displayTitleOf(p))}</div>` +
