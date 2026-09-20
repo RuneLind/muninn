@@ -1579,13 +1579,28 @@ async function loadProvStrip(relPath: string): Promise<void> {
     /* falls through to the unavailable line */
   }
   if (currentRelPath !== relPath) return;
-  if (next !== null) {
-    const strip = document.querySelector(".wiki-prov-strip.wiki-prov-pending");
-    if (strip) strip.outerHTML = next;
+  const placeholder = document.querySelector(".wiki-prov-strip.wiki-prov-pending");
+  if (next === null) {
+    // Failed outright. With no placeholder to replace (a `prs:`-only page) the
+    // failure is silent: the page never promised a strip.
+    if (placeholder) placeholder.outerHTML = provUnavailableHtml();
     return;
   }
-  const strip = document.querySelector(".wiki-prov-strip.wiki-prov-pending");
-  if (strip) strip.outerHTML = provUnavailableHtml();
+  if (placeholder) {
+    placeholder.outerHTML = next;
+    return;
+  }
+  // No placeholder was rendered (a `prs:`-only page) and a strip did come
+  // back: it goes where `articleHeadHtml` would have put it, after the meta row.
+  if (next) document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", next);
+}
+
+/** The retry on a failed load: back to the placeholder, then the fetch again. */
+function retryProvStrip(): void {
+  const failed = document.querySelector(".wiki-prov-strip.wiki-prov-unavailable");
+  if (!failed || !currentRelPath) return;
+  failed.outerHTML = provPendingHtml();
+  void loadProvStrip(currentRelPath);
 }
 
 /** Replace the strip in place from a fresh payload, preserving the open/closed
@@ -2172,7 +2187,9 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   // `jiraKeys` is the facet's membership set, and the strip's key is a SECOND
   // way into that facet — so the strip renders a control only for a key the
   // facet can actually serve (see `provStripHtml`).
-  if (provenancePending) head += provPendingHtml();
+  // The placeholder only where a strip is certain — see `provPendingHtml`.
+  // A `prs:`-only page still fetches; its strip, if any, is inserted on arrival.
+  if (provenancePending && (m.sessions?.length || m.jira?.length)) head += provPendingHtml();
   head += "</div>";
   return head;
 }
@@ -2506,6 +2523,11 @@ document.body.addEventListener("click", (e) => {
   if (provToggle) {
     e.preventDefault();
     toggleProvChain(provToggle);
+    return;
+  }
+  if (target.closest && target.closest("[data-prov-retry]")) {
+    e.preventDefault();
+    retryProvStrip();
     return;
   }
   const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;

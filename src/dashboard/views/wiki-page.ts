@@ -1074,8 +1074,10 @@ export async function renderWikiPage(opts?: {
       border-top: 1px solid var(--border-primary);
     }
     /* The placeholder while the block is fetched: one caption-sized line with
-       a spinner, the same height the cost line will take, so the article
-       below does not jump when the strip lands. */
+       a spinner. The real strip is taller (a Jira row, the disclosure line —
+       measured 21 px → 79 px on the e2e shape fixture), so the article does
+       shift once when the block lands; the trade is that shift against a page
+       open that waits on the join. */
     .wiki-prov-pending .wiki-prov-cost { display: inline-flex; align-items: center; gap: 6px; }
     .wiki-prov-spinner {
       width: 10px; height: 10px; border-radius: 50%;
@@ -1084,6 +1086,11 @@ export async function renderWikiPage(opts?: {
     }
     @keyframes wiki-prov-spin { to { transform: rotate(360deg); } }
     .wiki-prov-unavailable .wiki-prov-cost { color: var(--text-muted); }
+    .wiki-prov-retry {
+      border: none; background: none; padding: 0;
+      color: var(--accent-light); font: inherit; cursor: pointer;
+    }
+    .wiki-prov-retry:hover { text-decoration: underline; }
     .wiki-prov-jira-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
     /* The key and its ↗ read as ONE chip: the key filters the list, the arrow
        opens Jira. Shaped like .wiki-project-hub — it sets a facet, so it must

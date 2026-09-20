@@ -109,11 +109,12 @@ const NEST_REL = "nested.md";
 const MERGESDOWN_REL = "merges-down.md";
 const DAMAGED_REL = "damaged.md";
 const PLAIN_REL = "plain.md";
+const PRSONLY_REL = "prsonly.md";
 const OTHER_REL = "other.md";
 const MIXED_REL = "mixed.md";
 
 /** How many pages the temp wiki holds — every "the whole wiki" assertion below. */
-const ALL_PAGES = 8;
+const ALL_PAGES = 9;
 
 const DAMAGED = [
   "---",
@@ -171,6 +172,20 @@ const STAMPME = [
   "# Stamp me",
   "",
   "A page with a PR ghost to stamp.",
+  "",
+].join("\n");
+
+// `prs:` alone: a page whose strip may render to NOTHING (no Jira row, and on a
+// host where the `?prs=` leg finds no ghost, no cost line either), so it must
+// get no placeholder — a spinner that vanishes is worse than no spinner.
+const PRSONLY = [
+  "---",
+  "type: note",
+  "title: PRs only",
+  "prs: [RuneLind/muninn#9999]",
+  "---",
+  "",
+  "# PRs only",
   "",
 ].join("\n");
 
@@ -562,6 +577,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, SHAPE_REL), shape, "utf8");
   await writeFile(path.join(root, DAMAGED_REL), DAMAGED, "utf8");
   await writeFile(path.join(root, PLAIN_REL), PLAIN, "utf8");
+  await writeFile(path.join(root, PRSONLY_REL), PRSONLY, "utf8");
   await writeFile(path.join(root, OTHER_REL), OTHER, "utf8");
   await writeFile(path.join(root, MIXED_REL), MIXED, "utf8");
   await writeFile(path.join(root, MERGESDOWN_REL), MERGES_DOWN, "utf8");
@@ -1309,8 +1325,62 @@ test.describe("Wiki reader: provenance", () => {
     await page.route("**/api/wiki/page/provenance?**", (route) => route.abort());
     await open_(page, SHAPE_REL);
     const strip = page.locator(".wiki-prov-strip.wiki-prov-unavailable");
-    await expect(strip).toHaveText("provenance not loaded");
+    await expect(strip).toContainText("provenance not loaded");
     await expect(page.locator(".wiki-prov-spinner")).toHaveCount(0);
     await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+  });
+
+  test("a block that lands after the reader navigated away is dropped", async ({ page }) => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      await held;
+      await route.continue();
+    });
+    await open_(page, SHAPE_REL);
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    // In-app navigation, so the held fetch stays in flight under the new page.
+    await page.locator(`.wiki-list-item[data-relpath="${PLAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
+    release();
+    // Give the released answer time to arrive — the assertion is that it does
+    // NOT render: the shape page's chain under the plain page's title would be
+    // another page's sessions and cost.
+    await page.waitForTimeout(300);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(0);
+  });
+
+  test("a prs-only page gets no placeholder, since its strip may render to nothing", async ({ page }) => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      await held;
+      await route.continue();
+    });
+    await open_(page, PRSONLY_REL);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("PRs only");
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
+    release();
+    await page.waitForTimeout(300);
+    await expect(page.locator(".wiki-prov-pending")).toHaveCount(0);
+  });
+
+  test("retry after a failed fetch brings the strip, and its Stamp, back", async ({ page }) => {
+    let fail = true;
+    await page.route("**/api/wiki/page/provenance?**", (route) =>
+      fail ? route.abort() : route.continue(),
+    );
+    await open_(page, SHAPE_REL);
+    const retry = page.locator(".wiki-prov-unavailable [data-prov-retry]");
+    await expect(retry).toBeVisible();
+    fail = false;
+    await retry.click();
+    await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
+    await expect(page.locator(".wiki-prov-unavailable")).toHaveCount(0);
   });
 });

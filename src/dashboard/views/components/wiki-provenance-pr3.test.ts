@@ -725,5 +725,8 @@ describe("the placeholder strip a deferred page renders", () => {
     expect(html).not.toContain("wiki-prov-spinner");
     expect(html).not.toContain("aria-busy");
     expect(html).toContain(PROV_UNAVAILABLE_COPY);
+    // The way back to the strip — and to the Stamp button it carries — without
+    // a reload.
+    expect(html).toContain('data-prov-retry');
   });
 });

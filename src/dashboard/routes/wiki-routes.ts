@@ -1785,11 +1785,20 @@ export function registerWikiRoutes(
   // node clicks send the node's normalized relPath so a same-stem page in another
   // folder can't shadow the intended page), else by `name` (first-stem-match, the
   // legacy wikilink/list-click path).
-  app.get("/api/wiki/page", async (c) => {
+  /**
+   * The ONE resolution `/api/wiki/page` and `/api/wiki/page/provenance` share:
+   * `wiki`/`bot` → registry entry, `relPath` (collision-proof) else `name`
+   * (first-stem-match) → page. The 400/404/503 ladder is the contract both
+   * answer, so it lives once.
+   */
+  type PageResolution =
+    | { ok: true; entry: ReturnType<typeof resolveWikiRequest>["entry"]; index: NonNullable<Awaited<ReturnType<typeof getWikiIndex>>>; meta: WikiPageMeta }
+    | { ok: false; res: Response };
+  async function resolvePageRequest(c: Context): Promise<PageResolution> {
     const relPathQ = c.req.query("relPath");
     const name = c.req.query("name");
     if (!relPathQ && !name) {
-      return c.json({ error: "name or relPath query param required" }, 400);
+      return { ok: false, res: c.json({ error: "name or relPath query param required" }, 400) };
     }
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
@@ -1797,14 +1806,21 @@ export function registerWikiRoutes(
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
-    if (unknownWiki) return c.json({ error: "no wiki configured for that name" }, 404);
+    if (unknownWiki) return { ok: false, res: c.json({ error: "no wiki configured for that name" }, 404) };
     const index = await getWikiIndex({ root: entry?.root });
-    if (!index) return c.json({ error: "wiki directory not found" }, 503);
+    if (!index) return { ok: false, res: c.json({ error: "wiki directory not found" }, 503) };
     const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
     if (!meta) {
       const which = relPathQ ? `relPath "${relPathQ}"` : `name "${name}"`;
-      return c.json({ error: `no wiki page for ${which}` }, 404);
+      return { ok: false, res: c.json({ error: `no wiki page for ${which}` }, 404) };
     }
+    return { ok: true, entry, index, meta };
+  }
+
+  app.get("/api/wiki/page", async (c) => {
+    const resolved = await resolvePageRequest(c);
+    if (!resolved.ok) return resolved.res;
+    const { entry, index, meta } = resolved;
     const markdown = await readWikiPage(index, meta);
     if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
 
@@ -1853,25 +1869,9 @@ export function registerWikiRoutes(
   // instances configured with `WIKI_DIR`, hiding every Stamp button on a wiki
   // the CLI covers.
   app.get("/api/wiki/page/provenance", async (c) => {
-    const relPathQ = c.req.query("relPath");
-    const name = c.req.query("name");
-    if (!relPathQ && !name) {
-      return c.json({ error: "name or relPath query param required" }, 400);
-    }
-    const { entry, unknownWiki } = resolveWikiRequest(
-      getWikiRegistry(),
-      c.req.query("wiki"),
-      c.req.query("bot"),
-      process.env.WIKI_DIR,
-    );
-    if (unknownWiki) return c.json({ error: "no wiki configured for that name" }, 404);
-    const index = await getWikiIndex({ root: entry?.root });
-    if (!index) return c.json({ error: "wiki directory not found" }, 503);
-    const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
-    if (!meta) {
-      const which = relPathQ ? `relPath "${relPathQ}"` : `name "${name}"`;
-      return c.json({ error: `no wiki page for ${which}` }, 404);
-    }
+    const resolved = await resolvePageRequest(c);
+    if (!resolved.ok) return resolved.res;
+    const { entry, index, meta } = resolved;
     const provenance = await pageProvenance(meta, provenanceCtx, resolveWikiRoot(entry?.root));
     return c.json(provenance ? { provenance } : {});
   });

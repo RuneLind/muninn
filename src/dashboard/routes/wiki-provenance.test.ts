@@ -253,6 +253,41 @@ describe("the listing and the page route", () => {
     expect(body.provenance.costedSessions).toBe(0);
   });
 
+  test("/api/wiki/page/provenance resolves by name too", async () => {
+    const body = await (
+      await pageApp.request("/api/wiki/page/provenance?wiki=mimir&name=plan")
+    ).json();
+    expect(body.provenance.prs[0].url).toBe("https://github.com/RuneLind/muninn/pull/543");
+  });
+
+  test("/api/wiki/page does not WAIT on the join: a hanging ledger cannot hold the page open", async () => {
+    // A ledger that never answers. The page route must answer anyway — the
+    // deferral is the whole point of `provenancePending`, and a re-await of
+    // `pageProvenance` on the page route would sit here until the budget.
+    const hung = new Hono();
+    registerWikiRoutes(
+      hung,
+      { knowledgeApiUrl: "http://localhost:8321", claudeUsageUrl: "http://127.0.0.1:8787", claudeUsagePublicUrl: null } as Config,
+      testCtx({
+        budgetMs: 3_000,
+        sessionLedger: {
+          ...testCtx().sessionLedger,
+          fetchSessions: () => new Promise(() => {}),
+          fetchMerges: () => new Promise(() => {}),
+        },
+      }),
+    );
+    const started = Date.now();
+    const res = await Promise.race([
+      hung.request("/api/wiki/page?wiki=mimir&relPath=plan.md"),
+      new Promise<null>((r) => setTimeout(() => r(null), 1_000)),
+    ]);
+    expect(res).not.toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    const body = await res!.json();
+    expect(body.provenancePending).toBe(true);
+  });
+
   test("/api/wiki/page/provenance answers {} for an unstamped page and 404 for none", async () => {
     const plain = await pageApp.request("/api/wiki/page/provenance?wiki=mimir&relPath=plain.md");
     expect(plain.status).toBe(200);

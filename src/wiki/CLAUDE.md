@@ -825,9 +825,10 @@ opted in by the SINGLE-PAGE caller alone, through `includeProvenance` (the
 `includeDesc` mechanism, whose comment names all three callers of that one
 function).
 
-**The reader's block** rides `GET /api/wiki/page` beside `meta`, and only when
-`hasProvenance(meta)` — the ONE gate, shared with the store's other callers —
-says the page carries any of the three LIST keys. `sessions_backfilled` alone
+**The reader's block** is `GET /api/wiki/page/provenance` (deferred — see
+below); `GET /api/wiki/page` only answers `provenancePending: true`, and only
+when `hasProvenance(meta)` — the ONE gate, shared with the store's other
+callers — says the page carries any of the three LIST keys. `sessions_backfilled` alone
 opens nothing: it is a marker about a list that is not there. The payload is
 `{sessions, jira, prs, merges, totalCost, costedSessions, backfilled?, ledger,
 mergesLedger}`.
@@ -862,8 +863,12 @@ four sessions and three PRs opened seconds after its markdown was ready,
 because the join's slowest leg gated the whole payload. The placeholder is a
 `.wiki-prov-strip` like the real one, so `redrawProvStrip` (the Stamp refetch)
 replaces either in place; a fetch that fails outright becomes one
-"provenance not loaded" line, never a spinner that runs forever, and an answer
-landing after the reader navigated away is dropped. The stamp route still
+"provenance not loaded · retry" line — the retry matters because the Stamp
+button lives inside the real strip — never a spinner that runs forever, and an
+answer landing after the reader navigated away is dropped. The placeholder is
+rendered only when the page names a session or a Jira key: a `prs:`-only page
+may resolve to no strip at all, so it fetches with no spinner and the strip, if
+one comes back, is inserted after the meta row. The stamp route still
 returns the block inline — it has just written the keys and owes the caller
 the strip.
 
@@ -1290,7 +1295,7 @@ having only the first:
   flag cleared, button live — so a retry asks again.
 - **A 200 with no `provenance` disabled it forever.** The re-resolve can
   legitimately answer nothing; the button now re-enables and `refetchProvStrip`
-  re-reads `GET /api/wiki/page`.
+  re-reads `GET /api/wiki/page/provenance`.
 
 A 200 WITH a block redraws the strip in place from the route's own re-resolved
 payload, with the chain left OPEN since the reader was reading it. A refusal goes
