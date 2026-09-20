@@ -914,22 +914,49 @@ popover node shared by the three — so "only one open at a time" is a property 
 the DOM rather than a rule to enforce. It offers four verbs: JOIN a series (or
 type a new key), RENAME the label, MOVE the head, and REMOVE the page.
 
-  - **The route is the fourth writer through `writeWikiPage`**, in NO-LOG mode
-    like the `/plans` board's metadata flips: no `log.md` line, no reindex, no
-    commit (mimir's committer is the repo-sync loop). It DOES refresh the wiki
-    index inside the write, because the rail reads that index behind a 5-minute
-    TTL. The frontmatter half is `setFrontmatterScalar`
-    (`src/plans/frontmatter.ts`), so there is still exactly one line-upsert
-    implementation.
+  - **The route is the FIFTH call site of `writeWikiPage`**, and the third of
+    the three that write metadata in NO-LOG mode (the two `/plans` flips are the
+    others; the fact-check append and the integrate apply both log and commit):
+    no `log.md` line, no reindex, no commit. It DOES refresh the wiki index
+    inside the write, because the rail reads that index behind a 5-minute TTL,
+    and it reads the index with `refresh: true` BEFORE deciding too — the key's
+    spelling and the one-label check are decisions made off that index, and the
+    cached one is up to five minutes old. The frontmatter half is
+    `setFrontmatterScalar` (`src/plans/frontmatter.ts`), so there is still
+    exactly one line-upsert implementation; the label is written with its
+    `after: "series"` anchor so the pair stays together through a head move.
+  - **Who commits it.** mimir: the repo-sync loop. A BOT wiki: the daily
+    `wiki-committer` sweeper, up to ~24 h later, under a `[sweep]` subject that
+    bypasses that bot's own `wikiAutoCommit` policy. A standalone `WIKI_EXTRA`
+    wiki outside `SYNC_REPOS`: **nobody** — the edit sits in the working tree,
+    and the write logs one `warn` saying so (`src/wiki/series-committer.ts`).
   - **ONE page per call**, `{wiki?, relPath, baseHash, series: string|null,
-    seriesLabel?: string|null}`. 400 bad body / html page, 404 unknown wiki or
-    page, 422 a fence this must not edit or a list-valued key, 403 read-only,
-    409 stale or locked, 200 `{relPath, hash, written, series, seriesLabel}` —
-    always what is ON DISK, so a noop echoes the pair the CAS just proved.
+    seriesLabel?: string|null}`. The status ladder, in full: **415** a
+    `content-type` that is not `application/json` and **403** a cross-site POST
+    (both `decideStampRequest`, before the body is read) · **403** read-only,
+    instance or root · **400** a bad body, a non-markdown page, or one of the
+    reserved basenames `index`/`log`/`CLAUDE` (`canEditSeriesPage`, the same
+    predicate that decides which rows render an opener — without it the writer's
+    own confinement answered **500**) · **404** an unknown wiki, an unknown page,
+    or a target that vanished between the index read and the write · **503** a
+    wiki directory that is not there · **422** a fence this must not edit, a
+    list-valued key (block or flow), or a label carrying both quote characters,
+    which the reader's unquote rule cannot carry · **409** a stale `baseHash`, a
+    held write lock, or a label on a series another member already names
+    (`twoHeaded`) · **200** `{relPath, hash, written, series, seriesLabel}`,
+    parsed back out of the bytes the transform ended with — the FILE, never the
+    TTL-cached index, which reported the pre-write pair on a noop and on an
+    omitted field.
   - **The CAS base is `GET /api/wiki/page`'s new `hash`** (sha256 of the raw
-    file, beside `meta` rather than inside the listing shape). The client reads
-    it FRESH per write, for the open page too: a hash cached at page-open time
-    goes stale the moment the editor's own first write lands.
+    file, beside `meta` rather than inside the listing shape), and it is captured
+    when the POPOVER OPENS — one per page the menu's verbs can write, held for as
+    long as it is on screen. Read per write instead, the compare-and-swap covers
+    the network round trip and not the seconds a human spends deciding: measured,
+    an edit made while the menu stood open was silently overwritten. The page the
+    reader has OPEN needs no request at all (its page payload carried the hash,
+    and every write answers the hash it left behind, so the editor's own writes
+    keep it current); a 409 stops the menu writing, names the page and refetches
+    the listing, and the reader reopens with fresh bases.
   - **A head move is TWO calls**, each CAS'd, and the ORDER is the contract: the
     old head's label is cleared FIRST. A failure between them leaves a series
     with no labelled member — rendered under its bare key, and reported by lint
@@ -947,7 +974,24 @@ type a new key), RENAME the label, MOVE the head, and REMOVE the page.
     means changing a page's `status_date`, which is the `/plans` board's job.
   - **Read-only renders NOTHING**, on both mechanisms — not a dimmed control
     (#557's F2 rule), with the two selectors in `WIKI_READONLY_BLOCKED_SELECTOR`
-    as the backstop and the route refusing 403 regardless.
+    as the backstop and the route refusing 403 regardless. Neither does a row no
+    series can claim: an `.html` attachment or a reserved basename renders no
+    opener, by the same `canEditSeriesPage` the route 400s on.
+  - **The `⋯` is revealed by its OWN row's hover and costs the row no width.**
+    Both are measured failures of the first cut: one reveal rule keyed on
+    `.wiki-list-item:hover` left a `Related work` row's opener permanently
+    `pointer-events: none` (the click NAVIGATED), a later unconditional
+    `opacity: 1` painted the rail's on every row, and the always-in-flow button
+    took `.wiki-list-end` to 90 px and wrapped a plan row's title under
+    `RAIL_TITLE_MIN` at the 300 px rail on CI's fonts. On a fine pointer it is
+    absolutely positioned over the date it replaces on hover (the `▸` rule — the
+    row's six items are budgeted one by one in `wiki-rail-width.ts`); on a coarse
+    one it is visible and in flow, since a hover-revealed control is one a finger
+    cannot reach.
+  - **The header-less POST is the stamp route's known class**, inherited with
+    `decideStampRequest`: a request with neither `origin` nor `sec-fetch-site` is
+    allowed, so under `MUNINN_AUTH=off` anything that can reach the port can
+    write this line. Stated, not fixed here — the answer is the auth switch.
 
 Acceptance: `wiki-groups.test.ts` (formation, membership, the case fold, the
 head and newest-plan rules incl. the terminal statuses, the day granularity and
@@ -962,13 +1006,22 @@ VISIBLE at 300 and 260px, since `toHaveText` passes on a clipped element — the
 reader header agreeing with the fold, and the contrast of the label, the chip,
 the census, the timeline date and the `▸` in both themes). The EDITOR's own acceptance is
 `wiki-series-routes.test.ts` (every status code, the case-fold normalization,
-the html refusal, both read-only refusals through the test setters),
-`wiki-series-menu.test.ts` (the menu model, the cap, the head-move plan, the
-escaping) and `e2e/wiki-series-editor.spec.ts` (acceptance 11: joining from a
-rail row writes one line and moves the row inside the fold with `#wikiCount`
-unchanged, the label rename touches only the head's bytes, the head move touches
-two files, the removal drops the header in place, and both read-only shapes —
-instance and per-root — render no opener and 403 the POST).
+the html and reserved-basename refusals, the one-label 409, the noop's honest
+echo, the two write-time races via the `readFile` seam, the held lock, and both
+read-only refusals through the test setters), `wiki-series-menu.test.ts` (the
+menu model, the cap and its "N more" note, `canEditSeriesPage`, the head-move
+plan, the escaping), `series-committer.test.ts` (which wikis have a committer)
+and `e2e/wiki-series-editor.spec.ts` (acceptance 11: joining from a rail row
+writes one line and moves the row inside the fold with `#wikiCount` unchanged,
+the label rename touches only the head's bytes, the head move touches two files,
+the removal drops the header in place, both read-only shapes — instance and
+per-root — render no opener and 403 the POST, plus the fix-round half: an
+out-of-band edit while the menu is open is refused rather than overwritten (both
+writes of a head move), a `Related work` opener opens instead of navigating, the
+rail's is invisible until its own row is hovered and takes the row no width, no
+opener on a page no series can claim, a scroll inside the popover does not
+dismiss it, focus returns to the opener, and the popover's contrast in both
+themes).
 
 ### Lint check 8 — the series checks, and the only lint that proposes a fix
 

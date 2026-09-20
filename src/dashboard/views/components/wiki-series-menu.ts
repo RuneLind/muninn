@@ -38,9 +38,51 @@ import { normalizeRel } from "./wiki-nav.ts";
  * most recently worked on — which is what a reader adding a page to a series is
  * reaching for. Past that the `New series…` field takes any key, including one
  * the list did not show, and {@link normalizeSeriesKey} folds it onto the
- * existing spelling, so nothing is unreachable — only unlisted.
+ * existing spelling, so nothing is unreachable — only unlisted, and the menu
+ * says how many and how to reach them (`hiddenOptions`).
  */
 export const SERIES_MENU_MAX = 12;
+
+/** A series key and a label are one line of frontmatter each; a value past this
+ *  is a paste accident, and the rail clips a label to a fraction of it anyway.
+ *  Declared HERE, not in the route, because the input's `maxlength` and the
+ *  route's 400 are the same bound — as two literals they were one copy edit from
+ *  a field that silently refuses what it let the reader type. */
+export const SERIES_VALUE_MAX = 200;
+
+/**
+ * Basenames a wiki reserves for its own infrastructure — the stem, either
+ * markdown extension, case-insensitively.
+ *
+ * The same set `hasForbiddenBasename` (`src/gardener/draft.ts`) keeps every
+ * programmatic writer off, and for the same reason: `CLAUDE.md` is loaded as
+ * instructions by any agent with a cwd inside the wiki, and `index.md`/`log.md`
+ * are the wiki's own bookkeeping. Spelled again here rather than imported
+ * because this module is bundled into the BROWSER and that one pulls the whole
+ * gardener in; the route imports THIS one, so the server and the client still
+ * answer from a single list.
+ */
+const SERIES_RESERVED_STEMS = new Set(["index", "log", "claude"]);
+
+/**
+ * May a page carry a `series:` line at all?
+ *
+ * The one predicate behind three answers: which rows render an opener, which
+ * rows the `Related work` block renders one on, and the route's own 400. A row
+ * whose only possible outcome is a refusal must not paint a control — and the
+ * route must answer 400 naming the rule rather than 500 from the writer's own
+ * confinement check, which is what an `index.md` measured before this existed.
+ *
+ * Deliberately NOT a test on the page's `type`: a wiki's `.wiki-reader.json`
+ * can type an ordinary `.md` page `explainer`, and an editor that refused those
+ * would be refusing markdown pages on one wiki and not the next. The extension
+ * test is what excludes a real HTML explainer.
+ */
+export function canEditSeriesPage(relPath: string): boolean {
+  if (!/\.mdx?$/i.test(relPath)) return false;
+  const base = relPath.replace(/\\/g, "/").split("/").pop() ?? "";
+  return !SERIES_RESERVED_STEMS.has(base.replace(/\.mdx?$/i, "").toLowerCase());
+}
 
 /** One series the menu offers to join. */
 export interface SeriesMenuOption {
@@ -77,6 +119,10 @@ export interface SeriesMenuModel {
   /** relPath of the member carrying the label, `""` when there is none. */
   headRel: string;
   options: SeriesMenuOption[];
+  /** How many series the cap left OUT of `options` — 0 when they all fit. The
+   *  menu says the number rather than trailing off, because the way to reach an
+   *  unlisted series is to type its key and nothing on screen said so. */
+  hiddenOptions: number;
   /** The current series' members, newest first. Empty when the page is in none. */
   members: SeriesMemberRow[];
 }
@@ -135,6 +181,7 @@ export function buildSeriesMenu(
     // The current series is always offered, however old it is — it is the one
     // the edit verbs act on.
     options: capOptions(options),
+    hiddenOptions: Math.max(0, options.length - SERIES_MENU_MAX),
     members: members.map((m) => ({
       relPath: m.relPath,
       title: displayTitleOf(m),
@@ -254,6 +301,13 @@ export function seriesMenuHtml(model: SeriesMenuModel, edit: boolean): string {
         cmdRow("join", o.key, o.label, `${o.count} page${o.count === 1 ? "" : "s"}`, o.current),
       );
     }
+    if (model.hiddenOptions > 0) {
+      // The way to a series the cap left out is the field below, and nothing on
+      // screen said so — a list that simply stops reads as the whole set.
+      rows.push(
+        `<div class="wiki-series-menu-note is-more">… ${model.hiddenOptions} more — type the key</div>`,
+      );
+    }
   }
   rows.push(formHtml("new", "New series key", "", "Add"));
   if (model.current) rows.push(cmdRow("remove", "", "Remove from series"));
@@ -266,7 +320,7 @@ function formHtml(kind: string, label: string, value: string, verb: string): str
   return (
     `<form class="wiki-series-menu-form" data-series-form="${esc(kind)}">` +
     `<input type="text" class="wiki-series-menu-input" data-series-input="1"` +
-    ` placeholder="${esc(label)}…" aria-label="${esc(label)}" maxlength="200"` +
+    ` placeholder="${esc(label)}…" aria-label="${esc(label)}" maxlength="${SERIES_VALUE_MAX}"` +
     ` value="${esc(value)}">` +
     `<button type="submit" class="wiki-series-menu-go">${esc(verb)}</button>` +
     `</form>`
@@ -286,12 +340,14 @@ function cmdRow(
   const noteHtml = note ? `<span class="wiki-series-menu-note">${esc(note)}</span>` : "";
   if (current) {
     return (
-      `<div class="wiki-series-menu-row is-current" aria-disabled="true">` +
+      `<div class="wiki-series-menu-row is-current" role="menuitem" aria-disabled="true">` +
       `<span>${esc(label)}</span><span class="wiki-series-menu-note">in this series</span></div>`
     );
   }
+  // `role="menuitem"`: the container claims `role="menu"`, and a menu whose
+  // children are plain buttons is a menu with no items to a screen reader.
   return (
-    `<button type="button" class="wiki-series-menu-row" data-series-cmd="${esc(cmd)}"` +
+    `<button type="button" class="wiki-series-menu-row" role="menuitem" data-series-cmd="${esc(cmd)}"` +
     ` data-series-arg="${esc(arg)}"><span>${esc(label)}</span>${noteHtml}</button>`
   );
 }

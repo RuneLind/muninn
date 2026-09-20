@@ -2,12 +2,15 @@
  * `POST /api/wiki/series` — the SERIES EDITOR's one write: setting or clearing
  * `series:` (and optionally `series_label:`) on ONE page.
  *
- * It is the fourth writer to go through `writeWikiPage` (`src/wiki/page-write.ts`)
- * rather than a seam of its own, so it inherits the read-only refusals, the path
- * confinement, the per-wiki queue, the cross-process lockfile and the `baseHash`
- * CAS unchanged. What it adds is the frontmatter half — `setFrontmatterScalar`
- * (`src/plans/frontmatter.ts`), the line-scoped upsert PR C wrote for the wiki
- * lint's series fixes — and three rules of its own:
+ * It goes through `writeWikiPage` (`src/wiki/page-write.ts`) rather than a seam
+ * of its own — the fifth call site of that function, and the third of the three
+ * that write METADATA in no-log mode (the two `/plans` flips are the others;
+ * the fact-check append and the integrate apply both log and commit) — so it
+ * inherits the read-only refusals, the path confinement, the per-wiki queue,
+ * the cross-process lockfile and the `baseHash` CAS unchanged. What it adds is
+ * the frontmatter half — `setFrontmatterScalar` (`src/plans/frontmatter.ts`),
+ * the line-scoped upsert PR C wrote for the wiki lint's series fixes — and four
+ * rules of its own:
  *
  *  1. **ONE page per call.** Moving a series' head is two calls from the client
  *     (clear the label on the old head, set it on the new), each with its own
@@ -23,15 +26,26 @@
  *     in no series names nothing: it is invisible to the rail (which reads the
  *     label off a MEMBER) and is exactly 8.3(a)'s finding. So `series: null`
  *     removes both lines whatever `seriesLabel` said.
+ *  4. **One labelled member per series.** Naming a series another member already
+ *     names is a 409, not a second label: `seriesHead` picks one of two silently,
+ *     so the fork would be invisible on every surface that reads the label. The
+ *     editor's own head move clears the old head first and is unaffected.
  *
  * **No log.md entry, no reindex, no commit** — `writeWikiPage`'s no-log mode,
  * the `/plans` board's priority-flip discipline. A series edit is metadata: it
  * moves no prose, so re-embedding the page buys nothing, and a rail-menu click
  * is a triage-rate action whose curated log line would bury the log it sits in.
- * The commit is the repo-sync loop's job on a standalone wiki (mimir is in
- * `SYNC_REPOS`) and the bot's own `wikiAutoCommit` policy's on a bot wiki — see
- * the decision note on the PR; `groupApplyPolicy` is the policy for a gardener
- * GROUP APPLY, which writes page CONTENT at a review gate.
+ * `groupApplyPolicy` is the policy for a gardener GROUP APPLY, which writes page
+ * CONTENT at a review gate.
+ *
+ * **Who commits it, then — and the wiki where nobody does.** On mimir the
+ * repo-sync loop is the committer (it is in `SYNC_REPOS`). On a BOT wiki the
+ * daily `wiki-committer` sweeper is, up to ~24 h later, under a `[sweep]`
+ * subject and bypassing that bot's own `wikiAutoCommit` policy — late, not lost.
+ * On a standalone `WIKI_EXTRA` wiki that no `SYNC_REPOS` entry covers there is
+ * NO committer at all, so the write logs one `warn` naming that
+ * ({@link seriesCommitterWarning}); the reader's edit sits in the working tree
+ * until a human commits it.
  *
  * It DOES refresh the wiki index (`defaultPageWriteIo`), unlike the plans board:
  * the rail renders from `GET /api/wiki/pages`, which reads that index behind a
@@ -43,19 +57,37 @@
  * same-origin write guard `wiki-stamp.ts` carries for the measured
  * `MUNINN_AUTH=off` hole, where none of the global middlewares are mounted. One
  * spelling, two routes; the name is the stamp route's because that is where it
- * was first needed.
+ * was first needed. It inherits that guard's KNOWN GAP with it, stated rather
+ * than papered over: a request carrying neither `origin` nor `sec-fetch-site`
+ * (curl, an old client) is ALLOWED, so under `MUNINN_AUTH=off` anything that
+ * can reach the port can write this line. Same class, same answer as the stamp
+ * route — the fix is the auth switch, not a header check that only bothers
+ * browsers.
  */
 
 import type { Hono } from "hono";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
-import { getWikiIndex, resolveWikiRoot, type WikiPageMeta } from "../../wiki/store.ts";
-import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
+import {
+  getWikiIndex,
+  parseFrontmatter,
+  resolveWikiRoot,
+  normalizeRelPath,
+  type WikiPageMeta,
+} from "../../wiki/store.ts";
+import {
+  PAGE_GONE_REASON,
+  defaultPageWriteIo,
+  writeWikiPage,
+} from "../../wiki/page-write.ts";
 import { setFrontmatterScalar } from "../../plans/frontmatter.ts";
 import { sha256 } from "../../gardener/util.ts";
-import { normalizeSeriesKey } from "../views/components/wiki-groups.ts";
+import { normalizeSeriesKey, seriesCensusKey, seriesKeyOf } from "../views/components/wiki-groups.ts";
+import { canEditSeriesPage, SERIES_VALUE_MAX } from "../views/components/wiki-series-menu.ts";
 import { decideStampRequest } from "./wiki-stamp.ts";
 import { readonlyRefusal } from "./route-utils.ts";
+import { seriesCommitterWarning } from "../../wiki/series-committer.ts";
+import { getSyncRepos } from "../../sync/config.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("wiki", "series");
@@ -66,21 +98,46 @@ export interface WikiSeriesRouteDeps {
   /** Shortens the cross-process lockfile wait so a refusal case costs
    *  milliseconds rather than the two seconds a human click may. */
   lockWaitMs?: number;
+  /**
+   * The write's own read of the target, overriding `defaultPageWriteIo`'s.
+   *
+   * It exists for the two outcomes that live in the gap between the index read
+   * and the CAS — the file VANISHING (⇒ 404) and the file CHANGING (⇒ 409) —
+   * which are a race by definition and therefore unreachable from a test that
+   * can only act before the request or after it.
+   */
+  readFile?: (absPath: string) => Promise<string | null>;
 }
 
 /** The two frontmatter keys this route owns. */
 const SERIES_KEY = "series";
 const SERIES_LABEL_KEY = "series_label";
 
-/** A series key and a label are one line of frontmatter each; a value past this
- *  is a paste accident, and the rail clips a label to a fraction of it anyway. */
-const SERIES_VALUE_MAX = 200;
-
-/** A page a series member may be. `writeWikiPage`'s confinement admits the same
- *  two extensions, but it answers `error` ⇒ 500 — this is a 400 that says which
- *  rule refused, before the queue is entered. */
+/**
+ * A page a series member may be — {@link canEditSeriesPage}, the SAME predicate
+ * the rail and the `Related work` block render their openers from.
+ *
+ * `writeWikiPage`'s confinement admits the same two extensions AND refuses the
+ * same reserved basenames, but it answers `error` ⇒ 500: measured, a POST for
+ * `index.md` logged an error and returned 500 for a rule this route knows before
+ * the queue is entered. Here it is a 400 that says which rule refused.
+ *
+ * Deliberately no test on `meta.type`: a wiki's `.wiki-reader.json` can type an
+ * ordinary `.md` page `explainer`, and the extension test is what excludes a
+ * real HTML one.
+ */
 function isMarkdownPage(meta: WikiPageMeta): boolean {
-  return /\.mdx?$/i.test(meta.relPath) && meta.type !== "explainer";
+  return canEditSeriesPage(meta.relPath);
+}
+
+/** The two keys this route owns, read back out of the bytes it is about to
+ *  return a hash for — so the 200 reports the FILE rather than the wiki index,
+ *  which is a TTL cache the write has not refreshed yet. */
+function seriesPairOf(content: string): { series: string | null; seriesLabel: string | null } {
+  const fm = parseFrontmatter(content);
+  const scalar = (v: string | string[] | undefined): string | null =>
+    typeof v === "string" && v.trim() ? v.trim() : null;
+  return { series: scalar(fm[SERIES_KEY]), seriesLabel: scalar(fm[SERIES_LABEL_KEY]) };
 }
 
 /** `string | null | absent`, the three states this route's two value fields
@@ -158,12 +215,20 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       const root = entry?.root ?? (envOverride ? resolveWikiRoot(undefined) : null);
       if (!root) return c.json({ error: "no wiki configured for that name" }, 404);
 
-      const index = await getWikiIndex({ root });
+      // `refresh: true`, the gardener approve-guard's rule: the normalization
+      // below and the two-headed check are DECISIONS made off this index, and
+      // the cached one is up to five minutes old — long enough for the previous
+      // write of this very editor's own head move to be invisible to the next.
+      // One rebuild per human click, and the write refreshes it again anyway.
+      const index = await getWikiIndex({ root, refresh: true });
       if (!index) return c.json({ error: "wiki directory not found" }, 503);
       const meta = index.resolveRelPath(relPath);
       if (!meta) return c.json({ error: `no wiki page for relPath "${relPath}"` }, 404);
       if (!isMarkdownPage(meta)) {
-        return c.json({ error: "a series member is a markdown page" }, 400);
+        return c.json(
+          { error: "a series member is a markdown page, and never index/log/CLAUDE" },
+          400,
+        );
       }
 
       // Rule 2: the spelling an existing member already uses.
@@ -172,11 +237,42 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       // Rule 3: no key, no label.
       const label = series === null ? null : wantedLabel.value;
 
+      // Rule 4: ONE labelled member per series. The rail reads the label off a
+      // member (`seriesHead`) and silently picks one when two carry it, so a
+      // second `series_label:` is an invisible fork of what the series is
+      // called. The editor's own head move clears the old head FIRST, so it is
+      // unaffected; what this refuses is a rename racing another reader's, and
+      // a hand-edited second label.
+      if (label != null && series) {
+        const fold = seriesCensusKey(series);
+        const mine = normalizeRelPath(meta.relPath);
+        const other = index.pages.find(
+          (p) =>
+            normalizeRelPath(p.relPath) !== mine &&
+            !!seriesKeyOf(p) &&
+            seriesCensusKey(seriesKeyOf(p)) === fold &&
+            !!(p.seriesLabel ?? "").trim(),
+        );
+        if (other) {
+          return c.json(
+            {
+              error:
+                `"${other.relPath}" already names this series ("${other.seriesLabel}") — ` +
+                `clear its label before naming it here`,
+              twoHeaded: true,
+              headRelPath: other.relPath,
+            },
+            409,
+          );
+        }
+      }
+
       // `writeWikiPage`'s `transform` seam speaks `null` for "nothing to do", so
       // the refusal reason and the written bytes ride out on closure variables —
       // the `/api/plans/priority` idiom.
       let written: string | null = null;
       let refusedReason: string | null = null;
+      let onDisk: { series: string | null; seriesLabel: string | null } | null = null;
       const result = await writeWikiPage({
         wikiDir: root,
         relPath: meta.relPath,
@@ -191,25 +287,35 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
         transform: (raw) => {
           written = null;
           refusedReason = null;
+          onDisk = null;
           // Two line edits, one write. The second runs on the first's OUTPUT, so
           // a page gaining both lines gains them in one pass and the guard
-          // `setFrontmatterScalar` closes with checks the final bytes.
-          const edits: Array<[string, string | null]> = [[SERIES_KEY, series]];
-          if (label !== undefined) edits.push([SERIES_LABEL_KEY, label]);
+          // `setFrontmatterScalar` closes with checks the final bytes. The label
+          // is anchored under `series:` so the pair stays together — without it
+          // a head move's clear-then-set round trip re-ordered every fence it
+          // touched (the label left the pair and came back at the fence's end).
+          const edits: Array<[string, string | null, { after?: string }]> = [
+            [SERIES_KEY, series, {}],
+          ];
+          if (label !== undefined) edits.push([SERIES_LABEL_KEY, label, { after: SERIES_KEY }]);
           let current = raw;
-          for (const [key, value] of edits) {
-            const edit = setFrontmatterScalar(current, key, value);
+          for (const [key, value, opts] of edits) {
+            const edit = setFrontmatterScalar(current, key, value, opts);
             if (edit.kind === "refused") {
               refusedReason = edit.reason;
               return null;
             }
             if (edit.kind === "changed") current = edit.content;
           }
+          // Read back from the BYTES, on both paths: the 200 reports the file,
+          // and on a noop `current` is the file the CAS just proved.
+          onDisk = seriesPairOf(current);
           if (current === raw) return null;
           written = current;
           return current;
         },
         ...defaultPageWriteIo(root),
+        ...(deps.readFile ? { readFile: deps.readFile } : {}),
         // Unreachable in no-log mode (`writeWikiPage` skips the fan-out), and
         // required by the type — stated rather than relied on.
         reindex: async () => {},
@@ -226,6 +332,13 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
         return c.json({ error: result.reason, readonly: true }, 403);
       }
       if (result.outcome === "stale") {
+        // The writer folds "the file is gone" into `stale`, and the two
+        // recoveries are opposite: a 409 says "reload and try again", which on a
+        // page that no longer exists is a loop. It is the index's own 404 a beat
+        // later, so it answers 404.
+        if (result.reason === PAGE_GONE_REASON) {
+          return c.json({ error: `no wiki page for relPath "${meta.relPath}"` }, 404);
+        }
         return c.json({ error: result.reason, stale: true }, 409);
       }
       // The cross-process wiki lockfile was held throughout (claude-usage's
@@ -242,22 +355,31 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
         return c.json({ error: result.reason }, 500);
       }
 
-      // The 200 reports what is ON DISK, never what was asked for — a `noop` (the
-      // same key re-set, a clear on a page carrying none) echoes the unchanged
-      // pair, which the CAS just proved. `written` is the transform's own output,
-      // so the hash is of the bytes this call produced rather than of a re-read
-      // that another writer may have moved.
+      // The 200 reports what is ON DISK, never what was asked for and never the
+      // wiki INDEX — which is a 5-minute TTL cache this write has not refreshed
+      // yet, so echoing `meta.series` reported the pre-write value on every noop
+      // and on every omitted field (measured). `onDisk` is parsed out of the
+      // exact bytes the transform ended with — the written ones, or, on a noop,
+      // the ones the CAS just proved — and `written` is that same string, so the
+      // hash is of this call's own output rather than of a re-read another
+      // writer may have moved.
       const changed = written !== null;
+      if (changed) {
+        const warning = seriesCommitterWarning(
+          entry ? { name: entry.name, root: entry.root, source: entry.source } : null,
+          getSyncRepos().repos,
+        );
+        if (warning) log.warn("wiki series: {warning}", { warning, path: meta.relPath });
+      }
+      // The cast is the `written`/`refusedReason` idiom above: TypeScript cannot
+      // see that the closure ran, so it narrows every one of these to `null`.
+      const pair = onDisk as { series: string | null; seriesLabel: string | null } | null;
       return c.json({
         relPath: meta.relPath,
         hash: changed ? sha256(written!) : baseHash,
         written: changed,
-        series: changed ? series : meta.series ?? null,
-        seriesLabel: changed
-          ? label === undefined
-            ? meta.seriesLabel ?? null
-            : label
-          : meta.seriesLabel ?? null,
+        series: pair?.series ?? null,
+        seriesLabel: pair?.seriesLabel ?? null,
       });
     } catch (err) {
       log.error("wiki series: unexpected failure: {error}", {

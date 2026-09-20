@@ -13,7 +13,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { seriesMenuBtnHtml } from "./wiki-series-menu.ts";
+import { canEditSeriesPage, seriesMenuBtnHtml } from "./wiki-series-menu.ts";
 
 /** One `Related work` row: an ordinary listing row plus the one line saying why
  *  it is there (`cites this page · shares RuneLind/muninn#550, …`). */
@@ -38,7 +38,10 @@ export interface RelatedListing extends WikiListing {
  * are these one piece of work?"). It is a parameter rather than a flag read
  * here, because this module must stay pure: the caller owns the two read-only
  * flags. FALSE renders nothing at all rather than a dimmed control — a visible
- * control that cannot act is the dead control #557's F2 decision rejected.
+ * control that cannot act is the dead control #557's F2 decision rejected, and
+ * so is an opener on a row `canEditSeriesPage` says no series may claim (a
+ * same-stem `.html` attachment — 82 of mimir's 527 rows — or an `index.md`),
+ * which is why it is tested PER ROW and not once for the block.
  */
 export function relatedSectionHtml(items: RelatedListing[], editable = false): string {
   if (!items.length) return "";
@@ -54,7 +57,7 @@ export function relatedSectionHtml(items: RelatedListing[], editable = false): s
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       `<div class="wiki-conn-text"><span>${esc(displayTitleOf(p))}</span>` +
       `<div class="wiki-conn-why" title="${esc(p.why)}">${why}</div></div>` +
-      (editable ? seriesMenuBtnHtml(p.relPath, !!p.series) : "") +
+      (editable && canEditSeriesPage(p.relPath) ? seriesMenuBtnHtml(p.relPath, !!p.series) : "") +
       `</div>`;
   });
   return html + "</div>";

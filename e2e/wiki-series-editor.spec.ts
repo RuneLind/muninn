@@ -32,6 +32,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { contrastOf } from "./contrast.ts";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
@@ -47,6 +48,12 @@ const WIKI = "e2e-series-edit";
  *  mini's exact shape, where the instance owns writes and this root is one it
  *  only reads. */
 const RO_WIKI = "e2e-series-edit-ro";
+/** A THIRD wiki, holding more series than the menu will list — the only way to
+ *  drive a popover that really scrolls, and to see the cap's own note. Its own
+ *  corpus so the acceptance fixture above keeps one series and one fold. */
+const MANY_WIKI = "e2e-series-edit-many";
+const MANY_SERIES = 16;
+const MANY_FREE = "plans/free.mdx";
 const LABEL = "Wiki provenance";
 const KEY = "prov";
 const FOLD = `series:${KEY}`;
@@ -57,11 +64,13 @@ const BLOG = "blogs/prov-explained.mdx";
 /** The page acceptance 11 adds to the series. */
 const JOINER = "plans/recall.mdx";
 const OUTSIDER = "plans/solo.mdx";
+/** A page no series can ever claim: the wiki's own bookkeeping. */
+const META = "index.md";
+/** …and the other half of that rule — a page that is not markdown at all. */
+const ATTACHMENT = "blogs/report.html";
 
-function md(title: string, extra: string[] = []): string {
-  return ["---", `title: ${title}`, SETTLED_CREATED_LINE, ...extra, "---", "", "Body.", ""].join(
-    "\n",
-  );
+function md(title: string, extra: string[] = [], body = "Body."): string {
+  return ["---", `title: ${title}`, SETTLED_CREATED_LINE, ...extra, "---", "", body, ""].join("\n");
 }
 
 const PAGES: Array<[string, string]> = [
@@ -80,7 +89,19 @@ const PAGES: Array<[string, string]> = [
   ],
   [BLOG, md("Provenance campaign explained", [`series: ${KEY}`, "status_date: 2026-03-01"])],
   [JOINER, md("Search recall plan", ["plan_status: proposed", "status_date: 2026-09-03"])],
-  [OUTSIDER, md("Solo page", ["plan_status: shipped", "status_date: 2026-01-01"])],
+  // It CITES the head, which is what puts it in the head's `Related work` block
+  // — the editor's second opener site, and a block with no rows has no opener
+  // to click.
+  [
+    OUTSIDER,
+    md(
+      "Solo page",
+      ["plan_status: shipped", "status_date: 2026-01-01"],
+      "Body, which cites [[prov-plan]].",
+    ),
+  ],
+  [META, md("Index")],
+  [ATTACHMENT, "<html><body><h1>Report</h1><p>Body.</p></body></html>\n"],
 ];
 
 let server: ChildProcess | undefined;
@@ -88,6 +109,7 @@ let roServer: ChildProcess | undefined;
 let root = "";
 let roRoot = "";
 let roServerRoot = "";
+let manyRoot = "";
 
 async function writeWiki(dir: string): Promise<void> {
   for (const [rel, body] of PAGES) {
@@ -145,8 +167,19 @@ test.beforeAll(async () => {
   // can never be confused with one that landed on the writable server's copy.
   roServerRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-sered-ro-"));
   await writeWiki(roServerRoot);
+  manyRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-sered-many-"));
+  await mkdir(path.join(manyRoot, "plans"), { recursive: true });
+  for (let i = 0; i < MANY_SERIES; i++) {
+    await writeFile(
+      path.join(manyRoot, `plans/m${i}.mdx`),
+      md(`Series member ${i}`, [`series: s${i}`, `series_label: Series ${i}`, "plan_status: shipped", `status_date: 2026-09-${String(20 - i).padStart(2, "0")}`]),
+      "utf8",
+    );
+  }
+  await writeFile(path.join(manyRoot, MANY_FREE), md("Free page", ["plan_status: proposed"]), "utf8");
+  await settleWikiMtimes(manyRoot);
 
-  server = boot(PORT, `${WIKI}=${root},${RO_WIKI}=${roRoot}`, {
+  server = boot(PORT, `${WIKI}=${root},${RO_WIKI}=${roRoot},${MANY_WIKI}=${manyRoot}`, {
     WIKI_READONLY_ROOTS: roRoot,
   });
   roServer = boot(RO_PORT, `${WIKI}=${roServerRoot}`, { MUNINN_WIKI_READONLY: "1" });
@@ -169,7 +202,7 @@ test.beforeEach(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   roServer?.kill("SIGTERM");
-  for (const dir of [root, roRoot, roServerRoot]) {
+  for (const dir of [root, roRoot, roServerRoot, manyRoot]) {
     if (dir) await rm(dir, { recursive: true, force: true });
   }
 });
@@ -188,10 +221,18 @@ const row = (page: Page, rel: string) => page.locator(`.wiki-list-item[data-relp
 const menu = (page: Page) => page.locator("#wikiSeriesMenu");
 const countText = async (page: Page) => (await page.locator("#wikiCount").textContent()) ?? "";
 
-/** Open the rail row's ⋯ menu. The control is hover-revealed, so the click is
- *  forced rather than preceded by a hover that Playwright would have to hold. */
+/**
+ * Open the rail row's ⋯ menu.
+ *
+ * Hover, then an ORDINARY click — never `force`. The control is revealed by its
+ * own row's hover and is out of flow while hidden, so a forced click is a click
+ * at coordinates whose hit test the CSS decides: it lands on the row (and opens
+ * the page) exactly when the reveal is broken, which is the failure this
+ * feature shipped with. The unforced click is the assertion.
+ */
 async function openRowMenu(page: Page, rel: string): Promise<void> {
-  await row(page, rel).locator("[data-series-menu]").click({ force: true });
+  await row(page, rel).hover();
+  await row(page, rel).locator("[data-series-menu]").click();
   await expect(menu(page)).toBeVisible();
 }
 
@@ -381,3 +422,243 @@ test.describe("read-only", () => {
     await expect(page.locator("[data-series-menu]").first()).toBeAttached();
   });
 });
+
+/**
+ * The CAS the popover really holds — fix round 1, finding A.
+ *
+ * The base was read one fetch before each POST, so the window it compared
+ * against was the network round trip rather than the seconds a human spends in
+ * the menu: an edit landing while the popover stood open was overwritten
+ * without a word. The bases are captured at OPEN now, and the only way to see
+ * that from the outside is to move the file while the menu is on screen.
+ */
+test.describe("the base the menu holds", () => {
+  test("an edit made while the menu is open is refused, not overwritten", async ({ page }) => {
+    await openRail(page);
+    await openRowMenu(page, JOINER);
+    // Behind the server AND behind the reader: the menu is already painted.
+    const edited = (await read(root, JOINER)).replace("Body.", "Body, rewritten elsewhere.");
+    await writeFile(path.join(root, JOINER), edited, "utf8");
+
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    const msg = page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad");
+    await expect(msg).toBeVisible();
+    await expect(msg).toContainText(JOINER);
+    // The file is EXACTLY what the other writer left: no `series:` line, and the
+    // out-of-band edit intact.
+    expect(await read(root, JOINER)).toBe(edited);
+    expect((await fence(root, JOINER)).some((l) => l.startsWith("series:"))).toBe(false);
+  });
+
+  test("the SECOND write of a head move is refused the same way, and the rail says so", async ({
+    page,
+  }) => {
+    // The head move is clear-then-set. The target is the page the reader has
+    // open, so its base is the one the page payload carried — and moving the
+    // file under it is what proves the editor is holding that base rather than
+    // re-reading it a millisecond before the POST.
+    await openPage(page, SHIPPED, "Provenance chain strip");
+    await page.locator("[data-series-edit]").click();
+    await expect(menu(page)).toBeVisible();
+    const edited = (await read(root, SHIPPED)).replace("Body.", "Body, rewritten elsewhere.");
+    await writeFile(path.join(root, SHIPPED), edited, "utf8");
+
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="head"][data-series-arg="${SHIPPED}"]`).click();
+    const msg = page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad");
+    await expect(msg).toBeVisible();
+    await expect(msg).toContainText(SHIPPED);
+    // Write 1 landed: the old head's label is gone from disk.
+    await expect
+      .poll(async () => (await fence(root, HEAD)).some((l) => l.startsWith("series_label:")))
+      .toBe(false);
+    // Write 2 did not: the target is byte-identical to the out-of-band edit.
+    expect(await read(root, SHIPPED)).toBe(edited);
+    // And the reader is NOT left looking at a label that is gone from every
+    // file: the failure path refreshes too, so the header falls back to the
+    // bare key.
+    await expect(page.locator(".wiki-series-head .wiki-series-name")).toHaveText(KEY);
+  });
+});
+
+/**
+ * The openers — fix round 1, finding B.
+ *
+ * Every assertion here is one a `force: true` click or a unit test cannot make:
+ * whether the control is REACHABLE by a real pointer, and whether it is painted
+ * on rows where it is not.
+ */
+test.describe("the ⋯ openers", () => {
+  test("a Related-work row's ⋯ opens the menu instead of navigating", async ({ page }) => {
+    // Measured before the cascade fix: the reveal restored `pointer-events`
+    // only under `.wiki-list-item:hover`, which a `.wiki-conn-related` row is
+    // not — so the click fell through to the row and opened the page.
+    await openPage(page, HEAD, "Wiki provenance plan");
+    const related = page.locator(".wiki-conn-related").first();
+    await expect(related).toBeAttached();
+    const url = page.url();
+    // Hover the ROW, then an ordinary click on its opener: with the reveal keyed
+    // on a selector this row does not match, the button stays
+    // `pointer-events: none` however long the pointer sits on it, and the click
+    // lands on the row — which navigates.
+    await related.hover();
+    await related.locator("[data-series-menu]").click();
+    await expect(menu(page)).toBeVisible();
+    expect(page.url()).toBe(url);
+  });
+
+  test("a rail row's ⋯ is invisible until its OWN row is hovered, and then clickable", async ({
+    page,
+  }) => {
+    await openRail(page);
+    const opener = row(page, JOINER).locator("[data-series-menu]");
+    const other = row(page, OUTSIDER).locator("[data-series-menu]");
+    const opacity = (l: typeof opener) =>
+      l.evaluate((el) => getComputedStyle(el as HTMLElement).opacity);
+    // Unhovered it is exactly as invisible as the ★ beside it.
+    expect(await opacity(opener)).toBe("0");
+    await row(page, JOINER).hover();
+    // Polled: the reveal is a 0.12s transition, so the frame the hover landed
+    // in is not the state being asserted.
+    await expect.poll(() => opacity(opener)).toBe("1");
+    // …and hovering ONE row reveals ONE row's opener.
+    expect(await opacity(other)).toBe("0");
+    // No `force`: this is the hit test the cascade broke.
+    await opener.click();
+    await expect(menu(page)).toBeVisible();
+  });
+
+  test("the ⋯ costs the row no width at all", async ({ page }) => {
+    // The rail's rows are budgeted item by item (`wiki-rail-width.ts`), and an
+    // in-flow seventh item took `.wiki-list-end` to 90px and wrapped a plan
+    // row's title under its floor on CI's fonts. Measured by DELETING the
+    // button: a slot whose width does not move is a slot the button was never
+    // taking space in — which a before/after HOVER cannot tell, since an
+    // always-painted opener measures the same in both.
+    await openRail(page);
+    const slot = row(page, JOINER).locator(".wiki-list-end");
+    const { before, after } = await slot.evaluate((el) => {
+      const width = () => el.getBoundingClientRect().width;
+      const b = width();
+      el.querySelector(".wiki-series-menu-btn")!.remove();
+      return { before: b, after: width() };
+    });
+    expect(before).toBeGreaterThan(0);
+    expect(after).toBe(before);
+  });
+
+  test("no opener on a page no series can claim", async ({ page }) => {
+    await openRail(page);
+    // A standalone `.html` explainer is an ordinary row; the wiki's own
+    // bookkeeping pages sit under the collapsed `Bookkeeping` header, so the
+    // absence below is asserted on a row that is really on screen rather than
+    // on one the fold is hiding.
+    await expect(row(page, ATTACHMENT)).toBeAttached();
+    await expect(row(page, ATTACHMENT).locator("[data-series-menu]")).toHaveCount(0);
+    await page.locator('.wiki-sec-fold[data-fold-key="section:meta"]').click();
+    await expect(row(page, META)).toBeAttached();
+    await expect(row(page, META).locator("[data-series-menu]")).toHaveCount(0);
+    // The ordinary rows still have theirs.
+    await expect(row(page, JOINER).locator("[data-series-menu]")).toHaveCount(1);
+  });
+});
+
+/**
+ * The popover's own behaviour — fix round 1, finding C.
+ */
+test.describe("the popover", () => {
+  test("scrolling INSIDE it does not dismiss it, and the cap says what it left out", async ({
+    page,
+  }) => {
+    // The dismiss-on-scroll listener is capture-phase, so the menu's own
+    // `overflow-y: auto` list dismissed it on the first wheel tick and the
+    // `max-height: 70vh` was unreachable. A short viewport is what makes 70vh a
+    // real cap for a menu this size.
+    await page.setViewportSize({ width: 1200, height: 400 });
+    await openRail(page, BASE, MANY_WIKI);
+    await openRowMenu(page, MANY_FREE);
+    const el = menu(page);
+    // The cap is 12 of the 16 this wiki holds, and the field is how the other
+    // four are reached — so the menu says so.
+    await expect(el.locator('[data-series-cmd="join"]')).toHaveCount(12);
+    await expect(el.locator(".wiki-series-menu-note.is-more")).toHaveText(
+      "… 4 more — type the key",
+    );
+    expect(await el.evaluate((n) => n.scrollHeight > n.clientHeight)).toBe(true);
+
+    await el.hover();
+    await page.mouse.wheel(0, 200);
+    // The wheel lands asynchronously — polled, so the assertion is about where
+    // the menu ENDED UP rather than about the frame it was read in.
+    await expect.poll(async () => el.evaluate((n) => n.scrollTop)).toBeGreaterThan(0);
+    await expect(el).toBeVisible();
+  });
+
+  test("a refetch that does not move the listing is reported, not called success", async ({
+    page,
+  }) => {
+    // `receivePages` has five outcomes and only one of them is "the screen now
+    // shows the write": a superseded response, a degraded empty set and a
+    // byte-identical payload all leave the rail showing the listing from before
+    // the click. Driven here as the byte-identical case — the server's own
+    // pre-write answer, replayed.
+    await openRail(page);
+    const stale = await (await page.request.get(`${BASE}/api/wiki/pages?wiki=${WIKI}`)).text();
+    await page.route("**/api/wiki/pages*", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: stale }),
+    );
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    // The write landed…
+    await expect
+      .poll(async () => (await fence(root, JOINER)).some((l) => l.startsWith("series:")))
+      .toBe(true);
+    // …and the reader is told the list did not, instead of the menu closing on a
+    // rail that still shows the row outside the fold.
+    const msg = page.locator("#wikiSeriesMenu .wiki-series-menu-msg");
+    await expect(msg).toHaveText("Saved — reload to see the updated list");
+  });
+
+  test("closing returns focus to the control that opened it", async ({ page }) => {
+    await openRail(page);
+    await openRowMenu(page, JOINER);
+    await page.keyboard.press("Escape");
+    await expect(menu(page)).toHaveCount(0);
+    expect(
+      await page.evaluate(() => document.activeElement?.getAttribute("data-series-menu")),
+    ).toBe(JOINER);
+  });
+});
+
+/** Both themes, measured against whatever actually paints behind the text —
+ *  the three sibling rail specs' rule, and the popover is the one surface in
+ *  this feature a reader has to READ. */
+for (const scheme of ["light", "dark"] as const) {
+  test(`the popover is legible in the ${scheme} theme`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await openRail(page);
+    // Opened on a MEMBER, so the inert "in this series" row is painted too —
+    // and a member's row is inside the fold, which starts closed.
+    await openSeriesFold(page);
+    await openRowMenu(page, HEAD);
+    expect(await contrastOf(menu(page).locator(".wiki-series-menu-sec").first())).toBeGreaterThanOrEqual(4.5);
+    expect(await contrastOf(menu(page).locator(".wiki-series-menu-note").first())).toBeGreaterThanOrEqual(4.5);
+    expect(
+      await contrastOf(menu(page).locator(".wiki-series-menu-row.is-current")),
+    ).toBeGreaterThanOrEqual(4.5);
+
+    // The refusal is the one line the reader MUST be able to read, so it is
+    // measured in the state it really appears in — after a write the CAS
+    // refused.
+    await page.keyboard.press("Escape");
+    await openRowMenu(page, JOINER);
+    await writeFile(
+      path.join(root, JOINER),
+      (await read(root, JOINER)).replace("Body.", "Moved on."),
+      "utf8",
+    );
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    const bad = menu(page).locator(".wiki-series-menu-msg.bad");
+    await expect(bad).toBeVisible();
+    expect(await contrastOf(bad)).toBeGreaterThanOrEqual(4.5);
+  });
+}

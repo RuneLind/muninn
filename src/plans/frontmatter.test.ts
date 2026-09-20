@@ -419,6 +419,59 @@ describe("setFrontmatterScalar", () => {
     );
   });
 
+  test("a FLOW list on the key's own line is REFUSED, in both directions", () => {
+    // The one-line spelling of the case above. It looked like a scalar to the
+    // upsert, which rewrote it — measured: `series: [alpha, beta]` became
+    // `series: prov` and both members were gone with no refusal and no note.
+    const flow = "---\ntitle: A\nseries: [alpha, beta]\n---\n\nBody.\n";
+    expect(setFrontmatterScalar(flow, "series", "prov").kind).toBe("refused");
+    expect(setFrontmatterScalar(flow, "series", null).kind).toBe("refused");
+    const map = "---\ntitle: A\nseries: {a: 1}\n---\n\nBody.\n";
+    expect(setFrontmatterScalar(map, "series", "prov").kind).toBe("refused");
+    // A value that merely CONTAINS a bracket is an ordinary scalar.
+    const brackety = "---\ntitle: A\nseries: prov [old]\n---\n\nBody.\n";
+    expect(setFrontmatterScalar(brackety, "series", "prov2").kind).toBe("changed");
+  });
+
+  test("a value another YAML reader would type as a non-string is quoted", () => {
+    const content = (v: string) =>
+      (setFrontmatterScalar(page("title: A"), "series_label", v) as { content: string }).content;
+    // muninn's own reader returns strings for all of these; every other reader
+    // of these files (mimir's scripts, yq, an editor plugin) infers a type, and
+    // an unquoted `No` or `2026-09-20` hands them a boolean and a Date.
+    for (const v of ["true", "False", "yes", "No", "on", "off", "null", "~", "y", "n"]) {
+      expect([v, content(v)]).toEqual([v, `---\ntitle: A\nseries_label: "${v}"\n---\n\nBody.\n`]);
+    }
+    for (const v of ["3", "-2", "1.5", "0x1f", "1e3", "2026-09-20", "2026-9-2"]) {
+      expect([v, content(v)]).toEqual([v, `---\ntitle: A\nseries_label: "${v}"\n---\n\nBody.\n`]);
+    }
+    // And the words around them stay bare — the guard is the whole value, not a
+    // substring: quoting every title carrying `no` would quote most of them.
+    for (const v of ["Prov 2", "no way", "Yes and no", "2026 in review"]) {
+      expect([v, content(v)]).toEqual([v, `---\ntitle: A\nseries_label: ${v}\n---\n\nBody.\n`]);
+    }
+  });
+
+  test("`after` puts an inserted key beside the one it belongs to", () => {
+    const res = setFrontmatterScalar(
+      page("title: A", "series: prov", "plan_status: shipped"),
+      "series_label",
+      "Wiki provenance",
+      { after: "series" },
+    );
+    expect((res as { content: string }).content).toBe(
+      "---\ntitle: A\nseries: prov\nseries_label: Wiki provenance\nplan_status: shipped\n---\n\nBody.\n",
+    );
+    // An anchor the page does not carry falls back to the fence's end, which is
+    // what every caller without an anchor gets.
+    const noAnchor = setFrontmatterScalar(page("title: A"), "series_label", "X", {
+      after: "series",
+    });
+    expect((noAnchor as { content: string }).content).toBe(
+      "---\ntitle: A\nseries_label: X\n---\n\nBody.\n",
+    );
+  });
+
   test("a file with no readable fence is REFUSED, never a noop", () => {
     expect(setFrontmatterScalar("# Just a heading\n\nBody.\n", "series", "prov").kind).toBe("refused");
     expect(setFrontmatterScalar("---\ntitle: A\n", "series", "prov").kind).toBe("refused");

@@ -22,13 +22,16 @@ import {
   __setWikiReadonlyForTest,
 } from "../../wiki/readonly.ts";
 import { sha256 } from "../../gardener/util.ts";
-import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
+import { registerWikiSeriesRoutes, type WikiSeriesRouteDeps } from "./wiki-series-routes.ts";
+import { WIKI_LOCK_BASENAME } from "../../wiki/lockfile.ts";
 
 const PLAN = "plans/alpha.mdx";
 const SHIPPED = "plans/beta.mdx";
 const BLOG = "blogs/gamma.mdx";
 const LONE = "plans/lone.mdx";
 const EXPLAINER = "blogs/report.html";
+/** The wiki's own bookkeeping pages — markdown, and never series members. */
+const META_PAGES = ["index.md", "log.md", "CLAUDE.md", "plans/index.md"];
 
 /** A page with the frontmatter shape the reader parses. */
 function md(title: string, extra: string[] = []): string {
@@ -41,20 +44,25 @@ const PAGES: Array<[string, string]> = [
   [BLOG, md("Gamma blog", ["status_date: 2026-08-01"])],
   [LONE, md("Lone plan", ["plan_status: proposed"])],
   [EXPLAINER, "<html><body><h1>Report</h1></body></html>\n"],
+  ...META_PAGES.map((rel): [string, string] => [rel, md(`Meta ${rel}`)]),
 ];
 
 let root = "";
 
-function app(): Hono {
+function app(deps: WikiSeriesRouteDeps = {}): Hono {
   const a = new Hono();
-  // A short lock wait keeps the `locked` case (which no test drives today) from
-  // costing two seconds if one is ever added.
-  registerWikiSeriesRoutes(a, { lockWaitMs: 50 });
+  // A short lock wait keeps the `locked` case in milliseconds rather than the
+  // two seconds a human click would wait.
+  registerWikiSeriesRoutes(a, { lockWaitMs: 50, ...deps });
   return a;
 }
 
-const post = (body: unknown, headers: Record<string, string> = {}) =>
-  app().request("/api/wiki/series", {
+const post = (
+  body: unknown,
+  headers: Record<string, string> = {},
+  deps: WikiSeriesRouteDeps = {},
+) =>
+  app(deps).request("/api/wiki/series", {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
@@ -155,6 +163,24 @@ describe("the body contract", () => {
       (await post({ wiki: "w", relPath: "plans/ghost.mdx", baseHash: "x", series: "prov" }))
         .status,
     ).toBe(404);
+  });
+
+  test("400s the wiki's own bookkeeping pages, before the writer can 500", async () => {
+    // `writeWikiPage`'s confinement refuses these too, but as an `error` ⇒ 500
+    // plus a `log.error` — measured. They are markdown, so only the reserved
+    // BASENAME rule tells them from a page: the same rule that keeps the opener
+    // off their rows.
+    for (const rel of META_PAGES) {
+      const before = await read(rel);
+      const res = await post({
+        wiki: "w",
+        relPath: rel,
+        baseHash: sha256(before),
+        series: "prov",
+      });
+      expect([rel, res.status]).toEqual([rel, 400]);
+      expect([rel, await read(rel)]).toEqual([rel, before]);
+    }
   });
 
   test("400s an html page — a series member is a markdown page", async () => {
@@ -306,6 +332,169 @@ describe("the write", () => {
   });
 });
 
+describe("what the 200 reports, and the two races the write can lose", () => {
+  test("reports the FILE, not the wiki index the request opened with", async () => {
+    // Warm the index (any request that resolves a page builds it), then move the
+    // page's frontmatter behind it — a hand edit, another muninn, a `git pull`.
+    // The index is a 5-minute TTL cache, so a body echoing `meta.series`
+    // reported the value from before that edit; the CAS meanwhile proves the
+    // caller is holding the CURRENT bytes, which is the only thing this route
+    // can honestly report.
+    await post({ wiki: "w", relPath: LONE, baseHash: "x", series: "prov" });
+    const edited = md("Alpha plan", [
+      "series: renamed",
+      "series_label: Renamed by hand",
+      "plan_status: in-flight",
+    ]);
+    await writeFile(path.join(root, PLAN), edited, "utf8");
+
+    const res = await post({
+      wiki: "w",
+      relPath: PLAN,
+      baseHash: sha256(edited),
+      series: "renamed",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      written: false,
+      series: "renamed",
+      seriesLabel: "Renamed by hand",
+    });
+  });
+
+  test("reports the bytes the CAS proved, even when the index cannot have seen them", async () => {
+    // The same fact isolated from the index refresh: the write reads a file
+    // whose series the index (fresh, built this request) does not carry, which
+    // is the race the byte-read defends. The body must describe the file.
+    const raced = md("Lone plan", ["series: prov", "series_label: From the race"]);
+    const res = await post(
+      { wiki: "w", relPath: LONE, baseHash: sha256(raced), series: "prov" },
+      {},
+      { readFile: async () => raced },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      written: false,
+      series: "prov",
+      seriesLabel: "From the race",
+    });
+  });
+
+  test("normalizes against the wiki as it is NOW, not as the TTL cache remembers it", async () => {
+    // The key's spelling is a decision made off the index, and the index behind
+    // `/api/wiki/pages` is a 5-minute cache. Warm it, move a member's key on
+    // disk, and the next join must fold onto the spelling that is really there —
+    // otherwise the editor mints the very case variant the fold exists to avoid.
+    await post({ wiki: "w", relPath: LONE, baseHash: "x", series: "prov" });
+    const moved = md("Beta plan", ["series: Zeta", "plan_status: shipped"]);
+    await writeFile(path.join(root, SHIPPED), moved, "utf8");
+
+    const res = await post({
+      wiki: "w",
+      relPath: LONE,
+      baseHash: await hashOf(LONE),
+      series: "ZETA",
+    });
+    expect(res.status).toBe(200);
+    expect(await fence(LONE)).toContain("series: Zeta");
+  });
+
+  test("a target that VANISHED between the index read and the write is a 404, not a 409", async () => {
+    // Both are `stale` to `writeWikiPage`, and the recoveries are opposite: 409
+    // says reload and retry, which on a page that no longer exists is a loop.
+    const res = await post(
+      { wiki: "w", relPath: LONE, baseHash: await hashOf(LONE), series: "prov" },
+      {},
+      { readFile: async () => null },
+    );
+    expect(res.status).toBe(404);
+    expect(await read(LONE)).not.toContain("series:");
+  });
+
+  test("a target that CHANGED between the index read and the write is still a 409", async () => {
+    const res = await post(
+      { wiki: "w", relPath: LONE, baseHash: await hashOf(LONE), series: "prov" },
+      {},
+      { readFile: async () => "---\ntitle: Moved on\n---\n\nBody.\n" },
+    );
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ stale: true });
+  });
+
+  test("409s while another process holds the wiki's write lock", async () => {
+    // The cross-process lockfile claude-usage's `wiki-stamp` is the other holder
+    // of. Nothing is written, and the recovery is a retry — hence 409 beside
+    // `stale` rather than a 5xx.
+    const lock = path.join(root, WIKI_LOCK_BASENAME);
+    await writeFile(lock, `${JSON.stringify({ pid: process.pid, op: "test" })}\n`, "utf8");
+    try {
+      const before = await read(LONE);
+      const res = await post({
+        wiki: "w",
+        relPath: LONE,
+        baseHash: sha256(before),
+        series: "prov",
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ locked: true });
+      expect(await read(LONE)).toBe(before);
+    } finally {
+      await rm(lock, { force: true });
+    }
+  });
+});
+
+describe("one labelled member per series", () => {
+  test("409s a label on a series another member already names", async () => {
+    // The rail reads the label off a MEMBER and silently picks one when two
+    // carry it, so a second `series_label:` is an invisible fork of what the
+    // series is called.
+    const before = await read(SHIPPED);
+    const res = await post({
+      wiki: "w",
+      relPath: SHIPPED,
+      baseHash: sha256(before),
+      series: "prov",
+      seriesLabel: "A second name",
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ twoHeaded: true, headRelPath: PLAN });
+    expect(await read(SHIPPED)).toBe(before);
+  });
+
+  test("the editor's own head move is unaffected — the old head is cleared first", async () => {
+    const clear = await post({
+      wiki: "w",
+      relPath: PLAN,
+      baseHash: await hashOf(PLAN),
+      series: "prov",
+      seriesLabel: null,
+    });
+    expect(clear.status).toBe(200);
+    const set = await post({
+      wiki: "w",
+      relPath: SHIPPED,
+      baseHash: await hashOf(SHIPPED),
+      series: "prov",
+      seriesLabel: "Wiki provenance",
+    });
+    expect(set.status).toBe(200);
+    expect(await fence(SHIPPED)).toContain("series_label: Wiki provenance");
+  });
+
+  test("renaming the label on the page that already carries it is not a fork", async () => {
+    const res = await post({
+      wiki: "w",
+      relPath: PLAN,
+      baseHash: await hashOf(PLAN),
+      series: "prov",
+      seriesLabel: "Renamed",
+    });
+    expect(res.status).toBe(200);
+    expect(await fence(PLAN)).toContain("series_label: Renamed");
+  });
+});
+
 describe("read-only", () => {
   test("403s on a read-only INSTANCE, before the file is opened", async () => {
     const before = await read(LONE);
@@ -367,5 +556,51 @@ describe("the head move, as the two calls it is", () => {
     // preserving it. The store still reports whatever a HAND edit leaves.
     expect(await fence(SHIPPED)).toContain("series: prov");
     expect(await fence(PLAN)).toContain("series: prov");
+  });
+
+  test("the label lands beside the key, so the round trip re-orders nothing", async () => {
+    // The two lines are one fact. Inserted at the fence's end instead, the label
+    // left the pair on the old head and came back at the bottom of the new
+    // head's frontmatter — a diff nobody asked for on every head move.
+    const planBefore = await fence(PLAN);
+    const set = await post({
+      wiki: "w",
+      relPath: SHIPPED,
+      baseHash: await hashOf(SHIPPED),
+      series: "prov",
+      seriesLabel: null,
+    });
+    expect(set.status).toBe(200);
+    const move = await post({
+      wiki: "w",
+      relPath: SHIPPED,
+      baseHash: await hashOf(SHIPPED),
+      series: "prov",
+      seriesLabel: "Wiki provenance",
+    });
+    // The other member still carries the label, so this one is refused — clear
+    // it the way the editor does, then move it.
+    expect(move.status).toBe(409);
+    await post({
+      wiki: "w",
+      relPath: PLAN,
+      baseHash: await hashOf(PLAN),
+      series: "prov",
+      seriesLabel: null,
+    });
+    const moved = await post({
+      wiki: "w",
+      relPath: SHIPPED,
+      baseHash: await hashOf(SHIPPED),
+      series: "prov",
+      seriesLabel: "Wiki provenance",
+    });
+    expect(moved.status).toBe(200);
+    const lines = await fence(SHIPPED);
+    expect(lines.indexOf("series_label: Wiki provenance")).toBe(
+      lines.findIndex((l) => l.startsWith("series:")) + 1,
+    );
+    // And the old head kept its own order, minus the line that left.
+    expect(await fence(PLAN)).toEqual(planBefore.filter((l) => !l.startsWith("series_label:")));
   });
 });

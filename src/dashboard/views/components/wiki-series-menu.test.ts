@@ -10,9 +10,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildSeriesMenu,
+  canEditSeriesPage,
   headMoveWrites,
   seriesMenuHtml,
   SERIES_MENU_MAX,
+  SERIES_VALUE_MAX,
 } from "./wiki-series-menu.ts";
 import { normalizeSeriesKey } from "./wiki-groups.ts";
 import type { WikiListing } from "./wiki-filter.ts";
@@ -117,10 +119,54 @@ describe("buildSeriesMenu", () => {
       status_date: "2020-01-01",
     });
     const m = buildSeriesMenu([...many, old], "plans/old.mdx")!;
-    expect(m.options).toHaveLength(SERIES_MENU_MAX);
+    // The LITERAL, not `SERIES_MENU_MAX` again: a length compared against the
+    // very constant that produced it is true for every value of it — a
+    // `12 → 50` mutation left this green.
+    expect(m.options).toHaveLength(12);
+    expect(SERIES_MENU_MAX).toBe(12);
     const current = m.options.filter((o) => o.current);
     expect(current).toHaveLength(1);
     expect(current[0]!.key).toBe("ancient");
+    // And it says how many it left out, because the only way to reach one of
+    // them is to type its key.
+    expect(m.hiddenOptions).toBe(4);
+  });
+
+  test("reports no hidden series when they all fit", () => {
+    expect(buildSeriesMenu(PAGES, "plans/lone.mdx")!.hiddenOptions).toBe(0);
+  });
+});
+
+describe("canEditSeriesPage", () => {
+  test("markdown pages yes, an html explainer no", () => {
+    expect(canEditSeriesPage("plans/alpha.mdx")).toBe(true);
+    expect(canEditSeriesPage("projects/muninn/wiki.md")).toBe(true);
+    expect(canEditSeriesPage("blogs/2026-09-01-thing.html")).toBe(false);
+    expect(canEditSeriesPage("blogs/2026-09-01-thing.htm")).toBe(false);
+    expect(canEditSeriesPage("assets/diagram.png")).toBe(false);
+  });
+
+  test("the wiki's reserved basenames are never series members", () => {
+    // The route refuses these too — a `writeWikiPage` 500 before the shared
+    // predicate existed — so an opener on their row can only produce an error.
+    for (const rel of [
+      "index.md",
+      "log.md",
+      "CLAUDE.md",
+      "plans/index.md",
+      "plans/LOG.mdx",
+      "deep/nest/claude.mdx",
+    ]) {
+      expect([rel, canEditSeriesPage(rel)]).toEqual([rel, false]);
+    }
+    // A page that merely CONTAINS a reserved word is an ordinary page.
+    for (const rel of [
+      "plans/index-rework.md",
+      "entities/Claude Code.md",
+      "projects/logging.md",
+    ]) {
+      expect([rel, canEditSeriesPage(rel)]).toEqual([rel, true]);
+    }
   });
 });
 
@@ -194,6 +240,40 @@ describe("seriesMenuHtml", () => {
     expect(html).not.toContain('data-series-cmd="join" data-series-arg="prov"');
     // The other series is still joinable.
     expect(html).toContain('data-series-cmd="join" data-series-arg="rail"');
+  });
+
+  test("every row of the menu is a menuitem", () => {
+    // The container claims `role="menu"`; children that are plain buttons leave
+    // it a menu with no items to a screen reader.
+    const html = seriesMenuHtml(buildSeriesMenu(PAGES, "plans/beta.mdx")!, true);
+    const rows = html.match(/class="wiki-series-menu-row[^"]*"/g) ?? [];
+    expect(rows.length).toBeGreaterThan(2);
+    expect(html.match(/role="menuitem"/g) ?? []).toHaveLength(rows.length);
+  });
+
+  test("says how many series the cap left out, and where to find them", () => {
+    const many: WikiListing[] = [];
+    for (let i = 0; i < 15; i++) {
+      many.push(
+        page(`plans/s${i}.mdx`, {
+          title: `S${i}`,
+          series: `s${i}`,
+          plan_status: "shipped",
+          status_date: `2026-09-${String(20 - i).padStart(2, "0")}`,
+        }),
+      );
+    }
+    many.push(page("plans/free.mdx", { title: "Free", plan_status: "proposed" }));
+    const html = seriesMenuHtml(buildSeriesMenu(many, "plans/free.mdx")!, false);
+    expect(html).toContain("… 3 more — type the key");
+    // …and a menu that shows every series says nothing.
+    expect(seriesMenuHtml(buildSeriesMenu(PAGES, "plans/lone.mdx")!, false)).not.toContain("more —");
+  });
+
+  test("the value fields cannot accept more than the route will take", () => {
+    const html = seriesMenuHtml(buildSeriesMenu(PAGES, "plans/beta.mdx")!, true);
+    expect(html.match(new RegExp(`maxlength="${SERIES_VALUE_MAX}"`, "g"))).toHaveLength(2);
+    expect(SERIES_VALUE_MAX).toBe(200);
   });
 
   test("escapes a title, a label and a key into every sink", () => {
