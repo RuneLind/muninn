@@ -14,18 +14,29 @@ import {
   FAMILY_MIN,
   GROUP_FAMILIES_TOGGLE_KEY,
   NO_STATUS_WORD,
+  SERIES_CONTINUE_MAX,
+  clipSeriesTitle,
   closedFoldKey,
   defaultOpenGroupKey,
   familyFoldKey,
   groupFamilies,
   groupMonths,
   groupRollup,
+  groupSeries,
   isMonthGrouping,
   monthFoldKey,
+  newestSeriesPlan,
   orderPagesForGroups,
   railGroups,
+  seriesClaimedKeys,
+  seriesDateMs,
+  seriesDateSignal,
+  seriesFoldKey,
+  seriesHead,
+  seriesMembersOf,
+  withoutSeriesMembers,
 } from "./wiki-groups.ts";
-import { pageDateSignal, type WikiListing } from "./wiki-filter.ts";
+import { localDay, pageDateSignal, type WikiListing } from "./wiki-filter.ts";
 
 function page(over: Partial<WikiListing> & { relPath: string }): WikiListing {
   return {
@@ -691,5 +702,609 @@ describe("isMonthGrouping", () => {
     );
     expect(isMonthGrouping(groupFamilies(slate("beta-flow", 3), PROJECTS))).toBe(false);
     expect(isMonthGrouping([])).toBe(false);
+  });
+});
+
+// ── Series ────────────────────────────────────────────────────────────────
+// The third grouping layer, and the only AUTHORED one. Its cases are written the
+// same way as the family rule's: every clause gets one, and the two knock-on
+// effects on the family rule get one each, because "the family dissolved" is a
+// consequence this PR accepted rather than a bug it would fix.
+
+/** A series member — `page()` with the `series:` key made mandatory, so a case
+ *  that means to write one cannot forget it. */
+function member(relPath: string, over: Partial<WikiListing> & { series: string }): WikiListing {
+  return page({ relPath, ...over });
+}
+
+describe("groupSeries — formation and membership", () => {
+  test("pages carrying one key are ONE group, whatever folder they sit in", () => {
+    const pages = [
+      member("plans/one.mdx", { series: "alpha" }),
+      member("blogs/two.mdx", { series: "alpha" }),
+      member("archive/three.mdx", { series: "alpha" }),
+      page({ relPath: "plans/unrelated.mdx" }),
+    ];
+    const groups = groupSeries(pages);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.kind).toBe("series");
+    expect(groups[0]!.members.map((m) => m.relPath).sort()).toEqual([
+      "archive/three.mdx",
+      "blogs/two.mdx",
+      "plans/one.mdx",
+    ]);
+  });
+
+  test("a ONE-member series still forms: it is a name someone wrote, not a slate", () => {
+    // The family rule's FAMILY_MIN says three, because a prefix two pages share
+    // is a coincidence. A key is never a coincidence.
+    expect(groupSeries([member("plans/one.mdx", { series: "alpha" })])).toHaveLength(1);
+  });
+
+  test("there is no CAP: twenty members is twenty pages of one piece of work", () => {
+    const pages = Array.from({ length: FAMILY_MAX + 8 }, (_, i) =>
+      member(`plans/p-${i}.mdx`, { series: "alpha" }),
+    );
+    expect(groupSeries(pages)[0]!.members).toHaveLength(FAMILY_MAX + 8);
+  });
+
+  test("a blank or whitespace-only key is no key at all", () => {
+    expect(groupSeries([page({ relPath: "plans/one.mdx", series: "   " })])).toEqual([]);
+    expect(groupSeries([page({ relPath: "plans/one.mdx", series: "" })])).toEqual([]);
+  });
+
+  test("the key is compared TRIMMED and case-insensitively — two spellings are one series", () => {
+    // Case-folded here because the folds store lower-cases what it compares, so
+    // two spellings minted one fold key and lost a series; reporting the two
+    // spellings is the wiki linter's job. See `seriesFoldKey`.
+    const groups = groupSeries([
+      member("plans/one.mdx", { series: "alpha" }),
+      member("plans/two.mdx", { series: "Alpha" }),
+    ]);
+    expect(groups.map((g) => g.key)).toEqual(["series:alpha"]);
+    expect(groups[0]!.members).toHaveLength(2);
+  });
+
+  test("the fold key is `series:<key>`, lower-cased", () => {
+    expect(seriesFoldKey("alpha")).toBe("series:alpha");
+    expect(seriesFoldKey(" Alpha ")).toBe("series:alpha");
+    expect(groupSeries([member("plans/one.mdx", { series: "alpha" })])[0]!.key).toBe("series:alpha");
+  });
+
+  test("a SUPERSEDED child counts as a member of the series its SUCCESSOR is in", () => {
+    const groups = groupSeries([
+      member("plans/new.mdx", { series: "alpha" }),
+      member("plans/old.mdx", {
+        series: "alpha",
+        parent: "plans/new.mdx",
+        pairedBy: "superseded",
+      }),
+    ]);
+    expect(groups[0]!.members.map((m) => m.relPath)).toEqual(["plans/new.mdx"]);
+    expect(groups[0]!.supersededChildren.map((m) => m.relPath)).toEqual(["plans/old.mdx"]);
+    expect(groups[0]!.total).toBe(2);
+  });
+
+  test("…and NOT when its successor is in another series: it renders in neither body", () => {
+    const groups = groupSeries([
+      member("plans/new.mdx", { series: "beta" }),
+      member("plans/old.mdx", {
+        series: "alpha",
+        parent: "plans/new.mdx",
+        pairedBy: "superseded",
+      }),
+    ]);
+    // `alpha` has no parent row of its own and cannot claim this child, so it
+    // draws nothing at all — the page renders under its successor in `beta`.
+    expect(groups.map((g) => g.key)).toEqual(["series:beta"]);
+    expect(groups[0]!.supersededChildren).toEqual([]);
+  });
+
+  test("a child of any OTHER pairing rule is an attachment, never a member", () => {
+    // `stem`/`suffix`/`link` pair an `.html` twin, which carries no authored
+    // frontmatter — so no file on any wiki can actually produce a child of
+    // these rules holding a `series:` key. The case is kept anyway: the rule is
+    // "membership is decided by the PAIRING, not by the key", and a rule that
+    // is only ever exercised by its reachable half is a rule nobody can change
+    // safely.
+    for (const pairedBy of ["stem", "suffix", "link"] as const) {
+      const groups = groupSeries([
+        member("plans/one.mdx", { series: "alpha" }),
+        member("plans/one-prototype.html", {
+          series: "alpha",
+          parent: "plans/one.mdx",
+          pairedBy,
+        }),
+      ]);
+      expect(groups[0]!.members.map((m) => m.relPath), pairedBy).toEqual(["plans/one.mdx"]);
+      expect(groups[0]!.supersededChildren, pairedBy).toEqual([]);
+      expect(groups[0]!.total, pairedBy).toBe(1);
+    }
+  });
+
+  test("groups keep the caller's sort order — first appearance wins", () => {
+    const groups = groupSeries([
+      member("plans/b.mdx", { series: "beta" }),
+      member("plans/a.mdx", { series: "alpha" }),
+    ]);
+    expect(groups.map((g) => g.key)).toEqual(["series:beta", "series:alpha"]);
+  });
+});
+
+describe("groupSeries — the head and the newest plan", () => {
+  const withLabel = [
+    member("blogs/late.mdx", { series: "alpha", seriesLabel: "Alpha work", status_date: "2026-09-20" }),
+    member("plans/early.mdx", { series: "alpha", plan_status: "shipped", status_date: "2026-01-01" }),
+  ];
+
+  test("the HEAD is the member carrying `series_label:`, and the label is its", () => {
+    expect(seriesHead(withLabel)!.relPath).toBe("blogs/late.mdx");
+    expect(groupSeries(withLabel)[0]!.label).toBe("Alpha work");
+  });
+
+  test("no label anywhere ⇒ the label is the KEY, never a title", () => {
+    const pages = [member("plans/one.mdx", { series: "alpha", title: "Some plan" })];
+    expect(groupSeries(pages)[0]!.label).toBe("alpha");
+  });
+
+  test("no label ⇒ the head is the newest PLAN, by status_date", () => {
+    const pages = [
+      member("plans/old.mdx", { series: "alpha", plan_status: "shipped", status_date: "2026-01-01" }),
+      member("plans/new.mdx", { series: "alpha", plan_status: "in-flight", status_date: "2026-09-01" }),
+      member("blogs/newest.mdx", { series: "alpha", status_date: "2026-09-30" }),
+    ];
+    expect(seriesHead(pages)!.relPath).toBe("plans/new.mdx");
+  });
+
+  test("…and by gitTouchedMs when no member declares a status_date", () => {
+    const pages = [
+      member("plans/old.mdx", { series: "alpha", plan_status: "shipped", gitTouchedMs: 1_000 }),
+      member("plans/new.mdx", { series: "alpha", plan_status: "shipped", gitTouchedMs: 9_000 }),
+    ];
+    expect(seriesHead(pages)!.relPath).toBe("plans/new.mdx");
+  });
+
+  test("`status_date` BEATS a newer git touch — it is what the plan asserts", () => {
+    const pages = [
+      member("plans/asserted.mdx", {
+        series: "alpha",
+        plan_status: "in-flight",
+        status_date: "2026-09-01",
+        gitTouchedMs: 1,
+      }),
+      member("plans/typo-fixed.mdx", {
+        series: "alpha",
+        plan_status: "shipped",
+        status_date: "2026-01-01",
+        gitTouchedMs: Date.parse("2026-09-30T00:00:00Z"),
+      }),
+    ];
+    expect(newestSeriesPlan(pages)!.relPath).toBe("plans/asserted.mdx");
+  });
+
+  test("the NEWEST PLAN is never a blog or an archive page, however new it is", () => {
+    const pages = [
+      member("blogs/newest.mdx", { series: "alpha", status_date: "2026-09-30" }),
+      member("archive/newer.mdx", { series: "alpha", status_date: "2026-09-25" }),
+      member("plans/plan.mdx", { series: "alpha", plan_status: "shipped", status_date: "2026-01-01" }),
+    ];
+    expect(newestSeriesPlan(pages)!.relPath).toBe("plans/plan.mdx");
+    expect(groupSeries(pages)[0]!.latestRel).toBe("plans/plan.mdx");
+  });
+
+  test("a series of blogs alone has NO latest: there is no plan to continue in", () => {
+    const pages = [
+      member("blogs/one.mdx", { series: "alpha", status_date: "2026-09-30" }),
+      member("blogs/two.mdx", { series: "alpha", status_date: "2026-08-30" }),
+    ];
+    expect(newestSeriesPlan(pages)).toBeUndefined();
+    expect(groupSeries(pages)[0]!.latestRel).toBeUndefined();
+    // …and the head falls through to the newest member, so the fold still has a
+    // page to read a label off once someone writes one.
+    expect(seriesHead(pages)!.relPath).toBe("blogs/one.mdx");
+  });
+
+  test("a plan_status outside `plans/` still counts as the latest", () => {
+    const pages = [
+      member("notes/plan.mdx", { series: "alpha", plan_status: "in-flight", status_date: "2026-02-01" }),
+      member("plans/blog.mdx", { series: "alpha", status_date: "2026-09-01" }),
+    ];
+    expect(newestSeriesPlan(pages)!.relPath).toBe("notes/plan.mdx");
+  });
+
+  test("members come back NEWEST first, ties broken by relPath", () => {
+    const pages = [
+      member("plans/b.mdx", { series: "alpha", status_date: "2026-01-01" }),
+      member("plans/a.mdx", { series: "alpha", status_date: "2026-01-01" }),
+      member("plans/c.mdx", { series: "alpha", status_date: "2026-09-01" }),
+    ];
+    expect(groupSeries(pages)[0]!.members.map((m) => m.relPath)).toEqual([
+      "plans/c.mdx",
+      "plans/a.mdx",
+      "plans/b.mdx",
+    ]);
+  });
+
+  test("seriesDateMs falls through status_date → gitTouchedMs → mtimeMs → 0, at DAY granularity", () => {
+    // Every rung answers with the same unit — its own LOCAL day at UTC
+    // midnight — so an instant can never outrank the day a plan asserted.
+    const day = (iso: string) => Date.parse(iso + "T00:00:00Z");
+    const git = Date.parse("2026-07-04T18:30:00Z");
+    const mtime = Date.parse("2026-02-09T06:15:00Z");
+    expect(seriesDateMs(page({ relPath: "x.mdx", status_date: "2026-09-01", gitTouchedMs: git, mtimeMs: mtime })))
+      .toBe(day("2026-09-01"));
+    expect(seriesDateMs(page({ relPath: "x.mdx", gitTouchedMs: git, mtimeMs: mtime })))
+      .toBe(day(localDay(new Date(git))));
+    expect(seriesDateMs(page({ relPath: "x.mdx", mtimeMs: mtime }))).toBe(day(localDay(new Date(mtime))));
+    expect(seriesDateMs(page({ relPath: "x.mdx" }))).toBe(0);
+    // A malformed day is not a date — it falls through rather than becoming NaN.
+    expect(seriesDateMs(page({ relPath: "x.mdx", status_date: "whenever", mtimeMs: mtime })))
+      .toBe(day(localDay(new Date(mtime))));
+    // …and the RUNG rides along, which is what breaks a same-day tie.
+    expect(seriesDateSignal(page({ relPath: "x.mdx", status_date: "2026-09-01" })).day).toBe("2026-09-01");
+    expect(seriesDateSignal(page({ relPath: "x.mdx", gitTouchedMs: git })).day).toBe(localDay(new Date(git)));
+    expect(seriesDateSignal(page({ relPath: "x.mdx" }))).toEqual({ ms: 0, day: "", rank: 0 });
+  });
+});
+
+describe("groupSeries — the FILTERED set and `N of M`", () => {
+  const all = [
+    member("plans/one.mdx", { series: "alpha", seriesLabel: "Alpha work" }),
+    member("plans/two.mdx", { series: "alpha" }),
+    member("blogs/three.mdx", { series: "alpha" }),
+  ];
+
+  test("members come from the filtered set, `total` from the whole listing", () => {
+    const filtered = all.filter((p) => p.relPath.startsWith("plans/"));
+    const g = groupSeries(filtered, all)[0]!;
+    expect(g.members.map((m) => m.relPath).sort()).toEqual(["plans/one.mdx", "plans/two.mdx"]);
+    expect(g.total).toBe(3);
+  });
+
+  test("the LABEL survives a facet that hid the head page", () => {
+    // The head here is the only page carrying the label, and the facet drops it.
+    const filtered = all.filter((p) => p.relPath !== "plans/one.mdx");
+    expect(groupSeries(filtered, all)[0]!.label).toBe("Alpha work");
+  });
+
+  test("the NEWEST PLAN survives a facet that hid it", () => {
+    const pages = [
+      member("plans/plan.mdx", { series: "alpha", plan_status: "shipped", status_date: "2026-09-01" }),
+      member("blogs/blog.mdx", { series: "alpha", status_date: "2026-08-01" }),
+    ];
+    const filtered = pages.filter((p) => p.relPath.startsWith("blogs/"));
+    expect(groupSeries(filtered, pages)[0]!.latestRel).toBe("plans/plan.mdx");
+  });
+
+  test("a facet that hides EVERY member draws no group", () => {
+    expect(groupSeries([], all)).toEqual([]);
+  });
+
+  test("`all` defaults to `pages` — the un-faceted render needs no second argument", () => {
+    expect(groupSeries(all)[0]!.total).toBe(3);
+  });
+});
+
+describe("groupSeries — what the claim does to families", () => {
+  test("a family that drops below FAMILY_MIN DISSOLVES into plain rows", () => {
+    const pages = [
+      ...FILLER,
+      ...slate("beta-flow", FAMILY_MIN),
+    ];
+    expect(labels(pages)).toEqual(["beta-flow-*"]);
+    // Put one of the three in a series and the prefix is a pair again.
+    const claimed = pages.map((p) =>
+      p.relPath === "notes/beta-flow-1.mdx" ? page({ ...p, series: "alpha" }) : p,
+    );
+    const series = groupSeries(claimed);
+    expect(labels(withoutSeriesMembers(claimed, series))).toEqual([]);
+  });
+
+  test("an OVER-CAP prefix that drops to the cap MAY form", () => {
+    const pages = slate("beta-flow", FAMILY_MAX + 1);
+    expect(labels(pages)).toEqual([]);
+    const claimed = pages.map((p) =>
+      p.relPath === "notes/beta-flow-1.mdx" ? page({ ...p, series: "alpha" }) : p,
+    );
+    const series = groupSeries(claimed);
+    expect(labels(withoutSeriesMembers(claimed, series))).toEqual(["beta-flow-*"]);
+  });
+
+  test("seriesClaimedKeys covers the superseded children too", () => {
+    const pages = [
+      member("plans/new.mdx", { series: "alpha" }),
+      member("plans/old.mdx", { series: "alpha", parent: "plans/new.mdx", pairedBy: "superseded" }),
+      page({ relPath: "plans/other.mdx" }),
+    ];
+    const keys = seriesClaimedKeys(groupSeries(pages));
+    expect([...keys].sort()).toEqual(["plans/new.mdx", "plans/old.mdx"]);
+    expect(withoutSeriesMembers(pages, groupSeries(pages)).map((p) => p.relPath)).toEqual([
+      "plans/other.mdx",
+    ]);
+  });
+
+  test("with no series at all, `withoutSeriesMembers` is the identity", () => {
+    const pages = slate("beta-flow", 3);
+    expect(withoutSeriesMembers(pages, []).map((p) => p.relPath)).toEqual(
+      pages.map((p) => p.relPath),
+    );
+  });
+});
+
+describe("groupRollup — the SERIES word", () => {
+  test("a member with no plan_status counts under its FOLDER, for blogs and archive", () => {
+    const members = [
+      member("plans/one.mdx", { series: "alpha", plan_status: "in-flight" }),
+      member("plans/two.mdx", { series: "alpha", plan_status: "shipped" }),
+      member("blogs/three.mdx", { series: "alpha" }),
+      member("archive/four.mdx", { series: "alpha" }),
+      member("notes/five.mdx", { series: "alpha" }),
+    ];
+    // Known statuses in facet order first, then the unknown words alphabetically.
+    expect(groupRollup("series", members).label).toBe(
+      `1 in-flight · 1 shipped · 1 archive · 1 blog · 1 ${NO_STATUS_WORD}`,
+    );
+  });
+
+  test("the acceptance chip: one in-flight plan, one shipped plan, one blog", () => {
+    expect(
+      groupRollup("series", [
+        member("plans/a.mdx", { series: "alpha", plan_status: "in-flight" }),
+        member("plans/b.mdx", { series: "alpha", plan_status: "shipped" }),
+        member("blogs/c.mdx", { series: "alpha" }),
+      ]).label,
+    ).toBe("1 in-flight · 1 shipped · 1 blog");
+  });
+
+  test("a FAMILY keeps the neutral word — the folder says nothing there", () => {
+    const members = [page({ relPath: "blogs/a.mdx" }), page({ relPath: "archive/b.mdx" })];
+    expect(groupRollup("family", members).label).toBe(`2 ${NO_STATUS_WORD}`);
+  });
+
+  test("the folder rule is case-insensitive, like every other relPath compare", () => {
+    expect(groupRollup("series", [member("Blogs/a.mdx", { series: "alpha" })]).label).toBe("1 blog");
+  });
+});
+
+// ── Series, fix round 1 ───────────────────────────────────────────────────
+// The four rule defects the review pass found, each as the case that fails
+// against the shipped rule.
+
+describe("groupSeries — a key is ONE series however it is spelled (fix round 1)", () => {
+  test("case variants and stray whitespace fold into one group, labelled from the head", () => {
+    const pages = [
+      member("plans/one.mdx", {
+        series: "Alpha",
+        seriesLabel: "Alpha work",
+        plan_status: "in-flight",
+        status_date: "2026-09-01",
+      }),
+      member("plans/two.mdx", { series: "alpha", plan_status: "shipped", status_date: "2026-05-01" }),
+      member("blogs/three.mdx", { series: "  ALPHA  ", status_date: "2026-01-01" }),
+    ];
+    const groups = groupSeries(pages);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.key).toBe("series:alpha");
+    expect(groups[0]!.label).toBe("Alpha work");
+    expect(groups[0]!.total).toBe(3);
+    expect(groups[0]!.members.map((m) => m.relPath).sort()).toEqual([
+      "blogs/three.mdx",
+      "plans/one.mdx",
+      "plans/two.mdx",
+    ]);
+  });
+
+  test("the LABEL falls back to the HEAD's own spelling, not the first row's", () => {
+    const pages = [
+      member("plans/one.mdx", { series: "alpha", status_date: "2026-01-01" }),
+      member("plans/two.mdx", { series: "Alpha", plan_status: "in-flight", status_date: "2026-09-01" }),
+    ];
+    // `plans/two.mdx` is the newest plan, so it is the head.
+    expect(groupSeries(pages)[0]!.label).toBe("Alpha");
+  });
+
+  test("the fold key is lower-cased, so two spellings cannot mint two fold keys", () => {
+    expect(seriesFoldKey("Alpha")).toBe("series:alpha");
+    expect(seriesFoldKey(" ALPHA ")).toBe("series:alpha");
+  });
+});
+
+describe("groupSeries — a retired child needs its SUCCESSOR in the series (fix round 1)", () => {
+  const all = [
+    member("plans/keep.mdx", {
+      series: "alpha",
+      plan_status: "in-flight",
+      status_date: "2026-01-01",
+    }),
+    page({ relPath: "plans/successor.mdx" }),
+    member("plans/retired.mdx", {
+      series: "alpha",
+      seriesLabel: "Ghost label",
+      parent: "plans/successor.mdx",
+      pairedBy: "superseded",
+      plan_status: "shipped",
+      status_date: "2026-09-01",
+    }),
+  ];
+
+  test("the WHOLE-listing total drops a child whose successor carries no key", () => {
+    expect(groupSeries(all)[0]!.total).toBe(1);
+  });
+
+  test("…so the `▸` cannot land on a page the fold never shows", () => {
+    expect(groupSeries(all)[0]!.latestRel).toBe("plans/keep.mdx");
+  });
+
+  test("…and the LABEL cannot be read off one either", () => {
+    expect(groupSeries(all)[0]!.label).toBe("alpha");
+  });
+});
+
+describe("newestSeriesPlan — a terminal status is not a plan to continue in (fix round 1)", () => {
+  for (const status of ["superseded", "abandoned"]) {
+    test(`a ${status} plan is never the newest, however new its status_date`, () => {
+      const pages = [
+        member("plans/live.mdx", {
+          series: "alpha",
+          plan_status: "in-flight",
+          status_date: "2026-01-01",
+        }),
+        member("plans/retired.mdx", { series: "alpha", plan_status: status, status_date: "2026-09-01" }),
+      ];
+      expect(newestSeriesPlan(pages)!.relPath).toBe("plans/live.mdx");
+      expect(groupSeries(pages)[0]!.latestRel).toBe("plans/live.mdx");
+    });
+  }
+
+  test("a series of retired plans alone has NO latest — there is nothing to continue", () => {
+    const pages = [
+      member("plans/a.mdx", { series: "alpha", plan_status: "superseded", status_date: "2026-09-01" }),
+      member("plans/b.mdx", { series: "alpha", plan_status: "abandoned", status_date: "2026-08-01" }),
+    ];
+    expect(newestSeriesPlan(pages)).toBeUndefined();
+    expect(groupSeries(pages)[0]!.latestRel).toBeUndefined();
+  });
+});
+
+describe("seriesDateMs — one granularity, one tie-break (fix round 1)", () => {
+  // Measured on mimir: the chain strip's own `2026-09-17` lost to a sibling's
+  // 09:29Z git touch on the same day, so the `▸` named the page git happened to
+  // rewrite last. Noon UTC here so the day is the same in every CI timezone.
+  // ⚠️ The asserted page is named `z-…` and the touched one `a-…` ON PURPOSE:
+  // relPath is the LAST tie-break, so with the names the other way round these
+  // cases pass whether or not the rung is consulted at all.
+  const asserted = member("plans/z-asserted.mdx", {
+    series: "alpha",
+    plan_status: "in-flight",
+    status_date: "2026-09-17",
+  });
+  const touchedSameDay = member("plans/a-touched.mdx", {
+    series: "alpha",
+    plan_status: "in-flight",
+    gitTouchedMs: Date.parse("2026-09-17T12:00:00Z"),
+  });
+  const touchedNextDay = member("plans/a-later.mdx", {
+    series: "alpha",
+    plan_status: "in-flight",
+    gitTouchedMs: Date.parse("2026-09-18T12:00:00Z"),
+  });
+
+  test("on the SAME day an asserted status_date beats a git touch", () => {
+    expect(newestSeriesPlan([asserted, touchedSameDay])!.relPath).toBe("plans/z-asserted.mdx");
+    expect(newestSeriesPlan([touchedSameDay, asserted])!.relPath).toBe("plans/z-asserted.mdx");
+  });
+
+  test("…and the members order the same way, whatever the input order", () => {
+    expect(groupSeries([touchedSameDay, asserted])[0]!.members.map((m) => m.relPath)).toEqual([
+      "plans/z-asserted.mdx",
+      "plans/a-touched.mdx",
+    ]);
+  });
+
+  test("a git touch on a LATER day still wins — the granularity is the day, not the rung", () => {
+    expect(newestSeriesPlan([asserted, touchedNextDay])!.relPath).toBe("plans/a-later.mdx");
+  });
+});
+
+describe("seriesMembersOf — ONE membership rule for the rail and the header (fix round 1)", () => {
+  const all = [
+    member("plans/plan.mdx", {
+      series: "Prov",
+      seriesLabel: "Wiki provenance",
+      plan_status: "in-flight",
+      status_date: "2026-09-01",
+    }),
+    // An attachment of the plan that carries the key (and a label) anyway: the
+    // header used to count it and read its label, which renamed the strip.
+    member("plans/plan-prototype.html", {
+      series: "prov",
+      seriesLabel: "Prototype",
+      parent: "plans/plan.mdx",
+      pairedBy: "stem",
+    }),
+    // A retired plan whose successor IS a member — a real member.
+    member("plans/plan-v1.mdx", {
+      series: "prov",
+      parent: "plans/plan.mdx",
+      pairedBy: "superseded",
+      plan_status: "superseded",
+      status_date: "2026-04-01",
+    }),
+    member("blogs/explained.mdx", { series: "PROV", status_date: "2026-03-01" }),
+    page({ relPath: "plans/unrelated.mdx" }),
+  ];
+
+  test("the key is matched trimmed and without case", () => {
+    expect(seriesMembersOf(all, "  pRoV ").members.map((m) => m.relPath)).toEqual(
+      seriesMembersOf(all, "prov").members.map((m) => m.relPath),
+    );
+    expect(seriesMembersOf(all, "nothing").members).toEqual([]);
+  });
+
+  test("an attachment child is not a member, whatever its frontmatter says", () => {
+    const rel = seriesMembersOf(all, "prov").members.map((m) => m.relPath);
+    expect(rel).not.toContain("plans/plan-prototype.html");
+    expect(rel).toEqual(["plans/plan.mdx", "plans/plan-v1.mdx", "blogs/explained.mdx"]);
+  });
+
+  test("…and so its label can never rename the series", () => {
+    expect(seriesMembersOf(all, "prov").head!.relPath).toBe("plans/plan.mdx");
+    expect(seriesMembersOf(all, "prov").head!.seriesLabel).toBe("Wiki provenance");
+  });
+
+  test("the retired plan is a member but never the LATEST", () => {
+    expect(seriesMembersOf(all, "prov").latest!.relPath).toBe("plans/plan.mdx");
+  });
+
+  test("the header's count is the fold's total, by construction", () => {
+    expect(seriesMembersOf(all, "prov").members).toHaveLength(groupSeries(all)[0]!.total!);
+  });
+
+  test("a retired page whose successor is outside the series is nobody's member", () => {
+    const pages = [
+      member("plans/keep.mdx", { series: "alpha" }),
+      page({ relPath: "plans/successor.mdx" }),
+      member("plans/old.mdx", {
+        series: "alpha",
+        parent: "plans/successor.mdx",
+        pairedBy: "superseded",
+      }),
+    ];
+    expect(seriesMembersOf(pages, "alpha").members.map((m) => m.relPath)).toEqual([
+      "plans/keep.mdx",
+    ]);
+  });
+});
+
+describe("clipSeriesTitle — the reader header's `continue at:` label (fix round 1)", () => {
+  test("a title at the budget is untouched", () => {
+    const exact = "x".repeat(SERIES_CONTINUE_MAX);
+    expect(clipSeriesTitle(exact)).toBe(exact);
+    expect(clipSeriesTitle("Short one")).toBe("Short one");
+  });
+
+  test("a longer one keeps its first 64 code points and an ellipsis", () => {
+    const long = "Wiki provenance — every page points at the sessions that wrote it, and back";
+    expect([...long].length).toBeGreaterThan(SERIES_CONTINUE_MAX);
+    const out = clipSeriesTitle(long);
+    expect(out).toBe("Wiki provenance — every page points at the sessions that wrote i…");
+    expect([...out]).toHaveLength(SERIES_CONTINUE_MAX + 1);
+  });
+
+  test("…and no trailing space is left sitting before the ellipsis", () => {
+    // Character 65 of this title is a space, so the naive slice ends " …".
+    const long = "a".repeat(SERIES_CONTINUE_MAX) + " tail";
+    expect(clipSeriesTitle(long)).toBe("a".repeat(SERIES_CONTINUE_MAX) + "…");
+    const spaceAtTheCut = "b".repeat(SERIES_CONTINUE_MAX - 1) + " tail";
+    expect(clipSeriesTitle(spaceAtTheCut)).toBe("b".repeat(SERIES_CONTINUE_MAX - 1) + "…");
+  });
+
+  test("it cuts by CODE POINT, never through a surrogate pair", () => {
+    const emoji = "🎯".repeat(SERIES_CONTINUE_MAX + 4);
+    const out = clipSeriesTitle(emoji);
+    expect([...out]).toHaveLength(SERIES_CONTINUE_MAX + 1);
+    expect(out.includes("�")).toBe(false);
+    // Every code point but the ellipsis is a whole emoji.
+    expect([...out].slice(0, -1).every((c) => c === "🎯")).toBe(true);
   });
 });

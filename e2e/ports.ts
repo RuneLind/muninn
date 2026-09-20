@@ -99,6 +99,12 @@ export const E2E_PORTS = {
   // toggle, the roll-up, the forced-open family and the month default all drive
   // against the one fixture.
   "wiki-rail-families": 3061,
+  // The rail's SERIES fold: one temp wiki holding a four-member series spread
+  // over `plans/`, `blogs/` and a stem family, one of whose members the series
+  // claims — so the fold, the roll-up, the `N of M shown` census, the ghost row
+  // a pinned member leaves and the family that dissolves around it all drive
+  // against the one fixture.
+  "wiki-rail-series": 3062,
   // `/summaries/prompts`, against a throwaway `claude-cli` bot under
   // MUNINN_BOTS_DIR (the connector decides which kinds are offered, and only a
   // Claude one is offered `deep`). The server is restarted mid-file, because a

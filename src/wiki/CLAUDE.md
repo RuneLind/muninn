@@ -760,6 +760,167 @@ one-row invariant with both layers at once) and
 `e2e/wiki-rail-families.spec.ts` (the toggle, the roll-up, the count, the
 reload, the flatten, the month defaults and the contrast in both themes).
 
+### Series (`series:` / `series_label:`, `groupSeries`)
+
+The rail's THIRD grouping layer, and the only AUTHORED one. Families and months
+fold what a filename says; the work a reader returns to is spread over stems and
+folders — a plan, its successor plan and the blog explaining them are three
+unrelated rows — and "the latest plan in this piece of work" has no row at all.
+
+**Two frontmatter keys.** `series: <key>` on every member, one short authored
+slug; `series_label: <text>` on the HEAD page only, so renaming a series is one
+edit and never breaks the key its members share. Read in `store.ts`'s index pass
+beside `superseded_by` and with the same tolerance (a scalar, or the first entry
+of a flow list; trimmed; anything else ignored). **The store keeps the raw
+string; the GROUPING folds it** — trimmed and compared without case
+(`seriesFoldKey`), because the folds store lower-cases every key it compares:
+`Wiki-Provenance` and `wiki-provenance` minted two groups whose `data-fold-key`
+was one string, the second registration overwrote the first, one series' pages
+vanished from the rail and the other's rendered twice. Reporting the two
+spellings stays the wiki linter's job — it reads the INDEX, not the rail, so
+nothing is hidden by folding them here. Both ride `toListing`'s
+rest spread on all three callers and are deliberately NOT in the provenance
+opt-in: the rail groups by them on the hot listing, exactly as it facets by
+`project`.
+
+**Membership is ONE function**, `seriesMembersOf(all, key)` in
+`wiki-groups.ts`: a page carrying the key is a member when it is a parent row,
+or a `superseded` child whose SUCCESSOR is a member. A child of any other
+pairing rule is an attachment (a prototype, an exported twin) and counts
+nowhere however its frontmatter reads. `groupSeries` and the reader header both
+call it, which is the only reason `N pages` and `N of M shown` can be trusted to
+be about the same set — the header re-deriving it with its own filter is what
+let an attachment child rename the strip and a case variant drop out of the
+count.
+
+**The head, and the newest plan.** The HEAD is the member carrying
+`series_label:`; absent, the newest PLAN; absent that too, the newest member.
+The label is read off it — its `series_label:` where it wrote one, else its own
+spelling of the key — so a series nobody has labelled renders under the bare key
+the HEAD wrote. **Two members carrying `series_label:` is not an error here: the
+newer one wins, silently**, because the head is picked newest-first; the lint
+reports the duplicate. The **newest plan** is the member carrying a NON-TERMINAL
+`plan_status` (`SERIES_TERMINAL_STATUSES` = `superseded`, `abandoned` — a
+retired plan's `status_date` is usually NEWER than its successor's, since
+retiring a page is the last edit it gets, so without this the `▸` and *continue
+at* named a dead page), newest by `seriesDateMs`. A blog or an archive page is a
+member of the work but never "the latest", because *continue at* has to name a
+page a reader can continue IN. The test is `plan_status`, not the `plans/`
+folder: a plan filed elsewhere counts, a blog in `plans/` does not.
+
+**`seriesDateMs` compares DAYS, not instants.** `status_date` else the git touch
+date else mtime, each floored to its LOCAL day (`localDay`, the spelling every
+rendered date in the reader uses) — measured on mimir, comparing a calendar day
+against a git instant let any page touched later the same day outrank the plan
+that had just affirmed its status. A tie on the day is broken by the RUNG (an
+authored `status_date` beats a git touch) and then by relPath, so the order is
+the same on every render. **The day is the PROCESS's local day**: `localDay`
+reads the timezone this code runs in, so a git touch near UTC midnight floors to
+one day in Oslo and another in a UTC pod, and the two hosts can order the same
+pair differently. The rendered date cell always names the day the order used.
+
+**Six rail rules**, extending the family list above:
+
+1. **Always on.** Series are computed whether or not `group families` is
+   checked: that toggle guards the two NAME heuristics, and a key is not a
+   guess. A query still flattens everything, series included.
+2. **Precedence: Pinned > Series > Activity > months/families.** Activity sits
+   ABOVE months and families, not below: it lifts a family member out before
+   the groups form, which is what a family's roll-up dropping a lifted member
+   means. A pinned member stays in `Pinned` — the ★ is the reader's explicit
+   choice — and the fold shows a dim, non-clickable **ghost row**
+   (`pinned above`, rendered AFTER the member rows: it is a footnote about a
+   page already on screen, and interleaving it by date would cost the member
+   rows their own order) so the roll-up's count and the rows on screen cannot
+   disagree. **Activity does NOT lift a series member**, the deliberate
+   difference from a family: a series is the
+   work the reader came back to, and lifting its newest page out renders the
+   fold without the row it is about. A series claims its members BEFORE
+   `groupFamilies`/`groupMonths` are computed — `renderList` subtracts them
+   (`withoutSeriesMembers`) — so two knock-on effects are accepted and pinned by
+   unit tests: a family that drops below `FAMILY_MIN` **dissolves** into plain
+   rows, and a prefix that was over `FAMILY_MAX` **may form**.
+3. **Formed over the FILTERED set**, like families — but the LABEL, the member
+   `total` and the newest plan come from the WHOLE listing, because each is a
+   fact about the series rather than about the facet. Under a facet the row says
+   `N of M shown` on its OWN LINE under the label: beside it, inside the label's
+   `overflow: hidden; nowrap` box, it painted 15px of its 65 at the 300px
+   default rail — clipped to nothing while a `toHaveText` assertion still
+   passed. A second LINE costs the group row 10.9px of height (measured on
+   mimir: 30 → 40.89) and `.wiki-list-mid` no width at all (253.58 either
+   way), so `RAIL_GROUP_CHIP_SWITCH` and the page rows' budgets are untouched.
+
+   The members inside the fold are always NEWEST-FIRST by `seriesDateMs`,
+   whatever the reader's sort — unlike a family or a month, which open in the
+   sort's own order. The fold is a timeline of one piece of work and "where do I
+   go now" is its first row.
+4. **The open page's series is forced open**, with a disabled chip that says so
+   (#557's F2 decision) — unless the open page is itself lifted into `Pinned`,
+   where it is already on screen and forcing the fold would hide the reader's
+   stored state behind a dead control. Fold state is stored like a family's, and
+   a series NEVER defaults open, so it never uses the `closed:` spelling.
+5. **`shown` / `#wikiCount` count a member once**, in the series — or under
+   `Pinned` when it was lifted there. A ghost row is not a row and is not
+   counted. The `N of M shown` census counts every rule-4 child of the filtered
+   set, wherever it renders (inside the body, under a lifted successor, or as
+   its own row when the reader pinned the child): the census says which of the
+   series' members this render ACCOUNTS FOR, not which are painted — a closed
+   fold paints none of them and still says `4 of 4`. Dropping the lifted-parent
+   case read `1 of 2 shown` with nothing hidden and lost the roll-up's
+   `1 superseded`. A FAMILY's census is deliberately the other way round: there
+   the lift really does take the page out of the slate for that render.
+6. **`latest` is not a seventh row element.** The newest plan's row carries a
+   `▸` glyph INSIDE `.wiki-list-title` with the words on hover; the row's six
+   elements are each budgeted in `wiki-rail-width.ts` and a seventh takes the
+   title under its floor. Re-measured at 260 and 300 px against #559's baseline:
+   no new wrapped row. The glyph is `--accent-light`, the token the series group
+   row already carries: `--status-warning` measured 3.19:1 in the light theme,
+   under AA for an 11px mark that is the whole claim. The series group row's
+   2px accent rule is paid back out of its fold's own left padding (10 → 8),
+   so `.wiki-list-mid` is the same width as a family row's and the chip's
+   container query fires at the same rail on both — measured 251.58 vs 253.58
+   before, 253.58 on both after. `box-sizing: border-box` does NOT do this:
+   these rows declare no width, and an auto-width block takes its border off
+   the content box whatever the box model says.
+
+**No minimum and no cap.** A one-member series is a series with one page in it
+so far, and a twenty-member one is twenty pages of one piece of work — neither
+is the accidental folder-shaped fold `FAMILY_MIN`/`FAMILY_MAX` exist to refuse.
+
+**The roll-up counts the folder where a member declares no `plan_status`** —
+`blogs/` as `blog`, `archive/` as `archive`, everything else as `unmarked` — so
+the chip reads `1 in-flight · 1 shipped · 1 blog` rather than reporting a blog
+and an archive report as the same nothing. Series-only: a family lives in one
+folder, where the word would be the same on every member.
+
+**The reader header.** A member's article head carries one line —
+`Series · <label> · N pages · continue at: <the newest plan that is not this
+page>` — plus a timeline of the members, oldest → newest, with the open page and
+the shipped ones marked. Built from the listing the rail already holds, so it
+costs no request, and through `seriesMembersOf` and `seriesDateSignal`, so it
+can never report a different set or a different day from the fold: the timeline
+is the fold's own order REVERSED, and each step prints the day it was ordered
+by, mtime rung included. *continue at* never names the open page (a reader
+usually arrives there from the `▸` row), is omitted when there is no other plan,
+and clips its label at `SERIES_CONTINUE_MAX` (64 code points) with the whole
+title on `title=` — a mimir plan title runs past 100 characters and took the
+strip's whole second line. There is no `edit` affordance yet — the series editor
+is a later PR, and a visible control that cannot act is the dead control F2
+rejected.
+
+Acceptance: `wiki-groups.test.ts` (formation, membership, the case fold, the
+head and newest-plan rules incl. the terminal statuses, the day granularity and
+its tie-break, the filtered/whole split, the two family knock-on effects, the
+roll-up word, the `continue at:` clip), `store.test.ts` (the parse),
+`wiki-recents.test.ts` (the block's position, the ghost row and its place after
+the member rows, the census, the lifts, the forced-open rule and its pinned
+exception) and `e2e/wiki-rail-series.spec.ts` (the chain end to end: the fold,
+one row for two spellings of the key, the dissolution against an untouched
+control family, the `▸` inside the title, the ghost, `N of M shown` — asserted
+VISIBLE at 300 and 260px, since `toHaveText` passes on a clipped element — the
+reader header agreeing with the fold, and the contrast of the label, the chip,
+the census, the timeline date and the `▸` in both themes).
+
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 
 Turns one wiki page into a pasteable post — the reader's **📤 Share** breadcrumb action, beside 💬 Discuss. One fenced one-shot on the wiki's synthesis bot (`resolveWikiSynthesisBot`, same routing as Ask), streamed as markdown, and on completion three server-rendered strings. Prompt/preset/body-prep layers live in `src/share/` (see the Share row in the repo `CLAUDE.md`); the SSE runner is `dashboard/routes/share-sse.ts`, the dialog `dashboard/views/components/share-dialog.ts` (+ its pure half `wiki-share-dialog.ts`).

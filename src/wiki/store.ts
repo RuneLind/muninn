@@ -564,6 +564,35 @@ export interface WikiPageMeta {
    *  an unrecognized value is dropped at parse time (also ⇒ absent). */
   followups?: PlanFollowups;
   /**
+   * SERIES — the piece of work this page belongs to, from the frontmatter key
+   * `series:`. One authored slug per member, spread over folders and stems: the
+   * signal the rail's name heuristics (families, months) cannot see, and the one
+   * the reader writes when the work is not one folder and not one stem.
+   *
+   * Authored, never derived. A grouping a page can fall out of because another
+   * page was edited is not a grouping anyone can return to, which is why this is
+   * a key rather than a link-graph cluster.
+   *
+   * Read with `superseded_by`'s tolerance — a scalar, or the first entry of a
+   * flow list — and trimmed; anything else is ignored. Case is kept as written:
+   * the key is compared verbatim, so `Wiki-Provenance` and `wiki-provenance` are
+   * two series, which a lint reports (campaign 2, PR C) rather than this parse
+   * silently merging.
+   *
+   * Deliberately NOT stripped by `toListing`: the rail groups by it on the hot
+   * listing, exactly as it facets by `project`. One short string per page.
+   */
+  series?: string;
+  /**
+   * The series' display NAME, from `series_label:` — carried by the HEAD page
+   * only, so renaming a series is one edit and never breaks the key its members
+   * share. Absent on every other member; the rail falls back to the key.
+   *
+   * On the listing for `series`' reason: the fold's label would otherwise need a
+   * second fetch per series to find the one page carrying it.
+   */
+  seriesLabel?: string;
+  /**
    * ATTACHMENTS — the pages that fold under this one in the reader's rail, as
    * wiki-relative paths in the order the pairing pass found them. Absent (never
    * `[]`) on a page that adopted nothing, which is almost every page of every
@@ -2187,6 +2216,27 @@ function asStringArray(v: string | string[] | undefined): string[] {
 }
 
 /**
+ * One trimmed frontmatter SCALAR, with `superseded_by`'s tolerance: a plain
+ * string, or the first entry of a flow list (`series: [x]` is a shape a hand
+ * edit produces and the author plainly meant one value). Anything else — an
+ * empty or whitespace-only value, a list whose first entry is not a string — is
+ * `undefined`, i.e. the page declared none. A nested map never arrives here at
+ * all: `parseFrontmatter` flattens it to `series.key`, so `series` is absent.
+ *
+ * NB every value that parser yields is a string or a string list, so the
+ * non-string branch cannot be reached FROM A FILE. It is defence for a caller
+ * handing in a parse of its own, not a case a wiki page can produce.
+ *
+ * Its own function so `series:` and `series_label:` cannot drift from the
+ * tolerance `superseded_by` already documents, and so the "non-string is
+ * IGNORED, never coerced" rule is one place rather than four.
+ */
+function asOptionalScalar(v: unknown): string | undefined {
+  const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : "";
+  return raw.trim() || undefined;
+}
+
+/**
  * The same read as `asStringArray`, answering UNDEFINED rather than `[]` when a
  * page declares nothing — for the optional provenance fields, where `[]` on every
  * page of a wiki that stamps none would be three empty arrays × ~800 pages of
@@ -2746,6 +2796,13 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
             : undefined,
         jira: asOptionalStringArray(fm.jira, normalizeJiraKey),
         prs: asOptionalStringArray(fm.prs),
+        // SERIES — read beside `superseded_by` below, and with the same
+        // tolerance: both are one authored pointer at other pages of this work.
+        // A non-string value is ignored rather than coerced, so a malformed line
+        // leaves the page out of every series instead of minting one nothing
+        // else can join.
+        series: asOptionalScalar(fm.series),
+        seriesLabel: asOptionalScalar(fm.series_label),
         // Plan lifecycle fields. Wiki-agnostic (any page may declare them) and
         // strictly validated — an invalid value is dropped here and only ever
         // surfaces as a count in the aggregated warn below.

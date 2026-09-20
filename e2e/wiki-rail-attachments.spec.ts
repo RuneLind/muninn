@@ -38,6 +38,7 @@ import {
   RAIL_WIDTH_KEY,
 } from "../src/dashboard/views/components/wiki-rail-width.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
+import { contrastOf } from "./contrast.ts";
 
 const PORT = e2ePort("wiki-rail-attachments");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -569,32 +570,4 @@ async function hoverRowLeftOfChip(page: Page, rel: string): Promise<void> {
   // has its centre between them, where the chip is not and neither is the title.
   await page.mouse.move((rowBox.x + chipBox.x) / 2, chipBox.y + chipBox.height / 2);
   expect(await target.evaluate((el) => el.matches(":hover"))).toBe(true);
-}
-
-/** WCAG contrast of an element's text against the nearest ancestor that really
- *  paints a background — including whatever a `:hover` has put there. */
-async function contrastOf(locator: import("@playwright/test").Locator): Promise<number> {
-  return locator.evaluate((el) => {
-    const lum = (c: string): number => {
-      const [r, g, b] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number) as [number, number, number];
-      const ch = (v: number) => {
-        const s = v / 255;
-        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-      };
-      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
-    };
-    let node: HTMLElement | null = el as HTMLElement;
-    let bg = "rgba(0, 0, 0, 0)";
-    while (node) {
-      const c = getComputedStyle(node).backgroundColor;
-      if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) {
-        bg = c;
-        break;
-      }
-      node = node.parentElement;
-    }
-    const a = lum(getComputedStyle(el).color);
-    const b = lum(bg);
-    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  });
 }

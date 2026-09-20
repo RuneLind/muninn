@@ -158,6 +158,19 @@ export interface WikiListing {
   /** Pull requests this page's work landed as (`owner/repo#number`). Single-page
    *  only, like `sessions`. */
   prs?: string[];
+  /**
+   * The SERIES this page belongs to — the frontmatter `series:` slug, verbatim
+   * and case-sensitive (see the store's `WikiPageMeta.series`).
+   *
+   * **Listing field**, the `project` twin: the rail's Series fold groups by it,
+   * so it rides the hot `/api/wiki/pages` payload and is NOT stripped by
+   * `toListing`. Absent on every page carrying no key, which is most pages.
+   */
+  series?: string;
+  /** The series' display NAME (`series_label:`), carried by the HEAD page only —
+   *  so at most one page per series has it, and the fold's label costs one string
+   *  on one row. Absent everywhere else; the rail falls back to the key. */
+  seriesLabel?: string;
   linkCount: number;
   backlinkCount: number;
 }

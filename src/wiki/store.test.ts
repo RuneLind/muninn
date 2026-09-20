@@ -3824,3 +3824,77 @@ describe("flattenWikiLinks", () => {
     );
   });
 });
+
+describe("buildWikiIndex — series", () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-series-"));
+    await mkdir(path.join(root, "plans"), { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const page = (name: string, fmLines: string[]) =>
+    Bun.write(
+      path.join(root, `plans/${name}.md`),
+      ["---", `title: ${name}`, ...fmLines, "---", "", "Plan body."].join("\n"),
+    );
+
+  test("reads `series:` and `series_label:` off the frontmatter", async () => {
+    await page("Head", ["series: wiki-provenance", "series_label: Wiki provenance"]);
+    await page("Member", ["series: wiki-provenance"]);
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("Head")!.series).toBe("wiki-provenance");
+    expect(index.resolve("Head")!.seriesLabel).toBe("Wiki provenance");
+    expect(index.resolve("Member")!.series).toBe("wiki-provenance");
+    expect(index.resolve("Member")!.seriesLabel).toBeUndefined();
+  });
+
+  test("both are trimmed, and a blank value is ABSENT rather than empty", async () => {
+    await page("Padded", ["series:    wiki-provenance   ", "series_label:   Wiki provenance  "]);
+    await page("Blank", ["series:", "series_label:"]);
+    await page("Quoted Blank", ['series: ""']);
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("Padded")!.series).toBe("wiki-provenance");
+    expect(index.resolve("Padded")!.seriesLabel).toBe("Wiki provenance");
+    expect(index.resolve("Blank")!.series).toBeUndefined();
+    expect(index.resolve("Blank")!.seriesLabel).toBeUndefined();
+    expect(index.resolve("Quoted Blank")!.series).toBeUndefined();
+  });
+
+  test("CASE is kept — a lint's job to report, not this parse's to merge", async () => {
+    await page("Shouty", ["series: Wiki-Provenance"]);
+    expect((await buildWikiIndex(root)).resolve("Shouty")!.series).toBe("Wiki-Provenance");
+  });
+
+  test("a page declaring neither carries neither key", async () => {
+    await page("Plain", ["plan_status: shipped"]);
+    const meta = (await buildWikiIndex(root)).resolve("Plain")!;
+    expect(meta.series).toBeUndefined();
+    expect(meta.seriesLabel).toBeUndefined();
+  });
+
+  test("a FLOW LIST takes its first entry — `superseded_by`'s tolerance", async () => {
+    await page("Listed", ["series: [wiki-provenance, other]"]);
+    expect((await buildWikiIndex(root)).resolve("Listed")!.series).toBe("wiki-provenance");
+  });
+
+  test("a NESTED MAP mints no series key", async () => {
+    // `parseFrontmatter` flattens one nested level to `series.key`, so `series`
+    // itself is simply absent — which is the outcome that matters. (Every value
+    // that parser produces is a string or a string list, so "a non-string
+    // reaches this field" is unreachable from a file; the reader's own guard is
+    // defence for a caller that does not go through it.)
+    await page("Mapped", ["series:", "  key: wiki-provenance"]);
+    const meta = (await buildWikiIndex(root)).resolve("Mapped")!;
+    expect(meta.series).toBeUndefined();
+  });
+
+  test("an EXPLAINER page carries neither key: it has no frontmatter to read", async () => {
+    await Bun.write(path.join(root, "plans/explainer.html"), "<html><title>X</title></html>");
+    const meta = (await buildWikiIndex(root)).pages.find((p) => p.relPath.endsWith(".html"))!;
+    expect(meta.series).toBeUndefined();
+    expect(meta.seriesLabel).toBeUndefined();
+  });
+});

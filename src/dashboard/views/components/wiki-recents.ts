@@ -554,7 +554,7 @@ export function jumpHeaderLabel(jump: JiraKeyJump): string {
 
 // ── The rail ──────────────────────────────────────────────────────────
 
-export type RailSection = "jump" | "activity" | "pinned" | "all" | "meta";
+export type RailSection = "jump" | "activity" | "pinned" | "series" | "all" | "meta";
 
 export type RailEntry =
   | {
@@ -604,11 +604,45 @@ export type RailEntry =
        *  indent: a row indented under whatever happens to be above it reads as
        *  that row's child, which is a relation the rail would be inventing. */
       lifted?: boolean;
-      /** Set on a row drawn inside an open FAMILY or MONTH group: the group's
-       *  label, for the painter's indent and the row's hover. A member lifted
-       *  into Activity or Pinned does not carry it — it is not in the group's
-       *  body there, exactly as a lifted attachment child loses its indent. */
+      /** Set on a row drawn inside an open FAMILY, MONTH or SERIES group: the
+       *  group's label, for the painter's indent and the row's hover. A member
+       *  lifted into Activity or Pinned does not carry it — it is not in the
+       *  group's body there, exactly as a lifted attachment child loses its
+       *  indent. */
       member?: { label: string; kind: RailGroupKind };
+      /**
+       * Set on the NEWEST PLAN of a series, wherever that page renders. The
+       * painter draws a `▸` glyph INSIDE the title (never a seventh row
+       * element — see `wiki-rail-width.ts`) and says why on hover.
+       *
+       * Carried on the ROW rather than derived by the painter because the
+       * decision is the group's (`RailGroup.latestRel`, computed over every
+       * member in the whole listing), and a painter re-deriving it from the
+       * rows on screen would move the glyph whenever a facet hid the real one.
+       */
+      latest?: true;
+    }
+  | {
+      /**
+       * A GHOST row: a series member that really is on screen, one section up —
+       * the reader pinned it, so it renders under `Pinned` and the series shows
+       * a dim, non-clickable placeholder saying so.
+       *
+       * It exists because the two halves of the rule pull opposite ways: Pinned
+       * outranks Series (the ★ is the reader's explicit choice), while the
+       * series chip is a census OF the series and must go on counting the page.
+       * A silent hole in the fold would make the chip disagree with the rows —
+       * the one failure this module is written around — and a second real row
+       * would break the one-row-per-page invariant. So the census counts it, the
+       * body names it, and `shown` does not.
+       */
+      kind: "ghost";
+      section: RailSection;
+      page: WikiListing;
+      /** Where the page really is. One value today; a value rather than a
+       *  boolean so a second lift (Activity never lifts a series member) reads
+       *  as a new case rather than as this one. */
+      reason: "pinned";
     }
   | {
       /**
@@ -632,10 +666,22 @@ export type RailEntry =
       /** The members this row stands for: the ones not emitted anywhere else in
        *  this render, which is what the roll-up counts. */
       members: WikiListing[];
-      /** The rule-4 children counted with them (families only) — on screen under
-       *  their own successor, or hidden with it, but members of the slate either
-       *  way. */
+      /** The rule-4 children counted with them (families and series) — on screen
+       *  under their own successor, or hidden with it, but members of the slate
+       *  either way. */
       superseded: WikiListing[];
+      /** SERIES only: the members the reader PINNED, drawn as ghost rows inside
+       *  this fold and as real rows under `Pinned`. Counted by the roll-up,
+       *  never by `shown`. Absent (never `[]`) when none. */
+      ghosts?: WikiListing[];
+      /**
+       * SERIES only, and only when a facet is hiding part of the series: how
+       * many members this row stands for against how many the series holds in
+       * the whole listing. The row says `N of M shown`, so a reader under
+       * `folder=plans` is told the other pages exist rather than shown a fold
+       * that quietly lost them.
+       */
+      census?: { shown: number; total: number };
       /** True when the group is CLOSED, so its members are not emitted. */
       folded: boolean;
       /** Set when the group is open because the reader is ON a page inside it.
@@ -685,6 +731,20 @@ export interface RailInput {
    * render, the same lift the attachment layer makes.
    */
   groups?: readonly RailGroup[];
+  /**
+   * The SERIES groups for this render (`groupSeries`), which the caller computes
+   * whether or not `group families` is on: a series is an authored key, not a
+   * name heuristic, so it is not behind that toggle.
+   *
+   * They are handed in SEPARATELY from `groups` because the two differ in every
+   * way the rail cares about: a series claims its members BEFORE the family and
+   * month rules are even computed (the caller does that subtraction — see
+   * `withoutSeriesMembers`), it is not lifted by Activity, and it renders as its
+   * own block above the remainder rather than at its first member's position.
+   *
+   * A query flattens them like everything else.
+   */
+  seriesGroups?: readonly RailGroup[];
   /**
    * The page the reader currently has OPEN, if any. The group HOLDING it is
    * expanded whatever the store says — a reader is never on a page the rail
@@ -916,12 +976,13 @@ export function buildRail(input: RailInput): RailModel {
   // The second grouping layer, and it obeys the same invariant: a group MOVES
   // its members into its own block, it never copies them, and a member the
   // Activity ranking or the reader's pin took is not in the block at all.
-  /** page key → the family/month group it belongs to in this render. */
+  /** page key → the series/family/month group it belongs to in this render. */
   const groupOf = new Map<string, RailGroup>();
   /** group key → its members PRESENT in this filtered set, in the sort's order. */
   const groupMembers = new Map<string, WikiListing[]>();
-  if (grouped) {
-    for (const g of input.groups ?? []) {
+  const seriesList = grouped ? (input.seriesGroups ?? []) : [];
+  const registerGroups = (gs: readonly RailGroup[]): void => {
+    for (const g of gs) {
       const key = normalizeFoldKey(g.key);
       const present: WikiListing[] = [];
       for (const m of g.members) {
@@ -935,7 +996,26 @@ export function buildRail(input: RailInput): RailModel {
       }
       if (present.length) groupMembers.set(key, present);
     }
+  };
+  if (grouped) {
+    // ⚠️ SERIES FIRST, and that order is the precedence rule. A page carrying a
+    // `series:` key is in that series and nowhere else — the caller has already
+    // taken those pages out of the set the family and month rules were computed
+    // over, so a family that lost a member below `FAMILY_MIN` never formed at
+    // all; this skip is what holds the line for a family the caller DID hand in
+    // (a stale groups array, a caller that forgot the subtraction) rather than
+    // the mechanism.
+    registerGroups(seriesList);
+    registerGroups(input.groups ?? []);
   }
+  /** Is this page claimed by a SERIES in this render? The remainder skips it:
+   *  the series block above has already accounted for it, open or closed. */
+  const inSeries = (p: WikiListing): boolean =>
+    groupOf.get(normalizeRel(p.relPath))?.kind === "series";
+  /** The newest plan of each series, keyed on relPath — the rows that earn the
+   *  `▸`, wherever they render (a pinned one keeps it under `Pinned`). */
+  const latestRels = new Set<string>();
+  for (const g of seriesList) if (g.latestRel) latestRels.add(normalizeRel(g.latestRel));
 
   const open = input.openFolds ?? [];
   // The open page forces ITS group open — the group it is in when it is a child,
@@ -1033,6 +1113,7 @@ export function buildRail(input: RailInput): RailModel {
       ...(extra.inGroup
         ? { member: { label: extra.inGroup.label, kind: extra.inGroup.kind } }
         : {}),
+      ...(latestRels.has(key) ? { latest: true as const } : {}),
     });
     if (mine.length && !folded) {
       // A child of a group MEMBER stays inside its own parent's group and
@@ -1074,6 +1155,14 @@ export function buildRail(input: RailInput): RailModel {
     for (const row of activity ?? []) {
       const rel = normalizeRel(row.page.relPath);
       if (claimed.has(rel) || activityRows.some((r) => normalizeRel(r.page.relPath) === rel)) continue;
+      // ⚠️ SERIES OUTRANKS ACTIVITY, and this is the one place it is enforced —
+      // the deliberate difference from a family, where "Activity ranks PAGES,
+      // not groups" lifts a member out. A series is the work the reader returns
+      // to; lifting its newest page into Activity is exactly what the fold
+      // exists to stop, since the series then renders without the member the
+      // whole row is about. Pinned is the other way round (the ★ is explicit),
+      // and that lift leaves a ghost row instead.
+      if (inSeries(row.page)) continue;
       activityRows.push(row);
     }
     // Activity wins the overlap because the SEEN set is shared: a page it already
@@ -1122,33 +1211,22 @@ export function buildRail(input: RailInput): RailModel {
     }
   }
 
-  const remainder = filtered.filter(
-    (p) => !claimed.has(normalizeRel(p.relPath)) && !parentOf.has(normalizeRel(p.relPath)),
-  );
-  // The Bookkeeping split is a recency-list affordance and nothing else: under
-  // a query the rows are exactly as today (a result list grows no furniture),
-  // and a header explains a TAIL — it needs rows ABOVE it, lifted (Activity /
-  // Pinned) or in the remainder. With nothing above, the meta pages are the
-  // whole list and render plain. `remainder.some(non-meta)` alone was wrong
-  // here: with every non-meta row lifted, the meta-only remainder fell through
-  // to the `Other pages` header instead — labelled, and wrongly.
-  const split =
-    !!metaTail && grouped && (claimed.size > 0 || remainder.some((p) => !isMetaPage(p)));
-  const rest = split ? remainder.filter((p) => !isMetaPage(p)) : remainder;
-  const meta = split ? remainder.filter((p) => isMetaPage(p)) : [];
-  if (claimed.size && rest.length) {
-    entries.push({ kind: "header", section: "all", label: jump ? "Other matches" : "Other pages" });
-  }
-
   // ── The groups' open state, decided AFTER the lift ────────────────────
+  // ⚠️ Computed HERE, above the series block and the remainder, because the
+  // series block emits before both and needs the same open-state rule the
+  // family and month rows use. It depends only on `sectionLifted` (filled by
+  // Activity and Pinned above) and on `groupMembers`, never on the remainder.
   /** The members of one group that the recall sections did not take. */
   const unlifted = (g: RailGroup): WikiListing[] =>
     (groupMembers.get(normalizeFoldKey(g.key)) ?? []).filter(
       (m) => !sectionLifted.has(normalizeRel(m.relPath)),
     );
-  /** The groups this render really DRAWS — the ones with a member left. Both
-   *  rules below are functions of this set rather than of the grouping, because
-   *  a group nothing draws can neither hold the open page nor carry a default. */
+  /** The FAMILY and MONTH groups this render really DRAWS — the ones with a
+   *  member left. The default-open rule below is a function of this set rather
+   *  than of the grouping, because a group nothing draws cannot carry a default.
+   *
+   *  Series are deliberately out: only a month can default open, and a series
+   *  draws on a different test anyway (it renders on a ghost row alone). */
   const renderedGroups = (input.groups ?? []).filter((g) => unlifted(g).length > 0);
   const defaultOpenKey = defaultOpenGroupKey(renderedGroups);
   /**
@@ -1178,13 +1256,104 @@ export function buildRail(input: RailInput): RailModel {
     }
   }
   /** A GROUP's open state: forced, else whichever spelling the reader wrote
-   *  last, else this render's default (the newest month that draws). */
+   *  last, else this render's default (the newest month that draws). A series
+   *  reads exactly the same rule — it just never carries the default. */
   const isGroupExpanded = (key: string): boolean => {
     if (forcedGroupKey === key) return true;
     const stored = groupFoldState(open, key);
     if (stored) return stored === "open";
     return key === defaultOpenKey;
   };
+
+  // ── Series ────────────────────────────────────────────────────────────
+  // Their own block, above the remainder: a series is the piece of work the
+  // reader came back to, and interleaving it with the listing by date would put
+  // it wherever its newest page happens to sort on whichever sort is selected.
+  // Within the block the groups keep the order `groupSeries` gave them, which is
+  // first appearance in the caller's own sorted list — so under a date sort the
+  // series with the newest member is first.
+  let seriesEmitted = false;
+  for (const g of seriesList) {
+    const foldKey = normalizeFoldKey(g.key);
+    const present = groupMembers.get(foldKey) ?? [];
+    const members = unlifted(g);
+    // The members the reader PINNED: on screen under `Pinned`, and named here as
+    // ghost rows so the fold does not silently lose them.
+    const ghosts = present.filter((m) => sectionLifted.has(normalizeRel(m.relPath)));
+    // ⚠️ EVERY rule-4 child in the filtered set counts — unlike a FAMILY's
+    // census below, where the lift really does take a page out of the slate for
+    // that render. A series' census says which of its members this render holds,
+    // not which ones are painted (a CLOSED fold paints none of them and still
+    // says `4 of 4`), and the three placements a retired child can take are all
+    // inside it: under its successor in the body, under that successor where
+    // Activity or a pin lifted the successor one section up, and as its own row
+    // where the reader pinned the child. Dropping the lifted-PARENT case made a
+    // series with one pinned member holding one retired child read
+    // `1 of 2 shown` with nothing hidden, and cost the roll-up its
+    // `1 superseded`.
+    const superseded = g.supersededChildren;
+    // A series with neither a member nor a ghost present is not on screen at
+    // all — a facet took every page of it — and a header standing for nothing
+    // is furniture.
+    if (!members.length && !ghosts.length) continue;
+    if (!seriesEmitted) {
+      entries.push({ kind: "header", section: "series", label: "Series" });
+      seriesEmitted = true;
+    }
+    const shown = members.length + ghosts.length + superseded.length;
+    const expanded = isGroupExpanded(foldKey);
+    entries.push({
+      kind: "group",
+      section: "series",
+      group: g,
+      foldKey,
+      // A series never defaults open, so it never offers the `closed:` spelling:
+      // its own key is what a click writes, and its absence means closed forever.
+      toggleKey: foldKey,
+      members,
+      superseded,
+      ...(ghosts.length ? { ghosts } : {}),
+      // Only when the facets are really hiding part of the series: `3 of 3` is a
+      // number that reports nothing and reads as a warning. `total` is optional
+      // on `RailGroup` because a family and a month carry none; `?? shown` is
+      // that absence read as "nothing is hidden", not a guard — a series always
+      // sets it.
+      ...(shown < (g.total ?? shown) ? { census: { shown, total: g.total! } } : {}),
+      folded: !expanded,
+      ...(forcedGroupKey === foldKey ? { forcedOpen: true } : {}),
+    });
+    if (expanded) {
+      for (const m of members) emitRow(m, "series", { inGroup: g });
+      // Ghosts last: they are a footnote about pages that are already on screen,
+      // not content, and interleaving them into the date order would cost the
+      // member rows their own.
+      for (const p of ghosts) entries.push({ kind: "ghost", section: "series", page: p, reason: "pinned" });
+    }
+  }
+
+  const remainder = filtered.filter((p) => {
+    const key = normalizeRel(p.relPath);
+    // A series member is accounted for by the block above whether that fold is
+    // open or closed, so it never falls through to the listing — the rule the
+    // family loop gets for free by emitting its groups from inside this list.
+    return !claimed.has(key) && !parentOf.has(key) && !inSeries(p);
+  });
+  // The Bookkeeping split is a recency-list affordance and nothing else: under
+  // a query the rows are exactly as today (a result list grows no furniture),
+  // and a header explains a TAIL — it needs rows ABOVE it, lifted (Activity /
+  // Pinned), in a series block, or in the remainder. With nothing above, the
+  // meta pages are the whole list and render plain. `remainder.some(non-meta)`
+  // alone was wrong here: with every non-meta row lifted, the meta-only
+  // remainder fell through to the `Other pages` header instead — labelled, and
+  // wrongly. `seriesEmitted` joins `claimed` because a CLOSED series draws a row
+  // and claims no page, so the count alone would report an empty rail above.
+  const above = claimed.size > 0 || seriesEmitted;
+  const split = !!metaTail && grouped && (above || remainder.some((p) => !isMetaPage(p)));
+  const rest = split ? remainder.filter((p) => !isMetaPage(p)) : remainder;
+  const meta = split ? remainder.filter((p) => isMetaPage(p)) : [];
+  if (above && rest.length) {
+    entries.push({ kind: "header", section: "all", label: jump ? "Other matches" : "Other pages" });
+  }
 
 
   // No `claimed` re-test: `remainder` is computed from `claimed` a few lines up
