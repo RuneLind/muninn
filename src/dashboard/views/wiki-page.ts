@@ -617,7 +617,7 @@ export async function renderWikiPage(opts?: {
        ramp darkened for exactly that reason (shared-styles.ts says so where it
        is declared) and measures 6.34:1 light; in the DARK theme the two tokens
        are the same value, so nothing moves there. --accent-light needed no such
-       swap: 6.46:1 light, 8.53:1 dark. */
+       swap: 6.46:1 light, 8.05:1 dark. */
     .wiki-act-glyph {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 11px; font-weight: 700; line-height: 1.45;
