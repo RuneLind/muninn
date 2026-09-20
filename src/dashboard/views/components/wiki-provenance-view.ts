@@ -478,8 +478,8 @@ export const PROV_UNAVAILABLE_COPY = "provenance not loaded";
 
 /**
  * The strip a page renders BEFORE its provenance is known: the same
- * `.wiki-prov-strip` block `provStripHtml` renders, so `redrawProvStrip` can
- * replace it in place, plus `wiki-prov-pending` for the spinner. Rendered only
+ * `.wiki-prov-strip` block `provStripHtml` renders, so the one writer,
+ * `placeProvStrip`, replaces it, plus `wiki-prov-pending` for the spinner. Rendered only
  * when the page answered `provenancePending` AND names a session or a Jira key
  * — the two keys that guarantee a strip (a Jira row, or at least the "N session
  * refs" cost line). A `prs:`-only page may resolve to NO strip at all

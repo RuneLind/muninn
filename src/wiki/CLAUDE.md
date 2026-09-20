@@ -877,7 +877,7 @@ empty or failed answer replaces only a placeholder — a real strip stays, so a
 Stamp refetch that re-reads a page which resolved to no keys does not remove
 the strip the reader just stamped from. Two
 writers with DOM rules of their own is how the page showed two strips twice
-(#560's fix rounds 2 and 4). The placeholder is rendered only when the
+(#560's fix rounds 1 and 4 caused it, 2 and 5 removed it). The placeholder is rendered only when the
 page names a session or a Jira key: a `prs:`-only page may resolve to no strip
 at all, so it fetches with no spinner; a strip that comes back is inserted
 after the meta row, and an empty or failed answer stays silent. The stamp route still
