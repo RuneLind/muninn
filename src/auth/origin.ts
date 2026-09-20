@@ -90,6 +90,10 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // the admin's browser visits should not be able to drive this host's outbound
   // calls, however bounded each one is.
   "/api/wiki/provenance",
+  // The per-page block: the SAME join (sessions, merges, handoffs, huginn) for
+  // one page, split off `GET /api/wiki/page` so the page open never waits on
+  // it. Listed for the same reason — it is the amplifier under its own path.
+  "/api/wiki/page/provenance",
   // The two WebSocket upgrades. They never reach this middleware — `src/index.ts`
   // handles them inside `Bun.serve`'s `fetch`, before `app.fetch` — and the
   // enforcement point is `src/auth/ws-upgrade.ts`, which consults this same

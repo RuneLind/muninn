@@ -28,7 +28,7 @@
  *
  * Everything in this file is PURE. The claude-usage lookup lives in
  * `session-ledger.ts`; the routes are `dashboard/routes/wiki-provenance.ts` and
- * the `provenance` block on `GET /api/wiki/page`.
+ * `GET /api/wiki/page/provenance` in `dashboard/routes/wiki-routes.ts`.
  */
 
 import type { WikiPageMeta } from "./store.ts";

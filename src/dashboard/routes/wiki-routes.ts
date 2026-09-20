@@ -25,7 +25,7 @@ import {
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
-import { jiraCounts } from "../../wiki/provenance.ts";
+import { hasProvenance, jiraCounts } from "../../wiki/provenance.ts";
 import { pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import {
   defaultProvenanceContext,
@@ -1785,11 +1785,20 @@ export function registerWikiRoutes(
   // node clicks send the node's normalized relPath so a same-stem page in another
   // folder can't shadow the intended page), else by `name` (first-stem-match, the
   // legacy wikilink/list-click path).
-  app.get("/api/wiki/page", async (c) => {
+  /**
+   * The ONE resolution `/api/wiki/page` and `/api/wiki/page/provenance` share:
+   * `wiki`/`bot` → registry entry, `relPath` (collision-proof) else `name`
+   * (first-stem-match) → page. The 400/404/503 ladder is the contract both
+   * answer, so it lives once.
+   */
+  type PageResolution =
+    | { ok: true; entry: ReturnType<typeof resolveWikiRequest>["entry"]; index: NonNullable<Awaited<ReturnType<typeof getWikiIndex>>>; meta: WikiPageMeta }
+    | { ok: false; res: Response };
+  async function resolvePageRequest(c: Context): Promise<PageResolution> {
     const relPathQ = c.req.query("relPath");
     const name = c.req.query("name");
     if (!relPathQ && !name) {
-      return c.json({ error: "name or relPath query param required" }, 400);
+      return { ok: false, res: c.json({ error: "name or relPath query param required" }, 400) };
     }
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
@@ -1797,14 +1806,21 @@ export function registerWikiRoutes(
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
-    if (unknownWiki) return c.json({ error: "no wiki configured for that name" }, 404);
+    if (unknownWiki) return { ok: false, res: c.json({ error: "no wiki configured for that name" }, 404) };
     const index = await getWikiIndex({ root: entry?.root });
-    if (!index) return c.json({ error: "wiki directory not found" }, 503);
+    if (!index) return { ok: false, res: c.json({ error: "wiki directory not found" }, 503) };
     const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
     if (!meta) {
       const which = relPathQ ? `relPath "${relPathQ}"` : `name "${name}"`;
-      return c.json({ error: `no wiki page for ${which}` }, 404);
+      return { ok: false, res: c.json({ error: `no wiki page for ${which}` }, 404) };
     }
+    return { ok: true, entry, index, meta };
+  }
+
+  app.get("/api/wiki/page", async (c) => {
+    const resolved = await resolvePageRequest(c);
+    if (!resolved.ok) return resolved.res;
+    const { entry, index, meta } = resolved;
     const markdown = await readWikiPage(index, meta);
     if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
 
@@ -1814,35 +1830,50 @@ export function registerWikiRoutes(
         .filter((m): m is WikiPageMeta => m !== undefined)
         .map((m) => toListing(index, m));
 
-    // The provenance strip's data: who wrote this page, which issue it serves,
-    // which PRs it landed as, and what those sessions cost. ABSENT (not empty)
-    // on a page carrying none of the keys, which is most pages. The sessions go
-    // to claude-usage in BATCHES of `SESSION_IDS_PER_CALL` (200) — one call for
-    // every page anyone has actually stamped, but not one by contract — and the
-    // whole enrichment, huginn's Jira corpus included, shares ONE
-    // `PROVENANCE_BUDGET_MS` deadline so a page open cannot cost the sum of its
-    // legs. An unreachable claude-usage degrades to bare chips rather than
-    // failing the page open.
-    // `resolveWikiRoot`, not `entry?.root`: `resolveWikiRequest` returns NO entry
-    // for the `WIKI_DIR` env-override shape, and `stampable` is computed from the
-    // wiki dir — so `undefined` here reported "not stampable" on exactly the
-    // instances configured with `WIKI_DIR`, hiding every Stamp button on a wiki
-    // the CLI covers. The read half above already resolves the same way
-    // (`getWikiIndex` calls `resolveWikiRoot` on the value it is handed), so this
-    // makes the two halves name one root.
-    const provenance = await pageProvenance(meta, provenanceCtx, resolveWikiRoot(entry?.root));
+    // The provenance strip's data is NOT joined here. `pageProvenance` fans out
+    // to claude-usage and huginn under a 10 s budget, and awaiting it made every
+    // stamped page open wait for the slowest leg (measured: a plan page with
+    // four sessions and three PRs opened seconds after its markdown was ready).
+    // The page answers with `provenancePending: true` when the page carries
+    // any of the keys, the reader renders a placeholder under the title, and
+    // fetches `GET /api/wiki/page/provenance` for the block itself. ABSENT (not
+    // false) on a page carrying none of the keys, which is most pages — the
+    // client's one gate stays "is this key here at all".
 
     return c.json({
       // The two callers that opt fields in — see `toListing`. Deliberately NOT
       // `listings()` below, whose arrays are the link-heavy pages' bulk.
       meta: toListing(index, meta, { includeDesc: true, includeProvenance: true }),
-      ...(provenance ? { provenance } : {}),
+      ...(hasProvenance(meta) ? { provenancePending: true } : {}),
       // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
       // a link opened on a non-default wiki lands on the DEFAULT one.
       html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title, wiki: entry?.name }),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
     });
+  });
+
+  // The provenance block for ONE page — who wrote it, which issue it serves,
+  // which PRs it landed as, and what those sessions cost — split out of
+  // `/api/wiki/page` so the page open never waits on it. The sessions go to
+  // claude-usage in BATCHES of `SESSION_IDS_PER_CALL` (200) — one call for every
+  // page anyone has actually stamped, but not one by contract — and the whole
+  // enrichment, huginn's Jira corpus included, shares ONE `PROVENANCE_BUDGET_MS`
+  // deadline so a fetch cannot cost the sum of its legs. An unreachable
+  // claude-usage degrades to bare chips rather than failing the request.
+  // Answers `{}` (not 404) for a page carrying none of the keys: the page exists,
+  // it has nothing to say. Same registry resolution as `/api/wiki/page`.
+  // `resolveWikiRoot`, not `entry?.root`: `resolveWikiRequest` returns NO entry
+  // for the `WIKI_DIR` env-override shape, and `stampable` is computed from the
+  // wiki dir — so `undefined` here reported "not stampable" on exactly the
+  // instances configured with `WIKI_DIR`, hiding every Stamp button on a wiki
+  // the CLI covers.
+  app.get("/api/wiki/page/provenance", async (c) => {
+    const resolved = await resolvePageRequest(c);
+    if (!resolved.ok) return resolved.res;
+    const { entry, index, meta } = resolved;
+    const provenance = await pageProvenance(meta, provenanceCtx, resolveWikiRoot(entry?.root));
+    return c.json(provenance ? { provenance } : {});
   });
 
   // Semantic "Similar" articles for one page: a query built from the page's

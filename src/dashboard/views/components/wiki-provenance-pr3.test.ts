@@ -27,7 +27,11 @@ import {
   linksNotes,
   modelLabel,
   provLineHtml,
+  PROV_PENDING_COPY,
+  PROV_UNAVAILABLE_COPY,
+  provPendingHtml,
   provStripHtml,
+  provUnavailableHtml,
   STAMP_CONFIRM_LABEL,
   STAMP_LABEL,
 } from "./wiki-provenance-view.ts";
@@ -701,5 +705,28 @@ describe("the Stamp button's message span", () => {
   test("and is absent where there is no Stamp to explain", () => {
     const html = chainHtml(payload({ ghosts: [prGhost], stampable: false }), UTC);
     expect(html).not.toContain("data-prov-stamp-msg");
+  });
+});
+
+describe("the placeholder strip a deferred page renders", () => {
+  test("is a .wiki-prov-strip so the real block can replace it in place, and is busy", () => {
+    const html = provPendingHtml();
+    expect(html).toContain('class="wiki-prov-strip wiki-prov-pending"');
+    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain("wiki-prov-spinner");
+    expect(html).toContain(PROV_PENDING_COPY);
+    // Not a control: the disclosure class carries a pointer cursor.
+    expect(html).not.toContain("wiki-prov-line");
+  });
+
+  test("its failed state is still a .wiki-prov-strip, without the spinner", () => {
+    const html = provUnavailableHtml();
+    expect(html).toContain('class="wiki-prov-strip wiki-prov-unavailable"');
+    expect(html).not.toContain("wiki-prov-spinner");
+    expect(html).not.toContain("aria-busy");
+    expect(html).toContain(PROV_UNAVAILABLE_COPY);
+    // The way back to the strip — and to the Stamp button it carries — without
+    // a reload.
+    expect(html).toContain('data-prov-retry');
   });
 });

@@ -149,6 +149,9 @@ describe("decideOrigin — the pure rule", () => {
     // from this host's network position — the property §4 cares about.
     expect(SIDE_EFFECTING_GETS).toContain("/api/wiki/provenance");
     expect(isSideEffectingRequest("GET", "/api/wiki/provenance")).toBe(true);
+    // The per-page block is the SAME fan-out under its own path.
+    expect(SIDE_EFFECTING_GETS).toContain("/api/wiki/page/provenance");
+    expect(isSideEffectingRequest("GET", "/api/wiki/page/provenance")).toBe(true);
     expect(
       decideOrigin({
         ...base,

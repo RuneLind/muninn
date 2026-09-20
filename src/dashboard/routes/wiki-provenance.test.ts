@@ -225,26 +225,83 @@ describe("the listing and the page route", () => {
     }
   });
 
-  test("/api/wiki/page carries the page-only keys on its meta AND the provenance block", async () => {
+  test("/api/wiki/page carries the page-only keys on its meta and DEFERS the block", async () => {
     const body = await (await pageApp.request("/api/wiki/page?wiki=mimir&relPath=plan.md")).json();
     expect(body.meta.sessions).toEqual([SESSION_A, SESSION_B]);
     expect(body.meta.prs).toEqual(["RuneLind/muninn#543"]);
     expect(body.meta.sessionsBackfilled).toBe("2026-10-14");
+    // The join reaches claude-usage and huginn under a 10 s budget; a page open
+    // must not wait on it. The page says there is a block to fetch, and nothing
+    // more.
+    expect(body.provenancePending).toBe(true);
+    expect("provenance" in body).toBe(false);
+  });
+
+  test("/api/wiki/page/provenance answers the block for a stamped page", async () => {
+    const body = await (
+      await pageApp.request("/api/wiki/page/provenance?wiki=mimir&relPath=plan.md")
+    ).json();
     expect(body.provenance.sessions.map((s: { id: string }) => s.id)).toEqual([ID_A, "ses_7f3a9b2c1d"]);
     expect(body.provenance.prs[0].url).toBe("https://github.com/RuneLind/muninn/pull/543");
     expect(body.provenance.jira[0].url).toBe("https://nav.atlassian.net/browse/MELOSYS-8045");
     expect(body.provenance.backfilled).toBe("2026-10-14");
     // No claude-usage on this host: bare chips and an honest ledger state,
-    // rather than a failed page open.
+    // rather than a failed request.
     expect(body.provenance.ledger.reachable).toBe(false);
     expect(body.provenance.ledger.configured).toBe(false);
     expect(body.provenance.totalCost).toBe(0);
     expect(body.provenance.costedSessions).toBe(0);
   });
 
-  test("an unstamped page gets NO provenance field at all", async () => {
+  test("/api/wiki/page/provenance resolves by name too", async () => {
+    const body = await (
+      await pageApp.request("/api/wiki/page/provenance?wiki=mimir&name=plan")
+    ).json();
+    expect(body.provenance.prs[0].url).toBe("https://github.com/RuneLind/muninn/pull/543");
+  });
+
+  test("/api/wiki/page does not WAIT on the join: a hanging ledger cannot hold the page open", async () => {
+    // A ledger that never answers. The page route must answer anyway — the
+    // deferral is the whole point of `provenancePending`, and a re-await of
+    // `pageProvenance` on the page route would sit here until the budget.
+    const hung = new Hono();
+    registerWikiRoutes(
+      hung,
+      { knowledgeApiUrl: "http://localhost:8321", claudeUsageUrl: "http://127.0.0.1:8787", claudeUsagePublicUrl: null } as Config,
+      testCtx({
+        budgetMs: 3_000,
+        sessionLedger: {
+          ...testCtx().sessionLedger,
+          fetchSessions: () => new Promise(() => {}),
+          fetchMerges: () => new Promise(() => {}),
+        },
+      }),
+    );
+    const started = Date.now();
+    const res = await Promise.race([
+      hung.request("/api/wiki/page?wiki=mimir&relPath=plan.md"),
+      new Promise<null>((r) => setTimeout(() => r(null), 1_000)),
+    ]);
+    expect(res).not.toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    const body = await res!.json();
+    expect(body.provenancePending).toBe(true);
+  });
+
+  test("/api/wiki/page/provenance answers {} for an unstamped page and 404 for none", async () => {
+    const plain = await pageApp.request("/api/wiki/page/provenance?wiki=mimir&relPath=plain.md");
+    expect(plain.status).toBe(200);
+    expect(await plain.json()).toEqual({});
+    const missing = await pageApp.request("/api/wiki/page/provenance?wiki=mimir&relPath=nope.md");
+    expect(missing.status).toBe(404);
+    const noRef = await pageApp.request("/api/wiki/page/provenance?wiki=mimir");
+    expect(noRef.status).toBe(400);
+  });
+
+  test("an unstamped page gets NO provenancePending field at all", async () => {
     const body = await (await pageApp.request("/api/wiki/page?wiki=mimir&relPath=plain.md")).json();
     expect("provenance" in body).toBe(false);
+    expect("provenancePending" in body).toBe(false);
   });
 });
 
@@ -402,7 +459,7 @@ describe("?session= prices the session ASKED ABOUT", () => {
 });
 
 describe("an unconfigured host", () => {
-  test("never fetches the default claude-usage on a page open", async () => {
+  test("never fetches the default claude-usage on a page open or its provenance fetch", async () => {
     // `claudeUsageUrl: null` on the page app. Before the fix the route built
     // deps pointing at `127.0.0.1:8787` and fetched it on EVERY stamped page
     // open, reporting an "unreachable" service the operator never ran — and the
@@ -425,7 +482,14 @@ describe("an unconfigured host", () => {
         },
       }),
     });
-    const body = await (await quiet.request("/api/wiki/page?wiki=mimir&relPath=plan.md")).json();
+    // Both halves: the page open itself asks nothing, and the deferred block
+    // asks nothing either.
+    const page = await (await quiet.request("/api/wiki/page?wiki=mimir&relPath=plan.md")).json();
+    expect(page.provenancePending).toBe(true);
+    expect(calls).toBe(0);
+    const body = await (
+      await quiet.request("/api/wiki/page/provenance?wiki=mimir&relPath=plan.md")
+    ).json();
     expect(calls).toBe(0);
     expect(body.provenance.ledger).toEqual({
       asked: false,

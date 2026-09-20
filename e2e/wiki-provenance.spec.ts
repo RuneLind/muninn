@@ -109,11 +109,13 @@ const NEST_REL = "nested.md";
 const MERGESDOWN_REL = "merges-down.md";
 const DAMAGED_REL = "damaged.md";
 const PLAIN_REL = "plain.md";
+const PRSONLY_REL = "prsonly.md";
+const PRSNONE_REL = "prsnone.md";
 const OTHER_REL = "other.md";
 const MIXED_REL = "mixed.md";
 
 /** How many pages the temp wiki holds — every "the whole wiki" assertion below. */
-const ALL_PAGES = 8;
+const ALL_PAGES = 10;
 
 const DAMAGED = [
   "---",
@@ -171,6 +173,35 @@ const STAMPME = [
   "# Stamp me",
   "",
   "A page with a PR ghost to stamp.",
+  "",
+].join("\n");
+
+// `prs:` alone: a page whose strip may render to NOTHING (no Jira row, and on a
+// host where the `?prs=` leg finds no ghost, no cost line either), so it must
+// get no placeholder — a spinner that vanishes is worse than no spinner. #543
+// IS a merge the ledger stub knows, so on this suite the strip does come back
+// and the no-placeholder insertion path is the one exercised.
+const PRSONLY = [
+  "---",
+  "type: note",
+  "title: PRs only",
+  "prs: [RuneLind/muninn#543]",
+  "---",
+  "",
+  "# PRs only",
+  "",
+].join("\n");
+
+// `prs:` alone naming a merge the ledger stub does NOT know: the strip resolves
+// to nothing at all, which is the case the no-placeholder gate exists for.
+const PRSNONE = [
+  "---",
+  "type: note",
+  "title: PRs unknown",
+  "prs: [RuneLind/muninn#9999]",
+  "---",
+  "",
+  "# PRs unknown",
   "",
 ].join("\n");
 
@@ -562,6 +593,8 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, SHAPE_REL), shape, "utf8");
   await writeFile(path.join(root, DAMAGED_REL), DAMAGED, "utf8");
   await writeFile(path.join(root, PLAIN_REL), PLAIN, "utf8");
+  await writeFile(path.join(root, PRSONLY_REL), PRSONLY, "utf8");
+  await writeFile(path.join(root, PRSNONE_REL), PRSNONE, "utf8");
   await writeFile(path.join(root, OTHER_REL), OTHER, "utf8");
   await writeFile(path.join(root, MIXED_REL), MIXED, "utf8");
   await writeFile(path.join(root, MERGESDOWN_REL), MERGES_DOWN, "utf8");
@@ -1278,5 +1311,300 @@ test.describe("Wiki reader: provenance", () => {
     expect((await res.json()).error).toContain("WIKI_READONLY_ROOTS");
     const after = await readFile(path.join(roRoot, RO_REL), "utf8");
     expect(after).not.toContain(STAMP_GHOST);
+  });
+
+  test("the article renders BEFORE the provenance block, behind a spinner", async ({ page }) => {
+    // Hold the provenance answer: the page open must not wait on it. The route
+    // is intercepted, not the ledger stub, so the page request itself is the
+    // real one and the deferral is proved at the seam the reader uses.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      await held;
+      await route.continue();
+    });
+    await open_(page, SHAPE_REL);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Wiki provenance — the frontmatter shape");
+    const pending = page.locator(".wiki-prov-strip.wiki-prov-pending");
+    await expect(pending).toBeVisible();
+    await expect(pending).toHaveAttribute("aria-busy", "true");
+    await expect(pending.locator(".wiki-prov-spinner")).toHaveCount(1);
+    await expect(pending).toContainText("loading provenance");
+    release();
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+  });
+
+  test("a provenance fetch that fails outright becomes one line, not a spinner", async ({ page }) => {
+    await page.route("**/api/wiki/page/provenance?**", (route) => route.abort());
+    await open_(page, SHAPE_REL);
+    const strip = page.locator(".wiki-prov-strip.wiki-prov-unavailable");
+    await expect(strip).toContainText("provenance not loaded");
+    await expect(page.locator(".wiki-prov-spinner")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+  });
+
+  test("a block that lands after the reader navigated away is dropped", async ({ page }) => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      await held;
+      await route.continue();
+    });
+    await open_(page, SHAPE_REL);
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    // In-app navigation, so the held fetch stays in flight under the new page.
+    await page.locator(`.wiki-list-item[data-relpath="${PLAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
+    release();
+    // Give the released answer time to arrive — the assertion is that it does
+    // NOT render: the shape page's chain under the plain page's title would be
+    // another page's sessions and cost.
+    await page.waitForTimeout(300);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(0);
+  });
+
+  test("a prs-only page gets no placeholder, since its strip may render to nothing", async ({ page }) => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      await held;
+      await route.continue();
+    });
+    await open_(page, PRSONLY_REL);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("PRs only");
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
+    release();
+    // The strip that comes back lands where `articleHeadHtml` would have put
+    // it: directly after the meta row, inside the head.
+    await expect(page.locator(".wiki-article-head .wiki-meta-row + .wiki-prov-strip")).toHaveCount(1);
+    await expect(page.locator(".wiki-prov-pending")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+  });
+
+  test("returning to a page before its first block arrived renders ONE strip", async ({ page }) => {
+    // A → B → A with the first answer held: fetch 1 belongs to the first
+    // visit, fetch 2 to the second (the plain page in between fetches
+    // nothing). Both are for the same relPath, so the navigation guard lets
+    // both through — and only one may render.
+    let calls = 0;
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      calls += 1;
+      if (calls === 1) await held;
+      await route.continue();
+    });
+    await open_(page, SHAPE_REL);
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    await page.locator(`.wiki-list-item[data-relpath="${PLAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
+    await page.locator(`.wiki-list-item[data-relpath="${SHAPE_REL}"]`).click();
+    await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
+    const first = page.waitForResponse((r) => r.url().includes("/api/wiki/page/provenance"));
+    release();
+    await first;
+    await expect(page.locator(".wiki-article-head .wiki-prov-strip")).toHaveCount(1);
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
+  });
+
+  test("a stale FAILED load cannot bury the current visit's block", async ({ page }) => {
+    // A → B → A where the first visit's load fails AFTER the second visit's
+    // load was sent, and the second succeeds — a claude-usage blip that
+    // clears. The newest load wins: the reader sees the block, not the
+    // failure line of a visit that is over.
+    let calls = 0;
+    let failFirst: () => void = () => {};
+    const firstHeld = new Promise<void>((r) => {
+      failFirst = r;
+    });
+    let releaseSecond: () => void = () => {};
+    const secondHeld = new Promise<void>((r) => {
+      releaseSecond = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      calls += 1;
+      if (calls === 1) {
+        await firstHeld;
+        await route.abort();
+        return;
+      }
+      await secondHeld;
+      await route.continue();
+    });
+    await open_(page, SHAPE_REL);
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    await page.locator(`.wiki-list-item[data-relpath="${PLAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
+    await page.locator(`.wiki-list-item[data-relpath="${SHAPE_REL}"]`).click();
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    await expect.poll(() => calls).toBe(2);
+    failFirst();
+    // The stale failure must not even flash: give it a beat, then the
+    // placeholder is still the placeholder.
+    await page.waitForTimeout(200);
+    await expect(page.locator(".wiki-prov-unavailable")).toHaveCount(0);
+    const second = page.waitForResponse((r) => r.url().includes("/api/wiki/page/provenance"));
+    releaseSecond();
+    await second;
+    await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
+    await expect(page.locator(".wiki-prov-unavailable")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+  });
+
+  test("a prs-only page whose strip resolves to nothing shows nothing, ever", async ({ page }) => {
+    const answered = page.waitForResponse((r) => r.url().includes("/api/wiki/page/provenance"));
+    await open_(page, PRSNONE_REL);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("PRs unknown");
+    await answered;
+    await page.waitForTimeout(200);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
+  });
+
+  test("retry after a failed fetch brings the strip, and its Stamp, back", async ({ page }) => {
+    let fail = true;
+    await page.route("**/api/wiki/page/provenance?**", (route) =>
+      fail ? route.abort() : route.continue(),
+    );
+    await open_(page, SHAPE_REL);
+    const retry = page.locator(".wiki-prov-unavailable [data-prov-retry]");
+    await expect(retry).toBeVisible();
+    fail = false;
+    await retry.click();
+    await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
+    await expect(page.locator(".wiki-prov-unavailable")).toHaveCount(0);
+  });
+
+  test("a failed fetch on a page that rendered no placeholder is silent", async ({ page }) => {
+    await page.route("**/api/wiki/page/provenance?**", (route) => route.abort());
+    await open_(page, PRSONLY_REL);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("PRs only");
+    await page.waitForTimeout(300);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-unavailable")).toHaveCount(0);
+  });
+
+  test("a Stamp answer that lands after the reader navigated does not redraw the new page", async ({ page }) => {
+    // The POST is answered by the test with the shape page's OWN block (read
+    // through the real route), so nothing is written; the body is shaped like
+    // the stamp route's `{ outcome, provenance }` answer, with `written` as the
+    // outcome it reports for a real write — held until the reader is on the
+    // chain page.
+    const block = await (
+      await page.request.get(`${BASE}/api/wiki/page/provenance?wiki=${WIKI}&relPath=${SHAPE_REL}`)
+    ).json();
+    expect(block.provenance).toBeTruthy();
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/provenance/stamp", async (route) => {
+      await held;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ outcome: "written", provenance: block.provenance }),
+      });
+    });
+    await open_(page, SHAPE_REL);
+    const rows = await openChain(page);
+    await rows.nth(4).locator(".wiki-chain-stamp").click();
+    await page.locator(`.wiki-list-item[data-relpath="${CHAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("The handoff chain");
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
+    const chainRowsBefore = await page.locator(".wiki-chain-row").count();
+    const answered = page.waitForResponse((r) => r.url().includes("/api/wiki/provenance/stamp"));
+    release();
+    await answered;
+    await page.waitForTimeout(200);
+    // The chain page keeps its own strip: same row count, and none of the
+    // shape page's rows.
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(chainRowsBefore);
+    await expect(page.locator(".wiki-chain-reason", { hasText: "merged #543" })).toHaveCount(0);
+  });
+
+  test("a Stamp answer with no block, landing while the page's own load is slow, leaves ONE strip", async ({ page }) => {
+    // Two LOADS for one page through one writer: the reader presses Stamp on
+    // A, leaves, and returns before the POST answers; A's second load is held,
+    // the POST answers with no block, and the refetch it triggers is a warm
+    // GET that lands first. Whatever order they land in, one strip.
+    let shapeLoads = 0;
+    let releaseLoad: () => void = () => {};
+    const loadHeld = new Promise<void>((r) => {
+      releaseLoad = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      if (route.request().url().includes(encodeURIComponent(SHAPE_REL))) {
+        shapeLoads += 1;
+        if (shapeLoads === 2) await loadHeld;
+      }
+      await route.continue();
+    });
+    let releaseStamp: () => void = () => {};
+    const stampHeld = new Promise<void>((r) => {
+      releaseStamp = r;
+    });
+    await page.route("**/api/wiki/provenance/stamp", async (route) => {
+      await stampHeld;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ outcome: "written" }),
+      });
+    });
+    await open_(page, SHAPE_REL);
+    const rows = await openChain(page);
+    await rows.nth(4).locator(".wiki-chain-stamp").click();
+    await page.locator(`.wiki-list-item[data-relpath="${PLAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
+    await page.locator(`.wiki-list-item[data-relpath="${SHAPE_REL}"]`).click();
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    await expect.poll(() => shapeLoads).toBe(2);
+    releaseStamp();
+    // The refetch's GET is the THIRD shape load and passes straight through.
+    await expect.poll(() => shapeLoads).toBe(3);
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
+    const second = page.waitForResponse((r) => r.url().includes(encodeURIComponent(SHAPE_REL)));
+    releaseLoad();
+    await second;
+    await page.waitForTimeout(200);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
+  });
+
+  test("a Stamp refetch that answers {} keeps the strip the reader was looking at", async ({ page }) => {
+    // The stamp route answers 200 with no block when the page did not
+    // re-resolve after the write, and that is the same state in which the
+    // refetch's GET answers {}. A successful write must not make the strip,
+    // its chain and its Stamp button vanish.
+    let loads = 0;
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      loads += 1;
+      if (loads >= 2) {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/api/wiki/provenance/stamp", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ outcome: "written" }) }),
+    );
+    await open_(page, SHAPE_REL);
+    const rows = await openChain(page);
+    await rows.nth(4).locator(".wiki-chain-stamp").click();
+    await expect.poll(() => loads).toBe(2);
+    await page.waitForTimeout(200);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+    await expect(page.locator(".wiki-prov-line")).toHaveAttribute("aria-expanded", "true");
   });
 });

@@ -1,6 +1,6 @@
 /**
  * The reader's provenance VIEW — every string and every fragment of markup the
- * browser shows for `/api/wiki/page`'s `provenance` block, with no DOM in sight.
+ * browser shows for the `GET /api/wiki/page/provenance` block, with no DOM in sight.
  *
  * **One surface, under the title.** The strip is a collapsed LINE — the Jira
  * row, then one sentence of cost plus a mark per event — that opens in place
@@ -467,6 +467,51 @@ function jiraKeyFilterable(key: string, known?: Record<string, number> | null): 
  * the facet does not hold gets neither, and says why in its `title`, because the
  * browse URL for a non-key is as dead as the filter (see `jiraKeyFilterable`).
  */
+/** What the placeholder strip says while `GET /api/wiki/page/provenance` is in
+ *  flight. The page is already readable above it; this line only says the
+ *  chain is coming, so it stays as short as a caption. */
+export const PROV_PENDING_COPY = "loading provenance…";
+/** What the placeholder becomes when the fetch fails outright (network, a 5xx).
+ *  A degraded LEDGER is not this — that answers 200 with bare chips and its own
+ *  reason; this is the one case where nothing at all came back. */
+export const PROV_UNAVAILABLE_COPY = "provenance not loaded";
+
+/**
+ * The strip a page renders BEFORE its provenance is known: the same
+ * `.wiki-prov-strip` block `provStripHtml` renders, so the one writer,
+ * `placeProvStrip`, replaces it, plus `wiki-prov-pending` for the spinner. Rendered only
+ * when the page answered `provenancePending` AND names a session or a Jira key
+ * — the two keys that guarantee a strip (a Jira row, or at least the "N session
+ * refs" cost line). A `prs:`-only page may resolve to NO strip at all
+ * (`provStripHtml` returns "" with no Jira row and no cost line), and a spinner
+ * that then vanishes and shifts the article is worse than no spinner.
+ */
+export function provPendingHtml(): string {
+  return (
+    `<div class="wiki-prov-strip wiki-prov-pending" aria-busy="true">` +
+    `<span class="wiki-prov-cost"><span class="wiki-prov-spinner" aria-hidden="true"></span>` +
+    `${esc(PROV_PENDING_COPY)}</span></div>`
+  );
+}
+
+/** The retry control's label on the failed state. */
+const PROV_RETRY_LABEL = "retry";
+
+/**
+ * The placeholder's state when the fetch itself failed: the reason and a retry.
+ * The retry is not decoration — the Stamp button lives inside the real strip,
+ * so without a way to fetch again a failed load costs the reader the Stamp
+ * affordance until a reload.
+ */
+export function provUnavailableHtml(): string {
+  return (
+    `<div class="wiki-prov-strip wiki-prov-unavailable">` +
+    `<span class="wiki-prov-cost">${esc(PROV_UNAVAILABLE_COPY)} · ` +
+    `<button type="button" class="wiki-prov-retry" data-prov-retry>${esc(PROV_RETRY_LABEL)}</button>` +
+    `</span></div>`
+  );
+}
+
 export function provStripHtml(
   p: ProvenancePayload,
   known?: Record<string, number> | null,
