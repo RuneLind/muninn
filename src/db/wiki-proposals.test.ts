@@ -19,6 +19,10 @@ import {
   getLiveOrAppliedTopicKeysByWiki,
   getRecentlyRejectedTopicKeysByWiki,
   deleteSourceProposalsForDoc,
+  listWikiProposalsByGroup,
+  approveWikiProposalGroup,
+  rejectWikiProposalGroup,
+  getLintGroupKeysByWiki,
   type InsertWikiProposalParams,
 } from "./wiki-proposals.ts";
 
@@ -328,5 +332,91 @@ describe("deleteSourceProposalsForDoc", () => {
   test("a doc with no proposals is a no-op with empty lists", async () => {
     const res = await deleteSourceProposalsForDoc(`delsrc-none-${Date.now()}`, "youtube-summaries", "nope.md");
     expect(res).toEqual({ deleted: [], kept: [] });
+  });
+});
+
+/**
+ * `group_key` — the column the lint fixes' one-card-many-diffs gate rests on.
+ * Real Postgres: the round trip, the two group CAS verbs, and the skip list
+ * that makes Dismiss durable.
+ */
+describe("lint groups", () => {
+  const GROUP = "lint:series-unnamed:0123456789ab";
+  const OTHER = "lint:series-unnamed:ffffffffffff";
+
+  function lintRow(relPath: string, group = GROUP): InsertWikiProposalParams {
+    return makeProposal({
+      botName: "lintwiki",
+      wikiName: "lintwiki",
+      topicKey: `${group}:${relPath}`,
+      groupKey: group,
+      kind: "lint",
+      mode: "update",
+      targetPath: relPath,
+      baseHash: "a".repeat(64),
+      sourceDocs: [],
+      rationale: "two linked pages declare no series:",
+    });
+  }
+
+  test("group_key round-trips, and every other kind keeps it NULL", async () => {
+    const lint = await insertWikiProposal(lintRow("plans/a.mdx"));
+    expect(lint?.groupKey).toBe(GROUP);
+    expect((await getWikiProposalById(lint!.id))?.groupKey).toBe(GROUP);
+    const plain = await insertWikiProposal(makeProposal({ topicKey: "plain-topic" }));
+    expect(plain?.groupKey).toBeNull();
+  });
+
+  test("the rows of one group read back together, in target_path order", async () => {
+    await insertWikiProposal(lintRow("plans/b.mdx"));
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await insertWikiProposal(lintRow("plans/z.mdx", OTHER));
+
+    const rows = await listWikiProposalsByGroup(GROUP);
+    expect(rows.map((r) => r.targetPath)).toEqual(["plans/a.mdx", "plans/b.mdx"]);
+  });
+
+  test("approve CASes every draft of the group, and a second call claims nothing", async () => {
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await insertWikiProposal(lintRow("plans/b.mdx"));
+    await insertWikiProposal(lintRow("plans/z.mdx", OTHER));
+
+    const first = await approveWikiProposalGroup(GROUP);
+    expect(first.map((r) => r.targetPath).sort()).toEqual(["plans/a.mdx", "plans/b.mdx"]);
+    expect(first.every((r) => r.status === "approved")).toBe(true);
+    // The loser of a two-reviewer race gets nothing, which is how the route
+    // tells "I claimed it" from "somebody else did".
+    expect(await approveWikiProposalGroup(GROUP)).toEqual([]);
+    // …and the OTHER group is untouched.
+    expect((await listWikiProposalsByGroup(OTHER))[0]!.status).toBe("draft");
+  });
+
+  test("reject CASes every draft and stamps resolved_at", async () => {
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await insertWikiProposal(lintRow("plans/b.mdx"));
+
+    const rejected = await rejectWikiProposalGroup(GROUP);
+    expect(rejected).toHaveLength(2);
+    expect(rejected.every((r) => r.status === "rejected" && r.resolvedAt !== null)).toBe(true);
+    expect(await rejectWikiProposalGroup(GROUP)).toEqual([]);
+  });
+
+  test("the skip list holds a group in EVERY status — which is what makes Dismiss durable", async () => {
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await rejectWikiProposalGroup(GROUP);
+    const keys = await getLintGroupKeysByWiki("lintwiki");
+    // A rejected group's key is still there, so the next lint pass skips the
+    // finding rather than re-proposing it forever.
+    expect(keys.has(GROUP)).toBe(true);
+    expect(keys.has(OTHER)).toBe(false);
+  });
+
+  test("a group's rows do not collide on topic_key while they are live", async () => {
+    // The live unique index is (wiki, topic_key), so two members of one group
+    // are only insertable because the page path is IN the topic key.
+    expect(await insertWikiProposal(lintRow("plans/a.mdx"))).not.toBeNull();
+    expect(await insertWikiProposal(lintRow("plans/b.mdx"))).not.toBeNull();
+    // …and re-seeding the same page IS refused by that index.
+    expect(await insertWikiProposal(lintRow("plans/a.mdx"))).toBeNull();
   });
 });

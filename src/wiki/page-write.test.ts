@@ -243,6 +243,7 @@ test("TOCTOU: a gardener apply + an append on one wiki serialize — both log en
     botName: "jarvis",
     wikiName: null,
     topicKey: "new-concept",
+    groupKey: null,
     kind: "concept",
     mode: "create",
     targetPath: "concepts/New Concept.md",

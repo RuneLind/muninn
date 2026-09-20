@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   applyWikiProposal,
+  applyWikiProposalGroup,
   insertLogEntry,
   reindexCollectionFor,
   draftTitle,
@@ -12,6 +13,7 @@ import {
   type ApplyDeps,
 } from "./apply.ts";
 import { commitWikiChange, __resetForTest as resetCommitQueue } from "../wiki/commit.ts";
+import { runWikiWriteExclusive, __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import { sha256 } from "./util.ts";
 import { buildWikiIndex } from "../wiki/store.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
@@ -54,6 +56,7 @@ function makeProposal(overrides: Partial<WikiProposal> = {}): WikiProposal {
     botName: "jarvis",
     wikiName: null,
     topicKey: "context-compaction",
+    groupKey: null,
     kind: "concept",
     mode: "create",
     targetPath: "concepts/Context Compaction.md",
@@ -840,5 +843,154 @@ describe("applyWikiProposal → commit seam (acceptance)", () => {
     expect((await git(["log", "--format=%s"])).out).toBe("init");
     // The writes are present as uncommitted files.
     expect((await git(["status", "--porcelain"])).out).not.toBe("");
+  });
+});
+
+/**
+ * Group apply — the lint kind's own path.
+ *
+ * Two properties nothing else can see: the whole group runs inside ONE write
+ * section (so no other wiki writer interleaves between its rows), and a row that
+ * is not `applied` STOPS the group before the next row is written.
+ */
+describe("applyWikiProposalGroup", () => {
+  let wikiDir: string;
+
+  const PAGE_A = "plans/a.mdx";
+  const PAGE_B = "plans/b.mdx";
+  const pageBody = (title: string) => `---\ntitle: ${title}\n---\n\nBody.\n`;
+
+  function lintRow(id: string, relPath: string, current: string): WikiProposal {
+    return makeProposal({
+      id,
+      kind: "lint",
+      mode: "update",
+      groupKey: "lint:series-unnamed:deadbeef1234",
+      topicKey: `lint:series-unnamed:deadbeef1234:${relPath}`,
+      targetPath: relPath,
+      baseHash: sha256(current),
+      draft: current.replace("---\n\n", "series: prov\n---\n\n"),
+      sourceDocs: [],
+    });
+  }
+
+  function deps(overrides: Partial<ApplyDeps> = {}): ApplyDeps {
+    return {
+      wikiDir,
+      now: () => Date.parse("2026-09-20T10:00:00Z"),
+      readFile: async (absPath) => {
+        try {
+          return await readFile(absPath, "utf8");
+        } catch {
+          return null;
+        }
+      },
+      writeFile: async (absPath, content) => {
+        await mkdir(path.dirname(absPath), { recursive: true });
+        await writeFile(absPath, content);
+      },
+      getWikiIndex: () => buildWikiIndex(wikiDir),
+      refreshIndex: async () => {},
+      reindex: async () => {},
+      ...overrides,
+    };
+  }
+
+  beforeEach(async () => {
+    wikiDir = await mkdtemp(path.join(tmpdir(), "gardener-group-"));
+    __resetWikiWriteQueueForTest();
+    await mkdir(path.join(wikiDir, "plans"), { recursive: true });
+    await writeFile(path.join(wikiDir, PAGE_A), pageBody("A"));
+    await writeFile(path.join(wikiDir, PAGE_B), pageBody("B"));
+  });
+  afterEach(async () => {
+    await rm(wikiDir, { recursive: true, force: true });
+  });
+
+  test("takes the per-wiki write section ONCE for the whole group", async () => {
+    const order: string[] = [];
+    let competitor: Promise<void> | null = null;
+    const rows = [
+      lintRow("r1", PAGE_A, pageBody("A")),
+      lintRow("r2", PAGE_B, pageBody("B")),
+    ];
+
+    const res = await applyWikiProposalGroup(
+      rows,
+      deps({
+        writeFile: async (absPath, content) => {
+          order.push(`write:${path.basename(absPath)}`);
+          // Enqueued from INSIDE the group's section on the first write. With one
+          // section it runs after the LAST row; with a section per row it would
+          // slot in between them, which is exactly the interleaving this rule
+          // exists to prevent (`log.md` is wiki-global).
+          competitor ??= runWikiWriteExclusive(wikiDir, async () => {
+            order.push("other-writer");
+          });
+          await mkdir(path.dirname(absPath), { recursive: true });
+          await writeFile(absPath, content);
+        },
+      }),
+    );
+
+    expect(res.results.map((r) => r.outcome.outcome)).toEqual(["applied", "applied"]);
+    expect(res.stoppedAt).toBeUndefined();
+    await competitor;
+    expect(order[order.length - 1]).toBe("other-writer");
+    expect(order.filter((o) => o === "other-writer")).toHaveLength(1);
+    expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toContain("series: prov");
+    expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).toContain("series: prov");
+  });
+
+  test("stops at a stale row; earlier rows stay written, later rows are never attempted", async () => {
+    const rows = [
+      lintRow("r1", PAGE_A, pageBody("A")),
+      { ...lintRow("r2", PAGE_B, pageBody("B")), baseHash: "0".repeat(64) },
+      lintRow("r3", PAGE_B, pageBody("B")),
+    ];
+    const res = await applyWikiProposalGroup(rows, deps());
+
+    expect(res.results).toHaveLength(2);
+    expect(res.stoppedAt?.id).toBe("r2");
+    expect(res.stoppedAt?.outcome.outcome).toBe("stale");
+    expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toContain("series: prov");
+    expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).not.toContain("series: prov");
+  });
+
+  test("makes ONE commit over every path the group touched", async () => {
+    const commits: Array<{ paths: string[]; message: string }> = [];
+    const rows = [
+      lintRow("r1", PAGE_A, pageBody("A")),
+      lintRow("r2", PAGE_B, pageBody("B")),
+    ];
+    await applyWikiProposalGroup(
+      rows,
+      deps({
+        commit: async (paths, message) => {
+          commits.push({ paths, message });
+        },
+      }),
+    );
+    expect(commits).toHaveLength(1);
+    expect(commits[0]!.paths.sort()).toEqual([PAGE_A, PAGE_B, "log.md"].sort());
+    expect(commits[0]!.message).toContain("2 pages");
+  });
+
+  test("a lint draft is written byte-exact — no alias strip, no link containment, no newline collapse", async () => {
+    // A page whose body carries a wikilink to a page that does NOT exist, an
+    // alias another page owns, and TWO trailing newlines. All three are things
+    // the model-containment passes would rewrite on a drafted page; on a lint row
+    // the diff the reviewer approved is the whole edit.
+    const raw = "---\ntitle: C\naliases: [Owned]\n---\n\nSee [[No Such Page]].\n\n";
+    await writeFile(path.join(wikiDir, "plans/c.mdx"), raw);
+    await writeFile(
+      path.join(wikiDir, "plans/owner.mdx"),
+      "---\ntitle: Owner\naliases: [Owned]\n---\n\nBody.\n",
+    );
+    const expected = raw.replace("---\n\n", "series: prov\n---\n\n");
+    const res = await applyWikiProposalGroup([lintRow("r1", "plans/c.mdx", raw)], deps());
+
+    expect(res.results[0]!.outcome.outcome).toBe("applied");
+    expect(await readFile(path.join(wikiDir, "plans/c.mdx"), "utf8")).toBe(expected);
   });
 });

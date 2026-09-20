@@ -17,6 +17,11 @@ import type { BotConfig } from "../bots/config.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { lintWiki, LINT_CHECKS, type LintCheck } from "../wiki/lint.ts";
 import { todayOslo } from "../gardener/util.ts";
+import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
+import {
+  seedLintProposals,
+  DEFAULT_LINT_PROPOSAL_DEPS,
+} from "../gardener/lint-proposals.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "wiki-linter");
@@ -34,6 +39,9 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "index-truncation": { one: "truncated wikilink", many: "truncated wikilinks" },
   "nested-annotation": { one: "nested annotation", many: "nested annotations" },
   "stem-collision": { one: "stem collision", many: "stem collisions" },
+  "same-work-no-link": { one: "unlinked pair", many: "unlinked pairs" },
+  "series-unnamed": { one: "unnamed series", many: "unnamed series" },
+  "series-inconsistent": { one: "inconsistent series", many: "inconsistent series" },
 };
 
 /** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks
@@ -73,6 +81,50 @@ export async function checkWikiLinter(
   if (findings.length === 0) {
     log.info("Wiki-linter: no findings for \"{name}\" — wiki is clean", { botName: name, name });
     return [];
+  }
+
+  // Check 8's findings carry a FIX, so the weekly pass also seeds the review
+  // gate with them — the one thing this watcher writes, and only to the DB.
+  //
+  // Both read-only mechanisms refuse first: the mini must never fill the gate
+  // with rows only the write owner can apply. A group already proposed — in any
+  // status, a dismissal's `rejected` rows included — is skipped by the seeder,
+  // so a weekly re-run does not re-propose what a reviewer said no to.
+  //
+  // The `fixable` gate is not an optimisation only: without it a wiki whose
+  // findings are all hygiene ones would still ask the DB for a skip list it has
+  // no use for, on every weekly run.
+  const fixable = findings.filter((f) => f.fix);
+  if (fixable.length === 0) {
+    // nothing to propose
+  } else if (isWikiReadonly() || isReadonlyWikiRoot(botConfig.wikiDir)) {
+    log.info("Wiki-linter: read-only, not seeding lint proposals for \"{name}\"", {
+      botName: name,
+      name,
+    });
+  } else {
+    try {
+      const seeded = await seedLintProposals(fixable, {
+        ...DEFAULT_LINT_PROPOSAL_DEPS,
+        wikiDir: botConfig.wikiDir,
+        wikiName: name,
+      });
+      if (seeded.proposed > 0) {
+        log.info("Wiki-linter: proposed {proposed} lint fix group(s) ({rows} rows) for \"{name}\"", {
+          botName: name,
+          name,
+          proposed: seeded.proposed,
+          rows: seeded.rows,
+        });
+      }
+    } catch (err) {
+      // Best-effort: a seeding failure must never cost the report itself.
+      log.warn("Wiki-linter: seeding lint proposals failed for \"{name}\": {error}", {
+        botName: name,
+        name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   const summary = `Wiki lint: ${summarizeCounts(counts)} — review at /wiki/gardener`;

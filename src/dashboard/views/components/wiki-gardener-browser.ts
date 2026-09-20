@@ -47,6 +47,9 @@ interface DiffLine {
 interface ProposalView {
   id: string;
   topicKey: string;
+  /** The lint group this row belongs to, or null for an ordinary single-row
+   *  proposal. A group renders as ONE card with one diff per row. */
+  groupKey?: string | null;
   title: string;
   kind: string;
   mode: string;
@@ -186,6 +189,50 @@ function cardHtml(p: ProposalView): string {
   return html;
 }
 
+/**
+ * One card for a whole lint GROUP: the finding's rationale once, then one diff
+ * per touched page, then ONE Accept and ONE Dismiss.
+ *
+ * Approving half a series is a worse state than not approving it, which is why
+ * the group is the unit here rather than a row with N siblings beside it. Every
+ * diff is labelled with its own target path — the rows differ only in which
+ * file they touch, so an unlabelled stack of diffs says nothing.
+ */
+function groupCardHtml(rows: ProposalView[]): string {
+  const head = rows[0]!;
+  const key = head.groupKey!;
+  const reviewable = rows.some((r) => r.status === "draft");
+  let html = `<div class="gard-card" data-group="${esc(key)}">`;
+
+  html += '<div class="gard-card-head"><div class="gard-title-row">';
+  html += `<span class="gard-title">${esc(head.title)}</span>`;
+  html += `<span class="gard-badge badge-lint">lint</span>`;
+  html += `<span class="gard-badge badge-group">${rows.length} page${rows.length === 1 ? "" : "s"}</span>`;
+  html += chip(head.status);
+  html += "</div>";
+  html += `<div class="gard-meta-row"><span class="gard-path">${esc(rows.map((r) => r.targetPath).join(" · "))}</span><span>·</span><span>${esc(fmtDate(head.createdAt))}</span></div>`;
+  html += "</div>";
+
+  html += '<div class="gard-body">';
+  if (head.rationale) html += `<div class="gard-rationale">${esc(head.rationale)}</div>`;
+  for (const row of rows) {
+    html += `<div class="gard-group-diff"><div class="gard-group-diff-path">${esc(row.targetPath)}</div>`;
+    html += row.diff && row.diff.length ? diffHtml(row.diff) : '<div class="gard-empty">No diff (the page changed since drafting).</div>';
+    html += "</div>";
+  }
+  html += "</div>";
+
+  if (reviewable) {
+    html += '<div class="gard-actions">';
+    html += `<button class="gard-btn gard-approve" data-group-action="approve">Accept all ${rows.length}</button>`;
+    html += `<button class="gard-btn gard-reject" data-group-action="reject">Dismiss</button>`;
+    html += '<span class="gard-outcome"></span>';
+    html += "</div>";
+  }
+  html += "</div>";
+  return html;
+}
+
 function render(): void {
   const list = document.getElementById("gardList")!;
   const shown = statusFilter
@@ -198,7 +245,20 @@ function render(): void {
       "</div>";
     return;
   }
-  list.innerHTML = shown.map(cardHtml).join("");
+  // A grouped row is rendered ONCE, at the position of its first member, so the
+  // list keeps the server's newest-first order whether or not a card is a group.
+  const emitted = new Set<string>();
+  let html = "";
+  for (const p of shown) {
+    if (!p.groupKey) {
+      html += cardHtml(p);
+      continue;
+    }
+    if (emitted.has(p.groupKey)) continue;
+    emitted.add(p.groupKey);
+    html += groupCardHtml(shown.filter((r) => r.groupKey === p.groupKey));
+  }
+  list.innerHTML = html;
 }
 
 function setOutcome(card: HTMLElement, text: string, kind: "ok" | "err" | ""): void {
@@ -241,6 +301,54 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
   }
 }
 
+/**
+ * Accept or Dismiss a whole group. The approve answer has THREE shapes, not two:
+ * a clean apply, and a `stopped` one naming the page the group halted at — with
+ * the pages before it already written, which the note has to say rather than
+ * reading as "nothing happened".
+ */
+async function actOnGroup(
+  groupKey: string,
+  action: "approve" | "reject",
+  card: HTMLElement,
+): Promise<void> {
+  const buttons = card.querySelectorAll(".gard-btn");
+  buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
+  setOutcome(card, action === "approve" ? "Applying…" : "Dismissing…", "");
+  try {
+    const res = await fetch(
+      withBot("/api/wiki/proposals/group/" + encodeURIComponent(groupKey) + "/" + action),
+      { method: "POST" },
+    );
+    const data = await res.json();
+    if (!res.ok) {
+      const applied: string[] = data.applied || [];
+      const note = data.outcome === "stopped"
+        ? "Stopped at " + data.stoppedAt + " (" + data.stoppedOutcome + ")" +
+          (applied.length ? " — " + applied.length + " page(s) already written" : "") +
+          (data.error ? ": " + data.error : "")
+        : data.error || "Failed (" + res.status + ")";
+      setOutcome(card, note, "err");
+      buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
+      // A partial apply moved rows, so the list on screen is stale either way.
+      if (data.outcome === "stopped") loadProposals();
+      return;
+    }
+    const next = action === "approve" ? "applied" : "rejected";
+    allProposals.forEach((p) => {
+      if (p.groupKey === groupKey && p.status === "draft") {
+        p.status = next;
+        p.resolvedAt = Date.now();
+      }
+    });
+    render();
+    rerenderStrip();
+  } catch (err) {
+    setOutcome(card, "Network error: " + (err as Error).message, "err");
+    buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
+  }
+}
+
 // Delegated clicks: filters, toggles, actions.
 document.getElementById("gardFilters")!.addEventListener("click", (e) => {
   const chipEl = (e.target as HTMLElement).closest(".gard-filter");
@@ -266,6 +374,17 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
     return;
   }
 
+  const groupBtn = target.closest("[data-group-action]");
+  if (groupBtn) {
+    const card = groupBtn.closest(".gard-card") as HTMLElement;
+    actOnGroup(
+      card.getAttribute("data-group")!,
+      groupBtn.getAttribute("data-group-action") as "approve" | "reject",
+      card,
+    );
+    return;
+  }
+
   const actionBtn = target.closest("[data-action]");
   if (actionBtn) {
     const card = actionBtn.closest(".gard-card") as HTMLElement;
@@ -287,6 +406,9 @@ const LINT_LABELS: Record<LintCheck, string> = {
   "index-truncation": "Truncated wikilinks (unclosed [[)",
   "nested-annotation": "Markup nested inside a wikilink",
   "stem-collision": "Same-stem pages (one is hidden from the wiki)",
+  "same-work-no-link": "Same work, no link between the pages",
+  "series-unnamed": "Linked pages that declare no series:",
+  "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",
 };
 
 function renderLint(findings: LintFinding[]): void {
@@ -331,6 +453,40 @@ function loadLint(): void {
 }
 
 document.getElementById("lintRefresh")?.addEventListener("click", loadLint);
+
+/**
+ * `Propose fixes` — turn the check-8 findings into review-gate rows.
+ *
+ * A group already proposed (in ANY status, including a dismissal's `rejected`
+ * rows) is skipped server-side, so a second click is a no-op rather than a
+ * second card. The note says how many were skipped for exactly that reason.
+ */
+document.getElementById("lintPropose")?.addEventListener("click", () => {
+  const btn = document.getElementById("lintPropose") as HTMLButtonElement | null;
+  const note = document.getElementById("lintProposeNote");
+  if (btn) btn.disabled = true;
+  if (note) note.textContent = "Proposing…";
+  fetch(withBot("/api/wiki/lint-proposals"), { method: "POST" })
+    .then(async (r) => ({ ok: r.ok, data: await r.json() }))
+    .then(({ ok, data }) => {
+      if (!ok) {
+        if (note) note.textContent = data.error || "Failed";
+        return;
+      }
+      const parts = [`${data.proposed} group(s), ${data.rows} row(s)`];
+      if (data.skipped) parts.push(`${data.skipped} already proposed or dismissed`);
+      if (data.refusals?.length) parts.push(`${data.refusals.length} page(s) could not take the fix`);
+      if (note) note.textContent = parts.join(" · ");
+      // New rows land at the top of the gate; reload rather than patch.
+      loadProposals();
+    })
+    .catch((err: Error) => {
+      if (note) note.textContent = "Failed: " + err.message;
+    })
+    .finally(() => {
+      if (btn) btn.disabled = false;
+    });
+});
 
 // ── Ingest backlog strip (report-only "queued up" counter) ──────────────────
 

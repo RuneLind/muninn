@@ -132,16 +132,25 @@ export interface ApplyDeps {
  */
 export function commitMessageFor(proposal: WikiProposal): string {
   if (proposal.kind === "synthesis") return `[consolidation] apply: ${proposal.targetPath}`;
+  if (proposal.kind === "lint") return `[lint] fix: ${proposal.targetPath}`;
   const writer = proposal.kind === "source" ? "source-drafter" : "gardener";
   const verb = proposal.kind === "source" ? "draft" : "apply";
   return `[${writer}] ${verb}: ${proposal.targetPath}`;
+}
+
+/** The commit message for a GROUP apply: one commit over every page the group
+ *  touched, since the whole point of a group is that its rows land together. */
+export function groupCommitMessageFor(groupKey: string, pages: number): string {
+  return `[lint] fix: ${pages} page${pages === 1 ? "" : "s"} (${groupKey})`;
 }
 
 /** The `via <writer>` attribution in the apply-time log.md entry, keyed by kind:
  *  consolidation `synthesis` applies say `via consolidation-gardener`; every other
  *  kind keeps the historical `via wiki-gardener`. */
 export function logWriterFor(proposal: WikiProposal): string {
-  return proposal.kind === "synthesis" ? "consolidation-gardener" : "wiki-gardener";
+  if (proposal.kind === "synthesis") return "consolidation-gardener";
+  if (proposal.kind === "lint") return "wiki-linter";
+  return "wiki-gardener";
 }
 
 /**
@@ -156,7 +165,7 @@ async function commitApply(
   modified: Set<string>,
 ): Promise<void> {
   if (!deps.commit) return;
-  const paths = [...new Set([proposal.targetPath, "log.md", ...modified])];
+  const paths = commitPaths(proposal, modified);
   try {
     await deps.commit(paths, commitMessageFor(proposal));
   } catch (err) {
@@ -165,6 +174,13 @@ async function commitApply(
       error: errMsg(err),
     });
   }
+}
+
+/** The files one apply touched: the page, the wiki-global `log.md`, and whatever
+ *  the wire stage modified. Deduped, and the ONE spelling both the single-row
+ *  commit and the group's single commit are built from. */
+function commitPaths(proposal: WikiProposal, modified: Set<string>): string[] {
+  return [...new Set([proposal.targetPath, "log.md", ...modified])];
 }
 
 /** The huginn collection a target path reindexes into: life/** → wiki-life, else wiki. */
@@ -247,23 +263,11 @@ export async function applyWikiProposal(
   proposal: WikiProposal,
   deps: ApplyDeps,
 ): Promise<ApplyOutcome> {
-  // Readonly instance: refuse before the queue is even entered. A refusal, not
-  // an error — the route answers 403 and leaves the row reviewable.
-  if ((deps.isReadonly ?? isWikiReadonly)()) {
-    log.warn("Wiki-gardener apply refused — instance is wiki-readonly: {path}", {
-      path: proposal.targetPath,
-    });
-    return { outcome: "forbidden", reason: WIKI_READONLY_REASON };
-  }
-
-  // Per-WIKI read-only root: this instance owns writes, just not to THIS root.
-  if ((deps.isReadonlyRoot ?? isReadonlyWikiRoot)(deps.wikiDir)) {
-    log.warn("Wiki-gardener apply refused — wiki root is registered read-only: {path}", {
-      path: proposal.targetPath,
-      root: deps.wikiDir,
-    });
-    return { outcome: "forbidden", reason: wikiReadonlyRootReason(deps.wikiDir) };
-  }
+  // Readonly instance, then per-WIKI read-only root: refuse before the queue is
+  // even entered. A refusal, not an error — the route answers 403 and leaves the
+  // row reviewable.
+  const refusal = readonlyRefusalFor(deps, proposal.targetPath);
+  if (refusal) return refusal;
 
   // A holder, not a `let` — TS narrows a closure-assigned local to `null`.
   const tail: { commit?: () => Promise<void> } = {};
@@ -276,9 +280,112 @@ export async function applyWikiProposal(
   return outcome;
 }
 
+/** One row's result inside a group apply. */
+export interface GroupRowOutcome {
+  id: string;
+  targetPath: string;
+  outcome: ApplyOutcome;
+}
+
+export interface GroupApplyResult {
+  /** Every row the apply REACHED, in the order it ran them. A row after the one
+   *  that stopped the group is absent — it was never attempted and keeps its
+   *  `approved` status, which is re-runnable by design. */
+  results: GroupRowOutcome[];
+  /** The row that stopped the group, when one did. Rows before it are already
+   *  written and stay written. */
+  stoppedAt?: GroupRowOutcome;
+}
+
+/**
+ * Apply every row of a lint GROUP inside ONE write section.
+ *
+ * The section is taken once, for the reason `src/gardener/CLAUDE.md` states for
+ * the single-row path: `log.md` is wiki-global, and a group writing N pages
+ * through N sections would interleave with the fact-check and integrate writers
+ * between its own rows — the reviewer approved one edit over N files, and half
+ * of it landing around somebody else's write is not that edit. The commit tail
+ * still runs OUTSIDE the section, as ONE commit over every path the group
+ * touched.
+ *
+ * **It STOPS on the first row that is not `applied`, and says which.** A stale
+ * or colliding row means the group's diffs no longer describe the wiki, and the
+ * remaining rows are not attempted. Rows already written stay written: there is
+ * no rollback, so the honest answer is to report the boundary and let the
+ * reviewer re-propose, which the lint does deterministically on its next run.
+ *
+ * The per-row work is the SAME `applyInner` a single approve runs — the
+ * confinement, staleness, write, `log.md` and reindex steps are not re-spelled
+ * here.
+ */
+export async function applyWikiProposalGroup(
+  rows: readonly WikiProposal[],
+  deps: ApplyDeps,
+): Promise<GroupApplyResult> {
+  const refusal = readonlyRefusalFor(deps, rows[0]?.targetPath ?? "(group)");
+  if (refusal) {
+    return {
+      results: rows.map((r) => ({ id: r.id, targetPath: r.targetPath, outcome: refusal })),
+    };
+  }
+
+  const groupKey = rows[0]?.groupKey ?? "(no group)";
+  const tail: { paths: string[] } = { paths: [] };
+  const result = await runWikiWriteExclusive(deps.wikiDir, async () => {
+    const out: GroupApplyResult = { results: [] };
+    for (const row of rows) {
+      const outcome = await applyInner(row, deps, (_commit, paths) => {
+        tail.paths.push(...paths);
+      });
+      const entry: GroupRowOutcome = { id: row.id, targetPath: row.targetPath, outcome };
+      out.results.push(entry);
+      if (outcome.outcome !== "applied") {
+        out.stoppedAt = entry;
+        break;
+      }
+    }
+    return out;
+  });
+
+  if (deps.commit && tail.paths.length > 0) {
+    const paths = [...new Set(tail.paths)];
+    try {
+      await deps.commit(paths, groupCommitMessageFor(groupKey, result.results.length));
+    } catch (err) {
+      log.warn("Wiki-gardener group apply: commit failed for {group}: {error}", {
+        group: groupKey,
+        error: errMsg(err),
+      });
+    }
+  }
+  return result;
+}
+
+/** The two read-only refusals `applyWikiProposal` makes before entering the
+ *  queue, as one function so the group path cannot drift from the single one. */
+function readonlyRefusalFor(deps: ApplyDeps, forPath: string): ApplyOutcome | null {
+  if ((deps.isReadonly ?? isWikiReadonly)()) {
+    log.warn("Wiki-gardener apply refused — instance is wiki-readonly: {path}", { path: forPath });
+    return { outcome: "forbidden", reason: WIKI_READONLY_REASON };
+  }
+  if ((deps.isReadonlyRoot ?? isReadonlyWikiRoot)(deps.wikiDir)) {
+    log.warn("Wiki-gardener apply refused — wiki root is registered read-only: {path}", {
+      path: forPath,
+      root: deps.wikiDir,
+    });
+    return { outcome: "forbidden", reason: wikiReadonlyRootReason(deps.wikiDir) };
+  }
+  return null;
+}
+
 /** Hand the commit closure to `applyWikiProposal`, which runs it after the
- *  per-wiki write section releases. */
-type DeferCommit = (commit: () => Promise<void>) => void;
+ *  per-wiki write section releases.
+ *
+ *  `paths` is the same set the closure would commit. A single apply ignores it
+ *  and runs the closure; a GROUP apply collects the paths of every row and makes
+ *  ONE commit out of them instead of N — a twelve-member series otherwise lands
+ *  as twelve commits whose only difference is which frontmatter line moved. */
+type DeferCommit = (commit: () => Promise<void>, paths: string[]) => void;
 
 async function applyInner(
   proposal: WikiProposal,
@@ -343,10 +450,21 @@ async function applyInner(
   //     itself is always "self": on a create re-run after a crash-after-write,
   //     the target's own first write is indexed and must not strip the draft's
   //     aliases (a FOREIGN file at the target is caught by the stale check).
-  const dealiased = stripOwnedAliases(proposal.draft, {
-    index,
-    selfRelPath: existingRelPath ?? proposal.targetPath,
-  });
+  //
+  //     ⚠️ SKIPPED for a `lint` row, with 1d and the trailing-newline normalization
+  //     below. Both passes exist to CONTAIN MODEL OUTPUT: an alias a drafter
+  //     invented, a `[[link]]` to a page that does not exist. A lint draft is the
+  //     page's own bytes with one mechanical edit applied — so on that kind the
+  //     two passes only ever rewrite what a human wrote, and containment would
+  //     silently de-link every pre-existing dangling wikilink on a page whose
+  //     card promised one `See also` line and nothing else.
+  const mechanical = proposal.kind === "lint";
+  const dealiased = mechanical
+    ? { draft: proposal.draft, stripped: [] as string[] }
+    : stripOwnedAliases(proposal.draft, {
+        index,
+        selfRelPath: existingRelPath ?? proposal.targetPath,
+      });
   if (dealiased.stripped.length > 0) {
     log.warn("Apply: stripped alias(es) owned by other pages from proposal {id}: {aliases}", {
       id: proposal.id,
@@ -365,7 +483,7 @@ async function applyInner(
   //     to `stale`; the row re-drafts next weekly cycle). When the index is
   //     unchanged, containment is a no-op and idempotent recovery still holds.
   let containedDraft = dealiased.draft;
-  if (index) {
+  if (index && !mechanical) {
     const contained = containDraftBodyLinks(dealiased.draft, {
       resolve: index.resolve,
       selfTitle: draftTitle(proposal),
@@ -380,7 +498,9 @@ async function applyInner(
   }
 
   const absTarget = path.join(deps.wikiDir, proposal.targetPath);
-  const finalContent = withTrailingNewline(containedDraft);
+  // `withTrailingNewline` COLLAPSES a run of trailing newlines, which on a lint
+  // row is a second change the diff the reviewer approved did not show.
+  const finalContent = mechanical ? containedDraft : withTrailingNewline(containedDraft);
   const current = await deps.readFile(absTarget);
 
   // 2a. Re-run safety: the target already IS the draft — a crash after the file
@@ -403,7 +523,7 @@ async function applyInner(
     // Commit is the last step, and runs OUTSIDE the write section (see
     // `applyWikiProposal`) — a re-run that changed nothing on disk stages an
     // empty diff and the helper skips the commit quietly.
-    deferCommit(() => commitApply(proposal, deps, modified));
+    deferCommit(() => commitApply(proposal, deps, modified), commitPaths(proposal, modified));
     return { outcome: "applied", writtenPath: proposal.targetPath };
   }
 
@@ -502,7 +622,7 @@ async function applyInner(
   //    back to `applyWikiProposal` to await after the per-wiki write section
   //    releases (a stalled push must not park the other wiki writers; see there).
   //    Non-fatal — a commit failure never undoes the applied page.
-  deferCommit(() => commitApply(proposal, deps, modified));
+  deferCommit(() => commitApply(proposal, deps, modified), commitPaths(proposal, modified));
 
   return { outcome: "applied", writtenPath: proposal.targetPath };
 }

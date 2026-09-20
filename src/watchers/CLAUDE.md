@@ -1400,16 +1400,28 @@ See-also wiring memory] is migration `062`); the `watchers.type` CHECK gains
 
 ## Wiki Linter (wiki-linter.ts + src/wiki/lint.ts)
 
-A weekly **report-only** sibling of the gardener that checks a bot's knowledge
-wiki for hygiene issues and emits ONE summarizing Telegram alert (🧹) pointing at
+A weekly sibling of the gardener that checks a bot's knowledge wiki for hygiene
+issues and emits ONE summarizing Telegram alert (🧹) pointing at
 `/wiki/gardener`, which hosts a **Lint findings** section. Findings are
 **transient** — recomputed on demand from the wiki tree via `getWikiIndex` + the
-`lintWiki` engine; there is **no DB table, no migration, and zero writes** to the
-wiki or DB. v1 is purely a report.
+`lintWiki` engine; there is no findings table and **nothing is ever written to
+the wiki** from this path.
+
+⚠️ **It is no longer purely a report, and the qualifier is exact.** Since check 8
+(the three SERIES checks, `src/wiki/lint-series.ts`) a finding can carry a `fix`,
+and the run SEEDS those into `wiki_proposals` as `kind: "lint"` rows for the
+human review gate — a DB write, never a wiki one, and refused outright when the
+instance is wiki-readonly or the ROOT is registered read-only. The seeding is
+gated on a finding carrying a fix at all, so a wiki whose findings are all
+hygiene ones makes no DB call, and it is best-effort: a seeding failure warns and
+the report still goes out. Rules and cuts: `src/wiki/CLAUDE.md`; the rows, the
+group apply and why Dismiss is durable: `src/gardener/CLAUDE.md`.
 
 - **Lint engine** (`src/wiki/lint.ts`): pure functions over a built `WikiIndex`
   plus per-file content reads. Each finding is `{ check, relPath, message,
-  detail? }`. Six checks:
+  detail?, fix? }` — `fix` on check 8's findings alone. Seven hygiene checks,
+  plus the three series checks of check 8 (`src/wiki/CLAUDE.md` owns those
+  rules, their cuts and their measurements):
   1. **broken-link** — re-runs `extractWikilinks` + `extractMarkdownLinks` per
      page and resolves against the index (the store's builder silently drops
      unresolved targets, so resolution is recomputed here); `../`-escapes are

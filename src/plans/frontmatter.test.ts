@@ -10,7 +10,12 @@
 
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
-import { setPlanPriority, setPlanStatus, type PlanPriorityEdit } from "./frontmatter.ts";
+import {
+  setFrontmatterScalar,
+  setPlanPriority,
+  setPlanStatus,
+  type PlanPriorityEdit,
+} from "./frontmatter.ts";
 import { planRecordFromContent } from "./source.ts";
 import type { PlanPriority } from "./constants.ts";
 
@@ -302,5 +307,76 @@ describe("setPlanStatus", () => {
     expect(out).toBe(
       `---\r\ntitle: T\r\nplan_status: abandoned\r\nstatus_date: 2026-08-29\r\n---\r\n\r\n# Body\r\n`,
     );
+  });
+});
+
+/**
+ * `setFrontmatterScalar` — the generic line upsert the wiki lint's series fixes
+ * write through, and the series editor after it.
+ */
+describe("setFrontmatterScalar", () => {
+  const page = (...fm: string[]) => `---\n${fm.join("\n")}\n---\n\nBody.\n`;
+
+  test("inserts a missing key at the END of the fence", () => {
+    const res = setFrontmatterScalar(page("title: A", "plan_status: shipped"), "series", "prov");
+    expect(res.kind).toBe("changed");
+    expect((res as { content: string }).content).toBe(
+      "---\ntitle: A\nplan_status: shipped\nseries: prov\n---\n\nBody.\n",
+    );
+  });
+
+  test("replaces an existing key in place and normalises a duplicate", () => {
+    const res = setFrontmatterScalar(
+      page("series: old", "title: A", "series: older"),
+      "series",
+      "new",
+    );
+    expect((res as { content: string }).content).toBe("---\nseries: new\ntitle: A\n---\n\nBody.\n");
+  });
+
+  test("a null value REMOVES the key, and removing an absent key is a noop", () => {
+    const removed = setFrontmatterScalar(page("title: A", "series_label: X"), "series_label", null);
+    expect((removed as { content: string }).content).toBe("---\ntitle: A\n---\n\nBody.\n");
+    expect(setFrontmatterScalar(page("title: A"), "series_label", null).kind).toBe("noop");
+  });
+
+  test("writing the value already on the line is a noop", () => {
+    expect(setFrontmatterScalar(page("series: prov"), "series", "prov").kind).toBe("noop");
+  });
+
+  test("quotes a value that would not read back as itself", () => {
+    const content = (v: string) =>
+      (setFrontmatterScalar(page("title: A"), "series_label", v) as { content: string }).content;
+    // A `:` opens a nested key, a `#` opens a comment, a leading `-` a list item,
+    // and a padded value loses its padding to the reader's trim.
+    expect(content("Wiki: provenance")).toContain('series_label: "Wiki: provenance"');
+    expect(content("Prov #1")).toContain('series_label: "Prov #1"');
+    expect(content("- dash")).toContain('series_label: "- dash"');
+    expect(content(" pad ")).toContain('series_label: " pad "');
+    // A plain title is written bare.
+    expect(content("Wiki provenance")).toContain("series_label: Wiki provenance\n");
+    // …and a quote inside a quoted value is escaped, so the reader's unquote
+    // rule returns the string that went in.
+    expect(content('He said "no"')).toContain('series_label: "He said \\"no\\""');
+  });
+
+  test("a file with no readable fence is REFUSED, never a noop", () => {
+    expect(setFrontmatterScalar("# Just a heading\n\nBody.\n", "series", "prov").kind).toBe("refused");
+    expect(setFrontmatterScalar("---\ntitle: A\n", "series", "prov").kind).toBe("refused");
+  });
+
+  test("bytes outside the fence are untouched — including a body line shaped like the key", () => {
+    const doc = "---\ntitle: A\n---\n\n```yaml\nseries: example\n```\n\nTail.\n";
+    const out = (setFrontmatterScalar(doc, "series", "prov") as { content: string }).content;
+    expect(out).toBe("---\ntitle: A\nseries: prov\n---\n\n```yaml\nseries: example\n```\n\nTail.\n");
+  });
+
+  test("an inserted line copies the fence's CRLF", () => {
+    const out = (
+      setFrontmatterScalar("---\r\ntitle: A\r\n---\r\n\r\nBody.\r\n", "series", "prov") as {
+        content: string;
+      }
+    ).content;
+    expect(out).toContain("series: prov\r\n");
   });
 });

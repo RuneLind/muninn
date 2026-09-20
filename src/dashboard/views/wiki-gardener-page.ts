@@ -319,6 +319,8 @@ export async function renderWikiGardenerPage(opts?: {
     .badge-concept { background: var(--tint-purple); color: var(--accent-light); }
     .badge-entity { background: var(--tint-cyan); color: var(--status-cyan); }
     .badge-source { background: var(--tint-warning); color: var(--status-warning); }
+    .badge-lint { background: var(--tint-cyan); color: var(--status-cyan); }
+    .badge-group { background: var(--tint-neutral); color: var(--text-muted); }
     .badge-create { background: var(--tint-success); color: var(--status-success); }
     .badge-update { background: var(--tint-info); color: var(--status-info); }
     .chip-draft { background: var(--tint-neutral); color: var(--text-muted); }
@@ -364,6 +366,13 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-diff .d-add { color: var(--status-success); background: color-mix(in srgb, var(--status-success) 12%, transparent); display: block; white-space: pre-wrap; }
     .gard-diff .d-del { color: var(--status-magenta); background: color-mix(in srgb, var(--status-magenta) 12%, transparent); display: block; white-space: pre-wrap; }
     .gard-diff .d-ctx { color: var(--text-dim); display: block; white-space: pre-wrap; }
+    /* A lint group's per-page diff. The path label is what makes a stack of
+       near-identical frontmatter diffs readable at all. */
+    .gard-group-diff { margin-bottom: 12px; }
+    .gard-group-diff-path {
+      font-family: var(--font-mono, monospace); font-size: 11.5px; color: var(--text-muted);
+      margin-bottom: 4px;
+    }
 
     /* Preview (mirrors the /wiki article styling, scoped) */
     .gard-preview { border: 1px solid var(--border-secondary); border-radius: 8px; padding: 16px 20px; background: var(--bg-surface); font-size: 13.5px; line-height: 1.6; color: var(--text-secondary); }
@@ -398,7 +407,8 @@ export async function renderWikiGardenerPage(opts?: {
 
     /* Lint findings (report-only) */
     .lint-section { margin-top: 36px; }
-    .lint-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+    .lint-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; flex-wrap: wrap; }
+    .lint-head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .lint-head h2 { font-size: 16px; color: var(--text-primary); }
     .lint-sub { font-size: 12px; color: var(--text-muted); margin-bottom: 14px; }
     .lint-refresh {
@@ -406,6 +416,7 @@ export async function renderWikiGardenerPage(opts?: {
       color: var(--text-muted); font-size: 11.5px; font-family: inherit; padding: 4px 10px; cursor: pointer;
     }
     .lint-refresh:hover { color: var(--text-primary); border-color: var(--accent); }
+    .lint-propose-note { font-size: 11.5px; color: var(--text-muted); }
     .lint-group {
       background: var(--bg-panel); border: 1px solid var(--border-primary); border-radius: 10px;
       margin-bottom: 12px; overflow: hidden;
@@ -457,9 +468,13 @@ ${readonly ? `    <div class="gard-readonly">This muninn instance is <strong>wik
     <div class="lint-section">
       <div class="lint-head">
         <h2>🧹 Lint findings</h2>
-        <button id="lintRefresh" class="lint-refresh">Refresh</button>
+        <div class="lint-head-actions">
+          <span id="lintProposeNote" class="lint-propose-note"></span>
+          <button id="lintPropose" class="lint-refresh">Propose fixes</button>
+          <button id="lintRefresh" class="lint-refresh">Refresh</button>
+        </div>
       </div>
-      <div class="lint-sub">Report-only wiki hygiene — broken links, orphan pages, missing <code>updated:</code>, and concepts citing no sources. Recomputed on demand; nothing is written.</div>
+      <div class="lint-sub">Report-only wiki hygiene — broken links, orphan pages, missing <code>updated:</code>, concepts citing no sources, and the three <strong>series</strong> checks. Recomputed on demand; nothing is written. <strong>Propose fixes</strong> turns the series findings into review-gate cards above — one card per finding, one Accept.</div>
       <div id="lintList"><div class="gard-empty">Loading lint findings…</div></div>
     </div>
   </div>

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, LINT_CHECKS, type LintFinding } from "./lint.ts";
+import { SERIES_LINT_CHECKS } from "./lint-series.ts";
 
 /**
  * Lint-engine tests over temp-dir wiki fixtures (modeled on store.test.ts).
@@ -76,7 +77,7 @@ describe("lintWiki", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  test("clean wiki produces no findings", async () => {
+  test("clean wiki produces no HYGIENE findings, and its mutual pair is an 8.2 cluster", async () => {
     // "Sidekick" is referenced by Good Concept + index but doesn't exist yet →
     // that's a broken link. Add it so the baseline is genuinely clean.
     await write(
@@ -93,7 +94,17 @@ describe("lintWiki", () => {
       ].join("\n"),
     );
     const findings = await lint();
-    expect(findings).toEqual([]);
+    // The seven hygiene checks. Check 8 is scoped out here and asserted below:
+    // adding Sidekick makes the two pages link each other BOTH ways, which is
+    // exactly 8.2's edge — the fixture became a two-page unnamed series the
+    // moment it became link-clean, and that is the rule working.
+    const hygiene = findings.filter(
+      (f) => !(SERIES_LINT_CHECKS as readonly string[]).includes(f.check),
+    );
+    expect(hygiene).toEqual([]);
+    const series = findings.filter((f) => f.check === "series-unnamed");
+    expect(series).toHaveLength(1);
+    expect(series[0]!.detail).toContain("concepts/Sidekick.md");
   });
 
   test("broken wikilink fires broken-link with the raw target", async () => {

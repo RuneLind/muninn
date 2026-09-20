@@ -44,6 +44,90 @@ Three of the four outcomes (`covered`/`skipped`/`error`) persist NO `wiki_propos
 
 Both collision skips carry the BLOCKING PAGE (`findCollidingPage` returns the page, not a boolean) so the row deep-links it. **`POST /api/wiki/gardener/source-draft-doc`** re-runs one doc with an optional `title` override: the drafter uses it verbatim and **forgoes the collision retry** — that retry's SKIP branch is exactly what drops these docs, and it must not overrule a title a human chose. An override that is also taken is answered from the index before any model call; `sanitizeTitleOverride` collapses whitespace + drops quotes, since the value is interpolated into the prompt.
 
+## Lint fixes (`kind: "lint"`, `src/gardener/lint-proposals.ts`)
+
+The fourth thing that fills the review gate, and the only one with **no model
+call anywhere on its path**. The wiki linter's check 8 (`src/wiki/lint-series.ts`
+— rules and cuts there) produces findings carrying a typed `fix`; this module
+turns one into proposal rows:
+
+- **one row per touched PAGE** — its own `target_path`, its own `base_hash`
+  (sha256 of the file's current bytes, so a page edited between the lint and the
+  Accept goes `stale` rather than being overwritten), its own draft, its own CAS;
+- **all of them sharing a `group_key`** (migration 077) — `lint:<check>:<12 hex
+  of sha256 over the check id, the sub-rule and the sorted member paths>`, so a
+  re-run over an unchanged wiki reproduces it byte for byte.
+
+`mode: "update"`, `source_docs: []`, `rationale` = the finding's own sentence.
+The `topic_key` is `<group_key>:<relPath>`: the live unique index is
+(wiki, topic_key), so the page path has to be IN it or only one member of a group
+could be live at a time. Rows are keyed `wiki_name = bot_name = <registry wiki
+name>` — a lint row is drafted by no bot, and one name covers both the standalone
+and the bot-wiki gate listings.
+
+**A page whose edits all no-op contributes no row** (already linked, key already
+correct) and a page that REFUSES one — no frontmatter fence, unreadable file —
+contributes a refusal and no row, while the rest of the group still proposes: a
+blog with no fence must not cost the series its other five members.
+
+**`lint` is never cataloged and never wired.** It IS the wire: `catalogPage`
+hard-skips it beside `synthesis`, and the See-also half reads `related_pages`,
+which is NULL on these rows. `commitMessageFor` says `[lint] fix: …` and
+`logWriterFor` says `via wiki-linter`.
+
+⚠️ **The apply path SKIPS `stripOwnedAliases`, `containDraftBodyLinks` and the
+trailing-newline normalisation for this kind** (`applyInner`'s `mechanical`
+flag). Those three exist to contain MODEL OUTPUT — an invented alias, a
+`[[link]]` to a page that does not exist, a ragged tail. A lint draft is the
+page's own bytes with one mechanical edit applied, so on this kind they would
+only ever rewrite what a human wrote: containment would silently de-link every
+pre-existing dangling wikilink on a page whose card promised one `See also` line
+and nothing else. Pinned by a byte-exact test in `apply.test.ts`.
+
+### Group apply — one write section, stop on the first refusal
+
+`applyWikiProposalGroup(rows, deps)` takes `runWikiWriteExclusive` **once** and
+runs the existing per-row `applyInner` inside it, for the reason the
+write-queue section below states: `log.md` is wiki-global, so a group writing N
+pages through N sections would interleave with the fact-check and integrate
+writers between its own rows — the reviewer approved one edit over N files, and
+half of it landing around somebody else's write is not that edit. The commit
+tail still runs OUTSIDE the section, as **one** commit over every path the group
+touched (twelve commits differing only in which frontmatter line moved is not a
+history anyone reads).
+
+It **stops at the first row that is not `applied`** and reports which. Rows
+already written stay written — there is no rollback, so the honest answer names
+the boundary and lets the reviewer re-propose, which the lint does
+deterministically on its next run. The route
+(`POST /api/wiki/proposals/group/:groupKey/approve`) answers 409 `outcome:
+"stopped"` with `applied[]` and `stoppedAt`, CASes each reached row through its
+own terminal verb, and leaves every row AFTER the boundary `approved` — which is
+re-runnable by a second click, exactly as a stuck single row is.
+
+### Seeding, and why Dismiss is durable
+
+Findings become rows in two places, both refusing when the instance is
+wiki-readonly or the ROOT is registered read-only (the mini must never fill the
+gate with rows only the write owner can apply):
+
+- the **`wiki-linter` watcher**, after its lint pass — gated on a finding
+  carrying a fix at all, so a wiki whose findings are all hygiene ones never asks
+  the DB for a skip list it has no use for;
+- **`POST /api/wiki/lint-proposals?wiki=<name>`**, behind the `Propose fixes`
+  button in the lint panel of `/wiki/gardener`.
+
+**Dedup is by GROUP KEY in ANY status** (`getLintGroupKeysByWiki`) — and that is
+the whole mechanism behind Dismiss: `POST /api/wiki/proposals/group/:groupKey/reject`
+CASes the group's drafts to `rejected` and **leaves those rows in place**, so a
+later seeding pass sees the key and skips the finding rather than proposing it
+again. There is no TTL, unlike the concept gardener's rejection skip list: a
+model can draft a better page next week, but a lint finding is deterministic and
+would come back identical forever.
+
+Single-row Approve/Reject keep working unchanged for rows with `group_key IS
+NULL`, which is every other kind.
+
 ## Stem collisions — the apply path refuses, at approve time
 
 `store.ts`'s precedence rule (`.md` > `.mdx` > `.html`) DROPS the loser when two

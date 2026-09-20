@@ -182,9 +182,11 @@ export function monthFoldKey(month: string): string {
 /**
  * The authored `series:` slug on a page — trimmed, and `""` for a page in no
  * series. The ONE reader of that field, so the trim cannot drift between the
- * grouping, the membership helper and the reader header.
+ * grouping, the membership helper, the reader header and the lint's series
+ * checks (which read it off the server's `WikiPageMeta`, hence the structural
+ * parameter).
  */
-export function seriesKeyOf(p: WikiListing): string {
+export function seriesKeyOf(p: Pick<WikiListing, "series">): string {
   return (p.series || "").trim();
 }
 
@@ -311,6 +313,11 @@ export function seriesDateMs(p: PageDateFields): number {
  *  breaks a tie on both. */
 type PageDateOrder = PageDateFields & Pick<WikiListing, "relPath">;
 
+/** What {@link newestSeriesPlan} needs — the ordering fields plus the one status
+ *  it filters on. A structural subset for the same reason {@link PageDateFields}
+ *  is one: the server's `WikiPageMeta` satisfies it without being a listing. */
+export type SeriesPlanFields = PageDateOrder & Pick<WikiListing, "plan_status">;
+
 /** Newest first, ties broken by the date's own rung and then by relPath, so two
  *  members sharing a day order the same way on every render. Which day a git
  *  touch falls on is the process's own timezone question — see
@@ -344,6 +351,11 @@ export const SERIES_TERMINAL_STATUSES: readonly string[] = ["superseded", "aband
  * The NEWEST PLAN of a series: the member carrying a NON-TERMINAL `plan_status`,
  * newest by {@link seriesDateMs}. `undefined` when no member declares one.
  *
+ * Generic over the structural subset it reads, for {@link seriesDateSignal}'s own
+ * reason: the SERVER's `WikiPageMeta` has to satisfy it too, because the lint's
+ * series checks (`src/wiki/lint-series.ts`) pick a proposed series' head with this
+ * function rather than a second spelling of the rule.
+ *
  * A blog and an archive report are members of the work but never "the latest":
  * they record what happened, and "continue at" has to name a page the reader can
  * continue IN. That is why the test is `plan_status` rather than the `plans/`
@@ -351,7 +363,9 @@ export const SERIES_TERMINAL_STATUSES: readonly string[] = ["superseded", "aband
  * A `superseded` or `abandoned` plan fails the same test one step further on:
  * see {@link SERIES_TERMINAL_STATUSES}.
  */
-export function newestSeriesPlan(members: readonly WikiListing[]): WikiListing | undefined {
+export function newestSeriesPlan<T extends SeriesPlanFields>(
+  members: readonly T[],
+): T | undefined {
   return [...members]
     .filter((m) => !!m.plan_status && !SERIES_TERMINAL_STATUSES.includes(m.plan_status))
     .sort(bySeriesDateDesc)[0];

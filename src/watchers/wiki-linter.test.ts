@@ -46,14 +46,16 @@ describe("checkWikiLinter", () => {
   });
 
   test("clean wiki → no alerts", async () => {
-    // Two pages linking each other, valid updated:, sources: frontmatter.
+    // Two pages linking each other, valid updated:, sources: frontmatter — and a
+    // `series:` on both, because a mutually-linked pair with no series IS a
+    // check-8 finding and this fixture's claim is that the wiki is clean.
     await Bun.write(
       path.join(root, "concepts/A.md"),
-      "---\ntype: concept\ntitle: A\nupdated: 2026-06-01\nsources: [x]\n---\n\nSee [[B]].",
+      "---\ntype: concept\ntitle: A\nupdated: 2026-06-01\nseries: ab\nsources: [x]\n---\n\nSee [[B]].",
     );
     await Bun.write(
       path.join(root, "concepts/B.md"),
-      "---\ntype: concept\ntitle: B\nupdated: 2026-06-01\nsources: [x]\n---\n\nSee [[A]].",
+      "---\ntype: concept\ntitle: B\nupdated: 2026-06-01\nseries: ab\nsources: [x]\n---\n\nSee [[A]].",
     );
     const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }));
     expect(alerts).toEqual([]);

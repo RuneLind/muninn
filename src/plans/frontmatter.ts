@@ -256,3 +256,111 @@ export function setPlanStatus(
   }
   return { kind: "changed", content: out };
 }
+
+/** `parseFrontmatter`'s key shape for an arbitrary top-level key: the name at
+ *  column 0, colon immediately after. Built per call because the key is a
+ *  parameter — every character is escaped, so a key carrying regex syntax
+ *  matches itself and nothing else. */
+function frontmatterKeyLine(key: string): RegExp {
+  return new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`);
+}
+
+/**
+ * A YAML scalar that needs no quoting — the conservative set, not YAML's real
+ * one. A `series:` key is a slug and a `series_label:` is a title, so the shapes
+ * that matter are a leading/trailing space, a `#` (a comment), a `:` (a nested
+ * key), a quote, and the indicator characters a value may not START with.
+ * Anything outside it is double-quoted with `"` and `\` escaped, which
+ * `parseFrontmatter`'s `unquote` reads back as the same string.
+ */
+function needsQuoting(value: string): boolean {
+  if (value === "" || value !== value.trim()) return true;
+  if (/[:#"'\r\n]/.test(value)) return true;
+  return /^[-?&*!|>%@`[\]{},]/.test(value);
+}
+
+/** The value as it is written into the fence. */
+function scalarLiteral(value: string): string {
+  if (!needsQuoting(value)) return value;
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Upsert (or, with `value: null`, REMOVE) one top-level frontmatter key.
+ *
+ * The generic sibling of {@link setPlanPriority} and {@link setPlanStatus},
+ * under all four of this module's rules — fence-scoped, the READER's fence
+ * boundaries, a line upsert rather than parse-and-reserialize, and a refusal
+ * (never a `noop`) on a file whose fence this cannot read. A duplicate key
+ * inside one fence is normalized the way `setPlanPriority` normalizes a
+ * duplicate `priority:`: the first is rewritten and the rest dropped, so the
+ * value on disk and the value the reader takes (the LAST one) cannot disagree
+ * afterwards.
+ *
+ * Two behaviours of its own, both from having no anchor key to lean on:
+ *
+ *   - **An inserted key goes at the END of the fence**, where `setPlanPriority`
+ *     inserts after `plan_status:`. There is no key every page carries — this
+ *     writes `series:` onto blogs and archive reports as well as plans — and an
+ *     anchor that is usually absent is a rule with two behaviours rather than
+ *     one.
+ *   - **The value is QUOTED when it needs to be** ({@link needsQuoting}), since
+ *     the caller passes a page TITLE as well as a slug. `setPlanPriority` writes
+ *     a closed enum and never had to.
+ *
+ * Written for the wiki lint's series fixes (`src/gardener/lint-proposals.ts`)
+ * and reused by the series editor, so it takes any key rather than a union of
+ * the two it has callers for today.
+ */
+export function setFrontmatterScalar(
+  content: string,
+  key: string,
+  value: string | null,
+): PlanPriorityEdit {
+  const bounds = fenceBounds(content);
+  if (!bounds) {
+    return {
+      kind: "refused",
+      reason: "the file has no readable frontmatter fence — refusing to edit it",
+    };
+  }
+  const { openEnd, closeNl } = bounds;
+  const openLine = content.slice(0, openEnd);
+  const tail = content.slice(closeNl);
+  const body = closeNl > openEnd ? content.slice(openEnd + 1, closeNl) : null;
+
+  const cr = openLine.endsWith("\r") ? "\r" : "";
+  const keyLine = frontmatterKeyLine(key);
+  const fence: string[] = [];
+  let replaced = false;
+  let hadKey = false;
+  for (const line of body === null ? [] : body.split("\n")) {
+    if (!keyLine.test(line)) {
+      fence.push(line);
+      continue;
+    }
+    hadKey = true;
+    if (value === null || replaced) continue;
+    fence.push(`${key}: ${scalarLiteral(value)}${cr}`);
+    replaced = true;
+  }
+  if (value === null && !hadKey) return { kind: "noop" };
+  if (value !== null && !replaced) {
+    fence.push(`${key}: ${scalarLiteral(value)}${cr}`);
+  }
+
+  const out = openLine + (fence.length > 0 ? `\n${fence.join("\n")}` : "") + tail;
+  if (out === content) return { kind: "noop" };
+
+  // The same re-derived guard `setPlanPriority` and `setPlanStatus` close with:
+  // the fence boundary is read back out of the OUTPUT with the reader's own
+  // rule, so a boundary that moved is caught rather than assumed away.
+  const outBounds = fenceBounds(out);
+  if (!outBounds || out.slice(outBounds.closeNl) !== tail) {
+    return {
+      kind: "refused",
+      reason: "the edit would have changed bytes outside the frontmatter fence",
+    };
+  }
+  return { kind: "changed", content: out };
+}

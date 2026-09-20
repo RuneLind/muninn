@@ -149,7 +149,12 @@ function truncateOneLiner(text: string): string {
  * `["concept"]`).
  */
 export function catalogPage(kind: WikiProposalKind, catalogKinds: string[] = DEFAULT_CATALOG_KINDS): boolean {
-  if (kind === "entity" || kind === "synthesis") return false;
+  // `lint` joins the hard skips: it edits a page that is already in the wiki
+  // (and already cataloged, if its kind is), so a catalog line would be a second
+  // entry for a page nobody created. Implied today by every lint row being
+  // `mode: "update"`, which `indexSkipFor` answers first — stated here so a
+  // policy that opts the kind in cannot reach the index.
+  if (kind === "entity" || kind === "synthesis" || kind === "lint") return false;
   return catalogKinds.includes(kind);
 }
 
