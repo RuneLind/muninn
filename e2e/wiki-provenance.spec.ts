@@ -1496,12 +1496,14 @@ test.describe("Wiki reader: provenance", () => {
 
   test("a Stamp answer that lands after the reader navigated does not redraw the new page", async ({ page }) => {
     // The POST is answered by the test with the shape page's OWN block (read
-    // through the real route), so nothing is written and the answer is
-    // exactly what the stamp route would have returned — held until the
-    // reader is on the chain page.
+    // through the real route), so nothing is written; the body is shaped like
+    // the stamp route's `{ outcome, provenance }` answer, with `written` as the
+    // outcome it reports for a real write — held until the reader is on the
+    // chain page.
     const block = await (
       await page.request.get(`${BASE}/api/wiki/page/provenance?wiki=${WIKI}&relPath=${SHAPE_REL}`)
     ).json();
+    expect(block.provenance).toBeTruthy();
     let release: () => void = () => {};
     const held = new Promise<void>((r) => {
       release = r;
@@ -1511,7 +1513,7 @@ test.describe("Wiki reader: provenance", () => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ outcome: "stamped", provenance: block.provenance }),
+        body: JSON.stringify({ outcome: "written", provenance: block.provenance }),
       });
     });
     await open_(page, SHAPE_REL);
@@ -1529,5 +1531,51 @@ test.describe("Wiki reader: provenance", () => {
     // shape page's rows.
     await expect(page.locator(".wiki-chain-row")).toHaveCount(chainRowsBefore);
     await expect(page.locator(".wiki-chain-reason", { hasText: "merged #543" })).toHaveCount(0);
+  });
+
+  test("a Stamp answer with no block, landing on a page whose load is slow, leaves ONE strip", async ({ page }) => {
+    // Two writers on one page: the Stamp's refetch (a warm GET, answered at
+    // once) and the chain page's own load (held). Whatever order they land in,
+    // the page ends with one strip.
+    let chainLoads = 0;
+    let releaseLoad: () => void = () => {};
+    const loadHeld = new Promise<void>((r) => {
+      releaseLoad = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      if (route.request().url().includes(encodeURIComponent(CHAIN_REL))) {
+        chainLoads += 1;
+        if (chainLoads === 1) await loadHeld;
+      }
+      await route.continue();
+    });
+    let releaseStamp: () => void = () => {};
+    const stampHeld = new Promise<void>((r) => {
+      releaseStamp = r;
+    });
+    await page.route("**/api/wiki/provenance/stamp", async (route) => {
+      await stampHeld;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ outcome: "written" }),
+      });
+    });
+    await open_(page, SHAPE_REL);
+    const rows = await openChain(page);
+    await rows.nth(4).locator(".wiki-chain-stamp").click();
+    await page.locator(`.wiki-list-item[data-relpath="${CHAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("The handoff chain");
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    releaseStamp();
+    // The refetch's GET is the SECOND chain load and passes straight through.
+    await expect.poll(() => chainLoads).toBe(2);
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
+    const first = page.waitForResponse((r) => r.url().includes(encodeURIComponent(CHAIN_REL)));
+    releaseLoad();
+    await first;
+    await page.waitForTimeout(200);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
   });
 });

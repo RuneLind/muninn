@@ -1533,59 +1533,66 @@ async function stampGhost(btn: HTMLButtonElement): Promise<void> {
     // A 200 with no block: the write happened, the re-resolve did not answer.
     // Re-read the page's own payload rather than leaving a dead button.
     resetStampButton(btn);
-    void refetchProvStrip();
+    refetchProvStrip();
   } catch {
     resetStampButton(btn);
     showStampMsg(btn, "not stamped: the request failed");
   }
 }
 
-/** Re-read the open page's provenance block and redraw the strip from it.
- *  Best effort: a failure leaves the strip exactly as it was. */
-async function refetchProvStrip(): Promise<void> {
-  const relPath = currentRelPath;
-  if (!relPath) return;
-  try {
-    const res = await fetch(provenanceUrl(relPath));
-    if (!res.ok) return;
-    const data = (await res.json()) as WikiPageProvenance | null;
-    // The reader may have navigated while this was in flight.
-    if (data?.provenance && currentRelPath === relPath) redrawProvStrip(data.provenance);
-  } catch {
-    /* the strip stays as it is */
-  }
+/** Re-read the open page's provenance block and redraw the strip from it —
+ *  through the ONE load path, so it takes a sequence number like any load and
+ *  writes through `placeProvStrip` like any writer. */
+function refetchProvStrip(): void {
+  if (currentRelPath) void loadProvStrip(currentRelPath);
 }
 
 function provenanceUrl(relPath: string): string {
   return withWiki("/api/wiki/page/provenance?relPath=" + encodeURIComponent(relPath));
 }
 
-/** The newest provenance load's sequence number. Only that load may touch the
- *  DOM — see `loadProvStrip`. */
+/** The newest provenance load's sequence number. Only that load may write —
+ *  see `loadProvStrip`; a Stamp redraw bumps it to retire whatever is in
+ *  flight. */
 let provLoadSeq = 0;
+
+/**
+ * The ONE writer of the strip. Every writer — a load, the Stamp redraw, the
+ * retry — replaces whatever `.wiki-prov-strip` is on the page (the
+ * placeholder, the failure line, a real strip), and inserts one after the meta
+ * row only when none is there and there is something to show (a `prs:`-only
+ * page rendered no placeholder). Two writers with rules of their own is how
+ * this page came to show two strips, twice: each rule enumerated the DOM
+ * states the OTHER writer could leave and got one wrong. An open chain stays
+ * open across the replacement: the reader was looking at it.
+ */
+function placeProvStrip(html: string): void {
+  const existing = document.querySelector(".wiki-prov-strip");
+  if (!existing) {
+    if (html) document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", html);
+    return;
+  }
+  const wasOpen =
+    existing.querySelector("[data-prov-toggle]")?.getAttribute("aria-expanded") === "true";
+  existing.outerHTML = html;
+  if (!wasOpen) return;
+  const line = document.querySelector<HTMLButtonElement>("[data-prov-toggle]");
+  if (line) toggleProvChain(line);
+}
 
 /**
  * Fill the placeholder strip a `provenancePending` page rendered. Runs AFTER
  * the article is on screen, so the join's 10 s budget is spent behind a
  * spinner rather than in front of the markdown.
  *
- * ONE rule decides who may write: the NEWEST load for the page that is still
+ * Who may write is decided once: the NEWEST load for the page that is still
  * open. Loads overlap whenever the reader leaves a page and returns before
- * its first answer lands — both are for the same relPath, so a relPath guard
- * alone lets both through, and the per-case DOM checks tried before this
- * (replace only a placeholder; keep any existing strip) each moved the bug
- * rather than removing it: two strips in one case, a stale failure line
- * burying a fresh block in the next. An older answer is dropped whatever it
- * carries. The rule covers THIS path only: the Stamp redraw does not load, and
- * keeps its own page guard in `stampGhost`.
- *
- * The newest load then has exactly two DOM states to meet, because `loadPage`
- * replaces the whole article on every navigation and nothing else renders a
- * strip before a load completes: the placeholder it rendered, which it
- * replaces (with the block, with nothing, or with the failure line and its
- * retry), or no strip at all on a `prs:`-only page, where a block goes where
- * `articleHeadHtml` would have put it, after the meta row, and an empty or
- * failed answer stays silent because the page never promised a strip.
+ * its first answer lands, or presses Stamp and the refetch races the page's
+ * own load — both are for the same relPath, so a relPath guard alone lets
+ * both through. An older answer is dropped whatever it carries; the newest
+ * writes through `placeProvStrip`. A failed fetch becomes the failure line
+ * with a retry only where a placeholder promised a strip; on a `prs:`-only
+ * page, which rendered none, it stays silent.
  */
 async function loadProvStrip(relPath: string): Promise<void> {
   const seq = ++provLoadSeq;
@@ -1600,12 +1607,11 @@ async function loadProvStrip(relPath: string): Promise<void> {
     /* falls through to the unavailable line */
   }
   if (currentRelPath !== relPath || seq !== provLoadSeq) return;
-  const placeholder = document.querySelector(".wiki-prov-strip.wiki-prov-pending");
-  if (placeholder) {
-    placeholder.outerHTML = next === null ? provUnavailableHtml() : next;
+  if (next === null) {
+    if (document.querySelector(".wiki-prov-strip.wiki-prov-pending")) placeProvStrip(provUnavailableHtml());
     return;
   }
-  if (next) document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", next);
+  placeProvStrip(next);
 }
 
 /** The retry on a failed load: back to the placeholder, then the fetch again. */
@@ -1616,17 +1622,12 @@ function retryProvStrip(): void {
   void loadProvStrip(currentRelPath);
 }
 
-/** Replace the strip in place from a fresh payload, preserving the open/closed
- *  state of the chain the reader was looking at. */
+/** Redraw the strip from the block the stamp route answered with. That block
+ *  is a re-resolve AFTER the write, so it is fresher than any load in flight:
+ *  the sequence is bumped to retire them. */
 function redrawProvStrip(provenance: ProvenancePayload): void {
-  const strip = document.querySelector(".wiki-prov-strip");
-  if (!strip) return;
-  const wasOpen =
-    strip.querySelector("[data-prov-toggle]")?.getAttribute("aria-expanded") === "true";
-  strip.outerHTML = provStripHtml(provenance, jiraKeys);
-  if (!wasOpen) return;
-  const line = document.querySelector<HTMLButtonElement>("[data-prov-toggle]");
-  if (line) toggleProvChain(line);
+  provLoadSeq += 1;
+  placeProvStrip(provStripHtml(provenance, jiraKeys));
 }
 
 /**
@@ -2202,9 +2203,7 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   // facet can actually serve (see `provStripHtml`).
   // The placeholder only where a strip is certain — see `provPendingHtml`.
   // A `prs:`-only page still fetches; its strip, if any, is inserted on arrival.
-  // `m.relPath` too: the load is keyed on it (`currentRelPath`), so a payload
-  // without one would render a spinner nothing ever fills.
-  if (provenancePending && m.relPath && (m.sessions?.length || m.jira?.length)) head += provPendingHtml();
+  if (provenancePending && (m.sessions?.length || m.jira?.length)) head += provPendingHtml();
   head += "</div>";
   return head;
 }
