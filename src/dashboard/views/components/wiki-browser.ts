@@ -252,7 +252,9 @@ import {
 // `bun test`-covered); this file only decides WHERE it goes and wires the three
 // controls it carries — the Jira key, the disclosure and the ⧉ copy button.
 import {
+  provPendingHtml,
   provStripHtml,
+  provUnavailableHtml,
   railListHtml,
   SESSION_COPY_FAIL,
   SESSION_COPY_IDLE,
@@ -321,9 +323,18 @@ interface WikiPageDetail {
   html: string;
   outgoing: WikiListing[];
   backlinks: WikiListing[];
-  /** Who wrote this page, which issue it serves, what it cost. ABSENT on a page
-   *  carrying none of the frontmatter keys — never `{}` — so the client's one
-   *  gate is "is this key here at all". */
+  /** TRUE when the page carries any provenance key and the block is worth
+   *  fetching from `/api/wiki/page/provenance`. ABSENT on a page carrying none
+   *  of the frontmatter keys — never `false` — so the client's one gate is "is
+   *  this key here at all". The block itself never rides on this payload: the
+   *  join reaches claude-usage and huginn, and a page open must not wait on it. */
+  provenancePending?: boolean;
+  error?: string;
+}
+
+/** `GET /api/wiki/page/provenance`'s answer: the block, or `{}` on a page
+ *  carrying none of the keys. */
+interface WikiPageProvenance {
   provenance?: ProvenancePayload;
   error?: string;
 }
@@ -1532,14 +1543,49 @@ async function refetchProvStrip(): Promise<void> {
   const relPath = currentRelPath;
   if (!relPath) return;
   try {
-    const res = await fetch(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)));
+    const res = await fetch(provenanceUrl(relPath));
     if (!res.ok) return;
-    const data = (await res.json()) as { provenance?: ProvenancePayload } | null;
+    const data = (await res.json()) as WikiPageProvenance | null;
     // The reader may have navigated while this was in flight.
     if (data?.provenance && currentRelPath === relPath) redrawProvStrip(data.provenance);
   } catch {
     /* the strip stays as it is */
   }
+}
+
+function provenanceUrl(relPath: string): string {
+  return withWiki("/api/wiki/page/provenance?relPath=" + encodeURIComponent(relPath));
+}
+
+/**
+ * Fill the placeholder strip a `provenancePending` page rendered. Runs AFTER
+ * the article is on screen, so the join's 10 s budget is spent behind a
+ * spinner rather than in front of the markdown. Three outcomes, each replacing
+ * the placeholder in place: the block (the strip proper), `{}` (no strip — the
+ * keys were dropped between the page read and this one), or a failed fetch
+ * (one line saying so, never a spinner that runs forever). A navigation while
+ * this is in flight discards the answer: `redrawProvStrip` keys on the DOM, and
+ * the DOM is now another page's.
+ */
+async function loadProvStrip(relPath: string): Promise<void> {
+  let next: string | null = null;
+  try {
+    const res = await fetch(provenanceUrl(relPath));
+    if (res.ok) {
+      const data = (await res.json()) as WikiPageProvenance | null;
+      next = data?.provenance ? provStripHtml(data.provenance, jiraKeys) : "";
+    }
+  } catch {
+    /* falls through to the unavailable line */
+  }
+  if (currentRelPath !== relPath) return;
+  if (next !== null) {
+    const strip = document.querySelector(".wiki-prov-strip.wiki-prov-pending");
+    if (strip) strip.outerHTML = next;
+    return;
+  }
+  const strip = document.querySelector(".wiki-prov-strip.wiki-prov-pending");
+  if (strip) strip.outerHTML = provUnavailableHtml();
 }
 
 /** Replace the strip in place from a fresh payload, preserving the open/closed
@@ -2087,14 +2133,16 @@ function projectHubChipHtml(m: WikiListing): string {
  * Article-head block (title, badges, tags, dates, source link) — shared by
  * markdown pages and HTML explainers.
  *
- * `provenance` is the SINGLE-PAGE payload's block and is therefore optional: the
- * explainer path renders this head before its `/api/wiki/page` response lands
- * (and an HTML explainer carries no frontmatter to stamp in the first place), so
- * it passes nothing and renders no strip. A page the stamper has not touched
- * carries no `provenance` key at all, which is the one gate — never an empty
- * object, so there is no "is it empty" question to get wrong.
+ * `provenancePending` is the SINGLE-PAGE payload's flag and is therefore
+ * optional: the explainer path renders this head before its `/api/wiki/page`
+ * response lands (and an HTML explainer carries no frontmatter to stamp in the
+ * first place), so it passes nothing and renders no strip. A page the stamper
+ * has not touched carries no `provenancePending` key at all, which is the one
+ * gate — never `false`, so there is no "is it set" question to get wrong. The
+ * strip rendered here is the PLACEHOLDER; `loadProvStrip` fills it once the
+ * page is on screen.
  */
-function articleHeadHtml(m: WikiListing, provenance?: ProvenancePayload): string {
+function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   // Explainer-style subtitle under the H1 for blog pages that declared a
   // `description` (user text → escaped into innerHTML). Non-blog pages are unchanged.
   const subtitle =
@@ -2124,7 +2172,7 @@ function articleHeadHtml(m: WikiListing, provenance?: ProvenancePayload): string
   // `jiraKeys` is the facet's membership set, and the strip's key is a SECOND
   // way into that facet — so the strip renders a control only for a key the
   // facet can actually serve (see `provStripHtml`).
-  if (provenance) head += provStripHtml(provenance, jiraKeys);
+  if (provenancePending) head += provPendingHtml();
   head += "</div>";
   return head;
 }
@@ -2308,9 +2356,12 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       const accentBlock = isBlog ? blogAccentStyleBlock(data.meta) : "";
       document.getElementById("articleWrap")!.innerHTML =
         accentBlock +
-        articleHeadHtml(data.meta, data.provenance) +
+        articleHeadHtml(data.meta, data.provenancePending) +
         `<div class="${articleClass}">${data.html}</div>`;
       document.getElementById("articleWrap")!.scrollTop = 0;
+      // The provenance join runs behind the placeholder, never in front of the
+      // article: `/api/wiki/page` no longer waits on claude-usage and huginn.
+      if (data.provenancePending && currentRelPath) void loadProvStrip(currentRelPath);
       // Client-side enhancement: upgrade any ```mermaid fences to inline SVG.
       // No-op (zero mermaid bytes) for pages without a mermaid fence. Covers
       // every navigation path — direct clicks, popstate, and boot deep-link all

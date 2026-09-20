@@ -1073,6 +1073,17 @@ export async function renderWikiPage(opts?: {
       margin-top: 8px; padding-top: 7px;
       border-top: 1px solid var(--border-primary);
     }
+    /* The placeholder while the block is fetched: one caption-sized line with
+       a spinner, the same height the cost line will take, so the article
+       below does not jump when the strip lands. */
+    .wiki-prov-pending .wiki-prov-cost { display: inline-flex; align-items: center; gap: 6px; }
+    .wiki-prov-spinner {
+      width: 10px; height: 10px; border-radius: 50%;
+      border: 1.5px solid var(--border-secondary); border-top-color: var(--accent);
+      animation: wiki-prov-spin 0.8s linear infinite;
+    }
+    @keyframes wiki-prov-spin { to { transform: rotate(360deg); } }
+    .wiki-prov-unavailable .wiki-prov-cost { color: var(--text-muted); }
     .wiki-prov-jira-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
     /* The key and its ↗ read as ONE chip: the key filters the list, the arrow
        opens Jira. Shaped like .wiki-project-hub — it sets a facet, so it must

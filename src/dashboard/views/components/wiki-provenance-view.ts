@@ -467,6 +467,39 @@ function jiraKeyFilterable(key: string, known?: Record<string, number> | null): 
  * the facet does not hold gets neither, and says why in its `title`, because the
  * browse URL for a non-key is as dead as the filter (see `jiraKeyFilterable`).
  */
+/** What the placeholder strip says while `GET /api/wiki/page/provenance` is in
+ *  flight. The page is already readable above it; this line only says the
+ *  chain is coming, so it stays as short as a caption. */
+export const PROV_PENDING_COPY = "loading provenance…";
+/** What the placeholder becomes when the fetch fails outright (network, a 5xx).
+ *  A degraded LEDGER is not this — that answers 200 with bare chips and its own
+ *  reason; this is the one case where nothing at all came back. */
+export const PROV_UNAVAILABLE_COPY = "provenance not loaded";
+
+/**
+ * The strip a page renders BEFORE its provenance is known: the same
+ * `.wiki-prov-strip` block `provStripHtml` renders, so `redrawProvStrip` can
+ * replace it in place, plus `wiki-prov-pending` for the spinner. Rendered only
+ * when the page answered `provenancePending`, so an unstamped page still gets
+ * no strip at all.
+ */
+export function provPendingHtml(): string {
+  return (
+    `<div class="wiki-prov-strip wiki-prov-pending" aria-busy="true">` +
+    `<span class="wiki-prov-cost"><span class="wiki-prov-spinner" aria-hidden="true"></span>` +
+    `${esc(PROV_PENDING_COPY)}</span></div>`
+  );
+}
+
+/** The placeholder's terminal state when the fetch itself failed. Still a
+ *  `.wiki-prov-strip`, so a later stamp refetch can replace it too. */
+export function provUnavailableHtml(): string {
+  return (
+    `<div class="wiki-prov-strip wiki-prov-unavailable">` +
+    `<span class="wiki-prov-cost">${esc(PROV_UNAVAILABLE_COPY)}</span></div>`
+  );
+}
+
 export function provStripHtml(
   p: ProvenancePayload,
   known?: Record<string, number> | null,

@@ -1279,4 +1279,38 @@ test.describe("Wiki reader: provenance", () => {
     const after = await readFile(path.join(roRoot, RO_REL), "utf8");
     expect(after).not.toContain(STAMP_GHOST);
   });
+
+  test("the article renders BEFORE the provenance block, behind a spinner", async ({ page }) => {
+    // Hold the provenance answer: the page open must not wait on it. The route
+    // is intercepted, not the ledger stub, so the page request itself is the
+    // real one and the deferral is proved at the seam the reader uses.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      await held;
+      await route.continue();
+    });
+    await open_(page, SHAPE_REL);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Wiki provenance — the frontmatter shape");
+    const pending = page.locator(".wiki-prov-strip.wiki-prov-pending");
+    await expect(pending).toBeVisible();
+    await expect(pending).toHaveAttribute("aria-busy", "true");
+    await expect(pending.locator(".wiki-prov-spinner")).toHaveCount(1);
+    await expect(pending).toContainText("loading provenance");
+    release();
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+  });
+
+  test("a provenance fetch that fails outright becomes one line, not a spinner", async ({ page }) => {
+    await page.route("**/api/wiki/page/provenance?**", (route) => route.abort());
+    await open_(page, SHAPE_REL);
+    const strip = page.locator(".wiki-prov-strip.wiki-prov-unavailable");
+    await expect(strip).toHaveText("provenance not loaded");
+    await expect(page.locator(".wiki-prov-spinner")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+  });
 });

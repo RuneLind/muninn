@@ -1,7 +1,9 @@
 /**
  * Resolving a page's provenance keys into an answer — the one place the session
- * ledger and the huginn Jira corpus are joined, shared by `GET /api/wiki/page`'s
- * `provenance` block and by the two reverse lookups
+ * ledger and the huginn Jira corpus are joined, shared by
+ * `GET /api/wiki/page/provenance` (the block the reader fetches AFTER the page
+ * is on screen — `GET /api/wiki/page` only says whether there is one to fetch,
+ * `provenancePending`) and by the two reverse lookups
  * (`dashboard/routes/wiki-provenance.ts`).
  *
  * Both external reads are OPTIONAL and neither can fail the request:

@@ -851,6 +851,22 @@ the same id-shape gate, the same `SESSION_IDS_QUERY_MAX_BYTES` budget — the
 shares one `PROVENANCE_BUDGET_MS` (10 s) `AbortSignal`, so a page open costs one
 budget rather than the sum of its legs.
 
+**The page open does not wait on that budget at all.** `GET /api/wiki/page`
+answers `provenancePending: true` (absent, never `false`, on a page carrying
+none of the keys — the client's one gate stays "is the key here") and joins
+nothing; the reader renders a placeholder strip with a spinner under the title
+and fetches **`GET /api/wiki/page/provenance`** (same `wiki`/`relPath`/`name`
+resolution, `{ provenance }` or `{}` for an unstamped page, 404 for no page)
+once the article is on screen. Measured before the split: a plan page naming
+four sessions and three PRs opened seconds after its markdown was ready,
+because the join's slowest leg gated the whole payload. The placeholder is a
+`.wiki-prov-strip` like the real one, so `redrawProvStrip` (the Stamp refetch)
+replaces either in place; a fetch that fails outright becomes one
+"provenance not loaded" line, never a spinner that runs forever, and an answer
+landing after the reader navigated away is dropped. The stamp route still
+returns the block inline — it has just written the keys and owes the caller
+the strip.
+
 That signal is created in **`pageProvenance`** and passed down. It used to be
 created inside `resolveProvenance` and never returned, which leaves a leg added
 beside it either unbounded or armed with a second timer — and awaiting that
