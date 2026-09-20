@@ -446,6 +446,20 @@ test.describe("wiki lint fixes", () => {
     await expect(card.locator(".gard-group-diff")).toHaveCount(3);
     await expect(card.locator(".gard-badge.badge-group")).toHaveText("3 pages");
     await page.locator('.gard-filter[data-status=""]').click();
+
+    // …and the buttons DO something. The stop left one row `draft`, so a second
+    // Accept has to apply it — an all-or-nothing gate answers 409 `mixed` here
+    // and the reverted rows can never be applied at all.
+    const beforeSecond = await read(HEAL_C);
+    await card.locator('[data-group-action="approve"]').click();
+    await expect(card.locator(".gard-badge.chip-stale")).toHaveCount(1);
+    expect(await read(HEAL_C)).not.toBe(beforeSecond);
+    expect(await read(HEAL_C)).toContain("series: ");
+    // The chip is coloured by the SET, not by `rows[0]`: nothing is reviewable
+    // any more, but a stale member means the card is not `applied` either.
+    const settled = await card.locator(".gard-badge.chip-stale").textContent();
+    expect(settled!.split(" · ").sort()).toEqual(["1 stale", "2 applied"]);
+    await expect(card.locator('[data-group-action="approve"]')).toHaveCount(0);
   });
 
   /**

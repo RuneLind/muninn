@@ -122,6 +122,13 @@ tail still runs OUTSIDE the section, as **one** commit over every path the group
 touched (twelve commits differing only in which frontmatter line moved is not a
 history anyone reads).
 
+A row the apply short-circuits at step 2a — the page already WAS the draft —
+**stages nothing of its own**: not its `target_path`, and not the wiki-global
+`log.md`, which only a row that WROTE causes an entry in. Staging them made the
+one commit claim a page it never touched (a group of one written page plus one
+noop said "2 pages"), since the subject counts the staged paths. Whatever the
+WIRE stage modified on that row is a real change and stays staged.
+
 It writes **ONE `log.md` entry** for the whole group, inside the same section,
 naming every page it wrote and the seeder that proposed it — a twelve-member
 series otherwise files twelve entries whose only difference is which
@@ -137,31 +144,50 @@ the boundary. The route (`POST /api/wiki/proposals/group/:groupKey/approve?wiki=
 answers 409 `outcome: "stopped"` with `applied[]`, `noop[]` and `stoppedAt`,
 and CASes each reached row through its own terminal verb.
 
-⚠️ **Every row the apply never REACHED goes back to `draft`.** The first cut left
-them `approved` and called that "re-runnable by a second click" — and nothing
+⚠️ **Every row left in `approved` goes back to `draft`** — the ones the apply
+never reached, and a `forbidden` one, which it reached and refused. The first cut
+left them `approved` and called that "re-runnable by a second click", and nothing
 rendered the click: the gate draws Accept/Reject on `draft` and on nothing else,
 so after a stop the card showed one chip reading `applied`, three pages, and no
-buttons at all. What actually retires a stopped group is the SELF-HEAL on the
-next seeding pass (below); until then the reviewer can act on the members that
-are still writable.
+buttons at all. The second cut reverted only the UNREACHED ones plus the stopped
+row, which strands the read-only refusal's other rows: that path hands back a
+`forbidden` outcome for EVERY row with `stoppedAt` on the first, so rows 2..N are
+"reached" and were skipped. The decision is the exported pure `groupApplyActions`
+(`wiki-gardener-routes.ts`), which is also the only way to drive that branch —
+both read-only refusals the route makes fire before the apply is ever called.
 
 Three more rules on that route, each a measured defect:
 
-- **ALL OR NOTHING on the way in.** Every row must be `draft` or the request is
-  refused 409 `{outcome: "mixed", statuses}`. A reviewer who dismissed one member
-  cannot then accept the group, and a half-applied group is not the card
-  anybody approved.
+- **The gate refuses a decision in flight and SKIPS what is settled.** An
+  `approved` row (another apply mid-flight over these pages) or a `rejected` one
+  (a dismissal) refuses the request, 409 `{outcome: "mixed", statuses}`;
+  `applied` and `stale` rows are skipped and reported as
+  `skipped: {applied: n, stale: n}`, and the `draft` rows are approved and
+  applied. A group with no `draft` row left answers 409
+  `{outcome: "nothing-to-apply", statuses}` — a different fact and a different
+  remedy. Refusing on ANY non-draft row, which is what shipped first, made the
+  stop path above a DEAD END: after a stop the group is `applied` + `stale` +
+  `draft`, so the very next Accept answered `mixed` and the reverted rows could
+  never be applied at all — the card kept its buttons and they did nothing. That
+  is also what the e2e stop case now asserts: a second Accept writes the
+  remaining page and the card settles on `2 applied · 1 stale`.
 - **A row `applyInner` short-circuits at step 2a** — the page already WAS the
   draft — is reported in `noop[]`, not `applied[]`. It is `applied` in the DB
   (it is done), but "3 pages written" and "3 pages that already said that" are
   different answers to a reviewer about to look at a diff.
-- **`?wiki=` is REQUIRED on both group verbs** (400 without, 404 on an unknown
-  name), and every group DB verb is scoped by `COALESCE(wiki_name, bot_name)`.
-  A group key is a sha256 prefix over a check id, a sub-rule and a list of
-  wiki-RELATIVE paths — it carries no wiki identity, so two wikis holding
-  `plans/a.mdx` and `plans/b.mdx` mint the same key for the same finding. The
-  first cut read the wiki off the group's own first ROW, which is circular: the
-  query that found the row was already unscoped.
+- **Both group verbs resolve the wiki through `resolveWikiRequest`**, exactly as
+  every other reader/gardener route does (`?wiki=`, the legacy `?bot=`, else the
+  registry default), and every group DB verb is scoped by
+  `COALESCE(wiki_name, bot_name)`. A group key is a sha256 prefix over a check
+  id, a sub-rule and a list of wiki-RELATIVE paths — it carries no wiki
+  identity, so two wikis holding `plans/a.mdx` and `plans/b.mdx` mint the same
+  key for the same finding. The first cut read the wiki off the group's own
+  first ROW, which is circular: the query that found the row was already
+  unscoped. The second made the param REQUIRED, which the gate's own client
+  cannot satisfy — `withBot()` emits no query at all when the page was served
+  without a wiki name, so both verbs 400'd under the `WIKI_DIR` default wiki.
+  The only 400 left is a request resolving to NO entry (a bare one under that
+  env override, or an empty registry); an unknown name is still 404.
 
 A group whose rows belong to a BOT wiki takes the **bot's own `wikiAutoCommit`
 policy** (`groupApplyPolicy`) — its `wikiDir`, its `push` opt-out, its
@@ -190,9 +216,15 @@ newer end of an 8.1 pair AND a member of an 8.2 cluster got rows in both.
 rows (`listLintGroupRowsByWiki` — rows, not keys, because three different
 questions are asked of them):
 
-1. **SELF-HEAL first.** Every live `draft` group whose key no CURRENT finding
-   mints is marked `stale` (`markLintGroupStale`; `approved` rows are mid-apply
-   and the apply's own terminal CAS owns them). That is what retires the
+1. **SELF-HEAL first — and it runs on a pass with NOTHING to propose.** Every
+   live `draft` group whose key no CURRENT finding mints is marked `stale`
+   (`markLintGroupStale`; `approved` rows are mid-apply and the apply's own
+   terminal CAS owns them). The weekly watcher therefore calls the seeder
+   whenever the wiki is writable, before its own clean-wiki return, rather than
+   short-circuiting on `fixable.length === 0`: a wiki whose fixable findings
+   have all been fixed is EXACTLY the state where every live group is
+   superseded, and the short circuit left those cards live forever while its
+   comment claimed the opposite. That is what retires the
    superseded 8.2 group after an 8.1 accept grows the cluster by one member —
    the key moved, so the old card can only ever apply a stale edit. It runs
    BEFORE the claim pass, so the pages it frees are re-proposable in the SAME

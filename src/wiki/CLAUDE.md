@@ -994,8 +994,16 @@ is not a review.
 `plan_status`** (`SERIES_CLUSTER_MIN_PLANS`, the dry run's own `≥2 plans` gate).
 Under it the component is still a FINDING — the count is the signal — but
 carries no `fix`, so nothing is seeded and no Accept can name a series nobody is
-working on. Measured: with the narrative predicate and this gate the shipped
-clustering reproduces the dry run's 20-odd usable clusters instead of 42.
+working on. **Measured on mimir 2026-09-20** (547 pages): 44 `series-unnamed`
+findings, of which **31 carry a fix** over **139 pages** and 13 are report-only.
+The campaign's dry run counted 21 usable clusters, and that number is **not the
+one to compare against**: it FILTERED components over `SERIES_CLUSTER_MAX` out
+of its count, where the shipped rule keeps them and takes a 12-newest CUT — so
+the two are counting different things, and an earlier version of this paragraph
+claiming the shipped clustering "reproduces the dry run's 20-odd usable
+clusters" was false in both directions. Re-derive with
+`bun -e` over `buildWikiIndex` + `lintWiki`, counting `f.fix` and the distinct
+`fix.edits[].relPath`.
 
 **A coined key never collides with a series that already exists**
 (`coinSeriesKey`, compared under `seriesCensusKey`): a stem is exactly the kind

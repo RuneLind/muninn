@@ -369,13 +369,27 @@ export async function applyWikiProposalGroup(
       // twelve-member series otherwise files twelve entries whose only
       // difference is which frontmatter line moved, burying the curated ones the
       // log is for. The entry is written below, still inside this section.
+      let rowPaths: string[] = [];
       const outcome = await applyInner(
         row,
         deps,
         (_commit, paths) => {
-          tail.paths.push(...paths);
+          rowPaths = paths;
         },
         { skipLog: true },
+      );
+      // A NOOP row wrote nothing — `applyInner` short-circuited at step 2a
+      // because the page already WAS the draft — so staging its own path (and
+      // the wiki-global `log.md`, which only a row that WROTE causes an entry
+      // in) makes the one commit claim a page it never touched: the subject
+      // counts the staged paths, and a group of one written page plus one noop
+      // said "2 pages". Whatever the WIRE stage modified is a real change and
+      // stays staged.
+      const noopPath = outcome.outcome === "applied" && outcome.noop;
+      tail.paths.push(
+        ...(noopPath
+          ? rowPaths.filter((p) => p !== row.targetPath && p !== WIKI_LOG_FILE)
+          : rowPaths),
       );
       const entry: GroupRowOutcome = { id: row.id, targetPath: row.targetPath, outcome };
       out.results.push(entry);

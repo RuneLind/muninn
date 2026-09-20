@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { checkWikiLinter } from "./wiki-linter.ts";
 import { __resetWikiCacheForTest } from "../wiki/store.ts";
+import { __setReadonlyWikiRootsForTest } from "../wiki/readonly.ts";
 import type { Watcher } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
 
@@ -16,6 +17,20 @@ const watcher = { id: "w1", userId: "u1", name: "Wiki Linter" } as unknown as Wa
 
 function botConfig(overrides: Partial<BotConfig>): BotConfig {
   return { name: "testbot", ...overrides } as BotConfig;
+}
+
+/** The seeding seam, recorded. Every case injects it: the checker seeds on any
+ *  writable wiki now, and the real seeder would reach for a DB this suite has
+ *  no connection to. */
+function seedSpy() {
+  const calls: Array<{ findings: number }> = [];
+  return {
+    calls,
+    seed: async (findings: readonly unknown[]) => {
+      calls.push({ findings: findings.length });
+      return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] };
+    },
+  };
 }
 
 describe("checkWikiLinter", () => {
@@ -57,8 +72,35 @@ describe("checkWikiLinter", () => {
       path.join(root, "concepts/B.md"),
       "---\ntype: concept\ntitle: B\nupdated: 2026-06-01\nseries: ab\nsources: [x]\n---\n\nSee [[A]].",
     );
-    const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }));
+    const spy = seedSpy();
+    const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: spy.seed });
     expect(alerts).toEqual([]);
+    // THE SELF-HEAL. A wiki with no fixable finding is exactly the state where
+    // every live draft group has been superseded — the seeder's first rule
+    // retires them, and it only runs if it is CALLED.
+    expect(spy.calls).toEqual([{ findings: 0 }]);
+  });
+
+  test("a wiki whose findings carry no fix still runs the self-heal", async () => {
+    // One orphan with a broken link: four findings, none of them check 8's.
+    await Bun.write(
+      path.join(root, "concepts/Messy.md"),
+      "---\ntype: concept\ntitle: Messy\n---\n\nSee [[Missing Page]].",
+    );
+    const spy = seedSpy();
+    await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: spy.seed });
+    expect(spy.calls).toEqual([{ findings: 0 }]);
+  });
+
+  test("a read-only wiki root is NOT seeded — the write owner retires its own groups", async () => {
+    const spy = seedSpy();
+    __setReadonlyWikiRootsForTest([root]);
+    try {
+      await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: spy.seed });
+    } finally {
+      __setReadonlyWikiRootsForTest();
+    }
+    expect(spy.calls).toEqual([]);
   });
 
   test("findings → ONE low-urgency alert with dated id, count summary, and gardener pointer", async () => {
@@ -67,7 +109,7 @@ describe("checkWikiLinter", () => {
       path.join(root, "concepts/Messy.md"),
       "---\ntype: concept\ntitle: Messy\n---\n\nSee [[Missing Page]].",
     );
-    const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }));
+    const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed });
     expect(alerts.length).toBe(1);
     const alert = alerts[0]!;
     expect(alert.id).toMatch(/^wiki-lint-\d{4}-\d{2}-\d{2}$/);
@@ -87,7 +129,7 @@ describe("checkWikiLinter", () => {
       path.join(root, "concepts/Cut.md"),
       "---\ntype: concept\ntitle: Cut\nupdated: 2026-06-01\nsources: [x]\n---\n\nA line cut at [[Some Long Page",
     );
-    const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }));
+    const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed });
     expect(alerts[0]!.summary).toContain("1 truncated wikilink");
   });
 
@@ -101,7 +143,7 @@ describe("checkWikiLinter", () => {
       path.join(root, "concepts/M2.md"),
       "---\ntype: concept\ntitle: M2\nupdated: 2026-06-01\nsources: [x]\n---\n\nSee [[Gone Two]].",
     );
-    const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }));
+    const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed });
     expect(alerts.length).toBe(1);
     expect(alerts[0]!.summary).toContain("2 broken links");
     expect(alerts[0]!.summary).toContain("2 orphans");

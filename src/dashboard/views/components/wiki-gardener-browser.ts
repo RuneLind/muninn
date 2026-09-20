@@ -32,6 +32,7 @@ import {
   type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
+import { groupStatusSummary, groupChipTone } from "./wiki-gardener-group.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 interface SourceDoc {
@@ -192,20 +193,6 @@ function cardHtml(p: ProposalView): string {
   return html;
 }
 
-/**
- * The one-word summary of a group's status SET — `3 draft`, `2 applied · 1 stale`.
- *
- * A group is not in ONE status: a stopped apply leaves some rows `applied`, one
- * `stale` and the rest back in `draft`. The first cut rendered `chip(rows[0])`,
- * which on that exact state said `applied` and `3 pages` — the card claimed the
- * whole fix had landed. Counts are in the rows' own order of first appearance,
- * so the chip is stable across re-renders.
- */
-export function groupStatusSummary(statuses: readonly string[]): string {
-  const counts = new Map<string, number>();
-  for (const s of statuses) counts.set(s, (counts.get(s) ?? 0) + 1);
-  return [...counts.entries()].map(([s, n]) => `${n} ${s}`).join(" · ");
-}
 
 /**
  * One card for a whole lint GROUP: the finding's rationale once, then one diff
@@ -232,7 +219,10 @@ function groupCardHtml(rows: ProposalView[]): string {
   html += `<span class="gard-title">${esc(head.title)}</span>`;
   html += `<span class="gard-badge badge-lint">lint</span>`;
   html += `<span class="gard-badge badge-group">${rows.length} page${rows.length === 1 ? "" : "s"}</span>`;
-  html += `<span class="gard-badge chip-${esc(head.status)}">${esc(groupStatusSummary(rows.map((r) => r.status)))}</span>`;
+  // Both halves of the chip read the SET. The class used to come off `head`,
+  // which on a stopped group rendered `chip-applied` over text saying otherwise.
+  const statuses = rows.map((r) => r.status);
+  html += `<span class="gard-badge chip-${esc(groupChipTone(statuses))}">${esc(groupStatusSummary(statuses))}</span>`;
   html += "</div>";
   html += `<div class="gard-meta-row"><span class="gard-path">${esc(rows.map((r) => r.targetPath).join(" · "))}</span><span>·</span><span>${esc(fmtDate(head.createdAt))}</span></div>`;
   html += "</div>";

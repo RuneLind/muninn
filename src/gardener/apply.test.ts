@@ -977,6 +977,48 @@ describe("applyWikiProposalGroup", () => {
     expect(commits[0]!.message).toContain("2 pages");
   });
 
+  test("a NOOP row stages nothing, so the commit subject counts the pages it wrote", async () => {
+    const commits: Array<{ paths: string[]; message: string }> = [];
+    const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+    // The step-2a short circuit: B's file already IS the draft, so the apply
+    // writes nothing for it. Staging its path anyway makes the one commit claim
+    // a page it never touched.
+    const rowB = lintRow("r2", PAGE_B, pageBody("B"));
+    await writeFile(path.join(wikiDir, PAGE_B), rowB.draft);
+    const res = await applyWikiProposalGroup(
+      [rowA, { ...rowB, baseHash: sha256(rowB.draft) }],
+      deps({
+        commit: async (paths, message) => {
+          commits.push({ paths, message });
+        },
+      }),
+    );
+
+    expect(res.results.map((r) => r.outcome.outcome)).toEqual(["applied", "applied"]);
+    expect(res.results[1]!.outcome).toMatchObject({ noop: true });
+    expect(commits).toHaveLength(1);
+    expect(commits[0]!.paths.sort()).toEqual([PAGE_A, "log.md"].sort());
+    expect(commits[0]!.message).toContain("1 page");
+    expect(commits[0]!.message).not.toContain("2 pages");
+  });
+
+  test("an ALL-noop group stages nothing at all — there is no log entry either", async () => {
+    const commits: Array<{ paths: string[]; message: string }> = [];
+    const row = lintRow("r1", PAGE_A, pageBody("A"));
+    await writeFile(path.join(wikiDir, PAGE_A), row.draft);
+    await applyWikiProposalGroup(
+      [{ ...row, baseHash: sha256(row.draft) }],
+      deps({
+        commit: async (paths, message) => {
+          commits.push({ paths, message });
+        },
+      }),
+    );
+    // `writeGroupLogEntry` runs only for rows that WROTE, so staging `log.md`
+    // here would stage a file this apply never appended to.
+    expect(commits).toEqual([]);
+  });
+
   test("a read-only refusal sets stoppedAt, so the route takes its failure branch", async () => {
     const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
     const res = await applyWikiProposalGroup(rows, deps({ isReadonly: () => true }));

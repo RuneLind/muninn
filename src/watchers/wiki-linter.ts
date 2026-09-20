@@ -58,9 +58,17 @@ function summarizeCounts(counts: Record<LintCheck, number>): string {
   return parts.join(", ");
 }
 
+/** The one seam this checker writes through, injectable so a test can assert
+ *  THAT it ran — the seeder's answer is counts, and every outcome it can report
+ *  on a clean wiki is zero. */
+export interface WikiLinterDeps {
+  seed: typeof seedLintProposals;
+}
+
 export async function checkWikiLinter(
   watcher: Watcher,
   botConfig: BotConfig,
+  deps: WikiLinterDeps = { seed: seedLintProposals },
 ): Promise<WatcherAlert[]> {
   const name = botConfig.name;
   if (!botConfig.wikiDir) {
@@ -78,10 +86,6 @@ export async function checkWikiLinter(
   }
 
   const { findings, counts } = await lintWiki(index);
-  if (findings.length === 0) {
-    log.info("Wiki-linter: no findings for \"{name}\" — wiki is clean", { botName: name, name });
-    return [];
-  }
 
   // Check 8's findings carry a FIX, so the weekly pass also seeds the review
   // gate with them — the one thing this watcher writes, and only to the DB.
@@ -91,22 +95,23 @@ export async function checkWikiLinter(
   // status, a dismissal's `rejected` rows included — is skipped by the seeder,
   // so a weekly re-run does not re-propose what a reviewer said no to.
   //
-  // The `fixable` gate is not an optimisation only: without it a wiki whose
-  // findings are all hygiene ones would still ask the DB for a skip list it has
-  // no use for, on every weekly run. It also means the SELF-HEAL does not run on
-  // such a wiki — correct, since a wiki that mints no fixable finding this week
-  // has nothing that could have superseded a live group either.
+  // **It runs even when this pass has NOTHING to propose, and before the
+  // clean-wiki return.** The seeder's first rule is the SELF-HEAL, which retires
+  // every live `draft` group whose key no current finding mints — so a wiki
+  // whose fixable findings have all been fixed is EXACTLY the state where every
+  // live group is superseded. The first cut skipped the call on
+  // `fixable.length === 0` and claimed the opposite ("nothing that could have
+  // superseded a live group either"), which left those cards live forever. The
+  // cost of being wrong the other way is one indexed read per wiki per week.
   const fixable = findings.filter((f) => f.fix);
-  if (fixable.length === 0) {
-    // nothing to propose
-  } else if (isWikiReadonly() || isReadonlyWikiRoot(botConfig.wikiDir)) {
+  if (isWikiReadonly() || isReadonlyWikiRoot(botConfig.wikiDir)) {
     log.info("Wiki-linter: read-only, not seeding lint proposals for \"{name}\"", {
       botName: name,
       name,
     });
   } else {
     try {
-      const seeded = await seedLintProposals(fixable, {
+      const seeded = await deps.seed(fixable, {
         ...DEFAULT_LINT_PROPOSAL_DEPS,
         wikiDir: botConfig.wikiDir,
         wikiName: name,
@@ -132,6 +137,11 @@ export async function checkWikiLinter(
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  if (findings.length === 0) {
+    log.info("Wiki-linter: no findings for \"{name}\" — wiki is clean", { botName: name, name });
+    return [];
   }
 
   const summary = `Wiki lint: ${summarizeCounts(counts)} — review at /wiki/gardener`;

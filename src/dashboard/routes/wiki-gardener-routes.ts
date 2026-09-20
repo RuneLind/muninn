@@ -42,7 +42,7 @@ import {
   rejectWikiProposalGroup,
   type DeletedSourceProposal,
 } from "../../db/wiki-proposals.ts";
-import { applyWikiProposalGroup } from "../../gardener/apply.ts";
+import { applyWikiProposalGroup, type GroupApplyResult } from "../../gardener/apply.ts";
 import {
   seedLintProposals,
   DEFAULT_LINT_PROPOSAL_DEPS,
@@ -2567,20 +2567,26 @@ export function registerWikiGardenerRoutes(
    * Approve a whole lint GROUP: CAS every `draft` row to `approved`, then apply
    * them in ONE write section (`applyWikiProposalGroup`).
    *
-   * **ALL OR NOTHING on the way in.** Every row of the group must be `draft`, or
-   * the request is refused 409 `{outcome: "mixed", statuses}`. A reviewer who
-   * dismissed one member cannot then accept the group, and a group whose rows
-   * are half-applied is not a card anybody approved.
+   * **The gate refuses a group somebody else is mid-decision on, and SKIPS the
+   * rows that are already settled.** A row in `approved` means another apply is
+   * in flight over these same pages, and a `rejected` one is a dismissal the
+   * reviewer made — either refuses the whole request, 409
+   * `{outcome: "mixed", statuses}`. `applied` and `stale` rows are skipped and
+   * reported (`skipped`), and the `draft` rows are approved and applied. A group
+   * with no `draft` row left answers 409 `{outcome: "nothing-to-apply"}`, which
+   * is a different fact and a different remedy.
+   *
+   * It used to refuse on ANY non-draft row, which made the stop path below a
+   * dead end: after a stop the group is `applied` + `stale` + `draft`, so the
+   * very next Accept answered `mixed` and the reverted rows could never be
+   * applied at all — the card kept its buttons and they did nothing.
    *
    * **On a STOP, the card stays actionable.** The apply halts at the first row
    * that is not `applied`; that row is CASed to its own terminal status, and
-   * every row the apply never REACHED is put back to `draft`
-   * (`revertWikiProposalToDraft`). The first cut left them `approved`, which the
-   * gate renders with no buttons at all — the docblock claimed they were
-   * "re-runnable by a second click" and nothing rendered the click. Re-seeding
-   * on the next lint pass is what actually retires them (the self-heal in
-   * `seedLintProposals`), and until then the reviewer can act on the members
-   * that are still writable.
+   * every row left in `approved` — the ones the apply never reached, plus a
+   * `forbidden` one, which it reached and refused — is put back to `draft`
+   * (`revertWikiProposalToDraft`), since `approved` renders no verb in the gate
+   * at all. The decision itself is {@link groupApplyActions}.
    */
   app.post("/api/wiki/proposals/group/:groupKey/approve", async (c) => {
     const refused = readonlyRefusal(c);
@@ -2597,12 +2603,27 @@ export function registerWikiGardenerRoutes(
     const existing = await backlogDeps.listProposalsByGroup(wikiName, groupKey);
     if (existing.length === 0) return c.json({ error: "group not found" }, 404);
 
-    // MIXED: every row must be a draft. A group half-applied, half-dismissed or
-    // mid-apply is not the card the reviewer is looking at.
-    const mixed = existing.filter((r) => r.status !== "draft");
-    if (mixed.length > 0) {
+    // MIXED: only a row somebody else is deciding on blocks the request — an
+    // `approved` one (another apply is mid-flight over these pages) or a
+    // `rejected` one (a dismissal this click must not overrule).
+    const blocking = existing.filter((r) => r.status === "approved" || r.status === "rejected");
+    if (blocking.length > 0) {
       return c.json(
         { outcome: "mixed", error: "the group is not all draft", statuses: statusCounts(existing) },
+        409,
+      );
+    }
+    // Everything else that is not a draft is SETTLED — `applied` from an earlier
+    // click, `stale` from a stop. It is skipped and reported rather than
+    // refused, or the stop path's own reverted rows are unreachable forever.
+    const skipped = statusCounts(existing.filter((r) => r.status !== "draft"));
+    if (existing.every((r) => r.status !== "draft")) {
+      return c.json(
+        {
+          outcome: "nothing-to-apply",
+          error: "every row of the group is already settled",
+          statuses: statusCounts(existing),
+        },
         409,
       );
     }
@@ -2620,41 +2641,14 @@ export function registerWikiGardenerRoutes(
     const deps = applyDepsForWiki(wikiEntry, bot);
     const result = await applyWikiProposalGroup(rows, deps);
 
-    const applied: string[] = [];
-    const noop: string[] = [];
-    const reached = new Set<string>();
-    for (const row of result.results) {
-      reached.add(row.id);
-      if (row.outcome.outcome === "applied") {
-        await backlogDeps.markProposal(row.id, "applied");
-        // A row `applyInner` short-circuited (step 2a: the page already WAS the
-        // draft) wrote nothing. It is `applied` in the DB — it is done — but the
-        // answer keeps the two apart, or a card reports N pages written on a
-        // re-click that touched none.
-        (row.outcome.noop ? noop : applied).push(row.targetPath);
-        continue;
-      }
-      if (row.outcome.outcome === "stale") {
-        await backlogDeps.markProposal(row.id, "stale");
-      } else if (row.outcome.outcome === "collision") {
-        await backlogDeps.revertProposal(row.id);
-      } else if (row.outcome.outcome === "error") {
-        await backlogDeps.markProposal(row.id, "error");
-      }
-      // `forbidden` keeps its `approved` status, like the single-row route —
-      // and the revert below then puts it back to `draft` with the rest.
+    const { actions, applied, noop } = groupApplyActions(rows, result);
+    for (const action of actions) {
+      if (action.status === "draft") await backlogDeps.revertProposal(action.id);
+      else await backlogDeps.markProposal(action.id, action.status);
     }
 
     const stopped = result.stoppedAt;
     if (stopped) {
-      // Every row the apply never REACHED — plus a `forbidden` one, which it
-      // reached and refused — goes back to `draft`, so the card keeps its
-      // buttons. `approved` renders no verb in the gate at all.
-      for (const row of rows) {
-        if (reached.has(row.id) && row.id !== stopped.id) continue;
-        if (row.id === stopped.id && stopped.outcome.outcome !== "forbidden") continue;
-        await backlogDeps.revertProposal(row.id);
-      }
       const outcome = stopped.outcome;
       const reason = "reason" in outcome ? outcome.reason : "";
       log.warn("Lint group {group} stopped at {path}: {outcome} — {reason}", {
@@ -2670,6 +2664,7 @@ export function registerWikiGardenerRoutes(
           // answer names the boundary rather than implying nothing happened.
           applied,
           noop,
+          skipped,
           stoppedAt: stopped.targetPath,
           stoppedOutcome: outcome.outcome,
           error: reason,
@@ -2679,7 +2674,7 @@ export function registerWikiGardenerRoutes(
       );
     }
     log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
-    return c.json({ outcome: "applied", applied, noop });
+    return c.json({ outcome: "applied", applied, noop, skipped });
   });
 
   /**
@@ -2713,8 +2708,9 @@ export function registerWikiGardenerRoutes(
   });
 
   /**
-   * Which WIKI a group request is about — `?wiki=` (or the legacy `?bot=`),
-   * REQUIRED.
+   * Which WIKI a group request is about — resolved exactly as every other
+   * reader/gardener route resolves one (`resolveWikiRequest`: `?wiki=`, the
+   * legacy `?bot=`, else the registry's default entry).
    *
    * A group key carries no wiki identity: it is a sha256 prefix over a check id,
    * a sub-rule and a list of wiki-RELATIVE paths, so two wikis holding
@@ -2722,18 +2718,30 @@ export function registerWikiGardenerRoutes(
    * first cut read the wiki off the group's own first ROW, which is circular —
    * the query that found the row was already unscoped, so it could return the
    * other wiki's rows and then confirm itself.
+   *
+   * The second cut made the param REQUIRED instead, which the gate's own client
+   * cannot satisfy: `withBot()` emits no query at all when the page was served
+   * without a wiki name, so both group verbs 400'd there. A bare request is not
+   * ambiguous — it means the same wiki the listing came from — so the ONLY 400
+   * left is a request that resolves to no entry at all (a bare one under the
+   * `WIKI_DIR` env override, or an empty registry), where there is genuinely
+   * nothing to scope the key to.
    */
   function resolveGroupScope(
     c: Context,
   ):
     | { wikiEntry: WikiRegistryEntry; wikiName: string; bot: ReturnType<typeof getBots>[number] | undefined }
     | { error: string; status: 400 | 404 } {
-    const requested = c.req.query("wiki") ?? c.req.query("bot");
-    if (!requested || !requested.trim()) {
+    const { entry: wikiEntry, wiki, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki) return { error: `no wiki configured for "${wiki}"`, status: 404 };
+    if (!wikiEntry) {
       return { error: "wiki is required — a lint group key is not unique across wikis", status: 400 };
     }
-    const wikiEntry = findWiki(getWikiRegistry(), requested.trim());
-    if (!wikiEntry) return { error: `no wiki configured for "${requested.trim()}"`, status: 404 };
     const bot = getBots().find(
       (b) => b.name.toLowerCase() === wikiEntry.name.toLowerCase() && !!b.wikiDir,
     );
@@ -2782,6 +2790,70 @@ function applyDepsForWiki(
 ): ApplyDeps {
   const policy = groupApplyPolicy(entry, bot);
   return applyDepsFor(policy.wikiDir, policy.push, policy.catalogKinds, policy.reindexCollections);
+}
+
+/** One DB write a group apply's outcome asks for. `draft` is the revert
+ *  (`revertWikiProposalToDraft`); every other status is a terminal mark. */
+export interface GroupRowAction {
+  id: string;
+  status: "applied" | "stale" | "error" | "draft";
+}
+
+/**
+ * The whole status decision a group apply produces, as DATA — which rows are
+ * marked, which go back to `draft`, and which paths the answer reports.
+ *
+ * A function rather than an inline loop because the case that matters cannot be
+ * reached through the route at all: `applyWikiProposalGroup`'s read-only refusal
+ * hands back a `forbidden` outcome for EVERY row with `stoppedAt` on the first,
+ * and both read-only refusals the route makes fire before it — so the branch is
+ * exercisable only here.
+ *
+ * Actions are emitted in the order the route must apply them: the per-row
+ * outcomes in the apply's own order, then the reverts.
+ */
+export function groupApplyActions(
+  rows: readonly WikiProposal[],
+  result: GroupApplyResult,
+): { actions: GroupRowAction[]; applied: string[]; noop: string[] } {
+  const actions: GroupRowAction[] = [];
+  const applied: string[] = [];
+  const noop: string[] = [];
+  // Rows whose outcome left them in a status of their own. Everything else —
+  // a row the apply never reached, and a `forbidden` one, which it reached and
+  // refused — is still `approved`, which the gate renders with NO buttons at
+  // all, so on a stop it goes back to `draft`.
+  const settled = new Set<string>();
+  for (const row of result.results) {
+    if (row.outcome.outcome === "applied") {
+      actions.push({ id: row.id, status: "applied" });
+      settled.add(row.id);
+      // A row `applyInner` short-circuited (step 2a: the page already WAS the
+      // draft) wrote nothing. It is `applied` in the DB — it is done — but the
+      // answer keeps the two apart, or a card reports N pages written on a
+      // re-click that touched none.
+      (row.outcome.noop ? noop : applied).push(row.targetPath);
+      continue;
+    }
+    if (row.outcome.outcome === "stale") {
+      actions.push({ id: row.id, status: "stale" });
+      settled.add(row.id);
+    } else if (row.outcome.outcome === "collision") {
+      actions.push({ id: row.id, status: "draft" });
+      settled.add(row.id);
+    } else if (row.outcome.outcome === "error") {
+      actions.push({ id: row.id, status: "error" });
+      settled.add(row.id);
+    }
+  }
+
+  if (result.stoppedAt) {
+    for (const row of rows) {
+      if (settled.has(row.id)) continue;
+      actions.push({ id: row.id, status: "draft" });
+    }
+  }
+  return { actions, applied, noop };
 }
 
 /** `{draft: 2, applied: 1}` — what a 409 tells the reviewer about a group it
