@@ -24,6 +24,9 @@ import {
   collectKnownProjects,
   PLAN_STATUS_VALUES,
   stripFrontmatter,
+  extractPrRefs,
+  normalizePrRef,
+  pagePrRefs,
   __resetWikiCacheForTest,
   type WikiProjectRule,
 } from "./store.ts";
@@ -3896,5 +3899,131 @@ describe("buildWikiIndex — series", () => {
     const meta = (await buildWikiIndex(root)).pages.find((p) => p.relPath.endsWith(".html"))!;
     expect(meta.series).toBeUndefined();
     expect(meta.seriesLabel).toBeUndefined();
+  });
+});
+
+describe("extractPrRefs / pagePrRefs — the three body shapes", () => {
+  test("reads `<owner>/<repo>#N`, a pull URL, and the bare known-repo prose form", () => {
+    const refs = extractPrRefs(
+      [
+        "Landed as RuneLind/muninn#543.",
+        "See https://github.com/RuneLind/claude-usage/pull/207 for the ledger half.",
+        "muninn #550 and huginn#12 followed.",
+      ].join("\n"),
+    );
+    expect(refs).toEqual([
+      "RuneLind/muninn#543",
+      "RuneLind/claude-usage#207",
+      "RuneLind/muninn#550",
+      "RuneLind/huginn#12",
+    ]);
+  });
+
+  test("a non-RuneLind owner keeps its own owner — only the BARE form defaults", () => {
+    expect(extractPrRefs("navikt/melosys-api#1234 and mimir#3")).toEqual([
+      "navikt/melosys-api#1234",
+      "RuneLind/mimir#3",
+    ]);
+  });
+
+  test("a bare `#N` is NOT a PR ref — it is a heading anchor or a count", () => {
+    expect(extractPrRefs("See #543 below, and the 12 in #2.")).toEqual([]);
+  });
+
+  test("an UNKNOWN bare repo name is ignored — the known set is the gate", () => {
+    // `notarepo#7` could be anything; the two explicit shapes stay open to it.
+    expect(extractPrRefs("notarepo#7 landed. RuneLind/notarepo#8 landed too.")).toEqual([
+      "RuneLind/notarepo#8",
+    ]);
+  });
+
+  test("a repo name is matched whole — `x-muninn#5` is not `muninn#5`", () => {
+    expect(extractPrRefs("x-muninn#5 and muninn-ish#6")).toEqual([]);
+  });
+
+  test("ONE optional space before the `#`, no more", () => {
+    expect(extractPrRefs("muninn #550")).toEqual(["RuneLind/muninn#550"]);
+    // The dry run allowed up to 12 arbitrary characters here, which reads a repo
+    // named in one clause and a number in the next as one reference.
+    expect(extractPrRefs("muninn, and later on #550")).toEqual([]);
+  });
+
+  test("a longer PATH does not mint a ref: `src/wiki/store.ts#164` is a file", () => {
+    expect(extractPrRefs("src/wiki/store.ts#164 and docs/api.md#L20")).toEqual([]);
+  });
+
+  test("FENCED and INLINE code is skipped — a page documenting the shape pairs nothing", () => {
+    const body = [
+      "Prose naming muninn#550.",
+      "",
+      "```yaml",
+      "prs: [navikt/melosys-api#1234, RuneLind/muninn#543]",
+      "```",
+      "",
+      "Inline `claude-usage#207` too.",
+    ].join("\n");
+    expect(extractPrRefs(body)).toEqual(["RuneLind/muninn#550"]);
+  });
+
+  test("FRONTMATTER is not body — the `prs:` line is read by `pagePrRefs`, not scanned", () => {
+    const content = "---\nprs: [RuneLind/muninn#543]\n---\n\nBody names muninn#550.\n";
+    expect(extractPrRefs(content)).toEqual(["RuneLind/muninn#550"]);
+  });
+
+  test("dedupes case-insensitively, keeping the FIRST spelling", () => {
+    expect(extractPrRefs("RuneLind/muninn#5 then runelind/Muninn#5 then muninn#5")).toEqual([
+      "RuneLind/muninn#5",
+    ]);
+  });
+
+  test("normalizePrRef lifts an authored bare form to the stamp CLI's spelling", () => {
+    expect(normalizePrRef("muninn#550")).toBe("RuneLind/muninn#550");
+    expect(normalizePrRef("  RuneLind/muninn#543  ")).toBe("RuneLind/muninn#543");
+    expect(normalizePrRef("https://github.com/RuneLind/mimir/pull/3")).toBe("RuneLind/mimir#3");
+    // No recognized shape: kept verbatim, the `jira` precedent — a typo is worth
+    // seeing on the page's own row, it simply pairs with nothing.
+    expect(normalizePrRef("  not a coordinate  ")).toBe("not a coordinate");
+  });
+
+  test("pagePrRefs puts the AUTHORED list first and merges the body's, deduped", () => {
+    const body = "Body names muninn #550 and claude-usage#207.\n";
+    expect(pagePrRefs(["muninn#550", "RuneLind/mimir#2"], body)).toEqual([
+      "RuneLind/muninn#550",
+      "RuneLind/mimir#2",
+      "RuneLind/claude-usage#207",
+    ]);
+  });
+
+  test("pagePrRefs is UNDEFINED, never [], on a page naming none", () => {
+    expect(pagePrRefs(undefined, "Nothing here.")).toBeUndefined();
+    expect(pagePrRefs([], "Nothing here.")).toBeUndefined();
+  });
+});
+
+describe("buildWikiIndex — prRefs", () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-prrefs-"));
+    await mkdir(path.join(root, "plans"), { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("merges the frontmatter list with the body's refs on the indexed page", async () => {
+    await Bun.write(
+      path.join(root, "plans/a.md"),
+      "---\ntitle: A\nprs: [RuneLind/muninn#543]\n---\n\nAlso muninn #550.\n",
+    );
+    await Bun.write(path.join(root, "plans/b.md"), "---\ntitle: B\n---\n\nNothing here.\n");
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("A")!.prRefs).toEqual(["RuneLind/muninn#543", "RuneLind/muninn#550"]);
+    expect(index.resolve("B")!.prRefs).toBeUndefined();
+  });
+
+  test("an EXPLAINER page carries none: it takes the early return, body unread", async () => {
+    await Bun.write(path.join(root, "plans/x.html"), "<html><title>X</title>muninn#550</html>");
+    const meta = (await buildWikiIndex(root)).pages.find((p) => p.relPath.endsWith(".html"))!;
+    expect(meta.prRefs).toBeUndefined();
   });
 });

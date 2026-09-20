@@ -556,6 +556,26 @@ export interface WikiPageMeta {
   /** Pull requests this page's work landed as — the frontmatter `prs:` flow list,
    *  `owner/repo#number`, verbatim. Page-route only, like `sessions`. */
   prs?: string[];
+  /**
+   * Every PR this page names — DERIVED, page-route only, like `links`.
+   *
+   * The authored `prs:` list merged with what the BODY names, normalized to one
+   * spelling (`owner/repo#n`, what `PR_COORDINATE` parses) and deduped. Computed
+   * in `buildWikiIndex`'s existing read pass, where the body is already in hand;
+   * see {@link pagePrRefs} for the three shapes and {@link PR_REF_REPOS} for the
+   * bare prose form's known-repo gate.
+   *
+   * Derived rather than authored because `prs:` is stamped on **0** of mimir's
+   * 379 narrative pages while the bodies name PRs constantly — the signal is in
+   * the prose, and the frontmatter is the exception.
+   *
+   * STRIPPED by `toListing` on all three callers and opted in by NONE: it is the
+   * input to `computeRelated` (`src/wiki/related.ts`), which runs server-side on
+   * the single-page route and returns the `related[]` rows; the raw list is a
+   * dozen refs per page that no LIST renders. Absent, not `[]`, on a page naming
+   * none.
+   */
+  prRefs?: string[];
   /** When `plan_status` was last affirmed (`YYYY-MM-DD`). A value that isn't that
    *  exact shape — or is that shape but not a real calendar day, e.g. `2026-02-31`
    *  — is dropped at parse time. See `isCalendarDay`. */
@@ -1189,6 +1209,147 @@ export function extractEmbedTargets(content: string, fromRelPath: string): strin
     out.push(key);
   }
   return out;
+}
+
+
+/**
+ * The repos a BARE `<repo>#N` / `<repo> #N` prose reference may name. A bare
+ * `#N` with no repo at all is deliberately not a PR reference — in this corpus
+ * it is a heading anchor or a count — so the form needs a known name in front
+ * of it, and the owner defaults to {@link PR_REF_OWNER}.
+ *
+ * Derived from what the wikis already name: mimir's read-only dry run
+ * (`scripts/lint-series-dryrun.ts`, the measurement behind campaign 2's table)
+ * matched `muninn|claude-usage|huginn|yggdrasil`; the three added here are the
+ * other repos those wikis' pages talk about by name.
+ *
+ * A name this list is missing costs a pairing, never a wrong one: the
+ * `owner/repo#N` and `…/pull/N` shapes stay open to every repo.
+ */
+export const PR_REF_REPOS: readonly string[] = [
+  "muninn",
+  "huginn",
+  "mimir",
+  "yggdrasil",
+  "claude-usage",
+  "claude-skills",
+  "claude-hivemind",
+];
+
+/** The owner a bare `<repo>#N` resolves to. Every repo in {@link PR_REF_REPOS}
+ *  is this account's; the two explicit shapes carry their own owner. */
+export const PR_REF_OWNER = "RuneLind";
+
+/**
+ * The three PR-reference shapes, as ONE alternation so a left-to-right scan
+ * settles which one a span is. Order is load-bearing:
+ *
+ *  1. `https://github.com/<owner>/<repo>/pull/N` — groups 1–3.
+ *  2. `<owner>/<repo>#N`, any owner — groups 4–6. Before shape 3, so the
+ *     `muninn#543` inside `RuneLind/muninn#543` is not read as a bare form
+ *     (it would normalize to the same ref, but the owner would be a guess).
+ *  3. The bare prose form `<repo>#N` / `<repo> #N`, {@link PR_REF_REPOS} only —
+ *     groups 7–8.
+ *
+ * The lookbehind on shapes 2 and 3 is what keeps a longer path out: in
+ * `src/wiki/store.ts` the `wiki` and `store.ts` segments are both preceded by
+ * `/`, so neither starts a match, and `x-muninn#5` is not `muninn#5`.
+ *
+ * One optional space before the `#` and no more: the dry run allowed up to 12
+ * arbitrary characters there, which reads `muninn` and a `#12` two clauses
+ * later as one reference.
+ */
+const PR_REF_RE = new RegExp(
+  [
+    "https?://github\\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/pull/(\\d+)",
+    "(?<![A-Za-z0-9._/-])([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#(\\d+)",
+    `(?<![A-Za-z0-9._/-])(${PR_REF_REPOS.join("|")})[ \\t]?#(\\d+)`,
+  ].join("|"),
+  "g",
+);
+
+/** The stamp CLI's spelling — what `PR_COORDINATE` (`provenance.ts`) parses and
+ *  what a `prs:` line is written as. */
+function prRefOf(owner: string, repo: string, n: string): string {
+  return `${owner}/${repo}#${n}`;
+}
+
+/**
+ * Normalize ONE authored PR reference — a frontmatter `prs:` entry — to the
+ * stamp CLI's `owner/repo#n` spelling, so a page whose frontmatter says
+ * `muninn#550` and a page whose body says `muninn #550` share a ref rather than
+ * carrying two spellings of it. A value that is no recognized shape is returned
+ * trimmed and verbatim: the store keeps what the page declared (the `jira`
+ * precedent — a typo is worth seeing), it simply pairs with nothing.
+ */
+export function normalizePrRef(raw: string): string {
+  const value = raw.trim();
+  PR_REF_RE.lastIndex = 0;
+  const m = PR_REF_RE.exec(value);
+  if (!m) return value;
+  if (m[1]) return prRefOf(m[1], m[2]!, m[3]!);
+  if (m[4]) return prRefOf(m[4], m[5]!, m[6]!);
+  return prRefOf(PR_REF_OWNER, m[7]!, m[8]!);
+}
+
+/**
+ * Every PR this page's BODY names, normalized and deduped in first-occurrence
+ * order. The derived half of {@link WikiPageMeta.prRefs}.
+ *
+ * Frontmatter is not body (`stripFrontmatter`) and **fenced and inline code is
+ * masked** (`markdownCodeRegions`) — the same two rules `extractEmbedTargets`
+ * applies, and for the same measured reason: the pages that talk about this
+ * feature quote the shapes it matches, and a plan documenting `muninn #550`
+ * inside a fence must not be paired with the PR.
+ *
+ * Deduplication is case-insensitive on the whole ref, keeping the first
+ * spelling seen — `RuneLind/muninn#5` and `runelind/muninn#5` are one PR.
+ */
+export function extractPrRefs(content: string): string[] {
+  const body = stripFrontmatter(content);
+  const regions = markdownCodeRegions(body);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  PR_REF_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PR_REF_RE.exec(body)) !== null) {
+    if (inProtectedRegion(m.index, regions)) continue;
+    const ref = m[1]
+      ? prRefOf(m[1], m[2]!, m[3]!)
+      : m[4]
+        ? prRefOf(m[4], m[5]!, m[6]!)
+        : prRefOf(PR_REF_OWNER, m[7]!, m[8]!);
+    const key = ref.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ref);
+  }
+  return out;
+}
+
+/**
+ * {@link WikiPageMeta.prRefs} for one page: the authored `prs:` list first, then
+ * whatever the body names, normalized through one spelling and deduped
+ * case-insensitively. `undefined` — never `[]` — when the page names none,
+ * which is most pages of every wiki (`sessions`' rule: an empty array per page
+ * is payload that says nothing).
+ *
+ * Frontmatter first because it is the authored answer: when the two disagree on
+ * spelling, the declared one is the one kept.
+ */
+export function pagePrRefs(
+  declared: string[] | undefined,
+  content: string,
+): string[] | undefined {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of [...(declared ?? []).map(normalizePrRef), ...extractPrRefs(content)]) {
+    const key = raw.toLowerCase();
+    if (!raw || seen.has(key)) continue;
+    seen.add(key);
+    out.push(raw);
+  }
+  return out.length ? out : undefined;
 }
 
 /**
@@ -2796,6 +2957,10 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
             : undefined,
         jira: asOptionalStringArray(fm.jira, normalizeJiraKey),
         prs: asOptionalStringArray(fm.prs),
+        // DERIVED beside the authored list: `prs:` merged with the body's own
+        // references. The body is already in hand here, which is the whole
+        // reason this is an index field rather than a per-request body read.
+        prRefs: pagePrRefs(asOptionalStringArray(fm.prs), content),
         // SERIES — read beside `superseded_by` below, and with the same
         // tolerance: both are one authored pointer at other pages of this work.
         // A non-string value is ignored rather than coerced, so a malformed line

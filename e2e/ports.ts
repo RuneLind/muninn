@@ -105,6 +105,12 @@ export const E2E_PORTS = {
   // a pinned member leaves and the family that dissolves around it all drive
   // against the one fixture.
   "wiki-rail-series": 3062,
+  // The Connections panel's RELATED WORK block: one temp wiki holding all three
+  // sources (a citer, a cited page, a PR-sharing page) plus the two pages that
+  // must NOT appear — a hub linked from 26 fillers and a digest naming 16 PR
+  // refs — so the block, the why lines, the order and both cuts drive against
+  // one fixture.
+  "wiki-related-work": 3063,
   // `/summaries/prompts`, against a throwaway `claude-cli` bot under
   // MUNINN_BOTS_DIR (the connector decides which kinds are offered, and only a
   // Claude one is offered `deep`). The server is restarted mid-file, because a

@@ -921,6 +921,150 @@ VISIBLE at 300 and 260px, since `toHaveText` passes on a clipped element — the
 reader header agreeing with the fold, and the contrast of the label, the chip,
 the census, the timeline date and the `▸` in both themes).
 
+## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
+
+The Connections panel's first section: the pages one hop from the open page,
+newest first, each with the one line saying why it is there. It leads the panel
+because it ANSWERS a question — "what else is this piece of work?" — while
+`Linked from` and `Links to` under it are the raw lists it is derived from.
+
+```
+related = cites ∪ cited-by ∪ shares ≥2 PR refs, minus hubs, never transitive
+```
+
+Deterministic: no model, no embedding, and it changes only when a page's text
+changes. `Similar` in the same panel is the semantic answer; this one is the
+answer a reader can reproduce.
+
+**Never transitive**, and that is a measurement rather than a preference. The
+largest connected component of mimir's raw link graph is 189 of 379 narrative
+pages (`scripts/lint-series-dryrun.ts` in mimir, 2026-09-20), so "reachable"
+groups half the wiki and says nothing. **Two shared PR refs, not one**: one
+shared number pairs every page that mentions a busy week.
+
+### `prRefs` — a derived index field
+
+`WikiPageMeta.prRefs` is every PR a page names: the authored `prs:` list merged
+with what the BODY names, normalized to `owner/repo#n` (the spelling
+`PR_COORDINATE` in `provenance.ts` parses) and deduped case-insensitively.
+`pagePrRefs` computes it in `buildWikiIndex`'s existing read pass, where the body
+is already in hand — a derived field like `links`, so "no bodies in the index"
+still holds. Absent, never `[]`, on a page naming none.
+
+It is derived rather than authored because `prs:` is stamped on **0** of mimir's
+379 narrative pages while the bodies name PRs constantly. Measured over the
+whole wiki (547 pages, 2026-09-20): **156** carry at least one ref.
+
+Three body shapes, in the order the one alternation regex tries them:
+
+| Shape | Owner |
+|---|---|
+| `https://github.com/<owner>/<repo>/pull/N` | as written |
+| `<owner>/<repo>#N` | as written |
+| `<repo>#N` / `<repo> #N`, `PR_REF_REPOS` only | `PR_REF_OWNER` (`RuneLind`) |
+
+Every clause of that is a shape the corpus contains:
+
+- **A bare `#N` is not a PR reference.** In this corpus it is a heading anchor or
+  a count, so the third shape needs a known repo name in front of it.
+  `PR_REF_REPOS` is `muninn`, `huginn`, `mimir`, `yggdrasil`, `claude-usage`,
+  `claude-skills` and `claude-hivemind`. A name the list is missing costs a
+  pairing, never a wrong one — the first two shapes stay open to every repo.
+- **One optional space before the `#`, and no more.** The dry run allowed up to
+  12 arbitrary characters there, which reads a repo named in one clause and a
+  `#12` in the next as one reference.
+- **The lookbehind keeps a longer path out.** In `src/wiki/store.ts` the `wiki`
+  and `store.ts` segments are both preceded by `/`, so neither starts a match,
+  and `x-muninn#5` is not `muninn#5`.
+- ⚠️ **Frontmatter is not body, and fenced and inline code is masked** —
+  `stripFrontmatter` plus `markdownCodeRegions`, the two rules
+  `extractEmbedTargets` already applies. Measured: both acceptance pages quote
+  `prs: [navikt/melosys-api#1234, RuneLind/muninn#543]` inside a ```yaml fence
+  documenting this very feature, and without the mask every page explaining
+  provenance pairs with PR 543.
+
+**The listing does not grow.** `toListing` strips `prRefs` on ALL THREE callers
+and opts it in for NONE — not even `includeProvenance`. It is the input to
+`computeRelated`, which runs server-side and hands each row the refs it matched
+on inside that row's own `why`; the raw list is a dozen refs per page that no
+LIST renders. Measured on a 547-page mimir clone, `GET /api/wiki/pages`:
+**385,013 bytes before and after**, every row byte-identical.
+
+### The rule (`computeRelated`, pure)
+
+`computeRelated(index, relPath)` takes the built `WikiIndex` and answers the
+DECISION — which pages, and why — never a listing row. `/api/wiki/page` maps each
+decision onto `toListing`, so a related row is the shape the panel's other rows
+are plus `why`, and this module stays testable without a Hono app.
+
+Three cuts, each one a way the block fills with pages nobody meant:
+
+- **Hubs**: a candidate with more than `RELATED_HUB_BACKLINKS` (25) backlinks is
+  dropped, from EVERY source. A page cited by the whole wiki is not related work
+  because this page cites it too.
+- **Digests**: a page naming more than `RELATED_DIGEST_PRS` (15) refs is cut from
+  the PR-sharing source — it names half the month by construction. It still
+  appears through a real link, with the link as its reason. The cut is applied to
+  BOTH ends of a pair: the inference is as false when the digest is the page you
+  have open. Measured on mimir, 5 pages exceed it (`log.md` at 210,
+  `plans/index.md` 84, the plans-index archive report 32, `index.md` 27, the
+  review-9 blog 19), against 18 pages in the 6–15 band — the constant sits in a
+  real gap.
+- ⚠️ **Bookkeeping**: `index`, `log` and `CLAUDE`, by stem, in any folder
+  (`isMetaStem`, the rail's own predicate). The hub cut does not reach them, and
+  that is measured rather than assumed: on mimir `index.md` has **3** backlinks,
+  `log.md` 4 and `plans/index.md` 6, because a catalog page LINKS OUT rather than
+  being linked to. Without this cut they led the block on both acceptance pages.
+  The campaign's dry run cut them by NAME; this is the same cut spelled as a
+  predicate the reader already has.
+
+**Order is newest first, through `bySeriesDateDesc`** — `status_date`, else the
+durable git touch date, else mtime, at DAY granularity with the rung as the
+tie-break. The same function the rail's Series fold orders its members by, so two
+surfaces that both claim to show the newest page of one piece of work cannot
+disagree. `seriesDateSignal` takes a structural `PageDateFields` for that reason:
+the server's `WikiPageMeta` satisfies it as well as the client's `WikiListing`.
+
+**The why line joins its reasons with ` · `** in a fixed source order —
+`cites this page`, `cited by this page`, then
+`shares <ref>, <ref>`. The shares reason names the first two shared refs in the
+OPEN page's own `prRefs` order, in the full `RuneLind/<repo>#N` spelling: the
+reader pastes that into a PR search, and a display form the ledger does not use
+is one more spelling to reconcile.
+
+Series membership changes nothing here. A series member is an ordinary
+candidate — the block is about links, and the rail already groups the series.
+
+### Rendering
+
+`relatedSectionHtml` (`wiki-browser.ts`) paints the block at the top of
+`renderConnections`. Rows are the panel's own `.wiki-conn-item`, so the delegated
+`[data-page]` handler opens them and there is no second click path; the why line
+is a second line inside `.wiki-conn-text`, with each reason in an `<em>` and the
+separators outside them.
+
+**An empty block is omitted**, not rendered as a "nothing related" row: the two
+sections under it already say `None` for the mechanism they name, and a third
+saying it about a derived rule reads as a failure. `related` is `[]` on a page
+with no neighbours and absent on an older server; both land as no block.
+
+**Contrast**: the why line is `--text-muted` (5.26:1 dark, 4.94:1 light over
+`--bg-panel`), not the prototype's two-tone `--text-dim` + `--text-muted` —
+`--text-dim` is 3.24:1 dark and 3.74:1 light, under the 4.5:1 floor for a line
+carrying the PR numbers the pairing rests on.
+
+**There is no `⋯ add to series` control.** The series editor is a later PR, and a
+visible control that cannot act is the dead control #557's F2 decision rejected.
+`series` and `series_label` are untouched by this feature.
+
+Acceptance: `store.test.ts` (the three shapes, the fence mask, the frontmatter
+merge, the bare-`#N` and unknown-repo refusals), `related.test.ts` (each source,
+the multi-reason why, the three cuts with the hub threshold driven at 25 and 26,
+the never-transitive case, the order), `wiki-provenance.test.ts` (the strip on
+`/api/wiki/pages`, `related[]` on `/api/wiki/page`) and
+`e2e/wiki-related-work.spec.ts` (the chain end to end, both cuts against a real
+index, the listing's absent key, and the contrast in both themes).
+
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 
 Turns one wiki page into a pasteable post — the reader's **📤 Share** breadcrumb action, beside 💬 Discuss. One fenced one-shot on the wiki's synthesis bot (`resolveWikiSynthesisBot`, same routing as Ask), streamed as markdown, and on completion three server-rendered strings. Prompt/preset/body-prep layers live in `src/share/` (see the Share row in the repo `CLAUDE.md`); the SSE runner is `dashboard/routes/share-sse.ts`, the dialog `dashboard/views/components/share-dialog.ts` (+ its pure half `wiki-share-dialog.ts`).

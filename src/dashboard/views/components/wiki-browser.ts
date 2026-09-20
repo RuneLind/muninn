@@ -326,11 +326,22 @@ let projects: Record<string, number> = {};
 let jiraKeys: Record<string, number> = {};
 
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
+/** One `Related work` row: an ordinary listing row plus the one line saying why
+ *  it is there (`cites this page · shares RuneLind/muninn#550, …`). The rule and
+ *  the reason strings are server-side in `src/wiki/related.ts`; the client
+ *  renders what it is handed and decides nothing. */
+interface RelatedListing extends WikiListing {
+  why: string;
+}
+
 interface WikiPageDetail {
   meta: WikiListing;
   html: string;
   outgoing: WikiListing[];
   backlinks: WikiListing[];
+  /** The pages one hop from this one, newest first. ABSENT on an older server;
+   *  `[]` on a page with no neighbours — both render no block at all. */
+  related?: RelatedListing[];
   /** TRUE when the page carries any provenance key and the block is worth
    *  fetching from `/api/wiki/page/provenance`. ABSENT on a page carrying none
    *  of the frontmatter keys — never `false` — so the client's one gate is "is
@@ -2117,10 +2128,46 @@ function renderConnections(data: WikiPageDetail): void {
   }
   document.getElementById("connBody")!.innerHTML =
     miniGraphHtml(data) +
+    // `Related work` leads: it is the one section that ANSWERS a question
+    // ("what else is this piece of work?") rather than listing a mechanism.
+    // The two below are the raw link lists it is derived from.
+    relatedSectionHtml(data.related ?? []) +
     section("Linked from", data.backlinks) +
     section("Links to", data.outgoing) +
     // Placeholder the lazy "Similar" fetch fills in after the page renders.
     '<div id="wikiSimilar"></div>';
+}
+
+/**
+ * The `Related work` block, or `""` when the page has no neighbours — an empty
+ * block would be a row saying nothing, in a panel whose other sections already
+ * render `None` for the mechanism they name. The server's `related[]` is `[]`
+ * there, and on an older server the key is absent; both land here as no block.
+ *
+ * Rows are the panel's own `.wiki-conn-item` (so the delegated `[data-page]`
+ * handler opens them, with no second click path) plus a second line carrying the
+ * why. The reasons are split on ` · ` and wrapped in `<em>` — the separator is
+ * punctuation and the reasons are the text, which is the distinction the CSS
+ * paints. No `⋯ add to series` control: the series editor is a later PR, and a
+ * visible control that cannot act is the dead control F2 rejected.
+ */
+function relatedSectionHtml(items: RelatedListing[]): string {
+  if (!items.length) return "";
+  let html =
+    `<div class="wiki-conn-section"><div class="wiki-conn-title">Related work (${items.length})</div>`;
+  items.forEach((p) => {
+    const why = p.why
+      .split(" · ")
+      .map((r) => `<em>${esc(r)}</em>`)
+      .join(" · ");
+    html +=
+      `<div class="wiki-conn-item wiki-conn-related" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
+      `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
+      `<div class="wiki-conn-text"><span>${esc(displayTitleOf(p))}</span>` +
+      `<div class="wiki-conn-why" title="${esc(p.why)}">${why}</div></div>` +
+      `</div>`;
+  });
+  return html + "</div>";
 }
 
 // ── Right rail tabs (Connections | Ask) ───────────────────────────────
