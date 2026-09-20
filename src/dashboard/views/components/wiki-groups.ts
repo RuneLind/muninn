@@ -268,7 +268,13 @@ export interface SeriesDateSignal {
  * rewrite last. Both rungs are floored to their local day (the spelling every
  * other rendered date in the reader uses, {@link localDay}), and a tie on the
  * day is broken by the RUNG — an asserted date beats a touch — then by relPath,
- * so the order is the same on every render and on every machine.
+ * so the order is the same on every render.
+ *
+ * **The day is the PROCESS's local day, not a universal one.** `localDay` reads
+ * the calendar of whatever timezone this code runs in, so a touch just either
+ * side of UTC midnight floors to one day in Oslo and to another in a UTC pod —
+ * two machines can order the same two pages differently. The rendered date cell
+ * says which day it used, so the order always matches what is on screen.
  */
 export function seriesDateSignal(p: WikiListing): SeriesDateSignal {
   const asserted = calendarDayMs(p.status_date);
@@ -292,8 +298,9 @@ export function seriesDateMs(p: WikiListing): number {
 }
 
 /** Newest first, ties broken by the date's own rung and then by relPath, so two
- *  members sharing a day order the same way on every render (and on every
- *  machine). See {@link seriesDateSignal}. */
+ *  members sharing a day order the same way on every render. Which day a git
+ *  touch falls on is the process's own timezone question — see
+ *  {@link seriesDateSignal}. */
 function bySeriesDateDesc(a: WikiListing, b: WikiListing): number {
   const sa = seriesDateSignal(a);
   const sb = seriesDateSignal(b);

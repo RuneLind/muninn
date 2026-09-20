@@ -121,16 +121,64 @@ const ROLLUP = "1 in-flight · 2 shipped · 1 blog";
 /** Newest first by `status_date`. */
 const MEMBERS = [PLAN, STRIP, FAM_MEMBER, BLOG];
 
+/**
+ * A SECOND wiki, for the two cases the fixture above cannot hold:
+ *
+ *  - a `superseded` member whose SUCCESSOR is in no series. The membership rule
+ *    counts that page nowhere, so the reader header has a body the open page is
+ *    not in — and pairing it costs its successor an attachment fold, which
+ *    would be a second `.wiki-list-group` in a wiki whose group count is the
+ *    claim of four cases above;
+ *  - an over-long series LABEL, which the fixture above cannot carry either: its
+ *    label is asserted verbatim eight times.
+ */
+const WIKI2 = "e2e-series-orphan";
+const ORPHAN_LABEL =
+  "Orphan retirement series with a label far past what a 260px rail can show";
+const ORPHAN_LIVE = "plans/orphan-live.mdx";
+const ORPHAN_RETIRED = "plans/orphan-retired.mdx";
+const ORPHAN_SUCCESSOR = "plans/orphan-successor.mdx";
+const ORPHAN_PAGES: Array<[string, string]> = [
+  [
+    ORPHAN_LIVE,
+    md("Orphan live plan", [
+      "series: orphan",
+      `series_label: ${ORPHAN_LABEL}`,
+      "plan_status: in-flight",
+      "status_date: 2026-09-02",
+    ]),
+  ],
+  [
+    // Carries the key AND a successor that does not: a rule-4 child of a page
+    // outside the series.
+    ORPHAN_RETIRED,
+    md("Orphan retired plan", [
+      "series: orphan",
+      "plan_status: superseded",
+      "status_date: 2026-09-01",
+      "superseded_by: orphan-successor",
+    ]),
+  ],
+  [ORPHAN_SUCCESSOR, md("Orphan successor")],
+];
+
 let server: ChildProcess | undefined;
 let root = "";
+let root2 = "";
+
+async function writeWiki(dir: string, pages: Array<[string, string]>): Promise<void> {
+  for (const [rel, body] of pages) {
+    await mkdir(path.join(dir, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(dir, rel), body, "utf8");
+  }
+  await settleWikiMtimes(dir);
+}
 
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-series-"));
-  for (const [rel, body] of PAGES) {
-    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
-    await writeFile(path.join(root, rel), body, "utf8");
-  }
-  await settleWikiMtimes(root);
+  await writeWiki(root, PAGES);
+  root2 = await mkdtemp(path.join(tmpdir(), "muninn-e2e-series-orphan-"));
+  await writeWiki(root2, ORPHAN_PAGES);
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -140,7 +188,7 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root}`,
+      WIKI_EXTRA: `${WIKI}=${root},${WIKI2}=${root2}`,
     },
     stdio: "ignore",
   });
@@ -161,13 +209,25 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
+  if (root2) await rm(root2, { recursive: true, force: true });
 });
 
 type Page = import("@playwright/test").Page;
 
-async function openRail(page: Page, params = ""): Promise<void> {
-  await page.goto(`${BASE}/wiki?wiki=${WIKI}${params}`);
+async function openWiki(page: Page, wiki: string, params = ""): Promise<void> {
+  await page.goto(`${BASE}/wiki?wiki=${wiki}${params}`);
   await expect(page.locator(".wiki-list-item").first()).toBeAttached();
+}
+
+async function openRail(page: Page, params = ""): Promise<void> {
+  await openWiki(page, WIKI, params);
+}
+
+/** The reader on one page of one wiki, waited for by its own H1 — the article
+ *  head is what every series-header case reads. */
+async function openPage(page: Page, wiki: string, rel: string, title: string): Promise<void> {
+  await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(rel)}`);
+  await expect(page.locator(".wiki-article-head h1")).toHaveText(title);
 }
 
 const row = (page: Page, rel: string) => page.locator(`.wiki-list-item[data-relpath="${rel}"]`);
@@ -391,6 +451,45 @@ test.describe("Wiki rail: series", () => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(SOLO)}`);
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Solo page");
     await expect(page.locator(".wiki-series-head")).toHaveCount(0);
+  });
+
+  test("a RETIRED page whose successor is in no series gets no header either", async ({ page }) => {
+    // The control first: the one page the membership rule DOES count carries the
+    // header, so the case below is about membership and not about this wiki.
+    await openPage(page, WIKI2, ORPHAN_LIVE, "Orphan live plan");
+    const head = page.locator(".wiki-series-head");
+    await expect(head.locator(".wiki-series-count")).toHaveText("1 page");
+    await expect(head.locator(".wiki-series-step.current .wiki-series-step-title")).toHaveText(
+      "Orphan live plan",
+    );
+
+    // The retired page carries the same key and counts NOWHERE: it renders under
+    // a successor that is in no series. Its own key still resolves to a series
+    // with a member in it, so a `members.length` guard let the header paint
+    // `1 page` and a timeline over a body the open page is not in.
+    await openPage(page, WIKI2, ORPHAN_RETIRED, "Orphan retired plan");
+    await expect(page.locator(".wiki-series-head")).toHaveCount(0);
+  });
+
+  test("an over-long series label ELLIPSIZES rather than spilling the row", async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await openWiki(page, WIKI2);
+    await setRailWidth(page, RAIL_WIDTH_MIN);
+    await openWiki(page, WIKI2);
+    const name = groupRow(page, "series:orphan").locator(".wiki-group-name");
+    await expect(name).toHaveText(ORPHAN_LABEL);
+    // The clip belongs to the NAME, not to the label box around it: as an inline
+    // span it had no box of its own to ellipsize in, which is both halves of
+    // what `display: block` buys here — a `clientWidth`/`scrollWidth` pair that
+    // is not 0/0, and the ellipsis actually applying.
+    const fit = await name.evaluate((el) => ({
+      overflow: getComputedStyle(el).textOverflow,
+      client: el.clientWidth,
+      scroll: el.scrollWidth,
+    }));
+    expect(fit.overflow).toBe("ellipsis");
+    expect(fit.client).toBeGreaterThan(0);
+    expect(fit.scroll).toBeGreaterThan(fit.client);
   });
 
   test("a CASE VARIANT of the key is the same series, not a second one", async ({ page }) => {

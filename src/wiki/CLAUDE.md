@@ -814,7 +814,10 @@ rendered date in the reader uses) — measured on mimir, comparing a calendar da
 against a git instant let any page touched later the same day outrank the plan
 that had just affirmed its status. A tie on the day is broken by the RUNG (an
 authored `status_date` beats a git touch) and then by relPath, so the order is
-the same on every render and on every machine.
+the same on every render. **The day is the PROCESS's local day**: `localDay`
+reads the timezone this code runs in, so a git touch near UTC midnight floors to
+one day in Oslo and another in a UTC pod, and the two hosts can order the same
+pair differently. The rendered date cell always names the day the order used.
 
 **Six rail rules**, extending the family list above:
 

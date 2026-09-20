@@ -2260,7 +2260,8 @@ function projectHubChipHtml(m: WikiListing): string {
  *    attachment child that happens to carry the key, and applies the successor
  *    test to a retired one. Re-deriving the set here is exactly what made
  *    `N pages` disagree with the fold's `N of M shown`, and let a prototype
- *    carrying a `series_label:` rename the strip.
+ *    carrying a `series_label:` rename the strip. The open page has to be one
+ *    of the members, not merely carry the key — see the guard below.
  *  - **`continue at:` never names the open page.** The newest plan IS usually
  *    the page the reader has open (they got here from the `▸` row), and a link
  *    back to it would be the one useless answer. It names the next-newest plan
@@ -2280,9 +2281,13 @@ function seriesStripHtml(m: WikiListing): string {
   const key = seriesKeyOf(m);
   if (!key) return "";
   const { members, head } = seriesMembersOf(allPages, key);
-  if (!members.length) return "";
-  const label = head?.seriesLabel || (head ? seriesKeyOf(head) : key);
   const openKey = normalizeRel(m.relPath);
+  // The open page must be IN the body this header describes. Carrying the key
+  // is not the same as counting: a `superseded` child whose successor is in no
+  // series counts nowhere, and a `members.length` test alone painted `N pages`
+  // over a timeline the reader's own page was absent from.
+  if (!members.some((p) => normalizeRel(p.relPath) === openKey)) return "";
+  const label = head?.seriesLabel || (head ? seriesKeyOf(head) : key);
   const continueAt = newestSeriesPlan(
     members.filter((p) => normalizeRel(p.relPath) !== openKey),
   );

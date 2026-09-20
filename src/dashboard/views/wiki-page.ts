@@ -576,7 +576,7 @@ export async function renderWikiPage(opts?: {
        budgeted and a seventh takes the title under its floor.
        --accent-light, not --status-warning: measured against the rail's ground
        (.wiki-pane paints --bg-panel) the warning amber is 3.19:1 light, under AA
-       for an 11px mark; --accent-light is 6.46:1 light and 8.53:1 dark (the same
+       for an 11px mark; --accent-light is 6.46:1 light and 8.05:1 dark (the same
        swap .wiki-act-glyph's green made, and the token the series group row
        already carries — the glyph and its fold now read as one colour). */
     .wiki-latest-glyph { color: var(--accent-light); margin-right: 4px; font-size: 11px; }
