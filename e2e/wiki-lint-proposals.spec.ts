@@ -261,6 +261,10 @@ test.describe("wiki lint fixes", () => {
   test("a group card holds every row whatever the status filter shows", async ({ page }) => {
     await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
     const cluster = page.locator(`.gard-card[data-group]`).filter({ hasText: "Rail lead" }).first();
+    // The card is titled by the page the FINDING was filed against. The rows
+    // arrive newest-created first, so `rows[0]` is the LAST member the seeder
+    // inserted — an accident of the cluster's own date order.
+    await expect(cluster.locator(".gard-title")).toHaveText("Rail lead");
     // The status chip summarises the SET, not `rows[0]`.
     await expect(cluster.locator(".gard-badge.chip-draft")).toHaveText("4 draft");
     // A filter selects which CARDS show, never which rows a card holds.
@@ -274,9 +278,18 @@ test.describe("wiki lint fixes", () => {
     const otherBefore = await read(CODE);
 
     await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
+    const pairCount = page
+      .locator("#lintList .lint-group")
+      .filter({ hasText: "Same work, no link" })
+      .locator(".lint-count");
+    await expect(pairCount).toHaveText("3");
+
     const card = page.locator(`.gard-card[data-group]`).filter({ hasText: "Chain strip" }).first();
     await card.locator('[data-group-action="approve"]').click();
     await expect(card.locator(".gard-badge.chip-applied")).toHaveCount(1);
+    // An applied fix changes what the linter finds, so the panel is refreshed
+    // by the action — no manual Refresh, no reload.
+    await expect(pairCount).toHaveText("2");
 
     // Byte-exact: the page's own content plus the wire stage's own bullet shape.
     expect(await read(STRIP)).toBe(`${before.replace(/\s+$/, "")}\n\n## See also\n- [[Summary code]]\n`);
@@ -424,5 +437,43 @@ test.describe("wiki lint fixes", () => {
     expect(await read(HEAL_A)).toContain("series: ");
     await expect(card.locator('[data-group-action="approve"]')).toHaveCount(1);
     await expect(card.locator('[data-group-action="reject"]')).toHaveCount(1);
+
+    // A status filter picks which CARDS show, never which ROWS a card holds —
+    // and only a MIXED group can tell the two apart. Filtered to `draft`, a
+    // card built from the filtered list renders a one-page fix over a
+    // three-page group, with the applied member silently missing.
+    await page.locator('.gard-filter[data-status="draft"]').click();
+    await expect(card.locator(".gard-group-diff")).toHaveCount(3);
+    await expect(card.locator(".gard-badge.badge-group")).toHaveText("3 pages");
+    await page.locator('.gard-filter[data-status=""]').click();
+  });
+
+  /**
+   * A row the apply short-circuits (step 2a: the page already IS the draft)
+   * wrote nothing, and the answer keeps it out of `applied`. The note lands on
+   * a card that has just STOPPED being reviewable — every row is `applied` —
+   * which is why the actions row is rendered outside the reviewable guard.
+   */
+  test("a page that already carries the edit is reported as noop, on a card with no verbs", async ({ page }) => {
+    // The OVERLAP × FOLLOW pair was claimed on the first pass; with the cluster
+    // applied, its pages are free and this seeds it.
+    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, { method: "POST" });
+    expect(body.proposed).toBeGreaterThan(0);
+    const rows = await sql!<{ group_key: string; target_path: string; draft: string }[]>`
+      SELECT group_key, target_path, draft FROM wiki_proposals
+      WHERE wiki_name = ${WIKI} AND status = 'draft' AND group_key LIKE 'lint:same-work-no-link:%'
+    `;
+    expect(rows.length).toBeGreaterThan(0);
+    const row = rows[0]!;
+    // Write the draft's exact bytes by hand: `applyInner` short-circuits at 2a
+    // BEFORE the base_hash check, so this is a noop and not a stale row.
+    await writeFile(path.join(root, row.target_path), row.draft, "utf8");
+
+    await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
+    const card = page.locator(`.gard-card[data-group="${row.group_key}"]`);
+    await card.locator('[data-group-action="approve"]').click();
+
+    await expect(card.locator(".gard-outcome")).toContainText("already carried the edit");
+    await expect(card.locator('[data-group-action="approve"]')).toHaveCount(0);
   });
 });
