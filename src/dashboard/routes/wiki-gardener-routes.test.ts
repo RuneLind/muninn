@@ -2692,7 +2692,13 @@ describe("lint proposals — seeding and the group verbs", () => {
       expect([blocking, res.status]).toEqual([blocking, 409]);
       // A reviewer who dismissed one member cannot then accept the group, and an
       // `approved` row means another apply is mid-flight over these same pages.
-      expect(await res.json()).toMatchObject({ outcome: "mixed", statuses: { [blocking]: 1, draft: 1 } });
+      // The message names what BLOCKS: `applied`/`stale` rows are not draft
+      // either and are skipped, so "not all draft" described another condition.
+      expect(await res.json()).toMatchObject({
+        outcome: "mixed",
+        error: "an approved or rejected row blocks the group",
+        statuses: { [blocking]: 1, draft: 1 },
+      });
       expect(store.marked).toEqual([]);
       expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
     }
@@ -2742,6 +2748,27 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(await res.json()).toMatchObject({
       outcome: "nothing-to-apply",
       statuses: { applied: 1, stale: 1 },
+    });
+    expect(store.marked).toEqual([]);
+  });
+
+  test("an all-REJECTED group is nothing-to-apply too, not mixed", async () => {
+    const store = groupStore([
+      { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "rejected" },
+      { ...((await lintRow("r2", PAGE_B, "prov")) as object), status: "rejected" },
+    ]);
+    const app2 = new Hono();
+    registerWikiGardenerRoutes(app2, deps(store.deps));
+
+    const res = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    expect(res.status).toBe(409);
+    // A `rejected` row BLOCKS a group that still holds a draft — but with no
+    // draft left there is no other decision in flight to wait for, and `mixed`'s
+    // remedy ("try again when it finishes") never arrives. The dismissal IS the
+    // decision, so the settled answer outranks the blocked one.
+    expect(await res.json()).toMatchObject({
+      outcome: "nothing-to-apply",
+      statuses: { rejected: 2 },
     });
     expect(store.marked).toEqual([]);
   });
@@ -2833,25 +2860,63 @@ describe("lint proposals — seeding and the group verbs", () => {
     });
   });
 
-  test("a bare group verb resolves the DEFAULT wiki; an unknown name is a 404", async () => {
+  /**
+   * The group verbs' wiki resolution, as a state space rather than as cases.
+   *
+   * Three cells, and the third is the one that shipped wrong: a bare request
+   * fell back to the registry's DEFAULT entry, so a POST naming no wiki acted on
+   * whichever wiki `defaultWikiEntry` picked — a group key is a hash over
+   * wiki-RELATIVE paths, which is the ambiguity the guard exists for. The
+   * fallback's stated motivation (a client that sends no query) is covered by
+   * the page test below instead: the gate names its wiki now.
+   */
+  test("group verbs: a registered name acts, an unknown name 404s, NO name 400s", async () => {
     // Pin the registry to this block's own temp wiki: `defaultWikiEntry` prefers
-    // jarvis, and whether jarvis is discovered is a fact about the machine.
+    // jarvis, and whether jarvis is discovered is a fact about the machine — so
+    // without this the bare case could pass for the wrong reason.
     const emptyBots = await mkdtemp(path.join(tmpdir(), "wiki-lint-nobots-"));
     const prevBotsDir = process.env.MUNINN_BOTS_DIR;
     process.env.MUNINN_BOTS_DIR = emptyBots;
     __resetWikiRegistryForTest();
+    let read = 0;
     const store = groupStore([await lintRow("r1", PAGE_A, "prov")]);
-    registerWikiGardenerRoutes(app, deps(store.deps));
+    const counted = { ...store.deps, listProposalsByGroup: async () => { read += 1; return store.rows(); } };
+    registerWikiGardenerRoutes(app, deps(counted));
     try {
+      // (b) a name nothing is registered under — 404, and no row is read.
+      for (const verb of ["approve", "reject"]) {
+        const unknown = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}?wiki=nope`, { method: "POST" });
+        expect([verb, unknown.status]).toEqual([verb, 404]);
+      }
 
-      // The reader's own `withBot()` emits NO `?wiki=` when the page was served
-      // without one, so a required param made every group verb a 400 there.
-      const bare = await app.request(`/api/wiki/proposals/group/${GROUP}/approve`, { method: "POST" });
-      expect(bare.status).toBe(200);
+      // (c) NO name — 400 on both verbs, whether or not `WIKI_DIR` is set, and
+      // refused before any row is read, so the key never reaches a wiki-less
+      // query. The `lintwiki` entry IS the registry default here, so a 200 would
+      // be the fallback answering.
+      for (const wikiDir of [undefined, root]) {
+        if (wikiDir === undefined) delete process.env.WIKI_DIR;
+        else process.env.WIKI_DIR = wikiDir; // restored by afterEach
+        for (const verb of ["approve", "reject"]) {
+          const bare = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}`, { method: "POST" });
+          expect([String(wikiDir), verb, bare.status]).toEqual([String(wikiDir), verb, 400]);
+        }
+      }
+      expect(read).toBe(0);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).not.toContain("series:");
+
+      // (a) the registered name — the verb acts, and the file carries the edit.
+      const named = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+      expect(named.status).toBe(200);
       expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
 
-      const unknown = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=nope`, { method: "POST" });
-      expect(unknown.status).toBe(404);
+      // …and through the legacy `?bot=` alias, which is what the gate's own
+      // client sends.
+      const store2 = groupStore([await lintRow("r2", PAGE_B, "prov")]);
+      const app2 = new Hono();
+      registerWikiGardenerRoutes(app2, deps(store2.deps));
+      const alias = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?bot=lintwiki`, { method: "POST" });
+      expect(alias.status).toBe(200);
+      expect(await Bun.file(path.join(root, PAGE_B)).text()).toContain("series: prov");
     } finally {
       if (prevBotsDir === undefined) delete process.env.MUNINN_BOTS_DIR;
       else process.env.MUNINN_BOTS_DIR = prevBotsDir;
@@ -2860,22 +2925,39 @@ describe("lint proposals — seeding and the group verbs", () => {
     }
   });
 
-  test("a bare group verb 400s only when the request resolves to NO wiki", async () => {
-    let read = 0;
-    registerWikiGardenerRoutes(
-      app,
-      deps({ listProposalsByGroup: async () => { read += 1; return []; } }),
-    );
-    // `WIKI_DIR` is the one bare-request shape that resolves to no registry
-    // entry at all — and a group key is not unique across wikis, so there is
-    // nothing to fall back to.
-    process.env.WIKI_DIR = root; // restored by afterEach
-    for (const verb of ["approve", "reject"]) {
-      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}`, { method: "POST" });
-      expect([verb, res.status]).toEqual([verb, 400]);
+  /**
+   * The other half of that 400: the gate page has to NAME its wiki, or its own
+   * Accept is the caller with no name.
+   *
+   * `resolveWikiRequest` is keyed by NAME and `WIKI_DIR` names a ROOT, so the
+   * override resolved no entry and the page injected `window.__WIKI_BOT__ = ""`
+   * — the client then sent every gardener fetch bare. Matching the override's
+   * root against the registry is what closes it.
+   */
+  test("the gate page names the wiki whose ROOT the WIKI_DIR override points at", async () => {
+    // A collection-bearing entry, so the page renders its picker at all
+    // (`isGardenerWiki`) and the two selection states are distinguishable.
+    __setWikiRegistryForTest([{ name: "lintwiki", root, source: "extra", collections: ["wiki"] }]);
+    registerWikiGardenerRoutes(app, deps({}));
+    const other = await mkdtemp(path.join(tmpdir(), "wiki-lint-elsewhere-"));
+    try {
+      process.env.WIKI_DIR = root; // the `lintwiki` entry's own root; restored by afterEach
+      const html = await (await app.request("/wiki/gardener")).text();
+      expect(html).toContain('window.__WIKI_BOT__ = "lintwiki"');
+      // …and the picker agrees: an "env override" placeholder beside a named
+      // wiki would be the page contradicting the requests it is about to make.
+      expect(html).not.toContain(">env override<");
+
+      // A root NO entry holds keeps the old state — there is no proposals
+      // surface to name, and inventing a name would scope the verbs elsewhere.
+      process.env.WIKI_DIR = other;
+      const html2 = await (await app.request("/wiki/gardener")).text();
+      expect(html2).toContain('window.__WIKI_BOT__ = ""');
+      expect(html2).toContain(">env override<");
+    } finally {
+      __resetWikiRegistryForTest();
+      await rm(other, { recursive: true, force: true });
     }
-    // Refused before any row is read, so the key never reaches a wiki-less query.
-    expect(read).toBe(0);
   });
 
   test("a BOT wiki's group apply takes the BOT's wikiAutoCommit policy", () => {

@@ -11,7 +11,7 @@
 
 import { discoverAllBots } from "../bots/config.ts";
 import { getLog } from "../logging.ts";
-import { buildWikiRegistry, type WikiRegistryEntry } from "./registry.ts";
+import { buildWikiRegistry, resolveConfiguredPath, type WikiRegistryEntry } from "./registry.ts";
 import { isReadonlyWikiRoot, readonlyWikiRoots, sameWikiRoot } from "./readonly.ts";
 
 const log = getLog("wiki", "registry");
@@ -59,6 +59,32 @@ export function unmatchedReadonlyWikiRoots(
   roots: string[],
 ): string[] {
   return roots.filter((root) => !entries.some((e) => sameWikiRoot(e.root, root)));
+}
+
+/**
+ * The registered wiki whose ROOT is this path — the `WIKI_DIR` env override's
+ * missing half.
+ *
+ * `resolveWikiRequest` answers `{envOverride: true, entry: undefined}` for a bare
+ * request under that variable: the override names a DIRECTORY, and the registry
+ * is keyed by NAME. But the override routinely points at a root the registry
+ * already holds (its own default is jarvis's `wikiDir`), and a surface that has
+ * to hand a wiki NAME to its own client — the gardener gate, whose group verbs
+ * refuse a request naming no wiki — then has none to hand.
+ *
+ * Realpath-aware through the shared `sameWikiRoot`, like every other root
+ * comparison here: on macOS a `/tmp` wiki and its `/private/tmp` spelling are one
+ * root. A blank path, or one no entry matches, answers `undefined` — the override
+ * is then a root nothing in the registry names, which is what it says it is.
+ */
+export function findWikiByRoot(
+  entries: WikiRegistryEntry[],
+  rawRoot: string | undefined,
+): WikiRegistryEntry | undefined {
+  const raw = rawRoot?.trim();
+  if (!raw) return undefined;
+  const root = resolveConfiguredPath(raw);
+  return entries.find((e) => sameWikiRoot(e.root, root));
 }
 
 /** Test-only: drop the memoized registry so a test can re-derive it from a

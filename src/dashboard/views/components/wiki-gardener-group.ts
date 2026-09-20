@@ -26,8 +26,19 @@ export function groupStatusSummary(statuses: readonly string[]): string {
  * The chip summarises N statuses, so a class read off one row is a claim the
  * text beside it denies: a stopped group rendered `chip-applied` over
  * `1 applied · 1 draft · 1 stale`. Precedence is by what the reviewer still has
- * to do — a group holding a `draft` is actionable whatever else it holds, then
- * anything unresolved, and only an all-`applied` group reads as done.
+ * to do, and the WHOLE order is a decision rather than the first three rungs
+ * plus a tail — a permutation of the middle four survived the round that pinned
+ * the ends, so every adjacent pair is pinned by a table test now:
+ *
+ *  `draft` — the card offers a verb, whatever else it holds.
+ *  `approved` — a decision is in flight over these pages; the next Accept 409s.
+ *  `error` — an apply failed and the reviewer has to look.
+ *  `stale` — the page moved under the draft; re-propose.
+ *  `rejected` — dismissed on purpose; nothing is owed.
+ *  `applied` — done, and only an all-`applied` group reads as done.
+ *
+ * `error` over `stale` because a failure asks a question a retry does not, and
+ * `stale` over `rejected` because a dismissal is an answer already given.
  */
 const CHIP_TONE_ORDER = ["draft", "approved", "error", "stale", "rejected", "applied"] as const;
 

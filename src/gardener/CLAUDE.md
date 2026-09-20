@@ -156,16 +156,22 @@ row, which strands the read-only refusal's other rows: that path hands back a
 (`wiki-gardener-routes.ts`), which is also the only way to drive that branch —
 both read-only refusals the route makes fire before the apply is ever called.
 
-Three more rules on that route, each a measured defect:
+Four more rules on that route, each a measured defect:
 
 - **The gate refuses a decision in flight and SKIPS what is settled.** An
   `approved` row (another apply mid-flight over these pages) or a `rejected` one
-  (a dismissal) refuses the request, 409 `{outcome: "mixed", statuses}`;
+  (a dismissal) refuses the request, 409
+  `{outcome: "mixed", error: "an approved or rejected row blocks the group",
+  statuses}` — the message names what blocks, since `applied` and `stale` rows
+  are not draft either and are skipped rather than refused;
   `applied` and `stale` rows are skipped and reported as
   `skipped: {applied: n, stale: n}`, and the `draft` rows are approved and
   applied. A group with no `draft` row left answers 409
   `{outcome: "nothing-to-apply", statuses}` — a different fact and a different
-  remedy. Refusing on ANY non-draft row, which is what shipped first, made the
+  remedy — and **that check runs FIRST**, so an all-`rejected` group is reported
+  as settled rather than as blocked: with no draft to block there is no other
+  apply to wait for, and `mixed`'s remedy never arrives. Refusing on ANY
+  non-draft row, which is what shipped first, made the
   stop path above a DEAD END: after a stop the group is `applied` + `stale` +
   `draft`, so the very next Accept answered `mixed` and the reverted rows could
   never be applied at all — the card kept its buttons and they did nothing. That
@@ -175,19 +181,31 @@ Three more rules on that route, each a measured defect:
   draft — is reported in `noop[]`, not `applied[]`. It is `applied` in the DB
   (it is done), but "3 pages written" and "3 pages that already said that" are
   different answers to a reviewer about to look at a diff.
-- **Both group verbs resolve the wiki through `resolveWikiRequest`**, exactly as
-  every other reader/gardener route does (`?wiki=`, the legacy `?bot=`, else the
-  registry default), and every group DB verb is scoped by
+- **Both group verbs REQUIRE a wiki name, and the state space has three cells.**
+  `?wiki=<name>` (or the legacy `?bot=<name>`) naming a registered wiki is the
+  scope; a name registered nowhere is **404**; **no name at all is 400**, never
+  the registry's default entry. Every group DB verb is scoped by
   `COALESCE(wiki_name, bot_name)`. A group key is a sha256 prefix over a check
   id, a sub-rule and a list of wiki-RELATIVE paths — it carries no wiki
   identity, so two wikis holding `plans/a.mdx` and `plans/b.mdx` mint the same
   key for the same finding. The first cut read the wiki off the group's own
   first ROW, which is circular: the query that found the row was already
-  unscoped. The second made the param REQUIRED, which the gate's own client
-  cannot satisfy — `withBot()` emits no query at all when the page was served
-  without a wiki name, so both verbs 400'd under the `WIKI_DIR` default wiki.
-  The only 400 left is a request resolving to NO entry (a bare one under that
-  env override, or an empty registry); an unknown name is still 404.
+  unscoped. The second cut fell back to the registry DEFAULT for a bare request,
+  to satisfy a client believed to send none — measured, it did not: the only
+  bare-client shape is the `WIKI_DIR` override, where that fallback resolves no
+  entry and the verb 400s anyway, so it was inert for its own motivation while a
+  bare POST from any other caller acted on whichever wiki `defaultWikiEntry`
+  picked. The guard failing open on exactly the ambiguity it cites.
+- **The gate CLIENT sends the resolved wiki name, which is what makes that 400
+  unreachable from the page.** `withBot()` appends `?bot=<window.__WIKI_BOT__>`
+  to every gardener fetch, and the `/wiki/gardener` route fills that global with
+  the entry it resolved. Under `WIKI_DIR` `resolveWikiRequest` answers no entry
+  (it is keyed by NAME; the override names a ROOT), so the page used to inject
+  `""` and the client sent nothing — the route matches that root against the
+  registry now (`findWikiByRoot`, realpath-aware) and names the wiki whose root
+  it is. A root no entry holds keeps the "env override" state and the empty
+  name, which is honest: no entry means no proposals surface either, since
+  `/api/wiki/lint-proposals` and the listing both need one.
 
 A group whose rows belong to a BOT wiki takes the **bot's own `wikiAutoCommit`
 policy** (`groupApplyPolicy`) — its `wikiDir`, its `push` opt-out, its

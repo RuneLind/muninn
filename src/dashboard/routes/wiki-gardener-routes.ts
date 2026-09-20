@@ -15,7 +15,7 @@ import {
   wikiNoEgressReason,
   wikiReadonlyRootReason,
 } from "../../wiki/readonly.ts";
-import { getWikiRegistry } from "../../wiki/registry-memo.ts";
+import { findWikiByRoot, getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
@@ -1163,12 +1163,29 @@ export function registerWikiGardenerRoutes(
     // Resolve against the FULL registry so a `?wiki=<extra>` is recognized. An
     // extra wiki WITHOUT collections still reads as "unavailable" (no consolidation
     // corpus); one WITH collections is a valid consolidation gate scope.
-    const { wiki: selected, envOverride, entry } = resolveWikiRequest(
+    const resolved = resolveWikiRequest(
       getWikiRegistry(),
       c.req.query("wiki"),
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
+    // The `WIKI_DIR` override names a ROOT, so `resolveWikiRequest` — which is
+    // keyed by NAME — hands back no entry and the page renders `selected: ""`.
+    // That empty string is injected as `window.__WIKI_BOT__`, so the gate's own
+    // client then sends every gardener fetch with no `?bot=` at all, and the two
+    // group verbs (which refuse a request naming no wiki — a group key is not
+    // unique across wikis) answer 400 on the page's own Accept.
+    //
+    // When that root IS a registered wiki's, the gate IS that wiki: name it, and
+    // the picker, the listing and the verbs all agree. When it is not, nothing
+    // changes — the page keeps its "env override" state and its empty name, which
+    // is honest: no registry entry means no proposals surface either.
+    const envEntry = resolved.envOverride
+      ? findWikiByRoot(getWikiRegistry(), process.env.WIKI_DIR)
+      : undefined;
+    const entry = resolved.entry ?? envEntry;
+    const selected = entry?.name ?? resolved.wiki;
+    const envOverride = resolved.envOverride && !envEntry;
     const notBotWiki = !!entry && !isGardenerWiki(entry);
     return c.html(await renderWikiGardenerPage({ wikiBots, selected, envOverride, notBotWiki }));
   });
@@ -2574,7 +2591,8 @@ export function registerWikiGardenerRoutes(
    * `{outcome: "mixed", statuses}`. `applied` and `stale` rows are skipped and
    * reported (`skipped`), and the `draft` rows are approved and applied. A group
    * with no `draft` row left answers 409 `{outcome: "nothing-to-apply"}`, which
-   * is a different fact and a different remedy.
+   * is a different fact and a different remedy — and that check runs FIRST, so a
+   * fully-dismissed group is reported as settled rather than as blocked.
    *
    * It used to refuse on ANY non-draft row, which made the stop path below a
    * dead end: after a stop the group is `applied` + `stale` + `draft`, so the
@@ -2603,25 +2621,35 @@ export function registerWikiGardenerRoutes(
     const existing = await backlogDeps.listProposalsByGroup(wikiName, groupKey);
     if (existing.length === 0) return c.json({ error: "group not found" }, 404);
 
-    // MIXED: only a row somebody else is deciding on blocks the request — an
-    // `approved` one (another apply is mid-flight over these pages) or a
-    // `rejected` one (a dismissal this click must not overrule).
-    const blocking = existing.filter((r) => r.status === "approved" || r.status === "rejected");
-    if (blocking.length > 0) {
-      return c.json(
-        { outcome: "mixed", error: "the group is not all draft", statuses: statusCounts(existing) },
-        409,
-      );
-    }
-    // Everything else that is not a draft is SETTLED — `applied` from an earlier
-    // click, `stale` from a stop. It is skipped and reported rather than
-    // refused, or the stop path's own reverted rows are unreachable forever.
+    // NOTHING TO APPLY outranks MIXED, and the order is the whole difference for
+    // an all-`rejected` group: there is no draft for an `approved`/`rejected` row
+    // to block, so "somebody else is mid-decision, try again" is false — the
+    // dismissal IS the decision, and the honest answer is that this click has
+    // nothing to do. Judged the other way round, a dismissed group answered
+    // `mixed`, whose remedy ("wait for the other apply") never arrives.
     const skipped = statusCounts(existing.filter((r) => r.status !== "draft"));
     if (existing.every((r) => r.status !== "draft")) {
       return c.json(
         {
           outcome: "nothing-to-apply",
           error: "every row of the group is already settled",
+          statuses: statusCounts(existing),
+        },
+        409,
+      );
+    }
+    // MIXED: with a draft still live, only a row somebody else is deciding on
+    // blocks the request — an `approved` one (another apply is mid-flight over
+    // these pages) or a `rejected` one (a dismissal this click must not
+    // overrule). The message names what blocks: `applied` and `stale` rows are
+    // not draft either and are skipped rather than refused, so "the group is not
+    // all draft" described a condition this branch does not test.
+    const blocking = existing.filter((r) => r.status === "approved" || r.status === "rejected");
+    if (blocking.length > 0) {
+      return c.json(
+        {
+          outcome: "mixed",
+          error: "an approved or rejected row blocks the group",
           statuses: statusCounts(existing),
         },
         409,
@@ -2708,9 +2736,12 @@ export function registerWikiGardenerRoutes(
   });
 
   /**
-   * Which WIKI a group request is about — resolved exactly as every other
-   * reader/gardener route resolves one (`resolveWikiRequest`: `?wiki=`, the
-   * legacy `?bot=`, else the registry's default entry).
+   * Which WIKI a group request is about. THREE cases, and there is no fourth:
+   *
+   *  (a) `?wiki=<name>` (or the legacy `?bot=<name>`) naming a registered wiki —
+   *      that wiki's scope;
+   *  (b) a name that is registered nowhere — **404**;
+   *  (c) no name at all — **400**, never a default wiki.
    *
    * A group key carries no wiki identity: it is a sha256 prefix over a check id,
    * a sub-rule and a list of wiki-RELATIVE paths, so two wikis holding
@@ -2719,29 +2750,27 @@ export function registerWikiGardenerRoutes(
    * the query that found the row was already unscoped, so it could return the
    * other wiki's rows and then confirm itself.
    *
-   * The second cut made the param REQUIRED instead, which the gate's own client
-   * cannot satisfy: `withBot()` emits no query at all when the page was served
-   * without a wiki name, so both group verbs 400'd there. A bare request is not
-   * ambiguous — it means the same wiki the listing came from — so the ONLY 400
-   * left is a request that resolves to no entry at all (a bare one under the
-   * `WIKI_DIR` env override, or an empty registry), where there is genuinely
-   * nothing to scope the key to.
+   * The second cut resolved a bare request through `resolveWikiRequest`, i.e.
+   * onto the registry's DEFAULT entry, to satisfy a client that sends no query.
+   * It did not: measured, the only bare-client shape is the `WIKI_DIR` override,
+   * where that resolution answers no entry and the verb still 400'd — so the
+   * fallback was inert for its own motivation, while a bare POST from any other
+   * caller silently acted on whichever wiki `defaultWikiEntry` picked. That is
+   * the guard failing open on exactly the ambiguity this docblock cites. The
+   * gate's client sends the resolved name now (see the `/wiki/gardener` route),
+   * so case (c) is a caller that named nothing, and nothing is what it gets.
    */
   function resolveGroupScope(
     c: Context,
   ):
     | { wikiEntry: WikiRegistryEntry; wikiName: string; bot: ReturnType<typeof getBots>[number] | undefined }
     | { error: string; status: 400 | 404 } {
-    const { entry: wikiEntry, wiki, unknownWiki } = resolveWikiRequest(
-      getWikiRegistry(),
-      c.req.query("wiki"),
-      c.req.query("bot"),
-      process.env.WIKI_DIR,
-    );
-    if (unknownWiki) return { error: `no wiki configured for "${wiki}"`, status: 404 };
-    if (!wikiEntry) {
+    const wanted = c.req.query("wiki")?.trim() || c.req.query("bot")?.trim();
+    if (!wanted) {
       return { error: "wiki is required — a lint group key is not unique across wikis", status: 400 };
     }
+    const wikiEntry = findWiki(getWikiRegistry(), wanted);
+    if (!wikiEntry) return { error: `no wiki configured for "${wanted}"`, status: 404 };
     const bot = getBots().find(
       (b) => b.name.toLowerCase() === wikiEntry.name.toLowerCase() && !!b.wikiDir,
     );
