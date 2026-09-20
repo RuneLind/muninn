@@ -244,6 +244,17 @@ export function defaultPageWriteIo(root: string): Pick<
 }
 
 /**
+ * The `stale` reason for a target that is GONE, rather than changed.
+ *
+ * Both are `stale` to this writer — nothing was written and the caller's base is
+ * no longer the file's — but the recoveries differ, so a route that wants to
+ * answer 404 for the missing case (`POST /api/wiki/series`) needs to tell them
+ * apart, and comparing against a string literal spelled a second time is the
+ * kind of match that goes quietly wrong on a copy edit.
+ */
+export const PAGE_GONE_REASON = "target file no longer exists";
+
+/**
  * Run one page write through the shared sequence above. Returns the outcome; the
  * caller maps it to an HTTP status (written→200, noop→200-with-0-applied,
  * stale→409, error→400/500). Never throws for a recoverable condition.
@@ -327,7 +338,7 @@ export async function writeWikiPage(
    *  prologue; the body is unchanged from when it was the callback. */
   async function writeSection(): Promise<PageWriteOutcome> {
     const current = await opts.readFile(absTarget);
-    if (current === null) return { outcome: "stale", reason: "target file no longer exists" };
+    if (current === null) return { outcome: "stale", reason: PAGE_GONE_REASON };
     if (!baseHash || sha256(current) !== baseHash) {
       return { outcome: "stale", reason: opts.staleReason ?? "page changed since the fact check" };
     }

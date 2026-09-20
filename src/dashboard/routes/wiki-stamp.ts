@@ -2,6 +2,11 @@
  * `POST /api/wiki/provenance/stamp` — record a session on a wiki page's
  * `sessions:` line.
  *
+ * **This file exports one thing another route uses**: {@link decideStampRequest},
+ * the same-origin write guard, which `POST /api/wiki/series` calls too. Its own
+ * docblock carries the rules; what matters here is that editing them edits two
+ * routes.
+ *
  * **muninn writes no frontmatter line here.** There is exactly ONE line-upsert
  * implementation and it lives in claude-usage (`src/wiki-stamp.ts`, driven by
  * `scripts/wiki-stamp.ts`); the Claude Code `PostToolUse` hook and the opencode
@@ -210,6 +215,12 @@ export interface StampRequestRefusal {
  *     browser attaches that a page cannot forge, and it catches the shapes rule
  *     1 does not (a navigation, a redirected POST).
  *  3. An `Origin` that is not this request's own authority ⇒ 403.
+ *
+ * **This function has TWO callers**: this route, and `POST /api/wiki/series`
+ * (`wiki-series-routes.ts`, the series editor's write). Nothing here is
+ * stamp-specific — it is the same-origin gate for any write route mounted where
+ * the global middlewares are not — but the NAME is this route's, because this is
+ * where it was first needed. A change to the three rules moves both.
  *
  * ⚠️ Rule 3 compares `Origin` against the request's own `Host`, which
  * `auth/origin.ts` explicitly REFUSES to do for the global middleware, and for a

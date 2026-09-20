@@ -147,6 +147,12 @@ export const E2E_PORTS = {
   // BECAUSE nothing answers. A post-apply reindex must be best-effort, and a
   // future spec binding this number would quietly turn that into a live call.
   "wiki-lint-proposals/dead-huginn": 8797,
+  // The SERIES EDITOR, acceptance 11: a writable muninn over a temp wiki plus a
+  // second one in `MUNINN_WIKI_READONLY=1` over its own copy, so "the menu is
+  // absent and the POST 403s" is asserted against a real read-only instance
+  // rather than a flag flipped in the page.
+  "wiki-series-editor": 3065,
+  "wiki-series-editor/readonly": 3066,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

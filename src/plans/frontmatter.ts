@@ -266,14 +266,35 @@ function frontmatterKeyLine(key: string): RegExp {
 }
 
 /**
+ * A value a YAML parser would read as something OTHER than a string — a
+ * boolean, a null, a number or a date.
+ *
+ * `parseFrontmatter` (`src/wiki/store.ts`) has no type inference at all, so to
+ * muninn's own reader `series_label: true` is the four-character string it looks
+ * like. Every OTHER reader of these files does infer: mimir's own scripts, a
+ * `yq` in a shell pipeline, any editor plugin. Writing a label of `No` or
+ * `2026-09-20` unquoted hands those a boolean and a Date, which is a value this
+ * writer never meant to store — so the shapes below are quoted on the way out
+ * and read back as themselves everywhere.
+ *
+ * YAML 1.1's boolean set (which is what `js-yaml`'s default schema and PyYAML
+ * accept) is the wide one — `y`/`n`/`on`/`off` included — so this matches it
+ * rather than the 1.2 core schema's three words.
+ */
+const YAML_NON_STRING =
+  /^(?:y|n|yes|no|true|false|on|off|null|~|[-+]?(?:0x[0-9a-f_]+|0o[0-7_]+|\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:e[-+]?\d+)?|[-+]?\.(?:inf|nan)|\d{4}-\d{1,2}-\d{1,2}(?:[t ][\d:.+-]*z?)?)$/i;
+
+/**
  * A YAML scalar that needs no quoting — the conservative set, not YAML's real
  * one. A `series:` key is a slug and a `series_label:` is a title, so the shapes
  * that matter are a leading/trailing space, a `#` (a comment), a `:` (a nested
- * key), a quote, and the indicator characters a value may not START with.
+ * key), a quote, the indicator characters a value may not START with, and
+ * anything another reader would type as a non-string ({@link YAML_NON_STRING}).
  */
 function needsQuoting(value: string): boolean {
   if (value === "" || value !== value.trim()) return true;
   if (/[:#"'\r\n]/.test(value)) return true;
+  if (YAML_NON_STRING.test(value)) return true;
   return /^[-?&*!|>%@`[\]{},]/.test(value);
 }
 
@@ -317,6 +338,20 @@ function scalarLiteral(value: string): { literal: string } | { refused: string }
 const CONTINUATION_LINE = /^(?:[ \t]+\S|-(?:[ \t]|\r?$))/;
 
 /**
+ * A FLOW collection on the key's own line — `series: [alpha, beta]` or
+ * `series: {a: 1}`.
+ *
+ * {@link CONTINUATION_LINE} catches the BLOCK spelling of a list, which spills
+ * onto the lines below; the flow spelling fits on one line and therefore looked
+ * to this writer exactly like a scalar. Measured: a page carrying
+ * `series: [alpha, beta]` had both members silently collapsed into whichever
+ * single key the caller asked for. It is the same loss as the block case — a
+ * value this writer cannot represent — so it gets the same refusal, in BOTH
+ * directions: a clear would delete a list the caller only knew as a scalar.
+ */
+const FLOW_COLLECTION_VALUE = /^[[{]/;
+
+/**
  * Upsert (or, with `value: null`, REMOVE) one top-level frontmatter key.
  *
  * The generic sibling of {@link setPlanPriority} and {@link setPlanStatus},
@@ -330,11 +365,12 @@ const CONTINUATION_LINE = /^(?:[ \t]+\S|-(?:[ \t]|\r?$))/;
  *
  * Two behaviours of its own, both from having no anchor key to lean on:
  *
- *   - **An inserted key goes at the END of the fence**, where `setPlanPriority`
- *     inserts after `plan_status:`. There is no key every page carries — this
- *     writes `series:` onto blogs and archive reports as well as plans — and an
- *     anchor that is usually absent is a rule with two behaviours rather than
- *     one.
+ *   - **An inserted key goes at the END of the fence** unless the caller names
+ *     an anchor (`opts.after`), where `setPlanPriority` always inserts after
+ *     `plan_status:`. There is no key every page carries — this writes `series:`
+ *     onto blogs and archive reports as well as plans — so the DEFAULT is the
+ *     end; a caller writing the second half of a pair (`series_label:` under
+ *     `series:`) says so, and gets the end again when the anchor is absent.
  *   - **The value is QUOTED when it needs to be** ({@link needsQuoting}), since
  *     the caller passes a page TITLE as well as a slug. `setPlanPriority` writes
  *     a closed enum and never had to. The quoting is the READER's grammar and
@@ -350,6 +386,7 @@ export function setFrontmatterScalar(
   content: string,
   key: string,
   value: string | null,
+  opts: { after?: string } = {},
 ): PlanPriorityEdit {
   const bounds = fenceBounds(content);
   if (!bounds) {
@@ -380,6 +417,14 @@ export function setFrontmatterScalar(
         reason: `"${key}:" carries a multi-line value — refusing to rewrite it as a scalar`,
       };
     }
+    // The one-line spelling of the same problem — see FLOW_COLLECTION_VALUE.
+    const own = lines[i]!.slice(key.length + 1).trim();
+    if (FLOW_COLLECTION_VALUE.test(own)) {
+      return {
+        kind: "refused",
+        reason: `"${key}:" carries a list value — refusing to rewrite it as a scalar`,
+      };
+    }
   }
 
   // The literal is resolved ONCE, up front, so an unwritable value refuses
@@ -406,7 +451,16 @@ export function setFrontmatterScalar(
   }
   if (value === null && !hadKey) return { kind: "noop" };
   if (value !== null && !replaced) {
-    fence.push(`${key}: ${literal}${cr}`);
+    // `opts.after` names a key this one BELONGS beside — `series_label:` under
+    // `series:`. Without it the two lines of one fact land at opposite ends of
+    // the fence, and a head move (clear here, set there) leaves every page it
+    // touches re-ordered: the round trip must be a no-op on the bytes it does
+    // not mean to change. Absent, or naming a key this page does not carry, the
+    // line goes at the fence's end as it always has.
+    const anchor = opts.after
+      ? fence.findIndex((line) => frontmatterKeyLine(opts.after!).test(line))
+      : -1;
+    fence.splice(anchor === -1 ? fence.length : anchor + 1, 0, `${key}: ${literal}${cr}`);
   }
 
   const out = openLine + (fence.length > 0 ? `\n${fence.join("\n")}` : "") + tail;

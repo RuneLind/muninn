@@ -46,6 +46,26 @@ describe("relatedSectionHtml", () => {
     );
   });
 
+  test("the series opener renders per ROW, and only where a series may land", () => {
+    const rows = [
+      row({ relPath: "plans/citer.md" }),
+      // An `.html` explainer (mimir carries 94) and the wiki's own bookkeeping
+      // page: the route refuses both, so an opener on them can only produce a
+      // refusal.
+      row({ name: "report", relPath: "blogs/report.html" }),
+      row({ name: "index", relPath: "plans/index.md" }),
+    ];
+    const html = relatedSectionHtml(rows, true);
+    expect(html).toContain('data-series-menu="plans/citer.md"');
+    expect(html).not.toContain('data-series-menu="blogs/report.html"');
+    expect(html).not.toContain('data-series-menu="plans/index.md"');
+    expect(html.match(/data-series-menu=/g) ?? []).toHaveLength(1);
+    // Not editable ⇒ no opener at all, on any row — a visible control that
+    // cannot act is the dead control #557's F2 decision rejected.
+    expect(relatedSectionHtml(rows, false)).not.toContain("data-series-menu");
+    expect(relatedSectionHtml(rows)).not.toContain("data-series-menu");
+  });
+
   test("the why line and the title are escaped", () => {
     const html = relatedSectionHtml([row({ title: "<script>", why: "<b>why</b>" })]);
     expect(html).not.toContain("<script>");

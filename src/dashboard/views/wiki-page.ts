@@ -671,7 +671,49 @@ export async function renderWikiPage(opts?: {
     @media (hover: hover) and (not (any-pointer: coarse)) {
       .wiki-pin { opacity: 0; pointer-events: none; }
       .wiki-pin.on, .wiki-list-item:hover .wiki-pin { opacity: 1; pointer-events: auto; }
+      /* The series ⋯ follows the ★'s reveal rule, keyed on ITS OWN row in each
+         of the two places it is rendered — and it takes the row NO WIDTH while
+         it is hidden, which the ★ does not have to do.
+         Two measured failures this replaces. (1) The reveal was written as one
+         rule under \`.wiki-list-item:hover\`, and a plain
+         \`.wiki-series-menu-btn { opacity: 1 }\` declared AFTER this block won the
+         cascade for every row: the rail's ⋯ painted on all of them (opacity 1
+         unhovered, measured, where the ★ measured 0), and a Related-work row's ⋯
+         — which \`.wiki-list-item\` does not match — was permanently
+         \`pointer-events: none\`, so a real mouse click fell through to the row
+         and NAVIGATED. Both sites now reveal on their own row's hover, and the
+         unconditional opacity below is gone.
+         (2) In flow it cost the row width forever: the end slot measured 90px
+         and a chipless pill + ⚑ row wrapped its title under \`RAIL_TITLE_MIN\` at
+         300px on CI's fonts. So on the rail it is ABSOLUTE — the \`▸\` rule from
+         PR A, a seventh row item the budget has no room for — pinned to the end
+         slot's top-right corner, which is the corner the date occupies. The
+         date is not drawn under it: the whole \`.wiki-list-meta\` goes
+         \`visibility: hidden\` for the hover, so the two never paint together,
+         while its box stays (\`visibility\`, never \`display\`) and nothing
+         reflows under the cursor. \`:has()\` scopes that swap to rows that really
+         carry an opener, so a read-only rail keeps its dates. On a COARSE pointer none of this
+         applies: the ⋯ is visible and in flow beside the ★, because a control
+         revealed by hover is a control a finger cannot reach. */
+      .wiki-list-end { position: relative; }
+      .wiki-list-end > .wiki-series-menu-btn {
+        position: absolute; right: 0; top: 0;
+        opacity: 0; pointer-events: none;
+      }
+      .wiki-list-item:hover > .wiki-list-end > .wiki-series-menu-btn { opacity: 1; pointer-events: auto; }
+      .wiki-list-item:hover > .wiki-list-end:has(> .wiki-series-menu-btn) > .wiki-list-meta { visibility: hidden; }
+      .wiki-conn-item > .wiki-series-menu-btn { opacity: 0; pointer-events: none; }
+      .wiki-conn-item:hover > .wiki-series-menu-btn { opacity: 1; pointer-events: auto; }
     }
+    /* Series ⋯ — a rail row's and a Related-work row's opener. Same box as the ★
+       so the pair takes one slot's worth of the row rather than two. */
+    .wiki-series-menu-btn {
+      background: none; border: 0; padding: 0 2px; cursor: pointer;
+      font-size: 11px; line-height: 1.55; color: var(--text-muted);
+      flex-shrink: 0; transition: opacity .12s;
+    }
+    .wiki-series-menu-btn:hover { color: var(--text-primary); }
+    .wiki-conn-related .wiki-series-menu-btn { align-self: center; margin-left: auto; }
     /* Drag handle on the rail's right edge. right:-14px resolves against the
        PADDING box, so the 14px box starts ON the pane's 1px border and runs 13px
        into the gap (measured at 1400px: pane border-box right edge 324, handle
@@ -1139,12 +1181,84 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-series-name { color: var(--text-primary); font-weight: 600; }
     .wiki-series-sep { color: var(--text-faint); }
-    /* The one control here, so it carries the accent and nothing else does. */
+    /* "continue at:" is the strip's PRIMARY control, so it keeps the accent and
+       "edit series" beside it does not — an editing affordance competing with
+       "where do I go now" for the eye would invert what the strip is for. */
     .wiki-series-go {
       border: none; background: none; padding: 0;
       color: var(--accent-light); font: inherit; cursor: pointer;
     }
     .wiki-series-go:hover { text-decoration: underline; }
+    .wiki-series-edit {
+      border: none; background: none; padding: 0;
+      color: var(--text-muted); font: inherit; cursor: pointer;
+    }
+    .wiki-series-edit:hover { color: var(--text-primary); text-decoration: underline; }
+    /* The series editor popover. position:fixed, placed by the client, which also
+       closes it on scroll/resize rather than re-anchoring — the openers live in
+       a scrolling rail. */
+    .wiki-series-menu {
+      position: fixed; z-index: 120; min-width: 240px; max-width: 320px;
+      max-height: 70vh; overflow-y: auto;
+      padding: 6px; border-radius: 8px;
+      background: var(--bg-surface); border: 1px solid var(--border-primary);
+      box-shadow: 0 8px 28px rgba(0,0,0,0.3);
+      font-size: 12px; color: var(--text-primary);
+    }
+    .wiki-series-menu-head {
+      padding: 4px 8px 6px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      border-bottom: 1px solid var(--border-primary);
+    }
+    /* The popover's dim text is --text-tertiary, not --text-muted.
+       Measured on the popover's own ground (it paints --bg-surface: #f1f2f6
+       light, #1a1a2e dark): --text-muted is 4.42:1 in LIGHT — under AA, and the
+       section headers are 10px — while dark measures 4.81:1 and would have
+       passed. One token for both, --text-tertiary, at 7.54:1 light and 10.62:1
+       dark; the rail made the same swap for the same reason. (The ratios are the
+       WCAG formula over the two token values; the 4.42 is what the spec's own
+       contrast helper measured in the browser on the shipped popover.) */
+    .wiki-series-menu-sec {
+      padding: 8px 8px 3px; font-size: 10px; letter-spacing: .07em;
+      text-transform: uppercase; color: var(--text-tertiary);
+    }
+    .wiki-series-menu-row {
+      display: flex; align-items: baseline; gap: 8px; width: 100%;
+      padding: 5px 8px; border: 0; border-radius: 5px; background: none;
+      font: inherit; color: inherit; text-align: left; cursor: pointer;
+    }
+    .wiki-series-menu-row > span:first-child {
+      flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .wiki-series-menu-row:hover { background: var(--bg-hover); }
+    .wiki-series-menu-row.is-current { cursor: default; color: var(--text-tertiary); }
+    .wiki-series-menu-row.is-current:hover { background: none; }
+    .wiki-series-menu-note { flex-shrink: 0; color: var(--text-tertiary); font-size: 11px; }
+    /* The "… N more" line is a NOTE about the list, not a note on a row: it
+       takes the row's own padding and sits under the last option. */
+    .wiki-series-menu-note.is-more { padding: 3px 8px 1px; }
+    .wiki-series-menu-form { display: flex; gap: 4px; padding: 5px 8px; }
+    .wiki-series-menu-input {
+      flex: 1; min-width: 0; padding: 3px 6px; border-radius: 4px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-inset); color: var(--text-primary); font: inherit;
+    }
+    .wiki-series-menu-go {
+      padding: 3px 8px; border-radius: 4px; cursor: pointer; font: inherit;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-inset); color: var(--text-primary);
+    }
+    /* A refusal is the one line in this popover a reader MUST be able to read,
+       and --status-error measures 4.32:1 on --bg-surface in light. Light gets a
+       darker red (#b91c1c = 5.78:1); dark keeps the token (6.17:1). The four
+       selectors mirror shared-styles.ts exactly — dark at :root, light in the
+       media query, both forced forms — the --wiki-prov-warn precedent below. */
+    :root { --wiki-series-bad: var(--status-error); }
+    @media (prefers-color-scheme: light) { :root { --wiki-series-bad: #b91c1c; } }
+    html[data-theme="dark"] { --wiki-series-bad: var(--status-error); }
+    html[data-theme="light"] { --wiki-series-bad: #b91c1c; }
+    .wiki-series-menu-msg { padding: 4px 8px 2px; color: var(--text-tertiary); }
+    .wiki-series-menu-msg.bad { color: var(--wiki-series-bad); }
     /* The timeline scrolls sideways rather than wrapping: the steps are a
        sequence, and a wrapped one reads as two. */
     .wiki-series-tl {
