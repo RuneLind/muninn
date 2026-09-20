@@ -865,10 +865,15 @@ because the join's slowest leg gated the whole payload. The placeholder is a
 replaces either in place; a fetch that fails outright becomes one
 "provenance not loaded · retry" line — the retry matters because the Stamp
 button lives inside the real strip — never a spinner that runs forever, and an
-answer landing after the reader navigated away is dropped. The placeholder is
-rendered only when the page names a session or a Jira key: a `prs:`-only page
-may resolve to no strip at all, so it fetches with no spinner and the strip, if
-one comes back, is inserted after the meta row. The stamp route still
+answer landing after the reader navigated away is dropped. Loads can also
+OVERLAP for one page — leave and return before the first answer lands — and
+there the rule is **the newest load wins**: it replaces whatever strip is on
+the page, and an older answer is dropped whatever it carries (a per-case DOM
+check was tried twice and each time moved the bug: two strips, then a stale
+failure line burying a fresh block). The placeholder is rendered only when the
+page names a session or a Jira key: a `prs:`-only page may resolve to no strip
+at all, so it fetches with no spinner; a strip that comes back is inserted
+after the meta row, and an empty or failed answer stays silent. The stamp route still
 returns the block inline — it has just written the keys and owes the caller
 the strip.
 

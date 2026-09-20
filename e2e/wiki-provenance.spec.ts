@@ -110,11 +110,12 @@ const MERGESDOWN_REL = "merges-down.md";
 const DAMAGED_REL = "damaged.md";
 const PLAIN_REL = "plain.md";
 const PRSONLY_REL = "prsonly.md";
+const PRSNONE_REL = "prsnone.md";
 const OTHER_REL = "other.md";
 const MIXED_REL = "mixed.md";
 
 /** How many pages the temp wiki holds — every "the whole wiki" assertion below. */
-const ALL_PAGES = 9;
+const ALL_PAGES = 10;
 
 const DAMAGED = [
   "---",
@@ -188,6 +189,19 @@ const PRSONLY = [
   "---",
   "",
   "# PRs only",
+  "",
+].join("\n");
+
+// `prs:` alone naming a merge the ledger stub does NOT know: the strip resolves
+// to nothing at all, which is the case the no-placeholder gate exists for.
+const PRSNONE = [
+  "---",
+  "type: note",
+  "title: PRs unknown",
+  "prs: [RuneLind/muninn#9999]",
+  "---",
+  "",
+  "# PRs unknown",
   "",
 ].join("\n");
 
@@ -580,6 +594,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, DAMAGED_REL), DAMAGED, "utf8");
   await writeFile(path.join(root, PLAIN_REL), PLAIN, "utf8");
   await writeFile(path.join(root, PRSONLY_REL), PRSONLY, "utf8");
+  await writeFile(path.join(root, PRSNONE_REL), PRSNONE, "utf8");
   await writeFile(path.join(root, OTHER_REL), OTHER, "utf8");
   await writeFile(path.join(root, MIXED_REL), MIXED, "utf8");
   await writeFile(path.join(root, MERGESDOWN_REL), MERGES_DOWN, "utf8");
@@ -1377,8 +1392,9 @@ test.describe("Wiki reader: provenance", () => {
 
   test("returning to a page before its first block arrived renders ONE strip", async ({ page }) => {
     // A → B → A with the first answer held: fetch 1 belongs to the first
-    // visit, fetch 3 to the second. Both are for the same relPath, so the
-    // navigation guard lets both through — and only one may render.
+    // visit, fetch 2 to the second (the plain page in between fetches
+    // nothing). Both are for the same relPath, so the navigation guard lets
+    // both through — and only one may render.
     let calls = 0;
     let release: () => void = () => {};
     const held = new Promise<void>((r) => {
@@ -1395,10 +1411,64 @@ test.describe("Wiki reader: provenance", () => {
     await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
     await page.locator(`.wiki-list-item[data-relpath="${SHAPE_REL}"]`).click();
     await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
+    const first = page.waitForResponse((r) => r.url().includes("/api/wiki/page/provenance"));
     release();
-    await page.waitForTimeout(300);
+    await first;
     await expect(page.locator(".wiki-article-head .wiki-prov-strip")).toHaveCount(1);
     await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
+  });
+
+  test("a stale FAILED load cannot bury the current visit's block", async ({ page }) => {
+    // A → B → A where the first visit's load fails AFTER the second visit's
+    // load was sent, and the second succeeds — a claude-usage blip that
+    // clears. The newest load wins: the reader sees the block, not the
+    // failure line of a visit that is over.
+    let calls = 0;
+    let failFirst: () => void = () => {};
+    const firstHeld = new Promise<void>((r) => {
+      failFirst = r;
+    });
+    let releaseSecond: () => void = () => {};
+    const secondHeld = new Promise<void>((r) => {
+      releaseSecond = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      calls += 1;
+      if (calls === 1) {
+        await firstHeld;
+        await route.abort();
+        return;
+      }
+      await secondHeld;
+      await route.continue();
+    });
+    await open_(page, SHAPE_REL);
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    await page.locator(`.wiki-list-item[data-relpath="${PLAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
+    await page.locator(`.wiki-list-item[data-relpath="${SHAPE_REL}"]`).click();
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    await expect.poll(() => calls).toBe(2);
+    failFirst();
+    // The stale failure must not even flash: give it a beat, then the
+    // placeholder is still the placeholder.
+    await page.waitForTimeout(200);
+    await expect(page.locator(".wiki-prov-unavailable")).toHaveCount(0);
+    const second = page.waitForResponse((r) => r.url().includes("/api/wiki/page/provenance"));
+    releaseSecond();
+    await second;
+    await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
+    await expect(page.locator(".wiki-prov-unavailable")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+  });
+
+  test("a prs-only page whose strip resolves to nothing shows nothing, ever", async ({ page }) => {
+    const answered = page.waitForResponse((r) => r.url().includes("/api/wiki/page/provenance"));
+    await open_(page, PRSNONE_REL);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("PRs unknown");
+    await answered;
+    await page.waitForTimeout(200);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
   });
 
   test("retry after a failed fetch brings the strip, and its Stamp, back", async ({ page }) => {

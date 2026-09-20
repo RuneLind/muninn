@@ -1557,17 +1557,32 @@ function provenanceUrl(relPath: string): string {
   return withWiki("/api/wiki/page/provenance?relPath=" + encodeURIComponent(relPath));
 }
 
+/** The newest provenance load's sequence number. Only that load may touch the
+ *  DOM — see `loadProvStrip`. */
+let provLoadSeq = 0;
+
 /**
  * Fill the placeholder strip a `provenancePending` page rendered. Runs AFTER
  * the article is on screen, so the join's 10 s budget is spent behind a
- * spinner rather than in front of the markdown. Three outcomes, each replacing
- * the placeholder in place: the block (the strip proper), `{}` (no strip — the
- * keys were dropped between the page read and this one), or a failed fetch
- * (one line saying so, never a spinner that runs forever). A navigation while
- * this is in flight discards the answer: `redrawProvStrip` keys on the DOM, and
- * the DOM is now another page's.
+ * spinner rather than in front of the markdown.
+ *
+ * ONE rule decides who may write: the NEWEST load for the page that is still
+ * open. Loads overlap whenever the reader leaves a page and returns before
+ * its first answer lands — both are for the same relPath, so a relPath guard
+ * alone lets both through, and every per-case DOM check tried before this
+ * (replace only a placeholder; keep any existing strip) moved the bug rather
+ * than removing it: two strips in one case, a stale failure line burying a
+ * fresh block in the next. An older answer is dropped whatever it carries.
+ *
+ * The newest load then replaces WHATEVER strip is on the page — the
+ * placeholder it rendered, or nothing on a `prs:`-only page, where a block
+ * that comes back goes where `articleHeadHtml` would have put it, after the
+ * meta row, and an empty or failed answer stays silent because the page never
+ * promised a strip. Behind a placeholder, a failed fetch becomes one line
+ * with a retry, never a spinner that runs forever.
  */
 async function loadProvStrip(relPath: string): Promise<void> {
+  const seq = ++provLoadSeq;
   let next: string | null = null;
   try {
     const res = await fetch(provenanceUrl(relPath));
@@ -1578,27 +1593,17 @@ async function loadProvStrip(relPath: string): Promise<void> {
   } catch {
     /* falls through to the unavailable line */
   }
-  if (currentRelPath !== relPath) return;
-  const placeholder = document.querySelector(".wiki-prov-strip.wiki-prov-pending");
+  if (currentRelPath !== relPath || seq !== provLoadSeq) return;
+  const existing = document.querySelector(".wiki-prov-strip");
   if (next === null) {
-    // Failed outright. With no placeholder to replace (a `prs:`-only page) the
-    // failure is silent: the page never promised a strip.
-    if (placeholder) placeholder.outerHTML = provUnavailableHtml();
+    if (existing) existing.outerHTML = provUnavailableHtml();
     return;
   }
-  if (placeholder) {
-    placeholder.outerHTML = next;
+  if (existing) {
+    existing.outerHTML = next;
     return;
   }
-  // No placeholder. Two ways here: a `prs:`-only page rendered none, or a
-  // strip is ALREADY on the page — the reader left and came back before the
-  // first visit's answer arrived, so two loads for the same relPath overlap,
-  // both pass the guard above, and the second must not add a second strip
-  // (measured: two cost lines, two chains sharing one `CHAIN_ID`). A strip that
-  // did come back for a bare head goes where `articleHeadHtml` would have put
-  // it, after the meta row.
-  if (!next || document.querySelector(".wiki-prov-strip")) return;
-  document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", next);
+  if (next) document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", next);
 }
 
 /** The retry on a failed load: back to the placeholder, then the fetch again. */
