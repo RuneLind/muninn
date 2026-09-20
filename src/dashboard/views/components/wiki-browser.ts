@@ -1484,6 +1484,9 @@ function resetStampButton(btn: HTMLButtonElement): void {
 async function stampGhost(btn: HTMLButtonElement): Promise<void> {
   const ref = btn.getAttribute("data-prov-stamp") || "";
   if (!ref || !currentRelPath || btn.disabled) return;
+  // The page the button was pressed on. The redraw below keys on the DOM, and
+  // the DOM is another page's if the reader navigated while the POST ran.
+  const pressedOn = currentRelPath;
   // ARM. `data-prov-stamp-confirm` says this ghost needs confirming and is never
   // removed; `data-prov-stamp-armed` is the press that answered it.
   if (btn.getAttribute("data-prov-stamp-confirm") && !btn.hasAttribute("data-prov-stamp-armed")) {
@@ -1524,7 +1527,7 @@ async function stampGhost(btn: HTMLButtonElement): Promise<void> {
     // second fetch — and with the chain left open, since the reader was reading
     // it when they pressed the button.
     if (body?.provenance) {
-      redrawProvStrip(body.provenance);
+      if (currentRelPath === pressedOn) redrawProvStrip(body.provenance);
       return;
     }
     // A 200 with no block: the write happened, the re-resolve did not answer.
@@ -1569,17 +1572,20 @@ let provLoadSeq = 0;
  * ONE rule decides who may write: the NEWEST load for the page that is still
  * open. Loads overlap whenever the reader leaves a page and returns before
  * its first answer lands — both are for the same relPath, so a relPath guard
- * alone lets both through, and every per-case DOM check tried before this
- * (replace only a placeholder; keep any existing strip) moved the bug rather
- * than removing it: two strips in one case, a stale failure line burying a
- * fresh block in the next. An older answer is dropped whatever it carries.
+ * alone lets both through, and the per-case DOM checks tried before this
+ * (replace only a placeholder; keep any existing strip) each moved the bug
+ * rather than removing it: two strips in one case, a stale failure line
+ * burying a fresh block in the next. An older answer is dropped whatever it
+ * carries. The rule covers THIS path only: the Stamp redraw does not load, and
+ * keeps its own page guard in `stampGhost`.
  *
- * The newest load then replaces WHATEVER strip is on the page — the
- * placeholder it rendered, or nothing on a `prs:`-only page, where a block
- * that comes back goes where `articleHeadHtml` would have put it, after the
- * meta row, and an empty or failed answer stays silent because the page never
- * promised a strip. Behind a placeholder, a failed fetch becomes one line
- * with a retry, never a spinner that runs forever.
+ * The newest load then has exactly two DOM states to meet, because `loadPage`
+ * replaces the whole article on every navigation and nothing else renders a
+ * strip before a load completes: the placeholder it rendered, which it
+ * replaces (with the block, with nothing, or with the failure line and its
+ * retry), or no strip at all on a `prs:`-only page, where a block goes where
+ * `articleHeadHtml` would have put it, after the meta row, and an empty or
+ * failed answer stays silent because the page never promised a strip.
  */
 async function loadProvStrip(relPath: string): Promise<void> {
   const seq = ++provLoadSeq;
@@ -1594,13 +1600,9 @@ async function loadProvStrip(relPath: string): Promise<void> {
     /* falls through to the unavailable line */
   }
   if (currentRelPath !== relPath || seq !== provLoadSeq) return;
-  const existing = document.querySelector(".wiki-prov-strip");
-  if (next === null) {
-    if (existing) existing.outerHTML = provUnavailableHtml();
-    return;
-  }
-  if (existing) {
-    existing.outerHTML = next;
+  const placeholder = document.querySelector(".wiki-prov-strip.wiki-prov-pending");
+  if (placeholder) {
+    placeholder.outerHTML = next === null ? provUnavailableHtml() : next;
     return;
   }
   if (next) document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", next);
@@ -2200,7 +2202,9 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   // facet can actually serve (see `provStripHtml`).
   // The placeholder only where a strip is certain — see `provPendingHtml`.
   // A `prs:`-only page still fetches; its strip, if any, is inserted on arrival.
-  if (provenancePending && (m.sessions?.length || m.jira?.length)) head += provPendingHtml();
+  // `m.relPath` too: the load is keyed on it (`currentRelPath`), so a payload
+  // without one would render a spinner nothing ever fills.
+  if (provenancePending && m.relPath && (m.sessions?.length || m.jira?.length)) head += provPendingHtml();
   head += "</div>";
   return head;
 }

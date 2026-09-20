@@ -867,10 +867,11 @@ replaces either in place; a fetch that fails outright becomes one
 button lives inside the real strip — never a spinner that runs forever, and an
 answer landing after the reader navigated away is dropped. Loads can also
 OVERLAP for one page — leave and return before the first answer lands — and
-there the rule is **the newest load wins**: it replaces whatever strip is on
-the page, and an older answer is dropped whatever it carries (a per-case DOM
+there the rule is **the newest load wins**: only it may replace the placeholder
+it rendered, and an older answer is dropped whatever it carries (a per-case DOM
 check was tried twice and each time moved the bug: two strips, then a stale
-failure line burying a fresh block). The placeholder is rendered only when the
+failure line burying a fresh block). The Stamp redraw is a separate path with a
+page guard of its own. The placeholder is rendered only when the
 page names a session or a Jira key: a `prs:`-only page may resolve to no strip
 at all, so it fetches with no spinner; a strip that comes back is inserted
 after the meta row, and an empty or failed answer stays silent. The stamp route still

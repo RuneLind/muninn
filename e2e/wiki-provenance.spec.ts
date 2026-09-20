@@ -1484,4 +1484,50 @@ test.describe("Wiki reader: provenance", () => {
     await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
     await expect(page.locator(".wiki-prov-unavailable")).toHaveCount(0);
   });
+
+  test("a failed fetch on a page that rendered no placeholder is silent", async ({ page }) => {
+    await page.route("**/api/wiki/page/provenance?**", (route) => route.abort());
+    await open_(page, PRSONLY_REL);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("PRs only");
+    await page.waitForTimeout(300);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-unavailable")).toHaveCount(0);
+  });
+
+  test("a Stamp answer that lands after the reader navigated does not redraw the new page", async ({ page }) => {
+    // The POST is answered by the test with the shape page's OWN block (read
+    // through the real route), so nothing is written and the answer is
+    // exactly what the stamp route would have returned — held until the
+    // reader is on the chain page.
+    const block = await (
+      await page.request.get(`${BASE}/api/wiki/page/provenance?wiki=${WIKI}&relPath=${SHAPE_REL}`)
+    ).json();
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/provenance/stamp", async (route) => {
+      await held;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ outcome: "stamped", provenance: block.provenance }),
+      });
+    });
+    await open_(page, SHAPE_REL);
+    const rows = await openChain(page);
+    await rows.nth(4).locator(".wiki-chain-stamp").click();
+    await page.locator(`.wiki-list-item[data-relpath="${CHAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("The handoff chain");
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
+    const chainRowsBefore = await page.locator(".wiki-chain-row").count();
+    const answered = page.waitForResponse((r) => r.url().includes("/api/wiki/provenance/stamp"));
+    release();
+    await answered;
+    await page.waitForTimeout(200);
+    // The chain page keeps its own strip: same row count, and none of the
+    // shape page's rows.
+    await expect(page.locator(".wiki-chain-row")).toHaveCount(chainRowsBefore);
+    await expect(page.locator(".wiki-chain-reason", { hasText: "merged #543" })).toHaveCount(0);
+  });
 });
