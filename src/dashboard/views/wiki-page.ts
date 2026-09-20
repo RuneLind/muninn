@@ -544,6 +544,36 @@ export async function renderWikiPage(opts?: {
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .wiki-group-fold:hover .wiki-group-label { color: var(--text-primary); }
+    /* A SERIES row is the only group the reader AUTHORED, so it is the only one
+       that carries the accent — a family and a month are the rail's own
+       guesses about filenames and read as ordinary furniture. */
+    .wiki-list-group.series .wiki-group-label { color: var(--accent-light); }
+    .wiki-list-group.series { border-left: 2px solid var(--accent); border-radius: 7px; }
+    /* \`N of M shown\` — a facet is hiding part of the series. Inside the label
+       box, so it takes the label's ellipsis rather than a width of its own. */
+    .wiki-group-sub { color: var(--text-muted); font-size: 10.5px; margin-left: 6px; font-weight: 400; }
+    /* The \`▸\` on the newest plan of a series: a text mark inside the title, not
+       a row element. See \`wiki-rail-width.ts\` — the row's six items are each
+       budgeted and a seventh takes the title under its floor. */
+    .wiki-latest-glyph { color: var(--status-warning); margin-right: 4px; font-size: 11px; }
+    /* A GHOST row: a series member the reader pinned, named inside the fold so
+       the roll-up's count and the rows agree. Not a control and not a link —
+       there is nothing to open that is not already on screen — so it takes no
+       hover, no pointer and no pin. */
+    .wiki-list-ghost {
+      display: flex; align-items: baseline; gap: 8px;
+      padding: 5px 10px 5px 20px; position: relative;
+      font-size: 12px; color: var(--text-muted);
+    }
+    .wiki-list-ghost::before {
+      content: ""; position: absolute; left: 10px; top: 4px; bottom: 4px;
+      width: 2px; border-radius: 1px; background: var(--border-primary);
+    }
+    .wiki-list-ghost-title {
+      flex: 1 1 0; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .wiki-list-ghost-note { flex-shrink: 0; font-size: 10.5px; color: var(--text-muted); }
     /* The roll-up rides a chip that is NOT a control of its own — the whole row
        is the button — so it drops the pointer affordance and keeps the legible
        colour. */
@@ -1059,6 +1089,63 @@ export async function renderWikiPage(opts?: {
       transition: all 0.15s;
     }
     .wiki-project-hub:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+    /* ── Series ──────────────────────────────────────────────────────────
+       The strip above the provenance one, on a page carrying a \`series:\` key:
+       one line saying which piece of work this is and where to continue, and a
+       date-ordered timeline of the members under it.
+
+       Every colour is a page token, so both themes follow one set of
+       declarations. The text a reader must READ sits at --text-muted or above
+       (measured ≥ 4.5:1 in both themes, the provenance strip's own floor);
+       --text-faint is reserved for the dates and the separators, which are
+       secondary marks beside text that repeats them. */
+    .wiki-series-head {
+      margin-top: 8px; padding-top: 7px;
+      border-top: 1px solid var(--border-primary);
+    }
+    .wiki-series-strip {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+      font-size: 12px; color: var(--text-muted);
+    }
+    .wiki-series-lbl {
+      font-size: 10px; letter-spacing: .07em; text-transform: uppercase;
+      color: var(--accent-light);
+    }
+    .wiki-series-name { color: var(--text-primary); font-weight: 600; }
+    .wiki-series-sep { color: var(--text-faint); }
+    /* The one control here, so it carries the accent and nothing else does. */
+    .wiki-series-go {
+      border: none; background: none; padding: 0;
+      color: var(--accent-light); font: inherit; cursor: pointer;
+    }
+    .wiki-series-go:hover { text-decoration: underline; }
+    /* The timeline scrolls sideways rather than wrapping: the steps are a
+       sequence, and a wrapped one reads as two. */
+    .wiki-series-tl {
+      display: flex; gap: 0; align-items: flex-start;
+      margin: 10px 0 2px; overflow-x: auto; padding-bottom: 4px;
+    }
+    .wiki-series-step {
+      min-width: 150px; max-width: 220px; padding: 6px 10px 2px 0;
+      border-top: 2px solid var(--border-secondary); position: relative;
+    }
+    .wiki-series-step::before {
+      content: ""; position: absolute; top: -6px; left: 0;
+      width: 10px; height: 10px; border-radius: 50%; background: var(--border-secondary);
+    }
+    .wiki-series-step.current { border-top-color: var(--accent); }
+    .wiki-series-step.current::before { background: var(--accent); }
+    .wiki-series-step.shipped { border-top-color: var(--status-success); }
+    .wiki-series-step.shipped::before { background: var(--status-success); }
+    .wiki-series-step-date { font-size: 10px; color: var(--text-faint); }
+    .wiki-series-step-title {
+      font-size: 11.5px; color: var(--text-secondary); line-height: 1.3;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; overflow-wrap: anywhere;
+    }
+    .wiki-series-step.current .wiki-series-step-title { color: var(--text-primary); }
+    .wiki-series-step-kind { font-size: 10px; color: var(--text-muted); }
+
     /* ── Provenance ──────────────────────────────────────────────────────
        ONE surface under the title: a collapsed line (Jira row + one sentence of
        cost + a mark per event) that opens in place into the chain. The rail

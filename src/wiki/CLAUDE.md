@@ -760,6 +760,94 @@ one-row invariant with both layers at once) and
 `e2e/wiki-rail-families.spec.ts` (the toggle, the roll-up, the count, the
 reload, the flatten, the month defaults and the contrast in both themes).
 
+### Series (`series:` / `series_label:`, `groupSeries`)
+
+The rail's THIRD grouping layer, and the only AUTHORED one. Families and months
+fold what a filename says; the work a reader returns to is spread over stems and
+folders — a plan, its successor plan and the blog explaining them are three
+unrelated rows — and "the latest plan in this piece of work" has no row at all.
+
+**Two frontmatter keys.** `series: <key>` on every member, one short authored
+slug; `series_label: <text>` on the HEAD page only, so renaming a series is one
+edit and never breaks the key its members share. Read in `store.ts`'s index pass
+beside `superseded_by` and with the same tolerance (a scalar, or the first entry
+of a flow list; trimmed; anything else ignored). **The key is compared
+VERBATIM** — `Wiki-Provenance` and `wiki-provenance` are two series, which a
+lint reports rather than this parse silently merging. Both ride `toListing`'s
+rest spread on all three callers and are deliberately NOT in the provenance
+opt-in: the rail groups by them on the hot listing, exactly as it facets by
+`project`.
+
+**The head, and the newest plan.** The HEAD is the member carrying
+`series_label:`; absent, the newest PLAN; absent that too, the newest member.
+The label is read off it, so a series nobody has labelled renders under its bare
+key. The **newest plan** is the member carrying a `plan_status`, by
+`status_date` else the git touch date else mtime (`seriesDateMs`) — a blog or an
+archive page is a member of the work but never "the latest", because *continue
+at* has to name a page a reader can continue IN. The test is `plan_status`, not
+the `plans/` folder: a plan filed elsewhere counts, a blog in `plans/` does not.
+
+**Six rail rules**, extending the family list above:
+
+1. **Always on.** Series are computed whether or not `group families` is
+   checked: that toggle guards the two NAME heuristics, and a key is not a
+   guess. A query still flattens everything, series included.
+2. **Precedence: Pinned > Series > months/families > Activity.** A pinned member
+   stays in `Pinned` — the ★ is the reader's explicit choice — and the fold
+   shows a dim, non-clickable **ghost row** (`pinned above`) so the roll-up's
+   count and the rows on screen cannot disagree. **Activity does NOT lift a
+   series member**, the deliberate difference from a family: a series is the
+   work the reader came back to, and lifting its newest page out renders the
+   fold without the row it is about. A series claims its members BEFORE
+   `groupFamilies`/`groupMonths` are computed — `renderList` subtracts them
+   (`withoutSeriesMembers`) — so two knock-on effects are accepted and pinned by
+   unit tests: a family that drops below `FAMILY_MIN` **dissolves** into plain
+   rows, and a prefix that was over `FAMILY_MAX` **may form**.
+3. **Formed over the FILTERED set**, like families — but the LABEL, the member
+   `total` and the newest plan come from the WHOLE listing, because each is a
+   fact about the series rather than about the facet. Under a facet the row says
+   `N of M shown`, inside the label box so it takes no width of its own.
+4. **The open page's series is forced open**, with a disabled chip that says so
+   (#557's F2 decision) — unless the open page is itself lifted into `Pinned`,
+   where it is already on screen and forcing the fold would hide the reader's
+   stored state behind a dead control. Fold state is stored like a family's, and
+   a series NEVER defaults open, so it never uses the `closed:` spelling.
+5. **`shown` / `#wikiCount` count a member once**, in the series — or under
+   `Pinned` when it was lifted there. A ghost row is not a row and is not
+   counted.
+6. **`latest` is not a seventh row element.** The newest plan's row carries a
+   `▸` glyph INSIDE `.wiki-list-title` with the words on hover; the row's six
+   elements are each budgeted in `wiki-rail-width.ts` and a seventh takes the
+   title under its floor. Re-measured at 260 and 300 px against #559's baseline:
+   no new wrapped row.
+
+**No minimum and no cap.** A one-member series is a series with one page in it
+so far, and a twenty-member one is twenty pages of one piece of work — neither
+is the accidental folder-shaped fold `FAMILY_MIN`/`FAMILY_MAX` exist to refuse.
+
+**The roll-up counts the folder where a member declares no `plan_status`** —
+`blogs/` as `blog`, `archive/` as `archive`, everything else as `unmarked` — so
+the chip reads `1 in-flight · 1 shipped · 1 blog` rather than reporting a blog
+and an archive report as the same nothing. Series-only: a family lives in one
+folder, where the word would be the same on every member.
+
+**The reader header.** A member's article head carries one line —
+`Series · <label> · N pages · continue at: <the newest plan that is not this
+page>` — plus a date-ordered timeline of the members, oldest → newest, with the
+open page and the shipped ones marked. Built from the listing the rail already
+holds, so it costs no request. *continue at* never names the open page (a reader
+usually arrives there from the `▸` row) and is omitted when there is no other
+plan. There is no `edit` affordance yet — the series editor is a later PR, and a
+visible control that cannot act is the dead control F2 rejected.
+
+Acceptance: `wiki-groups.test.ts` (formation, membership, the head and
+newest-plan rules, the filtered/whole split, the two family knock-on effects,
+the roll-up word), `store.test.ts` (the parse), `wiki-recents.test.ts` (the
+block's position, the ghost row, the census, the lifts, the forced-open rule)
+and `e2e/wiki-rail-series.spec.ts` (the chain end to end: the fold, the
+dissolution against an untouched control family, the `▸` inside the title, the
+ghost, `N of M shown`, the reader header and the contrast in both themes).
+
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 
 Turns one wiki page into a pasteable post — the reader's **📤 Share** breadcrumb action, beside 💬 Discuss. One fenced one-shot on the wiki's synthesis bot (`resolveWikiSynthesisBot`, same routing as Ask), streamed as markdown, and on completion three server-rendered strings. Prompt/preset/body-prep layers live in `src/share/` (see the Share row in the repo `CLAUDE.md`); the SSE runner is `dashboard/routes/share-sse.ts`, the dialog `dashboard/views/components/share-dialog.ts` (+ its pure half `wiki-share-dialog.ts`).

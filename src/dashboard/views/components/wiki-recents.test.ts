@@ -37,7 +37,7 @@ import {
   type RailEntry,
   type RailSection,
 } from "./wiki-recents.ts";
-import { GROUP_FAMILIES_TOGGLE_KEY, groupRollup, railGroups } from "./wiki-groups.ts";
+import { GROUP_FAMILIES_TOGGLE_KEY, groupRollup, groupSeries, railGroups } from "./wiki-groups.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import type { ActivityRow } from "./wiki-activity-rank.ts";
 
@@ -2177,5 +2177,273 @@ describe("groups (families and months) — fix round 2", () => {
       expect(g.forcedOpen).toBe(true);
       expect(g.folded).toBe(false);
     });
+  });
+});
+
+// ── Series in the rail ────────────────────────────────────────────────────
+// What `buildRail` does with an authored series: where the block sits, what
+// outranks what, and the two counts (`shown`, the census) that must agree with
+// the rows on screen.
+
+describe("buildRail — series", () => {
+  const plan = (rel: string, over: Partial<WikiListing> = {}) =>
+    page({ relPath: rel, series: "alpha", ...over });
+
+  const A = plan("plans/a.mdx", { seriesLabel: "Alpha work", plan_status: "in-flight", status_date: "2026-09-01" });
+  const B = plan("plans/b.mdx", { plan_status: "shipped", status_date: "2026-05-01" });
+  const C = plan("blogs/c.mdx", { status_date: "2026-03-01" });
+  const LOOSE = page({ relPath: "plans/loose.mdx" });
+  const ALL = [A, B, C, LOOSE];
+
+  const build = (over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+    buildRail({
+      filtered: ALL,
+      facetOnly: ALL,
+      filters: INERT,
+      pins: [],
+      seriesGroups: groupSeries(ALL),
+      ...over,
+    });
+
+  const headers = (entries: RailEntry[]) =>
+    entries.filter((e) => e.kind === "header").map((e) => (e as { label: string }).label);
+  const rows = (entries: RailEntry[]) =>
+    entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const groupsOf = (entries: RailEntry[]) =>
+    entries.filter((e) => e.kind === "group") as Array<Extract<RailEntry, { kind: "group" }>>;
+  const ghosts = (entries: RailEntry[]) =>
+    entries.filter((e) => e.kind === "ghost") as Array<Extract<RailEntry, { kind: "ghost" }>>;
+
+  test("the block is its OWN section, above the remainder", () => {
+    const m = build();
+    expect(headers(m.entries)).toEqual(["Series", "Other pages"]);
+    expect(groupsOf(m.entries)).toHaveLength(1);
+    expect(groupsOf(m.entries)[0]!.group.label).toBe("Alpha work");
+    // Closed by default, so the three members are not rows and the loner is.
+    expect(rows(m.entries).map((r) => r.page.relPath)).toEqual(["plans/loose.mdx"]);
+  });
+
+  test("a CLOSED series lowers `shown` by exactly its members", () => {
+    expect(build().shown).toBe(1);
+    expect(build({ openFolds: ["series:alpha"] }).shown).toBe(4);
+  });
+
+  test("…and each member is counted ONCE, in the series", () => {
+    const m = build({ openFolds: ["series:alpha"] });
+    const rel = rows(m.entries).map((r) => r.page.relPath);
+    expect(rel).toHaveLength(new Set(rel).size);
+    expect(rel.filter((r) => r === "plans/a.mdx")).toHaveLength(1);
+    expect(m.shown).toBe(rel.length);
+  });
+
+  test("an open series emits its members as member rows, newest first", () => {
+    const m = build({ openFolds: ["series:alpha"] });
+    const members = rows(m.entries).filter((r) => r.section === "series");
+    expect(members.map((r) => r.page.relPath)).toEqual([
+      "plans/a.mdx",
+      "plans/b.mdx",
+      "blogs/c.mdx",
+    ]);
+    expect(members[0]!.member).toEqual({ label: "Alpha work", kind: "series" });
+  });
+
+  test("the newest PLAN carries `latest`, wherever it renders", () => {
+    const m = build({ openFolds: ["series:alpha"] });
+    expect(rows(m.entries).filter((r) => r.latest).map((r) => r.page.relPath)).toEqual([
+      "plans/a.mdx",
+    ]);
+    // …including from Pinned, which is where a pinned newest plan really is.
+    const pinned = build({ pins: ["plans/a.mdx"], openFolds: ["series:alpha"] });
+    const row = rows(pinned.entries).find((r) => r.page.relPath === "plans/a.mdx")!;
+    expect(row.section).toBe("pinned");
+    expect(row.latest).toBe(true);
+  });
+
+  test("ACTIVITY does not lift a series member out — the deliberate family difference", () => {
+    const activity: ActivityRow[] = [
+      { page: A, kind: "changed", why: "changed today", ageMs: 1, score: 9 },
+      { page: LOOSE, kind: "changed", why: "changed today", ageMs: 1, score: 8 },
+    ];
+    const m = build({ activity, openFolds: ["series:alpha"] });
+    // Activity and Pinned still come FIRST in the rail; the series block sits
+    // between them and the listing. `LOOSE` was the only remainder row and
+    // Activity took it, so there is no `Other pages` tail here.
+    expect(headers(m.entries)).toEqual(["Activity", "Series"]);
+    expect(rows(m.entries).filter((r) => r.section === "activity").map((r) => r.page.relPath)).toEqual(
+      ["plans/loose.mdx"],
+    );
+    expect(rows(m.entries).find((r) => r.page.relPath === "plans/a.mdx")!.section).toBe("series");
+  });
+
+  test("PINNED outranks the series: a real row above, a GHOST row inside", () => {
+    const m = build({ pins: ["plans/b.mdx"], openFolds: ["series:alpha"] });
+    expect(rows(m.entries).find((r) => r.page.relPath === "plans/b.mdx")!.section).toBe("pinned");
+    expect(ghosts(m.entries).map((g) => g.page.relPath)).toEqual(["plans/b.mdx"]);
+    expect(ghosts(m.entries)[0]!.reason).toBe("pinned");
+    // A ghost is not a row: `shown` counts the page once, under Pinned.
+    expect(m.shown).toBe(4);
+    // …and the series body no longer emits it as a member row.
+    expect(
+      rows(m.entries).filter((r) => r.section === "series").map((r) => r.page.relPath),
+    ).toEqual(["plans/a.mdx", "blogs/c.mdx"]);
+  });
+
+  test("a series whose every member is pinned still renders, ghosts only", () => {
+    const m = build({
+      pins: ["plans/a.mdx", "plans/b.mdx", "blogs/c.mdx"],
+      openFolds: ["series:alpha"],
+    });
+    expect(groupsOf(m.entries)).toHaveLength(1);
+    expect(groupsOf(m.entries)[0]!.members).toEqual([]);
+    expect(groupsOf(m.entries)[0]!.ghosts).toHaveLength(3);
+    expect(ghosts(m.entries)).toHaveLength(3);
+    expect(m.shown).toBe(4);
+  });
+
+  test("a series with no member ON SCREEN draws no row at all", () => {
+    const only = [LOOSE];
+    const m = buildRail({
+      filtered: only,
+      facetOnly: only,
+      filters: INERT,
+      pins: [],
+      seriesGroups: groupSeries(only, ALL),
+    });
+    expect(groupsOf(m.entries)).toHaveLength(0);
+    expect(headers(m.entries)).toEqual([]);
+  });
+
+  test("under a facet the row says `N of M shown`", () => {
+    const filtered = [A, B, LOOSE];
+    const m = buildRail({
+      filtered,
+      facetOnly: filtered,
+      filters: { ...INERT, folder: "plans" },
+      pins: [],
+      seriesGroups: groupSeries(filtered, ALL),
+    });
+    expect(groupsOf(m.entries)[0]!.census).toEqual({ shown: 2, total: 3 });
+  });
+
+  test("…and says nothing when the whole series is on screen", () => {
+    expect(groupsOf(build().entries)[0]!.census).toBeUndefined();
+  });
+
+  test("a pinned member still counts toward the census", () => {
+    const filtered = [A, B, LOOSE];
+    const m = buildRail({
+      filtered,
+      facetOnly: filtered,
+      filters: { ...INERT, folder: "plans" },
+      pins: ["plans/b.mdx"],
+      seriesGroups: groupSeries(filtered, ALL),
+    });
+    expect(groupsOf(m.entries)[0]!.census).toEqual({ shown: 2, total: 3 });
+  });
+
+  test("a QUERY flattens the series like everything else", () => {
+    const m = build({ filters: { ...INERT, q: "plan" }, activity: [] });
+    expect(groupsOf(m.entries)).toHaveLength(0);
+    expect(headers(m.entries)).toEqual([]);
+    expect(rows(m.entries).map((r) => r.page.relPath)).toEqual(ALL.map((p) => p.relPath));
+    expect(rows(m.entries).some((r) => r.latest)).toBe(false);
+  });
+
+  test("the OPEN page's series is forced open, with a chip that cannot toggle", () => {
+    const m = build({ openRelPath: "blogs/c.mdx" });
+    const g = groupsOf(m.entries)[0]!;
+    expect(g.folded).toBe(false);
+    expect(g.forcedOpen).toBe(true);
+    expect(rows(m.entries).map((r) => r.page.relPath)).toContain("blogs/c.mdx");
+  });
+
+  test("…and a series NOT holding the open page keeps its stored state", () => {
+    const m = build({ openRelPath: "plans/loose.mdx" });
+    expect(groupsOf(m.entries)[0]!.folded).toBe(true);
+    expect(groupsOf(m.entries)[0]!.forcedOpen).toBeUndefined();
+  });
+
+  test("a series NEVER defaults open — only the newest month does", () => {
+    expect(groupsOf(build().entries)[0]!.folded).toBe(true);
+    // …so its toggle key is its own spelling, never the `closed:` one.
+    expect(groupsOf(build().entries)[0]!.toggleKey).toBe("series:alpha");
+  });
+
+  test("a closed series still puts the `Other pages` header over the remainder", () => {
+    // It claims no page, so the count of claimed rows alone says nothing.
+    const m = build();
+    expect(headers(m.entries)).toEqual(["Series", "Other pages"]);
+  });
+
+  test("a series member's own attachment child renders inside the body", () => {
+    const child = page({
+      relPath: "plans/a-prototype.html",
+      parent: "plans/a.mdx",
+      pairedBy: "suffix",
+    });
+    const all = [...ALL, child];
+    const m = buildRail({
+      filtered: all,
+      facetOnly: all,
+      filters: INERT,
+      pins: [],
+      seriesGroups: groupSeries(all),
+      openFolds: ["series:alpha", "plans/a.mdx"],
+    });
+    const rel = rows(m.entries).map((r) => r.page.relPath);
+    expect(rel).toContain("plans/a-prototype.html");
+    const childRow = rows(m.entries).find((r) => r.page.relPath === "plans/a-prototype.html")!;
+    expect(childRow.member).toEqual({ label: "Alpha work", kind: "series" });
+    expect(childRow.child?.parent.relPath).toBe("plans/a.mdx");
+  });
+
+  test("a superseded member renders under its successor and counts in the census", () => {
+    const old = page({
+      relPath: "plans/old.mdx",
+      series: "alpha",
+      plan_status: "superseded",
+      parent: "plans/a.mdx",
+      pairedBy: "superseded",
+    });
+    const all = [...ALL, old];
+    const m = buildRail({
+      filtered: all,
+      facetOnly: all,
+      filters: INERT,
+      pins: [],
+      seriesGroups: groupSeries(all),
+      openFolds: ["series:alpha"],
+    });
+    const g = groupsOf(m.entries)[0]!;
+    expect(g.superseded.map((p) => p.relPath)).toEqual(["plans/old.mdx"]);
+    expect(groupRollup("series", g.members, g.superseded).label).toBe(
+      "1 in-flight · 1 shipped · 1 superseded · 1 blog",
+    );
+  });
+
+  test("a series member never also lands in a FAMILY row", () => {
+    // The caller subtracts before computing families; this pins the rail's own
+    // second line of defence for a caller that hands in a stale groups array.
+    const fam = [
+      page({ relPath: "notes/beta-flow-1.mdx", series: "alpha" }),
+      page({ relPath: "notes/beta-flow-2.mdx" }),
+      page({ relPath: "notes/beta-flow-3.mdx" }),
+    ];
+    const series = groupSeries(fam);
+    const m = buildRail({
+      filtered: fam,
+      facetOnly: fam,
+      filters: INERT,
+      pins: [],
+      seriesGroups: series,
+      // Deliberately NOT subtracted — the stale-input case.
+      groups: railGroups(fam, { folder: "", sort: "title", projects: {} }),
+      openFolds: ["series:alpha", "family:notes/beta-flow"],
+    });
+    const rel = rows(m.entries).map((r) => r.page.relPath);
+    expect(rel.filter((r) => r === "notes/beta-flow-1.mdx")).toHaveLength(1);
+    expect(rows(m.entries).find((r) => r.page.relPath === "notes/beta-flow-1.mdx")!.section).toBe(
+      "series",
+    );
   });
 });

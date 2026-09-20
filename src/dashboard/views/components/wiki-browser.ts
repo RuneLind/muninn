@@ -108,9 +108,14 @@ import {
 import {
   GROUP_FAMILIES_TOGGLE_KEY,
   groupRollup,
+  groupSeries,
   isMonthGrouping,
+  newestSeriesPlan,
   orderPagesForGroups,
   railGroups,
+  seriesDateMs,
+  seriesHead,
+  withoutSeriesMembers,
 } from "./wiki-groups.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
@@ -193,6 +198,7 @@ import {
   findPageByRelPath,
   isActivePage,
   navTargetFrom,
+  normalizeRel,
   NAV_LINK_SELECTOR,
   type NavTarget,
 } from "./wiki-nav.ts";
@@ -1027,9 +1033,24 @@ function renderList(): void {
   // group — and only when the toggle is on AND the rail is not under a query,
   // which flattens everything. `projects` is the wiki's own name list, the one
   // thing the family rule needs that the page rows do not carry.
+  // SERIES are computed whether or not `group families` is on: the toggle guards
+  // the two NAME heuristics, and a series is a key someone wrote. Over the
+  // FILTERED set for the members, over `allPages` for the label, the member total
+  // and the newest plan — those three are facts about the series, and a facet
+  // that hid the head page would otherwise rename the fold.
+  const seriesGroups = railSectionsVisible(filters) ? groupSeries(filtered, allPages) : [];
+  // ⚠️ A series CLAIMS its members before the family and month rules see the
+  // list, which is what makes the two knock-on cases real and intended: a family
+  // that drops under FAMILY_MIN dissolves into plain rows, and a prefix that was
+  // over FAMILY_MAX may drop to the cap and form.
   const groups =
     familiesOn() && railSectionsVisible(filters)
-      ? railGroups(filtered, { folder: filters.folder, sort: mode, projects, now })
+      ? railGroups(withoutSeriesMembers(filtered, seriesGroups), {
+          folder: filters.folder,
+          sort: mode,
+          projects,
+          now,
+        })
       : [];
   // MONTHS decide their own order (newest first), so the rows are re-ordered to
   // match before the rail places each group at its first member. Families are
@@ -1049,6 +1070,7 @@ function renderList(): void {
     // away — that is a scan of every page on every keystroke.
     activity: railSectionsVisible(filters) ? rankActivity(rows, activityWeights, now) : [],
     groups,
+    seriesGroups,
     openFolds,
     // The page the reader has open — its group is expanded whatever the store
     // says, so the `.active` row is never inside a closed fold.
@@ -1102,20 +1124,38 @@ function renderList(): void {
     // for every group but the one that defaults open — that one offers the
     // `closed:` spelling, so this one generic handler writes the right key.
     if (entry.kind === "group") {
-      const roll = groupRollup(entry.group.kind, entry.members, entry.superseded);
+      const isSeries = entry.group.kind === "series";
+      // A SERIES roll-up counts its ghost rows too — the pinned members are on
+      // screen one section up, but they are members of the work and the chip is
+      // a census of it. A family's chip drops a lifted member, because there the
+      // lift really does take the page out of the slate for that render.
+      const roll = groupRollup(
+        entry.group.kind,
+        isSeries ? [...entry.members, ...(entry.ghosts ?? [])] : entry.members,
+        entry.superseded,
+      );
       const why = entry.forcedOpen
         ? "the open page is in this group"
-        : (entry.folded ? "Show" : "Hide") + " the " + entry.group.label + " pages";
-      const hover = `${roll.label} — ${why}`;
+        : (entry.folded ? "Show" : "Hide") +
+          " the " +
+          entry.group.label +
+          (isSeries ? " series" : " pages");
+      // `N of M shown` says a facet is hiding part of the series. It rides the
+      // label, never a new element: a group row has the same width budget as a
+      // page row, and its own chip is already the widest thing on it.
+      const census = entry.census ? `${entry.census.shown} of ${entry.census.total} shown` : "";
+      const hover = `${roll.label} — ${why}` + (census ? ` (${census})` : "");
       html +=
-        `<div class="wiki-list-group" data-section="${esc(entry.section)}" data-group="${esc(entry.foldKey)}">` +
+        `<div class="wiki-list-group${isSeries ? " series" : ""}" data-section="${esc(entry.section)}" data-group="${esc(entry.foldKey)}">` +
         `<button type="button" class="wiki-group-fold${entry.folded ? " folded" : ""}"` +
         ` data-fold-key="${esc(entry.toggleKey)}" aria-expanded="${entry.folded ? "false" : "true"}"` +
         (entry.forcedOpen ? ` disabled` : "") +
         ` aria-label="${esc(entry.group.label + " · " + hover)}" title="${esc(hover)}">` +
         `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
         `<div class="wiki-list-mid">` +
-        `<div class="wiki-group-label">${esc(entry.group.label)}</div>` +
+        `<div class="wiki-group-label">${esc(entry.group.label)}` +
+        (census ? `<small class="wiki-group-sub">${esc(census)}</small>` : "") +
+        `</div>` +
         // The same two size classes as a page chip, from the same functions, so
         // the two painters can never classify one label two ways. On a group row
         // (mid ≥ 213.6px at the narrowest rail) only `is-wide` is load-bearing —
@@ -1129,6 +1169,21 @@ function renderList(): void {
         `</span>` +
         `</div>` +
         `</button></div>`;
+      return;
+    }
+    // A GHOST row: a series member the reader pinned, so the real row is under
+    // `Pinned` and this is a dim placeholder saying where it went. Deliberately
+    // NOT a `.wiki-list-item` and carrying no `data-relpath` — that selector
+    // must keep naming exactly one element per page (four e2e specs rely on it,
+    // and `#wikiCount` would disagree with a second row for one page).
+    if (entry.kind === "ghost") {
+      const title = displayTitleOf(entry.page);
+      html +=
+        `<div class="wiki-list-ghost" data-ghost-relpath="${esc(entry.page.relPath)}"` +
+        ` title="${esc(title + "\npinned — its row is under Pinned, above")}">` +
+        `<div class="wiki-list-ghost-title">${esc(title)}</div>` +
+        `<div class="wiki-list-ghost-note">pinned above</div>` +
+        `</div>`;
       return;
     }
     const p = entry.page;
@@ -1172,15 +1227,21 @@ function renderList(): void {
     const childWhy = entry.child
       ? pairedByWhy(entry.child.pairedBy, displayTitleOf(entry.child.parent))
       : "";
-    // A row inside a family or month says which one on hover — the group's own
-    // row carries the label, and a reader scrolling past the top of a long open
-    // group has nothing else to read it from.
+    // A row inside a family, month or series says which one on hover — the
+    // group's own row carries the label, and a reader scrolling past the top of
+    // a long open group has nothing else to read it from.
     const memberWhy = entry.member
       ? entry.member.kind === "month"
         ? `In ${entry.member.label}`
-        : `In the ${entry.member.label} family`
+        : `In the ${entry.member.label} ${entry.member.kind === "series" ? "series" : "family"}`
       : "";
-    const rowTitle = [entry.activity?.why ?? "", childWhy, memberWhy].filter(Boolean).join("\n");
+    // The `▸` glyph on the newest plan of a series says WHAT it is here, because
+    // the glyph itself cannot: the words live in the reader header, and a row
+    // that grew a seventh element for them would wrap at the default rail.
+    const latestWhy = entry.latest ? "newest plan in this series" : "";
+    const rowTitle = [entry.activity?.why ?? "", childWhy, memberWhy, latestWhy]
+      .filter(Boolean)
+      .join("\n");
     html +=
       // The indent is for a row drawn INSIDE its parent's group. A lifted child
       // (Activity ranked it, or the reader pinned it) sits under an unrelated
@@ -1210,7 +1271,14 @@ function renderList(): void {
       // row it carries the derivation UNDER the name as well — this element is
       // two thirds of the row, and its own `title` is what the pointer lands on
       // there, so the row's attribute alone is unreachable over most of the row.
-      `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">${esc(displayTitleOf(p))}</div>` +
+      // The `▸` marking the newest plan of a series lives INSIDE this element,
+      // not beside it: the row is six flex items and `wiki-rail-width.ts` budgets
+      // every one of them, so a seventh would cost the title its floor and wrap
+      // the row. An inline span inside the line clamp costs 11px of the title's
+      // own text and nothing of the row's layout.
+      `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
+      (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
+      `${esc(displayTitleOf(p))}</div>` +
       // The group CHIP: what is folded under this row, and the control that
       // opens it. A click here toggles; a click anywhere else on the row opens
       // the page, as it always has.
@@ -2166,6 +2234,86 @@ function projectHubChipHtml(m: WikiListing): string {
 }
 
 /**
+ * The SERIES strip under a member's title: what the series is called, how many
+ * pages it holds, where to continue, and the members on a date line.
+ *
+ * Built from `allPages` — the listing the rail already holds — so opening a page
+ * costs no extra request. It renders nothing at all for a page carrying no
+ * `series:`, which is almost every page of every wiki.
+ *
+ * Three rules worth stating:
+ *
+ *  - **`continue at:` never names the open page.** The newest plan IS usually
+ *    the page the reader has open (they got here from the `▸` row), and a link
+ *    back to it would be the one useless answer. It names the next-newest plan
+ *    instead, and is omitted entirely when there is none.
+ *  - **The timeline runs oldest → newest**, the opposite of the rail's fold: the
+ *    rail answers "where do I go now" and this answers "how did this get here",
+ *    which is a story with a beginning.
+ *  - **Dates are `status_date` else the git touch date** (`seriesDateMs`), the
+ *    same signal the fold orders by — the strip and the fold must not disagree
+ *    about which page is later.
+ */
+function seriesStripHtml(m: WikiListing): string {
+  const key = (m.series || "").trim();
+  if (!key) return "";
+  const members = allPages.filter((p) => (p.series || "").trim() === key);
+  if (!members.length) return "";
+  const label = seriesHead(members)?.seriesLabel || key;
+  const openKey = normalizeRel(m.relPath);
+  const continueAt = newestSeriesPlan(
+    members.filter((p) => normalizeRel(p.relPath) !== openKey),
+  );
+  const ordered = [...members].sort(
+    (a, b) =>
+      seriesDateMs(a) - seriesDateMs(b) ||
+      normalizeRel(a.relPath).localeCompare(normalizeRel(b.relPath)),
+  );
+  const sep = `<span class="wiki-series-sep" aria-hidden="true">·</span>`;
+  let strip =
+    `<div class="wiki-series-strip">` +
+    `<span class="wiki-series-lbl">Series</span>` +
+    `<span class="wiki-series-name">${esc(label)}</span>` +
+    sep +
+    `<span class="wiki-series-count">${members.length} page${members.length === 1 ? "" : "s"}</span>`;
+  if (continueAt) {
+    strip +=
+      sep +
+      `<span class="wiki-series-continue">continue at: ` +
+      // A button, not an anchor: the reader is a single page and every other
+      // in-article navigation goes through the same delegate.
+      `<button type="button" class="wiki-series-go" data-series-go="${esc(continueAt.relPath)}"` +
+      ` title="${esc("Open " + displayTitleOf(continueAt))}">${esc(displayTitleOf(continueAt))}</button>` +
+      `</span>`;
+  }
+  strip += `</div>`;
+  const steps = ordered
+    .map((p) => {
+      const isOpen = normalizeRel(p.relPath) === openKey;
+      const shipped = p.plan_status === "shipped";
+      const day = p.status_date || (p.gitTouchedMs ? dayOf(p.gitTouchedMs) : "");
+      const kind = [pageFolder(p), p.plan_status].filter(Boolean).join(" · ");
+      return (
+        `<div class="wiki-series-step${isOpen ? " current" : shipped ? " shipped" : ""}">` +
+        `<div class="wiki-series-step-date">${esc(day)}</div>` +
+        `<div class="wiki-series-step-title">${esc(displayTitleOf(p))}</div>` +
+        `<div class="wiki-series-step-kind">${esc(kind)}</div>` +
+        `</div>`
+      );
+    })
+    .join("");
+  return `<div class="wiki-series-head">${strip}<div class="wiki-series-tl">${steps}</div></div>`;
+}
+
+/** An epoch instant as a LOCAL `YYYY-MM-DD`, the spelling every other rendered
+ *  git date in the reader uses. */
+function dayOf(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
  * Article-head block (title, badges, tags, dates, source link) — shared by
  * markdown pages and HTML explainers.
  *
@@ -2205,6 +2353,11 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   // The meta row closes first: the strip is a BLOCK under it (the Jira row plus
   // one line of cost), not another chip competing with the tags and dates.
   head += "</div>";
+  // The SERIES strip sits above the provenance one, in the same slot and for the
+  // same reason: it is a block about the page's place in the work, not a chip.
+  // Above, because "which piece of work is this" is the question a reader lands
+  // on the page with, and provenance is the one they ask afterwards.
+  head += seriesStripHtml(m);
   // `jiraKeys` is the facet's membership set, and the strip's key is a SECOND
   // way into that facet — so the strip renders a control only for a key the
   // facet can actually serve (see `provStripHtml`).
@@ -2498,6 +2651,16 @@ document.body.addEventListener("click", (e) => {
   if (hubChip) {
     e.preventDefault();
     applyProjectFilter(hubChip.getAttribute("data-project-hub") || "");
+    return;
+  }
+  // The series strip's `continue at:` link. Delegated for the hub chip's reason
+  // — `#articleWrap`'s innerHTML is replaced on every page load — and by relPath
+  // rather than by name, since two pages of one series can share a stem.
+  const seriesGo = target.closest ? target.closest("[data-series-go]") : null;
+  if (seriesGo) {
+    e.preventDefault();
+    const rel = seriesGo.getAttribute("data-series-go") || "";
+    if (rel) loadPageByRelPath(rel, true);
     return;
   }
   // The provenance strip's Jira key: the key itself narrows the page list to the

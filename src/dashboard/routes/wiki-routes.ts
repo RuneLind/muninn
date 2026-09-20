@@ -1049,6 +1049,12 @@ function toListing(
   // screen, so a server-side child list is payload nothing may believe (and a
   // second spelling of the same relation to keep in step). `parent`/`pairedBy`
   // DO ride along — they are what the rail reads, one short string each.
+  //
+  // `series`/`seriesLabel` ride the rest spread on ALL THREE callers and are
+  // deliberately NOT in the provenance opt-in: the rail's Series fold is a
+  // LISTING grouping, the `project` twin, so the hot payload is exactly where
+  // they have to be. Two short strings per page — and `seriesLabel` sits on ONE
+  // page per series, so naming a fold costs nothing per member.
   const { desc, pubDate, sessions, prs, sessionsBackfilled, children, ...rest } = meta;
   void pubDate;
   void children;

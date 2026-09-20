@@ -27,6 +27,7 @@ import {
   STATUS_ORDER,
   isMetaPage,
   pageDateSignal,
+  pageFolder,
   pageStemOf,
   type WikiListing,
   type WikiSortMode,
@@ -102,7 +103,7 @@ export function closedFoldKey(key: string): string {
  *  on most wikis. */
 export const NO_STATUS_WORD = "unmarked";
 
-export type RailGroupKind = "family" | "month";
+export type RailGroupKind = "family" | "month" | "series";
 
 /**
  * One group the rail may fold. Built here, arranged by `buildRail`.
@@ -110,8 +111,8 @@ export type RailGroupKind = "family" | "month";
 export interface RailGroup {
   kind: RailGroupKind;
   /**
-   * The fold key, in the folds store's flat namespace: `family:<folder>/<prefix>`
-   * or `month:<YYYY-MM>`.
+   * The fold key, in the folds store's flat namespace: `family:<folder>/<prefix>`,
+   * `month:<YYYY-MM>` or `series:<key>`.
    *
    * The FOLDER rides the family key although the plan wrote `family:<prefix>`:
    * families are scoped to one folder, so two folders can hold a family of the
@@ -119,7 +120,8 @@ export interface RailGroup {
    * bare-prefix key would make one reader's click open both.
    */
   key: string;
-  /** What the group's row says: `alpha-beta-*`, or the month as `YYYY-MM`. */
+  /** What the group's row says: `alpha-beta-*`, the month as `YYYY-MM`, or a
+   *  series' `series_label:` (its key when no member carries one). */
   label: string;
   /** The rows this group folds, in the order the caller's sort gave them. */
   members: WikiListing[];
@@ -136,6 +138,25 @@ export interface RailGroup {
    * renders in neither's body.
    */
   supersededChildren: WikiListing[];
+  /**
+   * SERIES only: how many members the series holds in the WHOLE listing, before
+   * any facet narrowed it. The row says `N of M shown` when this exceeds what is
+   * on screen, so a reader under a folder facet is told the series continues
+   * elsewhere rather than being shown a fold that silently lost half its
+   * members. Absent on a family or a month, whose members are a fact about the
+   * filtered set by construction.
+   */
+  total?: number;
+  /**
+   * SERIES only: the normalized relPath of the NEWEST PLAN in the series — the
+   * one row that earns the `▸` glyph. Computed over every member in the whole
+   * listing, not the filtered set: "which plan do I continue at" is a fact about
+   * the work, and a facet must not move the marker onto a different page.
+   *
+   * Absent when no member carries a `plan_status` — a series of blogs and
+   * archive pages has no latest plan, and marking one would invent a claim.
+   */
+  latestRel?: string;
 }
 
 /** The fold key for a family in one folder. */
@@ -146,6 +167,208 @@ export function familyFoldKey(folder: string, prefix: string): string {
 /** The fold key for one `YYYY-MM`. */
 export function monthFoldKey(month: string): string {
   return "month:" + month;
+}
+
+/** The fold key for one series. The key is the authored slug verbatim; the
+ *  folds store normalizes what it is compared against, as it does for every
+ *  other spelling in that flat namespace. */
+export function seriesFoldKey(key: string): string {
+  return "series:" + key;
+}
+
+/**
+ * The word a SERIES roll-up counts a member under when it declares no
+ * `plan_status` — its folder, for the two folders that mean something.
+ *
+ * A series spans folders by definition (that is the whole reason it is not a
+ * family), so `2 in-flight · 3 unmarked` would report the blog and the archive
+ * report as the same nothing. `1 in-flight · 1 shipped · 1 blog` is the sentence
+ * the fold exists to say.
+ *
+ * Deliberately SERIES-only: a family lives in one folder, so the word would be
+ * the same on every member and say nothing, and changing its roll-up would move
+ * a number the family rules are measured against.
+ */
+function seriesStatusWord(p: WikiListing): string {
+  if (p.plan_status) return p.plan_status;
+  const folder = pageFolder(p).toLowerCase();
+  if (folder === "blogs") return "blog";
+  if (folder === "archive") return "archive";
+  return NO_STATUS_WORD;
+}
+
+/** `YYYY-MM-DD` at UTC midnight, or `null` for anything that is not that exact
+ *  shape. The store validates `status_date` to a real calendar day, so this only
+ *  has to parse it. */
+function calendarDayMs(day: string | undefined): number | null {
+  if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const ms = Date.parse(day + "T00:00:00Z");
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * The date a series orders its members by: the plan's own `status_date`, else
+ * the durable git touch date, else the file's mtime, else 0.
+ *
+ * `status_date` first because it is what a plan ASSERTS about itself — the day
+ * the status was last affirmed — while a git touch moves on a typo fix. The two
+ * are different units (a calendar day at UTC midnight against a real instant),
+ * which is accurate enough for an ordering whose granularity is "which plan is
+ * the one I am working in" and is what the plan's own head rule specifies.
+ */
+export function seriesDateMs(p: WikiListing): number {
+  return calendarDayMs(p.status_date) ?? p.gitTouchedMs ?? p.mtimeMs ?? 0;
+}
+
+/** Newest first, with a relPath tie-break so two members sharing a date order
+ *  the same way on every render (and on every machine). */
+function bySeriesDateDesc(a: WikiListing, b: WikiListing): number {
+  return seriesDateMs(b) - seriesDateMs(a) || normalizeRel(a.relPath).localeCompare(normalizeRel(b.relPath));
+}
+
+/**
+ * The NEWEST PLAN of a series: the member carrying a `plan_status`, newest by
+ * {@link seriesDateMs}. `undefined` when no member declares one.
+ *
+ * A blog and an archive report are members of the work but never "the latest":
+ * they record what happened, and "continue at" has to name a page the reader can
+ * continue IN. That is why the test is `plan_status` rather than the `plans/`
+ * folder — a plan filed elsewhere still counts, and a blog in `plans/` does not.
+ */
+export function newestSeriesPlan(members: readonly WikiListing[]): WikiListing | undefined {
+  return [...members].filter((m) => !!m.plan_status).sort(bySeriesDateDesc)[0];
+}
+
+/**
+ * The HEAD of a series — the member whose `series_label:` names it.
+ *
+ * Absent, the newest plan; absent that too, the newest member. The label is read
+ * off the head, so this is what decides whether the fold says `Wiki provenance`
+ * or falls back to the bare key. The fallback chain matters because it is what a
+ * series gets for free before anyone writes a label at all.
+ */
+export function seriesHead(members: readonly WikiListing[]): WikiListing | undefined {
+  const sorted = [...members].sort(bySeriesDateDesc);
+  return (
+    sorted.find((m) => !!m.seriesLabel) ?? newestSeriesPlan(sorted) ?? sorted[0]
+  );
+}
+
+/**
+ * The SERIES groups among `pages` — the rail's third grouping layer, and the
+ * only one that is AUTHORED rather than inferred.
+ *
+ * Two page sets, and the split is the whole rule:
+ *
+ *  - `pages` is the FILTERED set: it decides which members render and where the
+ *    group sits in the reader's own sort (first-appearance order, like
+ *    `groupMonths`' `order`);
+ *  - `all` is the whole listing: it decides the LABEL, the member `total` and
+ *    which member is the newest plan. Each of those is a fact about the series
+ *    rather than about the filter — a folder facet that hid the head page would
+ *    otherwise rename the fold, and one that hid the newest plan would move the
+ *    `▸` onto a page that is not the latest anything.
+ *
+ * Membership mirrors the family rule so one page can never be in two blocks: a
+ * parent row carrying the key is a member; a `superseded` child carrying it is a
+ * `supersededChild` when its SUCCESSOR is a member (it renders under that
+ * successor, inside the body); a child of any other pairing rule is an
+ * attachment of its parent and counts nowhere.
+ *
+ * No minimum and no cap. A series is a name someone wrote, not a heuristic over
+ * filenames: a one-member series is a series with one page in it so far, and a
+ * twenty-member one is twenty pages of one piece of work — neither is the
+ * accidental folder-shaped fold `FAMILY_MAX` exists to refuse.
+ */
+export function groupSeries(
+  pages: readonly WikiListing[],
+  all: readonly WikiListing[] = pages,
+): RailGroup[] {
+  /** key → every member in the WHOLE listing, parents and rule-4 children
+   *  alike — what the label, the total and the newest plan are read from. */
+  const allMembers = new Map<string, WikiListing[]>();
+  for (const p of all) {
+    const key = (p.series || "").trim();
+    if (!key) continue;
+    if (p.parent && p.pairedBy !== "superseded") continue;
+    const arr = allMembers.get(key);
+    if (arr) arr.push(p);
+    else allMembers.set(key, [p]);
+  }
+  if (!allMembers.size) return [];
+
+  /** key → the members present HERE, in the caller's sort order, split the way
+   *  a family splits them. */
+  const order: string[] = [];
+  const parents = new Map<string, WikiListing[]>();
+  const children = new Map<string, WikiListing[]>();
+  for (const p of pages) {
+    const key = (p.series || "").trim();
+    if (!key || !allMembers.has(key)) continue;
+    const isSuperseded = p.pairedBy === "superseded";
+    if (p.parent && !isSuperseded) continue;
+    if (!parents.has(key)) {
+      parents.set(key, []);
+      children.set(key, []);
+      order.push(key);
+    }
+    (p.parent ? children : parents).get(key)!.push(p);
+  }
+
+  const groups: RailGroup[] = [];
+  for (const key of order) {
+    const members = parents.get(key)!;
+    const memberKeys = new Set(members.map((m) => normalizeRel(m.relPath)));
+    // A retired member whose successor is not on screen here renders as an
+    // ordinary row under its own parent; counting it in this roll-up would put
+    // it in a census of a body it is not in.
+    const supersededChildren = children
+      .get(key)!
+      .filter((c) => memberKeys.has(normalizeRel(c.parent ?? "")));
+    if (!members.length && !supersededChildren.length) continue;
+    const whole = allMembers.get(key)!;
+    const head = seriesHead(whole);
+    const latest = newestSeriesPlan(whole);
+    groups.push({
+      kind: "series",
+      key: seriesFoldKey(key),
+      label: head?.seriesLabel || key,
+      members: [...members].sort(bySeriesDateDesc),
+      supersededChildren,
+      total: whole.length,
+      ...(latest ? { latestRel: normalizeRel(latest.relPath) } : {}),
+    });
+  }
+  return groups;
+}
+
+/**
+ * Every page a series has CLAIMED, keyed on the normalized relPath — the set the
+ * remainder is taken from before `groupMonths`/`groupFamilies` see it.
+ *
+ * Its own function because the claim is what makes the two dissolution cases
+ * real: a family that drops below `FAMILY_MIN` once the series takes a member
+ * stops forming and its remaining pages render as plain rows, and a prefix that
+ * was over `FAMILY_MAX` may drop to the cap and form. Both are accepted — the
+ * series is the stronger statement, being the one a person wrote — and both are
+ * pinned by unit tests.
+ */
+export function seriesClaimedKeys(seriesGroups: readonly RailGroup[]): Set<string> {
+  const out = new Set<string>();
+  for (const g of seriesGroups) {
+    for (const m of [...g.members, ...g.supersededChildren]) out.add(normalizeRel(m.relPath));
+  }
+  return out;
+}
+
+/** `pages` minus everything {@link seriesClaimedKeys} claimed — what the family
+ *  and month rules are computed over. */
+export function withoutSeriesMembers(
+  pages: readonly WikiListing[],
+  seriesGroups: readonly RailGroup[],
+): WikiListing[] {
+  const claimed = seriesClaimedKeys(seriesGroups);
+  return claimed.size ? pages.filter((p) => !claimed.has(normalizeRel(p.relPath))) : [...pages];
 }
 
 /**
@@ -577,6 +800,10 @@ export function isMonthGrouping(groups: readonly RailGroup[]): boolean {
  * wherever the rail happens to draw them; `buildRail` decides which of them this
  * render is a census OF (only the LIFT takes one out).
  *
+ * A SERIES carries the same roll-up as a family, over the folder-aware word: it
+ * raises the same question one folder up, and `1 in-flight · 1 shipped · 1 blog`
+ * is what says the work is live and already written about.
+ *
  * A month carries the count, because every page in it says the same thing about
  * itself — that it happened that month.
  *
@@ -595,7 +822,10 @@ export function groupRollup(
   }
   const counts = new Map<string, number>();
   for (const p of [...members, ...supersededChildren]) {
-    const status = p.plan_status || NO_STATUS_WORD;
+    // A SERIES spans folders, so a member with no `plan_status` counts under its
+    // folder's word (`blog`, `archive`) rather than under the neutral one — see
+    // `seriesStatusWord`. A family lives in one folder and keeps the plain rule.
+    const status = kind === "series" ? seriesStatusWord(p) : p.plan_status || NO_STATUS_WORD;
     counts.set(status, (counts.get(status) ?? 0) + 1);
   }
   const order = [...counts.keys()].sort((a, b) => {
