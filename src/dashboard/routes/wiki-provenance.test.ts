@@ -68,11 +68,18 @@ beforeAll(async () => {
 
   await writeFile(
     path.join(mimir, "plan.md"),
-    `---\ntype: plan\ntitle: A plan\nsessions: [${SESSION_A}, ${SESSION_B}]\nsessions_backfilled: 2026-10-14\njira: [MELOSYS-8045]\nprs: [RuneLind/muninn#543]\n---\n\n# A plan\n\nBody.\n`,
+    `---\ntype: plan\ntitle: A plan\nsessions: [${SESSION_A}, ${SESSION_B}]\nsessions_backfilled: 2026-10-14\njira: [MELOSYS-8045]\nprs: [RuneLind/muninn#543]\n---\n\n# A plan\n\nBody, which also names claude-usage#207.\n`,
   );
   await writeFile(
     path.join(mimir, "plain.md"),
     "---\ntype: plan\ntitle: Plain\n---\n\n# Plain\n\nNothing stamped.\n",
+  );
+  // Cites `plan.md` AND shares both of its PR refs — the two `related[]`
+  // sources on one row, so the route's `why` is the joined form rather than a
+  // single reason. Stamped with nothing, so neither reverse lookup's counts move.
+  await writeFile(
+    path.join(mimir, "citer.md"),
+    "---\ntype: plan\ntitle: Citer\n---\n\n# Citer\n\nReads [[A plan]] — muninn#543 and claude-usage #207.\n",
   );
   await writeFile(
     path.join(kode, "service.md"),
@@ -201,6 +208,30 @@ describe("the listing and the page route", () => {
     expect(row.sessions).toBeUndefined();
     expect(row.prs).toBeUndefined();
     expect(row.sessionsBackfilled).toBeUndefined();
+  });
+
+  test("/api/wiki/pages carries NO `prRefs` on any row — it is stripped for all three callers", async () => {
+    const body = await (await pageApp.request("/api/wiki/pages?wiki=mimir")).json();
+    // The derived field exists on the INDEX for these pages (the route test
+    // below proves the rows it produces), so its absence here is the strip.
+    expect(body.pages.some((p: Record<string, unknown>) => "prRefs" in p)).toBe(false);
+  });
+
+  test("/api/wiki/page carries `related[]` with its why lines, and still no `prRefs`", async () => {
+    const body = await (await pageApp.request("/api/wiki/page?wiki=mimir&relPath=plan.md")).json();
+    expect(body.related.map((r: { relPath: string; why: string }) => [r.relPath, r.why])).toEqual([
+      ["citer.md", "cites this page · shares RuneLind/muninn#543, RuneLind/claude-usage#207"],
+    ]);
+    // A related row is the panel's ordinary listing row plus `why` — so it is
+    // stripped exactly like every other `toListing` caller's rows.
+    expect("prRefs" in body.related[0]).toBe(false);
+    expect("prRefs" in body.meta).toBe(false);
+    expect(body.meta.prs).toEqual(["RuneLind/muninn#543"]);
+  });
+
+  test("`related[]` is [] on a page with no neighbours — never absent", async () => {
+    const body = await (await pageApp.request("/api/wiki/page?wiki=kode&relPath=service.md")).json();
+    expect(body.related).toEqual([]);
   });
 
   test("a wiki nothing stamped answers `{}` — which is how the client renders no facet at all", async () => {

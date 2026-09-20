@@ -57,6 +57,9 @@ import { closeChatOptionsIfNavigatingAway, initChatOptions } from "./wiki-chat-o
 // module — two states, two document listener sets, one split dialog.
 import { openShareDialog, closeShareDialogOnNavigate } from "./share-dialog.ts";
 import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
+// The `Related work` block: pure string building, moved out so `bun test` can
+// load it — this file touches `document` at import time.
+import { relatedSectionHtml, type RelatedListing } from "./wiki-related-view.ts";
 // The start-view cards (What's new · Index coverage · reindex poller): IMPORTED
 // for the same reason as the share dialog above — one bundle, one module state.
 import {
@@ -331,6 +334,9 @@ interface WikiPageDetail {
   html: string;
   outgoing: WikiListing[];
   backlinks: WikiListing[];
+  /** The pages one hop from this one, newest first. ABSENT on an older server;
+   *  `[]` on a page with no neighbours — both render no block at all. */
+  related?: RelatedListing[];
   /** TRUE when the page carries any provenance key and the block is worth
    *  fetching from `/api/wiki/page/provenance`. ABSENT on a page carrying none
    *  of the frontmatter keys — never `false` — so the client's one gate is "is
@@ -2117,6 +2123,10 @@ function renderConnections(data: WikiPageDetail): void {
   }
   document.getElementById("connBody")!.innerHTML =
     miniGraphHtml(data) +
+    // `Related work` leads: it is the one section that ANSWERS a question
+    // ("what else is this piece of work?") rather than listing a mechanism.
+    // The two below are the raw link lists it is derived from.
+    relatedSectionHtml(data.related ?? []) +
     section("Linked from", data.backlinks) +
     section("Links to", data.outgoing) +
     // Placeholder the lazy "Similar" fetch fills in after the page renders.

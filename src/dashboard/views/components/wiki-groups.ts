@@ -240,6 +240,16 @@ function calendarDayMs(day: string | undefined): number | null {
  *  the order matters; the numbers are the rungs of the fallback chain. */
 const SERIES_DATE_RANK = { asserted: 3, git: 2, mtime: 1, none: 0 } as const;
 
+/**
+ * The fields {@link seriesDateSignal} reads — a structural subset rather than
+ * `WikiListing`, so the SERVER's `WikiPageMeta` satisfies it too. `Related work`
+ * (`src/wiki/related.ts`) orders its rows by this same signal, computed on the
+ * single-page route: two surfaces that both claim to show the newest page of a
+ * piece of work must not disagree about which one that is, and the way they end
+ * up disagreeing is a second spelling of the fallback chain.
+ */
+export type PageDateFields = Pick<WikiListing, "status_date" | "gitTouchedMs" | "mtimeMs">;
+
 /** A member's series date, as the three things the rail and the reader header
  *  both need: the day it sorts on, the day it PRINTS, and which rung of the
  *  fallback chain that came from. */
@@ -276,7 +286,7 @@ export interface SeriesDateSignal {
  * two machines can order the same two pages differently. The rendered date cell
  * says which day it used, so the order always matches what is on screen.
  */
-export function seriesDateSignal(p: WikiListing): SeriesDateSignal {
+export function seriesDateSignal(p: PageDateFields): SeriesDateSignal {
   const asserted = calendarDayMs(p.status_date);
   if (asserted !== null) {
     return { ms: asserted, day: p.status_date!, rank: SERIES_DATE_RANK.asserted };
@@ -293,15 +303,22 @@ export function seriesDateSignal(p: WikiListing): SeriesDateSignal {
 }
 
 /** The day a series orders `p` by, at UTC midnight. See {@link seriesDateSignal}. */
-export function seriesDateMs(p: WikiListing): number {
+export function seriesDateMs(p: PageDateFields): number {
   return seriesDateSignal(p).ms;
 }
+
+/** What {@link bySeriesDateDesc} needs: the date chain plus the relPath that
+ *  breaks a tie on both. */
+type PageDateOrder = PageDateFields & Pick<WikiListing, "relPath">;
 
 /** Newest first, ties broken by the date's own rung and then by relPath, so two
  *  members sharing a day order the same way on every render. Which day a git
  *  touch falls on is the process's own timezone question — see
- *  {@link seriesDateSignal}. */
-function bySeriesDateDesc(a: WikiListing, b: WikiListing): number {
+ *  {@link seriesDateSignal}.
+ *
+ *  Exported for `src/wiki/related.ts`, which orders the `Related work` rows the
+ *  same way. */
+export function bySeriesDateDesc(a: PageDateOrder, b: PageDateOrder): number {
   const sa = seriesDateSignal(a);
   const sb = seriesDateSignal(b);
   return (

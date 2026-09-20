@@ -26,6 +26,7 @@ import {
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { hasProvenance, jiraCounts } from "../../wiki/provenance.ts";
+import { computeRelated } from "../../wiki/related.ts";
 import { pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import {
   defaultProvenanceContext,
@@ -1044,6 +1045,12 @@ function toListing(
   // in this strip — it is a listing FACET (the `project` twin), so the hot
   // payload is exactly where it has to be.
   //
+  // `prRefs` is stripped on ALL THREE callers and opted in by NONE — not even
+  // `includeProvenance`. It is the INPUT to `computeRelated` (`src/wiki/related.ts`),
+  // which runs server-side on caller 2 and answers with `related[]`; each of
+  // those rows carries the refs it matched on inside its own `why` string, so
+  // shipping the raw list would be a dozen refs per page that nothing renders.
+  //
   // `children` is stripped on ALL THREE callers and opted in by none: the rail
   // rebuilds every group from the `parent` links of the pages the facets left on
   // screen, so a server-side child list is payload nothing may believe (and a
@@ -1055,9 +1062,10 @@ function toListing(
   // LISTING grouping, the `project` twin, so the hot payload is exactly where
   // they have to be. Two short strings per page — and `seriesLabel` sits on ONE
   // page per series, so naming a fold costs nothing per member.
-  const { desc, pubDate, sessions, prs, sessionsBackfilled, children, ...rest } = meta;
+  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, ...rest } = meta;
   void pubDate;
   void children;
+  void prRefs;
   return {
     ...rest,
     ...(opts.includeDesc && desc ? { desc } : {}),
@@ -1856,6 +1864,24 @@ export function registerWikiRoutes(
       html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title, wiki: entry?.name }),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
+      // RELATED WORK — `cites ∪ cited-by ∪ shares ≥2 PR refs, minus hubs, never
+      // transitive`, newest first, one `why` line per row. Computed here rather
+      // than in the browser because its input is `prRefs`, which the listing does
+      // not carry (and must not: see `toListing`) — and because the rule reads the
+      // whole index, which the client holds only as the filtered page list.
+      //
+      // A row is `toListing`-shaped like `outgoing`/`backlinks`, plus `why` — it
+      // cannot use `listings()` itself, which answers a bare listing and would
+      // drop the one field this block exists for. The array is bounded by the
+      // link graph and by the three cuts, not by a cap: measured over the
+      // 547-page mimir clone 2026-09-20, the largest block is 33 rows
+      // (`overview.md`), and the pages that answered hundreds — `index.md` at
+      // 340, `plans/index.md` 246, `log.md` 189 — are bookkeeping or hubs, which
+      // now get no block at all.
+      related: computeRelated(index, meta.relPath).flatMap((r) => {
+        const m = index.resolveRelPath(r.relPath);
+        return m ? [{ ...toListing(index, m), why: r.why }] : [];
+      }),
     });
   });
 

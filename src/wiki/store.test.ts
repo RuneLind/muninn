@@ -24,6 +24,9 @@ import {
   collectKnownProjects,
   PLAN_STATUS_VALUES,
   stripFrontmatter,
+  extractPrRefs,
+  normalizePrRef,
+  pagePrRefs,
   __resetWikiCacheForTest,
   type WikiProjectRule,
 } from "./store.ts";
@@ -3896,5 +3899,174 @@ describe("buildWikiIndex — series", () => {
     const meta = (await buildWikiIndex(root)).pages.find((p) => p.relPath.endsWith(".html"))!;
     expect(meta.series).toBeUndefined();
     expect(meta.seriesLabel).toBeUndefined();
+  });
+});
+
+describe("extractPrRefs / pagePrRefs — the three body shapes", () => {
+  test("reads `<owner>/<repo>#N`, a pull URL, and the bare known-repo prose form", () => {
+    const refs = extractPrRefs(
+      [
+        "Landed as RuneLind/muninn#543.",
+        "See https://github.com/RuneLind/claude-usage/pull/207 for the ledger half.",
+        "muninn #550 and huginn#12 followed.",
+      ].join("\n"),
+    );
+    expect(refs).toEqual([
+      "RuneLind/muninn#543",
+      "RuneLind/claude-usage#207",
+      "RuneLind/muninn#550",
+      "RuneLind/huginn#12",
+    ]);
+  });
+
+  test("in PROSE, shape 2's owner must be `PR_REF_OWNER` — an `<a>/<b>#N` span is not a ref", () => {
+    // Every one of these matched shape 2 and minted a pairing ref. The last is
+    // live on mimir (`log.md`); the rest are ordinary markdown a page writes.
+    expect(extractPrRefs("[x](plans/foo#3)")).toEqual([]);
+    expect(extractPrRefs("[[plans/index#3]]")).toEqual([]);
+    expect(extractPrRefs("rune@muninn#5")).toEqual([]);
+    expect(extractPrRefs("v1.2/3.4#5")).toEqual([]);
+    expect(extractPrRefs("Jira-Cloud/PR#165")).toEqual([]);
+    // Matched WITHOUT case, and the page's own spelling is what is kept.
+    expect(extractPrRefs("runelind/muninn#5")).toEqual(["runelind/muninn#5"]);
+    // The bare known-repo form is unaffected.
+    expect(extractPrRefs("navikt/melosys-api#1234 and mimir#3")).toEqual(["RuneLind/mimir#3"]);
+  });
+
+  test("a pull URL keeps ANY owner — that shape carries its own proof", () => {
+    expect(extractPrRefs("https://github.com/navikt/melosys-api/pull/1234")).toEqual([
+      "navikt/melosys-api#1234",
+    ]);
+  });
+
+  test("an AUTHORED `prs:` entry keeps any owner — the stamp CLI writes NAV ones", () => {
+    // `PR_COORDINATE` (`provenance.ts`), the single-value sibling, accepts any
+    // owner, and the documented frontmatter shape is
+    // `prs: [navikt/melosys-api#1234, RuneLind/muninn#543]`. Only the PROSE scan
+    // is narrowed — an authored entry is a declaration, a prose span is a guess.
+    expect(pagePrRefs(["navikt/melosys-api#1234"], "")).toEqual(["navikt/melosys-api#1234"]);
+  });
+
+  test("a bare `#N` is NOT a PR ref — it is a heading anchor or a count", () => {
+    expect(extractPrRefs("See #543 below, and the 12 in #2.")).toEqual([]);
+  });
+
+  test("an UNKNOWN bare repo name is ignored — the known set is the gate", () => {
+    // `notarepo#7` could be anything; the two explicit shapes stay open to it.
+    expect(extractPrRefs("notarepo#7 landed. RuneLind/notarepo#8 landed too.")).toEqual([
+      "RuneLind/notarepo#8",
+    ]);
+  });
+
+  test("a repo name is matched whole — `x-muninn#5` is not `muninn#5`", () => {
+    expect(extractPrRefs("x-muninn#5 and muninn-ish#6")).toEqual([]);
+  });
+
+  test("shape 2's own lookbehind refuses an `@` — `rune@RuneLind/muninn#5` is a handle", () => {
+    // The false-shape case above covers `rune@muninn#5`, which is SHAPE 3 — so
+    // shape 3's class is what refuses that one, and dropping `@` from shape 2's
+    // class alone left every other case in this file green while this span
+    // minted `RuneLind/muninn#5`. The owner gate cannot close it: the owner
+    // here IS `PR_REF_OWNER`.
+    expect(extractPrRefs("rune@RuneLind/muninn#5")).toEqual([]);
+  });
+
+  test("ONE optional space before the `#`, no more", () => {
+    expect(extractPrRefs("muninn #550")).toEqual(["RuneLind/muninn#550"]);
+    // The dry run allowed up to 12 arbitrary characters here, which reads a repo
+    // named in one clause and a number in the next as one reference.
+    expect(extractPrRefs("muninn, and later on #550")).toEqual([]);
+  });
+
+  test("a longer PATH does not mint a ref: `src/wiki/store.ts#164` is a file", () => {
+    expect(extractPrRefs("src/wiki/store.ts#164 and docs/api.md#L20")).toEqual([]);
+  });
+
+  test("FENCED and INLINE code is skipped — a page documenting the shape pairs nothing", () => {
+    const body = [
+      "Prose naming muninn#550.",
+      "",
+      "```yaml",
+      "prs: [navikt/melosys-api#1234, RuneLind/muninn#543]",
+      "```",
+      "",
+      "Inline `claude-usage#207` too.",
+    ].join("\n");
+    expect(extractPrRefs(body)).toEqual(["RuneLind/muninn#550"]);
+  });
+
+  test("FRONTMATTER is not body — the `prs:` line is read by `pagePrRefs`, not scanned", () => {
+    const content = "---\nprs: [RuneLind/muninn#543]\n---\n\nBody names muninn#550.\n";
+    expect(extractPrRefs(content)).toEqual(["RuneLind/muninn#550"]);
+  });
+
+  test("dedupes case-insensitively, keeping the FIRST spelling", () => {
+    expect(extractPrRefs("RuneLind/muninn#5 then runelind/Muninn#5 then muninn#5")).toEqual([
+      "RuneLind/muninn#5",
+    ]);
+  });
+
+  test("normalizePrRef lifts an authored bare form to the stamp CLI's spelling", () => {
+    expect(normalizePrRef("muninn#550")).toBe("RuneLind/muninn#550");
+    expect(normalizePrRef("  RuneLind/muninn#543  ")).toBe("RuneLind/muninn#543");
+    expect(normalizePrRef("https://github.com/RuneLind/mimir/pull/3")).toBe("RuneLind/mimir#3");
+  });
+
+  test("normalizePrRef is ANCHORED — a sentence that NAMES a ref is not one", () => {
+    // Unanchored it read the first match anywhere in the value, so a `prs:`
+    // entry someone wrote as a sentence normalized to the first PR in it and
+    // then paired the page with everything else naming that PR.
+    expect(normalizePrRef("see muninn#5 and huginn#6")).toBeUndefined();
+    expect(normalizePrRef("TBD")).toBeUndefined();
+    expect(normalizePrRef("  not a coordinate  ")).toBeUndefined();
+  });
+
+  test("an unparseable `prs:` entry is DROPPED from prRefs, never carried into it", () => {
+    expect(pagePrRefs(["TBD", "muninn#550"], "")).toEqual(["RuneLind/muninn#550"]);
+    // Two pages both parked on `TBD` shared two "refs" and read as one piece of
+    // work. The provenance strip still renders `meta.prs` verbatim.
+    expect(pagePrRefs(["TBD", "pending"], "")).toBeUndefined();
+  });
+
+  test("pagePrRefs puts the AUTHORED list first and merges the body's, deduped", () => {
+    const body = "Body names muninn #550 and claude-usage#207.\n";
+    expect(pagePrRefs(["muninn#550", "RuneLind/mimir#2"], body)).toEqual([
+      "RuneLind/muninn#550",
+      "RuneLind/mimir#2",
+      "RuneLind/claude-usage#207",
+    ]);
+  });
+
+  test("pagePrRefs is UNDEFINED, never [], on a page naming none", () => {
+    expect(pagePrRefs(undefined, "Nothing here.")).toBeUndefined();
+    expect(pagePrRefs([], "Nothing here.")).toBeUndefined();
+  });
+});
+
+describe("buildWikiIndex — prRefs", () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-prrefs-"));
+    await mkdir(path.join(root, "plans"), { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("merges the frontmatter list with the body's refs on the indexed page", async () => {
+    await Bun.write(
+      path.join(root, "plans/a.md"),
+      "---\ntitle: A\nprs: [RuneLind/muninn#543]\n---\n\nAlso muninn #550.\n",
+    );
+    await Bun.write(path.join(root, "plans/b.md"), "---\ntitle: B\n---\n\nNothing here.\n");
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("A")!.prRefs).toEqual(["RuneLind/muninn#543", "RuneLind/muninn#550"]);
+    expect(index.resolve("B")!.prRefs).toBeUndefined();
+  });
+
+  test("an EXPLAINER page carries none: it takes the early return, body unread", async () => {
+    await Bun.write(path.join(root, "plans/x.html"), "<html><title>X</title>muninn#550</html>");
+    const meta = (await buildWikiIndex(root)).pages.find((p) => p.relPath.endsWith(".html"))!;
+    expect(meta.prRefs).toBeUndefined();
   });
 });

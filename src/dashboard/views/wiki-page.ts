@@ -2093,6 +2093,30 @@ export async function renderWikiPage(opts?: {
     .wiki-conn-item:hover { background: var(--bg-surface); }
     .wiki-conn-item span { font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-conn-empty { font-size: 12px; color: var(--text-dim); padding: 4px 8px; }
+    /* A Related work row is two lines, so it tops-aligns and its dot drops onto
+       the title's baseline instead of centring against both. */
+    .wiki-conn-item.wiki-conn-related { align-items: flex-start; }
+    .wiki-conn-related .wiki-type-dot { margin-top: 5px; flex-shrink: 0; }
+    .wiki-conn-text { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+    /* --text-soft, judged in all FOUR states a reader meets: over --bg-panel at
+       rest and over the row's own :hover fill, in both themes. Measured in the
+       browser (e2e/wiki-related-work.spec.ts, which asserts both): --text-dim is
+       3.24 dark / 3.74 light and --text-muted 4.42 over the LIGHT hover fill —
+       both under the 4.5:1 floor for a line a reader has to READ, and this one
+       carries the PR numbers the pairing rests on. Soft clears it everywhere.
+       A hovered row is not a transient state: it is where the pointer is
+       whenever a row is being read.
+
+       It WRAPS rather than ellipsizing. nowrap + text-overflow measured 353px
+       of line in a 248px box — 30% hidden, and the hidden half is the
+       "shares RuneLind/muninn#549, ..." numbers the reason exists to show,
+       while a toHaveText assertion passed the whole time. The explicit
+       line-height is what lets the spec count the line boxes. */
+    .wiki-conn-why {
+      font-size: 10.5px; color: var(--text-soft); line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .wiki-conn-why em { font-style: normal; }
 
     .wiki-empty-state { padding: 40px; text-align: center; color: var(--text-muted); font-size: 13px; }
     .wiki-empty-state code { background: var(--bg-inset); padding: 2px 6px; border-radius: 4px; }
