@@ -139,6 +139,14 @@ export const E2E_PORTS = {
   // nothing binds that host, and nothing needs to.
   "wiki-provenance": 3058,
   "wiki-provenance/ledger": 3059,
+  // Lint check 8 end to end: the findings, the proposal rows, the group card and
+  // the file bytes an Accept writes. No fake services — the wiki is a temp dir
+  // and the rows go into the test database.
+  "wiki-lint-proposals": 3064,
+  // Registered so nothing binds it: the lint spec points KNOWLEDGE_API_URL here
+  // BECAUSE nothing answers. A post-apply reindex must be best-effort, and a
+  // future spec binding this number would quietly turn that into a live call.
+  "wiki-lint-proposals/dead-huginn": 8797,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

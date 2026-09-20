@@ -10,8 +10,14 @@
 
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
-import { setPlanPriority, setPlanStatus, type PlanPriorityEdit } from "./frontmatter.ts";
+import {
+  setFrontmatterScalar,
+  setPlanPriority,
+  setPlanStatus,
+  type PlanPriorityEdit,
+} from "./frontmatter.ts";
 import { planRecordFromContent } from "./source.ts";
+import { parseFrontmatter } from "../wiki/store.ts";
 import type { PlanPriority } from "./constants.ts";
 
 /** The edited bytes, asserting the edit was a change and not a noop/refusal. */
@@ -302,5 +308,134 @@ describe("setPlanStatus", () => {
     expect(out).toBe(
       `---\r\ntitle: T\r\nplan_status: abandoned\r\nstatus_date: 2026-08-29\r\n---\r\n\r\n# Body\r\n`,
     );
+  });
+});
+
+/**
+ * `setFrontmatterScalar` — the generic line upsert the wiki lint's series fixes
+ * write through, and the series editor after it.
+ */
+describe("setFrontmatterScalar", () => {
+  const page = (...fm: string[]) => `---\n${fm.join("\n")}\n---\n\nBody.\n`;
+
+  test("inserts a missing key at the END of the fence", () => {
+    const res = setFrontmatterScalar(page("title: A", "plan_status: shipped"), "series", "prov");
+    expect(res.kind).toBe("changed");
+    expect((res as { content: string }).content).toBe(
+      "---\ntitle: A\nplan_status: shipped\nseries: prov\n---\n\nBody.\n",
+    );
+  });
+
+  test("replaces an existing key in place and normalises a duplicate", () => {
+    const res = setFrontmatterScalar(
+      page("series: old", "title: A", "series: older"),
+      "series",
+      "new",
+    );
+    expect((res as { content: string }).content).toBe("---\nseries: new\ntitle: A\n---\n\nBody.\n");
+  });
+
+  test("a null value REMOVES the key, and removing an absent key is a noop", () => {
+    const removed = setFrontmatterScalar(page("title: A", "series_label: X"), "series_label", null);
+    expect((removed as { content: string }).content).toBe("---\ntitle: A\n---\n\nBody.\n");
+    expect(setFrontmatterScalar(page("title: A"), "series_label", null).kind).toBe("noop");
+  });
+
+  test("writing the value already on the line is a noop", () => {
+    expect(setFrontmatterScalar(page("series: prov"), "series", "prov").kind).toBe("noop");
+  });
+
+  test("quotes a value that would not read back as itself", () => {
+    const content = (v: string) =>
+      (setFrontmatterScalar(page("title: A"), "series_label", v) as { content: string }).content;
+    // A `:` opens a nested key, a `#` opens a comment, a leading `-` a list item,
+    // and a padded value loses its padding to the reader's trim.
+    expect(content("Wiki: provenance")).toContain('series_label: "Wiki: provenance"');
+    expect(content("Prov #1")).toContain('series_label: "Prov #1"');
+    expect(content("- dash")).toContain('series_label: "- dash"');
+    expect(content(" pad ")).toContain('series_label: " pad "');
+    // A plain title is written bare.
+    expect(content("Wiki provenance")).toContain("series_label: Wiki provenance\n");
+    // A value carrying `"` takes SINGLE quotes — the reader unquotes by
+    // stripping one surrounding pair and never unescapes, so a `\\"` escape
+    // would read back verbatim.
+    expect(content('He said "no"')).toContain(`series_label: 'He said "no"'`);
+  });
+
+  /**
+   * THE round-trip property, through the READER rather than through a re-typed
+   * unquote rule: whatever `setFrontmatterScalar` writes, `parseFrontmatter`
+   * gives back unchanged. `unquote` (`src/wiki/store.ts`) strips ONE surrounding
+   * quote pair and never unescapes, so any writer that escapes inside the quotes
+   * loses the round trip on exactly the values a title carries.
+   */
+  test("every writable value round-trips through parseFrontmatter", () => {
+    const values = [
+      "Wiki provenance",
+      "Wiki: provenance",
+      "Prov #1",
+      " pad ",
+      'He said "no"',
+      "C:\\path\\to",
+      "it's fine",
+      "",
+    ];
+    for (const v of values) {
+      const edit = setFrontmatterScalar(page("title: A"), "series_label", v);
+      expect(edit.kind).toBe("changed");
+      const read = parseFrontmatter((edit as { content: string }).content);
+      expect([v, read.series_label]).toEqual([v, v]);
+    }
+  });
+
+  test("a value the reader's grammar cannot carry is REFUSED, not mangled", () => {
+    // Both quote characters: there is no surrounding pair that survives the
+    // reader's strip-one-pair rule, and escaping is not a thing it undoes.
+    const both = setFrontmatterScalar(page("title: A"), "series_label", `he said "no", it's odd`);
+    expect(both.kind).toBe("refused");
+    // A newline would end the line — and the next line is then a frontmatter key
+    // (or worse, the fence).
+    expect(setFrontmatterScalar(page("title: A"), "series_label", "a\nb").kind).toBe("refused");
+  });
+
+  test("a key whose existing value is a LIST or a block scalar is REFUSED", () => {
+    const list = "---\ntitle: A\nseries:\n  - one\n  - two\n---\n\nBody.\n";
+    expect(setFrontmatterScalar(list, "series", "prov").kind).toBe("refused");
+    // …and removing it is refused for the same reason: the line upsert would
+    // drop the key line and orphan its items.
+    expect(setFrontmatterScalar(list, "series", null).kind).toBe("refused");
+
+    const block = "---\ntitle: A\nseries_label: >\n  a folded title\n---\n\nBody.\n";
+    expect(setFrontmatterScalar(block, "series_label", "X").kind).toBe("refused");
+
+    // A column-0 block sequence is the same shape with no indent.
+    const flat = "---\ntitle: A\nseries:\n- one\n---\n\nBody.\n";
+    expect(setFrontmatterScalar(flat, "series", "prov").kind).toBe("refused");
+
+    // The guard is about the key's OWN line: an ordinary scalar followed by
+    // another key still writes.
+    expect(setFrontmatterScalar(page("series: old", "title: A"), "series", "new").kind).toBe(
+      "changed",
+    );
+  });
+
+  test("a file with no readable fence is REFUSED, never a noop", () => {
+    expect(setFrontmatterScalar("# Just a heading\n\nBody.\n", "series", "prov").kind).toBe("refused");
+    expect(setFrontmatterScalar("---\ntitle: A\n", "series", "prov").kind).toBe("refused");
+  });
+
+  test("bytes outside the fence are untouched — including a body line shaped like the key", () => {
+    const doc = "---\ntitle: A\n---\n\n```yaml\nseries: example\n```\n\nTail.\n";
+    const out = (setFrontmatterScalar(doc, "series", "prov") as { content: string }).content;
+    expect(out).toBe("---\ntitle: A\nseries: prov\n---\n\n```yaml\nseries: example\n```\n\nTail.\n");
+  });
+
+  test("an inserted line copies the fence's CRLF", () => {
+    const out = (
+      setFrontmatterScalar("---\r\ntitle: A\r\n---\r\n\r\nBody.\r\n", "series", "prov") as {
+        content: string;
+      }
+    ).content;
+    expect(out).toContain("series: prov\r\n");
   });
 });

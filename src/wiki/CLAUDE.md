@@ -921,6 +921,143 @@ VISIBLE at 300 and 260px, since `toHaveText` passes on a clipped element — the
 reader header agreeing with the fold, and the contrast of the label, the chip,
 the census, the timeline date and the `▸` in both themes).
 
+### Lint check 8 — the series checks, and the only lint that proposes a fix
+
+The rail can only fold what somebody NAMED, and nothing told a reader which
+pages a `series:` was missing from. Check 8 (`src/wiki/lint-series.ts`, run by
+`lintWiki` like the seven hygiene checks) reads the index the rail reads and
+reports three things — and its findings, alone among the ten checks, carry a
+machine-readable `fix` the gardener turns into review-gate rows.
+
+| check | what it reports |
+|---|---|
+| `same-work-no-link` (8.1) | two pages that are plainly one piece of work with no wikilink either way |
+| `series-unnamed` (8.2) | a cluster of linked pages that declares no `series:` at all |
+| `series-inconsistent` (8.3) | a series whose declaration is half-written |
+
+**The four cuts are REUSED, never re-declared** — `isBookkeeping` (exported from
+`related.ts` for this), `RELATED_HUB_BACKLINKS` (25), `RELATED_DIGEST_PRS` (15)
+and `RELATED_SHARED_PRS_MIN` (2), with the measurements in
+`related-constants.ts`. Hubs and bookkeeping pages are cut from BOTH ends of
+every pair, exactly as `computeRelated` cuts the open page: each says "this page
+is not a piece of work", which is as true of one end as of the other. Explainers
+are out — no frontmatter to write and no link graph to join.
+
+**8.1** pairs two non-hub, non-bookkeeping pages with no `[[link]]` either way on
+one of three signals, in this precedence: ≥2 shared `prRefs` (neither page a
+digest), a shared `sessions:` id, or a `superseded_by` chain — read off the
+store's own `pairedBy: "superseded"` pairing, so nothing re-parses frontmatter.
+One finding per pair, filed against the **newer** page by `bySeriesDateDesc`,
+which is also the page its fix writes on. Candidate pairs come from inverted
+indexes over the two list fields plus the superseded pairing, so the cost is the
+number of pages carrying a signal rather than the square of the wiki.
+
+**8.2 and 8.3(c) run over NARRATIVE pages only** (`isNarrativePage`, exported):
+a page carrying `plan_status`, or `status_date`, or a narrative `type:`
+(blog/plan/archive/report/handover/postmortem), or sitting in a top-level
+`plans`/`blogs`/`archive`. 8.1 keeps the wider candidate set — a missing link
+between two pages that landed the same two PRs is worth reporting wherever they
+live — but a SERIES is the stronger claim that these pages are episodes of one
+effort with a head you can continue at. Measured on a mimir clone before the
+predicate existed: the largest cluster ran to 68 pages, glued by
+`projects/muninn/tracing.md` (21 backlinks, under the 25-backlink hub cut), and
+8 of another's 12 rows were permanent reference pages — one Accept would have
+put `series:` on the wiki's `overview.md`. It is a clarification of the plan's
+own scan scope: the dry run scanned `plans/`, `blogs/` and `archive/` only.
+
+**8.2 and 8.3(c) are ONE clustering, and that is load-bearing.** The edge is
+*mutual wikilinks, OR one wikilink plus ≥1 shared PR ref (neither a digest), OR a
+superseded chain* — stronger than 8.1's signal because a cluster is transitive
+and a weak edge merges half the wiki (mimir's raw link graph has a 189-of-379
+component). Per component of ≥2 pages:
+
+- **no member names a series** ⇒ an 8.2 finding: coin `series: <the head's page
+  stem>` on every member and `series_label: <the head's title, clipped to
+  `SERIES_CONTINUE_MAX`>` on the head, where the head is `newestSeriesPlan` (the
+  rail's own rule: a blog records the work, it never names it), falling back to
+  the newest member;
+- **exactly one member names one** ⇒ an 8.3 finding: the unnamed members join
+  that key;
+- **two or more keys** ⇒ nothing. Merging two named series is an editorial
+  decision, not a lint fix.
+
+Splitting those into two passes over two vertex sets was tried and is wrong: one
+page could be proposed by both checks with two different keys, i.e. two
+`wiki_proposals` rows on one `target_path` whose group applies stale each other.
+
+A component over **`SERIES_CLUSTER_MAX` (12)** pages is proposed as its 12
+newest, with the rest named in `detail` (`N more cut: …`) — a cut rather than a
+refusal, because the cluster is real and 40 frontmatter edits behind one Accept
+is not a review.
+
+**An 8.2 component is PROPOSED only when ≥2 members carry a non-terminal
+`plan_status`** (`SERIES_CLUSTER_MIN_PLANS`, the dry run's own `≥2 plans` gate).
+Under it the component is still a FINDING — the count is the signal — but
+carries no `fix`, so nothing is seeded and no Accept can name a series nobody is
+working on. **Measured on mimir 2026-09-20** (547 pages): 44 `series-unnamed`
+findings, of which **31 carry a fix** over **139 pages** and 13 are report-only.
+The campaign's dry run counted 21 usable clusters, and that number is **not the
+one to compare against**: it FILTERED components over `SERIES_CLUSTER_MAX` out
+of its count, where the shipped rule keeps them and takes a 12-newest CUT — so
+the two are counting different things, and an earlier version of this paragraph
+claiming the shipped clustering "reproduces the dry run's 20-odd usable
+clusters" was false in both directions. Re-derive with
+`bun -e` over `buildWikiIndex` + `lintWiki`, counting `f.fix` and the distinct
+`fix.edits[].relPath`.
+
+**A coined key never collides with a series that already exists**
+(`coinSeriesKey`, compared under `seriesCensusKey`): a stem is exactly the kind
+of name somebody has already typed, and coining it twice merges two unrelated
+pieces of work into one rail fold the moment the second fix applies. On a
+collision the key takes a `-2`, `-3` suffix, and keys coined earlier in the same
+pass are taken too. **No `series_label:` row is proposed when the head carries
+no `title:`** — the store falls a title back to the page STEM, which is what the
+key is, so the label would restate it.
+
+**8.3's other two sub-rules read the AUTHORED key alone**, over the RAIL's own
+census of each series (`seriesMembersByFoldKey`, exported from `wiki-groups.ts`
+for this): hubs and bookkeeping pages are IN — the cuts answer "is this page a
+piece of work", which is the PAIRING question, while a key somebody typed is a
+declaration — and the two kinds of page the rail does not count are OUT, an
+attachment child and a retired page whose successor left the series. Those
+render under another page, so their key is not this series' to normalise and
+their `series_label:` is not this series' label; censusing with a plain
+`filter(key ===)` let the lint propose removing the very label the fold reads.
+(a) one series spelled more than one way normalises to the head's spelling; (b)
+more than one member carrying `series_label:` keeps the one the RAIL reads —
+`seriesHead`, the newest LABELLED member — and removes the rest. 8.3(c) joins
+under that same head's spelling, never the spelling of whichever member the
+cluster happened to touch: joining the met spelling adds a fresh variant of a
+key rule (a) is normalising away in the same pass.
+**One normalisation, stated once:** two keys are one series when
+`seriesCensusKey` (trim + lower-case) agrees. ⚠️ That is NOT `seriesFoldKey`,
+which prefixes `series:` for the folds STORE's flat namespace — a caller that
+looked a series up with the prefixed form got `undefined` and silently fell
+back.
+
+⚠️ **Accepting an 8.1 fix can mint an 8.2 finding, and that is the rule
+escalating rather than a treadmill.** The See-also line makes the pair linked,
+and a link plus a shared PR ref IS the cluster edge — so a pair that was "one
+piece of work with no link" becomes "a linked pair that declares no series". It
+is pinned by `e2e/wiki-lint-proposals.spec.ts` so the behaviour is a decision
+rather than a surprise.
+
+The lint still WRITES NOTHING: `lintWiki(index, deps)` stays pure and the `fix`
+is a payload. What turns it into rows — and what happens on Accept — is
+`src/gardener/CLAUDE.md`.
+
+Acceptance: `lint-series.test.ts` (each rule, each cut sized from the constants
+AND driven at the boundary — a page at exactly 25 backlinks is not a hub and one
+at exactly 15 refs is not a digest — the 12-cap with its cut line, the
+two-named-series refusal, the superseded and same-session pairs, the newer-page
+rule, link suppression in BOTH directions, the shared-title stem fallback, the
+narrative predicate, the plans gate, the `-2` collision suffix, the label skip,
+the head's spelling and the rail census), `src/gardener/lint-proposals.test.ts`
+(the row builder, the claim, the order, the self-heal) and
+`e2e/wiki-lint-proposals.spec.ts` (the chain end to end, including the file
+bytes an Accept writes, the simultaneous overlap, the sequential self-heal and
+the stopped path).
+
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 
 The Connections panel's first section: the pages one hop from the open page,

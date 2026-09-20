@@ -19,6 +19,11 @@ import {
   getLiveOrAppliedTopicKeysByWiki,
   getRecentlyRejectedTopicKeysByWiki,
   deleteSourceProposalsForDoc,
+  listWikiProposalsByGroup,
+  approveWikiProposalGroup,
+  rejectWikiProposalGroup,
+  listLintGroupRowsByWiki,
+  markLintGroupStale,
   type InsertWikiProposalParams,
 } from "./wiki-proposals.ts";
 
@@ -328,5 +333,135 @@ describe("deleteSourceProposalsForDoc", () => {
   test("a doc with no proposals is a no-op with empty lists", async () => {
     const res = await deleteSourceProposalsForDoc(`delsrc-none-${Date.now()}`, "youtube-summaries", "nope.md");
     expect(res).toEqual({ deleted: [], kept: [] });
+  });
+});
+
+/**
+ * `group_key` — the column the lint fixes' one-card-many-diffs gate rests on.
+ * Real Postgres: the round trip, the two group CAS verbs, and the skip list
+ * that makes Dismiss durable.
+ */
+describe("lint groups", () => {
+  const GROUP = "lint:series-unnamed:0123456789ab";
+  const OTHER = "lint:series-unnamed:ffffffffffff";
+
+  function lintRow(relPath: string, group = GROUP): InsertWikiProposalParams {
+    return makeProposal({
+      botName: "lintwiki",
+      wikiName: "lintwiki",
+      topicKey: `${group}:${relPath}`,
+      groupKey: group,
+      kind: "lint",
+      mode: "update",
+      targetPath: relPath,
+      baseHash: "a".repeat(64),
+      sourceDocs: [],
+      rationale: "two linked pages declare no series:",
+    });
+  }
+
+  test("group_key and lint_meta round-trip, and every other kind keeps them NULL", async () => {
+    const lint = await insertWikiProposal({
+      ...lintRow("plans/a.mdx"),
+      lintMeta: { seededBy: "lint-proposals", findingRelPath: "plans/head.mdx" },
+    });
+    expect(lint?.groupKey).toBe(GROUP);
+    expect((await getWikiProposalById(lint!.id))?.groupKey).toBe(GROUP);
+    // JSONB, so a stringified value would insert as a quoted STRING and read
+    // back as one — the apply's seeder and finding-page lookups both then
+    // silently degrade to their defaults.
+    expect(lint?.lintMeta).toEqual({ seededBy: "lint-proposals", findingRelPath: "plans/head.mdx" });
+    expect((await getWikiProposalById(lint!.id))?.lintMeta).toEqual({
+      seededBy: "lint-proposals",
+      findingRelPath: "plans/head.mdx",
+    });
+    const plain = await insertWikiProposal(makeProposal({ topicKey: "plain-topic" }));
+    expect(plain?.groupKey).toBeNull();
+    expect(plain?.lintMeta).toBeNull();
+  });
+
+  test("the rows of one group read back together, in target_path order", async () => {
+    await insertWikiProposal(lintRow("plans/b.mdx"));
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await insertWikiProposal(lintRow("plans/z.mdx", OTHER));
+
+    const rows = await listWikiProposalsByGroup("lintwiki", GROUP);
+    expect(rows.map((r) => r.targetPath)).toEqual(["plans/a.mdx", "plans/b.mdx"]);
+  });
+
+  test("approve CASes every draft of the group, and a second call claims nothing", async () => {
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await insertWikiProposal(lintRow("plans/b.mdx"));
+    await insertWikiProposal(lintRow("plans/z.mdx", OTHER));
+
+    const first = await approveWikiProposalGroup("lintwiki", GROUP);
+    expect(first.map((r) => r.targetPath).sort()).toEqual(["plans/a.mdx", "plans/b.mdx"]);
+    expect(first.every((r) => r.status === "approved")).toBe(true);
+    // The loser of a two-reviewer race gets nothing, which is how the route
+    // tells "I claimed it" from "somebody else did".
+    expect(await approveWikiProposalGroup("lintwiki", GROUP)).toEqual([]);
+    // …and the OTHER group is untouched.
+    expect((await listWikiProposalsByGroup("lintwiki", OTHER))[0]!.status).toBe("draft");
+  });
+
+  test("reject CASes every draft and stamps resolved_at", async () => {
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await insertWikiProposal(lintRow("plans/b.mdx"));
+
+    const rejected = await rejectWikiProposalGroup("lintwiki", GROUP);
+    expect(rejected).toHaveLength(2);
+    expect(rejected.every((r) => r.status === "rejected" && r.resolvedAt !== null)).toBe(true);
+    expect(await rejectWikiProposalGroup("lintwiki", GROUP)).toEqual([]);
+  });
+
+  test("the seeder's input holds every row with its page and status", async () => {
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await rejectWikiProposalGroup("lintwiki", GROUP);
+    await insertWikiProposal(lintRow("plans/z.mdx", OTHER));
+
+    const rows = await listLintGroupRowsByWiki("lintwiki");
+    // A rejected group's key is still there, which is what makes Dismiss
+    // durable — and the PAGE is there too, which is what the claim rule reads.
+    expect(rows).toContainEqual({ groupKey: GROUP, targetPath: "plans/a.mdx", status: "rejected" });
+    expect(rows).toContainEqual({ groupKey: OTHER, targetPath: "plans/z.mdx", status: "draft" });
+  });
+
+  test("the self-heal stales a group's DRAFTS and leaves its other rows alone", async () => {
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await insertWikiProposal(lintRow("plans/b.mdx"));
+    await insertWikiProposal(lintRow("plans/z.mdx", OTHER));
+    // An `approved` row is mid-apply; the apply's own terminal CAS owns it.
+    await approveWikiProposalGroup("lintwiki", OTHER);
+
+    expect(await markLintGroupStale("lintwiki", GROUP)).toBe(2);
+    const rows = await listWikiProposalsByGroup("lintwiki", GROUP);
+    expect(rows.every((r) => r.status === "stale" && r.resolvedAt !== null)).toBe(true);
+    expect(await markLintGroupStale("lintwiki", OTHER)).toBe(0);
+    expect((await listWikiProposalsByGroup("lintwiki", OTHER))[0]!.status).toBe("approved");
+  });
+
+  test("the group verbs are scoped by WIKI — one key, two wikis, no crossover", async () => {
+    // A group key is a hash over a check id, a sub-rule and wiki-RELATIVE paths.
+    // Two wikis holding the same page paths mint the SAME key for the same
+    // finding, so an unscoped verb applies one wiki's card to the other's rows.
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await insertWikiProposal({ ...lintRow("plans/a.mdx"), botName: "otherwiki", wikiName: "otherwiki" });
+
+    expect((await listWikiProposalsByGroup("lintwiki", GROUP)).map((r) => r.wikiName)).toEqual([
+      "lintwiki",
+    ]);
+    expect(await approveWikiProposalGroup("lintwiki", GROUP)).toHaveLength(1);
+    // The other wiki's row is untouched and still reviewable.
+    expect((await listWikiProposalsByGroup("otherwiki", GROUP))[0]!.status).toBe("draft");
+    expect(await rejectWikiProposalGroup("otherwiki", GROUP)).toHaveLength(1);
+  });
+
+  test("a group's rows do not collide on topic_key while they are live", async () => {
+    // The live unique index is (wiki, topic_key), so two members of one group
+    // are only insertable because the page path is IN the topic key.
+    expect(await insertWikiProposal(lintRow("plans/a.mdx"))).not.toBeNull();
+    expect(await insertWikiProposal(lintRow("plans/b.mdx"))).not.toBeNull();
+    // …and re-seeding the same page IS refused by that index.
+    expect(await insertWikiProposal(lintRow("plans/a.mdx"))).toBeNull();
   });
 });

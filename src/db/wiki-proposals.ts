@@ -1,4 +1,5 @@
 import { getDb } from "./client.ts";
+import type { LintMeta } from "../gardener/lint-markers.ts";
 
 /**
  * Wiki-gardener proposals — drafted knowledge-wiki pages awaiting review.
@@ -50,7 +51,13 @@ export interface WikiProposalRelatedPage {
   relPath?: string;
 }
 
-export type WikiProposalKind = "concept" | "entity" | "source" | "synthesis";
+/**
+ * `lint` is the odd one out: it is not a DRAFTED page but a mechanical edit the
+ * wiki linter computed (`src/gardener/lint-proposals.ts`) — always `update`
+ * mode, always `source_docs: []`, never cataloged and never wired, because it IS
+ * the wire. It is also the only kind whose rows come in GROUPS (`group_key`).
+ */
+export type WikiProposalKind = "concept" | "entity" | "source" | "synthesis" | "lint";
 export type WikiProposalMode = "create" | "update";
 export type WikiProposalStatus =
   | "draft"
@@ -71,6 +78,17 @@ export interface WikiProposal {
    */
   wikiName: string | null;
   topicKey: string;
+  /**
+   * The id the rows of ONE lint finding share — `lint:<check>:<12 hex>`, a
+   * sha256 prefix over the check id, the sub-rule and the sorted member paths,
+   * so a re-run over an unchanged wiki reproduces it. NULL on every
+   * single-row proposal, which is every kind but `lint`.
+   */
+  groupKey: string | null;
+  /** `lint` rows only: who seeded the row and which page the finding was filed
+   *  against. NULL on every other kind, and on lint rows written before
+   *  migration 078 — both readers degrade, see `src/gardener/lint-markers.ts`. */
+  lintMeta: LintMeta | null;
   kind: WikiProposalKind;
   mode: WikiProposalMode;
   targetPath: string;
@@ -91,6 +109,10 @@ export interface InsertWikiProposalParams {
    *  legacy bot-keyed rows (see {@link WikiProposal.wikiName}). */
   wikiName?: string | null;
   topicKey: string;
+  /** See {@link WikiProposal.groupKey}; omit for a single-row proposal. */
+  groupKey?: string | null;
+  /** See {@link WikiProposal.lintMeta}; omit for every kind but `lint`. */
+  lintMeta?: LintMeta | null;
   kind: WikiProposalKind;
   mode: WikiProposalMode;
   targetPath: string;
@@ -116,11 +138,13 @@ export async function insertWikiProposal(
   const sql = getDb();
   const [row] = await sql`
     INSERT INTO wiki_proposals (
-      bot_name, wiki_name, topic_key, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
+      bot_name, wiki_name, topic_key, group_key, lint_meta, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
     ) VALUES (
       ${params.botName},
       ${params.wikiName ?? null},
       ${params.topicKey},
+      ${params.groupKey ?? null},
+      ${params.lintMeta ? sql.json(params.lintMeta as any) : null},
       ${params.kind},
       ${params.mode},
       ${params.targetPath},
@@ -510,12 +534,155 @@ export const DEFAULT_COVERAGE_DEPS: CoverageDeps = {
   getPending: getPendingDocIds,
 };
 
+/**
+ * Every row of one lint group, in a STABLE order — `target_path` ASC — whatever
+ * status each is in. The group endpoints' one read, and the order
+ * `applyWikiProposalGroup` writes the files in, so a group that stops halfway
+ * stops at the same row on every re-run.
+ *
+ * ⚠️ That is NOT the order the GATE renders the diffs in. The card is built from
+ * `/api/wiki/proposals`, which orders by `created_at` DESC and which the client
+ * then groups by key — so the reviewer reads the rows newest-first and the apply
+ * writes them path-first. Nothing depends on the two agreeing (each row carries
+ * its own path label and its own CAS); what would break is a reader assuming
+ * "the first diff is the first file written", which is why this says so.
+ *
+ * **Scoped by WIKI as well as by group key**, like its two CAS siblings. A group
+ * key is a hash over a check id, a sub-rule and a list of wiki-RELATIVE paths —
+ * it carries no wiki identity at all, so two wikis holding `plans/a.mdx` and
+ * `plans/b.mdx` mint the same key for the same finding, and a key-only verb
+ * would apply one wiki's card against the other's rows. The scope is
+ * `COALESCE(wiki_name, bot_name)` — the same expression the seeder writes both
+ * columns from, and the one that still resolves a legacy bot-keyed row.
+ */
+export async function listWikiProposalsByGroup(
+  wikiName: string,
+  groupKey: string,
+): Promise<WikiProposal[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM wiki_proposals
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND group_key = ${groupKey}
+    ORDER BY target_path ASC
+  `;
+  return rows.map(mapRow);
+}
+
+/**
+ * CAS every `draft` row of a group to `approved`, in one statement.
+ *
+ * ONE statement rather than a loop of {@link approveWikiProposal}, for the same
+ * reason the single-row version is a CAS: two reviewers clicking Accept on one
+ * card must not each claim half the group. The loser gets the rows the winner
+ * did not take, which is `[]` — and a partial result is not a lost race but the
+ * ordinary re-run shape (a group whose apply stopped mid-way leaves earlier rows
+ * `applied` and later ones `approved`), so the caller re-reads the group rather
+ * than reading a count.
+ */
+export async function approveWikiProposalGroup(
+  wikiName: string,
+  groupKey: string,
+): Promise<WikiProposal[]> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE wiki_proposals SET status = 'approved'
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
+      AND group_key = ${groupKey} AND status = 'draft'
+    RETURNING *
+  `;
+  return rows.map(mapRow);
+}
+
+/** CAS every `draft` row of a group to `rejected` (+ resolved_at). The rejected
+ *  rows are what makes the group's key a SKIP LIST: `lint-proposals.ts` refuses
+ *  to re-propose a group any row of which exists in any status, so a dismissal
+ *  is remembered by leaving these rows in place. */
+export async function rejectWikiProposalGroup(
+  wikiName: string,
+  groupKey: string,
+): Promise<WikiProposal[]> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE wiki_proposals SET status = 'rejected', resolved_at = now()
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
+      AND group_key = ${groupKey} AND status = 'draft'
+    RETURNING *
+  `;
+  return rows.map(mapRow);
+}
+
+/** One lint row, reduced to what the seeder decides with: which group it is in,
+ *  which page it holds, and what state it is in. */
+export interface LintGroupRow {
+  groupKey: string;
+  targetPath: string;
+  status: WikiProposalStatus;
+}
+
+/**
+ * Every lint row this wiki holds, in every status — the seeder's whole input for
+ * "what may I propose".
+ *
+ * It returns ROWS rather than a set of keys because the seeder now asks three
+ * different questions of them and only one is answerable from a key:
+ *
+ *  - **which group keys are blocked** — a `rejected` row (Dismiss is durable, no
+ *    TTL: the concept gardener's skip list ages out so a model can draft a better
+ *    page next week, while a lint finding is deterministic and would come back
+ *    identical forever) or a LIVE row (`draft`/`approved`, which a re-seed would
+ *    duplicate). `applied`/`stale`/`error` block nothing: the remaining pages get
+ *    fresh rows with fresh hashes, and the partial unique index covers live rows
+ *    only, so `topic_key` cannot collide;
+ *  - **which PAGES are claimed** — the `target_path` of every live row. One page
+ *    may be in one live group at a time, or applying either group stales the
+ *    other forever;
+ *  - **which live DRAFT groups no longer match a finding** — the self-heal's
+ *    input (see `seedLintProposals`).
+ */
+export async function listLintGroupRowsByWiki(wikiName: string): Promise<LintGroupRow[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT group_key, target_path, status FROM wiki_proposals
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND group_key IS NOT NULL
+  `;
+  return rows.map((r) => ({
+    groupKey: r.group_key as string,
+    targetPath: r.target_path as string,
+    status: r.status as WikiProposalStatus,
+  }));
+}
+
+/**
+ * Retire every `draft` row of one lint group — the self-heal's write.
+ *
+ * `stale` rather than `rejected`: the reviewer said nothing, the FINDING changed
+ * shape under the card (the cluster grew a member after a sibling fix applied),
+ * and `stale` is the status this table already uses for "the draft no longer
+ * describes the wiki". A `rejected` row would silence the successor group too,
+ * since a dismissal is by group key and the key is what moved.
+ *
+ * `approved` rows are left alone: they are mid-apply, and the apply's own
+ * terminal CAS owns them.
+ */
+export async function markLintGroupStale(wikiName: string, groupKey: string): Promise<number> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
+      AND group_key = ${groupKey} AND status = 'draft'
+    RETURNING id
+  `;
+  return rows.length;
+}
+
 function mapRow(r: Record<string, any>): WikiProposal {
   return {
     id: r.id,
     botName: r.bot_name,
     wikiName: r.wiki_name ?? null,
     topicKey: r.topic_key,
+    groupKey: r.group_key ?? null,
+    lintMeta: (r.lint_meta ?? null) as LintMeta | null,
     kind: r.kind as WikiProposalKind,
     mode: r.mode as WikiProposalMode,
     targetPath: r.target_path,

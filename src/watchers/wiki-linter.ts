@@ -17,6 +17,11 @@ import type { BotConfig } from "../bots/config.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { lintWiki, LINT_CHECKS, type LintCheck } from "../wiki/lint.ts";
 import { todayOslo } from "../gardener/util.ts";
+import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
+import {
+  seedLintProposals,
+  DEFAULT_LINT_PROPOSAL_DEPS,
+} from "../gardener/lint-proposals.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "wiki-linter");
@@ -34,6 +39,9 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "index-truncation": { one: "truncated wikilink", many: "truncated wikilinks" },
   "nested-annotation": { one: "nested annotation", many: "nested annotations" },
   "stem-collision": { one: "stem collision", many: "stem collisions" },
+  "same-work-no-link": { one: "unlinked pair", many: "unlinked pairs" },
+  "series-unnamed": { one: "unnamed series", many: "unnamed series" },
+  "series-inconsistent": { one: "inconsistent series", many: "inconsistent series" },
 };
 
 /** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks
@@ -50,9 +58,17 @@ function summarizeCounts(counts: Record<LintCheck, number>): string {
   return parts.join(", ");
 }
 
+/** The one seam this checker writes through, injectable so a test can assert
+ *  THAT it ran — the seeder's answer is counts, and every outcome it can report
+ *  on a clean wiki is zero. */
+export interface WikiLinterDeps {
+  seed: typeof seedLintProposals;
+}
+
 export async function checkWikiLinter(
   watcher: Watcher,
   botConfig: BotConfig,
+  deps: WikiLinterDeps = { seed: seedLintProposals },
 ): Promise<WatcherAlert[]> {
   const name = botConfig.name;
   if (!botConfig.wikiDir) {
@@ -70,6 +86,59 @@ export async function checkWikiLinter(
   }
 
   const { findings, counts } = await lintWiki(index);
+
+  // Check 8's findings carry a FIX, so the weekly pass also seeds the review
+  // gate with them — the one thing this watcher writes, and only to the DB.
+  //
+  // Both read-only mechanisms refuse first: the mini must never fill the gate
+  // with rows only the write owner can apply. A group already proposed — in any
+  // status, a dismissal's `rejected` rows included — is skipped by the seeder,
+  // so a weekly re-run does not re-propose what a reviewer said no to.
+  //
+  // **It runs even when this pass has NOTHING to propose, and before the
+  // clean-wiki return.** The seeder's first rule is the SELF-HEAL, which retires
+  // every live `draft` group whose key no current finding mints — so a wiki
+  // whose fixable findings have all been fixed is EXACTLY the state where every
+  // live group is superseded. The first cut skipped the call on
+  // `fixable.length === 0` and claimed the opposite ("nothing that could have
+  // superseded a live group either"), which left those cards live forever. The
+  // cost of being wrong the other way is one indexed read per wiki per week.
+  const fixable = findings.filter((f) => f.fix);
+  if (isWikiReadonly() || isReadonlyWikiRoot(botConfig.wikiDir)) {
+    log.info("Wiki-linter: read-only, not seeding lint proposals for \"{name}\"", {
+      botName: name,
+      name,
+    });
+  } else {
+    try {
+      const seeded = await deps.seed(fixable, {
+        ...DEFAULT_LINT_PROPOSAL_DEPS,
+        wikiDir: botConfig.wikiDir,
+        wikiName: name,
+      });
+      if (seeded.proposed > 0 || seeded.staled > 0) {
+        log.info(
+          "Wiki-linter: proposed {proposed} lint fix group(s) ({rows} rows), retired {staled}, {claimed} page-claimed for \"{name}\"",
+          {
+            botName: name,
+            name,
+            proposed: seeded.proposed,
+            rows: seeded.rows,
+            staled: seeded.staled,
+            claimed: seeded.claimed,
+          },
+        );
+      }
+    } catch (err) {
+      // Best-effort: a seeding failure must never cost the report itself.
+      log.warn("Wiki-linter: seeding lint proposals failed for \"{name}\": {error}", {
+        botName: name,
+        name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   if (findings.length === 0) {
     log.info("Wiki-linter: no findings for \"{name}\" — wiki is clean", { botName: name, name });
     return [];

@@ -182,9 +182,11 @@ export function monthFoldKey(month: string): string {
 /**
  * The authored `series:` slug on a page — trimmed, and `""` for a page in no
  * series. The ONE reader of that field, so the trim cannot drift between the
- * grouping, the membership helper and the reader header.
+ * grouping, the membership helper, the reader header and the lint's series
+ * checks (which read it off the server's `WikiPageMeta`, hence the structural
+ * parameter).
  */
-export function seriesKeyOf(p: WikiListing): string {
+export function seriesKeyOf(p: Pick<WikiListing, "series">): string {
   return (p.series || "").trim();
 }
 
@@ -203,6 +205,22 @@ export function seriesKeyOf(p: WikiListing): string {
  */
 export function seriesFoldKey(key: string): string {
   return "series:" + key.trim().toLowerCase();
+}
+
+/**
+ * The key {@link seriesMembersByFoldKey} files a series under — trimmed and
+ * lower-cased, and **without** {@link seriesFoldKey}'s `series:` prefix.
+ *
+ * Two keys, one fold, and the difference is what they are keys INTO:
+ * `seriesFoldKey` writes into the folds STORE, whose namespace is flat and
+ * shared with `family:`/`month:`/`section:` keys, so it needs the prefix; this
+ * one keys a census map that holds nothing else. Spelled once because a caller
+ * that looked a series up with the prefixed form got `undefined` and silently
+ * fell back — measured on the lint's 8.3(c) rule, which then wrote the wrong
+ * spelling of the key.
+ */
+export function seriesCensusKey(key: string): string {
+  return key.trim().toLowerCase();
 }
 
 /**
@@ -311,6 +329,11 @@ export function seriesDateMs(p: PageDateFields): number {
  *  breaks a tie on both. */
 type PageDateOrder = PageDateFields & Pick<WikiListing, "relPath">;
 
+/** What {@link newestSeriesPlan} needs — the ordering fields plus the one status
+ *  it filters on. A structural subset for the same reason {@link PageDateFields}
+ *  is one: the server's `WikiPageMeta` satisfies it without being a listing. */
+export type SeriesPlanFields = PageDateOrder & Pick<WikiListing, "plan_status">;
+
 /** Newest first, ties broken by the date's own rung and then by relPath, so two
  *  members sharing a day order the same way on every render. Which day a git
  *  touch falls on is the process's own timezone question — see
@@ -344,6 +367,11 @@ export const SERIES_TERMINAL_STATUSES: readonly string[] = ["superseded", "aband
  * The NEWEST PLAN of a series: the member carrying a NON-TERMINAL `plan_status`,
  * newest by {@link seriesDateMs}. `undefined` when no member declares one.
  *
+ * Generic over the structural subset it reads, for {@link seriesDateSignal}'s own
+ * reason: the SERVER's `WikiPageMeta` has to satisfy it too, because the lint's
+ * series checks (`src/wiki/lint-series.ts`) pick a proposed series' head with this
+ * function rather than a second spelling of the rule.
+ *
  * A blog and an archive report are members of the work but never "the latest":
  * they record what happened, and "continue at" has to name a page the reader can
  * continue IN. That is why the test is `plan_status` rather than the `plans/`
@@ -351,7 +379,9 @@ export const SERIES_TERMINAL_STATUSES: readonly string[] = ["superseded", "aband
  * A `superseded` or `abandoned` plan fails the same test one step further on:
  * see {@link SERIES_TERMINAL_STATUSES}.
  */
-export function newestSeriesPlan(members: readonly WikiListing[]): WikiListing | undefined {
+export function newestSeriesPlan<T extends SeriesPlanFields>(
+  members: readonly T[],
+): T | undefined {
   return [...members]
     .filter((m) => !!m.plan_status && !SERIES_TERMINAL_STATUSES.includes(m.plan_status))
     .sort(bySeriesDateDesc)[0];
@@ -364,8 +394,15 @@ export function newestSeriesPlan(members: readonly WikiListing[]): WikiListing |
  * off the head, so this is what decides whether the fold says `Wiki provenance`
  * or falls back to the bare key. The fallback chain matters because it is what a
  * series gets for free before anyone writes a label at all.
+ *
+ * Generic over the structural subset it reads, for {@link newestSeriesPlan}'s
+ * reason: the lint's duplicate-label rule (`src/wiki/lint-series.ts`) decides
+ * which `series_label:` to KEEP with this function, over the server's
+ * `WikiPageMeta`, rather than a second spelling of the rail's head rule.
  */
-export function seriesHead(members: readonly WikiListing[]): WikiListing | undefined {
+export function seriesHead<T extends SeriesPlanFields & Pick<WikiListing, "seriesLabel">>(
+  members: readonly T[],
+): T | undefined {
   const sorted = [...members].sort(bySeriesDateDesc);
   return (
     sorted.find((m) => !!m.seriesLabel) ?? newestSeriesPlan(sorted) ?? sorted[0]
@@ -425,7 +462,7 @@ export interface SeriesMembers {
  * carrying a `series_label:` could rename the header alone.
  */
 export function seriesMembersOf(all: readonly WikiListing[], key: string): SeriesMembers {
-  const members = seriesMembersByFoldKey(all).get(key.trim().toLowerCase()) ?? [];
+  const members = seriesMembersByFoldKey(all).get(seriesCensusKey(key)) ?? [];
   return describeSeries(members);
 }
 
@@ -436,18 +473,36 @@ function describeSeries(members: readonly WikiListing[]): SeriesMembers {
   return { members: sorted, head: seriesHead(sorted), latest: newestSeriesPlan(sorted) };
 }
 
+/** What {@link seriesMembersByFoldKey} reads off a page: the key, the pairing
+ *  fields the attachment/retirement rules test, and the ordering fields the head
+ *  and the newest plan are picked with. A structural subset for
+ *  {@link SeriesPlanFields}' reason — the SERVER's `WikiPageMeta` has to satisfy
+ *  it, because the lint's series checks census a series with this rule rather
+ *  than a second spelling of it. */
+export type SeriesMemberFields = SeriesPlanFields &
+  Pick<WikiListing, "series" | "parent" | "pairedBy">;
+
 /**
  * Every series in `all`, keyed on the FOLD key (trimmed, lower-cased), by the
  * membership rule {@link seriesMembersOf} states. Two passes, because the
  * successor test needs the parent members of the series first.
+ *
+ * **Exported** because it is the ONE census of a series: the rail folds on it,
+ * the reader header counts on it, and `src/wiki/lint-series.ts` decides which
+ * pages a `series:` finding may rewrite with it. A lint that censused the series
+ * with its own `filter(key ===)` would propose removing the very
+ * `series_label:` the rail reads — the head it picked would be an attachment
+ * child the rail excludes.
  */
-function seriesMembersByFoldKey(all: readonly WikiListing[]): Map<string, WikiListing[]> {
-  const byKey = new Map<string, WikiListing[]>();
-  const retired = new Map<string, WikiListing[]>();
+export function seriesMembersByFoldKey<T extends SeriesMemberFields>(
+  all: readonly T[],
+): Map<string, T[]> {
+  const byKey = new Map<string, T[]>();
+  const retired = new Map<string, T[]>();
   for (const p of all) {
     const key = seriesKeyOf(p);
     if (!key) continue;
-    const fold = key.toLowerCase();
+    const fold = seriesCensusKey(key);
     if (p.parent) {
       if (p.pairedBy !== "superseded") continue;
       const arr = retired.get(fold);
@@ -515,7 +570,7 @@ export function groupSeries(
   for (const p of pages) {
     const key = seriesKeyOf(p);
     if (!key) continue;
-    const fold = key.toLowerCase();
+    const fold = seriesCensusKey(key);
     if (!whole.has(fold)) continue;
     const isSuperseded = p.pairedBy === "superseded";
     if (p.parent && !isSuperseded) continue;

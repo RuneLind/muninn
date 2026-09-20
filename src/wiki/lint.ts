@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Seven checks, each finding `{ check, relPath, message, detail? }`:
+ * Ten checks, each finding `{ check, relPath, message, detail?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -31,6 +31,10 @@
  *                      The continuous regression guard behind the apply path's
  *                      approve-time refusal; `checkStemCollisions` states what
  *                      counts as a stem and the three shapes deliberately excluded.
+ *  8. same-work-no-link / series-unnamed / series-inconsistent — the SERIES
+ *                      checks, and the only ones carrying a `fix` the gardener
+ *                      turns into `wiki_proposals` rows. Rules, cuts and the
+ *                      one-clustering split between 8.2 and 8.3: `lint-series.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -58,6 +62,7 @@ import {
   NESTED_MARKUP_RE,
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
+import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 
 export const LINT_CHECKS = [
   "broken-link",
@@ -67,6 +72,7 @@ export const LINT_CHECKS = [
   "index-truncation",
   "nested-annotation",
   "stem-collision",
+  ...SERIES_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -77,6 +83,15 @@ export interface LintFinding {
   message: string;
   /** Optional secondary context (e.g. link kind). */
   detail?: string;
+  /**
+   * The machine-readable remedy, on check 8's findings alone — which pages to
+   * edit and the group id the resulting proposal rows share.
+   *
+   * A typed payload rather than something the proposal builder re-derives from
+   * `detail`: that builder writes files, and a regex over a prose sentence is
+   * not a contract. Absent on the seven hygiene checks, which propose nothing.
+   */
+  fix?: LintFix;
 }
 
 export interface LintReport {
@@ -553,6 +568,9 @@ export async function lintWiki(
   // Index-level, not per-page: the subject of this finding is a page the loop
   // above never sees — the store dropped it from `index.pages`.
   findings.push(...checkStemCollisions(index));
+  // Check 8 — index-level for the same reason, and the only checks whose
+  // findings carry a `fix`. Its rules and cuts: `lint-series.ts`.
+  findings.push(...checkSeries(index));
 
   // Pre-seeded by a typed loop rather than `Object.fromEntries(...) as Record<…>`
   // — the cast is what let a partially-seeded map type-check as complete.

@@ -32,6 +32,14 @@
  */
 export const WIKI_READONLY_BLOCKED_SELECTOR = [
   '[data-action="approve"]',
+  // The lint GROUP verbs. Both are listed, unlike the single-row pair: a group
+  // Dismiss is not the DB status flip `[data-action="reject"]` is — it is a
+  // permanent, un-undoable decision (the `rejected` rows ARE the skip list) about
+  // a wiki this instance may not write, and the server refuses it.
+  "[data-group-action]",
+  // "Propose fixes" — seeds the review gate with rows only the write owner can
+  // apply; the route 403s.
+  "#lintPropose",
   // Backlog drain: opening the confirm panel is blocked too — every action
   // inside it is refused, so the panel is a dead end on a readonly instance.
   '[data-backlog-action="confirm"]',

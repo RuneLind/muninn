@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, LINT_CHECKS, type LintFinding } from "./lint.ts";
+import { SERIES_LINT_CHECKS } from "./lint-series.ts";
 
 /**
  * Lint-engine tests over temp-dir wiki fixtures (modeled on store.test.ts).
@@ -76,7 +77,7 @@ describe("lintWiki", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  test("clean wiki produces no findings", async () => {
+  test("clean wiki produces no findings at all — concept pages are not a series", async () => {
     // "Sidekick" is referenced by Good Concept + index but doesn't exist yet →
     // that's a broken link. Add it so the baseline is genuinely clean.
     await write(
@@ -93,7 +94,17 @@ describe("lintWiki", () => {
       ].join("\n"),
     );
     const findings = await lint();
-    expect(findings).toEqual([]);
+    const hygiene = findings.filter(
+      (f) => !(SERIES_LINT_CHECKS as readonly string[]).includes(f.check),
+    );
+    expect(hygiene).toEqual([]);
+    // Adding Sidekick makes the two pages link each other BOTH ways, which IS
+    // 8.2's cluster edge — and they are still not a series, because a
+    // `concepts/` page carrying no `plan_status` and no `status_date` is
+    // reference material rather than a piece of work in time
+    // (`isNarrativePage`). Before that predicate this fixture minted a
+    // two-page unnamed series the moment it became link-clean.
+    expect(findings.filter((f) => f.check === "series-unnamed")).toEqual([]);
   });
 
   test("broken wikilink fires broken-link with the raw target", async () => {

@@ -32,6 +32,7 @@ import {
   type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
+import { groupStatusSummary, groupChipTone } from "./wiki-gardener-group.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 interface SourceDoc {
@@ -47,6 +48,12 @@ interface DiffLine {
 interface ProposalView {
   id: string;
   topicKey: string;
+  /** The lint group this row belongs to, or null for an ordinary single-row
+   *  proposal. A group renders as ONE card with one diff per row. */
+  groupKey?: string | null;
+  /** `lint` rows only: the page the FINDING was filed against — the card's
+   *  title. Rows are listed by path, so `rows[0]` is an alphabetical accident. */
+  findingPath?: string | null;
   title: string;
   kind: string;
   mode: string;
@@ -186,6 +193,64 @@ function cardHtml(p: ProposalView): string {
   return html;
 }
 
+
+/**
+ * One card for a whole lint GROUP: the finding's rationale once, then one diff
+ * per touched page, then ONE Accept and ONE Dismiss.
+ *
+ * Approving half a series is a worse state than not approving it, which is why
+ * the group is the unit here rather than a row with N siblings beside it. Every
+ * diff is labelled with its own target path — the rows differ only in which
+ * file they touch, so an unlabelled stack of diffs says nothing.
+ *
+ * `rows` is the group's WHOLE row set, never the status-filtered one: the filter
+ * chips decide which CARDS show, never which rows a card holds. Filtered, a
+ * `draft` view of a half-applied group rendered `2 pages` over a three-page fix.
+ */
+function groupCardHtml(rows: ProposalView[]): string {
+  // The FINDING's page titles the card; `rows[0]` is whichever path sorts first.
+  const findingPath = rows.find((r) => r.findingPath)?.findingPath;
+  const head = rows.find((r) => r.targetPath === findingPath) ?? rows[0]!;
+  const key = head.groupKey!;
+  const reviewable = rows.some((r) => r.status === "draft");
+  let html = `<div class="gard-card" data-group="${esc(key)}">`;
+
+  html += '<div class="gard-card-head"><div class="gard-title-row">';
+  html += `<span class="gard-title">${esc(head.title)}</span>`;
+  html += `<span class="gard-badge badge-lint">lint</span>`;
+  html += `<span class="gard-badge badge-group">${rows.length} page${rows.length === 1 ? "" : "s"}</span>`;
+  // Both halves of the chip read the SET. The class used to come off `head`,
+  // which on a stopped group rendered `chip-applied` over text saying otherwise.
+  const statuses = rows.map((r) => r.status);
+  html += `<span class="gard-badge chip-${esc(groupChipTone(statuses))}">${esc(groupStatusSummary(statuses))}</span>`;
+  html += "</div>";
+  html += `<div class="gard-meta-row"><span class="gard-path">${esc(rows.map((r) => r.targetPath).join(" · "))}</span><span>·</span><span>${esc(fmtDate(head.createdAt))}</span></div>`;
+  html += "</div>";
+
+  html += '<div class="gard-body">';
+  if (head.rationale) html += `<div class="gard-rationale">${esc(head.rationale)}</div>`;
+  for (const row of rows) {
+    html += `<div class="gard-group-diff"><div class="gard-group-diff-path">${esc(row.targetPath)} <span class="gard-group-diff-status">${esc(row.status)}</span></div>`;
+    html += row.diff && row.diff.length ? diffHtml(row.diff) : '<div class="gard-empty">No diff (the page changed since drafting).</div>';
+    html += "</div>";
+  }
+  html += "</div>";
+
+  // Buttons render while ANY row is a draft — which, after a stop, is every row
+  // the apply did not reach. A group that renders no verb is a card a reviewer
+  // can only reload past.
+  html += '<div class="gard-actions">';
+  if (reviewable) {
+    const drafts = rows.filter((r) => r.status === "draft").length;
+    html += `<button class="gard-btn gard-approve" data-group-action="approve">Accept all ${drafts}</button>`;
+    html += `<button class="gard-btn gard-reject" data-group-action="reject">Dismiss</button>`;
+  }
+  html += '<span class="gard-outcome"></span>';
+  html += "</div>";
+  html += "</div>";
+  return html;
+}
+
 function render(): void {
   const list = document.getElementById("gardList")!;
   const shown = statusFilter
@@ -198,7 +263,43 @@ function render(): void {
       "</div>";
     return;
   }
-  list.innerHTML = shown.map(cardHtml).join("");
+  // A grouped row is rendered ONCE, at the position of its first member, so the
+  // list keeps the server's newest-first order whether or not a card is a group.
+  //
+  // The MEMBERS come from the unfiltered list. A status filter selects which
+  // CARDS are shown (a group appears when any of its rows matches); it must
+  // never decide which rows a card holds, or a half-applied group renders as a
+  // two-page fix with the applied member silently missing.
+  const emitted = new Set<string>();
+  let html = "";
+  for (const p of shown) {
+    if (!p.groupKey) {
+      html += cardHtml(p);
+      continue;
+    }
+    if (emitted.has(p.groupKey)) continue;
+    emitted.add(p.groupKey);
+    html += groupCardHtml(allProposals.filter((r) => r.groupKey === p.groupKey));
+  }
+  list.innerHTML = html;
+  // A group's outcome note lives on the card, which this render just replaced.
+  // Re-paint whatever the last group action said, or a `Stopped at …` note is
+  // wiped by the very reload the stop triggers.
+  for (const [groupKey, note] of groupOutcomes) {
+    const card = list.querySelector(`.gard-card[data-group="${cssEscape(groupKey)}"]`);
+    if (card) setOutcome(card as HTMLElement, note.text, note.kind);
+  }
+}
+
+/** The last outcome note per group, so it survives the re-render a stopped
+ *  apply triggers. Cleared when that group is acted on again. */
+const groupOutcomes = new Map<string, { text: string; kind: "ok" | "err" | "" }>();
+
+/** `CSS.escape`, with a conservative fallback: a group key is
+ *  `lint:<check>:<hex>`, whose `:` is a selector character. */
+function cssEscape(value: string): string {
+  const fn = (globalThis as { CSS?: { escape?: (v: string) => string } }).CSS?.escape;
+  return fn ? fn(value) : value.replace(/[^\w-]/g, (ch) => "\\" + ch);
 }
 
 function setOutcome(card: HTMLElement, text: string, kind: "ok" | "err" | ""): void {
@@ -241,6 +342,72 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
   }
 }
 
+/**
+ * Accept or Dismiss a whole group. The approve answer has THREE shapes, not two:
+ * a clean apply, and a `stopped` one naming the page the group halted at — with
+ * the pages before it already written, which the note has to say rather than
+ * reading as "nothing happened".
+ */
+async function actOnGroup(
+  groupKey: string,
+  action: "approve" | "reject",
+  card: HTMLElement,
+): Promise<void> {
+  const buttons = card.querySelectorAll(".gard-btn");
+  buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
+  groupOutcomes.delete(groupKey);
+  setOutcome(card, action === "approve" ? "Applying…" : "Dismissing…", "");
+  try {
+    const res = await fetch(
+      withBot("/api/wiki/proposals/group/" + encodeURIComponent(groupKey) + "/" + action),
+      { method: "POST" },
+    );
+    const data = await res.json();
+    if (!res.ok) {
+      const applied: string[] = data.applied || [];
+      const note = data.outcome === "stopped"
+        ? "Stopped at " + data.stoppedAt + " (" + data.stoppedOutcome + ")" +
+          (applied.length ? " — " + applied.length + " page(s) already written" : "") +
+          (data.error ? ": " + data.error : "")
+        : data.error || "Failed (" + res.status + ")";
+      // Stored BEFORE the reload, because `render()` replaces the card element
+      // this note is painted on.
+      groupOutcomes.set(groupKey, { text: note, kind: "err" });
+      setOutcome(card, note, "err");
+      buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
+      // A partial apply moved rows, so the list on screen is stale either way —
+      // and the lint panel is stale too: the finding the group was FOR may be
+      // gone, or may have grown a member.
+      if (data.outcome === "stopped") {
+        loadProposals();
+        loadLint();
+      }
+      return;
+    }
+    const next = action === "approve" ? "applied" : "rejected";
+    allProposals.forEach((p) => {
+      if (p.groupKey === groupKey && p.status === "draft") {
+        p.status = next;
+        p.resolvedAt = Date.now();
+      }
+    });
+    if (action === "approve" && (data.noop?.length || 0) > 0) {
+      groupOutcomes.set(groupKey, {
+        text: data.noop.length + " page(s) already carried the edit",
+        kind: "ok",
+      });
+    }
+    render();
+    rerenderStrip();
+    // An applied fix changes what the linter finds — a named series stops being
+    // an 8.2 finding, and a new `See also` line can mint one.
+    loadLint();
+  } catch (err) {
+    setOutcome(card, "Network error: " + (err as Error).message, "err");
+    buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
+  }
+}
+
 // Delegated clicks: filters, toggles, actions.
 document.getElementById("gardFilters")!.addEventListener("click", (e) => {
   const chipEl = (e.target as HTMLElement).closest(".gard-filter");
@@ -266,6 +433,17 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
     return;
   }
 
+  const groupBtn = target.closest("[data-group-action]");
+  if (groupBtn) {
+    const card = groupBtn.closest(".gard-card") as HTMLElement;
+    actOnGroup(
+      card.getAttribute("data-group")!,
+      groupBtn.getAttribute("data-group-action") as "approve" | "reject",
+      card,
+    );
+    return;
+  }
+
   const actionBtn = target.closest("[data-action]");
   if (actionBtn) {
     const card = actionBtn.closest(".gard-card") as HTMLElement;
@@ -287,6 +465,9 @@ const LINT_LABELS: Record<LintCheck, string> = {
   "index-truncation": "Truncated wikilinks (unclosed [[)",
   "nested-annotation": "Markup nested inside a wikilink",
   "stem-collision": "Same-stem pages (one is hidden from the wiki)",
+  "same-work-no-link": "Same work, no link between the pages",
+  "series-unnamed": "Linked pages that declare no series:",
+  "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",
 };
 
 function renderLint(findings: LintFinding[]): void {
@@ -331,6 +512,44 @@ function loadLint(): void {
 }
 
 document.getElementById("lintRefresh")?.addEventListener("click", loadLint);
+
+/**
+ * `Propose fixes` — turn the check-8 findings into review-gate rows.
+ *
+ * A group already proposed (in ANY status, including a dismissal's `rejected`
+ * rows) is skipped server-side, so a second click is a no-op rather than a
+ * second card. The note says how many were skipped for exactly that reason.
+ */
+document.getElementById("lintPropose")?.addEventListener("click", () => {
+  const btn = document.getElementById("lintPropose") as HTMLButtonElement | null;
+  const note = document.getElementById("lintProposeNote");
+  if (btn) btn.disabled = true;
+  if (note) note.textContent = "Proposing…";
+  fetch(withBot("/api/wiki/lint-proposals"), { method: "POST" })
+    .then(async (r) => ({ ok: r.ok, data: await r.json() }))
+    .then(({ ok, data }) => {
+      if (!ok) {
+        if (note) note.textContent = data.error || "Failed";
+        return;
+      }
+      const parts = [`${data.proposed} group(s), ${data.rows} row(s)`];
+      if (data.skipped) parts.push(`${data.skipped} already proposed or dismissed`);
+      if (data.claimed) parts.push(`${data.claimed} waiting on a page another card holds`);
+      if (data.staled) parts.push(`${data.staled} superseded row(s) retired`);
+      if (data.refusals?.length) parts.push(`${data.refusals.length} page(s) could not take the fix`);
+      if (note) note.textContent = parts.join(" · ");
+      // New rows land at the top of the gate; reload rather than patch. The lint
+      // panel moves too — a retired group's finding is what the seeder re-read.
+      loadProposals();
+      loadLint();
+    })
+    .catch((err: Error) => {
+      if (note) note.textContent = "Failed: " + err.message;
+    })
+    .finally(() => {
+      if (btn) btn.disabled = false;
+    });
+});
 
 // ── Ingest backlog strip (report-only "queued up" counter) ──────────────────
 
@@ -1277,7 +1496,8 @@ function loadProposals(): void {
     });
 }
 
-// A wiki-readonly instance dims + blocks Approve, Start batch, Backfill oldest
+// A wiki-readonly instance dims + blocks Approve, the lint group verbs,
+// Propose fixes, Start batch, Backfill oldest
 // and the per-row draft verbs, so the 403 is visible before the click. No-op
 // when this instance owns writes.
 installWikiReadonlyGuard();

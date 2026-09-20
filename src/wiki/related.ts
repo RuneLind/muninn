@@ -61,13 +61,16 @@ export {
  * as ordinary related work. ⚠️ `isMetaStem` is case-SENSITIVE on `CLAUDE` alone
  * (inherited from the rail, where the same predicate decides the tail).
  *
+ * Exported for the lint's series checks (`lint-series.ts`), which apply the same
+ * four cuts — the constants AND this predicate — rather than re-declaring them.
+ *
  * The hub cut alone does not reach these pages, and that is measured rather than
  * assumed: on mimir (547 pages) `index.md` has **3** backlinks, `log.md` 4 and
  * `plans/index.md` 6 — all far under `RELATED_HUB_BACKLINKS`, because a catalog
  * page LINKS OUT rather than being linked to. Without the cut they led the block
  * on both acceptance pages.
  */
-function isBookkeeping(relPath: string): boolean {
+export function isBookkeeping(relPath: string): boolean {
   return isMetaStem(pageStemOf(relPath));
 }
 

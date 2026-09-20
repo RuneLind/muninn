@@ -784,6 +784,8 @@ CREATE TABLE wiki_proposals (
   contained_links JSONB,                 -- {delinked: [..]} — body wikilinks de-linked at persist time (migration 061)
   related_pages JSONB,                   -- [{title, relPath?}] — related existing pages for apply-time See-also wiring (migration 062)
   wiki_name     TEXT,                    -- consolidation gardener: keys a row to a standalone wiki (NULL = legacy bot-keyed) (migration 065)
+  group_key     TEXT,                    -- lint fixes: the id the rows of ONE finding share (NULL = single-row proposal) (migration 077)
+  lint_meta     JSONB,                   -- lint fixes: {seededBy, findingRelPath} — the seeder and the page the finding was filed against (migration 078)
   status        TEXT NOT NULL DEFAULT 'draft',  -- draft|approved|applied|rejected|stale|error
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   resolved_at   TIMESTAMPTZ
@@ -792,6 +794,8 @@ CREATE TABLE wiki_proposals (
 CREATE INDEX ON wiki_proposals (bot_name, status);
 CREATE UNIQUE INDEX wiki_proposals_wiki_topic_live_idx
   ON wiki_proposals (COALESCE(wiki_name, bot_name), topic_key) WHERE status IN ('draft', 'approved');
+CREATE INDEX wiki_proposals_group_key_idx
+  ON wiki_proposals (group_key) WHERE group_key IS NOT NULL;
 
 -- ============================================================================
 -- Source-drafter attempt ledger: why a captured doc has no wiki page.

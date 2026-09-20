@@ -11,11 +11,14 @@ import {
   sortBacklogDocsNewestFirst,
   attachDraftAttempts,
   indexSkipFor,
+  groupApplyPolicy,
+  groupApplyActions,
   getIngestBacklogCached,
   invalidateIngestBacklogCache,
   mergeBacklogLiveFields,
   __resetIngestBacklogCacheForTest,
   __setBotsForTest,
+  type BacklogRouteDeps,
   type GardenerWatcherRef,
   type IngestBacklogDeps,
   type IngestBacklogResponse,
@@ -28,6 +31,10 @@ import {
 } from "./summaries-routes.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { getWikiIndex, __resetWikiCacheForTest } from "../../wiki/store.ts";
+import {
+  __setWikiReadonlyForTest,
+  __setReadonlyWikiRootsForTest,
+} from "../../wiki/readonly.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
@@ -291,6 +298,30 @@ describe("watcher nextRunAt projection honors the time-of-day gate (FIX 1)", () 
     ).toBeNull();
   });
 });
+
+/**
+ * The lint GROUP seams, stubbed empty. These routes are exercised end to end in
+ * `e2e/wiki-lint-proposals.spec.ts` (they need a real wiki on disk AND a real
+ * database); here they only have to exist, so a route this file DOES drive is
+ * not refused by a missing dep.
+ */
+const lintGroupStubs = {
+  listProposalsByGroup: async () => [],
+  approveProposalGroup: async () => [],
+  rejectProposalGroup: async () => [],
+  markProposal: async () => true,
+  seedLintProposals: async () => ({
+    proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [],
+  }),
+} satisfies Pick<
+  BacklogRouteDeps,
+    | "listProposalsByGroup"
+  | "approveProposalGroup"
+  | "rejectProposalGroup"
+  | "markProposal"
+  | "seedLintProposals"
+>;
+
 
 describe("mergeBacklogLiveFields — live fields outside the cache", () => {
   const cached: IngestBacklogResponse = {
@@ -793,6 +824,7 @@ describe("GET /api/wiki/ingest-backlog — docs=1 through the route", () => {
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      ...lintGroupStubs,
       deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
@@ -1214,6 +1246,7 @@ describe("prune routes — dismiss / un-dismiss / reset guards (PR 2)", () => {
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      ...lintGroupStubs,
       deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
@@ -1427,6 +1460,7 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      ...lintGroupStubs,
       deleteSourceProposalsForDoc: async (bot, collection, id) => {
         proposalCalls.push(`${bot}:${collection}/${id}`);
         // The seam runs INSIDE the gardener mutex, or a drain could re-draft the doc
@@ -1650,6 +1684,7 @@ describe("POST /api/wiki/gardener/source-draft-doc — pre-I/O guards", () => {
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      ...lintGroupStubs,
       deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
@@ -1780,6 +1815,7 @@ describe("POST /api/wiki/gardener/source-draft-run — the per-bot mutex", () =>
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      ...lintGroupStubs,
       deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
@@ -1901,6 +1937,7 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
       getProposalById: async () => null,
       approveProposal: async () => null,
       revertProposal: async () => null,
+      ...lintGroupStubs,
       deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
     });
   });
@@ -2429,5 +2466,562 @@ describe("indexSkipFor", () => {
 
   test("a create row outside the policy is still the policy skip", () => {
     expect(indexSkipFor("create", "source", ["concept"])).toBe("not-in-policy");
+  });
+});
+
+/**
+ * The lint-fix endpoints: seeding, and the two GROUP verbs.
+ *
+ * Same shape as the stem-collision block above — the REAL routes over a REAL
+ * temp wiki, with only the DB seams faked, because what a group apply is FOR is
+ * the file bytes and the order they land in.
+ */
+describe("lint proposals — seeding and the group verbs", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+  let prevReadonlyRoots: string | undefined;
+  // `WIKI_DIR` is NOT in `AMBIENT_INSTANCE_ENV`, and a bare group verb resolves
+  // differently with it set — so this block pins it rather than inheriting
+  // whichever value the machine's `.env` carries.
+  let prevWikiDir: string | undefined;
+
+  const PAGE_A = "plans/a.mdx";
+  const PAGE_B = "plans/b.mdx";
+  const GROUP = "lint:series-unnamed:abcdef012345";
+
+  const body = (title: string, extra = "") =>
+    `---\ntitle: ${title}\n${extra}---\n\nBody.\n`;
+  const hashOf = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
+
+  /** A lint row for one page, with a base hash that matches what is on disk. */
+  async function lintRow(id: string, relPath: string, series: string): Promise<unknown> {
+    const current = await Bun.file(path.join(root, relPath)).text();
+    return {
+      id,
+      botName: "lintwiki",
+      wikiName: "lintwiki",
+      topicKey: `${GROUP}:${relPath}`,
+      groupKey: GROUP,
+      kind: "lint",
+      mode: "update",
+      targetPath: relPath,
+      baseHash: new Bun.CryptoHasher("sha256").update(current).digest("hex"),
+      draft: current.replace("---\n\n", `series: ${series}\n---\n\n`),
+      sourceDocs: [],
+      lintMeta: { seededBy: "lint-proposals", findingRelPath: relPath },
+      rationale: "two linked pages declare no series:",
+      containedLinks: null,
+      relatedPages: null,
+      status: "draft",
+      createdAt: 0,
+      resolvedAt: null,
+    };
+  }
+
+  const deps = (over: Record<string, unknown>) =>
+    ({
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+      getProposalById: async () => null,
+      approveProposal: async () => null,
+      revertProposal: async () => null,
+      deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
+      ...lintGroupStubs,
+      ...over,
+    }) as unknown as Parameters<typeof registerWikiGardenerRoutes>[1];
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-lint-group-"));
+    await Bun.write(path.join(root, PAGE_A), body("A"));
+    await Bun.write(path.join(root, PAGE_B), body("B"));
+    prevExtra = process.env.WIKI_EXTRA;
+    prevReadonlyRoots = process.env.WIKI_READONLY_ROOTS;
+    prevWikiDir = process.env.WIKI_DIR;
+    process.env.WIKI_EXTRA = `lintwiki=${root}`;
+    delete process.env.WIKI_READONLY_ROOTS;
+    delete process.env.WIKI_DIR;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __setReadonlyWikiRootsForTest();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+  });
+
+  afterEach(async () => {
+    __setWikiReadonlyForTest();
+    __setReadonlyWikiRootsForTest();
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    if (prevReadonlyRoots === undefined) delete process.env.WIKI_READONLY_ROOTS;
+    else process.env.WIKI_READONLY_ROOTS = prevReadonlyRoots;
+    if (prevWikiDir === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prevWikiDir;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("lint-proposals: a READ-ONLY INSTANCE refuses before the lint even runs", async () => {
+    let seeded = false;
+    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
+    __setWikiReadonlyForTest(true);
+
+    const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", { method: "POST" });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { readonly?: boolean }).readonly).toBe(true);
+    // The whole point of refusing at the route: no lint pass, no rows.
+    expect(seeded).toBe(false);
+  });
+
+  test("lint-proposals: a READ-ONLY ROOT refuses too, and the two refusals are distinct", async () => {
+    let seeded = false;
+    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
+    __setReadonlyWikiRootsForTest([root]);
+
+    const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", { method: "POST" });
+    expect(res.status).toBe(403);
+    const payload = (await res.json()) as { readonly?: boolean; error: string };
+    expect(payload.readonly).toBe(true);
+    // The per-wiki sentence, not the instance one — a host that writes every
+    // other wiki must not claim `MUNINN_WIKI_READONLY=1`.
+    expect(payload.error).not.toContain("MUNINN_WIKI_READONLY");
+    expect(seeded).toBe(false);
+  });
+
+  test("lint-proposals: the seeder is handed this wiki's root and name, and its counts are the answer", async () => {
+    let handed: { wikiDir?: string; wikiName?: string } = {};
+    registerWikiGardenerRoutes(
+      app,
+      deps({
+        seedLintProposals: async (_f: unknown, d: { wikiDir: string; wikiName: string }) => {
+          handed = d;
+          return { proposed: 2, rows: 5, skipped: 1, claimed: 0, refused: 0, staled: 0, refusals: [] };
+        },
+      }),
+    );
+    const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ proposed: 2, rows: 5, skipped: 1 });
+    expect(handed.wikiDir).toBe(root);
+    expect(handed.wikiName).toBe("lintwiki");
+  });
+
+  /**
+   * A stateful stand-in for the three group DB verbs — the route CASes, then
+   * RE-READS, so a stub that answers the same rows twice tests nothing the real
+   * sequence does.
+   */
+  function groupStore(initial: unknown[]) {
+    type Row = { id: string; status: string };
+    let state = initial as Row[];
+    const marked: Array<[string, string]> = [];
+    const reverted: string[] = [];
+    const set = (id: string, status: string) => {
+      state = state.map((r) => (r.id === id ? { ...r, status } : r));
+    };
+    return {
+      marked,
+      reverted,
+      rows: () => state,
+      deps: {
+        listProposalsByGroup: async () => state,
+        approveProposalGroup: async () => {
+          state = state.map((r) => (r.status === "draft" ? { ...r, status: "approved" } : r));
+          return state.filter((r) => r.status === "approved");
+        },
+        rejectProposalGroup: async () => {
+          const taken = state.filter((r) => r.status === "draft");
+          state = state.map((r) => (r.status === "draft" ? { ...r, status: "rejected" } : r));
+          return taken;
+        },
+        markProposal: async (id: string, status: string) => {
+          marked.push([id, status]);
+          set(id, status);
+          return true;
+        },
+        revertProposal: async (id: string) => {
+          reverted.push(id);
+          set(id, "draft");
+          return { id } as never;
+        },
+      },
+    };
+  }
+
+  test("group approve: every row lands, in ONE pass, and the files carry the edit", async () => {
+    const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+    registerWikiGardenerRoutes(app, deps(store.deps));
+
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ outcome: "applied", applied: [PAGE_A, PAGE_B], noop: [] });
+    expect(store.marked).toEqual([["r1", "applied"], ["r2", "applied"]]);
+    expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+    expect(await Bun.file(path.join(root, PAGE_B)).text()).toContain("series: prov");
+  });
+
+  test("group approve writes ONE log.md entry naming every page and the seeder", async () => {
+    const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+    registerWikiGardenerRoutes(app, deps(store.deps));
+    await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+
+    const log = await Bun.file(path.join(root, "log.md")).text();
+    // One entry, not one per row: twelve entries differing only in which
+    // frontmatter line moved bury the curated ones the log is for.
+    expect(log.split("## [").length - 1).toBe(1);
+    expect(log).toContain(`- via lint-proposals, 2 pages: ${PAGE_A}, ${PAGE_B}`);
+  });
+
+  test("group approve REFUSES a group holding an approved or rejected row", async () => {
+    for (const blocking of ["approved", "rejected"]) {
+      await Bun.write(path.join(root, PAGE_B), body("B"));
+      const half = [
+        { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: blocking },
+        await lintRow("r2", PAGE_B, "prov"),
+      ];
+      const store = groupStore(half);
+      const one = new Hono();
+      registerWikiGardenerRoutes(one, deps(store.deps));
+
+      const res = await one.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+      expect([blocking, res.status]).toEqual([blocking, 409]);
+      // A reviewer who dismissed one member cannot then accept the group, and an
+      // `approved` row means another apply is mid-flight over these same pages.
+      // The message names what BLOCKS: `applied`/`stale` rows are not draft
+      // either and are skipped, so "not all draft" described another condition.
+      expect(await res.json()).toMatchObject({
+        outcome: "mixed",
+        error: "an approved or rejected row blocks the group",
+        statuses: { [blocking]: 1, draft: 1 },
+      });
+      expect(store.marked).toEqual([]);
+      expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+    }
+  });
+
+  test("a second Accept after a stop applies the rows the stop put back to DRAFT", async () => {
+    const stale = { ...((await lintRow("r2", PAGE_B, "prov")) as object), baseHash: "0".repeat(64) };
+    await Bun.write(path.join(root, "plans/c.mdx"), body("C"));
+    const store = groupStore([
+      await lintRow("r1", PAGE_A, "prov"),
+      stale,
+      await lintRow("r3", "plans/c.mdx", "prov"),
+    ]);
+    registerWikiGardenerRoutes(app, deps(store.deps));
+
+    const first = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    expect(first.status).toBe(409);
+    expect(store.rows().map((r) => r.status)).toEqual(["applied", "stale", "draft"]);
+
+    // THE POINT: the stop left the card reviewable, so the very next Accept has
+    // to be able to act on it. An all-or-nothing gate answers `mixed` here and
+    // the reverted rows can never be applied at all.
+    const second = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({
+      outcome: "applied",
+      applied: ["plans/c.mdx"],
+      noop: [],
+      // The rows the apply skipped are reported, not silently dropped.
+      skipped: { applied: 1, stale: 1 },
+    });
+    expect(await Bun.file(path.join(root, "plans/c.mdx")).text()).toContain("series: prov");
+    expect(store.rows().map((r) => r.status)).toEqual(["applied", "stale", "applied"]);
+  });
+
+  test("a group with no draft rows left answers nothing-to-apply, not mixed", async () => {
+    const store = groupStore([
+      { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "applied" },
+      { ...((await lintRow("r2", PAGE_B, "prov")) as object), status: "stale" },
+    ]);
+    registerWikiGardenerRoutes(app, deps(store.deps));
+
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    expect(res.status).toBe(409);
+    // `mixed` would claim the group is half-reviewed; there is simply nothing
+    // left to apply, and the reviewer needs to be told which.
+    expect(await res.json()).toMatchObject({
+      outcome: "nothing-to-apply",
+      statuses: { applied: 1, stale: 1 },
+    });
+    expect(store.marked).toEqual([]);
+  });
+
+  test("an all-REJECTED group is nothing-to-apply too, not mixed", async () => {
+    const store = groupStore([
+      { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "rejected" },
+      { ...((await lintRow("r2", PAGE_B, "prov")) as object), status: "rejected" },
+    ]);
+    const app2 = new Hono();
+    registerWikiGardenerRoutes(app2, deps(store.deps));
+
+    const res = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    expect(res.status).toBe(409);
+    // A `rejected` row BLOCKS a group that still holds a draft — but with no
+    // draft left there is no other decision in flight to wait for, and `mixed`'s
+    // remedy ("try again when it finishes") never arrives. The dismissal IS the
+    // decision, so the settled answer outranks the blocked one.
+    expect(await res.json()).toMatchObject({
+      outcome: "nothing-to-apply",
+      statuses: { rejected: 2 },
+    });
+    expect(store.marked).toEqual([]);
+  });
+
+  test("a forbidden group leaves NO row stranded in `approved`", () => {
+    const rows = [
+      { id: "r1", targetPath: PAGE_A },
+      { id: "r2", targetPath: PAGE_B },
+      { id: "r3", targetPath: "plans/c.mdx" },
+    ] as unknown as Parameters<typeof groupApplyActions>[0];
+    // What `applyWikiProposalGroup` returns when the read-only refusal fires:
+    // EVERY row carries the refusal and `stoppedAt` is the first of them.
+    const forbidden = { outcome: "forbidden", reason: "read-only" } as const;
+    const results = [
+      { id: "r1", targetPath: PAGE_A, outcome: forbidden },
+      { id: "r2", targetPath: PAGE_B, outcome: forbidden },
+      { id: "r3", targetPath: "plans/c.mdx", outcome: forbidden },
+    ];
+    const actions = groupApplyActions(rows, {
+      results,
+      stoppedAt: results[0],
+    } as unknown as Parameters<typeof groupApplyActions>[1]);
+
+    // Rows 2 and 3 were REACHED and refused, so a revert loop that skips reached
+    // rows leaves them `approved` — a status the gate renders with no buttons.
+    expect(actions.actions).toEqual([
+      { id: "r1", status: "draft" },
+      { id: "r2", status: "draft" },
+      { id: "r3", status: "draft" },
+    ]);
+    expect(actions.applied).toEqual([]);
+    expect(actions.noop).toEqual([]);
+  });
+
+  test("group approve STOPS at a stale row, names it, and puts the untouched rows back to DRAFT", async () => {
+    const stale = { ...((await lintRow("r2", PAGE_B, "prov")) as object), baseHash: "0".repeat(64) };
+    await Bun.write(path.join(root, "plans/c.mdx"), body("C"));
+    const store = groupStore([
+      await lintRow("r1", PAGE_A, "prov"),
+      stale,
+      await lintRow("r3", "plans/c.mdx", "prov"),
+    ]);
+    registerWikiGardenerRoutes(app, deps(store.deps));
+
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    expect(res.status).toBe(409);
+    const payload = (await res.json()) as { outcome: string; applied: string[]; stoppedAt: string };
+    expect(payload.outcome).toBe("stopped");
+    // Rows already written STAY written — there is no rollback, so the answer
+    // names the boundary instead of implying nothing happened.
+    expect(payload.applied).toEqual([PAGE_A]);
+    expect(payload.stoppedAt).toBe(PAGE_B);
+    expect(store.marked).toEqual([["r1", "applied"], ["r2", "stale"]]);
+    expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+    // The row AFTER the boundary was never attempted, so its page is untouched.
+    expect(await Bun.file(path.join(root, "plans/c.mdx")).text()).not.toContain("series:");
+    // …and it is back in `draft`, so the card keeps its buttons. `approved`
+    // renders no verb in the gate at all.
+    expect(store.reverted).toEqual(["r3"]);
+    expect(store.rows().find((r) => r.id === "r3")!.status).toBe("draft");
+  });
+
+  test("a row whose page ALREADY carries the edit is reported as noop, not applied", async () => {
+    const row = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
+    // The apply's step-2a short circuit: the target already IS the draft.
+    await Bun.write(path.join(root, PAGE_A), row.draft);
+    const store = groupStore([{ ...row, baseHash: hashOf(row.draft) }]);
+    registerWikiGardenerRoutes(app, deps(store.deps));
+
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    expect(res.status).toBe(200);
+    // It is `applied` in the DB — it is done — but the ANSWER keeps the two
+    // apart, or the card reports a page written on a click that touched none.
+    expect(await res.json()).toMatchObject({ outcome: "applied", applied: [], noop: [PAGE_A] });
+    expect(store.marked).toEqual([["r1", "applied"]]);
+  });
+
+  test("group approve on an unknown group is a 404, and on an already-applied group a 409", async () => {
+    registerWikiGardenerRoutes(app, deps({ listProposalsByGroup: async () => [] }));
+    expect((await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" })).status).toBe(404);
+
+    const app2 = new Hono();
+    const done = [{ ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "applied" }];
+    registerWikiGardenerRoutes(app2, deps({ listProposalsByGroup: async () => done, approveProposalGroup: async () => [] }));
+    const res = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { statuses: Record<string, number> }).toMatchObject({
+      statuses: { applied: 1 },
+    });
+  });
+
+  /**
+   * The group verbs' wiki resolution, as a state space rather than as cases.
+   *
+   * Three cells, and the third is the one that shipped wrong: a bare request
+   * fell back to the registry's DEFAULT entry, so a POST naming no wiki acted on
+   * whichever wiki `defaultWikiEntry` picked — a group key is a hash over
+   * wiki-RELATIVE paths, which is the ambiguity the guard exists for. The
+   * fallback's stated motivation (a client that sends no query) is covered by
+   * the page test below instead: the gate names its wiki now.
+   */
+  test("group verbs: a registered name acts, an unknown name 404s, NO name 400s", async () => {
+    // Pin the registry to this block's own temp wiki: `defaultWikiEntry` prefers
+    // jarvis, and whether jarvis is discovered is a fact about the machine — so
+    // without this the bare case could pass for the wrong reason.
+    const emptyBots = await mkdtemp(path.join(tmpdir(), "wiki-lint-nobots-"));
+    const prevBotsDir = process.env.MUNINN_BOTS_DIR;
+    process.env.MUNINN_BOTS_DIR = emptyBots;
+    __resetWikiRegistryForTest();
+    let read = 0;
+    const store = groupStore([await lintRow("r1", PAGE_A, "prov")]);
+    const counted = { ...store.deps, listProposalsByGroup: async () => { read += 1; return store.rows(); } };
+    registerWikiGardenerRoutes(app, deps(counted));
+    try {
+      // (b) a name nothing is registered under — 404, and no row is read.
+      for (const verb of ["approve", "reject"]) {
+        const unknown = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}?wiki=nope`, { method: "POST" });
+        expect([verb, unknown.status]).toEqual([verb, 404]);
+      }
+
+      // (c) NO name — 400 on both verbs, whether or not `WIKI_DIR` is set, and
+      // refused before any row is read, so the key never reaches a wiki-less
+      // query. The `lintwiki` entry IS the registry default here, so a 200 would
+      // be the fallback answering.
+      for (const wikiDir of [undefined, root]) {
+        if (wikiDir === undefined) delete process.env.WIKI_DIR;
+        else process.env.WIKI_DIR = wikiDir; // restored by afterEach
+        for (const verb of ["approve", "reject"]) {
+          const bare = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}`, { method: "POST" });
+          expect([String(wikiDir), verb, bare.status]).toEqual([String(wikiDir), verb, 400]);
+        }
+      }
+      expect(read).toBe(0);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).not.toContain("series:");
+
+      // (a) the registered name — the verb acts, and the file carries the edit.
+      const named = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+      expect(named.status).toBe(200);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+
+      // …and through the legacy `?bot=` alias, which is what the gate's own
+      // client sends.
+      const store2 = groupStore([await lintRow("r2", PAGE_B, "prov")]);
+      const app2 = new Hono();
+      registerWikiGardenerRoutes(app2, deps(store2.deps));
+      const alias = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?bot=lintwiki`, { method: "POST" });
+      expect(alias.status).toBe(200);
+      expect(await Bun.file(path.join(root, PAGE_B)).text()).toContain("series: prov");
+    } finally {
+      if (prevBotsDir === undefined) delete process.env.MUNINN_BOTS_DIR;
+      else process.env.MUNINN_BOTS_DIR = prevBotsDir;
+      __resetWikiRegistryForTest();
+      await rm(emptyBots, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The other half of that 400: the gate page has to NAME its wiki, or its own
+   * Accept is the caller with no name.
+   *
+   * `resolveWikiRequest` is keyed by NAME and `WIKI_DIR` names a ROOT, so the
+   * override resolved no entry and the page injected `window.__WIKI_BOT__ = ""`
+   * — the client then sent every gardener fetch bare. Matching the override's
+   * root against the registry is what closes it.
+   */
+  test("the gate page names the wiki whose ROOT the WIKI_DIR override points at", async () => {
+    // A collection-bearing entry, so the page renders its picker at all
+    // (`isGardenerWiki`) and the two selection states are distinguishable.
+    __setWikiRegistryForTest([{ name: "lintwiki", root, source: "extra", collections: ["wiki"] }]);
+    registerWikiGardenerRoutes(app, deps({}));
+    const other = await mkdtemp(path.join(tmpdir(), "wiki-lint-elsewhere-"));
+    try {
+      process.env.WIKI_DIR = root; // the `lintwiki` entry's own root; restored by afterEach
+      const html = await (await app.request("/wiki/gardener")).text();
+      expect(html).toContain('window.__WIKI_BOT__ = "lintwiki"');
+      // …and the picker agrees: an "env override" placeholder beside a named
+      // wiki would be the page contradicting the requests it is about to make.
+      expect(html).not.toContain(">env override<");
+
+      // A root NO entry holds keeps the old state — there is no proposals
+      // surface to name, and inventing a name would scope the verbs elsewhere.
+      process.env.WIKI_DIR = other;
+      const html2 = await (await app.request("/wiki/gardener")).text();
+      expect(html2).toContain('window.__WIKI_BOT__ = ""');
+      expect(html2).toContain(">env override<");
+    } finally {
+      __resetWikiRegistryForTest();
+      await rm(other, { recursive: true, force: true });
+    }
+  });
+
+  test("a BOT wiki's group apply takes the BOT's wikiAutoCommit policy", () => {
+    const entry = { root: "/w/standalone", collections: ["wiki"] };
+    // Standalone: the registry entry's root + its own collections, push on.
+    expect(groupApplyPolicy(entry, undefined)).toEqual({
+      wikiDir: "/w/standalone",
+      push: true,
+      reindexCollections: ["wiki"],
+    });
+    // Bot-owned: the BOT's wikiDir and its opt-outs. Forcing `push: true` here
+    // pushed the lint fixes of a bot that had turned pushing off.
+    expect(
+      groupApplyPolicy(entry, {
+        wikiDir: "/w/bot",
+        wikiAutoCommit: { push: false, catalogKinds: ["concept", "source"] },
+      }),
+    ).toEqual({ wikiDir: "/w/bot", push: false, catalogKinds: ["concept", "source"] });
+    // A bot with no policy block keeps the default push.
+    expect(groupApplyPolicy(entry, { wikiDir: "/w/bot" })).toEqual({
+      wikiDir: "/w/bot",
+      push: true,
+      catalogKinds: undefined,
+    });
+  });
+
+  test("group REJECT refuses on a read-only instance and on a read-only ROOT", async () => {
+    const store = groupStore([await lintRow("r1", PAGE_A, "prov")]);
+    registerWikiGardenerRoutes(app, deps(store.deps));
+
+    __setWikiReadonlyForTest(true);
+    const instance = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, { method: "POST" });
+    expect(instance.status).toBe(403);
+    expect(((await instance.json()) as { readonly?: boolean }).readonly).toBe(true);
+
+    __setWikiReadonlyForTest(false);
+    __setReadonlyWikiRootsForTest([root]);
+    const perWiki = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, { method: "POST" });
+    expect(perWiki.status).toBe(403);
+    // The per-wiki sentence, not the instance one.
+    expect(((await perWiki.json()) as { error: string }).error).not.toContain("MUNINN_WIKI_READONLY");
+    // A dismissal is permanent — the `rejected` rows ARE the skip list — so the
+    // instance that cannot apply the fix must not be able to bury it either.
+    expect(store.rows()[0]!.status).toBe("draft");
+  });
+
+  test("group reject rejects the drafts, and a second click 409s", async () => {
+    const rows = [await lintRow("r1", PAGE_A, "prov")];
+    let rejected = rows;
+    registerWikiGardenerRoutes(
+      app,
+      deps({
+        listProposalsByGroup: async () => rows,
+        rejectProposalGroup: async () => {
+          const out = rejected;
+          rejected = [];
+          return out;
+        },
+      }),
+    );
+    const first = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, { method: "POST" });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ outcome: "rejected", rejected: 1 });
+    const second = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, { method: "POST" });
+    expect(second.status).toBe(409);
   });
 });

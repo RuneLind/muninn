@@ -1,0 +1,28 @@
+-- `wiki_proposals.lint_meta` — the two facts a `lint` row carries that no other
+-- column can say, as one JSONB object:
+--
+--   {"seededBy": "wiki-linter" | "lint-proposals",
+--    "findingRelPath": "plans/muninn-rail-grouping.mdx"}
+--
+--   * `seededBy` — the weekly `wiki-linter` watcher, or the gate's own
+--     `Propose fixes` button. The apply's `log.md` entry names it: an
+--     unattended proposal and one a reviewer asked for are different events in
+--     a wiki's history, and `via wiki-linter` on both made them one.
+--   * `findingRelPath` — the page the LINT filed the finding against, which is
+--     not in general the row's own `target_path`: an 8.2 cluster is filed
+--     against its HEAD and edits every member. The gate's card reads it to pick
+--     which member's title to show, and the group apply to headline its log
+--     entry. Without it both took `rows[0]`, which is the alphabetically first
+--     `target_path` — an accident of sorting.
+--
+-- Why a column rather than `source_docs`: that column is a JSONB array of
+-- `{collection, docId, title, url}` DOCUMENTS, read by the coverage and backlog
+-- queries. A lint row has none (its draft is the page's own bytes plus one
+-- mechanical edit), and stuffing two strings into that shape would be a type
+-- lie every one of those readers could trip over.
+--
+-- NULLable, and NULL on every row that existed before this migration —
+-- including the lint rows of the first cut. Both readers degrade: `seededBy`
+-- falls back to `wiki-linter` (which is what those rows came from) and
+-- `findingRelPath` to the group's first row.
+ALTER TABLE wiki_proposals ADD COLUMN lint_meta JSONB;

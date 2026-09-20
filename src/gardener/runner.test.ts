@@ -56,6 +56,8 @@ function makeDeps(overrides: Partial<GardenerDeps> = {}): { deps: GardenerDeps; 
         botName: params.botName,
         wikiName: params.wikiName ?? null,
         topicKey: params.topicKey,
+        groupKey: params.groupKey ?? null,
+        lintMeta: null,
         kind: params.kind,
         mode: params.mode,
         targetPath: params.targetPath,
@@ -134,7 +136,9 @@ describe("runGardener", () => {
       makeDeps({
         insertProposal: async (params) => ({
           id: String((seq += 1)),
-          botName: params.botName, wikiName: params.wikiName ?? null, topicKey: params.topicKey, kind: params.kind, mode: params.mode,
+          botName: params.botName, wikiName: params.wikiName ?? null, topicKey: params.topicKey,
+          groupKey: params.groupKey ?? null,
+          lintMeta: null, kind: params.kind, mode: params.mode,
           targetPath: params.targetPath, baseHash: params.baseHash ?? null, draft: params.draft,
           sourceDocs: params.sourceDocs, rationale: params.rationale ?? null,
           containedLinks: params.containedLinks ?? null, relatedPages: params.relatedPages ?? null, status: "draft",
@@ -569,6 +573,8 @@ function makeTwoClusterDeps(overrides: Partial<GardenerDeps> = {}): {
         botName: params.botName,
         wikiName: params.wikiName ?? null,
         topicKey: params.topicKey,
+        groupKey: params.groupKey ?? null,
+        lintMeta: null,
         kind: params.kind,
         mode: params.mode,
         targetPath: params.targetPath,
