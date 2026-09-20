@@ -904,9 +904,50 @@ by, mtime rung included. *continue at* never names the open page (a reader
 usually arrives there from the `▸` row), is omitted when there is no other plan,
 and clips its label at `SERIES_CONTINUE_MAX` (64 code points) with the whole
 title on `title=` — a mimir plan title runs past 100 characters and took the
-strip's whole second line. There is no `edit` affordance yet — the series editor
-is a later PR, and a visible control that cannot act is the dead control F2
-rejected.
+strip's whole second line. Beside it sits **`edit series`**, the affordance PR A
+omitted rather than rendering inert — the editor below is what it opens.
+
+**The editor** (`POST /api/wiki/series`, `wiki-series-routes.ts`; the popover's
+pure half in `views/components/wiki-series-menu.ts`). One `⋯` opener on a rail
+row and on a `Related work` row, one `edit series` in the reader header, and one
+popover node shared by the three — so "only one open at a time" is a property of
+the DOM rather than a rule to enforce. It offers four verbs: JOIN a series (or
+type a new key), RENAME the label, MOVE the head, and REMOVE the page.
+
+  - **The route is the fourth writer through `writeWikiPage`**, in NO-LOG mode
+    like the `/plans` board's metadata flips: no `log.md` line, no reindex, no
+    commit (mimir's committer is the repo-sync loop). It DOES refresh the wiki
+    index inside the write, because the rail reads that index behind a 5-minute
+    TTL. The frontmatter half is `setFrontmatterScalar`
+    (`src/plans/frontmatter.ts`), so there is still exactly one line-upsert
+    implementation.
+  - **ONE page per call**, `{wiki?, relPath, baseHash, series: string|null,
+    seriesLabel?: string|null}`. 400 bad body / html page, 404 unknown wiki or
+    page, 422 a fence this must not edit or a list-valued key, 403 read-only,
+    409 stale or locked, 200 `{relPath, hash, written, series, seriesLabel}` —
+    always what is ON DISK, so a noop echoes the pair the CAS just proved.
+  - **The CAS base is `GET /api/wiki/page`'s new `hash`** (sha256 of the raw
+    file, beside `meta` rather than inside the listing shape). The client reads
+    it FRESH per write, for the open page too: a hash cached at page-open time
+    goes stale the moment the editor's own first write lands.
+  - **A head move is TWO calls**, each CAS'd, and the ORDER is the contract: the
+    old head's label is cleared FIRST. A failure between them leaves a series
+    with no labelled member — rendered under its bare key, and reported by lint
+    8.3 — where the other order leaves two labelled members, which the rail
+    resolves silently.
+  - **A new key is normalized to an existing member's spelling**
+    (`normalizeSeriesKey`), since the fold is case-insensitive: joining `alpha`
+    from a menu listing `Alpha` must write `Alpha` or the fold is unchanged
+    while 8.3(b) gains a variant nobody chose. The same rule HEALS a variant on
+    any write that touches a member's own `series:` line.
+  - **Clearing the key clears the label with it** — a `series_label:` on a page
+    in no series names nothing and is 8.3(a)'s own finding.
+  - **`order` is not a key and is not editable.** A series' order is DERIVED
+    (`seriesDateSignal`), so there is nothing to write; re-ordering a series
+    means changing a page's `status_date`, which is the `/plans` board's job.
+  - **Read-only renders NOTHING**, on both mechanisms — not a dimmed control
+    (#557's F2 rule), with the two selectors in `WIKI_READONLY_BLOCKED_SELECTOR`
+    as the backstop and the route refusing 403 regardless.
 
 Acceptance: `wiki-groups.test.ts` (formation, membership, the case fold, the
 head and newest-plan rules incl. the terminal statuses, the day granularity and
@@ -919,7 +960,15 @@ one row for two spellings of the key, the dissolution against an untouched
 control family, the `▸` inside the title, the ghost, `N of M shown` — asserted
 VISIBLE at 300 and 260px, since `toHaveText` passes on a clipped element — the
 reader header agreeing with the fold, and the contrast of the label, the chip,
-the census, the timeline date and the `▸` in both themes).
+the census, the timeline date and the `▸` in both themes). The EDITOR's own acceptance is
+`wiki-series-routes.test.ts` (every status code, the case-fold normalization,
+the html refusal, both read-only refusals through the test setters),
+`wiki-series-menu.test.ts` (the menu model, the cap, the head-move plan, the
+escaping) and `e2e/wiki-series-editor.spec.ts` (acceptance 11: joining from a
+rail row writes one line and moves the row inside the fold with `#wikiCount`
+unchanged, the label rename touches only the head's bytes, the head move touches
+two files, the removal drops the header in place, and both read-only shapes —
+instance and per-root — render no opener and 403 the POST).
 
 ### Lint check 8 — the series checks, and the only lint that proposes a fix
 

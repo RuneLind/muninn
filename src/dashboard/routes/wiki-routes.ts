@@ -33,6 +33,7 @@ import {
   registerWikiProvenanceRoutes,
 } from "./wiki-provenance.ts";
 import { registerWikiStampRoute } from "./wiki-stamp.ts";
+import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
@@ -100,7 +101,7 @@ import {
 import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "../views/components/wiki-activity-rank.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
-import { todayOslo } from "../../gardener/util.ts";
+import { sha256, todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { capabilitiesForConnectorType } from "../../ai/connector-capabilities.ts";
 import { jiraBotName } from "../../jira/bot.ts";
@@ -1215,6 +1216,8 @@ export function registerWikiRoutes(
   // registered wiki root on this machine's filesystem, so `MUNINN_PROFILE=nais`
   // must drop it with everything else bound to a working tree.
   registerWikiStampRoute(app, provenanceCtx);
+  // The series editor's one write, in the same group for the same reason.
+  registerWikiSeriesRoutes(app);
 
   app.get("/wiki", async (c) => {
     const registry = getWikiRegistry();
@@ -1858,6 +1861,14 @@ export function registerWikiRoutes(
       // The two callers that opt fields in — see `toListing`. Deliberately NOT
       // `listings()` below, whose arrays are the link-heavy pages' bulk.
       meta: toListing(index, meta, { includeDesc: true, includeProvenance: true }),
+      // The page's CONTENT hash — the CAS base `POST /api/wiki/series` (and any
+      // later page writer the reader drives) sends back. Beside `meta` rather
+      // than inside it: `toListing` is shared with the hot listing and with the
+      // outgoing/backlink arrays, and a 64-character digest per row there is
+      // payload nothing reads. Computed over the SAME bytes `writeWikiPage`
+      // hashes — `readWikiPage` and `defaultPageWriteIo.readFile` are both a
+      // bare `Bun.file().text()`, so the two cannot disagree.
+      hash: sha256(markdown),
       ...(hasProvenance(meta) ? { provenancePending: true } : {}),
       // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
       // a link opened on a non-default wiki lands on the DEFAULT one.

@@ -13,6 +13,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { displayTitleOf, type WikiListing } from "./wiki-filter.ts";
+import { seriesMenuBtnHtml } from "./wiki-series-menu.ts";
 
 /** One `Related work` row: an ordinary listing row plus the one line saying why
  *  it is there (`cites this page · shares RuneLind/muninn#550, …`). */
@@ -30,10 +31,16 @@ export interface RelatedListing extends WikiListing {
  * handler opens them, with no second click path) plus a second line carrying the
  * why. The reasons are split on ` · ` and wrapped in `<em>` — the separator is
  * punctuation and the reasons are the text, which is the distinction the CSS
- * paints. No `⋯ add to series` control: the series editor is a later PR, and a
- * visible control that cannot act is the dead control F2 rejected.
+ * paints.
+ *
+ * `editable` renders the series editor's `⋯` opener on each row — the second of
+ * its three sites, and the one that answers the question this block raises ("so
+ * are these one piece of work?"). It is a parameter rather than a flag read
+ * here, because this module must stay pure: the caller owns the two read-only
+ * flags. FALSE renders nothing at all rather than a dimmed control — a visible
+ * control that cannot act is the dead control #557's F2 decision rejected.
  */
-export function relatedSectionHtml(items: RelatedListing[]): string {
+export function relatedSectionHtml(items: RelatedListing[], editable = false): string {
   if (!items.length) return "";
   let html =
     `<div class="wiki-conn-section"><div class="wiki-conn-title">Related work (${items.length})</div>`;
@@ -47,6 +54,7 @@ export function relatedSectionHtml(items: RelatedListing[]): string {
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       `<div class="wiki-conn-text"><span>${esc(displayTitleOf(p))}</span>` +
       `<div class="wiki-conn-why" title="${esc(p.why)}">${why}</div></div>` +
+      (editable ? seriesMenuBtnHtml(p.relPath, !!p.series) : "") +
       `</div>`;
   });
   return html + "</div>";

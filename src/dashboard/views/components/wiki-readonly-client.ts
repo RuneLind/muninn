@@ -40,6 +40,18 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   // "Propose fixes" — seeds the review gate with rows only the write owner can
   // apply; the route 403s.
   "#lintPropose",
+  // The SERIES editor's two openers (the rail/related `⋯` and the reader
+  // header's `edit series`). Both are already ABSENT on a read-only instance and
+  // on a read-only root — `wiki-browser.ts` renders neither, which is the "no
+  // dead controls" rule and what the acceptance asserts — so these entries are
+  // the BACKSTOP for anything painted before the flags are read. They are in
+  // this list and NOT in the egress one below although they must also be dead on
+  // a read-only ROOT: `wikiBlockedSelectorFor(false, true)` installs THIS list
+  // too, so the click guard already covers both flags, and the egress list is by
+  // its own definition the non-write family (putting a write control there would
+  // dim it on the read-only INSTANCE for the wrong reason).
+  "[data-series-menu]",
+  "[data-series-edit]",
   // Backlog drain: opening the confirm panel is blocked too — every action
   // inside it is refused, so the panel is a dead end on a readonly instance.
   '[data-backlog-action="confirm"]',

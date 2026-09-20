@@ -224,6 +224,35 @@ export function seriesCensusKey(key: string): string {
 }
 
 /**
+ * The spelling a WRITER puts on disk for `wanted` — the one an existing member
+ * already uses whenever the two fold together, else `wanted`'s own trimmed form.
+ *
+ * The editor's counterpart to {@link seriesCensusKey}. The rail folds `Alpha`
+ * and `alpha` into one series, so a reader joining "alpha" from the menu of an
+ * existing `Alpha` must not write the second spelling: the fold would be
+ * unchanged and the wiki linter's 8.3(b) would then report a variant the reader
+ * never chose. Only the WRITE normalizes — the store keeps whatever is on disk,
+ * which is what leaves the lint something to report on a wiki edited by hand.
+ *
+ * First match in listing order wins, which is deterministic for one listing and
+ * only reachable when a wiki ALREADY holds two spellings — exactly the state the
+ * lint exists to clear.
+ */
+export function normalizeSeriesKey<T extends Pick<WikiListing, "series">>(
+  all: readonly T[],
+  wanted: string,
+): string {
+  const key = wanted.trim();
+  if (!key) return "";
+  const fold = seriesCensusKey(key);
+  for (const p of all) {
+    const existing = seriesKeyOf(p);
+    if (existing && seriesCensusKey(existing) === fold) return existing;
+  }
+  return key;
+}
+
+/**
  * The word a SERIES roll-up counts a member under when it declares no
  * `plan_status` — its folder, for the two folders that mean something.
  *

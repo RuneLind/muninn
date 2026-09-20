@@ -671,7 +671,20 @@ export async function renderWikiPage(opts?: {
     @media (hover: hover) and (not (any-pointer: coarse)) {
       .wiki-pin { opacity: 0; pointer-events: none; }
       .wiki-pin.on, .wiki-list-item:hover .wiki-pin { opacity: 1; pointer-events: auto; }
+      /* The series ⋯ follows the ★'s reveal rule exactly, minus its pinned-on
+         branch: unlike a pin it has no state to keep lit. */
+      .wiki-series-menu-btn { opacity: 0; pointer-events: none; }
+      .wiki-list-item:hover .wiki-series-menu-btn { opacity: 1; pointer-events: auto; }
     }
+    /* Series ⋯ — a rail row's and a Related-work row's opener. Same box as the ★
+       so the pair takes one slot's worth of the row rather than two. */
+    .wiki-series-menu-btn {
+      background: none; border: 0; padding: 0 2px; cursor: pointer;
+      font-size: 11px; line-height: 1.55; color: var(--text-muted);
+      flex-shrink: 0; opacity: 1; transition: opacity .12s;
+    }
+    .wiki-series-menu-btn:hover { color: var(--text-primary); }
+    .wiki-conn-related .wiki-series-menu-btn { align-self: center; margin-left: auto; }
     /* Drag handle on the rail's right edge. right:-14px resolves against the
        PADDING box, so the 14px box starts ON the pane's 1px border and runs 13px
        into the gap (measured at 1400px: pane border-box right edge 324, handle
@@ -1139,12 +1152,64 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-series-name { color: var(--text-primary); font-weight: 600; }
     .wiki-series-sep { color: var(--text-faint); }
-    /* The one control here, so it carries the accent and nothing else does. */
+    /* "continue at:" is the strip's PRIMARY control, so it keeps the accent and
+       "edit series" beside it does not — an editing affordance competing with
+       "where do I go now" for the eye would invert what the strip is for. */
     .wiki-series-go {
       border: none; background: none; padding: 0;
       color: var(--accent-light); font: inherit; cursor: pointer;
     }
     .wiki-series-go:hover { text-decoration: underline; }
+    .wiki-series-edit {
+      border: none; background: none; padding: 0;
+      color: var(--text-muted); font: inherit; cursor: pointer;
+    }
+    .wiki-series-edit:hover { color: var(--text-primary); text-decoration: underline; }
+    /* The series editor popover. position:fixed, placed by the client, which also
+       closes it on scroll/resize rather than re-anchoring — the openers live in
+       a scrolling rail. */
+    .wiki-series-menu {
+      position: fixed; z-index: 120; min-width: 240px; max-width: 320px;
+      max-height: 70vh; overflow-y: auto;
+      padding: 6px; border-radius: 8px;
+      background: var(--bg-surface); border: 1px solid var(--border-primary);
+      box-shadow: 0 8px 28px rgba(0,0,0,0.3);
+      font-size: 12px; color: var(--text-primary);
+    }
+    .wiki-series-menu-head {
+      padding: 4px 8px 6px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      border-bottom: 1px solid var(--border-primary);
+    }
+    .wiki-series-menu-sec {
+      padding: 8px 8px 3px; font-size: 10px; letter-spacing: .07em;
+      text-transform: uppercase; color: var(--text-muted);
+    }
+    .wiki-series-menu-row {
+      display: flex; align-items: baseline; gap: 8px; width: 100%;
+      padding: 5px 8px; border: 0; border-radius: 5px; background: none;
+      font: inherit; color: inherit; text-align: left; cursor: pointer;
+    }
+    .wiki-series-menu-row > span:first-child {
+      flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .wiki-series-menu-row:hover { background: var(--bg-hover); }
+    .wiki-series-menu-row.is-current { cursor: default; color: var(--text-muted); }
+    .wiki-series-menu-row.is-current:hover { background: none; }
+    .wiki-series-menu-note { flex-shrink: 0; color: var(--text-muted); font-size: 11px; }
+    .wiki-series-menu-form { display: flex; gap: 4px; padding: 5px 8px; }
+    .wiki-series-menu-input {
+      flex: 1; min-width: 0; padding: 3px 6px; border-radius: 4px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-inset); color: var(--text-primary); font: inherit;
+    }
+    .wiki-series-menu-go {
+      padding: 3px 8px; border-radius: 4px; cursor: pointer; font: inherit;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-inset); color: var(--text-primary);
+    }
+    .wiki-series-menu-msg { padding: 4px 8px 2px; color: var(--text-muted); }
+    .wiki-series-menu-msg.bad { color: var(--status-error); }
     /* The timeline scrolls sideways rather than wrapping: the steps are a
        sequence, and a wrapped one reads as two. */
     .wiki-series-tl {

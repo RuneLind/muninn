@@ -18,9 +18,24 @@
 import { escHtml as esc } from "./escape.ts";
 import {
   installWikiReadonlyGuard,
+  wikiReadonlyFlag,
   wikiReadonlyWikiFlag,
   WIKI_READONLY_INPUT_PLACEHOLDER,
 } from "./wiki-readonly-client.ts";
+// The series editor's pure half — the menu model, the head-move plan and the
+// markup. Only the DOM (the popover, the writes, the repaint) lives here.
+import {
+  buildSeriesMenu,
+  headMoveWrites,
+  seriesEditBtnHtml,
+  seriesMenuBtnHtml,
+  seriesMenuHtml,
+  SERIES_EDIT_ATTR,
+  SERIES_MENU_ATTR,
+  SERIES_MENU_ID,
+  type SeriesMenuModel,
+  type SeriesWrite,
+} from "./wiki-series-menu.ts";
 import { makeSseFrameParser, sseClient, type SseFrame, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody, enhanceConfidenceHtml } from "./wiki-ask-render.ts";
 import {
@@ -995,6 +1010,21 @@ function pinBtnHtml(pinned: boolean): string {
 }
 
 /**
+ * May this reader edit a page's series?
+ *
+ * Both read-only mechanisms refuse the write server-side (`writeWikiPage`'s two
+ * guards, plus the route's own `readonlyRefusal`), and this is what keeps the
+ * control OFF THE PAGE rather than dimmed: the acceptance for a read-only
+ * instance is that the menu is ABSENT, and #557's F2 decision is that a visible
+ * control which cannot act is worse than none. The selectors are in both
+ * `wiki-readonly-client.ts` lists as well, as the backstop for anything painted
+ * before the flags are read.
+ */
+function seriesEditable(): boolean {
+  return !wikiReadonlyFlag() && !wikiReadonlyWikiFlag();
+}
+
+/**
  * Paint EVERY row's ★ from the stored pin list. No notion of which page changed,
  * because "the page that was clicked" is the wrong unit: `togglePin` displaces
  * the oldest pin at `PINS_MAX`, so a toggle at the cap flips TWO pages. Painting
@@ -1089,6 +1119,9 @@ function renderList(): void {
   // room; `railListHtml` below still owns the empty state, because the rule that
   // made it a function of the PAGE ROWS alone outlives the prefix that broke it.
   let html = "";
+  // Read ONCE per render, not per row: the answer is a fact about the instance
+  // and the wiki, and it is the same for all 953 rows.
+  const canEditSeries = seriesEditable();
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
       // A FOLDABLE header (today: Bookkeeping) is a real button: it carries the
@@ -1345,6 +1378,10 @@ function renderList(): void {
       // on every row — a third of the title box at RAIL_WIDTH_MIN, paid by a
       // reader who never pins anything.
       `<div class="wiki-list-end">` +
+      // The series `⋯`, beside the ★ and hidden until hover exactly like it —
+      // two pointer affordances in one slot rather than a third element paying
+      // the row's gap again. Absent entirely on a read-only instance or root.
+      (canEditSeries ? seriesMenuBtnHtml(p.relPath, !!p.series) : "") +
       pinBtnHtml(entry.pinned) +
       // The full date on the META element, never on the row — same reason the
       // derivation is repeated onto `.wiki-list-title` above. It carries the
@@ -2126,7 +2163,7 @@ function renderConnections(data: WikiPageDetail): void {
     // `Related work` leads: it is the one section that ANSWERS a question
     // ("what else is this piece of work?") rather than listing a mechanism.
     // The two below are the raw link lists it is derived from.
-    relatedSectionHtml(data.related ?? []) +
+    relatedSectionHtml(data.related ?? [], seriesEditable()) +
     section("Linked from", data.backlinks) +
     section("Links to", data.outgoing) +
     // Placeholder the lazy "Similar" fetch fills in after the page renders.
@@ -2322,6 +2359,11 @@ function seriesStripHtml(m: WikiListing): string {
       ` title="${esc("Open " + full)}">${esc(clipSeriesTitle(full))}</button>` +
       `</span>`;
   }
+  // The `edit series` affordance PR A deliberately omitted rather than rendering
+  // inert — the function behind it is this PR's. Last in the strip, so it never
+  // pushes the label, the count or `continue at:` around; absent (never dimmed)
+  // where the write is refused, which is what the read-only acceptance asserts.
+  if (seriesEditable()) strip += sep + seriesEditBtnHtml(m.relPath);
   strip += `</div>`;
   const steps = ordered
     .map((p) => {
@@ -2339,6 +2381,234 @@ function seriesStripHtml(m: WikiListing): string {
     .join("");
   return `<div class="wiki-series-head">${strip}<div class="wiki-series-tl">${steps}</div></div>`;
 }
+
+// ── Series editor: the popover, the writes, the repaint ───────────────
+//
+// ONE popover node, keyed by id, so "only one open at a time" is a property of
+// the DOM rather than a rule something has to enforce. It is `position: fixed`
+// and CLOSES on scroll/resize rather than re-anchoring: the openers live in a
+// scrolling rail, and a menu that chases its row is a menu whose click lands
+// somewhere else.
+//
+// The CAS base is read FRESH per write from `GET /api/wiki/page?relPath=`, for
+// every target including the page the reader has open. The listing carries no
+// hash, and a hash cached at page-open time goes stale the moment this editor's
+// own first write lands — re-seeding it from each 200 is a second state machine
+// to get wrong, and the round trip is one fetch per human click.
+
+/** The page the open popover acts on, and which view it is painting. `null` when
+ *  no menu is open. */
+let seriesMenu: { model: SeriesMenuModel; edit: boolean; busy: boolean } | null = null;
+
+function seriesMenuEl(): HTMLElement | null {
+  return document.getElementById(SERIES_MENU_ID);
+}
+
+function closeSeriesMenu(): void {
+  seriesMenuEl()?.remove();
+  seriesMenu = null;
+}
+
+/** Open the popover for `relPath`, anchored under `anchor`. */
+function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): void {
+  closeSeriesMenu();
+  if (!seriesEditable()) return;
+  const model = buildSeriesMenu(allPages, relPath);
+  if (!model) return;
+  const el = document.createElement("div");
+  el.id = SERIES_MENU_ID;
+  el.className = "wiki-series-menu";
+  el.setAttribute("role", "menu");
+  el.innerHTML = seriesMenuHtml(model, edit);
+  document.body.appendChild(el);
+  const rect = anchor.getBoundingClientRect();
+  // Clamped into the viewport on both axes; the rail's rows sit at the left
+  // edge and the reader header's control near the right one.
+  const width = el.offsetWidth || 260;
+  const height = el.offsetHeight || 200;
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+  const below = rect.bottom + 6;
+  const top = below + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - 6) : below;
+  el.style.left = `${Math.round(left)}px`;
+  el.style.top = `${Math.round(top)}px`;
+  seriesMenu = { model, edit, busy: false };
+  el.querySelector<HTMLInputElement>("[data-series-input]")?.focus();
+}
+
+/** Say what happened, in the popover, without tearing it down — a refusal the
+ *  reader cannot read is a click that did nothing. */
+function setSeriesMenuNote(text: string, bad: boolean): void {
+  const el = seriesMenuEl();
+  if (!el) return;
+  let note = el.querySelector<HTMLElement>(".wiki-series-menu-msg");
+  if (!note) {
+    note = document.createElement("div");
+    note.className = "wiki-series-menu-msg";
+    el.appendChild(note);
+  }
+  note.classList.toggle("bad", bad);
+  note.textContent = text;
+}
+
+/** The page's current content hash — the CAS base. `null` when the page cannot
+ *  be read, which the caller reports rather than writing without one. */
+async function seriesBaseHash(relPath: string): Promise<string | null> {
+  try {
+    const res = await fetch(withWiki(`/api/wiki/page?relPath=${encodeURIComponent(relPath)}`));
+    const data = (await res.json()) as { hash?: unknown };
+    return typeof data.hash === "string" && data.hash ? data.hash : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run the editor's writes, in order, stopping at the first failure.
+ *
+ * ORDER MATTERS on the two-call head move (see {@link headMoveWrites}) and the
+ * stop is what keeps its failure state the reportable one: the label is cleared
+ * first, so a failure leaves a series with no labelled member — rendered under
+ * its bare key, and reported by the wiki lint's 8.3 — rather than two members
+ * claiming the label, where the rail silently picks one and says nothing.
+ */
+async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
+  if (!seriesMenu || seriesMenu.busy) return;
+  seriesMenu.busy = true;
+  setSeriesMenuNote("Saving…", false);
+  try {
+    for (const write of writes) {
+      const baseHash = await seriesBaseHash(write.relPath);
+      if (!baseHash) {
+        setSeriesMenuNote(`Could not read ${write.relPath}`, true);
+        return;
+      }
+      // The wiki rides the BODY, not the query — the Stamp route's contract,
+      // and the reason the route reads one place: a write must name its target
+      // in the payload it is validated against, never in a string the client
+      // happened to append.
+      const res = await fetch("/api/wiki/series", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wiki: WIKI, ...write, baseHash }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        setSeriesMenuNote(body?.error || `Write refused (${res.status})`, true);
+        return;
+      }
+    }
+    closeSeriesMenu();
+    await refreshAfterSeriesWrite();
+  } finally {
+    if (seriesMenu) seriesMenu.busy = false;
+  }
+}
+
+/**
+ * Re-read the listing and repaint what the edit moved.
+ *
+ * Deliberately a FORCED apply (`force: true`): `receivePages` defers an arriving
+ * listing while the reader has an article open, which is exactly the state the
+ * header's `edit series` acts from — and here the re-sort IS the reader's own
+ * click, not the background refresh that rule exists for. `?refresh=1` because
+ * the index behind `/api/wiki/pages` is a 5-minute TTL cache; the route rebuilt
+ * it inside the write, and this is what makes the rail read the rebuild.
+ */
+async function refreshAfterSeriesWrite(): Promise<void> {
+  await requestPagesAwaited({ refresh: true, force: true });
+  repaintSeriesHead();
+}
+
+/** Repaint the open article's series header from the fresh listing — the rail's
+ *  own `renderList` does not reach inside `#articleWrap`. Adds, replaces or
+ *  removes the block, in the slot `articleHeadHtml` puts it (right after the
+ *  meta row). */
+function repaintSeriesHead(): void {
+  if (!currentRelPath) return;
+  const host = document.querySelector<HTMLElement>(".wiki-article-head");
+  if (!host) return;
+  const key = normalizeRel(currentRelPath);
+  const meta = allPages.find((p) => normalizeRel(p.relPath) === key);
+  const html = meta ? seriesStripHtml(meta) : "";
+  const existing = host.querySelector(".wiki-series-head");
+  if (existing) {
+    if (html) existing.outerHTML = html;
+    else existing.remove();
+    return;
+  }
+  if (!html) return;
+  host.querySelector(".wiki-meta-row")?.insertAdjacentHTML("afterend", html);
+}
+
+document.addEventListener("keydown", (e) => {
+  if ((e as KeyboardEvent).key === "Escape" && seriesMenuEl()) closeSeriesMenu();
+});
+// Closed rather than re-anchored — see the block comment above. `capture` so a
+// scroll inside the rail (which does not bubble) is seen too.
+window.addEventListener("scroll", () => closeSeriesMenu(), true);
+window.addEventListener("resize", () => closeSeriesMenu());
+
+/** The popover's own delegate, on its node, so the shell's document listeners
+ *  carry no branch for it and a click inside it never reaches the rail's
+ *  row-opening handler. */
+document.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  if (!target?.closest) return;
+  const menuEl = seriesMenuEl();
+  if (menuEl && menuEl.contains(target)) {
+    const cmd = target.closest<HTMLElement>("[data-series-cmd]");
+    if (!cmd || !seriesMenu) return;
+    e.preventDefault();
+    const arg = cmd.getAttribute("data-series-arg") || "";
+    const { model } = seriesMenu;
+    if (cmd.getAttribute("data-series-cmd") === "join") {
+      void applySeriesWrites([{ relPath: model.relPath, series: arg }]);
+    } else if (cmd.getAttribute("data-series-cmd") === "remove") {
+      // The route clears `series_label:` with the key — a label on a page in no
+      // series names nothing and is the lint's own 8.3(a) finding.
+      void applySeriesWrites([{ relPath: model.relPath, series: null }]);
+    } else if (cmd.getAttribute("data-series-cmd") === "head" && arg) {
+      void applySeriesWrites(headMoveWrites(model, arg, model.label));
+    }
+    return;
+  }
+  // An opener. Re-clicking the one that opened the menu closes it, the ordinary
+  // popover convention.
+  const opener =
+    target.closest<HTMLElement>(`[${SERIES_MENU_ATTR}]`) ||
+    target.closest<HTMLElement>(`[${SERIES_EDIT_ATTR}]`);
+  if (opener) {
+    e.preventDefault();
+    e.stopPropagation();
+    const edit = opener.hasAttribute(SERIES_EDIT_ATTR);
+    const rel = opener.getAttribute(edit ? SERIES_EDIT_ATTR : SERIES_MENU_ATTR) || "";
+    const wasOpen = !!seriesMenu && seriesMenu.model.relPath === rel && seriesMenu.edit === edit;
+    closeSeriesMenu();
+    if (!wasOpen && rel) openSeriesMenu(opener, rel, edit);
+    return;
+  }
+  // Any other click dismisses.
+  if (menuEl) closeSeriesMenu();
+});
+
+document.addEventListener("submit", (e) => {
+  const form = (e.target as HTMLElement)?.closest?.<HTMLElement>("[data-series-form]");
+  if (!form || !seriesMenu) return;
+  e.preventDefault();
+  const value = (form.querySelector("[data-series-input]") as HTMLInputElement | null)?.value.trim();
+  if (!value) return;
+  const { model } = seriesMenu;
+  if (form.getAttribute("data-series-form") === "label") {
+    // The label lives on the HEAD. With no labelled member yet, it lands on the
+    // page the reader opened the editor from — which is the page they are
+    // looking at, and which `seriesHead` then reads it off.
+    void applySeriesWrites([
+      { relPath: model.headRel || model.relPath, series: model.current, seriesLabel: value },
+    ]);
+    return;
+  }
+  void applySeriesWrites([{ relPath: model.relPath, series: value }]);
+});
 
 /**
  * Article-head block (title, badges, tags, dates, source link) — shared by
@@ -2669,6 +2939,19 @@ document.body.addEventListener("click", (e) => {
   // `[data-relpath]` row, both belong to the list's own listener, and a click on
   // either means "show me what is folded here", never "open this page".
   if (target.closest && target.closest("[data-fold-key]")) return;
+  // Same rule again for the series editor: its `⋯` opener sits inside a
+  // `[data-relpath]` row (the rail's and the Related-work panel's), and its
+  // popover is appended to `document.body`, so without this skip a click on
+  // either OPENED THE PAGE underneath — measured, one navigation per menu open.
+  // Skipped by SELECTOR rather than by stopping propagation in the editor's own
+  // listener, which runs after this one: the ★ and the fold chip settled that
+  // rule for exactly this shape.
+  if (
+    target.closest &&
+    target.closest(`[${SERIES_MENU_ATTR}], [${SERIES_EDIT_ATTR}], #${SERIES_MENU_ID}`)
+  ) {
+    return;
+  }
   // The article header's project hub chip. Delegated here rather than bound at
   // render time because `#articleWrap`'s innerHTML is replaced on every page
   // load — and checked BEFORE the nav-link branch, since the chip sits inside the
@@ -5849,7 +6132,7 @@ function paintWikiSetError(error: string): void {
 /** Fold an arrived `/api/wiki/pages` response in. Boot and refresh share every
  *  guard; only the error PAINTING is boot-only (a refresh nobody asked for that
  *  fails silently keeps the last good listing, which is strictly better). */
-function handlePagesResponse(text: string, seq: number, isBoot: boolean): void {
+function handlePagesResponse(text: string, seq: number, isBoot: boolean, force = false): void {
   let data: WikiPagesResponse | null = null;
   try {
     data = JSON.parse(text) as WikiPagesResponse;
@@ -5870,7 +6153,12 @@ function handlePagesResponse(text: string, seq: number, isBoot: boolean): void {
   const fingerprint = pagesFingerprint(text);
   const outcome = receivePages(pagesRefresh, {
     data,
-    view: currentViewState(),
+    // `force` reports the START view whatever is on screen, which is the ONE
+    // thing it overrides: every other guard — the sequence, the empty set, the
+    // unchanged fingerprint — still runs. It is for a refetch the reader's own
+    // write asked for (the series editor), where deferring the listing would
+    // leave the fold and the header showing the state before the click.
+    view: force ? "start" : currentViewState(),
     seq,
     fingerprint,
   });
@@ -5887,13 +6175,23 @@ function handlePagesResponse(text: string, seq: number, isBoot: boolean): void {
  * throttle bounds the cost). Reserved for a user actively returning to the tab:
  * the boot load and the idle heartbeat take the TTL-fresh plain fetch.
  */
-function requestPages(opts: { refresh: boolean; boot?: boolean }): void {
+function requestPages(opts: { refresh: boolean; boot?: boolean; force?: boolean }): void {
+  void requestPagesAwaited(opts);
+}
+
+/** The same request, awaitable — so a caller that must repaint something ELSE
+ *  once the listing is in (the series editor's header repaint) can. */
+function requestPagesAwaited(opts: {
+  refresh: boolean;
+  boot?: boolean;
+  force?: boolean;
+}): Promise<void> {
   // Sequence + throttle stamp at REQUEST time: a hung request must not leave the
   // gate open for a pile-up, and responses are adopted in issue order.
   const seq = startFetch(pagesRefresh, Date.now());
-  fetch(withWiki("/api/wiki/pages" + (opts.refresh ? "?refresh=1" : "")))
+  return fetch(withWiki("/api/wiki/pages" + (opts.refresh ? "?refresh=1" : "")))
     .then((r) => r.text())
-    .then((text) => handlePagesResponse(text, seq, !!opts.boot))
+    .then((text) => handlePagesResponse(text, seq, !!opts.boot, !!opts.force))
     .catch((err: Error) => {
       if (opts.boot) paintBootError(`Failed to load wiki: ${esc(err.message)}`);
       // Otherwise silent — a failed refresh keeps the last good listing.
