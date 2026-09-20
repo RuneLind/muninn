@@ -19,6 +19,11 @@
  * page that mentions a busy week; two is what made the dry run's pairs read as
  * one piece of work.
  *
+ * **All three cuts are SYMMETRIC**: bookkeeping, hub and digest each say "this
+ * page is not a piece of work", which is as true of the page you have open as
+ * of a candidate. A bookkeeping or hub page therefore gets no block at all —
+ * see {@link computeRelated} for what the one-sided version measured.
+ *
  * Pure and index-only: it takes the built `WikiIndex` and a relPath and returns
  * the DECISION (which pages, and why), never a listing row. The route
  * (`/api/wiki/page`) maps each decision onto `toListing` — the same shape the
@@ -27,58 +32,49 @@
  */
 
 import { bySeriesDateDesc } from "../dashboard/views/components/wiki-groups.ts";
-import { isMetaStem } from "../dashboard/views/components/wiki-filter.ts";
-import { normalizeRelPath, wikiPageStem, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import { isMetaStem, pageStemOf } from "../dashboard/views/components/wiki-filter.ts";
+import { normalizeRelPath, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import {
+  RELATED_DIGEST_PRS,
+  RELATED_HUB_BACKLINKS,
+  RELATED_SHARED_PRS_MIN,
+  RELATED_SHARED_PRS_SHOWN,
+} from "./related-constants.ts";
 
-/**
- * A page with more backlinks than this is a HUB and is never a related row: it
- * is cited by everything, so it is about nothing in particular. Without the cut
- * every neighbourhood on mimir contained the same handful of pages.
- *
- * 25 is fitted to today's mimir — the same threshold the campaign-2 dry run
- * measured with, where it cuts `index`, the plan overview and the genesis page
- * and nothing else. A constant, not a name list, so an acceptance run on
- * another wiki can move it.
- */
-export const RELATED_HUB_BACKLINKS = 25;
+// Re-exported so the rule and its tests read one name each — the numbers and
+// what they were measured against live in `related-constants.ts`, which imports
+// nothing and therefore loads under Playwright's loader too.
+export {
+  RELATED_DIGEST_PRS,
+  RELATED_HUB_BACKLINKS,
+  RELATED_SHARED_PRS_MIN,
+  RELATED_SHARED_PRS_SHOWN,
+};
 
 /**
  * BOOKKEEPING pages are never related work, whatever the link graph says —
- * `index`, `log` and `CLAUDE`, by stem, in any folder (`isMetaStem`, the rail's
- * own predicate for the `Bookkeeping` tail).
+ * `index`, `log` and `CLAUDE`, by stem, in any folder.
  *
- * The hub cut alone does not reach them, and that is measured rather than
+ * The stem comes from `pageStemOf`, the RAIL's own spelling, which strips any
+ * extension: `wikiPageStem` strips only `.md`/`.mdx`, so `plans/index.html` read
+ * as the stem `index.html`, sat under `Bookkeeping` in the rail and arrived here
+ * as ordinary related work. ⚠️ `isMetaStem` is case-SENSITIVE on `CLAUDE` alone
+ * (inherited from the rail, where the same predicate decides the tail).
+ *
+ * The hub cut alone does not reach these pages, and that is measured rather than
  * assumed: on mimir (547 pages) `index.md` has **3** backlinks, `log.md` 4 and
  * `plans/index.md` 6 — all far under `RELATED_HUB_BACKLINKS`, because a catalog
- * page LINKS OUT rather than being linked to. So without this they led the block
- * on both acceptance pages. The campaign's dry run cut them by NAME
- * (`slug === "index"`, plus `plan-overview|genesis`); this is the same cut
- * spelled as the predicate the reader already has, rather than a second name
- * list to keep in step.
+ * page LINKS OUT rather than being linked to. Without the cut they led the block
+ * on both acceptance pages.
  */
 function isBookkeeping(relPath: string): boolean {
-  return isMetaStem(wikiPageStem(relPath));
+  return isMetaStem(pageStemOf(relPath));
 }
 
-/**
- * A page naming more PR references than this is a DIGEST — a review report, a
- * month's blog, an index — and shared PR numbers say nothing about it: it names
- * half the month by construction. Cut from the PR-sharing source only; a digest
- * that really links to the open page still appears, with the link as its reason.
- *
- * Applied to BOTH ends of a pair, not only to the candidate: the rule reads
- * "≥2 shared refs means one piece of work", and that inference is equally false
- * when the digest is the page you have open. 15 is the dry run's constant
- * (`RELATED_DIGEST_PRS`), where it cuts `index`, the review-9 blog and the
- * plans-index blog.
- */
-export const RELATED_DIGEST_PRS = 15;
-
-/** How many shared PR refs a pair needs before it is one piece of work. */
-export const RELATED_SHARED_PRS_MIN = 2;
-
-/** How many of the shared refs the `shares …` reason names. */
-const SHARED_PRS_SHOWN = 2;
+/** How many pages link to this one. The hub test's one reader. */
+function backlinkCount(index: WikiIndex, key: string): number {
+  return index.backlinks.get(key)?.length ?? 0;
+}
 
 /** One related page: which page, and the one line saying why it is there. */
 export interface RelatedRef {
@@ -106,11 +102,24 @@ const REASON_CITED_BY = "cited by this page";
  *
  * Returns `[]` for an unknown relPath and for a page with no neighbours — the
  * route passes that through and the reader renders no block at all.
+ *
+ * **The bookkeeping and hub cuts apply to the OPEN page too**, the way the
+ * digest cut already did: each one says "this page is not a piece of work", and
+ * that is as true of the page you have open as of a candidate. Measured on the
+ * 547-page mimir clone with the cuts on candidates only, opening `index.md`
+ * yielded **340** rows (+220 KB on one response), `plans/index.md` 246, `log.md`
+ * 189 and `flows/how-we-build.mdx` — cut as a candidate at 27 backlinks — 36.
+ * With both applied to the open page as well, the largest block on that corpus
+ * is **33** rows (`overview.md`), which is the link graph's own bound: no cap is
+ * declared, because a cap would silently drop rows from a page that really does
+ * have that many neighbours.
  */
 export function computeRelated(index: WikiIndex, relPath: string): RelatedRef[] {
   const self = index.resolveRelPath(relPath);
   if (!self) return [];
   const selfKey = normalizeRelPath(self.relPath);
+  if (isBookkeeping(self.relPath)) return [];
+  if (backlinkCount(index, selfKey) > RELATED_HUB_BACKLINKS) return [];
 
   /** Candidate key → its reasons, in the order this function adds them. */
   const reasons = new Map<string, string[]>();
@@ -121,9 +130,14 @@ export function computeRelated(index: WikiIndex, relPath: string): RelatedRef[] 
     const meta = index.resolveRelPath(candidateKey);
     if (!meta) return;
     if (isBookkeeping(meta.relPath)) return;
+    // The open page's OWN attachments are not related work: the rail already
+    // shows them as this page's attachment chip, so a row here is the same file
+    // twice on one screen. Scoped to THIS page's children — an `.html` explainer
+    // belonging to some other page is an ordinary candidate.
+    if (meta.parent !== undefined && normalizeRelPath(meta.parent) === selfKey) return;
     // The hub cut applies to EVERY source, link included: a page cited by the
     // whole wiki is not related work just because this page cites it too.
-    if ((index.backlinks.get(candidateKey)?.length ?? 0) > RELATED_HUB_BACKLINKS) return;
+    if (backlinkCount(index, candidateKey) > RELATED_HUB_BACKLINKS) return;
     pages.set(candidateKey, meta);
     const list = reasons.get(candidateKey);
     if (list) {
@@ -164,7 +178,7 @@ export function computeRelated(index: WikiIndex, relPath: string): RelatedRef[] 
       // are the first two THIS page declares rather than whichever pair the
       // candidate happened to write first.
       shared.sort((a, b) => selfRefs.indexOf(a) - selfRefs.indexOf(b));
-      push(key, `shares ${shared.slice(0, SHARED_PRS_SHOWN).join(", ")}`);
+      push(key, `shares ${shared.slice(0, RELATED_SHARED_PRS_SHOWN).join(", ")}`);
     }
   }
 

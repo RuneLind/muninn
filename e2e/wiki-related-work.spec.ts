@@ -32,6 +32,15 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { contrastOf } from "./contrast.ts";
+/**
+ * The REAL constants, imported rather than re-typed. `src/wiki/related.ts`
+ * itself is unloadable here — it reaches `registry.ts`, whose `import.meta.dir`
+ * is `undefined` under Playwright's node loader, and the import alone made this
+ * whole file report "No tests found" — but `related-constants.ts` imports
+ * nothing, so it loads. Re-typed numbers only caught a threshold moving UP:
+ * 25 → 10 and 15 → 5 both left this fixture passing.
+ */
+import { RELATED_DIGEST_PRS, RELATED_HUB_BACKLINKS } from "../src/wiki/related-constants.ts";
 
 const PORT = e2ePort("wiki-related-work");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -40,16 +49,6 @@ const WIKI = "e2e-related";
 
 const OPEN = "plans/a.mdx";
 
-/**
- * `RELATED_HUB_BACKLINKS` and `RELATED_DIGEST_PRS` (`src/wiki/related.ts`),
- * re-typed rather than imported: that module reaches `store.ts` →
- * `registry.ts`, whose `import.meta.dir` is `undefined` under Playwright's node
- * loader, and the import alone made this whole file unloadable (measured — "No
- * tests found"). `related.test.ts` drives both by their real exported names; here
- * they are fixture SIZES, and a drift shows up as this spec's own red.
- */
-const HUB_BACKLINKS = 25;
-const DIGEST_PRS = 15;
 
 /** Two PR refs the open page carries — one authored in `prs:`, one only in its
  *  prose, as a pull URL. Both have to reach `prRefs` for `c` to pair. */
@@ -71,7 +70,8 @@ function md(title: string, fm: string[], body: string): string {
  *  - `hub` — cites `a`, and 26 fillers cite `hub`. Dated NEWER than every real
  *    row, so it would lead the block if the cut were off.
  *  - `digest` — names 16 PR refs including both of `a`'s, and links nothing.
- *  - `unrelated` — in none of it.
+ *  - `unrelated` — shares exactly ONE ref and links nothing: one under the
+ *    threshold, so a rule that paired on a single ref would put it in.
  *
  * Every page carries a `status_date`, which is what the block orders by on a
  * temp wiki with no git history.
@@ -105,12 +105,18 @@ const PAGES: Array<[string, string]> = [
       "Digest page",
       ["status_date: 2026-09-17"],
       `An audit naming muninn#549, muninn#550, ${Array.from(
-        { length: DIGEST_PRS - 1 },
+        { length: RELATED_DIGEST_PRS - 1 },
         (_, i) => `huginn#${i + 1}`,
       ).join(", ")}.`,
     ),
   ],
-  ["plans/unrelated.mdx", md("Unrelated plan", ["status_date: 2026-09-13"], "Nothing at all.")],
+  [
+    "plans/unrelated.mdx",
+    // ONE of the open page's refs and no link: the only page here a rule that
+    // dropped `RELATED_SHARED_PRS_MIN` to 1 would admit. With "Nothing at all."
+    // in its body the assertion below could not fail under any rule.
+    md("Unrelated plan", ["status_date: 2026-09-13"], `Names ${REF_AUTHORED} once.`),
+  ],
 ];
 
 /** The rows the block must hold, newest first, with their why lines. */
@@ -131,7 +137,7 @@ test.beforeAll(async () => {
   }
   // One past the threshold: the cut fires ABOVE it, not at it.
   await mkdir(path.join(root, "fill"), { recursive: true });
-  for (let i = 1; i <= HUB_BACKLINKS + 1; i++) {
+  for (let i = 1; i <= RELATED_HUB_BACKLINKS + 1; i++) {
     await writeFile(
       path.join(root, `fill/f${i}.mdx`),
       md(`Filler ${i}`, ["status_date: 2026-01-01"], "Points at [[hub]]."),
@@ -237,13 +243,78 @@ test("`/api/wiki/pages` rows carry no `prRefs` — the listing did not grow", as
   expect(body.pages.some((p: Record<string, unknown>) => "prRefs" in p)).toBe(false);
 });
 
+/**
+ * The background the nearest PAINTING ancestor actually has — `contrastOf`'s own
+ * walk, returned rather than folded into a ratio, so a hovered assertion can
+ * prove the fill really changed instead of silently re-measuring the rest state.
+ */
+function paintedBg(locator: import("@playwright/test").Locator): Promise<string> {
+  return locator.evaluate((el) => {
+    let node: HTMLElement | null = el as HTMLElement;
+    while (node) {
+      const c = getComputedStyle(node).backgroundColor;
+      if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) return c;
+      node = node.parentElement;
+    }
+    return "none";
+  });
+}
+
+test("the why line is fully VISIBLE — the PR numbers are what the `shares` reason is for", async ({
+  page,
+}) => {
+  await openReader(page);
+  const why = relatedRows(page).nth(1).locator(".wiki-conn-why");
+  await expect(why).toHaveText(EXPECTED[1]![1]);
+
+  // ⚠️ `toHaveText` passes on a CLIPPED element, which is how this shipped:
+  // `white-space: nowrap` + `text-overflow: ellipsis` painted 248px of a 353px
+  // line and hid 30% of it — the half carrying the PR numbers. Two measurements
+  // are needed: the element's OWN box (the ellipsis) and every clipping
+  // ancestor's (the technique `wiki-rail-series.spec.ts`'s census case uses).
+  const fit = await why.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    let clipLeft = -Infinity;
+    let clipRight = Infinity;
+    for (let n = el.parentElement; n; n = n.parentElement) {
+      if (getComputedStyle(n).overflowX === "visible") continue;
+      const r = n.getBoundingClientRect();
+      clipLeft = Math.max(clipLeft, r.left);
+      clipRight = Math.min(clipRight, r.right);
+    }
+    return {
+      natural: rect.width,
+      visible: Math.max(0, Math.min(rect.right, clipRight) - Math.max(rect.left, clipLeft)),
+      client: el.clientWidth,
+      scroll: el.scrollWidth,
+      lines: Math.round(rect.height / parseFloat(getComputedStyle(el).lineHeight)),
+    };
+  });
+  expect(fit.natural).toBeGreaterThan(0);
+  expect(fit.visible).toBeGreaterThanOrEqual(fit.natural - 0.5);
+  expect(fit.client).toBeGreaterThanOrEqual(fit.scroll);
+  // …and it WRAPS rather than growing without bound: the row stays compact.
+  expect(fit.lines).toBeGreaterThan(1);
+  expect(fit.lines).toBeLessThanOrEqual(2);
+});
+
 for (const scheme of ["light", "dark"] as const) {
-  test(`the why line clears 4.5:1 in the ${scheme} theme`, async ({ page }) => {
+  test(`the why line clears 4.5:1 in the ${scheme} theme, at rest and hovered`, async ({ page }) => {
     await page.emulateMedia({ colorScheme: scheme });
     await openReader(page);
     // The `em` carries the reasons; the container carries only the separators.
-    const reason = relatedRows(page).nth(1).locator(".wiki-conn-why em").first();
+    const row = relatedRows(page).nth(1);
+    const reason = row.locator(".wiki-conn-why em").first();
     await expect(reason).toBeVisible();
+    expect(await contrastOf(reason)).toBeGreaterThanOrEqual(4.5);
+
+    // …and over the fill the row paints under the POINTER, which is where a
+    // reader is whenever they are reading one of these rows. Measured at
+    // --text-muted: 4.42:1 in the light theme, under the floor.
+    const rest = await paintedBg(reason);
+    await row.hover();
+    const hovered = await paintedBg(reason);
+    expect(hovered).not.toBe(rest);
     expect(await contrastOf(reason)).toBeGreaterThanOrEqual(4.5);
   });
 }

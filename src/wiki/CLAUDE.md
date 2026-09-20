@@ -959,12 +959,26 @@ Three body shapes, in the order the one alternation regex tries them:
 
 | Shape | Owner |
 |---|---|
-| `https://github.com/<owner>/<repo>/pull/N` | as written |
-| `<owner>/<repo>#N` | as written |
+| `https://github.com/<owner>/<repo>/pull/N` | as written, any owner |
+| `<owner>/<repo>#N` | as written — in PROSE, `PR_REF_OWNER` only |
 | `<repo>#N` / `<repo> #N`, `PR_REF_REPOS` only | `PR_REF_OWNER` (`RuneLind`) |
 
 Every clause of that is a shape the corpus contains:
 
+- ⚠️ **Shape 2's owner is gated, and the two callers gate it differently.**
+  `<a>/<b>#N` is also an anchor link, a wikilink fragment and a version string,
+  so a BODY scan keeps it only for `PR_REF_OWNER`, matched without case. Without
+  that gate `[x](plans/foo#3)`, `[[plans/index#3]]` and `v1.2/3.4#5` each minted
+  a ref that pairs pages, and mimir's `log.md` carries a live `Jira-Cloud/PR#165`.
+  One AUTHORED `prs:` entry keeps any owner (`normalizePrRef`, anchored end to
+  end) — the documented frontmatter shape is
+  `prs: [navikt/melosys-api#1234, RuneLind/muninn#543]` and `PR_COORDINATE` in
+  `provenance.ts`, the single-value sibling, accepts any owner too. An authored
+  entry is a declaration; a prose span is a guess. Measured cost of the gate on
+  mimir: **822 → 819** refs over the same 156 pages — one false
+  `Jira-Cloud/PR#165` and two prose spellings of `navikt/melosys-muninn#1`, both
+  on pages the digest cut already excluded; the third occurrence of that PR is a
+  pull URL and still pairs.
 - **A bare `#N` is not a PR reference.** In this corpus it is a heading anchor or
   a count, so the third shape needs a known repo name in front of it.
   `PR_REF_REPOS` is `muninn`, `huginn`, `mimir`, `yggdrasil`, `claude-usage`,
@@ -975,7 +989,14 @@ Every clause of that is a shape the corpus contains:
   `#12` in the next as one reference.
 - **The lookbehind keeps a longer path out.** In `src/wiki/store.ts` the `wiki`
   and `store.ts` segments are both preceded by `/`, so neither starts a match,
-  and `x-muninn#5` is not `muninn#5`.
+  and `x-muninn#5` is not `muninn#5`. `@` is in that class for the same reason:
+  `rune@muninn#5` is a handle, not a PR.
+- **An unparseable `prs:` entry is DROPPED.** `normalizePrRef` answers
+  `undefined` and `pagePrRefs` leaves it out. The `jira` precedent (keep the
+  typo, it pairs with nothing) does not transfer — two pages both parked on
+  `TBD` carry two identical unparseable entries, which is exactly the
+  `RELATED_SHARED_PRS_MIN` threshold. The provenance strip renders the page's own
+  `meta.prs` verbatim; this is the DERIVED field.
 - ⚠️ **Frontmatter is not body, and fenced and inline code is masked** —
   `stripFrontmatter` plus `markdownCodeRegions`, the two rules
   `extractEmbedTargets` already applies. Measured: both acceptance pages quote
@@ -997,11 +1018,21 @@ DECISION — which pages, and why — never a listing row. `/api/wiki/page` maps
 decision onto `toListing`, so a related row is the shape the panel's other rows
 are plus `why`, and this module stays testable without a Hono app.
 
-Three cuts, each one a way the block fills with pages nobody meant:
+Three cuts, each one a way the block fills with pages nobody meant — and **all
+three are SYMMETRIC**: each says "this page is not a piece of work", which is as
+true of the page you have open as of a candidate, so a bookkeeping or hub page
+gets no block at all. Measured on the 547-page clone with the first two applied
+to candidates only, opening `index.md` answered **340** rows (+220 KB on one
+response), `plans/index.md` 246, `log.md` 189, and `flows/how-we-build.mdx` — cut
+as a candidate at 27 backlinks — 36. Symmetric, the largest block on that corpus
+is **33** rows (`overview.md`), which is the link graph's own bound: there is no
+`RELATED_MAX` cap, because a cap drops rows from a page that really does have
+that many neighbours.
 
 - **Hubs**: a candidate with more than `RELATED_HUB_BACKLINKS` (25) backlinks is
   dropped, from EVERY source. A page cited by the whole wiki is not related work
-  because this page cites it too.
+  because this page cites it too. Measured on mimir, exactly two pages exceed it:
+  `flows/how-we-build.mdx` (27) and `projects/muninn/dashboard.md` (26).
 - **Digests**: a page naming more than `RELATED_DIGEST_PRS` (15) refs is cut from
   the PR-sharing source — it names half the month by construction. It still
   appears through a real link, with the link as its reason. The cut is applied to
@@ -1016,7 +1047,18 @@ Three cuts, each one a way the block fills with pages nobody meant:
   `log.md` 4 and `plans/index.md` 6, because a catalog page LINKS OUT rather than
   being linked to. Without this cut they led the block on both acceptance pages.
   The campaign's dry run cut them by NAME; this is the same cut spelled as a
-  predicate the reader already has.
+  predicate the reader already has. The stem comes from `pageStemOf`, the rail's
+  own spelling, which strips ANY extension — `wikiPageStem` strips only
+  `.md`/`.mdx`, so `plans/index.html` sat under `Bookkeeping` in the rail and
+  arrived here as ordinary related work. ⚠️ `isMetaStem` is case-sensitive on
+  `CLAUDE` alone, inherited from the rail.
+
+**The open page's own ATTACHMENTS are excluded too** — a candidate whose `parent`
+is the open page. The rail already shows them as that page's attachment chip, so
+a row here is the same file twice on one screen (measured: opening
+`plans/muninn-wiki-rail-grouping.mdx` listed its own
+`-prototype.html`). Scoped to THIS page's children: an `.html` explainer
+belonging to some other page is an ordinary candidate.
 
 **Order is newest first, through `bySeriesDateDesc`** — `status_date`, else the
 durable git touch date, else mtime, at DAY granularity with the rung as the
@@ -1037,7 +1079,9 @@ candidate — the block is about links, and the rail already groups the series.
 
 ### Rendering
 
-`relatedSectionHtml` (`wiki-browser.ts`) paints the block at the top of
+`relatedSectionHtml` (`views/components/wiki-related-view.ts` — pure string
+building, in its own module because `wiki-browser.ts` touches `document` at
+import time and `bun test` cannot load it) paints the block at the top of
 `renderConnections`. Rows are the panel's own `.wiki-conn-item`, so the delegated
 `[data-page]` handler opens them and there is no second click path; the why line
 is a second line inside `.wiki-conn-text`, with each reason in an `<em>` and the
@@ -1048,22 +1092,40 @@ sections under it already say `None` for the mechanism they name, and a third
 saying it about a derived rule reads as a failure. `related` is `[]` on a page
 with no neighbours and absent on an older server; both land as no block.
 
-**Contrast**: the why line is `--text-muted` (5.26:1 dark, 4.94:1 light over
-`--bg-panel`), not the prototype's two-tone `--text-dim` + `--text-muted` —
-`--text-dim` is 3.24:1 dark and 3.74:1 light, under the 4.5:1 floor for a line
-carrying the PR numbers the pairing rests on.
+**The why line WRAPS.** `white-space: nowrap` + `text-overflow: ellipsis`
+measured 353 px of line in a 248 px box at the default rail — 30% hidden, and the
+hidden half is the `shares RuneLind/muninn#549, …` numbers the reason exists to
+show, while a `toHaveText` assertion passed the whole time. The e2e measures the
+element's own box AND intersects it with every clipping ancestor (the technique
+`wiki-rail-series.spec.ts`'s census case uses), and counts the line boxes off an
+explicit `line-height` so the row stays two lines.
+
+**Contrast**: the why line is `--text-soft`, judged in all FOUR states a reader
+meets — over `--bg-panel` at rest and over the row's own `:hover` fill, in both
+themes. `--text-dim` is 3.24:1 dark / 3.74:1 light and `--text-muted` measures
+**4.42:1** over the LIGHT hover fill, both under the 4.5:1 floor for a line
+carrying the PR numbers the pairing rests on. A hovered row is not a transient
+state: it is where the pointer is whenever a row is being read.
 
 **There is no `⋯ add to series` control.** The series editor is a later PR, and a
 visible control that cannot act is the dead control #557's F2 decision rejected.
 `series` and `series_label` are untouched by this feature.
 
 Acceptance: `store.test.ts` (the three shapes, the fence mask, the frontmatter
-merge, the bare-`#N` and unknown-repo refusals), `related.test.ts` (each source,
-the multi-reason why, the three cuts with the hub threshold driven at 25 and 26,
-the never-transitive case, the order), `wiki-provenance.test.ts` (the strip on
-`/api/wiki/pages`, `related[]` on `/api/wiki/page`) and
-`e2e/wiki-related-work.spec.ts` (the chain end to end, both cuts against a real
-index, the listing's absent key, and the contrast in both themes).
+merge, the bare-`#N` and unknown-repo refusals, the prose owner gate and its five
+false shapes, the anchored normaliser and the dropped `prs:` entry),
+`related.test.ts` (each source, the multi-reason why, the three cuts with the hub
+threshold driven at 25 and 26, the same two cuts applied to the OPEN page, the
+`.html` stem case, the attachment exclusion and its non-child control, the
+never-transitive case, the shares reason's order and count, the case fold and the
+self guard), `wiki-related-view.test.ts` (the empty-block guard — the shape a
+spec cannot reach, since an omitted block has no element to assert on),
+`wiki-provenance.test.ts` (the strip on `/api/wiki/pages`, `related[]` on
+`/api/wiki/page`) and `e2e/wiki-related-work.spec.ts` (the chain end to end, both
+cuts against a real index, the listing's absent key, the why line's full
+visibility, and the contrast at rest AND hovered in both themes). The spec sizes
+its fixture from `src/wiki/related-constants.ts` rather than re-typing the
+numbers — re-typed, a threshold moving DOWN (25 → 10, 15 → 5) left it green.
 
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 

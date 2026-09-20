@@ -12,13 +12,8 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildWikiIndex, type WikiIndex } from "./store.ts";
-import {
-  computeRelated,
-  RELATED_DIGEST_PRS,
-  RELATED_HUB_BACKLINKS,
-  RELATED_SHARED_PRS_MIN,
-} from "./related.ts";
+import { buildWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import { computeRelated, RELATED_DIGEST_PRS, RELATED_HUB_BACKLINKS } from "./related.ts";
 
 /** A plan page: frontmatter lines, then the body. */
 function page(title: string, fm: string[], body: string): string {
@@ -134,7 +129,6 @@ describe("computeRelated", () => {
   test("ONE shared PR ref is not enough", async () => {
     await writeFillers(0);
     expect(whyByPath(await buildWikiIndex(root), OPEN)["plans/onepr.md"]).toBeUndefined();
-    expect(RELATED_SHARED_PRS_MIN).toBe(2);
   });
 
   test("NEVER transitive: a page two hops away is not related", async () => {
@@ -212,11 +206,15 @@ describe("computeRelated", () => {
     expect(computeRelated(await buildWikiIndex(root), "plans/nope.md")).toEqual([]);
   });
 
-  test("a page with no neighbours answers [] — the reader renders no block", async () => {
+  test("ONE neighbour is one row — the transitive page is reached, from the other end", async () => {
     await writeFillers(0);
     expect(computeRelated(await buildWikiIndex(root), "plans/far.md").map((r) => r.relPath)).toEqual(
       ["plans/cited.md"],
     );
+  });
+
+  test("a page with no neighbours answers [] — the reader renders no block", async () => {
+    await writeFillers(0);
     expect(computeRelated(await buildWikiIndex(root), "plans/onepr.md")).toEqual([]);
   });
 
@@ -231,5 +229,262 @@ describe("computeRelated", () => {
       "RuneLind/muninn#550",
     ]);
     expect(computeRelated(index, "plans/digest.md")).toEqual([]);
+  });
+});
+
+/**
+ * A throwaway wiki for ONE case, built and removed inside the test.
+ *
+ * Separate from the shared fixture above on purpose: that one's pages are what
+ * every ordering and count expectation in the first block is written against,
+ * so a page added there moves assertions in tests it has nothing to do with.
+ */
+async function indexOver(
+  pages: Array<[string, string]>,
+  fn: (index: WikiIndex) => void | Promise<void>,
+): Promise<void> {
+  const dir = await mkdtemp(path.join(tmpdir(), "wiki-related-case-"));
+  try {
+    for (const [rel, body] of pages) {
+      await mkdir(path.join(dir, path.dirname(rel)), { recursive: true });
+      await writeFile(path.join(dir, rel), body, "utf8");
+    }
+    await fn(await buildWikiIndex(dir));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** A bare `.html` explainer — no frontmatter, which is what makes it one. */
+function html(title: string): string {
+  return `<html><head><title>${title}</title></head><body><p>Body.</p></body></html>`;
+}
+
+describe("computeRelated — the cuts applied to the OPEN page", () => {
+  test("a BOOKKEEPING page gets no block of its own", async () => {
+    await indexOver(
+      [
+        ["index.md", page("Index", ["status_date: 2026-09-20"], "Catalog of [[a]] and [[b]].")],
+        ["log.md", page("Log", ["status_date: 2026-09-19"], "An entry about [[a]].")],
+        ["plans/index.md", page("Plan board", ["status_date: 2026-09-18"], "Board of [[a]].")],
+        ["plans/a.md", page("A", ["status_date: 2026-09-17"], "Reads [[b]].")],
+        ["plans/b.md", page("B", ["status_date: 2026-09-16"], "Nothing.")],
+      ],
+      (index) => {
+        // Each of the three really has neighbours, so the `[]` below is the cut
+        // and not an empty graph — measured on mimir, opening `index.md` yielded
+        // 340 rows, `plans/index.md` 246 and `log.md` 189.
+        for (const meta of ["index.md", "log.md", "plans/index.md"]) {
+          expect(index.outgoing.get(meta)).toContain("plans/a.md");
+          expect(computeRelated(index, meta)).toEqual([]);
+        }
+        // …and an ordinary page in the same wiki still answers rows, so the cut
+        // is not "this fixture has no edges".
+        expect(computeRelated(index, "plans/a.md").map((r) => r.relPath)).toEqual(["plans/b.md"]);
+      },
+    );
+  });
+
+  test("a HUB gets no block of its own", async () => {
+    const pages: Array<[string, string]> = [
+      ["plans/hub.md", page("Hub", ["status_date: 2026-09-20"], "Everything, incl. [[a]].")],
+      ["plans/a.md", page("A", ["status_date: 2026-09-10"], "Nothing.")],
+    ];
+    for (let i = 1; i <= RELATED_HUB_BACKLINKS + 1; i++) {
+      pages.push([`fill/f${i}.md`, page(`Fill ${i}`, [], "Points at [[hub]].")]);
+    }
+    await indexOver(pages, (index) => {
+      expect((index.backlinks.get("plans/hub.md") ?? []).length).toBe(RELATED_HUB_BACKLINKS + 1);
+      // 26 pages cite it and it cites one — every source has something to give,
+      // and the block is still empty. (mimir's `flows/how-we-build.mdx`, cut as
+      // a candidate at 27 backlinks, yielded 36 rows when OPEN.)
+      expect(computeRelated(index, "plans/hub.md")).toEqual([]);
+    });
+  });
+
+  test("a hub ONE backlink under the threshold still gets its block", async () => {
+    const pages: Array<[string, string]> = [
+      ["plans/hub.md", page("Hub", ["status_date: 2026-09-20"], "Everything, incl. [[a]].")],
+      ["plans/a.md", page("A", ["status_date: 2026-09-10"], "Nothing.")],
+    ];
+    for (let i = 1; i <= RELATED_HUB_BACKLINKS; i++) {
+      pages.push([`fill/f${i}.md`, page(`Fill ${i}`, [], "Points at [[hub]].")]);
+    }
+    await indexOver(pages, (index) => {
+      expect((index.backlinks.get("plans/hub.md") ?? []).length).toBe(RELATED_HUB_BACKLINKS);
+      expect(computeRelated(index, "plans/hub.md").map((r) => r.relPath)).toContain("plans/a.md");
+    });
+  });
+});
+
+describe("computeRelated — bookkeeping is by STEM, whatever the extension", () => {
+  test("an `.html` catalog is cut as a candidate AND as the open page", async () => {
+    await indexOver(
+      [
+        [
+          "plans/a.md",
+          page("A", ["status_date: 2026-09-20"], "See [catalog](./index.html) and [[b]]."),
+        ],
+        ["plans/index.html", html("Catalog")],
+        ["plans/b.md", page("B", ["status_date: 2026-09-10"], "Nothing.")],
+      ],
+      (index) => {
+        // The link really resolved to the `.html` page — `wikiPageStem` strips
+        // only `.md`/`.mdx`, so its stem read `index.html` and the rail called it
+        // Bookkeeping while this rule called it ordinary related work.
+        expect(index.outgoing.get("plans/a.md")).toContain("plans/index.html");
+        expect(computeRelated(index, "plans/a.md").map((r) => r.relPath)).toEqual(["plans/b.md"]);
+        expect(computeRelated(index, "plans/index.html")).toEqual([]);
+      },
+    );
+  });
+});
+
+describe("computeRelated — the open page's own attachments", () => {
+  test("an attachment CHILD of the open page is not a related row", async () => {
+    await indexOver(
+      [
+        [
+          "plans/p.md",
+          page(
+            "P",
+            ["status_date: 2026-09-20"],
+            "See [proto](./p-prototype.html) and [loose](./loose.html).",
+          ),
+        ],
+        ["plans/p-prototype.html", html("P prototype")],
+        ["plans/loose.html", html("Loose explainer")],
+      ],
+      (index) => {
+        // The prototype really IS this page's child (pairing rule 2), which is
+        // why a related row for it duplicates the rail's own attachment chip…
+        expect(index.resolveRelPath("plans/p-prototype.html")!.parent).toBe("plans/p.md");
+        // …while the loose explainer is nobody's child and stays an ordinary row,
+        // so the exclusion is the PARENT link and not "`.html` pages are out".
+        expect(index.resolveRelPath("plans/loose.html")!.parent).toBeUndefined();
+        expect(computeRelated(index, "plans/p.md").map((r) => r.relPath)).toEqual([
+          "plans/loose.html",
+        ]);
+      },
+    );
+  });
+
+  test("a child of ANOTHER page is still related work", async () => {
+    await indexOver(
+      [
+        [
+          "plans/open.md",
+          page("Open", ["status_date: 2026-09-20"], "Reads [proto](../blogs/q-prototype.html)."),
+        ],
+        ["blogs/q.md", page("Q", ["status_date: 2026-09-12"], "Its own plan.")],
+        ["blogs/q-prototype.html", html("Q prototype")],
+      ],
+      (index) => {
+        expect(index.resolveRelPath("blogs/q-prototype.html")!.parent).toBe("blogs/q.md");
+        expect(computeRelated(index, "plans/open.md").map((r) => r.relPath)).toEqual([
+          "blogs/q-prototype.html",
+        ]);
+      },
+    );
+  });
+});
+
+describe("computeRelated — the shares reason", () => {
+  /** One pair sharing THREE refs, spelled in the OPPOSITE order on the
+   *  candidate, so the reason's order is the open page's and not the match's. */
+  const THREE_SHARED: Array<[string, string]> = [
+    [
+      "plans/open.md",
+      page(
+        "Open",
+        ["status_date: 2026-09-20"],
+        "Names muninn#901, then muninn#902, then muninn#903.",
+      ),
+    ],
+    [
+      "plans/cand.md",
+      page(
+        "Cand",
+        ["status_date: 2026-09-10"],
+        "Names muninn#903, then muninn#902, then muninn#901.",
+      ),
+    ],
+  ];
+
+  test("the refs it names are the first two in the OPEN page's order", async () => {
+    await indexOver(THREE_SHARED, (index) => {
+      // The candidate really declares them the other way round.
+      expect(index.resolveRelPath("plans/cand.md")!.prRefs).toEqual([
+        "RuneLind/muninn#903",
+        "RuneLind/muninn#902",
+        "RuneLind/muninn#901",
+      ]);
+      expect(whyByPath(index, "plans/open.md")["plans/cand.md"]).toBe(
+        "shares RuneLind/muninn#901, RuneLind/muninn#902",
+      );
+    });
+  });
+
+  test("a pair sharing three refs names TWO of them", async () => {
+    await indexOver(THREE_SHARED, (index) => {
+      const why = whyByPath(index, "plans/open.md")["plans/cand.md"]!;
+      expect(why.slice("shares ".length).split(", ")).toHaveLength(2);
+      expect(why).not.toContain("muninn#903");
+    });
+  });
+
+  test("refs match without case, and the OPEN page's spelling is what prints", async () => {
+    await indexOver(
+      [
+        [
+          "plans/open.md",
+          page("Open", ["status_date: 2026-09-20"], "Names RuneLind/muninn#901, RuneLind/muninn#902."),
+        ],
+        [
+          "plans/cand.md",
+          page("Cand", ["status_date: 2026-09-10"], "Names runelind/MUNINN#901, runelind/muninn#902."),
+        ],
+      ],
+      (index) => {
+        // The candidate's own refs really are spelled differently — without this
+        // the pairing and the printed spelling are the same string by accident.
+        expect(index.resolveRelPath("plans/cand.md")!.prRefs).toEqual([
+          "runelind/MUNINN#901",
+          "runelind/muninn#902",
+        ]);
+        expect(whyByPath(index, "plans/open.md")["plans/cand.md"]).toBe(
+          "shares RuneLind/muninn#901, RuneLind/muninn#902",
+        );
+      },
+    );
+  });
+});
+
+describe("computeRelated — the self guard", () => {
+  /**
+   * ⚠️ Driven against a SYNTHETIC index, the one test in this file that is —
+   * and the reason is measured: `buildWikiIndex` drops a self-edge at both
+   * extraction sites (`store.ts`, `targetKey !== key` and `rel !== key`), so a
+   * page linking to itself by `[[wikilink]]` OR by relative path comes back with
+   * no self entry in `outgoing`/`backlinks` at all. The guard is therefore
+   * unreachable through a real wiki, and a fixture that links to itself proves
+   * nothing: it passes with the guard deleted.
+   */
+  test("a candidate equal to the open page is dropped", () => {
+    const meta = (relPath: string): WikiPageMeta =>
+      ({ relPath, name: relPath, title: relPath, type: "plan", tags: [] }) as unknown as WikiPageMeta;
+    const self = meta("plans/self.md");
+    const other = meta("plans/other.md");
+    const index = {
+      pages: [self, other],
+      resolveRelPath: (rp: string) =>
+        rp === "plans/self.md" ? self : rp === "plans/other.md" ? other : undefined,
+      backlinks: new Map([["plans/self.md", ["plans/self.md", "plans/other.md"]]]),
+      outgoing: new Map([["plans/self.md", ["plans/self.md"]]]),
+    } as unknown as WikiIndex;
+
+    expect(computeRelated(index, "plans/self.md").map((r) => r.relPath)).toEqual([
+      "plans/other.md",
+    ]);
   });
 });

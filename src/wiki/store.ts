@@ -1244,29 +1244,52 @@ export const PR_REF_OWNER = "RuneLind";
  * The three PR-reference shapes, as ONE alternation so a left-to-right scan
  * settles which one a span is. Order is load-bearing:
  *
- *  1. `https://github.com/<owner>/<repo>/pull/N` — groups 1–3.
- *  2. `<owner>/<repo>#N`, any owner — groups 4–6. Before shape 3, so the
- *     `muninn#543` inside `RuneLind/muninn#543` is not read as a bare form
- *     (it would normalize to the same ref, but the owner would be a guess).
+ *  1. `https://github.com/<owner>/<repo>/pull/N` — groups 1–3. ANY owner: a
+ *     pull URL carries its own proof of being one.
+ *  2. `<owner>/<repo>#N` — groups 4–6. Before shape 3, so the `muninn#543`
+ *     inside `RuneLind/muninn#543` is not read as a bare form (it would
+ *     normalize to the same ref, but the owner would be a guess).
  *  3. The bare prose form `<repo>#N` / `<repo> #N`, {@link PR_REF_REPOS} only —
  *     groups 7–8.
  *
+ * ⚠️ **Shape 2 is the permissive one, and its two callers gate it differently.**
+ * `<a>/<b>#N` is also what an anchor link, a wikilink fragment and a version
+ * string look like, so in a BODY scan {@link extractPrRefs} keeps it only for
+ * {@link PR_REF_OWNER} (matched without case). Measured, without that gate
+ * `[x](plans/foo#3)`, `[[plans/index#3]]` and `v1.2/3.4#5` each minted a ref
+ * that pairs pages, and mimir's `log.md` carries a live `Jira-Cloud/PR#165`.
+ * {@link normalizePrRef} — one AUTHORED `prs:` entry, anchored end to end —
+ * keeps any owner, matching `PR_COORDINATE` in `provenance.ts`, the
+ * single-value sibling: the documented frontmatter shape is
+ * `prs: [navikt/melosys-api#1234, RuneLind/muninn#543]`, and an authored entry
+ * is a declaration where a prose span is a guess.
+ *
  * The lookbehind on shapes 2 and 3 is what keeps a longer path out: in
  * `src/wiki/store.ts` the `wiki` and `store.ts` segments are both preceded by
- * `/`, so neither starts a match, and `x-muninn#5` is not `muninn#5`.
+ * `/`, so neither starts a match, and `x-muninn#5` is not `muninn#5`. `@` is in
+ * that class for the same reason — `rune@muninn#5` is a handle, not a PR.
  *
  * One optional space before the `#` and no more: the dry run allowed up to 12
  * arbitrary characters there, which reads `muninn` and a `#12` two clauses
  * later as one reference.
  */
-const PR_REF_RE = new RegExp(
-  [
-    "https?://github\\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/pull/(\\d+)",
-    "(?<![A-Za-z0-9._/-])([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#(\\d+)",
-    `(?<![A-Za-z0-9._/-])(${PR_REF_REPOS.join("|")})[ \\t]?#(\\d+)`,
-  ].join("|"),
-  "g",
-);
+const PR_REF_SOURCE = [
+  "https?://github\\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/pull/(\\d+)",
+  "(?<![A-Za-z0-9._/@-])([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#(\\d+)",
+  `(?<![A-Za-z0-9._/@-])(${PR_REF_REPOS.join("|")})[ \\t]?#(\\d+)`,
+].join("|");
+
+/** The scanning form, for a page BODY. */
+const PR_REF_RE = new RegExp(PR_REF_SOURCE, "g");
+
+/** The whole-value form, for ONE authored `prs:` entry. Same three shapes,
+ *  same group numbers — the alternation is wrapped, not re-spelled. */
+const PR_REF_ANCHORED_RE = new RegExp(`^(?:${PR_REF_SOURCE})$`);
+
+/** Is this shape-2 owner the account whose PRs this corpus is about? */
+function isKnownPrOwner(owner: string): boolean {
+  return owner.toLowerCase() === PR_REF_OWNER.toLowerCase();
+}
 
 /** The stamp CLI's spelling — what `PR_COORDINATE` (`provenance.ts`) parses and
  *  what a `prs:` line is written as. */
@@ -1278,15 +1301,23 @@ function prRefOf(owner: string, repo: string, n: string): string {
  * Normalize ONE authored PR reference — a frontmatter `prs:` entry — to the
  * stamp CLI's `owner/repo#n` spelling, so a page whose frontmatter says
  * `muninn#550` and a page whose body says `muninn #550` share a ref rather than
- * carrying two spellings of it. A value that is no recognized shape is returned
- * trimmed and verbatim: the store keeps what the page declared (the `jira`
- * precedent — a typo is worth seeing), it simply pairs with nothing.
+ * carrying two spellings of it. `undefined` when the WHOLE value is no
+ * recognized shape.
+ *
+ * **Anchored**, which is the difference between reading a value and scanning
+ * one: unanchored, `prs: [see muninn#5 and huginn#6]` normalized to
+ * `RuneLind/muninn#5` — a ref the page never declared — and every other page
+ * naming that PR then read as the same piece of work.
+ *
+ * Refusing rather than keeping the raw value is the other half. The `jira`
+ * precedent (keep the typo, it pairs with nothing) does not transfer: two pages
+ * both parked on `TBD` carry two identical unparseable entries, which is exactly
+ * the {@link RELATED_SHARED_PRS_MIN} threshold. The page's own provenance strip
+ * still renders `meta.prs` verbatim — this is the DERIVED index field.
  */
-export function normalizePrRef(raw: string): string {
-  const value = raw.trim();
-  PR_REF_RE.lastIndex = 0;
-  const m = PR_REF_RE.exec(value);
-  if (!m) return value;
+export function normalizePrRef(raw: string): string | undefined {
+  const m = PR_REF_ANCHORED_RE.exec(raw.trim());
+  if (!m) return undefined;
   if (m[1]) return prRefOf(m[1], m[2]!, m[3]!);
   if (m[4]) return prRefOf(m[4], m[5]!, m[6]!);
   return prRefOf(PR_REF_OWNER, m[7]!, m[8]!);
@@ -1314,6 +1345,8 @@ export function extractPrRefs(content: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = PR_REF_RE.exec(body)) !== null) {
     if (inProtectedRegion(m.index, regions)) continue;
+    // Shape 2 in prose needs the known owner — see the regex's own docstring.
+    if (m[4] && !isKnownPrOwner(m[4])) continue;
     const ref = m[1]
       ? prRefOf(m[1], m[2]!, m[3]!)
       : m[4]
@@ -1335,7 +1368,8 @@ export function extractPrRefs(content: string): string[] {
  * is payload that says nothing).
  *
  * Frontmatter first because it is the authored answer: when the two disagree on
- * spelling, the declared one is the one kept.
+ * spelling, the declared one is the one kept. A declared entry that is no
+ * recognized shape is DROPPED rather than carried — see {@link normalizePrRef}.
  */
 export function pagePrRefs(
   declared: string[] | undefined,
@@ -1343,7 +1377,10 @@ export function pagePrRefs(
 ): string[] | undefined {
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const raw of [...(declared ?? []).map(normalizePrRef), ...extractPrRefs(content)]) {
+  const authored = (declared ?? [])
+    .map(normalizePrRef)
+    .filter((ref): ref is string => ref !== undefined);
+  for (const raw of [...authored, ...extractPrRefs(content)]) {
     const key = raw.toLowerCase();
     if (!raw || seen.has(key)) continue;
     seen.add(key);

@@ -2098,16 +2098,23 @@ export async function renderWikiPage(opts?: {
     .wiki-conn-item.wiki-conn-related { align-items: flex-start; }
     .wiki-conn-related .wiki-type-dot { margin-top: 5px; flex-shrink: 0; }
     .wiki-conn-text { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-    /* --text-muted, not the prototype's two-tone --text-dim + --text-muted:
-       measured on a body probe, dim is 3.24:1 dark / 3.74:1 light, under the
-       4.5:1 floor for a line a reader has to READ — and this one carries the
-       PR numbers the pairing rests on. Muted is 5.26 / 4.94 over --bg-panel.
-       (Over the row's own :hover fill the light theme reads 4.42:1, the same
-       measurement that keeps the rail's group chip unfilled — a transient
-       state here, and the row's title sits at --text-secondary regardless.) */
+    /* --text-soft, judged in all FOUR states a reader meets: over --bg-panel at
+       rest and over the row's own :hover fill, in both themes. Measured in the
+       browser (e2e/wiki-related-work.spec.ts, which asserts both): --text-dim is
+       3.24 dark / 3.74 light and --text-muted 4.42 over the LIGHT hover fill —
+       both under the 4.5:1 floor for a line a reader has to READ, and this one
+       carries the PR numbers the pairing rests on. Soft clears it everywhere.
+       A hovered row is not a transient state: it is where the pointer is
+       whenever a row is being read.
+
+       It WRAPS rather than ellipsizing. nowrap + text-overflow measured 353px
+       of line in a 248px box — 30% hidden, and the hidden half is the
+       "shares RuneLind/muninn#549, ..." numbers the reason exists to show,
+       while a toHaveText assertion passed the whole time. The explicit
+       line-height is what lets the spec count the line boxes. */
     .wiki-conn-why {
-      font-size: 10.5px; color: var(--text-muted);
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 10.5px; color: var(--text-soft); line-height: 1.35;
+      overflow-wrap: anywhere;
     }
     .wiki-conn-why em { font-style: normal; }
 

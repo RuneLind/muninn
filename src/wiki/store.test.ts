@@ -3919,11 +3919,32 @@ describe("extractPrRefs / pagePrRefs — the three body shapes", () => {
     ]);
   });
 
-  test("a non-RuneLind owner keeps its own owner — only the BARE form defaults", () => {
-    expect(extractPrRefs("navikt/melosys-api#1234 and mimir#3")).toEqual([
+  test("in PROSE, shape 2's owner must be `PR_REF_OWNER` — an `<a>/<b>#N` span is not a ref", () => {
+    // Every one of these matched shape 2 and minted a pairing ref. The last is
+    // live on mimir (`log.md`); the rest are ordinary markdown a page writes.
+    expect(extractPrRefs("[x](plans/foo#3)")).toEqual([]);
+    expect(extractPrRefs("[[plans/index#3]]")).toEqual([]);
+    expect(extractPrRefs("rune@muninn#5")).toEqual([]);
+    expect(extractPrRefs("v1.2/3.4#5")).toEqual([]);
+    expect(extractPrRefs("Jira-Cloud/PR#165")).toEqual([]);
+    // Matched WITHOUT case, and the page's own spelling is what is kept.
+    expect(extractPrRefs("runelind/muninn#5")).toEqual(["runelind/muninn#5"]);
+    // The bare known-repo form is unaffected.
+    expect(extractPrRefs("navikt/melosys-api#1234 and mimir#3")).toEqual(["RuneLind/mimir#3"]);
+  });
+
+  test("a pull URL keeps ANY owner — that shape carries its own proof", () => {
+    expect(extractPrRefs("https://github.com/navikt/melosys-api/pull/1234")).toEqual([
       "navikt/melosys-api#1234",
-      "RuneLind/mimir#3",
     ]);
+  });
+
+  test("an AUTHORED `prs:` entry keeps any owner — the stamp CLI writes NAV ones", () => {
+    // `PR_COORDINATE` (`provenance.ts`), the single-value sibling, accepts any
+    // owner, and the documented frontmatter shape is
+    // `prs: [navikt/melosys-api#1234, RuneLind/muninn#543]`. Only the PROSE scan
+    // is narrowed — an authored entry is a declaration, a prose span is a guess.
+    expect(pagePrRefs(["navikt/melosys-api#1234"], "")).toEqual(["navikt/melosys-api#1234"]);
   });
 
   test("a bare `#N` is NOT a PR ref — it is a heading anchor or a count", () => {
@@ -3980,9 +4001,22 @@ describe("extractPrRefs / pagePrRefs — the three body shapes", () => {
     expect(normalizePrRef("muninn#550")).toBe("RuneLind/muninn#550");
     expect(normalizePrRef("  RuneLind/muninn#543  ")).toBe("RuneLind/muninn#543");
     expect(normalizePrRef("https://github.com/RuneLind/mimir/pull/3")).toBe("RuneLind/mimir#3");
-    // No recognized shape: kept verbatim, the `jira` precedent — a typo is worth
-    // seeing on the page's own row, it simply pairs with nothing.
-    expect(normalizePrRef("  not a coordinate  ")).toBe("not a coordinate");
+  });
+
+  test("normalizePrRef is ANCHORED — a sentence that NAMES a ref is not one", () => {
+    // Unanchored it read the first match anywhere in the value, so a `prs:`
+    // entry someone wrote as a sentence normalized to the first PR in it and
+    // then paired the page with everything else naming that PR.
+    expect(normalizePrRef("see muninn#5 and huginn#6")).toBeUndefined();
+    expect(normalizePrRef("TBD")).toBeUndefined();
+    expect(normalizePrRef("  not a coordinate  ")).toBeUndefined();
+  });
+
+  test("an unparseable `prs:` entry is DROPPED from prRefs, never carried into it", () => {
+    expect(pagePrRefs(["TBD", "muninn#550"], "")).toEqual(["RuneLind/muninn#550"]);
+    // Two pages both parked on `TBD` shared two "refs" and read as one piece of
+    // work. The provenance strip still renders `meta.prs` verbatim.
+    expect(pagePrRefs(["TBD", "pending"], "")).toBeUndefined();
   });
 
   test("pagePrRefs puts the AUTHORED list first and merges the body's, deduped", () => {

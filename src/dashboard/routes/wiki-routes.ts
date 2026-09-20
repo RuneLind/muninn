@@ -1870,10 +1870,14 @@ export function registerWikiRoutes(
       // not carry (and must not: see `toListing`) — and because the rule reads the
       // whole index, which the client holds only as the filtered page list.
       //
-      // Rows go through `listings()` like `outgoing`/`backlinks`, so a related row
-      // is the same shape the panel's other rows are, plus `why`. The array is
-      // bounded by the link graph and the hub cut, not by a cap: on mimir the
-      // largest is 11 rows.
+      // A row is `toListing`-shaped like `outgoing`/`backlinks`, plus `why` — it
+      // cannot use `listings()` itself, which answers a bare listing and would
+      // drop the one field this block exists for. The array is bounded by the
+      // link graph and by the three cuts, not by a cap: measured over the
+      // 547-page mimir clone 2026-09-20, the largest block is 33 rows
+      // (`overview.md`), and the pages that answered hundreds — `index.md` at
+      // 340, `plans/index.md` 246, `log.md` 189 — are bookkeeping or hubs, which
+      // now get no block at all.
       related: computeRelated(index, meta.relPath).flatMap((r) => {
         const m = index.resolveRelPath(r.relPath);
         return m ? [{ ...toListing(index, m), why: r.why }] : [];
