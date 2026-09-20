@@ -317,9 +317,11 @@ test("the why line is fully VISIBLE — the PR numbers are what the `shares` rea
   expect(fit.natural).toBeGreaterThan(0);
   expect(fit.visible).toBeGreaterThanOrEqual(fit.natural - 0.5);
   expect(fit.client).toBeGreaterThanOrEqual(fit.scroll);
-  // …and it WRAPS rather than growing without bound: the row stays compact.
+  // …and it WRAPS (more than one line). How MANY lines is a fact about the
+  // machine's font metrics, not the CSS — there is no line clamp — and the
+  // runner's wider Linux glyphs turned a 2-line line into 3 (the same CI trap
+  // #559 hit), so no upper bound is asserted here.
   expect(fit.lines).toBeGreaterThan(1);
-  expect(fit.lines).toBeLessThanOrEqual(2);
 });
 
 for (const scheme of ["light", "dark"] as const) {
