@@ -373,6 +373,9 @@ export async function renderWikiGardenerPage(opts?: {
       font-family: var(--font-mono, monospace); font-size: 11.5px; color: var(--text-muted);
       margin-bottom: 4px;
     }
+    /* Per-row status inside a group card — the half-applied group's only way of
+       saying WHICH member landed. */
+    .gard-group-diff-status { font-family: inherit; color: var(--text-dim); }
 
     /* Preview (mirrors the /wiki article styling, scoped) */
     .gard-preview { border: 1px solid var(--border-secondary); border-radius: 8px; padding: 16px 20px; background: var(--bg-surface); font-size: 13.5px; line-height: 1.6; color: var(--text-secondary); }
@@ -454,7 +457,7 @@ export async function renderWikiGardenerPage(opts?: {
       </div>
     </div>
     <div class="gard-sub">Drafted knowledge-wiki pages awaiting review. Approve writes the page into the wiki and triggers a reindex; reject skips the topic on future runs.</div>
-${readonly ? `    <div class="gard-readonly">This muninn instance is <strong>wiki-readonly</strong> (<code>MUNINN_WIKI_READONLY=1</code>) — Approve, Start batch and the source-draft actions are disabled here and return 403. Apply proposals from the write-owning instance.</div>
+${readonly ? `    <div class="gard-readonly">This muninn instance is <strong>wiki-readonly</strong> (<code>MUNINN_WIKI_READONLY=1</code>) — Approve, Accept/Dismiss on a lint group, Propose fixes, Start batch and the source-draft actions are disabled here and return 403. Apply proposals from the write-owning instance.</div>
 ` : ""}    <div id="gardBacklog" class="gard-backlog"></div>
     <div class="gard-filter-row" id="gardFilters">
       <button class="gard-filter active" data-status="">All</button>

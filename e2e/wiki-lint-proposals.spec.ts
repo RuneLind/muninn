@@ -51,10 +51,22 @@ function md(title: string, date: string, extra: string[], body: string): string 
 // 8.1 — two pages that landed the same two PRs and link each other nowhere.
 const STRIP = "plans/chain-strip.mdx";
 const CODE = "plans/summary-code.mdx";
-// 8.2 — two plans and a blog, mutually linked, none of them naming a series.
+// 8.2 — two plans, a blog and a note, mutually linked, none naming a series.
+// The cluster needs TWO open plans (`SERIES_CLUSTER_MIN_PLANS`).
 const LEAD = "plans/rail-lead.mdx";
 const FOLLOW = "plans/rail-follow.mdx";
 const BLOG = "blogs/rail-explained.mdx";
+// The SIMULTANEOUS overlap: `OVERLAP` is a member of the 8.2 cluster (mutual
+// link with LEAD) AND one end of an 8.1 pair with FOLLOW (two shared PR refs,
+// no link either way). One of those two findings may hold its pages.
+const OVERLAP = "plans/rail-overlap.mdx";
+// The SEQUENTIAL one: `HEAL_A`/`HEAL_B` are an 8.2 cluster today, and
+// accepting the `HEAL_C` 8.1 pair links C into it — which GROWS the member set,
+// mints a different group key, and leaves the first group describing a finding
+// that no longer exists in that shape.
+const HEAL_A = "plans/heal-a.mdx";
+const HEAL_B = "plans/heal-b.mdx";
+const HEAL_C = "plans/heal-c.mdx";
 // 8.3 — one series key spelled two ways.
 const PROV_HEAD = "plans/prov-head.mdx";
 const PROV_VAR = "plans/prov-var.mdx";
@@ -62,9 +74,13 @@ const PROV_VAR = "plans/prov-var.mdx";
 const PAGES: Array<[string, string]> = [
   [STRIP, md("Chain strip", "2026-09-17", ["plan_status: shipped"], "Landed RuneLind/muninn#553 and RuneLind/muninn#552.")],
   [CODE, md("Summary code", "2026-09-16", ["plan_status: shipped"], "Shipped in RuneLind/muninn#552 and RuneLind/muninn#553.")],
-  [LEAD, md("Rail lead", "2026-09-18", ["plan_status: in-flight"], "See [[Rail follow]] and [[Rail explained]].")],
-  [FOLLOW, md("Rail follow", "2026-09-12", [], "See [[Rail lead]].")],
+  [LEAD, md("Rail lead", "2026-09-18", ["plan_status: in-flight"], "See [[Rail follow]], [[Rail explained]] and [[Rail overlap]].")],
+  [FOLLOW, md("Rail follow", "2026-09-12", ["plan_status: proposed"], "See [[Rail lead]]. Landed RuneLind/muninn#601 and RuneLind/muninn#602.")],
   [BLOG, md("Rail explained", "2026-09-05", [], "See [[Rail lead]].")],
+  [OVERLAP, md("Rail overlap", "2026-09-16", [], "See [[Rail lead]]. Shipped in RuneLind/muninn#601, RuneLind/muninn#602.")],
+  [HEAL_A, md("Heal a", "2026-09-08", ["plan_status: in-flight"], "See [[Heal b]]. Landed RuneLind/muninn#701 and RuneLind/muninn#702.")],
+  [HEAL_B, md("Heal b", "2026-09-07", ["plan_status: proposed"], "See [[Heal a]].")],
+  [HEAL_C, md("Heal c", "2026-09-09", ["plan_status: in-flight"], "Shipped in RuneLind/muninn#701, RuneLind/muninn#702.")],
   [PROV_HEAD, md("Prov head", "2026-09-14", ["plan_status: in-flight", "series: prov"], "Body.")],
   [PROV_VAR, md("Prov variant", "2026-09-13", ["series: Prov"], "Body.")],
 ];
@@ -81,6 +97,11 @@ async function writeWiki(): Promise<void> {
 }
 
 const read = (rel: string) => readFile(path.join(root, rel), "utf8");
+
+/** The group verbs are wiki-scoped — a group key is a hash over wiki-RELATIVE
+ *  paths and is not unique across wikis. */
+const groupUrl = (key: string, verb: "approve" | "reject") =>
+  `/api/wiki/proposals/group/${encodeURIComponent(key)}/${verb}?wiki=${WIKI}`;
 
 async function api(pathAndQuery: string, init?: RequestInit): Promise<any> {
   const res = await fetch(`${BASE}${pathAndQuery}`, init);
@@ -140,8 +161,9 @@ test.describe.configure({ mode: "serial" });
 test.describe("wiki lint fixes", () => {
   test("the findings carry all three check-8 kinds, filed against the right pages", async () => {
     const { body } = await api(`/api/wiki/linter-findings?wiki=${WIKI}`);
-    expect(body.counts["same-work-no-link"]).toBe(1);
-    expect(body.counts["series-unnamed"]).toBe(1);
+    // Three unlinked pairs, two unnamed clusters, one half-written series.
+    expect(body.counts["same-work-no-link"]).toBe(3);
+    expect(body.counts["series-unnamed"]).toBe(2);
     expect(body.counts["series-inconsistent"]).toBe(1);
 
     const pair = body.findings.find((f: any) => f.check === "same-work-no-link");
@@ -150,9 +172,9 @@ test.describe("wiki lint fixes", () => {
     expect(pair.detail).toContain(CODE);
     expect(pair.detail).toContain("shares RuneLind/muninn#553, RuneLind/muninn#552");
 
-    const cluster = body.findings.find((f: any) => f.check === "series-unnamed");
-    expect(cluster.relPath).toBe(LEAD);
+    const cluster = body.findings.find((f: any) => f.check === "series-unnamed" && f.relPath === LEAD);
     expect(cluster.detail).toContain(BLOG);
+    expect(cluster.detail).toContain(OVERLAP);
 
     const variant = body.findings.find((f: any) => f.check === "series-inconsistent");
     expect(variant.message).toContain("spelled 2 ways");
@@ -161,43 +183,90 @@ test.describe("wiki lint fixes", () => {
   test("POST /api/wiki/lint-proposals creates one row per touched page", async () => {
     const { status, body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, { method: "POST" });
     expect(status).toBe(200);
-    // 8.1 one page · 8.2 three pages · 8.3 one page.
-    expect(body).toMatchObject({ proposed: 3, rows: 5, skipped: 0 });
+    // Five groups: two 8.1 pairs (one page each), two 8.2 clusters (4 and 2),
+    // and the 8.3 spelling fix. The THIRD 8.1 pair — OVERLAP × FOLLOW — is
+    // CLAIMED: both its pages are already held by the 8.2 cluster, and two live
+    // rows on one page is the state where applying either group stales the
+    // other forever.
+    expect(body).toMatchObject({ proposed: 5, rows: 9, skipped: 0, claimed: 1, staled: 0, refused: 0 });
 
     const rows = await sql!<{ target_path: string; group_key: string; kind: string }[]>`
       SELECT target_path, group_key, kind FROM wiki_proposals WHERE wiki_name = ${WIKI}
     `;
-    expect(rows).toHaveLength(5);
+    expect(rows).toHaveLength(9);
     expect(rows.every((r) => r.kind === "lint" && r.group_key)).toBe(true);
-    // Three distinct groups, and the 8.2 one holds exactly its three pages.
     const byGroup = new Map<string, string[]>();
     for (const r of rows) byGroup.set(r.group_key, [...(byGroup.get(r.group_key) ?? []), r.target_path]);
-    expect(byGroup.size).toBe(3);
-    expect([...byGroup.values()].map((v) => v.length).sort()).toEqual([1, 1, 3]);
+    expect(byGroup.size).toBe(5);
+    expect([...byGroup.values()].map((v) => v.length).sort()).toEqual([1, 1, 1, 2, 4]);
   });
 
   test("a second POST proposes nothing — the group keys are already taken", async () => {
     const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, { method: "POST" });
-    expect(body).toMatchObject({ proposed: 0, rows: 0, skipped: 3 });
+    expect(body).toMatchObject({ proposed: 0, rows: 0, skipped: 5, staled: 0 });
+  });
+
+  /**
+   * THE core invariant: one page is held by at most one LIVE group.
+   *
+   * `plans/chain-strip.mdx` is the newer end of the 8.1 pair. After the 8.1 fix
+   * applies it also becomes a member of an 8.2 cluster — and a page carrying two
+   * live rows shares a `base_hash` between them, so applying either group leaves
+   * the other permanently `stale` and the skip list then refuses to re-propose
+   * the loser's key. The series is unnameable forever.
+   */
+  test("no page carries two live rows after the first seeding pass", async () => {
+    const live = await sql!<{ target_path: string; n: string }[]>`
+      SELECT target_path, COUNT(*)::text AS n FROM wiki_proposals
+      WHERE wiki_name = ${WIKI} AND status IN ('draft','approved')
+      GROUP BY target_path HAVING COUNT(*) > 1
+    `;
+    expect(live).toEqual([]);
+  });
+
+  test("the payload skips the drafted-page machinery for a lint row", async () => {
+    const { body } = await api(`/api/wiki/proposals?wiki=${WIKI}`);
+    const lint = body.proposals.filter((p: any) => p.kind === "lint");
+    expect(lint.length).toBeGreaterThan(0);
+    // The card renders the rationale and the diff and nothing else. Measured on
+    // a mimir clone, 183 lint rows shipped a 10.3 MB payload, nearly all of it
+    // `previewHtml` for pages the reviewer can open in the reader.
+    for (const row of lint) {
+      expect([row.targetPath, row.previewHtml]).toEqual([row.targetPath, ""]);
+      expect([row.targetPath, row.wiring]).toEqual([row.targetPath, null]);
+      expect([row.targetPath, row.unresolvedLinks]).toEqual([row.targetPath, []]);
+      expect(row.diff?.length).toBeGreaterThan(0);
+    }
   });
 
   test("the gate renders ONE card per group, with one labelled diff per page", async ({ page }) => {
     await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
     const cards = page.locator(".gard-card[data-group]");
-    await expect(cards).toHaveCount(3);
+    await expect(cards).toHaveCount(5);
 
-    // The 8.2 card: three diffs, three paths, one Accept.
+    // The 8.2 card: four diffs, four paths, one Accept.
     const cluster = page.locator(`.gard-card[data-group]`).filter({ hasText: "Rail lead" }).first();
-    await expect(cluster.locator(".gard-group-diff")).toHaveCount(3);
+    await expect(cluster.locator(".gard-group-diff")).toHaveCount(4);
     const labels = await cluster.locator(".gard-group-diff-path").allTextContents();
-    expect(labels.sort()).toEqual([BLOG, FOLLOW, LEAD].sort());
-    await expect(cluster.locator('[data-group-action="approve"]')).toHaveText("Accept all 3");
+    expect(labels.map((t) => t.split(" ")[0]).sort()).toEqual([BLOG, FOLLOW, LEAD, OVERLAP].sort());
+    await expect(cluster.locator('[data-group-action="approve"]')).toHaveText("Accept all 4");
     await expect(cluster.locator('[data-group-action="reject"]')).toHaveCount(1);
 
     // The 8.1 card is a group of one — one diff, one Accept.
     const pair = page.locator(`.gard-card[data-group]`).filter({ hasText: "Chain strip" }).first();
     await expect(pair.locator(".gard-group-diff")).toHaveCount(1);
     await expect(pair.locator('[data-group-action="approve"]')).toHaveText("Accept all 1");
+  });
+
+  test("a group card holds every row whatever the status filter shows", async ({ page }) => {
+    await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
+    const cluster = page.locator(`.gard-card[data-group]`).filter({ hasText: "Rail lead" }).first();
+    // The status chip summarises the SET, not `rows[0]`.
+    await expect(cluster.locator(".gard-badge.chip-draft")).toHaveText("4 draft");
+    // A filter selects which CARDS show, never which rows a card holds.
+    await page.locator('.gard-filter[data-status="draft"]').click();
+    await expect(cluster.locator(".gard-group-diff")).toHaveCount(4);
+    await page.locator('.gard-filter[data-status=""]').click();
   });
 
   test("accepting 8.1 writes ONE See-also line on the newer page and nothing else", async ({ page }) => {
@@ -215,20 +284,23 @@ test.describe("wiki lint fixes", () => {
     expect(await read(CODE)).toBe(otherBefore);
   });
 
-  test("accepting 8.2 writes exactly three series: lines and one series_label:", async ({ page }) => {
+  test("accepting 8.2 writes one series: line per member and one series_label:", async ({ page }) => {
     await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
     const card = page.locator(`.gard-card[data-group]`).filter({ hasText: "Rail lead" }).first();
     await card.locator('[data-group-action="approve"]').click();
     await expect(card.locator(".gard-badge.chip-applied")).toHaveCount(1);
 
-    const members = await Promise.all([LEAD, FOLLOW, BLOG].map(read));
+    const members = await Promise.all([LEAD, FOLLOW, BLOG, OVERLAP].map(read));
     for (const body of members) expect(body).toContain("series: rail-lead\n");
     // The label rides on the HEAD alone — one edit renames the series.
     const labelled = members.filter((b) => b.includes("series_label:"));
     expect(labelled).toHaveLength(1);
     expect(labelled[0]).toContain("series_label: Rail lead\n");
     // …and every member kept its body: this is a frontmatter line upsert.
-    expect(members[0]).toContain("See [[Rail follow]] and [[Rail explained]].");
+    expect(members[0]).toContain("See [[Rail follow]], [[Rail explained]] and [[Rail overlap]].");
+    // ONE log.md entry for the whole group, naming every page and the seeder.
+    const log = await read("log.md");
+    expect(log).toContain(`- via lint-proposals, 4 pages: ${BLOG}, ${FOLLOW}, ${LEAD}, ${OVERLAP}`);
   });
 
   test("dismissing a group keeps it dismissed across a re-POST", async ({ page }) => {
@@ -269,11 +341,88 @@ test.describe("wiki lint fixes", () => {
    */
   test("the accepted 8.1 pair becomes an 8.2 candidate on the next lint", async () => {
     const { body } = await api(`/api/wiki/linter-findings?wiki=${WIKI}`);
-    expect(body.counts["same-work-no-link"]).toBe(0);
+    // The pair that was accepted is linked now, so it is no longer a finding.
+    expect(
+      body.findings.filter((f: any) => f.check === "same-work-no-link" && f.relPath === STRIP),
+    ).toEqual([]);
     const cluster = body.findings.find(
       (f: any) => f.check === "series-unnamed" && f.detail.includes(CODE),
     );
     expect(cluster).toBeDefined();
     expect(cluster.detail).toContain(STRIP);
+  });
+
+  /**
+   * THE SEQUENTIAL case. Accepting the `HEAL_C` pair links C into the A/B
+   * cluster, which GROWS the member set and therefore mints a DIFFERENT group
+   * key. The first group's card now describes a finding that no longer exists
+   * in that shape — and because the skip rule is by key, leaving it live would
+   * keep C's pages claimed forever and the series unnameable.
+   */
+  test("accepting 8.1 retires the superseded 8.2 group and proposes its successor", async ({ page }) => {
+    const before = await sql!<{ group_key: string }[]>`
+      SELECT DISTINCT group_key FROM wiki_proposals
+      WHERE wiki_name = ${WIKI} AND status = 'draft' AND target_path = ${HEAL_A}
+    `;
+    expect(before).toHaveLength(1);
+    const oldKey = before[0]!.group_key;
+
+    await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
+    const pair = page.locator(`.gard-card[data-group]`).filter({ hasText: "Heal c" }).first();
+    await pair.locator('[data-group-action="approve"]').click();
+    await expect(pair.locator(".gard-badge.chip-applied")).toHaveCount(1);
+    expect(await read(HEAL_C)).toContain("- [[Heal a]]");
+
+    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, { method: "POST" });
+    expect(body.staled).toBe(2);
+    expect(body.proposed).toBe(1);
+
+    // The old group is retired…
+    const old = await sql!<{ status: string }[]>`
+      SELECT status FROM wiki_proposals WHERE wiki_name = ${WIKI} AND group_key = ${oldKey}
+    `;
+    expect(old.map((r) => r.status)).toEqual(["stale", "stale"]);
+    // …a successor covering all THREE pages is live…
+    const live = await sql!<{ group_key: string; target_path: string }[]>`
+      SELECT group_key, target_path FROM wiki_proposals
+      WHERE wiki_name = ${WIKI} AND status = 'draft' AND target_path IN (${HEAL_A}, ${HEAL_B}, ${HEAL_C})
+    `;
+    expect(new Set(live.map((r) => r.group_key)).size).toBe(1);
+    expect(live.map((r) => r.target_path).sort()).toEqual([HEAL_A, HEAL_B, HEAL_C].sort());
+    expect(live[0]!.group_key).not.toBe(oldKey);
+    // …and no page anywhere carries two live rows.
+    const doubled = await sql!<{ target_path: string }[]>`
+      SELECT target_path FROM wiki_proposals
+      WHERE wiki_name = ${WIKI} AND status IN ('draft','approved')
+      GROUP BY target_path HAVING COUNT(*) > 1
+    `;
+    expect(doubled).toEqual([]);
+  });
+
+  /**
+   * THE STOPPED path. A member edited on disk after seeding fails its CAS, so
+   * the apply halts there — and everything it never reached goes back to
+   * `draft`, or the card renders with no verb at all and the reviewer can only
+   * reload past it.
+   */
+  test("a member edited after seeding stops the group, and the card stays actionable", async ({ page }) => {
+    await writeFile(path.join(root, HEAL_B), (await read(HEAL_B)) + "\nEdited after drafting.\n", "utf8");
+
+    await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
+    const card = page.locator(`.gard-card[data-group]`).filter({ hasText: "Heal a" }).first();
+    await card.locator('[data-group-action="approve"]').click();
+
+    // The note names the boundary and survives the reload the stop triggers.
+    await expect(card.locator(".gard-outcome")).toContainText(`Stopped at ${HEAL_B}`);
+    await expect(card.locator(".gard-badge.badge-group")).toHaveText("3 pages");
+    // The chip summarises the status SET — the card used to read `applied` off
+    // `rows[0]` and claim the whole fix had landed. Order follows the rows, so
+    // the assertion is on the parts.
+    const chip = await card.locator(".gard-badge[class*='chip-']").last().textContent();
+    expect(chip!.split(" · ").sort()).toEqual(["1 applied", "1 draft", "1 stale"]);
+    // Rows before the boundary stay written; the rest are reviewable again.
+    expect(await read(HEAL_A)).toContain("series: ");
+    await expect(card.locator('[data-group-action="approve"]')).toHaveCount(1);
+    await expect(card.locator('[data-group-action="reject"]')).toHaveCount(1);
   });
 });

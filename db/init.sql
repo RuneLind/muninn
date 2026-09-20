@@ -785,6 +785,7 @@ CREATE TABLE wiki_proposals (
   related_pages JSONB,                   -- [{title, relPath?}] — related existing pages for apply-time See-also wiring (migration 062)
   wiki_name     TEXT,                    -- consolidation gardener: keys a row to a standalone wiki (NULL = legacy bot-keyed) (migration 065)
   group_key     TEXT,                    -- lint fixes: the id the rows of ONE finding share (NULL = single-row proposal) (migration 077)
+  lint_meta     JSONB,                   -- lint fixes: {seededBy, findingRelPath} — the seeder and the page the finding was filed against (migration 078)
   status        TEXT NOT NULL DEFAULT 'draft',  -- draft|approved|applied|rejected|stale|error
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   resolved_at   TIMESTAMPTZ

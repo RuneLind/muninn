@@ -57,6 +57,7 @@ function makeProposal(overrides: Partial<WikiProposal> = {}): WikiProposal {
     wikiName: null,
     topicKey: "context-compaction",
     groupKey: null,
+    lintMeta: null,
     kind: "concept",
     mode: "create",
     targetPath: "concepts/Context Compaction.md",
@@ -974,6 +975,66 @@ describe("applyWikiProposalGroup", () => {
     expect(commits).toHaveLength(1);
     expect(commits[0]!.paths.sort()).toEqual([PAGE_A, PAGE_B, "log.md"].sort());
     expect(commits[0]!.message).toContain("2 pages");
+  });
+
+  test("a read-only refusal sets stoppedAt, so the route takes its failure branch", async () => {
+    const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+    const res = await applyWikiProposalGroup(rows, deps({ isReadonly: () => true }));
+
+    // Without it the route read `stoppedAt` as absent and answered the SUCCESS
+    // shape — `{outcome: "applied", applied: []}` — so the card reported a fix
+    // that landed on an instance which wrote nothing.
+    expect(res.stoppedAt?.outcome.outcome).toBe("forbidden");
+    expect(res.stoppedAt?.id).toBe("r1");
+    expect(res.results.every((r) => r.outcome.outcome === "forbidden")).toBe(true);
+    expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).not.toContain("series:");
+  });
+
+  test("ONE log.md entry for the group, naming every page it wrote and the seeder", async () => {
+    const rows = [
+      { ...lintRow("r1", PAGE_A, pageBody("A")), lintMeta: { seededBy: "lint-proposals", findingRelPath: PAGE_B } },
+      lintRow("r2", PAGE_B, pageBody("B")),
+    ];
+    await applyWikiProposalGroup(rows, deps());
+
+    const log = await readFile(path.join(wikiDir, "log.md"), "utf8");
+    expect(log.split("## [").length - 1).toBe(1);
+    // The headline is the FINDING's page, not `rows[0]` — the rows are ordered
+    // by `target_path`, so the first one is an alphabetical accident.
+    expect(log).toContain("| B\n");
+    expect(log).toContain(`- via lint-proposals, 2 pages: ${PAGE_A}, ${PAGE_B}`);
+  });
+
+  test("a title-less lint page headlines its log entry with the PATH, not the topic key", async () => {
+    // mimir's plan pages carry no `title:` — measured on a 547-page clone, an
+    // accepted group logged `## [date] update |
+    // lint:series-unnamed:2b4a4375643a:plans/muninn-spec-driven-dev-loop.md`.
+    // A lint row's topic key is `<group>:<relPath>` by construction and can
+    // never be a readable title.
+    const raw = "---\nstatus_date: 2026-09-01\n---\n\nBody.\n";
+    await writeFile(path.join(wikiDir, "plans/untitled.mdx"), raw);
+    await applyWikiProposalGroup([lintRow("r1", "plans/untitled.mdx", raw)], deps());
+
+    const log = await readFile(path.join(wikiDir, "log.md"), "utf8");
+    expect(log).toContain("update | plans/untitled.mdx");
+    expect(log).not.toContain("lint:series-unnamed:deadbeef1234:");
+  });
+
+  test("a STOPPED group commits the pages it wrote, and its subject says so", async () => {
+    const commits: Array<{ paths: string[]; message: string }> = [];
+    const rows = [
+      lintRow("r1", PAGE_A, pageBody("A")),
+      { ...lintRow("r2", PAGE_B, pageBody("B")), baseHash: "0".repeat(64) },
+    ];
+    await applyWikiProposalGroup(
+      rows,
+      deps({ commit: async (paths, message) => { commits.push({ paths, message }); } }),
+    );
+    expect(commits).toHaveLength(1);
+    // `log.md` is not a page. Counting the rows the apply REACHED said
+    // "2 pages" over a commit staging one.
+    expect(commits[0]!.paths.sort()).toEqual([PAGE_A, "log.md"].sort());
+    expect(commits[0]!.message).toContain("1 page (");
   });
 
   test("a lint draft is written byte-exact — no alias strip, no link containment, no newline collapse", async () => {

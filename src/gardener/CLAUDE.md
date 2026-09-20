@@ -65,6 +65,24 @@ could be live at a time. Rows are keyed `wiki_name = bot_name = <registry wiki
 name>` — a lint row is drafted by no bot, and one name covers both the standalone
 and the bot-wiki gate listings.
 
+**The group key hashes the proposed VALUE, not only the member set**
+(`groupKeyFor`): 8.2's coined key rides in the sub-rule as `coin:<key>`, 8.3(c)'s
+as `join:<key>`. Three pages joining `prov` and the same three joining `prov-2`
+are different proposals — and since the skip list is BY KEY, a key that hashed
+only the members would let a dismissal of one silence the other forever.
+
+**`lint_meta` (migration 078) carries the two facts no other column can say** —
+`seededBy` (the weekly watcher, or the gate's `Propose fixes` button) and
+`findingRelPath` (the page the LINT filed the finding against, which is not in
+general the row's own `target_path`: an 8.2 cluster is filed against its HEAD
+and edits every member). The apply's `log.md` entry names the first and
+headlines with the second; the card's title reads the second. Both readers
+degrade on a NULL — `wiki-linter`, and the group's first row — so a row written
+before the migration renders as it always did. It is a COLUMN rather than two
+strings smuggled into `source_docs`, which is a JSONB array of
+`{collection, docId, title, url}` documents the coverage and backlog queries
+read. Rules: `src/gardener/lint-markers.ts`.
+
 **A page whose edits all no-op contributes no row** (already linked, key already
 correct) and a page that REFUSES one — no frontmatter fence, unreadable file —
 contributes a refusal and no row, while the rest of the group still proposes: a
@@ -73,7 +91,15 @@ blog with no fence must not cost the series its other five members.
 **`lint` is never cataloged and never wired.** It IS the wire: `catalogPage`
 hard-skips it beside `synthesis`, and the See-also half reads `related_pages`,
 which is NULL on these rows. `commitMessageFor` says `[lint] fix: …` and
-`logWriterFor` says `via wiki-linter`.
+`logWriterFor` says `via <the seeder>`.
+
+**The GATE's payload skips three read-time passes for this kind**
+(`/api/wiki/proposals`, the `mechanical` flag): no `renderWikiHtml` preview, no
+`scanUnresolvedBodyLinks`, no wiring preview, and no `legacyNoRelated` note. The
+card renders the rationale and the diff and nothing else, and the page is
+already in the wiki — a reviewer opens it in the reader. Measured on a mimir
+clone: 183 lint rows shipped a **10.3 MB** payload, nearly all of it
+`previewHtml`.
 
 ⚠️ **The apply path SKIPS `stripOwnedAliases`, `containDraftBodyLinks` and the
 trailing-newline normalisation for this kind** (`applyInner`'s `mechanical`
@@ -96,14 +122,52 @@ tail still runs OUTSIDE the section, as **one** commit over every path the group
 touched (twelve commits differing only in which frontmatter line moved is not a
 history anyone reads).
 
+It writes **ONE `log.md` entry** for the whole group, inside the same section,
+naming every page it wrote and the seeder that proposed it — a twelve-member
+series otherwise files twelve entries whose only difference is which
+frontmatter line moved, burying the curated ones the log is for. The headline is
+the FINDING's page (`lint_meta.findingRelPath`), not `rows[0]`, which is
+whichever `target_path` sorts first. The commit subject counts PAGES — the
+staged paths minus the wiki-global `log.md` — never the rows the apply reached,
+which on a stopped group said "3 pages" over a commit staging one.
+
 It **stops at the first row that is not `applied`** and reports which. Rows
 already written stay written — there is no rollback, so the honest answer names
-the boundary and lets the reviewer re-propose, which the lint does
-deterministically on its next run. The route
-(`POST /api/wiki/proposals/group/:groupKey/approve`) answers 409 `outcome:
-"stopped"` with `applied[]` and `stoppedAt`, CASes each reached row through its
-own terminal verb, and leaves every row AFTER the boundary `approved` — which is
-re-runnable by a second click, exactly as a stuck single row is.
+the boundary. The route (`POST /api/wiki/proposals/group/:groupKey/approve?wiki=`)
+answers 409 `outcome: "stopped"` with `applied[]`, `noop[]` and `stoppedAt`,
+and CASes each reached row through its own terminal verb.
+
+⚠️ **Every row the apply never REACHED goes back to `draft`.** The first cut left
+them `approved` and called that "re-runnable by a second click" — and nothing
+rendered the click: the gate draws Accept/Reject on `draft` and on nothing else,
+so after a stop the card showed one chip reading `applied`, three pages, and no
+buttons at all. What actually retires a stopped group is the SELF-HEAL on the
+next seeding pass (below); until then the reviewer can act on the members that
+are still writable.
+
+Three more rules on that route, each a measured defect:
+
+- **ALL OR NOTHING on the way in.** Every row must be `draft` or the request is
+  refused 409 `{outcome: "mixed", statuses}`. A reviewer who dismissed one member
+  cannot then accept the group, and a half-applied group is not the card
+  anybody approved.
+- **A row `applyInner` short-circuits at step 2a** — the page already WAS the
+  draft — is reported in `noop[]`, not `applied[]`. It is `applied` in the DB
+  (it is done), but "3 pages written" and "3 pages that already said that" are
+  different answers to a reviewer about to look at a diff.
+- **`?wiki=` is REQUIRED on both group verbs** (400 without, 404 on an unknown
+  name), and every group DB verb is scoped by `COALESCE(wiki_name, bot_name)`.
+  A group key is a sha256 prefix over a check id, a sub-rule and a list of
+  wiki-RELATIVE paths — it carries no wiki identity, so two wikis holding
+  `plans/a.mdx` and `plans/b.mdx` mint the same key for the same finding. The
+  first cut read the wiki off the group's own first ROW, which is circular: the
+  query that found the row was already unscoped.
+
+A group whose rows belong to a BOT wiki takes the **bot's own `wikiAutoCommit`
+policy** (`groupApplyPolicy`) — its `wikiDir`, its `push` opt-out, its
+`catalogKinds` — exactly as the single-row bot-keyed path does. The standalone
+shape was used for every group, so a bot that had turned pushing off had its
+lint fixes pushed.
 
 ### Seeding, and why Dismiss is durable
 
@@ -117,13 +181,47 @@ gate with rows only the write owner can apply):
 - **`POST /api/wiki/lint-proposals?wiki=<name>`**, behind the `Propose fixes`
   button in the lint panel of `/wiki/gardener`.
 
-**Dedup is by GROUP KEY in ANY status** (`getLintGroupKeysByWiki`) — and that is
-the whole mechanism behind Dismiss: `POST /api/wiki/proposals/group/:groupKey/reject`
-CASes the group's drafts to `rejected` and **leaves those rows in place**, so a
-later seeding pass sees the key and skips the finding rather than proposing it
-again. There is no TTL, unlike the concept gardener's rejection skip list: a
-model can draft a better page next week, but a lint finding is deterministic and
-would come back identical forever.
+**ONE PAGE, ONE LIVE GROUP.** Two live rows on one `target_path` share a
+`base_hash`, so applying either group leaves the other permanently `stale` — and
+since the skip rule is by group key, that key is then never re-proposed and the
+series is unnameable forever. Measured on a mimir clone: a page that is the
+newer end of an 8.1 pair AND a member of an 8.2 cluster got rows in both.
+`seedLintProposals` therefore runs four rules over one read of the wiki's lint
+rows (`listLintGroupRowsByWiki` — rows, not keys, because three different
+questions are asked of them):
+
+1. **SELF-HEAL first.** Every live `draft` group whose key no CURRENT finding
+   mints is marked `stale` (`markLintGroupStale`; `approved` rows are mid-apply
+   and the apply's own terminal CAS owns them). That is what retires the
+   superseded 8.2 group after an 8.1 accept grows the cluster by one member —
+   the key moved, so the old card can only ever apply a stale edit. It runs
+   BEFORE the claim pass, so the pages it frees are re-proposable in the SAME
+   run rather than a week later.
+2. **Blocked keys.** A `rejected` row (the durable dismissal) or a LIVE one
+   blocks its key. `applied`/`stale`/`error` block NOTHING: the remaining pages
+   get fresh rows with fresh hashes, and the partial unique index covers live
+   rows only, so `topic_key` cannot collide.
+3. **The page CLAIM.** A finding touching a page a live row already holds is
+   skipped this pass and counted in `claimed`. Rows inserted during the pass
+   claim their pages too.
+4. **Order: CLUSTER findings before 8.1 pairs.** Both can want the same page and
+   only one may have it. Skipping an 8.1 pair costs a pass — the finding is
+   deterministic and returns unchanged. Skipping a cluster costs its HEAD, which
+   is the page the key and the label are derived from, so it does not return
+   unchanged: it returns as a different series.
+
+**Dismiss is durable and has no TTL:**
+`POST /api/wiki/proposals/group/:groupKey/reject?wiki=` CASes the group's drafts
+to `rejected` and **leaves those rows in place**, so every later pass sees the
+key and skips the finding. A model can draft a better page next week, but a lint
+finding is deterministic and would come back identical forever. That route
+carries BOTH read-only refusals, unlike its single-row sibling
+(`proposals/:id/reject`, a DB status flip that mutates no wiki): a group
+dismissal is a permanent, un-undoable decision about a wiki this instance may not
+write.
+
+A finding every page of which REFUSES the edit is counted once per pass
+(`refused`), not once per page.
 
 Single-row Approve/Reject keep working unchanged for rows with `group_key IS
 NULL`, which is every other kind.

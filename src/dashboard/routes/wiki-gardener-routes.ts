@@ -18,7 +18,7 @@ import {
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
-import { lineDiff, type DiffLine } from "../../gardener/diff.ts";
+import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
 import { applyWikiProposal, draftTitle, type ApplyDeps } from "../../gardener/apply.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import {
@@ -49,6 +49,7 @@ import {
   type SeedLintProposalsResult,
 } from "../../gardener/lint-proposals.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
+import { lintFindingPathOf } from "../../gardener/lint-markers.ts";
 import { invalidateSummariesStatsCache } from "./summaries-routes.ts";
 import { notifySummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
@@ -192,6 +193,8 @@ interface ProposalView {
   /** The lint group this row belongs to, or null for a single-row proposal.
    *  The gate renders one card per group, with one diff per row. */
   groupKey: string | null;
+  /** `lint` rows only: the page the finding was filed against. */
+  findingPath: string | null;
   title: string;
   kind: string;
   mode: string;
@@ -377,9 +380,9 @@ export interface BacklogRouteDeps extends CoverageDeps {
    * rows moved and in what order", and a test that stubs the route can only
    * assert the endpoint exists.
    */
-  listProposalsByGroup: (groupKey: string) => Promise<WikiProposal[]>;
-  approveProposalGroup: (groupKey: string) => Promise<WikiProposal[]>;
-  rejectProposalGroup: (groupKey: string) => Promise<WikiProposal[]>;
+  listProposalsByGroup: (wikiName: string, groupKey: string) => Promise<WikiProposal[]>;
+  approveProposalGroup: (wikiName: string, groupKey: string) => Promise<WikiProposal[]>;
+  rejectProposalGroup: (wikiName: string, groupKey: string) => Promise<WikiProposal[]>;
   /** The group route's terminal CAS, as ONE seam over the three verbs the
    *  single-row route calls as module functions. A group's apply can end on a
    *  different verb per row, so a test that cannot drive them cannot tell a
@@ -413,7 +416,7 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
   revertProposal: (id) => revertWikiProposalToDraft(id),
   deleteSourceProposalsForDoc: (botName, collection, docId) =>
     deleteSourceProposalsForDoc(botName, collection, docId),
-  listProposalsByGroup: (groupKey) => listWikiProposalsByGroup(groupKey),
+  listProposalsByGroup: (wikiName, groupKey) => listWikiProposalsByGroup(wikiName, groupKey),
   markProposal: (id, status) =>
     finishProposal(
       id,
@@ -424,8 +427,8 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
           : markWikiProposalError,
       status,
     ),
-  approveProposalGroup: (groupKey) => approveWikiProposalGroup(groupKey),
-  rejectProposalGroup: (groupKey) => rejectWikiProposalGroup(groupKey),
+  approveProposalGroup: (wikiName, groupKey) => approveWikiProposalGroup(wikiName, groupKey),
+  rejectProposalGroup: (wikiName, groupKey) => rejectWikiProposalGroup(wikiName, groupKey),
   seedLintProposals,
 };
 
@@ -1230,17 +1233,32 @@ export function registerWikiGardenerRoutes(
       rows.map(async (p) => {
         const title = draftTitle(p);
         const reviewable = p.status === "draft" || p.status === "stale";
+        // A LINT row is a mechanical edit to a page that is already in the wiki.
+        // Its card renders the rationale and the diff and NOTHING else — no
+        // preview, no unresolved-link scan, no wiring preview — so the three
+        // expensive read-time passes below are skipped for it. Measured on a
+        // mimir clone: 183 lint rows rendered a 10.3 MB payload, almost all of
+        // it `previewHtml` for a page the reviewer can open in the reader.
+        const mechanical = p.kind === "lint";
         let diff: DiffLine[] | null = null;
         if (reviewable && p.mode === "update" && root) {
           const current = await readFileOrNull(path.join(root, p.targetPath));
-          if (current !== null) diff = lineDiff(current, p.draft);
+          // A lint diff is one frontmatter line on a page the reviewer can open
+          // in the reader, and the gate ships one per touched page — so its
+          // context is TRIMMED. `lineDiff`'s full context is right for a drafted
+          // page and wrong here: measured on a 547-page mimir clone, 153 lint
+          // rows shipped 4.66 MB, 4.47 MB of it context lines.
+          if (current !== null) {
+            const full = lineDiff(current, p.draft);
+            diff = mechanical ? trimDiffContext(full) : full;
+          }
         }
         // New rows carry a persisted containment report (`contained_links`); the
         // read-time scan is only a fallback for legacy rows drafted before body
         // containment. Computed read-time (a page created post-draft clears it).
         const containedLinks = p.containedLinks ? p.containedLinks.delinked : null;
         const unresolvedLinks =
-          reviewable && !containedLinks
+          reviewable && !containedLinks && !mechanical
             ? scanUnresolvedBodyLinks(stripFrontmatter(p.draft), { resolve, selfTitle: title })
             : [];
         // Wiring preview: what the apply-time wire stage will do — the planned
@@ -1248,7 +1266,7 @@ export function registerWikiGardenerRoutes(
         // live index and will gain an inbound See-also link. Read-time, no persisted
         // state; a NULL `related_pages` (pre-migration row) degrades to a note.
         let wiring: WiringPreview | null = null;
-        if (reviewable) {
+        if (reviewable && !mechanical) {
           const domain: "ai" | "life" = p.targetPath.startsWith("life/") ? "life" : "ai";
           // A wiki-keyed (consolidation `synthesis`) row uses default kinds even when
           // listed in a bot wiki's gate — never the drafting bot's catalog policy —
@@ -1284,6 +1302,10 @@ export function registerWikiGardenerRoutes(
           id: p.id,
           topicKey: p.topicKey,
           groupKey: p.groupKey,
+          // Which member of the group the FINDING was filed against — the card's
+          // title, since the rows are sorted by `target_path` and the first one
+          // is an alphabetical accident. Null on every non-lint row.
+          findingPath: lintFindingPathOf(p.lintMeta),
           title,
           kind: p.kind,
           mode: p.mode,
@@ -1293,7 +1315,8 @@ export function registerWikiGardenerRoutes(
           resolvedAt: p.resolvedAt,
           rationale: p.rationale,
           sourceDocs: p.sourceDocs,
-          previewHtml: reviewable ? renderWikiHtml(p.draft, resolve, { stripTitle: title }) : "",
+          previewHtml:
+            reviewable && !mechanical ? renderWikiHtml(p.draft, resolve, { stripTitle: title }) : "",
           diff,
           unresolvedLinks,
           containedLinks,
@@ -2519,13 +2542,19 @@ export function registerWikiGardenerRoutes(
         ...DEFAULT_LINT_PROPOSAL_DEPS,
         wikiDir: entry.root,
         wikiName: entry.name,
+        seededBy: "lint-proposals",
       });
-      log.info("Lint proposals for {wiki}: {proposed} group(s), {rows} row(s), {skipped} skipped", {
-        wiki: entry.name,
-        proposed: result.proposed,
-        rows: result.rows,
-        skipped: result.skipped,
-      });
+      log.info(
+        "Lint proposals for {wiki}: {proposed} group(s), {rows} row(s), {skipped} skipped, {claimed} page-claimed, {staled} retired",
+        {
+          wiki: entry.name,
+          proposed: result.proposed,
+          rows: result.rows,
+          skipped: result.skipped,
+          claimed: result.claimed,
+          staled: result.staled,
+        },
+      );
       return c.json(result);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
@@ -2538,48 +2567,71 @@ export function registerWikiGardenerRoutes(
    * Approve a whole lint GROUP: CAS every `draft` row to `approved`, then apply
    * them in ONE write section (`applyWikiProposalGroup`).
    *
-   * The per-row terminal CAS is the single-row route's, run per result — the
-   * group apply STOPS at the first row that is not `applied`, so a row after the
-   * boundary keeps its `approved` status and is re-runnable by a second click,
-   * exactly as a stuck single row is.
+   * **ALL OR NOTHING on the way in.** Every row of the group must be `draft`, or
+   * the request is refused 409 `{outcome: "mixed", statuses}`. A reviewer who
+   * dismissed one member cannot then accept the group, and a group whose rows
+   * are half-applied is not a card anybody approved.
+   *
+   * **On a STOP, the card stays actionable.** The apply halts at the first row
+   * that is not `applied`; that row is CASed to its own terminal status, and
+   * every row the apply never REACHED is put back to `draft`
+   * (`revertWikiProposalToDraft`). The first cut left them `approved`, which the
+   * gate renders with no buttons at all — the docblock claimed they were
+   * "re-runnable by a second click" and nothing rendered the click. Re-seeding
+   * on the next lint pass is what actually retires them (the self-heal in
+   * `seedLintProposals`), and until then the reviewer can act on the members
+   * that are still writable.
    */
   app.post("/api/wiki/proposals/group/:groupKey/approve", async (c) => {
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const groupKey = c.req.param("groupKey");
 
-    const existing = await backlogDeps.listProposalsByGroup(groupKey);
-    if (existing.length === 0) return c.json({ error: "group not found" }, 404);
-
-    // Every row of a group shares one wiki by construction (the seeder writes
-    // them from one finding over one root), so the first row resolves it.
-    const wikiName = existing[0]!.wikiName ?? existing[0]!.botName;
-    const wikiEntry = findWiki(getWikiRegistry(), wikiName);
-    if (!wikiEntry) {
-      return c.json({ error: `wiki "${wikiName}" is not registered` }, 500);
-    }
+    const scope = resolveGroupScope(c);
+    if ("error" in scope) return c.json({ error: scope.error }, scope.status);
+    const { wikiEntry, wikiName, bot } = scope;
     if (isReadonlyWikiRoot(wikiEntry.root)) {
       return c.json({ error: wikiReadonlyRootReason(wikiEntry.root), readonly: true }, 403);
     }
 
-    await backlogDeps.approveProposalGroup(groupKey);
-    // Re-read rather than trusting the CAS's own RETURNING set: a re-click after
-    // a stopped apply has nothing left in `draft` and everything to do.
-    const rows = (await backlogDeps.listProposalsByGroup(groupKey)).filter(
+    const existing = await backlogDeps.listProposalsByGroup(wikiName, groupKey);
+    if (existing.length === 0) return c.json({ error: "group not found" }, 404);
+
+    // MIXED: every row must be a draft. A group half-applied, half-dismissed or
+    // mid-apply is not the card the reviewer is looking at.
+    const mixed = existing.filter((r) => r.status !== "draft");
+    if (mixed.length > 0) {
+      return c.json(
+        { outcome: "mixed", error: "the group is not all draft", statuses: statusCounts(existing) },
+        409,
+      );
+    }
+
+    await backlogDeps.approveProposalGroup(wikiName, groupKey);
+    // Re-read rather than trusting the CAS's own RETURNING set: a concurrent
+    // click may have taken half of them.
+    const rows = (await backlogDeps.listProposalsByGroup(wikiName, groupKey)).filter(
       (r) => r.status === "approved",
     );
     if (rows.length === 0) {
       return c.json({ error: "group is not reviewable", statuses: statusCounts(existing) }, 409);
     }
 
-    const deps = applyDepsFor(wikiEntry.root, true, undefined, wikiEntry.collections ?? []);
+    const deps = applyDepsForWiki(wikiEntry, bot);
     const result = await applyWikiProposalGroup(rows, deps);
 
     const applied: string[] = [];
+    const noop: string[] = [];
+    const reached = new Set<string>();
     for (const row of result.results) {
+      reached.add(row.id);
       if (row.outcome.outcome === "applied") {
         await backlogDeps.markProposal(row.id, "applied");
-        applied.push(row.targetPath);
+        // A row `applyInner` short-circuited (step 2a: the page already WAS the
+        // draft) wrote nothing. It is `applied` in the DB — it is done — but the
+        // answer keeps the two apart, or a card reports N pages written on a
+        // re-click that touched none.
+        (row.outcome.noop ? noop : applied).push(row.targetPath);
         continue;
       }
       if (row.outcome.outcome === "stale") {
@@ -2589,11 +2641,20 @@ export function registerWikiGardenerRoutes(
       } else if (row.outcome.outcome === "error") {
         await backlogDeps.markProposal(row.id, "error");
       }
-      // `forbidden` keeps its `approved` status, like the single-row route.
+      // `forbidden` keeps its `approved` status, like the single-row route —
+      // and the revert below then puts it back to `draft` with the rest.
     }
 
     const stopped = result.stoppedAt;
     if (stopped) {
+      // Every row the apply never REACHED — plus a `forbidden` one, which it
+      // reached and refused — goes back to `draft`, so the card keeps its
+      // buttons. `approved` renders no verb in the gate at all.
+      for (const row of rows) {
+        if (reached.has(row.id) && row.id !== stopped.id) continue;
+        if (row.id === stopped.id && stopped.outcome.outcome !== "forbidden") continue;
+        await backlogDeps.revertProposal(row.id);
+      }
       const outcome = stopped.outcome;
       const reason = "reason" in outcome ? outcome.reason : "";
       log.warn("Lint group {group} stopped at {path}: {outcome} — {reason}", {
@@ -2608,6 +2669,7 @@ export function registerWikiGardenerRoutes(
           // Written pages stay written — there is no rollback, so the honest
           // answer names the boundary rather than implying nothing happened.
           applied,
+          noop,
           stoppedAt: stopped.targetPath,
           stoppedOutcome: outcome.outcome,
           error: reason,
@@ -2617,24 +2679,109 @@ export function registerWikiGardenerRoutes(
       );
     }
     log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
-    return c.json({ outcome: "applied", applied });
+    return c.json({ outcome: "applied", applied, noop });
   });
 
   /**
    * Dismiss a whole lint group. The `rejected` rows are LEFT IN PLACE on
-   * purpose — `getLintGroupKeysByWiki` reads every status, so the rows are what
-   * stops the finding being proposed again on the next lint pass.
+   * purpose — the seeder's skip list reads them, so they are what stops the
+   * finding being proposed again on the next lint pass.
+   *
+   * It carries BOTH read-only refusals, unlike its single-row sibling
+   * (`proposals/:id/reject`, a DB status flip that mutates no wiki). A dismissal
+   * here is not a status flip: it is a permanent, un-undoable decision about a
+   * wiki this instance may not write, taken on the instance that cannot act on
+   * the alternative.
    */
   app.post("/api/wiki/proposals/group/:groupKey/reject", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const groupKey = c.req.param("groupKey");
-    const existing = await backlogDeps.listProposalsByGroup(groupKey);
+    const scope = resolveGroupScope(c);
+    if ("error" in scope) return c.json({ error: scope.error }, scope.status);
+    if (isReadonlyWikiRoot(scope.wikiEntry.root)) {
+      return c.json({ error: wikiReadonlyRootReason(scope.wikiEntry.root), readonly: true }, 403);
+    }
+
+    const existing = await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey);
     if (existing.length === 0) return c.json({ error: "group not found" }, 404);
-    const rejected = await backlogDeps.rejectProposalGroup(groupKey);
+    const rejected = await backlogDeps.rejectProposalGroup(scope.wikiName, groupKey);
     if (rejected.length === 0) {
       return c.json({ error: "group is no longer a draft", statuses: statusCounts(existing) }, 409);
     }
     return c.json({ outcome: "rejected", rejected: rejected.length });
   });
+
+  /**
+   * Which WIKI a group request is about — `?wiki=` (or the legacy `?bot=`),
+   * REQUIRED.
+   *
+   * A group key carries no wiki identity: it is a sha256 prefix over a check id,
+   * a sub-rule and a list of wiki-RELATIVE paths, so two wikis holding
+   * `plans/a.mdx` and `plans/b.mdx` mint the same key for the same finding. The
+   * first cut read the wiki off the group's own first ROW, which is circular —
+   * the query that found the row was already unscoped, so it could return the
+   * other wiki's rows and then confirm itself.
+   */
+  function resolveGroupScope(
+    c: Context,
+  ):
+    | { wikiEntry: WikiRegistryEntry; wikiName: string; bot: ReturnType<typeof getBots>[number] | undefined }
+    | { error: string; status: 400 | 404 } {
+    const requested = c.req.query("wiki") ?? c.req.query("bot");
+    if (!requested || !requested.trim()) {
+      return { error: "wiki is required — a lint group key is not unique across wikis", status: 400 };
+    }
+    const wikiEntry = findWiki(getWikiRegistry(), requested.trim());
+    if (!wikiEntry) return { error: `no wiki configured for "${requested.trim()}"`, status: 404 };
+    const bot = getBots().find(
+      (b) => b.name.toLowerCase() === wikiEntry.name.toLowerCase() && !!b.wikiDir,
+    );
+    return { wikiEntry, wikiName: wikiEntry.name, bot };
+  }
+}
+
+/** What {@link groupApplyPolicy} answers — the four arguments `applyDepsFor`
+ *  takes, as data, so the decision is testable without a git repo. */
+export interface GroupApplyPolicy {
+  wikiDir: string;
+  push: boolean;
+  catalogKinds?: string[];
+  reindexCollections?: string[];
+}
+
+/**
+ * How a group apply's seams are configured for the wiki its rows belong to.
+ *
+ * A BOT-owned wiki gets the bot's own `wikiAutoCommit` policy — `push` and
+ * `catalogKinds` — and its own `wikiDir`, exactly as the single-row bot-keyed
+ * path does; reindex collections are left undefined there, which is what selects
+ * the life/wiki mapping. The first cut used the STANDALONE shape for every
+ * group, so a bot that had opted out of pushing had its lint fixes pushed, and
+ * the reindex ran over the registry entry's collections rather than the bot's.
+ * (Cataloging is inert on this kind either way: `catalogPage` hard-skips
+ * `lint` — stated, not relied on.)
+ */
+export function groupApplyPolicy(
+  entry: Pick<WikiRegistryEntry, "root" | "collections">,
+  bot: { wikiDir?: string; wikiAutoCommit?: { push?: boolean; catalogKinds?: string[] } } | undefined,
+): GroupApplyPolicy {
+  if (bot?.wikiDir) {
+    return {
+      wikiDir: bot.wikiDir,
+      push: bot.wikiAutoCommit?.push ?? true,
+      catalogKinds: bot.wikiAutoCommit?.catalogKinds,
+    };
+  }
+  return { wikiDir: entry.root, push: true, reindexCollections: entry.collections ?? [] };
+}
+
+function applyDepsForWiki(
+  entry: WikiRegistryEntry,
+  bot: { wikiDir?: string; wikiAutoCommit?: { push?: boolean; catalogKinds?: string[] } } | undefined,
+): ApplyDeps {
+  const policy = groupApplyPolicy(entry, bot);
+  return applyDepsFor(policy.wikiDir, policy.push, policy.catalogKinds, policy.reindexCollections);
 }
 
 /** `{draft: 2, applied: 1}` — what a 409 tells the reviewer about a group it

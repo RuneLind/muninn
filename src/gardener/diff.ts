@@ -55,3 +55,51 @@ function splitLines(text: string): string[] {
   const t = text.replace(/\n+$/, "");
   return t === "" ? [] : t.split("\n");
 }
+
+/** The `…` line a trimmed run of context collapses to. Deliberately a `ctx`
+ *  line, so the renderer needs no fourth type and the elision is VISIBLE — a
+ *  silently shortened diff is a diff nobody can trust. */
+export const DIFF_ELISION = "…";
+
+/**
+ * Keep every changed line plus `radius` context lines around it, collapsing the
+ * runs in between to one {@link DIFF_ELISION} line.
+ *
+ * `lineDiff` emits FULL context — every unchanged line of the file — which is
+ * right for a drafted page, where the reviewer is reading a new document. A
+ * `lint` row is one frontmatter line on a page that is already in the wiki, and
+ * the gate ships one of these per touched page: measured on a 547-page mimir
+ * clone, 153 lint rows shipped **4.66 MB**, of which **4.47 MB** was context
+ * lines for pages the reviewer can open in the reader.
+ *
+ * A diff with no changed line at all is returned unchanged — that is the
+ * "no diff" state the card renders its own sentence for, and trimming it to a
+ * lone `…` would replace one honest empty state with a misleading one.
+ */
+export function trimDiffContext(lines: readonly DiffLine[], radius = 3): DiffLine[] {
+  const keep = new Array<boolean>(lines.length).fill(false);
+  let changed = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.type === "ctx") continue;
+    changed = true;
+    for (let j = Math.max(0, i - radius); j <= Math.min(lines.length - 1, i + radius); j++) {
+      keep[j] = true;
+    }
+  }
+  if (!changed) return [...lines];
+
+  const out: DiffLine[] = [];
+  let elided = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (keep[i]) {
+      out.push(lines[i]!);
+      elided = false;
+      continue;
+    }
+    if (!elided) {
+      out.push({ type: "ctx", text: DIFF_ELISION });
+      elided = true;
+    }
+  }
+  return out;
+}

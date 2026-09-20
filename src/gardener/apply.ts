@@ -41,12 +41,18 @@ import {
   wikiReadonlyRootReason,
 } from "../wiki/readonly.ts";
 import { sha256, todayOslo } from "./util.ts";
+import { lintFindingPathOf, lintSeederOf } from "./lint-markers.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "apply");
 
 export type ApplyOutcome =
-  | { outcome: "applied"; writtenPath: string }
+  /** `noop` marks the re-run branch (step 2a): the target already WAS the draft,
+   *  so nothing was written this time. The single-row route reports it as
+   *  applied, which it is; a GROUP route reports it separately, because "3 pages
+   *  written" and "3 pages that already said that" are different answers to a
+   *  reviewer who is about to look at a diff. */
+  | { outcome: "applied"; writtenPath: string; noop?: true }
   | { outcome: "stale"; reason: string }
   /**
    * This instance is wiki-readonly (`MUNINN_WIKI_READONLY=1`). A REFUSAL, not a
@@ -139,17 +145,28 @@ export function commitMessageFor(proposal: WikiProposal): string {
 }
 
 /** The commit message for a GROUP apply: one commit over every page the group
- *  touched, since the whole point of a group is that its rows land together. */
+ *  touched, since the whole point of a group is that its rows land together.
+ *
+ *  `pages` is the number of PAGES in the commit — the staged path set minus the
+ *  wiki-global `log.md` — never the number of rows the apply REACHED: a group
+ *  that stopped at its second row staged one page and said "3 pages". */
 export function groupCommitMessageFor(groupKey: string, pages: number): string {
   return `[lint] fix: ${pages} page${pages === 1 ? "" : "s"} (${groupKey})`;
 }
+
+/** The wiki-global log file every apply appends to. Named once, because the
+ *  group commit's page count is "the staged paths that are not this". */
+const WIKI_LOG_FILE = "log.md";
 
 /** The `via <writer>` attribution in the apply-time log.md entry, keyed by kind:
  *  consolidation `synthesis` applies say `via consolidation-gardener`; every other
  *  kind keeps the historical `via wiki-gardener`. */
 export function logWriterFor(proposal: WikiProposal): string {
   if (proposal.kind === "synthesis") return "consolidation-gardener";
-  if (proposal.kind === "lint") return "wiki-linter";
+  // A lint row names the SEEDER that proposed it — the weekly `wiki-linter`
+  // watcher, or the gate's own `Propose fixes` button — because the two are the
+  // reader's only way to tell an unattended proposal from one they asked for.
+  if (proposal.kind === "lint") return lintSeederOf(proposal.lintMeta);
   return "wiki-gardener";
 }
 
@@ -188,11 +205,21 @@ export function reindexCollectionFor(targetPath: string): "wiki" | "wiki-life" {
   return targetPath.startsWith("life/") ? "wiki-life" : "wiki";
 }
 
-/** Title for the log.md entry — the draft's frontmatter title, falling back to topicKey. */
+/** Title for the log.md entry and the gate card — the draft's frontmatter title,
+ *  falling back to the TARGET PATH on a `lint` row and to the topic key on every
+ *  other kind. */
 export function draftTitle(proposal: WikiProposal): string {
   const fm = parseFrontmatter(proposal.draft);
   const title = Array.isArray(fm.title) ? fm.title[0] : fm.title;
-  return (title && title.trim()) || proposal.topicKey;
+  if (title && title.trim()) return title.trim();
+  // A `lint` row's topic key is `<group_key>:<relPath>` by construction, so the
+  // ordinary fallback prints a hash and a path where every other kind prints a
+  // drafted page's name. Measured on a 547-page mimir clone, whose plan pages
+  // carry no `title:`: an accepted group logged
+  // `## [date] update | lint:series-unnamed:2b4a4375643a:plans/….md`, and the
+  // gate's card headlined the same string.
+  if (proposal.kind === "lint") return proposal.targetPath;
+  return proposal.topicKey;
 }
 
 /**
@@ -324,33 +351,49 @@ export async function applyWikiProposalGroup(
 ): Promise<GroupApplyResult> {
   const refusal = readonlyRefusalFor(deps, rows[0]?.targetPath ?? "(group)");
   if (refusal) {
-    return {
-      results: rows.map((r) => ({ id: r.id, targetPath: r.targetPath, outcome: refusal })),
-    };
+    // `stoppedAt` on the FIRST row, so the route takes its failure branch and
+    // answers 403 with the refusal. Without it a refused group answered the
+    // success shape — `{outcome: "applied", applied: []}` — and the card said
+    // the fix had landed on a read-only instance that wrote nothing.
+    const results = rows.map((r) => ({ id: r.id, targetPath: r.targetPath, outcome: refusal }));
+    return { results, ...(results[0] ? { stoppedAt: results[0] } : {}) };
   }
 
   const groupKey = rows[0]?.groupKey ?? "(no group)";
   const tail: { paths: string[] } = { paths: [] };
   const result = await runWikiWriteExclusive(deps.wikiDir, async () => {
     const out: GroupApplyResult = { results: [] };
+    const written: WikiProposal[] = [];
     for (const row of rows) {
-      const outcome = await applyInner(row, deps, (_commit, paths) => {
-        tail.paths.push(...paths);
-      });
+      // `skipLog: true` — a group writes ONE log.md entry, not one per row. A
+      // twelve-member series otherwise files twelve entries whose only
+      // difference is which frontmatter line moved, burying the curated ones the
+      // log is for. The entry is written below, still inside this section.
+      const outcome = await applyInner(
+        row,
+        deps,
+        (_commit, paths) => {
+          tail.paths.push(...paths);
+        },
+        { skipLog: true },
+      );
       const entry: GroupRowOutcome = { id: row.id, targetPath: row.targetPath, outcome };
       out.results.push(entry);
       if (outcome.outcome !== "applied") {
         out.stoppedAt = entry;
         break;
       }
+      if (!outcome.noop) written.push(row);
     }
+    if (written.length > 0) await writeGroupLogEntry(written, deps);
     return out;
   });
 
   if (deps.commit && tail.paths.length > 0) {
     const paths = [...new Set(tail.paths)];
+    const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
     try {
-      await deps.commit(paths, groupCommitMessageFor(groupKey, result.results.length));
+      await deps.commit(paths, groupCommitMessageFor(groupKey, pages));
     } catch (err) {
       log.warn("Wiki-gardener group apply: commit failed for {group}: {error}", {
         group: groupKey,
@@ -359,6 +402,43 @@ export async function applyWikiProposalGroup(
     }
   }
   return result;
+}
+
+/**
+ * ONE `log.md` entry for a whole group apply, naming every page it wrote and
+ * the SEEDER that proposed it.
+ *
+ * Same shape and same degrade as the per-row entry in `applyInner` step 4 — a
+ * log hiccup must never undo a page write — and written inside the group's write
+ * section, because `log.md` is wiki-global and the section is what keeps the
+ * fact-check and integrate writers out from between the rows.
+ *
+ * The headline is the FINDING's page (the one the lint filed the finding
+ * against), not `rows[0]`: the rows are sorted by `target_path`, so the first
+ * one is an alphabetical accident.
+ */
+async function writeGroupLogEntry(rows: readonly WikiProposal[], deps: ApplyDeps): Promise<void> {
+  // `lint_meta` is the SAME on every row of a group, so it is read off whichever
+  // row carries it (a row written before migration 078 carries none) rather than
+  // off the head — the head is chosen BY it, and reading the seeder off a head
+  // that carries no marker reported every group as the weekly watcher's.
+  const meta = rows.map((r) => r.lintMeta).find((m) => !!m) ?? null;
+  const findingPath = lintFindingPathOf(meta);
+  const head = rows.find((r) => r.targetPath === findingPath) ?? rows[0]!;
+  const paths = rows.map((r) => r.targetPath);
+  try {
+    const logPath = path.join(deps.wikiDir, WIKI_LOG_FILE);
+    const existingLog = await deps.readFile(logPath);
+    const entry =
+      `## [${todayOslo(deps.now())}] ${head.mode} | ${draftTitle(head)}\n` +
+      `- via ${logWriterFor({ ...head, lintMeta: meta })}, ${paths.length} page${paths.length === 1 ? "" : "s"}: ${paths.join(", ")}`;
+    await deps.writeFile(logPath, insertLogEntry(existingLog, entry));
+  } catch (err) {
+    log.warn("Wiki-gardener group apply: log.md update failed for {group}: {error}", {
+      group: rows[0]?.groupKey ?? "(no group)",
+      error: errMsg(err),
+    });
+  }
 }
 
 /** The two read-only refusals `applyWikiProposal` makes before entering the
@@ -387,10 +467,18 @@ function readonlyRefusalFor(deps: ApplyDeps, forPath: string): ApplyOutcome | nu
  *  as twelve commits whose only difference is which frontmatter line moved. */
 type DeferCommit = (commit: () => Promise<void>, paths: string[]) => void;
 
+/** Per-apply switches the GROUP path sets and the single-row path does not. */
+interface ApplyInnerOptions {
+  /** Do not write this row's own `log.md` entry — the caller writes ONE for the
+   *  whole group, inside the same write section. */
+  skipLog?: boolean;
+}
+
 async function applyInner(
   proposal: WikiProposal,
   deps: ApplyDeps,
   deferCommit: DeferCommit,
+  opts: ApplyInnerOptions = {},
 ): Promise<ApplyOutcome> {
   const domain: "ai" | "life" = proposal.targetPath.startsWith("life/") ? "life" : "ai";
 
@@ -524,7 +612,7 @@ async function applyInner(
     // `applyWikiProposal`) — a re-run that changed nothing on disk stages an
     // empty diff and the helper skips the commit quietly.
     deferCommit(() => commitApply(proposal, deps, modified), commitPaths(proposal, modified));
-    return { outcome: "applied", writtenPath: proposal.targetPath };
+    return { outcome: "applied", writtenPath: proposal.targetPath, noop: true };
   }
 
   // 2b. Staleness — the target must be exactly as it was at draft time.
@@ -589,7 +677,8 @@ async function applyInner(
 
   // 4. log.md entry (reverse-chron). A log-write hiccup must not undo the page
   //    write — the page is the source of truth — so it degrades to a warning.
-  try {
+  //    Skipped for a GROUP apply, which files one entry for every row it wrote.
+  if (!opts.skipLog) try {
     const logPath = path.join(deps.wikiDir, "log.md");
     const existingLog = await deps.readFile(logPath);
     const entry = `## [${todayOslo(deps.now())}] ${proposal.mode} | ${draftTitle(proposal)}\n- via ${logWriterFor(proposal)}, ${proposal.sourceDocs.length} sources`;

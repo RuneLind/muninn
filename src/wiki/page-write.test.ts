@@ -244,6 +244,7 @@ test("TOCTOU: a gardener apply + an append on one wiki serialize — both log en
     wikiName: null,
     topicKey: "new-concept",
     groupKey: null,
+    lintMeta: null,
     kind: "concept",
     mode: "create",
     targetPath: "concepts/New Concept.md",

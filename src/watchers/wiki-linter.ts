@@ -93,7 +93,9 @@ export async function checkWikiLinter(
   //
   // The `fixable` gate is not an optimisation only: without it a wiki whose
   // findings are all hygiene ones would still ask the DB for a skip list it has
-  // no use for, on every weekly run.
+  // no use for, on every weekly run. It also means the SELF-HEAL does not run on
+  // such a wiki — correct, since a wiki that mints no fixable finding this week
+  // has nothing that could have superseded a live group either.
   const fixable = findings.filter((f) => f.fix);
   if (fixable.length === 0) {
     // nothing to propose
@@ -109,13 +111,18 @@ export async function checkWikiLinter(
         wikiDir: botConfig.wikiDir,
         wikiName: name,
       });
-      if (seeded.proposed > 0) {
-        log.info("Wiki-linter: proposed {proposed} lint fix group(s) ({rows} rows) for \"{name}\"", {
-          botName: name,
-          name,
-          proposed: seeded.proposed,
-          rows: seeded.rows,
-        });
+      if (seeded.proposed > 0 || seeded.staled > 0) {
+        log.info(
+          "Wiki-linter: proposed {proposed} lint fix group(s) ({rows} rows), retired {staled}, {claimed} page-claimed for \"{name}\"",
+          {
+            botName: name,
+            name,
+            proposed: seeded.proposed,
+            rows: seeded.rows,
+            staled: seeded.staled,
+            claimed: seeded.claimed,
+          },
+        );
       }
     } catch (err) {
       // Best-effort: a seeding failure must never cost the report itself.
