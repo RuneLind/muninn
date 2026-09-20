@@ -5,10 +5,17 @@
  * `related.ts` reaches `store.ts` → `registry.ts`, whose `import.meta.dir` is
  * `undefined` under Playwright's node loader — importing it from an `e2e/` spec
  * made the whole file unloadable ("No tests found"). This module imports
- * nothing, so it loads under every runner, and `e2e/wiki-related-work.spec.ts`
- * sizes its fixture from the real values. A drift then shows up as that spec's
- * own red in BOTH directions; re-typed numbers only caught a threshold moving
- * UP.
+ * nothing, so it loads under every runner.
+ *
+ * ⚠️ **Importing them catches no drift on its own.**
+ * `e2e/wiki-related-work.spec.ts` SIZES its fixture from these values
+ * (`RELATED_HUB_BACKLINKS + 1` fillers, `RELATED_DIGEST_PRS - 1` extra refs),
+ * so the fixture tracks the constant: the boundary case holds at whatever the
+ * threshold is and both cut cases stay green on a move in EITHER direction —
+ * measured, 25 → 10 and 25 → 30 both leave the spec passing. What catches a
+ * move is the VALUE PIN in that spec, one `toBe` per constant, asserting the
+ * number the paragraphs below were measured against. Re-measure on the live
+ * wiki before moving either, and move the pin in the same edit.
  *
  * `related.ts` re-exports all four, so the rule and its tests still read one
  * name each.
@@ -37,8 +44,8 @@ export const RELATED_HUB_BACKLINKS = 25;
  * "≥2 shared refs means one piece of work", and that inference is equally false
  * when the digest is the page you have open.
  *
- * Measured on mimir 2026-09-20, FIVE pages exceed it — `log.md` (210 refs),
- * `plans/index.md` (84), `archive/mimir/2026-07-30-plans-index-pre-generation.md`
+ * Measured on mimir 2026-09-20, FIVE pages exceed it — `log.md` (208 refs),
+ * `plans/index.md` (83), `archive/mimir/2026-07-30-plans-index-pre-generation.md`
  * (32), `index.md` (27) and `blogs/2026-09-10-shipping-pipeline-review-9.mdx`
  * (19) — against 18 pages in the 6–15 band, so the constant sits in a real gap.
  */

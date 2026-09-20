@@ -37,8 +37,13 @@ import { contrastOf } from "./contrast.ts";
  * itself is unloadable here — it reaches `registry.ts`, whose `import.meta.dir`
  * is `undefined` under Playwright's node loader, and the import alone made this
  * whole file report "No tests found" — but `related-constants.ts` imports
- * nothing, so it loads. Re-typed numbers only caught a threshold moving UP:
- * 25 → 10 and 15 → 5 both left this fixture passing.
+ * nothing, so it loads.
+ *
+ * ⚠️ Importing them keeps the fixture in STEP with them; it does not detect a
+ * move. The fixture is sized from the values below, so the hub straddles
+ * whatever the threshold is and the cut cases stay green either way — measured,
+ * 25 → 10 and 25 → 30 both pass. The value pin further down is what reports a
+ * move.
  */
 import { RELATED_DIGEST_PRS, RELATED_HUB_BACKLINKS } from "../src/wiki/related-constants.ts";
 
@@ -187,6 +192,25 @@ async function openReader(page: Page): Promise<void> {
 }
 
 const relatedRows = (page: Page) => page.locator(".wiki-conn-item.wiki-conn-related");
+
+/**
+ * The deliberate "re-measure on the live wiki before moving this" guard.
+ *
+ * Every other case here is sized FROM the constants, which is what keeps the
+ * boundary honest at any value — and what makes those cases blind to the value
+ * itself. Both numbers are fitted to a 547-page mimir clone (the measurements
+ * are in `related-constants.ts`: two pages over 25 backlinks, five over 15 PR
+ * refs against 18 in the 6–15 band), so moving one is a re-measurement rather
+ * than an edit, and this is the line that says so.
+ *
+ * A value pin in an ACCEPTANCE spec is not the unit-test tautology class: it
+ * stands beside the cases that drive the same numbers through a real index, so
+ * a red here reads "the tuning moved" rather than restating the source.
+ */
+test("the thresholds are the measured values — moving one means re-measuring", () => {
+  expect(RELATED_HUB_BACKLINKS).toBe(25);
+  expect(RELATED_DIGEST_PRS).toBe(15);
+});
 
 test("the block leads the Connections panel, newest first, with one why line per row", async ({
   page,

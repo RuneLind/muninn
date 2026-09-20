@@ -3962,6 +3962,15 @@ describe("extractPrRefs / pagePrRefs — the three body shapes", () => {
     expect(extractPrRefs("x-muninn#5 and muninn-ish#6")).toEqual([]);
   });
 
+  test("shape 2's own lookbehind refuses an `@` — `rune@RuneLind/muninn#5` is a handle", () => {
+    // The false-shape case above covers `rune@muninn#5`, which is SHAPE 3 — so
+    // shape 3's class is what refuses that one, and dropping `@` from shape 2's
+    // class alone left every other case in this file green while this span
+    // minted `RuneLind/muninn#5`. The owner gate cannot close it: the owner
+    // here IS `PR_REF_OWNER`.
+    expect(extractPrRefs("rune@RuneLind/muninn#5")).toEqual([]);
+  });
+
   test("ONE optional space before the `#`, no more", () => {
     expect(extractPrRefs("muninn #550")).toEqual(["RuneLind/muninn#550"]);
     // The dry run allowed up to 12 arbitrary characters here, which reads a repo

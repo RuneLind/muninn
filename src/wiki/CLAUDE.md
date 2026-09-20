@@ -1037,8 +1037,8 @@ that many neighbours.
   the PR-sharing source — it names half the month by construction. It still
   appears through a real link, with the link as its reason. The cut is applied to
   BOTH ends of a pair: the inference is as false when the digest is the page you
-  have open. Measured on mimir, 5 pages exceed it (`log.md` at 210,
-  `plans/index.md` 84, the plans-index archive report 32, `index.md` 27, the
+  have open. Measured on mimir, 5 pages exceed it (`log.md` at 208,
+  `plans/index.md` 83, the plans-index archive report 32, `index.md` 27, the
   review-9 blog 19), against 18 pages in the 6–15 band — the constant sits in a
   real gap.
 - ⚠️ **Bookkeeping**: `index`, `log` and `CLAUDE`, by stem, in any folder
@@ -1125,7 +1125,11 @@ spec cannot reach, since an omitted block has no element to assert on),
 cuts against a real index, the listing's absent key, the why line's full
 visibility, and the contrast at rest AND hovered in both themes). The spec sizes
 its fixture from `src/wiki/related-constants.ts` rather than re-typing the
-numbers — re-typed, a threshold moving DOWN (25 → 10, 15 → 5) left it green.
+numbers, so the FIXTURE TRACKS the constant and the boundary case holds at any
+value — which is also why the import catches no drift by itself (measured:
+25 → 10 and 25 → 30 both leave the spec green). The spec PINS each value
+instead, one `toBe` per constant: a threshold is a measurement, and moving it
+means re-measuring on the live wiki and moving the pin in the same edit.
 
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 
