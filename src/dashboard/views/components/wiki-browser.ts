@@ -2423,10 +2423,11 @@ function seriesStripHtml(m: WikiListing): string {
 //
 // The CAS bases are captured when the popover OPENS, one per page the menu can
 // write, and held for as long as it is open. Reading them a millisecond before
-// each POST is a CAS whose window is the network round trip — measured, an edit
-// made while the popover stood open was silently overwritten — where the window
-// that matters is the one a human spends deciding, which is exactly the span
-// this menu is on screen. The page the reader has OPEN needs no request at all:
+// each POST is a CAS whose window is the network round trip, where the window
+// that matters is the one a human spends deciding — exactly the span this menu
+// is on screen. Measured: a file edited while the popover stood open was
+// written anyway, against bytes the reader had never seen and with no refusal
+// shown. The page the reader has OPEN needs no request at all:
 // its `/api/wiki/page` payload carried the hash, and every write here answers
 // the hash it left behind, so the editor's own writes keep it current instead
 // of staling it.
