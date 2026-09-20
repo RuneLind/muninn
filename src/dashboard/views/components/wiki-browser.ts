@@ -1590,9 +1590,15 @@ async function loadProvStrip(relPath: string): Promise<void> {
     placeholder.outerHTML = next;
     return;
   }
-  // No placeholder was rendered (a `prs:`-only page) and a strip did come
-  // back: it goes where `articleHeadHtml` would have put it, after the meta row.
-  if (next) document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", next);
+  // No placeholder. Two ways here: a `prs:`-only page rendered none, or a
+  // strip is ALREADY on the page — the reader left and came back before the
+  // first visit's answer arrived, so two loads for the same relPath overlap,
+  // both pass the guard above, and the second must not add a second strip
+  // (measured: two cost lines, two chains sharing one `CHAIN_ID`). A strip that
+  // did come back for a bare head goes where `articleHeadHtml` would have put
+  // it, after the meta row.
+  if (!next || document.querySelector(".wiki-prov-strip")) return;
+  document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", next);
 }
 
 /** The retry on a failed load: back to the placeholder, then the fetch again. */

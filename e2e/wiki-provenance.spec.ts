@@ -177,12 +177,14 @@ const STAMPME = [
 
 // `prs:` alone: a page whose strip may render to NOTHING (no Jira row, and on a
 // host where the `?prs=` leg finds no ghost, no cost line either), so it must
-// get no placeholder — a spinner that vanishes is worse than no spinner.
+// get no placeholder — a spinner that vanishes is worse than no spinner. #543
+// IS a merge the ledger stub knows, so on this suite the strip does come back
+// and the no-placeholder insertion path is the one exercised.
 const PRSONLY = [
   "---",
   "type: note",
   "title: PRs only",
-  "prs: [RuneLind/muninn#9999]",
+  "prs: [RuneLind/muninn#543]",
   "---",
   "",
   "# PRs only",
@@ -1366,8 +1368,37 @@ test.describe("Wiki reader: provenance", () => {
     await expect(page.locator(".wiki-article-head h1")).toHaveText("PRs only");
     await expect(page.locator(".wiki-prov-strip")).toHaveCount(0);
     release();
-    await page.waitForTimeout(300);
+    // The strip that comes back lands where `articleHeadHtml` would have put
+    // it: directly after the meta row, inside the head.
+    await expect(page.locator(".wiki-article-head .wiki-meta-row + .wiki-prov-strip")).toHaveCount(1);
     await expect(page.locator(".wiki-prov-pending")).toHaveCount(0);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+  });
+
+  test("returning to a page before its first block arrived renders ONE strip", async ({ page }) => {
+    // A → B → A with the first answer held: fetch 1 belongs to the first
+    // visit, fetch 3 to the second. Both are for the same relPath, so the
+    // navigation guard lets both through — and only one may render.
+    let calls = 0;
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      calls += 1;
+      if (calls === 1) await held;
+      await route.continue();
+    });
+    await open_(page, SHAPE_REL);
+    await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    await page.locator(`.wiki-list-item[data-relpath="${PLAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
+    await page.locator(`.wiki-list-item[data-relpath="${SHAPE_REL}"]`).click();
+    await expect(page.locator(".wiki-prov-strip .wiki-prov-jira-key")).toHaveText("MELOSYS-8045");
+    release();
+    await page.waitForTimeout(300);
+    await expect(page.locator(".wiki-article-head .wiki-prov-strip")).toHaveCount(1);
+    await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
   });
 
   test("retry after a failed fetch brings the strip, and its Stamp, back", async ({ page }) => {

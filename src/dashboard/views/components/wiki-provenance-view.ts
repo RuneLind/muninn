@@ -1,6 +1,6 @@
 /**
  * The reader's provenance VIEW — every string and every fragment of markup the
- * browser shows for `/api/wiki/page`'s `provenance` block, with no DOM in sight.
+ * browser shows for the `GET /api/wiki/page/provenance` block, with no DOM in sight.
  *
  * **One surface, under the title.** The strip is a collapsed LINE — the Jira
  * row, then one sentence of cost plus a mark per event — that opens in place
@@ -495,7 +495,7 @@ export function provPendingHtml(): string {
 }
 
 /** The retry control's label on the failed state. */
-export const PROV_RETRY_LABEL = "retry";
+const PROV_RETRY_LABEL = "retry";
 
 /**
  * The placeholder's state when the fetch itself failed: the reason and a retry.
