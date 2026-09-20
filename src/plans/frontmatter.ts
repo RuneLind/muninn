@@ -270,8 +270,6 @@ function frontmatterKeyLine(key: string): RegExp {
  * one. A `series:` key is a slug and a `series_label:` is a title, so the shapes
  * that matter are a leading/trailing space, a `#` (a comment), a `:` (a nested
  * key), a quote, and the indicator characters a value may not START with.
- * Anything outside it is double-quoted with `"` and `\` escaped, which
- * `parseFrontmatter`'s `unquote` reads back as the same string.
  */
 function needsQuoting(value: string): boolean {
   if (value === "" || value !== value.trim()) return true;
@@ -279,11 +277,44 @@ function needsQuoting(value: string): boolean {
   return /^[-?&*!|>%@`[\]{},]/.test(value);
 }
 
-/** The value as it is written into the fence. */
-function scalarLiteral(value: string): string {
-  if (!needsQuoting(value)) return value;
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+/**
+ * The value as it is written into the fence — **in the READER's grammar, which
+ * has no escapes at all.**
+ *
+ * `parseFrontmatter`'s `unquote` (`src/wiki/store.ts`) trims, then strips ONE
+ * surrounding pair of matching quotes, and returns the rest verbatim. It never
+ * unescapes. So a `\"` inside double quotes reads back as a literal backslash
+ * plus a quote, and a `C:\path` written as `"C:\\path"` reads back with two
+ * backslashes — which is what the earlier escaping writer did, and what the
+ * round-trip test in `frontmatter.test.ts` now pins.
+ *
+ * Hence: double quotes when the value carries no `"`, single quotes when it
+ * carries `"` but no `'`, and a REFUSAL when it carries both or spans a line —
+ * there is no third pair to reach for, and mangling a title is worse than
+ * telling the reviewer this one page cannot take the edit. Both refusals are
+ * reachable only from a hand-written `series_label:`; a coined series key is a
+ * path stem.
+ */
+function scalarLiteral(value: string): { literal: string } | { refused: string } {
+  if (/[\r\n]/.test(value)) {
+    return { refused: "the value spans more than one line — refusing to write it as a scalar" };
+  }
+  if (!needsQuoting(value)) return { literal: value };
+  if (!value.includes('"')) return { literal: `"${value}"` };
+  if (!value.includes("'")) return { literal: `'${value}'` };
+  return {
+    refused:
+      "the value carries both \" and ' — the frontmatter reader strips one quote pair and unescapes nothing",
+  };
 }
+
+/**
+ * A line that CONTINUES the key above it: an indented child, or a block-sequence
+ * item at column 0. Either means the key's value is a list or a block scalar
+ * rather than the inline scalar this writer replaces — and replacing only the
+ * key line would leave the rest orphaned inside the fence.
+ */
+const CONTINUATION_LINE = /^(?:[ \t]+\S|-(?:[ \t]|\r?$))/;
 
 /**
  * Upsert (or, with `value: null`, REMOVE) one top-level frontmatter key.
@@ -306,7 +337,10 @@ function scalarLiteral(value: string): string {
  *     one.
  *   - **The value is QUOTED when it needs to be** ({@link needsQuoting}), since
  *     the caller passes a page TITLE as well as a slug. `setPlanPriority` writes
- *     a closed enum and never had to.
+ *     a closed enum and never had to. The quoting is the READER's grammar and
+ *     carries no escapes, so two value shapes are REFUSED rather than written —
+ *     see {@link scalarLiteral}. A key whose current value is a list or a block
+ *     scalar is refused too ({@link CONTINUATION_LINE}).
  *
  * Written for the wiki lint's series fixes (`src/gardener/lint-proposals.ts`)
  * and reused by the series editor, so it takes any key rather than a union of
@@ -331,22 +365,48 @@ export function setFrontmatterScalar(
 
   const cr = openLine.endsWith("\r") ? "\r" : "";
   const keyLine = frontmatterKeyLine(key);
+  const lines = body === null ? [] : body.split("\n");
+
+  // Refuse a key whose value is NOT an inline scalar, before anything is built:
+  // the upsert below rewrites (or drops) exactly one line, so a list or a block
+  // scalar under the key would be left as orphan continuation lines the reader
+  // then reads as depth-1 children of whatever key precedes them.
+  for (let i = 0; i < lines.length; i++) {
+    if (!keyLine.test(lines[i]!)) continue;
+    const next = lines[i + 1];
+    if (next !== undefined && CONTINUATION_LINE.test(next)) {
+      return {
+        kind: "refused",
+        reason: `"${key}:" carries a multi-line value — refusing to rewrite it as a scalar`,
+      };
+    }
+  }
+
+  // The literal is resolved ONCE, up front, so an unwritable value refuses
+  // instead of half-editing the fence.
+  let literal = "";
+  if (value !== null) {
+    const lit = scalarLiteral(value);
+    if ("refused" in lit) return { kind: "refused", reason: lit.refused };
+    literal = lit.literal;
+  }
+
   const fence: string[] = [];
   let replaced = false;
   let hadKey = false;
-  for (const line of body === null ? [] : body.split("\n")) {
+  for (const line of lines) {
     if (!keyLine.test(line)) {
       fence.push(line);
       continue;
     }
     hadKey = true;
     if (value === null || replaced) continue;
-    fence.push(`${key}: ${scalarLiteral(value)}${cr}`);
+    fence.push(`${key}: ${literal}${cr}`);
     replaced = true;
   }
   if (value === null && !hadKey) return { kind: "noop" };
   if (value !== null && !replaced) {
-    fence.push(`${key}: ${scalarLiteral(value)}${cr}`);
+    fence.push(`${key}: ${literal}${cr}`);
   }
 
   const out = openLine + (fence.length > 0 ? `\n${fence.join("\n")}` : "") + tail;
