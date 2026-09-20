@@ -105,6 +105,59 @@ describe("checkSeries", () => {
     expect(await findings("same-work-no-link")).toHaveLength(0);
   });
 
+  test("a link the OLDER page carries suppresses the pair too", async () => {
+    // The fix writes on the NEWER page, so the newer→older direction is the one
+    // the rule is obviously about — and a suppression test in that direction
+    // passes whether or not the other branch exists at all.
+    await write(
+      "plans/newer.mdx",
+      page("Newer plan", { date: "2026-09-10" }, "Landed RuneLind/muninn#553 and RuneLind/muninn#552."),
+    );
+    await write(
+      "plans/older.mdx",
+      page("Older plan", { date: "2026-09-01" }, "RuneLind/muninn#552, RuneLind/muninn#553. See [[Newer plan]]."),
+    );
+    expect(await findings("same-work-no-link")).toHaveLength(0);
+  });
+
+  test("the hub and digest cuts are STRICT — exactly at the threshold still pairs", async () => {
+    // `> RELATED_HUB_BACKLINKS` and `> RELATED_DIGEST_PRS`: a page AT the number
+    // is not a hub and not a digest. A test that only drives the far side of a
+    // `>` passes for `>=` too.
+    const refs = Array.from({ length: RELATED_DIGEST_PRS }, (_, i) => `RuneLind/muninn#${900 + i}`);
+    await write("plans/edge.mdx", page("Edge", { date: "2026-09-10" }, refs.join(" ")));
+    await write(
+      "plans/peer.mdx",
+      page("Peer", { date: "2026-09-01" }, "RuneLind/muninn#900 and RuneLind/muninn#901."),
+    );
+    for (let i = 0; i < RELATED_HUB_BACKLINKS; i++) {
+      await write(`notes/f-${i}.md`, page(`F ${i}`, { date: "2026-08-01" }, "See [[Edge]]."));
+    }
+    const [f, ...rest] = await findings("same-work-no-link");
+    expect(rest).toHaveLength(0);
+    expect(f!.relPath).toBe("plans/edge.mdx");
+  });
+
+  test("a title SHARED with another page falls back to the stem in the fix", async () => {
+    // `index.resolve` is first-registration-wins, so linking by a shared title
+    // would make the lint's own fix a `broken-link` finding on the next run.
+    await write(
+      "plans/newer.mdx",
+      page("Newer plan", { date: "2026-09-10" }, "RuneLind/muninn#553 and RuneLind/muninn#552."),
+    );
+    await write(
+      "plans/older.mdx",
+      page("Shared title", { date: "2026-09-01" }, "RuneLind/muninn#552, RuneLind/muninn#553."),
+    );
+    // Registered FIRST (relPath order), so `[[Shared title]]` resolves here.
+    await write("archive/claimant.mdx", page("Shared title", { date: "2026-08-01" }));
+
+    const [f] = await findings("same-work-no-link");
+    expect(edits(f!)).toEqual([
+      { op: "see-also", relPath: "plans/newer.mdx", title: "older" },
+    ]);
+  });
+
   test("a shared session id pairs two pages that share no PR ref", async () => {
     await write("plans/a.mdx", page("A", { date: "2026-09-10", sessions: ["claude-code:abc-123"] }));
     await write("plans/b.mdx", page("B", { date: "2026-09-01", sessions: ["claude-code:abc-123"] }));
@@ -172,7 +225,7 @@ describe("checkSeries", () => {
     );
     await write(
       "plans/follow.mdx",
-      page("Follow up", { date: "2026-09-10" }, "See [[Rail grouping]]."),
+      page("Follow up", { date: "2026-09-10", plan: true }, "See [[Rail grouping]]."),
     );
     await write(
       "blogs/explained.mdx",
@@ -195,7 +248,7 @@ describe("checkSeries", () => {
 
   test("ONE wikilink plus ONE shared PR ref is a cluster edge; a bare link is not", async () => {
     await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true }, "See [[B]] — RuneLind/muninn#900."));
-    await write("plans/b.mdx", page("B", { date: "2026-09-05" }, "RuneLind/muninn#900."));
+    await write("plans/b.mdx", page("B", { date: "2026-09-05", plan: true }, "RuneLind/muninn#900."));
     // A bare one-way link with no shared ref: its own page, never a cluster.
     await write("plans/c.mdx", page("C", { date: "2026-09-04" }, "See [[A]]."));
     const [f, ...rest] = await findings("series-unnamed");
@@ -211,7 +264,10 @@ describe("checkSeries", () => {
     for (let i = 0; i < n - 1; i++) {
       // Older as i grows, so the cut is the LAST three.
       const day = String(20 - i).padStart(2, "0");
-      await write(`plans/spoke-${i}.mdx`, page(`Spoke ${i}`, { date: `2026-09-${day}` }, "See [[Head]]."));
+      await write(
+        `plans/spoke-${i}.mdx`,
+        page(`Spoke ${i}`, { date: `2026-09-${day}`, plan: i === 0 }, "See [[Head]]."),
+      );
     }
 
     const [f] = await findings("series-unnamed");
@@ -262,6 +318,144 @@ describe("checkSeries", () => {
     await write("plans/two.mdx", page("Two", { date: "2026-09-10", series: "prov" }, "See [[One]]."));
     expect(await findings("series-unnamed")).toHaveLength(0);
     expect(await findings("series-inconsistent")).toHaveLength(0);
+  });
+
+
+  // ── 8.2 / 8.3(c) candidate set, gate and coined key ───────────────────────
+
+  test("only NARRATIVE pages join a cluster — a reference page glues nothing", async () => {
+    await write(
+      "plans/a.mdx",
+      page("Alpha", { date: "2026-09-18", plan: true }, "See [[Beta]] and [[Tracing]]."),
+    );
+    await write(
+      "plans/b.mdx",
+      page("Beta", { date: "2026-09-12", plan: true }, "See [[Alpha]] and [[Tracing]]."),
+    );
+    // A permanent reference page: no plan_status, no status_date, not under
+    // plans/ blogs/ archive/. It links both plans and both link it, so under the
+    // raw clustering it is a member — and one Accept would put `series:` on it.
+    await write("projects/tracing.md", "---\ntitle: Tracing\n---\n\nSee [[Alpha]] and [[Beta]].\n");
+
+    const [f, ...rest] = await findings("series-unnamed");
+    expect(rest).toHaveLength(0);
+    expect(edits(f!).map((e) => e.relPath)).toEqual(["plans/a.mdx", "plans/a.mdx", "plans/b.mdx"]);
+    expect(f!.detail).not.toContain("projects/tracing.md");
+  });
+
+  test("a cluster carrying fewer than two open plans is REPORT-ONLY", async () => {
+    await write("blogs/one.mdx", page("One", { date: "2026-09-18" }, "See [[Two]]."));
+    await write("blogs/two.mdx", page("Two", { date: "2026-09-12" }, "See [[One]]."));
+
+    const [f, ...rest] = await findings("series-unnamed");
+    expect(rest).toHaveLength(0);
+    // The cluster is REPORTED — the count is the point — but carries no fix, so
+    // nothing is seeded and no Accept can name a series nobody is working on.
+    expect(f!.fix).toBeUndefined();
+    expect(f!.message).toContain("report-only");
+  });
+
+  test("a coined key that an existing series already owns gets a -2 suffix", async () => {
+    await write(
+      "plans/lead.mdx",
+      page("Lead", { date: "2026-09-18", plan: true }, "See [[Second]]."),
+    );
+    await write(
+      "plans/second.mdx",
+      page("Second", { date: "2026-09-12", plan: true }, "See [[Lead]]."),
+    );
+    // An unrelated page already NAMES `lead`. Coining it again would merge two
+    // pieces of work into one rail fold the moment the fix applied.
+    await write("archive/other.mdx", page("Other", { date: "2026-09-01", series: "lead" }));
+
+    const [f] = await findings("series-unnamed");
+    expect(f!.message).toContain("series: lead-2");
+    expect(
+      edits(f!).filter((e) => e.op === "frontmatter" && e.key === "series").map((e) =>
+        e.op === "frontmatter" ? e.value : null,
+      ),
+    ).toEqual(["lead-2", "lead-2"]);
+  });
+
+  test("no series_label: is proposed when the head carries no title:", async () => {
+    // No `title:` ⇒ the store falls the title back to the page STEM, which is
+    // also what the coined key is — so the label would say nothing the key does
+    // not already say.
+    await write(
+      "plans/untitled.mdx",
+      ["---", "status_date: 2026-09-18", "plan_status: in-flight", "---", "", "See [[second]].", ""].join("\n"),
+    );
+    await write(
+      "plans/second.mdx",
+      page("Second", { date: "2026-09-12", plan: true }, "See [[untitled]]."),
+    );
+
+    const [f] = await findings("series-unnamed");
+    expect(f!.message).toContain("series: untitled");
+    expect(edits(f!).filter((e) => e.op === "frontmatter" && e.key === "series_label")).toEqual([]);
+  });
+
+  test("8.3(c) joins under the HEAD's spelling of the key, not the member it met", async () => {
+    // The series' head spells it `prov`; the member the cluster touches spells it
+    // `Prov`. Joining the met spelling would write a second variant of a key the
+    // spelling rule is at the same moment normalising away.
+    await write("plans/canon.mdx", page("Canon", { date: "2026-09-18", plan: true, series: "prov" }));
+    await write(
+      "plans/variant.mdx",
+      page("Variant", { date: "2026-09-12", series: "Prov" }, "See [[Joiner]]."),
+    );
+    await write("plans/joiner.mdx", page("Joiner", { date: "2026-09-10" }, "See [[Variant]]."));
+
+    const joining = (await findings("series-inconsistent")).find((f) =>
+      (f.fix?.edits ?? []).some((e) => e.relPath === "plans/joiner.mdx"),
+    );
+    expect(edits(joining!)).toEqual([
+      { op: "frontmatter", relPath: "plans/joiner.mdx", key: "series", value: "prov" },
+    ]);
+  });
+
+  test("8.3(b) keeps the label the RAIL reads — the newest labelled member", async () => {
+    // The newest labelled member is a blog; the only labelled PLAN is older. The
+    // rail reads the blog's label, so removing it would rename the fold.
+    await write(
+      "plans/p.mdx",
+      page("P", { date: "2026-09-10", plan: true, series: "prov", label: "Plan label" }),
+    );
+    await write("blogs/b.mdx", page("B", { date: "2026-09-18", series: "prov", label: "Blog label" }));
+
+    const [f, ...rest] = await findings("series-inconsistent");
+    expect(rest).toHaveLength(0);
+    expect(f!.detail).toContain("Blog label");
+    expect(edits(f!)).toEqual([
+      { op: "frontmatter", relPath: "plans/p.mdx", key: "series_label", value: null },
+    ]);
+  });
+
+  test("a retired page whose successor left the series is not censused as a member", async () => {
+    await write("plans/head.mdx", page("Head", { date: "2026-09-18", plan: true, series: "prov" }));
+    await write("plans/newplan.mdx", page("New plan", { date: "2026-09-12", plan: true }));
+    await write(
+      "plans/retired.mdx",
+      [
+        "---",
+        "title: Retired",
+        "status_date: 2026-09-05",
+        "series: Prov",
+        "superseded_by: newplan",
+        "---",
+        "",
+        "Body.",
+        "",
+      ].join("\n"),
+    );
+
+    // The rail does not count a page that renders under a successor outside the
+    // series, so neither does the lint — its spelling is not this series' to
+    // normalise.
+    const spelling = (await findings("series-inconsistent")).filter((f) =>
+      f.message.includes("spelled"),
+    );
+    expect(spelling).toEqual([]);
   });
 
   // ── 8.3 series inconsistent ───────────────────────────────────────────────

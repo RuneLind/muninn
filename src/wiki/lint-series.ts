@@ -13,10 +13,12 @@
  *
  * Its own module rather than three more functions in `lint.ts`: it is the only
  * check that needs the SERIES vocabulary (`wiki-groups.ts`) and the RELATED
- * WORK cuts (`related.ts` + `related-constants.ts`), and folding it in would
- * pull both graphs into every reader of the seven hygiene checks. `lint.ts`
- * imports `checkSeries` as a value and this file imports `LintFinding` as a
- * TYPE, so the pair is erased at runtime and is not a module cycle.
+ * WORK cuts (`related.ts` + `related-constants.ts`), and it is the only one
+ * carrying a `fix`. The split is for READING, not for load: `lint.ts` imports
+ * `checkSeries` as a VALUE, so every reader of the seven hygiene checks pulls
+ * this module and both of its graphs anyway. What the direction does buy is
+ * that this file imports `LintFinding` as a TYPE, so the pair is erased at
+ * runtime and is not a module cycle.
  *
  * **The four cuts are REUSED, never re-declared** — `isBookkeeping`,
  * `RELATED_HUB_BACKLINKS` (25), `RELATED_DIGEST_PRS` (15) and
@@ -35,9 +37,12 @@ import {
   bySeriesDateDesc,
   clipSeriesTitle,
   newestSeriesPlan,
-  seriesFoldKey,
+  seriesCensusKey,
+  seriesHead,
   seriesKeyOf,
+  seriesMembersByFoldKey,
   SERIES_CONTINUE_MAX,
+  SERIES_TERMINAL_STATUSES,
 } from "../dashboard/views/components/wiki-groups.ts";
 import { isBookkeeping } from "./related.ts";
 import {
@@ -67,6 +72,67 @@ export type SeriesLintCheck = (typeof SERIES_LINT_CHECKS)[number];
  * instead of dropping it.
  */
 export const SERIES_CLUSTER_MAX = 12;
+
+/**
+ * How many members of an 8.2 cluster must be an OPEN PLAN before the cluster is
+ * proposed rather than merely reported.
+ *
+ * The dry run this check was sized on (2026-09-20) scanned `plans/`, `blogs/`
+ * and `archive/` only and gated on `≥2 plans`, and measured 21 usable clusters
+ * over 79–92 pages. Shipped without the gate the same clustering measured 42
+ * clusters over 169 pages — the extra half being reference material and finished
+ * work nobody is going to continue, where a coined `series:` is noise a reader
+ * then has to un-write. A cluster under the gate is still a FINDING (the count
+ * is the signal), it just carries no `fix`.
+ */
+export const SERIES_CLUSTER_MIN_PLANS = 2;
+
+/** `type:` values that are narrative by declaration, whatever folder they sit
+ *  in — a wiki with a `.wiki-reader.json` ontology names its own. */
+const NARRATIVE_TYPES = new Set(["blog", "plan", "archive", "report", "handover", "postmortem"]);
+
+/** Top-level folders that are narrative by convention — mimir's three, the ones
+ *  the dry run scanned. */
+const NARRATIVE_FOLDERS = new Set(["plans", "blogs", "archive"]);
+
+/**
+ * Is this page a piece of WORK-IN-TIME — something a series can be a series OF?
+ *
+ * The four cuts in `buildCandidates` answer "is this page a piece of work", and
+ * 8.1 needs nothing more: a missing link between two pages that landed the same
+ * two PRs is worth reporting wherever they live. A SERIES is a stronger claim —
+ * it says these pages are episodes of one effort with a head you can continue
+ * at — and applying it to reference material is how one Accept ends up writing
+ * `series:` onto a wiki's `overview.md`. Measured on a mimir clone before this
+ * predicate existed: the largest cluster ran to 68 pages, glued by
+ * `projects/muninn/tracing.md` (21 backlinks, under the 25-backlink hub cut),
+ * and 8 of the 12 rows of another were permanent reference pages.
+ *
+ * A page qualifies when it declares a lifecycle (`plan_status`), declares WHEN
+ * its state was last affirmed (`status_date`), declares a narrative `type:`, or
+ * sits in one of the three narrative folders. Exported because it is a
+ * clarification of the plan's own scan scope, not an internal detail — a wiki
+ * whose narrative lives elsewhere reads this predicate to find out why its
+ * pages are not clustering.
+ *
+ * 8.1 keeps its own, wider candidate set.
+ */
+export function isNarrativePage(
+  page: Pick<WikiPageMeta, "relPath" | "type" | "plan_status" | "status_date">,
+): boolean {
+  if (page.plan_status) return true;
+  if (page.status_date) return true;
+  if (NARRATIVE_TYPES.has((page.type || "").toLowerCase())) return true;
+  const slash = page.relPath.indexOf("/");
+  return slash > 0 && NARRATIVE_FOLDERS.has(page.relPath.slice(0, slash).toLowerCase());
+}
+
+/** An OPEN plan: the exact filter `newestSeriesPlan` picks a head with, so "the
+ *  cluster has two open plans" and "the cluster has a head to continue at" are
+ *  the same sentence. */
+function isOpenPlan(page: WikiPageMeta): boolean {
+  return !!page.plan_status && !SERIES_TERMINAL_STATUSES.includes(page.plan_status);
+}
 
 /** How many members a `detail` line names before it says "and N more". */
 const DETAIL_MEMBERS_SHOWN = 12;
@@ -114,9 +180,23 @@ function hash12(parts: readonly string[]): string {
   return new Bun.CryptoHasher("sha256").update(parts.join("\n")).digest("hex").slice(0, 12);
 }
 
-/** The group id for one finding. The sub-rule is IN the hash because 8.3's three
- *  sub-rules can cover the same member set, and two findings sharing a group key
- *  would mint two proposal rows with one `topic_key`. */
+/**
+ * The group id for one finding — `lint:<check>:<12 hex>` over
+ * `[sub, ...sortedMembers]`.
+ *
+ * Two things are deliberately IN the hash:
+ *
+ *  - **the sub-rule**, because 8.3's three sub-rules can cover the same member
+ *    set, and two findings sharing a group key would mint two proposal rows with
+ *    one `topic_key`;
+ *  - **the proposed VALUE**, carried inside `sub` by every caller that has one —
+ *    8.2's coined key (`coin:<key>`), 8.3(c)'s target spelling (`join:<key>`),
+ *    8.3(a)'s normalisation target. The key is part of the finding's identity,
+ *    not a detail of it: the same three pages joining `prov` and joining
+ *    `prov-2` are different proposals, and a key that hashed only the members
+ *    would let a dismissal of one silence the other forever (the skip list is
+ *    by group key) and would let the self-heal pass mistake one for the other.
+ */
 function groupKeyFor(check: SeriesLintCheck, sub: string, members: readonly string[]): string {
   return `lint:${check}:${hash12([sub, ...[...members].sort()])}`;
 }
@@ -356,6 +436,45 @@ function headOf(members: WikiPageMeta[]): WikiPageMeta {
   return newestSeriesPlan(ordered) ?? ordered[0]!;
 }
 
+/**
+ * A NEW series key that no existing series owns, under the rail's own fold
+ * (`seriesCensusKey`: trimmed, case-insensitive).
+ *
+ * A coined key is a page stem, and a stem is exactly the kind of name a reader
+ * has already typed somewhere else — coining it twice would merge two unrelated
+ * pieces of work into one rail fold the moment the second fix applied, with no
+ * signal anywhere that it happened. `-2`, `-3`, … is the disambiguation the
+ * reader can rename later with one `series_label:` edit.
+ *
+ * `taken` is MUTATED, so two clusters of one pass cannot coin the same key
+ * either.
+ */
+function coinSeriesKey(stem: string, taken: Set<string>): string {
+  let key = stem;
+  for (let n = 2; taken.has(seriesCensusKey(key)); n++) key = `${stem}-${n}`;
+  taken.add(seriesCensusKey(key));
+  return key;
+}
+
+/**
+ * How the series folded at `fold` SPELLS its key — the head's spelling, which is
+ * the one 8.3(a) normalises every other member to.
+ *
+ * 8.3(c) writes this rather than the spelling of whichever member the cluster
+ * happened to touch: joining the met spelling would add a fresh variant of a key
+ * the spelling rule is, in the same pass, normalising away. `null` when the
+ * census holds no member for the fold — the only member declaring it is a page
+ * the rail does not count (a retired page whose successor left the series).
+ */
+function declaredKeySpelling(
+  declared: Map<string, WikiPageMeta[]>,
+  fold: string,
+): string | null {
+  const members = declared.get(fold);
+  if (!members || members.length === 0) return null;
+  return seriesKeyOf(headOf(members)) || null;
+}
+
 /** ────────────────────────── 8.2 + 8.3(c), one pass ───────────────────────── */
 
 /**
@@ -369,10 +488,28 @@ function headOf(members: WikiPageMeta[]): WikiPageMeta {
  * A component touching TWO existing series keys is left alone: merging two
  * named series is an editorial decision, not a lint fix.
  */
-function checkClusters(candidates: Candidate[], index: WikiIndex): LintFinding[] {
+function checkClusters(
+  candidates: Candidate[],
+  index: WikiIndex,
+  declared: Map<string, WikiPageMeta[]>,
+): LintFinding[] {
   const findings: LintFinding[] = [];
-  for (const component of seriesComponents(index, candidates)) {
-    const folds = new Set(component.filter((c) => c.series).map((c) => seriesFoldKey(c.series)));
+  // Every fold key ANY page declares, census or not: a coined key must collide
+  // with none of them, including one written on a page the rail does not count.
+  const takenKeys = new Set(
+    index.pages
+      .map((p) => seriesKeyOf(p))
+      .filter((k) => !!k)
+      .map((k) => seriesCensusKey(k)),
+  );
+  // Sorted, so which component reaches `coinSeriesKey` first — and therefore
+  // which one takes the bare stem and which the `-2` — is a property of the
+  // wiki rather than of the page walk's order.
+  const components = seriesComponents(index, candidates).sort((a, b) =>
+    componentId(a).localeCompare(componentId(b)),
+  );
+  for (const component of components) {
+    const folds = new Set(component.filter((c) => c.series).map((c) => seriesCensusKey(c.series)));
     if (folds.size >= 2) continue;
 
     const unnamed = component.filter((c) => !c.series).map((c) => c.page);
@@ -380,8 +517,11 @@ function checkClusters(candidates: Candidate[], index: WikiIndex): LintFinding[]
 
     if (folds.size === 1) {
       // 8.3(c) — the series exists; these pages link into it without declaring it.
-      const named = component.find((c) => !!c.series)!;
-      const key = named.series;
+      const fold = [...folds][0]!;
+      // The HEAD's spelling, not the member the cluster met — see
+      // `declaredKeySpelling`. The fallback is the met spelling, for the one
+      // case the census is empty (the only declaring page is a retired child).
+      const key = declaredKeySpelling(declared, fold) ?? component.find((c) => !!c.series)!.series;
       const { kept, cut } = capCluster(unnamed);
       const paths = kept.map((p) => p.relPath);
       findings.push({
@@ -407,18 +547,42 @@ function checkClusters(candidates: Candidate[], index: WikiIndex): LintFinding[]
     // 8.2 — nobody in this component has named the work yet.
     const { kept, cut } = capCluster(unnamed);
     const head = headOf(kept);
-    const key = wikiPageStem(head.relPath);
-    const label = clipSeriesTitle(head.title);
     const paths = kept.map((p) => p.relPath);
+    const cutNote = cut.length
+      ? ` · ${cut.length} more cut: ${memberList(cut.map((p) => p.relPath))}`
+      : "";
+
+    // The GATE: a cluster nobody has an open plan in is reported and not
+    // proposed. See `SERIES_CLUSTER_MIN_PLANS` — a finding with no `fix` never
+    // reaches the seeder, so the count is visible and nothing is written.
+    const openPlans = component.filter((c) => isOpenPlan(c.page)).length;
+    if (openPlans < SERIES_CLUSTER_MIN_PLANS) {
+      findings.push({
+        check: "series-unnamed",
+        relPath: head.relPath,
+        message: `${kept.length} linked pages declare no series: — report-only, ${openPlans} open plan(s) of the ${SERIES_CLUSTER_MIN_PLANS} a proposal needs`,
+        detail: `members: ${memberList(paths)}${cutNote}`,
+      });
+      continue;
+    }
+
+    const stem = wikiPageStem(head.relPath);
+    const key = coinSeriesKey(stem, takenKeys);
+    // A head with no `title:` takes its STEM as its title (`buildWikiIndex`),
+    // which is the key — so the label would restate it. No row rather than a
+    // frontmatter line saying nothing.
+    const label = clipSeriesTitle(head.title);
+    const labelEdits: LintPageEdit[] =
+      label.trim() === stem
+        ? []
+        : [{ op: "frontmatter", relPath: head.relPath, key: "series_label", value: label }];
     findings.push({
       check: "series-unnamed",
       relPath: head.relPath,
       message: `${kept.length} linked pages declare no series: — propose series: ${key}`,
-      detail:
-        `members: ${memberList(paths)}` +
-        (cut.length ? ` · ${cut.length} more cut: ${memberList(cut.map((p) => p.relPath))}` : ""),
+      detail: `members: ${memberList(paths)}${cutNote}`,
       fix: {
-        groupKey: groupKeyFor("series-unnamed", "coin", paths),
+        groupKey: groupKeyFor("series-unnamed", `coin:${key}`, paths),
         edits: [
           ...paths.map((relPath) => ({
             op: "frontmatter" as const,
@@ -426,7 +590,7 @@ function checkClusters(candidates: Candidate[], index: WikiIndex): LintFinding[]
             key: "series" as const,
             value: key,
           })),
-          { op: "frontmatter", relPath: head.relPath, key: "series_label", value: label },
+          ...labelEdits,
         ],
       },
     });
@@ -434,36 +598,34 @@ function checkClusters(candidates: Candidate[], index: WikiIndex): LintFinding[]
   return findings.sort((a, b) => a.relPath.localeCompare(b.relPath));
 }
 
+/** A component's stable identity — its smallest member key. Used to order the
+ *  components, never hashed into a group key. */
+function componentId(component: readonly Candidate[]): string {
+  return component.map((c) => c.key).sort()[0] ?? "";
+}
+
 /** ──────────────────── 8.3 (a) spelling + (b) duplicate label ──────────────── */
 
 /**
  * The two sub-rules that read the AUTHORED key alone.
  *
- * They run over every page carrying `series:` — hubs and bookkeeping pages
- * included, and unlike every other rule here. The four cuts answer "is this page
- * a piece of work", which is the question the PAIRING rules ask; a key somebody
- * typed is a declaration, and a wiki whose series is spelled two ways is
- * inconsistent wherever the second spelling landed.
+ * They run over the RAIL's census of each series (`seriesMembersByFoldKey`), so
+ * hubs and bookkeeping pages are IN — the four cuts answer "is this page a piece
+ * of work", which is the question the PAIRING rules ask, while a key somebody
+ * typed is a declaration — and the two kinds of page the rail does not count are
+ * OUT: an attachment child, and a retired page whose successor left the series.
+ * Those render under another page, so their key is not this series' to normalise
+ * and their `series_label:` is not this series' label. Rewriting one would let
+ * the lint remove the very label the fold reads.
  *
  * **One normalisation, stated once:** two keys are the same series when
- * `seriesFoldKey` (trim + lower-case) agrees — the rail's own fold, because the
+ * `seriesCensusKey` (trim + lower-case) agrees — the rail's own fold, because the
  * folds store lower-cases what it compares and two spellings already render as
  * one row there.
  */
-function checkDeclaredSeries(index: WikiIndex): LintFinding[] {
-  const byFold = new Map<string, WikiPageMeta[]>();
-  for (const page of index.pages) {
-    if (page.type === "explainer") continue;
-    const key = seriesKeyOf(page);
-    if (!key) continue;
-    const fold = seriesFoldKey(key);
-    const list = byFold.get(fold);
-    if (list) list.push(page);
-    else byFold.set(fold, [page]);
-  }
-
+function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding[] {
   const findings: LintFinding[] = [];
-  for (const members of byFold.values()) {
+  for (const members of declared.values()) {
     const head = headOf(members);
     const headKey = seriesKeyOf(head);
 
@@ -478,7 +640,7 @@ function checkDeclaredSeries(index: WikiIndex): LintFinding[] {
         message: `series: "${headKey}" is spelled ${variants.length} ways — ${variants.join(", ")}`,
         detail: `normalising to "${headKey}" on: ${memberList(paths)}`,
         fix: {
-          groupKey: groupKeyFor("series-inconsistent", `spelling:${seriesFoldKey(headKey)}`, paths),
+          groupKey: groupKeyFor("series-inconsistent", `spelling:${seriesCensusKey(headKey)}`, paths),
           edits: paths.map((relPath) => ({
             op: "frontmatter" as const,
             relPath,
@@ -489,20 +651,23 @@ function checkDeclaredSeries(index: WikiIndex): LintFinding[] {
       });
     }
 
-    // (b) more than one member carries series_label:. The head is picked among
-    //     the LABELLED members, so the fix can never remove every label.
+    // (b) more than one member carries series_label:. The head is `seriesHead`,
+    //     the RAIL's own head rule — the newest LABELLED member — so the label
+    //     kept is the label a reader already sees on the fold. `headOf` (the
+    //     newest open PLAN) is a different page whenever the newest labelled
+    //     member is a blog, and keeping that one renames the fold.
     const labelled = members.filter((m) => !!m.seriesLabel && m.seriesLabel.trim());
     if (labelled.length > 1) {
-      const labelHead = headOf(labelled);
+      const labelHead = seriesHead(members) ?? labelled[0]!;
       const extra = labelled.filter((m) => m.relPath !== labelHead.relPath);
       const paths = extra.map((p) => p.relPath);
       findings.push({
         check: "series-inconsistent",
         relPath: labelHead.relPath,
-        message: `series "${headKey}" has ${labelled.length} series_label: heads — the rail shows the newest one`,
+        message: `series "${headKey}" has ${labelled.length} series_label: heads — the rail reads the newest labelled page`,
         detail: `keeping "${labelHead.seriesLabel}" on ${labelHead.relPath}; removing series_label: from ${memberList(paths)}`,
         fix: {
-          groupKey: groupKeyFor("series-inconsistent", `label:${seriesFoldKey(headKey)}`, paths),
+          groupKey: groupKeyFor("series-inconsistent", `label:${seriesCensusKey(headKey)}`, paths),
           edits: paths.map((relPath) => ({
             op: "frontmatter" as const,
             relPath,
@@ -522,10 +687,16 @@ function checkDeclaredSeries(index: WikiIndex): LintFinding[] {
  */
 export function checkSeries(index: WikiIndex): LintFinding[] {
   const candidates = buildCandidates(index);
+  // ONE census of every declared series, by the RAIL's membership rule
+  // (`seriesMembersByFoldKey`): attachment children out, a retired page whose
+  // successor left the series out. 8.3(a)/(b) rewrite only those members, and
+  // 8.3(c) reads the head's spelling off the same map — so the lint can never
+  // propose removing the `series_label:` the rail is reading.
+  const declared = seriesMembersByFoldKey(index.pages.filter((p) => p.type !== "explainer"));
   return [
     ...checkSameWorkNoLink(index, candidates),
-    ...checkClusters(candidates, index),
-    ...checkDeclaredSeries(index),
+    ...checkClusters(candidates.filter((c) => isNarrativePage(c.page)), index, declared),
+    ...checkDeclaredSeries(declared),
   ];
 }
 
