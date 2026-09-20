@@ -861,8 +861,8 @@ resolution, `{ provenance }` or `{}` for an unstamped page, 404 for no page)
 once the article is on screen. Measured before the split: a plan page naming
 four sessions and three PRs opened seconds after its markdown was ready,
 because the join's slowest leg gated the whole payload. The placeholder is a
-`.wiki-prov-strip` like the real one, so `redrawProvStrip` (the Stamp refetch)
-replaces either in place; a fetch that fails outright becomes one
+`.wiki-prov-strip` like the real one, so the one writer, `placeProvStrip`,
+replaces either; a fetch that fails outright becomes one
 "provenance not loaded · retry" line — the retry matters because the Stamp
 button lives inside the real strip — never a spinner that runs forever, and an
 answer landing after the reader navigated away is dropped. Loads can also
@@ -871,7 +871,11 @@ there the rule is **the newest load wins**, and **there is ONE writer**:
 every load, the Stamp redraw and the retry write through `placeProvStrip`,
 which replaces whatever strip is on the page or inserts one when none is. An
 older load's answer is dropped whatever it carries, and a Stamp redraw retires
-the loads in flight, since its block is a re-resolve after the write. Two
+the loads in flight, since its block is a re-resolve after the write. What a
+load may write is decided before the writer runs: a block replaces anything, an
+empty or failed answer replaces only a placeholder — a real strip stays, so a
+Stamp refetch that re-reads a page which resolved to no keys does not remove
+the strip the reader just stamped from. Two
 writers with DOM rules of their own is how the page showed two strips twice
 (#560's fix rounds 2 and 4). The placeholder is rendered only when the
 page names a session or a Jira key: a `prs:`-only page may resolve to no strip

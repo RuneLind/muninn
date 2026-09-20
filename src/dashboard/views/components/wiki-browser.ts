@@ -1559,17 +1559,19 @@ let provLoadSeq = 0;
 /**
  * The ONE writer of the strip. Every writer — a load, the Stamp redraw, the
  * retry — replaces whatever `.wiki-prov-strip` is on the page (the
- * placeholder, the failure line, a real strip), and inserts one after the meta
- * row only when none is there and there is something to show (a `prs:`-only
- * page rendered no placeholder). Two writers with rules of their own is how
- * this page came to show two strips, twice: each rule enumerated the DOM
- * states the OTHER writer could leave and got one wrong. An open chain stays
- * open across the replacement: the reader was looking at it.
+ * placeholder, the failure line, a real strip), and inserts after the meta
+ * row when none is there (a `prs:`-only page rendered no placeholder; an empty
+ * insert is a no-op). Two writers with rules of their own is how this page
+ * came to show two strips, twice: each rule enumerated the DOM states the
+ * OTHER writer could leave and got one wrong. What a load may WRITE is decided
+ * in `loadProvStrip` (an empty or failed answer replaces only a placeholder);
+ * where it goes is decided here. An open chain stays open across the
+ * replacement: the reader was looking at it.
  */
 function placeProvStrip(html: string): void {
   const existing = document.querySelector(".wiki-prov-strip");
   if (!existing) {
-    if (html) document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", html);
+    document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", html);
     return;
   }
   const wasOpen =
@@ -1607,18 +1609,23 @@ async function loadProvStrip(relPath: string): Promise<void> {
     /* falls through to the unavailable line */
   }
   if (currentRelPath !== relPath || seq !== provLoadSeq) return;
-  if (next === null) {
-    if (document.querySelector(".wiki-prov-strip.wiki-prov-pending")) placeProvStrip(provUnavailableHtml());
+  if (next) {
+    placeProvStrip(next);
     return;
   }
-  placeProvStrip(next);
+  // Nothing to show, or nothing came back. Either one may only replace a
+  // PLACEHOLDER: a real strip stays (the Stamp refetch re-reads a page that
+  // just resolved to no keys — the same state that answered its POST with no
+  // block — and a successful write must not make the strip, the chain and the
+  // Stamp button vanish), and a bare head stays bare.
+  if (!document.querySelector(".wiki-prov-strip.wiki-prov-pending")) return;
+  placeProvStrip(next === null ? provUnavailableHtml() : "");
 }
 
 /** The retry on a failed load: back to the placeholder, then the fetch again. */
 function retryProvStrip(): void {
-  const failed = document.querySelector(".wiki-prov-strip.wiki-prov-unavailable");
-  if (!failed || !currentRelPath) return;
-  failed.outerHTML = provPendingHtml();
+  if (!document.querySelector(".wiki-prov-strip.wiki-prov-unavailable") || !currentRelPath) return;
+  placeProvStrip(provPendingHtml());
   void loadProvStrip(currentRelPath);
 }
 

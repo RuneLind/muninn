@@ -1533,19 +1533,20 @@ test.describe("Wiki reader: provenance", () => {
     await expect(page.locator(".wiki-chain-reason", { hasText: "merged #543" })).toHaveCount(0);
   });
 
-  test("a Stamp answer with no block, landing on a page whose load is slow, leaves ONE strip", async ({ page }) => {
-    // Two writers on one page: the Stamp's refetch (a warm GET, answered at
-    // once) and the chain page's own load (held). Whatever order they land in,
-    // the page ends with one strip.
-    let chainLoads = 0;
+  test("a Stamp answer with no block, landing while the page's own load is slow, leaves ONE strip", async ({ page }) => {
+    // Two LOADS for one page through one writer: the reader presses Stamp on
+    // A, leaves, and returns before the POST answers; A's second load is held,
+    // the POST answers with no block, and the refetch it triggers is a warm
+    // GET that lands first. Whatever order they land in, one strip.
+    let shapeLoads = 0;
     let releaseLoad: () => void = () => {};
     const loadHeld = new Promise<void>((r) => {
       releaseLoad = r;
     });
     await page.route("**/api/wiki/page/provenance?**", async (route) => {
-      if (route.request().url().includes(encodeURIComponent(CHAIN_REL))) {
-        chainLoads += 1;
-        if (chainLoads === 1) await loadHeld;
+      if (route.request().url().includes(encodeURIComponent(SHAPE_REL))) {
+        shapeLoads += 1;
+        if (shapeLoads === 2) await loadHeld;
       }
       await route.continue();
     });
@@ -1564,18 +1565,46 @@ test.describe("Wiki reader: provenance", () => {
     await open_(page, SHAPE_REL);
     const rows = await openChain(page);
     await rows.nth(4).locator(".wiki-chain-stamp").click();
-    await page.locator(`.wiki-list-item[data-relpath="${CHAIN_REL}"]`).click();
-    await expect(page.locator(".wiki-article-head h1")).toHaveText("The handoff chain");
+    await page.locator(`.wiki-list-item[data-relpath="${PLAIN_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Plain page");
+    await page.locator(`.wiki-list-item[data-relpath="${SHAPE_REL}"]`).click();
     await expect(page.locator(".wiki-prov-strip.wiki-prov-pending")).toBeVisible();
+    await expect.poll(() => shapeLoads).toBe(2);
     releaseStamp();
-    // The refetch's GET is the SECOND chain load and passes straight through.
-    await expect.poll(() => chainLoads).toBe(2);
+    // The refetch's GET is the THIRD shape load and passes straight through.
+    await expect.poll(() => shapeLoads).toBe(3);
     await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
-    const first = page.waitForResponse((r) => r.url().includes(encodeURIComponent(CHAIN_REL)));
+    const second = page.waitForResponse((r) => r.url().includes(encodeURIComponent(SHAPE_REL)));
     releaseLoad();
-    await first;
+    await second;
     await page.waitForTimeout(200);
     await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
     await expect(page.locator(".wiki-prov-line")).toHaveCount(1);
+  });
+
+  test("a Stamp refetch that answers {} keeps the strip the reader was looking at", async ({ page }) => {
+    // The stamp route answers 200 with no block when the page did not
+    // re-resolve after the write, and that is the same state in which the
+    // refetch's GET answers {}. A successful write must not make the strip,
+    // its chain and its Stamp button vanish.
+    let loads = 0;
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      loads += 1;
+      if (loads >= 2) {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/api/wiki/provenance/stamp", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ outcome: "written" }) }),
+    );
+    await open_(page, SHAPE_REL);
+    const rows = await openChain(page);
+    await rows.nth(4).locator(".wiki-chain-stamp").click();
+    await expect.poll(() => loads).toBe(2);
+    await page.waitForTimeout(200);
+    await expect(page.locator(".wiki-prov-strip")).toHaveCount(1);
+    await expect(page.locator(".wiki-prov-line")).toHaveAttribute("aria-expanded", "true");
   });
 });
