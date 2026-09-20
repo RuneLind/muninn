@@ -39,9 +39,9 @@ export interface RelatedListing extends WikiListing {
  * here, because this module must stay pure: the caller owns the two read-only
  * flags. FALSE renders nothing at all rather than a dimmed control — a visible
  * control that cannot act is the dead control #557's F2 decision rejected, and
- * so is an opener on a row `canEditSeriesPage` says no series may claim (a
- * same-stem `.html` attachment — 82 of mimir's 527 rows — or an `index.md`),
- * which is why it is tested PER ROW and not once for the block.
+ * so is an opener on a row `canEditSeriesPage` says no series may claim (an
+ * `.html` explainer or attachment — mimir carries 94 of them — or an
+ * `index.md`), which is why it is tested PER ROW and not once for the block.
  */
 export function relatedSectionHtml(items: RelatedListing[], editable = false): string {
   if (!items.length) return "";

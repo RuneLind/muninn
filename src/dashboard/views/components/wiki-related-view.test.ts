@@ -49,9 +49,9 @@ describe("relatedSectionHtml", () => {
   test("the series opener renders per ROW, and only where a series may land", () => {
     const rows = [
       row({ relPath: "plans/citer.md" }),
-      // A same-stem `.html` attachment (82 of mimir's 527 rows) and the wiki's
-      // own bookkeeping page: the route refuses both, so an opener on them can
-      // only produce a refusal.
+      // An `.html` explainer (mimir carries 94) and the wiki's own bookkeeping
+      // page: the route refuses both, so an opener on them can only produce a
+      // refusal.
       row({ name: "report", relPath: "blogs/report.html" }),
       row({ name: "index", relPath: "plans/index.md" }),
     ];
