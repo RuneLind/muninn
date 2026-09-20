@@ -584,8 +584,9 @@ describe("moving to another series", () => {
         seriesLabel: null,
         clearedLabel: { series: "prov", label: "Wiki provenance" },
       });
-      // The series it left is label-less now — which is lint 8.3's finding, not
-      // a second name for a series nobody renamed.
+      // The series it left is label-less now and renders under its bare key; the
+      // lint reports no finding for that state (measured: 8.3 stays at 0), so the
+      // note on the 200 is the only thing that tells the reader.
       expect((await fence(SHIPPED)).some((l) => l.startsWith("series_label:"))).toBe(false);
     });
   });
@@ -642,8 +643,8 @@ describe("moving to another series", () => {
   });
 
   test("an orphan label on a page in NO series is cleared with no report", async () => {
-    // 8.3(a)'s own finding: a `series_label:` with no `series:` names nothing, so
-    // there is no series to tell the reader has lost its name.
+    // A `series_label:` with no `series:` names nothing (no lint check reports
+    // it either), so there is no series to tell the reader has lost its name.
     const rel = "plans/orphan.mdx";
     await writeFile(path.join(root, rel), md("Orphan", ["series_label: Names nothing"]), "utf8");
     try {
@@ -704,8 +705,9 @@ describe("the head move, as the two calls it is", () => {
       seriesLabel: null,
     });
     expect(clear.status).toBe(200);
-    // Between the two calls the series is label-less — the state the lint's 8.3
-    // reports, and the reason the clear runs FIRST.
+    // Between the two calls the series is label-less: it renders under its bare
+    // key and the lint reports nothing for it, which is why the clear runs FIRST
+    // rather than leaving two labelled heads (8.3(b)) mid-sequence.
     expect((await fence(PLAN)).some((l) => l.startsWith("series_label:"))).toBe(false);
     expect((await fence(SHIPPED)).some((l) => l.startsWith("series_label:"))).toBe(false);
 
@@ -720,7 +722,7 @@ describe("the head move, as the two calls it is", () => {
     expect(await fence(SHIPPED)).toContain("series_label: Wiki provenance");
     // `Prov` was posted and `prov` is what landed: the normalization heals the
     // page's own case variant on any write that touches its `series:` line, so
-    // an edit of a variant member retires the lint's 8.3(b) finding rather than
+    // an edit of a variant member retires the lint's 8.3(a) finding rather than
     // preserving it. The store still reports whatever a HAND edit leaves.
     expect(await fence(SHIPPED)).toContain("series: prov");
     expect(await fence(PLAN)).toContain("series: prov");

@@ -230,7 +230,7 @@ export function seriesCensusKey(key: string): string {
  * The editor's counterpart to {@link seriesCensusKey}. The rail folds `Alpha`
  * and `alpha` into one series, so a reader joining "alpha" from the menu of an
  * existing `Alpha` must not write the second spelling: the fold would be
- * unchanged and the wiki linter's 8.3(b) would then report a variant the reader
+ * unchanged and the wiki linter's 8.3(a) would then report a variant the reader
  * never chose. Only the WRITE normalizes — the store keeps whatever is on disk,
  * which is what leaves the lint something to report on a wiki edited by hand.
  *
