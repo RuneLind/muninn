@@ -260,26 +260,33 @@ describe("the write", () => {
     expect(await res.json()).toMatchObject({ series: null, seriesLabel: null });
   });
 
-  test("an omitted seriesLabel leaves the line alone; null removes it", async () => {
-    const keep = await post({
+  test("an omitted seriesLabel leaves the line alone WITHIN the same series", async () => {
+    const res = await post({
       wiki: "w",
       relPath: PLAN,
       baseHash: await hashOf(PLAN),
-      series: "other",
+      series: "prov",
     });
-    expect(keep.status).toBe(200);
+    expect(res.status).toBe(200);
     expect(await fence(PLAN)).toContain("series_label: Wiki provenance");
+    expect(await res.json()).toMatchObject({ seriesLabel: "Wiki provenance" });
+  });
 
-    const drop = await post({
+  test("an explicit null removes the label and keeps the key", async () => {
+    const res = await post({
       wiki: "w",
       relPath: PLAN,
       baseHash: await hashOf(PLAN),
       series: "other",
       seriesLabel: null,
     });
-    expect(drop.status).toBe(200);
+    expect(res.status).toBe(200);
     expect((await fence(PLAN)).some((l) => l.startsWith("series_label:"))).toBe(false);
     expect(await fence(PLAN)).toContain("series: other");
+    // An explicit clear is the caller's own decision, so nothing is reported
+    // back about it — `clearedLabel` is for the label this route took off by
+    // itself.
+    expect(await res.json()).not.toHaveProperty("clearedLabel");
   });
 
   test("re-setting the same key is an honest noop: 200, written false, same hash", async () => {
@@ -492,6 +499,167 @@ describe("one labelled member per series", () => {
     });
     expect(res.status).toBe(200);
     expect(await fence(PLAN)).toContain("series_label: Renamed");
+  });
+
+  test("finds the other head through the FOLD, not the spelling", async () => {
+    // The rail folds `cases` and `Cases` into one series, so the labelled member
+    // this must find is exactly the one spelling the key the other way. The two
+    // fixture pages are named so the SORTED index hands `normalizeSeriesKey` the
+    // lower-case spelling first — the write's key is then `cases` while the head
+    // on disk says `Cases`, which a spelling compare misses.
+    const lower = "plans/case-a.mdx";
+    const upper = "plans/case-z.mdx";
+    await writeFile(path.join(root, lower), md("Case A", ["series: cases"]), "utf8");
+    await writeFile(
+      path.join(root, upper),
+      md("Case Z", ["series: Cases", "series_label: Case series"]),
+      "utf8",
+    );
+    try {
+      const before = await read(LONE);
+      const res = await post({
+        wiki: "w",
+        relPath: LONE,
+        baseHash: sha256(before),
+        series: "CASES",
+        seriesLabel: "A second name",
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ twoHeaded: true, headRelPath: upper });
+      expect(await read(LONE)).toBe(before);
+    } finally {
+      await rm(path.join(root, lower), { force: true });
+      await rm(path.join(root, upper), { force: true });
+      __resetWikiCacheForTest();
+    }
+  });
+});
+
+/**
+ * A label belongs to a SERIES — the fix round 2 defect.
+ *
+ * The menu's join and new-key verbs send `{relPath, series}` and no
+ * `seriesLabel`, so a page that was the HEAD of the series it is leaving used to
+ * carry that name into the series it joins: two labelled members there, the
+ * series it left silently un-named, and a 200 reporting the fork as success.
+ *
+ * The four cases below are {the request carries a label, it omits one} × {the
+ * target series already has a labelled member, it has none}, all of them on a
+ * page that is MOVING — which is the only shape where the request's label and
+ * the one on disk can disagree.
+ */
+describe("moving to another series", () => {
+  /** The target: a series whose head is somebody else. Written per test rather
+   *  than seeded, so the shared fixture keeps its single series. */
+  const TARGET = "plans/target.mdx";
+
+  async function withTarget(labelled: boolean, run: () => Promise<void>): Promise<void> {
+    await writeFile(
+      path.join(root, TARGET),
+      md("Target plan", ["series: tgt", ...(labelled ? ["series_label: Target series"] : [])]),
+      "utf8",
+    );
+    try {
+      await run();
+    } finally {
+      await rm(path.join(root, TARGET), { force: true });
+      __resetWikiCacheForTest();
+    }
+  }
+
+  test("an omitted label is CLEARED, and the 200 names the series left behind", async () => {
+    await withTarget(false, async () => {
+      const res = await post({
+        wiki: "w",
+        relPath: PLAN,
+        baseHash: await hashOf(PLAN),
+        series: "tgt",
+      });
+      expect(res.status).toBe(200);
+      const lines = await fence(PLAN);
+      expect(lines).toContain("series: tgt");
+      expect(lines.some((l) => l.startsWith("series_label:"))).toBe(false);
+      expect(await res.json()).toMatchObject({
+        series: "tgt",
+        seriesLabel: null,
+        clearedLabel: { series: "prov", label: "Wiki provenance" },
+      });
+      // The series it left is label-less now — which is lint 8.3's finding, not
+      // a second name for a series nobody renamed.
+      expect((await fence(SHIPPED)).some((l) => l.startsWith("series_label:"))).toBe(false);
+    });
+  });
+
+  test("an omitted label is cleared even where the target already has a head", async () => {
+    // The two-headed refusal must not fire here: the label is gone by the time
+    // the write lands, so there is no fork to refuse — and refusing would leave
+    // the reader unable to move a page into a named series at all.
+    await withTarget(true, async () => {
+      const res = await post({
+        wiki: "w",
+        relPath: PLAN,
+        baseHash: await hashOf(PLAN),
+        series: "tgt",
+      });
+      expect(res.status).toBe(200);
+      const lines = await fence(PLAN);
+      expect(lines).toContain("series: tgt");
+      expect(lines.some((l) => l.startsWith("series_label:"))).toBe(false);
+      // The target's own head is untouched — one labelled member, still.
+      expect(await fence(TARGET)).toContain("series_label: Target series");
+    });
+  });
+
+  test("a label the request CARRIES is written, when nothing else names the target", async () => {
+    await withTarget(false, async () => {
+      const res = await post({
+        wiki: "w",
+        relPath: PLAN,
+        baseHash: await hashOf(PLAN),
+        series: "tgt",
+        seriesLabel: "Renamed on arrival",
+      });
+      expect(res.status).toBe(200);
+      expect(await fence(PLAN)).toContain("series_label: Renamed on arrival");
+      expect(await res.json()).not.toHaveProperty("clearedLabel");
+    });
+  });
+
+  test("a label the request carries is a 409 when the target already has a head", async () => {
+    await withTarget(true, async () => {
+      const before = await read(PLAN);
+      const res = await post({
+        wiki: "w",
+        relPath: PLAN,
+        baseHash: sha256(before),
+        series: "tgt",
+        seriesLabel: "A second name",
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ twoHeaded: true, headRelPath: TARGET });
+      expect(await read(PLAN)).toBe(before);
+    });
+  });
+
+  test("an orphan label on a page in NO series is cleared with no report", async () => {
+    // 8.3(a)'s own finding: a `series_label:` with no `series:` names nothing, so
+    // there is no series to tell the reader has lost its name.
+    const rel = "plans/orphan.mdx";
+    await writeFile(path.join(root, rel), md("Orphan", ["series_label: Names nothing"]), "utf8");
+    try {
+      const res = await post({
+        wiki: "w",
+        relPath: rel,
+        baseHash: sha256(await read(rel)),
+        series: "fresh",
+      });
+      expect(res.status).toBe(200);
+      expect((await fence(rel)).some((l) => l.startsWith("series_label:"))).toBe(false);
+      expect(await res.json()).not.toHaveProperty("clearedLabel");
+    } finally {
+      await rm(path.join(root, rel), { force: true });
+      __resetWikiCacheForTest();
+    }
   });
 });
 

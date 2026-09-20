@@ -217,9 +217,10 @@ export interface SeriesWrite {
  * transaction across two would need a notion of rollback the wiki has none of.
  * So the old head is cleared FIRST and the new head set second — that order on
  * purpose. A failure between them leaves a series with no labelled member, which
- * renders under its bare key and which the lint's 8.3 reports; the other order
- * leaves TWO labelled members, where the rail silently picks the newer and the
- * reader is told nothing.
+ * the fold and the reader header then render under its bare key — visible, and
+ * one rename from repaired; the other order leaves TWO labelled members, where
+ * the rail silently picks the newer, no surface says so, and the only thing that
+ * reports it at all is lint 8.3(b).
  *
  * The clear is omitted when the old head IS the new one, and when no member
  * carries a label at all.

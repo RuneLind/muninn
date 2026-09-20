@@ -2448,8 +2448,11 @@ interface SeriesMenuState {
   /** Resolves when every base above has been read (or failed). A click that
    *  beats the fetches waits for it instead of racing them. */
   basesReady: Promise<void>;
-  /** Set when a write came back 409: the held bases describe a file somebody
-   *  else has moved on from, so no further write may go out under them. */
+  /** Set when the held bases no longer describe the files on disk — a write
+   *  came back 409, or one of this menu's own writes landed and the popover
+   *  stayed open to report it. Either way no further write may go out under
+   *  them, and the reader is told to reopen rather than shown a 409 about a
+   *  change they made themselves. */
   staleBases: boolean;
 }
 
@@ -2595,10 +2598,11 @@ async function seriesBaseHash(relPath: string): Promise<string | null> {
  * Run the editor's writes, in order, stopping at the first failure.
  *
  * ORDER MATTERS on the two-call head move (see {@link headMoveWrites}) and the
- * stop is what keeps its failure state the reportable one: the label is cleared
- * first, so a failure leaves a series with no labelled member — rendered under
- * its bare key, and reported by the wiki lint's 8.3 — rather than two members
- * claiming the label, where the rail silently picks one and says nothing.
+ * stop is what keeps its failure state the VISIBLE one: the label is cleared
+ * first, so a failure leaves a series with no labelled member, which the fold
+ * and the header render under its bare key — rather than two members claiming
+ * the label, where the rail silently picks one and says nothing (only lint
+ * 8.3(b) reports that one, on its next run).
  *
  * Both endings refresh. A second write that fails leaves the FIRST one's effect
  * on disk, and without the refresh the header and the rail went on painting a
@@ -2613,6 +2617,10 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
   }
   state.busy = true;
   setSeriesMenuNote(state, "Saving…", false);
+  /** The series this sequence left without a label — the route reports it when
+   *  a MOVE took the page's own `series_label:` with it, since a label names a
+   *  series rather than a page. */
+  let cleared: { series: string } | null = null;
   try {
     await state.basesReady;
     for (const write of writes) {
@@ -2632,7 +2640,12 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
         body: JSON.stringify({ wiki: WIKI, ...write, baseHash }),
       });
       const body = (await res.json().catch(() => null)) as
-        | { error?: string; hash?: string; stale?: boolean }
+        | {
+            error?: string;
+            hash?: string;
+            stale?: boolean;
+            clearedLabel?: { series?: string; label?: string };
+          }
         | null;
       if (!res.ok) {
         if (res.status === 409) {
@@ -2661,12 +2674,29 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
       ) {
         currentPageHash = body.hash;
       }
+      const dropped = body?.clearedLabel?.series;
+      if (typeof dropped === "string" && dropped) cleared = { series: dropped };
     }
     const outcome = await refreshAfterSeriesWrite();
-    if (outcome !== "apply") {
-      // The write landed; the listing did not. Saying so beats repainting the
-      // rail from the set it already had and calling that success.
-      setSeriesMenuNote(state, "Saved — reload to see the updated list", false);
+    const notes: string[] = [];
+    if (cleared) {
+      // The label went with the move, and nothing on screen would otherwise say
+      // so: the series this page left renders under its bare key from here on —
+      // visible on its fold and on every member's header, and reported by no
+      // lint check (measured), which is why the reader is told here.
+      notes.push(
+        `This page was the head of "${cleared.series}" — that series has no label now`,
+      );
+    }
+    // The write landed; the listing did not. Saying so beats repainting the
+    // rail from the set it already had and calling that success.
+    if (outcome !== "apply") notes.push("Saved — reload to see the updated list");
+    if (notes.length) {
+      // The menu stays OPEN so the line can be read — and the bases it still
+      // holds describe files this write has just moved on from, so the next
+      // click reopens instead of spending a 409 that blames another writer.
+      state.staleBases = true;
+      setSeriesMenuNote(state, notes.join(" · "), false);
       return;
     }
     closeSeriesMenu({ focus: false });
@@ -2754,7 +2784,8 @@ document.addEventListener("click", (e) => {
       void applySeriesWrites([{ relPath: model.relPath, series: arg }]);
     } else if (cmd.getAttribute("data-series-cmd") === "remove") {
       // The route clears `series_label:` with the key — a label on a page in no
-      // series names nothing and is the lint's own 8.3(a) finding.
+      // series names nothing, and no surface reads it (the rail takes the label
+      // off a MEMBER, and the lint's census skips a page with no key).
       void applySeriesWrites([{ relPath: model.relPath, series: null }]);
     } else if (cmd.getAttribute("data-series-cmd") === "head" && arg) {
       void applySeriesWrites(headMoveWrites(model, arg, model.label));

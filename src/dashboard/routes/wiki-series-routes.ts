@@ -15,21 +15,40 @@
  *  1. **ONE page per call.** Moving a series' head is two calls from the client
  *     (clear the label on the old head, set it on the new), each with its own
  *     CAS. A failure between them leaves a series with no labelled member, which
- *     renders under its bare key and which the lint's 8.3 reports — a visible,
- *     repairable state, where a two-page write would need a second transaction
- *     the wiki has no notion of.
+ *     the rail's fold and the reader header then render under its BARE KEY — a
+ *     visible, repairable state, where a two-page write would need a second
+ *     transaction the wiki has no notion of. Visible is all it is: measured
+ *     against a copy of mimir's `plans/`, a series whose only labelled member
+ *     had left produced NO `series-inconsistent` finding. What lint 8.3 reports
+ *     is the opposite state — two labelled members, its (b) — which is the one
+ *     the other write order would have left and which no surface shows at all.
  *  2. **The key is normalized to an existing member's spelling**
  *     ({@link normalizeSeriesKey}). The rail folds case-insensitively, so
  *     joining `alpha` from a menu listing `Alpha` must write `Alpha` or the fold
  *     is unchanged while the lint gains a variant nobody chose.
- *  3. **Clearing the key clears the label with it.** A `series_label:` on a page
- *     in no series names nothing: it is invisible to the rail (which reads the
- *     label off a MEMBER) and is exactly 8.3(a)'s finding. So `series: null`
- *     removes both lines whatever `seriesLabel` said.
+ *  3. **A label belongs to a SERIES, not to a page.** `series: null` removes both
+ *     lines whatever `seriesLabel` said — a `series_label:` on a page in no
+ *     series names nothing and is invisible to every surface there is: the rail
+ *     reads the label off a MEMBER, and `seriesMembersByFoldKey` skips a page
+ *     with no key, so lint 8.3 never sees it either (measured). And a page MOVING
+ *     to another series drops its label the same way when the request names none:
+ *     measured, the menu's join and new-key verbs send `{relPath, series}` with
+ *     no `seriesLabel`, so a page that was the head of the series it is leaving
+ *     carried that name into the one it joins — two labelled members there, and
+ *     the series it left silently un-named. The 200 says so (`clearedLabel`), so
+ *     the reader learns which series is now label-less rather than reading it off
+ *     the rail later.
  *  4. **One labelled member per series.** Naming a series another member already
  *     names is a 409, not a second label: `seriesHead` picks one of two silently,
  *     so the fork would be invisible on every surface that reads the label. The
- *     editor's own head move clears the old head first and is unaffected.
+ *     check runs INSIDE the transform, against the label that will be ON DISK
+ *     when it returns rather than against the one the request carried — the two
+ *     differ on exactly the write that produced the defect above. It fires only
+ *     where THIS write is what puts that label on that series (the label line
+ *     changes, or the series fold does); a write that leaves both alone cannot
+ *     have created the fork it would be refusing, and refusing it would fail a
+ *     noop over somebody else's hand edit. The editor's own head move clears the
+ *     old head first and is unaffected.
  *
  * **No log.md entry, no reindex, no commit** — `writeWikiPage`'s no-log mode,
  * the `/plans` board's priority-flip discipline. A series edit is metadata: it
@@ -234,45 +253,41 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       // Rule 2: the spelling an existing member already uses.
       const series =
         wantedSeries.value == null ? null : normalizeSeriesKey(index.pages, wantedSeries.value);
-      // Rule 3: no key, no label.
-      const label = series === null ? null : wantedLabel.value;
 
-      // Rule 4: ONE labelled member per series. The rail reads the label off a
-      // member (`seriesHead`) and silently picks one when two carry it, so a
-      // second `series_label:` is an invisible fork of what the series is
-      // called. The editor's own head move clears the old head FIRST, so it is
-      // unaffected; what this refuses is a rename racing another reader's, and
-      // a hand-edited second label.
-      if (label != null && series) {
-        const fold = seriesCensusKey(series);
+      /**
+       * Rule 4's census: the OTHER member of `series` that already carries a
+       * label, if one does. The rail reads the label off a member
+       * (`seriesHead`) and silently picks one when two carry it, so a second
+       * `series_label:` is an invisible fork of what the series is called.
+       *
+       * The fold, not the spelling: the rail folds `Alpha` and `alpha` into one
+       * series, so a member spelling the key the other way is the very member
+       * this must find.
+       */
+      const otherLabelledMember = (): WikiPageMeta | undefined => {
+        const fold = seriesCensusKey(series ?? "");
         const mine = normalizeRelPath(meta.relPath);
-        const other = index.pages.find(
+        return index.pages.find(
           (p) =>
             normalizeRelPath(p.relPath) !== mine &&
             !!seriesKeyOf(p) &&
             seriesCensusKey(seriesKeyOf(p)) === fold &&
             !!(p.seriesLabel ?? "").trim(),
         );
-        if (other) {
-          return c.json(
-            {
-              error:
-                `"${other.relPath}" already names this series ("${other.seriesLabel}") — ` +
-                `clear its label before naming it here`,
-              twoHeaded: true,
-              headRelPath: other.relPath,
-            },
-            409,
-          );
-        }
-      }
+      };
 
       // `writeWikiPage`'s `transform` seam speaks `null` for "nothing to do", so
       // the refusal reason and the written bytes ride out on closure variables —
-      // the `/api/plans/priority` idiom.
+      // the `/api/plans/priority` idiom. Rules 3 and 4 ride the same seam,
+      // because both are decisions about the bytes the CAS has just proved.
       let written: string | null = null;
       let refusedReason: string | null = null;
       let onDisk: { series: string | null; seriesLabel: string | null } | null = null;
+      /** The label this write took off, when it took it off as a consequence of
+       *  the MOVE rather than because the caller asked. */
+      let clearedLabel: { series: string; label: string } | null = null;
+      /** Rule 4's loser — the member that already names this series. */
+      let twoHeaded: WikiPageMeta | null = null;
       const result = await writeWikiPage({
         wikiDir: root,
         relPath: meta.relPath,
@@ -288,6 +303,38 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
           written = null;
           refusedReason = null;
           onDisk = null;
+          clearedLabel = null;
+          twoHeaded = null;
+          // Rule 3, off the bytes the CAS proved rather than off the request:
+          // the label is dropped when the key goes, and when the page MOVES to
+          // another series without the caller naming a label for it. A label
+          // names a series; carried along, it names the new series a second time
+          // and leaves the old one anonymous. `undefined` is the third state —
+          // the line is not edited at all.
+          const before = seriesPairOf(raw);
+          const foldChanged =
+            seriesCensusKey(before.series ?? "") !== seriesCensusKey(series ?? "");
+          const label: string | null | undefined =
+            series === null
+              ? null
+              : wantedLabel.value !== undefined
+                ? wantedLabel.value
+                : foldChanged
+                  ? null
+                  : undefined;
+          // Rule 4, against what will be on disk when this returns. The guard is
+          // what keeps it from failing a write that did not create the fork:
+          // touching neither the label line nor the fold cannot introduce a
+          // second head, and a noop over a wiki somebody else hand-edited into
+          // that state is not this write's to refuse.
+          const labelAfter = label === undefined ? before.seriesLabel : label;
+          if (labelAfter && series && (labelAfter !== before.seriesLabel || foldChanged)) {
+            const other = otherLabelledMember();
+            if (other) {
+              twoHeaded = other;
+              return null;
+            }
+          }
           // Two line edits, one write. The second runs on the first's OUTPUT, so
           // a page gaining both lines gains them in one pass and the guard
           // `setFrontmatterScalar` closes with checks the final bytes. The label
@@ -311,6 +358,18 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
           // and on a noop `current` is the file the CAS just proved.
           onDisk = seriesPairOf(current);
           if (current === raw) return null;
+          // Reported only for the label this write took off ON ITS OWN — an
+          // explicit `seriesLabel: null` is the caller's own decision, and a
+          // label on a page that was in NO series named nothing to begin with,
+          // so there is no series to tell the reader has lost its name.
+          if (
+            label === null &&
+            wantedLabel.value === undefined &&
+            before.seriesLabel &&
+            before.series
+          ) {
+            clearedLabel = { series: before.series, label: before.seriesLabel };
+          }
           written = current;
           return current;
         },
@@ -321,6 +380,21 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
         reindex: async () => {},
       });
 
+      // Rule 4's refusal. Ahead of every other outcome for the same reason the
+      // refusal reason is: the transform ran, decided, and wrote nothing.
+      const conflict = twoHeaded as WikiPageMeta | null;
+      if (conflict) {
+        return c.json(
+          {
+            error:
+              `"${conflict.relPath}" already names this series ("${conflict.seriesLabel}") — ` +
+              `clear its label before naming it here`,
+            twoHeaded: true,
+            headRelPath: conflict.relPath,
+          },
+          409,
+        );
+      }
       if (refusedReason) {
         log.warn("wiki series: refused {path}: {reason}", {
           path: meta.relPath,
@@ -374,12 +448,16 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       // The cast is the `written`/`refusedReason` idiom above: TypeScript cannot
       // see that the closure ran, so it narrows every one of these to `null`.
       const pair = onDisk as { series: string | null; seriesLabel: string | null } | null;
+      const dropped = clearedLabel as { series: string; label: string } | null;
       return c.json({
         relPath: meta.relPath,
         hash: changed ? sha256(written!) : baseHash,
         written: changed,
         series: pair?.series ?? null,
         seriesLabel: pair?.seriesLabel ?? null,
+        // Absent on every write that kept or was never given a label — the
+        // client renders a note off its PRESENCE.
+        ...(dropped ? { clearedLabel: dropped } : {}),
       });
     } catch (err) {
       log.error("wiki series: unexpected failure: {error}", {

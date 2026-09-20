@@ -481,6 +481,150 @@ test.describe("the base the menu holds", () => {
 });
 
 /**
+ * A label belongs to a SERIES — fix round 2, the defect.
+ *
+ * The join and new-key verbs post `{relPath, series}` and no `seriesLabel`, so a
+ * page that was the HEAD of the series it is leaving used to carry that name
+ * into the series it joins: two labelled members there, and the series it left
+ * with no name at all. The route clears it now, and the popover stays open to
+ * say which series that was.
+ */
+test.describe("moving the head of a series", () => {
+  test("drops the label and names the series left behind", async ({ page }) => {
+    // The new-key field, because this fixture holds ONE series: typing a key is
+    // the same client path as a join (`{relPath, series}`, no label) and the
+    // only one that needs no second series seeded into every other case's
+    // arithmetic.
+    await openPage(page, HEAD, "Wiki provenance plan");
+    await expect(page.locator(".wiki-series-head .wiki-series-name")).toHaveText(LABEL);
+    await page.locator("[data-series-edit]").click();
+    await expect(menu(page)).toBeVisible();
+    await page.locator('#wikiSeriesMenu [data-series-form="new"] [data-series-input]').fill("recall");
+    await page.locator('#wikiSeriesMenu [data-series-form="new"] button[type="submit"]').click();
+
+    // ── the file ──
+    await expect
+      .poll(async () => (await fence(root, HEAD)).find((l) => l.startsWith("series:")))
+      .toBe("series: recall");
+    expect((await fence(root, HEAD)).some((l) => l.startsWith("series_label:"))).toBe(false);
+    // ── the reader ──
+    // The menu stays open, because the line below is the only place this is
+    // said — and it names the series that has just lost its name.
+    const msg = page.locator("#wikiSeriesMenu .wiki-series-menu-msg");
+    await expect(msg).toBeVisible();
+    await expect(msg).toContainText(`"${KEY}"`);
+    await expect(msg).not.toHaveClass(/bad/);
+    // The two members left really do render under the bare key now, rather than
+    // a second series called "Wiki provenance" beside the first.
+    await openPage(page, SHIPPED, "Provenance chain strip");
+    await expect(page.locator(".wiki-series-head .wiki-series-name")).toHaveText(KEY);
+  });
+});
+
+/**
+ * What the popover holds between clicks — fix round 2, the lines a mutation
+ * survived in round 1.
+ */
+test.describe("the menu between clicks", () => {
+  test("two renames in a row both land", async ({ page }) => {
+    // The second write's CAS base is the hash the FIRST write answered with:
+    // `/api/wiki/page` is read once, at page load, so without the re-stamp the
+    // reader's second edit is refused as somebody else's change.
+    await openPage(page, HEAD, "Wiki provenance plan");
+    for (const name of ["First rename", "Second rename"]) {
+      await page.locator("[data-series-edit]").click();
+      await expect(menu(page)).toBeVisible();
+      await page.locator('#wikiSeriesMenu [data-series-form="label"] [data-series-input]').fill(name);
+      await page.locator('#wikiSeriesMenu [data-series-form="label"] button[type="submit"]').click();
+      await expect(menu(page)).toHaveCount(0);
+      await expect
+        .poll(async () => (await fence(root, HEAD)).find((l) => l.startsWith("series_label:")))
+        .toBe(`series_label: ${name}`);
+    }
+    await expect(page.locator(".wiki-series-head .wiki-series-name")).toHaveText("Second rename");
+  });
+
+  test("a click that beats the base fetch waits for it instead of writing blind", async ({
+    page,
+  }) => {
+    await openRail(page);
+    // The base read, slowed to something a human click beats every time. Matched
+    // by PATHNAME: `/api/wiki/pages` is a different route and this menu's own
+    // refresh needs it.
+    await page.route(
+      (url) => url.pathname === "/api/wiki/page",
+      async (route) => {
+        await new Promise((r) => setTimeout(r, 1200));
+        await route.continue();
+      },
+    );
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    // The write goes out under the base that arrives late, rather than being
+    // refused as a page the menu could not read.
+    await expect
+      .poll(async () => (await fence(root, JOINER)).some((l) => l.startsWith("series:")))
+      .toBe(true);
+    await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad")).toHaveCount(0);
+  });
+
+  test("after a 409 the next click sends nothing and says to reopen", async ({ page }) => {
+    let posts = 0;
+    page.on("request", (req) => {
+      if (req.method() === "POST" && req.url().includes("/api/wiki/series")) posts++;
+    });
+    await openRail(page);
+    await openRowMenu(page, JOINER);
+    const edited = (await read(root, JOINER)).replace("Body.", "Body, rewritten elsewhere.");
+    await writeFile(path.join(root, JOINER), edited, "utf8");
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad")).toContainText(JOINER);
+    expect(posts).toBe(1);
+
+    // A second verb from the same popover: the bases it holds are the ones the
+    // 409 just disproved, so the click is refused HERE and the reader is told
+    // what to do, rather than spending a round trip on a second 409 that reads
+    // as somebody else's edit.
+    await page.locator('#wikiSeriesMenu [data-series-form="new"] [data-series-input]').fill("recall");
+    await page.locator('#wikiSeriesMenu [data-series-form="new"] button[type="submit"]').click();
+    await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad")).toHaveText(
+      "Close and reopen this menu — the page has changed",
+    );
+    expect(posts).toBe(1);
+    expect(await read(root, JOINER)).toBe(edited);
+  });
+
+  test("a write's outcome lands in ITS menu, not in whichever is open when it answers", async ({
+    page,
+  }) => {
+    // A write is a sequence of awaits, and the reader can close the popover and
+    // open another on a different page while one is in flight. Driven as a
+    // failure, because a refusal painted into the wrong menu reports a page it
+    // is not about.
+    await page.route("**/api/wiki/series", async (route) => {
+      await new Promise((r) => setTimeout(r, 1200));
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "refused, for the page this menu is not about" }),
+      });
+    });
+    await openRail(page);
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    // Close it and open another BEFORE the refusal comes back.
+    await page.keyboard.press("Escape");
+    await expect(menu(page)).toHaveCount(0);
+    await openRowMenu(page, OUTSIDER);
+    // The failed write's own tail refetches the listing, and it does that AFTER
+    // it has painted its note — so this response is the moment to look.
+    await page.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes("refresh=1"));
+    await expect(menu(page)).toBeVisible();
+    await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg")).toHaveCount(0);
+  });
+});
+
+/**
  * The openers — fix round 1, finding B.
  *
  * Every assertion here is one a `force: true` click or a unit test cannot make:

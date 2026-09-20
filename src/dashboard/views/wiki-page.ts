@@ -686,11 +686,13 @@ export async function renderWikiPage(opts?: {
          (2) In flow it cost the row width forever: the end slot measured 90px
          and a chipless pill + ⚑ row wrapped its title under \`RAIL_TITLE_MIN\` at
          300px on CI's fonts. So on the rail it is ABSOLUTE — the \`▸\` rule from
-         PR A, a seventh row item the budget has no room for — sitting over the
-         date it replaces while the row is hovered. The date keeps its layout
-         (\`visibility\`, never \`display\`), so nothing reflows under the cursor,
-         and \`:has()\` scopes the swap to rows that really carry an opener, so a
-         read-only rail keeps its dates. On a COARSE pointer none of this
+         PR A, a seventh row item the budget has no room for — pinned to the end
+         slot's top-right corner, which is the corner the date occupies. The
+         date is not drawn under it: the whole \`.wiki-list-meta\` goes
+         \`visibility: hidden\` for the hover, so the two never paint together,
+         while its box stays (\`visibility\`, never \`display\`) and nothing
+         reflows under the cursor. \`:has()\` scopes that swap to rows that really
+         carry an opener, so a read-only rail keeps its dates. On a COARSE pointer none of this
          applies: the ⋯ is visible and in flow beside the ★, because a control
          revealed by hover is a control a finger cannot reach. */
       .wiki-list-end { position: relative; }

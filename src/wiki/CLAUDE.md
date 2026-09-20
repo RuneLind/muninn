@@ -959,16 +959,35 @@ type a new key), RENAME the label, MOVE the head, and REMOVE the page.
     the listing, and the reader reopens with fresh bases.
   - **A head move is TWO calls**, each CAS'd, and the ORDER is the contract: the
     old head's label is cleared FIRST. A failure between them leaves a series
-    with no labelled member — rendered under its bare key, and reported by lint
-    8.3 — where the other order leaves two labelled members, which the rail
-    resolves silently.
+    with no labelled member, which the fold and the reader header render under
+    its bare key — visible, and one rename from repaired — where the other order
+    leaves two labelled members, which the rail resolves silently and only lint
+    8.3(b) reports. Measured against a copy of mimir's `plans/`: the label-less
+    state produces no `series-inconsistent` finding at all, so "visible" is the
+    whole of its safety net.
   - **A new key is normalized to an existing member's spelling**
     (`normalizeSeriesKey`), since the fold is case-insensitive: joining `alpha`
     from a menu listing `Alpha` must write `Alpha` or the fold is unchanged
-    while 8.3(b) gains a variant nobody chose. The same rule HEALS a variant on
+    while 8.3(a) gains a variant nobody chose. The same rule HEALS a variant on
     any write that touches a member's own `series:` line.
-  - **Clearing the key clears the label with it** — a `series_label:` on a page
-    in no series names nothing and is 8.3(a)'s own finding.
+  - **A label belongs to a SERIES, not to a page.** Clearing the key clears the
+    label with it — a `series_label:` on a page in no series names nothing and is
+    read by nothing (the rail takes the label off a MEMBER, and the lint's census
+    skips a page with no key) — and so does MOVING the page, when the request names no
+    label of its own. The menu's join and new-key verbs send `{relPath, series}`
+    and nothing else, so without that rule a page that was the HEAD of the series
+    it is leaving carried that name into the one it joins: two labelled members
+    there, the series it left silently un-named, and a 200 calling it success.
+    The 200 reports the drop (`clearedLabel: {series, label}`, absent otherwise)
+    and the popover stays OPEN to say which series has no label now, since the
+    rail and the header fall back to its bare key and no lint check reports it. An explicit
+    `seriesLabel: null` is the caller's own decision and reports nothing.
+  - **The one-label check runs inside the TRANSFORM**, against the label that
+    will be on disk when it returns rather than the one the request carried —
+    they differ on exactly the write above. It fires only where THIS write puts
+    the label on that series (the label line changes, or the fold does): a write
+    touching neither cannot have created the fork, and refusing it would fail a
+    noop over a wiki somebody else hand-edited two-headed.
   - **`order` is not a key and is not editable.** A series' order is DERIVED
     (`seriesDateSignal`), so there is nothing to write; re-ordering a series
     means changing a page's `status_date`, which is the `/plans` board's job.
