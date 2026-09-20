@@ -26,6 +26,7 @@
 import {
   STATUS_ORDER,
   isMetaPage,
+  localDay,
   pageDateSignal,
   pageFolder,
   pageStemOf,
@@ -123,7 +124,16 @@ export interface RailGroup {
   /** What the group's row says: `alpha-beta-*`, the month as `YYYY-MM`, or a
    *  series' `series_label:` (its key when no member carries one). */
   label: string;
-  /** The rows this group folds, in the order the caller's sort gave them. */
+  /**
+   * The rows this group folds.
+   *
+   * A family's and a month's are in the order the caller's sort gave them, so
+   * the reader's own sort decides what the fold opens into. A SERIES is always
+   * newest-first by {@link seriesDateMs}, whatever the sort: the fold is a
+   * timeline of one piece of work and "where do I go now" is its first row —
+   * re-ordering it by backlink count or title would answer a different question
+   * from the one the `▸` and the reader header answer.
+   */
   members: WikiListing[];
   /**
    * Rule-4 children (`pairedBy: "superseded"`) whose SUCCESSOR is a member of
@@ -169,11 +179,30 @@ export function monthFoldKey(month: string): string {
   return "month:" + month;
 }
 
-/** The fold key for one series. The key is the authored slug verbatim; the
- *  folds store normalizes what it is compared against, as it does for every
- *  other spelling in that flat namespace. */
+/**
+ * The authored `series:` slug on a page — trimmed, and `""` for a page in no
+ * series. The ONE reader of that field, so the trim cannot drift between the
+ * grouping, the membership helper and the reader header.
+ */
+export function seriesKeyOf(p: WikiListing): string {
+  return (p.series || "").trim();
+}
+
+/**
+ * The fold key for one series — `series:<key>` with the key TRIMMED AND
+ * LOWER-CASED.
+ *
+ * The folds store compares its keys through `normalizeRel`, which lower-cases,
+ * so a key that kept its case minted a fold key the store could not tell from
+ * another spelling's: `Alpha` and `alpha` produced two groups whose `data-fold-key`
+ * was the same string, the second registration overwrote the first, one series'
+ * pages vanished from the rail and the other's rendered twice. Folding the case
+ * HERE (and in {@link groupSeries}, which groups on the same fold) is what makes
+ * one key one series. Reporting the two spellings is the wiki linter's job — it
+ * reads the index, not the rail, so nothing is hidden by merging them here.
+ */
 export function seriesFoldKey(key: string): string {
-  return "series:" + key;
+  return "series:" + key.trim().toLowerCase();
 }
 
 /**
@@ -206,37 +235,102 @@ function calendarDayMs(day: string | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+/** How much a series date is WORTH when two members land on the same day: an
+ *  authored `status_date` outranks a git touch, which outranks an mtime. Only
+ *  the order matters; the numbers are the rungs of the fallback chain. */
+const SERIES_DATE_RANK = { asserted: 3, git: 2, mtime: 1, none: 0 } as const;
+
+/** A member's series date, as the three things the rail and the reader header
+ *  both need: the day it sorts on, the day it PRINTS, and which rung of the
+ *  fallback chain that came from. */
+export interface SeriesDateSignal {
+  /** The day at UTC midnight — the sort key. `0` when the page carries no date
+   *  signal at all. */
+  ms: number;
+  /** The same day as `YYYY-MM-DD`, or `""`. What a date cell renders. */
+  day: string;
+  /** Which rung answered, for the same-day tie-break. */
+  rank: number;
+}
+
 /**
- * The date a series orders its members by: the plan's own `status_date`, else
- * the durable git touch date, else the file's mtime, else 0.
+ * The date a series orders its members by, at DAY granularity: the plan's own
+ * `status_date`, else the durable git touch date, else the file's mtime.
  *
  * `status_date` first because it is what a plan ASSERTS about itself — the day
- * the status was last affirmed — while a git touch moves on a typo fix. The two
- * are different units (a calendar day at UTC midnight against a real instant),
- * which is accurate enough for an ordering whose granularity is "which plan is
- * the one I am working in" and is what the plan's own head rule specifies.
+ * the status was last affirmed — while a git touch moves on a typo fix.
+ *
+ * **The granularity is the day, and that is a fix.** The first cut compared a
+ * calendar day at UTC midnight against a real INSTANT, so on the day a plan
+ * affirmed its status, any sibling git touched later that same day sorted above
+ * it — measured on mimir, the chain strip's own `2026-09-17` lost to a
+ * sibling's 09:29Z touch and the `▸` named whichever page git happened to
+ * rewrite last. Both rungs are floored to their local day (the spelling every
+ * other rendered date in the reader uses, {@link localDay}), and a tie on the
+ * day is broken by the RUNG — an asserted date beats a touch — then by relPath,
+ * so the order is the same on every render and on every machine.
  */
-export function seriesDateMs(p: WikiListing): number {
-  return calendarDayMs(p.status_date) ?? p.gitTouchedMs ?? p.mtimeMs ?? 0;
+export function seriesDateSignal(p: WikiListing): SeriesDateSignal {
+  const asserted = calendarDayMs(p.status_date);
+  if (asserted !== null) {
+    return { ms: asserted, day: p.status_date!, rank: SERIES_DATE_RANK.asserted };
+  }
+  for (const [ms, rank] of [
+    [p.gitTouchedMs, SERIES_DATE_RANK.git],
+    [p.mtimeMs, SERIES_DATE_RANK.mtime],
+  ] as const) {
+    if (typeof ms !== "number" || !Number.isFinite(ms)) continue;
+    const day = localDay(new Date(ms));
+    return { ms: calendarDayMs(day) ?? 0, day, rank };
+  }
+  return { ms: 0, day: "", rank: SERIES_DATE_RANK.none };
 }
 
-/** Newest first, with a relPath tie-break so two members sharing a date order
- *  the same way on every render (and on every machine). */
+/** The day a series orders `p` by, at UTC midnight. See {@link seriesDateSignal}. */
+export function seriesDateMs(p: WikiListing): number {
+  return seriesDateSignal(p).ms;
+}
+
+/** Newest first, ties broken by the date's own rung and then by relPath, so two
+ *  members sharing a day order the same way on every render (and on every
+ *  machine). See {@link seriesDateSignal}. */
 function bySeriesDateDesc(a: WikiListing, b: WikiListing): number {
-  return seriesDateMs(b) - seriesDateMs(a) || normalizeRel(a.relPath).localeCompare(normalizeRel(b.relPath));
+  const sa = seriesDateSignal(a);
+  const sb = seriesDateSignal(b);
+  return (
+    sb.ms - sa.ms ||
+    sb.rank - sa.rank ||
+    normalizeRel(a.relPath).localeCompare(normalizeRel(b.relPath))
+  );
 }
 
 /**
- * The NEWEST PLAN of a series: the member carrying a `plan_status`, newest by
- * {@link seriesDateMs}. `undefined` when no member declares one.
+ * The plan statuses that are an END rather than a place to continue. A
+ * superseded plan has a successor and an abandoned one has nobody working in
+ * it; both routinely carry a `status_date` NEWER than the plan that replaced
+ * them, because retiring a page is the last edit it gets.
+ *
+ * The other five of `STATUS_ORDER` (`proposed`, `ready`, `in-flight`,
+ * `blocked`, `shipped`) are all live readings — a shipped plan is still the
+ * page a reader continues in, which is why it is not here.
+ */
+export const SERIES_TERMINAL_STATUSES: readonly string[] = ["superseded", "abandoned"];
+
+/**
+ * The NEWEST PLAN of a series: the member carrying a NON-TERMINAL `plan_status`,
+ * newest by {@link seriesDateMs}. `undefined` when no member declares one.
  *
  * A blog and an archive report are members of the work but never "the latest":
  * they record what happened, and "continue at" has to name a page the reader can
  * continue IN. That is why the test is `plan_status` rather than the `plans/`
  * folder — a plan filed elsewhere still counts, and a blog in `plans/` does not.
+ * A `superseded` or `abandoned` plan fails the same test one step further on:
+ * see {@link SERIES_TERMINAL_STATUSES}.
  */
 export function newestSeriesPlan(members: readonly WikiListing[]): WikiListing | undefined {
-  return [...members].filter((m) => !!m.plan_status).sort(bySeriesDateDesc)[0];
+  return [...members]
+    .filter((m) => !!m.plan_status && !SERIES_TERMINAL_STATUSES.includes(m.plan_status))
+    .sort(bySeriesDateDesc)[0];
 }
 
 /**
@@ -255,6 +349,104 @@ export function seriesHead(members: readonly WikiListing[]): WikiListing | undef
 }
 
 /**
+ * How much of the next plan's title the reader header's `continue at:` shows
+ * before the ellipsis. The strip is one wrapping line of 12px text and a mimir
+ * plan title runs past 100 characters, which took the whole second line for one
+ * link; 64 is the width at which two plans of one series are still told apart.
+ */
+export const SERIES_CONTINUE_MAX = 64;
+
+/**
+ * A title clipped to {@link SERIES_CONTINUE_MAX}, by CODE POINT (the
+ * `truncateUnits` rule — a title ending in an emoji must not be cut through a
+ * surrogate pair). The caller keeps the whole title on the element's `title=`,
+ * so nothing is lost, only folded.
+ */
+export function clipSeriesTitle(title: string): string {
+  const chars = [...title];
+  return chars.length <= SERIES_CONTINUE_MAX
+    ? title
+    : chars.slice(0, SERIES_CONTINUE_MAX).join("").trimEnd() + "…";
+}
+
+/** What one series holds, and the two members every surface reads off it. */
+export interface SeriesMembers {
+  /** Every member in the listing handed in, NEWEST FIRST ({@link seriesDateMs}). */
+  members: WikiListing[];
+  /** The member the label is read off — see {@link seriesHead}. */
+  head?: WikiListing;
+  /** The member the `▸` and `continue at:` name — see {@link newestSeriesPlan}. */
+  latest?: WikiListing;
+}
+
+/**
+ * MEMBERSHIP — the one rule, for one listing.
+ *
+ * A page is a member of `key` when it carries that key (compared trimmed and
+ * case-insensitively, see {@link seriesFoldKey}) AND either
+ *
+ *  - it is a parent row, or
+ *  - it is a `superseded` child whose SUCCESSOR is itself a member.
+ *
+ * A child of any other pairing rule is an attachment of its parent — a
+ * prototype, a figure, an exported twin — not a piece of the work, so it counts
+ * nowhere however its frontmatter reads. A retired page whose successor is
+ * outside the series counts nowhere either: it renders under that successor, and
+ * counting it here would put one page in a census of a body it is not in.
+ *
+ * ⚠️ **This function is the whole reason the rail and the reader header agree.**
+ * The header used to re-derive the set with its own `allPages.filter(key ===)`,
+ * which folded no case, applied no attachment rule and ran no successor test —
+ * so `N pages` disagreed with the fold's own total, and an attachment child
+ * carrying a `series_label:` could rename the header alone.
+ */
+export function seriesMembersOf(all: readonly WikiListing[], key: string): SeriesMembers {
+  const members = seriesMembersByFoldKey(all).get(key.trim().toLowerCase()) ?? [];
+  return describeSeries(members);
+}
+
+/** `members` sorted newest first, with the head and the newest plan read off
+ *  them — the derivation {@link groupSeries} and {@link seriesMembersOf} share. */
+function describeSeries(members: readonly WikiListing[]): SeriesMembers {
+  const sorted = [...members].sort(bySeriesDateDesc);
+  return { members: sorted, head: seriesHead(sorted), latest: newestSeriesPlan(sorted) };
+}
+
+/**
+ * Every series in `all`, keyed on the FOLD key (trimmed, lower-cased), by the
+ * membership rule {@link seriesMembersOf} states. Two passes, because the
+ * successor test needs the parent members of the series first.
+ */
+function seriesMembersByFoldKey(all: readonly WikiListing[]): Map<string, WikiListing[]> {
+  const byKey = new Map<string, WikiListing[]>();
+  const retired = new Map<string, WikiListing[]>();
+  for (const p of all) {
+    const key = seriesKeyOf(p);
+    if (!key) continue;
+    const fold = key.toLowerCase();
+    if (p.parent) {
+      if (p.pairedBy !== "superseded") continue;
+      const arr = retired.get(fold);
+      if (arr) arr.push(p);
+      else retired.set(fold, [p]);
+      continue;
+    }
+    const arr = byKey.get(fold);
+    if (arr) arr.push(p);
+    else byKey.set(fold, [p]);
+  }
+  for (const [fold, children] of retired) {
+    const parents = byKey.get(fold);
+    if (!parents) continue;
+    const parentKeys = new Set(parents.map((m) => normalizeRel(m.relPath)));
+    for (const c of children) {
+      if (parentKeys.has(normalizeRel(c.parent ?? ""))) parents.push(c);
+    }
+  }
+  return byKey;
+}
+
+/**
  * The SERIES groups among `pages` — the rail's third grouping layer, and the
  * only one that is AUTHORED rather than inferred.
  *
@@ -269,11 +461,13 @@ export function seriesHead(members: readonly WikiListing[]): WikiListing | undef
  *    otherwise rename the fold, and one that hid the newest plan would move the
  *    `▸` onto a page that is not the latest anything.
  *
- * Membership mirrors the family rule so one page can never be in two blocks: a
- * parent row carrying the key is a member; a `superseded` child carrying it is a
- * `supersededChild` when its SUCCESSOR is a member (it renders under that
- * successor, inside the body); a child of any other pairing rule is an
- * attachment of its parent and counts nowhere.
+ * Membership is {@link seriesMembersOf}'s rule, applied to each of the two sets
+ * in turn, so one page can never be in two blocks and the reader header can
+ * never disagree with the fold about who is in the series.
+ *
+ * **A key is ONE series however it is spelled** — trimmed and compared without
+ * case, the fold the store's own key comparison already makes. See
+ * {@link seriesFoldKey} for what keeping the case did.
  *
  * No minimum and no cap. A series is a name someone wrote, not a heuristic over
  * filenames: a one-member series is a series with one page in it so far, and a
@@ -284,59 +478,56 @@ export function groupSeries(
   pages: readonly WikiListing[],
   all: readonly WikiListing[] = pages,
 ): RailGroup[] {
-  /** key → every member in the WHOLE listing, parents and rule-4 children
-   *  alike — what the label, the total and the newest plan are read from. */
-  const allMembers = new Map<string, WikiListing[]>();
-  for (const p of all) {
-    const key = (p.series || "").trim();
-    if (!key) continue;
-    if (p.parent && p.pairedBy !== "superseded") continue;
-    const arr = allMembers.get(key);
-    if (arr) arr.push(p);
-    else allMembers.set(key, [p]);
-  }
-  if (!allMembers.size) return [];
+  /** fold key → every member in the WHOLE listing — what the label, the total
+   *  and the newest plan are read from. */
+  const whole = seriesMembersByFoldKey(all);
+  if (!whole.size) return [];
 
-  /** key → the members present HERE, in the caller's sort order, split the way
-   *  a family splits them. */
+  /** fold key → the members present HERE, in the caller's sort order, split the
+   *  way a family splits them. */
   const order: string[] = [];
   const parents = new Map<string, WikiListing[]>();
   const children = new Map<string, WikiListing[]>();
   for (const p of pages) {
-    const key = (p.series || "").trim();
-    if (!key || !allMembers.has(key)) continue;
+    const key = seriesKeyOf(p);
+    if (!key) continue;
+    const fold = key.toLowerCase();
+    if (!whole.has(fold)) continue;
     const isSuperseded = p.pairedBy === "superseded";
     if (p.parent && !isSuperseded) continue;
-    if (!parents.has(key)) {
-      parents.set(key, []);
-      children.set(key, []);
-      order.push(key);
+    if (!parents.has(fold)) {
+      parents.set(fold, []);
+      children.set(fold, []);
+      order.push(fold);
     }
-    (p.parent ? children : parents).get(key)!.push(p);
+    (p.parent ? children : parents).get(fold)!.push(p);
   }
 
   const groups: RailGroup[] = [];
-  for (const key of order) {
-    const members = parents.get(key)!;
+  for (const fold of order) {
+    const members = parents.get(fold)!;
     const memberKeys = new Set(members.map((m) => normalizeRel(m.relPath)));
     // A retired member whose successor is not on screen here renders as an
     // ordinary row under its own parent; counting it in this roll-up would put
     // it in a census of a body it is not in.
     const supersededChildren = children
-      .get(key)!
+      .get(fold)!
       .filter((c) => memberKeys.has(normalizeRel(c.parent ?? "")));
     if (!members.length && !supersededChildren.length) continue;
-    const whole = allMembers.get(key)!;
-    const head = seriesHead(whole);
-    const latest = newestSeriesPlan(whole);
+    const described = describeSeries(whole.get(fold)!);
+    const head = described.head;
     groups.push({
       kind: "series",
-      key: seriesFoldKey(key),
-      label: head?.seriesLabel || key,
+      key: seriesFoldKey(fold),
+      // The label is the head's: its `series_label:` where it wrote one, else
+      // its OWN spelling of the key — so a series nobody has labelled renders
+      // under the spelling of the page that heads it rather than under whichever
+      // variant happened to sort first.
+      label: head?.seriesLabel || (head ? seriesKeyOf(head) : fold),
       members: [...members].sort(bySeriesDateDesc),
       supersededChildren,
-      total: whole.length,
-      ...(latest ? { latestRel: normalizeRel(latest.relPath) } : {}),
+      total: described.members.length,
+      ...(described.latest ? { latestRel: normalizeRel(described.latest.relPath) } : {}),
     });
   }
   return groups;

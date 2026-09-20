@@ -34,7 +34,13 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
+import { contrastOf } from "./contrast.ts";
 import { PINS_KEY_PREFIX } from "../src/dashboard/views/components/wiki-recents.ts";
+import {
+  RAIL_WIDTH_DEFAULT,
+  RAIL_WIDTH_KEY,
+  RAIL_WIDTH_MIN,
+} from "../src/dashboard/views/components/wiki-rail-width.ts";
 
 const PORT = e2ePort("wiki-rail-series");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -92,8 +98,12 @@ const PAGES: Array<[string, string]> = [
   ],
   [BLOG, md("Provenance campaign explained", ["series: prov", "status_date: 2026-03-01"])],
   [
+    // `Prov`, not `prov`: a CASE VARIANT of the same key. Two spellings are one
+    // series — the folds store lower-cases what it compares, so keeping the case
+    // minted two groups sharing one `data-fold-key`, one of which overwrote the
+    // other's members. Reporting the variant is the wiki linter's job.
     FAM_MEMBER,
-    md("Slate piece 1", ["series: prov", "plan_status: shipped", "status_date: 2026-04-01"]),
+    md("Slate piece 1", ["series: Prov", "plan_status: shipped", "status_date: 2026-04-01"]),
   ],
   ["plans/fam-slate-2.mdx", md("Slate piece 2", ["plan_status: shipped"])],
   ["plans/fam-slate-3.mdx", md("Slate piece 3", ["plan_status: shipped"])],
@@ -187,6 +197,15 @@ async function pinPage(page: Page, rel: string): Promise<void> {
   await page.evaluate(
     (arg: { key: string; value: string }) => localStorage.setItem(arg.key, arg.value),
     { key: PINS_KEY_PREFIX + WIKI, value: JSON.stringify([rel]) },
+  );
+}
+
+/** Apply a rail width the way the reader's own store spells it. Applied at
+ *  boot, so the caller reloads after it. */
+async function setRailWidth(page: Page, px: number): Promise<void> {
+  await page.evaluate(
+    (arg: { key: string; value: string }) => localStorage.setItem(arg.key, arg.value),
+    { key: RAIL_WIDTH_KEY, value: String(px) },
   );
 }
 
@@ -374,6 +393,110 @@ test.describe("Wiki rail: series", () => {
     await expect(page.locator(".wiki-series-head")).toHaveCount(0);
   });
 
+  test("a CASE VARIANT of the key is the same series, not a second one", async ({ page }) => {
+    await openRail(page);
+    // One group row, one fold key, and the variant member inside it — the whole
+    // series, whichever way its four pages spell the key.
+    await expect(page.locator(".wiki-list-group")).toHaveCount(1);
+    await expect(seriesRow(page)).toHaveCount(1);
+    await seriesFold(page).click();
+    const rel = await relPaths(page);
+    for (const m of MEMBERS) expect(rel, m).toContain(m);
+    await expect(row(page, FAM_MEMBER)).toHaveClass(/member/);
+  });
+
+  test("the accent rule costs the series row no width — its mid matches a family's", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await openRail(page);
+    await page.locator("#wikiGroupFamilies").check();
+    await expect(groupRow(page, "family:plans/other-slate")).toHaveCount(1);
+    // `.wiki-list-mid` is what `RAIL_GROUP_CHIP_SWITCH`'s container query
+    // measures, so a 2px difference moves the chip's breakpoint on series rows
+    // alone — the 2px border is paid back out of the fold's own left padding.
+    const mids = await page.evaluate(() => {
+      const mid = (el: Element) =>
+        (el.querySelector(".wiki-list-mid") as HTMLElement).getBoundingClientRect().width;
+      const groups = Array.from(document.querySelectorAll(".wiki-list-group"));
+      return {
+        series: mid(groups.find((g) => g.classList.contains("series"))!),
+        family: mid(groups.find((g) => !g.classList.contains("series"))!),
+      };
+    });
+    expect(mids.series).toBeCloseTo(mids.family, 1);
+  });
+
+  test("the reader header counts the SAME pages the fold does", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(STRIP)}`);
+    const head = page.locator(".wiki-series-head");
+    await expect(head.locator(".wiki-series-count")).toHaveText(`${MEMBERS.length} pages`);
+    // …including the member whose key is spelled differently, which a header
+    // filtering `allPages` on the raw string dropped.
+    const titles = await head.locator(".wiki-series-step-title").allTextContents();
+    expect(titles).toHaveLength(MEMBERS.length);
+    expect(titles).toContain("Slate piece 1");
+    // Every step carries the day the fold ordered it by — none is blank.
+    const days = await head.locator(".wiki-series-step-date").allTextContents();
+    expect(days.filter((d) => d.trim() !== "")).toHaveLength(MEMBERS.length);
+
+    // …and the page whose OWN key is the case variant gets the same header,
+    // which is what makes the membership helper's fold load-bearing on both
+    // sides rather than only on the one spelling the majority wrote.
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(FAM_MEMBER)}`);
+    await expect(head.locator(".wiki-series-name")).toHaveText(LABEL);
+    await expect(head.locator(".wiki-series-count")).toHaveText(`${MEMBERS.length} pages`);
+  });
+
+  // The census is the one thing on a group row a reader is asked to READ, and
+  // `toHaveText` passes on a fully clipped element — it reads the DOM, not the
+  // paint. Measured at the shipped default and at the narrowest rail, in both
+  // themes, because the label beside it is what ate the width.
+  for (const scheme of ["light", "dark"] as const) {
+    for (const width of [RAIL_WIDTH_DEFAULT, RAIL_WIDTH_MIN]) {
+      test(`the \`N of M shown\` census is fully visible at ${width}px, ${scheme}`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width: 1400, height: 900 });
+        await page.emulateMedia({ colorScheme: scheme });
+        await openRail(page);
+        await setRailWidth(page, width);
+        await openRail(page);
+        await selectFolder(page, "plans");
+        const sub = seriesRow(page).locator(".wiki-group-sub");
+        await expect(sub).toHaveText("3 of 4 shown");
+        // ⚠️ `clientWidth`/`scrollWidth` alone CANNOT see this failure: the
+        // shipped census was an INLINE `<small>`, whose two are both 0, so the
+        // check passed on an element painting 15px of its 65. What it was
+        // clipped by is an ANCESTOR's overflow, so the measurement has to walk
+        // up to every clipping box and intersect.
+        const fit = await sub.evaluate((el) => {
+          const rect = el.getBoundingClientRect();
+          let clipLeft = -Infinity;
+          let clipRight = Infinity;
+          for (let n = el.parentElement; n; n = n.parentElement) {
+            if (getComputedStyle(n).overflowX === "visible") continue;
+            const r = n.getBoundingClientRect();
+            clipLeft = Math.max(clipLeft, r.left);
+            clipRight = Math.min(clipRight, r.right);
+          }
+          return {
+            natural: rect.width,
+            visible: Math.max(0, Math.min(rect.right, clipRight) - Math.max(rect.left, clipLeft)),
+            client: el.clientWidth,
+            scroll: el.scrollWidth,
+          };
+        });
+        expect(fit.natural).toBeGreaterThan(0);
+        // Every pixel the census lays out is a pixel that gets painted…
+        expect(fit.visible).toBeGreaterThanOrEqual(fit.natural - 0.5);
+        // …and its own box does not ellipsize the words either.
+        expect(fit.client).toBeGreaterThanOrEqual(fit.scroll);
+        expect(await contrastOf(sub)).toBeGreaterThanOrEqual(4.5);
+      });
+    }
+  }
+
   // Both themes, measured rather than eyeballed — these are a label, a name and
   // a title, so 4.5:1 is the floor, and the background is whatever actually
   // paints behind the element, which a `toHaveCSS("color", <token>)` assertion
@@ -407,34 +530,23 @@ test.describe("Wiki rail: series", () => {
       expect(
         await contrastOf(head.locator(".wiki-series-step-title").first()),
       ).toBeGreaterThanOrEqual(4.5);
+      // The DATE is text the reader is asked for and it appears nowhere else on
+      // the step, so it takes the same floor as the title beside it.
+      expect(
+        await contrastOf(head.locator(".wiki-series-step-date").first()),
+      ).toBeGreaterThanOrEqual(4.5);
+    });
+
+    // Its own case, so a failing date cell cannot mask it: the `▸` is the whole
+    // claim "this is the plan to continue in" compressed into one mark, and it
+    // is the only thing on that row saying so.
+    test(`the \`▸\` on the newest plan is legible in the ${scheme} theme`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await openRail(page);
+      await seriesFold(page).click();
+      const glyph = page.locator(".wiki-latest-glyph");
+      await expect(glyph).toHaveCount(1);
+      expect(await contrastOf(glyph)).toBeGreaterThanOrEqual(4.5);
     });
   }
 });
-
-/** WCAG contrast of an element's text against the nearest ancestor that really
- *  paints a background — including whatever a `:hover` has put there. */
-async function contrastOf(locator: import("@playwright/test").Locator): Promise<number> {
-  return locator.evaluate((el) => {
-    const lum = (c: string): number => {
-      const [r, g, b] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number) as [number, number, number];
-      const ch = (v: number) => {
-        const s = v / 255;
-        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-      };
-      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
-    };
-    let node: HTMLElement | null = el as HTMLElement;
-    let bg = "rgba(0, 0, 0, 0)";
-    while (node) {
-      const c = getComputedStyle(node).backgroundColor;
-      if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) {
-        bg = c;
-        break;
-      }
-      node = node.parentElement;
-    }
-    const a = lum(getComputedStyle(el).color);
-    const b = lum(bg);
-    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  });
-}

@@ -36,6 +36,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
+import { contrastOf } from "./contrast.ts";
 import {
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_KEY,
@@ -460,31 +461,3 @@ test.describe("Wiki rail: families and months", () => {
     });
   }
 });
-
-/** WCAG contrast of an element's text against the nearest ancestor that really
- *  paints a background — including whatever a `:hover` has put there. */
-async function contrastOf(locator: import("@playwright/test").Locator): Promise<number> {
-  return locator.evaluate((el) => {
-    const lum = (c: string): number => {
-      const [r, g, b] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number) as [number, number, number];
-      const ch = (v: number) => {
-        const s = v / 255;
-        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-      };
-      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
-    };
-    let node: HTMLElement | null = el as HTMLElement;
-    let bg = "rgba(0, 0, 0, 0)";
-    while (node) {
-      const c = getComputedStyle(node).backgroundColor;
-      if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) {
-        bg = c;
-        break;
-      }
-      node = node.parentElement;
-    }
-    const a = lum(getComputedStyle(el).color);
-    const b = lum(bg);
-    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  });
-}

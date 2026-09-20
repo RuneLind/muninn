@@ -113,8 +113,10 @@ import {
   newestSeriesPlan,
   orderPagesForGroups,
   railGroups,
-  seriesDateMs,
-  seriesHead,
+  clipSeriesTitle,
+  seriesDateSignal,
+  seriesKeyOf,
+  seriesMembersOf,
   withoutSeriesMembers,
 } from "./wiki-groups.ts";
 import {
@@ -1140,9 +1142,15 @@ function renderList(): void {
           " the " +
           entry.group.label +
           (isSeries ? " series" : " pages");
-      // `N of M shown` says a facet is hiding part of the series. It rides the
-      // label, never a new element: a group row has the same width budget as a
-      // page row, and its own chip is already the widest thing on it.
+      // `N of M shown` says a facet is hiding part of the series. It sits on its
+      // OWN LINE under the label, inside the same box — beside it, it was inside
+      // `.wiki-group-label`'s `overflow: hidden; nowrap`, where the label ate the
+      // width first: measured 15px visible of 65 at the 300px shipped default
+      // under `folder=plans`, i.e. clipped to nothing on every rail anybody has
+      // while `toHaveText("3 of 4 shown")` still passed. A second LINE costs the
+      // group row 10.9px of height (measured on mimir: 30 → 40.89) and
+      // `.wiki-list-mid` no width at all (253.58 either way), so
+      // `RAIL_GROUP_CHIP_SWITCH` and the page rows' budgets are untouched.
       const census = entry.census ? `${entry.census.shown} of ${entry.census.total} shown` : "";
       const hover = `${roll.label} — ${why}` + (census ? ` (${census})` : "");
       html +=
@@ -1153,7 +1161,8 @@ function renderList(): void {
         ` aria-label="${esc(entry.group.label + " · " + hover)}" title="${esc(hover)}">` +
         `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
         `<div class="wiki-list-mid">` +
-        `<div class="wiki-group-label">${esc(entry.group.label)}` +
+        `<div class="wiki-group-label">` +
+        `<span class="wiki-group-name">${esc(entry.group.label)}</span>` +
         (census ? `<small class="wiki-group-sub">${esc(census)}</small>` : "") +
         `</div>` +
         // The same two size classes as a page chip, from the same functions, so
@@ -1274,8 +1283,8 @@ function renderList(): void {
       // The `▸` marking the newest plan of a series lives INSIDE this element,
       // not beside it: the row is six flex items and `wiki-rail-width.ts` budgets
       // every one of them, so a seventh would cost the title its floor and wrap
-      // the row. An inline span inside the line clamp costs 11px of the title's
-      // own text and nothing of the row's layout.
+      // the row. An inline span inside the line clamp costs the title's own text
+      // an 11px glyph plus its 4px margin and costs the row's layout nothing.
       `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
       (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
       `${esc(displayTitleOf(p))}</div>` +
@@ -2241,34 +2250,43 @@ function projectHubChipHtml(m: WikiListing): string {
  * costs no extra request. It renders nothing at all for a page carrying no
  * `series:`, which is almost every page of every wiki.
  *
- * Three rules worth stating:
+ * Four rules worth stating:
  *
+ *  - **Membership is `seriesMembersOf`, never a filter of its own.** This
+ *    header and the rail's fold report the same number about the same pages
+ *    because they run the same function: it folds the key's case, refuses an
+ *    attachment child that happens to carry the key, and applies the successor
+ *    test to a retired one. Re-deriving the set here is exactly what made
+ *    `N pages` disagree with the fold's `N of M shown`, and let a prototype
+ *    carrying a `series_label:` rename the strip.
  *  - **`continue at:` never names the open page.** The newest plan IS usually
  *    the page the reader has open (they got here from the `▸` row), and a link
  *    back to it would be the one useless answer. It names the next-newest plan
- *    instead, and is omitted entirely when there is none.
+ *    instead, and is omitted entirely when there is none. Its label is clipped
+ *    to `SERIES_CONTINUE_MAX`, with the whole title one hover away — a wiki
+ *    title runs to ~100 characters and an unclipped one took the whole line.
  *  - **The timeline runs oldest → newest**, the opposite of the rail's fold: the
  *    rail answers "where do I go now" and this answers "how did this get here",
- *    which is a story with a beginning.
- *  - **Dates are `status_date` else the git touch date** (`seriesDateMs`), the
- *    same signal the fold orders by — the strip and the fold must not disagree
- *    about which page is later.
+ *    which is a story with a beginning. It is the fold's own order REVERSED, so
+ *    the two cannot sequence one series two ways.
+ *  - **Dates come from `seriesDateSignal`** — the same day the fold sorts on,
+ *    mtime rung included. Printing a different chain from the one the order is
+ *    computed from is what left an mtime-dated member ordered correctly under a
+ *    blank date cell.
  */
 function seriesStripHtml(m: WikiListing): string {
-  const key = (m.series || "").trim();
+  const key = seriesKeyOf(m);
   if (!key) return "";
-  const members = allPages.filter((p) => (p.series || "").trim() === key);
+  const { members, head } = seriesMembersOf(allPages, key);
   if (!members.length) return "";
-  const label = seriesHead(members)?.seriesLabel || key;
+  const label = head?.seriesLabel || (head ? seriesKeyOf(head) : key);
   const openKey = normalizeRel(m.relPath);
   const continueAt = newestSeriesPlan(
     members.filter((p) => normalizeRel(p.relPath) !== openKey),
   );
-  const ordered = [...members].sort(
-    (a, b) =>
-      seriesDateMs(a) - seriesDateMs(b) ||
-      normalizeRel(a.relPath).localeCompare(normalizeRel(b.relPath)),
-  );
+  // `members` is newest first, the fold's own order; the story reads the other
+  // way round.
+  const ordered = [...members].reverse();
   const sep = `<span class="wiki-series-sep" aria-hidden="true">·</span>`;
   let strip =
     `<div class="wiki-series-strip">` +
@@ -2277,13 +2295,14 @@ function seriesStripHtml(m: WikiListing): string {
     sep +
     `<span class="wiki-series-count">${members.length} page${members.length === 1 ? "" : "s"}</span>`;
   if (continueAt) {
+    const full = displayTitleOf(continueAt);
     strip +=
       sep +
       `<span class="wiki-series-continue">continue at: ` +
       // A button, not an anchor: the reader is a single page and every other
       // in-article navigation goes through the same delegate.
       `<button type="button" class="wiki-series-go" data-series-go="${esc(continueAt.relPath)}"` +
-      ` title="${esc("Open " + displayTitleOf(continueAt))}">${esc(displayTitleOf(continueAt))}</button>` +
+      ` title="${esc("Open " + full)}">${esc(clipSeriesTitle(full))}</button>` +
       `</span>`;
   }
   strip += `</div>`;
@@ -2291,11 +2310,10 @@ function seriesStripHtml(m: WikiListing): string {
     .map((p) => {
       const isOpen = normalizeRel(p.relPath) === openKey;
       const shipped = p.plan_status === "shipped";
-      const day = p.status_date || (p.gitTouchedMs ? dayOf(p.gitTouchedMs) : "");
       const kind = [pageFolder(p), p.plan_status].filter(Boolean).join(" · ");
       return (
         `<div class="wiki-series-step${isOpen ? " current" : shipped ? " shipped" : ""}">` +
-        `<div class="wiki-series-step-date">${esc(day)}</div>` +
+        `<div class="wiki-series-step-date">${esc(seriesDateSignal(p).day)}</div>` +
         `<div class="wiki-series-step-title">${esc(displayTitleOf(p))}</div>` +
         `<div class="wiki-series-step-kind">${esc(kind)}</div>` +
         `</div>`
@@ -2303,14 +2321,6 @@ function seriesStripHtml(m: WikiListing): string {
     })
     .join("");
   return `<div class="wiki-series-head">${strip}<div class="wiki-series-tl">${steps}</div></div>`;
-}
-
-/** An epoch instant as a LOCAL `YYYY-MM-DD`, the spelling every other rendered
- *  git date in the reader uses. */
-function dayOf(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /**

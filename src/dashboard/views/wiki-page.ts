@@ -541,7 +541,14 @@ export async function renderWikiPage(opts?: {
     .wiki-group-label {
       font-size: 12.5px; line-height: 1.3; font-weight: 600;
       color: var(--text-secondary); flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      overflow: hidden;
+    }
+    /* The NAME is the one line that ellipsizes. It is its own element so the
+       census under it is not inside the clip: as a sibling span on one nowrap
+       line the label ate the width first and the census rendered 15px of 65 at
+       the 300px default. */
+    .wiki-group-name {
+      display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .wiki-group-fold:hover .wiki-group-label { color: var(--text-primary); }
     /* A SERIES row is the only group the reader AUTHORED, so it is the only one
@@ -549,13 +556,30 @@ export async function renderWikiPage(opts?: {
        guesses about filenames and read as ordinary furniture. */
     .wiki-list-group.series .wiki-group-label { color: var(--accent-light); }
     .wiki-list-group.series { border-left: 2px solid var(--accent); border-radius: 7px; }
-    /* \`N of M shown\` — a facet is hiding part of the series. Inside the label
-       box, so it takes the label's ellipsis rather than a width of its own. */
-    .wiki-group-sub { color: var(--text-muted); font-size: 10.5px; margin-left: 6px; font-weight: 400; }
+    /* …and the fold gives those 2px back out of its own left padding, so a
+       series row's \`.wiki-list-mid\` is the same width as a family row's and the
+       chip's container query fires at the same rail on both. Measured on mimir
+       at the 300px default: 251.58px vs a family's 253.58 before, 253.58 on
+       both after. \`box-sizing: border-box\` does NOT do this — these rows have
+       no declared width, and for an auto-width block the border comes off the
+       content box whatever the box model says (measured: still 251.58). */
+    .wiki-list-group.series .wiki-group-fold { padding-left: 8px; }
+    /* \`N of M shown\` — a facet is hiding part of the series. Its OWN line under
+       the name, because the census is the one thing on a group row a reader has
+       to READ and the name is allowed to take the rest. */
+    .wiki-group-sub {
+      display: block; color: var(--text-muted); font-size: 10.5px; font-weight: 400;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     /* The \`▸\` on the newest plan of a series: a text mark inside the title, not
        a row element. See \`wiki-rail-width.ts\` — the row's six items are each
-       budgeted and a seventh takes the title under its floor. */
-    .wiki-latest-glyph { color: var(--status-warning); margin-right: 4px; font-size: 11px; }
+       budgeted and a seventh takes the title under its floor.
+       --accent-light, not --status-warning: measured against the rail's ground
+       (.wiki-pane paints --bg-panel) the warning amber is 3.19:1 light, under AA
+       for an 11px mark; --accent-light is 6.46:1 light and 8.53:1 dark (the same
+       swap .wiki-act-glyph's green made, and the token the series group row
+       already carries — the glyph and its fold now read as one colour). */
+    .wiki-latest-glyph { color: var(--accent-light); margin-right: 4px; font-size: 11px; }
     /* A GHOST row: a series member the reader pinned, named inside the fold so
        the roll-up's count and the rows agree. Not a control and not a link —
        there is nothing to open that is not already on screen — so it takes no
@@ -1096,9 +1120,11 @@ export async function renderWikiPage(opts?: {
 
        Every colour is a page token, so both themes follow one set of
        declarations. The text a reader must READ sits at --text-muted or above
-       (measured ≥ 4.5:1 in both themes, the provenance strip's own floor);
-       --text-faint is reserved for the dates and the separators, which are
-       secondary marks beside text that repeats them. */
+       (measured ≥ 4.5:1 in both themes, the provenance strip's own floor), and
+       a timeline DATE is such text: it appears nowhere else on the step, so the
+       --text-faint it shipped at (2.50:1 dark, 2.62:1 light) was a number the
+       reader is asked for and cannot make out. --text-faint is left to the
+       strip's \`·\` separators, which are decoration and carry aria-hidden. */
     .wiki-series-head {
       margin-top: 8px; padding-top: 7px;
       border-top: 1px solid var(--border-primary);
@@ -1137,7 +1163,7 @@ export async function renderWikiPage(opts?: {
     .wiki-series-step.current::before { background: var(--accent); }
     .wiki-series-step.shipped { border-top-color: var(--status-success); }
     .wiki-series-step.shipped::before { background: var(--status-success); }
-    .wiki-series-step-date { font-size: 10px; color: var(--text-faint); }
+    .wiki-series-step-date { font-size: 10px; color: var(--text-muted); }
     .wiki-series-step-title {
       font-size: 11.5px; color: var(--text-secondary); line-height: 1.3;
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;

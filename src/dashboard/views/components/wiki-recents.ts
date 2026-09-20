@@ -1280,11 +1280,18 @@ export function buildRail(input: RailInput): RailModel {
     // The members the reader PINNED: on screen under `Pinned`, and named here as
     // ghost rows so the fold does not silently lose them.
     const ghosts = present.filter((m) => sectionLifted.has(normalizeRel(m.relPath)));
-    const superseded = g.supersededChildren.filter(
-      (c) =>
-        !sectionLifted.has(normalizeRel(c.relPath)) &&
-        !sectionLifted.has(normalizeRel(c.parent ?? "")),
-    );
+    // ⚠️ EVERY rule-4 child in the filtered set counts — unlike a FAMILY's
+    // census below, where the lift really does take a page out of the slate for
+    // that render. A series' census says which of its members this render holds,
+    // not which ones are painted (a CLOSED fold paints none of them and still
+    // says `4 of 4`), and the three placements a retired child can take are all
+    // inside it: under its successor in the body, under that successor where
+    // Activity or a pin lifted the successor one section up, and as its own row
+    // where the reader pinned the child. Dropping the lifted-PARENT case made a
+    // series with one pinned member holding one retired child read
+    // `1 of 2 shown` with nothing hidden, and cost the roll-up its
+    // `1 superseded`.
+    const superseded = g.supersededChildren;
     // A series with neither a member nor a ghost present is not on screen at
     // all — a facet took every page of it — and a header standing for nothing
     // is furniture.
@@ -1307,8 +1314,11 @@ export function buildRail(input: RailInput): RailModel {
       superseded,
       ...(ghosts.length ? { ghosts } : {}),
       // Only when the facets are really hiding part of the series: `3 of 3` is a
-      // number that reports nothing and reads as a warning.
-      ...(g.total !== undefined && shown < g.total ? { census: { shown, total: g.total } } : {}),
+      // number that reports nothing and reads as a warning. `total` is optional
+      // on `RailGroup` because a family and a month carry none; `?? shown` is
+      // that absence read as "nothing is hidden", not a guard — a series always
+      // sets it.
+      ...(shown < (g.total ?? shown) ? { census: { shown, total: g.total! } } : {}),
       folded: !expanded,
       ...(forcedGroupKey === foldKey ? { forcedOpen: true } : {}),
     });

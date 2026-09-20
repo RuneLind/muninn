@@ -2447,3 +2447,130 @@ describe("buildRail — series", () => {
     );
   });
 });
+
+// ── Series, fix round 1 ───────────────────────────────────────────────────
+
+describe("buildRail — series, fix round 1", () => {
+  const plan = (rel: string, over: Partial<WikiListing> = {}) =>
+    page({ relPath: rel, series: "alpha", ...over });
+  const groupsOf = (entries: RailEntry[]) =>
+    entries.filter((e) => e.kind === "group") as Array<Extract<RailEntry, { kind: "group" }>>;
+  const rows = (entries: RailEntry[]) =>
+    entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+
+  test("two case-variant keys are ONE row: every member once, `shown` intact", () => {
+    const pages = [
+      plan("plans/a.mdx", {
+        series: "Alpha",
+        seriesLabel: "Alpha work",
+        plan_status: "in-flight",
+        status_date: "2026-09-01",
+      }),
+      plan("plans/b.mdx", { series: "alpha", plan_status: "shipped", status_date: "2026-05-01" }),
+      page({ relPath: "plans/loose.mdx" }),
+    ];
+    const m = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: [],
+      seriesGroups: groupSeries(pages),
+      openFolds: ["series:alpha"],
+    });
+    const groups = groupsOf(m.entries);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.group.label).toBe("Alpha work");
+    const rel = rows(m.entries).map((r) => r.page.relPath);
+    // Every page exactly once, and the count agrees with the rows on screen.
+    expect(rel.slice().sort()).toEqual(["plans/a.mdx", "plans/b.mdx", "plans/loose.mdx"]);
+    expect(rel).toHaveLength(new Set(rel).size);
+    expect(m.shown).toBe(3);
+  });
+
+  test("a superseded child under a PINNED member still counts in the census", () => {
+    const keep = plan("plans/keep.mdx", { plan_status: "in-flight", status_date: "2026-09-01" });
+    const old = plan("plans/old.mdx", {
+      parent: "plans/keep.mdx",
+      pairedBy: "superseded",
+      plan_status: "superseded",
+      status_date: "2026-01-01",
+    });
+    const pages = [keep, old, page({ relPath: "plans/loose.mdx" })];
+    const m = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: ["plans/keep.mdx"],
+      seriesGroups: groupSeries(pages),
+      // The series fold AND the pinned member's own attachment fold, so the
+      // retired child really is painted — under its successor, in `Pinned`.
+      openFolds: ["series:alpha", "plans/keep.mdx"],
+    });
+    expect(rows(m.entries).map((r) => r.page.relPath)).toContain("plans/old.mdx");
+    const g = groupsOf(m.entries)[0]!;
+    // Nothing is hidden, so the row must not say a facet took a page…
+    expect(g.census).toBeUndefined();
+    // …and the roll-up must keep the `1 superseded` it is counted under.
+    expect(g.superseded.map((c) => c.relPath)).toEqual(["plans/old.mdx"]);
+  });
+
+  test("GHOST rows render AFTER every member row, never interleaved by date", () => {
+    // The pinned member is the NEWEST, so a date-ordered interleave would put
+    // its ghost first — which is what makes this an assertion about ORDER.
+    const newest = plan("plans/newest.mdx", { plan_status: "in-flight", status_date: "2026-09-01" });
+    const mid = plan("plans/mid.mdx", { plan_status: "shipped", status_date: "2026-05-01" });
+    const oldest = plan("blogs/oldest.mdx", { status_date: "2026-01-01" });
+    const pages = [newest, mid, oldest];
+    const m = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: ["plans/newest.mdx"],
+      seriesGroups: groupSeries(pages),
+      openFolds: ["series:alpha"],
+    });
+    const body = m.entries
+      .filter((e) => e.kind !== "header" && (e as { section: string }).section === "series")
+      .map((e) =>
+        e.kind === "ghost" ? "ghost:" + e.page.relPath : e.kind === "row" ? "row:" + e.page.relPath : "group",
+      );
+    expect(body).toEqual([
+      "group",
+      "row:plans/mid.mdx",
+      "row:blogs/oldest.mdx",
+      "ghost:plans/newest.mdx",
+    ]);
+  });
+
+  test("a series holding the open page is NOT forced open while that page is pinned", () => {
+    const a = plan("plans/a.mdx", { plan_status: "in-flight", status_date: "2026-09-01" });
+    const b = plan("plans/b.mdx", { plan_status: "shipped", status_date: "2026-05-01" });
+    const pages = [a, b];
+    const m = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: ["plans/a.mdx"],
+      seriesGroups: groupSeries(pages),
+      openRelPath: "plans/a.mdx",
+      openFolds: [],
+    });
+    const g = groupsOf(m.entries)[0]!;
+    // The open page is already on screen one section up, so the fold keeps the
+    // reader's own stored state (closed) and its chip stays a live toggle.
+    expect(g.forcedOpen).toBeUndefined();
+    expect(g.folded).toBe(true);
+    // …while the same page NOT pinned does force it open.
+    const forced = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: [],
+      seriesGroups: groupSeries(pages),
+      openRelPath: "plans/a.mdx",
+      openFolds: [],
+    });
+    expect(groupsOf(forced.entries)[0]!.forcedOpen).toBe(true);
+    expect(groupsOf(forced.entries)[0]!.folded).toBe(false);
+  });
+});
