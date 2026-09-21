@@ -462,3 +462,23 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
     expect(html).not.toContain("WIKIPAGELINK");
   });
 });
+
+describe("paragraphGaps", () => {
+  test("two prose paragraphs get a visible gap; a block boundary does not double up", () => {
+    const html = renderWikiHtml("para one\n\npara two\n\n### H\n\npara three", resolve);
+    expect(html).toContain("para one<br><br>para two");
+    expect(html).toContain("para two\n<h4>H</h4>\npara three");
+    expect(html).not.toContain("\n\n");
+  });
+
+  test("a blank line inside a fenced block keeps its bytes", () => {
+    const html = renderWikiHtml("intro\n\n```mermaid\nflowchart LR\n  A --> B\n\n  B --> C\n```\n\nafter\n\nmore", resolve);
+    expect(stripTokenSpans(html)).toContain("A --&gt; B\n\n  B --&gt; C");
+    expect(html).toContain("after<br><br>more");
+  });
+
+  test("paragraphs inside a fold body get the gap too", () => {
+    const html = renderWikiHtml('<Fold title="X">\n\n## X\n\npara a\n\npara b\n\n</Fold>', resolve);
+    expect(html).toContain("para a<br><br>para b");
+  });
+});

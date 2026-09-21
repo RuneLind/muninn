@@ -145,7 +145,26 @@ export function renderWikiHtml(
       return rendered[i] ?? "";
     },
   );
-  return upgradeObsidianCallouts(html);
+  return paragraphGaps(upgradeObsidianCallouts(html));
+}
+
+/**
+ * Give consecutive prose paragraphs a visible gap in the reader.
+ *
+ * `formatWebHtml` emits NO `<p>` (see `src/web/CLAUDE.md`): two paragraphs come out as bare
+ * text with a `\n\n` between them, and every block element gets a single `\n`. The chat shows
+ * that blank line because `.msg-body` is `white-space: pre-wrap`; `.wiki-article` is `normal`,
+ * so on every wiki page each run of plain paragraphs rendered as ONE paragraph — measured
+ * 2026-09-21 on a plan brief whose seven slots read as one block (11 top-level text nodes
+ * carrying a blank line, 0 `<br>`, computed white-space `normal`). The blank line is the only
+ * place the formatter leaves a double newline outside code, so it is exactly the paragraph
+ * boundary, and `<br><br>` is what the formatter already writes for one inside a blockquote.
+ * Code regions keep their bytes: a fenced block with an empty line (a mermaid graph) is
+ * shown, not reflowed.
+ */
+export function paragraphGaps(html: string): string {
+  const regions = renderedCodeRegions(html);
+  return html.replace(/\n\n/g, (m, offset: number) => (inRenderedCode(regions, offset) ? m : "<br><br>"));
 }
 
 /** Obsidian callout type → the reader's callout tone palette. */
