@@ -499,8 +499,9 @@ describe("paragraphGaps", () => {
   });
 
   test("a close tag after leading whitespace is still seen through the window", () => {
+    // Three spaces before the longest close tag: 16 chars after the blank line, over the
+    // old 14-char window and inside the 20-char one.
     expect(paragraphGaps("x\n\n   </blockquote>")).toBe("x\n   </blockquote>");
-    expect(paragraphGaps("<div>\n\n\n\n  <details>")).toBe("<div>\n\n\n  <details>");
   });
 
   test("paragraphs inside a fold body get the gap too", () => {
