@@ -477,6 +477,19 @@ describe("paragraphGaps", () => {
     expect(html).toContain("after<br><br>more");
   });
 
+  test("no gap between two folds, or between prose and a block that follows", () => {
+    const html = renderWikiHtml(
+      '<Fold title="A">\n\n## A\n\na\n\n</Fold>\n\n<Fold title="B">\n\n## B\n\nb\n\n</Fold>\n\nintro\n\n<Embed src="./x.html" title="X" />\n\n- item\n\ntail',
+      resolve,
+    );
+    expect(html).toContain("</details>\n<details");
+    expect(html).not.toContain("</details><br><br>");
+    expect(html).not.toContain("<br><br><details");
+    expect(html).not.toContain("<br><br><figure");
+    expect(html).not.toContain("<br><br><ul");
+    expect(html).not.toContain("</ul><br><br>");
+  });
+
   test("paragraphs inside a fold body get the gap too", () => {
     const html = renderWikiHtml('<Fold title="X">\n\n## X\n\npara a\n\npara b\n\n</Fold>', resolve);
     expect(html).toContain("para a<br><br>para b");

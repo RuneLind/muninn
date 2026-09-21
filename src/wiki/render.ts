@@ -164,8 +164,21 @@ export function renderWikiHtml(
  */
 export function paragraphGaps(html: string): string {
   const regions = renderedCodeRegions(html);
-  return html.replace(/\n\n/g, (m, offset: number) => (inRenderedCode(regions, offset) ? m : "<br><br>"));
+  return html.replace(/\n\n/g, (m, offset: number) => {
+    if (inRenderedCode(regions, offset)) return m;
+    // A double newline beside a BLOCK element (two folds in a row, prose before an
+    // embed or a list) is the formatter's block spacing, not a paragraph boundary:
+    // the block's own margin is the gap, and a `<br><br>` there paints a 2-line hole
+    // between every pair of folds (measured 2026-09-21: 8 of a plan page's 22).
+    if (BLOCK_CLOSE_BEFORE_RE.test(html.slice(Math.max(0, offset - 16), offset))) return "\n";
+    if (BLOCK_OPEN_AFTER_RE.test(html.slice(offset + 2, offset + 16))) return "\n";
+    return "<br><br>";
+  });
 }
+
+const BLOCK_TAGS = "details|div|ul|ol|pre|table|blockquote|h[1-6]|figure|hr|p|section|summary";
+const BLOCK_CLOSE_BEFORE_RE = new RegExp(`</(?:${BLOCK_TAGS})>$`);
+const BLOCK_OPEN_AFTER_RE = new RegExp(`^<(?:${BLOCK_TAGS})(?:[\\s>/]|$)`);
 
 /** Obsidian callout type → the reader's callout tone palette. */
 function calloutTone(type: string): "info" | "warn" | "good" | "bad" {
