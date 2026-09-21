@@ -490,6 +490,14 @@ describe("paragraphGaps", () => {
     expect(html).not.toContain("</ul><br><br>");
   });
 
+  test("no gap before a block CLOSE either: a component body ending in a blank line", () => {
+    // Two blank lines before the close: one is trimmed by the formatter, two survive as `\n\n`
+    // (measured on plans/huginn-nav-approval-privacy-gate.mdx, which is authored that way).
+    const html = renderWikiHtml('<Callout type="info">\n\nfirst\n\nlast\n\n\n</Callout>\n\ntail', resolve);
+    expect(html).toContain("first<br><br>last");
+    expect(html).not.toMatch(/<br><br>\s*<\/div>/);
+  });
+
   test("paragraphs inside a fold body get the gap too", () => {
     const html = renderWikiHtml('<Fold title="X">\n\n## X\n\npara a\n\npara b\n\n</Fold>', resolve);
     expect(html).toContain("para a<br><br>para b");

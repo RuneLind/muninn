@@ -152,33 +152,43 @@ export function renderWikiHtml(
  * Give consecutive prose paragraphs a visible gap in the reader.
  *
  * `formatWebHtml` emits NO `<p>` (see `src/web/CLAUDE.md`): two paragraphs come out as bare
- * text with a `\n\n` between them, and every block element gets a single `\n`. The chat shows
- * that blank line because `.msg-body` is `white-space: pre-wrap`; `.wiki-article` is `normal`,
- * so on every wiki page each run of plain paragraphs rendered as ONE paragraph — measured
- * 2026-09-21 on a plan brief whose seven slots read as one block (11 top-level text nodes
- * carrying a blank line, 0 `<br>`, computed white-space `normal`). The blank line is the only
- * place the formatter leaves a double newline outside code, so it is exactly the paragraph
- * boundary, and `<br><br>` is what the formatter already writes for one inside a blockquote.
- * Code regions keep their bytes: a fenced block with an empty line (a mermaid graph) is
- * shown, not reflowed.
+ * text with a `\n\n` between them. The chat shows that blank line because `.msg-body` is
+ * `white-space: pre-wrap`; `.wiki-article` is `normal`, so on every wiki page each run of
+ * plain paragraphs rendered as ONE paragraph — measured 2026-09-21 on a plan brief whose seven
+ * slots read as one block (11 top-level text nodes carrying a blank line, 0 `<br>`, computed
+ * white-space `normal`). `<br><br>` is what the formatter already writes for a paragraph
+ * break inside a blockquote.
+ *
+ * A `\n\n` is NOT only a paragraph boundary. The formatter's own `BLOCK_TAG` list
+ * (`web-format.ts`) collapses the newline around the blocks it knows, but component wrappers
+ * (`<div>`, `<details>`, `<figure>`) keep theirs: measured over 1774 mimir + jarvis pages,
+ * 661 double newlines sat right after such a close tag and 1035 right before an open one, and
+ * every pair of folds painted a two-line hole. So the gap is written only when NEITHER side
+ * is a block tag; beside one, the block's own margin is the spacing and a single newline is
+ * returned. Code regions keep their bytes: a fenced block with an empty line (a mermaid graph)
+ * is shown, not reflowed.
+ *
+ * `BLOCK_TAGS` is this renderer's list, not the formatter's: it needs the wrappers the
+ * formatter does not name and none of the table internals, which never abut a `\n\n`.
  */
 export function paragraphGaps(html: string): string {
   const regions = renderedCodeRegions(html);
   return html.replace(/\n\n/g, (m, offset: number) => {
     if (inRenderedCode(regions, offset)) return m;
-    // A double newline beside a BLOCK element (two folds in a row, prose before an
-    // embed or a list) is the formatter's block spacing, not a paragraph boundary:
-    // the block's own margin is the gap, and a `<br><br>` there paints a 2-line hole
-    // between every pair of folds (measured 2026-09-21: 8 of a plan page's 22).
-    if (BLOCK_CLOSE_BEFORE_RE.test(html.slice(Math.max(0, offset - 16), offset))) return "\n";
-    if (BLOCK_OPEN_AFTER_RE.test(html.slice(offset + 2, offset + 16))) return "\n";
+    const before = html.slice(Math.max(0, offset - 16), offset);
+    const after = html.slice(offset + 2, offset + 16);
+    if (BLOCK_CLOSE_RE.test(before) || BLOCK_OPEN_RE.test(after) || BLOCK_CLOSE_AFTER_RE.test(after)) return "\n";
     return "<br><br>";
   });
 }
 
-const BLOCK_TAGS = "details|div|ul|ol|pre|table|blockquote|h[1-6]|figure|hr|p|section|summary";
-const BLOCK_CLOSE_BEFORE_RE = new RegExp(`</(?:${BLOCK_TAGS})>$`);
-const BLOCK_OPEN_AFTER_RE = new RegExp(`^<(?:${BLOCK_TAGS})(?:[\\s>/]|$)`);
+const BLOCK_TAGS = "details|div|ul|ol|pre|table|blockquote|h[1-6]|figure|hr|section|summary";
+/** A block just closed before the blank line. `hr` is void and never closes; listed once, for the open side. */
+const BLOCK_CLOSE_RE = new RegExp(`</(?:${BLOCK_TAGS})>$`);
+/** A block opens right after it. */
+const BLOCK_OPEN_RE = new RegExp(`^<(?:${BLOCK_TAGS})(?:[\\s>/]|$)`);
+/** A block CLOSES right after it — a component body whose source ended in a blank line. */
+const BLOCK_CLOSE_AFTER_RE = new RegExp(`^\\s*</(?:${BLOCK_TAGS})>`);
 
 /** Obsidian callout type → the reader's callout tone palette. */
 function calloutTone(type: string): "info" | "warn" | "good" | "bad" {
