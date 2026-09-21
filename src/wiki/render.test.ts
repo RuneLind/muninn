@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { renderWikiHtml, stripFrontmatter } from "./render.ts";
+import { paragraphGaps, renderWikiHtml, stripFrontmatter } from "./render.ts";
 import type { WikiPageMeta } from "./store.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
 
@@ -460,5 +460,52 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
     );
     expect(html).not.toContain("\u0000");
     expect(html).not.toContain("WIKIPAGELINK");
+  });
+});
+
+describe("paragraphGaps", () => {
+  test("two prose paragraphs get a visible gap; a block boundary does not double up", () => {
+    const html = renderWikiHtml("para one\n\npara two\n\n### H\n\npara three", resolve);
+    expect(html).toContain("para one<br><br>para two");
+    expect(html).toContain("para two\n<h4>H</h4>\npara three");
+    expect(html).not.toContain("\n\n");
+  });
+
+  test("a blank line inside a fenced block keeps its bytes", () => {
+    const html = renderWikiHtml("intro\n\n```mermaid\nflowchart LR\n  A --> B\n\n  B --> C\n```\n\nafter\n\nmore", resolve);
+    expect(stripTokenSpans(html)).toContain("A --&gt; B\n\n  B --&gt; C");
+    expect(html).toContain("after<br><br>more");
+  });
+
+  test("no gap between two folds, or between prose and a block that follows", () => {
+    const html = renderWikiHtml(
+      '<Fold title="A">\n\n## A\n\na\n\n</Fold>\n\n<Fold title="B">\n\n## B\n\nb\n\n</Fold>\n\nintro\n\n<Embed src="./x.html" title="X" />\n\n- item\n\ntail',
+      resolve,
+    );
+    expect(html).toContain("</details>\n<details");
+    expect(html).not.toContain("</details><br><br>");
+    expect(html).not.toContain("<br><br><details");
+    expect(html).not.toContain("<br><br><figure");
+    expect(html).not.toContain("<br><br><ul");
+    expect(html).not.toContain("</ul><br><br>");
+  });
+
+  test("no gap before a block CLOSE either: a component body ending in a blank line", () => {
+    // Two blank lines before the close: one is trimmed by the formatter, two survive as `\n\n`
+    // (measured on plans/huginn-nav-approval-privacy-gate.mdx, which is authored that way).
+    const html = renderWikiHtml('<Callout type="info">\n\nfirst\n\nlast\n\n\n</Callout>\n\ntail', resolve);
+    expect(html).toContain("first<br><br>last");
+    expect(html).not.toMatch(/<br><br>\s*<\/div>/);
+  });
+
+  test("a close tag after leading whitespace is still seen through the window", () => {
+    // Three spaces before the longest close tag: 16 chars after the blank line, over the
+    // old 14-char window and inside the 20-char one.
+    expect(paragraphGaps("x\n\n   </blockquote>")).toBe("x\n   </blockquote>");
+  });
+
+  test("paragraphs inside a fold body get the gap too", () => {
+    const html = renderWikiHtml('<Fold title="X">\n\n## X\n\npara a\n\npara b\n\n</Fold>', resolve);
+    expect(html).toContain("para a<br><br>para b");
   });
 });
