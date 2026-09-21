@@ -2611,10 +2611,13 @@ async function seriesBaseHash(relPath: string): Promise<string | null> {
  * A sequence the route reports as all-noop (`written: false` on every answer —
  * the key typed is the one the page carries) still refreshes, but reports
  * nothing and stales nothing. The refresh stays because the noop's usual
- * trigger is DRIFT: the key reached the disk through something else (a lint
- * Accept, the sync loop, a pull) and the 5-minute index has not seen it, so
- * the popover offered a join the file no longer needs — and the refresh is
- * what moves the row into the fold. The note and the stale flag go because a
+ * trigger is DRIFT: the key reached the disk after THIS BROWSER fetched its
+ * listing (`allPages`, read at page load), so the popover offered a join the
+ * file no longer needs. The stale party is the client, not the server — the
+ * route rebuilds the index before every write, and the lint Accept and the
+ * sync loop refresh it themselves — so only a refetch-and-apply here moves the
+ * row into the fold (measured: skipping it closed the menu as a success over a
+ * rail that stayed wrong). The note and the stale flag go because a
  * byte-identical listing after a non-write is the expected answer, not a
  * failed one: measured, it read as "Saved — reload" and the menu locked
  * itself over its own non-write, refusing the next verb until reopened.
