@@ -622,6 +622,81 @@ test.describe("the menu between clicks", () => {
     await expect(menu(page)).toBeVisible();
     await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg")).toHaveCount(0);
   });
+
+  test("a write that LANDS closes its own menu, not the one open when it answers", async ({
+    page,
+  }) => {
+    // The success twin of the case above. The refusal path keys its note to
+    // the menu that sent the write; the success path closes "the menu", and
+    // with another popover open by then that is the wrong one — and the menu
+    // the reader is looking at vanishes under their pointer.
+    await page.route("**/api/wiki/series", async (route) => {
+      await new Promise((r) => setTimeout(r, 1200));
+      await route.continue();
+    });
+    await openRail(page);
+    await openSeriesFold(page);
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await page.keyboard.press("Escape");
+    await expect(menu(page)).toHaveCount(0);
+    await openRowMenu(page, OUTSIDER);
+    // The write lands and its tail repaints the rail — the joiner's row moves
+    // into the fold. The close, if it happens, happens in that same tail, so
+    // a menu still standing AFTER the repaint is one the tail left alone.
+    await expect
+      .poll(async () => (await fence(root, JOINER)).join("|"))
+      .toContain(`series: ${KEY}`);
+    await expect(row(page, JOINER)).toHaveClass(/member/);
+    await expect(menu(page)).toBeVisible();
+    await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg")).toHaveCount(0);
+    // And it is the OUTSIDER's menu, live: a verb from it writes THAT page.
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await expect(menu(page)).toHaveCount(0);
+    await expect
+      .poll(async () => (await fence(root, OUTSIDER)).join("|"))
+      .toContain(`series: ${KEY}`);
+  });
+
+  test("a write the route reports as a noop leaves the menu usable", async ({ page }) => {
+    // The key typed into the field is the one the page already carries. The
+    // route answers 200 with `written: false` and the same hash; the listing
+    // cannot have moved. Nothing to report, and nothing the held bases no
+    // longer describe — so the next verb must go out, not be refused as a
+    // write over bases this menu's own (non-)write moved on from.
+    await openRail(page);
+    await openSeriesFold(page);
+    const before = await read(root, HEAD);
+    await openRowMenu(page, HEAD);
+    await page.locator('#wikiSeriesMenu [data-series-form="new"] [data-series-input]').fill(KEY);
+    await page.locator('#wikiSeriesMenu [data-series-form="new"] button[type="submit"]').click();
+    await expect(menu(page)).toHaveCount(0);
+    expect(await read(root, HEAD)).toBe(before);
+  });
+
+  test("a noop against a page that DRIFTED behind the index still reconciles the rail", async ({
+    page,
+  }) => {
+    // The noop's realistic trigger: the key is on disk already because
+    // something else put it there — a lint Accept, the sync loop, a pull —
+    // and the 5-minute index has not seen it, so the popover still offers the
+    // join. The route answers `written: false`; the refresh that follows is
+    // the only thing that moves the row into the fold. A noop that skipped it
+    // closed the menu as a success over a rail that stayed wrong.
+    const drifted = (await read(root, JOINER)).replace(
+      "plan_status: proposed",
+      `series: ${KEY}\nplan_status: proposed`,
+    );
+    await writeFile(path.join(root, JOINER), drifted, "utf8");
+    await openRail(page);
+    await openSeriesFold(page);
+    await expect(row(page, JOINER)).not.toHaveClass(/member/);
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await expect(menu(page)).toHaveCount(0);
+    await expect(row(page, JOINER)).toHaveClass(/member/);
+    expect(await read(root, JOINER)).toBe(drifted);
+  });
 });
 
 /**
