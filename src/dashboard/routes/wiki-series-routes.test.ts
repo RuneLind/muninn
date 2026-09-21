@@ -642,6 +642,27 @@ describe("moving to another series", () => {
     });
   });
 
+  test("a label IDENTICAL to the page's own is still a 409 when the target already has a head", async () => {
+    // Rule 4's `|| foldChanged` clause. The page carries `series_label: Wiki
+    // provenance` already, so a request naming that same label changes no
+    // label line — and a guard that read only the label would wave it through,
+    // landing a second head on the target. The MOVE is what creates the fork.
+    await withTarget(true, async () => {
+      const before = await read(PLAN);
+      const res = await post({
+        wiki: "w",
+        relPath: PLAN,
+        baseHash: sha256(before),
+        series: "tgt",
+        seriesLabel: "Wiki provenance",
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ twoHeaded: true, headRelPath: TARGET });
+      expect(await read(PLAN)).toBe(before);
+      expect(await fence(TARGET)).toContain("series_label: Target series");
+    });
+  });
+
   test("an orphan label on a page in NO series is cleared with no report", async () => {
     // A `series_label:` with no `series:` names nothing (no lint check reports
     // it either), so there is no series to tell the reader has lost its name.

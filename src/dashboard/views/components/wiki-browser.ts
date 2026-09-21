@@ -2607,6 +2607,13 @@ async function seriesBaseHash(relPath: string): Promise<string | null> {
  * Both endings refresh. A second write that fails leaves the FIRST one's effect
  * on disk, and without the refresh the header and the rail went on painting a
  * label that is gone from the file.
+ *
+ * A sequence the route reports as all-noop (`written: false` on every answer —
+ * the key typed is the one the page carries) refreshes nothing and stales
+ * nothing: no byte moved, so the listing cannot have, and the bases this menu
+ * holds still describe the files. Measured before this guard: the byte-identical
+ * refresh read as "Saved — reload" and the menu locked itself over its own
+ * non-write, refusing the next verb until reopened.
  */
 async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
   const state = seriesMenu;
@@ -2621,6 +2628,8 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
    *  a MOVE took the page's own `series_label:` with it, since a label names a
    *  series rather than a page. */
   let cleared: { series: string } | null = null;
+  /** Whether any answer in the sequence reported bytes moved. */
+  let wrote = false;
   try {
     await state.basesReady;
     for (const write of writes) {
@@ -2644,6 +2653,7 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
             error?: string;
             hash?: string;
             stale?: boolean;
+            written?: boolean;
             clearedLabel?: { series?: string; label?: string };
           }
         | null;
@@ -2676,8 +2686,11 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
       }
       const dropped = body?.clearedLabel?.series;
       if (typeof dropped === "string" && dropped) cleared = { series: dropped };
+      // An answer with no `written` at all is treated as a write — the older
+      // shape, and the direction that refreshes rather than the one that skips.
+      if (body?.written !== false) wrote = true;
     }
-    const outcome = await refreshAfterSeriesWrite();
+    const outcome = wrote ? await refreshAfterSeriesWrite() : null;
     const notes: string[] = [];
     if (cleared) {
       // The label went with the move, and nothing on screen would otherwise say
@@ -2690,7 +2703,7 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
     }
     // The write landed; the listing did not. Saying so beats repainting the
     // rail from the set it already had and calling that success.
-    if (outcome !== "apply") notes.push("Saved — reload to see the updated list");
+    if (outcome && outcome !== "apply") notes.push("Saved — reload to see the updated list");
     if (notes.length) {
       // The menu stays OPEN so the line can be read — and the bases it still
       // holds describe files this write has just moved on from, so the next
@@ -2699,7 +2712,10 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
       setSeriesMenuNote(state, notes.join(" · "), false);
       return;
     }
-    closeSeriesMenu({ focus: false });
+    // Keyed to THIS sequence's menu, as the note setter is: the reader can
+    // have dismissed this popover and opened another while the write was in
+    // flight, and that one is theirs to keep.
+    if (seriesMenu === state) closeSeriesMenu({ focus: false });
   } finally {
     state.busy = false;
   }
