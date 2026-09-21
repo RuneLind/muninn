@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { renderWikiHtml, stripFrontmatter } from "./render.ts";
+import { paragraphGaps, renderWikiHtml, stripFrontmatter } from "./render.ts";
 import type { WikiPageMeta } from "./store.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
 
@@ -496,6 +496,11 @@ describe("paragraphGaps", () => {
     const html = renderWikiHtml('<Callout type="info">\n\nfirst\n\nlast\n\n\n</Callout>\n\ntail', resolve);
     expect(html).toContain("first<br><br>last");
     expect(html).not.toMatch(/<br><br>\s*<\/div>/);
+  });
+
+  test("a close tag after leading whitespace is still seen through the window", () => {
+    expect(paragraphGaps("x\n\n   </blockquote>")).toBe("x\n   </blockquote>");
+    expect(paragraphGaps("<div>\n\n\n\n  <details>")).toBe("<div>\n\n\n  <details>");
   });
 
   test("paragraphs inside a fold body get the gap too", () => {

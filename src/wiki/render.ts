@@ -175,15 +175,21 @@ export function paragraphGaps(html: string): string {
   const regions = renderedCodeRegions(html);
   return html.replace(/\n\n/g, (m, offset: number) => {
     if (inRenderedCode(regions, offset)) return m;
-    const before = html.slice(Math.max(0, offset - 16), offset);
-    const after = html.slice(offset + 2, offset + 16);
+    // The windows hold the longest tag (`</blockquote>`, 13 chars) plus a few characters of
+    // whitespace on either side; the regexes anchor on the tag itself, so a longer window
+    // costs nothing and a shorter one is a cliff (14 held `</blockquote>` with ONE space).
+    const before = html.slice(Math.max(0, offset - WINDOW), offset);
+    const after = html.slice(offset + 2, offset + 2 + WINDOW);
     if (BLOCK_CLOSE_RE.test(before) || BLOCK_OPEN_RE.test(after) || BLOCK_CLOSE_AFTER_RE.test(after)) return "\n";
     return "<br><br>";
   });
 }
 
+const WINDOW = 20;
+/** One list for all three sides. `hr` is void and only ever matches on the open side; `p` is
+ *  absent because the formatter emits it only glued inside a `<figure>`, never beside a `\n\n`. */
 const BLOCK_TAGS = "details|div|ul|ol|pre|table|blockquote|h[1-6]|figure|hr|section|summary";
-/** A block just closed before the blank line. `hr` is void and never closes; listed once, for the open side. */
+/** A block just closed before the blank line. */
 const BLOCK_CLOSE_RE = new RegExp(`</(?:${BLOCK_TAGS})>$`);
 /** A block opens right after it. */
 const BLOCK_OPEN_RE = new RegExp(`^<(?:${BLOCK_TAGS})(?:[\\s>/]|$)`);
