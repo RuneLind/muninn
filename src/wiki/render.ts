@@ -175,9 +175,11 @@ export function paragraphGaps(html: string): string {
   const regions = renderedCodeRegions(html);
   return html.replace(/\n\n/g, (m, offset: number) => {
     if (inRenderedCode(regions, offset)) return m;
-    // The windows hold the longest tag (`</blockquote>`, 13 chars) plus a few characters of
-    // whitespace on either side; the regexes anchor on the tag itself, so a longer window
-    // costs nothing and a shorter one is a cliff (14 held `</blockquote>` with ONE space).
+    // Both windows hold the longest tag (`</blockquote>`, 13 chars) with room for whitespace.
+    // The `after` window was 14 by an off-by-two (`offset + 16` after skipping the two
+    // newlines) and held `</blockquote>` with ONE leading space; the test pins 16 as the
+    // floor. The only rule the width changes is `BLOCK_CLOSE_AFTER_RE`, whose `\s*` tolerates
+    // as much leading whitespace as the window leaves; the other two anchor on the tag.
     const before = html.slice(Math.max(0, offset - WINDOW), offset);
     const after = html.slice(offset + 2, offset + 2 + WINDOW);
     if (BLOCK_CLOSE_RE.test(before) || BLOCK_OPEN_RE.test(after) || BLOCK_CLOSE_AFTER_RE.test(after)) return "\n";
