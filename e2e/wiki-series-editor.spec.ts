@@ -672,13 +672,30 @@ test.describe("the menu between clicks", () => {
     await page.locator('#wikiSeriesMenu [data-series-form="new"] button[type="submit"]').click();
     await expect(menu(page)).toHaveCount(0);
     expect(await read(root, HEAD)).toBe(before);
+  });
 
-    // Usable: the same menu, reopened, moves the page with no reopen-note.
-    await openRowMenu(page, HEAD);
-    await page.locator('#wikiSeriesMenu [data-series-form="new"] [data-series-input]').fill("recall");
-    await page.locator('#wikiSeriesMenu [data-series-form="new"] button[type="submit"]').click();
-    await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad")).toHaveCount(0);
-    await expect.poll(async () => (await fence(root, HEAD)).join("|")).toContain("series: recall");
+  test("a noop against a page that DRIFTED behind the index still reconciles the rail", async ({
+    page,
+  }) => {
+    // The noop's realistic trigger: the key is on disk already because
+    // something else put it there — a lint Accept, the sync loop, a pull —
+    // and the 5-minute index has not seen it, so the popover still offers the
+    // join. The route answers `written: false`; the refresh that follows is
+    // the only thing that moves the row into the fold. A noop that skipped it
+    // closed the menu as a success over a rail that stayed wrong.
+    const drifted = (await read(root, JOINER)).replace(
+      "plan_status: proposed",
+      `series: ${KEY}\nplan_status: proposed`,
+    );
+    await writeFile(path.join(root, JOINER), drifted, "utf8");
+    await openRail(page);
+    await openSeriesFold(page);
+    await expect(row(page, JOINER)).not.toHaveClass(/member/);
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await expect(menu(page)).toHaveCount(0);
+    await expect(row(page, JOINER)).toHaveClass(/member/);
+    expect(await read(root, JOINER)).toBe(drifted);
   });
 });
 

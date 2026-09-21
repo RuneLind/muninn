@@ -2609,11 +2609,15 @@ async function seriesBaseHash(relPath: string): Promise<string | null> {
  * label that is gone from the file.
  *
  * A sequence the route reports as all-noop (`written: false` on every answer —
- * the key typed is the one the page carries) refreshes nothing and stales
- * nothing: no byte moved, so the listing cannot have, and the bases this menu
- * holds still describe the files. Measured before this guard: the byte-identical
- * refresh read as "Saved — reload" and the menu locked itself over its own
- * non-write, refusing the next verb until reopened.
+ * the key typed is the one the page carries) still refreshes, but reports
+ * nothing and stales nothing. The refresh stays because the noop's usual
+ * trigger is DRIFT: the key reached the disk through something else (a lint
+ * Accept, the sync loop, a pull) and the 5-minute index has not seen it, so
+ * the popover offered a join the file no longer needs — and the refresh is
+ * what moves the row into the fold. The note and the stale flag go because a
+ * byte-identical listing after a non-write is the expected answer, not a
+ * failed one: measured, it read as "Saved — reload" and the menu locked
+ * itself over its own non-write, refusing the next verb until reopened.
  */
 async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
   const state = seriesMenu;
@@ -2687,10 +2691,11 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
       const dropped = body?.clearedLabel?.series;
       if (typeof dropped === "string" && dropped) cleared = { series: dropped };
       // An answer with no `written` at all is treated as a write — the older
-      // shape, and the direction that refreshes rather than the one that skips.
+      // shape, and the direction that reports rather than the one that stays
+      // quiet.
       if (body?.written !== false) wrote = true;
     }
-    const outcome = wrote ? await refreshAfterSeriesWrite() : null;
+    const outcome = await refreshAfterSeriesWrite();
     const notes: string[] = [];
     if (cleared) {
       // The label went with the move, and nothing on screen would otherwise say
@@ -2703,7 +2708,7 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
     }
     // The write landed; the listing did not. Saying so beats repainting the
     // rail from the set it already had and calling that success.
-    if (outcome && outcome !== "apply") notes.push("Saved — reload to see the updated list");
+    if (wrote && outcome !== "apply") notes.push("Saved — reload to see the updated list");
     if (notes.length) {
       // The menu stays OPEN so the line can be read — and the bases it still
       // holds describe files this write has just moved on from, so the next
