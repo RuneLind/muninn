@@ -10,7 +10,14 @@
  */
 
 import { test, expect } from "bun:test";
-import { parseGitLog, buildWikiGitDates, SWEEP_THRESHOLD } from "./git-dates.ts";
+import {
+  parseGitLog,
+  buildWikiGitDates,
+  classifyPageChange,
+  SWEEP_THRESHOLD,
+  __setClassifyBudgetForTest,
+} from "./git-dates.ts";
+import { setFrontmatterScalar } from "../plans/frontmatter.ts";
 
 /** `%at` is seconds; the maps are ms. */
 const at = (iso: string) => Math.floor(Date.parse(iso) / 1000);
@@ -357,9 +364,6 @@ test("buildWikiGitDates: real repo — an uncommitted edit shows up as DIRTY", a
 // (`classifyPageChange`, below); everything around it is a claim about what `git
 // status` and `git cat-file` emit, so those run against a REAL temp git repo — a
 // hand-written fixture would prove only that a Set works.
-
-import { classifyPageChange, __setClassifyBudgetForTest } from "./git-dates.ts";
-import { setFrontmatterScalar } from "../plans/frontmatter.ts";
 
 /** Page text with one frontmatter block and one body line, so a case can move
  *  exactly one of the two. */
