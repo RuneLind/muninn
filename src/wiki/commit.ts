@@ -525,9 +525,10 @@ interface PorcelainEntry {
 /**
  * One STATUS-CARRYING entry from `git status --porcelain -z -uall`.
  *
- * The sweeper's {@link listWikiSubtreeDirty} deliberately discards `XY` — it
- * only ever needs "which paths are dirty" and derives deletions from absence on
- * disk. The repo-sync loop cannot: an ordinary unstaged `mv` shows as `D old`
+ * The sweeper's {@link listWikiSubtreeDirty} reads `XY` for one thing only — the
+ * `trackedModified` subset it hands `git-dates.ts` — and derives its own dirty
+ * list from the paths and its deletions from absence on disk. The repo-sync loop
+ * needs more: an ordinary unstaged `mv` shows as `D old`
  * plus a fresh `?? new` (verified against real git — an UNSTAGED rename is never
  * paired, only a staged `git mv` produces an `R` record), so a rule that staged
  * deletions unconditionally would push a bare page deletion while the

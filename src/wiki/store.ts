@@ -31,6 +31,7 @@ import {
 } from "../format/markdown-ast.ts";
 import { parseEmbedAttrs, resolveEmbedRelPath } from "../format/embed.ts";
 import { buildWikiGitDates } from "./git-dates.ts";
+import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 
@@ -792,24 +793,12 @@ function folderStemKey(relPath: string, stem?: string): string {
 }
 
 /**
- * Is this a MARKDOWN wiki page (`.md` or `.mdx`) rather than a standalone `.html`
- * explainer? The one spelling of that test, so "which pages share one title
- * namespace" cannot be answered two ways. Lives here beside {@link extRank}, which
- * is the rule it qualifies. Two callers: `resolve()`'s path-form branch below, and
- * the linter's `stem-collision` check (`lint.ts`).
- *
- * **The case fold is defensive and currently unreachable**, which is worth stating
- * because the name invites the opposite reading. `resolve()` lowercases its target
- * before calling; the linter passes a raw on-disk relPath, but that path reached
- * the index through the case-SENSITIVE discovery glob (`**​/*.{md,mdx,html}`), so no
- * indexed page carries an uppercase extension in the first place. It is kept so the
- * predicate answers the question its name asks for any path a future caller hands
- * it, and pinned in `store.test.ts` / `lint.test.ts` so that stays deliberate.
+ * Is this a MARKDOWN wiki page (`.md` or `.mdx`)? Defined in `page-text.ts` and
+ * re-exported here, beside {@link extRank}, which is the rule it qualifies — the
+ * metadata-only rule in `git-dates.ts` needs it too, and this module imports that
+ * one. Full rationale (including why the case fold is there): `page-text.ts`.
  */
-export function isMarkdownWikiPath(relPath: string): boolean {
-  const l = relPath.toLowerCase();
-  return l.endsWith(".md") || l.endsWith(".mdx");
-}
+export { isMarkdownWikiPath };
 
 /**
  * A `[[wikilink]]`, target and alias both NEWLINE-FREE. Obsidian has no
@@ -950,10 +939,11 @@ export function resolveWikiRoot(explicit?: string): string {
  * not asked for by name.
  */
 export function parseFrontmatter(content: string): Record<string, string | string[]> {
-  if (!content.startsWith("---")) return {};
-  const end = content.indexOf("\n---", 3);
-  if (end === -1) return {};
-  const body = content.slice(content.indexOf("\n") + 1, end);
+  // The fence detection is `splitFrontmatter` (`page-text.ts`) — ONE rule, shared
+  // with `stripFrontmatter` below and with `git-dates.ts`'s metadata-only rule,
+  // which is allowed to forgive a changed line only INSIDE this block.
+  const body = splitFrontmatter(content).frontmatter;
+  if (body === null) return {};
 
   const out: Record<string, string | string[]> = {};
   // The value-less top-level key whose children we are collecting, and the
@@ -1408,18 +1398,13 @@ function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[
 }
 
 /**
- * The body content after the frontmatter fence. Mirrors `parseFrontmatter`'s
- * fence detection: a leading `---` with a closing `\n---`; the body starts on the
- * line after the closing fence. Returns the whole content when there is no fence.
+ * The body content after the frontmatter fence — `splitFrontmatter`'s other half,
+ * so it SHARES `parseFrontmatter`'s fence detection rather than mirroring it: a
+ * leading `---` with a closing `\n---`; the body starts on the line after the
+ * closing fence. Returns the whole content when there is no fence.
  */
 export function stripFrontmatter(content: string): string {
-  if (!content.startsWith("---")) return content;
-  const end = content.indexOf("\n---", 3);
-  if (end === -1) return content;
-  // `end` points at the `\n` before the closing `---`; skip to the newline that
-  // ends the closing fence line, and the body is everything after it.
-  const afterFence = content.indexOf("\n", end + 1);
-  return afterFence === -1 ? "" : content.slice(afterFence + 1);
+  return splitFrontmatter(content).body;
 }
 
 /**

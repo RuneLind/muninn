@@ -149,17 +149,29 @@ minute" failure those functions exist to absorb. ⚠️ **The mtime rule has ONE
 exception, and it is where that failure came back**: a DIRTY page's mtime is
 trusted, because git has not recorded that edit yet — so a mechanical frontmatter
 write (a series join across twelve pages, a burst of `/plans` flips) made every
-page it touched read as edited minutes ago. `buildWikiGitDates` now drops a
-TRACKED, MODIFIED page whose whole `git diff HEAD` is frontmatter metadata lines
-(`METADATA_ONLY_FRONTMATTER_KEYS`, the four provenance keys plus
-`series`/`series_label`/`priority`/`plan_status`/`status_date`) out of `dirty`, so
-it dates from git history like a clean page. Untracked and deleted paths pass
-through UNTOUCHED — an untracked page has no `HEAD` diff and would pass the test
-vacuously, and dropping it would also count it into `store.ts`'s unexplained-miss
-warn — the diff is against `HEAD` rather than the worktree because both wiki
-writers stage before they commit, and a changed line counts only INSIDE the
-frontmatter block, since mimir documents these very keys at column 0 inside body
-code fences. Every failure keeps the page dirty. Rules and degrades: the
+page it touched read as edited minutes ago. `buildWikiGitDates` now COMPARES a
+TRACKED, MODIFIED page against its `HEAD` blob and drops it from `dirty` on either
+of two verdicts, so it dates from git history like a clean page: `metadata-only`
+(the body after the fence is byte-identical and every frontmatter LINE that
+differs is a column-0 key in `METADATA_ONLY_FRONTMATTER_KEYS` — the four
+provenance keys plus `series`/`series_label`/`priority`/`plan_status`/`status_date`)
+and `identical` (equal texts, which `git status` still reports as modified after a
+`chmod`). Everything else is an `edit` and keeps its mtime — and `edit` is the
+DEFAULT, so there is no unnamed page to guess about: a body difference, a page
+with no frontmatter, a differing key outside the set, an indented or unparsed
+frontmatter line, a missing `HEAD` blob, an unreadable, non-UTF-8 or
+NUL-carrying file. The HEAD side is ONE `git cat-file --batch` fed
+repo-relative paths on STDIN — a path with a space, a quote or a non-ASCII byte
+needs no quoting there, and no `diff.*` user config can change the spelling an
+answer comes back under, which is the whole class of bug the `git diff HEAD` text
+parse this replaced was built on. Untracked and deleted paths pass through
+UNTOUCHED (an untracked page has no `HEAD` blob, and dropping it would also count
+it into `store.ts`'s unexplained-miss warn); the comparison is against `HEAD`
+rather than the index because both wiki writers stage before they commit; and a
+changed line counts only INSIDE the frontmatter block `parseFrontmatter` reads,
+since mimir documents these very keys at column 0 inside body code fences. The
+classification carries its OWN budget (`GIT_DATES_CLASSIFY_TIMEOUT_MS`) whose
+loser is the UNCLASSIFIED dirty set, never the empty one. Rules and degrades: the
 metadata-only section of `src/wiki/git-dates.ts`. ⚠️ A **change means the update signal's own KIND is `updated`** (`pageDateKind`),
 never a gap between two dates: `updatedSignal` falls back to the git CREATION
 date for a page whose every commit was a sweep, and read as a date it makes

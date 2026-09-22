@@ -41,8 +41,9 @@
  * back to the mtime rule, and a mechanical frontmatter write — a series join, a
  * plan-status flip — moves every touched page's mtime while changing nothing a
  * reader would call an edit. Such a page is dropped from `dirty` and dates from its
- * git history like a clean one; see the metadata-only section below for the three
- * rules that keep a real edit from being dropped with it.
+ * git history like a clean one. The metadata-only section below states the three
+ * verdicts and the three rules that keep a real edit from being dropped with it;
+ * everywhere else points there.
  *
  * A page whose history begins with a move INTO this wiki from another repo (the 10
  * plans imported in mimir's 2026-05-04 consolidation) dates to the import, not to
@@ -55,7 +56,8 @@ import path from "node:path";
 import { realpath } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { listWikiSubtreeDirty } from "./commit.ts";
-import { METADATA_ONLY_FRONTMATTER_KEYS } from "./provenance.ts";
+import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
+import { PROVENANCE_FRONTMATTER_KEYS } from "./provenance.ts";
 
 const log = getLog("wiki", "git-dates");
 
@@ -109,9 +111,10 @@ export interface WikiGitDates {
    * edit that git has not recorded yet, and is the one signal a git-only ranking
    * would lose. Empty (never null) when the tree is clean or the probe failed.
    *
-   * MINUS the metadata-only edits — see {@link classifyDiffFiles}: a tracked page
-   * whose whole diff against `HEAD` is frontmatter metadata lines was written by a
-   * mechanical pass, so its mtime is the sweep's timestamp and not an edit.
+   * MINUS the metadata-only edits — see {@link classifyPageChange} and the section
+   * it belongs to: a tracked page whose body matches `HEAD` and whose frontmatter
+   * differs only in metadata keys was written by a mechanical pass, so its mtime is
+   * that pass's timestamp and not an edit.
    */
   dirty: Set<string>;
 }
@@ -278,210 +281,321 @@ export function parseGitLog(
 // `series:` onto twelve pages, the /plans board writing `priority:` or
 // `plan_status` + `status_date` in a burst of clicks — moves every touched page's
 // mtime, and the dirty probe above then hands all of them to the mtime rule: the
-// rail reads twelve pages as edited three hours ago. Those writes are exactly the
-// ones `writeWikiPage` already files under its NO-LOG path, i.e. the repo has
-// already decided they are not edits.
+// rail reads twelve pages as edited three hours ago.
 //
-// So a TRACKED, MODIFIED page whose diff against `HEAD` adds and removes only
-// frontmatter metadata lines is dropped from `dirty`, and falls back to its git
-// touch date like any clean page. Three rules make that safe, and each of them is
-// a way the rule would otherwise hide a real edit:
+// So a TRACKED, MODIFIED page is COMPARED against its `HEAD` blob, and dropped
+// from `dirty` — dating from git history like a clean page — on either of two
+// verdicts. Three rules and one degrade make that safe.
 //
-//  1. The diff is `git diff HEAD`, never a bare `git diff`. Both wiki writers
-//     (`commitWikiChange` and the repo-sync loop's `stagePaths`) `git add` before
-//     they commit, so a STAGED real prose edit has an empty unstaged diff and
-//     would read as metadata-only — hiding the one kind of edit this must never
-//     hide.
+// **The three verdicts, stated once** ({@link classifyPageChange}; everything
+// else in this module points here rather than restating them):
+//
+//  - `metadata-only` — both sides carry frontmatter, the BODY after the fence is
+//    byte-identical, and every frontmatter LINE that differs is a column-0 line
+//    whose key is in {@link METADATA_ONLY_FRONTMATTER_KEYS}. Dropped.
+//  - `identical` — the two texts are equal, which `git status` still reports as
+//    modified for a mode-only change (`chmod`). No edit to hide. Dropped.
+//  - `edit` — everything else, and it is the DEFAULT: a body difference, a page
+//    with no frontmatter on either side, a differing key outside the set, an
+//    indented or otherwise unparsed frontmatter line, a HEAD blob the repo does
+//    not hold, an unreadable or non-UTF-8 or NUL-carrying file, a path a
+//    `cat-file --batch` line cannot carry. Kept dirty.
+//
+// **The three rules.** Each is a way the rule would otherwise hide a real edit:
+//
+//  1. The comparison is against `HEAD`, never the worktree's own index state.
+//     Both wiki writers (`commitWikiChange` and the repo-sync loop's
+//     `stagePaths`) `git add` before they commit, so a STAGED real prose edit is
+//     invisible to anything that compares against the index — the one kind of
+//     edit this must never hide.
 //  2. Only tracked-MODIFIED paths are classified (`isTrackedModifiedStatus`).
 //     `listWikiSubtreeDirty` also reports untracked and deleted paths; an
-//     untracked page has no HEAD diff at all and would pass the test VACUOUSLY,
-//     which both hides a brand-new page's only date signal and pushes it into
-//     `store.ts`'s unexplained-miss counter — a coverage alarm about a bug that
-//     does not exist. Untracked and deleted paths pass through untouched.
-//  3. A changed line counts as metadata only INSIDE the frontmatter block. mimir
+//     untracked page has no HEAD blob at all, and dropping it would both hide a
+//     brand-new page's only date signal and push it into `store.ts`'s
+//     unexplained-miss counter — a coverage alarm about a bug that does not
+//     exist. Untracked and deleted paths pass through untouched.
+//  3. A changed line counts as metadata only INSIDE the frontmatter block, and
+//     the block is the one `parseFrontmatter` reads (`splitFrontmatter`). mimir
 //     documents these very keys, so `prs: [...]` and `sessions: [...]` occur at
-//     column 0 inside body code fences; without the position test, editing one of
-//     those pages would read as a metadata write.
+//     column 0 inside body code fences.
 //
-// Every failure degrades the same way: the page stays dirty. Hiding a real edit
-// is the only outcome worth engineering against — showing a sweep's timestamp is
-// what shipped until now.
+// **The degrade is always "keep the page dirty"** — there is no absent-verdict
+// state: every candidate gets a positive answer or defaults to `edit`. Hiding a
+// real edit is the only outcome worth engineering against; showing a sweep's
+// timestamp is what shipped before this rule existed.
+//
+// (Fix round 1 replaced a `git diff HEAD -U0` TEXT parse, which had five ways to
+// leave a candidate unnamed — a space in the path, a C-quoted header, a
+// binary-detected page, a `diff.noprefix`-style user config, and a deletion whose
+// hunk anchors on the closing fence — and dropped every one of them.)
+
+/**
+ * The frontmatter keys whose ADDITION, REMOVAL or REWRITE is not an edit of the
+ * page: the four provenance keys claude-usage's stamper writes, plus the five
+ * muninn's own mechanical writers do — the series editor (`series`/`series_label`,
+ * one call per member of a join) and the `/plans` board (`priority`, and
+ * `plan_status` + `status_date` together).
+ *
+ * The rule is derived from the KEY SET, not from a claim about its writers: the
+ * gardener's lint-proposals path writes `series:` WITH a `log.md` entry, so "every
+ * writer of these keys takes the no-log path" is false. What makes a key belong
+ * here is that its value says something about the page's PLACE in the wiki rather
+ * than about its content — which is what a reader asking "when was this last
+ * edited" wants left out.
+ *
+ * Lives here because `git-dates.ts` is the only consumer, and is a superset of
+ * {@link PROVENANCE_FRONTMATTER_KEYS} rather than a second list, so a key added
+ * there is covered here by construction.
+ */
+export const METADATA_ONLY_FRONTMATTER_KEYS = [
+  ...PROVENANCE_FRONTMATTER_KEYS,
+  "series",
+  "series_label",
+  "priority",
+  "plan_status",
+  "status_date",
+] as const;
 
 /** A frontmatter line whose KEY is one a mechanical writer owns. Column 0 and a
  *  literal `:`, matching `parseFrontmatter`'s own key shape (which admits no
- *  leading space), so a nested or list-item line is never metadata. */
-const METADATA_LINE_RE = new RegExp(`^(?:${METADATA_ONLY_FRONTMATTER_KEYS.join("|")}):`);
+ *  leading space), so an indented child, a list item and a comment are never
+ *  metadata — and a page whose only change is one of those keeps its mtime. Every
+ *  key is a bare identifier, so none needs escaping into the alternation. */
+const METADATA_FRONTMATTER_LINE_RE = new RegExp(
+  `^(?:${METADATA_ONLY_FRONTMATTER_KEYS.join("|")}):`,
+);
 
-/** A unified-diff hunk header: `@@ -oldStart[,oldCount] +newStart[,newCount] @@`. */
-const HUNK_HEADER_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
-
-/** How many pathspecs ride in one `git diff` argv — the `ADD_CHUNK` rationale in
- *  `src/sync/run.ts`: bound the pathspec against ARG_MAX on a wiki where a sweep
- *  left hundreds of files dirty. The call is bounded by the DIRTY count, never by
- *  the wiki's size, so on every real tree this is one chunk. */
-const DIFF_PATH_CHUNK = 200;
-
-/** How far into a file the closing `---` fence is looked for. A frontmatter block
- *  is a dozen lines; a file whose first 400 carry no closing fence has none. */
-const FRONTMATTER_SCAN_LINES = 400;
+/** What a dirty page's two texts say about each other. See the section comment
+ *  above for the full rule; `edit` is the default and the only one that keeps the
+ *  page's mtime. */
+export type PageChangeVerdict = "identical" | "metadata-only" | "edit";
 
 /**
- * Classify one `git diff HEAD -U0` output: repo-relative path → "every changed
- * line in this file is a frontmatter metadata line". Pure, so the state machine is
- * testable against literal git output.
+ * Compare a page's `HEAD` text with its worktree text. Pure, so the whole rule is
+ * unit-testable without a repo.
  *
- * The parse is a STATE MACHINE over `diff --git` sections rather than a line-shape
- * match, because the two are genuinely ambiguous: a removed body line reading `--`
- * is emitted as `---`, which is also the spelling of a file header. A `---`/`+++`
- * line is a header only BEFORE the section's first `@@`; after it every `+`/`-`
- * line is content.
- *
- * @param frontmatterEnd 1-based line number of a file's closing `---` fence, by
- *   repo-relative path. A file it answers `undefined` for cannot be metadata-only
- *   (it has no frontmatter to have written into).
+ * A page with no frontmatter on EITHER side is an `edit` whenever the two texts
+ * differ at all: there is no block a mechanical writer could have written into, so
+ * every difference is body. (Equal texts answer `identical` before the split runs,
+ * so a frontmatter-less page that did not change is still dropped.)
  */
-export function classifyDiffFiles(
-  stdout: string,
-  frontmatterEnd: (repoRelPath: string) => number | undefined,
-): Map<string, boolean> {
-  const out = new Map<string, boolean>();
-  let file: string | null = null;
-  let ok = true;
-  let inHunk = false;
-  let newStart = 0;
+export function classifyPageChange(headText: string, workText: string): PageChangeVerdict {
+  if (headText === workText) return "identical";
+  const head = splitFrontmatter(headText);
+  const work = splitFrontmatter(workText);
+  if (head.frontmatter === null || work.frontmatter === null) return "edit";
+  if (head.body !== work.body) return "edit";
+  return frontmatterDiffIsMetadataOnly(head.frontmatter, work.frontmatter)
+    ? "metadata-only"
+    : "edit";
+}
 
-  const flush = () => {
-    if (file !== null) out.set(file, ok);
-    file = null;
-    ok = true;
-    inHunk = false;
-  };
-
-  for (const line of stdout.split("\n")) {
-    if (line.startsWith("diff --git ")) {
-      flush();
-      continue;
-    }
-    if (!inHunk) {
-      // Section header. The path comes off `+++ b/<path>`: git separates the two
-      // paths on the `diff --git` line with a space, which a path may contain, so
-      // that line can only be read as a boundary — never as a name.
-      if (line.startsWith("+++ ")) {
-        const p = line.slice(4);
-        file = p.startsWith("b/") ? p.slice(2) : null;
-        // A file with no frontmatter has no metadata line to have been written —
-        // and this is also what keeps `/dev/null` (a creation) out.
-        if (file !== null && frontmatterEnd(file) === undefined) ok = false;
-        continue;
-      }
-      // "Binary files a/x and b/x differ" — no content lines will follow, and
-      // nothing about it is a frontmatter write.
-      if (line.startsWith("Binary files ")) ok = false;
-      if (!line.startsWith("@@ ")) continue;
-    }
-    const hunk = HUNK_HEADER_RE.exec(line);
-    if (hunk) {
-      inHunk = true;
-      newStart = Number(hunk[2]);
-      continue;
-    }
-    if (!inHunk || file === null || !ok) continue;
-    if (line.startsWith("\\")) continue; // "\ No newline at end of file"
-    if (!line.startsWith("+") && !line.startsWith("-")) continue; // -U0 emits no context
-    // The position test reads the NEW side alone. A body deletion's hunk header
-    // still carries its position in the new file, so it is caught there; taking
-    // the OLD side too would refuse a legitimate frontmatter write that removed
-    // lines ABOVE the one it changed, which is a metadata write reported as an
-    // edit.
-    const end = frontmatterEnd(file);
-    if (end === undefined || newStart > end || !METADATA_LINE_RE.test(line.slice(1))) ok = false;
+/**
+ * Is every frontmatter LINE that differs between the two blocks a metadata key
+ * line? A multiset difference rather than a key-by-key parse, deliberately: a
+ * parse answers nothing about the lines it does not model — a value-less block
+ * opener, a list item, a comment, a depth-2 child, an unparseable line — and
+ * "not modelled" would read as "not changed", i.e. as a page nobody edited.
+ */
+function frontmatterDiffIsMetadataOnly(head: string, work: string): boolean {
+  const counts = new Map<string, number>();
+  for (const line of head.split("\n")) counts.set(line, (counts.get(line) ?? 0) + 1);
+  for (const line of work.split("\n")) counts.set(line, (counts.get(line) ?? 0) - 1);
+  for (const [line, n] of counts) {
+    if (n === 0) continue; // present the same number of times on both sides
+    // `\r` is trimmed per line for `parseFrontmatter`'s reason: a CRLF page's
+    // every line carries one, and the key shape is anchored at column 0.
+    const l = line.endsWith("\r") ? line.slice(0, -1) : line;
+    if (!METADATA_FRONTMATTER_LINE_RE.test(l)) return false;
   }
-  flush();
+  return true;
+}
+
+/**
+ * Wall-clock budget for the metadata-only classification — its OWN, not a share of
+ * {@link GIT_DATES_TIMEOUT_MS}. Same number for the same reason (this also runs
+ * inside `buildWikiIndex`), but a separate budget, because the two degrade
+ * differently: the dirty probe losing its race costs the mtime rule for every
+ * page, while this one losing its own costs only the metadata-only DROP — the
+ * unclassified dirty set is returned whole.
+ */
+export const GIT_DATES_CLASSIFY_TIMEOUT_MS = 5_000;
+
+let classifyBudgetMs: number = GIT_DATES_CLASSIFY_TIMEOUT_MS;
+
+/** Test seam: shrink the classification budget so the degrade path can be driven
+ *  against a real slow `git` inside `bun test`'s own 5 s per-test default. `null`
+ *  restores {@link GIT_DATES_CLASSIFY_TIMEOUT_MS}. */
+export function __setClassifyBudgetForTest(ms: number | null): void {
+  classifyBudgetMs = ms ?? GIT_DATES_CLASSIFY_TIMEOUT_MS;
+}
+
+/**
+ * Read `HEAD:<path>` for each repo-relative path through ONE `git cat-file
+ * --batch`, answering the text per path IN INPUT ORDER (`null` where there is no
+ * usable text). `null` for the whole call when the read failed or timed out.
+ *
+ * The paths go in on STDIN, which is what makes this immune to the class of bug it
+ * replaces: a batch line carries spaces, quotes and non-ASCII verbatim, needs no
+ * shell or argv quoting, and no `diff.*` user config can change the spelling an
+ * answer comes back under. Answers are matched by POSITION rather than by the
+ * echoed name for the same reason.
+ */
+async function readHeadTexts(toplevel: string, repoRel: string[]): Promise<(string | null)[] | null> {
+  try {
+    const proc = Bun.spawn(["git", "-C", toplevel, "cat-file", "--batch"], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    // The same kill the module's other spawns take, on this call's own budget —
+    // without it a hung `cat-file` outlives the race that gave up on it.
+    const timer = setTimeout(() => proc.kill(), classifyBudgetMs);
+    try {
+      // stdout is consumed CONCURRENTLY with the write: the request is one line
+      // per candidate and a large dirty set exceeds a pipe buffer, so writing it
+      // all before reading would deadlock.
+      const stdoutPromise = new Response(proc.stdout).arrayBuffer();
+      proc.stdin.write(repoRel.map((p) => `HEAD:${p}\n`).join(""));
+      const [buf, code] = await Promise.all([
+        stdoutPromise,
+        proc.exited,
+        Promise.resolve(proc.stdin.end()),
+      ]);
+      if (code !== 0) return null;
+      return parseCatFileBatch(new Uint8Array(buf), repoRel.length);
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse `git cat-file --batch` output into one entry per request, in order.
+ *
+ * Each answer is either `<oid> <type> <size>\n<size bytes>\n` or `<input>
+ * <reason>\n` (`missing`, `ambiguous`) — the second form echoes the whole input
+ * line, which may itself contain spaces, so it is recognised by NOT being the
+ * three-field content form rather than by matching a reason word. Anything that is
+ * not a `blob` answers `null` and consumes its bytes.
+ */
+function parseCatFileBatch(bytes: Uint8Array, expected: number): (string | null)[] {
+  const out: (string | null)[] = [];
+  const ascii = new TextDecoder("utf-8", { fatal: false });
+  let pos = 0;
+  while (out.length < expected) {
+    const lf = bytes.indexOf(0x0a, pos);
+    if (lf === -1) break;
+    const header = ascii.decode(bytes.subarray(pos, lf));
+    pos = lf + 1;
+    const fields = header.split(" ");
+    const size = fields.length === 3 ? Number(fields[2]) : NaN;
+    if (fields.length !== 3 || !Number.isSafeInteger(size) || size < 0) {
+      out.push(null); // missing / ambiguous: no content follows
+      continue;
+    }
+    const end = pos + size;
+    if (end > bytes.length) break; // truncated output — the rest is unanswered
+    out.push(fields[1] === "blob" ? decodeStrict(bytes.subarray(pos, end)) : null);
+    pos = end + 1; // the LF git writes after every object's content
+  }
+  while (out.length < expected) out.push(null);
   return out;
 }
 
-/** 1-based line number of a page's closing `---` fence, or `undefined` when the
- *  file has no frontmatter block (or cannot be read). Same shape
- *  `parseFrontmatter` accepts: an opening `---` on line 1 and a closing one at
- *  column 0. `\r` is trimmed per line for the same reason it is there. */
-async function frontmatterEndLine(abs: string): Promise<number | undefined> {
-  const text = await Bun.file(abs)
-    .text()
-    .catch(() => null);
-  if (text === null) return undefined;
-  const lines = text.split("\n");
-  if (lines[0]?.trimEnd() !== "---") return undefined;
-  const scan = Math.min(lines.length, FRONTMATTER_SCAN_LINES);
-  for (let i = 1; i < scan; i++) if (lines[i]?.trimEnd() === "---") return i + 1;
-  return undefined;
+/** Bytes → text, or `null` for anything a line comparison must not be run over: a
+ *  NUL (what makes git call a page binary) or invalid UTF-8, where a lossy decode
+ *  would map two different byte sequences onto one string of U+FFFD. */
+function decodeStrict(bytes: Uint8Array): string | null {
+  if (bytes.includes(0)) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
 }
 
-/** Wiki pages are the only files that carry frontmatter; an `.html` attachment or
- *  a stray `.json` is never a metadata write and never worth a diff. */
-const isMarkdownPage = (rel: string) => rel.endsWith(".md") || rel.endsWith(".mdx");
+/** The worktree half, through the same strict decode. Unreadable ⇒ `null` ⇒ the
+ *  page keeps its mtime. */
+async function readWorktreeText(abs: string): Promise<string | null> {
+  try {
+    return decodeStrict(new Uint8Array(await Bun.file(abs).arrayBuffer()));
+  } catch {
+    return null;
+  }
+}
+
+/** The wiki-relative paths whose only change is metadata (or nothing at all). An
+ *  empty set is the honest answer for "nothing to drop" AND for "nothing could be
+ *  read" — both keep every page dirty. */
+async function classifyCandidates(
+  toplevel: string,
+  canonicalRoot: string,
+  relPrefix: string,
+  candidates: string[],
+): Promise<Set<string>> {
+  // A newline in a path cannot be carried by a `cat-file --batch` line, and a path
+  // with no spelling has no verdict — so it keeps its mtime.
+  const usable = candidates.filter((p) => !p.includes("\n"));
+  const [headTexts, workTexts] = await Promise.all([
+    readHeadTexts(toplevel, usable.map((p) => relPrefix + p)),
+    Promise.all(usable.map((p) => readWorktreeText(path.join(canonicalRoot, p)))),
+  ]);
+  const drop = new Set<string>();
+  if (headTexts === null) return drop; // the whole read failed — keep every page
+  for (let i = 0; i < usable.length; i++) {
+    const head = headTexts[i];
+    const work = workTexts[i];
+    // No usable text on either side ⇒ `edit`, the default. `undefined` is the
+    // same answer as `null` here: a short batch answer is a read that did not
+    // happen, not a page that did not change.
+    if (typeof head !== "string" || typeof work !== "string") continue;
+    if (classifyPageChange(head, work) !== "edit") drop.add(usable[i]!);
+  }
+  return drop;
+}
 
 /**
- * The dirty list MINUS the pages whose only change is frontmatter metadata. Never
- * throws; every degrade (an unreadable file, a failed diff, a path the diff did not
- * name in a spelling we sent) keeps the page dirty, i.e. today's behaviour.
+ * The dirty list MINUS the pages whose only change is frontmatter metadata (or
+ * nothing at all). Never throws, and every degrade — a failed read, a thrown
+ * error, its own budget expiring — answers the UNCLASSIFIED dirty set, i.e. the
+ * behaviour of a muninn that never had this rule.
  *
- * One bounded `git diff` over the tracked-modified subset — bounded by the dirty
- * count, not by wiki size — through this module's own `git()`, so it carries the
- * same `GIT_DATES_TIMEOUT_MS` budget as the log walk and the dirty probe and
- * answers `null` rather than throwing on a timeout.
+ * Bounded by {@link GIT_DATES_CLASSIFY_TIMEOUT_MS}, its own budget: it runs inside
+ * `buildWikiIndex`, and a pathological repo must degrade the drop rather than
+ * stall every /wiki request behind a cold index build.
  */
 async function dropMetadataOnlyEdits(
+  root: string,
   toplevel: string,
   canonicalRoot: string,
   relPrefix: string,
   listed: { dirty: string[]; trackedModified: string[] },
 ): Promise<string[]> {
-  const candidates = listed.trackedModified.filter(isMarkdownPage);
+  const candidates = listed.trackedModified.filter(isMarkdownWikiPath);
   if (candidates.length === 0) return listed.dirty;
 
-  // repo-relative (what the diff emits and what the pathspec takes) → wiki-relative
-  // (what `dirty` is keyed by), plus each file's frontmatter extent.
-  const wikiRelOf = new Map<string, string>();
-  const ends = new Map<string, number>();
-  for (const wikiRel of candidates) {
-    const end = await frontmatterEndLine(path.join(canonicalRoot, wikiRel));
-    if (end === undefined) continue;
-    const repoRel = relPrefix + wikiRel;
-    wikiRelOf.set(repoRel, wikiRel);
-    ends.set(repoRel, end);
+  const drop = await Promise.race([
+    classifyCandidates(toplevel, canonicalRoot, relPrefix, candidates).catch(() => null),
+    new Promise<null>((resolve) =>
+      setTimeout(() => resolve(null), classifyBudgetMs).unref?.(),
+    ),
+  ]);
+  if (drop === null) {
+    log.debug(
+      "wiki {root}: metadata-only classification exceeded its budget — every dirty page keeps its mtime",
+      { root },
+    );
+    return listed.dirty;
   }
-  if (wikiRelOf.size === 0) return listed.dirty;
-
-  const drop = new Set<string>();
-  const paths = [...wikiRelOf.keys()];
-  for (let i = 0; i < paths.length; i += DIFF_PATH_CHUNK) {
-    const chunk = paths.slice(i, i + DIFF_PATH_CHUNK);
-    // `--no-renames` so a pair this pathspec happens to catch is read as its own
-    // add and delete rather than as a rename with no content lines at all.
-    const stdout = await git(toplevel, [
-      "diff",
-      "HEAD",
-      "-U0",
-      "--no-renames",
-      "--no-color",
-      "--",
-      ...chunk,
-    ]);
-    if (stdout === null) return listed.dirty; // failed or timed out — keep every page dirty
-    const verdicts = classifyDiffFiles(stdout, (p) => ends.get(p));
-    for (const repoRel of chunk) {
-      // ABSENT from the diff is the third verdict and it means "identical to
-      // HEAD": `git status` reports a stat-dirty file (a touch, an atomic rewrite
-      // with the same bytes) as modified, and such a page has no edit to hide.
-      if (verdicts.get(repoRel) !== false) drop.add(wikiRelOf.get(repoRel)!);
-    }
-  }
-  if (drop.size > 0) {
-    log.debug("wiki {root}: {n} dirty page(s) are metadata-only — mtime rule dropped", {
-      root: canonicalRoot,
-      n: drop.size,
-    });
-  }
+  if (drop.size === 0) return listed.dirty;
+  log.debug("wiki {root}: {n} dirty page(s) are metadata-only — mtime rule dropped", {
+    root,
+    n: drop.size,
+  });
   return listed.dirty.filter((p) => !drop.has(p));
 }
 
@@ -557,17 +671,23 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   // would bound only half of what this function spawns, and a `git status` stat-walk
   // over a large or network-mounted worktree could park every /wiki request behind a
   // cold index build. Losing the race costs only the mtime rule for dirty pages.
+  //
+  // The metadata-only classification hangs off the RESULT rather than sitting
+  // inside the race: it carries its own budget (see `dropMetadataOnlyEdits`) whose
+  // loser is the unclassified dirty set. Inside this race its loser would be `[]`
+  // — a slow classification silently deleting the mtime rule for the untracked and
+  // deleted pages it never looks at.
   const dirtyPromise = Promise.race([
-    listWikiSubtreeDirty(toplevel, root).then((d) =>
-      dropMetadataOnlyEdits(toplevel, canonicalRoot, prefix, d),
-    ),
-    new Promise<string[]>((resolve) =>
+    listWikiSubtreeDirty(toplevel, root),
+    new Promise<Awaited<ReturnType<typeof listWikiSubtreeDirty>>>((resolve) =>
       setTimeout(() => {
         log.debug("wiki {root}: dirty probe exceeded its budget — mtime rule disabled", { root });
-        resolve([]);
+        resolve({ dirty: [], deletions: [], trackedModified: [] });
       }, GIT_DATES_TIMEOUT_MS).unref?.(),
     ),
-  ]).catch(() => [] as string[]);
+  ])
+    .then((listed) => dropMetadataOnlyEdits(root, toplevel, canonicalRoot, prefix, listed))
+    .catch(() => [] as string[]);
 
   const stdout = await git(toplevel, args);
   if (stdout === null) {
