@@ -20,6 +20,10 @@
  *  - `wsshut` — 2 of 8 covered (25%), gate shut.
  *  - `wsnone` — the ledger knows nothing: the pre-feature ranking, which the
  *    shut wiki must reproduce row for row.
+ *  - `wslow` — 2 of 8 covered (25%), but its own `.wiki-reader.json` declares
+ *    `workedGate: 20`, so it opens. Its newest ledger row is 1.5 days old, so
+ *    alpha's 12h-old update is past the ledger's HORIZON and must not be
+ *    demoted to its 8-day-old worked date.
  *
  * No model calls and no writes.
  *
@@ -48,6 +52,7 @@ const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 const OPEN_WIKI = "wsopen";
 const SHUT_WIKI = "wsshut";
 const NONE_WIKI = "wsnone";
+const LOW_WIKI = "wslow";
 
 const DAY = 86_400_000;
 const NOW = Date.now();
@@ -82,6 +87,7 @@ const WORKED: Record<string, Record<string, number>> = {
   // a leaking gate would lift them to the top here. 2/8.
   [SHUT_WIKI]: { "notes/charlie.md": 0.25, "facet/foxtrot.md": 0.75 },
   [NONE_WIKI]: {},
+  [LOW_WIKI]: { "notes/alpha.md": 8, "notes/charlie.md": 1.5 },
 };
 
 /** mtime order: the ranking with nothing substituted. */
@@ -115,16 +121,35 @@ const day = (ago: number) => {
 /** Far enough back that no row is placed by its creation. */
 const CREATED = day(40);
 
+/** `wslow`: alpha kept on its mtime (past the horizon), charlie promoted to
+ *  its worked 1.5 days, everything else on its mtime. */
+const LOW_ORDER = [
+  "notes/alpha.md",
+  "notes/bravo.md",
+  "notes/charlie.md",
+  "notes/delta.md",
+  "facet/golf.md",
+  "notes/echo.md",
+  "facet/hotel.md",
+  "facet/foxtrot.md",
+];
+
 /**
- * `agePenalty`/`hubPenalty`/`planBoost` off: a temp file's birthtime is not
- * portable (Linux keeps it through `utimes`, macOS can pull it to the mtime),
- * and the age discount would scale scores by a factor the runner picks.
- * `rows: 8` so truncation never does the cutting. `workedGate` is left at its
- * default on purpose — the gate under test is the shipped one.
+ * The three penalties off so every score is 0.7 × recency, and the orders
+ * above read straight off the day offsets. `rows: 8` so truncation never does
+ * the cutting. Only `wslow` declares a `workedGate`; the others run the
+ * shipped default.
  */
-const READER_CONFIG = JSON.stringify({
-  activity: { agePenalty: 0, hubPenalty: 0, planBoost: 0, rows: 8 },
-});
+const readerConfig = (wiki: string): string =>
+  JSON.stringify({
+    activity: {
+      agePenalty: 0,
+      hubPenalty: 0,
+      planBoost: 0,
+      rows: 8,
+      ...(wiki === LOW_WIKI ? { workedGate: 20 } : {}),
+    },
+  });
 
 const roots: Record<string, string> = {};
 let server: ChildProcess | undefined;
@@ -154,7 +179,7 @@ function startLedger(): Promise<Server> {
 async function makeRoot(name: string): Promise<void> {
   const root = await mkdtemp(path.join(tmpdir(), `muninn-e2e-actworked-${name}-`));
   roots[name] = root;
-  await writeFile(path.join(root, ".wiki-reader.json"), READER_CONFIG, "utf8");
+  await writeFile(path.join(root, ".wiki-reader.json"), readerConfig(name), "utf8");
   for (const { rel, updated } of PAGES) {
     const abs = path.join(root, rel);
     await mkdir(path.dirname(abs), { recursive: true });
@@ -196,7 +221,7 @@ async function openReader(page: Page, wiki: string, rows = PAGES.length): Promis
 }
 
 test.beforeAll(async () => {
-  for (const w of [OPEN_WIKI, SHUT_WIKI, NONE_WIKI]) await makeRoot(w);
+  for (const w of [OPEN_WIKI, SHUT_WIKI, NONE_WIKI, LOW_WIKI]) await makeRoot(w);
   ledger = await startLedger();
 
   server = spawn("bun", ["run", "src/index.ts"], {
@@ -231,14 +256,14 @@ test.beforeAll(async () => {
   const warm = Date.now() + 20_000;
   for (;;) {
     const matched = await Promise.all(
-      [OPEN_WIKI, SHUT_WIKI].map(async (w) => {
+      [OPEN_WIKI, SHUT_WIKI, LOW_WIKI].map(async (w) => {
         const body = (await (await fetch(`${BASE}/api/wiki/pages?wiki=${w}&refresh=1`)).json()) as {
           workedCoverage?: { matched: number };
         };
         return body.workedCoverage?.matched ?? 0;
       }),
     );
-    if (matched[0] === 5 && matched[1] === 2) break;
+    if (matched[0] === 5 && matched[1] === 2 && matched[2] === 2) break;
     if (Date.now() > warm) throw new Error("the worked ledger memo never warmed: " + matched.join("/"));
     await new Promise((r) => setTimeout(r, 300));
   }
@@ -268,8 +293,9 @@ test.describe("Wiki rail: worked-on substitution in Activity", () => {
       expect(byRel[rel]!.why, rel).toMatch(/^changed /);
     }
 
-    // DEMOTE: alpha's mtime is 12h old, its last session 8 days back.
-    expect(byRel["notes/alpha.md"]!.why).toMatch(/^worked on 8d ago, /);
+    // DEMOTE: alpha's mtime is 12h old, its last session 8 days back, and the
+    // hover names the update it set aside.
+    expect(byRel["notes/alpha.md"]!.why).toMatch(/^worked on 8d ago, .*; update 12h ago not a session write$/);
     expect(byRel["notes/alpha.md"]!.meta).toBe("8d");
     // PROMOTE: charlie's mtime is 6 days old, its last session 6 hours back —
     // the date cell and its hover name the worked day, not the mtime.
@@ -306,5 +332,17 @@ test.describe("Wiki rail: worked-on substitution in Activity", () => {
     const rows = await activitySnapshot(page);
     expect(rows.map((r) => r.rel)).toEqual(["facet/foxtrot.md", "facet/golf.md", "facet/hotel.md"]);
     expect(rows[0]!.why).toMatch(/^worked on /);
+  });
+
+  test("a wiki's own workedGate opens it, and the ledger's horizon bounds a demotion", async ({ page }) => {
+    await openReader(page, LOW_WIKI);
+    const rows = await activitySnapshot(page);
+    expect(rows.map((r) => r.rel)).toEqual(LOW_ORDER);
+    const byRel = Object.fromEntries(rows.map((r) => [r.rel, r]));
+    // Open at 25% only because the wiki asked for 20.
+    expect(byRel["notes/charlie.md"]!.why).toMatch(/^worked on 2d ago, /);
+    // The ledger's newest row is 1.5 days old; an update 12h ago is past what
+    // it has seen, so it is not evidence against the update.
+    expect(byRel["notes/alpha.md"]!.why).toMatch(/^changed 12h ago, /);
   });
 });

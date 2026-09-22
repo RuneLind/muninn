@@ -544,7 +544,7 @@ describe("the index fold", () => {
       const two = index.pages.find((p) => p.relPath === "two.md");
       expect(one?.workedMs).toBe(1_700_000_000_000);
       expect(two?.workedMs).toBeUndefined();
-      expect(index.workedCoverage).toEqual({ matched: 1, total: 2, returned: 2 });
+      expect(index.workedCoverage).toEqual({ matched: 1, total: 2, returned: 2, horizonMs: 1_700_000_000_000 });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -563,8 +563,38 @@ describe("the index fold", () => {
       await writeFile(path.join(root, "b", "x.html"), "<title>X</title><p>body</p>");
       await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "a/x.md", w: 1_700_000_000_000 }] } }));
       const index = await buildWikiIndex(root);
-      expect(index.workedCoverage).toEqual({ matched: 1, total: index.pages.length, returned: 1 });
+      expect(index.workedCoverage).toEqual({
+        matched: 1,
+        total: index.pages.length,
+        returned: 1,
+        horizonMs: 1_700_000_000_000,
+      });
       expect(index.shadowed?.length).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the HORIZON is the newest row upstream sent, matched or not", async () => {
+    const { buildWikiIndex } = await import("./store.ts");
+    const root = await mkdtemp(path.join(tmpdir(), "worked-index-horizon-"));
+    try {
+      await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
+      await refreshWorkedLedger(
+        root,
+        deps({
+          [root]: {
+            pages: [
+              { p: "a.md", w: 1_600_000_000_000 },
+              // Renamed since: no page matches it, but the ledger DID see a
+              // session this recent under the root.
+              { p: "renamed.md", w: 1_700_000_000_000 },
+            ],
+          },
+        }),
+      );
+      const index = await buildWikiIndex(root);
+      expect(index.workedCoverage?.horizonMs).toBe(1_700_000_000_000);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

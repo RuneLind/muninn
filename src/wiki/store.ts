@@ -813,8 +813,12 @@ export interface WikiIndex {
    * shape (93% of its pages carry a write row, every one of them a bulk pass).
    * Offering the mode there is offering a relabelled "Recently updated", and this
    * is the ONE place that figure is stated.
+   *
+   * `horizonMs` is the newest `w` among ALL returned rows, matched or not — how
+   * far the ledger has seen. Activity may demote a page to an older worked date
+   * only when its update stamp is at or before it. Absent on a zero-row answer.
    */
-  workedCoverage?: { matched: number; total: number; returned: number };
+  workedCoverage?: { matched: number; total: number; returned: number; horizonMs?: number };
 }
 
 /** A page the same-stem precedence rule dropped, and the page that displaced it. */
@@ -3341,7 +3345,14 @@ export async function buildWikiIndex(
         matched++;
       }
     }
-    workedCoverage = { matched, total: pages.length, returned: workedMemo.returned };
+    let horizonMs = 0;
+    for (const w of workedMemo.pages.values()) if (w > horizonMs) horizonMs = w;
+    workedCoverage = {
+      matched,
+      total: pages.length,
+      returned: workedMemo.returned,
+      ...(horizonMs > 0 ? { horizonMs } : {}),
+    };
     if (workedMatchWarnDue(root, matched, workedMemo.returned)) {
       // Names the base URL for the reason every other claude-usage message does:
       // the operator's first question about a degraded axis is which service, and

@@ -56,8 +56,9 @@ export interface WikiPagesResponse {
    *  or ABSENT when no ledger answer has landed for this root — which is also
    *  what an older server sends. The two are read differently: `matched: 0` is a
    *  verdict (this corpus has no authored dates) and hides the Worked-on sort
-   *  option, while absent means "nothing is known yet" and changes nothing. */
-  workedCoverage?: { matched: number; total: number; returned: number };
+   *  option, while absent means "nothing is known yet" and changes nothing.
+   *  `horizonMs` is how far the ledger has seen (see `WikiIndex`). */
+  workedCoverage?: { matched: number; total: number; returned: number; horizonMs?: number };
   error?: string;
 }
 

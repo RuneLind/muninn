@@ -20,7 +20,7 @@ import {
   type ActivityWeights,
   type WorkedGate,
 } from "./wiki-activity-rank.ts";
-import { localDay, type WikiListing } from "./wiki-filter.ts";
+import { isUsableWorkedMs, localDay, workedSignal, type WikiListing } from "./wiki-filter.ts";
 
 const NOW = Date.UTC(2026, 8, 12, 12, 0, 0);
 const DAY = 86_400_000;
@@ -656,8 +656,8 @@ describe("parseActivityWeights", () => {
 
 /** A gate verdict by hand, for cases about what an open or closed gate DOES
  *  rather than about how one is measured. */
-const OPEN: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1 };
-const CLOSED: WorkedGate = { open: false, candidates: 1, covered: 0, coverage: 0 };
+const OPEN: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1, horizonMs: NOW };
+const CLOSED: WorkedGate = { open: false, candidates: 1, covered: 0, coverage: 0, horizonMs: NOW };
 
 describe("rankActivity — worked-on substitution", () => {
   test("a worked date OLDER than the update stamp demotes the page", () => {
@@ -771,7 +771,10 @@ describe("rankActivity — a closed gate is the pre-gate ranking, byte for byte"
 
   test("no gate, a null gate, and a closed gate all reproduce the baseline", () => {
     for (const gate of [undefined, null, CLOSED]) {
-      expect(serialise(rankActivity(pages, wide, NOW, gate))).toBe(JSON.stringify(BASELINE));
+      const rows = rankActivity(pages, wide, NOW, gate);
+      expect(serialise(rows)).toBe(JSON.stringify(BASELINE));
+      // `JSON.stringify` drops a `worked: undefined` key; `in` does not.
+      expect(rows.every((r) => !("worked" in r))).toBe(true);
     }
   });
 
@@ -809,6 +812,16 @@ describe("workedGateFor — the coverage gate", () => {
     expect(at(60, 5, 3)).toEqual({ open: true, candidates: 5, covered: 3, coverage: 0.6 });
     expect(at(61, 5, 3).open).toBe(false);
     expect(at(60, 5, 2).open).toBe(false);
+  });
+
+  test("an .html candidate is not in the denominator — the ledger never covers one", () => {
+    const pages = [...listing(2, 1), page({ relPath: "x.html", createdDaysAgo: 40, updatedDaysAgo: 1 })];
+    expect(workedGateFor(pages, wide, NOW)).toMatchObject({ candidates: 2, covered: 1, coverage: 0.5 });
+  });
+
+  test("the horizon passed in rides out on the verdict", () => {
+    expect(workedGateFor(listing(2, 1), wide, NOW, ago(3)).horizonMs).toBe(ago(3));
+    expect(workedGateFor(listing(2, 1), wide, NOW).horizonMs).toBeUndefined();
   });
 
   test("0 opens wherever anything could substitute; 100 needs every candidate covered", () => {
@@ -861,7 +874,8 @@ describe("workedGateFor — the coverage gate", () => {
     // the gate on its own; the wiki as a whole is at 75%.
     const facet = listing(3, 1).map((p) => ({ ...p, relPath: "facet/" + p.relPath }));
     const rest = listing(9, 8);
-    const gate = workedGateFor([...facet, ...rest], wide, NOW);
+    // The ledger has seen up to now, so the 2-day worked dates may demote.
+    const gate = workedGateFor([...facet, ...rest], wide, NOW, NOW);
     expect(gate.open).toBe(true);
     expect(workedGateFor(facet, wide, NOW).open).toBe(false);
     const rows = rankActivity(facet, wide, NOW, gate);
@@ -885,9 +899,110 @@ describe("parseActivityWeights — workedGate", () => {
       warnings: [{ key: "activity.workedGate", reason: "is outside 0–100 — ignoring it" }],
     });
     expect(parseActivityWeights({ workedGate: -1 }).weights.workedGate).toBe(60);
+    // A fraction is refused, not rounded: the gate compares integers.
+    expect(parseActivityWeights({ workedGate: 64.4 })).toEqual({
+      weights: DEFAULT_ACTIVITY_WEIGHTS,
+      warnings: [{ key: "activity.workedGate", reason: "is not a whole number — ignoring it" }],
+    });
     expect(parseActivityWeights({ workedGate: "60" })).toEqual({
       weights: DEFAULT_ACTIVITY_WEIGHTS,
       warnings: [{ key: "activity.workedGate", reason: "is not a finite number — ignoring it" }],
     });
+  });
+});
+
+describe("rankActivity — the ledger's freshness horizon", () => {
+  // The sweep shape again: git 12h ago, the last session 5 days ago.
+  const swept = page({ relPath: "s.md", createdDaysAgo: 40, updatedDaysAgo: 0.5, workedDaysAgo: 5 });
+  const gateAt = (horizonDaysAgo: number | undefined): WorkedGate => ({
+    ...OPEN,
+    horizonMs: horizonDaysAgo === undefined ? undefined : ago(horizonDaysAgo),
+  });
+  const closed = () => rankActivity([swept], wide, NOW, CLOSED);
+
+  test("an update AFTER the horizon is not demoted — the ledger has not seen that far", () => {
+    expect(rankActivity([swept], wide, NOW, gateAt(3))).toEqual(closed());
+  });
+
+  test("an update at or before the horizon is demoted", () => {
+    for (const h of [0.5, 0.25]) {
+      expect(rankActivity([swept], wide, NOW, gateAt(h))[0]!.why).toStartWith("worked on 5d ago, ");
+    }
+  });
+
+  test("no horizon ⇒ no demotion", () => {
+    expect(rankActivity([swept], wide, NOW, gateAt(undefined))).toEqual(closed());
+  });
+
+  test("promotion does not need the horizon", () => {
+    const stale = page({ relPath: "p.md", createdDaysAgo: 40, updatedDaysAgo: 6, workedDaysAgo: 0.5 });
+    for (const h of [undefined, 3]) {
+      expect(rankActivity([stale], wide, NOW, gateAt(h))[0]!.why).toStartWith("worked on 12h ago, ");
+    }
+  });
+});
+
+describe("rankActivity — an `added`-floor page and the session that brought it", () => {
+  // Moved into place 3 days ago (git's floor, no `--follow`) with an older
+  // authored `created:`; the only session write is the one that moved it.
+  const createdFm = new Date(ago(21)).toISOString().slice(0, 10);
+  const moved = (workedDaysAgo: number): WikiListing =>
+    page({ relPath: "archive/moved.md", createdFm, createdDaysAgo: 3, updatedDaysAgo: null, workedDaysAgo });
+
+  test("a worked date at the floor mints no change — the arrival is not an edit", () => {
+    expect(rankActivity([moved(3)], wide, NOW, OPEN)).toEqual(rankActivity([moved(3)], wide, NOW, CLOSED));
+    expect(rankActivity([moved(3)], wide, NOW, OPEN)[0]!.kind).toBe("new");
+  });
+
+  test("a worked date more than a day past the floor still promotes", () => {
+    const row = rankActivity([moved(1)], wide, NOW, OPEN)[0]!;
+    expect(row.kind).toBe("changed");
+    expect(row.worked).toBe(true);
+  });
+});
+
+describe("rankActivity — the discarded update is named", () => {
+  test("a demoted change says which update it set aside", () => {
+    const p = page({ relPath: "a.md", createdDaysAgo: 40, updatedDaysAgo: 0.5, workedDaysAgo: 5 });
+    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toEndWith("; update 12h ago not a session write");
+  });
+
+  test("…and so does a change the substitution turned into a creation", () => {
+    const p = page({ relPath: "plans/p.mdx", createdDaysAgo: 5, updatedDaysAgo: 1, workedDaysAgo: 4.9 });
+    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toMatch(
+      /^created 5d ago → [0-9.]+; update 1d ago not a session write$/,
+    );
+  });
+
+  test("an update whose loss changes nothing is not mentioned", () => {
+    // The update is within a day of creation, so it was never a change: the row
+    // is the same `new` row with or without the substitution.
+    const p = page({ relPath: "q.md", createdDaysAgo: 5, updatedDaysAgo: 4.5, workedDaysAgo: 4.9 });
+    expect(rankActivity([p], wide, NOW, OPEN)).toEqual(rankActivity([p], wide, NOW, CLOSED));
+  });
+
+  test("a promotion discards nothing and says nothing", () => {
+    const p = page({ relPath: "p.md", createdDaysAgo: 40, updatedDaysAgo: 6, workedDaysAgo: 0.5 });
+    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).not.toContain("not a session write");
+  });
+});
+
+describe("rankActivity — a worked stamp the ranking may not use", () => {
+  test("the shared predicate: a positive instant the future guard accepts", () => {
+    expect(isUsableWorkedMs(ago(1), NOW)).toBe(true);
+    for (const ms of [0, -5, Number.NaN, Number.POSITIVE_INFINITY, ago(-5), "1", undefined]) {
+      expect(isUsableWorkedMs(ms, NOW)).toBe(false);
+    }
+    // …and it is `workedSignal`'s rung: a negative stamp falls back to the update.
+    const p = { ...page({ relPath: "n.md", createdDaysAgo: 40, updatedDaysAgo: 2 }), workedMs: -5 };
+    expect(workedSignal(p, NOW).kind).toBe("updated");
+  });
+
+  test("zero or negative is ignored, in the gate and in the rank", () => {
+    for (const workedMs of [0, -5]) {
+      const p = { ...page({ relPath: "z.md", createdDaysAgo: 40, updatedDaysAgo: 0.5 }), workedMs };
+      expect(workedGateFor([p], wide, NOW).covered).toBe(0);
+      expect(rankActivity([p], wide, NOW, OPEN)).toEqual(rankActivity([p], wide, NOW, CLOSED));
+    }
   });
 });

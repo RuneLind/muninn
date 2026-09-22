@@ -40,18 +40,19 @@
 
 import {
   displayTitleOf,
-  isImplausibleFutureDate,
   isMetaPage,
+  isUsableWorkedMs,
   localDay,
   pageDateSignal,
   type WikiListing,
 } from "./wiki-filter.ts";
 
 /**
- * The ranking's knobs. The five percent knobs are 0–100 with the prototype
+ * The ranking's knobs. The four percent knobs are 0–100 with the prototype
  * slider's semantics (0 = the factor is off, 100 = the reference strength named
  * in {@link rankActivity}); the two half-lives are days; `rows` is how many rows
- * the section renders.
+ * the section renders; `workedGate` is a whole-number coverage percentage, not
+ * a factor.
  */
 export interface ActivityWeights {
   /** Rows the Activity section renders, 1–20. */
@@ -77,9 +78,9 @@ export interface ActivityWeights {
    */
   changedWeight: number;
   /**
-   * The share of the ranked candidates (0–100) that must carry a worked-on date
-   * before a covered page's change term decays on that date instead of its
-   * update stamp. Not a weight: 0 substitutes wherever a page is covered, 100
+   * The share of the ranked candidates (a whole number, 0–100) that must carry
+   * a worked-on date before a covered page's change term decays on that date
+   * instead of its update stamp. Not a weight: 0 substitutes wherever a page is covered, 100
    * only when every candidate is. See {@link workedGateFor}.
    */
   workedGate: number;
@@ -207,6 +208,12 @@ export function parseActivityWeights(raw: unknown): {
     if (v === null) continue;
     if (v < 0 || v > 100) {
       warn(`activity.${key}`, "is outside 0–100 — ignoring it");
+      continue;
+    }
+    // The gate compares integers (see `workedGateFor`); a fraction is refused
+    // rather than rounded, since either rounding moves the boundary.
+    if (key === "workedGate" && !Number.isInteger(v)) {
+      warn(`activity.${key}`, "is not a whole number — ignoring it");
       continue;
     }
     weights[key] = v;
@@ -358,10 +365,11 @@ const HUB_PENALTY_REFERENCE_BACKLINKS = 5;
  * Whether this wiki's Activity ranking may substitute `workedMs` for the update
  * stamp, and the numbers behind the verdict.
  *
- * The denominator is the RANKED CANDIDATE SET — non-meta pages clearing
- * {@link ACTIVITY_MIN_SCORE} with substitution off — not
- * `WikiIndex.workedCoverage`, which counts the `.html` pages the upstream ledger
- * query never returns.
+ * The denominator is the RANKED CANDIDATE SET — non-meta `.md`/`.mdx` pages
+ * clearing {@link ACTIVITY_MIN_SCORE} with substitution off. `.html` pages are
+ * left out because the upstream ledger query returns only those two extensions,
+ * so one could never be covered — and so is `WikiIndex.workedCoverage`, whose
+ * denominator includes them.
  */
 export interface WorkedGate {
   /** `covered / candidates ≥ workedGate / 100`; with no candidates, only a
@@ -372,21 +380,28 @@ export interface WorkedGate {
   covered: number;
   /** `covered / candidates`, 0 when there are no candidates. */
   coverage: number;
+  /** The ledger's horizon (`workedCoverage.horizonMs`): the newest session
+   *  stamp it reported for this root. A covered page is demoted to an OLDER
+   *  worked date only when its update stamp is at or before this; absent ⇒
+   *  never. It does not affect `open`. */
+  horizonMs?: number;
 }
 
 /**
  * A page's worked stamp, or 0 when it has none this ranking may use.
  *
- * ⚠️ Reads `page.workedMs` DIRECTLY. `workedSignal` falls back to the update
- * signal, so through it every uncovered page would "substitute" its own update
- * stamp and every wiki would measure fully covered.
+ * ⚠️ Reads `page.workedMs` DIRECTLY, through `workedSignal`'s predicate but not
+ * `workedSignal` itself: that falls back to the update signal, so every
+ * uncovered page would "substitute" its own update stamp and every wiki would
+ * measure fully covered.
  */
 function usableWorkedMs(page: WikiListing, now: number): number {
-  const ms = page.workedMs;
-  return typeof ms === "number" && Number.isFinite(ms) && ms > 0 && !isImplausibleFutureDate(ms, now)
-    ? ms
-    : 0;
+  return isUsableWorkedMs(page.workedMs, now) ? page.workedMs : 0;
 }
+
+/** The extensions the upstream ledger query returns (`sessionPagesUnderRoot`,
+ *  case-sensitive there too). */
+const LEDGER_PAGE_EXT = /\.mdx?$/;
 
 /**
  * Measure the worked gate for ONE listing — once per payload, over the FULL page
@@ -401,12 +416,13 @@ export function workedGateFor(
   pages: readonly WikiListing[],
   weights: ActivityWeights,
   now: number,
+  horizonMs?: number,
 ): WorkedGate {
   let candidates = 0;
   let covered = 0;
   for (const page of pages) {
-    if (isMetaPage(page)) continue;
-    if (scorePage(page, weights, now, false).score < ACTIVITY_MIN_SCORE) continue;
+    if (isMetaPage(page) || !LEDGER_PAGE_EXT.test(page.relPath)) continue;
+    if (scorePage(page, weights, now, null).score < ACTIVITY_MIN_SCORE) continue;
     candidates++;
     if (usableWorkedMs(page, now) > 0) covered++;
   }
@@ -416,6 +432,7 @@ export function workedGateFor(
     candidates,
     covered,
     coverage: candidates > 0 ? covered / candidates : 0,
+    ...(horizonMs === undefined ? {} : { horizonMs }),
   };
 }
 
@@ -444,7 +461,7 @@ export function rankActivity(
   now: number,
   gate?: WorkedGate | null,
 ): ActivityRow[] {
-  const substitute = gate?.open === true;
+  const substitute = gate?.open === true ? gate : null;
   const rows: ActivityRow[] = [];
   for (const page of pages) {
     if (isMetaPage(page)) continue;
@@ -464,11 +481,22 @@ export function rankActivity(
  * change. An `if (both absent) return null` line sat here and was untestable by
  * construction, which is its own kind of wrong.
  *
- * `substitute` puts a covered page's `workedMs` in place of the update stamp for
- * the change term — older or newer — and counts it as an edit whatever the
- * update signal's kind: a ledger write IS a known edit event.
+ * `substitute` (an open gate, or null) puts a covered page's `workedMs` in place
+ * of the update stamp for the change term and counts it as an edit whatever the
+ * update signal's kind: a ledger write IS a known edit event. Two limits, both
+ * falling back to the unsubstituted score:
+ *  - an OLDER worked date replaces the update only when the update is at or
+ *    before the gate's `horizonMs` — past it, the ledger has not seen that far;
+ *  - on an `added`-floor page (whose update stamp is its git arrival) the worked
+ *    date must land more than {@link CHANGE_MIN_DAYS_AFTER_CREATION} after the
+ *    floor, or it is the session that brought the page there, not an edit.
  */
-function scorePage(page: WikiListing, w: ActivityWeights, now: number, substitute: boolean): ActivityRow {
+function scorePage(
+  page: WikiListing,
+  w: ActivityWeights,
+  now: number,
+  substitute: Pick<WorkedGate, "horizonMs"> | null,
+): ActivityRow {
   // ONE derivation per signal, because each carries three facts this function
   // needs: the stamp, the label the `why` sentence must quote, and (for the update
   // signal) the kind the `isEdit` gate reads.
@@ -476,9 +504,17 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number, substitut
   const updated = pageDateSignal(page, "updated", now);
   const createdMs = created?.ms ?? 0;
   const workedMs = substitute ? usableWorkedMs(page, now) : 0;
-  const worked = workedMs > 0;
+  const updMs = updated?.ms ?? 0;
+  const worked =
+    workedMs > 0 &&
+    (updated?.kind === "added"
+      ? workedMs - updMs > CHANGE_MIN_DAYS_AFTER_CREATION * MS_PER_DAY
+      : workedMs >= updMs || (substitute?.horizonMs !== undefined && updMs <= substitute.horizonMs));
+  // A demotion set an update aside (named in the `why` below, when it moved
+  // the row, so a page git changed yesterday that now reads `+ 6d` says why).
+  const setAside = worked && updated?.kind === "updated" && updMs > workedMs;
   // The change term's stamp — the only thing substitution replaces.
-  const changeMs = worked ? workedMs : (updated?.ms ?? 0);
+  const changeMs = worked ? workedMs : updMs;
   // Ages in DAYS, which is the unit every knob below is expressed in. A page
   // with no creation signal has no `createdDays` at all — see `knownAge`.
   const knownAge = createdMs > 0;
@@ -556,10 +592,16 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number, substitut
   const changedPhrase = worked
     ? `worked on ${agePhrase(changeMs, now)}`
     : `changed ${agePhrase(changeMs, now, updated?.label)}`;
-  const why =
+  let why =
     kind === "new"
       ? `created ${createdPhrase} → ${newScore.toFixed(2)}`
       : `${changedPhrase}, created ${createdPhrase}: ${parts.join(", ")} → ${changedScore.toFixed(2)}`;
+  if (setAside) {
+    const unsubstituted = scorePage(page, w, now, null);
+    if (unsubstituted.kind !== kind || unsubstituted.score !== score) {
+      why += `; update ${agePhrase(updMs, now, updated?.label)} not a session write`;
+    }
+  }
   const row: ActivityRow = { page, kind, score, why, ageMs: kind === "new" ? now - createdMs : now - changeMs };
   if (worked && kind === "changed") row.worked = true;
   return row;
