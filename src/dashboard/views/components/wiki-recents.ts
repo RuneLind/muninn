@@ -580,7 +580,7 @@ export type RailEntry =
       /** Set on Activity rows only: which signal put the page there, how old
        *  that signal is, and the sentence explaining the placement. The painter
        *  draws the glyph, the date cell and the row's `title=` from it. */
-      activity?: { kind: "new" | "changed"; why: string; ageMs: number };
+      activity?: Pick<ActivityRow, "kind" | "why" | "ageMs">;
       /**
        * Set on a PARENT row: the children this row stands for — the ones not
        * emitted anywhere else in this render, which is exactly what the chip
@@ -1077,7 +1077,7 @@ export function buildRail(input: RailInput): RailModel {
     page: WikiListing,
     section: RailSection,
     extra: {
-      activity?: { kind: "new" | "changed"; why: string; ageMs: number };
+      activity?: Pick<ActivityRow, "kind" | "why" | "ageMs">;
       /** True only on the recursive call below, i.e. the row really is drawn
        *  inside its parent's group. A row emitted anywhere else is `lifted`. */
       underParent?: boolean;

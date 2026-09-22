@@ -160,6 +160,14 @@ export const E2E_PORTS = {
   // (500, over-cap body, the un-upgraded raw row form) are driven in one boot.
   "wiki-worked-recency": 3067,
   "wiki-worked-recency/ledger": 3068,
+  // The WORKED term inside the rail's Activity RANKING, and the per-wiki
+  // coverage gate in front of it. ONE muninn over two temp wikis whose worked
+  // dates contradict their update dates identically, and ONE fake claude-usage
+  // covering enough of the first wiki's candidates to open the gate and too few
+  // of the second's — so "it reorders" and "it is byte-identical" are measured
+  // in one boot against one fixture.
+  "wiki-activity-worked": 3069,
+  "wiki-activity-worked/ledger": 3070,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

@@ -9,6 +9,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  ACTIVITY_GLYPH,
+  ACTIVITY_MIN_SCORE,
   ACTIVITY_ROWS_MAX,
   ACTIVITY_ROWS_MIN,
   DEFAULT_ACTIVITY_WEIGHTS,
@@ -16,7 +18,11 @@ import {
   parseActivityWeights,
   RAIL_AGE_MAX_DAYS,
   rankActivity,
+  WORKED_GATE_MIN_COVERAGE,
+  workedGateFor,
+  type ActivityRow,
   type ActivityWeights,
+  type WorkedGate,
 } from "./wiki-activity-rank.ts";
 import { localDay, type WikiListing } from "./wiki-filter.ts";
 
@@ -77,6 +83,11 @@ function page(over: {
    *  rather than a derived local day, so it is the only way to build the page
    *  whose date the rail may not re-derive. */
   createdFm?: string;
+  /** `workedMs` — the day a session wrote the page. ABSENT is the state most of
+   *  a wiki is in and the one the worked term must ABSTAIN on, so it is left
+   *  unset by default rather than defaulted to anything. A NEGATIVE value is a
+   *  stamp in the FUTURE, which is how the guard is driven. */
+  workedDaysAgo?: number;
 }): WikiListing {
   const created = over.createdDaysAgo;
   const updated = over.updatedDaysAgo === null ? undefined : (over.updatedDaysAgo ?? over.createdDaysAgo);
@@ -96,6 +107,7 @@ function page(over: {
     ...(updated === undefined ? {} : { gitTouchedMs: ago(updated) }),
     ...(over.birthtimeDaysAgo === undefined ? {} : { birthtimeMs: ago(over.birthtimeDaysAgo) }),
     ...(over.mtimeDaysAgo === undefined ? {} : { mtimeMs: ago(over.mtimeDaysAgo) }),
+    ...(over.workedDaysAgo === undefined ? {} : { workedMs: ago(over.workedDaysAgo) }),
   } as WikiListing;
 }
 
@@ -568,6 +580,7 @@ describe("parseActivityWeights", () => {
       ["hubPenalty", 101],
       ["planBoost", -1],
       ["changedWeight", Number.NaN],
+      ["workedWeight", 101],
       ["halfLifeNewDays", 0],
       ["halfLifeChangedDays", 400],
       ["rows", "4"],
@@ -645,5 +658,289 @@ describe("parseActivityWeights", () => {
     expect(relOrder([hub, leaf])).toEqual(["leaf.md", "hub.md"]);
     const off = parseActivityWeights({ hubPenalty: 0, rows: 12 }).weights;
     expect(relOrder([hub, leaf], off)).toEqual(["hub.md", "leaf.md"]);
+  });
+});
+
+/** A gate in either state, with the counts a test is not asserting about left
+ *  at whatever the flag implies. `rankActivity` reads only `open`. */
+const gate = (open: boolean): WorkedGate => ({
+  open,
+  candidates: open ? 1 : 0,
+  covered: open ? 1 : 0,
+  coverage: open ? 1 : 0,
+});
+const OPEN = gate(true);
+const CLOSED = gate(false);
+
+describe("rankActivity — the WORKED term", () => {
+  /** An ordinary changed page: old enough that the age discount bites, recently
+   *  touched, no backlinks and no type boost. Everything below varies exactly
+   *  one thing about it. */
+  const changed = (over: { relPath: string; workedDaysAgo?: number; title?: string }) =>
+    page({ createdDaysAgo: 40, updatedDaysAgo: 2, ...over });
+
+  test("a worked date NEWER than the change takes the row and relabels it", () => {
+    const [row] = rankActivity([changed({ relPath: "a.md", workedDaysAgo: 0.25 })], wide, NOW, OPEN);
+    expect(row!.kind).toBe("worked");
+    // The age is the WORKED stamp's, not the change's — the row's date cell
+    // reads `now - ageMs`, so a mismatch here shows a day nothing happened on.
+    expect(row!.ageMs).toBe(0.25 * DAY);
+  });
+
+  test("a worked date OLDER than the change leaves the row exactly as it was", () => {
+    const p = changed({ relPath: "a.md", workedDaysAgo: 30 });
+    expect(rankActivity([p], wide, NOW, OPEN)).toEqual(rankActivity([p], wide, NOW, CLOSED));
+  });
+
+  test("an EQUAL worked score does not displace the winner — the rule is a strict `>`", () => {
+    // Same day as the change, and `workedWeight` defaults to `changedWeight` on
+    // the same half-life, so the two terms come out identical to the last bit.
+    const p = changed({ relPath: "a.md", workedDaysAgo: 2 });
+    const [open] = rankActivity([p], wide, NOW, OPEN);
+    const [closed] = rankActivity([p], wide, NOW, CLOSED);
+    expect(open!.score).toBe(closed!.score);
+    expect(open!.kind).toBe("changed");
+    expect(open!.why).toBe(closed!.why);
+  });
+
+  test("⚠ an UNCOVERED page gets NO worked score — it does not fall back to the update signal", () => {
+    // The trap this whole feature turns on: `workedSignal`/`pageDateSignal(…,
+    // "worked")` fall back to the UPDATE signal, so a term reading the page
+    // through either would score every uncovered page a second copy of its
+    // change term — the term would look like it works and the gate would be
+    // measuring nothing.
+    //
+    // Driven with the worked knob turned up far past the change knob, which is
+    // what makes a fallback VISIBLE: under a fallback this page's score would
+    // jump by 100/10, and it must not move at all.
+    const loud: ActivityWeights = { ...wide, changedWeight: 10, workedWeight: 100 };
+    const uncovered = changed({ relPath: "a.md" });
+    expect(uncovered.workedMs).toBeUndefined();
+    expect(rankActivity([uncovered], loud, NOW, OPEN)).toEqual(
+      rankActivity([uncovered], loud, NOW, CLOSED),
+    );
+  });
+
+  test("the term does not run at all without an OPEN gate", () => {
+    const p = changed({ relPath: "a.md", workedDaysAgo: 0.25 });
+    // The three spellings of "closed": no gate at all (every pre-existing
+    // caller), an explicit closed one, and a wiki that zeroed the knob.
+    const off: ActivityWeights = { ...wide, workedWeight: 0 };
+    expect(rankActivity([p], wide, NOW)).toEqual(rankActivity([p], wide, NOW, CLOSED));
+    expect(rankActivity([p], wide, NOW, null)).toEqual(rankActivity([p], wide, NOW, CLOSED));
+    expect(rankActivity([p], off, NOW, OPEN)).toEqual(rankActivity([p], wide, NOW, CLOSED));
+  });
+
+  test("the `why` sentence is the worked score's own derivation", () => {
+    const p = page({
+      relPath: "p.md",
+      createdDaysAgo: 30,
+      updatedDaysAgo: 20,
+      workedDaysAgo: 1,
+      backlinkCount: 5,
+      type: "plan",
+      plan_status: "in-flight",
+    });
+    const [row] = rankActivity([p], wide, NOW, OPEN);
+    expect(row!.kind).toBe("worked");
+    expect(row!.why).toBe(
+      "worked 1d ago, created 30d ago: " +
+        "weight ×0.70, recency 0.79, age ×0.63, hub ×0.63 (5←), type ×1.60 → 0.35",
+    );
+    // …and it really multiplies out to the score printed at the end of it:
+    // 0.70 × 2^-(1/3) × 1/(1+0.6) × 1/(1+0.6) × 1.6.
+    expect(0.7 * Math.pow(0.5, 1 / 3) * 0.625 * 0.625 * 1.6).toBeCloseTo(row!.score, 12);
+  });
+
+  test("a worked stamp in the FUTURE is ignored, like every other date signal", () => {
+    // A ledger stamp comes from whatever clock wrote the transcript. Past the
+    // 48h skew window it is not a date, and clamping it to now would invent a
+    // write that never happened.
+    const p = changed({ relPath: "a.md", workedDaysAgo: -7 });
+    expect(rankActivity([p], wide, NOW, OPEN)).toEqual(rankActivity([p], wide, NOW, CLOSED));
+    // Inside the window it is skew, and it counts.
+    const skewed = changed({ relPath: "b.md", workedDaysAgo: -1 });
+    expect(rankActivity([skewed], wide, NOW, OPEN)[0]!.kind).toBe("worked");
+  });
+
+  test("an open gate can lift a page the floor drops today — which is the point", () => {
+    // Created and last touched long enough ago that both terms are far under
+    // `ACTIVITY_MIN_SCORE`; a session wrote it this morning.
+    const stale = page({ relPath: "old.md", createdDaysAgo: 400, updatedDaysAgo: 300, workedDaysAgo: 0.5 });
+    expect(rankActivity([stale], wide, NOW, CLOSED)).toEqual([]);
+    const [row] = rankActivity([stale], wide, NOW, OPEN);
+    expect(row!.kind).toBe("worked");
+    expect(row!.score).toBeGreaterThanOrEqual(ACTIVITY_MIN_SCORE);
+  });
+
+  test("the glyph map covers every kind and spells three different marks", () => {
+    // The row renders `ACTIVITY_GLYPH[kind]`, so a missing entry is a blank slot
+    // rather than a type error at the call site.
+    expect(Object.keys(ACTIVITY_GLYPH).sort()).toEqual(["changed", "new", "worked"]);
+    expect(new Set(Object.values(ACTIVITY_GLYPH)).size).toBe(3);
+  });
+});
+
+describe("workedGateFor", () => {
+  /** A page that clears the floor on its CHANGE term alone, so it is a candidate
+   *  whatever the worked term does. */
+  const candidate = (relPath: string, workedDaysAgo?: number) =>
+    page({ relPath, createdDaysAgo: 40, updatedDaysAgo: 1, ...(workedDaysAgo === undefined ? {} : { workedDaysAgo }) });
+
+  test("coverage is measured over the CANDIDATE set, not the listing", () => {
+    // Ten pages, two of them candidates — and the eight below the floor are
+    // covered while the two candidates are not. Over the listing that reads 80%;
+    // over the rows the section would show it is 0%, which is the honest number.
+    const sunk = Array.from({ length: 8 }, (_, i) =>
+      page({ relPath: `sunk-${i}.md`, createdDaysAgo: 500, updatedDaysAgo: 400, workedDaysAgo: 1 }),
+    );
+    const g = workedGateFor([...sunk, candidate("a.md"), candidate("b.md")], wide, NOW);
+    expect(g).toEqual({ open: false, candidates: 2, covered: 0, coverage: 0 });
+  });
+
+  test("a page that only clears the floor WITH the term is not a candidate", () => {
+    // Non-circularity: pass 1 runs with the term forced OFF, so the very pages
+    // the term would admit cannot pad the denominator that decides whether it
+    // may run.
+    const lifted = page({ relPath: "old.md", createdDaysAgo: 400, updatedDaysAgo: 300, workedDaysAgo: 0.5 });
+    expect(workedGateFor([lifted], wide, NOW)).toEqual({
+      open: false,
+      candidates: 0,
+      covered: 0,
+      coverage: 0,
+    });
+    // …and it really is a page the open term would rank.
+    expect(rankActivity([lifted], wide, NOW, OPEN)).toHaveLength(1);
+  });
+
+  test("zero candidates is coverage 0, not 0/0", () => {
+    const dormant = page({ relPath: "a.md", createdDaysAgo: 900, updatedDaysAgo: 800, workedDaysAgo: 1 });
+    const g = workedGateFor([dormant], wide, NOW);
+    expect(g.coverage).toBe(0);
+    expect(g.open).toBe(false);
+  });
+
+  test("bookkeeping pages are excluded, exactly as the ranking excludes them", () => {
+    const meta = page({ relPath: "log.md", createdDaysAgo: 40, updatedDaysAgo: 1 });
+    const g = workedGateFor([meta, candidate("a.md", 1)], wide, NOW);
+    expect(g).toEqual({ open: true, candidates: 1, covered: 1, coverage: 1 });
+  });
+
+  test("the threshold is a floor, not a strict majority", () => {
+    const set = (covered: number, total: number) =>
+      Array.from({ length: total }, (_, i) =>
+        candidate(`p-${i}.md`, i < covered ? 1 : undefined),
+      );
+    // The literal, not the constant: a change to the threshold has to fail a
+    // case rather than follow itself.
+    expect(WORKED_GATE_MIN_COVERAGE).toBe(0.6);
+    expect(workedGateFor(set(6, 10), wide, NOW)).toMatchObject({ coverage: 0.6, open: true });
+    expect(workedGateFor(set(5, 10), wide, NOW)).toMatchObject({ coverage: 0.5, open: false });
+  });
+
+  test("a wiki that zeroed the knob keeps the gate shut however covered it is", () => {
+    const off: ActivityWeights = { ...wide, workedWeight: 0 };
+    const g = workedGateFor([candidate("a.md", 1), candidate("b.md", 1)], off, NOW);
+    // The coverage is still reported honestly — only the verdict is no.
+    expect(g).toEqual({ open: false, candidates: 2, covered: 2, coverage: 1 });
+  });
+
+  test("it is pure: same answer twice, and the pages are untouched", () => {
+    const pages = [candidate("a.md", 1), candidate("b.md")];
+    const snapshot = JSON.stringify(pages);
+    expect(workedGateFor(pages, wide, NOW)).toEqual(workedGateFor(pages, wide, NOW));
+    expect(JSON.stringify(pages)).toBe(snapshot);
+  });
+});
+
+describe("a CLOSED gate is the pre-worked ranking, byte for byte", () => {
+  /** Six pages spanning every branch the ranking has — a creation, three kinds
+   *  of change (plain, type-boosted plan, hub-discounted), a blog, and one page
+   *  far under the floor — each carrying a worked stamp that WOULD move it. */
+  const FIXTURE: WikiListing[] = [
+    page({ relPath: "notes/new.md", title: "A new note", createdDaysAgo: 1, workedDaysAgo: 5 }),
+    page({ relPath: "notes/changed.md", title: "B changed note", createdDaysAgo: 40, updatedDaysAgo: 1, workedDaysAgo: 0.25 }),
+    page({ relPath: "plans/live.md", title: "C live plan", createdDaysAgo: 20, updatedDaysAgo: 2, type: "plan", plan_status: "in-flight", workedDaysAgo: 9 }),
+    page({ relPath: "concepts/hub.md", title: "D hub", createdDaysAgo: 30, updatedDaysAgo: 1, backlinkCount: 12 }),
+    page({ relPath: "blogs/post.md", title: "E blog", createdDaysAgo: 60, updatedDaysAgo: 3, type: "blog", workedDaysAgo: 1 }),
+    page({ relPath: "notes/dormant.md", title: "F dormant", createdDaysAgo: 400, updatedDaysAgo: 300, workedDaysAgo: 0.5 }),
+  ];
+
+  /**
+   * What `origin/main`'s `rankActivity` answers for `FIXTURE` — generated by
+   * running THAT module (`git show origin/main:…/wiki-activity-rank.ts`) over
+   * these pages, not by copying this one's output.
+   *
+   * A row count would not have caught the failure this pins: the `age`/`hub`/
+   * `boost` factors moved out of the change branch to be shared with the worked
+   * term, and a transcription slip there changes a `why` string and a score
+   * while leaving the section exactly six rows long.
+   */
+  const BEFORE: Array<Pick<ActivityRow, "kind" | "score" | "why" | "ageMs"> & { relPath: string }> = [
+    { relPath: "notes/new.md", kind: "new", score: 0.8705505632961241, why: "created 1d ago → 0.87", ageMs: 86400000 },
+    {
+      relPath: "plans/live.md",
+      kind: "changed",
+      score: 0.5039684199579492,
+      why: "changed 2d ago, created 20d ago: weight ×0.70, recency 0.63, age ×0.71, hub ×1.00 (0←), type ×1.60 → 0.50",
+      ageMs: 172800000,
+    },
+    {
+      relPath: "notes/changed.md",
+      kind: "changed",
+      score: 0.30866131566048327,
+      why: "changed 1d ago, created 40d ago: weight ×0.70, recency 0.79, age ×0.56, hub ×1.00 (0←), type ×1.00 → 0.31",
+      ageMs: 86400000,
+    },
+    {
+      relPath: "blogs/post.md",
+      kind: "changed",
+      score: 0.17500000000000002,
+      why: "changed 3d ago, created 60d ago: weight ×0.70, recency 0.50, age ×0.45, hub ×1.00 (0←), type ×1.10 → 0.18",
+      ageMs: 259200000,
+    },
+    {
+      relPath: "concepts/hub.md",
+      kind: "changed",
+      score: 0.1423131066057556,
+      why: "changed 1d ago, created 30d ago: weight ×0.70, recency 0.79, age ×0.63, hub ×0.41 (12←), type ×1.00 → 0.14",
+      ageMs: 86400000,
+    },
+  ];
+
+  const shape = (w: ActivityWeights, g?: WorkedGate | null) =>
+    rankActivity(FIXTURE, w, NOW, g).map((r) => ({
+      relPath: r.page.relPath,
+      kind: r.kind,
+      score: r.score,
+      why: r.why,
+      ageMs: r.ageMs,
+    }));
+
+  test("no gate, a closed gate and a zeroed knob all answer what main answered", () => {
+    expect(shape(wide)).toEqual(BEFORE);
+    expect(shape(wide, CLOSED)).toEqual(BEFORE);
+    expect(shape({ ...wide, workedWeight: 0 }, OPEN)).toEqual(BEFORE);
+  });
+
+  test("…and an OPEN gate moves it — so the case above is not passing by accident", () => {
+    const g = workedGateFor(FIXTURE, wide, NOW);
+    expect(g).toEqual({ open: true, candidates: 5, covered: 4, coverage: 0.8 });
+    const after = shape(wide, g);
+    // Three rows relabel to `worked`, one of them (`dormant`) admitted by the
+    // term from under the floor, and the order changes with them.
+    expect(after.map((r) => r.relPath)).toEqual([
+      "notes/new.md",
+      "plans/live.md",
+      "notes/changed.md",
+      "blogs/post.md",
+      "concepts/hub.md",
+      "notes/dormant.md",
+    ]);
+    expect(after.filter((r) => r.kind === "worked").map((r) => r.relPath)).toEqual([
+      "notes/changed.md",
+      "blogs/post.md",
+      "notes/dormant.md",
+    ]);
   });
 });

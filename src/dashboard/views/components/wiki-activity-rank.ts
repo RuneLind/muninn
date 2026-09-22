@@ -11,7 +11,7 @@
  * touches its hubs. So a page CREATED lately leads, and a CHANGE counts in
  * proportion to how young and how peripheral the page is.
  *
- * The five factors, all from `/api/wiki/pages`:
+ * The six factors, all from `/api/wiki/pages`:
  *
  *  - **creation recency** — exponential decay on `pageAddedMs`, half-life
  *    `halfLifeNewDays`.
@@ -20,6 +20,10 @@
  *    age, and they do about equal shares of the work: the half-life is shorter
  *    (3 d against 5 d) and the whole change term is scaled by `changedWeight`
  *    (0.70).
+ *  - **worked-on recency** — the same decay on `workedMs`, the day an agent
+ *    session last wrote the page (claude-usage's ledger, bulk passes already
+ *    discounted upstream), scaled by `workedWeight` and GATED per wiki on how
+ *    much of the ranked set the ledger covers. See {@link workedGateFor}.
  *  - **page age** — a change to an old page counts for less (`agePenalty`).
  *  - **hub weight** — a change to a page many pages link to counts for less
  *    (`hubPenalty`), which is what keeps `log.md`-shaped traffic out.
@@ -37,10 +41,17 @@
  * wiki can override them in its `.wiki-reader.json` `activity` block.
  */
 
-import { displayTitleOf, isMetaPage, localDay, pageDateSignal, type WikiListing } from "./wiki-filter.ts";
+import {
+  displayTitleOf,
+  isImplausibleFutureDate,
+  isMetaPage,
+  localDay,
+  pageDateSignal,
+  type WikiListing,
+} from "./wiki-filter.ts";
 
 /**
- * The ranking's knobs. The four percent knobs are 0–100 with the prototype
+ * The ranking's knobs. The five percent knobs are 0–100 with the prototype
  * slider's semantics (0 = the factor is off, 100 = the reference strength named
  * in {@link rankActivity}); the two half-lives are days; `rows` is how many rows
  * the section renders.
@@ -68,6 +79,18 @@ export interface ActivityWeights {
    * `halfLifeChangedDays` and carries the age/hub discounts too.
    */
   changedWeight: number;
+  /**
+   * How much of its raw recency a WORKED-ON date keeps — the whole worked term
+   * is multiplied by this, and 0 switches the term off outright.
+   *
+   * It has no half-life of its own: the worked term decays on
+   * `halfLifeChangedDays`, because a worked date IS a change date, better
+   * attested. The default is `changedWeight`'s number for the same reason — at
+   * equal age the two terms score identically, so the worked term can only ever
+   * win by naming a NEWER day than mtime and git did, which is the whole claim
+   * the ledger makes.
+   */
+  workedWeight: number;
 }
 
 /**
@@ -94,6 +117,7 @@ export const DEFAULT_ACTIVITY_WEIGHTS: ActivityWeights = {
   hubPenalty: 60,
   planBoost: 50,
   changedWeight: 70,
+  workedWeight: 70,
 };
 
 /** Bounds on `rows`: below 1 the section cannot render, past 20 it is the listing
@@ -135,8 +159,9 @@ export const ACTIVITY_MIN_SCORE = 0.02;
  *  explains the placement (rendered as the row's `title=`). */
 export interface ActivityRow {
   page: WikiListing;
-  /** `new` when the CREATION signal won, `changed` when a later edit did. */
-  kind: "new" | "changed";
+  /** `new` when the CREATION signal won, `changed` when a later edit did,
+   *  `worked` when an agent session's own write to the page beat both. */
+  kind: "new" | "changed" | "worked";
   score: number;
   /** Human-readable derivation — every factor with its value. */
   why: string;
@@ -145,7 +170,28 @@ export interface ActivityRow {
   ageMs: number;
 }
 
-const PERCENT_KEYS = ["agePenalty", "hubPenalty", "planBoost", "changedWeight"] as const;
+/**
+ * The one-character mark a row carries for each kind, and the only place the
+ * three are spelled — a `Record` over the union, so a fourth kind fails the
+ * build here rather than rendering a blank slot.
+ *
+ * `✎` for worked reads as "someone wrote this", which is the claim, and shares
+ * no stroke with `+` or `~` — the pair are one glyph apart at 11px in a 10px
+ * slot, so a third ASCII sign would have been the one that needs a legend.
+ */
+export const ACTIVITY_GLYPH: Record<ActivityRow["kind"], string> = {
+  new: "+",
+  changed: "~",
+  worked: "✎",
+};
+
+const PERCENT_KEYS = [
+  "agePenalty",
+  "hubPenalty",
+  "planBoost",
+  "changedWeight",
+  "workedWeight",
+] as const;
 const HALF_LIFE_KEYS = ["halfLifeNewDays", "halfLifeChangedDays"] as const;
 
 /**
@@ -335,6 +381,107 @@ const AGE_PENALTY_REFERENCE_DAYS = 30;
 const HUB_PENALTY_REFERENCE_BACKLINKS = 5;
 
 /**
+ * How much of the ranked candidate set the ledger must cover before the worked
+ * term is allowed to move a row.
+ *
+ * Under it the term is not a signal, it is a lottery: the pages the ledger
+ * happens to know get a third score and everything else keeps two, so a wiki
+ * written mostly by hand would rank its handful of agent-written pages above
+ * work that is genuinely newer. 0.6 is the point where "most of what this
+ * section would show was written by a session" is a true statement about the
+ * wiki rather than about the sample.
+ */
+export const WORKED_GATE_MIN_COVERAGE = 0.6;
+
+/**
+ * Whether this wiki's Activity ranking may spend `workedMs`, and the numbers
+ * behind the verdict.
+ *
+ * `coverage` is measured over the CANDIDATE SET — the rows the section would
+ * show today, before truncation — and deliberately NOT over
+ * `WikiIndex.workedCoverage`, whose denominator is the whole listing including
+ * the `.html` pages the upstream ledger query excludes by construction
+ * (`sessionPagesUnderRoot` filters to `.md`/`.mdx`), so it structurally
+ * understates: measured on the mini 2026-09-22, mimir reads 54.3% there and
+ * 65.4% over md/mdx alone. The Activity list only ever ranks a recent slice, so
+ * the honest denominator is the pages it actually scores.
+ */
+export interface WorkedGate {
+  /** True when the term may run: `coverage ≥ WORKED_GATE_MIN_COVERAGE` AND the
+   *  wiki asked for a non-zero `workedWeight`. */
+  open: boolean;
+  /** Non-meta pages clearing {@link ACTIVITY_MIN_SCORE} with the term OFF. */
+  candidates: number;
+  /** How many of those carry a usable `workedMs`. */
+  covered: number;
+  /** `covered / candidates`, or 0 when there are no candidates at all. */
+  coverage: number;
+}
+
+/** The same weights with the worked term switched off — what a closed gate, and
+ *  the gate's own measuring pass, both rank with. */
+function withWorkedOff(w: ActivityWeights): ActivityWeights {
+  return w.workedWeight === 0 ? w : { ...w, workedWeight: 0 };
+}
+
+/**
+ * A page's worked stamp, or 0 when it has none this ranking may use.
+ *
+ * ⚠️ It reads `page.workedMs` **directly**, never `pageDateSignal(page,
+ * "worked")` or `workedSignal` — those fall back to the UPDATE signal for an
+ * uncovered page, which is the right answer for a row's date chip and exactly
+ * the wrong one here: every uncovered page would score a second copy of the
+ * change term instead of abstaining, the term would look like it works, every
+ * wiki would measure as fully covered, and the gate below would be measuring
+ * nothing.
+ *
+ * The future guard is the sort's (`isImplausibleFutureDate`): a ledger stamp
+ * comes from whatever clock wrote the transcript.
+ */
+function usableWorkedMs(page: WikiListing, now: number): number {
+  const ms = page.workedMs;
+  const ok = typeof ms === "number" && Number.isFinite(ms) && ms > 0 && !isImplausibleFutureDate(ms, now);
+  return ok ? (ms as number) : 0;
+}
+
+/**
+ * Measure the worked gate for ONE listing.
+ *
+ * Pure, and computed ONCE per payload over the FULL page set — never over the
+ * filtered rows the rail hands {@link rankActivity}, or the term would flicker
+ * on and off as the reader changes a facet, which is a fact about the facet
+ * rather than about the wiki.
+ *
+ * Non-circular by construction: pass 1 scores with the term FORCED OFF, so the
+ * candidate set the coverage is measured over is exactly today's row set and
+ * cannot be widened by the very term it is deciding about.
+ */
+export function workedGateFor(
+  pages: readonly WikiListing[],
+  weights: ActivityWeights,
+  now: number,
+): WorkedGate {
+  const off = withWorkedOff(weights);
+  let candidates = 0;
+  let covered = 0;
+  for (const page of pages) {
+    if (isMetaPage(page)) continue;
+    if (scorePage(page, off, now).score < ACTIVITY_MIN_SCORE) continue;
+    candidates++;
+    if (usableWorkedMs(page, now) > 0) covered++;
+  }
+  // Zero candidates is coverage 0, not 0/0: a dormant wiki renders no section,
+  // and "the empty set is fully covered" would open the gate on it.
+  const coverage = candidates > 0 ? covered / candidates : 0;
+  return {
+    open: weights.workedWeight > 0 && coverage >= WORKED_GATE_MIN_COVERAGE,
+    candidates,
+    covered,
+    coverage,
+  };
+}
+
+/**
  * Rank pages by activity, best first, truncated to `weights.rows`.
  *
  * Bookkeeping pages are excluded outright (`isMetaPage`): nearly every wiki
@@ -354,11 +501,16 @@ export function rankActivity(
   pages: readonly WikiListing[],
   weights: ActivityWeights,
   now: number,
+  gate?: WorkedGate | null,
 ): ActivityRow[] {
+  // NO gate is the same answer as a CLOSED one, and it is the important default:
+  // every caller that has not measured coverage gets today's two-term ranking
+  // byte for byte rather than a term nobody checked.
+  const w = gate?.open ? weights : withWorkedOff(weights);
   const rows: ActivityRow[] = [];
   for (const page of pages) {
     if (isMetaPage(page)) continue;
-    const row = scorePage(page, weights, now);
+    const row = scorePage(page, w, now);
     if (row.score >= ACTIVITY_MIN_SCORE) rows.push(row);
   }
   rows.sort((a, b) => b.score - a.score || displayTitleOf(a.page).localeCompare(displayTitleOf(b.page)));
@@ -392,6 +544,36 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
   // branch below says so.)
   const newScore = knownAge ? Math.pow(0.5, createdDays / w.halfLifeNewDays) : 0;
 
+  // The three factors that describe the PAGE rather than which recency signal
+  // won — how old it is, how linked it is, what type it is. Hoisted out of the
+  // change branch so the worked term below multiplies the SAME numbers and
+  // prints them the same way; a second derivation is a second set of numbers one
+  // edit away from disagreeing.
+  //
+  // An UNKNOWN age is not evidence of an old page, so it is not discounted:
+  // the penalty exists to say "this page has been around a long time", which
+  // is a claim no signal here supports.
+  const age = knownAge
+    ? 1 / (1 + (w.agePenalty / 100) * (createdDays / AGE_PENALTY_REFERENCE_DAYS))
+    : 1;
+  const backlinks = page.backlinkCount || 0;
+  const hub = 1 / (1 + (w.hubPenalty / 100) * (backlinks / HUB_PENALTY_REFERENCE_BACKLINKS));
+  let boost = 1;
+  if (page.type === "plan") {
+    boost += (w.planBoost / 100) * (page.plan_status === "in-flight" || page.plan_status === "proposed" ? 1.2 : 0.6);
+  }
+  if (page.type === "blog") boost += (w.planBoost / 100) * 0.2;
+  // `weight` leads the list because it leads the product: without it the
+  // factors a reader multiplies come out 1/0.7 too high against the score
+  // printed beside them.
+  const factors = (weightPct: number, recency: number): string[] => [
+    `weight ×${(weightPct / 100).toFixed(2)}`,
+    `recency ${recency.toFixed(2)}`,
+    `age ×${age.toFixed(2)}`,
+    `hub ×${hub.toFixed(2)} (${backlinks}←)`,
+    `type ×${boost.toFixed(2)}`,
+  ];
+
   /**
    * ⚠️ **An update signal is not the same thing as an EDIT.** `updatedSignal`
    * falls back to the git CREATION date for a page whose every commit was a
@@ -418,34 +600,39 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
   const parts: string[] = [];
   if (isChange) {
     const recency = Math.pow(0.5, updatedDays / w.halfLifeChangedDays);
-    // An UNKNOWN age is not evidence of an old page, so it is not discounted:
-    // the penalty exists to say "this page has been around a long time", which
-    // is a claim no signal here supports.
-    const age = knownAge
-      ? 1 / (1 + (w.agePenalty / 100) * (createdDays / AGE_PENALTY_REFERENCE_DAYS))
-      : 1;
-    const backlinks = page.backlinkCount || 0;
-    const hub = 1 / (1 + (w.hubPenalty / 100) * (backlinks / HUB_PENALTY_REFERENCE_BACKLINKS));
-    let boost = 1;
-    if (page.type === "plan") {
-      boost += (w.planBoost / 100) * (page.plan_status === "in-flight" || page.plan_status === "proposed" ? 1.2 : 0.6);
-    }
-    if (page.type === "blog") boost += (w.planBoost / 100) * 0.2;
     changedScore = (w.changedWeight / 100) * recency * age * hub * boost;
-    // `weight` leads the list because it leads the product: without it the
-    // factors a reader multiplies come out 1/0.7 too high against the score
-    // printed beside them.
-    parts.push(
-      `weight ×${(w.changedWeight / 100).toFixed(2)}`,
-      `recency ${recency.toFixed(2)}`,
-      `age ×${age.toFixed(2)}`,
-      `hub ×${hub.toFixed(2)} (${backlinks}←)`,
-      `type ×${boost.toFixed(2)}`,
-    );
+    parts.push(...factors(w.changedWeight, recency));
   }
 
-  const kind: "new" | "changed" = newScore >= changedScore ? "new" : "changed";
-  const score = Math.max(newScore, changedScore);
+  // The THIRD candidate: the day a session wrote the page. No `isChange`-style
+  // gate — the ledger row IS the evidence that someone edited it, and it needs
+  // no floor against the creation date (a page created and written by the same
+  // session loses to `newScore` on its own, since a creation scores 1.00
+  // undiscounted while this carries every factor).
+  const workedMs = usableWorkedMs(page, now);
+  let workedScore = 0;
+  const workedParts: string[] = [];
+  // The `workedWeight > 0` half is a COST gate, not a correctness one — at 0 the
+  // product is 0 and the strict `>` below already refuses it. It is here because
+  // a closed gate ranks with exactly that zero, and without it every page on a
+  // closed wiki would still pay a `Math.pow` and a five-string array on every
+  // render (1261 rows on jarvis, per keystroke).
+  if (workedMs > 0 && w.workedWeight > 0) {
+    const recency = Math.pow(0.5, (now - workedMs) / MS_PER_DAY / w.halfLifeChangedDays);
+    workedScore = (w.workedWeight / 100) * recency * age * hub * boost;
+    workedParts.push(...factors(w.workedWeight, recency));
+  }
+
+  // Today's winner is settled FIRST and on its own terms, and the worked term
+  // then takes the row only on a strict `>`. A zero or equal worked score
+  // therefore cannot displace a winner or relabel a row — which is what makes a
+  // closed gate (where `workedScore` is 0 for every page) byte-identical to the
+  // two-term ranking rather than merely equivalent-looking.
+  const baseKind: "new" | "changed" = newScore >= changedScore ? "new" : "changed";
+  const baseScore = Math.max(newScore, changedScore);
+  const workedWins = workedScore > baseScore;
+  const kind: ActivityRow["kind"] = workedWins ? "worked" : baseKind;
+  const score = workedWins ? workedScore : baseScore;
   // `agePhrase` answers "?" for a stamp of 0 on its own, which is exactly what
   // `!knownAge` means here. Both phrases get their signal's LABEL, so a sentence
   // explaining a row names the same day the row's cell shows — for the creation
@@ -454,10 +641,19 @@ function scorePage(page: WikiListing, w: ActivityWeights, now: number): Activity
   // floor for ~13 days, so it is reachable only under a configured
   // `halfLifeChangedDays` (365 keeps a 550-day-old change); no test covers it.
   const createdPhrase = agePhrase(createdMs, now, created?.label);
+  // The worked phrase takes NO label: a ledger stamp is a wall-clock instant
+  // whose only spelling is its local day, which is exactly what `calendarDay`
+  // derives when no label is given.
   const why =
-    kind === "new"
-      ? `created ${createdPhrase} → ${newScore.toFixed(2)}`
-      : `changed ${agePhrase(updatedMs, now, updated?.label)}, created ${createdPhrase}: ` +
-        `${parts.join(", ")} → ${changedScore.toFixed(2)}`;
-  return { page, kind, score, why, ageMs: kind === "new" ? now - createdMs : now - updatedMs };
+    kind === "worked"
+      ? `worked ${agePhrase(workedMs, now)}, created ${createdPhrase}: ` +
+        `${workedParts.join(", ")} → ${workedScore.toFixed(2)}`
+      : kind === "new"
+        ? `created ${createdPhrase} → ${newScore.toFixed(2)}`
+        : `changed ${agePhrase(updatedMs, now, updated?.label)}, created ${createdPhrase}: ` +
+          `${parts.join(", ")} → ${changedScore.toFixed(2)}`;
+  // The age follows the winning signal, so the row's date cell and this sentence
+  // cannot name two different days.
+  const stampMs = kind === "worked" ? workedMs : kind === "new" ? createdMs : updatedMs;
+  return { page, kind, score, why, ageMs: now - stampMs };
 }

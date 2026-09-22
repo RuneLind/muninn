@@ -141,11 +141,14 @@ import {
   workedDateSignal,
 } from "./wiki-groups.ts";
 import {
+  ACTIVITY_GLYPH,
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
   parseActivityWeights,
   rankActivity,
+  workedGateFor,
   type ActivityWeights,
+  type WorkedGate,
 } from "./wiki-activity-rank.ts";
 import { purgeRecentsKeys, readFolds, readPins, toggleFolded, togglePinned } from "./wiki-recents-store.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
@@ -327,6 +330,19 @@ let defaultType = "";
  *  defaults until a payload lands, and after one that carries no such field —
  *  an older server must render the section, not lose it. */
 let activityWeights: ActivityWeights = DEFAULT_ACTIVITY_WEIGHTS;
+
+/**
+ * Whether Activity may spend this wiki's WORKED-ON dates — measured once per
+ * payload in `setPagesData`, never per render.
+ *
+ * Two reasons it lives here rather than inside `renderList`. It is a fact about
+ * the WIKI, so measuring it over the filtered rows the rail is about to rank
+ * would flicker the term on and off as the reader changes a facet; and it costs
+ * a scoring pass over every page, which on jarvis's 1261 rows is not something a
+ * keystroke may pay. `null` until a payload lands — read as "closed", which is
+ * today's ranking.
+ */
+let workedGate: WorkedGate | null = null;
 
 /**
  * The wiki's project → page-count map from `/api/wiki/pages`. `{}` for a wiki
@@ -1167,7 +1183,7 @@ function renderList(): void {
     // date cannot disagree with the score that placed it. Skipped entirely under
     // a query, where `buildRail` renders no sections and would throw the ranking
     // away — that is a scan of every page on every keystroke.
-    activity: railSectionsVisible(filters) ? rankActivity(rows, activityWeights, now) : [],
+    activity: railSectionsVisible(filters) ? rankActivity(rows, activityWeights, now, workedGate) : [],
     groups,
     seriesGroups,
     openFolds,
@@ -1305,7 +1321,9 @@ function renderList(): void {
     const signal: "added" | "updated" | "worked" | null = entry.activity
       ? entry.activity.kind === "new"
         ? "added"
-        : "updated"
+        : entry.activity.kind === "worked"
+          ? "worked"
+          : "updated"
       : mode === "backlinks"
         ? null
         : // `isRecencySort` is a TYPE PREDICATE, so the mode goes straight to the
@@ -1378,7 +1396,7 @@ function renderList(): void {
       (rowTitle ? ` title="${esc(rowTitle)}"` : "") +
       `>` +
       (entry.activity
-        ? `<span class="wiki-act-glyph ${esc(entry.activity.kind)}">${entry.activity.kind === "new" ? "+" : "~"}</span>`
+        ? `<span class="wiki-act-glyph ${esc(entry.activity.kind)}">${esc(ACTIVITY_GLYPH[entry.activity.kind])}</span>`
         : "") +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       // Title and chip share ONE box, `.wiki-list-mid`, and that box is what is
@@ -6325,6 +6343,10 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   if (data.activity && typeof data.activity === "object") {
     activityWeights = parseActivityWeights(data.activity).weights;
   }
+  // AFTER the weights, and over the FULL listing rather than the rail's filtered
+  // rows — see `workedGate`. `recencyNow()` is already anchored: `scannedAtMs`
+  // is assigned at the top of this function.
+  workedGate = workedGateFor(data.pages, activityWeights, recencyNow());
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one
   // would admit a project the listing on screen no longer has. An older server /

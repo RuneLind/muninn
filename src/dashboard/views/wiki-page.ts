@@ -625,6 +625,12 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-act-glyph.new { color: var(--tok-str); }
     .wiki-act-glyph.changed { color: var(--accent-light); }
+    /* WORKED-on: an agent session wrote the page. --tok-num for the same reason
+       the other two took theirs — it is the third token on this ramp that clears
+       AA at 11px bold against the rail's ground (--bg-panel): measured 6.18:1
+       light (#9c4a07 on #ffffff) and 11.16:1 dark (#fbbf24 on #12121a), where
+       --status-warning is 3.19:1 light and fails. */
+    .wiki-act-glyph.worked { color: var(--tok-num); }
     /* ★ and the date share one flex slot, so the ★ costs the row its own width
        and NOT the row's 8px gap as well: as a sibling of the title the pair
        measured 21px off .wiki-list-title on every row — 42px of title left at
