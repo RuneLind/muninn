@@ -89,6 +89,13 @@ export interface WikiListing {
    *  every mtime but contributes no touch date at all. Absent for a non-git or
    *  untracked page, and for a page whose every commit was a sweep. */
   gitTouchedMs?: number;
+  /** WORKED-ON time (epoch ms) — the newest write to this page by an agent session,
+   *  from claude-usage's ledger (`src/wiki/worked-ledger.ts`). Absent when the
+   *  ledger holds no qualifying write (every one of them was part of a bulk pass,
+   *  or nobody wrote the page with an agent), when the server's memo is cold, and
+   *  on an instance pointed at no claude-usage — so a consumer falls back per page
+   *  rather than treating absence as "old". */
+  workedMs?: number;
   /** True when git reports the file dirty (modified / untracked). The one condition
    *  under which `mtimeMs` still carries information rather than being a checkout or
    *  sweep artifact. Absent (never `false`) otherwise. */
@@ -227,7 +234,15 @@ export function sanitizeColorToken(value: unknown): string | undefined {
  *  collide with it, so it doubles as a selectable value in the folder picker. */
 export const ROOT_FOLDER = "/";
 
-export type WikiSortMode = "updated" | "created" | "backlinks" | "title";
+export type WikiSortMode = "updated" | "created" | "worked" | "backlinks" | "title";
+
+/** The three modes that order by a DATE. Named once, because four sites branch on
+ *  exactly this set — the sort, the row's date chip, the archive's month folding
+ *  and the rail's `Bookkeeping` tail — and each of them was a two-value test that
+ *  turned itself silently off when a third value arrived. */
+export function isRecencySort(mode: WikiSortMode): boolean {
+  return mode === "updated" || mode === "created" || mode === "worked";
+}
 
 /** The built-in type order + labels — the no-`.wiki-reader.json` defaults. A wiki's
  *  merged type list (see `mergeWikiTypes`) always starts with these, so a wiki with
@@ -627,8 +642,14 @@ function updatedSignal(
  * scale a header reading "updated <creation date>" is a claim the data does not
  * support. Consumed by `pageHeaderDates`, which omits the "updated" slot outright on
  * this kind rather than relabelling it.
+ *
+ * `"worked"` is the third axis (`workedMs`) and is reachable from ONE caller,
+ * `pageDateSignal(p, "worked")`. It can never reach `pageHeaderDates`, which reads
+ * `updatedSignal`/`addedSignal` and neither of those ever mints it — which is what
+ * keeps the article header out of this PR: it answers "created / updated", and a
+ * third word there is a different question.
  */
-export type WikiDateKind = "updated" | "added";
+export type WikiDateKind = "updated" | "added" | "worked";
 
 /** The word that honestly describes `pageDateLabel(p)` for this page. See
  *  `WikiDateKind`. */
@@ -831,14 +852,56 @@ export interface WikiDateSignal {
  */
 export function pageDateSignal(
   p: WikiListing,
-  which: "added" | "updated",
+  which: "added" | "updated" | "worked",
   now?: number,
 ): WikiDateSignal | null {
   const signal =
     which === "added"
       ? { ...addedSignal(p, now), kind: "added" as WikiDateKind }
-      : updatedSignal(p, now);
+      : which === "worked"
+        ? workedSignal(p, now)
+        : updatedSignal(p, now);
   return signal.ms > 0 ? signal : null;
+}
+
+/**
+ * The WORKED-ON signal: the day an agent session last wrote the page, and the
+ * label that explains it — falling back to the UPDATE signal, kind and all, on a
+ * page the ledger holds no qualifying write for.
+ *
+ * The fallback is what makes the axis honest rather than sparse. Roughly a third
+ * of a covered wiki has no worked date (every write discounted as part of a bulk
+ * pass), and rendering those rows blank would say "nothing ever happened here"
+ * about pages with a perfectly good git history. So an uncovered page shows the
+ * date that DID answer, and its `kind` is what the row's hover names — which is
+ * the whole of acceptance 3: in Worked-on mode the chip says which signal it is
+ * reading, per row.
+ *
+ * `workedMs` is a wall-clock instant, so it renders as a LOCAL day, the same
+ * split `updatedSignal` makes for a git date against a frontmatter one. The
+ * future-date guard applies here too: the ledger's timestamps come from whatever
+ * clock wrote the transcript.
+ */
+function workedSignal(
+  p: WikiListing,
+  now: number = Date.now(),
+): { ms: number; label: string; kind: WikiDateKind } {
+  const ms = p.workedMs;
+  if (typeof ms === "number" && Number.isFinite(ms) && ms > 0 && !isImplausibleFutureDate(ms, now)) {
+    return { ms, label: localDay(new Date(ms)), kind: "worked" };
+  }
+  return updatedSignal(p, now);
+}
+
+/**
+ * Worked-on recency in epoch ms — the sort key behind "Worked on", with the
+ * update signal as the per-page fallback. 0 when the page has neither.
+ *
+ * `now` is optional for `pageTimeMs`'s reason: `sortPages` captures ONE instant
+ * for the whole pass so the comparator stays pure across the 48h future boundary.
+ */
+export function pageWorkedMs(p: WikiListing, now?: number): number {
+  return workedSignal(p, now).ms;
 }
 
 /** `YYYY-MM-DD` in the viewer's timezone (no UTC shift). */
@@ -942,29 +1005,51 @@ export function sortPages(
   // order nothing on screen explains.
   const byTitle = (a: WikiListing, b: WikiListing) =>
     displayTitleOf(a).localeCompare(displayTitleOf(b));
-  if (mode === "title") {
-    copy.sort(byTitle);
-  } else if (mode === "backlinks") {
-    copy.sort((a, b) => b.backlinkCount - a.backlinkCount || byTitle(a, b));
-  } else if (mode === "created") {
-    copy.sort(
-      (a, b) =>
-        Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
-        pageAddedMs(b, now) - pageAddedMs(a, now) ||
-        byTitle(a, b),
-    );
-  } else {
-    // Meta pages sink here too (see `isMetaPage`): measured 2026-09-02, two of
-    // the top three of "Recently updated" were bookkeeping pages on mimir and
-    // on jarvis alike.
-    copy.sort(
-      (a, b) =>
-        Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
-        pageTimeMs(b, now) - pageTimeMs(a, now) ||
-        byTitle(a, b),
-    );
+  // EXHAUSTIVE, and that is the point of the shape. This used to end in a bare
+  // `else` that sorted anything it did not recognise by `pageTimeMs` — so a mode
+  // added without a branch here LOOKED like it worked, producing "Recently
+  // updated" under another name. The `never` assignment is what makes a fourth
+  // recency mode a compile error instead.
+  switch (mode) {
+    case "title":
+      copy.sort(byTitle);
+      break;
+    case "backlinks":
+      copy.sort((a, b) => b.backlinkCount - a.backlinkCount || byTitle(a, b));
+      break;
+    case "created":
+    case "updated":
+    case "worked": {
+      // Meta pages sink in every recency mode (see `isMetaPage`): measured
+      // 2026-09-02, two of the top three of "Recently updated" were bookkeeping
+      // pages on mimir and on jarvis alike.
+      const key = recencyKeyFor(mode);
+      copy.sort(
+        (a, b) =>
+          Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
+          key(b, now) - key(a, now) ||
+          byTitle(a, b),
+      );
+      break;
+    }
+    default: {
+      const exhaustive: never = mode;
+      void exhaustive;
+    }
   }
   return copy;
+}
+
+/** The per-page key ONE recency mode orders by. Exported because the Series
+ *  SECTION orders its groups by the newest member's key for the mode on screen
+ *  (`orderSeriesGroups`), and two spellings of "what does this mode sort on"
+ *  would be two answers about one list. */
+export function recencyKeyFor(
+  mode: "created" | "updated" | "worked",
+): (p: WikiListing, now?: number) => number {
+  if (mode === "created") return pageAddedMs;
+  if (mode === "worked") return pageWorkedMs;
+  return pageTimeMs;
 }
 
 /** Count pages per top-level folder, honoring the active domain filter (used for

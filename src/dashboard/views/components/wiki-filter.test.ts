@@ -19,6 +19,11 @@ import {
   followupCount,
   hasPlanStatus,
   hasTypedHubs,
+  isRecencySort,
+  localDay,
+  pageDateSignal,
+  pageWorkedMs,
+  recencyKeyFor,
   displayTitleOf,
   shortGraphLabel,
   folderLabelOf,
@@ -1467,4 +1472,105 @@ test("articleUrl carries the jira facet alongside the project one", () => {
   expect(articleUrl("mimir", "relPath", "units/x.md", "pomme-core")).toBe(
     "/wiki?wiki=mimir&relPath=units%2Fx.md&project=pomme-core",
   );
+});
+
+// ── The WORKED axis ─────────────────────────────────────────────────────────
+// The third date axis: the day an agent session last wrote the page, from
+// claude-usage's ledger (`src/wiki/worked-ledger.ts`). Absent on a page whose
+// every write was part of a bulk pass, which is ~a third of a covered wiki —
+// so every case below drives the FALLBACK as well as the hit.
+
+const DAY = 86_400_000;
+/** A fixed "now" so no assertion here is a fact about the clock. */
+const NOW = Date.parse("2026-09-22T12:00:00Z");
+
+test("pageWorkedMs takes the worked date, else the update signal", () => {
+  const worked = NOW - 3 * DAY;
+  // Covered: the ledger's own instant wins outright.
+  expect(pageWorkedMs(page({ workedMs: worked, updated: "2026-09-21" }), NOW)).toBe(worked);
+  // Uncovered: the page still sorts somewhere honest rather than as undated.
+  expect(pageWorkedMs(page({ updated: "2026-09-20" }), NOW)).toBe(Date.parse("2026-09-20"));
+  // No signal at all is 0, exactly as `pageTimeMs` reports it.
+  expect(pageWorkedMs(page({}), NOW)).toBe(0);
+  // A zero/NaN/negative stamp is not a date — fall back, never sort on it.
+  expect(pageWorkedMs(page({ workedMs: 0, updated: "2026-09-20" }), NOW)).toBe(
+    Date.parse("2026-09-20"),
+  );
+  // The future guard applies here too: the ledger's stamps come from whatever
+  // clock wrote the transcript.
+  expect(
+    pageWorkedMs(page({ workedMs: NOW + 10 * DAY, updated: "2026-09-20" }), NOW),
+  ).toBe(Date.parse("2026-09-20"));
+});
+
+test("pageDateSignal's third value names WHICH signal answered", () => {
+  const worked = Date.parse("2026-09-18T09:00:00Z");
+  const covered = pageDateSignal(page({ workedMs: worked, updated: "2026-09-21" }), "worked", NOW);
+  expect(covered).toMatchObject({ ms: worked, kind: "worked" });
+  // A wall-clock instant renders as a LOCAL day, like every other observed
+  // signal (a frontmatter date is echoed verbatim instead).
+  expect(covered!.label).toBe(localDay(new Date(worked)));
+
+  // Uncovered ⇒ the update signal, kind and all. That kind is acceptance 3: the
+  // row's hover says which signal it is reading.
+  const uncovered = pageDateSignal(page({ updated: "2026-09-20" }), "worked", NOW);
+  expect(uncovered).toMatchObject({ ms: Date.parse("2026-09-20"), label: "2026-09-20" });
+  expect(uncovered!.kind).not.toBe("worked");
+
+  // A page with no signal of any kind answers null, like the other two values.
+  expect(pageDateSignal(page({}), "worked", NOW)).toBeNull();
+});
+
+test('sortPages "worked" orders by the worked day, sinking meta pages', () => {
+  const pages = [
+    page({ relPath: "old-work.md", title: "old work", workedMs: NOW - 30 * DAY }),
+    page({ relPath: "log.md", title: "log", workedMs: NOW }),
+    page({ relPath: "new-work.md", title: "new work", workedMs: NOW - 1 * DAY }),
+    // Uncovered: sorts on its UPDATE date, interleaved with the covered ones.
+    page({ relPath: "fallback.md", title: "fallback", updated: "2026-09-19" }),
+  ];
+  expect(sortPages(pages, "worked", NOW).map((p) => p.title)).toEqual([
+    "new work",
+    "fallback",
+    "old work",
+    // Bookkeeping sinks in every recency mode, however fresh — the rail's
+    // `Bookkeeping` header is what explains the tail.
+    "log",
+  ]);
+});
+
+test('"worked" really is a DIFFERENT order from "updated" — the mode is not a relabel', () => {
+  // The headline case, one page each: the ledger says A was worked on most
+  // recently, the file dates say B was updated most recently.
+  const a = page({ relPath: "a.md", title: "a", workedMs: NOW - 1 * DAY, updated: "2026-07-02" });
+  const b = page({ relPath: "b.md", title: "b", workedMs: NOW - 40 * DAY, updated: "2026-09-21" });
+  expect(sortPages([a, b], "worked", NOW).map((p) => p.title)).toEqual(["a", "b"]);
+  expect(sortPages([a, b], "updated", NOW).map((p) => p.title)).toEqual(["b", "a"]);
+});
+
+test("isRecencySort names the three date modes and nothing else", () => {
+  expect(isRecencySort("updated")).toBe(true);
+  expect(isRecencySort("created")).toBe(true);
+  expect(isRecencySort("worked")).toBe(true);
+  expect(isRecencySort("title")).toBe(false);
+  expect(isRecencySort("backlinks")).toBe(false);
+});
+
+test("recencyKeyFor answers the same key each mode sorts on", () => {
+  const p = page({ workedMs: NOW - 5 * DAY, created: "2026-01-01", updated: "2026-09-20" });
+  expect(recencyKeyFor("worked")(p, NOW)).toBe(pageWorkedMs(p, NOW));
+  expect(recencyKeyFor("updated")(p, NOW)).toBe(pageTimeMs(p, NOW));
+  expect(recencyKeyFor("created")(p, NOW)).toBe(pageAddedMs(p, NOW));
+});
+
+test("an unknown sort mode is left ALONE, not silently sorted as updated", () => {
+  // The bare `else` this replaced sorted any unrecognised mode by `pageTimeMs`,
+  // so a mode added without a branch looked like it worked. The switch is
+  // exhaustive now; a value outside the union returns the input order.
+  const pages = [
+    page({ relPath: "b.md", title: "b", updated: "2026-01-01" }),
+    page({ relPath: "a.md", title: "a", updated: "2026-09-21" }),
+  ];
+  const out = sortPages(pages, "nope" as never, NOW);
+  expect(out.map((p) => p.title)).toEqual(["b", "a"]);
 });

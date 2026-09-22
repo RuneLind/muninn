@@ -126,6 +126,23 @@ initDb(config);
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();
 
+// Warm the WORKED-on ledger memo for every registered wiki (fire-and-forget,
+// beside the embeddings warm-up and for the same reason). The index folds in
+// whatever is warm and never waits, and it is itself TTL-cached at 5 minutes —
+// so without this kick the first reader of a cold process gets the axis-less
+// listing for up to a TTL rather than for one request. A wiki registered on an
+// instance with no `CLAUDE_USAGE_URL` fetches nothing: the kick returns at its
+// `urlConfigured` gate. See `src/wiki/worked-ledger.ts`.
+try {
+  const { getWikiRegistry } = await import("./wiki/registry-memo.ts");
+  const { kickWorkedLedgerRefresh } = await import("./wiki/worked-ledger.ts");
+  for (const entry of getWikiRegistry()) kickWorkedLedgerRefresh(entry.root);
+} catch (err) {
+  log.warn("Failed to warm the worked-on ledger: {error}", {
+    error: err instanceof Error ? err.message : String(err),
+  });
+}
+
 // Pre-build browser bundles so the first /traces and /chat request doesn't
 // pay Bun.build latency. The accessors memoize, so this just primes the cache;
 // any build error will resurface on the actual request.

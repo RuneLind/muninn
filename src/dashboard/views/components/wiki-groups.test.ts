@@ -12,6 +12,10 @@ import { describe, expect, test } from "bun:test";
 import {
   FAMILY_MAX,
   FAMILY_MIN,
+  byWorkedDateDesc,
+  bySeriesDateDesc,
+  orderSeriesGroups,
+  workedDateSignal,
   GROUP_FAMILIES_TOGGLE_KEY,
   NO_STATUS_WORD,
   SERIES_CONTINUE_MAX,
@@ -1306,5 +1310,194 @@ describe("clipSeriesTitle — the reader header's `continue at:` label (fix roun
     expect(out.includes("�")).toBe(false);
     // Every code point but the ellipsis is a whole emoji.
     expect([...out].slice(0, -1).every((c) => c === "🎯")).toBe(true);
+  });
+});
+
+// ── The WORKED axis ─────────────────────────────────────────────────────────
+
+describe("the worked comparator — ORDER moves, IDENTITY does not", () => {
+  const DAY = 86_400_000;
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+
+  test("workedDateSignal floors to the local day and outranks every other rung", () => {
+    const worked = Date.parse("2026-09-18T09:00:00Z");
+    const s = workedDateSignal({ workedMs: worked, status_date: "2026-09-21" });
+    expect(s.day).toBe(localDay(new Date(worked)));
+    // The rung sits ABOVE `asserted`, so a same-day tie goes to the worked date.
+    expect(s.rank).toBeGreaterThan(seriesDateSignal({ status_date: "2026-09-21" }).rank);
+    // Uncovered ⇒ the existing chain, verbatim.
+    expect(workedDateSignal({ status_date: "2026-09-21" })).toEqual(
+      seriesDateSignal({ status_date: "2026-09-21" }),
+    );
+    // Not a date: fall through rather than sort on it.
+    expect(workedDateSignal({ workedMs: 0, status_date: "2026-09-21" })).toEqual(
+      seriesDateSignal({ status_date: "2026-09-21" }),
+    );
+  });
+
+  test("byWorkedDateDesc orders newest-worked first, then by rung, then relPath", () => {
+    const rows = [
+      page({ relPath: "a.mdx", workedMs: Date.parse("2026-07-02T10:00:00Z") }),
+      page({ relPath: "b.mdx", workedMs: Date.parse("2026-09-21T10:00:00Z") }),
+      page({ relPath: "c.mdx", status_date: "2026-08-01" }),
+    ];
+    expect([...rows].sort(byWorkedDateDesc).map((p) => p.relPath)).toEqual([
+      "b.mdx",
+      "c.mdx",
+      "a.mdx",
+    ]);
+    // Same DAY, different rungs: the worked date wins the tie.
+    const sameDay = [
+      page({ relPath: "z.mdx", status_date: "2026-09-21" }),
+      page({ relPath: "y.mdx", workedMs: Date.parse("2026-09-21T23:00:00Z") }),
+    ];
+    expect([...sameDay].sort(byWorkedDateDesc).map((p) => p.relPath)).toEqual([
+      "y.mdx",
+      "z.mdx",
+    ]);
+  });
+
+  // ── Acceptance 7, half one: a network field never decides a write ──────────
+  test("the head, the newest plan and bySeriesDateDesc are IDENTICAL with workedMs present", () => {
+    const base = [
+      member("plans/head.mdx", {
+        series: "alpha",
+        seriesLabel: "Alpha",
+        status_date: "2026-08-01",
+        plan_status: "in-flight",
+      }),
+      member("plans/newer.mdx", {
+        series: "alpha",
+        status_date: "2026-09-01",
+        plan_status: "ready",
+      }),
+      member("blogs/about.mdx", { series: "alpha", status_date: "2026-09-10" }),
+    ];
+    // A worked map that DISAGREES with every status_date, hardest case first:
+    // the oldest-asserted page is the most recently worked one.
+    const worked = base.map((p, i) =>
+      page({ ...p, workedMs: Date.parse("2026-09-21T10:00:00Z") - i * DAY }),
+    );
+
+    expect(seriesHead(worked)!.relPath).toBe(seriesHead(base)!.relPath);
+    expect(newestSeriesPlan(worked)!.relPath).toBe(newestSeriesPlan(base)!.relPath);
+    expect([...worked].sort(bySeriesDateDesc).map((p) => p.relPath)).toEqual(
+      [...base].sort(bySeriesDateDesc).map((p) => p.relPath),
+    );
+    // The group's own identity fields, which the lint and the reader header read.
+    const g = (ps: WikiListing[]) => groupSeries(ps)[0]!;
+    expect(g(worked).label).toBe(g(base).label);
+    expect(g(worked).latestRel).toBe(g(base).latestRel);
+    expect(g(worked).total).toBe(g(base).total);
+  });
+
+  // ── Acceptance 7, half two: the display half really does move ─────────────
+  test("…while the FOLD and the reader strip's set DO reorder", () => {
+    const base = [
+      member("plans/head.mdx", { series: "alpha", seriesLabel: "Alpha", status_date: "2026-08-01" }),
+      member("plans/newer.mdx", { series: "alpha", status_date: "2026-09-01" }),
+      member("blogs/about.mdx", { series: "alpha", status_date: "2026-09-10" }),
+    ];
+    const worked = [
+      page({ ...base[0]!, workedMs: Date.parse("2026-09-21T10:00:00Z") }),
+      page({ ...base[1]!, workedMs: Date.parse("2026-07-02T10:00:00Z") }),
+      page({ ...base[2]!, workedMs: Date.parse("2026-08-15T10:00:00Z") }),
+    ];
+    expect(groupSeries(base)[0]!.members.map((m) => m.relPath)).toEqual([
+      "blogs/about.mdx",
+      "plans/newer.mdx",
+      "plans/head.mdx",
+    ]);
+    expect(groupSeries(worked)[0]!.members.map((m) => m.relPath)).toEqual([
+      "plans/head.mdx",
+      "blogs/about.mdx",
+      "plans/newer.mdx",
+    ]);
+    // The reader strip is the fold's order REVERSED, so it must move with it —
+    // `seriesMembersOf` is the one function both surfaces read.
+    expect(seriesMembersOf(worked, "alpha").members.map((m) => m.relPath)).toEqual(
+      groupSeries(worked)[0]!.members.map((m) => m.relPath),
+    );
+  });
+
+  test("groupMonths takes the third value and buckets by the worked day", () => {
+    // No date prefix in the filename, so the month comes from the sorted signal.
+    const pages = [
+      page({ relPath: "archive/alpha.mdx", workedMs: Date.parse("2026-07-14T10:00:00Z"), updated: "2026-09-20" }),
+      page({ relPath: "archive/beta.mdx", workedMs: Date.parse("2026-09-02T10:00:00Z"), updated: "2026-09-20" }),
+    ];
+    expect(groupMonths(pages, "worked", NOW).map((g) => g.label)).toEqual(["2026-09", "2026-07"]);
+    // Under "updated" both share one month — which is the flattening the axis
+    // exists to undo.
+    expect(groupMonths(pages, "updated", NOW).map((g) => g.label)).toEqual(["2026-09"]);
+  });
+
+  test("railGroups keeps the archive's month folding ON in worked mode", () => {
+    const pages = [
+      page({ relPath: "archive/2026-07-14-alpha.mdx" }),
+      page({ relPath: "archive/2026-09-02-beta.mdx" }),
+    ];
+    const opts = { folder: "archive", projects: {}, now: NOW };
+    expect(railGroups(pages, { ...opts, sort: "worked" }).map((g) => g.kind)).toEqual([
+      "month",
+      "month",
+    ]);
+    // …and the two-value test it replaced would have returned families here.
+    expect(railGroups(pages, { ...opts, sort: "updated" }).every((g) => g.kind === "month")).toBe(
+      true,
+    );
+  });
+});
+
+// ── Acceptance 8: the Series SECTION's own row order ─────────────────────────
+describe("orderSeriesGroups", () => {
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+  /** Three series that all share ONE updated date — the live 15-way tie on
+   *  mimir, shrunk — and differ only in when they were worked on. */
+  const pages = [
+    member("plans/zulu.mdx", {
+      series: "zulu",
+      seriesLabel: "Zulu",
+      updated: "2026-09-21",
+      workedMs: Date.parse("2026-09-20T10:00:00Z"),
+    }),
+    member("plans/alpha.mdx", {
+      series: "alpha",
+      seriesLabel: "Alpha",
+      updated: "2026-09-21",
+      workedMs: Date.parse("2026-07-02T10:00:00Z"),
+    }),
+    member("plans/mike.mdx", {
+      series: "mike",
+      seriesLabel: "Mike",
+      updated: "2026-09-21",
+      workedMs: Date.parse("2026-09-21T10:00:00Z"),
+    }),
+  ];
+  const groups = groupSeries(pages);
+  const labels = (sort: "updated" | "created" | "worked" | "title" | "backlinks") =>
+    orderSeriesGroups(groups, { sort, now: NOW }).map((g) => g.label);
+
+  test("worked mode orders by each group's newest member's worked day", () => {
+    expect(labels("worked")).toEqual(["Mike", "Zulu", "Alpha"]);
+  });
+
+  test("the recency modes tie on the shared date and fall back to the label", () => {
+    // Every group's newest member carries the same `updated` — which is exactly
+    // the tie first-appearance broke by scan order. The label makes it stable.
+    expect(labels("updated")).toEqual(["Alpha", "Mike", "Zulu"]);
+  });
+
+  test("title mode is alphabetical by label; backlinks keeps first appearance", () => {
+    expect(labels("title")).toEqual(["Alpha", "Mike", "Zulu"]);
+    // Under a backlink sort the caller's order already means "the group holding
+    // the most-connected page first", which is the answer that mode asks for.
+    expect(labels("backlinks")).toEqual(groups.map((g) => g.label));
+  });
+
+  test("it never mutates the array it is handed", () => {
+    const before = groups.map((g) => g.label);
+    orderSeriesGroups(groups, { sort: "worked", now: NOW });
+    expect(groups.map((g) => g.label)).toEqual(before);
   });
 });

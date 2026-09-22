@@ -1072,6 +1072,140 @@ opener on a page no series can claim, a scroll inside the popover does not
 dismiss it, focus returns to the opener, and the popover's contrast in both
 themes).
 
+### Worked-on recency (`worked-ledger.ts`, `workedMs`)
+
+The rail's THIRD date axis, and the only one that comes from outside this
+machine: **the day an agent session last WROTE the page**, read out of
+claude-usage's `session_files` ledger. It exists because the other two collapse
+under a mechanical edit — twelve pages joined into one `series:` all read `3h`
+old on mtime, and a git touch date is flattened by ordinary small commits the
+sweep threshold cannot tune away (measured 2026-09-21: four of twelve pages
+sharing 09-15, three sharing 09-21, all from authored 1–3-file commits).
+
+**One request, server-side.** `GET <CLAUDE_USAGE_URL>/api/files?root=<abs>&summary=1`
+answers one row per page with a qualifying write — `{p, w, b?, s}`, `p`
+wiki-relative and `w` epoch ms — with any session that wrote `bulk` (10) or more
+pages under that root discounted WHOLE, upstream, where the corpus is in hand.
+`b` (the bash-derived touch) rides the payload and is deliberately **unread**:
+on the laptop's corpus `bash` covers 994 distinct paths against `write`'s 402 and
+a `sed -i` loop is exactly how a mechanical pass runs, so folding it in is a
+decision of its own. The BROWSER never reaches claude-usage (tailnet viewers,
+mixed content under `tailscale serve`), which is why the field is computed here
+and shipped on the listing.
+
+**A page with no worked date is the ordinary case, not an error.** Absent means
+one of four things and none of them is a failure: the ledger holds no write for
+the page, every write it holds was discounted as a bulk pass, the memo has not
+warmed yet, or this instance is pointed at no claude-usage. Post-discount
+coverage was measured at mimir 64%, melosys-kode-wiki 37%, jarvis 6% and **capra
+0%** — so every consumer falls back PER PAGE rather than treating absence as
+"old", and `workedMs ?? pageTimeMs` is the whole sort key.
+
+**The memo, and the two TTLs in phase.** `refreshWorkedLedger` fills a per-root
+memo that the index build folds in as a post-pass beside the git dates and
+**never awaits** — a page load must not inherit a tailnet service's latency. The
+index is itself TTL-cached at five minutes, so a refresh that lands mid-TTL does
+not appear until the next rebuild; the kick at server boot (`src/index.ts`, for
+every registered wiki) is what keeps the cold window to the first index build
+rather than to the first reader, and `buildWikiIndex` kicks again whenever the
+memo is older than that TTL. Roots are independent, a failure never blanks a
+good memo (one bad poll must not take the axis off every page), and an
+unconfigured `CLAUDE_USAGE_URL` fetches nothing at all — the `/models` card's
+"left unset and unreachable, hide it" rule one layer down.
+
+**Four degrades, four distinct warns, every one naming the base URL.** A non-200,
+an over-cap or timed-out body, a body with **no `pages` key**, and malformed
+rows. The third is the one the strictness exists for and the plan's most likely
+day-one failure: an un-upgraded claude-usage ignores `summary=1` and answers
+**200 with the raw `{root, sessions, total, rows, limit, offset}` row form** —
+~800 KB, inside both bounds, so nothing times out and nothing overflows. Read as
+an answer it is a wiki nobody has ever written. One malformed row rejects the
+WHOLE body for the same reason: half the contract is a wrong service, and a
+half-read of it puts a partial axis on screen with nothing saying so.
+
+**Path matching, and the guard that can actually fire.** Rows key on the
+NORMALIZED wiki-relative path (`normalizeWorkedPath` — posix, no leading `./`,
+lower-cased), deliberately looser than the git walk's raw-relPath keying: that
+walk and the index read one filesystem through one tool, while this map comes
+from a second process reading a case-insensitive filesystem through whatever
+spelling an agent typed. The guard is a RATE, `WORKED_MATCH_WARN_RATE` (50%) over
+the rows RETURNED — an absolute count carries no signal, since a healthy mimir
+refresh leaves ~68 rows for pages since renamed or deleted (the measured healthy
+band is 75–90%), while a root whose ledger spelling differs matches ~0%. Gated on
+a non-empty answer, like its `GIT_DATE_MISS_WARN_RATE` sibling.
+
+⚠️ **Upstream matches `?root=` as a plain string PREFIX and runs no `realpath`.**
+So a wiki registered through a symlinked path can answer zero rows while the
+ledger holds every one of them. The configured root is asked FIRST (it is what
+the operator named) and a ZERO-row answer is retried once against the realpath;
+a non-empty answer is never retried.
+
+**`worked` moves ORDER, never IDENTITY — the Decision this axis turns on.**
+`seriesDateSignal` and its chain (`bySeriesDateDesc`, `newestSeriesPlan`,
+`seriesHead`, `SERIES_DATE_RANK`) are UNTOUCHED, because they decide which page a
+series IS about: `lint-series.ts` picks the head a `series_label:` fix writes on
+with them, and `related.ts` orders the Related-work panel with them. A field that
+is absent on a cold memo would make two lint runs over one corpus propose two
+different heads, and one Accept would then write different bytes. A SEPARATE
+comparator — `workedDateSignal` / `byWorkedDateDesc`, worked day first and the
+existing chain as the per-page fallback — is threaded through the THREE display
+surfaces together: `describeSeries`'s member order, `groupSeries`'s fold, and the
+reader strip (which is the fold's order reversed, "so the two cannot sequence one
+series two ways"). Moving one without the others is what would break that
+invariant. `seriesHead`/`newestSeriesPlan` are safe under the reorder by
+construction — both re-sort what they are handed with `bySeriesDateDesc`, whose
+last tiebreak is the relPath and so is a TOTAL order. What may legitimately
+disagree, stated so nobody files it: the fold's FIRST ROW need not be its head,
+its `▸` or the lint's proposed head. Pinned in BOTH directions by
+`worked-order-invariant.test.ts` — identical lint findings and `computeRelated`
+rows with `workedMs` present and absent, AND a fold that really does reorder, so
+neither half can pass vacuously.
+
+**The Series SECTION's own order is a deliberate divergence.** The rail's rule is
+that a group sits where the reader's sort put its first member; measured on mimir
+2026-09-22, that left its 30 series carrying only 14 distinct newest-member days,
+15 of them sharing one — half the section ordered by nothing but a title. So
+`orderSeriesGroups` orders the section by each group's newest member's key FOR
+THE MODE ON SCREEN in the three recency modes (ties falling back to the label),
+alphabetically by label in `title` mode, and keeps FIRST APPEARANCE in
+`backlinks` — where that already means "the group holding the most-connected page
+first", and link counts do not tie the way a corpus of same-day dates does. The
+members INSIDE a fold are unaffected: they are newest-first whatever the sort.
+
+**The client's five quiet sites**, three of which failed silently on a two-value
+test: `WikiSortMode` gains `worked` and `sortPages`' mode switch is EXHAUSTIVE
+(its bare `else` sorted any unknown mode by `pageTimeMs`, so a forgotten branch
+looked like it worked); `pageDateSignal`/`groupMonths` take the third `which`
+value; `wiki-groups.ts`' `dateSort` gate and `wiki-browser.ts`' `metaTail` both
+read the shared `isRecencySort` rather than testing two values (the first turned
+the archive's month folding off, the second sank the bookkeeping rows with no
+`Bookkeeping` header to explain the tail); and `views/wiki-page.ts` owns the
+`<option value="worked" hidden>`. **The option is HIDDEN, not disabled, on a wiki
+whose `workedCoverage.matched` is 0** — offering it on capra, where 93% of pages
+have a write row and every one is a bulk pass, is offering "Recently updated"
+under a second name. An ABSENT `workedCoverage` (a cold memo, a degraded ledger,
+an older server) leaves the option as it is: "nothing is known yet" is not a
+verdict. `pageHeaderDates` needs nothing — it reads `updatedSignal`, which never
+mints a `worked` kind, so the article header stays a created/updated question.
+
+**In worked mode the row's hover names the signal** (`2026-07-02 (worked)` /
+`2024-03-01 (updated)`), because the axis is sparse by construction and a bare
+day would claim a worked date an uncovered page never got. The suffix goes on the
+`title=` ONLY: `formatRailAge` reads the label as a BARE day and would fall back
+to the stamp's local day for a decorated one, shifting a frontmatter date west of
+UTC.
+
+Acceptance: `worked-ledger.test.ts` (the parse — including the raw row form —
+the memo, the realpath retry, the rate guard at its boundary and the index
+fold), `worked-order-invariant.test.ts` (the pair above),
+`views/components/wiki-filter.test.ts` + `wiki-groups.test.ts` (the sort, the
+chip signal, `groupMonths`' third value, the comparator and the section order)
+and `e2e/wiki-worked-recency.spec.ts` (a twelve-page fixture spreading 09-21 →
+07-02 with a swept page on its fallback, the chip, the Series section, the hidden
+option, and all three ledger degrades in ONE boot — asserted against the spawned
+server's own stderr, since "nothing warned and the axis is just empty" is the
+failure the `pages`-key strictness exists to prevent).
+
 ### Lint check 8 — the series checks, and the only lint that proposes a fix
 
 The rail can only fold what somebody NAMED, and nothing told a reader which
