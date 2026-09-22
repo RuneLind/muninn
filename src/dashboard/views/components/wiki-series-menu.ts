@@ -137,6 +137,7 @@ export interface SeriesMenuModel {
 export function buildSeriesMenu(
   all: readonly WikiListing[],
   relPath: string,
+  now?: number,
 ): SeriesMenuModel | undefined {
   const key = normalizeRel(relPath);
   const page = all.find((p) => normalizeRel(p.relPath) === key);
@@ -166,8 +167,13 @@ export function buildSeriesMenu(
   ranked.sort((a, b) => b.newest - a.newest || a.opt.label.localeCompare(b.opt.label));
   const options = ranked.map((r) => r.opt);
 
+  // ONE clock read, threaded from the caller's server-anchored instant where it
+  // has one (`wiki-browser.ts`'s `recencyNow()`): the member order's future
+  // guard compares against it, and a bare `Date.now()` here would be the
+  // VIEWER's clock — a >48h-slow machine judging every frontmatter date in the
+  // wiki implausible at once.
   const { members, head } = current
-    ? seriesMembersOf(all, current)
+    ? seriesMembersOf(all, current, now)
     : { members: [] as WikiListing[], head: undefined };
   // The RAW relPath, never `normalizeRel`'s lower-cased form: this is a WRITE
   // target that goes back over the wire as `relPath`.

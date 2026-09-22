@@ -1,12 +1,16 @@
 import { setupLogging, getLog } from "./logging.ts";
-import { ConfigError, loadConfig } from "./config.ts";
+import { ConfigError, loadConfig, resolveServingProfile } from "./config.ts";
 import { discoverActiveBots, discoverAllBots } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createSlackApp } from "./slack/index.ts";
 import { registerSlackApp, getAllSlackApps } from "./slack/registry.ts";
 import { createDashboardRoutes } from "./dashboard/index.ts";
-import { NAIS_DROPPED_ROUTE_GROUPS } from "./dashboard/route-groups.ts";
+import {
+  NAIS_DROPPED_ROUTE_GROUPS,
+  droppedRouteGroups,
+  shouldKickWorkedLedgerAtBoot,
+} from "./dashboard/route-groups.ts";
 import { activityLog } from "./observability/activity-log.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
@@ -125,6 +129,30 @@ initDb(config);
 
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();
+
+// Warm the WORKED-on ledger memo for every registered wiki (fire-and-forget,
+// beside the embeddings warm-up and for the same reason). The index folds in
+// whatever is warm and never waits, and it is itself TTL-cached at 5 minutes —
+// so without this kick the first reader of a cold process gets the axis-less
+// listing for up to a TTL rather than for one request. A wiki registered on an
+// instance with no `CLAUDE_USAGE_URL` fetches nothing: the kick returns at its
+// `urlConfigured` gate. See `src/wiki/worked-ledger.ts`.
+//
+// Skipped whole under a profile that drops the `wiki` route group: in a nais pod
+// there is no reader to warm the axis for, the wiki roots are working trees that
+// do not exist there, and the claude-usage this would dial is a launchd service
+// on another machine's loopback.
+if (shouldKickWorkedLedgerAtBoot(config.profile ?? resolveServingProfile())) {
+  try {
+    const { getWikiRegistry } = await import("./wiki/registry-memo.ts");
+    const { kickWorkedLedgerRefresh } = await import("./wiki/worked-ledger.ts");
+    for (const entry of getWikiRegistry()) kickWorkedLedgerRefresh(entry.root);
+  } catch (err) {
+    log.warn("Failed to warm the worked-on ledger: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 // Pre-build browser bundles so the first /traces and /chat request doesn't
 // pay Bun.build latency. The accessors memoize, so this just primes the cache;

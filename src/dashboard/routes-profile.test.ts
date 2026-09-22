@@ -2,7 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { Hono } from "hono";
 import type { Config } from "../config.ts";
 import { createDashboardRoutes } from "./routes.ts";
-import { NAIS_DROPPED_ROUTE_GROUPS } from "./route-groups.ts";
+import { NAIS_DROPPED_ROUTE_GROUPS, shouldKickWorkedLedgerAtBoot } from "./route-groups.ts";
 import { renderNav } from "./views/shared-styles.ts";
 
 /**
@@ -194,5 +194,24 @@ describe("renderNav under the nais profile", () => {
 
   test("no options at all is the default profile, byte for byte", () => {
     expect(renderNav("dashboard")).toBe(renderNav("dashboard", { profile: "default" }));
+  });
+});
+
+describe("the worked-on ledger's boot kick (fix round 2)", () => {
+  /**
+   * The gate `src/index.ts` warms the memo behind. A predicate rather than an
+   * inline test at the boot site, so both profiles are drivable: under `nais`
+   * there is no `/wiki` reader to warm the axis for, the wiki roots are working
+   * trees that do not exist in a pod, and the claude-usage it would dial is a
+   * launchd service on another machine's loopback.
+   */
+  test("the default profile kicks it and `nais` does not", () => {
+    expect(shouldKickWorkedLedgerAtBoot("default")).toBe(true);
+    expect(shouldKickWorkedLedgerAtBoot("nais")).toBe(false);
+  });
+
+  test("…and it is DERIVED from the drop set, not from the profile name", () => {
+    // So a later profile that drops `wiki` skips the kick with no second edit.
+    expect(NAIS_DROPPED_ROUTE_GROUPS.includes("wiki")).toBe(true);
   });
 });

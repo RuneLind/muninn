@@ -26,11 +26,16 @@
 import {
   STATUS_ORDER,
   isMetaPage,
+  isRecencySort,
   localDay,
   pageDateSignal,
   pageFolder,
   pageStemOf,
+  recencyKeyFor,
+  recencyKindFor,
+  workedSignal,
   type WikiListing,
+  type WikiRecencyFields,
   type WikiSortMode,
 } from "./wiki-filter.ts";
 import { normalizeRel } from "./wiki-nav.ts";
@@ -129,10 +134,17 @@ export interface RailGroup {
    *
    * A family's and a month's are in the order the caller's sort gave them, so
    * the reader's own sort decides what the fold opens into. A SERIES is always
-   * newest-first by {@link seriesDateMs}, whatever the sort: the fold is a
+   * newest-first by {@link workedDateSignal}, whatever the sort: the fold is a
    * timeline of one piece of work and "where do I go now" is its first row —
    * re-ordering it by backlink count or title would answer a different question
    * from the one the `▸` and the reader header answer.
+   *
+   * ⚠️ That key falls back per page, so a series' fold order is worked-first in
+   * EVERY sort mode whenever the ledger memo is warm — and unchanged from
+   * {@link seriesDateMs}'s day for a wiki the ledger has nothing for. Two
+   * instances reading one wiki, one warm and one cold, can therefore open the
+   * same fold in two orders under "Recently updated". Accepted: the alternative
+   * is a fold whose order depends on a sort the fold does not show.
    */
   members: WikiListing[];
   /**
@@ -381,6 +393,119 @@ export function bySeriesDateDesc(a: PageDateOrder, b: PageDateOrder): number {
 }
 
 /**
+ * The rung a WORKED date sits on, above every rung {@link SERIES_DATE_RANK}
+ * holds. Its own constant rather than a fifth key in that object, because that
+ * object is read by the write-deciding chain (`seriesHead`, `newestSeriesPlan`,
+ * `lint-series.ts`) and this rung must never reach it.
+ *
+ * It is the TOP of the fallback chain, not a second value in a binary one:
+ * below it the fold keeps {@link seriesDateSignal}'s own rungs
+ * (`asserted` > `git` > `mtime`), so two uncovered members sharing a day still
+ * order authored-date-first rather than by relPath. Fix round 1 collapsed the
+ * rank to two values and lost that tiebreak with it.
+ */
+const SERIES_WORKED_RANK = 4;
+
+/** What {@link byWorkedDateDesc} reads: the worked key the rail's own chip is
+ *  computed from, PLUS the fields the fold falls back through. A structural
+ *  subset for {@link PageDateFields}' reason — the server's `WikiPageMeta`
+ *  satisfies it too. */
+type WorkedDateFields = WikiRecencyFields & PageDateFields;
+
+/**
+ * The DISPLAY order of a series, at DAY granularity: a thin day-floored wrapper
+ * over {@link workedSignal} — the same key, the same future guard and the same
+ * per-page fallback the rail row's own date chip reads.
+ *
+ * ── One key, because two of them disagreed in three measured ways ───────────
+ * This was a second chain (worked-or-{@link seriesDateSignal}, with no future
+ * guard) beside the rail's (worked-or-`updatedSignal`, guarded). On live mimir
+ * that produced: a `workedMs` of 2027 falling back in the rail while sorting
+ * first and printing `2027-06-01` in the fold and the strip; a series the
+ * SECTION placed by one chain whose fold cells were printed by the other; and an
+ * expanded fold reading `09-21, 09-17, 09-17, 09-20, 09-15`, because its members
+ * sorted on a date their own chips did not show. The four surfaces — the rail
+ * row in worked mode, the Series section's order, the fold's members via
+ * {@link describeSeries}, and the reader strip — read one signal now.
+ *
+ * ⚠️ The chain is worked-then-{@link seriesDateSignal}, and the second rung is
+ * the fix round 2 correction. Fix round 1 fell an uncovered member back to the
+ * rail's UPDATE chain, which on a COLD instance — no ledger, the mini, the first
+ * build after boot, and 537 of mimir's 549 pages even when warm — lands on
+ * `gitTouchedMs`, a date ordinary 1–3-file commits flatten: measured on a mimir
+ * clone, 23 of 30 series folds reordered against `origin/main` and 25 of 30
+ * collapsed to one tie-day, i.e. to alphabetical, with the reader strip then
+ * reading reverse-alphabetical. `seriesDateSignal` reads the authored
+ * `status_date:` first, which is the chronology the pages themselves assert.
+ *
+ * The cost, stated so nobody files it: in Worked-on mode an UNCOVERED member is
+ * ordered by the series chain while its own row chip still shows the update
+ * date, so a fold can read non-monotonic across covered and uncovered members.
+ * The authored chronology wins over a flat git date.
+ *
+ * ── Order, never identity ───────────────────────────────────────────────────
+ * It is a second COMPARATOR rather than a change to `seriesDateSignal`, and that
+ * split is the Decision the plan turns on. `seriesDateSignal` decides which page
+ * a series IS about — the head, the `▸`, `lint-series.ts`'s proposed head,
+ * `related.ts`'s panel — and `workedMs` comes off a network memo that is absent
+ * on a cold boot and on an unreachable service. Folding it into that chain would
+ * let two lint runs over one corpus propose two different heads, and a gardener
+ * Accept then writes different bytes.
+ *
+ * What may legitimately disagree, stated so nobody files it: the fold's FIRST
+ * ROW need not be its head or its `▸`. Those answer "which page names this
+ * work"; the order answers "what happened most recently".
+ */
+export function workedDateSignal(p: WorkedDateFields, now?: number): SeriesDateSignal {
+  // The WORKED rung comes through `workedSignal` — the ONE guarded worked key,
+  // future guard and all — rather than through a second `p.workedMs` read, so
+  // the rail's chip and this comparator can never disagree about whether the
+  // ledger answered for a page. `kind === "worked"` is that answer; anything
+  // else means the guard rejected it or the ledger holds nothing.
+  const signal = workedSignal(p, now);
+  if (signal.kind === "worked") {
+    // A ledger instant, so its LOCAL day is the spelling to floor by — the same
+    // split `seriesDateSignal` makes between an authored day and an observed one.
+    const day = localDay(new Date(signal.ms));
+    return { ms: calendarDayMs(day) ?? 0, day, rank: SERIES_WORKED_RANK };
+  }
+  return seriesDateSignal(p);
+}
+
+/** Newest WORKED day first, then the rung, then relPath — {@link bySeriesDateDesc}
+ *  one axis over. See {@link workedDateSignal} for why it is a second comparator.
+ *
+ *  `now` is optional and captured ONCE per sort by its callers, for `sortPages`'
+ *  reason: the future guard compares against it, so a per-comparison clock read
+ *  makes the comparator impure at the 48h boundary. */
+export function byWorkedDateDesc(
+  a: WorkedDateFields & Pick<WikiListing, "relPath">,
+  b: WorkedDateFields & Pick<WikiListing, "relPath">,
+  now?: number,
+): number {
+  const sa = workedDateSignal(a, now);
+  const sb = workedDateSignal(b, now);
+  return (
+    sb.ms - sa.ms ||
+    sb.rank - sa.rank ||
+    normalizeRel(a.relPath).localeCompare(normalizeRel(b.relPath))
+  );
+}
+
+/**
+ * The reader strip's own order: the fold's, REVERSED.
+ *
+ * One exported spelling rather than an inline `[...members].reverse()` in the
+ * view, because that reversal IS the strip's whole invariant — the rail answers
+ * "where do I go now" and the strip "how did this get here", and the two must
+ * never sequence one series two ways. De-reversing the view's copy left 370
+ * tests green; this one is pinned.
+ */
+export function seriesStripOrder<T>(members: readonly T[]): T[] {
+  return [...members].reverse();
+}
+
+/**
  * The plan statuses that are an END rather than a place to continue. A
  * superseded plan has a successor and an abandoned one has nobody working in
  * it; both routinely carry a `status_date` NEWER than the plan that replaced
@@ -461,7 +586,8 @@ export function clipSeriesTitle(title: string): string {
 
 /** What one series holds, and the two members every surface reads off it. */
 export interface SeriesMembers {
-  /** Every member in the listing handed in, NEWEST FIRST ({@link seriesDateMs}). */
+  /** Every member in the listing handed in, NEWEST FIRST
+   *  ({@link workedDateSignal} — the worked day, falling back per page). */
   members: WikiListing[];
   /** The member the label is read off — see {@link seriesHead}. */
   head?: WikiListing;
@@ -490,15 +616,33 @@ export interface SeriesMembers {
  * so `N pages` disagreed with the fold's own total, and an attachment child
  * carrying a `series_label:` could rename the header alone.
  */
-export function seriesMembersOf(all: readonly WikiListing[], key: string): SeriesMembers {
+export function seriesMembersOf(
+  all: readonly WikiListing[],
+  key: string,
+  now?: number,
+): SeriesMembers {
   const members = seriesMembersByFoldKey(all).get(seriesCensusKey(key)) ?? [];
-  return describeSeries(members);
+  return describeSeries(members, now);
 }
 
 /** `members` sorted newest first, with the head and the newest plan read off
- *  them — the derivation {@link groupSeries} and {@link seriesMembersOf} share. */
-function describeSeries(members: readonly WikiListing[]): SeriesMembers {
-  const sorted = [...members].sort(bySeriesDateDesc);
+ *  them — the derivation {@link groupSeries} and {@link seriesMembersOf} share.
+ *
+ *  The ORDER is {@link byWorkedDateDesc}; the head and the newest plan are NOT.
+ *  Both re-sort what they are handed with {@link bySeriesDateDesc}, whose last
+ *  tiebreak is the relPath and so is a TOTAL order — meaning neither can depend
+ *  on the order it was given. That is what lets the display order move here
+ *  without moving one identity with it, and it is the property the invariant
+ *  test pins.
+ *
+ *  ONE clock read per call, threaded into every comparison — the caller's
+ *  server-anchored instant where it has one. A `Date.now()` inside the
+ *  comparator is impure at the future guard's 48h boundary, and the bare
+ *  default is the VIEWER's clock, which a >48h-slow machine would use to judge
+ *  every frontmatter date in the wiki implausible at once. */
+function describeSeries(members: readonly WikiListing[], nowMs?: number): SeriesMembers {
+  const now = nowMs ?? Date.now();
+  const sorted = [...members].sort((a, b) => byWorkedDateDesc(a, b, now));
   return { members: sorted, head: seriesHead(sorted), latest: newestSeriesPlan(sorted) };
 }
 
@@ -585,7 +729,10 @@ export function seriesMembersByFoldKey<T extends SeriesMemberFields>(
 export function groupSeries(
   pages: readonly WikiListing[],
   all: readonly WikiListing[] = pages,
+  nowMs?: number,
 ): RailGroup[] {
+  // ONE clock read for every comparison in this build — see `describeSeries`.
+  const now = nowMs ?? Date.now();
   /** fold key → every member in the WHOLE listing — what the label, the total
    *  and the newest plan are read from. */
   const whole = seriesMembersByFoldKey(all);
@@ -622,7 +769,7 @@ export function groupSeries(
       .get(fold)!
       .filter((c) => memberKeys.has(normalizeRel(c.parent ?? "")));
     if (!members.length && !supersededChildren.length) continue;
-    const described = describeSeries(whole.get(fold)!);
+    const described = describeSeries(whole.get(fold)!, now);
     const head = described.head;
     groups.push({
       kind: "series",
@@ -632,7 +779,11 @@ export function groupSeries(
       // under the spelling of the page that heads it rather than under whichever
       // variant happened to sort first.
       label: head?.seriesLabel || (head ? seriesKeyOf(head) : fold),
-      members: [...members].sort(bySeriesDateDesc),
+      // The FOLD's order — the second of the three display surfaces, moved with
+      // `describeSeries`'s above and the reader strip's below, because the strip
+      // is this order reversed and one moving without the others is exactly how
+      // one series gets sequenced two ways.
+      members: [...members].sort((a, b) => byWorkedDateDesc(a, b, now)),
       supersededChildren,
       total: described.members.length,
       ...(described.latest ? { latestRel: normalizeRel(described.latest.relPath) } : {}),
@@ -668,6 +819,63 @@ export function withoutSeriesMembers(
 ): WikiListing[] {
   const claimed = seriesClaimedKeys(seriesGroups);
   return claimed.size ? pages.filter((p) => !claimed.has(normalizeRel(p.relPath))) : [...pages];
+}
+
+/**
+ * The SERIES SECTION's own row order — a deliberate divergence from the rail's
+ * "a group sits where the reader's sort put its first member" contract.
+ *
+ * First-appearance is what the rail does everywhere else, and it is what produced
+ * the tie this exists to break: measured on mimir 2026-09-22, its 30 series carry
+ * only 14 distinct newest-member days under `seriesDateSignal`, 15 of them sharing
+ * one — so half the section was ordered by nothing but the title of whichever
+ * member happened to sort first, which reads as unsorted. Keyed on each group's
+ * newest member's key FOR THE MODE ON SCREEN, the worked axis resolves the same
+ * corpus to a day per series.
+ *
+ * Per mode, and each answer is the one the reader's sort is already asking for:
+ *
+ *  - `worked` orders by `max(workedDateSignal)` — the FOLD's own comparator, so
+ *    the section and the fold cannot place one group two ways — and `updated` /
+ *    `created` by `max(recencyKeyFor(mode))`, the mode's own row key, over the
+ *    members PRESENT in this render, newest first;
+ *  - `title` orders alphabetically by the group's label, which is what that mode
+ *    means one level up;
+ *  - `backlinks` keeps FIRST APPEARANCE — under that sort it already means "the
+ *    group holding the most-connected page first", and link counts do not tie the
+ *    way a corpus of same-day dates does.
+ *
+ * Ties in the recency modes fall back to the label, so the order is stable rather
+ * than scan order. The members INSIDE a fold are untouched: they are always
+ * newest-first by {@link byWorkedDateDesc} whatever the sort.
+ */
+export function orderSeriesGroups(
+  groups: readonly RailGroup[],
+  opts: { sort: WikiSortMode; now?: number },
+): RailGroup[] {
+  if (opts.sort === "backlinks") return [...groups];
+  const byLabel = (a: RailGroup, b: RailGroup) => a.label.localeCompare(b.label);
+  if (opts.sort === "title") return [...groups].sort(byLabel);
+  // In WORKED mode the section is keyed on THIS fold's own comparator, so a
+  // group is never placed by a date its fold does not print. The two other
+  // recency modes keep the mode's own row key: there the section follows the
+  // row chips and the fold follows the worked-first series chronology, so the
+  // two can differ for any member — a covered one's worked day places nothing
+  // in the section, an uncovered one's two chains part (see {@link workedDateSignal}).
+  const key =
+    opts.sort === "worked"
+      ? (m: WikiListing, now?: number) => workedDateSignal(m, now).ms
+      : recencyKeyFor(opts.sort);
+  const newest = new Map<RailGroup, number>();
+  for (const g of groups) {
+    let best = 0;
+    for (const m of [...g.members, ...g.supersededChildren]) {
+      const ms = key(m, opts.now);
+      if (ms > best) best = ms;
+    }
+    newest.set(g, best);
+  }
+  return [...groups].sort((a, b) => newest.get(b)! - newest.get(a)! || byLabel(a, b));
 }
 
 /**
@@ -972,7 +1180,7 @@ export function groupFamilies(
  */
 export function groupMonths(
   pages: readonly WikiListing[],
-  which: "added" | "updated",
+  which: "added" | "updated" | "worked",
   now?: number,
 ): RailGroup[] {
   const order: string[] = [];
@@ -1065,11 +1273,15 @@ export function railGroups(
     now?: number;
   },
 ): RailGroup[] {
-  const dateSort = opts.sort === "updated" || opts.sort === "created";
+  // `isRecencySort`, not a two-value test: this gate silently turned the archive's
+  // month folding OFF in any mode it had not been told about, which is a feature
+  // disappearing rather than a branch failing. It is a type PREDICATE, so the
+  // mode goes straight to `recencyKindFor` rather than to a second spelling of
+  // the mode→kind map beside the test.
   // Lower-cased on both sides, like `folderOf` and every other relPath
   // comparison in the rail: a facet value of `Archive` is the same folder.
-  if ((opts.folder || "").toLowerCase() === MONTH_FOLDER && dateSort) {
-    return groupMonths(pages, opts.sort === "created" ? "added" : "updated", opts.now);
+  if ((opts.folder || "").toLowerCase() === MONTH_FOLDER && isRecencySort(opts.sort)) {
+    return groupMonths(pages, recencyKindFor(opts.sort), opts.now);
   }
   return groupFamilies(pages, opts.projects);
 }

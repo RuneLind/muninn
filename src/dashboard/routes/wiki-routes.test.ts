@@ -4107,3 +4107,56 @@ describe("a HELD wiki write lock at the fact-check write routes", () => {
     expect(await Bun.file(path.join(root, "Widgets.md")).text()).toContain("[!factcheck]");
   });
 });
+
+describe("GET /api/wiki/pages?refresh=1 and the worked ledger's back-off", () => {
+  // The browser sends `?refresh=1` on every tab focus and after every series
+  // write, so it must never reach the ledger's back-off: a hatch keyed on it
+  // re-asked a dead claude-usage every 30 s per open tab (fix rounds 2–4).
+  // Real env deps and a real socket, because the coupling lived in the ROUTE.
+  test("a refreshed listing does not re-ask a failed upstream inside the TTL", async () => {
+    const { __resetWorkedLedgerForTest } = await import("../../wiki/worked-ledger.ts");
+    const root = await mkdtemp(path.join(tmpdir(), "wiki-pages-nohatch-"));
+    await Bun.write(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
+    let hits = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        hits += 1;
+        return new Response("nope", { status: 500 });
+      },
+    });
+    const prevWikiDir = process.env.WIKI_DIR;
+    const prevUsage = process.env.CLAUDE_USAGE_URL;
+    process.env.WIKI_DIR = root;
+    process.env.CLAUDE_USAGE_URL = `http://127.0.0.1:${server.port}`;
+    __resetWikiCacheForTest();
+    __resetWorkedLedgerForTest();
+    const app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+    const until = async (ok: () => boolean, budgetMs: number) => {
+      const stop = Date.now() + budgetMs;
+      while (!ok() && Date.now() < stop) await Bun.sleep(10);
+    };
+    try {
+      expect((await app.request("/api/wiki/pages")).status).toBe(200);
+      await until(() => hits >= 1, 2000);
+      expect(hits).toBe(1);
+      // Two focus refetches. Poll the whole window for a hit that must not come.
+      expect((await app.request("/api/wiki/pages?refresh=1")).status).toBe(200);
+      expect((await app.request("/api/wiki/pages?refresh=1")).status).toBe(200);
+      // 500 ms is ~60× the positive half: request start to upstream hit measured
+      // median 1 ms, max 8 ms over 20 runs on loopback (verify pass, fix round 4).
+      await until(() => hits >= 2, 500);
+      expect(hits).toBe(1);
+    } finally {
+      server.stop(true);
+      if (prevWikiDir === undefined) delete process.env.WIKI_DIR;
+      else process.env.WIKI_DIR = prevWikiDir;
+      if (prevUsage === undefined) delete process.env.CLAUDE_USAGE_URL;
+      else process.env.CLAUDE_USAGE_URL = prevUsage;
+      __resetWikiCacheForTest();
+      __resetWorkedLedgerForTest();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

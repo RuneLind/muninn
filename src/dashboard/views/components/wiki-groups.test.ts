@@ -8,10 +8,14 @@
  * are a disclosure; the live 18-family table is checked once, in the acceptance
  * run against the real wiki, and recorded in the PR body.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   FAMILY_MAX,
   FAMILY_MIN,
+  byWorkedDateDesc,
+  bySeriesDateDesc,
+  orderSeriesGroups,
+  workedDateSignal,
   GROUP_FAMILIES_TOGGLE_KEY,
   NO_STATUS_WORD,
   SERIES_CONTINUE_MAX,
@@ -34,9 +38,15 @@ import {
   seriesFoldKey,
   seriesHead,
   seriesMembersOf,
+  seriesStripOrder,
   withoutSeriesMembers,
 } from "./wiki-groups.ts";
-import { localDay, pageDateSignal, type WikiListing } from "./wiki-filter.ts";
+import {
+  localDay,
+  pageDateSignal,
+  recencyKeyFor,
+  type WikiListing,
+} from "./wiki-filter.ts";
 
 function page(over: Partial<WikiListing> & { relPath: string }): WikiListing {
   return {
@@ -1194,11 +1204,15 @@ describe("seriesDateMs — one granularity, one tie-break (fix round 1)", () => 
     expect(newestSeriesPlan([touchedSameDay, asserted])!.relPath).toBe("plans/z-asserted.mdx");
   });
 
+  // ⚠️ The FOLD reads this chain too, as `workedDateSignal`'s fallback rung —
+  // so the rung tie-break is a display property as well as an identity one. Fix
+  // round 1 fell back to the rail's UPDATE chain instead, which collapsed the
+  // fold's rank to two values and made this read alphabetically.
   test("…and the members order the same way, whatever the input order", () => {
-    expect(groupSeries([touchedSameDay, asserted])[0]!.members.map((m) => m.relPath)).toEqual([
-      "plans/z-asserted.mdx",
-      "plans/a-touched.mdx",
-    ]);
+    const one = groupSeries([touchedSameDay, asserted])[0]!.members.map((m) => m.relPath);
+    const two = groupSeries([asserted, touchedSameDay])[0]!.members.map((m) => m.relPath);
+    expect(one).toEqual(two);
+    expect(one).toEqual(["plans/z-asserted.mdx", "plans/a-touched.mdx"]);
   });
 
   test("a git touch on a LATER day still wins — the granularity is the day, not the rung", () => {
@@ -1306,5 +1320,389 @@ describe("clipSeriesTitle — the reader header's `continue at:` label (fix roun
     expect(out.includes("�")).toBe(false);
     // Every code point but the ellipsis is a whole emoji.
     expect([...out].slice(0, -1).every((c) => c === "🎯")).toBe(true);
+  });
+});
+
+// ── The WORKED axis ─────────────────────────────────────────────────────────
+
+describe("the worked comparator — ORDER moves, IDENTITY does not", () => {
+  const DAY = 86_400_000;
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+
+  test("workedDateSignal floors to the local day and outranks every other rung", () => {
+    const worked = Date.parse("2026-09-18T09:00:00Z");
+    const s = workedDateSignal({ workedMs: worked, status_date: "2026-09-21" }, NOW);
+    expect(s.day).toBe(localDay(new Date(worked)));
+    // The rung sits ABOVE `asserted`, so a same-day tie goes to the worked date.
+    expect(s.rank).toBeGreaterThan(seriesDateSignal({ status_date: "2026-09-21" }).rank);
+    // Uncovered ⇒ the SERIES chain, verbatim — rung included.
+    expect(workedDateSignal({ status_date: "2026-09-21" }, NOW)).toEqual(
+      seriesDateSignal({ status_date: "2026-09-21" }),
+    );
+    // Not a date: fall through rather than sort on it.
+    expect(workedDateSignal({ workedMs: 0, status_date: "2026-09-21" }, NOW)).toEqual(
+      seriesDateSignal({ status_date: "2026-09-21" }),
+    );
+    // A page with no signal at all answers the `none` rung, not a day.
+    expect(workedDateSignal({}, NOW)).toEqual({ ms: 0, day: "", rank: 0 });
+  });
+
+  // The ONE-CHAIN property, as fix round 2 leaves it: the WORKED rung is the
+  // rail chip's own guarded signal, so the fold and the row chip agree about a
+  // COVERED page. Below that rung the two chains part — the chip falls to the
+  // update chain, the fold to the series chain — so an uncovered page AND a page
+  // whose stamp the guard rejects may be dated differently by the two; that is
+  // the declared divergence class, and the rejected-stamp case below pins that
+  // it lands on the SERIES chain, with fixture dates that can tell them apart.
+  test("the WORKED rung is the rail chip's own signal, day-floored", () => {
+    for (const p of [
+      // Covered.
+      page({ relPath: "a.md", workedMs: Date.parse("2026-09-18T09:00:00Z") }),
+      // Covered, and a day the row chip renders west of UTC the same way.
+      page({ relPath: "b.md", workedMs: Date.parse("2026-08-04T23:30:00Z") }),
+    ]) {
+      expect(workedDateSignal(p, NOW).day).toBe(pageDateSignal(p, "worked", NOW)?.label ?? "");
+      expect(workedDateSignal(p, NOW).rank).toBe(4);
+    }
+    // A FUTURE worked stamp is rejected by the SAME guard the chip applies, so
+    // it can no longer sort first: neither surface sees 2027. Below the guard
+    // the two chains part, so the fixture gives them DIFFERENT days — the fold
+    // lands on `status_date` and the chip on `updated:`. Equal days here would
+    // let a fold that fell to the update chain pass unnoticed.
+    const future = page({
+      relPath: "c.md",
+      workedMs: Date.parse("2027-06-01T10:00:00Z"),
+      status_date: "2026-01-05",
+      updated: "2026-08-04",
+    });
+    expect(workedDateSignal(future, NOW).day).toBe("2026-01-05");
+    expect(pageDateSignal(future, "worked", NOW)?.label).toBe("2026-08-04");
+    expect(workedDateSignal(future, NOW)).toEqual(seriesDateSignal(future));
+  });
+
+  test("byWorkedDateDesc orders newest-worked first, then by rung, then relPath", () => {
+    const rows = [
+      page({ relPath: "a.mdx", workedMs: Date.parse("2026-07-02T10:00:00Z") }),
+      page({ relPath: "b.mdx", workedMs: Date.parse("2026-09-21T10:00:00Z") }),
+      // Uncovered: the SERIES chain stands in, interleaved with the covered rows.
+      page({ relPath: "c.mdx", status_date: "2026-08-01" }),
+    ];
+    expect([...rows].sort(byWorkedDateDesc).map((p) => p.relPath)).toEqual([
+      "b.mdx",
+      "c.mdx",
+      "a.mdx",
+    ]);
+    // Same DAY, different rungs: the worked date wins the tie.
+    const sameDay = [
+      page({ relPath: "z.mdx", status_date: "2026-09-21" }),
+      page({ relPath: "y.mdx", workedMs: Date.parse("2026-09-21T23:00:00Z") }),
+    ];
+    expect([...sameDay].sort(byWorkedDateDesc).map((p) => p.relPath)).toEqual([
+      "y.mdx",
+      "z.mdx",
+    ]);
+  });
+
+  // ── Acceptance 7, half one: a network field never decides a write ──────────
+  test("the head, the newest plan and bySeriesDateDesc are IDENTICAL with workedMs present", () => {
+    const base = [
+      member("plans/head.mdx", {
+        series: "alpha",
+        seriesLabel: "Alpha",
+        status_date: "2026-08-01",
+        plan_status: "in-flight",
+      }),
+      member("plans/newer.mdx", {
+        series: "alpha",
+        status_date: "2026-09-01",
+        plan_status: "ready",
+      }),
+      member("blogs/about.mdx", { series: "alpha", status_date: "2026-09-10" }),
+    ];
+    // A worked map that DISAGREES with every status_date, hardest case first:
+    // the oldest-asserted page is the most recently worked one.
+    const worked = base.map((p, i) =>
+      page({ ...p, workedMs: Date.parse("2026-09-21T10:00:00Z") - i * DAY }),
+    );
+
+    expect(seriesHead(worked)!.relPath).toBe(seriesHead(base)!.relPath);
+    expect(newestSeriesPlan(worked)!.relPath).toBe(newestSeriesPlan(base)!.relPath);
+    expect([...worked].sort(bySeriesDateDesc).map((p) => p.relPath)).toEqual(
+      [...base].sort(bySeriesDateDesc).map((p) => p.relPath),
+    );
+    // The group's own identity fields, which the lint and the reader header read.
+    const g = (ps: WikiListing[]) => groupSeries(ps)[0]!;
+    expect(g(worked).label).toBe(g(base).label);
+    expect(g(worked).latestRel).toBe(g(base).latestRel);
+    expect(g(worked).total).toBe(g(base).total);
+  });
+
+  // ── Acceptance 7, half two: the display half really does move ─────────────
+  test("…while the FOLD and the reader strip's set DO reorder", () => {
+    const base = [
+      member("plans/head.mdx", {
+        series: "alpha",
+        seriesLabel: "Alpha",
+        status_date: "2026-08-01",
+      }),
+      member("plans/newer.mdx", { series: "alpha", status_date: "2026-09-01" }),
+      member("blogs/about.mdx", { series: "alpha", status_date: "2026-09-10" }),
+    ];
+    const worked = [
+      page({ ...base[0]!, workedMs: Date.parse("2026-09-21T10:00:00Z") }),
+      page({ ...base[1]!, workedMs: Date.parse("2026-07-02T10:00:00Z") }),
+      page({ ...base[2]!, workedMs: Date.parse("2026-08-15T10:00:00Z") }),
+    ];
+    expect(groupSeries(base)[0]!.members.map((m) => m.relPath)).toEqual([
+      "blogs/about.mdx",
+      "plans/newer.mdx",
+      "plans/head.mdx",
+    ]);
+    expect(groupSeries(worked)[0]!.members.map((m) => m.relPath)).toEqual([
+      "plans/head.mdx",
+      "blogs/about.mdx",
+      "plans/newer.mdx",
+    ]);
+    // The reader strip is the fold's order REVERSED, so it must move with it —
+    // `seriesMembersOf` is the one function both surfaces read.
+    expect(seriesMembersOf(worked, "alpha").members.map((m) => m.relPath)).toEqual(
+      groupSeries(worked)[0]!.members.map((m) => m.relPath),
+    );
+  });
+
+  test("groupMonths takes the third value and buckets by the worked day", () => {
+    // No date prefix in the filename, so the month comes from the sorted signal.
+    const pages = [
+      page({ relPath: "archive/alpha.mdx", workedMs: Date.parse("2026-07-14T10:00:00Z"), updated: "2026-09-20" }),
+      page({ relPath: "archive/beta.mdx", workedMs: Date.parse("2026-09-02T10:00:00Z"), updated: "2026-09-20" }),
+    ];
+    expect(groupMonths(pages, "worked", NOW).map((g) => g.label)).toEqual(["2026-09", "2026-07"]);
+    // Under "updated" both share one month — which is the flattening the axis
+    // exists to undo.
+    expect(groupMonths(pages, "updated", NOW).map((g) => g.label)).toEqual(["2026-09"]);
+  });
+
+  test("railGroups keeps the archive's month folding ON in worked mode", () => {
+    const pages = [
+      page({ relPath: "archive/2026-07-14-alpha.mdx" }),
+      page({ relPath: "archive/2026-09-02-beta.mdx" }),
+    ];
+    const opts = { folder: "archive", projects: {}, now: NOW };
+    expect(railGroups(pages, { ...opts, sort: "worked" }).map((g) => g.kind)).toEqual([
+      "month",
+      "month",
+    ]);
+    // …and the two-value test it replaced would have returned families here.
+    expect(railGroups(pages, { ...opts, sort: "updated" }).every((g) => g.kind === "month")).toBe(
+      true,
+    );
+  });
+});
+
+// ── Acceptance 8: the Series SECTION's own row order ─────────────────────────
+describe("orderSeriesGroups", () => {
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+  /** Three series that all share ONE updated date — the live 15-way tie on
+   *  mimir, shrunk — and differ only in when they were worked on. */
+  const pages = [
+    member("plans/zulu.mdx", {
+      series: "zulu",
+      seriesLabel: "Zulu",
+      updated: "2026-09-21",
+      workedMs: Date.parse("2026-09-20T10:00:00Z"),
+    }),
+    member("plans/alpha.mdx", {
+      series: "alpha",
+      seriesLabel: "Alpha",
+      updated: "2026-09-21",
+      workedMs: Date.parse("2026-07-02T10:00:00Z"),
+    }),
+    member("plans/mike.mdx", {
+      series: "mike",
+      seriesLabel: "Mike",
+      updated: "2026-09-21",
+      workedMs: Date.parse("2026-09-21T10:00:00Z"),
+    }),
+  ];
+  const groups = groupSeries(pages);
+  const labels = (sort: "updated" | "created" | "worked" | "title" | "backlinks") =>
+    orderSeriesGroups(groups, { sort, now: NOW }).map((g) => g.label);
+
+  test("worked mode orders by each group's newest member's worked day", () => {
+    expect(labels("worked")).toEqual(["Mike", "Zulu", "Alpha"]);
+  });
+
+  test("the recency modes tie on the shared date and fall back to the label", () => {
+    // Every group's newest member carries the same `updated` — which is exactly
+    // the tie first-appearance broke by scan order. The label makes it stable.
+    expect(labels("updated")).toEqual(["Alpha", "Mike", "Zulu"]);
+  });
+
+  test("title mode is alphabetical by label; backlinks keeps first appearance", () => {
+    expect(labels("title")).toEqual(["Alpha", "Mike", "Zulu"]);
+    // Under a backlink sort the caller's order already means "the group holding
+    // the most-connected page first", which is the answer that mode asks for.
+    expect(labels("backlinks")).toEqual(groups.map((g) => g.label));
+  });
+
+  test("it never mutates the array it is handed", () => {
+    const before = groups.map((g) => g.label);
+    orderSeriesGroups(groups, { sort: "worked", now: NOW });
+    expect(groups.map((g) => g.label)).toEqual(before);
+  });
+
+  // The measured defect fix round 1 found: the SECTION was keyed on the rail's
+  // chain while the FOLD was keyed on another, so a series whose frontmatter and
+  // file dates disagree was PLACED by one and PRINTED by the other — first in
+  // the section, with every cell in its fold reading seven months older. In
+  // WORKED mode the section now reads the fold's own comparator.
+  test("in WORKED mode the section is placed by the day its own fold prints", () => {
+    // An UNCOVERED series whose row chip (the update chain) says 09-21 while its
+    // fold prints its authored 02-01 — the two legitimately differ now.
+    const split = [
+      member("plans/split.mdx", {
+        series: "split",
+        seriesLabel: "Split",
+        updated: "2026-09-21",
+        status_date: "2026-02-01",
+      }),
+    ];
+    const other = [
+      member("plans/mid.mdx", { series: "mid", seriesLabel: "Mid", status_date: "2026-06-01" }),
+    ];
+    const both = [...split, ...other];
+    const gs = groupSeries(both, both, NOW);
+    expect(workedDateSignal(gs[0]!.members[0]!, NOW).day).toBe("2026-02-01");
+    // The section follows the fold: 06-01 above 02-01, NOT the chip's 09-21.
+    expect(orderSeriesGroups(gs, { sort: "worked", now: NOW }).map((g) => g.label)).toEqual([
+      "Mid",
+      "Split",
+    ]);
+    // …while `updated` mode keeps the mode's own row key, which is what that
+    // sort's rows show — the documented section-vs-fold divergence.
+    expect(recencyKeyFor("updated")(gs[0]!.members[0]!, NOW)).toBe(Date.parse("2026-09-21"));
+    expect(orderSeriesGroups(gs, { sort: "updated", now: NOW }).map((g) => g.label)).toEqual([
+      "Split",
+      "Mid",
+    ]);
+  });
+});
+
+// ── The COLD shape: no ledger, `status_date:` and a flat git touch ──────────
+describe("a fold on a COLD instance (fix round 2)", () => {
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+  /** The shape 537 of mimir's 549 pages have even on a WARM instance, and every
+   *  page has on a cold one: an authored `status_date:`, no `updated:`, and a
+   *  git touch date flattened onto one day by an ordinary small commit. */
+  const FLAT = Date.parse("2026-09-21T09:00:00Z");
+  const cold = [
+    member("plans/zulu.mdx", { series: "s", status_date: "2026-07-02", gitTouchedMs: FLAT }),
+    member("plans/alpha.mdx", { series: "s", status_date: "2026-09-17", gitTouchedMs: FLAT }),
+    member("plans/mike.mdx", { series: "s", status_date: "2026-08-15", gitTouchedMs: FLAT }),
+  ];
+
+  test("the fold is in status_date order, not alphabetical", () => {
+    // Fix round 1 fell back to the rail's UPDATE chain, which on this shape is
+    // the flat git touch: all three tie on one day and the relPath decides, so
+    // the fold read alpha · mike · zulu — alphabetical — and the reader strip
+    // read it reverse-alphabetical. Measured on a mimir clone: 23 of 30 folds
+    // reordered against origin/main and 25 of 30 collapsed to one tie-day.
+    expect(groupSeries(cold, cold, NOW)[0]!.members.map((m) => m.relPath)).toEqual([
+      "plans/alpha.mdx",
+      "plans/mike.mdx",
+      "plans/zulu.mdx",
+    ]);
+    // Non-vacuous: the assertion above is about the DATES, not the names — the
+    // days it prints descend, and the alphabetical order does not.
+    expect(
+      groupSeries(cold, cold, NOW)[0]!.members.map((m) => workedDateSignal(m, NOW).day),
+    ).toEqual(["2026-09-17", "2026-08-15", "2026-07-02"]);
+  });
+
+  test("…and the section places the fold by its newest authored day", () => {
+    // The label deliberately sorts AFTER the other group's, so a section that
+    // ties on the flat git day and falls back to the label answers the other way
+    // round — which is what this case has to be able to see.
+    const later = [
+      member("plans/later.mdx", {
+        series: "later",
+        seriesLabel: "Zeta later",
+        status_date: "2026-09-20",
+        gitTouchedMs: FLAT,
+      }),
+    ];
+    const both = [...cold, ...later];
+    expect(
+      orderSeriesGroups(groupSeries(both, both, NOW), { sort: "worked", now: NOW }).map(
+        (g) => g.label,
+      ),
+    ).toEqual(["Zeta later", "s"]);
+  });
+});
+
+// ── The frontmatter DAY, west of UTC (fix round 2) ──────────────────────────
+//
+// `Date.parse("2026-09-21")` is UTC midnight, so a chain that re-derived the day
+// through `localDay` would render 2026-09-20 for a reader west of UTC — and the
+// bug is INVISIBLE in Oslo, where every other case in this file runs. The zone
+// is set for this block alone and restored after it.
+describe("workedDateSignal's authored day does not shift west of UTC", () => {
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+  // Restored to an EXPLICIT zone, never by deleting the variable: measured on
+  // Bun 1.3, `delete process.env.TZ` leaves the previously-set zone in place.
+  const PREV = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  beforeAll(() => {
+    process.env.TZ = "America/New_York";
+  });
+  afterAll(() => {
+    process.env.TZ = PREV;
+  });
+
+  test("the zone really is west of UTC, or this block proves nothing", () => {
+    expect(new Date(Date.parse("2026-09-21T00:00:00Z")).getDate()).toBe(20);
+  });
+
+  test("an authored `status_date:` is echoed verbatim, day and ms alike", () => {
+    const s = workedDateSignal({ status_date: "2026-09-21" }, NOW);
+    expect(s.day).toBe("2026-09-21");
+    expect(s.ms).toBe(Date.parse("2026-09-21T00:00:00Z"));
+  });
+
+  test("…while a WORKED instant renders as its LOCAL day", () => {
+    // 01:00Z on the 21st is still the 20th in New York, and the fold prints the
+    // day it sorted on.
+    const s = workedDateSignal({ workedMs: Date.parse("2026-09-21T01:00:00Z") }, NOW);
+    expect(s.day).toBe("2026-09-20");
+    expect(s.ms).toBe(Date.parse("2026-09-20T00:00:00Z"));
+  });
+});
+
+// ── The reader strip is the fold, reversed ──────────────────────────────────
+describe("seriesStripOrder", () => {
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+
+  test("it reverses the fold's own member order", () => {
+    const members = [
+      member("plans/a.mdx", { series: "s", workedMs: Date.parse("2026-09-21T10:00:00Z") }),
+      member("plans/b.mdx", { series: "s", workedMs: Date.parse("2026-08-01T10:00:00Z") }),
+      member("plans/c.mdx", { series: "s", workedMs: Date.parse("2026-07-02T10:00:00Z") }),
+    ];
+    const fold = groupSeries(members, members, NOW)[0]!.members.map((m) => m.relPath);
+    expect(fold).toEqual(["plans/a.mdx", "plans/b.mdx", "plans/c.mdx"]);
+    // The strip runs oldest → newest: the fold's order, REVERSED. De-reversing
+    // the view's own copy left 370 tests green, which is what this pins.
+    expect(seriesStripOrder(fold)).toEqual(["plans/c.mdx", "plans/b.mdx", "plans/a.mdx"]);
+    // …and the dates it prints ascend with it, which is the reader-visible claim.
+    const days = seriesStripOrder(groupSeries(members, members, NOW)[0]!.members).map(
+      (m) => workedDateSignal(m, NOW).day,
+    );
+    expect(days).toEqual([...days].sort());
+  });
+
+  test("it copies rather than reversing in place", () => {
+    const rows = ["a", "b", "c"];
+    expect(seriesStripOrder(rows)).toEqual(["c", "b", "a"]);
+    expect(rows).toEqual(["a", "b", "c"]);
   });
 });

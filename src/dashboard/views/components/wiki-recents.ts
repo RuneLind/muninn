@@ -1269,9 +1269,10 @@ export function buildRail(input: RailInput): RailModel {
   // Their own block, above the remainder: a series is the piece of work the
   // reader came back to, and interleaving it with the listing by date would put
   // it wherever its newest page happens to sort on whichever sort is selected.
-  // Within the block the groups keep the order `groupSeries` gave them, which is
-  // first appearance in the caller's own sorted list — so under a date sort the
-  // series with the newest member is first.
+  // Within the block the groups keep the order they were HANDED IN — which the
+  // caller sets with `orderSeriesGroups`, not `groupSeries` (whose own output is
+  // first appearance in the caller's sorted list). The rail owns no ordering
+  // rule of its own; see that function for what each sort mode means here.
   let seriesEmitted = false;
   for (const g of seriesList) {
     const foldKey = normalizeFoldKey(g.key);

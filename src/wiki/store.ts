@@ -34,6 +34,12 @@ import { buildWikiGitDates } from "./git-dates.ts";
 import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
+import { normalizeRelPath } from "./rel-path.ts";
+import {
+  kickWorkedLedgerRefresh,
+  normalizeWorkedPath,
+  workedLedgerFor,
+} from "./worked-ledger.ts";
 
 const log = getLog("wiki", "store");
 
@@ -290,6 +296,67 @@ const PLAN_DROP_SAMPLE_CAP = 5;
 const GIT_DATE_MISS_WARN_RATE = 0.1;
 
 /**
+ * What fraction of the rows the WORKED ledger returned must match a page in this
+ * index before the build warns that the path spellings have stopped lining up.
+ *
+ * A RATE, and over the RETURNED rows rather than over the pages, for the reason
+ * `GIT_DATE_MISS_WARN_RATE`'s docblock gives one axis over: an absolute count of
+ * unmatched rows carries no signal at all here, because a healthy refresh leaves
+ * a row for every page that has since been renamed or deleted. The plan measured
+ * that overhead at ~15% of the set on the mini's ledger and put the healthy band
+ * at 75–90%; THIS PR did not reproduce it — the laptop's ledger is thin enough
+ * that mimir matched 12 of 12 returned rows — so treat the band as the plan's
+ * figure rather than as a property of every host.
+ *
+ * 50% is the floor between that band and the failure it is sized for: a root
+ * whose ledger spelling differs (a symlink, a worktree, a second checkout)
+ * matches ~0%, not 60%. Gated on a NON-EMPTY answer, like its git sibling — a
+ * ledger that holds nothing for this root yet is the ordinary state of a wiki
+ * nobody has written with an agent, not a keying bug.
+ */
+const WORKED_MATCH_WARN_RATE = 0.5;
+
+/** Roots currently sitting under the rate. Warned ONCE each, then silent until
+ *  the rate recovers — see {@link workedMatchWarnDue}. */
+const workedMatchWarned = new Set<string>();
+
+/**
+ * Should this build warn that the worked ledger's paths stopped matching — and
+ * RECORD that it did?
+ *
+ * Its own exported predicate rather than an inline comparison, for the reason
+ * every threshold in this repo ends up one: a test has to be able to drive it at
+ * the boundary, and the log line it guards is not assertable from a unit test
+ * (an unconfigured logger is a silent no-op).
+ *
+ * It is THROTTLED per root, because the condition it reports is durable while
+ * the caller is not: the index rebuilds every 5 minutes and on every
+ * `?refresh=1`, so a mis-keyed root warned on every build (measured: 5 builds,
+ * 5 identical warns). The first sighting warns; later builds are silent until
+ * the rate RECOVERS, which clears the root so a second onset is reported again.
+ *
+ * ⚠️ `returned` counts every `.md`/`.mdx` upstream knows about under the root
+ * and cannot see the reader's `include` globs, so a wiki that scopes its scan
+ * can sit under the floor legitimately. Zero returned rows is NOT low — that is
+ * the ordinary state of a wiki nobody has written with an agent.
+ */
+export function workedMatchWarnDue(root: string, matched: number, returned: number): boolean {
+  if (returned <= 0) return false;
+  if (matched / returned >= WORKED_MATCH_WARN_RATE) {
+    workedMatchWarned.delete(root);
+    return false;
+  }
+  if (workedMatchWarned.has(root)) return false;
+  workedMatchWarned.add(root);
+  return true;
+}
+
+/** Test-only: forget which roots have already warned about their match rate. */
+export function __resetWorkedMatchWarnsForTest(): void {
+  workedMatchWarned.clear();
+}
+
+/**
  * Per-index-build tally of frontmatter values REJECTED by the plan-status
  * validators. Aggregated into ONE warn at the end of the build rather than one
  * per page: a backfill writes these fields into ~145 files at once against a
@@ -475,6 +542,25 @@ export interface WikiPageMeta {
    * date rather than treating as undated. See `src/wiki/git-dates.ts`.
    */
   gitTouchedMs?: number;
+  /**
+   * WORKED-ON time (epoch ms) — the newest write to this page by an AGENT SESSION,
+   * read out of claude-usage's `session_files` ledger and stamped from a warm memo
+   * (`src/wiki/worked-ledger.ts`). The third date axis, beside the two git ones.
+   *
+   * Absent for FOUR reasons, none of them an error: the ledger holds no write for
+   * the page (a human edited it in an editor, or it predates the backfill), every
+   * write it holds came from a BULK PASS and was discounted whole upstream, the
+   * memo has not warmed yet (the index never waits on it), or this instance is not
+   * pointed at a claude-usage. "Absent" is a first-class answer exactly as it is
+   * for `gitTouchedMs` on a page whose every commit was a sweep — the sort mode
+   * falls back per page rather than inventing a date.
+   *
+   * It moves ORDER, never IDENTITY: `seriesDateSignal` and everything derived from
+   * it (the series head, the newest plan, `lint-series.ts`'s proposed head,
+   * `related.ts`'s panel order) are untouched, because a network-derived field that
+   * is absent on a cold memo would make a write decision nondeterministic.
+   */
+  workedMs?: number;
   /**
    * True when `git status` reports this page dirty (modified / untracked) — the ONLY
    * condition under which its mtime still means something. A clean file's mtime is a
@@ -715,6 +801,20 @@ export interface WikiIndex {
    * attribution that flips between builds is a bug report nobody can reproduce.
    */
   shadowed?: ShadowedPage[];
+  /**
+   * How much of this wiki the WORKED axis covers, as of this build: `matched`
+   * pages carry a `workedMs`, out of `total` scanned, from `returned` rows the
+   * ledger sent. Absent when no memo was warm (never fetched, or nothing has
+   * landed yet) — which is a different answer from `matched: 0`, and the reason
+   * this is optional rather than a zeroed object.
+   *
+   * It rides `/api/wiki/pages` so the client can HIDE the Worked-on sort option on
+   * a wiki the ledger has nothing authored for — the plan measured capra as that
+   * shape (93% of its pages carry a write row, every one of them a bulk pass).
+   * Offering the mode there is offering a relabelled "Recently updated", and this
+   * is the ONE place that figure is stated.
+   */
+  workedCoverage?: { matched: number; total: number; returned: number };
 }
 
 /** A page the same-stem precedence rule dropped, and the page that displaced it. */
@@ -727,10 +827,10 @@ export interface ShadowedPage {
   stem: string;
 }
 
-/** Canonical graph key for a page path: posix-normalized, lowercased relPath. */
-export function normalizeRelPath(relPath: string): string {
-  return path.posix.normalize(relPath).toLowerCase();
-}
+/** Canonical graph key for a page path: posix-normalized, lowercased relPath.
+ *  Re-exported from `rel-path.ts`, which owns it so the worked-on ledger can
+ *  share the spelling without importing this module back. */
+export { normalizeRelPath };
 
 /**
  * Stem-collision precedence rank for a page by file extension: `.md` (0) beats
@@ -2781,7 +2881,9 @@ export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): v
  * and join the link graph; standalone HTML explainers do not (title/mtime only,
  * no backlinks).
  */
-export async function buildWikiIndex(root: string): Promise<WikiIndex> {
+export async function buildWikiIndex(
+  root: string,
+): Promise<WikiIndex> {
   // Per-wiki reader config — read once per build (inherits the index TTL). It is
   // read BEFORE the scan, not after, because `include` scopes the scan itself;
   // the move is safe because the read depends on nothing but `root`.
@@ -2905,6 +3007,21 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // ~700-file read pass below instead of adding its latency to it. Never rejects;
   // null ⇒ pages keep exactly the pre-existing frontmatter+mtime+birthtime behavior.
   const gitDatesPromise = buildWikiGitDates(root);
+
+  // The WORKED axis is kicked, never awaited: this build folds in whatever memo is
+  // already warm, and a refresh started here shows up at the NEXT rebuild. The
+  // staleness we tolerate is the index's own TTL, so a rebuild inside one TTL
+  // re-uses the memo and one after it asks again — up to two TTLs in phase, which
+  // is the stated price of never putting a tailnet service on a page load's
+  // critical path (`src/wiki/worked-ledger.ts`). Server boot kicks it too, so the
+  // cold window is the first index build rather than the first reader.
+  // NO build waives the memo's TTL gate or the degraded-upstream back-off — not
+  // `?refresh=1` either. The server cannot tell an operator's typed refresh from
+  // the client's own: the browser sends `?refresh=1` on every tab focus (30 s
+  // throttle, per tab) and after every series write, so a hatch keyed on it
+  // re-asked a dead service from a hot path (fix rounds 2–4). The back-off is
+  // released by time alone: one index TTL.
+  kickWorkedLedgerRefresh(root, { maxAgeMs: CACHE_TTL_MS });
 
   const register = (key: string, meta: WikiPageMeta) => {
     const k = key.toLowerCase();
@@ -3201,6 +3318,56 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // on the loop direction of the code above it.
   shadowed.sort((a, b) => a.relPath.localeCompare(b.relPath));
 
+  // Stamp the WORKED date — a post-pass like the git dates, for the same reason:
+  // the memo is in hand, the pages are built, and nothing here waits on anything.
+  //
+  // ⚠️ It runs AFTER the same-stem DROP above, unlike the git fold, because it is
+  // the one post-pass that reports a DENOMINATOR. Placed beside the git dates it
+  // counted the pages that drop takes out — measured on mimir, `total` read 550
+  // against a listing of 549 — and a coverage figure that disagrees with the rows
+  // on screen is exactly the kind of number nobody can reconcile later.
+  //
+  // `workedCoverage` stays undefined when no memo has landed: "the axis was never
+  // answered for this wiki" is a different fact from "it matched nothing", and the
+  // client hides the sort option on the second, not the first.
+  let workedCoverage: WikiIndex["workedCoverage"];
+  const workedMemo = workedLedgerFor(root);
+  if (workedMemo) {
+    let matched = 0;
+    for (const meta of pages) {
+      const w = workedMemo.pages.get(normalizeWorkedPath(meta.relPath));
+      if (w !== undefined) {
+        meta.workedMs = w;
+        matched++;
+      }
+    }
+    workedCoverage = { matched, total: pages.length, returned: workedMemo.returned };
+    if (workedMatchWarnDue(root, matched, workedMemo.returned)) {
+      // Names the base URL for the reason every other claude-usage message does:
+      // the operator's first question about a degraded axis is which service, and
+      // which SPELLING of the root, this instance asked.
+      log.warn(
+        "wiki {root}: the worked ledger at {baseUrl} answered {returned} row(s) for " +
+          "{asked} and only {matched} matched a page — the path spellings have " +
+          'probably stopped lining up, so "Worked on" is mostly empty',
+        {
+          root,
+          baseUrl: workedMemo.baseUrl,
+          returned: workedMemo.returned,
+          asked: workedMemo.rootAsked,
+          matched,
+        },
+      );
+    } else {
+      log.debug("wiki {root}: worked dates — {matched}/{total} pages, {returned} rows", {
+        root,
+        matched,
+        total: pages.length,
+        returned: workedMemo.returned,
+      });
+    }
+  }
+
   // FOLD the attachments — before the display-title pass and the registration
   // below, both of which read the result (`stemCounts` skips a rule-1 child, and
   // a rule-1 child registers no stem key). `pages` is relPath-sorted here, which
@@ -3387,6 +3554,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     folderLabels,
     trails,
     shadowed,
+    ...(workedCoverage ? { workedCoverage } : {}),
   };
 }
 
@@ -3401,6 +3569,10 @@ const warnedRoots = new Set<string>();
  * default). Each root is cached and degraded independently — a missing melosys
  * wiki never affects the jarvis cache. Returns null (and warns once per root)
  * when the directory is missing — the caller renders an empty state.
+ *
+ * `refresh` busts the index TTL only. It is what every programmatic write passes
+ * after it lands, and what the browser sends on tab focus, so it never reaches
+ * the worked ledger's TTL gate or back-off (see the kick in `buildWikiIndex`).
  */
 export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }): Promise<WikiIndex | null> {
   const root = resolveWikiRoot(opts?.root);

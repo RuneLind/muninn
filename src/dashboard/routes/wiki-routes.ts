@@ -1366,6 +1366,14 @@ export function registerWikiRoutes(
       // the pages, and a partial block would make the client the second place
       // that knows what a missing knob means.
       activity: index.readerConfig?.activity ?? DEFAULT_ACTIVITY_WEIGHTS,
+      // How much of this wiki the WORKED axis covers — `{matched, total,
+      // returned}` — or ABSENT when no ledger answer has landed for this root.
+      // The client hides the "Worked on" sort option on `matched: 0`, which is
+      // the honest answer for a corpus written entirely by bulk passes; the
+      // absent case means "nothing is known yet", where hiding would make a cold
+      // memo look like a verdict. Derived, like `projects`, over the same page
+      // array the listing ships, so the option and the rows cannot disagree.
+      ...(index.workedCoverage ? { workedCoverage: index.workedCoverage } : {}),
     });
   });
 

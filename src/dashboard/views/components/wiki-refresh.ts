@@ -52,6 +52,12 @@ export interface WikiPagesResponse {
    *  `.wiki-reader.json` `activity` block over the defaults). Absent on an older
    *  server ⇒ the client's own defaults. */
   activity?: Record<string, unknown>;
+  /** How much of this wiki the WORKED axis covers (`{matched, total, returned}`),
+   *  or ABSENT when no ledger answer has landed for this root — which is also
+   *  what an older server sends. The two are read differently: `matched: 0` is a
+   *  verdict (this corpus has no authored dates) and hides the Worked-on sort
+   *  option, while absent means "nothing is known yet" and changes nothing. */
+  workedCoverage?: { matched: number; total: number; returned: number };
   error?: string;
 }
 

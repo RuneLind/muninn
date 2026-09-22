@@ -2271,6 +2271,15 @@ export async function renderWikiPage(opts?: {
           <select id="wikiSort" class="wiki-sort">
             <option value="updated" selected>Recently updated</option>
             <option value="created">Recently added</option>
+            <!-- The worked-on axis: the day an agent session last wrote the page,
+                 out of claude-usage's ledger. HIDDEN until the listing says this
+                 wiki has any covered page (workedCoverage.matched > 0) — on a
+                 corpus written entirely by bulk passes every page falls back to
+                 its update date, so the option would be "Recently updated" under
+                 a second name (the measured corpus is named once, on
+                 WikiIndex.workedCoverage). Hidden rather than disabled: a control
+                 that can never be chosen is furniture (the rail's own F2 rule). -->
+            <option value="worked" hidden>Worked on</option>
             <option value="backlinks">Most linked</option>
             <option value="title">Title A–Z</option>
           </select>

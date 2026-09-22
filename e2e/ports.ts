@@ -153,6 +153,13 @@ export const E2E_PORTS = {
   // rather than a flag flipped in the page.
   "wiki-series-editor": 3065,
   "wiki-series-editor/readonly": 3066,
+  // The WORKED-on axis end to end: the sort mode, the row's date chip, the
+  // Series section's order and all three ledger degrades. ONE muninn over six
+  // temp wikis, and ONE fake `node:http` claude-usage answering a different
+  // `/api/files?summary=1` per wiki root — which is how three distinct degrades
+  // (500, over-cap body, the un-upgraded raw row form) are driven in one boot.
+  "wiki-worked-recency": 3067,
+  "wiki-worked-recency/ledger": 3068,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

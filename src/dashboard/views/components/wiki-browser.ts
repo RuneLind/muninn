@@ -131,12 +131,14 @@ import {
   isMonthGrouping,
   newestSeriesPlan,
   orderPagesForGroups,
+  orderSeriesGroups,
   railGroups,
   clipSeriesTitle,
-  seriesDateSignal,
   seriesKeyOf,
   seriesMembersOf,
+  seriesStripOrder,
   withoutSeriesMembers,
+  workedDateSignal,
 } from "./wiki-groups.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
@@ -239,6 +241,8 @@ import {
   followupCount,
   hasTypedHubs,
   hubTypeList,
+  isRecencySort,
+  recencyKindFor,
   pageDateLabel,
   pageDateSignal,
   pageHeaderDates,
@@ -630,6 +634,34 @@ initPaneToggles();
 
 function sortMode(): WikiSortMode {
   return (document.getElementById("wikiSort") as HTMLSelectElement).value as WikiSortMode;
+}
+
+/**
+ * Show or hide the "Worked on" sort option for the wiki whose listing just
+ * arrived.
+ *
+ * Three states, and the third is why `matched: 0` and an ABSENT coverage are not
+ * the same answer:
+ *
+ *  - `matched > 0` ⇒ the option is offered.
+ *  - `matched === 0` ⇒ hidden. Every page would fall back to its update date, so
+ *    the mode is "Recently updated" relabelled. The corpus that shape was
+ *    measured on is named once, in `WikiIndex.workedCoverage` (`src/wiki/store.ts`).
+ *  - ABSENT (a cold memo, an unreachable ledger, an older server) ⇒ LEFT AS IS.
+ *    Nothing is known yet, and hiding on that is a verdict the data did not give.
+ *
+ * On a hide it also walks the select back to `updated` when `worked` was
+ * selected — the reader switches wikis without a reload, and a select stuck on a
+ * hidden option sorts by a mode with no control on screen to leave it.
+ */
+function applyWorkedSortOption(coverage: WikiPagesResponse["workedCoverage"]): void {
+  if (!coverage || typeof coverage.matched !== "number") return;
+  const select = document.getElementById("wikiSort") as HTMLSelectElement | null;
+  const option = select?.querySelector<HTMLOptionElement>('option[value="worked"]');
+  if (!select || !option) return;
+  const show = coverage.matched > 0;
+  option.hidden = !show;
+  if (!show && select.value === "worked") select.value = "updated";
 }
 
 // ── Left pane: filter + list ──────────────────────────────────────────
@@ -1095,7 +1127,14 @@ function renderList(): void {
   // FILTERED set for the members, over `allPages` for the label, the member total
   // and the newest plan — those three are facts about the series, and a facet
   // that hid the head page would otherwise rename the fold.
-  const seriesGroups = railSectionsVisible(filters) ? groupSeries(filtered, allPages) : [];
+  // The SECTION's row order is applied here rather than inside `buildRail`: the
+  // rail arranges what it is handed and owns no ordering rule of its own (the
+  // `activity` and `groups` split), and `orderSeriesGroups` is then a pure
+  // function a unit test can drive without a rail. See its docblock for why the
+  // section diverges from "a group sits where its first member sorts".
+  const seriesGroups = railSectionsVisible(filters)
+    ? orderSeriesGroups(groupSeries(filtered, allPages, now), { sort: mode, now })
+    : [];
   // ⚠️ A series CLAIMS its members before the family and month rules see the
   // list, which is what makes the two knock-on cases real and intended: a family
   // that drops under FAMILY_MIN dissolves into plain rows, and a prefix that was
@@ -1119,7 +1158,10 @@ function renderList(): void {
     facetOnly,
     filters,
     pins,
-    metaTail: mode === "updated" || mode === "created",
+    // `isRecencySort`, not a two-value test: this decides whether the sunk
+    // bookkeeping run gets its `Bookkeeping` header, and without it a third
+    // recency mode sinks them with nothing on screen explaining the tail.
+    metaTail: isRecencySort(mode),
     // Ranked over the FILTERED pages and on the same anchored instant as the
     // sort, so a facet narrows Activity exactly as it narrows Pinned and a row's
     // date cannot disagree with the score that placed it. Skipped entirely under
@@ -1260,14 +1302,18 @@ function renderList(): void {
     // mode the date shown is the one actually sorted on (mtime/birthtime or
     // frontmatter) — otherwise a frontmatter-less page would show nothing while
     // sitting at the top, which is exactly what looked broken before.
-    const signal: "added" | "updated" | null = entry.activity
+    const signal: "added" | "updated" | "worked" | null = entry.activity
       ? entry.activity.kind === "new"
         ? "added"
         : "updated"
       : mode === "backlinks"
         ? null
-        : mode === "created"
-          ? "added"
+        : // `isRecencySort` is a TYPE PREDICATE, so the mode goes straight to the
+          // shared `recencyKindFor` and the mode→kind map lives in one place.
+          // `title` is deliberately NOT folded in here: it falls through to the
+          // update date, which is what that mode has always shown in this cell.
+          isRecencySort(mode)
+          ? recencyKindFor(mode)
           : "updated";
     // ONE signal derivation per row — the stamp AND the label in a single call,
     // because this runs for every row on every keystroke (1261 of them on jarvis).
@@ -1279,6 +1325,15 @@ function renderList(): void {
     const stampMs = entry.activity ? now - entry.activity.ageMs : (dateSignal?.ms ?? 0);
     // The full date, from the SAME signal — kept one hover away below.
     const fullDate = dateSignal?.label ?? "";
+    // In WORKED-ON mode the hover also names WHICH signal answered, because the
+    // axis is sparse by construction: a covered wiki still holds pages with no
+    // worked date (every write discounted as a bulk pass) that fall back to the
+    // update signal, so a bare day would read as a worked date the page never
+    // earned. The suffix goes on the `title=` ONLY — `formatRailAge` reads
+    // `fullDate` as a BARE day and would fall back to `localDay(ms)` for a
+    // decorated one, which shifts a frontmatter date west of UTC.
+    const dateTitle =
+      signal === "worked" && dateSignal ? `${fullDate} (${dateSignal.kind})` : fullDate;
     // Every rail row shows a COMPACT age (`formatRailAge`, whose docblock has the
     // why), the backlinks sort its link count instead.
     const meta = signal === null ? p.backlinkCount + " ←" : formatRailAge(stampMs, now, fullDate);
@@ -1412,7 +1467,7 @@ function renderList(): void {
       // The full date on the META element, never on the row — same reason the
       // derivation is repeated onto `.wiki-list-title` above. It carries the
       // signal's label verbatim, time and all, since a hover has room for it.
-      `<div class="wiki-list-meta"${fullDate ? ` title="${esc(fullDate)}"` : ""}>${esc(meta)}</div>` +
+      `<div class="wiki-list-meta"${dateTitle ? ` title="${esc(dateTitle)}"` : ""}>${esc(meta)}</div>` +
       `</div>` +
       `</div>`;
   });
@@ -2346,15 +2401,21 @@ function projectHubChipHtml(m: WikiListing): string {
  *    rail answers "where do I go now" and this answers "how did this get here",
  *    which is a story with a beginning. It is the fold's own order REVERSED, so
  *    the two cannot sequence one series two ways.
- *  - **Dates come from `seriesDateSignal`** — the same day the fold sorts on,
- *    mtime rung included. Printing a different chain from the one the order is
- *    computed from is what left an mtime-dated member ordered correctly under a
- *    blank date cell.
+ *  - **Dates come from `workedDateSignal`** — the same day the fold sorts on AND
+ *    the same one the fold's own rows print in their chips, because after the
+ *    one-chain fix all three read one signal. Printing a different chain from
+ *    the one the order is computed from is what left an mtime-dated member
+ *    ordered correctly under a blank date cell, and it is the same trap one rung
+ *    up: printing `seriesDateSignal`'s day here would put a `status_date` beside
+ *    a row the ledger placed.
  */
 function seriesStripHtml(m: WikiListing): string {
   const key = seriesKeyOf(m);
   if (!key) return "";
-  const { members, head } = seriesMembersOf(allPages, key);
+  // ONE server-anchored instant for the whole strip — the order and every date
+  // cell below read it, and the future guard compares against it.
+  const now = recencyNow();
+  const { members, head } = seriesMembersOf(allPages, key, now);
   const openKey = normalizeRel(m.relPath);
   // The open page must be IN the body this header describes. Carrying the key
   // is not the same as counting: a `superseded` child whose successor is in no
@@ -2366,8 +2427,9 @@ function seriesStripHtml(m: WikiListing): string {
     members.filter((p) => normalizeRel(p.relPath) !== openKey),
   );
   // `members` is newest first, the fold's own order; the story reads the other
-  // way round.
-  const ordered = [...members].reverse();
+  // way round. ONE exported spelling of that reversal (`seriesStripOrder`), so
+  // the invariant is pinned by a unit test rather than by this line.
+  const ordered = seriesStripOrder(members);
   const sep = `<span class="wiki-series-sep" aria-hidden="true">·</span>`;
   let strip =
     `<div class="wiki-series-strip">` +
@@ -2401,7 +2463,7 @@ function seriesStripHtml(m: WikiListing): string {
       const kind = [pageFolder(p), p.plan_status].filter(Boolean).join(" · ");
       return (
         `<div class="wiki-series-step${isOpen ? " current" : shipped ? " shipped" : ""}">` +
-        `<div class="wiki-series-step-date">${esc(seriesDateSignal(p).day)}</div>` +
+        `<div class="wiki-series-step-date">${esc(workedDateSignal(p, now).day)}</div>` +
         `<div class="wiki-series-step-title">${esc(displayTitleOf(p))}</div>` +
         `<div class="wiki-series-step-kind">${esc(kind)}</div>` +
         `</div>`
@@ -2502,7 +2564,7 @@ function paintSeriesMenuEl(anchor: HTMLElement, html: string): HTMLElement {
 function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): void {
   closeSeriesMenu({ focus: false });
   if (!seriesEditable()) return;
-  const model = buildSeriesMenu(allPages, relPath);
+  const model = buildSeriesMenu(allPages, relPath, recencyNow());
   if (!model) {
     // The listing moved under the row between its render and this click — a
     // deleted or renamed page. Said in the popover rather than swallowed: a
@@ -6238,6 +6300,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // (`recencyNow`) — a viewer clock running >48h slow would otherwise trip the
   // future-date guard on every frontmatter-dated page in the wiki at once.
   scannedAtMs = typeof data.scannedAt === "number" ? data.scannedAt : null;
+  applyWorkedSortOption(data.workedCoverage);
   // Store the wiki's merged type list (defaults + `.wiki-reader.json` customs).
   // Absent/empty (older server / degraded) keeps the built-in constants so
   // standard types still render — the belt-and-suspenders unions in the chip/hub
