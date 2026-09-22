@@ -486,7 +486,8 @@ function warnDegraded(
  *
  * `maxAgeMs` is the staleness the caller tolerates: `buildWikiIndex` passes the
  * index's own TTL, so a rebuild inside one TTL re-uses the memo and a rebuild
- * after it asks again. Pass 0 to force.
+ * after it asks again. Pass 0 to force — BOOT only (`src/index.ts`); no HTTP
+ * caller may, see `lastFailureAt` above.
  *
  * It bounds a FAILED attempt on the same cadence (`lastFailureAt`), so a
  * degraded upstream is re-tested once per TTL rather than once per index build.

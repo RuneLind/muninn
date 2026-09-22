@@ -4144,6 +4144,8 @@ describe("GET /api/wiki/pages?refresh=1 and the worked ledger's back-off", () =>
       // Two focus refetches. Poll the whole window for a hit that must not come.
       expect((await app.request("/api/wiki/pages?refresh=1")).status).toBe(200);
       expect((await app.request("/api/wiki/pages?refresh=1")).status).toBe(200);
+      // 500 ms is ~60× the positive half: request start to upstream hit measured
+      // median 1 ms, max 8 ms over 20 runs on loopback (verify pass, fix round 4).
       await until(() => hits >= 2, 500);
       expect(hits).toBe(1);
     } finally {

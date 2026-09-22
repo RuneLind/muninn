@@ -757,6 +757,7 @@ describe("no index build waives the ledger's back-off", () => {
       await buildWikiIndex(root);
       await getWikiIndex({ root, refresh: true });
       await getWikiIndex({ root, refresh: true });
+      // 500 ms is ~60× the positive half (median 1 ms, max 8 ms measured).
       await until(() => hits >= 2, 500);
       expect(hits).toBe(1);
     } finally {
