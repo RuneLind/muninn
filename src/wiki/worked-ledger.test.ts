@@ -758,8 +758,15 @@ describe("the ?refresh=1 escape hatch", () => {
       await until(() => hits >= 2);
       expect(hits).toBe(2);
 
-      // …and through the caller the route actually uses.
+      // A programmatic `refresh: true` — what every page write passes after it
+      // lands — is NOT the hatch: it busts the index TTL and leaves the ledger's
+      // back-off in force, or a gardener drain would re-ask upstream per page.
       await getWikiIndex({ root, refresh: true });
+      await Bun.sleep(50);
+      expect(hits).toBe(2);
+
+      // …the operator's `?refresh=1` is, through the caller the route uses.
+      await getWikiIndex({ root, refresh: true, forceLedger: true });
       await until(() => hits >= 3);
       expect(hits).toBe(3);
     } finally {

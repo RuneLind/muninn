@@ -1348,10 +1348,12 @@ describe("the worked comparator — ORDER moves, IDENTITY does not", () => {
   });
 
   // The ONE-CHAIN property, as fix round 2 leaves it: the WORKED rung is the
-  // rail chip's own guarded signal, so the fold and the row chip can never
-  // disagree about a COVERED page or about a stamp the guard rejects. What they
-  // may differ on is an uncovered one, where the chip shows the update date and
-  // the fold prints the series chain (the case below).
+  // rail chip's own guarded signal, so the fold and the row chip agree about a
+  // COVERED page. Below that rung the two chains part — the chip falls to the
+  // update chain, the fold to the series chain — so an uncovered page AND a page
+  // whose stamp the guard rejects may be dated differently by the two; that is
+  // the declared divergence class, and the rejected-stamp case below pins that
+  // it lands on the SERIES chain, with fixture dates that can tell them apart.
   test("the WORKED rung is the rail chip's own signal, day-floored", () => {
     for (const p of [
       // Covered.
@@ -1363,17 +1365,18 @@ describe("the worked comparator — ORDER moves, IDENTITY does not", () => {
       expect(workedDateSignal(p, NOW).rank).toBe(4);
     }
     // A FUTURE worked stamp is rejected by the SAME guard the chip applies, so
-    // it can no longer sort first while the row shows a fallback: neither
-    // surface sees 2027.
+    // it can no longer sort first: neither surface sees 2027. Below the guard
+    // the two chains part, so the fixture gives them DIFFERENT days — the fold
+    // lands on `status_date` and the chip on `updated:`. Equal days here would
+    // let a fold that fell to the update chain pass unnoticed.
     const future = page({
       relPath: "c.md",
       workedMs: Date.parse("2027-06-01T10:00:00Z"),
-      status_date: "2026-08-04",
+      status_date: "2026-01-05",
       updated: "2026-08-04",
     });
-    expect(workedDateSignal(future, NOW).day).toBe("2026-08-04");
+    expect(workedDateSignal(future, NOW).day).toBe("2026-01-05");
     expect(pageDateSignal(future, "worked", NOW)?.label).toBe("2026-08-04");
-    // …and it falls to the SERIES chain, not the update one — the rung says so.
     expect(workedDateSignal(future, NOW)).toEqual(seriesDateSignal(future));
   });
 

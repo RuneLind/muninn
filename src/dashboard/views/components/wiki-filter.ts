@@ -902,14 +902,16 @@ export function pageDateSignal(
  * future-date guard applies here too: the ledger's timestamps come from whatever
  * clock wrote the transcript.
  *
- * ⚠️ **This is the ONE worked key.** It is exported because `wiki-groups`'
+ * ⚠️ **This is the ONE worked RUNG.** It is exported because `wiki-groups`'
  * `workedDateSignal` — the order behind the series fold, the reader strip and
- * `describeSeries` — is a day-floored wrapper over it rather than a second
- * chain. Two chains is what shipped first, and they disagreed in three measured
- * ways: a 2027 stamp fell back here and sorted first there, a page whose
- * frontmatter and git dates differ was placed by one chain and PRINTED by the
- * other, and an expanded fold read `09-21, 09-17, 09-17, 09-20, 09-15` because
- * its members sorted on a date their own chips did not show.
+ * `describeSeries` — reads its top rung from here, so a covered page and a
+ * stamp the future guard rejects are judged once. Below that rung the two part
+ * on purpose: this falls to `updatedSignal` (the row chip), the fold falls to
+ * `seriesDateSignal` (`status_date` first, the authored plan chronology) — a
+ * fold that fell to the update chain collapsed 25 of mimir's 30 series to
+ * alphabetical on a cold instance. So the fold and the chip may date an
+ * uncovered or guard-rejected member differently; that is the declared
+ * divergence class, stated in `src/wiki/CLAUDE.md`.
  */
 export function workedSignal(
   p: WikiRecencyFields,

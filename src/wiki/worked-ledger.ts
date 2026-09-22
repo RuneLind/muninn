@@ -369,7 +369,11 @@ async function runRefresh(
   // released, or the caller's TTL gate never holds and the root is re-asked on
   // every index build — the back-off, defeated through this path.
   if (parsed.pages.size === 0 && prev && prev.pages.size > 0) {
-    const since = lastNonEmptyAt.get(root) ?? prev.fetchedAt;
+    // `lastNonEmptyAt` is set at every non-empty commit and cleared with the
+    // memo, so with `prev.pages.size > 0` it is always present; the fallback is
+    // "release now" rather than `prev.fetchedAt`, which a held empty answer
+    // advances and would therefore never let the window elapse.
+    const since = lastNonEmptyAt.get(root) ?? 0;
     if (at - since < WORKED_EMPTY_RELEASE_MS) {
       warnDegraded(
         deps,

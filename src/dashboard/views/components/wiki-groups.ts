@@ -859,8 +859,9 @@ export function orderSeriesGroups(
   // In WORKED mode the section is keyed on THIS fold's own comparator, so a
   // group is never placed by a date its fold does not print. The two other
   // recency modes keep the mode's own row key: there the section follows the
-  // row chips and the fold follows the series chronology, and for an UNCOVERED
-  // member those legitimately differ (see {@link workedDateSignal}).
+  // row chips and the fold follows the worked-first series chronology, so the
+  // two can differ for any member — a covered one's worked day places nothing
+  // in the section, an uncovered one's two chains part (see {@link workedDateSignal}).
   const key =
     opts.sort === "worked"
       ? (m: WikiListing, now?: number) => workedDateSignal(m, now).ms

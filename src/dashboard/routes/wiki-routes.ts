@@ -1323,7 +1323,8 @@ export function registerWikiRoutes(
       return c.json({ pages: [], scannedAt: null, error: "no wiki configured for that name" });
     }
     const root = entry?.root;
-    const index = await getWikiIndex({ root, refresh: c.req.query("refresh") === "1" });
+    const forced = c.req.query("refresh") === "1";
+    const index = await getWikiIndex({ root, refresh: forced, forceLedger: forced });
     if (!index) {
       return c.json({ pages: [], scannedAt: null, error: "wiki directory not found" });
     }
@@ -1403,7 +1404,7 @@ export function registerWikiRoutes(
     );
     if (unknownWiki) return emptyAtlas("no wiki configured for that name");
     const refresh = c.req.query("refresh") === "1";
-    const index = await getWikiIndex({ root: entry?.root, refresh });
+    const index = await getWikiIndex({ root: entry?.root, refresh, forceLedger: refresh });
     if (!index) return emptyAtlas("wiki directory not found");
     const payload = projectAtlas(index);
 
@@ -1707,7 +1708,8 @@ export function registerWikiRoutes(
     if (collections.length === 0) {
       return nullCoverage({ error: "no search collection connected for this wiki" });
     }
-    const index = await getWikiIndex({ root: entry.root, refresh: c.req.query("refresh") === "1" });
+    const forced = c.req.query("refresh") === "1";
+    const index = await getWikiIndex({ root: entry.root, refresh: forced, forceLedger: forced });
     if (!index) {
       return nullCoverage({ collections, error: "wiki directory not found" });
     }

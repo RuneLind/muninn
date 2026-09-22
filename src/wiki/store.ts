@@ -3026,9 +3026,10 @@ export async function buildWikiIndex(
   // is the stated price of never putting a tailnet service on a page load's
   // critical path (`src/wiki/worked-ledger.ts`). Server boot kicks it too, so the
   // cold window is the first index build rather than the first reader.
-  // A FORCED build (`?refresh=1`) passes 0, which waives both the memo's TTL
-  // gate and the degraded-upstream back-off — the escape hatch `worked-ledger.ts`
-  // documents, and which nothing exercised while this always sent the TTL.
+  // A FORCED build — `getWikiIndex({forceLedger: true})`, set only by the
+  // `?refresh=1` handlers, never by a write's own `refresh: true` — passes 0,
+  // which waives both the memo's TTL gate and the degraded-upstream back-off:
+  // the escape hatch `worked-ledger.ts` documents.
   kickWorkedLedgerRefresh(root, { maxAgeMs: opts?.forced ? 0 : CACHE_TTL_MS });
 
   const register = (key: string, meta: WikiPageMeta) => {
@@ -3578,7 +3579,20 @@ const warnedRoots = new Set<string>();
  * wiki never affects the jarvis cache. Returns null (and warns once per root)
  * when the directory is missing — the caller renders an empty state.
  */
-export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }): Promise<WikiIndex | null> {
+/**
+ * `refresh` busts the index TTL and is what every programmatic write passes after
+ * it lands (`page-write.ts`, the stamp/series/gardener routes, the sync loop).
+ * `forceLedger` is the OPERATOR's `?refresh=1` alone: it also waives the worked
+ * ledger's TTL gate and its degraded-upstream back-off. Fix round 2 tied the
+ * second to the first, which made every gardener drain, lint Accept and sync run
+ * re-ask claude-usage once per page written — the back-off, off for the whole
+ * write surface. Only the three `?refresh=1` route handlers set it.
+ */
+export async function getWikiIndex(opts?: {
+  root?: string;
+  refresh?: boolean;
+  forceLedger?: boolean;
+}): Promise<WikiIndex | null> {
   const root = resolveWikiRoot(opts?.root);
   const cached = caches.get(root);
   if (cached && !opts?.refresh && Date.now() - cached.scannedAt < CACHE_TTL_MS) {
@@ -3600,7 +3614,7 @@ export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }):
   }
 
   const started = Date.now();
-  const index = await buildWikiIndex(root, { forced: opts?.refresh === true });
+  const index = await buildWikiIndex(root, { forced: opts?.forceLedger === true });
   caches.set(root, index);
   warnedRoots.delete(root);
   log.info("Wiki index built: {pages} pages in {ms}ms from {path}", {

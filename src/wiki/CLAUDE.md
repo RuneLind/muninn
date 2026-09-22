@@ -1139,8 +1139,9 @@ wrong from outside:
   spelling that ANSWERED is asked first on every later refresh.
 - **A degraded upstream is backed off** on the caller's own TTL, so a service
   that is down or un-upgraded is re-tested once per TTL rather than on every
-  index rebuild — and a FORCED build (`getWikiIndex({refresh: true})`, i.e.
-  `?refresh=1`) passes `maxAgeMs: 0`, which waives both that back-off and the
+  index rebuild — and a FORCED build (`getWikiIndex({forceLedger: true})`, set
+  only by the `?refresh=1` handlers, never by a write's own `refresh: true`)
+  passes `maxAgeMs: 0`, which waives both that back-off and the
   memo's own TTL. `buildWikiIndex`'s `forced` option is the whole of that
   escape hatch; without it the promise in this module's docblock was inert.
 - **The boot kick is gated on the serving profile**: under `MUNINN_PROFILE=nais`
@@ -1196,8 +1197,10 @@ after boot, and 537 of mimir's 549 pages even when warm — lands on
 clone, 23 of 30 series folds reordered against `origin/main` and 25 of 30
 collapsed to a single tie-day, i.e. to alphabetical, with the reader strip then
 reading reverse-alphabetical. The WORKED rung still comes through the one
-guarded `workedSignal`, so the fold and the row chip cannot disagree about a
-covered page or about a stamp the future guard rejects; below it the fold keeps
+guarded `workedSignal`, so the fold and the row chip agree about a covered page;
+a stamp the guard rejects falls through to each surface's OWN lower rungs — the
+chip's update chain, the fold's series chain — and may be dated differently by
+the two, the same class as an uncovered member; below it the fold keeps
 `seriesDateSignal`'s own rungs (`asserted` > `git` > `mtime`), so two uncovered
 members sharing a day order authored-date-first rather than by relPath.
 
@@ -1221,8 +1224,8 @@ that a group sits where the reader's sort put its first member; measured on mimi
 THE MODE ON SCREEN in the three recency modes (ties falling back to the label) —
 in `worked` mode that key is the FOLD's own comparator, so no group is placed by
 a date its fold does not print, while `updated`/`created` keep the mode's own row
-key and the section then follows the row chips where an uncovered member's two
-dates differ —
+key and the section then follows the row chips while the fold stays worked-first,
+so the two can differ for any member, covered or not —
 alphabetically by label in `title` mode, and keeps FIRST APPEARANCE in
 `backlinks` — where that already means "the group holding the most-connected page
 first", and link counts do not tie the way a corpus of same-day dates does. The
