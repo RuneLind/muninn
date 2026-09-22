@@ -2276,8 +2276,9 @@ export async function renderWikiPage(opts?: {
                  wiki has any covered page (workedCoverage.matched > 0) — on a
                  corpus written entirely by bulk passes every page falls back to
                  its update date, so the option would be "Recently updated" under
-                 a second name. Hidden rather than disabled: a control that can
-                 never be chosen is furniture (the rail's own F2 rule). -->
+                 a second name (the measured corpus is named once, on
+                 WikiIndex.workedCoverage). Hidden rather than disabled: a control
+                 that can never be chosen is furniture (the rail's own F2 rule). -->
             <option value="worked" hidden>Worked on</option>
             <option value="backlinks">Most linked</option>
             <option value="title">Title A–Z</option>

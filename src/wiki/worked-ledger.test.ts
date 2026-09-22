@@ -23,9 +23,12 @@ import {
   workedLedgerDepsFromEnv,
   type WorkedLedgerDeps,
 } from "./worked-ledger.ts";
-import { WORKED_MATCH_WARN_RATE, workedMatchRateLow } from "./store.ts";
+import { __resetWorkedMatchWarnsForTest, workedMatchWarnDue } from "./store.ts";
 
-beforeEach(() => __resetWorkedLedgerForTest());
+beforeEach(() => {
+  __resetWorkedLedgerForTest();
+  __resetWorkedMatchWarnsForTest();
+});
 
 /** A deps object whose fetcher answers one body per root spelling. */
 function deps(
@@ -304,16 +307,189 @@ describe("defaultWorkedLedgerDeps / workedLedgerDepsFromEnv", () => {
 
 describe("the match-rate guard", () => {
   test("fires below the rate, and never on an empty answer", () => {
-    expect(WORKED_MATCH_WARN_RATE).toBe(0.5);
     // Driven AT the boundary in both directions, so moving the constant is a
-    // measurement rather than an edit.
-    expect(workedMatchRateLow(4, 10)).toBe(true);
-    expect(workedMatchRateLow(5, 10)).toBe(false);
-    expect(workedMatchRateLow(0, 10)).toBe(true);
-    // The healthy band (75–90% on mimir: rows for renamed/deleted pages).
-    expect(workedMatchRateLow(75, 100)).toBe(false);
+    // measurement rather than an edit. A fresh root each time, because the
+    // predicate is THROTTLED per root (below).
+    expect(workedMatchWarnDue("/r1", 4, 10)).toBe(true);
+    expect(workedMatchWarnDue("/r2", 5, 10)).toBe(false);
+    expect(workedMatchWarnDue("/r3", 0, 10)).toBe(true);
+    // A healthy band — rows for pages since renamed or deleted.
+    expect(workedMatchWarnDue("/r4", 75, 100)).toBe(false);
     // Zero rows is the ordinary state of an un-worked wiki, not a keying bug.
-    expect(workedMatchRateLow(0, 0)).toBe(false);
+    expect(workedMatchWarnDue("/r5", 0, 0)).toBe(false);
+  });
+
+  test("warns ONCE per root, then stays silent until the rate recovers", () => {
+    // The condition is durable and the caller is not: the index rebuilds every
+    // five minutes and on every `?refresh=1`, and the un-throttled predicate
+    // warned on every one of them (measured: 5 builds, 5 identical warns).
+    expect(workedMatchWarnDue("/w", 1, 10)).toBe(true);
+    expect(workedMatchWarnDue("/w", 1, 10)).toBe(false);
+    expect(workedMatchWarnDue("/w", 0, 10)).toBe(false);
+    // RECOVERY clears the root, so a second onset is reported again.
+    expect(workedMatchWarnDue("/w", 9, 10)).toBe(false);
+    expect(workedMatchWarnDue("/w", 1, 10)).toBe(true);
+  });
+
+  test("the throttle is PER ROOT — one wiki's warn never silences another's", () => {
+    expect(workedMatchWarnDue("/a", 1, 10)).toBe(true);
+    expect(workedMatchWarnDue("/b", 1, 10)).toBe(true);
+  });
+});
+
+describe("a SUCCESSFUL zero-row answer never blanks a good memo", () => {
+  test("the memo survives, and the empty answer is not committed", async () => {
+    let empty = false;
+    const d = deps((root) => (empty ? { root, pages: [] } : { root, pages: [{ p: "a.md", w: 7 }] }));
+    await refreshWorkedLedger("/w", d);
+    empty = true;
+    const after = await refreshWorkedLedger("/w", d);
+    // Proven before the fix: memo 1 → 0, the sort option hides, nothing logs.
+    expect(after?.pages.get("a.md")).toBe(7);
+    expect(workedLedgerFor("/w")?.pages.size).toBe(1);
+  });
+
+  test("…but a FIRST empty answer is committed — a wiki nobody has written", async () => {
+    const d = deps({ "/w": { pages: [] } });
+    const memo = await refreshWorkedLedger("/w", d);
+    expect(memo?.pages.size).toBe(0);
+    expect(memo?.returned).toBe(0);
+    // Which is what lets the listing report `matched: 0` and hide the option.
+    expect(workedLedgerFor("/w")).toBe(memo!);
+  });
+
+  test("a retry that THROWS keeps the memo, never falls through to the empty commit", async () => {
+    const real = await mkdtemp(path.join(tmpdir(), "worked-retry-throw-"));
+    const link = path.join(path.dirname(real), `worked-retry-link-${process.pid}`);
+    await symlink(real, link);
+    try {
+      const resolved = await realpath(link);
+      let good = true;
+      const d = deps((root) => {
+        if (root === link) return good ? { pages: [{ p: "a.md", w: 5 }] } : { pages: [] };
+        // The realpath leg is the one that fails — measured end to end on a
+        // symlinked root, where one ETIMEDOUT there blanked the whole axis.
+        return new Error("ETIMEDOUT");
+      });
+      await refreshWorkedLedger(link, d);
+      expect(workedLedgerFor(link)?.pages.size).toBe(1);
+      good = false;
+      const after = await refreshWorkedLedger(link, d);
+      expect(d.asked).toEqual([link, link, resolved]);
+      expect(after?.pages.get("a.md")).toBe(5);
+      expect(workedLedgerFor(link)?.pages.size).toBe(1);
+    } finally {
+      await rm(link, { force: true });
+      await rm(real, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the root SPELLING", () => {
+  test("an unnormalized root is RESOLVED before the ask", async () => {
+    // Upstream's `canonicalRoot` refuses a non-canonical root with a 400 — and a
+    // 400 is not the zero-row answer the realpath retry keys on, so an
+    // unnormalized `WIKI_DIR` would degrade forever with no way back.
+    const d = deps({ "/w/x": { pages: [{ p: "a.md", w: 1 }] } });
+    const memo = await refreshWorkedLedger("/w/y/../x", d);
+    expect(d.asked).toEqual(["/w/x"]);
+    expect(memo?.rootAsked).toBe("/w/x");
+    // The memo is keyed on the CONFIGURED spelling, which is what the store
+    // looks it up with.
+    expect(workedLedgerFor("/w/y/../x")).toBe(memo!);
+  });
+
+  test("the spelling that ANSWERED is asked FIRST on the next refresh", async () => {
+    const real = await mkdtemp(path.join(tmpdir(), "worked-hint-"));
+    const link = path.join(path.dirname(real), `worked-hint-link-${process.pid}`);
+    await symlink(real, link);
+    try {
+      const resolved = await realpath(link);
+      const d = deps({ [link]: { pages: [] }, [resolved]: { pages: [{ p: "a.md", w: 5 }] } });
+      await refreshWorkedLedger(link, d);
+      expect(d.asked).toEqual([link, resolved]);
+      // Second refresh: one fetch, no `realpath`, the winning spelling first.
+      await refreshWorkedLedger(link, d);
+      expect(d.asked).toEqual([link, resolved, resolved]);
+    } finally {
+      await rm(link, { force: true });
+      await rm(real, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a CLIPPED answer", () => {
+  test("`truncated` rides the memo, and an absent field is not a clip", async () => {
+    const d = deps({
+      "/w": { pages: [{ p: "a.md", w: 1 }], truncated: true, limit: 5000 },
+      "/q": { pages: [{ p: "a.md", w: 1 }] },
+    });
+    expect((await refreshWorkedLedger("/w", d))?.truncated).toBe(true);
+    expect((await refreshWorkedLedger("/q", d))?.truncated).toBe(false);
+  });
+
+  test("the parse reads upstream's own limit, so the warn can name it", () => {
+    const out = parseWorkedPages({ pages: [], truncated: true, limit: 5000 });
+    expect(out).toMatchObject({ ok: true, truncated: true, limit: 5000 });
+    // A non-numeric limit is simply not reported rather than echoed raw.
+    expect(parseWorkedPages({ pages: [], limit: "lots" })).not.toHaveProperty("limit");
+  });
+});
+
+describe("a NON-OBJECT throw", () => {
+  test("is classified without touching `.status`, so the refresh still resolves", async () => {
+    // `(err as {status?: unknown}).status` THROWS a TypeError inside the catch
+    // for a thrown string or null, which rejected `refreshWorkedLedger` and
+    // contradicted its "never throws" contract.
+    for (const thrown of ["boom", null, 42]) {
+      __resetWorkedLedgerForTest();
+      const d: WorkedLedgerDeps = {
+        urlConfigured: true,
+        baseUrl: "http://ledger.test:8787",
+        fetchPages: () => Promise.reject(thrown),
+      };
+      expect(await refreshWorkedLedger("/w", d)).toBeNull();
+    }
+  });
+
+  test("a typed HTTP status is still read off the error", async () => {
+    const d = deps({ "/w": Object.assign(new Error("nope"), { status: 503 }) });
+    expect(await refreshWorkedLedger("/w", d)).toBeNull();
+    expect(workedLedgerFor("/w")).toBeNull();
+  });
+});
+
+describe("the degraded-upstream back-off", () => {
+  test("a FAILED attempt is not repeated inside the caller's TTL", async () => {
+    const d = deps({ "/w": new Error("down") });
+    // AWAITED, so the failure is recorded and the in-flight entry is gone —
+    // otherwise the second kick would join the first and pass on that alone.
+    await refreshWorkedLedger("/w", d);
+    expect(d.asked).toEqual(["/w"]);
+    // The un-upgraded raw row form is ~800 KB and was re-fetched once per index
+    // build, forever. The second kick inside the window asks nothing.
+    kickWorkedLedgerRefresh("/w", { deps: d, maxAgeMs: 60_000 });
+    await Promise.resolve();
+    expect(d.asked).toEqual(["/w"]);
+    // …while a FORCED kick (`?refresh=1`) still retries at once.
+    kickWorkedLedgerRefresh("/w", { deps: d, maxAgeMs: 0 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(d.asked).toEqual(["/w", "/w"]);
+  });
+
+  test("one success clears it", async () => {
+    let fail = true;
+    const d = deps((root) => (fail ? new Error("down") : { root, pages: [{ p: "a.md", w: 1 }] }));
+    await refreshWorkedLedger("/w", d);
+    fail = false;
+    await refreshWorkedLedger("/w", d);
+    expect(d.asked.length).toBe(2);
+    // The memo is fresh now, so the next TTL-bounded kick skips on ITS age
+    // rather than on a failure that no longer stands.
+    kickWorkedLedgerRefresh("/w", { deps: d, maxAgeMs: 60_000 });
+    await Promise.resolve();
+    expect(d.asked.length).toBe(2);
   });
 });
 

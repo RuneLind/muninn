@@ -21,7 +21,7 @@
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
@@ -43,6 +43,11 @@ function page(
     "---",
     `title: ${title}`,
     `status_date: ${opts.date}`,
+    // MIRRORED onto `updated`, because the two chains read different keys: the
+    // IDENTITY chain (seriesDateSignal) reads status_date, while the DISPLAY
+    // chain (workedDateSignal) reads the rail's own update signal. Without both
+    // the display half of this file would order on nothing but the relPath.
+    `updated: ${opts.date}`,
     `series: ${opts.series}`,
     ...(opts.label ? [`series_label: ${opts.label}`] : []),
     ...(opts.plan ? ["plan_status: in-flight"] : []),
@@ -65,7 +70,11 @@ const PAGES: Array<[string, string]> = [
     "plans/head.md",
     page(
       "Head",
-      { date: "2026-07-02", series: "alpha", label: "Alpha", plan: true },
+      // The label is deliberately NOT the bare key: with `label: "Alpha"` a
+      // mutation picking `sorted[0]` as the head passed every case in this file,
+      // because `blogs/tail.md` spells its own key `Alpha` and `groupSeries`
+      // falls a label-less head back to `seriesKeyOf(head)` — the same string.
+      { date: "2026-07-02", series: "alpha", label: "Alpha campaign", plan: true },
       "Links [[mid]] and names https://github.com/RuneLind/muninn/pull/549.",
     ),
   ],
@@ -84,6 +93,13 @@ const PAGES: Array<[string, string]> = [
     // to the head's own spelling.
     "blogs/tail.md",
     page("Tail", { date: "2026-09-21", series: "Alpha" }, "About [[head]] and [[mid]]."),
+  ],
+  [
+    // Deliberately ABSENT from WORKED below: the ordinary case (every write to
+    // it was discounted as a bulk pass), so the fold interleaves a covered and
+    // an uncovered member and identity has to hold across both.
+    "plans/extra.md",
+    page("Extra", { date: "2026-08-01", series: "alpha" }, "Also about [[head]]."),
   ],
   ["plans/other.md", page("Other", { date: "2026-09-01", series: "beta" }, "Alone.")],
   ["plans/second.md", page("Second", { date: "2026-09-02", series: "beta" }, "Also alone.")],
@@ -119,6 +135,13 @@ beforeAll(async () => {
   await mkdir(path.join(root, "plans"), { recursive: true });
   await mkdir(path.join(root, "blogs"), { recursive: true });
   for (const [rel, body] of PAGES) await writeFile(path.join(root, rel), body, "utf8");
+  // BACKDATE every mtime. This wiki is not a git repo, so `updatedSignal` trusts
+  // mtime unconditionally and takes the MAX of it and the frontmatter date — and
+  // a file written a millisecond ago gives every page the same "now", which
+  // collapses the display order onto the relPath and makes the two halves of
+  // this file assert nothing. `e2e/settled-wiki.ts` exists for the same reason.
+  const settled = new Date("2020-01-01T00:00:00Z");
+  for (const [rel] of PAGES) await utimes(path.join(root, rel), settled, settled);
   plain = await buildWikiIndex(root);
   worked = await buildStamped();
 });
@@ -152,28 +175,55 @@ describe("worked never decides a write", () => {
 
   test("the series HEAD and the newest plan are unmoved", () => {
     const g = (index: WikiIndex) =>
-      groupSeries(index.pages as unknown as WikiListing[]).find((x) => x.key === "series:alpha")!;
+      groupSeries(index.pages as unknown as WikiListing[], undefined, NOW()).find(
+        (x) => x.key === "series:alpha",
+      )!;
     expect(g(worked).label).toBe(g(plain).label);
     expect(g(worked).latestRel).toBe(g(plain).latestRel);
+    // …and the label really is the one the HEAD wrote, so the assertion above is
+    // about the head choice rather than about a key two pages happen to share.
+    expect(g(plain).label).toBe("Alpha (mid)");
+  });
+
+  // `head` is the series editor's WRITE target (`headRel`) and the page
+  // `lint-series.ts` proposes a `series_label:` on, so it is asserted by name
+  // rather than only through the label the group reads off it.
+  test("seriesMembersOf's HEAD — the write target — is the same page either way", () => {
+    const head = (index: WikiIndex) =>
+      seriesMembersOf(index.pages as unknown as WikiListing[], "alpha", NOW()).head?.relPath;
+    expect(head(worked)).toBe(head(plain));
+    expect(head(plain)).toBe("plans/mid.md");
   });
 });
 
 describe("…and the display half DOES move", () => {
-  test("the fold's member order is worked-first", () => {
+  test("the fold's member order is worked-first, covered and uncovered together", () => {
     const g = (index: WikiIndex) =>
-      groupSeries(index.pages as unknown as WikiListing[])
+      groupSeries(index.pages as unknown as WikiListing[], undefined, NOW())
         .find((x) => x.key === "series:alpha")!
         .members.map((m) => m.relPath);
-    expect(g(plain)).toEqual(["blogs/tail.md", "plans/mid.md", "plans/head.md"]);
-    expect(g(worked)).toEqual(["plans/head.md", "plans/mid.md", "blogs/tail.md"]);
+    expect(g(plain)).toEqual([
+      "blogs/tail.md",
+      "plans/mid.md",
+      "plans/extra.md",
+      "plans/head.md",
+    ]);
+    // `plans/extra.md` has NO worked date and keeps its own place by its update
+    // date, between two covered members — mixed coverage, not all-or-nothing.
+    expect(g(worked)).toEqual([
+      "plans/head.md",
+      "plans/mid.md",
+      "plans/extra.md",
+      "blogs/tail.md",
+    ]);
   });
 
   test("the reader strip's set is the fold's own order, so it moves with it", () => {
     const strip = (index: WikiIndex) =>
-      seriesMembersOf(index.pages as unknown as WikiListing[], "alpha").members.map(
+      seriesMembersOf(index.pages as unknown as WikiListing[], "alpha", NOW()).members.map(
         (m) => m.relPath,
       );
-    const fold = groupSeries(worked.pages as unknown as WikiListing[])
+    const fold = groupSeries(worked.pages as unknown as WikiListing[], undefined, NOW())
       .find((x) => x.key === "series:alpha")!
       .members.map((m) => m.relPath);
     expect(strip(worked)).toEqual(fold);

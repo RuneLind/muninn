@@ -55,9 +55,27 @@ const LABEL = "Wiki provenance";
  *  fixture page would be, and the rail this file asserts about would be a list
  *  of Activity rows. */
 function md(title: string, extra: string[] = []): string {
-  return ["---", `title: ${title}`, SETTLED_CREATED_LINE, ...extra, "---", "", "Body.", ""].join(
-    "\n",
-  );
+  // ⚠️ `status_date:` is MIRRORED onto `updated:`. A series FOLD orders by
+  // `byWorkedDateDesc`, which reads the rail's own update chain per page (see
+  // `workedDateSignal`) rather than the identity chain `status_date` belongs to
+  // — and these mtimes are settled, so a page carrying only `status_date` has no
+  // date the fold can see and the order below would be a fact about file names.
+  const asserted = extra.find((l) => l.startsWith("status_date:"));
+  const mirrored =
+    asserted && !extra.some((l) => l.startsWith("updated:"))
+      ? [`updated: ${asserted.slice("status_date:".length).trim()}`]
+      : [];
+  return [
+    "---",
+    `title: ${title}`,
+    SETTLED_CREATED_LINE,
+    ...extra,
+    ...mirrored,
+    "---",
+    "",
+    "Body.",
+    "",
+  ].join("\n");
 }
 
 /**

@@ -34,6 +34,7 @@ import { buildWikiGitDates } from "./git-dates.ts";
 import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
+import { normalizeRelPath } from "./rel-path.ts";
 import {
   kickWorkedLedgerRefresh,
   normalizeWorkedPath,
@@ -301,8 +302,11 @@ const GIT_DATE_MISS_WARN_RATE = 0.1;
  * A RATE, and over the RETURNED rows rather than over the pages, for the reason
  * `GIT_DATE_MISS_WARN_RATE`'s docblock gives one axis over: an absolute count of
  * unmatched rows carries no signal at all here, because a healthy refresh leaves
- * a row for every page that has since been renamed or deleted — measured 68 such
- * rows on mimir, ~15% of the set, so the healthy band is 75–90%.
+ * a row for every page that has since been renamed or deleted. The plan measured
+ * that overhead at ~15% of the set on the mini's ledger and put the healthy band
+ * at 75–90%; THIS PR did not reproduce it — the laptop's ledger is thin enough
+ * that mimir matched 12 of 12 returned rows — so treat the band as the plan's
+ * figure rather than as a property of every host.
  *
  * 50% is the floor between that band and the failure it is sized for: a root
  * whose ledger spelling differs (a symlink, a worktree, a second checkout)
@@ -310,20 +314,46 @@ const GIT_DATE_MISS_WARN_RATE = 0.1;
  * ledger that holds nothing for this root yet is the ordinary state of a wiki
  * nobody has written with an agent, not a keying bug.
  */
-export const WORKED_MATCH_WARN_RATE = 0.5;
+const WORKED_MATCH_WARN_RATE = 0.5;
+
+/** Roots currently sitting under the rate. Warned ONCE each, then silent until
+ *  the rate recovers — see {@link workedMatchWarnDue}. */
+const workedMatchWarned = new Set<string>();
 
 /**
- * Should this build warn that the worked ledger's paths stopped matching?
+ * Should this build warn that the worked ledger's paths stopped matching — and
+ * RECORD that it did?
  *
  * Its own exported predicate rather than an inline comparison, for the reason
  * every threshold in this repo ends up one: a test has to be able to drive it at
  * the boundary, and the log line it guards is not assertable from a unit test
- * (an unconfigured logger is a silent no-op). Zero returned rows is NOT low —
- * that is the ordinary state of a wiki nobody has written with an agent.
+ * (an unconfigured logger is a silent no-op).
+ *
+ * It is THROTTLED per root, because the condition it reports is durable while
+ * the caller is not: the index rebuilds every 5 minutes and on every
+ * `?refresh=1`, so a mis-keyed root warned on every build (measured: 5 builds,
+ * 5 identical warns). The first sighting warns; later builds are silent until
+ * the rate RECOVERS, which clears the root so a second onset is reported again.
+ *
+ * ⚠️ `returned` counts every `.md`/`.mdx` upstream knows about under the root
+ * and cannot see the reader's `include` globs, so a wiki that scopes its scan
+ * can sit under the floor legitimately. Zero returned rows is NOT low — that is
+ * the ordinary state of a wiki nobody has written with an agent.
  */
-export function workedMatchRateLow(matched: number, returned: number): boolean {
+export function workedMatchWarnDue(root: string, matched: number, returned: number): boolean {
   if (returned <= 0) return false;
-  return matched / returned < WORKED_MATCH_WARN_RATE;
+  if (matched / returned >= WORKED_MATCH_WARN_RATE) {
+    workedMatchWarned.delete(root);
+    return false;
+  }
+  if (workedMatchWarned.has(root)) return false;
+  workedMatchWarned.add(root);
+  return true;
+}
+
+/** Test-only: forget which roots have already warned about their match rate. */
+export function __resetWorkedMatchWarnsForTest(): void {
+  workedMatchWarned.clear();
 }
 
 /**
@@ -779,9 +809,10 @@ export interface WikiIndex {
    * this is optional rather than a zeroed object.
    *
    * It rides `/api/wiki/pages` so the client can HIDE the Worked-on sort option on
-   * a wiki the ledger has nothing authored for (capra: 93% of its pages have a
-   * write row and every one of them is a bulk pass). Offering the mode there is
-   * offering a relabelled "Recently updated".
+   * a wiki the ledger has nothing authored for — the plan measured capra as that
+   * shape (93% of its pages carry a write row, every one of them a bulk pass).
+   * Offering the mode there is offering a relabelled "Recently updated", and this
+   * is the ONE place that figure is stated.
    */
   workedCoverage?: { matched: number; total: number; returned: number };
 }
@@ -796,10 +827,10 @@ export interface ShadowedPage {
   stem: string;
 }
 
-/** Canonical graph key for a page path: posix-normalized, lowercased relPath. */
-export function normalizeRelPath(relPath: string): string {
-  return path.posix.normalize(relPath).toLowerCase();
-}
+/** Canonical graph key for a page path: posix-normalized, lowercased relPath.
+ *  Re-exported from `rel-path.ts`, which owns it so the worked-on ledger can
+ *  share the spelling without importing this module back. */
+export { normalizeRelPath };
 
 /**
  * Stem-collision precedence rank for a page by file extension: `.md` (0) beats
@@ -3303,7 +3334,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       }
     }
     workedCoverage = { matched, total: pages.length, returned: workedMemo.returned };
-    if (workedMatchRateLow(matched, workedMemo.returned)) {
+    if (workedMatchWarnDue(root, matched, workedMemo.returned)) {
       // Names the base URL for the reason every other claude-usage message does:
       // the operator's first question about a degraded axis is which service, and
       // which SPELLING of the root, this instance asked.

@@ -448,13 +448,31 @@ test.describe("Wiki reader: worked-on recency", () => {
     expect(await labels()).toEqual(["Alpha", "Mike", "Zulu"]);
   });
 
+  test("the reader strip prints the WORKED day, oldest first", async ({ page }) => {
+    // The one surface no other case here opens. The strip is the fold's order
+    // REVERSED and prints the same signal the fold's own rows show, so its date
+    // column must ASCEND — de-reversing it, or printing a second chain, left 370
+    // unit tests green and is only visible in a rendered page.
+    await openReader(page, SERIES);
+    await page.goto(`${BASE}/wiki?wiki=${SERIES}&relPath=plans%2Fmike-a.md`);
+    const dates = page.locator(".wiki-series-head .wiki-series-tl .wiki-series-step-date");
+    await expect(dates).toHaveCount(2);
+    // mike-b was worked on 2026-05-01 and mike-a on 09-21 — oldest first, and
+    // neither is the shared `updated:` every fixture page carries.
+    expect(await dates.allTextContents()).toEqual(["2026-05-01", "2026-09-21"]);
+  });
+
   test("acceptance 4 — three ledger degrades: the listing renders and each warns", async ({
     page,
   }) => {
-    // The warns are emitted by the boot kick, one per wiki. Wait for all three
-    // rather than assuming they have landed.
+    // The warns are emitted by the boot kick, one per wiki, and they land in any
+    // order. Poll until ALL THREE are present rather than until one of them is:
+    // the over-cap warn fires on `content-length` before a body byte is read, so
+    // it is usually FIRST, and waiting on it alone let the other two race the
+    // assertions below.
+    const wanted = [/worked ledger degraded:.*HTTP 500/, /byte cap/, /summary form/];
     const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline && !/over the 8388608-byte cap/.test(serverLog)) {
+    while (Date.now() < deadline && !wanted.every((re) => re.test(serverLog))) {
       await new Promise((r) => setTimeout(r, 300));
     }
 

@@ -136,6 +136,7 @@ import {
   clipSeriesTitle,
   seriesKeyOf,
   seriesMembersOf,
+  seriesStripOrder,
   withoutSeriesMembers,
   workedDateSignal,
 } from "./wiki-groups.ts";
@@ -241,6 +242,7 @@ import {
   hasTypedHubs,
   hubTypeList,
   isRecencySort,
+  recencyKindFor,
   pageDateLabel,
   pageDateSignal,
   pageHeaderDates,
@@ -643,8 +645,8 @@ function sortMode(): WikiSortMode {
  *
  *  - `matched > 0` ⇒ the option is offered.
  *  - `matched === 0` ⇒ hidden. Every page would fall back to its update date, so
- *    the mode is "Recently updated" relabelled — measured on capra, where 93% of
- *    pages have a write row and every one of them is a bulk pass.
+ *    the mode is "Recently updated" relabelled. The corpus that shape was
+ *    measured on is named once, in `WikiIndex.workedCoverage` (`src/wiki/store.ts`).
  *  - ABSENT (a cold memo, an unreachable ledger, an older server) ⇒ LEFT AS IS.
  *    Nothing is known yet, and hiding on that is a verdict the data did not give.
  *
@@ -1131,7 +1133,7 @@ function renderList(): void {
   // function a unit test can drive without a rail. See its docblock for why the
   // section diverges from "a group sits where its first member sorts".
   const seriesGroups = railSectionsVisible(filters)
-    ? orderSeriesGroups(groupSeries(filtered, allPages), { sort: mode, now })
+    ? orderSeriesGroups(groupSeries(filtered, allPages, now), { sort: mode, now })
     : [];
   // ⚠️ A series CLAIMS its members before the family and month rules see the
   // list, which is what makes the two knock-on cases real and intended: a family
@@ -1306,11 +1308,13 @@ function renderList(): void {
         : "updated"
       : mode === "backlinks"
         ? null
-        : mode === "created"
-          ? "added"
-          : mode === "worked"
-            ? "worked"
-            : "updated";
+        : // `isRecencySort` is a TYPE PREDICATE, so the mode goes straight to the
+          // shared `recencyKindFor` and the mode→kind map lives in one place.
+          // `title` is deliberately NOT folded in here: it falls through to the
+          // update date, which is what that mode has always shown in this cell.
+          isRecencySort(mode)
+          ? recencyKindFor(mode)
+          : "updated";
     // ONE signal derivation per row — the stamp AND the label in a single call,
     // because this runs for every row on every keystroke (1261 of them on jarvis).
     const dateSignal = signal === null ? null : pageDateSignal(p, signal, now);
@@ -1322,8 +1326,8 @@ function renderList(): void {
     // The full date, from the SAME signal — kept one hover away below.
     const fullDate = dateSignal?.label ?? "";
     // In WORKED-ON mode the hover also names WHICH signal answered, because the
-    // axis is sparse by construction: roughly a third of a covered wiki has no
-    // worked date (every write discounted as a bulk pass) and falls back to the
+    // axis is sparse by construction: a covered wiki still holds pages with no
+    // worked date (every write discounted as a bulk pass) that fall back to the
     // update signal, so a bare day would read as a worked date the page never
     // earned. The suffix goes on the `title=` ONLY — `formatRailAge` reads
     // `fullDate` as a BARE day and would fall back to `localDay(ms)` for a
@@ -2397,17 +2401,21 @@ function projectHubChipHtml(m: WikiListing): string {
  *    rail answers "where do I go now" and this answers "how did this get here",
  *    which is a story with a beginning. It is the fold's own order REVERSED, so
  *    the two cannot sequence one series two ways.
- *  - **Dates come from `workedDateSignal`** — the same day the fold sorts on,
- *    worked rung first and mtime rung last. Printing a different chain from the
- *    one the order is computed from is what left an mtime-dated member ordered
- *    correctly under a blank date cell, and it is the same trap one rung up: the
- *    fold and this strip order by the WORKED day now, so printing
- *    `seriesDateSignal`'s would put a git date beside a row the ledger placed.
+ *  - **Dates come from `workedDateSignal`** — the same day the fold sorts on AND
+ *    the same one the fold's own rows print in their chips, because after the
+ *    one-chain fix all three read one signal. Printing a different chain from
+ *    the one the order is computed from is what left an mtime-dated member
+ *    ordered correctly under a blank date cell, and it is the same trap one rung
+ *    up: printing `seriesDateSignal`'s day here would put a `status_date` beside
+ *    a row the ledger placed.
  */
 function seriesStripHtml(m: WikiListing): string {
   const key = seriesKeyOf(m);
   if (!key) return "";
-  const { members, head } = seriesMembersOf(allPages, key);
+  // ONE server-anchored instant for the whole strip — the order and every date
+  // cell below read it, and the future guard compares against it.
+  const now = recencyNow();
+  const { members, head } = seriesMembersOf(allPages, key, now);
   const openKey = normalizeRel(m.relPath);
   // The open page must be IN the body this header describes. Carrying the key
   // is not the same as counting: a `superseded` child whose successor is in no
@@ -2419,8 +2427,9 @@ function seriesStripHtml(m: WikiListing): string {
     members.filter((p) => normalizeRel(p.relPath) !== openKey),
   );
   // `members` is newest first, the fold's own order; the story reads the other
-  // way round.
-  const ordered = [...members].reverse();
+  // way round. ONE exported spelling of that reversal (`seriesStripOrder`), so
+  // the invariant is pinned by a unit test rather than by this line.
+  const ordered = seriesStripOrder(members);
   const sep = `<span class="wiki-series-sep" aria-hidden="true">·</span>`;
   let strip =
     `<div class="wiki-series-strip">` +
@@ -2454,7 +2463,7 @@ function seriesStripHtml(m: WikiListing): string {
       const kind = [pageFolder(p), p.plan_status].filter(Boolean).join(" · ");
       return (
         `<div class="wiki-series-step${isOpen ? " current" : shipped ? " shipped" : ""}">` +
-        `<div class="wiki-series-step-date">${esc(workedDateSignal(p).day)}</div>` +
+        `<div class="wiki-series-step-date">${esc(workedDateSignal(p, now).day)}</div>` +
         `<div class="wiki-series-step-title">${esc(displayTitleOf(p))}</div>` +
         `<div class="wiki-series-step-kind">${esc(kind)}</div>` +
         `</div>`

@@ -2186,8 +2186,18 @@ describe("groups (families and months) — fix round 2", () => {
 // the rows on screen.
 
 describe("buildRail — series", () => {
+  // ⚠️ `status_date` is MIRRORED onto `updated`: a series fold orders by
+  // `byWorkedDateDesc`, which reads the rail's own update chain per page (see
+  // `workedDateSignal`) and not the identity chain `status_date` belongs to. A
+  // fixture carrying only `status_date` ties at 0 and falls to the relPath,
+  // which would make every order case below a fact about file names.
   const plan = (rel: string, over: Partial<WikiListing> = {}) =>
-    page({ relPath: rel, series: "alpha", ...over });
+    page({
+      relPath: rel,
+      series: "alpha",
+      ...(over.status_date && !over.updated ? { updated: over.status_date } : {}),
+      ...over,
+    });
 
   const A = plan("plans/a.mdx", { seriesLabel: "Alpha work", plan_status: "in-flight", status_date: "2026-09-01" });
   const B = plan("plans/b.mdx", { plan_status: "shipped", status_date: "2026-05-01" });
@@ -2451,8 +2461,18 @@ describe("buildRail — series", () => {
 // ── Series, fix round 1 ───────────────────────────────────────────────────
 
 describe("buildRail — series, fix round 1", () => {
+  // ⚠️ `status_date` is MIRRORED onto `updated`: a series fold orders by
+  // `byWorkedDateDesc`, which reads the rail's own update chain per page (see
+  // `workedDateSignal`) and not the identity chain `status_date` belongs to. A
+  // fixture carrying only `status_date` ties at 0 and falls to the relPath,
+  // which would make every order case below a fact about file names.
   const plan = (rel: string, over: Partial<WikiListing> = {}) =>
-    page({ relPath: rel, series: "alpha", ...over });
+    page({
+      relPath: rel,
+      series: "alpha",
+      ...(over.status_date && !over.updated ? { updated: over.status_date } : {}),
+      ...over,
+    });
   const groupsOf = (entries: RailEntry[]) =>
     entries.filter((e) => e.kind === "group") as Array<Extract<RailEntry, { kind: "group" }>>;
   const rows = (entries: RailEntry[]) =>

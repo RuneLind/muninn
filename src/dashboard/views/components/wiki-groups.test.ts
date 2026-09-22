@@ -38,9 +38,15 @@ import {
   seriesFoldKey,
   seriesHead,
   seriesMembersOf,
+  seriesStripOrder,
   withoutSeriesMembers,
 } from "./wiki-groups.ts";
-import { localDay, pageDateSignal, type WikiListing } from "./wiki-filter.ts";
+import {
+  localDay,
+  pageDateSignal,
+  recencyKeyFor,
+  type WikiListing,
+} from "./wiki-filter.ts";
 
 function page(over: Partial<WikiListing> & { relPath: string }): WikiListing {
   return {
@@ -916,11 +922,15 @@ describe("groupSeries — the head and the newest plan", () => {
     expect(newestSeriesPlan(pages)!.relPath).toBe("notes/plan.mdx");
   });
 
+  // ⚠️ The FOLD's order is `byWorkedDateDesc`, which reads the rail's own update
+  // chain per page (see `workedDateSignal`) — so the dates here are `updated:`,
+  // not `status_date:`. `status_date` still decides IDENTITY (the head, the
+  // newest plan, `related.ts`), which every other case in this file drives.
   test("members come back NEWEST first, ties broken by relPath", () => {
     const pages = [
-      member("plans/b.mdx", { series: "alpha", status_date: "2026-01-01" }),
-      member("plans/a.mdx", { series: "alpha", status_date: "2026-01-01" }),
-      member("plans/c.mdx", { series: "alpha", status_date: "2026-09-01" }),
+      member("plans/b.mdx", { series: "alpha", updated: "2026-01-01" }),
+      member("plans/a.mdx", { series: "alpha", updated: "2026-01-01" }),
+      member("plans/c.mdx", { series: "alpha", updated: "2026-09-01" }),
     ];
     expect(groupSeries(pages)[0]!.members.map((m) => m.relPath)).toEqual([
       "plans/c.mdx",
@@ -1198,11 +1208,17 @@ describe("seriesDateMs — one granularity, one tie-break (fix round 1)", () => 
     expect(newestSeriesPlan([touchedSameDay, asserted])!.relPath).toBe("plans/z-asserted.mdx");
   });
 
+  // ⚠️ The fold no longer orders on THIS chain — `byWorkedDateDesc` reads the
+  // rail's own update signal, so the rung race above is an IDENTITY question
+  // only (`newestSeriesPlan`, `seriesHead`, `related.ts`). What the fold owes is
+  // that its order is the same on every render whatever the input order, which
+  // is what this drives; the members here carry no signal the update chain
+  // reads, so they tie and fall to the relPath — deterministically.
   test("…and the members order the same way, whatever the input order", () => {
-    expect(groupSeries([touchedSameDay, asserted])[0]!.members.map((m) => m.relPath)).toEqual([
-      "plans/z-asserted.mdx",
-      "plans/a-touched.mdx",
-    ]);
+    const one = groupSeries([touchedSameDay, asserted])[0]!.members.map((m) => m.relPath);
+    const two = groupSeries([asserted, touchedSameDay])[0]!.members.map((m) => m.relPath);
+    expect(one).toEqual(two);
+    expect(one).toEqual(["plans/a-touched.mdx", "plans/z-asserted.mdx"]);
   });
 
   test("a git touch on a LATER day still wins — the granularity is the day, not the rung", () => {
@@ -1217,6 +1233,7 @@ describe("seriesMembersOf — ONE membership rule for the rail and the header (f
       seriesLabel: "Wiki provenance",
       plan_status: "in-flight",
       status_date: "2026-09-01",
+      updated: "2026-09-01",
     }),
     // An attachment of the plan that carries the key (and a label) anyway: the
     // header used to count it and read its label, which renamed the strip.
@@ -1233,8 +1250,13 @@ describe("seriesMembersOf — ONE membership rule for the rail and the header (f
       pairedBy: "superseded",
       plan_status: "superseded",
       status_date: "2026-04-01",
+      updated: "2026-04-01",
     }),
-    member("blogs/explained.mdx", { series: "PROV", status_date: "2026-03-01" }),
+    member("blogs/explained.mdx", {
+      series: "PROV",
+      status_date: "2026-03-01",
+      updated: "2026-03-01",
+    }),
     page({ relPath: "plans/unrelated.mdx" }),
   ];
 
@@ -1321,25 +1343,43 @@ describe("the worked comparator — ORDER moves, IDENTITY does not", () => {
 
   test("workedDateSignal floors to the local day and outranks every other rung", () => {
     const worked = Date.parse("2026-09-18T09:00:00Z");
-    const s = workedDateSignal({ workedMs: worked, status_date: "2026-09-21" });
+    const s = workedDateSignal({ workedMs: worked, updated: "2026-09-21" }, NOW);
     expect(s.day).toBe(localDay(new Date(worked)));
     // The rung sits ABOVE `asserted`, so a same-day tie goes to the worked date.
     expect(s.rank).toBeGreaterThan(seriesDateSignal({ status_date: "2026-09-21" }).rank);
-    // Uncovered ⇒ the existing chain, verbatim.
-    expect(workedDateSignal({ status_date: "2026-09-21" })).toEqual(
-      seriesDateSignal({ status_date: "2026-09-21" }),
-    );
     // Not a date: fall through rather than sort on it.
-    expect(workedDateSignal({ workedMs: 0, status_date: "2026-09-21" })).toEqual(
-      seriesDateSignal({ status_date: "2026-09-21" }),
-    );
+    expect(workedDateSignal({ workedMs: 0, updated: "2026-09-21" }, NOW).day).toBe("2026-09-21");
+    // A page with no signal at all answers the `none` rung, not a day.
+    expect(workedDateSignal({}, NOW)).toEqual({ ms: 0, day: "", rank: 0 });
+  });
+
+  // The ONE-CHAIN property the fix round installed: the fold/strip key and the
+  // rail row's own date chip are the same signal, guard included. Two chains is
+  // what shipped first, and they disagreed on exactly these two inputs.
+  test("workedDateSignal is the rail chip's OWN signal, day-floored", () => {
+    for (const p of [
+      // Covered.
+      page({ relPath: "a.md", workedMs: Date.parse("2026-09-18T09:00:00Z") }),
+      // Uncovered: the update chain answers, not `status_date`.
+      page({ relPath: "b.md", updated: "2026-08-04", status_date: "2026-01-01" }),
+      // A FUTURE worked stamp: guarded here exactly as it is in the chip, so it
+      // can no longer sort first while the row shows its fallback.
+      page({
+        relPath: "c.md",
+        workedMs: Date.parse("2027-06-01T10:00:00Z"),
+        updated: "2026-08-04",
+      }),
+    ]) {
+      expect(workedDateSignal(p, NOW).day).toBe(pageDateSignal(p, "worked", NOW)?.label ?? "");
+    }
   });
 
   test("byWorkedDateDesc orders newest-worked first, then by rung, then relPath", () => {
     const rows = [
       page({ relPath: "a.mdx", workedMs: Date.parse("2026-07-02T10:00:00Z") }),
       page({ relPath: "b.mdx", workedMs: Date.parse("2026-09-21T10:00:00Z") }),
-      page({ relPath: "c.mdx", status_date: "2026-08-01" }),
+      // Uncovered: the UPDATE chain stands in, interleaved with the covered rows.
+      page({ relPath: "c.mdx", updated: "2026-08-01" }),
     ];
     expect([...rows].sort(byWorkedDateDesc).map((p) => p.relPath)).toEqual([
       "b.mdx",
@@ -1348,7 +1388,7 @@ describe("the worked comparator — ORDER moves, IDENTITY does not", () => {
     ]);
     // Same DAY, different rungs: the worked date wins the tie.
     const sameDay = [
-      page({ relPath: "z.mdx", status_date: "2026-09-21" }),
+      page({ relPath: "z.mdx", updated: "2026-09-21" }),
       page({ relPath: "y.mdx", workedMs: Date.parse("2026-09-21T23:00:00Z") }),
     ];
     expect([...sameDay].sort(byWorkedDateDesc).map((p) => p.relPath)).toEqual([
@@ -1394,9 +1434,22 @@ describe("the worked comparator — ORDER moves, IDENTITY does not", () => {
   // ── Acceptance 7, half two: the display half really does move ─────────────
   test("…while the FOLD and the reader strip's set DO reorder", () => {
     const base = [
-      member("plans/head.mdx", { series: "alpha", seriesLabel: "Alpha", status_date: "2026-08-01" }),
-      member("plans/newer.mdx", { series: "alpha", status_date: "2026-09-01" }),
-      member("blogs/about.mdx", { series: "alpha", status_date: "2026-09-10" }),
+      member("plans/head.mdx", {
+        series: "alpha",
+        seriesLabel: "Alpha",
+        status_date: "2026-08-01",
+        updated: "2026-08-01",
+      }),
+      member("plans/newer.mdx", {
+        series: "alpha",
+        status_date: "2026-09-01",
+        updated: "2026-09-01",
+      }),
+      member("blogs/about.mdx", {
+        series: "alpha",
+        status_date: "2026-09-10",
+        updated: "2026-09-10",
+      }),
     ];
     const worked = [
       page({ ...base[0]!, workedMs: Date.parse("2026-09-21T10:00:00Z") }),
@@ -1499,5 +1552,58 @@ describe("orderSeriesGroups", () => {
     const before = groups.map((g) => g.label);
     orderSeriesGroups(groups, { sort: "worked", now: NOW });
     expect(groups.map((g) => g.label)).toEqual(before);
+  });
+
+  // The fix round's second measured defect: the SECTION was keyed on the rail's
+  // chain while the FOLD was keyed on `seriesDateSignal`'s, so a series whose
+  // frontmatter and file dates disagree was placed by one and printed by the
+  // other — first in the section, with every cell in its fold reading seven
+  // months older.
+  test("the section's placement key is the day its own fold prints", () => {
+    const split = [
+      member("plans/split.mdx", {
+        series: "split",
+        seriesLabel: "Split",
+        // The rail's chip reads this…
+        updated: "2026-09-21",
+        // …while `seriesDateSignal` would read these instead.
+        status_date: "2026-02-01",
+        mtimeMs: Date.parse("2026-02-01T10:00:00Z"),
+      }),
+    ];
+    const g = groupSeries(split, split, NOW)[0]!;
+    const foldDay = workedDateSignal(g.members[0]!, NOW).day;
+    expect(foldDay).toBe("2026-09-21");
+    // …and the key the section orders on is that same day, not the older one.
+    expect(recencyKeyFor("worked")(g.members[0]!, NOW)).toBe(Date.parse("2026-09-21"));
+  });
+});
+
+// ── The reader strip is the fold, reversed ──────────────────────────────────
+describe("seriesStripOrder", () => {
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+
+  test("it reverses the fold's own member order", () => {
+    const members = [
+      member("plans/a.mdx", { series: "s", workedMs: Date.parse("2026-09-21T10:00:00Z") }),
+      member("plans/b.mdx", { series: "s", workedMs: Date.parse("2026-08-01T10:00:00Z") }),
+      member("plans/c.mdx", { series: "s", workedMs: Date.parse("2026-07-02T10:00:00Z") }),
+    ];
+    const fold = groupSeries(members, members, NOW)[0]!.members.map((m) => m.relPath);
+    expect(fold).toEqual(["plans/a.mdx", "plans/b.mdx", "plans/c.mdx"]);
+    // The strip runs oldest → newest: the fold's order, REVERSED. De-reversing
+    // the view's own copy left 370 tests green, which is what this pins.
+    expect(seriesStripOrder(fold)).toEqual(["plans/c.mdx", "plans/b.mdx", "plans/a.mdx"]);
+    // …and the dates it prints ascend with it, which is the reader-visible claim.
+    const days = seriesStripOrder(groupSeries(members, members, NOW)[0]!.members).map(
+      (m) => workedDateSignal(m, NOW).day,
+    );
+    expect(days).toEqual([...days].sort());
+  });
+
+  test("it copies rather than reversing in place", () => {
+    const rows = ["a", "b", "c"];
+    expect(seriesStripOrder(rows)).toEqual(["c", "b", "a"]);
+    expect(rows).toEqual(["a", "b", "c"]);
   });
 });

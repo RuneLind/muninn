@@ -24,6 +24,7 @@ import {
   pageDateSignal,
   pageWorkedMs,
   recencyKeyFor,
+  recencyKindFor,
   displayTitleOf,
   shortGraphLabel,
   folderLabelOf,
@@ -1563,14 +1564,39 @@ test("recencyKeyFor answers the same key each mode sorts on", () => {
   expect(recencyKeyFor("created")(p, NOW)).toBe(pageAddedMs(p, NOW));
 });
 
-test("an unknown sort mode is left ALONE, not silently sorted as updated", () => {
+test("an unknown sort mode falls back to the UPDATE order, never to scan order", () => {
   // The bare `else` this replaced sorted any unrecognised mode by `pageTimeMs`,
-  // so a mode added without a branch looked like it worked. The switch is
-  // exhaustive now; a value outside the union returns the input order.
+  // so a mode added without a branch LOOKED like it worked — which the
+  // exhaustive switch's `never` now makes a compile error instead. At RUNTIME a
+  // mode outside the union still arrives (a sort value stored by an older
+  // build), and leaving the array alone showed the reader the walk's own
+  // directory order under a select reading "Recently updated".
   const pages = [
     page({ relPath: "b.md", title: "b", updated: "2026-01-01" }),
     page({ relPath: "a.md", title: "a", updated: "2026-09-21" }),
   ];
-  const out = sortPages(pages, "nope" as never, NOW);
-  expect(out.map((p) => p.title)).toEqual(["b", "a"]);
+  expect(sortPages(pages, "nope" as never, NOW).map((p) => p.title)).toEqual(["a", "b"]);
+  // …and it is the SAME order "updated" gives, not a second spelling of one.
+  expect(sortPages(pages, "nope" as never, NOW).map((p) => p.title)).toEqual(
+    sortPages(pages, "updated", NOW).map((p) => p.title),
+  );
+});
+
+test("recencyKindFor answers the date KIND each mode reads", () => {
+  // The mode→kind map used to be hand-written at both of its call sites
+  // (`railGroups`' month fold, the rail row's date chip).
+  expect(recencyKindFor("created")).toBe("added");
+  expect(recencyKindFor("updated")).toBe("updated");
+  expect(recencyKindFor("worked")).toBe("worked");
+  // …and it agrees with `recencyKeyFor`, or the row's chip names one signal
+  // while its position was decided by another.
+  const p = page({
+    relPath: "x.md",
+    workedMs: NOW - 5 * DAY,
+    created: "2026-01-01",
+    updated: "2026-09-20",
+  });
+  for (const mode of ["created", "updated", "worked"] as const) {
+    expect(pageDateSignal(p, recencyKindFor(mode), NOW)?.ms).toBe(recencyKeyFor(mode)(p, NOW));
+  }
 });

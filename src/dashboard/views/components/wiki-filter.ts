@@ -236,11 +236,20 @@ export const ROOT_FOLDER = "/";
 
 export type WikiSortMode = "updated" | "created" | "worked" | "backlinks" | "title";
 
+/** The three modes that order by a DATE — the subset {@link recencyKeyFor} and
+ *  {@link recencyKindFor} are total over. */
+export type WikiRecencySort = Extract<WikiSortMode, "updated" | "created" | "worked">;
+
 /** The three modes that order by a DATE. Named once, because four sites branch on
  *  exactly this set — the sort, the row's date chip, the archive's month folding
  *  and the rail's `Bookkeeping` tail — and each of them was a two-value test that
- *  turned itself silently off when a third value arrived. */
-export function isRecencySort(mode: WikiSortMode): boolean {
+ *  turned itself silently off when a third value arrived.
+ *
+ *  A TYPE PREDICATE, so a caller that has tested a mode can hand it straight to
+ *  `recencyKeyFor`/`recencyKindFor` instead of re-spelling the mode→kind map
+ *  beside the test — which is how `wiki-groups`' month fold and `wiki-browser`'s
+ *  row chip each grew their own copy of it. */
+export function isRecencySort(mode: WikiSortMode): mode is WikiRecencySort {
   return mode === "updated" || mode === "created" || mode === "worked";
 }
 
@@ -537,8 +546,19 @@ export function anchorNow(clockNow: number, scannedAt: number | null | undefined
  * (that was the pre-guard behavior and this is not the PR that changes it; the linter's
  * `stale-updated` check is what surfaces it).
  */
+/**
+ * The fields the UPDATE and WORKED signals read — a structural subset rather
+ * than `WikiListing`, for the reason `wiki-groups`' `PageDateFields` is one: the
+ * series comparators take a page shape, not a listing row, and the SERVER's
+ * `WikiPageMeta` has to satisfy it too.
+ */
+export type WikiRecencyFields = Pick<
+  WikiListing,
+  "updated" | "created" | "gitCreatedMs" | "gitTouchedMs" | "gitDirty" | "mtimeMs" | "workedMs"
+>;
+
 function authoredUpdatedDate(
-  p: WikiListing,
+  p: WikiRecencyFields,
   now: number,
 ): { ms: number; label: string } | null {
   const primary = p.updated || p.created || "";
@@ -604,7 +624,7 @@ function authoredUpdatedDate(
  * Label-only call sites (`pageDateLabel` on a rendered row) take the default.
  */
 function updatedSignal(
-  p: WikiListing,
+  p: WikiRecencyFields,
   now: number = Date.now(),
 ): { ms: number; label: string; kind: WikiDateKind } {
   const authored = authoredUpdatedDate(p, now);
@@ -869,7 +889,7 @@ export function pageDateSignal(
  * label that explains it — falling back to the UPDATE signal, kind and all, on a
  * page the ledger holds no qualifying write for.
  *
- * The fallback is what makes the axis honest rather than sparse. Roughly a third
+ * The fallback is what makes the axis honest rather than sparse. A large share
  * of a covered wiki has no worked date (every write discounted as part of a bulk
  * pass), and rendering those rows blank would say "nothing ever happened here"
  * about pages with a perfectly good git history. So an uncovered page shows the
@@ -881,9 +901,18 @@ export function pageDateSignal(
  * split `updatedSignal` makes for a git date against a frontmatter one. The
  * future-date guard applies here too: the ledger's timestamps come from whatever
  * clock wrote the transcript.
+ *
+ * ⚠️ **This is the ONE worked key.** It is exported because `wiki-groups`'
+ * `workedDateSignal` — the order behind the series fold, the reader strip and
+ * `describeSeries` — is a day-floored wrapper over it rather than a second
+ * chain. Two chains is what shipped first, and they disagreed in three measured
+ * ways: a 2027 stamp fell back here and sorted first there, a page whose
+ * frontmatter and git dates differ was placed by one chain and PRINTED by the
+ * other, and an expanded fold read `09-21, 09-17, 09-17, 09-20, 09-15` because
+ * its members sorted on a date their own chips did not show.
  */
-function workedSignal(
-  p: WikiListing,
+export function workedSignal(
+  p: WikiRecencyFields,
   now: number = Date.now(),
 ): { ms: number; label: string; kind: WikiDateKind } {
   const ms = p.workedMs;
@@ -900,7 +929,7 @@ function workedSignal(
  * `now` is optional for `pageTimeMs`'s reason: `sortPages` captures ONE instant
  * for the whole pass so the comparator stays pure across the 48h future boundary.
  */
-export function pageWorkedMs(p: WikiListing, now?: number): number {
+export function pageWorkedMs(p: WikiRecencyFields, now?: number): number {
   return workedSignal(p, now).ms;
 }
 
@@ -1005,6 +1034,18 @@ export function sortPages(
   // order nothing on screen explains.
   const byTitle = (a: WikiListing, b: WikiListing) =>
     displayTitleOf(a).localeCompare(displayTitleOf(b));
+  // Meta pages sink in every recency mode (see `isMetaPage`): measured
+  // 2026-09-02, two of the top three of "Recently updated" were bookkeeping
+  // pages on mimir and on jarvis alike.
+  const byRecency = (sort: WikiRecencySort) => {
+    const key = recencyKeyFor(sort);
+    copy.sort(
+      (a, b) =>
+        Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
+        key(b, now) - key(a, now) ||
+        byTitle(a, b),
+    );
+  };
   // EXHAUSTIVE, and that is the point of the shape. This used to end in a bare
   // `else` that sorted anything it did not recognise by `pageTimeMs` — so a mode
   // added without a branch here LOOKED like it worked, producing "Recently
@@ -1019,22 +1060,19 @@ export function sortPages(
       break;
     case "created":
     case "updated":
-    case "worked": {
-      // Meta pages sink in every recency mode (see `isMetaPage`): measured
-      // 2026-09-02, two of the top three of "Recently updated" were bookkeeping
-      // pages on mimir and on jarvis alike.
-      const key = recencyKeyFor(mode);
-      copy.sort(
-        (a, b) =>
-          Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
-          key(b, now) - key(a, now) ||
-          byTitle(a, b),
-      );
+    case "worked":
+      byRecency(mode);
       break;
-    }
     default: {
+      // Unreachable at COMPILE time — that is what the `never` buys. At RUNTIME
+      // a mode outside the union still arrives (a sort value stored by an older
+      // build, a hand-edited URL), and leaving the array alone showed the reader
+      // the walk's own directory order under a select that says "Recently
+      // updated". So the listing's default order is what an unknown mode falls
+      // back to.
       const exhaustive: never = mode;
       void exhaustive;
+      byRecency("updated");
     }
   }
   return copy;
@@ -1045,11 +1083,27 @@ export function sortPages(
  *  (`orderSeriesGroups`), and two spellings of "what does this mode sort on"
  *  would be two answers about one list. */
 export function recencyKeyFor(
-  mode: "created" | "updated" | "worked",
+  mode: WikiRecencySort,
 ): (p: WikiListing, now?: number) => number {
   if (mode === "created") return pageAddedMs;
   if (mode === "worked") return pageWorkedMs;
   return pageTimeMs;
+}
+
+/**
+ * The DATE KIND one recency mode reads — the `which` value `pageDateSignal` and
+ * `groupMonths` take.
+ *
+ * Beside {@link recencyKeyFor} because the two answer one question from
+ * different ends, and the mode→kind map had grown a hand-written copy at each
+ * of its two call sites (`railGroups`' month fold and the rail row's date chip).
+ * A third copy is how a fourth mode ends up reading the wrong signal on one
+ * surface only.
+ */
+export function recencyKindFor(mode: WikiRecencySort): "added" | "updated" | "worked" {
+  if (mode === "created") return "added";
+  if (mode === "worked") return "worked";
+  return "updated";
 }
 
 /** Count pages per top-level folder, honoring the active domain filter (used for
