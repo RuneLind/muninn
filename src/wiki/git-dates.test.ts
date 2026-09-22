@@ -717,8 +717,8 @@ test("a path containing a NEWLINE is never sent to cat-file, so later answers st
   // two requests and two `missing` answers, and every candidate after it is
   // matched to the previous candidate's answer. Constructed so that misalignment
   // produces a WRONG VERDICT, not just a null: c.md's worktree text equals b.md's
-  // HEAD text plus a metadata line, so c.md read against b.md's blob is
-  // "metadata-only" and a real edit is dropped.
+  // HEAD text with only the `series:` value changed, so c.md read against b.md's
+  // blob is "metadata-only" and a real edit is dropped.
   const { rm } = await import("node:fs/promises");
   const nl = "a\nnl.md"; // sorts FIRST in `git status`, so the shifted answers land on b and c
   const { wiki, dir, write } = await seededWiki({

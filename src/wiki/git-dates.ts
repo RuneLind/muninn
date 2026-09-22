@@ -291,8 +291,9 @@ export function parseGitLog(
 // else in this module points here rather than restating them):
 //
 //  - `metadata-only` — both sides carry frontmatter, the BODY after the fence is
-//    byte-identical, and every frontmatter LINE that differs is a column-0 line
-//    whose key is in {@link METADATA_ONLY_FRONTMATTER_KEYS}. Dropped.
+//    byte-identical, and with every column-0 {@link METADATA_ONLY_FRONTMATTER_KEYS}
+//    line stripped from both blocks the two remainders are identical IN ORDER —
+//    so a hand edit that only reordered `title:` and `tags:` is an edit. Dropped.
 //  - `identical` — the two texts are equal, which `git status` still reports as
 //    modified for a mode-only change (`chmod`). No edit to hide. Dropped.
 //  - `edit` — everything else, and it is the DEFAULT: a body difference, a page

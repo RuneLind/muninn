@@ -166,8 +166,8 @@ NUL-carrying file. The HEAD side is ONE `git cat-file --batch` fed
 repo-relative paths on STDIN — a path with a space, a quote or a non-ASCII byte
 needs no quoting there (a path containing a NEWLINE is the one shape stdin cannot
 carry; it is left out of the batch and stays dirty), and no `diff.*` user config
-can change the spelling an answer comes back under, which is the whole class of bug the `git diff HEAD` text
-parse this replaced was built on. Untracked and deleted paths pass through
+can change the spelling an answer comes back under, which is the whole class of
+bug the `git diff HEAD` text parse this replaced was built on. Untracked and deleted paths pass through
 UNTOUCHED (an untracked page has no `HEAD` blob, and dropping it would also count
 it into `store.ts`'s unexplained-miss warn); the comparison is against `HEAD`
 rather than the index because both wiki writers stage before they commit; and a
