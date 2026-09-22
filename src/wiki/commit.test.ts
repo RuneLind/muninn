@@ -7,6 +7,7 @@ import {
   listDirtyEntries,
   listWikiSubtreeDirty,
   gitToplevel,
+  isTrackedModifiedStatus,
   parsePorcelainZWithStatus,
   runGit,
   wikiDirtyStat,
@@ -646,5 +647,20 @@ describe("the wiki write lock is never swept, staged or counted", () => {
     const { wikiDir } = await makeRepo(base);
     await writeFile(path.join(wikiDir, WIKI_LOCK_BASENAME), "");
     expect((await wikiDirtyStat(wikiDir)).dirtyCount).toBe(0);
+  });
+});
+
+describe("isTrackedModifiedStatus", () => {
+  // The whole `XY` state space, because the one consumer (`git-dates.ts`) reads a
+  // `true` here as "a `git diff HEAD` describes this path completely".
+  test("admits a modification, in the index, the worktree or both", () => {
+    for (const xy of [" M", "M ", "MM"]) expect(isTrackedModifiedStatus(xy)).toBe(true);
+  });
+  test("refuses every state where HEAD is not the whole story", () => {
+    // untracked, added, deleted (either column), renamed, copied, unmerged,
+    // typechanged — and the clean pair, which a dirty listing never emits.
+    for (const xy of ["??", "A ", "AM", " D", "D ", "R ", "RM", "C ", "UU", " T", "  "]) {
+      expect(isTrackedModifiedStatus(xy)).toBe(false);
+    }
   });
 });

@@ -10,7 +10,14 @@
  */
 
 import { test, expect } from "bun:test";
-import { parseGitLog, buildWikiGitDates, SWEEP_THRESHOLD } from "./git-dates.ts";
+import {
+  parseGitLog,
+  buildWikiGitDates,
+  classifyPageChange,
+  SWEEP_THRESHOLD,
+  __setClassifyBudgetForTest,
+} from "./git-dates.ts";
+import { setFrontmatterScalar } from "../plans/frontmatter.ts";
 
 /** `%at` is seconds; the maps are ms. */
 const at = (iso: string) => Math.floor(Date.parse(iso) / 1000);
@@ -349,3 +356,486 @@ test("buildWikiGitDates: real repo — an uncommitted edit shows up as DIRTY", a
     await rm(abs, { force: true });
   }
 });
+
+// ── The metadata-only rule ───────────────────────────────────────────────────
+//
+// A mechanical frontmatter write moves a page's mtime without editing it, and the
+// dirty set is what hands a page to the mtime rule. The verdict itself is pure
+// (`classifyPageChange`, below); everything around it is a claim about what `git
+// status` and `git cat-file` emit, so those run against a REAL temp git repo — a
+// hand-written fixture would prove only that a Set works.
+
+/** Page text with one frontmatter block and one body line, so a case can move
+ *  exactly one of the two. */
+const pageText = (fm: string[], body: string) => `---\n${fm.join("\n")}\n---\n\n${body}\n`;
+
+test("classifyPageChange: a frontmatter metadata rewrite is metadata-only", () => {
+  expect(
+    classifyPageChange(
+      pageText(["title: A", "series: one"], "Prose."),
+      pageText(["title: A", "series: two"], "Prose."),
+    ),
+  ).toBe("metadata-only");
+});
+
+test("classifyPageChange: an ADDED or REMOVED metadata key is metadata-only too", () => {
+  // What a series join and a `/plans` flip actually do: the key was not there.
+  expect(
+    classifyPageChange(pageText(["title: A"], "Prose."), pageText(["title: A", "series: one"], "Prose.")),
+  ).toBe("metadata-only");
+  expect(
+    classifyPageChange(pageText(["title: A", "priority: 2"], "Prose."), pageText(["title: A"], "Prose.")),
+  ).toBe("metadata-only");
+});
+
+test("classifyPageChange: one body line is enough to make it a real edit", () => {
+  expect(
+    classifyPageChange(
+      pageText(["title: A", "series: one"], "Old prose."),
+      pageText(["title: A", "series: two"], "New prose."),
+    ),
+  ).toBe("edit");
+});
+
+test("classifyPageChange: a frontmatter key OUTSIDE the set is a real edit", () => {
+  expect(
+    classifyPageChange(pageText(["title: A"], "Prose."), pageText(["title: B"], "Prose.")),
+  ).toBe("edit");
+});
+
+test("classifyPageChange: a metadata KEY line in the BODY is a real edit", () => {
+  // mimir documents these very keys, so `prs: […]` occurs at column 0 inside body
+  // code fences. The body is compared byte for byte, so the spelling is irrelevant.
+  expect(
+    classifyPageChange(
+      pageText(["title: A"], "```yaml\nprs: [owner/repo#1]\n```"),
+      pageText(["title: A"], "```yaml\nprs: [owner/repo#2]\n```"),
+    ),
+  ).toBe("edit");
+});
+
+test("classifyPageChange: an INDENTED metadata-looking line is a real edit", () => {
+  // The key shape is anchored at column 0, `parseFrontmatter`'s own rule — a
+  // nested child, a list item under a block key, a comment: none of them is a
+  // line a mechanical writer owns, so none of them may be forgiven.
+  expect(
+    classifyPageChange(
+      pageText(["meta:", "  series: one"], "Prose."),
+      pageText(["meta:", "  series: two"], "Prose."),
+    ),
+  ).toBe("edit");
+});
+
+test("classifyPageChange: REORDERING non-metadata frontmatter lines is a real edit", () => {
+  // Line-by-line, not by multiset: every line is on both sides, so a bag of
+  // lines sees nothing changed, and a hand edit that moved `title:` below
+  // `tags:` would be dropped as if nobody touched the page.
+  expect(
+    classifyPageChange(
+      pageText(["title: A", "tags: [x]", "author: R"], "Prose."),
+      pageText(["author: R", "title: A", "tags: [x]"], "Prose."),
+    ),
+  ).toBe("edit");
+  // Moving only a METADATA line is still metadata-only.
+  expect(
+    classifyPageChange(
+      pageText(["title: A", "series: one", "tags: [x]"], "Prose."),
+      pageText(["series: one", "title: A", "tags: [x]"], "Prose."),
+    ),
+  ).toBe("metadata-only");
+});
+
+test("classifyPageChange: identical text is `identical`, whatever git says", () => {
+  // `git status` reports a mode-only change (`chmod`) as modified with no content
+  // difference at all. There is no edit to hide, so the page dates from history.
+  const text = pageText(["title: A"], "Prose.");
+  expect(classifyPageChange(text, text)).toBe("identical");
+});
+
+test("classifyPageChange: a page with no frontmatter is a real edit on any change", () => {
+  expect(classifyPageChange("# A\n\nOld.\n", "# A\n\nNew.\n")).toBe("edit");
+  // …including one that GAINS a fence, which is a page being restructured.
+  expect(classifyPageChange("# A\n", pageText(["series: one"], "# A"))).toBe("edit");
+});
+
+test("the REAL writer behind a series join and a /plans flip produces a metadata-only change", () => {
+  // `setFrontmatterScalar` is the one line-upsert both mechanical writers use, so
+  // running it through the verdict pins the two ends of the rule together: a key
+  // the writer is pointed at that is not in the set is still an edit.
+  const before = pageText(["title: A", "plan_status: in-flight"], "Prose.");
+  const changed = (key: string, value: string) => {
+    const edit = setFrontmatterScalar(before, key, value);
+    expect(edit.kind).toBe("changed");
+    return (edit as { kind: "changed"; content: string }).content;
+  };
+  expect(classifyPageChange(before, changed("series", "wiki-provenance"))).toBe("metadata-only");
+  expect(classifyPageChange(before, changed("plan_status", "shipped"))).toBe("metadata-only");
+  expect(classifyPageChange(before, changed("title", "B"))).toBe("edit");
+});
+
+test("classifyPageChange: an unterminated fence is not a frontmatter block", () => {
+  // `splitFrontmatter` needs a CLOSING `---`; without one there is no block, so a
+  // `series:` line in what looks like frontmatter is body and the page is dirty.
+  expect(classifyPageChange("---\nseries: one\n", "---\nseries: two\n")).toBe("edit");
+});
+
+/** Run git in the fixture repo, throwing on failure so a broken SETUP is never
+ *  mistaken for a failing assertion. Identity + signing are pinned: a runner has
+ *  no git identity and a developer may have `commit.gpgsign` on. */
+async function fixtureGit(cwd: string, ...args: string[]): Promise<void> {
+  const proc = Bun.spawn(
+    [
+      "git",
+      "-C",
+      cwd,
+      "-c",
+      "user.email=fixture@example.com",
+      "-c",
+      "user.name=fixture",
+      "-c",
+      "commit.gpgsign=false",
+      ...args,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  if (code !== 0) throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+}
+
+/** A page: frontmatter block, then prose. `extra` lands in the body. The H1 is a
+ *  separate argument so the `title:` case can change the KEY and nothing else —
+ *  a body line moving with it would make the page dirty for the position rule
+ *  instead, and the key-set assertion would pin nothing. */
+function page(title: string, series: string, prose: string, extra = "", heading = title): string {
+  return `---\ntitle: ${title}\nseries: ${series}\nplan_status: in-flight\n---\n\n# ${heading}\n\n${prose}\n${extra}`;
+}
+
+/**
+ * ONE fixture wiki holding every shape the rule has to tell apart, nested in a
+ * subdirectory of its repo so the wiki-relative ↔ repo-relative translation is
+ * exercised for real.
+ */
+async function metadataOnlyFixture(): Promise<{ wiki: string; dir: string }> {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = await mkdtemp(path.join(tmpdir(), "git-dates-meta-"));
+  const wiki = path.join(dir, "wiki");
+  await mkdir(wiki, { recursive: true });
+  const write = (rel: string, text: string) => writeFile(path.join(wiki, rel), text);
+
+  await write("meta-only.md", page("Meta only", "alpha", "Unchanged prose."));
+  await write("meta-and-prose.md", page("Meta and prose", "alpha", "Original prose."));
+  await write("staged-prose.md", page("Staged prose", "alpha", "Original prose."));
+  await write("deleted.md", page("Deleted", "alpha", "Doomed prose."));
+  await write("title-only.md", page("Title only", "alpha", "Unchanged prose."));
+  await write(
+    "body-fence.md",
+    page("Body fence", "alpha", "Documenting the keys:", "\n```yaml\nseries: quoted-alpha\n```\n"),
+  );
+  await write("clean.md", page("Clean", "alpha", "Never touched."));
+
+  await fixtureGit(dir, "init", "-b", "main");
+  await fixtureGit(dir, "add", "-A");
+  await fixtureGit(dir, "commit", "-m", "seed");
+
+  // (a) frontmatter metadata only — what a series join or a plan-status flip does.
+  await write("meta-only.md", page("Meta only", "beta", "Unchanged prose."));
+  // (b) the same metadata write plus one real prose line.
+  await write("meta-and-prose.md", page("Meta and prose", "beta", "Rewritten prose."));
+  // (c) a real prose edit that is STAGED, leaving the worktree clean against the
+  //     index — which is what both wiki writers do before they commit.
+  await write("staged-prose.md", page("Staged prose", "alpha", "Rewritten prose."));
+  await fixtureGit(dir, "add", "--", "wiki/staged-prose.md");
+  // (d) untracked.
+  await write("untracked.md", page("Untracked", "alpha", "Brand new."));
+  // (e) deleted from the worktree, still in HEAD.
+  await rm(path.join(wiki, "deleted.md"));
+  // (f) a frontmatter key OUTSIDE the metadata set.
+  await write(
+    "title-only.md",
+    page("Title only, renamed", "alpha", "Unchanged prose.", "", "Title only"),
+  );
+  // (g) a metadata-shaped line edited inside a BODY code fence.
+  await write(
+    "body-fence.md",
+    page("Body fence", "alpha", "Documenting the keys:", "\n```yaml\nseries: quoted-beta\n```\n"),
+  );
+
+  return { wiki, dir };
+}
+
+test("buildWikiGitDates: a metadata-only edit loses the mtime rule, every other dirty shape keeps it", async () => {
+  const { rm } = await import("node:fs/promises");
+  const { wiki, dir } = await metadataOnlyFixture();
+  try {
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates).not.toBeNull();
+    const dirty = dates!.dirty;
+
+    // (a) the whole point: a frontmatter-key rewrite is not an edit.
+    expect(dirty.has("meta-only.md")).toBe(false);
+    // …and it is still a tracked page with git dates, so it falls back to them
+    // rather than dropping out of the ranking altogether.
+    expect(dates!.created.get("meta-only.md")).toBeGreaterThan(0);
+
+    // (b) one prose line is enough.
+    expect(dirty.has("meta-and-prose.md")).toBe(true);
+    // (c) a STAGED prose edit — empty to a bare `git diff`, which is why the
+    //     classification diffs against HEAD.
+    expect(dirty.has("staged-prose.md")).toBe(true);
+    // (d) untracked: no HEAD diff at all, so it would pass the test vacuously.
+    expect(dirty.has("untracked.md")).toBe(true);
+    // (e) deleted: likewise, and it is the caller's `deletions` input.
+    expect(dirty.has("deleted.md")).toBe(true);
+    // (f) a frontmatter key outside the metadata set is an authored edit.
+    expect(dirty.has("title-only.md")).toBe(true);
+    // (g) the same key spelling, in the body.
+    expect(dirty.has("body-fence.md")).toBe(true);
+
+    // The control: an untouched page was never dirty to begin with.
+    expect(dirty.has("clean.md")).toBe(false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Fix round 1: the shapes the diff parser could not name ───────────────────
+//
+// Every case below is a page `git diff HEAD` describes in a spelling the old
+// parser keyed under something else (a trailing TAB, a C-quoted header, no
+// header at all) or not at all (a binary-detected page), plus the two the
+// position test read as metadata. The rule is a CONTENT comparison now, so each
+// candidate gets a positive drop/keep answer and every unknown keeps the page.
+
+/** A temp repo with a `wiki/` subdirectory, seeded and committed. `write` takes
+ *  bytes as well as text, for the NUL-byte case. */
+async function seededWiki(
+  seed: Record<string, string | Uint8Array>,
+): Promise<{ wiki: string; dir: string; write: (rel: string, body: string | Uint8Array) => Promise<void> }> {
+  const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = await mkdtemp(path.join(tmpdir(), "git-dates-fix1-"));
+  const wiki = path.join(dir, "wiki");
+  await mkdir(wiki, { recursive: true });
+  const write = (rel: string, body: string | Uint8Array) =>
+    writeFile(path.join(wiki, rel), body as Parameters<typeof writeFile>[1]);
+  for (const [rel, body] of Object.entries(seed)) await write(rel, body);
+  await fixtureGit(dir, "init", "-b", "main");
+  await fixtureGit(dir, "add", "-A");
+  await fixtureGit(dir, "commit", "-m", "seed");
+  return { wiki, dir, write };
+}
+
+test("a page whose NAME carries a space keeps its mtime after a prose edit", async () => {
+  // `git diff` appends a TAB to `+++ b/<path>` for a name with a space, so the
+  // parser's verdict landed under `<path>\t` and the page read as "no verdict" —
+  // which the old rule dropped. Measured 2026-09-22 on a clone of the real jarvis
+  // wiki: a prose edit on all 1323 markdown pages left 110 of them dirty, and the
+  // 1213 it dropped are exactly the 1213 whose path contains a space.
+  const { rm } = await import("node:fs/promises");
+  const { wiki, dir, write } = await seededWiki({
+    "Mac mini headless setup.md": page("Spaced", "alpha", "Original prose."),
+  });
+  try {
+    await write("Mac mini headless setup.md", page("Spaced", "alpha", "Rewritten prose."));
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has("Mac mini headless setup.md")).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a page whose NAME carries a quote keeps its mtime after a prose edit", async () => {
+  // git C-quotes the whole header for a `"`/`\`/control character — `+++
+  // "b/q\"uote.md"` — whatever `core.quotePath` says, so the `b/` strip answered
+  // null and the page again had no verdict.
+  const { rm } = await import("node:fs/promises");
+  const name = 'q"uote.md';
+  const { wiki, dir, write } = await seededWiki({ [name]: page("Quoted", "alpha", "Original prose.") });
+  try {
+    await write(name, page("Quoted", "alpha", "Rewritten prose."));
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has(name)).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a page carrying a NUL byte keeps its mtime after a prose edit", async () => {
+  // A NUL makes git call the file binary: `Binary files … differ`, no `+++` line
+  // at all. The old guard set `ok = false` on that line, but `file` was still
+  // null, so the flush recorded nothing and the page fell into the same
+  // no-verdict drop.
+  const { rm } = await import("node:fs/promises");
+  const enc = new TextEncoder();
+  const withNul = (prose: string) => {
+    const text = page("Binary", "alpha", prose);
+    const bytes = enc.encode(text);
+    const out = new Uint8Array(bytes.length + 1);
+    out.set(bytes);
+    out[bytes.length] = 0; // the byte that makes git say "binary"
+    return out;
+  };
+  const { wiki, dir, write } = await seededWiki({ "binary.md": withNul("Original prose.") });
+  try {
+    await write("binary.md", withNul("Rewritten prose."));
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has("binary.md")).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a page whose HEAD carries a NUL byte keeps its mtime even after a metadata-only write", async () => {
+  // Pins `decodeStrict`'s NUL branch on its own: the prose-edit case above is
+  // kept by the body comparison whether or not the NUL guard exists. Here the
+  // body is byte-identical and only `series:` moved, so the ONLY thing that
+  // keeps the page dirty is refusing to compare a NUL-carrying blob at all.
+  const { rm } = await import("node:fs/promises");
+  const enc = new TextEncoder();
+  const withNul = (series: string) => {
+    const bytes = enc.encode(page("Binary", series, "Same prose."));
+    const out = new Uint8Array(bytes.length + 1);
+    out.set(bytes);
+    out[bytes.length] = 0;
+    return out;
+  };
+  const { wiki, dir, write } = await seededWiki({ "binary-meta.md": withNul("alpha") });
+  try {
+    await write("binary-meta.md", withNul("beta"));
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has("binary-meta.md")).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a path containing a NEWLINE is never sent to cat-file, so later answers stay aligned", async () => {
+  // `cat-file --batch` takes one request per LINE; a newline in a path becomes
+  // two requests and two `missing` answers, and every candidate after it is
+  // matched to the previous candidate's answer. Constructed so that misalignment
+  // produces a WRONG VERDICT, not just a null: c.md's worktree text equals b.md's
+  // HEAD text with only the `series:` value changed, so c.md read against b.md's
+  // blob is "metadata-only" and a real edit is dropped.
+  const { rm } = await import("node:fs/promises");
+  const nl = "a\nnl.md"; // sorts FIRST in `git status`, so the shifted answers land on b and c
+  const { wiki, dir, write } = await seededWiki({
+    [nl]: page("NL", "alpha", "Newline prose."),
+    "b.md": page("B", "alpha", "Shared body."),
+    "c.md": page("C", "alpha", "C prose."),
+  });
+  try {
+    await write(nl, page("NL", "beta", "Newline prose."));
+    await write("b.md", page("B", "beta", "Shared body."));
+    await write("c.md", page("B", "beta", "Shared body."));
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has(nl)).toBe(true); // excluded from classification: stays dirty
+    expect(dates!.dirty.has("b.md")).toBe(false); // metadata-only: dropped
+    expect(dates!.dirty.has("c.md")).toBe(true); // a real edit, whatever blob it is compared to
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a repo configured with diff.noprefix still tells a prose edit from a metadata write", async () => {
+  // `diff.noprefix` / `diff.mnemonicPrefix` / `diff.external` are ordinary user
+  // config and they change the header the old parser read the path off — every
+  // candidate unnamed, so EVERY tracked-modified page was dropped. Both
+  // directions are asserted, because under the old rule the metadata case passed
+  // for the wrong reason.
+  const { rm } = await import("node:fs/promises");
+  const { wiki, dir, write } = await seededWiki({
+    "prose.md": page("Prose", "alpha", "Original prose."),
+    "meta.md": page("Meta", "alpha", "Unchanged prose."),
+  });
+  try {
+    await fixtureGit(dir, "config", "diff.noprefix", "true");
+    await write("prose.md", page("Prose", "alpha", "Rewritten prose."));
+    await write("meta.md", page("Meta", "beta", "Unchanged prose."));
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has("prose.md")).toBe(true);
+    expect(dates!.dirty.has("meta.md")).toBe(false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("deleting a metadata-shaped FIRST BODY line is an edit, not a metadata write", async () => {
+  // For a pure deletion git anchors the hunk at the preceding KEPT line, so a
+  // body line deleted immediately under the closing fence comes back as
+  // `@@ -6 +5,0 @@` — `newStart == end`, which passed the old `newStart > end`
+  // position test. The line reads `prs: [...]`, so the page was dropped.
+  const { rm } = await import("node:fs/promises");
+  const withPrsLine = `---\ntitle: Straddle\nseries: alpha\nplan_status: in-flight\n---\nprs: [owner/repo#1]\nprose here\n`;
+  const withoutPrsLine = `---\ntitle: Straddle\nseries: alpha\nplan_status: in-flight\n---\nprose here\n`;
+  const { wiki, dir, write } = await seededWiki({ "straddle.md": withPrsLine });
+  try {
+    await write("straddle.md", withoutPrsLine);
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has("straddle.md")).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a mode-only change is dropped: identical content is not an edit", async () => {
+  // `chmod +x` is the one shape `git status` really does report as modified with
+  // no content difference (a touch or an identical rewrite is compared by
+  // content and reports clean). There is no edit to hide, so the page dates from
+  // git history like a clean one. Same verdict before and after this round — it
+  // is pinned as a decision, not as a fix.
+  const { rm, chmod } = await import("node:fs/promises");
+  const path = (await import("node:path")).default;
+  const { wiki, dir } = await seededWiki({ "mode.md": page("Mode", "alpha", "Unchanged prose.") });
+  try {
+    await chmod(path.join(wiki, "mode.md"), 0o755);
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has("mode.md")).toBe(false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a classification that exceeds its budget keeps EVERY dirty page", async () => {
+  // The classification runs on the index-build critical path, so it is bounded —
+  // and the degrade is the UNCLASSIFIED dirty set, never the empty one. Driven
+  // with a `git` shim on PATH that sleeps on the subcommands a classification
+  // spawns, so the budget is exceeded for real rather than faked.
+  const { rm, writeFile, mkdir } = await import("node:fs/promises");
+  const path = (await import("node:path")).default;
+  const { wiki, dir, write } = await seededWiki({
+    "prose.md": page("Prose", "alpha", "Original prose."),
+    "meta.md": page("Meta", "alpha", "Unchanged prose."),
+  });
+  const realGit = Bun.which("git");
+  const shimDir = path.join(dir, "shim");
+  const pathBefore = process.env.PATH;
+  try {
+    await write("prose.md", page("Prose", "alpha", "Rewritten prose."));
+    await write("meta.md", page("Meta", "beta", "Unchanged prose."));
+    await write("untracked.md", page("Untracked", "alpha", "Brand new."));
+    await mkdir(shimDir, { recursive: true });
+    const shim = path.join(shimDir, "git");
+    await writeFile(
+      shim,
+      `#!/bin/sh\nfor a in "$@"; do\n  case "$a" in cat-file|diff) sleep 6 ;; esac\ndone\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${pathBefore ?? ""}`;
+    __setClassifyBudgetForTest(50);
+    const dates = await buildWikiGitDates(wiki);
+    // Nothing is classified, so nothing is dropped — including the page whose
+    // edit really was metadata-only.
+    expect(dates!.dirty.has("prose.md")).toBe(true);
+    expect(dates!.dirty.has("meta.md")).toBe(true);
+    // …and the untracked page, which never reaches the classification at all,
+    // must not be lost with it.
+    expect(dates!.dirty.has("untracked.md")).toBe(true);
+  } finally {
+    __setClassifyBudgetForTest(null);
+    process.env.PATH = pathBefore;
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 20_000);
