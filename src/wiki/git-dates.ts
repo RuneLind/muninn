@@ -391,24 +391,29 @@ export function classifyPageChange(headText: string, workText: string): PageChan
 }
 
 /**
- * Is every frontmatter LINE that differs between the two blocks a metadata key
- * line? A multiset difference rather than a key-by-key parse, deliberately: a
- * parse answers nothing about the lines it does not model — a value-less block
- * opener, a list item, a comment, a depth-2 child, an unparseable line — and
- * "not modelled" would read as "not changed", i.e. as a page nobody edited.
+ * Does the frontmatter differ ONLY in metadata key lines? Line-based rather than
+ * a key-by-key parse, deliberately: a parse answers nothing about the lines it
+ * does not model — a value-less block opener, a list item, a comment, a depth-2
+ * child, an unparseable line — and "not modelled" would read as "not changed",
+ * i.e. as a page nobody edited.
+ *
+ * The test is ORDER-SENSITIVE: strip every metadata line from both sides and the
+ * two remainders must be identical, in sequence. A multiset of lines was the
+ * first cut, and it read a hand edit that only reordered `title:` and `tags:`
+ * as "nothing changed" — every line present on both sides, count zero. With the
+ * remainders equal, whatever differs between the blocks is a metadata line by
+ * construction, added, removed, rewritten or moved.
+ *
+ * A trailing `\r` needs no trimming: the key regex is anchored at column 0 and
+ * open at the end, so a CRLF page's metadata lines match with it in place.
  */
 function frontmatterDiffIsMetadataOnly(head: string, work: string): boolean {
-  const counts = new Map<string, number>();
-  for (const line of head.split("\n")) counts.set(line, (counts.get(line) ?? 0) + 1);
-  for (const line of work.split("\n")) counts.set(line, (counts.get(line) ?? 0) - 1);
-  for (const [line, n] of counts) {
-    if (n === 0) continue; // present the same number of times on both sides
-    // `\r` is trimmed per line for `parseFrontmatter`'s reason: a CRLF page's
-    // every line carries one, and the key shape is anchored at column 0.
-    const l = line.endsWith("\r") ? line.slice(0, -1) : line;
-    if (!METADATA_FRONTMATTER_LINE_RE.test(l)) return false;
-  }
-  return true;
+  const remainder = (block: string) =>
+    block
+      .split("\n")
+      .filter((line) => !METADATA_FRONTMATTER_LINE_RE.test(line))
+      .join("\n");
+  return remainder(head) === remainder(work);
 }
 
 /**
@@ -499,6 +504,8 @@ function parseCatFileBatch(bytes: Uint8Array, expected: number): (string | null)
     }
     const end = pos + size;
     if (end > bytes.length) break; // truncated output — the rest is unanswered
+    // `blob` is the only type a tracked-modified page can resolve to (a status
+    // `[ M][ M]` path is a file in HEAD); the check is a statement, not a branch.
     out.push(fields[1] === "blob" ? decodeStrict(bytes.subarray(pos, end)) : null);
     pos = end + 1; // the LF git writes after every object's content
   }

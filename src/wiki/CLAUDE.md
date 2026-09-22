@@ -152,9 +152,11 @@ write (a series join across twelve pages, a burst of `/plans` flips) made every
 page it touched read as edited minutes ago. `buildWikiGitDates` now COMPARES a
 TRACKED, MODIFIED page against its `HEAD` blob and drops it from `dirty` on either
 of two verdicts, so it dates from git history like a clean page: `metadata-only`
-(the body after the fence is byte-identical and every frontmatter LINE that
-differs is a column-0 key in `METADATA_ONLY_FRONTMATTER_KEYS` — the four
-provenance keys plus `series`/`series_label`/`priority`/`plan_status`/`status_date`)
+(the body after the fence is byte-identical and, with every column-0
+`METADATA_ONLY_FRONTMATTER_KEYS` line stripped from both sides — the four
+provenance keys plus `series`/`series_label`/`priority`/`plan_status`/`status_date` —
+the two frontmatter remainders are identical IN ORDER, so a hand edit that only
+reordered `title:` and `tags:` is an edit)
 and `identical` (equal texts, which `git status` still reports as modified after a
 `chmod`). Everything else is an `edit` and keeps its mtime — and `edit` is the
 DEFAULT, so there is no unnamed page to guess about: a body difference, a page
@@ -162,8 +164,9 @@ with no frontmatter, a differing key outside the set, an indented or unparsed
 frontmatter line, a missing `HEAD` blob, an unreadable, non-UTF-8 or
 NUL-carrying file. The HEAD side is ONE `git cat-file --batch` fed
 repo-relative paths on STDIN — a path with a space, a quote or a non-ASCII byte
-needs no quoting there, and no `diff.*` user config can change the spelling an
-answer comes back under, which is the whole class of bug the `git diff HEAD` text
+needs no quoting there (a path containing a NEWLINE is the one shape stdin cannot
+carry; it is left out of the batch and stays dirty), and no `diff.*` user config
+can change the spelling an answer comes back under, which is the whole class of bug the `git diff HEAD` text
 parse this replaced was built on. Untracked and deleted paths pass through
 UNTOUCHED (an untracked page has no `HEAD` blob, and dropping it would also count
 it into `store.ts`'s unexplained-miss warn); the comparison is against `HEAD`

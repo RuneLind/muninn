@@ -426,6 +426,25 @@ test("classifyPageChange: an INDENTED metadata-looking line is a real edit", () 
   ).toBe("edit");
 });
 
+test("classifyPageChange: REORDERING non-metadata frontmatter lines is a real edit", () => {
+  // Line-by-line, not by multiset: every line is on both sides, so a bag of
+  // lines sees nothing changed, and a hand edit that moved `title:` below
+  // `tags:` would be dropped as if nobody touched the page.
+  expect(
+    classifyPageChange(
+      pageText(["title: A", "tags: [x]", "author: R"], "Prose."),
+      pageText(["author: R", "title: A", "tags: [x]"], "Prose."),
+    ),
+  ).toBe("edit");
+  // Moving only a METADATA line is still metadata-only.
+  expect(
+    classifyPageChange(
+      pageText(["title: A", "series: one", "tags: [x]"], "Prose."),
+      pageText(["series: one", "title: A", "tags: [x]"], "Prose."),
+    ),
+  ).toBe("metadata-only");
+});
+
 test("classifyPageChange: identical text is `identical`, whatever git says", () => {
   // `git status` reports a mode-only change (`chmod`) as modified with no content
   // difference at all. There is no edit to hide, so the page dates from history.
@@ -664,6 +683,57 @@ test("a page carrying a NUL byte keeps its mtime after a prose edit", async () =
     await write("binary.md", withNul("Rewritten prose."));
     const dates = await buildWikiGitDates(wiki);
     expect(dates!.dirty.has("binary.md")).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a page whose HEAD carries a NUL byte keeps its mtime even after a metadata-only write", async () => {
+  // Pins `decodeStrict`'s NUL branch on its own: the prose-edit case above is
+  // kept by the body comparison whether or not the NUL guard exists. Here the
+  // body is byte-identical and only `series:` moved, so the ONLY thing that
+  // keeps the page dirty is refusing to compare a NUL-carrying blob at all.
+  const { rm } = await import("node:fs/promises");
+  const enc = new TextEncoder();
+  const withNul = (series: string) => {
+    const bytes = enc.encode(page("Binary", series, "Same prose."));
+    const out = new Uint8Array(bytes.length + 1);
+    out.set(bytes);
+    out[bytes.length] = 0;
+    return out;
+  };
+  const { wiki, dir, write } = await seededWiki({ "binary-meta.md": withNul("alpha") });
+  try {
+    await write("binary-meta.md", withNul("beta"));
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has("binary-meta.md")).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a path containing a NEWLINE is never sent to cat-file, so later answers stay aligned", async () => {
+  // `cat-file --batch` takes one request per LINE; a newline in a path becomes
+  // two requests and two `missing` answers, and every candidate after it is
+  // matched to the previous candidate's answer. Constructed so that misalignment
+  // produces a WRONG VERDICT, not just a null: c.md's worktree text equals b.md's
+  // HEAD text plus a metadata line, so c.md read against b.md's blob is
+  // "metadata-only" and a real edit is dropped.
+  const { rm } = await import("node:fs/promises");
+  const nl = "a\nnl.md"; // sorts FIRST in `git status`, so the shifted answers land on b and c
+  const { wiki, dir, write } = await seededWiki({
+    [nl]: page("NL", "alpha", "Newline prose."),
+    "b.md": page("B", "alpha", "Shared body."),
+    "c.md": page("C", "alpha", "C prose."),
+  });
+  try {
+    await write(nl, page("NL", "beta", "Newline prose."));
+    await write("b.md", page("B", "beta", "Shared body."));
+    await write("c.md", page("B", "beta", "Shared body."));
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.dirty.has(nl)).toBe(true); // excluded from classification: stays dirty
+    expect(dates!.dirty.has("b.md")).toBe(false); // metadata-only: dropped
+    expect(dates!.dirty.has("c.md")).toBe(true); // a real edit, whatever blob it is compared to
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

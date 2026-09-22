@@ -49,9 +49,9 @@ export function splitFrontmatter(content: string): FrontmatterSplit {
 /**
  * Is this a MARKDOWN wiki page (`.md` or `.mdx`) rather than a standalone `.html`
  * explainer? The one spelling of that test, so "which pages share one title
- * namespace" cannot be answered two ways. Callers: `store.ts`'s `resolve()` and
- * the display-title pass, the linter's `stem-collision` check, and the
- * metadata-only rule in `git-dates.ts` (nothing but a markdown page carries
+ * namespace" cannot be answered two ways. Callers: `store.ts`'s `resolve()`, the
+ * linter's `stem-collision` check, and the metadata-only rule in
+ * `git-dates.ts` (nothing but a markdown page carries
  * frontmatter, so nothing else can be a metadata write).
  *
  * **The case fold is defensive and currently unreachable**, which is worth stating
