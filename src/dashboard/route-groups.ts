@@ -71,3 +71,17 @@ export const NAIS_DROPPED_ROUTE_GROUPS: readonly RouteGroup[] = [
 export function droppedRouteGroups(profile: MuninnProfile): ReadonlySet<RouteGroup> {
   return profile === "nais" ? new Set(NAIS_DROPPED_ROUTE_GROUPS) : new Set();
 }
+
+/**
+ * Does this profile warm the worked-on ledger memo at boot (`src/index.ts`)?
+ *
+ * A predicate beside the drop set rather than an inline test at the boot site,
+ * so the gate is drivable: in a pod there is no `/wiki` reader to warm the axis
+ * for, the wiki roots are working trees that do not exist there, and the
+ * claude-usage it would dial is a launchd service on another machine's loopback.
+ * Derived from `droppedRouteGroups` rather than from the profile name, so a
+ * later profile that drops `wiki` skips the kick without a second edit.
+ */
+export function shouldKickWorkedLedgerAtBoot(profile: MuninnProfile): boolean {
+  return !droppedRouteGroups(profile).has("wiki");
+}

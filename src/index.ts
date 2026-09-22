@@ -1,12 +1,16 @@
 import { setupLogging, getLog } from "./logging.ts";
-import { ConfigError, loadConfig } from "./config.ts";
+import { ConfigError, loadConfig, resolveServingProfile } from "./config.ts";
 import { discoverActiveBots, discoverAllBots } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createSlackApp } from "./slack/index.ts";
 import { registerSlackApp, getAllSlackApps } from "./slack/registry.ts";
 import { createDashboardRoutes } from "./dashboard/index.ts";
-import { NAIS_DROPPED_ROUTE_GROUPS, droppedRouteGroups } from "./dashboard/route-groups.ts";
+import {
+  NAIS_DROPPED_ROUTE_GROUPS,
+  droppedRouteGroups,
+  shouldKickWorkedLedgerAtBoot,
+} from "./dashboard/route-groups.ts";
 import { activityLog } from "./observability/activity-log.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
@@ -138,7 +142,7 @@ warmupEmbeddings();
 // there is no reader to warm the axis for, the wiki roots are working trees that
 // do not exist there, and the claude-usage this would dial is a launchd service
 // on another machine's loopback.
-if (!droppedRouteGroups(config.profile).has("wiki")) {
+if (shouldKickWorkedLedgerAtBoot(config.profile ?? resolveServingProfile())) {
   try {
     const { getWikiRegistry } = await import("./wiki/registry-memo.ts");
     const { kickWorkedLedgerRefresh } = await import("./wiki/worked-ledger.ts");

@@ -398,18 +398,19 @@ export function bySeriesDateDesc(a: PageDateOrder, b: PageDateOrder): number {
  * object is read by the write-deciding chain (`seriesHead`, `newestSeriesPlan`,
  * `lint-series.ts`) and this rung must never reach it.
  *
- * After the one-chain fix the rank is BINARY — the ledger answered, or the
- * update signal stood in for it — since both rungs come out of ONE function now
- * rather than from four interleaved fallbacks. It still earns its place: two
- * members on the same day order worked-first, which is what the chips they
- * render say about them.
+ * It is the TOP of the fallback chain, not a second value in a binary one:
+ * below it the fold keeps {@link seriesDateSignal}'s own rungs
+ * (`asserted` > `git` > `mtime`), so two uncovered members sharing a day still
+ * order authored-date-first rather than by relPath. Fix round 1 collapsed the
+ * rank to two values and lost that tiebreak with it.
  */
 const SERIES_WORKED_RANK = 4;
 
-/** What {@link byWorkedDateDesc} reads. A structural subset for
- *  {@link PageDateFields}' reason, and the SAME one the rail's own date chip is
- *  computed from, because after the one-chain fix they are one signal. */
-type WorkedDateFields = WikiRecencyFields;
+/** What {@link byWorkedDateDesc} reads: the worked key the rail's own chip is
+ *  computed from, PLUS the fields the fold falls back through. A structural
+ *  subset for {@link PageDateFields}' reason — the server's `WikiPageMeta`
+ *  satisfies it too. */
+type WorkedDateFields = WikiRecencyFields & PageDateFields;
 
 /**
  * The DISPLAY order of a series, at DAY granularity: a thin day-floored wrapper
@@ -427,12 +428,20 @@ type WorkedDateFields = WikiRecencyFields;
  * row in worked mode, the Series section's order, the fold's members via
  * {@link describeSeries}, and the reader strip — read one signal now.
  *
- * ⚠️ The consequence worth stating: the FALLBACK is the rail's update chain, not
- * {@link seriesDateSignal}'s. An uncovered page is dated by frontmatter
- * `updated:`/`created:` → the non-sweep git touch → mtime-if-dirty → the git
- * creation floor, and NOT by its authored `status_date:`. That is the date the
- * row's own chip has always shown; the strip printing a different one is exactly
- * the trap this removes.
+ * ⚠️ The chain is worked-then-{@link seriesDateSignal}, and the second rung is
+ * the fix round 2 correction. Fix round 1 fell an uncovered member back to the
+ * rail's UPDATE chain, which on a COLD instance — no ledger, the mini, the first
+ * build after boot, and 537 of mimir's 549 pages even when warm — lands on
+ * `gitTouchedMs`, a date ordinary 1–3-file commits flatten: measured on a mimir
+ * clone, 23 of 30 series folds reordered against `origin/main` and 25 of 30
+ * collapsed to one tie-day, i.e. to alphabetical, with the reader strip then
+ * reading reverse-alphabetical. `seriesDateSignal` reads the authored
+ * `status_date:` first, which is the chronology the pages themselves assert.
+ *
+ * The cost, stated so nobody files it: in Worked-on mode an UNCOVERED member is
+ * ordered by the series chain while its own row chip still shows the update
+ * date, so a fold can read non-monotonic across covered and uncovered members.
+ * The authored chronology wins over a flat git date.
  *
  * ── Order, never identity ───────────────────────────────────────────────────
  * It is a second COMPARATOR rather than a change to `seriesDateSignal`, and that
@@ -448,19 +457,19 @@ type WorkedDateFields = WikiRecencyFields;
  * work"; the order answers "what happened most recently".
  */
 export function workedDateSignal(p: WorkedDateFields, now?: number): SeriesDateSignal {
+  // The WORKED rung comes through `workedSignal` — the ONE guarded worked key,
+  // future guard and all — rather than through a second `p.workedMs` read, so
+  // the rail's chip and this comparator can never disagree about whether the
+  // ledger answered for a page. `kind === "worked"` is that answer; anything
+  // else means the guard rejected it or the ledger holds nothing.
   const signal = workedSignal(p, now);
-  if (signal.ms <= 0) return { ms: 0, day: "", rank: SERIES_DATE_RANK.none };
-  // `label` is already a DAY for every rung the chain can answer on — a
-  // frontmatter date verbatim, an observed instant as its local day — so it is
-  // the spelling to floor by. `localDay` is the belt for a shape that is not.
-  const day = /^\d{4}-\d{2}-\d{2}$/.test(signal.label)
-    ? signal.label
-    : localDay(new Date(signal.ms));
-  return {
-    ms: calendarDayMs(day) ?? 0,
-    day,
-    rank: signal.kind === "worked" ? SERIES_WORKED_RANK : SERIES_DATE_RANK.asserted,
-  };
+  if (signal.kind === "worked") {
+    // A ledger instant, so its LOCAL day is the spelling to floor by — the same
+    // split `seriesDateSignal` makes between an authored day and an observed one.
+    const day = localDay(new Date(signal.ms));
+    return { ms: calendarDayMs(day) ?? 0, day, rank: SERIES_WORKED_RANK };
+  }
+  return seriesDateSignal(p);
 }
 
 /** Newest WORKED day first, then the rung, then relPath — {@link bySeriesDateDesc}
@@ -826,8 +835,10 @@ export function withoutSeriesMembers(
  *
  * Per mode, and each answer is the one the reader's sort is already asking for:
  *
- *  - the three recency modes order by `max(recencyKeyFor(mode))` over the members
- *    PRESENT in this render, newest first;
+ *  - `worked` orders by `max(workedDateSignal)` — the FOLD's own comparator, so
+ *    the section and the fold cannot place one group two ways — and `updated` /
+ *    `created` by `max(recencyKeyFor(mode))`, the mode's own row key, over the
+ *    members PRESENT in this render, newest first;
  *  - `title` orders alphabetically by the group's label, which is what that mode
  *    means one level up;
  *  - `backlinks` keeps FIRST APPEARANCE — under that sort it already means "the
@@ -845,7 +856,15 @@ export function orderSeriesGroups(
   if (opts.sort === "backlinks") return [...groups];
   const byLabel = (a: RailGroup, b: RailGroup) => a.label.localeCompare(b.label);
   if (opts.sort === "title") return [...groups].sort(byLabel);
-  const key = recencyKeyFor(opts.sort);
+  // In WORKED mode the section is keyed on THIS fold's own comparator, so a
+  // group is never placed by a date its fold does not print. The two other
+  // recency modes keep the mode's own row key: there the section follows the
+  // row chips and the fold follows the series chronology, and for an UNCOVERED
+  // member those legitimately differ (see {@link workedDateSignal}).
+  const key =
+    opts.sort === "worked"
+      ? (m: WikiListing, now?: number) => workedDateSignal(m, now).ms
+      : recencyKeyFor(opts.sort);
   const newest = new Map<RailGroup, number>();
   for (const g of groups) {
     let best = 0;

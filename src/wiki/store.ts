@@ -2881,7 +2881,20 @@ export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): v
  * and join the link graph; standalone HTML explainers do not (title/mtime only,
  * no backlinks).
  */
-export async function buildWikiIndex(root: string): Promise<WikiIndex> {
+export async function buildWikiIndex(
+  root: string,
+  opts?: {
+    /**
+     * Did the CALLER force this build (`getWikiIndex({refresh: true})`, i.e.
+     * `?refresh=1`)? It is passed through to the worked-ledger kick and to
+     * nothing else: a forced build is the operator saying "ask again now", so
+     * the ledger's TTL gate and its degraded-upstream back-off are both waived
+     * for it. Without it every kick carried the index TTL and the escape hatch
+     * this module's own docblock promises did not exist.
+     */
+    forced?: boolean;
+  },
+): Promise<WikiIndex> {
   // Per-wiki reader config — read once per build (inherits the index TTL). It is
   // read BEFORE the scan, not after, because `include` scopes the scan itself;
   // the move is safe because the read depends on nothing but `root`.
@@ -3013,7 +3026,10 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // is the stated price of never putting a tailnet service on a page load's
   // critical path (`src/wiki/worked-ledger.ts`). Server boot kicks it too, so the
   // cold window is the first index build rather than the first reader.
-  kickWorkedLedgerRefresh(root, { maxAgeMs: CACHE_TTL_MS });
+  // A FORCED build (`?refresh=1`) passes 0, which waives both the memo's TTL
+  // gate and the degraded-upstream back-off — the escape hatch `worked-ledger.ts`
+  // documents, and which nothing exercised while this always sent the TTL.
+  kickWorkedLedgerRefresh(root, { maxAgeMs: opts?.forced ? 0 : CACHE_TTL_MS });
 
   const register = (key: string, meta: WikiPageMeta) => {
     const k = key.toLowerCase();
@@ -3584,7 +3600,7 @@ export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }):
   }
 
   const started = Date.now();
-  const index = await buildWikiIndex(root);
+  const index = await buildWikiIndex(root, { forced: opts?.refresh === true });
   caches.set(root, index);
   warnedRoots.delete(root);
   log.info("Wiki index built: {pages} pages in {ms}ms from {path}", {

@@ -1116,7 +1116,7 @@ guard. What belongs here is the CROSS-MODULE map:
 | `worked-ledger.ts` | the one fetch, the per-root memo, the root spelling, the degrades |
 | `store.ts` | the index post-pass, `workedMs` on `WikiPageMeta`, `workedCoverage` |
 | `wiki-filter.ts` | `workedSignal` — the ONE key — plus the sort mode and the row chip |
-| `wiki-groups.ts` | `workedDateSignal`/`byWorkedDateDesc` (a day-floored wrapper over it), the fold, the Series section order |
+| `wiki-groups.ts` | `workedDateSignal`/`byWorkedDateDesc` (that key day-floored, falling back to `seriesDateSignal`), the fold, the Series section order |
 | `wiki-browser.ts` / `views/wiki-page.ts` | the row's hover, the reader strip, the hidden `<option>` |
 
 Four rules from those modules are worth restating because a caller can get them
@@ -1125,13 +1125,24 @@ wrong from outside:
 - **A failure never blanks a good memo**, and neither does a SUCCESSFUL empty
   answer: a 200 carrying zero rows for a root the memo holds pages for is kept
   and warned about once, because nothing else about it would be visible — the
-  axis simply goes blank and the sort option hides.
+  axis simply goes blank and the sort option hides. It is HELD, not held
+  forever: the empty answer still advances `fetchedAt` (or the TTL gate never
+  holds and the root is re-asked on every index build — the back-off, defeated
+  through the empty path), and once empties have persisted for
+  `WORKED_EMPTY_RELEASE_MS` (1 h) since the last non-empty answer it is believed
+  and the memo is cleared, under a warn of its own. A wiki that legitimately
+  went N → 0 — every session under it later discounted, the root renamed
+  upstream — would otherwise show dates for writes nobody claims for the life of
+  the process.
 - **The root is `path.resolve`d before the ask** (upstream refuses a non-canonical
   root with a 400, which the zero-row realpath retry cannot recover), and the
   spelling that ANSWERED is asked first on every later refresh.
 - **A degraded upstream is backed off** on the caller's own TTL, so a service
-  that is down or un-upgraded is re-tested once per index rebuild rather than on
-  every one.
+  that is down or un-upgraded is re-tested once per TTL rather than on every
+  index rebuild — and a FORCED build (`getWikiIndex({refresh: true})`, i.e.
+  `?refresh=1`) passes `maxAgeMs: 0`, which waives both that back-off and the
+  memo's own TTL. `buildWikiIndex`'s `forced` option is the whole of that
+  escape hatch; without it the promise in this module's docblock was inert.
 - **The boot kick is gated on the serving profile**: under `MUNINN_PROFILE=nais`
   the `wiki` route group is dropped, so there is no reader to warm the axis for
   and nothing is fetched.
@@ -1166,9 +1177,9 @@ by `worked-order-invariant.test.ts` — identical lint findings, identical
 `computeRelated` rows and an identical HEAD with `workedMs` present and absent,
 AND a fold that really does reorder, so neither half can pass vacuously.
 
-**ONE chain, four surfaces — the fix round's own rule.** `workedDateSignal` is a
-thin day-floored wrapper over `wiki-filter.ts`'s `workedSignal`, so the rail row
-in worked mode, the Series SECTION's order, the fold's members (via
+**ONE WORKED key, four surfaces — the fix round's own rule.** The worked rung of
+`workedDateSignal` is `wiki-filter.ts`'s `workedSignal`, day-floored, so the rail
+row in worked mode, the Series SECTION's order, the fold's members (via
 `describeSeries`) and the reader strip all read one key with one future guard.
 They did not, and the three consequences were measured on live mimir: a
 `workedMs` of 2027 fell back in the rail while sorting first and printing
@@ -1177,11 +1188,23 @@ disagree was PLACED by one chain and PRINTED by the other; and an expanded fold
 read `09-21, 09-17, 09-17, 09-20, 09-15`, because its members sorted on a date
 their own chips did not show.
 
-Two consequences of that unification are by design and stated so nobody files
-them. **The fallback is the rail's UPDATE chain, not `seriesDateSignal`'s** — an
-uncovered member is dated by frontmatter `updated:`/`created:` → the non-sweep
-git touch → mtime-if-dirty → the git creation floor, and NOT by its authored
-`status_date:`, which is exactly what its own row has always shown. And **the
+⚠️ **The chain is worked-then-`seriesDateSignal`, and the second rung is fix
+round 2's correction.** Fix round 1 fell an uncovered member back to the rail's
+UPDATE chain, which on a COLD instance — no ledger, the mini, the first build
+after boot, and 537 of mimir's 549 pages even when warm — lands on
+`gitTouchedMs`, a date ordinary 1–3-file commits flatten: measured on a mimir
+clone, 23 of 30 series folds reordered against `origin/main` and 25 of 30
+collapsed to a single tie-day, i.e. to alphabetical, with the reader strip then
+reading reverse-alphabetical. The WORKED rung still comes through the one
+guarded `workedSignal`, so the fold and the row chip cannot disagree about a
+covered page or about a stamp the future guard rejects; below it the fold keeps
+`seriesDateSignal`'s own rungs (`asserted` > `git` > `mtime`), so two uncovered
+members sharing a day order authored-date-first rather than by relPath.
+
+The cost, stated so nobody files it: in Worked-on mode an UNCOVERED member is
+ordered by the series chain while its own row chip still shows the update date,
+so a fold can read non-monotonic across covered and uncovered members. The
+authored chronology wins over a flat git date. And **the
 fold's order is worked-first in EVERY sort mode** whenever the memo is warm, so
 one wiki open on a warm instance and on a cold one can sequence the same fold two
 ways under "Recently updated"; the alternative is a fold whose order depends on a
@@ -1195,7 +1218,11 @@ that a group sits where the reader's sort put its first member; measured on mimi
 2026-09-22, that left its 30 series carrying only 14 distinct newest-member days,
 15 of them sharing one — half the section ordered by nothing but a title. So
 `orderSeriesGroups` orders the section by each group's newest member's key FOR
-THE MODE ON SCREEN in the three recency modes (ties falling back to the label),
+THE MODE ON SCREEN in the three recency modes (ties falling back to the label) —
+in `worked` mode that key is the FOLD's own comparator, so no group is placed by
+a date its fold does not print, while `updated`/`created` keep the mode's own row
+key and the section then follows the row chips where an uncovered member's two
+dates differ —
 alphabetically by label in `title` mode, and keeps FIRST APPEARANCE in
 `backlinks` — where that already means "the group holding the most-connected page
 first", and link counts do not tie the way a corpus of same-day dates does. The

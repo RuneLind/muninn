@@ -21,7 +21,7 @@
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
@@ -43,11 +43,6 @@ function page(
     "---",
     `title: ${title}`,
     `status_date: ${opts.date}`,
-    // MIRRORED onto `updated`, because the two chains read different keys: the
-    // IDENTITY chain (seriesDateSignal) reads status_date, while the DISPLAY
-    // chain (workedDateSignal) reads the rail's own update signal. Without both
-    // the display half of this file would order on nothing but the relPath.
-    `updated: ${opts.date}`,
     `series: ${opts.series}`,
     ...(opts.label ? [`series_label: ${opts.label}`] : []),
     ...(opts.plan ? ["plan_status: in-flight"] : []),
@@ -135,13 +130,6 @@ beforeAll(async () => {
   await mkdir(path.join(root, "plans"), { recursive: true });
   await mkdir(path.join(root, "blogs"), { recursive: true });
   for (const [rel, body] of PAGES) await writeFile(path.join(root, rel), body, "utf8");
-  // BACKDATE every mtime. This wiki is not a git repo, so `updatedSignal` trusts
-  // mtime unconditionally and takes the MAX of it and the frontmatter date — and
-  // a file written a millisecond ago gives every page the same "now", which
-  // collapses the display order onto the relPath and makes the two halves of
-  // this file assert nothing. `e2e/settled-wiki.ts` exists for the same reason.
-  const settled = new Date("2020-01-01T00:00:00Z");
-  for (const [rel] of PAGES) await utimes(path.join(root, rel), settled, settled);
   plain = await buildWikiIndex(root);
   worked = await buildStamped();
 });
@@ -208,8 +196,9 @@ describe("…and the display half DOES move", () => {
       "plans/extra.md",
       "plans/head.md",
     ]);
-    // `plans/extra.md` has NO worked date and keeps its own place by its update
-    // date, between two covered members — mixed coverage, not all-or-nothing.
+    // `plans/extra.md` has NO worked date and keeps its place by its own
+    // `status_date` — the fold's fallback rung — between two covered members, so
+    // the coverage here is mixed rather than all-or-nothing.
     expect(g(worked)).toEqual([
       "plans/head.md",
       "plans/mid.md",

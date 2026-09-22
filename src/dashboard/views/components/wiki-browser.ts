@@ -2564,7 +2564,7 @@ function paintSeriesMenuEl(anchor: HTMLElement, html: string): HTMLElement {
 function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): void {
   closeSeriesMenu({ focus: false });
   if (!seriesEditable()) return;
-  const model = buildSeriesMenu(allPages, relPath);
+  const model = buildSeriesMenu(allPages, relPath, recencyNow());
   if (!model) {
     // The listing moved under the row between its render and this click — a
     // deleted or renamed page. Said in the popover rather than swallowed: a

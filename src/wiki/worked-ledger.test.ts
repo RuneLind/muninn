@@ -21,14 +21,39 @@ import {
   refreshWorkedLedger,
   workedLedgerFor,
   workedLedgerDepsFromEnv,
+  WORKED_EMPTY_RELEASE_MS,
   type WorkedLedgerDeps,
 } from "./worked-ledger.ts";
 import { __resetWorkedMatchWarnsForTest, workedMatchWarnDue } from "./store.ts";
+import { __resetClaudeUsageWarnsForTest } from "../utils/claude-usage-fetch.ts";
+import type { getLog } from "../logging.ts";
+
+type Logger = ReturnType<typeof getLog>;
 
 beforeEach(() => {
   __resetWorkedLedgerForTest();
   __resetWorkedMatchWarnsForTest();
+  __resetClaudeUsageWarnsForTest();
 });
+
+/**
+ * A logger that records the LEVEL each line went out at — the only observable a
+ * warn-once has (`claude-usage-warn.test.ts`'s recorder). An UNCONFIGURED logger
+ * is a silent no-op under `bun test`, so a degrade's warn is unassertable
+ * without injecting one.
+ */
+function recorder(): { levels: string[]; log: Logger } {
+  const levels: string[] = [];
+  const log = {
+    warn: () => levels.push("warn"),
+    info: () => levels.push("info"),
+    debug: () => levels.push("debug"),
+    error: () => levels.push("error"),
+    fatal: () => levels.push("fatal"),
+    trace: () => levels.push("trace"),
+  } as unknown as Logger;
+  return { levels, log };
+}
 
 /** A deps object whose fetcher answers one body per root spelling. */
 function deps(
@@ -554,6 +579,193 @@ describe("the index fold", () => {
       expect(index.workedCoverage).toBeUndefined();
       expect(index.pages[0]!.workedMs).toBeUndefined();
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Fix round 2 ─────────────────────────────────────────────────────────────
+
+describe("the empty-answer RELEASE window", () => {
+  /** A clock the test moves by hand — the window is an hour, and no suite waits
+   *  one. `deps.now` is the module's only clock read. */
+  function clocked(answers: (root: string) => unknown) {
+    let at = Date.parse("2026-09-22T09:00:00Z");
+    const d = deps(answers, { now: () => at });
+    return { d, advance: (ms: number) => (at += ms), at: () => at };
+  }
+
+  test("an empty answer KEEPS the pages and still advances fetchedAt", async () => {
+    // Both halves matter. Keeping the pages is the rule this module shipped
+    // with; advancing `fetchedAt` is the fix — without it the memo stayed
+    // permanently stale to the TTL gate and the root was re-asked on EVERY
+    // index build, i.e. the back-off defeated through the empty path.
+    let empty = false;
+    const { d, advance } = clocked((root) =>
+      empty ? { root, pages: [] } : { root, pages: [{ p: "a.md", w: 7 }] },
+    );
+    const first = await refreshWorkedLedger("/w", d);
+    const firstFetched = first!.fetchedAt;
+    empty = true;
+    advance(60_000);
+    const after = await refreshWorkedLedger("/w", d);
+    expect(after?.pages.get("a.md")).toBe(7);
+    expect(after!.fetchedAt).toBeGreaterThan(firstFetched);
+    // …and the TTL gate now HOLDS, so the next build asks nothing.
+    const asked = d.asked.length;
+    kickWorkedLedgerRefresh("/w", { deps: d, maxAgeMs: 5 * 60_000 });
+    await Promise.resolve();
+    expect(d.asked.length).toBe(asked);
+  });
+
+  test("an empty answer AFTER the window is believed — the memo is cleared", async () => {
+    let empty = false;
+    const { d, advance } = clocked((root) =>
+      empty ? { root, pages: [] } : { root, pages: [{ p: "a.md", w: 7 }] },
+    );
+    await refreshWorkedLedger("/w", d);
+    empty = true;
+    // Still inside the window: held.
+    advance(WORKED_EMPTY_RELEASE_MS - 1);
+    expect((await refreshWorkedLedger("/w", d))?.pages.size).toBe(1);
+    // Past it: a wiki that really went N → 0 (every session discounted, the root
+    // renamed upstream) stops showing dates for writes nobody claims.
+    advance(2);
+    const released = await refreshWorkedLedger("/w", d);
+    expect(released?.pages.size).toBe(0);
+    expect(workedLedgerFor("/w")?.pages.size).toBe(0);
+    expect(workedLedgerFor("/w")?.returned).toBe(0);
+  });
+
+  test("a NON-empty answer in between resets the window", async () => {
+    let empty = true;
+    const { d, advance } = clocked((root) =>
+      empty ? { root, pages: [] } : { root, pages: [{ p: "a.md", w: 7 }] },
+    );
+    empty = false;
+    await refreshWorkedLedger("/w", d);
+    empty = true;
+    advance(WORKED_EMPTY_RELEASE_MS - 60_000);
+    expect((await refreshWorkedLedger("/w", d))?.pages.size).toBe(1);
+    // The service comes back…
+    empty = false;
+    advance(60_000);
+    expect((await refreshWorkedLedger("/w", d))?.pages.size).toBe(1);
+    // …so the clock the release is measured against starts again: an empty
+    // answer just past the ORIGINAL deadline is held, not believed.
+    empty = true;
+    advance(120_000);
+    expect((await refreshWorkedLedger("/w", d))?.pages.size).toBe(1);
+    advance(WORKED_EMPTY_RELEASE_MS);
+    expect((await refreshWorkedLedger("/w", d))?.pages.size).toBe(0);
+  });
+});
+
+describe("the degrade warns", () => {
+  test("two ROOTS failing the same way both reach warn", async () => {
+    // The warn-once key carries the root: one process reads several wikis off
+    // one claude-usage, and without it the second root's failure dropped
+    // straight to `info` — the axis dark on a whole wiki with nothing at warn
+    // level naming it.
+    const rec = recorder();
+    const d = deps(() => new Error("down"), { log: rec.log });
+    await refreshWorkedLedger("/a", d);
+    await refreshWorkedLedger("/b", d);
+    expect(rec.levels).toEqual(["warn", "warn"]);
+    // …and the SAME root failing twice is still one warn.
+    await refreshWorkedLedger("/a", d);
+    expect(rec.levels).toEqual(["warn", "warn", "info"]);
+  });
+
+  test("a CLIPPED answer warns, naming upstream's own limit", async () => {
+    // The clip drops the OLDEST-worked pages while every row that did arrive
+    // still matches, so the store's match-rate guard cannot see it: this warn is
+    // the only signal the axis silently shortened.
+    const rec = recorder();
+    const d = deps(
+      {
+        "/w": { pages: [{ p: "a.md", w: 1 }], truncated: true, limit: 5000 },
+        "/q": { pages: [{ p: "a.md", w: 1 }] },
+      },
+      { log: rec.log },
+    );
+    await refreshWorkedLedger("/w", d);
+    expect(rec.levels).toEqual(["warn"]);
+    // An answer that was NOT clipped warns about nothing.
+    await refreshWorkedLedger("/q", d);
+    expect(rec.levels).toEqual(["warn"]);
+  });
+
+  test("the RELEASE is announced too, and it is not the same warn as the hold", async () => {
+    const rec = recorder();
+    let empty = false;
+    let at = Date.parse("2026-09-22T09:00:00Z");
+    const d = deps((root) => (empty ? { root, pages: [] } : { root, pages: [{ p: "a.md", w: 7 }] }), {
+      log: rec.log,
+      now: () => at,
+    });
+    await refreshWorkedLedger("/w", d);
+    empty = true;
+    at += 60_000;
+    await refreshWorkedLedger("/w", d);
+    at += WORKED_EMPTY_RELEASE_MS;
+    await refreshWorkedLedger("/w", d);
+    // Two DISTINCT reasons ⇒ two first sightings; one shared key would have
+    // reported the drop at `info`, under a line saying the memo was kept.
+    expect(rec.levels).toEqual(["warn", "warn"]);
+  });
+});
+
+describe("the ?refresh=1 escape hatch", () => {
+  /** Poll until `ok()` or the budget runs out — the kick is fire-and-forget, so
+   *  there is nothing to await. */
+  async function until(ok: () => boolean, budgetMs = 2000): Promise<void> {
+    const stop = Date.now() + budgetMs;
+    while (!ok() && Date.now() < stop) await Bun.sleep(10);
+  }
+
+  test("a FORCED index build re-asks a failed upstream; a TTL rebuild does not", async () => {
+    // Driven through the REAL env deps and a real socket, because the wiring is
+    // the whole finding: the module documents a forced kick as the way past the
+    // back-off, and `buildWikiIndex` sent the index TTL on every build, so the
+    // hatch did not exist.
+    const { buildWikiIndex, getWikiIndex } = await import("./store.ts");
+    let hits = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        hits += 1;
+        return new Response("nope", { status: 500 });
+      },
+    });
+    const prev = process.env.CLAUDE_USAGE_URL;
+    const root = await mkdtemp(path.join(tmpdir(), "worked-forced-"));
+    try {
+      process.env.CLAUDE_USAGE_URL = `http://127.0.0.1:${server.port}`;
+      await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
+
+      await buildWikiIndex(root);
+      await until(() => hits >= 1);
+      expect(hits).toBe(1);
+
+      // Inside the TTL, with the failure backed off: asks nothing.
+      await buildWikiIndex(root);
+      await Bun.sleep(50);
+      expect(hits).toBe(1);
+
+      // `?refresh=1` — the operator saying "ask again now".
+      await buildWikiIndex(root, { forced: true });
+      await until(() => hits >= 2);
+      expect(hits).toBe(2);
+
+      // …and through the caller the route actually uses.
+      await getWikiIndex({ root, refresh: true });
+      await until(() => hits >= 3);
+      expect(hits).toBe(3);
+    } finally {
+      server.stop(true);
+      if (prev === undefined) delete process.env.CLAUDE_USAGE_URL;
+      else process.env.CLAUDE_USAGE_URL = prev;
       await rm(root, { recursive: true, force: true });
     }
   });

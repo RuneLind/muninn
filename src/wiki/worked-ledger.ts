@@ -49,6 +49,8 @@ import { normalizeRelPath } from "./rel-path.ts";
 
 const log = getLog("wiki", "worked-ledger");
 
+type Logger = ReturnType<typeof getLog>;
+
 /** What one refreshed root holds. `pages` is keyed on the NORMALIZED
  *  wiki-relative path (`normalizeWorkedPath`), so the store looks a page up with
  *  the same spelling it stores its own relPath in. */
@@ -84,6 +86,19 @@ export interface WorkedLedgerDeps {
    *  every index build. */
   urlConfigured: boolean;
   baseUrl: string;
+  /** Where the degrades go. Defaults to this module's own logger; injected by
+   *  tests, because an UNCONFIGURED logger is a silent no-op under `bun test`
+   *  and the warn-once level is the only observable a warn has. */
+  log?: Logger;
+  /** The clock every TTL, back-off and empty-release window is measured on.
+   *  Defaults to `Date.now`; injected by tests, since the release window is an
+   *  hour and no suite may wait one. */
+  now?: () => number;
+}
+
+/** This module's own clock read, or the caller's injected one. */
+function nowOf(deps: WorkedLedgerDeps): number {
+  return (deps.now ?? Date.now)();
 }
 
 export function defaultWorkedLedgerDeps(
@@ -233,6 +248,32 @@ const inFlight = new Map<string, Promise<WorkedLedgerMemo | null>>();
  * still retries at once.
  */
 const lastFailureAt = new Map<string, number>();
+/**
+ * When a root last answered with ROWS — the start of the empty-release window
+ * below. Set on every committed non-empty answer; read only while empties are
+ * arriving over a memo that still holds pages.
+ */
+const lastNonEmptyAt = new Map<string, number>();
+
+/**
+ * How long a run of SUCCESSFUL zero-row answers is kept out of the memo before
+ * it is believed.
+ *
+ * A 200 carrying no rows for a root the memo holds pages for is usually a
+ * transient upstream state, so it is refused — that is the rule this module
+ * shipped with. But "refused forever" has two costs a wiki that legitimately
+ * went N → 0 pays for good: every session under the root later discounted, or
+ * the root renamed upstream, and the reader keeps seeing dates for writes the
+ * ledger no longer claims — while the memo's `fetchedAt` never advances, so the
+ * TTL gate never holds and the root is re-asked on EVERY index build (the
+ * back-off, defeated through the empty path).
+ *
+ * One hour: long enough that a restart, a reindex or a brief mis-configuration
+ * upstream passes without blanking the axis, short enough that a real removal
+ * shows up the same working session. Both halves are stated because the warn
+ * says which one is running.
+ */
+export const WORKED_EMPTY_RELEASE_MS = 60 * 60 * 1000;
 
 /** The warm memo for a root, or null when none has ever landed. */
 export function workedLedgerFor(root: string): WorkedLedgerMemo | null {
@@ -281,7 +322,7 @@ async function runRefresh(
 ): Promise<WorkedLedgerMemo | null> {
   const prev = memos.get(root) ?? null;
   const fail = (): WorkedLedgerMemo | null => {
-    lastFailureAt.set(root, Date.now());
+    lastFailureAt.set(root, nowOf(deps));
     return prev;
   };
   // The spelling that answered last time, else the canonical configured root.
@@ -313,24 +354,47 @@ async function runRefresh(
     }
   }
   lastFailureAt.delete(root);
+  const at = nowOf(deps);
+  if (parsed.pages.size > 0) lastNonEmptyAt.set(root, at);
   // A SUCCESSFUL zero-row answer must not replace a memo that holds pages. It is
   // a 200, so nothing warned, and the axis would simply go blank — the option
   // hides and no line says why. Committed only when there is no non-empty memo
   // to keep, which is what still lets a genuinely un-worked wiki report
   // `matched: 0` on its first refresh.
+  //
+  // …but HELD, not held forever: once the empties have persisted for
+  // `WORKED_EMPTY_RELEASE_MS` the answer is believed and the memo is cleared,
+  // because a wiki that really went N → 0 would otherwise show stale dates for
+  // the life of the process. `fetchedAt` advances on EVERY empty answer, kept or
+  // released, or the caller's TTL gate never holds and the root is re-asked on
+  // every index build — the back-off, defeated through this path.
   if (parsed.pages.size === 0 && prev && prev.pages.size > 0) {
+    const since = lastNonEmptyAt.get(root) ?? prev.fetchedAt;
+    if (at - since < WORKED_EMPTY_RELEASE_MS) {
+      warnDegraded(
+        deps,
+        root,
+        "empty-answer",
+        `upstream answered 0 rows for a root it had ${prev.pages.size} for — keeping the ` +
+          `last good answer for up to ${Math.round(WORKED_EMPTY_RELEASE_MS / 60_000)} min ` +
+          `(${deps.baseUrl})`,
+      );
+      const held: WorkedLedgerMemo = { ...prev, fetchedAt: at };
+      memos.set(root, held);
+      return held;
+    }
     warnDegraded(
       deps,
       root,
-      "empty-answer",
-      `upstream answered 0 rows for a root it had ${prev.pages.size} for — keeping the ` +
-        `last good answer (${deps.baseUrl})`,
+      "empty-released",
+      `upstream has answered 0 rows for over ${Math.round(WORKED_EMPTY_RELEASE_MS / 60_000)} ` +
+        `min for a root it had ${prev.pages.size} for — dropping the worked dates for it ` +
+        `(${deps.baseUrl})`,
     );
-    return prev;
   }
   const memo: WorkedLedgerMemo = {
     pages: parsed.pages,
-    fetchedAt: Date.now(),
+    fetchedAt: at,
     returned: parsed.returned,
     baseUrl: deps.baseUrl,
     rootAsked: asked,
@@ -402,7 +466,7 @@ function warnDegraded(
   error: string,
 ): void {
   claudeUsageWarnOnce({
-    log,
+    log: deps.log ?? log,
     baseUrl: deps.baseUrl,
     key: `${reason}\u0000${root}`,
     error,
@@ -430,9 +494,10 @@ export function kickWorkedLedgerRefresh(
   const memo = memos.get(root);
   const maxAge = opts.maxAgeMs ?? 0;
   if (maxAge > 0) {
-    if (memo && Date.now() - memo.fetchedAt < maxAge) return;
+    const at = nowOf(deps);
+    if (memo && at - memo.fetchedAt < maxAge) return;
     const failedAt = lastFailureAt.get(root);
-    if (failedAt !== undefined && Date.now() - failedAt < maxAge) return;
+    if (failedAt !== undefined && at - failedAt < maxAge) return;
   }
   void refreshWorkedLedger(root, deps).catch(() => {
     // `refreshWorkedLedger` already swallows and warns; this is the belt that
@@ -445,4 +510,5 @@ export function __resetWorkedLedgerForTest(): void {
   memos.clear();
   inFlight.clear();
   lastFailureAt.clear();
+  lastNonEmptyAt.clear();
 }
