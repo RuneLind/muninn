@@ -349,6 +349,26 @@ describe("the index fold", () => {
     }
   });
 
+  test("the coverage DENOMINATOR is the listing, not the pre-drop page set", async () => {
+    const { buildWikiIndex } = await import("./store.ts");
+    const root = await mkdtemp(path.join(tmpdir(), "worked-index-drop-"));
+    try {
+      await mkdir(path.join(root, "a"), { recursive: true });
+      await mkdir(path.join(root, "b"), { recursive: true });
+      await writeFile(path.join(root, "a", "x.md"), "---\ntitle: X\n---\n\nbody\n");
+      // A same-stem `.html` in ANOTHER folder: a real collision, dropped from
+      // the index — so it must not be in the denominator either. Measured on
+      // mimir, counting it read `total: 550` against a 549-row listing.
+      await writeFile(path.join(root, "b", "x.html"), "<title>X</title><p>body</p>");
+      await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "a/x.md", w: 1_700_000_000_000 }] } }));
+      const index = await buildWikiIndex(root);
+      expect(index.workedCoverage).toEqual({ matched: 1, total: index.pages.length, returned: 1 });
+      expect(index.shadowed?.length).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("no memo ⇒ NO coverage field at all — absent is not `matched: 0`", async () => {
     const { buildWikiIndex } = await import("./store.ts");
     const root = await mkdtemp(path.join(tmpdir(), "worked-index-cold-"));

@@ -3167,49 +3167,6 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     }
   }
 
-  // Stamp the WORKED date, beside the git dates and for the same reason it is a
-  // post-pass: the memo is in hand, the pages are built, and nothing here waits on
-  // anything. `workedCoverage` stays undefined when no memo has landed — "the axis
-  // was never answered for this wiki" is a different fact from "it matched
-  // nothing", and the client hides the sort option on the second, not the first.
-  let workedCoverage: WikiIndex["workedCoverage"];
-  const workedMemo = workedLedgerFor(root);
-  if (workedMemo) {
-    let matched = 0;
-    for (const meta of pages) {
-      const w = workedMemo.pages.get(normalizeWorkedPath(meta.relPath));
-      if (w !== undefined) {
-        meta.workedMs = w;
-        matched++;
-      }
-    }
-    workedCoverage = { matched, total: pages.length, returned: workedMemo.returned };
-    if (workedMatchRateLow(matched, workedMemo.returned)) {
-      // Names the base URL for the reason every other claude-usage message does:
-      // the operator's first question about a degraded axis is which service, and
-      // which SPELLING of the root, this instance asked.
-      log.warn(
-        "wiki {root}: the worked ledger at {baseUrl} answered {returned} row(s) for " +
-          "{asked} and only {matched} matched a page — the path spellings have " +
-          'probably stopped lining up, so "Worked on" is mostly empty',
-        {
-          root,
-          baseUrl: workedMemo.baseUrl,
-          returned: workedMemo.returned,
-          asked: workedMemo.rootAsked,
-          matched,
-        },
-      );
-    } else {
-      log.debug("wiki {root}: worked dates — {matched}/{total} pages, {returned} rows", {
-        root,
-        matched,
-        total: pages.length,
-        returned: workedMemo.returned,
-      });
-    }
-  }
-
   // ONE warn per index build, never one per page — a backfill writing these fields
   // across ~145 files at once would otherwise flood the log on every TTL refresh.
   // The offending pages stay browsable with the field simply absent. Counts alone
@@ -3321,6 +3278,56 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // guarantee wanted here is "the same order every build" and that must not depend
   // on the loop direction of the code above it.
   shadowed.sort((a, b) => a.relPath.localeCompare(b.relPath));
+
+  // Stamp the WORKED date — a post-pass like the git dates, for the same reason:
+  // the memo is in hand, the pages are built, and nothing here waits on anything.
+  //
+  // ⚠️ It runs AFTER the same-stem DROP above, unlike the git fold, because it is
+  // the one post-pass that reports a DENOMINATOR. Placed beside the git dates it
+  // counted the pages that drop takes out — measured on mimir, `total` read 550
+  // against a listing of 549 — and a coverage figure that disagrees with the rows
+  // on screen is exactly the kind of number nobody can reconcile later.
+  //
+  // `workedCoverage` stays undefined when no memo has landed: "the axis was never
+  // answered for this wiki" is a different fact from "it matched nothing", and the
+  // client hides the sort option on the second, not the first.
+  let workedCoverage: WikiIndex["workedCoverage"];
+  const workedMemo = workedLedgerFor(root);
+  if (workedMemo) {
+    let matched = 0;
+    for (const meta of pages) {
+      const w = workedMemo.pages.get(normalizeWorkedPath(meta.relPath));
+      if (w !== undefined) {
+        meta.workedMs = w;
+        matched++;
+      }
+    }
+    workedCoverage = { matched, total: pages.length, returned: workedMemo.returned };
+    if (workedMatchRateLow(matched, workedMemo.returned)) {
+      // Names the base URL for the reason every other claude-usage message does:
+      // the operator's first question about a degraded axis is which service, and
+      // which SPELLING of the root, this instance asked.
+      log.warn(
+        "wiki {root}: the worked ledger at {baseUrl} answered {returned} row(s) for " +
+          "{asked} and only {matched} matched a page — the path spellings have " +
+          'probably stopped lining up, so "Worked on" is mostly empty',
+        {
+          root,
+          baseUrl: workedMemo.baseUrl,
+          returned: workedMemo.returned,
+          asked: workedMemo.rootAsked,
+          matched,
+        },
+      );
+    } else {
+      log.debug("wiki {root}: worked dates — {matched}/{total} pages, {returned} rows", {
+        root,
+        matched,
+        total: pages.length,
+        returned: workedMemo.returned,
+      });
+    }
+  }
 
   // FOLD the attachments — before the display-title pass and the registration
   // below, both of which read the result (`stemCounts` skips a rule-1 child, and
