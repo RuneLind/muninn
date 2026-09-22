@@ -612,9 +612,9 @@ async function seededWiki(
 test("a page whose NAME carries a space keeps its mtime after a prose edit", async () => {
   // `git diff` appends a TAB to `+++ b/<path>` for a name with a space, so the
   // parser's verdict landed under `<path>\t` and the page read as "no verdict" —
-  // which the old rule dropped. Measured on a clone of the real jarvis wiki
-  // (1290 pages, 1180 of them space-named): a prose edit on every page left 110
-  // dirty instead of 1290.
+  // which the old rule dropped. Measured 2026-09-22 on a clone of the real jarvis
+  // wiki: a prose edit on all 1323 markdown pages left 110 of them dirty, and the
+  // 1213 it dropped are exactly the 1213 whose path contains a space.
   const { rm } = await import("node:fs/promises");
   const { wiki, dir, write } = await seededWiki({
     "Mac mini headless setup.md": page("Spaced", "alpha", "Original prose."),
