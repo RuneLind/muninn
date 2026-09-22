@@ -145,7 +145,9 @@ import {
   formatRailAge,
   parseActivityWeights,
   rankActivity,
+  workedGateFor,
   type ActivityWeights,
+  type WorkedGate,
 } from "./wiki-activity-rank.ts";
 import { purgeRecentsKeys, readFolds, readPins, toggleFolded, togglePinned } from "./wiki-recents-store.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
@@ -327,6 +329,11 @@ let defaultType = "";
  *  defaults until a payload lands, and after one that carries no such field —
  *  an older server must render the section, not lose it. */
 let activityWeights: ActivityWeights = DEFAULT_ACTIVITY_WEIGHTS;
+
+/** Whether Activity may substitute this wiki's worked-on dates — measured once
+ *  per payload in `setPagesData` over the FULL listing, so a facet cannot open
+ *  or shut it. `null` until a payload lands, which ranks as closed. */
+let workedGate: WorkedGate | null = null;
 
 /**
  * The wiki's project → page-count map from `/api/wiki/pages`. `{}` for a wiki
@@ -1167,7 +1174,7 @@ function renderList(): void {
     // date cannot disagree with the score that placed it. Skipped entirely under
     // a query, where `buildRail` renders no sections and would throw the ranking
     // away — that is a scan of every page on every keystroke.
-    activity: railSectionsVisible(filters) ? rankActivity(rows, activityWeights, now) : [],
+    activity: railSectionsVisible(filters) ? rankActivity(rows, activityWeights, now, workedGate) : [],
     groups,
     seriesGroups,
     openFolds,
@@ -1305,7 +1312,9 @@ function renderList(): void {
     const signal: "added" | "updated" | "worked" | null = entry.activity
       ? entry.activity.kind === "new"
         ? "added"
-        : "updated"
+        : entry.activity.worked
+          ? "worked"
+          : "updated"
       : mode === "backlinks"
         ? null
         : // `isRecencySort` is a TYPE PREDICATE, so the mode goes straight to the
@@ -6325,6 +6334,9 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   if (data.activity && typeof data.activity === "object") {
     activityWeights = parseActivityWeights(data.activity).weights;
   }
+  // After the weights (it reads `workedGate`) and after `scannedAtMs` (so
+  // `recencyNow()` is anchored).
+  workedGate = workedGateFor(data.pages, activityWeights, recencyNow());
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one
   // would admit a project the listing on screen no longer has. An older server /

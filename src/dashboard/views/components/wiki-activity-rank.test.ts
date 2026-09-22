@@ -16,7 +16,9 @@ import {
   parseActivityWeights,
   RAIL_AGE_MAX_DAYS,
   rankActivity,
+  workedGateFor,
   type ActivityWeights,
+  type WorkedGate,
 } from "./wiki-activity-rank.ts";
 import { localDay, type WikiListing } from "./wiki-filter.ts";
 
@@ -77,6 +79,8 @@ function page(over: {
    *  rather than a derived local day, so it is the only way to build the page
    *  whose date the rail may not re-derive. */
   createdFm?: string;
+  /** `workedMs` — the day a session last wrote the page (claude-usage's ledger). */
+  workedDaysAgo?: number;
 }): WikiListing {
   const created = over.createdDaysAgo;
   const updated = over.updatedDaysAgo === null ? undefined : (over.updatedDaysAgo ?? over.createdDaysAgo);
@@ -96,6 +100,7 @@ function page(over: {
     ...(updated === undefined ? {} : { gitTouchedMs: ago(updated) }),
     ...(over.birthtimeDaysAgo === undefined ? {} : { birthtimeMs: ago(over.birthtimeDaysAgo) }),
     ...(over.mtimeDaysAgo === undefined ? {} : { mtimeMs: ago(over.mtimeDaysAgo) }),
+    ...(over.workedDaysAgo === undefined ? {} : { workedMs: ago(over.workedDaysAgo) }),
   } as WikiListing;
 }
 
@@ -571,6 +576,7 @@ describe("parseActivityWeights", () => {
       ["halfLifeNewDays", 0],
       ["halfLifeChangedDays", 400],
       ["rows", "4"],
+      ["workedGate", 101],
     ];
     for (const [key, value] of bad) {
       // `halfLifeNewDays` is the neighbour in every case, because no entry of
@@ -645,5 +651,243 @@ describe("parseActivityWeights", () => {
     expect(relOrder([hub, leaf])).toEqual(["leaf.md", "hub.md"]);
     const off = parseActivityWeights({ hubPenalty: 0, rows: 12 }).weights;
     expect(relOrder([hub, leaf], off)).toEqual(["hub.md", "leaf.md"]);
+  });
+});
+
+/** A gate verdict by hand, for cases about what an open or closed gate DOES
+ *  rather than about how one is measured. */
+const OPEN: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1 };
+const CLOSED: WorkedGate = { open: false, candidates: 1, covered: 0, coverage: 0 };
+
+describe("rankActivity — worked-on substitution", () => {
+  test("a worked date OLDER than the update stamp demotes the page", () => {
+    // The sweep shape: git says 12h ago, the last session wrote it 5 days ago.
+    const swept = page({ relPath: "a-swept.md", createdDaysAgo: 40, updatedDaysAgo: 0.5, workedDaysAgo: 5 });
+    const real = page({ relPath: "b-real.md", createdDaysAgo: 40, updatedDaysAgo: 2 });
+    expect(rankActivity([swept, real], wide, NOW, CLOSED).map((r) => r.page.relPath)).toEqual([
+      "a-swept.md",
+      "b-real.md",
+    ]);
+    const rows = rankActivity([swept, real], wide, NOW, OPEN);
+    expect(rows.map((r) => r.page.relPath)).toEqual(["b-real.md", "a-swept.md"]);
+    const demoted = rows[1]!;
+    expect(demoted.kind).toBe("changed");
+    expect(demoted.worked).toBe(true);
+    expect(demoted.why).toStartWith("worked on 5d ago, created 40d ago: ");
+    expect(demoted.ageMs).toBe(5 * DAY);
+  });
+
+  test("a worked date NEWER than the update stamp promotes the page", () => {
+    const stale = page({ relPath: "a-stale.md", createdDaysAgo: 40, updatedDaysAgo: 6, workedDaysAgo: 0.5 });
+    const real = page({ relPath: "b-real.md", createdDaysAgo: 40, updatedDaysAgo: 2 });
+    expect(relOrder([stale, real])).toEqual(["b-real.md", "a-stale.md"]);
+    expect(rankActivity([stale, real], wide, NOW, OPEN).map((r) => r.page.relPath)).toEqual([
+      "a-stale.md",
+      "b-real.md",
+    ]);
+  });
+
+  test("an `added`-floor page gains a change term: a ledger write is a known edit", () => {
+    // No touch date: the update signal is the git floor, kind `added`, so today
+    // the page has no change term and its 30-day-old creation is under the floor.
+    const floor = page({ relPath: "concepts/floor.md", createdDaysAgo: 30, updatedDaysAgo: null, workedDaysAgo: 0.5 });
+    expect(rankActivity([floor], wide, NOW, CLOSED)).toEqual([]);
+    const rows = rankActivity([floor], wide, NOW, OPEN);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.kind).toBe("changed");
+    expect(rows[0]!.worked).toBe(true);
+    expect(rows[0]!.why).toStartWith("worked on 12h ago, ");
+  });
+
+  test("a worked date within a day of creation mints no change — the creating session", () => {
+    // The live mimir shape: a session wrote the page on day 1 and a sweep bumped
+    // git yesterday. The change term disappears and the row reads as new.
+    const p = page({ relPath: "plans/p.mdx", createdDaysAgo: 5, updatedDaysAgo: 1, workedDaysAgo: 4.9 });
+    expect(rankActivity([p], wide, NOW, CLOSED)[0]!.kind).toBe("changed");
+    const row = rankActivity([p], wide, NOW, OPEN)[0]!;
+    expect(row.kind).toBe("new");
+    expect(row.worked).toBeUndefined();
+    expect(row.why).toStartWith("created 5d ago");
+  });
+
+  test("an uncovered page ranks exactly as it did", () => {
+    const uncovered = page({ relPath: "u.md", createdDaysAgo: 40, updatedDaysAgo: 0.5 });
+    expect(rankActivity([uncovered], wide, NOW, OPEN)).toEqual(rankActivity([uncovered], wide, NOW, CLOSED));
+    expect("worked" in rankActivity([uncovered], wide, NOW, OPEN)[0]!).toBe(false);
+  });
+
+  test("an implausibly FUTURE worked stamp is ignored, like every other date signal", () => {
+    const p = page({ relPath: "f.md", createdDaysAgo: 40, updatedDaysAgo: 4, workedDaysAgo: -5 });
+    expect(rankActivity([p], wide, NOW, OPEN)).toEqual(rankActivity([p], wide, NOW, CLOSED));
+  });
+});
+
+/**
+ * Pinned against output of the implementation BEFORE the gate existed (45f8bff7):
+ * this fixture run through that file's `rankActivity` at default weights, rows 20,
+ * serialised. Every page but three carries a `workedMs`, so a closed gate that
+ * leaked the field anywhere — a score, a `why`, a key — fails here.
+ */
+describe("rankActivity — a closed gate is the pre-gate ranking, byte for byte", () => {
+  const specs: Parameters<typeof page>[0][] = [
+    { relPath: "new/fresh.md", createdDaysAgo: 0.5, workedDaysAgo: 0.5 },
+    { relPath: "new/older.md", createdDaysAgo: 9 },
+    { relPath: "changed/leaf.md", createdDaysAgo: 40, updatedDaysAgo: 0.5, workedDaysAgo: 6 },
+    { relPath: "changed/hub.md", createdDaysAgo: 40, updatedDaysAgo: 1, backlinkCount: 25, workedDaysAgo: 0.25 },
+    { relPath: "changed/old.md", createdDaysAgo: 80, updatedDaysAgo: 2 },
+    { relPath: "plans/live.mdx", createdDaysAgo: 20, updatedDaysAgo: 3, type: "plan", plan_status: "in-flight", workedDaysAgo: 12 },
+    { relPath: "plans/done.mdx", createdDaysAgo: 20, updatedDaysAgo: 3, type: "plan", plan_status: "shipped" },
+    { relPath: "blogs/post.mdx", createdDaysAgo: 15, updatedDaysAgo: 2, type: "blog", workedDaysAgo: 2 },
+    { relPath: "concepts/swept.md", createdDaysAgo: 5, updatedDaysAgo: null, birthtimeDaysAgo: 20, workedDaysAgo: 1 },
+    { relPath: "concepts/floor-old.md", createdDaysAgo: 30, updatedDaysAgo: null, workedDaysAgo: 0.5 },
+    { relPath: "notes/only-mtime.md", mtimeDaysAgo: 1 / 24, workedDaysAgo: 3 },
+    { relPath: "notes/authored.md", createdDaysAgo: 12, updatedDaysAgo: 1.5, createdFm: "2026-08-20" },
+    { relPath: "notes/future-worked.md", createdDaysAgo: 30, updatedDaysAgo: 4, workedDaysAgo: -5 },
+    { relPath: "notes/same-session.md", createdDaysAgo: 6, updatedDaysAgo: 0.5, workedDaysAgo: 5.8 },
+    { relPath: "notes/dormant.md", createdDaysAgo: 60, updatedDaysAgo: 30, workedDaysAgo: 0.5 },
+    { relPath: "log.md", createdDaysAgo: 90, updatedDaysAgo: 0.01, workedDaysAgo: 0.01 },
+    { relPath: "nothing.md" },
+  ];
+  const BASELINE = [
+    { relPath: "new/fresh.md", kind: "new", score: 0.9330329915368074, why: "created 12h ago → 0.93", ageMs: 43200000 },
+    { relPath: "notes/only-mtime.md", kind: "changed", score: 0.6932934032267783, why: "changed 1h ago, created ?: weight ×0.70, recency 0.99, age ×1.00, hub ×1.00 (0←), type ×1.00 → 0.69", ageMs: 3600000 },
+    { relPath: "notes/same-session.md", kind: "changed", score: 0.556811698837712, why: "changed 12h ago, created 6d ago: weight ×0.70, recency 0.89, age ×0.89, hub ×1.00 (0←), type ×1.00 → 0.56", ageMs: 43200000 },
+    { relPath: "plans/live.mdx", kind: "changed", score: 0.4, why: "changed 3d ago, created 20d ago: weight ×0.70, recency 0.50, age ×0.71, hub ×1.00 (0←), type ×1.60 → 0.40", ageMs: 259200000 },
+    { relPath: "blogs/post.mdx", kind: "changed", score: 0.37313046477655853, why: "changed 2d ago, created 15d ago: weight ×0.70, recency 0.63, age ×0.77, hub ×1.00 (0←), type ×1.10 → 0.37", ageMs: 172800000 },
+    { relPath: "changed/leaf.md", kind: "changed", score: 0.34646061261013195, why: "changed 12h ago, created 40d ago: weight ×0.70, recency 0.89, age ×0.56, hub ×1.00 (0←), type ×1.00 → 0.35", ageMs: 43200000 },
+    { relPath: "notes/authored.md", kind: "changed", score: 0.3367175148507369, why: "changed 2d ago, created 24d ago: weight ×0.70, recency 0.71, age ×0.68, hub ×1.00 (0←), type ×1.00 → 0.34", ageMs: 129600000 },
+    { relPath: "plans/done.mdx", kind: "changed", score: 0.325, why: "changed 3d ago, created 20d ago: weight ×0.70, recency 0.50, age ×0.71, hub ×1.00 (0←), type ×1.30 → 0.33", ageMs: 259200000 },
+    { relPath: "new/older.md", kind: "new", score: 0.2871745887492587, why: "created 9d ago → 0.29", ageMs: 777600000 },
+    { relPath: "notes/future-worked.md", kind: "changed", score: 0.17362199005902185, why: "changed 4d ago, created 30d ago: weight ×0.70, recency 0.40, age ×0.63, hub ×1.00 (0←), type ×1.00 → 0.17", ageMs: 345600000 },
+    { relPath: "changed/old.md", kind: "changed", score: 0.16960475671661757, why: "changed 2d ago, created 80d ago: weight ×0.70, recency 0.63, age ×0.38, hub ×1.00 (0←), type ×1.00 → 0.17", ageMs: 172800000 },
+    { relPath: "changed/hub.md", kind: "changed", score: 0.07716532891512082, why: "changed 1d ago, created 40d ago: weight ×0.70, recency 0.79, age ×0.56, hub ×0.25 (25←), type ×1.00 → 0.08", ageMs: 86400000 },
+    { relPath: "concepts/swept.md", kind: "new", score: 0.0625, why: "created 20d ago → 0.06", ageMs: 1728000000 },
+  ];
+  // JSON, not `toEqual`: `toEqual` ignores a key whose value is undefined, and
+  // key order is part of "byte for byte".
+  const serialise = (rows: ReturnType<typeof rankActivity>): string =>
+    JSON.stringify(rows.map(({ page: p, ...r }) => ({ relPath: p.relPath, ...r })));
+  const pages = specs.map(page);
+
+  test("no gate, a null gate, and a closed gate all reproduce the baseline", () => {
+    for (const gate of [undefined, null, CLOSED]) {
+      expect(serialise(rankActivity(pages, wide, NOW, gate))).toBe(JSON.stringify(BASELINE));
+    }
+  });
+
+  test("…and so does this fixture's own gate at 100, which it cannot meet", () => {
+    const w = { ...wide, workedGate: 100 };
+    const gate = workedGateFor(pages, w, NOW);
+    expect(gate.open).toBe(false);
+    expect(serialise(rankActivity(pages, w, NOW, gate))).toBe(JSON.stringify(BASELINE));
+  });
+
+  test("the same fixture with the gate OPEN does move — the pair cannot pass vacuously", () => {
+    expect(serialise(rankActivity(pages, wide, NOW, OPEN))).not.toBe(JSON.stringify(BASELINE));
+  });
+});
+
+describe("workedGateFor — the coverage gate", () => {
+  /** `n` changed candidates, the first `covered` of them with a worked date. */
+  const listing = (n: number, covered: number): WikiListing[] =>
+    Array.from({ length: n }, (_, i) =>
+      page({
+        relPath: `p${i}.md`,
+        createdDaysAgo: 40,
+        updatedDaysAgo: 1,
+        ...(i < covered ? { workedDaysAgo: 2 } : {}),
+      }),
+    );
+  const at = (workedGate: number, n: number, covered: number): WorkedGate =>
+    workedGateFor(listing(n, covered), { ...wide, workedGate }, NOW);
+
+  test("the default is 60", () => {
+    expect(DEFAULT_ACTIVITY_WEIGHTS.workedGate).toBe(60);
+  });
+
+  test("the boundary is inclusive and exact: 3 of 5 is 60%", () => {
+    expect(at(60, 5, 3)).toEqual({ open: true, candidates: 5, covered: 3, coverage: 0.6 });
+    expect(at(61, 5, 3).open).toBe(false);
+    expect(at(60, 5, 2).open).toBe(false);
+  });
+
+  test("0 opens wherever anything could substitute; 100 needs every candidate covered", () => {
+    expect(at(0, 5, 0).open).toBe(true);
+    expect(at(0, 0, 0).open).toBe(true);
+    expect(at(100, 5, 4).open).toBe(false);
+    expect(at(100, 5, 5).open).toBe(true);
+  });
+
+  test("no candidates is coverage 0, closed at any gate above 0", () => {
+    expect(at(1, 0, 0)).toEqual({ open: false, candidates: 0, covered: 0, coverage: 0 });
+  });
+
+  test("monotone across the whole range", () => {
+    for (const [n, covered] of [[5, 3], [7, 2], [3, 3], [4, 0]] as const) {
+      let wasOpen = true;
+      for (let g = 0; g <= 100; g++) {
+        const open = at(g, n, covered).open;
+        // Once shut, a higher gate never re-opens.
+        if (!wasOpen) expect(open).toBe(false);
+        wasOpen = open;
+      }
+    }
+  });
+
+  test("the denominator is the RANKED candidates — not meta pages, not rows under the floor", () => {
+    const pages = [
+      ...listing(2, 1),
+      page({ relPath: "log.md", createdDaysAgo: 40, updatedDaysAgo: 0.1 }),
+      page({ relPath: "dormant.md", createdDaysAgo: 200, updatedDaysAgo: 100, workedDaysAgo: 100 }),
+    ];
+    expect(workedGateFor(pages, wide, NOW)).toMatchObject({ candidates: 2, covered: 1 });
+  });
+
+  test("candidates are counted with substitution OFF", () => {
+    // Under the floor today; substitution would lift it in. It must not count
+    // itself into the denominator that decides whether it gets lifted.
+    const floor = page({ relPath: "floor.md", createdDaysAgo: 30, updatedDaysAgo: null, workedDaysAgo: 0.5 });
+    expect(workedGateFor([...listing(2, 0), floor], wide, NOW)).toMatchObject({ candidates: 2, covered: 0 });
+  });
+
+  test("reads `workedMs` itself — an uncovered page does not count as covered", () => {
+    // `workedSignal` falls back to the update signal; read through it, this
+    // listing would measure 100%.
+    expect(at(60, 4, 0).covered).toBe(0);
+  });
+
+  test("measured over the full listing, the verdict holds on any filtered subset", () => {
+    // The facet the reader picked holds one covered page of three (33%), under
+    // the gate on its own; the wiki as a whole is at 75%.
+    const facet = listing(3, 1).map((p) => ({ ...p, relPath: "facet/" + p.relPath }));
+    const rest = listing(9, 8);
+    const gate = workedGateFor([...facet, ...rest], wide, NOW);
+    expect(gate.open).toBe(true);
+    expect(workedGateFor(facet, wide, NOW).open).toBe(false);
+    const rows = rankActivity(facet, wide, NOW, gate);
+    expect(rows.filter((r) => r.worked).map((r) => r.page.relPath)).toEqual(["facet/p0.md"]);
+  });
+});
+
+describe("parseActivityWeights — workedGate", () => {
+  test("an in-range value is kept, both ends included", () => {
+    for (const v of [0, 45, 100]) {
+      expect(parseActivityWeights({ workedGate: v })).toEqual({
+        weights: { ...DEFAULT_ACTIVITY_WEIGHTS, workedGate: v },
+        warnings: [],
+      });
+    }
+  });
+
+  test("out of range or the wrong type ⇒ the default, with its sibling knobs' warnings", () => {
+    expect(parseActivityWeights({ workedGate: 101 })).toEqual({
+      weights: DEFAULT_ACTIVITY_WEIGHTS,
+      warnings: [{ key: "activity.workedGate", reason: "is outside 0–100 — ignoring it" }],
+    });
+    expect(parseActivityWeights({ workedGate: -1 }).weights.workedGate).toBe(60);
+    expect(parseActivityWeights({ workedGate: "60" })).toEqual({
+      weights: DEFAULT_ACTIVITY_WEIGHTS,
+      warnings: [{ key: "activity.workedGate", reason: "is not a finite number — ignoring it" }],
+    });
   });
 });
