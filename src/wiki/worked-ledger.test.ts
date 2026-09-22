@@ -716,7 +716,7 @@ describe("the degrade warns", () => {
   });
 });
 
-describe("the ?refresh=1 escape hatch", () => {
+describe("no index build waives the ledger's back-off", () => {
   /** Poll until `ok()` or the budget runs out — the kick is fire-and-forget, so
    *  there is nothing to await. */
   async function until(ok: () => boolean, budgetMs = 2000): Promise<void> {
@@ -724,11 +724,14 @@ describe("the ?refresh=1 escape hatch", () => {
     while (!ok() && Date.now() < stop) await Bun.sleep(10);
   }
 
-  test("a FORCED index build re-asks a failed upstream; a TTL rebuild does not", async () => {
+  test("a failed upstream is re-asked by TIME alone — not by ?refresh=1, not by a write's refresh", async () => {
     // Driven through the REAL env deps and a real socket, because the wiring is
-    // the whole finding: the module documents a forced kick as the way past the
-    // back-off, and `buildWikiIndex` sent the index TTL on every build, so the
-    // hatch did not exist.
+    // the whole finding. Three fix rounds tried to give `?refresh=1` a hatch past
+    // the back-off; each time it leaked — onto every programmatic write, then
+    // onto the browser's own focus refetch, which also sends `?refresh=1`. The
+    // server cannot tell those apart, so the hatch is gone: the negative half
+    // below is the pin, and it polls for the WHOLE budget rather than sleeping,
+    // so a re-coupling cannot pass on a slow runner.
     const { buildWikiIndex, getWikiIndex } = await import("./store.ts");
     let hits = 0;
     const server = Bun.serve({
@@ -739,7 +742,7 @@ describe("the ?refresh=1 escape hatch", () => {
       },
     });
     const prev = process.env.CLAUDE_USAGE_URL;
-    const root = await mkdtemp(path.join(tmpdir(), "worked-forced-"));
+    const root = await mkdtemp(path.join(tmpdir(), "worked-nohatch-"));
     try {
       process.env.CLAUDE_USAGE_URL = `http://127.0.0.1:${server.port}`;
       await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
@@ -748,27 +751,14 @@ describe("the ?refresh=1 escape hatch", () => {
       await until(() => hits >= 1);
       expect(hits).toBe(1);
 
-      // Inside the TTL, with the failure backed off: asks nothing.
+      // Inside the TTL, with the failure backed off: a plain rebuild, a write's
+      // `refresh: true` and the browser's `?refresh=1` (the same call) all ask
+      // nothing. Poll the full window for a second hit that must never come.
       await buildWikiIndex(root);
-      await Bun.sleep(50);
-      expect(hits).toBe(1);
-
-      // `?refresh=1` — the operator saying "ask again now".
-      await buildWikiIndex(root, { forced: true });
-      await until(() => hits >= 2);
-      expect(hits).toBe(2);
-
-      // A programmatic `refresh: true` — what every page write passes after it
-      // lands — is NOT the hatch: it busts the index TTL and leaves the ledger's
-      // back-off in force, or a gardener drain would re-ask upstream per page.
       await getWikiIndex({ root, refresh: true });
-      await Bun.sleep(50);
-      expect(hits).toBe(2);
-
-      // …the operator's `?refresh=1` is, through the caller the route uses.
-      await getWikiIndex({ root, refresh: true, forceLedger: true });
-      await until(() => hits >= 3);
-      expect(hits).toBe(3);
+      await getWikiIndex({ root, refresh: true });
+      await until(() => hits >= 2, 500);
+      expect(hits).toBe(1);
     } finally {
       server.stop(true);
       if (prev === undefined) delete process.env.CLAUDE_USAGE_URL;

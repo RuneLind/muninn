@@ -244,8 +244,10 @@ const inFlight = new Map<string, Promise<WorkedLedgerMemo | null>>();
  * measured against the laptop's own un-upgraded claude-usage, the raw row form
  * (~800 KB) was re-fetched and re-rejected once per build, forever. A failure is
  * worth re-testing on the same cadence a good answer goes stale on, which is the
- * caller's `maxAgeMs`; a forced kick (`maxAgeMs` 0) ignores it, so `?refresh=1`
- * still retries at once.
+ * caller's `maxAgeMs`. Nothing on the HTTP surface waives it: `?refresh=1` is
+ * also the browser's own focus refetch, so a hatch keyed on it re-asked a dead
+ * service every 30 s per open tab. Boot passes 0 (a process restart is the one
+ * deliberate "ask again now"); every index build passes the index TTL.
  */
 const lastFailureAt = new Map<string, number>();
 /**
@@ -369,8 +371,8 @@ async function runRefresh(
   // released, or the caller's TTL gate never holds and the root is re-asked on
   // every index build — the back-off, defeated through this path.
   if (parsed.pages.size === 0 && prev && prev.pages.size > 0) {
-    // `lastNonEmptyAt` is set at every non-empty commit and cleared with the
-    // memo, so with `prev.pages.size > 0` it is always present; the fallback is
+    // `lastNonEmptyAt` is set at every non-empty commit and reset only with the
+    // whole memo map, so with `prev.pages.size > 0` it is always present; the fallback is
     // "release now" rather than `prev.fetchedAt`, which a held empty answer
     // advances and would therefore never let the window elapse.
     const since = lastNonEmptyAt.get(root) ?? 0;

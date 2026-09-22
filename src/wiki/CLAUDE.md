@@ -1139,11 +1139,13 @@ wrong from outside:
   spelling that ANSWERED is asked first on every later refresh.
 - **A degraded upstream is backed off** on the caller's own TTL, so a service
   that is down or un-upgraded is re-tested once per TTL rather than on every
-  index rebuild — and a FORCED build (`getWikiIndex({forceLedger: true})`, set
-  only by the `?refresh=1` handlers, never by a write's own `refresh: true`)
-  passes `maxAgeMs: 0`, which waives both that back-off and the
-  memo's own TTL. `buildWikiIndex`'s `forced` option is the whole of that
-  escape hatch; without it the promise in this module's docblock was inert.
+  index rebuild. Nothing on the HTTP surface waives it, `?refresh=1` included:
+  the server cannot tell an operator's typed refresh from the browser's own
+  focus refetch (every tab focus, 30 s throttle, per tab) or the series editor's
+  post-write refetch, so a hatch keyed on it re-asked a dead service from a hot
+  path — measured through three fix rounds before the hatch was removed. The
+  release is time alone (one index TTL); a process restart is the deliberate
+  "ask again now", since boot kicks with no age gate.
 - **The boot kick is gated on the serving profile**: under `MUNINN_PROFILE=nais`
   the `wiki` route group is dropped, so there is no reader to warm the axis for
   and nothing is fetched.

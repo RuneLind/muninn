@@ -2883,17 +2883,6 @@ export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): v
  */
 export async function buildWikiIndex(
   root: string,
-  opts?: {
-    /**
-     * Did the CALLER force this build (`getWikiIndex({refresh: true})`, i.e.
-     * `?refresh=1`)? It is passed through to the worked-ledger kick and to
-     * nothing else: a forced build is the operator saying "ask again now", so
-     * the ledger's TTL gate and its degraded-upstream back-off are both waived
-     * for it. Without it every kick carried the index TTL and the escape hatch
-     * this module's own docblock promises did not exist.
-     */
-    forced?: boolean;
-  },
 ): Promise<WikiIndex> {
   // Per-wiki reader config — read once per build (inherits the index TTL). It is
   // read BEFORE the scan, not after, because `include` scopes the scan itself;
@@ -3026,11 +3015,13 @@ export async function buildWikiIndex(
   // is the stated price of never putting a tailnet service on a page load's
   // critical path (`src/wiki/worked-ledger.ts`). Server boot kicks it too, so the
   // cold window is the first index build rather than the first reader.
-  // A FORCED build — `getWikiIndex({forceLedger: true})`, set only by the
-  // `?refresh=1` handlers, never by a write's own `refresh: true` — passes 0,
-  // which waives both the memo's TTL gate and the degraded-upstream back-off:
-  // the escape hatch `worked-ledger.ts` documents.
-  kickWorkedLedgerRefresh(root, { maxAgeMs: opts?.forced ? 0 : CACHE_TTL_MS });
+  // NO build waives the memo's TTL gate or the degraded-upstream back-off — not
+  // `?refresh=1` either. The server cannot tell an operator's typed refresh from
+  // the client's own: the browser sends `?refresh=1` on every tab focus (30 s
+  // throttle, per tab) and after every series write, so a hatch keyed on it
+  // re-asked a dead service from a hot path (fix rounds 2–4). The back-off is
+  // released by time alone: one index TTL.
+  kickWorkedLedgerRefresh(root, { maxAgeMs: CACHE_TTL_MS });
 
   const register = (key: string, meta: WikiPageMeta) => {
     const k = key.toLowerCase();
@@ -3578,21 +3569,12 @@ const warnedRoots = new Set<string>();
  * default). Each root is cached and degraded independently — a missing melosys
  * wiki never affects the jarvis cache. Returns null (and warns once per root)
  * when the directory is missing — the caller renders an empty state.
+ *
+ * `refresh` busts the index TTL only. It is what every programmatic write passes
+ * after it lands, and what the browser sends on tab focus, so it never reaches
+ * the worked ledger's TTL gate or back-off (see the kick in `buildWikiIndex`).
  */
-/**
- * `refresh` busts the index TTL and is what every programmatic write passes after
- * it lands (`page-write.ts`, the stamp/series/gardener routes, the sync loop).
- * `forceLedger` is the OPERATOR's `?refresh=1` alone: it also waives the worked
- * ledger's TTL gate and its degraded-upstream back-off. Fix round 2 tied the
- * second to the first, which made every gardener drain, lint Accept and sync run
- * re-ask claude-usage once per page written — the back-off, off for the whole
- * write surface. Only the three `?refresh=1` route handlers set it.
- */
-export async function getWikiIndex(opts?: {
-  root?: string;
-  refresh?: boolean;
-  forceLedger?: boolean;
-}): Promise<WikiIndex | null> {
+export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }): Promise<WikiIndex | null> {
   const root = resolveWikiRoot(opts?.root);
   const cached = caches.get(root);
   if (cached && !opts?.refresh && Date.now() - cached.scannedAt < CACHE_TTL_MS) {
@@ -3614,7 +3596,7 @@ export async function getWikiIndex(opts?: {
   }
 
   const started = Date.now();
-  const index = await buildWikiIndex(root, { forced: opts?.forceLedger === true });
+  const index = await buildWikiIndex(root);
   caches.set(root, index);
   warnedRoots.delete(root);
   log.info("Wiki index built: {pages} pages in {ms}ms from {path}", {
