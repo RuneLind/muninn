@@ -656,8 +656,10 @@ describe("parseActivityWeights", () => {
 
 /** A gate verdict by hand, for cases about what an open or closed gate DOES
  *  rather than about how one is measured. */
-const OPEN: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1, horizonMs: NOW };
-const CLOSED: WorkedGate = { open: false, candidates: 1, covered: 0, coverage: 0, horizonMs: NOW };
+const OPEN: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1, horizonMs: NOW, demotes: true };
+const CLOSED: WorkedGate = { open: false, candidates: 1, covered: 0, coverage: 0, horizonMs: NOW, demotes: true };
+/** The clause a demotion appends, for an update `age` old. */
+const setAsideClause = (age: string): string => `; update ${age}: no session wrote it, or only a bulk pass`;
 
 describe("rankActivity — worked-on substitution", () => {
   test("a worked date OLDER than the update stamp demotes the page", () => {
@@ -809,7 +811,7 @@ describe("workedGateFor — the coverage gate", () => {
   });
 
   test("the boundary is inclusive and exact: 3 of 5 is 60%", () => {
-    expect(at(60, 5, 3)).toEqual({ open: true, candidates: 5, covered: 3, coverage: 0.6 });
+    expect(at(60, 5, 3)).toEqual({ open: true, candidates: 5, covered: 3, coverage: 0.6, demotes: false });
     expect(at(61, 5, 3).open).toBe(false);
     expect(at(60, 5, 2).open).toBe(false);
   });
@@ -832,7 +834,7 @@ describe("workedGateFor — the coverage gate", () => {
   });
 
   test("no candidates is coverage 0, closed at any gate above 0", () => {
-    expect(at(1, 0, 0)).toEqual({ open: false, candidates: 0, covered: 0, coverage: 0 });
+    expect(at(1, 0, 0)).toEqual({ open: false, candidates: 0, covered: 0, coverage: 0, demotes: false });
   });
 
   test("monotone across the whole range", () => {
@@ -964,13 +966,13 @@ describe("rankActivity — an `added`-floor page and the session that brought it
 describe("rankActivity — the discarded update is named", () => {
   test("a demoted change says which update it set aside", () => {
     const p = page({ relPath: "a.md", createdDaysAgo: 40, updatedDaysAgo: 0.5, workedDaysAgo: 5 });
-    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toEndWith("; update 12h ago not a session write");
+    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toEndWith(setAsideClause("12h ago"));
   });
 
   test("…and so does a change the substitution turned into a creation", () => {
     const p = page({ relPath: "plans/p.mdx", createdDaysAgo: 5, updatedDaysAgo: 1, workedDaysAgo: 4.9 });
     expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toMatch(
-      /^created 5d ago → [0-9.]+; update 1d ago not a session write$/,
+      /^created 5d ago → [0-9.]+; update 1d ago: no session wrote it, or only a bulk pass$/,
     );
   });
 
@@ -981,9 +983,18 @@ describe("rankActivity — the discarded update is named", () => {
     expect(rankActivity([p], wide, NOW, OPEN)).toEqual(rankActivity([p], wide, NOW, CLOSED));
   });
 
+  test("an update the same displayed age as the worked date is not named twice", () => {
+    // Both round to "4d": "worked on 4d ago … ; update 4d ago" reads as a contradiction.
+    const p = page({ relPath: "s.md", createdDaysAgo: 40, updatedDaysAgo: 3.9, workedDaysAgo: 4.2 });
+    const row = rankActivity([p], wide, NOW, OPEN)[0]!;
+    expect(row.worked).toBe(true);
+    expect(row.why).toStartWith("worked on 4d ago");
+    expect(row.why).not.toContain("; update ");
+  });
+
   test("a promotion discards nothing and says nothing", () => {
     const p = page({ relPath: "p.md", createdDaysAgo: 40, updatedDaysAgo: 6, workedDaysAgo: 0.5 });
-    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).not.toContain("not a session write");
+    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).not.toContain("; update ");
   });
 });
 
@@ -1004,5 +1015,114 @@ describe("rankActivity — a worked stamp the ranking may not use", () => {
       expect(workedGateFor([p], wide, NOW).covered).toBe(0);
       expect(rankActivity([p], wide, NOW, OPEN)).toEqual(rankActivity([p], wide, NOW, CLOSED));
     }
+  });
+});
+
+describe("rankActivity — every substitution state, enumerated", () => {
+  // update kind × worked vs update × update vs horizon × horizon present/absent/future.
+  // Built through `workedGateFor` at gate 0, so the horizon takes the real path in.
+  type Order = "newer" | "equal" | "older";
+  type Horizon = "after-update" | "before-update" | "absent" | "future";
+  const HORIZONS: Record<Horizon, number | undefined> = {
+    "after-update": ago(1),
+    "before-update": ago(3),
+    absent: undefined,
+    future: NOW + 5 * DAY,
+  };
+  const pageFor = (kind: "updated" | "added", order: Order): WikiListing =>
+    kind === "updated"
+      ? // update 2d ago (a real touch)
+        page({ relPath: "u.md", createdDaysAgo: 40, updatedDaysAgo: 2, workedDaysAgo: { newer: 0.5, equal: 2, older: 5 }[order] })
+      : // the `added` floor, 5d ago (no touch); the creation signal is older still
+        page({
+          relPath: "a.md",
+          createdDaysAgo: 5,
+          updatedDaysAgo: null,
+          birthtimeDaysAgo: 20,
+          workedDaysAgo: { newer: 3, equal: 5, older: 6 }[order],
+        });
+  const expected = (kind: "updated" | "added", order: Order, h: Horizon): boolean =>
+    kind === "added"
+      ? order === "newer" // more than a day past the floor; the horizon plays no part
+      : order !== "older" || h === "after-update"; // only a demotion needs the horizon
+  for (const kind of ["updated", "added"] as const) {
+    for (const order of ["newer", "equal", "older"] as const) {
+      for (const h of Object.keys(HORIZONS) as Horizon[]) {
+        test(`${kind} · worked ${order} · horizon ${h}`, () => {
+          const p = pageFor(kind, order);
+          const gate = workedGateFor([p], { ...wide, workedGate: 0 }, NOW, HORIZONS[h]);
+          expect(gate.open).toBe(true);
+          const rows = rankActivity([p], wide, NOW, gate);
+          expect(rows).toHaveLength(1);
+          expect(rows[0]!.worked === true).toBe(expected(kind, order, h));
+          if (!expected(kind, order, h)) expect(rows).toEqual(rankActivity([p], wide, NOW, CLOSED));
+        });
+      }
+    }
+  }
+});
+
+describe("workedGateFor — the horizon it accepts", () => {
+  const p = page({ relPath: "s.md", createdDaysAgo: 40, updatedDaysAgo: 0.5, workedDaysAgo: 5 });
+  const gateAt = (h: number | undefined) => workedGateFor([p], { ...wide, workedGate: 0 }, NOW, h);
+
+  test("the verdict says whether demotion is on", () => {
+    expect(gateAt(NOW).demotes).toBe(true);
+    expect(gateAt(undefined).demotes).toBe(false);
+    expect(gateAt(NOW + 5 * DAY).demotes).toBe(false);
+  });
+
+  test("a horizon past the skew allowance is refused, one inside it is clamped to now", () => {
+    expect(gateAt(NOW + 5 * DAY).horizonMs).toBeUndefined();
+    expect(gateAt(NOW + DAY).horizonMs).toBe(NOW);
+    // An update stamped 12h ahead (clock skew the date signals accept) is past
+    // a clamped horizon, so it is not demoted.
+    const skewed = page({ relPath: "k.md", createdDaysAgo: 40, updatedDaysAgo: -0.5, workedDaysAgo: 5 });
+    const gate = workedGateFor([skewed], { ...wide, workedGate: 0 }, NOW, NOW + DAY);
+    expect(rankActivity([skewed], wide, NOW, gate)).toEqual(rankActivity([skewed], wide, NOW, CLOSED));
+  });
+});
+
+describe("rankActivity — a day-precision update and the horizon", () => {
+  // `updated: 2026-09-11` parses to that day's UTC midnight, but the edit may
+  // have happened at any time that day.
+  const p = { ...page({ relPath: "d.md", createdDaysAgo: 40, updatedDaysAgo: 30, workedDaysAgo: 5 }), updated: "2026-09-11" };
+  const gateAt = (iso: string) => workedGateFor([p], { ...wide, workedGate: 0 }, NOW, Date.parse(iso));
+
+  test("a horizon inside that day does not demote it", () => {
+    expect(rankActivity([p], wide, NOW, gateAt("2026-09-11T06:00:00Z"))).toEqual(
+      rankActivity([p], wide, NOW, CLOSED),
+    );
+  });
+
+  test("a horizon after that day ends does", () => {
+    expect(rankActivity([p], wide, NOW, gateAt("2026-09-12T00:00:00Z"))[0]!.worked).toBe(true);
+  });
+});
+
+describe("rankActivity — the `added`-floor boundary is strict", () => {
+  // Floor 5d ago; the worked date must land MORE than one day after it.
+  const at = (workedDaysAgo: number) =>
+    rankActivity(
+      [page({ relPath: "b.md", createdDaysAgo: 5, updatedDaysAgo: null, birthtimeDaysAgo: 20, workedDaysAgo })],
+      wide,
+      NOW,
+      OPEN,
+    )[0]!.worked === true;
+
+  test("just under, exactly at and just over one day", () => {
+    expect(at(4.1)).toBe(false);
+    expect(at(4)).toBe(false);
+    expect(at(3.9)).toBe(true);
+  });
+});
+
+describe("workedGateFor — the ledger's extensions are case-sensitive", () => {
+  test("an `.MD` page is not a candidate, as upstream's `substr` test would not return it", () => {
+    const pages = [
+      page({ relPath: "a.md", createdDaysAgo: 40, updatedDaysAgo: 1, workedDaysAgo: 2 }),
+      page({ relPath: "B.MD", createdDaysAgo: 40, updatedDaysAgo: 1 }),
+    ];
+    expect(workedGateFor(pages, wide, NOW)).toMatchObject({ candidates: 1, covered: 1 });
   });
 });

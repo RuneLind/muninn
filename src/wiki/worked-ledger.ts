@@ -72,6 +72,11 @@ export interface WorkedLedgerMemo {
    *  OLDEST-worked pages, so the axis silently shortens — and the match rate
    *  cannot see it, because every row that did arrive still matches. */
   truncated: boolean;
+  /** Upstream's `ingestedThrough`: the instant every configured host has been
+   *  ingested up to (the MIN over hosts). Absent when upstream sent none. The
+   *  Activity rank's demotion horizon — not the newest row, which one host's
+   *  fresh write moves while another host's ingest has stalled. */
+  ingestedThrough?: number;
 }
 
 /** The one call this module makes, injectable so every test drives the real
@@ -171,6 +176,10 @@ export type WorkedPagesParse =
       /** The row cap upstream applied, when it said. Named in the clip warn, so
        *  the operator knows which number to raise. */
       limit?: number;
+      /** `ingestedThrough` when it is a positive finite instant; any other
+       *  value (null, absent, a string) is absent rather than a reject — the
+       *  horizon only switches demotion on. */
+      ingestedThrough?: number;
     }
   | { ok: false; reason: "no-pages-key" | "malformed-rows"; detail: string };
 
@@ -220,13 +229,20 @@ export function parseWorkedPages(body: unknown): WorkedPagesParse {
     const seen = pages.get(key);
     if (seen === undefined || w > seen) pages.set(key, w);
   }
-  const { truncated, limit } = body as { truncated?: unknown; limit?: unknown };
+  const { truncated, limit, ingestedThrough } = body as {
+    truncated?: unknown;
+    limit?: unknown;
+    ingestedThrough?: unknown;
+  };
   return {
     ok: true,
     pages,
     returned: rows.length,
     truncated: truncated === true,
     ...(typeof limit === "number" && Number.isFinite(limit) ? { limit } : {}),
+    ...(typeof ingestedThrough === "number" && Number.isFinite(ingestedThrough) && ingestedThrough > 0
+      ? { ingestedThrough }
+      : {}),
   };
 }
 
@@ -405,6 +421,7 @@ async function runRefresh(
     baseUrl: deps.baseUrl,
     rootAsked: asked,
     truncated: parsed.truncated,
+    ...(parsed.ingestedThrough === undefined ? {} : { ingestedThrough: parsed.ingestedThrough }),
   };
   memos.set(root, memo);
   if (memo.truncated) {

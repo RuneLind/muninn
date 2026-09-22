@@ -21,9 +21,11 @@
  *  - `wsnone` — the ledger knows nothing: the pre-feature ranking, which the
  *    shut wiki must reproduce row for row.
  *  - `wslow` — 2 of 8 covered (25%), but its own `.wiki-reader.json` declares
- *    `workedGate: 20`, so it opens. Its newest ledger row is 1.5 days old, so
- *    alpha's 12h-old update is past the ledger's HORIZON and must not be
- *    demoted to its 8-day-old worked date.
+ *    `workedGate: 20`, so it opens. The ledger vouches for its ingest only up
+ *    to 1.5 days ago (`ingestedThrough`) — even though it carries a row from
+ *    2.4 hours ago, the shape of one host ingesting while another has stalled
+ *    — so alpha's 12h-old update is past the HORIZON and must not be demoted
+ *    to its 8-day-old worked date.
  *
  * No model calls and no writes.
  *
@@ -87,7 +89,16 @@ const WORKED: Record<string, Record<string, number>> = {
   // a leaking gate would lift them to the top here. 2/8.
   [SHUT_WIKI]: { "notes/charlie.md": 0.25, "facet/foxtrot.md": 0.75 },
   [NONE_WIKI]: {},
-  [LOW_WIKI]: { "notes/alpha.md": 8, "notes/charlie.md": 1.5 },
+  // `notes/renamed.md` matches no page: a fresh write the ledger did see.
+  [LOW_WIKI]: { "notes/alpha.md": 8, "notes/charlie.md": 1.5, "notes/renamed.md": 0.1 },
+};
+
+/** Days ago each wiki's ledger has ingested through — upstream's `ingestedThrough`. */
+const INGESTED_THROUGH: Record<string, number> = {
+  [OPEN_WIKI]: 0,
+  [SHUT_WIKI]: 0,
+  [NONE_WIKI]: 0,
+  [LOW_WIKI]: 1.5,
 };
 
 /** mtime order: the ranking with nothing substituted. */
@@ -159,7 +170,16 @@ function ledgerAnswer(root: string): string {
   const wiki = Object.keys(roots).find((k) => roots[k] === root);
   const plan = wiki ? WORKED[wiki]! : {};
   const pages = Object.entries(plan).map(([p, ago]) => ({ p, w: NOW - ago * DAY, s: 1 }));
-  return JSON.stringify({ root, pages, pageCount: pages.length, bulk: 10, limit: 5000, truncated: false });
+  const through = wiki ? INGESTED_THROUGH[wiki] : undefined;
+  return JSON.stringify({
+    root,
+    pages,
+    pageCount: pages.length,
+    bulk: 10,
+    limit: 5000,
+    truncated: false,
+    ingestedThrough: through === undefined ? null : NOW - through * DAY,
+  });
 }
 
 function startLedger(): Promise<Server> {
@@ -295,7 +315,9 @@ test.describe("Wiki rail: worked-on substitution in Activity", () => {
 
     // DEMOTE: alpha's mtime is 12h old, its last session 8 days back, and the
     // hover names the update it set aside.
-    expect(byRel["notes/alpha.md"]!.why).toMatch(/^worked on 8d ago, .*; update 12h ago not a session write$/);
+    expect(byRel["notes/alpha.md"]!.why).toMatch(
+      /^worked on 8d ago, .*; update 12h ago: no session wrote it, or only a bulk pass$/,
+    );
     expect(byRel["notes/alpha.md"]!.meta).toBe("8d");
     // PROMOTE: charlie's mtime is 6 days old, its last session 6 hours back —
     // the date cell and its hover name the worked day, not the mtime.
@@ -341,8 +363,8 @@ test.describe("Wiki rail: worked-on substitution in Activity", () => {
     const byRel = Object.fromEntries(rows.map((r) => [r.rel, r]));
     // Open at 25% only because the wiki asked for 20.
     expect(byRel["notes/charlie.md"]!.why).toMatch(/^worked on 2d ago, /);
-    // The ledger's newest row is 1.5 days old; an update 12h ago is past what
-    // it has seen, so it is not evidence against the update.
+    // Upstream vouches for its ingest only up to 1.5 days ago, whatever its
+    // newest row; an update 12h ago is past that, so it is not demoted.
     expect(byRel["notes/alpha.md"]!.why).toMatch(/^changed 12h ago, /);
   });
 });

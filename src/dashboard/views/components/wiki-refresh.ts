@@ -57,7 +57,7 @@ export interface WikiPagesResponse {
    *  what an older server sends. The two are read differently: `matched: 0` is a
    *  verdict (this corpus has no authored dates) and hides the Worked-on sort
    *  option, while absent means "nothing is known yet" and changes nothing.
-   *  `horizonMs` is how far the ledger has seen (see `WikiIndex`). */
+   *  `horizonMs` is upstream's `ingestedThrough` (see `WikiIndex`). */
   workedCoverage?: { matched: number; total: number; returned: number; horizonMs?: number };
   error?: string;
 }

@@ -95,6 +95,18 @@ describe("parseWorkedPages", () => {
     expect(out.pages.get("blogs/b.md")).toBe(2000);
   });
 
+  test("`ingestedThrough` is read strictly: a positive finite instant, else absent", () => {
+    const at = (ingestedThrough: unknown) => {
+      const out = parseWorkedPages({ root: "/w", pages: [{ p: "a.md", w: 1 }], ingestedThrough });
+      if (!out.ok) throw new Error("a bad horizon must not reject the answer");
+      return out.ingestedThrough;
+    };
+    expect(at(1_650_000_000_000)).toBe(1_650_000_000_000);
+    for (const bad of [undefined, null, 0, -1, "1650000000000", Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(at(bad)).toBeUndefined();
+    }
+  });
+
   test("the RAW row form is rejected as no-pages-key, never read as an empty wiki", () => {
     // Byte-shape of what an un-upgraded claude-usage answers: 200, with
     // `sessions`/`rows` and no `pages` at all.
@@ -544,7 +556,8 @@ describe("the index fold", () => {
       const two = index.pages.find((p) => p.relPath === "two.md");
       expect(one?.workedMs).toBe(1_700_000_000_000);
       expect(two?.workedMs).toBeUndefined();
-      expect(index.workedCoverage).toEqual({ matched: 1, total: 2, returned: 2, horizonMs: 1_700_000_000_000 });
+      // No `ingestedThrough` in this answer, so no horizon — however recent the rows.
+      expect(index.workedCoverage).toEqual({ matched: 1, total: 2, returned: 2 });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -563,19 +576,14 @@ describe("the index fold", () => {
       await writeFile(path.join(root, "b", "x.html"), "<title>X</title><p>body</p>");
       await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "a/x.md", w: 1_700_000_000_000 }] } }));
       const index = await buildWikiIndex(root);
-      expect(index.workedCoverage).toEqual({
-        matched: 1,
-        total: index.pages.length,
-        returned: 1,
-        horizonMs: 1_700_000_000_000,
-      });
+      expect(index.workedCoverage).toEqual({ matched: 1, total: index.pages.length, returned: 1 });
       expect(index.shadowed?.length).toBe(1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  test("the HORIZON is the newest row upstream sent, matched or not", async () => {
+  test("the HORIZON is upstream's `ingestedThrough`, not the newest row", async () => {
     const { buildWikiIndex } = await import("./store.ts");
     const root = await mkdtemp(path.join(tmpdir(), "worked-index-horizon-"));
     try {
@@ -586,15 +594,34 @@ describe("the index fold", () => {
           [root]: {
             pages: [
               { p: "a.md", w: 1_600_000_000_000 },
-              // Renamed since: no page matches it, but the ledger DID see a
-              // session this recent under the root.
-              { p: "renamed.md", w: 1_700_000_000_000 },
+              // One host's fresh write says nothing about a host whose ingest
+              // stalled — the row is newer than what upstream vouches for.
+              { p: "other.md", w: 1_700_000_000_000 },
             ],
+            ingestedThrough: 1_650_000_000_000,
           },
         }),
       );
       const index = await buildWikiIndex(root);
-      expect(index.workedCoverage?.horizonMs).toBe(1_700_000_000_000);
+      expect(index.workedCoverage?.horizonMs).toBe(1_650_000_000_000);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a zero-row answer still carries upstream's horizon", async () => {
+    const { buildWikiIndex } = await import("./store.ts");
+    const root = await mkdtemp(path.join(tmpdir(), "worked-index-horizon0-"));
+    try {
+      await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
+      await refreshWorkedLedger(root, deps({ [root]: { pages: [], ingestedThrough: 1_650_000_000_000 } }));
+      const index = await buildWikiIndex(root);
+      expect(index.workedCoverage).toEqual({
+        matched: 0,
+        total: 1,
+        returned: 0,
+        horizonMs: 1_650_000_000_000,
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -40,6 +40,7 @@
 
 import {
   displayTitleOf,
+  isImplausibleFutureDate,
   isMetaPage,
   isUsableWorkedMs,
   localDay,
@@ -380,11 +381,15 @@ export interface WorkedGate {
   covered: number;
   /** `covered / candidates`, 0 when there are no candidates. */
   coverage: number;
-  /** The ledger's horizon (`workedCoverage.horizonMs`): the newest session
-   *  stamp it reported for this root. A covered page is demoted to an OLDER
-   *  worked date only when its update stamp is at or before this; absent ⇒
-   *  never. It does not affect `open`. */
+  /** The ledger's horizon as accepted here: upstream's `ingestedThrough`
+   *  (`workedCoverage.horizonMs`), clamped to `now`, absent when upstream sent
+   *  none or one past the future-date skew. A covered page is demoted to an
+   *  OLDER worked date only when its update is at or before this. It does not
+   *  affect `open`. */
   horizonMs?: number;
+  /** Whether demotion is on at all (`horizonMs` present). An open gate with
+   *  this false substitutes only NEWER worked dates. */
+  demotes: boolean;
 }
 
 /**
@@ -411,6 +416,9 @@ const LEDGER_PAGE_EXT = /\.mdx?$/;
  * Pass 1 scores with substitution forced off, so the candidate set cannot be
  * reshaped by the substitution it decides about. The comparison is on integers
  * (`covered × 100 ≥ gate × candidates`), so 60% of 5 is exactly 3.
+ *
+ * `horizonMs` is refused past the date signals' future-skew allowance and
+ * clamped to `now` inside it: a ledger cannot have ingested the future.
  */
 export function workedGateFor(
   pages: readonly WikiListing[],
@@ -426,13 +434,18 @@ export function workedGateFor(
     candidates++;
     if (usableWorkedMs(page, now) > 0) covered++;
   }
+  const horizon =
+    horizonMs !== undefined && Number.isFinite(horizonMs) && horizonMs > 0 && !isImplausibleFutureDate(horizonMs, now)
+      ? Math.min(horizonMs, now)
+      : undefined;
   return {
     // With no candidates the product test is 0 ≥ 0 at every gate; only 0 opens.
     open: candidates > 0 ? covered * 100 >= weights.workedGate * candidates : weights.workedGate === 0,
     candidates,
     covered,
     coverage: candidates > 0 ? covered / candidates : 0,
-    ...(horizonMs === undefined ? {} : { horizonMs }),
+    ...(horizon === undefined ? {} : { horizonMs: horizon }),
+    demotes: horizon !== undefined,
   };
 }
 
@@ -486,10 +499,12 @@ export function rankActivity(
  * update signal's kind: a ledger write IS a known edit event. Two limits, both
  * falling back to the unsubstituted score:
  *  - an OLDER worked date replaces the update only when the update is at or
- *    before the gate's `horizonMs` — past it, the ledger has not seen that far;
+ *    before the gate's `horizonMs` — past it, the ledger has not ingested that
+ *    far. A bare-day authored update counts as the END of the UTC day it names;
  *  - on an `added`-floor page (whose update stamp is its git arrival) the worked
  *    date must land more than {@link CHANGE_MIN_DAYS_AFTER_CREATION} after the
- *    floor, or it is the session that brought the page there, not an edit.
+ *    floor, or it is the session that brought the page there, not an edit; an
+ *    older or equal worked date never substitutes there.
  */
 function scorePage(
   page: WikiListing,
@@ -505,11 +520,20 @@ function scorePage(
   const createdMs = created?.ms ?? 0;
   const workedMs = substitute ? usableWorkedMs(page, now) : 0;
   const updMs = updated?.ms ?? 0;
+  // An authored `updated: 2026-09-11` parses to that day's UTC midnight, but the
+  // edit may have happened any time that day: compare its end with the horizon.
+  // Only an authored label — a git/mtime label is a derived day over an instant.
+  const dayPrecision =
+    !!updated &&
+    BARE_DAY_LABEL.test(updated.label) &&
+    (updated.label === page.updated || updated.label === page.created) &&
+    Date.parse(updated.label) === updMs;
+  const updLatestMs = dayPrecision ? updMs + MS_PER_DAY : updMs;
   const worked =
     workedMs > 0 &&
     (updated?.kind === "added"
       ? workedMs - updMs > CHANGE_MIN_DAYS_AFTER_CREATION * MS_PER_DAY
-      : workedMs >= updMs || (substitute?.horizonMs !== undefined && updMs <= substitute.horizonMs));
+      : workedMs >= updMs || (substitute?.horizonMs !== undefined && updLatestMs <= substitute.horizonMs));
   // A demotion set an update aside (named in the `why` below, when it moved
   // the row, so a page git changed yesterday that now reads `+ 6d` says why).
   const setAside = worked && updated?.kind === "updated" && updMs > workedMs;
@@ -597,9 +621,13 @@ function scorePage(
       ? `created ${createdPhrase} → ${newScore.toFixed(2)}`
       : `${changedPhrase}, created ${createdPhrase}: ${parts.join(", ")} → ${changedScore.toFixed(2)}`;
   if (setAside) {
+    // Named only when it moved the row, and not when it reads as the same age
+    // as the worked stamp ("worked on 4d ago … update 4d ago").
+    const updPhrase = agePhrase(updMs, now, updated?.label);
+    const sameAge = updPhrase === agePhrase(changeMs, now);
     const unsubstituted = scorePage(page, w, now, null);
-    if (unsubstituted.kind !== kind || unsubstituted.score !== score) {
-      why += `; update ${agePhrase(updMs, now, updated?.label)} not a session write`;
+    if (!sameAge && (unsubstituted.kind !== kind || unsubstituted.score !== score)) {
+      why += `; update ${updPhrase}: no session wrote it, or only a bulk pass`;
     }
   }
   const row: ActivityRow = { page, kind, score, why, ageMs: kind === "new" ? now - createdMs : now - changeMs };
