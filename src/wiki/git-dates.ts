@@ -37,6 +37,13 @@
  * classification is a property of a commit's own entry count — no second subprocess,
  * no second traversal. (`dirty` is a separate, cheap `git status` probe; see below.)
  *
+ * **A mtime is only evidence when a HUMAN moved it.** `dirty` is what hands a page
+ * back to the mtime rule, and a mechanical frontmatter write — a series join, a
+ * plan-status flip — moves every touched page's mtime while changing nothing a
+ * reader would call an edit. Such a page is dropped from `dirty` and dates from its
+ * git history like a clean one; see the metadata-only section below for the three
+ * rules that keep a real edit from being dropped with it.
+ *
  * A page whose history begins with a move INTO this wiki from another repo (the 10
  * plans imported in mimir's 2026-05-04 consolidation) dates to the import, not to
  * its original authorship. That is a floor, not a lie — "mimir has had it since" —
@@ -48,6 +55,7 @@ import path from "node:path";
 import { realpath } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { listWikiSubtreeDirty } from "./commit.ts";
+import { METADATA_ONLY_FRONTMATTER_KEYS } from "./provenance.ts";
 
 const log = getLog("wiki", "git-dates");
 
@@ -100,6 +108,10 @@ export interface WikiGitDates {
    * file's mtime is a checkout or sweep artifact; a dirty file's mtime is a real
    * edit that git has not recorded yet, and is the one signal a git-only ranking
    * would lose. Empty (never null) when the tree is clean or the probe failed.
+   *
+   * MINUS the metadata-only edits — see {@link classifyDiffFiles}: a tracked page
+   * whose whole diff against `HEAD` is frontmatter metadata lines was written by a
+   * mechanical pass, so its mtime is the sweep's timestamp and not an edit.
    */
   dirty: Set<string>;
 }
@@ -260,6 +272,219 @@ export function parseGitLog(
   return { created, touched };
 }
 
+// ── The metadata-only rule: which dirty pages' mtime is NOT evidence ──────────
+//
+// A mechanical write that only rewrites frontmatter keys — a series join writing
+// `series:` onto twelve pages, the /plans board writing `priority:` or
+// `plan_status` + `status_date` in a burst of clicks — moves every touched page's
+// mtime, and the dirty probe above then hands all of them to the mtime rule: the
+// rail reads twelve pages as edited three hours ago. Those writes are exactly the
+// ones `writeWikiPage` already files under its NO-LOG path, i.e. the repo has
+// already decided they are not edits.
+//
+// So a TRACKED, MODIFIED page whose diff against `HEAD` adds and removes only
+// frontmatter metadata lines is dropped from `dirty`, and falls back to its git
+// touch date like any clean page. Three rules make that safe, and each of them is
+// a way the rule would otherwise hide a real edit:
+//
+//  1. The diff is `git diff HEAD`, never a bare `git diff`. Both wiki writers
+//     (`commitWikiChange` and the repo-sync loop's `stagePaths`) `git add` before
+//     they commit, so a STAGED real prose edit has an empty unstaged diff and
+//     would read as metadata-only — hiding the one kind of edit this must never
+//     hide.
+//  2. Only tracked-MODIFIED paths are classified (`isTrackedModifiedStatus`).
+//     `listWikiSubtreeDirty` also reports untracked and deleted paths; an
+//     untracked page has no HEAD diff at all and would pass the test VACUOUSLY,
+//     which both hides a brand-new page's only date signal and pushes it into
+//     `store.ts`'s unexplained-miss counter — a coverage alarm about a bug that
+//     does not exist. Untracked and deleted paths pass through untouched.
+//  3. A changed line counts as metadata only INSIDE the frontmatter block. mimir
+//     documents these very keys, so `prs: [...]` and `sessions: [...]` occur at
+//     column 0 inside body code fences; without the position test, editing one of
+//     those pages would read as a metadata write.
+//
+// Every failure degrades the same way: the page stays dirty. Hiding a real edit
+// is the only outcome worth engineering against — showing a sweep's timestamp is
+// what shipped until now.
+
+/** A frontmatter line whose KEY is one a mechanical writer owns. Column 0 and a
+ *  literal `:`, matching `parseFrontmatter`'s own key shape (which admits no
+ *  leading space), so a nested or list-item line is never metadata. */
+const METADATA_LINE_RE = new RegExp(`^(?:${METADATA_ONLY_FRONTMATTER_KEYS.join("|")}):`);
+
+/** A unified-diff hunk header: `@@ -oldStart[,oldCount] +newStart[,newCount] @@`. */
+const HUNK_HEADER_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+/** How many pathspecs ride in one `git diff` argv — the `ADD_CHUNK` rationale in
+ *  `src/sync/run.ts`: bound the pathspec against ARG_MAX on a wiki where a sweep
+ *  left hundreds of files dirty. The call is bounded by the DIRTY count, never by
+ *  the wiki's size, so on every real tree this is one chunk. */
+const DIFF_PATH_CHUNK = 200;
+
+/** How far into a file the closing `---` fence is looked for. A frontmatter block
+ *  is a dozen lines; a file whose first 400 carry no closing fence has none. */
+const FRONTMATTER_SCAN_LINES = 400;
+
+/**
+ * Classify one `git diff HEAD -U0` output: repo-relative path → "every changed
+ * line in this file is a frontmatter metadata line". Pure, so the state machine is
+ * testable against literal git output.
+ *
+ * The parse is a STATE MACHINE over `diff --git` sections rather than a line-shape
+ * match, because the two are genuinely ambiguous: a removed body line reading `--`
+ * is emitted as `---`, which is also the spelling of a file header. A `---`/`+++`
+ * line is a header only BEFORE the section's first `@@`; after it every `+`/`-`
+ * line is content.
+ *
+ * @param frontmatterEnd 1-based line number of a file's closing `---` fence, by
+ *   repo-relative path. A file it answers `undefined` for cannot be metadata-only
+ *   (it has no frontmatter to have written into).
+ */
+export function classifyDiffFiles(
+  stdout: string,
+  frontmatterEnd: (repoRelPath: string) => number | undefined,
+): Map<string, boolean> {
+  const out = new Map<string, boolean>();
+  let file: string | null = null;
+  let ok = true;
+  let inHunk = false;
+  let newStart = 0;
+
+  const flush = () => {
+    if (file !== null) out.set(file, ok);
+    file = null;
+    ok = true;
+    inHunk = false;
+  };
+
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      flush();
+      continue;
+    }
+    if (!inHunk) {
+      // Section header. The path comes off `+++ b/<path>`: git separates the two
+      // paths on the `diff --git` line with a space, which a path may contain, so
+      // that line can only be read as a boundary — never as a name.
+      if (line.startsWith("+++ ")) {
+        const p = line.slice(4);
+        file = p.startsWith("b/") ? p.slice(2) : null;
+        // A file with no frontmatter has no metadata line to have been written —
+        // and this is also what keeps `/dev/null` (a creation) out.
+        if (file !== null && frontmatterEnd(file) === undefined) ok = false;
+        continue;
+      }
+      // "Binary files a/x and b/x differ" — no content lines will follow, and
+      // nothing about it is a frontmatter write.
+      if (line.startsWith("Binary files ")) ok = false;
+      if (!line.startsWith("@@ ")) continue;
+    }
+    const hunk = HUNK_HEADER_RE.exec(line);
+    if (hunk) {
+      inHunk = true;
+      newStart = Number(hunk[2]);
+      continue;
+    }
+    if (!inHunk || file === null || !ok) continue;
+    if (line.startsWith("\\")) continue; // "\ No newline at end of file"
+    if (!line.startsWith("+") && !line.startsWith("-")) continue; // -U0 emits no context
+    // The position test reads the NEW side alone. A body deletion's hunk header
+    // still carries its position in the new file, so it is caught there; taking
+    // the OLD side too would refuse a legitimate frontmatter write that removed
+    // lines ABOVE the one it changed, which is a metadata write reported as an
+    // edit.
+    const end = frontmatterEnd(file);
+    if (end === undefined || newStart > end || !METADATA_LINE_RE.test(line.slice(1))) ok = false;
+  }
+  flush();
+  return out;
+}
+
+/** 1-based line number of a page's closing `---` fence, or `undefined` when the
+ *  file has no frontmatter block (or cannot be read). Same shape
+ *  `parseFrontmatter` accepts: an opening `---` on line 1 and a closing one at
+ *  column 0. `\r` is trimmed per line for the same reason it is there. */
+async function frontmatterEndLine(abs: string): Promise<number | undefined> {
+  const text = await Bun.file(abs)
+    .text()
+    .catch(() => null);
+  if (text === null) return undefined;
+  const lines = text.split("\n");
+  if (lines[0]?.trimEnd() !== "---") return undefined;
+  const scan = Math.min(lines.length, FRONTMATTER_SCAN_LINES);
+  for (let i = 1; i < scan; i++) if (lines[i]?.trimEnd() === "---") return i + 1;
+  return undefined;
+}
+
+/** Wiki pages are the only files that carry frontmatter; an `.html` attachment or
+ *  a stray `.json` is never a metadata write and never worth a diff. */
+const isMarkdownPage = (rel: string) => rel.endsWith(".md") || rel.endsWith(".mdx");
+
+/**
+ * The dirty list MINUS the pages whose only change is frontmatter metadata. Never
+ * throws; every degrade (an unreadable file, a failed diff, a path the diff did not
+ * name in a spelling we sent) keeps the page dirty, i.e. today's behaviour.
+ *
+ * One bounded `git diff` over the tracked-modified subset — bounded by the dirty
+ * count, not by wiki size — through this module's own `git()`, so it carries the
+ * same `GIT_DATES_TIMEOUT_MS` budget as the log walk and the dirty probe and
+ * answers `null` rather than throwing on a timeout.
+ */
+async function dropMetadataOnlyEdits(
+  toplevel: string,
+  canonicalRoot: string,
+  relPrefix: string,
+  listed: { dirty: string[]; trackedModified: string[] },
+): Promise<string[]> {
+  const candidates = listed.trackedModified.filter(isMarkdownPage);
+  if (candidates.length === 0) return listed.dirty;
+
+  // repo-relative (what the diff emits and what the pathspec takes) → wiki-relative
+  // (what `dirty` is keyed by), plus each file's frontmatter extent.
+  const wikiRelOf = new Map<string, string>();
+  const ends = new Map<string, number>();
+  for (const wikiRel of candidates) {
+    const end = await frontmatterEndLine(path.join(canonicalRoot, wikiRel));
+    if (end === undefined) continue;
+    const repoRel = relPrefix + wikiRel;
+    wikiRelOf.set(repoRel, wikiRel);
+    ends.set(repoRel, end);
+  }
+  if (wikiRelOf.size === 0) return listed.dirty;
+
+  const drop = new Set<string>();
+  const paths = [...wikiRelOf.keys()];
+  for (let i = 0; i < paths.length; i += DIFF_PATH_CHUNK) {
+    const chunk = paths.slice(i, i + DIFF_PATH_CHUNK);
+    // `--no-renames` so a pair this pathspec happens to catch is read as its own
+    // add and delete rather than as a rename with no content lines at all.
+    const stdout = await git(toplevel, [
+      "diff",
+      "HEAD",
+      "-U0",
+      "--no-renames",
+      "--no-color",
+      "--",
+      ...chunk,
+    ]);
+    if (stdout === null) return listed.dirty; // failed or timed out — keep every page dirty
+    const verdicts = classifyDiffFiles(stdout, (p) => ends.get(p));
+    for (const repoRel of chunk) {
+      // ABSENT from the diff is the third verdict and it means "identical to
+      // HEAD": `git status` reports a stat-dirty file (a touch, an atomic rewrite
+      // with the same bytes) as modified, and such a page has no edit to hide.
+      if (verdicts.get(repoRel) !== false) drop.add(wikiRelOf.get(repoRel)!);
+    }
+  }
+  if (drop.size > 0) {
+    log.debug("wiki {root}: {n} dirty page(s) are metadata-only — mtime rule dropped", {
+      root: canonicalRoot,
+      n: drop.size,
+    });
+  }
+  return listed.dirty.filter((p) => !drop.has(p));
+}
+
 /**
  * Build the per-page date signals for the wiki rooted at `root`.
  *
@@ -302,6 +527,9 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   // A wiki root OUTSIDE its reported toplevel would mean a symlink crossing repos;
   // scoping to `..` is not a thing git accepts, so degrade rather than guess.
   if (rel.startsWith("..")) return null;
+  // repo-relative prefix of the wiki subtree, shared by the dirty classification
+  // (which talks to git in repo-relative paths) and the map strip below.
+  const prefix = !rel ? "" : rel.endsWith("/") ? rel : rel + "/";
 
   const args = [
     "log",
@@ -330,7 +558,9 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   // over a large or network-mounted worktree could park every /wiki request behind a
   // cold index build. Losing the race costs only the mtime rule for dirty pages.
   const dirtyPromise = Promise.race([
-    listWikiSubtreeDirty(toplevel, root).then((d) => d.dirty),
+    listWikiSubtreeDirty(toplevel, root).then((d) =>
+      dropMetadataOnlyEdits(toplevel, canonicalRoot, prefix, d),
+    ),
     new Promise<string[]>((resolve) =>
       setTimeout(() => {
         log.debug("wiki {root}: dirty probe exceeded its budget — mtime rule disabled", { root });
@@ -355,7 +585,6 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   // Translate repo-relative → wiki-relative, dropping anything outside the subtree
   // (the pathspec makes that rare, but a rename's SOURCE can legitimately sit
   // outside it and would otherwise land in the map under a bogus key).
-  const prefix = rel.endsWith("/") ? rel : rel + "/";
   const strip = (m: Map<string, number>) => {
     const out = new Map<string, number>();
     for (const [p, ms] of m) if (p.startsWith(prefix)) out.set(p.slice(prefix.length), ms);

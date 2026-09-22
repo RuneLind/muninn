@@ -349,3 +349,222 @@ test("buildWikiGitDates: real repo — an uncommitted edit shows up as DIRTY", a
     await rm(abs, { force: true });
   }
 });
+
+// ── The metadata-only rule ───────────────────────────────────────────────────
+//
+// A mechanical frontmatter write moves a page's mtime without editing it, and the
+// dirty set is what hands a page to the mtime rule. These run against a REAL temp
+// git repo, because the whole rule is a claim about what `git status` and
+// `git diff HEAD` emit — a hand-written fixture would prove only that a Set works.
+
+import { classifyDiffFiles } from "./git-dates.ts";
+
+test("classifyDiffFiles: a frontmatter-only change is metadata-only", () => {
+  const out = classifyDiffFiles(
+    [
+      "diff --git a/w/a.md b/w/a.md",
+      "index 111..222 100644",
+      "--- a/w/a.md",
+      "+++ b/w/a.md",
+      "@@ -3 +3 @@",
+      "-series: one",
+      "+series: two",
+      "",
+    ].join("\n"),
+    () => 5,
+  );
+  expect(out.get("w/a.md")).toBe(true);
+});
+
+test("classifyDiffFiles: one body line is enough to make it a real edit", () => {
+  const out = classifyDiffFiles(
+    [
+      "diff --git a/w/b.md b/w/b.md",
+      "--- a/w/b.md",
+      "+++ b/w/b.md",
+      "@@ -3 +3 @@",
+      "-series: one",
+      "+series: two",
+      "@@ -9 +9 @@",
+      "-old prose",
+      "+new prose",
+      "",
+    ].join("\n"),
+    () => 5,
+  );
+  expect(out.get("w/b.md")).toBe(false);
+});
+
+test("classifyDiffFiles: a metadata KEY line below the frontmatter is a real edit", () => {
+  // mimir documents these very keys, so `prs: […]` occurs at column 0 inside body
+  // code fences. Without the position test, editing one of those pages reads as a
+  // mechanical frontmatter write.
+  const out = classifyDiffFiles(
+    [
+      "diff --git a/w/c.md b/w/c.md",
+      "--- a/w/c.md",
+      "+++ b/w/c.md",
+      "@@ -20 +20 @@",
+      "-prs: [owner/repo#1]",
+      "+prs: [owner/repo#2]",
+      "",
+    ].join("\n"),
+    () => 5,
+  );
+  expect(out.get("w/c.md")).toBe(false);
+});
+
+test("classifyDiffFiles: a removed body line spelled `--` is content, not a header", () => {
+  // The ambiguity the state machine exists for: `-` + `--` is `---`, which is also
+  // how a file header line starts. After the first `@@` it can only be content.
+  const out = classifyDiffFiles(
+    [
+      "diff --git a/w/d.md b/w/d.md",
+      "--- a/w/d.md",
+      "+++ b/w/d.md",
+      "@@ -2 +2 @@",
+      "---",
+      "+series: x",
+      "",
+    ].join("\n"),
+    () => 5,
+  );
+  expect(out.get("w/d.md")).toBe(false);
+});
+
+test("classifyDiffFiles: a file with no frontmatter can never be metadata-only", () => {
+  const out = classifyDiffFiles(
+    [
+      "diff --git a/w/e.md b/w/e.md",
+      "--- a/w/e.md",
+      "+++ b/w/e.md",
+      "@@ -1 +1 @@",
+      "-series: one",
+      "+series: two",
+      "",
+    ].join("\n"),
+    () => undefined,
+  );
+  expect(out.get("w/e.md")).toBe(false);
+});
+
+/** Run git in the fixture repo, throwing on failure so a broken SETUP is never
+ *  mistaken for a failing assertion. Identity + signing are pinned: a runner has
+ *  no git identity and a developer may have `commit.gpgsign` on. */
+async function fixtureGit(cwd: string, ...args: string[]): Promise<void> {
+  const proc = Bun.spawn(
+    [
+      "git",
+      "-C",
+      cwd,
+      "-c",
+      "user.email=fixture@example.com",
+      "-c",
+      "user.name=fixture",
+      "-c",
+      "commit.gpgsign=false",
+      ...args,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  if (code !== 0) throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+}
+
+/** A page: frontmatter block, then prose. `extra` lands in the body. The H1 is a
+ *  separate argument so the `title:` case can change the KEY and nothing else —
+ *  a body line moving with it would make the page dirty for the position rule
+ *  instead, and the key-set assertion would pin nothing. */
+function page(title: string, series: string, prose: string, extra = "", heading = title): string {
+  return `---\ntitle: ${title}\nseries: ${series}\nplan_status: in-flight\n---\n\n# ${heading}\n\n${prose}\n${extra}`;
+}
+
+/**
+ * ONE fixture wiki holding every shape the rule has to tell apart, nested in a
+ * subdirectory of its repo so the wiki-relative ↔ repo-relative translation is
+ * exercised for real.
+ */
+async function metadataOnlyFixture(): Promise<{ wiki: string; dir: string }> {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = await mkdtemp(path.join(tmpdir(), "git-dates-meta-"));
+  const wiki = path.join(dir, "wiki");
+  await mkdir(wiki, { recursive: true });
+  const write = (rel: string, text: string) => writeFile(path.join(wiki, rel), text);
+
+  await write("meta-only.md", page("Meta only", "alpha", "Unchanged prose."));
+  await write("meta-and-prose.md", page("Meta and prose", "alpha", "Original prose."));
+  await write("staged-prose.md", page("Staged prose", "alpha", "Original prose."));
+  await write("deleted.md", page("Deleted", "alpha", "Doomed prose."));
+  await write("title-only.md", page("Title only", "alpha", "Unchanged prose."));
+  await write(
+    "body-fence.md",
+    page("Body fence", "alpha", "Documenting the keys:", "\n```yaml\nseries: quoted-alpha\n```\n"),
+  );
+  await write("clean.md", page("Clean", "alpha", "Never touched."));
+
+  await fixtureGit(dir, "init", "-b", "main");
+  await fixtureGit(dir, "add", "-A");
+  await fixtureGit(dir, "commit", "-m", "seed");
+
+  // (a) frontmatter metadata only — what a series join or a plan-status flip does.
+  await write("meta-only.md", page("Meta only", "beta", "Unchanged prose."));
+  // (b) the same metadata write plus one real prose line.
+  await write("meta-and-prose.md", page("Meta and prose", "beta", "Rewritten prose."));
+  // (c) a real prose edit that is STAGED, leaving the worktree clean against the
+  //     index — which is what both wiki writers do before they commit.
+  await write("staged-prose.md", page("Staged prose", "alpha", "Rewritten prose."));
+  await fixtureGit(dir, "add", "--", "wiki/staged-prose.md");
+  // (d) untracked.
+  await write("untracked.md", page("Untracked", "alpha", "Brand new."));
+  // (e) deleted from the worktree, still in HEAD.
+  await rm(path.join(wiki, "deleted.md"));
+  // (f) a frontmatter key OUTSIDE the metadata set.
+  await write(
+    "title-only.md",
+    page("Title only, renamed", "alpha", "Unchanged prose.", "", "Title only"),
+  );
+  // (g) a metadata-shaped line edited inside a BODY code fence.
+  await write(
+    "body-fence.md",
+    page("Body fence", "alpha", "Documenting the keys:", "\n```yaml\nseries: quoted-beta\n```\n"),
+  );
+
+  return { wiki, dir };
+}
+
+test("buildWikiGitDates: a metadata-only edit loses the mtime rule, every other dirty shape keeps it", async () => {
+  const { rm } = await import("node:fs/promises");
+  const { wiki, dir } = await metadataOnlyFixture();
+  try {
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates).not.toBeNull();
+    const dirty = dates!.dirty;
+
+    // (a) the whole point: a frontmatter-key rewrite is not an edit.
+    expect(dirty.has("meta-only.md")).toBe(false);
+    // …and it is still a tracked page with git dates, so it falls back to them
+    // rather than dropping out of the ranking altogether.
+    expect(dates!.created.get("meta-only.md")).toBeGreaterThan(0);
+
+    // (b) one prose line is enough.
+    expect(dirty.has("meta-and-prose.md")).toBe(true);
+    // (c) a STAGED prose edit — empty to a bare `git diff`, which is why the
+    //     classification diffs against HEAD.
+    expect(dirty.has("staged-prose.md")).toBe(true);
+    // (d) untracked: no HEAD diff at all, so it would pass the test vacuously.
+    expect(dirty.has("untracked.md")).toBe(true);
+    // (e) deleted: likewise, and it is the caller's `deletions` input.
+    expect(dirty.has("deleted.md")).toBe(true);
+    // (f) a frontmatter key outside the metadata set is an authored edit.
+    expect(dirty.has("title-only.md")).toBe(true);
+    // (g) the same key spelling, in the body.
+    expect(dirty.has("body-fence.md")).toBe(true);
+
+    // The control: an untouched page was never dirty to begin with.
+    expect(dirty.has("clean.md")).toBe(false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

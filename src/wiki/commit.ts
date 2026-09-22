@@ -516,6 +516,10 @@ async function pushInner(top: string): Promise<void> {
 interface PorcelainEntry {
   /** repo-relative path (posix separators, as git emits). */
   path: string;
+  /** The 2-char `XY` status field of the record this path came from. A rename's
+   *  ORIGINAL path carries the rename record's own `XY` (`R `), which is what
+   *  keeps it out of every "tracked-modified" test. */
+  xy: string;
 }
 
 /**
@@ -577,8 +581,8 @@ export function parsePorcelainZWithStatus(out: string): PorcelainStatusEntry[] {
 function parsePorcelainZ(out: string): PorcelainEntry[] {
   const entries: PorcelainEntry[] = [];
   for (const e of parsePorcelainZWithStatus(out)) {
-    entries.push({ path: e.path });
-    if (e.origPath) entries.push({ path: e.origPath });
+    entries.push({ path: e.path, xy: e.xy });
+    if (e.origPath) entries.push({ path: e.origPath, xy: e.xy });
   }
   return entries;
 }
@@ -639,11 +643,30 @@ export async function listDirtyEntries(
 }
 
 /**
+ * Is this `XY` status field a TRACKED file that has only been MODIFIED — i.e. a
+ * path that exists in `HEAD` and on disk, so `git diff HEAD` describes it fully?
+ *
+ * Both columns must be blank-or-`M`: `??` is untracked (nothing in HEAD to diff
+ * against), `A` is a new file staged (ditto, and its whole content reads as added
+ * lines), `D` is a deletion, `R`/`C` a rename or copy, `U` an unmerged path, `T` a
+ * typechange. Every one of those is deliberately OUT — the one consumer
+ * (`git-dates.ts`) uses this to decide whether a `git diff HEAD` answer can be
+ * trusted as the whole story about a page, and every excluded state is one where
+ * it cannot.
+ */
+export function isTrackedModifiedStatus(xy: string): boolean {
+  return /^[ M][ M]$/.test(xy) && xy !== "  ";
+}
+
+/**
  * Enumerate the dirty paths inside a wiki subtree (tracked-modified, untracked,
  * and deleted), as WIKI-relative paths ready to pass to `commitWikiChange`. The
  * status is scoped to the wiki directory pathspec, so unrelated dirt elsewhere in
  * the repo is never listed. Deletions (paths absent from disk) are returned
- * separately so the caller can pass them as `opts.deletions`. Best-effort: a
+ * separately so the caller can pass them as `opts.deletions`. `trackedModified` is
+ * the SUBSET of `dirty` that {@link isTrackedModifiedStatus} admits — it is a
+ * filter over the same one status spawn, for `git-dates.ts`'s metadata-only rule,
+ * and no caller of `dirty`/`deletions` is affected by it. Best-effort: a
  * failed `git status` degrades to empty, never throws.
  *
  * @param top        the repo toplevel (from `gitToplevel`)
@@ -652,7 +675,7 @@ export async function listDirtyEntries(
 export async function listWikiSubtreeDirty(
   top: string,
   wikiDirAbs: string,
-): Promise<{ dirty: string[]; deletions: string[] }> {
+): Promise<{ dirty: string[]; deletions: string[]; trackedModified: string[] }> {
   const canonicalWiki = await realpath(wikiDirAbs).catch(() => wikiDirAbs);
   // Scope to the wiki subtree; `--porcelain -z` keeps parsing quote-free and
   // includes untracked files by default. Absolute pathspec ⇒ repo-relative output.
@@ -671,10 +694,11 @@ export async function listWikiSubtreeDirty(
   );
   if (r.code !== 0) {
     log.warn("Wiki sweep: git status failed in {top}: {error}", { top, error: r.stderr });
-    return { dirty: [], deletions: [] };
+    return { dirty: [], deletions: [], trackedModified: [] };
   }
   const dirty: string[] = [];
   const deletions: string[] = [];
+  const trackedModified: string[] = [];
   for (const entry of parsePorcelainZ(r.stdout)) {
     const abs = path.join(top, entry.path);
     const rel = path.relative(canonicalWiki, abs);
@@ -685,9 +709,10 @@ export async function listWikiSubtreeDirty(
     // forever), on any wiki root whose repo does not ignore it.
     if (isWikiWriteArtifact(path.basename(wikiRel))) continue;
     dirty.push(wikiRel);
+    if (isTrackedModifiedStatus(entry.xy)) trackedModified.push(wikiRel);
     if (!(await pathExists(abs))) deletions.push(wikiRel);
   }
-  return { dirty, deletions };
+  return { dirty, deletions, trackedModified };
 }
 
 /** The dirty-state snapshot of a wiki's repo for the `/wiki` Index-card badge. */

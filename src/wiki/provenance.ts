@@ -42,6 +42,31 @@ export const PROVENANCE_FRONTMATTER_KEYS = [
 ] as const;
 
 /**
+ * The frontmatter keys whose ADDITION or REMOVAL is not an edit of the page.
+ *
+ * The four provenance keys above are written by claude-usage's stamper; the five
+ * beside them are written by muninn's own mechanical writers — the series editor
+ * (`series`/`series_label`, one call per member of a join) and the `/plans` board
+ * (`priority`, and `plan_status` + `status_date` together). All of them go through
+ * `writeWikiPage`'s no-log path, i.e. they are precisely the writes the repo has
+ * already decided are not worth a `log.md` line.
+ *
+ * Read by `git-dates.ts` alone, and only to decide whether a dirty page's MTIME is
+ * evidence of an edit: a series join writing `series:` on twelve pages made every
+ * one of them read "3h old" in the rail's Activity section. It is a superset of
+ * {@link PROVENANCE_FRONTMATTER_KEYS} rather than a second list, so a key added
+ * there is covered here by construction.
+ */
+export const METADATA_ONLY_FRONTMATTER_KEYS = [
+  ...PROVENANCE_FRONTMATTER_KEYS,
+  "series",
+  "series_label",
+  "priority",
+  "plan_status",
+  "status_date",
+] as const;
+
+/**
  * The Jira key shape a reverse lookup accepts: an uppercase letter, any further
  * prefix characters, a hyphen, digits. Byte for byte the regex claude-usage's
  * `/api/jira-sessions` validates with (`src/routes.ts`, `jiraKey`), so a key that

@@ -145,7 +145,22 @@ discount and a **backlink** discount on a change — together the reason a touch
 plans (in-flight and proposed most) and, at a third of a plan's share, blogs. The two signals are the sweep-aware
 `pageAddedMs`/`pageTimeMs`, never raw `mtimeMs`/`gitCreatedMs`: a mechanical pass
 moves every mtime in the wiki, and ranking on that is the "148 plans edited this
-minute" failure those functions exist to absorb. ⚠️ A **change means the update signal's own KIND is `updated`** (`pageDateKind`),
+minute" failure those functions exist to absorb. ⚠️ **The mtime rule has ONE
+exception, and it is where that failure came back**: a DIRTY page's mtime is
+trusted, because git has not recorded that edit yet — so a mechanical frontmatter
+write (a series join across twelve pages, a burst of `/plans` flips) made every
+page it touched read as edited minutes ago. `buildWikiGitDates` now drops a
+TRACKED, MODIFIED page whose whole `git diff HEAD` is frontmatter metadata lines
+(`METADATA_ONLY_FRONTMATTER_KEYS`, the four provenance keys plus
+`series`/`series_label`/`priority`/`plan_status`/`status_date`) out of `dirty`, so
+it dates from git history like a clean page. Untracked and deleted paths pass
+through UNTOUCHED — an untracked page has no `HEAD` diff and would pass the test
+vacuously, and dropping it would also count it into `store.ts`'s unexplained-miss
+warn — the diff is against `HEAD` rather than the worktree because both wiki
+writers stage before they commit, and a changed line counts only INSIDE the
+frontmatter block, since mimir documents these very keys at column 0 inside body
+code fences. Every failure keeps the page dirty. Rules and degrades: the
+metadata-only section of `src/wiki/git-dates.ts`. ⚠️ A **change means the update signal's own KIND is `updated`** (`pageDateKind`),
 never a gap between two dates: `updatedSignal` falls back to the git CREATION
 date for a page whose every commit was a sweep, and read as a date it makes
 such a page "changed <the day it was created>", outranking the creation it is
