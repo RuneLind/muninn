@@ -91,8 +91,33 @@ describe("parseWorkedPages", () => {
     if (!out.ok) return;
     expect(out.returned).toBe(2);
     expect(out.pages.get("plans/a.mdx")).toBe(1000);
-    // `b` (the bash-derived touch) rides the payload and is deliberately unread.
-    expect(out.pages.get("blogs/b.md")).toBe(2000);
+    // The worked date is max(w, b): a newer bash touch moves the page later.
+    expect(out.pages.get("blogs/b.md")).toBe(9999);
+  });
+
+  test("an older bash touch never moves w earlier", () => {
+    const out = parseWorkedPages({ pages: [{ p: "a.md", w: 5000, b: 4000 }] });
+    expect(out.ok && out.pages.get("a.md")).toBe(5000);
+  });
+
+  test("a malformed b is skipped, never rejecting the row's w", () => {
+    for (const b of ["9999", 0, -1, Number.NaN, Number.POSITIVE_INFINITY, null, {}]) {
+      const out = parseWorkedPages({ pages: [{ p: "a.md", w: 5000, b }] });
+      expect(out.ok).toBe(true);
+      if (!out.ok) continue;
+      expect(out.returned).toBe(1);
+      expect(out.pages.get("a.md")).toBe(5000);
+    }
+  });
+
+  test("two spellings of one path fold on max(w, b), newest wins", () => {
+    const out = parseWorkedPages({
+      pages: [
+        { p: "Plans/A.mdx", w: 1000, b: 7000 },
+        { p: "plans/a.mdx", w: 3000 },
+      ],
+    });
+    expect(out.ok && out.pages.get("plans/a.mdx")).toBe(7000);
   });
 
   test("the RAW row form is rejected as no-pages-key, never read as an empty wiki", () => {

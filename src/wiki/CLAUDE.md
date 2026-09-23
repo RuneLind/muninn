@@ -1086,10 +1086,12 @@ sharing 09-15, three sharing 09-21, all from authored 1–3-file commits).
 answers one row per page with a qualifying write — `{p, w, b?, s}`, `p`
 wiki-relative and `w` epoch ms — with any session that wrote `bulk` (10) or more
 pages under that root discounted WHOLE, upstream, where the corpus is in hand.
-`b` (the bash-derived touch) rides the payload and is deliberately **unread**:
-on the laptop's corpus `bash` covers 994 distinct paths against `write`'s 402 and
-a `sed -i` loop is exactly how a mechanical pass runs, so folding it in is a
-decision of its own. The BROWSER never reaches claude-usage (tailnet viewers,
+The worked date is **`max(w, b)`**: `b` is the page's newest bash touch (`sed -i`,
+`cat >`, and since claude-usage #215 a python-heredoc `open(…, "w")` target),
+under the same fan-out discount. Upstream sends `b` only on pages that also have
+a qualifying write, so bash-only pages stay uncovered. A malformed `b` is
+skipped, never rejecting the row. Measured on the mini 2026-09-23: 89 of mimir's
+354 pages have `b` newer than `w`, 34 by more than 3 days. The BROWSER never reaches claude-usage (tailnet viewers,
 mixed content under `tailscale serve`), which is why the field is computed here
 and shipped on the listing.
 
