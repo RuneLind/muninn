@@ -150,13 +150,28 @@ describe("the fold store", () => {
         map.delete(k);
       },
     };
-    Object.defineProperty(globalThis, "localStorage", { value: fake, configurable: true });
+    // `writable: true`: `defineProperty` defaults it to false when it CREATES the
+    // property, and a non-writable global throws on the plain assignment a later
+    // file in the same `bun test` process makes (`wiki-chat-options.test.ts` —
+    // red on CI only, since bun's file order varies by machine). The restore's
+    // flag is the one that counts; the install's keeps the fake assignable too.
+    Object.defineProperty(globalThis, "localStorage", { value: fake, configurable: true, writable: true });
     try {
       return fn(map);
     } finally {
-      Object.defineProperty(globalThis, "localStorage", { value: original, configurable: true });
+      Object.defineProperty(globalThis, "localStorage", { value: original, configurable: true, writable: true });
     }
   }
+
+  test("leaves the global ASSIGNABLE afterwards, for the next file in the process", () => {
+    withStorage({}, () => undefined);
+    const g = globalThis as Record<string, unknown>;
+    const before = g.localStorage;
+    expect(() => {
+      g.localStorage = { getItem: () => null };
+    }).not.toThrow();
+    g.localStorage = before;
+  });
 
   test("round-trips per wiki, and an untouched wiki holds nothing", () => {
     withStorage({}, (map) => {
