@@ -711,7 +711,7 @@ describe("the degrade warns", () => {
   });
 
   test("a CLIPPED answer warns, naming upstream's own limit", async () => {
-    // The clip drops the OLDEST-worked pages while every row that did arrive
+    // The clip drops the pages with the OLDEST write while every row that did arrive
     // still matches, so the store's match-rate guard cannot see it: this warn is
     // the only signal the axis silently shortened.
     const rec = recorder();
