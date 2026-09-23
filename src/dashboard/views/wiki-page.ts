@@ -598,6 +598,14 @@ export async function renderWikiPage(opts?: {
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .wiki-list-ghost-note { flex-shrink: 0; font-size: 10.5px; color: var(--text-muted); }
+    /* \`+N more\` under a closed series in Activity: opens the same fold as the
+       series row above it. Indented to the member rows' depth. */
+    .wiki-list-more {
+      display: block; background: none; border: 0; cursor: pointer; text-align: left;
+      padding: 2px 10px 5px 30px; font-family: inherit; font-size: 11.5px;
+      color: var(--accent-light);
+    }
+    .wiki-list-more:hover { text-decoration: underline; }
     /* The roll-up rides a chip that is NOT a control of its own — the whole row
        is the button — so it drops the pointer affordance and keeps the legible
        colour. */

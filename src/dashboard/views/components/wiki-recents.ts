@@ -59,6 +59,9 @@ export const PINS_MAX = 50;
 /** How many jump rows render. The header still reports the true total, so a key
  *  with 30 references says so rather than silently showing 8. */
 export const JUMP_MAX = 8;
+/** How many of a series' Activity-ranked pages a CLOSED series row shows under
+ *  it in Activity. The rest sit behind the `+N more` row. */
+export const SERIES_PEEK_MAX = 3;
 
 export function pinsKey(wiki: string): string {
   return PINS_KEY_PREFIX + wiki;
@@ -640,8 +643,8 @@ export type RailEntry =
       section: RailSection;
       page: WikiListing;
       /** Where the page really is. One value today; a value rather than a
-       *  boolean so a second lift (Activity never lifts a series member) reads
-       *  as a new case rather than as this one. */
+       *  boolean so a second lift reads as a new case rather than as this one.
+       *  Activity is not one: it moves the whole series, never one member. */
       reason: "pinned";
     }
   | {
@@ -687,6 +690,20 @@ export type RailEntry =
       /** Set when the group is open because the reader is ON a page inside it.
        *  The painter renders a control that does not pretend to toggle. */
       forcedOpen?: boolean;
+    }
+  | {
+      /**
+       * The `+N more` row under a CLOSED series in Activity, after its peek rows.
+       * A second control for the same fold — a click flips `toggleKey` exactly
+       * as the series row does — and, like a group row, not a page: `shown`
+       * does not count it.
+       */
+      kind: "more";
+      section: RailSection;
+      foldKey: string;
+      toggleKey: string;
+      /** The members the closed series holds that no peek row shows. */
+      hidden: number;
     };
 
 export interface RailInput {
@@ -739,8 +756,10 @@ export interface RailInput {
    * They are handed in SEPARATELY from `groups` because the two differ in every
    * way the rail cares about: a series claims its members BEFORE the family and
    * month rules are even computed (the caller does that subtraction — see
-   * `withoutSeriesMembers`), it is not lifted by Activity, and it renders as its
-   * own block above the remainder rather than at its first member's position.
+   * `withoutSeriesMembers`), Activity never lifts a member out of it (a ranked
+   * member moves the WHOLE series into Activity instead), and otherwise it
+   * renders as its own block above the remainder rather than at its first
+   * member's position.
    *
    * A query flattens them like everything else.
    */
@@ -920,6 +939,14 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  *    and expressed with the `closed:` key spelling so neither key's meaning can
  *    move when the default does;
  *  - and a query flattens groups exactly as it flattens attachments.
+ *
+ * **SERIES (`seriesGroups`) are placed by Activity, never split by it.** A
+ * member Activity ranked (or a member's attachment child) puts the WHOLE series
+ * at that Activity slot; closed, it shows up to `SERIES_PEEK_MAX` ranked
+ * members and a `+N more` row. A series nothing ranked renders in the `Series`
+ * block above the remainder. A pinned member Activity did not rank itself
+ * (unranked, or ranked only through its child) renders under `Pinned` and as a
+ * ghost in the open series.
  */
 export function buildRail(input: RailInput): RailModel {
   const { filtered, facetOnly, filters, pins, metaTail, activity } = input;
@@ -1143,27 +1170,80 @@ export function buildRail(input: RailInput): RailModel {
     }
   }
 
+  // ── Activity and Pinned: what they take ───────────────────────────────
+  // ⚠️ Activity claims BEFORE the pin list, so a page it lifts is skipped by
+  // Pinned and the remainder alike. Moving this block below it silently changes
+  // which section a new pinned page renders under, and nothing but this
+  // ordering decides it.
+  //
+  // Collected here and EMITTED further down, after the groups' open state is
+  // known: a series Activity ranked renders at its Activity slot, and whether
+  // that row is open depends on the lift both sections make.
+  /** One Activity slot: a page, or a series one of its pages earned. */
+  type ActivityItem = { row: ActivityRow } | { seriesKey: string };
+  const activityItems: ActivityItem[] = [];
+  const activityRows: ActivityRow[] = [];
+  /**
+   * The series Activity ranked, by fold key: the series and the members that put
+   * it there, in rank order. A member's attachment child ranks FOR its parent —
+   * the child renders under that parent, never as a loose Activity row.
+   */
+  const activitySeries = new Map<string, { group: RailGroup; ranked: WikiListing[] }>();
+  /** page key → the Activity row that ranked it, for the date cell of a series
+   *  member drawn in Activity. */
+  const activityOf = new Map<string, ActivityRow>();
+  /** Series members Activity ranked THEMSELVES — not only through a child. Only
+   *  these outrank a pin: a ★ on a page whose diagram changed stays a ★. */
+  const selfRanked = new Set<string>();
+  /** The series member a page ranks FOR: itself, or the member it is attached
+   *  to. Null for a page no series holds. */
+  const seriesHolderOf = (p: WikiListing): { group: RailGroup; holder: WikiListing } | null => {
+    const key = normalizeRel(p.relPath);
+    const own = groupOf.get(key);
+    if (own?.kind === "series") return { group: own, holder: p };
+    const parent = parentOf.get(key);
+    const viaParent = parent ? groupOf.get(normalizeRel(parent.relPath)) : undefined;
+    if (parent && viaParent?.kind === "series") return { group: viaParent, holder: parent };
+    return null;
+  };
+  let pinned: WikiListing[] = [];
   if (grouped) {
-    // ⚠️ Activity claims BEFORE the pin list, so a page it lifts is skipped by
-    // Pinned and the remainder alike. Moving this block below it silently changes
-    // which section a new pinned page renders under, and nothing but this
-    // ordering decides it.
     // Deduped by PAGE, like `resolve` and for the same reason: the
     // one-row-per-page invariant must not depend on the caller's input being
     // duplicate-free.
-    const activityRows: ActivityRow[] = [];
+    const seen = new Set<string>();
     for (const row of activity ?? []) {
       const rel = normalizeRel(row.page.relPath);
-      if (claimed.has(rel) || activityRows.some((r) => normalizeRel(r.page.relPath) === rel)) continue;
-      // ⚠️ SERIES OUTRANKS ACTIVITY, and this is the one place it is enforced —
-      // the deliberate difference from a family, where "Activity ranks PAGES,
-      // not groups" lifts a member out. A series is the work the reader returns
-      // to; lifting its newest page into Activity is exactly what the fold
-      // exists to stop, since the series then renders without the member the
-      // whole row is about. Pinned is the other way round (the ★ is explicit),
-      // and that lift leaves a ghost row instead.
-      if (inSeries(row.page)) continue;
+      if (claimed.has(rel) || seen.has(rel)) continue;
+      seen.add(rel);
+      // ⚠️ A SERIES MEMBER MOVES THE WHOLE SERIES, and this is the one place it
+      // is decided — the deliberate difference from a family, where "Activity
+      // ranks PAGES, not groups" lifts a member out. A series is the work the
+      // reader returns to: lifting its newest page alone renders the series
+      // without the member the whole row is about, and leaving it in a block
+      // below Activity hid the reader's newest work under week-old rows
+      // (measured on melosys-kode-wiki: a 15h member below an 8d Activity top).
+      // So the series takes the slot of its best-ranked member. Pinned is the
+      // other way round (the ★ is explicit), and that lift leaves a ghost row.
+      const held = seriesHolderOf(row.page);
+      if (held) {
+        const foldKey = normalizeFoldKey(held.group.key);
+        let entry = activitySeries.get(foldKey);
+        if (!entry) {
+          entry = { group: held.group, ranked: [] };
+          activitySeries.set(foldKey, entry);
+          activityItems.push({ seriesKey: foldKey });
+        }
+        const holderKey = normalizeRel(held.holder.relPath);
+        if (!entry.ranked.some((m) => normalizeRel(m.relPath) === holderKey)) entry.ranked.push(held.holder);
+        // The holder's date cell is the best signal that ranked it — its own, or
+        // its child's when only the child ranked. First seen is best: rank order.
+        if (!activityOf.has(holderKey)) activityOf.set(holderKey, row);
+        if (held.holder === row.page) selfRanked.add(holderKey);
+        continue;
+      }
       activityRows.push(row);
+      activityItems.push({ row });
     }
     // Activity wins the overlap because the SEEN set is shared: a page it already
     // took is skipped here, whatever spelling the pin list holds it under. There
@@ -1172,50 +1252,36 @@ export function buildRail(input: RailInput): RailModel {
     // that unsharing the set and dropping the filter each survived the whole
     // suite, while doing both together failed.
     //
+    // A series member Activity ranked ITSELF counts as taken too: it renders in
+    // its series' Activity row, so a pin on it must not draw it a second time.
+    // One ranked only through its attachment child does not — its pin resolves,
+    // and the series row names it as a ghost like any pinned member.
+    //
     // Resolved BEFORE the Activity rows are emitted (against a COPY of `claimed`,
     // since nothing is drawn yet) for the two-pass reason above: both sections'
     // placements have to be known before the first chip is counted.
     const pinSeen = new Set(claimed);
     for (const row of activityRows) pinSeen.add(normalizeRel(row.page.relPath));
-    const pinned = resolve(pins, filtered, pinSeen);
+    for (const key of selfRanked) pinSeen.add(key);
+    pinned = resolve(pins, filtered, pinSeen);
     for (const p of [...activityRows.map((r) => r.page), ...pinned]) {
       const key = normalizeRel(p.relPath);
       sectionLifted.add(key);
       if (parentOf.has(key)) lifted.add(key);
     }
-
-    if (activityRows.length) {
-      entries.push({ kind: "header", section: "activity", label: "Activity" });
-      for (const row of activityRows) {
-        // ⚠️ Re-tested against `claimed` HERE, not only at collection time: a
-        // PARENT emitted earlier in this same section takes its open group's
-        // children with it. Every child Activity ranked is `lifted`, so this is a
-        // belt-and-braces re-test of the one-row invariant rather than the
-        // mechanism — the mechanism is the lift.
-        if (claimed.has(normalizeRel(row.page.relPath))) continue;
-        emitRow(row.page, "activity", {
-          activity: { kind: row.kind, why: row.why, ageMs: row.ageMs, ...(row.worked ? { worked: true } : {}) },
-        });
-      }
-    }
-    if (pinned.length) {
-      entries.push({ kind: "header", section: "pinned", label: "Pinned" });
-      for (const p of pinned) {
-        // A pinned CHILD is lifted here exactly as Activity lifts one — the ★ is
-        // the reader's own choice, and a row they asked to keep at hand must not
-        // sit inside a closed group. No `claimed` re-test: `resolve` above both
-        // skipped what an earlier section took AND claimed what it returned, so
-        // testing it here would skip every pinned row (measured — it did).
-        emitRow(p, "pinned");
-      }
-    }
   }
+  /** The ranked members a CLOSED series row in Activity shows under it — never
+   *  one a pin lifted to `Pinned`, which is on screen there already. */
+  const peekOf = (foldKey: string): WikiListing[] =>
+    (activitySeries.get(foldKey)?.ranked ?? [])
+      .filter((m) => !sectionLifted.has(normalizeRel(m.relPath)))
+      .slice(0, SERIES_PEEK_MAX);
 
   // ── The groups' open state, decided AFTER the lift ────────────────────
-  // ⚠️ Computed HERE, above the series block and the remainder, because the
-  // series block emits before both and needs the same open-state rule the
-  // family and month rows use. It depends only on `sectionLifted` (filled by
-  // Activity and Pinned above) and on `groupMembers`, never on the remainder.
+  // ⚠️ Computed HERE, above every emit, because the series rows emit in Activity
+  // AND in their own block, and both need the same open-state rule the family
+  // and month rows use. It depends only on `sectionLifted` (filled by Activity
+  // and Pinned above) and on `groupMembers`, never on the remainder.
   /** The members of one group that the recall sections did not take. */
   const unlifted = (g: RailGroup): WikiListing[] =>
     (groupMembers.get(normalizeFoldKey(g.key)) ?? []).filter(
@@ -1241,6 +1307,9 @@ export function buildRail(input: RailInput): RailModel {
    * is its successor, which is an ordinary unlifted member — so pinning the
    * child the reader is looking at put it in Pinned AND forced its successor's
    * family open behind a dead control.
+   *
+   * A series in Activity is not forced open for a member its closed row PEEKS
+   * either: that member is on screen with the series closed.
    */
   let forcedGroupKey: string | null = null;
   if (grouped && input.openRelPath) {
@@ -1252,7 +1321,9 @@ export function buildRail(input: RailInput): RailModel {
         ? normalizeRel(openParent.relPath)
         : null;
     if (holderKey && !sectionLifted.has(openKey) && !sectionLifted.has(holderKey)) {
-      forcedGroupKey = normalizeFoldKey(groupOf.get(holderKey)!.key);
+      const foldKey = normalizeFoldKey(groupOf.get(holderKey)!.key);
+      const peeked = peekOf(foldKey).some((m) => normalizeRel(m.relPath) === holderKey);
+      if (!peeked) forcedGroupKey = foldKey;
     }
   }
   /** A GROUP's open state: forced, else whichever spelling the reader wrote
@@ -1265,16 +1336,18 @@ export function buildRail(input: RailInput): RailModel {
     return key === defaultOpenKey;
   };
 
-  // ── Series ────────────────────────────────────────────────────────────
-  // Their own block, above the remainder: a series is the piece of work the
-  // reader came back to, and interleaving it with the listing by date would put
-  // it wherever its newest page happens to sort on whichever sort is selected.
-  // Within the block the groups keep the order they were HANDED IN — which the
-  // caller sets with `orderSeriesGroups`, not `groupSeries` (whose own output is
-  // first appearance in the caller's sorted list). The rail owns no ordering
-  // rule of its own; see that function for what each sort mode means here.
-  let seriesEmitted = false;
-  for (const g of seriesList) {
+  /**
+   * Emit one SERIES: its row, then its body. Returns false when nothing of it is
+   * on screen. Shared by the series Activity ranked (drawn at its Activity slot)
+   * and the rest (drawn in their own block below).
+   *
+   * An OPEN series draws every member, newest first, then its ghosts. A CLOSED
+   * series in Activity draws the members Activity ranked (up to
+   * `SERIES_PEEK_MAX`, in rank order) and a `+N more` row for the rest — the
+   * newest work is on screen without opening anything, and the row above says
+   * which piece of work it belongs to.
+   */
+  const emitSeries = (g: RailGroup, section: RailSection, beforeRow?: () => void): boolean => {
     const foldKey = normalizeFoldKey(g.key);
     const present = groupMembers.get(foldKey) ?? [];
     const members = unlifted(g);
@@ -1296,16 +1369,13 @@ export function buildRail(input: RailInput): RailModel {
     // A series with neither a member nor a ghost present is not on screen at
     // all — a facet took every page of it — and a header standing for nothing
     // is furniture.
-    if (!members.length && !ghosts.length) continue;
-    if (!seriesEmitted) {
-      entries.push({ kind: "header", section: "series", label: "Series" });
-      seriesEmitted = true;
-    }
+    if (!members.length && !ghosts.length) return false;
+    beforeRow?.();
     const shown = members.length + ghosts.length + superseded.length;
     const expanded = isGroupExpanded(foldKey);
     entries.push({
       kind: "group",
-      section: "series",
+      section,
       group: g,
       foldKey,
       // A series never defaults open, so it never offers the `closed:` spelling:
@@ -1323,13 +1393,82 @@ export function buildRail(input: RailInput): RailModel {
       folded: !expanded,
       ...(forcedGroupKey === foldKey ? { forcedOpen: true } : {}),
     });
+    const memberRow = (m: WikiListing): void => {
+      const act = activityOf.get(normalizeRel(m.relPath));
+      emitRow(m, section, {
+        inGroup: g,
+        ...(act ? { activity: { kind: act.kind, why: act.why, ageMs: act.ageMs, ...(act.worked ? { worked: true } : {}) } } : {}),
+      });
+    };
     if (expanded) {
-      for (const m of members) emitRow(m, "series", { inGroup: g });
+      for (const m of members) memberRow(m);
       // Ghosts last: they are a footnote about pages that are already on screen,
       // not content, and interleaving them into the date order would cost the
       // member rows their own.
-      for (const p of ghosts) entries.push({ kind: "ghost", section: "series", page: p, reason: "pinned" });
+      for (const p of ghosts) entries.push({ kind: "ghost", section, page: p, reason: "pinned" });
+      return true;
     }
+    const peek = peekOf(foldKey);
+    if (!peek.length) return true;
+    for (const m of peek) memberRow(m);
+    const hidden = members.length - peek.length;
+    if (hidden > 0) entries.push({ kind: "more", section, foldKey, toggleKey: foldKey, hidden });
+    return true;
+  };
+
+  if (grouped) {
+    if (activityItems.length) {
+      entries.push({ kind: "header", section: "activity", label: "Activity" });
+      for (const item of activityItems) {
+        if ("seriesKey" in item) {
+          emitSeries(activitySeries.get(item.seriesKey)!.group, "activity");
+          continue;
+        }
+        const row = item.row;
+        // ⚠️ Re-tested against `claimed` HERE, not only at collection time: a
+        // PARENT emitted earlier in this same section takes its open group's
+        // children with it. Every child Activity ranked is `lifted`, so this is a
+        // belt-and-braces re-test of the one-row invariant rather than the
+        // mechanism — the mechanism is the lift.
+        if (claimed.has(normalizeRel(row.page.relPath))) continue;
+        emitRow(row.page, "activity", {
+          activity: { kind: row.kind, why: row.why, ageMs: row.ageMs, ...(row.worked ? { worked: true } : {}) },
+        });
+      }
+    }
+    if (pinned.length) {
+      entries.push({ kind: "header", section: "pinned", label: "Pinned" });
+      for (const p of pinned) {
+        // A pinned CHILD is lifted here exactly as Activity lifts one — the ★ is
+        // the reader's own choice, and a row they asked to keep at hand must not
+        // sit inside a closed group. No `claimed` re-test: `resolve` above both
+        // skipped what an earlier section took AND claimed what it returned, so
+        // testing it here would skip every pinned row (measured — it did).
+        emitRow(p, "pinned");
+      }
+    }
+  }
+
+  // ── Series ────────────────────────────────────────────────────────────
+  // Their own block, above the remainder: a series is the piece of work the
+  // reader came back to, and interleaving it with the listing by date would put
+  // it wherever its newest page happens to sort on whichever sort is selected.
+  // A series Activity ranked is already drawn at its Activity slot, so this
+  // block holds the series nothing recent touched — older context.
+  // Within the block the groups keep the order they were HANDED IN — which the
+  // caller sets with `orderSeriesGroups`, not `groupSeries` (whose own output is
+  // first appearance in the caller's sorted list). The rail owns no ordering
+  // rule of its own; see that function for what each sort mode means here.
+  let seriesEmitted = activitySeries.size > 0;
+  let seriesHeader = false;
+  for (const g of seriesList) {
+    if (activitySeries.has(normalizeFoldKey(g.key))) continue;
+    const drawn = emitSeries(g, "series", () => {
+      if (seriesHeader) return;
+      entries.push({ kind: "header", section: "series", label: "Series" });
+      seriesHeader = true;
+    });
+    if (drawn) seriesEmitted = true;
   }
 
   const remainder = filtered.filter((p) => {
