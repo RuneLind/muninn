@@ -68,9 +68,10 @@ export interface WorkedLedgerMemo {
    *  FIRST on every later refresh of this root, so a wiki registered through a
    *  symlink pays the second call and the `realpath` once rather than per poll. */
   rootAsked: string;
-  /** Upstream clipped its own answer at `limit` rows. The clip drops the
-   *  OLDEST-worked pages, so the axis silently shortens — and the match rate
-   *  cannot see it, because every row that did arrive still matches. */
+  /** Upstream clipped its own answer at `limit` rows. Upstream orders by `w`,
+   *  so the clip drops the pages with the OLDEST write (a recent `b` does not
+   *  save one), and the axis silently shortens — the match rate cannot see it,
+   *  because every row that did arrive still matches. */
   truncated: boolean;
 }
 
@@ -177,11 +178,13 @@ export type WorkedPagesParse =
 /**
  * Validate and fold one `?summary=1` body.
  *
- * `pages` must be an array of `{p: string, w: number}`; `b` (the bash-derived
- * touch) and `s` (the writing-session count) ride the payload and are
- * deliberately NOT read — `bash` is the loosest input the ledger has (a `sed -i`
- * loop is exactly how a mechanical pass runs), so folding it in is a decision of
- * its own, not a field to pick up because it is there.
+ * `pages` must be an array of `{p: string, w: number, b?: number}`, and a page's
+ * worked date is `max(w, b)`. `b` is the newest bash touch (a `sed -i`, a
+ * `cat >`, a python-heredoc `open(…, "w")` target — claude-usage #215), under the
+ * same fan-out discount as `w`: a session edits a page through Bash as often as
+ * through Edit, and `w` alone dated such a page to the session before. `b` is
+ * optional and skipped when malformed, never rejecting the row: it only ever
+ * moves a valid `w` later. `s` (the writing-session count) is not read.
  *
  * ONE malformed row rejects the WHOLE answer rather than being skipped. A body
  * that is half the contract is a wrong or broken service, and a half-read of it
@@ -206,19 +209,20 @@ export function parseWorkedPages(body: unknown): WorkedPagesParse {
     if (typeof row !== "object" || row === null || Array.isArray(row)) {
       return { ok: false, reason: "malformed-rows", detail: `pages[${i}] is not an object` };
     }
-    const { p, w } = row as { p?: unknown; w?: unknown };
+    const { p, w, b } = row as { p?: unknown; w?: unknown; b?: unknown };
     if (typeof p !== "string" || p.trim() === "") {
       return { ok: false, reason: "malformed-rows", detail: `pages[${i}].p is not a path` };
     }
-    if (typeof w !== "number" || !Number.isFinite(w) || w <= 0) {
+    if (!isInstant(w)) {
       return { ok: false, reason: "malformed-rows", detail: `pages[${i}].w is not an instant` };
     }
+    const worked = isInstant(b) && b > w ? b : w;
     const key = normalizeWorkedPath(p);
     // Two spellings of one path fold to one key, and the NEWER write wins: the
     // field answers "when was this page last worked on", which a lower value
     // cannot make less true.
     const seen = pages.get(key);
-    if (seen === undefined || w > seen) pages.set(key, w);
+    if (seen === undefined || worked > seen) pages.set(key, worked);
   }
   const { truncated, limit } = body as { truncated?: unknown; limit?: unknown };
   return {
@@ -228,6 +232,10 @@ export function parseWorkedPages(body: unknown): WorkedPagesParse {
     truncated: truncated === true,
     ...(typeof limit === "number" && Number.isFinite(limit) ? { limit } : {}),
   };
+}
+
+function isInstant(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
 }
 
 /** Per-root memo. Roots are independent: one wiki's unreachable ledger never
@@ -408,14 +416,14 @@ async function runRefresh(
   };
   memos.set(root, memo);
   if (memo.truncated) {
-    // The clip drops the OLDEST-worked pages, and every row that DID arrive
-    // still matches — so the match-rate warn cannot see this one.
+    // The clip drops the pages with the OLDEST write, and every row that DID
+    // arrive still matches — so the match-rate warn cannot see this one.
     warnDegraded(
       deps,
       root,
       "truncated",
       `upstream clipped its answer for ${asked} at ${parsed.limit ?? "its"} row(s) — the ` +
-        `oldest-worked pages are missing from the axis (${deps.baseUrl})`,
+        `pages with the oldest write are missing from the axis (${deps.baseUrl})`,
     );
   }
   log.debug("worked ledger: {pages} page(s) for {root} from {baseUrl}", {
