@@ -1302,6 +1302,17 @@ function renderList(): void {
         `</div>`;
       return;
     }
+    // The `+N more` row under a CLOSED series in Activity: a second button for
+    // the same fold, so the generic `[data-fold-key]` handler opens the series.
+    // Not a page row — no `data-relpath`, and `#wikiCount` does not count it.
+    if (entry.kind === "more") {
+      const label = `+${entry.hidden} more`;
+      html +=
+        `<button type="button" class="wiki-list-more" data-section="${esc(entry.section)}"` +
+        ` data-fold-key="${esc(entry.toggleKey)}" aria-expanded="false"` +
+        ` title="${esc(`Show all ${entry.hidden} more pages in this series`)}">${esc(label)}</button>`;
+      return;
+    }
     const p = entry.page;
     // WHICH SIGNAL this row's date comes from: the one that PUT an Activity row
     // there, the one the list SORTED on for every other row. `null` is the

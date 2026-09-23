@@ -13,6 +13,7 @@ import {
   JUMP_MAX,
   PINS_MAX,
   SECTION_META_FOLD_KEY,
+  SERIES_PEEK_MAX,
   buildRail,
   foldChipCompactLabel,
   foldChipCountsClass,
@@ -1707,8 +1708,8 @@ describe("groups (families and months)", () => {
       groups: railGroups(filtered, { folder: "", sort: "updated", projects: {} }),
     });
     const order = m.entries
-      .filter((e) => e.kind !== "header")
-      .map((e) => (e.kind === "group" ? e.group.label : e.page.relPath));
+      .filter((e) => e.kind !== "header" && e.kind !== "more")
+      .map((e) => (e.kind === "group" ? e.group.label : (e as { page: WikiListing }).page.relPath));
     expect(order).toEqual(["plans/aaa.mdx", "fam-one-*", "plans/zeta.mdx"]);
   });
 
@@ -2259,20 +2260,172 @@ describe("buildRail — series", () => {
     expect(row.latest).toBe(true);
   });
 
-  test("ACTIVITY does not lift a series member out — the deliberate family difference", () => {
-    const activity: ActivityRow[] = [
-      { page: A, kind: "changed", why: "changed today", ageMs: 1, score: 9 },
-      { page: LOOSE, kind: "changed", why: "changed today", ageMs: 1, score: 8 },
-    ];
-    const m = build({ activity, openFolds: ["series:alpha"] });
-    // Activity and Pinned still come FIRST in the rail; the series block sits
-    // between them and the listing. `LOOSE` was the only remainder row and
-    // Activity took it, so there is no `Other pages` tail here.
+  const act = (p: WikiListing, score: number): ActivityRow => ({
+    page: p,
+    kind: "changed",
+    why: "changed today",
+    ageMs: 100 - score,
+    score,
+  });
+  const mores = (entries: RailEntry[]) =>
+    entries.filter((e) => e.kind === "more") as Array<Extract<RailEntry, { kind: "more" }>>;
+  /** Every non-header entry as one comparable token, in render order. */
+  const shape = (entries: RailEntry[]) =>
+    entries
+      .filter((e) => e.kind !== "header")
+      .map((e) =>
+        e.kind === "group"
+          ? `${e.section}:[${e.group.label}]`
+          : e.kind === "more"
+            ? `${e.section}:+${e.hidden}`
+            : `${e.section}:${(e as { page: WikiListing }).page.relPath}`,
+      );
+
+  test("a ranked member moves the WHOLE series into Activity, at its best member's slot", () => {
+    const m = build({ activity: [act(B, 9), act(LOOSE, 8)] });
+    // No `Series` block: the one series is drawn in Activity, and LOOSE was the
+    // only remainder row.
+    expect(headers(m.entries)).toEqual(["Activity"]);
+    expect(shape(m.entries)).toEqual([
+      "activity:[Alpha work]",
+      "activity:plans/b.mdx",
+      "activity:+2",
+      "activity:plans/loose.mdx",
+    ]);
+  });
+
+  test("…and below a loose page that outranks it", () => {
+    const m = build({ activity: [act(LOOSE, 9), act(C, 8)] });
+    expect(shape(m.entries)).toEqual([
+      "activity:plans/loose.mdx",
+      "activity:[Alpha work]",
+      "activity:blogs/c.mdx",
+      "activity:+2",
+    ]);
+  });
+
+  test("a CLOSED series peeks its ranked members in RANK order, and `+N more` counts the rest", () => {
+    const m = build({ activity: [act(C, 9), act(A, 8)] });
+    expect(shape(m.entries)).toEqual([
+      "activity:[Alpha work]",
+      "activity:blogs/c.mdx",
+      "activity:plans/a.mdx",
+      "activity:+1",
+      "all:plans/loose.mdx",
+    ]);
+    const peek = rows(m.entries).filter((r) => r.section === "activity");
+    expect(peek.every((r) => r.member?.kind === "series")).toBe(true);
+    // The date cell of a peek row is the Activity signal that ranked it.
+    expect(peek[0]!.activity?.why).toBe("changed today");
+    // Peek rows are pages on screen; the `+N more` row and the group row are not.
+    expect(m.shown).toBe(3); // c, a, loose
+    expect(mores(m.entries)[0]!.toggleKey).toBe("series:alpha");
+    expect(groupsOf(m.entries)[0]!.folded).toBe(true);
+  });
+
+  test("the peek stops at SERIES_PEEK_MAX", () => {
+    const D = plan("plans/d.mdx", { status_date: "2026-01-01" });
+    const all = [A, B, C, D, LOOSE];
+    const m = build({
+      filtered: all,
+      facetOnly: all,
+      seriesGroups: groupSeries(all),
+      activity: [act(D, 9), act(C, 8), act(B, 7), act(A, 6)],
+    });
+    const peek = rows(m.entries).filter((r) => r.section === "activity").map((r) => r.page.relPath);
+    expect(peek).toHaveLength(SERIES_PEEK_MAX);
+    expect(peek).toEqual(["plans/d.mdx", "blogs/c.mdx", "plans/b.mdx"]);
+    expect(mores(m.entries)[0]!.hidden).toBe(1);
+  });
+
+  test("no `+N more` row when the peek already shows every member", () => {
+    const m = build({ activity: [act(A, 9), act(B, 8), act(C, 7)] });
+    expect(mores(m.entries)).toEqual([]);
+  });
+
+  test("an OPEN series in Activity draws every member newest first, with no `+N more`", () => {
+    const m = build({ activity: [act(C, 9)], openFolds: ["series:alpha"] });
+    expect(shape(m.entries)).toEqual([
+      "activity:[Alpha work]",
+      "activity:plans/a.mdx",
+      "activity:plans/b.mdx",
+      "activity:blogs/c.mdx",
+      "all:plans/loose.mdx",
+    ]);
+    const rs = rows(m.entries);
+    expect(rs.find((r) => r.page.relPath === "blogs/c.mdx")!.activity?.kind).toBe("changed");
+    expect(rs.find((r) => r.page.relPath === "plans/a.mdx")!.activity).toBeUndefined();
+  });
+
+  test("a series nothing ranked stays in its own block below Activity", () => {
+    const m = build({ activity: [act(LOOSE, 9)] });
     expect(headers(m.entries)).toEqual(["Activity", "Series"]);
-    expect(rows(m.entries).filter((r) => r.section === "activity").map((r) => r.page.relPath)).toEqual(
-      ["plans/loose.mdx"],
-    );
-    expect(rows(m.entries).find((r) => r.page.relPath === "plans/a.mdx")!.section).toBe("series");
+    expect(groupsOf(m.entries)[0]!.section).toBe("series");
+    expect(mores(m.entries)).toEqual([]);
+  });
+
+  test("two ranked series each take their own slot; the unranked one stays below", () => {
+    const X1 = page({ relPath: "plans/x1.mdx", series: "beta", status_date: "2026-08-01" });
+    const Y1 = page({ relPath: "plans/y1.mdx", series: "gamma", status_date: "2026-08-01" });
+    const all = [A, B, C, X1, Y1, LOOSE];
+    const m = build({
+      filtered: all,
+      facetOnly: all,
+      seriesGroups: groupSeries(all),
+      activity: [act(X1, 9), act(LOOSE, 8), act(A, 7)],
+    });
+    expect(headers(m.entries)).toEqual(["Activity", "Series"]);
+    expect(groupsOf(m.entries).map((g) => [g.section, g.group.key])).toEqual([
+      ["activity", "series:beta"],
+      ["activity", "series:alpha"],
+      ["series", "series:gamma"],
+    ]);
+  });
+
+  test("a ranked ATTACHMENT CHILD of a member ranks for its parent and stays under it", () => {
+    const child = page({ relPath: "plans/a-diagram.html", parent: "plans/a.mdx", pairedBy: "link" });
+    const all = [...ALL, child];
+    const m = build({
+      filtered: all,
+      facetOnly: all,
+      seriesGroups: groupSeries(all),
+      activity: [act(child, 9), act(LOOSE, 8)],
+    });
+    // Never a loose Activity row of its own: that orphaned it from the series.
+    expect(rows(m.entries).some((r) => r.page.relPath === "plans/a-diagram.html")).toBe(false);
+    const parent = rows(m.entries).find((r) => r.page.relPath === "plans/a.mdx")!;
+    expect(parent.section).toBe("activity");
+    expect(parent.member?.kind).toBe("series");
+    expect(parent.children?.map((c) => c.relPath)).toEqual(["plans/a-diagram.html"]);
+    expect(parent.folded).toBe(true);
+  });
+
+  test("a ranked member that is also PINNED renders once, in Activity", () => {
+    const m = build({ activity: [act(B, 9)], pins: ["plans/b.mdx"] });
+    expect(headers(m.entries)).not.toContain("Pinned");
+    expect(rows(m.entries).filter((r) => r.page.relPath === "plans/b.mdx").map((r) => r.section)).toEqual([
+      "activity",
+    ]);
+    expect(ghosts(m.entries)).toEqual([]);
+  });
+
+  test("an UNRANKED pinned member of a ranked series is under Pinned, and a ghost in the open series", () => {
+    const m = build({ activity: [act(A, 9)], pins: ["plans/b.mdx"], openFolds: ["series:alpha"] });
+    expect(rows(m.entries).find((r) => r.page.relPath === "plans/b.mdx")!.section).toBe("pinned");
+    expect(ghosts(m.entries).map((g) => [g.section, g.page.relPath])).toEqual([["activity", "plans/b.mdx"]]);
+    // Closed, the ghost is not drawn, and `+N more` does not count a pinned page.
+    const closed = build({ activity: [act(A, 9)], pins: ["plans/b.mdx"] });
+    expect(ghosts(closed.entries)).toEqual([]);
+    expect(mores(closed.entries)[0]!.hidden).toBe(1);
+  });
+
+  test("the open page PEEKED by a closed series does not force it open; an unpeeked one does", () => {
+    const peeked = build({ activity: [act(A, 9)], openRelPath: "plans/a.mdx" });
+    expect(groupsOf(peeked.entries)[0]!.folded).toBe(true);
+    expect(groupsOf(peeked.entries)[0]!.forcedOpen).toBeUndefined();
+    const hidden = build({ activity: [act(A, 9)], openRelPath: "blogs/c.mdx" });
+    expect(groupsOf(hidden.entries)[0]!.folded).toBe(false);
+    expect(groupsOf(hidden.entries)[0]!.forcedOpen).toBe(true);
   });
 
   test("PINNED outranks the series: a real row above, a GHOST row inside", () => {

@@ -28,7 +28,7 @@
 
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
@@ -50,10 +50,10 @@ const WIKI = "e2e-series";
 const SERIES_KEY = "series:prov";
 const LABEL = "Wiki provenance";
 
-/** Settled, so Activity claims none of these rows. A series member would not be
- *  lifted by Activity anyway — that is one of the rules here — but every OTHER
- *  fixture page would be, and the rail this file asserts about would be a list
- *  of Activity rows. */
+/** Settled, so Activity claims none of these rows: a fresh series member would
+ *  move its whole series into Activity, and every OTHER fixture page would be
+ *  lifted, so the rail this file asserts about would be a list of Activity rows.
+ *  The third wiki below (`WIKI3`) is the one place pages are left fresh. */
 function md(title: string, extra: string[] = []): string {
   return ["---", `title: ${title}`, SETTLED_CREATED_LINE, ...extra, "---", "", "Body.", ""].join(
     "\n",
@@ -162,9 +162,51 @@ const ORPHAN_PAGES: Array<[string, string]> = [
   [ORPHAN_SUCCESSOR, md("Orphan successor")],
 ];
 
+/**
+ * A THIRD wiki, for the one rule the settled fixtures above exclude by
+ * construction: a series Activity ranked renders AT its Activity slot. Five
+ * members, all settled except two signals:
+ *
+ *  - `ACT_FRESH`, a member written "now" — Activity ranks it, so the series
+ *    moves into Activity with this page peeked under its row;
+ *  - `ACT_DIAGRAM`, a fresh `.html` embedded in the settled `ACT_HOST` member —
+ *    it ranks FOR its host, so the host is peeked and the diagram stays under
+ *    it instead of standing in Activity on its own.
+ *
+ * The other three members stay behind the `+N more` row.
+ */
+const WIKI3 = "e2e-series-activity";
+const ACT_KEY = "series:act";
+const ACT_FRESH = "plans/act-fresh.mdx";
+const ACT_HOST = "flows/act-host.mdx";
+const ACT_DIAGRAM = "flows/act-host-diagram.html";
+const ACT_PAGES: Array<[string, string]> = [
+  [ACT_FRESH, md("Act fresh plan", ["series: act", "series_label: Act work", "status_date: 2026-09-01"])],
+  [
+    ACT_HOST,
+    [
+      "---",
+      "title: Act host overview",
+      SETTLED_CREATED_LINE,
+      "series: act",
+      "status_date: 2026-08-01",
+      "---",
+      "",
+      '<Embed src="./act-host-diagram.html" height="400" title="Diagram" />',
+      "",
+    ].join("\n"),
+  ],
+  [ACT_DIAGRAM, "<!doctype html><title>Act host diagram</title><p>Diagram.</p>\n"],
+  ["plans/act-old-1.mdx", md("Act old 1", ["series: act", "status_date: 2026-07-01"])],
+  ["plans/act-old-2.mdx", md("Act old 2", ["series: act", "status_date: 2026-06-01"])],
+  ["plans/act-old-3.mdx", md("Act old 3", ["series: act", "status_date: 2026-05-01"])],
+  ["plans/act-loose.mdx", md("Act loose page")],
+];
+
 let server: ChildProcess | undefined;
 let root = "";
 let root2 = "";
+let root3 = "";
 
 async function writeWiki(dir: string, pages: Array<[string, string]>): Promise<void> {
   for (const [rel, body] of pages) {
@@ -179,6 +221,11 @@ test.beforeAll(async () => {
   await writeWiki(root, PAGES);
   root2 = await mkdtemp(path.join(tmpdir(), "muninn-e2e-series-orphan-"));
   await writeWiki(root2, ORPHAN_PAGES);
+  root3 = await mkdtemp(path.join(tmpdir(), "muninn-e2e-series-activity-"));
+  await writeWiki(root3, ACT_PAGES);
+  // Un-settle the two fresh signals: `writeWiki` backdated every mtime.
+  const now = new Date();
+  for (const rel of [ACT_FRESH, ACT_DIAGRAM]) await utimes(path.join(root3, rel), now, now);
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -188,7 +235,7 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root},${WIKI2}=${root2}`,
+      WIKI_EXTRA: `${WIKI}=${root},${WIKI2}=${root2},${WIKI3}=${root3}`,
     },
     stdio: "ignore",
   });
@@ -210,6 +257,7 @@ test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
   if (root2) await rm(root2, { recursive: true, force: true });
+  if (root3) await rm(root3, { recursive: true, force: true });
 });
 
 type Page = import("@playwright/test").Page;
@@ -268,6 +316,41 @@ async function setRailWidth(page: Page, px: number): Promise<void> {
     { key: RAIL_WIDTH_KEY, value: String(px) },
   );
 }
+
+test.describe("Wiki rail: a series Activity ranked", () => {
+  const activityRow = (page: Page, rel: string) =>
+    page.locator(`.wiki-list-item[data-section="activity"][data-relpath="${rel}"]`);
+
+  test("renders AT its Activity slot, peeking the ranked members, with `+N more`", async ({ page }) => {
+    await openWiki(page, WIKI3);
+    await expect(page.locator(`.wiki-list-group[data-section="activity"][data-group="${ACT_KEY}"]`)).toBeVisible();
+    // Nothing else is a series, so there is no `Series` block at all.
+    await expect(page.locator('.wiki-list-sec[data-section="series"]')).toHaveCount(0);
+    await expect(activityRow(page, ACT_FRESH)).toBeVisible();
+    // The diagram ranked for its host: the HOST is peeked, the diagram is not a
+    // loose Activity row (it sat alone in Activity, orphaned, before this rule).
+    await expect(activityRow(page, ACT_HOST)).toBeVisible();
+    await expect(page.locator(`.wiki-list-item[data-relpath="${ACT_DIAGRAM}"]`)).toHaveCount(0);
+    await expect(activityRow(page, ACT_HOST).locator(".wiki-fold-chip")).toBeVisible();
+    await expect(page.locator(".wiki-list-more")).toHaveText("+3 more");
+    // 2 peek rows + the loose page; the three hidden members and the diagram are not rows.
+    expect(await countText(page)).toMatch(/^3 \/ /);
+  });
+
+  test("`+N more` opens the series in place, and the row is not counted", async ({ page }) => {
+    await openWiki(page, WIKI3);
+    await page.locator(".wiki-list-more").click();
+    await expect(page.locator(".wiki-list-more")).toHaveCount(0);
+    const members = page.locator('.wiki-list-item.member[data-section="activity"]');
+    await expect(members).toHaveCount(5);
+    expect(await countText(page)).toMatch(/^6 \/ /);
+    // The same fold key as the series row, so a reload keeps it open.
+    await page.reload();
+    await expect(page.locator('.wiki-list-item.member[data-section="activity"]')).toHaveCount(5);
+    await page.locator(`.wiki-list-group[data-group="${ACT_KEY}"] .wiki-group-fold`).click();
+    await expect(page.locator(".wiki-list-more")).toHaveText("+3 more");
+  });
+});
 
 test.describe("Wiki rail: series", () => {
   test("ONE series row, always on — no toggle, no query", async ({ page }) => {
