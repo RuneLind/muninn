@@ -266,13 +266,12 @@ export function parseGitLog(
       } else {
         firstSeen(e.path, ts);
       }
+      // A delete retires the path's touch history even inside a sweep, so a page
+      // re-added there never steps back into the deleted file's edits.
+      if (e.status === "D") touches.delete(e.path);
       if (isSweep) continue;
       touched.set(e.path, ts);
-      if (!commit) continue;
-      if (e.status === "D") {
-        touches.delete(e.path);
-        continue;
-      }
+      if (!commit || e.status === "D") continue;
       // An add or a copy has no parent blob to compare, so it is always an edit.
       const parentPath =
         e.status === "A" || e.status === "C" ? undefined : (e.from ?? e.path);
@@ -697,6 +696,8 @@ async function resolveMetadataOnlyTouches(
   touched: Map<string, number>,
   touches: Map<string, TouchRecord[]>,
 ): Promise<Map<string, number>> {
+  // Set when the budget race is lost, so the loser spawns no further rounds.
+  let aborted = false;
   const run = async (): Promise<Map<string, number>> => {
     const out = new Map(touched);
     let pending: { key: string; list: TouchRecord[]; i: number }[] = [];
@@ -709,7 +710,7 @@ async function resolveMetadataOnlyTouches(
       pending.push({ key, list, i: list.length - 1 });
     }
     let moved = 0;
-    for (let step = 0; step < METADATA_TOUCH_MAX_STEPS && pending.length > 0; step++) {
+    for (let step = 0; step < METADATA_TOUCH_MAX_STEPS && pending.length > 0 && !aborted; step++) {
       const judged = pending.filter((c) => {
         const r = c.list[c.i]!;
         return r.parentPath !== undefined && !r.path.includes("\n") && !r.parentPath.includes("\n");
@@ -745,7 +746,12 @@ async function resolveMetadataOnlyTouches(
 
   const resolved = await Promise.race([
     run().catch(() => null),
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), classifyBudgetMs).unref?.()),
+    new Promise<null>((resolve) =>
+      setTimeout(() => {
+        aborted = true;
+        resolve(null);
+      }, classifyBudgetMs).unref?.(),
+    ),
   ]);
   if (resolved === null) {
     log.debug(

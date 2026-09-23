@@ -998,3 +998,56 @@ test("buildWikiGitDates: a committed-touch classification over its budget keeps 
     await rm(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("parseGitLog: a delete inside a SWEEP retires the path's touch history", () => {
+  // Otherwise a page re-added at the path inherits the deleted file's edits:
+  // its metadata-only touch steps back into a page that no longer exists.
+  const { touches } = parseGitLog(
+    [
+      `${H1} ${at("2026-05-01T10:00:00Z")}`,
+      "M\tplans/p.md",
+      `${H2} ${at("2026-06-01T10:00:00Z")}`,
+      "D\tplans/p.md",
+      ...filler(SWEEP_THRESHOLD, "d").map((p) => `M\t${p}`),
+    ].join("\n"),
+  );
+  expect(touches.has("plans/p.md")).toBe(false);
+});
+
+test("buildWikiGitDates: a classification that lost its race spawns no further rounds", async () => {
+  // Each round is one cat-file; the shim logs every spawn and takes 200 ms, the
+  // budget is 300 ms, and the page needs four rounds (three metadata commits,
+  // then the edit). Without the abort the loser keeps spawning in the background.
+  const { rm, writeFile, mkdir, readFile } = await import("node:fs/promises");
+  const path = (await import("node:path")).default;
+  const { wiki, dir, write } = await seededWiki({ "meta.md": page("Meta", "s0", "Prose.") });
+  const realGit = Bun.which("git");
+  const shimDir = path.join(dir, "shim");
+  const spawnLog = path.join(dir, "spawns.log");
+  const pathBefore = process.env.PATH;
+  try {
+    await write("meta.md", page("Meta", "s0", "Edited prose."));
+    await commitAt(dir, "2026-09-01T10:00:00Z", "edit");
+    for (let i = 1; i <= 3; i++) {
+      await write("meta.md", page("Meta", `s${i}`, "Edited prose."));
+      await commitAt(dir, `2026-09-0${i + 1}T10:00:00Z`, `meta ${i}`);
+    }
+    await mkdir(shimDir, { recursive: true });
+    await writeFile(
+      path.join(shimDir, "git"),
+      `#!/bin/sh\nfor a in "$@"; do\n  case "$a" in cat-file) echo x >> ${spawnLog}; sleep 0.2 ;; esac\ndone\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${pathBefore ?? ""}`;
+    __setClassifyBudgetForTest(300);
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.touched.get("meta.md")).toBe(ms("2026-09-04T10:00:00Z"));
+    await Bun.sleep(1500);
+    const spawns = (await readFile(spawnLog, "utf8").catch(() => "")).split("\n").filter(Boolean).length;
+    expect(spawns).toBeLessThanOrEqual(2);
+  } finally {
+    __setClassifyBudgetForTest(null);
+    process.env.PATH = pathBefore;
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 20_000);
