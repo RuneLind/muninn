@@ -813,8 +813,12 @@ export interface WikiIndex {
    * shape (93% of its pages carry a write row, every one of them a bulk pass).
    * Offering the mode there is offering a relabelled "Recently updated", and this
    * is the ONE place that figure is stated.
+   *
+   * `asOfMs` is when the ledger answered (`WorkedLedgerMemo.answeredAt`). The
+   * Activity rank sets an update aside for an older worked date only when the
+   * update predates it, so an edit made after the ledger answered is not judged.
    */
-  workedCoverage?: { matched: number; total: number; returned: number };
+  workedCoverage?: { matched: number; total: number; returned: number; asOfMs: number };
 }
 
 /** A page the same-stem precedence rule dropped, and the page that displaced it. */
@@ -3341,7 +3345,12 @@ export async function buildWikiIndex(
         matched++;
       }
     }
-    workedCoverage = { matched, total: pages.length, returned: workedMemo.returned };
+    workedCoverage = {
+      matched,
+      total: pages.length,
+      returned: workedMemo.returned,
+      asOfMs: workedMemo.answeredAt,
+    };
     if (workedMatchWarnDue(root, matched, workedMemo.returned)) {
       // Names the base URL for the reason every other claude-usage message does:
       // the operator's first question about a degraded axis is which service, and

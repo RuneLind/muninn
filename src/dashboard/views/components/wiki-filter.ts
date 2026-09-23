@@ -918,10 +918,15 @@ export function workedSignal(
   now: number = Date.now(),
 ): { ms: number; label: string; kind: WikiDateKind } {
   const ms = p.workedMs;
-  if (typeof ms === "number" && Number.isFinite(ms) && ms > 0 && !isImplausibleFutureDate(ms, now)) {
-    return { ms, label: localDay(new Date(ms)), kind: "worked" };
-  }
+  if (isUsableWorkedMs(ms, now)) return { ms, label: localDay(new Date(ms)), kind: "worked" };
   return updatedSignal(p, now);
+}
+
+/** Whether a `workedMs` is a stamp any reader may use: a positive instant the
+ *  future guard accepts. {@link workedSignal}'s rung, shared with the Activity
+ *  rank so the two cannot judge one stamp two ways. */
+export function isUsableWorkedMs(ms: unknown, now: number): ms is number {
+  return typeof ms === "number" && Number.isFinite(ms) && ms > 0 && !isImplausibleFutureDate(ms, now);
 }
 
 /**

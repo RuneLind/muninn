@@ -160,6 +160,12 @@ export const E2E_PORTS = {
   // (500, over-cap body, the un-upgraded raw row form) are driven in one boot.
   "wiki-worked-recency": 3067,
   "wiki-worked-recency/ledger": 3068,
+  // The worked-on SUBSTITUTION inside the rail's Activity ranking and the
+  // per-wiki `workedGate` in front of it: ONE muninn over four temp wikis whose
+  // pages are identical and whose ledger coverage is not, and ONE fake
+  // claude-usage answering per root.
+  "wiki-activity-worked": 3069,
+  "wiki-activity-worked/ledger": 3070,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

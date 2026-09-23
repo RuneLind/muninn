@@ -58,6 +58,10 @@ export interface WorkedLedgerMemo {
   pages: Map<string, number>;
   /** When this answer arrived — the TTL the index's own kick compares against. */
   fetchedAt: number;
+  /** When upstream sent the PAGES this memo holds. Equal to `fetchedAt` except on
+   *  a held empty answer, which advances `fetchedAt` and keeps the older pages.
+   *  The Activity rank may set an update aside only if it predates this. */
+  answeredAt: number;
   /** How many rows upstream sent. The DENOMINATOR of the match rate: an absolute
    *  count of unmatched rows carries no signal, because a healthy refresh leaves
    *  rows for every page since renamed or deleted. */
@@ -409,6 +413,7 @@ async function runRefresh(
   const memo: WorkedLedgerMemo = {
     pages: parsed.pages,
     fetchedAt: at,
+    answeredAt: at,
     returned: parsed.returned,
     baseUrl: deps.baseUrl,
     rootAsked: asked,
