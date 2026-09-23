@@ -2400,6 +2400,39 @@ describe("buildRail — series", () => {
     expect(parent.folded).toBe(true);
   });
 
+  test("a PINNED member whose attachment child ranked stays under Pinned; the series still moves", () => {
+    const child = page({ relPath: "plans/a-diagram.html", parent: "plans/a.mdx", pairedBy: "link" });
+    const all = [...ALL, child];
+    const m = build({
+      filtered: all,
+      facetOnly: all,
+      seriesGroups: groupSeries(all),
+      activity: [act(child, 9)],
+      pins: ["plans/a.mdx"],
+    });
+    // The child earned the series its slot; the ★ on A is still the reader's choice.
+    expect(rows(m.entries).filter((r) => r.page.relPath === "plans/a.mdx").map((r) => r.section)).toEqual([
+      "pinned",
+    ]);
+    expect(groupsOf(m.entries)[0]!.section).toBe("activity");
+    const rel = rows(m.entries).map((r) => r.page.relPath);
+    expect(rel).toHaveLength(new Set(rel).size);
+    expect(m.shown).toBe(rel.length);
+  });
+
+  test("a peek row earned by its CHILD carries the child's Activity signal", () => {
+    const child = page({ relPath: "plans/a-diagram.html", parent: "plans/a.mdx", pairedBy: "link" });
+    const all = [...ALL, child];
+    const m = build({
+      filtered: all,
+      facetOnly: all,
+      seriesGroups: groupSeries(all),
+      activity: [{ ...act(child, 9), why: "diagram changed" }],
+    });
+    const parent = rows(m.entries).find((r) => r.page.relPath === "plans/a.mdx")!;
+    expect(parent.activity?.why).toBe("diagram changed");
+  });
+
   test("a ranked member that is also PINNED renders once, in Activity", () => {
     const m = build({ activity: [act(B, 9)], pins: ["plans/b.mdx"] });
     expect(headers(m.entries)).not.toContain("Pinned");

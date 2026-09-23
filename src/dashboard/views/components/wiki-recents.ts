@@ -944,8 +944,9 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  * member Activity ranked (or a member's attachment child) puts the WHOLE series
  * at that Activity slot; closed, it shows up to `SERIES_PEEK_MAX` ranked
  * members and a `+N more` row. A series nothing ranked renders in the `Series`
- * block above the remainder. A pinned member Activity did not rank renders
- * under `Pinned` and as a ghost in the open series.
+ * block above the remainder. A pinned member Activity did not rank itself
+ * (unranked, or ranked only through its child) renders under `Pinned` and as a
+ * ghost in the open series.
  */
 export function buildRail(input: RailInput): RailModel {
   const { filtered, facetOnly, filters, pins, metaTail, activity } = input;
@@ -1191,6 +1192,9 @@ export function buildRail(input: RailInput): RailModel {
   /** page key → the Activity row that ranked it, for the date cell of a series
    *  member drawn in Activity. */
   const activityOf = new Map<string, ActivityRow>();
+  /** Series members Activity ranked THEMSELVES — not only through a child. Only
+   *  these outrank a pin: a ★ on a page whose diagram changed stays a ★. */
+  const selfRanked = new Set<string>();
   /** The series member a page ranks FOR: itself, or the member it is attached
    *  to. Null for a page no series holds. */
   const seriesHolderOf = (p: WikiListing): { group: RailGroup; holder: WikiListing } | null => {
@@ -1232,7 +1236,10 @@ export function buildRail(input: RailInput): RailModel {
         }
         const holderKey = normalizeRel(held.holder.relPath);
         if (!entry.ranked.some((m) => normalizeRel(m.relPath) === holderKey)) entry.ranked.push(held.holder);
-        if (held.holder === row.page) activityOf.set(rel, row);
+        // The holder's date cell is the best signal that ranked it — its own, or
+        // its child's when only the child ranked. First seen is best: rank order.
+        if (!activityOf.has(holderKey)) activityOf.set(holderKey, row);
+        if (held.holder === row.page) selfRanked.add(holderKey);
         continue;
       }
       activityRows.push(row);
@@ -1245,15 +1252,17 @@ export function buildRail(input: RailInput): RailModel {
     // that unsharing the set and dropping the filter each survived the whole
     // suite, while doing both together failed.
     //
-    // A series member Activity ranked counts as taken too: it renders in its
-    // series' Activity row, so a pin on it must not draw it a second time.
+    // A series member Activity ranked ITSELF counts as taken too: it renders in
+    // its series' Activity row, so a pin on it must not draw it a second time.
+    // One ranked only through its attachment child does not — its pin resolves,
+    // and the series row names it as a ghost like any pinned member.
     //
     // Resolved BEFORE the Activity rows are emitted (against a COPY of `claimed`,
     // since nothing is drawn yet) for the two-pass reason above: both sections'
     // placements have to be known before the first chip is counted.
     const pinSeen = new Set(claimed);
     for (const row of activityRows) pinSeen.add(normalizeRel(row.page.relPath));
-    for (const { ranked } of activitySeries.values()) for (const m of ranked) pinSeen.add(normalizeRel(m.relPath));
+    for (const key of selfRanked) pinSeen.add(key);
     pinned = resolve(pins, filtered, pinSeen);
     for (const p of [...activityRows.map((r) => r.page), ...pinned]) {
       const key = normalizeRel(p.relPath);
@@ -1261,9 +1270,12 @@ export function buildRail(input: RailInput): RailModel {
       if (parentOf.has(key)) lifted.add(key);
     }
   }
-  /** The ranked members a CLOSED series row in Activity shows under it. */
+  /** The ranked members a CLOSED series row in Activity shows under it — never
+   *  one a pin lifted to `Pinned`, which is on screen there already. */
   const peekOf = (foldKey: string): WikiListing[] =>
-    (activitySeries.get(foldKey)?.ranked ?? []).slice(0, SERIES_PEEK_MAX);
+    (activitySeries.get(foldKey)?.ranked ?? [])
+      .filter((m) => !sectionLifted.has(normalizeRel(m.relPath)))
+      .slice(0, SERIES_PEEK_MAX);
 
   // ── The groups' open state, decided AFTER the lift ────────────────────
   // ⚠️ Computed HERE, above every emit, because the series rows emit in Activity

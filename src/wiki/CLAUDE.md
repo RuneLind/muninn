@@ -860,12 +860,14 @@ pair differently. The rendered date cell always names the day the order used.
 1. **Always on.** Series are computed whether or not `group families` is
    checked: that toggle guards the two NAME heuristics, and a key is not a
    guess. A query still flattens everything, series included.
-2. **Precedence: Pinned > Series > Activity > months/families** (for where a
-   PAGE renders; a series itself is placed by Activity — see below). Activity sits
+2. **Precedence for where a page renders: Activity-ranked > Pinned > Series >
+   months/families**, and a series itself is placed by Activity (below). A
+   series member Activity ranked renders in its series' Activity row; one it did
+   not rank, and is pinned, renders under `Pinned`. Activity sits
    ABOVE months and families, not below: it lifts a family member out before
    the groups form, which is what a family's roll-up dropping a lifted member
-   means. A pinned member stays in `Pinned` — the ★ is the reader's explicit
-   choice — and the fold shows a dim, non-clickable **ghost row**
+   means. A pinned member Activity did not rank stays in `Pinned` — the ★ is
+   the reader's explicit choice — and the fold shows a dim, non-clickable **ghost row**
    (`pinned above`, rendered AFTER the member rows: it is a footnote about a
    page already on screen, and interleaving it by date would cost the member
    rows their own order) so the roll-up's count and the rows on screen cannot
@@ -880,8 +882,11 @@ pair differently. The rendered date cell always names the day the order used.
    melosys-kode-wiki: a 15h member sat below an 8d Activity top, and two
    diagrams embedded in a series member were lifted out alone). The `Series`
    block keeps only the series Activity did not rank. A pinned member that
-   Activity also ranked renders in the series' Activity row, not under
-   `Pinned` — Activity claims before Pinned, as it does for any page. A series claims its members BEFORE
+   Activity ranked ITSELF renders in the series' Activity row, not under
+   `Pinned` — Activity claims before Pinned, as it does for any page. A pinned
+   member ranked only through its attachment child stays under `Pinned`, and
+   the series still takes the child's slot. A peek row earned by a child
+   carries the child's Activity signal in its date cell. A series claims its members BEFORE
    `groupFamilies`/`groupMonths` are computed — `renderList` subtracts them
    (`withoutSeriesMembers`) — so two knock-on effects are accepted and pinned by
    unit tests: a family that drops below `FAMILY_MIN` **dissolves** into plain
@@ -902,12 +907,13 @@ pair differently. The rendered date cell always names the day the order used.
    go now" is its first row.
 4. **The open page's series is forced open**, with a disabled chip that says so
    (#557's F2 decision) — unless the open page is itself lifted into `Pinned`,
-   or a closed series in Activity already shows it as a peek row, where it is
+   or a closed series in Activity already shows it (or the member it is
+   attached to, whose own chip then opens) as a peek row, where it is
    already on screen and forcing the fold would hide the reader's
    stored state behind a dead control. Fold state is stored like a family's, and
    a series NEVER defaults open, so it never uses the `closed:` spelling.
-5. **`shown` / `#wikiCount` count a member once**, in the series — or under
-   `Pinned` when it was lifted there. A ghost row is not a row and is not
+5. **`shown` / `#wikiCount` count a member once**, in the series (in Activity
+   or its own block) — or under `Pinned` when it was lifted there. A ghost row is not a row and is not
    counted. The `N of M shown` census counts every rule-4 child of the filtered
    set, wherever it renders (inside the body, under a lifted successor, or as
    its own row when the reader pinned the child): the census says which of the
