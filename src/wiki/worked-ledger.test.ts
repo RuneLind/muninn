@@ -671,6 +671,27 @@ describe("the empty-answer RELEASE window", () => {
     expect((await refreshWorkedLedger("/w", d))!.answeredAt).toBe(at());
   });
 
+  test("after a HELD empty answer the index ships the older answer time", async () => {
+    const { buildWikiIndex } = await import("./store.ts");
+    const root = await mkdtemp(path.join(tmpdir(), "worked-index-asof-held-"));
+    try {
+      await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
+      let empty = false;
+      const { d, advance, at } = clocked((r) =>
+        empty ? { root: r, pages: [] } : { root: r, pages: [{ p: "a.md", w: 7 }] },
+      );
+      await refreshWorkedLedger(root, d);
+      const answered = at();
+      empty = true;
+      advance(60_000);
+      await refreshWorkedLedger(root, d);
+      const index = await buildWikiIndex(root);
+      expect(index.workedCoverage?.asOfMs).toBe(answered);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("the index ships the pages' answer time as workedCoverage.asOfMs", async () => {
     const { buildWikiIndex } = await import("./store.ts");
     const root = await mkdtemp(path.join(tmpdir(), "worked-index-asof-"));

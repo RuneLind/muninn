@@ -349,10 +349,10 @@ function agePhrase(ms: number, now: number, dayLabel?: string): string {
 }
 
 /** `agePhrase` after "worked": "worked on 3d ago", but "worked on 2026-05-26"
- *  rather than "worked on on …" past the relative window. */
+ *  rather than "worked on on …", and "worked just now". */
 function workedAgePhrase(ms: number, now: number): string {
   const phrase = agePhrase(ms, now);
-  return phrase.startsWith("on ") ? phrase : "on " + phrase;
+  return phrase.startsWith("on ") || phrase === "just now" ? phrase : "on " + phrase;
 }
 
 /**
@@ -412,9 +412,12 @@ function usableWorkedMs(page: WikiListing, now: number): number {
  *  case-sensitive there too). */
 const LEDGER_PAGE_EXT = /\.mdx?$/;
 
-/** How long after an edit the ledger may still not hold it: the mini ingests
- *  transcripts every minute, and the memo refreshes at most every index TTL
- *  (5 min). An update newer than `asOfMs` minus this is never set aside. */
+/** How long after an edit the ledger may still not hold it. `asOfMs` is when
+ *  muninn got the answer, not how fresh the ledger's data is: a laptop edit
+ *  reaches the mini's ledger through a push job that runs every minute. An
+ *  update newer than `asOfMs` minus this is never set aside. It covers the
+ *  steady state only: while that push stalls (one lasted 2h44m) a fresh laptop
+ *  edit on a page with an older worked date is demoted until it lands. */
 export const WORKED_INGEST_SLACK_MS = 10 * 60_000;
 
 /**
@@ -422,7 +425,9 @@ export const WORKED_INGEST_SLACK_MS = 10 * 60_000;
  * `added`-floor page (whose update stamp is its git arrival) it must land more
  * than {@link CHANGE_MIN_DAYS_AFTER_CREATION} after the floor, or it is the
  * session that brought the page there, not an edit. Shared by the gate's
- * `covered` count and the rank, so the gate counts only pages it could move.
+ * `covered` count and the rank. The count ignores `asOfMs`, which is a
+ * per-update bound: a covered page whose update is too fresh to set aside still
+ * counts toward opening the gate.
  */
 function workedStandsIn(workedMs: number, updated: { ms: number; kind: string } | null): boolean {
   return (
@@ -520,8 +525,9 @@ export function rankActivity(
  * update signal's kind: a ledger write or bash touch IS a known edit event. A
  * newer worked date always substitutes ({@link workedStandsIn} aside). An OLDER
  * one demotes the page, reading the update past it as a bulk pass or a writer
- * the ledger cannot see — measured 2026-09-23 as right for most demotes, with
- * about 10 of mimir's 92 unexplained, all far below the rail's top rows. It
+ * the ledger cannot see. Measured 2026-09-23: 7 of mimir's 92 demotes were
+ * session edits the ledger missed, none in the top 10 then; such a miss
+ * demotes a page at its freshest, when it matters most. It
  * demotes only when the update predates the ledger's answer by
  * {@link WORKED_INGEST_SLACK_MS}; a fresher update keeps the unsubstituted score.
  */

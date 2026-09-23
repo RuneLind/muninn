@@ -958,6 +958,14 @@ describe("rankActivity — demotion is bounded by when the ledger answered", () 
     expect(edge(10 * MIN - 1)).toBe(false);
   });
 
+  test("a worked date EQUAL to a fresh update still substitutes — it is not older", () => {
+    const twoMin = (2 * MIN) / DAY;
+    const tied = page({ relPath: "t.md", createdDaysAgo: 40, updatedDaysAgo: twoMin, workedDaysAgo: twoMin });
+    const row = rankActivity([tied], wide, NOW, OPEN)[0]!;
+    expect(row.worked).toBe(true);
+    expect(row.why).toStartWith("worked just now, ");
+  });
+
   test("an update after an OLDER answer is not set aside either", () => {
     // Updated 12h ago; the ledger last answered a day ago.
     expect(rankActivity([swept(0.5)], wide, NOW, gateAsOf(ago(1)))).toEqual(
@@ -1028,7 +1036,8 @@ describe("rankActivity — the discarded update is named", () => {
     const p = page({ relPath: "a.md", createdDaysAgo: 40, updatedDaysAgo: 0.125, workedDaysAgo: 0.5 });
     const row = rankActivity([p], wide, NOW, OPEN)[0]!;
     expect(row.score).not.toBe(rankActivity([p], wide, NOW, CLOSED)[0]!.score);
-    expect(row.why).not.toContain("no session write on record");
+    // Wording-neutral, so it held against the clause's earlier text too.
+    expect(row.why).not.toContain("no session");
   });
 
   test("an update set aside a day or more back is still not named when the row did not move", () => {
