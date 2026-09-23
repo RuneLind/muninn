@@ -43,7 +43,9 @@
  * reader would call an edit. Such a page is dropped from `dirty` and dates from its
  * git history like a clean one. The metadata-only section below states the three
  * verdicts and the three rules that keep a real edit from being dropped with it;
- * everywhere else points there.
+ * everywhere else points there. The same verdict applies to COMMITTED history:
+ * a touch whose commit only rewrote metadata steps back to the commit before it
+ * (`resolveMetadataOnlyTouches`).
  *
  * A page whose history begins with a move INTO this wiki from another repo (the 10
  * plans imported in mimir's 2026-05-04 consolidation) dates to the import, not to
@@ -120,7 +122,7 @@ export interface WikiGitDates {
 }
 
 /** A file entry from `--name-status`: a status letter, optional similarity score,
- *  then a TAB. Commit stamps (`--format=%at`, a bare integer) can never match it,
+ *  then a TAB. Commit lines (`--format=%H %at`, hex and digits) can never match it,
  *  which is what makes the two line kinds unambiguous without a sentinel. */
 const NAME_STATUS_RE = /^([A-Z])(\d*)\t(.*)$/;
 
@@ -157,6 +159,10 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
   }
 }
 
+/** A commit line: `%H %at`. The bare-integer form (`%at` alone) is still read, so
+ *  a hash-less log parses as before — it just records no {@link TouchRecord}s. */
+const COMMIT_LINE_RE = /^(?:([0-9a-f]{7,64}) )?(\d+)$/;
+
 /** One parsed `--name-status` file entry. `from` is set only for renames/copies. */
 interface FileEntry {
   status: string;
@@ -165,12 +171,26 @@ interface FileEntry {
 }
 
 /**
+ * One non-sweep commit that touched a page, kept so {@link resolveMetadataOnlyTouches}
+ * can ask what the commit changed. Paths are repo-relative AS OF that commit: a
+ * record carried across a later rename still names the path the blob lived at.
+ */
+export interface TouchRecord {
+  ts: number;
+  commit: string;
+  path: string;
+  /** Where the page lived in the commit's parent: `from` for a rename, else
+   *  `path`. Absent when the commit added the page, which is always an edit. */
+  parentPath?: string;
+}
+
+/**
  * Walk `git log --name-status` output oldest-first and record, per path, when it
  * first appeared and when it was last touched by a non-sweep commit. Pure (no
  * spawn, no fs) so the rename/sweep semantics are unit-testable against literal git
  * output.
  *
- * Expects `--reverse --name-status -M --format=%at` — oldest commit first, which is
+ * Expects `--reverse --name-status -M --format=%H %at` — oldest commit first, which is
  * what makes both maps single-pass: a rename's source is always already recorded
  * when the rename is read, and "last write wins" on `touched` lands on the newest
  * qualifying commit without a second sort.
@@ -198,9 +218,16 @@ interface FileEntry {
 export function parseGitLog(
   stdout: string,
   sweepThreshold = SWEEP_THRESHOLD,
-): { created: Map<string, number>; touched: Map<string, number> } {
+): {
+  created: Map<string, number>;
+  touched: Map<string, number>;
+  /** Every non-sweep touch per page, oldest first — `touched` is the last one's
+   *  `ts`. Only filled from `%H %at` commit lines. */
+  touches: Map<string, TouchRecord[]>;
+} {
   const created = new Map<string, number>();
   const touched = new Map<string, number>();
+  const touches = new Map<string, TouchRecord[]>();
 
   const firstSeen = (p: string, at: number) => {
     if (p && !created.has(p)) created.set(p, at);
@@ -208,7 +235,7 @@ export function parseGitLog(
 
   /** Apply one commit's entries. Sweep-ness is a property of the whole commit, so
    *  entries are buffered until the commit is complete before any is applied. */
-  const flush = (ts: number, entries: FileEntry[]) => {
+  const flush = (ts: number, commit: string, entries: FileEntry[]) => {
     if (!ts || entries.length === 0) return;
     const isSweep = entries.length >= sweepThreshold;
     for (const e of entries) {
@@ -222,6 +249,10 @@ export function parseGitLog(
         const carried = touched.get(e.from);
         if (carried !== undefined) touched.set(e.path, carried);
         touched.delete(e.from);
+        const carriedTouches = touches.get(e.from);
+        touches.delete(e.from);
+        if (carriedTouches) touches.set(e.path, carriedTouches);
+        else touches.delete(e.path);
       } else if (e.from !== undefined) {
         // A COPY is a NEW page that happens to share text with an existing one, so it
         // inherits NEITHER date — dating it to its source would sink a genuinely new
@@ -235,24 +266,38 @@ export function parseGitLog(
       } else {
         firstSeen(e.path, ts);
       }
-      if (!isSweep) touched.set(e.path, ts);
+      // A delete retires the path's touch history even inside a sweep, so a page
+      // re-added there never steps back into the deleted file's edits.
+      if (e.status === "D") touches.delete(e.path);
+      if (isSweep) continue;
+      touched.set(e.path, ts);
+      if (!commit || e.status === "D") continue;
+      // An add or a copy has no parent blob to compare, so it is always an edit.
+      const parentPath =
+        e.status === "A" || e.status === "C" ? undefined : (e.from ?? e.path);
+      const list = touches.get(e.path) ?? [];
+      list.push({ ts, commit, path: e.path, ...(parentPath ? { parentPath } : {}) });
+      touches.set(e.path, list);
     }
   };
 
   let ts = 0;
+  let commit = "";
   let entries: FileEntry[] = [];
   for (const line of stdout.split("\n")) {
     if (!line) continue;
     const m = NAME_STATUS_RE.exec(line);
     if (!m) {
-      // A bare integer is the commit stamp — and the commit BOUNDARY, so it flushes
-      // the previous commit. Anything else (a `--format` artifact, a path with no
-      // status prefix) is skipped rather than guessed at, and does NOT end a commit.
-      const n = /^\d+$/.test(line) ? Number(line) : NaN;
-      if (!Number.isFinite(n)) continue;
-      flush(ts, entries);
+      // A commit line (`%H %at`, or a bare `%at`) is the commit BOUNDARY, so it
+      // flushes the previous commit. Anything else (a `--format` artifact, a path
+      // with no status prefix) is skipped rather than guessed at, and does NOT end
+      // a commit.
+      const c = COMMIT_LINE_RE.exec(line);
+      if (!c) continue;
+      flush(ts, commit, entries);
       entries = [];
-      ts = n * 1000;
+      commit = c[1] ?? "";
+      ts = Number(c[2]) * 1000;
       continue;
     }
     if (!ts) continue; // file entry before any stamp — malformed, ignore
@@ -270,9 +315,9 @@ export function parseGitLog(
     }
     entries.push({ status, path: rest });
   }
-  flush(ts, entries); // the last commit has no following stamp to trigger its flush
+  flush(ts, commit, entries); // the last commit has no following stamp to trigger its flush
 
-  return { created, touched };
+  return { created, touched, touches };
 }
 
 // ── The metadata-only rule: which dirty pages' mtime is NOT evidence ──────────
@@ -448,6 +493,18 @@ export function __setClassifyBudgetForTest(ms: number | null): void {
  * echoed name for the same reason.
  */
 async function readHeadTexts(toplevel: string, repoRel: string[]): Promise<(string | null)[] | null> {
+  return readObjectTexts(
+    toplevel,
+    repoRel.map((p) => `HEAD:${p}`),
+  );
+}
+
+/** {@link readHeadTexts} for any `<rev>:<path>` object names — the one
+ *  `cat-file --batch` reader both metadata-only rules share. */
+async function readObjectTexts(
+  toplevel: string,
+  objectNames: string[],
+): Promise<(string | null)[] | null> {
   try {
     const proc = Bun.spawn(["git", "-C", toplevel, "cat-file", "--batch"], {
       stdin: "pipe",
@@ -463,14 +520,14 @@ async function readHeadTexts(toplevel: string, repoRel: string[]): Promise<(stri
       // per candidate and a large dirty set exceeds a pipe buffer, so writing it
       // all before reading would deadlock.
       const stdoutPromise = new Response(proc.stdout).arrayBuffer();
-      proc.stdin.write(repoRel.map((p) => `HEAD:${p}\n`).join(""));
+      proc.stdin.write(objectNames.map((n) => `${n}\n`).join(""));
       const [buf, code] = await Promise.all([
         stdoutPromise,
         proc.exited,
         Promise.resolve(proc.stdin.end()),
       ]);
       if (code !== 0) return null;
-      return parseCatFileBatch(new Uint8Array(buf), repoRel.length);
+      return parseCatFileBatch(new Uint8Array(buf), objectNames.length);
     } finally {
       clearTimeout(timer);
     }
@@ -608,6 +665,105 @@ async function dropMetadataOnlyEdits(
 }
 
 /**
+ * How far back {@link resolveMetadataOnlyTouches} walks one page's history. Each
+ * step is one `cat-file --batch` round over every page still unresolved; a page
+ * still unresolved after the last step keeps the commit it reached, unverified.
+ */
+export const METADATA_TOUCH_MAX_STEPS = 8;
+
+/**
+ * The committed half of the metadata-only rule: `touched` with every page whose
+ * newest non-sweep commit only rewrote metadata frontmatter moved back to the
+ * newest commit that did more.
+ *
+ * The sweep threshold cannot see these commits, because a mechanical writer
+ * commits per call: the 2026-09-21 lint accepts wrote `series:` onto mimir as 38
+ * commits of 2–12 pages, and 93 of its 139 series members dated to that morning.
+ * Each touch is judged by {@link classifyPageChange} over the commit's blob and
+ * its parent's; `metadata-only` and `identical` (a pure rename) step back, and
+ * `edit` — the default, including any blob that cannot be read — stops. A page
+ * whose every touch steps back leaves the map, which is what a page touched only
+ * by sweeps already does.
+ *
+ * Keys are repo-relative, as {@link parseGitLog} returns them; only markdown
+ * pages under `prefix` are judged. Every degrade — a failed read, a thrown error,
+ * {@link GIT_DATES_CLASSIFY_TIMEOUT_MS} expiring — answers `touched` unchanged.
+ */
+async function resolveMetadataOnlyTouches(
+  root: string,
+  toplevel: string,
+  prefix: string,
+  touched: Map<string, number>,
+  touches: Map<string, TouchRecord[]>,
+): Promise<Map<string, number>> {
+  // Set when the budget race is lost, so the loser spawns no further rounds.
+  let aborted = false;
+  const run = async (): Promise<Map<string, number>> => {
+    const out = new Map(touched);
+    let pending: { key: string; list: TouchRecord[]; i: number }[] = [];
+    for (const [key, list] of touches) {
+      if (!key.startsWith(prefix) || !isMarkdownWikiPath(key)) continue;
+      const last = list[list.length - 1];
+      // `touched` and the newest record are set by the same commit; a mismatch is
+      // a shape this rule was not built for, so the page keeps its date.
+      if (!last || out.get(key) !== last.ts) continue;
+      pending.push({ key, list, i: list.length - 1 });
+    }
+    let moved = 0;
+    for (let step = 0; step < METADATA_TOUCH_MAX_STEPS && pending.length > 0 && !aborted; step++) {
+      const judged = pending.filter((c) => {
+        const r = c.list[c.i]!;
+        return r.parentPath !== undefined && !r.path.includes("\n") && !r.parentPath.includes("\n");
+      });
+      const names = judged.flatMap((c) => {
+        const r = c.list[c.i]!;
+        return [`${r.commit}^:${r.parentPath}`, `${r.commit}:${r.path}`];
+      });
+      const texts = names.length ? await readObjectTexts(toplevel, names) : [];
+      if (texts === null) throw new Error("cat-file read failed");
+      const next: typeof pending = [];
+      judged.forEach((c, j) => {
+        const before = texts[2 * j];
+        const after = texts[2 * j + 1];
+        if (typeof before !== "string" || typeof after !== "string") return;
+        if (classifyPageChange(before, after) === "edit") return;
+        moved++;
+        c.i--;
+        if (c.i < 0) {
+          out.delete(c.key);
+          return;
+        }
+        out.set(c.key, c.list[c.i]!.ts);
+        next.push(c);
+      });
+      pending = next;
+    }
+    if (moved > 0) {
+      log.debug("wiki {root}: {n} metadata-only commit touch(es) set aside", { root, n: moved });
+    }
+    return out;
+  };
+
+  const resolved = await Promise.race([
+    run().catch(() => null),
+    new Promise<null>((resolve) =>
+      setTimeout(() => {
+        aborted = true;
+        resolve(null);
+      }, classifyBudgetMs).unref?.(),
+    ),
+  ]);
+  if (resolved === null) {
+    log.debug(
+      "wiki {root}: metadata-only commit classification failed or exceeded its budget — touch dates unfiltered",
+      { root },
+    );
+    return touched;
+  }
+  return resolved;
+}
+
+/**
  * Build the per-page date signals for the wiki rooted at `root`.
  *
  * The wiki root is often a SUBDIRECTORY of its repo (jarvis's wiki lives at
@@ -665,7 +821,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     // `-M90%` would therefore mis-date 6 real pages to prevent 1 hypothetical.
     "-M",
     "--diff-merges=first-parent",
-    "--format=%at",
+    "--format=%H %at",
   ];
   if (rel) args.push("--", rel);
 
@@ -705,7 +861,15 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     return null;
   }
 
-  const { created, touched } = parseGitLog(stdout);
+  const parsed = parseGitLog(stdout);
+  const created = parsed.created;
+  const touched = await resolveMetadataOnlyTouches(
+    root,
+    toplevel,
+    prefix,
+    parsed.touched,
+    parsed.touches,
+  );
   // `listWikiSubtreeDirty` already returns WIKI-relative paths, so it needs no strip.
   const dirty = new Set(await dirtyPromise);
   if (!rel) return { created, touched, dirty };

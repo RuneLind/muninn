@@ -15,6 +15,7 @@ import {
   buildWikiGitDates,
   classifyPageChange,
   SWEEP_THRESHOLD,
+  METADATA_TOUCH_MAX_STEPS,
   __setClassifyBudgetForTest,
 } from "./git-dates.ts";
 import { setFrontmatterScalar } from "../plans/frontmatter.ts";
@@ -833,6 +834,217 @@ test("a classification that exceeds its budget keeps EVERY dirty page", async ()
     // …and the untracked page, which never reaches the classification at all,
     // must not be lost with it.
     expect(dates!.dirty.has("untracked.md")).toBe(true);
+  } finally {
+    __setClassifyBudgetForTest(null);
+    process.env.PATH = pathBefore;
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+// ── Committed metadata-only touches ──────────────────────────────────────────
+//
+// The 2026-09-21 lint accepts wrote `series:` onto mimir as 38 commits of 2–12
+// pages, under the sweep threshold, so 93 of 139 series members dated to that
+// morning in "Recently updated". A touch whose commit only rewrote metadata
+// frontmatter now steps back to the commit before it.
+
+const H1 = "a".repeat(40);
+const H2 = "b".repeat(40);
+const H3 = "c".repeat(40);
+
+test("parseGitLog: a `%H %at` log records every non-sweep touch with its commit", () => {
+  const { touched, touches } = parseGitLog(
+    [
+      `${H1} ${at("2026-05-01T10:00:00Z")}`,
+      "A\tplans/one.md",
+      `${H2} ${at("2026-06-01T10:00:00Z")}`,
+      "M\tplans/one.md",
+      `${H3} ${at("2026-07-01T10:00:00Z")}`,
+      "R100\tplans/one.md\tplans/two.md",
+    ].join("\n"),
+  );
+  expect(touched.get("plans/two.md")).toBe(ms("2026-07-01T10:00:00Z"));
+  // An add has no parent blob; a modify's parent is the same path; a rename's
+  // parent is its source, and the records before it keep the old path.
+  expect(touches.get("plans/two.md")).toEqual([
+    { ts: ms("2026-05-01T10:00:00Z"), commit: H1, path: "plans/one.md" },
+    { ts: ms("2026-06-01T10:00:00Z"), commit: H2, path: "plans/one.md", parentPath: "plans/one.md" },
+    { ts: ms("2026-07-01T10:00:00Z"), commit: H3, path: "plans/two.md", parentPath: "plans/one.md" },
+  ]);
+  expect(touches.has("plans/one.md")).toBe(false);
+});
+
+test("parseGitLog: a sweep records no touch, and a bare `%at` log records none at all", () => {
+  const withHash = parseGitLog(
+    [`${H1} ${at("2026-05-01T10:00:00Z")}`, ...filler(SWEEP_THRESHOLD).map((p) => `M\t${p}`)].join("\n"),
+  );
+  expect(withHash.touches.size).toBe(0);
+  const bare = parseGitLog([`${at("2026-05-01T10:00:00Z")}`, "M\tplans/one.md"].join("\n"));
+  expect(bare.touched.get("plans/one.md")).toBe(ms("2026-05-01T10:00:00Z"));
+  expect(bare.touches.size).toBe(0);
+});
+
+/** Commit everything staged at a fixed author date. */
+async function commitAt(dir: string, iso: string, message: string): Promise<void> {
+  await fixtureGit(dir, "add", "-A");
+  await fixtureGit(dir, "commit", "-q", "--date", iso, "-m", message);
+}
+
+test("buildWikiGitDates: a committed metadata-only change does not move the touch date", async () => {
+  const { mkdtemp, mkdir, writeFile, rename, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = await mkdtemp(path.join(tmpdir(), "git-dates-committed-"));
+  const wiki = path.join(dir, "wiki");
+  await mkdir(wiki, { recursive: true });
+  const write = (rel: string, text: string) => writeFile(path.join(wiki, rel), text);
+  try {
+    await write("edited.md", page("Edited", "alpha", "Original prose."));
+    await write("only-meta.md", page("Only meta", "alpha", "Unchanged prose."));
+    await write("both.md", page("Both", "alpha", "Original prose."));
+    await write("moved.md", page("Moved", "alpha", "Unchanged prose."));
+    await fixtureGit(dir, "init", "-q", "-b", "main");
+    await commitAt(dir, "2026-05-01T10:00:00Z", "seed");
+
+    await write("edited.md", page("Edited", "alpha", "Rewritten prose."));
+    await commitAt(dir, "2026-06-01T10:00:00Z", "prose");
+
+    // What a lint accept commits: one `series:` line per page, two pages.
+    await write("edited.md", page("Edited", "beta", "Rewritten prose."));
+    await write("only-meta.md", page("Only meta", "beta", "Unchanged prose."));
+    await commitAt(dir, "2026-09-21T07:12:00Z", "[lint] fix: 2 pages");
+
+    await write("both.md", page("Both", "beta", "Rewritten prose."));
+    await commitAt(dir, "2026-09-21T08:00:00Z", "metadata plus prose");
+
+    await rename(path.join(wiki, "moved.md"), path.join(wiki, "renamed.md"));
+    await commitAt(dir, "2026-09-22T10:00:00Z", "pure rename");
+
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates).not.toBeNull();
+    // The metadata commit steps back to the prose edit before it.
+    expect(dates!.touched.get("edited.md")).toBe(ms("2026-06-01T10:00:00Z"));
+    // Its only earlier touch is the add, which is always an edit.
+    expect(dates!.touched.get("only-meta.md")).toBe(ms("2026-05-01T10:00:00Z"));
+    // A metadata line beside a prose change is an edit.
+    expect(dates!.touched.get("both.md")).toBe(ms("2026-09-21T08:00:00Z"));
+    // A pure rename changed no text: `identical`, so it steps back too.
+    expect(dates!.touched.get("renamed.md")).toBe(ms("2026-05-01T10:00:00Z"));
+    // Creation dates are untouched by the rule.
+    expect(dates!.created.get("edited.md")).toBe(ms("2026-05-01T10:00:00Z"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("buildWikiGitDates: a page whose every touch is metadata-only leaves the touched map", async () => {
+  // Created inside a sweep, then only metadata commits: nothing qualifies, which
+  // is what a page touched only by sweeps already answers.
+  const { rm } = await import("node:fs/promises");
+  const seed: Record<string, string> = { "target.md": page("Target", "alpha", "Prose.") };
+  for (const f of filler(SWEEP_THRESHOLD, "pad")) seed[f.replace("plans/", "")] = `# ${f}\n`;
+  const { wiki, dir, write } = await seededWiki(seed);
+  try {
+    await write("target.md", page("Target", "beta", "Prose."));
+    await commitAt(dir, "2026-09-21T07:12:00Z", "[lint] fix: 1 page");
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.touched.has("target.md")).toBe(false);
+    expect(dates!.created.has("target.md")).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("buildWikiGitDates: the walk back stops after METADATA_TOUCH_MAX_STEPS, unverified", async () => {
+  const { rm } = await import("node:fs/promises");
+  const { wiki, dir, write } = await seededWiki({ "long.md": page("Long", "s0", "Prose.") });
+  try {
+    const steps = METADATA_TOUCH_MAX_STEPS + 1;
+    for (let i = 1; i <= steps; i++) {
+      await write("long.md", page("Long", `s${i}`, "Prose."));
+      await commitAt(dir, `2026-09-${String(i).padStart(2, "0")}T10:00:00Z`, `meta ${i}`);
+    }
+    const dates = await buildWikiGitDates(wiki);
+    // Eight metadata commits are set aside; the ninth-newest is kept as reached.
+    expect(dates!.touched.get("long.md")).toBe(ms("2026-09-01T10:00:00Z"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("buildWikiGitDates: a committed-touch classification over its budget keeps git's own dates", async () => {
+  const { rm, writeFile, mkdir } = await import("node:fs/promises");
+  const path = (await import("node:path")).default;
+  const { wiki, dir, write } = await seededWiki({ "meta.md": page("Meta", "alpha", "Prose.") });
+  const realGit = Bun.which("git");
+  const shimDir = path.join(dir, "shim");
+  const pathBefore = process.env.PATH;
+  try {
+    await write("meta.md", page("Meta", "beta", "Prose."));
+    await commitAt(dir, "2026-09-21T07:12:00Z", "[lint] fix: 1 page");
+    await mkdir(shimDir, { recursive: true });
+    await writeFile(
+      path.join(shimDir, "git"),
+      `#!/bin/sh\nfor a in "$@"; do\n  case "$a" in cat-file) sleep 6 ;; esac\ndone\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${pathBefore ?? ""}`;
+    __setClassifyBudgetForTest(50);
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.touched.get("meta.md")).toBe(ms("2026-09-21T07:12:00Z"));
+  } finally {
+    __setClassifyBudgetForTest(null);
+    process.env.PATH = pathBefore;
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("parseGitLog: a delete inside a SWEEP retires the path's touch history", () => {
+  // Otherwise a page re-added at the path inherits the deleted file's edits:
+  // its metadata-only touch steps back into a page that no longer exists.
+  const { touches } = parseGitLog(
+    [
+      `${H1} ${at("2026-05-01T10:00:00Z")}`,
+      "M\tplans/p.md",
+      `${H2} ${at("2026-06-01T10:00:00Z")}`,
+      "D\tplans/p.md",
+      ...filler(SWEEP_THRESHOLD, "d").map((p) => `M\t${p}`),
+    ].join("\n"),
+  );
+  expect(touches.has("plans/p.md")).toBe(false);
+});
+
+test("buildWikiGitDates: a classification that lost its race spawns no further rounds", async () => {
+  // Each round is one cat-file; the shim logs every spawn and takes 200 ms, the
+  // budget is 300 ms, and the page needs four rounds (three metadata commits,
+  // then the edit). Without the abort the loser keeps spawning in the background.
+  const { rm, writeFile, mkdir, readFile } = await import("node:fs/promises");
+  const path = (await import("node:path")).default;
+  const { wiki, dir, write } = await seededWiki({ "meta.md": page("Meta", "s0", "Prose.") });
+  const realGit = Bun.which("git");
+  const shimDir = path.join(dir, "shim");
+  const spawnLog = path.join(dir, "spawns.log");
+  const pathBefore = process.env.PATH;
+  try {
+    await write("meta.md", page("Meta", "s0", "Edited prose."));
+    await commitAt(dir, "2026-09-01T10:00:00Z", "edit");
+    for (let i = 1; i <= 3; i++) {
+      await write("meta.md", page("Meta", `s${i}`, "Edited prose."));
+      await commitAt(dir, `2026-09-0${i + 1}T10:00:00Z`, `meta ${i}`);
+    }
+    await mkdir(shimDir, { recursive: true });
+    await writeFile(
+      path.join(shimDir, "git"),
+      `#!/bin/sh\nfor a in "$@"; do\n  case "$a" in cat-file) echo x >> ${spawnLog}; sleep 0.2 ;; esac\ndone\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${pathBefore ?? ""}`;
+    __setClassifyBudgetForTest(300);
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.touched.get("meta.md")).toBe(ms("2026-09-04T10:00:00Z"));
+    await Bun.sleep(1500);
+    const spawns = (await readFile(spawnLog, "utf8").catch(() => "")).split("\n").filter(Boolean).length;
+    expect(spawns).toBeLessThanOrEqual(2);
   } finally {
     __setClassifyBudgetForTest(null);
     process.env.PATH = pathBefore;
