@@ -656,8 +656,8 @@ describe("parseActivityWeights", () => {
 
 /** A gate verdict by hand, for cases about what an open or closed gate DOES
  *  rather than about how one is measured. */
-const OPEN: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1 };
-const CLOSED: WorkedGate = { open: false, candidates: 1, covered: 0, coverage: 0 };
+const OPEN: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1, asOfMs: NOW };
+const CLOSED: WorkedGate = { open: false, candidates: 1, covered: 0, coverage: 0, asOfMs: NOW };
 
 describe("rankActivity — worked-on substitution", () => {
   test("a worked date OLDER than the update stamp demotes the page", () => {
@@ -819,6 +819,30 @@ describe("workedGateFor — the coverage gate", () => {
     expect(workedGateFor(pages, wide, NOW)).toMatchObject({ candidates: 2, covered: 1, coverage: 0.5 });
   });
 
+  test("an .mdx candidate IS in the denominator, covered or not", () => {
+    const pages = [
+      ...listing(2, 1),
+      page({ relPath: "plans/x.mdx", createdDaysAgo: 40, updatedDaysAgo: 1, workedDaysAgo: 2 }),
+      page({ relPath: "plans/y.mdx", createdDaysAgo: 40, updatedDaysAgo: 1 }),
+    ];
+    expect(workedGateFor(pages, wide, NOW)).toMatchObject({ candidates: 4, covered: 2 });
+  });
+
+  test("an `added`-floor page whose only worked date is its arrival is not covered", () => {
+    // The rank will not substitute it (see the `added`-floor block), so the gate
+    // must not count it toward opening.
+    const createdFm = new Date(ago(21)).toISOString().slice(0, 10);
+    const moved = page({ relPath: "moved.md", createdFm, createdDaysAgo: 3, updatedDaysAgo: null, workedDaysAgo: 3 });
+    expect(workedGateFor([moved, ...listing(1, 1)], wide, NOW)).toMatchObject({ candidates: 2, covered: 1 });
+  });
+
+  test("the ledger's answer time rides out, clamped to now; a future one is refused", () => {
+    expect(workedGateFor(listing(2, 1), wide, NOW, ago(1)).asOfMs).toBe(ago(1));
+    expect(workedGateFor(listing(2, 1), wide, NOW, NOW + 60_000).asOfMs).toBe(NOW);
+    expect(workedGateFor(listing(2, 1), wide, NOW, NOW + 30 * DAY).asOfMs).toBeUndefined();
+    expect(workedGateFor(listing(2, 1), wide, NOW).asOfMs).toBeUndefined();
+  });
+
   test("0 opens wherever anything could substitute; 100 needs every candidate covered", () => {
     expect(at(0, 5, 0).open).toBe(true);
     expect(at(0, 0, 0).open).toBe(true);
@@ -869,7 +893,8 @@ describe("workedGateFor — the coverage gate", () => {
     // the gate on its own; the wiki as a whole is at 75%.
     const facet = listing(3, 1).map((p) => ({ ...p, relPath: "facet/" + p.relPath }));
     const rest = listing(9, 8);
-    const gate = workedGateFor([...facet, ...rest], wide, NOW);
+    // The ledger answered now, so the 2-day worked dates may demote.
+    const gate = workedGateFor([...facet, ...rest], wide, NOW, NOW);
     expect(gate.open).toBe(true);
     expect(workedGateFor(facet, wide, NOW).open).toBe(false);
     const rows = rankActivity(facet, wide, NOW, gate);
@@ -905,22 +930,47 @@ describe("parseActivityWeights — workedGate", () => {
   });
 });
 
-describe("rankActivity — demotion needs no ledger horizon", () => {
-  // The sweep shape: git 12h ago, the last session 5 days ago. The ledger
-  // records Bash-script writes since claude-usage #215, so the update past the
-  // worked stamp is a bulk pass or a non-session writer, and the page demotes.
-  test("an update after the worked stamp is set aside, however recent", () => {
+describe("rankActivity — demotion is bounded by when the ledger answered", () => {
+  // The sweep shape: git after the last session. An update the ledger had
+  // time to see is a bulk pass or a writer it cannot see, and the page demotes;
+  // an update newer than the ledger's answer cannot be judged by it.
+  const swept = (updatedDaysAgo: number) =>
+    page({ relPath: "s.md", createdDaysAgo: 40, updatedDaysAgo, workedDaysAgo: 5 });
+  const gateAsOf = (asOfMs: number | undefined): WorkedGate => ({ ...OPEN, asOfMs });
+  const MIN = 60_000;
+
+  test("an update the ledger had time to see is set aside, however recent", () => {
     for (const updatedDaysAgo of [0.01, 0.5, 4]) {
-      const swept = page({ relPath: "s.md", createdDaysAgo: 40, updatedDaysAgo, workedDaysAgo: 5 });
-      const row = rankActivity([swept], wide, NOW, OPEN)[0]!;
+      const row = rankActivity([swept(updatedDaysAgo)], wide, NOW, OPEN)[0]!;
       expect(row.why).toStartWith("worked on 5d ago, ");
-      expect(row.score).toBeLessThan(rankActivity([swept], wide, NOW, CLOSED)[0]!.score);
+      expect(row.score).toBeLessThan(rankActivity([swept(updatedDaysAgo)], wide, NOW, CLOSED)[0]!.score);
     }
   });
 
-  test("a newer worked date promotes", () => {
+  test("an update within the ingest slack of the ledger's answer is NOT set aside", () => {
+    // Edited 2 minutes ago; the ledger answered now, before it could hold the edit.
+    const fresh = swept((2 * MIN) / DAY);
+    expect(rankActivity([fresh], wide, NOW, OPEN)).toEqual(rankActivity([fresh], wide, NOW, CLOSED));
+    // The boundary: exactly the slack before the answer is set aside, a ms later is not.
+    const edge = (msBeforeAnswer: number) =>
+      rankActivity([swept(msBeforeAnswer / DAY)], wide, NOW, OPEN)[0]!.why.startsWith("worked on");
+    expect(edge(10 * MIN)).toBe(true);
+    expect(edge(10 * MIN - 1)).toBe(false);
+  });
+
+  test("an update after an OLDER answer is not set aside either", () => {
+    // Updated 12h ago; the ledger last answered a day ago.
+    expect(rankActivity([swept(0.5)], wide, NOW, gateAsOf(ago(1)))).toEqual(
+      rankActivity([swept(0.5)], wide, NOW, CLOSED),
+    );
+  });
+
+  test("no answer time ⇒ nothing demotes, but a newer worked date still promotes", () => {
+    expect(rankActivity([swept(0.5)], wide, NOW, gateAsOf(undefined))).toEqual(
+      rankActivity([swept(0.5)], wide, NOW, CLOSED),
+    );
     const stale = page({ relPath: "p.md", createdDaysAgo: 40, updatedDaysAgo: 6, workedDaysAgo: 0.5 });
-    expect(rankActivity([stale], wide, NOW, OPEN)[0]!.why).toStartWith("worked on 12h ago, ");
+    expect(rankActivity([stale], wide, NOW, gateAsOf(undefined))[0]!.why).toStartWith("worked on 12h ago, ");
   });
 });
 
@@ -936,6 +986,10 @@ describe("rankActivity — an `added`-floor page and the session that brought it
     expect(rankActivity([moved(3)], wide, NOW, OPEN)[0]!.kind).toBe("new");
   });
 
+  test("a worked date under a day past the floor mints no change either", () => {
+    expect(rankActivity([moved(2.5)], wide, NOW, OPEN)).toEqual(rankActivity([moved(2.5)], wide, NOW, CLOSED));
+  });
+
   test("a worked date more than a day past the floor still promotes", () => {
     const row = rankActivity([moved(1)], wide, NOW, OPEN)[0]!;
     expect(row.kind).toBe("changed");
@@ -946,13 +1000,13 @@ describe("rankActivity — an `added`-floor page and the session that brought it
 describe("rankActivity — the discarded update is named", () => {
   test("a demoted change says which update it set aside", () => {
     const p = page({ relPath: "a.md", createdDaysAgo: 40, updatedDaysAgo: 0.5, workedDaysAgo: 5 });
-    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toEndWith("; update 12h ago: no session wrote it, or only a bulk pass");
+    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toEndWith("; update 12h ago: no session write on record, or a bulk pass");
   });
 
   test("…and so does a change the substitution turned into a creation", () => {
     const p = page({ relPath: "plans/p.mdx", createdDaysAgo: 5, updatedDaysAgo: 1, workedDaysAgo: 4.9 });
     expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toMatch(
-      /^created 5d ago → [0-9.]+; update 1d ago: no session wrote it, or only a bulk pass$/,
+      /^created 5d ago → [0-9.]+; update 1d ago: no session write on record, or a bulk pass$/,
     );
   });
 
@@ -965,15 +1019,32 @@ describe("rankActivity — the discarded update is named", () => {
 
   test("a promotion discards nothing and says nothing", () => {
     const p = page({ relPath: "p.md", createdDaysAgo: 40, updatedDaysAgo: 6, workedDaysAgo: 0.5 });
-    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).not.toContain("no session wrote it");
+    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).not.toContain("no session write on record");
   });
 
-  test("an update that reads as the same age as the worked stamp is not named", () => {
-    // 4.2d and 4.4d both read "4d ago": the row moved, but the clause would say nothing.
-    const p = page({ relPath: "a.md", createdDaysAgo: 40, updatedDaysAgo: 4.2, workedDaysAgo: 4.4 });
+  test("an update under a day after the worked stamp is not named", () => {
+    // Edited 12h ago, committed 3h ago: the git touch postdates the ledger's
+    // stamp, but it is that session's own commit. The row still moves.
+    const p = page({ relPath: "a.md", createdDaysAgo: 40, updatedDaysAgo: 0.125, workedDaysAgo: 0.5 });
     const row = rankActivity([p], wide, NOW, OPEN)[0]!;
     expect(row.score).not.toBe(rankActivity([p], wide, NOW, CLOSED)[0]!.score);
-    expect(row.why).not.toContain("no session wrote it");
+    expect(row.why).not.toContain("no session write on record");
+  });
+
+  test("an update set aside a day or more back is still not named when the row did not move", () => {
+    // Both ways the row is `new` on its 3-day creation: the update (2.5d) lands
+    // within a day of it, and the worked stamp (5d) predates it.
+    const p = page({ relPath: "a.md", createdDaysAgo: 3, updatedDaysAgo: 2.5, workedDaysAgo: 5 });
+    expect(rankActivity([p], wide, NOW, OPEN)).toEqual(rankActivity([p], wide, NOW, CLOSED));
+  });
+
+});
+
+describe("rankActivity — a worked date past the relative window", () => {
+  test("reads `worked on <day>`, not `worked on on <day>`", () => {
+    const p = page({ relPath: "old.md", createdDaysAgo: 400, updatedDaysAgo: 0.5, workedDaysAgo: 120 });
+    const why = rankActivity([p], { ...wide, halfLifeChangedDays: 365 }, NOW, OPEN)[0]!.why;
+    expect(why).toMatch(/^worked on \d{4}-\d{2}-\d{2}, /);
   });
 });
 

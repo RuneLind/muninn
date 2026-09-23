@@ -161,7 +161,7 @@ export const E2E_PORTS = {
   "wiki-worked-recency": 3067,
   "wiki-worked-recency/ledger": 3068,
   // The worked-on SUBSTITUTION inside the rail's Activity ranking and the
-  // per-wiki `workedGate` in front of it: ONE muninn over three temp wikis whose
+  // per-wiki `workedGate` in front of it: ONE muninn over four temp wikis whose
   // pages are identical and whose ledger coverage is not, and ONE fake
   // claude-usage answering per root.
   "wiki-activity-worked": 3069,

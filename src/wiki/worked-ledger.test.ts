@@ -577,7 +577,7 @@ describe("the index fold", () => {
       const two = index.pages.find((p) => p.relPath === "two.md");
       expect(one?.workedMs).toBe(1_700_000_000_000);
       expect(two?.workedMs).toBeUndefined();
-      expect(index.workedCoverage).toEqual({ matched: 1, total: 2, returned: 2 });
+      expect(index.workedCoverage).toEqual({ matched: 1, total: 2, returned: 2, asOfMs: expect.any(Number) });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -596,7 +596,7 @@ describe("the index fold", () => {
       await writeFile(path.join(root, "b", "x.html"), "<title>X</title><p>body</p>");
       await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "a/x.md", w: 1_700_000_000_000 }] } }));
       const index = await buildWikiIndex(root);
-      expect(index.workedCoverage).toEqual({ matched: 1, total: index.pages.length, returned: 1 });
+      expect(index.workedCoverage).toMatchObject({ matched: 1, total: index.pages.length, returned: 1 });
       expect(index.shadowed?.length).toBe(1);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -649,6 +649,40 @@ describe("the empty-answer RELEASE window", () => {
     kickWorkedLedgerRefresh("/w", { deps: d, maxAgeMs: 5 * 60_000 });
     await Promise.resolve();
     expect(d.asked.length).toBe(asked);
+  });
+
+  test("a held empty answer keeps the PAGES' answer time — it says nothing newer", async () => {
+    // The Activity rank judges an update only against when the ledger answered
+    // for the pages it holds; a held empty answer holds pages from earlier.
+    let empty = false;
+    const { d, advance, at } = clocked((root) =>
+      empty ? { root, pages: [] } : { root, pages: [{ p: "a.md", w: 7 }] },
+    );
+    const first = await refreshWorkedLedger("/w", d);
+    expect(first!.answeredAt).toBe(at());
+    const answered = at();
+    empty = true;
+    advance(60_000);
+    const held = await refreshWorkedLedger("/w", d);
+    expect(held!.fetchedAt).toBe(at());
+    expect(held!.answeredAt).toBe(answered);
+    empty = false;
+    advance(60_000);
+    expect((await refreshWorkedLedger("/w", d))!.answeredAt).toBe(at());
+  });
+
+  test("the index ships the pages' answer time as workedCoverage.asOfMs", async () => {
+    const { buildWikiIndex } = await import("./store.ts");
+    const root = await mkdtemp(path.join(tmpdir(), "worked-index-asof-"));
+    try {
+      await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
+      const { d, at } = clocked((r) => ({ root: r, pages: [{ p: "a.md", w: 7 }] }));
+      await refreshWorkedLedger(root, d);
+      const index = await buildWikiIndex(root);
+      expect(index.workedCoverage?.asOfMs).toBe(at());
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("an empty answer AFTER the window is believed — the memo is cleared", async () => {

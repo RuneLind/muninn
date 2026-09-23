@@ -40,6 +40,7 @@
 
 import {
   displayTitleOf,
+  isImplausibleFutureDate,
   isMetaPage,
   isUsableWorkedMs,
   localDay,
@@ -347,6 +348,13 @@ function agePhrase(ms: number, now: number, dayLabel?: string): string {
   return age.text === "now" ? "just now" : age.text + " ago";
 }
 
+/** `agePhrase` after "worked": "worked on 3d ago", but "worked on 2026-05-26"
+ *  rather than "worked on on …" past the relative window. */
+function workedAgePhrase(ms: number, now: number): string {
+  const phrase = agePhrase(ms, now);
+  return phrase.startsWith("on ") ? phrase : "on " + phrase;
+}
+
 /**
  * A change counts as a CHANGE only when it landed more than this many days after
  * the page was created. Under it the "edit" is the same writing session as the
@@ -380,6 +388,12 @@ export interface WorkedGate {
   covered: number;
   /** `covered / candidates`, 0 when there are no candidates. */
   coverage: number;
+  /** When the ledger answered (`workedCoverage.asOfMs`), clamped to `now`.
+   *  An OLDER worked date replaces an update only when the update is at least
+   *  {@link WORKED_INGEST_SLACK_MS} older than this: an edit made after the
+   *  ledger answered cannot be judged by it. Absent ⇒ nothing is demoted. It
+   *  does not affect `open`. */
+  asOfMs?: number;
 }
 
 /**
@@ -398,6 +412,25 @@ function usableWorkedMs(page: WikiListing, now: number): number {
  *  case-sensitive there too). */
 const LEDGER_PAGE_EXT = /\.mdx?$/;
 
+/** How long after an edit the ledger may still not hold it: the mini ingests
+ *  transcripts every minute, and the memo refreshes at most every index TTL
+ *  (5 min). An update newer than `asOfMs` minus this is never set aside. */
+export const WORKED_INGEST_SLACK_MS = 10 * 60_000;
+
+/**
+ * Whether a worked stamp may stand in for this update signal at all. On an
+ * `added`-floor page (whose update stamp is its git arrival) it must land more
+ * than {@link CHANGE_MIN_DAYS_AFTER_CREATION} after the floor, or it is the
+ * session that brought the page there, not an edit. Shared by the gate's
+ * `covered` count and the rank, so the gate counts only pages it could move.
+ */
+function workedStandsIn(workedMs: number, updated: { ms: number; kind: string } | null): boolean {
+  return (
+    workedMs > 0 &&
+    (updated?.kind !== "added" || workedMs - updated.ms > CHANGE_MIN_DAYS_AFTER_CREATION * MS_PER_DAY)
+  );
+}
+
 /**
  * Measure the worked gate for ONE listing — once per payload, over the FULL page
  * set. Measured over the rail's filtered rows it would open and shut as the
@@ -411,21 +444,29 @@ export function workedGateFor(
   pages: readonly WikiListing[],
   weights: ActivityWeights,
   now: number,
+  asOfMs?: number,
 ): WorkedGate {
   let candidates = 0;
   let covered = 0;
   for (const page of pages) {
     if (isMetaPage(page) || !LEDGER_PAGE_EXT.test(page.relPath)) continue;
-    if (scorePage(page, weights, now, false).score < ACTIVITY_MIN_SCORE) continue;
+    if (scorePage(page, weights, now, null).score < ACTIVITY_MIN_SCORE) continue;
     candidates++;
-    if (usableWorkedMs(page, now) > 0) covered++;
+    if (workedStandsIn(usableWorkedMs(page, now), pageDateSignal(page, "updated", now))) covered++;
   }
+  // A ledger cannot have answered in the future: refused past the date
+  // signals' skew allowance, clamped to `now` inside it.
+  const asOf =
+    asOfMs !== undefined && Number.isFinite(asOfMs) && asOfMs > 0 && !isImplausibleFutureDate(asOfMs, now)
+      ? Math.min(asOfMs, now)
+      : undefined;
   return {
     // With no candidates the product test is 0 ≥ 0 at every gate; only 0 opens.
     open: candidates > 0 ? covered * 100 >= weights.workedGate * candidates : weights.workedGate === 0,
     candidates,
     covered,
     coverage: candidates > 0 ? covered / candidates : 0,
+    ...(asOf === undefined ? {} : { asOfMs: asOf }),
   };
 }
 
@@ -454,7 +495,7 @@ export function rankActivity(
   now: number,
   gate?: WorkedGate | null,
 ): ActivityRow[] {
-  const substitute = gate?.open === true;
+  const substitute = gate?.open === true ? gate : null;
   const rows: ActivityRow[] = [];
   for (const page of pages) {
     if (isMetaPage(page)) continue;
@@ -474,22 +515,21 @@ export function rankActivity(
  * change. An `if (both absent) return null` line sat here and was untestable by
  * construction, which is its own kind of wrong.
  *
- * `substitute` (the gate is open) puts a covered page's `workedMs` in place of
- * the update stamp for the change term — older or newer — and counts it as an
- * edit whatever the update signal's kind: a ledger write or bash touch IS a
- * known edit event. An older worked date demotes the page: the ledger records
- * Edit/Write and Bash-script writes since claude-usage #215, so an update stamp
- * past it is a bulk pass or a non-session writer. One limit, falling back to the
- * unsubstituted score: on an `added`-floor page (whose update stamp is its git
- * arrival) the worked date must land more than
- * {@link CHANGE_MIN_DAYS_AFTER_CREATION} after the floor, or it is the session
- * that brought the page there, not an edit.
+ * `substitute` (an open gate, or null) puts a covered page's `workedMs` in place
+ * of the update stamp for the change term and counts it as an edit whatever the
+ * update signal's kind: a ledger write or bash touch IS a known edit event. A
+ * newer worked date always substitutes ({@link workedStandsIn} aside). An OLDER
+ * one demotes the page, reading the update past it as a bulk pass or a writer
+ * the ledger cannot see — measured 2026-09-23 as right for most demotes, with
+ * about 10 of mimir's 92 unexplained, all far below the rail's top rows. It
+ * demotes only when the update predates the ledger's answer by
+ * {@link WORKED_INGEST_SLACK_MS}; a fresher update keeps the unsubstituted score.
  */
 function scorePage(
   page: WikiListing,
   w: ActivityWeights,
   now: number,
-  substitute: boolean,
+  substitute: Pick<WorkedGate, "asOfMs"> | null,
 ): ActivityRow {
   // ONE derivation per signal, because each carries three facts this function
   // needs: the stamp, the label the `why` sentence must quote, and (for the update
@@ -500,8 +540,9 @@ function scorePage(
   const workedMs = substitute ? usableWorkedMs(page, now) : 0;
   const updMs = updated?.ms ?? 0;
   const worked =
-    workedMs > 0 &&
-    (updated?.kind !== "added" || workedMs - updMs > CHANGE_MIN_DAYS_AFTER_CREATION * MS_PER_DAY);
+    workedStandsIn(workedMs, updated) &&
+    (workedMs >= updMs ||
+      (substitute?.asOfMs !== undefined && updMs <= substitute.asOfMs - WORKED_INGEST_SLACK_MS));
   // A demotion set an update aside (named in the `why` below, when it moved
   // the row, so a page git changed yesterday that now reads `+ 6d` says why).
   const setAside = worked && updated?.kind === "updated" && updMs > workedMs;
@@ -582,20 +623,19 @@ function scorePage(
   // A worked stamp is a wall-clock instant with no label of its own — its local
   // day, which is what `calendarDay` derives when given none.
   const changedPhrase = worked
-    ? `worked on ${agePhrase(changeMs, now)}`
+    ? `worked ${workedAgePhrase(changeMs, now)}`
     : `changed ${agePhrase(changeMs, now, updated?.label)}`;
   let why =
     kind === "new"
       ? `created ${createdPhrase} → ${newScore.toFixed(2)}`
       : `${changedPhrase}, created ${createdPhrase}: ${parts.join(", ")} → ${changedScore.toFixed(2)}`;
-  if (setAside) {
-    // Named only when it moved the row, and not when it reads as the same age
-    // as the worked stamp ("worked on 4d ago … update 4d ago").
-    const updPhrase = agePhrase(updMs, now, updated?.label);
-    const sameAge = updPhrase === agePhrase(changeMs, now);
-    const unsubstituted = scorePage(page, w, now, false);
-    if (!sameAge && (unsubstituted.kind !== kind || unsubstituted.score !== score)) {
-      why += `; update ${updPhrase}: no session wrote it, or only a bulk pass`;
+  // Named only when it moved the row, and only past a day: a session that
+  // edits and commits hours later leaves a git touch after its ledger stamp,
+  // and the clause would pin that session's own commit on someone else.
+  if (setAside && updMs - workedMs > MS_PER_DAY) {
+    const unsubstituted = scorePage(page, w, now, null);
+    if (unsubstituted.kind !== kind || unsubstituted.score !== score) {
+      why += `; update ${agePhrase(updMs, now, updated?.label)}: no session write on record, or a bulk pass`;
     }
   }
   const row: ActivityRow = { page, kind, score, why, ageMs: kind === "new" ? now - createdMs : now - changeMs };

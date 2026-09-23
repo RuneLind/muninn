@@ -6336,7 +6336,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   }
   // After the weights (it reads `workedGate`) and after `scannedAtMs` (so
   // `recencyNow()` is anchored).
-  workedGate = workedGateFor(data.pages, activityWeights, recencyNow());
+  workedGate = workedGateFor(data.pages, activityWeights, recencyNow(), data.workedCoverage?.asOfMs);
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one
   // would admit a project the listing on screen no longer has. An older server /

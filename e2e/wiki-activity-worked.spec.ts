@@ -8,7 +8,7 @@
  * `renderList`; a unit test can hand the ranker a verdict but cannot prove the
  * verdict is measured once over the whole payload.
  *
- * ONE muninn, THREE temp wikis holding the SAME eight pages, ONE fake
+ * ONE muninn, FOUR temp wikis holding the SAME eight pages, ONE fake
  * `node:http` claude-usage. The update signal is the file mtime (the roots are
  * not git repos, so mtime is trusted outright) and is set to an exact offset,
  * so every score is a function of the fixture alone. The wikis differ only in
@@ -294,7 +294,7 @@ test.describe("Wiki rail: worked-on substitution in Activity", () => {
 
     // DEMOTE: alpha's mtime is 12h old, its last session 8 days back, and the
     // hover names the update it set aside.
-    expect(byRel["notes/alpha.md"]!.why).toMatch(/^worked on 8d ago, .*; update 12h ago: no session wrote it, or only a bulk pass$/);
+    expect(byRel["notes/alpha.md"]!.why).toMatch(/^worked on 8d ago, .*; update 12h ago: no session write on record, or a bulk pass$/);
     expect(byRel["notes/alpha.md"]!.meta).toBe("8d");
     // PROMOTE: charlie's mtime is 6 days old, its last session 6 hours back —
     // the date cell and its hover name the worked day, not the mtime.
