@@ -1310,7 +1310,7 @@ function renderList(): void {
       html +=
         `<button type="button" class="wiki-list-more" data-section="${esc(entry.section)}"` +
         ` data-fold-key="${esc(entry.toggleKey)}" aria-expanded="false"` +
-        ` title="${esc(`Show the other ${entry.hidden} members of this series`)}">${esc(label)}</button>`;
+        ` title="${esc(`Show the other ${entry.hidden} ${entry.hidden === 1 ? "member" : "members"} of this series`)}">${esc(label)}</button>`;
       return;
     }
     const p = entry.page;

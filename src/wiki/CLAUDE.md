@@ -885,8 +885,9 @@ pair differently. The rendered date cell always names the day the order used.
    Activity ranked ITSELF renders in the series' Activity row, not under
    `Pinned` — Activity claims before Pinned, as it does for any page. A pinned
    member ranked only through its attachment child stays under `Pinned`, and
-   the series still takes the child's slot. A peek row earned by a child
-   carries the child's Activity signal in its date cell. A series claims its members BEFORE
+   the series still takes the child's slot. A member row in an Activity series
+   carries the best signal that ranked it — its own, or its child's when the
+   child ranked first — in its date cell. A series claims its members BEFORE
    `groupFamilies`/`groupMonths` are computed — `renderList` subtracts them
    (`withoutSeriesMembers`) — so two knock-on effects are accepted and pinned by
    unit tests: a family that drops below `FAMILY_MIN` **dissolves** into plain
