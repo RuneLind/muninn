@@ -118,6 +118,14 @@ describe("parseWorkedPages", () => {
       ],
     });
     expect(out.ok && out.pages.get("plans/a.mdx")).toBe(7000);
+    // Reversed: the fold must COMPARE on max(w, b), not on w (3000 > 1000).
+    const rev = parseWorkedPages({
+      pages: [
+        { p: "plans/a.mdx", w: 3000 },
+        { p: "Plans/A.mdx", w: 1000, b: 7000 },
+      ],
+    });
+    expect(rev.ok && rev.pages.get("plans/a.mdx")).toBe(7000);
   });
 
   test("the RAW row form is rejected as no-pages-key, never read as an empty wiki", () => {

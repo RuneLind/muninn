@@ -1091,9 +1091,9 @@ The worked date is **`max(w, b)`**: `b` is the page's newest bash touch (`sed -i
 under the same fan-out discount. Upstream sends `b` only on pages that also have
 a qualifying write, so bash-only pages stay uncovered. A malformed `b` is
 skipped, never rejecting the row. Measured on the mini 2026-09-23: 89 of mimir's
-354 pages have `b` newer than `w`, 34 by more than 3 days. The BROWSER never reaches claude-usage (tailnet viewers,
-mixed content under `tailscale serve`), which is why the field is computed here
-and shipped on the listing.
+354 pages have `b` newer than `w`, 34 by more than 3 days. The BROWSER never
+reaches claude-usage (tailnet viewers, mixed content under `tailscale serve`),
+which is why the field is computed here and shipped on the listing.
 
 **A page with no worked date is the ordinary case, not an error.** Absent means
 one of four things and none of them is a failure: the ledger holds no write for

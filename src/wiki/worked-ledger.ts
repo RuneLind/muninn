@@ -68,9 +68,10 @@ export interface WorkedLedgerMemo {
    *  FIRST on every later refresh of this root, so a wiki registered through a
    *  symlink pays the second call and the `realpath` once rather than per poll. */
   rootAsked: string;
-  /** Upstream clipped its own answer at `limit` rows. The clip drops the
-   *  OLDEST-worked pages, so the axis silently shortens — and the match rate
-   *  cannot see it, because every row that did arrive still matches. */
+  /** Upstream clipped its own answer at `limit` rows. Upstream orders by `w`,
+   *  so the clip drops the pages with the OLDEST write (a recent `b` does not
+   *  save one), and the axis silently shortens — the match rate cannot see it,
+   *  because every row that did arrive still matches. */
   truncated: boolean;
 }
 
@@ -415,14 +416,14 @@ async function runRefresh(
   };
   memos.set(root, memo);
   if (memo.truncated) {
-    // The clip drops the OLDEST-worked pages, and every row that DID arrive
-    // still matches — so the match-rate warn cannot see this one.
+    // The clip drops the pages with the OLDEST write, and every row that DID
+    // arrive still matches — so the match-rate warn cannot see this one.
     warnDegraded(
       deps,
       root,
       "truncated",
       `upstream clipped its answer for ${asked} at ${parsed.limit ?? "its"} row(s) — the ` +
-        `oldest-worked pages are missing from the axis (${deps.baseUrl})`,
+        `pages with the oldest write are missing from the axis (${deps.baseUrl})`,
     );
   }
   log.debug("worked ledger: {pages} page(s) for {root} from {baseUrl}", {
