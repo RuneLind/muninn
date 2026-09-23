@@ -174,8 +174,14 @@ rather than the index because both wiki writers stage before they commit; and a
 changed line counts only INSIDE the frontmatter block `parseFrontmatter` reads,
 since mimir documents these very keys at column 0 inside body code fences. The
 classification carries its OWN budget (`GIT_DATES_CLASSIFY_TIMEOUT_MS`) whose
-loser is the UNCLASSIFIED dirty set, never the empty one. Rules and degrades: the
-metadata-only section of `src/wiki/git-dates.ts`. ⚠️ A **change means the update signal's own KIND is `updated`** (`pageDateKind`),
+loser is the UNCLASSIFIED dirty set, never the empty one. The same verdict
+covers COMMITTED history: a page's newest non-sweep commit is compared with its
+parent blob, and a `metadata-only` or `identical` one (a pure rename) steps back
+to the commit before it, up to `METADATA_TOUCH_MAX_STEPS` (8). The sweep
+threshold cannot catch these, because a mechanical writer commits per call — the
+2026-09-21 lint accepts were 38 commits of 2–12 pages and dated 93 of mimir's 139
+series members to that morning. Rules and degrades: the metadata-only section of
+`src/wiki/git-dates.ts`. ⚠️ A **change means the update signal's own KIND is `updated`** (`pageDateKind`),
 never a gap between two dates: `updatedSignal` falls back to the git CREATION
 date for a page whose every commit was a sweep, and read as a date it makes
 such a page "changed <the day it was created>", outranking the creation it is
