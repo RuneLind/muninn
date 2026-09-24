@@ -16,7 +16,7 @@ Requires `wikiDir`; per-bot `gardener` config block; seed via `scripts/setup-wik
 
 `synthesis-drafter.ts` + the `consolidation-gardener` watcher (seed `scripts/setup-consolidation-gardener.ts`) drafts saga-style `synthesis` proposals across a wiki's OWN pages (semantic clusters of the Atlas overlay) into the same gate, keyed by `wiki_name` — the automation leg of the Atlas "Draft synthesis" button. Topic-key dedup skips clusters already drafted via the button.
 
-Its model call is **fenced** (`runFencedOneShot`, see Source drafter below) — the drafted page is the call's RETURN TEXT, so a reachable `Write` loses it. The seven observability strings the seam is parameterized with are pinned by a test (`SYNTHESIS_ONESHOT_IDENTITY`, plus one case that reads `traceName`/`platform` off the REAL trace root rather than the literal object); Unlike the source drafter it has NO text-only retry; it relies on the fence alone, which since #580 binds on all four connectors (`toolsDisabled` — see Source drafter below).
+Its model call is **fenced** (`runFencedOneShot`, see Source drafter below) — the drafted page is the call's RETURN TEXT, so a reachable `Write` loses it. The seven observability strings the seam is parameterized with are pinned by a test (`SYNTHESIS_ONESHOT_IDENTITY`, plus one case that reads `traceName`/`platform` off the REAL trace root rather than the literal object); unlike the source drafter it has NO text-only retry; it relies on the fence alone, which since #580 binds on all four connectors (`toolsDisabled` — see Source drafter below).
 
 ## Source drafter (per-article, auto-triggered after every capture)
 

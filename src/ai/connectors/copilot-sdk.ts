@@ -357,11 +357,6 @@ export async function executePrompt(
 }
 
 /**
- * Build custom subagents from the bot's serena config.
- * Creates a "verify-code" agent with grep/diff/read tools for verifying
- * claims that Serena alone can't verify (reference-following, file diffing).
- */
-/**
  * The tool half of `createSession`: MCP servers, custom agents and the exclude
  * list. Under `toolsDisabled` all three sources are excluded by Copilot's
  * source-qualified patterns, which bind whatever Copilot names its built-ins —
@@ -385,6 +380,11 @@ export function copilotSessionTools(botConfig: BotConfig): {
   };
 }
 
+/**
+ * Build custom subagents from the bot's serena config.
+ * Creates a "verify-code" agent with grep/diff/read tools for verifying
+ * claims that Serena alone can't verify (reference-following, file diffing).
+ */
 export function buildCustomAgents(botConfig: BotConfig): CustomAgentConfig[] {
   // Reuse the shared Serena config discovery (validates name, projectPath, port)
   const botsDir = resolve(botConfig.dir, "..");
