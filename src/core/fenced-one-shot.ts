@@ -6,8 +6,8 @@
  * Two verticals had ~75 verbatim-identical lines of this: the source-page drafter
  * (`src/gardener/drafter-oneshot.ts`) and the fact-check integrate proposer
  * (`src/wiki/integrate-oneshot.ts`). Both mint their own trace ROOT, register a
- * lightweight `/agents` run, clone the bot config with {@link FENCED_EXCLUDED_TOOLS}
- * unioned onto its `excludedTools`, cap thinking, delegate the model call to
+ * lightweight `/agents` run, clone the bot config with `toolsDisabled` set and
+ * {@link FENCED_EXCLUDED_TOOLS} unioned onto its `excludedTools`, cap thinking, delegate the model call to
  * `tracedOneShot` (which owns the `claude` CHILD span, never the root), and finish
  * both root and run in try/catch so a throw can't leak an unfinished trace or a run
  * stuck mid-phase. That sequence lives here now; the callers supply only their own
@@ -50,26 +50,20 @@ export const FENCED_THINKING_MAX_TOKENS = 8000;
  * muninn repo itself. On the integrate path the same reach would bypass the human
  * preview, the CAS and the per-wiki write queue all at once.
  *
- * The fence has three layers, because a deny-list alone drifts: every Claude Code
- * release adds tools, and 2.1.281 shipped `Workflow` (sub-agents with a full
- * toolset), `Monitor` (runs shell commands), `SendMessage`/`ListAgents` (ask
- * another local session to write) and `EnterWorktree` past the old eight names.
+ * So a fenced run gets NO tools: the clone sets `toolsDisabled`, which removes
+ * every built-in, every MCP server and every custom agent on all four connectors
+ * (claude-sdk `tools: []`; claude-cli `--tools ""` + `--strict-mcp-config`;
+ * copilot-sdk `builtin:*`/`mcp:*`/`custom:*` excluded; openai-compat loads no
+ * MCP tools). A deny-list alone drifted: Claude Code 2.1.281 shipped `Workflow`,
+ * `Monitor` (runs shell commands), `SendMessage`/`ListAgents` and `EnterWorktree`
+ * past the old eight names, and the bots' `.mcp.json` (gmail, calendar, hivemind)
+ * was never fenced at all. Read-only tools are out too: a fenced run's source is
+ * captured external text, and Read plus a returned post is enough to leak a file.
+ * Fenced runs used 3 Glob/Grep calls in 194 runs over the 7-day trace window.
  *
- * 1. {@link FENCED_ALLOWED_TOOLS} — the built-in ALLOW-list, fail-closed against
- *    tools a future release adds. claude-sdk → `tools`, claude-cli → `--tools`.
- *    Measured from the init event on 2.1.281: the surface is exactly these three.
- * 2. `mcpDisabled` — no MCP servers at all. The bots' own `.mcp.json` carries
- *    gmail / calendar / hivemind, and a claude-cli spawn without it also inherits
- *    the user-global servers (an IDE's terminal tool, claude.ai Gmail). Fenced
- *    runs used zero MCP tools over the 7-day trace window (194 runs).
- * 3. {@link FENCED_EXCLUDED_TOOLS} — the deny-list, kept as the belt: copilot-sdk
- *    honours only `excludedTools`, and the allow-list mapping is one conditional
- *    spread that a refactor could drop.
- *
- * openai-compat has no built-in tools, so only layer 2 applies there.
+ * The deny-list below stays as the belt — the `toolsDisabled` mappings are
+ * conditional spreads a refactor could drop.
  */
-export const FENCED_ALLOWED_TOOLS = ["Read", "Glob", "Grep"];
-
 export const FENCED_EXCLUDED_TOOLS = [
   "Write",
   "Edit",
@@ -179,9 +173,8 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
     // the trace and the run still report the bot's own identity.
     const fencedBotConfig: BotConfig = {
       ...botConfig,
-      allowedTools: FENCED_ALLOWED_TOOLS,
       excludedTools: [...new Set([...(botConfig.excludedTools ?? []), ...FENCED_EXCLUDED_TOOLS])],
-      mcpDisabled: true,
+      toolsDisabled: true,
     };
 
     const result = await tracedOneShot(tracer, "claude", opts.prompt, config, fencedBotConfig, {

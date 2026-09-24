@@ -14,9 +14,9 @@
  * human and only then applied under CAS. A model that can reach `Write`/`Edit`
  * can satisfy the prompt by editing the page directly — bypassing the preview,
  * the CAS, the per-wiki queue, the log entry and the commit, all at once. So the
- * call goes through `runFencedOneShot`, whose three-layer fence (built-in
- * allow-list of Read/Glob/Grep, no MCP servers, and the `FENCED_EXCLUDED_TOOLS`
- * deny-list) is documented in `src/core/fenced-one-shot.ts`. Every source the
+ * call goes through `runFencedOneShot`, which runs it with no tools at all
+ * (`toolsDisabled`, plus the `FENCED_EXCLUDED_TOOLS` deny-list as the belt; see
+ * `src/core/fenced-one-shot.ts`). Every source the
  * edit list needs is already quoted in the verdict blocks, so no web tools.
  */
 

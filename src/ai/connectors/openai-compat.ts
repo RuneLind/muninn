@@ -71,11 +71,11 @@ export async function executePrompt(
     : 8192;
 
   // Pre-flight: warn if a *critical* MCP server is down (cached probe).
-  if (!botConfig.mcpDisabled) await preflightMcpForRequest(botConfig, onProgress);
+  if (!botConfig.toolsDisabled) await preflightMcpForRequest(botConfig, onProgress);
 
   // Load MCP tools for this bot (cached per bot NAME after first call, so a
   // tool-less call must bypass the cache rather than share its key).
-  const { openaiTools, toolServerMap } = botConfig.mcpDisabled
+  const { openaiTools, toolServerMap } = botConfig.toolsDisabled
     ? { openaiTools: [], toolServerMap: new Map<string, string>() }
     : await loadToolsForBot(botConfig);
 

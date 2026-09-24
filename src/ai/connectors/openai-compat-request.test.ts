@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executePrompt } from "./openai-compat.ts";
@@ -34,6 +34,8 @@ type Mode = "ok" | "unauthorized-once" | "unauthorized-always" | "forbidden" | "
 let mode: Mode = "ok";
 /** Every request the server saw, in order. */
 let seen: { authorization: string | null; contentType: string | null }[] = [];
+/** Whether each request body carried a `tools` key, in order. */
+let sentTools: boolean[] = [];
 
 function sse(...chunks: unknown[]): Response {
   const body = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
@@ -50,7 +52,8 @@ beforeAll(() => {
   botDir = mkdtempSync(join(tmpdir(), "muninn-oc-test-"));
   server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
+      sentTools.push("tools" in ((await req.json()) as Record<string, unknown>));
       seen.push({
         authorization: req.headers.get("authorization"),
         contentType: req.headers.get("content-type"),
@@ -74,7 +77,7 @@ beforeAll(() => {
 });
 
 afterAll(() => server.stop(true));
-afterEach(() => { seen = []; });
+afterEach(() => { seen = []; sentTools = []; });
 
 /** A distinct bot NAME per case: `loadToolsForBot` caches on it. */
 let botCounter = 0;
@@ -211,4 +214,27 @@ describe("executePrompt over a real socket — Vertex credential path", () => {
     })))).rejects.toThrow(/global/);
     expect(seen).toHaveLength(0);
   });
+});
+
+describe("executePrompt — toolsDisabled", () => {
+  test("sends no tools even when the bot's .mcp.json serves some", async () => {
+    // A real stdio MCP server with one tool, so the control arm has something to lose.
+    const dir = mkdtempSync(join(tmpdir(), "muninn-oc-mcp-"));
+    const mcp = (sub: string) => JSON.stringify(Bun.resolveSync(`@modelcontextprotocol/sdk/${sub}`, import.meta.dir));
+    writeFileSync(join(dir, "server.ts"), [
+      `import { McpServer } from ${mcp("server/mcp.js")};`,
+      `import { StdioServerTransport } from ${mcp("server/stdio.js")};`,
+      `const s = new McpServer({ name: "t", version: "1" });`,
+      `s.tool("ping", async () => ({ content: [{ type: "text", text: "pong" }] }));`,
+      `await s.connect(new StdioServerTransport());`,
+    ].join("\n"));
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+      mcpServers: { t: { command: process.execPath, args: [join(dir, "server.ts")] } },
+    }));
+    mode = "ok";
+
+    await run(bot({ dir }));
+    await run(bot({ dir, toolsDisabled: true }));
+    expect(sentTools).toEqual([true, false]);
+  }, 20_000);
 });

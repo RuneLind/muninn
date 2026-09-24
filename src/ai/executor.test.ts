@@ -214,7 +214,7 @@ describe("executeClaudePrompt", () => {
     spawnSpy.mockRestore();
   });
 
-  test("mcpDisabled drops every MCP server and allowedTools maps to --tools", async () => {
+  test("toolsDisabled spawns with no built-in tools and no MCP servers at all", async () => {
     // A bot dir WITH a .mcp.json: the flag must win over it, and --strict-mcp-config
     // is what also keeps the CLI's user-global servers out.
     const dir = mkdtempSync(join(tmpdir(), "executor-fence-"));
@@ -230,20 +230,15 @@ describe("executeClaudePrompt", () => {
 
     try {
       const config = { claudeModel: "sonnet", claudeTimeoutMs: 30000 } as any;
-      const botConfig = {
-        name: "testbot",
-        dir,
-        mcpDisabled: true,
-        allowedTools: ["Read", "Glob", "Grep"],
-      } as any;
-      await executeClaudePrompt("test", config, botConfig);
+      await executeClaudePrompt("test", config, { name: "testbot", dir, toolsDisabled: true } as any);
 
       const [args] = spawnSpy.mock.calls[0]! as unknown as [string[]];
       expect(args).toContain("--strict-mcp-config");
       expect(args).not.toContain("--mcp-config");
       const i = args.indexOf("--tools");
       expect(i).toBeGreaterThan(-1);
-      expect(args[i + 1]).toBe("Read,Glob,Grep");
+      // `--tools ""` is the CLI's own spelling of "no built-in tools".
+      expect(args[i + 1]).toBe("");
       expect(i).toBeLessThan(args.indexOf("--"));
     } finally {
       spawnSpy.mockRestore();
