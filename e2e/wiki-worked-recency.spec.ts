@@ -31,6 +31,11 @@
  *  5. **The "Worked on" option is HIDDEN on a wiki the ledger matched nothing
  *     for.** Offering it there is offering "Recently updated" under a second
  *     name (capra: 93% of pages have a write row, every one a bulk pass).
+ *  6. **"Worked on" is the DEFAULT sort where it is offered**, a sort the reader
+ *     picks is remembered per wiki, and the chip and the article header MARK
+ *     where a date came from: cyan for a session's write, an amber dot for a
+ *     change after it, a dotted underline for "no session — updated date". The
+ *     colours are asserted against the resolved tokens in both themes.
  *
  * No model calls and no writes: the whole feature is a read.
  *
@@ -67,6 +72,12 @@ const BULK = "wrbulk";
 const FAIL = "wrfail";
 const BIG = "wrbig";
 const RAW = "wrraw";
+/** Three pages, one per source state: a session wrote it; a session wrote it
+ *  and something else changed it later; no session wrote it. */
+const MARK = "wrmark";
+const MARK_WORKED = "plans/worked.md";
+const MARK_CHANGED = "plans/changed.md";
+const MARK_NONE = "plans/none.md";
 
 const roots: Record<string, string> = {};
 let server: ChildProcess | undefined;
@@ -182,6 +193,15 @@ function ledgerAnswer(root: string): { status: number; body: string } | "oversiz
     // page the corpus does not have. `matched: 0`, which is the verdict that
     // hides the option.
     return { status: 200, body: rows([["ghost/one.md", dayMs("2026-09-01")]]) };
+  }
+  if (root === roots[MARK]) {
+    return {
+      status: 200,
+      body: rows([
+        [MARK_WORKED, dayMs("2025-02-01")],
+        [MARK_CHANGED, dayMs("2025-01-01")],
+      ]),
+    };
   }
   if (root === roots[FAIL]) return { status: 500, body: JSON.stringify({ error: "ledger down" }) };
   if (root === roots[BIG]) return "oversized";
@@ -299,6 +319,21 @@ test.beforeAll(async () => {
     );
   }
 
+  // Dates a year back, far under the Activity threshold, so every row is a
+  // plain listing row whose chip answers about the sort.
+  const mark = await makeRoot(MARK);
+  for (const [rel, updated] of [
+    [MARK_WORKED, "2024-03-01"],
+    [MARK_CHANGED, "2025-06-01"],
+    [MARK_NONE, "2025-03-01"],
+  ] as Array<[string, string]>) {
+    await writeFile(
+      path.join(mark, rel),
+      ["---", `title: ${rel}`, SETTLED_CREATED_LINE, `updated: ${updated}`, "---", "", "Body.", ""].join("\n"),
+      "utf8",
+    );
+  }
+
   for (const name of [BULK, FAIL, BIG, RAW]) {
     const root = await makeRoot(name);
     await writeFile(path.join(root, "plans/a.md"), fixture("A"), "utf8");
@@ -345,14 +380,16 @@ test.beforeAll(async () => {
   // …and then wait for the boot kick's answer to reach a REBUILT index. The
   // memo is refreshed in the background and never awaited, so "the server is
   // up" and "the axis is warm" are two different instants.
-  const warm = Date.now() + 20_000;
-  for (;;) {
-    const body = (await (await fetch(`${BASE}/api/wiki/pages?wiki=${MAIN}&refresh=1`)).json()) as {
-      workedCoverage?: { matched: number };
-    };
-    if ((body.workedCoverage?.matched ?? 0) > 0) break;
-    if (Date.now() > warm) throw new Error("the worked ledger memo never warmed");
-    await new Promise((r) => setTimeout(r, 300));
+  for (const wiki of [MAIN, MARK]) {
+    const warm = Date.now() + 20_000;
+    for (;;) {
+      const body = (await (await fetch(`${BASE}/api/wiki/pages?wiki=${wiki}&refresh=1`)).json()) as {
+        workedCoverage?: { matched: number };
+      };
+      if ((body.workedCoverage?.matched ?? 0) > 0) break;
+      if (Date.now() > warm) throw new Error(`the worked ledger memo never warmed for ${wiki}`);
+      await new Promise((r) => setTimeout(r, 300));
+    }
   }
 });
 
@@ -376,6 +413,7 @@ test.describe("Wiki reader: worked-on recency", () => {
     // The SYMPTOM first: under "Recently updated" all thirteen pages carry the
     // same authored date, so the list is ONE flat tie broken by title — which is
     // what twelve rows of `3h` looked like on the wiki this was measured on.
+    await sortBy(page, "updated");
     const updatedOrder = await railOrder(page);
     expect(updatedOrder).toEqual([...updatedOrder].sort());
 
@@ -403,7 +441,10 @@ test.describe("Wiki reader: worked-on recency", () => {
 
     // The UNCOVERED page says which signal answered instead — a bare day here
     // would be a worked date this page never earned.
-    await expect(metaOf(BULK_REL)).toHaveAttribute("title", `${SHARED_UPDATED} (updated)`);
+    await expect(metaOf(BULK_REL)).toHaveAttribute(
+      "title",
+      `${SHARED_UPDATED} (updated — no session write recorded)`,
+    );
     await expect(metaOf(BULK_REL)).not.toHaveAttribute("title", /\(worked\)$/);
 
     // …and no other mode grows the suffix.
@@ -428,6 +469,116 @@ test.describe("Wiki reader: worked-on recency", () => {
     await expect(page.locator('#wikiSort option[value="worked"]')).toHaveAttribute("hidden", "");
     // The listing itself is untouched.
     await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+  });
+
+  test("acceptance 6 — Worked on is the default where offered, and a pick is remembered per wiki", async ({
+    page,
+  }) => {
+    await openReader(page, MAIN);
+    await expect(page.locator("#wikiSort")).toHaveValue("worked");
+    await sortBy(page, "title");
+    await openReader(page, MAIN);
+    await expect(page.locator("#wikiSort")).toHaveValue("title");
+    // The pick is THIS wiki's: another covered wiki still opens on the default…
+    await openReader(page, SERIES);
+    await expect(page.locator("#wikiSort")).toHaveValue("worked");
+    // …and a wiki the ledger covers nothing on keeps "Recently updated".
+    await openReader(page, BULK);
+    await expect(page.locator("#wikiSort")).toHaveValue("updated");
+  });
+
+  test("acceptance 6 — the chip marks where a worked-on date came from, in both themes", async ({
+    page,
+  }) => {
+    const metaOf = (rel: string) =>
+      page.locator(`.wiki-list-item[data-relpath="${rel}"] .wiki-list-meta`);
+    // The token values themselves are pinned too: an undefined token resolves
+    // to the inherited colour on the probe AND the chip, which would compare equal.
+    const expected = {
+      dark: { worked: "rgb(34, 211, 238)", changed: "rgb(251, 191, 36)" },
+      light: { worked: "rgb(14, 116, 144)", changed: "rgb(180, 83, 9)" },
+    };
+    for (const scheme of ["dark", "light"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await openReader(page, MARK);
+      await expect(page.locator("#wikiSort")).toHaveValue("worked");
+
+      await expect(metaOf(MARK_WORKED)).toHaveClass(/\bworked\b/);
+      await expect(metaOf(MARK_WORKED)).not.toHaveClass(/changed-since/);
+      await expect(metaOf(MARK_WORKED)).toHaveAttribute("title", "2025-02-01 (worked)");
+      await expect(metaOf(MARK_CHANGED)).toHaveClass(/\bworked\b.*\bchanged-since\b/);
+      await expect(metaOf(MARK_CHANGED)).toHaveAttribute(
+        "title",
+        "2025-01-01 (worked)\nchanged 2025-06-01, no session write recorded",
+      );
+      await expect(metaOf(MARK_NONE)).toHaveClass(/\bfallback\b/);
+      await expect(metaOf(MARK_NONE)).toHaveAttribute("title", "2025-03-01 (updated — no session write recorded)");
+
+      const tokens = await page.evaluate(() => {
+        const read = (v: string) => {
+          const probe = document.createElement("span");
+          probe.style.color = `var(${v})`;
+          document.body.appendChild(probe);
+          const c = getComputedStyle(probe).color;
+          probe.remove();
+          return c;
+        };
+        return { worked: read("--worked-ink"), changed: read("--changed-ink") };
+      });
+      expect(tokens).toEqual(expected[scheme]);
+      expect(await metaOf(MARK_WORKED).evaluate((e) => getComputedStyle(e).color)).toBe(tokens.worked);
+      expect(await metaOf(MARK_CHANGED).evaluate((e) => getComputedStyle(e, "::after").color)).toBe(
+        tokens.changed,
+      );
+      expect(
+        await metaOf(MARK_NONE).evaluate((e) => {
+          const cs = getComputedStyle(e);
+          return `${cs.textDecorationLine} ${cs.textDecorationStyle}`;
+        }),
+      ).toBe("underline dotted");
+    }
+
+    // Every other mode answers one question, so no row is marked.
+    await sortBy(page, "updated");
+    for (const rel of [MARK_WORKED, MARK_CHANGED, MARK_NONE]) {
+      await expect(metaOf(rel)).not.toHaveClass(/\b(worked|fallback|changed-since)\b/);
+    }
+  });
+
+  test("acceptance 6 — the article header names the worked day, a later change, or no session", async ({
+    page,
+  }) => {
+    const open = async (rel: string) => {
+      await openReader(page, MARK);
+      await page.goto(`${BASE}/wiki?wiki=${MARK}&relPath=${encodeURIComponent(rel)}`);
+      const date = page.locator("#wikiBreadcrumb .wiki-bc-date");
+      await expect(date).toBeVisible();
+      return date;
+    };
+
+    let date = await open(MARK_WORKED);
+    await expect(date.locator(".wiki-bc-worked")).toHaveText("worked 2025-02-01");
+    await expect(date).not.toContainText("updated");
+    await expect(date).not.toContainText("no session");
+
+    date = await open(MARK_CHANGED);
+    await expect(date.locator(".wiki-bc-worked")).toHaveText("worked 2025-01-01");
+    await expect(date.locator(".wiki-bc-changed")).toHaveText("updated 2025-06-01");
+
+    date = await open(MARK_NONE);
+    await expect(date.locator(".wiki-bc-worked")).toHaveCount(0);
+    await expect(date.locator(".wiki-bc-fallback")).toHaveText("updated 2025-03-01");
+    await expect(date.locator(".wiki-bc-nosession")).toHaveText("no session");
+    // Readable, not faint: --text-faint measures ~2.3:1 on the header ground.
+    const [note, muted] = await date.locator(".wiki-bc-nosession").evaluate((e) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--text-muted)";
+      document.body.appendChild(probe);
+      const m = getComputedStyle(probe).color;
+      probe.remove();
+      return [getComputedStyle(e).color, m];
+    });
+    expect(note).toBe(muted);
   });
 
   test("acceptance 8 — the Series section orders by each group's worked day", async ({ page }) => {

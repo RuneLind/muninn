@@ -35,6 +35,11 @@ import {
   pageDateLabel,
   pageDateKind,
   pageHeaderDates,
+  parseWikiSortMode,
+  resolveSortMode,
+  workedSourceOf,
+  workedChip,
+  CHANGED_SINCE_MIN_MS,
   pageFolder,
   pageFollowups,
   pageTimeMs,
@@ -1599,4 +1604,134 @@ test("recencyKindFor answers the date KIND each mode reads", () => {
   for (const mode of ["created", "updated", "worked"] as const) {
     expect(pageDateSignal(p, recencyKindFor(mode), NOW)?.ms).toBe(recencyKeyFor(mode)(p, NOW));
   }
+});
+
+// ── Worked-on source marking: the rail chip, the article header, the default sort ──
+
+const T = (iso: string) => Date.parse(iso + "T12:00:00Z");
+const MARK_NOW = T("2026-09-24");
+
+test("workedSourceOf: a session-written page is `worked`, an uncovered one `fallback`", () => {
+  expect(workedSourceOf(page({ workedMs: T("2026-09-19"), gitTouchedMs: T("2026-09-19") }), MARK_NOW)).toEqual({
+    kind: "worked",
+    worked: "2026-09-19",
+  });
+  expect(workedSourceOf(page({ gitTouchedMs: T("2026-09-21") }), MARK_NOW)).toEqual({ kind: "fallback" });
+  // A stamp the future guard rejects is no worked date either.
+  expect(workedSourceOf(page({ workedMs: MARK_NOW + 10 * 86_400_000 }), MARK_NOW)).toEqual({ kind: "fallback" });
+});
+
+test("workedSourceOf: an update more than a day after the session is `changedSince`", () => {
+  // `gitCreatedMs` rides every git-dated listing; without it the update signal
+  // does not trust the git dates at all.
+  const git = { gitCreatedMs: T("2026-09-01") };
+  const later = page({ ...git, workedMs: T("2026-09-16"), gitTouchedMs: T("2026-09-21") });
+  expect(workedSourceOf(later, MARK_NOW)).toEqual({
+    kind: "worked",
+    worked: "2026-09-16",
+    changedSince: "2026-09-21",
+  });
+  // Written late one evening, committed the next morning: the same work.
+  const lag = page({
+    ...git,
+    workedMs: Date.parse("2026-09-16T21:00:00Z"),
+    gitTouchedMs: Date.parse("2026-09-16T21:00:00Z") + CHANGED_SINCE_MIN_MS - 60_000,
+  });
+  expect(workedSourceOf(lag, MARK_NOW)).toEqual({ kind: "worked", worked: "2026-09-16" });
+  // An update OLDER than the worked day (a session touched it after the last
+  // commit) is not a change since.
+  expect(workedSourceOf(page({ ...git, workedMs: T("2026-09-20"), gitTouchedMs: T("2026-09-10") }), MARK_NOW)).toEqual({
+    kind: "worked",
+    worked: "2026-09-20",
+  });
+});
+
+test("pageHeaderDates: without the ledger flag the header is unchanged", () => {
+  const p = page({ workedMs: T("2026-09-16"), gitCreatedMs: T("2026-09-01"), gitTouchedMs: T("2026-09-21") });
+  expect(pageHeaderDates(p, MARK_NOW)).toEqual({ created: "2026-09-01", updated: "2026-09-21" });
+});
+
+test("pageHeaderDates (ledger): a worked page names the worked day, updated only when later", () => {
+  const worked = page({ workedMs: T("2026-09-19"), gitCreatedMs: T("2026-07-20"), gitTouchedMs: T("2026-09-19") });
+  expect(pageHeaderDates(worked, MARK_NOW, { ledger: true })).toEqual({
+    created: "2026-07-20",
+    worked: "2026-09-19",
+  });
+  const later = page({ workedMs: T("2026-09-16"), gitCreatedMs: T("2026-09-01"), gitTouchedMs: T("2026-09-21") });
+  expect(pageHeaderDates(later, MARK_NOW, { ledger: true })).toEqual({
+    created: "2026-09-01",
+    worked: "2026-09-16",
+    updated: "2026-09-21",
+    changedSince: true,
+  });
+  // Created and worked the same day: one slot, the worked one.
+  const fresh = page({ workedMs: T("2026-09-22"), gitCreatedMs: T("2026-09-22"), gitTouchedMs: T("2026-09-22") });
+  expect(pageHeaderDates(fresh, MARK_NOW, { ledger: true })).toEqual({ worked: "2026-09-22" });
+});
+
+test("pageHeaderDates (ledger): a page no session wrote keeps its dates and says so", () => {
+  const p = page({ gitCreatedMs: T("2026-09-05"), gitTouchedMs: T("2026-09-21") });
+  expect(pageHeaderDates(p, MARK_NOW, { ledger: true })).toEqual({
+    created: "2026-09-05",
+    updated: "2026-09-21",
+    noSession: true,
+  });
+  // No known edit: the creation date alone, still flagged.
+  const swept = page({ gitCreatedMs: T("2026-05-04") });
+  expect(pageHeaderDates(swept, MARK_NOW, { ledger: true })).toEqual({ created: "2026-05-04", noSession: true });
+});
+
+test("parseWikiSortMode: known modes only", () => {
+  expect(parseWikiSortMode("worked")).toBe("worked");
+  expect(parseWikiSortMode("title")).toBe("title");
+  expect(parseWikiSortMode("recent")).toBeNull();
+  expect(parseWikiSortMode(null)).toBeNull();
+});
+
+test("resolveSortMode: worked is the default where the ledger covers pages", () => {
+  const base = { current: "updated" as const, stored: null, touched: false };
+  expect(resolveSortMode({ ...base, workedShown: true })).toBe("worked");
+  expect(resolveSortMode({ ...base, workedShown: false })).toBe("updated");
+  // A cold memo says nothing: keep what the select holds until a listing does.
+  expect(resolveSortMode({ ...base, workedShown: null })).toBe("updated");
+});
+
+test("resolveSortMode: a picked sort beats the default", () => {
+  expect(resolveSortMode({ current: "worked", stored: "updated", touched: false, workedShown: true })).toBe("updated");
+  expect(resolveSortMode({ current: "title", stored: null, touched: true, workedShown: true })).toBe("title");
+  expect(resolveSortMode({ current: "updated", stored: "title", touched: false, workedShown: null })).toBe("title");
+});
+
+test("resolveSortMode: worked never survives a wiki the ledger covers nothing on", () => {
+  expect(resolveSortMode({ current: "worked", stored: "worked", touched: false, workedShown: false })).toBe("updated");
+  expect(resolveSortMode({ current: "worked", stored: null, touched: true, workedShown: false })).toBe("updated");
+  // Stored worked, coverage not known yet: the hidden option is not selected early.
+  expect(resolveSortMode({ current: "updated", stored: "worked", touched: false, workedShown: null })).toBe("updated");
+  expect(resolveSortMode({ current: "updated", stored: "worked", touched: false, workedShown: true })).toBe("worked");
+});
+
+test("workedChip: class and hover per source, and none outside the worked axis", () => {
+  expect(workedChip(null, "2026-09-19")).toEqual({ cls: "", title: "2026-09-19" });
+  expect(workedChip({ kind: "worked", worked: "2026-09-19" }, "2026-09-19")).toEqual({
+    cls: " worked",
+    title: "2026-09-19 (worked)",
+  });
+  expect(
+    workedChip({ kind: "worked", worked: "2026-09-16", changedSince: "2026-09-21" }, "2026-09-16"),
+  ).toEqual({
+    cls: " worked changed-since",
+    title: "2026-09-16 (worked)\nchanged 2026-09-21, no session write recorded",
+  });
+  expect(workedChip({ kind: "fallback" }, "2026-09-21", "updated")).toEqual({
+    cls: " fallback",
+    title: "2026-09-21 (updated — no session write recorded)",
+  });
+});
+
+test("workedChip: a fallback onto the CREATION date says added, never updated", () => {
+  // A sweep-only page falls back to the git floor, and calling that an update
+  // is the claim `pageDateKind` exists to refuse.
+  expect(workedChip({ kind: "fallback" }, "2024-03-01", "added").title).toBe(
+    "2024-03-01 (added — no session write recorded)",
+  );
 });

@@ -45,6 +45,13 @@ const DARK_TOKENS = `
       --status-cyan: #22d3ee;
       --status-magenta: #c084fc;
 
+      /* /wiki dates: the day an agent session wrote the page, and a change after
+         that session with no ledger row. Own tokens because the light values of
+         --status-cyan/--status-warning measure 3.68:1 and 3.19:1 on white, under
+         AA for 10.5px text; these measure 5.36:1 and 5.02:1 (10.31/11.16 dark). */
+      --worked-ink: #22d3ee;
+      --changed-ink: #fbbf24;
+
       /* Tinted backgrounds (for badges, events) */
       --tint-success: #1a3a2a;
       --tint-error: #3a1a1a;
@@ -134,6 +141,9 @@ const LIGHT_TOKENS = `
       --status-tool: #c2620a;
       --status-cyan: #0891b2;
       --status-magenta: #9333ea;
+
+      --worked-ink: #0e7490;
+      --changed-ink: #b45309;
 
       /* Tinted backgrounds (for badges, events) */
       --tint-success: #dcfce7;
