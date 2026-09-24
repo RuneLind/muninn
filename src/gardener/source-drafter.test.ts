@@ -3,6 +3,7 @@ import {
   draftSourcePage,
   sourceTopicKey,
   sourceWikilinkTargets,
+  sourceRelatedPages,
   buildSourceDraftPrompt,
   buildSourceRevisePrompt,
   VERBATIM_MATERIAL_RULE,
@@ -1402,5 +1403,51 @@ describe("draftSourcePage — See-also seeding (relatedPages)", () => {
     const row = await seeded({}, "Built on [[Agents]].", [concept("Agents")]);
     const wirable = selectWirablePages(row.relatedPages, fakeIndex([concept("Agents")]), row.targetPath);
     expect(wirable.map((w) => w.title)).toEqual(["Agents"]);
+  });
+
+  test("a link whose label names something else is skipped for an honest one", async () => {
+    const row = await seeded({}, "Per [[Andrej Karpathy|Andrew Ng]], see [[RAG Basics]].", [
+      page({ title: "Andrej Karpathy", name: "Andrej Karpathy", type: "entity", relPath: "entities/Andrej Karpathy.md" }),
+      concept("RAG Basics"),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "RAG Basics", relPath: "concepts/RAG Basics.md" }]);
+  });
+
+  test("a mislabeled link is not a last resort — no backlink at all", async () => {
+    const row = await seeded({}, "Grounded in [[RAG Basics|quantum mechanics]].", [concept("RAG Basics")]);
+    expect(row.relatedPages).toEqual([]);
+  });
+
+  test("a label equal to an alias (any case) is honest; a later honest link to a mislabeled page still counts", async () => {
+    const row = await seeded({}, "[[Agents|cats]] and [[Agents]]; also [[RAG Basics|rag]].", [
+      concept("RAG Basics", { aliases: ["RAG"] }),
+      concept("Agents"),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "Agents", relPath: "concepts/Agents.md" }]);
+    const aliased = await seeded({}, "Built on [[RAG Basics|rag]].", [concept("RAG Basics", { aliases: ["RAG"] })]);
+    expect(aliased.relatedPages).toEqual([{ title: "RAG Basics", relPath: "concepts/RAG Basics.md" }]);
+  });
+
+  test("a life/ source prefers a life/ host and never backlinks onto an ai page", async () => {
+    const life = { input: { ...baseDeps().input, category: "health" } };
+    const aiTopic = concept("Agents");
+    const sleep = concept("Sleep", { domain: "life", relPath: "life/concepts/Sleep.md" });
+    const row = await seeded(life, "Like [[Agents]], [[Sleep]] matters.", [aiTopic, sleep]);
+    expect(row.targetPath.startsWith("life/")).toBe(true);
+    expect(row.relatedPages).toEqual([{ title: "Sleep", relPath: "life/concepts/Sleep.md" }]);
+    expect((await seeded(life, "Like [[Agents]].", [aiTopic])).relatedPages).toEqual([]);
+  });
+
+  test("stores the link text as written, which is what resolved — not the host's title", async () => {
+    const host = concept("Retrieval Systems", { aliases: ["RAG"] });
+    const row = await seeded(
+      { index: { ...fakeIndex([host]), resolve: (t: string) => (t.trim().toLowerCase() === "rag" ? host : undefined) } },
+      "Built on [[RAG]].",
+    );
+    expect(row.relatedPages).toEqual([{ title: "RAG", relPath: "concepts/Retrieval Systems.md" }]);
+  });
+
+  test("no index → no related pages", () => {
+    expect(sourceRelatedPages(mdxDraft(), null, "sources/X.mdx")).toEqual([]);
   });
 });
