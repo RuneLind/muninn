@@ -2299,7 +2299,7 @@ export async function renderWikiPage(opts?: {
                  WikiIndex.workedCoverage). Hidden rather than disabled: a control
                  that can never be chosen is furniture (the rail's own F2 rule).
                  Once shown it becomes the DEFAULT unless the reader picked a
-                 sort — `resolveSortMode` in wiki-filter.ts. -->
+                 sort (resolveSortMode in wiki-filter.ts). -->
             <option value="worked" hidden>Worked on</option>
             <option value="backlinks">Most linked</option>
             <option value="title">Title A–Z</option>
