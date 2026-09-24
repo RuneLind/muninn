@@ -420,15 +420,33 @@ test.describe("Wiki rail: the series rail", () => {
   // Forced colours (Windows High Contrast) repaint every background as Canvas,
   // which erases a rail drawn as a background — the border it replaced was
   // repainted as a visible colour. The rail must stay distinct from the pane.
-  test("the rail survives forced colours", async ({ page }) => {
+  test("the rail survives forced colours — on every row of the run, hovered too", async ({ page }) => {
     await page.emulateMedia({ forcedColors: "active" });
-    await openRail(page);
-    const paint = await seriesRow(page).evaluate((el) => ({
-      rail: getComputedStyle(el, "::after").backgroundColor,
-      pane: getComputedStyle(document.querySelector(".wiki-pane")!).backgroundColor,
-    }));
-    expect(paint.rail).not.toBe(paint.pane);
-    expect(paint.rail).not.toBe("rgba(0, 0, 0, 0)");
+    await openWiki(page, WIKI3);
+    await page.locator(".wiki-list-more").click();
+    await expect(page.locator(".wiki-list-more")).toHaveCount(0);
+    const pane = await page
+      .locator(".wiki-pane")
+      .first()
+      .evaluate((el) => getComputedStyle(el).backgroundColor);
+    const rails = async () => {
+      await page.mouse.move(0, 0);
+      return page.evaluate((key: string) => {
+        const kids = Array.from(document.querySelectorAll("#wikiList > *"));
+        const start = kids.findIndex((el) => el.getAttribute("data-group") === key);
+        const run = [kids[start]!];
+        for (let i = start + 1; kids[i]?.classList.contains("wiki-series-cont"); i++) run.push(kids[i]!);
+        return run.map((el) => getComputedStyle(el, "::after").backgroundColor);
+      }, ACT_KEY);
+    };
+    const run = await rails();
+    expect(run.length).toBeGreaterThan(2);
+    for (const c of run) expect(c).not.toBe(pane);
+    // A hovered member is the row the reader is about to click, and its hover
+    // colour must not win the cascade back to Canvas.
+    const member = page.locator('.wiki-list-item.member.wiki-series-cont[data-section="activity"]').first();
+    await member.hover();
+    expect(await member.evaluate((el) => getComputedStyle(el, "::after").backgroundColor)).not.toBe(pane);
   });
 
   test("a FOLDED series row caps its own rail", async ({ page }) => {
@@ -449,6 +467,16 @@ test.describe("Wiki rail: series", () => {
     await expect(page.locator(".wiki-list-group")).toHaveCount(1);
     await expect(seriesRow(page).locator(".wiki-group-label")).toContainText(LABEL);
     await expect(seriesRow(page).locator(".wiki-group-rollup")).toHaveText(ROLLUP);
+    // Only the two coloured statuses carry a class: the status word is free
+    // frontmatter, so it never becomes a class name of its own.
+    const tones = await seriesRow(page)
+      .locator(".wiki-rollup-part")
+      .evaluateAll((els) => els.map((el) => el.className));
+    expect(tones).toEqual([
+      "wiki-rollup-part s-in-flight",
+      "wiki-rollup-part s-shipped",
+      "wiki-rollup-part",
+    ]);
     await expect(seriesFold(page)).toHaveAttribute("aria-expanded", "false");
     // Closed by default: the four members are off the list…
     const rel = await relPaths(page);

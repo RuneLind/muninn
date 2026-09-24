@@ -577,9 +577,11 @@ export async function renderWikiPage(opts?: {
     .wiki-list-ghost.wiki-series-cont::before { display: none; }
     .wiki-list-item.wiki-series-cont:hover::after { background: var(--accent-light); }
     /* Forced colours repaint a background as Canvas, which would erase the
-       rail; the border it replaced stayed visible. */
+       rail; the border it replaced stayed visible. The hover selector is listed
+       so its higher specificity cannot win back the Canvas. */
     @media (forced-colors: active) {
-      .wiki-list-group.series::after, .wiki-series-cont::after { background: CanvasText; }
+      .wiki-list-group.series::after, .wiki-series-cont::after,
+      .wiki-list-item.wiki-series-cont:hover::after { background: CanvasText; }
     }
     /* A series NAME wraps to two lines, like a page title, rather than
        ellipsizing on one: the roll-up moved to its own line under it, so the

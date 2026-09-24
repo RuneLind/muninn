@@ -1317,12 +1317,14 @@ function renderList(): void {
         // Each count is one unbreakable unit, so the line wraps between counts
         // and never clips one — a clipped count is a wrong count. The `·` rides
         // inside the count before it, so a wrapped line never starts with one.
+        // Only the two coloured statuses get a class: the word is free
+        // frontmatter and never becomes a class name of its own.
         (isSeries
           ? `<small class="wiki-group-rollup">` +
             roll.parts
               .map(
                 (p, i) =>
-                  `<span class="wiki-rollup-part s-${esc(p.word.replace(/[^a-z0-9-]/gi, "-"))}">${p.n} ${esc(p.word)}` +
+                  `<span class="wiki-rollup-part${p.word === "shipped" || p.word === "in-flight" ? " s-" + p.word : ""}">${p.n} ${esc(p.word)}` +
                   (i < roll.parts.length - 1 ? `<span class="wiki-rollup-sep"> ·</span>` : "") +
                   `</span>`,
               )

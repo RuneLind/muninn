@@ -935,7 +935,7 @@ pair differently. The rendered date cell always names the day the order used.
    attachment children, ghosts, `+N more` — and caps on the last one
    (`:not(:has(+ .wiki-series-cont))`, since the rows are flat siblings). It is
    an absolute `::after`, not a border, so it costs no row width; under
-   forced colours it paints `CanvasText`. A series row carries NO chip: the
+   forced colours every segment, hovered or not, paints `CanvasText`. A series row carries NO chip: the
    name wraps to two lines and the roll-up is a line under it, one nowrap unit
    per count, so it wraps between counts and never clips one. The chip's fixed
    `RAIL_GROUP_CHIP_SWITCH` breakpoint ignores label length, and a five-status
@@ -948,7 +948,7 @@ is the accidental folder-shaped fold `FAMILY_MIN`/`FAMILY_MAX` exist to refuse.
 
 **The roll-up counts the folder where a member declares no `plan_status`** —
 `blogs/` as `blog`, `archive/` as `archive`, everything else as `unmarked` — so
-the chip reads `1 in-flight · 1 shipped · 1 blog` rather than reporting a blog
+the roll-up line reads `1 in-flight · 1 shipped · 1 blog` rather than reporting a blog
 and an archive report as the same nothing. Series-only: a family lives in one
 folder, where the word would be the same on every member.
 
