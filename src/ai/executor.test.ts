@@ -1,4 +1,7 @@
 import { test, expect, describe, mock, spyOn, afterEach } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // Mock parseClaudeOutput to avoid needing real Claude output
 mock.module("./result-parser.ts", () => ({
@@ -209,5 +212,42 @@ describe("executeClaudePrompt", () => {
     expect(typeof result.startupMs).toBe("number");
 
     spawnSpy.mockRestore();
+  });
+
+  test("mcpDisabled drops every MCP server and allowedTools maps to --tools", async () => {
+    // A bot dir WITH a .mcp.json: the flag must win over it, and --strict-mcp-config
+    // is what also keeps the CLI's user-global servers out.
+    const dir = mkdtempSync(join(tmpdir(), "executor-fence-"));
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "x" } } }));
+    const spawnSpy = spyOn(Bun, "spawn");
+    spawnSpy.mockReturnValueOnce({
+      pid: 123,
+      stdout: new Response(JSON.stringify({ result: "ok" })).body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(0),
+      kill: mock(),
+    } as any);
+
+    try {
+      const config = { claudeModel: "sonnet", claudeTimeoutMs: 30000 } as any;
+      const botConfig = {
+        name: "testbot",
+        dir,
+        mcpDisabled: true,
+        allowedTools: ["Read", "Glob", "Grep"],
+      } as any;
+      await executeClaudePrompt("test", config, botConfig);
+
+      const [args] = spawnSpy.mock.calls[0]! as unknown as [string[]];
+      expect(args).toContain("--strict-mcp-config");
+      expect(args).not.toContain("--mcp-config");
+      const i = args.indexOf("--tools");
+      expect(i).toBeGreaterThan(-1);
+      expect(args[i + 1]).toBe("Read,Glob,Grep");
+      expect(i).toBeLessThan(args.indexOf("--"));
+    } finally {
+      spawnSpy.mockRestore();
+      rmSync(dir, { recursive: true });
+    }
   });
 });

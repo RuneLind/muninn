@@ -173,11 +173,18 @@ export interface BotConfig {
    * Tool names to allow (allow-list). For claude-sdk: mapped to the SDK
    * `tools` option (the built-in base set) — under `bypassPermissions` the
    * SDK's own `allowedTools` option only suppresses prompts and cannot
-   * restrict the surface. MCP tools are fenced via `excludedTools`
-   * (→ `disallowedTools`). Empty/unset ⇒ full surface. Other connectors
-   * ignore it today.
+   * restrict the surface. For claude-cli: `--tools`. MCP tools are fenced
+   * via `excludedTools` (→ `disallowedTools`) or `mcpDisabled`. Empty/unset
+   * ⇒ full surface. copilot-sdk and openai-compat ignore it.
    */
   allowedTools?: string[];
+  /**
+   * Run with NO MCP servers — neither the bot's `.mcp.json` nor, on claude-cli,
+   * the user-global ones the CLI would otherwise discover (`--strict-mcp-config`
+   * with no `--mcp-config`). Set per-call by the fence in
+   * `src/core/fenced-one-shot.ts`, never in config.json.
+   */
+  mcpDisabled?: boolean;
   /** Hivemind peer-to-peer integration config — parsed from `hivemind` block in config.json */
   hivemind?: HivemindBotConfig;
   /** MCP status probing config — controls cache TTL and which servers are critical */

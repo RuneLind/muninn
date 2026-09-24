@@ -143,7 +143,7 @@ export async function executePrompt(
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
 
   // Parse .mcp.json for this bot
-  const mcpServers = parseMcpConfig(botConfig.dir);
+  const mcpServers = botConfig.mcpDisabled ? {} : parseMcpConfig(botConfig.dir);
   const hasMcp = Object.keys(mcpServers).length > 0;
 
   // Pre-flight: warn if a *critical* MCP server is down. Non-critical failures

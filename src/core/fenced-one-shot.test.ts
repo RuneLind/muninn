@@ -17,7 +17,7 @@ import { test, expect, describe } from "bun:test";
 import type { Tracer } from "../tracing/index.ts";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
-import { runFencedOneShot, FENCED_EXCLUDED_TOOLS } from "./fenced-one-shot.ts";
+import { runFencedOneShot, FENCED_EXCLUDED_TOOLS, FENCED_ALLOWED_TOOLS } from "./fenced-one-shot.ts";
 
 /** The slice of `Tracer` the seam + `tracedOneShot` actually touch. */
 function fakeTracer(): Tracer {
@@ -111,5 +111,19 @@ describe("runFencedOneShot — onProgress passthrough", () => {
     });
     expect(seen).toHaveLength(1);
     for (const tool of FENCED_EXCLUDED_TOOLS) expect(bot!.excludedTools).toContain(tool);
+    expect(bot!.allowedTools).toEqual(FENCED_ALLOWED_TOOLS);
+    expect(bot!.mcpDisabled).toBe(true);
+  });
+
+  test("the allow-list holds only read tools and the deny-list covers 2.1.281's escapes", () => {
+    // Measured from a fenced init event on Claude Code 2.1.281: each of these was
+    // on the surface the old eight-name deny-list left open.
+    expect(FENCED_ALLOWED_TOOLS).toEqual(["Read", "Glob", "Grep"]);
+    for (const tool of [
+      "Workflow", "Monitor", "SendMessage", "ListAgents", "EnterWorktree",
+      "RemoteTrigger", "CronCreate", "ScheduleWakeup", "PushNotification", "DesignSync",
+    ]) {
+      expect(FENCED_EXCLUDED_TOOLS).toContain(tool);
+    }
   });
 });

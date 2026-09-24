@@ -97,7 +97,7 @@ export async function executePrompt(
   const model = botConfig.model ?? config.claudeModel;
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
 
-  const mcpServers = parseMcpConfig(botConfig.dir);
+  const mcpServers = botConfig.mcpDisabled ? {} : parseMcpConfig(botConfig.dir);
   const hasMcp = Object.keys(mcpServers).length > 0;
   const thinking = resolveThinking(botConfig.thinkingMaxTokens);
 

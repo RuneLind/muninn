@@ -14,16 +14,10 @@
  * human and only then applied under CAS. A model that can reach `Write`/`Edit`
  * can satisfy the prompt by editing the page directly — bypassing the preview,
  * the CAS, the per-wiki queue, the log entry and the commit, all at once. So the
- * bot config is cloned with `FENCED_EXCLUDED_TOOLS` unioned onto its own
- * `excludedTools` (muninn #397's lesson: under `bypassPermissions` an empty
- * `allowedTools` means the FULL surface — only `excludedTools` binds). WebFetch /
- * WebSearch stay available; the prompt steers against using them, since every
- * source the edit list needs is already quoted in the verdict blocks.
- *
- * CAVEAT: the fence does NOT bind on `openai-compat` — that connector ignores
- * `excludedTools` entirely (the same caveat the drafter carries). It also exposes
- * no filesystem tools, so the practical exposure there is nil; the guarantee just
- * isn't enforced by this code.
+ * call goes through `runFencedOneShot`, whose three-layer fence (built-in
+ * allow-list of Read/Glob/Grep, no MCP servers, and the `FENCED_EXCLUDED_TOOLS`
+ * deny-list) is documented in `src/core/fenced-one-shot.ts`. Every source the
+ * edit list needs is already quoted in the verdict blocks, so no web tools.
  */
 
 import type { Config } from "../config.ts";
