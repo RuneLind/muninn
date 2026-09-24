@@ -1229,7 +1229,7 @@ describe("the summary KIND", () => {
   });
 
   test("the connector that can NAME opus but not honour the budget is the one this vertical drops", async () => {
-    // Copilot carries `claude-opus-5` verbatim in its catalog, so the model half
+    // Copilot's catalog carries the deep model (as `claude-opus-5.5`), so the model half
     // of `deep` IS honoured there and no warn fires — but `supportsThinkingBudget`
     // is false, so the budget half is not. That combination is refused by the
     // route's kind set rather than run and stamped `deep`.

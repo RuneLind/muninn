@@ -181,7 +181,7 @@ export async function seedConnectorsFromBotConfigs(botConfigs: BotConfig[]): Pro
     // Always include a copilot-sdk entry
     created += await seedOne(tx, seen, {
       connectorType: "copilot-sdk",
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       baseUrl: null,
       thinkingMaxTokens: null,
       timeoutMs: null,
@@ -214,7 +214,7 @@ async function seedOne(
 async function ensureCopilotConnector(tx: Sql): Promise<void> {
   const [row] = await tx`
     INSERT INTO connectors (name, description, connector_type, model)
-    VALUES ('copilot-sdk claude-sonnet-4-6', 'Auto-seeded', 'copilot-sdk', 'claude-sonnet-4-6')
+    VALUES ('copilot-sdk claude-sonnet-5', 'Auto-seeded', 'copilot-sdk', 'claude-sonnet-5')
     ON CONFLICT (connector_type, COALESCE(model, ''), COALESCE(base_url, '')) DO NOTHING
     RETURNING id
   `;

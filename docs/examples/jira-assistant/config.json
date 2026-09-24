@@ -1,5 +1,5 @@
 {
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5",
   "thinkingMaxTokens": 16000,
   "timeoutMs": 180000,
   "connector": "copilot-sdk",

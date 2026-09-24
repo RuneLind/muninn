@@ -82,7 +82,7 @@ own) and nothing a preset says may un-pick it. `buildVimeoSystemPrompt` lives in
 so `/summaries/prompts` can show it without importing the harvest pipeline.
 
 **A kind is instruction + run options, and a file on disk can only replace the
-instruction.** `deep` is `standard`'s structure on `claude-opus-5` with the
+instruction.** `deep` is `standard`'s structure on `claude-opus-5-5` with the
 thinking cap lifted (`thinkingMaxTokens: null`, the TikTok mechanism); a per-bot
 `captureSummary.deep.md` keeps those run options, and a NEW per-bot id runs like
 `standard`. The model swap applies only on connectors whose model ids are

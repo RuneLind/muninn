@@ -23,7 +23,7 @@ import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { SUMMARY_STRUCTURE_BULLETS } from "../summaries/summarizer-shared.ts";
-import { SHIPPED_CAPTURE_PRESETS, type CapturePreset } from "../summaries/presets.ts";
+import { CAPTURE_DEEP_MODEL, SHIPPED_CAPTURE_PRESETS, type CapturePreset } from "../summaries/presets.ts";
 import { SHORT_VIDEO_THINKING } from "./short-video-kinds.ts";
 
 // --- Module mocks (registered before the dynamic imports below) ---
@@ -622,7 +622,7 @@ for (const v of VERTICALS) {
 
       await capture(v.title, v.submitUrl, { preset: DEEP });
       expect("thinkingMaxTokens" in lastOpts!).toBe(false);
-      expect(lastBotConfig!.model).toBe("claude-opus-5");
+      expect(lastBotConfig!.model).toBe(CAPTURE_DEEP_MODEL);
 
       // `talk-notes` too, so the assertion is about the VERTICAL rather than
       // about the two kinds whose run options happen to differ.

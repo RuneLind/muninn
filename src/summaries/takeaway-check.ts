@@ -44,7 +44,7 @@ const log = getLog("summaries", "takeaway-check");
  * Claude CLI — inference leaving the one deployment shape that exists to keep
  * it in a named region. There the check runs on the backend's own model.
  */
-export const TAKEAWAY_CHECK_MODEL = "claude-sonnet-4-6";
+export const TAKEAWAY_CHECK_MODEL = "claude-sonnet-5";
 
 /** The closer marker every capture prompt asks for (`summary-structure.ts`). */
 export const TAKEAWAY_MARKER = "> 💬 **Takeaway:**";

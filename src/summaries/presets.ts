@@ -82,7 +82,7 @@ const DEFAULT_RUN: CaptureRunOptions = { thinking: "capped", model: "bot" };
  * connectors speak. Applied by {@link captureBotConfigFor} only on a connector
  * whose model ids ARE that namespace — see the note there.
  */
-export const CAPTURE_DEEP_MODEL = "claude-opus-5";
+export const CAPTURE_DEEP_MODEL = "claude-opus-5-5";
 
 /**
  * The `talk-notes` structure: a timeline, one block per section of the talk,
@@ -129,14 +129,13 @@ export const SHIPPED_CAPTURE_PRESETS: readonly CapturePreset[] = [
 /**
  * Whether a connector can run {@link CAPTURE_DEEP_MODEL}: its model ids are
  * Anthropic's. `claude-cli` and `claude-sdk` speak that namespace directly;
- * `copilot-sdk` carries the id VERBATIM in its catalog (measured 2026-09-05 via
- * `CopilotClient.listModels()`: `claude-opus-5` is listed as-is — its
- * `resolveCopilotModelId` strips a trailing 8-digit date and respells a
- * trailing `-N-M` version, and this id has neither, so it is looked up
- * verbatim; a respelled catalog entry such as `claude-opus-5.1` would make
- * Copilot fall back to its default model with only a server-side error line,
- * and the document would still say `deep` — re-measure when the constant
- * moves). On `openai-compat` the model is whatever the endpoint serves
+ * `copilot-sdk` reaches it through `resolveCopilotModelId`'s `-N-M` → `N.M`
+ * respelling (measured 2026-09-24 via `CopilotClient.listModels()`: the catalog
+ * lists `claude-opus-5.5`, and `claude-opus-5-5` resolves to it with
+ * `known: true`; an id the catalog lacks would make Copilot fall back to its
+ * default model with only a server-side error line, and the document would
+ * still say `deep` — re-measure when the constant moves). On `openai-compat`
+ * the model is whatever the endpoint serves
  * — `qwen3.5:35b`, `google/gemini-2.5-flash` — and a Claude id there is a 400
  * from the endpoint, not a bigger model.
  */
