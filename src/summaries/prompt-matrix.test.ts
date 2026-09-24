@@ -18,6 +18,7 @@ import type { BotConfig } from "../bots/config.ts";
 import { SUMMARY_SOURCES } from "./sources.ts";
 import { joinPromptPieces } from "./prompt-pieces.ts";
 import {
+  CAPTURE_DEEP_MODEL,
   CAPTURE_THINKING_MAX_TOKENS,
   resolveCapturePresets,
   SHIPPED_CAPTURE_PRESETS,
@@ -174,7 +175,7 @@ describe("the chips", () => {
   test("the deep kind's chips name the bigger model and the inherited budget", () => {
     const matrix = buildPromptMatrix(bot(), [bot()]);
     const chips = cell(matrix, "youtube", "deep").chips;
-    expect(chips).toContain("model: claude-opus-5");
+    expect(chips).toContain(`model: ${CAPTURE_DEEP_MODEL}`);
     expect(chips).toContain("thinking: the bot's own budget");
     expect(chips).not.toContain("model: the bot's own");
   });
@@ -265,7 +266,7 @@ describe("the chips", () => {
       // And `deep` still says what it buys — the budget the pre-merge run had.
       const deep = cell(matrix, id, "deep").chips;
       expect(deep).toContain("thinking: the bot's own budget");
-      expect(deep).toContain("model: claude-opus-5");
+      expect(deep).toContain(`model: ${CAPTURE_DEEP_MODEL}`);
     }
   });
 
@@ -293,7 +294,7 @@ describe("the chips", () => {
         expect(c.chips.filter((chip) => chip.startsWith("thinking:"))).toHaveLength(1);
       }
       // The MODEL chip is still the kind's own — the override is the budget only.
-      expect(cell(matrix, id, "deep").chips).toContain("model: claude-opus-5");
+      expect(cell(matrix, id, "deep").chips).toContain(`model: ${CAPTURE_DEEP_MODEL}`);
       expect(cell(matrix, id, "standard").chips).toContain("model: the bot's own");
     }
     // Per ROW: a vertical that does take the cap still shows it.
@@ -481,7 +482,7 @@ describe("the override files", () => {
     });
     // The override replaces the INSTRUCTION and keeps the run options: `deep`
     // still promises the bigger model.
-    expect(cell(matrix, "youtube", "deep").chips).toContain("model: claude-opus-5");
+    expect(cell(matrix, "youtube", "deep").chips).toContain(`model: ${CAPTURE_DEEP_MODEL}`);
     expect(cell(matrix, "youtube", "deep").systemPrompt).toContain(`   ${TINY_INSTRUCTION}`);
   });
 

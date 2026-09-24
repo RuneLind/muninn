@@ -39,7 +39,7 @@ const DAILY = "Anthropic Daily Digest";
 const WEEKLY = "Anthropic Weekly Digest";
 const DIGEST_NAMES = new Set([DAILY, WEEKLY]);
 
-const SONNET = "claude-sonnet-4-6";
+const SONNET = "claude-sonnet-5";
 const TIMEOUT_MS = 300000; // clears the runner's 120s watcher-timeout floor (net = +30s)
 
 const config = loadConfig();

@@ -42,14 +42,14 @@ const botConfig: BotConfig = {
   persona: "You are a concise technical assistant.",
   telegramAllowedUserIds: [],
   slackAllowedUserIds: [],
-  model: "claude-sonnet-4-6",
+  model: "claude-sonnet-5",
 };
 
 const config = loadConfig();
 
 console.log(`Question: ${question}`);
 console.log("");
-console.log("→ claude-sdk connector (model=claude-sonnet-4-6) ...");
+console.log("→ claude-sdk connector (model=claude-sonnet-5) ...");
 
 const start = performance.now();
 let firstDeltaAt: number | null = null;

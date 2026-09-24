@@ -31,7 +31,7 @@ interface ConnectorSeed {
 
 const DEFAULTS: ConnectorSeed[] = [
   { name: "claude-cli", connectorType: "claude-cli", model: null, baseUrl: null },
-  { name: "copilot-sdk claude-sonnet-4-6", connectorType: "copilot-sdk", model: "claude-sonnet-4-6", baseUrl: null },
+  { name: "copilot-sdk claude-sonnet-5", connectorType: "copilot-sdk", model: "claude-sonnet-5", baseUrl: null },
 ];
 
 async function seedConnector(c: ConnectorSeed): Promise<boolean> {

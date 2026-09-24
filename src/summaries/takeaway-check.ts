@@ -34,7 +34,9 @@ const log = getLog("summaries", "takeaway-check");
  * The model the check REQUESTS. Measured 2026-09-08 on the Drolshammer talk:
  * Haiku and Sonnet both flag all three defects, but Haiku's rewrite ran to
  * three sentences that read as a list, while Sonnet's was two sentences the
- * body would sign — and the rewrite is what the reader reads. The request is
+ * body would sign — and the rewrite is what the reader reads. That was Sonnet
+ * 4.6; moved to Sonnet 5 on 2026-09-24 without re-running that comparison
+ * (`bun scripts/eval-takeaway.ts --check-only` is the re-measure). The request is
  * honoured by the anthropic and CLI backends and passed through on copilot
  * (where the router's non-Haiku warn line fires — accepted, the summarizer bot
  * is not a copilot bot). It is NOT sent to the vertex backend: that backend
@@ -44,7 +46,7 @@ const log = getLog("summaries", "takeaway-check");
  * Claude CLI — inference leaving the one deployment shape that exists to keep
  * it in a named region. There the check runs on the backend's own model.
  */
-export const TAKEAWAY_CHECK_MODEL = "claude-sonnet-4-6";
+export const TAKEAWAY_CHECK_MODEL = "claude-sonnet-5";
 
 /** The closer marker every capture prompt asks for (`summary-structure.ts`). */
 export const TAKEAWAY_MARKER = "> 💬 **Takeaway:**";

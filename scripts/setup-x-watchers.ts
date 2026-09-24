@@ -65,7 +65,7 @@ async function main() {
   // slackChannels, slackBot — but drop its custom prompt and any old scheduling hints.
   const shared: Record<string, unknown> = {
     collection: baseConfig.collection ?? "x-feed",
-    model: baseConfig.model ?? "claude-sonnet-4-6",
+    model: baseConfig.model ?? "claude-sonnet-5",
     timeoutMs: baseConfig.timeoutMs ?? 600_000,
     maxDocs: baseConfig.maxDocs ?? 80,
     ...(baseConfig.slackChannels ? { slackChannels: baseConfig.slackChannels } : {}),
