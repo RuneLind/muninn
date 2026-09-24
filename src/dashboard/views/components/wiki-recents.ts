@@ -49,6 +49,8 @@ export const PINS_KEY_PREFIX = "muninn.wiki.pins.v1:";
  *  stored list is the exceptions — which is also why a reader who has never
  *  touched the rail carries no key at all. */
 export const FOLDS_KEY_PREFIX = "muninn.wiki.folds.v1:";
+/** The sort this reader PICKED, per wiki. Absent ⇒ the default (`resolveSortMode`). */
+export const SORT_KEY_PREFIX = "muninn.wiki.sort.v1:";
 
 /** Pins are the reader's own choice, so the cap is only a bound on the stored
  *  string — but it is enforced on READ as well as on write, so a hand-edited or
@@ -76,6 +78,10 @@ export const FOLDS_MAX = 200;
 
 export function foldsKey(wiki: string): string {
   return FOLDS_KEY_PREFIX + wiki;
+}
+
+export function sortKey(wiki: string): string {
+  return SORT_KEY_PREFIX + wiki;
 }
 
 /**

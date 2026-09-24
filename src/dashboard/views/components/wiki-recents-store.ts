@@ -23,9 +23,11 @@ import {
   parseRelPathList,
   pinsKey,
   serializeRelPathList,
+  sortKey,
   togglePin,
   toggleFold,
 } from "./wiki-recents.ts";
+import { parseWikiSortMode, type WikiSortMode } from "./wiki-filter.ts";
 
 /** The slice of `Storage` the purge below needs, so a unit test can hand it a
  *  fake instead of a browser. */
@@ -83,6 +85,24 @@ export function toggleFolded(wiki: string, key: string): string[] {
   const next = toggleFold(readFolds(wiki), key);
   write(foldsKey(wiki), next);
   return next;
+}
+
+/** The sort this reader picked on this wiki, or `null` for "never picked" (and
+ *  for a stored value no build knows). */
+export function readSort(wiki: string): WikiSortMode | null {
+  try {
+    return parseWikiSortMode(localStorage.getItem(sortKey(wiki)));
+  } catch {
+    return null;
+  }
+}
+
+export function writeSort(wiki: string, mode: WikiSortMode): void {
+  try {
+    localStorage.setItem(sortKey(wiki), mode);
+  } catch {
+    /* best-effort */
+  }
 }
 
 /**

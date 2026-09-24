@@ -1276,16 +1276,45 @@ whose `workedCoverage.matched` is 0** — on a corpus written entirely by bulk
 passes the mode is "Recently updated" under a second name (the corpus that shape
 was measured on is named once, on `WikiIndex.workedCoverage`). An ABSENT
 `workedCoverage` (a cold memo, a degraded ledger, an older server) leaves the
-option as it is: "nothing is known yet" is not a verdict. `pageHeaderDates` needs
-nothing — it reads `updatedSignal`, which never mints a `worked` kind, so the
-article header stays a created/updated question.
+option as it is: "nothing is known yet" is not a verdict.
+
+**"Worked on" is the DEFAULT sort wherever the option is shown**, and a sort the
+reader picks is stored per wiki (`muninn.wiki.sort.v1:<wiki>`) and wins over the
+default. The rules are the pure `resolveSortMode`: a listing with no coverage
+answer (a cold memo after a restart) keeps what the select holds, so the rail
+switches to `worked` on the first listing that reports coverage unless the
+reader already picked a sort in that tab; a stored `worked` on a wiki the ledger
+matched nothing for falls back to `updated`.
+
+**The chip MARKS where a worked-on date came from** (`workedSourceOf`, shared
+with the header): cyan + semibold (`--worked-ink`) when a session wrote the page,
+an amber dot after it (`--changed-ink`) when the update signal is more than
+`CHANGED_SINCE_MIN_MS` (24h) newer — a hand edit, a heredoc script, a lint or
+sync commit the ledger cannot see — and a dotted underline on a FALLBACK date
+(no ledger row, so the chip shows the update date). The 24h bound is measured:
+11 of mimir's 60 covered pages with a later update day sit within a day, the
+late-evening-edit-committed-next-morning shape. Colour is never the only cue.
+In Activity, a `changed` row on a wiki whose worked gate is open gets the
+fallback mark when the ledger has no row for its page. The other sort modes
+answer one question each and mark nothing. Both tokens are their own because
+the light values of `--status-cyan`/`--status-warning` measure under AA at
+10.5px (3.68:1, 3.19:1 on white).
 
 **In worked mode the row's hover names the signal** (`2026-07-02 (worked)` /
-`2024-03-01 (updated)`), because the axis is sparse by construction and a bare
-day would claim a worked date an uncovered page never got. The suffix goes on the
-`title=` ONLY: `formatRailAge` reads the label as a BARE day and would fall back
-to the stamp's local day for a decorated one, shifting a frontmatter date west of
-UTC.
+`2024-03-01 (updated — no session recorded)`, plus a `changed <day>, no session
+recorded` line on a changed-since row), because the axis is sparse by
+construction and a bare day would claim a worked date an uncovered page never
+got. The suffix goes on the `title=` ONLY: `formatRailAge` reads the label as a
+BARE day and would fall back to the stamp's local day for a decorated one,
+shifting a frontmatter date west of UTC.
+
+**The article header gets a `worked` slot** when the last listing reported
+coverage (`pageHeaderDates(p, now, { ledger: true })`): `created X · worked Y`,
+plus `updated Z` in amber only when a change landed after that session, and on a
+page no session wrote the old created/updated slots with the update date
+dotted-underlined and a `no session` note. On a wiki the ledger covers nothing
+on, the header is unchanged — "no session" would be true of every page there
+and say nothing.
 
 **`workedMs` rides `toListing` onto the single-page route's rows too** — the
 meta, the outgoing/backlink listings and the `related` rows — unread, at ~15

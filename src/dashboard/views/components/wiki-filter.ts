@@ -253,6 +253,39 @@ export function isRecencySort(mode: WikiSortMode): mode is WikiRecencySort {
   return mode === "updated" || mode === "created" || mode === "worked";
 }
 
+const SORT_MODES: readonly WikiSortMode[] = ["updated", "created", "worked", "backlinks", "title"];
+
+/** A stored sort value, validated — a key from an older build, or one edited by
+ *  hand, is `null` rather than a mode the select has no option for. */
+export function parseWikiSortMode(raw: unknown): WikiSortMode | null {
+  return typeof raw === "string" && (SORT_MODES as readonly string[]).includes(raw)
+    ? (raw as WikiSortMode)
+    : null;
+}
+
+/**
+ * The sort the rail should hold after a listing arrives.
+ *
+ * "Worked on" is the default wherever the listing says the ledger covers a page
+ * (`workedShown`), and a sort the reader PICKED — this tab (`touched`) or stored
+ * for this wiki — wins over the default. `workedShown === null` is a listing that
+ * said nothing about coverage (a cold memo after a restart): the current value
+ * stays, and the next listing that does say decides.
+ */
+export function resolveSortMode(o: {
+  current: WikiSortMode;
+  stored: WikiSortMode | null;
+  touched: boolean;
+  workedShown: boolean | null;
+}): WikiSortMode {
+  const wanted = o.touched ? o.current : (o.stored ?? (o.workedShown ? "worked" : o.current));
+  if (wanted !== "worked") return wanted;
+  if (o.workedShown === false) return "updated";
+  // Unknown coverage: `worked` is only reachable while the option is visible, so
+  // keep whatever the select holds until a listing says.
+  return o.workedShown === true ? "worked" : o.current;
+}
+
 /** The built-in type order + labels — the no-`.wiki-reader.json` defaults. A wiki's
  *  merged type list (see `mergeWikiTypes`) always starts with these, so a wiki with
  *  no config renders byte-identically to before. */
@@ -664,10 +697,9 @@ function updatedSignal(
  * this kind rather than relabelling it.
  *
  * `"worked"` is the third axis (`workedMs`) and is reachable from ONE caller,
- * `pageDateSignal(p, "worked")`. It can never reach `pageHeaderDates`, which reads
- * `updatedSignal`/`addedSignal` and neither of those ever mints it — which is what
- * keeps the article header out of this PR: it answers "created / updated", and a
- * third word there is a different question.
+ * `pageDateSignal(p, "worked")`. `updatedSignal`/`addedSignal` never mint it; the
+ * article header reads the worked day through {@link workedSourceOf} instead, as
+ * its own labelled slot.
  */
 export type WikiDateKind = "updated" | "added" | "worked";
 
@@ -699,20 +731,89 @@ export function pageDateKind(p: WikiListing, now?: number): WikiDateKind {
  *  - **Created and last edited on the same day** ⇒ the creation date alone, since
  *    "created X · updated X" is noise.
  *  - Otherwise both, and either one alone when the other has no signal.
+ *
+ * With `opts.ledger` (the wiki's ledger covers pages), a page a session wrote gets
+ * a `worked` slot instead, plus `updated` only when a change landed after that
+ * session with no ledger row; a page no session wrote keeps the rules above and
+ * is flagged `noSession`.
  */
 export function pageHeaderDates(
   p: WikiListing,
   nowMs?: number,
-): { created?: string; updated?: string } {
+  opts: { ledger?: boolean } = {},
+): WikiHeaderDates {
   // One clock read for all three signal reads on this page (they must agree). The
   // caller passes a server-ANCHORED instant (`anchorNow`) where it has one — this
   // module runs in the browser, so the bare default is the viewer's own clock.
   const now = nowMs ?? Date.now();
   const created = pageAddedLabel(p, now);
+  if (opts.ledger) {
+    const src = workedSourceOf(p, now);
+    if (src.kind === "worked") {
+      // "created X · worked X" is the same noise the created/updated pair drops.
+      const out: WikiHeaderDates = { worked: src.worked };
+      if (created && created !== src.worked) out.created = created;
+      if (src.changedSince) {
+        out.updated = src.changedSince;
+        out.changedSince = true;
+      }
+      return out;
+    }
+  }
   const updated = pageDateLabel(p, now);
-  if (pageDateKind(p, now) === "added") return created ? { created } : {};
-  if (!created) return updated ? { updated } : {};
-  return created === updated ? { created } : { created, updated };
+  const noSession = opts.ledger ? { noSession: true } : {};
+  if (pageDateKind(p, now) === "added") return created ? { created, ...noSession } : { ...noSession };
+  if (!created) return updated ? { updated, ...noSession } : { ...noSession };
+  return created === updated ? { created, ...noSession } : { created, updated, ...noSession };
+}
+
+/**
+ * The article header's slots. `worked`, `changedSince` and `noSession` appear
+ * only when the caller says the wiki's ledger covers pages (`opts.ledger`) —
+ * on a wiki it covers nothing, "no session" would be true of every page and say
+ * nothing.
+ */
+export interface WikiHeaderDates {
+  created?: string;
+  updated?: string;
+  /** The day the last agent session wrote the page. */
+  worked?: string;
+  /** `updated` is a change AFTER `worked` that no session recorded. */
+  changedSince?: boolean;
+  /** No session in the ledger wrote this page: `updated` is the fallback. */
+  noSession?: boolean;
+}
+
+/**
+ * How long after the last session's write an update must land before it counts as
+ * a change the ledger did not see. A day, because a page written late in a
+ * session and committed the next morning is the SAME work: on mimir 11 of the 60
+ * covered pages whose update day is later than their worked day sit within 24h
+ * (measured 2026-09-24).
+ */
+export const CHANGED_SINCE_MIN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Where a page's worked-on date comes from — the fact the rail's date chip and
+ * the article header both mark.
+ *
+ *  - `worked` — an agent session wrote the page. `changedSince` is set when the
+ *    update signal is more than {@link CHANGED_SINCE_MIN_MS} newer: a hand edit,
+ *    a script the ledger cannot read, a lint or sync commit.
+ *  - `fallback` — no usable ledger row, so any worked-on date shown for it is the
+ *    update signal.
+ */
+export function workedSourceOf(
+  p: WikiRecencyFields,
+  now: number,
+): { kind: "worked"; worked: string; changedSince?: string } | { kind: "fallback" } {
+  const signal = workedSignal(p, now);
+  if (signal.kind !== "worked") return { kind: "fallback" };
+  const updated = updatedSignal(p, now);
+  if (updated.kind === "updated" && updated.ms - signal.ms > CHANGED_SINCE_MIN_MS && updated.label > signal.label) {
+    return { kind: "worked", worked: signal.label, changedSince: updated.label };
+  }
+  return { kind: "worked", worked: signal.label };
 }
 
 /**

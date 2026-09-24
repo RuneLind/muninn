@@ -149,7 +149,15 @@ import {
   type ActivityWeights,
   type WorkedGate,
 } from "./wiki-activity-rank.ts";
-import { purgeRecentsKeys, readFolds, readPins, toggleFolded, togglePinned } from "./wiki-recents-store.ts";
+import {
+  purgeRecentsKeys,
+  readFolds,
+  readPins,
+  readSort,
+  toggleFolded,
+  togglePinned,
+  writeSort,
+} from "./wiki-recents-store.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
@@ -245,6 +253,8 @@ import {
   hubTypeList,
   isRecencySort,
   recencyKindFor,
+  resolveSortMode,
+  workedSourceOf,
   pageDateLabel,
   pageDateSignal,
   pageHeaderDates,
@@ -662,14 +672,30 @@ function sortMode(): WikiSortMode {
  * hidden option sorts by a mode with no control on screen to leave it.
  */
 function applyWorkedSortOption(coverage: WikiPagesResponse["workedCoverage"]): void {
-  if (!coverage || typeof coverage.matched !== "number") return;
   const select = document.getElementById("wikiSort") as HTMLSelectElement | null;
   const option = select?.querySelector<HTMLOptionElement>('option[value="worked"]');
   if (!select || !option) return;
-  const show = coverage.matched > 0;
-  option.hidden = !show;
-  if (!show && select.value === "worked") select.value = "updated";
+  const workedShown = coverage && typeof coverage.matched === "number" ? coverage.matched > 0 : null;
+  if (workedShown !== null) {
+    option.hidden = !workedShown;
+    workedAxisOn = workedShown;
+  }
+  // "Worked on" is the default where it is offered; a sort the reader picked
+  // (this tab, or stored for this wiki) wins. `resolveSortMode` owns the rules.
+  select.value = resolveSortMode({
+    current: select.value as WikiSortMode,
+    stored: readSort(WIKI),
+    touched: sortTouched,
+    workedShown,
+  });
 }
+
+/** The reader changed the sort in this tab: it outranks the default for the rest
+ *  of the session, even where storage refuses the write. */
+let sortTouched = false;
+/** The last listing said the ledger covers pages on this wiki — what lets the
+ *  article header name a worked day, or say no session wrote the page. */
+let workedAxisOn = false;
 
 // ── Left pane: filter + list ──────────────────────────────────────────
 /** Populate the folder picker from the pages themselves — wikis differ wildly
@@ -1352,8 +1378,34 @@ function renderList(): void {
     // earned. The suffix goes on the `title=` ONLY — `formatRailAge` reads
     // `fullDate` as a BARE day and would fall back to `localDay(ms)` for a
     // decorated one, which shifts a frontmatter date west of UTC.
-    const dateTitle =
-      signal === "worked" && dateSignal ? `${fullDate} (${dateSignal.kind})` : fullDate;
+    // Where a worked-on date came from, marked on the chip: a session wrote it
+    // (`worked`, and `changed-since` when a change landed after that session with
+    // no ledger row) or no session did (`fallback` — the update date). An
+    // Activity "changed" row on a wiki whose worked gate is open is a fallback
+    // too when the ledger has no row for the page — the one case its update
+    // date stands in for a worked day.
+    const source =
+      signal === "worked" && dateSignal
+        ? dateSignal.kind === "worked"
+          ? workedSourceOf(p, now)
+          : ({ kind: "fallback" } as const)
+        : entry.activity?.kind === "changed" && workedGate?.open && workedSourceOf(p, now).kind === "fallback"
+          ? ({ kind: "fallback" } as const)
+          : null;
+    const metaClass = !source
+      ? ""
+      : source.kind === "fallback"
+        ? " fallback"
+        : source.changedSince
+          ? " worked changed-since"
+          : " worked";
+    const dateTitle = !source
+      ? fullDate
+      : source.kind === "fallback"
+        ? `${fullDate} (updated — no session recorded)`
+        : source.changedSince
+          ? `${fullDate} (worked)\nchanged ${source.changedSince}, no session recorded`
+          : `${fullDate} (worked)`;
     // Every rail row shows a COMPACT age (`formatRailAge`, whose docblock has the
     // why), the backlinks sort its link count instead.
     const meta = signal === null ? p.backlinkCount + " ←" : formatRailAge(stampMs, now, fullDate);
@@ -1487,7 +1539,7 @@ function renderList(): void {
       // The full date on the META element, never on the row — same reason the
       // derivation is repeated onto `.wiki-list-title` above. It carries the
       // signal's label verbatim, time and all, since a hover has room for it.
-      `<div class="wiki-list-meta"${dateTitle ? ` title="${esc(dateTitle)}"` : ""}>${esc(meta)}</div>` +
+      `<div class="wiki-list-meta${metaClass}"${dateTitle ? ` title="${esc(dateTitle)}"` : ""}>${esc(meta)}</div>` +
       `</div>` +
       `</div>`;
   });
@@ -1887,6 +1939,10 @@ function toggleProvChain(btn: HTMLButtonElement): void {
 // Shows "wiki / folder / page · updated" for the open page and hosts the
 // Explain affordance (a button shown only while a selection exists — see the
 // Select-to-Explain section). Hidden on the start view and on Ask answers.
+const WORKED_SLOT_TITLE = "The day an agent session last wrote this page (claude-usage's session ledger)";
+const CHANGED_SINCE_TITLE =
+  "Changed after the last session by something the ledger does not record: a hand edit, a script, a lint or sync commit";
+const NO_SESSION_TITLE = "No agent session in the ledger wrote this page. The date is the file's last update.";
 function renderBreadcrumb(m: WikiListing): void {
   const el = document.getElementById("wikiBreadcrumb");
   // Navigating to a DIFFERENT page invalidates an open article popover: it still
@@ -1938,15 +1994,28 @@ function renderBreadcrumb(m: WikiListing): void {
   // BOTH dates, each labelled — unlike a list row, which shows the one date it sorted
   // on. `pageHeaderDates` owns which slots appear; the "no known edit" case yields a
   // creation date only, so the header never asserts an edit the history doesn't record.
-  const { created, updated } = pageHeaderDates(m, recencyNow());
-  const dateHtml =
-    created || updated
-      ? '<span class="wiki-bc-date">' +
-        (created ? "created " + esc(created) : "") +
-        (created && updated ? " · " : "") +
-        (updated ? "updated " + esc(updated) : "") +
-        "</span>"
-      : "";
+  // With the ledger on, a `worked` slot names the day the last agent session wrote
+  // the page; `updated` then appears only as a change after that session, or as
+  // the fallback on a page no session wrote.
+  const dates = pageHeaderDates(m, recencyNow(), { ledger: workedAxisOn });
+  const slots: string[] = [];
+  if (dates.created) slots.push("created " + esc(dates.created));
+  if (dates.worked) {
+    slots.push(
+      `<span class="wiki-bc-worked" title="${esc(WORKED_SLOT_TITLE)}">worked ${esc(dates.worked)}</span>`,
+    );
+  }
+  if (dates.updated) {
+    slots.push(
+      dates.changedSince
+        ? `<span class="wiki-bc-changed" title="${esc(CHANGED_SINCE_TITLE)}">updated ${esc(dates.updated)}</span>`
+        : dates.noSession
+          ? `<span class="wiki-bc-fallback" title="${esc(NO_SESSION_TITLE)}">updated ${esc(dates.updated)}</span>`
+          : "updated " + esc(dates.updated),
+    );
+  }
+  if (dates.noSession) slots.push(`<span class="wiki-bc-nosession" title="${esc(NO_SESSION_TITLE)}">no session</span>`);
+  const dateHtml = slots.length ? '<span class="wiki-bc-date">' + slots.join(" · ") + "</span>" : "";
   el.innerHTML =
     '<div class="wiki-bc-trail">' +
     crumbs.join('<span class="wiki-bc-sep">/</span>') +
@@ -3533,7 +3602,11 @@ document.getElementById("tagChips")!.addEventListener("click", (e) => {
   syncFilters();
 });
 
-document.getElementById("wikiSort")!.addEventListener("change", renderList);
+document.getElementById("wikiSort")!.addEventListener("change", () => {
+  sortTouched = true;
+  writeSort(WIKI, sortMode());
+  renderList();
+});
 
 // `group families`, per wiki. The control is painted from the STORE at boot (the
 // server has no idea what this browser remembers) and written back through the

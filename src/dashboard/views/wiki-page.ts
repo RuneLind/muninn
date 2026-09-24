@@ -746,6 +746,13 @@ export async function renderWikiPage(opts?: {
     body.wiki-rail-dragging { cursor: col-resize; user-select: none; }
     .wiki-list-item.active .wiki-list-title { color: var(--text-primary); }
     .wiki-list-meta { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
+    /* Where a worked-on date came from. Cyan + weight = a session wrote the page;
+       a dotted underline = no session did, so the date is the update fallback
+       (the hover says so). Colour is never the only cue. An amber dot after a
+       worked date = changed since, with no ledger row. */
+    .wiki-list-meta.worked { color: var(--worked-ink); font-weight: 600; }
+    .wiki-list-meta.fallback { text-decoration: underline dotted; text-underline-offset: 2px; }
+    .wiki-list-meta.changed-since::after { content: "•"; color: var(--changed-ink); margin-left: 2px; }
 
     /* Neutral default so a custom type (no dedicated type-* rule) still shows a
        dot; the specific rules below override for the built-in types. */
@@ -1054,6 +1061,10 @@ export async function renderWikiPage(opts?: {
     .wiki-bc-wiki { color: var(--accent-light); text-decoration: none; }
     .wiki-bc-wiki:hover, .wiki-bc-wiki:focus-visible { text-decoration: underline; }
     .wiki-bc-date { color: var(--text-dim); flex-shrink: 0; }
+    .wiki-bc-worked { color: var(--worked-ink); font-weight: 600; }
+    .wiki-bc-changed { color: var(--changed-ink); }
+    .wiki-bc-fallback { text-decoration: underline dotted; text-underline-offset: 2px; }
+    .wiki-bc-nosession { font-style: italic; color: var(--text-faint); }
     .wiki-bc-explain {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
       background: var(--accent); color: #fff;
@@ -2286,7 +2297,9 @@ export async function renderWikiPage(opts?: {
                  its update date, so the option would be "Recently updated" under
                  a second name (the measured corpus is named once, on
                  WikiIndex.workedCoverage). Hidden rather than disabled: a control
-                 that can never be chosen is furniture (the rail's own F2 rule). -->
+                 that can never be chosen is furniture (the rail's own F2 rule).
+                 Once shown it becomes the DEFAULT unless the reader picked a
+                 sort — `resolveSortMode` in wiki-filter.ts. -->
             <option value="worked" hidden>Worked on</option>
             <option value="backlinks">Most linked</option>
             <option value="title">Title A–Z</option>
