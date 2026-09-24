@@ -417,6 +417,20 @@ test.describe("Wiki rail: the series rail", () => {
     checkRun(open, openLen === -1 ? open.length : openLen);
   });
 
+  // Forced colours (Windows High Contrast) repaint every background as Canvas,
+  // which erases a rail drawn as a background — the border it replaced was
+  // repainted as a visible colour. The rail must stay distinct from the pane.
+  test("the rail survives forced colours", async ({ page }) => {
+    await page.emulateMedia({ forcedColors: "active" });
+    await openRail(page);
+    const paint = await seriesRow(page).evaluate((el) => ({
+      rail: getComputedStyle(el, "::after").backgroundColor,
+      pane: getComputedStyle(document.querySelector(".wiki-pane")!).backgroundColor,
+    }));
+    expect(paint.rail).not.toBe(paint.pane);
+    expect(paint.rail).not.toBe("rgba(0, 0, 0, 0)");
+  });
+
   test("a FOLDED series row caps its own rail", async ({ page }) => {
     await openRail(page);
     const run = await railRun(page, SERIES_KEY);
@@ -782,12 +796,15 @@ test.describe("Wiki rail: series", () => {
       for (const part of await seriesRow(page).locator(".wiki-rollup-part").all()) {
         expect(await contrastOf(part)).toBeGreaterThanOrEqual(4.5);
       }
-      // …and in the state the reader clicks it in: hovered, which paints a
-      // background of its own behind the transparent chip.
+      // …and in the state the reader clicks it in: hovered, which recolours the
+      // name and the roll-up line.
       await seriesRow(page).locator(".wiki-group-label").hover();
       expect(await contrastOf(seriesRow(page).locator(".wiki-group-label"))).toBeGreaterThanOrEqual(
         4.5,
       );
+      for (const part of await seriesRow(page).locator(".wiki-rollup-part, .wiki-group-rollup").all()) {
+        expect(await contrastOf(part)).toBeGreaterThanOrEqual(4.5);
+      }
 
       await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(STRIP)}`);
       const head = page.locator(".wiki-series-head");

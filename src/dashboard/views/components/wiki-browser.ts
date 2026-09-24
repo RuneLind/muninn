@@ -1248,11 +1248,12 @@ function renderList(): void {
         `</div>`;
       return;
     }
-    // A FAMILY or MONTH row: a fold control with a roll-up on it, and the one
-    // row in this list that is not a page — no `data-relpath`, nothing to open,
-    // and `#wikiCount` does not count it. It reuses the parent row's furniture
-    // (the caret, both chip label forms, the `.wiki-list-mid` container) but
-    // takes its OWN breakpoint (`.is-group`, `RAIL_GROUP_CHIP_SWITCH`): this
+    // A FAMILY, MONTH or SERIES row: a fold control with a roll-up on it, and
+    // the one row in this list that is not a page — no `data-relpath`, nothing
+    // to open, and `#wikiCount` does not count it. A family or month reuses the
+    // parent row's furniture (the caret, both chip label forms, the
+    // `.wiki-list-mid` container) but takes its OWN breakpoint (`.is-group`,
+    // `RAIL_GROUP_CHIP_SWITCH`): this
     // row's mid holds a label and a chip and nothing else — no type dot, no
     // status pill, no ⚑, no ★+date — so the width at which the words stop
     // fitting is a different number, and borrowing the parent row's hid the
@@ -1264,8 +1265,8 @@ function renderList(): void {
     if (entry.kind === "group") {
       const isSeries = entry.group.kind === "series";
       // A SERIES roll-up counts its ghost rows too — the pinned members are on
-      // screen one section up, but they are members of the work and the chip is
-      // a census of it. A family's chip drops a lifted member, because there the
+      // screen one section up, but they are members of the work and the roll-up
+      // is a census of it. A family's chip drops a lifted member, because there the
       // lift really does take the page out of the slate for that render.
       const roll = groupRollup(
         entry.group.kind,
@@ -1283,20 +1284,19 @@ function renderList(): void {
       // `.wiki-group-label`'s `overflow: hidden; nowrap`, where the label ate the
       // width first: measured 15px visible of 65 at the 300px shipped default
       // under `folder=plans`, i.e. clipped to nothing on every rail anybody has
-      // while `toHaveText("3 of 4 shown")` still passed. A second LINE costs the
-      // group row 10.9px of height (measured on mimir: 30 → 40.89) and
-      // `.wiki-list-mid` no width at all (253.58 either way), so
-      // `RAIL_GROUP_CHIP_SWITCH` and the page rows' budgets are untouched.
+      // while `toHaveText("3 of 4 shown")` still passed. A line under the label
+      // costs `.wiki-list-mid` no width, so no chip breakpoint moves.
       const census = entry.census ? `${entry.census.shown} of ${entry.census.total} shown` : "";
       const hover = `${roll.label} — ${why}` + (census ? ` (${census})` : "");
-      // The same two size classes as a page chip, from the same functions, so
-      // the two painters can never classify one label two ways. On a group row
-      // (mid ≥ 213.6px at the narrowest rail) only `is-wide` is load-bearing —
+      // A family or month chip: the same two size classes as a page chip, from
+      // the same functions, so the two painters can never classify one label two
+      // ways. On a group row (mid ≥ 213.6px at the narrowest rail) only `is-wide` is load-bearing —
       // it selects RAIL_GROUP_CHIP_SWITCH (235) and fires at the 260px rail;
       // `is-long` (183) and the counts floors (≤ 156) cannot bind there.
       // `groupRollup`'s `wide` field says the same thing as the label test.
-      const chipHtml =
-        `<span class="wiki-fold-chip is-group${cls(foldChipLabelClass(roll.label))}` +
+      const chipHtml = isSeries
+        ? ""
+        : `<span class="wiki-fold-chip is-group${cls(foldChipLabelClass(roll.label))}` +
         `${cls(foldChipCountsClass(roll.compact))} static">` +
         `<span class="wiki-fold-chip-label">${esc(roll.label)}</span>` +
         `<span class="wiki-fold-chip-counts">${esc(roll.compact)}</span>` +
@@ -1322,7 +1322,7 @@ function renderList(): void {
             roll.parts
               .map(
                 (p, i) =>
-                  `<span class="wiki-rollup-part s-${esc(p.word)}">${p.n} ${esc(p.word)}` +
+                  `<span class="wiki-rollup-part s-${esc(p.word.replace(/[^a-z0-9-]/gi, "-"))}">${p.n} ${esc(p.word)}` +
                   (i < roll.parts.length - 1 ? `<span class="wiki-rollup-sep"> ·</span>` : "") +
                   `</span>`,
               )
@@ -1331,7 +1331,7 @@ function renderList(): void {
           : "") +
         (census ? `<small class="wiki-group-sub">${esc(census)}</small>` : "") +
         `</div>` +
-        (isSeries ? "" : chipHtml) +
+        chipHtml +
         `</div>` +
         `</button></div>`;
       return;

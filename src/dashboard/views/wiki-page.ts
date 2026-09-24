@@ -543,7 +543,8 @@ export async function renderWikiPage(opts?: {
       color: var(--text-secondary); flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
       overflow: hidden;
     }
-    /* The NAME is the one line that ellipsizes. It is its own element so the
+    /* The NAME is the one line that ellipsizes (a series name wraps to two
+       instead — see the series rules below). It is its own element so the
        census under it is not inside the clip: as a sibling span on one nowrap
        line the label ate the width first and the census rendered 15px of 65 at
        the 300px default. */
@@ -575,6 +576,11 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item.member.wiki-series-cont:not(.child)::before,
     .wiki-list-ghost.wiki-series-cont::before { display: none; }
     .wiki-list-item.wiki-series-cont:hover::after { background: var(--accent-light); }
+    /* Forced colours repaint a background as Canvas, which would erase the
+       rail; the border it replaced stayed visible. */
+    @media (forced-colors: active) {
+      .wiki-list-group.series::after, .wiki-series-cont::after { background: CanvasText; }
+    }
     /* A series NAME wraps to two lines, like a page title, rather than
        ellipsizing on one: the roll-up moved to its own line under it, so the
        name has the whole row, and this wiki's series labels carry their meaning

@@ -898,16 +898,16 @@ pair differently. The rendered date cell always names the day the order used.
    `N of M shown` on its OWN LINE under the label: beside it, inside the label's
    `overflow: hidden; nowrap` box, it painted 15px of its 65 at the 300px
    default rail — clipped to nothing while a `toHaveText` assertion still
-   passed. A second LINE costs the group row 10.9px of height (measured on
-   mimir: 30 → 40.89) and `.wiki-list-mid` no width at all (253.58 either
-   way), so `RAIL_GROUP_CHIP_SWITCH` and the page rows' budgets are untouched.
+   passed. The series row's own roll-up is also a line under the name (#581),
+   so the census is the line after it, and neither costs `.wiki-list-mid` any
+   width.
 
    The members inside the fold are always NEWEST-FIRST by `seriesDateMs`,
    whatever the reader's sort — unlike a family or a month, which open in the
    sort's own order. The fold is a timeline of one piece of work and "where do I
    go now" is its first row.
-4. **The open page's series is forced open**, with a disabled chip that says so
-   (#557's F2 decision) — unless the open page is itself lifted into `Pinned`,
+4. **The open page's series is forced open**, with a disabled fold button that
+   says so on hover (#557's F2 decision) — unless the open page is itself lifted into `Pinned`,
    or a closed series in Activity already shows it (or the member it is
    attached to, whose own chip then opens) as a peek row, where it is
    already on screen and forcing the fold would hide the reader's
@@ -929,13 +929,18 @@ pair differently. The rendered date cell always names the day the order used.
    title under its floor. Re-measured at 260 and 300 px against #559's baseline:
    no new wrapped row. The glyph is `--accent-light`, the token the series group
    row already carries: `--status-warning` measured 3.19:1 in the light theme,
-   under AA for an 11px mark that is the whole claim. The series group row's
-   2px accent rule is paid back out of its fold's own left padding (10 → 8),
-   so `.wiki-list-mid` is the same width as a family row's and the chip's
-   container query fires at the same rail on both — measured 251.58 vs 253.58
-   before, 253.58 on both after. `box-sizing: border-box` does NOT do this:
-   these rows declare no width, and an auto-width block takes its border off
-   the content box whatever the box model says.
+   under AA for an 11px mark that is the whole claim.
+7. **The series is one block** (#581). A 2px accent rail runs from the series
+   row through every `.wiki-series-cont` row after it — members and their
+   attachment children, ghosts, `+N more` — and caps on the last one
+   (`:not(:has(+ .wiki-series-cont))`, since the rows are flat siblings). It is
+   an absolute `::after`, not a border, so it costs no row width; under
+   forced colours it paints `CanvasText`. A series row carries NO chip: the
+   name wraps to two lines and the roll-up is a line under it, one nowrap unit
+   per count, so it wraps between counts and never clips one. The chip's fixed
+   `RAIL_GROUP_CHIP_SWITCH` breakpoint ignores label length, and a five-status
+   roll-up kept its full form at any rail over ~282px while the name fell to
+   its 72px floor. Families and months keep the chip.
 
 **No minimum and no cap.** A one-member series is a series with one page in it
 so far, and a twenty-member one is twenty pages of one piece of work — neither
