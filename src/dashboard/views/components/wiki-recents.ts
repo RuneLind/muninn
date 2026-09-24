@@ -639,8 +639,8 @@ export type RailEntry =
        *
        * It exists because the two halves of the rule pull opposite ways: Pinned
        * outranks Series (the ★ is the reader's explicit choice), while the
-       * series chip is a census OF the series and must go on counting the page.
-       * A silent hole in the fold would make the chip disagree with the rows —
+       * series roll-up is a census OF the series and must go on counting the page.
+       * A silent hole in the fold would make the roll-up disagree with the rows —
        * the one failure this module is written around — and a second real row
        * would break the one-row-per-page invariant. So the census counts it, the
        * body names it, and `shown` does not.
@@ -939,7 +939,7 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  *    an attachment child of a member — but only while that page is still one of
  *    the members this group DRAWS: lifted into Activity or Pinned it is already
  *    on screen, and forcing the group open would hide the reader's own stored
- *    state behind a disabled chip for nothing;
+ *    state behind a disabled fold control for nothing;
  *  - **one group may default to OPEN**: the newest month among the groups that
  *    render (`defaultOpenGroupKey`), chosen after the lift for the same reason,
  *    and expressed with the `closed:` key spelling so neither key's meaning can
@@ -1306,7 +1306,7 @@ export function buildRail(input: RailInput): RailModel {
    * while that page (or, for an attachment child, its successor) is still one of
    * the members this group is going to DRAW. With the page lifted into Activity
    * or Pinned it is already on screen one section up, so forcing the group open
-   * hid the reader's own stored state behind a disabled chip for nothing.
+   * hid the reader's own stored state behind a disabled fold control for nothing.
    *
    * ⚠️ NEITHER of them may be lifted, and the open page's OWN lift is the half
    * that is easy to miss: when the open page is an attachment CHILD, the holder

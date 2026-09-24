@@ -1248,11 +1248,12 @@ function renderList(): void {
         `</div>`;
       return;
     }
-    // A FAMILY or MONTH row: a fold control with a roll-up on it, and the one
-    // row in this list that is not a page — no `data-relpath`, nothing to open,
-    // and `#wikiCount` does not count it. It reuses the parent row's furniture
-    // (the caret, both chip label forms, the `.wiki-list-mid` container) but
-    // takes its OWN breakpoint (`.is-group`, `RAIL_GROUP_CHIP_SWITCH`): this
+    // A FAMILY, MONTH or SERIES row: a fold control with a roll-up on it, and
+    // the one row in this list that is not a page — no `data-relpath`, nothing
+    // to open, and `#wikiCount` does not count it. A family or month reuses the
+    // parent row's furniture (the caret, both chip label forms, the
+    // `.wiki-list-mid` container) but takes its OWN breakpoint (`.is-group`,
+    // `RAIL_GROUP_CHIP_SWITCH`): this
     // row's mid holds a label and a chip and nothing else — no type dot, no
     // status pill, no ⚑, no ★+date — so the width at which the words stop
     // fitting is a different number, and borrowing the parent row's hid the
@@ -1264,8 +1265,8 @@ function renderList(): void {
     if (entry.kind === "group") {
       const isSeries = entry.group.kind === "series";
       // A SERIES roll-up counts its ghost rows too — the pinned members are on
-      // screen one section up, but they are members of the work and the chip is
-      // a census of it. A family's chip drops a lifted member, because there the
+      // screen one section up, but they are members of the work and the roll-up
+      // is a census of it. A family's chip drops a lifted member, because there the
       // lift really does take the page out of the slate for that render.
       const roll = groupRollup(
         entry.group.kind,
@@ -1283,12 +1284,23 @@ function renderList(): void {
       // `.wiki-group-label`'s `overflow: hidden; nowrap`, where the label ate the
       // width first: measured 15px visible of 65 at the 300px shipped default
       // under `folder=plans`, i.e. clipped to nothing on every rail anybody has
-      // while `toHaveText("3 of 4 shown")` still passed. A second LINE costs the
-      // group row 10.9px of height (measured on mimir: 30 → 40.89) and
-      // `.wiki-list-mid` no width at all (253.58 either way), so
-      // `RAIL_GROUP_CHIP_SWITCH` and the page rows' budgets are untouched.
+      // while `toHaveText("3 of 4 shown")` still passed. A line under the label
+      // costs `.wiki-list-mid` no width, so no chip breakpoint moves.
       const census = entry.census ? `${entry.census.shown} of ${entry.census.total} shown` : "";
       const hover = `${roll.label} — ${why}` + (census ? ` (${census})` : "");
+      // A family or month chip: the same two size classes as a page chip, from
+      // the same functions, so the two painters can never classify one label two
+      // ways. On a group row (mid ≥ 213.6px at the narrowest rail) only `is-wide` is load-bearing —
+      // it selects RAIL_GROUP_CHIP_SWITCH (235) and fires at the 260px rail;
+      // `is-long` (183) and the counts floors (≤ 156) cannot bind there.
+      // `groupRollup`'s `wide` field says the same thing as the label test.
+      const chipHtml = isSeries
+        ? ""
+        : `<span class="wiki-fold-chip is-group${cls(foldChipLabelClass(roll.label))}` +
+        `${cls(foldChipCountsClass(roll.compact))} static">` +
+        `<span class="wiki-fold-chip-label">${esc(roll.label)}</span>` +
+        `<span class="wiki-fold-chip-counts">${esc(roll.compact)}</span>` +
+        `</span>`;
       html +=
         `<div class="wiki-list-group${isSeries ? " series" : ""}" data-section="${esc(entry.section)}" data-group="${esc(entry.foldKey)}">` +
         `<button type="button" class="wiki-group-fold${entry.folded ? " folded" : ""}"` +
@@ -1299,19 +1311,29 @@ function renderList(): void {
         `<div class="wiki-list-mid">` +
         `<div class="wiki-group-label">` +
         `<span class="wiki-group-name">${esc(entry.group.label)}</span>` +
+        // A SERIES draws its roll-up as a line under the name instead of a chip
+        // beside it: a five-status roll-up is ~310px, and sharing one line with
+        // the name left the name at its 72px floor and the chip clipped too.
+        // Each count is one unbreakable unit, so the line wraps between counts
+        // and never clips one — a clipped count is a wrong count. The `·` rides
+        // inside the count before it, so a wrapped line never starts with one.
+        // Only the two coloured statuses get a class: the word is free
+        // frontmatter and never becomes a class name of its own.
+        (isSeries
+          ? `<small class="wiki-group-rollup">` +
+            roll.parts
+              .map(
+                (p, i) =>
+                  `<span class="wiki-rollup-part${p.word === "shipped" || p.word === "in-flight" ? " s-" + p.word : ""}">${p.n} ${esc(p.word)}` +
+                  (i < roll.parts.length - 1 ? `<span class="wiki-rollup-sep"> ·</span>` : "") +
+                  `</span>`,
+              )
+              .join(" ") +
+            `</small>`
+          : "") +
         (census ? `<small class="wiki-group-sub">${esc(census)}</small>` : "") +
         `</div>` +
-        // The same two size classes as a page chip, from the same functions, so
-        // the two painters can never classify one label two ways. On a group row
-        // (mid ≥ 213.6px at the narrowest rail) only `is-wide` is load-bearing —
-        // it selects RAIL_GROUP_CHIP_SWITCH (235) and fires at the 260px rail;
-        // `is-long` (183) and the counts floors (≤ 156) cannot bind there.
-        // `groupRollup`'s `wide` field says the same thing as the label test.
-        `<span class="wiki-fold-chip is-group${cls(foldChipLabelClass(roll.label))}` +
-        `${cls(foldChipCountsClass(roll.compact))} static">` +
-        `<span class="wiki-fold-chip-label">${esc(roll.label)}</span>` +
-        `<span class="wiki-fold-chip-counts">${esc(roll.compact)}</span>` +
-        `</span>` +
+        chipHtml +
         `</div>` +
         `</button></div>`;
       return;
@@ -1324,7 +1346,7 @@ function renderList(): void {
     if (entry.kind === "ghost") {
       const title = displayTitleOf(entry.page);
       html +=
-        `<div class="wiki-list-ghost" data-ghost-relpath="${esc(entry.page.relPath)}"` +
+        `<div class="wiki-list-ghost wiki-series-cont" data-ghost-relpath="${esc(entry.page.relPath)}"` +
         ` title="${esc(title + "\npinned — its row is under Pinned, above")}">` +
         `<div class="wiki-list-ghost-title">${esc(title)}</div>` +
         `<div class="wiki-list-ghost-note">pinned above</div>` +
@@ -1337,7 +1359,7 @@ function renderList(): void {
     if (entry.kind === "more") {
       const label = `+${entry.hidden} more`;
       html +=
-        `<button type="button" class="wiki-list-more" data-section="${esc(entry.section)}"` +
+        `<button type="button" class="wiki-list-more wiki-series-cont" data-section="${esc(entry.section)}"` +
         ` data-fold-key="${esc(entry.toggleKey)}" aria-expanded="false"` +
         ` title="${esc(`Show the other ${entry.hidden} ${entry.hidden === 1 ? "member" : "members"} of this series`)}">${esc(label)}</button>`;
       return;
@@ -1436,7 +1458,9 @@ function renderList(): void {
       // A group MEMBER is indented under its group's row, and a member's own
       // attachment child indents one level further (`.member.child`) — at the
       // family's own depth it would read as a sibling of the page it belongs to.
-      `<div class="wiki-list-item${active ? " active" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      // A SERIES member (and its attachment child) also carries
+      // `wiki-series-cont`, which runs the series' accent rail through the row.
+      `<div class="wiki-list-item${active ? " active" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}${entry.member?.kind === "series" ? " wiki-series-cont" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
       // The derivation on the ROW, and again on the title element below:
       // the child's own `title=` wins the hover over most of the row's width.
       (rowTitle ? ` title="${esc(rowTitle)}"` : "") +

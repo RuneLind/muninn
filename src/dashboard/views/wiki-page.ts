@@ -543,7 +543,8 @@ export async function renderWikiPage(opts?: {
       color: var(--text-secondary); flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
       overflow: hidden;
     }
-    /* The NAME is the one line that ellipsizes. It is its own element so the
+    /* The NAME is the one line that ellipsizes (a series name wraps to two
+       instead — see the series rules below). It is its own element so the
        census under it is not inside the clip: as a sibling span on one nowrap
        line the label ate the width first and the census rendered 15px of 65 at
        the 300px default. */
@@ -555,15 +556,55 @@ export async function renderWikiPage(opts?: {
        that carries the accent — a family and a month are the rail's own
        guesses about filenames and read as ordinary furniture. */
     .wiki-list-group.series .wiki-group-label { color: var(--accent-light); }
-    .wiki-list-group.series { border-left: 2px solid var(--accent); border-radius: 7px; }
-    /* …and the fold gives those 2px back out of its own left padding, so a
-       series row's \`.wiki-list-mid\` is the same width as a family row's and the
-       chip's container query fires at the same rail on both. Measured on mimir
-       at the 300px default: 251.58px vs a family's 253.58 before, 253.58 on
-       both after. \`box-sizing: border-box\` does NOT do this — these rows have
-       no declared width, and for an auto-width block the border comes off the
-       content box whatever the box model says (measured: still 251.58). */
-    .wiki-list-group.series .wiki-group-fold { padding-left: 8px; }
+    /* The series RAIL: one 2px accent line from the series row down through its
+       members, ghosts and \`+N more\` (\`.wiki-series-cont\`), so the reader sees
+       where the series ends. The rows are flat siblings in \`#wikiList\`, so the
+       line is one pseudo-element per row, flush with the next, and the LAST row
+       of the run — the one whose next sibling does not continue it — caps it.
+       Absolute, so it takes no row width: a border here cost the fold 2px and
+       moved the chip breakpoint. It replaces the grey member rule on a series
+       member; an attachment child keeps its own inner rule beside it. */
+    .wiki-list-group.series, .wiki-list-more { position: relative; }
+    .wiki-list-group.series::after, .wiki-series-cont::after {
+      content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+      background: var(--accent); pointer-events: none;
+    }
+    .wiki-list-group.series::after { top: 4px; border-radius: 1px 1px 0 0; }
+    .wiki-list-group.series:not(:has(+ .wiki-series-cont))::after,
+    .wiki-series-cont:not(:has(+ .wiki-series-cont))::after { bottom: 4px; border-radius: 0 0 1px 1px; }
+    .wiki-list-group.series:not(:has(+ .wiki-series-cont))::after { border-radius: 1px; }
+    .wiki-list-item.member.wiki-series-cont:not(.child)::before,
+    .wiki-list-ghost.wiki-series-cont::before { display: none; }
+    .wiki-list-item.wiki-series-cont:hover::after { background: var(--accent-light); }
+    /* Forced colours repaint a background as Canvas, which would erase the
+       rail; the border it replaced stayed visible. The hover selector is listed
+       so its higher specificity cannot win back the Canvas. */
+    @media (forced-colors: active) {
+      .wiki-list-group.series::after, .wiki-series-cont::after,
+      .wiki-list-item.wiki-series-cont:hover::after { background: CanvasText; }
+    }
+    /* A series NAME wraps to two lines, like a page title, rather than
+       ellipsizing on one: the roll-up moved to its own line under it, so the
+       name has the whole row, and this wiki's series labels carry their meaning
+       in the second half. */
+    .wiki-list-group.series .wiki-group-name {
+      white-space: normal; overflow-wrap: anywhere;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    }
+    /* The series ROLL-UP line. Each count is one nowrap unit, so the line
+       wraps BETWEEN counts and never clips one. --text-muted over the pane (the
+       group row paints no hover fill); the two live statuses take the colours
+       their row pills use, both measured ≥ 6.3:1 in the light theme (see
+       .wiki-act-glyph). Blocked stays muted: the warning amber is 3.19:1 light. */
+    .wiki-group-rollup {
+      display: block; color: var(--text-muted); font-size: 10.5px; font-weight: 400;
+      line-height: 1.45; margin-top: 1px; white-space: normal;
+    }
+    .wiki-rollup-part { white-space: nowrap; }
+    .wiki-rollup-part.s-shipped { color: var(--tok-str); }
+    .wiki-rollup-part.s-in-flight { color: var(--accent-light); }
+    .wiki-rollup-sep { color: var(--text-muted); }
+    .wiki-group-fold:hover .wiki-group-rollup { color: var(--text-secondary); }
     /* \`N of M shown\` — a facet is hiding part of the series. Its OWN line under
        the name, because the census is the one thing on a group row a reader has
        to READ and the name is allowed to take the rest. */
