@@ -16,6 +16,7 @@ import {
   type SourceDraftInput,
 } from "./source-drafter.ts";
 import { sanitizeFilename } from "./target-resolve.ts";
+import { selectWirablePages } from "./wire.ts";
 import { sha256 } from "./util.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
@@ -165,9 +166,11 @@ describe("draftSourcePage", () => {
     expect(captured!.targetPath).toBe("sources/Retrieval-Augmented Generation.mdx");
     // The resolvable body wikilink SURVIVES containment (still a live link).
     expect(captured!.draft).toContain("[[Model Context Protocol]]");
-    // source_docs carries the real doc + url; relatedPages is [] (not null legacy).
+    // source_docs carries the real doc + url; relatedPages seeds the resolved body link.
     expect(captured!.sourceDocs[0]).toMatchObject({ collection: "youtube-summaries", docId: "abc12345678", url: SOURCE_URL });
-    expect(captured!.relatedPages).toEqual([]);
+    expect(captured!.relatedPages).toEqual([
+      { title: "Model Context Protocol", relPath: "concepts/Model Context Protocol.md" },
+    ]);
   });
 
   test("covered by URL already in the wiki → credit + skip (no draft call, no insert)", async () => {
@@ -1309,5 +1312,95 @@ describe("buildSourceRevisePrompt", () => {
     const short = `https://example.invalid/${"p".repeat(470)}`;
     expect(short.length).toBeLessThanOrEqual(500);
     expect(revise({ input: { ...baseDeps().input, url: short } })).toContain("The source URL is");
+  });
+});
+
+describe("draftSourcePage — See-also seeding (relatedPages)", () => {
+  const concept = (title: string, over: Partial<WikiPageMeta> = {}) =>
+    page({ title, name: title, type: "concept", relPath: `concepts/${title}.md`, ...over });
+
+  async function seeded(over: Partial<DraftSourcePageDeps>, body: string, pages?: WikiPageMeta[]) {
+    let captured: InsertWikiProposalParams | null = null;
+    const out = await draftSourcePage(
+      baseDeps({
+        callDrafter: async () => mdxDraft({ body }),
+        insertProposal: async (params) => {
+          captured = params;
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+        ...(pages ? { index: fakeIndex(pages) } : {}),
+        ...over,
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    return captured!;
+  }
+
+  test("the first resolved concept/entity body link is seeded, skipping earlier source links", async () => {
+    const row = await seeded({}, "Intro [[Other Video]], then [[Anthropic]] and [[RAG Basics]].", [
+      page({ title: "Other Video", name: "Other Video", type: "source", relPath: "sources/Other Video.mdx" }),
+      page({ title: "Anthropic", name: "Anthropic", type: "entity", relPath: "entities/Anthropic.md" }),
+      concept("RAG Basics"),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "Anthropic", relPath: "entities/Anthropic.md" }]);
+  });
+
+  test("with no concept/entity link, falls back to another resolved page", async () => {
+    const row = await seeded({}, "See [[Other Video]].", [
+      page({ title: "Other Video", name: "Other Video", type: "source", relPath: "sources/Other Video.mdx" }),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "Other Video", relPath: "sources/Other Video.mdx" }]);
+  });
+
+  test("skips reserved basenames, .html explainers and links inside code", async () => {
+    const row = await seeded({}, "`[[RAG Basics]]` then [[Index]], [[Diagram]], and finally [[Agents]].", [
+      concept("RAG Basics"),
+      concept("Index", { relPath: "index.md" }),
+      concept("Diagram", { relPath: "explainers/Diagram.html" }),
+      concept("Agents"),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "Agents", relPath: "concepts/Agents.md" }]);
+  });
+
+  test("frontmatter `sources:` wikilinks are not body links", async () => {
+    const row = await seeded(
+      {
+        callDrafter: async () =>
+          mdxDraft({ body: "See [[Body Page]]." }).replace(`sources: [${SOURCE_URL}]`, 'sources: ["[[Frontmatter Page]]"]'),
+      },
+      "",
+      [concept("Frontmatter Page"), concept("Body Page")],
+    );
+    expect(row.relatedPages).toEqual([{ title: "Body Page", relPath: "concepts/Body Page.md" }]);
+  });
+
+  test("update mode seeds too, and never the page being revised", async () => {
+    const RELPATH = "sources/Retrieval-Augmented Generation.mdx";
+    const self = page({
+      title: "Retrieval-Augmented Generation",
+      name: "Retrieval-Augmented Generation",
+      type: "concept",
+      relPath: RELPATH,
+    });
+    const other = concept("Vector Search");
+    // Resolves the page being revised by its alias, which body containment keeps
+    // (it only de-links the self TITLE).
+    const byKey: Record<string, WikiPageMeta> = { rag: self, "vector search": other };
+    const row = await seeded(
+      {
+        index: { ...fakeIndex([self, other]), resolve: (t: string) => byKey[t.trim().toLowerCase()] },
+        collectWikiRefs: async () => ({ urls: new Set([SOURCE_URL]), idTokens: new Set() }),
+        update: { relPath: RELPATH, currentText: mdxDraft() },
+      },
+      "Also called [[RAG]]; built on [[Vector Search]].",
+    );
+    expect(row.mode).toBe("update");
+    expect(row.relatedPages).toEqual([{ title: "Vector Search", relPath: "concepts/Vector Search.md" }]);
+  });
+
+  test("the gate's wiring preview (selectWirablePages) shows the seeded backlink", async () => {
+    const row = await seeded({}, "Built on [[Agents]].", [concept("Agents")]);
+    const wirable = selectWirablePages(row.relatedPages, fakeIndex([concept("Agents")]), row.targetPath);
+    expect(wirable.map((w) => w.title)).toEqual(["Agents"]);
   });
 });

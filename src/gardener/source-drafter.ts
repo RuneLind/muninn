@@ -23,10 +23,10 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
-import { extRank, normalizeRelPath, parseFrontmatter, stemKey } from "../wiki/store.ts";
+import { extRank, extractWikilinks, normalizeRelPath, parseFrontmatter, stemKey, stripFrontmatter } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
 import { normalizeUrl, docIdFromUrl } from "../wiki/ingest-backlog.ts";
-import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
+import type { InsertWikiProposalParams, WikiProposal, WikiProposalRelatedPage } from "../db/wiki-proposals.ts";
 import { expectedDir, sanitizeFilename } from "./target-resolve.ts";
 import {
   appendPendingIngestionCallout,
@@ -54,6 +54,44 @@ const log = getLog("gardener", "source-drafter");
  * Named export so the guard boundary is testable against the exact threshold.
  */
 export const MIN_SOURCE_BODY_CHARS = 400;
+
+/**
+ * How many of a source page's own body links get a `## See also` backlink at
+ * apply. One de-orphans as many pages as three (238 of 240 jarvis source orphans,
+ * 2026-09-24) at a third of the edits; the rest land on hubs (Claude Code: 108 → 234).
+ */
+export const SOURCE_BACKLINK_CAP = 1;
+
+/**
+ * The pages a source draft's apply-time wire stage backlinks: the draft's own
+ * resolved BODY wikilinks, in body order, concept/entity pages first (other
+ * resolved pages only when there are none). Skips code regions, self-links,
+ * reserved basenames and `.html` explainers; dedupes by page. Without this every
+ * approved source page is born an orphan (239 of 242 on jarvis, 2026-09-24).
+ */
+export function sourceRelatedPages(
+  draft: string,
+  index: WikiIndex | null,
+  targetPath: string,
+): WikiProposalRelatedPage[] {
+  if (!index) return [];
+  const body = stripFrontmatter(draft).replace(/```[\s\S]*?```|`[^`\n]*`/g, "");
+  const self = normalizeRelPath(targetPath);
+  const seen = new Set<string>();
+  const primary: WikiProposalRelatedPage[] = [];
+  const fallback: WikiProposalRelatedPage[] = [];
+  for (const target of extractWikilinks(body)) {
+    const page = index.resolve(target);
+    if (!page) continue;
+    const key = normalizeRelPath(page.relPath);
+    if (key === self || seen.has(key)) continue;
+    if (hasForbiddenBasename(page.relPath) || /\.html$/i.test(page.relPath)) continue;
+    seen.add(key);
+    const rp = { title: target, relPath: page.relPath };
+    (page.type === "concept" || page.type === "entity" ? primary : fallback).push(rp);
+  }
+  return (primary.length > 0 ? primary : fallback).slice(0, SOURCE_BACKLINK_CAP);
+}
 
 /** The one input a source draft is built from — a single captured summary doc. */
 export interface SourceDraftInput {
@@ -909,9 +947,9 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
       ],
       rationale: null,
       containedLinks: containedLinks.length > 0 ? { delinked: containedLinks } : null,
-      // Empty (not null): a source page seeds no See-also backlinks, but the row
-      // isn't a pre-migration legacy row either.
-      relatedPages: [],
+      // Both modes: an update target is usually an orphan too, and the See-also
+      // edit is idempotent on a page that already links it.
+      relatedPages: sourceRelatedPages(finalDraft, index, targetPath),
     });
 
     if (!row) {
