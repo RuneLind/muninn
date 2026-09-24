@@ -202,7 +202,7 @@ export const YTDLP_INFO_TEMPLATE = "%(.{id,title,duration,uploader,webpage_url})
 
 /**
  * Parse a single yt-dlp {@link YTDLP_INFO_TEMPLATE} line into the fields we need. Returns
- * null for non-JSON lines (yt-dlp interleaves progress/warnings on stdout) or
+ * null for non-JSON lines (`-O` implies `--quiet`, but the scan stays tolerant) or
  * objects missing an `id`, so callers can scan every line for the first hit.
  */
 export function parseYtDlpJson(line: string): YtDlpInfo | null {
@@ -424,7 +424,7 @@ export async function downloadVideo(
     );
   }
 
-  // Parse the info JSON from stdout (yt-dlp can interleave other lines).
+  // Parse the template's info line from stdout.
   let info: YtDlpInfo | null = null;
   for (const line of stdout.split("\n")) {
     const parsed = parseYtDlpJson(line);
@@ -437,8 +437,9 @@ export async function downloadVideo(
     throw new Error(`yt-dlp produced no parseable metadata JSON:\n${stdout.slice(0, 500)}`);
   }
 
-  // Resolve the actual file by globbing — don't trust `_filename` from the JSON
-  // (can be a pre-remux name; the `best` fallback can yield a non-mp4 container).
+  // Resolve the actual file by globbing — the template does not ask for
+  // `_filename`, which can be a pre-remux name anyway (and the `best` fallback
+  // can yield a non-mp4 container).
   // Prefer known video containers over a junk-suffix denylist, so intermediate
   // artifacts (`.part`, `.ytdl`, info `.json`, thumbnails) can't be picked up.
   const candidates = await globAbsolute(workDir, "video.*");
