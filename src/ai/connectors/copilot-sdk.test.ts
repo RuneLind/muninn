@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { buildCustomAgents, accumulateInputTokens, resolveCopilotModelId } from "./copilot-sdk.ts";
+import { buildCustomAgents, accumulateInputTokens, resolveCopilotModelId, copilotSessionTools } from "./copilot-sdk.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -191,5 +191,29 @@ describe("accumulateInputTokens", () => {
 
   test("single turn returns that turn's tokens", () => {
     expect(accumulateInputTokens(0, 900)).toBe(900);
+  });
+});
+
+describe("copilotSessionTools", () => {
+  test("toolsDisabled drops MCP servers and custom agents and excludes every tool source", () => {
+    // A bot WITH a .mcp.json and a serena entry, so both would otherwise be passed.
+    const { botDir, cleanup } = makeBotDir([
+      { name: "serena-api", displayName: "Backend API", projectPath: "/src/api", port: 9121 },
+    ]);
+    writeFileSync(join(botDir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "x" } } }));
+    try {
+      const plain = copilotSessionTools(baseBotConfig(botDir));
+      expect(Object.keys(plain.mcpServers ?? {})).toEqual(["gmail"]);
+      expect(plain.customAgents).toHaveLength(1);
+
+      const fenced = copilotSessionTools({ ...baseBotConfig(botDir), toolsDisabled: true, excludedTools: ["Write"] });
+      expect(fenced.mcpServers).toBeUndefined();
+      expect(fenced.customAgents).toBeUndefined();
+      // Source-qualified patterns bind whatever Copilot names its built-ins.
+      for (const pattern of ["builtin:*", "mcp:*", "custom:*"]) expect(fenced.excludedTools).toContain(pattern);
+      expect(fenced.excludedTools).toContain("Write");
+    } finally {
+      cleanup();
+    }
   });
 });

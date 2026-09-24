@@ -178,6 +178,13 @@ export interface BotConfig {
    * ignore it today.
    */
   allowedTools?: string[];
+  /**
+   * Run with NO tools at all: no built-ins, no MCP servers (neither the bot's
+   * `.mcp.json` nor, on claude-cli, the user-global ones the CLI discovers on
+   * its own) and no custom agents. Wins over `allowedTools`. Set per-call by
+   * the fence in `src/core/fenced-one-shot.ts`, never in config.json.
+   */
+  toolsDisabled?: boolean;
   /** Hivemind peer-to-peer integration config — parsed from `hivemind` block in config.json */
   hivemind?: HivemindBotConfig;
   /** MCP status probing config — controls cache TTL and which servers are critical */

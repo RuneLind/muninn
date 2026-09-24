@@ -111,5 +111,17 @@ describe("runFencedOneShot — onProgress passthrough", () => {
     });
     expect(seen).toHaveLength(1);
     for (const tool of FENCED_EXCLUDED_TOOLS) expect(bot!.excludedTools).toContain(tool);
+    expect(bot!.toolsDisabled).toBe(true);
+  });
+
+  test("the deny-list covers 2.1.281's escapes", () => {
+    // Measured from a fenced init event on Claude Code 2.1.281: each of these was
+    // on the surface the old eight-name deny-list left open.
+    for (const tool of [
+      "Workflow", "Monitor", "SendMessage", "ListAgents", "EnterWorktree",
+      "RemoteTrigger", "CronCreate", "ScheduleWakeup", "PushNotification", "DesignSync",
+    ]) {
+      expect(FENCED_EXCLUDED_TOOLS).toContain(tool);
+    }
   });
 });

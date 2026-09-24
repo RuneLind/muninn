@@ -504,6 +504,28 @@ describe("claude-sdk executePrompt", () => {
     expect(resolveThinking(8_000)).toEqual({ type: "enabled", budgetTokens: 8_000 });
   });
 
+  test("toolsDisabled passes tools: [] and no mcpServers even when the bot has a .mcp.json", async () => {
+    fakeEvents = successOnly;
+    const dir = mkdtempSync(join(tmpdir(), "claude-sdk-fence-"));
+    writeFileSync(
+      join(dir, ".mcp.json"),
+      JSON.stringify({ mcpServers: { gmail: { command: "node", args: ["gmail.js"] } } }),
+    );
+    try {
+      await executePrompt("hi", baseConfig, { ...baseBot(), dir });
+      const plain = queryCalls[0]!.options as Record<string, unknown>;
+      expect("mcpServers" in plain).toBe(true);
+      expect("tools" in plain).toBe(false);
+
+      await executePrompt("hi", baseConfig, { ...baseBot(), dir, toolsDisabled: true });
+      const fenced = queryCalls[1]!.options as Record<string, unknown>;
+      expect("mcpServers" in fenced).toBe(false);
+      expect(fenced.tools).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
   test("forwards excludedTools as disallowedTools", async () => {
     fakeEvents = [
       {

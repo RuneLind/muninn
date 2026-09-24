@@ -142,19 +142,14 @@ export async function executePrompt(
   const model = await resolveModelForRequest(cl, botConfig.model ?? config.claudeModel, botConfig.name);
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
 
-  // Parse .mcp.json for this bot
-  const mcpServers = parseMcpConfig(botConfig.dir);
-  const hasMcp = Object.keys(mcpServers).length > 0;
+  const tools = copilotSessionTools(botConfig);
 
   // Pre-flight: warn if a *critical* MCP server is down. Non-critical failures
   // are visible in the inspector panel only — they no longer pollute the chat
   // stream. See src/ai/mcp-status.ts.
-  if (hasMcp) {
+  if (tools.mcpServers) {
     await preflightMcpForRequest(botConfig, onProgress);
   }
-
-  // Build custom subagents (e.g. verify-code for grep/diff verification)
-  const customAgents = buildCustomAgents(botConfig);
 
   // Create session per request (system prompt is dynamic — memories, goals, history change per message)
   const session = await cl.createSession({
@@ -165,9 +160,7 @@ export async function executePrompt(
       ? { mode: "replace", content: systemPrompt }
       : undefined,
     onPermissionRequest: approveAll,
-    ...(hasMcp ? { mcpServers } : {}),
-    ...(customAgents.length > 0 ? { customAgents } : {}),
-    ...(botConfig.excludedTools?.length ? { excludedTools: botConfig.excludedTools } : {}),
+    ...tools,
   });
 
   // Track tool calls for waterfall
@@ -361,6 +354,30 @@ export async function executePrompt(
       log.warn("Failed to delete Copilot SDK session: {error}", { error: String(e) });
     });
   }
+}
+
+/**
+ * The tool half of `createSession`: MCP servers, custom agents and the exclude
+ * list. Under `toolsDisabled` all three sources are excluded by Copilot's
+ * source-qualified patterns, which bind whatever Copilot names its built-ins —
+ * Claude Code's names in `excludedTools` may match nothing here.
+ */
+export function copilotSessionTools(botConfig: BotConfig): {
+  mcpServers?: ReturnType<typeof parseMcpConfig>;
+  customAgents?: CustomAgentConfig[];
+  excludedTools?: string[];
+} {
+  if (botConfig.toolsDisabled) {
+    return { excludedTools: [...(botConfig.excludedTools ?? []), "builtin:*", "mcp:*", "custom:*"] };
+  }
+  const mcpServers = parseMcpConfig(botConfig.dir);
+  // Custom subagents (e.g. verify-code for grep/diff verification)
+  const customAgents = buildCustomAgents(botConfig);
+  return {
+    ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+    ...(customAgents.length > 0 ? { customAgents } : {}),
+    ...(botConfig.excludedTools?.length ? { excludedTools: botConfig.excludedTools } : {}),
+  };
 }
 
 /**

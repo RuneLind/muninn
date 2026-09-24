@@ -37,10 +37,15 @@ export async function executeClaudePrompt(
     "--model", model,
   ];
 
-  // Claude CLI discovers .mcp.json from the git root, not from cwd.
-  // Bot dirs are subdirectories, so explicitly pass their .mcp.json.
+  // The CLI also discovers .mcp.json from its cwd; passing it explicitly is
+  // what the MCP preflight below pairs with.
   const mcpConfigPath = join(botConfig.dir, ".mcp.json");
-  if (existsSync(mcpConfigPath)) {
+  if (botConfig.toolsDisabled) {
+    // `--tools ""` removes every built-in; --strict-mcp-config with no
+    // --mcp-config removes every MCP server, including the user-global ones
+    // (IDE, peer messaging, claude.ai connectors) the CLI discovers on its own.
+    args.push("--tools", "", "--strict-mcp-config");
+  } else if (existsSync(mcpConfigPath)) {
     args.push("--mcp-config", mcpConfigPath);
     // Pre-flight: warn if a *critical* MCP server is down (cached probe).
     await preflightMcpForRequest(botConfig, onProgress);

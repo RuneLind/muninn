@@ -1,4 +1,7 @@
 import { test, expect, describe, mock, spyOn, afterEach } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // Mock parseClaudeOutput to avoid needing real Claude output
 mock.module("./result-parser.ts", () => ({
@@ -209,5 +212,37 @@ describe("executeClaudePrompt", () => {
     expect(typeof result.startupMs).toBe("number");
 
     spawnSpy.mockRestore();
+  });
+
+  test("toolsDisabled spawns with no built-in tools and no MCP servers at all", async () => {
+    // A bot dir WITH a .mcp.json: the flag must win over it, and --strict-mcp-config
+    // is what also keeps the CLI's user-global servers out.
+    const dir = mkdtempSync(join(tmpdir(), "executor-fence-"));
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "x" } } }));
+    const spawnSpy = spyOn(Bun, "spawn");
+    spawnSpy.mockReturnValueOnce({
+      pid: 123,
+      stdout: new Response(JSON.stringify({ result: "ok" })).body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(0),
+      kill: mock(),
+    } as any);
+
+    try {
+      const config = { claudeModel: "sonnet", claudeTimeoutMs: 30000 } as any;
+      await executeClaudePrompt("test", config, { name: "testbot", dir, toolsDisabled: true } as any);
+
+      const [args] = spawnSpy.mock.calls[0]! as unknown as [string[]];
+      expect(args).toContain("--strict-mcp-config");
+      expect(args).not.toContain("--mcp-config");
+      const i = args.indexOf("--tools");
+      expect(i).toBeGreaterThan(-1);
+      // `--tools ""` is the CLI's own spelling of "no built-in tools".
+      expect(args[i + 1]).toBe("");
+      expect(i).toBeLessThan(args.indexOf("--"));
+    } finally {
+      spawnSpy.mockRestore();
+      rmSync(dir, { recursive: true });
+    }
   });
 });

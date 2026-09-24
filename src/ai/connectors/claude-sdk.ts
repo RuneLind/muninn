@@ -97,7 +97,7 @@ export async function executePrompt(
   const model = botConfig.model ?? config.claudeModel;
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
 
-  const mcpServers = parseMcpConfig(botConfig.dir);
+  const mcpServers = botConfig.toolsDisabled ? {} : parseMcpConfig(botConfig.dir);
   const hasMcp = Object.keys(mcpServers).length > 0;
   const thinking = resolveThinking(botConfig.thinkingMaxTokens);
 
@@ -153,7 +153,10 @@ export async function executePrompt(
     // tools are available, use the `tools` option instead", sdk.d.ts). So the
     // allow-list maps to `tools` (the built-in base set; MCP tools are fenced
     // via excludedTools → disallowedTools). Empty/unset ⇒ full surface.
-    ...(botConfig.allowedTools?.length ? { tools: botConfig.allowedTools } : {}),
+    // toolsDisabled is the one way to say `tools: []` (no built-ins at all).
+    ...(botConfig.toolsDisabled
+      ? { tools: [] }
+      : botConfig.allowedTools?.length ? { tools: botConfig.allowedTools } : {}),
     ...(botConfig.excludedTools?.length ? { disallowedTools: botConfig.excludedTools } : {}),
   };
 
