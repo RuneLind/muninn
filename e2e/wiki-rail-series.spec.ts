@@ -352,6 +352,80 @@ test.describe("Wiki rail: a series Activity ranked", () => {
   });
 });
 
+/**
+ * The series RAIL as painted: every element of `#wikiList` from the series row
+ * on, with its `::after` — whether it draws one, in which colour, how far from
+ * its bottom edge, and the gap to the element before it. A run is the series
+ * row plus the `.wiki-series-cont` siblings after it.
+ */
+async function railRun(page: Page, groupKey: string) {
+  // Off the rail first: a hovered member lightens its own segment, and the
+  // pointer is left on one after a click on `+N more`.
+  await page.mouse.move(0, 0);
+  return page.evaluate((key: string) => {
+    const kids = Array.from(document.querySelectorAll("#wikiList > *"));
+    const start = kids.findIndex((el) => el.getAttribute("data-group") === key);
+    return kids.slice(start, start + 12).map((el, i, arr) => {
+      const after = getComputedStyle(el, "::after");
+      const r = el.getBoundingClientRect();
+      const prev = i > 0 ? arr[i - 1]!.getBoundingClientRect() : null;
+      return {
+        cont: el.classList.contains("wiki-series-cont"),
+        drawn: after.content !== "none" && after.content !== "normal",
+        colour: after.backgroundColor,
+        bottom: after.bottom,
+        gap: prev ? r.top - prev.bottom : 0,
+      };
+    });
+  }, groupKey);
+}
+
+test.describe("Wiki rail: the series rail", () => {
+  // The rows are flat siblings, so the rail is one pseudo-element per row and
+  // it only reads as ONE line if every row of the run draws it, flush with the
+  // next, and the row after the run does not.
+  const checkRun = (run: Awaited<ReturnType<typeof railRun>>, length: number) => {
+    const inRun = run.slice(0, length);
+    expect(inRun.slice(1).every((r) => r.cont)).toBe(true);
+    for (const r of inRun) expect(r.drawn).toBe(true);
+    expect(new Set(inRun.map((r) => r.colour)).size).toBe(1);
+    for (const r of inRun.slice(1)) expect(Math.abs(r.gap)).toBeLessThan(0.5);
+    // Capped on the last row of the run and nowhere before it.
+    expect(inRun.slice(0, -1).map((r) => r.bottom)).toEqual(inRun.slice(0, -1).map(() => "0px"));
+    expect(inRun.at(-1)!.bottom).toBe("4px");
+    // …and the row after the run is outside it.
+    const next = run[length];
+    if (next) {
+      expect(next.cont).toBe(false);
+      expect(next.drawn && next.colour === inRun[0]!.colour).toBe(false);
+    }
+  };
+
+  test("runs from an Activity series row through its peek and `+N more`, then stops", async ({ page }) => {
+    await openWiki(page, WIKI3);
+    await expect(page.locator(".wiki-list-more")).toHaveText("+3 more");
+    // Series row, the peeked members, `+N more`.
+    const closed = await railRun(page, ACT_KEY);
+    const closedLen = closed.findIndex((r, i) => i > 0 && !r.cont);
+    expect(closedLen).toBeGreaterThan(2);
+    checkRun(closed, closedLen);
+
+    await page.locator(".wiki-list-more").click();
+    await expect(page.locator(".wiki-list-more")).toHaveCount(0);
+    const open = await railRun(page, ACT_KEY);
+    const openLen = open.findIndex((r, i) => i > 0 && !r.cont);
+    checkRun(open, openLen === -1 ? open.length : openLen);
+  });
+
+  test("a FOLDED series row caps its own rail", async ({ page }) => {
+    await openRail(page);
+    const run = await railRun(page, SERIES_KEY);
+    expect(run[0]!.drawn).toBe(true);
+    expect(run[0]!.bottom).toBe("4px");
+    expect(run[1]?.cont ?? false).toBe(false);
+  });
+});
+
 test.describe("Wiki rail: series", () => {
   test("ONE series row, always on — no toggle, no query", async ({ page }) => {
     await openRail(page);
@@ -360,7 +434,7 @@ test.describe("Wiki rail: series", () => {
     await expect(page.locator("#wikiGroupFamilies")).not.toBeChecked();
     await expect(page.locator(".wiki-list-group")).toHaveCount(1);
     await expect(seriesRow(page).locator(".wiki-group-label")).toContainText(LABEL);
-    await expect(seriesRow(page).locator(".wiki-fold-chip-label")).toHaveText(ROLLUP);
+    await expect(seriesRow(page).locator(".wiki-group-rollup")).toHaveText(ROLLUP);
     await expect(seriesFold(page)).toHaveAttribute("aria-expanded", "false");
     // Closed by default: the four members are off the list…
     const rel = await relPaths(page);
@@ -442,8 +516,8 @@ test.describe("Wiki rail: series", () => {
     const ghost = page.locator(`.wiki-list-ghost[data-ghost-relpath="${FAM_MEMBER}"]`);
     await expect(ghost).toHaveCount(1);
     await expect(ghost).toContainText("pinned above");
-    // The chip still counts it: the census is a fact about the series.
-    await expect(seriesRow(page).locator(".wiki-fold-chip-label")).toHaveText(ROLLUP);
+    // The roll-up still counts it: the census is a fact about the series.
+    await expect(seriesRow(page).locator(".wiki-group-rollup")).toHaveText(ROLLUP);
     // And the page is counted ONCE.
     expect(await countText(page)).toBe(`${ALL_PAGES} / ${ALL_PAGES}`);
     await page.evaluate((key: string) => localStorage.removeItem(key), PINS_KEY_PREFIX + WIKI);
@@ -554,24 +628,29 @@ test.describe("Wiki rail: series", () => {
     await expect(page.locator(".wiki-series-head")).toHaveCount(0);
   });
 
-  test("an over-long series label ELLIPSIZES rather than spilling the row", async ({ page }) => {
+  test("an over-long series label CLAMPS at two lines rather than spilling the row", async ({ page }) => {
     await page.setViewportSize({ width: 1400, height: 900 });
     await openWiki(page, WIKI2);
     await setRailWidth(page, RAIL_WIDTH_MIN);
     await openWiki(page, WIKI2);
     const name = groupRow(page, "series:orphan").locator(".wiki-group-name");
     await expect(name).toHaveText(ORPHAN_LABEL);
-    // The clip belongs to the NAME, not to the label box around it: as an inline
-    // span it had no box of its own to ellipsize in, which is both halves of
-    // what `display: block` buys here — a `clientWidth`/`scrollWidth` pair that
-    // is not 0/0, and the ellipsis actually applying.
-    const fit = await name.evaluate((el) => ({
-      overflow: getComputedStyle(el).textOverflow,
-      client: el.clientWidth,
-      scroll: el.scrollWidth,
-    }));
-    expect(fit.overflow).toBe("ellipsis");
-    expect(fit.client).toBeGreaterThan(0);
+    // The name has the whole row now that the roll-up is on its own line, so it
+    // wraps like a page title and clips at the second line. The HEIGHT is the
+    // proof: Chromium reports this box's display as \`flow-root\`, not
+    // \`-webkit-box\`, so the computed styles alone say little.
+    const fit = await name.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return {
+        clamp: cs.webkitLineClamp,
+        lineHeight: parseFloat(cs.lineHeight),
+        client: el.clientHeight,
+        scroll: el.scrollHeight,
+      };
+    });
+    expect(fit.clamp).toBe("2");
+    expect(fit.client).toBeGreaterThan(1.5 * fit.lineHeight);
+    expect(fit.client).toBeLessThanOrEqual(2 * fit.lineHeight + 1);
     expect(fit.scroll).toBeGreaterThan(fit.client);
   });
 
@@ -587,16 +666,15 @@ test.describe("Wiki rail: series", () => {
     await expect(row(page, FAM_MEMBER)).toHaveClass(/member/);
   });
 
-  test("the accent rule costs the series row no width — its mid matches a family's", async ({
+  test("the accent rail costs the series row no width — its mid matches a family's", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1400, height: 900 });
     await openRail(page);
     await page.locator("#wikiGroupFamilies").check();
     await expect(groupRow(page, "family:plans/other-slate")).toHaveCount(1);
-    // `.wiki-list-mid` is what `RAIL_GROUP_CHIP_SWITCH`'s container query
-    // measures, so a 2px difference moves the chip's breakpoint on series rows
-    // alone — the 2px border is paid back out of the fold's own left padding.
+    // The rail is an absolute pseudo-element, not a border, so the series row's
+    // `.wiki-list-mid` is exactly a family row's — a border here cost 2px.
     const mids = await page.evaluate(() => {
       const mid = (el: Element) =>
         (el.querySelector(".wiki-list-mid") as HTMLElement).getBoundingClientRect().width;
@@ -636,7 +714,7 @@ test.describe("Wiki rail: series", () => {
   // themes, because the label beside it is what ate the width.
   for (const scheme of ["light", "dark"] as const) {
     for (const width of [RAIL_WIDTH_DEFAULT, RAIL_WIDTH_MIN]) {
-      test(`the \`N of M shown\` census is fully visible at ${width}px, ${scheme}`, async ({
+      test(`the roll-up and the \`N of M shown\` census are fully visible at ${width}px, ${scheme}`, async ({
         page,
       }) => {
         await page.setViewportSize({ width: 1400, height: 900 });
@@ -645,36 +723,38 @@ test.describe("Wiki rail: series", () => {
         await setRailWidth(page, width);
         await openRail(page);
         await selectFolder(page, "plans");
-        const sub = seriesRow(page).locator(".wiki-group-sub");
-        await expect(sub).toHaveText("3 of 4 shown");
-        // ⚠️ `clientWidth`/`scrollWidth` alone CANNOT see this failure: the
-        // shipped census was an INLINE `<small>`, whose two are both 0, so the
-        // check passed on an element painting 15px of its 65. What it was
-        // clipped by is an ANCESTOR's overflow, so the measurement has to walk
-        // up to every clipping box and intersect.
-        const fit = await sub.evaluate((el) => {
-          const rect = el.getBoundingClientRect();
-          let clipLeft = -Infinity;
-          let clipRight = Infinity;
-          for (let n = el.parentElement; n; n = n.parentElement) {
-            if (getComputedStyle(n).overflowX === "visible") continue;
-            const r = n.getBoundingClientRect();
-            clipLeft = Math.max(clipLeft, r.left);
-            clipRight = Math.min(clipRight, r.right);
-          }
-          return {
-            natural: rect.width,
-            visible: Math.max(0, Math.min(rect.right, clipRight) - Math.max(rect.left, clipLeft)),
-            client: el.clientWidth,
-            scroll: el.scrollWidth,
-          };
-        });
-        expect(fit.natural).toBeGreaterThan(0);
-        // Every pixel the census lays out is a pixel that gets painted…
-        expect(fit.visible).toBeGreaterThanOrEqual(fit.natural - 0.5);
-        // …and its own box does not ellipsize the words either.
-        expect(fit.client).toBeGreaterThanOrEqual(fit.scroll);
-        expect(await contrastOf(sub)).toBeGreaterThanOrEqual(4.5);
+        await expect(seriesRow(page).locator(".wiki-group-sub")).toHaveText("3 of 4 shown");
+        for (const sel of [".wiki-group-sub", ".wiki-group-rollup"]) {
+          const sub = seriesRow(page).locator(sel);
+          // ⚠️ `clientWidth`/`scrollWidth` alone CANNOT see this failure: the
+          // shipped census was an INLINE `<small>`, whose two are both 0, so the
+          // check passed on an element painting 15px of its 65. What it was
+          // clipped by is an ANCESTOR's overflow, so the measurement has to walk
+          // up to every clipping box and intersect.
+          const fit = await sub.evaluate((el) => {
+            const rect = el.getBoundingClientRect();
+            let clipLeft = -Infinity;
+            let clipRight = Infinity;
+            for (let n = el.parentElement; n; n = n.parentElement) {
+              if (getComputedStyle(n).overflowX === "visible") continue;
+              const r = n.getBoundingClientRect();
+              clipLeft = Math.max(clipLeft, r.left);
+              clipRight = Math.min(clipRight, r.right);
+            }
+            return {
+              natural: rect.width,
+              visible: Math.max(0, Math.min(rect.right, clipRight) - Math.max(rect.left, clipLeft)),
+              client: el.clientWidth,
+              scroll: el.scrollWidth,
+            };
+          });
+          expect(fit.natural).toBeGreaterThan(0);
+          // Every pixel the census lays out is a pixel that gets painted…
+          expect(fit.visible).toBeGreaterThanOrEqual(fit.natural - 0.5);
+          // …and its own box does not ellipsize the words either.
+          expect(fit.client).toBeGreaterThanOrEqual(fit.scroll);
+          expect(await contrastOf(sub)).toBeGreaterThanOrEqual(4.5);
+        }
       });
     }
   }
@@ -694,9 +774,14 @@ test.describe("Wiki rail: series", () => {
       expect(await contrastOf(seriesRow(page).locator(".wiki-group-sub"))).toBeGreaterThanOrEqual(
         4.5,
       );
-      expect(
-        await contrastOf(seriesRow(page).locator(".wiki-fold-chip-label")),
-      ).toBeGreaterThanOrEqual(4.5);
+      // The roll-up line, and each count in it: the live statuses carry colours
+      // of their own, so the line's colour alone would not see a failing part.
+      expect(await contrastOf(seriesRow(page).locator(".wiki-group-rollup"))).toBeGreaterThanOrEqual(
+        4.5,
+      );
+      for (const part of await seriesRow(page).locator(".wiki-rollup-part").all()) {
+        expect(await contrastOf(part)).toBeGreaterThanOrEqual(4.5);
+      }
       // …and in the state the reader clicks it in: hovered, which paints a
       // background of its own behind the transparent chip.
       await seriesRow(page).locator(".wiki-group-label").hover();

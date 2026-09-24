@@ -1321,15 +1321,19 @@ export function isMonthGrouping(groups: readonly RailGroup[]): boolean {
  * The COMPACT form is the counts alone, in the same order and with the same
  * separator, for the chip's container-query swap (`wiki-rail-width.ts`): the
  * words are moved to the hover at narrow rails, never dropped.
+ *
+ * `parts` is the label unjoined, for a series row, which draws the roll-up as
+ * its own line with each status coloured rather than as a chip.
  */
 export function groupRollup(
   kind: RailGroupKind,
   members: readonly WikiListing[],
   supersededChildren: readonly WikiListing[] = [],
-): { label: string; compact: string; wide: boolean } {
+): { label: string; compact: string; wide: boolean; parts: { n: number; word: string }[] } {
   if (kind === "month") {
     const n = members.length;
-    return { label: n + " page" + (n === 1 ? "" : "s"), compact: String(n), wide: false };
+    const word = "page" + (n === 1 ? "" : "s");
+    return { label: n + " " + word, compact: String(n), wide: false, parts: [{ n, word }] };
   }
   const counts = new Map<string, number>();
   for (const p of [...members, ...supersededChildren]) {
@@ -1347,9 +1351,11 @@ export function groupRollup(
     return (ia === -1 ? STATUS_ORDER.length : ia) - (ib === -1 ? STATUS_ORDER.length : ib) ||
       a.localeCompare(b);
   });
+  const parts = order.map((word) => ({ n: counts.get(word)!, word }));
   return {
-    label: order.map((s) => counts.get(s) + " " + s).join(" · "),
-    compact: order.map((s) => String(counts.get(s))).join(" · "),
+    label: parts.map((p) => p.n + " " + p.word).join(" · "),
+    compact: parts.map((p) => String(p.n)).join(" · "),
     wide: order.length > 1,
+    parts,
   };
 }

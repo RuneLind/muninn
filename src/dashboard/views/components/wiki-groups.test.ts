@@ -462,6 +462,11 @@ describe("groupRollup", () => {
       label: "1 ready · 9 shipped · 1 superseded",
       compact: "1 · 9 · 1",
       wide: true,
+      parts: [
+        { n: 1, word: "ready" },
+        { n: 9, word: "shipped" },
+        { n: 1, word: "superseded" },
+      ],
     });
   });
 
@@ -476,6 +481,10 @@ describe("groupRollup", () => {
       label: `1 shipped · 2 ${NO_STATUS_WORD}`,
       compact: "1 · 2",
       wide: true,
+      parts: [
+        { n: 1, word: "shipped" },
+        { n: 2, word: NO_STATUS_WORD },
+      ],
     });
   });
 
@@ -484,6 +493,7 @@ describe("groupRollup", () => {
       label: "3 shipped",
       compact: "3",
       wide: false,
+      parts: [{ n: 3, word: "shipped" }],
     });
   });
 
@@ -493,6 +503,7 @@ describe("groupRollup", () => {
       label: "4 pages",
       compact: "4",
       wide: false,
+      parts: [{ n: 4, word: "pages" }],
     });
   });
 });

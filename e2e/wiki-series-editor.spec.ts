@@ -377,7 +377,7 @@ test.describe("edit series, from the reader header", () => {
     // And the rail's fold lost its blog: the roll-up counts the two plans left,
     // and the removed page is an ordinary row again rather than a member.
     await expect(
-      page.locator(`.wiki-list-group[data-group="${FOLD}"] .wiki-fold-chip-label`),
+      page.locator(`.wiki-list-group[data-group="${FOLD}"] .wiki-group-rollup`),
     ).toHaveText("1 in-flight · 1 shipped");
     await expect(row(page, BLOG)).not.toHaveClass(/member/);
   });
