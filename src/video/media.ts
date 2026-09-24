@@ -193,8 +193,16 @@ export function summarizeTimeoutFor(frameCount: number, floorMs: number): number
 }
 
 /**
- * Parse a single yt-dlp `--print-json` line into the fields we need. Returns
- * null for non-JSON lines (yt-dlp interleaves progress/warnings on stdout) or
+ * The yt-dlp `-O` template that prints ONLY the fields {@link parseYtDlpJson}
+ * reads, as one JSON line. Not `--dump-json`/`--print-json`: a YouTube info JSON
+ * measured 11.7 MB (2026-09-24, `vsGwx28z4jk`), past `runProc`'s 8 MB cap, and
+ * the capped read closes the pipe — yt-dlp then exits 1 with `Broken pipe`.
+ */
+export const YTDLP_INFO_TEMPLATE = "%(.{id,title,duration,uploader,webpage_url})j";
+
+/**
+ * Parse a single yt-dlp {@link YTDLP_INFO_TEMPLATE} line into the fields we need. Returns
+ * null for non-JSON lines (`-O` implies `--quiet`, but the scan stays tolerant) or
  * objects missing an `id`, so callers can scan every line for the first hit.
  */
 export function parseYtDlpJson(line: string): YtDlpInfo | null {
@@ -316,7 +324,10 @@ export function ytDlpDownloadArgs(
     "--no-playlist",
     "-o",
     join(workDir, "video.%(ext)s"),
-    "--print-json",
+    // `after_move:` prints once the file is in place and, unlike a bare -O,
+    // does not imply --simulate.
+    "-O",
+    `after_move:${YTDLP_INFO_TEMPLATE}`,
     "--break-match-filters",
     `duration <= ${opts.maxDurationSeconds}`,
     url,
@@ -331,7 +342,7 @@ export const PROBE_TIMEOUT_MS = 30_000;
  * {@link ytDlpDownloadArgs} is.
  */
 export function ytDlpProbeArgs(url: string): string[] {
-  return ["yt-dlp", "--dump-json", "--skip-download", "--no-playlist", url];
+  return ["yt-dlp", "-O", YTDLP_INFO_TEMPLATE, "--skip-download", "--no-playlist", url];
 }
 
 /**
@@ -340,7 +351,7 @@ export function ytDlpProbeArgs(url: string): string[] {
  *
  * The frames path needs the duration to size everything it is about to spend
  * (the cap, the frame budget, the download and summarize timeouts), and
- * `downloadVideo`'s own `--print-json` line arrives only AFTER the download it
+ * `downloadVideo`'s own info line arrives only AFTER the download it
  * is meant to bound. So this is a separate ~3 s call.
  *
  * `null` rather than a throw on every failure — a non-zero exit, an unparseable
@@ -388,7 +399,7 @@ export async function probeVideoInfo(
 /**
  * Download a video with yt-dlp into `workDir` (TikTok, X, or any yt-dlp-supported
  * host). Rejects videos longer than the duration cap pre-download (exit 101).
- * Returns the resolved on-disk path plus metadata from the `--print-json` output.
+ * Returns the resolved on-disk path plus metadata from the {@link YTDLP_INFO_TEMPLATE} line.
  */
 export async function downloadVideo(
   url: string,
@@ -413,7 +424,7 @@ export async function downloadVideo(
     );
   }
 
-  // Parse the info JSON from stdout (yt-dlp can interleave other lines).
+  // Parse the template's info line from stdout.
   let info: YtDlpInfo | null = null;
   for (const line of stdout.split("\n")) {
     const parsed = parseYtDlpJson(line);
@@ -426,8 +437,9 @@ export async function downloadVideo(
     throw new Error(`yt-dlp produced no parseable metadata JSON:\n${stdout.slice(0, 500)}`);
   }
 
-  // Resolve the actual file by globbing — don't trust `_filename` from the JSON
-  // (can be a pre-remux name; the `best` fallback can yield a non-mp4 container).
+  // Resolve the actual file by globbing — the template does not ask for
+  // `_filename`, which can be a pre-remux name anyway (and the `best` fallback
+  // can yield a non-mp4 container).
   // Prefer known video containers over a junk-suffix denylist, so intermediate
   // artifacts (`.part`, `.ytdl`, info `.json`, thumbnails) can't be picked up.
   const candidates = await globAbsolute(workDir, "video.*");

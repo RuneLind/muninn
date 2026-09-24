@@ -9,6 +9,7 @@ import {
   parseShowinfoTimestamps,
   ytDlpDownloadArgs,
   ytDlpProbeArgs,
+  YTDLP_INFO_TEMPLATE,
   YTDLP_FORMAT_SELECTOR,
 } from "./media.ts";
 
@@ -282,11 +283,41 @@ test("ytDlpDownloadArgs is byte-identical to the pre-`format` argv when no forma
     "--no-playlist",
     "-o",
     "/work/video.%(ext)s",
-    "--print-json",
+    "-O",
+    "after_move:%(.{id,title,duration,uploader,webpage_url})j",
     "--break-match-filters",
     "duration <= 3600",
     "https://x.test/v",
   ]);
+});
+
+test("neither yt-dlp argv asks for the full info JSON", () => {
+  // A YouTube info JSON measured 11.7 MB, past runProc's 8 MB cap: the capped
+  // read closed the pipe and yt-dlp exited 1 with `Broken pipe`, so the probe
+  // returned null (slides skipped) and the download threw.
+  for (const args of [
+    ytDlpProbeArgs("https://x.test/v"),
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 }),
+  ]) {
+    expect(args).not.toContain("--dump-json");
+    expect(args).not.toContain("--print-json");
+    expect(args).not.toContain("-j");
+    expect(args).not.toContain("-J");
+  }
+});
+
+test("the info template carries every field parseYtDlpJson reads", () => {
+  // The exact line yt-dlp 2026.08.19 printed for this template on a real video.
+  const line =
+    '{"id": "vsGwx28z4jk", "title": "T", "duration": 423, "uploader": "U", "webpage_url": "https://www.youtube.com/watch?v=vsGwx28z4jk"}';
+  expect(YTDLP_INFO_TEMPLATE).toBe("%(.{id,title,duration,uploader,webpage_url})j");
+  expect(parseYtDlpJson(line)).toEqual({
+    id: "vsGwx28z4jk",
+    title: "T",
+    duration: 423,
+    uploader: "U",
+    webpageUrl: "https://www.youtube.com/watch?v=vsGwx28z4jk",
+  });
 });
 
 test("ytDlpDownloadArgs puts a caller's format in -f and changes nothing else", () => {
@@ -315,7 +346,8 @@ test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () =>
   // playlist's worth of JSON.
   expect(ytDlpProbeArgs("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toEqual([
     "yt-dlp",
-    "--dump-json",
+    "-O",
+    "%(.{id,title,duration,uploader,webpage_url})j",
     "--skip-download",
     "--no-playlist",
     "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
