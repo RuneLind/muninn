@@ -296,7 +296,7 @@ export interface SummarizeVideoOptions {
  * yt-dlp PROBE, because nothing else in the process knows how long the video is
  * — not the route, not the job, not huginn's transcript endpoint — and the
  * duration is what the 3 h cap, the frame budget, the download budget and the
- * summarize budget are all sized from. `downloadVideo`'s own `--print-json`
+ * summarize budget are all sized from. `downloadVideo`'s own info
  * line arrives after the download it would have to bound.
  *
  * Every frames failure — a probe that says nothing, a live stream, yt-dlp rot,
