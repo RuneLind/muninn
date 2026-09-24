@@ -38,6 +38,7 @@ import {
   parseWikiSortMode,
   resolveSortMode,
   workedSourceOf,
+  workedChip,
   CHANGED_SINCE_MIN_MS,
   pageFolder,
   pageFollowups,
@@ -1707,4 +1708,30 @@ test("resolveSortMode: worked never survives a wiki the ledger covers nothing on
   // Stored worked, coverage not known yet: the hidden option is not selected early.
   expect(resolveSortMode({ current: "updated", stored: "worked", touched: false, workedShown: null })).toBe("updated");
   expect(resolveSortMode({ current: "updated", stored: "worked", touched: false, workedShown: true })).toBe("worked");
+});
+
+test("workedChip: class and hover per source, and none outside the worked axis", () => {
+  expect(workedChip(null, "2026-09-19")).toEqual({ cls: "", title: "2026-09-19" });
+  expect(workedChip({ kind: "worked", worked: "2026-09-19" }, "2026-09-19")).toEqual({
+    cls: " worked",
+    title: "2026-09-19 (worked)",
+  });
+  expect(
+    workedChip({ kind: "worked", worked: "2026-09-16", changedSince: "2026-09-21" }, "2026-09-16"),
+  ).toEqual({
+    cls: " worked changed-since",
+    title: "2026-09-16 (worked)\nchanged 2026-09-21, no session write recorded",
+  });
+  expect(workedChip({ kind: "fallback" }, "2026-09-21", "updated")).toEqual({
+    cls: " fallback",
+    title: "2026-09-21 (updated — no session write recorded)",
+  });
+});
+
+test("workedChip: a fallback onto the CREATION date says added, never updated", () => {
+  // A sweep-only page falls back to the git floor, and calling that an update
+  // is the claim `pageDateKind` exists to refuse.
+  expect(workedChip({ kind: "fallback" }, "2024-03-01", "added").title).toBe(
+    "2024-03-01 (added — no session write recorded)",
+  );
 });

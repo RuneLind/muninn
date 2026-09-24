@@ -751,7 +751,7 @@ export async function renderWikiPage(opts?: {
        (the hover says so). Colour is never the only cue. An amber dot after a
        worked date = changed since, with no ledger row. */
     .wiki-list-meta.worked { color: var(--worked-ink); font-weight: 600; }
-    .wiki-list-meta.fallback { text-decoration: underline dotted; text-underline-offset: 2px; }
+    .wiki-list-meta.fallback { text-decoration: underline dotted var(--text-muted); text-underline-offset: 2px; }
     .wiki-list-meta.changed-since::after { content: "•"; color: var(--changed-ink); margin-left: 2px; }
 
     /* Neutral default so a custom type (no dedicated type-* rule) still shows a
@@ -1063,8 +1063,8 @@ export async function renderWikiPage(opts?: {
     .wiki-bc-date { color: var(--text-dim); flex-shrink: 0; }
     .wiki-bc-worked { color: var(--worked-ink); font-weight: 600; }
     .wiki-bc-changed { color: var(--changed-ink); }
-    .wiki-bc-fallback { text-decoration: underline dotted; text-underline-offset: 2px; }
-    .wiki-bc-nosession { font-style: italic; color: var(--text-faint); }
+    .wiki-bc-fallback { text-decoration: underline dotted var(--text-muted); text-underline-offset: 2px; }
+    .wiki-bc-nosession { font-style: italic; color: var(--text-muted); }
     .wiki-bc-explain {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
       background: var(--accent); color: #fff;

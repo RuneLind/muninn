@@ -443,7 +443,7 @@ test.describe("Wiki reader: worked-on recency", () => {
     // would be a worked date this page never earned.
     await expect(metaOf(BULK_REL)).toHaveAttribute(
       "title",
-      `${SHARED_UPDATED} (updated — no session recorded)`,
+      `${SHARED_UPDATED} (updated — no session write recorded)`,
     );
     await expect(metaOf(BULK_REL)).not.toHaveAttribute("title", /\(worked\)$/);
 
@@ -509,10 +509,10 @@ test.describe("Wiki reader: worked-on recency", () => {
       await expect(metaOf(MARK_CHANGED)).toHaveClass(/\bworked\b.*\bchanged-since\b/);
       await expect(metaOf(MARK_CHANGED)).toHaveAttribute(
         "title",
-        "2025-01-01 (worked)\nchanged 2025-06-01, no session recorded",
+        "2025-01-01 (worked)\nchanged 2025-06-01, no session write recorded",
       );
       await expect(metaOf(MARK_NONE)).toHaveClass(/\bfallback\b/);
-      await expect(metaOf(MARK_NONE)).toHaveAttribute("title", "2025-03-01 (updated — no session recorded)");
+      await expect(metaOf(MARK_NONE)).toHaveAttribute("title", "2025-03-01 (updated — no session write recorded)");
 
       const tokens = await page.evaluate(() => {
         const read = (v: string) => {
@@ -569,6 +569,16 @@ test.describe("Wiki reader: worked-on recency", () => {
     await expect(date.locator(".wiki-bc-worked")).toHaveCount(0);
     await expect(date.locator(".wiki-bc-fallback")).toHaveText("updated 2025-03-01");
     await expect(date.locator(".wiki-bc-nosession")).toHaveText("no session");
+    // Readable, not faint: --text-faint measures ~2.3:1 on the header ground.
+    const [note, muted] = await date.locator(".wiki-bc-nosession").evaluate((e) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--text-muted)";
+      document.body.appendChild(probe);
+      const m = getComputedStyle(probe).color;
+      probe.remove();
+      return [getComputedStyle(e).color, m];
+    });
+    expect(note).toBe(muted);
   });
 
   test("acceptance 8 — the Series section orders by each group's worked day", async ({ page }) => {

@@ -1301,8 +1301,9 @@ the light values of `--status-cyan`/`--status-warning` measure under AA at
 10.5px (3.68:1, 3.19:1 on white).
 
 **In worked mode the row's hover names the signal** (`2026-07-02 (worked)` /
-`2024-03-01 (updated — no session recorded)`, plus a `changed <day>, no session
-recorded` line on a changed-since row), because the axis is sparse by
+`2024-03-01 (updated — no session write recorded)`, `(added — …)` when the
+fallback is a sweep-only page's creation date, plus a `changed <day>, no session
+write recorded` line on a changed-since row — all from the pure `workedChip`), because the axis is sparse by
 construction and a bare day would claim a worked date an uncovered page never
 got. The suffix goes on the `title=` ONLY: `formatRailAge` reads the label as a
 BARE day and would fall back to the stamp's local day for a decorated one,

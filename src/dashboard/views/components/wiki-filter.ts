@@ -234,7 +234,9 @@ export function sanitizeColorToken(value: unknown): string | undefined {
  *  collide with it, so it doubles as a selectable value in the folder picker. */
 export const ROOT_FOLDER = "/";
 
-export type WikiSortMode = "updated" | "created" | "worked" | "backlinks" | "title";
+const SORT_MODES = ["updated", "created", "worked", "backlinks", "title"] as const;
+
+export type WikiSortMode = (typeof SORT_MODES)[number];
 
 /** The three modes that order by a DATE — the subset {@link recencyKeyFor} and
  *  {@link recencyKindFor} are total over. */
@@ -252,8 +254,6 @@ export type WikiRecencySort = Extract<WikiSortMode, "updated" | "created" | "wor
 export function isRecencySort(mode: WikiSortMode): mode is WikiRecencySort {
   return mode === "updated" || mode === "created" || mode === "worked";
 }
-
-const SORT_MODES: readonly WikiSortMode[] = ["updated", "created", "worked", "backlinks", "title"];
 
 /** A stored sort value, validated — a key from an older build, or one edited by
  *  hand, is `null` rather than a mode the select has no option for. */
@@ -761,10 +761,16 @@ export function pageHeaderDates(
     }
   }
   const updated = pageDateLabel(p, now);
-  const noSession = opts.ledger ? { noSession: true } : {};
-  if (pageDateKind(p, now) === "added") return created ? { created, ...noSession } : { ...noSession };
-  if (!created) return updated ? { updated, ...noSession } : { ...noSession };
-  return created === updated ? { created, ...noSession } : { created, updated, ...noSession };
+  const out: WikiHeaderDates =
+    pageDateKind(p, now) === "added"
+      ? created ? { created } : {}
+      : !created
+        ? updated ? { updated } : {}
+        : created === updated
+          ? { created }
+          : { created, updated };
+  if (opts.ledger) out.noSession = true;
+  return out;
 }
 
 /**
@@ -782,6 +788,29 @@ export interface WikiHeaderDates {
   changedSince?: boolean;
   /** No session in the ledger wrote this page: `updated` is the fallback. */
   noSession?: boolean;
+}
+
+/**
+ * The rail chip's extra class and hover for a date's source; `null` (a mode that
+ * answers one question) adds nothing. `fallbackKind` is the fallback date's own
+ * kind, so a sweep-only page's creation date is never called an update.
+ */
+export function workedChip(
+  source: WorkedSource | null,
+  fullDate: string,
+  fallbackKind: "updated" | "added" = "updated",
+): { cls: string; title: string } {
+  if (!source) return { cls: "", title: fullDate };
+  if (source.kind === "fallback") {
+    return { cls: " fallback", title: `${fullDate} (${fallbackKind} — no session write recorded)` };
+  }
+  if (source.changedSince) {
+    return {
+      cls: " worked changed-since",
+      title: `${fullDate} (worked)\nchanged ${source.changedSince}, no session write recorded`,
+    };
+  }
+  return { cls: " worked", title: `${fullDate} (worked)` };
 }
 
 /**
@@ -803,11 +832,14 @@ export const CHANGED_SINCE_MIN_MS = 24 * 60 * 60 * 1000;
  *  - `fallback` — no usable ledger row, so any worked-on date shown for it is the
  *    update signal.
  */
+export type WorkedSource = { kind: "worked"; worked: string; changedSince?: string } | { kind: "fallback" };
+
 export function workedSourceOf(
   p: WikiRecencyFields,
   now: number,
-): { kind: "worked"; worked: string; changedSince?: string } | { kind: "fallback" } {
-  const signal = workedSignal(p, now);
+  // The row already holds this signal; passing it keeps one derivation per row.
+  signal: { ms: number; label: string; kind: WikiDateKind } = workedSignal(p, now),
+): WorkedSource {
   if (signal.kind !== "worked") return { kind: "fallback" };
   const updated = updatedSignal(p, now);
   if (updated.kind === "updated" && updated.ms - signal.ms > CHANGED_SINCE_MIN_MS && updated.label > signal.label) {

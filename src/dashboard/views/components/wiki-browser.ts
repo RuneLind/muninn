@@ -255,6 +255,9 @@ import {
   recencyKindFor,
   resolveSortMode,
   workedSourceOf,
+  workedChip,
+  isUsableWorkedMs,
+  type WorkedSource,
   pageDateLabel,
   pageDateSignal,
   pageHeaderDates,
@@ -1380,32 +1383,21 @@ function renderList(): void {
     // decorated one, which shifts a frontmatter date west of UTC.
     // Where a worked-on date came from, marked on the chip: a session wrote it
     // (`worked`, and `changed-since` when a change landed after that session with
-    // no ledger row) or no session did (`fallback` — the update date). An
-    // Activity "changed" row on a wiki whose worked gate is open is a fallback
-    // too when the ledger has no row for the page — the one case its update
-    // date stands in for a worked day.
-    const source =
+    // no ledger row) or no session did (`fallback`). An Activity "changed" row on
+    // a wiki whose worked gate is open is a fallback too when the ledger has no
+    // usable row for the page — the one case its update date stands in for a
+    // worked day.
+    const source: WorkedSource | null =
       signal === "worked" && dateSignal
         ? dateSignal.kind === "worked"
-          ? workedSourceOf(p, now)
-          : ({ kind: "fallback" } as const)
-        : entry.activity?.kind === "changed" && workedGate?.open && workedSourceOf(p, now).kind === "fallback"
-          ? ({ kind: "fallback" } as const)
+          ? workedSourceOf(p, now, dateSignal)
+          : { kind: "fallback" }
+        : entry.activity?.kind === "changed" && workedGate?.open && !isUsableWorkedMs(p.workedMs, now)
+          ? { kind: "fallback" }
           : null;
-    const metaClass = !source
-      ? ""
-      : source.kind === "fallback"
-        ? " fallback"
-        : source.changedSince
-          ? " worked changed-since"
-          : " worked";
-    const dateTitle = !source
-      ? fullDate
-      : source.kind === "fallback"
-        ? `${fullDate} (updated — no session recorded)`
-        : source.changedSince
-          ? `${fullDate} (worked)\nchanged ${source.changedSince}, no session recorded`
-          : `${fullDate} (worked)`;
+    const chip = workedChip(source, fullDate, dateSignal?.kind === "added" ? "added" : "updated");
+    const metaClass = chip.cls;
+    const dateTitle = chip.title;
     // Every rail row shows a COMPACT age (`formatRailAge`, whose docblock has the
     // why), the backlinks sort its link count instead.
     const meta = signal === null ? p.backlinkCount + " ←" : formatRailAge(stampMs, now, fullDate);
@@ -1942,7 +1934,8 @@ function toggleProvChain(btn: HTMLButtonElement): void {
 const WORKED_SLOT_TITLE = "The day an agent session last wrote this page (claude-usage's session ledger)";
 const CHANGED_SINCE_TITLE =
   "Changed after the last session by something the ledger does not record: a hand edit, a script, a lint or sync commit";
-const NO_SESSION_TITLE = "No agent session in the ledger wrote this page. The date is the file's last update.";
+const NO_SESSION_TITLE =
+  "No agent session write is recorded for this page (bulk passes are not counted). The date is the file's own.";
 function renderBreadcrumb(m: WikiListing): void {
   const el = document.getElementById("wikiBreadcrumb");
   // Navigating to a DIFFERENT page invalidates an open article popover: it still
