@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { clauseBoundaries, inferJiraIssues, titleKeys } from "./jira.ts";
+import { clauseBoundaries, inferJiraIssues, stampedKeys, stemKeys, titleKeys } from "./jira.ts";
 import { inferIssues, isPlanTitle, parseTrackersConfig } from "./index.ts";
 import type { IssueRef, TrackerConfig, TrackerPage } from "./types.ts";
 
@@ -236,12 +236,15 @@ describe("fix round 1: key shapes that are not keys", () => {
     expect(stamped(["demo-103", " DEMO-104 "])).toEqual({ "DEMO-103": ["stamped"], "DEMO-104": ["stamped"] });
   });
 
-  test("a title shorthand needs the base key's digit count and no word after it", () => {
+  test("a title shorthand needs the base key's digit count and to sit within 1000 of it", () => {
     expect(titleKeys("DEMO-145/2026 rapport", CONFIG)).toEqual(["DEMO-145"]);
     // The digit count alone: nothing but punctuation follows the year.
     expect(titleKeys("DEMO-145/2026 — rapport", CONFIG)).toEqual(["DEMO-145"]);
-    expect(titleKeys("DEMO-145 + 300 saker", CONFIG)).toEqual(["DEMO-145"]);
+    // Same width, more than 1000 away: a year, not a key.
+    expect(titleKeys("DEMO-8045/2026", CONFIG)).toEqual(["DEMO-8045"]);
     expect(titleKeys("DEMO-8045 + 2025-kjøringen", CONFIG)).toEqual(["DEMO-8045"]);
+    // The accepted residual: a same-width count within 1000 still chains.
+    expect(titleKeys("DEMO-145 + 300 saker", CONFIG)).toEqual(["DEMO-145", "DEMO-300"]);
     // The real forms.
     expect(titleKeys("DEMO-7588/7969 — Nullable sats", CONFIG)).toEqual(["DEMO-7588", "DEMO-7969"]);
     expect(titleKeys("DEMO-8045/8174 — plan for PR-splitt", CONFIG)).toEqual(["DEMO-8045", "DEMO-8174"]);
@@ -322,5 +325,39 @@ describe("fix round 1: key shapes that are not keys", () => {
     const t0 = performance.now();
     inferJiraIssues(page({ body: "opprettet: " + line }), CONFIG);
     expect(performance.now() - t0).toBeLessThan(1000);
+  });
+});
+
+describe("fix round 2", () => {
+  test("a title shorthand chains when a word follows it (N1)", () => {
+    expect(titleKeys("DEMO-7588/7969 Nullable sats", CONFIG)).toEqual(["DEMO-7588", "DEMO-7969"]);
+    expect(titleKeys("DEMO-7588 + 7969 implementeringsplan", CONFIG)).toEqual(["DEMO-7588", "DEMO-7969"]);
+    expect(titleKeys("DEMO-7588/7969 og DEMO-8000", CONFIG)).toEqual(["DEMO-7588", "DEMO-7969", "DEMO-8000"]);
+  });
+
+  test("a chained number with a leading zero ends the chain (N3b)", () => {
+    expect(titleKeys("DEMO-145/045", CONFIG)).toEqual(["DEMO-145"]);
+    expect(stemKeys("x-demo-145-045-y", CONFIG)).toEqual([]);
+  });
+
+  test("a browse link ends like every other rule (N2)", () => {
+    for (const k of ["DEMO-12-3", "DEMO-77abc"]) {
+      const body = `Opprettet: [x](${url(k)})`;
+      expect({ k, rels: rels(inferJiraIssues(page({ body }), CONFIG)) }).toEqual({ k, rels: {} });
+    }
+  });
+
+  test("the scan flags carry no `u`: the long s does not fold into a project letter (N3a)", () => {
+    const demos = parseTrackersConfig([{ id: "jira", projects: ["DEMOS"] }], () => {
+      throw new Error("must parse clean");
+    })[0]!;
+    expect(stemKeys("demos-12-notes", demos)).toEqual(["DEMOS-12"]);
+    expect(stemKeys("demo\u017F-12-notes", demos)).toEqual([]);
+  });
+
+  test("a stamped exact key must be ASCII before it is uppercased (N3c)", () => {
+    expect(stampedKeys(["demo\u017F-12"])).toEqual([]); // LATIN SMALL LETTER LONG S → S
+    expect(stampedKeys(["d\u0131ag-12"])).toEqual([]); // LATIN SMALL LETTER DOTLESS I → I
+    expect(stampedKeys(["demos-12"])).toEqual(["DEMOS-12"]);
   });
 });

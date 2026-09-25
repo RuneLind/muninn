@@ -41,11 +41,24 @@ export function issueRefInferred(ref: ListingIssueRef): boolean {
   return ref.relations[0] !== "stamped";
 }
 
-/** `Jira DEMO-104 — inferred (title)`, or `… — stamped`. */
+/** `Jira DEMO-104 — inferred (title)`, `… — stamped`, or `… — stamped (also
+ *  title)`: every relation the key has, not only the strongest. */
 function pillTitle(ref: ListingIssueRef, label: string): string {
   const name = label ? `${label} ${ref.key}` : ref.key;
-  if (!issueRefInferred(ref)) return `${name} — stamped`;
-  return `${name} — inferred (${ref.relations.map(relationWord).join(", ")})`;
+  if (issueRefInferred(ref)) return `${name} — inferred (${ref.relations.map(relationWord).join(", ")})`;
+  const also = ref.relations.slice(1).map(relationWord);
+  return also.length ? `${name} — stamped (also ${also.join(", ")})` : `${name} — stamped`;
+}
+
+/**
+ * A key with one break opportunity, after its project's `-`: a title cell
+ * narrower than the whole key (a long project name at the title's floor) wraps
+ * the pill there instead of pushing it out of the cell. Nowhere else — a line
+ * break never falls inside the number.
+ */
+function keyHtml(key: string): string {
+  const cut = key.indexOf("-") + 1;
+  return cut > 0 ? `${esc(key.slice(0, cut))}<wbr>${esc(key.slice(cut))}` : esc(key);
 }
 
 /**
@@ -65,7 +78,7 @@ export function railIssuePillsHtml(
     html +=
       `<span class="wiki-issue-pill${issueRefInferred(ref) ? " inferred" : ""}"` +
       ` data-issue-key="${esc(ref.key)}" data-issue-rel="${esc(ref.relations[0] ?? "")}"` +
-      ` title="${esc(pillTitle(ref, labelOf(ref.tracker)))}">${esc(ref.key)}</span>`;
+      ` title="${esc(pillTitle(ref, labelOf(ref.tracker)))}">${keyHtml(ref.key)}</span>`;
   }
   if (rest.length) {
     const titles = rest.map((r) => pillTitle(r, labelOf(r.tracker)));

@@ -111,6 +111,12 @@ describe("parseTrackersConfig, fix round 1", () => {
     expect(warns.map((w) => w.key)).toEqual(["trackers[0].projects[0]"]);
   });
 
+  test("a project is at most 16 characters", () => {
+    const { configs, warns } = collect([{ id: "jira", projects: ["A".repeat(16), "B".repeat(17)] }]);
+    expect(configs[0]!.projects).toEqual(["A".repeat(16)]);
+    expect(warns.map((w) => w.key)).toEqual(["trackers[0].projects[1]"]);
+  });
+
   test("a non-array block names the key `trackers`", () => {
     expect(collect({ id: "jira" }).warns.map((w) => w.key)).toEqual(["trackers"]);
   });

@@ -73,17 +73,18 @@ export const RAIL_TITLE_MIN = 72;
  * (70.2px) overflowed the default floor's 60px by 3–9px onto the status pill
  * at rails 260–270; the wide floor (156) makes that row wrap instead.
  */
-/**
- * The issue-pill column's reserve on a row that carries pills: the column's
- * `max-width` (92px — one `DEMO-1234`-sized pill, or two short ones, per line)
- * plus the 4px gap to the title text. Added to every floor and chip breakpoint
- * of such a row, so the title text keeps `RAIL_TITLE_MIN` beside the pills.
- */
-export const RAIL_ISSUE_PILLS_COL = 96;
-
 export const RAIL_MID_MIN_CHIP_NARROW = RAIL_TITLE_MIN + 8 + 46;
 export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + 62;
 export const RAIL_MID_MIN_CHIP_WIDE = RAIL_TITLE_MIN + 8 + 76;
+
+/**
+ * The issue-pill column's `max-width`: one `DEMO-1234`-sized pill, or two short
+ * ones, per line. The column sits beside the title text while the text keeps
+ * `RAIL_TITLE_MIN`, and wraps UNDER it otherwise, so a pill row takes no reserve
+ * in the floors or breakpoints above: it breaks lines exactly where the same
+ * row without pills does. The column shrinks to its widest pill before that.
+ */
+export const RAIL_ISSUE_PILLS_COL = 92;
 
 /**
  * The three container breakpoints, in px of REMAINING row space (`.wiki-list-mid`),

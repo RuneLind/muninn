@@ -21,7 +21,10 @@
  * link-only page (demoted: no pill, no chip), a long-titled page for the pill
  * geometry, and two FOLDS that hold a keyed page — a series and a markdown page
  * with its same-stem `.html` twin — so the facet's "chip count = rows =
- * #wikiCount" is driven through a closed fold. PR 3 extends this file with
+ * #wikiCount" is driven through a closed fold. Fix round 2 adds a key-less
+ * twin as the control for a fold-chip row's line structure, a title that fits
+ * two lines only without its pill, and a key on a second, long project that is
+ * wider than its title cell at the 260px rail. PR 3 extends this file with
  * Connections and Link.
  *
  * No model calls and no writes. `KNOWLEDGE_API_URL` points at a port nothing
@@ -38,7 +41,12 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 import { contrastOf } from "./contrast.ts";
-import { RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-width.ts";
+import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
+import {
+  RAIL_ISSUE_PILLS_COL,
+  RAIL_TITLE_MIN,
+  RAIL_WIDTH_KEY,
+} from "../src/dashboard/views/components/wiki-rail-width.ts";
 
 const PORT = e2ePort("wiki-tracker-links");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -50,7 +58,7 @@ const READER_CONFIG = JSON.stringify({
   trackers: [
     {
       id: "jira",
-      projects: ["DEMO"],
+      projects: ["DEMO", "DEMOPROSJEKT"],
       hosts: ["example.invalid"],
       frontmatterKeys: ["issue", "tickets"],
       planTitle: "plan(er|en)?(?!\\p{L})",
@@ -99,6 +107,17 @@ const SER_B = "work/serie-b.md";
  *  under the page), both carrying DEMO-210. */
 const TWIN_MD = "notes/tvilling.md";
 const TWIN_HTML = "notes/tvilling.html";
+/** The control for the twin: the same fold chip and title length, no key. */
+const MIRROR_MD = "notes/speil.md";
+const MIRROR_HTML = "notes/speil.html";
+/** A title that fits two lines at the 260px rail WITHOUT its pill, and that the
+ *  inline pill run of the first cut pushed onto a clamped third line. */
+/** A key wider than its row's title cell at the 260px rail (a long project
+ *  name beside a fold chip): the pill wraps after the dash, inside the cell. */
+const LONG_KEY = "notes/langnokkel.md";
+const LONG_KEY_HTML = "notes/langnokkel.html";
+const TWO_LINE = "notes/to-linjer.md";
+const TWO_LINE_TITLE = "DEMO-162 notater fra kjøringen i går";
 
 const PAGES: Record<string, string> = {
   [ANCHOR]: md(
@@ -126,6 +145,11 @@ const PAGES: Record<string, string> = {
   [SER_B]: md(["title: Serie B", "series: demo-serie"], "# B"),
   [TWIN_MD]: md(["title: Tvilling", "tags: [demo-210]"], "# Tvilling"),
   [TWIN_HTML]: "<!doctype html><html><head><title>DEMO-210 tvilling</title></head><body></body></html>",
+  [MIRROR_MD]: md(["title: Speilside"], "# Speilside"),
+  [MIRROR_HTML]: "<!doctype html><html><head><title>Speil</title></head><body></body></html>",
+  [TWO_LINE]: md([`title: ${TWO_LINE_TITLE}`], "# To linjer"),
+  [LONG_KEY]: md(["title: Langnøkkel", "tags: [demoprosjekt-123456]"], "# Langnøkkel"),
+  [LONG_KEY_HTML]: "<!doctype html><html><head><title>Lang</title></head><body></body></html>",
   [EXPLAINER]:
     "<!doctype html><html><head><title>DEMO-150 forklart</title></head>" +
     `<body><a href="${url("DEMO-199")}">DEMO-199</a></body></html>`,
@@ -146,12 +170,14 @@ const KEY_PAGES: Record<string, string[]> = {
   "DEMO-141": [SCALAR],
   "DEMO-150": [EXPLAINER],
   "DEMO-160": [STEM_PLAN],
+  "DEMO-162": [TWO_LINE],
+  "DEMOPROSJEKT-123456": [LONG_KEY],
   "DEMO-170": [ISSUE_PLAN],
   "DEMO-180": [STAMPED],
   "DEMO-200": [SER_A],
   "DEMO-210": [TWIN_MD, TWIN_HTML],
 };
-const KEY_COUNT = Object.keys(KEY_PAGES).length; // 18
+const KEY_COUNT = Object.keys(KEY_PAGES).length;
 
 /** The control wiki: one stamped page, and an inferred-shaped page that must
  *  stay key-less there. */
@@ -233,7 +259,7 @@ async function shownCount(page: Page): Promise<number> {
  * line clamp has hidden, so the geometry is the only honest test.
  */
 async function clippedPillRows(page: Page): Promise<string[]> {
-  return page.locator(".wiki-list-item").evaluateAll((rows) => {
+  return page.locator(".wiki-list-item").evaluateAll((rows, [maxCol, minText]) => {
     const bad: string[] = [];
     for (const row of rows) {
       const pills = Array.from(row.querySelectorAll(".wiki-issue-pill")) as HTMLElement[];
@@ -247,10 +273,35 @@ async function clippedPillRows(page: Page): Promise<string[]> {
           if (r.top < b.top - 0.5 || r.bottom > b.bottom + 0.5 || r.left < b.left - 0.5 || r.right > b.right + 0.5) ok = false;
           if (a === row) break;
         }
-        // A COLUMN beside the title text, not a line under it.
+        // Beside the title text or under it, never over it.
         const text = row.querySelector(".wiki-list-title-text");
-        if (ok && text && r.left < text.getBoundingClientRect().right - 0.5) ok = false;
+        if (ok && text) {
+          const t = text.getBoundingClientRect();
+          if (r.left < t.right - 0.5 && r.top < t.bottom - 0.5) ok = false;
+        }
         if (!ok) bad.push(`${row.getAttribute("data-relpath")} ${pill.textContent}`);
+      }
+      // The column: at most its max-width, inside the title cell, and never
+      // narrower than a pill in it; a pill never narrower than its text.
+      const col = row.querySelector(".wiki-issue-pills");
+      if (col) {
+        const c = col.getBoundingClientRect();
+        const cell = row.querySelector(".wiki-list-title")!.getBoundingClientRect();
+        if (c.left < cell.left - 0.5 || c.right > cell.right + 0.5) bad.push(`${row.getAttribute("data-relpath")} column outside the title cell`);
+        for (const pill of pills) {
+          if (pill.scrollWidth > pill.clientWidth + 1) bad.push(`${row.getAttribute("data-relpath")} ${pill.textContent} squeezed`);
+        }
+        if (c.width > maxCol + 0.5) bad.push(`${row.getAttribute("data-relpath")} column ${c.width}px`);
+        for (const pill of pills) {
+          const r = pill.getBoundingClientRect();
+          if (r.left < c.left - 0.5 || r.right > c.right + 0.5) bad.push(`${row.getAttribute("data-relpath")} ${pill.textContent} outside its column`);
+        }
+        // Beside the pills, the text keeps its floor.
+        const text = row.querySelector(".wiki-list-title-text");
+        if (text) {
+          const t = text.getBoundingClientRect();
+          if (c.top < t.bottom - 0.5 && t.width < minText - 0.5) bad.push(`${row.getAttribute("data-relpath")} text ${t.width}px beside the pills`);
+        }
       }
       // The title + pill column fit the box the row gave them — an overflow
       // lands on the status pill beside it, which no clip test can see.
@@ -260,6 +311,63 @@ async function clippedPillRows(page: Page): Promise<string[]> {
       }
     }
     return bad;
+  }, [RAIL_ISSUE_PILLS_COL, RAIL_TITLE_MIN] as const);
+}
+
+/**
+ * Whether a row's dot, title cell and ★+date share one line box — the row's
+ * line STRUCTURE, which a pill must not change.
+ */
+async function oneLine(page: Page, rel: string): Promise<boolean> {
+  return row(page, rel).evaluate((el) => {
+    const box = (sel: string) => el.querySelector(sel)!.getBoundingClientRect();
+    const dot = box(".wiki-type-dot");
+    const title = box(".wiki-list-title");
+    const end = box(".wiki-list-end");
+    return dot.top < title.top + 16 && Math.abs(end.top - title.top) < 6;
+  });
+}
+
+/** Which form the fold chip shows: its words or its counts. */
+async function chipForm(page: Page, rel: string): Promise<string> {
+  return row(page, rel)
+    .locator(".wiki-fold-chip")
+    .evaluate((el) => (getComputedStyle(el.querySelector(".wiki-fold-chip-label")!).display === "none" ? "counts" : "words"));
+}
+
+/**
+ * The contrast of an element's text against what is really painted behind it:
+ * every translucent fill between it and the first opaque one composited, as the
+ * browser does — the active row's fill is a 14% tint, which a walk that stops
+ * at the first non-transparent colour would read as solid.
+ */
+async function paintedContrast(locator: import("@playwright/test").Locator): Promise<number> {
+  return locator.evaluate((el) => {
+    const rgba = (c: string) => {
+      const n = c.match(/[\d.]+/g)!.map(Number);
+      return { r: n[0]!, g: n[1]!, b: n[2]!, a: n.length > 3 ? n[3]! : 1 };
+    };
+    const layers: ReturnType<typeof rgba>[] = [];
+    for (let n: HTMLElement | null = el as HTMLElement; n; n = n.parentElement) {
+      const c = rgba(getComputedStyle(n).backgroundColor);
+      if (c.a === 0) continue;
+      layers.push(c);
+      if (c.a >= 1) break;
+    }
+    let bg = { r: 255, g: 255, b: 255 };
+    for (const l of layers.reverse()) {
+      bg = { r: l.r * l.a + bg.r * (1 - l.a), g: l.g * l.a + bg.g * (1 - l.a), b: l.b * l.a + bg.b * (1 - l.a) };
+    }
+    const lum = ({ r, g, b }: { r: number; g: number; b: number }) => {
+      const ch = (v: number) => {
+        const x = v / 255;
+        return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
+    };
+    const a = lum(rgba(getComputedStyle(el).color));
+    const b = lum(bg);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
   });
 }
 
@@ -327,9 +435,9 @@ test.describe("Wiki reader: tracker links", () => {
 
   test("2: chip count = rows = #wikiCount for every key, folds included; top 8 plus +N", async ({ page }) => {
     await openReader(page, `wiki=${WIKI}`);
-    // Unfiltered, the series and the twin are folded away: three pages hidden.
+    // Unfiltered, the series and the three twins are folded away: five pages hidden.
     const baseline = await shownCount(page);
-    expect(baseline).toBe(Object.keys(PAGES).length - 3);
+    expect(baseline).toBe(Object.keys(PAGES).length - 5);
     for (const rel of [SER_A, TWIN_HTML]) await expect(row(page, rel)).toHaveCount(0);
 
     await page.locator("#wikiFilters summary").click();
@@ -430,9 +538,11 @@ test.describe("Wiki reader: tracker links", () => {
         const longText = row(page, LONG).locator(".wiki-list-title-text");
         expect(await longText.evaluate((el) => el.scrollHeight > el.clientHeight), where).toBe(true);
         expect(await clippedPillRows(page), where).toEqual([]);
-        // A title that fits two lines shows no ellipsis.
-        const fits = row(page, STEM_PLAN).locator(".wiki-list-title-text");
-        expect(await fits.evaluate((el) => el.scrollHeight <= el.clientHeight), where).toBe(true);
+        if (width === 260) {
+          // The long key really wraps after its dash there — the case is only about a key that does.
+          const lines = await pills(page, LONG_KEY).evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
+          expect(lines, where).toBe(2);
+        }
         // The pill is text a reader has to read.
         expect(await contrastOf(pills(page, STAMPED)), where).toBeGreaterThanOrEqual(4.5);
         // No sideways scroll bought by the pill column.
@@ -442,15 +552,74 @@ test.describe("Wiki reader: tracker links", () => {
     }
   });
 
+  test("pills: a row with a fold chip keeps the line structure and chip form of the same row without pills, 260–560px", async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 1400 });
+    for (let width = 260; width <= 560; width += 20) {
+      await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
+      await openReader(page, `wiki=${WIKI}`);
+      const where = `${width}px`;
+      await expect(pills(page, TWIN_MD).first(), where).toBeVisible();
+      await expect(row(page, MIRROR_MD).locator(".wiki-issue-pill"), where).toHaveCount(0);
+      if (width === 260) expect(await oneLine(page, MIRROR_MD), where).toBe(true);
+      expect(await oneLine(page, TWIN_MD), where).toBe(await oneLine(page, MIRROR_MD));
+      expect(await chipForm(page, TWIN_MD), where).toBe(await chipForm(page, MIRROR_MD));
+      expect(await clippedPillRows(page), where).toEqual([]);
+    }
+  });
+
+  test("pills: a title that fits two lines without its pill shows no ellipsis at the 260px rail", async ({ page }) => {
+    await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, 260] as const);
+    await page.setViewportSize({ width: 1280, height: 1400 });
+    await openReader(page, `wiki=${WIKI}`);
+    const text = row(page, TWO_LINE).locator(".wiki-list-title-text");
+    const fit = await text.evaluate((el) => ({
+      lines: Math.round(el.scrollHeight / parseFloat(getComputedStyle(el).lineHeight)),
+      clamped: el.scrollHeight > el.clientHeight + 1,
+    }));
+    expect(fit).toEqual({ lines: 2, clamped: false });
+  });
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`pills: 4.5:1 at rest, on the hovered row and on the active row, ${scheme} theme`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await openReader(page, `wiki=${WIKI}`);
+      const pill = pills(page, STAMPED);
+      await page.mouse.move(0, 0);
+      expect(await paintedContrast(pill), "rest").toBeGreaterThanOrEqual(4.5);
+      await row(page, STAMPED).hover();
+      expect(await paintedContrast(pill), "hovered").toBeGreaterThanOrEqual(4.5);
+      await row(page, STAMPED).click();
+      await expect(row(page, STAMPED)).toHaveClass(/active/);
+      await page.mouse.move(0, 0);
+      expect(await paintedContrast(pill), "active").toBeGreaterThanOrEqual(4.5);
+      await row(page, STAMPED).hover();
+      expect(await paintedContrast(pill), "active, hovered").toBeGreaterThanOrEqual(4.5);
+    });
+  }
+
+  test("pills: a listing refresh that drops the tracker drops its label and its cap", async ({ page }) => {
+    await page.clock.install();
+    await openReader(page, `wiki=${WIKI}`);
+    await page.locator("#wikiFilters summary").click();
+    await expect(page.locator("#jiraChips .wiki-chip-row-label")).toHaveText("Jira");
+    // The same reader, handed a listing with no `trackers` (its config lost the
+    // block): the label and the cap are the last wiki's no longer.
+    const plain = await (await fetch(`${BASE}/api/wiki/pages?wiki=${WIKI_PLAIN}`)).text();
+    await page.route("**/api/wiki/pages**", (route) => route.fulfill({ status: 200, contentType: "application/json", body: plain }));
+    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(page.locator(".wiki-issue-pill")).toHaveCount(0);
+    await expect(page.locator('#jiraChips [data-jira="DEMO-180"]')).toBeVisible();
+    await expect(page.locator("#jiraChips .wiki-chip-row-label")).toHaveCount(0);
+    await expect(page.locator("#jiraChips [data-jira-more]")).toHaveCount(0);
+  });
+
   test("pills: named with the tracker, +N carries its keys in the accessible name, a click opens the row", async ({ page }) => {
     await openReader(page, `wiki=${WIKI}`);
     await expect(pills(page, INFERRED).first()).toHaveAttribute("title", "Jira DEMO-130 — inferred (title)");
     await expect(pills(page, STAMPED)).toHaveAttribute("title", "Jira DEMO-180 — stamped");
     const plus = row(page, ANCHOR).locator(".wiki-issue-pill.more");
     await expect(plus).toHaveAttribute("aria-label", /^3 more: Jira DEMO-/);
-    expect(await pills(page, STAMPED).evaluate((el) => getComputedStyle(el).cursor)).toBe(
-      await row(page, STAMPED).evaluate((el) => getComputedStyle(el).cursor),
-    );
     await pills(page, STAMPED).click();
     await expect(page.locator(".wiki-bc-cur")).toContainText("Stemplet");
   });

@@ -949,9 +949,9 @@ function applyProjectFilter(project: string): void {
  *
  * On a wiki with a tracker the row is CAPPED (`jiraChipRow`) and labelled with
  * the adapter's name: the facet counts inferred keys too, and a
- * kode-wiki-sized corpus would otherwise draw ~90 chips. The top eight show,
- * plus the active key wherever it ranks, plus a `+N` expander. A wiki without
- * one draws the row it always has.
+ * kode-wiki-sized corpus would otherwise draw 45 chips (measured with `link`
+ * demoted). The top eight show, plus the active key wherever it ranks, plus a
+ * `+N` expander. A wiki without one draws the row it always has.
  */
 function renderJiraChips(): void {
   const row = document.getElementById("jiraChips");

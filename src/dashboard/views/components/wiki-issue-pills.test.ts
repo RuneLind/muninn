@@ -20,6 +20,11 @@ describe("railIssuePillsHtml", () => {
     expect(html).toContain('title="Jira DEMO-102 — inferred (created here, link)"');
   });
 
+  test("a stamped key's hover keeps its other relations", () => {
+    const html = railIssuePillsHtml([ref("DEMO-101", "stamped", "title", "stem")], JIRA);
+    expect(html).toContain('title="Jira DEMO-101 — stamped (also title, file name)"');
+  });
+
   test("two pills, then +N carrying the rest on its hover AND in its accessible name", () => {
     const html = railIssuePillsHtml(
       [ref("DEMO-1", "title"), ref("DEMO-2", "tag"), ref("DEMO-3", "tag"), ref("DEMO-4", "stem")],
@@ -29,6 +34,10 @@ describe("railIssuePillsHtml", () => {
     expect(html).toContain(">+2</span>");
     expect(html).toContain("Jira DEMO-3 — inferred (tag)\nJira DEMO-4 — inferred (file name)");
     expect(html).toContain('aria-label="2 more: Jira DEMO-3 — inferred (tag); Jira DEMO-4 — inferred (file name)"');
+  });
+
+  test("a key may wrap after its project's dash and nowhere else", () => {
+    expect(railIssuePillsHtml([ref("DEMOPROSJEKT-123456", "tag")])).toContain(">DEMOPROSJEKT-<wbr>123456</span>");
   });
 
   test("keys are escaped", () => {

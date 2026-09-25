@@ -51,8 +51,9 @@ function projectAlt(config: TrackerConfig): string {
 /**
  * ASCII word edges, the same `\b` `extractJiraKeys` uses, on every rule: a
  * letter, digit or `_` on the left (`xdemo-1`), or on the right (`demo-12x`),
- * means the run is not a key. The flags carry no `u`, so a case-insensitive
- * rule cannot fold a lookalike (the Kelvin sign) into a project letter.
+ * means the run is not a key. The key rules' flags carry no `u`, so a
+ * case-insensitive rule cannot fold a lookalike (the Kelvin sign, `ſ`) into a
+ * project letter.
  */
 const LEFT = "(?<![A-Za-z0-9_])";
 /** A key NUMBER: no leading zero (`DEMO-0145` is not `DEMO-145`), at most eight
@@ -75,14 +76,15 @@ function keep(key: string, config: TrackerConfig): boolean {
  * `DEMO-145/174` and `DEMO-158 + 169`, the stem's `demo-7588-7969`. A chained
  * number must have the base number's digit count (so `DEMO-145/2026` and
  * `demo-2026-09` do not expand), no leading zero, and must itself end cleanly;
- * `after` adds what may not follow it (the title refuses a following word, so
- * `DEMO-145 + 300 saker` does not mint `DEMO-300`). A base key that does not
- * end cleanly after its chain yields nothing.
+ * `maxGap` adds how far from the base it may be (the title's 1000, so
+ * `DEMO-8045/2026` and `DEMO-8045 + 2025-kjøringen` do not expand while
+ * `DEMO-7588/7969 Nullable sats` does). A base key that does not end cleanly
+ * after its chain yields nothing.
  */
 function scanKeys(
   text: string,
   config: TrackerConfig,
-  opts: { caseSensitive: boolean; chain?: RegExp; after?: RegExp },
+  opts: { caseSensitive: boolean; chain?: RegExp; maxGap?: number },
 ): string[] {
   const re = new RegExp(`${LEFT}${projectAlt(config)}-${NUM}`, opts.caseSensitive ? "g" : "gi");
   const out: string[] = [];
@@ -100,7 +102,7 @@ function scanKeys(
         const next = c.index + c[0].length;
         const rest = text.slice(next);
         if (num.length !== base.length || num[0] === "0" || END_RE.test(rest)) break;
-        if (opts.after && opts.after.test(rest)) break;
+        if (opts.maxGap !== undefined && Math.abs(Number(num) - Number(base)) > opts.maxGap) break;
         found.push(`${project}-${num}`);
         pos = next;
       }
@@ -112,18 +114,18 @@ function scanKeys(
 }
 
 const TITLE_CHAIN = /\s*[/+]\s*([0-9]+)/y;
-/** A shorthand number followed by a word, or by `-`, is a count or a year in
- *  prose: `+ 300 saker`, `+ 2025-kjøringen`. */
-const TITLE_AFTER = /^(?:\s*\p{L}|-)/u;
+/** How far a title shorthand may sit from its base key. A year or a count is
+ *  rarely this close to a same-width key; `DEMO-145 + 300 saker` still is. */
+const TITLE_MAX_GAP = 1000;
 const STEM_CHAIN = /-([0-9]+)/y;
 
 /**
  * Title keys: UPPERCASE only (like `mention` — `melosys-2 bot-plan` names a
  * bot), with the shorthands `DEMO-145/174` and `DEMO-158 + 169` expanded to the
- * same project under {@link scanKeys}' digit-count rule.
+ * same project under {@link scanKeys}' digit-count and distance rules.
  */
 export function titleKeys(title: string, config: TrackerConfig): string[] {
-  return scanKeys(title, config, { caseSensitive: true, chain: TITLE_CHAIN, after: TITLE_AFTER });
+  return scanKeys(title, config, { caseSensitive: true, chain: TITLE_CHAIN, maxGap: TITLE_MAX_GAP });
 }
 
 /** Stem keys, case-insensitive; `demo-7588-7969-notes` yields both. */
@@ -150,7 +152,7 @@ function valueStrings(value: string | string[] | undefined): string[] {
 
 /**
  * The keys in a stamped value, list or scalar. An entry that is itself exactly
- * key-shaped is kept whatever its case (`jira: [demo-103]`); any other entry is
+ * ASCII key-shaped is kept whatever its case (`jira: [demo-103]`); any other entry is
  * prose and goes through `extractJiraKeys` — uppercase keys only, with its
  * denylist — so `jira: DEMO-140 (kilde), se steg-2 og utf-8` yields DEMO-140
  * alone. Not project-bounded: the stamped line is the author's own claim.
@@ -158,8 +160,8 @@ function valueStrings(value: string | string[] | undefined): string[] {
 export function stampedKeys(value: string | string[] | undefined): string[] {
   const out: string[] = [];
   for (const v of valueStrings(value)) {
-    const whole = normalizeJiraKey(v);
-    if (JIRA_KEY_SHAPE.test(whole)) out.push(whole);
+    // ASCII-shaped BEFORE uppercasing: `toUpperCase` maps `ſ` to S and `ı` to I.
+    if (/^[A-Za-z][A-Za-z0-9]*-[0-9]+$/.test(v.trim())) out.push(normalizeJiraKey(v));
     else out.push(...extractJiraKeys(v));
   }
   return out;
@@ -231,7 +233,7 @@ function maskBody(body: string): string {
 function linkHits(maskedBody: string, config: TrackerConfig): LinkHit[] {
   if (config.hosts.length === 0) return [];
   const re = new RegExp(
-    `https?://(?:${config.hosts.map(escapeRe).join("|")})(?::\\d+)?/browse/${projectAlt(config)}-${NUM}`,
+    `https?://(?:${config.hosts.map(escapeRe).join("|")})(?::\\d+)?/browse/${projectAlt(config)}-${NUM}(?![A-Za-z0-9_]|-[0-9])`,
     "gi",
   );
   const out: LinkHit[] = [];
