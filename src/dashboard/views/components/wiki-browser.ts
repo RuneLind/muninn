@@ -109,6 +109,7 @@ import {
   wikiPagePath,
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
+import { railIssuePillsHtml } from "./wiki-issue-pills.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
@@ -265,6 +266,7 @@ import {
   pageFollowups,
   projectCounts,
   jiraChipCounts,
+  jiraChipRow,
   jiraFacetVisible,
   jiraFilterAfterListing,
   JIRA_PARAM,
@@ -631,6 +633,8 @@ function goToStart(): void {
   renderStart();
 }
 let tagsExpanded = false;
+/** The Jira chip row's `+N` expander — `tagsExpanded`'s twin. */
+let jiraChipsExpanded = false;
 
 // ── Start-view cards (What's new · Index coverage · reindex) ──────────
 // The three cards, their module state and the reindex poller live in
@@ -936,6 +940,11 @@ function applyProjectFilter(project: string): void {
  * with it, an empty CURRENT scope hides the row unless a filter is active, the
  * active key joins the list even at count 0, and the order is count DESC then
  * key.
+ *
+ * The row is CAPPED (`jiraChipRow`): on a wiki with a tracker the facet counts
+ * inferred keys too, and a kode-wiki-sized corpus would otherwise draw ~90
+ * chips. The top eight show, plus the active key wherever it ranks, plus a
+ * `+N` expander.
  */
 function renderJiraChips(): void {
   const row = document.getElementById("jiraChips");
@@ -958,13 +967,17 @@ function renderJiraChips(): void {
     return;
   }
   let html = `<button class="wiki-chip${filters.jira === "" ? " active" : ""}" data-jira="">All issues</button>`;
-  facetKeys(counts, filters.jira)
-    .sort((a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b))
-    .forEach((k) => {
-      html +=
-        `<button class="wiki-chip${filters.jira === k ? " active" : ""}" data-jira="${esc(k)}">` +
-        `${esc(k)} ${counts[k] || 0}</button>`;
-    });
+  const chipRow = jiraChipRow(counts, filters.jira, jiraChipsExpanded);
+  chipRow.keys.forEach((k) => {
+    html +=
+      `<button class="wiki-chip${filters.jira === k ? " active" : ""}" data-jira="${esc(k)}">` +
+      `${esc(k)} ${counts[k] || 0}</button>`;
+  });
+  if (chipRow.hidden > 0 || jiraChipsExpanded) {
+    html +=
+      `<button class="wiki-chip" data-jira-more="1">` +
+      `${jiraChipsExpanded ? "less" : "+" + chipRow.hidden + " issues"}</button>`;
+  }
   row.innerHTML = html;
   row.style.display = "";
 }
@@ -1490,7 +1503,11 @@ function renderList(): void {
       // to name is the font SIZE, not a width.)
       `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
       (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
-      `${esc(displayTitleOf(p))}</div>` +
+      `${esc(displayTitleOf(p))}` +
+      // The issue pills ride INSIDE the title element for the `▸`'s reason: a
+      // seventh flex item would cost the title its floor. Dashed when inferred.
+      railIssuePillsHtml(p.issues) +
+      `</div>` +
       // The group CHIP: what is folded under this row, and the control that
       // opens it. A click here toggles; a click anywhere else on the row opens
       // the page, as it always has.
@@ -3598,6 +3615,11 @@ document.getElementById("jiraChips")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   const chip = target.closest ? target.closest(".wiki-chip") : null;
   if (!chip) return;
+  if (chip.hasAttribute("data-jira-more")) {
+    jiraChipsExpanded = !jiraChipsExpanded;
+    renderJiraChips();
+    return;
+  }
   const key = chip.getAttribute("data-jira") || "";
   applyJiraFilter(filters.jira === key ? "" : key);
 });

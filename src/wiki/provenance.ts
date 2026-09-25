@@ -32,6 +32,7 @@
  */
 
 import type { WikiPageMeta } from "./store.ts";
+import { facetJiraKeys } from "../dashboard/views/components/wiki-filter.ts";
 
 /** The four frontmatter keys, exactly as they are spelled in a page. */
 export const PROVENANCE_FRONTMATTER_KEYS = [
@@ -185,12 +186,18 @@ export function parsePrRef(raw: string): PrRef {
  * is not a key with a 400 — so an unfiltered facet renders a chip whose only
  * behaviour is to fail when clicked. The page's own row still carries the raw
  * value; the facet is the one surface that promises a working click.
+ *
+ * On a wiki with a tracker the keys are stamped PLUS inferred, never `mention`
+ * — read through `facetJiraKeys`, the one definition the client's chip counts
+ * and filter share, so a chip's count is the rows clicking it leaves. On a wiki
+ * without one they are the stamped `jira` list, as before.
  */
 export function jiraCounts(pages: readonly WikiPageMeta[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const p of pages) {
-    if (!p.jira?.length) continue;
-    for (const key of new Set(p.jira)) {
+    const keys = facetJiraKeys(p);
+    if (!keys.length) continue;
+    for (const key of new Set(keys)) {
       if (!isJiraKeyShape(key)) continue;
       counts[key] = (counts[key] ?? 0) + 1;
     }

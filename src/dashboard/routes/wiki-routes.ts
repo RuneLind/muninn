@@ -4,6 +4,7 @@ import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
+import { compactIssues } from "../../wiki/trackers/index.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
 import { getSemanticOverlay } from "../../wiki/atlas-semantic.ts";
 import {
@@ -1063,12 +1064,20 @@ function toListing(
   // LISTING grouping, the `project` twin, so the hot payload is exactly where
   // they have to be. Two short strings per page — and `seriesLabel` sits on ONE
   // page per series, so naming a fold costs nothing per member.
-  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, ...rest } = meta;
+  //
+  // `issues` (set only on a wiki with a tracker) rides callers 1 and 3 in its
+  // COMPACT form — no `mention` relation, and no key that had nothing else —
+  // because the rail's pills and the Jira facet read it and a mention is
+  // neither. Caller 2 opts the whole list in through `includeProvenance`: the
+  // mentions are a fact about the one open page.
+  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, ...rest } = meta;
   void pubDate;
   void children;
   void prRefs;
+  const listedIssues = opts.includeProvenance ? issues : compactIssues(issues);
   return {
     ...rest,
+    ...(listedIssues ? { issues: listedIssues } : {}),
     ...(opts.includeDesc && desc ? { desc } : {}),
     ...(opts.includeProvenance
       ? {

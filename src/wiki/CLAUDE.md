@@ -2031,6 +2031,55 @@ a 15 s timeout and nothing remembered that it had just expired, so a down huginn
 cost every caller 15 s — and on this path that is once per stamped page open.
 Short deliberately: the answer it suppresses is a degrade rather than a result.
 
+### Tracker inference (`src/wiki/trackers/`, `.wiki-reader.json` `trackers`)
+
+Pages name their issues in titles, file names, tags and links far more often
+than in a stamped `jira:` line, so a wiki whose `.wiki-reader.json` declares a
+`trackers` block gets `issues` inferred per page at index time
+(`buildWikiIndex`, where the body is already in hand). Code outside the one
+adapter file says tracker / issue / issue ref (`{tracker, key, relations}`);
+`jira.ts` is the only adapter, registered in `index.ts`.
+
+- **The block** is parsed with the rule every other block here follows: a bad
+  field warns and drops alone. An entry is dropped WHOLE only for an unknown
+  `id`, a duplicate, or no usable `projects` — `projects` bounds every inferred
+  key, so without it the entry could only guess. No usable entry ⇒ no tracker.
+- **Relations**, strongest first: `stamped` (every key-shaped token in the
+  adapter's `frontmatterKey` line, list or prose scalar; NOT project-bounded),
+  `declared` (the configured `frontmatterKeys`), `created` ("created here": a
+  `link` after a `createdMarkers` word in the same clause), `title` (the
+  authored `title:` line only, never the stem fallback; shorthands `A-1/234` and
+  `A-1 + 234`, three digits or more; an `.html` page's `<title>`), `stem`,
+  `link` (`browse/KEY` on a configured host), `tag`, `mention` (a bare
+  uppercase key in the body; fenced and inline code, URLs and wikilink targets
+  masked; `extractJiraKeys`' denylist). Every relation is kept per key.
+- **A clause** ends at a newline, `·`, `;`, a period followed by whitespace or
+  the line's end, and — on a table row only — a `|` outside `[...]`/`[[...]]`.
+  Never a character count.
+- **Bookkeeping pages** (`isMetaStem`) are never inferred from, and an `.html`
+  page reads only its bounded `<head>` prefix (title, keywords).
+- **Payloads.** `WikiPageMeta.issues` is absent, never `[]`. The hot listing
+  ships a COMPACT copy (`compactIssues`: no `mention`, and no key left with
+  nothing); the single-page `meta` carries the whole list. Measured on a copy of
+  melosys-kode-wiki (417 pages, 111 with a non-mention key, 210 refs):
+  `/api/wiki/pages` 181,765 → 198,107 bytes.
+- **The facet.** `facetJiraKeys` (`wiki-filter.ts`) is the ONE definition the
+  four consumers share — `jiraCounts`, `filterPages`, `jiraChipCounts` and the
+  listing field: a page carrying `issues` answers its Jira refs minus mentions,
+  a page without answers its stamped `jira` list. ⚠️ So a wiki with NO tracker
+  is byte-identical to before — pinned by `trackers/store-issues.test.ts` and
+  by the spec's second wiki. The reverse lookup (`?jira=`) and the strip stay
+  stamped-only. The chip row shows the top `JIRA_CHIPS_MAX` (8) plus the
+  active key and a `+N` expander (`jiraChipRow`).
+- **Rail pills** ride INSIDE `.wiki-list-title` (the `▸` rule — no seventh row
+  element): up to two, strongest first, then `+N`; dashed unless `stamped`.
+
+Acceptance: `trackers/jira.test.ts` (each rule, the anchor line's 2/70/138
+shape, Jira markup, the project bound), `trackers/index.test.ts` (the block's
+validation), `trackers/store-issues.test.ts` (the index build, the
+count-equals-rows property, the no-tracker pin) and
+`e2e/wiki-tracker-links.spec.ts`.
+
 ### The client (`views/components/wiki-provenance-view.ts`)
 
 **One surface: a collapsed line under the title that opens into the chain.**

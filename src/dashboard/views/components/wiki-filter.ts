@@ -152,6 +152,14 @@ export interface WikiListing {
    */
   jira?: string[];
   /**
+   * The issues this page relates to, on a wiki whose `.wiki-reader.json` names a
+   * tracker — stamped and inferred, every relation per key, strongest first
+   * (`src/wiki/trackers/`). The listing's COMPACT copy: `mention` relations are
+   * dropped server-side, and so is a key that had nothing else. Absent on a wiki
+   * with no tracker and on a page carrying none.
+   */
+  issues?: ListingIssueRef[];
+  /**
    * The agent sessions that wrote this page (`provider:id`, in arrival order).
    *
    * **Single-page payloads only**, exactly like `desc`: `/api/wiki/pages` strips
@@ -180,6 +188,14 @@ export interface WikiListing {
   seriesLabel?: string;
   linkCount: number;
   backlinkCount: number;
+}
+
+/** One issue ref as the listing ships it. `relations` is non-empty and ordered
+ *  strongest first; its words are the tracker model's `IssueRelation`. */
+export interface ListingIssueRef {
+  tracker: string;
+  key: string;
+  relations: string[];
 }
 
 export interface WikiFilters {
@@ -1132,7 +1148,7 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
     // Membership of a LIST, and exact: the store normalizes every key to trimmed
     // UPPERCASE, so a page's spelling and the chip's cannot disagree and a
     // case-folded compare would only ever admit a spelling no chip carries.
-    if (filters.jira && (p.jira ?? []).indexOf(filters.jira) === -1) return false;
+    if (filters.jira && facetJiraKeys(p).indexOf(filters.jira) === -1) return false;
     if (!q) return true;
     if (p.title.toLowerCase().indexOf(q) !== -1) return true;
     if (displayTitleOf(p).toLowerCase().indexOf(q) !== -1) return true;
@@ -1637,12 +1653,67 @@ export function jiraChipCounts(
     if (domain && p.domain !== domain) return;
     if (type && p.type !== type) return;
     if (folder && pageFolder(p) !== folder) return;
-    (p.jira ?? []).forEach((key) => {
+    facetJiraKeys(p).forEach((key) => {
       if (!Object.prototype.hasOwnProperty.call(known, key)) return;
       counts[key] = (counts[key] || 0) + 1;
     });
   });
   return counts;
+}
+
+/**
+ * The tracker whose keys the Jira facet counts. The facet stays Jira-only by
+ * design: a second tracker gets a facet of its own keyed `tracker:key`, not a
+ * share of this one.
+ */
+export const JIRA_FACET_TRACKER = "jira";
+
+/**
+ * The keys the Jira facet counts and filters a page by — the ONE definition the
+ * four consumers share: the server's `jiraCounts`, `filterPages`,
+ * `jiraChipCounts` and the listing field they all read.
+ *
+ * A page carrying `issues` (a wiki with a tracker) answers its Jira refs that
+ * hold any relation but `mention` — stamped and inferred alike. A page without
+ * it answers its stamped `jira` list exactly as before, which is every page of
+ * a wiki with no tracker: that path must not change.
+ */
+export function facetJiraKeys(p: {
+  jira?: readonly string[];
+  issues?: readonly { tracker: string; key: string; relations: readonly string[] }[];
+}): string[] {
+  if (!p.issues) return p.jira ? [...p.jira] : [];
+  const out: string[] = [];
+  for (const r of p.issues) {
+    if (r.tracker !== JIRA_FACET_TRACKER) continue;
+    if (!r.relations.some((rel) => rel !== "mention")) continue;
+    if (out.indexOf(r.key) === -1) out.push(r.key);
+  }
+  return out;
+}
+
+/** How many Jira chips the facet row shows before its `+N` expander. */
+export const JIRA_CHIPS_MAX = 8;
+
+/**
+ * Which Jira chips to draw: the top {@link JIRA_CHIPS_MAX} by page count (then
+ * key), plus the active key when it falls outside them — a filter set from the
+ * URL must always be on screen — or every key once expanded. `hidden` is what
+ * the `+N` expander offers.
+ */
+export function jiraChipRow(
+  counts: Record<string, number>,
+  active: string,
+  expanded: boolean,
+  max: number = JIRA_CHIPS_MAX,
+): { keys: string[]; hidden: number } {
+  const all = facetKeys(counts, active).sort(
+    (a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b),
+  );
+  if (expanded || all.length <= max) return { keys: all, hidden: 0 };
+  const keys = all.slice(0, max);
+  if (active && keys.indexOf(active) === -1) keys.push(active);
+  return { keys, hidden: all.length - keys.length };
 }
 
 /** Whether to render the Jira chip row at all — the whole-wiki gate.

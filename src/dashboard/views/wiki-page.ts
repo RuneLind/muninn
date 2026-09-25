@@ -621,6 +621,17 @@ export async function renderWikiPage(opts?: {
        swap .wiki-act-glyph's green made, and the token the series group row
        already carries — the glyph and its fold now read as one colour). */
     .wiki-latest-glyph { color: var(--accent-light); margin-right: 4px; font-size: 11px; }
+    /* Issue pills: inline INSIDE .wiki-list-title (the ▸ rule — a seventh flex
+       item would cost the title its floor). Solid = stamped, dashed = inferred. */
+    .wiki-issue-pills { white-space: nowrap; }
+    .wiki-issue-pill {
+      display: inline-block; margin-left: 4px; padding: 0 4px;
+      border: 1px solid var(--text-muted); border-radius: 3px;
+      font-family: ui-monospace, Menlo, monospace; font-size: 9.5px; line-height: 13px;
+      color: var(--text-muted); vertical-align: 1px;
+    }
+    .wiki-issue-pill.inferred { border-style: dashed; }
+    .wiki-issue-pill.more { border-color: transparent; padding: 0 2px; }
     /* A GHOST row: a series member the reader pinned, named inside the fold so
        the roll-up's count and the rows agree. Not a control and not a link —
        there is nothing to open that is not already on screen — so it takes no
