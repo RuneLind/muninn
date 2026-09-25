@@ -59,43 +59,106 @@ export const FACTCHECK_SENTINEL_END = "<!-- factcheck:end -->";
  */
 export const FACTCHECK_ANSWER_MAX = 32_000;
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** A LIVE sentinel block: `start` is the offset of the start sentinel's `<`,
+ *  `end` the offset just past the end sentinel's `>` — the span the old paired
+ *  regex matched, so a plain page splices byte-identically. */
+export interface SentinelBlockSpan {
+  start: number;
+  end: number;
 }
 
-/** The paired non-greedy sentinel matcher — the ONE authority on "does this body
- *  carry a fact-check block?". A fresh RegExp per call because the `g` variant
- *  used by {@link stripFactcheckBlock} is stateful. */
-function factcheckBlockRe(global = false): RegExp {
-  return new RegExp(
-    escapeRegExp(FACTCHECK_SENTINEL_START) + "[\\s\\S]*?" + escapeRegExp(FACTCHECK_SENTINEL_END),
-    global ? "g" : "",
-  );
+/** The fence toggle `render.ts`'s `stripSentinelLines` uses: a trimmed line
+ *  opening with ``` or ~~~, at any indent. */
+function isFenceLine(trimmed: string): boolean {
+  return trimmed.startsWith("```") || trimmed.startsWith("~~~");
 }
 
 /**
- * True when the body carries a COMPLETE sentinel-wrapped fact-check block.
+ * Every LIVE fact-check block in `text`, in order — the ONE authority the splice,
+ * {@link hasFactcheckBlock}, {@link stripFactcheckBlock} and integrate's exclusion
+ * zones share. A line walk, not a regex, because a page that documents this
+ * feature carries the sentinels as CONTENT:
  *
- * Deliberately the paired regex, not a bare `includes(FACTCHECK_SENTINEL_START)`:
- * a page carrying an orphan START (a truncated write, a hand-edit) has no block
- * the splice can replace, so treating it as "already has one" would default the
- * reader's refresh-callout checkbox ON, make the apply APPEND a second block, and
- * leave the next re-check's strip swallowing the prose between the two sentinels.
- * The three existing authorities — `stripFactcheckBlock`, `spliceSentinelBlock`,
- * and the integrate engine's exclusion zones — all use the paired form; this makes
- * the fourth consumer agree with them.
+ *  - a sentinel counts only as the whole trimmed line (an inline-code mention in
+ *    prose never does);
+ *  - outside a live block, a line inside a fenced region never counts — the same
+ *    toggle the renderer uses, so what the reader hides is what this pairs;
+ *  - once a live START is found, fence lines are IGNORED until its END: the
+ *    `.mdx` appendix embeds answer text unquoted, and a stray ``` in it must not
+ *    turn the END into "fenced" and make every later ➕ append a duplicate;
+ *  - a START pairs with the first END after it; a START with no END is no block,
+ *    so nothing is ever deleted on its account.
+ */
+export function findLiveSentinelBlocks(text: string): SentinelBlockSpan[] {
+  const spans: SentinelBlockSpan[] = [];
+  const lines = text.split("\n");
+  let inFence = false;
+  let offset = 0;
+  let open: number | null = null; // offset of the live START, while inside a block
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (open !== null) {
+      if (trimmed === FACTCHECK_SENTINEL_END) {
+        spans.push({ start: open, end: offset + line.indexOf(FACTCHECK_SENTINEL_END) + FACTCHECK_SENTINEL_END.length });
+        open = null;
+      }
+    } else if (isFenceLine(trimmed)) {
+      inFence = !inFence;
+    } else if (!inFence && trimmed === FACTCHECK_SENTINEL_START) {
+      open = offset + line.indexOf(FACTCHECK_SENTINEL_START);
+    }
+    offset += line.length + 1;
+  }
+  return spans;
+}
+
+/** The first live block, or null. */
+export function findLiveSentinelBlock(text: string): SentinelBlockSpan | null {
+  return findLiveSentinelBlocks(text)[0] ?? null;
+}
+
+/** Index of the first line matching `pred` that is not inside a fenced region
+ *  (same toggle as {@link findLiveSentinelBlocks}), or -1. */
+export function firstUnfencedLineIndex(lines: readonly string[], pred: (line: string) => boolean): number {
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (isFenceLine(lines[i]!.trim())) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence && pred(lines[i]!)) return i;
+  }
+  return -1;
+}
+
+/**
+ * True when the body carries a COMPLETE live fact-check block.
+ *
+ * Deliberately paired, not a bare `includes(FACTCHECK_SENTINEL_START)`: a page
+ * carrying an orphan START (a truncated write, a hand-edit) has no block the
+ * splice can replace, so treating it as "already has one" would default the
+ * reader's refresh-callout checkbox ON and make the apply APPEND a second block.
+ * And live, not textual: a page whose only sentinels sit in a fenced example is
+ * appended to, so it must answer false here too.
  */
 export function hasFactcheckBlock(body: string): boolean {
-  return factcheckBlockRe().test(body);
+  return findLiveSentinelBlock(body) !== null;
 }
 
 /**
- * Remove every sentinel-wrapped fact-check block (sentinels included) from a page
- * body, so a re-check never sees its own prior verdicts. Tolerant of multiple
- * blocks and surrounding whitespace; collapses the resulting 3+ blank lines.
+ * Remove every live fact-check block (sentinels included) from a page body, so a
+ * re-check never sees its own prior verdicts. Tolerant of multiple blocks and
+ * surrounding whitespace; collapses the resulting 3+ blank lines.
  */
 export function stripFactcheckBlock(body: string): string {
-  return body.replace(factcheckBlockRe(true), "").replace(/\n{3,}/g, "\n\n").trim();
+  let out = "";
+  let at = 0;
+  for (const span of findLiveSentinelBlocks(body)) {
+    out += body.slice(at, span.start);
+    at = span.end;
+  }
+  out += body.slice(at);
+  return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /**
@@ -111,9 +174,9 @@ export function stripFactcheckBlock(body: string): string {
  */
 export function buildFactcheckBlock(answer: string, dateOslo: string): string {
   // Neutralize embedded sentinel strings (e.g. the model quoting a page that
-  // documents this feature): a literal end-sentinel inside the answer would make
-  // the non-greedy strip/replace regexes stop early, stranding prose and
-  // accumulating unbalanced sentinels on every re-append.
+  // documents this feature): a literal end-sentinel on its own line inside the
+  // answer would close the block early for `findLiveSentinelBlocks`, stranding
+  // prose and accumulating unbalanced sentinels on every re-append.
   const safeAnswer = answer
     .replaceAll(FACTCHECK_SENTINEL_START, "factcheck:start")
     .replaceAll(FACTCHECK_SENTINEL_END, "factcheck:end");

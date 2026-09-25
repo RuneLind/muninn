@@ -83,6 +83,7 @@ import {
   FACTCHECK_MAX_CLAIMS,
   FACTCHECK_SENTINEL_START,
   FACTCHECK_SENTINEL_END,
+  findLiveSentinelBlocks,
 } from "./factcheck-context.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import {
@@ -190,11 +191,6 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-const SENTINEL_BLOCK_RE = new RegExp(
-  escapeRegExp(FACTCHECK_SENTINEL_START) + "[\\s\\S]*?" + escapeRegExp(FACTCHECK_SENTINEL_END),
-  "g",
-);
-
 /**
  * A KNOWN component's opening / closing / self-closing tag **at the start of a
  * line** (leading indent captured separately so it is not swallowed into the
@@ -281,9 +277,10 @@ export function findExclusionZones(body: string, isMdx: boolean): Zone[] {
   const fm = body.match(FRONTMATTER_RE);
   if (fm && fm.index === 0) zones.push({ start: 0, end: fm[0].length, kind: "frontmatter" });
 
-  for (const m of body.matchAll(SENTINEL_BLOCK_RE)) {
-    if (m.index === undefined) continue;
-    zones.push({ start: m.index, end: m.index + m[0].length, kind: "sentinel" });
+  // Live blocks only, from the shared walker: a fenced example pair is masked by
+  // the fence scan below, and an inline-code mention in prose is prose.
+  for (const span of findLiveSentinelBlocks(body)) {
+    zones.push({ start: span.start, end: span.end, kind: "sentinel" });
   }
 
   // Fenced code blocks — a line-state scan, so an indented or info-string fence
@@ -421,10 +418,10 @@ export interface EditListResult {
  * Neutralize embedded fact-check sentinels in model- or client-supplied text —
  * the same treatment `buildFactcheckBlock` gives an answer body, for the same
  * reason: a lone injected `<!-- factcheck:start -->` spliced into the page makes
- * the NEXT "➕ Add to article" append's non-greedy `spliceSentinelBlock` match
- * from that stray marker and swallow the real prose between it and the true end
- * sentinel. Applied to every `new` at BOTH entry points (model parse + client
- * echo), so no path can inject one.
+ * the NEXT "➕ Add to article" append pair that stray marker with the true end
+ * sentinel (`findLiveSentinelBlocks` counts a whole-line sentinel outside a
+ * fence) and swallow the real prose between them. Applied to every `new` at BOTH
+ * entry points (model parse + client echo), so no path can inject one.
  */
 export function neutralizeFactcheckSentinels(text: string): string {
   return text

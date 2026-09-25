@@ -3906,11 +3906,11 @@ export function registerWikiRoutes(
       // when it does (refreshing a stale block is almost always wanted) and OFF on
       // a clean page. The client cannot derive this — the page body is not in the
       // turn — so it rides the propose response.
-      // PAIRED matcher, not a bare START scan: an orphan start sentinel means
-      // there is no block to replace, so claiming one would default the reader's
-      // refresh checkbox ON and make the apply append a SECOND block (whose next
-      // strip would then swallow the prose between them). `hasFactcheckBlock` is
-      // the shared authority the strip + splice + exclusion zones already use.
+      // A LIVE block, not a bare START scan: an orphan start sentinel, or a pair
+      // in a fenced example, means there is no block to replace, so claiming one
+      // would default the reader's refresh checkbox ON while the apply appends.
+      // `hasFactcheckBlock` reads the same walker (`findLiveSentinelBlocks`) as
+      // the strip, the splice and the exclusion zones.
       const hasSentinelBlock = hasFactcheckBlock(current);
 
       // Claim quotes are validated against the anchors we parse out of the SAME

@@ -45,8 +45,10 @@ const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
  * Drop the fact-check sentinel MARKERS that own a whole line, leaving the block
  * between them (real content) to render.
  *
- * Deliberately NOT the paired `start…end` regex the write-side authorities use,
- * and deliberately a line filter rather than a regex:
+ * Deliberately NOT the write side's `findLiveSentinelBlocks`, which answers a
+ * different question (where is the live block?): an UNPAIRED marker line is
+ * never content either, so it is dropped here too. The two agree on every page
+ * of mimir + jarvis (sweep, 2026-09-25). A line filter rather than a regex:
  *  - the marker literals come from `factcheck-context.ts` (the one authority)
  *    instead of a third hand-copied spelling;
  *  - a line must be EXACTLY the marker (surrounding whitespace ok), so
