@@ -38,6 +38,9 @@ import {
   WIKI_READONLY_WIKI_MESSAGE,
 } from "../views/components/wiki-readonly-client.ts";
 
+/** The gated gardener POSTs take application/json (a 415 otherwise — `json-request.ts`). */
+const JSON_POST: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
+
 /**
  * `WIKI_READONLY_ROOTS` at the ROUTE level — the per-wiki guard on a
  * WRITE-OWNING instance (`MUNINN_WIKI_READONLY` is off throughout, which is what
@@ -447,7 +450,7 @@ describe("WIKI_READONLY_ROOTS — gardener approve + backlog", () => {
     // verb at all (reject 409s "not reviewable"). Stuck forever on a refusal that
     // changed nothing.
     registerWikiGardenerRoutes(app, deps(fakeProposal()));
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string; readonly?: boolean };
     expect(body.readonly).toBe(true);
@@ -459,7 +462,7 @@ describe("WIKI_READONLY_ROOTS — gardener approve + backlog", () => {
   test("CONTROL: the same approve on a WRITABLE wiki reaches the CAS", async () => {
     __setReadonlyWikiRootsForTest([]);
     registerWikiGardenerRoutes(app, deps(fakeProposal()));
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     // It fails later (no such wiki root content / apply error) — what matters is
     // that the row WAS claimed, i.e. the guard is per-wiki and not global.
     expect(res.status).not.toBe(403);

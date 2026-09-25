@@ -39,6 +39,9 @@ import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 
+/** The gated gardener POSTs take application/json (a 415 otherwise — `json-request.ts`). */
+const JSON_POST: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
+
 /**
  * One fetch per registered summary source. Derived, never a literal: the
  * backlog fans out over `SUMMARY_SOURCES`, so a new vertical moves every count
@@ -1261,13 +1264,68 @@ describe("prune routes — dismiss / un-dismiss / reset guards (PR 2)", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  // Every prune verb takes application/json (a bodyless reset sends `{}`, as its
+  // client does) — see the 415 cases below.
   const post = async (path_: string, body?: unknown): Promise<Response> =>
     await app.request(`${path_}${path_.includes("?") ? "&" : "?"}wiki=prunebot`, {
       method: "POST",
-      ...(body === undefined
-        ? {}
-        : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body ?? {}),
     });
+
+  const PRUNE_VERBS = [
+    "/api/wiki/gardener/backlog-docs-dismiss",
+    "/api/wiki/gardener/backlog-docs-undismiss",
+    "/api/wiki/gardener/backlog-docs-dismiss-reset",
+    "/api/wiki/gardener/backlog-doc-delete",
+  ] as const;
+
+  /** The two CORS-simple shapes: no body at all, and JSON bytes labelled text/plain. */
+  const nonJsonInits = (): RequestInit[] => [
+    { method: "POST" },
+    {
+      method: "POST",
+      headers: { "content-type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify({ keys: ["c/a"], collection: "youtube-summaries", id: "a" }),
+    },
+  ];
+
+  test("a non-JSON POST is 415 on every prune verb, and nothing is written", async () => {
+    snapshots.set("backlog:dismissed", ["c/keep"]);
+    for (const p of PRUNE_VERBS) {
+      for (const init of nonJsonInits()) {
+        const res = await app.request(`${p}?wiki=prunebot`, init);
+        expect(res.status).toBe(415);
+      }
+    }
+    expect(snapshots.get("backlog:dismissed")).toEqual(["c/keep"]);
+  });
+
+  test("the 415 comes before the gardener mutex (a held mutex still answers 415, not 409)", async () => {
+    let release!: () => void;
+    const held = runExclusive("prunebot", () => new Promise<void>((r) => (release = r)));
+    try {
+      for (const p of PRUNE_VERBS) {
+        const res = await app.request(`${p}?wiki=prunebot`, nonJsonInits()[1]);
+        expect(res.status).toBe(415);
+      }
+    } finally {
+      release();
+      await held;
+    }
+  });
+
+  test("a read-only instance still refuses FIRST — 403 outranks the 415", async () => {
+    __setWikiReadonlyForTest(true);
+    try {
+      for (const p of PRUNE_VERBS) {
+        const res = await app.request(`${p}?wiki=prunebot`, nonJsonInits()[1]);
+        expect(res.status).toBe(403);
+      }
+    } finally {
+      __setWikiReadonlyForTest();
+    }
+  });
 
   test("dismiss persists the keys, un-dismiss removes them, reset clears the set", async () => {
     const r1 = await post("/api/wiki/gardener/backlog-docs-dismiss", { keys: ["c/a", "c/b"] });
@@ -1490,6 +1548,19 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+
+  test("a text/plain delete is 415: no huginn DELETE, no proposal delete, no snapshot prune", async () => {
+    const before = JSON.stringify([...snapshots]);
+    const res = await app.request("/api/wiki/gardener/backlog-doc-delete?wiki=delbot", {
+      method: "POST",
+      headers: { "content-type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify({ collection: "youtube-summaries", id: "junk.md" }),
+    });
+    expect(res.status).toBe(415);
+    expect(deleteCalls).toEqual([]);
+    expect(proposalCalls).toEqual([]);
+    expect(JSON.stringify([...snapshots])).toBe(before);
+  });
 
   test("a confirmed delete notifies the summary-document listeners; a refused one does not", async () => {
     // The Vimeo route's recently-ingested dedup map hears about deletes only
@@ -2055,6 +2126,21 @@ describe("approve — stem-collision refusal (the apply path had no check at all
     await rm(root, { recursive: true, force: true });
   });
 
+  test("approve + reject: a non-JSON POST is 415 before any lookup, CAS or write", async () => {
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    for (const verb of ["approve", "reject"]) {
+      for (const init of [
+        { method: "POST" },
+        { method: "POST", headers: { "content-type": "text/plain;charset=UTF-8" }, body: "{}" },
+      ]) {
+        const res = await app.request(`/api/wiki/proposals/p1/${verb}`, init);
+        expect([verb, res.status]).toEqual([verb, 415]);
+      }
+    }
+    expect(approved).toEqual([]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
   test("an existing .mdx source page blocks a same-stem .md entity apply — 409, no CAS, no write", async () => {
     await Bun.write(
       path.join(root, "sources", `${STEM}.mdx`),
@@ -2062,7 +2148,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
     );
     registerWikiGardenerRoutes(app, deps(proposalRow()));
 
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string; collision?: boolean };
     // `collision` is the whole machine marker — the blocking path and title used to
@@ -2084,8 +2170,8 @@ describe("approve — stem-collision refusal (the apply path had no check at all
       `---\ntitle: ${STEM}\ntype: source\n---\n\nBody.\n`,
     );
     registerWikiGardenerRoutes(app, deps(proposalRow()));
-    const first = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
-    const second = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const first = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
+    const second = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(first.status).toBe(409);
     expect(second.status).toBe(409);
     expect(approved).toEqual([]);
@@ -2099,7 +2185,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
     await Bun.write(path.join(root, "entities", `${STEM}.md`), draft);
     registerWikiGardenerRoutes(app, deps(proposalRow({ status: "approved", draft })));
 
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     // Assert on the GUARD's own observable, never on `status !== 409`: 409 is also
     // the route's "proposal state changed during apply" answer, which this fixture
     // reaches whenever a DB happens to be connected (it is, in the full suite —
@@ -2129,7 +2215,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
       app,
       deps(proposalRow({ mode: "update", baseHash: Bun.SHA256.hash(body, "hex") })),
     );
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
     // The row was CLAIMED — the guard sits above the CAS, so reaching it proves
     // the guard let this through rather than refusing it.
@@ -2146,7 +2232,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
       `---\ntitle: ${STEM}\ntype: concept\n---\n\nBody.\n`,
     );
     registerWikiGardenerRoutes(app, deps(proposalRow()));
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
     expect(approved).toEqual(["p1"]);
     expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(true);
@@ -2160,7 +2246,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
       `<!doctype html><html><head><title>${STEM}</title></head><body>Synthesized fixture.</body></html>`,
     );
     registerWikiGardenerRoutes(app, deps(proposalRow()));
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toContain(`blogs/${STEM}.html`);
     expect(approved).toEqual([]);
@@ -2183,7 +2269,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
       `---\ntitle: ${STEM}\ntype: source\n---\n\nSynthesized fixture body.\n`,
     );
     // 3. Approve. No cache reset here on purpose — that IS the reproduction.
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(res.status).toBe(409);
     expect(((await res.json()) as { collision?: boolean }).collision).toBe(true);
     expect(approved).toEqual([]);
@@ -2201,7 +2287,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
       `---\ntitle: ${STEM}\ntype: source\n---\n\nBody.\n`,
     );
     registerWikiGardenerRoutes(app, deps(proposalRow({ status: "rejected" })));
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string; collision?: boolean; status?: string };
     expect(body.collision).toBeUndefined();
@@ -2218,7 +2304,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
     await chmod(root, 0o000);
     try {
       registerWikiGardenerRoutes(app, deps(proposalRow()));
-      const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+      const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
       // The observable is the CAS, not the status: the row was CLAIMED, which only
       // happens PAST the guard — before this fix the throw escaped the guard and
       // the CAS was never reached. (The apply's own index read then throws too;
@@ -2233,7 +2319,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
 
   test("a row whose wiki this process cannot resolve skips the guard, does not 409", async () => {
     registerWikiGardenerRoutes(app, deps(proposalRow({ wikiName: "no-such-wiki" })));
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
     // The apply block below the CAS is what reports the unresolvable wiki properly.
     expect(approved).toEqual(["p1"]);
@@ -2245,7 +2331,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
       "---\ntitle: Aurora Ledger Protocols\ntype: source\n---\n\nBody.\n",
     );
     registerWikiGardenerRoutes(app, deps(proposalRow()));
-    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/p1/approve", JSON_POST);
     expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
     expect(approved).toEqual(["p1"]);
     // The apply ran: the page really was written at the near-miss-free stem.
@@ -2360,7 +2446,7 @@ describe("approve — the in-queue collision refusal returns the row to draft", 
   test("a twin landing after the CAS: 409 with the collision sentence, row back to draft, nothing written", async () => {
     registerWikiGardenerRoutes(app, deps(landTwin));
 
-    const res = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/q1/approve", JSON_POST);
 
     // Same status and same body shape as the pre-CAS guard — a reviewer hitting the
     // two paths seconds apart must not be able to tell them apart. NOT the 500 the
@@ -2387,11 +2473,11 @@ describe("approve — the in-queue collision refusal returns the row to draft", 
     // repeatable rather than a one-way trip.
     registerWikiGardenerRoutes(app, deps(landTwin));
 
-    const first = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    const first = await app.request("/api/wiki/proposals/q1/approve", JSON_POST);
     expect(first.status).toBe(409);
     expect(row.status).toBe("draft");
 
-    const second = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    const second = await app.request("/api/wiki/proposals/q1/approve", JSON_POST);
     expect(second.status).toBe(409);
     expect(((await second.json()) as { collision?: boolean }).collision).toBe(true);
     expect(row.status).toBe("draft");
@@ -2410,7 +2496,7 @@ describe("approve — the in-queue collision refusal returns the row to draft", 
     await landTwin();
     registerWikiGardenerRoutes(app, deps());
 
-    const res = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/q1/approve", JSON_POST);
     expect(res.status).toBe(409);
     expect(((await res.json()) as { collision?: boolean }).collision).toBe(true);
     // Re-reviewable: the recovery row is a draft with Approve/Reject on it again.
@@ -2430,7 +2516,7 @@ describe("approve — the in-queue collision refusal returns the row to draft", 
     });
     registerWikiGardenerRoutes(app, d);
 
-    const res = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    const res = await app.request("/api/wiki/proposals/q1/approve", JSON_POST);
     expect(res.status).toBe(409);
     expect(((await res.json()) as { collision?: boolean }).collision).toBe(true);
     expect(reverted).toEqual([]);
@@ -2571,7 +2657,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
     __setWikiReadonlyForTest(true);
 
-    const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", { method: "POST" });
+    const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", JSON_POST);
     expect(res.status).toBe(403);
     expect(((await res.json()) as { readonly?: boolean }).readonly).toBe(true);
     // The whole point of refusing at the route: no lint pass, no rows.
@@ -2583,7 +2669,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
     __setReadonlyWikiRootsForTest([root]);
 
-    const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", { method: "POST" });
+    const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", JSON_POST);
     expect(res.status).toBe(403);
     const payload = (await res.json()) as { readonly?: boolean; error: string };
     expect(payload.readonly).toBe(true);
@@ -2604,7 +2690,7 @@ describe("lint proposals — seeding and the group verbs", () => {
         },
       }),
     );
-    const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", { method: "POST" });
+    const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", JSON_POST);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ proposed: 2, rows: 5, skipped: 1 });
     expect(handed.wikiDir).toBe(root);
@@ -2653,11 +2739,45 @@ describe("lint proposals — seeding and the group verbs", () => {
     };
   }
 
+  // These three POSTs carry no body, so before the gate a cross-origin
+  // `<form method=post>` or a `text/plain` fetch (CORS *simple*, no preflight)
+  // could seed rows or write `series:` lines into the wiki.
+  const NON_JSON: RequestInit[] = [
+    { method: "POST" },
+    { method: "POST", headers: { "content-type": "text/plain;charset=UTF-8" }, body: "{}" },
+  ];
+
+  test("lint-proposals: a non-JSON POST is 415 and seeds nothing", async () => {
+    let seeded = false;
+    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
+    for (const init of NON_JSON) {
+      const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", init);
+      expect(res.status).toBe(415);
+    }
+    expect(seeded).toBe(false);
+  });
+
+  test("group approve + reject: a non-JSON POST is 415, no row moves and no file is written", async () => {
+    const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+    registerWikiGardenerRoutes(app, deps(store.deps));
+    for (const verb of ["approve", "reject"]) {
+      for (const init of NON_JSON) {
+        const res = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}?wiki=lintwiki`, init);
+        expect([verb, res.status]).toEqual([verb, 415]);
+      }
+    }
+    expect(store.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
+    expect(store.marked).toEqual([]);
+    expect(await Bun.file(path.join(root, PAGE_A)).text()).toBe(body("A"));
+    expect(await Bun.file(path.join(root, PAGE_B)).text()).toBe(body("B"));
+    expect(await Bun.file(path.join(root, "log.md")).exists()).toBe(false);
+  });
+
   test("group approve: every row lands, in ONE pass, and the files carry the edit", async () => {
     const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
     registerWikiGardenerRoutes(app, deps(store.deps));
 
-    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ outcome: "applied", applied: [PAGE_A, PAGE_B], noop: [] });
     expect(store.marked).toEqual([["r1", "applied"], ["r2", "applied"]]);
@@ -2668,7 +2788,7 @@ describe("lint proposals — seeding and the group verbs", () => {
   test("group approve writes ONE log.md entry naming every page and the seeder", async () => {
     const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
     registerWikiGardenerRoutes(app, deps(store.deps));
-    await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
 
     const log = await Bun.file(path.join(root, "log.md")).text();
     // One entry, not one per row: twelve entries differing only in which
@@ -2688,7 +2808,7 @@ describe("lint proposals — seeding and the group verbs", () => {
       const one = new Hono();
       registerWikiGardenerRoutes(one, deps(store.deps));
 
-      const res = await one.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+      const res = await one.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
       expect([blocking, res.status]).toEqual([blocking, 409]);
       // A reviewer who dismissed one member cannot then accept the group, and an
       // `approved` row means another apply is mid-flight over these same pages.
@@ -2714,14 +2834,14 @@ describe("lint proposals — seeding and the group verbs", () => {
     ]);
     registerWikiGardenerRoutes(app, deps(store.deps));
 
-    const first = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    const first = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
     expect(first.status).toBe(409);
     expect(store.rows().map((r) => r.status)).toEqual(["applied", "stale", "draft"]);
 
     // THE POINT: the stop left the card reviewable, so the very next Accept has
     // to be able to act on it. An all-or-nothing gate answers `mixed` here and
     // the reverted rows can never be applied at all.
-    const second = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    const second = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
     expect(second.status).toBe(200);
     expect(await second.json()).toMatchObject({
       outcome: "applied",
@@ -2741,7 +2861,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     ]);
     registerWikiGardenerRoutes(app, deps(store.deps));
 
-    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
     expect(res.status).toBe(409);
     // `mixed` would claim the group is half-reviewed; there is simply nothing
     // left to apply, and the reviewer needs to be told which.
@@ -2760,7 +2880,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     const app2 = new Hono();
     registerWikiGardenerRoutes(app2, deps(store.deps));
 
-    const res = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    const res = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
     expect(res.status).toBe(409);
     // A `rejected` row BLOCKS a group that still holds a draft — but with no
     // draft left there is no other decision in flight to wait for, and `mixed`'s
@@ -2813,7 +2933,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     ]);
     registerWikiGardenerRoutes(app, deps(store.deps));
 
-    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
     expect(res.status).toBe(409);
     const payload = (await res.json()) as { outcome: string; applied: string[]; stoppedAt: string };
     expect(payload.outcome).toBe("stopped");
@@ -2838,7 +2958,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     const store = groupStore([{ ...row, baseHash: hashOf(row.draft) }]);
     registerWikiGardenerRoutes(app, deps(store.deps));
 
-    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
     expect(res.status).toBe(200);
     // It is `applied` in the DB — it is done — but the ANSWER keeps the two
     // apart, or the card reports a page written on a click that touched none.
@@ -2848,12 +2968,12 @@ describe("lint proposals — seeding and the group verbs", () => {
 
   test("group approve on an unknown group is a 404, and on an already-applied group a 409", async () => {
     registerWikiGardenerRoutes(app, deps({ listProposalsByGroup: async () => [] }));
-    expect((await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" })).status).toBe(404);
+    expect((await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST)).status).toBe(404);
 
     const app2 = new Hono();
     const done = [{ ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "applied" }];
     registerWikiGardenerRoutes(app2, deps({ listProposalsByGroup: async () => done, approveProposalGroup: async () => [] }));
-    const res = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+    const res = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
     expect(res.status).toBe(409);
     expect((await res.json()) as { statuses: Record<string, number> }).toMatchObject({
       statuses: { applied: 1 },
@@ -2885,7 +3005,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     try {
       // (b) a name nothing is registered under — 404, and no row is read.
       for (const verb of ["approve", "reject"]) {
-        const unknown = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}?wiki=nope`, { method: "POST" });
+        const unknown = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}?wiki=nope`, JSON_POST);
         expect([verb, unknown.status]).toEqual([verb, 404]);
       }
 
@@ -2897,7 +3017,7 @@ describe("lint proposals — seeding and the group verbs", () => {
         if (wikiDir === undefined) delete process.env.WIKI_DIR;
         else process.env.WIKI_DIR = wikiDir; // restored by afterEach
         for (const verb of ["approve", "reject"]) {
-          const bare = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}`, { method: "POST" });
+          const bare = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}`, JSON_POST);
           expect([String(wikiDir), verb, bare.status]).toEqual([String(wikiDir), verb, 400]);
         }
       }
@@ -2905,7 +3025,7 @@ describe("lint proposals — seeding and the group verbs", () => {
       expect(await Bun.file(path.join(root, PAGE_A)).text()).not.toContain("series:");
 
       // (a) the registered name — the verb acts, and the file carries the edit.
-      const named = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, { method: "POST" });
+      const named = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
       expect(named.status).toBe(200);
       expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
 
@@ -2914,7 +3034,7 @@ describe("lint proposals — seeding and the group verbs", () => {
       const store2 = groupStore([await lintRow("r2", PAGE_B, "prov")]);
       const app2 = new Hono();
       registerWikiGardenerRoutes(app2, deps(store2.deps));
-      const alias = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?bot=lintwiki`, { method: "POST" });
+      const alias = await app2.request(`/api/wiki/proposals/group/${GROUP}/approve?bot=lintwiki`, JSON_POST);
       expect(alias.status).toBe(200);
       expect(await Bun.file(path.join(root, PAGE_B)).text()).toContain("series: prov");
     } finally {
@@ -2989,13 +3109,13 @@ describe("lint proposals — seeding and the group verbs", () => {
     registerWikiGardenerRoutes(app, deps(store.deps));
 
     __setWikiReadonlyForTest(true);
-    const instance = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, { method: "POST" });
+    const instance = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
     expect(instance.status).toBe(403);
     expect(((await instance.json()) as { readonly?: boolean }).readonly).toBe(true);
 
     __setWikiReadonlyForTest(false);
     __setReadonlyWikiRootsForTest([root]);
-    const perWiki = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, { method: "POST" });
+    const perWiki = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
     expect(perWiki.status).toBe(403);
     // The per-wiki sentence, not the instance one.
     expect(((await perWiki.json()) as { error: string }).error).not.toContain("MUNINN_WIKI_READONLY");
@@ -3018,10 +3138,10 @@ describe("lint proposals — seeding and the group verbs", () => {
         },
       }),
     );
-    const first = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, { method: "POST" });
+    const first = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
     expect(first.status).toBe(200);
     expect(await first.json()).toMatchObject({ outcome: "rejected", rejected: 1 });
-    const second = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, { method: "POST" });
+    const second = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
     expect(second.status).toBe(409);
   });
 });

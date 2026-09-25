@@ -114,6 +114,7 @@ import { loadConfig } from "../../config.ts";
 import { Tracer } from "../../tracing/index.ts";
 import { getLog } from "../../logging.ts";
 import { readonlyRefusal as sharedReadonlyRefusal } from "./route-utils.ts";
+import { requireJsonRequest } from "./json-request.ts";
 
 const log = getLog("dashboard", "wiki-gardener");
 
@@ -1799,13 +1800,17 @@ export function registerWikiGardenerRoutes(
    *
    * The readonly refusal leads it: a prune verb writes no wiki page, but it DOES
    * mutate snapshots the write owner's in-flight drain reads (and, for delete,
-   * huginn itself) — so a non-owner instance must not touch them.
+   * huginn itself) — so a non-owner instance must not touch them. The 415 for a
+   * non-JSON POST (a CORS simple request, see `json-request.ts`) comes next,
+   * before the watcher lookup, the mutex, huginn or any snapshot write.
    */
   const resolvePruneTarget = async (
     c: Context,
   ): Promise<{ bot: BotConfig; watcher: GardenerWatcherRef } | { refusal: Response }> => {
     const refused = readonlyRefusal(c);
     if (refused) return { refusal: refused };
+    const notJson = requireJsonRequest(c);
+    if (notJson) return { refusal: notJson };
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) {
       return { refusal: backlogRefusal(c, resolved) };
@@ -2267,6 +2272,10 @@ export function registerWikiGardenerRoutes(
     // and the seam's own `forbidden` (mapped below) would arrive after the flip.
     const refused = readonlyRefusal(c);
     if (refused) return refused;
+    // Bodyless, so a cross-origin form POST could apply a proposal — the client
+    // sends `{}` as application/json (see `json-request.ts`).
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
     const id = c.req.param("id");
     const existing = await backlogDeps.getProposalById(id);
     if (!existing) return c.json({ error: "proposal not found" }, 404);
@@ -2503,6 +2512,8 @@ export function registerWikiGardenerRoutes(
 
   // Reject → CAS draft→rejected. Rejected topicKeys are skipped by the cluster filter.
   app.post("/api/wiki/proposals/:id/reject", async (c) => {
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
     const id = c.req.param("id");
     const existing = await getWikiProposalById(id);
     if (!existing) return c.json({ error: "proposal not found" }, 404);
@@ -2536,6 +2547,10 @@ export function registerWikiGardenerRoutes(
   app.post("/api/wiki/lint-proposals", async (c) => {
     const refused = readonlyRefusal(c);
     if (refused) return refused;
+    // Bodyless (the wiki comes from `?wiki=`), so a cross-origin form POST could
+    // seed rows — the client sends `{}` as application/json.
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
 
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
@@ -2609,6 +2624,8 @@ export function registerWikiGardenerRoutes(
   app.post("/api/wiki/proposals/group/:groupKey/approve", async (c) => {
     const refused = readonlyRefusal(c);
     if (refused) return refused;
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
     const groupKey = c.req.param("groupKey");
 
     const scope = resolveGroupScope(c);
@@ -2719,6 +2736,8 @@ export function registerWikiGardenerRoutes(
   app.post("/api/wiki/proposals/group/:groupKey/reject", async (c) => {
     const refused = readonlyRefusal(c);
     if (refused) return refused;
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
     const groupKey = c.req.param("groupKey");
     const scope = resolveGroupScope(c);
     if ("error" in scope) return c.json({ error: scope.error }, scope.status);
