@@ -1347,6 +1347,39 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     expect(vimeoSummarizeCalls).toBe(0);
   });
 
+  // A `text/plain` or body-less POST is a CORS *simple* request (no preflight),
+  // and Hono parses the body whatever the header says — so without a 415 any
+  // page could start a Chromium harvest and a model turn.
+  test("a non-JSON POST is 415 before oEmbed, a job or a harvest", async () => {
+    const before = vmState.getRecentJobs().length;
+    for (const init of [
+      { method: "POST" },
+      {
+        method: "POST",
+        headers: { "content-type": "text/plain;charset=UTF-8" },
+        body: JSON.stringify({ url: VIMEO_URL }),
+      },
+    ]) {
+      const res = await vmApp().request("/api/vimeo/summarize", init);
+      expect(res.status).toBe(415);
+      expect(((await res.json()) as { code?: string }).code).toBe("bad_content_type");
+    }
+    expect(oembedCalls).toBe(0);
+    expect(vmState.getRecentJobs().length).toBe(before);
+    expect(vimeoSummarizeCalls).toBe(0);
+  });
+
+  test("an application/json POST with a charset still starts a job", async () => {
+    const res = await vmApp().request("/api/vimeo/summarize", {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ url: VIMEO_URL }),
+    });
+    expect(res.status).toBe(200);
+    expect(typeof ((await res.json()) as { job_id?: unknown }).job_id).toBe("string");
+    expect(oembedCalls).toBe(1);
+  });
+
   test("a video EXACTLY at the cap is accepted", async () => {
     oembedAnswer = { ...(oembedAnswer as Record<string, unknown>), durationSec: 10_800 } as typeof oembedAnswer;
     const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL });

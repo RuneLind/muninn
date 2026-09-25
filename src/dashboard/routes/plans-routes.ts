@@ -120,6 +120,7 @@ import {
 import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
 import { sha256, todayOslo } from "../../gardener/util.ts";
 import { readonlyRefusal } from "./route-utils.ts";
+import { isJsonRequest } from "./json-request.ts";
 import { renderPlansPage } from "../views/plans-page.ts";
 
 const log = getLog("dashboard", "plans");
@@ -627,7 +628,9 @@ const PLAN_BODY_MAX_BYTES = 256 * 1024;
  */
 async function readJsonBody(
   c: Context,
-): Promise<{ body: Record<string, unknown> } | { error: string; status: 400 | 413 }> {
+): Promise<{ body: Record<string, unknown> } | { error: string; status: 400 | 413 | 415 }> {
+  // A `text/plain` or bodyless POST is a CORS simple request (`json-request.ts`).
+  if (!isJsonRequest(c)) return { error: "This endpoint takes application/json.", status: 415 };
   const overLimit = {
     error: `request body is larger than the ${PLAN_BODY_MAX_BYTES}-byte limit`,
     status: 413 as const,

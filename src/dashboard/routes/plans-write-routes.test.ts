@@ -769,3 +769,79 @@ describe("a HELD wiki write lock at the two plan write routes", () => {
     expect(await Bun.file(path.join(root, "plans", "alpha-plan.mdx")).text()).toContain("priority: p1");
   });
 });
+
+// ── application/json is required (architecture review 2026-09, finding 8) ──
+//
+// A `text/plain` POST is a CORS *simple* request — no preflight — and these
+// three routes used to parse any body whatever its header said, so a
+// cross-origin page could rewrite a plan's frontmatter or the queue file.
+
+describe("the three plan write routes take application/json only", () => {
+  const queueFile = (root: string) => path.join(root, QUEUE_REL_PATH);
+
+  test("a text/plain or bodyless POST is 415 and writes nothing", async () => {
+    const root = await makeWiki();
+    const a = app(root);
+    const hash = await hashOf(root, "alpha-plan");
+    const bodies: Array<[string, unknown]> = [
+      ["/api/plans/priority", { slug: "alpha-plan", priority: "p1", baseHash: hash }],
+      ["/api/plans/status", { slug: "alpha-plan", status: "abandoned", baseHash: hash }],
+      ["/api/plans/order", { order: { ready: ["alpha-plan"] }, baseHash: "" }],
+    ];
+    for (const [url, body] of bodies) {
+      for (const init of [
+        { method: "POST", headers: { "content-type": "text/plain;charset=UTF-8" }, body: JSON.stringify(body) },
+        { method: "POST" },
+      ]) {
+        const res = await a.request(url, init);
+        expect([url, res.status]).toEqual([url, 415]);
+      }
+    }
+    expect(await pageText(root, "alpha-plan")).toBe(plan("alpha-plan"));
+    expect(await Bun.file(queueFile(root)).exists()).toBe(false);
+  });
+
+  test("the readonly refusal still answers first", async () => {
+    const root = await makeWiki();
+    __setWikiReadonlyForTest(true);
+    const res = await app(root).request("/api/plans/priority", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "{}",
+    });
+    expect(res.status).toBe(403);
+  });
+
+  // A known slug proves the WRITE: `{order: {ready: []}}` against no queue
+  // file answers 200 `written: false` and would pass whatever the gate did.
+  test("application/json, with and without a charset, still writes", async () => {
+    for (const ct of ["application/json", "application/json; charset=utf-8"]) {
+      const root = await makeWiki();
+      const a = app(root);
+      const pri = await a.request("/api/plans/priority", {
+        method: "POST",
+        headers: { "content-type": ct },
+        body: JSON.stringify({ slug: "alpha-plan", priority: "p1", baseHash: await hashOf(root, "alpha-plan") }),
+      });
+      expect([ct, pri.status]).toEqual([ct, 200]);
+      expect((await pri.json()).written).toBe(true);
+      expect(await pageText(root, "alpha-plan")).toContain("priority: p1");
+
+      const st = await a.request("/api/plans/status", {
+        method: "POST",
+        headers: { "content-type": ct },
+        body: JSON.stringify({ slug: "beta-plan", status: "abandoned", baseHash: await hashOf(root, "beta-plan") }),
+      });
+      expect([ct, st.status]).toEqual([ct, 200]);
+      expect(await pageText(root, "beta-plan")).toContain("plan_status: abandoned");
+
+      const ord = await a.request("/api/plans/order", {
+        method: "POST",
+        headers: { "content-type": ct },
+        body: JSON.stringify({ order: { ready: ["alpha-plan"] }, baseHash: "" }),
+      });
+      expect([ct, ord.status]).toEqual([ct, 200]);
+      expect(await Bun.file(queueFile(root)).text()).toBe("ready:\n  - alpha-plan\n");
+    }
+  });
+});

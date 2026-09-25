@@ -754,7 +754,9 @@ capture.
 `corsPreflight: false` and the POST calls no `applyCors`: there is no Chrome
 extension for this vertical (PR 3's entry point is same-origin), and a
 cross-origin summarize entry is a way for any page to spend the operator's model
-budget.
+budget. Missing CORS headers do not stop a CORS *simple* request, so the POST
+also answers **415** to anything that is not `application/json`, before oEmbed
+(`dashboard/routes/json-request.ts`).
 
 **`MUNINN_PROFILE=nais` drops the group**, for the reason the other capture
 verticals are dropped with a different binary: the capture launches a headless
