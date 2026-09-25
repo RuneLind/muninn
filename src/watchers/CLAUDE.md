@@ -1514,6 +1514,7 @@ group apply and why Dismiss is durable: `src/gardener/CLAUDE.md`.
      pages" was those two counts added together and attributed to mimir alone — and
      a control copy of mimir's plan page with ONE live occurrence added reports
      exactly that line and none of its six documented ones.
+  6b. **unrendered-fact-mark** — a page whose zone-aware `countFactWrappers` differs from the `fc-mark` elements (inline span and `fc-mark-block` alike) `formatWebHtml` renders for its body: a `<Fact>` shipping as literal markup, such as one across a table row's pipes written before #500. Report-only; the rule is in `src/web/CLAUDE.md`.
   7. **stem-collision** — two same-stem MARKDOWN pages, one of which `store.ts`'s
      precedence rule (`.md` > `.mdx`) therefore DROPPED from the index. The
      continuous regression guard behind the apply path's approve-time refusal
