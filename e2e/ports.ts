@@ -166,6 +166,10 @@ export const E2E_PORTS = {
   // claude-usage answering per root.
   "wiki-activity-worked": 3069,
   "wiki-activity-worked/ledger": 3070,
+  // Tracker links: two temp wikis in ONE process — one declaring a `trackers`
+  // block (pills, the widened Jira facet) and one that does not, which must
+  // render today's stamped-only facet and no pills.
+  "wiki-tracker-links": 3071,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

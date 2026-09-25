@@ -2031,6 +2031,131 @@ a 15 s timeout and nothing remembered that it had just expired, so a down huginn
 cost every caller 15 s — and on this path that is once per stamped page open.
 Short deliberately: the answer it suppresses is a degrade rather than a result.
 
+### Tracker inference (`src/wiki/trackers/`, `.wiki-reader.json` `trackers`)
+
+Pages name their issues in titles, file names, tags and links far more often
+than in a stamped `jira:` line, so a wiki whose `.wiki-reader.json` declares a
+`trackers` block gets `issues` inferred per page at index time
+(`buildWikiIndex`, where the body is already in hand). Code outside the one
+adapter file says tracker / issue / issue ref (`{tracker, key, relations}`);
+`jira.ts` is the only adapter, registered in `index.ts`.
+
+- **The block** is parsed with the rule every other block here follows: a bad
+  field warns and drops alone, and in a list a bad ELEMENT drops alone — a
+  `projects` entry must be a 2–16-character key prefix (the shape the mention
+  scanner can find), a `hosts` entry a bare hostname with an optional port. An
+  entry is dropped WHOLE only for an unknown `id`, a duplicate, or no usable
+  `projects` — `projects` bounds every inferred key, so without it the entry
+  could only guess. No usable entry ⇒ no tracker. Each warning names its
+  config key (`trackers[0].hosts[1]`) as its own log property, the `activity`
+  block's convention.
+- **Relations**, strongest first: `stamped` (the adapter's `frontmatterKey`
+  line: an entry that is itself exactly key-shaped is kept whatever its case,
+  any other entry is prose and goes through `extractJiraKeys` — uppercase only,
+  denylisted; NOT project-bounded), `declared` (the configured
+  `frontmatterKeys`, project-bounded), `created` ("created here": a `link` after
+  a `createdMarkers` word in the same clause), `title` (the authored `title:`
+  line only, never the stem fallback; UPPERCASE keys only, so a bot name like
+  `demo-2` is not a key; shorthands `A-145/174` and `A-158 + 169`; an `.html`
+  page's `<title>`), `stem` (case-insensitive; the two-key form
+  `demo-7588-7969-notes` yields both), `tag`, `link` (`browse/KEY` on a
+  configured host), `mention` (a bare uppercase key in the body). Every
+  relation is kept per key.
+- **What is not a key**, in every inferred rule: ASCII word edges on both sides
+  (`xdemo-1`, `demo-12x`, `FOO_X-7`), a number with a leading zero
+  (`DEMO-0145`), a run followed by `-` and a digit (`demo-2026-09-25`,
+  `DEMO-1-2` — `extractJiraKeys` shares that rule, so the Jira composer's key
+  check changed with it), and any key that is not ASCII key-shaped and in a
+  configured project after normalization (a Kelvin sign `K` never becomes a
+  `KODE` key: the key-scanning regexes carry no `u` — the created-marker
+  regex does, which folds only the marker word — and the membership check is
+  a second layer in the scan path; `stampedKeys` requires an exact entry to be ASCII key-shaped BEFORE
+  it upper-cases it, since `toUpperCase` maps `ſ` to S and `ı` to I). A chained
+  number — a title shorthand or the stem's second key — must have the base
+  number's digit count, no leading zero and end cleanly, and a title shorthand
+  must also sit within 1000 of the base (`DEMO-145/2026 rapport`,
+  `DEMO-8045/2026`, `DEMO-8045 + 2025-kjøringen` each yield the base key
+  alone, while `DEMO-7588/7969 Nullable sats` yields both). Accepted residual:
+  a same-width count within 1000 still chains (`DEMO-145 + 300 saker` mints
+  `DEMO-300`). At most five expansions per base key. The `link` rule carries
+  the same right edge (`browse/DEMO-12-3` and `browse/DEMO-77abc` are no link).
+- **Masks.** Every body rule reads the body with fenced code, inline code and
+  HTML comments blanked, same length; `mention` additionally blanks URLs,
+  markdown link destinations and wikilink targets.
+- **A clause** ends at a newline, `·`, `;`, a period followed by whitespace or
+  the line's end, and — on a table row only — a `|` outside `[...]`/`[[...]]`,
+  where only a `[` with a matching `]` later on the line opens a bracket.
+  Never a character count. Boundaries are computed once per line that holds a
+  link, and not at all on a wiki with no `createdMarkers`.
+- **Bookkeeping pages** (`isMetaStem`) are never inferred from, and an `.html`
+  page reads only its bounded `<head>` prefix (title, keywords).
+- ⚠️ **`link` and `mention` are the DEMOTED tier** (`DEMOTED_RELATIONS`,
+  `relationsCount` in `types.ts`). A key whose only relations are those two
+  stays in the page's full `issues` — the single-page meta, for PR 3's "also
+  linked" line — but is not a pill, not a facet key and not in a key's page
+  count. `link` joined `mention` after measurement: on melosys-kode-wiki it was
+  right on ~42 % of its 118 refs and ~23 % of the 88 where it stood alone
+  (epics, "Relatert" lines, history tables). `created` still refines a link and
+  counts; a key that is `link` plus anything stronger counts through that.
+  `tag` sits above `link` in `RELATION_STRENGTH` for that reason, so
+  `relations[0]` is always a counting relation on a counting key.
+- **Payloads.** `WikiPageMeta.issues` is absent, never `[]`. The hot listing
+  ships a COMPACT copy (`compactIssues`: only counting refs, `mention` relation
+  dropped); the single-page `meta` carries the whole list. `/api/wiki/pages`
+  also carries `trackers: [{id, label}]` on a wiki with a tracker (absent
+  otherwise). Measured 2026-09-25 on melosys-kode-wiki (417 pages, 92 with a
+  counting key, 45 facet keys): `/api/wiki/pages` 181,740 → 191,768 bytes.
+- **The facet.** `facetJiraKeys` (`wiki-filter.ts`) is the ONE definition the
+  four consumers share — `jiraCounts`, `filterPages`, `jiraChipCounts` and the
+  listing field: a page carrying `issues` answers its counting Jira refs, a
+  page without answers its stamped `jira` list. ⚠️ So a wiki with NO tracker
+  is byte-identical to before — pinned by `trackers/store-issues.test.ts` and
+  by the spec's second wiki. The reader's `?jira=` FILTER reads that facet
+  (inferred keys included); the reverse lookup `GET /api/wiki/provenance?jira=`
+  and the provenance strip stay stamped-only. On a tracker wiki the chip row is
+  labelled with the adapter's name and shows the top `JIRA_CHIPS_MAX` (8) plus
+  the active key and a `+N` expander (`jiraChipRow`); on a wiki with none it is
+  uncapped and unlabelled, as before.
+- ⚠️ **An active Jira filter opens every fold** (`buildRail`'s `expandAll`):
+  series, families, months, attachment groups and Bookkeeping render open with
+  a disabled control saying why, so a chip's count is the rows on screen and
+  `#wikiCount`. A tag filter makes no such promise and still counts pages a
+  closed fold hides.
+- **Rail pills** sit in a column of their own inside `.wiki-list-title`,
+  which becomes a wrapping flex pair (`has-issues`: the clamped
+  `.wiki-list-title-text` and `.wiki-issue-pills`) — never inside the clamp,
+  where a wrapped pill run was clipped on 80 of 96 keyed rows. Still one row
+  element (the `▸` rule). The column sits BESIDE the text while the text keeps
+  `RAIL_TITLE_MIN`, and wraps UNDER it (flush right) otherwise, so a pill row
+  takes no reserve in the row's floors or chip breakpoints and breaks lines
+  exactly where the same row without pills does: a reserve on the chip floors
+  (fix round 1's 96px) wrapped whole rows at 260–290px. The column is at most
+  `RAIL_ISSUE_PILLS_COL` (92px) and shrinks to its widest pill; a key may wrap
+  after its project's `-` (`<wbr>`), so a pill only overhangs its cell for a
+  project name of 11+ characters at the title's floor (the one residual).
+  Up to two pills, strongest first, then `+N` whose hidden keys are in its
+  accessible name; dashed unless `stamped`. A pill is part of the row, which
+  is one click target, so it keeps the row's `pointer`. On a hovered or active
+  row the pill ink is `--text-secondary` (`--text-muted` measured 4.42:1 and
+  under 4.5 there in the light theme). Measured on melosys-kode-wiki at every
+  rail width 260–560px (10px steps), both themes: 0 rows that wrap where main's
+  do not, 0 clipped pills, 0 pill overlaps; mimir's rail is byte-for-byte the
+  same geometry as main. The cost is the title text: clamped rows 206 / 152 /
+  135 / 103 / 42 / 2 at 260 / 286 / 300 / 340 / 420 / 560px against main's 203
+  / 145 / 115 / 66 / 17 / 0, and 53 / 19 / 19 / 21 / 28 of the 78 pill rows are
+  taller than on main at 260 / 300 / 340 / 420 / 560px.
+
+Acceptance: `trackers/jira.test.ts` (each rule, the anchor line's 2/70/138
+shape, Jira markup, the project bound, the not-a-key shapes and masks),
+`trackers/index.test.ts` (the block's validation), `trackers/store-issues.test.ts`
+(the index build through the route's own `toListing`, the demotion, the
+count-equals-rows property, the no-tracker pin) and
+`e2e/wiki-tracker-links.spec.ts` (pill geometry at three rail widths in both
+themes, a fold-chip row's line structure and chip form against the same row
+without pills at 260–560px, a long key wrapping inside its cell, contrast at
+rest / hovered / active, a listing that drops the tracker, and chip = rows =
+`#wikiCount` through a closed series and an `.html` twin).
+
 ### The client (`views/components/wiki-provenance-view.ts`)
 
 **One surface: a collapsed line under the title that opens into the chain.**

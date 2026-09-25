@@ -109,6 +109,7 @@ import {
   wikiPagePath,
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
+import { railIssuePillsHtml } from "./wiki-issue-pills.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
@@ -265,6 +266,7 @@ import {
   pageFollowups,
   projectCounts,
   jiraChipCounts,
+  jiraChipRow,
   jiraFacetVisible,
   jiraFilterAfterListing,
   JIRA_PARAM,
@@ -290,10 +292,12 @@ import {
   TYPE_ORDER,
   urlWithJira,
   urlWithProject,
+  type ListingTracker,
   type WikiFilters,
   type WikiListing,
   type WikiSortMode,
 } from "./wiki-filter.ts";
+import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
 // The provenance strip: one collapsed line under the title that opens into the
 // chain. Every string and every fragment of markup lives in that module (pure,
 // `bun test`-covered); this file only decides WHERE it goes and wires the three
@@ -368,6 +372,10 @@ let projects: Record<string, number> = {};
  * which mean "no Jira facet".
  */
 let jiraKeys: Record<string, number> = {};
+/** Tracker id → what the UI calls it, for a wiki whose `.wiki-reader.json`
+ *  configures one; `{}` on every other wiki, which is what keeps their Jira row
+ *  uncapped and unlabelled. */
+let trackerLabels: Record<string, string> = {};
 
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
@@ -631,6 +639,8 @@ function goToStart(): void {
   renderStart();
 }
 let tagsExpanded = false;
+/** The Jira chip row's `+N` expander — `tagsExpanded`'s twin. */
+let jiraChipsExpanded = false;
 
 // ── Start-view cards (What's new · Index coverage · reindex) ──────────
 // The three cards, their module state and the reindex poller live in
@@ -936,6 +946,12 @@ function applyProjectFilter(project: string): void {
  * with it, an empty CURRENT scope hides the row unless a filter is active, the
  * active key joins the list even at count 0, and the order is count DESC then
  * key.
+ *
+ * On a wiki with a tracker the row is CAPPED (`jiraChipRow`) and labelled with
+ * the adapter's name: the facet counts inferred keys too, and a
+ * kode-wiki-sized corpus would otherwise draw 45 chips (measured with `link`
+ * demoted). The top eight show, plus the active key wherever it ranks, plus a
+ * `+N` expander. A wiki without one draws the row it always has.
  */
 function renderJiraChips(): void {
   const row = document.getElementById("jiraChips");
@@ -957,14 +973,21 @@ function renderJiraChips(): void {
     hide();
     return;
   }
-  let html = `<button class="wiki-chip${filters.jira === "" ? " active" : ""}" data-jira="">All issues</button>`;
-  facetKeys(counts, filters.jira)
-    .sort((a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b))
-    .forEach((k) => {
-      html +=
-        `<button class="wiki-chip${filters.jira === k ? " active" : ""}" data-jira="${esc(k)}">` +
-        `${esc(k)} ${counts[k] || 0}</button>`;
-    });
+  const label = trackerLabels[JIRA_TRACKER_ID] ?? "";
+  let html = label ? `<span class="wiki-chip-row-label">${esc(label)}</span>` : "";
+  html += `<button class="wiki-chip${filters.jira === "" ? " active" : ""}" data-jira="">All issues</button>`;
+  const chipRow = jiraChipRow(counts, filters.jira, jiraChipsExpanded, !!label);
+  chipRow.keys.forEach((k) => {
+    html +=
+      `<button class="wiki-chip${filters.jira === k ? " active" : ""}" data-jira="${esc(k)}">` +
+      `${esc(k)} ${counts[k] || 0}</button>`;
+  });
+  if (chipRow.expander) {
+    const open = chipRow.expander === "less";
+    html +=
+      `<button type="button" class="wiki-chip" data-jira-more="1" aria-expanded="${open}">` +
+      `${open ? "less" : "+" + chipRow.hidden + " issues"}</button>`;
+  }
   row.innerHTML = html;
   row.style.display = "";
 }
@@ -1142,6 +1165,12 @@ function paintPinState(): void {
   }
 }
 
+/** Why a fold cannot close: a Jira filter opens every fold (`expandAll`), else
+ *  the reader is on a page inside it. */
+function forcedOpenWhy(what: "group" | "section"): string {
+  return filters.jira ? "the Jira filter shows every matching page" : `the open page is in this ${what}`;
+}
+
 function renderList(): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
@@ -1210,6 +1239,9 @@ function renderList(): void {
     // The page the reader has open — its group is expanded whatever the store
     // says, so the `.active` row is never inside a closed fold.
     openRelPath: currentRelPath || undefined,
+    // A Jira filter opens every fold, so its chip's count is the rows on screen
+    // and `#wikiCount` (the facet's promise; a tag filter makes none).
+    expandAll: !!filters.jira,
   });
   // The open page's sessions used to be a section at the head of this rail. They
   // are now rows in the chain under the page title, which is where they have
@@ -1235,7 +1267,7 @@ function renderList(): void {
           // says what it is instead of behaving like a broken toggle. `disabled`
           // is what makes that true — a disabled button dispatches no click.
           (entry.forcedOpen ? ` disabled` : "") +
-          ` title="${esc(entry.forcedOpen ? "the open page is in this section" : label + " the " + entry.label.toLowerCase() + " pages")}">` +
+          ` title="${esc(entry.forcedOpen ? forcedOpenWhy("section") : label + " the " + entry.label.toLowerCase() + " pages")}">` +
           `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
           `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
           `<span class="wiki-sec-count">${entry.count ?? 0}</span>` +
@@ -1274,7 +1306,7 @@ function renderList(): void {
         entry.superseded,
       );
       const why = entry.forcedOpen
-        ? "the open page is in this group"
+        ? forcedOpenWhy("group")
         : (entry.folded ? "Show" : "Hide") +
           " the " +
           entry.group.label +
@@ -1447,6 +1479,7 @@ function renderList(): void {
     // the glyph itself cannot: the words live in the reader header, and a row
     // that grew a seventh element for them would wrap at the default rail.
     const latestWhy = entry.latest ? "newest plan in this series" : "";
+    const pills = railIssuePillsHtml(p.issues, (id) => trackerLabels[id] ?? "");
     const rowTitle = [entry.activity?.why ?? "", childWhy, memberWhy, latestWhy]
       .filter(Boolean)
       .join("\n");
@@ -1488,9 +1521,20 @@ function renderList(): void {
       // 9.3px — measured on mimir: a 5.3px glyph at 11px type plus its 4px
       // margin — and costs the row's layout nothing. (The 11px this comment used
       // to name is the font SIZE, not a width.)
-      `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
-      (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
-      `${esc(displayTitleOf(p))}</div>` +
+      (pills
+        ? // A row with issue pills: the title element becomes a flex pair — the
+          // clamped text, and the pills in their own column beside it — so the
+          // clamp can never hide them. Still ONE element of the row, for the
+          // `▸`'s reason. Rows without pills keep the plain markup.
+          `<div class="wiki-list-title has-issues" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
+          `<span class="wiki-list-title-text">` +
+          (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
+          `${esc(displayTitleOf(p))}</span>` +
+          pills +
+          `</div>`
+        : `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
+          (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
+          `${esc(displayTitleOf(p))}</div>`) +
       // The group CHIP: what is folded under this row, and the control that
       // opens it. A click here toggles; a click anywhere else on the row opens
       // the page, as it always has.
@@ -1505,7 +1549,7 @@ function renderList(): void {
             const compact = foldChipCompactLabel(entry.children);
             const sizeClasses = cls(foldChipLabelClass(full)) + cls(foldChipCountsClass(compact));
             const why = entry.forcedOpen
-              ? "the open page is in this group"
+              ? forcedOpenWhy("group")
               : (entry.folded ? "Show" : "Hide") + " what folds under this page";
             // The full label rides BOTH attributes whichever form is painted —
             // the compact form is the words moved to the hover, not dropped, and
@@ -3598,6 +3642,14 @@ document.getElementById("jiraChips")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   const chip = target.closest ? target.closest(".wiki-chip") : null;
   if (!chip) return;
+  if (chip.hasAttribute("data-jira-more")) {
+    jiraChipsExpanded = !jiraChipsExpanded;
+    renderJiraChips();
+    // The row was re-rendered under the reader's focus: hand it to the new
+    // expander, so a keyboard user can toggle again without hunting for it.
+    (document.querySelector("#jiraChips [data-jira-more]") as HTMLElement | null)?.focus();
+    return;
+  }
   const key = chip.getAttribute("data-jira") || "";
   applyJiraFilter(filters.jira === key ? "" : key);
 });
@@ -6448,6 +6500,13 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // membership set a `?jira=` deep link is judged against, so a stale map would
   // admit a key the listing on screen no longer carries.
   jiraKeys = data.jira && typeof data.jira === "object" ? data.jira : {};
+  // Same rule: absent means "no tracker", never "the last wiki's tracker".
+  trackerLabels = {};
+  if (Array.isArray(data.trackers)) {
+    for (const t of data.trackers as ListingTracker[]) {
+      if (t && typeof t.id === "string" && typeof t.label === "string") trackerLabels[t.id] = t.label;
+    }
+  }
   // Before the first `renderPageFacets` on every path that reaches one, so the
   // boot render already paints the chip the URL asked for as active.
   adoptProjectFilter(boot);

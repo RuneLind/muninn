@@ -21,7 +21,7 @@
  *   re-adopts a payload byte-identical (modulo `scannedAt`) to the one on screen.
  */
 
-import type { WikiListing } from "./wiki-filter.ts";
+import type { ListingTracker, WikiListing } from "./wiki-filter.ts";
 
 /** The `/api/wiki/pages` payload (mirrors `src/dashboard/routes/wiki-routes.ts`).
  *  It lives here rather than in `wiki-browser.ts` so this module can name it
@@ -33,6 +33,9 @@ export interface WikiPagesResponse {
   /** Effective display label per first-path-segment folder (see the store's
    *  `deriveFolderLabels`). Absent on an older server ⇒ raw folder names. */
   folderLabels?: Record<string, string>;
+  /** The trackers the wiki's `.wiki-reader.json` configures, id and label.
+   *  Absent on a wiki with none. */
+  trackers?: ListingTracker[];
   /** The wiki's `.wiki-reader.json` `defaultType`, "" / absent when it declares
    *  none. Read only by `hubTypeList`, which excludes that bucket from the start
    *  view's hub sections (see its doc comment). */

@@ -21,7 +21,7 @@
 
 import { depthRider, languageRider, neutralizeJiraFence } from "./prompt.ts";
 import { JIRA_STORED_MAX_SOURCES, toJiraCitation } from "./retrieval.ts";
-import { extractJiraKeys } from "./verify-keys.ts";
+import { extractJiraKeys } from "./key-scan.ts";
 import type { JiraCitation, JiraCoverage, JiraDepth } from "./wire.ts";
 
 /**

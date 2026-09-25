@@ -36,6 +36,12 @@ import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { normalizeRelPath } from "./rel-path.ts";
 import {
+  inferIssues,
+  parseTrackersConfig,
+  type IssueRef,
+  type TrackerConfig,
+} from "./trackers/index.ts";
+import {
   kickWorkedLedgerRefresh,
   normalizeWorkedPath,
   workedLedgerFor,
@@ -158,6 +164,14 @@ export interface WikiReaderConfig {
    * validate-warn-degrade rule and `wiki-activity-rank.ts` for what each does.
    */
   activity: ActivityWeights;
+  /**
+   * The issue trackers this wiki's pages refer to (`src/wiki/trackers/`). Empty
+   * on every wiki whose file declares none — and then no page carries `issues`,
+   * so stamped `jira:` lines keep exactly today's facet and strip behaviour.
+   * Optional so hand-built configs stay valid; `readWikiReaderConfig` always
+   * sets it.
+   */
+  trackers?: TrackerConfig[];
 }
 
 /**
@@ -643,6 +657,18 @@ export interface WikiPageMeta {
   /** Pull requests this page's work landed as — the frontmatter `prs:` flow list,
    *  `owner/repo#number`, verbatim. Page-route only, like `sessions`. */
   prs?: string[];
+  /**
+   * The issues this page relates to — stamped, declared or inferred — with
+   * EVERY relation per key, strongest first (`src/wiki/trackers/`). Set only on
+   * a wiki whose `.wiki-reader.json` names a tracker, and absent, not `[]`, on a
+   * page carrying none. Bookkeeping pages (`index`, `log`, `CLAUDE`) are never
+   * inferred from.
+   *
+   * Demoted refs (`link`/`mention` only) live here and reach the single-page
+   * payload only: `toListing` ships a compact copy WITHOUT them on the hot
+   * listing.
+   */
+  issues?: IssueRef[];
   /**
    * Every PR this page names — DERIVED, page-route only, like `links`.
    *
@@ -1924,6 +1950,9 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     folderLabels: isStringRecord(obj.folderLabels) ? obj.folderLabels : {},
     project: parseProjectRule(obj.project, root),
     activity: activity.weights,
+    trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
+      log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
+    ),
   };
 }
 
@@ -2665,16 +2694,18 @@ async function buildExplainerMeta(
   relPath: string,
   projectRule: WikiProjectRule | null,
   knownProjects: ReadonlySet<string>,
+  trackers: readonly TrackerConfig[] = [],
 ): Promise<WikiPageMeta | null> {
   const abs = path.join(root, relPath);
   const stem = path.basename(relPath, ".html");
   let title = stem;
+  let authoredTitle: string | undefined;
   let tags: string[] = [];
   let description: string | undefined;
   try {
     const prefix = await Bun.file(abs).slice(0, HTML_TITLE_SNIFF_BYTES).text();
     const m = prefix.match(HTML_TITLE_RE);
-    if (m && m[1]!.trim()) title = m[1]!.trim();
+    if (m && m[1]!.trim()) title = authoredTitle = m[1]!.trim();
     // Same bounded prefix also feeds the tags + description sniff (explainers
     // carry no frontmatter — the <head> meta is all we have).
     const keywords = sniffMetaContent(prefix, "keywords");
@@ -2685,6 +2716,15 @@ async function buildExplainerMeta(
   }
   const { mtimeMs, birthtimeMs } = await fileStatTimes(abs);
   const date = mtimeMs === undefined ? undefined : new Date(mtimeMs).toISOString().slice(0, 10);
+  // Issue refs from the same bounded `<head>` prefix — its `<title>` and its
+  // keywords — so a key in the explainer's BODY never counts.
+  const issues =
+    trackers.length && !isMetaStem(stem)
+      ? inferIssues(
+          { relPath, stem, kind: "html", frontmatter: {}, authoredTitle, tags, body: "" },
+          trackers,
+        )
+      : undefined;
   return {
     name: stem,
     title,
@@ -2699,6 +2739,7 @@ async function buildExplainerMeta(
     mtimeMs,
     birthtimeMs,
     project: resolveProject(relPath, {}, tags, projectRule, knownProjects),
+    ...(issues ? { issues } : {}),
   };
 }
 
@@ -2983,6 +3024,8 @@ export async function buildWikiIndex(
   // depending on which of ~700 concurrent reads finished first.
   const projectRule = readerConfig?.project ?? null;
   const knownProjects = collectKnownProjects(relPaths, projectRule);
+  // Issue trackers: `[]` on a wiki that names none, which skips inference whole.
+  const trackers = readerConfig?.trackers ?? [];
   // Curated Atlas trails — a sibling read next to `.wiki-reader.json`, same TTL.
   const trails = await readWikiTrails(root);
 
@@ -3035,7 +3078,7 @@ export async function buildWikiIndex(
   await Promise.all(
     relPaths.map(async (relPath) => {
       if (relPath.endsWith(".html")) {
-        const meta = await buildExplainerMeta(root, relPath, projectRule, knownProjects);
+        const meta = await buildExplainerMeta(root, relPath, projectRule, knownProjects, trackers);
         if (meta) {
           pages.push(meta);
           rawOutgoing.set(relPath, []); // explainers don't join the link graph
@@ -3116,6 +3159,24 @@ export async function buildWikiIndex(
         // surfaces as a count in the aggregated warn below.
         ...parsePlanFields(fm, relPath, planDrops),
       };
+      // Issue refs, where the body is already in hand (the `pagePrRefs`
+      // precedent). The TITLE rule reads the authored `title:` line only, never
+      // the stem fallback `titleFromFrontmatter` answers with.
+      if (trackers.length && !isMetaStem(name)) {
+        const issues = inferIssues(
+          {
+            relPath,
+            stem: name,
+            kind: "markdown",
+            frontmatter: fm,
+            authoredTitle: typeof fm.title === "string" && fm.title.trim() ? fm.title.trim() : undefined,
+            tags,
+            body: stripFrontmatter(content),
+          },
+          trackers,
+        );
+        if (issues) meta.issues = issues;
+      }
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
       rawMdTargets.set(relPath, resolveMarkdownTargets(relPath, extractMarkdownLinks(content)));

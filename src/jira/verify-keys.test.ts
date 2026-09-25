@@ -65,6 +65,10 @@ describe("extractJiraKeys", () => {
     expect(extractJiraKeys("Flyten dekker BUC-02 og SED-01.")).toEqual([]);
   });
 
+  test("a run followed by `-` and a digit is not its first key: a date, a step number", () => {
+    expect(extractJiraKeys("DEMO-2026-09-25 og DEMO-1-2, men DEMO-7-notat")).toEqual(["DEMO-7"]);
+  });
+
   test("skips keys inside a fenced code block", () => {
     const md = [
       "Se MELOSYS-1.",

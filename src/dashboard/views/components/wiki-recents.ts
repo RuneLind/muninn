@@ -781,6 +781,14 @@ export interface RailInput {
    * on the reader's own stored state instead.
    */
   openRelPath?: string;
+  /**
+   * Draw every fold OPEN, whatever the store says — a Jira filter sets it. The
+   * facet promises "chip count = rows = `#wikiCount`", and a matching page
+   * inside a closed series, family, month, attachment group or Bookkeeping is
+   * neither a row nor counted. Each fold reports `forcedOpen`, so its control
+   * says it cannot close rather than toggling a key nothing on screen reflects.
+   */
+  expandAll?: boolean;
 }
 
 export interface RailModel {
@@ -1065,6 +1073,10 @@ export function buildRail(input: RailInput): RailModel {
     // it should be depends on the lift, which has not happened yet. See
     // `forcedGroupKey` below.
   }
+  if (input.expandAll) {
+    for (const k of childrenOf.keys()) forced.add(k);
+    forced.add(SECTION_META_FOLD_KEY);
+  }
   const isOpen = (key: string): boolean => forced.has(key) || isFoldOpen(open, key);
 
   /**
@@ -1336,7 +1348,7 @@ export function buildRail(input: RailInput): RailModel {
    *  last, else this render's default (the newest month that draws). A series
    *  reads exactly the same rule — it just never carries the default. */
   const isGroupExpanded = (key: string): boolean => {
-    if (forcedGroupKey === key) return true;
+    if (input.expandAll || forcedGroupKey === key) return true;
     const stored = groupFoldState(open, key);
     if (stored) return stored === "open";
     return key === defaultOpenKey;
@@ -1397,7 +1409,7 @@ export function buildRail(input: RailInput): RailModel {
       // sets it.
       ...(shown < (g.total ?? shown) ? { census: { shown, total: g.total! } } : {}),
       folded: !expanded,
-      ...(forcedGroupKey === foldKey ? { forcedOpen: true } : {}),
+      ...(input.expandAll || forcedGroupKey === foldKey ? { forcedOpen: true } : {}),
     });
     const memberRow = (m: WikiListing): void => {
       const act = activityOf.get(normalizeRel(m.relPath));
@@ -1551,7 +1563,7 @@ export function buildRail(input: RailInput): RailModel {
       members,
       superseded,
       folded: !expanded,
-      ...(forcedGroupKey === foldKey ? { forcedOpen: true } : {}),
+      ...(input.expandAll || forcedGroupKey === foldKey ? { forcedOpen: true } : {}),
     });
     if (expanded) for (const m of members) emitRow(m, "all", { inGroup: g });
   }

@@ -421,6 +421,15 @@ describe("buildRail", () => {
       expect(headers(m.entries), axis).toEqual(["Pinned", "Other pages"]);
     }
   });
+  test("expandAll (a Jira filter) opens Bookkeeping and says it cannot close", () => {
+    const log = page({ relPath: "log.md", title: "Log" });
+    const m = buildRail({ filtered: [a, log], facetOnly: [a, log], filters: INERT, pins: [], metaTail: true, expandAll: true });
+    const metaHeader = m.entries.find((e) => e.kind === "header" && e.section === "meta")!;
+    expect(metaHeader).toMatchObject({ folded: false, forcedOpen: true });
+    expect(rows(m.entries).map((r) => r.page.relPath)).toEqual(["a.md", "log.md"]);
+    expect(m.shown).toBe(2);
+  });
+
   test("metaTail: the sunk bookkeeping pages get their own header", () => {
     // sortPages already puts index/log/CLAUDE last in a recency mode; without a
     // header the date column jumps back to today at the tail and reads as a
@@ -1111,6 +1120,15 @@ describe("groups (attachments)", () => {
     ]);
   });
 
+  test("expandAll (a Jira filter) opens every group and says it cannot close", () => {
+    const m = rail({ expandAll: true });
+    expect(rowsOf(m).map((r) => r.page.relPath)).toContain("plans/x.html");
+    const parentRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.folded).toBe(false);
+    expect(parentRow.forcedOpen).toBe(true);
+    expect(m.shown).toBe(5);
+  });
+
   test("a query FLATTENS: every page is a plain row, no chips, nothing hidden", () => {
     const m = rail({ filters: { ...INERT, q: "x" } });
     const rs = rowsOf(m);
@@ -1566,6 +1584,14 @@ describe("groups (families and months)", () => {
     expect(family[0]!.label).toBe("fam-one-*");
     expect(family[0]!.members).toHaveLength(3);
     expect(family[0]!.supersededChildren.map((c) => c.relPath)).toEqual(["plans/fam-one-old.mdx"]);
+  });
+
+  test("expandAll (a Jira filter) opens a closed family and says it cannot close", () => {
+    const m = rail({ expandAll: true });
+    const g = groupsOf(m)[0]!;
+    expect(g.folded).toBe(false);
+    expect(g.forcedOpen).toBe(true);
+    expect(rowsOf(m).map((r) => r.page.relPath)).toContain("plans/fam-one-2.mdx");
   });
 
   test("closed by default: no member is a row, and `shown` says so", () => {
@@ -2336,6 +2362,16 @@ describe("buildRail — series", () => {
     expect(peek).toHaveLength(SERIES_PEEK_MAX);
     expect(peek).toEqual(["plans/d.mdx", "blogs/c.mdx", "plans/b.mdx"]);
     expect(mores(m.entries)[0]!.hidden).toBe(1);
+  });
+
+  test("expandAll opens a closed series: every member is a row, none behind `+N more`", () => {
+    const m = build({ activity: [act(C, 9)], expandAll: true });
+    expect(mores(m.entries)).toEqual([]);
+    expect(groupsOf(m.entries)[0]!.folded).toBe(false);
+    expect(groupsOf(m.entries)[0]!.forcedOpen).toBe(true);
+    expect(rows(m.entries).map((r) => r.page.relPath).sort()).toEqual(
+      ["blogs/c.mdx", "plans/a.mdx", "plans/b.mdx", "plans/loose.mdx"].sort(),
+    );
   });
 
   test("no `+N more` row when the peek already shows every member", () => {

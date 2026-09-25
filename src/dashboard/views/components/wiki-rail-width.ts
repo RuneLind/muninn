@@ -78,6 +78,15 @@ export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + 62;
 export const RAIL_MID_MIN_CHIP_WIDE = RAIL_TITLE_MIN + 8 + 76;
 
 /**
+ * The issue-pill column's `max-width`: one `DEMO-1234`-sized pill, or two short
+ * ones, per line. The column sits beside the title text while the text keeps
+ * `RAIL_TITLE_MIN`, and wraps UNDER it otherwise, so a pill row takes no reserve
+ * in the floors or breakpoints above: it breaks lines exactly where the same
+ * row without pills does. The column shrinks to its widest pill before that.
+ */
+export const RAIL_ISSUE_PILLS_COL = 92;
+
+/**
  * The three container breakpoints, in px of REMAINING row space (`.wiki-list-mid`),
  * at or under which a chip swaps its words for its counts. Three of them because
  * the full label's width is a fact about the LABEL and not about the row:

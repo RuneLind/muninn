@@ -11,6 +11,7 @@ import {
   RAIL_CHIP_SWITCH_LONG,
   RAIL_CHIP_SWITCH_WIDE,
   RAIL_GROUP_CHIP_SWITCH,
+  RAIL_ISSUE_PILLS_COL,
   RAIL_MID_MIN_CHIP,
   RAIL_MID_MIN_CHIP_NARROW,
   RAIL_MID_MIN_CHIP_WIDE,
@@ -621,6 +622,44 @@ export async function renderWikiPage(opts?: {
        swap .wiki-act-glyph's green made, and the token the series group row
        already carries — the glyph and its fold now read as one colour). */
     .wiki-latest-glyph { color: var(--accent-light); margin-right: 4px; font-size: 11px; }
+    /* Issue pills: a COLUMN of their own inside .wiki-list-title, never inside
+       the clamp — inline, a pill run wrapped to a third line and was clipped on
+       80 of 96 keyed rows of a real wiki. The title element stays ONE row item
+       (the ▸ rule — a seventh flex item would cost the title its floor).
+       Solid = stamped, dashed = inferred. A pill is part of the row, which is
+       one click target, so it keeps the row's pointer. */
+    .wiki-list-title.has-issues {
+      display: flex; flex-wrap: wrap; align-items: flex-start; gap: 2px 4px;
+      -webkit-line-clamp: unset; overflow: visible;
+    }
+    /* The text's own floor is what decides where the column goes: beside the
+       text while the text keeps RAIL_TITLE_MIN, under it (flush right)
+       otherwise — so a pill row keeps the line structure of the same row
+       without pills. */
+    .wiki-list-title-text {
+      flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; overflow-wrap: anywhere;
+    }
+    .wiki-issue-pills {
+      display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px;
+      flex: 0 1 auto; max-width: ${RAIL_ISSUE_PILLS_COL}px; margin: 1px 0 0 auto;
+    }
+    .wiki-issue-pill {
+      display: inline-block; padding: 0 4px;
+      border: 1px solid var(--text-muted); border-radius: 3px;
+      font-family: ui-monospace, Menlo, monospace; font-size: 9.5px; line-height: 13px;
+      color: var(--text-muted);
+    }
+    .wiki-issue-pill.inferred { border-style: dashed; }
+    /* The hovered and the active row paint a fill under the pill, where
+       --text-muted measures 4.42:1 and 4.24:1 in the light theme. */
+    .wiki-list-item:hover .wiki-issue-pill,
+    .wiki-list-item.active .wiki-issue-pill { color: var(--text-secondary); }
+    .wiki-issue-pill.more { border-color: transparent; padding: 0 2px; }
+    .wiki-chip-row-label {
+      align-self: center; font-size: 11px; color: var(--text-muted); margin-right: 2px;
+    }
     /* A GHOST row: a series member the reader pinned, named inside the fold so
        the roll-up's count and the rows agree. Not a control and not a link —
        there is nothing to open that is not already on screen — so it takes no
