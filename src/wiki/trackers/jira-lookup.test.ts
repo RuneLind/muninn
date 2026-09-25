@@ -5,6 +5,7 @@ import {
   parseIssueUpdated,
   pickIssueFields,
 } from "./jira-lookup.ts";
+import { JIRA_ISSUES_COLLECTION, jiraKeyFromDocId } from "../../jira/retrieval.ts";
 
 afterEach(() => __resetIssueFieldsCacheForTest());
 
@@ -102,5 +103,56 @@ describe("loadIssueFields", () => {
 
   test("an EMPTY listing is a failure, not a corpus with no issues", async () => {
     expect(await loadIssueFields("http://c.test", async () => ({ documents: [] }))).toBeNull();
+  });
+});
+
+describe("PR 3 fix round 1", () => {
+  test("S2: an out-of-range component is null, never a rolled-over instant", () => {
+    for (const bad of [
+      "2026-13-01T00:00:00.000+0100",
+      "2026-00-10T00:00:00Z",
+      "2026-01-00T00:00:00Z",
+      "2026-02-30T12:00:00Z",
+      "2026-02-29T12:00:00Z",
+      "2026-04-31T12:00:00Z",
+      "2026-02-30T25:61:00Z",
+      "2026-01-01T24:00:00Z",
+      "2026-01-01T12:60:00Z",
+      "2026-01-01T12:00:60Z",
+      "2026-01-01T12:00:00.000+9999",
+      "2026-01-01T12:00:00.000+1401",
+      "2026-01-01T12:00:00.000+0160",
+    ]) {
+      expect(parseIssueUpdated(bad)).toBeNull();
+    }
+    // The edges that ARE valid still parse.
+    expect(parseIssueUpdated("2028-02-29T23:59:59Z")).toBe(Date.UTC(2028, 1, 29, 23, 59, 59));
+    expect(parseIssueUpdated("2026-01-01T00:00:00+14:00")).toBe(Date.UTC(2025, 11, 31, 10, 0, 0));
+    expect(parseIssueUpdated("2026-01-01T00:00:00-1200")).toBe(Date.UTC(2026, 0, 1, 12, 0, 0));
+  });
+
+  test("S4: a document's key is the composer's `jiraKeyFromDocId`, so both sides agree which keys huginn holds", () => {
+    const ids = ["demo-5_x.md", "D-1_x.md", "DEMO-6.extra_y.md", "DEMO-7.md", "DEMO-8_z.md"];
+    const m = pickIssueFields(ids.map((id) => ({ id, status: "S" })));
+    const expected = ids.map((id) => jiraKeyFromDocId(JIRA_ISSUES_COLLECTION, id)).filter(Boolean);
+    expect([...m.keys()].sort()).toEqual((expected as string[]).sort());
+    expect([...m.keys()].sort()).toEqual(["DEMO-6", "DEMO-7", "DEMO-8"]);
+  });
+
+  test("S3: past the TTL a failed refetch serves the last good listing, without refetching again at once", async () => {
+    const listing = { documents: [{ id: "DEMO-110_x.md", status: "Ferdig" }] };
+    let calls = 0;
+    let up = true;
+    const fetchApi = async () => {
+      calls++;
+      if (!up) throw new Error("down");
+      return listing;
+    };
+    expect((await loadIssueFields("http://s.test", fetchApi, 0))?.get("DEMO-110")?.status).toBe("Ferdig");
+    up = false;
+    const tenMinutes = 10 * 60_000;
+    expect((await loadIssueFields("http://s.test", fetchApi, tenMinutes + 1))?.get("DEMO-110")?.status).toBe("Ferdig");
+    expect((await loadIssueFields("http://s.test", fetchApi, tenMinutes + 2))?.get("DEMO-110")?.status).toBe("Ferdig");
+    expect(calls).toBe(2);
   });
 });

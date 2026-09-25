@@ -292,6 +292,7 @@ import {
   TYPE_ORDER,
   urlWithJira,
   urlWithProject,
+  facetJiraKeys,
   type ListingTracker,
   type WikiFilters,
   type WikiListing,
@@ -315,7 +316,7 @@ import {
   STAMP_LABEL,
 } from "./wiki-provenance-view.ts";
 import { provenanceStripCertain, type ProvenancePayload } from "../../../wiki/provenance.ts";
-import { relationsCount, type IssueRow } from "../../../wiki/trackers/types.ts";
+import { compactIssues, relationsCount, type IssueRow } from "../../../wiki/trackers/types.ts";
 import {
   CONN_ISSUES_ID,
   ISSUE_LINK_ALL_ATTR,
@@ -517,6 +518,19 @@ let currentArticle: WikiListing | null = null;
 let issueRows: IssueRow[] | null = null;
 let issueStampable = false;
 const issueStates = new Map<string, IssueRowState>();
+/**
+ * In-flight Links, per page (`linkLockId`) → the keys being written, plus
+ * {@link LINK_ALL_LOCK} while Link all runs. Module-level and keyed by wiki and
+ * relPath, NOT cleared by a render: a reader who leaves a page mid-Link and
+ * comes back finds its Links still disabled until the POST lands.
+ */
+const linkLocks = new Map<string, Set<string>>();
+const LINK_ALL_LOCK = "*";
+/** The key the reader last Linked — where focus goes back to after a redraw. */
+let issueFocusKey: string | null = null;
+/** The page payload Connections last rendered, so the mini-graph can redraw
+ *  when the issue rows change under it. */
+let connData: WikiPageDetail | null = null;
 /**
  * Titles of the current page's outgoing links, stamped by `renderConnections`.
  *
@@ -2003,12 +2017,33 @@ function redrawProvStrip(provenance: ProvenancePayload): void {
 }
 
 /** Take a provenance block's whole issue rows (and its `stampable`) into
- *  Connections. A block with no `issues` leaves the inline rows standing. */
+ *  Connections and the mini-graph. A block with no `issues` means the page has
+ *  none now, so the rows go too. */
 function adoptIssueRows(provenance: ProvenancePayload): void {
-  if (!provenance.issues) return;
-  issueRows = provenance.issues;
+  const had = issueRows !== null;
+  issueRows = provenance.issues ?? null;
   issueStampable = provenance.stampable;
+  // A wiki with no tracker has rows on neither side: nothing to redraw.
+  if (!had && !issueRows) return;
   redrawConnIssues();
+  redrawMiniGraph();
+}
+
+function linkLockId(relPath: string): string {
+  return JSON.stringify([WIKI, relPath]);
+}
+
+function pageLinkLocked(relPath: string): boolean {
+  return (linkLocks.get(linkLockId(relPath))?.size ?? 0) > 0;
+}
+
+function setLinkLock(relPath: string, key: string, on: boolean): void {
+  const id = linkLockId(relPath);
+  const held = linkLocks.get(id) ?? new Set<string>();
+  if (on) held.add(key);
+  else held.delete(key);
+  if (held.size) linkLocks.set(id, held);
+  else linkLocks.delete(id);
 }
 
 /** The open page is markdown — only then is Link offered. */
@@ -2018,82 +2053,161 @@ function isMarkdownRel(relPath: string | null): boolean {
 
 function issueSectionFor(relPath: string | null): string {
   if (!relPath) return "";
+  // A Link in flight on this page reads "linking…" on its row, whichever
+  // render drew the section.
+  const states = new Map(issueStates);
+  for (const key of linkLocks.get(linkLockId(relPath)) ?? []) {
+    if (key !== LINK_ALL_LOCK) states.set(key, { kind: "busy" });
+  }
   return issueSectionHtml(issueRows ?? undefined, {
     labelOf: (id) => trackerLabels[id] || "",
     stampable: issueStampable,
     markdown: isMarkdownRel(relPath),
     relPath,
-    states: issueStates,
+    states,
     discuss: !wikiReadonlyWikiFlag(),
+    locked: pageLinkLocked(relPath),
   });
 }
 
 /** The ONE writer of Connections' issue section: replaces it in place, or
- *  inserts it at the top of the panel (above the mini-graph). */
+ *  inserts it at the top of the panel (above the mini-graph). Focus inside
+ *  the section stays inside it — see {@link restoreIssueFocus}. */
 function redrawConnIssues(): void {
   const html = issueSectionFor(currentRelPath);
   const el = document.getElementById(CONN_ISSUES_ID);
   if (el) {
+    const hadFocus = el.contains(document.activeElement);
     el.outerHTML = html;
+    if (hadFocus) restoreIssueFocus();
     return;
   }
   if (html) document.getElementById("connBody")?.insertAdjacentHTML("afterbegin", html);
 }
 
+/** After a redraw replaced the focused control: the last-Linked key's Link,
+ *  else another control on its row, else the first enabled Link, else Link
+ *  all, else the section itself (every Link is disabled while one runs). */
+function restoreIssueFocus(): void {
+  const sec = document.getElementById(CONN_ISSUES_ID);
+  if (!sec) return;
+  const q = (sel: string) => sec.querySelector<HTMLElement>(sel);
+  const key = issueFocusKey ? CSS.escape(issueFocusKey) : null;
+  const target =
+    (key && (q(`[${ISSUE_LINK_ATTR}="${key}"]:not(:disabled)`) ?? q(`[data-issue-row="${key}"] button:not(:disabled)`))) ||
+    q(`[${ISSUE_LINK_ATTR}]:not(:disabled)`) ||
+    q(`[${ISSUE_LINK_ALL_ATTR}]:not(:disabled)`) ||
+    sec;
+  target.focus({ preventScroll: true });
+}
+
+/** Redraw the mini-graph from the current issue rows (a Link, or the deferred
+ *  rows landing), in place. */
+function redrawMiniGraph(): void {
+  if (!connData || (connData.meta?.relPath ?? currentRelPath) !== currentRelPath) return;
+  const html = miniGraphHtml(connData, issueRows);
+  const el = document.querySelector("#connBody .wiki-mini-graph");
+  if (el) {
+    if (html) el.outerHTML = html;
+    else el.remove();
+    return;
+  }
+  if (!html) return;
+  const sec = document.getElementById(CONN_ISSUES_ID);
+  if (sec) sec.insertAdjacentHTML("afterend", html);
+  else document.getElementById("connBody")?.insertAdjacentHTML("afterbegin", html);
+}
+
 /**
- * **Link**: write one key to the open page's tracker line through the Stamp
- * route's `{ tracker, key }` form — the only write path, which shells out to
- * the same CLI as a session Stamp. The answer carries the re-resolved block,
- * so the strip and the rows redraw from it with no second fetch. A skip lands
- * on the row as its named state. Resolves true on success.
+ * A Link changed a page's relations: its rail row's pills and the Jira facet
+ * take the answer's rows (the listing's own compact shape) without a listing
+ * refetch. A key that newly counts joins the facet's membership.
  */
-async function linkIssue(tracker: string, key: string): Promise<boolean> {
-  const pressedOn = currentRelPath;
-  if (!pressedOn) return false;
-  issueStates.set(key, { kind: "busy" });
-  redrawConnIssues();
+function refreshListingIssues(relPath: string, rows: readonly IssueRow[]): void {
+  const hit = allPages.find((p) => p.relPath === relPath);
+  if (!hit) return;
+  const before = new Set(facetJiraKeys(hit));
+  hit.issues = compactIssues(rows);
+  if (currentArticle && currentArticle !== hit && currentArticle.relPath === relPath) currentArticle.issues = hit.issues;
+  for (const key of facetJiraKeys(hit)) if (!before.has(key)) jiraKeys[key] = (jiraKeys[key] ?? 0) + 1;
+  renderList();
+}
+
+/**
+ * **Link**: write one key to a page's tracker line through the Stamp route's
+ * `{ tracker, key }` form — the only write path, which shells out to the same
+ * CLI as a session Stamp. The answer carries the re-resolved block, so the
+ * strip, the rows, the mini-graph and the rail row redraw from it with no
+ * second fetch. A skip lands on the row as its named state. The page's Link
+ * lock is held for the POST, so no second Link starts beside it (`inLinkAll`:
+ * Link all already holds it). Resolves true on success.
+ */
+async function linkIssue(relPath: string, tracker: string, key: string, inLinkAll = false): Promise<boolean> {
+  if (!inLinkAll && pageLinkLocked(relPath)) return false;
+  issueFocusKey = key;
+  if (currentRelPath === relPath) issueStates.delete(key);
+  setLinkLock(relPath, key, true);
+  if (currentRelPath === relPath) redrawConnIssues();
   let state: IssueRowState | null = null;
+  let provenance: ProvenancePayload | undefined;
+  let ok = false;
   try {
     const res = await fetch("/api/wiki/provenance/stamp", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ wiki: WIKI, relPath: pressedOn, tracker, key }),
+      body: JSON.stringify({ wiki: WIKI, relPath, tracker, key }),
     });
     const body = (await res.json().catch(() => null)) as
       | { provenance?: ProvenancePayload; reason?: string; error?: string }
       | null;
-    if (currentRelPath !== pressedOn) return false;
-    if (!res.ok) {
+    if (res.ok) {
+      ok = true;
+      provenance = body?.provenance;
+    } else {
       state =
         res.status === 409 && body?.reason
           ? { kind: "refused", reason: body.reason }
           : { kind: "error", text: `not linked: ${body?.reason || body?.error || res.status}` };
-    } else {
-      issueStates.delete(key);
-      if (body?.provenance) redrawProvStrip(body.provenance);
-      else {
-        redrawConnIssues();
-        refetchProvStrip();
-      }
-      return true;
     }
   } catch {
     state = { kind: "error", text: "not linked: the request failed" };
+  } finally {
+    setLinkLock(relPath, key, false);
   }
-  if (currentRelPath !== pressedOn) return false;
-  issueStates.set(key, state!);
-  redrawConnIssues();
-  return false;
+  // The rail row is that page's wherever the reader is now.
+  if (provenance) refreshListingIssues(relPath, provenance.issues ?? []);
+  if (currentRelPath !== relPath) return ok;
+  if (!ok) {
+    issueStates.set(key, state!);
+    redrawConnIssues();
+  } else if (provenance) redrawProvStrip(provenance);
+  else {
+    redrawConnIssues();
+    refetchProvStrip();
+  }
+  return ok;
 }
 
 /** **Link all**: the eligible keys one POST at a time (the CLI's lockfile
- *  serializes them anyway), stopping at the first that does not land. */
+ *  serializes them anyway), under the page's Link lock from first to last, and
+ *  stopping at the first that does not land. A key the open page already shows
+ *  stamped by its turn is skipped. */
 async function linkAllIssues(): Promise<void> {
-  const rows = issueRows ?? [];
-  const keys = linkAllKeys(rows, { stampable: issueStampable, markdown: isMarkdownRel(currentRelPath) });
-  for (const key of keys) {
-    const row = rows.find((r) => r.key === key);
-    if (!row || !(await linkIssue(row.tracker, key))) return;
+  const relPath = currentRelPath;
+  if (!relPath || pageLinkLocked(relPath)) return;
+  const rows = [...(issueRows ?? [])];
+  const keys = linkAllKeys(rows, { stampable: issueStampable, markdown: isMarkdownRel(relPath) });
+  setLinkLock(relPath, LINK_ALL_LOCK, true);
+  try {
+    for (const key of keys) {
+      const row = rows.find((r) => r.key === key)!;
+      const now = currentRelPath === relPath ? issueRows?.find((r) => r.key === key) : undefined;
+      if (now?.relations.includes("stamped")) continue;
+      if (!(await linkIssue(relPath, row.tracker, key, true))) break;
+    }
+  } finally {
+    setLinkLock(relPath, LINK_ALL_LOCK, false);
+    if (currentRelPath === relPath) redrawConnIssues();
   }
 }
 
@@ -2430,14 +2544,19 @@ interface MiniNode {
   y?: number;
 }
 
-/** How many of the page's issue keys the mini-graph draws beside its pages. */
+/** How many of the page's issue keys the mini-graph draws beside its pages;
+ *  the rest are counted in its footer line. */
 const MINI_ISSUES_MAX = 4;
 
 /** 1-hop neighborhood as a small radial SVG: current page centered, top
- *  neighbors on a ring, and the page's counting issue keys as diamonds on the
- *  same ring (dashed edge when inferred; a click filters by the key). */
-function miniGraphHtml(data: WikiPageDetail): string {
-  const issues = (data.issueRows ?? []).filter((r) => relationsCount(r.relations)).slice(0, MINI_ISSUES_MAX);
+ *  neighbors on a ring, and the page's counting Jira keys as diamonds on the
+ *  same ring (dashed edge when inferred; a click filters by the key). `rows`
+ *  are Connections' current issue rows, which a Link or the deferred fetch
+ *  replaces after the page renders. */
+function miniGraphHtml(data: WikiPageDetail, rows: readonly IssueRow[] | null | undefined): string {
+  // Jira only: a diamond's click is the Jira facet's filter.
+  const counting = (rows ?? []).filter((r) => r.tracker === JIRA_TRACKER_ID && relationsCount(r.relations));
+  const issues = counting.slice(0, MINI_ISSUES_MAX);
   const byName: Record<string, MiniNode> = {};
   data.outgoing.forEach((p) => {
     byName[p.name] = { p, out: true, inn: false };
@@ -2505,10 +2624,14 @@ function miniGraphHtml(data: WikiPageDetail): string {
   nodes +=
     `<g class="mini-center"><circle class="mini-dot t-${esc(data.meta.type)}" cx="${cx}" cy="${cy}" r="7"></circle>` +
     `<text x="${cx}" y="${cy + 21}" text-anchor="middle">${esc(short(data.meta.title))}</text></g>`;
-  const more =
-    all.length > shown.length
-      ? `<div class="wiki-mini-more">strongest ${shown.length} of ${all.length} — full lists below</div>`
-      : "";
+  const hiddenIssues = counting.length - issues.length;
+  const more = [
+    all.length > shown.length ? `strongest ${shown.length} of ${all.length} — full lists below` : "",
+    hiddenIssues > 0 ? `+${hiddenIssues} issue${hiddenIssues === 1 ? "" : "s"} not drawn` : "",
+  ]
+    .filter(Boolean)
+    .map((t) => `<div class="wiki-mini-more">${esc(t)}</div>`)
+    .join("");
   return `<div class="wiki-mini-graph"><svg viewBox="0 0 ${W} ${H}">${edges}${nodes}</svg>${more}</div>`;
 }
 
@@ -2539,13 +2662,15 @@ function renderConnections(data: WikiPageDetail): void {
     });
     return html + "</div>";
   }
-  // The inline half of the issue rows; the deferred fetch replaces them.
+  // The inline half of the issue rows; the deferred fetch replaces them. A
+  // Link lock is not cleared here — see `linkLocks`.
   issueRows = data.issueRows ?? null;
   issueStampable = data.issueStampable === true;
   issueStates.clear();
+  connData = data;
   document.getElementById("connBody")!.innerHTML =
     issueSectionFor(data.meta?.relPath ?? currentRelPath) +
-    miniGraphHtml(data) +
+    miniGraphHtml(data, issueRows) +
     // `Related work` leads: it is the one section that ANSWERS a question
     // ("what else is this piece of work?") rather than listing a mechanism.
     // The two below are the raw link lists it is derived from.
@@ -3593,8 +3718,12 @@ document.body.addEventListener("click", (e) => {
   const issueLink = target.closest ? target.closest<HTMLButtonElement>(`[${ISSUE_LINK_ATTR}]`) : null;
   if (issueLink) {
     e.preventDefault();
-    if (issueLink.disabled) return;
-    void linkIssue(issueLink.getAttribute("data-issue-tracker") || "", issueLink.getAttribute(ISSUE_LINK_ATTR) || "");
+    if (issueLink.disabled || !currentRelPath) return;
+    void linkIssue(
+      currentRelPath,
+      issueLink.getAttribute("data-issue-tracker") || "",
+      issueLink.getAttribute(ISSUE_LINK_ATTR) || "",
+    );
     return;
   }
   if (target.closest && target.closest(`[${ISSUE_LINK_ALL_ATTR}]`)) {

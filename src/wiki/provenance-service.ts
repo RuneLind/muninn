@@ -339,14 +339,16 @@ export async function pageProvenance(
     return { handoffs, candidates, ghostIds, ghostFacts, ghostMerges };
   })();
 
-  const issuesP = baseRows.length ? resolveIssueRows(baseRows, trackers, ctx, signal) : Promise.resolve([]);
+  const issuesP = baseRows.length ? resolveIssueRows(baseRows, trackers, ctx, signal, index?.root) : Promise.resolve([]);
 
-  const [resolved, mergeResult, handoffResult, prResult, ghostStage, issues] = await Promise.all([
-    resolvedP,
-    mergeP,
-    handoffP,
-    prP,
-    ghostStageP,
+  // `links.timedOut` is read when the legs it reports on have settled, not
+  // after the issue leg: that one carries its deadline on each row's `ledger`,
+  // and a page whose other legs finished (or never ran) must not blame them.
+  const linkLegsP = Promise.all([resolvedP, mergeP, handoffP, prP, ghostStageP]).then(
+    (legs) => [legs, signal?.aborted === true] as const,
+  );
+  const [[[resolved, mergeResult, handoffResult, prResult, ghostStage], linksTimedOut], issues] = await Promise.all([
+    linkLegsP,
     issuesP,
   ]);
   const { handoffs, candidates, ghostIds, ghostFacts, ghostMerges } = ghostStage;
@@ -414,9 +416,9 @@ export async function pageProvenance(
       handoffsCapped,
       prsCapped,
       // The shared deadline fired while a leg was still in flight. Read off the
-      // signal AFTER the awaits rather than raced per leg: one deadline, one
-      // answer about it.
-      timedOut: signal?.aborted === true,
+      // signal once those legs settled rather than raced per leg: one deadline,
+      // one answer about it.
+      timedOut: linksTimedOut,
     },
     // Whichever leg answered first. The date is upstream's own constant and is
     // the same on every envelope; carrying it rather than restating it is what
@@ -445,26 +447,27 @@ export async function resolveIssueRows(
   trackers: readonly TrackerConfig[],
   ctx: ProvenanceContext,
   signal?: AbortSignal,
+  /** Names the wiki in the unmapped-status log line. */
+  wikiRoot = "",
 ): Promise<IssueRow[]> {
   const configOf = new Map(trackers.map((t) => [t.id, t]));
   const ids = [...new Set(base.map((r) => r.tracker))];
-  const lookups = new Map(
-    await Promise.all(
-      ids.map(async (id) => {
-        const adapter = trackerAdapter(id);
-        const load = (async () => {
-          if (!adapter) return null;
-          try {
-            if (ctx.lookupIssues) return await ctx.lookupIssues(adapter, ctx.knowledgeApiUrl);
-            return adapter.lookup ? await adapter.lookup(ctx.knowledgeApiUrl) : null;
-          } catch {
-            return null;
-          }
-        })();
-        const facts = signal ? await Promise.race([load, aborted(signal)]) : await load;
-        return [id, facts] as const;
-      }),
-    ),
+  // The lookup and the ledger start together: a slow huginn must not spend the
+  // deadline claude-usage was never asked inside.
+  const lookupsP = Promise.all(
+    ids.map(async (id) => {
+      const adapter = trackerAdapter(id);
+      const load = (async () => {
+        if (!adapter) return null;
+        try {
+          if (ctx.lookupIssues) return await ctx.lookupIssues(adapter, ctx.knowledgeApiUrl);
+          return adapter.lookup ? await adapter.lookup(ctx.knowledgeApiUrl) : null;
+        } catch {
+          return null;
+        }
+      })();
+      return [id, await raceDeadline(load, signal)] as const;
+    }),
   );
 
   // Which rows are asked about, and why the others are not.
@@ -473,9 +476,9 @@ export async function resolveIssueRows(
   for (const row of base) {
     const config = configOf.get(row.tracker);
     const adapter = trackerAdapter(row.tracker);
-    const project = row.key.slice(0, row.key.indexOf("-"));
+    const project = adapter?.projectOf(row.key);
     if (!relationsCount(row.relations)) ledger.push({ state: "unpriced", reason: "demoted" });
-    else if (!config || !config.ledgerProjects.includes(project)) ledger.push({ state: "not-tracked" });
+    else if (!config || !project || !config.ledgerProjects.includes(project)) ledger.push({ state: "not-tracked" });
     else if (!ctx.sessionLedger.urlConfigured || !ctx.sessionLedger.fetchIssueLedger || !adapter?.ledgerPath) {
       ledger.push({ state: "unpriced", reason: "not-configured" });
     } else if (asked >= ISSUE_LEDGER_MAX) ledger.push({ state: "unpriced", reason: "cap" });
@@ -484,13 +487,17 @@ export async function resolveIssueRows(
       asked++;
     }
   }
-  await mapPool(
-    base.map((row, i) => ({ row, i })).filter(({ i }) => ledger[i] === "ask"),
-    ISSUE_LEDGER_CONCURRENCY,
-    async ({ row, i }) => {
-      ledger[i] = await priceIssue(row, ctx, signal);
-    },
-  );
+  const [lookupEntries] = await Promise.all([
+    lookupsP,
+    mapPool(
+      base.map((row, i) => ({ row, i })).filter(({ i }) => ledger[i] === "ask"),
+      ISSUE_LEDGER_CONCURRENCY,
+      async ({ row, i }) => {
+        ledger[i] = await priceIssue(row, ctx, signal);
+      },
+    ),
+  ]);
+  const lookups = new Map(lookupEntries);
 
   return base.map((row, i) => {
     const config = configOf.get(row.tracker);
@@ -499,7 +506,7 @@ export async function resolveIssueRows(
     const out: IssueRow = { ...row, ledger: ledger[i] as IssueLedgerView };
     if (facts && config) {
       out.known = !!fact;
-      out.category = statusCategory(fact?.status, config);
+      out.category = statusCategory(fact?.status, config, wikiRoot);
       if (fact?.title) out.title = fact.title;
       if (fact?.status) out.status = fact.status;
       if (fact?.updated) out.updated = fact.updated;
@@ -511,39 +518,27 @@ export async function resolveIssueRows(
   });
 }
 
-/** One key's `/api/jira`-shaped answer: `{sessions[], totalCost,
- *  costedSessions, truncated}`. Never throws. */
+/** One key's price through its tracker's ledger path and parser. Never throws. */
 async function priceIssue(row: IssueRow, ctx: ProvenanceContext, signal?: AbortSignal): Promise<IssueLedgerView> {
-  const path = trackerAdapter(row.tracker)?.ledgerPath?.(row.key);
-  if (!path || !ctx.sessionLedger.fetchIssueLedger) return { state: "unpriced", reason: "not-configured" };
+  const adapter = trackerAdapter(row.tracker);
+  const path = adapter?.ledgerPath?.(row.key);
+  if (!path || !adapter?.parseLedger || !ctx.sessionLedger.fetchIssueLedger) {
+    return { state: "unpriced", reason: "not-configured" };
+  }
   if (signal?.aborted) return { state: "unpriced", reason: "deadline" };
   try {
     // Raced as well as handed the signal: a fetch that ignored it would
     // otherwise hold the whole page open.
-    const fetched = ctx.sessionLedger.fetchIssueLedger(path, signal);
-    const raw = (signal ? await Promise.race([fetched, aborted(signal)]) : await fetched) as {
-      sessions?: unknown;
-      totalCost?: unknown;
-      costedSessions?: unknown;
-      truncated?: unknown;
-    } | null;
+    const raw = await raceDeadline(ctx.sessionLedger.fetchIssueLedger(path, signal), signal);
     if (raw === null && signal?.aborted) return { state: "unpriced", reason: "deadline" };
-    if (!raw || !Array.isArray(raw.sessions)) return { state: "unpriced", reason: "unreachable" };
-    const total = typeof raw.totalCost === "number" && Number.isFinite(raw.totalCost) ? raw.totalCost : 0;
-    return {
-      state: "priced",
-      sessions: raw.sessions.length,
-      totalCost: Math.round(total * 100) / 100,
-      costedSessions: typeof raw.costedSessions === "number" ? raw.costedSessions : 0,
-      truncated: raw.truncated === true,
-    };
+    return adapter.parseLedger(raw) ?? { state: "unpriced", reason: "unreachable" };
   } catch {
     return { state: "unpriced", reason: signal?.aborted ? "deadline" : "unreachable" };
   }
 }
 
 /** Run `fn` over `items` with at most `limit` in flight. */
-export async function mapPool<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+async function mapPool<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
   const worker = async () => {
     while (next < items.length) {
@@ -663,8 +658,12 @@ async function loadCorpus(
       return null;
     }
   })();
-  if (!signal) return await load;
-  return await Promise.race([load, aborted(signal)]);
+  return await raceDeadline(load, signal);
+}
+
+/** `p`, or `null` once the shared deadline fires — whichever comes first. */
+async function raceDeadline<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T | null> {
+  return signal ? await Promise.race([p, aborted(signal)]) : await p;
 }
 
 /** Resolves `null` when the shared deadline fires. */

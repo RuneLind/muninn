@@ -435,9 +435,11 @@ export function suggestedQuestions(input: {
   if (input.mode === "article") {
     const article = input.article;
     if (!article) return [];
-    const t = titleForPrompt(article.title || "");
-    if (!t) return [];
+    // The opener's chips first, and before the title gate: Draft plan names
+    // its key, not the title, so an untitled page still gets it.
     out.push(...(input.lead ?? []));
+    const t = titleForPrompt(article.title || "");
+    if (!t) return out;
     if (input.jiraBot) {
       // Bokmål on purpose: the pinned Jira bot drafts in bokmål, and the chip
       // fills the box editable like every other one — never a one-click send.

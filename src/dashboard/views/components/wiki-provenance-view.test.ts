@@ -511,3 +511,34 @@ describe("the strip's chips on a wiki with a tracker", () => {
     expect(provStripHtml(p, { "DEMO-180": 1 })).not.toContain("inferred");
   });
 });
+
+describe("the strip's chips on a wiki with a tracker, PR 3 fix round 1", () => {
+  const issue = (tracker: string, key: string, relations: string[]) => ({
+    tracker,
+    key,
+    url: `https://example.invalid/browse/${key}`,
+    field: "jira",
+    relations: relations as never,
+    pageCount: 1,
+    planPages: [],
+  });
+
+  test("C8: only the Jira tracker's rows become Jira chips", () => {
+    const p = payload({ jira: [], issues: [issue("jira", "DEMO-101", ["title"]), issue("gitlab", "DEMO-7", ["title"])] });
+    expect(stripChipViews(p).map((c) => c.key)).toEqual(["DEMO-101"]);
+  });
+
+  test("C9: a stamped value that is not key-shaped still draws its inert chip beside the counting keys", () => {
+    const p = payload({
+      jira: [
+        { key: "DEMO-140", url: "https://example.invalid/browse/DEMO-140" },
+        { key: "SEE THE EPIC", url: "https://example.invalid/browse/SEE%20THE%20EPIC" },
+      ],
+      issues: [issue("jira", "DEMO-140", ["stamped"]), issue("jira", "DEMO-142", ["tag"]), issue("jira", "DEMO-150", ["title"])],
+    });
+    expect(stripChipViews(p).map((c) => c.key)).toEqual(["DEMO-140", "DEMO-142", "DEMO-150", "SEE THE EPIC"]);
+    const html = provStripHtml(p, { "DEMO-140": 1, "DEMO-150": 1 });
+    expect(html).toContain('<span class="wiki-prov-jira wiki-prov-jira-inert"><span class="wiki-prov-jira-key"');
+    expect(html).toContain("SEE THE EPIC");
+  });
+});

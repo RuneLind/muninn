@@ -308,7 +308,8 @@ describe("the page route", () => {
       const body = await get(`/api/wiki/page?wiki=trk&relPath=${rel}`);
       expect(body.provenancePending).toBe(true);
       expect((body.issueRows as IssueRow[]).length).toBeGreaterThan(0);
-      expect(body.issueStampable).toBe(true);
+      // W4: the Stamp route refuses a non-markdown page, so it is never stampable here.
+      expect(body.issueStampable).toBe(rel.endsWith(".md"));
       // The inline half carries no network-joined field.
       expect((body.issueRows as IssueRow[]).every((r) => r.category === undefined && r.ledger === undefined)).toBe(true);
     }
@@ -325,5 +326,52 @@ describe("the page route", () => {
     expect("issueRows" in stamped).toBe(false);
     const prov = (await get("/api/wiki/page/provenance?wiki=plain&relPath=stamped.md")).provenance as Record<string, unknown>;
     expect("issues" in prov).toBe(false);
+  });
+});
+
+describe("PR 3 fix round 1", () => {
+  test("S1: a slow lookup does not starve the ledger — both start together under the one deadline", async () => {
+    const rows = rowsOf(tracked, "inferred.md");
+    const [config] = tracked.readerConfig!.trackers!;
+    const slowLookup = async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      return new Map<string, IssueFacts>();
+    };
+    const fastLedger = async () => ({ sessions: [{}], totalCost: 1, costedSessions: 1, truncated: false });
+    const c = ctx({ lookupIssues: slowLookup }, fastLedger);
+    const out = await resolveIssueRows(rows, [config!], c, AbortSignal.timeout(60));
+    expect(out.map((r) => r.ledger?.state)).toEqual(["priced", "priced"]);
+    // The lookup missed the deadline, so the rows stay bare rather than wrong.
+    expect(out.every((r) => r.known === undefined)).toBe(true);
+  });
+
+  test("S5: a key with no `-` has no project, so it is not tracked rather than priced as a prefix", async () => {
+    const [config] = tracked.readerConfig!.trackers!;
+    const asked: string[] = [];
+    const ledger = async (p: string) => {
+      asked.push(p);
+      return { sessions: [], totalCost: 0, costedSessions: 0, truncated: false };
+    };
+    const base: IssueRow = { tracker: "jira", key: "DEMOX", url: "", field: "jira", relations: ["title"], pageCount: 1, planPages: [] };
+    const out = await resolveIssueRows([base], [config!], ctx({}, ledger));
+    expect(out[0]!.ledger).toEqual({ state: "not-tracked" });
+    expect(asked).toEqual([]);
+  });
+
+  test("S7: a deadline only the issue leg hit does not mark the page's other legs timed out", async () => {
+    const hang = () => new Promise<unknown>(() => {});
+    const p = await pageProvenance(meta(tracked, "inferred.md"), ctx({ budgetMs: 20 }, hang), undefined, tracked);
+    expect(p!.issues!.map((r) => r.ledger)).toEqual([
+      { state: "unpriced", reason: "deadline" },
+      { state: "unpriced", reason: "deadline" },
+    ]);
+    expect(p!.links.timedOut).toBe(false);
+  });
+
+  test("S7: a page whose own legs ran still reports the deadline", async () => {
+    const hang = () => new Promise<unknown>(() => {});
+    const c = ctx({ budgetMs: 20, loadJiraIndex: () => new Promise(() => {}) }, hang);
+    const p = await pageProvenance(meta(tracked, "stamped.md"), c, undefined, tracked);
+    expect(p!.links.timedOut).toBe(true);
   });
 });

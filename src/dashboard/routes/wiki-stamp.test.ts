@@ -829,7 +829,9 @@ describe("the { tracker, key } form (Connections' Link)", () => {
     await writeFile(path.join(troot, TREL), TPAGE, "utf8");
     await writeFile(
       path.join(troot, ".wiki-reader.json"),
-      JSON.stringify({ trackers: [{ id: "jira", projects: ["DEMO"], hosts: ["example.invalid"] }] }),
+      // SEMO, ITEM and SSX are the projects a Unicode case fold would reach
+      // (`ſemo-1`, `ıtem-1`, `ßx-1`), so the shape check alone must refuse them.
+      JSON.stringify({ trackers: [{ id: "jira", projects: ["DEMO", "SEMO", "ITEM", "SSX"], hosts: ["example.invalid"] }] }),
       "utf8",
     );
     __setWikiRegistryForTest([
@@ -905,5 +907,42 @@ describe("the { tracker, key } form (Connections' Link)", () => {
     const res = await link(tapp({ isReadonlyRoot: () => true }));
     expect(res.status).toBe(403);
     expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("W1: a key is ASCII key-shaped BEFORE uppercasing — no Unicode fold reaches the CLI", async () => {
+    await fakeCli(`printf x > "${argvFile}"; exit 1`);
+    for (const key of ["ſemo-1", "ıtem-1", "ßx-1"]) {
+      const res = await link(tapp(), { key });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { reason: string }).reason).toBe("bad-key");
+    }
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("W2: an overlong key or a leading zero is 400 before any spawn", async () => {
+    await fakeCli(`printf x > "${argvFile}"; exit 1`);
+    for (const key of [`DEMO-${"1".repeat(200_000)}`, "DEMO-123456789", "DEMO-01407", `${"D".repeat(17)}-1`]) {
+      const res = await link(tapp(), { key });
+      expect(res.status).toBe(400);
+    }
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("W3: a key outside the wiki's configured projects is refused 409 out-of-project, no spawn", async () => {
+    await fakeCli(`printf x > "${argvFile}"; exit 1`);
+    const res = await link(tapp(), { key: "FOO-1" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { reason: string }).reason).toBe("out-of-project");
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("W5: `tracker: null` / `key: null` beside a ref is the session form, not the issue form", async () => {
+    for (const extra of [{ tracker: null }, { key: null }]) {
+      await fakeCli(`printf '%s\\n' "$@" > "${argvFile}"\n echo '{"outcome":"unchanged","reason":"already-stamped","path":"'"$4"'"}'`);
+      const res = await post(tapp(), { wiki: "t", relPath: TREL, ref: NEW_REF, ...extra });
+      expect(res.status).toBe(200);
+      expect((await readFile(argvFile, "utf8")).trim().split("\n")[0]).toBe("--session");
+      await rm(argvFile, { force: true });
+    }
   });
 });

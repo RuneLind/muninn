@@ -1093,8 +1093,10 @@ export async function renderWikiPage(opts?: {
     .mini-issue.inferred .mini-issue-dot { fill: none; stroke: var(--accent-light); stroke-width: 1.4; }
     .mini-edge.mini-issue-edge { stroke: var(--accent-muted); }
 
-    /* Connections' issue section (tracker wikis only). Every line a reader has
-       to read sits at --text-muted or stronger — the provenance strip's rule. */
+    /* Connections' issue section (tracker wikis only). Each status pill paints
+       its own opaque ground; every pill ink measures >= 5.3:1 on it in both
+       themes (e2e/wiki-tracker-connections.spec.ts), where --status-* and
+       --text-muted measured 3.0-4.52:1. */
     .wiki-conn-issues .wiki-conn-title { display: flex; align-items: center; gap: 8px; }
     .wiki-issue-row {
       padding: 6px 8px; margin: 0 0 6px; border-radius: 6px;
@@ -1109,15 +1111,15 @@ export async function renderWikiPage(opts?: {
       font-size: 10.5px; padding: 0 6px; border-radius: 999px;
       background: var(--tint-neutral); color: var(--text-secondary);
     }
-    .wiki-issue-status.cat-todo { background: var(--tint-info); color: var(--status-info); }
+    .wiki-issue-status.cat-todo { background: var(--tint-neutral); color: var(--tok-fn); }
     .wiki-issue-status.cat-active { background: var(--tint-purple); color: var(--accent-light); }
-    .wiki-issue-status.cat-review { background: var(--tint-warning); color: var(--changed-ink); }
-    .wiki-issue-status.cat-done { background: var(--tint-success); color: var(--status-success); }
-    .wiki-issue-status.cat-unknown { background: var(--tint-neutral); color: var(--text-muted); }
+    .wiki-issue-status.cat-review { background: var(--tint-warning); color: var(--tok-num); }
+    .wiki-issue-status.cat-done { background: var(--tint-success); color: var(--tok-str); }
+    .wiki-issue-status.cat-unknown { background: var(--tint-neutral); color: var(--text-soft); }
     .wiki-issue-title, .wiki-issue-epic { font-size: 12px; color: var(--text-secondary); margin-top: 2px; overflow-wrap: anywhere; }
     .wiki-issue-epic { font-size: 11px; color: var(--text-muted); }
     .wiki-issue-meta { font-size: 11px; color: var(--text-muted); margin-top: 3px; overflow-wrap: anywhere; }
-    .wiki-issue-cover.covered { color: var(--status-success); }
+    .wiki-issue-cover.covered { color: var(--tok-str); }
     .wiki-issue-plan { color: var(--accent-light); text-decoration: none; }
     .wiki-issue-plan:hover { text-decoration: underline; }
     .wiki-issue-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; }

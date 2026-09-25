@@ -1851,7 +1851,9 @@ coordinate shape first — a malformed coordinate is a 400 for the WHOLE request
 upstream, so one typo in `prs:` must not take the leg down. `links`
 (`{handoffs, prs, ghostFacts, ghostMerges, handoffsCapped, prsCapped, timedOut}`)
 is what the footer reads; `timedOut` is the shared signal's own `aborted`, read
-once after the awaits rather than raced per leg.
+once when legs 1–4 and the ghost hop have settled rather than raced per leg — not
+after the issue leg, which carries its deadline on each row's `ledger`, so a
+page whose own legs finished (or never ran) is not blamed for it.
 
 **A GHOST is a session the ledger links to the page that `sessions:` does not
 name**, and the two sources are not interchangeable. Through a HANDOFF: a stamped
@@ -2164,7 +2166,8 @@ rest / hovered / active, a listing that drops the tracker, and chip = rows =
 ### Connections and Link (`trackers/rows.ts`, `trackers/jira-lookup.ts`, `views/components/wiki-issue-rows.ts`)
 
 On a wiki with a tracker, the Connections panel opens with the page's issues,
-above the mini-graph (which draws up to four counting keys as diamonds).
+above the mini-graph (which draws up to four counting Jira keys as diamonds,
+and counts the rest in its footer as `+N issues not drawn`).
 
 - **One row shape, two paths** (`IssueRow`, `trackers/types.ts`). `GET
   /api/wiki/page` carries the index-local half inline as `issueRows` (key, url,
@@ -2187,13 +2190,18 @@ above the mini-graph (which draws up to four counting keys as diamonds).
   over every relation that page has to the key. `tag` and `link` never cover.
 - **Status.** `loadIssueFields` reads huginn's `jira-issues` listing with
   `include_issue_fields=true` ONLY (its own 10-minute cache and 60 s negative
-  cache; the composer's `loadJiraKeyIndex` keeps the cheap listing). The key is
-  the document id's prefix before the first `_`. Twin documents: the newest
+  cache; past the TTL a failed refetch keeps serving the last good listing, and
+  only a host with none answers null; the first failure warns, repeats log
+  info). The key is `jiraKeyFromDocId`'s (`src/jira/retrieval.ts`), so the
+  strip, Connections and the Jira composer agree on which keys huginn holds
+  (measured 2026-09-25: all 2,386 live ids yield the same key both ways). A
+  stamp with an out-of-range component (`2026-13-01`, `+9999`) is unparseable,
+  never rolled over. Twin documents: the newest
   PARSED `updated` wins (offsets `+0100`/`+02:00`, a stray `\:` unescaped), an
   unparseable one loses and is not served, a tie goes to the smaller id — a
   string max picks the wrong twin across an offset change. The status goes
   through the wiki's merged `statusMap`; unmapped is `unknown`, logged once per
-  value. A lookup that degrades leaves the rows with no `category`, so no
+  wiki and value. A lookup that degrades leaves the rows with no `category`, so no
   status pill and no Draft plan.
 - **Cost.** `/api/jira?key=` on the claude-usage host, through the optional
   `SessionLedgerDeps.fetchIssueLedger` and the adapter's `ledgerPath`: at most
@@ -2201,8 +2209,12 @@ above the mini-graph (which draws up to four counting keys as diamonds).
   at a time, strongest first, on the page's one `PROVENANCE_BUDGET_MS`
   deadline (raced as well as signalled). claude-usage records mentions only for
   its `JIRA_KEY_PREFIXES`, so a key outside the tracker's `ledgerProjects`
-  (default: the adapter's mirror of that list; a wiki may name its own) renders
-  "not tracked" and is never asked. Every other unpriced row says why (`cap`,
+  (default: the adapter's mirror of that list; a wiki may name its own, and an
+  empty or unusable one warns and keeps the default — never "nothing is
+  tracked") renders "not tracked" and is never asked. The lookup and the ledger
+  start together, so a slow huginn cannot spend the deadline claude-usage was
+  never asked in. The key's project and the answer's shape are the adapter's
+  (`projectOf`, `parseLedger`). Every other unpriced row says why (`cap`,
   `deadline`, `unreachable`, `not-configured`, `demoted`).
 - **Layout.** Counting keys are rows (dashed unless stamped; the strongest
   relation shown, all of them on hover). Link-only keys go on an "also linked"
@@ -2211,14 +2223,22 @@ above the mini-graph (which draws up to four counting keys as diamonds).
   `todo`/`active` and opens the Discuss dialog in article mode with a leading
   "Draft a plan for KEY" chip and an empty question box.
 - **The strip.** When the payload carries `issues`, the strip's chip row draws
-  every counting key from them (`stripChipViews`, inferred ones dashed) instead
-  of `jira`. `jira` stays in the payload for the shape fixture and the reverse
+  every counting Jira key from them (`stripChipViews`, strongest first,
+  inferred ones dashed, ✓ from the lookup's `known`), then every stamped value
+  that is not key-shaped as the same inert chip a wiki without a tracker draws.
+  `jira` stays in the payload for that, the shape fixture and the reverse
   lookup, which stay stamped-only.
 - **Link** is the Stamp route's second body form — see the Stamp section.
-  Offered only when `stampable` and the page is markdown; **Link all** writes
-  the `declared`/`created`/`title`/`stem` keys (already covering, so it never
-  changes a verdict), one POST at a time. After a Link the rows and the strip
-  redraw from the route's re-resolved block.
+  Offered only when `stampable` and the page is markdown (the inline
+  `issueStampable` is false on any other page); **Link all** writes the
+  `declared`/`created`/`title`/`stem` keys (`LINK_ALL_RELATIONS`, the coverage
+  relations minus `stamped`, so it never changes a verdict), one POST at a
+  time. While any Link on a page is in flight every Link control there is
+  disabled; the lock is keyed by wiki and relPath and survives a navigation
+  away and back. After a Link the rows, the strip, the mini-graph and the rail
+  row's pills redraw from the route's re-resolved block, and focus stays in the
+  section (the same key's control, else the next enabled Link, else the
+  section).
 
 Acceptance: `trackers/jira-lookup.test.ts`, `provenance-issues.test.ts` (the
 gate, coverage, the deferred rows, the ledger cap and deadline, the page route,
@@ -2493,14 +2513,17 @@ plus `--report`:
 
 The second line is the **`{ tracker, key }` body form** — Connections' Link.
 Exactly one of `ref` and `tracker`+`key` (both ⇒ 400). The adapter is resolved
-(unknown ⇒ 400 `unknown-tracker`), the key normalized and tested against its
-`keyPattern` (⇒ 400 `bad-key`), and a wiki whose `.wiki-reader.json` names no
-such tracker is refused 409 `no-tracker` before any spawn. Every other check
+(unknown ⇒ 400 `unknown-tracker`; a `null` `tracker` or `key` counts as
+absent), the key read by its `parseKey` — ASCII key-shaped BEFORE any case
+fold, a 2–16 character project and a number of at most eight digits with no
+leading zero (⇒ 400 `bad-key`) — a wiki whose `.wiki-reader.json` names no such
+tracker is refused 409 `no-tracker`, and a key in none of that tracker's
+`projects` 409 `out-of-project`, all before any spawn. Every other check
 below applies unchanged. The form refreshes the index on `unchanged` as well as
 `written`, since an "already stamped" from the reader usually means a hand edit
 the cache has not seen. The CLI's skip reasons reach the row as named states
-(`not-inline-list`, `duplicate-key`, `skip-list`, `not-markdown`; any other one
-by name).
+(`not-inline-list`, `duplicate-key`, `skip-list`; any other one by name — a
+non-markdown page never reaches the CLI, since confinement refuses it first).
 
 through the shared bounded spawn helper (`src/utils/run-proc.ts`, hoisted out of
 `src/video/media.ts` so a wiki route does not import the capture-vertical graph;

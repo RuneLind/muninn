@@ -43,9 +43,14 @@ export interface IssueSectionOptions {
   /** The Discuss dialog can open here (false on a read-only wiki, which seeds
    *  no chat) — gates Draft plan. Default true. */
   discuss?: boolean;
+  /** A Link or Link all on this page is in flight: every Link control renders
+   *  disabled, so two POSTs never race for one `jira:` line. */
+  locked?: boolean;
 }
 
 const isStamped = (r: IssueRow) => r.relations.includes("stamped");
+const isLocked = (opts: IssueSectionOptions) =>
+  opts.locked === true || [...(opts.states?.values() ?? [])].some((s) => s.kind === "busy");
 
 /** May this row be Linked one at a time? Not stamped already, and the page
  *  can be written. A mention is not offered (see `issueSectionHtml`). */
@@ -116,8 +121,6 @@ export function linkRefusalHtml(reason: string, field: string): string {
       return `the page has two ${f} lines; edit it by hand`;
     case "skip-list":
       return "this page is on the stamper's skip list";
-    case "not-markdown":
-      return "only a markdown page can be linked";
     default:
       return `not linked: ${esc(reason)}`;
   }
@@ -154,8 +157,8 @@ function stateHtml(state: IssueRowState | undefined, field: string): string {
   return `<span class="wiki-issue-msg err" data-issue-state="${esc(state.kind === "refused" ? state.reason : "error")}">${text}</span>`;
 }
 
-function linkButton(row: IssueRow, state: IssueRowState | undefined): string {
-  const busy = state?.kind === "busy";
+function linkButton(row: IssueRow, state: IssueRowState | undefined, locked: boolean): string {
+  const busy = locked || state?.kind === "busy";
   return (
     `<button type="button" class="wiki-issue-btn" ${ISSUE_LINK_ATTR}="${esc(row.key)}"` +
     ` data-issue-tracker="${esc(row.tracker)}"${busy ? " disabled" : ""}` +
@@ -184,7 +187,7 @@ function rowHtml(row: IssueRow, opts: IssueSectionOptions): string {
         ` title="${esc(`Discuss this page with a starter question to draft a plan for ${row.key}`)}">Draft plan</button>`,
     );
   }
-  if (linkOffered(row, opts)) actions.push(linkButton(row, state));
+  if (linkOffered(row, opts)) actions.push(linkButton(row, state, isLocked(opts)));
   return (
     `<div class="wiki-issue-row${isStamped(row) ? " stamped" : " inferred"}" data-issue-row="${esc(row.key)}">` +
     `<div class="wiki-issue-head">${key}` +
@@ -205,7 +208,7 @@ function alsoHtml(row: IssueRow, opts: IssueSectionOptions): string {
   const key = row.url
     ? `<a class="wiki-issue-key" href="${esc(row.url)}" target="_blank" rel="noopener">${esc(row.key)}</a>`
     : `<span class="wiki-issue-key">${esc(row.key)}</span>`;
-  const link = linkOffered(row, opts) ? linkButton(row, state) : "";
+  const link = linkOffered(row, opts) ? linkButton(row, state, isLocked(opts)) : "";
   return `<span class="wiki-issue-also-item" data-issue-row="${esc(row.key)}">${key}${link}${state ? stateHtml(state, row.field) : ""}</span>`;
 }
 
@@ -223,9 +226,11 @@ export function issueSectionHtml(rows: readonly IssueRow[] | undefined, opts: Is
   const mentions = rows.filter((r) => !relationsCount(r.relations) && !r.relations.includes("link"));
   const label = opts.labelOf(rows[0]!.tracker) || "Issues";
   const all = linkAllKeys(counting, opts);
-  const busy = [...(opts.states?.values() ?? [])].some((s) => s.kind === "busy");
+  const busy = isLocked(opts);
+  // `tabindex="-1"`: while every Link is disabled, focus waits on the section
+  // itself rather than falling to <body>.
   let html =
-    `<div class="wiki-conn-section wiki-conn-issues" id="${CONN_ISSUES_ID}">` +
+    `<div class="wiki-conn-section wiki-conn-issues" id="${CONN_ISSUES_ID}" tabindex="-1">` +
     `<div class="wiki-conn-title">${esc(label)} (${counting.length})` +
     (all.length > 1
       ? ` <button type="button" class="wiki-issue-btn wiki-issue-linkall" ${ISSUE_LINK_ALL_ATTR}="1"${busy ? " disabled" : ""}` +

@@ -40,7 +40,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
-import { contrastOf } from "./contrast.ts";
+import { contrastOf, paintedContrast } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 import {
   RAIL_ISSUE_PILLS_COL,
@@ -333,42 +333,6 @@ async function chipForm(page: Page, rel: string): Promise<string> {
   return row(page, rel)
     .locator(".wiki-fold-chip")
     .evaluate((el) => (getComputedStyle(el.querySelector(".wiki-fold-chip-label")!).display === "none" ? "counts" : "words"));
-}
-
-/**
- * The contrast of an element's text against what is really painted behind it:
- * every translucent fill between it and the first opaque one composited, as the
- * browser does — the active row's fill is a 14% tint, which a walk that stops
- * at the first non-transparent colour would read as solid.
- */
-async function paintedContrast(locator: import("@playwright/test").Locator): Promise<number> {
-  return locator.evaluate((el) => {
-    const rgba = (c: string) => {
-      const n = c.match(/[\d.]+/g)!.map(Number);
-      return { r: n[0]!, g: n[1]!, b: n[2]!, a: n.length > 3 ? n[3]! : 1 };
-    };
-    const layers: ReturnType<typeof rgba>[] = [];
-    for (let n: HTMLElement | null = el as HTMLElement; n; n = n.parentElement) {
-      const c = rgba(getComputedStyle(n).backgroundColor);
-      if (c.a === 0) continue;
-      layers.push(c);
-      if (c.a >= 1) break;
-    }
-    let bg = { r: 255, g: 255, b: 255 };
-    for (const l of layers.reverse()) {
-      bg = { r: l.r * l.a + bg.r * (1 - l.a), g: l.g * l.a + bg.g * (1 - l.a), b: l.b * l.a + bg.b * (1 - l.a) };
-    }
-    const lum = ({ r, g, b }: { r: number; g: number; b: number }) => {
-      const ch = (v: number) => {
-        const x = v / 255;
-        return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
-      };
-      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
-    };
-    const a = lum(rgba(getComputedStyle(el).color));
-    const b = lum(bg);
-    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  });
 }
 
 test.describe("Wiki reader: tracker links", () => {

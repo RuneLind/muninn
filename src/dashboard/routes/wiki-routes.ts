@@ -1010,15 +1010,20 @@ export function projectCounts(pages: readonly WikiPageMeta[]): Record<string, nu
   return counts;
 }
 
-/** `{ issueRows }` for a page with issue refs on a wiki with a tracker, `{}`
- *  otherwise. */
+/**
+ * Connections' issue rows, index-local half (key, relations, page count,
+ * covering plans), for a page with issue refs on a wiki with a tracker; `{}`
+ * otherwise. `issueStampable` rides with them so a page whose only keys are
+ * link-only (no deferred fetch) can still offer Link — never on a non-markdown
+ * page, which the Stamp route refuses.
+ */
 function issueRowsField(
   index: WikiIndex,
   meta: WikiPageMeta,
   stampable: () => boolean,
 ): { issueRows?: IssueRow[]; issueStampable?: boolean } {
   const rows = issueRowsFor(meta, index.issueKeys, index.readerConfig?.trackers ?? []);
-  return rows.length ? { issueRows: rows, issueStampable: stampable() } : {};
+  return rows.length ? { issueRows: rows, issueStampable: /\.mdx?$/i.test(meta.relPath) && stampable() } : {};
 }
 
 /** `{ trackers: [{id, label}] }` for a wiki with a tracker, `{}` otherwise. */
@@ -1914,13 +1919,7 @@ export function registerWikiRoutes(
       // bare `Bun.file().text()`, so the two cannot disagree.
       hash: sha256(markdown),
       ...(hasProvenance(meta) ? { provenancePending: true } : {}),
-      // Connections' issue rows, index-local half (key, relations, page count,
-      // covering plans): they need no network join, so the section renders
-      // with the page. The deferred provenance block carries the whole row.
-      // Absent on a page with none, which is every page of a wiki with no
-      // tracker.
-      // `issueStampable` rides with them so a page whose only keys are
-      // link-only (no deferred fetch) can still offer Link.
+      // No network join, so the section renders with the page.
       ...issueRowsField(index, meta, () => ctxStampable(provenanceCtx, resolveWikiRoot(entry?.root))),
       // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
       // a link opened on a non-default wiki lands on the DEFAULT one.

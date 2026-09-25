@@ -44,6 +44,7 @@ import {
 import { escHtml as esc } from "./escape.ts";
 import { fmtCost } from "./fmt-cost.ts";
 import { relationsCount } from "../../../wiki/trackers/types.ts";
+import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
 
 /**
  * `$X.XX` for the STRIP's `totalCost` and nothing else.
@@ -426,14 +427,17 @@ export function jiraChipView(j: ProvenanceJira): JiraChipView {
 
 /**
  * The strip's chips. On a wiki with a tracker the payload's `issues` supersede
- * `jira`: every key that COUNTS, stamped and inferred, strongest first. On a
- * wiki without one, the stamped `jira` list as before.
+ * `jira`: every Jira key that COUNTS, stamped and inferred, strongest first,
+ * with its ✓ from the issue lookup's `known`; then any stamped value that is
+ * not key-shaped, as the inert chip a wiki without a tracker draws for it. On
+ * a wiki without one, the stamped `jira` list as before.
  */
 export function stripChipViews(p: ProvenancePayload): JiraChipView[] {
   if (!p.issues) return p.jira.map(jiraChipView);
-  return p.issues
-    .filter((r) => relationsCount(r.relations))
+  const keys = p.issues
+    .filter((r) => r.tracker === JIRA_TRACKER_ID && relationsCount(r.relations))
     .map((r) => ({ key: r.key, url: r.url, known: r.known === true, inferred: !r.relations.includes("stamped") }));
+  return [...keys, ...p.jira.filter((j) => !isJiraKeyShape(j.key)).map(jiraChipView)];
 }
 
 // ── Markup ───────────────────────────────────────────────────────────────────

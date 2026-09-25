@@ -27,7 +27,7 @@ export interface IssuePageInput {
 }
 
 /** `tracker:key`, the map's key — the way a session ref is `provider:id`. */
-export const issueKeyId = (tracker: string, key: string): string => `${tracker}:${key}`;
+const issueKeyId = (tracker: string, key: string): string => `${tracker}:${key}`;
 
 /**
  * Is this page a plan under this tracker's config? Its resolved type is `plan`
@@ -73,7 +73,7 @@ export function buildIssueKeyIndex(
 }
 
 /** The plans that cover a key: a plan page with a coverage relation to it. */
-export function coveringPlans(entry: IssueKeyEntry | undefined): { relPath: string; title: string }[] {
+function coveringPlans(entry: IssueKeyEntry | undefined): { relPath: string; title: string }[] {
   if (!entry) return [];
   return entry.pages
     .filter((p) => p.plan && p.relations.some((r) => (COVERAGE_RELATIONS as readonly string[]).includes(r)))
@@ -112,25 +112,21 @@ export function issueRowsFor(
   return out;
 }
 
-/** Raw statuses already logged as unmapped, per tracker. Bounded by the
- *  corpus's own status vocabulary (tens of values), never by requests. */
+/** Raw statuses already logged as unmapped, per wiki and tracker. Bounded by
+ *  the corpus's own status vocabulary (tens of values), never by requests. */
 const warnedStatuses = new Set<string>();
 
-/** Test-only. */
-export function __resetStatusWarnsForTest(): void {
-  warnedStatuses.clear();
-}
-
 /** A raw status through the wiki's merged `statusMap`. Unmapped ⇒ `unknown`,
- *  logged once per value so the operator can extend the map. */
-export function statusCategory(status: string | undefined, config: TrackerConfig): StatusCategory {
+ *  logged once per wiki and value so that wiki's operator can extend its map. */
+export function statusCategory(status: string | undefined, config: TrackerConfig, wikiRoot = ""): StatusCategory {
   if (!status) return "unknown";
   if (Object.prototype.hasOwnProperty.call(config.statusMap, status)) return config.statusMap[status]!;
-  const seen = `${config.id}:${status}`;
+  const seen = JSON.stringify([wikiRoot, config.id, status]);
   if (!warnedStatuses.has(seen)) {
     warnedStatuses.add(seen);
-    log.info("tracker {tracker}: status {status} is in no statusMap — shown as unknown", {
+    log.info("tracker {tracker} on {wiki}: status {status} is in no statusMap — shown as unknown", {
       tracker: config.id,
+      wiki: wikiRoot,
       status,
     });
   }

@@ -31,6 +31,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
+import { paintedContrast } from "./contrast.ts";
 
 const PORT = e2ePort("wiki-tracker-connections");
 const STUB_PORT = e2ePort("wiki-tracker-connections/stub");
@@ -77,6 +78,18 @@ const PLAN_A = "plans/arbeidsplan.md";
 const PLAN_B = "plans/kjoreplan.md";
 const ORA = "notes/ora.md";
 const LINKED = "notes/linked-only.md";
+/** Every Link-all relation (declared, created, title, stem) plus a tag, a link
+ *  and a mention, and one key in each status category. */
+const LINK_ALL = "notes/demo-205-samleside.md";
+const PLAN_C = "plans/samleplan.md";
+/** The stub stamper sleeps on these (their path says `treg`), so a Link is
+ *  still in flight while the spec looks. */
+const SLOW = "notes/treg.md";
+const SLOW_BACK = "notes/treg-igjen.md";
+const FOCUS = "notes/fokus.md";
+/** Where the hostile POSTs aim — a page of its own, so a spawn that should
+ *  not happen cannot damage a page another case reads. */
+const HOSTILE = "notes/hostile.md";
 
 const PAGES: Record<string, string> = {
   [ANCHOR]: md(
@@ -96,6 +109,15 @@ const PAGES: Record<string, string> = {
   [PLAN_B]: md(["title: Kjøreplan for utrulling", "type: plan", "tags: [demo-121]"], "# Kjøreplan"),
   [ORA]: md(["title: Fallgruve (ORA-01407) på SAK-4711", "tags: [demo-api]"], "# Fallgruve"),
   [LINKED]: md(["title: Lenket side"], `# Lenket side\n\nEpic: [DEMO-190](${url("DEMO-190")}).`),
+  [LINK_ALL]: md(
+    ["title: DEMO-201 samleside", "issue: DEMO-202", "tags: [demo-206]"],
+    `# Samleside\n\nJira opprettet: [DEMO-203](${url("DEMO-203")}). Epic: [DEMO-207](${url("DEMO-207")}).\n\nSe også DEMO-208.`,
+  ),
+  [PLAN_C]: md(["title: Samleplan", "type: plan", "issue: DEMO-203"], "# Samleplan"),
+  [SLOW]: md(["title: DEMO-211 og DEMO-212 treg"], `# Treg\n\nEpic: [DEMO-213](${url("DEMO-213")}).`),
+  [SLOW_BACK]: md(["title: DEMO-221 treg igjen"], "# Treg igjen"),
+  [FOCUS]: md(["title: DEMO-231 og DEMO-232 fokus"], "# Fokus"),
+  [HOSTILE]: md(["title: DEMO-241 mål"], "# Mål"),
   [EXPLAINER]:
     "<!doctype html><html><head><title>DEMO-150 forklart</title></head>" +
     `<body><a href="${url("DEMO-199")}">DEMO-199</a></body></html>`,
@@ -109,11 +131,17 @@ const ISSUES: Record<string, { title: string; status: string; updated: string }>
   "DEMO-120": { title: "Tag en", status: "Ferdig", updated: "2025-12-01T09:00:00.000+0100" },
   "DEMO-121": { title: "Tag to", status: "Til Utvikle", updated: "2025-12-02T09:00:00.000+0100" },
   "DEMO-130": { title: "Notat en", status: "Til Utvikle", updated: "2025-11-01T09:00:00.000+0100" },
+  // One key per status category (DEMO-206 is absent: "not in huginn").
+  "DEMO-201": { title: "Aktiv", status: "In Progress", updated: "2026-01-05T09:00:00.000+0100" },
+  "DEMO-202": { title: "Ikke startet", status: "Til Utvikle", updated: "2026-01-05T09:00:00.000+0100" },
+  "DEMO-203": { title: "I test", status: "Akseptanse test", updated: "2026-01-05T09:00:00.000+0100" },
+  "DEMO-205": { title: "Ferdig sak", status: "Ferdig", updated: "2026-01-05T09:00:00.000+0100" },
 };
 
 /** The stub stamper — the real CLI's `jira:` behaviour, one report line. */
-const STUB_STAMPER = [
+const stubStamper = (log: string) => [
   "#!/bin/bash",
+  `printf '%s\\n' "$*" >> '${log}'`,
   'key=""; file=""',
   'while [ $# -gt 0 ]; do',
   '  case "$1" in',
@@ -122,6 +150,7 @@ const STUB_STAMPER = [
   "    *) shift;;",
   "  esac",
   "done",
+  'case "$file" in *treg*) sleep 1.5;; esac',
   'report() { printf \'{"outcome":"%s"%s,"path":"%s"}\\n\' "$1" "$2" "$file"; exit 0; }',
   '[ -f "$file" ] || report skipped \',"reason":"missing-file"\'',
   'if grep -q "^jira: \\[" "$file"; then',
@@ -145,6 +174,7 @@ let root = "";
 let plainRoot = "";
 let roRoot = "";
 let stampBin = "";
+let stampLog = "";
 const jiraAsked: string[] = [];
 
 async function writeWiki(pages: Record<string, string>, config?: string): Promise<string> {
@@ -163,7 +193,9 @@ test.beforeAll(async () => {
   plainRoot = await writeWiki({ [STAMPED]: PAGES[STAMPED]!, [INFERRED]: PAGES[INFERRED]! });
   roRoot = await writeWiki({ [INFERRED]: PAGES[INFERRED]! }, READER_CONFIG);
   stampBin = path.join(root, "..", `e2e-conn-stamp-${process.pid}.sh`);
-  await writeFile(stampBin, STUB_STAMPER, { mode: 0o755 });
+  stampLog = `${stampBin}.log`;
+  await writeFile(stampLog, "", "utf8");
+  await writeFile(stampBin, stubStamper(stampLog), { mode: 0o755 });
 
   stub = createServer((req, res) => {
     const u = new URL(req.url ?? "/", `http://127.0.0.1:${STUB_PORT}`);
@@ -232,6 +264,7 @@ test.afterAll(async () => {
   await new Promise<void>((r) => (stub ? stub.close(() => r()) : r()));
   for (const r of [root, plainRoot, roRoot]) if (r) await rm(r, { recursive: true, force: true });
   if (stampBin) await rm(stampBin, { force: true });
+  if (stampLog) await rm(stampLog, { force: true });
 });
 
 async function openPage(page: Page, wiki: string, rel: string): Promise<void> {
@@ -390,5 +423,149 @@ test.describe("Wiki reader: Connections + Link", () => {
     const also = section(page).locator(".wiki-issue-also");
     await expect(also).toContainText("DEMO-190");
     await expect(also.locator('[data-issue-link="DEMO-190"]')).toBeVisible();
+  });
+
+  // ── Fix round 1 ─────────────────────────────────────────────────────────────
+
+  test("Link all writes exactly the declared, created, title and stem keys; the mini-graph and the rail turn solid", async ({ page }) => {
+    await openPage(page, WIKI, LINK_ALL);
+    await deferred(page, "DEMO-201");
+    // Five counting keys, four drawn: the fifth is counted on the graph, not dropped.
+    const graph = page.locator(".wiki-mini-graph");
+    await expect(graph.locator("[data-mini-issue]")).toHaveCount(4);
+    await expect(graph.locator(".mini-issue.inferred")).toHaveCount(4);
+    await expect(graph.locator(".wiki-mini-more")).toContainText("+1 issue");
+    const railPill = page.locator(`.wiki-list-item[data-relpath="${LINK_ALL}"] .wiki-issue-pill`).first();
+    await expect(railPill).toHaveClass(/inferred/);
+
+    const linkAll = section(page).locator("[data-issue-link-all]");
+    await expect(linkAll).toHaveText("Link all (4)");
+    await linkAll.click();
+    for (const key of ["DEMO-202", "DEMO-203", "DEMO-201", "DEMO-205"]) {
+      await expect(issueRow(page, key)).toHaveClass(/stamped/);
+    }
+    const bytes = await readFile(path.join(root, LINK_ALL), "utf8");
+    expect(bytes.match(/^jira:.*$/gm)).toEqual(["jira: [DEMO-202, DEMO-203, DEMO-201, DEMO-205]"]);
+    // The tag, the link and the mention are not written.
+    await expect(issueRow(page, "DEMO-206")).toHaveClass(/inferred/);
+
+    await expect(graph.locator(".mini-issue.inferred")).toHaveCount(0);
+    await expect(graph.locator('[data-mini-issue="DEMO-202"]')).toHaveCount(1);
+    await expect(railPill).not.toHaveClass(/inferred/);
+    await expect(railPill).toHaveAttribute("data-issue-rel", "stamped");
+  });
+
+  test("a promoted link-only key joins the mini-graph, solid", async ({ page }) => {
+    await openPage(page, WIKI, LINKED);
+    await expect(page.locator('[data-mini-issue="DEMO-190"]')).toHaveCount(0);
+    await section(page).locator('[data-issue-link="DEMO-190"]').click();
+    await expect(issueRow(page, "DEMO-190")).toHaveClass(/stamped/);
+    const node = page.locator('.wiki-mini-graph [data-mini-issue="DEMO-190"]');
+    await expect(node).toHaveCount(1);
+    await expect(node).not.toHaveClass(/inferred/);
+  });
+
+  test("focus stays inside the section after a Link, on the next Link", async ({ page }) => {
+    await openPage(page, WIKI, FOCUS);
+    await deferred(page, "DEMO-231");
+    await issueRow(page, "DEMO-231").locator("[data-issue-link]").focus();
+    await page.keyboard.press("Enter");
+    await expect(issueRow(page, "DEMO-231")).toHaveClass(/stamped/);
+    await expect(issueRow(page, "DEMO-232").locator("[data-issue-link]")).toBeFocused();
+  });
+
+  test("while Link all runs every Link control is disabled, and the file gets each key once", async ({ page }) => {
+    await openPage(page, WIKI, SLOW);
+    await deferred(page, "DEMO-211");
+    await section(page).locator("[data-issue-link-all]").click();
+    // The stub sleeps 1.5 s a key, so the first POST is still in flight here.
+    await expect(section(page).locator("[data-issue-link-all]")).toBeDisabled();
+    await expect(section(page).locator('[data-issue-link="DEMO-212"]')).toBeDisabled();
+    await expect(section(page).locator('[data-issue-link="DEMO-213"]')).toBeDisabled();
+    await expect(issueRow(page, "DEMO-212")).toHaveClass(/stamped/, { timeout: 10_000 });
+    await expect(section(page).locator('[data-issue-link="DEMO-213"]')).toBeEnabled();
+    const bytes = await readFile(path.join(root, SLOW), "utf8");
+    expect(bytes.match(/^jira:.*$/gm)).toEqual(["jira: [DEMO-211, DEMO-212]"]);
+  });
+
+  test("leaving and returning mid-Link keeps that page's Links disabled until the POST lands", async ({ page }) => {
+    await openPage(page, WIKI, SLOW_BACK);
+    await deferred(page, "DEMO-221");
+    await issueRow(page, "DEMO-221").locator("[data-issue-link]").click();
+    await page.locator(`.wiki-list-item[data-relpath="${FOCUS}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toContainText("fokus");
+    await page.locator(`.wiki-list-item[data-relpath="${SLOW_BACK}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toContainText("treg igjen");
+    const link = issueRow(page, "DEMO-221").locator("[data-issue-link]");
+    // Still in flight: the control is there, and it is disabled.
+    await expect(link).toBeDisabled();
+    await expect(issueRow(page, "DEMO-221")).toHaveClass(/stamped/, { timeout: 10_000 });
+    const bytes = await readFile(path.join(root, SLOW_BACK), "utf8");
+    expect(bytes.match(/^jira:.*$/gm)).toEqual(["jira: [DEMO-221]"]);
+  });
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`every status pill and the covered line read at 4.5:1 or better, ${scheme} theme`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await openPage(page, WIKI, LINK_ALL);
+      await deferred(page, "DEMO-201");
+      // One key per category; each pill's ink and ground are the tokens the CSS
+      // names, resolved on a body probe, so the pin is the rule and not a colour.
+      const cats: Record<string, { key: string; ink: string; ground: string }> = {
+        active: { key: "DEMO-201", ink: "--accent-light", ground: "--tint-purple" },
+        todo: { key: "DEMO-202", ink: "--tok-fn", ground: "--tint-neutral" },
+        review: { key: "DEMO-203", ink: "--tok-num", ground: "--tint-warning" },
+        done: { key: "DEMO-205", ink: "--tok-str", ground: "--tint-success" },
+        unknown: { key: "DEMO-206", ink: "--text-soft", ground: "--tint-neutral" },
+      };
+      const resolve = (token: string, prop: "color" | "backgroundColor") =>
+        page.evaluate(
+          ([t, p]) => {
+            const probe = document.createElement("span");
+            probe.style[p as "color"] = `var(${t})`;
+            document.body.appendChild(probe);
+            const v = getComputedStyle(probe)[p as "color"];
+            probe.remove();
+            return v;
+          },
+          [token, prop] as const,
+        );
+      const ratios: Record<string, number> = {};
+      for (const [cat, { key, ink, ground }] of Object.entries(cats)) {
+        const pill = issueRow(page, key).locator(`.wiki-issue-status.cat-${cat}`);
+        await expect(pill, cat).toBeVisible();
+        await expect(pill, cat).toHaveCSS("color", await resolve(ink, "color"));
+        await expect(pill, cat).toHaveCSS("background-color", await resolve(ground, "backgroundColor"));
+        ratios[cat] = await paintedContrast(pill);
+      }
+      const covered = issueRow(page, "DEMO-203").locator(".wiki-issue-cover.covered");
+      await expect(covered).toHaveCSS("color", await resolve("--tok-str", "color"));
+      ratios.covered = await paintedContrast(covered);
+      console.log(`[contrast ${scheme}]`, JSON.stringify(Object.fromEntries(Object.entries(ratios).map(([k, v]) => [k, +v.toFixed(2)]))));
+      for (const [name, value] of Object.entries(ratios)) expect(value, `${scheme} ${name}`).toBeGreaterThanOrEqual(4.6);
+    });
+  }
+
+  test("a stamped value that is not key-shaped keeps its inert chip beside the counting keys", async ({ page }) => {
+    await openPage(page, WIKI, SCALAR);
+    const strip = page.locator(".wiki-prov-strip");
+    await expect(strip.locator('[data-prov-jira="DEMO-142"]')).toBeVisible();
+    const inert = strip.locator(".wiki-prov-jira-inert");
+    await expect(inert).toHaveCount(1);
+    await expect(inert).toContainText(/kilde/i);
+  });
+
+  test("hostile keys answer 4xx and never reach the stamper", async ({ page }) => {
+    const before = await readFile(stampLog, "utf8");
+    for (const key of ["ſemo-1", "ıther-1", `DEMO-${"1".repeat(200_000)}`, "FOO-1", "DEMO-0145"]) {
+      const res = await page.request.post(`${BASE}/api/wiki/provenance/stamp`, {
+        headers: { "content-type": "application/json" },
+        data: { wiki: WIKI, relPath: HOSTILE, tracker: "jira", key },
+      });
+      expect(res.status(), key.slice(0, 12)).toBeGreaterThanOrEqual(400);
+      expect(res.status(), key.slice(0, 12)).toBeLessThan(500);
+    }
+    expect(await readFile(stampLog, "utf8")).toBe(before);
+    expect(await readFile(path.join(root, HOSTILE), "utf8")).toBe(PAGES[HOSTILE]);
   });
 });

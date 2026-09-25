@@ -1367,3 +1367,13 @@ describe("Draft plan's starter chip", () => {
     expect(suggestedQuestions({ mode: "direct", lead: [lead] }).some((s) => s.label === lead.label)).toBe(false);
   });
 });
+
+describe("Draft plan's starter chip, PR 3 fix round 1", () => {
+  test("C7: survives an article whose title normalizes to empty", () => {
+    const lead = draftPlanSuggestion("DEMO-101", "<b></b>");
+    for (const title of ["", "<b></b>"]) {
+      const out = suggestedQuestions({ mode: "article", article: { name: "a", title, relPath: "notes/a.md" }, lead: [lead] });
+      expect(out).toEqual([lead]);
+    }
+  });
+});

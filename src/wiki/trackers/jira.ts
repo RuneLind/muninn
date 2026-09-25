@@ -16,6 +16,7 @@ import { JIRA_TRACKER_ID } from "./jira-id.ts";
 import { loadIssueFields } from "./jira-lookup.ts";
 import {
   RELATION_STRENGTH,
+  type IssueLedgerView,
   type IssueRef,
   type IssueRelation,
   type StatusCategory,
@@ -318,6 +319,36 @@ export function inferJiraIssues(page: TrackerPage, config: TrackerConfig): Issue
   return refs.sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
 }
 
+/** An exact key as a client sends it: ASCII letters and digits only, tested
+ *  BEFORE uppercasing (`toUpperCase` maps `ſ` to S, `ı` to I and `ß` to SS),
+ *  with the project shape of a configured prefix and {@link NUM}'s number. */
+const CLIENT_KEY_RE = /^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,7}$/;
+
+function parseClientKey(raw: string): string | null {
+  const v = raw.trim();
+  return CLIENT_KEY_RE.test(v) ? v.toUpperCase() : null;
+}
+
+function projectOfKey(key: string): string | null {
+  return JIRA_KEY_SHAPE.test(key) ? key.slice(0, key.indexOf("-")) : null;
+}
+
+/** `/api/jira?key=`'s answer — `{sessions[], totalCost, costedSessions,
+ *  truncated}` — as a priced view, or null when it is not that shape. */
+function parseJiraLedger(raw: unknown): Extract<IssueLedgerView, { state: "priced" }> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { sessions?: unknown; totalCost?: unknown; costedSessions?: unknown; truncated?: unknown };
+  if (!Array.isArray(r.sessions)) return null;
+  const total = typeof r.totalCost === "number" && Number.isFinite(r.totalCost) ? r.totalCost : 0;
+  return {
+    state: "priced",
+    sessions: r.sessions.length,
+    totalCost: Math.round(total * 100) / 100,
+    costedSessions: typeof r.costedSessions === "number" ? r.costedSessions : 0,
+    truncated: r.truncated === true,
+  };
+}
+
 export const jiraAdapter: TrackerAdapter = {
   id: ID,
   label: "Jira",
@@ -332,4 +363,7 @@ export const jiraAdapter: TrackerAdapter = {
   defaultLedgerProjects: JIRA_DEFAULT_LEDGER_PROJECTS,
   lookup: (knowledgeApiUrl) => loadIssueFields(knowledgeApiUrl),
   ledgerPath: (key) => `/api/jira?key=${encodeURIComponent(key)}`,
+  parseLedger: parseJiraLedger,
+  projectOf: projectOfKey,
+  parseKey: parseClientKey,
 };

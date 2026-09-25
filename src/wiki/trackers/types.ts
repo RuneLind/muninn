@@ -54,6 +54,23 @@ export function relationsCount(relations: readonly string[]): boolean {
 }
 
 /**
+ * A page's refs as the HOT listing ships them: only a ref that COUNTS
+ * (`relationsCount` — something besides `link` and `mention`), with its
+ * `mention` relation dropped. Undefined when nothing is left, so the field
+ * stays absent rather than `[]`. The rail's pills and the Jira facet read this
+ * copy; a link-only or mention-only key is neither.
+ */
+export function compactIssues(issues: readonly IssueRef[] | undefined): IssueRef[] | undefined {
+  if (!issues) return undefined;
+  const out: IssueRef[] = [];
+  for (const r of issues) {
+    if (!relationsCount(r.relations)) continue;
+    out.push({ tracker: r.tracker, key: r.key, relations: r.relations.filter((rel) => rel !== "mention") });
+  }
+  return out.length ? out : undefined;
+}
+
+/**
  * The relations through which a page that is a PLAN covers a key. `tag` and
  * `link` are not among them: a plan tagged with a neighbouring key does not
  * plan that key. A `link` or `tag` key the reader Links by hand becomes
@@ -61,10 +78,10 @@ export function relationsCount(relations: readonly string[]): boolean {
  */
 export const COVERAGE_RELATIONS: readonly IssueRelation[] = ["stamped", "declared", "created", "title", "stem"];
 
-/** The relations **Link all** promotes to `stamped`. Each already counts
- *  toward coverage, so Link all never changes a coverage verdict; every one of
- *  them is project-bounded by the inference rules. */
-export const LINK_ALL_RELATIONS: readonly IssueRelation[] = ["declared", "created", "title", "stem"];
+/** The relations **Link all** promotes to `stamped`: the coverage relations
+ *  minus `stamped` itself, so Link all never changes a coverage verdict; every
+ *  one of them is project-bounded by the inference rules. */
+export const LINK_ALL_RELATIONS: readonly IssueRelation[] = COVERAGE_RELATIONS.filter((r) => r !== "stamped");
 
 /** A status mapped to one of five words every tracker can be read in. */
 export type StatusCategory = "todo" | "active" | "review" | "done" | "unknown";
@@ -219,13 +236,20 @@ export interface TrackerAdapter {
   /** The claude-usage path that lists the sessions mentioning a key. Absent ⇒
    *  the tracker has no ledger and no row is priced. */
   ledgerPath?: (key: string) => string;
+  /** That path's answer as a priced view, or null when it is not one. */
+  parseLedger?: (raw: unknown) => Extract<IssueLedgerView, { state: "priced" }> | null;
+  /** A key's project, or null when the string is not a key. */
+  projectOf: (key: string) => string | null;
+  /** A key exactly as a client sent it (trimmed), normalized, or null when it is
+   *  not one — ASCII-shaped before any case fold, and bounded like the
+   *  inference rules. The Stamp route's one shape check. */
+  parseKey: (raw: string) => string | null;
 }
 
 /** What a tracker lookup knows about one issue. */
 export interface IssueFacts {
   title?: string;
   status?: string;
-  issueType?: string;
   epicLink?: string;
   epicSummary?: string;
   /** The tracker's last-updated stamp, as served (a stray `\:` unescaped). */
