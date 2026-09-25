@@ -5,6 +5,11 @@
  * `src/dashboard/routes/wiki-routes.ts`.
  */
 
+// Both dependency-free by contract, so the browser bundle may import them: the
+// relation vocabulary and the demoted tier are decided in ONE place.
+import { relationsCount, type IssueRelation } from "../../../wiki/trackers/types.ts";
+import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
+
 /**
  * A wiki page's type. Independent client-safe copy of the store's alias (this file
  * has no DOM/server deps so it stays unit-testable). Widened to `string` because a
@@ -154,9 +159,9 @@ export interface WikiListing {
   /**
    * The issues this page relates to, on a wiki whose `.wiki-reader.json` names a
    * tracker — stamped and inferred, every relation per key, strongest first
-   * (`src/wiki/trackers/`). The listing's COMPACT copy: `mention` relations are
-   * dropped server-side, and so is a key that had nothing else. Absent on a wiki
-   * with no tracker and on a page carrying none.
+   * (`src/wiki/trackers/`). The listing's COMPACT copy: only keys that count
+   * (`relationsCount` — not `link`/`mention` alone), `mention` relations dropped.
+   * Absent on a wiki with no tracker and on a page carrying none.
    */
   issues?: ListingIssueRef[];
   /**
@@ -191,11 +196,18 @@ export interface WikiListing {
 }
 
 /** One issue ref as the listing ships it. `relations` is non-empty and ordered
- *  strongest first; its words are the tracker model's `IssueRelation`. */
+ *  strongest first. */
 export interface ListingIssueRef {
   tracker: string;
   key: string;
-  relations: string[];
+  relations: IssueRelation[];
+}
+
+/** A tracker a wiki's `.wiki-reader.json` configured, as the listing names it —
+ *  present on the payload only for a wiki that has one. */
+export interface ListingTracker {
+  id: string;
+  label: string;
 }
 
 export interface WikiFilters {
@@ -1662,21 +1674,16 @@ export function jiraChipCounts(
 }
 
 /**
- * The tracker whose keys the Jira facet counts. The facet stays Jira-only by
- * design: a second tracker gets a facet of its own keyed `tracker:key`, not a
- * share of this one.
- */
-export const JIRA_FACET_TRACKER = "jira";
-
-/**
  * The keys the Jira facet counts and filters a page by — the ONE definition the
  * four consumers share: the server's `jiraCounts`, `filterPages`,
  * `jiraChipCounts` and the listing field they all read.
  *
  * A page carrying `issues` (a wiki with a tracker) answers its Jira refs that
- * hold any relation but `mention` — stamped and inferred alike. A page without
- * it answers its stamped `jira` list exactly as before, which is every page of
- * a wiki with no tracker: that path must not change.
+ * COUNT (`relationsCount`: something besides `link` and `mention`) — stamped
+ * and inferred alike. A page without it answers its stamped `jira` list exactly
+ * as before, which is every page of a wiki with no tracker: that path must not
+ * change. The facet stays Jira-only by design: a second tracker gets a facet of
+ * its own, not a share of this one.
  */
 export function facetJiraKeys(p: {
   jira?: readonly string[];
@@ -1685,35 +1692,40 @@ export function facetJiraKeys(p: {
   if (!p.issues) return p.jira ? [...p.jira] : [];
   const out: string[] = [];
   for (const r of p.issues) {
-    if (r.tracker !== JIRA_FACET_TRACKER) continue;
-    if (!r.relations.some((rel) => rel !== "mention")) continue;
+    if (r.tracker !== JIRA_TRACKER_ID) continue;
+    if (!relationsCount(r.relations)) continue;
     if (out.indexOf(r.key) === -1) out.push(r.key);
   }
   return out;
 }
 
-/** How many Jira chips the facet row shows before its `+N` expander. */
+/** How many Jira chips a tracker wiki's facet row shows before its `+N`. */
 export const JIRA_CHIPS_MAX = 8;
 
 /**
- * Which Jira chips to draw: the top {@link JIRA_CHIPS_MAX} by page count (then
- * key), plus the active key when it falls outside them — a filter set from the
- * URL must always be on screen — or every key once expanded. `hidden` is what
- * the `+N` expander offers.
+ * Which Jira chips to draw. Uncapped on a wiki with no tracker, whose row is
+ * the stamped keys it has always shown. On a tracker wiki: the top
+ * {@link JIRA_CHIPS_MAX} by page count (then key), plus the active key when it
+ * falls outside them — a filter set from the URL must always be on screen — or
+ * every key once expanded. `hidden` is what the `+N` offers; `expander` is
+ * `null` when there is nothing to expand or to collapse.
  */
 export function jiraChipRow(
   counts: Record<string, number>,
   active: string,
   expanded: boolean,
+  capped: boolean,
   max: number = JIRA_CHIPS_MAX,
-): { keys: string[]; hidden: number } {
+): { keys: string[]; hidden: number; expander: "more" | "less" | null } {
   const all = facetKeys(counts, active).sort(
     (a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b),
   );
-  if (expanded || all.length <= max) return { keys: all, hidden: 0 };
-  const keys = all.slice(0, max);
+  const keys = capped ? all.slice(0, max) : all;
   if (active && keys.indexOf(active) === -1) keys.push(active);
-  return { keys, hidden: all.length - keys.length };
+  const hidden = all.length - keys.length;
+  if (hidden === 0) return { keys: all, hidden: 0, expander: null };
+  if (expanded) return { keys: all, hidden: 0, expander: "less" };
+  return { keys, hidden, expander: "more" };
 }
 
 /** Whether to render the Jira chip row at all — the whole-wiki gate.

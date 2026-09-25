@@ -664,8 +664,9 @@ export interface WikiPageMeta {
    * page carrying none. Bookkeeping pages (`index`, `log`, `CLAUDE`) are never
    * inferred from.
    *
-   * `mention` refs live here and reach the single-page payload only:
-   * `toListing` ships a compact copy WITHOUT them on the hot listing.
+   * Demoted refs (`link`/`mention` only) live here and reach the single-page
+   * payload only: `toListing` ships a compact copy WITHOUT them on the hot
+   * listing.
    */
   issues?: IssueRef[];
   /**
@@ -1949,13 +1950,8 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     folderLabels: isStringRecord(obj.folderLabels) ? obj.folderLabels : {},
     project: parseProjectRule(obj.project, root),
     activity: activity.weights,
-    trackers: parseTrackersConfig(obj.trackers, (reason, index) =>
-      log.warn("{file} at {root}: trackers[{index}] {reason}", {
-        file: WIKI_READER_CONFIG_FILE,
-        root,
-        index,
-        reason,
-      }),
+    trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
+      log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),
   };
 }

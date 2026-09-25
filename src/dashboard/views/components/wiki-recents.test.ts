@@ -1111,6 +1111,15 @@ describe("groups (attachments)", () => {
     ]);
   });
 
+  test("expandAll (a Jira filter) opens every group and says it cannot close", () => {
+    const m = rail({ expandAll: true });
+    expect(rowsOf(m).map((r) => r.page.relPath)).toContain("plans/x.html");
+    const parentRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.folded).toBe(false);
+    expect(parentRow.forcedOpen).toBe(true);
+    expect(m.shown).toBe(5);
+  });
+
   test("a query FLATTENS: every page is a plain row, no chips, nothing hidden", () => {
     const m = rail({ filters: { ...INERT, q: "x" } });
     const rs = rowsOf(m);
@@ -2336,6 +2345,16 @@ describe("buildRail — series", () => {
     expect(peek).toHaveLength(SERIES_PEEK_MAX);
     expect(peek).toEqual(["plans/d.mdx", "blogs/c.mdx", "plans/b.mdx"]);
     expect(mores(m.entries)[0]!.hidden).toBe(1);
+  });
+
+  test("expandAll opens a closed series: every member is a row, none behind `+N more`", () => {
+    const m = build({ activity: [act(C, 9)], expandAll: true });
+    expect(mores(m.entries)).toEqual([]);
+    expect(groupsOf(m.entries)[0]!.folded).toBe(false);
+    expect(groupsOf(m.entries)[0]!.forcedOpen).toBe(true);
+    expect(rows(m.entries).map((r) => r.page.relPath).sort()).toEqual(
+      ["blogs/c.mdx", "plans/a.mdx", "plans/b.mdx", "plans/loose.mdx"].sort(),
+    );
   });
 
   test("no `+N more` row when the peek already shows every member", () => {

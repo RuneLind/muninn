@@ -21,6 +21,7 @@
 
 import { jiraAdapter } from "./jira.ts";
 import {
+  relationsCount,
   STATUS_CATEGORIES,
   type IssueRef,
   type StatusCategory,
@@ -30,7 +31,7 @@ import {
 } from "./types.ts";
 
 export type { IssueRef, IssueRelation, StatusCategory, TrackerAdapter, TrackerConfig, TrackerPage } from "./types.ts";
-export { RELATION_STRENGTH, STATUS_CATEGORIES } from "./types.ts";
+export { DEMOTED_RELATIONS, RELATION_STRENGTH, relationsCount, STATUS_CATEGORIES } from "./types.ts";
 
 /** Every adapter muninn ships, by id. A second tracker adds a file and a line. */
 export const TRACKER_ADAPTERS: Readonly<Record<string, TrackerAdapter>> = Object.freeze({
@@ -41,26 +42,30 @@ export function trackerAdapter(id: string): TrackerAdapter | undefined {
   return Object.prototype.hasOwnProperty.call(TRACKER_ADAPTERS, id) ? TRACKER_ADAPTERS[id] : undefined;
 }
 
-/** How a parse reports a dropped field: a sentence and the entry it is about. */
-export type TrackerConfigWarn = (message: string, index: number) => void;
+/**
+ * How a parse reports a dropped field: the config KEY it is about
+ * (`trackers[0].projects`) and the reason, kept apart so the log sink can group
+ * a wiki's warnings by cause (the `activity` block's convention in `store.ts`).
+ */
+export type TrackerConfigWarn = (warning: { key: string; reason: string }) => void;
 
-const PROJECT_RE = /^[A-Z][A-Z0-9]*$/;
+/** A project prefix: `JIRA_KEY_SOURCE`'s prefix shape, 2–16 characters, so a
+ *  configured project is one the mention scanner can also find. */
+const PROJECT_RE = /^[A-Z][A-Z0-9]{1,15}$/;
+/** A bare hostname, optionally with a port — what a `browse/` link's host is
+ *  compared against. A URL or a path never matches one, so it is refused. */
+const HOST_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$/;
 
-function stringList(v: unknown): string[] | null {
-  if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) return null;
-  return (v as string[]).map((s) => s.trim()).filter((s) => s.length > 0);
-}
-
-function compileRe(v: unknown, field: string, i: number, warn: TrackerConfigWarn): RegExp | null {
+function compileRe(v: unknown, key: string, warn: TrackerConfigWarn): RegExp | null {
   if (v === undefined) return null;
   if (typeof v !== "string" || !v.trim()) {
-    warn(`${field} is not a non-empty string — ignoring it`, i);
+    warn({ key, reason: "is not a non-empty string — ignoring it" });
     return null;
   }
   try {
     return new RegExp(v, "iu");
   } catch (err) {
-    warn(`${field} is not a valid regular expression (${err instanceof Error ? err.message : String(err)}) — ignoring it`, i);
+    warn({ key, reason: `is not a valid regular expression (${err instanceof Error ? err.message : String(err)}) — ignoring it` });
     return null;
   }
 }
@@ -72,56 +77,71 @@ function compileRe(v: unknown, field: string, i: number, warn: TrackerConfigWarn
 export function parseTrackersConfig(raw: unknown, warn: TrackerConfigWarn): TrackerConfig[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) {
-    warn("trackers is not an array — ignoring it", -1);
+    warn({ key: "trackers", reason: "is not an array — ignoring it" });
     return [];
   }
   const out: TrackerConfig[] = [];
   const seen = new Set<string>();
   raw.forEach((entry, i) => {
+    const at = (field?: string) => `trackers[${i}]${field ? "." + field : ""}`;
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      warn("entry is not an object — dropping it", i);
+      warn({ key: at(), reason: "is not an object — dropping it" });
       return;
     }
     const o = entry as Record<string, unknown>;
     const id = typeof o.id === "string" ? o.id.trim() : "";
     const adapter = trackerAdapter(id);
     if (!adapter) {
-      warn(`id ${JSON.stringify(o.id)} names no known tracker — dropping the entry`, i);
+      warn({ key: at("id"), reason: `${JSON.stringify(o.id)} names no known tracker — dropping the entry` });
       return;
     }
     if (seen.has(id)) {
-      warn(`a second "${id}" entry — dropping it`, i);
+      warn({ key: at(), reason: `is a second "${id}" entry — dropping it` });
       return;
     }
-    const projectsRaw = stringList(o.projects);
-    const projects = (projectsRaw ?? []).map((p) => p.toUpperCase()).filter((p) => {
-      if (PROJECT_RE.test(p)) return true;
-      warn(`project ${JSON.stringify(p)} is not a key prefix — dropping it`, i);
-      return false;
-    });
-    if (projects.length === 0) {
-      warn("projects names no usable key prefix, and every inferred key is bounded by it — dropping the entry", i);
-      return;
-    }
-    const list = (field: string): string[] => {
-      if (o[field] === undefined) return [];
-      const v = stringList(o[field]);
-      if (v === null) {
-        warn(`${field} is not an array of strings — ignoring it`, i);
+    /** An array field, element by element: a bad element warns and drops alone. */
+    const list = (field: string, accept: (s: string) => boolean = () => true, what = "a string"): string[] => {
+      const v = o[field];
+      if (v === undefined) return [];
+      if (!Array.isArray(v)) {
+        warn({ key: at(field), reason: `is not an array (write ${JSON.stringify([typeof v === "string" ? v : "…"])}) — ignoring it` });
         return [];
       }
-      return v;
+      const kept: string[] = [];
+      v.forEach((x, j) => {
+        const s = typeof x === "string" ? x.trim() : "";
+        if (typeof x === "string" && s === "") return;
+        if (typeof x !== "string" || !accept(s)) {
+          warn({ key: `${at(field)}[${j}]`, reason: `${JSON.stringify(x)} is not ${what} — dropping it` });
+          return;
+        }
+        kept.push(s);
+      });
+      return kept;
     };
+    const projects = list("projects", (s) => PROJECT_RE.test(s.toUpperCase()), "a key prefix").map((p) =>
+      p.toUpperCase(),
+    );
+    if (projects.length === 0) {
+      warn({
+        key: at("projects"),
+        reason: "names no usable key prefix, and every inferred key is bounded by it — dropping the entry",
+      });
+      return;
+    }
     const statusMap: Record<string, StatusCategory> = { ...adapter.defaultStatusMap };
     if (o.statusMap !== undefined) {
       if (!o.statusMap || typeof o.statusMap !== "object" || Array.isArray(o.statusMap)) {
-        warn("statusMap is not an object — using the tracker's defaults", i);
+        warn({ key: at("statusMap"), reason: "is not an object — using the tracker's defaults" });
       } else {
         for (const [status, cat] of Object.entries(o.statusMap as Record<string, unknown>)) {
           if (typeof cat === "string" && (STATUS_CATEGORIES as readonly string[]).includes(cat)) {
             statusMap[status] = cat as StatusCategory;
           } else {
-            warn(`statusMap ${JSON.stringify(status)} maps to ${JSON.stringify(cat)}, not one of ${STATUS_CATEGORIES.join("/")} — dropping it`, i);
+            warn({
+              key: `${at("statusMap")}.${status}`,
+              reason: `maps to ${JSON.stringify(cat)}, not one of ${STATUS_CATEGORIES.join("/")} — dropping it`,
+            });
           }
         }
       }
@@ -130,10 +150,12 @@ export function parseTrackersConfig(raw: unknown, warn: TrackerConfigWarn): Trac
     out.push({
       id,
       projects: [...new Set(projects)],
-      hosts: list("hosts").map((h) => h.toLowerCase()),
+      hosts: list("hosts", (s) => HOST_RE.test(s.toLowerCase()), "a bare hostname (optionally :port)").map((h) =>
+        h.toLowerCase(),
+      ),
       frontmatterKeys: list("frontmatterKeys"),
-      planTitle: compileRe(o.planTitle, "planTitle", i, warn),
-      planTitleExclude: compileRe(o.planTitleExclude, "planTitleExclude", i, warn),
+      planTitle: compileRe(o.planTitle, at("planTitle"), warn),
+      planTitleExclude: compileRe(o.planTitleExclude, at("planTitleExclude"), warn),
       createdMarkers: list("createdMarkers"),
       statusMap,
     });
@@ -155,17 +177,18 @@ export function inferIssues(page: TrackerPage, trackers: readonly TrackerConfig[
 }
 
 /**
- * A page's refs as the HOT listing ships them: `mention` dropped, and a ref
- * left with no relation dropped with it. Undefined when nothing is left, so the
- * field stays absent rather than `[]`. The rail's pills and the Jira facet read
- * this copy; a mention is neither.
+ * A page's refs as the HOT listing ships them: only a ref that COUNTS
+ * (`relationsCount` — something besides `link` and `mention`), with its
+ * `mention` relation dropped. Undefined when nothing is left, so the field
+ * stays absent rather than `[]`. The rail's pills and the Jira facet read this
+ * copy; a link-only or mention-only key is neither.
  */
 export function compactIssues(issues: readonly IssueRef[] | undefined): IssueRef[] | undefined {
   if (!issues) return undefined;
   const out: IssueRef[] = [];
   for (const r of issues) {
-    const relations = r.relations.filter((rel) => rel !== "mention");
-    if (relations.length) out.push({ tracker: r.tracker, key: r.key, relations });
+    if (!relationsCount(r.relations)) continue;
+    out.push({ tracker: r.tracker, key: r.key, relations: r.relations.filter((rel) => rel !== "mention") });
   }
   return out.length ? out : undefined;
 }

@@ -222,3 +222,105 @@ describe("registry", () => {
     expect(isPlanTitle("Review av arbeidsplan", CONFIG)).toBe(false);
   });
 });
+
+describe("fix round 1: key shapes that are not keys", () => {
+  const titled = (t: string) => rels(inferJiraIssues(page({ authoredTitle: t }), CONFIG));
+  const stemmed = (stem: string) => rels(inferJiraIssues(page({ stem }), CONFIG));
+  const stamped = (jira: string | string[]) => rels(inferJiraIssues(page({ frontmatter: { jira } }), CONFIG));
+
+  test("a stamped prose value is scanned case-sensitively, with the denylist", () => {
+    expect(stamped("DEMO-140 (kilde), se steg-2 og utf-8")).toEqual({ "DEMO-140": ["stamped"] });
+    expect(stamped("DEMO-1-2")).toEqual({});
+    expect(stamped("[FOO_X-7]")).toEqual({});
+    // An entry that IS a key is kept whatever its case.
+    expect(stamped(["demo-103", " DEMO-104 "])).toEqual({ "DEMO-103": ["stamped"], "DEMO-104": ["stamped"] });
+  });
+
+  test("a title shorthand needs the base key's digit count and no word after it", () => {
+    expect(titleKeys("DEMO-145/2026 rapport", CONFIG)).toEqual(["DEMO-145"]);
+    // The digit count alone: nothing but punctuation follows the year.
+    expect(titleKeys("DEMO-145/2026 — rapport", CONFIG)).toEqual(["DEMO-145"]);
+    expect(titleKeys("DEMO-145 + 300 saker", CONFIG)).toEqual(["DEMO-145"]);
+    expect(titleKeys("DEMO-8045 + 2025-kjøringen", CONFIG)).toEqual(["DEMO-8045"]);
+    // The real forms.
+    expect(titleKeys("DEMO-7588/7969 — Nullable sats", CONFIG)).toEqual(["DEMO-7588", "DEMO-7969"]);
+    expect(titleKeys("DEMO-8045/8174 — plan for PR-splitt", CONFIG)).toEqual(["DEMO-8045", "DEMO-8174"]);
+    expect(titleKeys("DEMO-7588 + 7969 — Implementeringsplan", CONFIG)).toEqual(["DEMO-7588", "DEMO-7969"]);
+    // Bounded: at most five expansions per base key.
+    expect(titleKeys("DEMO-101/102/103/104/105/106/107", CONFIG)).toHaveLength(6);
+  });
+
+  test("the title rule is uppercase only: a bot name is not a key", () => {
+    expect(titleKeys("demo-2 bot-plan", CONFIG)).toEqual([]);
+    expect(titled("demo-2 bot-plan")).toEqual({});
+  });
+
+  test("a lookalike letter never becomes a key, in any rule", () => {
+    const kode = parseTrackersConfig([{ id: "jira", projects: ["KODE"] }], () => {
+      throw new Error("must parse clean");
+    })[0]!;
+    const kelvin = "\u212AODE-12"; // the KELVIN SIGN, which folds to k
+    const refs = inferJiraIssues(
+      page({ authoredTitle: kelvin, stem: kelvin, tags: [kelvin.replace("ODE", "ode")], body: kelvin }),
+      kode,
+    );
+    expect(refs).toEqual([]);
+  });
+
+  test("an ASCII letter or digit on the left ends a key", () => {
+    expect(stemmed("xdemo-1")).toEqual({});
+    expect(titled("ADEMO-1")).toEqual({});
+  });
+
+  test("stem: a date after the key is not a key; the two-key form yields both", () => {
+    expect(stemmed("demo-2026-09-25-handover")).toEqual({});
+    expect(stemmed("2026-05-04-demo-7588-7969-arbeidsdokument")).toEqual({
+      "DEMO-7588": ["stem"],
+      "DEMO-7969": ["stem"],
+    });
+    expect(stemmed("demo-12x")).toEqual({});
+  });
+
+  test("a leading-zero number is not a key in any inferred rule", () => {
+    const refs = inferJiraIssues(
+      page({
+        authoredTitle: "DEMO-0145 notes",
+        stem: "demo-0146",
+        tags: ["demo-0147"],
+        body: `DEMO-0148 and [x](${url("DEMO-0149")})`,
+      }),
+      CONFIG,
+    );
+    expect(refs).toEqual([]);
+  });
+
+  test("a markdown link DESTINATION is not a mention; an HTML comment is read by no body rule", () => {
+    expect(rels(inferJiraIssues(page({ body: "[plan](plans/DEMO-120-plan.md)" }), CONFIG))).toEqual({});
+    expect(
+      rels(inferJiraIssues(page({ body: `<!-- Opprettet: [DEMO-805](${url("DEMO-805")})\nDEMO-806 -->` }), CONFIG)),
+    ).toEqual({});
+  });
+
+  test("the created marker must end as a word", () => {
+    for (const w of ["opprettelse", "opprettetdato", "createdby"]) {
+      const r = rels(inferJiraIssues(page({ body: `${w}: [DEMO-196](${url("DEMO-196")})` }), CONFIG));
+      expect({ w, rels: r["DEMO-196"] }).toEqual({ w, rels: ["link", "mention"] });
+    }
+  });
+
+  test("a browse URL inside backticks is not a link", () => {
+    expect(rels(inferJiraIssues(page({ body: "`https://example.invalid/browse/DEMO-197`" }), CONFIG))).toEqual({});
+  });
+
+  test("an unclosed [ does not swallow the later cells of a table row", () => {
+    const body = `| a [ b | Opprettet i en annen celle | [DEMO-192](${url("DEMO-192")}) |`;
+    expect(rels(inferJiraIssues(page({ body }), CONFIG))["DEMO-192"]).not.toContain("created");
+  });
+
+  test("many links on one line stay linear", () => {
+    const line = Array.from({ length: 5000 }, (_, i) => `[DEMO-${1000 + i}](${url(`DEMO-${1000 + i}`)})`).join(" ");
+    const t0 = performance.now();
+    inferJiraIssues(page({ body: "opprettet: " + line }), CONFIG);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+});

@@ -11,6 +11,7 @@ import {
   RAIL_CHIP_SWITCH_LONG,
   RAIL_CHIP_SWITCH_WIDE,
   RAIL_GROUP_CHIP_SWITCH,
+  RAIL_ISSUE_PILLS_COL,
   RAIL_MID_MIN_CHIP,
   RAIL_MID_MIN_CHIP_NARROW,
   RAIL_MID_MIN_CHIP_WIDE,
@@ -357,9 +358,13 @@ export async function renderWikiPage(opts?: {
        on — is its floor rather than the length of the title text. */
     .wiki-list-mid {
       display: flex; align-items: flex-start; gap: 8px;
-      flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
+      flex: 1 1 0; min-width: calc(${RAIL_TITLE_MIN}px + var(--rail-pills-col));
       container-type: inline-size; container-name: railmid;
+      --rail-pills-col: 0px;
     }
+    /* A row with issue pills adds their column to every floor below, so the
+       text keeps its own floor beside them. */
+    .wiki-list-mid:has(.wiki-issue-pills) { --rail-pills-col: ${RAIL_ISSUE_PILLS_COL}px; }
     /* With a chip the pair needs the title's floor, the gap and the widest
        COMPACT chip of the chip's digit class (\`counts-narrow\` for one count of up to
        three digits, \`counts-wide\` for a four-digit, three-digit-pair or
@@ -367,9 +372,9 @@ export async function renderWikiPage(opts?: {
        wraps instead. Only when a chip is really there — a plan row carrying a
        pill and a ⚑ but no chip has 90.6px at the 300px rail, fits its title in
        it, and must not start wrapping. */
-    .wiki-list-mid:has(.wiki-fold-chip) { min-width: ${RAIL_MID_MIN_CHIP}px; }
-    .wiki-list-mid:has(.wiki-fold-chip.counts-narrow) { min-width: ${RAIL_MID_MIN_CHIP_NARROW}px; }
-    .wiki-list-mid:has(.wiki-fold-chip.counts-wide) { min-width: ${RAIL_MID_MIN_CHIP_WIDE}px; }
+    .wiki-list-mid:has(.wiki-fold-chip) { min-width: calc(${RAIL_MID_MIN_CHIP}px + var(--rail-pills-col)); }
+    .wiki-list-mid:has(.wiki-fold-chip.counts-narrow) { min-width: calc(${RAIL_MID_MIN_CHIP_NARROW}px + var(--rail-pills-col)); }
+    .wiki-list-mid:has(.wiki-fold-chip.counts-wide) { min-width: calc(${RAIL_MID_MIN_CHIP_WIDE}px + var(--rail-pills-col)); }
     /* Two lines, then clip: this wiki's titles carry their meaning in the second
        half, so a one-line ellipsis made sibling pages indistinguishable. The dot
        and the date sit on the first line.
@@ -491,6 +496,24 @@ export async function renderWikiPage(opts?: {
        has. A one-kind roll-up keeps the SHORT rule above (61–80.3px of chip,
        under its 88 budget) or the LONG one for \`N superseded\` — neither can
        bind on a group row, whose mid is ≥ 213px. See RAIL_GROUP_CHIP_SWITCH. */
+    /* The same three swaps on a row with issue pills, each breakpoint moved by
+       the pill column: the words stay only while the text keeps its floor
+       beside the pills. (A group row carries no pills.) */
+    @container railmid (max-width: ${RAIL_CHIP_SWITCH_SHORT + RAIL_ISSUE_PILLS_COL}px) {
+      .wiki-list-mid:has(.wiki-issue-pills) .wiki-fold-chip:not(.is-wide):not(.is-long) { flex-shrink: 0; }
+      .wiki-list-mid:has(.wiki-issue-pills) .wiki-fold-chip:not(.is-wide):not(.is-long) .wiki-fold-chip-label { display: none; }
+      .wiki-list-mid:has(.wiki-issue-pills) .wiki-fold-chip:not(.is-wide):not(.is-long) .wiki-fold-chip-counts { display: inline; }
+    }
+    @container railmid (max-width: ${RAIL_CHIP_SWITCH_LONG + RAIL_ISSUE_PILLS_COL}px) {
+      .wiki-list-mid:has(.wiki-issue-pills) .wiki-fold-chip.is-long { flex-shrink: 0; }
+      .wiki-list-mid:has(.wiki-issue-pills) .wiki-fold-chip.is-long .wiki-fold-chip-label { display: none; }
+      .wiki-list-mid:has(.wiki-issue-pills) .wiki-fold-chip.is-long .wiki-fold-chip-counts { display: inline; }
+    }
+    @container railmid (max-width: ${RAIL_CHIP_SWITCH_WIDE + RAIL_ISSUE_PILLS_COL}px) {
+      .wiki-list-mid:has(.wiki-issue-pills) .wiki-fold-chip.is-wide:not(.is-group) { flex-shrink: 0; }
+      .wiki-list-mid:has(.wiki-issue-pills) .wiki-fold-chip.is-wide:not(.is-group) .wiki-fold-chip-label { display: none; }
+      .wiki-list-mid:has(.wiki-issue-pills) .wiki-fold-chip.is-wide:not(.is-group) .wiki-fold-chip-counts { display: inline; }
+    }
     @container railmid (max-width: ${RAIL_GROUP_CHIP_SWITCH}px) {
       .wiki-fold-chip.is-wide.is-group { flex-shrink: 0; }
       .wiki-fold-chip.is-wide.is-group .wiki-fold-chip-label { display: none; }
@@ -621,17 +644,36 @@ export async function renderWikiPage(opts?: {
        swap .wiki-act-glyph's green made, and the token the series group row
        already carries — the glyph and its fold now read as one colour). */
     .wiki-latest-glyph { color: var(--accent-light); margin-right: 4px; font-size: 11px; }
-    /* Issue pills: inline INSIDE .wiki-list-title (the ▸ rule — a seventh flex
-       item would cost the title its floor). Solid = stamped, dashed = inferred. */
-    .wiki-issue-pills { white-space: nowrap; }
+    /* Issue pills: a COLUMN of their own at the right of .wiki-list-title,
+       beside the clamped text rather than inside the clamp — inline, a pill
+       run wrapped to a third line and was clipped on 80 of 96 keyed rows of a
+       real wiki. The title element stays ONE row item (the ▸ rule — a seventh
+       flex item would cost the title its floor). Solid = stamped, dashed =
+       inferred. Not controls: the row's click opens the page. */
+    .wiki-list-title.has-issues {
+      display: flex; align-items: flex-start; gap: 4px;
+      -webkit-line-clamp: unset; overflow: visible;
+    }
+    .wiki-list-title-text {
+      flex: 1 1 0; min-width: 0;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; overflow-wrap: anywhere;
+    }
+    .wiki-issue-pills {
+      display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px;
+      flex-shrink: 0; max-width: ${RAIL_ISSUE_PILLS_COL - 4}px; margin-top: 1px;
+    }
     .wiki-issue-pill {
-      display: inline-block; margin-left: 4px; padding: 0 4px;
+      display: inline-block; padding: 0 4px; cursor: inherit;
       border: 1px solid var(--text-muted); border-radius: 3px;
       font-family: ui-monospace, Menlo, monospace; font-size: 9.5px; line-height: 13px;
-      color: var(--text-muted); vertical-align: 1px;
+      color: var(--text-muted); white-space: nowrap;
     }
     .wiki-issue-pill.inferred { border-style: dashed; }
     .wiki-issue-pill.more { border-color: transparent; padding: 0 2px; }
+    .wiki-chip-row-label {
+      align-self: center; font-size: 11px; color: var(--text-muted); margin-right: 2px;
+    }
     /* A GHOST row: a series member the reader pinned, named inside the fold so
        the roll-up's count and the rows agree. Not a control and not a link —
        there is nothing to open that is not already on screen — so it takes no

@@ -4,7 +4,7 @@ import { JIRA_DEFAULT_STATUS_MAP } from "./jira.ts";
 
 function parse(raw: unknown): { configs: ReturnType<typeof parseTrackersConfig>; warns: string[] } {
   const warns: string[] = [];
-  const configs = parseTrackersConfig(raw, (m, i) => warns.push(`${i}: ${m}`));
+  const configs = parseTrackersConfig(raw, (w) => warns.push(`${w.key}: ${w.reason}`));
   return { configs, warns };
 }
 
@@ -75,5 +75,43 @@ describe("parseTrackersConfig", () => {
   test("trackerAdapter never reads the prototype", () => {
     expect(trackerAdapter("jira")?.label).toBe("Jira");
     expect(trackerAdapter("constructor")).toBeUndefined();
+  });
+});
+
+describe("parseTrackersConfig, fix round 1", () => {
+  const collect = (raw: unknown) => {
+    const warns: { key: string; reason: string }[] = [];
+    const configs = parseTrackersConfig(raw, (w) => warns.push(w));
+    return { configs, warns };
+  };
+
+  test("a host that is not a bare hostname warns and drops alone", () => {
+    const { configs, warns } = collect([
+      { id: "jira", projects: ["DEMO"], hosts: ["https://example.invalid/", "example.invalid:8443", "Example.Invalid"] },
+    ]);
+    expect(configs[0]!.hosts).toEqual(["example.invalid:8443", "example.invalid"]);
+    expect(warns.map((w) => w.key)).toEqual(["trackers[0].hosts[0]"]);
+  });
+
+  test("a bad projects ELEMENT drops alone; the entry survives", () => {
+    const { configs, warns } = collect([{ id: "jira", projects: ["DEMO", 5] }]);
+    expect(configs[0]!.projects).toEqual(["DEMO"]);
+    expect(warns.map((w) => w.key)).toEqual(["trackers[0].projects[1]"]);
+  });
+
+  test("a scalar projects says it is not an array, then drops the entry", () => {
+    const { configs, warns } = collect([{ id: "jira", projects: "DEMO" }]);
+    expect(configs).toEqual([]);
+    expect(warns[0]).toEqual({ key: "trackers[0].projects", reason: expect.stringContaining("is not an array") });
+  });
+
+  test("a one-letter project is refused — the mention scanner could never find its keys", () => {
+    const { configs, warns } = collect([{ id: "jira", projects: ["D", "DEMO"] }]);
+    expect(configs[0]!.projects).toEqual(["DEMO"]);
+    expect(warns.map((w) => w.key)).toEqual(["trackers[0].projects[0]"]);
+  });
+
+  test("a non-array block names the key `trackers`", () => {
+    expect(collect({ id: "jira" }).warns.map((w) => w.key)).toEqual(["trackers"]);
   });
 });

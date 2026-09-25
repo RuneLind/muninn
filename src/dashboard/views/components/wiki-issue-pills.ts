@@ -1,7 +1,10 @@
 /**
- * The rail's issue pills: up to two keys per row plus a `+N`, drawn INSIDE the
- * row's title element so the row keeps its six budgeted flex items
- * (`wiki-rail-width.ts`; `e2e/wiki-rail-series.spec.ts` pins the child count).
+ * The rail's issue pills: up to two keys per row plus a `+N`, in a column of
+ * their own at the right of the row's title element — beside the clamped title
+ * text, never inside the clamp, so a two-line title cannot push them out of
+ * sight. They stay inside `.wiki-list-title` so the row keeps its six budgeted
+ * flex items (`wiki-rail-width.ts`; `e2e/wiki-rail-series.spec.ts` pins the
+ * child count).
  *
  * Pure string building, in its own module because `wiki-browser.ts` touches
  * `document` at import time and `bun test` cannot load it.
@@ -9,12 +12,13 @@
 
 import { escHtml as esc } from "./escape.ts";
 import type { ListingIssueRef } from "./wiki-filter.ts";
+import type { IssueRelation } from "../../../wiki/trackers/types.ts";
 
 /** How many pills a row shows before the `+N`. */
 export const RAIL_ISSUE_PILLS_MAX = 2;
 
 /** What each relation is called on a hover. `created` reads "created here". */
-const RELATION_WORDS: Readonly<Record<string, string>> = {
+const RELATION_WORDS: Readonly<Record<IssueRelation, string>> = {
   stamped: "stamped",
   declared: "declared",
   created: "created here",
@@ -25,7 +29,7 @@ const RELATION_WORDS: Readonly<Record<string, string>> = {
   mention: "mention",
 };
 
-export function relationWord(rel: string): string {
+export function relationWord(rel: IssueRelation): string {
   return RELATION_WORDS[rel] ?? rel;
 }
 
@@ -37,16 +41,22 @@ export function issueRefInferred(ref: ListingIssueRef): boolean {
   return ref.relations[0] !== "stamped";
 }
 
-function pillTitle(ref: ListingIssueRef): string {
-  const how = ref.relations.map(relationWord).join(", ");
-  return `${ref.key} — ${issueRefInferred(ref) ? "inferred: " : ""}${how}`;
+/** `Jira DEMO-104 — inferred (title)`, or `… — stamped`. */
+function pillTitle(ref: ListingIssueRef, label: string): string {
+  const name = label ? `${label} ${ref.key}` : ref.key;
+  if (!issueRefInferred(ref)) return `${name} — stamped`;
+  return `${name} — inferred (${ref.relations.map(relationWord).join(", ")})`;
 }
 
 /**
- * The pill run for one row, `""` when the page carries no issue. The refs
+ * The pill column for one row, `""` when the page carries no issue. The refs
  * arrive strongest first, so the two shown are the page's strongest ties.
+ * `labelOf` names a tracker id the way the UI calls it (`Jira`).
  */
-export function railIssuePillsHtml(issues: readonly ListingIssueRef[] | undefined): string {
+export function railIssuePillsHtml(
+  issues: readonly ListingIssueRef[] | undefined,
+  labelOf: (trackerId: string) => string = () => "",
+): string {
   if (!issues || issues.length === 0) return "";
   const shown = issues.slice(0, RAIL_ISSUE_PILLS_MAX);
   const rest = issues.slice(RAIL_ISSUE_PILLS_MAX);
@@ -55,11 +65,16 @@ export function railIssuePillsHtml(issues: readonly ListingIssueRef[] | undefine
     html +=
       `<span class="wiki-issue-pill${issueRefInferred(ref) ? " inferred" : ""}"` +
       ` data-issue-key="${esc(ref.key)}" data-issue-rel="${esc(ref.relations[0] ?? "")}"` +
-      ` title="${esc(pillTitle(ref))}">${esc(ref.key)}</span>`;
+      ` title="${esc(pillTitle(ref, labelOf(ref.tracker)))}">${esc(ref.key)}</span>`;
   }
   if (rest.length) {
+    const titles = rest.map((r) => pillTitle(r, labelOf(r.tracker)));
+    // The hidden keys are in the ACCESSIBLE NAME too, not only on a hover a
+    // keyboard or screen-reader user never triggers.
     html +=
-      `<span class="wiki-issue-pill more" title="${esc(rest.map(pillTitle).join("\n"))}">+${rest.length}</span>`;
+      `<span class="wiki-issue-pill more" role="img"` +
+      ` aria-label="${esc(`${rest.length} more: ${titles.join("; ")}`)}"` +
+      ` title="${esc(titles.join("\n"))}">+${rest.length}</span>`;
   }
   return `<span class="wiki-issue-pills">${html}</span>`;
 }

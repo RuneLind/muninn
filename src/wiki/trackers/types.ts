@@ -25,17 +25,33 @@ export type IssueRelation =
   | "tag"
   | "mention";
 
-/** Strongest first. The rail shows the strongest; `stamped` alone renders solid. */
+/** Strongest first. The rail shows the strongest; `stamped` alone renders solid.
+ *  `tag` sits above `link` so a key's strongest relation is a counting one
+ *  whenever it has one (see {@link DEMOTED_RELATIONS}). */
 export const RELATION_STRENGTH: readonly IssueRelation[] = [
   "stamped",
   "declared",
   "created",
   "title",
   "stem",
-  "link",
   "tag",
+  "link",
   "mention",
 ];
+
+/**
+ * The weak tier. A key whose only relations are these stays in the page's full
+ * `issues`, but is not a pill, not a facet key and not in a key's page count.
+ * `link` is here because a link is as often an epic, a "related" line or a
+ * history row as the page's own issue: measured on a real 417-page wiki, `link`
+ * was right on ~42 % of its refs and ~23 % of the ones where it stood alone.
+ */
+export const DEMOTED_RELATIONS: readonly IssueRelation[] = ["link", "mention"];
+
+/** Does a ref with these relations count — carry a pill and a facet key? */
+export function relationsCount(relations: readonly string[]): boolean {
+  return relations.some((r) => !(DEMOTED_RELATIONS as readonly string[]).includes(r));
+}
 
 /** A status mapped to one of five words every tracker can be read in. */
 export type StatusCategory = "todo" | "active" | "review" | "done" | "unknown";

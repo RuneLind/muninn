@@ -34,10 +34,11 @@ export const JIRA_KEY_DENYLIST = new Set([
  * It used to be a second, hand-written regex that disagreed with
  * `jiraKeyFromDocId` on both ends (prefix length and digit count), so a key the
  * scanner accepted could be absent from an index built by the other — a red
- * "fabricated" row for a real issue. Anchored on a word boundary so `xMELOSYS-1`
- * does not match.
+ * "fabricated" row for a real issue. Anchored on a word boundary so `xDEMO-1`
+ * does not match, and never followed by `-` and a digit, so a date-like or
+ * numbered run (`DEMO-1-2`, `DEMO-2026-09`) is not read as its first key.
  */
-const KEY_RE = new RegExp(`\\b(${JIRA_KEY_SOURCE})\\b`, "g");
+const KEY_RE = new RegExp(`\\b(${JIRA_KEY_SOURCE})\\b(?!-\\d)`, "g");
 
 /** Every candidate key in the markdown, fenced code excluded, in first-seen order. */
 export function extractJiraKeys(markdown: string): string[] {

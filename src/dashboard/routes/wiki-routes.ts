@@ -4,7 +4,7 @@ import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
-import { compactIssues } from "../../wiki/trackers/index.ts";
+import { compactIssues, trackerAdapter, type TrackerConfig } from "../../wiki/trackers/index.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
 import { getSemanticOverlay } from "../../wiki/atlas-semantic.ts";
 import {
@@ -1009,13 +1009,24 @@ export function projectCounts(pages: readonly WikiPageMeta[]): Record<string, nu
   return counts;
 }
 
+/** `{ trackers: [{id, label}] }` for a wiki with a tracker, `{}` otherwise. */
+function trackersField(trackers: readonly TrackerConfig[] | undefined): { trackers?: { id: string; label: string }[] } {
+  const out = (trackers ?? []).flatMap((t) => {
+    const a = trackerAdapter(t.id);
+    return a ? [{ id: a.id, label: a.label }] : [];
+  });
+  return out.length ? { trackers: out } : {};
+}
+
 /** Listing shape sent to the client — meta plus connection counts for sorting. */
-interface WikiPageListing extends WikiPageMeta {
+export interface WikiPageListing extends WikiPageMeta {
   linkCount: number;
   backlinkCount: number;
 }
 
-function toListing(
+/** Exported for `trackers/store-issues.test.ts`, which drives the real
+ *  compaction rather than restating it. */
+export function toListing(
   index: WikiIndex,
   meta: WikiPageMeta,
   opts: { includeDesc?: boolean; includeProvenance?: boolean } = {},
@@ -1066,10 +1077,10 @@ function toListing(
   // page per series, so naming a fold costs nothing per member.
   //
   // `issues` (set only on a wiki with a tracker) rides callers 1 and 3 in its
-  // COMPACT form — no `mention` relation, and no key that had nothing else —
-  // because the rail's pills and the Jira facet read it and a mention is
-  // neither. Caller 2 opts the whole list in through `includeProvenance`: the
-  // mentions are a fact about the one open page.
+  // COMPACT form (`compactIssues`: only keys that count — not `link`/`mention`
+  // alone — with the `mention` relation dropped), because the rail's pills and
+  // the Jira facet read it. Caller 2 opts the whole list in through
+  // `includeProvenance`: the demoted keys are a fact about the one open page.
   const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, ...rest } = meta;
   void pubDate;
   void children;
@@ -1362,6 +1373,10 @@ export function registerWikiRoutes(
       // a wiki nothing has stamped, which is how the client knows to render no
       // facet rather than one empty control. The chips themselves are PR 4b.
       jira: jiraCounts(index.pages),
+      // The trackers this wiki configures, id and label — the chip row's label
+      // and the pills' hover name them. Absent (not `[]`) on a wiki with none,
+      // so its payload is byte-identical to before.
+      ...trackersField(index.readerConfig?.trackers),
       // The wiki's `defaultType`, "" when it declares none. The client needs it
       // for exactly one decision — `hubTypeList` excludes the leftovers bucket
       // from the start view's "Top … by connections" sections — and cannot derive

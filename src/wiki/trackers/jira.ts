@@ -12,6 +12,7 @@
 import { JIRA_KEY_SHAPE, normalizeJiraKey } from "../provenance.ts";
 import { extractJiraKeys } from "../../jira/key-scan.ts";
 import { maskFencedCode, maskInlineCode } from "../../jira/markdown-scan.ts";
+import { JIRA_TRACKER_ID } from "./jira-id.ts";
 import {
   RELATION_STRENGTH,
   type IssueRef,
@@ -22,7 +23,7 @@ import {
   type TrackerPage,
 } from "./types.ts";
 
-const ID = "jira";
+const ID = JIRA_TRACKER_ID;
 
 /** Jira's own English workflow names. A wiki's `statusMap` merges over this. */
 export const JIRA_DEFAULT_STATUS_MAP: Readonly<Record<string, StatusCategory>> = Object.freeze({
@@ -47,58 +48,97 @@ function projectAlt(config: TrackerConfig): string {
   return "(" + config.projects.map(escapeRe).join("|") + ")";
 }
 
-/** Letters or digits on either side end a key, in any script. */
-const NOT_WORD_BEFORE = "(?<![\\p{L}\\p{N}])";
-const NOT_DIGIT_AFTER = "(?!\\p{N})";
+/**
+ * ASCII word edges, the same `\b` `extractJiraKeys` uses, on every rule: a
+ * letter, digit or `_` on the left (`xdemo-1`), or on the right (`demo-12x`),
+ * means the run is not a key. The flags carry no `u`, so a case-insensitive
+ * rule cannot fold a lookalike (the Kelvin sign) into a project letter.
+ */
+const LEFT = "(?<![A-Za-z0-9_])";
+/** A key NUMBER: no leading zero (`DEMO-0145` is not `DEMO-145`), at most eight
+ *  digits like `JIRA_KEY_SOURCE`, and not running on into a digit. */
+const NUM = "([1-9][0-9]{0,7})(?![0-9])";
+/** What may not follow a whole key: a word character, or `-` and a digit (a
+ *  date `demo-2026-09-25`, a step `DEMO-1-2`). */
+const END_RE = /^(?:[A-Za-z0-9_]|-[0-9])/;
+/** How many shorthand numbers one base key may expand to. */
+const MAX_EXPANSIONS = 5;
 
-/** Every project-bounded key in `text`, case-insensitive, uppercased. */
-function boundedKeys(text: string, config: TrackerConfig): string[] {
-  const re = new RegExp(`${NOT_WORD_BEFORE}${projectAlt(config)}-(\\d+)${NOT_DIGIT_AFTER}`, "giu");
-  const out: string[] = [];
-  for (const m of text.matchAll(re)) out.push(`${m[1]!.toUpperCase()}-${m[2]}`);
-  return out;
+/** Emit only a key that is ASCII key-shaped and in a configured project. */
+function keep(key: string, config: TrackerConfig): boolean {
+  return JIRA_KEY_SHAPE.test(key) && config.projects.includes(key.slice(0, key.indexOf("-")));
 }
 
 /**
- * Title keys, including the shorthands `DEMO-145/174` and
- * `DEMO-158 + 169`, which expand to the same project. A shorthand number
- * needs three digits or more, so `KEY-1 + 2 andre` does not mint `KEY-2`.
+ * The project-bounded keys in `text`. `chain` is a sticky separator pattern
+ * whose one group is a further number of the same project — the title's
+ * `DEMO-145/174` and `DEMO-158 + 169`, the stem's `demo-7588-7969`. A chained
+ * number must have the base number's digit count (so `DEMO-145/2026` and
+ * `demo-2026-09` do not expand), no leading zero, and must itself end cleanly;
+ * `after` adds what may not follow it (the title refuses a following word, so
+ * `DEMO-145 + 300 saker` does not mint `DEMO-300`). A base key that does not
+ * end cleanly after its chain yields nothing.
  */
-export function titleKeys(title: string, config: TrackerConfig): string[] {
-  const re = new RegExp(
-    `${NOT_WORD_BEFORE}${projectAlt(config)}-(\\d+)((?:\\s*[/+]\\s*\\d{3,}${NOT_DIGIT_AFTER})*)${NOT_DIGIT_AFTER}`,
-    "giu",
-  );
+function scanKeys(
+  text: string,
+  config: TrackerConfig,
+  opts: { caseSensitive: boolean; chain?: RegExp; after?: RegExp },
+): string[] {
+  const re = new RegExp(`${LEFT}${projectAlt(config)}-${NUM}`, opts.caseSensitive ? "g" : "gi");
   const out: string[] = [];
-  for (const m of title.matchAll(re)) {
+  for (const m of text.matchAll(re)) {
     const project = m[1]!.toUpperCase();
-    out.push(`${project}-${m[2]}`);
-    for (const n of (m[3] ?? "").match(/\d+/g) ?? []) out.push(`${project}-${n}`);
+    const base = m[2]!;
+    const found = [`${project}-${base}`];
+    let pos = m.index + m[0].length;
+    if (opts.chain) {
+      for (let n = 0; n < MAX_EXPANSIONS; n++) {
+        opts.chain.lastIndex = pos;
+        const c = opts.chain.exec(text);
+        if (!c) break;
+        const num = c[1]!;
+        const next = c.index + c[0].length;
+        const rest = text.slice(next);
+        if (num.length !== base.length || num[0] === "0" || END_RE.test(rest)) break;
+        if (opts.after && opts.after.test(rest)) break;
+        found.push(`${project}-${num}`);
+        pos = next;
+      }
+    }
+    if (END_RE.test(text.slice(pos))) continue;
+    for (const k of found) if (keep(k, config)) out.push(k);
   }
   return out;
+}
+
+const TITLE_CHAIN = /\s*[/+]\s*([0-9]+)/y;
+/** A shorthand number followed by a word, or by `-`, is a count or a year in
+ *  prose: `+ 300 saker`, `+ 2025-kjøringen`. */
+const TITLE_AFTER = /^(?:\s*\p{L}|-)/u;
+const STEM_CHAIN = /-([0-9]+)/y;
+
+/**
+ * Title keys: UPPERCASE only (like `mention` — `melosys-2 bot-plan` names a
+ * bot), with the shorthands `DEMO-145/174` and `DEMO-158 + 169` expanded to the
+ * same project under {@link scanKeys}' digit-count rule.
+ */
+export function titleKeys(title: string, config: TrackerConfig): string[] {
+  return scanKeys(title, config, { caseSensitive: true, chain: TITLE_CHAIN, after: TITLE_AFTER });
+}
+
+/** Stem keys, case-insensitive; `demo-7588-7969-notes` yields both. */
+export function stemKeys(stem: string, config: TrackerConfig): string[] {
+  return scanKeys(stem, config, { caseSensitive: false, chain: STEM_CHAIN });
 }
 
 /** A tag that IS a key: `demo-145`. */
 function tagKeys(tags: readonly string[], config: TrackerConfig): string[] {
-  const re = new RegExp(`^${projectAlt(config)}-(\\d+)$`, "iu");
+  const re = new RegExp(`^${projectAlt(config)}-${NUM}$`, "i");
   const out: string[] = [];
   for (const t of tags) {
     const m = re.exec(t.trim());
-    if (m) out.push(`${m[1]!.toUpperCase()}-${m[2]}`);
-  }
-  return out;
-}
-
-/** Every key-shaped token in a stamped value, list or scalar — the prose scalar
- *  `jira: A-1 (kilde), ny ticket under epic A-2` yields both. Not
- *  project-bounded: the stamped line is the author's own claim. */
-function stampedKeys(value: string | string[] | undefined): string[] {
-  const values = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
-  const out: string[] = [];
-  for (const v of values) {
-    for (const m of normalizeJiraKey(v).matchAll(/(?<![A-Z0-9-])[A-Z][A-Z0-9]*-[0-9]+(?![0-9])/g)) {
-      if (JIRA_KEY_SHAPE.test(m[0])) out.push(m[0]);
-    }
+    const key = m ? `${m[1]!.toUpperCase()}-${m[2]}` : "";
+    if (key && keep(key, config)) out.push(key);
   }
   return out;
 }
@@ -106,6 +146,23 @@ function stampedKeys(value: string | string[] | undefined): string[] {
 /** Strings of one frontmatter value, list or scalar. */
 function valueStrings(value: string | string[] | undefined): string[] {
   return Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+}
+
+/**
+ * The keys in a stamped value, list or scalar. An entry that is itself exactly
+ * key-shaped is kept whatever its case (`jira: [demo-103]`); any other entry is
+ * prose and goes through `extractJiraKeys` — uppercase keys only, with its
+ * denylist — so `jira: DEMO-140 (kilde), se steg-2 og utf-8` yields DEMO-140
+ * alone. Not project-bounded: the stamped line is the author's own claim.
+ */
+export function stampedKeys(value: string | string[] | undefined): string[] {
+  const out: string[] = [];
+  for (const v of valueStrings(value)) {
+    const whole = normalizeJiraKey(v);
+    if (JIRA_KEY_SHAPE.test(whole)) out.push(whole);
+    else out.push(...extractJiraKeys(v));
+  }
+  return out;
 }
 
 /** A `browse/KEY` link on a configured host, with its offset on its line. */
@@ -119,17 +176,28 @@ interface LinkHit {
  * Where each clause on a line ENDS: a `·`, a `;`, a period followed by
  * whitespace or the end of the line (so `jira.example.invalid` and `22.09` do not
  * split), and — on a table row only — a `|` outside `[...]` and `[[...]]`, which
- * Jira-markup links and wikilink aliases use. A newline ends every clause; a
- * list item starts on its own line. Never a character count.
+ * Jira-markup links and wikilink aliases use. Only a `[` with a matching `]`
+ * later on the line opens a bracket, so a stray `[` does not swallow every
+ * later cell. A newline ends every clause; a list item starts on its own line.
+ * Never a character count.
  */
 export function clauseBoundaries(line: string): number[] {
   const tableRow = /^\s*\|/.test(line);
+  const matched = new Set<number>();
+  if (tableRow) {
+    const open: number[] = [];
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === "[") open.push(i);
+      else if (line[i] === "]" && open.length) matched.add(open.pop()!);
+    }
+  }
   const out: number[] = [];
   let depth = 0;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!;
-    if (ch === "[") depth++;
-    else if (ch === "]") depth = Math.max(0, depth - 1);
+    if (ch === "[") {
+      if (matched.has(i)) depth++;
+    } else if (ch === "]") depth = Math.max(0, depth - 1);
     else if (ch === "·" || ch === ";") out.push(i);
     else if (ch === "|" && tableRow && depth === 0) out.push(i);
     else if (ch === "." && (i + 1 === line.length || /\s/.test(line[i + 1]!))) out.push(i);
@@ -138,9 +206,9 @@ export function clauseBoundaries(line: string): number[] {
 }
 
 /** The text of the clause before `col`, from its opening boundary. */
-function clauseBefore(line: string, col: number): string {
+function clauseBefore(line: string, boundaries: readonly number[], col: number): string {
   let start = 0;
-  for (const b of clauseBoundaries(line)) {
+  for (const b of boundaries) {
     if (b < col) start = b + 1;
     else break;
   }
@@ -148,41 +216,46 @@ function clauseBefore(line: string, col: number): string {
 }
 
 function markerRe(marker: string): RegExp {
-  return new RegExp(`${NOT_WORD_BEFORE}${escapeRe(marker)}(?![\\p{L}])`, "iu");
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(marker)}(?![\\p{L}])`, "iu");
 }
 
-/** Fenced and inline code blanked, same length, so offsets survive. */
-function maskCode(body: string): string {
-  return maskInlineCode(maskFencedCode(body));
+/** Blank a match same-length, newlines kept, so offsets and lines survive. */
+const blank = (s: string) => s.replace(/[^\n]/g, " ");
+
+/** Fenced code, inline code and HTML comments blanked — the text every body
+ *  rule reads. A key there is an example or a note to self, not a reference. */
+function maskBody(body: string): string {
+  return maskInlineCode(maskFencedCode(body)).replace(/<!--[\s\S]*?-->/g, blank);
 }
 
 function linkHits(maskedBody: string, config: TrackerConfig): LinkHit[] {
   if (config.hosts.length === 0) return [];
   const re = new RegExp(
-    `https?://(?:${config.hosts.map(escapeRe).join("|")})(?::\\d+)?/browse/${projectAlt(config)}-(\\d+)${NOT_DIGIT_AFTER}`,
-    "giu",
+    `https?://(?:${config.hosts.map(escapeRe).join("|")})(?::\\d+)?/browse/${projectAlt(config)}-${NUM}`,
+    "gi",
   );
   const out: LinkHit[] = [];
   maskedBody.split("\n").forEach((text, line) => {
     for (const m of text.matchAll(re)) {
-      out.push({ key: `${m[1]!.toUpperCase()}-${m[2]}`, line, col: m.index });
+      const key = `${m[1]!.toUpperCase()}-${m[2]}`;
+      if (keep(key, config)) out.push({ key, line, col: m.index });
     }
   });
   return out;
 }
 
 /**
- * Mentions: a bare, uppercase, project-bounded key in the body. The scanner is
- * `extractJiraKeys` (fenced-code mask, denylist); inline code, URLs and
- * wikilink targets are blanked first, since a key there is an address or a
- * path, not a sentence about the issue.
+ * Mentions: a bare, uppercase, project-bounded key in the already-masked body.
+ * The scanner is `extractJiraKeys` (denylist); URLs, markdown link
+ * destinations and wikilink targets are blanked first, since a key there is an
+ * address or a path, not a sentence about the issue.
  */
-function mentionKeys(body: string, config: TrackerConfig): string[] {
-  let text = maskInlineCode(maskFencedCode(body));
-  text = text.replace(/https?:\/\/[^\s)\]>]+/g, (u) => " ".repeat(u.length));
-  text = text.replace(/\[\[([^\]|\n]*)/g, (all, target: string) => "[[" + " ".repeat(target.length));
-  const projects = new Set(config.projects);
-  return extractJiraKeys(text).filter((k) => projects.has(k.slice(0, k.indexOf("-"))));
+function mentionKeys(maskedBody: string, config: TrackerConfig): string[] {
+  const text = maskedBody
+    .replace(/https?:\/\/[^\s)\]>]+/g, blank)
+    .replace(/\]\(([^)\n]*)\)/g, (_all, dest: string) => "](" + blank(dest) + ")")
+    .replace(/\[\[([^\]|\n]*)/g, (_all, target: string) => "[[" + blank(target));
+  return extractJiraKeys(text).filter((k) => k.slice(k.indexOf("-") + 1)[0] !== "0" && keep(k, config));
 }
 
 /**
@@ -202,22 +275,28 @@ export function inferJiraIssues(page: TrackerPage, config: TrackerConfig): Issue
   add(stampedKeys(page.frontmatter[jiraAdapter.frontmatterKey]), "stamped");
   for (const field of config.frontmatterKeys) {
     if (!Object.prototype.hasOwnProperty.call(page.frontmatter, field)) continue;
-    add(valueStrings(page.frontmatter[field]).flatMap((v) => boundedKeys(v, config)), "declared");
+    add(valueStrings(page.frontmatter[field]).flatMap((v) => scanKeys(v, config, { caseSensitive: false })), "declared");
   }
   if (page.authoredTitle) add(titleKeys(page.authoredTitle, config), "title");
-  add(boundedKeys(page.stem, config), "stem");
+  add(stemKeys(page.stem, config), "stem");
   add(tagKeys(page.tags, config), "tag");
 
   if (page.kind === "markdown" && page.body) {
-    const masked = maskCode(page.body);
+    const masked = maskBody(page.body);
     const lines = masked.split("\n");
     const markers = config.createdMarkers.map(markerRe);
+    /** Line → its clause boundaries, computed once and only when a marker exists. */
+    const bounds = new Map<number, number[]>();
     for (const hit of linkHits(masked, config)) {
       add([hit.key], "link");
-      const before = clauseBefore(lines[hit.line]!, hit.col);
+      if (!markers.length) continue;
+      const line = lines[hit.line]!;
+      let b = bounds.get(hit.line);
+      if (!b) bounds.set(hit.line, (b = clauseBoundaries(line)));
+      const before = clauseBefore(line, b, hit.col);
       if (markers.some((re) => re.test(before))) add([hit.key], "created");
     }
-    add(mentionKeys(page.body, config), "mention");
+    add(mentionKeys(masked, config), "mention");
   }
 
   const refs: IssueRef[] = [];

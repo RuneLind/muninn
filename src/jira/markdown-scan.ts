@@ -1,7 +1,7 @@
 /**
  * The one fenced-code scanner both post-passes run on.
  *
- * `verify-keys.ts` and `markdown-check.ts` each walk the generated markdown
+ * `key-scan.ts` and `markdown-check.ts` each walk the generated markdown
  * looking for things to flag, and both must ignore fenced code — a `MELOSYS-123`
  * in a code excerpt is not a citation, and a `<div>` in one is not raw HTML the
  * paste will mangle. Two independent fence walks would be two things to drift,

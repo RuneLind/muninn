@@ -50,7 +50,7 @@ export const PROVENANCE_FRONTMATTER_KEYS = [
  * accepts a ONE-character project prefix, and requiring two here made `X-1` a
  * 400 on the muninn side of a key the stamper had happily written.
  *
- * Deliberately NOT `src/jira/verify-keys.ts`'s `KEY_RE`, which is a SCANNER over
+ * Deliberately NOT `src/jira/key-scan.ts`'s `KEY_RE`, which is a SCANNER over
  * prose (word-boundary anchored, denylisted for `UTF-8`): this one validates a
  * whole query parameter, where an anchored match is the question and a denylist
  * would refuse a project that happens to be called `SED`.
@@ -187,8 +187,8 @@ export function parsePrRef(raw: string): PrRef {
  * behaviour is to fail when clicked. The page's own row still carries the raw
  * value; the facet is the one surface that promises a working click.
  *
- * On a wiki with a tracker the keys are stamped PLUS inferred, never `mention`
- * — read through `facetJiraKeys`, the one definition the client's chip counts
+ * On a wiki with a tracker the keys are stamped PLUS inferred, never a key
+ * whose only relations are `link`/`mention` — read through `facetJiraKeys`, the one definition the client's chip counts
  * and filter share, so a chip's count is the rows clicking it leaves. On a wiki
  * without one they are the stamped `jira` list, as before.
  */
