@@ -5,7 +5,7 @@
  *
  *   1. **`cited` derivation.** On this path there are no `[n]` markers to read
  *      back — a chat turn names its sources in prose — so "did the conversation
- *      actually use this source" is inferred from the Jira key (or url) appearing
+ *      actually use this source" is inferred from the Jira key, url or title appearing
  *      in what the bot said. It drives the ORDER, and depth slices from the top,
  *      so a wrong answer here silently changes which sources a shallow draft
  *      cites and which ones its `## Referanser` lists.
@@ -196,6 +196,34 @@ describe("seedThreadCitations", () => {
     expect(seeded[0]!.docId).toBe("Team MELOSYS/rammeavtale.md");
   });
 
+  test("a keyless, url-less source named by TITLE is cited first", () => {
+    const seeded = seedThreadCitations(
+      [
+        row({ docId: "MELOSYS-4_B.md", title: "MELOSYS-4_B", url: undefined, relevance: 0.9 }),
+        row({
+          collection: "nav-wiki",
+          docId: "concepts/lovvalg-eos.md",
+          title: "Lovvalg for EØS-borgere",
+          url: null,
+          relevance: 0.1,
+        }),
+      ],
+      ["Reglene står i «lovvalg for EØS-borgere», det er den som gjelder."],
+    );
+    expect(seeded[0]!.docId).toBe("concepts/lovvalg-eos.md");
+  });
+
+  test("a short title appearing incidentally is NOT cited", () => {
+    const seeded = seedThreadCitations(
+      [
+        row({ docId: "MELOSYS-4_B.md", title: "MELOSYS-4_B", url: undefined, relevance: 0.9 }),
+        row({ collection: "nav-wiki", docId: "concepts/sak.md", title: "Sak", url: null, relevance: 0.1 }),
+      ],
+      ["Denne sak gjelder uttrekket."],
+    );
+    expect(seeded.map((c) => c.docId)).toEqual(["MELOSYS-4_B.md", "concepts/sak.md"]);
+  });
+
   test("caps at the same 24 the notes path stores, and renumbers 1..n", () => {
     const many = Array.from({ length: 40 }, (_, i) =>
       row({ docId: `MELOSYS-${1000 + i}_x.md`, title: `MELOSYS-${1000 + i}_x`, url: undefined, relevance: 1 - i / 100 }),
@@ -384,6 +412,56 @@ describe("citationsNamedInDraft", () => {
     expect(
       citationsNamedInDraft([short], "Se https://jira.adeo.no/browse/MELOSYS-8150."),
     ).toHaveLength(0);
+  });
+
+  const titled = (collection: string, title: string, url?: string): JiraCitation => ({
+    n: 1,
+    collection,
+    docId: `${collection}/${title}.md`,
+    title,
+    badge: collection,
+    relevance: 0.5,
+    ...(url ? { url } : {}),
+  });
+
+  test("a source named by exact TITLE is kept — key, title+url and title-only rows all count", () => {
+    const cites = [
+      jira("MELOSYS-8150", 1),
+      titled("melosys-confluence-v3", "Rammeavtale for utsendte arbeidstakere", "https://confluence.test/rammeavtale"),
+      titled("nav-wiki", "Lovvalg for EØS-borgere"),
+    ];
+    const kept = citationsNamedInDraft(
+      cites,
+      "Se MELOSYS-8150. Flyten står i «Rammeavtale for utsendte arbeidstakere», og reglene i \"lovvalg for EØS-borgere\".",
+    );
+    expect(kept.map((c) => c.collection)).toEqual(["jira-issues", "melosys-confluence-v3", "nav-wiki"]);
+  });
+
+  test("a title shorter than the minimum never matches incidentally", () => {
+    expect(citationsNamedInDraft([titled("nav-wiki", "Sak")], "Denne sak gjelder uttrekket.")).toEqual([]);
+  });
+
+  test("a title must end and start on a Unicode boundary — æøå count as letters", () => {
+    const eos = titled("nav-wiki", "Lovvalg i EØS");
+    expect(citationsNamedInDraft([eos], "Se Lovvalg i EØS.")).toHaveLength(1);
+    expect(citationsNamedInDraft([eos], "Se Lovvalg i\nEØS.")).toHaveLength(1);
+    // A \b boundary would see `S|å` as a word break and call this a mention.
+    expect(citationsNamedInDraft([eos], "Se Lovvalg i EØSåret.")).toHaveLength(0);
+    expect(citationsNamedInDraft([eos], "Se Lovvalg i EØS-avtalen.")).toHaveLength(0);
+    expect(citationsNamedInDraft([eos], "Se ÅLovvalg i EØS.")).toHaveLength(0);
+  });
+
+  test("a title inside a LONGER cited title's mention does not count on its own", () => {
+    const short = titled("nav-wiki", "Rammeavtale");
+    const long = titled("melosys-confluence-v3", "Rammeavtale for utsendte arbeidstakere");
+    expect(
+      citationsNamedInDraft([short, long], "Se Rammeavtale for utsendte arbeidstakere.").map((c) => c.title),
+    ).toEqual(["Rammeavtale for utsendte arbeidstakere"]);
+    expect(
+      citationsNamedInDraft([short, long], "Se Rammeavtale for utsendte arbeidstakere og Rammeavtale.").map(
+        (c) => c.title,
+      ),
+    ).toEqual(["Rammeavtale", "Rammeavtale for utsendte arbeidstakere"]);
   });
 
   test("a draft that names nothing gets no reference list at all", () => {

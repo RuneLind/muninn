@@ -66,7 +66,7 @@ export interface ThreadCitationRow {
  *     tool handler writes every row `cited: false` — it cannot know, the reply
  *     does not exist yet — and unlike `/research` there are no `[n]` markers to
  *     read afterwards, because a chat turn names its sources in prose. So the
- *     signal is the Jira key (or the url) appearing in what the bot actually said.
+ *     signal is the Jira key, the url or the title appearing in what the bot said.
  *     A source the conversation TALKED ABOUT is better grounding for the task than
  *     one that merely came back from a search.
  *
@@ -110,9 +110,10 @@ export function seedThreadCitations(
       },
       0,
     );
-    const cited = namedIn(citation, mentionedKeys, joined);
-    return { citation, cited };
+    return { citation, cited: false };
   });
+  const titles = scored.map((s) => s.citation.title);
+  for (const s of scored) s.cited = namedIn(s.citation, mentionedKeys, joined, titles);
 
   scored.sort((a, b) => {
     if (a.cited !== b.cited) return a.cited ? -1 : 1;
@@ -125,7 +126,7 @@ export function seedThreadCitations(
 }
 
 /**
- * Did this text NAME this source — by Jira key, or by its url?
+ * Did this text NAME this source — by Jira key, by its url, or by its title?
  *
  * The key half goes through {@link extractJiraKeys}, which is already
  * word-bounded. The URL half is the one that needed a rule: a bare `includes`
@@ -135,9 +136,53 @@ export function seedThreadCitations(
  * depth slice and the reference list. A match therefore has to end the string or
  * be followed by something that cannot continue an identifier.
  */
-function namedIn(citation: JiraCitation, mentionedKeys: Set<string>, text: string): boolean {
+function namedIn(
+  citation: JiraCitation,
+  mentionedKeys: Set<string>,
+  text: string,
+  titles: string[],
+): boolean {
   if (citation.key && mentionedKeys.has(citation.key)) return true;
-  return !!citation.url && mentionsUrl(text, citation.url);
+  if (citation.url && mentionsUrl(text, citation.url)) return true;
+  return mentionsTitle(text, citation.title, titles);
+}
+
+/**
+ * The title arm — the turn instruction's «ellers sidetittelen», and the only way
+ * a keyless, url-less source (a `nav-wiki` page) can count as named.
+ *
+ * - A title under {@link TITLE_MIN_CHARS} never matches: «Sak» occurs in prose.
+ * - Case-insensitive and whitespace-run tolerant; everything else is exact.
+ *   Quotes AROUND the title («…», "…") pass the boundary; quotes inside must match.
+ * - The boundary is Unicode (`\b` is ASCII-only, so `EØS|år` would split) and on
+ *   both sides; `-` and `/` continue a title the way they continue a url.
+ * - A mention of a LONGER title in the same set that contains this one is masked
+ *   first, so «Rammeavtale for utsendte arbeidstakere» does not name «Rammeavtale».
+ */
+const TITLE_MIN_CHARS = 8;
+const TITLE_CONTINUES = "\\p{L}\\p{M}\\p{N}_\\-/";
+
+function titlePattern(title: string): RegExp | null {
+  const t = title.trim();
+  if ([...t].length < TITLE_MIN_CHARS) return null;
+  const body = t
+    .split(/\s+/)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"))
+    .join("\\s+");
+  return new RegExp(`(?<![${TITLE_CONTINUES}])${body}(?![${TITLE_CONTINUES}])`, "giu");
+}
+
+function mentionsTitle(text: string, title: string, titles: string[]): boolean {
+  const own = titlePattern(title);
+  if (!own) return false;
+  const needle = title.trim().toLowerCase();
+  let masked = text;
+  for (const other of titles) {
+    const o = other.trim();
+    if (o.length <= needle.length || !o.toLowerCase().includes(needle)) continue;
+    masked = masked.replace(titlePattern(o)!, (m) => " ".repeat(m.length));
+  }
+  return own.test(masked);
 }
 
 /**
@@ -170,17 +215,18 @@ function mentionsUrl(text: string, url: string): boolean {
  * appending the whole depth slice put links under the task for sources the turn
  * never mentioned, and the reference list stopped being a claim about the text.
  *
- * The signal is the same one `seedThreadCitations` uses for `cited`: the Jira key
- * (or the url) appearing in the prose, which is exactly how the turn instruction
- * asks the model to cite. Order is the slice's, so the list still reads
- * conversation-used first.
+ * The signal is the same one `seedThreadCitations` uses for `cited`: the Jira key,
+ * the url or the page title appearing in the prose — the key and the title are
+ * what the turn instruction asks the model to cite by. Order is the slice's, so
+ * the list still reads conversation-used first.
  */
 export function citationsNamedInDraft(
   citations: JiraCitation[],
   markdown: string,
 ): JiraCitation[] {
   const mentionedKeys = new Set(extractJiraKeys(markdown));
-  return citations.filter((c) => namedIn(c, mentionedKeys, markdown));
+  const titles = citations.map((c) => c.title);
+  return citations.filter((c) => namedIn(c, mentionedKeys, markdown, titles));
 }
 
 /**
