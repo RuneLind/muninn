@@ -464,6 +464,7 @@ const LINT_LABELS: Record<LintCheck, string> = {
   "missing-sources": "Missing sources",
   "index-truncation": "Truncated wikilinks (unclosed [[)",
   "nested-annotation": "Markup nested inside a wikilink",
+  "unrendered-fact-mark": "Fact-check marks that render as literal markup",
   "stem-collision": "Same-stem pages (one is hidden from the wiki)",
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
