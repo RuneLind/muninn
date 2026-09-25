@@ -61,6 +61,45 @@ test("spliceSentinelBlock replaces an existing block in place (exactly one pair)
   expect(out.indexOf(FACTCHECK_SENTINEL_START)).toBeLessThan(out.indexOf("## Sources"));
 });
 
+// A page that DOCUMENTS the sentinel format (a live mimir plan page does) shows
+// the pair inside a fence. That example is content, not the live block.
+const FENCED_EXAMPLE = [
+  "```mdx",
+  FACTCHECK_SENTINEL_START,
+  "Documented example verdict.",
+  FACTCHECK_SENTINEL_END,
+  "```",
+].join("\n");
+
+test("spliceSentinelBlock leaves a fenced example pair alone and appends outside the fence", () => {
+  const content = `# Title\n\nThe format:\n\n${FENCED_EXAMPLE}\n\nMore prose.\n\n## Sources\n\n- url\n`;
+  const out = spliceSentinelBlock(content, BLOCK);
+  expect(out).toContain(FENCED_EXAMPLE); // example kept byte-for-byte
+  expect((out.match(/factcheck:start/g) ?? []).length).toBe(2);
+  const liveAt = out.lastIndexOf(FACTCHECK_SENTINEL_START);
+  expect(liveAt).toBeGreaterThan(out.indexOf("More prose.")); // after the fence
+  expect(liveAt).toBeLessThan(out.indexOf("## Sources")); // normal fallthrough
+});
+
+test("spliceSentinelBlock never pairs an unfenced start with a fenced end", () => {
+  // Prose naming the start marker inline, then the fenced example (the live
+  // page's shape): no unfenced END exists, so nothing is replaced.
+  const content = `# Title\n\nThe \`${FACTCHECK_SENTINEL_START}\` marker opens it.\n\n${FENCED_EXAMPLE}\n`;
+  const out = spliceSentinelBlock(content, BLOCK);
+  expect(out.startsWith(content.replace(/\n+$/, ""))).toBe(true); // nothing before the append changed
+  expect(out.endsWith(BLOCK)).toBe(true);
+});
+
+test("spliceSentinelBlock replaces the first UNFENCED pair when a fenced example precedes it", () => {
+  const oldBlock = buildFactcheckBlock("Stale verdict.", "2026-01-01");
+  const content = `# Title\n\n~~~\n${FACTCHECK_SENTINEL_START}\nTilde example.\n${FACTCHECK_SENTINEL_END}\n~~~\n\nBody.\n\n${oldBlock}\n`;
+  const out = spliceSentinelBlock(content, BLOCK);
+  expect(out).toContain("Tilde example.");
+  expect(out).not.toContain("Stale verdict.");
+  expect(out).toContain("Claim A");
+  expect((out.match(/factcheck:start/g) ?? []).length).toBe(2);
+});
+
 test("appendBlockToPage writes, logs, and reindexes on a matching baseHash", async () => {
   const files: Record<string, string> = { "/wiki/analyses/page.md": "# Page\n\nBody.\n" };
   const { opts, reindexed } = makeDeps(files);

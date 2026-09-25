@@ -74,8 +74,41 @@ export interface PreparedBody {
   note?: string;
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * Offset ranges `[start, end)` of every fenced region, fence lines included —
+ * the same ``` / ~~~ toggle as render.ts's `stripSentinelLines`, so the splice
+ * and the reader agree on which sentinel lines are content.
+ */
+function fencedRanges(content: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let offset = 0;
+  let openAt = -1;
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+      if (openAt === -1) openAt = offset;
+      else {
+        ranges.push([openAt, offset + line.length]);
+        openAt = -1;
+      }
+    }
+    offset += line.length + 1;
+  }
+  if (openAt !== -1) ranges.push([openAt, content.length]);
+  return ranges;
+}
+
+/** Index of the first `needle` at or after `from` that sits outside every fence, or -1. */
+function indexOfUnfenced(
+  content: string,
+  needle: string,
+  from: number,
+  fenced: Array<[number, number]>,
+): number {
+  for (let i = content.indexOf(needle, from); i !== -1; i = content.indexOf(needle, i + 1)) {
+    if (!fenced.some(([s, e]) => i >= s && i < e)) return i;
+  }
+  return -1;
 }
 
 /** Ensure exactly one trailing newline. Exported so the fact-check INTEGRATE
@@ -88,19 +121,23 @@ export function withTrailingNewline(text: string): string {
 
 /**
  * Splice a sentinel-wrapped `block` into `content`:
- *   - if a `<!-- factcheck:start -->…<!-- factcheck:end -->` block already exists,
- *     REPLACE it in place (a function replacer, so `$`-sequences in the block are
- *     literal);
+ *   - if an UNFENCED `<!-- factcheck:start -->…<!-- factcheck:end -->` block
+ *     already exists, REPLACE the first one in place (first unfenced start, then
+ *     the first unfenced end after it — the old non-greedy regex, minus fences);
  *   - else insert before a trailing `## Sources` heading if present;
  *   - else append at end of file.
+ * A pair inside a ``` / ~~~ fence is a documented example, never the live block.
  * Pure — no trailing-newline normalization (the caller does that).
  */
 export function spliceSentinelBlock(content: string, block: string): string {
-  const re = new RegExp(
-    escapeRegExp(FACTCHECK_SENTINEL_START) + "[\\s\\S]*?" + escapeRegExp(FACTCHECK_SENTINEL_END),
-  );
-  if (re.test(content)) {
-    return content.replace(re, () => block);
+  const fenced = fencedRanges(content);
+  const start = indexOfUnfenced(content, FACTCHECK_SENTINEL_START, 0, fenced);
+  const end =
+    start === -1
+      ? -1
+      : indexOfUnfenced(content, FACTCHECK_SENTINEL_END, start + FACTCHECK_SENTINEL_START.length, fenced);
+  if (end !== -1) {
+    return content.slice(0, start) + block + content.slice(end + FACTCHECK_SENTINEL_END.length);
   }
   const lines = content.split("\n");
   const sourcesIdx = lines.findIndex((l) => /^##\s+Sources\b/i.test(l));
