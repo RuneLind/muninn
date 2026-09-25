@@ -12,6 +12,7 @@ import {
   downloadVtt,
   harvestVimeoCaptions,
   VIMEO_CAPTIONS_HOST,
+  VIMEO_HARVEST_TEARDOWN_MS,
   VIMEO_PLAYER_CONFIG_MAX_BYTES,
   VimeoBotBlockedError,
   VimeoBrowserMissingError,
@@ -355,6 +356,16 @@ interface FakePageSpec {
   /** The default config padded with a filler field of this many bytes — still valid JSON naming the manifest. */
   configPadBytes?: number;
   duration?: number;
+  /**
+   * Every `browser.newContext()` call never settles — a wedged Chromium. With
+   * `"until-close"` it rejects once `browser.close()` is called, the way
+   * Playwright rejects a pending call on a closed browser.
+   */
+  newContextHangs?: boolean | "until-close";
+  /** `context.close()` never settles. */
+  contextCloseHangs?: boolean;
+  /** `browser.close()` never settles. */
+  browserCloseHangs?: boolean;
 }
 
 interface FakeHarness {
@@ -364,6 +375,10 @@ interface FakeHarness {
   /** Watch-page loads. One per harvest ATTEMPT — the retry is the second. (The
    *  throwaway context `derivedUserAgent` opens navigates nowhere.) */
   navigations: number;
+  /** `browser.newContext()` calls, settled or not. */
+  newContextCalls: number;
+  /** `browser.close()` calls, settled or not. */
+  browserCloses: number;
 }
 
 /** The shape of the player's `/config` (measured 2026-09-06 on vimeo.com/1223305711); URLs are placeholders. */
@@ -509,17 +524,31 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
     },
   };
 
+  const never = () => new Promise<never>(() => {});
+  let newContextCalls = 0;
+  let browserCloses = 0;
+  const onBrowserClose: (() => void)[] = [];
   const context = {
     async newPage() {
       return page;
     },
-    async close() {},
+    close: () => (spec.contextCloseHangs ? never() : Promise.resolve()),
   };
   const browser = {
-    async newContext() {
-      return context;
+    newContext: () => {
+      newContextCalls++;
+      if (spec.newContextHangs === "until-close") {
+        return new Promise<never>((_, reject) =>
+          onBrowserClose.push(() => reject(new Error("browser.newContext: Target page, context or browser has been closed"))),
+        );
+      }
+      return spec.newContextHangs ? never() : Promise.resolve(context);
     },
-    async close() {},
+    close: () => {
+      browserCloses++;
+      for (const f of onBrowserClose.splice(0)) f();
+      return spec.browserCloseHangs ? never() : Promise.resolve();
+    },
   };
 
   return {
@@ -532,6 +561,12 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
     modeLog,
     get navigations() {
       return navigations;
+    },
+    get newContextCalls() {
+      return newContextCalls;
+    },
+    get browserCloses() {
+      return browserCloses;
     },
   };
 }
@@ -991,4 +1026,82 @@ describe("harvestVimeoCaptions — which manifest hosts count (v2 PR 4)", () => 
     const c = await harvestVimeoCaptions("123", { launcher: harness.launcher, awaitManifestMs: 300 });
     expect(c.manifestUrl).toBeUndefined();
   });
+});
+
+describe("harvestVimeoCaptions — a wedged browser is bounded by the budget", () => {
+  // Every harvest runs through ONE module-level queue key (`summarizer.ts`), so a
+  // browser call that never returns stalled every later Vimeo capture at
+  // `pending` until the 12 h reaper. The budget reached only the Playwright
+  // calls that take a `timeout`; `newContext`/`close` take none. Each stub below
+  // never settles, and `settledWithin` reports "STILL RUNNING" rather than hang.
+  const ONE_TRACK = { hasVideo: true, tracks: [{ lang: "en", label: "English" }], urlPerTrack: [CAPTION_URL("en")] };
+
+  test("(A) a newContext that never returns inside the user-agent probe is a harvest error, and the browser is still closed", async () => {
+    const harness = fakeHarness({ ...ONE_TRACK, newContextHangs: true });
+    const started = Date.now();
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 300 }), 2_000);
+    expect(outcome).toBeInstanceOf(VimeoHarvestError);
+    expect((outcome as Error).message).toMatch(/whole-operation budget/);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    // The one call made was the probe's: no userAgent was given.
+    expect(harness.newContextCalls).toBe(1);
+    expect(harness.browserCloses).toBe(1);
+  }, 5_000);
+
+  test("(B) a newContext that never returns in the harvest loop is a harvest error, and the browser is still closed", async () => {
+    const harness = fakeHarness({ ...ONE_TRACK, newContextHangs: true });
+    const started = Date.now();
+    const outcome = await settledWithin(
+      harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 300, userAgent: "Mozilla/5.0 test" }),
+      2_000,
+    );
+    expect(outcome).toBeInstanceOf(VimeoHarvestError);
+    expect(outcome).not.toBeInstanceOf(VimeoNotPublicError);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(harness.navigations).toBe(0);
+    expect(harness.browserCloses).toBe(1);
+  }, 5_000);
+
+  test("a raced-out call that rejects once the browser closes is swallowed, not reported in place of the budget", async () => {
+    // `bun test` fails the running test on an unhandled rejection, so the sleep
+    // after the answer is what gives a leaked rejection its chance to surface.
+    const harness = fakeHarness({ ...ONE_TRACK, newContextHangs: "until-close" });
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 300 }), 2_000);
+    expect(outcome).toBeInstanceOf(VimeoHarvestError);
+    expect((outcome as Error).message).toMatch(/whole-operation budget/);
+    expect(harness.browserCloses).toBe(1);
+    await Bun.sleep(50);
+  }, 5_000);
+
+  test("(C) a browser.close that never returns does not hold the harvest — the captions still come back", async () => {
+    const harness = fakeHarness({ ...ONE_TRACK, browserCloseHangs: true });
+    const started = Date.now();
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 300 }), 4_000);
+    expect(outcome).not.toBeString();
+    expect((outcome as { tracks: VimeoCaptionTrack[] }).tracks.map((t) => t.lang)).toEqual(["en"]);
+    expect(Date.now() - started).toBeLessThan(VIMEO_HARVEST_TEARDOWN_MS + 1_000);
+  }, 8_000);
+
+  test("a context.close that never returns does not turn a finished harvest into a budget error", async () => {
+    // The loop's `finally` closes its context. Unbounded, a close that hangs
+    // after the captions were in hand would run the clock out and report the
+    // BUDGET for a harvest that succeeded.
+    const harness = fakeHarness({ ...ONE_TRACK, contextCloseHangs: true });
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 60_000 }), 8_000);
+    expect(outcome).not.toBeString();
+    expect((outcome as { tracks: VimeoCaptionTrack[] }).tracks.map((t) => t.lang)).toEqual(["en"]);
+  }, 12_000);
+
+  test("with fast stubs the harvest returns its captions, and both manifest allowances still reach the page", async () => {
+    const tracked = fakeHarness({ ...ONE_TRACK, manifestAfterMs: 150 });
+    const c = await harvestVimeoCaptions("123", { launcher: tracked.launcher, awaitManifestMs: 3_000 });
+    expect(c.tracks.map((t) => t.vttUrl)).toEqual([CAPTION_URL("en")]);
+    expect(c.manifestUrl).toContain("/playlist.json");
+    expect(tracked.browserCloses).toBe(1);
+
+    const trackless = fakeHarness({ hasVideo: true, tracks: [], manifestAfterMs: 150 });
+    const t = await harvestVimeoCaptions("123", { launcher: trackless.launcher, awaitManifestNoCaptionsMs: 3_000 });
+    expect(t.tracks).toEqual([]);
+    expect(t.manifestUrl).toContain("/playlist.json");
+  }, 10_000);
 });

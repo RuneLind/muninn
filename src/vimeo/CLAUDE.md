@@ -1014,7 +1014,12 @@ same start, so `[00:00:00]` was printed twice and the citation named two places.
 **The whole harvest lives in ONE budget** (60 s by default, browser launch
 included) and every Playwright wait gets what is left of it — never 0, which
 Playwright reads as "wait forever". Chromium is launched per harvest and closed in
-`finally`; there is no long-lived browser to supervise.
+`finally`; there is no long-lived browser to supervise. **The body is also RACED
+against the deadline** (`withinBudget`, 500 ms grace so a wait's own clearer error
+wins), because `newContext`/`close`/`evaluate` take no timeout and every harvest
+shares one queue key: one wedged call stalled every later capture at `pending`.
+Each `close()` gets its own `VIMEO_HARVEST_TEARDOWN_MS` (2 s), outside the spent
+budget, hang or failure swallowed.
 
 **Track/URL correlation is by causation, not by order.** The request stream
 carries URLs and the DOM carries `lang`/`label`, with nothing linking them, so the

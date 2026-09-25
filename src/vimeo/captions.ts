@@ -41,6 +41,12 @@ type PwPage = Awaited<ReturnType<PwContext["newPage"]>>;
 export { VIMEO_CAPTIONS_HOST };
 /** Whole-operation budget for a harvest, browser launch included. */
 export const VIMEO_HARVEST_TIMEOUT_MS = 60_000;
+/**
+ * Each `context.close()`/`browser.close()` gets this long on its own, outside
+ * the budget. Measured 2026-09-25 on a real headless Chromium: 1–3 ms and
+ * 11–18 ms, so the bound only binds on a wedged browser.
+ */
+export const VIMEO_HARVEST_TEARDOWN_MS = 2_000;
 /** A 53-minute talk's VTT is 62 KB. The cap bounds the process, generously. */
 export const VIMEO_VTT_MAX_BYTES = 2 * 1024 * 1024;
 export const VIMEO_VTT_TIMEOUT_MS = 20_000;
@@ -282,9 +288,10 @@ export async function downloadVtt(url: string, opts: DownloadVttOptions = {}): P
  *
  * The whole operation, browser launch included, lives inside one budget; every
  * Playwright wait gets what is LEFT of it (never 0 — Playwright reads a 0 timeout
- * as "wait forever"). Chromium is launched per harvest and closed in `finally`:
- * a long-lived browser is a second process to supervise, for a job that runs
- * once per capture.
+ * as "wait forever"), and the body after launch is raced against the same
+ * deadline. Chromium is launched per harvest and closed in `finally`, under a
+ * bound of its own: a long-lived browser is a second process to supervise, for
+ * a job that runs once per capture.
  */
 export async function harvestVimeoCaptions(
   videoId: string,
@@ -329,37 +336,98 @@ export async function harvestVimeoCaptions(
     );
   }
 
+  // The body is RACED against the deadline, not just handed slices of it: only
+  // the Playwright calls that take a `timeout` see the budget, and
+  // `newContext`/`close`/`evaluate` take none. Every harvest runs through ONE
+  // queue key (`summarizer.ts`), so one wedged call stalled every later capture
+  // at `pending` until the 12 h reaper.
   try {
-    const userAgent = opts.userAgent ?? (await derivedUserAgent(browser));
-    // One retry on the bot page, in a NEW CONTEXT — which is a new cookie jar and
-    // new storage, and nothing else: same browser, same binary, same derived user
-    // agent, same locale. So it can shake off a per-session challenge cookie and
-    // cannot do a thing about the UA gate; that is what `deHeadlessUserAgent`
-    // (and, failing it, `headless: false`) is for.
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const context = await browser.newContext({ locale: "en-US", userAgent });
-      try {
-        return await harvestInContext(context, videoId, watchUrl, deadline, {
-          awaitManifestMs: Math.max(0, opts.awaitManifestMs ?? 0),
-          awaitManifestNoCaptionsMs: Math.max(0, opts.awaitManifestNoCaptionsMs ?? 0),
-        });
-      } catch (err) {
-        if (err instanceof VimeoBotBlockedError && attempt === 1) {
-          log.warn("Vimeo bot page for {videoId}; retrying once with a fresh context", { videoId });
-          continue;
-        }
-        throw err;
-      } finally {
-        await context.close().catch(() => {});
-      }
-    }
-    // Unreachable: the loop either returns, retries once, or rethrows. It is
-    // here because control-flow analysis cannot see that, and a `return`-less
-    // path would otherwise be typed `VimeoCaptions | undefined`.
-    throw new VimeoBotBlockedError(videoId);
+    return await withinBudget(harvestWithBrowser(browser, videoId, watchUrl, deadline, opts), deadline);
   } finally {
-    await browser.close().catch(() => {});
+    await closeWithin("browser", () => browser.close());
   }
+}
+
+async function harvestWithBrowser(
+  browser: PwBrowser,
+  videoId: string,
+  watchUrl: string,
+  deadline: number,
+  opts: HarvestOptions,
+): Promise<VimeoCaptions> {
+  const userAgent = opts.userAgent ?? (await derivedUserAgent(browser));
+  // One retry on the bot page, in a NEW CONTEXT — which is a new cookie jar and
+  // new storage, and nothing else: same browser, same binary, same derived user
+  // agent, same locale. So it can shake off a per-session challenge cookie and
+  // cannot do a thing about the UA gate; that is what `deHeadlessUserAgent`
+  // (and, failing it, `headless: false`) is for.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const context = await browser.newContext({ locale: "en-US", userAgent });
+    try {
+      return await harvestInContext(context, videoId, watchUrl, deadline, {
+        awaitManifestMs: Math.max(0, opts.awaitManifestMs ?? 0),
+        awaitManifestNoCaptionsMs: Math.max(0, opts.awaitManifestNoCaptionsMs ?? 0),
+      });
+    } catch (err) {
+      if (err instanceof VimeoBotBlockedError && attempt === 1) {
+        log.warn("Vimeo bot page for {videoId}; retrying once with a fresh context", { videoId });
+        continue;
+      }
+      throw err;
+    } finally {
+      await closeWithin("context", () => context.close());
+    }
+  }
+  // Unreachable: the loop either returns, retries once, or rethrows. It is
+  // here because control-flow analysis cannot see that, and a `return`-less
+  // path would otherwise be typed `VimeoCaptions | undefined`.
+  throw new VimeoBotBlockedError(videoId);
+}
+
+/**
+ * How far past the deadline the race waits before it answers for the body.
+ * Every budget-aware step inside the body notices the deadline itself within
+ * one 100 ms poll, and its error says more (which wait was cut short, what the
+ * video may also be); the race is for the body that notices nothing.
+ */
+const BUDGET_RACE_GRACE_MS = 500;
+
+/**
+ * Settle with `work`, or with the budget error once the deadline (plus
+ * {@link BUDGET_RACE_GRACE_MS}) passes. A raced-out `work` keeps running until
+ * the browser is closed under it, and Playwright then rejects it; `race` has
+ * already subscribed to it, so that rejection is handled, not unhandled.
+ */
+function withinBudget<T>(work: Promise<T>, deadline: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(budgetExceeded("while a browser call had not returned — the browser may be wedged")),
+      Math.max(0, deadline - Date.now()) + BUDGET_RACE_GRACE_MS,
+    );
+  });
+  return Promise.race([work, expiry]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Close a context or the browser within {@link VIMEO_HARVEST_TEARDOWN_MS} of
+ * its own, never the budget's: teardown runs after the budget may be spent.
+ * A failure or a hang is logged and swallowed — the harvest's answer stands.
+ */
+async function closeWithin(what: "browser" | "context", close: () => Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const closed = Promise.resolve()
+    .then(close)
+    .then(
+      () => true,
+      () => true,
+    );
+  const expired = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), VIMEO_HARVEST_TEARDOWN_MS);
+  });
+  const ok = await Promise.race([closed, expired]);
+  clearTimeout(timer);
+  if (!ok) log.warn("Vimeo harvest: {what}.close() did not return within {ms}ms; abandoning it", { what, ms: VIMEO_HARVEST_TEARDOWN_MS });
 }
 
 function isMediaHostUrl(u: string): boolean {
@@ -714,7 +782,7 @@ async function derivedUserAgent(browser: PwBrowser): Promise<string | undefined>
     log.warn("Could not read the browser's default user agent: {err}", { err });
     return undefined;
   } finally {
-    await context.close().catch(() => {});
+    await closeWithin("context", () => context.close());
   }
 }
 
@@ -787,12 +855,14 @@ function isBrowserMissing(err: unknown): boolean {
  */
 function remaining(deadline: number, cap?: number, ambiguity?: string): number {
   const left = deadline - Date.now();
-  if (left <= 0) {
-    throw new VimeoHarvestError(
-      "Vimeo caption harvest exceeded its whole-operation budget" + (ambiguity ? ` ${ambiguity}` : ""),
-    );
-  }
+  if (left <= 0) throw budgetExceeded(ambiguity);
   return cap ? Math.min(cap, left) : left;
+}
+
+function budgetExceeded(ambiguity?: string): VimeoHarvestError {
+  return new VimeoHarvestError(
+    "Vimeo caption harvest exceeded its whole-operation budget" + (ambiguity ? ` ${ambiguity}` : ""),
+  );
 }
 
 /** Poll a predicate. Resolves early when it holds; never throws on timeout —
