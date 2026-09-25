@@ -27,7 +27,7 @@ import {
   threadSeedLine,
   type ThreadCitationRow,
 } from "./thread-draft.ts";
-import { JIRA_STORED_MAX_SOURCES } from "./retrieval.ts";
+import { JIRA_STORED_MAX_SOURCES, sliceForDepth } from "./retrieval.ts";
 import type { JiraCitation } from "./wire.ts";
 
 const row = (over: Partial<ThreadCitationRow> = {}): ThreadCitationRow => ({
@@ -208,7 +208,7 @@ describe("seedThreadCitations", () => {
           relevance: 0.1,
         }),
       ],
-      ["Reglene står i «lovvalg for EØS-borgere», det er den som gjelder."],
+      ["Reglene står i «Lovvalg for EØS-borgere», det er den som gjelder."],
     );
     expect(seeded[0]!.docId).toBe("concepts/lovvalg-eos.md");
   });
@@ -222,6 +222,38 @@ describe("seedThreadCitations", () => {
       ["Denne sak gjelder uttrekket."],
     );
     expect(seeded.map((c) => c.docId)).toEqual(["MELOSYS-4_B.md", "concepts/sak.md"]);
+  });
+
+  test("tracer: concept pages mentioned in passing do not push key-named issues out of the depth slice", () => {
+    const concepts = ["Medlemskap", "Trygdeavgift", "Årsavregning", "Faktureringskomponenten", "Arbeidsgiveravgift"];
+    const rows = [
+      ...concepts.map((t, i) =>
+        row({ collection: "nav-wiki", docId: `concepts/${i}.md`, title: t, url: null, relevance: 0.9 - i / 100 }),
+      ),
+      ...[1001, 1002, 1003].map((k, i) =>
+        row({ docId: `MELOSYS-${k}_x.md`, title: `MELOSYS-${k}_x`, url: undefined, relevance: 0.3 - i / 100 }),
+      ),
+    ];
+    const chat = [
+      "Medlemskap og Trygdeavgift henger sammen; Årsavregning skjer i Faktureringskomponenten, og Arbeidsgiveravgift er egen.",
+      "Se MELOSYS-1001, MELOSYS-1002 og MELOSYS-1003.",
+    ];
+    const seeded = seedThreadCitations(rows, chat);
+    const draft = "## Problem\nMedlemskap og Trygdeavgift. Se MELOSYS-1001, MELOSYS-1002 og MELOSYS-1003.";
+    const kept = citationsNamedInDraft(sliceForDepth(seeded, "ingen"), draft, seeded.map((c) => c.title));
+    expect(kept.map((c) => c.key ?? c.title)).toEqual(["MELOSYS-1001", "MELOSYS-1002", "MELOSYS-1003"]);
+  });
+
+  test("three tiers: key/url-named, then title-named, then the rest — relevance within each", () => {
+    const seeded = seedThreadCitations(
+      [
+        row({ collection: "nav-wiki", docId: "a.md", title: "Uomtalt side", url: null, relevance: 0.95 }),
+        row({ collection: "nav-wiki", docId: "b.md", title: "Lovvalg for EØS-borgere", url: null, relevance: 0.9 }),
+        row({ docId: "MELOSYS-7_x.md", title: "MELOSYS-7_x", url: undefined, relevance: 0.2 }),
+      ],
+      ["Se MELOSYS-7 og Lovvalg for EØS-borgere."],
+    );
+    expect(seeded.map((c) => c.docId)).toEqual(["MELOSYS-7_x.md", "b.md", "a.md"]);
   });
 
   test("caps at the same 24 the notes path stores, and renumbers 1..n", () => {
@@ -432,12 +464,12 @@ describe("citationsNamedInDraft", () => {
     ];
     const kept = citationsNamedInDraft(
       cites,
-      "Se MELOSYS-8150. Flyten står i «Rammeavtale for utsendte arbeidstakere», og reglene i \"lovvalg for EØS-borgere\".",
+      "Se MELOSYS-8150. Flyten står i «Rammeavtale for utsendte arbeidstakere», og reglene i \"Lovvalg for EØS-borgere\".",
     );
     expect(kept.map((c) => c.collection)).toEqual(["jira-issues", "melosys-confluence-v3", "nav-wiki"]);
   });
 
-  test("a title shorter than the minimum never matches incidentally", () => {
+  test("a one-word title never matches as a bare word", () => {
     expect(citationsNamedInDraft([titled("nav-wiki", "Sak")], "Denne sak gjelder uttrekket.")).toEqual([]);
   });
 
@@ -458,10 +490,81 @@ describe("citationsNamedInDraft", () => {
       citationsNamedInDraft([short, long], "Se Rammeavtale for utsendte arbeidstakere.").map((c) => c.title),
     ).toEqual(["Rammeavtale for utsendte arbeidstakere"]);
     expect(
-      citationsNamedInDraft([short, long], "Se Rammeavtale for utsendte arbeidstakere og Rammeavtale.").map(
+      citationsNamedInDraft([short, long], "Se Rammeavtale for utsendte arbeidstakere og «Rammeavtale».").map(
         (c) => c.title,
       ),
     ).toEqual(["Rammeavtale", "Rammeavtale for utsendte arbeidstakere"]);
+  });
+
+  test("a KEYED row is never named by its title — only by key or url", () => {
+    const keyed: JiraCitation = { ...jira("MELOSYS-8150", 1), title: "Uttrekk av medlemskap" };
+    expect(citationsNamedInDraft([keyed], "Se «Uttrekk av medlemskap».")).toEqual([]);
+  });
+
+  test("a bare one-word title does not count, however long", () => {
+    expect(citationsNamedInDraft([titled("melosys-confluence-v3", "Årsavregningen")], "Justeres i årsavregningen.")).toEqual([]);
+    expect(citationsNamedInDraft([titled("nav-wiki", "Årsavregning")], "Det skjer ved Årsavregning neste år.")).toEqual([]);
+    expect(citationsNamedInDraft([titled("nav-wiki", "Trygdeavgift")], "Trygdeavgift beregnes av inntekten.")).toEqual([]);
+  });
+
+  test("a FRAMED one-word title counts, whatever its length", () => {
+    const lovvalg = titled("nav-wiki", "Lovvalg");
+    for (const framed of ["«Lovvalg»", '"Lovvalg"', "“Lovvalg”", "'Lovvalg'", "`Lovvalg`", "*Lovvalg*", "**Lovvalg**", "_Lovvalg_", "[Lovvalg](https://x.test/l)"]) {
+      expect(citationsNamedInDraft([lovvalg], `Se ${framed} for detaljer.`)).toHaveLength(1);
+    }
+    expect(citationsNamedInDraft([titled("nav-wiki", "Sak")], "Se «Sak».")).toHaveLength(1);
+    expect(citationsNamedInDraft([lovvalg], "Lovvalg avgjøres først.")).toEqual([]);
+    expect(citationsNamedInDraft([lovvalg], "Se foo_Lovvalg_bar.")).toEqual([]);
+    expect(citationsNamedInDraft([lovvalg], "Se foo_Lovvalg_ her.")).toEqual([]);
+  });
+
+  test("a multi-word title in _emphasis_ counts", () => {
+    expect(citationsNamedInDraft([titled("nav-wiki", "Lovvalg for EØS-borgere")], "Se _Lovvalg for EØS-borgere_.")).toHaveLength(1);
+  });
+
+  test("a `.md` suffix and a page-id prefix are not part of the title a draft cites", () => {
+    const art16 = titled("nav-wiki", "313350257 — Vilkår for artikkel 16 nr. 1 (unntak).md");
+    expect(citationsNamedInDraft([art16], "Se «Vilkår for artikkel 16 nr. 1 (unntak)».")).toHaveLength(1);
+    const hyphen = titled("nav-wiki", "42 - Rammeavtale for utsendte");
+    expect(citationsNamedInDraft([hyphen], "Se Rammeavtale for utsendte.")).toHaveLength(1);
+  });
+
+  test("a template heading is not a mention of a page with that title in another case", () => {
+    const dod = titled("melosys-confluence-v3", "Definition of Done");
+    const ak = titled("melosys-confluence-v3", "Akseptansekriterier");
+    const draft = "## Problem\nNoe.\n\n## Akseptansekriterier\n- a\n\n## Definition of done\n- b";
+    expect(citationsNamedInDraft([dod, ak], draft)).toEqual([]);
+    expect(citationsNamedInDraft([dod], "Se Definition of Done.")).toHaveLength(1);
+  });
+
+  test("masking runs longest-first, whatever order the titles come in", () => {
+    const cites = [
+      titled("nav-wiki", "Lovvalg i EØS"),
+      titled("nav-wiki", "Lovvalg i EØS for Norge"),
+      titled("nav-wiki", "Lovvalg i EØS: endringer i Lovvalg i EØS for Norge"),
+    ];
+    expect(
+      citationsNamedInDraft(cites, "Se Lovvalg i EØS: endringer i Lovvalg i EØS for Norge.").map((c) => c.title),
+    ).toEqual(["Lovvalg i EØS: endringer i Lovvalg i EØS for Norge"]);
+    // A mention that overlaps an already-masked longer one is not a mask itself —
+    // blanking the longest first leaves it unmatched, so the first «Lovvalg i EØS» counts.
+    const overlapping = [cites[0]!, cites[1]!, titled("nav-wiki", "for Norge og Sverige: Lovvalg i EØS")];
+    expect(
+      citationsNamedInDraft(overlapping, "Se Lovvalg i EØS for Norge og Sverige: Lovvalg i EØS.").map((c) => c.title),
+    ).toEqual(["Lovvalg i EØS", "Lovvalg i EØS for Norge", "for Norge og Sverige: Lovvalg i EØS"]);
+  });
+
+  test("masking compares whitespace-normalised titles, like the match does", () => {
+    const cites = [titled("nav-wiki", "Lovvalg  i EØS"), titled("nav-wiki", "Lovvalg i EØS for Norge")];
+    expect(citationsNamedInDraft(cites, "Se Lovvalg i EØS for Norge.").map((c) => c.title)).toEqual([
+      "Lovvalg i EØS for Norge",
+    ]);
+  });
+
+  test("a longer title OUTSIDE the slice still masks its prefix inside it", () => {
+    const inSlice = [titled("nav-wiki", "Lovvalg i EØS")];
+    const all = ["Lovvalg i EØS", "Lovvalg i EØS for Norge"];
+    expect(citationsNamedInDraft(inSlice, "Se Lovvalg i EØS for Norge.", all)).toEqual([]);
   });
 
   test("a draft that names nothing gets no reference list at all", () => {
