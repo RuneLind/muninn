@@ -35,7 +35,9 @@
  * way, and provenance is a READ.
  */
 
-import type { WikiPageMeta } from "./store.ts";
+import type { WikiIndex, WikiPageMeta } from "./store.ts";
+import { trackerAdapter, relationsCount, type IssueFacts, type IssueLedgerView, type IssueRow, type TrackerAdapter, type TrackerConfig } from "./trackers/index.ts";
+import { issueRowsFor, statusCategory } from "./trackers/rows.ts";
 import {
   costOfSessions,
   enrichSessions,
@@ -112,7 +114,15 @@ export interface ProvenanceContext {
   stampable?: (wikiDir: string | undefined) => boolean;
   /** Test seam for the deadline, so a hanging-stub case costs milliseconds. */
   budgetMs?: number;
+  /** Test seam for a tracker's issue lookup (`TrackerAdapter.lookup`). */
+  lookupIssues?: (adapter: TrackerAdapter, knowledgeApiUrl: string) => Promise<Map<string, IssueFacts> | null>;
 }
+
+/** At most this many keys per page are priced through the session ledger —
+ *  one call each, since `/api/jira` has no batch form. */
+export const ISSUE_LEDGER_MAX = 8;
+/** …and at most this many of those calls are in flight at once. */
+export const ISSUE_LEDGER_CONCURRENCY = 4;
 
 /** The session + Jira halves of an answer, before a caller adds its own fields. */
 export interface ResolvedProvenance {
@@ -238,6 +248,9 @@ export async function pageProvenance(
   /** The wiki's resolved root — the ONE input `stampable` needs. Absent (a
    *  caller that has no root in hand) ⇒ no Stamp is offered. */
   wikiDir?: string,
+  /** The wiki's index: its key map and its resolved tracker config feed the
+   *  issue rows. Absent ⇒ no rows (a caller with no index in hand). */
+  index?: WikiIndex,
 ): Promise<ProvenancePayload | null> {
   // ONE gate, `hasProvenance` — the same predicate the store's own callers use,
   // so "does this page carry provenance" has a single answer.
@@ -273,8 +286,13 @@ export async function pageProvenance(
   // `prs:`-only page asks nothing of the ledger's session routes and everything
   // of `?prs=`, so that leg is part of the condition rather than riding a timer
   // armed for somebody else.
+  // Leg 5's input: the page's issue rows, index-local half. `[]` on a wiki
+  // with no tracker, which is every page there.
+  const trackers = index?.readerConfig?.trackers ?? [];
+  const baseRows = issueRowsFor(meta, index?.issueKeys, trackers);
+
   const signal =
-    askLedger || askPrs || keys.length > 0
+    askLedger || askPrs || keys.length > 0 || baseRows.length > 0
       ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS)
       : undefined;
 
@@ -321,12 +339,17 @@ export async function pageProvenance(
     return { handoffs, candidates, ghostIds, ghostFacts, ghostMerges };
   })();
 
-  const [resolved, mergeResult, handoffResult, prResult, ghostStage] = await Promise.all([
-    resolvedP,
-    mergeP,
-    handoffP,
-    prP,
-    ghostStageP,
+  const issuesP = baseRows.length ? resolveIssueRows(baseRows, trackers, ctx, signal, index?.root) : Promise.resolve([]);
+
+  // `links.timedOut` is read when the legs it reports on have settled, not
+  // after the issue leg: that one carries its deadline on each row's `ledger`,
+  // and a page whose other legs finished (or never ran) must not blame them.
+  const linkLegsP = Promise.all([resolvedP, mergeP, handoffP, prP, ghostStageP]).then(
+    (legs) => [legs, signal?.aborted === true] as const,
+  );
+  const [[[resolved, mergeResult, handoffResult, prResult, ghostStage], linksTimedOut], issues] = await Promise.all([
+    linkLegsP,
+    issuesP,
   ]);
   const { handoffs, candidates, ghostIds, ghostFacts, ghostMerges } = ghostStage;
   const standardizedDate =
@@ -351,6 +374,7 @@ export async function pageProvenance(
 
   return {
     ...resolved,
+    ...(issues.length ? { issues } : {}),
     ghosts,
     handoffs,
     stampable: (ctx.stampable ?? defaultStampable)(wikiDir),
@@ -392,9 +416,9 @@ export async function pageProvenance(
       handoffsCapped,
       prsCapped,
       // The shared deadline fired while a leg was still in flight. Read off the
-      // signal AFTER the awaits rather than raced per leg: one deadline, one
-      // answer about it.
-      timedOut: signal?.aborted === true,
+      // signal once those legs settled rather than raced per leg: one deadline,
+      // one answer about it.
+      timedOut: linksTimedOut,
     },
     // Whichever leg answered first. The date is upstream's own constant and is
     // the same on every envelope; carrying it rather than restating it is what
@@ -405,6 +429,130 @@ export async function pageProvenance(
     ...(standardizedDate ? { rulesStandardizedDate: standardizedDate } : {}),
     ...(meta.sessionsBackfilled ? { backfilled: meta.sessionsBackfilled } : {}),
   };
+}
+
+/**
+ * The network-joined half of a page's issue rows: the tracker lookup (title,
+ * status, epic, last-updated) and the session ledger's price. Both under the
+ * page's ONE deadline, and neither can fail the payload:
+ *
+ *  - a lookup that degrades leaves the rows bare (no `category`, no `known`),
+ *    which renders no status and never offers Draft plan;
+ *  - the ledger is asked for at most {@link ISSUE_LEDGER_MAX} counting keys,
+ *    {@link ISSUE_LEDGER_CONCURRENCY} at a time, in the page's own order
+ *    (strongest relation first); every other row says why it has no price.
+ */
+export async function resolveIssueRows(
+  base: readonly IssueRow[],
+  trackers: readonly TrackerConfig[],
+  ctx: ProvenanceContext,
+  signal?: AbortSignal,
+  /** Names the wiki in the unmapped-status log line. */
+  wikiRoot = "",
+): Promise<IssueRow[]> {
+  const configOf = new Map(trackers.map((t) => [t.id, t]));
+  const ids = [...new Set(base.map((r) => r.tracker))];
+  // The lookup and the ledger start together: a slow huginn must not spend the
+  // deadline claude-usage was never asked inside.
+  const lookupsP = Promise.all(
+    ids.map(async (id) => {
+      const adapter = trackerAdapter(id);
+      const load = (async () => {
+        if (!adapter) return null;
+        try {
+          if (ctx.lookupIssues) return await ctx.lookupIssues(adapter, ctx.knowledgeApiUrl);
+          return adapter.lookup ? await adapter.lookup(ctx.knowledgeApiUrl) : null;
+        } catch {
+          return null;
+        }
+      })();
+      return [id, await raceDeadline(load, signal)] as const;
+    }),
+  );
+
+  // Which rows are asked about, and why the others are not.
+  const ledger: (IssueLedgerView | "ask")[] = [];
+  let asked = 0;
+  for (const row of base) {
+    const config = configOf.get(row.tracker);
+    const adapter = trackerAdapter(row.tracker);
+    const project = adapter?.projectOf(row.key);
+    if (!relationsCount(row.relations)) ledger.push({ state: "unpriced", reason: "demoted" });
+    else if (!config || !project || !config.ledgerProjects.includes(project)) ledger.push({ state: "not-tracked" });
+    else if (!ctx.sessionLedger.urlConfigured || !ctx.sessionLedger.fetchIssueLedger || !adapter?.ledgerPath) {
+      ledger.push({ state: "unpriced", reason: "not-configured" });
+    } else if (asked >= ISSUE_LEDGER_MAX) ledger.push({ state: "unpriced", reason: "cap" });
+    else {
+      ledger.push("ask");
+      asked++;
+    }
+  }
+  const [lookupEntries] = await Promise.all([
+    lookupsP,
+    mapPool(
+      base.map((row, i) => ({ row, i })).filter(({ i }) => ledger[i] === "ask"),
+      ISSUE_LEDGER_CONCURRENCY,
+      async ({ row, i }) => {
+        ledger[i] = await priceIssue(row, ctx, signal);
+      },
+    ),
+  ]);
+  const lookups = new Map(lookupEntries);
+
+  return base.map((row, i) => {
+    const config = configOf.get(row.tracker);
+    const facts = lookups.get(row.tracker);
+    const fact = facts?.get(row.key);
+    const out: IssueRow = { ...row, ledger: ledger[i] as IssueLedgerView };
+    if (facts && config) {
+      out.known = !!fact;
+      out.category = statusCategory(fact?.status, config, wikiRoot);
+      if (fact?.title) out.title = fact.title;
+      if (fact?.status) out.status = fact.status;
+      if (fact?.updated) out.updated = fact.updated;
+      if (fact?.epicLink) {
+        out.epic = { key: fact.epicLink, ...(fact.epicSummary ? { summary: fact.epicSummary } : {}) };
+      }
+    }
+    return out;
+  });
+}
+
+/** One key's price through its tracker's ledger path and parser. Never throws. */
+async function priceIssue(row: IssueRow, ctx: ProvenanceContext, signal?: AbortSignal): Promise<IssueLedgerView> {
+  const adapter = trackerAdapter(row.tracker);
+  const path = adapter?.ledgerPath?.(row.key);
+  if (!path || !adapter?.parseLedger || !ctx.sessionLedger.fetchIssueLedger) {
+    return { state: "unpriced", reason: "not-configured" };
+  }
+  if (signal?.aborted) return { state: "unpriced", reason: "deadline" };
+  try {
+    // Raced as well as handed the signal: a fetch that ignored it would
+    // otherwise hold the whole page open.
+    const raw = await raceDeadline(ctx.sessionLedger.fetchIssueLedger(path, signal), signal);
+    if (raw === null && signal?.aborted) return { state: "unpriced", reason: "deadline" };
+    return adapter.parseLedger(raw) ?? { state: "unpriced", reason: "unreachable" };
+  } catch {
+    return { state: "unpriced", reason: signal?.aborted ? "deadline" : "unreachable" };
+  }
+}
+
+/** Run `fn` over `items` with at most `limit` in flight. */
+async function mapPool<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++]!;
+      await fn(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+/** `stampable` for a page in this wiki, through the context's seam — the same
+ *  answer the payload gives, for a caller that renders before it lands. */
+export function ctxStampable(ctx: ProvenanceContext, wikiDir: string | undefined): boolean {
+  return (ctx.stampable ?? defaultStampable)(wikiDir);
 }
 
 /** The production `stampable` predicate: the env, both read-only guards, and the
@@ -510,8 +658,12 @@ async function loadCorpus(
       return null;
     }
   })();
-  if (!signal) return await load;
-  return await Promise.race([load, aborted(signal)]);
+  return await raceDeadline(load, signal);
+}
+
+/** `p`, or `null` once the shared deadline fires — whichever comes first. */
+async function raceDeadline<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T | null> {
+  return signal ? await Promise.race([p, aborted(signal)]) : await p;
 }
 
 /** Resolves `null` when the shared deadline fires. */

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { clauseBoundaries, inferJiraIssues, stampedKeys, stemKeys, titleKeys } from "./jira.ts";
+import { clauseBoundaries, inferJiraIssues, jiraAdapter, stampedKeys, stemKeys, titleKeys } from "./jira.ts";
 import { inferIssues, isPlanTitle, parseTrackersConfig } from "./index.ts";
 import type { IssueRef, TrackerConfig, TrackerPage } from "./types.ts";
 
@@ -359,5 +359,38 @@ describe("fix round 2", () => {
     expect(stampedKeys(["demo\u017F-12"])).toEqual([]); // LATIN SMALL LETTER LONG S → S
     expect(stampedKeys(["d\u0131ag-12"])).toEqual([]); // LATIN SMALL LETTER DOTLESS I → I
     expect(stampedKeys(["demos-12"])).toEqual(["DEMOS-12"]);
+  });
+});
+
+describe("PR 3 fix round 1: the adapter's key seams", () => {
+  test("S5: projectOf reads a key's project, and nothing from a string that is not a key", () => {
+    expect(jiraAdapter.projectOf("DEMO-1")).toBe("DEMO");
+    expect(jiraAdapter.projectOf("DEMO")).toBeNull();
+    expect(jiraAdapter.projectOf("DEMOX")).toBeNull();
+    expect(jiraAdapter.projectOf("-1")).toBeNull();
+  });
+
+  test("W1/W2: parseKey takes an exact ASCII key, bounded like the inference rules, and normalizes it", () => {
+    expect(jiraAdapter.parseKey(" demo-120 ")).toBe("DEMO-120");
+    for (const bad of ["ſemo-1", "ıtem-1", "ßx-1", "DEMO-01407", "DEMO-123456789", `${"D".repeat(17)}-1`, "D-1", "DEMO-0", "not a key"]) {
+      expect(jiraAdapter.parseKey(bad)).toBeNull();
+    }
+  });
+
+  test("S5: parseLedger reads /api/jira's answer; anything else is null", () => {
+    expect(jiraAdapter.parseLedger!({ sessions: [{}, {}], totalCost: 12.345, costedSessions: 2, truncated: false })).toEqual({
+      state: "priced",
+      sessions: 2,
+      totalCost: 12.35,
+      costedSessions: 2,
+      truncated: false,
+    });
+    expect(jiraAdapter.parseLedger!({ totalCost: 1 })).toBeNull();
+    expect(jiraAdapter.parseLedger!(null)).toBeNull();
+  });
+
+  test("parseLedger: `sessions` that is not an array is null, never a string's length", () => {
+    expect(jiraAdapter.parseLedger!({ sessions: "abc", totalCost: 1, costedSessions: 3, truncated: false })).toBeNull();
+    expect(jiraAdapter.parseLedger!({ sessions: { length: 3 }, totalCost: 1 })).toBeNull();
   });
 });

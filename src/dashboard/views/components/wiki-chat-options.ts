@@ -66,6 +66,7 @@ import {
   chosenSupportsWebTools,
   composeDeclineQuestion,
   conflictStatusLine,
+  draftPlanSuggestion,
   connectorOptionLabel,
   connectorStorageValue,
   shouldCloseArticleChatOnNavigate,
@@ -89,8 +90,10 @@ import {
   type ChatOptArticle,
   type ChatOptFocus,
   type ChatOptMode,
+  type ChatOptSuggestion,
   type ChatTarget,
 } from "./wiki-chat-target.ts";
+import { DRAFT_PLAN_ATTR } from "./wiki-issue-rows.ts";
 import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
 import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 
@@ -300,6 +303,9 @@ interface ChatOptState {
   /** Titles of the open article's outgoing links, for the "How it connects"
    *  starter question. Absent ⇒ that chip is simply not offered. */
   links?: string[];
+  /** Starter chips the opener asked for (Draft plan's "Draft a plan for KEY"),
+   *  shown first. */
+  lead?: ChatOptSuggestion[];
   /** A 409 `alreadyQueued` — the thread already holds an unopened question. The
    *  deep link is the recovery: open it, and the queued seed is delivered. */
   queuedUrl?: string;
@@ -396,6 +402,7 @@ function openChatOptions(
     declineReason?: DeclineReason;
     article?: ChatOptArticle;
     links?: string[];
+    lead?: ChatOptSuggestion[];
   } = {},
 ): void {
   // A read-only wiki (`WIKI_READONLY_ROOTS`) seeds no chat thread — the route
@@ -435,6 +442,7 @@ function openChatOptions(
     links: opts.links,
     pinnedQuestion: pinned ? question : undefined,
     declineReason: opts.declineReason,
+    lead: opts.lead,
     target: null, loading: true,
     botName: "", bots: [], needsBotPicker: false,
     userId: "", connectorId: "", threadName: "",
@@ -479,10 +487,12 @@ function openDeclineChat(): void {
  * payload carries `desc`, which is the question hint. No page open ⇒ no-op,
  * exactly like the escalate opener with no committed turn.
  */
-function openArticleChat(): void {
+function openArticleChat(planKey?: string): void {
   const m = deps.getCurrentArticle();
   if (!m) return;
   openChatOptions("article", {
+    // Connections' Draft plan: the same dialog, one chip ahead of the rest.
+    ...(planKey ? { lead: [draftPlanSuggestion(planKey, m.title)] } : {}),
     article: {
       name: m.name,
       title: m.title,
@@ -646,6 +656,7 @@ function chatOptBodyHtml(state: ChatOptState, question: string): string {
       // Resolves with the target, so the chip appears once the load lands —
       // the row re-renders then anyway.
       jiraBot: !!state.target?.isJiraBot,
+      lead: state.lead,
     });
     rows.push(
       chatOptSuggestionsHtml(
@@ -1241,6 +1252,9 @@ function wireChatOptions(): void {
     if (t.closest("#wikiChatEscOptBtn")) openChatOptions("escalate");
     else if (t.closest("#wikiNewChatBtn")) openChatOptions("direct");
     else if (t.closest("#" + DISCUSS_ARTICLE_BTN_ID)) openArticleChat();
+    else if (t.closest("[" + DRAFT_PLAN_ATTR + "]")) {
+      openArticleChat(t.closest("[" + DRAFT_PLAN_ATTR + "]")!.getAttribute(DRAFT_PLAN_ATTR) || undefined);
+    }
     else if (t.closest("#" + DECLINE_CHAT_BTN_ID)) openDeclineChat();
     else if (t.closest("#wikiChatOptClose")) closeChatOptions();
     else if (t.closest("#" + CHAT_OPT_ADV_ID)) {
@@ -1314,6 +1328,7 @@ function wireChatOptions(): void {
           !!t.closest("#wikiChatEscOptBtn") ||
           !!t.closest("#wikiNewChatBtn") ||
           !!t.closest("#" + DISCUSS_ARTICLE_BTN_ID) ||
+          !!t.closest("[" + DRAFT_PLAN_ATTR + "]") ||
           !!t.closest("#" + DECLINE_CHAT_BTN_ID),
         sending: chatOpt.sending,
       })

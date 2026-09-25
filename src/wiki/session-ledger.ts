@@ -174,6 +174,13 @@ export interface SessionLedgerDeps {
   /** `GET /api/merges?prs=owner/repo#n,…` — the page's own `prs:` list, which
    *  names the merging session even when the page never stamped it. */
   fetchMergesForPrs: (coordinates: string[], signal?: AbortSignal) => Promise<unknown>;
+  /**
+   * `GET <path>` for one issue's session list — the tracker adapter's
+   * `ledgerPath` (`/api/jira?key=`). OPTIONAL, unlike the legs above: an issue
+   * row carries its own `unpriced` state, so an absent leg renders "not
+   * configured" rather than "these sessions merged nothing".
+   */
+  fetchIssueLedger?: (path: string, signal?: AbortSignal) => Promise<unknown>;
   urlConfigured: boolean;
   baseUrl: string;
 }
@@ -230,6 +237,7 @@ export function defaultSessionLedgerDeps(
         `/api/merges?prs=${coordinates.map(encodeURIComponent).join(",")}`,
         { timeoutMs, maxBytes, signal, label: root },
       ),
+    fetchIssueLedger: (path, signal) => claudeUsageJson(root, path, { timeoutMs, maxBytes, signal, label: root }),
   };
 }
 

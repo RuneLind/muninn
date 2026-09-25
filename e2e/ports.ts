@@ -170,6 +170,11 @@ export const E2E_PORTS = {
   // block (pills, the widened Jira facet) and one that does not, which must
   // render today's stamped-only facet and no pills.
   "wiki-tracker-links": 3071,
+  // Connections + Link: one muninn over a tracker wiki, a no-tracker wiki and a
+  // read-only one, plus ONE stub playing both huginn's issue listing and
+  // claude-usage's `/api/jira`.
+  "wiki-tracker-connections": 3072,
+  "wiki-tracker-connections/stub": 3073,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

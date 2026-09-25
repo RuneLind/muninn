@@ -1,6 +1,7 @@
 /**
  * `POST /api/wiki/provenance/stamp` — record a session on a wiki page's
- * `sessions:` line.
+ * `sessions:` line, or (the `{ tracker, key }` form, Connections' **Link**) an
+ * issue key on the tracker's own line (`jira:`).
  *
  * **This file exports one thing another route uses**: {@link decideStampRequest},
  * the same-origin write guard, which `POST /api/wiki/series` calls too. Its own
@@ -18,8 +19,13 @@
  * So the spawn is the HOOK'S OWN command line plus `--report`:
  *
  *     <WIKI_STAMP_BUN|bun> <WIKI_STAMP_BIN> --session <ref> --file <abs> --report
+ *     <WIKI_STAMP_BUN|bun> <WIKI_STAMP_BIN> <adapter.stampFlag> <key> --file <abs> --report
  *
- * with `WIKI_STAMP_ROOTS` handed down in the child environment. `--report` is
+ * with `WIKI_STAMP_ROOTS` handed down in the child environment. The second
+ * form takes every check below unchanged; its step 1 is the adapter's
+ * `parseKey` instead of `SESSION_REF_RE`, a wiki whose `.wiki-reader.json`
+ * names no such tracker is refused 409 `no-tracker`, and a key in none of its
+ * `projects` 409 `out-of-project`. `--report` is
  * the CLI's answer channel: ONE JSON line on stdout, last. Without it the CLI
  * prints nothing and always exits 0 (its own banner invariant), so the exit code
  * is information HERE only when there is no report line at all.
@@ -107,6 +113,7 @@ import {
   type StampConfig,
 } from "../../wiki/stamp-roots.ts";
 import { pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
+import { trackerAdapter } from "../../wiki/trackers/index.ts";
 import { ProcTimeoutError, runProc } from "../../utils/run-proc.ts";
 import { getLog } from "../../logging.ts";
 
@@ -453,6 +460,8 @@ export function registerWikiStampRoute(
       wiki?: unknown;
       relPath?: unknown;
       ref?: unknown;
+      tracker?: unknown;
+      key?: unknown;
     } | null;
     // `wiki` PRESENT but not a string is a 400, never a silent fall-through to
     // `""`: `""` means "the default wiki", so a caller that sent `{"wiki": 3}`
@@ -464,12 +473,36 @@ export function registerWikiStampRoute(
     const wiki = typeof body?.wiki === "string" ? body.wiki.trim() : "";
     const relPath = typeof body?.relPath === "string" ? body.relPath.trim() : "";
     const ref = typeof body?.ref === "string" ? body.ref.trim() : "";
-    if (!relPath || !ref) {
-      return c.json({ error: "relPath and ref are required" }, 400);
+    const trackerId = typeof body?.tracker === "string" ? body.tracker.trim() : "";
+    // `null` is absent, like `undefined`: `{"tracker": null, "ref": …}` is a Stamp.
+    const issueForm = body?.tracker != null || body?.key != null;
+    if (issueForm && ref) {
+      return c.json({ error: "send ref, or tracker and key — not both" }, 400);
     }
-    // 1. Shape only. See `SESSION_REF_RE`.
-    if (!SESSION_REF_RE.test(ref)) {
-      return c.json({ error: "ref is not a session ref", reason: "bad-ref" }, 400);
+    if (!relPath || (!ref && !issueForm)) {
+      return c.json({ error: "relPath and ref (or tracker and key) are required" }, 400);
+    }
+    // 1. Shape only: `SESSION_REF_RE`, or the tracker adapter's own key shape.
+    //    The CLI stays the authority on meaning in both forms.
+    let argv: string[];
+    let what: string;
+    let issueKey = "";
+    if (issueForm) {
+      const adapter = trackerAdapter(trackerId);
+      if (!adapter) return c.json({ error: "tracker names no known tracker", reason: "unknown-tracker" }, 400);
+      const key = typeof body?.key === "string" ? adapter.parseKey(body.key) : null;
+      if (!key) {
+        return c.json({ error: `key is not a ${adapter.label} key`, reason: "bad-key" }, 400);
+      }
+      argv = [adapter.stampFlag, key];
+      what = `${adapter.id}:${key}`;
+      issueKey = key;
+    } else {
+      if (!SESSION_REF_RE.test(ref)) {
+        return c.json({ error: "ref is not a session ref", reason: "bad-ref" }, 400);
+      }
+      argv = ["--session", ref];
+      what = ref;
     }
 
     // The SAME resolution every other `/api/wiki/*` route makes, so an omitted
@@ -561,10 +594,30 @@ export function registerWikiStampRoute(
       );
     }
 
+    // The issue form writes a line the wiki's tracker config names; a wiki
+    // with no such tracker offers no Link, and a hand-made POST for one is
+    // refused rather than writing a line nothing on that wiki reads. The key
+    // must be in one of that tracker's `projects`, the bound every inferred
+    // key already carries.
+    if (issueForm) {
+      const configured = (await getWikiIndex({ root }))?.readerConfig?.trackers ?? [];
+      const tracker = configured.find((t) => t.id === trackerId);
+      if (!tracker) {
+        return c.json({ error: `this wiki configures no ${trackerId} tracker`, reason: "no-tracker" }, 409);
+      }
+      const project = trackerAdapter(trackerId)?.projectOf(issueKey);
+      if (!project || !tracker.projects.includes(project)) {
+        return c.json(
+          { error: `${issueKey} is in none of this wiki's ${trackerId} projects`, reason: "out-of-project" },
+          409,
+        );
+      }
+    }
+
     let proc;
     try {
       proc = await (deps.runProc ?? runProc)(
-        [config.bun, config.bin, "--session", ref, "--file", realPath, "--report"],
+        [config.bun, config.bin, ...argv, "--file", realPath, "--report"],
         deps.timeoutMs ?? WIKI_STAMP_TIMEOUT_MS,
         "wiki-stamp",
         // An ALLOWLIST, never `{...process.env}` — see `stampChildEnv`.
@@ -627,16 +680,18 @@ export function registerWikiStampRoute(
     // re-resolve, exactly as `defaultPageWriteIo` does for muninn's own writes.
     // Without it the cache answers the pre-stamp list and the row stays amber:
     // the inert-fix shape, green in every test that does not open the page.
-    if (report.outcome === "written") await getWikiIndex({ root, refresh: true });
+    // The issue form refreshes on `unchanged` too: that is usually a hand edit
+    // the cached index has not seen.
+    if (report.outcome === "written" || issueForm) await getWikiIndex({ root, refresh: true });
     const index = await getWikiIndex({ root });
     const meta = index?.resolveRelPath(relPath);
-    const provenance = meta ? await pageProvenance(meta, ctx, root) : null;
+    const provenance = meta ? await pageProvenance(meta, ctx, root, index ?? undefined) : null;
     // `wikiName`, not the raw body's `wiki`: the body carries whatever the client
     // sent (an alias, a bot name, or nothing at all on the default wiki), and a
     // log line naming that cannot be joined to anything.
     log.info("wiki-stamp {outcome} {ref} on {wiki}/{relPath}", {
       outcome: report.outcome,
-      ref,
+      ref: what,
       wiki: wikiName,
       relPath,
     });
