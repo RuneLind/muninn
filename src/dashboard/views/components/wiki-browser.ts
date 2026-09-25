@@ -529,9 +529,9 @@ const linkLocks = new Map<string, Set<string>>();
 const LINK_ALL_LOCK = "*";
 /** The Link control the reader activated and whose POST is still settling — a
  *  key, or {@link LINK_ALL_LOCK} for Link all. While focus is parked on the
- *  section (the control is disabled mid-POST), a redraw returns it there; it is
- *  the only way focus is ever moved ONTO a Link. Cleared when the Link settles
- *  and on navigation. */
+ *  section (the control is disabled mid-POST), a redraw returns it there. The
+ *  only other way focus lands on a Link is a redraw of the Link that already
+ *  held it. Cleared when the Link settles and on navigation. */
 let issueFocusKey: string | null = null;
 /** The page payload Connections last rendered, so the mini-graph can redraw
  *  when the issue rows change under it. */

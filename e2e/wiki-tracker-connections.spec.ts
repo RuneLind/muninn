@@ -678,8 +678,9 @@ test.describe("Wiki reader: Connections + Link", () => {
     await expect(section(page).locator("[data-issue-link-all]")).toHaveText("Link all (2)");
     await section(page).locator("[data-issue-link-all]").click();
     // The first POST (DEMO-291) has reached the stub, which sleeps 1.5 s before
-    // it reads the file: stamp DEMO-292 by hand in that window.
-    await expect.poll(spawnsFor).toBe(1);
+    // it reads the file: stamp DEMO-292 by hand in that window. A 50 ms poll
+    // keeps the default backoff from eating the window on a slow runner.
+    await expect.poll(spawnsFor, { intervals: [50] }).toBe(1);
     const file = path.join(root, SKIP);
     const bytes = await readFile(file, "utf8");
     await writeFile(file, bytes.replace("---\n", "---\njira: [DEMO-292]\n"), "utf8");
