@@ -802,3 +802,108 @@ describe("stampChildEnv", () => {
     expect([...STAMP_CHILD_ENV_NAMES]).toEqual(["PATH", "HOME", "TMPDIR"]);
   });
 });
+
+describe("the { tracker, key } form (Connections' Link)", () => {
+  let troot = "";
+  const TREL = "notes/demo.md";
+  const TPAGE = "---\ntitle: DEMO-101 notater\ntags: [demo-120]\n---\n\n# Notater\n";
+  const tconfig = () => config({ rootsRaw: troot, roots: [troot] });
+  const tapp = (deps: StampRouteDeps = {}) => appWith({ stampConfig: tconfig, ...deps });
+  const link = (app: Hono, body: Record<string, unknown> = {}) =>
+    post(app, { wiki: "t", relPath: TREL, tracker: "jira", key: "DEMO-120", ...body });
+  /** A fake CLI that appends `jira: [KEY]` when absent, like the real one. */
+  const writingCli = () =>
+    fakeCli(
+      [
+        `printf '%s\\n' "$@" > "${argvFile}"`,
+        'key="$2"; file="$4"',
+        'if grep -q "^jira:" "$file"; then echo \'{"outcome":"unchanged","reason":"already-stamped","path":"\'"$file"\'"}\'; exit 0; fi',
+        'sed -i.bak "s|^title:|jira: [$key]\\ntitle:|" "$file"; rm -f "$file.bak"',
+        'echo \'{"outcome":"written","path":"\'"$file"\'"}\'',
+      ].join("\n"),
+    );
+
+  beforeAll(async () => {
+    troot = await mkdtemp(path.join(tmpdir(), "muninn-stamp-trk-"));
+    await mkdir(path.join(troot, "notes"), { recursive: true });
+    await writeFile(path.join(troot, TREL), TPAGE, "utf8");
+    await writeFile(
+      path.join(troot, ".wiki-reader.json"),
+      JSON.stringify({ trackers: [{ id: "jira", projects: ["DEMO"], hosts: ["example.invalid"] }] }),
+      "utf8",
+    );
+    __setWikiRegistryForTest([
+      { name: "w", root, source: "extra" },
+      { name: "t", root: troot, source: "extra" },
+    ]);
+  });
+  afterEach(async () => {
+    await writeFile(path.join(troot, TREL), TPAGE, "utf8");
+  });
+  afterAll(async () => {
+    __setWikiRegistryForTest([{ name: "w", root, source: "extra" }]);
+    await rm(troot, { recursive: true, force: true });
+  });
+
+  test("spawns the adapter's own flag with the normalized key", async () => {
+    await writingCli();
+    const res = await link(tapp(), { key: " demo-120 " });
+    expect(res.status).toBe(200);
+    const argv = (await readFile(argvFile, "utf8")).trim().split("\n");
+    expect(argv.slice(0, 3)).toEqual(["--jira", "DEMO-120", "--file"]);
+    expect(argv.at(-1)).toBe("--report");
+  });
+
+  test("a written Link answers the re-resolved block with the key now STAMPED", async () => {
+    await writingCli();
+    const body = (await (await link(tapp())).json()) as {
+      outcome: string;
+      provenance?: { issues?: { key: string; relations: string[] }[] };
+    };
+    expect(body.outcome).toBe("written");
+    expect(body.provenance?.issues?.find((r) => r.key === "DEMO-120")?.relations[0]).toBe("stamped");
+  });
+
+  test("`unchanged` is a 200 and REFRESHES the index too — a hand edit the cache has not seen", async () => {
+    await writingCli();
+    // Warm the cache on the page as it is, then edit it behind the cache.
+    await getWikiIndex({ root: troot, refresh: true });
+    await writeFile(path.join(troot, TREL), TPAGE.replace("title:", "jira: [DEMO-120]\ntitle:"), "utf8");
+    const res = await link(tapp());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { outcome: string; provenance?: { issues?: { key: string; relations: string[] }[] } };
+    expect(body.outcome).toBe("unchanged");
+    expect(body.provenance?.issues?.find((r) => r.key === "DEMO-120")?.relations[0]).toBe("stamped");
+  });
+
+  test("a skip is 409 with the CLI's reason — the row's named state", async () => {
+    await fakeCli(`echo '{"outcome":"skipped","reason":"not-inline-list","path":"'"$4"'"}'`);
+    const res = await link(tapp());
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { reason: string }).reason).toBe("not-inline-list");
+  });
+
+  test("a key the adapter's keyPattern refuses, an unknown tracker, or both forms at once: 400, no spawn", async () => {
+    await fakeCli(`printf x > "${argvFile}"; exit 1`);
+    for (const body of [{ key: "not a key" }, { key: "DEMO-12x" }, { tracker: "nope" }, { tracker: 3 }, { ref: NEW_REF }]) {
+      const res = await link(tapp(), body);
+      expect(res.status).toBe(400);
+    }
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("a wiki whose .wiki-reader.json names no such tracker is refused 409 and never spawns", async () => {
+    await fakeCli(`printf x > "${argvFile}"; exit 1`);
+    const res = await post(appWith(), { wiki: "w", relPath: REL, tracker: "jira", key: "DEMO-120" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { reason: string }).reason).toBe("no-tracker");
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+
+  test("every guard applies unchanged: a read-only root is 403", async () => {
+    await fakeCli(`printf x > "${argvFile}"; exit 1`);
+    const res = await link(tapp({ isReadonlyRoot: () => true }));
+    expect(res.status).toBe(403);
+    expect(await Bun.file(argvFile).exists()).toBe(false);
+  });
+});

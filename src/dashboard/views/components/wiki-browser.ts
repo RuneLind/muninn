@@ -109,7 +109,7 @@ import {
   wikiPagePath,
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
-import { railIssuePillsHtml } from "./wiki-issue-pills.ts";
+import { railIssuePillsHtml, relationWord } from "./wiki-issue-pills.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
 import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
@@ -314,7 +314,16 @@ import {
   STAMP_CONFIRM_LABEL,
   STAMP_LABEL,
 } from "./wiki-provenance-view.ts";
-import type { ProvenancePayload } from "../../../wiki/provenance.ts";
+import { provenanceStripCertain, type ProvenancePayload } from "../../../wiki/provenance.ts";
+import { relationsCount, type IssueRow } from "../../../wiki/trackers/types.ts";
+import {
+  CONN_ISSUES_ID,
+  ISSUE_LINK_ALL_ATTR,
+  ISSUE_LINK_ATTR,
+  issueSectionHtml,
+  linkAllKeys,
+  type IssueRowState,
+} from "./wiki-issue-rows.ts";
 
 // The wiki's merged type list (built-in defaults + `.wiki-reader.json` customs),
 // stored at boot from the /api/wiki/pages response and used by every type-keyed
@@ -392,6 +401,12 @@ interface WikiPageDetail {
    *  this key here at all". The block itself never rides on this payload: the
    *  join reaches claude-usage and huginn, and a page open must not wait on it. */
   provenancePending?: boolean;
+  /** Connections' issue rows, index-local half. ABSENT on a page with none and
+   *  on every page of a wiki with no tracker. The deferred provenance block
+   *  carries the whole row and replaces these when it lands. */
+  issueRows?: IssueRow[];
+  /** Whether a Link may be offered, before the deferred payload says so. */
+  issueStampable?: boolean;
   /** sha256 of the page's RAW bytes, as of this response — the series editor's
    *  CAS base for the page the reader has open, captured when the popover opens
    *  rather than fetched again a millisecond before the POST. Kept in step with
@@ -492,6 +507,16 @@ let currentPageHash: string | null = null;
  * `allPages` would silently lose it.
  */
 let currentArticle: WikiListing | null = null;
+/**
+ * Connections' issue rows for the open page: the inline half from the page
+ * payload, replaced by the whole rows when the deferred provenance fetch (or a
+ * Link's answer) lands — written only under that fetch's sequence guard.
+ * `stampable` comes from the same payload; until it lands no Link is offered.
+ * Per-key Link state lives beside them and is dropped with them on navigation.
+ */
+let issueRows: IssueRow[] | null = null;
+let issueStampable = false;
+const issueStates = new Map<string, IssueRowState>();
 /**
  * Titles of the current page's outgoing links, stamped by `renderConnections`.
  *
@@ -1934,16 +1959,20 @@ function placeProvStrip(html: string): void {
 async function loadProvStrip(relPath: string): Promise<void> {
   const seq = ++provLoadSeq;
   let next: string | null = null;
+  let prov: ProvenancePayload | undefined;
   try {
     const res = await fetch(provenanceUrl(relPath));
     if (res.ok) {
       const data = (await res.json()) as WikiPageProvenance | null;
-      next = data?.provenance ? provStripHtml(data.provenance, jiraKeys) : "";
+      prov = data?.provenance;
+      next = prov ? provStripHtml(prov, jiraKeys) : "";
     }
   } catch {
     /* falls through to the unavailable line */
   }
   if (currentRelPath !== relPath || seq !== provLoadSeq) return;
+  // Connections is the fetch's second consumer, under the same guard.
+  if (prov) adoptIssueRows(prov);
   if (next) {
     placeProvStrip(next);
     return;
@@ -1970,6 +1999,102 @@ function retryProvStrip(): void {
 function redrawProvStrip(provenance: ProvenancePayload): void {
   provLoadSeq += 1;
   placeProvStrip(provStripHtml(provenance, jiraKeys));
+  adoptIssueRows(provenance);
+}
+
+/** Take a provenance block's whole issue rows (and its `stampable`) into
+ *  Connections. A block with no `issues` leaves the inline rows standing. */
+function adoptIssueRows(provenance: ProvenancePayload): void {
+  if (!provenance.issues) return;
+  issueRows = provenance.issues;
+  issueStampable = provenance.stampable;
+  redrawConnIssues();
+}
+
+/** The open page is markdown — only then is Link offered. */
+function isMarkdownRel(relPath: string | null): boolean {
+  return !!relPath && /\.mdx?$/i.test(relPath);
+}
+
+function issueSectionFor(relPath: string | null): string {
+  if (!relPath) return "";
+  return issueSectionHtml(issueRows ?? undefined, {
+    labelOf: (id) => trackerLabels[id] || "",
+    stampable: issueStampable,
+    markdown: isMarkdownRel(relPath),
+    relPath,
+    states: issueStates,
+    discuss: !wikiReadonlyWikiFlag(),
+  });
+}
+
+/** The ONE writer of Connections' issue section: replaces it in place, or
+ *  inserts it at the top of the panel (above the mini-graph). */
+function redrawConnIssues(): void {
+  const html = issueSectionFor(currentRelPath);
+  const el = document.getElementById(CONN_ISSUES_ID);
+  if (el) {
+    el.outerHTML = html;
+    return;
+  }
+  if (html) document.getElementById("connBody")?.insertAdjacentHTML("afterbegin", html);
+}
+
+/**
+ * **Link**: write one key to the open page's tracker line through the Stamp
+ * route's `{ tracker, key }` form — the only write path, which shells out to
+ * the same CLI as a session Stamp. The answer carries the re-resolved block,
+ * so the strip and the rows redraw from it with no second fetch. A skip lands
+ * on the row as its named state. Resolves true on success.
+ */
+async function linkIssue(tracker: string, key: string): Promise<boolean> {
+  const pressedOn = currentRelPath;
+  if (!pressedOn) return false;
+  issueStates.set(key, { kind: "busy" });
+  redrawConnIssues();
+  let state: IssueRowState | null = null;
+  try {
+    const res = await fetch("/api/wiki/provenance/stamp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wiki: WIKI, relPath: pressedOn, tracker, key }),
+    });
+    const body = (await res.json().catch(() => null)) as
+      | { provenance?: ProvenancePayload; reason?: string; error?: string }
+      | null;
+    if (currentRelPath !== pressedOn) return false;
+    if (!res.ok) {
+      state =
+        res.status === 409 && body?.reason
+          ? { kind: "refused", reason: body.reason }
+          : { kind: "error", text: `not linked: ${body?.reason || body?.error || res.status}` };
+    } else {
+      issueStates.delete(key);
+      if (body?.provenance) redrawProvStrip(body.provenance);
+      else {
+        redrawConnIssues();
+        refetchProvStrip();
+      }
+      return true;
+    }
+  } catch {
+    state = { kind: "error", text: "not linked: the request failed" };
+  }
+  if (currentRelPath !== pressedOn) return false;
+  issueStates.set(key, state!);
+  redrawConnIssues();
+  return false;
+}
+
+/** **Link all**: the eligible keys one POST at a time (the CLI's lockfile
+ *  serializes them anyway), stopping at the first that does not land. */
+async function linkAllIssues(): Promise<void> {
+  const rows = issueRows ?? [];
+  const keys = linkAllKeys(rows, { stampable: issueStampable, markdown: isMarkdownRel(currentRelPath) });
+  for (const key of keys) {
+    const row = rows.find((r) => r.key === key);
+    if (!row || !(await linkIssue(row.tracker, key))) return;
+  }
 }
 
 /**
@@ -2305,8 +2430,14 @@ interface MiniNode {
   y?: number;
 }
 
-/** 1-hop neighborhood as a small radial SVG: current page centered, top neighbors on a ring. */
+/** How many of the page's issue keys the mini-graph draws beside its pages. */
+const MINI_ISSUES_MAX = 4;
+
+/** 1-hop neighborhood as a small radial SVG: current page centered, top
+ *  neighbors on a ring, and the page's counting issue keys as diamonds on the
+ *  same ring (dashed edge when inferred; a click filters by the key). */
 function miniGraphHtml(data: WikiPageDetail): string {
+  const issues = (data.issueRows ?? []).filter((r) => relationsCount(r.relations)).slice(0, MINI_ISSUES_MAX);
   const byName: Record<string, MiniNode> = {};
   data.outgoing.forEach((p) => {
     byName[p.name] = { p, out: true, inn: false };
@@ -2316,13 +2447,14 @@ function miniGraphHtml(data: WikiPageDetail): string {
     else byName[p.name] = { p, out: false, inn: true };
   });
   const all = Object.keys(byName).map((k) => byName[k]!);
-  if (!all.length) return "";
+  if (!all.length && !issues.length) return "";
   all.sort((a, b) => {
     const ab = a.out && a.inn ? 1 : 0;
     const bb = b.out && b.inn ? 1 : 0;
     return bb - ab || b.p.backlinkCount - a.p.backlinkCount;
   });
-  const shown = all.slice(0, 12);
+  const shown = all.slice(0, 12 - issues.length);
+  const slots = shown.length + issues.length;
   const W = 272;
   const H = 244;
   const cx = W / 2;
@@ -2334,7 +2466,7 @@ function miniGraphHtml(data: WikiPageDetail): string {
   let edges = "";
   let nodes = "";
   shown.forEach((n, i) => {
-    const ang = (2 * Math.PI * i) / shown.length - Math.PI / 2;
+    const ang = (2 * Math.PI * i) / slots - Math.PI / 2;
     n.x = cx + r * Math.cos(ang);
     n.y = cy + r * Math.sin(ang);
     edges +=
@@ -2352,6 +2484,23 @@ function miniGraphHtml(data: WikiPageDetail): string {
       // reading from two different fields, so a colliding node's hover text said
       // `muninn/MEMORY` while the dot under it said `MEMORY`.
       `<text x="${n.x!.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle">${esc(short(displayTitleOf(n.p)))}</text></g>`;
+  });
+  issues.forEach((row, j) => {
+    const ang = (2 * Math.PI * (shown.length + j)) / slots - Math.PI / 2;
+    const x = cx + r * Math.cos(ang);
+    const y = cy + r * Math.sin(ang);
+    const inferred = !row.relations.includes("stamped");
+    edges +=
+      `<line class="mini-edge mini-issue-edge"${inferred ? ' stroke-dasharray="2,3"' : ""}` +
+      ` x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}"/>`;
+    const ly = y + (y >= cy ? 15 : -9);
+    nodes +=
+      `<g class="mini-node mini-issue${inferred ? " inferred" : ""}" data-prov-jira="${esc(row.key)}" data-mini-issue="${esc(row.key)}">` +
+      `<title>${esc(`${trackerLabels[row.tracker] || row.tracker} ${row.key} — ${row.relations.map(relationWord).join(", ")}`)}</title>` +
+      `<circle class="mini-hit" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="14" fill="transparent"></circle>` +
+      `<rect class="mini-issue-dot" x="${(x - 4.5).toFixed(1)}" y="${(y - 4.5).toFixed(1)}" width="9" height="9"` +
+      ` transform="rotate(45 ${x.toFixed(1)} ${y.toFixed(1)})"></rect>` +
+      `<text x="${x.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle">${esc(row.key)}</text></g>`;
   });
   nodes +=
     `<g class="mini-center"><circle class="mini-dot t-${esc(data.meta.type)}" cx="${cx}" cy="${cy}" r="7"></circle>` +
@@ -2390,7 +2539,12 @@ function renderConnections(data: WikiPageDetail): void {
     });
     return html + "</div>";
   }
+  // The inline half of the issue rows; the deferred fetch replaces them.
+  issueRows = data.issueRows ?? null;
+  issueStampable = data.issueStampable === true;
+  issueStates.clear();
   document.getElementById("connBody")!.innerHTML =
+    issueSectionFor(data.meta?.relPath ?? currentRelPath) +
     miniGraphHtml(data) +
     // `Related work` leads: it is the one section that ANSWERS a question
     // ("what else is this piece of work?") rather than listing a mechanism.
@@ -3116,7 +3270,7 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   // facet can actually serve (see `provStripHtml`).
   // The placeholder only where a strip is certain — see `provPendingHtml`.
   // A `prs:`-only page still fetches; its strip, if any, is inserted on arrival.
-  if (provenancePending && (m.sessions?.length || m.jira?.length)) head += provPendingHtml();
+  if (provenancePending && provenanceStripCertain(m)) head += provPendingHtml();
   head += "</div>";
   return head;
 }
@@ -3157,6 +3311,10 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       // explainer's `description` is sniffed, not always in the listing).
       if (data.meta) currentArticle = data.meta;
       renderConnections(data);
+      // The same gate as a markdown page: an explainer with inferred keys has
+      // provenance too. Its head rendered before this payload, so the strip is
+      // inserted when the block lands (`placeProvStrip`), with no placeholder.
+      if (data.provenancePending) void loadProvStrip(m.relPath);
       loadSimilar(m);
     })
     .catch(() => {
@@ -3428,6 +3586,20 @@ document.body.addEventListener("click", (e) => {
     e.preventDefault();
     const rel = seriesGo.getAttribute("data-series-go") || "";
     if (rel) loadPageByRelPath(rel, true);
+    return;
+  }
+  // Connections' Link and Link all. Before the Jira key below: a Link button
+  // sits beside a key, never inside one, but the order is the decision.
+  const issueLink = target.closest ? target.closest<HTMLButtonElement>(`[${ISSUE_LINK_ATTR}]`) : null;
+  if (issueLink) {
+    e.preventDefault();
+    if (issueLink.disabled) return;
+    void linkIssue(issueLink.getAttribute("data-issue-tracker") || "", issueLink.getAttribute(ISSUE_LINK_ATTR) || "");
+    return;
+  }
+  if (target.closest && target.closest(`[${ISSUE_LINK_ALL_ATTR}]`)) {
+    e.preventDefault();
+    void linkAllIssues();
     return;
   }
   // The provenance strip's Jira key: the key itself narrows the page list to the

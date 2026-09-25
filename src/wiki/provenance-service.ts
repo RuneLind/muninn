@@ -35,7 +35,9 @@
  * way, and provenance is a READ.
  */
 
-import type { WikiPageMeta } from "./store.ts";
+import type { WikiIndex, WikiPageMeta } from "./store.ts";
+import { trackerAdapter, relationsCount, type IssueFacts, type IssueLedgerView, type IssueRow, type TrackerAdapter, type TrackerConfig } from "./trackers/index.ts";
+import { issueRowsFor, statusCategory } from "./trackers/rows.ts";
 import {
   costOfSessions,
   enrichSessions,
@@ -112,7 +114,15 @@ export interface ProvenanceContext {
   stampable?: (wikiDir: string | undefined) => boolean;
   /** Test seam for the deadline, so a hanging-stub case costs milliseconds. */
   budgetMs?: number;
+  /** Test seam for a tracker's issue lookup (`TrackerAdapter.lookup`). */
+  lookupIssues?: (adapter: TrackerAdapter, knowledgeApiUrl: string) => Promise<Map<string, IssueFacts> | null>;
 }
+
+/** At most this many keys per page are priced through the session ledger —
+ *  one call each, since `/api/jira` has no batch form. */
+export const ISSUE_LEDGER_MAX = 8;
+/** …and at most this many of those calls are in flight at once. */
+export const ISSUE_LEDGER_CONCURRENCY = 4;
 
 /** The session + Jira halves of an answer, before a caller adds its own fields. */
 export interface ResolvedProvenance {
@@ -238,6 +248,9 @@ export async function pageProvenance(
   /** The wiki's resolved root — the ONE input `stampable` needs. Absent (a
    *  caller that has no root in hand) ⇒ no Stamp is offered. */
   wikiDir?: string,
+  /** The wiki's index: its key map and its resolved tracker config feed the
+   *  issue rows. Absent ⇒ no rows (a caller with no index in hand). */
+  index?: WikiIndex,
 ): Promise<ProvenancePayload | null> {
   // ONE gate, `hasProvenance` — the same predicate the store's own callers use,
   // so "does this page carry provenance" has a single answer.
@@ -273,8 +286,13 @@ export async function pageProvenance(
   // `prs:`-only page asks nothing of the ledger's session routes and everything
   // of `?prs=`, so that leg is part of the condition rather than riding a timer
   // armed for somebody else.
+  // Leg 5's input: the page's issue rows, index-local half. `[]` on a wiki
+  // with no tracker, which is every page there.
+  const trackers = index?.readerConfig?.trackers ?? [];
+  const baseRows = issueRowsFor(meta, index?.issueKeys, trackers);
+
   const signal =
-    askLedger || askPrs || keys.length > 0
+    askLedger || askPrs || keys.length > 0 || baseRows.length > 0
       ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS)
       : undefined;
 
@@ -321,12 +339,15 @@ export async function pageProvenance(
     return { handoffs, candidates, ghostIds, ghostFacts, ghostMerges };
   })();
 
-  const [resolved, mergeResult, handoffResult, prResult, ghostStage] = await Promise.all([
+  const issuesP = baseRows.length ? resolveIssueRows(baseRows, trackers, ctx, signal) : Promise.resolve([]);
+
+  const [resolved, mergeResult, handoffResult, prResult, ghostStage, issues] = await Promise.all([
     resolvedP,
     mergeP,
     handoffP,
     prP,
     ghostStageP,
+    issuesP,
   ]);
   const { handoffs, candidates, ghostIds, ghostFacts, ghostMerges } = ghostStage;
   const standardizedDate =
@@ -351,6 +372,7 @@ export async function pageProvenance(
 
   return {
     ...resolved,
+    ...(issues.length ? { issues } : {}),
     ghosts,
     handoffs,
     stampable: (ctx.stampable ?? defaultStampable)(wikiDir),
@@ -405,6 +427,137 @@ export async function pageProvenance(
     ...(standardizedDate ? { rulesStandardizedDate: standardizedDate } : {}),
     ...(meta.sessionsBackfilled ? { backfilled: meta.sessionsBackfilled } : {}),
   };
+}
+
+/**
+ * The network-joined half of a page's issue rows: the tracker lookup (title,
+ * status, epic, last-updated) and the session ledger's price. Both under the
+ * page's ONE deadline, and neither can fail the payload:
+ *
+ *  - a lookup that degrades leaves the rows bare (no `category`, no `known`),
+ *    which renders no status and never offers Draft plan;
+ *  - the ledger is asked for at most {@link ISSUE_LEDGER_MAX} counting keys,
+ *    {@link ISSUE_LEDGER_CONCURRENCY} at a time, in the page's own order
+ *    (strongest relation first); every other row says why it has no price.
+ */
+export async function resolveIssueRows(
+  base: readonly IssueRow[],
+  trackers: readonly TrackerConfig[],
+  ctx: ProvenanceContext,
+  signal?: AbortSignal,
+): Promise<IssueRow[]> {
+  const configOf = new Map(trackers.map((t) => [t.id, t]));
+  const ids = [...new Set(base.map((r) => r.tracker))];
+  const lookups = new Map(
+    await Promise.all(
+      ids.map(async (id) => {
+        const adapter = trackerAdapter(id);
+        const load = (async () => {
+          if (!adapter) return null;
+          try {
+            if (ctx.lookupIssues) return await ctx.lookupIssues(adapter, ctx.knowledgeApiUrl);
+            return adapter.lookup ? await adapter.lookup(ctx.knowledgeApiUrl) : null;
+          } catch {
+            return null;
+          }
+        })();
+        const facts = signal ? await Promise.race([load, aborted(signal)]) : await load;
+        return [id, facts] as const;
+      }),
+    ),
+  );
+
+  // Which rows are asked about, and why the others are not.
+  const ledger: (IssueLedgerView | "ask")[] = [];
+  let asked = 0;
+  for (const row of base) {
+    const config = configOf.get(row.tracker);
+    const adapter = trackerAdapter(row.tracker);
+    const project = row.key.slice(0, row.key.indexOf("-"));
+    if (!relationsCount(row.relations)) ledger.push({ state: "unpriced", reason: "demoted" });
+    else if (!config || !config.ledgerProjects.includes(project)) ledger.push({ state: "not-tracked" });
+    else if (!ctx.sessionLedger.urlConfigured || !ctx.sessionLedger.fetchIssueLedger || !adapter?.ledgerPath) {
+      ledger.push({ state: "unpriced", reason: "not-configured" });
+    } else if (asked >= ISSUE_LEDGER_MAX) ledger.push({ state: "unpriced", reason: "cap" });
+    else {
+      ledger.push("ask");
+      asked++;
+    }
+  }
+  await mapPool(
+    base.map((row, i) => ({ row, i })).filter(({ i }) => ledger[i] === "ask"),
+    ISSUE_LEDGER_CONCURRENCY,
+    async ({ row, i }) => {
+      ledger[i] = await priceIssue(row, ctx, signal);
+    },
+  );
+
+  return base.map((row, i) => {
+    const config = configOf.get(row.tracker);
+    const facts = lookups.get(row.tracker);
+    const fact = facts?.get(row.key);
+    const out: IssueRow = { ...row, ledger: ledger[i] as IssueLedgerView };
+    if (facts && config) {
+      out.known = !!fact;
+      out.category = statusCategory(fact?.status, config);
+      if (fact?.title) out.title = fact.title;
+      if (fact?.status) out.status = fact.status;
+      if (fact?.updated) out.updated = fact.updated;
+      if (fact?.epicLink) {
+        out.epic = { key: fact.epicLink, ...(fact.epicSummary ? { summary: fact.epicSummary } : {}) };
+      }
+    }
+    return out;
+  });
+}
+
+/** One key's `/api/jira`-shaped answer: `{sessions[], totalCost,
+ *  costedSessions, truncated}`. Never throws. */
+async function priceIssue(row: IssueRow, ctx: ProvenanceContext, signal?: AbortSignal): Promise<IssueLedgerView> {
+  const path = trackerAdapter(row.tracker)?.ledgerPath?.(row.key);
+  if (!path || !ctx.sessionLedger.fetchIssueLedger) return { state: "unpriced", reason: "not-configured" };
+  if (signal?.aborted) return { state: "unpriced", reason: "deadline" };
+  try {
+    // Raced as well as handed the signal: a fetch that ignored it would
+    // otherwise hold the whole page open.
+    const fetched = ctx.sessionLedger.fetchIssueLedger(path, signal);
+    const raw = (signal ? await Promise.race([fetched, aborted(signal)]) : await fetched) as {
+      sessions?: unknown;
+      totalCost?: unknown;
+      costedSessions?: unknown;
+      truncated?: unknown;
+    } | null;
+    if (raw === null && signal?.aborted) return { state: "unpriced", reason: "deadline" };
+    if (!raw || !Array.isArray(raw.sessions)) return { state: "unpriced", reason: "unreachable" };
+    const total = typeof raw.totalCost === "number" && Number.isFinite(raw.totalCost) ? raw.totalCost : 0;
+    return {
+      state: "priced",
+      sessions: raw.sessions.length,
+      totalCost: Math.round(total * 100) / 100,
+      costedSessions: typeof raw.costedSessions === "number" ? raw.costedSessions : 0,
+      truncated: raw.truncated === true,
+    };
+  } catch {
+    return { state: "unpriced", reason: signal?.aborted ? "deadline" : "unreachable" };
+  }
+}
+
+/** Run `fn` over `items` with at most `limit` in flight. */
+export async function mapPool<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++]!;
+      await fn(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+/** `stampable` for a page in this wiki, through the context's seam — the same
+ *  answer the payload gives, for a caller that renders before it lands. */
+export function ctxStampable(ctx: ProvenanceContext, wikiDir: string | undefined): boolean {
+  return (ctx.stampable ?? defaultStampable)(wikiDir);
 }
 
 /** The production `stampable` predicate: the env, both read-only guards, and the

@@ -30,8 +30,27 @@ import {
   type TrackerPage,
 } from "./types.ts";
 
-export type { IssueRef, IssueRelation, StatusCategory, TrackerAdapter, TrackerConfig, TrackerPage } from "./types.ts";
-export { DEMOTED_RELATIONS, RELATION_STRENGTH, relationsCount, STATUS_CATEGORIES } from "./types.ts";
+export type {
+  IssueFacts,
+  IssueKeyEntry,
+  IssueKeyPage,
+  IssueLedgerView,
+  IssueRef,
+  IssueRelation,
+  IssueRow,
+  StatusCategory,
+  TrackerAdapter,
+  TrackerConfig,
+  TrackerPage,
+} from "./types.ts";
+export {
+  COVERAGE_RELATIONS,
+  DEMOTED_RELATIONS,
+  LINK_ALL_RELATIONS,
+  RELATION_STRENGTH,
+  relationsCount,
+  STATUS_CATEGORIES,
+} from "./types.ts";
 
 /** Every adapter muninn ships, by id. A second tracker adds a file and a line. */
 export const TRACKER_ADAPTERS: Readonly<Record<string, TrackerAdapter>> = Object.freeze({
@@ -146,6 +165,16 @@ export function parseTrackersConfig(raw: unknown, warn: TrackerConfigWarn): Trac
         }
       }
     }
+    // Absent ⇒ the adapter's default; present-but-unusable warns and falls back
+    // to it, never to "nothing is tracked" (which would render a wiki's whole
+    // ledger as "not tracked" over a typo).
+    let ledgerProjects = [...adapter.defaultLedgerProjects];
+    if (o.ledgerProjects !== undefined) {
+      const named = list("ledgerProjects", (s) => PROJECT_RE.test(s.toUpperCase()), "a key prefix").map((p) =>
+        p.toUpperCase(),
+      );
+      if (named.length) ledgerProjects = [...new Set(named)];
+    }
     seen.add(id);
     out.push({
       id,
@@ -158,6 +187,7 @@ export function parseTrackersConfig(raw: unknown, warn: TrackerConfigWarn): Trac
       planTitleExclude: compileRe(o.planTitleExclude, at("planTitleExclude"), warn),
       createdMarkers: list("createdMarkers"),
       statusMap,
+      ledgerProjects,
     });
   });
   return out;

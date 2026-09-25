@@ -43,6 +43,7 @@ import {
 } from "../../../wiki/provenance.ts";
 import { escHtml as esc } from "./escape.ts";
 import { fmtCost } from "./fmt-cost.ts";
+import { relationsCount } from "../../../wiki/trackers/types.ts";
 
 /**
  * `$X.XX` for the STRIP's `totalCost` and nothing else.
@@ -415,10 +416,24 @@ export interface JiraChipView {
   key: string;
   url: string;
   known: boolean;
+  /** Inferred rather than stamped — renders dashed, like a rail pill. */
+  inferred?: boolean;
 }
 
 export function jiraChipView(j: ProvenanceJira): JiraChipView {
   return { key: j.key, url: j.url, known: j.huginnKnown === true };
+}
+
+/**
+ * The strip's chips. On a wiki with a tracker the payload's `issues` supersede
+ * `jira`: every key that COUNTS, stamped and inferred, strongest first. On a
+ * wiki without one, the stamped `jira` list as before.
+ */
+export function stripChipViews(p: ProvenancePayload): JiraChipView[] {
+  if (!p.issues) return p.jira.map(jiraChipView);
+  return p.issues
+    .filter((r) => relationsCount(r.relations))
+    .map((r) => ({ key: r.key, url: r.url, known: r.known === true, inferred: !r.relations.includes("stamped") }));
 }
 
 // ── Markup ───────────────────────────────────────────────────────────────────
@@ -521,13 +536,14 @@ export function provStripHtml(
   // chain rows do, and a zone passed to one and not the other renders a session
   // at two different hours on one page.
   const line = provLineHtml(p, opts);
-  if (!p.jira.length && !line) return "";
+  const chips = stripChipViews(p);
+  if (!chips.length && !line) return "";
   let html = `<div class="wiki-prov-strip">`;
-  if (p.jira.length) {
+  if (chips.length) {
     html += `<div class="wiki-prov-jira-row">`;
-    for (const j of p.jira.map(jiraChipView)) {
+    for (const j of chips) {
       const filterable = jiraKeyFilterable(j.key, known);
-      html += `<span class="wiki-prov-jira${filterable ? "" : " wiki-prov-jira-inert"}">`;
+      html += `<span class="wiki-prov-jira${filterable ? "" : " wiki-prov-jira-inert"}${j.inferred ? " inferred" : ""}">`;
       if (filterable) {
         html +=
           `<button type="button" class="wiki-prov-jira-key" data-prov-jira="${esc(j.key)}"` +
@@ -543,7 +559,7 @@ export function provStripHtml(
         html += `<span class="wiki-prov-jira-key" title="${esc(why)}">${esc(j.key)}</span>`;
       }
       html += j.known ? HUGINN_KNOWN_MARK : "";
-      if (filterable) {
+      if (filterable && j.url) {
         html +=
           `<a class="wiki-prov-jira-link" href="${esc(j.url)}" target="_blank" rel="noopener"` +
           ` title="Open ${esc(j.key)} in Jira">↗</a>`;

@@ -53,6 +53,19 @@ export function relationsCount(relations: readonly string[]): boolean {
   return relations.some((r) => !(DEMOTED_RELATIONS as readonly string[]).includes(r));
 }
 
+/**
+ * The relations through which a page that is a PLAN covers a key. `tag` and
+ * `link` are not among them: a plan tagged with a neighbouring key does not
+ * plan that key. A `link` or `tag` key the reader Links by hand becomes
+ * `stamped`, and so counts from then on.
+ */
+export const COVERAGE_RELATIONS: readonly IssueRelation[] = ["stamped", "declared", "created", "title", "stem"];
+
+/** The relations **Link all** promotes to `stamped`. Each already counts
+ *  toward coverage, so Link all never changes a coverage verdict; every one of
+ *  them is project-bounded by the inference rules. */
+export const LINK_ALL_RELATIONS: readonly IssueRelation[] = ["declared", "created", "title", "stem"];
+
 /** A status mapped to one of five words every tracker can be read in. */
 export type StatusCategory = "todo" | "active" | "review" | "done" | "unknown";
 
@@ -64,6 +77,68 @@ export interface IssueRef {
   tracker: string;
   key: string;
   relations: IssueRelation[];
+}
+
+/** One page's tie to a key, as the wiki-wide key map holds it. */
+export interface IssueKeyPage {
+  relPath: string;
+  title: string;
+  relations: IssueRelation[];
+  /** The page is a plan under this tracker's config — see `isPlanPage`. */
+  plan: boolean;
+}
+
+/** Every page related to one key, in relPath order. Built once per index. */
+export interface IssueKeyEntry {
+  tracker: string;
+  key: string;
+  pages: IssueKeyPage[];
+}
+
+/** How a Connections row prices a key through the session ledger. */
+export type IssueLedgerView =
+  | { state: "priced"; sessions: number; totalCost: number; costedSessions: number; truncated: boolean }
+  /** The ledger records mentions only for some projects, so a key outside them
+   *  has no cost to report — never "$0". */
+  | { state: "not-tracked" }
+  /** Not priced this time, and why: past the per-page cap, past the shared
+   *  deadline, the ledger did not answer, no ledger configured on this host, or
+   *  a demoted key (not priced at all). */
+  | { state: "unpriced"; reason: "cap" | "deadline" | "unreachable" | "not-configured" | "demoted" };
+
+/**
+ * One Connections row. The index-local half (everything down to `planPages`)
+ * rides `GET /api/wiki/page` inline; the deferred provenance payload carries
+ * the whole row, the network-joined fields included.
+ */
+export interface IssueRow {
+  tracker: string;
+  key: string;
+  /** Where a human reads the issue; `""` when the tracker config names no host. */
+  url: string;
+  /** The frontmatter key a Link writes (`jira`), for the row's refusal copy. */
+  field: string;
+  /** THIS page's relations to the key, strongest first. */
+  relations: IssueRelation[];
+  /** Pages whose relations to the key count (`relationsCount`), this one included. */
+  pageCount: number;
+  /** Plans that cover the key, over every page's relations; empty ⇒ uncovered. */
+  planPages: { relPath: string; title: string }[];
+  /** The issue's own title, from huginn. Deferred. */
+  title?: string;
+  /** The tracker's raw status text. Deferred. */
+  status?: string;
+  /** `status` through the wiki's merged `statusMap`; `unknown` when unmapped or
+   *  absent. Deferred — absent on the inline half. */
+  category?: StatusCategory;
+  /** The issue's epic, when it has one. Deferred. */
+  epic?: { key: string; summary?: string };
+  /** The tracker's own last-updated stamp, as huginn captured it. Deferred. */
+  updated?: string;
+  /** huginn holds the issue. Absent when the lookup was not made or degraded. */
+  known?: boolean;
+  /** The session ledger's figure. Deferred. */
+  ledger?: IssueLedgerView;
 }
 
 /**
@@ -92,6 +167,9 @@ export interface TrackerConfig {
   /** Raw status → category: the adapter's default with the wiki's entries
    *  merged over it. */
   statusMap: Record<string, StatusCategory>;
+  /** Projects the session ledger records mentions for; a key outside them is
+   *  "not tracked". The adapter's default unless the wiki names its own. */
+  ledgerProjects: string[];
 }
 
 /**
@@ -131,4 +209,25 @@ export interface TrackerAdapter {
   /** The `wiki-stamp` CLI flag that writes it. */
   stampFlag: string;
   defaultStatusMap: Readonly<Record<string, StatusCategory>>;
+  /** Projects claude-usage records session mentions for, by default. */
+  defaultLedgerProjects: readonly string[];
+  /**
+   * huginn's facts for every issue it holds, keyed by key, or null when the
+   * lookup degraded. Absent ⇒ the tracker has no lookup and rows stay bare.
+   */
+  lookup?: (knowledgeApiUrl: string) => Promise<Map<string, IssueFacts> | null>;
+  /** The claude-usage path that lists the sessions mentioning a key. Absent ⇒
+   *  the tracker has no ledger and no row is priced. */
+  ledgerPath?: (key: string) => string;
+}
+
+/** What a tracker lookup knows about one issue. */
+export interface IssueFacts {
+  title?: string;
+  status?: string;
+  issueType?: string;
+  epicLink?: string;
+  epicSummary?: string;
+  /** The tracker's last-updated stamp, as served (a stray `\:` unescaped). */
+  updated?: string;
 }

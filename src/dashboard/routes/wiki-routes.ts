@@ -4,7 +4,8 @@ import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
-import { compactIssues, trackerAdapter, type TrackerConfig } from "../../wiki/trackers/index.ts";
+import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
+import { issueRowsFor } from "../../wiki/trackers/rows.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
 import { getSemanticOverlay } from "../../wiki/atlas-semantic.ts";
 import {
@@ -28,7 +29,7 @@ import {
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { hasProvenance, jiraCounts } from "../../wiki/provenance.ts";
 import { computeRelated } from "../../wiki/related.ts";
-import { pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
+import { ctxStampable, pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import {
   defaultProvenanceContext,
   registerWikiProvenanceRoutes,
@@ -1009,6 +1010,17 @@ export function projectCounts(pages: readonly WikiPageMeta[]): Record<string, nu
   return counts;
 }
 
+/** `{ issueRows }` for a page with issue refs on a wiki with a tracker, `{}`
+ *  otherwise. */
+function issueRowsField(
+  index: WikiIndex,
+  meta: WikiPageMeta,
+  stampable: () => boolean,
+): { issueRows?: IssueRow[]; issueStampable?: boolean } {
+  const rows = issueRowsFor(meta, index.issueKeys, index.readerConfig?.trackers ?? []);
+  return rows.length ? { issueRows: rows, issueStampable: stampable() } : {};
+}
+
 /** `{ trackers: [{id, label}] }` for a wiki with a tracker, `{}` otherwise. */
 function trackersField(trackers: readonly TrackerConfig[] | undefined): { trackers?: { id: string; label: string }[] } {
   const out = (trackers ?? []).flatMap((t) => {
@@ -1902,6 +1914,14 @@ export function registerWikiRoutes(
       // bare `Bun.file().text()`, so the two cannot disagree.
       hash: sha256(markdown),
       ...(hasProvenance(meta) ? { provenancePending: true } : {}),
+      // Connections' issue rows, index-local half (key, relations, page count,
+      // covering plans): they need no network join, so the section renders
+      // with the page. The deferred provenance block carries the whole row.
+      // Absent on a page with none, which is every page of a wiki with no
+      // tracker.
+      // `issueStampable` rides with them so a page whose only keys are
+      // link-only (no deferred fetch) can still offer Link.
+      ...issueRowsField(index, meta, () => ctxStampable(provenanceCtx, resolveWikiRoot(entry?.root))),
       // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
       // a link opened on a non-default wiki lands on the DEFAULT one.
       html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title, wiki: entry?.name }),
@@ -1947,7 +1967,7 @@ export function registerWikiRoutes(
     const resolved = await resolvePageRequest(c);
     if (!resolved.ok) return resolved.res;
     const { entry, index, meta } = resolved;
-    const provenance = await pageProvenance(meta, provenanceCtx, resolveWikiRoot(entry?.root));
+    const provenance = await pageProvenance(meta, provenanceCtx, resolveWikiRoot(entry?.root), index);
     return c.json(provenance ? { provenance } : {});
   });
 

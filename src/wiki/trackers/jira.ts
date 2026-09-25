@@ -13,6 +13,7 @@ import { JIRA_KEY_SHAPE, normalizeJiraKey } from "../provenance.ts";
 import { extractJiraKeys } from "../../jira/key-scan.ts";
 import { maskFencedCode, maskInlineCode } from "../../jira/markdown-scan.ts";
 import { JIRA_TRACKER_ID } from "./jira-id.ts";
+import { loadIssueFields } from "./jira-lookup.ts";
 import {
   RELATION_STRENGTH,
   type IssueRef,
@@ -40,6 +41,14 @@ export const JIRA_DEFAULT_STATUS_MAP: Readonly<Record<string, StatusCategory>> =
   "Resolved": "done",
   "Closed": "done",
 });
+
+/**
+ * The projects claude-usage records session mentions for — a mirror of its
+ * `JIRA_KEY_PREFIXES` (`claude-usage/src/session-files.ts`), which this repo
+ * cannot import. A key outside them renders "not tracked", never "$0". A wiki
+ * may name its own list (`ledgerProjects` in `.wiki-reader.json`).
+ */
+export const JIRA_DEFAULT_LEDGER_PROJECTS: readonly string[] = Object.freeze(["MELOSYS", "TESTLOOP", "SMOKE"]);
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -320,4 +329,7 @@ export const jiraAdapter: TrackerAdapter = {
   frontmatterKey: "jira",
   stampFlag: "--jira",
   defaultStatusMap: JIRA_DEFAULT_STATUS_MAP,
+  defaultLedgerProjects: JIRA_DEFAULT_LEDGER_PROJECTS,
+  lookup: (knowledgeApiUrl) => loadIssueFields(knowledgeApiUrl),
+  ledgerPath: (key) => `/api/jira?key=${encodeURIComponent(key)}`,
 };

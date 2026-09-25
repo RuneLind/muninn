@@ -1757,8 +1757,12 @@ function).
 **The reader's block** is `GET /api/wiki/page/provenance` (deferred — see
 below); `GET /api/wiki/page` only answers `provenancePending: true`, and only
 when `hasProvenance(meta)` — the ONE gate, shared with the store's other
-callers — says the page carries any of the three LIST keys. `sessions_backfilled` alone
-opens nothing: it is a marker about a list that is not there. The payload is
+callers — says the page carries any of the three LIST keys, or (on a wiki with a
+tracker) at least one issue whose relations COUNT (`relationsCount`; a
+link-only or mention-only key opens nothing). `sessions_backfilled` alone
+opens nothing: it is a marker about a list that is not there. The reader's
+placeholder reads its sibling `provenanceStripCertain` (the same minus `prs:`,
+which may resolve to no strip), and the explainer path fetches the block too. The payload is
 `{sessions, jira, prs, merges, totalCost, costedSessions, backfilled?, ledger,
 mergesLedger}`.
 
@@ -2112,7 +2116,8 @@ adapter file says tracker / issue / issue ref (`{tracker, key, relations}`);
   is byte-identical to before — pinned by `trackers/store-issues.test.ts` and
   by the spec's second wiki. The reader's `?jira=` FILTER reads that facet
   (inferred keys included); the reverse lookup `GET /api/wiki/provenance?jira=`
-  and the provenance strip stay stamped-only. On a tracker wiki the chip row is
+  stays stamped-only, while the provenance strip draws the payload's `issues`
+  (see Connections and Link). On a tracker wiki the chip row is
   labelled with the adapter's name and shows the top `JIRA_CHIPS_MAX` (8) plus
   the active key and a `+N` expander (`jiraChipRow`); on a wiki with none it is
   uncapped and unlabelled, as before.
@@ -2155,6 +2160,70 @@ themes, a fold-chip row's line structure and chip form against the same row
 without pills at 260–560px, a long key wrapping inside its cell, contrast at
 rest / hovered / active, a listing that drops the tracker, and chip = rows =
 `#wikiCount` through a closed series and an `.html` twin).
+
+### Connections and Link (`trackers/rows.ts`, `trackers/jira-lookup.ts`, `views/components/wiki-issue-rows.ts`)
+
+On a wiki with a tracker, the Connections panel opens with the page's issues,
+above the mini-graph (which draws up to four counting keys as diamonds).
+
+- **One row shape, two paths** (`IssueRow`, `trackers/types.ts`). `GET
+  /api/wiki/page` carries the index-local half inline as `issueRows` (key, url,
+  this page's relations, `pageCount`, `planPages`) plus `issueStampable`, so
+  the section renders with the page. The deferred `GET
+  /api/wiki/page/provenance` carries the WHOLE row in `issues[]` — title, raw
+  `status`, `category`, epic, `updated`, `known`, `ledger` — and the reader
+  adopts it under the strip's own sequence guard (`adoptIssueRows`). Both are
+  absent, never `[]`, on a page with none, and on every page of a wiki with no
+  tracker — mimir's payloads are unchanged.
+- **The key map.** `buildWikiIndex` builds `index.issueKeys` (`tracker:key` →
+  every page related to it, with its relations and whether it is a plan).
+  `pageProvenance(meta, ctx, wikiDir, index)` reads it and the index's resolved
+  tracker config; both callers (the page route and the Stamp route) pass it.
+- **Plan coverage.** A page is a plan when its RESOLVED type is `plan` (a
+  `type: plan` the wiki's ontology accepts, or its `typeMap`), it sits in a
+  top-level `plans/`, or its title matches `planTitle` and not
+  `planTitleExclude`. A key is covered when a plan relates to it through
+  `COVERAGE_RELATIONS` (`stamped`, `declared`, `created`, `title`, `stem`),
+  over every relation that page has to the key. `tag` and `link` never cover.
+- **Status.** `loadIssueFields` reads huginn's `jira-issues` listing with
+  `include_issue_fields=true` ONLY (its own 10-minute cache and 60 s negative
+  cache; the composer's `loadJiraKeyIndex` keeps the cheap listing). The key is
+  the document id's prefix before the first `_`. Twin documents: the newest
+  PARSED `updated` wins (offsets `+0100`/`+02:00`, a stray `\:` unescaped), an
+  unparseable one loses and is not served, a tie goes to the smaller id — a
+  string max picks the wrong twin across an offset change. The status goes
+  through the wiki's merged `statusMap`; unmapped is `unknown`, logged once per
+  value. A lookup that degrades leaves the rows with no `category`, so no
+  status pill and no Draft plan.
+- **Cost.** `/api/jira?key=` on the claude-usage host, through the optional
+  `SessionLedgerDeps.fetchIssueLedger` and the adapter's `ledgerPath`: at most
+  `ISSUE_LEDGER_MAX` (8) counting keys a page, `ISSUE_LEDGER_CONCURRENCY` (4)
+  at a time, strongest first, on the page's one `PROVENANCE_BUDGET_MS`
+  deadline (raced as well as signalled). claude-usage records mentions only for
+  its `JIRA_KEY_PREFIXES`, so a key outside the tracker's `ledgerProjects`
+  (default: the adapter's mirror of that list; a wiki may name its own) renders
+  "not tracked" and is never asked. Every other unpriced row says why (`cap`,
+  `deadline`, `unreachable`, `not-configured`, `demoted`).
+- **Layout.** Counting keys are rows (dashed unless stamped; the strongest
+  relation shown, all of them on hover). Link-only keys go on an "also linked"
+  line, each with a Link that promotes it; mention-only keys on a "mentioned"
+  line with no Link. **Draft plan** shows on an uncovered counting key in
+  `todo`/`active` and opens the Discuss dialog in article mode with a leading
+  "Draft a plan for KEY" chip and an empty question box.
+- **The strip.** When the payload carries `issues`, the strip's chip row draws
+  every counting key from them (`stripChipViews`, inferred ones dashed) instead
+  of `jira`. `jira` stays in the payload for the shape fixture and the reverse
+  lookup, which stay stamped-only.
+- **Link** is the Stamp route's second body form — see the Stamp section.
+  Offered only when `stampable` and the page is markdown; **Link all** writes
+  the `declared`/`created`/`title`/`stem` keys (already covering, so it never
+  changes a verdict), one POST at a time. After a Link the rows and the strip
+  redraw from the route's re-resolved block.
+
+Acceptance: `trackers/jira-lookup.test.ts`, `provenance-issues.test.ts` (the
+gate, coverage, the deferred rows, the ledger cap and deadline, the page route,
+the no-tracker pin), `views/components/wiki-issue-rows.test.ts`,
+`wiki-stamp.test.ts` (the tracker form) and `e2e/wiki-tracker-connections.spec.ts`.
 
 ### The client (`views/components/wiki-provenance-view.ts`)
 
@@ -2419,7 +2488,19 @@ plus `--report`:
 
 ```
 <WIKI_STAMP_BUN|bun> <WIKI_STAMP_BIN> --session <ref> --file <abs> --report
+<WIKI_STAMP_BUN|bun> <WIKI_STAMP_BIN> <stampFlag> <KEY> --file <abs> --report
 ```
+
+The second line is the **`{ tracker, key }` body form** — Connections' Link.
+Exactly one of `ref` and `tracker`+`key` (both ⇒ 400). The adapter is resolved
+(unknown ⇒ 400 `unknown-tracker`), the key normalized and tested against its
+`keyPattern` (⇒ 400 `bad-key`), and a wiki whose `.wiki-reader.json` names no
+such tracker is refused 409 `no-tracker` before any spawn. Every other check
+below applies unchanged. The form refreshes the index on `unchanged` as well as
+`written`, since an "already stamped" from the reader usually means a hand edit
+the cache has not seen. The CLI's skip reasons reach the row as named states
+(`not-inline-list`, `duplicate-key`, `skip-list`, `not-markdown`; any other one
+by name).
 
 through the shared bounded spawn helper (`src/utils/run-proc.ts`, hoisted out of
 `src/video/media.ts` so a wiki route does not import the capture-vertical graph;

@@ -1087,6 +1087,53 @@ export async function renderWikiPage(opts?: {
     circle.t-explainer { fill: var(--status-warning); }
     circle.t-note { fill: var(--text-dim); }
     .wiki-mini-more { font-size: 10.5px; color: var(--text-dim); text-align: center; padding: 2px 0 4px; }
+    /* Issue keys on the mini-graph ring: a diamond, and a dashed edge when the
+       key is inferred rather than stamped. */
+    .mini-issue-dot { fill: var(--accent-light); }
+    .mini-issue.inferred .mini-issue-dot { fill: none; stroke: var(--accent-light); stroke-width: 1.4; }
+    .mini-edge.mini-issue-edge { stroke: var(--accent-muted); }
+
+    /* Connections' issue section (tracker wikis only). Every line a reader has
+       to read sits at --text-muted or stronger — the provenance strip's rule. */
+    .wiki-conn-issues .wiki-conn-title { display: flex; align-items: center; gap: 8px; }
+    .wiki-issue-row {
+      padding: 6px 8px; margin: 0 0 6px; border-radius: 6px;
+      border: 1px solid var(--border-secondary);
+    }
+    .wiki-issue-row.inferred { border-style: dashed; }
+    .wiki-issue-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+    .wiki-issue-key { color: var(--accent-light); font-weight: 600; text-decoration: none; }
+    a.wiki-issue-key:hover { text-decoration: underline; }
+    .wiki-issue-rel { font-size: 10.5px; color: var(--text-muted); }
+    .wiki-issue-status {
+      font-size: 10.5px; padding: 0 6px; border-radius: 999px;
+      background: var(--tint-neutral); color: var(--text-secondary);
+    }
+    .wiki-issue-status.cat-todo { background: var(--tint-info); color: var(--status-info); }
+    .wiki-issue-status.cat-active { background: var(--tint-purple); color: var(--accent-light); }
+    .wiki-issue-status.cat-review { background: var(--tint-warning); color: var(--changed-ink); }
+    .wiki-issue-status.cat-done { background: var(--tint-success); color: var(--status-success); }
+    .wiki-issue-status.cat-unknown { background: var(--tint-neutral); color: var(--text-muted); }
+    .wiki-issue-title, .wiki-issue-epic { font-size: 12px; color: var(--text-secondary); margin-top: 2px; overflow-wrap: anywhere; }
+    .wiki-issue-epic { font-size: 11px; color: var(--text-muted); }
+    .wiki-issue-meta { font-size: 11px; color: var(--text-muted); margin-top: 3px; overflow-wrap: anywhere; }
+    .wiki-issue-cover.covered { color: var(--status-success); }
+    .wiki-issue-plan { color: var(--accent-light); text-decoration: none; }
+    .wiki-issue-plan:hover { text-decoration: underline; }
+    .wiki-issue-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; }
+    .wiki-issue-btn {
+      font-size: 11px; padding: 1px 8px; border-radius: 5px; cursor: pointer; font-family: inherit;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-secondary);
+    }
+    .wiki-issue-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+    .wiki-issue-btn:disabled { opacity: 0.6; cursor: default; }
+    .wiki-issue-msg { font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
+    .wiki-issue-msg.err { color: var(--changed-ink); }
+    .wiki-issue-msg[hidden] { display: none; }
+    .wiki-issue-also, .wiki-issue-mentions { font-size: 11px; color: var(--text-muted); padding: 2px 8px; line-height: 1.8; }
+    .wiki-issue-line-label { color: var(--text-muted); }
+    .wiki-issue-also-item { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
+    .wiki-prov-jira.inferred { border-style: dashed; }
 
     /* ── Middle: article pane ──────────────────────────── */
     /* Breadcrumb bar above the article (wiki / folder / page · updated), also the

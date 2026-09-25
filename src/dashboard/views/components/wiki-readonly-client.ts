@@ -52,6 +52,10 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   // dim it on the read-only INSTANCE for the wrong reason).
   "[data-series-menu]",
   "[data-series-edit]",
+  // Connections' Link and Link all — absent wherever `stampable` is false, which
+  // both read-only mechanisms make it; listed as the same backstop.
+  "[data-issue-link]",
+  "[data-issue-link-all]",
   // Backlog drain: opening the confirm panel is blocked too — every action
   // inside it is refused, so the panel is a dead end on a readonly instance.
   '[data-backlog-action="confirm"]',
@@ -105,6 +109,8 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   "#wikiChatEscNewBtn",
   "#wikiChatEscOptBtn",
   "#wikiChatDeclineBtn",
+  // Connections' Draft plan opens the Discuss dialog.
+  "[data-draft-plan]",
   // Fact-check claim retry (row ↻ + the batch bar).
   "[data-claim-retry-btn]",
   "#wikiClaimRetryAll",
