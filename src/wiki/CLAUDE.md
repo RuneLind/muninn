@@ -2190,9 +2190,10 @@ and counts the rest in its footer as `+N issues not drawn`).
   over every relation that page has to the key. `tag` and `link` never cover.
 - **Status.** `loadIssueFields` reads huginn's `jira-issues` listing with
   `include_issue_fields=true` ONLY (its own 10-minute cache and 60 s negative
-  cache; past the TTL a failed refetch keeps serving the last good listing, and
-  only a host with none answers null; the first failure warns, repeats log
-  info). The key is `jiraKeyFromDocId`'s (`src/jira/retrieval.ts`), so the
+  cache; past the TTL a failed refetch keeps serving the last good listing for
+  up to `ISSUE_FIELDS_MAX_STALE_MS` (1 h) after it was read, and past that
+  answers null like a host with none; the first failure warns, repeats log
+  info, a success re-arms the warn). The key is `jiraKeyFromDocId`'s (`src/jira/retrieval.ts`), so the
   strip, Connections and the Jira composer agree on which keys huginn holds
   (measured 2026-09-25: all 2,386 live ids yield the same key both ways). A
   stamp with an out-of-range component (`2026-13-01`, `+9999`) is unparseable,
@@ -2236,9 +2237,13 @@ and counts the rest in its footer as `+N issues not drawn`).
   time. While any Link on a page is in flight every Link control there is
   disabled; the lock is keyed by wiki and relPath and survives a navigation
   away and back. After a Link the rows, the strip, the mini-graph and the rail
-  row's pills redraw from the route's re-resolved block, and focus stays in the
-  section (the same key's control, else the next enabled Link, else the
-  section).
+  row's pills and the Jira facet's chip row redraw from the route's
+  re-resolved block. A redraw that replaces the focused control moves focus to
+  the same kind of control for the same key (its anchor, its plan link, its
+  Draft plan, its Link), else to the section itself; focus is moved ONTO a Link
+  or Link all only from that same control, or from the section while it holds
+  focus for the Link the reader just activated — never from a read control, so
+  Enter on a key anchor cannot become a write.
 
 Acceptance: `trackers/jira-lookup.test.ts`, `provenance-issues.test.ts` (the
 gate, coverage, the deferred rows, the ledger cap and deadline, the page route,

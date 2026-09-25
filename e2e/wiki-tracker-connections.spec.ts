@@ -90,6 +90,18 @@ const FOCUS = "notes/fokus.md";
 /** Where the hostile POSTs aim — a page of its own, so a spawn that should
  *  not happen cannot damage a page another case reads. */
 const HOSTILE = "notes/hostile.md";
+/** Fix round 2: a focused key anchor survives the deferred redraw. */
+const FOCUS_ANCHOR = "notes/fokus-anker.md";
+/** Slow (`treg`), so a Link is still in flight while focus moves to Draft plan. */
+const FOCUS_DRAFT = "notes/treg-fokus.md";
+/** A link-only key, so a Link adds it to the Jira facet. */
+const FACET = "notes/fasett.md";
+/** Rewritten on disk mid-spec to carry no key; the `sessions:` line keeps its
+ *  provenance block, so the deferred answer arrives WITHOUT `issues`. */
+const EMPTIED = "notes/toemt.md";
+/** Slow, so the spec can stamp the second key by hand while Link all's first
+ *  POST is still in flight. */
+const SKIP = "notes/treg-hopp.md";
 
 const PAGES: Record<string, string> = {
   [ANCHOR]: md(
@@ -118,6 +130,14 @@ const PAGES: Record<string, string> = {
   [SLOW_BACK]: md(["title: DEMO-221 treg igjen"], "# Treg igjen"),
   [FOCUS]: md(["title: DEMO-231 og DEMO-232 fokus"], "# Fokus"),
   [HOSTILE]: md(["title: DEMO-241 mål"], "# Mål"),
+  [FOCUS_ANCHOR]: md(["title: DEMO-251 og DEMO-252 anker"], "# Anker"),
+  [FOCUS_DRAFT]: md(["title: DEMO-261 og DEMO-262 treg fokus"], "# Treg fokus"),
+  [FACET]: md(["title: Fasett"], `# Fasett\n\nEpic: [DEMO-271](${url("DEMO-271")}).`),
+  [EMPTIED]: md(
+    ["title: DEMO-281 tømt", "sessions: [claude-code:00000000-0000-4000-8000-000000000081]"],
+    "# Tømt",
+  ),
+  [SKIP]: md(["title: DEMO-291 og DEMO-292 treg hopp"], "# Treg hopp"),
   [EXPLAINER]:
     "<!doctype html><html><head><title>DEMO-150 forklart</title></head>" +
     `<body><a href="${url("DEMO-199")}">DEMO-199</a></body></html>`,
@@ -136,6 +156,8 @@ const ISSUES: Record<string, { title: string; status: string; updated: string }>
   "DEMO-202": { title: "Ikke startet", status: "Til Utvikle", updated: "2026-01-05T09:00:00.000+0100" },
   "DEMO-203": { title: "I test", status: "Akseptanse test", updated: "2026-01-05T09:00:00.000+0100" },
   "DEMO-205": { title: "Ferdig sak", status: "Ferdig", updated: "2026-01-05T09:00:00.000+0100" },
+  "DEMO-251": { title: "Anker", status: "Til Utvikle", updated: "2026-01-06T09:00:00.000+0100" },
+  "DEMO-261": { title: "Fokus", status: "Til Utvikle", updated: "2026-01-06T09:00:00.000+0100" },
 };
 
 /** The stub stamper — the real CLI's `jira:` behaviour, one report line. */
@@ -368,6 +390,8 @@ test.describe("Wiki reader: Connections + Link", () => {
     const msg = issueRow(page, "DEMO-142").locator('[data-issue-state="not-inline-list"]');
     await expect(msg).toContainText("is not an inline");
     await expect(issueRow(page, "DEMO-142")).toHaveClass(/inferred/);
+    // The Link the reader pressed is back, and focus returns to it.
+    await expect(issueRow(page, "DEMO-142").locator("[data-issue-link]")).toBeFocused();
   });
 
   test("7: Linking a tag key on a plan page flips it to covered in the redrawn row", async ({ page }) => {
@@ -465,13 +489,14 @@ test.describe("Wiki reader: Connections + Link", () => {
     await expect(node).not.toHaveClass(/inferred/);
   });
 
-  test("focus stays inside the section after a Link, on the next Link", async ({ page }) => {
+  test("focus stays inside the section after a Link, on the section, never on another key's Link", async ({ page }) => {
     await openPage(page, WIKI, FOCUS);
     await deferred(page, "DEMO-231");
     await issueRow(page, "DEMO-231").locator("[data-issue-link]").focus();
     await page.keyboard.press("Enter");
     await expect(issueRow(page, "DEMO-231")).toHaveClass(/stamped/);
-    await expect(issueRow(page, "DEMO-232").locator("[data-issue-link]")).toBeFocused();
+    await expect(section(page)).toBeFocused();
+    await expect(issueRow(page, "DEMO-232").locator("[data-issue-link]")).not.toBeFocused();
   });
 
   test("while Link all runs every Link control is disabled, and the file gets each key once", async ({ page }) => {
@@ -567,5 +592,102 @@ test.describe("Wiki reader: Connections + Link", () => {
     }
     expect(await readFile(stampLog, "utf8")).toBe(before);
     expect(await readFile(path.join(root, HOSTILE), "utf8")).toBe(PAGES[HOSTILE]);
+  });
+
+  // ── Fix round 2 ─────────────────────────────────────────────────────────────
+
+  test("a focused key anchor keeps focus when the deferred rows replace the inline ones", async ({ page }) => {
+    // Hold the deferred GET until the reader has focused the inline row's anchor.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      if (route.request().url().includes(encodeURIComponent(FOCUS_ANCHOR))) await held;
+      await route.continue();
+    });
+    await openPage(page, WIKI, FOCUS_ANCHOR);
+    const anchor = issueRow(page, "DEMO-251").locator("a.wiki-issue-key");
+    await expect(anchor).toBeVisible();
+    await expect(issueRow(page, "DEMO-251").locator(".wiki-issue-status")).toHaveCount(0);
+    await anchor.focus();
+    release();
+    await deferred(page, "DEMO-251");
+    await expect(issueRow(page, "DEMO-251").locator("a.wiki-issue-key")).toBeFocused();
+    const focused = await page.evaluate(() => document.activeElement?.outerHTML ?? "");
+    expect(focused).not.toContain("data-issue-link");
+  });
+
+  test("a Draft plan button focused while another key's Link runs keeps focus when the Link lands", async ({ page }) => {
+    await openPage(page, WIKI, FOCUS_DRAFT);
+    await deferred(page, "DEMO-261");
+    await issueRow(page, "DEMO-262").locator("[data-issue-link]").click();
+    // The stub sleeps 1.5 s on a `treg` page: the Link is still in flight here.
+    await expect(issueRow(page, "DEMO-261").locator("[data-issue-link]")).toBeDisabled();
+    const draft = issueRow(page, "DEMO-261").locator("[data-draft-plan]");
+    await draft.focus();
+    await expect(issueRow(page, "DEMO-262")).toHaveClass(/stamped/, { timeout: 10_000 });
+    await expect(issueRow(page, "DEMO-261").locator("[data-draft-plan]")).toBeFocused();
+  });
+
+  test("a Link repaints the Jira facet's chip row to what a reload shows", async ({ page }) => {
+    const chips = () =>
+      page.locator("#jiraChips button").evaluateAll((els) => els.map((e) => (e.textContent ?? "").trim()));
+    await openPage(page, WIKI, FACET);
+    await expect(section(page).locator('[data-issue-link="DEMO-271"]')).toBeVisible();
+    const before = await chips();
+    expect(before.some((t) => t.startsWith("DEMO-271"))).toBe(false);
+    await section(page).locator('[data-issue-link="DEMO-271"]').click();
+    await expect(issueRow(page, "DEMO-271")).toHaveClass(/stamped/);
+    await expect.poll(chips).not.toEqual(before);
+    const live = await chips();
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toBeVisible();
+    await expect.poll(chips).toEqual(live);
+  });
+
+  test("a deferred answer with no issues clears the inline rows", async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/wiki/page/provenance?**", async (route) => {
+      if (route.request().url().includes(encodeURIComponent(EMPTIED))) await held;
+      await route.continue();
+    });
+    await openPage(page, WIKI, EMPTIED);
+    await expect(issueRow(page, "DEMO-281")).toBeVisible();
+    // The page loses its key on disk; the index is refreshed before the held
+    // GET reaches the server, so its answer carries a block and no `issues`.
+    await writeFile(
+      path.join(root, EMPTIED),
+      md(["title: Tømt", "sessions: [claude-code:00000000-0000-4000-8000-000000000081]"], "# Tømt"),
+      "utf8",
+    );
+    expect((await page.request.get(`${BASE}/api/wiki/pages?wiki=${WIKI}&refresh=1`)).ok()).toBe(true);
+    const answered = page.waitForResponse((r) => r.url().includes("/api/wiki/page/provenance") && r.url().includes(encodeURIComponent(EMPTIED)));
+    release();
+    const body = await (await answered).json();
+    expect(body.provenance).toBeTruthy();
+    expect(body.provenance.issues).toBeUndefined();
+    await expect(page.locator(".wiki-prov-strip:not(.wiki-prov-pending)")).toBeVisible();
+    await expect(section(page)).toHaveCount(0);
+  });
+
+  test("Link all skips a key stamped while it ran, and spawns the stamper once", async ({ page }) => {
+    await openPage(page, WIKI, SKIP);
+    await deferred(page, "DEMO-291");
+    const spawnsFor = async () => (await readFile(stampLog, "utf8")).split("\n").filter((l) => l.includes(SKIP)).length;
+    expect(await spawnsFor()).toBe(0);
+    await expect(section(page).locator("[data-issue-link-all]")).toHaveText("Link all (2)");
+    await section(page).locator("[data-issue-link-all]").click();
+    // The first POST (DEMO-291) has reached the stub, which sleeps 1.5 s before
+    // it reads the file: stamp DEMO-292 by hand in that window.
+    await expect.poll(spawnsFor).toBe(1);
+    const file = path.join(root, SKIP);
+    const bytes = await readFile(file, "utf8");
+    await writeFile(file, bytes.replace("---\n", "---\njira: [DEMO-292]\n"), "utf8");
+    await expect(issueRow(page, "DEMO-291")).toHaveClass(/stamped/, { timeout: 10_000 });
+    await expect(issueRow(page, "DEMO-292")).toHaveClass(/stamped/);
+    // Link all is over (no row reads `linking…`) and spawned nothing for DEMO-292.
+    await expect(section(page)).not.toContainText("linking…", { timeout: 10_000 });
+    expect(await spawnsFor()).toBe(1);
+    expect((await readFile(file, "utf8")).match(/^jira:.*$/gm)).toEqual(["jira: [DEMO-292, DEMO-291]"]);
   });
 });

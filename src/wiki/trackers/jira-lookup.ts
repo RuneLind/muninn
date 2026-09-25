@@ -23,6 +23,9 @@ const ISSUE_FIELDS_TTL_MS = 10 * 60_000;
 /** A failed fetch is remembered this long, so a down huginn does not cost every
  *  page open its timeout. */
 const ISSUE_FIELDS_FAIL_TTL_MS = 60_000;
+/** How old a listing a failed refetch may still serve. Past it, a down huginn
+ *  answers null — no status — rather than an hours-old one nothing marks stale. */
+const ISSUE_FIELDS_MAX_STALE_MS = 60 * 60_000;
 const ISSUE_FIELDS_TIMEOUT_MS = 15_000;
 
 /** A Jira `updated` stamp with a YAML-escaped `\:` read as `:`. */
@@ -134,8 +137,8 @@ export function __resetIssueFieldsCacheForTest(): void {
 /**
  * The per-key facts, or null when huginn could not be read and no listing was
  * ever read. Never throws. Past the TTL a failed refetch keeps serving the last
- * good listing (a status a little staler beats none); only a host with no good
- * listing answers null. An EMPTY listing is a failure too: it cannot be told
+ * good listing (a status a little staler beats none) for up to an hour after it
+ * was read; a host with no listing that recent answers null. An EMPTY listing is a failure too: it cannot be told
  * from a mis-named collection, and believing it would report every key as
  * unknown.
  */
@@ -146,8 +149,9 @@ export async function loadIssueFields(
 ): Promise<Map<string, IssueFacts> | null> {
   const held = cached.get(knowledgeApiUrl);
   if (held && now - held.fetchedAtMs < ISSUE_FIELDS_TTL_MS) return held.facts;
+  const stale = held && now - held.fetchedAtMs < ISSUE_FIELDS_MAX_STALE_MS ? held.facts : null;
   const failed = failedAt.get(knowledgeApiUrl);
-  if (failed !== undefined && now - failed < ISSUE_FIELDS_FAIL_TTL_MS) return held?.facts ?? null;
+  if (failed !== undefined && now - failed < ISSUE_FIELDS_FAIL_TTL_MS) return stale;
   const running = inFlight.get(knowledgeApiUrl);
   if (running) return running;
 
@@ -170,14 +174,14 @@ export async function loadIssueFields(
       const props = {
         url: knowledgeApiUrl,
         error: err instanceof Error ? err.message : String(err),
-        stale: held ? "serving the last good listing" : "no listing to serve",
+        stale: stale ? "serving the last good listing" : "no listing to serve",
       };
       if (warnedFailure.has(knowledgeApiUrl)) log.info("issue fields still unavailable from {url}: {error} ({stale})", props);
       else {
         warnedFailure.add(knowledgeApiUrl);
         log.warn("issue fields unavailable from {url}: {error} ({stale})", props);
       }
-      return held?.facts ?? null;
+      return stale;
     } finally {
       inFlight.delete(knowledgeApiUrl);
     }

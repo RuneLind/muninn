@@ -319,6 +319,7 @@ import { provenanceStripCertain, type ProvenancePayload } from "../../../wiki/pr
 import { compactIssues, relationsCount, type IssueRow } from "../../../wiki/trackers/types.ts";
 import {
   CONN_ISSUES_ID,
+  DRAFT_PLAN_ATTR,
   ISSUE_LINK_ALL_ATTR,
   ISSUE_LINK_ATTR,
   issueSectionHtml,
@@ -526,7 +527,11 @@ const issueStates = new Map<string, IssueRowState>();
  */
 const linkLocks = new Map<string, Set<string>>();
 const LINK_ALL_LOCK = "*";
-/** The key the reader last Linked — where focus goes back to after a redraw. */
+/** The Link control the reader activated and whose POST is still settling — a
+ *  key, or {@link LINK_ALL_LOCK} for Link all. While focus is parked on the
+ *  section (the control is disabled mid-POST), a redraw returns it there; it is
+ *  the only way focus is ever moved ONTO a Link. Cleared when the Link settles
+ *  and on navigation. */
 let issueFocusKey: string | null = null;
 /** The page payload Connections last rendered, so the mini-graph can redraw
  *  when the issue rows change under it. */
@@ -2072,33 +2077,48 @@ function issueSectionFor(relPath: string | null): string {
 
 /** The ONE writer of Connections' issue section: replaces it in place, or
  *  inserts it at the top of the panel (above the mini-graph). Focus inside
- *  the section stays inside it — see {@link restoreIssueFocus}. */
+ *  the section stays inside it — see {@link issueFocusSelector}. */
 function redrawConnIssues(): void {
   const html = issueSectionFor(currentRelPath);
   const el = document.getElementById(CONN_ISSUES_ID);
   if (el) {
-    const hadFocus = el.contains(document.activeElement);
+    const active = document.activeElement;
+    const sel = active && el.contains(active) ? issueFocusSelector(active, el) : null;
     el.outerHTML = html;
-    if (hadFocus) restoreIssueFocus();
+    if (sel !== null) {
+      const sec = document.getElementById(CONN_ISSUES_ID);
+      const target = sel ? sec?.querySelector<HTMLElement>(`${sel}:not(:disabled)`) : null;
+      (target ?? sec)?.focus({ preventScroll: true });
+    }
     return;
   }
   if (html) document.getElementById("connBody")?.insertAdjacentHTML("afterbegin", html);
 }
 
-/** After a redraw replaced the focused control: the last-Linked key's Link,
- *  else another control on its row, else the first enabled Link, else Link
- *  all, else the section itself (every Link is disabled while one runs). */
-function restoreIssueFocus(): void {
-  const sec = document.getElementById(CONN_ISSUES_ID);
-  if (!sec) return;
-  const q = (sel: string) => sec.querySelector<HTMLElement>(sel);
-  const key = issueFocusKey ? CSS.escape(issueFocusKey) : null;
-  const target =
-    (key && (q(`[${ISSUE_LINK_ATTR}="${key}"]:not(:disabled)`) ?? q(`[data-issue-row="${key}"] button:not(:disabled)`))) ||
-    q(`[${ISSUE_LINK_ATTR}]:not(:disabled)`) ||
-    q(`[${ISSUE_LINK_ALL_ATTR}]:not(:disabled)`) ||
-    sec;
-  target.focus({ preventScroll: true });
+/**
+ * Where focus goes after a redraw replaced `active`: the EQUIVALENT control in
+ * the new section — same kind, same key — as a selector, or `""` for the
+ * section itself (`tabindex="-1"`). Focus is moved onto a Link or Link all only
+ * from that same control, or from the section while it holds focus for the
+ * Link the reader activated ({@link issueFocusKey}); never from anything else,
+ * so Enter on a focused key anchor cannot become a write.
+ */
+function issueFocusSelector(active: Element, sec: Element): string {
+  const attr = (name: string) => CSS.escape(active.getAttribute(name) ?? "");
+  if (active === sec) {
+    if (issueFocusKey === LINK_ALL_LOCK) return `[${ISSUE_LINK_ALL_ATTR}]`;
+    return issueFocusKey ? `[${ISSUE_LINK_ATTR}="${CSS.escape(issueFocusKey)}"]` : "";
+  }
+  if (active.hasAttribute(ISSUE_LINK_ATTR)) return `[${ISSUE_LINK_ATTR}="${attr(ISSUE_LINK_ATTR)}"]`;
+  if (active.hasAttribute(ISSUE_LINK_ALL_ATTR)) return `[${ISSUE_LINK_ALL_ATTR}]`;
+  if (active.hasAttribute(DRAFT_PLAN_ATTR)) return `[${DRAFT_PLAN_ATTR}="${attr(DRAFT_PLAN_ATTR)}"]`;
+  const row = active.closest("[data-issue-row]");
+  if (!row) return "";
+  const key = CSS.escape(row.getAttribute("data-issue-row") ?? "");
+  for (const cls of ["wiki-issue-key", "wiki-issue-plan"]) {
+    if (active.classList.contains(cls)) return `[data-issue-row="${key}"] a.${cls}`;
+  }
+  return "";
 }
 
 /** Redraw the mini-graph from the current issue rows (a Link, or the deferred
@@ -2130,6 +2150,7 @@ function refreshListingIssues(relPath: string, rows: readonly IssueRow[]): void 
   hit.issues = compactIssues(rows);
   if (currentArticle && currentArticle !== hit && currentArticle.relPath === relPath) currentArticle.issues = hit.issues;
   for (const key of facetJiraKeys(hit)) if (!before.has(key)) jiraKeys[key] = (jiraKeys[key] ?? 0) + 1;
+  renderJiraChips();
   renderList();
 }
 
@@ -2144,7 +2165,7 @@ function refreshListingIssues(relPath: string, rows: readonly IssueRow[]): void 
  */
 async function linkIssue(relPath: string, tracker: string, key: string, inLinkAll = false): Promise<boolean> {
   if (!inLinkAll && pageLinkLocked(relPath)) return false;
-  issueFocusKey = key;
+  if (!inLinkAll) issueFocusKey = key;
   if (currentRelPath === relPath) issueStates.delete(key);
   setLinkLock(relPath, key, true);
   if (currentRelPath === relPath) redrawConnIssues();
@@ -2185,6 +2206,7 @@ async function linkIssue(relPath: string, tracker: string, key: string, inLinkAl
     redrawConnIssues();
     refetchProvStrip();
   }
+  if (!inLinkAll && issueFocusKey === key) issueFocusKey = null;
   return ok;
 }
 
@@ -2198,6 +2220,7 @@ async function linkAllIssues(): Promise<void> {
   const rows = [...(issueRows ?? [])];
   const keys = linkAllKeys(rows, { stampable: issueStampable, markdown: isMarkdownRel(relPath) });
   setLinkLock(relPath, LINK_ALL_LOCK, true);
+  issueFocusKey = LINK_ALL_LOCK;
   try {
     for (const key of keys) {
       const row = rows.find((r) => r.key === key)!;
@@ -2208,6 +2231,7 @@ async function linkAllIssues(): Promise<void> {
   } finally {
     setLinkLock(relPath, LINK_ALL_LOCK, false);
     if (currentRelPath === relPath) redrawConnIssues();
+    if (issueFocusKey === LINK_ALL_LOCK) issueFocusKey = null;
   }
 }
 
@@ -2667,6 +2691,7 @@ function renderConnections(data: WikiPageDetail): void {
   issueRows = data.issueRows ?? null;
   issueStampable = data.issueStampable === true;
   issueStates.clear();
+  issueFocusKey = null;
   connData = data;
   document.getElementById("connBody")!.innerHTML =
     issueSectionFor(data.meta?.relPath ?? currentRelPath) +

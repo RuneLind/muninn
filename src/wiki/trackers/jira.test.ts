@@ -388,4 +388,9 @@ describe("PR 3 fix round 1: the adapter's key seams", () => {
     expect(jiraAdapter.parseLedger!({ totalCost: 1 })).toBeNull();
     expect(jiraAdapter.parseLedger!(null)).toBeNull();
   });
+
+  test("parseLedger: `sessions` that is not an array is null, never a string's length", () => {
+    expect(jiraAdapter.parseLedger!({ sessions: "abc", totalCost: 1, costedSessions: 3, truncated: false })).toBeNull();
+    expect(jiraAdapter.parseLedger!({ sessions: { length: 3 }, totalCost: 1 })).toBeNull();
+  });
 });

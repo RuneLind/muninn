@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import {
   __resetIssueFieldsCacheForTest,
   loadIssueFields,
@@ -154,5 +155,67 @@ describe("PR 3 fix round 1", () => {
     expect((await loadIssueFields("http://s.test", fetchApi, tenMinutes + 1))?.get("DEMO-110")?.status).toBe("Ferdig");
     expect((await loadIssueFields("http://s.test", fetchApi, tenMinutes + 2))?.get("DEMO-110")?.status).toBe("Ferdig");
     expect(calls).toBe(2);
+  });
+});
+
+describe("PR 3 fix round 2", () => {
+  /** Capture muninn's log records — the logger is a silent no-op unless configured. */
+  async function capture(): Promise<LogRecord[]> {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    return records;
+  }
+  const failures = (records: LogRecord[]) =>
+    records.filter((r) => r.category.join("/") === "muninn/wiki/issue-fields").map((r) => r.level);
+
+  test("S3: the first failure warns, later ones log info, and a success re-arms the warn", async () => {
+    const records = await capture();
+    try {
+      const listing = { documents: [{ id: "DEMO-110_x.md", status: "Ferdig" }] };
+      let up = false;
+      const fetchApi = async () => {
+        if (!up) throw new Error("down");
+        return listing;
+      };
+      const minute = 60_000;
+      // Each call is past the 60 s failure window, so each one fetches.
+      await loadIssueFields("http://w.test", fetchApi, 0);
+      await loadIssueFields("http://w.test", fetchApi, 2 * minute);
+      await loadIssueFields("http://w.test", fetchApi, 4 * minute);
+      expect(failures(records)).toEqual(["warning", "info", "info"]);
+      up = true;
+      expect(await loadIssueFields("http://w.test", fetchApi, 6 * minute)).not.toBeNull();
+      up = false;
+      // Past the 10-minute TTL, so the next call fetches — and fails.
+      await loadIssueFields("http://w.test", fetchApi, 17 * minute);
+      expect(failures(records)).toEqual(["warning", "info", "info", "warning"]);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("S3: past one hour a failed refetch no longer serves the last good listing", async () => {
+    const listing = { documents: [{ id: "DEMO-110_x.md", status: "Ferdig" }] };
+    let up = true;
+    const fetchApi = async () => {
+      if (!up) throw new Error("down");
+      return listing;
+    };
+    const minute = 60_000;
+    expect((await loadIssueFields("http://h.test", fetchApi, 0))?.get("DEMO-110")?.status).toBe("Ferdig");
+    up = false;
+    // Inside the hour: stale, still served — from the failed fetch and from the failure window.
+    expect((await loadIssueFields("http://h.test", fetchApi, 59 * minute))?.get("DEMO-110")?.status).toBe("Ferdig");
+    expect((await loadIssueFields("http://h.test", fetchApi, 59 * minute + 30_000))?.get("DEMO-110")?.status).toBe("Ferdig");
+    // Past it: null, as for a host that never answered — the failure window too.
+    expect(await loadIssueFields("http://h.test", fetchApi, 61 * minute)).toBeNull();
+    expect(await loadIssueFields("http://h.test", fetchApi, 61 * minute + 30_000)).toBeNull();
+    // A later success serves again.
+    up = true;
+    expect((await loadIssueFields("http://h.test", fetchApi, 63 * minute))?.get("DEMO-110")?.status).toBe("Ferdig");
   });
 });
