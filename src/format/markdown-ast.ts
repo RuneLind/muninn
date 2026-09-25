@@ -302,39 +302,22 @@ export interface ProtectedRegion {
 
 const FRONTMATTER_BLOCK_RE = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 
-/** Push every inline code span (`` `x` ``, matched backtick runs) on one line. */
+/**
+ * The inline code span grammar `formatWebHtml` pairs (`renderInline` parks every
+ * match before any other inline pass): ONE backtick, one or more non-backtick
+ * characters, ONE backtick, leftmost first. Not CommonMark's matched runs: a
+ * double-backtick span wrapping a single-backtick one renders as two one-space
+ * code spans with the inner text as PROSE.
+ * One source for both, so the fact-check strip cannot call code what the reader
+ * paints as a live mark.
+ */
+export const INLINE_CODE_SPAN_SOURCE = "`([^`]+)`";
+
+/** Push every inline code span on one line, by {@link INLINE_CODE_SPAN_SOURCE}. */
 function pushInlineCodeSpans(line: string, base: number, out: ProtectedRegion[]): void {
-  let i = 0;
-  while (i < line.length) {
-    if (line[i] !== "`") {
-      i++;
-      continue;
-    }
-    let j = i;
-    while (j < line.length && line[j] === "`") j++;
-    const runLen = j - i;
-    let k = j;
-    let closeEnd = -1;
-    while (k < line.length) {
-      if (line[k] !== "`") {
-        k++;
-        continue;
-      }
-      let e = k;
-      while (e < line.length && line[e] === "`") e++;
-      if (e - k === runLen) {
-        closeEnd = e;
-        break;
-      }
-      k = e;
-    }
-    // An UNCLOSED run is not a code span — resume scanning after it.
-    if (closeEnd === -1) {
-      i = j;
-      continue;
-    }
-    out.push({ start: base + i, end: base + closeEnd });
-    i = closeEnd;
+  // An unclosed backtick is not a span: the regex needs a closing tick.
+  for (const m of line.matchAll(new RegExp(INLINE_CODE_SPAN_SOURCE, "g"))) {
+    out.push({ start: base + m.index, end: base + m.index + m[0].length });
   }
 }
 

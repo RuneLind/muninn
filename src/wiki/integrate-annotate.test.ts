@@ -157,6 +157,35 @@ describe("stripFactWrappers", () => {
     expect(stripFactWrappers(once)).toBe(once);
     expect(countFactWrappers(once)).toBe(0);
   });
+
+  // The strip's inline-span grammar must be the one `formatWebHtml` pairs: a
+  // region the strip calls code but the reader renders as prose paints a live
+  // mark the ➕ supersede can never remove. Every row: count === rendered marks.
+  const renderedMarks = (body: string) =>
+    (formatWebHtml(body).match(/class="fc-mark/g) ?? []).length;
+  const INLINE_SPAN_ROWS: Array<[string, string, number]> = [
+    // Real line 46 of mimir plans/muninn-architecture-review-2026-08.mdx.
+    [
+      "inner-backtick span (live page)",
+      '**Failure scenario.** Fact-check a page and click ✎ Integrate — the prose gets `` `<Fact n="2" v="bad">ships 2.1M units</Fact>` `` and an appendix whose `#fc-claim-2` is "❌ Claim 2/2 — Ships 4M units".',
+      1,
+    ],
+    ["plain span", 'a `<Fact n="1" v="ok">x</Fact>` b', 0],
+    ["double-backtick span", 'a ``<Fact n="1" v="ok">x</Fact>`` b', 0],
+    // The renderer pairs `` ` <Fact…>x` `` as code and leaves `y</Fact> ` in prose,
+    // so the closer is an orphan there and the orphan-closer scan takes it.
+    ["double-backtick span holding one tick", 'a `` <Fact n="1" v="ok">x`y</Fact> `` b', 0],
+    ["unclosed triple run", 'a ```<Fact n="1" v="ok">x</Fact> b', 1],
+    ["empty pair then prose", 'a `` <Fact n="1" v="ok">x</Fact> b', 1],
+  ];
+  for (const [name, body, marks] of INLINE_SPAN_ROWS) {
+    test(`inline span agrees with the renderer: ${name}`, () => {
+      expect(renderedMarks(body)).toBe(marks);
+      expect(countFactWrappers(body)).toBe(marks);
+      expect(stripFactWrappers(body).includes("<Fact")).toBe(marks === 0);
+      if (marks > 0) expect(stripFactWrappers(body)).toBe(body.replace(/<\/?Fact[^>]*>/g, ""));
+    });
+  }
 });
 
 // ── the wrapper-only predicate, at all three measuring sites ─────────────────
