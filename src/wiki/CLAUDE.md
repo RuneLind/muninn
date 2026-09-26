@@ -2359,7 +2359,11 @@ no `trackers` block has no toggle, `g` does nothing there, and the route answers
   over `graphAdjacency`, built once per drawn graph). A click opens the side
   card and moves focus into it; its node stays lit, and Escape or ✕ closes it
   and returns focus to the node (in focus mode, that Escape closes only the
-  card). The card offers **Focus here** on an issue or
+  card). While another Escape owner is open (a modal, the series ★ menu, the
+  Explain pill, the header Tools menu) the card yields: that owner takes the
+  Escape and the card stays open, and the pane keys act as they do with no
+  card, so the pill or Tools menu in focus mode also leaves focus mode.
+  Escape typed in the search box closes the card. The card offers **Focus here** on an issue or
   a page that is not the root (an issue re-roots at the issue; a page opens
   that page, still in graph mode) — never on the root, a session or a PR —
   **Open** on a page (it leaves graph mode) and the tracker, PR or session
