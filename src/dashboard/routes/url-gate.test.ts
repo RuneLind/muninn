@@ -30,6 +30,9 @@ const REFUSED: Array<[string, string]> = [
   ["DEL", "https://example.com/\x7f"],
   ["non-breaking space", "https://example.com/a b"],
   ["http", "http://example.com/p"],
+  // Pins the prefix and protocol clauses as a pair: any 5-letter scheme lines
+  // `slice(8)` up with the authority, and WHATWG still reports the host.
+  ["5-letter non-https scheme", "wxyzs://example.com/p"],
   ["no slashes", "https:example.com/p"],
   ["one slash", "https:/example.com/p"],
   ["three slashes", "https:///example.com/p"],
