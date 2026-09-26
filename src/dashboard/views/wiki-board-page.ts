@@ -2,6 +2,7 @@ import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { boardClientScript } from "./components/wiki-board-client.ts";
 import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
+import { withWikiParam } from "./components/wiki-param.ts";
 
 /**
  * `/wiki/issues?wiki=` — the issue board: one row per key a page of the wiki
@@ -12,11 +13,12 @@ import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
  * no filters, no client, and a way back to the reader.
  */
 export async function renderWikiBoardPage(opts: { wiki: string; label: string; refusal?: string }): Promise<string> {
-  const readerHref = `/wiki?wiki=${encodeURIComponent(opts.wiki)}`;
+  const readerHref = withWikiParam("/wiki", opts.wiki);
   const body = opts.refusal
     ? `<p class="board-note board-error" id="boardRefusal">${escHtml(opts.refusal)}</p>`
-    : `<div class="board-kpis" id="boardKpis"></div>
-    <div class="board-bar"><div id="boardFilters" class="board-filters"></div><span id="boardShown" class="board-shown"></span></div>
+    : `<p class="board-sub">One row per key a page of this wiki relates to through a counting relation. A row opens the graph rooted at its key. Sessions and cost are per key and never summed: one session counts under every key it mentions.</p>
+    <div class="board-kpis" id="boardKpis"></div>
+    <div class="board-bar"><div id="boardFilters" class="board-filters"></div><span id="boardShown" class="board-shown" aria-live="polite"></span></div>
     <div id="boardNotes"></div>
     <div class="board-scroll" id="boardTableWrap"><p class="board-note">Loading…</p></div>
     <h2 class="board-h2">Pages with no key</h2>
@@ -60,7 +62,8 @@ export async function renderWikiBoardPage(opts: { wiki: string; label: string; r
     }
     .board-shown { font-size: 12px; color: var(--text-muted); }
     .board-note { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 8px; }
-    .board-error { color: var(--status-error); }
+    /* Light theme on --bg-page: 5.53:1 (--status-error alone is 4.39:1); dark 8.26:1. */
+    .board-error { color: color-mix(in srgb, var(--status-error) 85%, var(--text-primary)); }
     .board-scroll { overflow-x: auto; border: 1px solid var(--border-primary); border-radius: 10px; }
     .board-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
     .board-table th {
@@ -77,14 +80,18 @@ export async function renderWikiBoardPage(opts: { wiki: string; label: string; r
     .board-key a:hover, .board-plan:hover { text-decoration: underline; }
     .board-ext { font-weight: 400; margin-left: 2px; }
     .board-title { min-width: 180px; overflow-wrap: anywhere; color: var(--text-primary); }
+    /* --tok-str: 5.77:1 light, 11.33:1 dark on --bg-page (--status-success is 3.00:1 light). */
     .board-plan {
-      color: var(--status-success); text-decoration: none; overflow-wrap: anywhere;
+      color: var(--tok-str); text-decoration: none; overflow-wrap: anywhere;
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
     }
     .board-plan-cell { min-width: 140px; max-width: 240px; }
     .board-table .wiki-issue-status { white-space: nowrap; }
     .board-date { white-space: nowrap; font-variant-numeric: tabular-nums; }
-    .board-dim { color: var(--text-muted); }
+    /* --text-soft: 5.90:1 light, 8.50:1 dark (--text-muted is 4.49:1 light). The
+       td form outranks .board-table td, which would otherwise win. */
+    .board-dim, .board-table td.board-dim { color: var(--text-soft); }
+    .board-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     .board-pr { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; white-space: nowrap; }
     .board-flag {
       display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 999px; white-space: nowrap;
@@ -106,7 +113,6 @@ export async function renderWikiBoardPage(opts: { wiki: string; label: string; r
       <h1>${escHtml(opts.label)} board · ${escHtml(opts.wiki)}</h1>
       <a href="${escAttr(readerHref)}">← Wiki reader</a>
     </div>
-    <p class="board-sub">One row per key a page of this wiki relates to through a counting relation. A row opens the graph rooted at its key. Sessions and cost are per key and never summed: one session counts under every key it mentions.</p>
     ${body}
   </main>
   ${script}

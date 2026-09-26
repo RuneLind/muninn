@@ -141,9 +141,10 @@ export type KeyLedgerView =
   | ({ state: "priced" } & Omit<KeyLedgerRow, "tracked">)
   | { state: "not-tracked" }
   /** Not priced, and why: past the shared deadline, the ledger did not answer
-   *  (a 404 from a claude-usage without the route included), or no ledger is
-   *  configured on this host. */
-  | { state: "unpriced"; reason: "deadline" | "unreachable" | "not-configured" };
+   *  (a 404 from a claude-usage without the route included), no ledger is
+   *  configured on this host, or the ledger answered with no usable row for
+   *  the key (`no-row`). */
+  | { state: "unpriced"; reason: "deadline" | "unreachable" | "not-configured" | "no-row" };
 
 /**
  * One Connections row. The index-local half (everything down to `planPages`)

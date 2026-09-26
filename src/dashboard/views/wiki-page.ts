@@ -108,8 +108,9 @@ export async function renderWikiPage(opts?: {
     ? `<a href="${gardenerHref}" class="wiki-gardener-icon" title="Wiki gardener — review drafted pages" aria-label="Wiki gardener${gardenerPending > 0 ? ` (${gardenerPending} pending)` : ""}">🌱${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`
     : "";
   // The issue board's link. Rendered hidden for every named wiki, because the
-  // page does not read the index: the client shows it once the listing names a
-  // tracker (`syncBoardLink`), so a wiki with no `trackers` block never shows it.
+  // page does not read the index: `setPagesData` (wiki-browser.ts) shows it
+  // once the listing names a tracker, so a wiki with no `trackers` block never
+  // shows it.
   const boardLink =
     selected && !unknownWiki && !envOverride
       ? `<a href="/wiki/issues?wiki=${escAttr(encodeURIComponent(selected))}" id="wikiBoardLink" class="wiki-gardener-icon wiki-board-icon" title="Issue board — every key and whether a plan covers it" aria-label="Issue board" hidden>▤</a>`

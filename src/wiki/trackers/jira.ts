@@ -360,7 +360,8 @@ const count = (v: unknown): number | null =>
  * `/api/jira/keys?keys=`'s answer — `{keys: [{key, tracked, sessionCount,
  * totalCost, costedSessions, lastSeen, truncated}], …}` — as key → row, or
  * null when it is not that shape. A row that is not a row is skipped, so its
- * key reads as unanswered rather than as zero sessions.
+ * key reads as unanswered rather than as zero sessions — and so is a tracked
+ * row with a negative or non-finite cost, or more costed than counted sessions.
  */
 export function parseJiraKeysLedger(raw: unknown): Map<string, KeyLedgerRow> | null {
   if (!raw || typeof raw !== "object" || !Array.isArray((raw as { keys?: unknown }).keys)) return null;
@@ -371,12 +372,14 @@ export function parseJiraKeysLedger(raw: unknown): Map<string, KeyLedgerRow> | n
     if (typeof row.key !== "string" || typeof row.tracked !== "boolean") continue;
     const sessions = count(row.sessionCount);
     const costed = count(row.costedSessions);
-    const total = typeof row.totalCost === "number" && Number.isFinite(row.totalCost) ? row.totalCost : null;
-    if (row.tracked && (sessions === null || costed === null || total === null)) continue;
+    // Rounded BEFORE the finite check: 1e308 is finite and ×100 is not.
+    const total = typeof row.totalCost === "number" ? Math.round(row.totalCost * 100) / 100 : NaN;
+    const cost = Number.isFinite(total) && total >= 0 ? total : null;
+    if (row.tracked && (sessions === null || costed === null || cost === null || costed > sessions)) continue;
     out.set(row.key.toUpperCase(), {
       tracked: row.tracked,
       sessions: sessions ?? 0,
-      totalCost: Math.round((total ?? 0) * 100) / 100,
+      totalCost: cost ?? 0,
       costedSessions: costed ?? 0,
       truncated: row.truncated === true,
       lastSeen: typeof row.lastSeen === "string" ? row.lastSeen : null,

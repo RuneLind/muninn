@@ -14,10 +14,32 @@
  */
 
 import { trackerAdapter } from "./trackers/index.ts";
-import { statusCategory } from "./trackers/rows.ts";
 import type { KeyLedgerView, TrackerConfig } from "./trackers/types.ts";
-import { lookupTrackerIssues, raceDeadline, type ProvenanceContext } from "./provenance-service.ts";
-import type { GraphIssueNode, GraphKeysLedgerState } from "./graph-types.ts";
+import { applyIssueFact, lookupTrackerIssues, raceDeadline, type ProvenanceContext } from "./provenance-service.ts";
+import type { GraphIssueNode, GraphKeysLedgerState, GraphPayload, GraphQuery } from "./graph-types.ts";
+
+/**
+ * The board's joins onto a built payload, in place: the issue nodes get the
+ * lookup's facts and their prices, and the payload `issueLookup` and
+ * `keysLedger`. The two joins start together, so a slow huginn cannot spend
+ * the deadline claude-usage was never asked inside.
+ */
+export async function applyBoardJoins(
+  payload: GraphPayload,
+  query: Pick<GraphQuery, "issueFields" | "keysLedger">,
+  trackers: readonly TrackerConfig[],
+  ctx: ProvenanceContext,
+  opts: { signal?: AbortSignal; deadline?: AbortSignal; wikiRoot?: string } = {},
+): Promise<void> {
+  if (!query.issueFields && !query.keysLedger) return;
+  const issues = payload.nodes.filter((n): n is GraphIssueNode => n.lane === "issue");
+  const [lookup, keysLedger] = await Promise.all([
+    query.issueFields ? joinIssueFields(issues, trackers, ctx, opts.signal, opts.wikiRoot ?? "") : null,
+    query.keysLedger ? joinKeysLedger(issues, trackers, ctx, opts.signal, opts.deadline) : null,
+  ]);
+  if (lookup) payload.issueLookup = lookup;
+  if (keysLedger) payload.keysLedger = keysLedger;
+}
 
 /** Join the trackers' lookups onto the issue nodes, in place. */
 export async function joinIssueFields(
@@ -34,19 +56,13 @@ export async function joinIssueFields(
   for (const n of nodes) {
     const facts = lookups.get(n.tracker);
     const config = configOf.get(n.tracker);
-    if (!facts || !config) continue;
-    const fact = facts.get(n.key);
-    n.known = !!fact;
-    n.category = statusCategory(fact?.status, config, wikiRoot);
-    if (fact?.title) n.title = fact.title;
-    if (fact?.status) n.status = fact.status;
-    if (fact?.updated) n.updated = fact.updated;
+    if (facts && config) applyIssueFact(n, facts.get(n.key), config, wikiRoot);
   }
   return { available: ids.every((id) => lookups.get(id)) };
 }
 
-/** Split keys into calls of at most `max`. */
-export function batchKeys<T>(keys: readonly T[], max: number): T[][] {
+/** Split a tracker's keys into many-key ledger calls of at most `max`. */
+export function ledgerKeyBatches<T>(keys: readonly T[], max: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < keys.length; i += Math.max(1, max)) out.push(keys.slice(i, i + Math.max(1, max)));
   return out;
@@ -87,7 +103,7 @@ export async function joinKeysLedger(
   const jobs: Promise<void>[] = [];
   for (const [tracker, list] of ask) {
     const adapter = trackerAdapter(tracker)!;
-    for (const batch of batchKeys(list, adapter.ledgerKeysMax ?? 200)) {
+    for (const batch of ledgerKeyBatches(list, adapter.ledgerKeysMax ?? 200)) {
       calls++;
       jobs.push(
         (async () => {
@@ -106,7 +122,9 @@ export async function joinKeysLedger(
           if (!rows) reachable = false;
           for (const n of batch) {
             const row = rows?.get(n.key.toUpperCase());
-            if (!row) n.keyLedger = fail();
+            // An answer that holds no usable row for the key is its own
+            // reason: the call reached, and the tooltip says so.
+            if (!row) n.keyLedger = rows ? { state: "unpriced", reason: "no-row" } : fail();
             else if (!row.tracked) n.keyLedger = { state: "not-tracked" };
             else {
               const { tracked: _t, ...priced } = row;

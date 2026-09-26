@@ -2,7 +2,8 @@
  * The issue board's half of `GET /api/wiki/graph`: the three `scope=wiki`
  * opt-ins' parsing, the index-local aggregates and keyless pages, the lookup
  * join, and the many-key ledger join (batching, a 404, a malformed answer,
- * `tracked: false`, the project bound, the deadline). Synthetic keys (`DEMO`),
+ * `tracked: false`, the project bound, the deadline). `parseJiraKeysLedger`'s
+ * own tests live in `trackers/jira.test.ts`. Synthetic keys (`DEMO`),
  * host (`example.invalid`) and repo (`example-org/demo-repo`).
  */
 
@@ -12,9 +13,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetWikiCacheForTest, getWikiIndex, type WikiIndex } from "./store.ts";
 import { buildGraph, type GraphLedgerPort } from "./graph.ts";
-import { batchKeys, joinIssueFields, joinKeysLedger } from "./graph-board.ts";
-import { parseGraphQuery, type GraphIssueNode, type GraphPageNode, type GraphQuery } from "./graph-types.ts";
-import { parseJiraKeysLedger } from "./trackers/jira.ts";
+import { applyBoardJoins, joinIssueFields, joinKeysLedger, ledgerKeyBatches } from "./graph-board.ts";
+import { GRAPH_NODES_MAX, parseGraphQuery, type GraphIssueNode, type GraphPageNode, type GraphPayload, type GraphQuery } from "./graph-types.ts";
 import type { ProvenanceContext } from "./provenance-service.ts";
 import type { IssueFacts, TrackerConfig } from "./trackers/types.ts";
 
@@ -263,23 +263,9 @@ describe("joinKeysLedger", () => {
     expect(nodes[0]!.keyLedger).toEqual({ state: "unpriced", reason: "deadline" });
   });
 
-  test("batchKeys", () => {
-    expect(batchKeys([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
-    expect(batchKeys([], 200)).toEqual([]);
-  });
-});
-
-describe("parseJiraKeysLedger", () => {
-  test("rows by uppercased key; tracked:false keeps no figures", () => {
-    const m = parseJiraKeysLedger({ keys: [{ key: "demo-1", tracked: false, sessionCount: 0, totalCost: 0, costedSessions: 0, lastSeen: null }] });
-    expect(m!.get("DEMO-1")).toEqual({ tracked: false, sessions: 0, totalCost: 0, costedSessions: 0, truncated: false, lastSeen: null });
-  });
-  test("not the shape: null", () => {
-    for (const raw of [null, "x", {}, { keys: "DEMO-1" }]) expect(parseJiraKeysLedger(raw)).toBeNull();
-  });
-  test("a tracked row with a non-number figure is skipped", () => {
-    expect(parseJiraKeysLedger({ keys: [{ key: "DEMO-1", tracked: true, sessionCount: 1, totalCost: "1", costedSessions: 1 }] })!.size).toBe(0);
-    expect(parseJiraKeysLedger({ keys: [{ key: "DEMO-1", tracked: true, sessionCount: -1, totalCost: 1, costedSessions: 1 }] })!.size).toBe(0);
+  test("ledgerKeyBatches: calls of at most max keys", () => {
+    expect(ledgerKeyBatches([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+    expect(ledgerKeyBatches([], 200)).toEqual([]);
   });
 });
 
@@ -303,5 +289,58 @@ describe("joinIssueFields", () => {
     const nodes = nodesFor(["DEMO-101"]);
     expect(await joinIssueFields(nodes, trackers(), ctxWith({ lookup: null }))).toEqual({ available: false });
     expect([nodes[0]!.known, nodes[0]!.category]).toEqual([undefined, undefined]);
+  });
+});
+
+describe("fix round 1", () => {
+  test("S1: a padded or repeated opt-in is a 400 naming the parameter", () => {
+    expect(parseGraphQuery({ scope: "wiki", keyless: " 1 " })).toEqual({ ok: false, error: "keyless must be 1" });
+    expect(parseGraphQuery({ scope: "wiki", keyless: ["1", "2"] })).toEqual({ ok: false, error: "keyless must be given once" });
+    expect(parseGraphQuery({ scope: "wiki", ledger: ["keys", "keys"] })).toEqual({ ok: false, error: "ledger must be given once" });
+    const once = parseGraphQuery({ scope: "wiki", keyless: ["1"], fields: ["issue"] });
+    expect(once.ok && [once.query.keyless, once.query.issueFields]).toEqual([true, true]);
+  });
+
+  test("S2: keyless is cut past GRAPH_NODES_MAX, said on its own flag, and the drawn graph is not called cut", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-board-keyless-"));
+    roots.push(root);
+    await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");
+    await Promise.all(
+      Array.from({ length: GRAPH_NODES_MAX + 1 }, (_, i) => writeFile(path.join(root, `p${i}.md`), `---\ntitle: P${i}\n---\n\nBody.\n`, "utf8")),
+    );
+    const big = (await getWikiIndex({ root, refresh: true }))!;
+    const r = await buildGraph(big, wikiQuery({ keyless: true, depth: 0 }), noLedger);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.payload.keylessPages!.length).toBe(GRAPH_NODES_MAX);
+    expect(r.payload.keylessTruncated).toBe(true);
+    expect([r.payload.truncated, r.payload.truncatedBy]).toEqual([undefined, undefined]);
+  });
+
+  test("C8: a key the answer holds no row for is unpriced with reason no-row; the call still reached", async () => {
+    const nodes = nodesFor(["DEMO-101"]);
+    const state = await joinKeysLedger(nodes, trackers(), ctxWith({ fetch: async () => ({ keys: [] }) }));
+    expect(state.reachable).toBe(true);
+    expect(nodes[0]!.keyLedger).toEqual({ state: "unpriced", reason: "no-row" });
+  });
+
+  test("S4: applyBoardJoins starts the lookup and the keys ledger together, and sets both states", async () => {
+    let lookupDone = false;
+    let ledgerBeforeLookup: boolean | undefined;
+    const ctx = ctxWith({
+      fetch: async (p) => {
+        ledgerBeforeLookup ??= !lookupDone;
+        return keysAnswer(p);
+      },
+    });
+    ctx.lookupIssues = async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      lookupDone = true;
+      return new Map();
+    };
+    const payload = { nodes: nodesFor(["DEMO-101"]) } as unknown as GraphPayload;
+    await applyBoardJoins(payload, { issueFields: true, keysLedger: true }, trackers(), ctx, {});
+    expect(ledgerBeforeLookup).toBe(true);
+    expect(payload.issueLookup).toEqual({ available: true });
+    expect(payload.keysLedger).toMatchObject({ calls: 1, reachable: true });
   });
 });

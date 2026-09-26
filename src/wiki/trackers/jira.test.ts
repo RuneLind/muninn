@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { clauseBoundaries, inferJiraIssues, jiraAdapter, stampedKeys, stemKeys, titleKeys } from "./jira.ts";
+import { clauseBoundaries, inferJiraIssues, jiraAdapter, parseJiraKeysLedger, stampedKeys, stemKeys, titleKeys } from "./jira.ts";
 import { inferIssues, isPlanTitle, parseTrackersConfig } from "./index.ts";
 import type { IssueRef, TrackerConfig, TrackerPage } from "./types.ts";
 
@@ -392,5 +392,26 @@ describe("PR 3 fix round 1: the adapter's key seams", () => {
   test("parseLedger: `sessions` that is not an array is null, never a string's length", () => {
     expect(jiraAdapter.parseLedger!({ sessions: "abc", totalCost: 1, costedSessions: 3, truncated: false })).toBeNull();
     expect(jiraAdapter.parseLedger!({ sessions: { length: 3 }, totalCost: 1 })).toBeNull();
+  });
+});
+
+describe("parseJiraKeysLedger", () => {
+  test("rows by uppercased key; tracked:false keeps no figures", () => {
+    const m = parseJiraKeysLedger({ keys: [{ key: "demo-1", tracked: false, sessionCount: 0, totalCost: 0, costedSessions: 0, lastSeen: null }] });
+    expect(m!.get("DEMO-1")).toEqual({ tracked: false, sessions: 0, totalCost: 0, costedSessions: 0, truncated: false, lastSeen: null });
+  });
+  test("not the shape: null", () => {
+    for (const raw of [null, "x", {}, { keys: "DEMO-1" }]) expect(parseJiraKeysLedger(raw)).toBeNull();
+  });
+  test("a tracked row with a non-number figure is skipped", () => {
+    expect(parseJiraKeysLedger({ keys: [{ key: "DEMO-1", tracked: true, sessionCount: 1, totalCost: "1", costedSessions: 1 }] })!.size).toBe(0);
+    expect(parseJiraKeysLedger({ keys: [{ key: "DEMO-1", tracked: true, sessionCount: -1, totalCost: 1, costedSessions: 1 }] })!.size).toBe(0);
+  });
+  test("C9: a cost that rounds past finite, a negative cost and more costed than counted sessions leave the key unanswered", () => {
+    const row = (o: object) => ({ key: "DEMO-1", tracked: true, sessionCount: 2, totalCost: 1, costedSessions: 1, ...o });
+    for (const bad of [{ totalCost: 1e308 }, { totalCost: -0.5 }, { costedSessions: 3 }]) {
+      expect(parseJiraKeysLedger({ keys: [row(bad)] })!.size, JSON.stringify(bad)).toBe(0);
+    }
+    expect(parseJiraKeysLedger({ keys: [row({})] })!.size).toBe(1);
   });
 });

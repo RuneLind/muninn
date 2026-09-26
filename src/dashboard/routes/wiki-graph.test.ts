@@ -15,6 +15,7 @@ import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki
 import type { ProvenanceContext } from "../../wiki/provenance-service.ts";
 import { isSideEffectingRequest } from "../../auth/origin.ts";
 import type { Config } from "../../config.ts";
+import { renderWikiBoardPage } from "../views/wiki-board-page.ts";
 
 const S1 = "00000000-0000-4000-8000-000000000001";
 const CONFIG = { trackers: [{ id: "jira", projects: ["DEMO"], hosts: ["example.invalid"], ledgerProjects: ["DEMO"] }] };
@@ -168,6 +169,13 @@ describe("GET /api/wiki/graph", () => {
     expect(body.keylessPages).toEqual([]);
   });
 
+  test("S1: a repeated or padded opt-in is a 400 naming it, and calls nothing", async () => {
+    calls.length = 0;
+    expect(await get("wiki=trk&scope=wiki&keyless=1&keyless=2")).toEqual({ status: 400, body: { error: "keyless must be given once" } });
+    expect(await get("wiki=trk&scope=wiki&fields=%20issue%20")).toEqual({ status: 400, body: { error: "fields must be issue" } });
+    expect(calls).toEqual([]);
+  });
+
   test("the opt-ins are refused off wiki scope, and without them a level-1 answer carries none of their fields", async () => {
     const off = await get("wiki=trk&scope=page&root=side.md&fields=issue");
     expect(off).toEqual({ status: 400, body: { error: "fields is only read at scope=wiki" } });
@@ -197,6 +205,13 @@ describe("GET /wiki/issues", () => {
       expect(html).toContain('id="boardRefusal"');
       expect(html).not.toContain("__WIKI_BOARD__");
     }
+  });
+
+  test("C15: a refusal drops the board's intro; the default wiki's reader link carries no empty wiki param", async () => {
+    const html = await (await app.request("/wiki/issues?wiki=plain")).text();
+    expect(html).not.toContain("One row per key");
+    const def = await renderWikiBoardPage({ wiki: "", label: "Jira" });
+    expect(def).toContain('href="/wiki">← Wiki reader');
   });
 
   test("fans out to nothing, so it is not a side-effecting GET", () => {

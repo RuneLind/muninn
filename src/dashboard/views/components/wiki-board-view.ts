@@ -10,6 +10,9 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { articleUrl, localDay, urlWithDisplay } from "./wiki-filter.ts";
+import { withWikiParam } from "./wiki-param.ts";
+import { calendarDay } from "./wiki-activity-rank.ts";
+import { statusHtml } from "./wiki-issue-rows.ts";
 import { GRAPH_NODES_MAX, type GraphIssueNode, type GraphPageNode, type GraphPayload } from "../../../wiki/graph-types.ts";
 
 export type BoardFlag = "no plan" | "unknown key" | "0 stamped";
@@ -51,17 +54,36 @@ export function issueFlags(n: GraphIssueNode, lookupAvailable: boolean): BoardFl
   return flags;
 }
 
+const KEY_PARTS = /^(.*)-(\d+)$/;
+const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Project, then the key's number (`DEMO-9` before `DEMO-10`); a key of any
+ *  other shape by its code units. */
+export function compareIssueKeys(a: string, b: string): number {
+  const x = KEY_PARTS.exec(a);
+  const y = KEY_PARTS.exec(b);
+  if (!x || !y) return byCodeUnit(a, b);
+  return byCodeUnit(x[1]!, y[1]!) || Number(x[2]) - Number(y[2]) || byCodeUnit(a, b);
+}
+
 /** One row per issue node, newest activity first, then by key. */
 export function boardRows(p: Pick<GraphPayload, "nodes" | "issueLookup">): BoardRow[] {
   const available = p.issueLookup?.available === true;
   return p.nodes
     .filter((n): n is GraphIssueNode => n.lane === "issue")
     .map((node) => ({ node, flags: issueFlags(node, available) }))
-    .sort(
-      (a, b) =>
-        (b.node.lastActivityMs ?? 0) - (a.node.lastActivityMs ?? 0) ||
-        (a.node.key < b.node.key ? -1 : a.node.key > b.node.key ? 1 : 0),
-    );
+    .sort((a, b) => (b.node.lastActivityMs ?? 0) - (a.node.lastActivityMs ?? 0) || compareIssueKeys(a.node.key, b.node.key));
+}
+
+/**
+ * The calendar day a stamp names, or "" for none. A stamp at exactly UTC
+ * midnight is what `Date.parse` makes of a bare frontmatter day, so it names
+ * that day ({@link calendarDay}, the rail's rule) rather than the viewer's
+ * local day of the instant — the day before, west of UTC.
+ */
+export function boardDay(ms: number | undefined): string {
+  if (!ms || ms <= 0) return "";
+  return calendarDay(ms, ms % 86_400_000 === 0 ? new Date(ms).toISOString().slice(0, 10) : undefined);
 }
 
 /** Not `done`. A key with no category (the lookup did not answer) is open:
@@ -70,7 +92,10 @@ const isOpen = (n: GraphIssueNode): boolean => n.category !== "done";
 
 export function filterBoardRows(rows: readonly BoardRow[], f: BoardFilter, nowMs: number): BoardRow[] {
   const q = f.q.trim().toLowerCase();
-  const since = nowMs - BOARD_ACTIVE_DAYS * 86_400_000;
+  // Calendar days, not a 14 × 24 h window: a page dated 14 days back is in,
+  // whatever the time of day.
+  const now = new Date(nowMs);
+  const sinceDay = localDay(new Date(now.getFullYear(), now.getMonth(), now.getDate() - BOARD_ACTIVE_DAYS));
   return rows.filter(({ node, flags }) => {
     if (q && !node.key.toLowerCase().includes(q) && !(node.title ?? "").toLowerCase().includes(q)) return false;
     switch (f.show) {
@@ -79,7 +104,7 @@ export function filterBoardRows(rows: readonly BoardRow[], f: BoardFilter, nowMs
       case "noplan":
         return isOpen(node) && !node.planPages.length;
       case "active":
-        return (node.lastActivityMs ?? 0) >= since;
+        return boardDay(node.lastActivityMs) >= sinceDay;
       case "flagged":
         return flags.length > 0;
       default:
@@ -113,18 +138,13 @@ export function searchWithBoardFilter(search: string, f: BoardFilter): string {
 
 /** The reader's graph, rooted at the key (PR 4's deep link). */
 export function boardGraphUrl(wiki: string, tracker: string, key: string): string {
-  return urlWithDisplay(`/wiki?wiki=${encodeURIComponent(wiki)}`, { graph: true, issue: `${tracker}:${key}` });
+  return urlWithDisplay(withWikiParam("/wiki", wiki), { graph: true, issue: `${tracker}:${key}` });
 }
 
-/** The reader's own day label: the viewer's timezone. */
-const day = (ms: number | undefined): string => (ms && ms > 0 ? localDay(new Date(ms)) : "—");
+const day = (ms: number | undefined): string => boardDay(ms) || "—";
 
-function statusCell(n: GraphIssueNode): string {
-  if (!n.category) return `<span class="board-dim">—</span>`;
-  if (n.known === false) return `<span class="wiki-issue-status cat-unknown">not in huginn</span>`;
-  const title = n.updated ? `last updated ${n.updated.slice(0, 10)}, as of huginn's last capture` : "as of huginn's last capture";
-  return `<span class="wiki-issue-status cat-${esc(n.category)}" data-status-cat="${esc(n.category)}" title="${esc(title)}">${esc(n.status || "no status")}</span>`;
-}
+/** Connections' pill; a dash when the lookup did not answer. */
+const statusCell = (n: GraphIssueNode): string => statusHtml(n, n.label) || `<span class="board-dim">—</span>`;
 
 function planCell(n: GraphIssueNode, wiki: string): string {
   if (!n.planPages.length) return `<span class="board-dim">—</span>`;
@@ -137,6 +157,7 @@ const UNPRICED_TITLES = {
   deadline: "the session ledger timed out",
   unreachable: "the session ledger did not answer",
   "not-configured": "no session ledger on this host",
+  "no-row": "the session ledger returned no usable row for this key",
 } as const;
 
 /** Sessions and cost: a count and a dollar figure only when the ledger priced
@@ -156,7 +177,9 @@ function ledgerCells(n: GraphIssueNode): [string, string] {
   const count = `${l.sessions}${l.truncated ? "+" : ""}`;
   const costTitle =
     l.costedSessions < l.sessions ? `${l.costedSessions} of ${l.sessions} sessions carry a cost` : `${l.costedSessions} sessions`;
-  const cost = l.costedSessions > 0 ? `$${l.totalCost.toFixed(2)}` : "—";
+  // A cost that is not a number (JSON `null` for a non-finite one) is a dash,
+  // never a throw that leaves the board on "Loading…".
+  const cost = l.costedSessions > 0 && Number.isFinite(l.totalCost) ? `$${l.totalCost.toFixed(2)}` : "—";
   return [
     `<td class="num" data-sessions title="sessions that mention the key${esc(seen)}">${count}</td>`,
     `<td class="num" data-cost="priced" title="${esc(costTitle)}">${cost}</td>`,
@@ -170,12 +193,15 @@ function prCell(refs: readonly string[] | undefined): string {
   return shown.join(" ") + more;
 }
 
+const th = (label: string, cls = ""): string => `<th scope="col"${cls ? ` class="${cls}"` : ""}>${esc(label)}</th>`;
+
 /** One `<tr>` per row. The key cell is the row's link to the graph, so the row
  *  is reachable by keyboard; a click anywhere else on the row follows it too. */
 export function boardTableHtml(rows: readonly BoardRow[], wiki: string): string {
   const head =
-    `<thead><tr><th>Key</th><th>Issue</th><th>Status</th><th>Plan</th><th class="num">Pages</th>` +
-    `<th class="num">Sessions</th><th class="num">Cost</th><th>PRs</th><th>Last activity</th><th>Flags</th></tr></thead>`;
+    `<caption class="board-sr">Keys, newest activity first</caption>` +
+    `<thead><tr>${th("Key")}${th("Issue")}${th("Status")}${th("Plan")}${th("Pages", "num")}` +
+    `${th("Sessions", "num")}${th("Cost", "num")}${th("PRs")}${th("Last activity")}${th("Flags")}</tr></thead>`;
   const body = rows
     .map(({ node: n, flags }) => {
       const graph = boardGraphUrl(wiki, n.tracker, n.key);
@@ -205,7 +231,7 @@ export function boardTableHtml(rows: readonly BoardRow[], wiki: string): string 
 
 export function keylessTableHtml(pages: readonly GraphPageNode[], wiki: string): string {
   if (!pages.length) return `<p class="board-note">Every page relates to a key.</p>`;
-  const head = `<thead><tr><th>Page</th><th>Type</th><th>Last activity</th><th>PRs</th></tr></thead>`;
+  const head = `<thead><tr>${th("Page")}${th("Type")}${th("Last activity")}${th("PRs")}</tr></thead>`;
   const body = pages
     .map(
       (p) =>
@@ -220,30 +246,49 @@ export function keylessTableHtml(pages: readonly GraphPageNode[], wiki: string):
 }
 
 /** Counts over ALL rows, never the filtered ones, and no cost total: one
- *  session counts under every key it mentions, so a sum would double-count. */
-export function boardKpisHtml(rows: readonly BoardRow[], keyless: number): string {
-  const kpi = (n: number, label: string, id: string) => `<div class="board-kpi" data-kpi="${id}"><b>${n}</b><span>${esc(label)}</span></div>`;
+ *  session counts under every key it mentions, so a sum would double-count.
+ *  `keylessCapped`: the keyless list was cut, so its count reads `N+`. */
+export function boardKpisHtml(rows: readonly BoardRow[], keyless: number, keylessCapped = false): string {
+  const kpi = (n: number | string, label: string, id: string) =>
+    `<div class="board-kpi" data-kpi="${id}"><b>${n}</b><span>${esc(label)}</span></div>`;
   return (
     kpi(rows.length, "keys", "keys") +
     kpi(rows.filter((r) => isOpen(r.node) && !r.node.planPages.length).length, "open, no plan", "open-no-plan") +
     kpi(rows.filter((r) => r.flags.includes("0 stamped")).length, "0 stamped", "zero-stamped") +
-    kpi(keyless, "pages with no key", "keyless")
+    kpi(`${keyless}${keylessCapped ? "+" : ""}`, "pages with no key", "keyless")
   );
 }
 
+const keysWord = (n: number): string => `${n} ${n === 1 ? "key" : "keys"}`;
+const itWord = (n: number): string => (n === 1 ? "it" : "them");
+
 /** The notes above the table: what degraded, and what was cut. */
-export function boardNotes(p: Pick<GraphPayload, "truncated" | "truncatedBy" | "issueLookup" | "keysLedger">): string[] {
+export function boardNotes(
+  p: Pick<GraphPayload, "truncated" | "truncatedBy" | "keylessTruncated" | "issueLookup" | "keysLedger"> & Partial<Pick<GraphPayload, "nodes">>,
+): string[] {
   const out: string[] = [];
   if (p.issueLookup && !p.issueLookup.available) {
     out.push("The issue listing (huginn) did not answer: no titles or statuses, and no key is flagged unknown.");
   }
+  const ledgers = (p.nodes ?? []).flatMap((n) => (n.lane === "issue" && n.keyLedger ? [n.keyLedger] : []));
+  const unpriced = (reason: string) => ledgers.filter((v) => v.state === "unpriced" && v.reason === reason).length;
+  const noRow = unpriced("no-row");
+  const unreached = unpriced("unreachable");
+  // Some batch answered: a failed one leaves only its own keys unpriced.
+  const answered = noRow > 0 || ledgers.some((v) => v.state === "priced");
   const l = p.keysLedger;
   if (l && !l.configured) out.push("No session ledger on this host: sessions and cost are not shown.");
   else if (l?.timedOut) out.push("The session ledger timed out: sessions and cost are not shown for the keys it did not answer.");
-  else if (l && l.calls > 0 && !l.reachable) out.push("Session ledger unavailable: sessions and cost are not shown.");
-  const by = p.truncatedBy ?? [];
-  if (p.truncated && by.includes("nodes")) out.push(`The board shows the first ${GRAPH_NODES_MAX} keys.`);
-  if (p.truncated && by.includes("keyless")) out.push(`Pages with no key: the first ${GRAPH_NODES_MAX}, newest first.`);
+  else if (l && l.calls > 0 && !l.reachable) {
+    out.push(
+      answered && unreached > 0
+        ? `${keysWord(unreached)} could not be priced: the session ledger did not answer for ${itWord(unreached)}.`
+        : "Session ledger unavailable: sessions and cost are not shown.",
+    );
+  }
+  if (noRow > 0) out.push(`${keysWord(noRow)} got no row from the session ledger: sessions and cost are not shown for ${itWord(noRow)}.`);
+  if (p.truncated && (p.truncatedBy ?? []).includes("nodes")) out.push(`The board shows the first ${GRAPH_NODES_MAX} keys.`);
+  if (p.keylessTruncated) out.push(`Pages with no key: the first ${GRAPH_NODES_MAX}, newest first.`);
   return out;
 }
 

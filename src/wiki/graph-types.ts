@@ -80,9 +80,11 @@ export function parseGraphQuery(q: {
   root?: string | null;
   depth?: string | null;
   level?: string | null;
-  keyless?: string | null;
-  fields?: string | null;
-  ledger?: string | null;
+  /** Every value the request carried, so a repeat is refused rather than
+   *  read as its first. */
+  keyless?: string | readonly string[] | null;
+  fields?: string | readonly string[] | null;
+  ledger?: string | readonly string[] | null;
 }): { ok: true; query: GraphQuery } | { ok: false; error: string } {
   const scopeRaw = (q.scope ?? "").trim() || "page";
   if (!(GRAPH_SCOPES as readonly string[]).includes(scopeRaw)) {
@@ -110,13 +112,15 @@ export function parseGraphQuery(q: {
     depth = Number(depthRaw);
   }
   const opts: Pick<GraphQuery, "keyless" | "issueFields" | "keysLedger"> = {};
-  const optIns: [param: string, raw: string | null | undefined, value: string, set: () => void][] = [
+  const optIns: [param: string, raw: string | readonly string[] | null | undefined, value: string, set: () => void][] = [
     ["keyless", q.keyless, "1", () => (opts.keyless = true)],
     ["fields", q.fields, "issue", () => (opts.issueFields = true)],
     ["ledger", q.ledger, "keys", () => (opts.keysLedger = true)],
   ];
   for (const [param, raw, value, set] of optIns) {
-    const v = (raw ?? "").trim();
+    const all = raw == null ? [] : typeof raw === "string" ? [raw] : raw;
+    if (all.length > 1) return { ok: false, error: `${param} must be given once` };
+    const v = all[0] ?? "";
     if (!v) continue;
     if (v !== value) return { ok: false, error: `${param} must be ${value}` };
     if (scope !== "wiki") return { ok: false, error: `${param} is only read at scope=wiki` };
@@ -256,8 +260,7 @@ export interface GraphKeysLedgerState {
   timedOut: boolean;
 }
 
-/** `keyless` is `keylessPages` cut at `GRAPH_NODES_MAX`. */
-export type GraphCap = "sessions" | "nodes" | "edges" | "keyless";
+export type GraphCap = "sessions" | "nodes" | "edges";
 
 export interface GraphPayload {
   scope: GraphScope;
@@ -276,6 +279,9 @@ export interface GraphPayload {
    *  first, at hop 0 and on no edge. A field of their own rather than nodes, so
    *  a graph client never draws an unconnected page. */
   keylessPages?: GraphPageNode[];
+  /** `keylessPages` was cut at `GRAPH_NODES_MAX`. Its own flag, not a
+   *  `truncatedBy` entry: `truncated` means the drawn graph was cut. */
+  keylessTruncated?: true;
   /** `fields=issue`: did every tracker's lookup answer? False ⇒ no issue node
    *  carries `known`, and nothing may read as "unknown key". */
   issueLookup?: { available: boolean };

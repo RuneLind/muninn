@@ -126,7 +126,10 @@ export function linkRefusalHtml(reason: string, field: string): string {
   }
 }
 
-function statusHtml(row: IssueRow, label: string): string {
+/** A key's status pill from its lookup facts; empty when the lookup did not
+ *  answer. `label` is the tracker's (`Jira`). Connections and the issue board
+ *  share it. */
+export function statusHtml(row: Pick<IssueRow, "category" | "known" | "status" | "updated">, label: string): string {
   if (!row.category) return "";
   const when = row.updated ? row.updated.slice(0, 10) : "";
   const title = when

@@ -25,8 +25,8 @@ import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
 import { PROVENANCE_BUDGET_MS, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import { buildGraph, graphLedgerPort } from "../../wiki/graph.ts";
-import { joinIssueFields, joinKeysLedger } from "../../wiki/graph-board.ts";
-import { parseGraphQuery, type GraphIssueNode } from "../../wiki/graph-types.ts";
+import { applyBoardJoins } from "../../wiki/graph-board.ts";
+import { parseGraphQuery } from "../../wiki/graph-types.ts";
 
 export function registerWikiGraphRoute(app: Hono, ctx: ProvenanceContext): void {
   app.get("/api/wiki/graph", async (c) => {
@@ -35,9 +35,9 @@ export function registerWikiGraphRoute(app: Hono, ctx: ProvenanceContext): void 
       root: c.req.query("root"),
       depth: c.req.query("depth"),
       level: c.req.query("level"),
-      keyless: c.req.query("keyless"),
-      fields: c.req.query("fields"),
-      ledger: c.req.query("ledger"),
+      keyless: c.req.queries("keyless"),
+      fields: c.req.queries("fields"),
+      ledger: c.req.queries("ledger"),
     });
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
     const { query } = parsed;
@@ -59,19 +59,7 @@ export function registerWikiGraphRoute(app: Hono, ctx: ProvenanceContext): void 
     const signal = deadline ? AbortSignal.any([c.req.raw.signal, deadline]) : undefined;
     const result = await buildGraph(index, query, graphLedgerPort(ctx, signal, deadline));
     if (!result.ok) return c.json({ error: result.error }, result.status);
-    const payload = result.payload;
-    if (query.issueFields || query.keysLedger) {
-      const issues = payload.nodes.filter((n): n is GraphIssueNode => n.lane === "issue");
-      const trackers = index.readerConfig?.trackers ?? [];
-      // Started together: a slow huginn must not spend the deadline
-      // claude-usage was never asked inside.
-      const [lookup, keysLedger] = await Promise.all([
-        query.issueFields ? joinIssueFields(issues, trackers, ctx, signal, entry?.root ?? "") : null,
-        query.keysLedger ? joinKeysLedger(issues, trackers, ctx, signal, deadline) : null,
-      ]);
-      if (lookup) payload.issueLookup = lookup;
-      if (keysLedger) payload.keysLedger = keysLedger;
-    }
-    return c.json(payload);
+    await applyBoardJoins(result.payload, query, index.readerConfig?.trackers ?? [], ctx, { signal, deadline, wikiRoot: entry?.root ?? "" });
+    return c.json(result.payload);
   });
 }

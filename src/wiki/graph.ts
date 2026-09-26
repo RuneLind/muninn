@@ -491,12 +491,13 @@ export async function buildGraph(
     for (const n of nodes.values()) if (n.lane === "issue") Object.assign(n, issueAggregates(keyMap.get(issueKeyId(n.tracker, n.key)), index));
   }
   let keylessPages: GraphPageNode[] | undefined;
+  let keylessTruncated = false;
   if (query.keyless) {
     const keyless = index.pages
       .filter((p) => !isBookkeeping(p) && !(p.issues ?? []).some((r) => configOf.has(r.tracker) && relationsCount(r.relations)))
       .map((p) => ({ ...pageNode(p), hop: 0 }) as GraphPageNode)
       .sort((a, b) => b.pageTimeMs - a.pageTimeMs || (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
-    if (keyless.length > GRAPH_NODES_MAX) truncatedBy.add("keyless");
+    keylessTruncated = keyless.length > GRAPH_NODES_MAX;
     keylessPages = keyless.slice(0, GRAPH_NODES_MAX);
   }
 
@@ -530,6 +531,7 @@ export async function buildGraph(
         mergesTruncated,
       },
       ...(keylessPages ? { keylessPages } : {}),
+      ...(keylessTruncated ? { keylessTruncated: true as const } : {}),
     },
   };
 }

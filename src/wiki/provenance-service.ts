@@ -491,17 +491,29 @@ export async function resolveIssueRows(
     const fact = facts?.get(row.key);
     const out: IssueRow = { ...row, ledger: ledger[i] as IssueLedgerView };
     if (facts && config) {
-      out.known = !!fact;
-      out.category = statusCategory(fact?.status, config, wikiRoot);
-      if (fact?.title) out.title = fact.title;
-      if (fact?.status) out.status = fact.status;
-      if (fact?.updated) out.updated = fact.updated;
+      applyIssueFact(out, fact, config, wikiRoot);
       if (fact?.epicLink) {
         out.epic = { key: fact.epicLink, ...(fact.epicSummary ? { summary: fact.epicSummary } : {}) };
       }
     }
     return out;
   });
+}
+
+/** One key's lookup facts onto a Connections row or a board node: `known`, the
+ *  category through the wiki's `statusMap`, and title, status and updated when
+ *  the lookup has them. Only for a tracker whose lookup answered. */
+export function applyIssueFact(
+  target: Pick<IssueRow, "known" | "category" | "title" | "status" | "updated">,
+  fact: IssueFacts | undefined,
+  config: TrackerConfig,
+  wikiRoot: string,
+): void {
+  target.known = !!fact;
+  target.category = statusCategory(fact?.status, config, wikiRoot);
+  if (fact?.title) target.title = fact.title;
+  if (fact?.status) target.status = fact.status;
+  if (fact?.updated) target.updated = fact.updated;
 }
 
 /** A tracker's issue facts through the context's seam, raced against the

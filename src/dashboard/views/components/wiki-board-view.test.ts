@@ -157,3 +157,73 @@ describe("markup", () => {
     expect(boardNotes({ issueLookup: { available: true }, keysLedger: { configured: true, calls: 1, reachable: true, timedOut: false } })).toEqual([]);
   });
 });
+
+describe("fix round 1", () => {
+  /** Run `fn` with the process in `tz`, restoring the zone it had. */
+  const inZone = <T>(tz: string, fn: () => T): T => {
+    const prev = process.env.TZ;
+    const was = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    process.env.TZ = tz;
+    try {
+      return fn();
+    } finally {
+      process.env.TZ = prev ?? was;
+    }
+  };
+
+  test("C4: a bare frontmatter day renders as that day west of UTC, in both tables", () => {
+    const ms = Date.parse("2026-09-24");
+    const html = inZone("America/New_York", () => ({
+      row: boardTableHtml(boardRows({ nodes: [node("DEMO-101", { lastActivityMs: ms })] }), "w"),
+      keyless: keylessTableHtml([{ id: "page:l.md", lane: "page", hop: 0, relPath: "l.md", title: "L", type: "note", pageTimeMs: ms, plan: false }], "w"),
+    }));
+    expect(html.row).toContain('data-last>2026-09-24<');
+    expect(html.keyless).toContain(">2026-09-24<");
+  });
+
+  test("C5: active keeps a page dated exactly 14 calendar days back, at any time of day", () => {
+    const evening = new Date(2026, 0, 20, 18).getTime();
+    const rows = boardRows({
+      nodes: [node("DEMO-101", { lastActivityMs: Date.parse("2026-01-06") }), node("DEMO-102", { lastActivityMs: Date.parse("2026-01-05") })],
+    });
+    expect(filterBoardRows(rows, { show: "active", q: "" }, evening).map((r) => r.node.key)).toEqual(["DEMO-101"]);
+  });
+
+  test("C6: a tie sorts by project, then by the key's number", () => {
+    const at = NOW - DAY;
+    const rows = boardRows({
+      nodes: ["DEMO-100", "DEMO-10", "DEMO-9", "ABC-5"].map((k) => node(k, { lastActivityMs: at })),
+    });
+    expect(rows.map((r) => r.node.key)).toEqual(["ABC-5", "DEMO-9", "DEMO-10", "DEMO-100"]);
+  });
+
+  test("C7: one failed batch of several says how many keys went unpriced, not that the ledger is unavailable", () => {
+    const priced = { state: "priced", sessions: 1, totalCost: 1, costedSessions: 1, truncated: false, lastSeen: null } as const;
+    const nodes = [
+      node("DEMO-101", { keyLedger: priced }),
+      node("DEMO-102", { keyLedger: priced }),
+      node("DEMO-103", { keyLedger: { state: "unpriced", reason: "unreachable" } }),
+    ];
+    const notes = boardNotes({ nodes, keysLedger: { configured: true, calls: 2, reachable: false, timedOut: false } });
+    expect(notes).toEqual(["1 key could not be priced: the session ledger did not answer for it."]);
+  });
+
+  test("C8: a key the ledger returned no row for has its own reason, tooltip and note", () => {
+    const nodes = [node("DEMO-101", { keyLedger: { state: "unpriced", reason: "no-row" } as never })];
+    const html = boardTableHtml(boardRows({ nodes }), "w");
+    expect(html).toContain('title="the session ledger returned no usable row for this key"');
+    expect(boardNotes({ nodes, keysLedger: { configured: true, calls: 1, reachable: true, timedOut: false } })).toEqual([
+      "1 key got no row from the session ledger: sessions and cost are not shown for it.",
+    ]);
+  });
+
+  test("C9: a priced key whose cost arrived as null renders — and does not throw", () => {
+    const keyLedger = { state: "priced", sessions: 2, totalCost: null, costedSessions: 2, truncated: false, lastSeen: null } as never;
+    const html = boardTableHtml(boardRows({ nodes: [node("DEMO-101", { keyLedger })] }), "w");
+    expect(html).toContain('data-cost="priced" title="2 sessions">—<');
+  });
+
+  test("C15: the default wiki's links carry no empty wiki param", () => {
+    expect(boardGraphUrl("", "jira", "DEMO-101")).toBe("/wiki?display=graph&issue=jira%3ADEMO-101");
+  });
+});

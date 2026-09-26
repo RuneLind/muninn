@@ -329,3 +329,106 @@ test.describe("Wiki issue board", () => {
     expect(keysCalls.length).toBe(before);
   });
 });
+
+test.describe("Wiki issue board: fix round 1", () => {
+  const GRAPH = "**/api/wiki/graph?*";
+
+  test("C1: after a load error, a filter click or typing leaves the error in place", async ({ page }) => {
+    await page.route(GRAPH, (r) => r.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) }));
+    await page.goto(`${BASE}/wiki/issues?wiki=${WIKI}`);
+    const err = page.locator("#boardTableWrap .board-error");
+    await expect(err).toContainText("boom");
+    await page.locator('[data-board-show="open"]').click();
+    await page.locator("#boardQuery").fill("demo");
+    await expect(err).toContainText("boom");
+    await expect(page.locator("#boardTable")).toHaveCount(0);
+    await expect(page.locator("#boardShown")).not.toContainText("keys");
+  });
+
+  test("C2: typing while the graph call is in flight keeps Loading…, then the rows arrive filtered", async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(GRAPH, async (r) => {
+      await held;
+      await r.continue();
+    });
+    await page.goto(`${BASE}/wiki/issues?wiki=${WIKI}`);
+    await page.locator("#boardQuery").fill("følge");
+    await expect(page.locator("#boardTableWrap")).toContainText("Loading…");
+    await expect(page.locator("#boardShown")).not.toContainText("0 keys");
+    release();
+    await expect(page.locator("#boardTable")).toBeVisible();
+    expect(await rowKeys(page)).toEqual(["DEMO-102"]);
+  });
+
+  test("C3: a non-JSON error body shows the HTTP status", async ({ page }) => {
+    await page.route(GRAPH, (r) => r.fulfill({ status: 502, contentType: "text/html", body: "<html>Bad gateway</html>" }));
+    await page.goto(`${BASE}/wiki/issues?wiki=${WIKI}`);
+    await expect(page.locator("#boardTableWrap .board-error")).toContainText("HTTP 502");
+  });
+
+  test("C10: column headers are scoped, the key table is named, and the count is a polite live region", async ({ page }) => {
+    await openBoard(page);
+    for (const t of ["#boardTable", "#boardKeyless"]) {
+      const ths = page.locator(`${t} thead th`);
+      await expect(page.locator(`${t} thead th[scope="col"]`)).toHaveCount(await ths.count());
+    }
+    await expect(page.locator("#boardTable caption")).toHaveCount(1);
+    await expect(page.getByRole("table", { name: /keys/i })).toHaveCount(1);
+    await expect(page.locator("#boardShown")).toHaveAttribute("aria-live", "polite");
+  });
+
+  test("C12: a modifier click on a row opens the graph in a new tab and leaves this one; Enter on the key link still navigates", async ({ page, context }) => {
+    await openBoard(page);
+    const boardUrl = page.url();
+    const opened = context.waitForEvent("page", { timeout: 5_000 });
+    await row(page, "DEMO-102").locator(".board-title").click({ modifiers: ["ControlOrMeta"] });
+    const tab = await opened;
+    await tab.waitForLoadState();
+    expect(new URL(tab.url()).searchParams.get("issue")).toBe("jira:DEMO-102");
+    await tab.close();
+    expect(page.url()).toBe(boardUrl);
+    await row(page, "DEMO-102").locator(".board-key a").first().focus();
+    await page.keyboard.press("Enter");
+    await page.waitForURL(/\/wiki\?/);
+    expect(new URL(page.url()).searchParams.get("issue")).toBe("jira:DEMO-102");
+  });
+
+  test("C13: a throwing replaceState never skips the render; the URL write is debounced and keeps the hash", async ({ page }) => {
+    await page.addInitScript(() => {
+      const orig = history.replaceState.bind(history);
+      (window as unknown as { __rs: number }).__rs = 0;
+      history.replaceState = (...a: Parameters<History["replaceState"]>) => {
+        const w = window as unknown as { __rs: number; __rsThrow?: boolean };
+        w.__rs++;
+        if (w.__rsThrow) throw new DOMException("too many calls", "SecurityError");
+        return orig(...a);
+      };
+    });
+    await page.goto(`${BASE}/wiki/issues?wiki=${WIKI}#top`);
+    await expect(page.locator("#boardTable")).toBeVisible();
+    await page.locator("#boardQuery").pressSequentially("demo-10", { delay: 20 });
+    await expect.poll(() => new URL(page.url()).searchParams.get("q")).toBe("demo-10");
+    expect(new URL(page.url()).hash).toBe("#top");
+    expect(await page.evaluate(() => (window as unknown as { __rs: number }).__rs)).toBeLessThan(3);
+    await page.evaluate(() => ((window as unknown as { __rsThrow: boolean }).__rsThrow = true));
+    // A click writes the URL at once; a throwing write must not skip its render.
+    await page.locator('[data-board-show="noplan"]').click();
+    expect(await rowKeys(page)).toEqual(["DEMO-102", "DEMO-103"]);
+    await page.locator("#boardQuery").fill("følge");
+    expect(await rowKeys(page)).toEqual(["DEMO-102"]);
+  });
+
+  test("C14: a capped keyless list reads as capped on its KPI", async ({ page }) => {
+    await page.route(GRAPH, async (r) => {
+      const res = await r.fetch();
+      const body = await res.json();
+      const one = body.keylessPages[0];
+      body.keylessPages = Array.from({ length: 1500 }, (_, i) => ({ ...one, id: `page:x${i}.md`, relPath: `x${i}.md` }));
+      body.keylessTruncated = true;
+      await r.fulfill({ response: res, json: body });
+    });
+    await openBoard(page);
+    await expect(page.locator('[data-kpi="keyless"] b')).toHaveText("1500+");
+  });
+});
