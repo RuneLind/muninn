@@ -97,7 +97,7 @@ const UNPROVISIONED_INSTRUCTION = [
   "",
   "    bun db/provision.ts --yes        # or: bun run db:provision -- --yes",
   "",
-  "  `--yes` confirms the target: this applies 881 lines of DDL, and a bare",
+  "  `--yes` confirms the target: this applies db/init.sql's full schema in one transaction, and a bare",
   "  invocation in a checkout would resolve whatever `.env` names. Run it once",
   "  without the flag to see which database it resolved.",
   "",
