@@ -4,7 +4,8 @@
  * through an injected launcher over a stub DOM) — plus the load-bearing
  * structural fact that this module does not load a browser driver at import.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import {
   manifestUrlFromPlayerConfig,
   chooseTrack,
@@ -366,6 +367,20 @@ interface FakePageSpec {
   contextCloseHangs?: boolean;
   /** `browser.close()` never settles. */
   browserCloseHangs?: boolean;
+  /** `context.close()` settles after this long (slow, not hung). */
+  contextCloseDelayMs?: number;
+  /** The late duration read (the evaluate that pauses the video) never settles. */
+  lateDurationHangs?: boolean;
+  /** The challenge probe's evaluate resolves only after this long. */
+  probeDelayMs?: number;
+  /** The user-agent probe's evaluate resolves only after this long. */
+  uaProbeDelayMs?: number;
+  /** `browser.newContext()` resolves only after this long. */
+  newContextDelayMs?: number;
+  /** The user-agent probe's evaluate rejects only once `browser.close()` is called. */
+  uaProbeHangsUntilClose?: boolean;
+  /** `browser.process()` exists and returns a handle whose `kill` is recorded. */
+  browserProcess?: boolean;
 }
 
 interface FakeHarness {
@@ -379,6 +394,10 @@ interface FakeHarness {
   newContextCalls: number;
   /** `browser.close()` calls, settled or not. */
   browserCloses: number;
+  /** Signals sent through `browser.process().kill()`. */
+  kills: string[];
+  /** `context.newPage()` calls. */
+  newPages: number;
 }
 
 /** The shape of the player's `/config` (measured 2026-09-06 on vimeo.com/1223305711); URLs are placeholders. */
@@ -402,6 +421,8 @@ const CONFIG_WITH_DASH = {
 
 function fakeHarness(spec: FakePageSpec): FakeHarness {
   const modeLog: string[] = [];
+  /** Pending browser calls that reject once `browser.close()` is called. */
+  const onBrowserClose: (() => void)[] = [];
   const requestHandlers: ((req: { url: () => string }) => void)[] = [];
   const responseHandlers: ((res: { url: () => string; body: () => Promise<Uint8Array> }) => void)[] = [];
   const trackSpecs = spec.tracks ?? [];
@@ -505,6 +526,14 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
     async evaluate(fn: (arg?: unknown) => unknown, arg?: unknown) {
       const source = String(fn);
       if (source.includes("hasVideo") && spec.probeThrows) throw new Error(spec.probeThrows);
+      if (source.includes("hasVideo") && spec.probeDelayMs) await Bun.sleep(spec.probeDelayMs);
+      if (source.includes("pause()") && spec.lateDurationHangs) return await new Promise<never>(() => {});
+      if (source.includes("navigator.userAgent") && spec.uaProbeDelayMs) await Bun.sleep(spec.uaProbeDelayMs);
+      if (source.includes("navigator.userAgent") && spec.uaProbeHangsUntilClose) {
+        return await new Promise<never>((_, reject) =>
+          onBrowserClose.push(() => reject(new Error("page.evaluate: Target page, context or browser has been closed"))),
+        );
+      }
       return await runInPage(fn, arg);
     },
     async waitForSelector(selector: string, options?: { timeout?: number }) {
@@ -527,12 +556,15 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
   const never = () => new Promise<never>(() => {});
   let newContextCalls = 0;
   let browserCloses = 0;
-  const onBrowserClose: (() => void)[] = [];
+  const kills: string[] = [];
+  let newPages = 0;
   const context = {
     async newPage() {
+      newPages++;
       return page;
     },
-    close: () => (spec.contextCloseHangs ? never() : Promise.resolve()),
+    close: () =>
+      spec.contextCloseHangs ? never() : spec.contextCloseDelayMs ? Bun.sleep(spec.contextCloseDelayMs) : Promise.resolve(),
   };
   const browser = {
     newContext: () => {
@@ -542,6 +574,7 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
           onBrowserClose.push(() => reject(new Error("browser.newContext: Target page, context or browser has been closed"))),
         );
       }
+      if (spec.newContextDelayMs) return Bun.sleep(spec.newContextDelayMs).then(() => context);
       return spec.newContextHangs ? never() : Promise.resolve(context);
     },
     close: () => {
@@ -549,6 +582,17 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
       for (const f of onBrowserClose.splice(0)) f();
       return spec.browserCloseHangs ? never() : Promise.resolve();
     },
+    ...(spec.browserProcess
+      ? {
+          process: () => ({
+            pid: 4242,
+            kill: (signal: string) => {
+              kills.push(signal);
+              return true;
+            },
+          }),
+        }
+      : {}),
   };
 
   return {
@@ -567,6 +611,10 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
     },
     get browserCloses() {
       return browserCloses;
+    },
+    kills,
+    get newPages() {
+      return newPages;
     },
   };
 }
@@ -1104,4 +1152,142 @@ describe("harvestVimeoCaptions — a wedged browser is bounded by the budget", (
     expect(t.tracks).toEqual([]);
     expect(t.manifestUrl).toContain("/playlist.json");
   }, 10_000);
+});
+
+describe("harvestVimeoCaptions — an answer in hand wins over the budget (fix round 1)", () => {
+  // The race answers only for a body with NO answer. Closes run after it, and
+  // the one browser call left after the answer is bounded and non-fatal.
+  const ONE_TRACK = { hasVideo: true, tracks: [{ lang: "en", label: "English" }], urlPerTrack: [CAPTION_URL("en")] };
+  let records: LogRecord[] = [];
+  async function capture(): Promise<void> {
+    records = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "warning" },
+      ],
+      reset: true,
+    });
+  }
+  const warnings = () => records.filter((r) => r.level === "warning").map((r) => r.message.join(""));
+  afterEach(async () => {
+    await reset();
+  });
+
+  test("(a) track-less, no manifest, manifest wait past the budget, slow context.close → tracks:[] (the Whisper fallback), not the budget", async () => {
+    const harness = fakeHarness({ hasVideo: true, tracks: [], contextCloseDelayMs: 700 });
+    const started = Date.now();
+    const outcome = await settledWithin(
+      harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 1_000, awaitManifestNoCaptionsMs: 10_000 }),
+      5_000,
+    );
+    expect(outcome).not.toBeInstanceOf(Error);
+    expect((outcome as { tracks: VimeoCaptionTrack[] }).tracks).toEqual([]);
+    expect((outcome as { manifestUrl?: string }).manifestUrl).toBeUndefined();
+    // Manifest wait to the deadline, then the 700 ms closes after the race.
+    expect(Date.now() - started).toBeLessThan(1_000 + 700 + 1_000);
+  }, 10_000);
+
+  test("(b) captions in hand ~1 s before the deadline and a context.close that never returns → the captions", async () => {
+    const harness = fakeHarness({ ...ONE_TRACK, contextCloseHangs: true });
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 1_000 }), 6_000);
+    expect(outcome).not.toBeInstanceOf(Error);
+    expect((outcome as { tracks: VimeoCaptionTrack[] }).tracks.map((t) => t.lang)).toEqual(["en"]);
+    expect(harness.browserCloses).toBe(1);
+  }, 10_000);
+
+  test("(c) a late duration read that never returns after the manifest wait → the answer, without that duration", async () => {
+    const harness = fakeHarness({ ...ONE_TRACK, lateDurationHangs: true });
+    const started = Date.now();
+    const outcome = await settledWithin(
+      harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 1_000, awaitManifestMs: 10_000 }),
+      5_000,
+    );
+    expect(outcome).not.toBeInstanceOf(Error);
+    expect((outcome as { tracks: VimeoCaptionTrack[] }).tracks.map((t) => t.lang)).toEqual(["en"]);
+    // The stub's duration is NaN, so the earlier read said "unknown" too.
+    expect((outcome as { durationSec: number }).durationSec).toBe(0);
+    expect(Date.now() - started).toBeLessThan(1_000 + 1_000 + 1_000);
+  }, 10_000);
+
+  test("(d) a raced-out body opens no context and loads no page after the race was lost, and logs nothing misleading", async () => {
+    await capture();
+    const harness = fakeHarness({ ...ONE_TRACK, uaProbeHangsUntilClose: true });
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 300 }), 3_000);
+    expect(outcome).toBeInstanceOf(VimeoHarvestError);
+    expect((outcome as Error).message).toMatch(/whole-operation budget/);
+    expect(harness.newContextCalls).toBe(1);
+    // Give an abandoned body time to go on: the probe rejected on browser.close().
+    await Bun.sleep(300);
+    expect(harness.newContextCalls).toBe(1);
+    expect(harness.navigations).toBe(0);
+    expect(warnings().filter((w) => w.includes("user agent"))).toEqual([]);
+  }, 8_000);
+
+  test("(d) a user-agent probe that answers after the race was lost opens no harvest context", async () => {
+    const harness = fakeHarness({ ...ONE_TRACK, uaProbeDelayMs: 1_000 });
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 300 }), 3_000);
+    expect(outcome).toBeInstanceOf(VimeoHarvestError);
+    await Bun.sleep(500);
+    expect(harness.newContextCalls).toBe(1);
+    expect(harness.navigations).toBe(0);
+  }, 8_000);
+
+  test("(d) a context that arrives after the race was lost gets no page", async () => {
+    const harness = fakeHarness({ ...ONE_TRACK, newContextDelayMs: 1_000 });
+    const outcome = await settledWithin(
+      harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 300, userAgent: "Mozilla/5.0 test" }),
+      3_000,
+    );
+    expect(outcome).toBeInstanceOf(VimeoHarvestError);
+    await Bun.sleep(500);
+    expect(harness.newContextCalls).toBe(1);
+    expect(harness.newPages).toBe(0);
+  }, 8_000);
+
+  test("(d) a bot page seen after the race was lost is not retried and not logged as one", async () => {
+    await capture();
+    const harness = fakeHarness({ hasVideo: false, title: "Sorry", probeDelayMs: 1_000 });
+    const outcome = await settledWithin(
+      harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 300, userAgent: "Mozilla/5.0 test" }),
+      3_000,
+    );
+    expect(outcome).toBeInstanceOf(VimeoHarvestError);
+    await Bun.sleep(500);
+    expect(harness.navigations).toBe(1);
+    expect(warnings().filter((w) => w.includes("retrying"))).toEqual([]);
+  }, 8_000);
+
+  test("(e) a browser.close that never returns: SIGKILL through the process handle when there is one", async () => {
+    await capture();
+    const harness = fakeHarness({ ...ONE_TRACK, browserCloseHangs: true, browserProcess: true });
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 1_000 }), 5_000);
+    expect((outcome as { tracks: VimeoCaptionTrack[] }).tracks.map((t) => t.lang)).toEqual(["en"]);
+    expect(harness.kills).toEqual(["SIGKILL"]);
+    expect(warnings().some((w) => w.includes("SIGKILL") && w.includes("4242"))).toBe(true);
+  }, 8_000);
+
+  test("(e) a browser.close that never returns and no process handle: a leak warning", async () => {
+    await capture();
+    const harness = fakeHarness({ ...ONE_TRACK, browserCloseHangs: true });
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 1_000 }), 5_000);
+    expect((outcome as { tracks: VimeoCaptionTrack[] }).tracks.map((t) => t.lang)).toEqual(["en"]);
+    expect(harness.kills).toEqual([]);
+    expect(warnings().some((w) => w.includes("may have leaked"))).toBe(true);
+  }, 8_000);
+
+  test("a close that REJECTS is logged at warn, and the answer stands", async () => {
+    await capture();
+    const harness = fakeHarness(ONE_TRACK);
+    const launcher = {
+      launch: async (o: { headless: boolean; timeout: number }) => {
+        const b = await harness.launcher.launch(o);
+        return Object.assign(Object.create(b as object), { close: () => Promise.reject(new Error("boom on close")) });
+      },
+    } as unknown as VimeoBrowserLauncher;
+    const c = await harvestVimeoCaptions("123", { launcher, timeoutMs: 5_000 });
+    expect(c.tracks.map((t) => t.lang)).toEqual(["en"]);
+    expect(warnings().some((w) => w.includes("browser.close() failed") && w.includes("boom on close"))).toBe(true);
+  }, 8_000);
 });

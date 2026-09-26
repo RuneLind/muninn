@@ -698,7 +698,14 @@ entirely.
 browser per harvest, so every harvest goes through a module-level
 `createQueue()` key in `summarizer.ts`. A QUEUE, not a try-lock: two pastes are
 two legitimate jobs and neither may be dropped — the second waits, then runs, and
-its own 60 s budget starts when it does.
+its own 60 s budget starts when it does. ⚠️ The one exception is a
+`browser.close()` that does not return within `VIMEO_HARVEST_TEARDOWN_MS`: the
+harvest abandons it and the queue moves on. `closeWithin` then SIGKILLs the
+process when the `Browser` exposes `process()`, but a Browser from
+`chromium.launch()` does not (playwright-core 1.58 has `process()` only on
+`BrowserServer`), so in production it logs at warn that a Chromium process may
+have leaked, and that process lives until muninn exits while the next harvest
+launches its own.
 
 **The auto-caption rider is appended exactly when `detectCaptionKind` says
 `auto`.** Vimeo's machine captions garble proper nouns ("JavaBeen" for JavaBin,
@@ -1018,8 +1025,17 @@ Playwright reads as "wait forever". Chromium is launched per harvest and closed 
 against the deadline** (`withinBudget`, 500 ms grace so a wait's own clearer error
 wins), because `newContext`/`close`/`evaluate` take no timeout and every harvest
 shares one queue key: one wedged call stalled every later capture at `pending`.
-Each `close()` gets its own `VIMEO_HARVEST_TEARDOWN_MS` (2 s), outside the spent
-budget, hang or failure swallowed.
+**An answer in hand wins.** The race fires only while the body has no answer:
+once the manifest wait ends the body sets `answered`, the race stands down, and
+the one browser call left (the late duration read) has its own 1 s bound and
+falls back to "no duration" (the summarizer takes oEmbed's anyway). No `close()`
+runs inside the race — a slow context close after the answer used to eat the
+grace and turn a track-less video into a budget error instead of the Whisper
+fallback. After the race settles, each context and then the browser gets its own
+`VIMEO_HARVEST_TEARDOWN_MS` (2 s); a rejected close is logged at warn and
+swallowed, a hung one is logged at warn and abandoned. On a lost race the body
+is flagged `aborted` and stops at its next `newContext` (or retry, or probe
+warn), so it opens nothing and logs nothing after the answer.
 
 **Track/URL correlation is by causation, not by order.** The request stream
 carries URLs and the DOM carries `lang`/`label`, with nothing linking them, so the

@@ -340,12 +340,60 @@ export async function harvestVimeoCaptions(
   // the Playwright calls that take a `timeout` see the budget, and
   // `newContext`/`close`/`evaluate` take none. Every harvest runs through ONE
   // queue key (`summarizer.ts`), so one wedged call stalled every later capture
-  // at `pending` until the 12 h reaper.
+  // at `pending` until the 12 h reaper. Nothing is closed INSIDE the race: a
+  // slow close after the answer was in hand ate the grace and turned the answer
+  // into a budget error.
+  const run: HarvestRun = { aborted: false, answered: false, contexts: [] };
   try {
-    return await withinBudget(harvestWithBrowser(browser, videoId, watchUrl, deadline, opts), deadline);
+    return await withinBudget(harvestWithBrowser(browser, videoId, watchUrl, deadline, opts, run), deadline, run);
   } finally {
-    await closeWithin("browser", () => browser.close());
+    // After a lost race the browser is presumed wedged, and `browser.close()`
+    // closes its contexts anyway; the per-context closes are for a body that
+    // answered.
+    if (!run.aborted) {
+      await Promise.all(run.contexts.map((c) => closeWithin("context", () => c.close())));
+    }
+    await closeWithin("browser", () => browser.close(), browser);
   }
+}
+
+/** One harvest's state, shared by the raced body and the teardown after it. */
+interface HarvestRun {
+  /** The race answered for the body; the body stops at its next step. */
+  aborted: boolean;
+  /** The body holds its answer; the race no longer fires (only bounded steps remain). */
+  answered: boolean;
+  /** Every context the body opened, closed after the race settles. */
+  readonly contexts: PwContext[];
+}
+
+/** Thrown by a raced-out body at its next step. The race has settled, so nobody sees it. */
+class HarvestAbandonedError extends Error {
+  constructor() {
+    super("Vimeo harvest abandoned after its budget race was lost");
+    this.name = "HarvestAbandonedError";
+  }
+}
+
+/**
+ * Called before and after every `newContext`, before the retry and before the
+ * probe's warn. A raced-out body needs no check before `goto` or a wait: the
+ * race loses only past the deadline, where `remaining()` already throws.
+ */
+function checkpoint(run: HarvestRun): void {
+  if (run.aborted) throw new HarvestAbandonedError();
+}
+
+async function openContext(
+  browser: PwBrowser,
+  run: HarvestRun,
+  options?: Parameters<PwBrowser["newContext"]>[0],
+): Promise<PwContext> {
+  checkpoint(run);
+  const context = await browser.newContext(options);
+  run.contexts.push(context);
+  checkpoint(run);
+  return context;
 }
 
 async function harvestWithBrowser(
@@ -354,28 +402,28 @@ async function harvestWithBrowser(
   watchUrl: string,
   deadline: number,
   opts: HarvestOptions,
+  run: HarvestRun,
 ): Promise<VimeoCaptions> {
-  const userAgent = opts.userAgent ?? (await derivedUserAgent(browser));
+  const userAgent = opts.userAgent ?? (await derivedUserAgent(browser, run));
   // One retry on the bot page, in a NEW CONTEXT — which is a new cookie jar and
   // new storage, and nothing else: same browser, same binary, same derived user
   // agent, same locale. So it can shake off a per-session challenge cookie and
   // cannot do a thing about the UA gate; that is what `deHeadlessUserAgent`
   // (and, failing it, `headless: false`) is for.
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const context = await browser.newContext({ locale: "en-US", userAgent });
+    const context = await openContext(browser, run, { locale: "en-US", userAgent });
     try {
-      return await harvestInContext(context, videoId, watchUrl, deadline, {
+      return await harvestInContext(context, videoId, watchUrl, deadline, run, {
         awaitManifestMs: Math.max(0, opts.awaitManifestMs ?? 0),
         awaitManifestNoCaptionsMs: Math.max(0, opts.awaitManifestNoCaptionsMs ?? 0),
       });
     } catch (err) {
       if (err instanceof VimeoBotBlockedError && attempt === 1) {
+        checkpoint(run);
         log.warn("Vimeo bot page for {videoId}; retrying once with a fresh context", { videoId });
         continue;
       }
       throw err;
-    } finally {
-      await closeWithin("context", () => context.close());
     }
   }
   // Unreachable: the loop either returns, retries once, or rethrows. It is
@@ -393,41 +441,99 @@ async function harvestWithBrowser(
 const BUDGET_RACE_GRACE_MS = 500;
 
 /**
- * Settle with `work`, or with the budget error once the deadline (plus
- * {@link BUDGET_RACE_GRACE_MS}) passes. A raced-out `work` keeps running until
- * the browser is closed under it, and Playwright then rejects it; `race` has
- * already subscribed to it, so that rejection is handled, not unhandled.
+ * How long the post-answer duration read may take. It is best effort (oEmbed
+ * is this vertical's duration source), so on expiry the harvest answers
+ * without it rather than wait on an evaluate that takes no timeout.
  */
-function withinBudget<T>(work: Promise<T>, deadline: number): Promise<T> {
+const LATE_DURATION_READ_MS = 1_000;
+
+/**
+ * Settle with `work`, or with the budget error once the deadline (plus
+ * {@link BUDGET_RACE_GRACE_MS}) passes while the body has no answer. Once
+ * `run.answered` is set the expiry stands down: what is left of the body is
+ * bounded, and an answer in hand is never re-told as the budget. On expiry
+ * `run.aborted` is set, and the raced-out body stops at its next
+ * {@link checkpoint}; `race` has already subscribed to it, so its rejection is
+ * handled, not unhandled.
+ */
+function withinBudget<T>(work: Promise<T>, deadline: number, run: HarvestRun): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expiry = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(budgetExceeded("while a browser call had not returned — the browser may be wedged")),
+      () => {
+        if (run.answered) return;
+        run.aborted = true;
+        reject(budgetExceeded("while a browser call had not returned — the browser may be wedged"));
+      },
       Math.max(0, deadline - Date.now()) + BUDGET_RACE_GRACE_MS,
     );
   });
   return Promise.race([work, expiry]).finally(() => clearTimeout(timer));
 }
 
+/** The one handle an abandoned `browser.close()` can be finished with. */
+interface KillableProcess {
+  readonly pid?: number;
+  kill(signal: NodeJS.Signals): boolean;
+}
+
 /**
  * Close a context or the browser within {@link VIMEO_HARVEST_TEARDOWN_MS} of
  * its own, never the budget's: teardown runs after the budget may be spent.
- * A failure or a hang is logged and swallowed — the harvest's answer stands.
+ * A rejected close is logged at warn and swallowed — the harvest's answer
+ * stands. A close that does not return is logged at warn and abandoned; for
+ * the browser, the process is then SIGKILLed when the `Browser` exposes one
+ * (`process()`), since an abandoned Chromium would outlive the queue slot and
+ * the next harvest would launch a second one. A Browser from
+ * `chromium.launch()` does NOT expose it (playwright-core 1.58), so in
+ * production the abandon path logs that a Chromium may have leaked.
  */
-async function closeWithin(what: "browser" | "context", close: () => Promise<unknown>): Promise<void> {
+async function closeWithin(
+  what: "browser" | "context",
+  close: () => Promise<unknown>,
+  browser?: PwBrowser,
+): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const closed = Promise.resolve()
     .then(close)
     .then(
-      () => true,
-      () => true,
+      () => ({ state: "closed" as const }),
+      (err: unknown) => ({ state: "failed" as const, err }),
     );
-  const expired = new Promise<false>((resolve) => {
-    timer = setTimeout(() => resolve(false), VIMEO_HARVEST_TEARDOWN_MS);
+  const expired = new Promise<{ state: "hung" }>((resolve) => {
+    timer = setTimeout(() => resolve({ state: "hung" }), VIMEO_HARVEST_TEARDOWN_MS);
   });
-  const ok = await Promise.race([closed, expired]);
+  const outcome = await Promise.race([closed, expired]);
   clearTimeout(timer);
-  if (!ok) log.warn("Vimeo harvest: {what}.close() did not return within {ms}ms; abandoning it", { what, ms: VIMEO_HARVEST_TEARDOWN_MS });
+  if (outcome.state === "failed") {
+    log.warn("Vimeo harvest: {what}.close() failed: {error}", {
+      what,
+      error: outcome.err instanceof Error ? outcome.err.message : String(outcome.err),
+    });
+    return;
+  }
+  if (outcome.state === "closed") return;
+  log.warn("Vimeo harvest: {what}.close() did not return within {ms}ms; abandoning it", { what, ms: VIMEO_HARVEST_TEARDOWN_MS });
+  if (what !== "browser" || !browser) return;
+  let proc: KillableProcess | null | undefined;
+  try {
+    proc = (browser as unknown as { process?: () => KillableProcess | null | undefined }).process?.();
+  } catch {
+    proc = undefined;
+  }
+  if (!proc) {
+    log.warn("Vimeo harvest: no process handle for the abandoned browser; a Chromium process may have leaked until muninn exits");
+    return;
+  }
+  try {
+    proc.kill("SIGKILL");
+    log.warn("Vimeo harvest: sent SIGKILL to the abandoned browser process {pid}", { pid: proc.pid });
+  } catch (err) {
+    log.warn("Vimeo harvest: could not kill the abandoned browser process {pid}: {error}", {
+      pid: proc.pid,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 function isMediaHostUrl(u: string): boolean {
@@ -509,6 +615,7 @@ async function harvestInContext(
   videoId: string,
   watchUrl: string,
   deadline: number,
+  run: HarvestRun,
   waits: { awaitManifestMs: number; awaitManifestNoCaptionsMs: number },
 ): Promise<VimeoCaptions> {
   const page = await context.newPage();
@@ -738,14 +845,21 @@ async function harvestInContext(
   // because it costs one evaluate and a progressive (non-MSE) source would
   // answer it — but 0 here means "the player never said", not "a zero-length
   // video", and no caller may read it as a duration.
-  const lateDuration = await page
-    .evaluate(() => {
+  //
+  // From here the answer is in hand: the race stands down, and the one browser
+  // call left is bounded on its own and non-fatal — on expiry the duration is
+  // the earlier read's (0 = unknown; the summarizer takes oEmbed's anyway).
+  run.answered = true;
+  const lateDuration = await bestEffort(
+    page.evaluate(() => {
       const v = document.querySelector("video");
       const d = v?.duration;
       v?.pause();
       return typeof d === "number" && Number.isFinite(d) ? d : 0;
-    })
-    .catch(() => 0);
+    }),
+    LATE_DURATION_READ_MS,
+    0,
+  );
 
   const tracks: VimeoCaptionTrack[] = meta.tracks
     .map((t, i) => ({ lang: t.lang, label: t.label, vttUrl: paired[i] ?? "" }))
@@ -772,17 +886,18 @@ async function harvestInContext(
  * `undefined` means "use the browser's default", which is what the code did
  * before the Cloudflare gate appeared.
  */
-async function derivedUserAgent(browser: PwBrowser): Promise<string | undefined> {
-  const context = await browser.newContext();
+async function derivedUserAgent(browser: PwBrowser, run: HarvestRun): Promise<string | undefined> {
+  const context = await openContext(browser, run);
   try {
     const page = await context.newPage();
     const ua = await page.evaluate(() => navigator.userAgent);
     return deHeadlessUserAgent(ua);
   } catch (err) {
+    // A raced-out probe fails because the browser closed under it; that is
+    // not a user-agent problem, so it says nothing and stops.
+    checkpoint(run);
     log.warn("Could not read the browser's default user agent: {err}", { err });
     return undefined;
-  } finally {
-    await closeWithin("context", () => context.close());
   }
 }
 
@@ -863,6 +978,19 @@ function budgetExceeded(ambiguity?: string): VimeoHarvestError {
   return new VimeoHarvestError(
     "Vimeo caption harvest exceeded its whole-operation budget" + (ambiguity ? ` ${ambiguity}` : ""),
   );
+}
+
+/** `work`'s value, or `fallback` when it rejects or takes longer than `ms`. */
+async function bestEffort<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  try {
+    return await Promise.race([work.catch(() => fallback), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Poll a predicate. Resolves early when it holds; never throws on timeout —
