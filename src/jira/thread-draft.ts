@@ -157,8 +157,8 @@ function namedIn(
  * can count as named. Measured on real drafts, bare concept words and template
  * headings were the false positives, so:
  *
- * - The title is normalised first: a trailing `.md` and a `<digits> — ` page-id
- *   prefix go, and whitespace runs collapse (in the text too).
+ * - The title is normalised first: a trailing `.md` and a `<6+ digits> — `
+ *   page-id prefix go, and whitespace runs collapse (in the text too).
  * - Case-SENSITIVE: the instruction asks for the exact title, and
  *   `## Definition of done` is a heading, not the page «Definition of Done».
  * - A ONE-WORD title counts only when framed — «…», "…", `…`, *…*, _…_, […](…)
@@ -182,7 +182,8 @@ const FRAMES: [string, string][] = [
 function normalizeTitle(title: string): string {
   return title
     .replace(/\.md\s*$/i, "")
-    .replace(/^\s*\d+\s+[—–-]\s+/, "")
+    // Six digits or more: a Confluence page id (`313350257 — …`), never a year.
+    .replace(/^\s*\d{6,}\s+[—–-]\s+/, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -196,10 +197,11 @@ class TitleMatcher {
 
   constructor(text: string, titles: string[]) {
     this.text = text.replace(/\s+/g, " ");
-    // Longest first: masking order is the whole point of the list.
+    // Longest first: masking order is the whole point of the list. Equal lengths
+    // tie-break by code unit, so the verdict never depends on input order.
     this.all = [...new Set(titles.map(normalizeTitle))]
       .filter((t) => t && this.text.includes(t))
-      .sort((a, b) => b.length - a.length);
+      .sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0));
   }
 
   names(rawTitle: string): boolean {

@@ -1121,6 +1121,38 @@ describe("POST /api/jira/draft/from-thread", () => {
     expect(view.citations).toHaveLength(2);
   });
 
+  test("a longer title OUTSIDE the depth slice still masks its prefix inside it", async () => {
+    // `ingen` keeps six sources. By relevance the short title is first and the
+    // long one seventh, so only the caller's full-set mask argument can stop the
+    // draft's mention of the long title from naming the short one.
+    const page = (docId: string, title: string, relevance: number) => ({
+      threadId: THREAD_ID,
+      collection: "melosys-confluence-v3",
+      docId: `Team MELOSYS/${docId}.md`,
+      title,
+      url: `https://confluence.test/${docId}`,
+      relevance,
+    });
+    threads.set(THREAD_ID, THREAD);
+    threadCitations = [
+      page("kort", "Rammeavtale for utsendte", 0.99),
+      ...[1, 2, 3, 4, 5].map((i) => page(`fyll-${i}`, `Fyllside nummer ${i}`, 0.9 - i / 100)),
+      page("lang", "Rammeavtale for utsendte arbeidstakere", 0.1),
+    ];
+    __setJiraThreadTurnForTest(
+      scriptedThreadTurn("## Symptom\nSe Rammeavtale for utsendte arbeidstakere og Fyllside nummer 1."),
+    );
+    const res = await post({ threadId: THREAD_ID, template: "bug", depth: "ingen" });
+    const { draftId } = await res.json();
+    await new Promise((r) => setTimeout(r, 40));
+    const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.status).toBe("ready");
+    const refs = String(view.markdown).split("## Referanser")[1] ?? "";
+    // The control: a slice source the draft named is listed.
+    expect(refs).toContain("https://confluence.test/fyll-1");
+    expect(refs).not.toContain("https://confluence.test/kort");
+  });
+
   test("a simple-request content type is a 415 — this route writes into a conversation", async () => {
     threads.set(THREAD_ID, THREAD);
     // `text/plain` is a CORS *simple* request: no preflight, so the deliberate

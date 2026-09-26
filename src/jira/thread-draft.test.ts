@@ -525,8 +525,15 @@ describe("citationsNamedInDraft", () => {
   test("a `.md` suffix and a page-id prefix are not part of the title a draft cites", () => {
     const art16 = titled("nav-wiki", "313350257 — Vilkår for artikkel 16 nr. 1 (unntak).md");
     expect(citationsNamedInDraft([art16], "Se «Vilkår for artikkel 16 nr. 1 (unntak)».")).toHaveLength(1);
-    const hyphen = titled("nav-wiki", "42 - Rammeavtale for utsendte");
+    const hyphen = titled("nav-wiki", "313350258 - Rammeavtale for utsendte");
     expect(citationsNamedInDraft([hyphen], "Se Rammeavtale for utsendte.")).toHaveLength(1);
+  });
+
+  test("a leading year is part of the title, not a page id", () => {
+    const year = titled("nav-wiki", "2024 — Lovvalg");
+    expect(citationsNamedInDraft([year], "Se 2024 — Lovvalg for detaljer.")).toHaveLength(1);
+    // The year is not stripped, so the bare word alone no longer names the page.
+    expect(citationsNamedInDraft([year], "Se «Lovvalg».")).toEqual([]);
   });
 
   test("a template heading is not a mention of a page with that title in another case", () => {
@@ -552,6 +559,15 @@ describe("citationsNamedInDraft", () => {
     expect(
       citationsNamedInDraft(overlapping, "Se Lovvalg i EØS for Norge og Sverige: Lovvalg i EØS.").map((c) => c.title),
     ).toEqual(["Lovvalg i EØS", "Lovvalg i EØS for Norge", "for Norge og Sverige: Lovvalg i EØS"]);
+  });
+
+  test("equal-length containing titles mask the same way in either input order", () => {
+    const text = "c a c c b c b";
+    const titles = ["c c b", "c b", "c b c"];
+    const named = (order: string[]) =>
+      citationsNamedInDraft(order.map((t) => titled("nav-wiki", t)), text).map((c) => c.title).sort();
+    expect(named(titles)).toEqual(named([...titles].reverse()));
+    expect(named(titles)).not.toContain("c b");
   });
 
   test("masking compares whitespace-normalised titles, like the match does", () => {
