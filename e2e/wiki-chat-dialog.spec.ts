@@ -59,6 +59,7 @@ import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL } from "../src/test/test-db-url.ts";
+import { chatUserStorageKey } from "../src/dashboard/views/components/wiki-chat-target.ts";
 
 const PORT = e2ePort("wiki-chat-dialog");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -99,16 +100,30 @@ let root = "";
 
 /**
  * The chat target needs a USER for the pinned bot (`loadChatConfig` joins users
- * to threads), and the dialog's Start stays disabled without one. A developer's
- * database always has one; a fresh test database does not, so when the bot has
- * no chat user the spec seeds its own user + thread and deletes them afterwards. The spawned muninn is pointed at
- * the same database the rows went into: the environment's `DATABASE_URL` when the
- * runner sets one (CI does), otherwise the shared test database.
+ * to threads), and the dialog's Start stays disabled until one is selected. The
+ * spec seeds its OWN user + thread and deletes them afterwards, and every page
+ * starts with that user remembered under the chat page's storage key — the
+ * dialog's first preselection rule. So the choice does not depend on how many
+ * other chat users the bot has: a developer's database, or another spec
+ * (`chat-card-fences`) seeding one in parallel, would otherwise leave the
+ * sole-user rule with two candidates and Start disabled. The spawned muninn is
+ * pointed at the same database the rows went into: the environment's
+ * `DATABASE_URL` when the runner sets one (CI does), otherwise the shared test
+ * database.
  */
 const DB_URL = process.env.DATABASE_URL || TEST_DATABASE_URL;
 const USER_ID = "e2e-chat-dialog-user";
 let sql: ReturnType<typeof postgres> | null = null;
 let seeded = false;
+let pinnedBot = "";
+
+// Select the spec's own user explicitly, before any page script runs.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(
+    ([key, id]) => { try { localStorage.setItem(key, id); } catch { /* opaque origin */ } },
+    [chatUserStorageKey(pinnedBot), USER_ID] as const,
+  );
+});
 
 /** Every discovered bot folder, sorted — the bot-override test needs a second
  *  name to switch to, and self-skips (saying so) when the install has only one
@@ -146,17 +161,11 @@ test.beforeAll(async () => {
   // Fixed id: a run killed before teardown is healed by the next one.
   await sql`DELETE FROM threads WHERE user_id = ${USER_ID}`;
   await sql`DELETE FROM users WHERE id = ${USER_ID}`;
-  // ENSURE, not add: the dialog preselects a SOLE user, so a second chat user on
-  // a database that already has one would leave Start disabled instead.
-  const existing = await sql`
-    SELECT 1 FROM users u JOIN threads t ON t.user_id = u.id
-    WHERE u.is_active = true AND t.bot_name = ${bot} LIMIT 1`;
-  if (existing.length === 0) {
-    await sql`INSERT INTO users (id, username, display_name, platform)
-              VALUES (${USER_ID}, 'e2e-chat-dialog', 'E2E Chat Dialog', 'web')`;
-    await sql`INSERT INTO threads (user_id, bot_name, name, description)
-              VALUES (${USER_ID}, ${bot}, 'main', 'seeded for wiki-chat-dialog.spec.ts')`;
-  }
+  await sql`INSERT INTO users (id, username, display_name, platform)
+            VALUES (${USER_ID}, 'e2e-chat-dialog', 'E2E Chat Dialog', 'web')`;
+  await sql`INSERT INTO threads (user_id, bot_name, name, description)
+            VALUES (${USER_ID}, ${bot}, 'main', 'seeded for wiki-chat-dialog.spec.ts')`;
+  pinnedBot = bot;
   seeded = true;
 
   server = spawn("bun", ["run", "src/index.ts"], {
