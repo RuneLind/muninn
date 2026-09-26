@@ -20,7 +20,12 @@ import {
   normalizeFactVerdict,
   type FactVerdict,
 } from "../format/markdown-ast.ts";
-import { parseFactcheckClaims } from "../dashboard/views/components/wiki-integrate.ts";
+import {
+  fenceLineStates,
+  fenceOpener,
+  parseFactcheckClaims,
+} from "../dashboard/views/components/wiki-integrate.ts";
+import { splitFrontmatter } from "./page-text.ts";
 
 /** Server-side cap on the selected passage (chars) — mirrors `EXPLAIN_SELECTION_MAX`. */
 export const FACTCHECK_SELECTION_MAX = 1500;
@@ -59,43 +64,151 @@ export const FACTCHECK_SENTINEL_END = "<!-- factcheck:end -->";
  */
 export const FACTCHECK_ANSWER_MAX = 32_000;
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** A LIVE sentinel block: `start` is the offset of the start sentinel's `<`,
+ *  `end` the offset just past the end sentinel's `>` — the span the old paired
+ *  regex matched, so a plain page splices byte-identically. `startLine` and
+ *  `endLine` are the 0-based lines the two sentinels own. */
+export interface SentinelBlockSpan {
+  start: number;
+  end: number;
+  startLine: number;
+  endLine: number;
 }
 
-/** The paired non-greedy sentinel matcher — the ONE authority on "does this body
- *  carry a fact-check block?". A fresh RegExp per call because the `g` variant
- *  used by {@link stripFactcheckBlock} is stateful. */
-function factcheckBlockRe(global = false): RegExp {
-  return new RegExp(
-    escapeRegExp(FACTCHECK_SENTINEL_START) + "[\\s\\S]*?" + escapeRegExp(FACTCHECK_SENTINEL_END),
-    global ? "g" : "",
-  );
+/** {@link fenceLineStates} over `lines` with a CRLF line's `\r` dropped (the
+ *  shared fence grammar anchors its closer tail at `$`). `"literal"`: an opener
+ *  with no closer is prose — the reader's reading, and the one a parse that
+ *  splices needs, so a page's stray ``` cannot hide a block appended after it. */
+function spliceFenceStates(lines: readonly string[]): ReturnType<typeof fenceLineStates> {
+  return fenceLineStates(lines.map((l) => l.replace(/\r$/, "")), "literal");
+}
+
+/** `text` with a closer appended when it holds an opener nothing closes, so the
+ *  opener cannot pair with a closer in whatever follows it on the page. */
+function closeOpenFence(text: string): string {
+  const lines = text.split("\n");
+  const states = spliceFenceStates(lines);
+  for (let i = 0; i < lines.length; i++) {
+    const open = states[i] === "outside" ? fenceOpener(lines[i]!.replace(/\r$/, "")) : null;
+    // The FIRST unclosed opener: a closer of its marker and length pairs it, and
+    // any later unclosed opener then sits inside that fence.
+    if (open) return `${text.replace(/\n+$/, "")}\n${open.marker.repeat(open.len)}`;
+  }
+  return text;
+}
+
+/** A line that IS the sentinel: the whole trimmed line, indented ≤3 spaces (four
+ *  spaces is an indented code block, a tab likewise). */
+function isSentinelLine(line: string, sentinel: string): boolean {
+  return /^ {0,3}\S/.test(line) && line.trim() === sentinel;
+}
+
+/** Index of the first line of `text`'s BODY: the line after the frontmatter's
+ *  closing fence by the reader's own rule (`splitFrontmatter`), or 0. A sentinel
+ *  is live for the writers only where the reader renders the body. */
+function bodyStartLine(text: string): number {
+  const { frontmatter, body } = splitFrontmatter(text);
+  if (frontmatter === null) return 0;
+  return text.slice(0, text.length - body.length).split("\n").length - 1;
 }
 
 /**
- * True when the body carries a COMPLETE sentinel-wrapped fact-check block.
+ * Every LIVE fact-check block in `text`, in order — the ONE authority the splice,
+ * {@link hasFactcheckBlock}, {@link stripFactcheckBlock}, integrate's exclusion
+ * zones and the reader's sentinel filter share. A line walk, not a regex, because
+ * a page that documents this feature carries the sentinels as CONTENT:
  *
- * Deliberately the paired regex, not a bare `includes(FACTCHECK_SENTINEL_START)`:
- * a page carrying an orphan START (a truncated write, a hand-edit) has no block
- * the splice can replace, so treating it as "already has one" would default the
- * reader's refresh-callout checkbox ON, make the apply APPEND a second block, and
- * leave the next re-check's strip swallowing the prose between the two sentinels.
- * The three existing authorities — `stripFactcheckBlock`, `spliceSentinelBlock`,
- * and the integrate engine's exclusion zones — all use the paired form; this makes
- * the fourth consumer agree with them.
+ *  - a sentinel counts only as a whole line indented ≤3 spaces in the body (after
+ *    the frontmatter the reader splits off) — an inline-code mention, an indented
+ *    example, a blockquoted marker and a YAML value are all content;
+ *  - candidates pair each START with the next END; a later START before that END
+ *    makes the earlier one an orphan, and a START with no END is no candidate —
+ *    nothing is ever deleted on an orphan's account;
+ *  - a candidate is LIVE iff both its sentinel lines are outside a fence
+ *    (`fenceLineStates`, CommonMark's grammar; an opener nothing closes is prose,
+ *    as in the reader) in the page with the candidate's OWN interior blanked. The
+ *    interior is the writers' content, so it can neither open nor close a page
+ *    fence: a page ending in an unclosed ```ts stays prose however many fences an
+ *    appended answer carries, while a fenced example pair stays fenced, because
+ *    its closer sits after END.
+ */
+export function findLiveSentinelBlocks(text: string): SentinelBlockSpan[] {
+  const lines = text.split("\n");
+  const bodyFrom = bodyStartLine(text);
+  const offsets: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
+  const candidates: { startLine: number; endLine: number }[] = [];
+  let open = -1;
+  for (let i = bodyFrom; i < lines.length; i++) {
+    if (isSentinelLine(lines[i]!, FACTCHECK_SENTINEL_START)) open = i;
+    else if (open >= 0 && isSentinelLine(lines[i]!, FACTCHECK_SENTINEL_END)) {
+      candidates.push({ startLine: open, endLine: i });
+      open = -1;
+    }
+  }
+  const body = lines.slice(bodyFrom);
+  const spans: SentinelBlockSpan[] = [];
+  for (const { startLine, endLine } of candidates) {
+    const masked = body.map((l, k) => (k + bodyFrom > startLine && k + bodyFrom < endLine ? "" : l));
+    const fences = spliceFenceStates(masked);
+    if (fences[startLine - bodyFrom] !== "outside" || fences[endLine - bodyFrom] !== "outside") continue;
+    spans.push({
+      start: offsets[startLine]! + lines[startLine]!.indexOf(FACTCHECK_SENTINEL_START),
+      end: offsets[endLine]! + lines[endLine]!.indexOf(FACTCHECK_SENTINEL_END) + FACTCHECK_SENTINEL_END.length,
+      startLine,
+      endLine,
+    });
+  }
+  return spans;
+}
+
+/** The first live block, or null. */
+export function findLiveSentinelBlock(text: string): SentinelBlockSpan | null {
+  return findLiveSentinelBlocks(text)[0] ?? null;
+}
+
+/** Index of the first line matching `pred` that is outside every fence (the
+ *  reading {@link findLiveSentinelBlocks} uses), or -1. */
+export function firstUnfencedLineIndex(lines: readonly string[], pred: (line: string) => boolean): number {
+  const fences = spliceFenceStates(lines);
+  for (let i = 0; i < lines.length; i++) {
+    if (fences[i] === "outside" && pred(lines[i]!)) return i;
+  }
+  return -1;
+}
+
+/**
+ * True when the body carries a COMPLETE live fact-check block.
+ *
+ * Deliberately paired, not a bare `includes(FACTCHECK_SENTINEL_START)`: a page
+ * carrying an orphan START (a truncated write, a hand-edit) has no block the
+ * splice can replace, so treating it as "already has one" would default the
+ * reader's refresh-callout checkbox ON and make the apply APPEND a second block.
+ * And live, not textual: a page whose only sentinels sit in a fenced example is
+ * appended to, so it must answer false here too.
  */
 export function hasFactcheckBlock(body: string): boolean {
-  return factcheckBlockRe().test(body);
+  return findLiveSentinelBlock(body) !== null;
 }
 
 /**
- * Remove every sentinel-wrapped fact-check block (sentinels included) from a page
- * body, so a re-check never sees its own prior verdicts. Tolerant of multiple
- * blocks and surrounding whitespace; collapses the resulting 3+ blank lines.
+ * Remove every live fact-check block (sentinels included) from a page body, so a
+ * re-check never sees its own prior verdicts. Tolerant of multiple blocks and
+ * surrounding whitespace; collapses the resulting 3+ blank lines.
  */
 export function stripFactcheckBlock(body: string): string {
-  return body.replace(factcheckBlockRe(true), "").replace(/\n{3,}/g, "\n\n").trim();
+  let out = "";
+  let at = 0;
+  for (const span of findLiveSentinelBlocks(body)) {
+    out += body.slice(at, span.start);
+    at = span.end;
+  }
+  out += body.slice(at);
+  return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /**
@@ -111,9 +224,9 @@ export function stripFactcheckBlock(body: string): string {
  */
 export function buildFactcheckBlock(answer: string, dateOslo: string): string {
   // Neutralize embedded sentinel strings (e.g. the model quoting a page that
-  // documents this feature): a literal end-sentinel inside the answer would make
-  // the non-greedy strip/replace regexes stop early, stranding prose and
-  // accumulating unbalanced sentinels on every re-append.
+  // documents this feature): a literal end-sentinel on its own line inside the
+  // answer would close the block early for `findLiveSentinelBlocks`, stranding
+  // prose and accumulating unbalanced sentinels on every re-append.
   const safeAnswer = answer
     .replaceAll(FACTCHECK_SENTINEL_START, "factcheck:start")
     .replaceAll(FACTCHECK_SENTINEL_END, "factcheck:end");
@@ -237,7 +350,11 @@ export function buildFactcheckAppendix(
     // sentence) could close the appendix early from inside a `Was:` line.
     const raw = opts.originals?.get(a.index);
     const original = raw ? neutralizeAnswerMarkup(raw) : raw;
-    return original && original.trim() ? withWasLine(a.block, original) : a.block;
+    const block = original && original.trim() ? withWasLine(a.block, original) : a.block;
+    // The answer is embedded UNQUOTED here. The walker blanks a block's own
+    // interior, so this close is belt and braces: it keeps the persisted block
+    // fence-balanced on its own.
+    return closeOpenFence(block);
   });
 
   return [

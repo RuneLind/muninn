@@ -13,15 +13,16 @@
  * queue) is the SHARED `writeWikiPage` in `page-write.ts`, which the fact-check
  * integrate path uses with its own strings.
  *
- * The splice itself: replace an existing
- * `<!-- factcheck:start -->…<!-- factcheck:end -->` in place, else insert before a
- * trailing `## Sources` section if present, otherwise append at end.
+ * The splice itself: replace the existing LIVE fact-check block in place (the
+ * `findLiveSentinelBlock` walker's answer, not any textual sentinel pair), else
+ * insert before the first `## Sources` heading outside a fence, otherwise append
+ * at end.
  *
  * Filesystem/index/reindex seams are injected so the splice + staleness logic
  * unit-tests with in-memory fakes.
  */
 
-import { FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
+import { findLiveSentinelBlock, firstUnfencedLineIndex } from "./factcheck-context.ts";
 import { writeWikiPage, type PageWriteOptions } from "./page-write.ts";
 import type { CommitWikiResult } from "./commit.ts";
 
@@ -74,10 +75,6 @@ export interface PreparedBody {
   note?: string;
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /** Ensure exactly one trailing newline. Exported so the fact-check INTEGRATE
  *  write normalizes identically on BOTH its branches — otherwise ticking the
  *  "also refresh the callout" checkbox would change trailing bytes an untouched
@@ -88,22 +85,20 @@ export function withTrailingNewline(text: string): string {
 
 /**
  * Splice a sentinel-wrapped `block` into `content`:
- *   - if a `<!-- factcheck:start -->…<!-- factcheck:end -->` block already exists,
- *     REPLACE it in place (a function replacer, so `$`-sequences in the block are
- *     literal);
- *   - else insert before a trailing `## Sources` heading if present;
+ *   - if a LIVE `<!-- factcheck:start -->…<!-- factcheck:end -->` block already
+ *     exists ({@link findLiveSentinelBlock} — a fenced example or an inline-code
+ *     mention is not one), REPLACE it in place;
+ *   - else insert before the first `## Sources` heading outside a fence;
  *   - else append at end of file.
  * Pure — no trailing-newline normalization (the caller does that).
  */
 export function spliceSentinelBlock(content: string, block: string): string {
-  const re = new RegExp(
-    escapeRegExp(FACTCHECK_SENTINEL_START) + "[\\s\\S]*?" + escapeRegExp(FACTCHECK_SENTINEL_END),
-  );
-  if (re.test(content)) {
-    return content.replace(re, () => block);
+  const live = findLiveSentinelBlock(content);
+  if (live) {
+    return content.slice(0, live.start) + block + content.slice(live.end);
   }
   const lines = content.split("\n");
-  const sourcesIdx = lines.findIndex((l) => /^##\s+Sources\b/i.test(l));
+  const sourcesIdx = firstUnfencedLineIndex(lines, (l) => /^##\s+Sources\b/i.test(l));
   if (sourcesIdx !== -1) {
     const before = lines.slice(0, sourcesIdx).join("\n").replace(/\n+$/, "");
     const after = lines.slice(sourcesIdx).join("\n");

@@ -24,7 +24,9 @@ describe("stripFactcheckBlock", () => {
   });
 
   test("removes multiple blocks", () => {
-    const body = `A\n${FACTCHECK_SENTINEL_START}one${FACTCHECK_SENTINEL_END}\nB\n${FACTCHECK_SENTINEL_START}two${FACTCHECK_SENTINEL_END}\nC`;
+    // Whole-line sentinels, the only shape a writer emits: a pair sharing a line
+    // with prose is a mention, not a block (see the test below).
+    const body = `A\n${FACTCHECK_SENTINEL_START}\none\n${FACTCHECK_SENTINEL_END}\nB\n${FACTCHECK_SENTINEL_START}\ntwo\n${FACTCHECK_SENTINEL_END}\nC`;
     const out = stripFactcheckBlock(body);
     expect(out).not.toContain("one");
     expect(out).not.toContain("two");
@@ -38,9 +40,15 @@ describe("stripFactcheckBlock", () => {
     expect(stripFactcheckBlock(body)).toBe(body);
   });
 
-  test("the `g` regex is not shared state across calls", () => {
-    const body = `A\n${FACTCHECK_SENTINEL_START}x${FACTCHECK_SENTINEL_END}\nB`;
+  test("is stable across calls", () => {
+    const body = `A\n${FACTCHECK_SENTINEL_START}\nx\n${FACTCHECK_SENTINEL_END}\nB`;
+    expect(stripFactcheckBlock(body)).toBe("A\n\nB");
     expect(stripFactcheckBlock(body)).toBe(stripFactcheckBlock(body));
+  });
+
+  test("a pair on one line with prose is a mention, not a block", () => {
+    const body = `A\n${FACTCHECK_SENTINEL_START}one${FACTCHECK_SENTINEL_END}\nC`;
+    expect(stripFactcheckBlock(body)).toBe(body);
   });
 });
 

@@ -3932,11 +3932,11 @@ export function registerWikiRoutes(
       // when it does (refreshing a stale block is almost always wanted) and OFF on
       // a clean page. The client cannot derive this — the page body is not in the
       // turn — so it rides the propose response.
-      // PAIRED matcher, not a bare START scan: an orphan start sentinel means
-      // there is no block to replace, so claiming one would default the reader's
-      // refresh checkbox ON and make the apply append a SECOND block (whose next
-      // strip would then swallow the prose between them). `hasFactcheckBlock` is
-      // the shared authority the strip + splice + exclusion zones already use.
+      // A LIVE block, not a bare START scan: an orphan start sentinel, or a pair
+      // in a fenced example, means there is no block to replace, so claiming one
+      // would default the reader's refresh checkbox ON while the apply appends.
+      // `hasFactcheckBlock` reads the same walker (`findLiveSentinelBlocks`) as
+      // the strip, the splice and the exclusion zones.
       const hasSentinelBlock = hasFactcheckBlock(current);
 
       // Claim quotes are validated against the anchors we parse out of the SAME
@@ -4304,12 +4304,15 @@ export function registerWikiRoutes(
           // newline) so ticking the callout checkbox can't be the reason an
           // unrelated trailing byte changed.
           if (!appendCallout && !wroteWrapper) return withTrailingNewline(editedBody);
-          // Same splice the ➕ route uses: REPLACE an existing sentinel block in
-          // place (a stale callout is refreshed, never duplicated), else insert
-          // before a trailing `## Sources`, else append. Runs on the already-edited
-          // body inside the critical section, so page + callout are one write.
-          // Edit offsets were resolved BEFORE this, and the sentinel block is a
-          // masked exclusion zone, so the two can't collide.
+          // Same splice the ➕ route uses: REPLACE an existing LIVE sentinel block
+          // in place (a stale callout is refreshed, never duplicated), else insert
+          // before the first `## Sources` heading outside a fence, else append.
+          // Runs on the already-edited body inside the critical section, so page
+          // + callout are one write. Edit offsets were resolved BEFORE this, and
+          // the sentinel block is a masked exclusion zone, so the two can't
+          // collide. Residual: an accepted edit whose text adds a lone fence line
+          // above the block, when a fence line follows the block, hides it from
+          // the walker, so this appends a second.
           //
           // `.mdx` gets the `<FactCheck>` component appendix (whose `#fc-claim-N`
           // sections are the chips' targets, and whose `Was:` lines come from THIS

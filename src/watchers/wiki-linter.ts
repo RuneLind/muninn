@@ -38,6 +38,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "missing-sources": { one: "missing Sources", many: "missing Sources" },
   "index-truncation": { one: "truncated wikilink", many: "truncated wikilinks" },
   "nested-annotation": { one: "nested annotation", many: "nested annotations" },
+  "unrendered-fact-mark": { one: "unrendered fact mark", many: "unrendered fact marks" },
   "stem-collision": { one: "stem collision", many: "stem collisions" },
   "same-work-no-link": { one: "unlinked pair", many: "unlinked pairs" },
   "series-unnamed": { one: "unnamed series", many: "unnamed series" },

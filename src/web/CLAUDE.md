@@ -472,6 +472,9 @@ wrapper path because only one of them can express it:
   cell across two `<td>`s) — a false refusal, accepted, because the alternative costs
   a live link. Both directions measured; the state-space table in
   `integrate-mark-growth.test.ts` carries the row.
+  A mark written across the pipes BEFORE this trim (#500) is on disk still; the
+  `unrendered-fact-mark` lint check (`src/wiki/lint.ts`) reports any page whose
+  `countFactWrappers` differs from the `fc-mark` elements `formatWebHtml` renders.
 - **Order, and NO refusal at column 0.** Expansion runs FIRST and `markableRange`
   then guards the EXPANDED range, because `ownsLineStart` is evaluated on the span's
   start and expanding leftwards over a `[[` at column 0 is what flips it. The guard

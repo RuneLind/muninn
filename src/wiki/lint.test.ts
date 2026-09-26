@@ -634,6 +634,70 @@ describe("lintWiki", () => {
     expect(relPathsFor(await lint(), "nested-annotation")).toEqual([]);
   });
 
+  // ── unrendered-fact-mark ───────────────────────────────────────────────────
+
+  test("a `<Fact>` across a table row's pipes renders as literal markup and is reported", async () => {
+    await write(
+      "concepts/Coffee Table.mdx",
+      [
+        "---",
+        "type: concept",
+        "title: Coffee Table",
+        "updated: 2026-06-01",
+        "---",
+        "",
+        "| Drink | Effect |",
+        "|---|---|",
+        '| <Fact n="1" v="ok">Coffee | Lower risk</Fact> |',
+        '| Tea | <Fact n="2" v="ok">Slightly lower</Fact> |',
+        "",
+        "## Sources",
+        "- https://example.com/a",
+      ].join("\n"),
+    );
+    const findings = (await lint()).filter((f) => f.check === "unrendered-fact-mark");
+    expect(findings.map((f) => f.relPath)).toEqual(["concepts/Coffee Table.mdx"]);
+    expect(findings[0]!.message).toContain("2 <Fact> marks");
+    expect(findings[0]!.message).toContain("1 render");
+  });
+
+  test("the golden annotated fixture renders every mark — no finding", async () => {
+    const golden = await Bun.file(
+      path.join(import.meta.dir, "__fixtures__", "factcheck-annotated-page.mdx"),
+    ).text();
+    expect(golden).toContain("<Fact"); // the fixture really carries marks
+    await write("concepts/Annotated.mdx", golden);
+    expect(relPathsFor(await lint(), "unrendered-fact-mark")).toEqual([]);
+  });
+
+  test("a whole-paragraph block mark counts as rendered", async () => {
+    await write(
+      "concepts/Block.mdx",
+      ["# Block", "", '<Fact n="1" v="ok">', "A whole paragraph checked.", "</Fact>", "", "Tail."].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "unrendered-fact-mark")).toEqual([]);
+  });
+
+  test("`<Fact` quoted in frontmatter, a fence or inline code is documentation — no finding", async () => {
+    await write(
+      "concepts/Docs.mdx",
+      [
+        "---",
+        'summary: marks look like <Fact n="9" v="ok">this</Fact>',
+        "---",
+        "",
+        "# Docs",
+        "",
+        "```mdx",
+        '| <Fact n="1" v="ok">a | b</Fact> |',
+        "```",
+        "",
+        'A mark is spelled `<Fact n="2" v="bad">x</Fact>`, and <Fact n="3" v="ok">this one</Fact> is live.',
+      ].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "unrendered-fact-mark")).toEqual([]);
+  });
+
   test("counts summarize findings per check", async () => {
     const index = await buildWikiIndex(root);
     const report = await lintWiki(index);

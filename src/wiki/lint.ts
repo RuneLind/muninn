@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Ten checks, each finding `{ check, relPath, message, detail?, fix? }`:
+ * Eleven checks, each finding `{ check, relPath, message, detail?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -26,6 +26,11 @@
  *                      The write side that must not produce it, and the whole
  *                      rule: `src/web/CLAUDE.md`; scheduling + the measured
  *                      numbers: `src/watchers/CLAUDE.md`.
+ *  6b. unrendered-fact-mark — a page whose zone-aware `countFactWrappers` is
+ *                      not the number of `fc-mark` elements `formatWebHtml`
+ *                      renders, i.e. a mark shipping as literal markup (a
+ *                      `<Fact>` across a table row's pipes, written before
+ *                      `longestCellRange`). Report-only; rule: `src/web/CLAUDE.md`.
  *  7. stem-collision — two same-stem MARKDOWN pages, one of which the store
  *                      therefore DROPPED from the index (precedence `.md` > `.mdx`).
  *                      The continuous regression guard behind the apply path's
@@ -63,6 +68,8 @@ import {
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
+import { countFactWrappers } from "../format/markdown-ast.ts";
+import { formatWebHtml } from "../web/web-format.ts";
 
 export const LINT_CHECKS = [
   "broken-link",
@@ -71,6 +78,7 @@ export const LINT_CHECKS = [
   "missing-sources",
   "index-truncation",
   "nested-annotation",
+  "unrendered-fact-mark",
   "stem-collision",
   ...SERIES_LINT_CHECKS,
 ] as const;
@@ -325,6 +333,33 @@ function checkNestedAnnotation(page: WikiPageMeta, rawContent: string): LintFind
   return out;
 }
 
+/** An `fc-mark` element in rendered HTML — the inline span and the `fc-mark-block` div alike. */
+const RENDERED_FACT_MARK_RE = /class="fc-mark\b/g;
+
+/**
+ * A page whose `<Fact>` marks do not all render as marks: the strip's zone-aware
+ * count against the `fc-mark` elements the reader's renderer emits for the body
+ * (frontmatter excluded, as the reader renders it). A mismatch is a mark shipping
+ * as literal markup — the shape #500 stopped the annotator writing across a table
+ * row's pipes, which nothing on disk was checked for — or a zone the strip and the
+ * renderer disagree about. Pages with no counted mark are skipped.
+ */
+function checkUnrenderedFactMarks(page: WikiPageMeta, rawContent: string): LintFinding[] {
+  const counted = countFactWrappers(rawContent);
+  if (counted === 0) return [];
+  const lines = rawContent.split("\n");
+  const body = lines.slice(frontmatterEndLine(lines)).join("\n");
+  const rendered = (formatWebHtml(body).match(RENDERED_FACT_MARK_RE) ?? []).length;
+  if (rendered === counted) return [];
+  return [
+    {
+      check: "unrendered-fact-mark",
+      relPath: page.relPath,
+      message: `${counted} <Fact> marks on the page, but ${rendered} ${rendered === 1 ? "renders" : "render"} as marks — the rest show as literal markup or render outside what the strip can remove`,
+    },
+  ];
+}
+
 /** Hours in `FUTURE_DATE_SKEW_MS`, for the finding message (48). */
 const FUTURE_SKEW_HOURS = Math.round(FUTURE_DATE_SKEW_MS / (60 * 60 * 1000));
 
@@ -554,6 +589,7 @@ export async function lintWiki(
     // Reserved infra too, and for the same reason: the shape is a dead link
     // wherever it lands, and log.md/index.md carry [[links]] like any page.
     findings.push(...checkNestedAnnotation(page, content));
+    findings.push(...checkUnrenderedFactMarks(page, content));
 
     if (!reservedBasename(page.relPath)) {
       // One clock read per lint pass, so two pages at the 48h boundary are judged

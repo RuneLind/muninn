@@ -183,8 +183,12 @@ describe("renderWikiHtml", () => {
     expect(html).toContain("marker inline here.");
   });
 
-  test("an indented sentinel line is still stripped (leading whitespace tolerated)", () => {
-    const html = renderWikiHtml("Before.\n\n   <!-- factcheck:end -->\n\nAfter.", resolve);
+  test("a sentinel pair indented up to 3 spaces is still stripped", () => {
+    const html = renderWikiHtml(
+      "Before.\n\n   <!-- factcheck:start -->\nInner.\n   <!-- factcheck:end -->\n\nAfter.",
+      resolve,
+    );
+    expect(html).not.toContain("factcheck:start");
     expect(html).not.toContain("factcheck:end");
     expect(html).toContain("Before.");
     expect(html).toContain("After.");

@@ -85,7 +85,7 @@ const FENCE_SHAPE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSE_TAIL_RE = /^[ \t]*$/;
 
 /** An open fence: which marker character opened it, and how long its run was. */
-interface OpenFence {
+export interface OpenFence {
   marker: string;
   len: number;
 }
@@ -101,7 +101,7 @@ interface OpenFence {
  * already-persisted answers, `retryableClaims` silently dropped their ↻, and
  * `validateClaimQuotes` rejected the whole quote list as "more quotes than claims".
  */
-function fenceOpener(line: string): OpenFence | null {
+export function fenceOpener(line: string): OpenFence | null {
   const m = line.match(FENCE_SHAPE_RE);
   if (!m) return null;
   const run = m[1]!;
@@ -111,7 +111,7 @@ function fenceOpener(line: string): OpenFence | null {
 }
 
 /** Does `line` CLOSE `fence`? Same marker, at least as long, nothing after it. */
-function isFenceCloser(line: string, fence: OpenFence): boolean {
+export function isFenceCloser(line: string, fence: OpenFence): boolean {
   const m = line.match(FENCE_SHAPE_RE);
   if (!m) return false;
   const run = m[1]!;
@@ -144,22 +144,58 @@ function isFenceCloser(line: string, fence: OpenFence): boolean {
  * balance, and inventing content the author did not write is the worse error.
  */
 export function fencedLineMask(lines: readonly string[]): boolean[] {
-  const mask: boolean[] = new Array(lines.length).fill(false);
-  let open: OpenFence | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (open) {
-      mask[i] = true; // the closer line is itself fenced
-      if (isFenceCloser(line, open)) open = null;
+  return fenceLineStates(lines, "to-eof").map((state) => state !== "outside");
+}
+
+/** Where one line sits relative to fences. */
+export type FenceLineState = "opener" | "closer" | "inside" | "outside";
+
+/**
+ * The {@link FenceLineState} of every line, by {@link fenceOpener} and
+ * {@link isFenceCloser} — the walk behind {@link fencedLineMask}, the integrate
+ * exclusion zones and the fact-check sentinel walker. `unclosed` is what an opener
+ * with no closer means:
+ *  - `"to-eof"`: CommonMark's rule, the fence runs to the end of the document.
+ *    Right for a MASK, where over-masking costs a missed report or a refused edit;
+ *  - `"literal"`: {@link scanClaimLines}' retirement rule, and the reader's
+ *    (`extractFences`): the opener is prose and the lines after it are read as
+ *    usual. Right for a parse that then SPLICES, where one stray ``` must not hide
+ *    everything after it.
+ */
+export function fenceLineStates(
+  lines: readonly string[],
+  unclosed: "to-eof" | "literal",
+): FenceLineState[] {
+  const states: FenceLineState[] = new Array(lines.length).fill("outside");
+  // Once a scan for a closer of run ≥ r finds none, no later opener of the same
+  // marker with run ≥ r can find one (the range only shrinks), so a page of
+  // unclosed openers stays linear under "literal".
+  const noCloserAtLenAtLeast = new Map<string, number>();
+  let i = 0;
+  while (i < lines.length) {
+    const open = fenceOpener(lines[i]!);
+    if (!open || open.len >= (noCloserAtLenAtLeast.get(open.marker) ?? Infinity)) {
+      i++;
       continue;
     }
-    const opener = fenceOpener(line);
-    if (opener) {
-      open = opener;
-      mask[i] = true;
+    let close = i + 1;
+    while (close < lines.length && !isFenceCloser(lines[close]!, open)) close++;
+    if (close === lines.length) {
+      if (unclosed === "to-eof") {
+        states[i] = "opener";
+        for (let k = i + 1; k < lines.length; k++) states[k] = "inside";
+        break;
+      }
+      noCloserAtLenAtLeast.set(open.marker, open.len);
+      i++;
+      continue;
     }
+    states[i] = "opener";
+    for (let k = i + 1; k < close; k++) states[k] = "inside";
+    states[close] = "closer";
+    i = close + 1;
   }
-  return mask;
+  return states;
 }
 
 /**
@@ -869,8 +905,9 @@ export interface IntegrateProposal {
   dropped: DroppedEditRow[];
   note?: string;
   budget?: IntegrateBudget;
-  /** Additive (PR 2): the page already carries a `<!-- factcheck:start -->` block,
-   *  so the "also refresh the summary callout" checkbox defaults ON. */
+  /** Additive (PR 2): the page already carries a LIVE fact-check block
+   *  (`hasFactcheckBlock`), so the "also refresh the summary callout" checkbox
+   *  defaults ON. */
   hasSentinelBlock?: boolean;
   /** The claim quotes the propose route ACCEPTED (echoed back from
    *  {@link validateClaimQuotes}) — the posted list minus anything it dropped. */
