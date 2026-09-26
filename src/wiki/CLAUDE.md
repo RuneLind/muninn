@@ -2442,7 +2442,7 @@ its key (`/wiki?wiki=&display=graph&issue=jira:KEY`, PR 4's deep link).
     costed than counted sessions — leaves only that key `unpriced: no-row`,
     and the board says how many. One failed batch of several reads "N keys
     could not be priced", not "Session ledger unavailable": the board says
-    "unavailable" only when `answered` is 0. Row states cannot decide it —
+    "unavailable" when `answered` is 0, or when no key is `unreachable` yet the leg is not reachable (a failed batch whose keys read `deadline` because the client went away). Row states cannot decide it —
     `not-tracked` comes from the config as well as from an answered
     `tracked: false` row.
   - `keyless=1` — `keylessPages`: every non-bookkeeping page with no counting
