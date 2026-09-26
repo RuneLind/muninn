@@ -7282,6 +7282,10 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
       if (t && typeof t.id === "string" && typeof t.label === "string") trackerLabels[t.id] = t.label;
     }
   }
+  // The issue board is a tracker surface: its head link shows only while the
+  // listing names a tracker.
+  const boardLink = document.getElementById("wikiBoardLink");
+  if (boardLink) boardLink.hidden = Object.keys(trackerLabels).length === 0;
   // Before the first `renderPageFacets` on every path that reaches one, so the
   // boot render already paints the chip the URL asked for as active.
   adoptProjectFilter(boot);

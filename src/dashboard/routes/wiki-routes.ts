@@ -37,6 +37,7 @@ import {
 import { registerWikiStampRoute } from "./wiki-stamp.ts";
 import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { registerWikiGraphRoute } from "./wiki-graph.ts";
+import { registerWikiBoardRoute } from "./wiki-board.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
@@ -1259,6 +1260,8 @@ export function registerWikiRoutes(
   // Graph mode's read, in the same group for the same reason: it walks one
   // registered wiki's index on this machine.
   registerWikiGraphRoute(app, provenanceCtx);
+  // The issue board's page, in the same group: it reads one wiki's index.
+  registerWikiBoardRoute(app);
 
   app.get("/wiki", async (c) => {
     const registry = getWikiRegistry();

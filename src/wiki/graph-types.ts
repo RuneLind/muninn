@@ -7,6 +7,8 @@
  * many of them a graph draws, `depth` how many hops from the root it walks.
  */
 
+import type { KeyLedgerView, StatusCategory } from "./trackers/types.ts";
+
 export type GraphLane = "issue" | "page" | "session" | "pr";
 
 /** Every lane, left to right — the order the reader draws them in. */
@@ -61,6 +63,15 @@ export interface GraphQuery {
   root: string;
   depth: number;
   level: GraphLevel;
+  /** The board's three opt-ins, `scope=wiki` only. Absent ⇒ the answer is
+   *  exactly PR 4's. `keyless=1`: {@link GraphPayload.keylessPages}. */
+  keyless?: true;
+  /** `fields=issue`: huginn's facts and the index-local aggregates on every
+   *  issue node, and {@link GraphPayload.issueLookup}. */
+  issueFields?: true;
+  /** `ledger=keys`: each issue node priced through the tracker's many-key
+   *  ledger path, and {@link GraphPayload.keysLedger}. */
+  keysLedger?: true;
 }
 
 /** Validate the query. Every refusal names the parameter. */
@@ -69,6 +80,9 @@ export function parseGraphQuery(q: {
   root?: string | null;
   depth?: string | null;
   level?: string | null;
+  keyless?: string | null;
+  fields?: string | null;
+  ledger?: string | null;
 }): { ok: true; query: GraphQuery } | { ok: false; error: string } {
   const scopeRaw = (q.scope ?? "").trim() || "page";
   if (!(GRAPH_SCOPES as readonly string[]).includes(scopeRaw)) {
@@ -95,7 +109,20 @@ export function parseGraphQuery(q: {
     }
     depth = Number(depthRaw);
   }
-  return { ok: true, query: { scope, root: scope === "wiki" ? "" : root, depth, level: defaults.level } };
+  const opts: Pick<GraphQuery, "keyless" | "issueFields" | "keysLedger"> = {};
+  const optIns: [param: string, raw: string | null | undefined, value: string, set: () => void][] = [
+    ["keyless", q.keyless, "1", () => (opts.keyless = true)],
+    ["fields", q.fields, "issue", () => (opts.issueFields = true)],
+    ["ledger", q.ledger, "keys", () => (opts.keysLedger = true)],
+  ];
+  for (const [param, raw, value, set] of optIns) {
+    const v = (raw ?? "").trim();
+    if (!v) continue;
+    if (v !== value) return { ok: false, error: `${param} must be ${value}` };
+    if (scope !== "wiki") return { ok: false, error: `${param} is only read at scope=wiki` };
+    set();
+  }
+  return { ok: true, query: { scope, root: scope === "wiki" ? "" : root, depth, level: defaults.level, ...opts } };
 }
 
 interface GraphNodeBase {
@@ -119,6 +146,26 @@ export interface GraphIssueNode extends GraphNodeBase {
   pageCount: number;
   /** Plans that cover the key (`COVERAGE_RELATIONS`); empty ⇒ uncovered. */
   planPages: { relPath: string; title: string }[];
+  // ── `fields=issue` only. Index-local, over the key's counting pages in the
+  //    whole wiki, so no node or edge cap can shorten them: ──
+  /** Counting pages that carry the key with the `stamped` relation. */
+  stampedCount?: number;
+  /** The newest `pageTimeMs` among them; 0 when none has a usable date. */
+  lastActivityMs?: number;
+  /** Every PR they name, deduped case-insensitively, sorted. */
+  prRefs?: string[];
+  // ── …and from the tracker's lookup (huginn), when it answered: ──
+  title?: string;
+  /** The tracker's raw status text. */
+  status?: string;
+  /** `status` through the wiki's merged `statusMap`. */
+  category?: StatusCategory;
+  /** The tracker's own last-updated stamp. */
+  updated?: string;
+  /** The lookup holds the key. Absent when the lookup did not answer. */
+  known?: boolean;
+  /** `ledger=keys` only. */
+  keyLedger?: KeyLedgerView;
 }
 
 export interface GraphPageNode extends GraphNodeBase {
@@ -199,7 +246,18 @@ export interface GraphLedgerState {
   mergesTruncated: boolean;
 }
 
-export type GraphCap = "sessions" | "nodes" | "edges";
+/** `ledger=keys`: the many-key ledger leg. */
+export interface GraphKeysLedgerState {
+  configured: boolean;
+  /** Calls sent (one per ≤ `ledgerKeysMax` keys). */
+  calls: number;
+  /** Every call sent answered with the route's shape. */
+  reachable: boolean;
+  timedOut: boolean;
+}
+
+/** `keyless` is `keylessPages` cut at `GRAPH_NODES_MAX`. */
+export type GraphCap = "sessions" | "nodes" | "edges" | "keyless";
 
 export interface GraphPayload {
   scope: GraphScope;
@@ -214,6 +272,14 @@ export interface GraphPayload {
   truncated?: true;
   truncatedBy?: GraphCap[];
   ledger: GraphLedgerState;
+  /** `keyless=1`: the wiki's non-bookkeeping pages with no counting key, newest
+   *  first, at hop 0 and on no edge. A field of their own rather than nodes, so
+   *  a graph client never draws an unconnected page. */
+  keylessPages?: GraphPageNode[];
+  /** `fields=issue`: did every tracker's lookup answer? False ⇒ no issue node
+   *  carries `known`, and nothing may read as "unknown key". */
+  issueLookup?: { available: boolean };
+  keysLedger?: GraphKeysLedgerState;
 }
 
 /** `tracker:KEY`: a lowercase tracker id, one colon, a key with no colon or

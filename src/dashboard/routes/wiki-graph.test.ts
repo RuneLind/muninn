@@ -17,7 +17,7 @@ import { isSideEffectingRequest } from "../../auth/origin.ts";
 import type { Config } from "../../config.ts";
 
 const S1 = "00000000-0000-4000-8000-000000000001";
-const CONFIG = { trackers: [{ id: "jira", projects: ["DEMO"], hosts: ["example.invalid"] }] };
+const CONFIG = { trackers: [{ id: "jira", projects: ["DEMO"], hosts: ["example.invalid"], ledgerProjects: ["DEMO"] }] };
 const PAGE = `---\ntitle: DEMO-101 side\nsessions: [claude-code:${S1}]\n---\n\nBody.\n`;
 
 const roots: string[] = [];
@@ -50,10 +50,21 @@ const ctx: ProvenanceContext = {
     },
     fetchHandoff: async () => ({ available: false }),
     fetchMergesForPrs: async () => ({ merges: [], unmapped: [] }),
+    fetchIssueLedger: async (p) => {
+      calls.push(`issue-ledger:${p}`);
+      const keys = decodeURIComponent(p.slice(p.indexOf("=") + 1)).split(",");
+      return {
+        keys: keys.map((key) => ({ key, tracked: true, sessionCount: 2, totalCost: 3, costedSessions: 2, lastSeen: null, truncated: false })),
+      };
+    },
   },
   knowledgeApiUrl: "http://huginn.test",
   publicUrl: null,
   loadJiraIndex: async () => null,
+  lookupIssues: async () => {
+    calls.push("lookup");
+    return new Map([["DEMO-101", { title: "Side", status: "In Progress" }]]);
+  },
 };
 
 beforeAll(async () => {
@@ -136,5 +147,59 @@ describe("GET /api/wiki/graph", () => {
     await app.request(new Request("http://x/api/wiki/graph?wiki=trk&scope=page&root=side.md&level=3", { signal: gone.signal }));
     expect(signals.length).toBeGreaterThan(0);
     for (const s of signals) expect(s?.aborted).toBe(true);
+  });
+
+  test("the board's opt-ins: one keys-ledger call, one lookup, and the fields on the issue node", async () => {
+    calls.length = 0;
+    const { status, body } = await get("wiki=trk&scope=wiki&level=1&depth=0&keyless=1&fields=issue&ledger=keys");
+    expect(status).toBe(200);
+    expect(calls.sort()).toEqual(["issue-ledger:/api/jira/keys?keys=DEMO-101", "lookup"]);
+    const [n] = body.nodes as Record<string, unknown>[];
+    expect(n).toMatchObject({
+      key: "DEMO-101",
+      title: "Side",
+      category: "active",
+      known: true,
+      stampedCount: 0,
+      keyLedger: { state: "priced", sessions: 2, totalCost: 3 },
+    });
+    expect(body.issueLookup).toEqual({ available: true });
+    expect(body.keysLedger).toEqual({ configured: true, calls: 1, reachable: true, timedOut: false });
+    expect(body.keylessPages).toEqual([]);
+  });
+
+  test("the opt-ins are refused off wiki scope, and without them a level-1 answer carries none of their fields", async () => {
+    const off = await get("wiki=trk&scope=page&root=side.md&fields=issue");
+    expect(off).toEqual({ status: 400, body: { error: "fields is only read at scope=wiki" } });
+    calls.length = 0;
+    const { body } = await get("wiki=trk&scope=wiki");
+    expect(calls).toEqual([]);
+    for (const k of ["keylessPages", "issueLookup", "keysLedger"]) expect(body[k]).toBeUndefined();
+    expect((body.nodes as Record<string, unknown>[])[0]!.keyLedger).toBeUndefined();
+  });
+});
+
+describe("GET /wiki/issues", () => {
+  test("a tracker wiki renders the board shell; its client asks the graph route once", async () => {
+    const res = await app.request("/wiki/issues?wiki=trk");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('id="boardTableWrap"');
+    expect(html).toContain("Jira board");
+    expect(html).toContain('window.__WIKI_BOARD__ = {"wiki":"trk"}');
+  });
+
+  test("a wiki with no trackers block, or an unknown wiki, answers 404 with no board", async () => {
+    for (const w of ["plain", "nope"]) {
+      const res = await app.request(`/wiki/issues?wiki=${w}`);
+      expect(res.status, w).toBe(404);
+      const html = await res.text();
+      expect(html).toContain('id="boardRefusal"');
+      expect(html).not.toContain("__WIKI_BOARD__");
+    }
+  });
+
+  test("fans out to nothing, so it is not a side-effecting GET", () => {
+    expect(isSideEffectingRequest("GET", "/wiki/issues")).toBe(false);
   });
 });

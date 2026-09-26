@@ -2321,11 +2321,10 @@ no `trackers` block has no toggle, `g` does nothing there, and the route answers
   (`sessions`, `nodes`, `edges`), and the reader shows a banner. The edge cap
   exists because nodes alone do not bound the payload: 1,400 pages sharing one
   tag set drew 140,000 edges (14.5 MB).
-- **What the nodes carry**, for the board that reads `scope=wiki&level=1`
-  next: a page node its `prRefs`, `pageTimeMs` (the reader's recency key,
-  `wiki-filter.ts`) and `plan` at every level; an issue node its key, label,
-  `urlFor` link, counting `pageCount` and `planPages`. Nothing from huginn: the
-  route is index-local plus the ledger.
+- **What the nodes carry**: a page node its `prRefs`, `pageTimeMs` (the
+  reader's recency key, `wiki-filter.ts`) and `plan` at every level; an issue
+  node its key, label, `urlFor` link, counting `pageCount` and `planPages`.
+  Nothing from huginn unless the board asks (`fields=issue`, see Issue board).
 - **URL state.** `?display=graph` turns graph mode on and `issue=tracker:KEY`
   roots it at an issue (`readDisplayParams`, `urlWithDisplay`,
   `searchWithDisplay` in `wiki-filter.ts`). Not `view=`, which is the overview's
@@ -2391,6 +2390,78 @@ teardown, the pill, the global modal refusal, card focus, the fetch abort,
 the highlight across a redraw and the phone-width card; fix round 2's Back
 after a failed Forward, Escape in focus mode, the title pill and the aborts
 on every pane teardown).
+
+### Issue board (`/wiki/issues`, `graph-board.ts`, `views/components/wiki-board-view.ts`)
+
+On a wiki with a tracker, the reader's head carries a **▤** link to
+`/wiki/issues?wiki=`: one row per key a page counts, with its status, plan
+coverage, page count, sessions, mention cost, PRs, last activity and flags,
+then a table of the pages that count no key. A row opens the graph rooted at
+its key (`/wiki?wiki=&display=graph&issue=jira:KEY`, PR 4's deep link).
+
+- **One read.** The page is a shell; its client makes ONE
+  `GET /api/wiki/graph?scope=wiki&level=1&depth=0&keyless=1&fields=issue&ledger=keys`.
+  The browser never calls huginn or claude-usage. `/wiki/issues` itself reads
+  only the index (the tracker config), so it is not on `SIDE_EFFECTING_GETS`;
+  the graph path it calls is.
+- **The three opt-ins**, `scope=wiki` only (any other scope is a 400 naming the
+  parameter, as is any value but the one shown). Without them the answer is
+  byte-for-byte PR 4's.
+  - `fields=issue` — index-local aggregates on every issue node, over the key's
+    counting, non-bookkeeping pages in the WHOLE wiki (`issueAggregates`):
+    `stampedCount`, `lastActivityMs` (newest `pageTimeMs`) and `prRefs`
+    (deduped case-insensitively). Never from the drawn edges, which the caps
+    can cut — so the board asks `depth=0`, draws only the roots, and its
+    numbers do not move past ~750 keys or the edge cap. Plus the tracker's
+    lookup (`loadIssueFields`, through `lookupTrackerIssues`): `title`,
+    `status`, `category` (the wiki's merged `statusMap`), `updated`, `known`,
+    and `issueLookup: {available}`.
+  - `ledger=keys` — `keyLedger` on every issue node through the adapter's
+    `ledgerKeysPath` (`/api/jira/keys?keys=`, claude-usage #217), ONE call per
+    `ledgerKeysMax` (200) keys, over the existing `fetchIssueLedger` leg, and
+    `keysLedger: {configured, calls, reachable, timedOut}`. A key outside the
+    tracker's `ledgerProjects` is `not-tracked` and never asked (Connections'
+    rule); a row answering `tracked: false` is `not-tracked` too. A failed
+    call — a claude-usage without the route answers 404 — or a malformed answer
+    leaves its keys `unpriced` (`unreachable`, or `deadline`), never zero; a
+    malformed ROW leaves only its key unanswered.
+  - `keyless=1` — `keylessPages`: every non-bookkeeping page with no counting
+    key of a configured tracker (a `link`- or `mention`-only page is keyless),
+    newest first, as page nodes on no edge. A field of their own, not graph
+    nodes, so a graph client never draws an unconnected page. Cut at
+    `GRAPH_NODES_MAX` with `truncatedBy: ["keyless"]`.
+  - One `PROVENANCE_BUDGET_MS` deadline covers both network joins, armed when
+    `fields=issue` is asked or `ledger=keys` is asked on a host with a
+    claude-usage; the lookup and the ledger start together.
+- **Flags** (`issueFlags`): `no plan` (no covering plan — `planPages` empty),
+  `unknown key` (the lookup answered and does not hold the key — never when
+  huginn is down, and the board then says the listing was unavailable),
+  `0 stamped` (`stampedCount === 0`: every relation is inferred).
+- ⚠️ **Never a cost total.** One session counts under every key it mentions,
+  so the KPIs are counts only. A key the ledger did not price shows `—`, an
+  untracked one "not tracked" — never `$0`. A priced key with no costed
+  session shows `—` for cost and its session count.
+- **Filters** (the prototype's board tab): All, Open (every category but
+  `done`; a key with no category is open), Open without a plan, Active in 14
+  days (`BOARD_ACTIVE_DAYS`, over `lastActivityMs`), Flagged, and a text box
+  over key and title. URL state: `show=` and `q=`, replaced rather than pushed,
+  so a reload or a shared link keeps the filter and Back leaves the board.
+- **Refusal.** A wiki with no `trackers` block renders no head link (the link
+  is in the markup hidden and shown only once the listing names a tracker)
+  and `/wiki/issues` answers a 404 page saying so; an unknown wiki is a 404 too.
+- The status pill is Connections' own (`ISSUE_STATUS_STYLES`,
+  `wiki-issue-rows.ts`): the raw status in its category's colour.
+
+Acceptance: `graph-board.test.ts` (the opt-ins' parsing, the aggregates at
+depth 0, keyless pages, the lookup join, the keys ledger's batching, 404,
+malformed answer and row, `tracked: false`, the project bound and the
+deadline), `routes/wiki-graph.test.ts` (one keys call and one lookup, the
+opt-ins refused off wiki scope, PR 4's answer unchanged without them, the
+board page's 200/404), `views/components/wiki-board-view.test.ts` (flags, each
+filter, URL state, no `$0`, no total) and `e2e/wiki-tracker-board.spec.ts`
+(every fixture key's columns, one ledger call and no browser call to a
+backend, the keyless table, the 404 ledger, each filter, a row click landing
+on the graph, the head link, and the no-tracker refusal).
 
 ### The client (`views/components/wiki-provenance-view.ts`)
 

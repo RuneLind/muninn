@@ -19,6 +19,7 @@ import {
   type IssueLedgerView,
   type IssueRef,
   type IssueRelation,
+  type KeyLedgerRow,
   type StatusCategory,
   type TrackerAdapter,
   type TrackerConfig,
@@ -349,6 +350,41 @@ function parseJiraLedger(raw: unknown): Extract<IssueLedgerView, { state: "price
   };
 }
 
+/** claude-usage's own cap on `/api/jira/keys`: past it the answer is cut. */
+export const JIRA_KEYS_PER_CALL = 200;
+
+const count = (v: unknown): number | null =>
+  typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+
+/**
+ * `/api/jira/keys?keys=`'s answer — `{keys: [{key, tracked, sessionCount,
+ * totalCost, costedSessions, lastSeen, truncated}], …}` — as key → row, or
+ * null when it is not that shape. A row that is not a row is skipped, so its
+ * key reads as unanswered rather than as zero sessions.
+ */
+export function parseJiraKeysLedger(raw: unknown): Map<string, KeyLedgerRow> | null {
+  if (!raw || typeof raw !== "object" || !Array.isArray((raw as { keys?: unknown }).keys)) return null;
+  const out = new Map<string, KeyLedgerRow>();
+  for (const r of (raw as { keys: unknown[] }).keys) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+    if (typeof row.key !== "string" || typeof row.tracked !== "boolean") continue;
+    const sessions = count(row.sessionCount);
+    const costed = count(row.costedSessions);
+    const total = typeof row.totalCost === "number" && Number.isFinite(row.totalCost) ? row.totalCost : null;
+    if (row.tracked && (sessions === null || costed === null || total === null)) continue;
+    out.set(row.key.toUpperCase(), {
+      tracked: row.tracked,
+      sessions: sessions ?? 0,
+      totalCost: Math.round((total ?? 0) * 100) / 100,
+      costedSessions: costed ?? 0,
+      truncated: row.truncated === true,
+      lastSeen: typeof row.lastSeen === "string" ? row.lastSeen : null,
+    });
+  }
+  return out;
+}
+
 export const jiraAdapter: TrackerAdapter = {
   id: ID,
   label: "Jira",
@@ -364,6 +400,9 @@ export const jiraAdapter: TrackerAdapter = {
   lookup: (knowledgeApiUrl) => loadIssueFields(knowledgeApiUrl),
   ledgerPath: (key) => `/api/jira?key=${encodeURIComponent(key)}`,
   parseLedger: parseJiraLedger,
+  ledgerKeysPath: (keys) => `/api/jira/keys?keys=${keys.map(encodeURIComponent).join(",")}`,
+  ledgerKeysMax: JIRA_KEYS_PER_CALL,
+  parseLedgerKeys: parseJiraKeysLedger,
   projectOf: projectOfKey,
   parseKey: parseClientKey,
 };
