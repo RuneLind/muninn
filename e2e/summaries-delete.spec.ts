@@ -110,6 +110,22 @@ async function startFakeHuginn(): Promise<Server> {
  *  spec deleted nothing and reported so). */
 const SOURCE_DOCS = [{ collection: COLLECTION, docId: DOC_ID, title: DOC_TITLE, url: "https://example.com/v" }];
 
+/** A row-scoped trigger that makes the real proposal DELETE fail with a raw,
+ *  driver-shaped message — a genuine Postgres error on the test DB, touching only
+ *  this spec's draft row. Dropped in `finally` and again in `afterAll`. */
+const FAIL_FN = "e2e_summaries_delete_fail";
+async function dropFailTrigger(): Promise<void> {
+  await sql!.unsafe(`DROP TRIGGER IF EXISTS ${FAIL_FN} ON wiki_proposals`);
+  await sql!.unsafe(`DROP FUNCTION IF EXISTS ${FAIL_FN}()`);
+}
+async function installFailTrigger(): Promise<void> {
+  await dropFailTrigger();
+  await sql!.unsafe(`CREATE FUNCTION ${FAIL_FN}() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'write CONNECTION_CLOSED 127.0.0.1:5435'; END $$`);
+  await sql!.unsafe(`CREATE TRIGGER ${FAIL_FN} BEFORE DELETE ON wiki_proposals FOR EACH ROW
+    WHEN (OLD.topic_key = '${TOPIC_DRAFT}') EXECUTE FUNCTION ${FAIL_FN}()`);
+}
+
 async function seedProposals(): Promise<void> {
   await sql!`DELETE FROM wiki_proposals WHERE bot_name = ${BOT} AND topic_key IN (${TOPIC_DRAFT}, ${TOPIC_APPLIED})`;
   await sql!`INSERT INTO wiki_proposals (bot_name, topic_key, kind, mode, target_path, draft, source_docs, status)
@@ -118,7 +134,7 @@ async function seedProposals(): Promise<void> {
 }
 
 test.beforeAll(async () => {
-  sql = postgres(TEST_DB, { max: 2 });
+  sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
   // The route 404s without a seeded wiki-gardener watcher for the bot.
   const [existing] = await sql<{ id: string }[]>`SELECT id FROM watchers WHERE bot_name = ${BOT} AND type = 'wiki-gardener' LIMIT 1`;
   if (!existing) {
@@ -158,6 +174,7 @@ test.afterAll(async () => {
   huginn?.close();
   try {
     if (sql) {
+      await dropFailTrigger();
       await sql`DELETE FROM wiki_proposals WHERE bot_name = ${BOT} AND topic_key IN (${TOPIC_DRAFT}, ${TOPIC_APPLIED})`;
       if (seededWatcherId) {
         await sql`DELETE FROM watchers WHERE id = ${seededWatcherId}`;
@@ -235,6 +252,37 @@ test.describe("Summaries: doc-panel delete", () => {
     await page.waitForTimeout(3000);
     await expect(row).toHaveCount(0);
     await expect(otherRow).toHaveCount(1);
+  });
+
+  test("a delete whose bookkeeping failed says so in the warning tone and links the review gate", async ({ page }, testInfo) => {
+    page.on("dialog", (d) => d.accept());
+    await installFailTrigger();
+    try {
+      await page.goto(`${BASE}/summaries?source=${SOURCE}&doc=${encodeURIComponent(DOC_ID)}`);
+      await expect(page.locator("#docPanelTitle")).toHaveText(DOC_TITLE);
+      await page.locator("#docPanelDelete").click();
+      const notice = page.locator("#deleteNotice");
+      await expect(notice).toContainText(`Deleted "${DOC_TITLE}"`);
+      await expect(notice).toContainText("failed: source proposals delete");
+      await expect(notice).toContainText("may still be in the review gate");
+      await expect(notice).toHaveClass(/warn/);
+      await expect(notice).not.toHaveClass(/err/);
+      // The raw driver text is in the server log, never on the page.
+      await expect(notice).not.toContainText("CONNECTION_CLOSED");
+      await expect(notice.locator("a")).toHaveAttribute("href", `/wiki/gardener?wiki=${BOT}`);
+      // Still there after the reindex caveat pass re-renders the notice.
+      await page.waitForTimeout(3000);
+      await expect(notice).toHaveClass(/warn/);
+      await expect(notice).toContainText("may still be in the review gate");
+      await notice.screenshot({ path: testInfo.outputPath("degraded-delete-notice.png") });
+      // huginn deleted the doc; the draft is the leftover the notice points at.
+      expect(deletes).toHaveLength(1);
+      const [draft] = await sql!<{ status: string }[]>`
+        SELECT status FROM wiki_proposals WHERE bot_name = ${BOT} AND topic_key = ${TOPIC_DRAFT}`;
+      expect(draft?.status).toBe("draft");
+    } finally {
+      await dropFailTrigger();
+    }
   });
 
   test("a listing that fails after the delete is said, not hidden behind a green notice", async ({ page }) => {

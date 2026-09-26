@@ -926,11 +926,20 @@ export function sumArticleLibraryScript(): string {
       }
     })();
 
+    // tone: 'ok' | 'warn' | 'err'. A 'warn' notice carries a link to the review
+    // gate, where drafts a degraded delete left behind can be rejected.
     function showDeleteNotice(text, tone) {
       var el = document.getElementById('deleteNotice');
       if (!el) return;
-      el.textContent = text;
+      el.textContent = tone === 'warn' ? text + ' ' : text;
       el.classList.toggle('err', tone === 'err');
+      el.classList.toggle('warn', tone === 'warn');
+      if (tone === 'warn') {
+        var link = document.createElement('a');
+        link.setAttribute('href', '/wiki/gardener?wiki=' + encodeURIComponent(DELETE_TARGET.wiki));
+        link.textContent = 'Open the review gate';
+        el.appendChild(link);
+      }
       el.classList.add('visible');
       el.scrollIntoView({ block: 'nearest' });
     }
@@ -979,7 +988,12 @@ export function sumArticleLibraryScript(): string {
       var parts = ['Deleted "' + title + '"'];
       if (proposals.deleted.length) parts.push('and ' + proposals.deleted.length + ' wiki draft' + (proposals.deleted.length === 1 ? '' : 's') + ' written from it');
       if (proposals.kept.length) parts.push('(kept the applied page' + (proposals.kept.length === 1 ? ' ' : 's ') + proposals.kept.map(function(p) { return p.targetPath; }).join(', ') + ')');
-      showDeleteNotice(parts.join(' ') + '.', 'ok');
+      // The document IS gone; a failed bookkeeping step rides every later notice
+      // in the warning tone, so a reindex caveat cannot overwrite it.
+      var warning = typeof body.warning === 'string' ? body.warning : '';
+      var withWarning = function(text) { return warning ? text + ' ' + warning : text; };
+      var okTone = warning ? 'warn' : 'ok';
+      showDeleteNotice(withWarning(parts.join(' ') + '.'), okTone);
 
       // Wait for the reindex huginn started; then the listing is trustworthy again.
       var polling = Array.isArray(body.polling) ? body.polling : [];
@@ -990,7 +1004,7 @@ export function sumArticleLibraryScript(): string {
       if (skipped.length) caveats.push('a reindex was already running for ' + skipped.join(', '));
       if (unresolved.length) caveats.push('the reindex for ' + unresolved.join(', ') + ' never reported finishing');
       if (caveats.length) {
-        showDeleteNotice(parts.join(' ') + ' — but ' + caveats.join(' and ') + ', so it may reappear in the list until the next index run.', 'ok');
+        showDeleteNotice(withWarning(parts.join(' ') + ' — but ' + caveats.join(' and ') + ', so it may reappear in the list until the next index run.'), okTone);
       }
       // Refetch ONCE through the memo (getSummaryDocuments(true) is the only call
       // that throws — loadShelf and loadLibrary each swallow their own failures
@@ -1004,7 +1018,7 @@ export function sumArticleLibraryScript(): string {
         if (typeof loadLibrary === 'function') await loadLibrary();
         removeDocRows(docId, source);
       } catch (e) {
-        showDeleteNotice(parts.join(' ') + ' — but the listing could not be reloaded: ' + (e && e.message ? e.message : e), 'err');
+        showDeleteNotice(withWarning(parts.join(' ') + ' — but the listing could not be reloaded: ' + (e && e.message ? e.message : e)), 'err');
       }
     }
 

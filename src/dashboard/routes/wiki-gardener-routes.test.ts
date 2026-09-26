@@ -1443,7 +1443,7 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
   let proposalCalls: string[];
   let mutexHeldDuringProposalDelete: boolean | null;
   /** When set, the proposal-delete seam throws this AFTER recording its call. */
-  let proposalDeleteThrows: Error | null;
+  let proposalDeleteThrows: unknown;
   /** When set, reading this snapshot key throws (a post-DELETE DB failure). */
   let snapshotReadThrowsFor: string | null;
 
@@ -1669,7 +1669,7 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       // Present and empty, so a client reading `.deleted.length` cannot crash.
       expect(body.proposals).toEqual({ deleted: [], kept: [] });
       expect(body.warning).toContain("source proposals");
-      expect(body.warning).toContain("connection terminated unexpectedly");
+      expect(body.warning).not.toContain("connection terminated unexpectedly");
       expect(body.error).toBeUndefined();
       expect(deleteCalls.length).toBe(1);
       expect(mutexHeldDuringProposalDelete).toBe(true);
@@ -1704,6 +1704,37 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       expect(body.proposals.deleted.map((p) => p.id)).toEqual(["p1"]);
       expect(__peekSummariesStatsCacheForTest("jarvis")).toBeUndefined();
       expect(heard).toHaveLength(1);
+    } finally {
+      off();
+    }
+  });
+
+  test("the warning names the failed step and the remedy, never the raw driver error", async () => {
+    // The clients DISPLAY `warning`; driver text (host:port, a DB user) stays in the log.
+    proposalDeleteThrows = new Error("write CONNECTION_CLOSED 127.0.0.1:5435");
+    const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { warning?: string };
+    expect(body.warning).toContain("source proposals delete");
+    expect(body.warning).toContain("/wiki/gardener");
+    expect(body.warning).not.toContain("CONNECTION_CLOSED");
+    expect(body.warning).not.toContain("127.0.0.1");
+    expect(body.warning).not.toContain("5435");
+  });
+
+  test("a step that throws a null-prototype object is still a 200 + warning, and notifies once", async () => {
+    // `String(err)` throws on this; an unguarded stringify rejected `await run` → 500.
+    proposalDeleteThrows = Object.create(null);
+    const heard: Array<{ collection: string; id: string }> = [];
+    const off = onSummaryDocumentDeleted((e) => heard.push(e));
+    try {
+      const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { ok: boolean; warning?: string; proposals: unknown };
+      expect(body.ok).toBe(true);
+      expect(body.warning).toContain("source proposals delete");
+      expect(body.proposals).toEqual({ deleted: [], kept: [] });
+      expect(heard).toEqual([{ collection: "youtube-summaries", id: "junk.md" }]);
     } finally {
       off();
     }

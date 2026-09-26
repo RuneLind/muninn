@@ -271,6 +271,10 @@ export async function renderWikiGardenerPage(opts?: {
       color: var(--status-error); border-left-color: var(--status-error);
       background: color-mix(in srgb, var(--status-error) 10%, transparent);
     }
+    .gard-backlog .bk-inspector-notice.bk-warn {
+      color: var(--text-primary); border-left-color: var(--status-warning);
+      background: color-mix(in srgb, var(--status-warning) 12%, transparent);
+    }
     .gard-backlog .bk-inspector-notice.bk-info {
       color: var(--text-secondary); border-left-color: var(--status-info);
       background: color-mix(in srgb, var(--status-info) 10%, transparent);

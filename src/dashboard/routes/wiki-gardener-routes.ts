@@ -118,6 +118,30 @@ import { requireJsonRequest } from "./json-request.ts";
 
 const log = getLog("dashboard", "wiki-gardener");
 
+/** `String(err)` throws on a null-prototype object; this never does. */
+function safeErrorText(err: unknown): string {
+  try {
+    return err instanceof Error ? err.message : String(err);
+  } catch {
+    return "unknown error";
+  }
+}
+
+/** The step name `backlog-doc-delete` gives its proposal delete — the one failure the user can act on. */
+const PROPOSALS_DELETE_STEP = "source proposals delete";
+
+/**
+ * The `warning` a delete answers when huginn deleted the doc but a bookkeeping
+ * step failed. Displayed by both clients, so it names steps and a remedy only —
+ * never the raw error, which is in the warn log.
+ */
+function backlogDeleteWarning(failedSteps: string[]): string {
+  const head = `Deleted from huginn, but muninn could not finish its own bookkeeping (failed: ${failedSteps.join(", ")}).`;
+  return failedSteps.includes(PROPOSALS_DELETE_STEP)
+    ? `${head} Wiki drafts written from this document may still be in the review gate — reject them on /wiki/gardener.`
+    : `${head} No action needed; the server log has the details.`;
+}
+
 const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 
 /**
@@ -1945,16 +1969,17 @@ export function registerWikiGardenerRoutes(
         try {
           return await fn();
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+          // The raw error (driver text, host:port, a DB user) goes to the log only;
+          // the response names the step, because the client DISPLAYS `warning`.
           log.warn("Backlog delete of {key} for {bot}: huginn deleted it, but {step} failed: {error}", {
             bot: target.bot.name,
             key,
             collection,
             id,
             step: name,
-            error: message,
+            error: safeErrorText(err),
           });
-          failures.push(`${name}: ${message}`);
+          failures.push(name);
           return fallback;
         }
       };
@@ -1982,7 +2007,7 @@ export function registerWikiGardenerRoutes(
       // whose seam asserts the mutex is HELD when it runs — so a drain cannot
       // re-draft the doc between huginn's move and this DELETE.
       const proposals = await step(
-        "source proposals delete",
+        PROPOSALS_DELETE_STEP,
         () => backlogDeps.deleteSourceProposalsForDoc(target.bot.name, collection, id),
         { deleted: [] as DeletedSourceProposal[], kept: [] as DeletedSourceProposal[] },
       );
@@ -1999,7 +2024,7 @@ export function registerWikiGardenerRoutes(
       // anything else is an upstream/transport failure. Never a muninn 5xx.
       const err = done.refused;
       const upstream = err instanceof KnowledgeApiError ? err.upstreamStatus : undefined;
-      const message = err instanceof Error ? err.message : String(err);
+      const message = safeErrorText(err);
       log.warn("Backlog delete failed for {bot} ({key}): {error}", {
         bot: target.bot.name,
         key,
@@ -2046,9 +2071,7 @@ export function registerWikiGardenerRoutes(
       polling,
       skipped,
       proposals,
-      ...(failures.length > 0
-        ? { warning: `deleted from huginn, but muninn's bookkeeping failed — ${failures.join("; ")}` }
-        : {}),
+      ...(failures.length > 0 ? { warning: backlogDeleteWarning(failures) } : {}),
     });
   });
 
