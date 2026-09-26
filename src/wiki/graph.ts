@@ -342,6 +342,7 @@ export async function buildGraph(
         out.push({ id, lane: "page", make: () => pageNode(page), edge: edgeOf(node.id, "pr", id, "page") });
       }
       for (const bare of sessionsByPr.get(node.id) ?? []) {
+        if (!isSessionIdShape(bare)) continue;
         const id = sessionId(bare);
         const ref = sessionRefs.get(bare) ?? bare;
         out.push({ id, lane: "session", make: () => sessionNode(ref), edge: edgeOf(node.id, "pr", id, "session") });
@@ -427,6 +428,12 @@ export async function buildGraph(
     for (const node of frontier) {
       for (const nb of neighbors(node)) {
         if (!nodes.has(nb.id)) {
+          // A new node needs a new edge: past the edge cap it would be drawn
+          // with nothing connecting it to the node that reached it.
+          if (edges.size >= GRAPH_EDGES_MAX) {
+            truncatedBy.add("edges");
+            continue;
+          }
           if (!addNode(nb.make(), hop + 1)) continue;
           next.push(nodes.get(nb.id)!);
         }

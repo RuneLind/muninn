@@ -193,6 +193,11 @@ describe("fix round 1: the card and the notes", () => {
     expect(card).toContain("merge unconfirmed");
     expect(card).not.toContain("merged 2026-01-05");
     expect(graphHtml({ ...payload, nodes: [issue, root, unconfirmed] }, { level: 3, depth: 2, rootLabel: "A" })).toContain("unconfirmed");
+    // The node's class and its hint, each on its own.
+    const html = graphHtml({ ...payload, nodes: [issue, root, unconfirmed] }, { level: 3, depth: 2, rootLabel: "A" });
+    const btn = html.slice(html.indexOf('<button type="button" class="wiki-graph-node lane-pr'), html.indexOf("</button>", html.indexOf("lane-pr")));
+    expect(btn).toMatch(/class="[^"]*\bunconfirmed\b/);
+    expect(btn).toContain('<span class="wiki-graph-node-hint">merge unconfirmed</span>');
   });
   test("S11: a session whose ledger dates are not strings still renders its card", () => {
     const odd = { ...session, first: 12345, last: {} } as unknown as GraphNode;

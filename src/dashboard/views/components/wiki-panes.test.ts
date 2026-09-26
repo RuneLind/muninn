@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { paneKeyAction, parseStoredRightCollapsed } from "./wiki-panes.ts";
+import { modalOpen, paneKeyAction, parseStoredRightCollapsed, readerKeyRefused } from "./wiki-panes.ts";
 
 describe("stored right-pane preference", () => {
   test("only the exact literal reads as collapsed", () => {
@@ -46,5 +46,50 @@ describe("paneKeyAction", () => {
     expect(paneKeyAction({ key: "Escape", targetTag: "BUTTON", targetInDialog: true })).toBeNull();
     expect(paneKeyAction({ key: "]", targetTag: "BUTTON", targetInDialog: true })).toBeNull();
     expect(paneKeyAction({ key: "f", targetTag: "BUTTON", targetInDialog: true })).toBeNull();
+  });
+});
+
+describe("readerKeyRefused (fix round 2)", () => {
+  test("a plain key on a plain target is not refused", () => {
+    expect(readerKeyRefused({ key: "g", targetTag: "BODY" })).toBe(false);
+    expect(readerKeyRefused({ key: "g", targetTag: "BUTTON" })).toBe(false);
+    expect(readerKeyRefused({ key: "g" })).toBe(false);
+  });
+  test("each refusal on its own", () => {
+    const base = { key: "g", targetTag: "BODY" };
+    expect(readerKeyRefused({ ...base, ctrlKey: true })).toBe(true);
+    expect(readerKeyRefused({ ...base, metaKey: true })).toBe(true);
+    expect(readerKeyRefused({ ...base, altKey: true })).toBe(true);
+    expect(readerKeyRefused({ ...base, repeat: true })).toBe(true);
+    expect(readerKeyRefused({ ...base, targetInDialog: true })).toBe(true);
+    expect(readerKeyRefused({ ...base, targetEditable: true })).toBe(true);
+    for (const targetTag of ["INPUT", "input", "TEXTAREA", "textarea", "SELECT", "select"]) {
+      expect(readerKeyRefused({ key: "g", targetTag }), targetTag).toBe(true);
+    }
+  });
+});
+
+describe("modalOpen (fix round 2)", () => {
+  const el = (rects: number) => ({ getClientRects: () => ({ length: rects }) }) as unknown as Element;
+  const rootOf = (els: Element[]) => {
+    const asked: string[] = [];
+    return {
+      asked,
+      querySelectorAll: ((sel: string) => {
+        asked.push(sel);
+        return els;
+      }) as unknown as ParentNode["querySelectorAll"],
+    };
+  };
+  test("asks for dialogs and menus, anywhere", () => {
+    const root = rootOf([]);
+    expect(modalOpen(root)).toBe(false);
+    const sel = root.asked.join(",");
+    for (const part of ['[aria-modal="true"]', "dialog[open]", '[role="dialog"]', '[role="menu"]']) expect(sel).toContain(part);
+  });
+  test("only a rendered one counts: a hidden menu kept in the DOM has no client rects", () => {
+    expect(modalOpen(rootOf([el(0)]))).toBe(false);
+    expect(modalOpen(rootOf([el(1)]))).toBe(true);
+    expect(modalOpen(rootOf([el(0), el(2)]))).toBe(true);
   });
 });

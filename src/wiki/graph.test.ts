@@ -72,6 +72,8 @@ const PAGES: Record<string, string> = {
   "sub/index.md": `---\ntitle: Indeks\nsessions: [${S5}]\n---\n\nBody.\n`,
   // Exactly the cap in real ids, plus one junk ref that must not count.
   "cap-junk.md": `---\ntitle: Tak\nsessions: [see notes, ${Array.from({ length: GRAPH_SESSIONS_MAX }, (_, i) => sid(3000 + i)).join(", ")}]\n---\n\nBody.\n`,
+  // Fix round 2: a bookkeeping page that names the series.
+  "serie-logg/log.md": "---\ntitle: Serielogg\nseries: demo-serie\n---\n\nBody.\n",
 };
 
 const MERGES: Record<string, Partial<ProvenanceMerge>[]> = {
@@ -526,5 +528,93 @@ describe("fix round 1: issue roots", () => {
     }
     const unknown = (await graph({ scope: "issue", root: "jira:DEMO-999" })).res;
     expect(!unknown.ok && unknown.status).toBe(404);
+  });
+});
+
+// ── Fix round 2 ─────────────────────────────────────────────────────────────
+
+describe("fix round 2", () => {
+  test("D1: past the edge cap no node is drawn without the edge that reached it, and the walk stays deterministic", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-orphan-"));
+    roots.push(root);
+    // A hub with 70 keys, 100 pages carrying all 70 plus one key of their own:
+    // hop 1 exhausts the edge budget, hop 2 reaches 100 new issues.
+    const shared = Array.from({ length: 70 }, (_, i) => `demo-${200 + i}`);
+    await writeFile(path.join(root, "hub.md"), `---\ntitle: Hub\ntags: [${shared.join(", ")}]\n---\n\nBody.\n`, "utf8");
+    for (let i = 0; i < 100; i++) {
+      await writeFile(path.join(root, `p${i}.md`), `---\ntitle: Side ${i}\ntags: [${[...shared, `demo-${500 + i}`].join(", ")}]\n---\n\nBody.\n`, "utf8");
+    }
+    await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");
+    const wide = (await getWikiIndex({ root, refresh: true }))!;
+    const run = async () => ok((await graph({ scope: "page", root: "hub.md", depth: 3, level: 1 }, fakePort(), wide)).res);
+    const p = await run();
+    expect(p.truncatedBy).toEqual(["edges"]);
+    expect(p.edges.length).toBe(graphTypes.GRAPH_EDGES_MAX);
+    const touched = new Set(p.edges.flatMap((e) => [e.source, e.target]));
+    const orphans = p.nodes.filter((n) => n.hop > 0 && !touched.has(n.id)).map((n) => n.id);
+    expect(orphans).toEqual([]);
+    const again = await run();
+    expect(again.nodes.map((n) => n.id)).toEqual(p.nodes.map((n) => n.id));
+    expect(again.edges).toEqual(p.edges);
+  });
+
+  test("N3: a merge row whose session id is not an id shape draws no session node", async () => {
+    const port = fakePort();
+    const inner = port.merges;
+    port.merges = async (ids) => {
+      const r = await inner(ids);
+      const extra = r.merges.filter((m) => m.sessionId === S1).map((m) => ({ ...m, sessionId: "see notes" }));
+      return { ...r, merges: [...r.merges, ...extra] };
+    };
+    const p = ok((await graph({ scope: "page", root: "anchor.md", depth: 3, level: 3 }, port)).res);
+    expect(idsOf(p, "pr")).toContain("pr:example-org/demo-repo#21");
+    expect(idsOf(p, "session")).not.toContain("session:see notes");
+    expect(p.nodes.filter((n) => n.lane === "session" && n.sessionId.includes(" "))).toEqual([]);
+  });
+
+  test("M27: one confirmed and one unconfirmed merge row confirm the PR, in either order", async () => {
+    for (const order of [
+      [false, true],
+      [true, false],
+    ]) {
+      const port = fakePort();
+      const inner = port.merges;
+      port.merges = async (ids) => {
+        const r = await inner(ids);
+        const s1 = r.merges.find((m) => m.sessionId === S1)!;
+        const rest = r.merges.filter((m) => m.sessionId !== S1);
+        return { ...r, merges: [...order.map((mergeOk) => ({ ...s1, mergeOk })), ...rest] };
+      };
+      const p = ok((await graph({ scope: "page", root: "anchor.md", depth: 2, level: 3 }, port)).res);
+      const pr = p.nodes.find((n) => n.id === "pr:example-org/demo-repo#21")!;
+      expect(pr, JSON.stringify(order)).not.toHaveProperty("mergeUnconfirmed");
+    }
+  });
+
+  test("M28: a bookkeeping root answers 404", async () => {
+    const res = (await graph({ scope: "page", root: "log.md", level: 3 })).res;
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.status).toBe(404);
+      expect(res.error).toContain("bookkeeping");
+    }
+  });
+
+  test("M7: scope=series never roots at a bookkeeping page of the series", async () => {
+    const p = ok((await graph({ scope: "series", root: "demo-serie" })).res);
+    expect(idsOf(p, "page")).not.toContain("page:serie-logg/log.md");
+    expect(p.nodes.filter((n) => n.hop === 0).map((n) => n.id)).toEqual(["page:series/a.md", "page:series/b.md"]);
+  });
+
+  test("M26: a root the tracker cannot read as a key is echoed in the 400, bounded", async () => {
+    const short = (await graph({ scope: "issue", root: "jira:nope" })).res;
+    expect(!short.ok && short.status).toBe(400);
+    if (!short.ok) expect(short.error).toContain("jira:nope");
+    const long = (await graph({ scope: "issue", root: `jira:${"n".repeat(5000)}` })).res;
+    expect(!long.ok && long.status).toBe(400);
+    if (!long.ok) {
+      expect(long.error).toContain("jira:nnnn");
+      expect(long.error.length).toBeLessThan(200);
+    }
   });
 });

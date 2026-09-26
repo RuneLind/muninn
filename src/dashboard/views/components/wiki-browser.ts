@@ -505,7 +505,6 @@ let graphSeq = 0;
 let graphAbort: AbortController | null = null;
 /** The last answer and the query it answered, so toggling back to the same
  *  graph repaints it instead of repeating the ledger fan-out. One entry. */
-let graphCache: { key: string; payload: GraphPayload } | null = null;
 /** The graph on screen, for hover and the card, and its adjacency (built once
  *  per drawn graph). */
 let graphData: GraphPayload | null = null;
@@ -3819,11 +3818,6 @@ function loadGraph(): void {
     graphData = body;
     layoutGraph();
   };
-  const key = [WIKI, r.scope, r.root, depth, level].join("\u0001");
-  if (graphCache?.key === key) {
-    show(graphCache.payload);
-    return;
-  }
   const abort = new AbortController();
   graphAbort = abort;
   fetch(
@@ -3837,7 +3831,6 @@ function loadGraph(): void {
         paint(graphErrorHtml(body.error || "Graph unavailable."));
         return;
       }
-      graphCache = { key, payload: body };
       show(body);
     })
     .catch(() => {
@@ -4001,14 +3994,20 @@ document.addEventListener("change", (e) => {
   else return;
   loadGraph();
 });
+// Escape with a card open closes the card and nothing else. Capture phase, so
+// it runs before the pane keys' bubble listener, which would leave focus mode.
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.key !== "Escape" || !graphCardId || document.getElementById(GRAPH_CARD_ID)?.hidden) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeGraphCard();
+  },
+  true,
+);
 document.addEventListener("keydown", (e) => {
   const t = e.target as HTMLElement | null;
-  // Escape closes an open card first.
-  if (e.key === "Escape" && graphCardId && !document.getElementById(GRAPH_CARD_ID)?.hidden) {
-    e.preventDefault();
-    closeGraphCard();
-    return;
-  }
   const toggles = graphKeyToggles({
     key: e.key,
     ctrlKey: e.ctrlKey,
@@ -4018,8 +4017,8 @@ document.addEventListener("keydown", (e) => {
     repeat: e.repeat,
     targetTag: t?.tagName ?? null,
     targetEditable: !!t?.isContentEditable,
-    // Any open modal or menu, not only one around the focused element: a menu
-    // opened by the mouse leaves focus on the body.
+    // Any open modal or menu, not only one around the focused element
+    // (`modalOpen` says why).
     targetInDialog: !!t?.closest?.('[aria-modal="true"], dialog[open]') || modalOpen(document),
   });
   // Only where the toggle is on screen: an article or an issue graph, on a
@@ -4465,7 +4464,10 @@ window.addEventListener("popstate", () => {
   const relPath = params.get("relPath");
   // The page on screen, in another display state: switch the display, never
   // refetch the page (that reset its scroll and re-ran everything under it).
-  if (relPath && relPath === currentRelPath && currentName && !navInFlight) {
+  // Only while the pane shows that page: a failed load keeps the previous
+  // page's identity under its error.
+  const shown = document.querySelector("#articleWrap > .wiki-article, #articleWrap > .wiki-explainer-frame");
+  if (relPath && relPath === currentRelPath && currentName && !navInFlight && shown) {
     applyDisplay();
     return;
   }
@@ -7031,11 +7033,12 @@ function maybeShowExplainPill(): void {
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideExplainPill();
   const text = sel.toString().trim();
   if (text.length < EXPLAIN_MIN_CHARS || text.length > EXPLAIN_MAX_CHARS) return hideExplainPill();
-  // Inside the article body only: the graph section shares `#articleWrap`.
-  const article = document.querySelector("#articleWrap > .wiki-article");
+  const wrap = document.getElementById("articleWrap");
   const anchor = sel.anchorNode;
-  const focus = sel.focusNode;
-  if (!article || !anchor || !focus || !article.contains(anchor) || !article.contains(focus)) return hideExplainPill();
+  if (!wrap || !anchor || !wrap.contains(anchor)) return hideExplainPill();
+  // Never from the graph (its card included), which shares `#articleWrap`.
+  const graph = document.getElementById(GRAPH_SECTION_ID);
+  if (graph && (graph.contains(anchor) || (sel.focusNode && graph.contains(sel.focusNode)))) return hideExplainPill();
   const range = sel.getRangeAt(0);
   pillSel = text;
   pillHeading = nearestHeading(range);

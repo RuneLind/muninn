@@ -2316,7 +2316,8 @@ no `trackers` block has no toggle, `g` does nothing there, and the route answers
   "merged <date>" — qualified, never dropped, as provenance keeps it.
 - **Caps.** `GRAPH_SESSIONS_MAX` (400) session nodes, `GRAPH_NODES_MAX` (1500)
   nodes and `GRAPH_EDGES_MAX` (6000) edges; past any of them the walk stops
-  adding that kind, the answer carries `truncated: true` and `truncatedBy`
+  adding that kind — past the edge cap it also stops adding nodes, since a new
+  node needs a new edge and would be drawn unconnected — the answer carries `truncated: true` and `truncatedBy`
   (`sessions`, `nodes`, `edges`), and the reader shows a banner. The edge cap
   exists because nodes alone do not bound the payload: 1,400 pages sharing one
   tag set drew 140,000 edges (14.5 MB).
@@ -2357,18 +2358,19 @@ no `trackers` block has no toggle, `g` does nothing there, and the route answers
   lights the node, its neighbours and one path back to the root (`graphLit`
   over `graphAdjacency`, built once per drawn graph). A click opens the side
   card and moves focus into it; its node stays lit, and Escape or ✕ closes it
-  and returns focus to the node. The card offers **Focus here** on an issue or
+  and returns focus to the node (in focus mode, that Escape closes only the
+  card). The card offers **Focus here** on an issue or
   a page that is not the root (an issue re-roots at the issue; a page opens
   that page, still in graph mode) — never on the root, a session or a PR —
   **Open** on a page (it leaves graph mode) and the tracker, PR or session
   link. At 720 px and below the card sits over the bottom of the viewport,
   since the article column can be a sliver there. The Lanes and Depth selects
   re-fetch; they survive a re-root but are not URL state, so a reload or a
-  shared link opens at the defaults. The last answer is cached by (wiki,
-  scope, root, depth, level), so toggling back to the same graph repaints it
-  without a second fan-out; a new fetch, or leaving graph mode, aborts the one
-  in flight. The Explain / Fact-check pill ignores a selection outside
-  `.wiki-article`, so selecting in the graph offers neither.
+  shared link opens at the defaults. Nothing is cached: every toggle-on
+  fetches, so a Link, a reindex or a ledger that answered late shows on the
+  next toggle; a new fetch, or leaving graph mode, aborts the one in flight.
+  The Explain / Fact-check pill ignores a selection with either end in the
+  graph section (its card included); the article head still offers it.
 
 Acceptance: `graph.test.ts` (the walk, the counting rule, the caps,
 the scopes and their defaults, PR identity, bookkeeping pages, junk refs, the
@@ -2381,8 +2383,10 @@ lanes' counts on the created-keys page, no ledger call at `wiki` scope, no
 toggle without a tracker, `g` and its refusals, the `issue=` deep link,
 Back/Forward, a rail click re-rooting, the card, hover and the truncated
 banner, plus fix round 1's toggle-off URL, scroll, no-refetch Back, Ask
-teardown, the pill, the global modal refusal, card focus, the fetch cache and
-abort, the highlight across a redraw and the phone-width card).
+teardown, the pill, the global modal refusal, card focus, the fetch abort,
+the highlight across a redraw and the phone-width card; fix round 2's Back
+after a failed Forward, Escape in focus mode, the title pill and the aborts
+on every pane teardown).
 
 ### The client (`views/components/wiki-provenance-view.ts`)
 
