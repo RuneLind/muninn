@@ -22,8 +22,8 @@
  *    (0.70). On a wiki whose `workedGate` is open, a page the ledger covers
  *    decays on its `workedMs` INSTEAD — see {@link workedGateFor}.
  *  - **page age** — a change to an old page counts for less (`agePenalty`),
- *    less so the closer a ledger session write sits to the page's git update
- *    (see `ageTrail` in `scorePage`).
+ *    except a ledger session write: none when it is the newest stamp, and in
+ *    proportion to how far a later git update trails it (`ageTrail`).
  *  - **hub weight** — a change to a page many pages link to counts for less
  *    (`hubPenalty`), which is what keeps `log.md`-shaped traffic out.
  *  - **type** — plans count for more (`planBoost`), in-flight and proposed

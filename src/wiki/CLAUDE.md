@@ -189,7 +189,7 @@ made of (534 jarvis pages have the shape; all are old enough to sit under the
 floor today, so it bites when the floor is recent — a re-clone, an import). A
 page with NO creation signal at all (no git history, no birthtime, no
 frontmatter `created:`; mtime is its only date) is eligible as a change with its
-age factor at 1 — an unknown age is not evidence of an old page (a session-edited page gets the same, see `workedGate` above) — and its `why`
+age factor at 1 — an unknown age is not evidence of an old page — and its `why`
 says `created ?`. Bookkeeping pages are excluded
 (`isMetaPage`), and so is anything below `ACTIVITY_MIN_SCORE` — which is what lets
 the section be EMPTY on a wiki where nothing has happened, instead of filling six
