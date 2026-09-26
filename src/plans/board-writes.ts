@@ -47,7 +47,7 @@
  *      does a transport failure, which says nothing about disk at all.
  */
 
-import { PLAN_PRIORITIES, PLAN_STATUSES, type PlanPriority, type PlanStatus } from "./constants.ts";
+import { PLAN_PRIORITIES, PLAN_STATUSES, isValidSlug, type PlanPriority, type PlanStatus } from "./constants.ts";
 import {
   ACTIVE_COLUMN_KEYS,
   BOARD_COLUMNS,
@@ -83,6 +83,14 @@ export const QUEUE_UNREADABLE_REASON =
 
 export const NUDGE_OFF_SORT = "Switch Sort to “My order” to rank by hand";
 export const NUDGE_TERMINAL_COLUMN = "queue.yaml ranks only the active columns — nothing terminal is hand-ordered";
+/** A plan whose file name is outside queue.yaml's slug grammar: the write could
+ *  only 400, and Reload re-reads the same name, so the cure is a rename. */
+export function nudgeOffGrammarSlug(slug: string): string {
+  return (
+    `"${slug}" is not a name queue.yaml can hold (a letter, then letters, digits and hyphens; ` +
+    `not true/false/null) — rename the plan file to rank it`
+  );
+}
 
 /** A write in flight does NOT block a nudge (rule 5) — these two do, because
  *  both mean the base every queued move holds is known to be gone or about to
@@ -255,6 +263,9 @@ export interface NudgeGate {
   reloadPending: boolean;
   /** A refresh is in flight. The bases are about to be replaced wholesale. */
   reloading: boolean;
+  /** The card's slug (its file's basename). One outside the queue grammar can
+   *  never be written, whatever the mode. */
+  slug: string;
 }
 
 /**
@@ -269,6 +280,7 @@ export interface NudgeGate {
 export function nudgeBlockedReason(gate: NudgeGate): string | null {
   if (!gate.rankUi) return NUDGE_OFF_SORT;
   if (!isRankableColumn(gate.column)) return NUDGE_TERMINAL_COLUMN;
+  if (!isValidSlug(gate.slug)) return nudgeOffGrammarSlug(gate.slug);
   const mode = gate.capability.orderMode;
   if (mode === "off") return gate.capability.orderOffReason ?? QUEUE_UNREADABLE_REASON;
   if (gate.reloading) return NUDGE_RELOADING;

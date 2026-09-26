@@ -61,6 +61,7 @@ function gate(over: Partial<Parameters<typeof nudgeBlockedReason>[0]> = {}) {
     diskRanked: false,
     reloadPending: false,
     reloading: false,
+    slug: "alpha",
     ...over,
   });
 }
@@ -123,6 +124,34 @@ describe("nudgeBlockedReason", () => {
     expect(gate({ column: "shipped" })).toBe(NUDGE_TERMINAL_COLUMN);
     expect(gate({ column: "followups" })).toBe(NUDGE_TERMINAL_COLUMN);
     expect(isRankableColumn("in-flight")).toBe(true);
+  });
+
+  test("an off-grammar slug blocks with a sentence naming it — the write could only 400", () => {
+    for (const slug of ["my_plan", "2026-plan", "true", "Null", "plan.v2"]) {
+      const reason = gate({ slug });
+      expect(reason).not.toBeNull();
+      expect(reason).toContain(`"${slug}"`);
+      expect(reason).toContain("rename the plan file");
+    }
+    // A legal slug is untouched.
+    expect(gate({ slug: "muninn-plan-2" })).toBeNull();
+  });
+
+  test("off-grammar sits after the terminal column and before every mode and reload reason", () => {
+    // A terminal column says the column reason (it is not rankable whatever the name).
+    expect(gate({ slug: "my_plan", column: "shipped" })).toBe(NUDGE_TERMINAL_COLUMN);
+    // Off-sort still wins over everything.
+    expect(gate({ slug: "my_plan", rankUi: false })).toBe(NUDGE_OFF_SORT);
+    // Reload cannot cure a name, so the name reason beats the board-wide ones.
+    for (const over of [
+      { capability: OFF },
+      { capability: RO_OFF },
+      { capability: DRAFT, diskRanked: true },
+      { reloadPending: true },
+      { reloading: true },
+    ]) {
+      expect(gate({ slug: "my_plan", ...over })).toContain('"my_plan"');
+    }
   });
 
   test("a writable board allows the nudge", () => {

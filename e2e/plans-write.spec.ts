@@ -299,6 +299,28 @@ test.describe("Plan board: writing back to mimir", () => {
     await expect(page.locator("#pbNotice .pb-wmsg")).toBeHidden();
   });
 
+  test("a plan whose file name queue.yaml cannot hold renders its ▲▼ disabled, saying why", async ({
+    page,
+  }) => {
+    // `my_plan` is a card (membership is plan_status) but not a queue slug, so
+    // a nudge could only 400 — and a 400 there reads as a stale board whose
+    // Reload re-renders the same card forever.
+    const offGrammar = path.join(root, "plans", "my_plan.mdx");
+    await writeFile(offGrammar, planFile("my_plan"), "utf8");
+    try {
+      await page.goto(`${BASE}/plans`);
+      for (const dir of ["up", "down"] as const) {
+        const b = nudgeBtn(page, "my_plan", dir);
+        await expect(b).toBeDisabled();
+        await expect(b).toHaveAttribute("title", /"my_plan" is not a name queue\.yaml can hold/);
+      }
+      // The column's other cards still rank.
+      await expect(nudgeBtn(page, "beta-plan", "up")).toBeEnabled();
+    } finally {
+      await rm(offGrammar, { force: true });
+    }
+  });
+
   test("five rapid nudges all land, in order, and the keyboard stays on the button", async ({
     page,
   }) => {

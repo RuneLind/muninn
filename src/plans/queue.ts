@@ -41,6 +41,7 @@
  */
 
 import { isMap, parseDocument } from "yaml";
+import { isValidSlug } from "./constants.ts";
 
 /** The board columns that can be hand-ordered. Deliberately NOT the full
  *  `plan_status` enum: `shipped`/`superseded`/`abandoned` are terminal states
@@ -82,17 +83,10 @@ function isQueueColumn(key: string): key is QueueColumn {
   return (QUEUE_COLUMNS as readonly string[]).includes(key);
 }
 
-/** The shared slug grammar — see rule 3. Leading letter, then letters, digits
- *  and hyphens; nothing else survives as a bare YAML scalar in both parsers. */
-const SLUG_RE = /^[A-Za-z][A-Za-z0-9-]*$/;
-/** Words YAML resolves to a boolean or null in some casing. Never a slug, even
- *  quoted: the quoting is exactly what the other parser cannot see. */
-const YAML_LITERALS = new Set(["true", "false", "null"]);
-
-/** Whether a string is a legal queue slug under the grammar both parsers share. */
-export function isValidSlug(slug: string): boolean {
-  return SLUG_RE.test(slug) && !YAML_LITERALS.has(slug.toLowerCase());
-}
+/** The shared slug grammar — see rule 3. It lives in `constants.ts` so the
+ *  board's page bundle can gate a ▲▼ on it without importing this module (and
+ *  `yaml`); re-exported here under its existing name. */
+export { isValidSlug };
 
 /**
  * Parse `plans/queue.yaml` and validate it strictly against the grammar above.
