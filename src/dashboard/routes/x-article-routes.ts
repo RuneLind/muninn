@@ -9,6 +9,7 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
+import { parseAllowedHttpsUrl } from "./url-gate.ts";
 import { applyCors, corsHeaders } from "../../auth/cors.ts";
 import {
   shortVideoCaptureBlocker,
@@ -36,33 +37,23 @@ interface XaDocumentMeta { id: string; url?: string }
 const X_HOSTS = new Set(["x.com", "www.x.com", "twitter.com", "www.twitter.com"]);
 
 /**
- * Parse a caller-supplied X video URL ONCE — the `parseAllowedTikTokUrl` rule
- * (tiktok-routes.ts), for the same parser differential: `https://x.com\@127.0.0.1/status/1`
- * is x.com to WHATWG and loopback to yt-dlp (measured 2026-09-26). Returns the
- * parsed URL plus the status id read off its PATHNAME, or null. Callers hand
- * `url.href` downstream, never the raw string.
+ * The status-path shapes yt-dlp's TwitterIE matches — `/<user>/status/<id>` and
+ * `/i/web/status/<id>` (`/i/status/<id>` is the `<user>` form), with any suffix
+ * after a `/`. Anchored, so `/a/b/status/<id>` or `/i/cards/.../status/<id>`,
+ * which TwitterIE does NOT match and which would fall to another extractor, are
+ * refused. Tweet ids are ≤19 digits; 20 is the cap.
+ */
+const X_STATUS_PATH = /^\/(?:i\/web|[^/]+)\/status\/(\d{1,20})(?:\/|$)/;
+
+/**
+ * {@link parseAllowedHttpsUrl} over {@link X_HOSTS}, then the anchored status
+ * path. Returns the parsed URL and the status id read off its PATHNAME, or null.
+ * Callers hand `url.href` downstream, never the raw string.
  */
 export function parseAllowedXStatusUrl(raw: string): { url: URL; statusId: string } | null {
-  if (raw !== raw.trim() || /[\\\x00-\x20\x7f]|\s/.test(raw)) return null;
-  if (raw.slice(0, 8).toLowerCase() !== "https://") return null;
-  const authority = raw.slice(8).split(/[/?#]/, 1)[0]!;
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return null;
-  }
-  const ok =
-    u.protocol === "https:" &&
-    X_HOSTS.has(u.hostname) &&
-    u.port === "" &&
-    u.username === "" &&
-    u.password === "" &&
-    // The authority as typed IS the host: no `%`, `@`, `:` or fullwidth form.
-    authority.toLowerCase() === u.hostname;
-  if (!ok) return null;
-  const match = u.pathname.match(/\/status\/(\d+)(?:\/|$)/);
-  return match ? { url: u, statusId: match[1]! } : null;
+  const u = parseAllowedHttpsUrl(raw, X_HOSTS);
+  const match = u?.pathname.match(X_STATUS_PATH);
+  return u && match ? { url: u, statusId: match[1]! } : null;
 }
 
 /**

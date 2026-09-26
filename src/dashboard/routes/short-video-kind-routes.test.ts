@@ -11,6 +11,9 @@
  * therefore asserts the response AND that neither the listing nor the summarizer
  * was reached.
  *
+ * It also holds the two POSTs' url host gates (TikTok and X video), for the same
+ * reason: a refused url must be refused above the listing read and `createJob`.
+ *
  * RUNS IN ITS OWN `bun test` PROCESS (its own `&&` link in the `test` and
  * `test:unit` chains) and MUST stay that way: `mock.module` here replaces
  * `bots/config.ts`, which a large share of the suite imports transitively.
@@ -87,7 +90,7 @@ mock.module("../../x-article/video.ts", () => ({
 }));
 
 const { registerTikTokRoutes } = await import("./tiktok-routes.ts");
-const { registerXArticleRoutes } = await import("./x-article-routes.ts");
+const { registerXArticleRoutes, parseAllowedXStatusUrl } = await import("./x-article-routes.ts");
 const ttState = await import("../../tiktok/state.ts");
 const xaState = await import("../../x-article/state.ts");
 
@@ -479,13 +482,23 @@ describe("x-video: the POST's url host gate", () => {
     `https://x.com/a#/status/${S}`,
     `https://x.com/a/status/`,
     `https://x.com/a/status/12ab`,
+    // The anchored path rule: only the shapes yt-dlp's TwitterIE matches.
+    `https://x.com/status/${S}`,
+    `https://x.com//status/${S}`,
+    `https://x.com/a/b/status/${S}`,
+    `https://x.com/i/events/123/status/20`,
+    `https://x.com/i/cards/tfw/v1/999/status/20`,
+    `https://x.com/i/redirect/status/1`,
+    `https://x.com/http://127.0.0.1:39872/status/1`,
+    `https://x.com/a/status/${"9".repeat(5000)}`,
+    `https://x.com/a/status/${"1".repeat(21)}`,
     `file:///etc/passwd`,
     `not a url`,
     42,
     { href: `https://x.com/a/status/${S}` },
   ];
   for (const url of REFUSED) {
-    test(`refuses ${JSON.stringify(url)} with 400 bad_url, before the listing read and createJob`, async () => {
+    test(`refuses ${(JSON.stringify(url) ?? "").slice(0, 100)} with 400 bad_url, before the listing read and createJob`, async () => {
       const jobsBefore = xaState.getRecentJobs(50).length;
       const res = await post(app(), "/api/x-articles/summarize-video", { url });
       expect(res.status).toBe(400);
@@ -509,7 +522,14 @@ describe("x-video: the POST's url host gate", () => {
     [`https://x.com/coolcoder/status/${S}?s=20`, `https://x.com/coolcoder/status/${S}?s=20`],
     [`https://x.com/coolcoder/status/${S}#m`, `https://x.com/coolcoder/status/${S}#m`],
     [`https://x.com/i/web/status/${S}`, `https://x.com/i/web/status/${S}`],
+    [`https://x.com/i/status/${S}`, `https://x.com/i/status/${S}`],
+    [`https://x.com/coolcoder/status/${S}/photo/1`, `https://x.com/coolcoder/status/${S}/photo/1`],
+    [`https://x.com/coolcoder/status/${S}/analytics`, `https://x.com/coolcoder/status/${S}/analytics`],
+    [`https://x.com/coolcoder/status/${"1".repeat(20)}`, `https://x.com/coolcoder/status/${"1".repeat(20)}`],
+    // Two rows where href differs from the raw string, so "href, not raw, goes
+    // downstream" rests on more than one normalisation.
     [`HTTPS://X.COM/coolcoder/status/${S}`, `https://x.com/coolcoder/status/${S}`],
+    [`https://x.com/用户/status/${S}`, `https://x.com/%E7%94%A8%E6%88%B7/status/${S}`],
   ];
   for (const [raw, href] of ACCEPTED) {
     test(`accepts ${raw} and hands ${href} to every consumer`, async () => {
@@ -525,8 +545,7 @@ describe("x-video: the POST's url host gate", () => {
     });
   }
 
-  test("reads the status id off the pathname", async () => {
-    const { parseAllowedXStatusUrl } = await import("./x-article-routes.ts");
+  test("reads the status id off the pathname", () => {
     expect(parseAllowedXStatusUrl(`https://x.com/a/status/${S}/video/1?s=20`)?.statusId).toBe(S);
     expect(parseAllowedXStatusUrl(`https://x.com/a?next=/status/${S}`)).toBeNull();
   });

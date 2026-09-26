@@ -340,6 +340,25 @@ test("ytDlpDownloadArgs carries the duration cap into --break-match-filters", ()
   expect(args[args.indexOf("--break-match-filters") + 1]).toBe("duration <= 10800");
 });
 
+test("ytDlpDownloadArgs carries an extractor allowlist as --use-extractors, and no flag without one", () => {
+  // The X vertical pins `twitter` so a media-less tweet's link hand-off cannot
+  // reach `[generic]`; an absent or empty list must leave yt-dlp's default set.
+  const pinned = ytDlpDownloadArgs("https://x.test/v", "/work", {
+    maxDurationSeconds: 3600,
+    extractors: ["twitter"],
+  });
+  expect(pinned[pinned.indexOf("--use-extractors") + 1]).toBe("twitter");
+  expect(pinned.indexOf("--use-extractors")).toBeLessThan(pinned.indexOf("https://x.test/v"));
+  expect(
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 1, extractors: ["a", "b"] }),
+  ).toContain("a,b");
+  for (const extractors of [undefined, []]) {
+    expect(
+      ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors }),
+    ).not.toContain("--use-extractors");
+  }
+});
+
 test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () => {
   // `--skip-download` is the whole point (the probe runs BEFORE the download it
   // sizes) and `--no-playlist` keeps a `&list=` watch URL from dumping a whole

@@ -46,6 +46,10 @@ export const X_VIDEO_SPEC: ShortVideoSpec = {
   // `statusId`, NOT the TikTok twin's `videoId`: this vertical shipped with that
   // key and the JSONL sink is searched by field, so the merge must not rename it.
   idLogKey: "statusId",
+  // Only the status extractor: a media-less tweet's first link would otherwise
+  // reach yt-dlp's `[generic]`, which fetches any host. `twitter` is a fullmatch,
+  // so twitter:card/broadcast/spaces/amplify/shortener are not loaded either.
+  ytDlpExtractors: ["twitter"],
   // NO degraded-frame-Reads warn: this vertical has never had one, and the
   // merge must not hand it the neighbour's second step.
   visualWarning: false,
