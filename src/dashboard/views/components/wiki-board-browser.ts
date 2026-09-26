@@ -52,11 +52,18 @@ const URL_WRITE_MS = 300;
 let urlTimer: ReturnType<typeof setTimeout> | undefined;
 function writeFilterToUrl(): void {
   clearTimeout(urlTimer);
+  urlTimer = undefined;
   try {
     history.replaceState(history.state, "", location.pathname + searchWithBoardFilter(location.search, filter) + location.hash);
   } catch {
     /* The address bar lags the filter; the table does not. */
   }
+}
+
+/** Write a pending debounced URL now: before the page is left (a row click, a
+ *  reload, Back), or the history entry keeps the filter from before the typing. */
+function flushUrlWrite(): void {
+  if (urlTimer !== undefined) writeFilterToUrl();
 }
 
 /** Render first, then the URL — a throwing write can never skip the render. */
@@ -98,6 +105,14 @@ async function load(): Promise<void> {
   renderRows();
 }
 
+/** A box the browser restored (Back) to other text than the URL's filter wins:
+ *  it is what the reader sees, so the table and the URL follow it. Run on
+ *  `pageshow`, which comes after the browser's form restoration. */
+function syncFromBox(): void {
+  const box = $("boardQuery") as HTMLInputElement | null;
+  if (box && box.value.trim() !== filter.q.trim()) setFilter({ ...filter, q: box.value });
+}
+
 $("boardFilters")!.innerHTML = boardFilterHtml(filter);
 $("boardFilters")!.addEventListener("click", (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-board-show]");
@@ -106,19 +121,23 @@ $("boardFilters")!.addEventListener("click", (e) => {
 $("boardQuery")!.addEventListener("input", (e) => setFilter({ ...filter, q: (e.target as HTMLInputElement).value }, true));
 // A click on a row follows its graph link, unless it landed on a link of its
 // own (the key, the tracker ↗, a plan) or the reader is selecting text. A
-// modifier click (Cmd/Ctrl/Shift) or a middle click opens a new tab, as the
-// key link itself would.
-function followRow(e: MouseEvent): void {
+// modifier click (Cmd/Ctrl/Shift) or a middle click (`auxclick`) opens a new
+// tab, as the key link itself would. Either way this tab's URL is written
+// first, so it names the filter the reader sees.
+function followRow(e: MouseEvent, newTab: boolean): void {
+  flushUrlWrite();
   const target = e.target as HTMLElement;
   if (target.closest("a")) return;
   if (window.getSelection()?.toString()) return;
   const href = target.closest<HTMLTableRowElement>("tr[data-graph-href]")?.dataset.graphHref;
   if (!href) return;
-  if (e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey) window.open(href, "_blank", "noopener");
-  else if (e.button === 0) location.href = href;
+  if (newTab) window.open(href, "_blank", "noopener");
+  else location.href = href;
 }
-$("boardTableWrap")!.addEventListener("click", followRow);
+$("boardTableWrap")!.addEventListener("click", (e) => followRow(e, e.metaKey || e.ctrlKey || e.shiftKey));
 $("boardTableWrap")!.addEventListener("auxclick", (e) => {
-  if (e.button === 1) followRow(e);
+  if (e.button === 1) followRow(e, true);
 });
+addEventListener("pagehide", flushUrlWrite);
+addEventListener("pageshow", syncFromBox);
 void load();

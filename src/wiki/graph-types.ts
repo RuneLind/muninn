@@ -255,6 +255,9 @@ export interface GraphKeysLedgerState {
   configured: boolean;
   /** Calls sent (one per ≤ `ledgerKeysMax` keys). */
   calls: number;
+  /** Calls that answered with the route's shape, whatever their rows said.
+   *  The board reads a failed call as "the ledger is down" only when this is 0. */
+  answered: number;
   /** Every call sent answered with the route's shape. */
   reachable: boolean;
   timedOut: boolean;

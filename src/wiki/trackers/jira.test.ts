@@ -415,3 +415,23 @@ describe("parseJiraKeysLedger", () => {
     expect(parseJiraKeysLedger({ keys: [row({})] })!.size).toBe(1);
   });
 });
+
+describe("parseJiraKeysLedger: fix round 2", () => {
+  const row = (o: object) => ({ key: "DEMO-1", tracked: true, sessionCount: 1, totalCost: 0, costedSessions: 0, lastSeen: null, ...o });
+  test("a tracked row with a cost of exactly 0 is priced, not skipped", () => {
+    expect(parseJiraKeysLedger({ keys: [row({})] })!.get("DEMO-1")).toEqual({
+      tracked: true,
+      sessions: 1,
+      totalCost: 0,
+      costedSessions: 0,
+      truncated: false,
+      lastSeen: null,
+    });
+  });
+  test("a cost that is negative only before rounding to cents (-0.005 up to 0 rounds to -0) is accepted, and serializes as 0", () => {
+    const got = parseJiraKeysLedger({ keys: [row({ totalCost: -0.004 })] })!.get("DEMO-1")!;
+    expect(JSON.parse(JSON.stringify(got)).totalCost).toBe(0);
+    expect(parseJiraKeysLedger({ keys: [row({ totalCost: -0.005 })] })!.size).toBe(1);
+    expect(parseJiraKeysLedger({ keys: [row({ totalCost: -0.006 })] })!.size).toBe(0);
+  });
+});

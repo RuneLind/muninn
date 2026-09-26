@@ -2406,8 +2406,10 @@ its key (`/wiki?wiki=&display=graph&issue=jira:KEY`, PR 4's deep link).
   the graph path it calls is.
 - **The three opt-ins**, `scope=wiki` only (any other scope is a 400 naming the
   parameter, as is any value but the one shown — untrimmed, so `keyless=%201`
-  is refused — and a repeat: the route reads every value, so `keyless=1&keyless=2`
-  is a 400, not its first). Without them the answer is byte-for-byte PR 4's.
+  is refused, and so is `keyless=%20` — and a repeat: the route reads every
+  value, so `keyless=1&keyless=2` is a 400, not its first, and so is
+  `keyless=&keyless=`, two empty values, "given once"). One empty value is
+  absent. Without them the answer is byte-for-byte PR 4's.
   `applyBoardJoins` (`graph-board.ts`) runs the two network joins onto the
   built payload; the route only calls it.
   - `fields=issue` — index-local aggregates on every issue node, over the key's
@@ -2426,16 +2428,23 @@ its key (`/wiki?wiki=&display=graph&issue=jira:KEY`, PR 4's deep link).
   - `ledger=keys` — `keyLedger` on every issue node through the adapter's
     `ledgerKeysPath` (`/api/jira/keys?keys=`, claude-usage #217), ONE call per
     `ledgerKeysMax` (200) keys, over the existing `fetchIssueLedger` leg, and
-    `keysLedger: {configured, calls, reachable, timedOut}`. A key outside the
+    `keysLedger: {configured, calls, answered, reachable, timedOut}` —
+    `answered` counts the calls that came back in the route's shape, whatever
+    their rows said. A key outside the
     tracker's `ledgerProjects` is `not-tracked` and never asked (Connections'
     rule); a row answering `tracked: false` is `not-tracked` too. A failed
     call — a claude-usage without the route answers 404 — or a malformed answer
     leaves its keys `unpriced` (`unreachable`, or `deadline`), never zero. An
-    answer that holds no usable row for a key — omitted, malformed, a negative
-    or non-finite cost (rounded first: `1e308` is finite, ×100 is not), more
+    answer that holds no usable row for a key — omitted, malformed, a cost
+    still negative after rounding to cents or not finite (rounded first:
+    `1e308` is finite, ×100 is not; `-0.004` rounds to `-0` and is accepted,
+    serializing as `0`), more
     costed than counted sessions — leaves only that key `unpriced: no-row`,
     and the board says how many. One failed batch of several reads "N keys
-    could not be priced", not "Session ledger unavailable".
+    could not be priced", not "Session ledger unavailable": the board says
+    "unavailable" only when `answered` is 0. Row states cannot decide it —
+    `not-tracked` comes from the config as well as from an answered
+    `tracked: false` row.
   - `keyless=1` — `keylessPages`: every non-bookkeeping page with no counting
     key of a configured tracker (a `link`- or `mention`-only page is keyless),
     newest first, as page nodes on no edge. A field of their own, not graph
@@ -2471,11 +2480,18 @@ its key (`/wiki?wiki=&display=graph&issue=jira:KEY`, PR 4's deep link).
   reload or a shared link keeps the filter and Back leaves the board. A click
   writes the URL at once; typing writes it 300 ms after the last keystroke
   (Safari throws past ~100 `replaceState` calls in 30 s); the hash is kept,
-  and a throwing write never skips the render. Rows render only once the graph
+  and a throwing write never skips the render. A pending write is flushed
+  before a row click leaves (this tab, or a new one) and on `pagehide`, so
+  Back returns to the filter the reader left. On `pageshow` a box the browser
+  restored to other text than the URL's filter wins, and the table and URL
+  follow it. ⚠️ A reload inside the 300 ms still loses the typing: the browser
+  fixes a reload's URL before any page event (a flush on `pagehide` or
+  `beforeunload` measured too late in Chromium); box, table and URL come back
+  agreeing. Rows render only once the graph
   call answered: a filter before that keeps "Loading…", and after a failed load
   keeps the error, which names the HTTP status.
 - **Row click**: a plain click opens the graph in this tab; Cmd/Ctrl/Shift or
-  a middle click opens a new tab; a click on a link is the link's.
+  a middle click (`auxclick`) opens a new tab; a click on a link is the link's.
 - **Refusal.** A wiki with no `trackers` block renders no head link (the link
   is in the markup hidden and shown only once the listing names a tracker)
   and `/wiki/issues` answers a 404 page saying so; an unknown wiki is a 404 too.
@@ -2497,8 +2513,9 @@ filter, bare days west of UTC, URL state, notes, no `$0`, no total) and
 and no browser call to a backend, the keyless table, the 404 ledger, each
 filter, a row click landing on the graph, the head link, the no-tracker
 refusal, a load error or pending load that filters cannot overwrite, a
-non-JSON error's status, table semantics, modifier clicks, a throwing
-`replaceState`, and the capped keyless KPI).
+non-JSON error's status, table semantics, modifier and middle clicks, a
+throwing `replaceState`, the capped keyless KPI, and a filter typed inside the
+debounce surviving a row click, a link out and Back).
 
 ### The client (`views/components/wiki-provenance-view.ts`)
 

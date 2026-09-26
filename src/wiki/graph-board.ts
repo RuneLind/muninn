@@ -99,7 +99,7 @@ export async function joinKeysLedger(
   }
 
   let calls = 0;
-  let reachable = true;
+  let answered = 0;
   const jobs: Promise<void>[] = [];
   for (const [tracker, list] of ask) {
     const adapter = trackerAdapter(tracker)!;
@@ -119,7 +119,7 @@ export async function joinKeysLedger(
           } catch {
             rows = null;
           }
-          if (!rows) reachable = false;
+          if (rows) answered++;
           for (const n of batch) {
             const row = rows?.get(n.key.toUpperCase());
             // An answer that holds no usable row for the key is its own
@@ -139,7 +139,8 @@ export async function joinKeysLedger(
   return {
     configured: ctx.sessionLedger.urlConfigured,
     calls,
-    reachable: calls > 0 ? reachable : false,
+    answered,
+    reachable: calls > 0 && answered === calls,
     timedOut: deadline?.aborted === true,
   };
 }

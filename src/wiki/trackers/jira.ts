@@ -361,7 +361,9 @@ const count = (v: unknown): number | null =>
  * totalCost, costedSessions, lastSeen, truncated}], …}` — as key → row, or
  * null when it is not that shape. A row that is not a row is skipped, so its
  * key reads as unanswered rather than as zero sessions — and so is a tracked
- * row with a negative or non-finite cost, or more costed than counted sessions.
+ * row whose cost is not finite or still negative after rounding to cents
+ * (`-0.004` rounds to `-0`, is accepted and serializes as `0`), or with more
+ * costed than counted sessions.
  */
 export function parseJiraKeysLedger(raw: unknown): Map<string, KeyLedgerRow> | null {
   if (!raw || typeof raw !== "object" || !Array.isArray((raw as { keys?: unknown }).keys)) return null;

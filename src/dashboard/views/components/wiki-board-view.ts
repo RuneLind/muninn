@@ -274,9 +274,11 @@ export function boardNotes(
   const unpriced = (reason: string) => ledgers.filter((v) => v.state === "unpriced" && v.reason === reason).length;
   const noRow = unpriced("no-row");
   const unreached = unpriced("unreachable");
-  // Some batch answered: a failed one leaves only its own keys unpriced.
-  const answered = noRow > 0 || ledgers.some((v) => v.state === "priced");
   const l = p.keysLedger;
+  // Some call answered (the server counts them): a failed one leaves only its
+  // own keys unpriced. Row states cannot say this — `not-tracked` comes from
+  // the config as well as from an answered `tracked: false`.
+  const answered = (l?.answered ?? 0) > 0;
   if (l && !l.configured) out.push("No session ledger on this host: sessions and cost are not shown.");
   else if (l?.timedOut) out.push("The session ledger timed out: sessions and cost are not shown for the keys it did not answer.");
   else if (l && l.calls > 0 && !l.reachable) {

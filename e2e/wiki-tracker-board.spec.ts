@@ -432,3 +432,90 @@ test.describe("Wiki issue board: fix round 1", () => {
     await expect(page.locator('[data-kpi="keyless"] b')).toHaveText("1500+");
   });
 });
+
+test.describe("Wiki issue board: fix round 2", () => {
+  /** Hold the typing debounce forever, so "within 300 ms" is every moment of the test. */
+  const holdDebounce = (page: Page) =>
+    page.addInitScript(() => {
+      const orig = window.setTimeout;
+      window.setTimeout = ((fn: TimerHandler, ms?: number, ...rest: unknown[]) =>
+        ms === 300 ? orig(() => {}, 2 ** 30) : orig(fn, ms, ...rest)) as typeof window.setTimeout;
+    });
+  const q = (page: Page) => new URL(page.url()).searchParams.get("q");
+
+  test("D1: a row click inside the debounce keeps q in the URL, and Back shows box and table agreeing", async ({ page }) => {
+    await holdDebounce(page);
+    await openBoard(page);
+    await page.locator("#boardQuery").fill("følge");
+    expect(q(page)).toBeNull();
+    await row(page, "DEMO-102").locator(".board-title").click();
+    await page.waitForURL(/\/wiki\?/);
+    // At commit, before any board script runs: the history entry itself.
+    await page.goBack({ waitUntil: "commit" });
+    expect(q(page)).toBe("følge");
+    await expect(page.locator("#boardTable")).toBeVisible();
+    expect(q(page)).toBe("følge");
+    await expect(page.locator("#boardQuery")).toHaveValue("følge");
+    expect(await rowKeys(page)).toEqual(["DEMO-102"]);
+  });
+
+  test("D1: a modifier click inside the debounce writes q to this tab's URL before the new tab opens", async ({ page, context }) => {
+    await holdDebounce(page);
+    await openBoard(page);
+    await page.locator("#boardQuery").fill("følge");
+    const opened = context.waitForEvent("page", { timeout: 5_000 });
+    await row(page, "DEMO-102").locator(".board-title").click({ modifiers: ["ControlOrMeta"] });
+    await (await opened).close();
+    expect(q(page)).toBe("følge");
+  });
+
+  // Declared limit: the browser fixes a reload's URL before any page event
+  // (a flush on pagehide or beforeunload measured too late in Chromium), so the
+  // typing is lost — but box, table and URL come back agreeing.
+  test("D1: a reload inside the debounce comes back with box, table and URL agreeing", async ({ page }) => {
+    await holdDebounce(page);
+    await openBoard(page);
+    await page.locator("#boardQuery").fill("følge");
+    await page.reload();
+    await expect(page.locator("#boardTable")).toBeVisible();
+    const box = await page.locator("#boardQuery").inputValue();
+    expect(q(page) ?? "").toBe(box);
+    expect(await rowKeys(page)).toEqual(box ? ["DEMO-102"] : ["DEMO-101", "DEMO-102", "DEMO-103", "DEMO-104", "DEMO-150"]);
+  });
+
+  test("D1: a link out of the page inside the debounce keeps q for Back (pagehide)", async ({ page }) => {
+    await holdDebounce(page);
+    await openBoard(page);
+    await page.locator("#boardQuery").fill("følge");
+    await page.locator("a", { hasText: "Wiki reader" }).click();
+    await page.waitForURL((u) => !u.pathname.includes("/issues"));
+    // At commit, before any board script runs: the history entry itself.
+    await page.goBack({ waitUntil: "commit" });
+    expect(q(page)).toBe("følge");
+  });
+
+  test("D1: a box the browser restored to other text than the URL's filters the table by the box", async ({ page }) => {
+    // Form restoration sets the value and fires no input event.
+    await page.addInitScript(() =>
+      document.addEventListener("DOMContentLoaded", () => {
+        (document.getElementById("boardQuery") as HTMLInputElement).value = "følge";
+      }),
+    );
+    await openBoard(page);
+    await expect(page.locator("#boardQuery")).toHaveValue("følge");
+    await expect.poll(() => rowKeys(page)).toEqual(["DEMO-102"]);
+    expect(q(page)).toBe("følge");
+  });
+
+  test("P: a middle click on a row opens the graph in a new tab and leaves this one", async ({ page, context }) => {
+    await openBoard(page);
+    const boardUrl = page.url();
+    const opened = context.waitForEvent("page", { timeout: 5_000 });
+    await row(page, "DEMO-102").locator(".board-title").click({ button: "middle" });
+    const tab = await opened;
+    await tab.waitForLoadState();
+    expect(new URL(tab.url()).searchParams.get("issue")).toBe("jira:DEMO-102");
+    await tab.close();
+    expect(page.url()).toBe(boardUrl);
+  });
+});

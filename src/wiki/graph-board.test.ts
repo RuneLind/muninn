@@ -17,6 +17,7 @@ import { applyBoardJoins, joinIssueFields, joinKeysLedger, ledgerKeyBatches } fr
 import { GRAPH_NODES_MAX, parseGraphQuery, type GraphIssueNode, type GraphPageNode, type GraphPayload, type GraphQuery } from "./graph-types.ts";
 import type { ProvenanceContext } from "./provenance-service.ts";
 import type { IssueFacts, TrackerConfig } from "./trackers/types.ts";
+import { boardNotes } from "../dashboard/views/components/wiki-board-view.ts";
 
 const url = (k: string) => `https://example.invalid/browse/${k}`;
 const CONFIG = {
@@ -193,7 +194,7 @@ describe("joinKeysLedger", () => {
     expect(ctx.paths.length).toBe(3);
     expect(ctx.paths.map((p) => p.split(",").length)).toEqual([200, 200, 50]);
     expect(ctx.paths[0]!.startsWith("/api/jira/keys?keys=DEMO-1000,")).toBe(true);
-    expect(state).toEqual({ configured: true, calls: 3, reachable: true, timedOut: false });
+    expect(state).toEqual({ configured: true, calls: 3, answered: 3, reachable: true, timedOut: false });
     expect(nodes[449]!.keyLedger).toEqual({
       state: "priced",
       sessions: 3,
@@ -259,7 +260,7 @@ describe("joinKeysLedger", () => {
     const deadline = AbortSignal.timeout(20);
     const ctx = ctxWith({ fetch: () => new Promise(() => {}) });
     const state = await joinKeysLedger(nodes, trackers(), ctx, deadline, deadline);
-    expect(state).toEqual({ configured: true, calls: 1, reachable: false, timedOut: true });
+    expect(state).toEqual({ configured: true, calls: 1, answered: 0, reachable: false, timedOut: true });
     expect(nodes[0]!.keyLedger).toEqual({ state: "unpriced", reason: "deadline" });
   });
 
@@ -341,6 +342,62 @@ describe("fix round 1", () => {
     await applyBoardJoins(payload, { issueFields: true, keysLedger: true }, trackers(), ctx, {});
     expect(ledgerBeforeLookup).toBe(true);
     expect(payload.issueLookup).toEqual({ available: true });
-    expect(payload.keysLedger).toMatchObject({ calls: 1, reachable: true });
+    expect(payload.keysLedger).toMatchObject({ calls: 1, answered: 1, reachable: true });
   });
 });
+
+describe("fix round 2", () => {
+  test("D2: a batch answering only tracked:false rows plus a failed batch: answered 1 of 2, and the board counts the failed keys", async () => {
+    const keys = Array.from({ length: 201 }, (_, i) => `DEMO-${1000 + i}`);
+    const nodes = nodesFor(keys);
+    let n = 0;
+    const ctx = ctxWith({
+      fetch: async (p) => {
+        if (n++ === 0) return keysAnswer(p, () => false);
+        throw new Error("claude-usage returned HTTP 502");
+      },
+    });
+    const state = await joinKeysLedger(nodes, trackers(), ctx);
+    const payload: Pick<GraphPayload, "nodes" | "keysLedger"> = { nodes, keysLedger: state };
+    expect(boardNotes(payload)).toEqual(["1 key could not be priced: the session ledger did not answer for it."]);
+    expect(state).toEqual({ configured: true, calls: 2, answered: 1, reachable: false, timedOut: false });
+  });
+
+  const hung = () => new Promise<never>(() => {});
+
+  test("P: applyBoardJoins hands the signal to the lookup: a hung lookup is cut, and the lookup reads unavailable", async () => {
+    const ctx = ctxWith({ fetch: async (p) => keysAnswer(p) });
+    ctx.lookupIssues = hung;
+    const payload: Pick<GraphPayload, "nodes" | "issueLookup" | "keysLedger"> = { nodes: nodesFor(["DEMO-101"]) };
+    await applyBoardJoins(payload as GraphPayload, { issueFields: true }, trackers(), ctx, { signal: AbortSignal.timeout(20) });
+    expect(payload.issueLookup).toEqual({ available: false });
+  }, 2_000);
+
+  test("P: applyBoardJoins hands the signal to the ledger: a hung ledger is cut, each key unpriced", async () => {
+    const payload: Pick<GraphPayload, "nodes" | "issueLookup" | "keysLedger"> = { nodes: nodesFor(["DEMO-101"]) };
+    await applyBoardJoins(payload as GraphPayload, { keysLedger: true }, trackers(), ctxWith({ fetch: hung }), { signal: AbortSignal.timeout(20) });
+    expect(payload.keysLedger).toEqual({ configured: true, calls: 1, answered: 0, reachable: false, timedOut: false });
+    expect((payload.nodes[0] as GraphIssueNode).keyLedger).toEqual({ state: "unpriced", reason: "deadline" });
+  }, 2_000);
+
+  test("P: applyBoardJoins hands the deadline to the ledger, which then reports timedOut", async () => {
+    const deadline = AbortSignal.timeout(20);
+    const payload: Pick<GraphPayload, "nodes" | "issueLookup" | "keysLedger"> = { nodes: nodesFor(["DEMO-101"]) };
+    await applyBoardJoins(payload as GraphPayload, { keysLedger: true }, trackers(), ctxWith({ fetch: hung }), { signal: deadline, deadline });
+    expect(payload.keysLedger).toMatchObject({ timedOut: true, reachable: false });
+  }, 2_000);
+
+  test("P: exactly GRAPH_NODES_MAX keyless pages is not cut", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-board-keyless-eq-"));
+    roots.push(root);
+    await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");
+    await Promise.all(
+      Array.from({ length: GRAPH_NODES_MAX }, (_, i) => writeFile(path.join(root, `p${i}.md`), `---\ntitle: P${i}\n---\n\nBody.\n`, "utf8")),
+    );
+    const r = await buildGraph((await getWikiIndex({ root, refresh: true }))!, wikiQuery({ keyless: true, depth: 0 }), noLedger);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.payload.keylessPages!.length).toBe(GRAPH_NODES_MAX);
+    expect(r.payload.keylessTruncated).toBeUndefined();
+  });
+});
+

@@ -149,12 +149,12 @@ describe("markup", () => {
     expect(keylessTableHtml([], "w")).toContain("Every page relates to a key");
   });
   test("notes say what degraded", () => {
-    expect(boardNotes({ keysLedger: { configured: true, calls: 1, reachable: false, timedOut: false } })).toEqual([
+    expect(boardNotes({ keysLedger: { configured: true, calls: 1, answered: 0, reachable: false, timedOut: false } })).toEqual([
       "Session ledger unavailable: sessions and cost are not shown.",
     ]);
     expect(boardNotes({ issueLookup: { available: false } })[0]).toContain("no key is flagged unknown");
     expect(boardNotes({ truncated: true, truncatedBy: ["nodes"] })[0]).toContain("first 1500 keys");
-    expect(boardNotes({ issueLookup: { available: true }, keysLedger: { configured: true, calls: 1, reachable: true, timedOut: false } })).toEqual([]);
+    expect(boardNotes({ issueLookup: { available: true }, keysLedger: { configured: true, calls: 1, answered: 1, reachable: true, timedOut: false } })).toEqual([]);
   });
 });
 
@@ -204,26 +204,86 @@ describe("fix round 1", () => {
       node("DEMO-102", { keyLedger: priced }),
       node("DEMO-103", { keyLedger: { state: "unpriced", reason: "unreachable" } }),
     ];
-    const notes = boardNotes({ nodes, keysLedger: { configured: true, calls: 2, reachable: false, timedOut: false } });
+    const notes = boardNotes({ nodes, keysLedger: { configured: true, calls: 2, answered: 1, reachable: false, timedOut: false } });
     expect(notes).toEqual(["1 key could not be priced: the session ledger did not answer for it."]);
   });
 
   test("C8: a key the ledger returned no row for has its own reason, tooltip and note", () => {
-    const nodes = [node("DEMO-101", { keyLedger: { state: "unpriced", reason: "no-row" } as never })];
+    const nodes = [node("DEMO-101", { keyLedger: { state: "unpriced", reason: "no-row" } })];
     const html = boardTableHtml(boardRows({ nodes }), "w");
     expect(html).toContain('title="the session ledger returned no usable row for this key"');
-    expect(boardNotes({ nodes, keysLedger: { configured: true, calls: 1, reachable: true, timedOut: false } })).toEqual([
+    expect(boardNotes({ nodes, keysLedger: { configured: true, calls: 1, answered: 1, reachable: true, timedOut: false } })).toEqual([
       "1 key got no row from the session ledger: sessions and cost are not shown for it.",
     ]);
   });
 
   test("C9: a priced key whose cost arrived as null renders — and does not throw", () => {
-    const keyLedger = { state: "priced", sessions: 2, totalCost: null, costedSessions: 2, truncated: false, lastSeen: null } as never;
-    const html = boardTableHtml(boardRows({ nodes: [node("DEMO-101", { keyLedger })] }), "w");
+    // The wire form: the server's non-finite cost arrives as JSON null.
+    const sent: GraphIssueNode = node("DEMO-101", {
+      keyLedger: { state: "priced", sessions: 2, totalCost: Number.NaN, costedSessions: 2, truncated: false, lastSeen: null },
+    });
+    const received: GraphIssueNode = JSON.parse(JSON.stringify(sent));
+    expect(received.keyLedger).toMatchObject({ totalCost: null });
+    const html = boardTableHtml(boardRows({ nodes: [received] }), "w");
     expect(html).toContain('data-cost="priced" title="2 sessions">—<');
   });
 
   test("C15: the default wiki's links carry no empty wiki param", () => {
     expect(boardGraphUrl("", "jira", "DEMO-101")).toBe("/wiki?display=graph&issue=jira%3ADEMO-101");
+  });
+});
+
+describe("fix round 2", () => {
+  test("D2: a batch that answered only tracked:false rows plus a failed batch says how many keys went unpriced", () => {
+    const nodes = [
+      node("DEMO-150", { keyLedger: { state: "not-tracked" } }),
+      node("DEMO-103", { keyLedger: { state: "unpriced", reason: "unreachable" } }),
+    ];
+    const notes = boardNotes({ nodes, keysLedger: { configured: true, calls: 2, answered: 1, reachable: false, timedOut: false } });
+    expect(notes).toEqual(["1 key could not be priced: the session ledger did not answer for it."]);
+  });
+
+  test("D2: no batch answered is the ledger unavailable, whatever the rows say", () => {
+    const nodes = [node("DEMO-150", { keyLedger: { state: "not-tracked" } }), node("DEMO-103", { keyLedger: { state: "unpriced", reason: "unreachable" } })];
+    expect(boardNotes({ nodes, keysLedger: { configured: true, calls: 1, answered: 0, reachable: false, timedOut: false } })).toEqual([
+      "Session ledger unavailable: sessions and cost are not shown.",
+    ]);
+  });
+
+  test("P: the project decides before the number (ABC-100 before DEMO-9)", () => {
+    const rows = boardRows({ nodes: ["DEMO-9", "ABC-100"].map((k) => node(k, { lastActivityMs: NOW })) });
+    expect(rows.map((r) => r.node.key)).toEqual(["ABC-100", "DEMO-9"]);
+  });
+
+  test("P: a no-row key and an unreachable key each get their own note", () => {
+    const nodes = [
+      node("DEMO-101", { keyLedger: { state: "unpriced", reason: "no-row" } }),
+      node("DEMO-102", { keyLedger: { state: "unpriced", reason: "unreachable" } }),
+    ];
+    expect(boardNotes({ nodes, keysLedger: { configured: true, calls: 2, answered: 1, reachable: false, timedOut: false } })).toEqual([
+      "1 key could not be priced: the session ledger did not answer for it.",
+      "1 key got no row from the session ledger: sessions and cost are not shown for it.",
+    ]);
+  });
+
+  test("P: the keyless note reads keylessTruncated, not the graph's own truncation", () => {
+    expect(boardNotes({ keylessTruncated: true })).toEqual(["Pages with no key: the first 1500, newest first."]);
+    expect(boardNotes({ truncated: true, truncatedBy: ["nodes"] })).toEqual(["The board shows the first 1500 keys."]);
+  });
+
+  test("P: the status pill's title names the tracker", () => {
+    const html = boardTableHtml(
+      boardRows({ nodes: [node("DEMO-101", { label: "Jira", category: "active", status: "In Progress", updated: "2026-01-04T10:00:00Z", known: true })] }),
+      "w",
+    );
+    expect(html).toContain('title="Jira last updated 2026-01-04, as of huginn&#39;s last capture"');
+  });
+
+  test("P: a tracked key priced at a cost of 0 with no costed session shows a dash, never $0", () => {
+    const html = boardTableHtml(
+      boardRows({ nodes: [node("DEMO-101", { keyLedger: { state: "priced", sessions: 1, totalCost: 0, costedSessions: 0, truncated: false, lastSeen: null } })] }),
+      "w",
+    );
+    expect(html).toContain('data-cost="priced" title="0 of 1 sessions carry a cost">—<');
   });
 });

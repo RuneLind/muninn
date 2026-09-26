@@ -165,7 +165,7 @@ describe("GET /api/wiki/graph", () => {
       keyLedger: { state: "priced", sessions: 2, totalCost: 3 },
     });
     expect(body.issueLookup).toEqual({ available: true });
-    expect(body.keysLedger).toEqual({ configured: true, calls: 1, reachable: true, timedOut: false });
+    expect(body.keysLedger).toEqual({ configured: true, calls: 1, answered: 1, reachable: true, timedOut: false });
     expect(body.keylessPages).toEqual([]);
   });
 
@@ -217,4 +217,30 @@ describe("GET /wiki/issues", () => {
   test("fans out to nothing, so it is not a side-effecting GET", () => {
     expect(isSideEffectingRequest("GET", "/wiki/issues")).toBe(false);
   });
+});
+
+describe("GET /api/wiki/graph: fix round 2", () => {
+  test("a repeated fields or ledger is a 400 naming it", async () => {
+    calls.length = 0;
+    expect(await get("wiki=trk&scope=wiki&fields=issue&fields=issue")).toEqual({ status: 400, body: { error: "fields must be given once" } });
+    expect(await get("wiki=trk&scope=wiki&ledger=keys&ledger=keys")).toEqual({ status: 400, body: { error: "ledger must be given once" } });
+    expect(calls).toEqual([]);
+  });
+
+  test("the route hands the board joins its signal and deadline: a hung lookup and ledger answer within the budget, timedOut", async () => {
+    const hung = () => new Promise<never>(() => {});
+    const slow: ProvenanceContext = {
+      ...ctx,
+      budgetMs: 30,
+      sessionLedger: { ...ctx.sessionLedger, fetchIssueLedger: hung },
+      lookupIssues: hung,
+    };
+    const app2 = new Hono();
+    registerWikiRoutes(app2, { knowledgeApiUrl: "http://huginn.test", claudeUsageUrl: null, claudeUsagePublicUrl: null } as Config, slow);
+    const res = await app2.request("/api/wiki/graph?wiki=trk&scope=wiki&depth=0&fields=issue&ledger=keys");
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(res.status).toBe(200);
+    expect(body.issueLookup).toEqual({ available: false });
+    expect(body.keysLedger).toEqual({ configured: true, calls: 1, answered: 0, reachable: false, timedOut: true });
+  }, 2_000);
 });
