@@ -126,7 +126,10 @@ export function linkRefusalHtml(reason: string, field: string): string {
   }
 }
 
-function statusHtml(row: IssueRow, label: string): string {
+/** A key's status pill from its lookup facts; empty when the lookup did not
+ *  answer. `label` is the tracker's (`Jira`). Connections and the issue board
+ *  share it. */
+export function statusHtml(row: Pick<IssueRow, "category" | "known" | "status" | "updated">, label: string): string {
   if (!row.category) return "";
   const when = row.updated ? row.updated.slice(0, 10) : "";
   const title = when
@@ -250,3 +253,16 @@ export function issueSectionHtml(rows: readonly IssueRow[] | undefined, opts: Is
   }
   return html + `</div>`;
 }
+
+/** The status pill's colours, one per category — Connections' rows and the
+ *  issue board share them. */
+export const ISSUE_STATUS_STYLES = `
+    .wiki-issue-status {
+      font-size: 10.5px; padding: 0 6px; border-radius: 999px;
+      background: var(--tint-neutral); color: var(--text-secondary);
+    }
+    .wiki-issue-status.cat-todo { background: var(--tint-neutral); color: var(--tok-fn); }
+    .wiki-issue-status.cat-active { background: var(--tint-purple); color: var(--accent-light); }
+    .wiki-issue-status.cat-review { background: var(--tint-warning); color: var(--tok-num); }
+    .wiki-issue-status.cat-done { background: var(--tint-success); color: var(--tok-str); }
+    .wiki-issue-status.cat-unknown { background: var(--tint-neutral); color: var(--text-soft); }`;

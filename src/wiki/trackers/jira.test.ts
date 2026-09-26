@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { clauseBoundaries, inferJiraIssues, jiraAdapter, stampedKeys, stemKeys, titleKeys } from "./jira.ts";
+import { clauseBoundaries, inferJiraIssues, jiraAdapter, parseJiraKeysLedger, stampedKeys, stemKeys, titleKeys } from "./jira.ts";
 import { inferIssues, isPlanTitle, parseTrackersConfig } from "./index.ts";
 import type { IssueRef, TrackerConfig, TrackerPage } from "./types.ts";
 
@@ -392,5 +392,46 @@ describe("PR 3 fix round 1: the adapter's key seams", () => {
   test("parseLedger: `sessions` that is not an array is null, never a string's length", () => {
     expect(jiraAdapter.parseLedger!({ sessions: "abc", totalCost: 1, costedSessions: 3, truncated: false })).toBeNull();
     expect(jiraAdapter.parseLedger!({ sessions: { length: 3 }, totalCost: 1 })).toBeNull();
+  });
+});
+
+describe("parseJiraKeysLedger", () => {
+  test("rows by uppercased key; tracked:false keeps no figures", () => {
+    const m = parseJiraKeysLedger({ keys: [{ key: "demo-1", tracked: false, sessionCount: 0, totalCost: 0, costedSessions: 0, lastSeen: null }] });
+    expect(m!.get("DEMO-1")).toEqual({ tracked: false, sessions: 0, totalCost: 0, costedSessions: 0, truncated: false, lastSeen: null });
+  });
+  test("not the shape: null", () => {
+    for (const raw of [null, "x", {}, { keys: "DEMO-1" }]) expect(parseJiraKeysLedger(raw)).toBeNull();
+  });
+  test("a tracked row with a non-number figure is skipped", () => {
+    expect(parseJiraKeysLedger({ keys: [{ key: "DEMO-1", tracked: true, sessionCount: 1, totalCost: "1", costedSessions: 1 }] })!.size).toBe(0);
+    expect(parseJiraKeysLedger({ keys: [{ key: "DEMO-1", tracked: true, sessionCount: -1, totalCost: 1, costedSessions: 1 }] })!.size).toBe(0);
+  });
+  test("C9: a cost that rounds past finite, a negative cost and more costed than counted sessions leave the key unanswered", () => {
+    const row = (o: object) => ({ key: "DEMO-1", tracked: true, sessionCount: 2, totalCost: 1, costedSessions: 1, ...o });
+    for (const bad of [{ totalCost: 1e308 }, { totalCost: -0.5 }, { costedSessions: 3 }]) {
+      expect(parseJiraKeysLedger({ keys: [row(bad)] })!.size, JSON.stringify(bad)).toBe(0);
+    }
+    expect(parseJiraKeysLedger({ keys: [row({})] })!.size).toBe(1);
+  });
+});
+
+describe("parseJiraKeysLedger: fix round 2", () => {
+  const row = (o: object) => ({ key: "DEMO-1", tracked: true, sessionCount: 1, totalCost: 0, costedSessions: 0, lastSeen: null, ...o });
+  test("a tracked row with a cost of exactly 0 is priced, not skipped", () => {
+    expect(parseJiraKeysLedger({ keys: [row({})] })!.get("DEMO-1")).toEqual({
+      tracked: true,
+      sessions: 1,
+      totalCost: 0,
+      costedSessions: 0,
+      truncated: false,
+      lastSeen: null,
+    });
+  });
+  test("a cost that is negative only before rounding to cents (-0.005 up to 0 rounds to -0) is accepted, and serializes as 0", () => {
+    const got = parseJiraKeysLedger({ keys: [row({ totalCost: -0.004 })] })!.get("DEMO-1")!;
+    expect(JSON.parse(JSON.stringify(got)).totalCost).toBe(0);
+    expect(parseJiraKeysLedger({ keys: [row({ totalCost: -0.005 })] })!.size).toBe(1);
+    expect(parseJiraKeysLedger({ keys: [row({ totalCost: -0.006 })] })!.size).toBe(0);
   });
 });

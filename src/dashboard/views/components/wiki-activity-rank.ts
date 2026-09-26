@@ -307,7 +307,7 @@ function railAge(ms: number, now: number, dayLabel?: string): { relative: boolea
  * reached zero times.
  */
 const BARE_DAY_LABEL = /^\d{4}-\d{2}-\d{2}$/;
-function calendarDay(ms: number, dayLabel?: string): string {
+export function calendarDay(ms: number, dayLabel?: string): string {
   return dayLabel && BARE_DAY_LABEL.test(dayLabel) ? dayLabel : localDay(new Date(ms));
 }
 

@@ -27,6 +27,7 @@ import {
   WIKI_READONLY_INPUT_PLACEHOLDER,
 } from "./components/wiki-readonly-client.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
+import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
 
 /* Inline stroke icons for the pane toggles — sized/coloured by .wiki-pane-btn. */
 const SVG_COLLAPSE = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>';
@@ -106,6 +107,14 @@ export async function renderWikiPage(opts?: {
   const gardenerLink = gardener
     ? `<a href="${gardenerHref}" class="wiki-gardener-icon" title="Wiki gardener — review drafted pages" aria-label="Wiki gardener${gardenerPending > 0 ? ` (${gardenerPending} pending)` : ""}">🌱${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`
     : "";
+  // The issue board's link. Rendered hidden for every named wiki, because the
+  // page does not read the index: `setPagesData` (wiki-browser.ts) shows it
+  // once the listing names a tracker, so a wiki with no `trackers` block never
+  // shows it.
+  const boardLink =
+    selected && !unknownWiki && !envOverride
+      ? `<a href="/wiki/issues?wiki=${escAttr(encodeURIComponent(selected))}" id="wikiBoardLink" class="wiki-gardener-icon wiki-board-icon" title="Issue board — every key and whether a plan covers it" aria-label="Issue board" hidden>▤</a>`
+      : "";
   // An unknown `?wiki=` matches no real option — render its raw name as a
   // disabled, selected placeholder so the picker and the "No wiki named X" pane
   // agree instead of the browser highlighting the first wiki. Show the picker for
@@ -283,6 +292,9 @@ export async function renderWikiPage(opts?: {
       border: 1px solid var(--border-secondary); text-decoration: none; font-size: 15px;
     }
     .wiki-gardener-icon:hover { border-color: var(--accent); }
+    .wiki-board-icon { color: var(--accent-light); }
+    .wiki-board-icon[hidden] { display: none; }
+    .wiki-board-icon:not([hidden]) + .wiki-gardener-icon { margin-left: 0; }
     .wiki-gardener-icon .wiki-gardener-badge { position: absolute; top: -5px; right: -5px; }
 
     /* Domain segmented control (All / AI / Life). */
@@ -1107,15 +1119,7 @@ export async function renderWikiPage(opts?: {
     .wiki-issue-key { color: var(--accent-light); font-weight: 600; text-decoration: none; }
     a.wiki-issue-key:hover { text-decoration: underline; }
     .wiki-issue-rel { font-size: 10.5px; color: var(--text-muted); }
-    .wiki-issue-status {
-      font-size: 10.5px; padding: 0 6px; border-radius: 999px;
-      background: var(--tint-neutral); color: var(--text-secondary);
-    }
-    .wiki-issue-status.cat-todo { background: var(--tint-neutral); color: var(--tok-fn); }
-    .wiki-issue-status.cat-active { background: var(--tint-purple); color: var(--accent-light); }
-    .wiki-issue-status.cat-review { background: var(--tint-warning); color: var(--tok-num); }
-    .wiki-issue-status.cat-done { background: var(--tint-success); color: var(--tok-str); }
-    .wiki-issue-status.cat-unknown { background: var(--tint-neutral); color: var(--text-soft); }
+    ${ISSUE_STATUS_STYLES}
     .wiki-issue-title, .wiki-issue-epic { font-size: 12px; color: var(--text-secondary); margin-top: 2px; overflow-wrap: anywhere; }
     .wiki-issue-epic { font-size: 11px; color: var(--text-muted); }
     .wiki-issue-meta { font-size: 11px; color: var(--text-muted); margin-top: 3px; overflow-wrap: anywhere; }
@@ -2479,8 +2483,8 @@ export async function renderWikiPage(opts?: {
     <div class="wiki-pane">
       <div class="wiki-browse-head">
         ${
-          wikiSelector || gardenerLink
-            ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${gardenerLink}</div>`
+          wikiSelector || gardenerLink || boardLink
+            ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${boardLink}${gardenerLink}</div>`
             : ""
         }
         <div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>

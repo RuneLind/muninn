@@ -19,6 +19,7 @@ import {
   type IssueLedgerView,
   type IssueRef,
   type IssueRelation,
+  type KeyLedgerRow,
   type StatusCategory,
   type TrackerAdapter,
   type TrackerConfig,
@@ -349,6 +350,46 @@ function parseJiraLedger(raw: unknown): Extract<IssueLedgerView, { state: "price
   };
 }
 
+/** claude-usage's own cap on `/api/jira/keys`: past it the answer is cut. */
+export const JIRA_KEYS_PER_CALL = 200;
+
+const count = (v: unknown): number | null =>
+  typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+
+/**
+ * `/api/jira/keys?keys=`'s answer — `{keys: [{key, tracked, sessionCount,
+ * totalCost, costedSessions, lastSeen, truncated}], …}` — as key → row, or
+ * null when it is not that shape. A row that is not a row is skipped, so its
+ * key reads as unanswered rather than as zero sessions — and so is a tracked
+ * row whose cost is not finite or still negative after rounding to cents
+ * (`-0.004` rounds to `-0`, is accepted and serializes as `0`), or with more
+ * costed than counted sessions.
+ */
+export function parseJiraKeysLedger(raw: unknown): Map<string, KeyLedgerRow> | null {
+  if (!raw || typeof raw !== "object" || !Array.isArray((raw as { keys?: unknown }).keys)) return null;
+  const out = new Map<string, KeyLedgerRow>();
+  for (const r of (raw as { keys: unknown[] }).keys) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+    if (typeof row.key !== "string" || typeof row.tracked !== "boolean") continue;
+    const sessions = count(row.sessionCount);
+    const costed = count(row.costedSessions);
+    // Rounded BEFORE the finite check: 1e308 is finite and ×100 is not.
+    const total = typeof row.totalCost === "number" ? Math.round(row.totalCost * 100) / 100 : NaN;
+    const cost = Number.isFinite(total) && total >= 0 ? total : null;
+    if (row.tracked && (sessions === null || costed === null || cost === null || costed > sessions)) continue;
+    out.set(row.key.toUpperCase(), {
+      tracked: row.tracked,
+      sessions: sessions ?? 0,
+      totalCost: cost ?? 0,
+      costedSessions: costed ?? 0,
+      truncated: row.truncated === true,
+      lastSeen: typeof row.lastSeen === "string" ? row.lastSeen : null,
+    });
+  }
+  return out;
+}
+
 export const jiraAdapter: TrackerAdapter = {
   id: ID,
   label: "Jira",
@@ -364,6 +405,9 @@ export const jiraAdapter: TrackerAdapter = {
   lookup: (knowledgeApiUrl) => loadIssueFields(knowledgeApiUrl),
   ledgerPath: (key) => `/api/jira?key=${encodeURIComponent(key)}`,
   parseLedger: parseJiraLedger,
+  ledgerKeysPath: (keys) => `/api/jira/keys?keys=${keys.map(encodeURIComponent).join(",")}`,
+  ledgerKeysMax: JIRA_KEYS_PER_CALL,
+  parseLedgerKeys: parseJiraKeysLedger,
   projectOf: projectOfKey,
   parseKey: parseClientKey,
 };

@@ -123,6 +123,29 @@ export type IssueLedgerView =
    *  a demoted key (not priced at all). */
   | { state: "unpriced"; reason: "cap" | "deadline" | "unreachable" | "not-configured" | "demoted" };
 
+/** One key's row in a many-key ledger answer (`/api/jira/keys`). */
+export interface KeyLedgerRow {
+  /** False: the ledger records no mentions for the key's project. */
+  tracked: boolean;
+  sessions: number;
+  totalCost: number;
+  costedSessions: number;
+  /** The ledger cut the key's session list at its own per-key cap. */
+  truncated: boolean;
+  lastSeen: string | null;
+}
+
+/** How the board prices a key. Never a total across keys: one session counts
+ *  under every key it mentions. */
+export type KeyLedgerView =
+  | ({ state: "priced" } & Omit<KeyLedgerRow, "tracked">)
+  | { state: "not-tracked" }
+  /** Not priced, and why: past the shared deadline, the ledger did not answer
+   *  (a 404 from a claude-usage without the route included), no ledger is
+   *  configured on this host, or the ledger answered with no usable row for
+   *  the key (`no-row`). */
+  | { state: "unpriced"; reason: "deadline" | "unreachable" | "not-configured" | "no-row" };
+
 /**
  * One Connections row. The index-local half (everything down to `planPages`)
  * rides `GET /api/wiki/page` inline; the deferred provenance payload carries
@@ -238,6 +261,13 @@ export interface TrackerAdapter {
   ledgerPath?: (key: string) => string;
   /** That path's answer as a priced view, or null when it is not one. */
   parseLedger?: (raw: unknown) => Extract<IssueLedgerView, { state: "priced" }> | null;
+  /** The claude-usage path that prices up to {@link ledgerKeysMax} keys in one
+   *  call. Absent ⇒ the board prices no key of this tracker. */
+  ledgerKeysPath?: (keys: readonly string[]) => string;
+  /** The most keys one `ledgerKeysPath` call may carry. */
+  ledgerKeysMax?: number;
+  /** That path's answer, key → row, or null when it is not that shape. */
+  parseLedgerKeys?: (raw: unknown) => Map<string, KeyLedgerRow> | null;
   /** A key's project, or null when the string is not a key. */
   projectOf: (key: string) => string | null;
   /** A key exactly as a client sent it (trimmed), normalized, or null when it is

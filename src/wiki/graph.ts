@@ -486,6 +486,21 @@ export async function buildGraph(
     if (info && !info.confirmed) n.mergeUnconfirmed = true;
   }
 
+  // ── The board's index-local opt-ins (`scope=wiki` only) ──────────────────
+  if (query.issueFields) {
+    for (const n of nodes.values()) if (n.lane === "issue") Object.assign(n, issueAggregates(keyMap.get(issueKeyId(n.tracker, n.key)), index));
+  }
+  let keylessPages: GraphPageNode[] | undefined;
+  let keylessTruncated = false;
+  if (query.keyless) {
+    const keyless = index.pages
+      .filter((p) => !isBookkeeping(p) && !(p.issues ?? []).some((r) => configOf.has(r.tracker) && relationsCount(r.relations)))
+      .map((p) => ({ ...pageNode(p), hop: 0 }) as GraphPageNode)
+      .sort((a, b) => b.pageTimeMs - a.pageTimeMs || (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
+    keylessTruncated = keyless.length > GRAPH_NODES_MAX;
+    keylessPages = keyless.slice(0, GRAPH_NODES_MAX);
+  }
+
   const laneRank = (l: GraphLane) => GRAPH_LANES.indexOf(l);
   const sortKey = (n: GraphNode) =>
     n.lane === "issue" ? n.key : n.lane === "page" ? n.relPath : n.lane === "session" ? n.sessionId : n.ref;
@@ -515,6 +530,32 @@ export async function buildGraph(
         mergesPartial,
         mergesTruncated,
       },
+      ...(keylessPages ? { keylessPages } : {}),
+      ...(keylessTruncated ? { keylessTruncated: true as const } : {}),
     },
   };
+}
+
+/**
+ * A key's board columns that need no network: over its counting,
+ * non-bookkeeping pages in the whole wiki — never the drawn edges, which the
+ * caps can cut.
+ */
+export function issueAggregates(
+  entry: IssueKeyEntry | undefined,
+  index: Pick<WikiIndex, "resolveRelPath">,
+): Required<Pick<GraphIssueNode, "stampedCount" | "lastActivityMs" | "prRefs">> {
+  let stampedCount = 0;
+  let lastActivityMs = 0;
+  const prs = new Map<string, string>();
+  for (const p of entry?.pages ?? []) {
+    if (!relationsCount(p.relations)) continue;
+    const page = index.resolveRelPath(p.relPath);
+    if (!page || isBookkeeping(page)) continue;
+    if (p.relations.includes("stamped")) stampedCount++;
+    lastActivityMs = Math.max(lastActivityMs, pageTimeMs(page));
+    for (const ref of page.prRefs ?? []) if (!prs.has(ref.toLowerCase())) prs.set(ref.toLowerCase(), ref);
+  }
+  const prRefs = [...prs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([, ref]) => ref);
+  return { stampedCount, lastActivityMs, prRefs };
 }

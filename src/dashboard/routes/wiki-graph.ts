@@ -5,10 +5,15 @@
  * `src/wiki/graph.ts`; the wire shape and the query rules are
  * `graph-types.ts`.
  *
+ * At `scope=wiki` the issue board adds `keyless=1`, `fields=issue` and
+ * `ledger=keys` (`graph-board.ts`); without them the answer is PR 4's.
+ *
  * Registered inside the `wiki` route group, so `MUNINN_PROFILE=nais` drops it
  * with the rest of `/wiki`, and listed on `SIDE_EFFECTING_GETS`: at level 2 and
  * up one GET fans out into claude-usage calls, bounded by
- * `GRAPH_SESSIONS_MAX` and by one `PROVENANCE_BUDGET_MS` deadline.
+ * `GRAPH_SESSIONS_MAX` and by one `PROVENANCE_BUDGET_MS` deadline; with
+ * `ledger=keys` into one more call per 200 keys, and with `fields=issue` into
+ * huginn.
  *
  * A wiki with no `trackers` block answers 404: graph mode is a tracker
  * surface, and the reader offers no toggle there.
@@ -20,6 +25,7 @@ import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
 import { PROVENANCE_BUDGET_MS, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import { buildGraph, graphLedgerPort } from "../../wiki/graph.ts";
+import { applyBoardJoins } from "../../wiki/graph-board.ts";
 import { parseGraphQuery } from "../../wiki/graph-types.ts";
 
 export function registerWikiGraphRoute(app: Hono, ctx: ProvenanceContext): void {
@@ -29,8 +35,12 @@ export function registerWikiGraphRoute(app: Hono, ctx: ProvenanceContext): void 
       root: c.req.query("root"),
       depth: c.req.query("depth"),
       level: c.req.query("level"),
+      keyless: c.req.queries("keyless"),
+      fields: c.req.queries("fields"),
+      ledger: c.req.queries("ledger"),
     });
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const { query } = parsed;
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
       c.req.query("wiki"),
@@ -40,16 +50,16 @@ export function registerWikiGraphRoute(app: Hono, ctx: ProvenanceContext): void 
     if (unknownWiki) return c.json({ error: "no wiki configured for that name" }, 404);
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return c.json({ error: "wiki directory not found" }, 503);
-    // One deadline over every ledger read, armed only when a level reaches the
-    // ledger at all — level 1 is index-local. A client that goes away aborts
-    // the fan-out too; only the deadline reads as `timedOut`.
+    // One deadline over every network read, armed only when the request makes
+    // one — level 1 with no board opt-in is index-local. A client that goes
+    // away aborts the fan-out too; only the deadline reads as `timedOut`.
+    const ledgerLeg = ctx.sessionLedger.urlConfigured && (query.level >= 2 || query.keysLedger === true);
     const deadline =
-      parsed.query.level >= 2 && ctx.sessionLedger.urlConfigured
-        ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS)
-        : undefined;
+      ledgerLeg || query.issueFields ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS) : undefined;
     const signal = deadline ? AbortSignal.any([c.req.raw.signal, deadline]) : undefined;
-    const result = await buildGraph(index, parsed.query, graphLedgerPort(ctx, signal, deadline));
+    const result = await buildGraph(index, query, graphLedgerPort(ctx, signal, deadline));
     if (!result.ok) return c.json({ error: result.error }, result.status);
+    await applyBoardJoins(result.payload, query, index.readerConfig?.trackers ?? [], ctx, { signal, deadline, wikiRoot: entry?.root ?? "" });
     return c.json(result.payload);
   });
 }

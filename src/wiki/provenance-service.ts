@@ -454,21 +454,7 @@ export async function resolveIssueRows(
   const ids = [...new Set(base.map((r) => r.tracker))];
   // The lookup and the ledger start together: a slow huginn must not spend the
   // deadline claude-usage was never asked inside.
-  const lookupsP = Promise.all(
-    ids.map(async (id) => {
-      const adapter = trackerAdapter(id);
-      const load = (async () => {
-        if (!adapter) return null;
-        try {
-          if (ctx.lookupIssues) return await ctx.lookupIssues(adapter, ctx.knowledgeApiUrl);
-          return adapter.lookup ? await adapter.lookup(ctx.knowledgeApiUrl) : null;
-        } catch {
-          return null;
-        }
-      })();
-      return [id, await raceDeadline(load, signal)] as const;
-    }),
-  );
+  const lookupsP = Promise.all(ids.map(async (id) => [id, await lookupTrackerIssues(id, ctx, signal)] as const));
 
   // Which rows are asked about, and why the others are not.
   const ledger: (IssueLedgerView | "ask")[] = [];
@@ -505,17 +491,50 @@ export async function resolveIssueRows(
     const fact = facts?.get(row.key);
     const out: IssueRow = { ...row, ledger: ledger[i] as IssueLedgerView };
     if (facts && config) {
-      out.known = !!fact;
-      out.category = statusCategory(fact?.status, config, wikiRoot);
-      if (fact?.title) out.title = fact.title;
-      if (fact?.status) out.status = fact.status;
-      if (fact?.updated) out.updated = fact.updated;
+      applyIssueFact(out, fact, config, wikiRoot);
       if (fact?.epicLink) {
         out.epic = { key: fact.epicLink, ...(fact.epicSummary ? { summary: fact.epicSummary } : {}) };
       }
     }
     return out;
   });
+}
+
+/** One key's lookup facts onto a Connections row or a board node: `known`, the
+ *  category through the wiki's `statusMap`, and title, status and updated when
+ *  the lookup has them. Only for a tracker whose lookup answered. */
+export function applyIssueFact(
+  target: Pick<IssueRow, "known" | "category" | "title" | "status" | "updated">,
+  fact: IssueFacts | undefined,
+  config: TrackerConfig,
+  wikiRoot: string,
+): void {
+  target.known = !!fact;
+  target.category = statusCategory(fact?.status, config, wikiRoot);
+  if (fact?.title) target.title = fact.title;
+  if (fact?.status) target.status = fact.status;
+  if (fact?.updated) target.updated = fact.updated;
+}
+
+/** A tracker's issue facts through the context's seam, raced against the
+ *  deadline. Null when there is no adapter or lookup, it failed, or the
+ *  deadline fired first. Never throws. */
+export async function lookupTrackerIssues(
+  trackerId: string,
+  ctx: ProvenanceContext,
+  signal?: AbortSignal,
+): Promise<Map<string, IssueFacts> | null> {
+  const adapter = trackerAdapter(trackerId);
+  const load = (async () => {
+    if (!adapter) return null;
+    try {
+      if (ctx.lookupIssues) return await ctx.lookupIssues(adapter, ctx.knowledgeApiUrl);
+      return adapter.lookup ? await adapter.lookup(ctx.knowledgeApiUrl) : null;
+    } catch {
+      return null;
+    }
+  })();
+  return raceDeadline(load, signal);
 }
 
 /** One key's price through its tracker's ledger path and parser. Never throws. */
@@ -662,7 +681,7 @@ async function loadCorpus(
 }
 
 /** `p`, or `null` once the shared deadline fires — whichever comes first. */
-async function raceDeadline<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T | null> {
+export async function raceDeadline<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T | null> {
   return signal ? await Promise.race([p, aborted(signal)]) : await p;
 }
 
