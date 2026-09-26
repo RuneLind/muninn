@@ -40,9 +40,9 @@
  * the first discovered bot, resolved from `bots/` at setup so the spec doesn't
  * hardcode an install's bot name.
  *
- * ENV PREREQUISITE: the same one every other e2e spec has — a working `.env`
- * (`DATABASE_URL` at minimum) at the repo root, since `src/index.ts` boots the
- * full process.
+ * DATABASE: the spec seeds its own chat user + thread for the pinned bot (see
+ * `DB_URL` below) and points its muninn at that database, so it runs on an empty
+ * one. The rest of `src/index.ts`'s boot needs what every other e2e spec needs.
  *
  * SPAWN ENV: `e2eEnv()` keeps this muninn off Telegram/Slack, and blanks the
  * instance-profile flags (`MUNINN_WIKI_READONLY`, `SYNC_REPOS`, `MUNINN_AUTH`…)
@@ -55,8 +55,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { TEST_DATABASE_URL } from "../src/test/test-db-url.ts";
+import { chatUserStorageKey } from "../src/dashboard/views/components/wiki-chat-target.ts";
 
 const PORT = e2ePort("wiki-chat-dialog");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -95,6 +98,33 @@ const PAGES: Record<string, string> = {
 let server: ChildProcess | undefined;
 let root = "";
 
+/**
+ * The chat target needs a USER for the pinned bot (`loadChatConfig` joins users
+ * to threads), and the dialog's Start stays disabled until one is selected. The
+ * spec seeds its OWN user + thread and deletes them afterwards, and every page
+ * starts with that user remembered under the chat page's storage key — the
+ * dialog's first preselection rule. So the choice does not depend on how many
+ * other chat users the bot has: a developer's database, or another spec
+ * (`chat-card-fences`) seeding one in parallel, would otherwise leave the
+ * sole-user rule with two candidates and Start disabled. The spawned muninn is
+ * pointed at the same database the rows went into: the environment's
+ * `DATABASE_URL` when the runner sets one (CI does), otherwise the shared test
+ * database.
+ */
+const DB_URL = process.env.DATABASE_URL || TEST_DATABASE_URL;
+const USER_ID = "e2e-chat-dialog-user";
+let sql: ReturnType<typeof postgres> | null = null;
+let seeded = false;
+let pinnedBot = "";
+
+// Select the spec's own user explicitly, before any page script runs.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(
+    ([key, id]) => { try { localStorage.setItem(key, id); } catch { /* opaque origin */ } },
+    [chatUserStorageKey(pinnedBot), USER_ID] as const,
+  );
+});
+
 /** Every discovered bot folder, sorted — the bot-override test needs a second
  *  name to switch to, and self-skips (saying so) when the install has only one
  *  (CI tracks only `bots/jarvis/`). */
@@ -126,6 +156,18 @@ test.beforeAll(async () => {
     await writeFile(path.join(root, name), body, "utf8");
   }
   const bot = await firstBotName();
+
+  sql = postgres(DB_URL, { max: 2 });
+  // Fixed id: a run killed before teardown is healed by the next one.
+  await sql`DELETE FROM threads WHERE user_id = ${USER_ID}`;
+  await sql`DELETE FROM users WHERE id = ${USER_ID}`;
+  await sql`INSERT INTO users (id, username, display_name, platform)
+            VALUES (${USER_ID}, 'e2e-chat-dialog', 'E2E Chat Dialog', 'web')`;
+  await sql`INSERT INTO threads (user_id, bot_name, name, description)
+            VALUES (${USER_ID}, ${bot}, 'main', 'seeded for wiki-chat-dialog.spec.ts')`;
+  pinnedBot = bot;
+  seeded = true;
+
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -134,6 +176,7 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
+      DATABASE_URL: DB_URL,
       // name=path[=collections][=synthesisBotPin] — no collections (the dialog
       // needs none), pin so a chat target resolves.
       WIKI_EXTRA: `${WIKI}=${root}==${bot}`,
@@ -155,6 +198,19 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
+  // try/finally so the pool closes even when the DELETEs throw; the error is
+  // swallowed only when setup never seeded (the database was down).
+  try {
+    if (sql) {
+      await sql`DELETE FROM threads WHERE user_id = ${USER_ID}`;
+      await sql`DELETE FROM users WHERE id = ${USER_ID}`;
+    }
+  } catch (err) {
+    if (seeded) throw err;
+    console.warn("wiki-chat-dialog: setup failed, so teardown could not clean up:", err);
+  } finally {
+    await sql?.end();
+  }
 });
 
 /** Open the Ask tab's "New chat" dialog and wait for the target to resolve. */

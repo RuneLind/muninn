@@ -39,6 +39,7 @@ import {
   QUEUE_REL_PATH,
   PLAN_STATUSES,
   PLAN_PRIORITIES,
+  isValidSlug,
   type PlanStatus,
   type PlanPriority,
 } from "./constants.ts";
@@ -195,6 +196,10 @@ export function planRecordFromContent(
   }
 
   const slug = path.basename(relPath).replace(/\.mdx?$/i, "");
+  // Kept as a card (the ledger joins on it), but queue.yaml can never rank it.
+  if (!isValidSlug(slug)) {
+    warnings.push(`${relPath}: "${slug}" is not a queue.yaml slug — the card cannot be hand-ranked until the file is renamed`);
+  }
 
   let planStatus: PlanStatus | undefined;
   if ((PLAN_STATUSES as readonly string[]).includes(rawStatus)) {

@@ -155,6 +155,26 @@ describe("Tracer", () => {
       expect(typeof update.params.durationMs).toBe("number");
     });
 
+    test("end() with status \"error\" carries error status on the span update", async () => {
+      const tracer = new Tracer("request");
+      tracer.start("claude");
+      tracer.end("claude", { error: "boom" }, "error");
+      await flushWrites();
+
+      expect(updateSpanCalls).toHaveLength(1);
+      expect(updateSpanCalls[0]!.params.status).toBe("error");
+      expect(updateSpanCalls[0]!.params.attributes).toEqual({ error: "boom" });
+    });
+
+    test("end() with an { error } attribute but no status stays ok (status is never inferred)", async () => {
+      const tracer = new Tracer("request");
+      tracer.start("claude");
+      tracer.end("claude", { error: "boom" });
+      await flushWrites();
+
+      expect(updateSpanCalls[0]!.params.status).toBe("ok");
+    });
+
     test("includes attributes in span end", async () => {
       const tracer = new Tracer("request");
       tracer.start("claude");

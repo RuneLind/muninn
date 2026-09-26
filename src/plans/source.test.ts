@@ -70,6 +70,16 @@ describe("planRecordFromContent", () => {
     expect(warnings).toEqual([]);
   });
 
+  test("an off-grammar file name keeps the card and warns, naming the file", () => {
+    const warnings: string[] = [];
+    const rec = planRecordFromContent("plans/my_plan.mdx", "---\nplan_status: ready\n---\n", 0, warnings)!;
+    expect(rec.slug).toBe("my_plan");
+    expect(rec.planStatus).toBe("ready");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("plans/my_plan.mdx");
+    expect(warnings[0]).toContain("not a queue.yaml slug");
+  });
+
   test("an invalid plan_status warns and leaves the status unknown, keeping the card", () => {
     const warnings: string[] = [];
     const rec = planRecordFromContent("plans/x.md", "---\nplan_status: doing\n---\n", 0, warnings)!;

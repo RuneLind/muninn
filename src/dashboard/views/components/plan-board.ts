@@ -1270,6 +1270,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       // on the chain. A board known to be out of date is.
       reloadPending: orderMsg?.reload === true,
       reloading,
+      slug: card.slug,
     });
     for (const [delta, glyph, word] of [
       [-1, "▲", "up"],

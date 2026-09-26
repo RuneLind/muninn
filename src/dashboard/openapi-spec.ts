@@ -1330,7 +1330,11 @@ export const spec = {
         },
         responses: {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { job_id: { type: "string" }, dashboard_url: { type: "string" } } } } } },
-          "400": errorResponse,
+          "400": {
+            ...errorResponse,
+            description:
+              "`bad_url`: the url is not an https link on `tiktok.com`, `www.`, `m.`, `vm.` or `vt.tiktok.com`, or carries a port, userinfo, a backslash, whitespace, a control character or a percent-escape in the host. Refused before the yt-dlp pre-flight, the duplicate lookup and the job row; downstream receives the parsed URL, never the raw string. `bad_kind`: see `kind`.",
+          },
           "500": errorResponse,
           "503": {
             ...errorResponse,

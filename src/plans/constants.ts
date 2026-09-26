@@ -31,3 +31,15 @@ export type PlanStatus = (typeof PLAN_STATUSES)[number];
 
 export const PLAN_PRIORITIES = ["p0", "p1", "p2", "p3"] as const;
 export type PlanPriority = (typeof PLAN_PRIORITIES)[number];
+
+/** The shared slug grammar — `queue.ts` rule 3. Leading letter, then letters, digits
+ *  and hyphens; nothing else survives as a bare YAML scalar in both parsers. */
+const SLUG_RE = /^[A-Za-z][A-Za-z0-9-]*$/;
+/** Words YAML resolves to a boolean or null in some casing. Never a slug, even
+ *  quoted: the quoting is exactly what the other parser cannot see. */
+const YAML_LITERALS = new Set(["true", "false", "null"]);
+
+/** Whether a string is a legal queue slug under the grammar both parsers share. */
+export function isValidSlug(slug: string): boolean {
+  return SLUG_RE.test(slug) && !YAML_LITERALS.has(slug.toLowerCase());
+}

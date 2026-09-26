@@ -11,7 +11,7 @@ import type { ScheduledTask } from "../types.ts";
 // mirroring the real Timing.end — so the briefing's `claudeStarted` guard is
 // genuinely exercised (an unguarded end after a build-prompt throw would blow up
 // the fallback path).
-interface FakeSpan { label: string; attrs?: any; ended?: boolean; endAttrs?: any }
+interface FakeSpan { label: string; attrs?: any; ended?: boolean; endAttrs?: any; endStatus?: string }
 class FakeTracer {
   static instances: FakeTracer[] = [];
   static reset() { FakeTracer.instances = []; }
@@ -31,11 +31,12 @@ class FakeTracer {
     this.spans.push({ label, attrs });
     return `span-${label}`;
   }
-  end(label: string, attrs?: any): number {
+  end(label: string, attrs?: any, status: string = "ok"): number {
     const span = [...this.spans].reverse().find((s) => s.label === label && !s.ended);
     if (!span) throw new Error(`No active mark for "${label}"`);
     span.ended = true;
     span.endAttrs = attrs;
+    span.endStatus = status;
     return 1;
   }
   finish(status: string, attrs?: any): void {
@@ -318,6 +319,7 @@ describe("runScheduledTasksFromList — task tracing", () => {
     expect(claude).toBeDefined();
     expect(claude!.ended).toBe(true);
     expect(claude!.endAttrs.error).toContain("connector boom");
+    expect(claude!.endStatus).toBe("error");
     // Briefing degraded to fallback ⇒ the task itself succeeded.
     expect(tt.finished?.status).toBe("ok");
     expect(attachToolSpansCalls.length).toBe(0);

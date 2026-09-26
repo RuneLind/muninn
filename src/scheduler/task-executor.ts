@@ -238,7 +238,7 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
       },
     };
   } catch (err) {
-    if (claudeStarted) tracer?.end("claude", { error: err instanceof Error ? err.message : String(err) });
+    if (claudeStarted) tracer?.end("claude", { error: err instanceof Error ? err.message : String(err) }, "error");
     log.error("Briefing generation failed, using fallback: {error}", { botName: botConfig.name, error: err instanceof Error ? err.message : String(err) });
     const timeOfDay = task.scheduleHour < 12 ? "morning" : task.scheduleHour < 17 ? "afternoon" : "evening";
     return {

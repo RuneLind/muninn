@@ -125,8 +125,10 @@ export class Tracer {
     return id;
   }
 
-  /** End a named span — same API as Timing.end() + updates span in DB */
-  end(label: string, attributes?: Record<string, unknown>): number {
+  /** End a named span — same API as Timing.end() + updates span in DB.
+   *  `status` defaults to "ok"; a caller that ends a span on a failure passes
+   *  "error" so /traces renders it red. Never inferred from `attributes`. */
+  end(label: string, attributes?: Record<string, unknown>, status: "ok" | "error" = "ok"): number {
     const durationMs = this.timing.end(label);
     const span = this.spans.get(label);
 
@@ -137,7 +139,7 @@ export class Tracer {
         .then(() =>
           updateSpan(span.id, {
             durationMs: Math.round(durationMs),
-            status: "ok",
+            status,
             attributes,
           }),
         )

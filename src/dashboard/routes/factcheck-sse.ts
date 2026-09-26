@@ -1006,7 +1006,7 @@ async function runFactcheck(
     } catch (err) {
       // End the extract span on the throw path (the outer catch only finishes
       // the trace root) so it pairs on all paths like verify/compose.
-      tracer.end("extract", { error: err instanceof Error ? err.message : String(err) });
+      tracer.end("extract", { error: err instanceof Error ? err.message : String(err) }, "error");
       throw err;
     }
     addUsage(extraction, "extract");

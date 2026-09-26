@@ -34,6 +34,54 @@ const BROWSER_UA =
 
 interface TtDocumentMeta { id: string; url?: string }
 
+/**
+ * The hosts POST /api/tiktok/summarize may hand to yt-dlp. The URL is caller
+ * chosen and yt-dlp fetches whatever it is given, so without this gate the
+ * route fetched a loopback address on the caller's behalf (architecture review
+ * 2026-09, finding 12). `www.` is what the extension's content script sends;
+ * `m.` is the mobile share host a pasted link can carry.
+ */
+const TIKTOK_HOSTS = new Set(["tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"]);
+
+/**
+ * Parse a caller-supplied URL ONCE and return it only if it is an https URL on a
+ * TikTok host, with no credentials and no explicit port. Callers hand the
+ * returned `href` downstream, never the raw string: yt-dlp is Python and parses
+ * differently from WHATWG (`https://www.tiktok.com\@127.0.0.1/x` is TikTok to
+ * `new URL` and loopback to yt-dlp), so the gate must judge the string the sink
+ * receives. The raw-form checks below are belt and braces on top of that: a
+ * string WHATWG would have to normalise (backslash, control or whitespace
+ * characters, a percent-escape or any userinfo/port syntax in the authority, a
+ * missing `//`) is refused rather than normalised.
+ */
+export function parseAllowedTikTokUrl(raw: string): URL | null {
+  if (raw !== raw.trim() || /[\\\x00-\x20\x7f]|\s/.test(raw)) return null;
+  const scheme = raw.slice(0, 8).toLowerCase();
+  if (scheme !== "https://") return null;
+  const authority = raw.slice(8).split(/[/?#]/, 1)[0]!;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  const ok =
+    u.protocol === "https:" &&
+    TIKTOK_HOSTS.has(u.hostname) &&
+    u.port === "" &&
+    u.username === "" &&
+    u.password === "" &&
+    // The authority as typed IS the host: no `%`, `@`, `:`, fullwidth or other
+    // form that WHATWG maps onto an allowed hostname.
+    authority.toLowerCase() === u.hostname;
+  return ok ? u : null;
+}
+
+/** Boolean form of {@link parseAllowedTikTokUrl}. */
+export function isAllowedTikTokUrl(raw: string): boolean {
+  return parseAllowedTikTokUrl(raw) !== null;
+}
+
 /** vm.tiktok.com / vt.tiktok.com share links that redirect to the canonical URL. */
 function isShortLink(url: string): boolean {
   try {
@@ -66,6 +114,15 @@ async function resolveVideoId(url: string): Promise<string | null> {
       signal: controller.signal,
     });
     clearTimeout(timeout);
+    // Re-judge the redirect target before using it: an id read off a host the
+    // gate would refuse is not a TikTok id. Fall back to no dedup.
+    if (!isAllowedTikTokUrl(res.url)) {
+      log.warn("TikTok short link {url} redirected off TikTok to {target} — skipping dedup pre-check", {
+        url,
+        target: res.url,
+      });
+      return null;
+    }
     return extractTikTokVideoId(res.url);
   } catch (err) {
     log.warn("TikTok short-link resolution failed for {url} — skipping dedup pre-check: {error}", {
@@ -158,11 +215,20 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
       frames?: boolean;
       kind?: unknown;
     }>();
-    const { title, url, frames } = body;
+    const { title, url: rawUrl, frames } = body;
 
-    if (!url) {
+    if (!rawUrl) {
       return c.json({ error: "Missing required field: url" }, 400);
     }
+    const accepted = typeof rawUrl === "string" ? parseAllowedTikTokUrl(rawUrl) : null;
+    if (!accepted) {
+      return c.json(
+        { error: "Not a TikTok URL: expected an https link on tiktok.com", code: "bad_url" },
+        400,
+      );
+    }
+    // Everything below — dedup, the job row, yt-dlp — gets the parsed href.
+    const url = accepted.href;
 
     // Preflight: yt-dlp is a hard runtime dependency for this vertical.
     if (!Bun.which("yt-dlp")) {
