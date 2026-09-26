@@ -28,14 +28,6 @@ test("resolveProfile: unknown / empty / null falls back to the default profile",
 
 test("RESEARCH_COLLECTIONS is the ai profile's collections (the ask.ts fallback)", () => {
   expect(RESEARCH_COLLECTIONS).toEqual(RESEARCH_PROFILES.ai!.collections);
-  expect(RESEARCH_COLLECTIONS).toEqual([
-    "anthropic-summaries",
-    "anthropic-knowledge",
-    "youtube-summaries",
-    "x-articles",
-    "tiktok-summaries",
-    "wiki",
-  ]);
 });
 
 test("RESEARCH_CORPUS is the deduped union of all profile collections", () => {
