@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseTrackersConfig, trackerAdapter } from "./index.ts";
-import { JIRA_DEFAULT_STATUS_MAP } from "./jira.ts";
+import { JIRA_DEFAULT_LEDGER_PROJECTS, JIRA_DEFAULT_STATUS_MAP } from "./jira.ts";
 
 function parse(raw: unknown): { configs: ReturnType<typeof parseTrackersConfig>; warns: string[] } {
   const warns: string[] = [];
@@ -119,5 +119,16 @@ describe("parseTrackersConfig, fix round 1", () => {
 
   test("a non-array block names the key `trackers`", () => {
     expect(collect({ id: "jira" }).warns.map((w) => w.key)).toEqual(["trackers"]);
+  });
+});
+
+describe("parseTrackersConfig, PR 3 fix round 1", () => {
+  test("S6: an explicit ledgerProjects that is empty or unusable warns and falls back to the default", () => {
+    for (const ledgerProjects of [[], ["x!"], "DEMO"]) {
+      const warns: { key: string; reason: string }[] = [];
+      const [config] = parseTrackersConfig([{ id: "jira", projects: ["DEMO"], ledgerProjects }], (w) => warns.push(w));
+      expect(config!.ledgerProjects).toEqual([...JIRA_DEFAULT_LEDGER_PROJECTS]);
+      expect(warns.some((w) => w.key === "trackers[0].ledgerProjects" && /default/.test(w.reason))).toBe(true);
+    }
   });
 });

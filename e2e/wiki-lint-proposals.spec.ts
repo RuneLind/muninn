@@ -103,6 +103,9 @@ const read = (rel: string) => readFile(path.join(root, rel), "utf8");
 const groupUrl = (key: string, verb: "approve" | "reject") =>
   `/api/wiki/proposals/group/${encodeURIComponent(key)}/${verb}?wiki=${WIKI}`;
 
+/** The seeding and group POSTs take application/json (415 otherwise). */
+const JSON_POST: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
+
 async function api(pathAndQuery: string, init?: RequestInit): Promise<any> {
   const res = await fetch(`${BASE}${pathAndQuery}`, init);
   return { status: res.status, body: await res.json() };
@@ -181,7 +184,7 @@ test.describe("wiki lint fixes", () => {
   });
 
   test("POST /api/wiki/lint-proposals creates one row per touched page", async () => {
-    const { status, body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, { method: "POST" });
+    const { status, body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, JSON_POST);
     expect(status).toBe(200);
     // Five groups: two 8.1 pairs (one page each), two 8.2 clusters (4 and 2),
     // and the 8.3 spelling fix. The THIRD 8.1 pair — OVERLAP × FOLLOW — is
@@ -202,7 +205,7 @@ test.describe("wiki lint fixes", () => {
   });
 
   test("a second POST proposes nothing — the group keys are already taken", async () => {
-    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, { method: "POST" });
+    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, JSON_POST);
     expect(body).toMatchObject({ proposed: 0, rows: 0, skipped: 5, staled: 0 });
   });
 
@@ -330,7 +333,7 @@ test.describe("wiki lint fixes", () => {
     expect(dismissed).toHaveLength(1);
     const dismissedKey = dismissed[0]!.group_key;
 
-    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, { method: "POST" });
+    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, JSON_POST);
     expect(body.skipped).toBeGreaterThanOrEqual(1);
 
     // The dismissed group is still a FINDING — the lint is deterministic and the
@@ -386,7 +389,7 @@ test.describe("wiki lint fixes", () => {
     await expect(pair.locator(".gard-badge.chip-applied")).toHaveCount(1);
     expect(await read(HEAL_C)).toContain("- [[Heal a]]");
 
-    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, { method: "POST" });
+    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, JSON_POST);
     expect(body.staled).toBe(2);
     expect(body.proposed).toBe(1);
 
@@ -471,7 +474,7 @@ test.describe("wiki lint fixes", () => {
   test("a page that already carries the edit is reported as noop, on a card with no verbs", async ({ page }) => {
     // The OVERLAP × FOLLOW pair was claimed on the first pass; with the cluster
     // applied, its pages are free and this seeds it.
-    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, { method: "POST" });
+    const { body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, JSON_POST);
     expect(body.proposed).toBeGreaterThan(0);
     const rows = await sql!<{ group_key: string; target_path: string; draft: string }[]>`
       SELECT group_key, target_path, draft FROM wiki_proposals

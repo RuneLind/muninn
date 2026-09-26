@@ -13,10 +13,13 @@ import { JIRA_KEY_SHAPE, normalizeJiraKey } from "../provenance.ts";
 import { extractJiraKeys } from "../../jira/key-scan.ts";
 import { maskFencedCode, maskInlineCode } from "../../jira/markdown-scan.ts";
 import { JIRA_TRACKER_ID } from "./jira-id.ts";
+import { loadIssueFields } from "./jira-lookup.ts";
 import {
   RELATION_STRENGTH,
+  type IssueLedgerView,
   type IssueRef,
   type IssueRelation,
+  type KeyLedgerRow,
   type StatusCategory,
   type TrackerAdapter,
   type TrackerConfig,
@@ -40,6 +43,14 @@ export const JIRA_DEFAULT_STATUS_MAP: Readonly<Record<string, StatusCategory>> =
   "Resolved": "done",
   "Closed": "done",
 });
+
+/**
+ * The projects claude-usage records session mentions for — a mirror of its
+ * `JIRA_KEY_PREFIXES` (`claude-usage/src/session-files.ts`), which this repo
+ * cannot import. A key outside them renders "not tracked", never "$0". A wiki
+ * may name its own list (`ledgerProjects` in `.wiki-reader.json`).
+ */
+export const JIRA_DEFAULT_LEDGER_PROJECTS: readonly string[] = Object.freeze(["MELOSYS", "TESTLOOP", "SMOKE"]);
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -309,6 +320,76 @@ export function inferJiraIssues(page: TrackerPage, config: TrackerConfig): Issue
   return refs.sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
 }
 
+/** An exact key as a client sends it: ASCII letters and digits only, tested
+ *  BEFORE uppercasing (`toUpperCase` maps `ſ` to S, `ı` to I and `ß` to SS),
+ *  with the project shape of a configured prefix and {@link NUM}'s number. */
+const CLIENT_KEY_RE = /^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,7}$/;
+
+function parseClientKey(raw: string): string | null {
+  const v = raw.trim();
+  return CLIENT_KEY_RE.test(v) ? v.toUpperCase() : null;
+}
+
+function projectOfKey(key: string): string | null {
+  return JIRA_KEY_SHAPE.test(key) ? key.slice(0, key.indexOf("-")) : null;
+}
+
+/** `/api/jira?key=`'s answer — `{sessions[], totalCost, costedSessions,
+ *  truncated}` — as a priced view, or null when it is not that shape. */
+function parseJiraLedger(raw: unknown): Extract<IssueLedgerView, { state: "priced" }> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { sessions?: unknown; totalCost?: unknown; costedSessions?: unknown; truncated?: unknown };
+  if (!Array.isArray(r.sessions)) return null;
+  const total = typeof r.totalCost === "number" && Number.isFinite(r.totalCost) ? r.totalCost : 0;
+  return {
+    state: "priced",
+    sessions: r.sessions.length,
+    totalCost: Math.round(total * 100) / 100,
+    costedSessions: typeof r.costedSessions === "number" ? r.costedSessions : 0,
+    truncated: r.truncated === true,
+  };
+}
+
+/** claude-usage's own cap on `/api/jira/keys`: past it the answer is cut. */
+export const JIRA_KEYS_PER_CALL = 200;
+
+const count = (v: unknown): number | null =>
+  typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+
+/**
+ * `/api/jira/keys?keys=`'s answer — `{keys: [{key, tracked, sessionCount,
+ * totalCost, costedSessions, lastSeen, truncated}], …}` — as key → row, or
+ * null when it is not that shape. A row that is not a row is skipped, so its
+ * key reads as unanswered rather than as zero sessions — and so is a tracked
+ * row whose cost is not finite or still negative after rounding to cents
+ * (`-0.004` rounds to `-0`, is accepted and serializes as `0`), or with more
+ * costed than counted sessions.
+ */
+export function parseJiraKeysLedger(raw: unknown): Map<string, KeyLedgerRow> | null {
+  if (!raw || typeof raw !== "object" || !Array.isArray((raw as { keys?: unknown }).keys)) return null;
+  const out = new Map<string, KeyLedgerRow>();
+  for (const r of (raw as { keys: unknown[] }).keys) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+    if (typeof row.key !== "string" || typeof row.tracked !== "boolean") continue;
+    const sessions = count(row.sessionCount);
+    const costed = count(row.costedSessions);
+    // Rounded BEFORE the finite check: 1e308 is finite and ×100 is not.
+    const total = typeof row.totalCost === "number" ? Math.round(row.totalCost * 100) / 100 : NaN;
+    const cost = Number.isFinite(total) && total >= 0 ? total : null;
+    if (row.tracked && (sessions === null || costed === null || cost === null || costed > sessions)) continue;
+    out.set(row.key.toUpperCase(), {
+      tracked: row.tracked,
+      sessions: sessions ?? 0,
+      totalCost: cost ?? 0,
+      costedSessions: costed ?? 0,
+      truncated: row.truncated === true,
+      lastSeen: typeof row.lastSeen === "string" ? row.lastSeen : null,
+    });
+  }
+  return out;
+}
+
 export const jiraAdapter: TrackerAdapter = {
   id: ID,
   label: "Jira",
@@ -320,4 +401,13 @@ export const jiraAdapter: TrackerAdapter = {
   frontmatterKey: "jira",
   stampFlag: "--jira",
   defaultStatusMap: JIRA_DEFAULT_STATUS_MAP,
+  defaultLedgerProjects: JIRA_DEFAULT_LEDGER_PROJECTS,
+  lookup: (knowledgeApiUrl) => loadIssueFields(knowledgeApiUrl),
+  ledgerPath: (key) => `/api/jira?key=${encodeURIComponent(key)}`,
+  parseLedger: parseJiraLedger,
+  ledgerKeysPath: (keys) => `/api/jira/keys?keys=${keys.map(encodeURIComponent).join(",")}`,
+  ledgerKeysMax: JIRA_KEYS_PER_CALL,
+  parseLedgerKeys: parseJiraKeysLedger,
+  projectOf: projectOfKey,
+  parseKey: parseClientKey,
 };

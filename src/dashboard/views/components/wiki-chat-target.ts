@@ -425,14 +425,21 @@ export function suggestedQuestions(input: {
    *  (never a one-click send), so an irrelevant offer costs a glance, while a
    *  page-type gate would need an ontology the dialog doesn't have. */
   jiraBot?: boolean;
+  /** Chips the OPENER asked for, placed first in article mode — Connections'
+   *  **Draft plan** opens the dialog with "Draft a plan for KEY". They fill the
+   *  box like every other chip; the box itself stays empty. */
+  lead?: ChatOptSuggestion[];
 }): ChatOptSuggestion[] {
   if (input.pinned || input.mode === "escalate") return [];
   const out: ChatOptSuggestion[] = [];
   if (input.mode === "article") {
     const article = input.article;
     if (!article) return [];
+    // The opener's chips first, and before the title gate: Draft plan names
+    // its key, not the title, so an untitled page still gets it.
+    out.push(...(input.lead ?? []));
     const t = titleForPrompt(article.title || "");
-    if (!t) return [];
+    if (!t) return out;
     if (input.jiraBot) {
       // Bokmål on purpose: the pinned Jira bot drafts in bokmål, and the chip
       // fills the box editable like every other one — never a one-click send.
@@ -491,6 +498,18 @@ export function suggestedQuestions(input: {
     });
   }
   return out;
+}
+
+/** The starter chip Connections' **Draft plan** opens the Discuss dialog
+ *  with: a plan for one issue key, drafted from the open page. */
+export function draftPlanSuggestion(key: string, title: string): ChatOptSuggestion {
+  const t = titleForPrompt(title || "");
+  return {
+    label: `Draft a plan for ${key}`,
+    question:
+      `Draft a plan for ${key}${t ? `, starting from "${t}"` : ""}: the goal, the steps and how we ` +
+      "know it is done — keep to what the page and the issue say.",
+  };
 }
 
 /** One thread-name chip: `value` goes into the name field verbatim (so an empty

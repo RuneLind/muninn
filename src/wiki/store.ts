@@ -38,9 +38,11 @@ import { normalizeRelPath } from "./rel-path.ts";
 import {
   inferIssues,
   parseTrackersConfig,
+  type IssueKeyEntry,
   type IssueRef,
   type TrackerConfig,
 } from "./trackers/index.ts";
+import { buildIssueKeyIndex } from "./trackers/rows.ts";
 import {
   kickWorkedLedgerRefresh,
   normalizeWorkedPath,
@@ -845,6 +847,13 @@ export interface WikiIndex {
    * update predates it, so an edit made after the ledger answered is not judged.
    */
   workedCoverage?: { matched: number; total: number; returned: number; asOfMs: number };
+  /**
+   * `tracker:key` → every page related to that key, with its relations and
+   * whether it is a plan (`trackers/rows.ts`). Empty on a wiki with no tracker.
+   * Optional so hand-built test indexes stay valid; `buildWikiIndex` always
+   * sets it.
+   */
+  issueKeys?: Map<string, IssueKeyEntry>;
 }
 
 /** A page the same-stem precedence rule dropped, and the page that displaced it. */
@@ -3625,6 +3634,7 @@ export async function buildWikiIndex(
     trails,
     shadowed,
     ...(workedCoverage ? { workedCoverage } : {}),
+    issueKeys: buildIssueKeyIndex(pages, trackers),
   };
 }
 

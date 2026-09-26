@@ -33,6 +33,7 @@
 
 import type { WikiPageMeta } from "./store.ts";
 import { facetJiraKeys } from "../dashboard/views/components/wiki-filter.ts";
+import { relationsCount, type IssueRow } from "./trackers/types.ts";
 
 /** The four frontmatter keys, exactly as they are spelled in a page. */
 export const PROVENANCE_FRONTMATTER_KEYS = [
@@ -69,6 +70,18 @@ export function normalizeJiraKey(raw: string): string {
 
 export function isJiraKeyShape(key: string): boolean {
   return JIRA_KEY_SHAPE.test(key);
+}
+
+/** Longest echo of the caller's own input in an error body. */
+export const PROVENANCE_ECHO_MAX = 64;
+
+/** The caller's own input, echoed back in an error — normalized and bounded.
+ *  An error that reflects arbitrary caller bytes is a payload nobody asked the
+ *  route to carry, and the useful half is the first few characters anyway.
+ *  Shared by the provenance and graph routes. */
+export function echoQuery(raw: string): string {
+  const flat = raw.replace(/\s+/g, " ").trim();
+  return flat.length > PROVENANCE_ECHO_MAX ? `${flat.slice(0, PROVENANCE_ECHO_MAX)}…` : flat;
 }
 
 export function jiraBrowseUrl(key: string): string {
@@ -205,10 +218,41 @@ export function jiraCounts(pages: readonly WikiPageMeta[]): Record<string, numbe
   return counts;
 }
 
-/** Does this page carry any provenance at all? The gate on the page route's
- *  `provenance` block — an unstamped page gets no field, not an empty one. */
-export function hasProvenance(meta: WikiPageMeta): boolean {
-  return Boolean(meta.sessions?.length || meta.jira?.length || meta.prs?.length);
+/** The fields the two gates below read — structural, so the client's listing
+ *  row and the server's `WikiPageMeta` both satisfy it. */
+export interface ProvenanceGateFields {
+  sessions?: readonly string[];
+  jira?: readonly string[];
+  prs?: readonly string[];
+  issues?: readonly { relations: readonly string[] }[];
+}
+
+/** A page that carries at least one issue whose relations COUNT
+ *  (`relationsCount`): a link-only or mention-only key opens nothing. */
+function hasCountingIssue(meta: ProvenanceGateFields): boolean {
+  return !!meta.issues?.some((r) => relationsCount(r.relations));
+}
+
+/**
+ * Does this page carry any provenance at all? The ONE gate: `pageProvenance`,
+ * the page route's `provenancePending`, the reader's placeholder and its
+ * explainer path all read it (the placeholder through
+ * {@link provenanceStripCertain}). A stamped list key, or — on a wiki with a
+ * tracker — at least one inferred issue that counts. An unstamped page with
+ * neither gets no field, not an empty one.
+ */
+export function hasProvenance(meta: ProvenanceGateFields): boolean {
+  return Boolean(meta.sessions?.length || meta.jira?.length || meta.prs?.length) || hasCountingIssue(meta);
+}
+
+/**
+ * The part of {@link hasProvenance} that guarantees a STRIP — a session line,
+ * a stamped key or a counting issue key. `prs:` alone is provenance (the page
+ * still fetches) but may resolve to no strip, so the reader shows no
+ * placeholder for it.
+ */
+export function provenanceStripCertain(meta: ProvenanceGateFields): boolean {
+  return Boolean(meta.sessions?.length || meta.jira?.length) || hasCountingIssue(meta);
 }
 
 // ── Shaping the answer ───────────────────────────────────────────────────────
@@ -656,6 +700,13 @@ export interface ProvenancePayload {
    *  `stamp-roots.ts`. False hides every Stamp button. */
   stampable: boolean;
   jira: ProvenanceJira[];
+  /**
+   * The page's issue rows, whole (`trackers/types.ts` `IssueRow`), on a wiki
+   * with a tracker; absent otherwise. On such a wiki the strip draws its key
+   * chips from here and `jira` is kept for the shape fixture and the reverse
+   * lookup, which stay stamped-only.
+   */
+  issues?: IssueRow[];
   prs: PrRef[];
   /** The PRs the page's sessions merged, in the ledger's own order. Empty when
    *  the leg was not asked or did not answer — `mergesLedger` says which. */

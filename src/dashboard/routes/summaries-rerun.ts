@@ -134,6 +134,7 @@ import * as tiktokState from "../../tiktok/state.ts";
 import * as xState from "../../x-article/state.ts";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { requireJsonRequest } from "./json-request.ts";
 
 const log = getLog("summaries", "rerun");
 
@@ -1248,10 +1249,8 @@ export function registerSummariesRerunRoutes(
     // with the browser never asking permission. This route carries no CORS
     // headers, which stops such a page reading the RESPONSE and does nothing
     // about the write. A `charset` parameter is fine.
-    const contentType = (c.req.header("content-type") ?? "").trim();
-    if (!/^application\/json\s*(;|$)/i.test(contentType)) {
-      return c.json({ error: "This endpoint takes application/json.", code: "bad_content_type" }, 415);
-    }
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
 
     type Body = { source?: string; docId?: string; kind?: unknown; visual_detail?: unknown; full?: unknown };
     const body = await c.req.json<Body>().catch(() => ({}) as Body);

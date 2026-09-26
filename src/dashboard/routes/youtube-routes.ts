@@ -25,6 +25,7 @@ import { extractYouTubeVideoId } from "../../youtube/url.ts";
 import { youtubeCaptureKinds } from "../../youtube/kinds.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
+import { requireJsonRequest } from "./json-request.ts";
 
 const log = getLog("dashboard");
 
@@ -434,13 +435,8 @@ export function registerYouTubeRoutes(
     // cross-origin page could start a yt-dlp download, an ffmpeg pass and a
     // 60-image model turn with the browser never asking permission. The
     // extension already sends JSON. A `charset` parameter is fine.
-    const contentType = (c.req.header("content-type") ?? "").trim();
-    if (!/^application\/json\s*(;|$)/i.test(contentType)) {
-      return c.json(
-        { error: "This endpoint takes application/json.", code: "bad_content_type" },
-        415,
-      );
-    }
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
 
     type Body = {
       title?: string;

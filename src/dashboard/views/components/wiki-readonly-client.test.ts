@@ -183,3 +183,17 @@ describe("readonly guard — which events are cancelled", () => {
     expect(doc.listeners.filter((l) => l.capture).length).toBe(0);
   });
 });
+
+// This module is import-free by design (its selectors are string literals), so
+// the Connections attributes it names are pinned to wiki-issue-rows.ts' own.
+describe("Connections' attributes in the read-only selectors", () => {
+  test("R4: Link and Link all in the write list, Draft plan in the egress list, spelled as the renderer spells them", async () => {
+    const { ISSUE_LINK_ATTR, ISSUE_LINK_ALL_ATTR, DRAFT_PLAN_ATTR } = await import("./wiki-issue-rows.ts");
+    const { WIKI_READONLY_EGRESS_SELECTOR } = await import("./wiki-readonly-client.ts");
+    const blocked = WIKI_READONLY_BLOCKED_SELECTOR.split(",").map((s) => s.trim());
+    const egress = WIKI_READONLY_EGRESS_SELECTOR.split(",").map((s) => s.trim());
+    expect(blocked).toContain(`[${ISSUE_LINK_ATTR}]`);
+    expect(blocked).toContain(`[${ISSUE_LINK_ALL_ATTR}]`);
+    expect(egress).toContain(`[${DRAFT_PLAN_ATTR}]`);
+  });
+});

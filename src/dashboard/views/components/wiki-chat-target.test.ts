@@ -30,6 +30,7 @@ import {
   discussArticleBtnHtml,
   shouldCloseArticleChatOnNavigate,
   suggestedQuestions,
+  draftPlanSuggestion,
   threadNameSuggestions,
   CHAT_OPT_ADV_ID,
   CHAT_OPT_EMPTY_QUESTION,
@@ -1348,5 +1349,31 @@ describe("wiki reader chat-dialog wiring", () => {
     // The last two are the shell's own functions, passed by shorthand.
     expect(literal).toMatch(/postAskChat(,|:\s*postAskChat\b)/);
     expect(literal).toMatch(/refreshChatEscalateBar(,|:\s*refreshChatEscalateBar\b)/);
+  });
+});
+
+describe("Draft plan's starter chip", () => {
+  const page = { name: "a", title: "Utrulling av køen", relPath: "notes/a.md" };
+  test("leads the article chips, names the key, and fills (never sends) the question", () => {
+    const lead = draftPlanSuggestion("DEMO-101", page.title);
+    expect(lead.label).toBe("Draft a plan for DEMO-101");
+    expect(lead.question).toContain("DEMO-101");
+    const out = suggestedQuestions({ mode: "article", article: page, lead: [lead] });
+    expect(out[0]).toEqual(lead);
+    expect(suggestedQuestions({ mode: "article", article: page })[0]!.label).not.toBe(lead.label);
+  });
+  test("no lead chip outside article mode", () => {
+    const lead = draftPlanSuggestion("DEMO-101", page.title);
+    expect(suggestedQuestions({ mode: "direct", lead: [lead] }).some((s) => s.label === lead.label)).toBe(false);
+  });
+});
+
+describe("Draft plan's starter chip, PR 3 fix round 1", () => {
+  test("C7: survives an article whose title normalizes to empty", () => {
+    const lead = draftPlanSuggestion("DEMO-101", "<b></b>");
+    for (const title of ["", "<b></b>"]) {
+      const out = suggestedQuestions({ mode: "article", article: { name: "a", title, relPath: "notes/a.md" }, lead: [lead] });
+      expect(out).toEqual([lead]);
+    }
   });
 });
