@@ -718,12 +718,47 @@ describe("rankActivity — worked-on substitution", () => {
   });
 
   test("a demotion keeps the age penalty — the waiver never lifts a set-aside page", () => {
-    // Update exactly a day past the worked stamp: the demotion boundary.
+    // Update a full day past the worked stamp: the penalty is whole again.
     const p = page({ relPath: "p.md", createdDaysAgo: 40, updatedDaysAgo: 4, workedDaysAgo: 5 });
     const row = rankActivity([p], wide, NOW, OPEN)[0]!;
     expect(row.worked).toBe(true);
     expect(row.why).not.toContain("(worked)");
     expect(row.score).toBeLessThan(rankActivity([p], wide, NOW, CLOSED)[0]!.score);
+  });
+
+  test("the waiver tapers with the commit's lag — no cliff at a day", () => {
+    const lagged = (hours: number): WikiListing => {
+      const p = page({ relPath: "p.md", createdDaysAgo: 100, workedDaysAgo: 2 });
+      p.gitTouchedMs = p.workedMs! + hours * 3_600_000;
+      return p;
+    };
+    const score = (hours: number): number => rankActivity([lagged(hours)], wide, NOW, OPEN)[0]!.score;
+    // Measured on the pre-taper cutoff: 23h scored 0.550, 25h 0.180.
+    expect(Math.abs(score(23) - score(25))).toBeLessThan(0.05);
+    // Monotone: a later commit keeps more of the penalty.
+    expect(score(1)).toBeGreaterThan(score(12));
+    expect(score(12)).toBeGreaterThan(score(23));
+  });
+
+  test("a commit newer than the ledger's answer keeps the waiver", () => {
+    // Ledger write 5 min ago, commit 4 min ago, ledger answered 1 min ago: the
+    // update sits inside WORKED_INGEST_SLACK_MS, so the change decays on the git
+    // stamp — but that stamp is the session's own commit, not an old-page touch.
+    const p = page({ relPath: "plans/p.mdx", createdDaysAgo: 100, type: "plan", plan_status: "shipped" });
+    p.workedMs = NOW - 5 * 60_000;
+    p.gitTouchedMs = NOW - 4 * 60_000;
+    const gate: WorkedGate = { ...OPEN, asOfMs: NOW - 60_000 };
+    const row = rankActivity([p], wide, NOW, gate)[0]!;
+    expect(row.worked).toBeUndefined();
+    expect(row.why).toContain("age ×1.00 (worked)");
+    expect(row.score).toBeGreaterThan(0.7);
+  });
+
+  test("no `(worked)` label when the age penalty is off", () => {
+    const p = page({ relPath: "p.md", createdDaysAgo: 40, workedDaysAgo: 0.5 });
+    p.gitTouchedMs = p.workedMs! + 2_000;
+    const row = rankActivity([p], { ...wide, agePenalty: 0 }, NOW, OPEN)[0]!;
+    expect(row.why).toContain("age ×1.00,");
   });
 
   test("an `added`-floor page gains a change term: a ledger write is a known edit", () => {
