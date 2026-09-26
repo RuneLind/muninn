@@ -121,7 +121,7 @@ async function dropFailTrigger(): Promise<void> {
 async function installFailTrigger(): Promise<void> {
   await dropFailTrigger();
   await sql!.unsafe(`CREATE FUNCTION ${FAIL_FN}() RETURNS trigger LANGUAGE plpgsql AS $$
-    BEGIN RAISE EXCEPTION 'write CONNECTION_CLOSED 127.0.0.1:5435'; END $$`);
+    BEGIN RAISE EXCEPTION 'write CONNECTION_CLOSED db-host'; END $$`);
   await sql!.unsafe(`CREATE TRIGGER ${FAIL_FN} BEFORE DELETE ON wiki_proposals FOR EACH ROW
     WHEN (OLD.topic_key = '${TOPIC_DRAFT}') EXECUTE FUNCTION ${FAIL_FN}()`);
 }
