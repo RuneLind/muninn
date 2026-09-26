@@ -484,7 +484,7 @@ const CONFIRM_INSTRUCTION = [
   "",
   "  Why the confirmation. Bun auto-loads `.env`, so a bare invocation in a",
   "  checkout resolves whatever DATABASE_URL that file names — with nothing",
-  "  typed and nothing exported. This script applies 881 lines of DDL, so the",
+  "  typed and nothing exported. This script applies db/init.sql's full schema in one transaction, so the",
   "  target is confirmed rather than inferred. (`.env` is in .dockerignore, so",
   "  in a pod the URL can only have come from the platform.)",
   "",

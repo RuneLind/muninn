@@ -21,7 +21,9 @@ fi
 
 # (2) An empty database is an OPERATOR action, not something to migrate into
 #     existence — see db/require-provisioned.ts for why the predicate is the
-#     `users` table and why this cannot be folded into the migration runner.
+#     whole table set parsed out of db/init.sql (db/schema-state.ts, shared
+#     with db/provision.ts) and why this cannot be folded into the migration
+#     runner.
 bun db/require-provisioned.ts
 
 # (3) Pending migrations. Serialised across replicas by the runner's own
