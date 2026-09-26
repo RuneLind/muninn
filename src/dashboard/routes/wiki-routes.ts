@@ -4311,7 +4311,8 @@ export function registerWikiRoutes(
           // + callout are one write. Edit offsets were resolved BEFORE this, and
           // the sentinel block is a masked exclusion zone, so the two can't
           // collide. Residual: an accepted edit whose text adds a lone fence line
-          // above the block hides it from the walker, so this appends a second.
+          // above the block, when a fence line follows the block, hides it from
+          // the walker, so this appends a second.
           //
           // `.mdx` gets the `<FactCheck>` component appendix (whose `#fc-claim-N`
           // sections are the chips' targets, and whose `Was:` lines come from THIS

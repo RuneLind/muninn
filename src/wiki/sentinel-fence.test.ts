@@ -17,7 +17,7 @@ import {
   stripFactcheckBlock,
 } from "./factcheck-context.ts";
 import { findExclusionZones } from "./integrate-edits.ts";
-import { renderWikiHtml } from "./render.ts";
+import { renderWikiHtml, stripFrontmatter } from "./render.ts";
 
 const block = (label: string): string =>
   [START, `> [!factcheck] Fact check (${label})`, `> verdict ${label}`, END].join("\n");
@@ -207,5 +207,88 @@ describe("the reader's sentinel filter reads the writers' walker", () => {
   test("an unpaired marker line is content and renders literally", () => {
     const html = renderWikiHtml(`Before.\n\n${START}\n\nAfter.`, () => undefined);
     expect(html).toContain("factcheck:start");
+  });
+});
+
+/**
+ * Fix round 2: a candidate pair is judged against the page with its OWN interior
+ * blanked, so the writers' content can neither open nor close a page fence.
+ */
+describe("a candidate's interior cannot pair with a page fence", () => {
+  const FENCE = "```";
+  /** A page ending in an unclosed ```ts, which the reader shows as text. */
+  const UNCLOSED = ["# P", "", "prose", "", `${FENCE}ts`, "const open=1;", ""].join("\n");
+  const answers: Record<string, (tag: string) => string> = {
+    "a balanced ```ts answer": (tag) =>
+      [`### ⚠️ Claim 1/1 — ${tag}`, "", `${FENCE}ts`, "const ok=1;", FENCE, "", "Confidence: 70/100"].join("\n"),
+    "an odd ````md answer": (tag) =>
+      [`### ⚠️ Claim 1/1 — ${tag}`, "", "````md", `${FENCE}ts`, "const ok=1;", "", "Confidence: 70/100"].join("\n"),
+  };
+
+  for (const [name, answer] of Object.entries(answers)) {
+    test(`unclosed page opener + ${name}: three writes keep exactly one block`, () => {
+      const b1 = buildFactcheckAppendix(answer("one"), "2026-09-26");
+      const b2 = buildFactcheckAppendix(answer("two"), "2026-09-27");
+      const b3 = buildFactcheckAppendix(answer("three"), "2026-09-28");
+      const out1 = withTrailingNewline(spliceSentinelBlock(UNCLOSED, b1));
+      expect(out1).toBe(`${UNCLOSED.replace(/\n+$/, "")}\n\n${b1}\n`);
+      expect(hasFactcheckBlock(out1)).toBe(true);
+      const out2 = withTrailingNewline(spliceSentinelBlock(out1, b2));
+      expect(out2).toBe(out1.replace(b1, () => b2));
+      const out3 = withTrailingNewline(spliceSentinelBlock(out2, b3));
+      expect(out3).toBe(out1.replace(b1, () => b3));
+      expect(count(out3, START)).toBe(1);
+      const stripped = stripFactcheckBlock(out3);
+      expect(stripped).toBe(UNCLOSED.trim());
+      expect(stripped).not.toContain("three");
+    });
+  }
+
+  test("an on-disk block with an odd-fence interior and a fenced example later is replaced", () => {
+    const old = [START, '<FactCheck date="d0">', "", FENCE, "stray", "</FactCheck>", END].join("\n");
+    const page = `# P\n\nIntro.\n\n${old}\n\n## Later\n\n${FENCE}sh\nls\n${FENCE}\n`;
+    expect(hasFactcheckBlock(page)).toBe(true);
+    const out = spliceSentinelBlock(page, block("one"));
+    expect(out).toBe(page.replace(old, () => block("one")));
+    expect(stripFactcheckBlock(page)).toBe(`# P\n\nIntro.\n\n## Later\n\n${FENCE}sh\nls\n${FENCE}`);
+  });
+
+  test("a fenced example pair stays not live, beside an unclosed opener", () => {
+    const page = ["# P", "", "```md", START, "> example", END, "```", "", "Prose.", "", "```ts", "open", ""].join("\n");
+    expect(hasFactcheckBlock(page)).toBe(false);
+    const { out1, out2 } = twoWrites(page);
+    expect(out1.startsWith(page.replace(/\n+$/, ""))).toBe(true);
+    expect(out2).toBe(out1.replace(block("one"), () => block("two")));
+    expect(count(out2, START)).toBe(2);
+  });
+});
+
+describe("the walker's frontmatter is the reader's", () => {
+  const cases: Record<string, string> = {
+    "an indented `  ---` line does not close it": `---\ntitle: P\n  ---\n${START}\n> yaml\n${END}\n---\n# P\n\nBody.\n`,
+    "a `----` line closes it": `---\ntitle: P\n${START}\n> yaml\n${END}\n----\n# P\n\nBody.\n`,
+  };
+  for (const [name, page] of Object.entries(cases)) {
+    test(`${name}: a pair the reader reads as frontmatter is not live`, () => {
+      expect(stripFrontmatter(page)).not.toContain(START);
+      expect(hasFactcheckBlock(page)).toBe(false);
+      expect(stripFactcheckBlock(page)).toBe(page.trim());
+      const out = spliceSentinelBlock(page, block("one"));
+      expect(out.startsWith(page.replace(/\n+$/, ""))).toBe(true);
+    });
+  }
+
+  test("a pair on the first body line is live", () => {
+    const page = `---\ntitle: P\n---\n${block("one")}\n\nBody.\n`;
+    expect(hasFactcheckBlock(page)).toBe(true);
+    expect(stripFactcheckBlock(page)).toBe("---\ntitle: P\n---\n\nBody.");
+  });
+
+  test("a pair in the body after a `----` closer, before a `---` rule, is live", () => {
+    const page = `---\ntitle: P\n----\n# P\n\n${block("one")}\n\n---\n\nMore.\n`;
+    expect(stripFrontmatter(page)).toContain(START);
+    expect(hasFactcheckBlock(page)).toBe(true);
+    expect(stripFactcheckBlock(page)).not.toContain("verdict one");
+    expect(renderWikiHtml(page, () => undefined)).not.toContain("factcheck:start");
   });
 });

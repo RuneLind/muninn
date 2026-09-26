@@ -188,12 +188,12 @@ describe("hasFactcheckBlock / stripFactcheckBlock on a page that documents the s
     expect(stripFactcheckBlock(withBlock)).toBe(DOC_PAGE.trim());
   });
 
-  test("a pair whose interior opens a fence closed later on the page is not a block", () => {
-    // Its END is code. No writer persists this: `buildFactcheckAppendix` closes
-    // any fence an answer leaves open.
+  test("a pair whose interior opens a fence, with a fenced example later, is still a block", () => {
+    // An on-disk block from before `buildFactcheckAppendix` closed open fences:
+    // its interior cannot pair with the example's fence, so it stays live.
     const page = `Intro.\n\n${[START, "```", "</FactCheck>", END].join("\n")}\n\nOutro.\n\n\`\`\`\ncode\n\`\`\``;
-    expect(hasFactcheckBlock(page)).toBe(false);
-    expect(stripFactcheckBlock(page)).toBe(page);
+    expect(hasFactcheckBlock(page)).toBe(true);
+    expect(stripFactcheckBlock(page)).toBe("Intro.\n\nOutro.\n\n```\ncode\n```");
   });
 
   test("a pair whose interior holds an opener nothing closes is still a block", () => {
