@@ -21,7 +21,8 @@
  *    (3 d against 5 d) and the whole change term is scaled by `changedWeight`
  *    (0.70). On a wiki whose `workedGate` is open, a page the ledger covers
  *    decays on its `workedMs` INSTEAD — see {@link workedGateFor}.
- *  - **page age** — a change to an old page counts for less (`agePenalty`).
+ *  - **page age** — a change to an old page counts for less (`agePenalty`),
+ *    unless the change is a ledger session write newer than any git update.
  *  - **hub weight** — a change to a page many pages link to counts for less
  *    (`hubPenalty`), which is what keeps `log.md`-shaped traffic out.
  *  - **type** — plans count for more (`planBoost`), in-flight and proposed
@@ -552,6 +553,10 @@ function scorePage(
   // A demotion set an update aside (named in the `why` below, when it moved
   // the row, so a page git changed yesterday that now reads `+ 6d` says why).
   const setAside = worked && updated?.kind === "updated" && updMs > workedMs;
+  // A DEMOTION is an update a day or more past the worked stamp. Under that it
+  // is the session's own commit: measured on mimir, a page's git touch lands
+  // seconds to hours after its ledger write.
+  const demoted = setAside && updMs - workedMs >= MS_PER_DAY;
   // The change term's stamp — the only thing substitution replaces.
   const changeMs = worked ? workedMs : updMs;
   // Ages in DAYS, which is the unit every knob below is expressed in. A page
@@ -592,8 +597,15 @@ function scorePage(
     const recency = Math.pow(0.5, changeDays / w.halfLifeChangedDays);
     // An UNKNOWN age is not evidence of an old page, so it is not discounted:
     // the penalty exists to say "this page has been around a long time", which
-    // is a claim no signal here supports.
-    const age = knownAge
+    // is a claim no signal here supports. Nor is a WORKED change that is the
+    // page's newest signal: the penalty damps git touches to old pages, and a
+    // ledger session write is a real edit. Measured 2026-09-26 on mimir: a
+    // 21-day-old plan worked 5h ago scored 0.49 (age ×0.70), 13th, under rows
+    // 10; waived, 0.70, 8th. A demotion keeps the penalty, or the waiver would
+    // lift the page it is meant to push down.
+    const sessionEdit = worked && !demoted;
+    const agePenalized = knownAge && !sessionEdit;
+    const age = agePenalized
       ? 1 / (1 + (w.agePenalty / 100) * (createdDays / AGE_PENALTY_REFERENCE_DAYS))
       : 1;
     const backlinks = page.backlinkCount || 0;
@@ -610,7 +622,7 @@ function scorePage(
     parts.push(
       `weight ×${(w.changedWeight / 100).toFixed(2)}`,
       `recency ${recency.toFixed(2)}`,
-      `age ×${age.toFixed(2)}`,
+      `age ×${age.toFixed(2)}${knownAge && sessionEdit ? " (worked)" : ""}`,
       `hub ×${hub.toFixed(2)} (${backlinks}←)`,
       `type ×${boost.toFixed(2)}`,
     );
@@ -638,7 +650,7 @@ function scorePage(
   // Named only when it moved the row, and only past a day: a session that
   // edits and commits hours later leaves a git touch after its ledger stamp,
   // and the clause would pin that session's own commit on someone else.
-  if (setAside && updMs - workedMs > MS_PER_DAY) {
+  if (demoted) {
     const unsubstituted = scorePage(page, w, now, null);
     if (unsubstituted.kind !== kind || unsubstituted.score !== score) {
       why += `; update ${agePhrase(updMs, now, updated?.label)}: no session write on record, or a bulk pass`;
