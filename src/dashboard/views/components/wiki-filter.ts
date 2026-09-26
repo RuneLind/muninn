@@ -9,6 +9,7 @@
 // relation vocabulary and the demoted tier are decided in ONE place.
 import { relationsCount, type IssueRelation } from "../../../wiki/trackers/types.ts";
 import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
+import { parseIssueRoot } from "../../../wiki/graph-types.ts";
 
 /**
  * A wiki page's type. Independent client-safe copy of the store's alias (this file
@@ -885,7 +886,7 @@ export function workedSourceOf(
  * comparator is pure across the 48h future-date boundary; everything else takes the
  * default.
  */
-export function pageTimeMs(p: WikiListing, now?: number): number {
+export function pageTimeMs(p: WikiRecencyFields, now?: number): number {
   return updatedSignal(p, now).ms;
 }
 
@@ -1508,9 +1509,13 @@ export function articleUrl(
   value: string,
   project: string,
   jira = "",
+  display: DisplayState = NO_DISPLAY,
 ): string {
   const w = wiki ? "wiki=" + encodeURIComponent(wiki) + "&" : "";
-  return urlWithJira(urlWithProject("/wiki?" + w + key + "=" + encodeURIComponent(value), project), jira);
+  return urlWithDisplay(
+    urlWithJira(urlWithProject("/wiki?" + w + key + "=" + encodeURIComponent(value), project), jira),
+    display,
+  );
 }
 
 /**
@@ -1790,4 +1795,57 @@ export function tagCounts(
     });
   });
   return counts;
+}
+
+// ── Graph mode's URL state ───────────────────────────────────────────────────
+// `display=graph` turns the article pane into the lanes graph; `issue=` names
+// its root when the root is an issue rather than the open page. Not `view=`,
+// which is the overview's start-tab parameter (`START_VIEW_PARAM`), and not
+// stored per wiki: the address bar is the only place it lives, so Back and a
+// shared link restore it. `issue=` is independent of `jira=`, the facet filter.
+
+const DISPLAY_PARAM = "display";
+const ISSUE_PARAM = "issue";
+const DISPLAY_GRAPH = "graph";
+
+/** Graph mode on or off, and the issue it is rooted at (`tracker:KEY`, or
+ *  `""` for the open page). */
+export interface DisplayState {
+  graph: boolean;
+  issue: string;
+}
+
+const NO_DISPLAY: DisplayState = Object.freeze({ graph: false, issue: "" });
+
+/** The display state `location.search` asks for. `issue=` counts only beside
+ *  `display=graph`, and only in the one shape an issue root is read as
+ *  (`parseIssueRoot`, `src/wiki/graph-types.ts`); anything else is dropped. */
+export function readDisplayParams(search: string): DisplayState {
+  const params = new URLSearchParams(search);
+  const graph = params.get(DISPLAY_PARAM) === DISPLAY_GRAPH;
+  const issue = (params.get(ISSUE_PARAM) ?? "").trim();
+  return { graph, issue: graph && parseIssueRoot(issue) ? issue : "" };
+}
+
+/** Append the display params to a URL known to carry none. Reading mode leaves
+ *  the URL untouched, so a reader who never opened a graph shares today's link. */
+export function urlWithDisplay(url: string, display: DisplayState): string {
+  if (!display.graph) return url;
+  let out = url + (url.indexOf("?") === -1 ? "?" : "&") + DISPLAY_PARAM + "=" + DISPLAY_GRAPH;
+  if (display.issue) out += "&" + ISSUE_PARAM + "=" + encodeURIComponent(display.issue);
+  return out;
+}
+
+/** `location.search` with the display params set (or removed), every OTHER
+ *  param preserved — `searchWithJira`'s shape. */
+export function searchWithDisplay(search: string, display: DisplayState): string {
+  const params = new URLSearchParams(search);
+  params.delete(DISPLAY_PARAM);
+  params.delete(ISSUE_PARAM);
+  if (display.graph) {
+    params.set(DISPLAY_PARAM, DISPLAY_GRAPH);
+    if (display.issue) params.set(ISSUE_PARAM, display.issue);
+  }
+  const q = params.toString();
+  return q ? "?" + q : "";
 }

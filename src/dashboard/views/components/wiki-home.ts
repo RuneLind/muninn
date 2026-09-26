@@ -18,6 +18,8 @@
  * client-side swap.
  */
 
+import { readDisplayParams } from "./wiki-filter.ts";
+
 /** localStorage key holding the canonical name of the wiki last opened by URL. */
 export const LAST_WIKI_KEY = "muninn.wiki.last.v1";
 
@@ -115,6 +117,9 @@ export function sameStartUrl(search: string, wiki: string, tab: StartTab, stored
   const named = (params.get("wiki") ?? params.get("bot") ?? "").trim();
   if (named && named.toLowerCase() !== wiki.toLowerCase()) return false;
   if (nonBlank(params, "relPath") || nonBlank(params, "page")) return false;
+  // An issue-only graph names no page, yet is not the overview. Read on meaning
+  // (`readDisplayParams`): a `display=` naming no valid issue boots the overview.
+  if (readDisplayParams(search).issue) return false;
   return resolveStartTab(params.get(START_VIEW_PARAM), stored) === tab;
 }
 

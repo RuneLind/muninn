@@ -175,6 +175,11 @@ export const E2E_PORTS = {
   // claude-usage's `/api/jira`.
   "wiki-tracker-connections": 3072,
   "wiki-tracker-connections/stub": 3073,
+  // Graph mode: one muninn over a tracker wiki and a no-tracker wiki, plus ONE
+  // stub playing huginn's issue listing and claude-usage's sessions and merges
+  // routes, counting every ledger call.
+  "wiki-tracker-graph": 3074,
+  "wiki-tracker-graph/stub": 3075,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
