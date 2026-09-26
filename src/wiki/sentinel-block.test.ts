@@ -53,7 +53,8 @@ const DOC_PAGE = [
 
 const headings = (s: string): number => s.split("\n").filter((l) => /^#{1,6}\s/.test(l)).length;
 
-/** Fence parity at `offset` under the renderer's toggle (any indent, ``` or ~~~). */
+/** Fence parity at `offset` under a naive toggle (any indent, ``` or ~~~) —
+ *  enough for these fixtures, which carry no nested or mismatched fences. */
 function insideFence(text: string, offset: number): boolean {
   let inFence = false;
   let at = 0;
@@ -81,9 +82,9 @@ describe("spliceSentinelBlock on a page that documents the sentinels", () => {
     expect(out3).toBe(out1);
   });
 
-  test("an answer with an odd number of fence lines is replaced, never duplicated", () => {
-    const b1 = block("one", ["> prose", "```ts", "const stray = 1;"]);
-    const b2 = block("two", ["```", "```", "```"]);
+  test("an answer carrying a closed fence is replaced, never duplicated", () => {
+    const b1 = block("one", ["> prose", "```ts", "const stray = 1;", "```"]);
+    const b2 = block("two", ["````", "```", "````"]);
     const page = "# Page\n\nBody.\n\n## See also\n\n- x\n";
     const out1 = withTrailingNewline(spliceSentinelBlock(page, b1));
     const out2 = withTrailingNewline(spliceSentinelBlock(out1, b2));
@@ -93,10 +94,10 @@ describe("spliceSentinelBlock on a page that documents the sentinels", () => {
     expect(out3.split(START).length - 1).toBe(1);
   });
 
-  test("an unquoted appendix with a stray fence, then a DOC page's prose after it", () => {
-    // The `.mdx` appendix embeds answer text unquoted, so a stray ``` sits at
-    // column 0 inside the live block.
-    const b1 = [START, '<FactCheck date="d1">', "", "```", "</FactCheck>", END].join("\n");
+  test("an unquoted appendix with a fence, then a DOC page's prose after it", () => {
+    // The `.mdx` appendix embeds answer text unquoted, so its fences sit at
+    // column 0 inside the live block (the writer closes any it leaves open).
+    const b1 = [START, '<FactCheck date="d1">', "", "```", "code", "```", "</FactCheck>", END].join("\n");
     const b2 = [START, '<FactCheck date="d2">', "", "</FactCheck>", END].join("\n");
     const page = `# Page\n\nBody.\n\n${b1}\n\n## Later\n\n\`${START}\` in prose.\n`;
     const out = spliceSentinelBlock(page, b2);
@@ -187,7 +188,15 @@ describe("hasFactcheckBlock / stripFactcheckBlock on a page that documents the s
     expect(stripFactcheckBlock(withBlock)).toBe(DOC_PAGE.trim());
   });
 
-  test("a live block whose answer carries an odd fence count is still found and stripped", () => {
+  test("a pair whose interior opens a fence closed later on the page is not a block", () => {
+    // Its END is code. No writer persists this: `buildFactcheckAppendix` closes
+    // any fence an answer leaves open.
+    const page = `Intro.\n\n${[START, "```", "</FactCheck>", END].join("\n")}\n\nOutro.\n\n\`\`\`\ncode\n\`\`\``;
+    expect(hasFactcheckBlock(page)).toBe(false);
+    expect(stripFactcheckBlock(page)).toBe(page);
+  });
+
+  test("a pair whose interior holds an opener nothing closes is still a block", () => {
     const page = `Intro.\n\n${[START, "```", "</FactCheck>", END].join("\n")}\n\nOutro.`;
     expect(hasFactcheckBlock(page)).toBe(true);
     expect(stripFactcheckBlock(page)).toBe("Intro.\n\nOutro.");

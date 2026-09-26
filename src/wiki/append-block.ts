@@ -13,9 +13,10 @@
  * queue) is the SHARED `writeWikiPage` in `page-write.ts`, which the fact-check
  * integrate path uses with its own strings.
  *
- * The splice itself: replace an existing
- * `<!-- factcheck:start -->…<!-- factcheck:end -->` in place, else insert before a
- * trailing `## Sources` section if present, otherwise append at end.
+ * The splice itself: replace the existing LIVE fact-check block in place (the
+ * `findLiveSentinelBlock` walker's answer, not any textual sentinel pair), else
+ * insert before the first `## Sources` heading outside a fence, otherwise append
+ * at end.
  *
  * Filesystem/index/reindex seams are injected so the splice + staleness logic
  * unit-tests with in-memory fakes.

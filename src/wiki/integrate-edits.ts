@@ -88,6 +88,7 @@ import {
 import { extractJson } from "../ai/json-extract.ts";
 import {
   factWrapperForms,
+  fenceLineStates,
   fencedLineMask,
   frontmatterEndLine,
   isWrapperOnlyEdit,
@@ -283,42 +284,32 @@ export function findExclusionZones(body: string, isMdx: boolean): Zone[] {
     zones.push({ start: span.start, end: span.end, kind: "sentinel" });
   }
 
-  // Fenced code blocks — a line-state scan, so an indented or info-string fence
-  // (```ts) is handled and an UNTERMINATED fence masks to end of file (safer than
-  // leaving half a code block editable). Both CommonMark markers are supported and
-  // the OPENING marker is remembered, so a ``` inside a ~~~ block can't close it.
+  // Fenced code blocks, by `fenceLineStates` — CommonMark's opener and closer
+  // rules, the grammar the sentinel walker and `fencedLineMask` share: an indented
+  // or info-string fence (```ts) is handled, the OPENING marker is remembered and
+  // the closer must be at least as long and bare, so a ```ts inside a ``` block
+  // or a ``` inside a ~~~ or ```` block can't close it. An UNTERMINATED fence
+  // masks to end of file (safer than leaving half a code block editable).
   //
   // The scan SKIPS lines already inside a frontmatter or fact-check-sentinel zone:
   // a persisted fact-check block routinely quotes a page's markdown, and a single
   // stray ``` in there used to invert fence parity for the whole rest of the page
   // (everything after it silently became "code" and thus unintegrable).
-  //
-  // CommonMark also requires the CLOSING fence's marker run to be at least as
-  // long as the opener's, so a ```-line inside a ````-opened block is content,
-  // not a closer (otherwise the rest of the page flips to "code" and the real
-  // closing ```` opens a phantom fence).
   const preZones = [...zones];
+  const scanned: { line: string; offset: number }[] = [];
   let offset = 0;
-  let fenceStart = -1;
-  let fenceMarker = "";
-  let fenceRun = 0;
   for (const line of body.split("\n")) {
-    const m = /^\s*(`{3,}|~{3,})/.exec(line);
-    if (m && !inRanges(offset, preZones)) {
-      const run = m[1]!;
-      const marker = run[0]!;
-      if (fenceStart < 0) {
-        fenceStart = offset;
-        fenceMarker = marker;
-        fenceRun = run.length;
-      } else if (marker === fenceMarker && run.length >= fenceRun) {
-        zones.push({ start: fenceStart, end: offset + line.length, kind: "fence" });
-        fenceStart = -1;
-        fenceMarker = "";
-        fenceRun = 0;
-      }
-    }
+    if (!inRanges(offset, preZones)) scanned.push({ line, offset });
     offset += line.length + 1;
+  }
+  const states = fenceLineStates(scanned.map((s) => s.line.replace(/\r$/, "")), "to-eof");
+  let fenceStart = -1;
+  for (let i = 0; i < scanned.length; i++) {
+    if (states[i] === "opener") fenceStart = scanned[i]!.offset;
+    else if (states[i] === "closer") {
+      zones.push({ start: fenceStart, end: scanned[i]!.offset + scanned[i]!.line.length, kind: "fence" });
+      fenceStart = -1;
+    }
   }
   if (fenceStart >= 0) zones.push({ start: fenceStart, end: body.length, kind: "fence" });
 

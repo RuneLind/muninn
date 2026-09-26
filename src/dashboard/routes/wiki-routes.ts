@@ -4304,12 +4304,14 @@ export function registerWikiRoutes(
           // newline) so ticking the callout checkbox can't be the reason an
           // unrelated trailing byte changed.
           if (!appendCallout && !wroteWrapper) return withTrailingNewline(editedBody);
-          // Same splice the ➕ route uses: REPLACE an existing sentinel block in
-          // place (a stale callout is refreshed, never duplicated), else insert
-          // before a trailing `## Sources`, else append. Runs on the already-edited
-          // body inside the critical section, so page + callout are one write.
-          // Edit offsets were resolved BEFORE this, and the sentinel block is a
-          // masked exclusion zone, so the two can't collide.
+          // Same splice the ➕ route uses: REPLACE an existing LIVE sentinel block
+          // in place (a stale callout is refreshed, never duplicated), else insert
+          // before the first `## Sources` heading outside a fence, else append.
+          // Runs on the already-edited body inside the critical section, so page
+          // + callout are one write. Edit offsets were resolved BEFORE this, and
+          // the sentinel block is a masked exclusion zone, so the two can't
+          // collide. Residual: an accepted edit whose text adds a lone fence line
+          // above the block hides it from the walker, so this appends a second.
           //
           // `.mdx` gets the `<FactCheck>` component appendix (whose `#fc-claim-N`
           // sections are the chips' targets, and whose `Was:` lines come from THIS

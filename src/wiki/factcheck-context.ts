@@ -20,7 +20,12 @@ import {
   normalizeFactVerdict,
   type FactVerdict,
 } from "../format/markdown-ast.ts";
-import { parseFactcheckClaims } from "../dashboard/views/components/wiki-integrate.ts";
+import {
+  fenceLineStates,
+  fenceOpener,
+  frontmatterEndLine,
+  parseFactcheckClaims,
+} from "../dashboard/views/components/wiki-integrate.ts";
 
 /** Server-side cap on the selected passage (chars) — mirrors `EXPLAIN_SELECTION_MAX`. */
 export const FACTCHECK_SELECTION_MAX = 1500;
@@ -61,51 +66,77 @@ export const FACTCHECK_ANSWER_MAX = 32_000;
 
 /** A LIVE sentinel block: `start` is the offset of the start sentinel's `<`,
  *  `end` the offset just past the end sentinel's `>` — the span the old paired
- *  regex matched, so a plain page splices byte-identically. */
+ *  regex matched, so a plain page splices byte-identically. `startLine` and
+ *  `endLine` are the 0-based lines the two sentinels own. */
 export interface SentinelBlockSpan {
   start: number;
   end: number;
+  startLine: number;
+  endLine: number;
 }
 
-/** The fence toggle `render.ts`'s `stripSentinelLines` uses: a trimmed line
- *  opening with ``` or ~~~, at any indent. */
-function isFenceLine(trimmed: string): boolean {
-  return trimmed.startsWith("```") || trimmed.startsWith("~~~");
+/** {@link fenceLineStates} over `lines` with a CRLF line's `\r` dropped (the
+ *  shared fence grammar anchors its closer tail at `$`). `"literal"`: an opener
+ *  with no closer is prose — the reader's reading, and the one a parse that
+ *  splices needs, so a page's stray ``` cannot hide a block appended after it. */
+function spliceFenceStates(lines: readonly string[]): ReturnType<typeof fenceLineStates> {
+  return fenceLineStates(lines.map((l) => l.replace(/\r$/, "")), "literal");
+}
+
+/** `text` with a closer appended when it holds an opener nothing closes, so the
+ *  opener cannot pair with a closer in whatever follows it on the page. */
+function closeOpenFence(text: string): string {
+  const lines = text.split("\n");
+  const states = spliceFenceStates(lines);
+  for (let i = 0; i < lines.length; i++) {
+    const open = states[i] === "outside" ? fenceOpener(lines[i]!.replace(/\r$/, "")) : null;
+    // The FIRST unclosed opener: a closer of its marker and length pairs it, and
+    // any later unclosed opener then sits inside that fence.
+    if (open) return `${text.replace(/\n+$/, "")}\n${open.marker.repeat(open.len)}`;
+  }
+  return text;
+}
+
+/** A line that IS the sentinel: the whole trimmed line, indented ≤3 spaces (four
+ *  spaces is an indented code block, a tab likewise). */
+function isSentinelLine(line: string, sentinel: string): boolean {
+  return /^ {0,3}\S/.test(line) && line.trim() === sentinel;
 }
 
 /**
  * Every LIVE fact-check block in `text`, in order — the ONE authority the splice,
- * {@link hasFactcheckBlock}, {@link stripFactcheckBlock} and integrate's exclusion
- * zones share. A line walk, not a regex, because a page that documents this
- * feature carries the sentinels as CONTENT:
+ * {@link hasFactcheckBlock}, {@link stripFactcheckBlock}, integrate's exclusion
+ * zones and the reader's sentinel filter share. A line walk, not a regex, because
+ * a page that documents this feature carries the sentinels as CONTENT:
  *
- *  - a sentinel counts only as the whole trimmed line (an inline-code mention in
- *    prose never does);
- *  - outside a live block, a line inside a fenced region never counts — the same
- *    toggle the renderer uses, so what the reader hides is what this pairs;
- *  - once a live START is found, fence lines are IGNORED until its END: the
- *    `.mdx` appendix embeds answer text unquoted, and a stray ``` in it must not
- *    turn the END into "fenced" and make every later ➕ append a duplicate;
- *  - a START pairs with the first END after it; a START with no END is no block,
- *    so nothing is ever deleted on its account.
+ *  - a sentinel counts only as a whole line indented ≤3 spaces, outside the
+ *    frontmatter and outside a fence (`fenceLineStates`, CommonMark's grammar,
+ *    which the exclusion zones use too; an opener nothing closes is prose, as in
+ *    the reader) — an inline-code mention, a fenced or indented example, a
+ *    blockquoted marker and a YAML value are all content;
+ *  - fences are tracked INSIDE a block as well: the writers close any fence an
+ *    embedded answer leaves open, so a live block's interior is fence-balanced;
+ *  - a START opens a candidate that the next END closes; a later START before
+ *    that END makes the earlier one an orphan, and a START with no END is no
+ *    block — nothing is ever deleted on an orphan's account.
  */
 export function findLiveSentinelBlocks(text: string): SentinelBlockSpan[] {
   const spans: SentinelBlockSpan[] = [];
   const lines = text.split("\n");
-  let inFence = false;
+  const bodyFrom = frontmatterEndLine(lines);
+  const fences = spliceFenceStates(lines.slice(bodyFrom));
   let offset = 0;
-  let open: number | null = null; // offset of the live START, while inside a block
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (open !== null) {
-      if (trimmed === FACTCHECK_SENTINEL_END) {
-        spans.push({ start: open, end: offset + line.indexOf(FACTCHECK_SENTINEL_END) + FACTCHECK_SENTINEL_END.length });
+  let open: { offset: number; line: number } | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (i >= bodyFrom && fences[i - bodyFrom] === "outside") {
+      if (isSentinelLine(line, FACTCHECK_SENTINEL_START)) {
+        open = { offset: offset + line.indexOf(FACTCHECK_SENTINEL_START), line: i };
+      } else if (open && isSentinelLine(line, FACTCHECK_SENTINEL_END)) {
+        const end = offset + line.indexOf(FACTCHECK_SENTINEL_END) + FACTCHECK_SENTINEL_END.length;
+        spans.push({ start: open.offset, end, startLine: open.line, endLine: i });
         open = null;
       }
-    } else if (isFenceLine(trimmed)) {
-      inFence = !inFence;
-    } else if (!inFence && trimmed === FACTCHECK_SENTINEL_START) {
-      open = offset + line.indexOf(FACTCHECK_SENTINEL_START);
     }
     offset += line.length + 1;
   }
@@ -117,16 +148,12 @@ export function findLiveSentinelBlock(text: string): SentinelBlockSpan | null {
   return findLiveSentinelBlocks(text)[0] ?? null;
 }
 
-/** Index of the first line matching `pred` that is not inside a fenced region
- *  (same toggle as {@link findLiveSentinelBlocks}), or -1. */
+/** Index of the first line matching `pred` that is outside every fence (the
+ *  reading {@link findLiveSentinelBlocks} uses), or -1. */
 export function firstUnfencedLineIndex(lines: readonly string[], pred: (line: string) => boolean): number {
-  let inFence = false;
+  const fences = spliceFenceStates(lines);
   for (let i = 0; i < lines.length; i++) {
-    if (isFenceLine(lines[i]!.trim())) {
-      inFence = !inFence;
-      continue;
-    }
-    if (!inFence && pred(lines[i]!)) return i;
+    if (fences[i] === "outside" && pred(lines[i]!)) return i;
   }
   return -1;
 }
@@ -300,7 +327,11 @@ export function buildFactcheckAppendix(
     // sentence) could close the appendix early from inside a `Was:` line.
     const raw = opts.originals?.get(a.index);
     const original = raw ? neutralizeAnswerMarkup(raw) : raw;
-    return original && original.trim() ? withWasLine(a.block, original) : a.block;
+    const block = original && original.trim() ? withWasLine(a.block, original) : a.block;
+    // The answer is embedded UNQUOTED here, and the walker tracks fences inside
+    // a live block: a claim that leaves a fence open would hide `</FactCheck>`
+    // and the END sentinel, so the next ➕ would append a second block.
+    return closeOpenFence(block);
   });
 
   return [
