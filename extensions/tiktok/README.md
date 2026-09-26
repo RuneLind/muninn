@@ -62,7 +62,7 @@ When clicked on a TikTok video page:
 
 When no video is detected (or as an override under a detected one), the popup shows
 a URL field. A pasted link is normalized client-side (scheme added if missing,
-host checked against `tiktok.com`) and sent through the same `SUMMARIZE` path; the
+`http://` upgraded to `https://`, host checked against the server's allowlist) and sent through the same `SUMMARIZE` path; the
 server resolves short links and extracts the numeric id from the URL.
 
 ### Background (`background.js`)
@@ -86,4 +86,5 @@ POST /api/tiktok/summarize
 ```
 
 Response: `{ job_id, dashboard_url }` — the extension opens the dashboard URL in a new tab.
+The server answers 400 `bad_url` unless `url` is https on `tiktok.com`, `www.`, `m.`, `vm.` or `vt.tiktok.com`, with no port or userinfo.
 The server extracts the numeric video id from the URL itself.

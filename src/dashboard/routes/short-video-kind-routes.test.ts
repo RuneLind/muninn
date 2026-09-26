@@ -44,10 +44,12 @@ mock.module("../../ai/knowledge-api-client.ts", () => ({
 
 let tiktokCalls = 0;
 let lastTikTokOpts: { frames?: boolean; preset?: { id: string } } | undefined;
+let lastTikTokUrl: string | undefined;
+let lastTikTokJobId: string | undefined;
 mock.module("../../tiktok/summarizer.ts", () => ({
   summarizeTikTok: async (
-    _jobId: string,
-    _url: string,
+    jobId: string,
+    url: string,
     _title: string,
     _c: unknown,
     _b: unknown,
@@ -55,6 +57,8 @@ mock.module("../../tiktok/summarizer.ts", () => ({
   ) => {
     tiktokCalls++;
     lastTikTokOpts = opts;
+    lastTikTokUrl = url;
+    lastTikTokJobId = jobId;
   },
 }));
 
@@ -144,6 +148,8 @@ beforeEach(() => {
   tiktokCalls = 0;
   xVideoCalls = 0;
   lastTikTokOpts = undefined;
+  lastTikTokUrl = undefined;
+  lastTikTokJobId = undefined;
   lastXVideoOpts = undefined;
 });
 
@@ -344,6 +350,23 @@ describe("tiktok: the POST's url host gate", () => {
     "https://user@www.tiktok.com/@a/video/7523456789",
     "file:///etc/passwd",
     "not a url",
+    // Parser differentials (fix round 1): WHATWG reads `\` as `/` and so sees
+    // host www.tiktok.com; yt-dlp (Python) splits userinfo at the last `@` and
+    // connects to 127.0.0.1. Measured end to end before this fix.
+    "https://www.tiktok.com\\@127.0.0.1:39872/x",
+    "https://vm.tiktok.com\\@127.0.0.1:39872/x",
+    // Strings WHATWG normalises onto an allowed URL: refused, not normalised.
+    " https://www.tiktok.com/@a/video/7523456789",
+    "https://www.tiktok.com/@a/video/7523456789\n",
+    "https://www.tik\ttok.com/@a/video/7523456789",
+    "https://www.tiktok.com/@a/vid eo/7523456789",
+    "https://www\u0000.tiktok.com/@a/video/7523456789",
+    "https://www%2Etiktok.com/@a/video/7523456789",
+    "https:www.tiktok.com/@a/video/7523456789",
+    "https:\\\\www.tiktok.com/@a/video/7523456789",
+    "https://\uff57\uff57\uff57.tiktok.com/@a/video/7523456789",
+    "https://:@www.tiktok.com/@a/video/7523456789",
+    "https://www.tiktok.com:443/@a/video/7523456789",
   ];
   for (const url of REFUSED) {
     test(`refuses ${url} with 400 bad_url, before the listing read and createJob`, async () => {
@@ -369,4 +392,47 @@ describe("tiktok: the POST's url host gate", () => {
       expect(tiktokCalls).toBe(1);
     });
   }
+
+  test("hands the canonical href downstream, never the raw string", async () => {
+    const raw = "https://WWW.TikTok.com/@coolcoder/./video/7523456789";
+    const res = await post(app(), "/api/tiktok/summarize", { url: raw });
+    expect(res.status).toBe(200);
+    const href = "https://www.tiktok.com/@coolcoder/video/7523456789";
+    expect(lastTikTokUrl).toBe(href);
+    const job = ttState.getJob(lastTikTokJobId!)!;
+    expect(job.url).toBe(href);
+    expect(job.title).toBe(href);
+  });
+});
+
+/**
+ * The short-link HEAD's redirect target is re-judged by the same gate before a
+ * dedup id is read off it (fix round 1). `extractTikTokVideoId` alone accepts
+ * any host ending in `tiktok.com`, so `eviltiktok.com` used to yield an id.
+ */
+describe("tiktok: the short-link redirect target is re-gated", () => {
+  const realFetch = globalThis.fetch;
+  let redirectTo = "";
+  beforeEach(() => {
+    globalThis.fetch = (async () => ({ url: redirectTo }) as Response) as unknown as typeof fetch;
+  });
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("a redirect off TikTok yields no dedup id", async () => {
+    redirectTo = "https://eviltiktok.com/@a/video/7523456789";
+    const res = await post(app(), "/api/tiktok/summarize", { url: "https://vm.tiktok.com/ZMabc123/" });
+    expect(res.status).toBe(200);
+    expect(knowledgeApiCalls).toEqual([]);
+    expect(ttState.getJob(lastTikTokJobId!)!.videoId).toBe("");
+  });
+
+  test("a redirect onto TikTok still drives the dedup lookup", async () => {
+    redirectTo = "https://www.tiktok.com/@a/video/7523456789";
+    const res = await post(app(), "/api/tiktok/summarize", { url: "https://vm.tiktok.com/ZMabc123/" });
+    expect(res.status).toBe(200);
+    expect(knowledgeApiCalls.length).toBe(1);
+    expect(ttState.getJob(lastTikTokJobId!)!.videoId).toBe("7523456789");
+  });
 });
