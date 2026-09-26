@@ -64,7 +64,7 @@ const MODAL_SELECTOR = '[aria-modal="true"], dialog[open], [role="dialog"], [rol
  * Is a modal dialog or a menu open anywhere on the page — not only around the
  * focused element? The reader's one menu, the series ★ popover
  * (`role="menu"`), leaves focus on its opener or on its own input, and the
- * callers' ancestor tests match `[aria-modal]` and `dialog`, never a menu — so
+ * `g` key's ancestor test matches `[aria-modal]` and `dialog`, never a menu — so
  * with focus on the opener, only this page-wide check sees it open. "Open" is
  * "rendered": a closed menu or dialog kept in the DOM with `hidden` or
  * `display: none` has no client rects.

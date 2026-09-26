@@ -617,6 +617,14 @@ const heldAborted = (page: Page) =>
   page.evaluate(() =>
     (window as unknown as { __graphSignals: { signal?: AbortSignal }[] }).__graphSignals.map((x) => x.signal?.aborted === true),
   );
+/** The anchor page in graph mode with DEMO-101's card open. */
+async function openCard(page: Page): Promise<void> {
+  await openPage(page, WIKI, ANCHOR, "&display=graph");
+  await drawn(page);
+  await node(page, "issue:jira:DEMO-101").click();
+  await expect(page.locator("#wikiGraphCard")).toBeVisible();
+}
+
 const isOther = (u: URL) => u.pathname === "/api/wiki/page" && u.searchParams.get("relPath") === OTHER;
 
 test.describe("Wiki reader: graph mode, fix round 2", () => {
@@ -649,6 +657,74 @@ test.describe("Wiki reader: graph mode, fix round 2", () => {
     await expect(layout).toHaveClass(/focus-mode/);
     await page.keyboard.press("Escape");
     await expect(layout).not.toHaveClass(/focus-mode/);
+  });
+
+  test("E1: with a card open, Escape on the Share dialog closes the dialog only and focus never leaves it", async ({ page }) => {
+    await openCard(page);
+    await page.locator("#wikiShareBtn").click();
+    const dialog = page.locator("#wikiShare");
+    await expect(dialog).toBeVisible();
+    await page.evaluate(() => {
+      const w = window as unknown as { e2eEscaped: string[] };
+      w.e2eEscaped = [];
+      document.addEventListener("focusin", (e) => {
+        const d = document.getElementById("wikiShare");
+        const open = !!d && d.getClientRects().length > 0;
+        if (open && !d!.contains(e.target as Node)) w.e2eEscaped.push((e.target as Element).outerHTML.slice(0, 80));
+      });
+    });
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#wikiGraphCard")).toBeVisible();
+    expect(await page.evaluate(() => (window as unknown as { e2eEscaped: string[] }).e2eEscaped)).toEqual([]);
+  });
+
+  test("E2: with a card open, Escape on the series menu closes the menu only", async ({ page }) => {
+    await openCard(page);
+    const row = page.locator(`.wiki-list-item[data-relpath="${OTHER}"]`);
+    await row.hover();
+    await row.locator("[data-series-menu]").click();
+    const menu = page.locator("#wikiSeriesMenu");
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
+    await expect(page.locator("#wikiGraphCard")).toBeVisible();
+  });
+
+  test("E3: with a card open, Escape on the Discuss dialog is the dialog's, not the card's", async ({ page }) => {
+    await openCard(page);
+    await page.locator("#wikiDiscussBtn").click();
+    const dialog = page.locator("#wikiChatOpt");
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#wikiGraphCard")).toBeVisible();
+  });
+
+  test("E4: with a card open, Escape dismisses a visible Explain pill and leaves the card", async ({ page }) => {
+    await openCard(page);
+    await page.evaluate(() => {
+      const r = document.createRange();
+      r.selectNodeContents(document.querySelector(".wiki-article-head h1")!);
+      const w = window.getSelection()!;
+      w.removeAllRanges();
+      w.addRange(r);
+      document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
+    await expect(page.locator("#wikiExplainBtn")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiExplainBtn")).toBeHidden();
+    await expect(page.locator("#wikiGraphCard")).toBeVisible();
+  });
+
+  test("E5: with a card open, Escape on the open Tools menu closes the menu only", async ({ page }) => {
+    await openCard(page);
+    const tools = page.locator("details.nav-dropdown");
+    await tools.locator("summary").click();
+    await expect(tools).toHaveAttribute("open", "");
+    await page.keyboard.press("Escape");
+    await expect(tools).not.toHaveAttribute("open", "");
+    await expect(page.locator("#wikiGraphCard")).toBeVisible();
   });
 
   test("N1: selecting the page title offers the Explain pill; a selection reaching into the graph does not", async ({ page }) => {

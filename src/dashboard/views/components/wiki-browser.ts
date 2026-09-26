@@ -503,8 +503,6 @@ let graphDepth: number | null = null;
 let graphSeq = 0;
 /** The in-flight graph fetch, aborted when a newer one starts or the graph goes. */
 let graphAbort: AbortController | null = null;
-/** The last answer and the query it answered, so toggling back to the same
- *  graph repaints it instead of repeating the ledger fan-out. One entry. */
 /** The graph on screen, for hover and the card, and its adjacency (built once
  *  per drawn graph). */
 let graphData: GraphPayload | null = null;
@@ -3994,12 +3992,29 @@ document.addEventListener("change", (e) => {
   else return;
   loadGraph();
 });
-// Escape with a card open closes the card and nothing else. Capture phase, so
-// it runs before the pane keys' bubble listener, which would leave focus mode.
+/**
+ * Does another Escape owner hold this keypress? The card's listener runs in the
+ * capture phase and stops propagation, so every other owner — all bubble-phase —
+ * would never see Escape while the card is open. It stands aside for: an open
+ * dialog or menu anywhere (Share, Discuss, the series ★ menu, a native dialog —
+ * page-wide, so it also covers a target inside one); the Explain pill (the
+ * Fact check button only ever shows beside it); the header's Tools menu.
+ */
+function escapeOwnedElsewhere(): boolean {
+  return (
+    modalOpen(document) ||
+    (document.getElementById("wikiExplainBtn")?.getClientRects().length ?? 0) > 0 ||
+    !!document.querySelector("details.nav-dropdown[open]")
+  );
+}
+// Escape with a card open, and no other owner active, closes the card and
+// nothing else. Capture phase, so it runs before the pane keys' bubble
+// listener, which would leave focus mode.
 document.addEventListener(
   "keydown",
   (e) => {
     if (e.key !== "Escape" || !graphCardId || document.getElementById(GRAPH_CARD_ID)?.hidden) return;
+    if (escapeOwnedElsewhere()) return;
     e.preventDefault();
     e.stopPropagation();
     closeGraphCard();
