@@ -118,6 +118,30 @@ import { requireJsonRequest } from "./json-request.ts";
 
 const log = getLog("dashboard", "wiki-gardener");
 
+/** `String(err)` throws on a null-prototype object; this never does. */
+function safeErrorText(err: unknown): string {
+  try {
+    return err instanceof Error ? err.message : String(err);
+  } catch {
+    return "unknown error";
+  }
+}
+
+/** The step name `backlog-doc-delete` gives its proposal delete — the one failure the user can act on. */
+const PROPOSALS_DELETE_STEP = "source proposals delete";
+
+/**
+ * The `warning` a delete answers when huginn deleted the doc but a bookkeeping
+ * step failed. Displayed by both clients, so it names steps and a remedy only —
+ * never the raw error, which is in the warn log.
+ */
+function backlogDeleteWarning(failedSteps: string[]): string {
+  const head = `Deleted from huginn, but muninn could not finish its own bookkeeping (failed: ${failedSteps.join(", ")}).`;
+  return failedSteps.includes(PROPOSALS_DELETE_STEP)
+    ? `${head} Wiki drafts written from this document may still be in the review gate — reject them on /wiki/gardener.`
+    : `${head} No action needed; the server log has the details.`;
+}
+
 const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 
 /**
@@ -1904,6 +1928,9 @@ export function registerWikiGardenerRoutes(
    *
    * On success the key is pruned from BOTH snapshot sets (a deleted doc must not
    * leave a dangling offered/dismissed entry that outlives it).
+   *
+   * Only huginn's DELETE can answer 404/502. A muninn DB step failing after it is
+   * a 200 with a `warning`: the document IS gone, so the delete signal still fires.
    */
   app.post("/api/wiki/gardener/backlog-doc-delete", async (c) => {
     const target = await resolvePruneTarget(c);
@@ -1921,11 +1948,42 @@ export function registerWikiGardenerRoutes(
 
     const key = `${collection}/${id}`;
     const run = runExclusive(target.bot.name, async () => {
-      const res = await fetchKnowledgeApi(
-        KNOWLEDGE_API_URL,
-        `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
-        { method: "DELETE", timeoutMs: DELETE_TIMEOUT_MS },
-      );
+      // huginn's DELETE owns the 404/502 answers — and ONLY it. Everything after a
+      // confirmed move is muninn's own bookkeeping, reported separately below: the
+      // document is gone whatever a DB write then does.
+      let res: Record<string, unknown>;
+      try {
+        res = (await fetchKnowledgeApi(
+          KNOWLEDGE_API_URL,
+          `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+          { method: "DELETE", timeoutMs: DELETE_TIMEOUT_MS },
+        )) as Record<string, unknown>;
+      } catch (err) {
+        return { refused: err };
+      }
+
+      // Each step is guarded on its own, so one failure skips none of the others
+      // (a failed snapshot prune must not leave the stats cache stale).
+      const failures: string[] = [];
+      const step = async <T>(name: string, fn: () => Promise<T> | T, fallback: T): Promise<T> => {
+        try {
+          return await fn();
+        } catch (err) {
+          // The raw error (driver text, host:port, a DB user) goes to the log only;
+          // the response names the step, because the client DISPLAYS `warning`.
+          log.warn("Backlog delete of {key} for {bot}: huginn deleted it, but {step} failed: {error}", {
+            bot: target.bot.name,
+            key,
+            collection,
+            id,
+            step: name,
+            error: safeErrorText(err),
+          });
+          failures.push(name);
+          return fallback;
+        }
+      };
+
       // Prune the key from both live sets — the doc is gone, so an entry naming it
       // would linger forever (the sets are never garbage-collected against a listing).
       const pruneKeyFrom = async (
@@ -1937,36 +1995,36 @@ export function registerWikiGardenerRoutes(
           await backlogDeps.setSnapshot(target.watcher.id, snapKey, [...current]);
         }
       };
-      await pruneKeyFrom(WIKI_GARDENER_OFFERED_KEY, readOffered);
-      await pruneKeyFrom(WIKI_GARDENER_DISMISSED_KEY, readDismissed);
+      await step("offered snapshot prune", () => pruneKeyFrom(WIKI_GARDENER_OFFERED_KEY, readOffered), undefined);
+      await step("dismissed snapshot prune", () => pruneKeyFrom(WIKI_GARDENER_DISMISSED_KEY, readDismissed), undefined);
       // Same rule for the attempt ledger: the doc is gone, and a re-capture under the
       // same id must not inherit a months-old skip reason.
-      await deleteSourceDraftAttempt(target.bot.name, collection, id);
+      await step("source-draft attempt delete", () => deleteSourceDraftAttempt(target.bot.name, collection, id), undefined);
       // And the draft the source drafter wrote FROM it: a review-gate card whose
       // source no longer exists is not reviewable, and approving it would write a
       // wiki page from a document that is gone. Applied rows are kept and reported
       // (their wiki page still exists). Under the mutex — pinned by the route test,
       // whose seam asserts the mutex is HELD when it runs — so a drain cannot
       // re-draft the doc between huginn's move and this DELETE.
-      const proposals = await backlogDeps.deleteSourceProposalsForDoc(target.bot.name, collection, id);
+      const proposals = await step(
+        PROPOSALS_DELETE_STEP,
+        () => backlogDeps.deleteSourceProposalsForDoc(target.bot.name, collection, id),
+        { deleted: [] as DeletedSourceProposal[], kept: [] as DeletedSourceProposal[] },
+      );
       // The pending set the stats coverage reads just changed; a cached payload
       // would report the old pending/consumed split for its full 5-min TTL.
-      invalidateSummariesStatsCache();
-      return { res, proposals };
+      await step("summaries stats cache invalidation", () => invalidateSummariesStatsCache(), undefined);
+      return { res, proposals, failures };
     });
     if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
 
-    let res: Record<string, unknown>;
-    let proposals: { deleted: DeletedSourceProposal[]; kept: DeletedSourceProposal[] };
-    try {
-      const done = await run;
-      res = done.res as Record<string, unknown>;
-      proposals = done.proposals;
-    } catch (err) {
+    const done = await run;
+    if ("refused" in done) {
       // huginn 404 = the id isn't a member of that collection (its membership gate);
       // anything else is an upstream/transport failure. Never a muninn 5xx.
+      const err = done.refused;
       const upstream = err instanceof KnowledgeApiError ? err.upstreamStatus : undefined;
-      const message = err instanceof Error ? err.message : String(err);
+      const message = safeErrorText(err);
       log.warn("Backlog delete failed for {bot} ({key}): {error}", {
         bot: target.bot.name,
         key,
@@ -1975,6 +2033,7 @@ export function registerWikiGardenerRoutes(
       if (upstream === 404) return c.json({ error: "that doc is not in that collection" }, 404);
       return c.json({ error: `huginn refused the delete: ${message}` }, 502);
     }
+    const { res, proposals, failures } = done;
 
     // The document is gone (huginn confirmed the move), so every cache that
     // remembers it by id — the Vimeo route's recently-ingested dedup map —
@@ -2012,6 +2071,7 @@ export function registerWikiGardenerRoutes(
       polling,
       skipped,
       proposals,
+      ...(failures.length > 0 ? { warning: backlogDeleteWarning(failures) } : {}),
     });
   });
 

@@ -1442,9 +1442,15 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
   /** Every (bot, collection, id) the proposal-delete seam was asked for. */
   let proposalCalls: string[];
   let mutexHeldDuringProposalDelete: boolean | null;
+  /** When set, the proposal-delete seam throws this AFTER recording its call. */
+  let proposalDeleteThrows: unknown;
+  /** When set, reading this snapshot key throws (a post-DELETE DB failure). */
+  let snapshotReadThrowsFor: string | null;
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), "wiki-delete-route-"));
+    proposalDeleteThrows = null;
+    snapshotReadThrowsFor = null;
     await Bun.write(path.join(root, "notes.md"), "# Notes\n");
     deleteCalls = [];
     proposalCalls = [];
@@ -1508,7 +1514,10 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
         forceNextRun: false,
         config: {},
       }),
-      getSnapshot: async (_id, key) => snapshots.get(key) ?? null,
+      getSnapshot: async (_id, key) => {
+        if (key === snapshotReadThrowsFor) throw new Error("connection terminated unexpectedly");
+        return snapshots.get(key) ?? null;
+      },
       setSnapshot: async (_id, key, value) => {
         snapshots.set(key, value);
       },
@@ -1524,6 +1533,7 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
         // The seam runs INSIDE the gardener mutex, or a drain could re-draft the doc
         // between huginn's move and this delete: a second acquire must be refused.
         mutexHeldDuringProposalDelete = runExclusive(bot, async () => 0) === null;
+        if (proposalDeleteThrows) throw proposalDeleteThrows;
         return {
           deleted: [{ id: "p1", targetPath: "sources/junk.mdx", status: "draft" }],
           kept: [{ id: "p2", targetPath: "sources/junk-applied.mdx", status: "applied" }],
@@ -1631,6 +1641,133 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     // The cache is keyed on the stats route's `?bot=` fallback ("jarvis"), NOT the
     // deleting bot ("delbot") — so the invalidation must clear every key.
     expect(__peekSummariesStatsCacheForTest("jarvis")).toBeUndefined();
+  });
+
+  const STATS_FIXTURE = {
+    months: [],
+    bySource: {},
+    coverage: { windowDays: 30, total: 1, consumed: 0, pending: 1, neverClustered: [], undated: 0 },
+    errors: [],
+  };
+
+  test("a DB failure AFTER huginn's DELETE is still a 200: warning, notify, stats cache dropped", async () => {
+    // huginn moved the doc; only muninn's own bookkeeping failed. Reporting that
+    // as "huginn refused the delete" (502) hid a delete that happened, and
+    // skipped the delete signal, so the Vimeo dedup kept answering `duplicate`.
+    __setSummariesStatsCacheForTest("jarvis", STATS_FIXTURE);
+    proposalDeleteThrows = new Error("connection terminated unexpectedly");
+    const heard: Array<{ collection: string; id: string }> = [];
+    const off = onSummaryDocumentDeleted((e) => heard.push(e));
+    try {
+      const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.ok).toBe(true);
+      expect(body.polling).toEqual(["youtube-summaries"]);
+      expect(body.skipped).toEqual(["wiki"]);
+      expect(body.movedTo).toBe("/tmp/deleted/junk.md");
+      // Present and empty, so a client reading `.deleted.length` cannot crash.
+      expect(body.proposals).toEqual({ deleted: [], kept: [] });
+      expect(body.warning).toContain("source proposals");
+      expect(body.warning).not.toContain("connection terminated unexpectedly");
+      expect(body.error).toBeUndefined();
+      expect(deleteCalls.length).toBe(1);
+      expect(mutexHeldDuringProposalDelete).toBe(true);
+      expect(heard).toEqual([{ collection: "youtube-summaries", id: "junk.md" }]);
+      expect(__peekSummariesStatsCacheForTest("jarvis")).toBeUndefined();
+    } finally {
+      off();
+    }
+  });
+
+  test("each bookkeeping step is guarded on its own: a failed snapshot prune skips none of the others", async () => {
+    __setSummariesStatsCacheForTest("jarvis", STATS_FIXTURE);
+    snapshotReadThrowsFor = "backlog:offered";
+    const heard: Array<{ collection: string; id: string }> = [];
+    const off = onSummaryDocumentDeleted((e) => heard.push(e));
+    try {
+      const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        ok: boolean;
+        warning?: string;
+        proposals: { deleted: { id: string }[] };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.warning).toContain("offered");
+      expect(body.warning).not.toContain("dismissed");
+      // The offered set is untouched (its read failed); the dismissed prune still ran.
+      expect(snapshots.get("backlog:offered")).toEqual(["youtube-summaries/junk.md", "youtube-summaries/keep.md"]);
+      expect(snapshots.get("backlog:dismissed")).toEqual([]);
+      // …and so did the proposal delete, the stats invalidation and the signal.
+      expect(proposalCalls).toEqual(["delbot:youtube-summaries/junk.md"]);
+      expect(body.proposals.deleted.map((p) => p.id)).toEqual(["p1"]);
+      expect(__peekSummariesStatsCacheForTest("jarvis")).toBeUndefined();
+      expect(heard).toHaveLength(1);
+    } finally {
+      off();
+    }
+  });
+
+  test("the warning names the failed step and the remedy, never the raw driver error", async () => {
+    // The clients DISPLAY `warning`; driver text (host:port, a DB user) stays in the log.
+    proposalDeleteThrows = new Error("write CONNECTION_CLOSED 127.0.0.1:5435");
+    const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { warning?: string };
+    expect(body.warning).toContain("source proposals delete");
+    expect(body.warning).toContain("/wiki/gardener");
+    expect(body.warning).not.toContain("CONNECTION_CLOSED");
+    expect(body.warning).not.toContain("127.0.0.1");
+    expect(body.warning).not.toContain("5435");
+  });
+
+  test("a step that throws a null-prototype object is still a 200 + warning, and notifies once", async () => {
+    // `String(err)` throws on this; an unguarded stringify rejected `await run` → 500.
+    proposalDeleteThrows = Object.create(null);
+    const heard: Array<{ collection: string; id: string }> = [];
+    const off = onSummaryDocumentDeleted((e) => heard.push(e));
+    try {
+      const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { ok: boolean; warning?: string; proposals: unknown };
+      expect(body.ok).toBe(true);
+      expect(body.warning).toContain("source proposals delete");
+      expect(body.proposals).toEqual({ deleted: [], kept: [] });
+      expect(heard).toEqual([{ collection: "youtube-summaries", id: "junk.md" }]);
+    } finally {
+      off();
+    }
+  });
+
+  test("a clean delete carries no warning", async () => {
+    const body = (await (await del({ collection: "youtube-summaries", id: "junk.md" })).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(body.ok).toBe(true);
+    expect("warning" in body).toBe(false);
+  });
+
+  test("huginn 404 and 502 never notify, never run bookkeeping, never warn", async () => {
+    __setSummariesStatsCacheForTest("jarvis", STATS_FIXTURE);
+    const heard: Array<{ collection: string; id: string }> = [];
+    const off = onSummaryDocumentDeleted((e) => heard.push(e));
+    try {
+      deleteResponse = () => new Response("not found", { status: 404 });
+      const r404 = await del({ collection: "youtube-summaries", id: "junk.md" });
+      expect(r404.status).toBe(404);
+      deleteResponse = () => new Response("boom", { status: 500 });
+      const r502 = await del({ collection: "youtube-summaries", id: "junk.md" });
+      expect(r502.status).toBe(502);
+      expect("warning" in ((await r502.json()) as object)).toBe(false);
+      expect(heard).toEqual([]);
+      expect(proposalCalls).toEqual([]);
+      expect((snapshots.get("backlog:offered") as string[]).length).toBe(2);
+      expect(__peekSummariesStatsCacheForTest("jarvis")).toBeDefined();
+    } finally {
+      off();
+    }
   });
 
   test("huginn refusing the delete leaves the proposals alone", async () => {

@@ -202,6 +202,8 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
        accent for the error colour. */
     .delete-notice { cursor: pointer; }
     .delete-notice.err { border-left-color: var(--status-error); }
+    .delete-notice.warn { border-left-color: var(--status-warning); }
+    .delete-notice a { color: var(--accent, #6c8aff); }
   </style>
 </head>
 <body>

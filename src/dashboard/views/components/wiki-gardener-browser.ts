@@ -21,6 +21,7 @@ import {
   backlogGlossaryHtml,
   sourceDraftResultHtml,
   backlogInspectorHtml,
+  backlogDeleteNotice,
   backlogDocKey,
   filterBacklogDocs,
   initialInspectorState,
@@ -1147,6 +1148,7 @@ async function deleteBacklogDoc(collection: string, id: string, label: string): 
 
   let polling: string[] = [];
   let skipped: string[] = [];
+  let warning: string | undefined;
   try {
     const res = await fetch(withBot("/api/wiki/gardener/backlog-doc-delete"), {
       method: "POST",
@@ -1157,6 +1159,7 @@ async function deleteBacklogDoc(collection: string, id: string, label: string): 
       error?: string;
       polling?: string[];
       skipped?: string[];
+      warning?: string;
     };
     if (!res.ok) {
       setInspectorNotice(body.error || `delete failed (${res.status})`, "err");
@@ -1166,6 +1169,13 @@ async function deleteBacklogDoc(collection: string, id: string, label: string): 
     }
     polling = Array.isArray(body.polling) ? body.polling : [];
     skipped = Array.isArray(body.skipped) ? body.skipped : [];
+    warning = body.warning;
+    // Shown now, not after the up-to-two-minute reindex wait.
+    const early = backlogDeleteNotice(warning, []);
+    if (early) {
+      inspector.notice = early;
+      rerenderStrip();
+    }
   } catch {
     setInspectorNotice("couldn't reach the server", "err");
     inspector.removing = inspector.removing.filter((k) => k !== key);
@@ -1187,12 +1197,8 @@ async function deleteBacklogDoc(collection: string, id: string, label: string): 
   if (unresolved.length) {
     caveats.push(`the reindex for ${unresolved.join(", ")} never reported a terminal status`);
   }
-  if (caveats.length) {
-    setInspectorNotice(
-      `deleted — but ${caveats.join(" and ")}, so the doc may still be listed until the next index run`,
-      "info",
-    );
-  }
+  const notice = backlogDeleteNotice(warning, caveats);
+  if (notice) inspector.notice = notice;
 
   // Only a TERMINAL poll invalidated the server cache; without one, `refresh=1` would
   // re-cache the still-listed doc for the whole TTL. Plain refetch instead — the row

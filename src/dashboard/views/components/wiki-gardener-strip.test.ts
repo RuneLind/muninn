@@ -26,6 +26,7 @@ import {
   type IngestBacklogResponse,
   type SourceBacklogResult,
   type WeeklyGardenerRun,
+  backlogDeleteNotice,
 } from "./wiki-gardener-strip.ts";
 
 /**
@@ -1402,6 +1403,29 @@ describe("prune verbs — dismissed bucket + inspector actions (PR 2)", () => {
     // Absent by default and rendered nowhere.
     expect(initialInspectorState().notice).toBeNull();
     expect(backlogInspectorHtml(openPanel(), sources, {})).not.toContain("bk-inspector-notice");
+  });
+
+  test("a delete's `warning` becomes a warn notice that a reindex caveat cannot replace", () => {
+    const warning = "Deleted from huginn, but muninn could not finish its own bookkeeping (failed: source proposals delete).";
+    expect(backlogDeleteNotice(warning, [])).toEqual({ text: warning, kind: "warn" });
+    const both = backlogDeleteNotice(warning, ["a reindex was already running for wiki"]);
+    expect(both?.kind).toBe("warn");
+    expect(both?.text.startsWith(warning)).toBe(true);
+    expect(both?.text).toContain("a reindex was already running for wiki");
+    // Without a warning: the caveat note as before, and nothing on a clean delete.
+    expect(backlogDeleteNotice(undefined, ["x"])).toEqual({
+      text: "deleted — but x, so the doc may still be listed until the next index run",
+      kind: "info",
+    });
+    expect(backlogDeleteNotice(undefined, [])).toBeNull();
+    expect(backlogDeleteNotice("", [])).toBeNull();
+    // Rendered in the warning palette, not the error or info one.
+    const html = backlogInspectorHtml(openPanel({ notice: { text: warning, kind: "warn" } }), sources, {
+      pruneEnabled: true,
+    });
+    expect(html).toContain("bk-inspector-notice bk-warn");
+    expect(html).not.toContain("bk-inspector-notice bk-info");
+    expect(html).toContain("source proposals delete");
   });
 
   /**

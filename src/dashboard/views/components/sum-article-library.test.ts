@@ -700,3 +700,114 @@ describe("the re-run client's unpinned halves", () => {
     expect(h.wrap.hidden).toBe(true);
   });
 });
+
+/**
+ * The 🗑 Delete notice when huginn deleted the doc but muninn's bookkeeping did
+ * not finish (the route's 200 + `warning`). The real `deleteSummaryDoc` runs
+ * against a stubbed fetch; only the page surfaces it touches after the POST are
+ * stubbed.
+ */
+describe("deleteSummaryDoc — a 200 carrying `warning`", () => {
+  interface Notice {
+    textContent: string;
+    children: Array<{ tag: string; textContent: string; attrs: Record<string, string> }>;
+    classes: Set<string>;
+  }
+
+  function loadDelete(): { run: () => Promise<void>; notice: Notice } {
+    const classes = new Set<string>();
+    let text = "";
+    const notice = {
+      classes,
+      children: [] as Notice["children"],
+      get textContent() {
+        return text + this.children.map((c) => c.textContent).join("");
+      },
+      // Assigning textContent drops the children, as the DOM does.
+      set textContent(v: string) {
+        text = v;
+        this.children = [];
+      },
+      classList: {
+        add: (c: string) => void classes.add(c),
+        remove: (c: string) => void classes.delete(c),
+        toggle: (c: string, on: boolean) => void (on ? classes.add(c) : classes.delete(c)),
+        contains: (c: string) => classes.has(c),
+      },
+      appendChild(child: Notice["children"][number]) {
+        this.children.push(child);
+        return child;
+      },
+      scrollIntoView() {},
+    };
+    const ctx = {
+      document: {
+        addEventListener() {},
+        getElementById: (id: string) => (id === "deleteNotice" ? notice : null),
+        querySelectorAll: () => [],
+        createElement: (tag: string) => ({
+          tag,
+          textContent: "",
+          attrs: {} as Record<string, string>,
+          setAttribute(name: string, value: string) {
+            this.attrs[name] = value;
+          },
+        }),
+      },
+    };
+    const run = new Function(
+      "ctx",
+      `var document = ctx.document;
+       var DELETE_TARGET = { wiki: 'jarvis' };
+       var renderMarkdown = function(t) { return t; };
+       ${sumArticleLibraryScript()}
+       closeDocPanel = function() {};
+       getSummaryDocuments = function() { return Promise.resolve([]); };
+       var loadShelf = async function() {};
+       loadLibrary = async function() {};
+       return function() { return deleteSummaryDoc('youtube-summaries', 'a.md', 'youtube', 'A talk', function() {}); };`,
+    )(ctx) as () => Promise<void>;
+    return { run, notice: notice as unknown as Notice };
+  }
+
+  async function withResponse(body: unknown, fn: () => Promise<void>): Promise<void> {
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => Response.json(body);
+    try {
+      await fn();
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+  }
+
+  const WARNING = "Deleted from huginn, but muninn could not finish its own bookkeeping (failed: source proposals delete).";
+
+  test("the warning shows beside the success text, in the warning tone, with a link to the review gate", async () => {
+    const h = loadDelete();
+    await withResponse(
+      { ok: true, polling: [], skipped: ["wiki"], proposals: { deleted: [], kept: [] }, warning: WARNING },
+      h.run,
+    );
+    // Still warn after the reindex caveat re-renders the notice.
+    expect(h.notice.classes.has("warn")).toBe(true);
+    expect(h.notice.classes.has("err")).toBe(false);
+    expect(h.notice.classes.has("visible")).toBe(true);
+    expect(h.notice.textContent).toContain('Deleted "A talk"');
+    expect(h.notice.textContent).toContain(WARNING);
+    expect(h.notice.textContent).toContain("a reindex was already running for wiki");
+    expect(h.notice.children).toHaveLength(1);
+    expect(h.notice.children[0]?.tag).toBe("a");
+    expect(h.notice.children[0]?.attrs.href).toBe("/wiki/gardener?wiki=jarvis");
+  });
+
+  test("a clean delete stays in the ok tone with no link", async () => {
+    const h = loadDelete();
+    await withResponse({ ok: true, polling: [], skipped: [], proposals: { deleted: [], kept: [] } }, h.run);
+    expect(h.notice.classes.has("warn")).toBe(false);
+    expect(h.notice.classes.has("visible")).toBe(true);
+    expect(h.notice.textContent).toBe(
+      'Deleted "A talk" — but huginn started no reindex, so it may reappear in the list until the next index run.',
+    );
+    expect(h.notice.children).toHaveLength(0);
+  });
+});

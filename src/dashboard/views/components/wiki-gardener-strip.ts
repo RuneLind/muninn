@@ -254,8 +254,26 @@ export interface BacklogDocDraft {
  */
 export interface BacklogInspectorNotice {
   text: string;
-  /** `err` renders in the error palette; `info` is an honest-but-not-failed note. */
-  kind: "err" | "info";
+  /**
+   * `err` renders in the error palette; `info` is an honest-but-not-failed note;
+   * `warn` is a delete that happened but left bookkeeping behind (the route's `warning`).
+   */
+  kind: "err" | "info" | "warn";
+}
+
+/**
+ * The notice a confirmed `backlog-doc-delete` leaves. The route's `warning` (a
+ * bookkeeping step failed after huginn deleted the doc) wins the tone and leads
+ * the text, so a reindex caveat can never replace it; caveats alone are `info`.
+ */
+export function backlogDeleteNotice(warning: unknown, caveats: string[]): BacklogInspectorNotice | null {
+  const caveatText = caveats.length
+    ? `deleted — but ${caveats.join(" and ")}, so the doc may still be listed until the next index run`
+    : "";
+  if (typeof warning === "string" && warning) {
+    return { text: caveatText ? `${warning} Also: ${caveatText}.` : warning, kind: "warn" };
+  }
+  return caveatText ? { text: caveatText, kind: "info" } : null;
 }
 
 /**
@@ -1476,7 +1494,7 @@ export function backlogInspectorHtml(
   // the `loadInspectorDocs` that every prune verb triggers. Distinct from `error`
   // (the doc-fetch failure) in both field and styling.
   const noticeHtml = state.notice
-    ? `<div class="bk-inspector-notice ${state.notice.kind === "err" ? "bk-err" : "bk-info"}" ` +
+    ? `<div class="bk-inspector-notice bk-${state.notice.kind}" ` +
       `role="status">${esc(state.notice.text)}</div>`
     : "";
 
