@@ -475,8 +475,8 @@ export interface OrderResult {
   hash: string;
   written: boolean;
   deleted: boolean;
-  /** Per-entry drops the merge made durable (a retired slug, a hand-written
-   *  comment lost to serialization). Shown, never swallowed. */
+  /** Per-entry drops the merge made durable (a retired slug). Shown, never
+   *  swallowed. */
   warnings: string[];
   /** Column keys in the 200 this board does not rank. Skipped rather than
    *  refused — see {@link parseOrderResult} — and reported so a server that
