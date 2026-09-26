@@ -17,6 +17,7 @@ import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
+import { requireJsonRequest } from "./json-request.ts";
 
 const log = getLog("dashboard");
 
@@ -388,6 +389,10 @@ export function registerVimeoRoutes(
   // of a Vimeo capture are still absent from the pod exactly as before.
 
   app.post("/api/vimeo/summarize", async (c) => {
+    // `application/json` is REQUIRED, before the oEmbed round-trip: a
+    // `text/plain` POST is a CORS simple request (see `json-request.ts`).
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
     type Body = { url?: string; kind?: unknown; lang?: unknown; frames?: unknown };
     const body = await c.req.json<Body>().catch(() => ({} as Body));
     const url = body.url;

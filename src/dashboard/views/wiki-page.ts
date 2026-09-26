@@ -27,6 +27,7 @@ import {
   WIKI_READONLY_INPUT_PLACEHOLDER,
 } from "./components/wiki-readonly-client.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
+import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
 
 /* Inline stroke icons for the pane toggles — sized/coloured by .wiki-pane-btn. */
 const SVG_COLLAPSE = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>';
@@ -106,6 +107,14 @@ export async function renderWikiPage(opts?: {
   const gardenerLink = gardener
     ? `<a href="${gardenerHref}" class="wiki-gardener-icon" title="Wiki gardener — review drafted pages" aria-label="Wiki gardener${gardenerPending > 0 ? ` (${gardenerPending} pending)` : ""}">🌱${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`
     : "";
+  // The issue board's link. Rendered hidden for every named wiki, because the
+  // page does not read the index: `setPagesData` (wiki-browser.ts) shows it
+  // once the listing names a tracker, so a wiki with no `trackers` block never
+  // shows it.
+  const boardLink =
+    selected && !unknownWiki && !envOverride
+      ? `<a href="/wiki/issues?wiki=${escAttr(encodeURIComponent(selected))}" id="wikiBoardLink" class="wiki-gardener-icon wiki-board-icon" title="Issue board — every key and whether a plan covers it" aria-label="Issue board" hidden>▤</a>`
+      : "";
   // An unknown `?wiki=` matches no real option — render its raw name as a
   // disabled, selected placeholder so the picker and the "No wiki named X" pane
   // agree instead of the browser highlighting the first wiki. Show the picker for
@@ -283,6 +292,9 @@ export async function renderWikiPage(opts?: {
       border: 1px solid var(--border-secondary); text-decoration: none; font-size: 15px;
     }
     .wiki-gardener-icon:hover { border-color: var(--accent); }
+    .wiki-board-icon { color: var(--accent-light); }
+    .wiki-board-icon[hidden] { display: none; }
+    .wiki-board-icon:not([hidden]) + .wiki-gardener-icon { margin-left: 0; }
     .wiki-gardener-icon .wiki-gardener-badge { position: absolute; top: -5px; right: -5px; }
 
     /* Domain segmented control (All / AI / Life). */
@@ -1087,6 +1099,124 @@ export async function renderWikiPage(opts?: {
     circle.t-explainer { fill: var(--status-warning); }
     circle.t-note { fill: var(--text-dim); }
     .wiki-mini-more { font-size: 10.5px; color: var(--text-dim); text-align: center; padding: 2px 0 4px; }
+    /* Issue keys on the mini-graph ring: a diamond, and a dashed edge when the
+       key is inferred rather than stamped. */
+    .mini-issue-dot { fill: var(--accent-light); }
+    .mini-issue.inferred .mini-issue-dot { fill: none; stroke: var(--accent-light); stroke-width: 1.4; }
+    .mini-edge.mini-issue-edge { stroke: var(--accent-muted); }
+
+    /* Connections' issue section (tracker wikis only). Each status pill paints
+       its own opaque ground; every pill ink measures >= 5.3:1 on it in both
+       themes (e2e/wiki-tracker-connections.spec.ts), where --status-* and
+       --text-muted measured 3.0-4.52:1. */
+    .wiki-conn-issues .wiki-conn-title { display: flex; align-items: center; gap: 8px; }
+    .wiki-issue-row {
+      padding: 6px 8px; margin: 0 0 6px; border-radius: 6px;
+      border: 1px solid var(--border-secondary);
+    }
+    .wiki-issue-row.inferred { border-style: dashed; }
+    .wiki-issue-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+    .wiki-issue-key { color: var(--accent-light); font-weight: 600; text-decoration: none; }
+    a.wiki-issue-key:hover { text-decoration: underline; }
+    .wiki-issue-rel { font-size: 10.5px; color: var(--text-muted); }
+    ${ISSUE_STATUS_STYLES}
+    .wiki-issue-title, .wiki-issue-epic { font-size: 12px; color: var(--text-secondary); margin-top: 2px; overflow-wrap: anywhere; }
+    .wiki-issue-epic { font-size: 11px; color: var(--text-muted); }
+    .wiki-issue-meta { font-size: 11px; color: var(--text-muted); margin-top: 3px; overflow-wrap: anywhere; }
+    .wiki-issue-cover.covered { color: var(--tok-str); }
+    .wiki-issue-plan { color: var(--accent-light); text-decoration: none; }
+    .wiki-issue-plan:hover { text-decoration: underline; }
+    .wiki-issue-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; }
+    .wiki-issue-btn {
+      font-size: 11px; padding: 1px 8px; border-radius: 5px; cursor: pointer; font-family: inherit;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-secondary);
+    }
+    .wiki-issue-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+    .wiki-issue-btn:disabled { opacity: 0.6; cursor: default; }
+    .wiki-issue-msg { font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
+    .wiki-issue-msg.err { color: var(--changed-ink); }
+    .wiki-issue-msg[hidden] { display: none; }
+    .wiki-issue-also, .wiki-issue-mentions { font-size: 11px; color: var(--text-muted); padding: 2px 8px; line-height: 1.8; }
+    .wiki-issue-line-label { color: var(--text-muted); }
+    .wiki-issue-also-item { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
+    .wiki-prov-jira.inferred { border-style: dashed; }
+
+    /* Graph mode (tracker wikis only): four lanes in the article pane, the
+       article hidden under them. Node ink is --text-primary/--text-secondary
+       on --bg-surface, the pairs the reader's body text already uses. */
+    .wiki-graph-toggle {
+      font-size: 11px; padding: 1px 8px; border-radius: 5px; cursor: pointer; font-family: inherit;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-secondary);
+    }
+    .wiki-graph-toggle:hover { color: var(--text-primary); border-color: var(--accent); }
+    .wiki-graph-toggle.on { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-graph-hidden { display: none !important; }
+    .wiki-graph { margin-top: 12px; }
+    .wiki-graph-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+    .wiki-graph-title { margin-right: auto; overflow-wrap: anywhere; }
+    .wiki-graph-ctl select {
+      font: inherit; font-size: 11px; color: var(--text-secondary); background: var(--bg-surface);
+      border: 1px solid var(--border-secondary); border-radius: 5px; padding: 1px 4px;
+    }
+    .wiki-graph-banner {
+      font-size: 12px; padding: 6px 10px; border-radius: 6px; margin-bottom: 8px;
+      background: var(--tint-warning); color: var(--text-primary);
+    }
+    .wiki-graph-note { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+    .wiki-graph-body { display: flex; gap: 12px; align-items: flex-start; }
+    .wiki-graph-canvas { position: relative; flex: 1 1 auto; min-width: 0; overflow-x: auto; }
+    .wiki-graph-edges { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+    .wiki-graph-edge { fill: none; stroke: var(--border-secondary); stroke-width: 1.2; }
+    .wiki-graph-edge.kind-page-pr { stroke-dasharray: 4 3; }
+    .wiki-graph.hovering .wiki-graph-edge { opacity: .25; }
+    .wiki-graph.hovering .wiki-graph-edge.lit { opacity: 1; stroke: var(--accent); stroke-width: 1.8; }
+    .wiki-graph-lanes {
+      position: relative; display: grid; gap: 44px;
+      grid-template-columns: repeat(var(--graph-lanes, 4), minmax(120px, 1fr));
+    }
+    .wiki-graph-lane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .wiki-graph-lane-head { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
+    .wiki-graph-count { font-weight: 400; }
+    .wiki-graph-empty { font-size: 11px; color: var(--text-muted); font-style: italic; }
+    .wiki-graph-node {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 1px; text-align: left;
+      font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 6px; cursor: pointer; min-width: 0;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-primary);
+    }
+    .wiki-graph-node:hover, .wiki-graph-node:focus-visible { border-color: var(--accent); }
+    .wiki-graph-node.root { border-width: 2px; border-color: var(--accent); }
+    .wiki-graph-node.selected { box-shadow: 0 0 0 2px var(--accent-muted); }
+    .wiki-graph-node.bare, .wiki-graph-node.unconfirmed { border-style: dashed; }
+    .wiki-graph-node.lane-issue .wiki-graph-node-label { color: var(--accent-light); font-weight: 600; }
+    .wiki-graph-node-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wiki-graph-node-hint { font-size: 10.5px; color: var(--text-secondary); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wiki-graph.hovering .wiki-graph-node { opacity: .45; }
+    .wiki-graph.hovering .wiki-graph-node.lit { opacity: 1; }
+    .wiki-graph-card {
+      flex: 0 0 220px; font-size: 12px; padding: 8px 10px; border-radius: 8px;
+      border: 1px solid var(--border-secondary); background: var(--bg-panel); color: var(--text-primary);
+    }
+    .wiki-graph-card[hidden] { display: none; }
+    .wiki-graph-card:focus { outline: none; border-color: var(--accent); }
+    .wiki-graph-card-head { display: flex; justify-content: space-between; align-items: center; color: var(--text-muted); font-size: 11px; }
+    .wiki-graph-card-close { border: none; background: none; color: var(--text-muted); cursor: pointer; font: inherit; }
+    .wiki-graph-card-title { font-weight: 600; margin: 4px 0; overflow-wrap: anywhere; }
+    .wiki-graph-card-facts { margin: 0 0 6px; padding-left: 16px; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-graph-card-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .wiki-graph-card-btn {
+      font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 5px; cursor: pointer; text-decoration: none;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-secondary);
+    }
+    .wiki-graph-card-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+    /* Narrow: the article column can be a sliver (the rail keeps its width),
+       so the card leaves the column and sits over the bottom of the viewport. */
+    @media (max-width: 720px) {
+      .wiki-graph-body { flex-direction: column; }
+      .wiki-graph-card {
+        position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 40;
+        max-height: 50vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+      }
+    }
 
     /* ── Middle: article pane ──────────────────────────── */
     /* Breadcrumb bar above the article (wiki / folder / page · updated), also the
@@ -2353,8 +2483,8 @@ export async function renderWikiPage(opts?: {
     <div class="wiki-pane">
       <div class="wiki-browse-head">
         ${
-          wikiSelector || gardenerLink
-            ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${gardenerLink}</div>`
+          wikiSelector || gardenerLink || boardLink
+            ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${boardLink}${gardenerLink}</div>`
             : ""
         }
         <div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>

@@ -310,6 +310,17 @@ function setOutcome(card: HTMLElement, text: string, kind: "ok" | "err" | ""): v
   }
 }
 
+/**
+ * Init for the bodyless write POSTs (approve/reject, the group verbs, lint
+ * proposals, dismiss reset): the server answers 415 to anything that is not
+ * application/json, which keeps them out of reach of a cross-origin form POST.
+ */
+const JSON_POST: RequestInit = {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: "{}",
+};
+
 async function act(id: string, action: "approve" | "reject", card: HTMLElement): Promise<void> {
   const buttons = card.querySelectorAll(".gard-btn");
   buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
@@ -317,7 +328,7 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
   try {
     const res = await fetch(
       withBot("/api/wiki/proposals/" + encodeURIComponent(id) + "/" + action),
-      { method: "POST" },
+      JSON_POST,
     );
     const data = await res.json();
     if (!res.ok) {
@@ -360,7 +371,7 @@ async function actOnGroup(
   try {
     const res = await fetch(
       withBot("/api/wiki/proposals/group/" + encodeURIComponent(groupKey) + "/" + action),
-      { method: "POST" },
+      JSON_POST,
     );
     const data = await res.json();
     if (!res.ok) {
@@ -526,7 +537,7 @@ document.getElementById("lintPropose")?.addEventListener("click", () => {
   const note = document.getElementById("lintProposeNote");
   if (btn) btn.disabled = true;
   if (note) note.textContent = "Proposing…";
-  fetch(withBot("/api/wiki/lint-proposals"), { method: "POST" })
+  fetch(withBot("/api/wiki/lint-proposals"), JSON_POST)
     .then(async (r) => ({ ok: r.ok, data: await r.json() }))
     .then(({ ok, data }) => {
       if (!ok) {
@@ -1083,9 +1094,7 @@ async function postDismissKeys(path: string, keys: string[]): Promise<void> {
 async function resetDismissed(): Promise<void> {
   clearInspectorNotice();
   try {
-    const res = await fetch(withBot("/api/wiki/gardener/backlog-docs-dismiss-reset"), {
-      method: "POST",
-    });
+    const res = await fetch(withBot("/api/wiki/gardener/backlog-docs-dismiss-reset"), JSON_POST);
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       setInspectorNotice(body.error || `reset failed (${res.status})`, "err");

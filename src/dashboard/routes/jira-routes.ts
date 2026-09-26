@@ -88,6 +88,7 @@ import { getLog } from "../../logging.ts";
 import { requireOwnedResource, decideResourceAccess, ownerScope } from "../../auth/resource-guard.ts";
 import { sessionIdentity, sessionRole } from "../../auth/guard.ts";
 import { pinnedLocalUserId } from "../../auth/policy.ts";
+import { isJsonRequest } from "./json-request.ts";
 
 const log = getLog("dashboard", "jira-routes");
 
@@ -152,19 +153,6 @@ function unknownDraft(c: Context): Response {
 /** The same rule for a thread id: shape-checked before postgres sees it. */
 function unknownThread(c: Context): Response {
   return c.json({ error: "ukjent samtale" }, 404);
-}
-
-/**
- * Is this a JSON POST?
- *
- * Both POSTs enforce it, because both WRITE — one into a conversation, one onto
- * a row — and a `text/plain` POST is a CORS *simple* request that executes
- * whatever the response headers say. A `charset` parameter is fine; anything else
- * is not parsed at all.
- */
-function isJsonRequest(c: Context): boolean {
-  const ct = c.req.header("content-type") ?? "";
-  return /^application\/json\s*(;|$)/i.test(ct.trim());
 }
 
 /**

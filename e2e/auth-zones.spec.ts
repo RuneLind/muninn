@@ -205,7 +205,7 @@ test.describe("role `admin` — MUNINN_LOCAL_ROLE, and the channel it applies to
       body: JSON.stringify(STAMP_BODY),
     });
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "relPath and ref are required" });
+    expect(await res.json()).toEqual({ error: "relPath and ref (or tracker and key) are required" });
   });
 
   test("GET / is the dashboard, not a redirect", async () => {

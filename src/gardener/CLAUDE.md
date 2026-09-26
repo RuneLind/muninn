@@ -2,6 +2,8 @@
 
 Three drafting pipelines feed the human review gate at `/wiki/gardener` (approve/reject, CAS). Watcher-side scheduling detail: `src/watchers/CLAUDE.md`.
 
+The gate's write verbs — `proposals/:id/{approve,reject}`, `proposals/group/:groupKey/{approve,reject}`, `lint-proposals` and the four backlog prune verbs — answer **415** to anything that is not `application/json` (`dashboard/routes/json-request.ts`), so a bodyless client sends `{}`. A `text/plain` or bodyless POST is a CORS *simple* request, and with `MUNINN_AUTH=off` no origin check stands in front of these routes.
+
 ## Wiki gardener (weekly)
 
 The `wiki-gardener` watcher clusters recent summaries (Haiku + interest profile) and drafts wiki-page proposals into `wiki_proposals`. Approve writes the page into the bot's `wikiDir`, inserts a `log.md` entry, **wires it in** (`wire.ts`: index.md catalog line for concepts + `## See also` backlinks on up to 3 persisted `related_pages`; entities skip the index — surfaced in the gate's wiring preview), and fires the huginn reindex union of touched collections.
