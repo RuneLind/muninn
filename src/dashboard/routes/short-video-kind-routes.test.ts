@@ -64,19 +64,25 @@ mock.module("../../tiktok/summarizer.ts", () => ({
 
 let xVideoCalls = 0;
 let lastXVideoOpts: { frames?: boolean; preset?: { id: string } } | undefined;
+let lastXVideoUrl: string | undefined;
+let lastXVideoTitle: string | undefined;
+let lastXVideoJobId: string | undefined;
 const realXVideo = await import("../../x-article/video.ts");
 mock.module("../../x-article/video.ts", () => ({
   ...realXVideo,
   summarizeXVideo: async (
-    _jobId: string,
-    _url: string,
-    _title: string,
+    jobId: string,
+    url: string,
+    title: string,
     _c: unknown,
     _b: unknown,
     opts?: { frames?: boolean; preset?: { id: string } },
   ) => {
     xVideoCalls++;
     lastXVideoOpts = opts;
+    lastXVideoUrl = url;
+    lastXVideoTitle = title;
+    lastXVideoJobId = jobId;
   },
 }));
 
@@ -151,6 +157,9 @@ beforeEach(() => {
   lastTikTokUrl = undefined;
   lastTikTokJobId = undefined;
   lastXVideoOpts = undefined;
+  lastXVideoUrl = undefined;
+  lastXVideoTitle = undefined;
+  lastXVideoJobId = undefined;
 });
 
 async function post(a: Hono, path: string, body: unknown): Promise<Response> {
@@ -335,8 +344,7 @@ for (const p of POSTS) {
 /**
  * The TikTok POST's host gate (architecture review 2026-09, finding 12): the
  * url reaches yt-dlp, so anything but an https TikTok link is refused before a
- * listing read, a job row or the summarizer. The X-video route has its own gate
- * (`extractXStatusId`) and is not asserted here.
+ * listing read, a job row or the summarizer. The X-video twin is the next describe.
  */
 describe("tiktok: the POST's url host gate", () => {
   const REFUSED = [
@@ -434,5 +442,92 @@ describe("tiktok: the short-link redirect target is re-gated", () => {
     expect(res.status).toBe(200);
     expect(knowledgeApiCalls.length).toBe(1);
     expect(ttState.getJob(lastTikTokJobId!)!.videoId).toBe("7523456789");
+  });
+});
+
+/**
+ * The X-video POST's host gate — the TikTok gate's twin, for the same parser
+ * differential: the old gate (`extractXStatusId`) judged the WHATWG parse and
+ * passed the RAW string to yt-dlp, so `https://x.com\@127.0.0.1:PORT/status/1`
+ * made yt-dlp connect to loopback (measured 2026-09-26).
+ */
+describe("x-video: the POST's url host gate", () => {
+  const S = "2081279674966044799";
+  const REFUSED: unknown[] = [
+    `https://x.com\\@127.0.0.1:39872/status/1`,
+    `https://twitter.com\\@127.0.0.1:39872/a/status/${S}`,
+    `https://x.com@127.0.0.1/status/1`,
+    `https://127.0.0.1/x.com/status/1`,
+    `https://x.com:8443/a/status/${S}`,
+    `https://x.com:443/a/status/${S}`,
+    `https://:@x.com/a/status/${S}`,
+    `https://%78.com/a/status/${S}`,
+    `https://\uff58.com/a/status/${S}`,
+    `http://x.com/a/status/${S}`,
+    ` https://x.com/a/status/${S}`,
+    `https://x.com/a/status/${S} `,
+    `https://x.com/a/status/${S}\n`,
+    `https://x.c\tom/a/status/${S}`,
+    `https://x.com/a/sta\ntus/${S}`,
+    `https:x.com/a/status/${S}`,
+    `https:\\\\x.com/a/status/${S}`,
+    `https://mobile.x.com/a/status/${S}`,
+    `https://x.com.evil.example/a/status/${S}`,
+    `https://evil.com/?u=https://x.com/a/status/${S}`,
+    `https://evil.com/#https://x.com/a/status/${S}`,
+    `https://x.com/a?next=/status/${S}`,
+    `https://x.com/a#/status/${S}`,
+    `https://x.com/a/status/`,
+    `https://x.com/a/status/12ab`,
+    `file:///etc/passwd`,
+    `not a url`,
+    42,
+    { href: `https://x.com/a/status/${S}` },
+  ];
+  for (const url of REFUSED) {
+    test(`refuses ${JSON.stringify(url)} with 400 bad_url, before the listing read and createJob`, async () => {
+      const jobsBefore = xaState.getRecentJobs(50).length;
+      const res = await post(app(), "/api/x-articles/summarize-video", { url });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_url");
+      expect(xVideoCalls).toBe(0);
+      expect(knowledgeApiCalls).toEqual([]);
+      expect(xaState.getRecentJobs(50).length).toBe(jobsBefore);
+    });
+  }
+
+  // What the X extension sends (content.js: `${origin}/${user}/status/${id}`,
+  // on x.com or twitter.com) plus what a reader pastes from the tab: the
+  // `/video/1` media slot, a `?s=20` share query, a fragment, `www.`, and an
+  // upper-case scheme and host, which are normalised rather than refused.
+  const ACCEPTED: Array<[string, string]> = [
+    [`https://x.com/coolcoder/status/${S}`, `https://x.com/coolcoder/status/${S}`],
+    [`https://twitter.com/coolcoder/status/${S}`, `https://twitter.com/coolcoder/status/${S}`],
+    [`https://www.x.com/coolcoder/status/${S}`, `https://www.x.com/coolcoder/status/${S}`],
+    [`https://www.twitter.com/coolcoder/status/${S}`, `https://www.twitter.com/coolcoder/status/${S}`],
+    [`https://x.com/coolcoder/status/${S}/video/1`, `https://x.com/coolcoder/status/${S}/video/1`],
+    [`https://x.com/coolcoder/status/${S}?s=20`, `https://x.com/coolcoder/status/${S}?s=20`],
+    [`https://x.com/coolcoder/status/${S}#m`, `https://x.com/coolcoder/status/${S}#m`],
+    [`https://x.com/i/web/status/${S}`, `https://x.com/i/web/status/${S}`],
+    [`HTTPS://X.COM/coolcoder/status/${S}`, `https://x.com/coolcoder/status/${S}`],
+  ];
+  for (const [raw, href] of ACCEPTED) {
+    test(`accepts ${raw} and hands ${href} to every consumer`, async () => {
+      const res = await post(app(), "/api/x-articles/summarize-video", { url: raw });
+      expect(res.status).toBe(200);
+      expect(xVideoCalls).toBe(1);
+      expect(knowledgeApiCalls.length).toBe(1);
+      expect(lastXVideoUrl).toBe(href);
+      expect(lastXVideoTitle).toBe(href);
+      const job = xaState.getJob(lastXVideoJobId!)!;
+      expect(job.url).toBe(href);
+      expect(job.title).toBe(href);
+    });
+  }
+
+  test("reads the status id off the pathname", async () => {
+    const { parseAllowedXStatusUrl } = await import("./x-article-routes.ts");
+    expect(parseAllowedXStatusUrl(`https://x.com/a/status/${S}/video/1?s=20`)?.statusId).toBe(S);
+    expect(parseAllowedXStatusUrl(`https://x.com/a?next=/status/${S}`)).toBeNull();
   });
 });

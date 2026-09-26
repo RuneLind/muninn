@@ -31,6 +31,40 @@ const XV_FRAME_NOUN = "video frames";
 
 interface XaDocumentMeta { id: string; url?: string }
 
+/** The hosts POST /api/x-articles/summarize-video may hand to yt-dlp — the set
+ *  `extractXStatusId` already accepted, and what the X extension sends. */
+const X_HOSTS = new Set(["x.com", "www.x.com", "twitter.com", "www.twitter.com"]);
+
+/**
+ * Parse a caller-supplied X video URL ONCE — the `parseAllowedTikTokUrl` rule
+ * (tiktok-routes.ts), for the same parser differential: `https://x.com\@127.0.0.1/status/1`
+ * is x.com to WHATWG and loopback to yt-dlp (measured 2026-09-26). Returns the
+ * parsed URL plus the status id read off its PATHNAME, or null. Callers hand
+ * `url.href` downstream, never the raw string.
+ */
+export function parseAllowedXStatusUrl(raw: string): { url: URL; statusId: string } | null {
+  if (raw !== raw.trim() || /[\\\x00-\x20\x7f]|\s/.test(raw)) return null;
+  if (raw.slice(0, 8).toLowerCase() !== "https://") return null;
+  const authority = raw.slice(8).split(/[/?#]/, 1)[0]!;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  const ok =
+    u.protocol === "https:" &&
+    X_HOSTS.has(u.hostname) &&
+    u.port === "" &&
+    u.username === "" &&
+    u.password === "" &&
+    // The authority as typed IS the host: no `%`, `@`, `:` or fullwidth form.
+    authority.toLowerCase() === u.hostname;
+  if (!ok) return null;
+  const match = u.pathname.match(/\/status\/(\d+)(?:\/|$)/);
+  return match ? { url: u, statusId: match[1]! } : null;
+}
+
 /**
  * Video dedup keys on the numeric status id, not URL string equality — the
  * submitted URL may carry a `/video/1` media-slot suffix or query params while
@@ -186,19 +220,25 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
       frames?: boolean;
       kind?: unknown;
     }>();
-    const { title, url, frames } = body;
+    const { title, url: rawUrl, frames } = body;
 
-    if (!url) {
+    if (!rawUrl) {
       return c.json({ error: "Missing required field: url" }, 400);
     }
 
-    const statusId = extractXStatusId(url);
-    if (!statusId) {
+    const accepted = typeof rawUrl === "string" ? parseAllowedXStatusUrl(rawUrl) : null;
+    if (!accepted) {
       return c.json(
-        { error: "Not an X status URL — expected https://x.com/<user>/status/<id>[/video/N]" },
+        {
+          error: "Not an X status URL — expected https://x.com/<user>/status/<id>[/video/N]",
+          code: "bad_url",
+        },
         400,
       );
     }
+    // Everything below — dedup, the job row, yt-dlp — gets the parsed href.
+    const url = accepted.url.href;
+    const statusId = accepted.statusId;
 
     // Preflight: yt-dlp is a hard runtime dependency for the video path.
     if (!Bun.which("yt-dlp")) {
