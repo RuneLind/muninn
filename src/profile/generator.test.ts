@@ -119,6 +119,18 @@ describe("refreshInterestProfile", () => {
     expect(spanStatuses.filter((u) => u.status !== undefined).map((u) => u.status)).toEqual(["error", "error"]);
   });
 
+  test("a throw AFTER the haiku span ended still resolves and finishes the root as error", async () => {
+    // Timing.end throws "No active mark" on an already-ended label; the catch
+    // must not re-end the span, or that throw masks the real error and skips finish.
+    goals = [{ title: "x", description: null, tags: [] }];
+    spanStatuses.length = 0;
+    mockUpsert.mockRejectedValueOnce(new Error("upsert exploded"));
+    await expect(refreshInterestProfile("user-1", "jarvis")).resolves.toBeUndefined();
+    await new Promise((r) => setTimeout(r, 10));
+    // The haiku span ended ok before the upsert; the root finished error.
+    expect(spanStatuses.filter((u) => u.status !== undefined).map((u) => u.status)).toEqual(["ok", "error"]);
+  });
+
   test("rejects (no upsert) model output with no bullet lines — refusals/prose", async () => {
     goals = [{ title: "x", description: null, tags: [] }];
     haikuResult = "I'm sorry, but I can't create a profile from this information.";

@@ -102,6 +102,7 @@ export async function refreshInterestProfile(
   let usage: { inputTokens?: number; outputTokens?: number; numTurns?: number } = {};
   let model: string | undefined;
   let status: "ok" | "error" = "ok";
+  let haikuSpanOpen = false;
 
   try {
     const [goals, memories] = await Promise.all([
@@ -125,6 +126,7 @@ export async function refreshInterestProfile(
       name: `Interest profile: ${botName}`,
     });
     tracer.start("haiku", { goals: goals.length, memories: memories.length });
+    haikuSpanOpen = true;
 
     const prompt = buildPrompt(goals, memories);
     const haiku = await callHaikuWithFallback(prompt, {
@@ -154,6 +156,7 @@ export async function refreshInterestProfile(
     // co-resident bot-connector span to disagree with). Value is a HaikuBackend
     // (cli/anthropic/copilot), mapped through `backendConnector` into the connector
     // vocabulary (cli→"claude-cli") — connectorLabel() maps it to a friendly label.
+    haikuSpanOpen = false;
     tracer.end("haiku", { ...usage, model, ...(haiku.backend ? { connector: backendConnector(haiku.backend) } : {}) });
     if (model) agentStatus.setModel(reqId, model);
 
@@ -190,7 +193,9 @@ export async function refreshInterestProfile(
     // End the span too, not just the root: a Haiku call that throws (timeout,
     // backend down) still ran for a while, and an unended span carries no
     // duration at all in the waterfall.
-    tracer?.end("haiku", { error: message }, "error");
+    // Only while it is still open: a throw after it ended (the upsert) would
+    // make Timing.end throw here, masking `err` and skipping finish.
+    if (haikuSpanOpen) tracer?.end("haiku", { error: message }, "error");
     tracer?.finish("error", { error: message });
     log.error("Interest-profile refresh failed: {error}", {
       botName,
