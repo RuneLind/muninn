@@ -22,6 +22,8 @@ const PAGE = `---\ntitle: DEMO-101 side\nsessions: [claude-code:${S1}]\n---\n\nB
 
 const roots: string[] = [];
 const calls: string[] = [];
+/** The signal each ledger call was handed, in order. */
+const signals: (AbortSignal | undefined)[] = [];
 let app: Hono;
 
 async function wiki(config: object | null): Promise<string> {
@@ -36,12 +38,14 @@ const ctx: ProvenanceContext = {
   sessionLedger: {
     baseUrl: "http://ledger.test",
     urlConfigured: true,
-    fetchSessions: async (ids) => {
+    fetchSessions: async (ids, signal) => {
       calls.push(`sessions:${ids.join(",")}`);
+      signals.push(signal);
       return { sessions: ids.map((sessionId) => ({ sessionId, title: "Økt" })) };
     },
-    fetchMerges: async (ids) => {
+    fetchMerges: async (ids, signal) => {
       calls.push(`merges:${ids.join(",")}`);
+      signals.push(signal);
       return { merges: [{ sessionId: S1, repo: "/src/demo", prNumber: 7, url: "https://github.com/example-org/demo/pull/7" }] };
     },
     fetchHandoff: async () => ({ available: false }),
@@ -104,5 +108,33 @@ describe("GET /api/wiki/graph", () => {
   test("is a side-effecting GET: a cross-site request is refused before it fans out", () => {
     expect(isSideEffectingRequest("GET", "/api/wiki/graph")).toBe(true);
     expect(isSideEffectingRequest("HEAD", "/api/wiki/graph")).toBe(true);
+  });
+
+  test("S8: a 404 echoes the root through the house bound, never the caller's whole input", async () => {
+    const long = "x".repeat(5000);
+    for (const q of [`scope=page&root=${long}.md`, `scope=series&root=${long}`]) {
+      const { status, body } = await get(`wiki=trk&${q}`);
+      expect(status).toBe(404);
+      expect(String(body.error).length).toBeLessThan(200);
+      expect(String(body.error)).toContain("xxxx");
+    }
+  });
+
+  test("S9: an issue root that is not tracker:KEY shaped is a 400 naming root", async () => {
+    for (const root of ["DEMO-101", "JIRA%3ADEMO-101", "jira%3ADEMO-101%3Ax"]) {
+      const { status, body } = await get(`wiki=trk&scope=issue&root=${root}`);
+      expect(status, root).toBe(400);
+      expect(String(body.error)).toContain("root");
+    }
+    expect((await get("wiki=trk&scope=issue&root=jira%3ADEMO-999")).status).toBe(404);
+  });
+
+  test("S10: a client that goes away aborts the ledger fan-out", async () => {
+    signals.length = 0;
+    const gone = new AbortController();
+    gone.abort();
+    await app.request(new Request("http://x/api/wiki/graph?wiki=trk&scope=page&root=side.md&level=3", { signal: gone.signal }));
+    expect(signals.length).toBeGreaterThan(0);
+    for (const s of signals) expect(s?.aborted).toBe(true);
   });
 });

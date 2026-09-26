@@ -1182,7 +1182,7 @@ export async function renderWikiPage(opts?: {
     .wiki-graph-node:hover, .wiki-graph-node:focus-visible { border-color: var(--accent); }
     .wiki-graph-node.root { border-width: 2px; border-color: var(--accent); }
     .wiki-graph-node.selected { box-shadow: 0 0 0 2px var(--accent-muted); }
-    .wiki-graph-node.bare { border-style: dashed; }
+    .wiki-graph-node.bare, .wiki-graph-node.unconfirmed { border-style: dashed; }
     .wiki-graph-node.lane-issue .wiki-graph-node-label { color: var(--accent-light); font-weight: 600; }
     .wiki-graph-node-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-graph-node-hint { font-size: 10.5px; color: var(--text-secondary); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1193,6 +1193,7 @@ export async function renderWikiPage(opts?: {
       border: 1px solid var(--border-secondary); background: var(--bg-panel); color: var(--text-primary);
     }
     .wiki-graph-card[hidden] { display: none; }
+    .wiki-graph-card:focus { outline: none; border-color: var(--accent); }
     .wiki-graph-card-head { display: flex; justify-content: space-between; align-items: center; color: var(--text-muted); font-size: 11px; }
     .wiki-graph-card-close { border: none; background: none; color: var(--text-muted); cursor: pointer; font: inherit; }
     .wiki-graph-card-title { font-weight: 600; margin: 4px 0; overflow-wrap: anywhere; }
@@ -1203,9 +1204,14 @@ export async function renderWikiPage(opts?: {
       border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-secondary);
     }
     .wiki-graph-card-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+    /* Narrow: the article column can be a sliver (the rail keeps its width),
+       so the card leaves the column and sits over the bottom of the viewport. */
     @media (max-width: 720px) {
       .wiki-graph-body { flex-direction: column; }
-      .wiki-graph-card { flex-basis: auto; width: 100%; }
+      .wiki-graph-card {
+        position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 40;
+        max-height: 50vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+      }
     }
 
     /* ── Middle: article pane ──────────────────────────── */

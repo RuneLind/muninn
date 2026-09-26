@@ -14,7 +14,7 @@ export const GRAPH_LANES: readonly GraphLane[] = ["issue", "page", "session", "p
 
 export type GraphScope = "page" | "issue" | "series" | "wiki";
 
-export const GRAPH_SCOPES: readonly GraphScope[] = ["page", "issue", "series", "wiki"];
+const GRAPH_SCOPES: readonly GraphScope[] = ["page", "issue", "series", "wiki"];
 
 /** 1: issues and pages. 2: adds sessions. 3: adds PRs. */
 export type GraphLevel = 1 | 2 | 3;
@@ -28,14 +28,20 @@ export function lanesForLevel(level: GraphLevel): GraphLane[] {
  *  most of a tracker wiki, which is what `scope=wiki` is for. */
 export const GRAPH_DEPTH_MAX = 4;
 
-/** At most this many session refs per answer; past it the answer says
- *  `truncated`. Each 200 is one `/api/sessions-by-id` and one `/api/merges`
- *  call, so this bounds the ledger fan-out one GET buys. */
+/** At most this many session nodes per answer; past it the answer says
+ *  `truncated`. The facts read is one call per 200 drawn sessions (two at the
+ *  cap); merges are asked once per expanded hop that holds sessions, each call
+ *  batched by 200 the same way. So this bounds the ledger fan-out one GET buys. */
 export const GRAPH_SESSIONS_MAX = 400;
 
 /** At most this many nodes per answer, whatever the lane. A page-scoped graph
  *  stays far below it; the cap is for `series` and `wiki` scope. */
 export const GRAPH_NODES_MAX = 1500;
+
+/** At most this many edges per answer, beside the node cap: nodes alone do not
+ *  bound the payload, since 1,400 pages that all share one tag set drew 140,000
+ *  edges (14.5 MB). Past it the answer says `truncatedBy: ["edges"]`. */
+export const GRAPH_EDGES_MAX = 6000;
 
 /** The defaults a scope takes when the query leaves `depth` or `level` out.
  *  `series` and `wiki` default to level 1, which makes no ledger call; a
@@ -50,7 +56,7 @@ export function graphDefaults(scope: GraphScope, level?: GraphLevel): { depth: n
 
 export interface GraphQuery {
   scope: GraphScope;
-  /** A relPath (`page`), `tracker:KEY` (`issue`), a series key (`series`);
+  /** A relPath (`page`), `tracker:KEY` (`issue`, {@link parseIssueRoot}), a series key (`series`);
    *  `""` for `wiki`. */
   root: string;
   depth: number;
@@ -71,6 +77,9 @@ export function parseGraphQuery(q: {
   const scope = scopeRaw as GraphScope;
   const root = (q.root ?? "").trim();
   if (scope !== "wiki" && !root) return { ok: false, error: `root is required for scope=${scope}` };
+  if (scope === "issue" && !parseIssueRoot(root)) {
+    return { ok: false, error: "root must be tracker:KEY for scope=issue (a lowercase tracker id, e.g. jira:DEMO-101)" };
+  }
   let level: GraphLevel | undefined;
   const levelRaw = (q.level ?? "").trim();
   if (levelRaw) {
@@ -154,6 +163,9 @@ export interface GraphPrNode extends GraphNodeBase {
   /** The merge row's subject, when the ledger reported one. */
   subject?: string;
   mergedAt?: string;
+  /** Every merge row for it says the merge command did not confirm the merge
+   *  (`mergeOk: false`) — qualified, never dropped, as provenance does. */
+  mergeUnconfirmed?: true;
 }
 
 export type GraphNode = GraphIssueNode | GraphPageNode | GraphSessionNode | GraphPrNode;
@@ -179,7 +191,15 @@ export interface GraphLedgerState {
   reachable: boolean;
   /** The shared deadline fired first. */
   timedOut: boolean;
+  /** Some merges batch failed while another answered: session–PR edges may be
+   *  missing. */
+  mergesPartial: boolean;
+  /** claude-usage cut a merges batch at its own cap: session–PR edges may be
+   *  missing. */
+  mergesTruncated: boolean;
 }
+
+export type GraphCap = "sessions" | "nodes" | "edges";
 
 export interface GraphPayload {
   scope: GraphScope;
@@ -189,16 +209,20 @@ export interface GraphPayload {
   lanes: GraphLane[];
   nodes: GraphNode[];
   edges: GraphEdge[];
-  /** The answer is a prefix: past `GRAPH_SESSIONS_MAX` session refs or
-   *  `GRAPH_NODES_MAX` nodes. `truncatedBy` says which. */
+  /** The answer is a prefix: past `GRAPH_SESSIONS_MAX` session refs,
+   *  `GRAPH_NODES_MAX` nodes or `GRAPH_EDGES_MAX` edges. `truncatedBy` says which. */
   truncated?: true;
-  truncatedBy?: ("sessions" | "nodes")[];
+  truncatedBy?: GraphCap[];
   ledger: GraphLedgerState;
 }
 
+/** `tracker:KEY`: a lowercase tracker id, one colon, a key with no colon or
+ *  whitespace. The one shape an issue root is read as — the route's `root=`,
+ *  the reader's `issue=` and its own splits all go through {@link parseIssueRoot}. */
+const ISSUE_ROOT_SHAPE = /^([a-z][a-z0-9-]*):([A-Za-z0-9][A-Za-z0-9_-]*)$/;
+
 /** `tracker:KEY` → its parts, or null when it is not that shape. */
 export function parseIssueRoot(raw: string): { tracker: string; key: string } | null {
-  const at = raw.indexOf(":");
-  if (at <= 0 || at === raw.length - 1) return null;
-  return { tracker: raw.slice(0, at).trim(), key: raw.slice(at + 1).trim() };
+  const m = ISSUE_ROOT_SHAPE.exec(raw.trim());
+  return m ? { tracker: m[1]!, key: m[2]! } : null;
 }

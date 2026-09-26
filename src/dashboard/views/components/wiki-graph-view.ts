@@ -5,12 +5,14 @@
  * time and `bun test` cannot load it. The one DOM function here,
  * {@link drawGraphEdges}, runs only when the reader calls it.
  *
- * The data is `GET /api/wiki/graph` (`src/wiki/trackers/graph-types.ts`).
+ * The data is `GET /api/wiki/graph` (`src/wiki/graph-types.ts`).
  */
 
 import { escHtml as esc } from "./escape.ts";
+import { readerKeyRefused, type ReaderKeyEvent } from "./wiki-panes.ts";
 import {
   GRAPH_DEPTH_MAX,
+  GRAPH_EDGES_MAX,
   GRAPH_NODES_MAX,
   GRAPH_SESSIONS_MAX,
   type GraphEdge,
@@ -18,7 +20,7 @@ import {
   type GraphLevel,
   type GraphNode,
   type GraphPayload,
-} from "../../../wiki/trackers/graph-types.ts";
+} from "../../../wiki/graph-types.ts";
 
 export const GRAPH_SECTION_ID = "wikiGraph";
 export const GRAPH_TOGGLE_ID = "wikiGraphToggle";
@@ -42,31 +44,21 @@ const LEVEL_TITLES: Record<GraphLevel, string> = {
 
 // ── The `g` key ──────────────────────────────────────────────────────────────
 
-export interface GraphKeyEvent {
-  key: string;
-  ctrlKey?: boolean;
-  metaKey?: boolean;
-  altKey?: boolean;
+export interface GraphKeyEvent extends ReaderKeyEvent {
   shiftKey?: boolean;
-  repeat?: boolean;
-  targetTag?: string | null;
-  targetEditable?: boolean;
-  targetInDialog?: boolean;
 }
 
 /**
- * Does this keydown toggle graph mode? Only a bare `g`: any modifier refuses it
- * (⌘G/Ctrl+G is the browser's find-next, and Shift makes it `G`), as do key
- * repeat, a modal dialog and focus in an input, textarea, select or
- * contenteditable element — the Ask box, the follow-up input and the series
- * editor are where a reader types a `g`. The pane toggles' rule
- * (`paneKeyAction`), which owns `]` and `f`; `t` is the theme's.
+ * Does this keydown toggle graph mode? A `g`, or a `G` with Caps Lock on (no
+ * Shift held). It refuses what the pane keys refuse (`readerKeyRefused`: a
+ * modifier — ⌘G/Ctrl+G is the browser's find-next — key repeat, a modal, and
+ * focus in the Ask box, the follow-up input or the series editor, where a
+ * reader types a `g`), and Shift as well. `]` and `f` are the pane toggles'
+ * (`paneKeyAction`); `t` is the theme's.
  */
 export function graphKeyToggles(e: GraphKeyEvent): boolean {
-  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat || e.targetInDialog) return false;
-  const tag = (e.targetTag || "").toUpperCase();
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.targetEditable) return false;
-  return e.key === "g";
+  if (readerKeyRefused(e) || e.shiftKey) return false;
+  return e.key === "g" || e.key === "G";
 }
 
 // ── Markup ───────────────────────────────────────────────────────────────────
@@ -94,16 +86,21 @@ export function graphTruncatedText(p: Pick<GraphPayload, "truncated" | "truncate
   const parts: string[] = [];
   if (by.includes("sessions")) parts.push(`the first ${GRAPH_SESSIONS_MAX} sessions`);
   if (by.includes("nodes")) parts.push(`the first ${GRAPH_NODES_MAX} nodes`);
+  if (by.includes("edges")) parts.push(`the first ${GRAPH_EDGES_MAX} edges`);
   return `Graph cut short: it shows ${parts.join(" and ") || "a part of the walk"}. Lower the depth or the lanes to see all of it.`;
 }
 
-/** The note under the bar when the ledger could not fill the session lane. */
+/** The note under the bar when the ledger could not fill the session lane or
+ *  the session–PR edges. */
 export function graphLedgerText(p: GraphPayload): string {
   if (!p.lanes.includes("session")) return "";
   if (!p.nodes.some((n) => n.lane === "session")) return "";
   if (!p.ledger.configured) return "No session ledger on this host: sessions show their ids, and PRs come only from the pages.";
   if (p.ledger.timedOut) return "The session ledger timed out: some sessions show their ids only.";
   if (p.ledger.asked && !p.ledger.reachable) return "The session ledger did not answer: some sessions show their ids only.";
+  if (p.ledger.mergesPartial || p.ledger.mergesTruncated) {
+    return "The merge ledger answered only in part: some session–PR edges may be missing.";
+  }
   return "";
 }
 
@@ -112,7 +109,7 @@ function money(n: number | null): string {
 }
 
 /** A node's visible label and its one-line hint. */
-export function graphNodeLabel(n: GraphNode): { label: string; hint: string } {
+function graphNodeLabel(n: GraphNode): { label: string; hint: string } {
   if (n.lane === "issue") {
     const pages = `${n.pageCount} page${n.pageCount === 1 ? "" : "s"}`;
     return { label: n.key, hint: n.planPages.length ? `${pages} · plan` : pages };
@@ -122,7 +119,7 @@ export function graphNodeLabel(n: GraphNode): { label: string; hint: string } {
     return { label: n.title || n.sessionId.slice(0, 8), hint: [n.provider ?? "", money(n.cost)].filter(Boolean).join(" · ") };
   }
   const short = n.ref.includes("/") ? n.ref.slice(n.ref.indexOf("/") + 1) : n.ref;
-  return { label: short, hint: n.subject ?? "" };
+  return { label: short, hint: n.mergeUnconfirmed ? "merge unconfirmed" : (n.subject ?? "") };
 }
 
 export interface GraphRenderOptions {
@@ -157,6 +154,7 @@ export function graphHtml(p: GraphPayload, opts: GraphRenderOptions): string {
                 `lane-${n.lane}`,
                 n.hop === 0 ? "root" : "",
                 n.lane === "session" && (n.missing || n.unresolved) ? "bare" : "",
+                n.lane === "pr" && n.mergeUnconfirmed ? "unconfirmed" : "",
               ]
                 .filter(Boolean)
                 .join(" ");
@@ -187,7 +185,7 @@ export function graphHtml(p: GraphPayload, opts: GraphRenderOptions): string {
     `<div class="wiki-graph-body"><div class="wiki-graph-canvas">` +
     `<svg class="wiki-graph-edges" aria-hidden="true"></svg>` +
     `<div class="wiki-graph-lanes">${lanes}</div></div>` +
-    `<aside id="${GRAPH_CARD_ID}" class="wiki-graph-card" hidden></aside></div>` +
+    `<aside id="${GRAPH_CARD_ID}" class="wiki-graph-card" tabindex="-1" aria-label="Node details" hidden></aside></div>` +
     `</section>`
   );
 }
@@ -216,7 +214,7 @@ export function graphCardHtml(n: GraphNode, opts: { isRoot: boolean }): string {
   } else if (n.lane === "session") {
     facts.push(n.ref);
     if (typeof n.cost === "number") facts.push(`cost ${money(n.cost)}`);
-    if (n.first) facts.push(`from ${n.first.slice(0, 10)}`);
+    if (typeof n.first === "string" && n.first) facts.push(`from ${n.first.slice(0, 10)}`);
     if (n.missing) facts.push("not in the ledger");
     else if (n.unresolved) facts.push("not looked up");
     if (n.url && !n.missing && !n.unresolved) {
@@ -225,7 +223,10 @@ export function graphCardHtml(n: GraphNode, opts: { isRoot: boolean }): string {
   } else {
     facts.push(n.ref);
     if (n.subject) facts.push(n.subject);
-    if (n.mergedAt) facts.push(`merged ${n.mergedAt.slice(0, 10)}`);
+    // Provenance's qualifier: the merge command never confirmed it, which is
+    // not "did not merge" — so no "merged <date>" beside it.
+    if (n.mergeUnconfirmed) facts.push("merge unconfirmed");
+    else if (n.mergedAt) facts.push(`merged ${n.mergedAt.slice(0, 10)}`);
     if (n.url) actions.push(`<a class="wiki-graph-card-btn" href="${esc(n.url)}" target="_blank" rel="noopener">Open PR ↗</a>`);
   }
   return (
@@ -239,13 +240,16 @@ export function graphCardHtml(n: GraphNode, opts: { isRoot: boolean }): string {
 
 // ── Hover ────────────────────────────────────────────────────────────────────
 
-export const edgeKey = (e: Pick<GraphEdge, "source" | "target">): string => `${e.source}|${e.target}`;
+const edgeKey = (e: Pick<GraphEdge, "source" | "target">): string => `${e.source}|${e.target}`;
 
-/**
- * What hovering a node lights: the node, its neighbours and their edges, plus
- * one shortest path back to a root (each step to a neighbour one hop nearer).
- */
-export function graphLit(p: Pick<GraphPayload, "nodes" | "edges">, id: string): { nodes: Set<string>; edges: Set<string> } {
+/** Each node's hop and incident edges — built once per drawn graph, so a hover
+ *  is a lookup rather than a pass over every edge. */
+export interface GraphAdjacency {
+  hop: Map<string, number>;
+  adj: Map<string, GraphEdge[]>;
+}
+
+export function graphAdjacency(p: Pick<GraphPayload, "nodes" | "edges">): GraphAdjacency {
   const hop = new Map(p.nodes.map((n) => [n.id, n.hop]));
   const adj = new Map<string, GraphEdge[]>();
   for (const e of p.edges) {
@@ -255,6 +259,14 @@ export function graphLit(p: Pick<GraphPayload, "nodes" | "edges">, id: string): 
       else adj.set(end, [e]);
     }
   }
+  return { hop, adj };
+}
+
+/**
+ * What hovering a node lights: the node, its neighbours and their edges, plus
+ * one shortest path back to a root (each step to a neighbour one hop nearer).
+ */
+export function graphLit({ hop, adj }: GraphAdjacency, id: string): { nodes: Set<string>; edges: Set<string> } {
   const nodes = new Set<string>([id]);
   const edges = new Set<string>();
   for (const e of adj.get(id) ?? []) {

@@ -72,6 +72,18 @@ export function isJiraKeyShape(key: string): boolean {
   return JIRA_KEY_SHAPE.test(key);
 }
 
+/** Longest echo of the caller's own input in an error body. */
+export const PROVENANCE_ECHO_MAX = 64;
+
+/** The caller's own input, echoed back in an error — normalized and bounded.
+ *  An error that reflects arbitrary caller bytes is a payload nobody asked the
+ *  route to carry, and the useful half is the first few characters anyway.
+ *  Shared by the provenance and graph routes. */
+export function echoQuery(raw: string): string {
+  const flat = raw.replace(/\s+/g, " ").trim();
+  return flat.length > PROVENANCE_ECHO_MAX ? `${flat.slice(0, PROVENANCE_ECHO_MAX)}…` : flat;
+}
+
 export function jiraBrowseUrl(key: string): string {
   return `${JIRA_BROWSE_BASE}${encodeURIComponent(key)}`;
 }

@@ -35,6 +35,7 @@ import type { Config } from "../../config.ts";
 import { getWikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import {
+  echoQuery,
   isJiraKeyShape,
   normalizeJiraKey,
   parseSessionRef,
@@ -58,9 +59,6 @@ export const PROVENANCE_PAGES_MAX = 500;
 /** Most DISTINCT session refs one answer prices. Each 200 of them is one
  *  claude-usage call, so this is the bound on the fan-out a single GET buys. */
 export const PROVENANCE_REFS_MAX = 1000;
-
-/** Longest echo of the caller's own input in a 400 body. */
-export const PROVENANCE_ECHO_MAX = 64;
 
 /**
  * The production context, wired from `Config`.
@@ -133,14 +131,6 @@ interface ProvenanceLookupBody
   pages: ProvenancePageRow[];
   /** The answer is a PREFIX — of the page rows, of the priced refs, or both. */
   truncated?: true;
-}
-
-/** The caller's own input, echoed back in a 400 — normalized and bounded.
- *  A 400 that reflects arbitrary caller bytes is a payload nobody asked this
- *  route to carry, and the useful half is the first few characters anyway. */
-export function echoQuery(raw: string): string {
-  const flat = raw.replace(/\s+/g, " ").trim();
-  return flat.length > PROVENANCE_ECHO_MAX ? `${flat.slice(0, PROVENANCE_ECHO_MAX)}…` : flat;
 }
 
 export function registerWikiProvenanceRoutes(

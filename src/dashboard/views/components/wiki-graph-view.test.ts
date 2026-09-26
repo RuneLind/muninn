@@ -11,6 +11,7 @@ import {
   graphHtml,
   graphKeyToggles,
   graphLedgerText,
+  graphAdjacency,
   graphLit,
   graphTruncatedText,
 } from "./wiki-graph-view.ts";
@@ -21,7 +22,7 @@ import {
   urlWithDisplay,
   urlWithJira,
 } from "./wiki-filter.ts";
-import type { GraphNode, GraphPayload } from "../../../wiki/trackers/graph-types.ts";
+import type { GraphNode, GraphPayload } from "../../../wiki/graph-types.ts";
 
 const issue: GraphNode = {
   id: "issue:jira:DEMO-101",
@@ -65,7 +66,7 @@ const payload: GraphPayload = {
     { source: "page:a.md", target: "session:s1", kind: "page-session" },
     { source: "session:s1", target: "pr:example-org/demo#7", kind: "session-pr" },
   ],
-  ledger: { configured: true, asked: true, reachable: true, timedOut: false },
+  ledger: { configured: true, asked: true, reachable: true, timedOut: false, mergesPartial: false, mergesTruncated: false },
 };
 
 describe("graphKeyToggles", () => {
@@ -77,8 +78,12 @@ describe("graphKeyToggles", () => {
       expect(graphKeyToggles({ key: "g", [mod]: true }), mod).toBe(false);
     }
     for (const tag of ["INPUT", "textarea", "SELECT"]) expect(graphKeyToggles({ key: "g", targetTag: tag }), tag).toBe(false);
-    expect(graphKeyToggles({ key: "G" })).toBe(false);
+    expect(graphKeyToggles({ key: "G", shiftKey: true })).toBe(false);
     expect(graphKeyToggles({ key: "f" })).toBe(false);
+  });
+  test("C6: Caps Lock G (key G, no Shift) toggles like g", () => {
+    expect(graphKeyToggles({ key: "G", targetTag: "BODY" })).toBe(true);
+    expect(graphKeyToggles({ key: "G", shiftKey: false })).toBe(true);
   });
 });
 
@@ -164,11 +169,33 @@ describe("graphCardHtml", () => {
 
 describe("graphLit", () => {
   test("lights the neighbours and one path back to the root", () => {
-    const lit = graphLit(payload, "pr:example-org/demo#7");
+    const lit = graphLit(graphAdjacency(payload), "pr:example-org/demo#7");
     expect([...lit.nodes].sort()).toEqual(["page:a.md", "pr:example-org/demo#7", "session:s1"]);
     expect([...lit.edges].sort()).toEqual(["page:a.md|session:s1", "session:s1|pr:example-org/demo#7"]);
-    const fromB = graphLit(payload, "page:b.md");
+    const fromB = graphLit(graphAdjacency(payload), "page:b.md");
     expect(fromB.nodes.has("page:a.md")).toBe(true);
     expect(fromB.nodes.has("session:s1")).toBe(false);
+  });
+});
+
+describe("fix round 1: the card and the notes", () => {
+  test("S3: an edge-capped answer names the edge cap", () => {
+    expect(graphTruncatedText({ truncated: true, truncatedBy: ["edges"] })).toContain("first 6000 edges");
+  });
+  test("S5: a partial or truncated merges answer says session–PR edges may be missing", () => {
+    for (const k of ["mergesPartial", "mergesTruncated"] as const) {
+      expect(graphLedgerText({ ...payload, ledger: { ...payload.ledger, [k]: true } }), k).toContain("session–PR edges may be missing");
+    }
+  });
+  test("S7: an unconfirmed merge is qualified on the card and the node", () => {
+    const unconfirmed: GraphNode = { ...pr, mergedAt: "2026-01-05T10:00:00Z", mergeUnconfirmed: true } as GraphNode;
+    const card = graphCardHtml(unconfirmed, { isRoot: false });
+    expect(card).toContain("merge unconfirmed");
+    expect(card).not.toContain("merged 2026-01-05");
+    expect(graphHtml({ ...payload, nodes: [issue, root, unconfirmed] }, { level: 3, depth: 2, rootLabel: "A" })).toContain("unconfirmed");
+  });
+  test("S11: a session whose ledger dates are not strings still renders its card", () => {
+    const odd = { ...session, first: 12345, last: {} } as unknown as GraphNode;
+    expect(() => graphCardHtml(odd, { isRoot: false })).not.toThrow();
   });
 });

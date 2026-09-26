@@ -9,6 +9,7 @@
 // relation vocabulary and the demoted tier are decided in ONE place.
 import { relationsCount, type IssueRelation } from "../../../wiki/trackers/types.ts";
 import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
+import { parseIssueRoot } from "../../../wiki/graph-types.ts";
 
 /**
  * A wiki page's type. Independent client-safe copy of the store's alias (this file
@@ -1803,9 +1804,9 @@ export function tagCounts(
 // stored per wiki: the address bar is the only place it lives, so Back and a
 // shared link restore it. `issue=` is independent of `jira=`, the facet filter.
 
-export const DISPLAY_PARAM = "display";
-export const ISSUE_PARAM = "issue";
-export const DISPLAY_GRAPH = "graph";
+const DISPLAY_PARAM = "display";
+const ISSUE_PARAM = "issue";
+const DISPLAY_GRAPH = "graph";
 
 /** Graph mode on or off, and the issue it is rooted at (`tracker:KEY`, or
  *  `""` for the open page). */
@@ -1814,19 +1815,16 @@ export interface DisplayState {
   issue: string;
 }
 
-export const NO_DISPLAY: DisplayState = Object.freeze({ graph: false, issue: "" });
-
-/** `tracker:KEY` with both halves non-empty and no whitespace — the only shape
- *  an `issue=` value is read as. Anything else is dropped. */
-const ISSUE_ROOT_SHAPE = /^[a-z][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const NO_DISPLAY: DisplayState = Object.freeze({ graph: false, issue: "" });
 
 /** The display state `location.search` asks for. `issue=` counts only beside
- *  `display=graph`. */
+ *  `display=graph`, and only in the one shape an issue root is read as
+ *  (`parseIssueRoot`, `src/wiki/graph-types.ts`); anything else is dropped. */
 export function readDisplayParams(search: string): DisplayState {
   const params = new URLSearchParams(search);
   const graph = params.get(DISPLAY_PARAM) === DISPLAY_GRAPH;
   const issue = (params.get(ISSUE_PARAM) ?? "").trim();
-  return { graph, issue: graph && ISSUE_ROOT_SHAPE.test(issue) ? issue : "" };
+  return { graph, issue: graph && parseIssueRoot(issue) ? issue : "" };
 }
 
 /** Append the display params to a URL known to carry none. Reading mode leaves

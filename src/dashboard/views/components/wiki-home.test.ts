@@ -114,6 +114,8 @@ describe("fix round 3: sameStartUrl — does the address bar already DENOTE this
     expect(sameStartUrl("?wiki=Y", "X", "hubs", null)).toBe(false);
     expect(sameStartUrl("?wiki=X&relPath=a.md", "X", "hubs", null)).toBe(false);
     expect(sameStartUrl("?wiki=X&page=a", "X", "hubs", null)).toBe(false);
+    // C1: an issue-only graph is not the overview, though it names no page.
+    expect(sameStartUrl("?wiki=X&display=graph&issue=jira:DEMO-1", "X", "hubs", null)).toBe(false);
     expect(sameStartUrl("?wiki=X&view=atlas", "X", "timeline", null)).toBe(false);
     expect(sameStartUrl("?wiki=X", "X", "timeline", "hubs")).toBe(false); // bar denotes hubs
     expect(sameStartUrl("?wiki=X", "X", "timeline", null)).toBe(false);

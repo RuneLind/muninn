@@ -9,13 +9,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { __resetWikiCacheForTest, getWikiIndex, type WikiIndex } from "../store.ts";
-import type { ProvenanceMerge } from "../provenance.ts";
-import type { SessionLedgerResult } from "../session-ledger.ts";
-import { buildGraph, mergePrRef, type GraphLedgerPort } from "./graph.ts";
+import { __resetWikiCacheForTest, getWikiIndex, type WikiIndex } from "./store.ts";
+import type { ProvenanceMerge } from "./provenance.ts";
+import type { SessionLedgerResult } from "./session-ledger.ts";
+import { buildGraph, knownPrRefs, mergePrRef, type GraphLedgerPort } from "./graph.ts";
+import * as graphTypes from "./graph-types.ts";
 import {
   GRAPH_SESSIONS_MAX,
   parseGraphQuery,
+  parseIssueRoot,
   type GraphLane,
   type GraphPayload,
   type GraphQuery,
@@ -27,6 +29,8 @@ const S1 = sid(1);
 const S2 = sid(2);
 const S3 = sid(3);
 const S4 = sid(4);
+const S5 = sid(5);
+const LONG_ID = "a".repeat(5000);
 
 const CONFIG = {
   typeMap: { plans: "plan" },
@@ -60,12 +64,28 @@ const PAGES: Record<string, string> = {
   "series/b.md": "---\ntitle: Del to\nseries: demo-serie\ntags: [demo-131]\n---\n\nBody.\n",
   // Past the session cap.
   "many.md": `---\ntitle: DEMO-140 mange\nsessions: [${Array.from({ length: GRAPH_SESSIONS_MAX + 1 }, (_, i) => sid(1000 + i)).join(", ")}]\n---\n\nBody.\n`,
+  // Fix round 1: one PR named by a page (mixed case) and by a URL-less merge
+  // row; junk session refs; two bookkeeping pages reachable through the PR and
+  // the session.
+  "dup.md": `---\ntitle: Duplikat\nsessions: [claude-code:${S5}, see notes, x y, ${LONG_ID}]\nprs: [Example-Org/Demo-Repo#51]\n---\n\nBody.\n`,
+  "log.md": "---\ntitle: Logg\nprs: [example-org/demo-repo#51]\n---\n\nBody.\n",
+  "sub/index.md": `---\ntitle: Indeks\nsessions: [${S5}]\n---\n\nBody.\n`,
+  // Exactly the cap in real ids, plus one junk ref that must not count.
+  "cap-junk.md": `---\ntitle: Tak\nsessions: [see notes, ${Array.from({ length: GRAPH_SESSIONS_MAX }, (_, i) => sid(3000 + i)).join(", ")}]\n---\n\nBody.\n`,
 };
 
 const MERGES: Record<string, Partial<ProvenanceMerge>[]> = {
   [S1]: [{ url: "https://github.com/example-org/demo-repo/pull/21", prNumber: 21, subject: "Fiks A" }],
   [S2]: [{ url: "https://github.com/example-org/demo-repo/pull/22", prNumber: 22 }],
   [S3]: [{ url: "https://github.com/example-org/demo-repo/pull/31", prNumber: 31 }],
+  [S5]: [
+    // No URL: the page's `Example-Org/Demo-Repo#51` by basename + number.
+    { repo: "/src/DEMO-repo", prNumber: 51 },
+    // No URL and no page names it: the `<basename>#n` fallback.
+    { repo: "/src/other-repo", prNumber: 52 },
+    // The merge command never confirmed it.
+    { url: "https://github.com/example-org/demo-repo/pull/53", prNumber: 53, mergeOk: false },
+  ],
 };
 
 const roots: string[] = [];
@@ -99,6 +119,7 @@ function fakePort(configured = true): GraphLedgerPort & { calls: { kind: string;
     calls,
     configured,
     publicUrl: null,
+    timedOut: () => false,
     merges: async (ids) => {
       calls.push({ kind: "merges", ids });
       const merges = ids.flatMap((id) =>
@@ -115,7 +136,7 @@ function fakePort(configured = true): GraphLedgerPort & { calls: { kind: string;
           ...m,
         })) as ProvenanceMerge[],
       );
-      return { reachable: true, merges };
+      return { asked: true, reachable: true, partial: false, truncated: false, merges };
     },
     facts: async (ids): Promise<SessionLedgerResult> => {
       calls.push({ kind: "facts", ids });
@@ -178,7 +199,7 @@ describe("buildGraph — the page scope at depth 2, level 3", () => {
       { kind: "merges", ids: [S1, S2] },
       { kind: "facts", ids: [S1, S2] },
     ]);
-    expect(p.ledger).toEqual({ configured: true, asked: true, reachable: true, timedOut: false });
+    expect(p.ledger).toEqual({ configured: true, asked: true, reachable: true, timedOut: false, mergesPartial: false, mergesTruncated: false });
   });
 
   test("hops: root 0, its issues/sessions/prRefs 1, the other pages and the merged PRs 2", async () => {
@@ -260,7 +281,7 @@ describe("buildGraph — levels and depth", () => {
     expect(lanes(p).session.sort()).toEqual([S1, S2]);
     expect(p.nodes.filter((n) => n.lane === "session").every((n) => n.lane === "session" && n.unresolved)).toBe(true);
     expect(lanes(p).pr).toEqual(["example-org/demo-repo#11"]);
-    expect(p.ledger).toEqual({ configured: false, asked: false, reachable: false, timedOut: false });
+    expect(p.ledger).toEqual({ configured: false, asked: false, reachable: false, timedOut: false, mergesPartial: false, mergesTruncated: false });
   });
 });
 
@@ -325,7 +346,6 @@ describe("buildGraph — scopes", () => {
       [{ scope: "page", root: "nope.md" }, idx],
       [{ scope: "issue", root: "jira:DEMO-190" }, idx],
       [{ scope: "issue", root: "jira:DEMO-999" }, idx],
-      [{ scope: "issue", root: "nope" }, idx],
       [{ scope: "series", root: "nope" }, idx],
     ] as const) {
       const { res } = await graph(q as Partial<GraphQuery> & { scope: GraphQuery["scope"] }, fakePort(), index);
@@ -339,7 +359,7 @@ describe("buildGraph — scopes", () => {
 describe("parseGraphQuery", () => {
   test("defaults per scope", () => {
     const d = (scope: string, level = "") => {
-      const r = parseGraphQuery({ scope, root: "x", level });
+      const r = parseGraphQuery({ scope, root: scope === "issue" ? "jira:DEMO-1" : "x", level });
       if (!r.ok) throw new Error(r.error);
       return [r.query.depth, r.query.level];
     };
@@ -384,5 +404,127 @@ describe("mergePrRef", () => {
     expect(mergePrRef({ ...base, url: "https://github.com/example-org/demo-repo/pull/5" })).toBe("example-org/demo-repo#5");
     expect(mergePrRef(base)).toBe("demo-repo#5");
     expect(mergePrRef({ ...base, prNumber: null })).toBeNull();
+  });
+  test("S1: a URL-less row resolves onto a page's PR by basename + number, unless two owners claim it", () => {
+    const known = knownPrRefs([{ prRefs: ["Example-Org/Demo-Repo#5"] }, { prRefs: ["other-org/twin#6"] }, { prRefs: ["example-org/twin#6"] }]);
+    expect(mergePrRef(base, known)).toBe("Example-Org/Demo-Repo#5");
+    // A fork or a shared repo name: no owner is guessed.
+    expect(mergePrRef({ ...base, repo: "/src/twin", prNumber: 6 }, known)).toBe("twin#6");
+    expect(mergePrRef({ ...base, prNumber: 7 }, known)).toBe("demo-repo#7");
+  });
+});
+
+// ── Fix round 1 ─────────────────────────────────────────────────────────────
+
+const idsOf = (p: GraphPayload, lane: GraphLane) => p.nodes.filter((n) => n.lane === lane).map((n) => n.id).sort();
+
+describe("fix round 1: PR identity, bookkeeping pages, junk refs, unconfirmed merges", () => {
+  test("S1: a URL-less merge row lands on the page's own PR node (basename + number, any case), with both edges", async () => {
+    const p = ok((await graph({ scope: "page", root: "dup.md", depth: 2, level: 3 })).res);
+    const prs = idsOf(p, "pr");
+    expect(prs).toContain("pr:example-org/demo-repo#51");
+    expect(prs).not.toContain("pr:demo-repo#51");
+    expect(prs.filter((id) => id.endsWith("#51"))).toHaveLength(1);
+    const to51 = p.edges.filter((e) => e.target === "pr:example-org/demo-repo#51").map((e) => e.kind).sort();
+    expect(to51).toEqual(["page-pr", "session-pr"]);
+    // No page names #52: the `<basename>#n` fallback.
+    expect(prs).toContain("pr:other-repo#52");
+  });
+
+  test("S2: bookkeeping pages (log, index) are never page nodes, even when a PR or a session reaches them", async () => {
+    for (const depth of [2, 4]) {
+      const p = ok((await graph({ scope: "page", root: "dup.md", depth, level: 3 })).res);
+      expect(idsOf(p, "page")).toEqual(["page:dup.md"]);
+    }
+    const root = (await graph({ scope: "page", root: "log.md", level: 3 })).res;
+    expect(root.ok).toBe(false);
+  });
+
+  test("S6: junk session refs are not drawn and do not count toward the session cap", async () => {
+    const p = ok((await graph({ scope: "page", root: "dup.md", depth: 1, level: 2 })).res);
+    expect(idsOf(p, "session")).toEqual([`session:${S5}`]);
+    const cap = ok((await graph({ scope: "page", root: "cap-junk.md", depth: 1, level: 2 })).res);
+    expect(cap.truncated).toBeUndefined();
+    expect(idsOf(cap, "session")).toHaveLength(GRAPH_SESSIONS_MAX);
+    expect(idsOf(cap, "session")).not.toContain("session:see notes");
+  });
+
+  test("S7: a merge row the merge command never confirmed qualifies its PR node", async () => {
+    const p = ok((await graph({ scope: "page", root: "dup.md", depth: 2, level: 3 })).res);
+    const byId = new Map(p.nodes.map((n) => [n.id, n]));
+    expect(byId.get("pr:example-org/demo-repo#53")).toMatchObject({ mergeUnconfirmed: true });
+    expect(byId.get("pr:example-org/demo-repo#51")).not.toHaveProperty("mergeUnconfirmed");
+  });
+});
+
+describe("fix round 1: the merges leg's own state", () => {
+  test("S4: a merges leg that asked nothing (every id refused) is not a ledger that did not answer", async () => {
+    const port = fakePort();
+    port.merges = async () => ({ asked: false, reachable: false, partial: false, truncated: false, merges: [] });
+    const p = ok((await graph({ scope: "page", root: "dup.md", depth: 2, level: 3 }, port)).res);
+    expect(p.ledger.reachable).toBe(true);
+  });
+
+  test("S5: a partial or truncated merges answer is carried to the payload", async () => {
+    const port = fakePort();
+    const inner = port.merges;
+    port.merges = async (ids) => ({ ...(await inner(ids)), partial: true, truncated: true });
+    const p = ok((await graph({ scope: "page", root: "dup.md", depth: 2, level: 3 }, port)).res);
+    expect(p.ledger).toMatchObject({ mergesPartial: true, mergesTruncated: true });
+    const clean = ok((await graph({ scope: "page", root: "dup.md", depth: 2, level: 3 })).res);
+    expect(clean.ledger).toMatchObject({ mergesPartial: false, mergesTruncated: false });
+  });
+
+  test("S11: a ledger string field that is not a string reaches the node as null", async () => {
+    const port = fakePort();
+    const inner = port.facts;
+    port.facts = async (ids) => {
+      const r = await inner(ids);
+      for (const id of ids) r.facts.set(id, { sessionId: id, first: 12345 as unknown as string, last: {} as unknown as string, host: 7 as unknown as string });
+      return r;
+    };
+    const p = ok((await graph({ scope: "page", root: "anchor.md", depth: 1, level: 2 }, port)).res);
+    const s = p.nodes.find((n) => n.lane === "session")!;
+    expect(s).toMatchObject({ first: null, last: null });
+  });
+});
+
+describe("fix round 1: the edge cap", () => {
+  test("S3: past GRAPH_EDGES_MAX edges the answer is truncated by edges, at exactly the cap", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-wide-"));
+    roots.push(root);
+    const keys = Array.from({ length: 70 }, (_, i) => `demo-${200 + i}`);
+    for (let i = 0; i < 100; i++) {
+      await writeFile(path.join(root, `p${i}.md`), `---\ntitle: Side ${i}\ntags: [${keys.join(", ")}]\n---\n\nBody.\n`, "utf8");
+    }
+    await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");
+    const wide = (await getWikiIndex({ root, refresh: true }))!;
+    const p = ok((await graph({ scope: "wiki" }, fakePort(), wide)).res);
+    expect(p.nodes.length).toBe(170);
+    expect(p.truncatedBy).toContain("edges");
+    expect(p.edges.length).toBe(graphTypes.GRAPH_EDGES_MAX);
+  });
+});
+
+describe("fix round 1: issue roots", () => {
+  test("S9/T3: a root that is not `tracker:KEY` shaped is a 400 naming root", () => {
+    for (const root of ["DEMO-203", "JIRA:DEMO-203", "jira:DEMO-203:x", "jira:", ":DEMO-203", "jira:DEMO 203"]) {
+      const r = parseGraphQuery({ scope: "issue", root });
+      expect(r.ok, root).toBe(false);
+      if (!r.ok) expect(r.error, root).toContain("root");
+    }
+    expect(parseIssueRoot("jira:DEMO-203")).toEqual({ tracker: "jira", key: "DEMO-203" });
+    expect(parseIssueRoot("jira:DEMO-203:x")).toBeNull();
+  });
+
+  test("S9: a well-shaped root the tracker cannot read as a key is a 400 naming root; an unknown key stays 404", async () => {
+    const bad = (await graph({ scope: "issue", root: "jira:nope" })).res;
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.status).toBe(400);
+      expect(bad.error).toContain("root");
+    }
+    const unknown = (await graph({ scope: "issue", root: "jira:DEMO-999" })).res;
+    expect(!unknown.ok && unknown.status).toBe(404);
   });
 });

@@ -2,7 +2,7 @@
  * `GET /api/wiki/graph?wiki=&scope=page|issue|series|wiki&root=&depth=&level=`
  * — the reader's graph mode: typed nodes in four lanes (issues, pages,
  * sessions, PRs) and the edges between them. The walk is
- * `src/wiki/trackers/graph.ts`; the wire shape and the query rules are
+ * `src/wiki/graph.ts`; the wire shape and the query rules are
  * `graph-types.ts`.
  *
  * Registered inside the `wiki` route group, so `MUNINN_PROFILE=nais` drops it
@@ -19,8 +19,8 @@ import { getWikiIndex } from "../../wiki/store.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
 import { PROVENANCE_BUDGET_MS, type ProvenanceContext } from "../../wiki/provenance-service.ts";
-import { buildGraph, graphLedgerPort } from "../../wiki/trackers/graph.ts";
-import { parseGraphQuery } from "../../wiki/trackers/graph-types.ts";
+import { buildGraph, graphLedgerPort } from "../../wiki/graph.ts";
+import { parseGraphQuery } from "../../wiki/graph-types.ts";
 
 export function registerWikiGraphRoute(app: Hono, ctx: ProvenanceContext): void {
   app.get("/api/wiki/graph", async (c) => {
@@ -41,12 +41,14 @@ export function registerWikiGraphRoute(app: Hono, ctx: ProvenanceContext): void 
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return c.json({ error: "wiki directory not found" }, 503);
     // One deadline over every ledger read, armed only when a level reaches the
-    // ledger at all — level 1 is index-local.
-    const signal =
+    // ledger at all — level 1 is index-local. A client that goes away aborts
+    // the fan-out too; only the deadline reads as `timedOut`.
+    const deadline =
       parsed.query.level >= 2 && ctx.sessionLedger.urlConfigured
         ? AbortSignal.timeout(ctx.budgetMs ?? PROVENANCE_BUDGET_MS)
         : undefined;
-    const result = await buildGraph(index, parsed.query, graphLedgerPort(ctx, signal), signal);
+    const signal = deadline ? AbortSignal.any([c.req.raw.signal, deadline]) : undefined;
+    const result = await buildGraph(index, parsed.query, graphLedgerPort(ctx, signal, deadline));
     if (!result.ok) return c.json({ error: result.error }, result.status);
     return c.json(result.payload);
   });

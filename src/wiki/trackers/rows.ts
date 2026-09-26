@@ -27,7 +27,7 @@ export interface IssuePageInput {
 }
 
 /** `tracker:key`, the map's key — the way a session ref is `provider:id`. */
-const issueKeyId = (tracker: string, key: string): string => `${tracker}:${key}`;
+export const issueKeyId = (tracker: string, key: string): string => `${tracker}:${key}`;
 
 /**
  * Is this page a plan under this tracker's config? Its resolved type is `plan`
@@ -72,8 +72,14 @@ export function buildIssueKeyIndex(
   return out;
 }
 
+/** How many pages relate to a key through a counting relation — the number
+ *  Connections and the graph both print beside it. */
+export function countingPageCount(entry: IssueKeyEntry | undefined): number {
+  return entry ? entry.pages.filter((p) => relationsCount(p.relations)).length : 0;
+}
+
 /** The plans that cover a key: a plan page with a coverage relation to it. */
-function coveringPlans(entry: IssueKeyEntry | undefined): { relPath: string; title: string }[] {
+export function coveringPlans(entry: IssueKeyEntry | undefined): { relPath: string; title: string }[] {
   if (!entry) return [];
   return entry.pages
     .filter((p) => p.plan && p.relations.some((r) => (COVERAGE_RELATIONS as readonly string[]).includes(r)))
@@ -105,7 +111,7 @@ export function issueRowsFor(
       url: adapter.urlFor(ref.key, config),
       field: adapter.frontmatterKey,
       relations: [...ref.relations],
-      pageCount: entry ? entry.pages.filter((p) => relationsCount(p.relations)).length : 0,
+      pageCount: countingPageCount(entry),
       planPages: coveringPlans(entry),
     });
   }

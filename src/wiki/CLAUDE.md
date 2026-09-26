@@ -2250,21 +2250,27 @@ gate, coverage, the deferred rows, the ledger cap and deadline, the page route,
 the no-tracker pin), `views/components/wiki-issue-rows.test.ts`,
 `wiki-stamp.test.ts` (the tracker form) and `e2e/wiki-tracker-connections.spec.ts`.
 
-### Graph mode (`trackers/graph.ts`, `GET /api/wiki/graph`, `views/components/wiki-graph-view.ts`)
+### Graph mode (`graph.ts`, `GET /api/wiki/graph`, `views/components/wiki-graph-view.ts`)
 
 On a wiki with a tracker, the article pane has a **◇ Graph** toggle: four
 lanes — issues, pages, sessions, PRs — with the article hidden under them
-(hidden, not replaced, so turning it off keeps the reader's place). A wiki with
+(hidden, not replaced; turning it off puts the article's scroll position back
+where it was). A wiki with
 no `trackers` block has no toggle, `g` does nothing there, and the route answers
 404 `this wiki names no tracker`.
 
 - **The route.** `GET /api/wiki/graph?wiki=&scope=page|issue|series|wiki&root=&depth=&level=`
   answers `{scope, root, depth, level, lanes, nodes, edges, truncated?,
-  truncatedBy?, ledger}` (`trackers/graph-types.ts`, dependency-free, shared
+  truncatedBy?, ledger}` (`graph-types.ts`, dependency-free, shared
   with the client). `root` is a relPath (`page`), `tracker:KEY` (`issue`), a
   series key (`series`), and ignored at `wiki` scope, whose roots are every
-  key with a counting page. 400 names the bad parameter; 404 for an unknown
-  wiki, page, series, or a key no page counts. Registered inside the `wiki`
+  key with a counting page. 400 names the bad parameter — including an issue
+  root that is not `tracker:KEY` shaped (`parseIssueRoot`: a lowercase tracker
+  id, one colon, a key with no colon or whitespace) or that the tracker cannot
+  read as a key; 404 for an unknown wiki, page, series, a key no page counts,
+  or a bookkeeping page as root. A 404 echoes the root through `echoQuery`
+  (`PROVENANCE_ECHO_MAX`, `provenance.ts`). A missing `wiki=` answers 503 when
+  the default wiki directory is absent. Registered inside the `wiki`
   route group (`MUNINN_PROFILE=nais` drops it) and on `SIDE_EFFECTING_GETS`
   beside the two provenance paths.
 - **Level** picks the lanes: 1 is issues and pages, 2 adds sessions, 3 adds
@@ -2279,6 +2285,11 @@ no `trackers` block has no toggle, `g` does nothing there, and the route answers
 - ⚠️ **`link` and `mention` are never edges.** A page whose only relations to a
   key are those two is not in that key's graph, and a mention-only key on the
   root page is not drawn. Level 1 makes no ledger call.
+- ⚠️ **Never drawn:** bookkeeping pages (`isMetaStem` — `index`, `log`,
+  `CLAUDE`, the set the index already keeps out of issue inference; `log.md`
+  names every PR and fanned a depth-4 graph out to 90 pages), and session refs
+  that fail `isSessionIdShape` (`see notes`, `x y`, a 5000-character value).
+  Junk refs are neither nodes nor counted toward the session cap.
 - **The ledger.** Session facts come from ONE batched `fetchSessionsById`
   after the walk; merges are asked per hop, for the sessions the walk EXPANDS
   — a session at the last hop is never asked, so an edge from it to a PR
@@ -2286,11 +2297,29 @@ no `trackers` block has no toggle, `g` does nothing there, and the route answers
   sessions no page stamped. Every read shares one `PROVENANCE_BUDGET_MS`
   deadline, armed only at level 2 and up on a host with a claude-usage.
   Without one, sessions are drawn from the pages, `unresolved`, and PRs come
-  from `prRefs` alone. A merge row's PR is `owner/repo#n` off its GitHub URL,
-  else `<repo dir>#n`; a row with no PR number names no PR.
-- **Caps.** `GRAPH_SESSIONS_MAX` (400) session refs and `GRAPH_NODES_MAX`
-  (1500) nodes; past either the walk stops adding that kind, the answer
-  carries `truncated: true` and `truncatedBy`, and the reader shows a banner.
+  from `prRefs` alone. The deadline is combined with the request's own signal
+  (`AbortSignal.any`), so a client that goes away aborts the fan-out; only the
+  deadline reads as `ledger.timedOut`. The merges leg follows the facts leg's
+  rule: a call that sent nothing (every id refused) is not "the ledger did not
+  answer". Its `partial` and `truncated` ride out as `ledger.mergesPartial` and
+  `ledger.mergesTruncated`, and the reader says session–PR edges may be missing.
+- **One PR, one node.** A merge row's PR is `owner/repo#n` off its GitHub URL;
+  else the PR a page names (`prRefs`, anywhere in the wiki) with the same repo
+  basename and number, case-insensitive (`knownPrRefs`, `mergePrRef`); else
+  `<repo dir>#n`. The ledger answers `url: null` for a repo its own map does
+  not name, and `repo` is a checkout path, so without the middle step the
+  page's `owner/repo#n` and the row's `<dir>#n` were two nodes. ⚠️ Residual: a
+  basename claimed by two owners (a fork, two repos sharing a name) resolves
+  onto neither — the row keeps `<dir>#n`, a separate node. A row with no PR
+  number names no PR. A PR whose every merge row has `mergeOk: false` carries
+  `mergeUnconfirmed: true`: dashed, "merge unconfirmed" on the card, no
+  "merged <date>" — qualified, never dropped, as provenance keeps it.
+- **Caps.** `GRAPH_SESSIONS_MAX` (400) session nodes, `GRAPH_NODES_MAX` (1500)
+  nodes and `GRAPH_EDGES_MAX` (6000) edges; past any of them the walk stops
+  adding that kind, the answer carries `truncated: true` and `truncatedBy`
+  (`sessions`, `nodes`, `edges`), and the reader shows a banner. The edge cap
+  exists because nodes alone do not bound the payload: 1,400 pages sharing one
+  tag set drew 140,000 edges (14.5 MB).
 - **What the nodes carry**, for the board that reads `scope=wiki&level=1`
   next: a page node its `prRefs`, `pageTimeMs` (the reader's recency key,
   `wiki-filter.ts`) and `plan` at every level; an issue node its key, label,
@@ -2302,35 +2331,58 @@ no `trackers` block has no toggle, `g` does nothing there, and the route answers
   start tab, and not stored per wiki: the address bar is the only place it
   lives. `articleUrl` carries both, after `jira=`, so every pushed article URL
   keeps the mode; `issue=` is independent of `jira=`, the facet filter, and is
-  read only beside `display=graph`. The toggle, `g` and Focus here PUSH an
+  read only beside `display=graph`. Each toggle, `g` and Focus here PUSHES an
   entry, so Back restores the previous mode or root; popstate and boot re-read
-  the URL. A rail or wikilink click keeps graph mode and re-roots on the page
-  it opens (`issue` cleared). Returning to the overview leaves graph mode. With
-  `issue=` and no page, the pane shows the issue's own head and its graph;
-  toggling off there returns to the overview.
-- **`g`** toggles (`graphKeyToggles`), only while the toggle is on screen, and
-  never with a modifier held (⌘G/Ctrl+G is find-next, Shift makes `G`), on key
-  repeat, inside a modal dialog, or with focus in an input, textarea, select or
+  the URL. Back or Forward between two display states of the page on screen
+  switches the display without refetching the page. A rail or wikilink click
+  keeps graph mode and re-roots on the page it opens (`issue` cleared).
+  Returning to the overview, and an Ask or Explain answer, leave graph mode (a
+  citation then opens its page for reading). With `issue=` and no page, the
+  pane shows the issue's own head and its graph; toggling off there pushes the
+  overview's URL (`sameStartUrl` never reads a `display=` URL as the overview),
+  so a reload stays on the overview.
+- **`g`** toggles (`graphKeyToggles`), only while the toggle is on screen. A
+  `G` with Caps Lock on counts; Shift+G does not. It shares its refusals with
+  the pane keys (`readerKeyRefused`, `wiki-panes.ts`): a modifier (⌘G/Ctrl+G is
+  find-next), key repeat, a modal, and focus in an input, textarea, select or
   contenteditable element — the Ask box, the follow-up input, the series
-  editor. `]` and `f` stay the pane toggles', `t` the theme's.
+  editor. For `g` the modal test is global (`modalOpen`): an open
+  `aria-modal`, `dialog[open]`, `role="dialog"` or `role="menu"` anywhere on
+  the page refuses it, not only one around the focused element. `g` is inert
+  while focus is inside an explainer or embed iframe. `]` and `f` stay the
+  pane toggles', `t` the theme's.
 - **Reading it.** Nodes stack per lane, root outlined; edges are curves from a
   node's right edge to the next lane's left (page–PR dashed, since it crosses
-  the session lane), redrawn on resize. Hover (or focus) lights the node, its
-  neighbours and one path back to the root (`graphLit`). A click opens the side
-  card: **Focus here** (an issue re-roots at the issue; a page opens that page,
-  still in graph mode), **Open** (a page, in reading mode) and the tracker link
-  (an issue), or the PR or session link. The Lanes and Depth selects re-fetch;
-  they are not URL state, so a shared link opens at the defaults.
+  the session lane), redrawn on resize with the lit set kept. Hover (or focus)
+  lights the node, its neighbours and one path back to the root (`graphLit`
+  over `graphAdjacency`, built once per drawn graph). A click opens the side
+  card and moves focus into it; its node stays lit, and Escape or ✕ closes it
+  and returns focus to the node. The card offers **Focus here** on an issue or
+  a page that is not the root (an issue re-roots at the issue; a page opens
+  that page, still in graph mode) — never on the root, a session or a PR —
+  **Open** on a page (it leaves graph mode) and the tracker, PR or session
+  link. At 720 px and below the card sits over the bottom of the viewport,
+  since the article column can be a sliver there. The Lanes and Depth selects
+  re-fetch; they survive a re-root but are not URL state, so a reload or a
+  shared link opens at the defaults. The last answer is cached by (wiki,
+  scope, root, depth, level), so toggling back to the same graph repaints it
+  without a second fan-out; a new fetch, or leaving graph mode, aborts the one
+  in flight. The Explain / Fact-check pill ignores a selection outside
+  `.wiki-article`, so selecting in the graph offers neither.
 
-Acceptance: `trackers/graph.test.ts` (the walk, the counting rule, the caps,
-the scopes and their defaults), `routes/wiki-graph.test.ts` (the 400/404
-ladder, the no-tracker answer, the ledger fan-out per level),
+Acceptance: `graph.test.ts` (the walk, the counting rule, the caps,
+the scopes and their defaults, PR identity, bookkeeping pages, junk refs, the
+merges leg's state), `routes/wiki-graph.test.ts` (the 400/404 ladder, the
+no-tracker answer, the ledger fan-out per level, the bounded echo, the client
+disconnect),
 `views/components/wiki-graph-view.test.ts` (the `g` rule, the URL helpers, the
 markup, the card, `graphLit`) and `e2e/wiki-tracker-graph.spec.ts` (the four
 lanes' counts on the created-keys page, no ledger call at `wiki` scope, no
 toggle without a tracker, `g` and its refusals, the `issue=` deep link,
 Back/Forward, a rail click re-rooting, the card, hover and the truncated
-banner).
+banner, plus fix round 1's toggle-off URL, scroll, no-refetch Back, Ask
+teardown, the pill, the global modal refusal, card focus, the fetch cache and
+abort, the highlight across a redraw and the phone-width card).
 
 ### The client (`views/components/wiki-provenance-view.ts`)
 

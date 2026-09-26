@@ -64,6 +64,7 @@ const LINKED = "notes/lenket.md";
 const BACKGROUND = "notes/demo-122-bakgrunn.md";
 const OTHER = "notes/annen.md";
 const MANY = "notes/mange.md";
+const LONG = "notes/lang.md";
 
 const PAGES: Record<string, string> = {
   // Created ×3, tag ×2, one mention; two sessions, one PR.
@@ -96,6 +97,8 @@ const PAGES: Record<string, string> = {
     ["title: DEMO-170 mange økter", `sessions: [${Array.from({ length: 401 }, (_, i) => sid(1000 + i)).join(", ")}]`],
     "# Mange",
   ),
+  // Long enough to scroll: the toggle must keep the reader's place.
+  [LONG]: md(["title: Lang side"], "# Lang side\n\n" + Array.from({ length: 200 }, (_, i) => `Avsnitt ${i}: fylltekst for å gi siden høyde.`).join("\n\n")),
 };
 
 /** Which PR each session merged (`/api/merges?sessions=`). */
@@ -367,5 +370,211 @@ test.describe("Wiki reader: graph mode", () => {
     await drawn(page);
     await expect(page.locator("#wikiGraph [data-graph-truncated]")).toContainText("first 400 sessions");
     await expect(laneCount(page, "session")).toHaveText("400");
+  });
+
+  // ── Fix round 1 ─────────────────────────────────────────────────────────
+
+  test("C1: toggling off an issue-only graph lands on the overview URL, and a reload stays there", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&display=graph&issue=jira:DEMO-102`);
+    await drawn(page);
+    await page.locator("body").press("g");
+    await expect(graph(page)).toHaveCount(0);
+    const params = new URL(page.url()).searchParams;
+    expect(params.get("display")).toBeNull();
+    expect(params.get("issue")).toBeNull();
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Knowledge Wiki");
+    await expect(graph(page)).toHaveCount(0);
+  });
+
+  test("C2: the toggle keeps the reader's place in the article", async ({ page }) => {
+    await openPage(page, WIKI, LONG);
+    const wrap = page.locator("#articleWrap");
+    await wrap.evaluate((el) => (el.scrollTop = 2000));
+    const before = await wrap.evaluate((el) => el.scrollTop);
+    expect(before).toBeGreaterThan(1500);
+    await page.locator("body").press("g");
+    await drawn(page);
+    await page.locator("body").press("g");
+    await expect(graph(page)).toHaveCount(0);
+    expect(await wrap.evaluate((el) => el.scrollTop)).toBe(before);
+  });
+
+  test("C3: Back and Forward between two display states of one page do not refetch the page", async ({ page }) => {
+    await openPage(page, WIKI, ANCHOR);
+    await page.locator("body").press("g");
+    await drawn(page);
+    const pageFetches: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("/api/wiki/page?")) pageFetches.push(r.url());
+    });
+    await page.goBack();
+    await expect(graph(page)).toHaveCount(0);
+    await expect(article(page)).toBeVisible();
+    await page.goForward();
+    await drawn(page);
+    expect(pageFetches).toEqual([]);
+  });
+
+  test("C4: an Ask answer leaves graph mode, and its citation opens the cited page in reading mode", async ({ page }) => {
+    await page.route("**/api/wiki/ask?*", (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body:
+          `event: sources\ndata: ${JSON.stringify({ citations: [{ n: 1, docId: "d1", title: "Arbeidsplan", badge: "wiki", pageName: "arbeidsplan", pageRelPath: PLAN_A }] })}\n\n` +
+          `event: delta\ndata: ${JSON.stringify({ text: "Svar [1]" })}\n\n` +
+          `event: done\ndata: ${JSON.stringify({ answer: "Svar [1]", cited: [1] })}\n\n`,
+      }),
+    );
+    await openPage(page, WIKI, ANCHOR, "&display=graph");
+    await drawn(page);
+    await page.locator('.wiki-conn-tab[data-conntab="ask"]').click();
+    await page.locator("#wikiAskInput").fill("Hva er planen?");
+    await page.locator("#wikiAskBtn").click();
+    await expect(page.locator(`.wiki-ask-src[data-relpath="${PLAN_A}"]`)).toBeVisible();
+    await expect(graph(page)).toHaveCount(0);
+    await page.locator(`.wiki-ask-src[data-relpath="${PLAN_A}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toContainText("arbeidsplan");
+    await expect(article(page)).toBeVisible();
+    await expect(graph(page)).toHaveCount(0);
+    expect(new URL(page.url()).searchParams.get("display")).toBeNull();
+  });
+
+  test("C5: a selection inside the graph offers no Explain pill", async ({ page }) => {
+    await openPage(page, WIKI, ANCHOR, "&display=graph");
+    await drawn(page);
+    await page.evaluate(() => {
+      const lanes = document.querySelector("#wikiGraph .wiki-graph-lanes")!;
+      const r = document.createRange();
+      r.selectNodeContents(lanes);
+      const sel = window.getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(r);
+      document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
+    await page.waitForTimeout(100);
+    await expect(page.locator("#wikiExplainBtn")).toBeHidden();
+  });
+
+  test("C6: Caps Lock G toggles; an open modal or menu anywhere refuses g", async ({ page }) => {
+    await openPage(page, WIKI, ANCHOR);
+    for (const markup of ['<div role="dialog" aria-modal="true">x</div>', '<div role="menu">x</div>', "<dialog open>x</dialog>"]) {
+      await page.evaluate((m) => {
+        const host = document.createElement("div");
+        host.id = "e2eModal";
+        host.innerHTML = m;
+        document.body.appendChild(host);
+        (document.activeElement as HTMLElement | null)?.blur();
+      }, markup);
+      await page.keyboard.press("g");
+      await expect(graph(page), markup).toHaveCount(0);
+      await page.evaluate(() => document.getElementById("e2eModal")?.remove());
+    }
+    await page.keyboard.press("G");
+    await drawn(page);
+  });
+
+  test("C7: the card takes focus, keeps the highlight, and Escape or ✕ returns focus to its node", async ({ page }) => {
+    await openPage(page, WIKI, ANCHOR, "&display=graph");
+    await drawn(page);
+    const id = "issue:jira:DEMO-101";
+    await node(page, id).click();
+    const card = page.locator("#wikiGraphCard");
+    await expect(card).toBeVisible();
+    expect(await page.evaluate(() => !!document.activeElement?.closest("#wikiGraphCard"))).toBe(true);
+    await expect(graph(page)).toHaveClass(/hovering/);
+    await expect(node(page, id)).toHaveClass(/lit/);
+    await page.keyboard.press("Escape");
+    await expect(card).toBeHidden();
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-graph-node"))).toBe(id);
+    await node(page, id).click();
+    await card.locator("[data-graph-card-close]").click();
+    await expect(card).toBeHidden();
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-graph-node"))).toBe(id);
+  });
+
+  test("C8: g g g reuses the fetched graph, and a new fetch aborts the one in flight", async ({ page }) => {
+    await openPage(page, WIKI, ANCHOR);
+    const graphFetches: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("/api/wiki/graph?")) graphFetches.push(r.url());
+    });
+    await page.locator("body").press("g");
+    await drawn(page);
+    await page.locator("body").press("g");
+    await expect(graph(page)).toHaveCount(0);
+    await page.locator("body").press("g");
+    await drawn(page);
+    expect(graphFetches).toHaveLength(1);
+
+    // Hold the depth=1 answer in the page's own fetch and record the signal it
+    // was handed; leaving graph mode while it is held must abort it.
+    await page.evaluate(() => {
+      const w = window as unknown as { __graphSignals: { url: string; signal?: AbortSignal }[] };
+      w.__graphSignals = [];
+      const real = window.fetch.bind(window);
+      (window as unknown as { fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> }).fetch = (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const u = String(input);
+        if (!u.includes("/api/wiki/graph?")) return real(input, init);
+        w.__graphSignals.push({ url: u, signal: init?.signal ?? undefined });
+        return new Promise((r) => setTimeout(r, 1500)).then(() => real(input, init));
+      };
+    });
+    await page.locator("#wikiGraphDepth").selectOption("1");
+    await expect(page.locator("#wikiGraph[aria-busy]")).toHaveCount(1);
+    await page.locator("body").press("g");
+    await expect(graph(page)).toHaveCount(0);
+    const held = await page.evaluate(() => {
+      const w = window as unknown as { __graphSignals: { url: string; signal?: AbortSignal }[] };
+      return w.__graphSignals.map((x) => ({ depth1: x.url.includes("depth=1"), aborted: x.signal?.aborted === true }));
+    });
+    expect(held).toEqual([{ depth1: true, aborted: true }]);
+    // The held answer never paints into the reading view.
+    await page.waitForTimeout(1700);
+    await expect(graph(page)).toHaveCount(0);
+    await expect(article(page)).toBeVisible();
+
+    // A new fetch (a rail click re-roots) aborts the one still in flight.
+    await page.locator("body").press("g");
+    await expect(page.locator("#wikiGraph[aria-busy]")).toHaveCount(1);
+    await page.locator(`.wiki-list-item[data-relpath="${OTHER}"]`).click();
+    await drawn(page);
+    const reRooted = await page.evaluate(() => {
+      const w = window as unknown as { __graphSignals: { url: string; signal?: AbortSignal }[] };
+      return w.__graphSignals.slice(1).map((x) => ({ other: x.url.includes("annen"), aborted: x.signal?.aborted === true }));
+    });
+    expect(reRooted).toEqual([
+      { other: false, aborted: true },
+      { other: true, aborted: false },
+    ]);
+  });
+
+  test("C9: the hover highlight survives a redraw of the edges", async ({ page }) => {
+    await openPage(page, WIKI, ANCHOR, "&display=graph");
+    await drawn(page);
+    await node(page, "pr:example-org/demo-repo#21").focus();
+    await expect(page.locator("#wikiGraph .wiki-graph-edge.lit")).toHaveCount(2);
+    const size = page.viewportSize()!;
+    await page.setViewportSize({ width: size.width - 120, height: size.height });
+    await page.waitForTimeout(300);
+    await expect(page.locator("#wikiGraph .wiki-graph-edge.lit")).toHaveCount(2);
+    await page.setViewportSize(size);
+  });
+
+  test("C10: at phone width the card is readable, not a one-letter column", async ({ page }) => {
+    // Opened wide, then narrowed: at 390 px the article column itself is a
+    // sliver (the rail keeps its width), which is main's layout, not this card's.
+    await openPage(page, WIKI, ANCHOR, "&display=graph");
+    await drawn(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await node(page, "issue:jira:DEMO-101").dispatchEvent("click");
+    const card = page.locator("#wikiGraphCard");
+    await expect(card).toBeVisible();
+    const box = (await card.boundingBox())!;
+    expect(box.width).toBeGreaterThanOrEqual(200);
   });
 });

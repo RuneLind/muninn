@@ -14,26 +14,34 @@
  *
  * Everything but the two ledger reads is index-local. The ledger is behind a
  * port so the walk unit-tests with no claude-usage.
+ *
+ * Never drawn: bookkeeping pages (`isMetaStem` — index, log, CLAUDE; `log.md`
+ * names every PR and would fan out to everything), and session refs that are
+ * not an id shape (`isSessionIdShape`), which the ledger would refuse anyway.
  */
 
-import type { WikiIndex, WikiPageMeta } from "../store.ts";
-import { enrichSessions, parsePrRef, type ProvenanceMerge } from "../provenance.ts";
-import { dedupeSessionRefs, type ProvenanceContext } from "../provenance-service.ts";
+import type { WikiIndex, WikiPageMeta } from "./store.ts";
+import { echoQuery, enrichSessions, parsePrRef, parseSessionRef, type ProvenanceMerge } from "./provenance.ts";
+import { dedupeSessionRefs, type ProvenanceContext } from "./provenance-service.ts";
 import {
   fetchMergesForSessions,
   fetchSessionsById,
+  isSessionIdShape,
+  type MergeLedgerResult,
   type SessionLedgerResult,
-} from "../session-ledger.ts";
-import { pageTimeMs } from "../../dashboard/views/components/wiki-filter.ts";
-import { trackerAdapter } from "./index.ts";
-import { isPlanPage } from "./rows.ts";
-import { COVERAGE_RELATIONS, relationsCount, type IssueKeyEntry, type TrackerConfig } from "./types.ts";
+} from "./session-ledger.ts";
+import { isMetaStem, pageStemOf, pageTimeMs } from "../dashboard/views/components/wiki-filter.ts";
+import { trackerAdapter } from "./trackers/index.ts";
+import { countingPageCount, coveringPlans, isPlanPage, issueKeyId } from "./trackers/rows.ts";
+import { relationsCount, type IssueKeyEntry, type TrackerConfig } from "./trackers/types.ts";
 import {
+  GRAPH_EDGES_MAX,
   GRAPH_LANES,
   GRAPH_NODES_MAX,
   GRAPH_SESSIONS_MAX,
   lanesForLevel,
   parseIssueRoot,
+  type GraphCap,
   type GraphEdge,
   type GraphEdgeKind,
   type GraphIssueNode,
@@ -51,43 +59,87 @@ export interface GraphLedgerPort {
   /** A claude-usage is configured; false ⇒ neither read is made. */
   configured: boolean;
   publicUrl: string | null;
-  merges: (bareIds: string[]) => Promise<{ reachable: boolean; merges: ProvenanceMerge[] }>;
+  merges: (bareIds: string[]) => Promise<MergeLedgerResult>;
   facts: (bareIds: string[]) => Promise<SessionLedgerResult>;
+  /** The caller's deadline fired — read once the walk is done. */
+  timedOut: () => boolean;
 }
 
 /** The production port: the provenance join's own ledger client, under the
- *  caller's deadline. */
-export function graphLedgerPort(ctx: ProvenanceContext, signal?: AbortSignal): GraphLedgerPort {
+ *  caller's `signal` (the deadline, and the client's own disconnect). */
+export function graphLedgerPort(
+  ctx: ProvenanceContext,
+  signal?: AbortSignal,
+  deadline?: AbortSignal,
+): GraphLedgerPort {
   return {
     configured: ctx.sessionLedger.urlConfigured,
     publicUrl: ctx.publicUrl,
     merges: (ids) => fetchMergesForSessions(ctx.sessionLedger, ids, signal),
     facts: (ids) => fetchSessionsById(ctx.sessionLedger, ids, signal),
+    timedOut: () => deadline?.aborted === true,
   };
 }
 
-export type GraphResult = { ok: true; payload: GraphPayload } | { ok: false; status: 404; error: string };
+type GraphResult = { ok: true; payload: GraphPayload } | { ok: false; status: 400 | 404; error: string };
 
-const bareId = (ref: string): string => {
-  const at = ref.indexOf(":");
-  return at <= 0 || at === ref.length - 1 ? ref : ref.slice(at + 1);
-};
+const bareId = (ref: string): string => parseSessionRef(ref).id;
 
-const issueId = (tracker: string, key: string) => `issue:${tracker}:${key}`;
+const issueId = (tracker: string, key: string) => `issue:${issueKeyId(tracker, key)}`;
 const pageId = (relPath: string) => `page:${relPath}`;
 const sessionId = (bare: string) => `session:${bare}`;
 const prId = (ref: string) => `pr:${ref.toLowerCase()}`;
 
-const GITHUB_PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/pull\/([0-9]+)(?:[/?#].*)?$/;
+/** A bookkeeping page (`index`, `log`, `CLAUDE`): never a graph node. */
+const isBookkeeping = (page: { relPath: string }): boolean => isMetaStem(pageStemOf(page.relPath));
 
-/** A merge row's PR as `owner/repo#n`: from its URL, else `<repo dir>#n`. Null
- *  for a bare merge with no PR number, which names no PR. */
-export function mergePrRef(merge: ProvenanceMerge): string | null {
+/** A page's stamped session refs that can be session ids at all. */
+const stampedSessionRefs = (page: WikiPageMeta): string[] =>
+  dedupeSessionRefs(page.sessions ?? []).filter((ref) => isSessionIdShape(bareId(ref)));
+
+const GITHUB_PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/pull\/([0-9]+)(?:[/?#].*)?$/;
+const PR_COORDINATE = /^[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+)#([0-9]+)$/;
+
+/** `<repo basename>#n`, lowercased — the part of a PR's identity a URL-less
+ *  merge row and a page's `owner/repo#n` share. */
+const prBasenameKey = (repo: string, n: number | string): string => `${repo.toLowerCase()}#${n}`;
+
+/**
+ * The PRs the wiki's pages name, keyed by {@link prBasenameKey}: each key → the
+ * page's `owner/repo#n` as first seen, or null when two pages name two
+ * DIFFERENT owners for it (a fork, or two repos sharing a name) — then no
+ * merge row is resolved onto either.
+ */
+export function knownPrRefs(pages: readonly { prRefs?: string[] }[]): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  for (const page of pages) {
+    for (const ref of page.prRefs ?? []) {
+      const m = PR_COORDINATE.exec(ref.trim());
+      if (!m) continue;
+      const k = prBasenameKey(m[1]!, m[2]!);
+      const seen = out.get(k);
+      if (seen === undefined) out.set(k, ref.trim());
+      else if (seen !== null && seen.toLowerCase() !== ref.trim().toLowerCase()) out.set(k, null);
+    }
+  }
+  return out;
+}
+
+/**
+ * A merge row's PR as `owner/repo#n`: from its URL; else the PR a page names
+ * with the same repo basename and number (case-insensitive, `known`); else
+ * `<repo dir>#n`. Null for a bare merge with no PR number, which names no PR.
+ *
+ * The middle step is what keeps one PR one node: the ledger answers `url: null`
+ * for a repo its own map does not name, and its `repo` is a checkout path, so
+ * without it the page's `owner/repo#n` and the row's `<dir>#n` were two nodes.
+ */
+export function mergePrRef(merge: ProvenanceMerge, known?: ReadonlyMap<string, string | null>): string | null {
   const m = merge.url ? GITHUB_PR_URL.exec(merge.url) : null;
   if (m) return `${m[1]}/${m[2]}#${m[3]}`;
   if (merge.prNumber === null) return null;
   const dir = merge.repo.split("/").filter(Boolean).pop() || "unknown";
-  return `${dir}#${merge.prNumber}`;
+  return known?.get(prBasenameKey(dir, merge.prNumber)) ?? `${dir}#${merge.prNumber}`;
 }
 
 interface Neighbor {
@@ -114,7 +166,6 @@ export async function buildGraph(
   index: Pick<WikiIndex, "pages" | "issueKeys" | "readerConfig" | "resolveRelPath">,
   query: GraphQuery,
   port: GraphLedgerPort,
-  signal?: AbortSignal,
 ): Promise<GraphResult> {
   const trackers = index.readerConfig?.trackers ?? [];
   if (!trackers.length) return { ok: false, status: 404, error: "this wiki names no tracker" };
@@ -122,13 +173,15 @@ export async function buildGraph(
   const planConfig = trackers[0]!;
   const lanes = new Set<GraphLane>(lanesForLevel(query.level));
   const keyMap: ReadonlyMap<string, IssueKeyEntry> = index.issueKeys ?? new Map();
+  const knownPrs = lanes.has("pr") ? knownPrRefs(index.pages) : new Map<string, string | null>();
 
   // Reverse maps, built only for the lanes this level draws.
   const pagesBySession = new Map<string, WikiPageMeta[]>();
   const pagesByPr = new Map<string, WikiPageMeta[]>();
   for (const page of index.pages) {
+    if (isBookkeeping(page)) continue;
     if (lanes.has("session")) {
-      for (const ref of dedupeSessionRefs(page.sessions ?? [])) {
+      for (const ref of stampedSessionRefs(page)) {
         const id = bareId(ref);
         const list = pagesBySession.get(id);
         if (list) list.push(page);
@@ -149,8 +202,7 @@ export async function buildGraph(
   const issueNode = (tracker: string, key: string): Omit<GraphIssueNode, "hop"> => {
     const config = configOf.get(tracker)!;
     const adapter = trackerAdapter(tracker);
-    const entry = keyMap.get(`${tracker}:${key}`);
-    const counting = entry ? entry.pages.filter((p) => relationsCount(p.relations)) : [];
+    const entry = keyMap.get(issueKeyId(tracker, key));
     return {
       id: issueId(tracker, key),
       lane: "issue",
@@ -158,10 +210,8 @@ export async function buildGraph(
       key,
       label: adapter?.label ?? tracker,
       url: adapter ? adapter.urlFor(key, config) : "",
-      pageCount: counting.length,
-      planPages: (entry?.pages ?? [])
-        .filter((p) => p.plan && p.relations.some((r) => (COVERAGE_RELATIONS as readonly string[]).includes(r)))
-        .map((p) => ({ relPath: p.relPath, title: p.title })),
+      pageCount: countingPageCount(entry),
+      planPages: coveringPlans(entry),
     };
   };
   const pageNode = (page: WikiPageMeta): Omit<GraphPageNode, "hop"> => ({
@@ -192,7 +242,7 @@ export async function buildGraph(
       unresolved: true,
     };
   };
-  const prInfo = new Map<string, { subject?: string; mergedAt?: string }>();
+  const prInfo = new Map<string, { subject?: string; mergedAt?: string; confirmed: boolean }>();
   const prNode = (ref: string): Omit<GraphPrNode, "hop"> => ({
     id: prId(ref),
     lane: "pr",
@@ -206,15 +256,20 @@ export async function buildGraph(
   const askedMerges = new Set<string>();
   let ledgerAsked = false;
   let ledgerReachable = true;
+  let mergesPartial = false;
+  let mergesTruncated = false;
   const askMerges = async (bareIds: string[]) => {
     const ask = bareIds.filter((id) => !askedMerges.has(id));
     if (!ask.length || !port.configured || !lanes.has("pr")) return;
     for (const id of ask) askedMerges.add(id);
-    ledgerAsked = true;
     const res = await port.merges(ask);
-    if (!res.reachable) ledgerReachable = false;
+    // The facts leg's rule: a leg that sent nothing says nothing about the ledger.
+    if (res.asked) ledgerAsked = true;
+    if (res.asked && !res.reachable) ledgerReachable = false;
+    if (res.partial) mergesPartial = true;
+    if (res.truncated) mergesTruncated = true;
     for (const merge of res.merges) {
-      const ref = mergePrRef(merge);
+      const ref = mergePrRef(merge, knownPrs);
       if (!ref) continue;
       const list = prsBySession.get(merge.sessionId) ?? [];
       if (!list.some((r) => prId(r) === prId(ref))) list.push(ref);
@@ -222,7 +277,8 @@ export async function buildGraph(
       const set = sessionsByPr.get(prId(ref)) ?? new Set<string>();
       set.add(merge.sessionId);
       sessionsByPr.set(prId(ref), set);
-      const info = prInfo.get(prId(ref)) ?? {};
+      const info = prInfo.get(prId(ref)) ?? { confirmed: false };
+      if (merge.mergeOk) info.confirmed = true;
       if (!info.subject && merge.subject) info.subject = merge.subject;
       if (!info.mergedAt && merge.mergedAt) info.mergedAt = merge.mergedAt;
       prInfo.set(prId(ref), info);
@@ -234,11 +290,11 @@ export async function buildGraph(
   const neighbors = (node: GraphNode): Neighbor[] => {
     const out: Neighbor[] = [];
     if (node.lane === "issue") {
-      const entry = keyMap.get(`${node.tracker}:${node.key}`);
+      const entry = keyMap.get(issueKeyId(node.tracker, node.key));
       for (const p of entry?.pages ?? []) {
         if (!relationsCount(p.relations)) continue;
         const page = index.resolveRelPath(p.relPath);
-        if (!page) continue;
+        if (!page || isBookkeeping(page)) continue;
         out.push({
           id: pageId(page.relPath),
           lane: "page",
@@ -260,7 +316,7 @@ export async function buildGraph(
         });
       }
       if (lanes.has("session")) {
-        for (const ref of dedupeSessionRefs(page.sessions ?? [])) {
+        for (const ref of stampedSessionRefs(page)) {
           const id = sessionId(bareId(ref));
           out.push({ id, lane: "session", make: () => sessionNode(ref), edge: edgeOf(node.id, "page", id, "session") });
         }
@@ -295,7 +351,7 @@ export async function buildGraph(
   };
 
   // ── Caps ──────────────────────────────────────────────────────────────────
-  const truncatedBy = new Set<"sessions" | "nodes">();
+  const truncatedBy = new Set<GraphCap>();
   let sessionCount = 0;
   const addNode = (made: Omit<GraphNode, "hop">, hop: number): boolean => {
     if (nodes.size >= GRAPH_NODES_MAX) {
@@ -315,7 +371,12 @@ export async function buildGraph(
   const edges = new Map<string, GraphEdge>();
   const addEdge = (edge: GraphEdge) => {
     const k = `${edge.source}\u0001${edge.target}`;
-    if (!edges.has(k)) edges.set(k, edge);
+    if (edges.has(k)) return;
+    if (edges.size >= GRAPH_EDGES_MAX) {
+      truncatedBy.add("edges");
+      return;
+    }
+    edges.set(k, edge);
   };
 
   // ── Roots ─────────────────────────────────────────────────────────────────
@@ -323,28 +384,35 @@ export async function buildGraph(
   let rootEcho = query.root;
   if (query.scope === "page") {
     const page = index.resolveRelPath(query.root);
-    if (!page) return { ok: false, status: 404, error: `no wiki page for relPath "${query.root}"` };
+    if (!page) return { ok: false, status: 404, error: `no wiki page for relPath "${echoQuery(query.root)}"` };
+    if (isBookkeeping(page)) {
+      return { ok: false, status: 404, error: `"${echoQuery(page.relPath)}" is a bookkeeping page, which the graph never draws` };
+    }
     rootEcho = page.relPath;
     roots.push(pageNode(page));
   } else if (query.scope === "issue") {
     const parsed = parseIssueRoot(query.root);
-    const adapter = parsed ? trackerAdapter(parsed.tracker) : undefined;
-    const key = parsed && adapter ? adapter.parseKey(parsed.key) : null;
-    const entry = parsed && key && configOf.has(parsed.tracker) ? keyMap.get(`${parsed.tracker}:${key}`) : undefined;
-    if (!parsed || !key || !entry || !entry.pages.some((p) => relationsCount(p.relations))) {
+    if (!parsed) return { ok: false, status: 400, error: `root "${echoQuery(query.root)}" is not tracker:KEY` };
+    const adapter = configOf.has(parsed.tracker) ? trackerAdapter(parsed.tracker) : undefined;
+    const key = adapter ? adapter.parseKey(parsed.key) : null;
+    if (adapter && !key) {
+      return { ok: false, status: 400, error: `root "${echoQuery(query.root)}" is not a ${adapter.label} key` };
+    }
+    const entry = key ? keyMap.get(issueKeyId(parsed.tracker, key)) : undefined;
+    if (!key || !entry || countingPageCount(entry) === 0) {
       return { ok: false, status: 404, error: "no page in this wiki relates to that issue" };
     }
     rootEcho = `${parsed.tracker}:${key}`;
     roots.push(issueNode(parsed.tracker, key));
   } else if (query.scope === "series") {
     const members = index.pages
-      .filter((p) => p.series === query.root)
+      .filter((p) => p.series === query.root && !isBookkeeping(p))
       .sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
-    if (!members.length) return { ok: false, status: 404, error: `no series "${query.root}" in this wiki` };
+    if (!members.length) return { ok: false, status: 404, error: `no series "${echoQuery(query.root)}" in this wiki` };
     for (const p of members) roots.push(pageNode(p));
   } else {
     const keys = [...keyMap.values()]
-      .filter((e) => configOf.has(e.tracker) && e.pages.some((p) => relationsCount(p.relations)))
+      .filter((e) => configOf.has(e.tracker) && countingPageCount(e) > 0)
       .sort((a, b) => (a.tracker + a.key < b.tracker + b.key ? -1 : 1));
     for (const e of keys) roots.push(issueNode(e.tracker, e.key));
   }
@@ -393,8 +461,10 @@ export async function buildGraph(
         provider: chip.provider,
         title: chip.title,
         cost: chip.cost,
-        first: chip.first,
-        last: chip.last,
+        // The ledger's own JSON: a field that is not the type it should be is
+        // null here rather than a crash in the reader's card.
+        first: typeof chip.first === "string" ? chip.first : null,
+        last: typeof chip.last === "string" ? chip.last : null,
         missing: chip.missing,
         unresolved: chip.unresolved || chip.invalid,
         ...(chip.url ? { url: chip.url } : {}),
@@ -406,6 +476,7 @@ export async function buildGraph(
     const info = prInfo.get(n.id);
     if (info?.subject) n.subject = info.subject;
     if (info?.mergedAt) n.mergedAt = info.mergedAt;
+    if (info && !info.confirmed) n.mergeUnconfirmed = true;
   }
 
   const laneRank = (l: GraphLane) => GRAPH_LANES.indexOf(l);
@@ -433,7 +504,9 @@ export async function buildGraph(
         configured: port.configured,
         asked: ledgerAsked,
         reachable: ledgerAsked ? ledgerReachable : false,
-        timedOut: signal?.aborted === true,
+        timedOut: port.timedOut(),
+        mergesPartial,
+        mergesTruncated,
       },
     },
   };

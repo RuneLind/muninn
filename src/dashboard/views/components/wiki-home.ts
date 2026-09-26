@@ -115,6 +115,9 @@ export function sameStartUrl(search: string, wiki: string, tab: StartTab, stored
   const named = (params.get("wiki") ?? params.get("bot") ?? "").trim();
   if (named && named.toLowerCase() !== wiki.toLowerCase()) return false;
   if (nonBlank(params, "relPath") || nonBlank(params, "page")) return false;
+  // Graph mode's `display=` (`wiki-filter.ts`): an issue-only graph names no
+  // page, and the overview's URL never carries it.
+  if (nonBlank(params, "display")) return false;
   return resolveStartTab(params.get(START_VIEW_PARAM), stored) === tab;
 }
 
