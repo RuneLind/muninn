@@ -21,7 +21,9 @@
  *    (3 d against 5 d) and the whole change term is scaled by `changedWeight`
  *    (0.70). On a wiki whose `workedGate` is open, a page the ledger covers
  *    decays on its `workedMs` INSTEAD — see {@link workedGateFor}.
- *  - **page age** — a change to an old page counts for less (`agePenalty`).
+ *  - **page age** — a change to an old page counts for less (`agePenalty`),
+ *    except a ledger session write: none when it is the newest stamp, and in
+ *    proportion to how far a later git update trails it (`ageTrail`).
  *  - **hub weight** — a change to a page many pages link to counts for less
  *    (`hubPenalty`), which is what keeps `log.md`-shaped traffic out.
  *  - **type** — plans count for more (`planBoost`), in-flight and proposed
@@ -144,7 +146,8 @@ const MS_PER_DAY = 86_400_000;
  * days after the edit, and the latest any change can stay is **~17.4 days** —
  * an in-flight or proposed plan (type ×1.6) with no backlinks and no creation
  * signal, whose unknown age is not discounted (see `scorePage`); measured at
- * 0.0206 at 17.3 d, dropped at 17.5 d. Backlinks and page age only pull it in,
+ * 0.0206 at 17.3 d, dropped at 17.5 d. A session-edited page of known age
+ * reaches the same bound (`ageTrail` 0). Backlinks and page age only pull it in,
  * which is the intent: a much-linked old page's edit leaves the section sooner.
  */
 export const ACTIVITY_MIN_SCORE = 0.02;
@@ -552,6 +555,16 @@ function scorePage(
   // A demotion set an update aside (named in the `why` below, when it moved
   // the row, so a page git changed yesterday that now reads `+ 6d` says why).
   const setAside = worked && updated?.kind === "updated" && updMs > workedMs;
+  // How much of the age penalty a change keeps: the share of a day by which the
+  // git update trails the page's session write, 0–1. The penalty damps git
+  // touches to old pages; a session write is a real edit. Continuous, not a
+  // cutoff, because live commit lags spread from seconds past 24 h with no gap.
+  // Read off the raw stamps, not `worked`, so a commit newer than the ledger's
+  // answer (`asOfMs` slack) is not penalized until the memo refreshes. Closed
+  // gate ⇒ `workedMs` 0 ⇒ 1, the pre-gate ranking.
+  const ageTrail = workedStandsIn(workedMs, updated)
+    ? Math.min(1, Math.max(0, (updMs - workedMs) / MS_PER_DAY))
+    : 1;
   // The change term's stamp — the only thing substitution replaces.
   const changeMs = worked ? workedMs : updMs;
   // Ages in DAYS, which is the unit every knob below is expressed in. A page
@@ -592,9 +605,11 @@ function scorePage(
     const recency = Math.pow(0.5, changeDays / w.halfLifeChangedDays);
     // An UNKNOWN age is not evidence of an old page, so it is not discounted:
     // the penalty exists to say "this page has been around a long time", which
-    // is a claim no signal here supports.
+    // is a claim no signal here supports. `ageTrail` scales it for a session
+    // write; measured 2026-09-26 on mimir, a 21-day-old plan worked 6h ago
+    // scored 0.49 (age ×0.70), 13th under rows 10, and 0.70, 8th, without.
     const age = knownAge
-      ? 1 / (1 + (w.agePenalty / 100) * (createdDays / AGE_PENALTY_REFERENCE_DAYS))
+      ? 1 / (1 + ageTrail * (w.agePenalty / 100) * (createdDays / AGE_PENALTY_REFERENCE_DAYS))
       : 1;
     const backlinks = page.backlinkCount || 0;
     const hub = 1 / (1 + (w.hubPenalty / 100) * (backlinks / HUB_PENALTY_REFERENCE_BACKLINKS));
@@ -610,7 +625,7 @@ function scorePage(
     parts.push(
       `weight ×${(w.changedWeight / 100).toFixed(2)}`,
       `recency ${recency.toFixed(2)}`,
-      `age ×${age.toFixed(2)}`,
+      `age ×${age.toFixed(2)}${knownAge && w.agePenalty > 0 && ageTrail < 1 ? " (worked)" : ""}`,
       `hub ×${hub.toFixed(2)} (${backlinks}←)`,
       `type ×${boost.toFixed(2)}`,
     );
