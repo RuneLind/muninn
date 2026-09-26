@@ -293,12 +293,37 @@ import {
   urlWithJira,
   urlWithProject,
   facetJiraKeys,
+  readDisplayParams,
+  searchWithDisplay,
+  type DisplayState,
   type ListingTracker,
   type WikiFilters,
   type WikiListing,
   type WikiSortMode,
 } from "./wiki-filter.ts";
 import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
+// Graph mode: the lanes markup, the side card and the `g` rule are pure and
+// live in that module; this file owns the state, the fetch and the DOM.
+import {
+  drawGraphEdges,
+  GRAPH_CARD_CLOSE_ATTR,
+  GRAPH_CARD_ID,
+  GRAPH_DEPTH_ID,
+  GRAPH_FOCUS_ATTR,
+  GRAPH_LEVEL_ID,
+  GRAPH_NODE_ATTR,
+  GRAPH_OPEN_ATTR,
+  GRAPH_SECTION_ID,
+  GRAPH_TOGGLE_ID,
+  graphCardHtml,
+  graphErrorHtml,
+  graphHtml,
+  graphKeyToggles,
+  graphLit,
+  graphLoadingHtml,
+  graphToggleHtml,
+} from "./wiki-graph-view.ts";
+import { graphDefaults, type GraphLevel, type GraphPayload } from "../../../wiki/trackers/graph-types.ts";
 // The provenance strip: one collapsed line under the title that opens into the
 // chain. Every string and every fragment of markup lives in that module (pure,
 // `bun test`-covered); this file only decides WHERE it goes and wires the three
@@ -446,14 +471,48 @@ function withWiki(url: string): string {
  *  facet filters (`articleUrl`) — the rail stays narrowed when an article
  *  opens, so a URL without them would describe a different screen. */
 function pageUrl(name: string): string {
-  return articleUrl(WIKI, "page", name, filters.project, filters.jira);
+  return articleUrl(WIKI, "page", name, filters.project, filters.jira, displayState());
 }
 /** Collision-proof shareable URL keyed by the page's exact relPath — used for
  *  pages opened via the Atlas tab so Back/reload/share re-resolve the SAME page
  *  even on a wiki with same-stem pages in different folders (the `?page=` name
  *  route resolves first-stem-match). Carries both facets for the same reason. */
 function pageUrlByRelPath(relPath: string): string {
-  return articleUrl(WIKI, "relPath", relPath, filters.project, filters.jira);
+  return articleUrl(WIKI, "relPath", relPath, filters.project, filters.jira, displayState());
+}
+
+// ── Graph mode state ──────────────────────────────────────────────────
+/**
+ * Graph mode is URL state only (`display=graph`, `issue=`; see `wiki-filter.ts`):
+ * read at boot and on popstate, written on every toggle and re-root, carried by
+ * every article URL, never stored per wiki. A rail or wikilink click keeps the
+ * mode and re-roots on the page it opens (`issue` cleared); Focus here on an
+ * issue node roots at the issue.
+ */
+let graphMode = false;
+/** `tracker:KEY` when the graph is rooted at an issue, else `""` (the open page). */
+let graphIssue = "";
+/** The lanes and depth the reader picked; `null` ⇒ the scope's defaults. Not
+ *  URL state: a shared link opens at the defaults. */
+let graphLevel: GraphLevel | null = null;
+let graphDepth: number | null = null;
+/** Sequence guard for the graph fetch — a fast re-root must not paint an older answer. */
+let graphSeq = 0;
+/** The graph on screen, for hover and the card. */
+let graphData: GraphPayload | null = null;
+let graphResize: ResizeObserver | null = null;
+
+/** Does this wiki name a tracker? Graph mode exists only there. */
+function hasTracker(): boolean {
+  return Object.keys(trackerLabels).length > 0;
+}
+function displayState(): DisplayState {
+  return graphMode && hasTracker() ? { graph: true, issue: graphIssue } : { graph: false, issue: "" };
+}
+function syncDisplayFromUrl(): void {
+  const d = readDisplayParams(location.search);
+  graphMode = d.graph;
+  graphIssue = d.issue;
 }
 
 let allPages: WikiListing[] = [];
@@ -2527,6 +2586,10 @@ function renderStart(): void {
   currentName = null;
   currentRelPath = null; // the two identities are cleared together, always
   currentPageHash = null;
+  // The overview has no graph, and its URL carries no `display=`: leaving an
+  // article for it leaves graph mode too. Back restores it from the URL.
+  graphMode = false;
+  graphIssue = "";
   hideBreadcrumb(); // no page open — the breadcrumb has nothing to show
   let html =
     '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>' +
@@ -3407,6 +3470,8 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
     head += `<a class="wiki-source-url" href="${esc(m.url)}" target="_blank" rel="noopener">Open source ↗</a>`;
   }
   head += projectHubChipHtml(m);
+  // Graph mode's toggle, on a wiki with a tracker only.
+  if (hasTracker()) head += graphToggleHtml(displayState().graph);
   // The meta row closes first: the strip is a BLOCK under it (the Jira row plus
   // one line of cost), not another chip competing with the tags and dates.
   head += "</div>";
@@ -3440,6 +3505,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   currentRelPath = m.relPath;
   navInFlight = false; // `currentName` now carries the "article" signal on its own
   if (push) {
+    graphIssue = ""; // a click opens a page: graph mode re-roots on it
     history.pushState({ relPath: m.relPath }, "", pageUrlByRelPath(m.relPath));
   }
   renderBreadcrumb(m);
@@ -3450,6 +3516,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
     articleHeadHtml(m) +
     `<iframe class="wiki-explainer-frame" src="${esc(src)}" sandbox="${EXPLAINER_SANDBOX}" title="${esc(m.title)}"></iframe>`;
   document.getElementById("articleWrap")!.scrollTop = 0;
+  applyDisplay();
   document.getElementById("connBody")!.innerHTML = '<div class="wiki-conn-empty">Loading…</div>';
   fetch(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(m.relPath)))
     .then((r) => r.json())
@@ -3592,6 +3659,7 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       currentPageHash = typeof data.hash === "string" ? data.hash : null;
       renderBreadcrumb(data.meta);
       if (push) {
+        graphIssue = ""; // a click opens a page: graph mode re-roots on it
         // Push the resolved relPath whenever we have one, even for a by-name
         // navigation — that is what makes reload/Back/share land on the SAME page
         // instead of re-resolving the stem to the first registration.
@@ -3630,6 +3698,7 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // Fact-check layer: chip → evidence card, the summary strip, and the
       // layer toggle. No-op on a page carrying no annotation.
       enhanceFactCheck(document.getElementById("articleWrap")!);
+      applyDisplay();
       renderConnections(data);
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
@@ -3644,6 +3713,243 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       renderList();
     });
 }
+
+// ── Graph mode ────────────────────────────────────────────────────────
+/** What the graph is rooted at: the issue named by `issue=`, else the open page. */
+function graphRoot(): { scope: "page" | "issue"; root: string } | null {
+  if (graphIssue) return { scope: "issue", root: graphIssue };
+  if (currentRelPath) return { scope: "page", root: currentRelPath };
+  return null;
+}
+
+/**
+ * Show or hide the graph to match {@link displayState}. The article stays in
+ * the DOM under the graph (hidden, not replaced), so turning graph mode off is
+ * instant and keeps the reader's place in the article.
+ */
+function applyDisplay(): void {
+  const wrap = document.getElementById("articleWrap");
+  if (!wrap) return;
+  const on = displayState().graph && graphRoot() !== null;
+  const toggle = document.getElementById(GRAPH_TOGGLE_ID);
+  if (toggle) {
+    toggle.classList.toggle("on", on);
+    toggle.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  wrap.querySelectorAll<HTMLElement>(":scope > .wiki-article, :scope > .wiki-explainer-frame").forEach((el) => {
+    el.classList.toggle("wiki-graph-hidden", on);
+  });
+  if (!on) {
+    removeGraph();
+    return;
+  }
+  loadGraph();
+}
+
+function removeGraph(): void {
+  graphSeq++;
+  graphData = null;
+  graphResize?.disconnect();
+  graphResize = null;
+  document.getElementById(GRAPH_SECTION_ID)?.remove();
+}
+
+function loadGraph(): void {
+  const r = graphRoot();
+  const wrap = document.getElementById("articleWrap");
+  if (!r || !wrap) return;
+  const existing = document.getElementById(GRAPH_SECTION_ID);
+  if (existing) existing.outerHTML = graphLoadingHtml();
+  else wrap.insertAdjacentHTML("beforeend", graphLoadingHtml());
+  graphResize?.disconnect();
+  graphResize = null;
+  graphData = null;
+  const seq = ++graphSeq;
+  const d = graphDefaults(r.scope, graphLevel ?? undefined);
+  const level = graphLevel ?? d.level;
+  const depth = graphDepth ?? d.depth;
+  const paint = (html: string) => {
+    if (seq !== graphSeq) return false;
+    const el = document.getElementById(GRAPH_SECTION_ID);
+    if (!el) return false;
+    el.outerHTML = html;
+    return true;
+  };
+  fetch(
+    withWiki(
+      `/api/wiki/graph?scope=${r.scope}&root=${encodeURIComponent(r.root)}&depth=${depth}&level=${level}`,
+    ),
+  )
+    .then(async (res) => ({ ok: res.ok, body: (await res.json()) as GraphPayload & { error?: string } }))
+    .then(({ ok, body }) => {
+      if (!ok || body.error) {
+        paint(graphErrorHtml(body.error || "Graph unavailable."));
+        return;
+      }
+      const rootNode = body.nodes.find((n) => n.hop === 0);
+      const rootLabel =
+        r.scope === "issue"
+          ? r.root.slice(r.root.indexOf(":") + 1)
+          : rootNode && rootNode.lane === "page"
+            ? rootNode.title
+            : r.root;
+      if (!paint(graphHtml(body, { level, depth, rootLabel }))) return;
+      graphData = body;
+      layoutGraph();
+    })
+    .catch(() => {
+      paint(graphErrorHtml("Graph unavailable."));
+    });
+}
+
+/** Draw the edges once the lanes are laid out, and again whenever the canvas
+ *  changes size (the rail, the right pane, the window). */
+function layoutGraph(): void {
+  const section = document.getElementById(GRAPH_SECTION_ID);
+  if (!section || !graphData) return;
+  const edges = graphData.edges;
+  drawGraphEdges(section, edges);
+  const canvas = section.querySelector<HTMLElement>(".wiki-graph-canvas");
+  if (canvas && typeof ResizeObserver !== "undefined") {
+    graphResize = new ResizeObserver(() => drawGraphEdges(section, edges));
+    graphResize.observe(canvas);
+  }
+}
+
+/** Light the hovered node's neighbourhood and its path to the root; `null` clears. */
+function lightGraph(id: string | null): void {
+  const section = document.getElementById(GRAPH_SECTION_ID);
+  if (!section || !graphData) return;
+  const lit = id ? graphLit(graphData, id) : null;
+  section.classList.toggle("hovering", !!lit);
+  section.querySelectorAll<HTMLElement>(`[${GRAPH_NODE_ATTR}]`).forEach((el) => {
+    el.classList.toggle("lit", !!lit && lit.nodes.has(el.getAttribute(GRAPH_NODE_ATTR) || ""));
+  });
+  section.querySelectorAll<SVGPathElement>(".wiki-graph-edge").forEach((el) => {
+    el.classList.toggle("lit", !!lit && lit.edges.has(el.getAttribute("data-edge") || ""));
+  });
+}
+
+function openGraphCard(id: string): void {
+  const node = graphData?.nodes.find((n) => n.id === id);
+  const card = document.getElementById(GRAPH_CARD_ID);
+  if (!node || !card) return;
+  card.innerHTML = graphCardHtml(node, { isRoot: node.hop === 0 });
+  card.hidden = false;
+  document.querySelectorAll<HTMLElement>(`#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`).forEach((el) => {
+    el.classList.toggle("selected", el.getAttribute(GRAPH_NODE_ATTR) === id);
+  });
+}
+
+function closeGraphCard(): void {
+  const card = document.getElementById(GRAPH_CARD_ID);
+  if (card) card.hidden = true;
+  document.querySelectorAll(`#${GRAPH_SECTION_ID} .wiki-graph-node.selected`).forEach((el) => el.classList.remove("selected"));
+}
+
+/** Write the display state into the address bar as a NEW entry, so Back
+ *  returns to the previous mode or root. */
+function pushDisplay(): void {
+  history.pushState(history.state, "", location.pathname + searchWithDisplay(location.search, displayState()) + location.hash);
+}
+
+/** The toggle and `g`. Off from an issue-only graph (no page open) returns to
+ *  the overview, which is the only reading view there is. */
+function toggleGraph(): void {
+  if (!hasTracker()) return;
+  const on = !displayState().graph;
+  if (!on && !currentRelPath) {
+    graphMode = false;
+    graphIssue = "";
+    goToStart();
+    return;
+  }
+  graphMode = on;
+  if (!on) graphIssue = "";
+  pushDisplay();
+  applyDisplay();
+}
+
+/** Focus here: an issue node roots the graph at the issue; a page node opens
+ *  that page, still in graph mode, rooted at it. */
+function focusGraphNode(id: string): void {
+  const node = graphData?.nodes.find((n) => n.id === id);
+  if (!node) return;
+  if (node.lane === "issue") {
+    graphIssue = `${node.tracker}:${node.key}`;
+    pushDisplay();
+    if (currentRelPath) applyDisplay();
+    else renderIssueGraph();
+  } else if (node.lane === "page") {
+    loadPageByRelPath(node.relPath, true);
+  }
+}
+
+/** `?display=graph&issue=jira:KEY` with no page open: the issue's own head and
+ *  its graph fill the article pane. */
+function renderIssueGraph(): void {
+  const wrap = document.getElementById("articleWrap");
+  if (!wrap) return;
+  setAtlasFull(false);
+  currentName = null;
+  currentRelPath = null;
+  currentPageHash = null;
+  hideBreadcrumb();
+  const at = graphIssue.indexOf(":");
+  const tracker = graphIssue.slice(0, at);
+  const key = graphIssue.slice(at + 1);
+  wrap.innerHTML =
+    `<div class="wiki-article-head"><h1>${esc(key)}</h1><div class="wiki-meta-row">` +
+    `<span class="wiki-dates">${esc(trackerLabels[tracker] || tracker)} issue</span>${graphToggleHtml(true)}</div></div>`;
+  wrap.scrollTop = 0;
+  const conn = document.getElementById("connBody");
+  if (conn) conn.innerHTML = '<div class="wiki-conn-empty">No page open.</div>';
+  applyDisplay();
+}
+
+document.addEventListener("mouseover", (e) => {
+  const t = e.target as HTMLElement | null;
+  const node = t?.closest?.(`#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`);
+  if (node) lightGraph(node.getAttribute(GRAPH_NODE_ATTR));
+});
+document.addEventListener("mouseout", (e) => {
+  const t = e.target as HTMLElement | null;
+  if (!t?.closest?.(`#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`)) return;
+  const to = (e as MouseEvent).relatedTarget as HTMLElement | null;
+  if (!to?.closest?.(`#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`)) lightGraph(null);
+});
+document.addEventListener("focusin", (e) => {
+  const t = e.target as HTMLElement | null;
+  const node = t?.closest?.(`#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`);
+  lightGraph(node ? node.getAttribute(GRAPH_NODE_ATTR) : null);
+});
+document.addEventListener("change", (e) => {
+  const t = e.target as HTMLSelectElement | null;
+  if (!t) return;
+  if (t.id === GRAPH_LEVEL_ID) graphLevel = Number(t.value) as GraphLevel;
+  else if (t.id === GRAPH_DEPTH_ID) graphDepth = Number(t.value);
+  else return;
+  loadGraph();
+});
+document.addEventListener("keydown", (e) => {
+  const t = e.target as HTMLElement | null;
+  const toggles = graphKeyToggles({
+    key: e.key,
+    ctrlKey: e.ctrlKey,
+    metaKey: e.metaKey,
+    altKey: e.altKey,
+    shiftKey: e.shiftKey,
+    repeat: e.repeat,
+    targetTag: t?.tagName ?? null,
+    targetEditable: !!t?.isContentEditable,
+    targetInDialog: !!t?.closest?.('[aria-modal="true"], dialog[open]'),
+  });
+  // Only where the toggle is on screen: an article or an issue graph, on a
+  // wiki with a tracker — never the overview or an Ask answer.
+  if (!toggles || !document.getElementById(GRAPH_TOGGLE_ID)) return;
+  e.preventDefault();
+  toggleGraph();
+});
 
 // ── Event wiring (all clicks delegated) ───────────────────────────────
 document.body.addEventListener("click", (e) => {
@@ -3736,6 +4042,37 @@ document.body.addEventListener("click", (e) => {
     e.preventDefault();
     const rel = seriesGo.getAttribute("data-series-go") || "";
     if (rel) loadPageByRelPath(rel, true);
+    return;
+  }
+  // Graph mode: the toggle, a node (opens its card), the card's controls.
+  if (target.closest && target.closest(`#${GRAPH_TOGGLE_ID}`)) {
+    e.preventDefault();
+    toggleGraph();
+    return;
+  }
+  const graphFocus = target.closest ? target.closest(`[${GRAPH_FOCUS_ATTR}]`) : null;
+  if (graphFocus) {
+    e.preventDefault();
+    focusGraphNode(graphFocus.getAttribute(GRAPH_FOCUS_ATTR) || "");
+    return;
+  }
+  const graphOpen = target.closest ? target.closest(`[${GRAPH_OPEN_ATTR}]`) : null;
+  if (graphOpen) {
+    e.preventDefault();
+    graphMode = false;
+    graphIssue = "";
+    loadPageByRelPath(graphOpen.getAttribute(GRAPH_OPEN_ATTR) || "", true);
+    return;
+  }
+  if (target.closest && target.closest(`[${GRAPH_CARD_CLOSE_ATTR}]`)) {
+    e.preventDefault();
+    closeGraphCard();
+    return;
+  }
+  const graphNode = target.closest ? target.closest(`[${GRAPH_NODE_ATTR}]`) : null;
+  if (graphNode) {
+    e.preventDefault();
+    openGraphCard(graphNode.getAttribute(GRAPH_NODE_ATTR) || "");
     return;
   }
   // Connections' Link and Link all. Before the Jira key below: a Link button
@@ -4043,6 +4380,8 @@ window.addEventListener("popstate", () => {
   const jiraBefore = filters.jira;
   adoptJiraFilter(true);
   if (filters.jira !== jiraBefore) repaintForJira(false);
+  // Graph mode is URL state: Back and Forward restore it with the page.
+  syncDisplayFromUrl();
   // A relPath URL round-trips collision-proof (and is what every in-reader
   // navigation now pushes); check it first, `?page=` stays for older links.
   const relPath = params.get("relPath");
@@ -4052,6 +4391,7 @@ window.addEventListener("popstate", () => {
   }
   const page = params.get("page");
   if (page) loadPage(page, false);
+  else if (graphMode && graphIssue && hasTracker()) renderIssueGraph();
   else {
     syncStartTabFromUrl();
     renderStart();
@@ -6881,6 +7221,7 @@ function bootRender(applied: PendingPages): void {
     return;
   }
   const params = new URLSearchParams(location.search);
+  syncDisplayFromUrl();
   // A shared/reloaded relPath URL re-resolves collision-proof; check it first
   // (`?page=` remains for links written before relPath URLs were pushed).
   const relPath = params.get("relPath");
@@ -6889,7 +7230,11 @@ function bootRender(applied: PendingPages): void {
   } else {
     const page = params.get("page");
     if (page) loadPage(page, false);
-    else renderStart(); // renders the list itself
+    // `?display=graph&issue=jira:KEY` with no page: the issue's graph alone.
+    else if (graphMode && graphIssue && hasTracker()) {
+      renderIssueGraph();
+      renderList();
+    } else renderStart(); // renders the list itself
   }
 }
 

@@ -94,6 +94,9 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // one page, split off `GET /api/wiki/page` so the page open never waits on
   // it. Listed for the same reason — it is the amplifier under its own path.
   "/api/wiki/page/provenance",
+  // Graph mode: at level 2 and up the same ledger reads, for every session a
+  // walk reaches — up to `GRAPH_SESSIONS_MAX` refs behind one GET.
+  "/api/wiki/graph",
   // The two WebSocket upgrades. They never reach this middleware — `src/index.ts`
   // handles them inside `Bun.serve`'s `fetch`, before `app.fetch` — and the
   // enforcement point is `src/auth/ws-upgrade.ts`, which consults this same

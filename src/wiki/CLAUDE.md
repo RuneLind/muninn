@@ -2250,6 +2250,88 @@ gate, coverage, the deferred rows, the ledger cap and deadline, the page route,
 the no-tracker pin), `views/components/wiki-issue-rows.test.ts`,
 `wiki-stamp.test.ts` (the tracker form) and `e2e/wiki-tracker-connections.spec.ts`.
 
+### Graph mode (`trackers/graph.ts`, `GET /api/wiki/graph`, `views/components/wiki-graph-view.ts`)
+
+On a wiki with a tracker, the article pane has a **◇ Graph** toggle: four
+lanes — issues, pages, sessions, PRs — with the article hidden under them
+(hidden, not replaced, so turning it off keeps the reader's place). A wiki with
+no `trackers` block has no toggle, `g` does nothing there, and the route answers
+404 `this wiki names no tracker`.
+
+- **The route.** `GET /api/wiki/graph?wiki=&scope=page|issue|series|wiki&root=&depth=&level=`
+  answers `{scope, root, depth, level, lanes, nodes, edges, truncated?,
+  truncatedBy?, ledger}` (`trackers/graph-types.ts`, dependency-free, shared
+  with the client). `root` is a relPath (`page`), `tracker:KEY` (`issue`), a
+  series key (`series`), and ignored at `wiki` scope, whose roots are every
+  key with a counting page. 400 names the bad parameter; 404 for an unknown
+  wiki, page, series, or a key no page counts. Registered inside the `wiki`
+  route group (`MUNINN_PROFILE=nais` drops it) and on `SIDE_EFFECTING_GETS`
+  beside the two provenance paths.
+- **Level** picks the lanes: 1 is issues and pages, 2 adds sessions, 3 adds
+  PRs. **Depth** is hops from the root, walking only those lanes, over four
+  edge kinds: issue–page (the key map, counting relations only), page–session
+  (the page's stamped `sessions:` — the ONLY source of sessions), page–PR (the
+  page's `prRefs`, so a PR is one hop from its page with no session stamped)
+  and session–PR (`/api/merges?sessions=`). Defaults: `page` and `issue` depth
+  2, level 3; `series` depth 2, level 1; `wiki` level 1 and a depth equal to
+  its level (issues are its roots, so that reaches every lane it draws).
+  `depth` is 0–4 (`GRAPH_DEPTH_MAX`).
+- ⚠️ **`link` and `mention` are never edges.** A page whose only relations to a
+  key are those two is not in that key's graph, and a mention-only key on the
+  root page is not drawn. Level 1 makes no ledger call.
+- **The ledger.** Session facts come from ONE batched `fetchSessionsById`
+  after the walk; merges are asked per hop, for the sessions the walk EXPANDS
+  — a session at the last hop is never asked, so an edge from it to a PR
+  already drawn is not found. `/api/merges?prs=` is not asked: it would name
+  sessions no page stamped. Every read shares one `PROVENANCE_BUDGET_MS`
+  deadline, armed only at level 2 and up on a host with a claude-usage.
+  Without one, sessions are drawn from the pages, `unresolved`, and PRs come
+  from `prRefs` alone. A merge row's PR is `owner/repo#n` off its GitHub URL,
+  else `<repo dir>#n`; a row with no PR number names no PR.
+- **Caps.** `GRAPH_SESSIONS_MAX` (400) session refs and `GRAPH_NODES_MAX`
+  (1500) nodes; past either the walk stops adding that kind, the answer
+  carries `truncated: true` and `truncatedBy`, and the reader shows a banner.
+- **What the nodes carry**, for the board that reads `scope=wiki&level=1`
+  next: a page node its `prRefs`, `pageTimeMs` (the reader's recency key,
+  `wiki-filter.ts`) and `plan` at every level; an issue node its key, label,
+  `urlFor` link, counting `pageCount` and `planPages`. Nothing from huginn: the
+  route is index-local plus the ledger.
+- **URL state.** `?display=graph` turns graph mode on and `issue=tracker:KEY`
+  roots it at an issue (`readDisplayParams`, `urlWithDisplay`,
+  `searchWithDisplay` in `wiki-filter.ts`). Not `view=`, which is the overview's
+  start tab, and not stored per wiki: the address bar is the only place it
+  lives. `articleUrl` carries both, after `jira=`, so every pushed article URL
+  keeps the mode; `issue=` is independent of `jira=`, the facet filter, and is
+  read only beside `display=graph`. The toggle, `g` and Focus here PUSH an
+  entry, so Back restores the previous mode or root; popstate and boot re-read
+  the URL. A rail or wikilink click keeps graph mode and re-roots on the page
+  it opens (`issue` cleared). Returning to the overview leaves graph mode. With
+  `issue=` and no page, the pane shows the issue's own head and its graph;
+  toggling off there returns to the overview.
+- **`g`** toggles (`graphKeyToggles`), only while the toggle is on screen, and
+  never with a modifier held (⌘G/Ctrl+G is find-next, Shift makes `G`), on key
+  repeat, inside a modal dialog, or with focus in an input, textarea, select or
+  contenteditable element — the Ask box, the follow-up input, the series
+  editor. `]` and `f` stay the pane toggles', `t` the theme's.
+- **Reading it.** Nodes stack per lane, root outlined; edges are curves from a
+  node's right edge to the next lane's left (page–PR dashed, since it crosses
+  the session lane), redrawn on resize. Hover (or focus) lights the node, its
+  neighbours and one path back to the root (`graphLit`). A click opens the side
+  card: **Focus here** (an issue re-roots at the issue; a page opens that page,
+  still in graph mode), **Open** (a page, in reading mode) and the tracker link
+  (an issue), or the PR or session link. The Lanes and Depth selects re-fetch;
+  they are not URL state, so a shared link opens at the defaults.
+
+Acceptance: `trackers/graph.test.ts` (the walk, the counting rule, the caps,
+the scopes and their defaults), `routes/wiki-graph.test.ts` (the 400/404
+ladder, the no-tracker answer, the ledger fan-out per level),
+`views/components/wiki-graph-view.test.ts` (the `g` rule, the URL helpers, the
+markup, the card, `graphLit`) and `e2e/wiki-tracker-graph.spec.ts` (the four
+lanes' counts on the created-keys page, no ledger call at `wiki` scope, no
+toggle without a tracker, `g` and its refusals, the `issue=` deep link,
+Back/Forward, a rail click re-rooting, the card, hover and the truncated
+banner).
+
 ### The client (`views/components/wiki-provenance-view.ts`)
 
 **One surface: a collapsed line under the title that opens into the chain.**
