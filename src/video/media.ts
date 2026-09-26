@@ -306,6 +306,13 @@ export interface DownloadOptions {
    * of audio in that download is spent on nothing.
    */
   format?: string;
+  /**
+   * yt-dlp `--use-extractors` allowlist. Absent ⇒ no flag, yt-dlp's default set.
+   * A caller whose URL is gated to one site sets it so an extractor's own
+   * hand-off (X's TwitterIE returns a media-less tweet's first link as a new
+   * URL) cannot reach `[generic]`, which fetches anything.
+   */
+  extractors?: readonly string[];
 }
 
 /**
@@ -322,6 +329,7 @@ export function ytDlpDownloadArgs(
     "-f",
     opts.format ?? YTDLP_FORMAT_SELECTOR,
     "--no-playlist",
+    ...(opts.extractors?.length ? ["--use-extractors", opts.extractors.join(",")] : []),
     "-o",
     join(workDir, "video.%(ext)s"),
     // `after_move:` prints once the file is in place and, unlike a bare -O,

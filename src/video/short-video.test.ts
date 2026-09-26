@@ -42,7 +42,7 @@ let extractShouldThrow = false;
 let downloadCalls: Array<{
   url: string;
   workDir: string;
-  opts?: { maxDurationSeconds?: number; timeoutMs?: number };
+  opts?: { maxDurationSeconds?: number; timeoutMs?: number; extractors?: readonly string[] };
 }> = [];
 let extractCalls = 0;
 let summarizeTimeoutArgs: { frameCount: number; floorMs: number } | undefined;
@@ -94,7 +94,7 @@ mock.module("./media.ts", () => ({
   downloadVideo: async (
     url: string,
     workDir: string,
-    opts?: { maxDurationSeconds?: number; timeoutMs?: number },
+    opts?: { maxDurationSeconds?: number; timeoutMs?: number; extractors?: readonly string[] },
   ) => {
     downloadCalls.push({ url, workDir, opts });
     return {
@@ -272,6 +272,9 @@ const VERTICALS = [
     collection: "tiktok-summaries",
     workDirPrefix: "muninn-tiktok-",
     maxDurationSeconds: 3600,
+    // Unset: the bare and m. hosts the route accepts reach TikTokIE only via
+    // `[generic]`'s redirect (measured), so an allowlist would refuse them.
+    ytDlpExtractors: undefined,
   },
   {
     name: "x-video",
@@ -297,6 +300,9 @@ const VERTICALS = [
     collection: "x-articles",
     workDirPrefix: "muninn-x-video-",
     maxDurationSeconds: 10800,
+    // A media-less tweet hands its first link back to yt-dlp; only `twitter`
+    // may take it, never `[generic]`.
+    ytDlpExtractors: ["twitter"],
   },
 ] as const;
 
@@ -557,6 +563,8 @@ for (const v of VERTICALS) {
 
       expect(downloadCalls[0]!.opts?.maxDurationSeconds).toBe(v.maxDurationSeconds);
       expect(downloadCalls[0]!.opts?.timeoutMs).toBe(600_000);
+      expect(downloadCalls[0]!.opts?.extractors).toEqual(v.ytDlpExtractors);
+      expect(v.spec.ytDlpExtractors).toEqual(v.ytDlpExtractors);
       // Raising the cap alone just moves the failure to whisper/ffmpeg.
       expect(transcribeCalls[0]!.opts?.whisperTimeoutMs).toBe(619_000);
       expect(transcribeCalls[0]!.opts?.audioTimeoutMs).toBe(123_800);
@@ -849,6 +857,7 @@ describe("what the two specs do NOT share", () => {
       "store",
       "visualWarning",
       "workDirPrefix",
+      "ytDlpExtractors",
     ]);
   });
 

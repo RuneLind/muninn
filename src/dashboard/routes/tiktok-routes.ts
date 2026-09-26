@@ -8,6 +8,7 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
+import { parseAllowedHttpsUrl } from "./url-gate.ts";
 import { applyCors } from "../../auth/cors.ts";
 import {
   shortVideoCaptureBlocker,
@@ -43,38 +44,9 @@ interface TtDocumentMeta { id: string; url?: string }
  */
 const TIKTOK_HOSTS = new Set(["tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"]);
 
-/**
- * Parse a caller-supplied URL ONCE and return it only if it is an https URL on a
- * TikTok host, with no credentials and no explicit port. Callers hand the
- * returned `href` downstream, never the raw string: yt-dlp is Python and parses
- * differently from WHATWG (`https://www.tiktok.com\@127.0.0.1/x` is TikTok to
- * `new URL` and loopback to yt-dlp), so the gate must judge the string the sink
- * receives. The raw-form checks below are belt and braces on top of that: a
- * string WHATWG would have to normalise (backslash, control or whitespace
- * characters, a percent-escape or any userinfo/port syntax in the authority, a
- * missing `//`) is refused rather than normalised.
- */
+/** {@link parseAllowedHttpsUrl} over {@link TIKTOK_HOSTS}; callers hand `href` downstream. */
 export function parseAllowedTikTokUrl(raw: string): URL | null {
-  if (raw !== raw.trim() || /[\\\x00-\x20\x7f]|\s/.test(raw)) return null;
-  const scheme = raw.slice(0, 8).toLowerCase();
-  if (scheme !== "https://") return null;
-  const authority = raw.slice(8).split(/[/?#]/, 1)[0]!;
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return null;
-  }
-  const ok =
-    u.protocol === "https:" &&
-    TIKTOK_HOSTS.has(u.hostname) &&
-    u.port === "" &&
-    u.username === "" &&
-    u.password === "" &&
-    // The authority as typed IS the host: no `%`, `@`, `:`, fullwidth or other
-    // form that WHATWG maps onto an allowed hostname.
-    authority.toLowerCase() === u.hostname;
-  return ok ? u : null;
+  return parseAllowedHttpsUrl(raw, TIKTOK_HOSTS);
 }
 
 /** Boolean form of {@link parseAllowedTikTokUrl}. */

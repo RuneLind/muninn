@@ -124,6 +124,14 @@ export interface ShortVideoSpec extends ShortVideoPromptSpec, ShortVideoFinishSp
    * `short-video.test.ts`.
    */
   readonly idLogKey: string;
+  /**
+   * The yt-dlp extractors this vertical's download may use (`--use-extractors`,
+   * fullmatch regexes); undefined ⇒ yt-dlp's default set. X pins `twitter`:
+   * TwitterIE hands a media-less tweet's first link (author-controlled) back to
+   * yt-dlp, and under the default set that reached `[generic]`, which fetched a
+   * loopback listener (measured 2026-09-26, yt-dlp 2026.08.19).
+   */
+  readonly ytDlpExtractors: readonly string[] | undefined;
   readonly store: ShortVideoStore;
 }
 
@@ -175,6 +183,7 @@ export async function summarizeShortVideo(
     const dl = await downloadVideo(url, workDir, {
       maxDurationSeconds: spec.maxDurationSeconds,
       timeoutMs: DOWNLOAD_TIMEOUT_MS,
+      extractors: spec.ytDlpExtractors,
     });
 
     const canonicalUrl = spec.canonicalUrl(dl.canonicalUrl, url);

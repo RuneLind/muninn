@@ -9,6 +9,7 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
+import { parseAllowedHttpsUrl } from "./url-gate.ts";
 import { applyCors, corsHeaders } from "../../auth/cors.ts";
 import {
   shortVideoCaptureBlocker,
@@ -30,6 +31,30 @@ const XA_COLLECTION = XA_SOURCE.collection;
 const XV_FRAME_NOUN = "video frames";
 
 interface XaDocumentMeta { id: string; url?: string }
+
+/** The hosts POST /api/x-articles/summarize-video may hand to yt-dlp — the set
+ *  `extractXStatusId` already accepted, and what the X extension sends. */
+const X_HOSTS = new Set(["x.com", "www.x.com", "twitter.com", "www.twitter.com"]);
+
+/**
+ * The status-path shapes yt-dlp's TwitterIE matches — `/<user>/status/<id>` and
+ * `/i/web/status/<id>` (`/i/status/<id>` is the `<user>` form), with any suffix
+ * after a `/`. Anchored, so `/a/b/status/<id>` or `/i/cards/.../status/<id>`,
+ * which TwitterIE does NOT match and which would fall to another extractor, are
+ * refused. Tweet ids are ≤19 digits; 20 is the cap.
+ */
+const X_STATUS_PATH = /^\/(?:i\/web|[^/]+)\/status\/(\d{1,20})(?:\/|$)/;
+
+/**
+ * {@link parseAllowedHttpsUrl} over {@link X_HOSTS}, then the anchored status
+ * path. Returns the parsed URL and the status id read off its PATHNAME, or null.
+ * Callers hand `url.href` downstream, never the raw string.
+ */
+export function parseAllowedXStatusUrl(raw: string): { url: URL; statusId: string } | null {
+  const u = parseAllowedHttpsUrl(raw, X_HOSTS);
+  const match = u?.pathname.match(X_STATUS_PATH);
+  return u && match ? { url: u, statusId: match[1]! } : null;
+}
 
 /**
  * Video dedup keys on the numeric status id, not URL string equality — the
@@ -186,19 +211,25 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
       frames?: boolean;
       kind?: unknown;
     }>();
-    const { title, url, frames } = body;
+    const { title, url: rawUrl, frames } = body;
 
-    if (!url) {
+    if (!rawUrl) {
       return c.json({ error: "Missing required field: url" }, 400);
     }
 
-    const statusId = extractXStatusId(url);
-    if (!statusId) {
+    const accepted = typeof rawUrl === "string" ? parseAllowedXStatusUrl(rawUrl) : null;
+    if (!accepted) {
       return c.json(
-        { error: "Not an X status URL — expected https://x.com/<user>/status/<id>[/video/N]" },
+        {
+          error: "Not an X status URL — expected https://x.com/<user>/status/<id>[/video/N]",
+          code: "bad_url",
+        },
         400,
       );
     }
+    // Everything below — dedup, the job row, yt-dlp — gets the parsed href.
+    const url = accepted.url.href;
+    const statusId = accepted.statusId;
 
     // Preflight: yt-dlp is a hard runtime dependency for the video path.
     if (!Bun.which("yt-dlp")) {

@@ -83,3 +83,4 @@ POST /api/x-articles/summarize-video
 ```
 
 Response for both: `{ job_id, dashboard_url }` — the extension opens the dashboard URL in a new tab. The video endpoint may instead return `{ duplicate: true, dashboard_url }` when the tweet was already summarized; the dashboard URL then shows the existing summary.
+The video endpoint answers 400 `bad_url` unless `url` is https on `x.com`, `twitter.com` or their `www.` form, with no port or userinfo, and carries `/status/<id>` in its path.
