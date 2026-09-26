@@ -34,6 +34,32 @@ const BROWSER_UA =
 
 interface TtDocumentMeta { id: string; url?: string }
 
+/**
+ * The hosts POST /api/tiktok/summarize may hand to yt-dlp. The URL is caller
+ * chosen and yt-dlp fetches whatever it is given, so without this gate the
+ * route fetched a loopback address on the caller's behalf (architecture review
+ * 2026-09, finding 12). `www.` is what the extension's content script sends;
+ * `m.` is the mobile share host a pasted link can carry.
+ */
+const TIKTOK_HOSTS = new Set(["tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"]);
+
+/** An https URL on a TikTok host, with no credentials and no explicit port. */
+export function isAllowedTikTokUrl(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  return (
+    u.protocol === "https:" &&
+    TIKTOK_HOSTS.has(u.hostname.toLowerCase()) &&
+    u.port === "" &&
+    u.username === "" &&
+    u.password === ""
+  );
+}
+
 /** vm.tiktok.com / vt.tiktok.com share links that redirect to the canonical URL. */
 function isShortLink(url: string): boolean {
   try {
@@ -162,6 +188,12 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
 
     if (!url) {
       return c.json({ error: "Missing required field: url" }, 400);
+    }
+    if (typeof url !== "string" || !isAllowedTikTokUrl(url)) {
+      return c.json(
+        { error: "Not a TikTok URL: expected an https link on tiktok.com", code: "bad_url" },
+        400,
+      );
     }
 
     // Preflight: yt-dlp is a hard runtime dependency for this vertical.

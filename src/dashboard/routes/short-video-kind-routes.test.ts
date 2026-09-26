@@ -325,3 +325,48 @@ for (const p of POSTS) {
     });
   });
 }
+
+/**
+ * The TikTok POST's host gate (architecture review 2026-09, finding 12): the
+ * url reaches yt-dlp, so anything but an https TikTok link is refused before a
+ * listing read, a job row or the summarizer. The X-video route has its own gate
+ * (`extractXStatusId`) and is not asserted here.
+ */
+describe("tiktok: the POST's url host gate", () => {
+  const REFUSED = [
+    "http://127.0.0.1:9/x",
+    "http://localhost/internal/admin",
+    "https://evil.example/@a/video/1",
+    "http://www.tiktok.com/@a/video/7523456789",
+    "https://eviltiktok.com/@a/video/7523456789",
+    "https://www.tiktok.com.evil.example/@a/video/7523456789",
+    "https://www.tiktok.com:8443/@a/video/7523456789",
+    "https://user@www.tiktok.com/@a/video/7523456789",
+    "file:///etc/passwd",
+    "not a url",
+  ];
+  for (const url of REFUSED) {
+    test(`refuses ${url} with 400 bad_url, before the listing read and createJob`, async () => {
+      const jobsBefore = ttState.getRecentJobs(50).length;
+      const res = await post(app(), "/api/tiktok/summarize", { url });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_url");
+      expect(tiktokCalls).toBe(0);
+      expect(knowledgeApiCalls).toEqual([]);
+      expect(ttState.getRecentJobs(50).length).toBe(jobsBefore);
+    });
+  }
+
+  const ACCEPTED = [
+    "https://www.tiktok.com/@coolcoder/video/7523456789",
+    "https://tiktok.com/@coolcoder/video/7523456789",
+    "https://m.tiktok.com/v/7523456789.html",
+  ];
+  for (const url of ACCEPTED) {
+    test(`accepts ${url}`, async () => {
+      const res = await post(app(), "/api/tiktok/summarize", { url });
+      expect(res.status).toBe(200);
+      expect(tiktokCalls).toBe(1);
+    });
+  }
+});
