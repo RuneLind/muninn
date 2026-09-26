@@ -190,7 +190,7 @@ export async function refreshInterestProfile(
     // End the span too, not just the root: a Haiku call that throws (timeout,
     // backend down) still ran for a while, and an unended span carries no
     // duration at all in the waterfall.
-    tracer?.end("haiku", { error: message });
+    tracer?.end("haiku", { error: message }, "error");
     tracer?.finish("error", { error: message });
     log.error("Interest-profile refresh failed: {error}", {
       botName,

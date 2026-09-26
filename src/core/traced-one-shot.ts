@@ -139,7 +139,7 @@ export async function tracedOneShot(
 
     return result;
   } catch (err) {
-    tracer.end(spanLabel, { error: err instanceof Error ? err.message : String(err) });
+    tracer.end(spanLabel, { error: err instanceof Error ? err.message : String(err) }, "error");
     throw err;
   }
 }

@@ -43,6 +43,7 @@ interface RecordedSpan {
 }
 
 const spans: RecordedSpan[] = [];
+const spanUpdates: { id: string; status?: string }[] = [];
 
 const realTraces = await import("../../db/traces.ts");
 mock.module("../../db/traces.ts", () => ({
@@ -50,7 +51,9 @@ mock.module("../../db/traces.ts", () => ({
   saveSpan: async (p: RecordedSpan) => {
     spans.push({ id: p.id, parentId: p.parentId ?? null, name: p.name, attributes: p.attributes });
   },
-  updateSpan: async () => {},
+  updateSpan: async (id: string, p: { status?: string }) => {
+    spanUpdates.push({ id, status: p.status });
+  },
 }));
 
 const realHaiku = await import("../../ai/haiku-direct.ts");
@@ -120,8 +123,11 @@ function scriptedFailure(message: string) {
   };
 }
 
-async function runFactcheckWith(message: string): Promise<{ events: SseEvent[]; spans: RecordedSpan[] }> {
+async function runFactcheckWith(
+  message: string,
+): Promise<{ events: SseEvent[]; spans: RecordedSpan[]; updates: { id: string; status?: string }[] }> {
   spans.length = 0;
+  spanUpdates.length = 0;
   const app = new Hono();
   app.get("/fc", (c) =>
     streamFactcheckSSE(c, {
@@ -139,7 +145,7 @@ async function runFactcheckWith(message: string): Promise<{ events: SseEvent[]; 
   const events = parseSse(await res.text());
   // Span writes are fire-and-forget promises; let the microtask queue drain.
   await new Promise((r) => setTimeout(r, 20));
-  return { events, spans: [...spans] };
+  return { events, spans: [...spans], updates: [...spanUpdates] };
 }
 
 const TIMEOUT_MESSAGE = "Claude Agent SDK timed out after 90000ms";
@@ -240,6 +246,12 @@ describe("failed claim — rebuilt tool child spans", () => {
     expect(hung.attributes?.toolId).toBe("t2");
     expect(hung.attributes?.toolName).toBe("WebSearch");
     expect(hung.attributes?.input).toBe('{"query":"sky colour"}');
+  });
+
+  test("the failed claim's model span is ended with status error, not ok", () => {
+    const claim = errorRun.spans.find((s) => s.name === "claude:claim-0")!;
+    const ends = errorRun.updates.filter((u) => u.id === claim.id && u.status !== undefined);
+    expect(ends.map((u) => u.status)).toEqual(["error"]);
   });
 
   test("the non-timeout failure path attaches its tool spans too", () => {

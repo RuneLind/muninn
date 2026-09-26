@@ -13,15 +13,15 @@ import { tracedOneShot } from "./traced-one-shot.ts";
  */
 function recordingTracer(opts: { throwOnChildSpan?: boolean } = {}) {
   const starts: { label: string; attributes?: Record<string, unknown> }[] = [];
-  const ends: { label: string; attributes?: Record<string, unknown> }[] = [];
+  const ends: { label: string; attributes?: Record<string, unknown>; status?: "ok" | "error" }[] = [];
   let n = 0;
   const tracer: Pick<Tracer, "start" | "end" | "addChildSpan" | "addSubSpan" | "spanStartedAt"> = {
     start(label, attributes) {
       starts.push({ label, attributes });
       return `span-${++n}`;
     },
-    end(label, attributes) {
-      ends.push({ label, attributes });
+    end(label, attributes, status) {
+      ends.push({ label, attributes, status });
       return 1;
     },
     addChildSpan(_parentLabel, _name, _durationMs, _attributes, _startOffsetMs) {
@@ -133,6 +133,7 @@ describe("tracedOneShot", () => {
     ).rejects.toThrow("connector exploded");
     expect(ends).toHaveLength(1);
     expect(ends[0]!.attributes).toEqual({ error: "connector exploded" });
+    expect(ends[0]!.status).toBe("error");
   });
 
   test("attachToolSpans failure does NOT re-end the span and the caller still gets the result", async () => {

@@ -44,6 +44,17 @@ mock.module("../ai/haiku-direct.ts", () => ({
   backendConnector: (b: string) => (b === "cli" ? "claude-cli" : b),
 }));
 
+// Record span UPDATEs so the Haiku-error path can prove its span ends "error".
+const spanStatuses: { id: string; status?: string }[] = [];
+const realTraces = await import("../db/traces.ts");
+mock.module("../db/traces.ts", () => ({
+  ...realTraces,
+  saveSpan: async () => {},
+  updateSpan: async (id: string, p: { status?: string }) => {
+    spanStatuses.push({ id, status: p.status });
+  },
+}));
+
 const { refreshInterestProfile, loadInterestProfileForBot, loadInterestProfile, isValidProfileShape } =
   await import("./generator.ts");
 
@@ -96,6 +107,16 @@ describe("refreshInterestProfile", () => {
     mockCallHaiku.mockRejectedValueOnce(new Error("haiku exploded"));
     await expect(refreshInterestProfile("user-1", "jarvis")).resolves.toBeUndefined();
     expect(mockUpsert).toHaveBeenCalledTimes(0);
+  });
+
+  test("ends the haiku span with status error when Haiku throws", async () => {
+    goals = [{ title: "x", description: null, tags: [] }];
+    spanStatuses.length = 0;
+    mockCallHaiku.mockRejectedValueOnce(new Error("haiku exploded"));
+    await refreshInterestProfile("user-1", "jarvis");
+    await new Promise((r) => setTimeout(r, 10));
+    // Two status writes: the haiku span's end and the root's finish — both error.
+    expect(spanStatuses.filter((u) => u.status !== undefined).map((u) => u.status)).toEqual(["error", "error"]);
   });
 
   test("rejects (no upsert) model output with no bullet lines — refusals/prose", async () => {
