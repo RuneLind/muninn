@@ -6,7 +6,7 @@ The gate's write verbs — `proposals/:id/{approve,reject}`, `proposals/group/:g
 
 ## Wiki gardener (weekly)
 
-The `wiki-gardener` watcher clusters recent summaries (Haiku + interest profile) and drafts wiki-page proposals into `wiki_proposals`. Approve writes the page into the bot's `wikiDir`, inserts a `log.md` entry, **wires it in** (`wire.ts`: index.md catalog line for concepts + `## See also` backlinks on up to 3 persisted `related_pages`; entities skip the index — surfaced in the gate's wiring preview), and fires the huginn reindex union of touched collections.
+The `wiki-gardener` watcher clusters recent summaries (Haiku + interest profile) and drafts wiki-page proposals into `wiki_proposals`. Approve writes the page into the bot's `wikiDir`, inserts a `log.md` entry, **wires it in** (`wire.ts`: index.md catalog line for concepts + `## See also` backlinks on up to 3 persisted `related_pages`; entities skip the index — surfaced in the gate's wiring preview; source pages get their `related_pages` from the Source drafter below), and fires the huginn reindex union of touched collections.
 
 Drafts are contained at persist + apply time: unresolvable body wikilinks de-link to bold (`containBodyLinks`), `sources:` is sanitized to http(s)-only with a pending-ingestion callout for URL-less docs.
 
@@ -23,6 +23,8 @@ Its model call is **fenced** (`runFencedOneShot`, see Source drafter below) — 
 ## Source drafter (per-article, auto-triggered after every capture)
 
 `source-drafter.ts` takes the drafted page from the one-shot's **return text**, so its model call is fenced against the file-writing tools (`FENCED_EXCLUDED_TOOLS` in `src/core/fenced-one-shot.ts`, re-exported as `DRAFTER_EXCLUDED_TOOLS`; the synthesis drafter above and the fact-check integrate proposer share the same seam) — without that fence the model can satisfy the prompt by writing the `.mdx` to disk and replying "File created successfully…", which parses to no frontmatter title and silently drops the draft (3 lost in one week, 2026-07-28). Since #580 the fenced run has NO tools at all — the clone sets `toolsDisabled` (no built-ins, no MCP servers, no custom agents, mapped per connector in `src/core/fenced-one-shot.ts`) and keeps the deny-list as the belt. The deny-list alone had drifted: Claude Code 2.1.281 shipped `Workflow`, `Monitor`, `SendMessage` and `EnterWorktree` past it, and the bot's MCP servers (gmail, calendar) were never fenced. An EMPTY `allowedTools` still means the full surface; `toolsDisabled` is the only way to say "none".
+
+**Wiring (2026-09-24).** A source proposal's `related_pages` is its own first resolved body wikilink, concept/entity preferred (`sourceRelatedPages`, cap `SOURCE_BACKLINK_CAP` = 1), in both create and update mode, so the wire stage gives the page one inbound `## See also` link. Two kinds of link are refused, not demoted: one whose `|label` is not the host's title, name, alias or link text (`[[RAG|quantum mechanics]]`), and a host in the other domain (ai vs `life/`), which would erode the wiki/wiki-life split. Before this every source row persisted `[]` and every approved page was born an orphan: the linter reported 242 jarvis orphans, 240 of them source pages. Run over those 240, the helper de-orphans 237; the 3 left have no same-domain, honestly labeled body link. Cap 1 de-orphans as many pages as 3 at a third of the edits; the extra two land on hubs such as `entities/Claude Code.md`.
 
 ### Summary code blocks — what the drafters read (2026-09-15)
 

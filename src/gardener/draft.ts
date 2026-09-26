@@ -500,6 +500,16 @@ export function scanUnresolvedBodyLinks(
  */
 const CONTAIN_BODY_RE = /(```[\s\S]*?```|`[^`\n]*`)|\[\[([^\[\]|\n]+)(?:\|([^\[\]\n]*))?\]\]/g;
 
+/** The body wikilinks {@link containBodyLinks} sees (code regions skipped), in body order. */
+export function bodyWikilinks(body: string): { target: string; label: string | null }[] {
+  const out: { target: string; label: string | null }[] = [];
+  for (const m of body.matchAll(CONTAIN_BODY_RE)) {
+    if (m[1] !== undefined) continue;
+    out.push({ target: m[2]!.trim(), label: m[3]?.trim() || null });
+  }
+  return out;
+}
+
 /**
  * Persist-time BODY-link containment (symmetric with `replaceUnresolvedSourceLinks`
  * for the `sources:` frontmatter): every `[[wikilink]]` in the body that does NOT
