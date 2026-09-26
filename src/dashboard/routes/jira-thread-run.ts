@@ -195,9 +195,12 @@ export async function runJiraThreadDraft(opts: JiraThreadRunOptions): Promise<vo
     // appending the slice wholesale put links under the task for sources the turn
     // never mentioned. The same count bounds the `[n]` repair, which stays
     // correct: a marker may only resolve to a line the list holds.
+    // The FULL seeded title set masks too: a longer title outside the slice
+    // must not leave its shorter prefix inside it counted as named.
     const promptCitations = citationsNamedInDraft(
       sliceForDepth(citations, opts.depth),
       turn.text,
+      citations.map((c) => c.title),
     );
 
     const finalized = await finalizeJiraDraft({

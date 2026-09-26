@@ -66,13 +66,15 @@ export interface ThreadCitationRow {
  *     tool handler writes every row `cited: false` — it cannot know, the reply
  *     does not exist yet — and unlike `/research` there are no `[n]` markers to
  *     read afterwards, because a chat turn names its sources in prose. So the
- *     signal is the Jira key (or the url) appearing in what the bot actually said.
- *     A source the conversation TALKED ABOUT is better grounding for the task than
- *     one that merely came back from a search.
+ *     signal is the Jira key or url appearing in what the bot said, or — for a
+ *     source with no key — its title (see {@link namedIn}). A source the
+ *     conversation TALKED ABOUT is better grounding than one that merely came
+ *     back from a search.
  *
- *  3. **Cited first, then the rest by relevance, capped at the same 24** the
- *     notes path stores. Order is load-bearing downstream: depth slices from the
- *     top, so the sources the discussion used are the ones a shallow draft gets.
+ *  3. **Three tiers — key/url-named, then title-named, then the rest — by
+ *     relevance within each, capped at the same 24** the notes path stores. Order
+ *     is load-bearing downstream: depth slices from the top, and a title match is
+ *     weaker evidence than a key, so it must not push a key-named issue out.
  */
 export function seedThreadCitations(
   rows: ThreadCitationRow[],
@@ -110,14 +112,12 @@ export function seedThreadCitations(
       },
       0,
     );
-    const cited = namedIn(citation, mentionedKeys, joined);
-    return { citation, cited };
+    return { citation, tier: 2 };
   });
+  const titles = new TitleMatcher(joined, scored.map((s) => s.citation.title));
+  for (const s of scored) s.tier = tierOf(namedIn(s.citation, mentionedKeys, joined, titles));
 
-  scored.sort((a, b) => {
-    if (a.cited !== b.cited) return a.cited ? -1 : 1;
-    return b.citation.relevance - a.citation.relevance;
-  });
+  scored.sort((a, b) => a.tier - b.tier || b.citation.relevance - a.citation.relevance);
 
   return scored
     .slice(0, JIRA_STORED_MAX_SOURCES)
@@ -125,7 +125,8 @@ export function seedThreadCitations(
 }
 
 /**
- * Did this text NAME this source — by Jira key, or by its url?
+ * Did this text NAME this source — by Jira key, by its url, or (keyless only) by
+ * its title? The answer is the evidence tier: a title is weaker than a key.
  *
  * The key half goes through {@link extractJiraKeys}, which is already
  * word-bounded. The URL half is the one that needed a rule: a bare `includes`
@@ -135,9 +136,145 @@ export function seedThreadCitations(
  * depth slice and the reference list. A match therefore has to end the string or
  * be followed by something that cannot continue an identifier.
  */
-function namedIn(citation: JiraCitation, mentionedKeys: Set<string>, text: string): boolean {
-  if (citation.key && mentionedKeys.has(citation.key)) return true;
-  return !!citation.url && mentionsUrl(text, citation.url);
+type Naming = "key" | "title" | null;
+const tierOf = (n: Naming) => (n === "key" ? 0 : n === "title" ? 1 : 2);
+
+function namedIn(
+  citation: JiraCitation,
+  mentionedKeys: Set<string>,
+  text: string,
+  titles: TitleMatcher,
+): Naming {
+  if (citation.key && mentionedKeys.has(citation.key)) return "key";
+  if (citation.url && mentionsUrl(text, citation.url)) return "key";
+  // «Jira-nøkkelen der den finnes, ellers sidetittelen»: a keyed row is cited by key.
+  if (!citation.key && titles.names(citation.title)) return "title";
+  return null;
+}
+
+/**
+ * The title arm — the only way a keyless, url-less source (a `nav-wiki` page)
+ * can count as named. Measured on real drafts, bare concept words and template
+ * headings were the false positives, so:
+ *
+ * - The title is normalised first: a trailing `.md` and a `<6+ digits> — `
+ *   page-id prefix go, and whitespace runs collapse (in the text too).
+ * - Case-SENSITIVE: the instruction asks for the exact title, and
+ *   `## Definition of done` is a heading, not the page «Definition of Done».
+ * - A ONE-WORD title counts only when framed — «…», "…", `…`, *…*, _…_, […](…)
+ *   — so «Sak» or «Lovvalg» never matches incidental prose. Multi-word titles
+ *   need a Unicode boundary on both sides (`-` and `/` continue a title).
+ * - A mention of a LONGER title in the set that contains this one is masked,
+ *   longest first, so «Rammeavtale for utsendte arbeidstakere» does not also
+ *   name «Rammeavtale for utsendte».
+ *
+ * Built once per text, and cheap: spans come from `indexOf` plus a per-char
+ * boundary test (no regex per title), each title's spans once, and masking only
+ * runs for a title that matched.
+ */
+const TITLE_CONTINUES = /[\p{L}\p{M}\p{N}\-/]/u;
+const WORD_CHAR = /[\p{L}\p{M}\p{N}]/u;
+const FRAMES: [string, string][] = [
+  ["«", "»"], ['"', '"'], ["“", "”"], ["'", "'"], ["`", "`"],
+  ["**", "**"], ["*", "*"], ["_", "_"], ["[", "]("],
+];
+
+function normalizeTitle(title: string): string {
+  return title
+    .replace(/\.md\s*$/i, "")
+    // Six digits or more: a Confluence page id (`313350257 — …`), never a year.
+    .replace(/^\s*\d{6,}\s+[—–-]\s+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+type Span = [number, number];
+
+class TitleMatcher {
+  private readonly text: string;
+  private readonly all: string[];
+  private readonly spanCache = new Map<string, Span[]>();
+
+  constructor(text: string, titles: string[]) {
+    this.text = text.replace(/\s+/g, " ");
+    // Longest first: masking order is the whole point of the list. Equal lengths
+    // tie-break by code unit, so the verdict never depends on input order.
+    this.all = [...new Set(titles.map(normalizeTitle))]
+      .filter((t) => t && this.text.includes(t))
+      .sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0));
+  }
+
+  names(rawTitle: string): boolean {
+    const title = normalizeTitle(rawTitle);
+    if (!title || !this.text.includes(title)) return false;
+    const own = this.spans(title, !title.includes(" "));
+    if (own.length === 0) return false;
+    const longer = this.all.filter((o) => o.length > title.length && o.includes(title));
+    const containing = longer.map((o) => this.spans(o, false));
+    // Fast path: a mention no longer title's mention touches is named outright.
+    if (own.some((s) => !containing.some((spans) => anyOverlap(spans, s)))) return true;
+    // Otherwise mask longest-first, as blanking each longer mention in turn would.
+    const masks: Span[] = [];
+    for (const spans of containing) for (const m of spans) if (!anyOverlap(masks, m)) insertSorted(masks, m);
+    return own.some((s) => !anyOverlap(masks, s));
+  }
+
+  /** Match spans of one normalised title, sorted; `framed` = the one-word rule. */
+  private spans(title: string, framed: boolean): Span[] {
+    const key = `${framed ? "f" : "b"}${title}`;
+    const cached = this.spanCache.get(key);
+    if (cached) return cached;
+    const text = this.text;
+    const out: Span[] = [];
+    for (let at = text.indexOf(title); at >= 0; at = text.indexOf(title, at + 1)) {
+      const end = at + title.length;
+      if (!framed) {
+        if (!TITLE_CONTINUES.test(charBefore(text, at)) && !TITLE_CONTINUES.test(charAt(text, end))) out.push([at, end]);
+        continue;
+      }
+      for (const [open, close] of FRAMES) {
+        const from = at - open.length;
+        if (from < 0 || !text.startsWith(open, from) || !text.startsWith(close, end)) continue;
+        if (WORD_CHAR.test(charBefore(text, from))) continue;
+        // `](` is followed by the url, not by a word boundary.
+        if (close !== "](" && WORD_CHAR.test(charAt(text, end + close.length))) continue;
+        out.push([from, end + close.length]);
+        break;
+      }
+    }
+    this.spanCache.set(key, out);
+    return out;
+  }
+}
+
+function charAt(text: string, i: number): string {
+  const cp = text.codePointAt(i);
+  return cp === undefined ? "" : String.fromCodePoint(cp);
+}
+
+function charBefore(text: string, i: number): string {
+  if (i <= 0) return "";
+  const low = text.charCodeAt(i - 1);
+  return low >= 0xdc00 && low <= 0xdfff && i >= 2 ? text.slice(i - 2, i) : text[i - 1]!;
+}
+
+/** Does `s` overlap any span of `sorted`? Spans sorted by start, non-decreasing ends. */
+function anyOverlap(sorted: Span[], s: Span): boolean {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid]![0] < s[1]) lo = mid + 1;
+    else hi = mid;
+  }
+  // `lo - 1` is the last span starting before `s` ends; its end is the largest such.
+  return lo > 0 && sorted[lo - 1]![1] > s[0];
+}
+
+function insertSorted(sorted: Span[], s: Span): void {
+  let i = sorted.length;
+  while (i > 0 && sorted[i - 1]![0] > s[0]) i--;
+  sorted.splice(i, 0, s);
 }
 
 /**
@@ -170,17 +307,19 @@ function mentionsUrl(text: string, url: string): boolean {
  * appending the whole depth slice put links under the task for sources the turn
  * never mentioned, and the reference list stopped being a claim about the text.
  *
- * The signal is the same one `seedThreadCitations` uses for `cited`: the Jira key
- * (or the url) appearing in the prose, which is exactly how the turn instruction
- * asks the model to cite. Order is the slice's, so the list still reads
- * conversation-used first.
+ * The signal is the same one `seedThreadCitations` uses for `cited` (see
+ * {@link namedIn}). `maskTitles` is the thread's FULL seeded title set: a longer
+ * title outside the slice must still mask its shorter prefix inside it. Order is
+ * the slice's, so the list still reads conversation-used first.
  */
 export function citationsNamedInDraft(
   citations: JiraCitation[],
   markdown: string,
+  maskTitles: string[] = citations.map((c) => c.title),
 ): JiraCitation[] {
   const mentionedKeys = new Set(extractJiraKeys(markdown));
-  return citations.filter((c) => namedIn(c, mentionedKeys, markdown));
+  const titles = new TitleMatcher(markdown, maskTitles);
+  return citations.filter((c) => namedIn(c, mentionedKeys, markdown, titles) !== null);
 }
 
 /**
