@@ -287,6 +287,17 @@ async function globAbsolute(dir: string, pattern: string): Promise<string[]> {
 // 1. Download
 // ---------------------------------------------------------------------------
 
+/**
+ * Flags on every yt-dlp run, download and probe alike. `--ignore-config`: a
+ * user or system yt-dlp.conf holding `--ies default` would cancel an extractor
+ * allowlist, and one supplying cookies or a proxy would make the probe succeed
+ * where the download (which ignores it) fails. `--no-plugin-dirs`: a plugin
+ * extractor named like a pinned one would sit inside the allowlist; it empties
+ * every plugin search path, `sys.path` (pip-installed `yt_dlp_plugins`)
+ * included.
+ */
+export const YTDLP_ISOLATION_ARGS = ["--ignore-config", "--no-plugin-dirs"] as const;
+
 export interface DownloadOptions {
   /** Pre-download duration cap in seconds (yt-dlp match-filter). Required, with
    * no default: every vertical's cap is a per-host judgement (TikTok 60 min, X
@@ -310,7 +321,8 @@ export interface DownloadOptions {
    * yt-dlp `--use-extractors` allowlist. Absent ⇒ no flag, yt-dlp's default set.
    * A caller whose URL is gated to one site sets it so an extractor's own
    * hand-off (X's TwitterIE returns a media-less tweet's first link as a new
-   * URL) cannot reach `[generic]`, which fetches anything.
+   * URL) cannot reach `[generic]`, which fetches anything. An EMPTY list throws:
+   * it reads as "allow nothing", and dropping the flag would allow everything.
    */
   extractors?: readonly string[];
 }
@@ -324,12 +336,16 @@ export function ytDlpDownloadArgs(
   workDir: string,
   opts: DownloadOptions,
 ): string[] {
+  if (opts.extractors !== undefined && opts.extractors.length === 0) {
+    throw new Error("yt-dlp extractor allowlist is empty — refusing to run with every extractor");
+  }
   return [
     "yt-dlp",
+    ...YTDLP_ISOLATION_ARGS,
     "-f",
     opts.format ?? YTDLP_FORMAT_SELECTOR,
     "--no-playlist",
-    ...(opts.extractors?.length ? ["--use-extractors", opts.extractors.join(",")] : []),
+    ...(opts.extractors ? ["--use-extractors", opts.extractors.join(",")] : []),
     "-o",
     join(workDir, "video.%(ext)s"),
     // `after_move:` prints once the file is in place and, unlike a bare -O,
@@ -350,7 +366,7 @@ export const PROBE_TIMEOUT_MS = 30_000;
  * {@link ytDlpDownloadArgs} is.
  */
 export function ytDlpProbeArgs(url: string): string[] {
-  return ["yt-dlp", "-O", YTDLP_INFO_TEMPLATE, "--skip-download", "--no-playlist", url];
+  return ["yt-dlp", ...YTDLP_ISOLATION_ARGS, "-O", YTDLP_INFO_TEMPLATE, "--skip-download", "--no-playlist", url];
 }
 
 /**

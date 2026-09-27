@@ -8,7 +8,14 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
-import { parseAllowedHttpsUrl } from "./url-gate.ts";
+import {
+  isShortLink,
+  parseAllowedTikTokUrl,
+  resolveTikTokShortLink,
+  shortLinkRequestUrl,
+  tiktokDownloadUrl,
+  tiktokPathVideoId,
+} from "./tiktok-url.ts";
 import { applyCors } from "../../auth/cors.ts";
 import {
   shortVideoCaptureBlocker,
@@ -29,80 +36,49 @@ const TT_COLLECTION = TT_SOURCE.collection;
 /** This vertical's word for the frames in the capture-blocked sentence. */
 const TT_FRAME_NOUN = "TikTok frames";
 
-// A browser-like UA so the short-link HEAD isn't met with TikTok's anti-bot wall.
-const BROWSER_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
-
 interface TtDocumentMeta { id: string; url?: string }
 
-/**
- * The hosts POST /api/tiktok/summarize may hand to yt-dlp. The URL is caller
- * chosen and yt-dlp fetches whatever it is given, so without this gate the
- * route fetched a loopback address on the caller's behalf (architecture review
- * 2026-09, finding 12). `www.` is what the extension's content script sends;
- * `m.` is the mobile share host a pasted link can carry.
- */
-const TIKTOK_HOSTS = new Set(["tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"]);
-
-/** {@link parseAllowedHttpsUrl} over {@link TIKTOK_HOSTS}; callers hand `href` downstream. */
-export function parseAllowedTikTokUrl(raw: string): URL | null {
-  return parseAllowedHttpsUrl(raw, TIKTOK_HOSTS);
-}
-
-/** Boolean form of {@link parseAllowedTikTokUrl}. */
-export function isAllowedTikTokUrl(raw: string): boolean {
-  return parseAllowedTikTokUrl(raw) !== null;
-}
-
-/** vm.tiktok.com / vt.tiktok.com share links that redirect to the canonical URL. */
-function isShortLink(url: string): boolean {
-  try {
-    const host = new URL(url).hostname;
-    return host === "vm.tiktok.com" || host === "vt.tiktok.com";
-  } catch {
-    return false;
-  }
-}
+/** Why a short link yields no URL for yt-dlp — each answered before any job exists. */
+type ShortLinkError = { status: 400 | 502; error: string; code: string };
 
 /**
- * Resolve the numeric video id from an input URL. A canonical `/video/<id>` URL
- * parses with zero latency; a short link needs one redirect-following HEAD. On
- * any failure we return null so the caller skips the dedup pre-check and proceeds
- * — the yt-dlp-resolved id in the background job still drives the canonical URL,
- * so the only cost is a rare duplicate.
+ * Resolve a short link to the video URL it names, gated hop by hop. yt-dlp gets
+ * the result, never the short link: its `vm.tiktok` extractor would follow the
+ * chain again, ungated.
  */
-async function resolveVideoId(url: string): Promise<string | null> {
-  const direct = extractTikTokVideoId(url);
-  if (direct) return direct;
-  if (!isShortLink(url)) return null;
-
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(url, {
-      method: "HEAD",
-      redirect: "follow",
-      headers: { "User-Agent": BROWSER_UA },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    // Re-judge the redirect target before using it: an id read off a host the
-    // gate would refuse is not a TikTok id. Fall back to no dedup.
-    if (!isAllowedTikTokUrl(res.url)) {
-      log.warn("TikTok short link {url} redirected off TikTok to {target} — skipping dedup pre-check", {
-        url,
-        target: res.url,
-      });
-      return null;
-    }
-    return extractTikTokVideoId(res.url);
-  } catch (err) {
-    log.warn("TikTok short-link resolution failed for {url} — skipping dedup pre-check: {error}", {
-      url,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
+async function resolveShortLink(short: URL): Promise<URL | ShortLinkError> {
+  const res = await resolveTikTokShortLink(shortLinkRequestUrl(short));
+  if (res.kind === "refused") {
+    log.warn("TikTok short link {url} refused: {reason}", { url: short.href, reason: res.reason });
+    return {
+      status: 400,
+      error: `Not a TikTok URL: the short link was refused (${res.reason})`,
+      code: "bad_url",
+    };
   }
+  if (res.kind === "failed") {
+    log.warn("TikTok short-link resolution failed for {url}: {error}", {
+      url: short.href,
+      error: res.reason,
+    });
+    return {
+      status: 502,
+      error: `Could not resolve the TikTok short link: ${res.reason}`,
+      code: "short_link_failed",
+    };
+  }
+  // Every hop was gated, so this parses. It is still a short link when TikTok
+  // answered 200 on it, and has no video id when a stale link lands on the
+  // home page (`https://www.tiktok.com/?_r=1`, measured).
+  const landed = parseAllowedTikTokUrl(res.url);
+  if (!landed || isShortLink(landed) || !tiktokPathVideoId(new URL(tiktokDownloadUrl(landed)))) {
+    return {
+      status: 400,
+      error: `The short link does not lead to a TikTok video (it ends at ${res.url})`,
+      code: "no_video",
+    };
+  }
+  return landed;
 }
 
 async function findExistingByVideoId(
@@ -199,9 +175,6 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
         400,
       );
     }
-    // Everything below — dedup, the job row, yt-dlp — gets the parsed href.
-    const url = accepted.href;
-
     // Preflight: yt-dlp is a hard runtime dependency for this vertical.
     if (!Bun.which("yt-dlp")) {
       return c.json(
@@ -242,7 +215,21 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
       );
     }
 
-    const videoId = await resolveVideoId(url);
+    let target = accepted;
+    if (isShortLink(accepted)) {
+      const resolved = await resolveShortLink(accepted);
+      if (!(resolved instanceof URL)) {
+        return c.json({ error: resolved.error, code: resolved.code }, resolved.status);
+      }
+      target = resolved;
+    }
+    // Everything below — dedup, the job row, yt-dlp — gets a URL built from the
+    // parsed one, in the form the `TikTok` extractor matches.
+    const url = tiktokDownloadUrl(target);
+    const videoId = extractTikTokVideoId(url);
+    // The popup sends the pasted URL as its title; a title equal to the URL is
+    // how the job knows to use yt-dlp's title instead, so follow the rewrite.
+    const jobTitle = !title || title === rawUrl || title === accepted.href ? url : title;
 
     if (videoId) {
       const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, videoId);
@@ -274,10 +261,10 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
       return c.json({ error: blocker }, 503);
     }
 
-    const jobId = createJob(videoId ?? "", title || url, url);
+    const jobId = createJob(videoId ?? "", jobTitle, url);
 
     // Fire and forget — background summarization
-    summarizeTikTok(jobId, url, title || url, config, summarizerBot, { frames, preset }).catch((err) => {
+    summarizeTikTok(jobId, url, jobTitle, config, summarizerBot, { frames, preset }).catch((err) => {
       log.error("TikTok summarization failed: {error}", { error: err instanceof Error ? err.message : String(err) });
     });
 

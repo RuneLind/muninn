@@ -54,7 +54,7 @@ function showManualOnly() {
 // Accept a pasted link with or without a scheme; require a tiktok.com host.
 // Short links (vm./vt.tiktok.com) and canonical /video/<id> URLs are both
 // resolved server-side, so we only sanity-check the host here.
-// Mirror of TIKTOK_HOSTS in src/dashboard/routes/tiktok-routes.ts: the server
+// Mirror of TIKTOK_HOSTS in src/dashboard/routes/tiktok-url.ts: the server
 // answers 400 bad_url for any other host, so the popup refuses it up front.
 const TIKTOK_HOSTS = new Set(['tiktok.com', 'www.tiktok.com', 'm.tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com']);
 

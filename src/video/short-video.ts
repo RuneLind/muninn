@@ -126,7 +126,7 @@ export interface ShortVideoSpec extends ShortVideoPromptSpec, ShortVideoFinishSp
   readonly idLogKey: string;
   /**
    * The yt-dlp extractors this vertical's download may use (`--use-extractors`,
-   * fullmatch regexes); undefined ⇒ yt-dlp's default set. X pins `twitter`:
+   * fullmatch regexes); undefined ⇒ yt-dlp's default set, `[]` throws. X pins `twitter`:
    * TwitterIE hands a media-less tweet's first link (author-controlled) back to
    * yt-dlp, and under the default set that reached `[generic]`, which fetched a
    * loopback listener (measured 2026-09-26, yt-dlp 2026.08.19).

@@ -278,6 +278,8 @@ test("ytDlpDownloadArgs is byte-identical to the pre-`format` argv when no forma
   // builder would assert nothing.
   expect(ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 })).toEqual([
     "yt-dlp",
+    "--ignore-config",
+    "--no-plugin-dirs",
     "-f",
     YTDLP_FORMAT_SELECTOR,
     "--no-playlist",
@@ -342,7 +344,7 @@ test("ytDlpDownloadArgs carries the duration cap into --break-match-filters", ()
 
 test("ytDlpDownloadArgs carries an extractor allowlist as --use-extractors, and no flag without one", () => {
   // The X vertical pins `twitter` so a media-less tweet's link hand-off cannot
-  // reach `[generic]`; an absent or empty list must leave yt-dlp's default set.
+  // reach `[generic]`; an absent list leaves yt-dlp's default set.
   const pinned = ytDlpDownloadArgs("https://x.test/v", "/work", {
     maxDurationSeconds: 3600,
     extractors: ["twitter"],
@@ -352,10 +354,40 @@ test("ytDlpDownloadArgs carries an extractor allowlist as --use-extractors, and 
   expect(
     ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 1, extractors: ["a", "b"] }),
   ).toContain("a,b");
-  for (const extractors of [undefined, []]) {
-    expect(
-      ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors }),
-    ).not.toContain("--use-extractors");
+  expect(
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 }),
+  ).not.toContain("--use-extractors");
+});
+
+test("ytDlpDownloadArgs refuses an empty extractor allowlist instead of dropping the flag", () => {
+  // No flag means every extractor, `[generic]` included: an empty list that
+  // silently became "no flag" is the allowlist failing open.
+  expect(() =>
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors: [] }),
+  ).toThrow(/extractor allowlist is empty/);
+});
+
+test("ytDlpDownloadArgs ignores yt-dlp config files, with and without an allowlist", () => {
+  // A yt-dlp.conf holding `--ies default` would otherwise cancel the allowlist.
+  for (const extractors of [undefined, ["twitter"]]) {
+    const args = ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors });
+    expect(args).toContain("--ignore-config");
+  }
+});
+
+test("the probe and every download ignore yt-dlp config files and plugin dirs", () => {
+  // A config supplying cookies or a proxy made the probe succeed where the
+  // download (which ignores it) failed; a plugin extractor named `TikTok` or
+  // `twitter` would sit inside the allowlist.
+  for (const args of [
+    ytDlpProbeArgs("https://x.test/v"),
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 }),
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors: ["twitter"] }),
+  ]) {
+    expect(args).toContain("--ignore-config");
+    expect(args).toContain("--no-plugin-dirs");
+    // Options, not the URL: both precede it.
+    expect(args.indexOf("--no-plugin-dirs")).toBeLessThan(args.indexOf("https://x.test/v"));
   }
 });
 
@@ -365,6 +397,8 @@ test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () =>
   // playlist's worth of JSON.
   expect(ytDlpProbeArgs("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toEqual([
     "yt-dlp",
+    "--ignore-config",
+    "--no-plugin-dirs",
     "-O",
     "%(.{id,title,duration,uploader,webpage_url})j",
     "--skip-download",

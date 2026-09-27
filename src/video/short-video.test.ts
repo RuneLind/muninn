@@ -272,9 +272,9 @@ const VERTICALS = [
     collection: "tiktok-summaries",
     workDirPrefix: "muninn-tiktok-",
     maxDurationSeconds: 3600,
-    // Unset: the bare and m. hosts the route accepts reach TikTokIE only via
-    // `[generic]`'s redirect (measured), so an allowlist would refuse them.
-    ytDlpExtractors: undefined,
+    // Never `[generic]` or `vm.tiktok`: the route resolves short links itself
+    // and rewrites every accepted shape to one `TikTok` matches.
+    ytDlpExtractors: ["tiktok"],
   },
   {
     name: "x-video",
