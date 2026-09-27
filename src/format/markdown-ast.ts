@@ -13,7 +13,7 @@
  * platform through unwanted abstractions.
  */
 
-import { lineCodeSpanRanges } from "./code-spans.ts";
+import { textCodeSpanRanges } from "./code-spans.ts";
 
 export type Block =
   | { type: "code_block"; lang: string; code: string }
@@ -304,11 +304,6 @@ export interface ProtectedRegion {
 
 const FRONTMATTER_BLOCK_RE = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 
-/** Push every inline code span (`` `x` ``, matched backtick runs) on one line. */
-function pushInlineCodeSpans(line: string, base: number, out: ProtectedRegion[]): void {
-  for (const r of lineCodeSpanRanges(line)) out.push({ start: base + r.start, end: base + r.end });
-}
-
 /**
  * The regions of a page body where a `<Fact …>` tag is CONTENT, not markup:
  * frontmatter, fenced code blocks, and inline backtick spans.
@@ -334,7 +329,10 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
 /**
  * The regions of a markdown body where text is CODE rather than prose: fenced
  * blocks (marker-matched, CommonMark closer-length rule, an unterminated fence
- * running to EOF) and inline backtick spans.
+ * running to EOF) and inline backtick spans. A span pairs across the lines of one
+ * paragraph, grouped by the parser's own `text` blocks ({@link textBlockSourceLines})
+ * so it agrees with the renderer; any other line (heading, list item, table row)
+ * pairs on its own.
  *
  * Exported because every pass that rewrites markdown needs the same answer and a
  * second fence detector is how the two drift apart: the fact-check strip above
@@ -349,12 +347,18 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
  */
 export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
   const regions: ProtectedRegion[] = [];
+  const lines = body.split("\n");
+  const lineStarts: number[] = [];
+  // Lines outside every fence this scan finds; those in no `text` block pair alone.
+  const prose = new Set<number>();
   let offset = 0;
   let fenceStart = -1;
   let fenceMarker = "";
   let fenceRun = 0;
-  for (const line of body.split("\n")) {
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx]!;
     const lineStart = offset;
+    lineStarts.push(lineStart);
     offset += line.length + 1;
     if (lineStart < from) continue;
     const m = /^\s*(`{3,}|~{3,})/.exec(line);
@@ -375,11 +379,26 @@ export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
       }
       continue;
     }
-    // Inline code spans matter only OUTSIDE a fence (inside, the whole block is
-    // already protected) — and a fence line itself can carry no code span.
-    if (fenceStart < 0) pushInlineCodeSpans(line, lineStart, regions);
+    if (fenceStart < 0) prose.add(idx);
   }
   if (fenceStart >= 0) regions.push({ start: fenceStart, end: body.length });
+
+  const pushSpans = (first: number, count: number) => {
+    const base = lineStarts[first]!;
+    for (const r of textCodeSpanRanges(lines.slice(first, first + count))) {
+      regions.push({ start: base + r.start, end: base + r.end });
+    }
+  };
+  // A group (consecutive lines by construction) is paired whole even where this
+  // scan reads a line as fence (`~~~`, which the parser does not): the renderer
+  // pairs it whole, and the fence region is protected either way.
+  const firstLine = lineStarts.findIndex((s) => s >= from);
+  for (const group of firstLine < 0 ? [] : textBlockSourceLines(body.slice(from))) {
+    if (group.length === 0) continue;
+    for (const rel of group) prose.delete(rel + firstLine);
+    pushSpans(group[0]! + firstLine, group.length);
+  }
+  for (const idx of prose) pushSpans(idx, 1);
   return regions;
 }
 
@@ -656,6 +675,9 @@ function takenCodeIds(text: string): Set<number> {
  */
 interface FenceStore {
   blocks: Map<number, { lang: string; code: string }>;
+  /** When set, every `text` block's SOURCE line indices are recorded here
+   *  ({@link textBlockSourceLines}); a block with no source mapping is skipped. */
+  textLines?: number[][];
   /** Ids the input already spells; never allocated. */
   taken: Set<number>;
   /** Next candidate id. Monotone, so allocation is amortised O(1). */
@@ -699,6 +721,21 @@ export function parseBlocks(text: string): Block[] {
   const protectedText = extractFences(normalized, store);
 
   return parseBlocksInner(protectedText, store, 0);
+}
+
+/**
+ * The source line indices (into `text.split("\n")`) of every `text` block
+ * {@link parseBlocks} builds — the lines a renderer pairs code spans over. The
+ * fact-check strip asks the parser itself rather than re-spelling its block rules.
+ * A single-line component's inner content is not a source line and is omitted.
+ */
+export function textBlockSourceLines(text: string): number[][] {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, textLines: [] };
+  const src: number[] = [];
+  const protectedText = extractFences(normalized, store, src);
+  parseBlocksInner(protectedText, store, 0, src);
+  return store.textLines!;
 }
 
 /**
@@ -753,7 +790,7 @@ export function parseBlocks(text: string): Block[] {
  * wiki contains one (measured, same sweep) -- adding them is a separate change
  * with its own corpus diff, not a free ride on this one.
  */
-function extractFences(text: string, store: FenceStore): string {
+function extractFences(text: string, store: FenceStore, src?: number[]): string {
   const lines = text.split("\n");
   const out: string[] = [];
   let i = 0;
@@ -797,6 +834,7 @@ function extractFences(text: string, store: FenceStore): string {
     // pinned in `wiki/render.test.ts` -- the discard, and the swallowing not
     // coming back.
     if (!open || info.includes("`")) {
+      src?.push(i);
       out.push(lines[i]!);
       i++;
       continue;
@@ -816,6 +854,7 @@ function extractFences(text: string, store: FenceStore): string {
     }
     if (close === -1) {
       noCloserAtRunAtLeast = Math.min(noCloserAtRunAtLeast, runLen);
+      src?.push(i);
       out.push(lines[i]!);
       i++;
       continue;
@@ -827,6 +866,7 @@ function extractFences(text: string, store: FenceStore): string {
       lang: info.trim().match(FENCE_LANG_RE)![0],
       code: body.join("\n").trimEnd(),
     });
+    src?.push(i);
     out.push(`\x00CB${id}\x00`);
     i = close + 1;
   }
@@ -845,15 +885,18 @@ function dedentFenceLine(line: string, indent: number): string {
 }
 
 /** Parse already-fence-extracted text into blocks. `store` is the shared
- *  placeholder store; `depth` is the current component-nesting level. */
+ *  placeholder store; `depth` is the current component-nesting level; `src`
+ *  maps each line to its source line when {@link textBlockSourceLines} asks. */
 function parseBlocksInner(
   protectedText: string,
   store: FenceStore,
   depth: number,
+  src?: readonly number[],
 ): Block[] {
   const lines = protectedText.split("\n");
   const blocks: Block[] = [];
   let textBuffer: string[] = [];
+  let textStart = 0;
   let i = 0;
 
   // Per-parse memo of scan futility: once a multi-line scan for `<Name>` runs to
@@ -867,6 +910,7 @@ function parseBlocksInner(
 
   function flushText() {
     if (textBuffer.length > 0) {
+      if (store.textLines && src) store.textLines.push(src.slice(textStart, textStart + textBuffer.length));
       blocks.push({ type: "text", lines: textBuffer });
       textBuffer = [];
     }
@@ -876,7 +920,7 @@ function parseBlocksInner(
     const line = lines[i]!;
 
     if (depth < MAX_COMPONENT_DEPTH) {
-      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom);
+      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom, src);
       if (comp) {
         flushText();
         blocks.push(comp.block);
@@ -982,6 +1026,7 @@ function parseBlocksInner(
       }
     }
 
+    if (textBuffer.length === 0) textStart = i;
     textBuffer.push(line);
     i++;
   }
@@ -1002,6 +1047,7 @@ function tryParseComponent(
   store: FenceStore,
   depth: number,
   noCloseFrom: Map<string, number>,
+  src?: readonly number[],
 ): { block: Block; next: number } | null {
   const m = lines[i]!.trim().match(COMPONENT_OPEN_RE);
   if (!m) return null;
@@ -1066,7 +1112,7 @@ function tryParseComponent(
     return null; // unclosed → fall through as text
   }
 
-  const children = parseBlocksInner(body.join("\n"), store, depth + 1);
+  const children = parseBlocksInner(body.join("\n"), store, depth + 1, src?.slice(i + 1, j));
   return { block: { type: "component", name: cname, attrs, children }, next: j + 1 };
 }
 

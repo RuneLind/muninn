@@ -19,7 +19,7 @@ import type { Block, FactVerdict } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
-import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
+import { codeSpanContent, lineCodeSpanRanges, textCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
@@ -405,8 +405,27 @@ const webRenderer: BlockRenderer = {
       }
     }
   },
-  text: (lines) => lines.map(renderInline).join("\n"),
+  text: renderTextBlock,
 };
+
+/**
+ * A `text` block: code spans pair per PARAGRAPH (they may cross a soft break) and
+ * are parked first; everything else stays per line in `renderInline`, whose own
+ * span pass then finds no pair — a run left unmatched here has no equal run after
+ * it in the paragraph.
+ */
+function renderTextBlock(lines: string[]): string {
+  const text = lines.join("\n");
+  const ph = new Placeholders();
+  let parked = "";
+  let cursor = 0;
+  for (const r of textCodeSpanRanges(lines)) {
+    parked += text.slice(cursor, r.start) + ph.add("PARACODE", `<code>${escapeHtml(codeSpanContent(text, r))}</code>`);
+    cursor = r.end;
+  }
+  parked += text.slice(cursor);
+  return ph.restore(parked.split("\n").map(renderInline).join("\n"));
+}
 
 function renderInline(text: string): string {
   const ph = new Placeholders();

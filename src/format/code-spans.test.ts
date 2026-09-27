@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { codeSpanContent, lineCodeSpanRanges } from "./code-spans.ts";
+import { codeSpanContent, lineCodeSpanRanges, textCodeSpanRanges } from "./code-spans.ts";
 
 const content = (line: string) => lineCodeSpanRanges(line).map((r) => codeSpanContent(line, r));
 
@@ -45,5 +45,50 @@ describe("codeSpanContent", () => {
     expect(content("` \t `")).toEqual(["\t"]);
     expect(content("`   `")).toEqual([" "]);
     expect(content("`\tx\t`")).toEqual(["\tx\t"]);
+  });
+});
+
+describe("textCodeSpanRanges", () => {
+  const spans = (lines: string[]) => {
+    const text = lines.join("\n");
+    return textCodeSpanRanges(lines).map((r) => text.slice(r.start, r.end));
+  };
+
+  test("a span pairs across a soft line break", () => {
+    expect(spans(["a `one", "two` b"])).toEqual(["`one\ntwo`"]);
+  });
+
+  test("a blank line ends the paragraph, so nothing pairs across it", () => {
+    expect(spans(["a `one", "", "two` b"])).toEqual([]);
+    expect(spans(["a `one", " \t", "two` b"])).toEqual([]);
+  });
+
+  test("a list item line starts a new paragraph, and pairs onward itself", () => {
+    expect(spans(["a `one", "+ two` b"])).toEqual([]);
+    expect(spans(["a `one", "  - two` b"])).toEqual([]);
+    expect(spans(["a `one", "1) two` b"])).toEqual([]);
+    expect(spans(["x", "+ a `b", "c` d"])).toEqual(["`b\nc`"]);
+    expect(spans(["a `one", "+two` b"])).toEqual(["`one\n+two`"]);
+  });
+
+  test("offsets are into the joined block, past blank lines", () => {
+    expect(spans(["x", "", "`y`"])).toEqual(["`y`"]);
+  });
+});
+
+describe("codeSpanContent across lines", () => {
+  const joined = (text: string) => lineCodeSpanRanges(text).map((r) => codeSpanContent(text, r));
+
+  test("a line ending becomes a space", () => {
+    expect(joined("`one\ntwo`")).toEqual(["one two"]);
+  });
+
+  test("the next line's indent goes with the line ending", () => {
+    expect(joined("`a\n   b`")).toEqual(["a b"]);
+    expect(joined("`a  \n\tb`")).toEqual(["a   b"]);
+  });
+
+  test("the newline becomes a space BEFORE the one-space strip", () => {
+    expect(joined("`\nx\n`")).toEqual(["x"]);
   });
 });

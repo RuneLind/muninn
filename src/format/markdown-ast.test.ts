@@ -9,6 +9,8 @@ import {
   parseChecklistItem,
   parseChecklist,
   scanInlineComponents,
+  textBlockSourceLines,
+  countFactWrappers,
   type Block,
 } from "./markdown-ast.ts";
 
@@ -1011,5 +1013,19 @@ describe("the closer scan is not quadratic", () => {
     // post-memo cost of this one, so it separates the two without being tight
     // on a slow CI runner.
     expect(ms).toBeLessThan(2000);
+  });
+});
+
+describe("textBlockSourceLines", () => {
+  test("maps every text block, component bodies included, to its source lines", () => {
+    const text = "p1\n```\nx\n```\np2\np3\n<Callout>\nq\n</Callout>\n# h\n\nr";
+    const groups = textBlockSourceLines(text).sort((a, b) => a[0]! - b[0]!);
+    expect(groups).toEqual([[0], [4, 5], [7], [10, 11]]);
+  });
+
+  test("the strip pairs a cross-line span after the frontmatter", () => {
+    const fact = '<Fact n="1" v="ok">x</Fact>';
+    expect(countFactWrappers(`---\nk: v\n---\na \`one\ntwo\` ${fact} \`c\``)).toBe(1);
+    expect(countFactWrappers(`---\nk: v\n---\na \`one\n${fact}\` b`)).toBe(0);
   });
 });

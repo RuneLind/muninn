@@ -779,3 +779,60 @@ describe("formatWebHtml — inline code-span runs", () => {
     expect(countFactWrappers(live)).toBe(1);
   });
 });
+
+// CommonMark pairs a code span across a paragraph's soft breaks, never across a
+// blank line or a block boundary. The strip pairs over the same paragraphs.
+describe("formatWebHtml — code spans across lines", () => {
+  const FACT = '<Fact n="1" v="ok">x</Fact>';
+  const agree = (input: string) => ({
+    marked: formatWebHtml(input).includes("fc-mark"),
+    counted: countFactWrappers(input) > 0,
+  });
+
+  test("a single-backtick span wraps onto the next line", () => {
+    expect(formatWebHtml("a `one\ntwo` b")).toBe("a <code>one two</code> b");
+  });
+
+  test("a span does not cross a blank line", () => {
+    expect(formatWebHtml("a `one\n\ntwo` b")).not.toContain("<code>");
+  });
+
+  test("a span does not cross into a heading, a list item or a fence", () => {
+    expect(formatWebHtml("a `one\n# two` b")).not.toContain("<code>");
+    expect(formatWebHtml("a `one\n- two` b")).not.toContain("<code>");
+    expect(formatWebHtml("a `one\n```\nz\n```\ntwo` b")).toContain("a `one");
+  });
+
+  test("a <Fact> quoted inside a cross-line span is code for the renderer AND the strip", () => {
+    const input = `see \`${FACT}\nquoted\` here`;
+    expect(formatWebHtml(input)).toContain("<code>&lt;Fact");
+    expect(agree(input)).toEqual({ marked: false, counted: false });
+  });
+
+  test("a <Fact> after a cross-line span is live, where a per-line pairing hid it", () => {
+    const input = `a \`one\ntwo\` ${FACT} \`c\``;
+    expect(formatWebHtml(input)).toContain("<code>one two</code>");
+    expect(agree(input)).toEqual({ marked: true, counted: true });
+  });
+
+  test("a <Fact> past a paragraph or block boundary stays live on both sides", () => {
+    for (const input of [
+      `a \`one\n\n${FACT} two\` b`,
+      `a \`one\n# h ${FACT} two\` b`,
+      `a \`one\n- ${FACT} two\` b`,
+      `a \`one\n+ ${FACT} two\` b`,
+    ]) {
+      expect({ input, ...agree(input) }).toEqual({ input, marked: true, counted: true });
+    }
+  });
+
+  test("a `~~~` line inside the paragraph does not split the strip's pairing", () => {
+    const input = `a \`one\n~~~\nz\n~~~\n${FACT} two\` b`;
+    expect(agree(input)).toEqual({ marked: false, counted: false });
+  });
+
+  test("inside a component body the span pairs across lines on both sides", () => {
+    const input = `<Callout>\na \`one\n${FACT}\` b\n</Callout>`;
+    expect(agree(input)).toEqual({ marked: false, counted: false });
+  });
+});

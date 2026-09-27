@@ -411,20 +411,17 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
 
     test("a line SHAPED like a fence delimiter that is prose, and pairs backticks", () => {
       // Neither line here opens a fence: the first does not start with the run,
-      // and the third's info string holds a backtick (CommonMark). So the third
-      // line stays PROSE, its unmatched ``` stays literal, its two single
-      // backticks pair into an inline span, and the sentinel lands inside it —
-      // while a line-wise scan of the markdown reads that same line as a
-      // delimiter and gets the region wrong. The rendered output is what settles
-      // it, which is the whole point of this seam.
+      // and the third's info string holds a backtick (CommonMark). So all three
+      // lines are ONE paragraph, and line 1's backtick pairs with the next single
+      // one across the soft breaks — the ``` runs are content — while a line-wise
+      // scan of the markdown reads the third line as a delimiter. The rendered
+      // output is what settles it, which is the whole point of this seam.
       const html = renderWikiHtml("a ` ```\ncode\n``` ` [[Claude Code]] ` b", resolve);
-      expect(html).toContain("``` <code>[[Claude Code]]</code> b");
-      expect(html).not.toContain("wiki-link");
-      // Both inputs diverge from CommonMark, which pairs line 1's backtick with
-      // line 3's first one across the soft break; spans are per line here. A
-      // paragraph-scoped follow-up flips BOTH assertions.
+      expect(html).toContain("a <code>``` code ```</code> ");
+      expect(html).toContain('class="wiki-link"');
       const crossLine = renderWikiHtml("a ` ```\ncode\n``` [[Claude Code]] ` b", resolve);
-      expect(crossLine).toContain('``` <a href="/wiki?relPath=concepts%2FClaude%20Code.md" class="wiki-link"');
+      expect(crossLine).toContain("a <code>``` code ``` [[Claude Code]]</code> b");
+      expect(crossLine).not.toContain("wiki-link");
     });
   });
 

@@ -158,12 +158,19 @@ divergences, all four now regression tests in `render.test.ts`:
   extractor became a line walker the same input diverged for a different reason:
   the mid-line placeholder joined the text either side onto one line.)
 
-Inline code spans pair by CommonMark's rules, but per line: a run of N backticks
-closes only on exactly N, an unmatched run stays literal, and one U+0020 is
-stripped from each end when both ends are U+0020 and the content is not all
-U+0020. CommonMark also pairs across a paragraph's soft breaks; this renderer
-does not (a known divergence). The fact-check strip shares that grammar via
-`src/format/code-spans.ts`.
+Inline code spans pair by CommonMark's rules, per PARAGRAPH: a run of N
+backticks closes only on exactly N, an unmatched run stays literal, and a span
+may cross a soft line break (the line ending and the next line's indent become
+one space, before the one-U+0020 strip from each end) but never a blank line, a
+block `parseBlocks` splits off, or a list-item line (`+ `, `1) `, an indented
+`- `), which CommonMark lets interrupt a paragraph and the parser leaves as text.
+The `text` block handler parks the paragraph's spans before the per-line
+`renderInline`; headings, list items, table cells and blockquote lines still
+pair per line. The fact-check strip (`markdownCodeRegions`) pairs over the SAME
+paragraphs: it asks the parser for its `text` blocks (`textBlockSourceLines`)
+instead of re-spelling the block rules, and both sides share
+`textCodeSpanRanges` in `src/format/code-spans.ts`. Telegram, Slack, email and
+the line scanners in `lint.ts` / `wiki-integrate.ts` still pair per line.
 
 ⚠️ **What reading the output costs instead: the scan has to know every container
 the renderer uses for code, and there are TWO.** The first revision assumed one,
