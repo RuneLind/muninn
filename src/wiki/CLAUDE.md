@@ -633,16 +633,20 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   count), Similar, Related, tracker plan coverage (`isPlanPage` answers false),
   the gardener's See-also wiring targets (`selectWirablePages`), and the lint's
   finding subjects and edit targets (orphan, stale-updated, missing-sources,
-  check 8). A culled member never heads a series a live member still declares:
-  `seriesHead`/`seriesSpellingHead` (`wiki-groups.ts`) apply
-  `liveSeriesMembers` first, and the rail fold, the reader header and check 8.3
-  all pick their head through them, so the lint keeps the label the fold shows.
+  check 8). Check 8 never edits a culled page, but the series census INCLUDES
+  culled pages (plan M2): a culled member can be the series head and name the
+  fold, and the rail fold, the reader header, the `⋯` menu, the editor's
+  one-label check, `continue at:` and check 8.3 all read that one census-
+  inclusive rule (`seriesHead`/`newestSeriesPlan`). So 8.3(a) normalises LIVE
+  members to a culled head's spelling, 8.3(b) removes a live member's label when
+  a culled head carries the newer one, 8.3(c) joins under the head's spelling,
+  and a finding whose head is culled is filed against the newest edited page.
   Also in the gardener: `sourceRelatedPages` drops a culled page before its
   one-backlink cap, and a component whose
   culled members leave one live page is no 8.2 cluster.
 - **Kept in:** the rail listing (hiding is the reader UI's job), the link graph,
-  the series census (a culled member that alone declares a series still names
-  the fold, and a culled bridge
+  the series census (a culled member can head a series and name the fold,
+  and a culled bridge
   still joins a component, so 8.2 never re-coins a series), Connections'
   Linked from / Links to and its mini-graph, the issue graph and the board —
   marked with the ONE label `CULL_LABEL` ("Retired", `wiki-cull-view.ts`), the
@@ -1507,7 +1511,8 @@ their `series_label:` is not this series' label; censusing with a plain
 `filter(key ===)` let the lint propose removing the very label the fold reads.
 (a) one series spelled more than one way normalises to the head's spelling; (b)
 more than one member carrying `series_label:` keeps the one the RAIL reads —
-`seriesHead`, the newest LABELLED member — and removes the rest. 8.3(c) joins
+`seriesHead`, the newest LABELLED member, culled or not — and removes the rest
+(never from a culled page). 8.3(c) joins
 under that same head's spelling, never the spelling of whichever member the
 cluster happened to touch: joining the met spelling adds a fresh variant of a
 key rule (a) is normalising away in the same pass.
