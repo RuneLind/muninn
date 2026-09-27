@@ -2369,6 +2369,48 @@ describe("buildRail — series", () => {
     expect(rows(block.entries).map((r) => r.page.relPath)).toContain("plans/x.mdx");
   });
 
+  test("in ACTIVITY a PINNED culled member is no ghost row; a pinned live member still is", () => {
+    const X = plan("plans/x.mdx", { plan_status: "in-flight", status_date: "2026-08-01", culled: true });
+    const all = [A, B, C, X, LOOSE];
+    const m = build({
+      filtered: all,
+      facetOnly: all,
+      seriesGroups: groupSeries(all),
+      activity: [act(A, 9)],
+      pins: ["plans/x.mdx", "plans/b.mdx"],
+      openFolds: ["series:alpha"],
+    });
+    const activityGhosts = ghosts(m.entries).filter((g) => g.section === "activity").map((g) => g.page.relPath);
+    expect(activityGhosts).toEqual(["plans/b.mdx"]);
+    expect(groupsOf(m.entries).find((g) => g.section === "activity")!.ghosts!.map((p) => p.relPath)).toEqual([
+      "plans/b.mdx",
+    ]);
+  });
+
+  test("in ACTIVITY a CULLED superseded child is not in the roll-up; a live one is", () => {
+    const OLD = plan("plans/a-old.mdx", { parent: "plans/a.mdx", pairedBy: "superseded", status_date: "2026-02-01", culled: true });
+    const OLD2 = plan("plans/a-older.mdx", { parent: "plans/a.mdx", pairedBy: "superseded", status_date: "2026-01-01" });
+    const all = [A, B, C, OLD, OLD2, LOOSE];
+    const m = build({ filtered: all, facetOnly: all, seriesGroups: groupSeries(all), activity: [act(A, 9)] });
+    const g = groupsOf(m.entries).find((e) => e.section === "activity")!;
+    expect(g.superseded.map((p) => p.relPath)).toEqual(["plans/a-older.mdx"]);
+    // Control: the Series block's roll-up keeps both.
+    const block = build({ filtered: all, facetOnly: all, seriesGroups: groupSeries(all), activity: [] });
+    expect(groupsOf(block.entries)[0]!.superseded.map((p) => p.relPath).sort()).toEqual([
+      "plans/a-old.mdx",
+      "plans/a-older.mdx",
+    ]);
+  });
+
+  test("the `N of M shown` census in ACTIVITY still counts a culled member (a census of the work, not of the rows)", () => {
+    const X = plan("plans/x.mdx", { plan_status: "in-flight", status_date: "2026-08-01", culled: true });
+    const all = [A, B, C, X, LOOSE];
+    // A facet hides B: 3 of the 4 members are in this render, X among them.
+    const filtered = all.filter((p) => p !== B);
+    const m = build({ filtered, facetOnly: filtered, seriesGroups: groupSeries(filtered, all), activity: [act(A, 9)] });
+    expect(groupsOf(m.entries).find((e) => e.section === "activity")!.census).toEqual({ shown: 3, total: 4 });
+  });
+
   test("the peek stops at SERIES_PEEK_MAX", () => {
     const D = plan("plans/d.mdx", { status_date: "2026-01-01" });
     const all = [A, B, C, D, LOOSE];

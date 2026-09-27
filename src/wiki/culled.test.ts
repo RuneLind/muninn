@@ -291,6 +291,10 @@ describe("aliasWorkedPaths", () => {
     ]);
   });
 
+  test("the alias's folder segment is compared without case", () => {
+    expect(aliasWorkedPaths("Archive/Old-Plan", dirs)).toEqual(["archive/old-plan.md", "archive/old-plan.mdx"]);
+  });
+
   test("a spelled extension (.md, .mdx, .html) is used as written", () => {
     expect(aliasWorkedPaths("archive/x.html", dirs)).toEqual(["archive/x.html"]);
     expect(aliasWorkedPaths("archive/x.md", dirs)).toEqual(["archive/x.md"]);

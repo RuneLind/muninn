@@ -890,6 +890,33 @@ describe("the worked date follows a page's aliases (a moved page keeps its histo
       await rm(root, { recursive: true, force: true });
     }
   });
+  test("the folder test ignores case: an `Archive/` folder on disk folds an alias spelled `archive/…`", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-case-"));
+    try {
+      await mkdir(path.join(root, "Archive"), { recursive: true });
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await writeFile(path.join(root, "Archive/other.md"), "---\ntitle: Other\n---\n\nBody.\n");
+      await writeFile(path.join(root, "plans/moved.md"), "---\ntitle: Moved\naliases: [archive/moved]\n---\n\nBody.\n");
+      await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "archive/moved.md", w: 6_000 }] } }));
+      const index = await buildWikiIndex(root);
+      expect(index.pages.find((p) => p.relPath === "plans/moved.md")!.workedMs).toBe(6_000);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  test("a root-level FILE is no folder: an alias whose first segment names it folds nothing", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-file-"));
+    try {
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await writeFile(path.join(root, "old"), "not a folder\n");
+      await writeFile(path.join(root, "plans/moved.md"), "---\ntitle: Moved\naliases: [old/moved]\n---\n\nBody.\n");
+      await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "old/moved.md", w: 7_000 }] } }));
+      const index = await buildWikiIndex(root);
+      expect(index.pages.find((p) => p.relPath === "plans/moved.md")!.workedMs).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   test("a TITLE alias with a slash (no such folder in this wiki) folds no ledger row", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "worked-alias-title-"));
     try {
