@@ -25,6 +25,29 @@ describe("lineCodeSpanRanges", () => {
   });
 });
 
+describe("lineCodeSpanRanges — backslash escapes", () => {
+  test("an escaped backtick cannot open; the rest of its run opens one shorter", () => {
+    expect(content("\\`a`")).toEqual([]);
+    expect(content("\\``a`")).toEqual(["a"]);
+    expect(content("\\```a``")).toEqual(["a"]);
+    expect(lineCodeSpanRanges("\\``a`")).toEqual([{ start: 2, end: 5, runLen: 1 }]);
+  });
+
+  test("an escaped backslash leaves the backtick free to open", () => {
+    expect(content("\\\\`a`")).toEqual(["a"]);
+    expect(content("\\\\\\`a`")).toEqual([]);
+  });
+
+  test("a closer ignores a backslash: inside a span it is literal", () => {
+    expect(content("`a\\`b`")).toEqual(["a\\"]);
+  });
+
+  test("an escaped opener frees the next backtick to pair", () => {
+    expect(content("Press \\` then `ls` there")).toEqual(["ls"]);
+    expect(content("\\`a` b`")).toEqual([" b"]);
+  });
+});
+
 describe("codeSpanContent", () => {
   test("strips one U+0020 from each end when both ends carry one", () => {
     expect(content("`` `x` ``")).toEqual(["`x`"]);

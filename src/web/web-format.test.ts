@@ -778,4 +778,15 @@ describe("formatWebHtml — inline code-span runs", () => {
     }
     expect(countFactWrappers(live)).toBe(1);
   });
+
+  test("an escaped backtick opens no span, in the renderer and the strip alike", () => {
+    const escaped = 'The tag \\`<Fact n="1" v="ok">x</Fact>` is live.';
+    const split = '\\``<Fact n="1" v="ok">x</Fact>` is code.';
+    expect(formatWebHtml(escaped)).toContain("fc-mark");
+    expect(countFactWrappers(escaped)).toBe(1);
+    expect(formatWebHtml(split)).toContain("<code>&lt;Fact");
+    expect(countFactWrappers(split)).toBe(0);
+    // The backslash stays visible: the renderer processes no backslash escapes.
+    expect(formatWebHtml("a \\` b")).toBe("a \\` b");
+  });
 });
