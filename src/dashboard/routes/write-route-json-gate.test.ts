@@ -218,7 +218,8 @@ describe("every write route answers a non-JSON request with 415", () => {
   });
 
   test("an allowlisted route answers a cross-origin preflight as its reason says", async () => {
-    // OPTIONS runs only a route's own preflight handler, never the write handler.
+    // OPTIONS reaches a route's own preflight handler, and also any `app.all` or
+    // `app.mount` handler; no allowlisted route is either today (0 ALL routes).
     const { app } = writeRoutes();
     const wrong: string[] = [];
     for (const [route, reason] of UNGATED) {
