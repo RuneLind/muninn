@@ -62,7 +62,10 @@
  *
  * Note the ORDER of 2 and 3: an allowlisted `chrome-extension://…` origin is
  * granted before `Sec-Fetch-Site` is consulted, because an extension-initiated
- * fetch can arrive with `Sec-Fetch-Site: cross-site`.
+ * fetch can arrive with `Sec-Fetch-Site: cross-site`. The allowlist and
+ * loopback arm precede it too (a browser sends those origins only for this
+ * instance's own pages). The `off` Host arm is the one exception: it yields to
+ * a `Sec-Fetch-Site` of `cross-site` or `same-site`.
  */
 import type { Context, MiddlewareHandler } from "hono";
 import { getLog } from "../logging.ts";
@@ -109,7 +112,7 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // Graph mode: at level 2 and up the same ledger reads, for every session a
   // walk reaches — up to `GRAPH_SESSIONS_MAX` refs behind one GET.
   "/api/wiki/graph",
-  // Uncached, it SPAWNS every stdio MCP server in the bot's `.mcp.json` to probe
+  // On a missing or stale cache it SPAWNS every stdio MCP server in the bot's `.mcp.json` to probe
   // it — so an `<img>` on any page could start local processes. The chat page
   // calls it with a same-origin `fetch`, which passes.
   "/chat/mcp-status/",
@@ -194,9 +197,13 @@ export interface OriginDecisionInput {
  *   Metadata only to a potentially-trustworthy URL (https, localhost,
  *   127.0.0.0/8), so such a page's own POST carries an `Origin` and NO
  *   `Sec-Fetch-Site`, and without this arm every write it makes answers 403.
- * - **`Sec-Fetch-Site: same-origin`**, for the dashboard served over https
- *   through `tailscale serve` (`Origin: https://<tailnet-name>`, unknown to
- *   muninn), which may rewrite `Host` so the arm above does not match.
+ *   It also covers `tailscale serve`, which forwards the browser's `Host` to a
+ *   TCP backend — including its WS handshake, which carries no Fetch Metadata.
+ *   Skipped when `Sec-Fetch-Site` is present and not `none`: an http page on
+ *   the same name as an https-proxied muninn sends a matching Origin marked
+ *   `cross-site`.
+ * - **`Sec-Fetch-Site: same-origin`**, a second path for an https proxy that
+ *   rewrites `Host`, so the arm above does not match.
  *
  * The last two admit DNS rebinding — accepted, because `off` has no `Host`
  * allowlist, so a rebound name already reads and writes everything. The guard
@@ -268,7 +275,8 @@ export interface OriginDecision {
  * A proxied origin (the tailnet name `tailscale serve` publishes) is NOT
  * derivable this way. In an authenticating mode it must be listed in
  * `MUNINN_ALLOWED_ORIGINS` (a boot requirement there); `off` admits it through
- * its `Sec-Fetch-Site: same-origin` arm instead. Note the scheme matters
+ * its Host arm (the proxy forwards `Host`; the only path for the WS handshake)
+ * or its `Sec-Fetch-Site: same-origin` arm. Note the scheme matters
  * again as a result: `https://<tailnet-name>` is what the browser sends, and
  * that exact string is what belongs in the allowlist.
  */
@@ -296,7 +304,13 @@ export function decideOrigin(input: OriginDecisionInput): OriginDecision {
       if (offModeOriginAccepted(origin, input.allowedOrigins)) {
         return { allowed: true, reason: "extension origin" };
       }
-      if (originMatchesHost(origin, input.host)) return { allowed: true, reason: "origin matches host" };
+      // Fetch Metadata, when present, is authoritative: the Host arm is for the
+      // requests that carry none (a plain-http page, a WS handshake). A
+      // cross-site http page on the name an https proxy forwards as Host
+      // would otherwise match it.
+      if ((!site || site === "none") && originMatchesHost(origin, input.host)) {
+        return { allowed: true, reason: "origin matches host" };
+      }
       if (site === "same-origin") return { allowed: true, reason: "sec-fetch-site same-origin" };
     }
     // `Origin: null` lands here — a sandboxed iframe or a redirected

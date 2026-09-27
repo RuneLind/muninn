@@ -298,6 +298,13 @@ describe("with auth OFF", () => {
     expect((await handshake({ origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010" })).ok).toBe(true);
   });
 
+  test("a Host-matching Origin marked Sec-Fetch-Site cross-site is refused", async () => {
+    const lan = { origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010" };
+    expect((await handshake({ ...lan, "sec-fetch-site": "cross-site" })).ok).toBe(false);
+    expect((await handshake({ ...lan, "sec-fetch-site": "same-site" })).ok).toBe(false);
+    expect((await handshake(lan)).ok).toBe(true);
+  });
+
   test("over a real socket: a cross-origin handshake answers 403, a loopback one upgrades", async () => {
     const saved = authorizeAtPort;
     authorizeAtPort = off();
@@ -309,6 +316,9 @@ describe("with auth OFF", () => {
       // The Host arm, on a LAN name the loopback set does not contain.
       expect(statusOf(await rawHandshake("/chat/ws", { origin: "http://mini.lan:3987", host: "mini.lan:3987" }))).toBe(101);
       expect(statusOf(await rawHandshake("/chat/ws", { origin: "http://evil.test", host: "mini.lan:3987" }))).toBe(403);
+      expect(statusOf(await rawHandshake("/chat/ws", {
+        origin: "http://mini.lan:3987", host: "mini.lan:3987", "sec-fetch-site": "cross-site",
+      }))).toBe(403);
     } finally {
       authorizeAtPort = saved;
     }

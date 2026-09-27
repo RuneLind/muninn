@@ -278,10 +278,17 @@ laptop or mini keeps working:
   address (`DASHBOARD_HOST=0.0.0.0`, `http://mini:3010`): a browser sends Fetch
   Metadata only to potentially-trustworthy URLs (https, localhost, 127/8), so
   that page's own POST carries `Origin` and no `Sec-Fetch-Site`, and without
-  this arm every write it made answered 403 (measured).
-- **`Sec-Fetch-Site: same-origin`**, for the dashboard over **https** through
-  `tailscale serve` (`Origin: https://<tailnet-name>`), which may rewrite
-  `Host` so the arm above does not match.
+  this arm every write it made answered 403 (measured). It also covers
+  **https** through `tailscale serve` (`Origin: https://<tailnet-name>`):
+  serve forwards the browser's `Host` to a TCP backend (`r.Out.Host =
+  r.In.Host`; it rewrites only for a unix-socket backend), HTTP and the WS
+  handshake alike — and the handshake carries no `Sec-Fetch-Site`. The arm is
+  **skipped when `Sec-Fetch-Site` is `cross-site` or `same-site`**: Fetch
+  Metadata, when present, is authoritative. Without that, an http page on :80
+  of the name serve publishes sends a matching `Origin` with `cross-site` and
+  passed (measured).
+- **`Sec-Fetch-Site: same-origin`**, a second path for an https proxy that
+  rewrites `Host`, so the arm above does not match.
 
 The last two admit DNS rebinding — accepted: `off` has no `Host` allowlist, so
 a rebound name already reads and writes everything. The guard targets drive-by
@@ -311,7 +318,7 @@ enumerated exception list: `GET /chat/pending/:threadId` is a one-time *consume*
 (a cross-site `<img>` destroys the victim's pending message without reading a
 response) and `GET /api/research/ask` spends a retrieval + synthesis turn;
 `GET /chat/mcp-status/:bot` spawns every stdio MCP server in the bot's
-`.mcp.json` when uncached.
+`.mcp.json` when its cache is missing or stale.
 
 The decision order is **Origin, then `Sec-Fetch-Site`**, and it is load-bearing
 in both directions:

@@ -57,7 +57,7 @@ describe("decideOrigin — the off-mode table", () => {
     expect(allowed({ origin: "null", secFetchSite: "cross-site" })).toBe(false);
   });
 
-  test("an unknown origin with Sec-Fetch-Site same-origin is allowed (tailscale serve)", () => {
+  test("an unknown origin with Sec-Fetch-Site same-origin is allowed (a Host-rewriting https proxy)", () => {
     expect(allowed({ origin: TAILNET, secFetchSite: "same-origin" })).toBe(true);
     expect(allowed({ origin: TAILNET })).toBe(false);
   });
@@ -85,11 +85,25 @@ describe("decideOrigin — the off-mode table", () => {
     expect(allowed({ origin: "null", host: "null" })).toBe(false);
   });
 
+  test("Fetch Metadata saying cross-site or same-site overrides the Host arm", () => {
+    // The measured bypass: `tailscale serve --https=443` forwards Host, and an
+    // http page on :80 of the same name sends a matching Origin — cross-site.
+    expect(allowed({ origin: "http://mini.ts.net", host: "mini.ts.net", secFetchSite: "cross-site" })).toBe(false);
+    expect(allowed({ origin: "http://mini.ts.net", host: "mini.ts.net", secFetchSite: "same-site" })).toBe(false);
+    expect(allowed({ origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010", secFetchSite: "cross-site" })).toBe(false);
+    // Guards: no Fetch Metadata (plain-http page, WS handshake) or a same-origin
+    // one still passes, and the extension arm still precedes Sec-Fetch-Site.
+    expect(allowed({ origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010" })).toBe(true);
+    expect(allowed({ origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010", secFetchSite: "none" })).toBe(true);
+    expect(allowed({ origin: "https://mini.ts.net", host: "mini.ts.net", secFetchSite: "same-origin" })).toBe(true);
+    expect(allowed({ origin: EXTENSION, host: "mini.ts.net", secFetchSite: "cross-site" })).toBe(true);
+  });
+
   test("an origin on the optional allowlist is allowed", () => {
     expect(allowed({ origin: TAILNET, allowedOrigins: [...loopbackOrigins(PORT), TAILNET] })).toBe(true);
   });
 
-  test("GET /chat/mcp-status/:bot (spawns MCP servers when uncached) is side-effecting", () => {
+  test("GET /chat/mcp-status/:bot (spawns MCP servers on a missing or stale cache) is side-effecting", () => {
     // The cross-site `<img>` shape: no Origin, Sec-Fetch-Site cross-site.
     expect(allowed({ method: "GET", path: "/chat/mcp-status/jarvis", secFetchSite: "cross-site" })).toBe(false);
     expect(allowed({ method: "GET", path: "/chat/mcp-status/jarvis", secFetchSite: "same-origin" })).toBe(true);
@@ -219,6 +233,15 @@ describe("the dashboard with auth off, composed as src/index.ts composes it", ()
     await reachedHandler(await post(offApp(), {
       host: "192.168.1.50:3010", origin: "http://192.168.1.50:3010", "content-type": "application/json",
     }));
+  });
+
+  test("a Host-matching http Origin marked Sec-Fetch-Site cross-site is refused before the handler", async () => {
+    // The exact request measured reaching the handler (400) on 50d0c394.
+    const res = await offApp().request("/api/watchers/nope/trigger", {
+      method: "POST",
+      headers: { host: "mini.ts.net", origin: "http://mini.ts.net", "sec-fetch-site": "cross-site" },
+    });
+    await refused(res);
   });
 
   test("a foreign page's POST to that LAN host is still refused", async () => {
