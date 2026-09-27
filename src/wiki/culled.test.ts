@@ -13,6 +13,8 @@ import { aliasWorkedPaths, buildWikiIndex, readCull, type WikiIndex } from "./st
 import { toListing } from "../dashboard/routes/wiki-routes.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS, rankActivity } from "../dashboard/views/components/wiki-activity-rank.ts";
 import type { WikiListing } from "../dashboard/views/components/wiki-filter.ts";
+import { groupSeries, seriesMembersOf } from "../dashboard/views/components/wiki-groups.ts";
+import { lintWiki } from "./lint.ts";
 
 let root: string;
 beforeEach(async () => {
@@ -230,5 +232,63 @@ describe("Activity drops culled pages — through the store's effective value", 
     expect(ranked).toContain("plans/live.mdx");
     expect(ranked).not.toContain("plans/retired.mdx");
     expect(ranked).not.toContain("plans/retired.html");
+  });
+});
+
+describe("lint and the rail read ONE series head — a culled newest member steers neither", () => {
+  const NOW = Date.parse("2026-09-20T12:00:00Z");
+  const series = (title: string, o: { date: string; key: string; label?: string; plan?: boolean; culled?: boolean }) =>
+    md([
+      `title: ${title}`,
+      `status_date: ${o.date}`,
+      ...(o.plan ? ["plan_status: in-flight"] : []),
+      `series: ${o.key}`,
+      ...(o.label ? [`series_label: ${o.label}`] : []),
+      ...(o.culled ? ["signal: none"] : []),
+    ]);
+  /** The label the rail's fold and the reader header both show for the one series in the wiki. */
+  const railLabels = async () => {
+    const index = await buildWikiIndex(root);
+    const listing = index.pages.map((p) => toListing(index, p) as unknown as WikiListing);
+    const groups = groupSeries(listing, listing, NOW);
+    expect(groups).toHaveLength(1);
+    const header = seriesMembersOf(listing, "work", NOW).head;
+    return { fold: groups[0]!.label, header: header?.seriesLabel || header?.series };
+  };
+  const seriesFindings = async () => {
+    const index = await buildWikiIndex(root);
+    return (await lintWiki(index, { now: () => NOW })).findings.filter((f) => f.check === "series-inconsistent");
+  };
+
+  test("label: lint keeps the label the fold and the header show, and after the fix is applied they still agree", async () => {
+    await write("plans/dead.mdx", series("Dead", { date: "2026-09-18", key: "work", label: "Dead label", culled: true }));
+    await write("plans/keep.mdx", series("Keep", { date: "2026-09-12", key: "work", label: "Keep label", plan: true }));
+    await write("plans/old.mdx", series("Old", { date: "2026-09-10", key: "work", label: "Old label" }));
+
+    const [f, ...rest] = await seriesFindings();
+    expect(rest).toHaveLength(0);
+    expect(f!.detail).toContain('keeping "Keep label"');
+    expect(await railLabels()).toEqual({ fold: "Keep label", header: "Keep label" });
+
+    // Apply the fix (drop Old's label): lint goes silent and the rail still reads the kept label.
+    await write("plans/old.mdx", series("Old", { date: "2026-09-10", key: "work" }));
+    expect(await seriesFindings()).toHaveLength(0);
+    expect(await railLabels()).toEqual({ fold: "Keep label", header: "Keep label" });
+  });
+
+  test("spelling: the fold and the header show the spelling lint normalises to, not the culled newest member's", async () => {
+    await write("plans/dead.mdx", series("Dead", { date: "2026-09-18", key: "WORK", plan: true, culled: true }));
+    await write("plans/live.mdx", series("Live", { date: "2026-09-12", key: "work", plan: true }));
+    await write("plans/odd.mdx", series("Odd", { date: "2026-09-10", key: "Work" }));
+
+    const [f, ...rest] = await seriesFindings();
+    expect(rest).toHaveLength(0);
+    expect(f!.fix!.edits).toEqual([{ op: "frontmatter", relPath: "plans/odd.mdx", key: "series", value: "work" }]);
+    expect(await railLabels()).toEqual({ fold: "work", header: "work" });
+  });
+
+  test("control: a culled member that ALONE declares the series still names it on the rail", async () => {
+    await write("plans/dead.mdx", series("Dead", { date: "2026-09-18", key: "work", label: "Dead label", culled: true }));
+    expect(await railLabels()).toEqual({ fold: "Dead label", header: "Dead label" });
   });
 });

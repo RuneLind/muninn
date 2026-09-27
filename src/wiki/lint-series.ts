@@ -41,6 +41,7 @@ import {
   seriesHead,
   seriesKeyOf,
   seriesMembersByFoldKey,
+  seriesSpellingHead,
   SERIES_CONTINUE_MAX,
   SERIES_TERMINAL_STATUSES,
 } from "../dashboard/views/components/wiki-groups.ts";
@@ -439,14 +440,6 @@ function headOf(members: WikiPageMeta[]): WikiPageMeta {
   return newestSeriesPlan(ordered) ?? ordered[0]!;
 }
 
-/** The LIVE members, or all of them when none is live. A culled page never sets
- *  a series' spelling or keeps its label over a live one; it decides only when
- *  it alone still declares the series. */
-function preferLive(members: WikiPageMeta[]): WikiPageMeta[] {
-  const live = members.filter((m) => !m.culled);
-  return live.length > 0 ? live : members;
-}
-
 /**
  * A NEW series key that no existing series owns, under the rail's own fold
  * (`seriesCensusKey`: trimmed, case-insensitive).
@@ -483,7 +476,8 @@ function declaredKeySpelling(
 ): string | null {
   const members = declared.get(fold);
   if (!members || members.length === 0) return null;
-  return seriesKeyOf(headOf(preferLive(members))) || null;
+  const head = seriesSpellingHead(members);
+  return head ? seriesKeyOf(head) || null : null;
 }
 
 /** ────────────────────────── 8.2 + 8.3(c), one pass ───────────────────────── */
@@ -644,10 +638,11 @@ function componentId(component: readonly Candidate[]): string {
 function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding[] {
   const findings: LintFinding[] = [];
   for (const members of declared.values()) {
-    // A culled member stays IN the census but never sets the spelling or keeps
+    // The head is the RAIL's (`seriesSpellingHead`, `seriesHead`), live first:
+    // a culled member stays IN the census but never sets the spelling or keeps
     // the label while a live member declares the series, and is never edited.
     // So whenever a finding has an edit target, its head is live.
-    const head = headOf(preferLive(members));
+    const head = seriesSpellingHead(members)!;
     const headKey = seriesKeyOf(head);
 
     // (a) one series, more than one spelling.
@@ -672,21 +667,24 @@ function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding
       });
     }
 
-    // (b) more than one member carries series_label:. The head is `seriesHead`,
-    //     the RAIL's own head rule — the newest LABELLED member — so the label
-    //     kept is the label a reader already sees on the fold. `headOf` (the
-    //     newest open PLAN) is a different page whenever the newest labelled
-    //     member is a blog, and keeping that one renames the fold.
+    // (b) more than one member carries series_label:. The head is `seriesHead`
+    //     over the whole census, the RAIL's own head rule — the newest labelled
+    //     LIVE member (a culled one only when no member is live) — so the label
+    //     kept is the label a reader already sees on the fold and the header.
+    //     The spelling head (the newest open PLAN) is a different page whenever
+    //     the newest labelled member is a blog, and keeping that one renames the
+    //     fold. When the rail's head carries no label (only culled members are
+    //     labelled), no live member is either, and there is nothing to remove.
     const labelled = members.filter((m) => !!m.seriesLabel && m.seriesLabel.trim());
     if (labelled.length > 1) {
-      const labelHead = seriesHead(preferLive(labelled)) ?? labelled[0]!;
+      const labelHead = seriesHead(members)!;
       const extra = labelled.filter((m) => m.relPath !== labelHead.relPath && !m.culled);
       const paths = extra.map((p) => p.relPath);
       if (paths.length === 0) continue;
       findings.push({
         check: "series-inconsistent",
         relPath: labelHead.relPath,
-        message: `series "${headKey}" has ${labelled.length} series_label: heads — the rail reads the newest labelled page`,
+        message: `series "${headKey}" has ${labelled.length} series_label: heads — the rail reads the newest labelled live page`,
         detail: `keeping "${labelHead.seriesLabel}" on ${labelHead.relPath}; removing series_label: from ${memberList(paths)}`,
         fix: {
           groupKey: groupKeyFor("series-inconsistent", `label:${seriesCensusKey(headKey)}`, paths),
