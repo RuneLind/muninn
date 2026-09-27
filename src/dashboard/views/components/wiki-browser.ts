@@ -2757,7 +2757,9 @@ function renderConnections(data: WikiPageDetail): void {
         .forEach((p) => {
           html +=
             `<div class="wiki-conn-item" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
-            `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(displayTitleOf(p))}</span></div>`;
+            `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(displayTitleOf(p))}` +
+            // A culled page stays in Connections, marked (the reader's hide/banner UI is separate).
+            `${p.culled ? ' <em title="retired: signal: none">· retired</em>' : ""}</span></div>`;
         });
     });
     return html + "</div>";

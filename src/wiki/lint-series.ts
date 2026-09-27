@@ -321,6 +321,9 @@ function checkSameWorkNoLink(index: WikiIndex, candidates: Candidate[]): LintFin
 
   const findings: LintFinding[] = [];
   for (const [a, b] of pairs.values()) {
+    // A culled page is retired work: it is neither a subject nor a link target
+    // worth proposing, whichever end of the pair it is.
+    if (a.page.culled || b.page.culled) continue;
     if ((index.outgoing.get(a.key) ?? []).includes(b.key)) continue;
     if ((index.outgoing.get(b.key) ?? []).includes(a.key)) continue;
 
@@ -512,7 +515,10 @@ function checkClusters(
     const folds = new Set(component.filter((c) => c.series).map((c) => seriesCensusKey(c.series)));
     if (folds.size >= 2) continue;
 
-    const unnamed = component.filter((c) => !c.series).map((c) => c.page);
+    // A CULLED page stays in the component — it can bridge two live pages, and
+    // its `series:` can be the one the component touches — but it is never an
+    // edit target: its frontmatter is filed away.
+    const unnamed = component.filter((c) => !c.series && !c.page.culled).map((c) => c.page);
     if (unnamed.length === 0) continue;
 
     if (folds.size === 1) {
@@ -555,7 +561,7 @@ function checkClusters(
     // The GATE: a cluster nobody has an open plan in is reported and not
     // proposed. See `SERIES_CLUSTER_MIN_PLANS` — a finding with no `fix` never
     // reaches the seeder, so the count is visible and nothing is written.
-    const openPlans = component.filter((c) => isOpenPlan(c.page)).length;
+    const openPlans = component.filter((c) => !c.page.culled && isOpenPlan(c.page)).length;
     if (openPlans < SERIES_CLUSTER_MIN_PLANS) {
       findings.push({
         check: "series-unnamed",
@@ -629,14 +635,20 @@ function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding
     const head = headOf(members);
     const headKey = seriesKeyOf(head);
 
+    // A culled member stays IN the census (it can be the head whose spelling
+    // and label the fold reads) but is never edited nor filed against: the
+    // finding moves to the first page it does edit.
+    const subjectOf = (preferred: WikiPageMeta, edited: readonly string[]): string =>
+      preferred.culled ? edited[0]! : preferred.relPath;
+
     // (a) one series, more than one spelling.
     const variants = [...new Set(members.map((m) => seriesKeyOf(m)))];
-    if (variants.length > 1) {
-      const wrong = members.filter((m) => seriesKeyOf(m) !== headKey);
+    const wrong = members.filter((m) => seriesKeyOf(m) !== headKey && !m.culled);
+    if (variants.length > 1 && wrong.length > 0) {
       const paths = wrong.map((p) => p.relPath);
       findings.push({
         check: "series-inconsistent",
-        relPath: head.relPath,
+        relPath: subjectOf(head, paths),
         message: `series: "${headKey}" is spelled ${variants.length} ways — ${variants.join(", ")}`,
         detail: `normalising to "${headKey}" on: ${memberList(paths)}`,
         fix: {
@@ -659,11 +671,12 @@ function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding
     const labelled = members.filter((m) => !!m.seriesLabel && m.seriesLabel.trim());
     if (labelled.length > 1) {
       const labelHead = seriesHead(members) ?? labelled[0]!;
-      const extra = labelled.filter((m) => m.relPath !== labelHead.relPath);
+      const extra = labelled.filter((m) => m.relPath !== labelHead.relPath && !m.culled);
       const paths = extra.map((p) => p.relPath);
+      if (paths.length === 0) continue;
       findings.push({
         check: "series-inconsistent",
-        relPath: labelHead.relPath,
+        relPath: subjectOf(labelHead, paths),
         message: `series "${headKey}" has ${labelled.length} series_label: heads — the rail reads the newest labelled page`,
         detail: `keeping "${labelHead.seriesLabel}" on ${labelHead.relPath}; removing series_label: from ${memberList(paths)}`,
         fix: {

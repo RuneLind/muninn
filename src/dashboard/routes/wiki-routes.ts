@@ -1048,7 +1048,7 @@ export interface WikiPageListing extends WikiPageMeta {
 export function toListing(
   index: WikiIndex,
   meta: WikiPageMeta,
-  opts: { includeDesc?: boolean; includeProvenance?: boolean } = {},
+  opts: { includeDesc?: boolean; includeProvenance?: boolean; includeCull?: boolean } = {},
 ): WikiPageListing {
   // `desc` + `pubDate` are stripped by default: they are page-body fields no
   // LISTING consumer reads, and on jarvis they add ~100 KB to the hot
@@ -1100,7 +1100,14 @@ export function toListing(
   // alone — with the `mention` relation dropped), because the rail's pills and
   // the Jira facet read it. Caller 2 opts the whole list in through
   // `includeProvenance`: the demoted keys are a fact about the one open page.
-  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, ...rest } = meta;
+  //
+  // `culled` rides the rest spread on ALL THREE callers: the rail, Activity and
+  // the Connections rows all read it, and it is one boolean on the few pages
+  // that carry it. `cullReason` (free prose, up to a paragraph) and the resolved
+  // `supersededBy` are what the open page's banner renders, so they are the
+  // THIRD opt-in, `includeCull`, passed by caller 2 alone.
+  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, cullReason, supersededBy, ...rest } =
+    meta;
   void pubDate;
   void children;
   void prRefs;
@@ -1115,6 +1122,9 @@ export function toListing(
           ...(prs ? { prs } : {}),
           ...(sessionsBackfilled ? { sessionsBackfilled } : {}),
         }
+      : {}),
+    ...(opts.includeCull
+      ? { ...(cullReason ? { cullReason } : {}), ...(supersededBy ? { supersededBy } : {}) }
       : {}),
     linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
     backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
@@ -1916,7 +1926,7 @@ export function registerWikiRoutes(
     return c.json({
       // The two callers that opt fields in — see `toListing`. Deliberately NOT
       // `listings()` below, whose arrays are the link-heavy pages' bulk.
-      meta: toListing(index, meta, { includeDesc: true, includeProvenance: true }),
+      meta: toListing(index, meta, { includeDesc: true, includeProvenance: true, includeCull: true }),
       // The page's CONTENT hash — the CAS base `POST /api/wiki/series` (and any
       // later page writer the reader drives) sends back. Beside `meta` rather
       // than inside it: `toListing` is shared with the hot listing and with the

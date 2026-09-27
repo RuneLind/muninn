@@ -503,4 +503,69 @@ describe("checkSeries", () => {
     expect(new Set(first.map((f) => f.fix!.groupKey)).size).toBe(first.length);
     expect(first).toHaveLength(2);
   });
+
+  // ── culled pages: in the graph and the census, never a subject or a target ──
+
+  /** A `signal: none` page — the fence gains the one line. */
+  const culled = (text: string) => text.replace("---\n\n", "signal: none\n---\n\n");
+
+  test("a culled BRIDGE declaring nothing in a named series gets no 8.3 join edit", async () => {
+    await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true, series: "work" }, "See [[C]]."));
+    await write("plans/b.mdx", page("B", { date: "2026-09-12", plan: true, series: "work" }, "See [[C]]."));
+    // Links both ways to A and B, declares no series — a live page here is an
+    // 8.3(c) join candidate.
+    await write("plans/c.mdx", culled(page("C", { date: "2026-09-14" }, "See [[A]] and [[B]].")));
+
+    const all = [...(await findings("series-unnamed")), ...(await findings("series-inconsistent"))];
+    expect(all).toHaveLength(0);
+  });
+
+  test("control: the same bridge LIVE is joined into the series", async () => {
+    await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true, series: "work" }, "See [[C]]."));
+    await write("plans/b.mdx", page("B", { date: "2026-09-12", plan: true, series: "work" }, "See [[C]]."));
+    await write("plans/c.mdx", page("C", { date: "2026-09-14" }, "See [[A]] and [[B]]."));
+
+    const [f, ...rest] = await findings("series-inconsistent");
+    expect(rest).toHaveLength(0);
+    expect(edits(f!)).toEqual([{ op: "frontmatter", relPath: "plans/c.mdx", key: "series", value: "work" }]);
+  });
+
+  test("a culled HEAD that alone declares the series keeps it named: live members JOIN it, no 8.2 coins a new one", async () => {
+    // Dropping the culled head from the graph would leave A and B an unnamed
+    // cluster with two open plans — exactly the 8.2 proposal for pages already
+    // in a series.
+    await write(
+      "plans/head.mdx",
+      culled(page("Head", { date: "2026-09-18", series: "work", label: "The work" }, "See [[A]] and [[B]].")),
+    );
+    await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true }, "See [[Head]] and [[B]]."));
+    await write("plans/b.mdx", page("B", { date: "2026-09-12", plan: true }, "See [[Head]] and [[A]]."));
+
+    expect(await findings("series-unnamed")).toHaveLength(0);
+    const [f, ...rest] = await findings("series-inconsistent");
+    expect(rest).toHaveLength(0);
+    expect(f!.relPath).not.toBe("plans/head.mdx");
+    expect(edits(f!)).toEqual([
+      { op: "frontmatter", relPath: "plans/a.mdx", key: "series", value: "work" },
+      { op: "frontmatter", relPath: "plans/b.mdx", key: "series", value: "work" },
+    ]);
+  });
+
+  test("8.1 proposes no See-also link to or from a culled page", async () => {
+    await write(
+      "plans/newer.mdx",
+      page("Newer plan", { date: "2026-09-10" }, "Landed RuneLind/muninn#553 and RuneLind/muninn#552."),
+    );
+    await write(
+      "plans/older.mdx",
+      culled(page("Older plan", { date: "2026-09-01" }, "See RuneLind/muninn#552 and RuneLind/muninn#553.")),
+    );
+    expect(await findings("same-work-no-link")).toHaveLength(0);
+  });
+
+  test("a culled member's odd spelling or extra label is never rewritten", async () => {
+    await write("plans/head.mdx", page("Head", { date: "2026-09-18", plan: true, series: "work", label: "Work" }));
+    await write("plans/old.mdx", culled(page("Old", { date: "2026-09-01", series: "Work", label: "Old work" })));
+    expect(await findings("series-inconsistent")).toHaveLength(0);
+  });
 });

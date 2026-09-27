@@ -476,6 +476,9 @@ function checkOrphans(index: WikiIndex): LintFinding[] {
     // Explainers (.html) never join the link graph, so they'd always read as
     // orphans — that's structural, not a hygiene issue. Exclude them as subjects.
     if (page.type === "explainer") continue;
+    // A culled page is retired on purpose; it is never an orphan finding. It
+    // still COUNTS as a linker below — the backlinks it gives are real links.
+    if (page.culled) continue;
     const key = normalizeRelPath(page.relPath);
     if (reservedBasename(key)) continue;
 
@@ -591,7 +594,9 @@ export async function lintWiki(
     findings.push(...checkNestedAnnotation(page, content));
     findings.push(...checkUnrenderedFactMarks(page, content));
 
-    if (!reservedBasename(page.relPath)) {
+    // A culled page is never a subject of the two frontmatter-hygiene checks: it
+    // is filed away, and a finding asks someone to edit it.
+    if (!reservedBasename(page.relPath) && !page.culled) {
       // One clock read per lint pass, so two pages at the 48h boundary are judged
       // against the same instant (and `deps.now` makes the case deterministic in tests).
       findings.push(...checkStaleUpdated(page, content, nowMs));

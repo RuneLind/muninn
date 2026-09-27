@@ -457,7 +457,7 @@ export function workedGateFor(
   let candidates = 0;
   let covered = 0;
   for (const page of pages) {
-    if (isMetaPage(page) || !LEDGER_PAGE_EXT.test(page.relPath)) continue;
+    if (isMetaPage(page) || page.culled || !LEDGER_PAGE_EXT.test(page.relPath)) continue;
     if (scorePage(page, weights, now, null).score < ACTIVITY_MIN_SCORE) continue;
     candidates++;
     if (workedStandsIn(usableWorkedMs(page, now), pageDateSignal(page, "updated", now))) covered++;
@@ -483,9 +483,10 @@ export function workedGateFor(
  *
  * Bookkeeping pages are excluded outright (`isMetaPage`): nearly every wiki
  * write touches `log.md` and `index.md`, so their recency is the write traffic
- * itself — the same reason the recency sorts sink them. So is anything scoring
- * below {@link ACTIVITY_MIN_SCORE}, which is what lets the section be EMPTY on a
- * wiki where nothing has happened.
+ * itself — the same reason the recency sorts sink them. So is a CULLED page
+ * (`culled`, the store's effective value, so a culled page's `.html` twin goes
+ * with it), and anything scoring below {@link ACTIVITY_MIN_SCORE}, which is what
+ * lets the section be EMPTY on a wiki where nothing has happened.
  *
  * `now` is a parameter, not a clock read, for the same reason `pageTimeMs`'s is:
  * this runs inside a comparator and one instant per pass keeps it pure. The
@@ -506,7 +507,7 @@ export function rankActivity(
   const substitute = gate?.open === true ? gate : null;
   const rows: ActivityRow[] = [];
   for (const page of pages) {
-    if (isMetaPage(page)) continue;
+    if (isMetaPage(page) || page.culled) continue;
     const row = scorePage(page, weights, now, substitute);
     if (row.score >= ACTIVITY_MIN_SCORE) rows.push(row);
   }

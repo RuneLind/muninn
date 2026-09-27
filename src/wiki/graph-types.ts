@@ -183,8 +183,12 @@ export interface GraphPageNode extends GraphNodeBase {
   /** Every PR the page names (`WikiPageMeta.prRefs`), at every level — present
    *  even when the PR lane is not drawn. Absent when it names none. */
   prRefs?: string[];
-  /** A plan under the wiki's first tracker config (`isPlanPage`). */
+  /** A plan under the wiki's first tracker config (`isPlanPage`) — never a
+   *  culled page, which covers no key. */
   plan: boolean;
+  /** The page is retired (`WikiPageMeta.culled`). It stays in the graph,
+   *  marked, since a culled page can be where a key was created. */
+  culled?: true;
 }
 
 export interface GraphSessionNode extends GraphNodeBase {

@@ -618,3 +618,27 @@ describe("fix round 2", () => {
     }
   });
 });
+
+describe("buildGraph — a culled page", () => {
+  test("stays in the graph, marked culled, and leaves only the key's plan coverage", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-culled-"));
+    roots.push(root);
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");
+    // Where the key was created — then retired.
+    await writeFile(
+      path.join(root, "notes/demo-201-arbeidsplan.md"),
+      `---\ntitle: DEMO-201 arbeidsplan\nsignal: none\nsignal-reason: shipped\n---\n\nJira opprettet: [DEMO-201](${url("DEMO-201")}).\n`,
+      "utf8",
+    );
+    await writeFile(path.join(root, "notes/demo-201-notat.md"), "---\ntitle: DEMO-201 notat\n---\n\nBody.\n", "utf8");
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+
+    const p = ok((await graph({ scope: "issue", root: "jira:DEMO-201", level: 1 }, fakePort(), index)).res);
+    const retired = p.nodes.find((n) => n.id === "page:notes/demo-201-arbeidsplan.md")!;
+    expect(retired).toMatchObject({ lane: "page", culled: true, plan: false });
+    expect(p.nodes.find((n) => n.id === "page:notes/demo-201-notat.md")!).not.toHaveProperty("culled");
+    const issue = p.nodes.find((n) => n.id === "issue:jira:DEMO-201")!;
+    expect(issue).toMatchObject({ lane: "issue", pageCount: 2, planPages: [] });
+  });
+});

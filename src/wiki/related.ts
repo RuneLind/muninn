@@ -133,6 +133,9 @@ export function computeRelated(index: WikiIndex, relPath: string): RelatedRef[] 
     const meta = index.resolveRelPath(candidateKey);
     if (!meta) return;
     if (isBookkeeping(meta.relPath)) return;
+    // A CULLED page is retired work: it stays in Linked from / Links to (marked),
+    // but it is not "related work" a reader should continue in.
+    if (meta.culled) return;
     // The open page's OWN attachments are not related work: the rail already
     // shows them as this page's attachment chip, so a row here is the same file
     // twice on one screen. Scoped to THIS page's children — an `.html` explainer

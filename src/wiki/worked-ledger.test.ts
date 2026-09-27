@@ -24,7 +24,7 @@ import {
   WORKED_EMPTY_RELEASE_MS,
   type WorkedLedgerDeps,
 } from "./worked-ledger.ts";
-import { __resetWorkedMatchWarnsForTest, workedMatchWarnDue } from "./store.ts";
+import { __resetWorkedMatchWarnsForTest, buildWikiIndex, workedMatchWarnDue } from "./store.ts";
 import { __resetClaudeUsageWarnsForTest } from "../utils/claude-usage-fetch.ts";
 import type { getLog } from "../logging.ts";
 
@@ -852,6 +852,41 @@ describe("no index build waives the ledger's back-off", () => {
       server.stop(true);
       if (prev === undefined) delete process.env.CLAUDE_USAGE_URL;
       else process.env.CLAUDE_USAGE_URL = prev;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the worked date follows a page's aliases (a moved page keeps its history)", () => {
+  test("a page whose `aliases:` names its OLD path takes the old path's workedMs, newest wins", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-"));
+    try {
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await mkdir(path.join(root, "archive"), { recursive: true });
+      // Moved from archive/ to plans/ with the old path as an alias.
+      await writeFile(path.join(root, "plans/moved.md"), "---\ntitle: Moved\naliases: [archive/moved]\n---\n\nBody.\n");
+      // An alias naming a path a LIVE page holds now is that page's history, not this one's.
+      await writeFile(path.join(root, "plans/squatter.md"), "---\ntitle: Squatter\naliases: [archive/live]\n---\n\nBody.\n");
+      await writeFile(path.join(root, "archive/live.md"), "---\ntitle: Live\n---\n\nBody.\n");
+      await refreshWorkedLedger(
+        root,
+        deps({
+          [root]: {
+            pages: [
+              { p: "archive/moved.md", w: 5_000 },
+              { p: "plans/moved.md", w: 1_000 },
+              { p: "archive/live.md", w: 9_000 },
+            ],
+          },
+        }),
+      );
+      const index = await buildWikiIndex(root);
+      const at = (rel: string) => index.pages.find((p) => p.relPath === rel)!;
+      expect(at("plans/moved.md").workedMs).toBe(5_000);
+      expect(at("plans/squatter.md").workedMs).toBeUndefined();
+      expect(at("archive/live.md").workedMs).toBe(9_000);
+      expect(index.workedCoverage?.matched).toBe(2);
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });

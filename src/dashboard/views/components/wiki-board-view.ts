@@ -237,7 +237,7 @@ export function keylessTableHtml(pages: readonly GraphPageNode[], wiki: string):
       (p) =>
         `<tr data-keyless="${esc(p.relPath)}">` +
         `<td><a href="${esc(articleUrl(wiki, "relPath", p.relPath, ""))}">${esc(p.title)}</a><div class="board-path">${esc(p.relPath)}</div></td>` +
-        `<td>${esc(p.plan ? "plan" : p.type)}</td>` +
+        `<td>${esc(p.plan ? "plan" : p.type)}${p.culled ? " · retired" : ""}</td>` +
         `<td class="board-date">${day(p.pageTimeMs)}</td>` +
         `<td>${prCell(p.prRefs)}</td></tr>`,
     )

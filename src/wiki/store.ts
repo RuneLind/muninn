@@ -746,6 +746,30 @@ export interface WikiPageMeta {
   /** WHICH rule paired this page with its {@link parent} — what the rail says on
    *  hover. Absent exactly when `parent` is. */
   pairedBy?: PairedBy;
+  /**
+   * CULLED — the page is retired: frontmatter `signal: none` (only the value
+   * `none` is read; `signal: high` is ignored), or on an `.html` page a
+   * `<meta name="wiki-signal" content="none">` inside the sniffed head prefix.
+   *
+   * This is the EFFECTIVE value: an attachment child paired by rules 1–3 (its
+   * same-stem `.html` twin, a `-prototype`, an embedded page) inherits its
+   * parent's cull, since it is part of that page (`pairAttachments`). Every
+   * consumer reads this one field. Absent (never `false`) on a live page.
+   *
+   * A culled page leaves Activity, Similar, Related, tracker plan coverage and
+   * the lint's finding subjects, but stays in the link graph, the series census,
+   * Connections and the issue graph. Named `culled` because `retire` already
+   * names the gardener backlog tail and a superseded series member.
+   */
+  culled?: true;
+  /** The page's `signal-reason:` (an `.html` page's `wiki-signal-reason` meta),
+   *  or its parent's when the cull is inherited. Single-page payload only. */
+  cullReason?: string;
+  /** The page `superseded_by:` names, resolved to its relPath in ANY folder
+   *  through `index.resolve` (the pairing pass reads the same value, but only
+   *  for a same-folder successor). Absent when unset or unresolvable.
+   *  Single-page payload only. */
+  supersededBy?: string;
   /** One line of free prose qualifying the status. No vocabulary, so nothing to
    *  validate — only an empty value (or a bare YAML block-scalar indicator, whose
    *  body the frontmatter parser never read) is dropped. Deliberately NOT stripped
@@ -2562,6 +2586,23 @@ function asOptionalScalar(v: unknown): string | undefined {
 }
 
 /**
+ * The cull bit off one page's signal pair — frontmatter `signal` +
+ * `signal-reason`, or an explainer's two head metas. Only `none` culls (case
+ * folded, a trailing `# comment` dropped); `signal: high` and every other value
+ * are ignored. A reason that is a bare YAML block-scalar indicator is absent,
+ * since the parser never read its body.
+ */
+export function readCull(
+  signal: unknown,
+  reason: unknown,
+): { culled?: true; cullReason?: string } {
+  const value = asOptionalScalar(signal);
+  if (!value || stripTrailingComment(value).trim().toLowerCase() !== "none") return {};
+  const why = asOptionalScalar(reason);
+  return why && !YAML_BLOCK_SCALAR_INDICATORS.has(why) ? { culled: true, cullReason: why } : { culled: true };
+}
+
+/**
  * The same read as `asStringArray`, answering UNDEFINED rather than `[]` when a
  * page declares nothing — for the optional provenance fields, where `[]` on every
  * page of a wiki that stamps none would be three empty arrays × ~800 pages of
@@ -2711,6 +2752,7 @@ async function buildExplainerMeta(
   let authoredTitle: string | undefined;
   let tags: string[] = [];
   let description: string | undefined;
+  let cull: ReturnType<typeof readCull> = {};
   try {
     const prefix = await Bun.file(abs).slice(0, HTML_TITLE_SNIFF_BYTES).text();
     const m = prefix.match(HTML_TITLE_RE);
@@ -2720,6 +2762,10 @@ async function buildExplainerMeta(
     const keywords = sniffMetaContent(prefix, "keywords");
     if (keywords) tags = explainerKeywordTags(keywords);
     description = sniffMetaContent(prefix, "description");
+    // The cull bit, from the same bounded prefix: a tag past the first
+    // `HTML_TITLE_SNIFF_BYTES` (after a large `<style>` block) is not read, which
+    // is why the authoring rule puts it next to `<title>`.
+    cull = readCull(sniffMetaContent(prefix, "wiki-signal"), sniffMetaContent(prefix, "wiki-signal-reason"));
   } catch {
     return null; // unreadable — skip, keep the rest of the wiki browsable
   }
@@ -2749,6 +2795,7 @@ async function buildExplainerMeta(
     birthtimeMs,
     project: resolveProject(relPath, {}, tags, projectRule, knownProjects),
     ...(issues ? { issues } : {}),
+    ...cull,
   };
 }
 
@@ -2798,6 +2845,48 @@ function supersededTargetRef(raw: string, fromDir: string): { dir: string; stem:
     ? path.posix.normalize(path.posix.join(fromDir, named))
     : path.posix.normalize(named);
   return { dir, stem };
+}
+
+/**
+ * The worked-ledger keys an `aliases:` entry can stand for — the page's OLD
+ * path, when it was moved. A wikilink-style path (`archive/old-plan`,
+ * `[[archive/old-plan]]`) tries `.md` then `.mdx`; one carrying its extension
+ * is used as written. A bare name (`Alternative name`) is a title alias, not a
+ * path, and answers nothing — a root-level move therefore has to spell the
+ * extension (`old-plan.md`).
+ */
+export function aliasWorkedPaths(alias: string): string[] {
+  let v = alias.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
+  v = v.split("|")[0]!.split("#")[0]!.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!v) return [];
+  if (/\.mdx?$/i.test(v)) return [normalizeWorkedPath(v)];
+  if (!v.includes("/")) return [];
+  return [normalizeWorkedPath(`${v}.md`), normalizeWorkedPath(`${v}.mdx`)];
+}
+
+/**
+ * The relPath a `superseded_by:` value names, in ANY folder — what the reader's
+ * banner links to. Wikilink brackets, a `|label` and a `#fragment` are dropped;
+ * a `./`/`../` value is joined onto the page's folder (`supersededTargetRef`'s
+ * rule); a path goes through `resolve` (which tries `.md`, then `.mdx`) and then
+ * the raw relPath lookup (an `.html` successor); a bare name through `resolve`
+ * (stem, title or alias). Undefined when it names no page, or names the page
+ * itself.
+ */
+export function resolveSupersededBy(
+  raw: string,
+  fromRelPath: string,
+  resolve: (target: string) => WikiPageMeta | undefined,
+  resolveRelPath: (relPath: string) => WikiPageMeta | undefined,
+): string | undefined {
+  let v = raw.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
+  v = v.split("|")[0]!.split("#")[0]!.trim().replace(/\\/g, "/");
+  if (!v) return undefined;
+  if (/^\.{1,2}\//.test(v)) v = path.posix.normalize(path.posix.join(path.posix.dirname(fromRelPath), v));
+  v = v.replace(/^\/+/, "");
+  const hit = resolve(v) ?? (v.includes("/") ? resolveRelPath(v) : undefined);
+  if (!hit || normalizeRelPath(hit.relPath) === normalizeRelPath(fromRelPath)) return undefined;
+  return hit.relPath;
 }
 
 /**
@@ -2908,6 +2997,9 @@ export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): v
     if (!ref || ref.dir !== dir) continue;
     const parent = mdByFolderStem.get(dir + " " + stemKey(ref.stem));
     if (!parent || parent === p) continue;
+    // A CULLED successor adopts nothing: the rail hides it, and a page folded
+    // under a hidden row would vanish with it. The child lists at top level.
+    if (parent.culled) continue;
     superseded.push({ child: p, parent });
     supersededChildren.add(p);
   }
@@ -2924,6 +3016,13 @@ export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): v
     const parent = byRel.get(normalizeRelPath(p.parent));
     if (!parent) continue; // unreachable: every parent came out of `pages`
     (parent.children ??= []).push(p.relPath);
+    // An ATTACHMENT (rules 1–3) is part of its page, so it takes the page's cull
+    // as its own effective one. A rule-4 child keeps its own: a culled page
+    // under a live successor is culled, a live one is not.
+    if (parent.culled && p.pairedBy !== "superseded" && !p.culled) {
+      p.culled = true;
+      if (parent.cullReason && !p.cullReason) p.cullReason = parent.cullReason;
+    }
   }
 }
 
@@ -3167,6 +3266,8 @@ export async function buildWikiIndex(
         // strictly validated — an invalid value is dropped here and only ever
         // surfaces as a count in the aggregated warn below.
         ...parsePlanFields(fm, relPath, planDrops),
+        // The retired bit. Only `signal: none` culls; see `readCull`.
+        ...readCull(fm.signal, fm["signal-reason"]),
       };
       // Issue refs, where the body is already in hand (the `pagePrRefs`
       // precedent). The TITLE rule reads the authored `title:` line only, never
@@ -3408,8 +3509,20 @@ export async function buildWikiIndex(
   const workedMemo = workedLedgerFor(root);
   if (workedMemo) {
     let matched = 0;
+    // The ledger is keyed by PATH with no rename handling, so a page moved with
+    // `aliases: [old/path]` would lose its history. Each path-shaped alias is
+    // folded in and the newest wins — unless a live page sits at that path now,
+    // whose writes are its own.
+    const livePaths = new Set(pages.map((p) => normalizeWorkedPath(p.relPath)));
     for (const meta of pages) {
-      const w = workedMemo.pages.get(normalizeWorkedPath(meta.relPath));
+      let w = workedMemo.pages.get(normalizeWorkedPath(meta.relPath));
+      for (const alias of meta.aliases) {
+        for (const key of aliasWorkedPaths(alias)) {
+          if (livePaths.has(key)) continue;
+          const aw = workedMemo.pages.get(key);
+          if (aw !== undefined && (w === undefined || aw > w)) w = aw;
+        }
+      }
       if (w !== undefined) {
         meta.workedMs = w;
         matched++;
@@ -3587,6 +3700,16 @@ export async function buildWikiIndex(
     }
     return undefined;
   };
+
+  // The successor a page names, resolved across folders for the reader's banner.
+  // The pairing pass above read the same raw value but pairs only a same-folder
+  // successor, so this is a second, wider reading of it, not a replacement.
+  for (const meta of pages) {
+    const raw = pairingSuperseded.get(normalizeRelPath(meta.relPath));
+    if (!raw) continue;
+    const target = resolveSupersededBy(raw, meta.relPath, resolve, resolveRelPath);
+    if (target) meta.supersededBy = target;
+  }
 
   const outgoing = new Map<string, string[]>();
   const backlinks = new Map<string, string[]>();

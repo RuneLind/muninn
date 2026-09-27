@@ -1051,3 +1051,32 @@ test("buildWikiGitDates: a classification that lost its race spawns no further r
     await rm(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("buildWikiGitDates: culling a fenced page (signal: none + signal-reason + superseded_by) does not move its touch date", async () => {
+  // What a hand sweep or a gardener Accept commits: the three cull keys on a few
+  // pages, under the sweep threshold. Filing a page away is not editing it.
+  const { rm } = await import("node:fs/promises");
+  const { wiki, dir, write } = await seededWiki({
+    "culled.md": page("Culled", "alpha", "Original prose."),
+    "also.md": page("Also", "alpha", "Other prose."),
+  });
+  try {
+    await write("culled.md", page("Culled", "alpha", "Rewritten prose."));
+    await commitAt(dir, "2026-06-01T10:00:00Z", "prose");
+    await write(
+      "culled.md",
+      page("Culled", "alpha", "Rewritten prose.").replace(
+        "plan_status: in-flight\n",
+        "plan_status: in-flight\nsignal: none\nsignal-reason: folded into the successor\nsuperseded_by: [[plans/next]]\n",
+      ),
+    );
+    await write("also.md", page("Also", "alpha", "Other prose.").replace("---\n\n", "signal: none\n---\n\n"));
+    await commitAt(dir, "2026-09-21T07:12:00Z", "cull: 2 pages");
+    const dates = await buildWikiGitDates(wiki);
+    expect(dates!.touched.get("culled.md")).toBe(ms("2026-06-01T10:00:00Z"));
+    // Its only earlier touch is the seed, which is an add — still not the cull.
+    expect(dates!.touched.get("also.md")).not.toBe(ms("2026-09-21T07:12:00Z"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 20_000);

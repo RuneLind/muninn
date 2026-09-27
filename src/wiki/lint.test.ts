@@ -237,6 +237,28 @@ describe("lintWiki", () => {
     expect(orphans).not.toContain("concepts/Good Concept.md");
   });
 
+  test("a CULLED page is never an orphan, stale-updated or missing-sources subject — its links still count", async () => {
+    // Nobody links to it, it has no `updated:` and no sources: three findings on a
+    // live concept, none on a retired one.
+    await write(
+      "concepts/Retired.md",
+      ["---", "type: concept", "title: Retired", "signal: none", "signal-reason: superseded", "---", "", "Points at [[Lonely Live]]."].join("\n"),
+    );
+    // The control: same shape, live — an orphan with a stale `updated:` and no sources.
+    await write("concepts/Unfiled.md", ["---", "type: concept", "title: Unfiled", "---", "", "Alone."].join("\n"));
+    // Linked ONLY by the culled page: the culled page stays in the link graph.
+    await write(
+      "concepts/Lonely Live.md",
+      ["---", "type: concept", "title: Lonely Live", "updated: 2026-06-04", "sources: [x]", "---", "", "Hi."].join("\n"),
+    );
+    const findings = await lint();
+    for (const check of ["orphan", "stale-updated", "missing-sources"]) {
+      expect(relPathsFor(findings, check)).not.toContain("concepts/Retired.md");
+      expect(relPathsFor(findings, check)).toContain("concepts/Unfiled.md");
+    }
+    expect(relPathsFor(findings, "orphan")).not.toContain("concepts/Lonely Live.md");
+  });
+
   test("missing / unparseable updated: fires stale-updated; reserved files exempt", async () => {
     await write(
       "concepts/No Updated.md",

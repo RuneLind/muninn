@@ -154,7 +154,8 @@ TRACKED, MODIFIED page against its `HEAD` blob and drops it from `dirty` on eith
 of two verdicts, so it dates from git history like a clean page: `metadata-only`
 (the body after the fence is byte-identical and, with every column-0
 `METADATA_ONLY_FRONTMATTER_KEYS` line stripped from both sides — the four
-provenance keys plus `series`/`series_label`/`priority`/`plan_status`/`status_date` —
+provenance keys plus `series`/`series_label`/`priority`/`plan_status`/`status_date`
+and the three cull keys `signal`/`signal-reason`/`superseded_by` —
 the two frontmatter remainders are identical IN ORDER, so a hand edit that only
 reordered `title:` and `tags:` is an edit)
 and `identical` (equal texts, which `git status` still reports as modified after a
@@ -610,6 +611,41 @@ stays), `wiki-recents.test.ts` (the sections, with a child in every one of them
 at once), `wiki-routes.test.ts` (the listing, `?name=`, `resolvePageRef`) and
 `e2e/wiki-rail-attachments.spec.ts` (the chip, the fold, the count, the reload,
 the flatten, and the contrast in both themes).
+
+### Culled pages (`signal: none`, `WikiPageMeta.culled`)
+
+A page is RETIRED by frontmatter `signal: none` plus `signal-reason:`, optionally
+`superseded_by: [[any/folder/page]]`; an `.html` page by
+`<meta name="wiki-signal" content="none">` (and `wiki-signal-reason`), read
+through `sniffMetaContent` from the first 4 KB only, so the tag goes next to
+`<title>`, before any `<style>`. Only `none` is read (`readCull`). In code the
+bit is `culled`, because `retire` already names the gardener backlog tail.
+
+- **Effective value.** An attachment (rules 1–3) inherits its parent's cull and
+  reason; a rule-4 child keeps its own. A culled page adopts NO rule-4 child, so
+  the pages it supersedes list at top level. Every consumer reads `culled`.
+- **Dropped from:** Activity (`rankActivity`, and the worked gate's candidate
+  count), Similar, Related, tracker plan coverage (`isPlanPage` answers false),
+  and the lint's finding subjects and edit targets (orphan, stale-updated,
+  missing-sources, check 8).
+- **Kept in:** the rail listing (hiding is the reader UI's job), the link graph,
+  the series census (a culled head still names the fold, and a culled bridge
+  still joins a component, so 8.2 never re-coins a series), Connections'
+  Linked from / Links to, the issue graph and the board — marked `· retired`.
+- **Wire.** `culled` rides every `toListing` caller; `cullReason` and
+  `supersededBy` (resolved in ANY folder, `resolveSupersededBy`) ride the
+  single-page `meta` only, through `includeCull`.
+- **Dates.** The three keys are metadata-only (`git-dates.ts`), so a cull does
+  not move a page's update date.
+- **Worked date over `aliases:`.** The claude-usage ledger is keyed by path, so
+  the store folds each path-shaped alias (`aliasWorkedPaths`: `archive/old` tries
+  `.md` and `.mdx`, a bare name is a title alias and folds nothing) and keeps the
+  newest — unless a live page sits at that path now.
+
+Acceptance: `culled.test.ts`, plus a case each in `lint.test.ts`,
+`lint-series.test.ts`, `related.test.ts`, `similar.test.ts`,
+`trackers/rows.test.ts`, `graph.test.ts`, `git-dates.test.ts`,
+`worked-ledger.test.ts` and `wiki-routes.test.ts`.
 
 ### Families and months (`wiki-groups.ts`)
 
