@@ -549,12 +549,11 @@ export function newestSeriesPlan<T extends SeriesPlanFields>(
  * or falls back to the bare key. The fallback chain matters because it is what a
  * series gets for free before anyone writes a label at all.
  *
- * ONE rule over the whole CENSUS, culled members included (plan M2): a culled
- * page can be the head and name the fold. The rail fold, the reader header,
- * the `⋯` series menu and lint 8.3 read this one rule, and the editor's
- * one-label check counts culled members the same way, so no surface shows a
- * head another disagrees with. The lint never EDITS a culled head; it moves
- * the LIVE members to it instead.
+ * Culled members count (plan M2): a culled page can be the head and name the
+ * fold. The rail fold, the reader header, the `⋯` series menu and lint 8.3(b)
+ * read this function; lint 8.3(a)/(c) read `headOf` (no label rung), and the
+ * editor's one-label check scans raw pages rather than the census. The lint
+ * never EDITS a culled head; it moves the LIVE members to it instead.
  *
  * Generic over the structural subset it reads, for {@link newestSeriesPlan}'s
  * reason: the lint's duplicate-label rule (`src/wiki/lint-series.ts`) decides
