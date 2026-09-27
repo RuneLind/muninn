@@ -9,7 +9,9 @@ import {
   isShortLink,
   parseAllowedTikTokUrl,
   resolveTikTokShortLink,
+  shortLinkRequestUrl,
   tiktokDownloadUrl,
+  tiktokPathVideoId,
 } from "./tiktok-url.ts";
 
 // `_VALID_URL` of TikTokIE and TikTokVMIE, copied from yt-dlp 2026.08.19
@@ -172,13 +174,65 @@ for (const status of [301, 302, 303, 307, 308]) {
   });
 }
 
-for (const status of [300, 304]) {
-  test(`HTTP ${status} is not a redirect, even with a Location`, async () => {
+// A non-2xx status that is not a redirect ends the chain as a failure, not as
+// "resolved" on a URL that then reads as no video. 405 included: no GET retry.
+for (const status of [300, 304, 403, 404, 405, 429, 503]) {
+  test(`HTTP ${status} is a failure naming the status, even with a Location`, async () => {
     const { fetchImpl, requested } = stubFetch({
       "https://vm.tiktok.com/ZMabc123/": { status, location: "https://www.tiktok.com/@u/video/1" },
     });
     const res = await resolveTikTokShortLink("https://vm.tiktok.com/ZMabc123/", fetchImpl);
-    expect(res).toEqual({ kind: "resolved", url: "https://vm.tiktok.com/ZMabc123/" });
+    expect(res).toEqual({ kind: "failed", reason: `HTTP ${status} from https://vm.tiktok.com/ZMabc123/` });
     expect(requested).toEqual(["https://vm.tiktok.com/ZMabc123/"]);
+  });
+}
+
+test("a failure status on a later hop is a failure too", async () => {
+  const { fetchImpl, requested } = stubFetch({
+    "https://vm.tiktok.com/ZMabc123/": { status: 301, location: "https://www.tiktok.com/@u/video/1" },
+    "https://www.tiktok.com/@u/video/1": { status: 429 },
+  });
+  const res = await resolveTikTokShortLink("https://vm.tiktok.com/ZMabc123/", fetchImpl);
+  expect(res).toEqual({ kind: "failed", reason: "HTTP 429 from https://www.tiktok.com/@u/video/1" });
+  expect(requested).toHaveLength(2);
+});
+
+test("a 2xx other than 200 ends the chain where it stands", async () => {
+  const { fetchImpl } = stubFetch({ "https://www.tiktok.com/@u/video/1": { status: 204 } });
+  expect(await resolveTikTokShortLink("https://www.tiktok.com/@u/video/1", fetchImpl)).toEqual({
+    kind: "resolved",
+    url: "https://www.tiktok.com/@u/video/1",
+  });
+});
+
+// `m.tiktok.com` answers 404 on a valid `/t/<code>` (measured 2026-09-27).
+for (const [short, requestedAt] of [
+  ["https://m.tiktok.com/t/ZS4YoeRv2/", "https://www.tiktok.com/t/ZS4YoeRv2/"],
+  ["https://tiktok.com/t/ZS4YoeRv2/?a=1", "https://www.tiktok.com/t/ZS4YoeRv2/?a=1"],
+  ["https://www.tiktok.com/t/ZS4YoeRv2/", "https://www.tiktok.com/t/ZS4YoeRv2/"],
+  ["https://vm.tiktok.com/ZMabc123/", "https://vm.tiktok.com/ZMabc123/"],
+  ["https://vt.tiktok.com/ZSabc123", "https://vt.tiktok.com/ZSabc123"],
+] as Array<[string, string]>) {
+  test(`${short} is requested at ${requestedAt}`, () => {
+    expect(shortLinkRequestUrl(parseAllowedTikTokUrl(short)!)).toBe(requestedAt);
+  });
+}
+
+for (const [url, id] of [
+  ["https://www.tiktok.com/@u/video/7412345678901234567?x=1", "7412345678901234567"],
+  ["https://www.tiktok.com/?x=/video/7412345678901234567", null],
+  ["https://www.tiktok.com/#/video/7412345678901234567", null],
+  ["https://www.tiktok.com/?_r=1", null],
+] as Array<[string, string | null]>) {
+  test(`tiktokPathVideoId reads the path only: ${url}`, () => {
+    expect(tiktokPathVideoId(new URL(url))).toBe(id);
+  });
+}
+
+// `/t/` needs a code: TikTokVMIE requires `\w+` after it, so a bare `/t/` is
+// no short link (it fails inside the job as "No suitable extractor").
+for (const url of ["https://www.tiktok.com/t/", "https://www.tiktok.com/t/-abc"]) {
+  test(`${url} is not a short link`, () => {
+    expect(isShortLink(parseAllowedTikTokUrl(url)!)).toBe(false);
   });
 }

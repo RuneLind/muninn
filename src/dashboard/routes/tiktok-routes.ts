@@ -12,7 +12,9 @@ import {
   isShortLink,
   parseAllowedTikTokUrl,
   resolveTikTokShortLink,
+  shortLinkRequestUrl,
   tiktokDownloadUrl,
+  tiktokPathVideoId,
 } from "./tiktok-url.ts";
 import { applyCors } from "../../auth/cors.ts";
 import {
@@ -45,7 +47,7 @@ type ShortLinkError = { status: 400 | 502; error: string; code: string };
  * chain again, ungated.
  */
 async function resolveShortLink(short: URL): Promise<URL | ShortLinkError> {
-  const res = await resolveTikTokShortLink(short.href);
+  const res = await resolveTikTokShortLink(shortLinkRequestUrl(short));
   if (res.kind === "refused") {
     log.warn("TikTok short link {url} refused: {reason}", { url: short.href, reason: res.reason });
     return {
@@ -69,7 +71,7 @@ async function resolveShortLink(short: URL): Promise<URL | ShortLinkError> {
   // answered 200 on it, and has no video id when a stale link lands on the
   // home page (`https://www.tiktok.com/?_r=1`, measured).
   const landed = parseAllowedTikTokUrl(res.url);
-  if (!landed || isShortLink(landed) || !extractTikTokVideoId(tiktokDownloadUrl(landed))) {
+  if (!landed || isShortLink(landed) || !tiktokPathVideoId(new URL(tiktokDownloadUrl(landed)))) {
     return {
       status: 400,
       error: `The short link does not lead to a TikTok video (it ends at ${res.url})`,

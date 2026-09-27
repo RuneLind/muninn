@@ -42,6 +42,27 @@ export function isShortLink(u: URL): boolean {
 }
 
 /**
+ * Where a short link is requested. TikTok's `m.` host answers 404 to every
+ * path, a valid `/t/<code>` included (measured 2026-09-27), and bare
+ * `tiktok.com/t/` only redirects to `www.`, so both are requested on `www.`.
+ */
+export function shortLinkRequestUrl(u: URL): string {
+  if (u.hostname === "m.tiktok.com" || u.hostname === "tiktok.com") {
+    if (/^\/t\//.test(u.pathname)) return `https://www.tiktok.com${u.pathname}${u.search}`;
+  }
+  return u.href;
+}
+
+/**
+ * The video id in a TikTok URL's path, or null. Reads the pathname only, so an
+ * id in the query (`/?x=/video/1`) is no id; `extractTikTokVideoId` scans the
+ * whole string.
+ */
+export function tiktokPathVideoId(u: URL): string | null {
+  return u.pathname.match(/\/video\/(\d+)/)?.[1] ?? null;
+}
+
+/**
  * The URL yt-dlp is handed for a gated TikTok video URL — one its `TikTok`
  * extractor matches, so the vertical's allowlist is `tiktok` alone. That
  * extractor matches only `www.`; the bare and `m.` hosts used to reach it
@@ -61,14 +82,17 @@ export function tiktokDownloadUrl(u: URL): string {
 /** Redirects a short link may take before the resolver gives up. */
 export const SHORT_LINK_MAX_HOPS = 5;
 
-/** The statuses that redirect; any other status (300 and 304 included) ends the chain. */
+/**
+ * The statuses that redirect. A 2xx ends the chain where it stands; anything
+ * else (300, 304, 405 and every 4xx/5xx included) is a failure naming the status.
+ */
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 export type ShortLinkResolution =
   | { kind: "resolved"; url: string }
   /** A hop left TikTok, or the chain ran past {@link SHORT_LINK_MAX_HOPS}. */
   | { kind: "refused"; reason: string }
-  /** Network error, timeout, or a redirect without a `Location`. */
+  /** Network error, timeout, a redirect without a `Location`, or a non-2xx, non-redirect status. */
   | { kind: "failed"; reason: string };
 
 // A browser-like UA so the short-link HEAD isn't met with TikTok's anti-bot wall.
@@ -96,7 +120,10 @@ export async function resolveTikTokShortLink(
         headers: { "User-Agent": BROWSER_UA },
         signal: controller.signal,
       });
-      if (!REDIRECT_STATUSES.has(res.status)) return { kind: "resolved", url: current };
+      if (!REDIRECT_STATUSES.has(res.status)) {
+        if (res.status >= 200 && res.status < 300) return { kind: "resolved", url: current };
+        return { kind: "failed", reason: `HTTP ${res.status} from ${current}` };
+      }
       const location = res.headers.get("location");
       if (!location) return { kind: "failed", reason: `HTTP ${res.status} without a Location` };
       if (hop >= SHORT_LINK_MAX_HOPS) {

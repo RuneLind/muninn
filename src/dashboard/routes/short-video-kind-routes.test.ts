@@ -457,14 +457,17 @@ describe("tiktok: the short-link redirect chain is gated hop by hop", () => {
   const realFetch = globalThis.fetch;
   const SHORT = "https://vm.tiktok.com/ZMabc123/";
   let hops: Record<string, string> = {};
+  let statuses: Record<string, number> = {};
   let requested: string[] = [];
   beforeEach(() => {
     requested = [];
+    statuses = {};
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = String(input);
       requested.push(url);
       const location = hops[url];
-      return new Response(null, location ? { status: 302, headers: { location } } : { status: 200 });
+      if (location) return new Response(null, { status: 302, headers: { location } });
+      return new Response(null, { status: statuses[url] ?? 200 });
     }) as unknown as typeof fetch;
   });
   afterAll(() => {
@@ -504,22 +507,62 @@ describe("tiktok: the short-link redirect chain is gated hop by hop", () => {
   });
 
   // Every shape yt-dlp's `vm.tiktok` extractor matches goes through the gated
-  // resolver; `m.` lands on the `/v/<id>.html` share shape to prove the
-  // rewrite runs on the resolved URL too.
-  for (const [short, landing, handed] of [
-    ["https://vt.tiktok.com/ZSabc123/", "https://www.tiktok.com/@a/video/7523456789", "https://www.tiktok.com/@a/video/7523456789"],
-    ["https://www.tiktok.com/t/ZTRabc123/", "https://www.tiktok.com/@a/video/7523456789", "https://www.tiktok.com/@a/video/7523456789"],
-    ["https://tiktok.com/t/ZTRabc123", "https://tiktok.com/@a/video/7523456789", "https://www.tiktok.com/@a/video/7523456789"],
-    ["https://m.tiktok.com/t/ZTRabc123", "https://m.tiktok.com/v/7523456789.html", "https://www.tiktok.com/@/video/7523456789"],
-  ] as Array<[string, string, string]>) {
-    test(`${short} is resolved by the route and yt-dlp gets ${handed}`, async () => {
-      hops = { [short]: landing };
+  // resolver. A `/t/<code>` on bare or `m.` is requested on `www.`: TikTok's
+  // `m.` host answers 404 to every path, a valid `/t/` code included (measured
+  // 2026-09-27). The `m./v/<id>.html` landing proves the rewrite runs on the
+  // resolved URL too.
+  for (const [short, requestedAt, landing, handed] of [
+    ["https://vt.tiktok.com/ZSabc123/", "https://vt.tiktok.com/ZSabc123/", "https://www.tiktok.com/@a/video/7523456789", "https://www.tiktok.com/@a/video/7523456789"],
+    ["https://www.tiktok.com/t/ZTRabc123/", "https://www.tiktok.com/t/ZTRabc123/", "https://www.tiktok.com/@a/video/7523456789", "https://www.tiktok.com/@a/video/7523456789"],
+    ["https://tiktok.com/t/ZTRabc123", "https://www.tiktok.com/t/ZTRabc123", "https://www.tiktok.com/@a/video/7523456789", "https://www.tiktok.com/@a/video/7523456789"],
+    ["https://m.tiktok.com/t/ZTRabc123/", "https://www.tiktok.com/t/ZTRabc123/", "https://www.tiktok.com/@a/video/7523456789?_r=1", "https://www.tiktok.com/@a/video/7523456789?_r=1"],
+    ["https://vm.tiktok.com/ZMabc123/", "https://vm.tiktok.com/ZMabc123/", "https://m.tiktok.com/v/7523456789.html", "https://www.tiktok.com/@/video/7523456789"],
+  ] as Array<[string, string, string, string]>) {
+    test(`${short} is resolved at ${requestedAt} and yt-dlp gets ${handed}`, async () => {
+      hops = { [requestedAt]: landing };
+      // What live m.tiktok.com answers, should the short link be requested there.
+      statuses = { [short]: short.startsWith("https://m.") ? 404 : 200 };
       const res = await post(app(), "/api/tiktok/summarize", { url: short });
       expect(res.status).toBe(200);
-      expect(requested).toEqual([short, landing]);
+      expect(requested).toEqual([requestedAt, landing]);
       expect(lastTikTokUrl).toBe(handed);
       expect(ttState.getJob(lastTikTokJobId!)!.videoId).toBe("7523456789");
     });
+  }
+
+  // A raw short link that differs from its href, sent with the href as title:
+  // the title follows the rewrite to the resolved URL, never the short link.
+  test("a title equal to a short link's parsed href follows the resolved URL", async () => {
+    hops = { [SHORT]: "https://www.tiktok.com/@a/video/7523456789" };
+    const res = await post(app(), "/api/tiktok/summarize", {
+      url: "https://VM.tiktok.com/ZMabc123/",
+      title: SHORT,
+    });
+    expect(res.status).toBe(200);
+    expect(ttState.getJob(lastTikTokJobId!)!.title).toBe("https://www.tiktok.com/@a/video/7523456789");
+  });
+
+  // A non-redirect error status on any hop is the upstream failing, not a link
+  // that leads nowhere: 502 naming the status, not 400 `no_video`.
+  for (const [label, chain, failing] of [
+    ["the first hop", {}, SHORT],
+    ["a later hop", { [SHORT]: "https://www.tiktok.com/@a/video/7523456789" }, "https://www.tiktok.com/@a/video/7523456789"],
+  ] as Array<[string, Record<string, string>, string]>) {
+    for (const status of [403, 405, 429, 503]) {
+      test(`HTTP ${status} on ${label} answers 502 short_link_failed naming the status`, async () => {
+        hops = chain;
+        statuses = { [failing]: status };
+        const jobsBefore = ttState.getRecentJobs(50).length;
+        const res = await post(app(), "/api/tiktok/summarize", { url: SHORT });
+        expect(res.status).toBe(502);
+        const body = (await res.json()) as { code: string; error: string };
+        expect(body.code).toBe("short_link_failed");
+        expect(body.error).toContain(`HTTP ${status}`);
+        expect(knowledgeApiCalls).toEqual([]);
+        expect(tiktokCalls).toBe(0);
+        expect(ttState.getRecentJobs(50).length).toBe(jobsBefore);
+      });
+    }
   }
 
   test("a resolution that fails answers 502 short_link_failed and creates no job", async () => {
@@ -542,6 +585,8 @@ describe("tiktok: the short-link redirect chain is gated hop by hop", () => {
     ["lands on the home page", { [SHORT]: "https://www.tiktok.com/?_r=1" }],
     // TikTok answering 200 on the short link itself.
     ["does not redirect", {}],
+    // A video path only in the query is no video id.
+    ["lands on an id in the query", { [SHORT]: "https://www.tiktok.com/?x=/video/7523456789" }],
   ] as Array<[string, Record<string, string>]>) {
     test(`a short link that ${label} answers 400 no_video and creates no job`, async () => {
       hops = chain;
