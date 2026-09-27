@@ -481,7 +481,7 @@ describe("WIKI_READONLY_ROOTS — gardener approve + backlog", () => {
     // the caller cannot do here.
     __setWikiRegistryForTest([{ name: "robot", root: ro, source: "bot", readonly: true }]);
     registerWikiGardenerRoutes(app, deps(null));
-    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=robot", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=robot", JSON_POST);
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string; readonly?: boolean };
     expect(body.readonly).toBe(true);
@@ -499,7 +499,7 @@ describe("WIKI_READONLY_ROOTS — gardener approve + backlog", () => {
       "/api/wiki/gardener/backlog-reset?wiki=robot",
       "/api/wiki/gardener/backlog-cancel?wiki=robot",
     ]) {
-      const res = await app.request(url, { method: "POST" });
+      const res = await app.request(url, JSON_POST);
       expect(`${url} → ${res.status}`).toBe(`${url} → 403`);
       expect(`${url} → ${((await res.json()) as { readonly?: boolean }).readonly}`).toBe(
         `${url} → true`,
@@ -511,7 +511,7 @@ describe("WIKI_READONLY_ROOTS — gardener approve + backlog", () => {
     __setReadonlyWikiRootsForTest([]);
     __setWikiRegistryForTest([{ name: "robot", root: ro, source: "bot" }]);
     registerWikiGardenerRoutes(app, deps(null));
-    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=robot", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=robot", JSON_POST);
     expect(res.status).toBe(404);
     expect(await res.text()).toContain("no wiki bot resolved");
   });

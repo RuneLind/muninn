@@ -160,21 +160,21 @@ describe("GET /api/wiki/linter-findings — standalone wikis + resolution errors
 
   // The backlog-run + reset POSTs share the same resolution guards.
   test("backlog-run: standalone (non-bot) wiki → 400 bot-only error", async () => {
-    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=lintwiki", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=lintwiki", JSON_POST);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("only available for bot wikis");
   });
 
   test("backlog-run: unknown wiki → 404 not-configured", async () => {
-    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=does-not-exist", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=does-not-exist", JSON_POST);
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("no wiki configured");
   });
 
   test("backlog-reset: standalone (non-bot) wiki → 400 bot-only error", async () => {
-    const res = await app.request("/api/wiki/gardener/backlog-reset?wiki=lintwiki", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-reset?wiki=lintwiki", JSON_POST);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("only available for bot wikis");
@@ -182,14 +182,14 @@ describe("GET /api/wiki/linter-findings — standalone wikis + resolution errors
 
   // backlog-cancel shares the same resolution guards as reset.
   test("backlog-cancel: standalone (non-bot) wiki → 400 bot-only error", async () => {
-    const res = await app.request("/api/wiki/gardener/backlog-cancel?wiki=lintwiki", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-cancel?wiki=lintwiki", JSON_POST);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("only available for bot wikis");
   });
 
   test("backlog-cancel: unknown wiki → 404 not-configured", async () => {
-    const res = await app.request("/api/wiki/gardener/backlog-cancel?wiki=does-not-exist", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-cancel?wiki=does-not-exist", JSON_POST);
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("no wiki configured");
@@ -197,28 +197,28 @@ describe("GET /api/wiki/linter-findings — standalone wikis + resolution errors
 
   // backlog-recover / backlog-dismiss (PR 3) share the same resolution guards.
   test("backlog-recover: standalone (non-bot) wiki → 400 bot-only error", async () => {
-    const res = await app.request("/api/wiki/gardener/backlog-recover?wiki=lintwiki", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-recover?wiki=lintwiki", JSON_POST);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("only available for bot wikis");
   });
 
   test("backlog-recover: unknown wiki → 404 not-configured", async () => {
-    const res = await app.request("/api/wiki/gardener/backlog-recover?wiki=does-not-exist", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-recover?wiki=does-not-exist", JSON_POST);
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("no wiki configured");
   });
 
   test("backlog-dismiss: standalone (non-bot) wiki → 400 bot-only error", async () => {
-    const res = await app.request("/api/wiki/gardener/backlog-dismiss?wiki=lintwiki", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-dismiss?wiki=lintwiki", JSON_POST);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("only available for bot wikis");
   });
 
   test("backlog-dismiss: unknown wiki → 404 not-configured", async () => {
-    const res = await app.request("/api/wiki/gardener/backlog-dismiss?wiki=does-not-exist", { method: "POST" });
+    const res = await app.request("/api/wiki/gardener/backlog-dismiss?wiki=does-not-exist", JSON_POST);
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("no wiki configured");
@@ -2040,9 +2040,7 @@ describe("POST /api/wiki/gardener/source-draft-run — the per-bot mutex", () =>
   });
 
   const post = async (): Promise<Response> =>
-    await app.request("/api/wiki/gardener/source-draft-run?wiki=draftbot&collection=x-articles", {
-      method: "POST",
-    });
+    await app.request("/api/wiki/gardener/source-draft-run?wiki=draftbot&collection=x-articles", JSON_POST);
 
   test("409 while a gardener run holds the per-bot mutex — the run body never starts", async () => {
     let release = (): void => {};
@@ -2163,7 +2161,7 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
   test("the run body throwing → JSON {error} 500, not a text/plain framework 500", async () => {
     const res = await app.request(
       "/api/wiki/gardener/source-draft-run?wiki=draftbot&collection=x-articles",
-      { method: "POST" },
+      JSON_POST,
     );
     expect(res.status).toBe(500);
     expect(res.headers.get("content-type")).toContain("application/json");
@@ -2173,12 +2171,12 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
   test("the mutex is released after a throw — a retry is not permanently 409'd", async () => {
     const first = await app.request(
       "/api/wiki/gardener/source-draft-run?wiki=draftbot&collection=x-articles",
-      { method: "POST" },
+      JSON_POST,
     );
     expect(first.status).toBe(500);
     const second = await app.request(
       "/api/wiki/gardener/source-draft-run?wiki=draftbot&collection=x-articles",
-      { method: "POST" },
+      JSON_POST,
     );
     // 500 (the same throw), NOT the 409 a leaked mutex would produce.
     expect(second.status).toBe(500);
@@ -3280,5 +3278,96 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(await first.json()).toMatchObject({ outcome: "rejected", rejected: 1 });
     const second = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
     expect(second.status).toBe(409);
+  });
+});
+
+/**
+ * The backlog + source-draft POSTs take no body (or a small JSON one), so a
+ * `text/plain` or bodyless POST is a CORS simple request — sent cross-origin with
+ * no preflight. Each answers 415 before resolving the bot, reading a snapshot,
+ * taking the per-bot mutex or calling huginn: the deps and `fetch` below record
+ * every call, and a 415 must leave both empty.
+ */
+describe("gardener backlog + source-draft POSTs — 415 before any side effect", () => {
+  const ROUTES = [
+    "backlog-run",
+    "backlog-reset",
+    "backlog-cancel",
+    "backlog-recover",
+    "backlog-dismiss",
+    "backlog-docs-dismiss",
+    "backlog-docs-undismiss",
+    "backlog-docs-dismiss-reset",
+    "backlog-doc-delete",
+    "source-draft-run",
+    "source-draft-backlog",
+    "source-draft-doc",
+  ];
+  let root: string;
+  let app: Hono;
+  let origFetch: typeof fetch;
+  let calls: string[];
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-gardener-415-"));
+    __setBotsForTest([
+      {
+        name: "draftbot",
+        dir: root,
+        persona: "",
+        telegramAllowedUserIds: [],
+        slackAllowedUserIds: [],
+        wikiDir: root,
+        gardener: { enabled: true },
+      },
+    ] as unknown as Parameters<typeof __setBotsForTest>[0]);
+    __setWikiRegistryForTest([{ name: "draftbot", root, source: "bot" }]);
+    __resetGardenerMutexForTest();
+    calls = [];
+    origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(`fetch ${String(input)}`);
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const deps = new Proxy({} as BacklogRouteDeps, {
+      get: (_t, key) => async () => {
+        calls.push(`deps.${String(key)}`);
+        return null;
+      },
+    });
+    app = new Hono();
+    registerWikiGardenerRoutes(app, deps);
+    calls = [];
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = origFetch;
+    __setBotsForTest(null);
+    __resetWikiRegistryForTest();
+    __resetGardenerMutexForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const INITS: Array<[string, RequestInit]> = [
+    ["text/plain", { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" }],
+    ["bodyless", { method: "POST" }],
+  ];
+
+  for (const route of ROUTES) {
+    for (const [label, init] of INITS) {
+      test(`${route}: ${label} → 415, nothing reached`, async () => {
+        const res = await app.request(`/api/wiki/gardener/${route}?wiki=draftbot`, init);
+        expect(`${route} → ${res.status}`).toBe(`${route} → 415`);
+        expect(((await res.json()) as { code?: string }).code).toBe("bad_content_type");
+        expect(calls).toEqual([]);
+      });
+    }
+  }
+
+  test("CONTROL: application/json passes the gate on every route", async () => {
+    for (const route of ROUTES) {
+      const res = await app.request(`/api/wiki/gardener/${route}?wiki=draftbot`, JSON_POST);
+      expect(`${route} → ${res.status}`).not.toBe(`${route} → 415`);
+    }
   });
 });

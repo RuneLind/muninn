@@ -313,7 +313,7 @@ function setOutcome(card: HTMLElement, text: string, kind: "ok" | "err" | ""): v
 
 /**
  * Init for the bodyless write POSTs (approve/reject, the group verbs, lint
- * proposals, dismiss reset): the server answers 415 to anything that is not
+ * proposals, dismiss reset, the backlog and source-draft verbs): the server answers 415 to anything that is not
  * application/json, which keeps them out of reach of a cross-origin form POST.
  */
 const JSON_POST: RequestInit = {
@@ -779,7 +779,7 @@ function pollBacklogUntilDone(): void {
 
 async function startBacklogRun(): Promise<void> {
   try {
-    const res = await fetch(withBot("/api/wiki/gardener/backlog-run"), { method: "POST" });
+    const res = await fetch(withBot("/api/wiki/gardener/backlog-run"), JSON_POST);
     const data = await res.json();
     if (res.ok && (data.state === "started" || data.state === "running")) {
       pollBacklogUntilDone();
@@ -895,7 +895,7 @@ async function startSourceDraftBacklog(btn: HTMLButtonElement): Promise<void> {
   try {
     const res = await fetch(
       withBot("/api/wiki/gardener/source-draft-backlog?collection=" + encodeURIComponent(collection)),
-      { method: "POST" },
+      JSON_POST,
     );
     const data = await res.json();
     lastSourceDraftResult =
@@ -922,7 +922,7 @@ async function startSourceDraftBacklog(btn: HTMLButtonElement): Promise<void> {
 
 async function resetBacklog(): Promise<void> {
   try {
-    await fetch(withBot("/api/wiki/gardener/backlog-reset"), { method: "POST" });
+    await fetch(withBot("/api/wiki/gardener/backlog-reset"), JSON_POST);
   } catch {
     // ignore
   }
@@ -941,7 +941,7 @@ async function resetBacklog(): Promise<void> {
 // fresh GET right after flips the button to "Cancelling…" without waiting a tick.
 async function cancelBacklogRun(): Promise<void> {
   try {
-    await fetch(withBot("/api/wiki/gardener/backlog-cancel"), { method: "POST" });
+    await fetch(withBot("/api/wiki/gardener/backlog-cancel"), JSON_POST);
   } catch {
     // Best-effort — the poll still reflects the run's real state.
   }
@@ -955,7 +955,7 @@ async function cancelBacklogRun(): Promise<void> {
 // to the pool, then re-fetch the strip so eligible-now grows back + the banner clears.
 async function recoverBacklog(): Promise<void> {
   try {
-    await fetch(withBot("/api/wiki/gardener/backlog-recover"), { method: "POST" });
+    await fetch(withBot("/api/wiki/gardener/backlog-recover"), JSON_POST);
   } catch {
     // Best-effort — the follow-up GET reflects the real state either way.
   }
@@ -973,7 +973,7 @@ async function recoverBacklog(): Promise<void> {
 // the banner disappears on the next render.
 async function dismissBacklog(): Promise<void> {
   try {
-    await fetch(withBot("/api/wiki/gardener/backlog-dismiss"), { method: "POST" });
+    await fetch(withBot("/api/wiki/gardener/backlog-dismiss"), JSON_POST);
   } catch {
     // ignore
   }
