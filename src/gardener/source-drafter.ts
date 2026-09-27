@@ -23,13 +23,14 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
-import { extRank, normalizeRelPath, parseFrontmatter, stemKey } from "../wiki/store.ts";
+import { extRank, normalizeRelPath, parseFrontmatter, stemKey, stripFrontmatter } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
 import { normalizeUrl, docIdFromUrl } from "../wiki/ingest-backlog.ts";
-import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
+import type { InsertWikiProposalParams, WikiProposal, WikiProposalRelatedPage } from "../db/wiki-proposals.ts";
 import { expectedDir, sanitizeFilename } from "./target-resolve.ts";
 import {
   appendPendingIngestionCallout,
+  bodyWikilinks,
   containDraftBodyLinks,
   hasForbiddenBasename,
   isHttpUrl,
@@ -54,6 +55,99 @@ const log = getLog("gardener", "source-drafter");
  * Named export so the guard boundary is testable against the exact threshold.
  */
 export const MIN_SOURCE_BODY_CHARS = 400;
+
+/**
+ * How many of a source page's own body links get a `## See also` backlink at
+ * apply. On jarvis (2026-09-24, before the label/domain filters) one de-orphaned
+ * exactly as many source pages as three, at a third of the See-also edits; the extra edits land on hubs such as
+ * `entities/Claude Code.md`. Numbers: PR #577.
+ */
+export const SOURCE_BACKLINK_CAP = 1;
+
+/**
+ * The pages a source draft's apply-time wire stage backlinks: the draft's own
+ * resolved BODY wikilinks, in body order, concept/entity pages first (other
+ * resolved pages only when there are none). Skips code regions, self-links,
+ * reserved basenames and `.html` explainers; dedupes by page. Refuses a link whose
+ * `|label` names something else (`[[RAG|quantum mechanics]]`, see
+ * {@link labelNamesHost}) and a host in the
+ * other domain (ai vs `life/`): an orphan is better than a wrong backlink or one
+ * that pulls a page across the wiki/wiki-life split. Without this every approved
+ * source page is born an orphan (240 of the linter's 242 orphans, 2026-09-24).
+ */
+export function sourceRelatedPages(
+  draft: string,
+  index: WikiIndex | null,
+  targetPath: string,
+): WikiProposalRelatedPage[] {
+  if (!index) return [];
+  const self = normalizeRelPath(targetPath);
+  const domain = targetPath.startsWith("life/") ? "life" : "ai";
+  const seen = new Set<string>();
+  const primary: WikiProposalRelatedPage[] = [];
+  const fallback: WikiProposalRelatedPage[] = [];
+  for (const { target, label } of bodyWikilinks(stripFrontmatter(draft))) {
+    const page = index.resolve(target);
+    if (!page || page.domain !== domain) continue;
+    const key = normalizeRelPath(page.relPath);
+    if (key === self || seen.has(key)) continue;
+    if (hasForbiddenBasename(page.relPath) || /\.html$/i.test(page.relPath)) continue;
+    if (label && !labelNamesHost(label, [target, page.title, page.name, ...page.aliases])) continue;
+    seen.add(key);
+    const rp = { title: target, relPath: page.relPath };
+    (page.type === "concept" || page.type === "entity" ? primary : fallback).push(rp);
+  }
+  return (primary.length > 0 ? primary : fallback).slice(0, SOURCE_BACKLINK_CAP);
+}
+
+const LABEL_STOPWORDS = new Set([
+  "the", "and", "for", "with", "from", "into", "about", "how", "what", "why", "who",
+  "you", "your", "our", "its", "this", "that", "are", "was", "not", "new", "via",
+]);
+
+/** Lowercased, trimmed, accents dropped (`Erdős` → `erdos`). */
+function foldName(name: string): string {
+  return name.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().trim();
+}
+
+/**
+ * Word tokens of a name, plus its separator-free whole (`sub-agent` → `subagent`):
+ * split on anything but letters/digits (so a possessive `'s` falls off as a
+ * too-short token), trailing `s` dropped. A bare number is not a word: it is
+ * checked by {@link nameNumbers}, never counted as a match.
+ */
+function nameWords(name: string): string[] {
+  const words = foldName(name).split(/[^\p{L}\p{N}]+/u);
+  const singular = (w: string) => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w);
+  return [...words, words.join("")]
+    .filter((w) => w.length >= 3 && !LABEL_STOPWORDS.has(w) && !/^\d+$/.test(w))
+    .map(singular);
+}
+
+/** Every number in a name, `4-7` read as `4.7`: `Kimi K3` → `3`, `Qwen3.8-27B` → `3.8.27`. */
+function nameNumbers(name: string): string[] {
+  return (foldName(name).match(/\d+(?:[.-]\d+)*/g) ?? []).map((n) => n.replace(/-/g, "."));
+}
+
+/**
+ * Whether a `|label` honestly names the host. A label equal to one of the host's
+ * names (any case) does, `[[AI|ai]]` included. Otherwise it must share a word with
+ * one name whose numbers do not contradict it: a numbered name must carry one of a
+ * numbered label's numbers, so `[[Claude Opus 4.7|Opus 4.6]]` is refused while
+ * `[[Claude Opus 4.7|Opus]]` and `[[GLM|GLM 5.3]]` pass. Class table: PR #577.
+ */
+export function labelNamesHost(label: string, names: string[]): boolean {
+  const folded = foldName(label);
+  if (names.some((n) => foldName(n) === folded)) return true;
+  const words = nameWords(label);
+  const numbers = nameNumbers(label);
+  return names.some((name) => {
+    const hostNumbers = nameNumbers(name);
+    if (numbers.length > 0 && hostNumbers.length > 0 && !numbers.some((n) => hostNumbers.includes(n))) return false;
+    const hostWords = new Set(nameWords(name));
+    return words.some((w) => hostWords.has(w));
+  });
+}
 
 /** The one input a source draft is built from — a single captured summary doc. */
 export interface SourceDraftInput {
@@ -909,9 +1003,9 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
       ],
       rationale: null,
       containedLinks: containedLinks.length > 0 ? { delinked: containedLinks } : null,
-      // Empty (not null): a source page seeds no See-also backlinks, but the row
-      // isn't a pre-migration legacy row either.
-      relatedPages: [],
+      // Both modes: an update target is usually an orphan too, and the See-also
+      // edit is idempotent on a page that already links it.
+      relatedPages: sourceRelatedPages(finalDraft, index, targetPath),
     });
 
     if (!row) {

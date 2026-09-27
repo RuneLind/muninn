@@ -3,6 +3,8 @@ import {
   draftSourcePage,
   sourceTopicKey,
   sourceWikilinkTargets,
+  sourceRelatedPages,
+  labelNamesHost,
   buildSourceDraftPrompt,
   buildSourceRevisePrompt,
   VERBATIM_MATERIAL_RULE,
@@ -16,6 +18,7 @@ import {
   type SourceDraftInput,
 } from "./source-drafter.ts";
 import { sanitizeFilename } from "./target-resolve.ts";
+import { selectWirablePages } from "./wire.ts";
 import { sha256 } from "./util.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
@@ -165,9 +168,11 @@ describe("draftSourcePage", () => {
     expect(captured!.targetPath).toBe("sources/Retrieval-Augmented Generation.mdx");
     // The resolvable body wikilink SURVIVES containment (still a live link).
     expect(captured!.draft).toContain("[[Model Context Protocol]]");
-    // source_docs carries the real doc + url; relatedPages is [] (not null legacy).
+    // source_docs carries the real doc + url; relatedPages seeds the resolved body link.
     expect(captured!.sourceDocs[0]).toMatchObject({ collection: "youtube-summaries", docId: "abc12345678", url: SOURCE_URL });
-    expect(captured!.relatedPages).toEqual([]);
+    expect(captured!.relatedPages).toEqual([
+      { title: "Model Context Protocol", relPath: "concepts/Model Context Protocol.md" },
+    ]);
   });
 
   test("covered by URL already in the wiki → credit + skip (no draft call, no insert)", async () => {
@@ -1309,5 +1314,226 @@ describe("buildSourceRevisePrompt", () => {
     const short = `https://example.invalid/${"p".repeat(470)}`;
     expect(short.length).toBeLessThanOrEqual(500);
     expect(revise({ input: { ...baseDeps().input, url: short } })).toContain("The source URL is");
+  });
+});
+
+describe("draftSourcePage — See-also seeding (relatedPages)", () => {
+  const concept = (title: string, over: Partial<WikiPageMeta> = {}) =>
+    page({ title, name: title, type: "concept", relPath: `concepts/${title}.md`, ...over });
+
+  async function seeded(over: Partial<DraftSourcePageDeps>, body: string, pages?: WikiPageMeta[]) {
+    let captured: InsertWikiProposalParams | null = null;
+    const out = await draftSourcePage(
+      baseDeps({
+        callDrafter: async () => mdxDraft({ body }),
+        insertProposal: async (params) => {
+          captured = params;
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+        ...(pages ? { index: fakeIndex(pages) } : {}),
+        ...over,
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    return captured!;
+  }
+
+  test("the first resolved concept/entity body link is seeded, skipping earlier source links", async () => {
+    const row = await seeded({}, "Intro [[Other Video]], then [[Anthropic]] and [[RAG Basics]].", [
+      page({ title: "Other Video", name: "Other Video", type: "source", relPath: "sources/Other Video.mdx" }),
+      page({ title: "Anthropic", name: "Anthropic", type: "entity", relPath: "entities/Anthropic.md" }),
+      concept("RAG Basics"),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "Anthropic", relPath: "entities/Anthropic.md" }]);
+  });
+
+  test("with no concept/entity link, falls back to another resolved page", async () => {
+    const row = await seeded({}, "See [[Other Video]].", [
+      page({ title: "Other Video", name: "Other Video", type: "source", relPath: "sources/Other Video.mdx" }),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "Other Video", relPath: "sources/Other Video.mdx" }]);
+  });
+
+  test("skips reserved basenames, .html explainers and links inside code", async () => {
+    const row = await seeded({}, "`[[RAG Basics]]` then [[Index]], [[Diagram]], and finally [[Agents]].", [
+      concept("RAG Basics"),
+      concept("Index", { relPath: "index.md" }),
+      concept("Diagram", { relPath: "explainers/Diagram.html" }),
+      concept("Agents"),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "Agents", relPath: "concepts/Agents.md" }]);
+  });
+
+  test("frontmatter `sources:` wikilinks are not body links", async () => {
+    const row = await seeded(
+      {
+        callDrafter: async () =>
+          mdxDraft({ body: "See [[Body Page]]." }).replace(`sources: [${SOURCE_URL}]`, 'sources: ["[[Frontmatter Page]]"]'),
+      },
+      "",
+      [concept("Frontmatter Page"), concept("Body Page")],
+    );
+    expect(row.relatedPages).toEqual([{ title: "Body Page", relPath: "concepts/Body Page.md" }]);
+  });
+
+  test("update mode seeds too, and never the page being revised", async () => {
+    const RELPATH = "sources/Retrieval-Augmented Generation.mdx";
+    const self = page({
+      title: "Retrieval-Augmented Generation",
+      name: "Retrieval-Augmented Generation",
+      type: "concept",
+      relPath: RELPATH,
+    });
+    const other = concept("Vector Search");
+    // Resolves the page being revised by its alias, which body containment keeps
+    // (it only de-links the self TITLE).
+    const byKey: Record<string, WikiPageMeta> = { rag: self, "vector search": other };
+    const row = await seeded(
+      {
+        index: { ...fakeIndex([self, other]), resolve: (t: string) => byKey[t.trim().toLowerCase()] },
+        collectWikiRefs: async () => ({ urls: new Set([SOURCE_URL]), idTokens: new Set() }),
+        update: { relPath: RELPATH, currentText: mdxDraft() },
+      },
+      "Also called [[RAG]]; built on [[Vector Search]].",
+    );
+    expect(row.mode).toBe("update");
+    expect(row.relatedPages).toEqual([{ title: "Vector Search", relPath: "concepts/Vector Search.md" }]);
+  });
+
+  test("the gate's wiring preview (selectWirablePages) shows the seeded backlink", async () => {
+    const row = await seeded({}, "Built on [[Agents]].", [concept("Agents")]);
+    const wirable = selectWirablePages(row.relatedPages, fakeIndex([concept("Agents")]), row.targetPath);
+    expect(wirable.map((w) => w.title)).toEqual(["Agents"]);
+  });
+
+  test("a link whose label names something else is skipped for an honest one", async () => {
+    const row = await seeded({}, "Per [[Andrej Karpathy|Andrew Ng]], see [[RAG Basics]].", [
+      page({ title: "Andrej Karpathy", name: "Andrej Karpathy", type: "entity", relPath: "entities/Andrej Karpathy.md" }),
+      concept("RAG Basics"),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "RAG Basics", relPath: "concepts/RAG Basics.md" }]);
+  });
+
+  test("a mislabeled link is not a last resort — no backlink at all", async () => {
+    const row = await seeded({}, "Grounded in [[RAG Basics|quantum mechanics]].", [concept("RAG Basics")]);
+    expect(row.relatedPages).toEqual([]);
+  });
+
+  test("a label equal to an alias (any case) is honest; a later honest link to a mislabeled page still counts", async () => {
+    const row = await seeded({}, "[[Agents|cats]] and [[Agents]]; also [[RAG Basics|rag]].", [
+      concept("RAG Basics", { aliases: ["RAG"] }),
+      concept("Agents"),
+    ]);
+    expect(row.relatedPages).toEqual([{ title: "Agents", relPath: "concepts/Agents.md" }]);
+    const aliased = await seeded({}, "Built on [[RAG Basics|rag]].", [concept("RAG Basics", { aliases: ["RAG"] })]);
+    expect(aliased.relatedPages).toEqual([{ title: "RAG Basics", relPath: "concepts/RAG Basics.md" }]);
+  });
+
+  test("a life/ source prefers a life/ host and never backlinks onto an ai page", async () => {
+    const life = { input: { ...baseDeps().input, category: "health" } };
+    const aiTopic = concept("Agents");
+    const sleep = concept("Sleep", { domain: "life", relPath: "life/concepts/Sleep.md" });
+    const row = await seeded(life, "Like [[Agents]], [[Sleep]] matters.", [aiTopic, sleep]);
+    expect(row.targetPath.startsWith("life/")).toBe(true);
+    expect(row.relatedPages).toEqual([{ title: "Sleep", relPath: "life/concepts/Sleep.md" }]);
+    expect((await seeded(life, "Like [[Agents]].", [aiTopic])).relatedPages).toEqual([]);
+  });
+
+  test("stores the link text as written, which is what resolved — not the host's title", async () => {
+    const host = concept("Retrieval Systems", { aliases: ["RAG"] });
+    const row = await seeded(
+      { index: { ...fakeIndex([host]), resolve: (t: string) => (t.trim().toLowerCase() === "rag" ? host : undefined) } },
+      "Built on [[RAG]].",
+    );
+    expect(row.relatedPages).toEqual([{ title: "RAG", relPath: "concepts/Retrieval Systems.md" }]);
+  });
+
+  test("a label differing from the host's name only in case is honest", async () => {
+    const row = await seeded({}, "Built on [[Agents|AGENTS]].", [concept("Agents")]);
+    expect(row.relatedPages).toEqual([{ title: "Agents", relPath: "concepts/Agents.md" }]);
+  });
+
+  test("an ai source never backlinks onto a life/ page", async () => {
+    const sleep = concept("Sleep", { domain: "life", relPath: "life/concepts/Sleep.md" });
+    const row = await seeded({}, "Like [[Sleep]].", [sleep]);
+    expect(row.targetPath.startsWith("life/")).toBe(false);
+    expect(row.relatedPages).toEqual([]);
+  });
+
+  const entity = (title: string) => page({ title, name: title, type: "entity", relPath: `entities/${title}.md` });
+
+  test("a surname label names its host", async () => {
+    const row = await seeded({}, "Per [[Andrej Karpathy|Karpathy]].", [entity("Andrej Karpathy")]);
+    expect(row.relatedPages).toEqual([{ title: "Andrej Karpathy", relPath: "entities/Andrej Karpathy.md" }]);
+  });
+
+  test("a singular label names a plural host", async () => {
+    const row = await seeded({}, "Each [[Skills|skill]] loads lazily.", [concept("Skills")]);
+    expect(row.relatedPages).toEqual([{ title: "Skills", relPath: "concepts/Skills.md" }]);
+  });
+
+  test("a hyphenated label names its closed-compound host", async () => {
+    const row = await seeded({}, "Spawn a [[Subagents|sub-agent]].", [concept("Subagents")]);
+    expect(row.relatedPages).toEqual([{ title: "Subagents", relPath: "concepts/Subagents.md" }]);
+  });
+
+  test("a possessive label names its host", async () => {
+    const row = await seeded({}, "In [[Sabine Hossenfelder|Hossenfelder's]] view.", [entity("Sabine Hossenfelder")]);
+    expect(row.relatedPages).toEqual([{ title: "Sabine Hossenfelder", relPath: "entities/Sabine Hossenfelder.md" }]);
+  });
+
+  test("a label sharing only a stopword or a short token is still refused", async () => {
+    const hosts = [entity("The Pragmatic Engineer"), concept("AI Agents")];
+    expect((await seeded({}, "See [[The Pragmatic Engineer|the lecture]].", hosts)).relatedPages).toEqual([]);
+    expect((await seeded({}, "See [[AI Agents|AI safety]].", hosts)).relatedPages).toEqual([]);
+  });
+
+  test("a label naming a different version of the host is refused", async () => {
+    const opus = page({ title: "Claude Opus 4.7", name: "Claude Opus 4.7", type: "entity", relPath: "entities/Claude Opus 4.7.md", aliases: ["Opus 4.7"] });
+    expect((await seeded({}, "Unlike [[Claude Opus 4.7|Opus 4.6]].", [opus])).relatedPages).toEqual([]);
+  });
+
+  test("no index → no related pages", () => {
+    expect(sourceRelatedPages(mdxDraft(), null, "sources/X.mdx")).toEqual([]);
+  });
+});
+
+// One row per class in PR #577's label table: [class, label, host names, names the host].
+describe("labelNamesHost", () => {
+  test.each<[string, string, string[], boolean]>([
+    ["exact, other case", "AGENTS", ["Agents"], true],
+    ["exact alias", "rag", ["RAG Basics", "RAG"], true],
+    ["exact, two-letter host", "ai", ["AI"], true],
+    ["exact, one-letter host", "R", ["R"], true],
+    ["exact, symbol host", "C++", ["C++"], true],
+    ["exact, symbol host #", "c#", ["C#"], true],
+    ["label is a subset of the host's words", "Karpathy", ["Andrej Karpathy"], true],
+    ["singular label, plural host", "skill", ["Skills"], true],
+    ["an -ss word is not a plural", "boss", ["Bos Taurus"], false],
+    ["hyphenated label, closed-compound host", "sub-agent", ["Subagents"], true],
+    ["possessive label", "Hossenfelder's", ["Sabine Hossenfelder"], true],
+    ["label adds words to a shared one", "Karpathy's three-folder pattern", ["Karpathy's LLM Wiki"], true],
+    ["shares only a family word (accepted residual)", "Claude Desktop", ["Claude AI"], true],
+    ["same version", "Opus 4.7", ["Claude Opus 4.7"], true],
+    ["same version, hyphen form", "Opus 4-7", ["Claude Opus 4.7"], true],
+    ["other minor version", "Opus 4.6", ["Claude Opus 4.7", "Opus 4.7"], false],
+    ["other major version", "Opus 3", ["Claude Opus 4.7"], false],
+    ["version prefix is not the version", "Opus 4", ["Claude Opus 4.7"], false],
+    ["numbered label, numbered host, versions differ", "GPT-5.6", ["GPT-5"], false],
+    ["hyphenated version differs", "GPT-5.6-Sol", ["GPT-6 Astra"], false],
+    ["letter-prefixed version differs", "Kimi K2", ["Kimi K3"], false],
+    ["numbered host, label without a number", "Opus", ["Claude Opus 4.7"], true],
+    ["numbered label, a numberless name shares the word", "GLM 5.3", ["GLM", "GLM 5.2"], true],
+    ["numbered label, host without numbers", "May 2026 Karpathy talk", ["Karpathy Vibe to Agentic Engineering"], true],
+    ["numbered label, the host carries that number", "the 2026 safety wave", ["AI Safety Wave 2026"], true],
+    ["shares only a number", "2026 predictions", ["AI Safety Wave 2026"], false],
+    ["shares only a version number", "Qwen 3", ["Kimi K3"], false],
+    ["shares only a stopword", "the lecture", ["The Pragmatic Engineer"], false],
+    ["shares only a short word", "AI safety", ["AI Agents"], false],
+    ["unrelated", "quantum mechanics", ["RAG"], false],
+    ["accented label, unaccented host", "Erdős", ["Erdos Problems"], true],
+    ["non-ASCII word", "Lütke", ["Tobi Lütke"], true],
+  ])("%s: %s", (_class, label, names, expected) => {
+    expect(labelNamesHost(label, names)).toBe(expected);
   });
 });
