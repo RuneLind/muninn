@@ -551,38 +551,55 @@ describe("checkSeries", () => {
     expect(f!.message).toContain("1 open plan(s)");
   });
 
-  test("a culled newest plan does not set the series' spelling: live members are not rewritten to it", async () => {
+  // The series CENSUS includes culled pages (plan M2): a culled member can be the
+  // head and name the fold, so the lint normalises LIVE members to it — and never
+  // edits the culled page, nor files a finding against it.
+
+  test("a culled newest plan sets the series' spelling: live members are normalised and joined to it", async () => {
     await write("plans/dead.mdx", culled(page("Dead", { date: "2026-09-18", plan: true, series: "Work" }, "See [[A]].")));
     await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true, series: "work" }, "See [[B]] and [[Dead]]."));
     await write("plans/b.mdx", page("B", { date: "2026-09-12", plan: true }, "See [[A]]."));
 
     const inconsistent = await findings("series-inconsistent");
-    // No 8.3(a) spelling rewrite of the live page to the culled page's spelling …
-    expect(inconsistent.filter((f) => f.message.includes("spelled"))).toHaveLength(0);
-    // … and the 8.3(c) join writes the LIVE spelling.
+    // 8.3(a) rewrites the live page to the culled head's spelling, filed against the live page …
+    const spelling = inconsistent.filter((f) => f.message.includes("spelled"));
+    expect(spelling).toHaveLength(1);
+    expect(spelling[0]!.relPath).toBe("plans/a.mdx");
+    expect(edits(spelling[0]!)).toEqual([{ op: "frontmatter", relPath: "plans/a.mdx", key: "series", value: "Work" }]);
+    // … and the 8.3(c) join writes the head's spelling too.
     const join = inconsistent.find((f) => f.message.includes("without declaring"));
-    expect(edits(join!)).toEqual([{ op: "frontmatter", relPath: "plans/b.mdx", key: "series", value: "work" }]);
+    expect(edits(join!)).toEqual([{ op: "frontmatter", relPath: "plans/b.mdx", key: "series", value: "Work" }]);
+    expect(inconsistent.flatMap((f) => edits(f)).some((e) => e.relPath === "plans/dead.mdx")).toBe(false);
   });
 
-  test("8.3(a) is filed against a LIVE head when a newer culled member spells the key a third way", async () => {
+  test("8.3(a) normalises every LIVE member to a newer culled head's spelling and files against a live page", async () => {
     await write("plans/dead.mdx", culled(page("Dead", { date: "2026-09-18", plan: true, series: "WORK" })));
     await write("plans/head.mdx", page("Head", { date: "2026-09-12", plan: true, series: "work" }));
     await write("plans/odd.mdx", page("Odd", { date: "2026-09-10", series: "Work" }));
 
     const [f, ...rest] = (await findings("series-inconsistent")).filter((x) => x.message.includes("spelled"));
     expect(rest).toHaveLength(0);
+    // The subject is the newest EDITED member, never the culled head.
     expect(f!.relPath).toBe("plans/head.mdx");
-    expect(edits(f!)).toEqual([{ op: "frontmatter", relPath: "plans/odd.mdx", key: "series", value: "work" }]);
+    expect(f!.detail).toContain('normalising to "WORK"');
+    expect(edits(f!)).toEqual([
+      { op: "frontmatter", relPath: "plans/head.mdx", key: "series", value: "WORK" },
+      { op: "frontmatter", relPath: "plans/odd.mdx", key: "series", value: "WORK" },
+    ]);
   });
 
-  test("a culled NEWER label never removes the only live label", async () => {
+  test("a culled NEWER label is the fold's label: the live label is removed, the culled page untouched", async () => {
     await write("plans/live.mdx", page("Live", { date: "2026-09-10", plan: true, series: "work", label: "Live label" }));
     await write("plans/dead.mdx", culled(page("Dead", { date: "2026-09-18", plan: true, series: "work", label: "Dead label" })));
 
-    expect(await findings("series-inconsistent")).toHaveLength(0);
+    const [f, ...rest] = await findings("series-inconsistent");
+    expect(rest).toHaveLength(0);
+    expect(f!.relPath).toBe("plans/live.mdx");
+    expect(f!.detail).toContain('keeping "Dead label" on plans/dead.mdx');
+    expect(edits(f!)).toEqual([{ op: "frontmatter", relPath: "plans/live.mdx", key: "series_label", value: null }]);
   });
 
-  test("8.3(b) keeps the newest LIVE label and is filed against it when a newer culled member is labelled too", async () => {
+  test("8.3(b) keeps a newer culled head's label and removes every live label, filed against the newest live one", async () => {
     await write("plans/dead.mdx", culled(page("Dead", { date: "2026-09-18", series: "work", label: "Dead label" })));
     await write("plans/keep.mdx", page("Keep", { date: "2026-09-12", plan: true, series: "work", label: "Keep label" }));
     await write("plans/old.mdx", page("Old", { date: "2026-09-10", series: "work", label: "Old label" }));
@@ -590,7 +607,10 @@ describe("checkSeries", () => {
     const [f, ...rest] = await findings("series-inconsistent");
     expect(rest).toHaveLength(0);
     expect(f!.relPath).toBe("plans/keep.mdx");
-    expect(edits(f!)).toEqual([{ op: "frontmatter", relPath: "plans/old.mdx", key: "series_label", value: null }]);
+    expect(edits(f!)).toEqual([
+      { op: "frontmatter", relPath: "plans/keep.mdx", key: "series_label", value: null },
+      { op: "frontmatter", relPath: "plans/old.mdx", key: "series_label", value: null },
+    ]);
   });
 
   test("control: the same bridge LIVE is joined into the series", async () => {

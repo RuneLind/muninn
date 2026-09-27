@@ -41,7 +41,6 @@ import {
   seriesHead,
   seriesKeyOf,
   seriesMembersByFoldKey,
-  seriesSpellingHead,
   SERIES_CONTINUE_MAX,
   SERIES_TERMINAL_STATUSES,
 } from "../dashboard/views/components/wiki-groups.ts";
@@ -476,8 +475,7 @@ function declaredKeySpelling(
 ): string | null {
   const members = declared.get(fold);
   if (!members || members.length === 0) return null;
-  const head = seriesSpellingHead(members);
-  return head ? seriesKeyOf(head) || null : null;
+  return seriesKeyOf(headOf(members)) || null;
 }
 
 /** ────────────────────────── 8.2 + 8.3(c), one pass ───────────────────────── */
@@ -638,12 +636,15 @@ function componentId(component: readonly Candidate[]): string {
 function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding[] {
   const findings: LintFinding[] = [];
   for (const members of declared.values()) {
-    // The head is the RAIL's (`seriesSpellingHead`, `seriesHead`), live first:
-    // a culled member stays IN the census but never sets the spelling or keeps
-    // the label while a live member declares the series, and is never edited.
-    // So whenever a finding has an edit target, its head is live.
-    const head = seriesSpellingHead(members)!;
+    // The head is the census's, culled members included (plan M2) — the rule
+    // the rail reads. A culled head still sets the spelling and keeps its label;
+    // the lint moves the LIVE members to it and never edits the culled page, so
+    // when the head is culled the finding is filed against the newest EDITED
+    // member instead (a culled page is never a finding subject).
+    const head = headOf(members);
     const headKey = seriesKeyOf(head);
+    const subject = (edited: WikiPageMeta[]): string =>
+      head.culled ? newestFirst(edited)[0]!.relPath : head.relPath;
 
     // (a) one series, more than one spelling.
     const variants = [...new Set(members.map((m) => seriesKeyOf(m)))];
@@ -652,7 +653,7 @@ function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding
       const paths = wrong.map((p) => p.relPath);
       findings.push({
         check: "series-inconsistent",
-        relPath: head.relPath,
+        relPath: subject(wrong),
         message: `series: "${headKey}" is spelled ${variants.length} ways — ${variants.join(", ")}`,
         detail: `normalising to "${headKey}" on: ${memberList(paths)}`,
         fix: {
@@ -667,24 +668,24 @@ function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding
       });
     }
 
-    // (b) more than one member carries series_label:. The head is `seriesHead`
-    //     over the whole census, the RAIL's own head rule — the newest labelled
-    //     LIVE member (a culled one only when no member is live) — so the label
-    //     kept is the label a reader already sees on the fold and the header.
-    //     The spelling head (the newest open PLAN) is a different page whenever
-    //     the newest labelled member is a blog, and keeping that one renames the
-    //     fold. When the rail's head carries no label (only culled members are
-    //     labelled), no live member is either, and there is nothing to remove.
+    // (b) more than one member carries series_label:. The head is `seriesHead`,
+    //     the RAIL's own head rule — the newest LABELLED member of the census,
+    //     culled or not — so the label kept is the label a reader already sees
+    //     on the fold. `headOf` (the newest open PLAN) is a different page
+    //     whenever the newest labelled member is a blog, and keeping that one
+    //     renames the fold. A culled extra label is never removed (never edit a
+    //     culled page); a LIVE one under a culled head is, since the fold shows
+    //     the head's label and the live one is dead text.
     const labelled = members.filter((m) => !!m.seriesLabel && m.seriesLabel.trim());
     if (labelled.length > 1) {
-      const labelHead = seriesHead(members)!;
+      const labelHead = seriesHead(members) ?? labelled[0]!;
       const extra = labelled.filter((m) => m.relPath !== labelHead.relPath && !m.culled);
       const paths = extra.map((p) => p.relPath);
       if (paths.length === 0) continue;
       findings.push({
         check: "series-inconsistent",
-        relPath: labelHead.relPath,
-        message: `series "${headKey}" has ${labelled.length} series_label: heads — the rail reads the newest labelled live page`,
+        relPath: labelHead.culled ? newestFirst(extra)[0]!.relPath : labelHead.relPath,
+        message: `series "${headKey}" has ${labelled.length} series_label: heads — the rail reads the newest labelled page`,
         detail: `keeping "${labelHead.seriesLabel}" on ${labelHead.relPath}; removing series_label: from ${memberList(paths)}`,
         fix: {
           groupKey: groupKeyFor("series-inconsistent", `label:${seriesCensusKey(headKey)}`, paths),

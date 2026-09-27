@@ -9,11 +9,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { aliasWorkedPaths, buildWikiIndex, readCull, type WikiIndex } from "./store.ts";
+import { __resetWikiCacheForTest, aliasWorkedPaths, buildWikiIndex, readCull, type WikiIndex } from "./store.ts";
 import { toListing } from "../dashboard/routes/wiki-routes.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS, rankActivity } from "../dashboard/views/components/wiki-activity-rank.ts";
 import type { WikiListing } from "../dashboard/views/components/wiki-filter.ts";
 import { groupSeries, seriesMembersOf } from "../dashboard/views/components/wiki-groups.ts";
+import { buildSeriesMenu, headMoveWrites } from "../dashboard/views/components/wiki-series-menu.ts";
+import { registerWikiSeriesRoutes } from "../dashboard/routes/wiki-series-routes.ts";
+import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "./registry-memo.ts";
+import { sha256 } from "../gardener/util.ts";
+import { Hono } from "hono";
 import { lintWiki } from "./lint.ts";
 
 let root: string;
@@ -319,60 +324,174 @@ describe("Activity drops culled pages — through the store's effective value", 
   });
 });
 
-describe("lint and the rail read ONE series head — a culled newest member steers neither", () => {
+describe("ONE census-inclusive series head: lint, the rail fold, the reader header, the series menu and editor, continue at", () => {
+  // Plan M2: the series CENSUS includes culled pages, so a culled member can be
+  // the head and name the fold. Lint never EDITS a culled page — it normalises
+  // the LIVE members to the head's spelling and label instead.
   const NOW = Date.parse("2026-09-20T12:00:00Z");
-  const series = (title: string, o: { date: string; key: string; label?: string; plan?: boolean; culled?: boolean }) =>
-    md([
-      `title: ${title}`,
-      `status_date: ${o.date}`,
-      ...(o.plan ? ["plan_status: in-flight"] : []),
-      `series: ${o.key}`,
-      ...(o.label ? [`series_label: ${o.label}`] : []),
-      ...(o.culled ? ["signal: none"] : []),
-    ]);
-  /** The label the rail's fold and the reader header both show for the one series in the wiki. */
-  const railLabels = async () => {
+  const series = (title: string, o: { date: string; key?: string; label?: string; plan?: boolean; culled?: boolean }, body = "Prose.") =>
+    md(
+      [
+        `title: ${title}`,
+        `status_date: ${o.date}`,
+        ...(o.plan ? ["plan_status: in-flight"] : []),
+        ...(o.key ? [`series: ${o.key}`] : []),
+        ...(o.label ? [`series_label: ${o.label}`] : []),
+        ...(o.culled ? ["signal: none"] : []),
+      ],
+      body,
+    );
+  const listingOf = async () => {
     const index = await buildWikiIndex(root);
-    const listing = index.pages.map((p) => toListing(index, p) as unknown as WikiListing);
+    return index.pages.map((p) => toListing(index, p) as unknown as WikiListing);
+  };
+  /** Everything a reader sees name the one series: the fold, the header, the menu, `▸`/continue-at. */
+  const railView = async (openRel: string) => {
+    const listing = await listingOf();
     const groups = groupSeries(listing, listing, NOW);
     expect(groups).toHaveLength(1);
-    const header = seriesMembersOf(listing, "work", NOW).head;
-    return { fold: groups[0]!.label, header: header?.seriesLabel || header?.series };
+    const g = groups[0]! as { label: string; latestRel?: string };
+    const described = seriesMembersOf(listing, "work", NOW);
+    const header = described.head;
+    const menu = buildSeriesMenu(listing, openRel, NOW)!;
+    return {
+      fold: g.label,
+      header: header?.seriesLabel || header?.series,
+      menu: menu.label,
+      headRel: menu.headRel,
+      latest: g.latestRel,
+      continueAt: described.latest?.relPath,
+    };
   };
   const seriesFindings = async () => {
     const index = await buildWikiIndex(root);
     return (await lintWiki(index, { now: () => NOW })).findings.filter((f) => f.check === "series-inconsistent");
   };
+  const editsOf = (fs: Awaited<ReturnType<typeof seriesFindings>>) =>
+    fs.flatMap((f) => f.fix?.edits ?? []).map((e) => `${e.relPath} ${"key" in e ? e.key : ""}=${"value" in e ? e.value : ""}`).sort();
 
-  test("label: lint keeps the label the fold and the header show, and after the fix is applied they still agree", async () => {
+  test("label: lint keeps the culled head's label the fold, header and menu show; after the fix they still agree", async () => {
     await write("plans/dead.mdx", series("Dead", { date: "2026-09-18", key: "work", label: "Dead label", culled: true }));
     await write("plans/keep.mdx", series("Keep", { date: "2026-09-12", key: "work", label: "Keep label", plan: true }));
     await write("plans/old.mdx", series("Old", { date: "2026-09-10", key: "work", label: "Old label" }));
 
     const [f, ...rest] = await seriesFindings();
     expect(rest).toHaveLength(0);
-    expect(f!.detail).toContain('keeping "Keep label"');
-    expect(await railLabels()).toEqual({ fold: "Keep label", header: "Keep label" });
+    expect(f!.detail).toContain('keeping "Dead label" on plans/dead.mdx');
+    expect(f!.relPath).not.toBe("plans/dead.mdx");
+    expect(editsOf([f!])).toEqual(["plans/keep.mdx series_label=null", "plans/old.mdx series_label=null"]);
+    expect(await railView("plans/keep.mdx")).toMatchObject({
+      fold: "Dead label",
+      header: "Dead label",
+      menu: "Dead label",
+      headRel: "plans/dead.mdx",
+    });
 
-    // Apply the fix (drop Old's label): lint goes silent and the rail still reads the kept label.
+    // Apply the fix (drop the two live labels): lint goes silent and every surface still reads the kept label.
+    await write("plans/keep.mdx", series("Keep", { date: "2026-09-12", key: "work", plan: true }));
     await write("plans/old.mdx", series("Old", { date: "2026-09-10", key: "work" }));
     expect(await seriesFindings()).toHaveLength(0);
-    expect(await railLabels()).toEqual({ fold: "Keep label", header: "Keep label" });
+    expect(await railView("plans/keep.mdx")).toMatchObject({ fold: "Dead label", header: "Dead label", menu: "Dead label" });
   });
 
-  test("spelling: the fold and the header show the spelling lint normalises to, not the culled newest member's", async () => {
+  test("spelling: lint normalises the live members to the culled newest plan's spelling, which every surface shows", async () => {
     await write("plans/dead.mdx", series("Dead", { date: "2026-09-18", key: "WORK", plan: true, culled: true }));
     await write("plans/live.mdx", series("Live", { date: "2026-09-12", key: "work", plan: true }));
     await write("plans/odd.mdx", series("Odd", { date: "2026-09-10", key: "Work" }));
 
     const [f, ...rest] = await seriesFindings();
     expect(rest).toHaveLength(0);
-    expect(f!.fix!.edits).toEqual([{ op: "frontmatter", relPath: "plans/odd.mdx", key: "series", value: "work" }]);
-    expect(await railLabels()).toEqual({ fold: "work", header: "work" });
+    expect(f!.relPath).not.toBe("plans/dead.mdx");
+    expect(editsOf([f!])).toEqual(["plans/live.mdx series=WORK", "plans/odd.mdx series=WORK"]);
+    expect(await railView("plans/live.mdx")).toEqual({
+      fold: "WORK",
+      header: "WORK",
+      menu: "WORK",
+      headRel: "",
+      // continue at / `▸` name the newest plan of the whole census — the culled one.
+      latest: "plans/dead.mdx",
+      continueAt: "plans/dead.mdx",
+    });
+
+    // Apply the fix: lint goes silent, the surfaces are unchanged.
+    await write("plans/live.mdx", series("Live", { date: "2026-09-12", key: "WORK", plan: true }));
+    await write("plans/odd.mdx", series("Odd", { date: "2026-09-10", key: "WORK" }));
+    expect(await seriesFindings()).toHaveLength(0);
+    expect((await railView("plans/live.mdx")).fold).toBe("WORK");
+  });
+
+  test("the newest-PLAN rung picks the head: a culled plan outranks a newer live non-plan for spelling, join and continue at", async () => {
+    // z-dead is the newest PLAN but not the newest member; a-blog (no plan_status) is newer.
+    await write("plans/z-dead.mdx", series("Dead", { date: "2026-09-12", key: "WORK", plan: true, culled: true }, "See [[Blog]]."));
+    await write("plans/a-blog.mdx", series("Blog", { date: "2026-09-18", key: "Work" }, "See [[B]] and [[Dead]]."));
+    await write("plans/b.mdx", series("B", { date: "2026-09-14", plan: true }, "See [[Blog]]."));
+
+    const fs = await seriesFindings();
+    // 8.3(a) normalises the live blog, 8.3(c) joins b — both to the culled plan's spelling.
+    expect(editsOf(fs)).toEqual(["plans/a-blog.mdx series=WORK", "plans/b.mdx series=WORK"]);
+    expect(fs.every((f) => f.relPath !== "plans/z-dead.mdx")).toBe(true);
+    const view = await railView("plans/a-blog.mdx");
+    expect(view).toMatchObject({ fold: "WORK", header: "WORK", menu: "WORK", latest: "plans/z-dead.mdx", continueAt: "plans/z-dead.mdx" });
   });
 
   test("control: a culled member that ALONE declares the series still names it on the rail", async () => {
     await write("plans/dead.mdx", series("Dead", { date: "2026-09-18", key: "work", label: "Dead label", culled: true }));
-    expect(await railLabels()).toEqual({ fold: "Dead label", header: "Dead label" });
+    const listing = await listingOf();
+    expect(groupSeries(listing, listing, NOW)[0]!.label).toBe("Dead label");
+    expect(seriesMembersOf(listing, "work", NOW).head?.seriesLabel).toBe("Dead label");
+  });
+
+  describe("the series editor agrees with the head the fold shows", () => {
+    const app = () => {
+      const a = new Hono();
+      registerWikiSeriesRoutes(a, { lockWaitMs: 50 });
+      return a;
+    };
+    const post = async (body: Record<string, unknown>) => {
+      const rel = body.relPath as string;
+      const baseHash = sha256(await Bun.file(path.join(root, rel)).text());
+      return app().request("/api/wiki/series", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wiki: "w", baseHash, ...body }),
+      });
+    };
+    beforeEach(() => {
+      __setWikiRegistryForTest([{ name: "w", root, source: "extra" }]);
+    });
+    afterEach(() => {
+      __resetWikiRegistryForTest();
+      __resetWikiCacheForTest();
+    });
+
+    test("a culled labelled head + a live unlabelled member: the fold names the head, and the menu's head move names the live member without a 409", async () => {
+      await write("plans/dead.mdx", series("Dead", { date: "2026-09-18", key: "work", label: "Dead label", culled: true }));
+      await write("plans/live.mdx", series("Live", { date: "2026-09-12", key: "work", plan: true }));
+
+      const before = await railView("plans/live.mdx");
+      expect(before).toMatchObject({ fold: "Dead label", header: "Dead label", menu: "Dead label", headRel: "plans/dead.mdx" });
+
+      // Naming the live member while the head still carries the label is the fork the
+      // editor refuses — and the 409 names the page the fold is showing.
+      const fork = await post({ relPath: "plans/live.mdx", series: "work", seriesLabel: "New name" });
+      expect(fork.status).toBe(409);
+      expect(await fork.json()).toMatchObject({ twoHeaded: true, headRelPath: before.headRel });
+
+      // The menu's own head move: clear the head the menu showed, then label the live member.
+      const listing = await listingOf();
+      const writes = headMoveWrites(buildSeriesMenu(listing, "plans/live.mdx", NOW)!, "plans/live.mdx", "New name");
+      expect(writes.map((w) => w.relPath)).toEqual(["plans/dead.mdx", "plans/live.mdx"]);
+      for (const w of writes) {
+        const res = await post({ ...w });
+        expect(res.status).toBe(200);
+      }
+      expect(await railView("plans/live.mdx")).toMatchObject({
+        fold: "New name",
+        header: "New name",
+        menu: "New name",
+        headRel: "plans/live.mdx",
+      });
+      expect(await seriesFindings()).toHaveLength(0);
+    });
   });
 });

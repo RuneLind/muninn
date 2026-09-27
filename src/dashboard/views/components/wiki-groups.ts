@@ -544,49 +544,30 @@ export function newestSeriesPlan<T extends SeriesPlanFields>(
 /**
  * The HEAD of a series — the member whose `series_label:` names it.
  *
- * Absent, the newest plan; absent that too, the newest member — all of it over
- * {@link liveSeriesMembers}, so a culled member never heads a series a live
- * member still declares. The label is read off the head, so this is what decides whether the fold says `Wiki provenance`
+ * Absent, the newest plan; absent that too, the newest member. The label is read
+ * off the head, so this is what decides whether the fold says `Wiki provenance`
  * or falls back to the bare key. The fallback chain matters because it is what a
  * series gets for free before anyone writes a label at all.
+ *
+ * ONE rule over the whole CENSUS, culled members included (plan M2): a culled
+ * page can be the head and name the fold. The rail fold, the reader header,
+ * the `⋯` series menu and lint 8.3 read this one rule, and the editor's
+ * one-label check counts culled members the same way, so no surface shows a
+ * head another disagrees with. The lint never EDITS a culled head; it moves
+ * the LIVE members to it instead.
  *
  * Generic over the structural subset it reads, for {@link newestSeriesPlan}'s
  * reason: the lint's duplicate-label rule (`src/wiki/lint-series.ts`) decides
  * which `series_label:` to KEEP with this function, over the server's
  * `WikiPageMeta`, rather than a second spelling of the rail's head rule.
  */
-export function seriesHead<T extends SeriesPlanFields & Pick<WikiListing, "seriesLabel" | "culled">>(
+export function seriesHead<T extends SeriesPlanFields & Pick<WikiListing, "seriesLabel">>(
   members: readonly T[],
 ): T | undefined {
-  const sorted = [...liveSeriesMembers(members)].sort(bySeriesDateDesc);
+  const sorted = [...members].sort(bySeriesDateDesc);
   return (
     sorted.find((m) => !!m.seriesLabel) ?? newestSeriesPlan(sorted) ?? sorted[0]
   );
-}
-
-/**
- * The member whose `series:` SPELLING names the series: {@link seriesHead}'s
- * fallback chain without the label rung — the newest plan, else the newest
- * member, over {@link liveSeriesMembers}. It is the page the fold's label falls
- * back to when nobody wrote a `series_label:`, and the spelling the lint's
- * 8.3(a) normalises every other member to.
- */
-export function seriesSpellingHead<T extends SeriesPlanFields & Pick<WikiListing, "culled">>(
-  members: readonly T[],
-): T | undefined {
-  const sorted = [...liveSeriesMembers(members)].sort(bySeriesDateDesc);
-  return newestSeriesPlan(sorted) ?? sorted[0];
-}
-
-/**
- * The head rule's first cut, shared by the rail, the reader header and the lint:
- * the LIVE members, or all of them when none is live. A culled page names a
- * series only while it alone declares it. Applied inside {@link seriesHead} and
- * {@link seriesSpellingHead} so no caller can pick a head without it.
- */
-export function liveSeriesMembers<T extends Pick<WikiListing, "culled">>(members: readonly T[]): readonly T[] {
-  const live = members.filter((m) => !m.culled);
-  return live.length > 0 ? live : members;
 }
 
 /**
