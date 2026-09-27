@@ -185,6 +185,13 @@ export const E2E_PORTS = {
   // switchable to a 404 mid-spec.
   "wiki-tracker-board": 3076,
   "wiki-tracker-board/stub": 3077,
+  // The gardener strip's error note: one muninn over a throwaway bot with a
+  // seeded wiki-gardener watcher; the verb POSTs reach it unmodified or with
+  // their content type stripped.
+  "gardener-backlog-error": 3078,
+  // Not bound: the spec points `KNOWLEDGE_API_URL` here so no backlog GET
+  // reaches a live huginn.
+  "gardener-backlog-error/dead-huginn": 8796,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
