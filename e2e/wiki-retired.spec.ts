@@ -195,6 +195,9 @@ test.describe("Wiki: retired pages", () => {
     await expect(row(page, PARENT).locator(".wiki-fold-chip-label")).toHaveText("1 attached");
     expect(rels.sort()).toEqual([SUCCESSOR, OLDER, PARENT, PARENT_PROTO, S_A, S_B].sort());
     await expect(page.locator("#wikiCount")).toHaveText(`${LIVE} / ${LIVE}`);
+    // The folder facet counts the same pool: `archive/` holds only a retired page.
+    await expect(page.locator('#wikiFolder option[value="archive"]')).toHaveCount(0);
+    await expect(page.locator('#wikiFolder option[value="plans"]')).toHaveText("plans 3");
   });
 
   test("a retired series head still names the fold, and the census counts it", async ({ page }) => {
@@ -214,6 +217,8 @@ test.describe("Wiki: retired pages", () => {
     expect((await railRels(page)).sort()).toEqual(PAGES.map(([rel]) => rel).sort());
     await expect(row(page, TWIN)).toHaveClass(/\bculled\b/);
     await expect(row(page, TWIN)).toHaveAttribute("title", /Retired/);
+    await expect(page.locator('#wikiFolder option[value="archive"]')).toHaveText("archive 1");
+    await expect(page.locator('#wikiFolder option[value="plans"]')).toHaveText("plans 7");
     // The twin folds under its retired parent; the dead child is back in its
     // live parent's chip.
     await expect(row(page, TWIN_HTML)).toHaveClass(/\bchild\b/);
