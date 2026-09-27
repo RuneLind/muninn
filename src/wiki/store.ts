@@ -2911,10 +2911,13 @@ export function aliasWorkedPaths(alias: string, topDirs: ReadonlySet<string>): s
  * a `./`/`../` value is joined onto the page's folder (`supersededTargetRef`'s
  * rule); a path goes through `resolve` (which tries `.md`, then `.mdx`) and then
  * the raw relPath lookup (an `.html` successor), in any folder. A BARE name
- * resolves in the page's OWN folder first — the page rule 4 of
- * `pairAttachments` folds it under, so the banner and the fold agree — and only
- * then wiki-wide through `resolve` (stem, title or alias, first registration
- * wins). Undefined when it names no page, or names the page itself.
+ * resolves in the page's OWN folder first — the markdown page of its stem,
+ * whatever extension it spells, which is the page rule 4 of `pairAttachments`
+ * folds it under, so the banner and the fold agree; then a spelled extension as
+ * written — and only then wiki-wide through `resolve` (stem, title or alias,
+ * first registration wins). One known exception: rule 4 strips ANY extension
+ * (`v1.2` → stem `v1`), this strips only `.md`/`.mdx`/`.html`. Undefined when
+ * it names no page, or names the page itself.
  */
 export function resolveSupersededBy(
   raw: string,
@@ -2931,9 +2934,15 @@ export function resolveSupersededBy(
   if (!v.includes("/")) {
     const dir = path.posix.dirname(fromRelPath);
     const local = dir === "." ? v : `${dir}/${v}`;
-    hit = /\.(?:mdx?|html)$/i.test(v)
-      ? resolveRelPath(local)
-      : (resolveRelPath(`${local}.md`) ?? resolveRelPath(`${local}.mdx`));
+    // Rule 4 folds under the MARKDOWN page of the named stem whatever extension
+    // the value spells (`b.html` folds under `b.md`), so that page is tried
+    // first; a spelled extension as written comes second (an `.html` successor
+    // with no markdown page of its stem, which rule 4 never folds under).
+    const stem = local.replace(/\.(?:mdx?|html)$/i, "");
+    hit =
+      resolveRelPath(`${stem}.md`) ??
+      resolveRelPath(`${stem}.mdx`) ??
+      (stem !== local ? resolveRelPath(local) : undefined);
     if (hit && normalizeRelPath(hit.relPath) === normalizeRelPath(fromRelPath)) hit = undefined;
   }
   hit ??= resolve(v) ?? (v.includes("/") ? resolveRelPath(v) : undefined);

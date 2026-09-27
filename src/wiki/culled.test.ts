@@ -222,6 +222,50 @@ describe("supersededBy — resolved in ANY folder", () => {
     expect(pageOf(index, "plans/c.md").supersededBy).toBe("archive/only-in-archive.md");
     expect(pageOf(index, "plans/e.md").supersededBy).toBe("archive/b.md");
   });
+
+  test("a bare name SPELLING an extension names the page rule 4 folds it under, not the file as written", async () => {
+    await write("plans/b.md", md(["title: B"]));
+    await write("plans/b.html", "<!doctype html><html><head><title>B diagram</title></head><body>x</body></html>");
+    await write("plans/html-spelled.md", md(["title: H", "superseded_by: b.html"]));
+    await write("plans/mdx-spelled.md", md(["title: M", "superseded_by: b.mdx"]));
+    const index = await buildWikiIndex(root);
+
+    for (const rel of ["plans/html-spelled.md", "plans/mdx-spelled.md"]) {
+      expect({ rel, parent: pageOf(index, rel).parent }).toEqual({ rel, parent: "plans/b.md" });
+      expect({ rel, banner: pageOf(index, rel).supersededBy }).toEqual({ rel, banner: "plans/b.md" });
+    }
+  });
+
+  test("a spelled .html with NO markdown page of that stem names the .html in the page's own folder", async () => {
+    // archive/ registers first, so a wiki-wide lookup would answer the wrong one.
+    await write("archive/c.html", "<!doctype html><html><head><title>Archive C</title></head><body>x</body></html>");
+    await write("plans/c.html", "<!doctype html><html><head><title>Plans C</title></head><body>x</body></html>");
+    await write("plans/d.md", md(["title: D", "superseded_by: c.html"]));
+    const index = await buildWikiIndex(root);
+
+    expect(pageOf(index, "plans/d.md").parent).toBeUndefined();
+    expect(pageOf(index, "plans/d.md").supersededBy).toBe("plans/c.html");
+  });
+
+  test("a same-folder .mdx successor wins over a wiki-wide .mdx of the same stem", async () => {
+    // (An `archive/b.md` would shadow `plans/b.mdx` out of the index altogether.)
+    await write("archive/b.mdx", md(["title: Archive B"]));
+    await write("plans/b.mdx", md(["title: Plans B"]));
+    await write("plans/a.md", md(["title: A", "superseded_by: b"]));
+    const index = await buildWikiIndex(root);
+
+    expect(pageOf(index, "plans/a.md").parent).toBe("plans/b.mdx");
+    expect(pageOf(index, "plans/a.md").supersededBy).toBe("plans/b.mdx");
+  });
+
+  test("a bare name naming the page ITSELF falls through to the wiki-wide lookup", async () => {
+    await write("archive/b.md", md(["title: Archive B"]));
+    await write("plans/b.md", md(["title: Plans B", "superseded_by: b"]));
+    const index = await buildWikiIndex(root);
+
+    expect(pageOf(index, "plans/b.md").parent).toBeUndefined();
+    expect(pageOf(index, "plans/b.md").supersededBy).toBe("archive/b.md");
+  });
 });
 
 describe("aliasWorkedPaths", () => {
