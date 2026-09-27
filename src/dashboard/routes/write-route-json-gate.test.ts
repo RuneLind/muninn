@@ -1,20 +1,25 @@
 import { test, expect, describe } from "bun:test";
+import { Hono } from "hono";
 import type { Config } from "../../config.ts";
+import { createChatRoutes } from "../../chat/routes.ts";
 import { createDashboardRoutes } from "../routes.ts";
 
 /**
  * The mechanical carrier for the JSON gate (`json-request.ts`).
  *
- * A `text/plain` or bodyless POST is a CORS simple request: a cross-origin page
- * sends it with no preflight. Under `MUNINN_AUTH=off` the global origin check is
- * not mounted, so a write route's own 415 is the guard. This file walks every
- * write route `createDashboardRoutes` registers and requires that 415 — unless
- * the route is on {@link UNGATED} with a reason. A new write route therefore
- * starts RED here until it is gated or someone writes down why it is not.
+ * A `text/plain`, form-encoded, multipart or bodyless POST is a CORS simple
+ * request: a cross-origin page sends it with no preflight. Under
+ * `MUNINN_AUTH=off` the global origin check is not mounted, so a write route's
+ * own 415 is the guard. This file walks every write route of the app
+ * `src/index.ts` serves — `createDashboardRoutes` at `/` and `createChatRoutes`
+ * at `/chat` — and requires that 415, unless the route is on {@link UNGATED}
+ * with a reason. A new write route therefore starts RED here until it is gated
+ * or someone writes down why it is not.
  *
  * Only gated routes are requested: an allowlisted route's handler would run for
  * real (spawns, huginn calls, DB writes), so its entry is a claim this file
- * cannot probe. The list is the map of the remaining class — shrink it.
+ * cannot probe — and an entry whose route later gains a gate is not noticed.
+ * The list is the map of the remaining class: shrink it.
  */
 
 const CONFIG = { dashboardPort: 3010, profile: "default" } as Config;
@@ -26,6 +31,8 @@ const NON_SIMPLE = "non-simple method: a cross-origin request preflights and get
 const EXTENSION = "Chrome-extension route with its own CORS; JSON gate not added yet";
 /** The plain remainder: a write route with no per-route 415 today. */
 const OPEN = "dashboard-page POST with no per-route 415 yet: follow-up";
+/** The `/chat` slice: no route there is JSON-gated yet. */
+const CHAT = "/chat POST with no per-route 415 yet: follow-up";
 
 const UNGATED: ReadonlyMap<string, string> = new Map([
   ["DELETE /api/threads/:id", NON_SIMPLE],
@@ -67,12 +74,35 @@ const UNGATED: ReadonlyMap<string, string> = new Map([
   ["POST /api/models/bot-config", OPEN],
   ["POST /api/models/role", OPEN],
   ["POST /api/sync/run", OPEN],
+
+  ["PUT /chat/preferences/:userId/:botName/connector", NON_SIMPLE],
+  // Answers its own OPTIONS preflight (`GET, PUT` + `Content-Type`), so a
+  // cross-origin PUT does get through — NON_SIMPLE would be a false reason.
+  ["PUT /chat/bot-preferences/:botName/default-user", EXTENSION],
+  ["DELETE /chat/conversations/:id", NON_SIMPLE],
+  ["PATCH /chat/threads/:id/connector", NON_SIMPLE],
+  ["PATCH /chat/threads/:id/auto-respond", NON_SIMPLE],
+  ["DELETE /chat/threads/:id", NON_SIMPLE],
+  ["POST /chat/conversations", CHAT],
+  ["POST /chat/threads", CHAT],
+  ["POST /chat/feedback", CHAT],
+  ["POST /chat/conversations/:id/messages", CHAT],
+  ["POST /chat/mcp-status/:botName/refresh", CHAT],
+  ["POST /chat/reports/:botName/:userId/:issueKey", CHAT],
+  ["POST /chat/specs/:botName/:userId/:issueKey", CHAT],
 ]);
 
-const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+/** `ALL` is what `app.all(...)` and `app.mount(...)` register: a POST reaches it.
+ *  An `app.use` middleware inside either factory would also show up as `ALL`;
+ *  none is registered there today (it lives on the top-level app). */
+const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE", "ALL"]);
 
-function writeRoutes(): { app: ReturnType<typeof createDashboardRoutes>; routes: string[] } {
-  const app = createDashboardRoutes(CONFIG);
+/** The top-level app as `src/index.ts` composes it, minus the middlewares. No
+ *  bots: nothing here needs one, and none may be reachable. */
+function writeRoutes(): { app: Hono; routes: string[] } {
+  const app = new Hono();
+  app.route("/", createDashboardRoutes(CONFIG));
+  app.route("/chat", createChatRoutes([], CONFIG));
   const routes = [
     ...new Set(
       app.routes.filter((r) => WRITE_METHODS.has(r.method)).map((r) => `${r.method} ${r.path}`),
@@ -81,19 +111,58 @@ function writeRoutes(): { app: ReturnType<typeof createDashboardRoutes>; routes:
   return { app, routes };
 }
 
+const PROBE = "carrier-probe";
+/** Values tried, in order, against a regex-constrained `:name{…}` param. */
+const PARAM_CANDIDATES = [PROBE, "1", "carrier-probe.md", "carrier-probe/carrier-probe"];
+
 /**
- * A concrete URL for a route pattern: every `:param` becomes a probe value, and
- * `wiki`/`bot` name nothing. If a gate regresses, the handler runs — these keep
- * it pointed at no real wiki or bot, and the `fetch` stub below at no real
- * service, so a regression fails here as a status rather than as a drain.
+ * Hono's param shapes: `:name`, `:name?`, `:name{regex}` (a regex may itself
+ * hold braces or `/`), plus the `*` wildcard. The name is anything up to `/`,
+ * `{` or `?`, so `:id_2` and `:traceId` are one token.
  */
-function concrete(pattern: string): string {
-  return pattern.replace(/:[A-Za-z]+/g, "carrier-probe") + "?wiki=carrier-probe&bot=carrier-probe";
+const PARAM = /:[^/{}?]+(\{(?:[^{}\\]|\\.|\{[^{}]*\})*\})?\??|\*/g;
+
+/**
+ * A concrete URL for a route pattern, or `null` when a regex-constrained param
+ * accepts none of the candidates. `wiki`/`bot` name nothing: if a gate
+ * regresses, the handler runs — these keep it pointed at no real wiki or bot,
+ * and the `fetch` stub below at no real service, so a regression fails here as
+ * a status rather than as a drain. The stub does not fence process spawns.
+ */
+function concrete(pattern: string): string | null {
+  let unmatched = false;
+  const path = pattern.replace(PARAM, (_token, braced: string | undefined) => {
+    if (!braced) return PROBE;
+    const rx = new RegExp(`^(?:${braced.slice(1, -1)})$`);
+    const value = PARAM_CANDIDATES.find((v) => rx.test(v));
+    if (value === undefined) unmatched = true;
+    return value ?? PROBE;
+  });
+  return unmatched ? null : `${path}?wiki=${PROBE}&bot=${PROBE}`;
 }
 
-describe("every dashboard write route answers a non-JSON request with 415", () => {
+function form(): FormData {
+  const f = new FormData();
+  f.set("x", "{}");
+  return f;
+}
+
+/** The four CORS-simple shapes a cross-origin page can send with no preflight. */
+const PROBES: ReadonlyArray<[string, () => Omit<RequestInit, "method">]> = [
+  ["text/plain", () => ({ headers: { "content-type": "text/plain" }, body: "{}" })],
+  [
+    "form-urlencoded",
+    () => ({ headers: { "content-type": "application/x-www-form-urlencoded" }, body: "x=%7B%7D" }),
+  ],
+  ["multipart", () => ({ body: form() })],
+  ["bodyless", () => ({})],
+];
+
+describe("every write route answers a non-JSON request with 415", () => {
   test("the walk found the write surface (not an empty route table)", () => {
-    expect(writeRoutes().routes.length).toBeGreaterThan(40);
+    const { routes } = writeRoutes();
+    expect(routes.length).toBeGreaterThan(70);
+    expect(routes.some((r) => r.startsWith("POST /chat/"))).toBe(true);
   });
 
   test("every allowlist entry is a registered write route (no stale entries)", () => {
@@ -102,7 +171,27 @@ describe("every dashboard write route answers a non-JSON request with 415", () =
     expect(stale).toEqual([]);
   });
 
-  test("every other write route: text/plain → 415 and bodyless → 415", async () => {
+  test("concrete() fills every Hono param shape so the route still matches", async () => {
+    const app = new Hono();
+    const patterns = [
+      "/p/:id_2",
+      "/p/:a1/:b/opt/:c?",
+      "/p/re/:n{[0-9]+}",
+      "/p/md/:file{.+\\.md}",
+      "/p/wild/*",
+    ];
+    for (const p of patterns) app.post(p, (c) => c.text("hit"));
+    const missed: string[] = [];
+    for (const p of patterns) {
+      const url = concrete(p);
+      const res = url ? await app.request(url, { method: "POST" }) : null;
+      if (!res || (await res.text()) !== "hit") missed.push(`${p} → ${url}`);
+    }
+    expect(missed).toEqual([]);
+    expect(concrete("/p/:n{[a-f]{40}}")).toBeNull();
+  });
+
+  test("every other write route: each CORS-simple shape → 415", async () => {
     const { app, routes } = writeRoutes();
     const wrong: string[] = [];
     let probed = 0;
@@ -113,14 +202,17 @@ describe("every dashboard write route answers a non-JSON request with 415", () =
     try {
       for (const route of routes) {
         if (UNGATED.has(route)) continue;
-        const [method, pattern] = route.split(" ") as [string, string];
+        const [routeMethod, pattern] = route.split(" ") as [string, string];
+        // A browser's cross-origin simple request is a POST.
+        const method = routeMethod === "ALL" ? "POST" : routeMethod;
         const url = concrete(pattern);
-        for (const [label, init] of [
-          ["text/plain", { method, headers: { "content-type": "text/plain" }, body: "{}" }],
-          ["bodyless", { method }],
-        ] as Array<[string, RequestInit]>) {
+        if (url === null) {
+          wrong.push(`${route} → no probe value satisfies its param regex`);
+          continue;
+        }
+        for (const [label, init] of PROBES) {
           probed += 1;
-          const res = await app.request(url, init);
+          const res = await app.request(url, { method, ...init() });
           if (res.status !== 415) wrong.push(`${route} (${label}) → ${res.status}`);
         }
       }
