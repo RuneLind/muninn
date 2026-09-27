@@ -27,8 +27,11 @@ const CONFIG = { dashboardPort: 3010, profile: "default" } as Config;
 /** PUT/PATCH/DELETE are never CORS simple requests: a cross-origin one preflights,
  *  and muninn answers no CORS headers, so the browser never sends it. */
 const NON_SIMPLE = "non-simple method: a cross-origin request preflights and gets no CORS answer";
-/** Routes a Chrome extension calls cross-origin, answered with `applyCors`. */
-const EXTENSION = "Chrome-extension route with its own CORS; JSON gate not added yet";
+/** Routes that answer their own preflight with `Access-Control-Allow-Origin: *`
+ *  (the Chrome-extension routes): any page may send them a preflighted JSON
+ *  request, so a 415 would not close them. Checked below, not only claimed. */
+const WILDCARD_PREFLIGHT =
+  "answers its own preflight with `*`: needs an origin allowlist, a JSON gate would not close it";
 /** The plain remainder: a write route with no per-route 415 today. */
 const OPEN = "dashboard-page POST with no per-route 415 yet: follow-up";
 /** The `/chat` slice: no route there is JSON-gated yet. */
@@ -41,10 +44,10 @@ const UNGATED: ReadonlyMap<string, string> = new Map([
   ["PUT /api/connectors/:id", NON_SIMPLE],
   ["DELETE /api/connectors/:id", NON_SIMPLE],
 
-  ["POST /api/research/chat", EXTENSION],
-  ["POST /api/x-articles/summarize", EXTENSION],
-  ["POST /api/x-articles/summarize-video", EXTENSION],
-  ["POST /api/tiktok/summarize", EXTENSION],
+  ["POST /api/research/chat", WILDCARD_PREFLIGHT],
+  ["POST /api/x-articles/summarize", WILDCARD_PREFLIGHT],
+  ["POST /api/x-articles/summarize-video", WILDCARD_PREFLIGHT],
+  ["POST /api/tiktok/summarize", WILDCARD_PREFLIGHT],
 
   ["POST /api/users", OPEN],
   ["POST /api/watchers/:id/trigger", OPEN],
@@ -76,9 +79,7 @@ const UNGATED: ReadonlyMap<string, string> = new Map([
   ["POST /api/sync/run", OPEN],
 
   ["PUT /chat/preferences/:userId/:botName/connector", NON_SIMPLE],
-  // Answers its own OPTIONS preflight (`GET, PUT` + `Content-Type`), so a
-  // cross-origin PUT does get through — NON_SIMPLE would be a false reason.
-  ["PUT /chat/bot-preferences/:botName/default-user", EXTENSION],
+  ["PUT /chat/bot-preferences/:botName/default-user", WILDCARD_PREFLIGHT],
   ["DELETE /chat/conversations/:id", NON_SIMPLE],
   ["PATCH /chat/threads/:id/connector", NON_SIMPLE],
   ["PATCH /chat/threads/:id/auto-respond", NON_SIMPLE],
@@ -179,6 +180,8 @@ describe("every write route answers a non-JSON request with 415", () => {
       "/p/re/:n{[0-9]+}",
       "/p/md/:file{.+\\.md}",
       "/p/wild/*",
+      // Only the `/`-containing candidate satisfies this one.
+      "/p/nested/:path{[^/]+/[^/]+}",
     ];
     for (const p of patterns) app.post(p, (c) => c.text("hit"));
     const missed: string[] = [];
@@ -189,6 +192,51 @@ describe("every write route answers a non-JSON request with 415", () => {
     }
     expect(missed).toEqual([]);
     expect(concrete("/p/:n{[a-f]{40}}")).toBeNull();
+    expect(concrete("/p/nested/:path{[^/]+/[^/]+}")).toStartWith(`/p/nested/${PROBE}/${PROBE}?`);
+  });
+
+  test("concrete() keeps the probe query intact for every param shape", () => {
+    // A leftover `?` in the path would turn the query key into `?wiki`, and a
+    // regressed handler would then resolve the real default wiki and bot.
+    const cases: Array<[string, string]> = [
+      ["/q/:c", `/q/${PROBE}`],
+      ["/q/:a/:c?", `/q/${PROBE}/${PROBE}`],
+      ["/q/*", `/q/${PROBE}`],
+      ["/q/:n{[0-9]+}", "/q/1"],
+    ];
+    for (const [pattern, path] of cases) {
+      const url = new URL(concrete(pattern)!, "http://carrier.test");
+      expect([pattern, url.pathname, [...url.searchParams]]).toEqual([
+        pattern,
+        path,
+        [
+          ["wiki", PROBE],
+          ["bot", PROBE],
+        ],
+      ]);
+    }
+  });
+
+  test("an allowlisted route answers a cross-origin preflight as its reason says", async () => {
+    // OPTIONS runs only a route's own preflight handler, never the write handler.
+    const { app } = writeRoutes();
+    const wrong: string[] = [];
+    for (const [route, reason] of UNGATED) {
+      const [method, pattern] = route.split(" ") as [string, string];
+      const res = await app.request(concrete(pattern)!, {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://evil.example",
+          "Access-Control-Request-Method": method,
+          "Access-Control-Request-Headers": "content-type",
+        },
+      });
+      const wildcard = res.headers.get("access-control-allow-origin") === "*";
+      if (wildcard !== (reason === WILDCARD_PREFLIGHT)) {
+        wrong.push(`${route} → allow-origin ${res.headers.get("access-control-allow-origin")} (listed: ${reason})`);
+      }
+    }
+    expect(wrong).toEqual([]);
   });
 
   test("every other write route: each CORS-simple shape → 415", async () => {
@@ -220,6 +268,7 @@ describe("every write route answers a non-JSON request with 415", () => {
       globalThis.fetch = realFetch;
     }
     expect(wrong).toEqual([]);
-    expect(probed).toBeGreaterThan(0);
+    // Measured 2026-09-27: 27 gated routes × 4 shapes = 108 probes.
+    expect(probed).toBeGreaterThanOrEqual(100);
   });
 });
