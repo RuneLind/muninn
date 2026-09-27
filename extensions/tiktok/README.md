@@ -87,4 +87,5 @@ POST /api/tiktok/summarize
 
 Response: `{ job_id, dashboard_url }` — the extension opens the dashboard URL in a new tab.
 The server answers 400 `bad_url` unless `url` is https on `tiktok.com`, `www.`, `m.`, `vm.` or `vt.tiktok.com`, with no port or userinfo.
+A short link (`vm.`/`vt.tiktok.com/<code>`, or `/t/<code>`) is resolved by the server first: 400 `bad_url` if the redirect chain leaves TikTok or runs past 5 redirects, 400 `no_video` if it ends on no video, and 502 `short_link_failed` if TikTok answers an error status or the request fails.
 The server extracts the numeric video id from the URL itself.

@@ -1333,9 +1333,14 @@ export const spec = {
           "400": {
             ...errorResponse,
             description:
-              "`bad_url`: the url is not an https link on `tiktok.com`, `www.`, `m.`, `vm.` or `vt.tiktok.com`, or carries a port, userinfo, a backslash, whitespace, a control character or a percent-escape in the host. Refused before the yt-dlp pre-flight, the duplicate lookup and the job row; downstream receives the parsed URL, never the raw string. `bad_kind`: see `kind`.",
+              "`bad_url`: the url is not an https link on `tiktok.com`, `www.`, `m.`, `vm.` or `vt.tiktok.com`, or carries a port, userinfo, a backslash, whitespace, a control character or a percent-escape in the host. Refused before the yt-dlp pre-flight, the duplicate lookup and the job row; downstream receives the parsed URL, never the raw string. A short link (any path on `vm.`/`vt.tiktok.com`, or `/t/<code>`) is resolved by the route one redirect at a time, each hop gated before it is requested; a chain that leaves TikTok or runs past 5 redirects is `bad_url` too. `no_video`: the short link resolved but does not name a video (a stale link lands on the home page). `bad_kind`: see `kind`. All three are answered before the duplicate lookup and the job row.",
           },
           "500": errorResponse,
+          "502": {
+            ...errorResponse,
+            description:
+              "`short_link_failed`: resolving a short link failed — a network error, a timeout, a redirect without a `Location`, or a hop answering a non-2xx, non-redirect status (429, 503, 403, 405, …), which the error names. No job is created.",
+          },
           "503": {
             ...errorResponse,
             description:
