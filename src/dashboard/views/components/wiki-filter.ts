@@ -79,6 +79,11 @@ export interface WikiListing {
    *  Kept a plain `string` for the same reason `WikiPageType` is: this file stays
    *  server-dep-free. */
   pairedBy?: string;
+  /** The page is retired (`signal: none`, or the `wiki-signal` meta on an
+   *  `.html` page) — the EFFECTIVE value, so an attachment of a culled page
+   *  carries it too. Activity drops it; the rail still lists it until the reader
+   *  UI lands. Absent on a live page. */
+  culled?: boolean;
   /** File mtime (epoch ms) — the recency signal for frontmatter-less wikis. */
   mtimeMs?: number;
   /** File birthtime (epoch ms) — a WEAK "Recently added" signal: `git mv`, a

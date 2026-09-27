@@ -154,7 +154,8 @@ TRACKED, MODIFIED page against its `HEAD` blob and drops it from `dirty` on eith
 of two verdicts, so it dates from git history like a clean page: `metadata-only`
 (the body after the fence is byte-identical and, with every column-0
 `METADATA_ONLY_FRONTMATTER_KEYS` line stripped from both sides — the four
-provenance keys plus `series`/`series_label`/`priority`/`plan_status`/`status_date` —
+provenance keys plus `series`/`series_label`/`priority`/`plan_status`/`status_date`
+and the three cull keys `signal`/`signal-reason`/`superseded_by` —
 the two frontmatter remainders are identical IN ORDER, so a hand edit that only
 reordered `title:` and `tags:` is an edit)
 and `identical` (equal texts, which `git status` still reports as modified after a
@@ -610,6 +611,72 @@ stays), `wiki-recents.test.ts` (the sections, with a child in every one of them
 at once), `wiki-routes.test.ts` (the listing, `?name=`, `resolvePageRef`) and
 `e2e/wiki-rail-attachments.spec.ts` (the chip, the fold, the count, the reload,
 the flatten, and the contrast in both themes).
+
+### Culled pages (`signal: none`, `WikiPageMeta.culled`)
+
+A page is RETIRED by frontmatter `signal: none` plus `signal-reason:`, optionally
+`superseded_by: [[any/folder/page]]`; an `.html` page by
+`<meta name="wiki-signal" content="none">` (and `wiki-signal-reason`), read
+through `sniffWikiSignalMeta` from the first 4 KB only, so the tag goes next to
+`<title>`, before any `<style>`. That read is stricter than the keywords sniff:
+a tag inside an HTML comment or a `<script>`/`<style>` body does not count
+(one left-to-right scan, so a `<!--` inside a script string opens no comment;
+an unterminated comment or body runs to the end of the prefix), and the
+attribute must be `name=` itself, not `data-name=`. Only `none` is read,
+quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
+`culled`, because `retire` already names the gardener backlog tail.
+
+- **Effective value.** An attachment (rules 1–3) inherits its parent's cull and
+  reason; a rule-4 child keeps its own. A culled page adopts NO rule-4 child, so
+  the pages it supersedes list at top level. Every consumer reads `culled`.
+- **Dropped from:** Activity (`rankActivity`, and the worked gate's candidate
+  count), Similar, Related, tracker plan coverage (`isPlanPage` answers false),
+  the gardener's See-also wiring targets (`selectWirablePages`), and the lint's
+  finding subjects and edit targets (orphan, stale-updated, missing-sources,
+  check 8). Check 8 never edits a culled page, but the series census INCLUDES
+  culled pages (plan M2): a culled member can be the series head and name the
+  fold. The rail fold, the reader header, the `⋯` menu and `continue at:`
+  read `seriesHead`/`newestSeriesPlan`; check 8.3(b) reads `seriesHead`, and
+  8.3(a)/(c) read `headOf` (no label rung) — both count culled members. The
+  editor's one-label check (`otherLabelledMember`) scans raw pages, not the
+  census, as on main (known gap, see the PR's known limits). So 8.3(a) normalises LIVE
+  members to a culled head's spelling, 8.3(b) removes a live member's label when
+  a culled head carries the newer one, 8.3(c) joins under the head's spelling,
+  and a finding whose head is culled is filed against the newest edited page.
+  Also in the gardener: `sourceRelatedPages` drops a culled page before its
+  one-backlink cap, and a component whose
+  culled members leave one live page is no 8.2 cluster.
+- **Kept in:** the rail listing (hiding is the reader UI's job), the link graph,
+  the series census (a culled member can head a series and name the fold,
+  and a culled bridge
+  still joins a component, so 8.2 never re-coins a series), Connections'
+  Linked from / Links to and its mini-graph, the issue graph and the board —
+  marked with the ONE label `CULL_LABEL` ("Retired", `wiki-cull-view.ts`), the
+  hook the per-wiki `cullLabels` replaces. A series that Activity moved shows no
+  culled member as a row, in `+N more` or in its roll-up; the Series block does.
+- **Wire.** `culled` rides every `toListing` caller; `cullReason` and
+  `supersededBy` (resolved in ANY folder, `resolveSupersededBy`) ride the
+  single-page `meta` only, through `includeCull`. A bare-name `superseded_by:`
+  resolves in the page's own folder first — the markdown page of its stem
+  whatever extension it spells (`b.html` → `b.md`, the page rule 4 folds it
+  under), then a spelled extension as written — then wiki-wide; a path form resolves across folders.
+- **Dates.** The three keys are metadata-only (`git-dates.ts`), so a cull does
+  not move a page's update date.
+- **Worked date over `aliases:`.** The claude-usage ledger is keyed by path, so
+  the store folds each path-shaped alias and keeps the newest — unless a live
+  page sits at that path now. Path-shaped means for THIS wiki
+  (`aliasWorkedPaths`): its first segment is a directory under the wiki root, so
+  `claude.ai/design` or `/ultrareview` folds nothing; `archive/old` tries `.md`
+  and `.mdx`, a spelled `.md`/`.mdx`/`.html` is used as written, and a bare name
+  folds nothing.
+
+Acceptance: `culled.test.ts`, plus cases in `lint.test.ts`,
+`lint-series.test.ts`, `related.test.ts`, `similar.test.ts`,
+`trackers/rows.test.ts`, `graph.test.ts`, `git-dates.test.ts`,
+`worked-ledger.test.ts`, `wiki-routes.test.ts`, `gardener/wire.test.ts`,
+`wiki-recents.test.ts`, `wiki-activity-rank.test.ts` and the marker sites
+(`wiki-cull-view.test.ts`, `wiki-graph-view.test.ts`,
+`wiki-board-view.test.ts`).
 
 ### Families and months (`wiki-groups.ts`)
 
@@ -1446,7 +1513,8 @@ their `series_label:` is not this series' label; censusing with a plain
 `filter(key ===)` let the lint propose removing the very label the fold reads.
 (a) one series spelled more than one way normalises to the head's spelling; (b)
 more than one member carrying `series_label:` keeps the one the RAIL reads —
-`seriesHead`, the newest LABELLED member — and removes the rest. 8.3(c) joins
+`seriesHead`, the newest LABELLED member, culled or not — and removes the rest
+(never from a culled page). 8.3(c) joins
 under that same head's spelling, never the spelling of whichever member the
 cluster happened to touch: joining the met spelling adds a fresh variant of a
 key rule (a) is normalising away in the same pass.

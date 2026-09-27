@@ -287,3 +287,12 @@ describe("fix round 2", () => {
     expect(html).toContain('data-cost="priced" title="0 of 1 sessions carry a cost">—<');
   });
 });
+
+describe("keylessTableHtml — the culled marker", () => {
+  test("a culled page's type cell reads `type · Retired` on ONE line; a live one carries no marker", () => {
+    const base: GraphPageNode = { id: "page:a.md", lane: "page", hop: 0, relPath: "a.md", title: "A", type: "archive", pageTimeMs: NOW, plan: false };
+    const html = keylessTableHtml([{ ...base, culled: true }], "w");
+    expect(html).toContain("<td>archive&nbsp;·&nbsp;Retired</td>");
+    expect(keylessTableHtml([base], "w")).not.toContain("Retired");
+  });
+});

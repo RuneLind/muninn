@@ -1048,21 +1048,22 @@ export interface WikiPageListing extends WikiPageMeta {
 export function toListing(
   index: WikiIndex,
   meta: WikiPageMeta,
-  opts: { includeDesc?: boolean; includeProvenance?: boolean } = {},
+  opts: { includeDesc?: boolean; includeProvenance?: boolean; includeCull?: boolean } = {},
 ): WikiPageListing {
   // `desc` + `pubDate` are stripped by default: they are page-body fields no
   // LISTING consumer reads, and on jarvis they add ~100 KB to the hot
   // `/api/wiki/pages` payload.
   //
-  // Nothing may join (or leave) this strip list without checking ALL THREE
+  // Nothing may join (or leave) this strip list without checking ALL FOUR
   // callers, because they share this one function:
   //   1. `/api/wiki/pages`      — the hot listing. Strip.
   //   2. `/api/wiki/page` meta  — the single page the reader has open.
   //   3. `/api/wiki/page`'s `listings()` — the outgoing/backlink ARRAYS on that
   //      same response, which are link-heavy pages' bulk. Strip.
+  //   4. `/api/wiki/page`'s `related` rows — caller 3's shape plus `why`. Strip.
   // So a field stripped for payload size (e.g. `status_note`) also goes out of
   // reach of the reader, and a field opted IN for caller 2 must not be opted in
-  // for caller 3, which would re-bloat exactly the pages this strip protects.
+  // for callers 3 or 4, which would re-bloat exactly the pages this strip protects.
   //
   // `includeDesc` is that opt-in, passed ONLY by caller 2: the "💬 Discuss"
   // popover shows the open page's first prose line as a question HINT, and the
@@ -1077,30 +1078,37 @@ export function toListing(
   // in this strip — it is a listing FACET (the `project` twin), so the hot
   // payload is exactly where it has to be.
   //
-  // `prRefs` is stripped on ALL THREE callers and opted in by NONE — not even
+  // `prRefs` is stripped on EVERY caller and opted in by NONE — not even
   // `includeProvenance`. It is the INPUT to `computeRelated` (`src/wiki/related.ts`),
   // which runs server-side on caller 2 and answers with `related[]`; each of
   // those rows carries the refs it matched on inside its own `why` string, so
   // shipping the raw list would be a dozen refs per page that nothing renders.
   //
-  // `children` is stripped on ALL THREE callers and opted in by none: the rail
+  // `children` is stripped on EVERY caller and opted in by none: the rail
   // rebuilds every group from the `parent` links of the pages the facets left on
   // screen, so a server-side child list is payload nothing may believe (and a
   // second spelling of the same relation to keep in step). `parent`/`pairedBy`
   // DO ride along — they are what the rail reads, one short string each.
   //
-  // `series`/`seriesLabel` ride the rest spread on ALL THREE callers and are
+  // `series`/`seriesLabel` ride the rest spread on EVERY caller and are
   // deliberately NOT in the provenance opt-in: the rail's Series fold is a
   // LISTING grouping, the `project` twin, so the hot payload is exactly where
   // they have to be. Two short strings per page — and `seriesLabel` sits on ONE
   // page per series, so naming a fold costs nothing per member.
   //
-  // `issues` (set only on a wiki with a tracker) rides callers 1 and 3 in its
+  // `issues` (set only on a wiki with a tracker) rides callers 1, 3 and 4 in its
   // COMPACT form (`compactIssues`: only keys that count — not `link`/`mention`
   // alone — with the `mention` relation dropped), because the rail's pills and
   // the Jira facet read it. Caller 2 opts the whole list in through
   // `includeProvenance`: the demoted keys are a fact about the one open page.
-  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, ...rest } = meta;
+  //
+  // `culled` rides the rest spread on EVERY caller: the rail, Activity and
+  // the Connections rows all read it, and it is one boolean on the few pages
+  // that carry it. `cullReason` (free prose, up to a paragraph) and the resolved
+  // `supersededBy` are what the open page's banner renders, so they are the
+  // THIRD opt-in, `includeCull`, passed by caller 2 alone.
+  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, cullReason, supersededBy, ...rest } =
+    meta;
   void pubDate;
   void children;
   void prRefs;
@@ -1115,6 +1123,9 @@ export function toListing(
           ...(prs ? { prs } : {}),
           ...(sessionsBackfilled ? { sessionsBackfilled } : {}),
         }
+      : {}),
+    ...(opts.includeCull
+      ? { ...(cullReason ? { cullReason } : {}), ...(supersededBy ? { supersededBy } : {}) }
       : {}),
     linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
     backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
@@ -1916,7 +1927,7 @@ export function registerWikiRoutes(
     return c.json({
       // The two callers that opt fields in — see `toListing`. Deliberately NOT
       // `listings()` below, whose arrays are the link-heavy pages' bulk.
-      meta: toListing(index, meta, { includeDesc: true, includeProvenance: true }),
+      meta: toListing(index, meta, { includeDesc: true, includeProvenance: true, includeCull: true }),
       // The page's CONTENT hash — the CAS base `POST /api/wiki/series` (and any
       // later page writer the reader drives) sends back. Beside `meta` rather
       // than inside it: `toListing` is shared with the hot listing and with the

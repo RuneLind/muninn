@@ -114,6 +114,22 @@ afterAll(async () => {
 });
 
 describe("computeRelated", () => {
+  test("a CULLED candidate is not related work, whichever source reached it", async () => {
+    await writeFillers(0);
+    const index = await buildWikiIndex(root);
+    // Reached by all three sources — and a plain citer — live, then culled.
+    expect(Object.keys(whyByPath(index, OPEN))).toContain("plans/both.md");
+    index.resolveRelPath("plans/both.md")!.culled = true;
+    index.resolveRelPath("plans/citer.md")!.culled = true;
+    const why = whyByPath(index, OPEN);
+    expect(why["plans/both.md"]).toBeUndefined();
+    expect(why["plans/citer.md"]).toBeUndefined();
+    // The rest of the block is untouched.
+    expect(why["plans/cited.md"]).toBe("cited by this page");
+    // The culled page stays in the link graph the block is derived from.
+    expect(index.backlinks.get("plans/open.md")).toContain("plans/citer.md");
+  });
+
   test("the three sources, with a multi-reason why on the page reached by all of them", async () => {
     await writeFillers(0);
     const why = whyByPath(await buildWikiIndex(root), OPEN);

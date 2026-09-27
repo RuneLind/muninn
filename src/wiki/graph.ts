@@ -223,6 +223,7 @@ export async function buildGraph(
     pageTimeMs: pageTimeMs(page),
     ...(page.prRefs?.length ? { prRefs: [...page.prRefs] } : {}),
     plan: isPlanPage(page, planConfig),
+    ...(page.culled ? { culled: true as const } : {}),
   });
   const sessionRefs = new Map<string, string>(); // bare → the ref as first stamped
   const sessionNode = (ref: string): Omit<GraphSessionNode, "hop"> => {

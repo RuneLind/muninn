@@ -23,6 +23,7 @@ export interface IssuePageInput {
   relPath: string;
   title: string;
   type: string;
+  culled?: boolean;
   issues?: IssueRef[];
 }
 
@@ -33,9 +34,15 @@ export const issueKeyId = (tracker: string, key: string): string => `${tracker}:
  * Is this page a plan under this tracker's config? Its resolved type is `plan`
  * (a `type: plan` line, or the wiki's `typeMap` for its folder), it sits in a
  * top-level `plans/` folder, or its title reads as a plan (`planTitle`, minus
- * `planTitleExclude`).
+ * `planTitleExclude`). A CULLED page is never a plan here: a retired page does
+ * not cover a key, though it stays in the key's page list (and the graph and
+ * the board), since a culled page can be where the key was created.
  */
-export function isPlanPage(page: { relPath: string; title: string; type: string }, config: TrackerConfig): boolean {
+export function isPlanPage(
+  page: { relPath: string; title: string; type: string; culled?: boolean },
+  config: TrackerConfig,
+): boolean {
+  if (page.culled) return false;
   if (page.type === "plan") return true;
   if (page.relPath.split("/")[0] === "plans") return true;
   return isPlanTitle(page.title, config);

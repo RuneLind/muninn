@@ -24,7 +24,7 @@ import {
   WORKED_EMPTY_RELEASE_MS,
   type WorkedLedgerDeps,
 } from "./worked-ledger.ts";
-import { __resetWorkedMatchWarnsForTest, workedMatchWarnDue } from "./store.ts";
+import { __resetWorkedMatchWarnsForTest, buildWikiIndex, workedMatchWarnDue } from "./store.ts";
 import { __resetClaudeUsageWarnsForTest } from "../utils/claude-usage-fetch.ts";
 import type { getLog } from "../logging.ts";
 
@@ -852,6 +852,80 @@ describe("no index build waives the ledger's back-off", () => {
       server.stop(true);
       if (prev === undefined) delete process.env.CLAUDE_USAGE_URL;
       else process.env.CLAUDE_USAGE_URL = prev;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the worked date follows a page's aliases (a moved page keeps its history)", () => {
+  test("a page whose `aliases:` names its OLD path takes the old path's workedMs, newest wins", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-"));
+    try {
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await mkdir(path.join(root, "archive"), { recursive: true });
+      // Moved from archive/ to plans/ with the old path as an alias.
+      await writeFile(path.join(root, "plans/moved.md"), "---\ntitle: Moved\naliases: [archive/moved]\n---\n\nBody.\n");
+      // An alias naming a path a LIVE page holds now is that page's history, not this one's.
+      await writeFile(path.join(root, "plans/squatter.md"), "---\ntitle: Squatter\naliases: [archive/live]\n---\n\nBody.\n");
+      await writeFile(path.join(root, "archive/live.md"), "---\ntitle: Live\n---\n\nBody.\n");
+      await refreshWorkedLedger(
+        root,
+        deps({
+          [root]: {
+            pages: [
+              { p: "archive/moved.md", w: 5_000 },
+              { p: "plans/moved.md", w: 1_000 },
+              { p: "archive/live.md", w: 9_000 },
+            ],
+          },
+        }),
+      );
+      const index = await buildWikiIndex(root);
+      const at = (rel: string) => index.pages.find((p) => p.relPath === rel)!;
+      expect(at("plans/moved.md").workedMs).toBe(5_000);
+      expect(at("plans/squatter.md").workedMs).toBeUndefined();
+      expect(at("archive/live.md").workedMs).toBe(9_000);
+      expect(index.workedCoverage?.matched).toBe(2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  test("the folder test ignores case: an `Archive/` folder on disk folds an alias spelled `archive/…`", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-case-"));
+    try {
+      await mkdir(path.join(root, "Archive"), { recursive: true });
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await writeFile(path.join(root, "Archive/other.md"), "---\ntitle: Other\n---\n\nBody.\n");
+      await writeFile(path.join(root, "plans/moved.md"), "---\ntitle: Moved\naliases: [archive/moved]\n---\n\nBody.\n");
+      await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "archive/moved.md", w: 6_000 }] } }));
+      const index = await buildWikiIndex(root);
+      expect(index.pages.find((p) => p.relPath === "plans/moved.md")!.workedMs).toBe(6_000);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  test("a root-level FILE is no folder: an alias whose first segment names it folds nothing", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-file-"));
+    try {
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await writeFile(path.join(root, "old"), "not a folder\n");
+      await writeFile(path.join(root, "plans/moved.md"), "---\ntitle: Moved\naliases: [old/moved]\n---\n\nBody.\n");
+      await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "old/moved.md", w: 7_000 }] } }));
+      const index = await buildWikiIndex(root);
+      expect(index.pages.find((p) => p.relPath === "plans/moved.md")!.workedMs).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  test("a TITLE alias with a slash (no such folder in this wiki) folds no ledger row", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-title-"));
+    try {
+      await mkdir(path.join(root, "concepts"), { recursive: true });
+      await writeFile(path.join(root, "concepts/design.md"), "---\ntitle: Design\naliases: [claude.ai/design]\n---\n\nBody.\n");
+      await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "claude.ai/design.md", w: 7_000 }] } }));
+      const index = await buildWikiIndex(root);
+      expect(index.pages.find((p) => p.relPath === "concepts/design.md")!.workedMs).toBeUndefined();
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });

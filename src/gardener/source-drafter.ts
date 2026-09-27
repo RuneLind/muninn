@@ -68,7 +68,7 @@ export const SOURCE_BACKLINK_CAP = 1;
  * The pages a source draft's apply-time wire stage backlinks: the draft's own
  * resolved BODY wikilinks, in body order, concept/entity pages first (other
  * resolved pages only when there are none). Skips code regions, self-links,
- * reserved basenames and `.html` explainers; dedupes by page. Refuses a link whose
+ * reserved basenames, `.html` explainers and culled pages; dedupes by page. Refuses a link whose
  * `|label` names something else (`[[RAG|quantum mechanics]]`, see
  * {@link labelNamesHost}) and a host in the
  * other domain (ai vs `life/`): an orphan is better than a wrong backlink or one
@@ -92,6 +92,9 @@ export function sourceRelatedPages(
     const key = normalizeRelPath(page.relPath);
     if (key === self || seen.has(key)) continue;
     if (hasForbiddenBasename(page.relPath) || /\.html$/i.test(page.relPath)) continue;
+    // Before the cap: a culled page takes no new link (`selectWirablePages`), so
+    // one kept here would spend the only slot on a backlink the wire stage drops.
+    if (page.culled) continue;
     if (label && !labelNamesHost(label, [target, page.title, page.name, ...page.aliases])) continue;
     seen.add(key);
     const rp = { title: target, relPath: page.relPath };

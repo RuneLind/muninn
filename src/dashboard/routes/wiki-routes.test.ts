@@ -4160,3 +4160,77 @@ describe("GET /api/wiki/pages?refresh=1 and the worked ledger's back-off", () =>
     }
   });
 });
+
+/**
+ * The culled bit on the wire: `culled` rides every listing caller, while the
+ * open page's `cullReason` and its cross-folder `supersededBy` ride the
+ * single-page `meta` only.
+ */
+describe("the culled bit — listing and page payloads", () => {
+  let root: string;
+  let app: Hono;
+  let prevWikiDir: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-culled-route-"));
+    await mkdir(path.join(root, "archive"), { recursive: true });
+    await mkdir(path.join(root, "plans"), { recursive: true });
+    await Bun.write(
+      path.join(root, "archive/old.md"),
+      "---\ntitle: Old\nsignal: none\nsignal-reason: folded into the plan\nsuperseded_by: [[plans/next]]\n---\n\nSee [[Live]].",
+    );
+    await Bun.write(path.join(root, "plans/next.mdx"), "---\ntitle: Next\n---\n\nThe successor.");
+    await Bun.write(path.join(root, "plans/live.md"), "---\ntitle: Live\n---\n\nLinks [[Old]].");
+    prevWikiDir = process.env.WIKI_DIR;
+    process.env.WIKI_DIR = root;
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevWikiDir === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prevWikiDir;
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  type Row = { relPath: string; culled?: boolean; cullReason?: string; supersededBy?: string };
+
+  test("/api/wiki/pages marks the culled page and ships no reason or successor", async () => {
+    const data = (await (await app.request("/api/wiki/pages")).json()) as { pages: Row[] };
+    const old = data.pages.find((p) => p.relPath === "archive/old.md")!;
+    // Still LISTED — hiding is the reader's job.
+    expect(old.culled).toBe(true);
+    expect(old).not.toHaveProperty("cullReason");
+    expect(old).not.toHaveProperty("supersededBy");
+    expect(data.pages.find((p) => p.relPath === "plans/live.md")!).not.toHaveProperty("culled");
+  });
+
+  test("/api/wiki/page carries cullReason and a supersededBy resolved into another folder", async () => {
+    const data = (await (await app.request("/api/wiki/page?relPath=" + encodeURIComponent("archive/old.md"))).json()) as {
+      meta: Row;
+      outgoing: Row[];
+    };
+    expect(data.meta.culled).toBe(true);
+    expect(data.meta.cullReason).toBe("folded into the plan");
+    expect(data.meta.supersededBy).toBe("plans/next.mdx");
+    // The Connections rows are listings: no reason or successor there.
+    expect(data.outgoing.map((r) => r.relPath)).toContain("plans/live.md");
+    for (const r of data.outgoing) {
+      expect(r).not.toHaveProperty("cullReason");
+      expect(r).not.toHaveProperty("supersededBy");
+    }
+  });
+
+  test("a culled page stays in the live page's Connections, marked, and out of its Related work", async () => {
+    const data = (await (await app.request("/api/wiki/page?relPath=" + encodeURIComponent("plans/live.md"))).json()) as {
+      outgoing: Row[];
+      backlinks: Row[];
+      related: Row[];
+    };
+    expect(data.outgoing.find((r) => r.relPath === "archive/old.md")?.culled).toBe(true);
+    expect(data.backlinks.find((r) => r.relPath === "archive/old.md")?.culled).toBe(true);
+    expect(data.related.map((r) => r.relPath)).not.toContain("archive/old.md");
+  });
+});

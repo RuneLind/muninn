@@ -204,3 +204,18 @@ describe("fix round 1: the card and the notes", () => {
     expect(() => graphCardHtml(odd, { isRoot: false })).not.toThrow();
   });
 });
+
+describe("the culled marker in graph mode", () => {
+  const gone: GraphNode = { id: "page:gone.md", lane: "page", hop: 1, relPath: "gone.md", title: "Gone", type: "archive", pageTimeMs: 1, plan: false, culled: true };
+
+  test("a culled page node's hint says Retired; a live one's does not", () => {
+    const html = graphHtml({ ...payload, nodes: [root, gone] }, { level: 1, depth: 2, rootLabel: "A" });
+    expect(html).toContain('<span class="wiki-graph-node-hint">archive · Retired</span>');
+    expect(html).not.toContain("note · Retired");
+  });
+
+  test("the side card lists Retired as a fact", () => {
+    expect(graphCardHtml(gone, { isRoot: false })).toContain("Retired");
+    expect(graphCardHtml(other, { isRoot: false })).not.toContain("Retired");
+  });
+});

@@ -321,6 +321,9 @@ function checkSameWorkNoLink(index: WikiIndex, candidates: Candidate[]): LintFin
 
   const findings: LintFinding[] = [];
   for (const [a, b] of pairs.values()) {
+    // A culled page is retired work: it is neither a subject nor a link target
+    // worth proposing, whichever end of the pair it is.
+    if (a.page.culled || b.page.culled) continue;
     if ((index.outgoing.get(a.key) ?? []).includes(b.key)) continue;
     if ((index.outgoing.get(b.key) ?? []).includes(a.key)) continue;
 
@@ -512,8 +515,15 @@ function checkClusters(
     const folds = new Set(component.filter((c) => c.series).map((c) => seriesCensusKey(c.series)));
     if (folds.size >= 2) continue;
 
-    const unnamed = component.filter((c) => !c.series).map((c) => c.page);
+    // A CULLED page stays in the component — it can bridge two live pages, and
+    // its `series:` can be the one the component touches — but it is never an
+    // edit target: its frontmatter is filed away.
+    const unnamed = component.filter((c) => !c.series && !c.page.culled).map((c) => c.page);
     if (unnamed.length === 0) continue;
+    // A component whose culled members leave ONE live page names no cluster:
+    // "1 linked pages declare no series" is not a finding. 8.3(c) with one page
+    // (joining a series it links into) still is.
+    if (folds.size === 0 && unnamed.length < 2) continue;
 
     if (folds.size === 1) {
       // 8.3(c) — the series exists; these pages link into it without declaring it.
@@ -555,7 +565,7 @@ function checkClusters(
     // The GATE: a cluster nobody has an open plan in is reported and not
     // proposed. See `SERIES_CLUSTER_MIN_PLANS` — a finding with no `fix` never
     // reaches the seeder, so the count is visible and nothing is written.
-    const openPlans = component.filter((c) => isOpenPlan(c.page)).length;
+    const openPlans = component.filter((c) => !c.page.culled && isOpenPlan(c.page)).length;
     if (openPlans < SERIES_CLUSTER_MIN_PLANS) {
       findings.push({
         check: "series-unnamed",
@@ -626,17 +636,24 @@ function componentId(component: readonly Candidate[]): string {
 function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding[] {
   const findings: LintFinding[] = [];
   for (const members of declared.values()) {
+    // The head is the census's, culled members included (plan M2) — the rule
+    // the rail reads. A culled head still sets the spelling and keeps its label;
+    // the lint moves the LIVE members to it and never edits the culled page, so
+    // when the head is culled the finding is filed against the newest EDITED
+    // member instead (a culled page is never a finding subject).
     const head = headOf(members);
     const headKey = seriesKeyOf(head);
+    const subject = (edited: WikiPageMeta[]): string =>
+      head.culled ? newestFirst(edited)[0]!.relPath : head.relPath;
 
     // (a) one series, more than one spelling.
     const variants = [...new Set(members.map((m) => seriesKeyOf(m)))];
-    if (variants.length > 1) {
-      const wrong = members.filter((m) => seriesKeyOf(m) !== headKey);
+    const wrong = members.filter((m) => seriesKeyOf(m) !== headKey && !m.culled);
+    if (variants.length > 1 && wrong.length > 0) {
       const paths = wrong.map((p) => p.relPath);
       findings.push({
         check: "series-inconsistent",
-        relPath: head.relPath,
+        relPath: subject(wrong),
         message: `series: "${headKey}" is spelled ${variants.length} ways — ${variants.join(", ")}`,
         detail: `normalising to "${headKey}" on: ${memberList(paths)}`,
         fix: {
@@ -652,18 +669,22 @@ function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding
     }
 
     // (b) more than one member carries series_label:. The head is `seriesHead`,
-    //     the RAIL's own head rule — the newest LABELLED member — so the label
-    //     kept is the label a reader already sees on the fold. `headOf` (the
-    //     newest open PLAN) is a different page whenever the newest labelled
-    //     member is a blog, and keeping that one renames the fold.
+    //     the RAIL's own head rule — the newest LABELLED member of the census,
+    //     culled or not — so the label kept is the label a reader already sees
+    //     on the fold. `headOf` (the newest open PLAN) is a different page
+    //     whenever the newest labelled member is a blog, and keeping that one
+    //     renames the fold. A culled extra label is never removed (never edit a
+    //     culled page); a LIVE one under a culled head is, since the fold shows
+    //     the head's label and the live one is dead text.
     const labelled = members.filter((m) => !!m.seriesLabel && m.seriesLabel.trim());
     if (labelled.length > 1) {
       const labelHead = seriesHead(members) ?? labelled[0]!;
-      const extra = labelled.filter((m) => m.relPath !== labelHead.relPath);
+      const extra = labelled.filter((m) => m.relPath !== labelHead.relPath && !m.culled);
       const paths = extra.map((p) => p.relPath);
+      if (paths.length === 0) continue;
       findings.push({
         check: "series-inconsistent",
-        relPath: labelHead.relPath,
+        relPath: labelHead.culled ? newestFirst(extra)[0]!.relPath : labelHead.relPath,
         message: `series "${headKey}" has ${labelled.length} series_label: heads — the rail reads the newest labelled page`,
         detail: `keeping "${labelHead.seriesLabel}" on ${labelHead.relPath}; removing series_label: from ${memberList(paths)}`,
         fix: {

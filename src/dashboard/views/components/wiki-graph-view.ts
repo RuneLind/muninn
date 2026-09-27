@@ -10,6 +10,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { readerKeyRefused, type ReaderKeyEvent } from "./wiki-panes.ts";
+import { CULL_LABEL } from "./wiki-cull-view.ts";
 import {
   GRAPH_DEPTH_MAX,
   GRAPH_EDGES_MAX,
@@ -114,7 +115,10 @@ function graphNodeLabel(n: GraphNode): { label: string; hint: string } {
     const pages = `${n.pageCount} page${n.pageCount === 1 ? "" : "s"}`;
     return { label: n.key, hint: n.planPages.length ? `${pages} · plan` : pages };
   }
-  if (n.lane === "page") return { label: n.title, hint: n.plan ? "plan" : n.type };
+  if (n.lane === "page") {
+    const hint = n.plan ? "plan" : n.type;
+    return { label: n.title, hint: n.culled ? `${hint} · ${CULL_LABEL}` : hint };
+  }
   if (n.lane === "session") {
     return { label: n.title || n.sessionId.slice(0, 8), hint: [n.provider ?? "", money(n.cost)].filter(Boolean).join(" · ") };
   }
@@ -209,6 +213,7 @@ export function graphCardHtml(n: GraphNode, opts: { isRoot: boolean }): string {
   } else if (n.lane === "page") {
     facts.push(n.relPath);
     if (n.plan) facts.push("plan");
+    if (n.culled) facts.push(CULL_LABEL);
     if (!opts.isRoot) actions.push(focus);
     actions.push(`<button type="button" class="wiki-graph-card-btn" ${GRAPH_OPEN_ATTR}="${esc(n.relPath)}">Open</button>`);
   } else if (n.lane === "session") {

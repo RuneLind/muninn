@@ -503,4 +503,162 @@ describe("checkSeries", () => {
     expect(new Set(first.map((f) => f.fix!.groupKey)).size).toBe(first.length);
     expect(first).toHaveLength(2);
   });
+
+  // ── culled pages: in the graph and the census, never a subject or a target ──
+
+  /** A `signal: none` page — the fence gains the one line. */
+  const culled = (text: string) => text.replace("---\n\n", "signal: none\n---\n\n");
+
+  test("a culled BRIDGE is the only link between live pages: the component stands, the join lands on the live page, never on the bridge", async () => {
+    // A ↔ C ↔ D, with C culled and nothing linking A and D directly. Without C in
+    // the graph D is a singleton and nothing is proposed.
+    await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true, series: "work" }, "See [[C]]."));
+    await write("plans/c.mdx", culled(page("C", { date: "2026-09-14" }, "See [[A]] and [[D]].")));
+    await write("plans/d.mdx", page("D", { date: "2026-09-12", plan: true }, "See [[C]]."));
+
+    expect(await findings("series-unnamed")).toHaveLength(0);
+    const [f, ...rest] = await findings("series-inconsistent");
+    expect(rest).toHaveLength(0);
+    expect(f!.relPath).toBe("plans/d.mdx");
+    expect(edits(f!)).toEqual([{ op: "frontmatter", relPath: "plans/d.mdx", key: "series", value: "work" }]);
+  });
+
+  test("a culled page adds no 8.3 join edit even when it links into a named series", async () => {
+    await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true, series: "work" }, "See [[C]]."));
+    await write("plans/b.mdx", page("B", { date: "2026-09-12", plan: true, series: "work" }, "See [[C]]."));
+    await write("plans/c.mdx", culled(page("C", { date: "2026-09-14" }, "See [[A]] and [[B]].")));
+
+    const all = [...(await findings("series-unnamed")), ...(await findings("series-inconsistent"))];
+    expect(all).toHaveLength(0);
+  });
+
+  test("8.2 never reports a ONE-page cluster left when its mates are culled", async () => {
+    await write("plans/live.mdx", page("Live", { date: "2026-09-10", plan: true }, "See [[D1]] and [[D2]]."));
+    await write("plans/d1.mdx", culled(page("D1", { date: "2026-09-11", plan: true }, "See [[Live]] and [[D2]].")));
+    await write("plans/d2.mdx", culled(page("D2", { date: "2026-09-12", plan: true }, "See [[Live]] and [[D1]].")));
+
+    expect(await findings("series-unnamed")).toHaveLength(0);
+  });
+
+  test("8.2's open-plan gate counts LIVE plans only: a culled open plan does not buy a proposal", async () => {
+    await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true }, "See [[B]] and [[C]]."));
+    await write("plans/b.mdx", page("B", { date: "2026-09-11" }, "See [[A]] and [[C]]."));
+    await write("plans/c.mdx", culled(page("C", { date: "2026-09-12", plan: true }, "See [[A]] and [[B]].")));
+
+    const [f, ...rest] = await findings("series-unnamed");
+    expect(rest).toHaveLength(0);
+    expect(f!.fix).toBeUndefined();
+    expect(f!.message).toContain("1 open plan(s)");
+  });
+
+  // The series CENSUS includes culled pages (plan M2): a culled member can be the
+  // head and name the fold, so the lint normalises LIVE members to it — and never
+  // edits the culled page, nor files a finding against it.
+
+  test("a culled newest plan sets the series' spelling: live members are normalised and joined to it", async () => {
+    await write("plans/dead.mdx", culled(page("Dead", { date: "2026-09-18", plan: true, series: "Work" }, "See [[A]].")));
+    await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true, series: "work" }, "See [[B]] and [[Dead]]."));
+    await write("plans/b.mdx", page("B", { date: "2026-09-12", plan: true }, "See [[A]]."));
+
+    const inconsistent = await findings("series-inconsistent");
+    // 8.3(a) rewrites the live page to the culled head's spelling, filed against the live page …
+    const spelling = inconsistent.filter((f) => f.message.includes("spelled"));
+    expect(spelling).toHaveLength(1);
+    expect(spelling[0]!.relPath).toBe("plans/a.mdx");
+    expect(edits(spelling[0]!)).toEqual([{ op: "frontmatter", relPath: "plans/a.mdx", key: "series", value: "Work" }]);
+    // … and the 8.3(c) join writes the head's spelling too.
+    const join = inconsistent.find((f) => f.message.includes("without declaring"));
+    expect(edits(join!)).toEqual([{ op: "frontmatter", relPath: "plans/b.mdx", key: "series", value: "Work" }]);
+    expect(inconsistent.flatMap((f) => edits(f)).some((e) => e.relPath === "plans/dead.mdx")).toBe(false);
+  });
+
+  test("8.3(a) normalises every LIVE member to a newer culled head's spelling and files against a live page", async () => {
+    await write("plans/dead.mdx", culled(page("Dead", { date: "2026-09-18", plan: true, series: "WORK" })));
+    await write("plans/head.mdx", page("Head", { date: "2026-09-12", plan: true, series: "work" }));
+    await write("plans/odd.mdx", page("Odd", { date: "2026-09-10", series: "Work" }));
+
+    const [f, ...rest] = (await findings("series-inconsistent")).filter((x) => x.message.includes("spelled"));
+    expect(rest).toHaveLength(0);
+    // The subject is the newest EDITED member, never the culled head.
+    expect(f!.relPath).toBe("plans/head.mdx");
+    expect(f!.detail).toContain('normalising to "WORK"');
+    expect(edits(f!)).toEqual([
+      { op: "frontmatter", relPath: "plans/head.mdx", key: "series", value: "WORK" },
+      { op: "frontmatter", relPath: "plans/odd.mdx", key: "series", value: "WORK" },
+    ]);
+  });
+
+  test("a culled NEWER label is the fold's label: the live label is removed, the culled page untouched", async () => {
+    await write("plans/live.mdx", page("Live", { date: "2026-09-10", plan: true, series: "work", label: "Live label" }));
+    await write("plans/dead.mdx", culled(page("Dead", { date: "2026-09-18", plan: true, series: "work", label: "Dead label" })));
+
+    const [f, ...rest] = await findings("series-inconsistent");
+    expect(rest).toHaveLength(0);
+    expect(f!.relPath).toBe("plans/live.mdx");
+    expect(f!.detail).toContain('keeping "Dead label" on plans/dead.mdx');
+    expect(edits(f!)).toEqual([{ op: "frontmatter", relPath: "plans/live.mdx", key: "series_label", value: null }]);
+  });
+
+  test("8.3(b) keeps a newer culled head's label and removes every live label, filed against the newest live one", async () => {
+    await write("plans/dead.mdx", culled(page("Dead", { date: "2026-09-18", series: "work", label: "Dead label" })));
+    await write("plans/keep.mdx", page("Keep", { date: "2026-09-12", plan: true, series: "work", label: "Keep label" }));
+    await write("plans/old.mdx", page("Old", { date: "2026-09-10", series: "work", label: "Old label" }));
+
+    const [f, ...rest] = await findings("series-inconsistent");
+    expect(rest).toHaveLength(0);
+    expect(f!.relPath).toBe("plans/keep.mdx");
+    expect(edits(f!)).toEqual([
+      { op: "frontmatter", relPath: "plans/keep.mdx", key: "series_label", value: null },
+      { op: "frontmatter", relPath: "plans/old.mdx", key: "series_label", value: null },
+    ]);
+  });
+
+  test("control: the same bridge LIVE is joined into the series", async () => {
+    await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true, series: "work" }, "See [[C]]."));
+    await write("plans/b.mdx", page("B", { date: "2026-09-12", plan: true, series: "work" }, "See [[C]]."));
+    await write("plans/c.mdx", page("C", { date: "2026-09-14" }, "See [[A]] and [[B]]."));
+
+    const [f, ...rest] = await findings("series-inconsistent");
+    expect(rest).toHaveLength(0);
+    expect(edits(f!)).toEqual([{ op: "frontmatter", relPath: "plans/c.mdx", key: "series", value: "work" }]);
+  });
+
+  test("a culled HEAD that alone declares the series keeps it named: live members JOIN it, no 8.2 coins a new one", async () => {
+    // Dropping the culled head from the graph would leave A and B an unnamed
+    // cluster with two open plans — exactly the 8.2 proposal for pages already
+    // in a series.
+    await write(
+      "plans/head.mdx",
+      culled(page("Head", { date: "2026-09-18", series: "work", label: "The work" }, "See [[A]] and [[B]].")),
+    );
+    await write("plans/a.mdx", page("A", { date: "2026-09-10", plan: true }, "See [[Head]] and [[B]]."));
+    await write("plans/b.mdx", page("B", { date: "2026-09-12", plan: true }, "See [[Head]] and [[A]]."));
+
+    expect(await findings("series-unnamed")).toHaveLength(0);
+    const [f, ...rest] = await findings("series-inconsistent");
+    expect(rest).toHaveLength(0);
+    expect(f!.relPath).not.toBe("plans/head.mdx");
+    expect(edits(f!)).toEqual([
+      { op: "frontmatter", relPath: "plans/a.mdx", key: "series", value: "work" },
+      { op: "frontmatter", relPath: "plans/b.mdx", key: "series", value: "work" },
+    ]);
+  });
+
+  test("8.1 proposes no See-also link to or from a culled page", async () => {
+    await write(
+      "plans/newer.mdx",
+      page("Newer plan", { date: "2026-09-10" }, "Landed RuneLind/muninn#553 and RuneLind/muninn#552."),
+    );
+    await write(
+      "plans/older.mdx",
+      culled(page("Older plan", { date: "2026-09-01" }, "See RuneLind/muninn#552 and RuneLind/muninn#553.")),
+    );
+    expect(await findings("same-work-no-link")).toHaveLength(0);
+  });
+
+  test("a culled member's odd spelling or extra label is never rewritten", async () => {
+    await write("plans/head.mdx", page("Head", { date: "2026-09-18", plan: true, series: "work", label: "Work" }));
+    await write("plans/old.mdx", culled(page("Old", { date: "2026-09-01", series: "Work", label: "Old work" })));
+    expect(await findings("series-inconsistent")).toHaveLength(0);
+  });
 });

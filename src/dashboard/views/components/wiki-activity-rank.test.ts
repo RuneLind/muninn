@@ -893,6 +893,15 @@ describe("workedGateFor — the coverage gate", () => {
     expect(workedGateFor(pages, wide, NOW)).toMatchObject({ candidates: 2, covered: 1, coverage: 0.5 });
   });
 
+  test("a CULLED candidate is not in the denominator — covered or not, it never ranks", () => {
+    const pages = [
+      ...listing(2, 1),
+      { ...page({ relPath: "plans/gone.md", createdDaysAgo: 40, updatedDaysAgo: 1 }), culled: true as const },
+      { ...page({ relPath: "plans/gone2.md", createdDaysAgo: 40, updatedDaysAgo: 1, workedDaysAgo: 2 }), culled: true as const },
+    ];
+    expect(workedGateFor(pages, wide, NOW)).toMatchObject({ candidates: 2, covered: 1, coverage: 0.5 });
+  });
+
   test("an .mdx candidate IS in the denominator, covered or not", () => {
     const pages = [
       ...listing(2, 1),

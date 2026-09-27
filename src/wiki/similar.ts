@@ -175,6 +175,7 @@ export function resolveSimilarHits(
     const meta = resolveHitMeta(index, hit);
     if (!meta) continue; // unresolved external — drop
     if (meta.relPath === current.relPath) continue; // self
+    if (meta.culled) continue; // retired — a reader is not sent to it
     if (seen.has(meta.relPath)) continue;
     seen.add(meta.relPath);
     out.push({

@@ -184,6 +184,17 @@ describe("resolveSimilarHits", () => {
     expect(out.map((p) => p.name)).toEqual(["cousin-a"]);
   });
 
+  test("drops a CULLED page, keeping the live hits in order", () => {
+    const retired = meta({ name: "retired", relPath: "archive/retired.md", title: "Retired", culled: true });
+    const withRetired = fakeIndex([current, a, b, retired]);
+    const hits: SimilarSearchHit[] = [
+      { collection: "wiki", id: "archive/retired.md", relevance: 0.95 },
+      { collection: "wiki", id: "cousin-a.md", relevance: 0.5 },
+    ];
+    const out = resolveSimilarHits(hits, withRetired, current);
+    expect(out.map((p) => p.name)).toEqual(["cousin-a"]);
+  });
+
   test("drops unresolved external hits", () => {
     const hits: SimilarSearchHit[] = [
       { collection: "wiki", id: "external/not-in-wiki.md", title: "Nope", relevance: 0.8 },

@@ -380,7 +380,7 @@ export function parseGitLog(
  * page: the four provenance keys claude-usage's stamper writes, plus the five
  * muninn's own mechanical writers do — the series editor (`series`/`series_label`,
  * one call per member of a join) and the `/plans` board (`priority`, and
- * `plan_status` + `status_date` together).
+ * `plan_status` + `status_date` together) — plus the three keys of a cull.
  *
  * The rule is derived from the KEY SET, not from a claim about its writers: the
  * gardener's lint-proposals path writes `series:` WITH a `log.md` entry, so "every
@@ -400,13 +400,19 @@ export const METADATA_ONLY_FRONTMATTER_KEYS = [
   "priority",
   "plan_status",
   "status_date",
+  // The retired bit (`signal: none` + `signal-reason:`) and its successor
+  // pointer: culling a page files it away, it does not edit it.
+  "signal",
+  "signal-reason",
+  "superseded_by",
 ] as const;
 
 /** A frontmatter line whose KEY is one a mechanical writer owns. Column 0 and a
  *  literal `:`, matching `parseFrontmatter`'s own key shape (which admits no
  *  leading space), so an indented child, a list item and a comment are never
  *  metadata — and a page whose only change is one of those keeps its mtime. Every
- *  key is a bare identifier, so none needs escaping into the alternation. */
+ *  key is an identifier (`-` included, which is literal outside a class), so
+ *  none needs escaping into the alternation. */
 const METADATA_FRONTMATTER_LINE_RE = new RegExp(
   `^(?:${METADATA_ONLY_FRONTMATTER_KEYS.join("|")}):`,
 );
