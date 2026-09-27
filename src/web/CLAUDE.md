@@ -152,11 +152,15 @@ divergences, all four now regression tests in `render.test.ts`:
   A regression, in the direction the guard exists to prevent.
 - **A line SHAPED like a fence delimiter that is not one.** A backtick run that
   does not start its line, or whose info string holds a backtick, opens no fenced
-  block (CommonMark), so the line stays PROSE and its own backticks pair into an
-  inline span; a line-wise scan reads the same line as a delimiter and puts the
-  region somewhere else. (Before `parseBlocks`' extractor became a line walker
-  the same input diverged for a different reason: the mid-line placeholder joined
-  the text either side onto one line.)
+  block (CommonMark), so the line stays PROSE and its own backtick runs pair by the
+  exact-N rule (an unmatched ``` stays literal); a line-wise scan reads the same
+  line as a delimiter and puts the region somewhere else. (Before `parseBlocks`'
+  extractor became a line walker the same input diverged for a different reason:
+  the mid-line placeholder joined the text either side onto one line.)
+
+Inline code spans pair CommonMark-style, per line: a run of N backticks closes
+only on exactly N, an unmatched run stays literal, and one space is stripped from
+each end. The fact-check strip shares that grammar via `src/format/code-spans.ts`.
 
 ⚠️ **What reading the output costs instead: the scan has to know every container
 the renderer uses for code, and there are TWO.** The first revision assumed one,

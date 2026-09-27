@@ -420,6 +420,10 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
       const html = renderWikiHtml("a ` ```\ncode\n``` ` [[Claude Code]] ` b", resolve);
       expect(html).toContain("``` <code>[[Claude Code]]</code> b");
       expect(html).not.toContain("wiki-link");
+      // CommonMark pairs this span across the soft break, so the link should be code;
+      // spans are per line here. A paragraph-scoped follow-up flips this assertion.
+      const crossLine = renderWikiHtml("a ` ```\ncode\n``` [[Claude Code]] ` b", resolve);
+      expect(crossLine).toContain('``` <a href="/wiki?relPath=concepts%2FClaude%20Code.md" class="wiki-link"');
     });
   });
 

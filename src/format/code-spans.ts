@@ -1,10 +1,6 @@
 /**
- * Inline code-span pairing, shared by every scanner that must agree on where a
- * line's code spans are — the web renderer (`renderInline` in
- * `src/web/web-format.ts`), the fact-check strip (`pushInlineCodeSpans` in
- * `markdown-ast.ts`) and the wiki line scanners (`wiki-integrate.ts`).
- *
- * Dependency-free: `web-format.ts` ships in the browser bundle.
+ * Inline code-span pairing: the one grammar the renderer and the fact-check strip
+ * share, so they agree on what is code. Dependency-free and browser-safe.
  */
 
 /**
@@ -55,12 +51,13 @@ export function lineCodeSpanRanges(line: string): { start: number; end: number; 
 
 /**
  * A span's content per CommonMark: the text between the delimiters, with one
- * space stripped from each end when it both begins and ends with a space and is
- * not all spaces — what lets `` `` `x` `` `` read as `` `x` ``.
+ * U+0020 stripped from each end when it both begins and ends with one and is not
+ * made entirely of U+0020 (a tab or NBSP is not a space here) — what lets
+ * `` `` `x` `` `` read as `` `x` ``.
  */
 export function codeSpanContent(line: string, range: { start: number; end: number; runLen: number }): string {
   const inner = line.slice(range.start + range.runLen, range.end - range.runLen);
-  if (inner.length >= 2 && inner.startsWith(" ") && inner.endsWith(" ") && inner.trim() !== "") {
+  if (inner.startsWith(" ") && inner.endsWith(" ") && /[^ ]/.test(inner)) {
     return inner.slice(1, -1);
   }
   return inner;

@@ -217,13 +217,6 @@ export function frontmatterEndLine(lines: readonly string[]): number {
 }
 
 /**
- * Re-exported from `src/format/code-spans.ts` — the ONE pairing implementation
- * behind {@link stripLineCodeSpans}, {@link maskLineCodeSpans}, the web renderer's
- * inline code and the fact-check strip, so none of them can drift from another.
- */
-export { lineCodeSpanRanges };
-
-/**
  * Strip inline code spans from ONE line.
  *
  * The per-LINE sibling of {@link fencedLineMask}, for every line-oriented scanner
