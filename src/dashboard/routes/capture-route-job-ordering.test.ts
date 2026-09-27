@@ -892,7 +892,7 @@ describe("YouTube: the summary KIND (`/api/youtube/options` + `kind`)", () => {
     },
   };
 
-  const options = (app: Hono) => app.request("/api/youtube/options");
+  const options = (app: Hono) => app.request("/api/youtube/options", { headers: { origin: "chrome-extension://abcdefghijklmnop" } });
 
   test("the options endpoint serves the kinds and the slide capability, with CORS", async () => {
     const res = await options(ytApp());
@@ -901,7 +901,7 @@ describe("YouTube: the summary KIND (`/api/youtube/options` + `kind`)", () => {
     // CORS is not optional here: the extension's `muninnUrl` is user-editable
     // past the manifest's localhost grant, and without the header this GET
     // fails silently and the popup falls back to Standard-only.
-    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://abcdefghijklmnop");
     expect((await res.json()) as Record<string, unknown>).toEqual({
       kinds: [
         { id: "standard", label: "Standard" },

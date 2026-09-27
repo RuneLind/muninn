@@ -147,7 +147,7 @@ from the env allowlist to an Entra `groups` claim without touching a call site.
 Two answers skip the list entirely:
 
 - **a `null` identity ⇒ `admin`** — "auth off". Nothing passes `null` today:
-  with auth off no middleware is mounted, so `c.get("identity")` is `undefined`
+  with auth off no identity middleware is mounted, so `c.get("identity")` is `undefined`
   and `resolveRole` is never called. The branch is for PRs C–D's guards, which
   run in both modes. Do not read it as something enforced now.
 - **a `local` identity ⇒ `MUNINN_LOCAL_ROLE`, default `user`.** The default is
@@ -253,14 +253,78 @@ session id would move the traversal surface onto `MUNINN_LOCAL_USER`.
 
 ### `origin.ts` — the CSRF check
 
-Global, mounted **after** the auth middleware in an authenticating mode only, so
-a request with no credential is answered 401 by identity rather than 403 by
-origin.
+Global, mounted in **every** mode. In an authenticating mode it runs **after**
+the auth middleware, so a request with no credential is answered 401 by
+identity rather than 403 by origin. With auth **off** it is the only
+middleware, mounted as `createOriginMiddleware(…, "off")`: there is no session
+to ride, but any page the user visits could otherwise POST to
+`localhost:3010` — a preflighted JSON POST to `/api/research/chat` or a capture
+route spent a model turn, and a `text/plain` POST reached every ungated write
+route.
+
+**The `off` shape** adds three arms to the `Origin` branch, so an unconfigured
+laptop or mini keeps working:
+
+- **any `chrome-extension:` origin.** The four extensions carry no manifest
+  `key`, so their ids are per install and cannot be listed. This admits ANY
+  installed extension, including one WITHOUT host permission for this host —
+  it now gets a CORS echo and passes preflight. The `*` this replaced granted
+  every extension the same, so it is not a regression. No web page can send
+  that scheme.
+- **`Origin` equal to the request's own `Host`** (`originMatchesHost`: scheme
+  from the `Origin`, host and port from `Host`, both normalised — case, default
+  port, trailing dot, IPv6 brackets; a missing or malformed `Host` never
+  matches). This covers the dashboard over **plain http** on a LAN or tailnet
+  address (`DASHBOARD_HOST=0.0.0.0`, `http://mini:3010`): a browser sends Fetch
+  Metadata only to potentially-trustworthy URLs (https, localhost, 127/8), so
+  that page's own POST carries `Origin` and no `Sec-Fetch-Site`, and without
+  this arm every write it made answered 403 (measured). It also covers
+  **https** through `tailscale serve` (`Origin: https://<tailnet-name>`):
+  serve forwards the browser's `Host` to a TCP backend (`r.Out.Host =
+  r.In.Host`; it rewrites only for a unix-socket backend), HTTP and the WS
+  handshake alike — and the handshake carries no `Sec-Fetch-Site`. The arm is
+  **skipped when `Sec-Fetch-Site` is `cross-site` or `same-site`**: Fetch
+  Metadata, when present, is authoritative. Without that, an http page on :80
+  of the name serve publishes sends a matching `Origin` with `cross-site` and
+  passed (measured). **Open residual:** the same page's `new WebSocket` still
+  passes, because a handshake carries no `Sec-Fetch-Site` and the arm takes the
+  Host side's scheme from the `Origin` (measured: 101 and a chat snapshot). It
+  needs hostile http content on :80 of muninn's own tailnet name; the remedy
+  is to take that scheme from `X-Forwarded-Proto`, which serve sets. Browsers
+  that send no Fetch Metadata (Safari < 16.4, Firefox < 90) keep the HTTP half
+  of the same gap.
+- **`Sec-Fetch-Site: same-origin`**, a second path for an https proxy that
+  rewrites `Host`, so the arm above does not match.
+
+The last two admit DNS rebinding — accepted: `off` has no `Host` allowlist, so
+a rebound name already reads and writes everything. The guard targets drive-by
+cross-site pages. An authenticating mode has none of the three; the Host arm
+in particular is the comparison that mode rejected (below) and must never
+reach it.
+
+`MUNINN_ALLOWED_ORIGINS` is also read with auth off — optional there, an extra
+accepted origin, never a boot requirement; a stale `*` in it warns at boot. The
+WebSocket upgrade runs the same `off` rule (`createWsUpgradeAuthorizer`), with
+no identity.
+
+**Known residual in `off`, on a plain-http non-loopback host.** A cross-site
+`<img>`/`<script>` GET to a `SIDE_EFFECTING_GETS` path carries neither `Origin`
+nor `Sec-Fetch-Site` there, so it passes the "neither header" arm — measured:
+`<img src=http://muninn.lan:3987/chat/pending/…>` consumed the message. It
+cannot be closed without also refusing that page's own same-origin GETs, which
+look identical. Remedy: serve over https (`tailscale serve`) or run an
+authenticating mode.
+
+Under docker-compose the container's `DASHBOARD_PORT` is 3000, so the loopback
+arm targets `localhost:3000` while the browser uses `localhost:3010`, which
+passes through the Host / same-origin arms instead — known, not fixed.
 
 Scoped to **side effects, not to methods**. `SIDE_EFFECTING_GETS` is the
 enumerated exception list: `GET /chat/pending/:threadId` is a one-time *consume*
 (a cross-site `<img>` destroys the victim's pending message without reading a
-response) and `GET /api/research/ask` spends a retrieval + synthesis turn.
+response) and `GET /api/research/ask` spends a retrieval + synthesis turn;
+`GET /chat/mcp-status/:bot` spawns every stdio MCP server in the bot's
+`.mcp.json` when its cache is missing or stale.
 
 The decision order is **Origin, then `Sec-Fetch-Site`**, and it is load-bearing
 in both directions:
@@ -274,7 +338,8 @@ in both directions:
 - Neither header ⇒ **allowed**. A non-browser client sends neither; refusing
   there would break every script to close nothing.
 
-**The accepted set is CONFIGURED, never derived from the request.** An earlier
+**In an authenticating mode the accepted set is CONFIGURED, never derived from
+the request.** An earlier
 cut compared `Origin` against the request's own `Host` header — which asks "does
 this request agree with itself", not "is this my origin" — and review
 demonstrated the consequence on a live server: `Host: evil.example:3013` with
@@ -312,13 +377,16 @@ answers `mode: "session"`.
 ### `cors.ts` + `policy.ts` — the per-site CORS disposition
 
 The wildcard `Access-Control-Allow-Origin` literals — **13 of them across 7
-files**, counted on `main` — became one helper. (`article-routes.ts` is an
-eighth file that only NAMES the header in a comment; it never set one.) With auth **off** the header stays `*`, byte for byte — the
-four Chrome extensions in `extensions/` call these routes against
-`http://localhost:3010` and a blanket drop is the change most likely to break
-them. In an authenticating mode the request's own `Origin` is **echoed** when it
-is on `MUNINN_ALLOWED_ORIGINS`, and otherwise no header is sent. An extension
-keeps working by being named:
+files**, counted on `main` — became one helper, and no mode answers `*` any
+more. (`article-routes.ts` is an eighth file that only NAMES the header in a
+comment; it never set one.) Both modes **echo** the request's own `Origin`
+when it is accepted and otherwise send no header, with `Vary: Origin` on both
+outcomes. With auth **off**, accepted means `offModeOriginAccepted`: a loopback
+literal at the configured port, any `chrome-extension:` origin, or an entry on
+the optional `MUNINN_ALLOWED_ORIGINS` — the origin guard's `off` rule minus its
+same-origin arm, since a same-origin reader needs no CORS header. So the four
+extensions work unconfigured. In an authenticating mode accepted means
+`MUNINN_ALLOWED_ORIGINS` only, and an extension keeps working by being named:
 `MUNINN_ALLOWED_ORIGINS=…,chrome-extension://<id>`.
 
 `normalizeOrigin` (in `src/config.ts`) exists because `new URL(…).origin`
@@ -327,10 +395,12 @@ could not be allowlisted at all. Both the allowlist parser and the request-time
 check go through it, so a configured origin can never be normalised two
 different ways.
 
-`policy.ts` publishes the mode once at boot, because the two readers that need
-it — `src/db/memories.ts` and the CORS sites — have no Hono context. The default
-is `off`, and `wiring.test.ts` pins the single `setAuthPolicy(auth)` call site,
-since a missed call would fail **open**.
+`policy.ts` publishes the mode (and `DASHBOARD_PORT`, for the off-mode loopback
+echo) once at boot, because the two readers that need it —
+`src/db/memories.ts` and the CORS sites — have no Hono context. The default is
+`off` with no port, and `wiring.test.ts` pins the single
+`setAuthPolicy(auth, config.dashboardPort)` call site, since a missed call
+would fail **open**.
 
 ### `scope = 'shared'` memory reads
 
@@ -452,8 +522,13 @@ anyone who opened a socket.
 out of it for exactly this — so the upgrade grants precisely what HTTP grants,
 loopback bypass included. Origin is `decideOrigin` with the same CONFIGURED
 accepted set, and `/chat/ws` + `/simulator/ws` are entries in
-`SIDE_EFFECTING_GETS` so that rule evaluates them. ⚠️ **Do not write a second
-origin check here.** PR C's first cut compared `Origin` to the request's own
+`SIDE_EFFECTING_GETS` so that rule evaluates them. With auth off only this
+origin half runs, in its `off` shape, and identity stays null. Since a
+handshake carries no `Sec-Fetch-Site` (re-measured in Chromium on localhost and
+on a LAN IP), a page served through an https proxy opens its socket in `off`
+only through the Host arm — which holds when the proxy forwards the browser's
+`Host` — or by listing its origin in `MUNINN_ALLOWED_ORIGINS`. ⚠️ **Do not
+write a second origin check here.** PR C's first cut compared `Origin` to the request's own
 `Host` and review demonstrated `Host: evil.example` with a matching Origin
 creating a real conversation.
 
@@ -1058,11 +1133,11 @@ cannot exercise that wiring at all.
 
 ## The `Auth` entry from the root `CLAUDE.md` module table
 
-The `MUNINN_AUTH` switch, PR C's claimed-id guard and PR D's resource guard. `mode.ts` (the modes + every fail-closed boot refusal; `AUTH_ZONES_IMPLEMENTED` is now `true`, so `entra` BOOTS — the two entra asserts, `NAIS_TOKEN_INTROSPECTION_ENDPOINT` + `MUNINN_TENANT`, went live with it), `introspect.ts` (the seam: one interface, `token → identity | null` — the local shared-secret one, plus `createEntraIntrospector`: a Texas introspection POST (`identity_provider: "azuread"`, `active === true` the only accepted answer) behind a **token-hash-keyed cache** expiring at `min(exp, now + 5 min)` and a **single flight**. It is BUILT ONCE in `src/index.ts` and injected into both `createAuthMiddleware` and `createWsUpgradeAuthorizer` — a per-instance cache would make the chat page's socket upgrade miss the HTTP cache its own first request just filled, and in entra mode the introspector is also the DB-provisioning path, so two instances race two first-login transactions. Its answer is THREE-way internally: a definitive `active:false` caches 30 s, an OUTAGE — Texas unreachable, non-200, or the DB down — refuses and caches nothing. The `session` cookie channel is refused with no Texas call at all, since entra mints no muninn cookie), `session.ts` (the signed local cookie), `role.ts` (`resolveRole`), `middleware.ts` (the top-level Hono middleware — it TAKES the introspector rather than building one — plus `resolveRequestIdentity` — the whole identity decision over primitives, so the WebSocket upgrade grants exactly what HTTP grants rather than reading the three credential channels a second time), `guard.ts` (`requireOwnUser`: the session id beats a claimed `:userId`/`body.userId`/`username`; returns a RESULT rather than throwing, because most call sites sit inside a `catch → 500` that would swallow an `HTTPException`), `origin.ts` (the global CSRF check — scoped to side effects, not methods, with `SIDE_EFFECTING_GETS` enumerating the one-time consume, the synthesis GET, the five wiki egress GETs and the two WS upgrade paths), `cors.ts` + `policy.ts` (the per-site `Access-Control-Allow-Origin` disposition: `*` with auth off, an echoed allowlisted origin otherwise), `inventory.ts` + `claimed-id-inventory.txt` (the route inventory as a re-derived COMMAND with a disposition per row, not a remembered count) — PR D's two: `resource-guard.ts` (`requireOwnedResource(c, kind, id)` over seven kinds — `conversation`/`thread`/`message`/`trace`/`jiraDraft`/`scheduledTask`/`watcher` — answering **404, never 403**, since a web conversation id is derivable; it returns a VERDICT rather than a Response so the call site denies with the expression it already had and a refusal is byte-identical to a genuine miss, and it is always called BEFORE the side effect; plus `filterToOwner` for `GET /chat/conversations`) and `ws-upgrade.ts` (the `/chat/ws` + `/simulator/ws` handshake, the one surface no Hono middleware can see — identity via `resolveRequestIdentity`, origin via `decideOrigin` with the same CONFIGURED accepted set; **do not write a second origin check there**) — and the ZONE model's four: `zones.ts` (pure data + `decideZone`: a short deny list, the open zone, the user zone, then **default-deny**, so a route added next month arrives CLOSED; entries are exact paths or `/`-suffixed PREFIXES, which is what keeps `/api/goals/:userId` in the user zone while the unfiltered `/api/goals` list stays admin), `zone-middleware.ts` (the consumer, mounted THIRD on the top-level app in `src/index.ts` — after auth so a credential-less request is 401 not 403, after origin, and before both `app.route()` calls so the `/chat` sub-app is covered), `audit.ts` (the `activity_log` rows for an admin passthrough and an admin collection read — type **`system`**, since `activity_log.type` has a DB CHECK and `ActivityLog.push` swallows its `.catch`; the collection half is deduped per (reader, route) per 5 min and hooked in ONE place, the middleware's path list) and `zone-inventory.ts` + `chat-page-zone-inventory.txt` (every same-origin URL the COMPOSED chat page references, extracted from `renderChatPage()`'s output and dispositioned — the user zone is an allowlist, so a fetch added to the chat client must land as unassigned work rather than as a panel that quietly 403s). A NULL-owner row is admin-only, relaxed in `local` mode where there is one human. Still open: the admin-zone collection reads return **everyone's** rows (admin-only + audited, not filtered), and a role `user` still SEES the operator nav links they get 403 on. **PR 2's two:** `src/db/user-identities.ts` + migration 073 (`user_identities`, keyed `(provider, tenant, oid) → user_id`, mutable claims refreshed on every login) — the match key is **`oid`**, the only claim immutable for a person in a tenant, because a NAVident is RE-ISSUED and keying on it would eventually resolve two humans to one account; `tenant` comes from `MUNINN_TENANT` and is **provenance, never compared against the token's `tid`**; a first login mints `nav-<navident>` lowercased, or `nav-<oid>` when the token carries no NAVident (the manifest's `claims.extra` lives in another repo, so this half defends itself, and `resolveRole` matches the oid too); and the `users` insert is deliberately **NOT `ON CONFLICT DO NOTHING`** — a taken minted id belongs to someone else, so a `DO NOTHING` would provision a newcomer onto the previous ident-holder's account; the collision takes a `-<oid-prefix>` suffix and a warning. The default thread is created LAZILY on the first turn, never in that transaction. And `src/chat/views/components/authed-fetch.ts` — the client half: `window.authedFetch` (every fetch under `src/chat/views/` goes through it; a unit test refuses a bare `fetch(`) plus **three channels with three predicates and ONE breaker** — HTTP reloads when the 401 body's `loginUrl` is `/oauth2/login`, the socket and `EventSource` on the cached `provider === "entra"` (neither can read a body), at most one reload per 60 s from a `sessionStorage` TIMESTAMP whose clear is window-guarded so it can never shorten the breaker. ⚠️ The loopback bypass's proxy-header check is the load-bearing part, and `MUNINN_LOCAL_ROLE` deliberately does NOT reach it: **read `src/auth/CLAUDE.md` before touching it, before adding a route that reads a client-supplied `userId`, before adding one addressed by a resource id, or before adding a route the chat page fetches**.
+The `MUNINN_AUTH` switch, PR C's claimed-id guard and PR D's resource guard. `mode.ts` (the modes + every fail-closed boot refusal; `AUTH_ZONES_IMPLEMENTED` is now `true`, so `entra` BOOTS — the two entra asserts, `NAIS_TOKEN_INTROSPECTION_ENDPOINT` + `MUNINN_TENANT`, went live with it), `introspect.ts` (the seam: one interface, `token → identity | null` — the local shared-secret one, plus `createEntraIntrospector`: a Texas introspection POST (`identity_provider: "azuread"`, `active === true` the only accepted answer) behind a **token-hash-keyed cache** expiring at `min(exp, now + 5 min)` and a **single flight**. It is BUILT ONCE in `src/index.ts` and injected into both `createAuthMiddleware` and `createWsUpgradeAuthorizer` — a per-instance cache would make the chat page's socket upgrade miss the HTTP cache its own first request just filled, and in entra mode the introspector is also the DB-provisioning path, so two instances race two first-login transactions. Its answer is THREE-way internally: a definitive `active:false` caches 30 s, an OUTAGE — Texas unreachable, non-200, or the DB down — refuses and caches nothing. The `session` cookie channel is refused with no Texas call at all, since entra mints no muninn cookie), `session.ts` (the signed local cookie), `role.ts` (`resolveRole`), `middleware.ts` (the top-level Hono middleware — it TAKES the introspector rather than building one — plus `resolveRequestIdentity` — the whole identity decision over primitives, so the WebSocket upgrade grants exactly what HTTP grants rather than reading the three credential channels a second time), `guard.ts` (`requireOwnUser`: the session id beats a claimed `:userId`/`body.userId`/`username`; returns a RESULT rather than throwing, because most call sites sit inside a `catch → 500` that would swallow an `HTTPException`), `origin.ts` (the global CSRF check, mounted in every mode with a looser `off` shape — scoped to side effects, not methods, with `SIDE_EFFECTING_GETS` enumerating the one-time consume, the synthesis GET, the wiki egress/amplifier GETs, the MCP-status probe and the two WS upgrade paths), `cors.ts` + `policy.ts` (the per-site `Access-Control-Allow-Origin` disposition: an echoed accepted origin in every mode, never `*` — with auth off, loopback, any `chrome-extension:` origin or the optional allowlist), `inventory.ts` + `claimed-id-inventory.txt` (the route inventory as a re-derived COMMAND with a disposition per row, not a remembered count) — PR D's two: `resource-guard.ts` (`requireOwnedResource(c, kind, id)` over seven kinds — `conversation`/`thread`/`message`/`trace`/`jiraDraft`/`scheduledTask`/`watcher` — answering **404, never 403**, since a web conversation id is derivable; it returns a VERDICT rather than a Response so the call site denies with the expression it already had and a refusal is byte-identical to a genuine miss, and it is always called BEFORE the side effect; plus `filterToOwner` for `GET /chat/conversations`) and `ws-upgrade.ts` (the `/chat/ws` + `/simulator/ws` handshake, the one surface no Hono middleware can see — identity via `resolveRequestIdentity`, origin via `decideOrigin` with the same CONFIGURED accepted set; **do not write a second origin check there**) — and the ZONE model's four: `zones.ts` (pure data + `decideZone`: a short deny list, the open zone, the user zone, then **default-deny**, so a route added next month arrives CLOSED; entries are exact paths or `/`-suffixed PREFIXES, which is what keeps `/api/goals/:userId` in the user zone while the unfiltered `/api/goals` list stays admin), `zone-middleware.ts` (the consumer, mounted THIRD on the top-level app in `src/index.ts` — after auth so a credential-less request is 401 not 403, after origin, and before both `app.route()` calls so the `/chat` sub-app is covered), `audit.ts` (the `activity_log` rows for an admin passthrough and an admin collection read — type **`system`**, since `activity_log.type` has a DB CHECK and `ActivityLog.push` swallows its `.catch`; the collection half is deduped per (reader, route) per 5 min and hooked in ONE place, the middleware's path list) and `zone-inventory.ts` + `chat-page-zone-inventory.txt` (every same-origin URL the COMPOSED chat page references, extracted from `renderChatPage()`'s output and dispositioned — the user zone is an allowlist, so a fetch added to the chat client must land as unassigned work rather than as a panel that quietly 403s). A NULL-owner row is admin-only, relaxed in `local` mode where there is one human. Still open: the admin-zone collection reads return **everyone's** rows (admin-only + audited, not filtered), and a role `user` still SEES the operator nav links they get 403 on. **PR 2's two:** `src/db/user-identities.ts` + migration 073 (`user_identities`, keyed `(provider, tenant, oid) → user_id`, mutable claims refreshed on every login) — the match key is **`oid`**, the only claim immutable for a person in a tenant, because a NAVident is RE-ISSUED and keying on it would eventually resolve two humans to one account; `tenant` comes from `MUNINN_TENANT` and is **provenance, never compared against the token's `tid`**; a first login mints `nav-<navident>` lowercased, or `nav-<oid>` when the token carries no NAVident (the manifest's `claims.extra` lives in another repo, so this half defends itself, and `resolveRole` matches the oid too); and the `users` insert is deliberately **NOT `ON CONFLICT DO NOTHING`** — a taken minted id belongs to someone else, so a `DO NOTHING` would provision a newcomer onto the previous ident-holder's account; the collision takes a `-<oid-prefix>` suffix and a warning. The default thread is created LAZILY on the first turn, never in that transaction. And `src/chat/views/components/authed-fetch.ts` — the client half: `window.authedFetch` (every fetch under `src/chat/views/` goes through it; a unit test refuses a bare `fetch(`) plus **three channels with three predicates and ONE breaker** — HTTP reloads when the 401 body's `loginUrl` is `/oauth2/login`, the socket and `EventSource` on the cached `provider === "entra"` (neither can read a body), at most one reload per 60 s from a `sessionStorage` TIMESTAMP whose clear is window-guarded so it can never shorten the breaker. ⚠️ The loopback bypass's proxy-header check is the load-bearing part, and `MUNINN_LOCAL_ROLE` deliberately does NOT reach it: **read `src/auth/CLAUDE.md` before touching it, before adding a route that reads a client-supplied `userId`, before adding one addressed by a resource id, or before adding a route the chat page fetches**.
 
 ## `MUNINN_AUTH` — the full entry from the root `CLAUDE.md` env table
 
-Who-is-calling switch (and, since PR D, a whose-row-is-it switch). `off` (default) mounts **no middleware at all** — today's muninn, with one deliberate exception: an instance with `NAIS_CLUSTER_NAME` set now refuses to boot rather than come up unauthenticated. `local` puts ONE pinned identity behind a shared secret (`MUNINN_LOCAL_TOKEN` + `MUNINN_LOCAL_USER`), the shape for a single human's instance reachable beyond loopback. `entra` is the NAV path and it **boots**: every credential is a Bearer access token introspected against `NAIS_TOKEN_INTROSPECTION_ENDPOINT` (one call per token, cached ≤5 min and single-flighted across the HTTP and WebSocket paths), the claims are linked to a `users` row through `user_identities` (migration 073) keyed on the token's `oid`, role comes from `MUNINN_ADMIN_IDENTS` matched against `NAVident`/`oid`, no muninn cookie is minted (the sidecar owns the session), and memory/goal extraction is force-disabled for such accounts. It requires `MUNINN_TENANT` and the introspection endpoint or it refuses to start. An unrecognised value throws rather than degrading to `off` — the inverse of `optionalEnvFlag`'s rule, because here a typo means "open". A **direct** loopback request bypasses auth and no config can revoke that (a wrong secret must never lock the operator out) — ⚠️ but a same-host reverse proxy makes remote requests *look* loopback, so the bypass also requires the absence of forwarding headers (`x-forwarded-*`, `forwarded`, `via`, `tailscale-*`, `cf-*`, …). That test is on the PEER ADDRESS, so it is **blind to an L4 forward** — `tailscale serve --tcp`, an nginx `stream` block, `ssh -L`, `socat`, a bare `proxy_pass` with no `proxy_set_header` — behind which every client gets the pinned identity with no credential, and it does not exist at all under docker-compose (`DASHBOARD_HOST=0.0.0.0`), where a forgotten token IS a lockout. **Read `src/auth/CLAUDE.md` before touching that check or exposing an instance.** Claimed `userId`s are closed on every route that HAS an "own" version (PR C — four admin-zone routes still take one, listed in `src/auth/claimed-id-inventory.txt`), the id-addressed routes resolve their owner from the row and the `/chat/ws` upgrade is authenticated and owner-scoped (PR D). **Role is now enforced too** (`src/auth/zones.ts`): role `user` reaches `/chat` and the routes that page calls; every other route — `/traces`, `/models`, `/plans`, `/agents`, `/logs`, `/api/prompts/:traceId`, the unfiltered collection reads — answers 403, and `GET /` redirects a `user` to `/chat`. Only `/api/live` and `/api/ready` are reachable with no credential. ⚠️ Three operator consequences of turning this on, all by design and all easy to read as bugs: a `local` identity is role `user` **unless `MUNINN_LOCAL_ROLE=admin`**, so by default the whole operator dashboard is 403 and `GET /api/events` is denied to EVERYONE (the activity feed and `/agents` live zone freeze at Disconnected; the chat page is unaffected, it uses `/chat/events`); that promotion does NOT apply to a credential-less loopback request, so a browser running ON the muninn host stays `user` and the dashboard must be reached through the proxy or with the token on the request; and the session is ONE `users.id`, so a trace or conversation owned by a different `users.id` — a Telegram bot's user row — answers 404 to the operator's own web session, admin or not.
+Who-is-calling switch (and, since PR D, a whose-row-is-it switch). `off` (default) mounts **no identity middleware** — only the origin/CSRF guard in its `off` shape (on HTTP and the `/chat/ws` upgrade) and an echoed, never-`*` CORS header — and one boot rule: an instance with `NAIS_CLUSTER_NAME` set now refuses to boot rather than come up unauthenticated. `local` puts ONE pinned identity behind a shared secret (`MUNINN_LOCAL_TOKEN` + `MUNINN_LOCAL_USER`), the shape for a single human's instance reachable beyond loopback. `entra` is the NAV path and it **boots**: every credential is a Bearer access token introspected against `NAIS_TOKEN_INTROSPECTION_ENDPOINT` (one call per token, cached ≤5 min and single-flighted across the HTTP and WebSocket paths), the claims are linked to a `users` row through `user_identities` (migration 073) keyed on the token's `oid`, role comes from `MUNINN_ADMIN_IDENTS` matched against `NAVident`/`oid`, no muninn cookie is minted (the sidecar owns the session), and memory/goal extraction is force-disabled for such accounts. It requires `MUNINN_TENANT` and the introspection endpoint or it refuses to start. An unrecognised value throws rather than degrading to `off` — the inverse of `optionalEnvFlag`'s rule, because here a typo means "open". A **direct** loopback request bypasses auth and no config can revoke that (a wrong secret must never lock the operator out) — ⚠️ but a same-host reverse proxy makes remote requests *look* loopback, so the bypass also requires the absence of forwarding headers (`x-forwarded-*`, `forwarded`, `via`, `tailscale-*`, `cf-*`, …). That test is on the PEER ADDRESS, so it is **blind to an L4 forward** — `tailscale serve --tcp`, an nginx `stream` block, `ssh -L`, `socat`, a bare `proxy_pass` with no `proxy_set_header` — behind which every client gets the pinned identity with no credential, and it does not exist at all under docker-compose (`DASHBOARD_HOST=0.0.0.0`), where a forgotten token IS a lockout. **Read `src/auth/CLAUDE.md` before touching that check or exposing an instance.** Claimed `userId`s are closed on every route that HAS an "own" version (PR C — four admin-zone routes still take one, listed in `src/auth/claimed-id-inventory.txt`), the id-addressed routes resolve their owner from the row and the `/chat/ws` upgrade is authenticated and owner-scoped (PR D). **Role is now enforced too** (`src/auth/zones.ts`): role `user` reaches `/chat` and the routes that page calls; every other route — `/traces`, `/models`, `/plans`, `/agents`, `/logs`, `/api/prompts/:traceId`, the unfiltered collection reads — answers 403, and `GET /` redirects a `user` to `/chat`. Only `/api/live` and `/api/ready` are reachable with no credential. ⚠️ Three operator consequences of turning this on, all by design and all easy to read as bugs: a `local` identity is role `user` **unless `MUNINN_LOCAL_ROLE=admin`**, so by default the whole operator dashboard is 403 and `GET /api/events` is denied to EVERYONE (the activity feed and `/agents` live zone freeze at Disconnected; the chat page is unaffected, it uses `/chat/events`); that promotion does NOT apply to a credential-less loopback request, so a browser running ON the muninn host stays `user` and the dashboard must be reached through the proxy or with the token on the request; and the session is ONE `users.id`, so a trace or conversation owned by a different `users.id` — a Telegram bot's user row — answers 404 to the operator's own web session, admin or not.
 
 ## `MUNINN_LOCAL_TOKEN` — the full entry from the root `CLAUDE.md` env table
 
@@ -1090,4 +1165,4 @@ The directory the `oid` claims come from, written verbatim into `user_identities
 
 ## `MUNINN_ALLOWED_ORIGINS` — the full entry from the root `CLAUDE.md` env table
 
-Comma-split origin allowlist, normalised through `normalizeOrigin`; `*` and unparseable entries are dropped (a wildcard is the fail-OPEN direction), so a wildcard-only value reaches the boot assert as "empty" and refuses. Browser-extension origins (`chrome-extension://<id>`, `moz-extension://<id>`) are accepted — `new URL(…).origin` answers the opaque `"null"` for those, so without the special case the four Chrome extensions in `extensions/` could not be allowlisted at all and PR C's origin check would refuse every one of them. **Enforced by the global origin/CSRF check and the CORS disposition** (`src/auth/{origin,cors}.ts`) **and on the `/chat/ws` + `/simulator/ws` upgrades** (`src/auth/ws-upgrade.ts`, PR D — the upgrade runs before `app.fetch`, so it calls `decideOrigin` with the same configured accepted set rather than a second check).
+Comma-split origin allowlist, normalised through `normalizeOrigin`; `*` and unparseable entries are dropped (a wildcard is the fail-OPEN direction), so a wildcard-only value reaches the boot assert as "empty" and refuses. Browser-extension origins (`chrome-extension://<id>`, `moz-extension://<id>`) are accepted — `new URL(…).origin` answers the opaque `"null"` for those, so without the special case the four Chrome extensions in `extensions/` could not be allowlisted at all and PR C's origin check would refuse every one of them. **Enforced by the global origin/CSRF check and the CORS disposition** (`src/auth/{origin,cors}.ts`) **and on the `/chat/ws` + `/simulator/ws` upgrades** (`src/auth/ws-upgrade.ts`, PR D — the upgrade runs before `app.fetch`, so it calls `decideOrigin` with the same configured accepted set rather than a second check). **Also read with auth off**, where it is optional and only ADDS accepted origins to the off-mode origin guard and CORS echo — the extensions and same-origin pages pass there without it, and an empty value never refuses the boot.

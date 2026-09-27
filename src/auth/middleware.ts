@@ -1,8 +1,8 @@
 /**
  * The Hono middleware. Mounted on the TOP-LEVEL app (`src/index.ts`) so it
  * covers the dashboard and chat sub-apps alike, and mounted only when
- * `MUNINN_AUTH` names an authenticating mode — with auth off no middleware
- * exists at all, which is what "off is off" means.
+ * `MUNINN_AUTH` names an authenticating mode — with auth off no identity is
+ * resolved (only the origin guard runs), which is what "off is off" means.
  *
  * It sets two context variables and denies nothing else: `identity` and `role`.
  * The guards that READ them are PRs C and D; this PR only makes an identity
@@ -540,7 +540,7 @@ declare module "hono" {
   interface ContextVariableMap {
     /**
      * Set by `createAuthMiddleware` in any authenticating mode — and ABSENT
-     * with auth off, where no middleware is mounted at all.
+     * with auth off, where no identity middleware is mounted.
      *
      * Optional deliberately. Declared as `Identity` these read as always-present
      * to every route file in `src/` (the augmentation is repo-global), so a PR

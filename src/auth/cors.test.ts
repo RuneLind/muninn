@@ -55,7 +55,7 @@ describe("the policy seam", () => {
     expect(pinnedLocalUserId(), "auth off must keep the stored value's absence meaningful").toBeNull();
   });
 
-  test("setAuthPolicy(off) leaves the wildcard and the shared branch alone", () => {
+  test("setAuthPolicy(off) leaves the shared branch alone", () => {
     setAuthPolicy(resolveAuthConfig({ MUNINN_AUTH: "off" }));
     expect(isAuthenticatingInstance()).toBe(false);
     expect(sharedMemoryReadsAllowed()).toBe(true);
@@ -63,13 +63,16 @@ describe("the policy seam", () => {
 });
 
 describe("the CORS disposition", () => {
-  test("auth off: the header stays `*`, byte for byte", async () => {
+  test("auth off: an extension origin is ECHOED, never `*`, with Vary: Origin", async () => {
+    // The off-mode table lives in `origin-off.test.ts`; this pins the helper.
     __setAuthPolicyForTest(null);
     const res = await probe().request("/h", { headers: { origin: EXTENSION } });
-    expect(res.headers.get("access-control-allow-origin")).toBe("*");
-    // No Vary either — nothing varies when the answer is constant.
-    expect(res.headers.get("vary")).toBeNull();
-    expect(corsAllowOrigin(undefined)).toBe("*");
+    expect(res.headers.get("access-control-allow-origin")).toBe(EXTENSION);
+    expect(res.headers.get("vary")).toBe("Origin");
+    const refused = await probe().request("/h", { headers: { origin: "https://evil.example" } });
+    expect(refused.headers.get("access-control-allow-origin")).toBeNull();
+    expect(refused.headers.get("vary")).toBe("Origin");
+    expect(corsAllowOrigin(undefined)).toBeNull();
   });
 
   test("authenticating: an allowlisted origin is ECHOED, with Vary: Origin", async () => {

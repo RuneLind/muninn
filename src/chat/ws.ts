@@ -8,8 +8,8 @@ export interface ChatWsData {
   unsubscribe: (() => void) | null;
   /**
    * The identity `src/auth/ws-upgrade.ts` resolved at the handshake, or `null`
-   * with auth off — where no middleware is mounted on the HTTP side either and
-   * the socket stays exactly as unfiltered as it is today.
+   * with auth off — where the handshake passes the `off` origin rule only and
+   * the socket is then unfiltered.
    */
   userId: string | null;
   /** `"admin"` sees every conversation, as on the REST side. `null` with auth

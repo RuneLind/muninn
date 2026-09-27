@@ -501,9 +501,9 @@ describe("GET /api/jira/draft/:id — the polling contract", () => {
   test("a poll target is no-store and CORS-open", async () => {
     const app = makeApp();
     const id = seedRow();
-    const res = await app.request(`/api/jira/draft/${id}`);
+    const res = await app.request(`/api/jira/draft/${id}`, { headers: { origin: "chrome-extension://abcdefghijklmnop" } });
     expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-origin")).toBe("chrome-extension://abcdefghijklmnop");
   });
 
   test("an unknown id is a 404, including a non-uuid one", async () => {

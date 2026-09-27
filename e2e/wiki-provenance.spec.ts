@@ -1263,15 +1263,15 @@ test.describe("Wiki reader: provenance", () => {
   test("the route refuses a cross-origin POST and a text/plain body, on an auth-OFF instance", async ({
     request,
   }) => {
-    // This server runs `MUNINN_AUTH=off`, where `src/index.ts` mounts no origin
-    // middleware at all — so the refusal here is the ROUTE's own, and the page
-    // it protects is one a click would really write.
+    // This server runs `MUNINN_AUTH=off`, where `src/index.ts` mounts the origin
+    // guard in its `off` shape, so the foreign Origin is refused there before
+    // the route's own check (still in place behind it) runs.
     const cross = await request.post(`${BASE}/api/wiki/provenance/stamp`, {
       headers: { origin: "http://evil.example", "content-type": "application/json" },
       data: { wiki: WIKI, relPath: STAMP_REL, ref: `claude-code:${CHAIN_GHOST}` },
     });
     expect(cross.status()).toBe(403);
-    expect((await cross.json()).reason).toBe("cross-origin");
+    expect((await cross.json()).reason).toBe("cross-origin request");
 
     const plain = await request.post(`${BASE}/api/wiki/provenance/stamp`, {
       headers: { "content-type": "text/plain" },

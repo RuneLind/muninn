@@ -80,7 +80,9 @@ beforeEach(() => {
  * either: it normalises the target and will not let a caller set `Origin`.
  */
 function rawHandshake(path: string, headers: Record<string, string> = {}): Promise<string> {
-  const lines = Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join("\r\n");
+  // A `host` entry replaces the default `Host` line rather than adding a second.
+  const { host = `127.0.0.1:${PORT}`, ...rest } = headers;
+  const lines = Object.entries(rest).map(([k, v]) => `${k}: ${v}`).join("\r\n");
   return new Promise((resolve) => {
     let buf = "";
     Bun.connect({
@@ -89,7 +91,7 @@ function rawHandshake(path: string, headers: Record<string, string> = {}): Promi
       socket: {
         open(sock) {
           sock.write(
-            `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${PORT}\r\n` +
+            `GET ${path} HTTP/1.1\r\nHost: ${host}\r\n` +
             `Upgrade: websocket\r\nConnection: Upgrade\r\n` +
             `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n` +
             `${lines}${lines ? "\r\n" : ""}\r\n`,
@@ -224,8 +226,9 @@ describe("origin at the upgrade", () => {
   test("a matching Host does NOT make an origin acceptable", async () => {
     // The defect review demonstrated in PR C, re-asserted on the surface §6
     // explicitly warned not to re-implement: `Host: evil.example` with a
-    // matching `Origin` created a real conversation. `decideOrigin` takes no
-    // host input at all, and this pins that it stays that way here too.
+    // matching `Origin` created a real conversation. `decideOrigin`'s
+    // authenticating rule never reads the host (only `off`'s does), and this
+    // pins that it stays that way here too.
     const lines = [
       "Upgrade: websocket",
       "Connection: Upgrade",
@@ -269,21 +272,56 @@ describe("origin at the upgrade", () => {
 });
 
 describe("with auth OFF", () => {
-  test("the authorizer is a constant allow, carrying no identity", async () => {
-    // "Off is off": no middleware is mounted on the HTTP side either, and the
-    // socket stays exactly as unfiltered as it is today.
-    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT, createIntrospector(OFF_CONFIG));
-    const decision = await off(new Request("http://127.0.0.1/chat/ws"), "203.0.113.9");
-    expect(decision).toEqual({ ok: true, identity: null, role: null });
+  const off = () => createWsUpgradeAuthorizer(OFF_CONFIG, PORT, createIntrospector(OFF_CONFIG));
+  const handshake = (headers: Record<string, string>) =>
+    off()(new Request("http://127.0.0.1/chat/ws", { headers }), "203.0.113.9");
+
+  test("a same-origin handshake is allowed, carrying no identity", async () => {
+    expect(await handshake({ origin: `http://localhost:${PORT}` })).toEqual({ ok: true, identity: null, role: null });
+    expect(await handshake({})).toEqual({ ok: true, identity: null, role: null });
   });
 
-  test("even a cross-origin handshake is allowed", async () => {
-    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT, createIntrospector(OFF_CONFIG));
-    const decision = await off(
-      new Request("http://127.0.0.1/chat/ws", { headers: { origin: "https://evil.example" } }),
-      "203.0.113.9",
-    );
-    expect(decision.ok).toBe(true);
+  test("a cross-origin handshake is refused 403 — any page could otherwise read the chat stream", async () => {
+    const decision = await handshake({ origin: "https://evil.example" });
+    expect(decision.ok).toBe(false);
+    if (decision.ok) return;
+    expect(decision.response.status).toBe(403);
+    expect(await decision.response.json()).toEqual({ error: "forbidden", reason: "cross-origin request" });
+  });
+
+  test("an attacker Host of a DIFFERENT value does not rescue a foreign origin", async () => {
+    expect((await handshake({ origin: "https://evil.example", host: "192.168.1.50:3010" })).ok).toBe(false);
+  });
+
+  test("the extension and a plain-http LAN page whose Origin matches its Host are allowed", async () => {
+    expect((await handshake({ origin: "chrome-extension://abcdefghijklmnop" })).ok).toBe(true);
+    expect((await handshake({ origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010" })).ok).toBe(true);
+  });
+
+  test("a Host-matching Origin marked Sec-Fetch-Site cross-site is refused", async () => {
+    const lan = { origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010" };
+    expect((await handshake({ ...lan, "sec-fetch-site": "cross-site" })).ok).toBe(false);
+    expect((await handshake({ ...lan, "sec-fetch-site": "same-site" })).ok).toBe(false);
+    expect((await handshake(lan)).ok).toBe(true);
+  });
+
+  test("over a real socket: a cross-origin handshake answers 403, a loopback one upgrades", async () => {
+    const saved = authorizeAtPort;
+    authorizeAtPort = off();
+    try {
+      const refused = await rawHandshake("/chat/ws", { origin: "http://evil.test" });
+      expect(statusOf(refused)).toBe(403);
+      expect(refused).toContain("cross-origin");
+      expect(statusOf(await rawHandshake("/chat/ws", { origin: `http://127.0.0.1:${PORT}` }))).toBe(101);
+      // The Host arm, on a LAN name the loopback set does not contain.
+      expect(statusOf(await rawHandshake("/chat/ws", { origin: "http://mini.lan:3987", host: "mini.lan:3987" }))).toBe(101);
+      expect(statusOf(await rawHandshake("/chat/ws", { origin: "http://evil.test", host: "mini.lan:3987" }))).toBe(403);
+      expect(statusOf(await rawHandshake("/chat/ws", {
+        origin: "http://mini.lan:3987", host: "mini.lan:3987", "sec-fetch-site": "cross-site",
+      }))).toBe(403);
+    } finally {
+      authorizeAtPort = saved;
+    }
   });
 });
 

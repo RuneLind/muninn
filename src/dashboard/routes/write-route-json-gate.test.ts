@@ -8,9 +8,9 @@ import { createDashboardRoutes } from "../routes.ts";
  * The mechanical carrier for the JSON gate (`json-request.ts`).
  *
  * A `text/plain`, form-encoded, multipart or bodyless POST is a CORS simple
- * request: a cross-origin page sends it with no preflight. Under
- * `MUNINN_AUTH=off` the global origin check is not mounted, so a write route's
- * own 415 is the guard. This file walks every write route of the app
+ * request: a cross-origin page sends it with no preflight. The global origin
+ * check (`src/auth/origin.ts`, mounted in every mode) refuses a cross-site one;
+ * a write route's own 415 is the second layer. This file walks every write route of the app
  * `src/index.ts` serves — `createDashboardRoutes` at `/` and `createChatRoutes`
  * at `/chat` — and requires that 415, unless the route is on {@link UNGATED}
  * with a reason. A new write route therefore starts RED here until it is gated
@@ -27,11 +27,11 @@ const CONFIG = { dashboardPort: 3010, profile: "default" } as Config;
 /** PUT/PATCH/DELETE are never CORS simple requests: a cross-origin one preflights,
  *  and muninn answers no CORS headers, so the browser never sends it. */
 const NON_SIMPLE = "non-simple method: a cross-origin request preflights and gets no CORS answer";
-/** Routes that answer their own preflight with `Access-Control-Allow-Origin: *`
- *  (the Chrome-extension routes): any page may send them a preflighted JSON
- *  request, so a 415 would not close them. Checked below, not only claimed. */
-const WILDCARD_PREFLIGHT =
-  "answers its own preflight with `*`: needs an origin allowlist, a JSON gate would not close it";
+/** Routes that answer their own preflight for the Chrome extensions (an echoed
+ *  `chrome-extension:` origin): a JSON gate would not close them — the origin
+ *  check does. Checked below, not only claimed. */
+const EXTENSION_PREFLIGHT =
+  "answers its own preflight for an extension origin: the origin check closes it, a JSON gate would not";
 /** The plain remainder: a write route with no per-route 415 today. */
 const OPEN = "dashboard-page POST with no per-route 415 yet: follow-up";
 /** The `/chat` slice: no route there is JSON-gated yet. */
@@ -44,10 +44,10 @@ const UNGATED: ReadonlyMap<string, string> = new Map([
   ["PUT /api/connectors/:id", NON_SIMPLE],
   ["DELETE /api/connectors/:id", NON_SIMPLE],
 
-  ["POST /api/research/chat", WILDCARD_PREFLIGHT],
-  ["POST /api/x-articles/summarize", WILDCARD_PREFLIGHT],
-  ["POST /api/x-articles/summarize-video", WILDCARD_PREFLIGHT],
-  ["POST /api/tiktok/summarize", WILDCARD_PREFLIGHT],
+  ["POST /api/research/chat", EXTENSION_PREFLIGHT],
+  ["POST /api/x-articles/summarize", EXTENSION_PREFLIGHT],
+  ["POST /api/x-articles/summarize-video", EXTENSION_PREFLIGHT],
+  ["POST /api/tiktok/summarize", EXTENSION_PREFLIGHT],
 
   ["POST /api/users", OPEN],
   ["POST /api/watchers/:id/trigger", OPEN],
@@ -79,7 +79,7 @@ const UNGATED: ReadonlyMap<string, string> = new Map([
   ["POST /api/sync/run", OPEN],
 
   ["PUT /chat/preferences/:userId/:botName/connector", NON_SIMPLE],
-  ["PUT /chat/bot-preferences/:botName/default-user", WILDCARD_PREFLIGHT],
+  ["PUT /chat/bot-preferences/:botName/default-user", EXTENSION_PREFLIGHT],
   ["DELETE /chat/conversations/:id", NON_SIMPLE],
   ["PATCH /chat/threads/:id/connector", NON_SIMPLE],
   ["PATCH /chat/threads/:id/auto-respond", NON_SIMPLE],
@@ -224,18 +224,23 @@ describe("every write route answers a non-JSON request with 415", () => {
     const wrong: string[] = [];
     for (const [route, reason] of UNGATED) {
       const [method, pattern] = route.split(" ") as [string, string];
-      const res = await app.request(concrete(pattern)!, {
-        method: "OPTIONS",
-        headers: {
-          Origin: "https://evil.example",
-          "Access-Control-Request-Method": method,
-          "Access-Control-Request-Headers": "content-type",
-        },
-      });
-      const wildcard = res.headers.get("access-control-allow-origin") === "*";
-      if (wildcard !== (reason === WILDCARD_PREFLIGHT)) {
-        wrong.push(`${route} → allow-origin ${res.headers.get("access-control-allow-origin")} (listed: ${reason})`);
+      const preflight = (origin: string) =>
+        app.request(concrete(pattern)!, {
+          method: "OPTIONS",
+          headers: {
+            Origin: origin,
+            "Access-Control-Request-Method": method,
+            "Access-Control-Request-Headers": "content-type",
+          },
+        });
+      const ext = "chrome-extension://abcdefghijklmnop";
+      const extAnswer = (await preflight(ext)).headers.get("access-control-allow-origin");
+      if ((extAnswer === ext) !== (reason === EXTENSION_PREFLIGHT)) {
+        wrong.push(`${route} → extension allow-origin ${extAnswer} (listed: ${reason})`);
       }
+      // No route names a foreign page, and none answers `*`.
+      const evilAnswer = (await preflight("https://evil.example")).headers.get("access-control-allow-origin");
+      if (evilAnswer !== null) wrong.push(`${route} → evil allow-origin ${evilAnswer}`);
     }
     expect(wrong).toEqual([]);
   });

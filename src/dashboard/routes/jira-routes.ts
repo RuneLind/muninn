@@ -30,11 +30,12 @@
  *   · `POST /api/jira/draft/:id/save` — the card's «Lagre», stamping `saved_at`.
  *
  * `GET /api/jira/draft/:id` carries an `Access-Control-Allow-Origin` header with
- * an `app.options` preflight, matching `POST /api/research/chat` — `*` with
- * `MUNINN_AUTH` off, and the allowlisted request origin (or nothing) in an
- * authenticating mode, per `src/auth/cors.ts`. The consequence is
- * stated in migration 070 and accepted: any page the browser visits could read a
- * draft id it can guess, bounded by `DASHBOARD_HOST` defaulting to loopback.
+ * an `app.options` preflight, matching `POST /api/research/chat` — the request's
+ * own origin echoed when it is accepted (with `MUNINN_AUTH` off: loopback, any
+ * `chrome-extension:` origin or the allowlist; in an authenticating mode: the
+ * allowlist), else nothing, per `src/auth/cors.ts`. The consequence stated in
+ * migration 070 now reaches only those origins: an installed extension could
+ * read a draft id it can guess, bounded by `DASHBOARD_HOST` defaulting to loopback.
  *
  * **The four newer endpoints deliberately carry NONE of that** — `from-thread`,
  * the thread listing, `save` and the archive listing. Two of them WRITE (a
@@ -115,10 +116,9 @@ const CORS_GET_METHODS = {
 } as const;
 
 /** `Access-Control-Allow-Origin` is a per-request answer now, so only the
- *  method/header half is a constant: `*` with `MUNINN_AUTH` off, the request's
- *  own origin when it is on `MUNINN_ALLOWED_ORIGINS`, and no header at all
- *  otherwise. See `src/auth/cors.ts` for why the disposition is mode-gated
- *  rather than dropped outright. */
+ *  method/header half is a constant: the request's own origin when it is
+ *  accepted (`src/auth/cors.ts` — the accepted set is mode-gated), and no
+ *  header at all otherwise. */
 const corsGet = (c: Context) => corsHeaders(c, CORS_GET_METHODS);
 
 /**

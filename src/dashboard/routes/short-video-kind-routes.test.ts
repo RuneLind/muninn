@@ -176,7 +176,7 @@ async function post(a: Hono, path: string, body: unknown): Promise<Response> {
 for (const p of POSTS) {
   describe(`${p.name}: the options endpoint`, () => {
     test("answers the kinds this bot offers, with the default named", async () => {
-      const res = await app().request(p.optionsPath);
+      const res = await app().request(p.optionsPath, { headers: { origin: "chrome-extension://abcdefghijklmnop" } });
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
         kinds: { id: string; label: string }[];
@@ -197,7 +197,7 @@ for (const p of POSTS) {
       // CORS: the entry point is a Chrome extension whose muninnUrl is editable
       // past the manifest's localhost grant, so without this header the picker
       // silently falls back to Standard-only.
-      expect(res.headers.get("access-control-allow-origin")).toBeTruthy();
+      expect(res.headers.get("access-control-allow-origin")).toBe("chrome-extension://abcdefghijklmnop");
     });
 
     test("a connector that cannot name the opus MODEL loses the deep kind", async () => {
