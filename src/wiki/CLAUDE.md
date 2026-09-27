@@ -619,8 +619,10 @@ A page is RETIRED by frontmatter `signal: none` plus `signal-reason:`, optionall
 `<meta name="wiki-signal" content="none">` (and `wiki-signal-reason`), read
 through `sniffWikiSignalMeta` from the first 4 KB only, so the tag goes next to
 `<title>`, before any `<style>`. That read is stricter than the keywords sniff:
-a tag inside an HTML comment or a `<script>`/`<style>` body does not count, and
-the attribute must be `name=` itself, not `data-name=`. Only `none` is read,
+a tag inside an HTML comment or a `<script>`/`<style>` body does not count
+(one left-to-right scan, so a `<!--` inside a script string opens no comment;
+an unterminated comment or body runs to the end of the prefix), and the
+attribute must be `name=` itself, not `data-name=`. Only `none` is read,
 quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
 `culled`, because `retire` already names the gardener backlog tail.
 
@@ -631,8 +633,12 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   count), Similar, Related, tracker plan coverage (`isPlanPage` answers false),
   the gardener's See-also wiring targets (`selectWirablePages`), and the lint's
   finding subjects and edit targets (orphan, stale-updated, missing-sources,
-  check 8). In check 8 a culled member never sets a series' spelling or keeps
-  its label while a live member declares the series, and a component whose
+  check 8). A culled member never heads a series a live member still declares:
+  `seriesHead`/`seriesSpellingHead` (`wiki-groups.ts`) apply
+  `liveSeriesMembers` first, and the rail fold, the reader header and check 8.3
+  all pick their head through them, so the lint keeps the label the fold shows.
+  Also in the gardener: `sourceRelatedPages` drops a culled page before its
+  one-backlink cap, and a component whose
   culled members leave one live page is no 8.2 cluster.
 - **Kept in:** the rail listing (hiding is the reader UI's job), the link graph,
   the series census (a culled head still names the fold, and a culled bridge
@@ -644,8 +650,9 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
 - **Wire.** `culled` rides every `toListing` caller; `cullReason` and
   `supersededBy` (resolved in ANY folder, `resolveSupersededBy`) ride the
   single-page `meta` only, through `includeCull`. A bare-name `superseded_by:`
-  resolves in the page's own folder first (the page rule 4 folds it under),
-  then wiki-wide; a path form resolves across folders.
+  resolves in the page's own folder first — the markdown page of its stem
+  whatever extension it spells (`b.html` → `b.md`, the page rule 4 folds it
+  under), then a spelled extension as written — then wiki-wide; a path form resolves across folders.
 - **Dates.** The three keys are metadata-only (`git-dates.ts`), so a cull does
   not move a page's update date.
 - **Worked date over `aliases:`.** The claude-usage ledger is keyed by path, so
