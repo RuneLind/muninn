@@ -2704,16 +2704,27 @@ function sniffMetaContent(prefix: string, name: string): string | undefined {
 }
 
 /**
+ * What {@link sniffWikiSignalMeta} blanks: an HTML comment or a `<script>`/`<style>`
+ * body, in ONE alternation so the scan runs left to right and whichever opens
+ * first wins — a `<!--` inside a script string opens no comment, a `<script>`
+ * inside a comment opens no body. Two passes (comments, then bodies) masked from
+ * an in-script `<!--` to the end and lost the real tag after the script.
+ *
+ * An UNTERMINATED comment or body runs to the end of the prefix (`$`): the
+ * browser reads the rest of the file as comment/script text, and the prefix is
+ * a cut, so the close may lie past it — a tag after the opener is never a tag.
+ */
+const WIKI_SIGNAL_MASK_RE = /<!--[\s\S]*?(?:-->|$)|<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi;
+
+/**
  * The `wiki-signal` pair's STRICTER read: a tag inside an HTML comment or a
- * `<script>`/`<style>` body is text, not a tag, and the attribute must be
- * `name=` itself (`data-name=` is not it). Scoped to the cull pair — a false
- * cull hides a page, while the keywords/description sniff keeps its old read.
+ * `<script>`/`<style>` body is text, not a tag ({@link WIKI_SIGNAL_MASK_RE}), and
+ * the attribute must be `name=` itself (`data-name=` is not it). Scoped to the
+ * cull pair — a false cull hides a page, while the keywords/description sniff
+ * keeps its old read.
  */
 function sniffWikiSignalMeta(prefix: string, name: string): string | undefined {
-  const blank = (m: string) => " ".repeat(m.length);
-  const masked = prefix
-    .replace(/<!--[\s\S]*?(?:-->|$)/g, blank)
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, blank);
+  const masked = prefix.replace(WIKI_SIGNAL_MASK_RE, (m) => " ".repeat(m.length));
   const attr = (tag: string, a: string) => {
     const m = tag.match(new RegExp(`[\\s/]${a}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
     return m ? (m[1] ?? m[2]) : undefined;

@@ -105,6 +105,42 @@ describe("the .html wiki-signal sniff reads a REAL tag only", () => {
     }
     expect(pageOf(index, "archive/real.html").culled).toBe(true);
   });
+
+  test("a `<!--` inside a <script> string opens no comment: the real tag after the script still culls", async () => {
+    await write(
+      "archive/script-opener.html",
+      head('<script>var s = "<!--";</script><meta name="wiki-signal" content="none">'),
+    );
+    // …and a `<script>` inside a comment opens no script body.
+    await write(
+      "archive/comment-script.html",
+      head('<!-- <script> --><meta name="wiki-signal" content="none">'),
+    );
+    const index = await buildWikiIndex(root);
+
+    expect(pageOf(index, "archive/script-opener.html").culled).toBe(true);
+    expect(pageOf(index, "archive/comment-script.html").culled).toBe(true);
+  });
+
+  test("an UNTERMINATED comment or script body runs to the end of the sniffed prefix: a tag after it is text", async () => {
+    await write("archive/open-comment.html", head('<!-- draft <meta name="wiki-signal" content="none">'));
+    await write("archive/open-script.html", head('<script>let t = \'<meta name="wiki-signal" content="none">\';'));
+    const index = await buildWikiIndex(root);
+
+    expect(pageOf(index, "archive/open-comment.html").culled).toBeUndefined();
+    expect(pageOf(index, "archive/open-script.html").culled).toBeUndefined();
+  });
+
+  test("the REASON is read through the same strict sniff: a commented-out reason is no reason", async () => {
+    await write(
+      "archive/reason.html",
+      head('<meta name="wiki-signal" content="none"><!-- <meta name="wiki-signal-reason" content="draft note"> -->'),
+    );
+    const index = await buildWikiIndex(root);
+
+    expect(pageOf(index, "archive/reason.html").culled).toBe(true);
+    expect(pageOf(index, "archive/reason.html").cullReason).toBeUndefined();
+  });
 });
 
 describe("pairAttachments and the culled bit", () => {
