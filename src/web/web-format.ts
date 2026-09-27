@@ -19,6 +19,7 @@ import type { Block, FactVerdict } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
+import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
@@ -414,9 +415,15 @@ function renderInline(text: string): string {
   // Parking code before the component scan is what keeps a component tag inside
   // backticks (`` `<Verdict …>x</Verdict>` ``) literal: the parked sentinel
   // contains no `<`, so the scan below never sees the tag and it stays code.
-  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
-    ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
-  );
+  // Backtick runs pair by CommonMark's exact-N rule (the grammar the fact-check
+  // strip uses), so `` `` `<Fact>` `` `` is one span, not two plus a live tag.
+  let result = "";
+  let cursor = 0;
+  for (const r of lineCodeSpanRanges(text)) {
+    result += text.slice(cursor, r.start) + ph.add("INLINE", `<code>${escapeHtml(codeSpanContent(text, r))}</code>`);
+    cursor = r.end;
+  }
+  result += text.slice(cursor);
 
   // Inline components (Verdict, Pill) on the code-shielded text. Their generated
   // HTML must be parked BEFORE the escapeHtml pass below — otherwise the escape

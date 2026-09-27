@@ -13,6 +13,8 @@
  * platform through unwanted abstractions.
  */
 
+import { lineCodeSpanRanges } from "./code-spans.ts";
+
 export type Block =
   | { type: "code_block"; lang: string; code: string }
   | { type: "hr" }
@@ -304,38 +306,7 @@ const FRONTMATTER_BLOCK_RE = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 
 /** Push every inline code span (`` `x` ``, matched backtick runs) on one line. */
 function pushInlineCodeSpans(line: string, base: number, out: ProtectedRegion[]): void {
-  let i = 0;
-  while (i < line.length) {
-    if (line[i] !== "`") {
-      i++;
-      continue;
-    }
-    let j = i;
-    while (j < line.length && line[j] === "`") j++;
-    const runLen = j - i;
-    let k = j;
-    let closeEnd = -1;
-    while (k < line.length) {
-      if (line[k] !== "`") {
-        k++;
-        continue;
-      }
-      let e = k;
-      while (e < line.length && line[e] === "`") e++;
-      if (e - k === runLen) {
-        closeEnd = e;
-        break;
-      }
-      k = e;
-    }
-    // An UNCLOSED run is not a code span — resume scanning after it.
-    if (closeEnd === -1) {
-      i = j;
-      continue;
-    }
-    out.push({ start: base + i, end: base + closeEnd });
-    i = closeEnd;
-  }
+  for (const r of lineCodeSpanRanges(line)) out.push({ start: base + r.start, end: base + r.end });
 }
 
 /**

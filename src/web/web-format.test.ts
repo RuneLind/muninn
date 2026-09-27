@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { formatWebHtml } from "./web-format.ts";
+import { countFactWrappers } from "../format/markdown-ast.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
 
 describe("formatWebHtml", () => {
@@ -725,5 +726,56 @@ describe("formatWebHtml — inline components (Verdict/Pill mid-text)", () => {
     expect(formatWebHtml("<Verdict value=\"yes\">shipped</Verdict>")).toBe(
       '<span class="verdict verdict-yes">shipped</span>',
     );
+  });
+});
+
+// Backtick runs pair by CommonMark's exact-N rule — the grammar the fact-check strip
+// (`factProtectedRegions`) uses, so the renderer and the strip agree on what is code.
+describe("formatWebHtml — inline code-span runs", () => {
+  // A double-backtick span quoting a <Fact> tag — the shape main split into two spans.
+  const FACT_QUOTE = "**Example.** The draft reads `` `<Fact n=\"2\" v=\"bad\">ships 2.1M units</Fact>` `` and the `#fc-claim-2` card disagrees.";
+  // The #588 repro: a double-backtick span quoting an indented fence opener.
+  const FENCE_QUOTE = "Shape: ``   ```bash          →  <ol><li>Step</li></ol>`` is the output.";
+  const UNMATCHED = "a ``` b `c`";
+
+  test("a double-backtick span around a <Fact> is one code span, not a live mark", () => {
+    const html = formatWebHtml(FACT_QUOTE);
+    expect(html).toContain(
+      "<code>`&lt;Fact n=&quot;2&quot; v=&quot;bad&quot;&gt;ships 2.1M units&lt;/Fact&gt;`</code>",
+    );
+    expect(html).not.toContain("fc-mark");
+  });
+
+  test("a double-backtick span may hold a triple-backtick run", () => {
+    expect(formatWebHtml(FENCE_QUOTE)).toBe(
+      "Shape: <code>   ```bash          →  &lt;ol&gt;&lt;li&gt;Step&lt;/li&gt;&lt;/ol&gt;</code> is the output.",
+    );
+  });
+
+  test("an unmatched run stays literal and does not swallow a later span", () => {
+    expect(formatWebHtml(UNMATCHED)).toBe("a ``` b <code>c</code>");
+  });
+
+  test("one space is stripped from each end only when both ends carry one", () => {
+    expect(formatWebHtml("`` `x` ``")).toBe("<code>`x`</code>");
+    expect(formatWebHtml("`` x``")).toBe("<code> x</code>");
+    expect(formatWebHtml("`  `")).toBe("<code>  </code>");
+    // Only U+0020 counts: a tab or NBSP pad is content.
+    expect(formatWebHtml("a ` \t ` b")).toBe("a <code>\t</code> b");
+    expect(formatWebHtml("` \u00a0 `")).toBe("<code>\u00a0</code>");
+    expect(formatWebHtml("``  x  ``")).toBe("<code> x </code>");
+  });
+
+  test("single-backtick spans are unchanged", () => {
+    expect(formatWebHtml("use `a` and `b`")).toBe("use <code>a</code> and <code>b</code>");
+  });
+
+  test("renderer marks a <Fact> exactly when the strip counts it", () => {
+    const live = 'x ``` y <Fact n="1" v="bad">z</Fact> `c`';
+    for (const input of [FACT_QUOTE, FENCE_QUOTE, UNMATCHED, live]) {
+      const marked = formatWebHtml(input).includes("fc-mark");
+      expect({ input, marked }).toEqual({ input, marked: countFactWrappers(input) > 0 });
+    }
+    expect(countFactWrappers(live)).toBe(1);
   });
 });
