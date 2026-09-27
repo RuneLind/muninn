@@ -17,7 +17,7 @@ const INDEX = "src/index.ts";
 describe("src/index.ts wiring", () => {
   test("setAuthPolicy is called, and before any route is built", async () => {
     // The policy default is `off`. A call placed after `createDashboardRoutes`
-    // would leave a window in which a wildcard CORS header and a cross-user
+    // would leave a window in which an off-mode CORS echo and a cross-user
     // `scope='shared'` memory read are both still live on an authenticating
     // instance.
     const text = await readFile(INDEX, "utf8");

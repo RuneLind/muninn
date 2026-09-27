@@ -40,16 +40,25 @@
  *    preflight the disposition in `cors.ts` answers.)
  * 2. An `Origin` header ⇒ it must be an entry in `MUNINN_ALLOWED_ORIGINS` or a
  *    loopback literal at the CONFIGURED port. Anything else, including the
- *    literal `null` a sandboxed iframe sends, is refused. It is never compared
- *    against the request's own `Host` header — see `loopbackOrigins`.
- *    **`off` adds two arms** (see `OriginPolicyMode`): any `chrome-extension:`
- *    origin, and `Sec-Fetch-Site: same-origin`.
+ *    literal `null` a sandboxed iframe sends, is refused. An authenticating
+ *    mode never compares it against the request's own `Host` header — see
+ *    `loopbackOrigins`. **`off` adds three arms** (see `OriginPolicyMode`):
+ *    any `chrome-extension:` origin, an `Origin` equal to the request's own
+ *    `Host`, and `Sec-Fetch-Site: same-origin`.
  * 3. No `Origin`, but a `Sec-Fetch-Site` ⇒ `same-origin` and `none` pass;
  *    `cross-site` and `same-site` are refused. This is the `<img>` case.
  * 4. Neither header ⇒ allow. A non-browser client (curl, the launchd health
  *    check, a script) sends neither, and every browser that can be steered
  *    cross-site sends at least one. Refusing here would break every scripted
  *    caller to close nothing.
+ *
+ * **Known residual in `off`, on a plain-http non-loopback host.** A cross-site
+ * `<img>`/`<script>` GET to a `SIDE_EFFECTING_GETS` path carries neither
+ * `Origin` nor `Sec-Fetch-Site` there (no Fetch Metadata to an untrustworthy
+ * URL), so it passes step 4 — measured: `<img src=http://muninn.lan:3987/chat/pending/…>`
+ * consumed the message. It cannot be closed without also refusing that page's
+ * own same-origin GETs, which look identical. Remedy: serve over https
+ * (`tailscale serve`) or run an authenticating mode.
  *
  * Note the ORDER of 2 and 3: an allowlisted `chrome-extension://…` origin is
  * granted before `Sec-Fetch-Site` is consulted, because an extension-initiated
@@ -100,6 +109,10 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // Graph mode: at level 2 and up the same ledger reads, for every session a
   // walk reaches — up to `GRAPH_SESSIONS_MAX` refs behind one GET.
   "/api/wiki/graph",
+  // Uncached, it SPAWNS every stdio MCP server in the bot's `.mcp.json` to probe
+  // it — so an `<img>` on any page could start local processes. The chat page
+  // calls it with a same-origin `fetch`, which passes.
+  "/chat/mcp-status/",
   // The two WebSocket upgrades. They never reach this middleware — `src/index.ts`
   // handles them inside `Bun.serve`'s `fetch`, before `app.fetch` — and the
   // enforcement point is `src/auth/ws-upgrade.ts`, which consults this same
@@ -145,7 +158,7 @@ export interface OriginDecisionInput {
    * Every origin this instance accepts a side effect from: `MUNINN_ALLOWED_ORIGINS`
    * plus the loopback literals at the configured `DASHBOARD_PORT`.
    *
-   * There is deliberately NO `host` field. An earlier cut compared the `Origin`
+   * The authenticating rule deliberately never reads `host`. An earlier cut compared the `Origin`
    * against the request's own `Host` header, which asks "does this request agree
    * with itself" rather than "is this my origin" — and review demonstrated the
    * consequence on a live server: `Host: evil.example:3013` with
@@ -155,34 +168,49 @@ export interface OriginDecisionInput {
    * Host/Origin pair while the loopback bypass supplies the pinned identity.
    */
   readonly allowedOrigins: readonly string[];
+  /**
+   * The request's own `Host` header, verbatim — read by the `off` Host arm
+   * ONLY (see `OriginPolicyMode`). An authenticating mode never consults it,
+   * for the rebinding reason recorded on `allowedOrigins` above.
+   */
+  readonly host?: string | undefined;
   /** Omitted ⇒ `"authenticating"`, the stricter rule. */
   readonly mode?: OriginPolicyMode;
 }
 
 /**
- * `off` widens the `Origin` arm by two, both so that an unconfigured instance
+ * `off` widens the `Origin` arm by three, all so that an unconfigured instance
  * keeps working:
  *
  * - **any `chrome-extension:` origin.** The four extensions in `extensions/`
  *   carry no manifest `key`, so their ids differ per install and cannot be
- *   listed. Admitting the scheme costs nothing: an extension holding
- *   `host_permissions` for this host bypasses CORS and could send the request
- *   anyway, and a web page cannot forge the scheme.
- * - **`Sec-Fetch-Site: same-origin`**, for the dashboard served through
- *   `tailscale serve` (`Origin: https://<tailnet-name>`, unknown to muninn) or
- *   on a LAN address. This admits DNS rebinding — accepted, because `off` has
- *   no `Host` allowlist, so a rebound name already reads and writes
- *   everything. The guard targets drive-by cross-site pages, not rebinding.
+ *   listed. This admits ANY installed extension, including one WITHOUT host
+ *   permission for this host — it now gets a CORS echo and passes preflight.
+ *   Not a regression: the `*` this replaced granted every extension the same.
+ *   A web page cannot forge the scheme.
+ * - **`Origin` equal to the request's own `Host`** (scheme from the `Origin`),
+ *   for the dashboard served over plain http on a LAN or tailnet address
+ *   (`DASHBOARD_HOST=0.0.0.0`, `http://mini:3010`). A browser sends Fetch
+ *   Metadata only to a potentially-trustworthy URL (https, localhost,
+ *   127.0.0.0/8), so such a page's own POST carries an `Origin` and NO
+ *   `Sec-Fetch-Site`, and without this arm every write it makes answers 403.
+ * - **`Sec-Fetch-Site: same-origin`**, for the dashboard served over https
+ *   through `tailscale serve` (`Origin: https://<tailnet-name>`, unknown to
+ *   muninn), which may rewrite `Host` so the arm above does not match.
  *
- * An authenticating mode keeps neither: there, both are an identity question.
+ * The last two admit DNS rebinding — accepted, because `off` has no `Host`
+ * allowlist, so a rebound name already reads and writes everything. The guard
+ * targets drive-by cross-site pages, not rebinding. An authenticating mode
+ * keeps none of the three: there, each is an identity question, and the Host
+ * arm is exactly the comparison that mode rejected (see `allowedOrigins`).
  */
 export type OriginPolicyMode = "authenticating" | "off";
 
 /**
  * The origin predicate `off` mode shares with `cors.ts`: on the accepted set
  * (allowlist + loopback) or a `chrome-extension:` origin. Deliberately WITHOUT
- * the same-origin arm — CORS only ever answers a cross-origin reader, so a
- * `same-origin` request never needs the header.
+ * the Host and same-origin arms — CORS only ever answers a cross-origin reader,
+ * so a same-origin request never needs the header.
  */
 export function offModeOriginAccepted(origin: string, accepted: readonly string[]): boolean {
   const normalized = normalizeOrigin(origin);
@@ -198,6 +226,28 @@ export function acceptedOrigins(allowedOrigins: readonly string[], dashboardPort
     ...allowedOrigins,
     ...loopback.map((o) => normalizeOrigin(o)).filter((o): o is string => o !== null),
   ];
+}
+
+/**
+ * The `off` Host arm: does `origin` name the same scheme/host/port the request
+ * was sent to? The scheme comes from the `Origin` (http or https only); the
+ * host and port from `Host`, normalised the same way on both sides — case,
+ * default port, one trailing dot, IPv6 brackets. A missing or unparseable
+ * `Host`, or one carrying anything but `host[:port]`, never matches.
+ * NEVER call this in an authenticating mode.
+ */
+export function originMatchesHost(origin: string, host: string | undefined): boolean {
+  const h = host?.trim();
+  if (!h || /[\s/\\?#@]/.test(h)) return false;
+  const canon = (u: URL) => `${u.protocol}//${u.hostname.replace(/\.$/, "")}:${u.port}`.toLowerCase();
+  try {
+    const o = new URL(origin.trim());
+    if (o.protocol !== "http:" && o.protocol !== "https:") return false;
+    if (o.origin === "null" || o.href !== `${o.origin}/`) return false;
+    return canon(o) === canon(new URL(`${o.protocol}//${h}`));
+  } catch {
+    return false;
+  }
 }
 
 export interface OriginDecision {
@@ -246,6 +296,7 @@ export function decideOrigin(input: OriginDecisionInput): OriginDecision {
       if (offModeOriginAccepted(origin, input.allowedOrigins)) {
         return { allowed: true, reason: "extension origin" };
       }
+      if (originMatchesHost(origin, input.host)) return { allowed: true, reason: "origin matches host" };
       if (site === "same-origin") return { allowed: true, reason: "sec-fetch-site same-origin" };
     }
     // `Origin: null` lands here — a sandboxed iframe or a redirected
@@ -291,6 +342,7 @@ export function createOriginMiddleware(
       path: c.req.path,
       origin: c.req.header("origin"),
       secFetchSite: c.req.header("sec-fetch-site"),
+      host: c.req.header("host"),
       allowedOrigins: accepted,
       mode,
     });

@@ -27,6 +27,7 @@ describe("decideOrigin — the off-mode table", () => {
     allowedOrigins: loopbackOrigins(PORT),
     origin: undefined as string | undefined,
     secFetchSite: undefined as string | undefined,
+    host: undefined as string | undefined,
     mode: "off" as const,
   };
   const allowed = (over: Partial<typeof base>) => decideOrigin({ ...base, ...over }).allowed;
@@ -61,8 +62,37 @@ describe("decideOrigin — the off-mode table", () => {
     expect(allowed({ origin: TAILNET })).toBe(false);
   });
 
+  test("a plain-http LAN page: Origin equal to its own Host passes with NO Sec-Fetch-Site", () => {
+    // A browser sends Fetch Metadata only to potentially-trustworthy URLs, so
+    // this is the whole header set a dashboard page on `http://<lan-ip>:3010` sends.
+    expect(allowed({ origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010" })).toBe(true);
+    expect(allowed({ origin: "http://Mini.:3010", host: "mini:3010" })).toBe(true);
+    expect(allowed({ origin: "http://mini", host: "MINI:80" })).toBe(true);
+    expect(allowed({ origin: "https://mini", host: "mini:443" })).toBe(true);
+    expect(allowed({ origin: "http://[fe80::1]:3010", host: "[FE80::1]:3010" })).toBe(true);
+  });
+
+  test("the Host arm refuses a mismatch, an attacker Host of another value, and a missing Host", () => {
+    expect(allowed({ origin: "http://192.168.1.50:3010", host: "192.168.1.50:3011" })).toBe(false);
+    expect(allowed({ origin: "http://192.168.1.50:3010", host: "192.168.1.51:3010" })).toBe(false);
+    expect(allowed({ origin: "https://192.168.1.50:3010", host: "192.168.1.50" })).toBe(false);
+    expect(allowed({ origin: "http://evil.example", host: "192.168.1.50:3010" })).toBe(false);
+    expect(allowed({ origin: "http://evil.example", host: "evil.example.com" })).toBe(false);
+    expect(allowed({ origin: "http://192.168.1.50:3010" })).toBe(false);
+    expect(allowed({ origin: "http://192.168.1.50:3010", host: "" })).toBe(false);
+    expect(allowed({ origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010/x" })).toBe(false);
+    expect(allowed({ origin: "http://192.168.1.50:3010", host: "u@192.168.1.50:3010" })).toBe(false);
+    expect(allowed({ origin: "null", host: "null" })).toBe(false);
+  });
+
   test("an origin on the optional allowlist is allowed", () => {
     expect(allowed({ origin: TAILNET, allowedOrigins: [...loopbackOrigins(PORT), TAILNET] })).toBe(true);
+  });
+
+  test("GET /chat/mcp-status/:bot (spawns MCP servers when uncached) is side-effecting", () => {
+    // The cross-site `<img>` shape: no Origin, Sec-Fetch-Site cross-site.
+    expect(allowed({ method: "GET", path: "/chat/mcp-status/jarvis", secFetchSite: "cross-site" })).toBe(false);
+    expect(allowed({ method: "GET", path: "/chat/mcp-status/jarvis", secFetchSite: "same-origin" })).toBe(true);
   });
 
   test("no Origin: the Sec-Fetch-Site rule is the auth-mode one", () => {
@@ -83,6 +113,9 @@ describe("decideOrigin — the off-mode table", () => {
     const auth = { ...base, mode: "authenticating" as const };
     expect(decideOrigin({ ...auth, origin: TAILNET, secFetchSite: "same-origin" }).allowed).toBe(false);
     expect(decideOrigin({ ...auth, origin: EXTENSION, secFetchSite: "none" }).allowed).toBe(false);
+    // The Host arm is the comparison auth mode rejected (DNS rebinding).
+    expect(decideOrigin({ ...auth, origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010" }).allowed).toBe(false);
+    expect(decideOrigin({ ...auth, origin: "http://evil.example:3013", host: "evil.example:3013" }).allowed).toBe(false);
     // Omitted mode is the auth rule, so every existing caller is unchanged.
     const { mode: _omit, ...legacy } = auth;
     expect(decideOrigin({ ...legacy, origin: TAILNET, secFetchSite: "same-origin" }).allowed).toBe(false);
@@ -182,6 +215,18 @@ describe("the dashboard with auth off, composed as src/index.ts composes it", ()
     await reachedHandler(await post(offApp(), { "content-type": "application/json" }));
   });
 
+  test("a plain-http LAN page's POST (Origin = Host, no Sec-Fetch-Site) reaches the handler", async () => {
+    await reachedHandler(await post(offApp(), {
+      host: "192.168.1.50:3010", origin: "http://192.168.1.50:3010", "content-type": "application/json",
+    }));
+  });
+
+  test("a foreign page's POST to that LAN host is still refused", async () => {
+    await refused(await post(offApp(), {
+      host: "192.168.1.50:3010", origin: "http://evil.example", "content-type": "application/json",
+    }));
+  });
+
   test("the preflight names the extension and not a foreign page", async () => {
     const preflight = (origin: string) => offApp().request("/api/research/chat", {
       method: "OPTIONS",
@@ -194,5 +239,23 @@ describe("the dashboard with auth off, composed as src/index.ts composes it", ()
     expect(evil.status).toBe(204);
     expect(evil.headers.get("access-control-allow-origin")).toBeNull();
     expect(evil.headers.get("vary")).toBe("Origin");
+  });
+});
+
+describe("GET /chat/mcp-status/:bot behind the off-mode guard", () => {
+  test("a cross-site <img>-shaped GET is refused 403 before the probe; the chat page's fetch reaches it", async () => {
+    let probes = 0;
+    const app = new Hono();
+    app.use("*", createOriginMiddleware([], PORT, "off"));
+    app.get("/chat/mcp-status/:bot", (c) => {
+      probes += 1;
+      return c.json({ servers: [] });
+    });
+    const img = await app.request("/chat/mcp-status/jarvis", { headers: { "sec-fetch-site": "cross-site" } });
+    expect(img.status).toBe(403);
+    expect(probes).toBe(0);
+    const own = await app.request("/chat/mcp-status/jarvis", { headers: { "sec-fetch-site": "same-origin" } });
+    expect(own.status).toBe(200);
+    expect(probes).toBe(1);
   });
 });

@@ -576,8 +576,8 @@ describe("frames off — the capture that shipped before this PR", () => {
 
 describe("frames on", () => {
   test("the probe target is derived from the VIDEO ID, never from the caller's url", async () => {
-    // The route is CORS-`*` with MUNINN_AUTH=off, so a client-supplied url
-    // reaching yt-dlp would let any page spawn it against an arbitrary host.
+    // With MUNINN_AUTH=off any extension origin reaches the route, so a
+    // client-supplied url reaching yt-dlp would let it spawn yt-dlp anywhere.
     await summarizeVideo(
       createJob(VIDEO_ID, "A talk", "https://evil.test/whatever"),
       VIDEO_ID,

@@ -20,9 +20,10 @@
  *    accepted set. §6's first instruction for this PR is not to write a second
  *    origin check: PR C's first cut compared `Origin` to the request's own
  *    `Host`, and review demonstrated `Host: evil.example` with a matching
- *    `Origin` creating a real conversation. `decideOrigin` takes no `host` input
- *    at all, and `/chat/ws` + `/simulator/ws` are entries in
- *    `SIDE_EFFECTING_GETS` so the shared rule evaluates them.
+ *    `Origin` creating a real conversation. `decideOrigin`'s authenticating
+ *    rule never reads `host` (only the `off` rule does), and `/chat/ws` +
+ *    `/simulator/ws` are entries in `SIDE_EFFECTING_GETS` so the shared rule
+ *    evaluates them. With auth off, only this origin half runs.
  *
  * ## Why identity is checked first
  *
@@ -56,8 +57,7 @@ import type { AuthConfig } from "./mode.ts";
 import { isAuthenticatingMode } from "./mode.ts";
 import { localIdentity, type Identity, type Introspector } from "./introspect.ts";
 import { authUnavailableBody, resolveGrantedRole, resolveRequestIdentity, unauthenticatedBody } from "./middleware.ts";
-import { decideOrigin, loopbackOrigins } from "./origin.ts";
-import { normalizeOrigin } from "../config.ts";
+import { acceptedOrigins, decideOrigin, type OriginPolicyMode } from "./origin.ts";
 import type { AuthRole } from "./role.ts";
 
 const log = getLog("auth", "ws");
@@ -65,8 +65,8 @@ const log = getLog("auth", "ws");
 export type WsUpgradeDecision =
   | {
     readonly ok: true;
-    /** `null` with auth off — no middleware exists there, and the socket is
-     *  unfiltered exactly as it is today. */
+    /** `null` with auth off — there is no identity, so the socket is
+     *  unfiltered once the `off` origin rule has let the handshake through. */
     readonly identity: Identity | null;
     readonly role: AuthRole | null;
   }
@@ -91,10 +91,10 @@ export function __resetWsWarningsForTest(): void {
 /**
  * Build the upgrade authorizer once, at boot.
  *
- * With auth **off** it is a constant `ok` — there is no identity to resolve, and
- * the HTTP side's `off`-shape origin guard does not reach the upgrade.
- * The returned function is still called, so the wiring is exercised on every
- * instance rather than only on the one that authenticates.
+ * With auth **off** there is no identity to resolve, but the ORIGIN rule still
+ * runs — `decideOrigin` in its `off` shape, the same rule the HTTP guard
+ * applies. Without it any web page could `new WebSocket("ws://localhost:3010/chat/ws")`
+ * and read the chat event stream (measured: OPEN from `http://evil.test`).
  *
  * ⚠️ `introspector` is the SAME INSTANCE the HTTP middleware holds, built once
  * in `src/index.ts`. Building a second one here is not a duplicate object, it is
@@ -109,21 +109,19 @@ export function createWsUpgradeAuthorizer(
   dashboardPort: number,
   introspector: Introspector | null,
 ): (req: Request, peer: string | undefined) => Promise<WsUpgradeDecision> {
+  // Computed once, exactly as `createOriginMiddleware` does it: the accepted set
+  // is a property of the CONFIGURATION, never of the request.
+  const accepted = acceptedOrigins(auth.allowedOrigins, dashboardPort);
+
   if (!isAuthenticatingMode(auth.mode)) {
     const open: WsUpgradeDecision = { ok: true, identity: null, role: null };
-    return async () => open;
+    return async (req) => (originRefusal(req, accepted, "off") ?? open);
   }
 
   if (!introspector) {
     throw new Error(`createWsUpgradeAuthorizer called for MUNINN_AUTH="${auth.mode}" — nothing to mount.`);
   }
   const pinned = auth.local ? localIdentity(auth.local) : null;
-  // Computed once, exactly as `createOriginMiddleware` does it: the accepted set
-  // is a property of the CONFIGURATION, never of the request.
-  const accepted = [
-    ...auth.allowedOrigins,
-    ...loopbackOrigins(dashboardPort).map((o) => normalizeOrigin(o)).filter((o): o is string => o !== null),
-  ];
 
   return async (req, peer) => {
     // `via` as well as `identity`: the role this grants must equal the role
@@ -150,27 +148,8 @@ export function createWsUpgradeAuthorizer(
       return { ok: false, response: refuse(unauthenticatedBody(auth), 401) };
     }
 
-    let path = "/chat/ws";
-    try {
-      path = new URL(req.url).pathname;
-    } catch {
-      // A target Bun accepted at the socket layer but `URL` will not parse.
-      // Fall through with the guarded default rather than throwing: the two
-      // paths this handler serves are both in `SIDE_EFFECTING_GETS`, so the
-      // default is the fail-CLOSED one.
-    }
-
-    const decision = decideOrigin({
-      method: "GET",
-      path,
-      origin: req.headers.get("origin") ?? undefined,
-      secFetchSite: req.headers.get("sec-fetch-site") ?? undefined,
-      allowedOrigins: accepted,
-    });
-    if (!decision.allowed) {
-      warnOnce(decision.reason, `Refused a cross-origin WebSocket upgrade (${decision.reason})`);
-      return { ok: false, response: refuse({ error: "forbidden", reason: "cross-origin request" }, 403) };
-    }
+    const refused = originRefusal(req, accepted, "authenticating");
+    if (refused) return refused;
 
     // No ZONE decision is made here, deliberately: `/chat/ws` and
     // `/simulator/ws` are `/chat/*` surfaces, i.e. inside the user zone, and
@@ -178,6 +157,38 @@ export function createWsUpgradeAuthorizer(
     // `eventVisibleTo`). A role is still resolved because `ws.data` carries it.
     return { ok: true, identity, role: resolveGrantedRole(identity, via, auth) };
   };
+}
+
+/** The origin half, shared by both modes: `null` when the handshake passes,
+ *  else the 403 decision. `host` is passed always; `decideOrigin` reads it in
+ *  `off` only. */
+function originRefusal(
+  req: Request,
+  accepted: readonly string[],
+  mode: OriginPolicyMode,
+): WsUpgradeDecision | null {
+  let path = "/chat/ws";
+  try {
+    path = new URL(req.url).pathname;
+  } catch {
+    // A target Bun accepted at the socket layer but `URL` will not parse.
+    // Fall through with the guarded default rather than throwing: the two
+    // paths this handler serves are both in `SIDE_EFFECTING_GETS`, so the
+    // default is the fail-CLOSED one.
+  }
+
+  const decision = decideOrigin({
+    method: "GET",
+    path,
+    origin: req.headers.get("origin") ?? undefined,
+    secFetchSite: req.headers.get("sec-fetch-site") ?? undefined,
+    host: req.headers.get("host") ?? undefined,
+    allowedOrigins: accepted,
+    mode,
+  });
+  if (decision.allowed) return null;
+  warnOnce(decision.reason, `Refused a cross-origin WebSocket upgrade (${decision.reason})`);
+  return { ok: false, response: refuse({ error: "forbidden", reason: "cross-origin request" }, 403) };
 }
 
 function warnOnce(key: string, message: string): void {

@@ -80,8 +80,9 @@ try {
 // branch, the CORS sites across seven route files, and `getBotDefaultUser`'s
 // pinned-identity fallback. Immediately
 // after `resolveAuthConfig()` and before anything is started, because the
-// default is `off` and a later call would leave a window in which a wildcard
-// CORS header and a cross-user shared-memory read are both still live.
+// default is `off` and a later call would leave a window in which the CORS echo
+// ignores the configured allowlist and port, and a cross-user shared-memory
+// read is still live.
 // `src/auth/wiring.test.ts` pins this call site.
 setAuthPolicy(auth, config.dashboardPort);
 
@@ -278,7 +279,9 @@ if (isAuthenticatingMode(auth.mode)) {
 } else {
   // No session to ride, but any page the user visits can POST to
   // `localhost:3010` and spend model turns or write state. The `off` shape
-  // admits the unpinned Chrome extensions and same-origin pages unconfigured.
+  // admits the unpinned Chrome extensions and the dashboard's own pages
+  // (loopback, a plain-http LAN address via `Host`, an https proxy via
+  // `Sec-Fetch-Site`) unconfigured.
   app.use("*", createOriginMiddleware(auth.allowedOrigins, config.dashboardPort, "off"));
 }
 app.route("/", dashboard);
@@ -292,9 +295,8 @@ app.all("/simulator/*", (c) => c.redirect(c.req.path.replace("/simulator", "/cha
 app.all("/simulator", (c) => c.redirect("/chat", 301));
 
 // Start server — with WebSocket support for chat
-// Built once at boot, like the two Hono middlewares: with auth off it is a
-// constant "allow", so the wiring is exercised on every instance rather than
-// only on the one that authenticates.
+// Built once at boot, like the Hono middlewares. With auth off it resolves no
+// identity but still applies the `off` origin rule, as the HTTP guard does.
 const authorizeWsUpgrade = createWsUpgradeAuthorizer(auth, config.dashboardPort, introspector);
 
 const server = Bun.serve<import("./chat/index.ts").ChatWsData>({

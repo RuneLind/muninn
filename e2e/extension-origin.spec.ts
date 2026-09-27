@@ -11,10 +11,12 @@
  * `Origin: chrome-extension://<per-install id>` and `Sec-Fetch-Site: cross-site`,
  * which is why the guard admits the whole scheme rather than a listed id.
  *
- * The control is a page on another origin (the stub on a second port) POSTing
- * `text/plain` — a CORS simple request, so the browser sends it with no
- * preflight. The page cannot read the answer, so the refusal is read off the
- * server's own warn line.
+ * The control is a page on another SITE — the stub, served as
+ * `http://elsewhere.test:<port>`, a name `--host-resolver-rules` maps to
+ * 127.0.0.1 (a second port on 127.0.0.1 would be same-site, not cross-site) —
+ * POSTing `text/plain`, a CORS simple request the browser sends with no
+ * preflight, and opening a WebSocket to `/chat/ws`. The page cannot read the
+ * POST's answer, so that refusal is read off the server's own warn line.
  *
  * Extensions need a persistent context and the full Chromium build
  * (`channel: "chromium"`), not the default headless shell, so this spec launches
@@ -33,6 +35,7 @@ import { e2ePort } from "./ports.ts";
 const PORT = e2ePort("extension-origin");
 const PAGE_PORT = e2ePort("extension-origin/page");
 const BASE = `http://127.0.0.1:${PORT}`;
+const ELSEWHERE = "elsewhere.test";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const EXTENSION = path.join(REPO_ROOT, "extensions/youtube");
 
@@ -86,7 +89,11 @@ test.beforeAll(async () => {
   ctx = await chromium.launchPersistentContext(profileDir, {
     channel: "chromium",
     headless: true,
-    args: [`--disable-extensions-except=${EXTENSION}`, `--load-extension=${EXTENSION}`],
+    args: [
+      `--disable-extensions-except=${EXTENSION}`,
+      `--load-extension=${EXTENSION}`,
+      `--host-resolver-rules=MAP ${ELSEWHERE} 127.0.0.1`,
+    ],
   });
 });
 
@@ -134,7 +141,7 @@ test.describe("MUNINN_AUTH=off: the origin guard", () => {
 
   test("a cross-site page's text/plain POST is refused before the handler", async () => {
     const page = await ctx!.newPage();
-    await page.goto(`http://127.0.0.1:${PAGE_PORT}/`);
+    await page.goto(`http://${ELSEWHERE}:${PAGE_PORT}/`);
     const outcome = await page.evaluate(async (base) => {
       try {
         await fetch(`${base}/api/research/chat`, {
@@ -154,5 +161,26 @@ test.describe("MUNINN_AUTH=off: the origin guard", () => {
       .poll(() => serverLog, { timeout: 5_000 })
       .toContain("Refused a cross-origin POST /api/research/chat (origin not allowed)");
     expect(serverLog).not.toContain("POST /api/research/chat from");
+  });
+
+  test("a cross-site page's WebSocket to /chat/ws is refused at the handshake", async () => {
+    const page = await ctx!.newPage();
+    await page.goto(`http://${ELSEWHERE}:${PAGE_PORT}/`);
+    const outcome = await page.evaluate(
+      (url) =>
+        new Promise<string>((r) => {
+          const ws = new WebSocket(url);
+          ws.onopen = () => {
+            ws.close();
+            r("open");
+          };
+          ws.onerror = () => r("error");
+        }),
+      `ws://127.0.0.1:${PORT}/chat/ws`,
+    );
+    expect(outcome).toBe("error");
+    await expect
+      .poll(() => serverLog, { timeout: 5_000 })
+      .toContain("Refused a cross-origin WebSocket upgrade (origin not allowed)");
   });
 });
