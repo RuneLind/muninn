@@ -19,7 +19,7 @@ import type { Block, FactVerdict } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
-import { codeSpanContent, lineCodeSpanRanges, textCodeSpanRanges } from "../format/code-spans.ts";
+import { codeSpanContent, lineCodeSpanRanges, textCodeSpanRanges, type LineRange } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
@@ -283,7 +283,8 @@ const webRenderer: BlockRenderer = {
           ? `<div class="annotated-code-file">${escapeHtml(attrs.file)}</div>`
           : "";
         // Annotations are every non-fence body block (the paragraphs after it).
-        const notesHtml = renderBlocks(rawChildren, webRenderer, (b) => b.type !== "code_block");
+        const notes = rawChildren.filter((b) => b.type !== "code_block");
+        const notesHtml = renderBlocks(notes, webRenderer);
         const notesBlock = notesHtml.trim()
           ? `<div class="annotated-code-notes">${notesHtml}</div>`
           : "";
@@ -408,17 +409,18 @@ const webRenderer: BlockRenderer = {
 };
 
 /**
- * A `text` block: code spans pair by `textCodeSpanRanges` (across a soft break
- * only inside a certain paragraph) and are parked first, each placeholder
+ * A `text` block: code spans pair by `textCodeSpanRanges` (across lines only in
+ * an `across` range, a stretch that is certainly one paragraph) and are parked first, each placeholder
  * followed by the newlines its span contained, so every source line still
  * reaches `renderInline` on its own — emphasis, links, components and `<Fact>`
  * never cross a line, bridged by a span or not. A line a span ended on keeps only
  * its tail and is glued to the placeholder's line with no newline, as CommonMark
- * turns the break into a space INSIDE the span. `renderInline`'s own span pass
- * then finds no pair: a run left unmatched here has no equal run after it in the
- * stretch it was scanned over.
+ * turns the break into a space INSIDE the span. The pieces skip `renderInline`'s
+ * own span pass: every span is already parked, and a second pass could pair
+ * what this one left literal — the backtick an escape split off a parked span's
+ * run is a run of its own there.
  */
-function renderTextBlock(lines: string[], opensParagraph: boolean): string {
+function renderTextBlock(lines: string[], across: readonly LineRange[]): string {
   const text = lines.join("\n");
   const ph = new Placeholders();
   let parked = "";
@@ -431,7 +433,7 @@ function renderTextBlock(lines: string[], opensParagraph: boolean): string {
     for (let k = text.indexOf("\n", from); k !== -1 && k < to; k = text.indexOf("\n", k + 1)) n++;
     return n;
   };
-  for (const r of textCodeSpanRanges(lines, opensParagraph)) {
+  for (const r of textCodeSpanRanges(lines, across)) {
     line += countNewlines(cursor, r.start);
     const inside = countNewlines(r.start, r.end);
     for (let k = 1; k <= inside; k++) glued.add(line + k);
@@ -446,7 +448,7 @@ function renderTextBlock(lines: string[], opensParagraph: boolean): string {
   let out = "";
   parked.split("\n").forEach((piece, i) => {
     if (i > 0 && !glued.has(i)) out += "\n";
-    out += renderInline(piece);
+    out += renderInlineAfterSpans(piece, new Placeholders());
   });
   return ph.restore(out);
 }
@@ -467,6 +469,12 @@ function renderInline(text: string): string {
     cursor = r.end;
   }
   result += text.slice(cursor);
+  return renderInlineAfterSpans(result, ph);
+}
+
+/** Everything `renderInline` does after its code-span pass, on text whose spans are parked in `ph`. */
+function renderInlineAfterSpans(text: string, ph: Placeholders): string {
+  let result = text;
 
   // Inline components (Verdict, Pill) on the code-shielded text. Their generated
   // HTML must be parked BEFORE the escapeHtml pass below — otherwise the escape

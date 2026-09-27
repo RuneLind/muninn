@@ -10,6 +10,7 @@ import {
   parseChecklist,
   scanInlineComponents,
   textBlockSourceLines,
+  textBlockCrossLineRanges,
   countFactWrappers,
   markdownCodeRegions,
   type Block,
@@ -1021,23 +1022,24 @@ describe("textBlockSourceLines", () => {
   test("maps every text block, component bodies included, to its source lines", () => {
     const text = "p1\n```\nx\n```\np2\np3\n<Callout>\nq\n</Callout>\n# h\n\nr";
     const groups = textBlockSourceLines(text).sort((a, b) => a.lines[0]! - b.lines[0]!);
-    expect(groups).toEqual([
-      { lines: [0], opensParagraph: true },
-      { lines: [4, 5], opensParagraph: true },
-      { lines: [7], opensParagraph: true },
-      { lines: [10, 11], opensParagraph: true },
-    ]);
+    expect(groups.map((g) => g.lines)).toEqual([[0], [4, 5], [7], [10, 11]]);
   });
 
-  test("a block after a list, quote, table or component does not open a paragraph", () => {
-    for (const before of ["- a", "1. a", "> q", "| a |\n|---|\n| b |", "<Callout>\nq\n</Callout>"]) {
-      const groups = textBlockSourceLines(`${before}\nx`);
-      expect({ before, last: groups[groups.length - 1]!.opensParagraph }).toEqual({ before, last: false });
-    }
-    for (const before of ["# h", "---", "```\nz\n```"]) {
-      const groups = textBlockSourceLines(`${before}\nx`);
-      expect({ before, last: groups[groups.length - 1]!.opensParagraph }).toEqual({ before, last: true });
-    }
+  test("a stretch pairs across only when it lies whole in one text block", () => {
+    // After a collapsed fence the block's lines still map to their source lines.
+    const after = textBlockSourceLines("```\nz\n```\n\na `x\ny` b");
+    expect(after[after.length - 1]).toEqual({ lines: [3, 4, 5], across: [{ first: 1, end: 3 }] });
+    // `#` + NBSP is a heading to the parser, not to CommonMark: the stretch is split, so per line.
+    const split = textBlockSourceLines("a `x\n#\u00a0h\ny` b");
+    expect(split.every((g) => g.across.length === 0)).toBe(true);
+    const block = parseBlocks("a `x\n#\u00a0h\ny` b")[0]!;
+    expect(textBlockCrossLineRanges(block)).toEqual([]);
+  });
+
+  test("a parsed text block carries its cross-line ranges, and a hand-built one none", () => {
+    const [block] = parseBlocks("p\n\na `x\ny` b");
+    expect(textBlockCrossLineRanges(block!)).toEqual([{ first: 2, end: 4 }]);
+    expect(textBlockCrossLineRanges({ type: "text", lines: ["a `x", "y` b"] })).toEqual([]);
   });
 
   test("markdownCodeRegions returns its regions in document order", () => {

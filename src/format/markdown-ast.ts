@@ -13,7 +13,7 @@
  * platform through unwanted abstractions.
  */
 
-import { textCodeSpanRanges } from "./code-spans.ts";
+import { crossLineStretches, textCodeSpanRanges, type LineRange } from "./code-spans.ts";
 
 export type Block =
   | { type: "code_block"; lang: string; code: string }
@@ -329,10 +329,10 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
 /**
  * The regions of a markdown body where text is CODE rather than prose: fenced
  * blocks (marker-matched, CommonMark closer-length rule, an unterminated fence
- * running to EOF) and inline backtick spans, sorted by start. A span may pair
- * across the lines of a parser `text` block by the renderer's own rule
- * ({@link textBlockSourceLines} + `textCodeSpanRanges`); any other line
- * (heading, list item, table row) pairs on its own.
+ * running to EOF) and inline backtick spans, sorted by start. A span pairs
+ * across lines exactly where the renderer's does: inside a `crossLineStretches`
+ * stretch that lies whole in one parser `text` block ({@link textBlockSourceLines});
+ * every other line pairs on its own.
  *
  * Exported because every pass that rewrites markdown needs the same answer and a
  * second fence detector is how the two drift apart: the fact-check strip above
@@ -383,9 +383,9 @@ export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
   }
   if (fenceStart >= 0) regions.push({ start: fenceStart, end: body.length });
 
-  const pushSpans = (first: number, count: number, opensParagraph: boolean) => {
+  const pushSpans = (first: number, count: number, across: readonly LineRange[]) => {
     const base = lineStarts[first]!;
-    for (const r of textCodeSpanRanges(lines.slice(first, first + count), opensParagraph)) {
+    for (const r of textCodeSpanRanges(lines.slice(first, first + count), across)) {
       regions.push({ start: base + r.start, end: base + r.end });
     }
   };
@@ -396,9 +396,9 @@ export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
   for (const group of firstLine < 0 ? [] : textBlockSourceLines(body.slice(from))) {
     if (group.lines.length === 0) continue;
     for (const rel of group.lines) prose.delete(rel + firstLine);
-    pushSpans(group.lines[0]! + firstLine, group.lines.length, group.opensParagraph);
+    pushSpans(group.lines[0]! + firstLine, group.lines.length, group.across);
   }
-  for (const idx of prose) pushSpans(idx, 1, false);
+  for (const idx of prose) pushSpans(idx, 1, []);
   return regions.sort((a, b) => a.start - b.start);
 }
 
@@ -675,9 +675,12 @@ function takenCodeIds(text: string): Set<number> {
  */
 interface FenceStore {
   blocks: Map<number, { lang: string; code: string }>;
+  /** Source line → end of the `crossLineStretches` stretch starting there, when
+   *  the parse maps its lines back to the source. */
+  stretchEnd?: Map<number, number>;
   /** When set, every `text` block's SOURCE line indices are recorded here
    *  ({@link textBlockSourceLines}); a block with no source mapping is skipped. */
-  textLines?: { lines: number[]; opensParagraph: boolean }[];
+  textLines?: { lines: number[]; across: LineRange[] }[];
   /** Ids the input already spells; never allocated. */
   taken: Set<number>;
   /** Next candidate id. Monotone, so allocation is amortised O(1). */
@@ -718,36 +721,59 @@ export function parseBlocks(text: string): Block[] {
   // `\r` and leaves the `\n`, so it can neither create nor destroy a
   // placeholder-shaped run between the two.
   const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0 };
-  const protectedText = extractFences(normalized, store);
-
-  return parseBlocksInner(protectedText, store, 0);
+  // With no backtick there is no span to pair, across lines or not.
+  if (!normalized.includes("`")) return parseBlocksInner(extractFences(normalized, store), store, 0);
+  return parseWithStretches(normalized, store);
 }
 
+/** A parse that maps every line back to the source, so each `text` block learns
+ *  which `crossLineStretches` stretches lie whole inside it. */
+function parseWithStretches(normalized: string, store: FenceStore): Block[] {
+  store.stretchEnd = new Map(crossLineStretches(normalized.split("\n")).map((r) => [r.first, r.end]));
+  const src: number[] = [];
+  const protectedText = extractFences(normalized, store, src);
+  return parseBlocksInner(protectedText, store, 0, src);
+}
+
+const TEXT_BLOCK_ACROSS = new WeakMap<Block, readonly LineRange[]>();
+
 /**
- * Whether a `text` block's first line may open a paragraph, from the block
- * before it: nothing (the body's or a component body's start), an ATX heading,
- * a `---` rule or a fenced code block — each ends every CommonMark block that
- * could otherwise continue into the next line. After a list, blockquote, table
- * or component the line may be a lazy continuation, so it pairs per line
- * (`textCodeSpanRanges`). The renderer and the fact-check strip both ask this.
+ * The line ranges of a `text` block from {@link parseBlocks} whose code spans
+ * pair across lines: each `crossLineStretches` stretch of the source that lies
+ * WHOLE in the block, relative to `block.lines`. A stretch the parser split
+ * pairs per line. Empty for any other block, a hand-built one included.
  */
-export function textBlockOpensParagraph(prev: Block | undefined): boolean {
-  return prev === undefined || prev.type === "heading" || prev.type === "hr" || prev.type === "code_block";
+export function textBlockCrossLineRanges(block: Block): readonly LineRange[] {
+  return TEXT_BLOCK_ACROSS.get(block) ?? [];
+}
+
+/** The stretches lying whole in a block whose lines are the source lines `lines`
+ *  (consecutive: a fence collapses to a `code_block`, which ends the block). */
+function stretchesWithin(lines: readonly number[], stretchEnd: ReadonlyMap<number, number>): LineRange[] {
+  const out: LineRange[] = [];
+  for (let k = 0; k < lines.length; k++) {
+    const end = stretchEnd.get(lines[k]!);
+    if (end === undefined) continue;
+    const n = end - lines[k]!;
+    if (k + n <= lines.length) {
+      out.push({ first: k, end: k + n });
+      k += n - 1;
+    }
+  }
+  return out;
 }
 
 /**
  * The source line indices (into `text.split("\n")`) of every `text` block
- * {@link parseBlocks} builds — the lines a renderer pairs code spans over — and
- * whether each may open a paragraph ({@link textBlockOpensParagraph}). The
- * fact-check strip asks the parser itself rather than re-spelling its block rules.
- * A single-line component's inner content is not a source line and is omitted.
+ * {@link parseBlocks} builds, and the ranges of each that pair code spans across
+ * lines ({@link textBlockCrossLineRanges}). The fact-check strip asks the parser
+ * itself rather than re-spelling its block rules. A single-line component's
+ * inner content is not a source line and is omitted.
  */
-export function textBlockSourceLines(text: string): { lines: number[]; opensParagraph: boolean }[] {
+export function textBlockSourceLines(text: string): { lines: number[]; across: LineRange[] }[] {
   const normalized = text.replace(/\r\n/g, "\n");
   const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, textLines: [] };
-  const src: number[] = [];
-  const protectedText = extractFences(normalized, store, src);
-  parseBlocksInner(protectedText, store, 0, src);
+  parseWithStretches(normalized, store);
   return store.textLines!;
 }
 
@@ -923,13 +949,14 @@ function parseBlocksInner(
 
   function flushText() {
     if (textBuffer.length > 0) {
-      if (store.textLines && src) {
-        store.textLines.push({
-          lines: src.slice(textStart, textStart + textBuffer.length),
-          opensParagraph: textBlockOpensParagraph(blocks[blocks.length - 1]),
-        });
+      const block: Block = { type: "text", lines: textBuffer };
+      if (store.stretchEnd && src) {
+        const lines = src.slice(textStart, textStart + textBuffer.length);
+        const across = stretchesWithin(lines, store.stretchEnd);
+        if (across.length > 0) TEXT_BLOCK_ACROSS.set(block, across);
+        store.textLines?.push({ lines, across });
       }
-      blocks.push({ type: "text", lines: textBuffer });
+      blocks.push(block);
       textBuffer = [];
     }
   }

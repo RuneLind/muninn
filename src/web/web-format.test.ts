@@ -831,10 +831,14 @@ describe("formatWebHtml — code spans across lines", () => {
     expect(agree(input)).toEqual({ marked: true, counted: true });
   });
 
-  test("inside a component body the span pairs across lines on both sides", () => {
-    const input = `<Callout>\na \`one\nq ${FACT}\` b\n</Callout>`;
+  test("inside a component body a blank-line-bounded paragraph pairs across lines on both sides", () => {
+    const input = `<Callout>\n\na \`one\nq ${FACT}\` b\n\n</Callout>`;
     expect(formatWebHtml(input)).toContain("<code>one q &lt;Fact");
     expect(agree(input)).toEqual({ marked: false, counted: false });
+    // Flush against the tags, the lines may be raw HTML (CommonMark type 7) and
+    // end on a tag that does not interrupt, so they pair per line.
+    const flush = `<Callout>\na \`one\nq ${FACT}\` b\n</Callout>`;
+    expect(agree(flush)).toEqual({ marked: true, counted: true });
   });
 
   // Each line may begin or interrupt a block in SOME CommonMark context. The
@@ -880,21 +884,64 @@ describe("formatWebHtml — code spans across lines", () => {
     expect(formatWebHtml(bridged)).not.toContain("fc-mark");
   });
 
-  test("the strip's source-line map survives an opener the parser leaves unclosed", () => {
-    // `    ````` closes the strip's fence but not the parser's, so line 0 stays a
-    // literal text line; every later text block must still map to its own lines.
-    const input = `\`\`\`\`\nq\n    \`\`\`\`\n# h\na \`x\nb ${FACT}\` c`;
-    expect(agree(input)).toEqual({ marked: false, counted: false });
-    const tail = `\`\`\`\`\nq\n    \`\`\`\`\n${FACT} \`\`\`\` b`;
-    expect(agree(tail)).toEqual({ marked: true, counted: true });
+  test("the strip's source-line map survives a collapsed fence and a refused opener", () => {
+    // A closed fence is ONE parser line; a backtick-info opener is refused and stays text.
+    for (const before of ["\`\`\`\nz\nq\n\`\`\`", "\`\`\` \`x\`\nq"]) {
+      const input = `${before}\n\na \`x\nb ${FACT}\` c`;
+      expect({ before, ...agree(input) }).toEqual({ before, marked: false, counted: false });
+    }
+    // An opener the parser leaves unclosed is a fence to EOF in CommonMark: per line.
+    const unclosed = `\`\`\`\`\nq\n    \`\`\`\`\n\na \`x\nb ${FACT}\` c`;
+    expect(agree(unclosed)).toEqual({ marked: true, counted: true });
   });
 
-  test("AnnotatedCode notes pair after the fence as the strip does, the fence being their real predecessor", () => {
-    const input = `<AnnotatedCode lang="ts">\nintro\n\`\`\`ts\nx\n\`\`\`\na \`one\nq ${FACT} two\` b\n</AnnotatedCode>`;
+  test("AnnotatedCode notes keep their cross-line pairing once the fence is filtered out", () => {
+    const input = `<AnnotatedCode lang="ts">\nintro\n\`\`\`ts\nx\n\`\`\`\n\na \`one\nq ${FACT} two\` b\n\n</AnnotatedCode>`;
     const html = formatWebHtml(input);
     expect(html).toContain("<code>one q &lt;Fact");
     expect(html.match(/<pre>/g)?.length).toBe(1);
     expect(agree(input)).toEqual({ marked: false, counted: false });
+  });
+
+  test("a stretch cut by a line that may not end the paragraph pairs per line, not up to the cut", () => {
+    // CommonMark: one span `a \`b c\` d 2) e`. Pairing up to the cut made `b c` code.
+    for (const mid of ["2) e \`\` end", "<kbd>x</kbd> e \`\` end", "| t e \`\` end"]) {
+      const input = `The \`\` a \`b\nc\` d\n${mid}`;
+      expect({ mid, html: formatWebHtml(input) }).toEqual({
+        mid,
+        html: expect.not.stringContaining("<code>") as unknown as string,
+      });
+    }
+  });
+
+  test("a heading, rule or fence inside a raw context does not open a paragraph", () => {
+    for (const input of [
+      "<details>\n# Heading\n\`a\nb\`\n</details>",
+      "\`\`\`\ncode\n---\n\`a\nb\`",
+      "~~~\n# x\n\`a\nb\`\n~~~",
+      "<details>\n\n\`a\nb\`\n</details>".replace("<details>", "<pre>"),
+    ]) {
+      expect({ input, html: formatWebHtml(input) }).toEqual({
+        input,
+        html: expect.not.stringContaining("<code>") as unknown as string,
+      });
+    }
+  });
+
+  test("a backslash-escaped backtick opens no span, on one line or across two", () => {
+    expect(formatWebHtml("Press \\` to open the console and\nrun `ls` there.")).toBe(
+      "Press \\` to open the console and\nrun <code>ls</code> there.",
+    );
+    expect(formatWebHtml("# a \\`b` c")).not.toContain("<code>");
+    expect(formatWebHtml("# a \\``b` c")).toContain("<code>b</code>");
+  });
+
+  test("a backtick an escape split off a parked span is not paired again", () => {
+    // Runs: `, \``` and \``. The escaped ``` opens a 2-run span with the \`` run;
+    // the first backtick stays unmatched, and the escaped one must not close it.
+    const input = `x \`${FACT}\\\`\`\`\\\`\``;
+    expect(agree(input)).toEqual({ marked: true, counted: true });
+    expect(formatWebHtml(input)).toContain("<code>\\</code>");
   });
 
   test("CRLF line endings split the strip's pairing where the renderer's splits", () => {

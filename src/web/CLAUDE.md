@@ -153,45 +153,70 @@ divergences, all four now regression tests in `render.test.ts`:
 - **A line SHAPED like a fence delimiter that is not one.** A backtick run that
   does not start its line, or whose info string holds a backtick, opens no fenced
   block (CommonMark), so the line stays PROSE and its own backtick runs pair by the
-  exact-N rule (an unmatched ``` stays literal). No span crosses into or out of
-  it: a fence-shaped line may open a block, so the paragraph pairing below falls
-  back to per line there. A line-wise scan reads the same
-  line as a delimiter and puts the region somewhere else. (Before `parseBlocks`'
+  exact-N rule (an unmatched ``` stays literal). It is paragraph text, so a span
+  crosses into or out of it as below; a run whose info string holds NO backtick
+  opens a fence and ends the paragraph. A line-wise scan reads the same line as
+  a delimiter and puts the region somewhere else. (Before `parseBlocks`'
   extractor became a line walker the same input diverged for a different reason:
   the mid-line placeholder joined the text either side onto one line.)
 
 Inline code spans pair by CommonMark's rules: a run of N backticks closes only
 on exactly N, an unmatched run stays literal, and one U+0020 is stripped from
-each end when both ends are U+0020 and the content is not all U+0020. A span
-crosses a soft line break (the line ending and the next line's indent become one
-space, before that strip) only inside a stretch that is CERTAINLY one CommonMark
-paragraph; on any doubt the stretch pairs per line, which never pairs worse than
-per line. `textCodeSpanRanges` in `src/format/code-spans.ts` holds the rule:
+each end when both ends are U+0020 and the content is not all U+0020. Outside a
+span, a backtick after an odd number of backslashes is literal: that one
+backtick cannot open, and the rest of its run opens with length N−1; a closer
+ignores backslashes. A span crosses a soft line break (the line ending and the
+next line's indent become one space, before that strip) only inside a stretch
+that is CERTAINLY one CommonMark paragraph; otherwise every line of the stretch
+pairs on its own, which is the per-line pairing from before.
+`crossLineStretches` in `src/format/code-spans.ts` holds the rule. A stretch
+pairs across only if all hold:
 
-- **Where a stretch may start**: after a blank line, or at the start of a `text`
-  block whose predecessor ends every block that could continue into it — none
-  (body or component-body start), an ATX heading, a `---` rule, a fence
-  (`textBlockOpensParagraph`). After a list, blockquote, table or component the
-  line may be a lazy continuation, and the corpus had list continuations whose
-  span CommonMark closes inside the item: pairing the orphan closer with the next
-  opener inverted the line.
-- **Where it ends**: at a blank line or a line that could begin or interrupt a
-  block in ANY context, at any indent — a list marker (`-`, `+`, `*`, 1–9 digits
-  then `.`/`)`), a rule or setext underline, `#`, `>`, `<`, a fence, a table row
-  (`mayInterruptParagraph`, a deliberate superset). The lines after such a line
-  pair per line until the next blank line.
-- **Never a stretch**: a first line indented 4+ columns (indented code, at any
-  list depth), and anything after a fence or raw-HTML-block opener in the block.
+- **(a) Upper bound**: it starts at the body's first line or right after a blank
+  line. A heading, rule or fence predecessor was measured and earned nothing
+  (0 corpus pages), so none counts.
+- **(b) Lower bound**: it ends at a blank line, at the body's end, or right
+  before a line that certainly interrupts a paragraph, at indent ≤ 3: an ATX
+  heading, a backtick fence whose info string holds no backtick, a `~~~` fence,
+  a thematic break, a bullet with content, an ordered item numbered 1 with
+  content, a blockquote, or an HTML block start of types 1–6. Any other end (a
+  component tag, a table row, a `<kbd>` line, a `2)` item) sends the stretch
+  per line.
+- **(c) No raw context**: none of its lines, nor the blank line before it, may
+  lie inside a fence or an HTML block (types 1–7) under ANY reading of the
+  containers above it. The scan keeps a set of hypotheses (each possible list
+  content column, each uncertain start taken and not taken), and each closes no
+  earlier than CommonMark would. Past 64 live hypotheses every later line is
+  treated as raw.
+- **(d) No interrupter inside**: a line that may interrupt a paragraph
+  (`mayInterruptParagraph`, a deliberate superset) cuts the stretch, and the cut
+  has to satisfy (b).
+- **(e)** Its first line is not indented 4+ columns.
+- **(g)** It is not a possible link reference definition (first line `[`, and a
+  `]:` in the stretch): the fuzz sweep found 92 of 100 000 documents worse
+  without this.
 
-The `text` block handler parks the spans first and then still hands every
-source line to `renderInline` on its own: a span's line breaks stay in the
-parked text and the pieces are glued back with no newline. Emphasis, links,
-components and `<Fact>` never cross a line, bridged by a span or not. Headings,
-list items, table cells and blockquote lines pair per line. The fact-check strip
-(`markdownCodeRegions`) pairs by the SAME rule: it asks the parser for its
-`text` blocks and their `opensParagraph` (`textBlockSourceLines`) instead of
+`parseBlocks` runs the scan once per body and attaches to each `text` block the
+stretches that lie WHOLE inside it (`textBlockCrossLineRanges`); a stretch the
+parser split pairs per line. The `text` block handler parks the spans first and
+then hands every source line to the rest of `renderInline` (not its span pass —
+an escape can split a parked span's run, and a second pass would pair the
+fragment). Emphasis, links, components and `<Fact>` never cross a line, bridged
+by a span or not. Headings, list items, table cells and blockquote lines pair per
+line. The fact-check strip (`markdownCodeRegions`) pairs by the SAME stretches:
+it asks the parser for its `text` blocks (`textBlockSourceLines`) instead of
 re-spelling the block rules. Telegram, Slack, email and the line scanners in
-`lint.ts` / `wiki-integrate.ts` still pair per line.
+`lint.ts` / `wiki-integrate.ts` pair per line; `wiki-integrate.ts` shares
+`lineCodeSpanRanges`, escapes included.
+
+Measured against commonmark.js 0.31.2 by the symmetric difference of the inline
+code texts (acceptance for PR #597): no corpus page is further from CommonMark
+than per-line pairing. On random documents the cross-line rule is never further
+either, apart from a span it adds that CommonMark also has, while a per-line span
+elsewhere with the same text had been credited to the old pairing. The escape
+rule makes some random documents further from CommonMark: every such line is, on
+its own, at least as close as before, except a line CommonMark reads as indented
+code or a link reference definition. Both renderers render those as text.
 
 ⚠️ **What reading the output costs instead: the scan has to know every container
 the renderer uses for code, and there are TWO.** The first revision assumed one,
