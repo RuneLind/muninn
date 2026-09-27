@@ -641,7 +641,8 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   one-backlink cap, and a component whose
   culled members leave one live page is no 8.2 cluster.
 - **Kept in:** the rail listing (hiding is the reader UI's job), the link graph,
-  the series census (a culled head still names the fold, and a culled bridge
+  the series census (a culled member that alone declares a series still names
+  the fold, and a culled bridge
   still joins a component, so 8.2 never re-coins a series), Connections'
   Linked from / Links to and its mini-graph, the issue graph and the board —
   marked with the ONE label `CULL_LABEL` ("Retired", `wiki-cull-view.ts`), the
