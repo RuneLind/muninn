@@ -310,7 +310,8 @@ export interface DownloadOptions {
    * yt-dlp `--use-extractors` allowlist. Absent ⇒ no flag, yt-dlp's default set.
    * A caller whose URL is gated to one site sets it so an extractor's own
    * hand-off (X's TwitterIE returns a media-less tweet's first link as a new
-   * URL) cannot reach `[generic]`, which fetches anything.
+   * URL) cannot reach `[generic]`, which fetches anything. An EMPTY list throws:
+   * it reads as "allow nothing", and dropping the flag would allow everything.
    */
   extractors?: readonly string[];
 }
@@ -324,12 +325,18 @@ export function ytDlpDownloadArgs(
   workDir: string,
   opts: DownloadOptions,
 ): string[] {
+  if (opts.extractors !== undefined && opts.extractors.length === 0) {
+    throw new Error("yt-dlp extractor allowlist is empty — refusing to run with every extractor");
+  }
   return [
     "yt-dlp",
+    // A user or system yt-dlp.conf is read otherwise, and one holding
+    // `--ies default` would cancel the allowlist below.
+    "--ignore-config",
     "-f",
     opts.format ?? YTDLP_FORMAT_SELECTOR,
     "--no-playlist",
-    ...(opts.extractors?.length ? ["--use-extractors", opts.extractors.join(",")] : []),
+    ...(opts.extractors ? ["--use-extractors", opts.extractors.join(",")] : []),
     "-o",
     join(workDir, "video.%(ext)s"),
     // `after_move:` prints once the file is in place and, unlike a bare -O,

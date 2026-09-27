@@ -278,6 +278,7 @@ test("ytDlpDownloadArgs is byte-identical to the pre-`format` argv when no forma
   // builder would assert nothing.
   expect(ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 })).toEqual([
     "yt-dlp",
+    "--ignore-config",
     "-f",
     YTDLP_FORMAT_SELECTOR,
     "--no-playlist",
@@ -342,7 +343,7 @@ test("ytDlpDownloadArgs carries the duration cap into --break-match-filters", ()
 
 test("ytDlpDownloadArgs carries an extractor allowlist as --use-extractors, and no flag without one", () => {
   // The X vertical pins `twitter` so a media-less tweet's link hand-off cannot
-  // reach `[generic]`; an absent or empty list must leave yt-dlp's default set.
+  // reach `[generic]`; an absent list leaves yt-dlp's default set.
   const pinned = ytDlpDownloadArgs("https://x.test/v", "/work", {
     maxDurationSeconds: 3600,
     extractors: ["twitter"],
@@ -352,10 +353,24 @@ test("ytDlpDownloadArgs carries an extractor allowlist as --use-extractors, and 
   expect(
     ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 1, extractors: ["a", "b"] }),
   ).toContain("a,b");
-  for (const extractors of [undefined, []]) {
-    expect(
-      ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors }),
-    ).not.toContain("--use-extractors");
+  expect(
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 }),
+  ).not.toContain("--use-extractors");
+});
+
+test("ytDlpDownloadArgs refuses an empty extractor allowlist instead of dropping the flag", () => {
+  // No flag means every extractor, `[generic]` included: an empty list that
+  // silently became "no flag" is the allowlist failing open.
+  expect(() =>
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors: [] }),
+  ).toThrow(/extractor allowlist is empty/);
+});
+
+test("ytDlpDownloadArgs ignores yt-dlp config files, with and without an allowlist", () => {
+  // A yt-dlp.conf holding `--ies default` would otherwise cancel the allowlist.
+  for (const extractors of [undefined, ["twitter"]]) {
+    const args = ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors });
+    expect(args).toContain("--ignore-config");
   }
 });
 

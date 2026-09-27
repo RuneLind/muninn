@@ -391,16 +391,23 @@ describe("tiktok: the POST's url host gate", () => {
     });
   }
 
-  const ACCEPTED = [
-    "https://www.tiktok.com/@coolcoder/video/7523456789",
-    "https://tiktok.com/@coolcoder/video/7523456789",
-    "https://m.tiktok.com/v/7523456789.html",
+  // Accepted shape → the URL yt-dlp is handed, which its `TikTok` extractor
+  // matches: only `www.` does, and the vertical's allowlist has no `[generic]`.
+  const ACCEPTED: Array<[string, string]> = [
+    ["https://www.tiktok.com/@coolcoder/video/7523456789", "https://www.tiktok.com/@coolcoder/video/7523456789"],
+    ["https://tiktok.com/@coolcoder/video/7523456789", "https://www.tiktok.com/@coolcoder/video/7523456789"],
+    ["https://m.tiktok.com/v/7523456789.html", "https://www.tiktok.com/@/video/7523456789"],
   ];
-  for (const url of ACCEPTED) {
-    test(`accepts ${url}`, async () => {
-      const res = await post(app(), "/api/tiktok/summarize", { url });
+  for (const [url, handed] of ACCEPTED) {
+    test(`accepts ${url} and hands yt-dlp ${handed}`, async () => {
+      // The popup sends the pasted URL as the title too.
+      const res = await post(app(), "/api/tiktok/summarize", { url, title: url });
       expect(res.status).toBe(200);
       expect(tiktokCalls).toBe(1);
+      expect(lastTikTokUrl).toBe(handed);
+      // A title equal to the URL means "use yt-dlp's title"; it must follow the
+      // rewrite or the raw URL becomes the stored title.
+      expect(ttState.getJob(lastTikTokJobId!)!.title).toBe(handed);
     });
   }
 
@@ -417,34 +424,55 @@ describe("tiktok: the POST's url host gate", () => {
 });
 
 /**
- * The short-link HEAD's redirect target is re-judged by the same gate before a
- * dedup id is read off it (fix round 1). `extractTikTokVideoId` alone accepts
- * any host ending in `tiktok.com`, so `eviltiktok.com` used to yield an id.
+ * The short-link HEAD follows redirects by hand, judging each hop's `Location`
+ * with the same gate BEFORE requesting it. `extractTikTokVideoId` alone accepts
+ * any host ending in `tiktok.com`, and `redirect: "follow"` requested every hop
+ * — a loopback one included — before the target was judged.
  */
-describe("tiktok: the short-link redirect target is re-gated", () => {
+describe("tiktok: the short-link redirect chain is gated hop by hop", () => {
   const realFetch = globalThis.fetch;
-  let redirectTo = "";
+  const SHORT = "https://vm.tiktok.com/ZMabc123/";
+  let hops: Record<string, string> = {};
+  let requested: string[] = [];
   beforeEach(() => {
-    globalThis.fetch = (async () => ({ url: redirectTo }) as Response) as unknown as typeof fetch;
+    requested = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      const location = hops[url];
+      return new Response(null, location ? { status: 302, headers: { location } } : { status: 200 });
+    }) as unknown as typeof fetch;
   });
   afterAll(() => {
     globalThis.fetch = realFetch;
   });
 
-  test("a redirect off TikTok yields no dedup id", async () => {
-    redirectTo = "https://eviltiktok.com/@a/video/7523456789";
-    const res = await post(app(), "/api/tiktok/summarize", { url: "https://vm.tiktok.com/ZMabc123/" });
-    expect(res.status).toBe(200);
-    expect(knowledgeApiCalls).toEqual([]);
-    expect(ttState.getJob(lastTikTokJobId!)!.videoId).toBe("");
-  });
+  for (const target of [
+    "https://eviltiktok.com/@a/video/7523456789",
+    "http://127.0.0.1:39872/@a/video/7523456789",
+  ]) {
+    test(`a hop to ${target} is refused with 400 bad_url and never requested`, async () => {
+      hops = { [SHORT]: target };
+      const jobsBefore = ttState.getRecentJobs(50).length;
+      const res = await post(app(), "/api/tiktok/summarize", { url: SHORT });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code: string }).code).toBe("bad_url");
+      expect(requested).toEqual([SHORT]);
+      expect(knowledgeApiCalls).toEqual([]);
+      expect(tiktokCalls).toBe(0);
+      expect(ttState.getRecentJobs(50).length).toBe(jobsBefore);
+    });
+  }
 
-  test("a redirect onto TikTok still drives the dedup lookup", async () => {
-    redirectTo = "https://www.tiktok.com/@a/video/7523456789";
-    const res = await post(app(), "/api/tiktok/summarize", { url: "https://vm.tiktok.com/ZMabc123/" });
+  test("a vm.tiktok → www.tiktok chain still drives the dedup lookup", async () => {
+    hops = { [SHORT]: "https://www.tiktok.com/@a/video/7523456789?_r=1" };
+    const res = await post(app(), "/api/tiktok/summarize", { url: SHORT });
     expect(res.status).toBe(200);
+    expect(requested).toEqual([SHORT, "https://www.tiktok.com/@a/video/7523456789?_r=1"]);
     expect(knowledgeApiCalls.length).toBe(1);
     expect(ttState.getJob(lastTikTokJobId!)!.videoId).toBe("7523456789");
+    // yt-dlp still gets the short link; its `vm.tiktok` extractor follows it.
+    expect(lastTikTokUrl).toBe(SHORT);
   });
 });
 
