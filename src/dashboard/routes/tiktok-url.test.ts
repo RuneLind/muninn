@@ -6,6 +6,7 @@
 import { test, expect } from "bun:test";
 import {
   SHORT_LINK_MAX_HOPS,
+  isShortLink,
   parseAllowedTikTokUrl,
   resolveTikTokShortLink,
   tiktokDownloadUrl,
@@ -27,20 +28,39 @@ const DOWNLOAD_URLS: Array<[string, string]> = [
   ["https://m.tiktok.com/@u/video/7412345678901234567", "https://www.tiktok.com/@u/video/7412345678901234567"],
   ["https://m.tiktok.com/v/7412345678901234567.html", "https://www.tiktok.com/@/video/7412345678901234567"],
   ["https://m.tiktok.com/v/7412345678901234567.html?_r=1&u_code=x", "https://www.tiktok.com/@/video/7412345678901234567"],
-  ["https://vm.tiktok.com/ZMabc123/", "https://vm.tiktok.com/ZMabc123/"],
-  ["https://vt.tiktok.com/ZSabc123", "https://vt.tiktok.com/ZSabc123"],
-  ["https://www.tiktok.com/t/ZTRabc123/", "https://www.tiktok.com/t/ZTRabc123/"],
-  ["https://tiktok.com/t/ZTRabc123", "https://www.tiktok.com/t/ZTRabc123"],
-  ["https://m.tiktok.com/t/ZTRabc123", "https://www.tiktok.com/t/ZTRabc123"],
 ];
 
 for (const [input, expected] of DOWNLOAD_URLS) {
   test(`tiktokDownloadUrl hands yt-dlp an extractor-matched URL for ${input}`, () => {
     const out = tiktokDownloadUrl(parseAllowedTikTokUrl(input)!);
     expect(out).toBe(expected);
-    // The allowlist is `TikTok` + `vm.tiktok`, so every accepted shape must
-    // land on one of their patterns or yt-dlp refuses it.
-    expect(TIKTOK_IE.test(out) || TIKTOK_VM_IE.test(out)).toBe(true);
+    // The allowlist is `TikTok` alone, so every video shape must land on its
+    // pattern and never on `vm.tiktok`'s, which re-follows a chain ungated.
+    expect(TIKTOK_IE.test(out)).toBe(true);
+    expect(TIKTOK_VM_IE.test(out)).toBe(false);
+  });
+}
+
+const SHORT_LINKS = [
+  "https://vm.tiktok.com/ZMabc123/",
+  "https://vt.tiktok.com/ZSabc123",
+  "https://www.tiktok.com/t/ZTRabc123/",
+  "https://tiktok.com/t/ZTRabc123",
+  "https://m.tiktok.com/t/ZTRabc123",
+];
+
+for (const short of SHORT_LINKS) {
+  test(`${short} is a short link and never becomes a download URL`, () => {
+    const u = parseAllowedTikTokUrl(short)!;
+    expect(isShortLink(u)).toBe(true);
+    // Every shape TikTokVMIE matches, so none may reach yt-dlp unresolved.
+    expect(() => tiktokDownloadUrl(u)).toThrow(/short link must be resolved/);
+  });
+}
+
+for (const [video] of DOWNLOAD_URLS) {
+  test(`${video} is not a short link`, () => {
+    expect(isShortLink(parseAllowedTikTokUrl(video)!)).toBe(false);
   });
 }
 
@@ -139,3 +159,26 @@ test("a network error is a failure, not a refusal", async () => {
     reason: "ECONNRESET",
   });
 });
+
+for (const status of [301, 302, 303, 307, 308]) {
+  test(`HTTP ${status} with a Location is followed`, async () => {
+    const { fetchImpl, requested } = stubFetch({
+      "https://vm.tiktok.com/ZMabc123/": { status, location: "https://www.tiktok.com/@u/video/1" },
+      "https://www.tiktok.com/@u/video/1": { status: 200 },
+    });
+    const res = await resolveTikTokShortLink("https://vm.tiktok.com/ZMabc123/", fetchImpl);
+    expect(res).toEqual({ kind: "resolved", url: "https://www.tiktok.com/@u/video/1" });
+    expect(requested).toHaveLength(2);
+  });
+}
+
+for (const status of [300, 304]) {
+  test(`HTTP ${status} is not a redirect, even with a Location`, async () => {
+    const { fetchImpl, requested } = stubFetch({
+      "https://vm.tiktok.com/ZMabc123/": { status, location: "https://www.tiktok.com/@u/video/1" },
+    });
+    const res = await resolveTikTokShortLink("https://vm.tiktok.com/ZMabc123/", fetchImpl);
+    expect(res).toEqual({ kind: "resolved", url: "https://vm.tiktok.com/ZMabc123/" });
+    expect(requested).toEqual(["https://vm.tiktok.com/ZMabc123/"]);
+  });
+}

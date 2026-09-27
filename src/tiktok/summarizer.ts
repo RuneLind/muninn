@@ -43,11 +43,10 @@ export const TIKTOK_SPEC: ShortVideoSpec = {
   // The key this vertical's completion line has always used; the JSONL sink is
   // searched by field, so it is the spec's to declare, not the job's.
   idLogKey: "videoId",
-  // `TikTok` for video URLs, `vm.tiktok` for vm./vt./`/t/` short links. Both
-  // match only `www.` and the short hosts, so the route hands yt-dlp its
-  // `tiktokDownloadUrl` form; `[generic]` would otherwise take a short link
-  // whose redirect lands off a video page (measured 2026-09-27).
-  ytDlpExtractors: ["tiktok", "vm\\.tiktok"],
+  // `TikTok` only: it matches only `www.` video URLs, so the route hands yt-dlp
+  // the `tiktokDownloadUrl` form and resolves short links itself. `vm.tiktok`
+  // is left out — it would re-follow a short link's chain ungated.
+  ytDlpExtractors: ["tiktok"],
   // This vertical warns when a frames-ON summary mentions nothing visual: the
   // frame Reads can degrade silently (a permissions or `--add-dir` regression)
   // and the warn is the only place that failure is visible.

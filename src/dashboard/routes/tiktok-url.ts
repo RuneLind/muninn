@@ -32,33 +32,37 @@ export function isAllowedTikTokUrl(raw: string): boolean {
 }
 
 /**
- * The URL yt-dlp is handed for a gated TikTok URL — one its `TikTok` or
- * `vm.tiktok` extractor matches, so the vertical's allowlist can leave out
- * `[generic]`. Those extractors match only `www.` (plus the vm./vt. short
- * hosts); the bare and `m.` hosts used to reach them through `[generic]`'s
- * redirect, which this rewrite reproduces: same path and query on `www.`.
- * `/v/<id>.html` (the `m.` share shape) becomes the id-only video path.
+ * A short link: any path on vm./vt.tiktok.com, or `/t/<code>` on the other
+ * hosts. The route resolves these itself (gated hop by hop) and never hands one
+ * to yt-dlp, whose `vm.tiktok` extractor would re-follow the chain ungated.
+ */
+export function isShortLink(u: URL): boolean {
+  if (u.hostname === "vm.tiktok.com" || u.hostname === "vt.tiktok.com") return true;
+  return /^\/t\/\w+/.test(u.pathname);
+}
+
+/**
+ * The URL yt-dlp is handed for a gated TikTok video URL — one its `TikTok`
+ * extractor matches, so the vertical's allowlist is `tiktok` alone. That
+ * extractor matches only `www.`; the bare and `m.` hosts used to reach it
+ * through `[generic]`'s redirect, which this rewrite reproduces: same path and
+ * query on `www.`. `/v/<id>.html` (the `m.` share shape) becomes the id-only
+ * video path. A short link throws: resolve it with
+ * {@link resolveTikTokShortLink} first.
  */
 export function tiktokDownloadUrl(u: URL): string {
-  if (u.hostname === "vm.tiktok.com" || u.hostname === "vt.tiktok.com") return u.href;
+  if (isShortLink(u)) throw new Error(`short link must be resolved before download: ${u.href}`);
   const share = u.pathname.match(/^\/v\/(\d+)(?:\.html)?\/?$/);
   if (share) return `https://www.tiktok.com/@/video/${share[1]}`;
   if (u.hostname === "www.tiktok.com") return u.href;
   return `https://www.tiktok.com${u.pathname}${u.search}`;
 }
 
-/** vm.tiktok.com / vt.tiktok.com share links that redirect to the canonical URL. */
-export function isShortLink(url: string): boolean {
-  try {
-    const host = new URL(url).hostname;
-    return host === "vm.tiktok.com" || host === "vt.tiktok.com";
-  } catch {
-    return false;
-  }
-}
-
 /** Redirects a short link may take before the resolver gives up. */
 export const SHORT_LINK_MAX_HOPS = 5;
+
+/** The statuses that redirect; any other status (300 and 304 included) ends the chain. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 export type ShortLinkResolution =
   | { kind: "resolved"; url: string }
@@ -92,7 +96,7 @@ export async function resolveTikTokShortLink(
         headers: { "User-Agent": BROWSER_UA },
         signal: controller.signal,
       });
-      if (res.status < 300 || res.status > 399) return { kind: "resolved", url: current };
+      if (!REDIRECT_STATUSES.has(res.status)) return { kind: "resolved", url: current };
       const location = res.headers.get("location");
       if (!location) return { kind: "failed", reason: `HTTP ${res.status} without a Location` };
       if (hop >= SHORT_LINK_MAX_HOPS) {

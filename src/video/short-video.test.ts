@@ -272,8 +272,9 @@ const VERTICALS = [
     collection: "tiktok-summaries",
     workDirPrefix: "muninn-tiktok-",
     maxDurationSeconds: 3600,
-    // Never `[generic]`: the route rewrites every accepted shape to one these match.
-    ytDlpExtractors: ["tiktok", "vm\\.tiktok"],
+    // Never `[generic]` or `vm.tiktok`: the route resolves short links itself
+    // and rewrites every accepted shape to one `TikTok` matches.
+    ytDlpExtractors: ["tiktok"],
   },
   {
     name: "x-video",

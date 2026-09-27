@@ -36,34 +36,47 @@ const TT_FRAME_NOUN = "TikTok frames";
 
 interface TtDocumentMeta { id: string; url?: string }
 
-/**
- * Resolve the numeric video id from an input URL. A canonical `/video/<id>` URL
- * parses with zero latency; a short link is followed hop by hop. A short link
- * that leaves TikTok is refused; any other failure returns a null id so the
- * caller skips the dedup pre-check and proceeds — the yt-dlp-resolved id in the
- * background job still drives the canonical URL, so the only cost is a rare
- * duplicate.
- */
-async function resolveVideoId(
-  url: string,
-): Promise<{ videoId: string | null } | { refused: string }> {
-  const direct = extractTikTokVideoId(url);
-  if (direct) return { videoId: direct };
-  if (!isShortLink(url)) return { videoId: null };
+/** Why a short link yields no URL for yt-dlp — each answered before any job exists. */
+type ShortLinkError = { status: 400 | 502; error: string; code: string };
 
-  const res = await resolveTikTokShortLink(url);
+/**
+ * Resolve a short link to the video URL it names, gated hop by hop. yt-dlp gets
+ * the result, never the short link: its `vm.tiktok` extractor would follow the
+ * chain again, ungated.
+ */
+async function resolveShortLink(short: URL): Promise<URL | ShortLinkError> {
+  const res = await resolveTikTokShortLink(short.href);
   if (res.kind === "refused") {
-    log.warn("TikTok short link {url} refused: {reason}", { url, reason: res.reason });
-    return { refused: res.reason };
+    log.warn("TikTok short link {url} refused: {reason}", { url: short.href, reason: res.reason });
+    return {
+      status: 400,
+      error: `Not a TikTok URL: the short link was refused (${res.reason})`,
+      code: "bad_url",
+    };
   }
   if (res.kind === "failed") {
-    log.warn("TikTok short-link resolution failed for {url} — skipping dedup pre-check: {error}", {
-      url,
+    log.warn("TikTok short-link resolution failed for {url}: {error}", {
+      url: short.href,
       error: res.reason,
     });
-    return { videoId: null };
+    return {
+      status: 502,
+      error: `Could not resolve the TikTok short link: ${res.reason}`,
+      code: "short_link_failed",
+    };
   }
-  return { videoId: extractTikTokVideoId(res.url) };
+  // Every hop was gated, so this parses. It is still a short link when TikTok
+  // answered 200 on it, and has no video id when a stale link lands on the
+  // home page (`https://www.tiktok.com/?_r=1`, measured).
+  const landed = parseAllowedTikTokUrl(res.url);
+  if (!landed || isShortLink(landed) || !extractTikTokVideoId(tiktokDownloadUrl(landed))) {
+    return {
+      status: 400,
+      error: `The short link does not lead to a TikTok video (it ends at ${res.url})`,
+      code: "no_video",
+    };
+  }
+  return landed;
 }
 
 async function findExistingByVideoId(
@@ -160,13 +173,6 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
         400,
       );
     }
-    // Everything below — dedup, the job row, yt-dlp — gets a URL built from the
-    // parsed one, in the form the `TikTok`/`vm.tiktok` extractors match.
-    const url = tiktokDownloadUrl(accepted);
-    // The popup sends the pasted URL as its title; a title equal to the URL is
-    // how the job knows to use yt-dlp's title instead, so follow the rewrite.
-    const jobTitle = !title || title === rawUrl || title === accepted.href ? url : title;
-
     // Preflight: yt-dlp is a hard runtime dependency for this vertical.
     if (!Bun.which("yt-dlp")) {
       return c.json(
@@ -207,14 +213,21 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
       );
     }
 
-    const resolved = await resolveVideoId(url);
-    if ("refused" in resolved) {
-      return c.json(
-        { error: `Not a TikTok URL: the short link was refused (${resolved.refused})`, code: "bad_url" },
-        400,
-      );
+    let target = accepted;
+    if (isShortLink(accepted)) {
+      const resolved = await resolveShortLink(accepted);
+      if (!(resolved instanceof URL)) {
+        return c.json({ error: resolved.error, code: resolved.code }, resolved.status);
+      }
+      target = resolved;
     }
-    const { videoId } = resolved;
+    // Everything below — dedup, the job row, yt-dlp — gets a URL built from the
+    // parsed one, in the form the `TikTok` extractor matches.
+    const url = tiktokDownloadUrl(target);
+    const videoId = extractTikTokVideoId(url);
+    // The popup sends the pasted URL as its title; a title equal to the URL is
+    // how the job knows to use yt-dlp's title instead, so follow the rewrite.
+    const jobTitle = !title || title === rawUrl || title === accepted.href ? url : title;
 
     if (videoId) {
       const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, videoId);

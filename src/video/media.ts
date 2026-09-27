@@ -287,6 +287,17 @@ async function globAbsolute(dir: string, pattern: string): Promise<string[]> {
 // 1. Download
 // ---------------------------------------------------------------------------
 
+/**
+ * Flags on every yt-dlp run, download and probe alike. `--ignore-config`: a
+ * user or system yt-dlp.conf holding `--ies default` would cancel an extractor
+ * allowlist, and one supplying cookies or a proxy would make the probe succeed
+ * where the download (which ignores it) fails. `--no-plugin-dirs`: a plugin
+ * extractor named like a pinned one would sit inside the allowlist; it empties
+ * every plugin search path, `sys.path` (pip-installed `yt_dlp_plugins`)
+ * included.
+ */
+export const YTDLP_ISOLATION_ARGS = ["--ignore-config", "--no-plugin-dirs"] as const;
+
 export interface DownloadOptions {
   /** Pre-download duration cap in seconds (yt-dlp match-filter). Required, with
    * no default: every vertical's cap is a per-host judgement (TikTok 60 min, X
@@ -330,9 +341,7 @@ export function ytDlpDownloadArgs(
   }
   return [
     "yt-dlp",
-    // A user or system yt-dlp.conf is read otherwise, and one holding
-    // `--ies default` would cancel the allowlist below.
-    "--ignore-config",
+    ...YTDLP_ISOLATION_ARGS,
     "-f",
     opts.format ?? YTDLP_FORMAT_SELECTOR,
     "--no-playlist",
@@ -357,7 +366,7 @@ export const PROBE_TIMEOUT_MS = 30_000;
  * {@link ytDlpDownloadArgs} is.
  */
 export function ytDlpProbeArgs(url: string): string[] {
-  return ["yt-dlp", "-O", YTDLP_INFO_TEMPLATE, "--skip-download", "--no-playlist", url];
+  return ["yt-dlp", ...YTDLP_ISOLATION_ARGS, "-O", YTDLP_INFO_TEMPLATE, "--skip-download", "--no-playlist", url];
 }
 
 /**

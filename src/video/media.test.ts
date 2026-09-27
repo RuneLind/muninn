@@ -279,6 +279,7 @@ test("ytDlpDownloadArgs is byte-identical to the pre-`format` argv when no forma
   expect(ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 })).toEqual([
     "yt-dlp",
     "--ignore-config",
+    "--no-plugin-dirs",
     "-f",
     YTDLP_FORMAT_SELECTOR,
     "--no-playlist",
@@ -374,12 +375,30 @@ test("ytDlpDownloadArgs ignores yt-dlp config files, with and without an allowli
   }
 });
 
+test("the probe and every download ignore yt-dlp config files and plugin dirs", () => {
+  // A config supplying cookies or a proxy made the probe succeed where the
+  // download (which ignores it) failed; a plugin extractor named `TikTok` or
+  // `twitter` would sit inside the allowlist.
+  for (const args of [
+    ytDlpProbeArgs("https://x.test/v"),
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600 }),
+    ytDlpDownloadArgs("https://x.test/v", "/work", { maxDurationSeconds: 3600, extractors: ["twitter"] }),
+  ]) {
+    expect(args).toContain("--ignore-config");
+    expect(args).toContain("--no-plugin-dirs");
+    // Options, not the URL: both precede it.
+    expect(args.indexOf("--no-plugin-dirs")).toBeLessThan(args.indexOf("https://x.test/v"));
+  }
+});
+
 test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () => {
   // `--skip-download` is the whole point (the probe runs BEFORE the download it
   // sizes) and `--no-playlist` keeps a `&list=` watch URL from dumping a whole
   // playlist's worth of JSON.
   expect(ytDlpProbeArgs("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toEqual([
     "yt-dlp",
+    "--ignore-config",
+    "--no-plugin-dirs",
     "-O",
     "%(.{id,title,duration,uploader,webpage_url})j",
     "--skip-download",
