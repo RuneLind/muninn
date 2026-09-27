@@ -105,28 +105,48 @@ const LABEL_STOPWORDS = new Set([
   "you", "your", "our", "its", "this", "that", "are", "was", "not", "new", "via",
 ]);
 
-/**
- * Meaningful tokens of a name, plus its separator-free whole (`sub-agent` → `subagent`):
- * lowercased, split on anything but letters/digits (so a possessive `'s` falls off as
- * a too-short token), trailing `s` dropped.
- */
-function nameTokens(name: string): string[] {
-  const words = name.toLowerCase().split(/[^\p{L}\p{N}]+/u);
-  const singular = (w: string) => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w);
-  return [...words, words.join("")]
-    .filter((w) => w.length >= 3 && !LABEL_STOPWORDS.has(w))
-    .map(singular);
+/** Lowercased, trimmed, accents dropped (`Erdős` → `erdos`). */
+function foldName(name: string): string {
+  return name.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().trim();
 }
 
 /**
- * Whether a `|label` honestly names the host: it shares a meaningful token with one
- * of the host's names. Accepts `[[Andrej Karpathy|Karpathy]]`, `[[Subagents|sub-agent]]`
- * and `[[Skills System|skill]]`; refuses `[[RAG|quantum mechanics]]`. Exact equality
- * refused 913 labeled links on jarvis; this rule accepts 718 of them (PR #577).
+ * Word tokens of a name, plus its separator-free whole (`sub-agent` → `subagent`):
+ * split on anything but letters/digits (so a possessive `'s` falls off as a
+ * too-short token), trailing `s` dropped. A bare number is not a word: it is
+ * checked by {@link nameNumbers}, never counted as a match.
+ */
+function nameWords(name: string): string[] {
+  const words = foldName(name).split(/[^\p{L}\p{N}]+/u);
+  const singular = (w: string) => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w);
+  return [...words, words.join("")]
+    .filter((w) => w.length >= 3 && !LABEL_STOPWORDS.has(w) && !/^\d+$/.test(w))
+    .map(singular);
+}
+
+/** Every number in a name, `4-7` read as `4.7`: `Kimi K3` → `3`, `Qwen3.8-27B` → `3.8.27`. */
+function nameNumbers(name: string): string[] {
+  return (foldName(name).match(/\d+(?:[.-]\d+)*/g) ?? []).map((n) => n.replace(/-/g, "."));
+}
+
+/**
+ * Whether a `|label` honestly names the host. A label equal to one of the host's
+ * names (any case) does, `[[AI|ai]]` included. Otherwise it must share a word with
+ * one name whose numbers do not contradict it: a numbered name must carry one of a
+ * numbered label's numbers, so `[[Claude Opus 4.7|Opus 4.6]]` is refused while
+ * `[[Claude Opus 4.7|Opus]]` and `[[GLM|GLM 5.3]]` pass. Class table: PR #577.
  */
 export function labelNamesHost(label: string, names: string[]): boolean {
-  const hostTokens = new Set(names.flatMap(nameTokens));
-  return nameTokens(label).some((t) => hostTokens.has(t));
+  const folded = foldName(label);
+  if (names.some((n) => foldName(n) === folded)) return true;
+  const words = nameWords(label);
+  const numbers = nameNumbers(label);
+  return names.some((name) => {
+    const hostNumbers = nameNumbers(name);
+    if (numbers.length > 0 && hostNumbers.length > 0 && !numbers.some((n) => hostNumbers.includes(n))) return false;
+    const hostWords = new Set(nameWords(name));
+    return words.some((w) => hostWords.has(w));
+  });
 }
 
 /** The one input a source draft is built from — a single captured summary doc. */

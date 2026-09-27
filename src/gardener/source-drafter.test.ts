@@ -4,6 +4,7 @@ import {
   sourceTopicKey,
   sourceWikilinkTargets,
   sourceRelatedPages,
+  labelNamesHost,
   buildSourceDraftPrompt,
   buildSourceRevisePrompt,
   VERBATIM_MATERIAL_RULE,
@@ -1487,7 +1488,52 @@ describe("draftSourcePage — See-also seeding (relatedPages)", () => {
     expect((await seeded({}, "See [[AI Agents|AI safety]].", hosts)).relatedPages).toEqual([]);
   });
 
+  test("a label naming a different version of the host is refused", async () => {
+    const opus = page({ title: "Claude Opus 4.7", name: "Claude Opus 4.7", type: "entity", relPath: "entities/Claude Opus 4.7.md", aliases: ["Opus 4.7"] });
+    expect((await seeded({}, "Unlike [[Claude Opus 4.7|Opus 4.6]].", [opus])).relatedPages).toEqual([]);
+  });
+
   test("no index → no related pages", () => {
     expect(sourceRelatedPages(mdxDraft(), null, "sources/X.mdx")).toEqual([]);
+  });
+});
+
+// One row per class in PR #577's label table: [class, label, host names, names the host].
+describe("labelNamesHost", () => {
+  test.each<[string, string, string[], boolean]>([
+    ["exact, other case", "AGENTS", ["Agents"], true],
+    ["exact alias", "rag", ["RAG Basics", "RAG"], true],
+    ["exact, two-letter host", "ai", ["AI"], true],
+    ["exact, one-letter host", "R", ["R"], true],
+    ["exact, symbol host", "C++", ["C++"], true],
+    ["exact, symbol host #", "c#", ["C#"], true],
+    ["label is a subset of the host's words", "Karpathy", ["Andrej Karpathy"], true],
+    ["singular label, plural host", "skill", ["Skills"], true],
+    ["an -ss word is not a plural", "boss", ["Bos Taurus"], false],
+    ["hyphenated label, closed-compound host", "sub-agent", ["Subagents"], true],
+    ["possessive label", "Hossenfelder's", ["Sabine Hossenfelder"], true],
+    ["label adds words to a shared one", "Karpathy's three-folder pattern", ["Karpathy's LLM Wiki"], true],
+    ["shares only a family word (accepted residual)", "Claude Desktop", ["Claude AI"], true],
+    ["same version", "Opus 4.7", ["Claude Opus 4.7"], true],
+    ["same version, hyphen form", "Opus 4-7", ["Claude Opus 4.7"], true],
+    ["other minor version", "Opus 4.6", ["Claude Opus 4.7", "Opus 4.7"], false],
+    ["other major version", "Opus 3", ["Claude Opus 4.7"], false],
+    ["version prefix is not the version", "Opus 4", ["Claude Opus 4.7"], false],
+    ["numbered label, numbered host, versions differ", "GPT-5.6", ["GPT-5"], false],
+    ["hyphenated version differs", "GPT-5.6-Sol", ["GPT-6 Astra"], false],
+    ["letter-prefixed version differs", "Kimi K2", ["Kimi K3"], false],
+    ["numbered host, label without a number", "Opus", ["Claude Opus 4.7"], true],
+    ["numbered label, a numberless name shares the word", "GLM 5.3", ["GLM", "GLM 5.2"], true],
+    ["numbered label, host without numbers", "May 2026 Karpathy talk", ["Karpathy Vibe to Agentic Engineering"], true],
+    ["numbered label, the host carries that number", "the 2026 safety wave", ["AI Safety Wave 2026"], true],
+    ["shares only a number", "2026 predictions", ["AI Safety Wave 2026"], false],
+    ["shares only a version number", "Qwen 3", ["Kimi K3"], false],
+    ["shares only a stopword", "the lecture", ["The Pragmatic Engineer"], false],
+    ["shares only a short word", "AI safety", ["AI Agents"], false],
+    ["unrelated", "quantum mechanics", ["RAG"], false],
+    ["accented label, unaccented host", "Erdős", ["Erdos Problems"], true],
+    ["non-ASCII word", "Lütke", ["Tobi Lütke"], true],
+  ])("%s: %s", (_class, label, names, expected) => {
+    expect(labelNamesHost(label, names)).toBe(expected);
   });
 });
