@@ -439,6 +439,14 @@ function headOf(members: WikiPageMeta[]): WikiPageMeta {
   return newestSeriesPlan(ordered) ?? ordered[0]!;
 }
 
+/** The LIVE members, or all of them when none is live. A culled page never sets
+ *  a series' spelling or keeps its label over a live one; it decides only when
+ *  it alone still declares the series. */
+function preferLive(members: WikiPageMeta[]): WikiPageMeta[] {
+  const live = members.filter((m) => !m.culled);
+  return live.length > 0 ? live : members;
+}
+
 /**
  * A NEW series key that no existing series owns, under the rail's own fold
  * (`seriesCensusKey`: trimmed, case-insensitive).
@@ -475,7 +483,7 @@ function declaredKeySpelling(
 ): string | null {
   const members = declared.get(fold);
   if (!members || members.length === 0) return null;
-  return seriesKeyOf(headOf(members)) || null;
+  return seriesKeyOf(headOf(preferLive(members))) || null;
 }
 
 /** ────────────────────────── 8.2 + 8.3(c), one pass ───────────────────────── */
@@ -520,6 +528,10 @@ function checkClusters(
     // edit target: its frontmatter is filed away.
     const unnamed = component.filter((c) => !c.series && !c.page.culled).map((c) => c.page);
     if (unnamed.length === 0) continue;
+    // A component whose culled members leave ONE live page names no cluster:
+    // "1 linked pages declare no series" is not a finding. 8.3(c) with one page
+    // (joining a series it links into) still is.
+    if (folds.size === 0 && unnamed.length < 2) continue;
 
     if (folds.size === 1) {
       // 8.3(c) — the series exists; these pages link into it without declaring it.
@@ -632,14 +644,11 @@ function componentId(component: readonly Candidate[]): string {
 function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding[] {
   const findings: LintFinding[] = [];
   for (const members of declared.values()) {
-    const head = headOf(members);
+    // A culled member stays IN the census but never sets the spelling or keeps
+    // the label while a live member declares the series, and is never edited.
+    // So whenever a finding has an edit target, its head is live.
+    const head = headOf(preferLive(members));
     const headKey = seriesKeyOf(head);
-
-    // A culled member stays IN the census (it can be the head whose spelling
-    // and label the fold reads) but is never edited nor filed against: the
-    // finding moves to the first page it does edit.
-    const subjectOf = (preferred: WikiPageMeta, edited: readonly string[]): string =>
-      preferred.culled ? edited[0]! : preferred.relPath;
 
     // (a) one series, more than one spelling.
     const variants = [...new Set(members.map((m) => seriesKeyOf(m)))];
@@ -648,7 +657,7 @@ function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding
       const paths = wrong.map((p) => p.relPath);
       findings.push({
         check: "series-inconsistent",
-        relPath: subjectOf(head, paths),
+        relPath: head.relPath,
         message: `series: "${headKey}" is spelled ${variants.length} ways — ${variants.join(", ")}`,
         detail: `normalising to "${headKey}" on: ${memberList(paths)}`,
         fix: {
@@ -670,13 +679,13 @@ function checkDeclaredSeries(declared: Map<string, WikiPageMeta[]>): LintFinding
     //     member is a blog, and keeping that one renames the fold.
     const labelled = members.filter((m) => !!m.seriesLabel && m.seriesLabel.trim());
     if (labelled.length > 1) {
-      const labelHead = seriesHead(members) ?? labelled[0]!;
+      const labelHead = seriesHead(preferLive(labelled)) ?? labelled[0]!;
       const extra = labelled.filter((m) => m.relPath !== labelHead.relPath && !m.culled);
       const paths = extra.map((p) => p.relPath);
       if (paths.length === 0) continue;
       findings.push({
         check: "series-inconsistent",
-        relPath: subjectOf(labelHead, paths),
+        relPath: labelHead.relPath,
         message: `series "${headKey}" has ${labelled.length} series_label: heads — the rail reads the newest labelled page`,
         detail: `keeping "${labelHead.seriesLabel}" on ${labelHead.relPath}; removing series_label: from ${memberList(paths)}`,
         fix: {

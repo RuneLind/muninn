@@ -541,6 +541,13 @@ describe("selectWirablePages", () => {
     expect(picked.map((p) => p.title)).toEqual(["Other"]);
   });
 
+  test("never wires a CULLED page (signal: none): no See-also line is written into retired work", () => {
+    const index = fakeIndex({ Gone: "concepts/Gone.md", Live: "concepts/Live.md" });
+    index.pages.find((p) => p.title === "Gone")!.culled = true;
+    const picked = selectWirablePages([{ title: "Gone" }, { title: "Live" }], index, "concepts/New.md");
+    expect(picked.map((p) => p.title)).toEqual(["Live"]);
+  });
+
   test("null / empty related pages, or null index ⇒ []", () => {
     const index = fakeIndex({ A: "concepts/A.md" });
     expect(selectWirablePages(null, index, "concepts/New.md")).toEqual([]);

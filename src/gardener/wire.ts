@@ -38,7 +38,8 @@ export interface WirablePage {
  * selection order so the review-gate preview can't drift from what apply does:
  * take the first 3 related pages, resolve each (by title, then `relPath`
  * fallback), drop the unresolvable ones, and skip self-links (a page resolving
- * back to `targetPath`). PURE — no filesystem: apply's further already-linked and
+ * back to `targetPath`) and culled pages (a slot a culled page took is not
+ * backfilled from the 4th). PURE — no filesystem: apply's further already-linked and
  * path-confinement skips need file reads and stay in apply.ts.
  */
 export function selectWirablePages(
@@ -51,6 +52,7 @@ export function selectWirablePages(
     const page = index?.resolve(rp.title) ?? (rp.relPath ? index?.resolveRelPath(rp.relPath) : undefined);
     if (!page) continue;
     if (page.relPath === targetPath) continue; // never link a page to itself
+    if (page.culled) continue; // retired work (`signal: none`) takes no new links
     out.push({ title: rp.title, page });
   }
   return out;

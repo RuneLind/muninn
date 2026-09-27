@@ -2349,6 +2349,26 @@ describe("buildRail — series", () => {
     expect(groupsOf(m.entries)[0]!.folded).toBe(true);
   });
 
+  test("a CULLED member of a series Activity moved is no row, no `+N more` count and no roll-up member there", () => {
+    const X = plan("plans/x.mdx", { plan_status: "in-flight", status_date: "2026-08-01", culled: true });
+    const all = [A, B, C, X, LOOSE];
+    const base = { filtered: all, facetOnly: all, seriesGroups: groupSeries(all), activity: [act(A, 9)] };
+
+    const closed = build(base);
+    expect(shape(closed.entries)).toEqual(["activity:[Alpha work]", "activity:plans/a.mdx", "activity:+2", "all:plans/loose.mdx"]);
+    expect(groupsOf(closed.entries)[0]!.members.map((m) => m.relPath)).not.toContain("plans/x.mdx");
+
+    const open = build({ ...base, openFolds: ["series:alpha"] });
+    expect(rows(open.entries).map((r) => r.page.relPath)).not.toContain("plans/x.mdx");
+    expect(groupsOf(open.entries)[0]!.members.map((m) => m.relPath).sort()).toEqual(
+      ["blogs/c.mdx", "plans/a.mdx", "plans/b.mdx"],
+    );
+
+    // Control: in the Series BLOCK (nothing ranked) the census keeps the culled member.
+    const block = build({ ...base, activity: [], openFolds: ["series:alpha"] });
+    expect(rows(block.entries).map((r) => r.page.relPath)).toContain("plans/x.mdx");
+  });
+
   test("the peek stops at SERIES_PEEK_MAX", () => {
     const D = plan("plans/d.mdx", { status_date: "2026-01-01" });
     const all = [A, B, C, D, LOOSE];

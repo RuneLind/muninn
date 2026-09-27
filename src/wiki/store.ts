@@ -12,7 +12,7 @@
  */
 
 import path from "node:path";
-import { stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import {
   isMetaStem,
@@ -684,7 +684,7 @@ export interface WikiPageMeta {
    * 379 narrative pages while the bodies name PRs constantly — the signal is in
    * the prose, and the frontmatter is the exception.
    *
-   * STRIPPED by `toListing` on all three callers and opted in by NONE: it is the
+   * STRIPPED by `toListing` on every caller and opted in by NONE: it is the
    * input to `computeRelated` (`src/wiki/related.ts`), which runs server-side on
    * the single-page route and returns the `related[]` rows; the raw list is a
    * dozen refs per page that no LIST renders. Absent, not `[]`, on a page naming
@@ -2588,7 +2588,7 @@ function asOptionalScalar(v: unknown): string | undefined {
 /**
  * The cull bit off one page's signal pair — frontmatter `signal` +
  * `signal-reason`, or an explainer's two head metas. Only `none` culls (case
- * folded, a trailing `# comment` dropped); `signal: high` and every other value
+ * folded, quoted or not, a trailing `# comment` dropped); `signal: high` and every other value
  * are ignored. A reason that is a bare YAML block-scalar indicator is absent,
  * since the parser never read its body.
  */
@@ -2597,7 +2597,9 @@ export function readCull(
   reason: unknown,
 ): { culled?: true; cullReason?: string } {
   const value = asOptionalScalar(signal);
-  if (!value || stripTrailingComment(value).trim().toLowerCase() !== "none") return {};
+  // Comment first, then quotes: `signal: "none" # retired` reaches here whole,
+  // since the parser unquotes only a value that is quoted end to end.
+  if (!value || unquote(stripTrailingComment(value)).trim().toLowerCase() !== "none") return {};
   const why = asOptionalScalar(reason);
   return why && !YAML_BLOCK_SCALAR_INDICATORS.has(why) ? { culled: true, cullReason: why } : { culled: true };
 }
@@ -2701,6 +2703,29 @@ function sniffMetaContent(prefix: string, name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * The `wiki-signal` pair's STRICTER read: a tag inside an HTML comment or a
+ * `<script>`/`<style>` body is text, not a tag, and the attribute must be
+ * `name=` itself (`data-name=` is not it). Scoped to the cull pair — a false
+ * cull hides a page, while the keywords/description sniff keeps its old read.
+ */
+function sniffWikiSignalMeta(prefix: string, name: string): string | undefined {
+  const blank = (m: string) => " ".repeat(m.length);
+  const masked = prefix
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, blank)
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, blank);
+  const attr = (tag: string, a: string) => {
+    const m = tag.match(new RegExp(`[\\s/]${a}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
+    return m ? (m[1] ?? m[2]) : undefined;
+  };
+  for (const tag of masked.match(META_TAG_RE) ?? []) {
+    if (attr(tag, "name")?.toLowerCase() !== name) continue;
+    const content = attr(tag, "content")?.trim();
+    if (content) return content;
+  }
+  return undefined;
+}
+
 /** Normalize a `<meta name="keywords">` list into wiki tags — split on comma,
  *  trim, lowercase, spaces→hyphens (the same shape the markdown tagger produces),
  *  dropping empties. */
@@ -2765,7 +2790,7 @@ async function buildExplainerMeta(
     // The cull bit, from the same bounded prefix: a tag past the first
     // `HTML_TITLE_SNIFF_BYTES` (after a large `<style>` block) is not read, which
     // is why the authoring rule puts it next to `<title>`.
-    cull = readCull(sniffMetaContent(prefix, "wiki-signal"), sniffMetaContent(prefix, "wiki-signal-reason"));
+    cull = readCull(sniffWikiSignalMeta(prefix, "wiki-signal"), sniffWikiSignalMeta(prefix, "wiki-signal-reason"));
   } catch {
     return null; // unreadable — skip, keep the rest of the wiki browsable
   }
@@ -2849,18 +2874,23 @@ function supersededTargetRef(raw: string, fromDir: string): { dir: string; stem:
 
 /**
  * The worked-ledger keys an `aliases:` entry can stand for — the page's OLD
- * path, when it was moved. A wikilink-style path (`archive/old-plan`,
- * `[[archive/old-plan]]`) tries `.md` then `.mdx`; one carrying its extension
- * is used as written. A bare name (`Alternative name`) is a title alias, not a
- * path, and answers nothing — a root-level move therefore has to spell the
- * extension (`old-plan.md`).
+ * path, when it was moved. An alias is a PATH only when it is path-shaped for
+ * THIS wiki: its first segment is a directory under the wiki root (`topDirs`,
+ * lower-cased), so a title alias that happens to hold a slash
+ * (`claude.ai/design`, `coleam00/Archon`, `/ultrareview`) folds nothing. Such a
+ * path (`archive/old-plan`, `[[archive/old-plan]]`) tries `.md` then `.mdx`; a
+ * spelled `.md`/`.mdx`/`.html` extension is used as written, and is the only
+ * way a root-level move (`old-plan.md`) names itself. A bare name is a title
+ * alias and answers nothing.
  */
-export function aliasWorkedPaths(alias: string): string[] {
+export function aliasWorkedPaths(alias: string, topDirs: ReadonlySet<string>): string[] {
   let v = alias.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
   v = v.split("|")[0]!.split("#")[0]!.trim().replace(/\\/g, "/").replace(/^\.\//, "");
   if (!v) return [];
-  if (/\.mdx?$/i.test(v)) return [normalizeWorkedPath(v)];
-  if (!v.includes("/")) return [];
+  const slash = v.indexOf("/");
+  if (slash !== -1 && !topDirs.has(v.slice(0, slash).toLowerCase())) return [];
+  if (/\.(?:mdx?|html)$/i.test(v)) return [normalizeWorkedPath(v)];
+  if (slash === -1) return [];
   return [normalizeWorkedPath(`${v}.md`), normalizeWorkedPath(`${v}.mdx`)];
 }
 
@@ -2869,9 +2899,11 @@ export function aliasWorkedPaths(alias: string): string[] {
  * banner links to. Wikilink brackets, a `|label` and a `#fragment` are dropped;
  * a `./`/`../` value is joined onto the page's folder (`supersededTargetRef`'s
  * rule); a path goes through `resolve` (which tries `.md`, then `.mdx`) and then
- * the raw relPath lookup (an `.html` successor); a bare name through `resolve`
- * (stem, title or alias). Undefined when it names no page, or names the page
- * itself.
+ * the raw relPath lookup (an `.html` successor), in any folder. A BARE name
+ * resolves in the page's OWN folder first — the page rule 4 of
+ * `pairAttachments` folds it under, so the banner and the fold agree — and only
+ * then wiki-wide through `resolve` (stem, title or alias, first registration
+ * wins). Undefined when it names no page, or names the page itself.
  */
 export function resolveSupersededBy(
   raw: string,
@@ -2884,7 +2916,16 @@ export function resolveSupersededBy(
   if (!v) return undefined;
   if (/^\.{1,2}\//.test(v)) v = path.posix.normalize(path.posix.join(path.posix.dirname(fromRelPath), v));
   v = v.replace(/^\/+/, "");
-  const hit = resolve(v) ?? (v.includes("/") ? resolveRelPath(v) : undefined);
+  let hit: WikiPageMeta | undefined;
+  if (!v.includes("/")) {
+    const dir = path.posix.dirname(fromRelPath);
+    const local = dir === "." ? v : `${dir}/${v}`;
+    hit = /\.(?:mdx?|html)$/i.test(v)
+      ? resolveRelPath(local)
+      : (resolveRelPath(`${local}.md`) ?? resolveRelPath(`${local}.mdx`));
+    if (hit && normalizeRelPath(hit.relPath) === normalizeRelPath(fromRelPath)) hit = undefined;
+  }
+  hit ??= resolve(v) ?? (v.includes("/") ? resolveRelPath(v) : undefined);
   if (!hit || normalizeRelPath(hit.relPath) === normalizeRelPath(fromRelPath)) return undefined;
   return hit.relPath;
 }
@@ -3514,10 +3555,20 @@ export async function buildWikiIndex(
     // folded in and the newest wins — unless a live page sits at that path now,
     // whose writes are its own.
     const livePaths = new Set(pages.map((p) => normalizeWorkedPath(p.relPath)));
+    let topDirs = new Set<string>();
+    try {
+      topDirs = new Set(
+        (await readdir(root, { withFileTypes: true }))
+          .filter((d) => d.isDirectory())
+          .map((d) => d.name.toLowerCase()),
+      );
+    } catch {
+      // An unreadable root folds no alias; the page's own path still matches.
+    }
     for (const meta of pages) {
       let w = workedMemo.pages.get(normalizeWorkedPath(meta.relPath));
       for (const alias of meta.aliases) {
-        for (const key of aliasWorkedPaths(alias)) {
+        for (const key of aliasWorkedPaths(alias, topDirs)) {
           if (livePaths.has(key)) continue;
           const aw = workedMemo.pages.get(key);
           if (aw !== undefined && (w === undefined || aw > w)) w = aw;

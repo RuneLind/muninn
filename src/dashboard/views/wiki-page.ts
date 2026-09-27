@@ -1088,6 +1088,9 @@ export async function renderWikiPage(opts?: {
     .mini-node { cursor: pointer; }
     .mini-node text { fill: var(--text-muted); font-size: 9px; }
     .mini-node:hover text { fill: var(--text-primary); }
+    /* A culled (retired) neighbour: muted, and its hover names the label. */
+    .mini-node.culled .mini-dot { opacity: 0.45; }
+    .mini-node.culled text { font-style: italic; }
     .mini-center text { fill: var(--text-primary); font-size: 9.5px; font-weight: 600; }
     /* Neutral default for a custom type's mini-graph node; circle.t-* (higher
        specificity) overrides for the built-in types, the hit circle keeps its own. */
@@ -2435,6 +2438,9 @@ export async function renderWikiPage(opts?: {
     .wiki-conn-item { display: flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
     .wiki-conn-item:hover { background: var(--bg-surface); }
     .wiki-conn-item span { font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* The culled marker is the title span's SIBLING and never shrinks: inside the
+       ellipsis span a title over ~30 characters clipped it away. */
+    .wiki-conn-item .wiki-cull-mark { flex-shrink: 0; font-size: 11px; color: var(--text-muted); white-space: nowrap; }
     .wiki-conn-empty { font-size: 12px; color: var(--text-dim); padding: 4px 8px; }
     /* A Related work row is two lines, so it tops-aligns and its dot drops onto
        the title's baseline instead of centring against both. */

@@ -617,35 +617,52 @@ the flatten, and the contrast in both themes).
 A page is RETIRED by frontmatter `signal: none` plus `signal-reason:`, optionally
 `superseded_by: [[any/folder/page]]`; an `.html` page by
 `<meta name="wiki-signal" content="none">` (and `wiki-signal-reason`), read
-through `sniffMetaContent` from the first 4 KB only, so the tag goes next to
-`<title>`, before any `<style>`. Only `none` is read (`readCull`). In code the
-bit is `culled`, because `retire` already names the gardener backlog tail.
+through `sniffWikiSignalMeta` from the first 4 KB only, so the tag goes next to
+`<title>`, before any `<style>`. That read is stricter than the keywords sniff:
+a tag inside an HTML comment or a `<script>`/`<style>` body does not count, and
+the attribute must be `name=` itself, not `data-name=`. Only `none` is read,
+quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
+`culled`, because `retire` already names the gardener backlog tail.
 
 - **Effective value.** An attachment (rules 1–3) inherits its parent's cull and
   reason; a rule-4 child keeps its own. A culled page adopts NO rule-4 child, so
   the pages it supersedes list at top level. Every consumer reads `culled`.
 - **Dropped from:** Activity (`rankActivity`, and the worked gate's candidate
   count), Similar, Related, tracker plan coverage (`isPlanPage` answers false),
-  and the lint's finding subjects and edit targets (orphan, stale-updated,
-  missing-sources, check 8).
+  the gardener's See-also wiring targets (`selectWirablePages`), and the lint's
+  finding subjects and edit targets (orphan, stale-updated, missing-sources,
+  check 8). In check 8 a culled member never sets a series' spelling or keeps
+  its label while a live member declares the series, and a component whose
+  culled members leave one live page is no 8.2 cluster.
 - **Kept in:** the rail listing (hiding is the reader UI's job), the link graph,
   the series census (a culled head still names the fold, and a culled bridge
   still joins a component, so 8.2 never re-coins a series), Connections'
-  Linked from / Links to, the issue graph and the board — marked `· retired`.
+  Linked from / Links to and its mini-graph, the issue graph and the board —
+  marked with the ONE label `CULL_LABEL` ("Retired", `wiki-cull-view.ts`), the
+  hook the per-wiki `cullLabels` replaces. A series that Activity moved shows no
+  culled member as a row, in `+N more` or in its roll-up; the Series block does.
 - **Wire.** `culled` rides every `toListing` caller; `cullReason` and
   `supersededBy` (resolved in ANY folder, `resolveSupersededBy`) ride the
-  single-page `meta` only, through `includeCull`.
+  single-page `meta` only, through `includeCull`. A bare-name `superseded_by:`
+  resolves in the page's own folder first (the page rule 4 folds it under),
+  then wiki-wide; a path form resolves across folders.
 - **Dates.** The three keys are metadata-only (`git-dates.ts`), so a cull does
   not move a page's update date.
 - **Worked date over `aliases:`.** The claude-usage ledger is keyed by path, so
-  the store folds each path-shaped alias (`aliasWorkedPaths`: `archive/old` tries
-  `.md` and `.mdx`, a bare name is a title alias and folds nothing) and keeps the
-  newest — unless a live page sits at that path now.
+  the store folds each path-shaped alias and keeps the newest — unless a live
+  page sits at that path now. Path-shaped means for THIS wiki
+  (`aliasWorkedPaths`): its first segment is a directory under the wiki root, so
+  `claude.ai/design` or `/ultrareview` folds nothing; `archive/old` tries `.md`
+  and `.mdx`, a spelled `.md`/`.mdx`/`.html` is used as written, and a bare name
+  folds nothing.
 
-Acceptance: `culled.test.ts`, plus a case each in `lint.test.ts`,
+Acceptance: `culled.test.ts`, plus cases in `lint.test.ts`,
 `lint-series.test.ts`, `related.test.ts`, `similar.test.ts`,
 `trackers/rows.test.ts`, `graph.test.ts`, `git-dates.test.ts`,
-`worked-ledger.test.ts` and `wiki-routes.test.ts`.
+`worked-ledger.test.ts`, `wiki-routes.test.ts`, `gardener/wire.test.ts`,
+`wiki-recents.test.ts`, `wiki-activity-rank.test.ts` and the marker sites
+(`wiki-cull-view.test.ts`, `wiki-graph-view.test.ts`,
+`wiki-board-view.test.ts`).
 
 ### Families and months (`wiki-groups.ts`)
 

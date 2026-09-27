@@ -1368,10 +1368,17 @@ export function buildRail(input: RailInput): RailModel {
   const emitSeries = (g: RailGroup, section: RailSection, beforeRow?: () => void): boolean => {
     const foldKey = normalizeFoldKey(g.key);
     const present = groupMembers.get(foldKey) ?? [];
-    const members = unlifted(g);
+    // In ACTIVITY a culled member is no row, no `+N more` count and no roll-up
+    // member: Activity is recent LIVE work, and the series only sits there
+    // because a live member ranked. The Series block keeps it (the census is a
+    // census of the work), and so does the `N of M shown` line below.
+    const shownHere = (m: WikiListing) => section !== "activity" || !m.culled;
+    const allMembers = unlifted(g);
+    const members = allMembers.filter(shownHere);
     // The members the reader PINNED: on screen under `Pinned`, and named here as
     // ghost rows so the fold does not silently lose them.
-    const ghosts = present.filter((m) => sectionLifted.has(normalizeRel(m.relPath)));
+    const allGhosts = present.filter((m) => sectionLifted.has(normalizeRel(m.relPath)));
+    const ghosts = allGhosts.filter(shownHere);
     // ⚠️ EVERY rule-4 child in the filtered set counts — unlike a FAMILY's
     // census below, where the lift really does take a page out of the slate for
     // that render. A series' census says which of its members this render holds,
@@ -1383,13 +1390,13 @@ export function buildRail(input: RailInput): RailModel {
     // series with one pinned member holding one retired child read
     // `1 of 2 shown` with nothing hidden, and cost the roll-up its
     // `1 superseded`.
-    const superseded = g.supersededChildren;
+    const superseded = g.supersededChildren.filter(shownHere);
     // A series with neither a member nor a ghost present is not on screen at
     // all — a facet took every page of it — and a header standing for nothing
     // is furniture.
     if (!members.length && !ghosts.length) return false;
     beforeRow?.();
-    const shown = members.length + ghosts.length + superseded.length;
+    const shown = allMembers.length + allGhosts.length + g.supersededChildren.length;
     const expanded = isGroupExpanded(foldKey);
     entries.push({
       kind: "group",

@@ -343,6 +343,7 @@ import {
   STAMP_CONFIRM_LABEL,
   STAMP_LABEL,
 } from "./wiki-provenance-view.ts";
+import { connItemHtml, miniNodeHtml } from "./wiki-cull-view.ts";
 import { provenanceStripCertain, type ProvenancePayload } from "../../../wiki/provenance.ts";
 import { compactIssues, relationsCount, type IssueRow } from "../../../wiki/trackers/types.ts";
 import {
@@ -2695,14 +2696,11 @@ function miniGraphHtml(data: WikiPageDetail, rows: readonly IssueRow[] | null | 
   });
   shown.forEach((n) => {
     const ly = n.y! + (n.y! >= cy ? 15 : -9);
-    nodes +=
-      `<g class="mini-node" data-page="${esc(n.p.name)}" data-relpath="${esc(n.p.relPath)}"><title>${esc(displayTitleOf(n.p))}</title>` +
-      `<circle class="mini-hit" cx="${n.x!.toFixed(1)}" cy="${n.y!.toFixed(1)}" r="14" fill="transparent"></circle>` +
-      `<circle class="mini-dot t-${esc(n.p.type)}" cx="${n.x!.toFixed(1)}" cy="${n.y!.toFixed(1)}" r="5"></circle>` +
-      // The VISIBLE label, like the `<title>` tooltip two lines up — they were
-      // reading from two different fields, so a colliding node's hover text said
-      // `muninn/MEMORY` while the dot under it said `MEMORY`.
-      `<text x="${n.x!.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle">${esc(short(displayTitleOf(n.p)))}</text></g>`;
+    // The VISIBLE label and the `<title>` tooltip read one field — they used to
+    // read two, so a colliding node's hover said `muninn/MEMORY` while the dot
+    // under it said `MEMORY`. A culled neighbour is muted and says so on hover.
+    const title = displayTitleOf(n.p);
+    nodes += miniNodeHtml(n.p, { x: n.x!, y: n.y!, labelY: ly, label: short(title), title });
   });
   issues.forEach((row, j) => {
     const ang = (2 * Math.PI * (shown.length + j)) / slots - Math.PI / 2;
@@ -2755,11 +2753,8 @@ function renderConnections(data: WikiPageDetail): void {
       group
         .sort((a, b) => b.backlinkCount - a.backlinkCount)
         .forEach((p) => {
-          html +=
-            `<div class="wiki-conn-item" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
-            `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(displayTitleOf(p))}` +
-            // A culled page stays in Connections, marked (the reader's hide/banner UI is separate).
-            `${p.culled ? ' <em title="retired: signal: none">· retired</em>' : ""}</span></div>`;
+          // A culled page stays in Connections, marked (`connItemHtml`).
+          html += connItemHtml(p, displayTitleOf(p));
         });
     });
     return html + "</div>";

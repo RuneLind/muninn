@@ -36,6 +36,11 @@ describe("readCull", () => {
     expect(readCull(undefined, "reason without a signal")).toEqual({});
   });
 
+  test("a QUOTED value followed by a comment still culls", () => {
+    expect(readCull('"none" # retired', undefined)).toEqual({ culled: true });
+    expect(readCull("'none'   # retired 09-27", "why")).toEqual({ culled: true, cullReason: "why" });
+  });
+
   test("a block-scalar indicator reason is absent, not the reason", () => {
     expect(readCull("none", ">")).toEqual({ culled: true });
   });
@@ -70,6 +75,33 @@ describe("the culled bit on a built index", () => {
     expect(pageOf(index, "archive/near.html").culled).toBe(true);
     expect(pageOf(index, "archive/near.html").cullReason).toBe("a scaffold");
     expect(pageOf(index, "archive/far.html").culled).toBeUndefined();
+  });
+});
+
+describe("the .html wiki-signal sniff reads a REAL tag only", () => {
+  const head = (inner: string) =>
+    `<!doctype html><html><head><title>T</title>${inner}</head><body>x</body></html>`;
+
+  test("a commented-out tag, a tag inside a <script> string and a data-name attribute do not cull", async () => {
+    await write("archive/comment.html", head('<!-- <meta name="wiki-signal" content="none"> -->'));
+    await write(
+      "archive/script.html",
+      head(`<script>const tag = '<meta name="wiki-signal" content="none">';</script>`),
+    );
+    await write("archive/style.html", head('<style>/* <meta name="wiki-signal" content="none"> */</style>'));
+    await write("archive/dataname.html", head('<meta data-name="wiki-signal" content="none">'));
+    await write("archive/datacontent.html", head('<meta name="wiki-signal" data-content="none">'));
+    // Control: the real tag after a comment and a script still culls.
+    await write(
+      "archive/real.html",
+      head('<!-- note --><script>let x = 1;</script><meta name="wiki-signal" content="none">'),
+    );
+    const index = await buildWikiIndex(root);
+
+    for (const rel of ["comment", "script", "style", "dataname", "datacontent"]) {
+      expect({ rel, culled: pageOf(index, `archive/${rel}.html`).culled }).toEqual({ rel, culled: undefined });
+    }
+    expect(pageOf(index, "archive/real.html").culled).toBe(true);
   });
 });
 
@@ -132,14 +164,55 @@ describe("supersededBy — resolved in ANY folder", () => {
     }
     expect(pageOf(index, "archive/d.md").supersededBy).toBeUndefined();
   });
+
+  test("a BARE name resolves in the page's own folder first — the page the rail folds it under", async () => {
+    // Both `archive/b.md` and `plans/b.md` exist; `archive/` registers first, so
+    // the wiki-wide first-wins resolve answers the wrong one.
+    await write("archive/b.md", md(["title: Archive B"]));
+    await write("plans/b.md", md(["title: Plans B"]));
+    await write("plans/a.md", md(["title: A", "superseded_by: \"[[b]]\""]));
+    // A bare name with NO same-folder page still resolves wiki-wide.
+    await write("plans/c.md", md(["title: C", "superseded_by: only-in-archive"]));
+    await write("archive/only-in-archive.md", md(["title: Only"]));
+    // A PATH form keeps resolving across folders.
+    await write("plans/e.md", md(["title: E", "superseded_by: [[archive/b]]"]));
+    const index = await buildWikiIndex(root);
+
+    const a = pageOf(index, "plans/a.md");
+    expect(a.parent).toBe("plans/b.md");
+    expect(a.supersededBy).toBe("plans/b.md");
+    expect(pageOf(index, "plans/c.md").supersededBy).toBe("archive/only-in-archive.md");
+    expect(pageOf(index, "plans/e.md").supersededBy).toBe("archive/b.md");
+  });
 });
 
 describe("aliasWorkedPaths", () => {
+  const dirs = new Set(["archive", "plans"]);
+
   test("a path alias tries .md then .mdx; one with an extension is used as written; a bare name is no path", () => {
-    expect(aliasWorkedPaths("archive/old-plan")).toEqual(["archive/old-plan.md", "archive/old-plan.mdx"]);
-    expect(aliasWorkedPaths("[[archive/Old-Plan|label]]")).toEqual(["archive/old-plan.md", "archive/old-plan.mdx"]);
-    expect(aliasWorkedPaths("./old-plan.mdx")).toEqual(["old-plan.mdx"]);
-    expect(aliasWorkedPaths("Alternative name")).toEqual([]);
+    expect(aliasWorkedPaths("archive/old-plan", dirs)).toEqual(["archive/old-plan.md", "archive/old-plan.mdx"]);
+    expect(aliasWorkedPaths("[[archive/Old-Plan|label]]", dirs)).toEqual(["archive/old-plan.md", "archive/old-plan.mdx"]);
+    expect(aliasWorkedPaths("./old-plan.mdx", dirs)).toEqual(["old-plan.mdx"]);
+    expect(aliasWorkedPaths("Alternative name", dirs)).toEqual([]);
+  });
+
+  test("a slash alias whose first segment is no directory of this wiki is a TITLE alias, not a path", () => {
+    expect(aliasWorkedPaths("claude.ai/design", dirs)).toEqual([]);
+    expect(aliasWorkedPaths("coleam00/Archon", dirs)).toEqual([]);
+    expect(aliasWorkedPaths("/ultrareview", dirs)).toEqual([]);
+    // The real melosys-kode-wiki spelling: no extension, an existing folder.
+    expect(
+      aliasWorkedPaths("archive/melosys-eessi/2026-05-24-melosys-7821-avvikle-basic-auth-sak-plan-review", dirs),
+    ).toEqual([
+      "archive/melosys-eessi/2026-05-24-melosys-7821-avvikle-basic-auth-sak-plan-review.md",
+      "archive/melosys-eessi/2026-05-24-melosys-7821-avvikle-basic-auth-sak-plan-review.mdx",
+    ]);
+  });
+
+  test("a spelled extension (.md, .mdx, .html) is used as written", () => {
+    expect(aliasWorkedPaths("archive/x.html", dirs)).toEqual(["archive/x.html"]);
+    expect(aliasWorkedPaths("archive/x.md", dirs)).toEqual(["archive/x.md"]);
+    expect(aliasWorkedPaths("x.html", dirs)).toEqual(["x.html"]);
   });
 });
 

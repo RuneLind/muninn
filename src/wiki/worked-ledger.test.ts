@@ -890,4 +890,16 @@ describe("the worked date follows a page's aliases (a moved page keeps its histo
       await rm(root, { recursive: true, force: true });
     }
   });
+  test("a TITLE alias with a slash (no such folder in this wiki) folds no ledger row", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-title-"));
+    try {
+      await mkdir(path.join(root, "concepts"), { recursive: true });
+      await writeFile(path.join(root, "concepts/design.md"), "---\ntitle: Design\naliases: [claude.ai/design]\n---\n\nBody.\n");
+      await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: "claude.ai/design.md", w: 7_000 }] } }));
+      const index = await buildWikiIndex(root);
+      expect(index.pages.find((p) => p.relPath === "concepts/design.md")!.workedMs).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
