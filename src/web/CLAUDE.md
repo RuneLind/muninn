@@ -158,9 +158,12 @@ divergences, all four now regression tests in `render.test.ts`:
   extractor became a line walker the same input diverged for a different reason:
   the mid-line placeholder joined the text either side onto one line.)
 
-Inline code spans pair CommonMark-style, per line: a run of N backticks closes
-only on exactly N, an unmatched run stays literal, and one space is stripped from
-each end. The fact-check strip shares that grammar via `src/format/code-spans.ts`.
+Inline code spans pair by CommonMark's rules, but per line: a run of N backticks
+closes only on exactly N, an unmatched run stays literal, and one U+0020 is
+stripped from each end when both ends are U+0020 and the content is not all
+U+0020. CommonMark also pairs across a paragraph's soft breaks; this renderer
+does not (a known divergence). The fact-check strip shares that grammar via
+`src/format/code-spans.ts`.
 
 ⚠️ **What reading the output costs instead: the scan has to know every container
 the renderer uses for code, and there are TWO.** The first revision assumed one,
