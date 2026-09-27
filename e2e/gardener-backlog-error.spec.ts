@@ -124,6 +124,12 @@ interface Harness {
 
 async function openStrip(page: Page, h: Harness): Promise<void> {
   await page.route("**/api/wiki/ingest-backlog*", async (route: Route) => {
+    // The inspector's per-doc list: unpatched, and possibly still in flight when
+    // the test ends.
+    if (new URL(route.request().url()).searchParams.has("docs")) {
+      await route.continue().catch(() => {});
+      return;
+    }
     const res = await route.fetch();
     const data = await res.json();
     h.gets += 1;
@@ -190,6 +196,10 @@ test("a refused verb shows `<verb> failed: …`, and one note replaces another",
   await page.locator('#gardBacklog [data-backlog-action="confirm"]').click();
   await page.locator("#gardBacklog .bk-start").click();
   await expect.poll(() => h.seen.length).toBe(3);
+  await expect(notes(page)).toHaveText([` ${REFUSED}`]);
+  // Opening the inspector re-renders the strip; the Drain control is still there.
+  await page.locator('#gardBacklog [data-backlog-inspect="drainable"]').click();
+  await expect(page.locator("#gardBacklog .bk-inspector-close")).toHaveCount(1);
   await expect(notes(page)).toHaveText([` ${REFUSED}`]);
 
   // The refusals are the real server's 415s, not a test double.

@@ -799,11 +799,11 @@ async function startBacklogRun(): Promise<void> {
   }
 }
 
-/** Draw the strip's error note, replacing any note already there. */
+/** Draw the strip's error note. Called only by `renderBacklog`, right after it
+ *  replaced the strip's HTML, so there is never a second one. */
 function appendBacklogError(message: string): void {
   const el = document.getElementById("gardBacklog");
   if (!el) return;
-  el.querySelectorAll(".bk-action-err").forEach((n) => n.remove());
   const note = document.createElement("span");
   // `bk-err` alone is also the strip's "(some sources unavailable)" status.
   note.className = "bk-err bk-action-err";
@@ -811,11 +811,11 @@ function appendBacklogError(message: string): void {
   el.appendChild(note);
 }
 
-/** Record a failed strip action against the control it came from, and draw it. */
+/** Record a failed strip action against the control it came from, and draw it.
+ *  With no strip rendered there is no control, so nothing shows. */
 function showBacklogError(message: string, control: string): void {
   backlogError = { message, control };
-  if (lastBacklogData) rerenderStrip();
-  else appendBacklogError(message);
+  rerenderStrip();
 }
 
 /** A strip action is starting: the previous action's note no longer applies. */
