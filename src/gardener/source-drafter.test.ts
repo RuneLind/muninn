@@ -1447,6 +1447,46 @@ describe("draftSourcePage — See-also seeding (relatedPages)", () => {
     expect(row.relatedPages).toEqual([{ title: "RAG", relPath: "concepts/Retrieval Systems.md" }]);
   });
 
+  test("a label differing from the host's name only in case is honest", async () => {
+    const row = await seeded({}, "Built on [[Agents|AGENTS]].", [concept("Agents")]);
+    expect(row.relatedPages).toEqual([{ title: "Agents", relPath: "concepts/Agents.md" }]);
+  });
+
+  test("an ai source never backlinks onto a life/ page", async () => {
+    const sleep = concept("Sleep", { domain: "life", relPath: "life/concepts/Sleep.md" });
+    const row = await seeded({}, "Like [[Sleep]].", [sleep]);
+    expect(row.targetPath.startsWith("life/")).toBe(false);
+    expect(row.relatedPages).toEqual([]);
+  });
+
+  const entity = (title: string) => page({ title, name: title, type: "entity", relPath: `entities/${title}.md` });
+
+  test("a surname label names its host", async () => {
+    const row = await seeded({}, "Per [[Andrej Karpathy|Karpathy]].", [entity("Andrej Karpathy")]);
+    expect(row.relatedPages).toEqual([{ title: "Andrej Karpathy", relPath: "entities/Andrej Karpathy.md" }]);
+  });
+
+  test("a singular label names a plural host", async () => {
+    const row = await seeded({}, "Each [[Skills|skill]] loads lazily.", [concept("Skills")]);
+    expect(row.relatedPages).toEqual([{ title: "Skills", relPath: "concepts/Skills.md" }]);
+  });
+
+  test("a hyphenated label names its closed-compound host", async () => {
+    const row = await seeded({}, "Spawn a [[Subagents|sub-agent]].", [concept("Subagents")]);
+    expect(row.relatedPages).toEqual([{ title: "Subagents", relPath: "concepts/Subagents.md" }]);
+  });
+
+  test("a possessive label names its host", async () => {
+    const row = await seeded({}, "In [[Sabine Hossenfelder|Hossenfelder's]] view.", [entity("Sabine Hossenfelder")]);
+    expect(row.relatedPages).toEqual([{ title: "Sabine Hossenfelder", relPath: "entities/Sabine Hossenfelder.md" }]);
+  });
+
+  test("a label sharing only a stopword or a short token is still refused", async () => {
+    const hosts = [entity("The Pragmatic Engineer"), concept("AI Agents")];
+    expect((await seeded({}, "See [[The Pragmatic Engineer|the lecture]].", hosts)).relatedPages).toEqual([]);
+    expect((await seeded({}, "See [[AI Agents|AI safety]].", hosts)).relatedPages).toEqual([]);
+  });
+
   test("no index → no related pages", () => {
     expect(sourceRelatedPages(mdxDraft(), null, "sources/X.mdx")).toEqual([]);
   });

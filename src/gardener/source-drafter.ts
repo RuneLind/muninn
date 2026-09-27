@@ -69,7 +69,8 @@ export const SOURCE_BACKLINK_CAP = 1;
  * resolved BODY wikilinks, in body order, concept/entity pages first (other
  * resolved pages only when there are none). Skips code regions, self-links,
  * reserved basenames and `.html` explainers; dedupes by page. Refuses a link whose
- * `|label` names something else (`[[RAG|quantum mechanics]]`) and a host in the
+ * `|label` names something else (`[[RAG|quantum mechanics]]`, see
+ * {@link labelNamesHost}) and a host in the
  * other domain (ai vs `life/`): an orphan is better than a wrong backlink or one
  * that pulls a page across the wiki/wiki-life split. Without this every approved
  * source page is born an orphan (240 of the linter's 242 orphans, 2026-09-24).
@@ -91,13 +92,41 @@ export function sourceRelatedPages(
     const key = normalizeRelPath(page.relPath);
     if (key === self || seen.has(key)) continue;
     if (hasForbiddenBasename(page.relPath) || /\.html$/i.test(page.relPath)) continue;
-    const names = [target, page.title, page.name, ...page.aliases].map((n) => n.trim().toLowerCase());
-    if (label && !names.includes(label.toLowerCase())) continue;
+    if (label && !labelNamesHost(label, [target, page.title, page.name, ...page.aliases])) continue;
     seen.add(key);
     const rp = { title: target, relPath: page.relPath };
     (page.type === "concept" || page.type === "entity" ? primary : fallback).push(rp);
   }
   return (primary.length > 0 ? primary : fallback).slice(0, SOURCE_BACKLINK_CAP);
+}
+
+const LABEL_STOPWORDS = new Set([
+  "the", "and", "for", "with", "from", "into", "about", "how", "what", "why", "who",
+  "you", "your", "our", "its", "this", "that", "are", "was", "not", "new", "via",
+]);
+
+/**
+ * Meaningful tokens of a name, plus its separator-free whole (`sub-agent` → `subagent`):
+ * lowercased, split on anything but letters/digits (so a possessive `'s` falls off as
+ * a too-short token), trailing `s` dropped.
+ */
+function nameTokens(name: string): string[] {
+  const words = name.toLowerCase().split(/[^\p{L}\p{N}]+/u);
+  const singular = (w: string) => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w);
+  return [...words, words.join("")]
+    .filter((w) => w.length >= 3 && !LABEL_STOPWORDS.has(w))
+    .map(singular);
+}
+
+/**
+ * Whether a `|label` honestly names the host: it shares a meaningful token with one
+ * of the host's names. Accepts `[[Andrej Karpathy|Karpathy]]`, `[[Subagents|sub-agent]]`
+ * and `[[Skills System|skill]]`; refuses `[[RAG|quantum mechanics]]`. Exact equality
+ * refused 913 labeled links on jarvis; this rule accepts 718 of them (PR #577).
+ */
+export function labelNamesHost(label: string, names: string[]): boolean {
+  const hostTokens = new Set(names.flatMap(nameTokens));
+  return nameTokens(label).some((t) => hostTokens.has(t));
 }
 
 /** The one input a source draft is built from — a single captured summary doc. */
