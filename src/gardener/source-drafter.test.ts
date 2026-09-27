@@ -1496,6 +1496,16 @@ describe("draftSourcePage — See-also seeding (relatedPages)", () => {
   test("no index → no related pages", () => {
     expect(sourceRelatedPages(mdxDraft(), null, "sources/X.mdx")).toEqual([]);
   });
+
+  test("a CULLED first concept link does not use up the one seeded backlink: the next live one is seeded", async () => {
+    const pages = [concept("Retired Idea", { culled: true }), concept("Agents")];
+    const row = await seeded({}, "First [[Retired Idea]], then [[Agents]].", pages);
+    expect(row.relatedPages).toEqual([{ title: "Agents", relPath: "concepts/Agents.md" }]);
+    // …and the wire stage's preview wires it.
+    expect(selectWirablePages(row.relatedPages, fakeIndex(pages), row.targetPath).map((w) => w.page.relPath)).toEqual([
+      "concepts/Agents.md",
+    ]);
+  });
 });
 
 // One row per class in PR #577's label table: [class, label, host names, names the host].
