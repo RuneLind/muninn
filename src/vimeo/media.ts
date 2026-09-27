@@ -469,6 +469,8 @@ export async function downloadRendition(
         );
       }
       const seg = rep.segments[i]!;
+      // The segment's timer IS the rendition deadline when it was clamped to it.
+      const clamped = remaining <= VIMEO_SEGMENT_TIMEOUT_MS;
       let bytes: Uint8Array;
       try {
         bytes = await downloadPinned(resolveSegmentUrl(manifestUrl, manifest, rep, seg), {
@@ -480,10 +482,10 @@ export async function downloadRendition(
           ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
         });
       } catch (err) {
-        // A segment handed the LAST sliver of the budget fails with "Segment
-        // download timed out after 2ms" — true, and the wrong clock. When the
-        // whole operation's deadline has passed, that is what is reported.
-        if (err instanceof VimeoDownloadError && Date.now() >= deadline) {
+        // A clamped segment's timeout is the whole operation's, reported on
+        // that clock. Decided structurally: its timer can fire a millisecond
+        // before `Date.now()` reaches `deadline` (CI run 36331523505).
+        if (err instanceof VimeoDownloadError && err.timedOut && clamped) {
           throw new VimeoMediaDownloadError(
             `Rendition download timed out after ${timeoutMs}ms (${segmentsWritten.length}/${ordered.length} segments)`,
             { cause: err },

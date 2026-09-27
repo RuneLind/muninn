@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -404,6 +404,76 @@ describe("downloadRendition", () => {
     );
     expect((outcome as Error).message).not.toMatch(/Segment download timed out/);
     expect(existsSync(out)).toBe(false);
+  });
+
+  /**
+   * The clamped segment's timer can fire before `Date.now()` reaches the
+   * deadline (red on main CI run 36331523505). `setSystemTime` freezes
+   * `Date.now` while `setTimeout` keeps firing (measured, Bun 1.3.10), so the
+   * frozen clock stands for that early fire, every run.
+   */
+  // Both hang shapes: a transport that ignores the abort loses to the budget
+  // race; one that rejects on it (a real `fetch`) is classified as a timeout.
+  const hangs: [string, (init?: RequestInit) => Promise<never>][] = [
+    ["ignores its signal", () => new Promise<never>(() => {})],
+    [
+      "rejects on abort",
+      (init) => new Promise<never>((_r, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))),
+    ],
+  ];
+  test.each(hangs)("a clamped segment's timeout is the rendition timeout even when the clock lags the timer (%s)", async (_shape, hang) => {
+    const m = fixture();
+    const rep = rep4(m);
+    const start = Date.now();
+    setSystemTime(new Date(start));
+    try {
+      let fetches = 0;
+      // Not `async`: its extra ticks would let the budget's rejection win the
+      // race, and the abort-rejection path would go untested.
+      const impl = ((input: string | URL | Request, init?: RequestInit) => {
+        fetches++;
+        if (fetches > 1) return hang(init); // until its 100 ms timer fires
+        setSystemTime(new Date(start + 300)); // segment 0 spends 300 of the 400 ms
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        return Promise.resolve(new Response(segmentBody(url), { status: 200 }));
+      }) as unknown as typeof fetch;
+      const out = join(dir(), "lagging.mp4");
+      const outcome = await downloadRendition(MANIFEST_URL, m, rep, [0, 1, 2, 3, 4, 5], out, {
+        fetchImpl: impl,
+        timeoutMs: 400,
+      }).catch((e) => e);
+      expect(Date.now()).toBe(start + 300); // the timer fired with the clock short of the deadline
+      expect(outcome).toBeInstanceOf(VimeoMediaDownloadError);
+      expect(fetches).toBe(2);
+      expect((outcome as Error).message).toBe("Rendition download timed out after 400ms (1/6 segments)");
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test("a clamped segment that fails for another reason keeps its own error, even past the deadline", async () => {
+    const m = fixture();
+    const rep = rep4(m);
+    const start = Date.now();
+    setSystemTime(new Date(start));
+    try {
+      const impl = (async () => {
+        setSystemTime(new Date(start + 500)); // the answer lands after the 400 ms deadline
+        return new Response("boom", { status: 500 });
+      }) as unknown as typeof fetch;
+      const out = join(dir(), "status.mp4");
+      const outcome = await downloadRendition(MANIFEST_URL, m, rep, [0, 1], out, {
+        fetchImpl: impl,
+        timeoutMs: 400,
+      }).catch((e) => e);
+      expect(outcome).toBeInstanceOf(VimeoMediaDownloadError);
+      expect((outcome as Error).message).toBe("Segment download returned HTTP 500");
+      expect((outcome as VimeoMediaDownloadError).timedOut).toBe(false);
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      setSystemTime();
+    }
   });
 });
 
