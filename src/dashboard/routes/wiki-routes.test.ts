@@ -835,6 +835,40 @@ describe("integrate routes — pre-model / pre-write rejections", () => {
     expect(body.bodyLen).toBe(integrateBodyLen(stripFactWrappers(ANNOTATED_MD_PAGE), true));
   });
 
+  test("propose and apply strip the page the reader renders: a tag it shows as code stays", async () => {
+    // The reader drops the title H1, so `a` opens the paragraph and the span pairs
+    // across the break: that `<Fact>` is code, and no strip may count or remove it.
+    const page = `---\ntitle: Widgets\n---\n# Widgets\na \`x\nb <Fact n="1" v="ok">t</Fact>\` c\n\n${"prose ".repeat(6000)}\n`;
+    await Bun.write(path.join(root, "Widgets.md"), page);
+    __resetWikiCacheForTest();
+    const want = integrateBodyLen(page, pageHasComponentVocabulary("Widgets.md", page));
+    const propose = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "Widgets",
+      answer: "### ❌ Claim 1/1 — Units\n\nIt is wrong.",
+      baseHash: createHash("sha256").update(page).digest("hex"),
+    });
+    expect(((await propose.json()) as { bodyLen: number }).bodyLen).toBe(want);
+    const apply = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: "whatever",
+      edits: editsFor("prose prose", "text text"),
+    });
+    expect(((await apply.json()) as { bodyLen: number }).bodyLen).toBe(want);
+  });
+
+  test("apply writes the page back with a tag the reader shows as code still in it", async () => {
+    const page = `---\ntitle: Widgets\n---\n# Widgets\na \`x\nb <Fact n="1" v="ok">t</Fact>\` c\n\nThe device ships 4M units.\n`;
+    await Bun.write(path.join(root, "Widgets.md"), page);
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: createHash("sha256").update(page).digest("hex"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+    });
+    expect(res.status).toBe(200);
+    expect(await Bun.file(path.join(root, "Widgets.md")).text()).toBe(page.replace("4M", "2.1M"));
+  });
+
   // ── Claim quotes (PR 2) ────────────────────────────────────────────────────
   // Also reachable on the zero-claims early return, so no model call is spent.
 

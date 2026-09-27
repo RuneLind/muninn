@@ -298,6 +298,31 @@ describe("newline guard", () => {
     expect(spliced).toContain("\n</Fact>\n");
   });
 
+  test("tier 1 holds for a paragraph whose code span crosses its line break", () => {
+    // The block wrapper must not change how the span pairs, or the render guard refuses it.
+    const para = "Run `git\nlog` to see the history.";
+    const body = "Intro.\n\n" + para + "\n\nTail.\n";
+    const r = annotate({
+      body,
+      claims: [anchor(1, "✅")],
+      quotes: [{ index: 1, quote: para }],
+    });
+    expect(r.dropped).toEqual([]);
+    expect(r.edits.map((e) => e.new)).toEqual(['<Fact n="1" v="ok">\n' + para + "\n</Fact>"]);
+  });
+
+  test("the reversibility check strips the text the reader renders", () => {
+    // The reader drops the title H1 (line 0), so `a` opens the paragraph and the
+    // span crosses the break: a mark on the quote would sit inside code there.
+    const body = "# T\na `x\nb the quoted claim` c\n\nTail.\n";
+    const claims = [anchor(1, "✅")];
+    const quotes = [{ index: 1, quote: "the quoted claim" }];
+    expect(annotate({ body, claims, quotes }).edits).toHaveLength(1);
+    const r = annotate({ body, claims, quotes, hidden: () => new Set([0]) });
+    expect(r.edits).toEqual([]);
+    expect(r.dropped.map((d) => d.reason)).toEqual(["marking this passage would leave a tag the strip cannot remove"]);
+  });
+
   test("tier 2: a mid-line two-bullet span is TRIMMED to one newline-free line", () => {
     const body = ["Intro.", "", "- First bullet item.", "- Second bullet item.", "", "Tail.", ""].join("\n");
     const r = annotate({

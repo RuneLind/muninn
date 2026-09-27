@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { paragraphGaps, renderWikiHtml, stripFrontmatter } from "./render.ts";
+import { paragraphGaps, readerBody, readerHiddenLines, renderWikiHtml, stripFrontmatter } from "./render.ts";
+import { countFactWrappers, stripFactWrappers } from "../format/markdown-ast.ts";
 import type { WikiPageMeta } from "./store.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
 
@@ -530,5 +531,37 @@ describe("renderWikiHtml — double-backtick code spans", () => {
     expect(html).toContain("<code>`&lt;Fact n=&quot;2&quot; v=&quot;bad&quot;&gt;ships 2.1M units&lt;/Fact&gt;`</code>");
     expect(html).not.toContain("fc-mark");
     expect(html).toContain('data-wiki-page="Claude Code"');
+  });
+});
+
+describe("the strip reads the text the reader renders", () => {
+  const FACT = '<Fact n="1" v="ok">t</Fact>';
+  // Each page's `<Fact>` sits inside a span that pairs across lines only once the
+  // reader has dropped its title H1, frontmatter or sentinel line.
+  const PAGES = [
+    `---\ntitle: T\n---\n# T\na \`x\nb ${FACT}\` c\n`,
+    `a \`x\n<!-- factcheck:start -->\nb ${FACT}\` c\n<!-- factcheck:end -->\n`,
+  ];
+
+  test("readerBody drops whole lines, and names them", () => {
+    for (const md of PAGES) {
+      const { body, hidden } = readerBody(md, "T");
+      expect(md.split("\n").filter((_, i) => !hidden.has(i)).join("\n")).toBe(body);
+    }
+    expect([...readerBody("---\nk: v\n---", "T").hidden]).toEqual([0, 1, 2]);
+  });
+
+  test("the strip keeps a tag the reader shows as code, and counts what the reader marks", () => {
+    for (const md of PAGES) {
+      const marks = (renderWikiHtml(md, resolve, { stripTitle: "T" }).match(/class="fc-mark/g) ?? []).length;
+      expect({ md, marks, counted: countFactWrappers(md, readerHiddenLines("T")) }).toEqual({ md, marks: 0, counted: 0 });
+      expect(stripFactWrappers(md, readerHiddenLines("T"))).toBe(md);
+    }
+  });
+
+  test("with a title that does not match, the H1 stays and the span pairs per line", () => {
+    const md = PAGES[0]!;
+    expect(renderWikiHtml(md, resolve, { stripTitle: "Other" })).toContain("fc-mark");
+    expect(countFactWrappers(md, readerHiddenLines("Other"))).toBe(1);
   });
 });

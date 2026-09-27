@@ -304,10 +304,17 @@ export interface ProtectedRegion {
 
 const FRONTMATTER_BLOCK_RE = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 
-/** Push every inline code span (`` `x` ``, matched backtick runs) on one line, or one cross-line stretch. */
+/** Push every inline code span (`` `x` ``, matched backtick runs) on one line. */
 function pushInlineCodeSpans(line: string, base: number, out: ProtectedRegion[]): void {
   for (const r of lineCodeSpanRanges(line)) out.push({ start: base + r.start, end: base + r.end });
 }
+
+/**
+ * The lines of a page body the reader drops before it renders, by index into
+ * `body.split("\n")` — `readerHiddenLines` in `src/wiki/render.ts`. The strip's
+ * stretch scan reads the body without them, so it pairs as the reader does.
+ */
+export type HiddenLines = (body: string) => ReadonlySet<number>;
 
 /**
  * The regions of a page body where a `<Fact …>` tag is CONTENT, not markup:
@@ -323,11 +330,11 @@ function pushInlineCodeSpans(line: string, base: number, out: ProtectedRegion[])
  * but stays here: `markdown-ast.ts` is the import-safe module every platform
  * formatter and the bundled reader client already depend on.
  */
-function factProtectedRegions(body: string): ProtectedRegion[] {
+function factProtectedRegions(body: string, hidden?: HiddenLines): ProtectedRegion[] {
   const fm = FRONTMATTER_BLOCK_RE.exec(body);
   const fmEnd = fm && fm.index === 0 ? fm[0].length : 0;
   const regions: ProtectedRegion[] = fmEnd > 0 ? [{ start: 0, end: fmEnd }] : [];
-  regions.push(...markdownCodeRegions(body, fmEnd));
+  regions.push(...markdownCodeRegions(body, fmEnd, hidden));
   return regions;
 }
 
@@ -347,15 +354,35 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
  * {@link inProtectedRegion}.
  *
  * `from` skips everything before that offset, which must be a LINE boundary —
- * the frontmatter block the caller has already claimed.
+ * the frontmatter block the caller has already claimed. `hidden` drops lines
+ * from the stretch scan only; a stretch that spans one pairs without it.
  */
-export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
+export function markdownCodeRegions(body: string, from = 0, hidden?: HiddenLines): ProtectedRegion[] {
   const regions: ProtectedRegion[] = [];
   const lines = body.split("\n");
+  const starts: number[] = [];
+  for (let i = 0, o = 0; i < lines.length; o += lines[i]!.length + 1, i++) starts.push(o);
   const firstLine = body.slice(0, from).split("\n").length - 1;
   const stretchEnd = new Map<number, number>();
   if (body.includes("`", from)) {
-    for (const r of crossLineSourceStretches(body.slice(from))) stretchEnd.set(r.first + firstLine, r.end + firstLine);
+    const drop = hidden?.(body);
+    const kept: number[] = [];
+    for (let i = firstLine; i < lines.length; i++) if (!drop?.has(i)) kept.push(i);
+    for (const r of crossLineSourceStretches(kept.map((i) => lines[i]!).join("\n"))) {
+      const src = kept.slice(r.first, r.end);
+      stretchEnd.set(src[0]!, src[src.length - 1]! + 1);
+      // Offsets map back line by line, as a hidden line may sit between two. Spans
+      // come in order, so the line cursor `k` only moves forward.
+      let k = 0;
+      let lineAt = 0; // offset of `src[k]` in the joined text
+      const at = (p: number) => {
+        while (p > lineAt + lines[src[k]!]!.length) lineAt += lines[src[k++]!]!.length + 1;
+        return starts[src[k]!]! + p - lineAt;
+      };
+      for (const r of lineCodeSpanRanges(src.map((i) => lines[i]!).join("\n"))) {
+        regions.push({ start: at(r.start), end: at(r.end - 1) + 1 });
+      }
+    }
   }
   let perLineFrom = 0; // lines before this belong to a stretch already paired
   let offset = 0;
@@ -367,11 +394,7 @@ export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
     const lineStart = offset;
     offset += line.length + 1;
     if (lineStart < from) continue;
-    const end = stretchEnd.get(idx);
-    if (end !== undefined) {
-      pushInlineCodeSpans(lines.slice(idx, end).join("\n"), lineStart, regions);
-      perLineFrom = end;
-    }
+    perLineFrom = Math.max(perLineFrom, stretchEnd.get(idx) ?? 0);
     const m = /^\s*(`{3,}|~{3,})/.exec(line);
     if (m) {
       const run = m[1]!;
@@ -421,11 +444,11 @@ export function inProtectedRegion(pos: number, regions: readonly ProtectedRegion
  * ZONE-AWARE: a tag inside frontmatter, a fenced code block or an inline backtick
  * span is DOCUMENTATION and survives untouched (see {@link factProtectedRegions}).
  */
-export function stripFactWrappers(body: string): string {
+export function stripFactWrappers(body: string, hidden?: HiddenLines): string {
   // Bare-name scan, not `"<Fact"`: an orphan `</Fact>` (a hand-edit, a truncated
   // write) must still strip, and `</Fact>` does not contain `<Fact`.
   if (!body || body.indexOf("Fact") === -1) return body;
-  const regions = factProtectedRegions(body);
+  const regions = factProtectedRegions(body, hidden);
   return body.replace(FACT_TAG_SCAN_RE, (match, offset: number) =>
     inProtectedRegion(offset, regions) ? match : "",
   );
@@ -435,9 +458,9 @@ export function stripFactWrappers(body: string): string {
  *  re-annotation is about to supersede. Reported to the reviewer rather than left
  *  as a silent deletion. Counts only what {@link stripFactWrappers} would remove,
  *  so a page documenting the tag doesn't report phantom marks. */
-export function countFactWrappers(body: string): number {
+export function countFactWrappers(body: string, hidden?: HiddenLines): number {
   if (!body || body.indexOf("<Fact") === -1) return 0;
-  const regions = factProtectedRegions(body);
+  const regions = factProtectedRegions(body, hidden);
   let n = 0;
   for (const m of body.matchAll(FACT_OPEN_TAG_SCAN_RE)) {
     if (m.index !== undefined && !inProtectedRegion(m.index, regions)) n++;
@@ -721,13 +744,31 @@ export function parseBlocks(text: string): Block[] {
 /** A parse that maps every line back to its source line, so each `text` block
  *  learns which `crossLineStretches` stretches lie whole inside it. With no
  *  stretch, the plain parse. */
-function parseWithStretches(normalized: string, store: FenceStore): Block[] {
-  const stretches = normalized.includes("`") ? crossLineStretches(normalized.split("\n")) : [];
+function parseWithStretches(normalized: string, store: FenceStore, stretches = scanStretches(normalized)): Block[] {
   if (stretches.length === 0) return parseBlocksInner(extractFences(normalized, store), store, 0);
   store.stretchEnd = new Map(stretches.map((r) => [r.first, r.end]));
   const src: number[] = [];
   const protectedText = extractFences(normalized, store, src);
   return parseBlocksInner(protectedText, store, 0, src);
+}
+
+/** A whole-line `<Fact …>` or `</Fact>` tag: the block form, which the strip removes with its line. */
+const FACT_TAG_LINE_RE = new RegExp(`^[ \\t]*(?:${FACT_TAG_SOURCE})[ \\t]*$`);
+
+/**
+ * `crossLineStretches` over `text`'s lines with every whole-line `<Fact>` tag left
+ * out, so a paragraph pairs the same wrapped in the block form as unwrapped. A
+ * stretch that would span a tag line is dropped.
+ */
+function scanStretches(text: string): LineRange[] {
+  if (!text.includes("`")) return [];
+  const lines = text.split("\n");
+  if (!text.includes("Fact")) return crossLineStretches(lines);
+  const kept = lines.flatMap((l, i) => (FACT_TAG_LINE_RE.test(l) ? [] : [i]));
+  return crossLineStretches(kept.map((i) => lines[i]!))
+    .map((r) => ({ first: kept[r.first]!, end: kept[r.end - 1]! + 1, n: r.end - r.first }))
+    .filter((r) => r.end - r.first === r.n)
+    .map(({ first, end }) => ({ first, end }));
 }
 
 const TEXT_BLOCK_ACROSS = new WeakMap<Block, LineRange[]>();
@@ -749,8 +790,10 @@ export function textBlockCrossLineRanges(block: Block): readonly LineRange[] {
  */
 export function crossLineSourceStretches(text: string): LineRange[] {
   const normalized = text.replace(/\r\n/g, "\n");
+  const stretches = scanStretches(normalized);
+  if (stretches.length === 0) return [];
   const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, across: [] };
-  parseWithStretches(normalized, store);
+  parseWithStretches(normalized, store, stretches);
   return store.across!.sort((a, b) => a.first - b.first);
 }
 

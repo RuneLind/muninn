@@ -76,7 +76,7 @@ import {
   normalizeFactVerdict,
   stripFactWrappers,
 } from "../format/markdown-ast.ts";
-import type { FactVerdict } from "../format/markdown-ast.ts";
+import type { FactVerdict, HiddenLines } from "../format/markdown-ast.ts";
 import { collapseWithMap } from "./explain-context.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import {
@@ -1601,6 +1601,7 @@ function markSpanRefusal(
   span: FactSpan,
   verdict: FactVerdict,
   nl: string,
+  hidden?: HiddenLines,
 ): string | null {
   // ── Property 1: the mark must not enter a [[wikilink]] TARGET ──────────────
   // NEVER waived. `formatWebHtml` resolves no wikilink, so this whole family is
@@ -1666,7 +1667,7 @@ function markSpanRefusal(
   // pre-guard tree: 0 for `git log --oneline | head -5`, 1 for the backticked quote
   // or the whole row). The number is dropped rather than qualified; what holds for
   // every quote is the strip failing, and that is what this property tests.
-  if (stripFactWrappers(probe) !== stripFactWrappers(body)) {
+  if (stripFactWrappers(probe, hidden) !== stripFactWrappers(body, hidden)) {
     return "marking this passage would leave a tag the strip cannot remove";
   }
   // ── Property 3: the page must RENDER the same ──────────────────────────────
@@ -1895,6 +1896,8 @@ export interface AnnotateEditsInput {
   maxEdits: number;
   /** Per-edit char cap, re-checked on the POST-wrapper `new`. */
   maxEditChars: number;
+  /** The reader's hidden lines, so the reversibility check strips as apply does. */
+  hidden?: HiddenLines;
 }
 
 /** {@link annotateEdits}' result — an ordinary edit list plus the bookkeeping the
@@ -2086,7 +2089,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     // what `factSpanForm` adjusted — which is the whole thesis of `markSpanRefusal`:
     // an exact-tier match passes no gate at all, so nothing else ever looks at it.
     const markVerdict = verdictByClaim.get(o.edit.claimIndex) ?? "ok";
-    const cut = markSpanRefusal(body, span, markVerdict, nl);
+    const cut = markSpanRefusal(body, span, markVerdict, nl, input.hidden);
     if (cut) {
       dropped.push({ edit: o.edit, reason: cut });
       continue;

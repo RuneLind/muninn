@@ -191,8 +191,16 @@ line, and pairs across only if all hold:
   blank line.
 - Its first line is not indented 4+ columns.
 - It is not a possible link reference definition (first line `[`, a `]:` in it).
-- No backtick in it follows a backslash, or lies inside what may be an inline
-  tag or autolink (`<a title="`">`, which CommonMark reads first).
+- No backtick in it follows a backslash, or sits between a `<` + letter, `/`,
+  `!` or `?` and any later `>`, or between a `](` and any later `)`
+  (`mayHideBacktick`): raw HTML, autolinks and link destinations and titles,
+  which CommonMark reads before code spans. A deliberate superset.
+- One of its spans crosses a line; any other stretch pairs the same per line.
+
+A whole-line `<Fact …>` or `</Fact>` tag is left out of the scan
+(`scanStretches` in `markdown-ast.ts`), so a paragraph pairs the same wrapped in
+the block form as unwrapped, and fact-check integrate's render guard can mark it.
+A stretch that would span such a line pairs per line.
 
 `parseBlocks` attaches to each `text` block the stretches that lie WHOLE inside it
 (`textBlockCrossLineRanges`); a stretch the parser split pairs per line. The
@@ -200,7 +208,11 @@ line, and pairs across only if all hold:
 on each source line's remainder, so emphasis, links, components and `<Fact>` never
 cross a line. Headings, list items, table cells and blockquote lines pair per
 line. `markdownCodeRegions` (the fact-check strip and the capture passes) pairs
-by the same stretches, from the parser (`crossLineSourceStretches`). Telegram,
+by the same stretches, from the parser (`crossLineSourceStretches`). The
+integrate write routes pass the strip `readerHiddenLines(title)`
+(`src/wiki/render.ts`): the lines the reader drops before it renders (live
+sentinel lines, frontmatter, a title H1), so the strip's scan reads the reader's
+text while its offsets stay in the raw body. Telegram,
 Slack, email and the line scanners in `lint.ts` / `wiki-integrate.ts` pair per
 line.
 

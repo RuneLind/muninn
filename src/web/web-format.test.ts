@@ -877,10 +877,11 @@ describe("formatWebHtml — code spans across lines", () => {
     expect(formatWebHtml("para\n\n    code `x\n    y`")).toBe("para\n\n    code `x\n    y`");
   });
 
-  test("emphasis and <Fact> stay per line when a span bridges the break", () => {
+  test("emphasis stays per line when a span bridges the break", () => {
     expect(formatWebHtml("**bold `a\nb` end**")).toBe("**bold <code>a b</code> end**");
+    // A span between an inline tag's `<` and a later `>` pairs per line (`mayHideBacktick`).
     const bridged = `q <Fact n="1" v="ok">x \`c\nd\` y</Fact>`;
-    expect(formatWebHtml(bridged)).toContain("<code>c d</code>");
+    expect(formatWebHtml(bridged)).not.toContain("<code>");
     expect(formatWebHtml(bridged)).not.toContain("fc-mark");
   });
 
@@ -946,5 +947,29 @@ describe("formatWebHtml — code spans across lines", () => {
       const input = `a \`one\r\n${mid}q ${FACT} two\` b`;
       expect({ mid, ...agree(input) }).toEqual({ mid, marked: true, counted: true });
     }
+  });
+});
+
+describe("formatWebHtml — cross-line stretches, fix round 1", () => {
+  test("a line after the span's closing line keeps its line break", () => {
+    expect(formatWebHtml("a `x\ny` b\nc")).toBe("a <code>x y</code> b\nc");
+  });
+
+  test("a span that stays on its line does not split the inline pass", () => {
+    expect(formatWebHtml("**b `k` c** `x\ny`")).toBe("<strong>b <code>k</code> c</strong> <code>x y</code>");
+  });
+
+  test("a backtick opener the parser leaves unclosed keeps later lines on their source lines", () => {
+    // The parser reads only backtick fences, so the ``` inside the tilde fence is an unclosed opener.
+    expect(formatWebHtml("~~~\n```\n~~~\n\npara `a\nb` c")).toContain("para <code>a b</code> c");
+  });
+
+  test("a paragraph renders its code the same wrapped in a <Fact> block as unwrapped", () => {
+    const para = "Run `git\nlog` to see history.";
+    const code = (html: string) => html.match(/<code>[^<]*<\/code>/g);
+    const plain = formatWebHtml(`Intro.\n\n${para}\n\nTail.`);
+    const wrapped = formatWebHtml(`Intro.\n\n<Fact n="1" v="ok">\n${para}\n</Fact>\n\nTail.`);
+    expect(code(plain)).toEqual(["<code>git log</code>"]);
+    expect(code(wrapped)).toEqual(code(plain));
   });
 });

@@ -20,7 +20,7 @@ import {
 } from "../views/components/wiki-atlas-semantic.ts";
 import { getLiveOrAppliedTopicKeysByWiki } from "../../db/wiki-proposals.ts";
 import { draftAndPersistSynthesis } from "../../gardener/synthesis-drafter.ts";
-import { renderWikiHtml } from "../../wiki/render.ts";
+import { readerHiddenLines, renderWikiHtml } from "../../wiki/render.ts";
 import {
   listWikis,
   resolveWikiRequest,
@@ -90,6 +90,7 @@ import {
   type DroppedEdit,
   type IntegrateEdit,
 } from "../../wiki/integrate-edits.ts";
+import type { HiddenLines } from "../../format/markdown-ast.ts";
 import { hasForbiddenBasename } from "../../gardener/draft.ts";
 import { runIntegrateOneShot } from "../../wiki/integrate-oneshot.ts";
 import {
@@ -964,9 +965,9 @@ export function isAnnotatablePage(relPath: string, type: string): boolean {
  * the note, the log.md line and the commit subject all claimed a deletion the file
  * disproved.
  */
-export function stripSupersededMarks(current: string): { body: string; removed: number } {
-  const body = stripFactWrappers(current);
-  return { body, removed: countFactWrappers(current) - countFactWrappers(body) };
+export function stripSupersededMarks(current: string, hidden?: HiddenLines): { body: string; removed: number } {
+  const body = stripFactWrappers(current, hidden);
+  return { body, removed: countFactWrappers(current, hidden) - countFactWrappers(body, hidden) };
 }
 
 /**
@@ -2446,7 +2447,7 @@ export function registerWikiRoutes(
       // budgets a "too long" verdict the server would never reach.
       isMdx = meta.type !== "explainer" && pageHasComponentVocabulary(meta.relPath, raw);
       if (meta.type !== "explainer") {
-        bodyLen = integrateBodyLen(stripFactWrappers(raw), isMdx);
+        bodyLen = integrateBodyLen(stripFactWrappers(raw, readerHiddenLines(meta.title)), isMdx);
       }
       annotatable = isAnnotatablePage(meta.relPath, meta.type);
       body = meta.type === "explainer" ? htmlToText(raw) : raw;
@@ -3760,7 +3761,7 @@ export function registerWikiRoutes(
         logTitle: meta.title,
         now: () => Date.now(),
         prepareBody: (current: string) => {
-          const stripped = stripSupersededMarks(current);
+          const stripped = stripSupersededMarks(current, readerHiddenLines(meta.title));
           supersededWrappers = stripped.removed;
           return {
             body: stripped.body,
@@ -3907,7 +3908,7 @@ export function registerWikiRoutes(
       // then replaced — and on apply's `!appendCallout && !wroteWrapper` branch the
       // region is NOT replaced, so the block survives with its quoted tags already
       // stripped out of it.
-      const superseded = stripSupersededMarks(current);
+      const superseded = stripSupersededMarks(current, readerHiddenLines(meta.title));
       const supersededWrappers = superseded.removed;
       const editable = superseded.body;
       const bodyLen = integrateBodyLen(editable, isMdx);
@@ -4048,6 +4049,7 @@ export function registerWikiRoutes(
             quotes: quoteCheck.quotes,
             maxEdits,
             maxEditChars: INTEGRATE_MAX_EDIT_CHARS,
+            hidden: readerHiddenLines(meta.title),
           })
         : // A `.md` page takes no marks — but the link-crossing CORRECTION guard is
           // not about marks. Handing `bounded.kept` straight through let a
@@ -4208,7 +4210,7 @@ export function registerWikiRoutes(
 
       const current = (await readWikiPage(resolved.index, meta)) ?? "";
       const isMdx = pageHasComponentVocabulary(meta.relPath, current);
-      const bodyLen = integrateBodyLen(stripFactWrappers(current), isMdx);
+      const bodyLen = integrateBodyLen(stripFactWrappers(current, readerHiddenLines(meta.title)), isMdx);
       // Same cap + same copy as propose — apply must not be a way around it.
       if (bodyLen > INTEGRATE_BODY_MAX) {
         return c.json({ error: "page too long to integrate", bodyLen, max: INTEGRATE_BODY_MAX }, 400);
@@ -4252,7 +4254,7 @@ export function registerWikiRoutes(
         transform: (raw) => {
           // STRIP first, on the freshly-read body: the offsets the client echoed were
           // resolved against a stripped body, and a re-annotation must not nest.
-          const body = stripFactWrappers(raw);
+          const body = stripFactWrappers(raw, readerHiddenLines(meta.title));
           applyResult = applyEdits(body, edits, isMdx);
           // Authoritative budget check: on the FRESHLY-read body, over the spans
           // actually resolved (a tier-2 rescue's span can exceed `old.length`).

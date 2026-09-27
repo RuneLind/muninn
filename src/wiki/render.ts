@@ -28,6 +28,7 @@ import { escapeHtml } from "../format/markdown-core.ts";
 import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
 import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
+import type { HiddenLines } from "../format/markdown-ast.ts";
 
 // stripFrontmatter's single home is store.ts (the read-side, which store.ts must
 // not import back from — that would invert layering). Re-exported here so the
@@ -42,25 +43,56 @@ export { stripFrontmatter } from "./store.ts";
 const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
 
 /**
- * Drop the two marker LINES of every live fact-check block, leaving the block
- * between them (real content) to render. The blocks come from the writers' own
+ * The two marker LINES of every live fact-check block, which the reader drops,
+ * leaving the block between them (real content) to render. The blocks come from the writers' own
  * walker (`findLiveSentinelBlocks`), so what the reader hides is by construction
  * what the splice replaces and the strip removes: a marker mid-sentence, inside a
  * fence, indented as code, blockquoted, in the frontmatter or unpaired is content
  * and renders as written. Runs on the whole page, frontmatter included, because
  * the walker skips the frontmatter itself.
  */
-function stripSentinelLines(markdown: string): string {
+function sentinelLines(markdown: string): Set<number> {
   const owned = new Set<number>();
   for (const span of findLiveSentinelBlocks(markdown)) {
     owned.add(span.startLine);
     owned.add(span.endLine);
   }
-  if (owned.size === 0) return markdown;
-  return markdown
-    .split("\n")
-    .filter((_, i) => !owned.has(i))
-    .join("\n");
+  return owned;
+}
+
+/**
+ * The text `renderWikiHtml` renders: `markdown` without its live sentinel lines,
+ * its frontmatter, and a leading H1 that repeats `stripTitle`. Each step drops
+ * whole lines, so `hidden` names them by index into `markdown.split("\n")`.
+ */
+export function readerBody(markdown: string, stripTitle?: string): { body: string; hidden: Set<number> } {
+  const hidden = sentinelLines(markdown);
+  const lines = markdown.split("\n");
+  let kept = lines.flatMap((_, i) => (hidden.has(i) ? [] : [i]));
+  // Hide the lines `body` lost off its front to `next`, a suffix starting at a line.
+  const cut = (body: string, next: string) => {
+    const n = next === "" ? kept.length : body.slice(0, body.length - next.length).split("\n").length - 1;
+    for (const i of kept.slice(0, n)) hidden.add(i);
+    kept = kept.slice(n);
+    return next;
+  };
+  const unsentineled = hidden.size === 0 ? markdown : kept.map((i) => lines[i]!).join("\n");
+  let body = cut(unsentineled, stripFrontmatter(unsentineled));
+  // The reader renders its own title header — drop the page's leading H1 when
+  // it just repeats that title, but keep distinct ones (e.g. index.md's
+  // "# Wiki Index" under the fallback title "index").
+  if (stripTitle) {
+    const m = body.match(/^\s*#\s+(.+)\n?/);
+    if (m && m[1]!.trim().toLowerCase() === stripTitle.trim().toLowerCase()) {
+      body = cut(body, body.slice(m.index! + m[0].length));
+    }
+  }
+  return { body, hidden };
+}
+
+/** {@link readerBody}'s hidden lines, for the fact-check strip's stretch scan. */
+export function readerHiddenLines(stripTitle?: string): HiddenLines {
+  return (markdown) => readerBody(markdown, stripTitle).hidden;
 }
 
 export function renderWikiHtml(
@@ -80,16 +112,7 @@ export function renderWikiHtml(
   // carrying a persisted fact-check block they rendered as a visible literal
   // `<!-- factcheck:start -->` line in the reader (live on all three annotated
   // pages before this).
-  let body = stripFrontmatter(stripSentinelLines(markdown));
-  // The reader renders its own title header — drop the page's leading H1 when
-  // it just repeats that title, but keep distinct ones (e.g. index.md's
-  // "# Wiki Index" under the fallback title "index").
-  if (opts?.stripTitle) {
-    const m = body.match(/^\s*#\s+(.+)\n?/);
-    if (m && m[1]!.trim().toLowerCase() === opts.stripTitle.trim().toLowerCase()) {
-      body = body.slice(m.index! + m[0].length);
-    }
-  }
+  const { body } = readerBody(markdown, opts?.stripTitle);
 
   const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
   const rendered: string[] = [];

@@ -354,3 +354,83 @@ describe("codeSpanContent across lines", () => {
     expect(joined("`\nx\n`")).toEqual(["x"]);
   });
 });
+
+describe("crossLineStretches — fix round 1", () => {
+  const spans = (lines: string[]) => {
+    const text = lines.join("\n");
+    return textCodeSpanRanges(lines).map((r) => text.slice(r.start, r.end));
+  };
+  const expectPerLine = (lines: string[]) =>
+    expect({ lines, stretches: crossLineStretches(lines) }).toEqual({ lines, stretches: [] });
+
+  test("a backtick in a raw HTML or autolink window pairs per line, whatever the window holds", () => {
+    // CommonMark reads each `<…>` below as raw HTML or an autolink before it pairs backticks.
+    expectPerLine(['a <a title="x>y`">', "b `x", "y`"]); // an attribute holding `>`
+    expectPerLine(["a <!-- q > r ` -->", "b `x", "y`"]); // a comment holding `>`
+    expectPerLine(["a <?x > ` ?>", "b `x", "y`"]); // a processing instruction
+    expectPerLine(["a <![CDATA[ > ` ]]>", "b `x", "y`"]); // CDATA
+    expectPerLine(["a <!X ` >", "b `x", "y`"]); // a declaration
+    expectPerLine(['a <a title="', '`">', "b `x", "y`"]); // a window across lines
+    expectPerLine(["a <b>x `c", "d` y</b>"]); // a span between a tag and a later `>`
+  });
+
+  test("a backtick in a link destination or title pairs per line", () => {
+    expectPerLine(["[a](x`y) b", "c` d"]);
+    expectPerLine(['[a](u "t`") b `x', "y`"]);
+    expectPerLine(["![a](x`y) b", "c` d"]);
+    expectPerLine(["[a](x", "`y) b `c", "d`"]);
+  });
+
+  test("a backtick outside every window still pairs across", () => {
+    expect(spans(["a < b `x", "y` c > d"])).toEqual(["`x\ny`"]); // `<` + space opens nothing
+    expect(spans(["a `x", "y` <b>c</b>"])).toEqual(["`x\ny`"]); // the window starts after the span
+    expect(spans(["x > y `a", "b`"])).toEqual(["`a\nb`"]); // a `>` alone
+    expect(spans(["a `x", "y` [l](u)"])).toEqual(["`x\ny`"]);
+    expect(spans(["[l] (u) `x", "y`"])).toEqual(["`x\ny`"]); // no `](`
+  });
+
+  test("a stretch is kept only when a span crosses a line", () => {
+    expect(crossLineStretches(["a `x` b", "c"])).toEqual([]);
+    expect(crossLineStretches(["a `x", "y`"])).toEqual([{ first: 0, end: 2 }]);
+    // A span that ends where a line does crosses no line.
+    expect(crossLineStretches(["a `x`", "b"])).toEqual([]);
+  });
+
+  test("a link reference definition may be indented up to 3 spaces", () => {
+    expectPerLine(["   [a]: `x", "`y"]);
+  });
+
+  test("a fence run with an info string does not close a fence", () => {
+    expectPerLine(["```", "q", "``` x", "", "`a", "b`"]);
+  });
+
+  test("a fence run indented 4+ is no top-level fence, and the stretch before it may continue", () => {
+    expectPerLine(["a `x", "y` b", "    ```"]);
+  });
+
+  test("a processing instruction or CDATA block ends only at its own marker", () => {
+    expectPerLine(["<?x", "a > b", "", "`a", "b`"]);
+    expectPerLine(["<![CDATA[", "a > b", "", "`a", "b`"]);
+  });
+
+  test("`**` is paragraph text, not a thematic break, so the stretch before it pairs per line", () => {
+    expectPerLine(["a `x", "y` b", "**"]);
+    expect(crossLineStretches(["a `x", "y` b", "***"])).toEqual([{ first: 0, end: 2 }]);
+  });
+});
+
+describe("lineCodeSpanRanges — the per-length cursor", () => {
+  test("300k single backticks pair in linear time", () => {
+    const s = "`a".repeat(300_000);
+    const t0 = performance.now();
+    expect(lineCodeSpanRanges(s)).toHaveLength(150_000);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+});
+
+describe("codeSpanContent — CRLF", () => {
+  test("a CRLF line ending becomes one space", () => {
+    const text = "`a\r\nb`";
+    expect(codeSpanContent(text, lineCodeSpanRanges(text)[0]!)).toBe("a b");
+  });
+});

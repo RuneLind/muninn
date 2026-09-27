@@ -13,6 +13,7 @@ import {
   textBlockCrossLineRanges,
   countFactWrappers,
   markdownCodeRegions,
+  stripFactWrappers,
   type Block,
 } from "./markdown-ast.ts";
 
@@ -1053,5 +1054,35 @@ describe("crossLineSourceStretches", () => {
     const fact = '<Fact n="1" v="ok">x</Fact>';
     expect(countFactWrappers(`---\nk: v\n---\na \`one\ntwo\` ${fact} \`c\``)).toBe(1);
     expect(countFactWrappers(`---\nk: v\n---\na \`one\nq ${fact}\` b`)).toBe(0);
+  });
+});
+
+describe("crossLineSourceStretches — a <Fact> block wrapper", () => {
+  // The inner tag is code only when the span pairs across the break.
+  const para = "Run `git\nlog <Fact n=\"2\" v=\"ok\">x</Fact>` to see history.";
+  const plain = `Intro.\n\n${para}\n\nTail.`;
+  const wrapped = `Intro.\n\n<Fact n="1" v="ok">\n${para}\n</Fact>\n\nTail.`;
+
+  test("a wrapped paragraph pairs as the same paragraph unwrapped", () => {
+    expect(crossLineSourceStretches(plain)).toEqual([{ first: 2, end: 4 }]);
+    expect(crossLineSourceStretches(wrapped)).toEqual([{ first: 3, end: 5 }]);
+    expect(stripFactWrappers(wrapped)).toBe(plain);
+    expect(countFactWrappers(wrapped)).toBe(1);
+  });
+
+  test("a stretch that would span a tag line pairs per line", () => {
+    // Unclosed, the tag line is text to the parser, so only the scan can refuse it.
+    expect(crossLineSourceStretches('a `x\n<Fact n="1" v="ok">\ny` b')).toEqual([]);
+  });
+
+  test("CRLF tag lines are tag lines", () => {
+    expect(crossLineSourceStretches('<Fact n="1" v="ok">\r\na `x\r\ny` b\r\n</Fact>')).toEqual([{ first: 1, end: 3 }]);
+  });
+});
+
+describe("crossLineSourceStretches — the source-line map", () => {
+  test("an unclosed backtick opener keeps later lines on their source lines", () => {
+    // The parser reads only backtick fences, so the ``` inside the tilde fence opens nothing.
+    expect(crossLineSourceStretches("~~~\n```\n~~~\n\npara `a\nb` c")).toEqual([{ first: 4, end: 6 }]);
   });
 });

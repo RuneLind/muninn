@@ -108,8 +108,20 @@ const CERTAIN_INTERRUPT_RE = new RegExp(
 const INDENTED_CODE_RE = /^(?: {0,3}\t| {4})/;
 /** A first line that may open a link reference definition, which is not paragraph content. */
 const LINK_REF_START_RE = /^ {0,3}\[/;
-/** A backtick inside what may be an inline tag or autolink, which CommonMark reads before code spans. */
-const INLINE_TAG_BACKTICK_RE = /<[A-Za-z!?/][^<>]*`/;
+/**
+ * Whether a backtick in `text` may sit inside an inline construct CommonMark reads
+ * before code spans: raw HTML or an autolink (from a `<` + letter, `/`, `!` or `?`
+ * to any later `>`), or a link destination or title (from a `](` to any later `)`).
+ * A superset: each window runs from the first opener to the last closer.
+ */
+function mayHideBacktick(text: string): boolean {
+  for (const [open, closer] of [[/<[A-Za-z!?/]/, ">"], [/\]\(/, ")"]] as const) {
+    const from = text.search(open);
+    const tick = from < 0 ? -1 : text.indexOf("`", from);
+    if (tick >= 0 && tick < text.lastIndexOf(closer)) return true;
+  }
+  return false;
+}
 const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 /** A fence or HTML opener behind a container marker, 4+ spaces or a tab: a raw context this scan cannot place. */
@@ -145,9 +157,10 @@ const HTML_BLOCK_STARTS: readonly [RegExp, RegExp | null][] = [
  * - its first line is not indented 4+ columns;
  * - it is not a possible link reference definition (first line `[`, a `]:` in it);
  * - no backtick in it follows a backslash — this grammar reads no escapes — or
- *   lies inside what may be an inline tag or autolink (`<a title="`">`).
+ *   may sit inside raw HTML, an autolink or a link destination ({@link mayHideBacktick}).
  *
- * A trailing `\r` is a line ending. Single-line stretches are omitted.
+ * A trailing `\r` is a line ending. A stretch is kept only when one of its spans
+ * crosses a line; any other pairs the same per line.
  */
 export function crossLineStretches(input: readonly string[]): LineRange[] {
   const lines = input.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
@@ -162,8 +175,9 @@ export function crossLineStretches(input: readonly string[]): LineRange[] {
   const close = (end: number) => {
     if (first >= 0 && certain && end - first >= 2) {
       const text = lines.slice(first, end).join("\n");
-      if (!text.includes("\\`") && !INLINE_TAG_BACKTICK_RE.test(text) &&
-        !(LINK_REF_START_RE.test(lines[first]!) && text.includes("]:"))) {
+      if (!text.includes("\\`") && !mayHideBacktick(text) &&
+        !(LINK_REF_START_RE.test(lines[first]!) && text.includes("]:")) &&
+        lineCodeSpanRanges(text).some((r) => text.slice(r.start, r.end).includes("\n"))) {
         out.push({ first, end });
       }
     }
