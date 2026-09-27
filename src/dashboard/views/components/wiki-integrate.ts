@@ -26,6 +26,7 @@ import {
   type FactVerdict,
 } from "../../../format/markdown-ast.ts";
 import { escHtml as esc } from "./escape.ts";
+import { lineCodeSpanRanges } from "../../../format/code-spans.ts";
 
 /**
  * The four verdict markers, matching `VERDICT_RE` in `factcheck-sse.ts`. The VS16
@@ -216,56 +217,11 @@ export function frontmatterEndLine(lines: readonly string[]): number {
 }
 
 /**
- * Every inline code span on ONE line, as `[start, end)` ranges over that line,
- * by CommonMark's pairing rule: a run of N backticks opens a span that only a run
- * of exactly N closes. The range covers the whole span, delimiters included.
- *
- * The ONE pairing implementation behind both {@link stripLineCodeSpans} (which
- * removes the ranges) and {@link maskLineCodeSpans} (which blanks them in place) —
- * a second walk is exactly the drift that would let one scanner call a backticked
- * literal markup while the other calls it documentation.
- *
- * A `` `[^`]*` `` replace mis-pairs the double-backtick form the syntax exists
- * for — `` `` [[x `` `` is how a page writes a literal containing a backtick —
- * leaving the `[[` exposed and the line falsely reported. An UNMATCHED run opens
- * no span and the scan continues past it, so a stray backtick cannot swallow the
- * rest of the line either.
+ * Re-exported from `src/format/code-spans.ts` — the ONE pairing implementation
+ * behind {@link stripLineCodeSpans}, {@link maskLineCodeSpans}, the web renderer's
+ * inline code and the fact-check strip, so none of them can drift from another.
  */
-export function lineCodeSpanRanges(line: string): { start: number; end: number }[] {
-  const ranges: { start: number; end: number }[] = [];
-  let i = 0;
-  while (i < line.length) {
-    if (line[i] !== "`") {
-      i++;
-      continue;
-    }
-    let openEnd = i;
-    while (openEnd < line.length && line[openEnd] === "`") openEnd++;
-    const runLen = openEnd - i;
-    let closeAt = -1;
-    let k = openEnd;
-    while (k < line.length) {
-      if (line[k] !== "`") {
-        k++;
-        continue;
-      }
-      let runEnd = k;
-      while (runEnd < line.length && line[runEnd] === "`") runEnd++;
-      if (runEnd - k === runLen) {
-        closeAt = k;
-        break;
-      }
-      k = runEnd;
-    }
-    if (closeAt === -1) {
-      i = openEnd; // unmatched run — literal backticks, no span
-    } else {
-      ranges.push({ start: i, end: closeAt + runLen });
-      i = closeAt + runLen;
-    }
-  }
-  return ranges;
-}
+export { lineCodeSpanRanges };
 
 /**
  * Strip inline code spans from ONE line.

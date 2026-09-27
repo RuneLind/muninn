@@ -412,12 +412,13 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
     test("a line SHAPED like a fence delimiter that is prose, and pairs backticks", () => {
       // Neither line here opens a fence: the first does not start with the run,
       // and the third's info string holds a backtick (CommonMark). So the third
-      // line stays PROSE, its two backticks pair into an inline span, and the
-      // sentinel lands inside it — while a line-wise scan of the markdown reads
-      // that same line as a delimiter and gets the region wrong. The rendered
-      // output is what settles it, which is the whole point of this seam.
-      const html = renderWikiHtml("a ` ```\ncode\n``` [[Claude Code]] ` b", resolve);
-      expect(html).toContain("<code> [[Claude Code]] </code>");
+      // line stays PROSE, its unmatched ``` stays literal, its two single
+      // backticks pair into an inline span, and the sentinel lands inside it —
+      // while a line-wise scan of the markdown reads that same line as a
+      // delimiter and gets the region wrong. The rendered output is what settles
+      // it, which is the whole point of this seam.
+      const html = renderWikiHtml("a ` ```\ncode\n``` ` [[Claude Code]] ` b", resolve);
+      expect(html).toContain("``` <code>[[Claude Code]]</code> b");
       expect(html).not.toContain("wiki-link");
     });
   });
@@ -511,5 +512,17 @@ describe("paragraphGaps", () => {
   test("paragraphs inside a fold body get the gap too", () => {
     const html = renderWikiHtml('<Fold title="X">\n\n## X\n\npara a\n\npara b\n\n</Fold>', resolve);
     expect(html).toContain("para a<br><br>para b");
+  });
+});
+
+describe("renderWikiHtml — double-backtick code spans", () => {
+  test("a backticked <Fact> on a page stays code, and a wikilink beside it stays live", () => {
+    const html = renderWikiHtml(
+      'The prose gets `` `<Fact n="2" v="bad">ships 2.1M units</Fact>` `` — see [[Claude Code]].',
+      resolve,
+    );
+    expect(html).toContain("<code>`&lt;Fact n=&quot;2&quot; v=&quot;bad&quot;&gt;ships 2.1M units&lt;/Fact&gt;`</code>");
+    expect(html).not.toContain("fc-mark");
+    expect(html).toContain('data-wiki-page="Claude Code"');
   });
 });
