@@ -2,7 +2,7 @@
 
 Three drafting pipelines feed the human review gate at `/wiki/gardener` (approve/reject, CAS). Watcher-side scheduling detail: `src/watchers/CLAUDE.md`.
 
-The gate's write verbs — `proposals/:id/{approve,reject}`, `proposals/group/:groupKey/{approve,reject}`, `lint-proposals` and the four backlog prune verbs — answer **415** to anything that is not `application/json` (`dashboard/routes/json-request.ts`), so a bodyless client sends `{}`. A `text/plain` or bodyless POST is a CORS *simple* request, and with `MUNINN_AUTH=off` no origin check stands in front of these routes.
+The gate's write verbs — `proposals/:id/{approve,reject}`, `proposals/group/:groupKey/{approve,reject}`, `lint-proposals`, the four backlog prune verbs, the five backlog run verbs (`backlog-{run,reset,cancel,recover,dismiss}`) and `source-draft-{run,backlog,doc}` — answer **415** to anything that is not `application/json` (`dashboard/routes/json-request.ts`), so a bodyless client sends `{}`. A `text/plain` or bodyless POST is a CORS *simple* request, and with `MUNINN_AUTH=off` no origin check stands in front of these routes. `dashboard/routes/write-route-json-gate.test.ts` walks every write route `createDashboardRoutes` registers and requires that 415 unless the route is on its reasoned allowlist, so a new write route starts red there.
 
 ## Wiki gardener (weekly)
 

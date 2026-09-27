@@ -313,7 +313,7 @@ function setOutcome(card: HTMLElement, text: string, kind: "ok" | "err" | ""): v
 
 /**
  * Init for the bodyless write POSTs (approve/reject, the group verbs, lint
- * proposals, dismiss reset): the server answers 415 to anything that is not
+ * proposals, dismiss reset, the backlog and source-draft verbs): the server answers 415 to anything that is not
  * application/json, which keeps them out of reach of a cross-origin form POST.
  */
 const JSON_POST: RequestInit = {
@@ -581,6 +581,10 @@ let backlogConfirmOpen = false;
 // Last source-draft batch result (client-only) — survives the strip's wholesale
 // re-renders so the "N drafted…" note stays visible after a refresh.
 let lastSourceDraftResult: SourceBacklogResult | { error: string } | null = null;
+/** The strip's one error note and the selector of the control it is about.
+ *  `renderBacklog` re-appends it while that control is rendered and drops it
+ *  once the control is gone; every strip action clears it when it starts. */
+let backlogError: { message: string; control: string } | null = null;
 // Human label of the collection the last batch drafted — names it in the result note.
 let lastSourceDraftCollectionLabel: string | null = null;
 // The collection chosen in the source-draft <select>. Persisted here (not only in
@@ -655,6 +659,7 @@ function renderBacklog(data: IngestBacklogResponse): void {
     // A resolution error (non-bot/unknown wiki) — stay quiet, the body already
     // explains the situation.
     lastBacklogData = null;
+    backlogError = null;
     el.innerHTML = "";
     return;
   }
@@ -687,6 +692,8 @@ function renderBacklog(data: IngestBacklogResponse): void {
       wikiName: BOT,
     }) +
     backlogGlossaryHtml(model);
+  if (backlogError && !el.querySelector(backlogError.control)) backlogError = null;
+  if (backlogError) appendBacklogError(backlogError.message);
   if (tailWasOpen) {
     const tail = el.querySelector<HTMLDetailsElement>(".bk-tail");
     if (tail) tail.open = true;
@@ -778,23 +785,63 @@ function pollBacklogUntilDone(): void {
 }
 
 async function startBacklogRun(): Promise<void> {
+  clearBacklogError();
   try {
-    const res = await fetch(withBot("/api/wiki/gardener/backlog-run"), { method: "POST" });
+    const res = await fetch(withBot("/api/wiki/gardener/backlog-run"), JSON_POST);
     const data = await res.json();
     if (res.ok && (data.state === "started" || data.state === "running")) {
       pollBacklogUntilDone();
     } else if (data.error) {
-      const el = document.getElementById("gardBacklog");
-      if (el) {
-        const note = document.createElement("span");
-        note.className = "bk-err";
-        note.textContent = " " + data.error;
-        el.appendChild(note);
-      }
+      showBacklogError(data.error, '[data-backlog-action="confirm"]');
     }
   } catch {
     // Best-effort — leave the strip as-is.
   }
+}
+
+/** Draw the strip's error note. Called only by `renderBacklog`, right after it
+ *  replaced the strip's HTML, so there is never a second one. */
+function appendBacklogError(message: string): void {
+  const el = document.getElementById("gardBacklog");
+  if (!el) return;
+  const note = document.createElement("span");
+  // `bk-err` alone is also the strip's "(some sources unavailable)" status.
+  note.className = "bk-err bk-action-err";
+  note.textContent = " " + message;
+  el.appendChild(note);
+}
+
+/** Record a failed strip action against the control it came from, and draw it.
+ *  With no strip rendered there is no control, so nothing shows. */
+function showBacklogError(message: string, control: string): void {
+  backlogError = { message, control };
+  rerenderStrip();
+}
+
+/** A strip action is starting: the previous action's note no longer applies. */
+function clearBacklogError(): void {
+  backlogError = null;
+  document.getElementById("gardBacklog")?.querySelectorAll(".bk-action-err").forEach((n) => n.remove());
+}
+
+/**
+ * POST a bodyless backlog verb. On a non-2xx answer (a 415 from a tab older
+ * than the server, a 409 on the gardener mutex) surface the error in the strip
+ * and return false so the caller skips its refresh. A network failure stays
+ * best-effort, as before.
+ */
+async function postBacklogVerb(verb: string, label: string, control: string): Promise<boolean> {
+  clearBacklogError();
+  let res: Response;
+  try {
+    res = await fetch(withBot("/api/wiki/gardener/" + verb), JSON_POST);
+  } catch {
+    return true;
+  }
+  if (res.ok) return true;
+  const body = (await res.json().catch(() => ({}))) as { error?: string };
+  showBacklogError(label + " failed: " + (body.error || "status " + res.status), control);
+  return false;
 }
 
 // Poll the backlog GET after a manual "Run gardener now" until the scheduler
@@ -850,6 +897,7 @@ function pollBacklogUntilRunStarts(): void {
 // swaps the button to a queued state, then lets the strip refresh pick up
 // forceQueued/running from the server.
 async function triggerWatcherRun(id: string, btn: HTMLButtonElement): Promise<void> {
+  clearBacklogError();
   btn.disabled = true;
   btn.textContent = "Queuing…";
   try {
@@ -864,14 +912,7 @@ async function triggerWatcherRun(id: string, btn: HTMLButtonElement): Promise<vo
     pollBacklogUntilRunStarts();
   } catch {
     // Restore the button + surface the error the same way startBacklogRun does.
-    rerenderStrip();
-    const el = document.getElementById("gardBacklog");
-    if (el) {
-      const note = document.createElement("span");
-      note.className = "bk-err";
-      note.textContent = " failed to queue gardener run";
-      el.appendChild(note);
-    }
+    showBacklogError("failed to queue gardener run", '[data-backlog-action="run-watcher"]');
   }
 }
 
@@ -882,6 +923,7 @@ async function triggerWatcherRun(id: string, btn: HTMLButtonElement): Promise<vo
 // the totals surface, never a failed request.
 async function startSourceDraftBacklog(btn: HTMLButtonElement): Promise<void> {
   if (sourceDraftInFlight) return;
+  clearBacklogError();
   // Always send an explicit collection (falls back to the remembered pick, then
   // youtube — the route's own default — so a missing select can't send nothing).
   const el = document.getElementById("gardBacklog");
@@ -895,7 +937,7 @@ async function startSourceDraftBacklog(btn: HTMLButtonElement): Promise<void> {
   try {
     const res = await fetch(
       withBot("/api/wiki/gardener/source-draft-backlog?collection=" + encodeURIComponent(collection)),
-      { method: "POST" },
+      JSON_POST,
     );
     const data = await res.json();
     lastSourceDraftResult =
@@ -921,11 +963,7 @@ async function startSourceDraftBacklog(btn: HTMLButtonElement): Promise<void> {
 }
 
 async function resetBacklog(): Promise<void> {
-  try {
-    await fetch(withBot("/api/wiki/gardener/backlog-reset"), { method: "POST" });
-  } catch {
-    // ignore
-  }
+  if (!(await postBacklogVerb("backlog-reset", "reset", ".bk-reset"))) return;
   fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
     .then((r) => r.json())
     .then((data: IngestBacklogResponse) => {
@@ -940,11 +978,8 @@ async function resetBacklog(): Promise<void> {
 // existing 3s poll keeps running and reports the cancelled outcome on settle. A
 // fresh GET right after flips the button to "Cancelling…" without waiting a tick.
 async function cancelBacklogRun(): Promise<void> {
-  try {
-    await fetch(withBot("/api/wiki/gardener/backlog-cancel"), { method: "POST" });
-  } catch {
-    // Best-effort — the poll still reflects the run's real state.
-  }
+  // Best-effort on a network error — the poll still reflects the run's real state.
+  if (!(await postBacklogVerb("backlog-cancel", "cancel", ".bk-cancel-run"))) return;
   fetch(withBot("/api/wiki/ingest-backlog"))
     .then((r) => r.json())
     .then((data: IngestBacklogResponse) => renderBacklog(data))
@@ -954,11 +989,7 @@ async function cancelBacklogRun(): Promise<void> {
 // Recover an interrupted (crashed/errored) drain — return its undrafted batch docs
 // to the pool, then re-fetch the strip so eligible-now grows back + the banner clears.
 async function recoverBacklog(): Promise<void> {
-  try {
-    await fetch(withBot("/api/wiki/gardener/backlog-recover"), { method: "POST" });
-  } catch {
-    // Best-effort — the follow-up GET reflects the real state either way.
-  }
+  if (!(await postBacklogVerb("backlog-recover", "recover", ".bk-recover"))) return;
   fetch(withBot("/api/wiki/ingest-backlog"))
     .then((r) => r.json())
     .then((data: IngestBacklogResponse) => {
@@ -972,11 +1003,7 @@ async function recoverBacklog(): Promise<void> {
 // Dismiss an interrupted drain — leave the batch skipped, just clear the journal so
 // the banner disappears on the next render.
 async function dismissBacklog(): Promise<void> {
-  try {
-    await fetch(withBot("/api/wiki/gardener/backlog-dismiss"), { method: "POST" });
-  } catch {
-    // ignore
-  }
+  if (!(await postBacklogVerb("backlog-dismiss", "dismiss", ".bk-dismiss"))) return;
   fetch(withBot("/api/wiki/ingest-backlog"))
     .then((r) => r.json())
     .then((data: IngestBacklogResponse) => renderBacklog(data))
