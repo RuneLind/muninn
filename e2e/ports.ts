@@ -196,6 +196,9 @@ export const E2E_PORTS = {
   // loaded unpacked, plus a stub on a second port serving the cross-site page.
   "extension-origin": 3079,
   "extension-origin/page": 3080,
+  // Retired (culled) pages in the reader: one muninn over two temp wikis, one
+  // on the English defaults and one carrying Norwegian `cullLabels`.
+  "wiki-retired": 3081,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

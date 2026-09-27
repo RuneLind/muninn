@@ -23,6 +23,7 @@ import {
   parseActivityWeights,
   type ActivityWeights,
 } from "../dashboard/views/components/wiki-activity-rank.ts";
+import { parseCullLabels, type CullLabels } from "../dashboard/views/components/wiki-cull-view.ts";
 import {
   ATTR_RE,
   COMPONENT_TAG_SOURCE,
@@ -174,6 +175,14 @@ export interface WikiReaderConfig {
    * sets it.
    */
   trackers?: TrackerConfig[];
+  /**
+   * The words the reader uses for a culled page (`cullLabels`): the rail
+   * toggle, the banner prefix, the marker and the successor lead-in. Always
+   * RESOLVED — each field validated on its own and the default standing in for
+   * a missing or bad one ({@link parseCullLabels}). Optional so hand-built
+   * configs stay valid; `readWikiReaderConfig` always sets it.
+   */
+  cullLabels?: CullLabels;
 }
 
 /**
@@ -1966,6 +1975,10 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
   // Same shape once more, one level down: `parseActivityWeights` drops a knob
   // whose value is not a finite number of the right magnitude and keeps the rest
   // of the block, so a typo costs one weight rather than the section.
+  const cull = parseCullLabels(obj.cullLabels);
+  for (const { key, reason } of cull.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
+  }
   const activity = parseActivityWeights(obj.activity);
   for (const { key, reason } of activity.warnings) {
     // The KEY is its own property, not part of a pre-joined sentence: the JSONL
@@ -1983,6 +1996,7 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     folderLabels: isStringRecord(obj.folderLabels) ? obj.folderLabels : {},
     project: parseProjectRule(obj.project, root),
     activity: activity.weights,
+    cullLabels: cull.labels,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

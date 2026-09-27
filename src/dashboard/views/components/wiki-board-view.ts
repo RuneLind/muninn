@@ -13,7 +13,7 @@ import { articleUrl, localDay, urlWithDisplay } from "./wiki-filter.ts";
 import { withWikiParam } from "./wiki-param.ts";
 import { calendarDay } from "./wiki-activity-rank.ts";
 import { statusHtml } from "./wiki-issue-rows.ts";
-import { CULL_LABEL } from "./wiki-cull-view.ts";
+import { cullLabels } from "./wiki-cull-view.ts";
 import { GRAPH_NODES_MAX, type GraphIssueNode, type GraphPageNode, type GraphPayload } from "../../../wiki/graph-types.ts";
 
 export type BoardFlag = "no plan" | "unknown key" | "0 stamped";
@@ -239,7 +239,7 @@ export function keylessTableHtml(pages: readonly GraphPageNode[], wiki: string):
         `<tr data-keyless="${esc(p.relPath)}">` +
         `<td><a href="${esc(articleUrl(wiki, "relPath", p.relPath, ""))}">${esc(p.title)}</a><div class="board-path">${esc(p.relPath)}</div></td>` +
         // `&nbsp;` both sides: the cell must not wrap between the type and the label.
-        `<td>${esc(p.plan ? "plan" : p.type)}${p.culled ? `&nbsp;·&nbsp;${esc(CULL_LABEL)}` : ""}</td>` +
+        `<td>${esc(p.plan ? "plan" : p.type)}${p.culled ? `&nbsp;·&nbsp;${esc(cullLabels().marker)}` : ""}</td>` +
         `<td class="board-date">${day(p.pageTimeMs)}</td>` +
         `<td>${prCell(p.prRefs)}</td></tr>`,
     )

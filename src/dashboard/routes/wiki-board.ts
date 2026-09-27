@@ -41,6 +41,12 @@ export function registerWikiBoardRoute(app: Hono): void {
         404,
       );
     }
-    return c.html(await renderWikiBoardPage({ wiki: name, label: trackerAdapter(tracker.id)?.label ?? "Issue" }));
+    return c.html(
+      await renderWikiBoardPage({
+        wiki: name,
+        label: trackerAdapter(tracker.id)?.label ?? "Issue",
+        cullLabels: index.readerConfig?.cullLabels,
+      }),
+    );
   });
 }

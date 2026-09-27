@@ -268,12 +268,16 @@ export async function renderWikiPage(opts?: {
        measurement the group chip's own comment records), under the 4.5:1 floor.
        Pinned by the spec's both-themes contrast case, which measures against
        whatever actually paints behind it. */
-    .wiki-group-toggle {
+    .wiki-group-toggle, .wiki-retired-toggle {
       display: inline-flex; align-items: center; gap: 4px;
       font-size: 11.5px; color: var(--text-secondary); cursor: pointer;
       user-select: none;
     }
-    .wiki-group-toggle input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+    .wiki-group-toggle input, .wiki-retired-toggle input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+    .wiki-retired-toggle[hidden] { display: none; }
+    /* A retired row the toggle (or a search) put on screen: italic, never a
+       seventh flex item — the marker word rides the row's hover. */
+    .wiki-list-item.culled .wiki-list-title { font-style: italic; }
 
     .wiki-gardener-badge {
       background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 600;
@@ -1312,6 +1316,16 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-article-wrap { flex: 1; overflow-y: auto; padding: 24px 32px; }
     .wiki-article-head { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border-primary); }
+    /* The retired banner: text tokens on the warning tint, pinned by
+       e2e/wiki-retired.spec.ts against the tokens resolved on a body probe. */
+    .wiki-cull-banner {
+      margin: 0 0 12px; padding: 8px 12px; border-radius: 6px;
+      background: var(--tint-warning); border-left: 3px solid var(--status-warning);
+      color: var(--text-primary); font-size: 13px; line-height: 1.5;
+    }
+    .wiki-cull-banner-label { font-weight: 600; }
+    .wiki-cull-next { display: block; margin-top: 2px; color: var(--text-secondary); }
+    .wiki-cull-successor { color: var(--text-primary); text-decoration: underline; }
     .wiki-article-head h1 { font-size: 22px; color: var(--text-primary); margin-bottom: 10px; }
     /* Explainer-style subtitle (blog pages only) — muted lede under the H1. */
     .wiki-subtitle { font-size: 14.5px; line-height: 1.5; color: var(--text-muted); margin: -4px 0 12px; max-width: 68ch; }
@@ -2531,6 +2545,12 @@ export async function renderWikiPage(opts?: {
                grew a third control. -->
           <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
             <input type="checkbox" id="wikiGroupFamilies">group families
+          </label>
+          <!-- Retired (culled) pages, per wiki: hidden until checked. Hidden
+               outright on a wiki with none; the label and its count are painted
+               by the client from the wiki's cullLabels. -->
+          <label class="wiki-retired-toggle" id="wikiRetiredToggle" hidden title="Show pages marked signal: none">
+            <input type="checkbox" id="wikiShowRetired"><span id="wikiRetiredLabel"></span>
           </label>
         </div>
         <details class="wiki-filters" id="wikiFilters">

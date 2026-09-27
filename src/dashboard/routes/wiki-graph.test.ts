@@ -194,7 +194,8 @@ describe("GET /wiki/issues", () => {
     const html = await res.text();
     expect(html).toContain('id="boardTableWrap"');
     expect(html).toContain("Jira board");
-    expect(html).toContain('window.__WIKI_BOARD__ = {"wiki":"trk"}');
+    // The wiki's resolved cullLabels ride along for the keyless table's marker.
+    expect(html).toContain('window.__WIKI_BOARD__ = {"wiki":"trk","cullLabels":{"toggle":"Show retired ({n})"');
   });
 
   test("a wiki with no trackers block, or an unknown wiki, answers 404 with no board", async () => {

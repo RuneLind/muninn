@@ -55,6 +55,9 @@ export interface WikiPagesResponse {
    *  `.wiki-reader.json` `activity` block over the defaults). Absent on an older
    *  server ⇒ the client's own defaults. */
   activity?: Record<string, unknown>;
+  /** The wiki's resolved `cullLabels` (`parseCullLabels`). Absent on an older
+   *  server, which leaves the English defaults. */
+  cullLabels?: Record<string, unknown>;
   /** How much of this wiki the WORKED axis covers (`{matched, total, returned}`),
    *  or ABSENT when no ledger answer has landed for this root — which is also
    *  what an older server sends. The two are read differently: `matched: 0` is a

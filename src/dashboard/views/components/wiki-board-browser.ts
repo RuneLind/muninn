@@ -26,14 +26,17 @@ import {
   type BoardShow,
 } from "./wiki-board-view.ts";
 import { escHtml as esc } from "./escape.ts";
+import { setCullLabels } from "./wiki-cull-view.ts";
 
 declare global {
   interface Window {
-    __WIKI_BOARD__?: { wiki: string };
+    __WIKI_BOARD__?: { wiki: string; cullLabels?: unknown };
   }
 }
 
 const wiki = window.__WIKI_BOARD__?.wiki ?? "";
+// The keyless table marks a culled page with this wiki's own word.
+setCullLabels(window.__WIKI_BOARD__?.cullLabels);
 const $ = (id: string) => document.getElementById(id);
 let filter: BoardFilter = parseBoardFilter(location.search);
 /** Null until the graph call answered; stays null after a failed load. */

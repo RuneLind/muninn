@@ -81,9 +81,13 @@ export interface WikiListing {
   pairedBy?: string;
   /** The page is retired (`signal: none`, or the `wiki-signal` meta on an
    *  `.html` page) — the EFFECTIVE value, so an attachment of a culled page
-   *  carries it too. Activity drops it; the rail still lists it until the reader
-   *  UI lands. Absent on a live page. */
+   *  carries it too. Activity drops it, and the rail hides it unless the reader
+   *  turns `Show retired` on (`railPool`). Absent on a live page. */
   culled?: boolean;
+  /** The page's `signal-reason:` — single-page `meta` only (`includeCull`). */
+  cullReason?: string;
+  /** The successor's relPath, resolved in any folder — single-page `meta` only. */
+  supersededBy?: string;
   /** File mtime (epoch ms) — the recency signal for frontmatter-less wikis. */
   mtimeMs?: number;
   /** File birthtime (epoch ms) — a WEAK "Recently added" signal: `git mv`, a
