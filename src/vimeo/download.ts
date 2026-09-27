@@ -50,6 +50,8 @@ export function isAllowedHost(hostname: string, allowed: string | readonly strin
 
 /** Base class for every refusal this downloader produces. */
 export class VimeoDownloadError extends Error {
+  /** True when `downloadPinned`'s own time budget expired — set structurally, never read off the message. */
+  timedOut = false;
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "VimeoDownloadError";
@@ -118,9 +120,14 @@ export async function downloadPinned(url: string, opts: DownloadPinnedOptions): 
   // timer already fired and nobody listening. `.catch` is attached at once so a
   // timer firing when nothing is racing cannot raise an unhandled rejection, and
   // the timer is cleared in the `finally` below.
+  const timeoutError = (options?: ErrorOptions): VimeoDownloadError => {
+    const e = new Err(`${what} download timed out after ${timeoutMs}ms`, options);
+    e.timedOut = true;
+    return e;
+  };
   let expire: () => void = () => {};
   const budgetExpired = new Promise<never>((_resolve, reject) => {
-    expire = () => reject(new Err(`${what} download timed out after ${timeoutMs}ms`));
+    expire = () => reject(timeoutError());
   });
   budgetExpired.catch(() => {});
   const timer = setTimeout(() => {
@@ -137,15 +144,11 @@ export async function downloadPinned(url: string, opts: DownloadPinnedOptions): 
     // `redirect: "error"` meeting a 3xx — and naming only the second made a
     // plain timeout read as a redirect refusal. The transport's own message
     // says which; this line no longer guesses.
+    if (timedOut) throw timeoutError({ cause: err });
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Err(
-      timedOut
-        ? `${what} download timed out after ${timeoutMs}ms`
-        : reading
-          ? `${what} body could not be read: ${detail}`
-          : `${what} download failed: ${detail}`,
-      { cause: err },
-    );
+    throw new Err(reading ? `${what} body could not be read: ${detail}` : `${what} download failed: ${detail}`, {
+      cause: err,
+    });
   };
 
   try {
