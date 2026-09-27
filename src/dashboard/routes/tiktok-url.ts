@@ -42,9 +42,9 @@ export function isShortLink(u: URL): boolean {
 }
 
 /**
- * Where a short link is requested. TikTok's `m.` host answers 404 to every
- * path, a valid `/t/<code>` included (measured 2026-09-27), and bare
- * `tiktok.com/t/` only redirects to `www.`, so both are requested on `www.`.
+ * Where a short link is requested. TikTok's `m.` host answers 404 to a valid
+ * `/t/<code>` (measured 2026-09-27), and bare `tiktok.com/t/` only redirects
+ * to `www.`, so both are requested on `www.`.
  */
 export function shortLinkRequestUrl(u: URL): string {
   if (u.hostname === "m.tiktok.com" || u.hostname === "tiktok.com") {

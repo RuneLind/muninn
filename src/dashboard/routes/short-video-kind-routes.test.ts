@@ -508,8 +508,7 @@ describe("tiktok: the short-link redirect chain is gated hop by hop", () => {
 
   // Every shape yt-dlp's `vm.tiktok` extractor matches goes through the gated
   // resolver. A `/t/<code>` on bare or `m.` is requested on `www.`: TikTok's
-  // `m.` host answers 404 to every path, a valid `/t/` code included (measured
-  // 2026-09-27). The `m./v/<id>.html` landing proves the rewrite runs on the
+  // `m.` host answers 404 to a valid `/t/` code (measured 2026-09-27). The `m./v/<id>.html` landing proves the rewrite runs on the
   // resolved URL too.
   for (const [short, requestedAt, landing, handed] of [
     ["https://vt.tiktok.com/ZSabc123/", "https://vt.tiktok.com/ZSabc123/", "https://www.tiktok.com/@a/video/7523456789", "https://www.tiktok.com/@a/video/7523456789"],
