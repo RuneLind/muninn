@@ -161,7 +161,10 @@ divergences, all four now regression tests in `render.test.ts`:
 Inline code spans pair by CommonMark's rules, but per line: a run of N backticks
 closes only on exactly N, an unmatched run stays literal, and one U+0020 is
 stripped from each end when both ends are U+0020 and the content is not all
-U+0020. CommonMark also pairs across a paragraph's soft breaks; this renderer
+U+0020. A backtick after an odd number of backslashes cannot open a span (the
+rest of its run opens one shorter); a closer ignores backslashes. The backslash
+itself stays visible, since the renderer processes no backslash escapes.
+CommonMark also pairs across a paragraph's soft breaks; this renderer
 does not (a known divergence). The fact-check strip shares that grammar via
 `src/format/code-spans.ts`.
 

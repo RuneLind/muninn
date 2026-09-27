@@ -12,6 +12,11 @@
  * for — `` `` [[x `` `` is how a page writes a literal containing a backtick.
  * An UNMATCHED run opens no span and the scan continues past it, so a stray
  * backtick cannot swallow the rest of the line either.
+ *
+ * Backslash escapes, opener side only (CommonMark §2.4, §6.1): outside a span,
+ * a backtick after an odd number of backslashes is literal, so the rest of its
+ * run opens one backtick shorter. Inside a span a backslash is literal, so a
+ * closer ignores backslashes.
  */
 export function lineCodeSpanRanges(line: string): { start: number; end: number; runLen: number }[] {
   const ranges: { start: number; end: number; runLen: number }[] = [];
@@ -23,7 +28,11 @@ export function lineCodeSpanRanges(line: string): { start: number; end: number; 
     }
     let openEnd = i;
     while (openEnd < line.length && line[openEnd] === "`") openEnd++;
+    let slashes = 0;
+    while (i - slashes > 0 && line[i - slashes - 1] === "\\") slashes++;
+    if (slashes % 2 === 1) i++; // the escaped backtick is literal
     const runLen = openEnd - i;
+    if (runLen === 0) continue;
     let closeAt = -1;
     let k = openEnd;
     while (k < line.length) {
