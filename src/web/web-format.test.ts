@@ -826,13 +826,81 @@ describe("formatWebHtml — code spans across lines", () => {
     }
   });
 
-  test("a `~~~` line inside the paragraph does not split the strip's pairing", () => {
-    const input = `a \`one\n~~~\nz\n~~~\n${FACT} two\` b`;
-    expect(agree(input)).toEqual({ marked: false, counted: false });
+  test("a `~~~` line splits the pairing on both sides, though only the strip reads it as a fence", () => {
+    const input = `a \`one\n~~~\nz\n~~~\nq ${FACT} two\` b`;
+    expect(agree(input)).toEqual({ marked: true, counted: true });
   });
 
   test("inside a component body the span pairs across lines on both sides", () => {
-    const input = `<Callout>\na \`one\n${FACT}\` b\n</Callout>`;
+    const input = `<Callout>\na \`one\nq ${FACT}\` b\n</Callout>`;
+    expect(formatWebHtml(input)).toContain("<code>one q &lt;Fact");
     expect(agree(input)).toEqual({ marked: false, counted: false });
+  });
+
+  // Each line may begin or interrupt a block in SOME CommonMark context. The
+  // pairing splits there, and the lines after it pair per line until a blank.
+  const INTERRUPTERS = [
+    "- b", "+ b", "* b", "  * b", "    - b", "1. b", "1) b", "2) b", "  2. b", "01) b",
+    "***", "___", "===", "  # h", "#", "> q", "  > q", "<div>", "<!-- c -->", "| a |",
+  ];
+  test("a span does not cross a line that may start a block", () => {
+    for (const mid of INTERRUPTERS) {
+      expect({ mid, html: formatWebHtml(`a \`x\n${mid}\ny\` b`) }).toEqual({
+        mid,
+        html: expect.not.stringContaining("<code>") as unknown as string,
+      });
+      const input = `a \`x\n${mid}\nq ${FACT} y\` b`;
+      expect({ mid, ...agree(input) }).toEqual({ mid, marked: true, counted: true });
+    }
+  });
+
+  test("a sibling item or a nested item line splits the pairing", () => {
+    expect(formatWebHtml("1) a `x\n2) b`")).not.toContain("<code>");
+    expect(formatWebHtml("  1. a `x\n  2. b`")).not.toContain("<code>");
+    expect(formatWebHtml("- a\n    - b `x\n    - c`")).not.toContain("<code>");
+  });
+
+  test("a list item's continuation pairs per line, as the item's own span closes on it", () => {
+    // CommonMark pairs `--p:\n   #9` inside the item; the parser split the item
+    // off, so pairing the orphan closer with the next opener inverted the line.
+    const input = "1. **x.** a (`--p:\n   #9`), b\n   `g(y)` c";
+    expect(formatWebHtml(input)).toBe(
+      "<ol><li><strong>x.</strong> a (`--p:</li></ol>\n   #9`), b\n   <code>g(y)</code> c",
+    );
+  });
+
+  test("an indented code block after a blank line pairs per line", () => {
+    expect(formatWebHtml("para\n\n    code `x\n    y`")).toBe("para\n\n    code `x\n    y`");
+  });
+
+  test("emphasis and <Fact> stay per line when a span bridges the break", () => {
+    expect(formatWebHtml("**bold `a\nb` end**")).toBe("**bold <code>a b</code> end**");
+    const bridged = `q <Fact n="1" v="ok">x \`c\nd\` y</Fact>`;
+    expect(formatWebHtml(bridged)).toContain("<code>c d</code>");
+    expect(formatWebHtml(bridged)).not.toContain("fc-mark");
+  });
+
+  test("the strip's source-line map survives an opener the parser leaves unclosed", () => {
+    // `    ````` closes the strip's fence but not the parser's, so line 0 stays a
+    // literal text line; every later text block must still map to its own lines.
+    const input = `\`\`\`\`\nq\n    \`\`\`\`\n# h\na \`x\nb ${FACT}\` c`;
+    expect(agree(input)).toEqual({ marked: false, counted: false });
+    const tail = `\`\`\`\`\nq\n    \`\`\`\`\n${FACT} \`\`\`\` b`;
+    expect(agree(tail)).toEqual({ marked: true, counted: true });
+  });
+
+  test("AnnotatedCode notes pair after the fence as the strip does, the fence being their real predecessor", () => {
+    const input = `<AnnotatedCode lang="ts">\nintro\n\`\`\`ts\nx\n\`\`\`\na \`one\nq ${FACT} two\` b\n</AnnotatedCode>`;
+    const html = formatWebHtml(input);
+    expect(html).toContain("<code>one q &lt;Fact");
+    expect(html.match(/<pre>/g)?.length).toBe(1);
+    expect(agree(input)).toEqual({ marked: false, counted: false });
+  });
+
+  test("CRLF line endings split the strip's pairing where the renderer's splits", () => {
+    for (const mid of ["\r\n", "---\r\n", "+\r\n"]) {
+      const input = `a \`one\r\n${mid}q ${FACT} two\` b`;
+      expect({ mid, ...agree(input) }).toEqual({ mid, marked: true, counted: true });
+    }
   });
 });

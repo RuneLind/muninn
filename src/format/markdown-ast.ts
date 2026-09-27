@@ -329,10 +329,10 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
 /**
  * The regions of a markdown body where text is CODE rather than prose: fenced
  * blocks (marker-matched, CommonMark closer-length rule, an unterminated fence
- * running to EOF) and inline backtick spans. A span pairs across the lines of one
- * paragraph, grouped by the parser's own `text` blocks ({@link textBlockSourceLines})
- * so it agrees with the renderer; any other line (heading, list item, table row)
- * pairs on its own.
+ * running to EOF) and inline backtick spans, sorted by start. A span may pair
+ * across the lines of a parser `text` block by the renderer's own rule
+ * ({@link textBlockSourceLines} + `textCodeSpanRanges`); any other line
+ * (heading, list item, table row) pairs on its own.
  *
  * Exported because every pass that rewrites markdown needs the same answer and a
  * second fence detector is how the two drift apart: the fact-check strip above
@@ -383,23 +383,23 @@ export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
   }
   if (fenceStart >= 0) regions.push({ start: fenceStart, end: body.length });
 
-  const pushSpans = (first: number, count: number) => {
+  const pushSpans = (first: number, count: number, opensParagraph: boolean) => {
     const base = lineStarts[first]!;
-    for (const r of textCodeSpanRanges(lines.slice(first, first + count))) {
+    for (const r of textCodeSpanRanges(lines.slice(first, first + count), opensParagraph)) {
       regions.push({ start: base + r.start, end: base + r.end });
     }
   };
-  // A group (consecutive lines by construction) is paired whole even where this
-  // scan reads a line as fence (`~~~`, which the parser does not): the renderer
-  // pairs it whole, and the fence region is protected either way.
+  // A group (consecutive lines by construction) is paired by the renderer's rule
+  // even where this scan reads a line as fence (`~~~`, which the parser does not):
+  // that line pairs per line on both sides, and the fence region is protected.
   const firstLine = lineStarts.findIndex((s) => s >= from);
   for (const group of firstLine < 0 ? [] : textBlockSourceLines(body.slice(from))) {
-    if (group.length === 0) continue;
-    for (const rel of group) prose.delete(rel + firstLine);
-    pushSpans(group[0]! + firstLine, group.length);
+    if (group.lines.length === 0) continue;
+    for (const rel of group.lines) prose.delete(rel + firstLine);
+    pushSpans(group.lines[0]! + firstLine, group.lines.length, group.opensParagraph);
   }
-  for (const idx of prose) pushSpans(idx, 1);
-  return regions;
+  for (const idx of prose) pushSpans(idx, 1, false);
+  return regions.sort((a, b) => a.start - b.start);
 }
 
 /** Whether this offset falls inside any of the regions {@link markdownCodeRegions} returned. */
@@ -677,7 +677,7 @@ interface FenceStore {
   blocks: Map<number, { lang: string; code: string }>;
   /** When set, every `text` block's SOURCE line indices are recorded here
    *  ({@link textBlockSourceLines}); a block with no source mapping is skipped. */
-  textLines?: number[][];
+  textLines?: { lines: number[]; opensParagraph: boolean }[];
   /** Ids the input already spells; never allocated. */
   taken: Set<number>;
   /** Next candidate id. Monotone, so allocation is amortised O(1). */
@@ -724,12 +724,25 @@ export function parseBlocks(text: string): Block[] {
 }
 
 /**
+ * Whether a `text` block's first line may open a paragraph, from the block
+ * before it: nothing (the body's or a component body's start), an ATX heading,
+ * a `---` rule or a fenced code block — each ends every CommonMark block that
+ * could otherwise continue into the next line. After a list, blockquote, table
+ * or component the line may be a lazy continuation, so it pairs per line
+ * (`textCodeSpanRanges`). The renderer and the fact-check strip both ask this.
+ */
+export function textBlockOpensParagraph(prev: Block | undefined): boolean {
+  return prev === undefined || prev.type === "heading" || prev.type === "hr" || prev.type === "code_block";
+}
+
+/**
  * The source line indices (into `text.split("\n")`) of every `text` block
- * {@link parseBlocks} builds — the lines a renderer pairs code spans over. The
+ * {@link parseBlocks} builds — the lines a renderer pairs code spans over — and
+ * whether each may open a paragraph ({@link textBlockOpensParagraph}). The
  * fact-check strip asks the parser itself rather than re-spelling its block rules.
  * A single-line component's inner content is not a source line and is omitted.
  */
-export function textBlockSourceLines(text: string): number[][] {
+export function textBlockSourceLines(text: string): { lines: number[]; opensParagraph: boolean }[] {
   const normalized = text.replace(/\r\n/g, "\n");
   const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, textLines: [] };
   const src: number[] = [];
@@ -910,7 +923,12 @@ function parseBlocksInner(
 
   function flushText() {
     if (textBuffer.length > 0) {
-      if (store.textLines && src) store.textLines.push(src.slice(textStart, textStart + textBuffer.length));
+      if (store.textLines && src) {
+        store.textLines.push({
+          lines: src.slice(textStart, textStart + textBuffer.length),
+          opensParagraph: textBlockOpensParagraph(blocks[blocks.length - 1]),
+        });
+      }
       blocks.push({ type: "text", lines: textBuffer });
       textBuffer = [];
     }

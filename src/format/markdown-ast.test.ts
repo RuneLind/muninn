@@ -11,6 +11,7 @@ import {
   scanInlineComponents,
   textBlockSourceLines,
   countFactWrappers,
+  markdownCodeRegions,
   type Block,
 } from "./markdown-ast.ts";
 
@@ -1019,13 +1020,36 @@ describe("the closer scan is not quadratic", () => {
 describe("textBlockSourceLines", () => {
   test("maps every text block, component bodies included, to its source lines", () => {
     const text = "p1\n```\nx\n```\np2\np3\n<Callout>\nq\n</Callout>\n# h\n\nr";
-    const groups = textBlockSourceLines(text).sort((a, b) => a[0]! - b[0]!);
-    expect(groups).toEqual([[0], [4, 5], [7], [10, 11]]);
+    const groups = textBlockSourceLines(text).sort((a, b) => a.lines[0]! - b.lines[0]!);
+    expect(groups).toEqual([
+      { lines: [0], opensParagraph: true },
+      { lines: [4, 5], opensParagraph: true },
+      { lines: [7], opensParagraph: true },
+      { lines: [10, 11], opensParagraph: true },
+    ]);
+  });
+
+  test("a block after a list, quote, table or component does not open a paragraph", () => {
+    for (const before of ["- a", "1. a", "> q", "| a |\n|---|\n| b |", "<Callout>\nq\n</Callout>"]) {
+      const groups = textBlockSourceLines(`${before}\nx`);
+      expect({ before, last: groups[groups.length - 1]!.opensParagraph }).toEqual({ before, last: false });
+    }
+    for (const before of ["# h", "---", "```\nz\n```"]) {
+      const groups = textBlockSourceLines(`${before}\nx`);
+      expect({ before, last: groups[groups.length - 1]!.opensParagraph }).toEqual({ before, last: true });
+    }
+  });
+
+  test("markdownCodeRegions returns its regions in document order", () => {
+    const body = "a `x`\n```\nz\n```\nb `y`\n- c `w`\n~~~\nq";
+    const starts = markdownCodeRegions(body).map((r) => r.start);
+    expect(starts.length).toBe(5);
+    expect(starts).toEqual([...starts].sort((x, y) => x - y));
   });
 
   test("the strip pairs a cross-line span after the frontmatter", () => {
     const fact = '<Fact n="1" v="ok">x</Fact>';
     expect(countFactWrappers(`---\nk: v\n---\na \`one\ntwo\` ${fact} \`c\``)).toBe(1);
-    expect(countFactWrappers(`---\nk: v\n---\na \`one\n${fact}\` b`)).toBe(0);
+    expect(countFactWrappers(`---\nk: v\n---\na \`one\nq ${fact}\` b`)).toBe(0);
   });
 });

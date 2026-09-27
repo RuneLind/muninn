@@ -283,8 +283,7 @@ const webRenderer: BlockRenderer = {
           ? `<div class="annotated-code-file">${escapeHtml(attrs.file)}</div>`
           : "";
         // Annotations are every non-fence body block (the paragraphs after it).
-        const notes = rawChildren.filter((b) => b.type !== "code_block");
-        const notesHtml = renderBlocks(notes, webRenderer);
+        const notesHtml = renderBlocks(rawChildren, webRenderer, (b) => b.type !== "code_block");
         const notesBlock = notesHtml.trim()
           ? `<div class="annotated-code-notes">${notesHtml}</div>`
           : "";
@@ -409,22 +408,47 @@ const webRenderer: BlockRenderer = {
 };
 
 /**
- * A `text` block: code spans pair per PARAGRAPH (they may cross a soft break) and
- * are parked first; everything else stays per line in `renderInline`, whose own
- * span pass then finds no pair — a run left unmatched here has no equal run after
- * it in the paragraph.
+ * A `text` block: code spans pair by `textCodeSpanRanges` (across a soft break
+ * only inside a certain paragraph) and are parked first, each placeholder
+ * followed by the newlines its span contained, so every source line still
+ * reaches `renderInline` on its own — emphasis, links, components and `<Fact>`
+ * never cross a line, bridged by a span or not. A line a span ended on keeps only
+ * its tail and is glued to the placeholder's line with no newline, as CommonMark
+ * turns the break into a space INSIDE the span. `renderInline`'s own span pass
+ * then finds no pair: a run left unmatched here has no equal run after it in the
+ * stretch it was scanned over.
  */
-function renderTextBlock(lines: string[]): string {
+function renderTextBlock(lines: string[], opensParagraph: boolean): string {
   const text = lines.join("\n");
   const ph = new Placeholders();
   let parked = "";
   let cursor = 0;
-  for (const r of textCodeSpanRanges(lines)) {
-    parked += text.slice(cursor, r.start) + ph.add("PARACODE", `<code>${escapeHtml(codeSpanContent(text, r))}</code>`);
+  // Source line indices that continue the line before them inside a span.
+  const glued = new Set<number>();
+  let line = 0;
+  const countNewlines = (from: number, to: number) => {
+    let n = 0;
+    for (let k = text.indexOf("\n", from); k !== -1 && k < to; k = text.indexOf("\n", k + 1)) n++;
+    return n;
+  };
+  for (const r of textCodeSpanRanges(lines, opensParagraph)) {
+    line += countNewlines(cursor, r.start);
+    const inside = countNewlines(r.start, r.end);
+    for (let k = 1; k <= inside; k++) glued.add(line + k);
+    line += inside;
+    parked +=
+      text.slice(cursor, r.start) +
+      ph.add("PARACODE", `<code>${escapeHtml(codeSpanContent(text, r))}</code>`) +
+      "\n".repeat(inside);
     cursor = r.end;
   }
   parked += text.slice(cursor);
-  return ph.restore(parked.split("\n").map(renderInline).join("\n"));
+  let out = "";
+  parked.split("\n").forEach((piece, i) => {
+    if (i > 0 && !glued.has(i)) out += "\n";
+    out += renderInline(piece);
+  });
+  return ph.restore(out);
 }
 
 function renderInline(text: string): string {

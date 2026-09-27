@@ -1,4 +1,4 @@
-import type { Block, ComponentName, InlineComponentName } from "./markdown-ast.ts";
+import { textBlockOpensParagraph, type Block, type ComponentName, type InlineComponentName } from "./markdown-ast.ts";
 
 /**
  * Per-platform block rendering strategy. Each platform formatter (web HTML,
@@ -45,16 +45,25 @@ export interface BlockRenderer {
    *  Called directly by each platform's `renderInline`, not via `renderBlocks`;
    *  living on the interface is what forces every platform to implement it. */
   inlineComponent(name: InlineComponentName, attrs: Record<string, string>, text: string): string;
-  text(lines: string[]): string;
+  /** `opensParagraph`: whether the block's first line may open a paragraph
+   *  ({@link textBlockOpensParagraph}), for platforms that pair code spans
+   *  across lines. */
+  text(lines: string[], opensParagraph: boolean): string;
 }
 
 /** Render a parsed block list with a platform's {@link BlockRenderer}, joining
- *  blocks with a single newline (platforms apply their own spacing cleanup). */
-export function renderBlocks(blocks: Block[], r: BlockRenderer): string {
-  return blocks.map((block) => renderBlock(block, r)).join("\n");
+ *  blocks with a single newline (platforms apply their own spacing cleanup).
+ *  `include` renders a subset while each block still sees its REAL predecessor
+ *  (what `text` is told about, via `opensParagraph`). */
+export function renderBlocks(blocks: Block[], r: BlockRenderer, include?: (block: Block) => boolean): string {
+  const out: string[] = [];
+  blocks.forEach((block, i) => {
+    if (!include || include(block)) out.push(renderBlock(block, r, blocks[i - 1]));
+  });
+  return out.join("\n");
 }
 
-function renderBlock(block: Block, r: BlockRenderer): string {
+function renderBlock(block: Block, r: BlockRenderer, prev: Block | undefined): string {
   switch (block.type) {
     case "code_block":
       return r.code_block(block);
@@ -73,7 +82,7 @@ function renderBlock(block: Block, r: BlockRenderer): string {
     case "component":
       return r.component(block.name, block.attrs, renderBlocks(block.children, r), block.children);
     case "text":
-      return r.text(block.lines);
+      return r.text(block.lines, textBlockOpensParagraph(prev));
     default: {
       const _exhaustive: never = block;
       return _exhaustive;

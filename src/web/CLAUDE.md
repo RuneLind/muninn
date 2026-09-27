@@ -153,24 +153,45 @@ divergences, all four now regression tests in `render.test.ts`:
 - **A line SHAPED like a fence delimiter that is not one.** A backtick run that
   does not start its line, or whose info string holds a backtick, opens no fenced
   block (CommonMark), so the line stays PROSE and its own backtick runs pair by the
-  exact-N rule (an unmatched ``` stays literal); a line-wise scan reads the same
+  exact-N rule (an unmatched ``` stays literal). No span crosses into or out of
+  it: a fence-shaped line may open a block, so the paragraph pairing below falls
+  back to per line there. A line-wise scan reads the same
   line as a delimiter and puts the region somewhere else. (Before `parseBlocks`'
   extractor became a line walker the same input diverged for a different reason:
   the mid-line placeholder joined the text either side onto one line.)
 
-Inline code spans pair by CommonMark's rules, per PARAGRAPH: a run of N
-backticks closes only on exactly N, an unmatched run stays literal, and a span
-may cross a soft line break (the line ending and the next line's indent become
-one space, before the one-U+0020 strip from each end) but never a blank line, a
-block `parseBlocks` splits off, or a list-item line (`+ `, `1) `, an indented
-`- `), which CommonMark lets interrupt a paragraph and the parser leaves as text.
-The `text` block handler parks the paragraph's spans before the per-line
-`renderInline`; headings, list items, table cells and blockquote lines still
-pair per line. The fact-check strip (`markdownCodeRegions`) pairs over the SAME
-paragraphs: it asks the parser for its `text` blocks (`textBlockSourceLines`)
-instead of re-spelling the block rules, and both sides share
-`textCodeSpanRanges` in `src/format/code-spans.ts`. Telegram, Slack, email and
-the line scanners in `lint.ts` / `wiki-integrate.ts` still pair per line.
+Inline code spans pair by CommonMark's rules: a run of N backticks closes only
+on exactly N, an unmatched run stays literal, and one U+0020 is stripped from
+each end when both ends are U+0020 and the content is not all U+0020. A span
+crosses a soft line break (the line ending and the next line's indent become one
+space, before that strip) only inside a stretch that is CERTAINLY one CommonMark
+paragraph; on any doubt the stretch pairs per line, which never pairs worse than
+per line. `textCodeSpanRanges` in `src/format/code-spans.ts` holds the rule:
+
+- **Where a stretch may start**: after a blank line, or at the start of a `text`
+  block whose predecessor ends every block that could continue into it — none
+  (body or component-body start), an ATX heading, a `---` rule, a fence
+  (`textBlockOpensParagraph`). After a list, blockquote, table or component the
+  line may be a lazy continuation, and the corpus had list continuations whose
+  span CommonMark closes inside the item: pairing the orphan closer with the next
+  opener inverted the line.
+- **Where it ends**: at a blank line or a line that could begin or interrupt a
+  block in ANY context, at any indent — a list marker (`-`, `+`, `*`, 1–9 digits
+  then `.`/`)`), a rule or setext underline, `#`, `>`, `<`, a fence, a table row
+  (`mayInterruptParagraph`, a deliberate superset). The lines after such a line
+  pair per line until the next blank line.
+- **Never a stretch**: a first line indented 4+ columns (indented code, at any
+  list depth), and anything after a fence or raw-HTML-block opener in the block.
+
+The `text` block handler parks the spans first and then still hands every
+source line to `renderInline` on its own: a span's line breaks stay in the
+parked text and the pieces are glued back with no newline. Emphasis, links,
+components and `<Fact>` never cross a line, bridged by a span or not. Headings,
+list items, table cells and blockquote lines pair per line. The fact-check strip
+(`markdownCodeRegions`) pairs by the SAME rule: it asks the parser for its
+`text` blocks and their `opensParagraph` (`textBlockSourceLines`) instead of
+re-spelling the block rules. Telegram, Slack, email and the line scanners in
+`lint.ts` / `wiki-integrate.ts` still pair per line.
 
 ⚠️ **What reading the output costs instead: the scan has to know every container
 the renderer uses for code, and there are TWO.** The first revision assumed one,
