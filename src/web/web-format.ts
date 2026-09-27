@@ -19,7 +19,7 @@ import type { Block, FactVerdict } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
-import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
+import { codeSpanContent, lineCodeSpanRanges, type LineRange } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
@@ -405,8 +405,49 @@ const webRenderer: BlockRenderer = {
       }
     }
   },
-  text: (lines) => lines.map(renderInline).join("\n"),
+  text: renderTextBlock,
 };
+
+/**
+ * A `text` block: every line through the inline pipeline on its own, as
+ * `renderInline` does, except that each `across` stretch pairs its code spans
+ * over all its lines first and parks them.
+ * The rest of the inline pipeline then runs on each line's remainder on its own
+ * — emphasis, links, components and `<Fact>` never cross a line. A line a span
+ * ended on keeps only its tail, glued to the span with no newline: CommonMark
+ * turns that break into a space INSIDE the span.
+ */
+function renderTextBlock(lines: string[], across: readonly LineRange[]): string {
+  const out: string[] = [];
+  const endAt = new Map(across.map((r) => [r.first, r.end]));
+  for (let i = 0; i < lines.length; ) {
+    const end = endAt.get(i) ?? i + 1;
+    const text = lines.slice(i, end).join("\n");
+    const ph = new Placeholders();
+    // Pieces rendered one by one, each joined to the one before by its separator.
+    const pieces = [""];
+    const seps: string[] = [];
+    const emit = (s: string) => {
+      const [head = "", ...rest] = s.split("\n");
+      pieces[pieces.length - 1] += head;
+      for (const l of rest) seps.push("\n"), pieces.push(l);
+    };
+    let cursor = 0;
+    for (const r of lineCodeSpanRanges(text)) {
+      emit(text.slice(cursor, r.start) + parkCodeSpan(ph, text, r));
+      if (text.slice(r.start, r.end).includes("\n")) seps.push(""), pieces.push("");
+      cursor = r.end;
+    }
+    emit(text.slice(cursor));
+    out.push(pieces.map((p, k) => (k > 0 ? seps[k - 1] : "") + renderInlineAfterSpans(p, ph)).join(""));
+    i = end;
+  }
+  return out.join("\n");
+}
+
+function parkCodeSpan(ph: Placeholders, text: string, r: { start: number; end: number; runLen: number }): string {
+  return ph.add("INLINE", `<code>${escapeHtml(codeSpanContent(text, r))}</code>`);
+}
 
 function renderInline(text: string): string {
   const ph = new Placeholders();
@@ -420,10 +461,16 @@ function renderInline(text: string): string {
   let result = "";
   let cursor = 0;
   for (const r of lineCodeSpanRanges(text)) {
-    result += text.slice(cursor, r.start) + ph.add("INLINE", `<code>${escapeHtml(codeSpanContent(text, r))}</code>`);
+    result += text.slice(cursor, r.start) + parkCodeSpan(ph, text, r);
     cursor = r.end;
   }
   result += text.slice(cursor);
+  return renderInlineAfterSpans(result, ph);
+}
+
+/** Everything `renderInline` does after its code-span pass, on text whose spans are parked in `ph`. */
+function renderInlineAfterSpans(text: string, ph: Placeholders): string {
+  let result = text;
 
   // Inline components (Verdict, Pill) on the code-shielded text. Their generated
   // HTML must be parked BEFORE the escapeHtml pass below — otherwise the escape

@@ -9,6 +9,10 @@ import {
   parseChecklistItem,
   parseChecklist,
   scanInlineComponents,
+  crossLineSourceStretches,
+  textBlockCrossLineRanges,
+  countFactWrappers,
+  markdownCodeRegions,
   type Block,
 } from "./markdown-ast.ts";
 
@@ -1011,5 +1015,43 @@ describe("the closer scan is not quadratic", () => {
     // post-memo cost of this one, so it separates the two without being tight
     // on a slow CI runner.
     expect(ms).toBeLessThan(2000);
+  });
+});
+
+describe("crossLineSourceStretches", () => {
+  test("maps each stretch to its source lines, through a collapsed fence and a component body", () => {
+    const text = "p1\n```\nx\n```\n\na `x\ny` b\n\n<Callout>\n\nc `d\ne`\n\n</Callout>";
+    expect(crossLineSourceStretches(text)).toEqual([
+      { first: 5, end: 7 },
+      { first: 10, end: 12 },
+    ]);
+  });
+
+  test("a stretch pairs across only when it lies whole in one text block", () => {
+    // `#` + NBSP is a heading to the parser, not to CommonMark: the stretch is split, so per line.
+    expect(crossLineSourceStretches("a `x\n#\u00a0h\ny` b")).toEqual([]);
+    const block = parseBlocks("a `x\n#\u00a0h\ny` b")[0]!;
+    expect(textBlockCrossLineRanges(block)).toEqual([]);
+  });
+
+  test("a parsed text block carries its cross-line ranges, and a hand-built one none", () => {
+    const [block] = parseBlocks("p\n\na `x\ny` b");
+    expect(textBlockCrossLineRanges(block!)).toEqual([{ first: 2, end: 4 }]);
+    expect(textBlockCrossLineRanges({ type: "text", lines: ["a `x", "y` b"] })).toEqual([]);
+  });
+
+  test("markdownCodeRegions returns its regions in document order", () => {
+    // A backtick-info line is paragraph text to the pairing and a fence to this
+    // scan, whose region is pushed when it closes — after the stretch's spans.
+    const body = "a `x`\n\n``` `q`\nb `y\nz`\n```\nw `v`";
+    const starts = markdownCodeRegions(body).map((r) => r.start);
+    expect(starts.length).toBe(5);
+    expect(starts).toEqual([...starts].sort((x, y) => x - y));
+  });
+
+  test("the strip pairs a cross-line span after the frontmatter", () => {
+    const fact = '<Fact n="1" v="ok">x</Fact>';
+    expect(countFactWrappers(`---\nk: v\n---\na \`one\ntwo\` ${fact} \`c\``)).toBe(1);
+    expect(countFactWrappers(`---\nk: v\n---\na \`one\nq ${fact}\` b`)).toBe(0);
   });
 });

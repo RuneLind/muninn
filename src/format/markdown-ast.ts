@@ -13,7 +13,7 @@
  * platform through unwanted abstractions.
  */
 
-import { lineCodeSpanRanges } from "./code-spans.ts";
+import { crossLineStretches, lineCodeSpanRanges, type LineRange } from "./code-spans.ts";
 
 export type Block =
   | { type: "code_block"; lang: string; code: string }
@@ -304,7 +304,7 @@ export interface ProtectedRegion {
 
 const FRONTMATTER_BLOCK_RE = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 
-/** Push every inline code span (`` `x` ``, matched backtick runs) on one line. */
+/** Push every inline code span (`` `x` ``, matched backtick runs) on one line, or one cross-line stretch. */
 function pushInlineCodeSpans(line: string, base: number, out: ProtectedRegion[]): void {
   for (const r of lineCodeSpanRanges(line)) out.push({ start: base + r.start, end: base + r.end });
 }
@@ -334,7 +334,9 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
 /**
  * The regions of a markdown body where text is CODE rather than prose: fenced
  * blocks (marker-matched, CommonMark closer-length rule, an unterminated fence
- * running to EOF) and inline backtick spans.
+ * running to EOF) and inline backtick spans, sorted by start. A span pairs across
+ * lines exactly where the renderer's does ({@link crossLineSourceStretches});
+ * every other line pairs on its own.
  *
  * Exported because every pass that rewrites markdown needs the same answer and a
  * second fence detector is how the two drift apart: the fact-check strip above
@@ -349,14 +351,27 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
  */
 export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
   const regions: ProtectedRegion[] = [];
+  const lines = body.split("\n");
+  const firstLine = body.slice(0, from).split("\n").length - 1;
+  const stretchEnd = new Map<number, number>();
+  if (body.includes("`", from)) {
+    for (const r of crossLineSourceStretches(body.slice(from))) stretchEnd.set(r.first + firstLine, r.end + firstLine);
+  }
+  let perLineFrom = 0; // lines before this belong to a stretch already paired
   let offset = 0;
   let fenceStart = -1;
   let fenceMarker = "";
   let fenceRun = 0;
-  for (const line of body.split("\n")) {
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx]!;
     const lineStart = offset;
     offset += line.length + 1;
     if (lineStart < from) continue;
+    const end = stretchEnd.get(idx);
+    if (end !== undefined) {
+      pushInlineCodeSpans(lines.slice(idx, end).join("\n"), lineStart, regions);
+      perLineFrom = end;
+    }
     const m = /^\s*(`{3,}|~{3,})/.exec(line);
     if (m) {
       const run = m[1]!;
@@ -377,10 +392,10 @@ export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
     }
     // Inline code spans matter only OUTSIDE a fence (inside, the whole block is
     // already protected) — and a fence line itself can carry no code span.
-    if (fenceStart < 0) pushInlineCodeSpans(line, lineStart, regions);
+    if (fenceStart < 0 && idx >= perLineFrom) pushInlineCodeSpans(line, lineStart, regions);
   }
   if (fenceStart >= 0) regions.push({ start: fenceStart, end: body.length });
-  return regions;
+  return regions.sort((a, b) => a.start - b.start);
 }
 
 /** Whether this offset falls inside any of the regions {@link markdownCodeRegions} returned. */
@@ -656,6 +671,10 @@ function takenCodeIds(text: string): Set<number> {
  */
 interface FenceStore {
   blocks: Map<number, { lang: string; code: string }>;
+  /** Source line → end of the `crossLineStretches` stretch starting there. */
+  stretchEnd?: Map<number, number>;
+  /** When set, collects every stretch that lies whole in one `text` block, in source lines. */
+  across?: LineRange[];
   /** Ids the input already spells; never allocated. */
   taken: Set<number>;
   /** Next candidate id. Monotone, so allocation is amortised O(1). */
@@ -696,9 +715,43 @@ export function parseBlocks(text: string): Block[] {
   // `\r` and leaves the `\n`, so it can neither create nor destroy a
   // placeholder-shaped run between the two.
   const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0 };
-  const protectedText = extractFences(normalized, store);
+  return parseWithStretches(normalized, store);
+}
 
-  return parseBlocksInner(protectedText, store, 0);
+/** A parse that maps every line back to its source line, so each `text` block
+ *  learns which `crossLineStretches` stretches lie whole inside it. With no
+ *  stretch, the plain parse. */
+function parseWithStretches(normalized: string, store: FenceStore): Block[] {
+  const stretches = normalized.includes("`") ? crossLineStretches(normalized.split("\n")) : [];
+  if (stretches.length === 0) return parseBlocksInner(extractFences(normalized, store), store, 0);
+  store.stretchEnd = new Map(stretches.map((r) => [r.first, r.end]));
+  const src: number[] = [];
+  const protectedText = extractFences(normalized, store, src);
+  return parseBlocksInner(protectedText, store, 0, src);
+}
+
+const TEXT_BLOCK_ACROSS = new WeakMap<Block, LineRange[]>();
+
+/**
+ * The line ranges of a `text` block from {@link parseBlocks} whose code spans
+ * pair across lines: each `crossLineStretches` stretch of the source that lies
+ * WHOLE in the block, relative to `block.lines`. A stretch the parser split pairs
+ * per line. Empty for any other block, a hand-built one included.
+ */
+export function textBlockCrossLineRanges(block: Block): readonly LineRange[] {
+  return TEXT_BLOCK_ACROSS.get(block) ?? [];
+}
+
+/**
+ * The stretches of `text` (line indices into `text.split("\n")`) that
+ * {@link parseBlocks} pairs across lines, in order. The fact-check strip asks the
+ * parser itself rather than re-spelling its block rules.
+ */
+export function crossLineSourceStretches(text: string): LineRange[] {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, across: [] };
+  parseWithStretches(normalized, store);
+  return store.across!.sort((a, b) => a.first - b.first);
 }
 
 /**
@@ -753,7 +806,7 @@ export function parseBlocks(text: string): Block[] {
  * wiki contains one (measured, same sweep) -- adding them is a separate change
  * with its own corpus diff, not a free ride on this one.
  */
-function extractFences(text: string, store: FenceStore): string {
+function extractFences(text: string, store: FenceStore, src?: number[]): string {
   const lines = text.split("\n");
   const out: string[] = [];
   let i = 0;
@@ -797,6 +850,7 @@ function extractFences(text: string, store: FenceStore): string {
     // pinned in `wiki/render.test.ts` -- the discard, and the swallowing not
     // coming back.
     if (!open || info.includes("`")) {
+      src?.push(i);
       out.push(lines[i]!);
       i++;
       continue;
@@ -816,6 +870,7 @@ function extractFences(text: string, store: FenceStore): string {
     }
     if (close === -1) {
       noCloserAtRunAtLeast = Math.min(noCloserAtRunAtLeast, runLen);
+      src?.push(i);
       out.push(lines[i]!);
       i++;
       continue;
@@ -827,6 +882,7 @@ function extractFences(text: string, store: FenceStore): string {
       lang: info.trim().match(FENCE_LANG_RE)![0],
       code: body.join("\n").trimEnd(),
     });
+    src?.push(i);
     out.push(`\x00CB${id}\x00`);
     i = close + 1;
   }
@@ -845,15 +901,18 @@ function dedentFenceLine(line: string, indent: number): string {
 }
 
 /** Parse already-fence-extracted text into blocks. `store` is the shared
- *  placeholder store; `depth` is the current component-nesting level. */
+ *  placeholder store; `depth` is the current component-nesting level; `src`
+ *  maps each line to its source line. */
 function parseBlocksInner(
   protectedText: string,
   store: FenceStore,
   depth: number,
+  src?: readonly number[],
 ): Block[] {
   const lines = protectedText.split("\n");
   const blocks: Block[] = [];
   let textBuffer: string[] = [];
+  let textStart = 0;
   let i = 0;
 
   // Per-parse memo of scan futility: once a multi-line scan for `<Name>` runs to
@@ -867,7 +926,21 @@ function parseBlocksInner(
 
   function flushText() {
     if (textBuffer.length > 0) {
-      blocks.push({ type: "text", lines: textBuffer });
+      const block: Block = { type: "text", lines: textBuffer };
+      const across: LineRange[] = [];
+      // A stretch counts only where it lies whole in this block. A block's source
+      // lines are consecutive: a collapsed fence, the one gap, is a block of its own.
+      for (let k = 0; store.stretchEnd && src && k < textBuffer.length; k++) {
+        const first = src[textStart + k]!;
+        const n = (store.stretchEnd.get(first) ?? first) - first;
+        if (n > 0 && k + n <= textBuffer.length) {
+          across.push({ first: k, end: k + n });
+          store.across?.push({ first, end: first + n });
+          k += n - 1;
+        }
+      }
+      if (across.length > 0) TEXT_BLOCK_ACROSS.set(block, across);
+      blocks.push(block);
       textBuffer = [];
     }
   }
@@ -876,7 +949,7 @@ function parseBlocksInner(
     const line = lines[i]!;
 
     if (depth < MAX_COMPONENT_DEPTH) {
-      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom);
+      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom, src);
       if (comp) {
         flushText();
         blocks.push(comp.block);
@@ -982,6 +1055,7 @@ function parseBlocksInner(
       }
     }
 
+    if (textBuffer.length === 0) textStart = i;
     textBuffer.push(line);
     i++;
   }
@@ -1002,6 +1076,7 @@ function tryParseComponent(
   store: FenceStore,
   depth: number,
   noCloseFrom: Map<string, number>,
+  src?: readonly number[],
 ): { block: Block; next: number } | null {
   const m = lines[i]!.trim().match(COMPONENT_OPEN_RE);
   if (!m) return null;
@@ -1066,7 +1141,7 @@ function tryParseComponent(
     return null; // unclosed → fall through as text
   }
 
-  const children = parseBlocksInner(body.join("\n"), store, depth + 1);
+  const children = parseBlocksInner(body.join("\n"), store, depth + 1, src?.slice(i + 1, j));
   return { block: { type: "component", name: cname, attrs, children }, next: j + 1 };
 }
 

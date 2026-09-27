@@ -1,4 +1,5 @@
-import type { Block, ComponentName, InlineComponentName } from "./markdown-ast.ts";
+import { textBlockCrossLineRanges, type Block, type ComponentName, type InlineComponentName } from "./markdown-ast.ts";
+import type { LineRange } from "./code-spans.ts";
 
 /**
  * Per-platform block rendering strategy. Each platform formatter (web HTML,
@@ -45,7 +46,9 @@ export interface BlockRenderer {
    *  Called directly by each platform's `renderInline`, not via `renderBlocks`;
    *  living on the interface is what forces every platform to implement it. */
   inlineComponent(name: InlineComponentName, attrs: Record<string, string>, text: string): string;
-  text(lines: string[]): string;
+  /** `across`: the line ranges whose code spans pair across lines
+   *  ({@link textBlockCrossLineRanges}), for a platform that does. */
+  text(lines: string[], across: readonly LineRange[]): string;
 }
 
 /** Render a parsed block list with a platform's {@link BlockRenderer}, joining
@@ -73,7 +76,7 @@ function renderBlock(block: Block, r: BlockRenderer): string {
     case "component":
       return r.component(block.name, block.attrs, renderBlocks(block.children, r), block.children);
     case "text":
-      return r.text(block.lines);
+      return r.text(block.lines, textBlockCrossLineRanges(block));
     default: {
       const _exhaustive: never = block;
       return _exhaustive;

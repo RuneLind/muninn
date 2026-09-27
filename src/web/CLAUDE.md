@@ -153,17 +153,61 @@ divergences, all four now regression tests in `render.test.ts`:
 - **A line SHAPED like a fence delimiter that is not one.** A backtick run that
   does not start its line, or whose info string holds a backtick, opens no fenced
   block (CommonMark), so the line stays PROSE and its own backtick runs pair by the
-  exact-N rule (an unmatched ``` stays literal); a line-wise scan reads the same
-  line as a delimiter and puts the region somewhere else. (Before `parseBlocks`'
-  extractor became a line walker the same input diverged for a different reason:
-  the mid-line placeholder joined the text either side onto one line.)
+  exact-N rule (an unmatched ``` stays literal). It is paragraph text, so a span
+  can cross into or out of it as below. A line-wise scan reads the same line as a
+  delimiter and puts the region somewhere else. (Before `parseBlocks`' extractor
+  became a line walker the same input diverged for a different reason: the
+  mid-line placeholder joined the text either side onto one line.)
 
-Inline code spans pair by CommonMark's rules, but per line: a run of N backticks
-closes only on exactly N, an unmatched run stays literal, and one U+0020 is
-stripped from each end when both ends are U+0020 and the content is not all
-U+0020. CommonMark also pairs across a paragraph's soft breaks; this renderer
-does not (a known divergence). The fact-check strip shares that grammar via
-`src/format/code-spans.ts`.
+Inline code spans pair by CommonMark's rules: a run of N backticks closes only on
+exactly N, an unmatched run stays literal, and one U+0020 is stripped from each
+end when both ends are U+0020 and the content is not all U+0020. Backslash
+escapes are not read. A span crosses a soft line break only inside a stretch
+that is CERTAINLY one whole CommonMark paragraph; there the line ending and the
+next line's indent become one space, before that strip. Every other line pairs
+on its own, exactly as before cross-line pairing existed: with no stretch, the
+renderer, `markdownCodeRegions` and the strip are byte-identical to per-line
+pairing (measured on all 2437 wiki pages).
+
+`crossLineStretches` in `src/format/code-spans.ts` holds the rule, as one forward
+scan with one state. A stretch starts at the body's first line or after a blank
+line, and pairs across only if all hold:
+
+- It ends at a blank line, the body's end, or a line that certainly interrupts a
+  paragraph at indent ≤ 3 (`CERTAIN_INTERRUPT_RE`): an ATX heading, a fence, a
+  thematic break or setext `---`, a bullet with content, an ordered item numbered
+  1 with content, a blockquote, or an HTML block start of types 1–6.
+- No other line in it may interrupt a paragraph (`mayInterruptParagraph`, a
+  deliberate superset: a `2)` item, a component tag, a `<kbd>` line, a table row).
+- It lies outside every fence and HTML block the scan tracks. A fence closes on a
+  run of its own character at least as long, indented ≤ 3; an HTML block of types
+  1–5 on its end marker, of types 6–7 on a blank line.
+- The scan gives up — every later line pairs on its own — after a fence or HTML
+  opener behind a list marker or `>`, indented 4+ columns or behind a tab. An
+  opener indented 1–3 spaces may sit in a list item, so it gives up too at a
+  non-blank line indented less than the opener, or at a fence run indented 4+,
+  while that context is open. A `<` line that is not certainly a type 1–6 start
+  may be type 7 HTML or paragraph text; it gives up at an opener before the next
+  blank line.
+- Its first line is not indented 4+ columns.
+- It is not a possible link reference definition (first line `[`, a `]:` in it).
+- No backtick in it follows a backslash, or lies inside what may be an inline
+  tag or autolink (`<a title="`">`, which CommonMark reads first).
+
+`parseBlocks` attaches to each `text` block the stretches that lie WHOLE inside it
+(`textBlockCrossLineRanges`); a stretch the parser split pairs per line. The
+`text` handler parks a stretch's spans, then runs the rest of the inline pipeline
+on each source line's remainder, so emphasis, links, components and `<Fact>` never
+cross a line. Headings, list items, table cells and blockquote lines pair per
+line. `markdownCodeRegions` (the fact-check strip and the capture passes) pairs
+by the same stretches, from the parser (`crossLineSourceStretches`). Telegram,
+Slack, email and the line scanners in `lint.ts` / `wiki-integrate.ts` pair per
+line.
+
+Measured against commonmark.js 0.31.2 by the symmetric difference of inline code
+texts (the PR that added the rule has the numbers): no corpus page moves further
+from CommonMark, and on random documents a document moves further only where a
+per-line span elsewhere had matched a CommonMark span's text by coincidence.
 
 ⚠️ **What reading the output costs instead: the scan has to know every container
 the renderer uses for code, and there are TWO.** The first revision assumed one,
