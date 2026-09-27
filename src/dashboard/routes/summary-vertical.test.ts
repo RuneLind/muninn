@@ -240,9 +240,9 @@ test("redirect: bare path 302s to /summaries carrying the source tag + inbound p
 
 test("cors preflight: OPTIONS <apiBase>/summarize → 204 with CORS headers", async () => {
   const app = appFor(fixedStore(makeJob({})), { corsPreflight: true });
-  const res = await app.request("/api/test/summarize", { method: "OPTIONS" });
+  const res = await app.request("/api/test/summarize", { method: "OPTIONS", headers: { origin: "chrome-extension://abcdefghijklmnop" } });
   expect(res.status).toBe(204);
-  expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+  expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://abcdefghijklmnop");
   expect(res.headers.get("Access-Control-Allow-Methods")).toBe("POST");
 });
 

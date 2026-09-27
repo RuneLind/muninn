@@ -21,10 +21,10 @@ describe("src/index.ts wiring", () => {
     // `scope='shared'` memory read are both still live on an authenticating
     // instance.
     const text = await readFile(INDEX, "utf8");
-    const policyAt = text.indexOf("setAuthPolicy(auth)");
+    const policyAt = text.indexOf("setAuthPolicy(auth, config.dashboardPort)");
     const resolveAt = text.indexOf("resolveAuthConfig()");
     const routesAt = text.indexOf("createDashboardRoutes(config)");
-    expect(policyAt, "src/index.ts must call setAuthPolicy(auth)").toBeGreaterThan(-1);
+    expect(policyAt, "src/index.ts must call setAuthPolicy(auth, config.dashboardPort)").toBeGreaterThan(-1);
     expect(resolveAt).toBeGreaterThan(-1);
     expect(routesAt).toBeGreaterThan(-1);
     expect(policyAt).toBeGreaterThan(resolveAt);
@@ -61,16 +61,23 @@ describe("src/index.ts wiring", () => {
     expect(zones).toBeLessThan(firstRoute);
   });
 
-  test("all three middlewares are mounted only in an authenticating mode", async () => {
-    // "Off is off": with MUNINN_AUTH unset there must be no middleware at all,
-    // so all three `app.use` calls stay inside the same isAuthenticatingMode
-    // branch.
+  test("auth and zones mount only in an authenticating mode; off mounts the origin guard alone", async () => {
+    // With auth off there is no identity, so no auth or zone middleware — but
+    // the origin guard IS mounted, in its `off` shape, or any page the user
+    // visits can POST to localhost:3010. The else branch must hold exactly it,
+    // before the first `app.route`.
     const text = await readFile(INDEX, "utf8");
-    const branch = text.match(/if \(isAuthenticatingMode\(auth\.mode\)\) \{[\s\S]*?\n\}/);
-    expect(branch, "the isAuthenticatingMode branch was not found").not.toBeNull();
-    expect(branch![0]).toContain("createAuthMiddleware(auth, introspector)");
-    expect(branch![0]).toContain("createOriginMiddleware(auth.allowedOrigins, config.dashboardPort)");
-    expect(branch![0]).toContain("createZoneMiddleware(auth)");
+    const branch = text.match(/if \(isAuthenticatingMode\(auth\.mode\)\) \{[\s\S]*?\n\} else \{([\s\S]*?)\n\}/);
+    expect(branch, "the isAuthenticatingMode if/else was not found").not.toBeNull();
+    const authBranch = branch![0].slice(0, branch![0].indexOf("\n} else {"));
+    expect(authBranch).toContain("createAuthMiddleware(auth, introspector)");
+    expect(authBranch).toContain("createOriginMiddleware(auth.allowedOrigins, config.dashboardPort)");
+    expect(authBranch).toContain("createZoneMiddleware(auth)");
+    const offBranch = branch![1]!;
+    expect(offBranch).toContain(`app.use("*", createOriginMiddleware(auth.allowedOrigins, config.dashboardPort, "off"))`);
+    expect(offBranch).not.toContain("createAuthMiddleware");
+    expect(offBranch).not.toContain("createZoneMiddleware");
+    expect(text.indexOf('config.dashboardPort, "off")')).toBeLessThan(text.indexOf("app.route("));
   });
 
   test("the introspector is built ONCE and injected into both consumers", async () => {

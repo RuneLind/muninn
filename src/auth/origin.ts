@@ -1,6 +1,7 @@
 /**
- * The global origin / `Sec-Fetch-Site` check — CSRF, which loopback was
- * silently answering until PR B made muninn reachable with a credential.
+ * The global origin / `Sec-Fetch-Site` check — CSRF. Mounted in EVERY mode:
+ * an authenticating one refuses what rides the ambient session, and `off`
+ * refuses what any web page the user visits can send to `http://localhost:3010`.
  *
  * Every guard in this campaign keys on WHO the session is, which a forged
  * cross-site request satisfies by construction: the browser attaches the
@@ -41,6 +42,8 @@
  *    loopback literal at the CONFIGURED port. Anything else, including the
  *    literal `null` a sandboxed iframe sends, is refused. It is never compared
  *    against the request's own `Host` header — see `loopbackOrigins`.
+ *    **`off` adds two arms** (see `OriginPolicyMode`): any `chrome-extension:`
+ *    origin, and `Sec-Fetch-Site: same-origin`.
  * 3. No `Origin`, but a `Sec-Fetch-Site` ⇒ `same-origin` and `none` pass;
  *    `cross-site` and `same-site` are refused. This is the `<img>` case.
  * 4. Neither header ⇒ allow. A non-browser client (curl, the launchd health
@@ -152,6 +155,49 @@ export interface OriginDecisionInput {
    * Host/Origin pair while the loopback bypass supplies the pinned identity.
    */
   readonly allowedOrigins: readonly string[];
+  /** Omitted ⇒ `"authenticating"`, the stricter rule. */
+  readonly mode?: OriginPolicyMode;
+}
+
+/**
+ * `off` widens the `Origin` arm by two, both so that an unconfigured instance
+ * keeps working:
+ *
+ * - **any `chrome-extension:` origin.** The four extensions in `extensions/`
+ *   carry no manifest `key`, so their ids differ per install and cannot be
+ *   listed. Admitting the scheme costs nothing: an extension holding
+ *   `host_permissions` for this host bypasses CORS and could send the request
+ *   anyway, and a web page cannot forge the scheme.
+ * - **`Sec-Fetch-Site: same-origin`**, for the dashboard served through
+ *   `tailscale serve` (`Origin: https://<tailnet-name>`, unknown to muninn) or
+ *   on a LAN address. This admits DNS rebinding — accepted, because `off` has
+ *   no `Host` allowlist, so a rebound name already reads and writes
+ *   everything. The guard targets drive-by cross-site pages, not rebinding.
+ *
+ * An authenticating mode keeps neither: there, both are an identity question.
+ */
+export type OriginPolicyMode = "authenticating" | "off";
+
+/**
+ * The origin predicate `off` mode shares with `cors.ts`: on the accepted set
+ * (allowlist + loopback) or a `chrome-extension:` origin. Deliberately WITHOUT
+ * the same-origin arm — CORS only ever answers a cross-origin reader, so a
+ * `same-origin` request never needs the header.
+ */
+export function offModeOriginAccepted(origin: string, accepted: readonly string[]): boolean {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return false;
+  return accepted.includes(normalized) || normalized.startsWith("chrome-extension://");
+}
+
+/** The configured accepted set — the allowlist plus the loopback literals at
+ *  `dashboardPort` (none when the port is unknown), normalised the one way. */
+export function acceptedOrigins(allowedOrigins: readonly string[], dashboardPort: number | null): string[] {
+  const loopback = dashboardPort === null ? [] : loopbackOrigins(dashboardPort);
+  return [
+    ...allowedOrigins,
+    ...loopback.map((o) => normalizeOrigin(o)).filter((o): o is string => o !== null),
+  ];
 }
 
 export interface OriginDecision {
@@ -170,8 +216,9 @@ export interface OriginDecision {
  * unlike a `Host` comparison, there is no name here an attacker can own.
  *
  * A proxied origin (the tailnet name `tailscale serve` publishes) is NOT
- * derivable this way and must be listed in `MUNINN_ALLOWED_ORIGINS`, which is
- * already a boot requirement in an authenticating mode. Note the scheme matters
+ * derivable this way. In an authenticating mode it must be listed in
+ * `MUNINN_ALLOWED_ORIGINS` (a boot requirement there); `off` admits it through
+ * its `Sec-Fetch-Site: same-origin` arm instead. Note the scheme matters
  * again as a result: `https://<tailnet-name>` is what the browser sends, and
  * that exact string is what belongs in the allowlist.
  */
@@ -188,18 +235,24 @@ export function decideOrigin(input: OriginDecisionInput): OriginDecision {
     return { allowed: true, reason: "not side-effecting" };
   }
 
+  const site = input.secFetchSite?.trim().toLowerCase();
   const origin = input.origin?.trim();
   if (origin) {
     const normalized = normalizeOrigin(origin);
     if (normalized && input.allowedOrigins.includes(normalized)) {
       return { allowed: true, reason: "allowlisted origin" };
     }
+    if (input.mode === "off") {
+      if (offModeOriginAccepted(origin, input.allowedOrigins)) {
+        return { allowed: true, reason: "extension origin" };
+      }
+      if (site === "same-origin") return { allowed: true, reason: "sec-fetch-site same-origin" };
+    }
     // `Origin: null` lands here — a sandboxed iframe or a redirected
     // cross-origin POST. It is not this instance and it is not on the list.
     return { allowed: false, reason: "origin not allowed" };
   }
 
-  const site = input.secFetchSite?.trim().toLowerCase();
   if (site && site !== "same-origin" && site !== "none") {
     return { allowed: false, reason: `sec-fetch-site ${site}` };
   }
@@ -215,26 +268,23 @@ export function __resetOriginWarningsForTest(): void {
 }
 
 /**
- * Mounted on the TOP-LEVEL app in `src/index.ts`, in an authenticating mode
- * only — after `createAuthMiddleware`, so a request with no credential is
- * answered 401 by identity rather than 403 by origin.
- *
- * Not mounted with auth off: there is no ambient session to ride, every guard
- * is a no-op, and adding a refusal there would change today's muninn for no
- * gain — the "off is off" rule this whole campaign is written to.
+ * Mounted on the TOP-LEVEL app in `src/index.ts`, before any route. In an
+ * authenticating mode it goes after `createAuthMiddleware`, so a request with
+ * no credential is answered 401 by identity rather than 403 by origin. With
+ * auth off it is mounted with `mode: "off"` — there is no session to ride, but
+ * any page the user visits can still spend model turns and write state on
+ * `localhost:3010`.
  */
 export function createOriginMiddleware(
   allowedOrigins: readonly string[],
   dashboardPort: number,
+  mode: OriginPolicyMode = "authenticating",
 ): MiddlewareHandler {
   // Computed once: the set is a property of the configuration, never of a
   // request. Normalised through the same `normalizeOrigin` the allowlist parser
   // uses, so a configured origin and an incoming header can never be compared
   // in two different shapes.
-  const accepted = [
-    ...allowedOrigins,
-    ...loopbackOrigins(dashboardPort).map((o) => normalizeOrigin(o)).filter((o): o is string => o !== null),
-  ];
+  const accepted = acceptedOrigins(allowedOrigins, dashboardPort);
   return async (c: Context, next) => {
     const decision = decideOrigin({
       method: c.req.method,
@@ -242,6 +292,7 @@ export function createOriginMiddleware(
       origin: c.req.header("origin"),
       secFetchSite: c.req.header("sec-fetch-site"),
       allowedOrigins: accepted,
+      mode,
     });
     if (decision.allowed) return next();
 

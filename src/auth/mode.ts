@@ -1,8 +1,8 @@
 /**
  * The `MUNINN_AUTH` switch, and every boot refusal that hangs off it.
  *
- * Three modes: `off` (today's muninn, byte for byte — no middleware is even
- * mounted), `local` (one pinned identity behind a shared secret) and `entra`
+ * Three modes: `off` (no identity: the only middleware mounted is the origin
+ * guard in its `off` shape, `src/auth/origin.ts`), `local` (one pinned identity behind a shared secret) and `entra`
  * (the NAV path: a Texas token introspection per credential, a `users` row
  * provisioned from the claims — see `AUTH_ZONES_IMPLEMENTED`, now `true`).
  *
@@ -96,9 +96,9 @@ export interface AuthConfig {
   /** Trimmed, lowercased, de-duplicated. Empty is a boot refusal in any
    *  authenticating mode while the env allowlist is the role source. */
   readonly adminIdents: readonly string[];
-  /** Normalised origins for PR C's origin/CSRF check and PR D's WebSocket
-   *  upgrade check. Parsed and boot-asserted HERE; NOT yet enforced anywhere —
-   *  see the note in `allowedOriginsFromEnv`. */
+  /** Normalised origins for the origin/CSRF check, the CORS echo and the
+   *  WebSocket upgrade check. A non-empty list is a boot requirement in an
+   *  authenticating mode; with auth off it is optional. */
   readonly allowedOrigins: readonly string[];
   /** Present exactly when `mode === "local"`. */
   readonly local: LocalAuthConfig | null;
@@ -195,11 +195,12 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
   }
 
   if (!isAuthenticatingMode(mode)) {
-    // Parsed only when a mode reads them. Running the parsers unconditionally
-    // made an auth-OFF instance log `MUNINN_ALLOWED_ORIGINS contains "*"` at
-    // every boot from a stale `.env` line — a warning about a variable nothing
-    // in that mode consults, i.e. exactly the "nothing changes" claim breaking.
-    return { mode, adminIdents: [], allowedOrigins: [], local: null, entra: null, localRole: "user" };
+    // `MUNINN_ADMIN_IDENTS` is parsed only when a mode reads it. The origin
+    // allowlist IS read with auth off — optional there, an extra accepted
+    // origin for the off-mode origin guard and CORS echo (`src/auth/origin.ts`)
+    // — so it is parsed, and a stale `*` in it warns, but an empty one never
+    // refuses the boot.
+    return { mode, adminIdents: [], allowedOrigins: allowedOriginsFromEnv(env), local: null, entra: null, localRole: "user" };
   }
 
   const adminIdents = adminIdentsFromEnv(env);

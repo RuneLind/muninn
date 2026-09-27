@@ -33,19 +33,23 @@ interface Policy {
    *  authenticating/off split: `src/auth/audit.ts`, whose rows are gated to
    *  `entra` because on a `local` instance every one is self-audit. */
   readonly mode: AuthMode;
+  /** The configured `DASHBOARD_PORT`, for the loopback half of `off` mode's
+   *  CORS echo. Null until `setAuthPolicy` runs, which echoes no loopback. */
+  readonly dashboardPort: number | null;
 }
 
-const OFF: Policy = { authenticating: false, allowedOrigins: [], pinnedUserId: null, mode: "off" };
+const OFF: Policy = { authenticating: false, allowedOrigins: [], pinnedUserId: null, mode: "off", dashboardPort: null };
 
 let current: Policy = OFF;
 
 /** Called once from `src/index.ts`, immediately after `resolveAuthConfig()`. */
-export function setAuthPolicy(config: AuthConfig): void {
+export function setAuthPolicy(config: AuthConfig, dashboardPort: number | null = null): void {
   current = {
     authenticating: isAuthenticatingMode(config.mode),
     allowedOrigins: config.allowedOrigins,
     pinnedUserId: config.local?.userId ?? null,
     mode: config.mode,
+    dashboardPort,
   };
 }
 
@@ -66,6 +70,10 @@ export function isAuthenticatingInstance(): boolean {
 
 export function policyAllowedOrigins(): readonly string[] {
   return current.allowedOrigins;
+}
+
+export function policyDashboardPort(): number | null {
+  return current.dashboardPort;
 }
 
 /**

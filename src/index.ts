@@ -83,7 +83,7 @@ try {
 // default is `off` and a later call would leave a window in which a wildcard
 // CORS header and a cross-user shared-memory read are both still live.
 // `src/auth/wiring.test.ts` pins this call site.
-setAuthPolicy(auth);
+setAuthPolicy(auth, config.dashboardPort);
 
 // Backstop for promise rejections that escape a fire-and-forget path (e.g. a
 // throw inside an extraction `onResult` callback). Bun would otherwise log and
@@ -253,8 +253,8 @@ try {
 const dashboard = createDashboardRoutes(config);
 const app = new Hono();
 // Registered BEFORE any route: Hono matches handlers in registration order, so
-// a `use` added after `route` would never run for those routes. Mounted only in
-// an authenticating mode — with auth off there is no middleware to run.
+// a `use` added after `route` would never run for those routes. With auth off
+// only the origin guard runs, in its `off` shape (`src/auth/origin.ts`).
 // ONE introspector per process, shared by the HTTP middleware and the WebSocket
 // upgrade below. Not a tidiness choice: in `entra` mode it holds the Texas
 // introspection cache AND is the DB-provisioning path, so a second instance
@@ -267,9 +267,7 @@ if (isAuthenticatingMode(auth.mode)) {
   app.use("*", createAuthMiddleware(auth, introspector));
   // AFTER the auth middleware, so a request with no credential is answered 401
   // by identity rather than 403 by origin — a scripted client must be able to
-  // tell "you are not logged in" from "your origin is refused". Not mounted
-  // with auth off: there is no ambient session to ride there, so the refusal
-  // would change today's muninn to close nothing.
+  // tell "you are not logged in" from "your origin is refused".
   app.use("*", createOriginMiddleware(auth.allowedOrigins, config.dashboardPort));
   // LAST of the three, and on the TOP-LEVEL app: it decides ROLE, so it must
   // run after identity exists (or every request is 403 before it can be 401)
@@ -277,6 +275,11 @@ if (isAuthenticatingMode(auth.mode)) {
   // rather than refused). Mounting it inside `createDashboardRoutes` would
   // leave the `/chat` sub-app — the second `app.route` below — uncovered.
   app.use("*", createZoneMiddleware(auth));
+} else {
+  // No session to ride, but any page the user visits can POST to
+  // `localhost:3010` and spend model turns or write state. The `off` shape
+  // admits the unpinned Chrome extensions and same-origin pages unconfigured.
+  app.use("*", createOriginMiddleware(auth.allowedOrigins, config.dashboardPort, "off"));
 }
 app.route("/", dashboard);
 

@@ -192,6 +192,10 @@ export const E2E_PORTS = {
   // Not bound: the spec points `KNOWLEDGE_API_URL` here so no backlog GET
   // reaches a live huginn.
   "gardener-backlog-error/dead-huginn": 8796,
+  // `MUNINN_AUTH=off`'s origin guard, driven by the real YouTube extension
+  // loaded unpacked, plus a stub on a second port serving the cross-site page.
+  "extension-origin": 3079,
+  "extension-origin/page": 3080,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

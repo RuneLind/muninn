@@ -91,8 +91,8 @@ export function __resetWsWarningsForTest(): void {
 /**
  * Build the upgrade authorizer once, at boot.
  *
- * With auth **off** it is a constant `ok` — no middleware is mounted on the HTTP
- * side either, and "off is off" is the rule this whole campaign is written to.
+ * With auth **off** it is a constant `ok` — there is no identity to resolve, and
+ * the HTTP side's `off`-shape origin guard does not reach the upgrade.
  * The returned function is still called, so the wiring is exercised on every
  * instance rather than only on the one that authenticates.
  *
