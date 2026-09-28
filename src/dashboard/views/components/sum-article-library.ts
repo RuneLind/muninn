@@ -5,9 +5,9 @@
  * filter — see sum-shelf.ts). It remains the home of the shared doc helpers
  * (getSummaryDocuments, docTitle, docCategory, matchesDomain, renderDomainFilter,
  * sourceBadge, sourceLink, openSummaryDoc) and the 3-column doc panel (article
- * text · category sidebar · similar), which the Shelf + candidate rows open into.
- * `loadLibrary` survives only to build `docsByCategory`, which the doc panel's
- * category sidebar (renderArticleCategories) reads; its old chip/grid DOM writes
+ * text · Latest rail · similar), which the Shelf + candidate rows open into.
+ * `loadLibrary` survives only to build `docsByCategory`, which the rail's
+ * "By category" view (renderArticleCategories) reads; its old chip/grid DOM writes
  * are guarded no-ops now that the visible section is gone. Source-agnostic:
  * categories are computed from the merged /api/summaries/documents listing, and
  * each doc carries its `source` so opens/similar/original-link route to the right
@@ -221,8 +221,13 @@ export function sumArticleLibraryStyles(): string {
 
     /* Collapse to a single column on narrow viewports */
     @media (max-width: 1000px) {
-      .doc-panel-body { grid-template-columns: 1fr; }
-      .sum-col-left, .sum-col-right { position: static; max-height: none; }
+      /* align-content: auto rows otherwise stretch to the panel height, which
+         opened a gap above the article once the rail collapsed to one row. */
+      .doc-panel-body { grid-template-columns: 1fr; align-content: start; }
+      /* overflow: visible too — a scroll container contributes no min-content
+         height, so its grid row shrank and the opened rail overlapped the
+         article (measured: 458px row, 672px rail). The panel body scrolls. */
+      .sum-col-left, .sum-col-right { position: static; max-height: none; overflow: visible; }
     }
 
     .doc-similar { padding: 0; margin: 0; }
@@ -328,8 +333,9 @@ export function sumArticleLibraryScript(): string {
           if (typeof activeSource !== 'undefined') activeSource = null;
           if (typeof activeShelfCategory !== 'undefined') activeShelfCategory = null;
           renderDomainFilter();
-          loadLibrary();  // rebuild docsByCategory (doc-panel sidebar) for the new domain
+          loadLibrary();  // rebuild docsByCategory (the rail's By category view) for the new domain
           if (typeof loadShelf === 'function') loadShelf();
+          if (typeof refreshLatestRail === 'function') refreshLatestRail();
         });
       });
     }
@@ -356,11 +362,13 @@ export function sumArticleLibraryScript(): string {
     }
 
     // Single shared fetch of the merged document archive, used by the library,
-    // the Recently Added list, and the doc panel's category sidebar. Memoized so
-    // one page load doesn't pull the (date-enriched, read-every-file) listing
-    // more than once; throws on an upstream error so callers show a failure
-    // instead of a misleading empty state. Pass force=true to refresh after an
-    // ingest completes.
+    // the Shelf, and the doc panel's Latest rail. Memoized so one page load
+    // doesn't pull the (date-enriched, read-every-file) listing more than once;
+    // throws on an upstream error so callers show a failure instead of a
+    // misleading empty state. Pass force=true to refresh after an ingest
+    // completes or a delete lands — a forced refresh also rebuilds the Latest
+    // rail (onSummaryListingRefreshed, sum-latest-rail.ts), synchronously, so a
+    // caller awaiting the refresh sees the rebuilt rail.
     var _sumDocsPromise = null;
     function getSummaryDocuments(force) {
       if (force || !_sumDocsPromise) {
@@ -369,7 +377,11 @@ export function sumArticleLibraryScript(): string {
           return res.json();
         }).then(function(data) {
           if (data && data.error) throw new Error(data.error);
-          return (data && data.documents) || [];
+          var docs = (data && data.documents) || [];
+          if (force && typeof onSummaryListingRefreshed === 'function') {
+            try { onSummaryListingRefreshed(docs); } catch (e) { console.error('rail rebuild failed:', e); }
+          }
+          return docs;
         }).catch(function(err) {
           _sumDocsPromise = null;  // don't cache a failure — allow retry
           throw err;
@@ -1342,22 +1354,29 @@ export function sumArticleLibraryScript(): string {
         ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>'
         : '';
 
-      // 3-column article view: categories (left) | text (middle) | similar (right)
-      bodyEl.innerHTML =
-        '<div class="sum-col-left" id="sumCatPanel"></div>' +
-        '<div class="sum-col-main" id="sumArticleMain">' +
-          '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading...</div>' +
-        '</div>' +
-        '<div class="sum-col-right doc-similar" id="docSimilarPanel">' +
-          '<h4>Similar Articles</h4>' +
-          '<div style="color:var(--text-dim);font-size:12px;">Searching...</div>' +
-        '</div>';
+      // 3-column article view: Latest rail (left) | text (middle) | similar
+      // (right). The scaffold is built ONCE: the rail column survives every
+      // later open, which rewrites only the middle and right columns.
+      if (!document.getElementById('sumArticleMain')) {
+        bodyEl.innerHTML =
+          (typeof railScaffoldHtml === 'function'
+            ? railScaffoldHtml()
+            : '<div class="sum-col-left" id="sumCatPanel"></div>') +
+          '<div class="sum-col-main" id="sumArticleMain"></div>' +
+          '<div class="sum-col-right doc-similar" id="docSimilarPanel"></div>';
+      }
+      document.getElementById('sumArticleMain').innerHTML =
+        '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading...</div>';
+      document.getElementById('docSimilarPanel').innerHTML =
+        '<h4>Similar Articles</h4>' +
+        '<div style="color:var(--text-dim);font-size:12px;">Searching...</div>';
       overlay.classList.add('visible');
       document.body.style.overflow = 'hidden';
       bodyEl.scrollTop = 0;
 
-      // Left panel: browse categories without leaving the article
-      renderArticleCategories(cat, docId, myRequest);
+      // Left column: move .current in the Latest rail (built on first open).
+      if (typeof railOnOpen === 'function') railOnOpen(docId, source);
+      else renderArticleCategories(cat, docId, myRequest);
 
       try {
         var encodedId = docId.split('/').map(encodeURIComponent).join('/');
@@ -1412,8 +1431,8 @@ export function sumArticleLibraryScript(): string {
       }
     }
 
-    // Left sidebar: every category sorted by recency (most-recent article first),
-    // with the active category auto-expanded. Clicking a row selects it and is
+    // The rail's "By category" view: every category sorted by recency
+    // (most-recent article first), with the active category auto-expanded. Clicking a row selects it and is
     // single-expand — opens this category's article list and collapses every
     // other — so you can keep picking sibling articles under the selected
     // category. Reuses docsByCategory built by loadLibrary() — if the page

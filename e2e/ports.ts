@@ -207,6 +207,9 @@ export const E2E_PORTS = {
   // The Shelf's 10-newest window and its Show more / Show all footer.
   "summaries-shelf-paging": 3084,
   "summaries-shelf-paging/huginn": 3085,
+  // The doc panel's reader: the Latest rail (and, later, the header and cards).
+  "summaries-reader": 3086,
+  "summaries-reader/huginn": 3087,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
