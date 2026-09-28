@@ -392,6 +392,11 @@ test.describe("Wiki: retired pages", () => {
     await expect(toggle(page)).toBeChecked();
     await expect(row(page, OLD)).toBeVisible();
     await expect(page.locator("#wikiList .wiki-retired-reveal")).toHaveCount(0);
+    // A search already reaches retired pages, so an empty result offers none.
+    await toggle(page).uncheck();
+    await page.fill("#wikiSearch", "zzzz-no-such-page");
+    await expect(page.locator("#wikiList")).toContainText("No pages match.");
+    await expect(page.locator("#wikiList .wiki-retired-reveal")).toHaveCount(0);
     // The wiki's own words.
     await openRail(page, WIKI_NO);
     await expect(page.locator('#wikiFolder option[value="archive"]')).toHaveText("archive 0");
