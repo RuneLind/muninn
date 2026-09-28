@@ -95,6 +95,62 @@ export interface AtlasDeps {
   openPage(relPath: string, name: string): void;
   /** Canonical wiki name — the draft-synthesis POST body + the gate deep-link. "" = default/env. */
   wiki: string;
+  /** The retired pages, read at every build so a `Show retired` flip is seen.
+   *  Absent ⇒ the payload renders as served. */
+  cull?: () => AtlasCull;
+}
+
+/** What the reader tells the Atlas about retired (culled) pages. */
+export interface AtlasCull {
+  /** Normalized relPaths of every culled page — the payload's node keys. */
+  culled: ReadonlySet<string>;
+  /** Lowercased names of culled concepts with no live namesake — the topics
+   *  row is keyed by concept NAME, not relPath. */
+  culledTopicNames: ReadonlySet<string>;
+  /** True while the rail hides them: the Atlas then drops them too. */
+  hide: boolean;
+  /** The wiki's marker word, on a culled node's hover when they are shown. */
+  marker: string;
+}
+
+/**
+ * The payload restricted to the rail's pool: culled nodes out, the links and
+ * month buckets that named them pruned, a month or type column left empty
+ * dropped, and a culled concept's topic dropped. The server's caps are not
+ * re-run, so a capped column shows fewer than its cap rather than refilling.
+ * Curated trails stay as authored.
+ */
+export function atlasPoolView(
+  data: AtlasPayload,
+  culled: ReadonlySet<string>,
+  culledTopicNames: ReadonlySet<string>,
+): AtlasPayload {
+  const nodes: Record<string, AtlasNode> = {};
+  for (const [k, n] of Object.entries(data.nodes)) {
+    if (culled.has(k)) continue;
+    nodes[k] = { ...n, links: n.links.filter((l) => !culled.has(l)) };
+  }
+  const keepIdx: number[] = [];
+  const monthKeys: string[] = [];
+  const months: Record<string, string[]> = {};
+  data.monthKeys.forEach((mk, i) => {
+    const list = (data.months[mk] ?? []).filter((k) => !culled.has(k));
+    if (!list.length && !(data.omitted.byMonth[mk] ?? 0)) return;
+    keepIdx.push(i);
+    monthKeys.push(mk);
+    months[mk] = list;
+  });
+  const present = new Set(Object.values(nodes).map((n) => n.t));
+  return {
+    ...data,
+    types: data.types.filter((t) => present.has(t.key) || (data.omitted.byType[t.key] ?? 0) > 0),
+    nodes,
+    monthKeys,
+    months,
+    topics: data.topics
+      .filter((tp) => !culledTopicNames.has(tp.name.toLowerCase()))
+      .map((tp) => ({ ...tp, perMonth: keepIdx.map((i) => tp.perMonth[i] ?? 0) })),
+  };
 }
 
 type Selection =
@@ -132,6 +188,10 @@ let clustersNow: RailCluster[] = [];
 /** Selected cluster id (rail click) — dims non-members in the active projection.
  *  Mutually exclusive with `selection` and `dimSlot`. */
 let clusterSel: string | null = null;
+/** Culled node keys shown on the canvas (the toggle is on), and the marker
+ *  their hover carries. Empty when they are hidden or the reader said nothing. */
+let culledShown: ReadonlySet<string> = new Set();
+let cullMarker = "";
 
 /** Container markup for #startBody when the Atlas tab is active. */
 export function atlasBodyHtml(): string {
@@ -172,7 +232,11 @@ function monthLabel(mk: string): string {
     : d.toLocaleDateString("en", { month: "short", year: "2-digit" });
 }
 
-function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): void {
+function buildAtlas(root: HTMLElement, served: AtlasPayload, deps: AtlasDeps): void {
+  const cull = deps.cull?.();
+  const data = cull?.hide ? atlasPoolView(served, cull.culled, cull.culledTopicNames) : served;
+  culledShown = cull && !cull.hide ? cull.culled : new Set();
+  cullMarker = cull?.marker ?? "";
   const nodes = data.nodes;
   const keys = Object.keys(nodes);
   const hasTypes = data.types.length > 0 && keys.length > 0;
@@ -914,8 +978,10 @@ export function nodeHtml(key: string, n: AtlasNode, dataT: string): string {
   // column tell the reader nothing. `atlasLabel` is the one spelling, shared with
   // the step panel and the cluster rail.
   const label = atlasLabel(n);
+  const culled = culledShown.has(key);
+  const title = culled && cullMarker ? `${label} — ${cullMarker}` : label;
   return (
-    `<div class="wiki-atlas-node" data-t="${esc(dataT)}"${slotCls} data-key="${esc(key)}" title="${esc(label)}">` +
+    `<div class="wiki-atlas-node${culled ? " culled" : ""}" data-t="${esc(dataT)}"${slotCls} data-key="${esc(key)}" title="${esc(title)}">` +
     '<span class="wiki-atlas-badge"></span>' +
     dot +
     `<b>${esc(label)}</b>` +

@@ -278,6 +278,13 @@ export async function renderWikiPage(opts?: {
     /* A retired row the toggle (or a search) put on screen: italic, never a
        seventh flex item — the marker word rides the row's hover. */
     .wiki-list-item.culled .wiki-list-title { font-style: italic; }
+    /* The reveal control an empty rail or Hubs tab offers when only retired
+       pages would fill it — the toggle's own words, as a link-styled button. */
+    .wiki-retired-reveal {
+      display: block; margin: 4px 8px 0; padding: 0; border: 0; background: none; font-size: 12px;
+      color: var(--text-primary); font-family: inherit; text-decoration: underline; cursor: pointer;
+    }
+    .wiki-hub-card.culled .wiki-hub-title, .wiki-atlas-node.culled b { font-style: italic; }
 
     .wiki-gardener-badge {
       background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 600;
@@ -2547,9 +2554,10 @@ export async function renderWikiPage(opts?: {
             <input type="checkbox" id="wikiGroupFamilies">group families
           </label>
           <!-- Retired (culled) pages, per wiki: hidden until checked. Hidden
-               outright on a wiki with none; the label and its count are painted
-               by the client from the wiki's cullLabels. -->
-          <label class="wiki-retired-toggle" id="wikiRetiredToggle" hidden title="Show pages marked signal: none">
+               while the facets select none (unless checked); the label and its
+               count are painted by the client from the wiki's cullLabels, so it
+               carries no English hover of its own. -->
+          <label class="wiki-retired-toggle" id="wikiRetiredToggle" hidden>
             <input type="checkbox" id="wikiShowRetired"><span id="wikiRetiredLabel"></span>
           </label>
         </div>

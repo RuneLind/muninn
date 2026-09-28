@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { shellHtml, nodeHtml } from "./wiki-atlas.ts";
+import { atlasPoolView, shellHtml, nodeHtml } from "./wiki-atlas.ts";
 
 /**
  * The Atlas tab has no browser test env (no jsdom/happy-dom — the interactive DOM
@@ -72,5 +72,48 @@ describe("wiki-atlas no-overlay byte-identity", () => {
     expect(html).toContain('title="muninn/architecture"');
     // A node with no displayTitle is byte-identical to before.
     expect(nodeHtml("a.md", baseData.nodes["a.md"]!, "source")).toContain("<b>A</b>");
+  });
+});
+
+describe("atlasPoolView — the Atlas restricted to the rail's pool (retired pages hidden)", () => {
+  const data = {
+    types: [
+      { key: "source", label: "Sources" },
+      { key: "concept", label: "Concepts" },
+      { key: "analysis", label: "Analyses" },
+    ],
+    nodes: {
+      "s/live.md": { name: "live", t: "source", hub: false, in: 2, tags: [], links: ["c/old.md", "c/new.md"] },
+      "c/old.md": { name: "Old", t: "concept", hub: false, in: 1, tags: [], links: [] },
+      "c/new.md": { name: "New", t: "concept", hub: false, in: 1, tags: [], links: [] },
+      "a/gone.md": { name: "gone", t: "analysis", hub: false, in: 0, tags: [], links: [] },
+    },
+    monthKeys: ["2026-01", "2026-02", "2026-03"],
+    months: { "2026-01": ["s/live.md"], "2026-02": ["a/gone.md"], "2026-03": ["c/new.md", "c/old.md"] },
+    topics: [
+      { name: "Old", count: 1, perMonth: [1, 0, 0] },
+      { name: "New", count: 2, perMonth: [1, 0, 1] },
+    ],
+    trails: [],
+    omitted: { byType: {}, byMonth: {} },
+  } as unknown as Parameters<typeof atlasPoolView>[0];
+  const view = atlasPoolView(data, new Set(["c/old.md", "a/gone.md"]), new Set(["old"]));
+
+  test("culled nodes, and the links and month slots that named them, are gone", () => {
+    expect(Object.keys(view.nodes).sort()).toEqual(["c/new.md", "s/live.md"]);
+    expect(view.nodes["s/live.md"]!.links).toEqual(["c/new.md"]);
+    expect(view.months["2026-03"]).toEqual(["c/new.md"]);
+  });
+
+  test("a month or type column left empty is dropped, and topic sparklines stay aligned", () => {
+    expect(view.monthKeys).toEqual(["2026-01", "2026-03"]);
+    expect(view.types.map((t) => t.key)).toEqual(["source", "concept"]);
+    expect(view.topics.map((t) => t.name)).toEqual(["New"]);
+    expect(view.topics[0]!.perMonth).toEqual([1, 1]);
+  });
+
+  test("the served payload is not mutated", () => {
+    expect(Object.keys(data.nodes)).toHaveLength(4);
+    expect(data.nodes["s/live.md"]!.links).toHaveLength(2);
   });
 });

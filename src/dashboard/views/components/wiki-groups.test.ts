@@ -33,6 +33,7 @@ import {
   orderPagesForGroups,
   railGroups,
   seriesClaimedKeys,
+  seriesContinuePlan,
   seriesDateMs,
   seriesDateSignal,
   seriesFoldKey,
@@ -1184,6 +1185,34 @@ describe("newestSeriesPlan — a terminal status is not a plan to continue in (f
     ];
     expect(newestSeriesPlan(pages)).toBeUndefined();
     expect(groupSeries(pages)[0]!.latestRel).toBeUndefined();
+  });
+});
+
+describe("seriesContinuePlan — the display pointer skips a culled plan (M2 fix round 1)", () => {
+  // alpha-3 is the newest in-flight plan but retired: the rail hides it, so the
+  // `▸` and `continue at:` must name live alpha-2 instead.
+  const pages = [
+    member("plans/alpha-1.mdx", { series: "alpha", plan_status: "shipped", status_date: "2026-01-01" }),
+    member("plans/alpha-2.mdx", { series: "alpha", plan_status: "in-flight", status_date: "2026-02-01" }),
+    member("plans/alpha-3.mdx", { series: "alpha", plan_status: "in-flight", status_date: "2026-03-01", culled: true }),
+  ];
+
+  test("the newest LIVE plan, not the culled one", () => {
+    expect(seriesContinuePlan(pages)!.relPath).toBe("plans/alpha-2.mdx");
+    expect(groupSeries(pages)[0]!.latestRel).toBe("plans/alpha-2.mdx");
+    expect(seriesMembersOf(pages, "alpha").latest!.relPath).toBe("plans/alpha-2.mdx");
+  });
+
+  test("the census rule is untouched: newestSeriesPlan and the head still count the culled plan", () => {
+    expect(newestSeriesPlan(pages)!.relPath).toBe("plans/alpha-3.mdx");
+    expect(seriesHead(pages)!.relPath).toBe("plans/alpha-3.mdx");
+    expect(groupSeries(pages)[0]!.total).toBe(3);
+  });
+
+  test("no live plan left ⇒ no pointer", () => {
+    const allCulled = pages.map((p) => ({ ...p, culled: true }));
+    expect(seriesContinuePlan(allCulled)).toBeUndefined();
+    expect(groupSeries(allCulled)[0]!.latestRel).toBeUndefined();
   });
 });
 

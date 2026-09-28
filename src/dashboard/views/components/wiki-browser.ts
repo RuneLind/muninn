@@ -130,11 +130,11 @@ import {
   groupRollup,
   groupSeries,
   isMonthGrouping,
-  newestSeriesPlan,
   orderPagesForGroups,
   orderSeriesGroups,
   railGroups,
   clipSeriesTitle,
+  seriesContinuePlan,
   seriesKeyOf,
   seriesMembersOf,
   seriesStripOrder,
@@ -159,7 +159,7 @@ import {
   togglePinned,
   writeSort,
 } from "./wiki-recents-store.ts";
-import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
+import { atlasBodyHtml, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
@@ -348,10 +348,13 @@ import {
   CULL_GO_ATTR,
   cullBannerHtml,
   cullLabels,
+  cullMarkHtml,
   cullToggleText,
   miniNodeHtml,
   railPool,
+  RETIRED_REVEAL_ATTR,
   RETIRED_TOGGLE_KEY,
+  retiredRevealHtml,
   setCullLabels,
 } from "./wiki-cull-view.ts";
 import { provenanceStripCertain, type ProvenancePayload } from "../../../wiki/provenance.ts";
@@ -851,11 +854,15 @@ function renderFolderSelect(): void {
   const row = document.getElementById("wikiFolderRow");
   if (!sel || !row) return;
   const counts = folderCounts(railPages(), filters.domain);
+  // A folder whose pages are all retired stays listed, at its pool count (0):
+  // the folder view still reaches it, and picking it shows the rail's reveal
+  // control rather than dropping the folder from the picker.
+  const withRetired = Object.keys(folderCounts(allPages, filters.domain));
   // Sorted (and shown) by LABEL: on a wiki whose folder names are opaque — the
   // `memory` wiki's mangled `-Users-rune-source-private-muninn` project dirs — the
   // raw name is neither readable nor a useful sort key. The option VALUE stays the
   // raw folder, so every filter path is untouched.
-  const folders = facetKeys(counts, filters.folder).sort((a, b) => {
+  const folders = [...new Set([...facetKeys(counts, filters.folder), ...withRetired])].sort((a, b) => {
     if (a === ROOT_FOLDER) return 1; // root pages last — they're the odd ones out
     if (b === ROOT_FOLDER) return -1;
     return folderLabelOf(a, folderLabels).localeCompare(folderLabelOf(b, folderLabels));
@@ -1238,21 +1245,49 @@ function railPages(): WikiListing[] {
   return railPool(allPages, showRetired(), "");
 }
 
+/** The retired pages the current facets select, the query aside — the toggle's
+ *  N, and what the empty rail and the `#wikiCount` hover say is held back. */
+function retiredUnderFacets(): number {
+  return filterPages(
+    allPages.filter((p) => p.culled),
+    { ...filters, q: "" },
+  ).length;
+}
+
+/** How many retired pages the rail is holding back right now: 0 while they are
+ *  shown or a search (which reaches them) is typed. */
+function retiredHeldBack(): number {
+  return showRetired() || filters.q.trim() ? 0 : retiredUnderFacets();
+}
+
 /**
- * Paint the `Show retired (N)` toggle: hidden on a wiki with no retired page,
- * else N is the retired pages the current facets select (the query aside — a
- * search already shows them), so the number says what one click adds.
+ * Paint the `Show retired (N)` toggle. N is the retired pages the current
+ * facets select (the query aside — a search already shows them), so the number
+ * says what one click adds. Hidden on a wiki with no retired page, and while
+ * the facets select none — unless it is checked, the only way back out of it.
  */
 function paintRetiredToggle(): void {
   const wrap = document.getElementById("wikiRetiredToggle");
   const box = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
   const label = document.getElementById("wikiRetiredLabel");
   if (!wrap || !box || !label) return;
-  const culled = allPages.filter((p) => p.culled);
-  wrap.hidden = culled.length === 0;
-  const n = filterPages(culled, { ...filters, q: "" }).length;
-  label.textContent = cullToggleText(n);
+  const n = retiredUnderFacets();
   box.checked = showRetired();
+  wrap.hidden = !allPages.some((p) => p.culled) || (n === 0 && !box.checked);
+  label.textContent = cullToggleText(n);
+}
+
+/** Turn `Show retired` on — the toggle itself, or a reveal control on an empty
+ *  surface. A flip changes the pool every facet counts from, so the facets,
+ *  the start view (Atlas included) and the rows all repaint. */
+function setShowRetired(on: boolean): void {
+  if (showRetired() !== on) openFolds = toggleFolded(WIKI, RETIRED_TOGGLE_KEY);
+  const box = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
+  if (box) box.checked = showRetired();
+  renderPageFacets(false);
+  refreshStartStats();
+  refreshStartBody(true);
+  renderList();
 }
 
 /**
@@ -1772,7 +1807,9 @@ function renderList(): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
-  listEl.innerHTML = railListHtml(html);
+  // Retired pages held back under these facets: the empty rail offers them.
+  const heldBack = retiredHeldBack();
+  listEl.innerHTML = railListHtml(html, retiredRevealHtml(heldBack));
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
   // is shorter the browser clamps to the new maximum and re-assigning the saved
@@ -1786,11 +1823,11 @@ function renderList(): void {
   // appears both in a recall section and in the listing below is one, and a jump
   // hit the query itself would not have matched is counted.
   // The denominator is the POOL, so a hidden retired page is in neither number;
-  // the hover says how many the toggle holds back.
+  // the hover is the toggle's own text with the same facet-aware N, in the
+  // wiki's own words.
   const countEl = document.getElementById("wikiCount")!;
   countEl.textContent = rail.shown + " / " + pool.length;
-  const heldBack = allPages.length - pool.length;
-  if (heldBack) countEl.setAttribute("title", `${heldBack} hidden: ${cullToggleText(heldBack)}`);
+  if (heldBack) countEl.setAttribute("title", cullToggleText(heldBack));
   else countEl.removeAttribute("title");
   paintRetiredToggle();
 }
@@ -2520,8 +2557,8 @@ function hubGridHtml(heading: string, pages: WikiListing[]): string {
   let html = `<h2>${heading}</h2><div class="wiki-hub-grid">`;
   pages.forEach((p) => {
     html +=
-      `<div class="wiki-hub-card" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
-      `<div class="wiki-hub-title">${esc(displayTitleOf(p))}</div>` +
+      `<div class="wiki-hub-card${p.culled ? " culled" : ""}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
+      `<div class="wiki-hub-title">${esc(displayTitleOf(p))}${p.culled ? " " + cullMarkHtml() : ""}</div>` +
       `<div class="wiki-hub-sub">${p.backlinkCount} pages link here</div>` +
       `</div>`;
   });
@@ -2547,6 +2584,11 @@ function hubsHtml(): string {
   }
   const top = topPages(pages, (p) => p.backlinkCount > 0, 12);
   if (!top.length) {
+    // Linked pages that are all retired are held back, not absent: offer them
+    // rather than claim the wiki has no links.
+    if (!showRetired() && allPages.some((p) => p.culled && p.backlinkCount > 0)) {
+      return `<div class="wiki-conn-empty">${retiredRevealHtml(allPages.filter((p) => p.culled).length)}</div>`;
+    }
     return '<div class="wiki-conn-empty">No linked pages yet — this wiki has no resolvable internal links.</div>';
   }
   return hubGridHtml("Top pages by connections", top);
@@ -2555,7 +2597,8 @@ function hubsHtml(): string {
 function timelineHtml(): string {
   const groups: Record<string, { p: WikiListing; kind: "new" | "upd" }[]> = {};
   const now = recencyNow();
-  filterPages(railPages(), filters).forEach((p) => {
+  // The rows' own pool, query included: a search reaches a retired page here too.
+  filterPages(railPool(allPages, showRetired(), filters.q), filters).forEach((p) => {
     if (p.created) (groups[p.created] = groups[p.created] || []).push({ p, kind: "new" });
     if (p.updated && p.updated !== p.created) {
       (groups[p.updated] = groups[p.updated] || []).push({ p, kind: "upd" });
@@ -2630,11 +2673,45 @@ function refreshStartStats(): void {
  *  That early return is load-bearing for the background listing refresh too: an
  *  adopt must not wipe an in-progress Atlas exploration. The accepted cost is that
  *  the Atlas projection stays frozen at whatever it was built from until the next
- *  tab switch rebuilds it. */
-function refreshStartBody(): void {
-  if (startTab === "atlas") return;
+ *  tab switch rebuilds it. `rebuildAtlas` is the one exception: a `Show retired`
+ *  flip changes which nodes the Atlas may show, so it rebuilds from the cached
+ *  payload (the selection resets). */
+function refreshStartBody(rebuildAtlas = false): void {
   const el = document.getElementById("startBody");
-  if (el && currentName === null) el.innerHTML = startBodyHtml();
+  if (!el || currentName !== null) return;
+  if (startTab !== "atlas") {
+    el.innerHTML = startBodyHtml();
+  } else if (rebuildAtlas) {
+    el.innerHTML = atlasBodyHtml();
+    initAtlas(atlasDeps());
+  }
+}
+
+/** What the Atlas reads from the reader, retired pages included. Atlas passes
+ *  (relPath, name); the name is dropped — the relPath is authoritative and
+ *  drives the collision-proof history round-trip. */
+function atlasDeps(): AtlasDeps {
+  return {
+    withWiki,
+    openPage: (relPath) => loadPageByRelPath(relPath),
+    wiki: WIKI,
+    cull: () => {
+      const culled = allPages.filter((p) => p.culled);
+      const live = new Set(
+        allPages.filter((p) => !p.culled && p.type === "concept").map((p) => p.name.toLowerCase()),
+      );
+      return {
+        culled: new Set(culled.map((p) => normalizeRel(p.relPath))),
+        culledTopicNames: new Set(
+          culled
+            .filter((p) => p.type === "concept" && !live.has(p.name.toLowerCase()))
+            .map((p) => p.name.toLowerCase()),
+        ),
+        hide: !showRetired(),
+        marker: cullLabels().marker,
+      };
+    },
+  };
 }
 
 /** Atlas gets the full viewport while its tab is active on the start view —
@@ -2677,11 +2754,7 @@ function renderStart(): void {
   document.getElementById("articleWrap")!.innerHTML = html;
   setAtlasFull(startTab === "atlas");
   // The Atlas tab lazy-loads its projection into the placeholder just inserted.
-  if (startTab === "atlas") {
-    // Atlas passes (relPath, name); drop the display name — the relPath is
-    // authoritative and drives the collision-proof history round-trip.
-    initAtlas({ withWiki, openPage: (relPath) => loadPageByRelPath(relPath), wiki: WIKI });
-  }
+  if (startTab === "atlas") initAtlas(atlasDeps());
   document.getElementById("connBody")!.innerHTML =
     '<div class="wiki-conn-empty">Select a page to see its connections.</div>';
   // Re-attach the "what's new" and index-coverage cards: cached render reused on
@@ -3004,7 +3077,9 @@ function seriesStripHtml(m: WikiListing): string {
   // over a timeline the reader's own page was absent from.
   if (!members.some((p) => normalizeRel(p.relPath) === openKey)) return "";
   const label = head?.seriesLabel || (head ? seriesKeyOf(head) : key);
-  const continueAt = newestSeriesPlan(
+  // The DISPLAY pointer (`seriesContinuePlan`): a retired plan is hidden from
+  // the rail, so the strip never sends the reader to one.
+  const continueAt = seriesContinuePlan(
     members.filter((p) => normalizeRel(p.relPath) !== openKey),
   );
   // `members` is newest first, the fold's own order; the story reads the other
@@ -3045,7 +3120,7 @@ function seriesStripHtml(m: WikiListing): string {
       return (
         `<div class="wiki-series-step${isOpen ? " current" : shipped ? " shipped" : ""}">` +
         `<div class="wiki-series-step-date">${esc(workedDateSignal(p, now).day)}</div>` +
-        `<div class="wiki-series-step-title">${esc(displayTitleOf(p))}</div>` +
+        `<div class="wiki-series-step-title">${esc(displayTitleOf(p))}${p.culled ? " " + cullMarkHtml() : ""}</div>` +
         `<div class="wiki-series-step-kind">${esc(kind)}</div>` +
         `</div>`
       );
@@ -3498,24 +3573,13 @@ document.addEventListener("submit", (e) => {
 });
 
 /**
- * Article-head block (title, badges, tags, dates, source link) — shared by
- * markdown pages and HTML explainers.
- *
- * `provenancePending` is the SINGLE-PAGE payload's flag and is therefore
- * optional: the explainer path renders this head before its `/api/wiki/page`
- * response lands (and an HTML explainer carries no frontmatter to stamp in the
- * first place), so it passes nothing and renders no strip. A page the stamper
- * has not touched carries no `provenancePending` key at all, which is the one
- * gate — never `false`, so there is no "is it set" question to get wrong. The
- * strip rendered here is the PLACEHOLDER; `loadProvStrip` fills it once the
- * page is on screen.
- */
-/**
  * The retired banner for the open page, or "". Reads `cullReason` and
  * `supersededBy`, which only the single-page payload carries — an explainer's
  * head renders from the listing first and gets its banner when that lands
- * (`placeRetiredBanner`). The successor's title comes from the listing; a
- * successor the listing does not hold is linked by its relPath.
+ * (`placeRetiredBanner`). The server sends `supersededBy` only when the
+ * successor resolves, so no link is drawn for an unresolved one; the title
+ * comes from the listing, and the relPath stands in only when a listing older
+ * than the page payload does not hold it yet.
  */
 function retiredBannerHtml(m: WikiListing): string {
   if (!m.culled) return "";
@@ -3537,6 +3601,19 @@ function placeRetiredBanner(m: WikiListing): void {
   if (html) head.insertAdjacentHTML("afterbegin", html);
 }
 
+/**
+ * Article-head block (title, badges, tags, dates, source link) — shared by
+ * markdown pages and HTML explainers.
+ *
+ * `provenancePending` is the SINGLE-PAGE payload's flag and is therefore
+ * optional: the explainer path renders this head before its `/api/wiki/page`
+ * response lands (and an HTML explainer carries no frontmatter to stamp in the
+ * first place), so it passes nothing and renders no strip. A page the stamper
+ * has not touched carries no `provenancePending` key at all, which is the one
+ * gate — never `false`, so there is no "is it set" question to get wrong. The
+ * strip rendered here is the PLACEHOLDER; `loadProvStrip` fills it once the
+ * page is on screen.
+ */
 function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   // Explainer-style subtitle under the H1 for blog pages that declared a
   // `description` (user text → escaped into innerHTML). Non-blog pages are unchanged.
@@ -4215,6 +4292,12 @@ document.body.addEventListener("click", (e) => {
     if (rel) loadPageByRelPath(rel, true);
     return;
   }
+  // A reveal control on an empty surface (the rail, Hubs): turn the toggle on.
+  if (target.closest && target.closest(`[${RETIRED_REVEAL_ATTR}]`)) {
+    e.preventDefault();
+    setShowRetired(true);
+    return;
+  }
   // The retired banner's successor link — same shape as `continue at:`, but a
   // modified click keeps the anchor's own href (a new tab is a fair ask here).
   const cullGo = target.closest ? target.closest(`[${CULL_GO_ATTR}]`) : null;
@@ -4544,14 +4627,7 @@ if (familiesBox) {
 const retiredBox = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
 if (retiredBox) {
   retiredBox.checked = showRetired();
-  retiredBox.addEventListener("change", () => {
-    openFolds = toggleFolded(WIKI, RETIRED_TOGGLE_KEY);
-    retiredBox.checked = showRetired();
-    renderPageFacets(false);
-    refreshStartStats();
-    refreshStartBody();
-    renderList();
-  });
+  retiredBox.addEventListener("change", () => setShowRetired(retiredBox.checked));
 }
 
 // Switching wiki is a full navigation — resets browse context and keeps the URL shareable.

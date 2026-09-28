@@ -91,6 +91,27 @@ const NO_LIVE = "concepts/ny.md";
 const NO_OLD = "archive/gammel.md";
 const NO_LABELS = { toggle: "Vis utfasede ({n})", banner: "Utfaset", marker: "Utfaset", successor: "Erstattet av" };
 
+/**
+ * Fix round 1's wikis.
+ *  - ALPHA: a series whose NEWEST in-flight plan is retired — the `▸` and the
+ *    strip's `continue at:` must point at the newest LIVE plan instead.
+ *  - HUBS: untyped pages whose only backlinked page is retired, so Hubs has
+ *    nothing to show while the toggle is off.
+ *  - ATLAS: typed pages (a source linking two concepts, one retired), so the
+ *    Atlas has a Concepts column the toggle can shrink.
+ */
+const WIKI_ALPHA = "e2e-retired-alpha";
+const A1 = "plans/alpha-1.md";
+const A2 = "plans/alpha-2.md";
+const A3 = "plans/alpha-3.md";
+const WIKI_HUBS = "e2e-retired-hubs";
+const H_LIVE = "notes/live.md";
+const H_OLD = "notes/old.md";
+const WIKI_ATLAS = "e2e-retired-atlas";
+const AT_SRC = "sources/src.md";
+const AT_LIVE = "concepts/live-concept.md";
+const AT_OLD = "concepts/old-concept.md";
+
 let server: ChildProcess | undefined;
 const roots: string[] = [];
 
@@ -112,6 +133,20 @@ test.beforeAll(async () => {
     [NO_LIVE, md("Ny side", [], "Erstatter [[archive/gammel]].")],
     [NO_OLD, md("Gammel side", retired("Erstattet av ny side", ["superseded_by: [[concepts/ny]]"]))],
   ]);
+  const rootAlpha = await writeWiki([
+    [A1, md("Alpha one", ["series: alpha", "plan_status: shipped", "status_date: 2026-01-01"])],
+    [A2, md("Alpha two", ["series: alpha", "plan_status: in-flight", "status_date: 2026-02-01"])],
+    [A3, md("Alpha three", retired("Dropped", ["series: alpha", "plan_status: in-flight", "status_date: 2026-03-01"]))],
+  ]);
+  const rootHubs = await writeWiki([
+    [H_LIVE, md("Live note", [], "See [[old]].")],
+    [H_OLD, md("Old note", retired("Gone"))],
+  ]);
+  const rootAtlas = await writeWiki([
+    [AT_SRC, md("The source", ["type: source"], "Cites [[live-concept]] and [[old-concept]].")],
+    [AT_LIVE, md("Live concept", ["type: concept"])],
+    [AT_OLD, md("Old concept", ["type: concept", ...retired("Merged")])],
+  ]);
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -120,7 +155,13 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root},${WIKI_NO}=${rootNo}`,
+      WIKI_EXTRA: [
+        `${WIKI}=${root}`,
+        `${WIKI_NO}=${rootNo}`,
+        `${WIKI_ALPHA}=${rootAlpha}`,
+        `${WIKI_HUBS}=${rootHubs}`,
+        `${WIKI_ATLAS}=${rootAtlas}`,
+      ].join(","),
     },
     stdio: "ignore",
   });
@@ -144,12 +185,18 @@ test.afterAll(async () => {
 
 async function openRail(page: Page, wiki = WIKI): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${wiki}`);
-  await expect(page.locator(".wiki-list-item").first()).toBeAttached();
+  // A row, or a group row (the ALPHA wiki's rail is one closed series fold).
+  await expect(page.locator(".wiki-list-item, .wiki-list-group").first()).toBeAttached();
 }
 
 const row = (page: Page, rel: string) => page.locator(`.wiki-list-item[data-relpath="${rel}"]`);
 const toggle = (page: Page) => page.locator("#wikiShowRetired");
 const seriesRow = (page: Page) => page.locator('.wiki-list-group[data-group="series:retire"]');
+
+async function selectFolder(page: Page, folder: string): Promise<void> {
+  await page.locator("#wikiFilters").evaluate((el) => ((el as HTMLDetailsElement).open = true));
+  await page.selectOption("#wikiFolder", folder);
+}
 
 async function railRels(page: Page): Promise<string[]> {
   return page.locator(".wiki-list-item").evaluateAll((els) => els.map((el) => el.getAttribute("data-relpath") || ""));
@@ -195,8 +242,9 @@ test.describe("Wiki: retired pages", () => {
     await expect(row(page, PARENT).locator(".wiki-fold-chip-label")).toHaveText("1 attached");
     expect(rels.sort()).toEqual([SUCCESSOR, OLDER, PARENT, PARENT_PROTO, S_A, S_B].sort());
     await expect(page.locator("#wikiCount")).toHaveText(`${LIVE} / ${LIVE}`);
-    // The folder facet counts the same pool: `archive/` holds only a retired page.
-    await expect(page.locator('#wikiFolder option[value="archive"]')).toHaveCount(0);
+    // The folder facet counts the same pool: `archive/` holds only a retired
+    // page, so it stays listed at 0 — the folder view still reaches it.
+    await expect(page.locator('#wikiFolder option[value="archive"]')).toHaveText("archive 0");
     await expect(page.locator('#wikiFolder option[value="plans"]')).toHaveText("plans 3");
   });
 
@@ -311,5 +359,110 @@ test.describe("Wiki: retired pages", () => {
     }
     // Not vacuous: the two themes really resolve different colours.
     expect(probed.light).not.toEqual(probed.dark);
+  });
+  // ── Fix round 1 ─────────────────────────────────────────────────────────
+
+  test("fix 1: the ▸ and `continue at:` skip a retired plan; the strip marks it", async ({ page }) => {
+    await openRail(page, WIKI_ALPHA);
+    await openAllFolds(page);
+    await expect(row(page, A2).locator(".wiki-latest-glyph")).toHaveCount(1);
+    await toggle(page).check();
+    await openAllFolds(page);
+    await expect(row(page, A3)).toBeVisible();
+    await expect(row(page, A3).locator(".wiki-latest-glyph")).toHaveCount(0);
+    await expect(row(page, A2).locator(".wiki-latest-glyph")).toHaveCount(1);
+
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_ALPHA}&relPath=${encodeURIComponent(A1)}`);
+    await expect(page.locator(".wiki-series-go")).toHaveText("Alpha two");
+    await expect(page.locator(".wiki-series-go")).toHaveAttribute("data-series-go", A2);
+    const steps = page.locator(".wiki-series-step-title");
+    await expect(steps).toHaveCount(3);
+    await expect(steps.filter({ hasText: "Alpha three" }).locator(".wiki-cull-mark")).toHaveText("Retired");
+    await expect(steps.filter({ hasText: "Alpha two" }).locator(".wiki-cull-mark")).toHaveCount(0);
+  });
+
+  test("fix 2: an all-retired folder stays in the picker, and the empty rail offers them", async ({ page }) => {
+    await openRail(page);
+    await expect(page.locator('#wikiFolder option[value="archive"]')).toHaveText("archive 0");
+    await selectFolder(page, "archive");
+    await expect(page.locator(".wiki-list-item")).toHaveCount(0);
+    const reveal = page.locator("#wikiList .wiki-retired-reveal");
+    await expect(reveal).toHaveText("Show retired (1)");
+    await reveal.click();
+    await expect(toggle(page)).toBeChecked();
+    await expect(row(page, OLD)).toBeVisible();
+    await expect(page.locator("#wikiList .wiki-retired-reveal")).toHaveCount(0);
+    // The wiki's own words.
+    await openRail(page, WIKI_NO);
+    await expect(page.locator('#wikiFolder option[value="archive"]')).toHaveText("archive 0");
+    await selectFolder(page, "archive");
+    await expect(page.locator("#wikiList .wiki-retired-reveal")).toHaveText("Vis utfasede (1)");
+  });
+
+  test("fix 3: #wikiCount's hover is the toggle's own text with the facet-aware N", async ({ page }) => {
+    await openRail(page);
+    await expect(page.locator("#wikiCount")).toHaveAttribute("title", `Show retired (${CULLED.length})`);
+    await selectFolder(page, "plans");
+    await expect(page.locator("#wikiRetiredLabel")).toHaveText("Show retired (4)");
+    await expect(page.locator("#wikiCount")).toHaveAttribute("title", "Show retired (4)");
+    await openRail(page, WIKI_NO);
+    await expect(page.locator("#wikiCount")).toHaveAttribute("title", "Vis utfasede (1)");
+  });
+
+  test("fix 4: the toggle carries no hover of its own", async ({ page }) => {
+    await openRail(page);
+    await expect(page.locator("#wikiRetiredToggle")).toBeVisible();
+    await expect(page.locator("#wikiRetiredToggle")).not.toHaveAttribute("title", /.*/);
+  });
+
+  test("fix 5: the toggle hides at (0) under a facet, unless it is checked", async ({ page }) => {
+    await openRail(page);
+    await selectFolder(page, "concepts");
+    await expect(page.locator("#wikiRetiredToggle")).toBeHidden();
+    await expect(page.locator("#wikiCount")).not.toHaveAttribute("title", /.*/);
+    await selectFolder(page, "");
+    await toggle(page).check();
+    await selectFolder(page, "concepts");
+    await expect(page.locator("#wikiRetiredToggle")).toBeVisible();
+    await expect(page.locator("#wikiRetiredLabel")).toHaveText("Show retired (0)");
+  });
+
+  test("fix 6: the Atlas shows the rail's pool, and marks retired nodes when they are shown", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_ATLAS}&view=atlas`);
+    const node = (rel: string) => page.locator(`.wiki-atlas-canvas[data-view="types"] .wiki-atlas-node[data-key="${rel}"]`);
+    await expect(node(AT_LIVE)).toBeAttached();
+    await expect(node(AT_OLD)).toHaveCount(0);
+    const conceptCol = page.locator('.wiki-atlas-canvas[data-view="types"] .wiki-atlas-col', {
+      has: page.locator(`[data-key="${AT_LIVE}"]`),
+    });
+    await expect(conceptCol.locator(".wiki-atlas-count")).toHaveText("· 1");
+    // With the toggle on (set from Hubs, where the rail is on screen) the node
+    // returns, marked.
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_ATLAS}&view=hubs`);
+    await toggle(page).check();
+    await page.locator('.wiki-tab[data-tab="atlas"]').click();
+    await expect(node(AT_OLD)).toHaveClass(/\bculled\b/);
+    await expect(node(AT_OLD)).toHaveAttribute("title", /Retired/);
+    await expect(node(AT_LIVE)).not.toHaveClass(/\bculled\b/);
+  });
+
+  test("fix 7: the start Timeline follows a search that reaches only retired pages", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&view=timeline`);
+    await expect(page.locator(".wiki-tl-item").first()).toBeAttached();
+    await page.fill("#wikiSearch", "Twin");
+    await expect(row(page, TWIN)).toBeVisible();
+    await expect(page.locator(`.wiki-tl-item[data-relpath="${TWIN}"]`)).toBeAttached();
+  });
+
+  test("fix 8: Hubs offers held-back retired hubs instead of claiming no links, and marks them", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_HUBS}&view=hubs`);
+    const body = page.locator("#startBody");
+    await expect(body.locator(".wiki-retired-reveal")).toHaveText("Show retired (1)");
+    await expect(body).not.toContainText("no resolvable internal links");
+    await body.locator(".wiki-retired-reveal").click();
+    await expect(toggle(page)).toBeChecked();
+    const card = body.locator(`.wiki-hub-card[data-relpath="${H_OLD}"]`);
+    await expect(card).toHaveClass(/\bculled\b/);
+    await expect(card.locator(".wiki-cull-mark")).toHaveText("Retired");
   });
 });

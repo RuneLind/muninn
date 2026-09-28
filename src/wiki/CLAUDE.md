@@ -662,11 +662,20 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   under), then a spelled extension as written — then wiki-wide; a path form resolves across folders.
 - **Reader UI.** The rail draws from a POOL (`railPool`): live pages only,
   unless the reader checks `Show retired (N)` or types a search (search still
-  reaches a retired page). Every facet count, family roll-up, attachment chip
-  and `#wikiCount` (`shown / pool`, the hover naming how many are held back) is
-  over the pool; the series census is NOT — `groupSeries(filtered, allPages)`,
-  so a hidden member reads as `N of M shown` and a retired head still names the
-  fold. N counts the retired pages the current facets select, query aside. The
+  reaches a retired page). Every facet count, family roll-up, attachment chip,
+  the start view (stats, Hubs, Timeline — the Timeline with the query — and the
+  Atlas, filtered client-side by `atlasPoolView`) and `#wikiCount`
+  (`shown / pool`) is over the pool; the series census is NOT —
+  `groupSeries(filtered, allPages)`, so a hidden member reads as `N of M shown`
+  and a retired head still names the fold. The `▸` and `continue at:` are the
+  exception to the census rule: they skip a retired plan
+  (`seriesContinuePlan`), since the rail hides the page they would name;
+  `newestSeriesPlan`/`seriesHead` and lint stay census-inclusive. N counts the
+  retired pages the current facets select, query aside; `#wikiCount`'s hover is
+  the toggle text with that N, and the toggle hides while N is 0 unless it is
+  checked. A folder whose pages are all retired stays in the folder picker (at
+  0), and an empty rail or Hubs tab offers a reveal control worded as the
+  toggle (`retiredRevealHtml`). The
   toggle is the `toggle:retired` mode key in the per-wiki folds store. A retired
   page opens by direct link and carries a banner (`<banner>: <reason>` plus
   `<successor> <link>` when `supersededBy` resolved); an explainer's head is

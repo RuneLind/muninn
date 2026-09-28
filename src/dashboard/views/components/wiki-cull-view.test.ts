@@ -14,6 +14,8 @@ import {
   miniNodeHtml,
   parseCullLabels,
   railPool,
+  RETIRED_REVEAL_ATTR,
+  retiredRevealHtml,
   setCullLabels,
 } from "./wiki-cull-view.ts";
 import type { WikiListing } from "./wiki-filter.ts";
@@ -91,6 +93,19 @@ describe("railPool", () => {
     expect(railPool([live, culled], true, "")).toEqual([live, culled]);
     expect(railPool([live, culled], false, "b")).toEqual([live, culled]);
     expect(railPool([live, culled], false, "   ")).toEqual([live]);
+  });
+});
+
+describe("retiredRevealHtml", () => {
+  test("the toggle's own words and N, as a control the reader's delegate knows", () => {
+    setCullLabels(NORWEGIAN);
+    const html = retiredRevealHtml(4);
+    expect(html).toContain(">Vis utfasede (4)</button>");
+    expect(html).toContain(RETIRED_REVEAL_ATTR);
+    expect(html.replace(/<[^>]*>/g, "")).toBe("Vis utfasede (4)");
+  });
+  test("nothing held back ⇒ no control", () => {
+    expect(retiredRevealHtml(0)).toBe("");
   });
 });
 

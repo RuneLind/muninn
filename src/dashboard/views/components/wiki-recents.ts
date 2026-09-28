@@ -118,7 +118,7 @@ export function isFoldOpen(open: readonly string[], key: string): boolean {
 
 /**
  * Is this a MODE key rather than one of the fold exceptions `FOLDS_MAX` bounds?
- * Today exactly one: `toggle:families`.
+ * Today two: `toggle:families` and `toggle:retired`.
  *
  * A mode says how the whole rail is arranged; a fold key says which single group
  * this reader opened. Capping them together meant the sentinel was evicted after

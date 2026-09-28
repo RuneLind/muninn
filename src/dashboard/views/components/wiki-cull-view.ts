@@ -112,6 +112,20 @@ export function railPool<T extends Pick<WikiListing, "culled">>(pages: T[], show
   return pages.filter((p) => !p.culled);
 }
 
+/** The reveal control carries this; the reader's delegate turns the toggle on. */
+export const RETIRED_REVEAL_ATTR = "data-retired-reveal";
+
+/**
+ * A one-click "show them" control for an empty surface that is empty only
+ * because retired pages are held back: the rail's empty state, the Hubs tab.
+ * Worded with the toggle's own text, so it speaks the wiki's language and
+ * names the same N. `""` when nothing is held back.
+ */
+export function retiredRevealHtml(n: number): string {
+  if (n <= 0) return "";
+  return `<button type="button" class="wiki-retired-reveal" ${RETIRED_REVEAL_ATTR}>${esc(cullToggleText(n))}</button>`;
+}
+
 /** The marker as its own element. */
 export function cullMarkHtml(): string {
   const { marker } = active;

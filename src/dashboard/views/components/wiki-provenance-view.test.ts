@@ -469,6 +469,11 @@ describe("railListHtml", () => {
   test("real rows suppress the empty state", () => {
     expect(railListHtml("<div>row</div>")).toBe("<div>row</div>");
   });
+
+  test("the retired reveal rides below the empty state, and only with it", () => {
+    expect(railListHtml("", "<button>X</button>")).toBe(railListHtml("") + "<button>X</button>");
+    expect(railListHtml("<div>row</div>", "<button>X</button>")).toBe("<div>row</div>");
+  });
 });
 
 describe("money", () => {
