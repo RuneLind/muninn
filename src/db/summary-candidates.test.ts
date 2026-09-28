@@ -15,10 +15,7 @@ import {
   ACCEPTANCE_TARGET,
   HYPE_DEDUP_SWEEP_REASON,
 } from "./summary-candidates.ts";
-import {
-  REPACKAGING_CLAMP_SHIPPED_AT,
-  REPACKAGING_SCORE_CAP,
-} from "../watchers/repackaging-shape.ts";
+import { REPACKAGING_SCORE_CAP } from "../watchers/repackaging-shape.ts";
 
 setupTestDb();
 
@@ -657,7 +654,11 @@ describe("summary-candidates", () => {
       const old = await seed("ancient", "@f: OLDNEWSHERE from months ago", 0.95, "new");
       await sql`UPDATE summary_candidates SET created_at = now() - interval '40 days' WHERE id = ${old.id}`;
 
-      const recent = await candidateRecentStats(7);
+      // The clamp ship time is pinned 20 days back rather than read off the real
+      // REPACKAGING_CLAMP_SHIPPED_AT: against the real date, "40 days ago" crossed the
+      // 2026-08-19 ship time on 2026-09-28 and the out-of-metric row started counting.
+      const clock = { now: new Date(), clampShippedAt: new Date(Date.now() - 20 * 86_400_000) };
+      const recent = await candidateRecentStats(7, clock);
       expect(recent.windowDays).toBe(7);
       expect(recent.target).toBe(ACCEPTANCE_TARGET);
       expect(Date.parse(recent.since)).toBeLessThan(Date.now());
@@ -678,16 +679,16 @@ describe("summary-candidates", () => {
       // out-of-window shaped 0.95 row is out of the window.
       expect(x.repackagingShapedAbove08).toBe(1);
 
-      // A wider window reaches the 40-day-old row — but it was captured long BEFORE the
+      // A wider window reaches the 40-day-old row — but it was captured BEFORE the
       // clamp shipped, and the score ratchet means its high is permanent, so it is out
       // of the metric. The window start is what moves; the repackaging floor does not.
-      const wide = await candidateRecentStats(90);
+      const wide = await candidateRecentStats(90, clock);
       const wideX = wide.bySource.find((s) => s.source === "x")!;
       expect(wideX.captured).toBe(7);
       expect(wideX.repackagingShapedAbove08).toBe(1);
-      // 90 days reaches back past #454, so the clamp ship time is the binding bound.
+      // 90 days reaches back past the clamp ship time, so it is the binding bound.
       expect(wide.repackaging.floored).toBe(true);
-      expect(wide.repackaging.since).toBe(REPACKAGING_CLAMP_SHIPPED_AT.toISOString());
+      expect(wide.repackaging.since).toBe(clock.clampShippedAt.toISOString());
       expect(Date.parse(wide.since)).toBeLessThan(Date.parse(wide.repackaging.since));
     });
 
