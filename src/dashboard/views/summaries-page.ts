@@ -28,6 +28,7 @@ import { sumOutcomesStyles, sumOutcomesHtml, sumOutcomesScript } from "./compone
 import { sumStatsStyles, sumStatsHtml, sumStatsScript } from "./components/sum-stats.ts";
 import { sumShelfStyles, sumShelfHtml, sumShelfScript } from "./components/sum-shelf.ts";
 import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
+import { sumLatestRailStyles, sumLatestRailScript } from "./components/sum-latest-rail.ts";
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { shareDialogClientScript } from "./components/share-dialog-client.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -118,6 +119,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     ${sumCandidatesStyles()}
     ${sumShelfStyles()}
     ${sumArticleLibraryStyles()}
+    ${sumLatestRailStyles()}
     ${sumOutcomesStyles()}
     ${sumStatsStyles()}
     ${agentPresenceStyles()}
@@ -292,6 +294,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     ${sumCandidatesScript()}
     ${sumShelfScript()}
     ${sumArticleLibraryScript()}
+    ${sumLatestRailScript()}
     // AFTER the library's own Escape listener, deliberately: that one returns
     // early while this modal is visible, so this listener is what closes it.
     ${tracesPromptModalScript()}

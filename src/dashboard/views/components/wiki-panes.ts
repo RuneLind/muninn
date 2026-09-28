@@ -57,8 +57,9 @@ export function readerKeyRefused(e: ReaderKeyEvent): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!e.targetEditable;
 }
 
-/** What counts as an open modal or menu, anywhere on the page. */
-const MODAL_SELECTOR = '[aria-modal="true"], dialog[open], [role="dialog"], [role="menu"]';
+/** What counts as an open modal or menu, anywhere on the page. Exported for
+ *  the /summaries page, which injects `modalOpen` with `.toString()`. */
+export const MODAL_SELECTOR = '[aria-modal="true"], dialog[open], [role="dialog"], [role="menu"]';
 
 /**
  * Is a modal dialog or a menu open anywhere on the page — not only around the

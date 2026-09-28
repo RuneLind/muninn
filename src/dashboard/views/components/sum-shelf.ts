@@ -317,7 +317,7 @@ export function sumShelfScript(): string {
 
     // Only real summary docs (category-pathed .md files) go on the shelf.
     function isShelfDoc(d) {
-      return d.id && d.id.includes('/') && d.id.endsWith('.md');
+      return d && d.id && d.id.includes('/') && d.id.endsWith('.md');
     }
 
     // Render the source-filter chips from whichever sources appear in the
