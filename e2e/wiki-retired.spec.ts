@@ -17,6 +17,7 @@
 
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createServer, type Server } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -26,6 +27,7 @@ import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 import { contrastOf } from "./contrast.ts";
 
 const PORT = e2ePort("wiki-retired");
+const HUGINN_PORT = e2ePort("wiki-retired/huginn");
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 
@@ -111,8 +113,29 @@ const WIKI_ATLAS = "e2e-retired-atlas";
 const AT_SRC = "sources/src.md";
 const AT_LIVE = "concepts/live-concept.md";
 const AT_OLD = "concepts/old-concept.md";
+/**
+ * Fix round 2's wikis.
+ *  - CAP: 60 live and 11 retired entities, one type column over the server's
+ *    full-column cap (70), so the cap hides the 11 retired ones with 10 live
+ *    ones; plus the topics: a retired concept alone (`gone`), and a retired
+ *    concept whose name a live concept carries (`twin-topic`).
+ *  - SEM: five sources in one semantic cluster, one retired, served by the
+ *    huginn stub. s5 (retired) joins s3 and s4, which are also joined, so the
+ *    live four are a cluster of their own.
+ */
+const WIKI_CAP = "e2e-retired-cap";
+const CAP_LIVE = 60;
+const CAP_DEAD = 11;
+const capLive = (i: number) => `entities/e${String(i).padStart(2, "0")}.md`;
+const capDead = (i: number) => `entities/x${String(i).padStart(2, "0")}.md`;
+const WIKI_SEM = "e2e-retired-sem";
+const SEM_COLL = "e2e-retired-sem";
+const SEM = ["sources/s1.md", "sources/s2.md", "sources/s3.md", "sources/s4.md", "sources/s5.md"];
+const SEM_DEAD = SEM[4]!;
+const H_OLD2 = "notes/old2.md";
 
 let server: ChildProcess | undefined;
+let huginn: Server | undefined;
 const roots: string[] = [];
 
 async function writeWiki(files: Array<[string, string]>): Promise<string> {
@@ -139,9 +162,49 @@ test.beforeAll(async () => {
     [A3, md("Alpha three", retired("Dropped", ["series: alpha", "plan_status: in-flight", "status_date: 2026-03-01"]))],
   ]);
   const rootHubs = await writeWiki([
-    [H_LIVE, md("Live note", [], "See [[old]].")],
+    [H_LIVE, md("Live note", [], "See [[old]] and [[old2]].")],
     [H_OLD, md("Old note", retired("Gone"))],
+    [H_OLD2, md("Old note two", retired("Gone too"))],
   ]);
+  const hubLinks = Array.from({ length: CAP_LIVE }, (_, i) => `[[${capLive(i + 1).replace(/\.md$/, "")}]]`);
+  const rootCap = await writeWiki([
+    ["sources/hub.md", md("Hub", ["type: source"], `${hubLinks.join(" ")} [[concepts/gone]] [[concepts/twin-topic]] [[archive/twin-topic]]`)],
+    ...Array.from({ length: CAP_LIVE }, (_, i): [string, string] => [capLive(i + 1), md(`Entity ${i + 1}`, ["type: entity"])]),
+    ...Array.from({ length: CAP_DEAD }, (_, i): [string, string] => [
+      capDead(i + 1),
+      md(`Dead entity ${i + 1}`, ["type: entity", ...retired("Merged")]),
+    ]),
+    ["concepts/gone.md", md("gone", ["type: concept", ...retired("Merged")])],
+    ["concepts/twin-topic.md", md("twin-topic", ["type: concept"])],
+    ["archive/twin-topic.md", md("twin-topic", ["type: concept", ...retired("Moved")])],
+  ]);
+  const rootSem = await writeWiki(
+    SEM.map((rel, i): [string, string] => [
+      rel,
+      md(`Sem ${i + 1}`, ["type: source", ...(rel === SEM_DEAD ? retired("Merged") : [])]),
+    ]),
+  );
+  // huginn's similarity graph for the SEM wiki's one collection.
+  const graph = {
+    nodes: SEM.map((id) => ({ id, community: 0 })),
+    edges: [
+      [SEM[0], SEM[1]],
+      [SEM[1], SEM[2]],
+      [SEM[2], SEM[4]],
+      [SEM[3], SEM[4]],
+      [SEM[2], SEM[3]],
+    ].map(([source, target]) => ({ source, target, similarity: 0.99 })),
+    communities: [{ id: 0, size: 5, name: "sem", top_tags: [], representative_docs: [SEM[0]] }],
+  };
+  huginn = createServer((req, res) => {
+    if (req.url?.startsWith(`/api/collection/${SEM_COLL}/similarity-graph`)) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(graph));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => huginn!.listen(HUGINN_PORT, "127.0.0.1", resolve));
   const rootAtlas = await writeWiki([
     [AT_SRC, md("The source", ["type: source"], "Cites [[live-concept]] and [[old-concept]].")],
     [AT_LIVE, md("Live concept", ["type: concept"])],
@@ -155,12 +218,15 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
+      KNOWLEDGE_API_URL: `http://127.0.0.1:${HUGINN_PORT}`,
       WIKI_EXTRA: [
         `${WIKI}=${root}`,
         `${WIKI_NO}=${rootNo}`,
         `${WIKI_ALPHA}=${rootAlpha}`,
         `${WIKI_HUBS}=${rootHubs}`,
         `${WIKI_ATLAS}=${rootAtlas}`,
+        `${WIKI_CAP}=${rootCap}`,
+        `${WIKI_SEM}=${rootSem}=${SEM_COLL}`,
       ].join(","),
     },
     stdio: "ignore",
@@ -180,6 +246,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   server?.kill("SIGTERM");
+  await new Promise<void>((resolve) => (huginn ? huginn.close(() => resolve()) : resolve()));
   for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
@@ -366,6 +433,9 @@ test.describe("Wiki: retired pages", () => {
     await openRail(page, WIKI_ALPHA);
     await openAllFolds(page);
     await expect(row(page, A2).locator(".wiki-latest-glyph")).toHaveCount(1);
+    // A3 is newer and retired: the ▸ is the newest plan that is NOT retired,
+    // and its hover says so.
+    await expect(row(page, A2)).toHaveAttribute("title", /newest plan in this series that is not retired/);
     await toggle(page).check();
     await openAllFolds(page);
     await expect(row(page, A3)).toBeVisible();
@@ -462,12 +532,88 @@ test.describe("Wiki: retired pages", () => {
   test("fix 8: Hubs offers held-back retired hubs instead of claiming no links, and marks them", async ({ page }) => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI_HUBS}&view=hubs`);
     const body = page.locator("#startBody");
-    await expect(body.locator(".wiki-retired-reveal")).toHaveText("Show retired (1)");
+    await expect(body.locator(".wiki-retired-reveal")).toHaveText("Show retired (2)");
     await expect(body).not.toContainText("no resolvable internal links");
     await body.locator(".wiki-retired-reveal").click();
     await expect(toggle(page)).toBeChecked();
     const card = body.locator(`.wiki-hub-card[data-relpath="${H_OLD}"]`);
     await expect(card).toHaveClass(/\bculled\b/);
     await expect(card.locator(".wiki-cull-mark")).toHaveText("Retired");
+  });
+
+  test("fix 2.6: a keyboard reveal leaves focus on the toggle, not on <body>", async ({ page }) => {
+    await openRail(page);
+    await selectFolder(page, "archive");
+    const reveal = page.locator("#wikiList .wiki-retired-reveal");
+    await reveal.focus();
+    await page.keyboard.press("Enter");
+    await expect(toggle(page)).toBeChecked();
+    await expect(toggle(page)).toBeFocused();
+  });
+
+  test("fix 2.2: switching to the Atlas after a toggle flip shows the pool of the moment", async ({ page }) => {
+    const node = (rel: string) => page.locator(`.wiki-atlas-canvas[data-view="types"] .wiki-atlas-node[data-key="${rel}"]`);
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_ATLAS}&view=hubs`);
+    await toggle(page).check();
+    await page.locator('.wiki-tab[data-tab="atlas"]').click();
+    await expect(node(AT_OLD)).toBeAttached();
+    // Back to Hubs, the toggle off, and the Atlas again: built from the cached
+    // payload, it drops the retired node once more.
+    await page.locator('.wiki-tab[data-tab="hubs"]').click();
+    await toggle(page).uncheck();
+    await page.locator('.wiki-tab[data-tab="atlas"]').click();
+    await expect(node(AT_LIVE)).toBeAttached();
+    await expect(node(AT_OLD)).toHaveCount(0);
+  });
+
+  test("fix 2.3: a capped column's `+ N more` and the topics follow the pool", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_CAP}&view=atlas`);
+    const col = page.locator('.wiki-atlas-canvas[data-view="types"] .wiki-atlas-col', {
+      has: page.locator(`[data-key="${capLive(1)}"]`),
+    });
+    // 71 entities, 50 drawn: of the 21 the cap hid, 11 are retired.
+    await expect(col.locator(".wiki-atlas-count")).toHaveText("· 50");
+    await expect(col.locator(".wiki-atlas-more")).toHaveText("+ 10 more not shown");
+    const topics = page.locator(".wiki-atlas-topic b");
+    await expect(topics.filter({ hasText: /^twin-topic$/ }).first()).toBeAttached();
+    expect(await topics.allTextContents()).not.toContain("gone");
+  });
+
+  test("fix 2.1: the semantic clusters follow the pool, and Draft synthesis never sends a retired page", async ({ page }) => {
+    const posted: string[][] = [];
+    await page.route("**/api/wiki/atlas/draft-synthesis*", async (route) => {
+      posted.push((route.request().postDataJSON() as { members: string[] }).members);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ state: "started" }) });
+    });
+    const semOn = async () => {
+      const t = page.locator(".wiki-atlas-semtoggle");
+      await expect(t).toBeVisible();
+      if (!(await t.evaluate((el) => el.classList.contains("on")))) await t.click();
+    };
+    const cluster = page.locator(".wiki-atlas-cluster").first();
+    const member = (rel: string) => page.locator(`.wiki-atlas-cmember[data-key="${rel}"]`);
+
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_SEM}&view=atlas`);
+    await semOn();
+    await expect(page.locator(".wiki-atlas-cluster")).toHaveCount(1);
+    await expect(cluster.locator(".wiki-atlas-cluster-head em")).toHaveText("4");
+    await expect(member(SEM[0]!)).toBeAttached();
+    await expect(member(SEM_DEAD)).toHaveCount(0);
+    await cluster.locator(".wiki-atlas-cdraft").click();
+    await expect.poll(() => posted.length).toBe(1);
+    expect(posted[0]!.slice().sort()).toEqual(SEM.slice(0, 4));
+
+    // Shown: the retired page is a member again, marked, and still not sent.
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_SEM}&view=hubs`);
+    await toggle(page).check();
+    await page.locator('.wiki-tab[data-tab="atlas"]').click();
+    await semOn();
+    await expect(cluster.locator(".wiki-atlas-cluster-head em")).toHaveText("5");
+    await expect(member(SEM_DEAD)).toHaveClass(/\bculled\b/);
+    await expect(member(SEM_DEAD)).toHaveAttribute("title", /Retired/);
+    await expect(member(SEM[0]!)).not.toHaveClass(/\bculled\b/);
+    await cluster.locator(".wiki-atlas-cdraft").click();
+    await expect.poll(() => posted.length).toBe(2);
+    expect(posted[1]!.slice().sort()).toEqual(SEM.slice(0, 4));
   });
 });

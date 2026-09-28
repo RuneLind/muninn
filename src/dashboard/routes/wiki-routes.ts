@@ -10,6 +10,7 @@ import { projectAtlas } from "../../wiki/atlas.ts";
 import { getSemanticOverlay } from "../../wiki/atlas-semantic.ts";
 import {
   computeClusters,
+  overlayWithout,
   synthesisTopicKey,
   RAIL_MIN_MEMBERS,
   RAIL_BLOB_MAX,
@@ -1567,6 +1568,8 @@ export function registerWikiRoutes(
       for (const m of members) {
         const page = index.resolveRelPath(m);
         if (!page) return c.json({ error: `member "${m}" is not a page in this wiki` }, 400);
+        // A retired (culled) page is not a synthesis source.
+        if (page.culled) return c.json({ error: `member "${m}" is a retired page` }, 400);
         normMembers.push(normalizeRelPath(page.relPath));
       }
       if (normMembers.length < RAIL_MIN_MEMBERS) {
@@ -1587,7 +1590,10 @@ export function registerWikiRoutes(
       if (!overlay) {
         return c.json({ error: "semantic overlay unavailable — cannot confirm candidacy" }, 400);
       }
-      if (!confirmSynthesisCandidate(overlay, normMembers)) {
+      // Candidacy is confirmed without the retired pages, as the reader's rail
+      // computes it: the live part of a cluster is what it drafts.
+      const culled = new Set(index.pages.filter((p) => p.culled).map((p) => normalizeRelPath(p.relPath)));
+      if (!confirmSynthesisCandidate(overlayWithout(overlay, culled), normMembers)) {
         return c.json({ error: "these pages do not form a synthesis candidate" }, 400);
       }
 

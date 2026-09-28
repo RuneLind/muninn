@@ -1859,6 +1859,11 @@ describe("POST /api/wiki/atlas/draft-synthesis", () => {
     ] as const) {
       await Bun.write(path.join(root, rel), `---\ntype: plan\ntitle: ${title}\n---\n\nBody.`);
     }
+    // A retired plan, semantically joined to the three live ones.
+    await Bun.write(
+      path.join(root, "plans/delta.md"),
+      "---\ntype: plan\ntitle: Delta Plan\nsignal: none\nsignal-reason: Dropped\n---\n\nBody.",
+    );
     prevExtra = process.env.WIKI_EXTRA;
     // Standalone wiki WITH a backing collection (mimir-style).
     process.env.WIKI_EXTRA = `synthwiki=${root}=mimir`;
@@ -1946,6 +1951,49 @@ describe("POST /api/wiki/atlas/draft-synthesis", () => {
     expect(res.status).toBe(409);
     expect(((await res.json()) as { state: string }).state).toBe("pending");
     expect(drafted).toBe(false);
+  });
+
+  test("400 when a member is a retired page: a retired page is not a synthesis source", async () => {
+    let drafted = false;
+    __setSynthesisDraftDepsForTest({
+      getOverlay: async () => ({
+        ...candidateOverlay,
+        edges: [...candidateOverlay.edges, ["plans/gamma.md", "plans/delta.md", 0.99]],
+        nodeType: { ...candidateOverlay.nodeType, "plans/delta.md": "plan" },
+      }),
+      getLiveTopics: async () => [],
+      draft: async () => {
+        drafted = true;
+        return { ok: true, proposal: null, topicKey: "x" };
+      },
+    });
+    const res = await post("?wiki=synthwiki", { label: "Saga", members: [...members, "plans/delta.md"] });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("retired");
+    expect(drafted).toBe(false);
+  });
+
+  test("candidacy is confirmed without the retired pages: the live part of a cluster drafts", async () => {
+    // delta (retired) hangs off gamma, so the full graph's component is four
+    // pages; the reader sends the three live ones, which are the component
+    // once delta is left out.
+    let draftedMembers: string[] | null = null;
+    __setSynthesisDraftDepsForTest({
+      getOverlay: async () => ({
+        ...candidateOverlay,
+        edges: [...candidateOverlay.edges, ["plans/delta.md", "plans/gamma.md", 0.99]],
+        nodeType: { ...candidateOverlay.nodeType, "plans/delta.md": "plan" },
+      }),
+      getLiveTopics: async () => [],
+      draft: async (args) => {
+        draftedMembers = args.members;
+        return { ok: true, proposal: null, topicKey: "live-saga" };
+      },
+    });
+    const res = await post("?wiki=synthwiki", { label: "Live Saga", members });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { state: string }).state).toBe("started");
+    expect(draftedMembers!).toEqual(members);
   });
 
   test("409 (running) when another draft is already in flight for the same wiki (single-flight)", async () => {

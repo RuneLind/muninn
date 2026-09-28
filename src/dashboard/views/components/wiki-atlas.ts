@@ -24,11 +24,14 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+import { normalizeRel } from "./wiki-nav.ts";
 import {
-  computeClusters,
   computeColoring,
   neighborsFor,
+  overlayWithout,
+  railClusters,
   stemOf,
+  synthesisMembers,
   synthesisTopicKey,
   SEM_OTHER_SLOT,
   SEM_THRESHOLD_DEFAULT,
@@ -123,7 +126,9 @@ export interface AtlasCull {
  * re-run, so a capped column shows fewer than its cap rather than refilling;
  * its `+ N more` drops the culled pages the cap hid (`culledByType`). A
  * month's `+ N more` cannot be corrected (the listing carries no month key)
- * and keeps counting them. Curated trails stay as authored.
+ * and keeps counting them. Curated trails stay as authored. The semantic
+ * overlay loses the culled pages' edges and entries, so the cluster rail and
+ * the similarity edges draw from the pool too.
  */
 export function atlasPoolView(
   data: AtlasPayload,
@@ -164,6 +169,36 @@ export function atlasPoolView(
       .filter((tp) => !culledTopicNames.has(tp.name.toLowerCase()))
       .map((tp) => ({ ...tp, perMonth: keepIdx.map((i) => tp.perMonth[i] ?? 0) })),
     omitted: { ...data.omitted, byType },
+    ...(data.semantic ? { semantic: overlayWithout(data.semantic, culled) } : {}),
+  };
+}
+
+/** A listing row, as far as {@link atlasCullOf} reads it. */
+interface CullListingRow {
+  relPath: string;
+  name: string;
+  type: string;
+  culled?: boolean;
+}
+
+/** What the reader tells the Atlas about its retired pages, from the listing. */
+export function atlasCullOf(pages: readonly CullListingRow[], hide: boolean, marker: string): AtlasCull {
+  const culled = pages.filter((p) => p.culled);
+  const liveConcepts = new Set(
+    pages.filter((p) => !p.culled && p.type === "concept").map((p) => p.name.toLowerCase()),
+  );
+  const culledByType: Record<string, number> = {};
+  for (const p of culled) culledByType[p.type] = (culledByType[p.type] ?? 0) + 1;
+  return {
+    culled: new Set(culled.map((p) => normalizeRel(p.relPath))),
+    culledTopicNames: new Set(
+      culled
+        .filter((p) => p.type === "concept" && !liveConcepts.has(p.name.toLowerCase()))
+        .map((p) => p.name.toLowerCase()),
+    ),
+    culledByType,
+    hide,
+    marker,
   };
 }
 
@@ -206,6 +241,8 @@ let clusterSel: string | null = null;
  *  their hover carries. Empty when they are hidden or the reader said nothing. */
 let culledShown: ReadonlySet<string> = new Set();
 let cullMarker = "";
+/** Every culled page, shown or not: a Draft synthesis never sends one. */
+let culledAll: ReadonlySet<string> = new Set();
 
 /** Container markup for #startBody when the Atlas tab is active. */
 export function atlasBodyHtml(): string {
@@ -252,6 +289,7 @@ function buildAtlas(root: HTMLElement, served: AtlasPayload, deps: AtlasDeps): v
     ? atlasPoolView(served, cull.culled, cull.culledTopicNames, cull.culledByType)
     : served;
   culledShown = cull && !cull.hide ? cull.culled : new Set();
+  culledAll = cull?.culled ?? new Set();
   cullMarker = cull?.marker ?? "";
   const nodes = data.nodes;
   const keys = Object.keys(nodes);
@@ -405,7 +443,7 @@ function buildAtlas(root: HTMLElement, served: AtlasPayload, deps: AtlasDeps): v
   const buildClusterRail = () => {
     const body = root.querySelector(".wiki-atlas-clusters-body") as HTMLElement | null;
     if (!body) return;
-    clustersNow = data.semantic ? computeClusters(data.semantic, threshold) : [];
+    clustersNow = data.semantic ? railClusters(data.semantic, threshold, culledShown) : [];
     // Re-stamp the click-time topicKey onto any recomputed drafting cluster so a
     // label drift mid-draft still resolves to the same in-flight entry.
     for (const c of clustersNow) {
@@ -503,7 +541,7 @@ function buildAtlas(root: HTMLElement, served: AtlasPayload, deps: AtlasDeps): v
     fetch(deps.withWiki("/api/wiki/atlas/draft-synthesis"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ wiki: deps.wiki, members: cluster.members, label: cluster.label }),
+      body: JSON.stringify({ wiki: deps.wiki, members: synthesisMembers(cluster, culledAll), label: cluster.label }),
     })
       .then((r) => r.json().then((j: { state?: string; error?: string }) => ({ status: r.status, j })))
       .then(({ status, j }) => {
@@ -951,12 +989,14 @@ function clusterRailHtml(
       const members = c.members
         .map((m) => {
           const muted = renderedSet.has(m) ? "" : " muted";
+          const culled = culledShown.has(m) ? " culled" : "";
           // The node's own label where the payload carries it (a rendered node and
           // a capped-out one alike), else the relPath stem — the rail can hold
           // members the type columns never rendered.
           const cn = payload?.nodes[m];
           const clabel = cn ? atlasLabel(cn) : stemOf(m);
-          return `<button class="wiki-atlas-cmember${muted}" data-key="${esc(m)}" title="${esc(m)}">${esc(clabel)}</button>`;
+          const title = culled && cullMarker ? `${m} — ${cullMarker}` : m;
+          return `<button class="wiki-atlas-cmember${muted}${culled}" data-key="${esc(m)}" title="${esc(title)}">${esc(clabel)}</button>`;
         })
         .join("");
       return (

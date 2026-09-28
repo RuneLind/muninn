@@ -159,7 +159,7 @@ import {
   togglePinned,
   writeSort,
 } from "./wiki-recents-store.ts";
-import { atlasBodyHtml, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
+import { atlasBodyHtml, atlasCullOf, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
@@ -1279,14 +1279,16 @@ function paintRetiredToggle(): void {
 
 /** Turn `Show retired` on — the toggle itself, or a reveal control on an empty
  *  surface. A flip changes the pool every facet counts from, so the facets,
- *  the start view (Atlas included) and the rows all repaint. */
+ *  the start view's stats, Hubs or Timeline, and the rows all repaint. The
+ *  Atlas is never on screen for a flip (its tab hides the rail, and the one
+ *  start-view reveal is on Hubs); it reads the pool when its tab opens. */
 function setShowRetired(on: boolean): void {
   if (showRetired() !== on) openFolds = toggleFolded(WIKI, RETIRED_TOGGLE_KEY);
   const box = document.getElementById("wikiShowRetired") as HTMLInputElement | null;
   if (box) box.checked = showRetired();
   renderPageFacets(false);
   refreshStartStats();
-  refreshStartBody(true);
+  refreshStartBody();
   renderList();
 }
 
@@ -1672,7 +1674,7 @@ function renderList(): void {
     // The `▸` glyph on the newest plan of a series says WHAT it is here, because
     // the glyph itself cannot: the words live in the reader header, and a row
     // that grew a seventh element for them would wrap at the default rail.
-    const latestWhy = entry.latest ? "newest plan in this series" : "";
+    const latestWhy = entry.latest ? "newest plan in this series that is not retired" : "";
     const pills = railIssuePillsHtml(p.issues, (id) => trackerLabels[id] ?? "");
     // A retired row (the toggle is on, or a search found it) says so on hover;
     // the row itself is muted by `.culled` and grows no element.
@@ -2673,18 +2675,12 @@ function refreshStartStats(): void {
  *  That early return is load-bearing for the background listing refresh too: an
  *  adopt must not wipe an in-progress Atlas exploration. The accepted cost is that
  *  the Atlas projection stays frozen at whatever it was built from until the next
- *  tab switch rebuilds it. `rebuildAtlas` is the one exception: a `Show retired`
- *  flip changes which nodes the Atlas may show, so it rebuilds from the cached
- *  payload (the selection resets). */
-function refreshStartBody(rebuildAtlas = false): void {
+ *  tab switch rebuilds it — which is also when it reads the `Show retired` pool
+ *  (`atlasDeps().cull`), since the toggle is off screen on the Atlas tab. */
+function refreshStartBody(): void {
   const el = document.getElementById("startBody");
   if (!el || currentName !== null) return;
-  if (startTab !== "atlas") {
-    el.innerHTML = startBodyHtml();
-  } else if (rebuildAtlas) {
-    el.innerHTML = atlasBodyHtml();
-    initAtlas(atlasDeps());
-  }
+  if (startTab !== "atlas") el.innerHTML = startBodyHtml();
 }
 
 /** What the Atlas reads from the reader, retired pages included. Atlas passes
@@ -2695,26 +2691,7 @@ function atlasDeps(): AtlasDeps {
     withWiki,
     openPage: (relPath) => loadPageByRelPath(relPath),
     wiki: WIKI,
-    cull: () => {
-      const culled = allPages.filter((p) => p.culled);
-      const live = new Set(
-        allPages.filter((p) => !p.culled && p.type === "concept").map((p) => p.name.toLowerCase()),
-      );
-      return {
-        culled: new Set(culled.map((p) => normalizeRel(p.relPath))),
-        culledTopicNames: new Set(
-          culled
-            .filter((p) => p.type === "concept" && !live.has(p.name.toLowerCase()))
-            .map((p) => p.name.toLowerCase()),
-        ),
-        culledByType: culled.reduce<Record<string, number>>((acc, p) => {
-          acc[p.type] = (acc[p.type] ?? 0) + 1;
-          return acc;
-        }, {}),
-        hide: !showRetired(),
-        marker: cullLabels().marker,
-      };
-    },
+    cull: () => atlasCullOf(allPages, !showRetired(), cullLabels().marker),
   };
 }
 
@@ -4300,6 +4277,9 @@ document.body.addEventListener("click", (e) => {
   if (target.closest && target.closest(`[${RETIRED_REVEAL_ATTR}]`)) {
     e.preventDefault();
     setShowRetired(true);
+    // The repaint removed the control that had focus; the toggle it turned on
+    // is where a keyboard reader continues.
+    (document.getElementById("wikiShowRetired") as HTMLInputElement | null)?.focus();
     return;
   }
   // The retired banner's successor link — same shape as `continue at:`, but a

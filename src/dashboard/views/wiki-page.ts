@@ -284,7 +284,7 @@ export async function renderWikiPage(opts?: {
       display: block; margin: 4px 8px 0; padding: 0; border: 0; background: none; font-size: 12px;
       color: var(--text-primary); font-family: inherit; text-decoration: underline; cursor: pointer;
     }
-    .wiki-hub-card.culled .wiki-hub-title, .wiki-atlas-node.culled b { font-style: italic; }
+    .wiki-hub-card.culled .wiki-hub-title, .wiki-atlas-node.culled b, .wiki-atlas-cmember.culled { font-style: italic; }
 
     .wiki-gardener-badge {
       background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 600;

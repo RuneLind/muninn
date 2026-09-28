@@ -4,7 +4,10 @@ import {
   computeClusters,
   computeColoring,
   neighborsFor,
+  overlayWithout,
   RAIL_BLOB_MAX,
+  railClusters,
+  synthesisMembers,
   SEM_COLOR_SLOTS,
   SEM_OTHER_ID,
   SEM_OTHER_SLOT,
@@ -273,5 +276,76 @@ describe("clusterLabel (informative-tag rule)", () => {
     // members sort to [plans/a.md, plans/m.md, plans/z.md]; all tags generic/empty
     // ⇒ label falls back to stemOf(smallest) = "a".
     expect(computeClusters(overlay, 0.98)[0]!.label).toBe("a");
+  });
+});
+
+describe("retired (culled) pages in the semantic overlay", () => {
+  // s1–s4 and a retired s5, all narrative (`source`): s5 bridges s3 and s4,
+  // and s3–s4 are also linked, so the live pages stay one component without it.
+  const overlay: SemanticOverlay = {
+    communities: [community("k:1", "K")],
+    nodeCommunity: { s1: "k:1", s5: "k:1" },
+    nodeType: { s1: "source", s2: "source", s3: "source", s4: "source", s5: "source" },
+    nodeTags: { s1: ["live"], s2: ["live"], s3: ["live"], s4: ["live"], s5: ["dead", "dead2"] },
+    edges: [
+      ["s1", "s2", 0.99],
+      ["s2", "s3", 0.99],
+      ["s3", "s5", 0.99],
+      ["s4", "s5", 0.99],
+      ["s3", "s4", 0.99],
+    ],
+  };
+  const culled = new Set(["s5"]);
+
+  test("overlayWithout drops the pages' edges and per-node entries, and copies", () => {
+    const o = overlayWithout(overlay, culled);
+    expect(o.edges.flat().filter((x) => x === "s5")).toEqual([]);
+    expect(o.edges).toHaveLength(3);
+    expect(Object.keys(o.nodeCommunity)).toEqual(["s1"]);
+    expect(o.nodeType!.s5).toBeUndefined();
+    expect(o.nodeTags!.s5).toBeUndefined();
+    expect(overlay.edges).toHaveLength(5); // the served overlay is untouched
+  });
+
+  test("railClusters with nothing retired is computeClusters", () => {
+    expect(railClusters(overlay, 0.98, new Set())).toEqual(computeClusters(overlay, 0.98));
+  });
+
+  test("a cluster holding a retired page keeps it as a member but drafts the live pages", () => {
+    const [c] = railClusters(overlay, 0.98, culled);
+    expect(c!.members).toEqual(["s1", "s2", "s3", "s4", "s5"]);
+    expect(c!.candidate).toBe(true);
+    expect(synthesisMembers(c!, culled)).toEqual(["s1", "s2", "s3", "s4"]);
+    // The label is the live cluster's, so the topic key matches what the
+    // hidden view would draft (s5's own tags do not lead it).
+    expect(c!.label).toBe(computeClusters(overlayWithout(overlay, culled), 0.98)[0]!.label);
+    expect(c!.label).not.toContain("dead");
+  });
+
+  test("a retired page that bridges two parts leaves no candidate: the server could not confirm it", () => {
+    const bridged: SemanticOverlay = { ...overlay, edges: overlay.edges.filter((e) => !(e[0] === "s3" && e[1] === "s4")) };
+    const [c] = railClusters(bridged, 0.98, culled);
+    expect(c!.members).toEqual(["s1", "s2", "s3", "s4", "s5"]);
+    expect(c!.candidate).toBe(false);
+  });
+
+  test("retired narrative pages do not make a candidate out of too few live ones", () => {
+    const thin: SemanticOverlay = {
+      communities: [],
+      nodeCommunity: {},
+      nodeType: { a: "source", b: "source", x: "source" },
+      edges: [
+        ["a", "b", 0.99],
+        ["b", "x", 0.99],
+      ],
+    };
+    const [c] = railClusters(thin, 0.98, new Set(["x"]));
+    expect(c!.members).toEqual(["a", "b", "x"]);
+    expect(c!.candidate).toBe(false);
+  });
+
+  test("synthesisMembers never returns a retired page", () => {
+    expect(synthesisMembers({ members: ["a", "x", "b"] }, new Set(["x"]))).toEqual(["a", "b"]);
+    expect(synthesisMembers({ members: ["a", "b"] }, new Set())).toEqual(["a", "b"]);
   });
 });
