@@ -5,8 +5,8 @@
  * to everything on "Show all"; a filter change starts over at 10. A fake huginn
  * serves 75 YouTube docs + 5 X docs, so every step is visible: 10 → 60 → 75 of
  * one source, and the X filter (5 docs) needs no footer at all. The X docs sit
- * under `health/`, which maps to the Life domain, so the domain chips and a
- * second category render and both resets can be driven.
+ * under `health/`, which maps to the Life domain, so a Life chip and a second
+ * category render beside AI and both resets can be driven.
  *
  * NO MODEL CALLS, NO DATABASE WRITES. Ports come from `e2e/ports.ts`.
  */
@@ -121,6 +121,15 @@ test("the shelf shows the newest 10, grows on demand, and resets on a filter cha
   await expect(rows).toHaveCount(60);
   ingested = 0;
   await page.evaluate(() => (window as unknown as { loadShelf: (f: boolean) => Promise<void> }).loadShelf(true));
+  await expect(page.locator("#shelfCount")).toHaveText(`${total} articles`);
+
+  // The last step, pressed from the keyboard, ends the footer: focus moves to
+  // the first row it revealed rather than falling to <body>.
+  await more.getByRole("button", { name: "Show 20 more" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(rows).toHaveCount(total);
+  await expect(more).toHaveCount(0);
+  await expect(rows.nth(60).locator(".recent-item-link")).toBeFocused();
 
   // A source filter starts over at 10.
   await page.locator('#sourceFilter .source-chip[data-source="youtube"]').click();
@@ -129,6 +138,8 @@ test("the shelf shows the newest 10, grows on demand, and resets on a filter cha
   await more.getByRole("button", { name: "Show all" }).click();
   await expect(rows).toHaveCount(YOUTUBE_DOCS);
   await expect(more).toHaveCount(0);
+  // No footer left: focus lands on the first newly revealed row's link.
+  await expect(rows.nth(10).locator(".recent-item-link")).toBeFocused();
 
   // A filter with fewer than 10 docs renders them all and no footer.
   await page.locator('#sourceFilter .source-chip[data-source="x-article"]').click();

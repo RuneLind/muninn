@@ -497,10 +497,15 @@ export function sumShelfScript(): string {
         list.querySelectorAll('.shelf-more-btn').forEach(function(btn) {
           btn.addEventListener('click', function() {
             shelfLimit = shelfNextLimit(shown, btn.getAttribute('data-more'));
-            // The re-render replaces the clicked button; hand keyboard focus to
-            // the new footer's first button so Tab does not restart at the top.
+            // The re-render replaces the clicked button, so keyboard focus would
+            // fall to <body>. Hand it to the new footer's first button, or — when the
+            // click revealed everything — to the first newly revealed row's link.
             loadShelf().then(function() {
               var next = document.querySelector('#shelfMore .shelf-more-btn');
+              if (!next) {
+                var revealed = list.querySelectorAll('.recent-item')[shown];
+                next = revealed && revealed.querySelector('.recent-item-link');
+              }
               if (next) next.focus();
             });
           });
