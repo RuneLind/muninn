@@ -450,8 +450,10 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
         target = list.querySelector('.sum-latest-day[data-day="' + mark.summary + '"] > summary');
       }
       if (!target) return;
+      // A rebuild keeps the column's scroll: only Show older, which asked
+      // for a day, scrolls to the row it lands on.
       target.focus({ preventScroll: true });
-      if (target.classList.contains('sum-latest-row')) railReveal(target);
+      if (mark.day && target.classList.contains('sum-latest-row')) railReveal(target);
     }
 
     /** Builds the rail's chips and list from a listing. Keeps .current, the
@@ -463,9 +465,14 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
       if (!rail || !list || !chipsEl) return;
       var shelfDocs = (allDocs || []).filter(isShelfDoc);
       var listed = {};
-      shelfDocs.forEach(function(d) { listed[railKey(d)] = true; });
+      var listedSources = {};
+      shelfDocs.forEach(function(d) { listed[railKey(d)] = true; listedSources[d.source] = true; });
       // A deleted doc the listing has caught up on needs no hiding any more.
-      Object.keys(_railDeleted).forEach(function(k) { if (!listed[k]) delete _railDeleted[k]; });
+      // A source with no row at all may have failed (a partial listing), so
+      // its keys stay, as in railPrune.
+      Object.keys(_railDeleted).forEach(function(k) {
+        if (listedSources[k.slice(0, k.indexOf('|'))] && !listed[k]) delete _railDeleted[k];
+      });
       var state = railPruneReadState(shelfDocs);
       var docs = shelfDocs.filter(function(d) { return !_railDeleted[railKey(d)] && matchesDomain(d); });
       var today = railUtcDay(new Date());
@@ -566,8 +573,6 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
         var hadFocus = rail.contains(document.activeElement);
         railSetOpen(false);
         if (hadFocus) document.getElementById('sumRailToggle').focus({ preventScroll: true });
-        var body = document.getElementById('docPanelBody');
-        if (body) body.scrollTop = 0;
       }
       if (!_railBuilt || _railLoadFailed) {
         if (!_railBuilt) railWire();

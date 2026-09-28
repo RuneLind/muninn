@@ -68,6 +68,11 @@ function drop(source: string, id: string): void {
   listing[COLLECTIONS[source]!]?.delete(id);
 }
 
+/** Collections the fake huginn answers 500 for (`*`: every one), as a
+ *  timed-out source does. The documents route still answers 200 while one
+ *  source loads, and 503 when none does. */
+let failing = new Set<string>();
+
 const A1 = "ai/agents/Today first.md";
 const A2 = "ai/agents/Today second.md";
 const A3 = "ai/tools/Today third.md";
@@ -79,6 +84,7 @@ const L1 = "health/sleep/Life today.md";
 
 function seed(): void {
   listing = {};
+  failing = new Set();
   // Today: A1 has the latest modifiedTime, so it leads its day.
   put("youtube", A1, TODAY, "12:00:00");
   put("youtube", A2, TODAY, "11:00:00");
@@ -105,6 +111,7 @@ test.beforeAll(async () => {
     };
     if (p.startsWith("/api/collection/") && p.endsWith("/documents")) {
       const coll = p.slice("/api/collection/".length, -"/documents".length);
+      if (failing.has(coll) || failing.has("*")) return json({ error: "down" }, 500);
       return json({ documents: [...(listing[coll]?.values() ?? [])] });
     }
     if (p.startsWith("/api/document/")) {
@@ -614,4 +621,102 @@ test("rows and controls carry names a screen reader can use", async ({ page }) =
   await page.locator("#sumRailToggle").click();
   await expect(page.locator("#sumRailList")).toBeVisible();
   await expect(page.getByRole("button", { name: "Latest", exact: true })).toHaveCount(1);
+});
+
+// --- Fix round 2 -----------------------------------------------------------
+
+const forceRefresh = (page: Page) =>
+  page.evaluate(() => (window as unknown as PageWindow).getSummaryDocuments!(true));
+
+test("a rebuild keeps the rail's scroll position while a clicked row has focus", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 420 });
+  for (let i = 10; i < 22; i++) put("youtube", `ai/agents/Filler ${i}.md`, YESTERDAY, `07:${i}:00`);
+  await openDeepLink(page, A2);
+  await row(page, A1).click();
+  await expect(current(page)).toHaveAttribute("data-doc-id", A1);
+  await expect(row(page, A1)).toBeFocused();
+  const scrollTop = () => rail(page).evaluate((el) => el.scrollTop);
+  const bottom = await rail(page).evaluate((el) => { el.scrollTop = el.scrollHeight; return el.scrollTop; });
+  expect(bottom).toBeGreaterThan(200);
+  await forceRefresh(page);
+  expect(await scrollTop()).toBe(bottom);
+  await expect(row(page, A1)).toBeFocused();
+});
+
+test("a deleted doc stays hidden across a partial listing, and is forgotten once its source lists without it", async ({ page }) => {
+  await openDeepLink(page, A1);
+  // Deleted here; huginn's listing still lists A3.
+  await page.evaluate((id) => (window as unknown as PageWindow).removeDocRows!(id, "youtube"), A3);
+  await expect(row(page, A3)).toHaveCount(0);
+  // youtube times out: the listing carries no youtube row at all.
+  failing.add(COLLECTIONS.youtube!);
+  await forceRefresh(page);
+  await expect(row(page, L1)).toHaveCount(1);
+  await expect(row(page, A1)).toHaveCount(0);
+  // youtube is back and still lags: A3 stays hidden.
+  failing.clear();
+  await forceRefresh(page);
+  await expect(row(page, A1)).toHaveCount(1);
+  await expect(row(page, A3)).toHaveCount(0);
+  // youtube lists without A3: the key goes, so a re-capture of A3 shows.
+  drop("youtube", A3);
+  await forceRefresh(page);
+  put("youtube", A3, TODAY, "10:00:00");
+  await forceRefresh(page);
+  await expect(row(page, A3)).toHaveCount(1);
+});
+
+test("j does nothing while the prompt modal is up", async ({ page }) => {
+  await openDeepLink(page, A1);
+  await page.locator("#docPanelTitle").click();
+  const backdrop = (on: boolean) => page.evaluate((v) => {
+    document.getElementById("promptModalBackdrop")!.classList.toggle("visible", v);
+  }, on);
+  await backdrop(true);
+  await page.keyboard.press("j");
+  await page.waitForTimeout(300);
+  await expect(current(page)).toHaveAttribute("data-doc-id", A1);
+  await expect(page.locator("#docPanelTitle")).toHaveText(title(A1));
+  // Control: with the modal gone, the same j steps.
+  await backdrop(false);
+  await page.keyboard.press("j");
+  await expect(current(page)).toHaveAttribute("data-doc-id", A2);
+});
+
+test("By category follows a forced refresh and a domain change", async ({ page }) => {
+  await openDeepLink(page, A3);
+  await rail(page).getByRole("button", { name: "By category" }).click();
+  const article = (id: string) => page.locator("#sumCatPanel .sum-cat-article", { hasText: title(id) });
+  await expect(article(A2)).toHaveCount(1);
+  drop("youtube", A2);
+  await forceRefresh(page);
+  await expect(article(A2)).toHaveCount(0);
+  await expect(article(A1)).toHaveCount(1);
+
+  await page.keyboard.press("Escape");
+  await page.locator('#domainFilter .source-chip[data-domain="life"]').click();
+  await expect(page.locator("#sumCatPanel .sum-cat-name")).toHaveText(["health/sleep"]);
+});
+
+test("narrow: folding the rail on an open moves focus to the Latest toggle", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 700 });
+  await openDeepLink(page, A1);
+  const toggle = page.locator("#sumRailToggle");
+  await toggle.click();
+  await row(page, C1).click();
+  await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(C1)}.`);
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(toggle).toBeFocused();
+});
+
+test("a rail whose first listing load failed builds on the next open", async ({ page }) => {
+  failing.add("*");
+  await page.goto(`${BASE}/summaries?doc=${encodeURIComponent(A1)}&source=youtube`);
+  await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(A1)}.`);
+  await expect(page.locator("#sumRailList")).toContainText("Failed to load");
+  failing.clear();
+  await page.evaluate((id) => (window as unknown as PageWindow).openSummaryDoc!(id, "", "youtube"), B1);
+  await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(B1)}.`);
+  await expect(page.locator("#sumRailList .sum-latest-row")).toHaveCount(7);
+  await expect(current(page)).toHaveAttribute("data-doc-id", B1);
 });
