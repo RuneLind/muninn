@@ -64,6 +64,15 @@ export function revealRightPane(): void {
   window.dispatchEvent(new Event("resize"));
 }
 
+/** Leave focus mode — for code about to show something in the RAIL, which
+ *  focus mode hides. The right pane's own collapse is left as it is. */
+export function leaveFocusMode(): void {
+  if (!layoutEl?.classList.contains(FOCUS)) return;
+  layoutEl.classList.remove(FOCUS);
+  syncButtons();
+  window.dispatchEvent(new Event("resize"));
+}
+
 export function initPaneToggles(): void {
   const layout = document.querySelector<HTMLElement>(".wiki-layout");
   if (!layout) return;

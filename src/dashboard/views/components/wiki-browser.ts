@@ -111,7 +111,8 @@ import {
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { railIssuePillsHtml, relationWord } from "./wiki-issue-pills.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
-import { initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
+import { initPaneToggles, leaveFocusMode, revealRightPane } from "./wiki-pane-toggle.ts";
+import { revealScrollTop, rowFullyVisible } from "./wiki-rail-reveal.ts";
 import {
   buildRail,
   foldChipCompactLabel,
@@ -247,6 +248,7 @@ import {
   shortGraphLabel,
   facetKeys,
   filterPages,
+  filtersRevealing,
   folderCounts,
   folderLabelOf,
   followupCount,
@@ -634,6 +636,11 @@ let currentOutgoingTitles: string[] = [];
  *  error) lands. `currentName` is only assigned from that response, so this is the
  *  only signal that the pane is "about to be an article" — see `viewStateOf`. */
 let navInFlight = false;
+/** Set by every page navigation that lands, cleared by the first `renderList`
+ *  that has a listing to draw: that render scrolls the open page's row into
+ *  view. Normally set and consumed in the same render; it waits only when the
+ *  boot listing failed and a later refetch heals it. */
+let revealOnRender = false;
 const filters: WikiFilters = {
   q: "",
   domain: "",
@@ -1832,6 +1839,66 @@ function renderList(): void {
   if (heldBack) countEl.setAttribute("title", cullToggleText(heldBack));
   else countEl.removeAttribute("title");
   paintRetiredToggle();
+  if (revealOnRender && allPages.length) {
+    revealOnRender = false;
+    revealActiveRow(false);
+  }
+}
+
+/**
+ * Scroll the rail so the open page's row is on screen. A page can hold two rows
+ * (an Activity row and its listing row); when either is already wholly visible
+ * nothing moves, so a row the reader just clicked stays under the pointer.
+ * Scrolls `#wikiList` only — `scrollIntoView` would scroll the page as well.
+ * Returns false when the rail has no row for the open page.
+ */
+function revealActiveRow(flash: boolean): boolean {
+  const listEl = document.getElementById("wikiList");
+  if (!listEl) return false;
+  const rows = Array.from(listEl.querySelectorAll<HTMLElement>(".wiki-list-item.active"));
+  if (!rows.length) return false;
+  const box = listEl.getBoundingClientRect();
+  let row = rows.find((r) => rowFullyVisible(box, r.getBoundingClientRect()));
+  if (!row) {
+    row = rows[0]!;
+    const top = revealScrollTop(box, row.getBoundingClientRect(), listEl.scrollTop);
+    if (top !== null) listEl.scrollTop = top;
+  }
+  if (flash) {
+    row.classList.remove("reveal-flash");
+    void row.offsetWidth; // restart the animation on a repeat click
+    row.classList.add("reveal-flash");
+  }
+  return true;
+}
+
+/**
+ * ⌖ Show in list: give the open page a rail row and scroll to it. Clears only
+ * the filters that hide the page (`filtersRevealing`), turns `Show retired` on
+ * for a retired page, and leaves focus mode, which hides the rail.
+ */
+function showOpenPageInList(): void {
+  const page = currentRelPath
+    ? findPageByRelPath(allPages, currentRelPath)
+    : currentName
+      ? findPageByName(allPages, currentName)
+      : undefined;
+  if (!page) return;
+  leaveFocusMode();
+  const next = filtersRevealing(page, filters);
+  if ((Object.keys(next) as (keyof WikiFilters)[]).some((k) => next[k] !== filters[k])) {
+    Object.assign(filters, next);
+    (document.getElementById("wikiSearch") as HTMLInputElement).value = filters.q;
+    writeProjectParam();
+    writeJiraParam();
+    renderPageFacets(false);
+    // After the chip rows, which may clear a project or jira key (`repaintForProject`).
+    refreshCrumbHref();
+    refreshStartBody();
+  }
+  if (page.culled && !showRetired() && !filters.q.trim()) setShowRetired(true);
+  else renderList();
+  revealActiveRow(true);
 }
 
 /** The payload-derived facet renders, in one place so the boot load and a
@@ -2516,6 +2583,10 @@ function renderBreadcrumb(m: WikiListing): void {
     // the wiki this instance may only read — which is the one whose paths get
     // pasted into briefs most.
     copyPathBtnHtml(m) +
+    // ⌖ Show in list — the rail's row for this page, beside Copy path for the
+    // same reason: a utility about where the page is, not about its content.
+    `<button class="wiki-bc-copy wiki-bc-locate" id="wikiLocateBtn" type="button" ` +
+    `title="Show in list" aria-label="Show this page in the list">⌖</button>` +
     // Selection-gated actions (hidden until a selection exists — see maybeShowExplainPill).
     '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>' +
     '<button class="wiki-bc-factcheck" id="wikiFactcheckBtn" style="display:none">✓ Fact check</button>' +
@@ -3689,6 +3760,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       document.getElementById("connBody")!.innerHTML =
         '<div class="wiki-conn-empty">Connections unavailable.</div>';
     });
+  revealOnRender = true;
   renderList();
 }
 
@@ -3854,6 +3926,7 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
       loadSimilar(data.meta);
+      revealOnRender = true;
       renderList();
     })
     .catch((err: Error) => {
@@ -7031,6 +7104,8 @@ document.addEventListener("click", (e) => {
   // listener on the second page the reader opens.
   else if (t.closest("#" + COPY_PATH_BTN_ID))
     copyArticlePath(t.closest("#" + COPY_PATH_BTN_ID) as HTMLButtonElement);
+  // ⌖ Show in list — delegated for the same reason.
+  else if (t.closest("#wikiLocateBtn")) showOpenPageInList();
   else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
   // ↻ claim retry — the row buttons are injected into the answer body by a DOM
   // pass, so they are delegated by ATTRIBUTE rather than by id.
