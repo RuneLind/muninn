@@ -414,8 +414,9 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
 
     /** Called by removeDocRows after a delete: the row goes, and the day
      *  counts with it, even while huginn's listing still lists the doc. The
-     *  delete flow calls it again after its refetch; that call keeps the
-     *  modifiedTime the first one's render recorded. */
+     *  delete flow calls it again after its refetch; that call keeps a
+     *  recorded modifiedTime, but re-adds the key when a re-capture during
+     *  the reindex wait already dropped it (known limit, see the PR). */
     function railForgetDoc(docId, source) {
       var key = railKey({ source: source, id: docId });
       if (!Object.prototype.hasOwnProperty.call(_railDeleted, key)) _railDeleted[key] = null;
@@ -424,8 +425,10 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
 
     /**
      * Whether a listed row is a deleted doc that huginn still lists. The first
-     * listing to show a deleted key records its modifiedTime: that is the
-     * memo the delete's own re-render reads, so it is the deleted row. A later
+     * listing to show a deleted key records its modifiedTime: usually the
+     * memo the delete's own re-render reads, which holds the deleted row. When
+     * that memo never listed the doc, the first listing may already be a
+     * re-capture, which then stays hidden until reload (known limit). A later
      * listing with the same modifiedTime lags, and the row stays hidden; a
      * different one is a re-capture, so the row shows and the key goes. A key
      * never goes on absence: the documents route answers 200 when one source
