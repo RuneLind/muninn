@@ -74,6 +74,27 @@ describe("docPanelHtml askFollowUp", () => {
 });
 
 /**
+ * The flagless header, pinned byte for byte. /search, /research and chat call
+ * `docPanelHtml()` with no arguments; every /summaries control is an opt-in
+ * flag, and this string is what keeps a new flag from leaking into the others.
+ */
+const FLAGLESS_DOC_PANEL_HTML = `
+  <div class="doc-overlay" id="docOverlay" onclick="if(event.target===this)closeDocPanel()">
+    <div class="doc-panel">
+      <div class="doc-panel-header">
+        <button class="doc-panel-close" onclick="closeDocPanel()">&larr; Back</button>
+        <span class="doc-panel-title" id="docPanelTitle"></span>
+        <div class="doc-panel-links" id="docPanelLinks"></div>
+      </div>
+      <div class="doc-panel-body" id="docPanelBody"></div>
+    </div>
+  </div>`;
+
+test("the flagless docPanelHtml() is byte-identical to the pinned golden string", () => {
+  expect(docPanelHtml()).toBe(FLAGLESS_DOC_PANEL_HTML);
+});
+
+/**
  * The export (`src/summaries/export.ts`) renders with the npm `marked` and
  * promises to match the article view, which loads marked from this CDN tag.
  * Two literals, one promise — pinned so a `bun update marked` cannot make the
