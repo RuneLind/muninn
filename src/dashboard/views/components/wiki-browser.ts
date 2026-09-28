@@ -638,8 +638,8 @@ let currentOutgoingTitles: string[] = [];
 let navInFlight = false;
 /** Set by every page navigation that lands, cleared by the first `renderList`
  *  that has a listing to draw: that render scrolls the open page's row into
- *  view. Deferred rather than done at the navigation, because a boot deep link
- *  renders its article before `/api/wiki/pages` has answered. */
+ *  view. Normally set and consumed in the same render; it waits only when the
+ *  boot listing failed and a later refetch heals it. */
 let revealOnRender = false;
 const filters: WikiFilters = {
   q: "",
@@ -1891,8 +1891,10 @@ function showOpenPageInList(): void {
     (document.getElementById("wikiSearch") as HTMLInputElement).value = filters.q;
     writeProjectParam();
     writeJiraParam();
-    refreshCrumbHref();
     renderPageFacets(false);
+    // After the chip rows, which may clear a project or jira key (`repaintForProject`).
+    refreshCrumbHref();
+    refreshStartBody();
   }
   if (page.culled && !showRetired() && !filters.q.trim()) setShowRetired(true);
   else renderList();
