@@ -234,7 +234,7 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
     var _railRead;                // undefined until loaded; null = storage failed
     var _railBuilt = false;       // wired and first render requested
     var _railLoadFailed = false;  // the first render's fetch failed: retry on the next open
-    var _railDeleted = {};        // railKey -> true: deleted here, maybe still in a lagging listing
+    var _railDeleted = {};        // railKey -> the deleted row's modifiedTime; null until a listing shows it
 
     /** The read state, loaded once per page. Any storage failure is null, and
      *  null shows every row as read. */
@@ -413,10 +413,32 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
     }
 
     /** Called by removeDocRows after a delete: the row goes, and the day
-     *  counts with it, even while huginn's listing still lists the doc. */
+     *  counts with it, even while huginn's listing still lists the doc. The
+     *  delete flow calls it again after its refetch; that call keeps the
+     *  modifiedTime the first one's render recorded. */
     function railForgetDoc(docId, source) {
-      _railDeleted[railKey({ source: source, id: docId })] = true;
+      var key = railKey({ source: source, id: docId });
+      if (!Object.prototype.hasOwnProperty.call(_railDeleted, key)) _railDeleted[key] = null;
       railRefresh();
+    }
+
+    /**
+     * Whether a listed row is a deleted doc that huginn still lists. The first
+     * listing to show a deleted key records its modifiedTime: that is the
+     * memo the delete's own re-render reads, so it is the deleted row. A later
+     * listing with the same modifiedTime lags, and the row stays hidden; a
+     * different one is a re-capture, so the row shows and the key goes. A key
+     * never goes on absence: the documents route answers 200 when one source
+     * fails, so an absent row does not prove huginn caught up.
+     */
+    function railHidesDeleted(d) {
+      var key = railKey(d);
+      if (!Object.prototype.hasOwnProperty.call(_railDeleted, key)) return false;
+      var mtime = d.modifiedTime || null;
+      if (_railDeleted[key] === null) _railDeleted[key] = mtime;
+      if (_railDeleted[key] === mtime) return true;
+      delete _railDeleted[key];
+      return false;
     }
 
     /** What has focus inside the rail, as something a rebuild can find again. */
@@ -464,17 +486,8 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
       var chipsEl = document.getElementById('sumRailChips');
       if (!rail || !list || !chipsEl) return;
       var shelfDocs = (allDocs || []).filter(isShelfDoc);
-      var listed = {};
-      var listedSources = {};
-      shelfDocs.forEach(function(d) { listed[railKey(d)] = true; listedSources[d.source] = true; });
-      // A deleted doc the listing has caught up on needs no hiding any more.
-      // A source with no row at all may have failed (a partial listing), so
-      // its keys stay, as in railPrune.
-      Object.keys(_railDeleted).forEach(function(k) {
-        if (listedSources[k.slice(0, k.indexOf('|'))] && !listed[k]) delete _railDeleted[k];
-      });
       var state = railPruneReadState(shelfDocs);
-      var docs = shelfDocs.filter(function(d) { return !_railDeleted[railKey(d)] && matchesDomain(d); });
+      var docs = shelfDocs.filter(function(d) { return !railHidesDeleted(d) && matchesDomain(d); });
       var today = railUtcDay(new Date());
       var initialCutoff = railWindowStart(today);
       var cutoff = _railCutoff && _railCutoff < initialCutoff ? _railCutoff : initialCutoff;

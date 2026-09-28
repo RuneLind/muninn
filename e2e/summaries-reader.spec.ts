@@ -456,6 +456,23 @@ test("focus stays on a chip or moves to the revealed day after a rebuild", async
   await expect(row(page, D1)).toBeFocused();
 });
 
+test("Show older scrolls the rail to the first row of the day it revealed", async ({ page }) => {
+  // Short enough that Show older sits at the rail's bottom edge once focused:
+  // the revealed day's heading takes its place and the row lands below it.
+  await page.setViewportSize({ width: 1280, height: 420 });
+  for (let i = 10; i < 16; i++) put("youtube", `ai/agents/Filler ${i}.md`, YESTERDAY, `07:${i}:00`);
+  await openDeepLink(page, A1);
+  await rail(page).locator(".sum-rail-more").focus();
+  await page.keyboard.press("Enter");
+  await expect(row(page, D1)).toBeFocused();
+  const inView = await page.evaluate((id) => {
+    const r = document.querySelector(`#sumRailList .sum-latest-row[data-doc-id="${CSS.escape(id)}"]`)!.getBoundingClientRect();
+    const col = document.getElementById("sumLatestRail")!.getBoundingClientRect();
+    return r.top >= col.top - 0.5 && r.bottom <= col.bottom + 0.5;
+  }, D1);
+  expect(inView).toBe(true);
+});
+
 test("the sticky rail head never covers the current row", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 420 });
   await openDeepLink(page, C1);
@@ -643,28 +660,57 @@ test("a rebuild keeps the rail's scroll position while a clicked row has focus",
   await expect(row(page, A1)).toBeFocused();
 });
 
-test("a deleted doc stays hidden across a partial listing, and is forgotten once its source lists without it", async ({ page }) => {
-  await openDeepLink(page, A1);
-  // Deleted here; huginn's listing still lists A3.
-  await page.evaluate((id) => (window as unknown as PageWindow).removeDocRows!(id, "youtube"), A3);
-  await expect(row(page, A3)).toHaveCount(0);
-  // youtube times out: the listing carries no youtube row at all.
-  failing.add(COLLECTIONS.youtube!);
-  await forceRefresh(page);
-  await expect(row(page, L1)).toHaveCount(1);
-  await expect(row(page, A1)).toHaveCount(0);
-  // youtube is back and still lags: A3 stays hidden.
-  failing.clear();
-  await forceRefresh(page);
-  await expect(row(page, A1)).toHaveCount(1);
-  await expect(row(page, A3)).toHaveCount(0);
-  // youtube lists without A3: the key goes, so a re-capture of A3 shows.
-  drop("youtube", A3);
-  await forceRefresh(page);
-  put("youtube", A3, TODAY, "10:00:00");
-  await forceRefresh(page);
-  await expect(row(page, A3)).toHaveCount(1);
-});
+// A deleted doc's key holds the deleted row's modifiedTime. Each row is one
+// state of that rule: the delete lands while huginn still lists the doc, then
+// the steps run, each followed by a forced refresh; after the first one the
+// rows are pulled again, as deleteSummaryDoc does after its refetch. The row
+// stays hidden after every step but the last, and the last decides `shown`.
+type DeleteStep = "lag" | "drop" | "fail" | "same" | "new";
+const DELETE_STATES: Array<{ name: string; source: string; id: string; unlisted?: boolean; steps: DeleteStep[]; shown: boolean }> = [
+  { name: "(a) a lagging listing with the same modifiedTime hides it", source: "youtube", id: A3, steps: ["lag"], shown: false },
+  { name: "(b) caught up, then a lagging listing again: still hidden", source: "youtube", id: A3, steps: ["drop", "same"], shown: false },
+  { name: "(c) its source fails, then lags: still hidden", source: "youtube", id: A3, steps: ["fail", "lag"], shown: false },
+  { name: "(d) the only doc of its source, re-captured: shown", source: "x-article", id: L1, steps: ["drop", "new"], shown: true },
+  { name: "(e) a doc beside others in its source, re-captured: shown", source: "youtube", id: A3, steps: ["drop", "new"], shown: true },
+  { name: "(f) the only doc of its source, re-listed with the same modifiedTime: hidden", source: "x-article", id: L1, steps: ["drop", "same"], shown: false },
+  { name: "(g) deleted before the rail listed it: adopts the first listing, then a re-capture shows", source: "youtube", id: "ai/agents/Unlisted.md", unlisted: true, steps: ["lag", "new"], shown: true },
+];
+
+for (const c of DELETE_STATES) {
+  test(`a deleted doc: ${c.name}`, async ({ page }) => {
+    const MTIME = "10:30:00";
+    if (!c.unlisted) {
+      // Pin the target's modifiedTime so "same" and "new" are unambiguous.
+      put(c.source, c.id, TODAY, MTIME);
+    }
+    await openDeepLink(page, A1);
+    // Listed after the rail's listing, so the rail never saw its modifiedTime.
+    if (c.unlisted) put(c.source, c.id, TODAY, MTIME);
+    const todayCount = day(page, TODAY).locator(".sum-latest-day-count");
+    const base = Number(await todayCount.textContent());
+    const removeRows = () =>
+      page.evaluate(([i, s]) => (window as unknown as PageWindow).removeDocRows!(i, s), [c.id, c.source] as const);
+    await removeRows();
+    await expect(row(page, c.id)).toHaveCount(0);
+    for (const [n, step] of c.steps.entries()) {
+      if (step === "drop") drop(c.source, c.id);
+      if (step === "fail") failing.add(COLLECTIONS[c.source]!);
+      if (step === "same") put(c.source, c.id, TODAY, MTIME);
+      if (step === "new") put(c.source, c.id, TODAY, "13:00:00");
+      await forceRefresh(page);
+      failing.clear();
+      if (n === 0) await removeRows();
+      const last = n === c.steps.length - 1;
+      const shown = last && c.shown;
+      await expect(row(page, c.id), `after ${step}`).toHaveCount(shown ? 1 : 0);
+      if (step !== "fail") {
+        // A hidden row leaves the day count; unlisted, the base never had it.
+        const expected = (c.unlisted ? base : base - 1) + (shown ? 1 : 0);
+        await expect(todayCount, `count after ${step}`).toHaveText(String(expected));
+      }
+    }
+  });
+}
 
 test("j does nothing while the prompt modal is up", async ({ page }) => {
   await openDeepLink(page, A1);
