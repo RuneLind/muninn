@@ -324,7 +324,10 @@ describe("Activity drops culled pages — through the store's effective value", 
   });
 });
 
-describe("ONE census-inclusive series head: lint, the rail fold, the reader header, the series menu and editor, continue at", () => {
+// The head is census-inclusive; the `▸`/`continue at:` pointer is not — it
+// skips a culled plan (`seriesContinuePlan`, M2 fix round 1), since the rail
+// hides the page it would point at.
+describe("ONE census-inclusive series head: lint, the rail fold, the reader header, the series menu and editor", () => {
   // Plan M2: the series CENSUS includes culled pages, so a culled member can be
   // the head and name the fold. Lint never EDITS a culled page — it normalises
   // the LIVE members to the head's spelling and label instead.
@@ -408,9 +411,9 @@ describe("ONE census-inclusive series head: lint, the rail fold, the reader head
       header: "WORK",
       menu: "WORK",
       headRel: "",
-      // continue at / `▸` name the newest plan of the whole census — the culled one.
-      latest: "plans/dead.mdx",
-      continueAt: "plans/dead.mdx",
+      // continue at / `▸` skip the culled plan: the newest LIVE plan.
+      latest: "plans/live.mdx",
+      continueAt: "plans/live.mdx",
     });
 
     // Apply the fix: lint goes silent, the surfaces are unchanged.
@@ -420,7 +423,7 @@ describe("ONE census-inclusive series head: lint, the rail fold, the reader head
     expect((await railView("plans/live.mdx")).fold).toBe("WORK");
   });
 
-  test("the newest-PLAN rung picks the head: a culled plan outranks a newer live non-plan for spelling, join and continue at", async () => {
+  test("the newest-PLAN rung picks the head: a culled plan outranks a newer live non-plan for spelling and join", async () => {
     // z-dead is the newest PLAN but not the newest member; a-blog (no plan_status) is newer.
     await write("plans/z-dead.mdx", series("Dead", { date: "2026-09-12", key: "WORK", plan: true, culled: true }, "See [[Blog]]."));
     await write("plans/a-blog.mdx", series("Blog", { date: "2026-09-18", key: "Work" }, "See [[B]] and [[Dead]]."));
@@ -431,7 +434,10 @@ describe("ONE census-inclusive series head: lint, the rail fold, the reader head
     expect(editsOf(fs)).toEqual(["plans/a-blog.mdx series=WORK", "plans/b.mdx series=WORK"]);
     expect(fs.every((f) => f.relPath !== "plans/z-dead.mdx")).toBe(true);
     const view = await railView("plans/a-blog.mdx");
-    expect(view).toMatchObject({ fold: "WORK", header: "WORK", menu: "WORK", latest: "plans/z-dead.mdx", continueAt: "plans/z-dead.mdx" });
+    expect(view).toMatchObject({ fold: "WORK", header: "WORK", menu: "WORK" });
+    // …but no `▸`/continue at: the only plan in the census is culled.
+    expect(view.latest).toBeUndefined();
+    expect(view.continueAt).toBeUndefined();
   });
 
   test("control: a culled member that ALONE declares the series still names it on the rail", async () => {

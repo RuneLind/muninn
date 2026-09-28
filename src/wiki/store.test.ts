@@ -33,6 +33,7 @@ import {
 import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { SWEEP_THRESHOLD } from "./git-dates.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "../dashboard/views/components/wiki-activity-rank.ts";
+import { DEFAULT_CULL_LABELS } from "../dashboard/views/components/wiki-cull-view.ts";
 
 describe("parseFrontmatter", () => {
   test("parses scalars, quoted strings, and inline arrays", () => {
@@ -1017,6 +1018,49 @@ describe("buildWikiIndex", () => {
     );
     const index = await buildWikiIndex(root);
     expect(index.readerConfig?.activity).toEqual({ ...DEFAULT_ACTIVITY_WEIGHTS, planBoost: 10 });
+  });
+
+  test(".wiki-reader.json cullLabels: a valid block resolves over the defaults", async () => {
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ cullLabels: { toggle: "Vis utfasede ({n})", banner: "Utfaset", marker: "Utfaset" } }),
+    );
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig?.cullLabels).toEqual({
+      ...DEFAULT_CULL_LABELS,
+      toggle: "Vis utfasede ({n})",
+      banner: "Utfaset",
+      marker: "Utfaset",
+    });
+  });
+
+  test(".wiki-reader.json cullLabels: a wrong-typed field warns and drops only itself", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        JSON.stringify({ typeLabels: { plan: "Plans" }, cullLabels: { banner: 7, marker: "Utfaset" } }),
+      );
+      const index = await buildWikiIndex(root);
+      expect(index.readerConfig?.cullLabels).toEqual({ ...DEFAULT_CULL_LABELS, marker: "Utfaset" });
+      expect(index.readerConfig?.typeLabels.plan).toBe("Plans");
+      expect(
+        records.some((r) => r.level === "warning" && r.properties.key === "cullLabels.banner"),
+      ).toBe(true);
+    } finally {
+      await reset();
+    }
+  });
+
+  test(".wiki-reader.json with no cullLabels ⇒ the English defaults", async () => {
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ typeMap: { plans: "plan" } }));
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig?.cullLabels).toEqual(DEFAULT_CULL_LABELS);
   });
 
   test(".wiki-reader.json with no activity block ⇒ the defaults, so no consumer merges", async () => {

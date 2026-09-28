@@ -10,6 +10,7 @@ import { projectAtlas } from "../../wiki/atlas.ts";
 import { getSemanticOverlay } from "../../wiki/atlas-semantic.ts";
 import {
   computeClusters,
+  overlayWithout,
   synthesisTopicKey,
   RAIL_MIN_MEMBERS,
   RAIL_BLOB_MAX,
@@ -104,6 +105,7 @@ import {
 // only one of them would split the route from the screen it answers.
 import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "../views/components/wiki-activity-rank.ts";
+import { DEFAULT_CULL_LABELS } from "../views/components/wiki-cull-view.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { sha256, todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
@@ -1425,6 +1427,9 @@ export function registerWikiRoutes(
       // the pages, and a partial block would make the client the second place
       // that knows what a missing knob means.
       activity: index.readerConfig?.activity ?? DEFAULT_ACTIVITY_WEIGHTS,
+      // The words for a culled page, RESOLVED the same way (`parseCullLabels`):
+      // the rail toggle, banner and markers render in the browser.
+      cullLabels: index.readerConfig?.cullLabels ?? DEFAULT_CULL_LABELS,
       // How much of this wiki the WORKED axis covers — `{matched, total,
       // returned}` — or ABSENT when no ledger answer has landed for this root.
       // The client hides the "Worked on" sort option on `matched: 0`, which is
@@ -1563,6 +1568,8 @@ export function registerWikiRoutes(
       for (const m of members) {
         const page = index.resolveRelPath(m);
         if (!page) return c.json({ error: `member "${m}" is not a page in this wiki` }, 400);
+        // A retired (culled) page is not a synthesis source.
+        if (page.culled) return c.json({ error: `member "${m}" is a retired page` }, 400);
         normMembers.push(normalizeRelPath(page.relPath));
       }
       if (normMembers.length < RAIL_MIN_MEMBERS) {
@@ -1583,7 +1590,10 @@ export function registerWikiRoutes(
       if (!overlay) {
         return c.json({ error: "semantic overlay unavailable — cannot confirm candidacy" }, 400);
       }
-      if (!confirmSynthesisCandidate(overlay, normMembers)) {
+      // Candidacy is confirmed without the retired pages, as the reader's rail
+      // computes it: the live part of a cluster is what it drafts.
+      const culled = new Set(index.pages.filter((p) => p.culled).map((p) => normalizeRelPath(p.relPath)));
+      if (!confirmSynthesisCandidate(overlayWithout(overlay, culled), normMembers)) {
         return c.json({ error: "these pages do not form a synthesis candidate" }, 400);
       }
 

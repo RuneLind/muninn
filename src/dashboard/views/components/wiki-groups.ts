@@ -177,6 +177,7 @@ export interface RailGroup {
    *
    * Absent when no member carries a `plan_status` — a series of blogs and
    * archive pages has no latest plan, and marking one would invent a claim.
+   * A culled plan is skipped too ({@link seriesContinuePlan}).
    */
   latestRel?: string;
 }
@@ -542,6 +543,22 @@ export function newestSeriesPlan<T extends SeriesPlanFields>(
 }
 
 /**
+ * The plan the READER is pointed at — the `▸` and `continue at:` — which is
+ * {@link newestSeriesPlan} over the LIVE members only. A culled plan is hidden
+ * from the rail by default, so pointing at one sends the reader to a row that
+ * is not there. Falls back to no pointer when no live plan remains.
+ *
+ * A second function rather than a filter inside {@link newestSeriesPlan}: that
+ * one feeds {@link seriesHead} and lint 8.3, which count culled members on
+ * purpose (a culled page can still name the fold).
+ */
+export function seriesContinuePlan<T extends SeriesPlanFields & Pick<WikiListing, "culled">>(
+  members: readonly T[],
+): T | undefined {
+  return newestSeriesPlan(members.filter((m) => !m.culled));
+}
+
+/**
  * The HEAD of a series — the member whose `series_label:` names it.
  *
  * Absent, the newest plan; absent that too, the newest member. The label is read
@@ -597,7 +614,7 @@ export interface SeriesMembers {
   members: WikiListing[];
   /** The member the label is read off — see {@link seriesHead}. */
   head?: WikiListing;
-  /** The member the `▸` and `continue at:` name — see {@link newestSeriesPlan}. */
+  /** The member the `▸` and `continue at:` name — see {@link seriesContinuePlan}. */
   latest?: WikiListing;
 }
 
@@ -649,7 +666,7 @@ export function seriesMembersOf(
 function describeSeries(members: readonly WikiListing[], nowMs?: number): SeriesMembers {
   const now = nowMs ?? Date.now();
   const sorted = [...members].sort((a, b) => byWorkedDateDesc(a, b, now));
-  return { members: sorted, head: seriesHead(sorted), latest: newestSeriesPlan(sorted) };
+  return { members: sorted, head: seriesHead(sorted), latest: seriesContinuePlan(sorted) };
 }
 
 /** What {@link seriesMembersByFoldKey} reads off a page: the key, the pairing

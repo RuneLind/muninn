@@ -3,6 +3,7 @@ import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { boardClientScript } from "./components/wiki-board-client.ts";
 import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
 import { withWikiParam } from "./components/wiki-param.ts";
+import type { CullLabels } from "./components/wiki-cull-view.ts";
 
 /**
  * `/wiki/issues?wiki=` — the issue board: one row per key a page of the wiki
@@ -12,7 +13,13 @@ import { withWikiParam } from "./components/wiki-param.ts";
  * `refusal` renders the page a wiki with no board gets (404 from the route):
  * no filters, no client, and a way back to the reader.
  */
-export async function renderWikiBoardPage(opts: { wiki: string; label: string; refusal?: string }): Promise<string> {
+export async function renderWikiBoardPage(opts: {
+  wiki: string;
+  label: string;
+  refusal?: string;
+  /** The wiki's resolved `cullLabels` — the keyless table's marker reads it. */
+  cullLabels?: CullLabels;
+}): Promise<string> {
   const readerHref = withWikiParam("/wiki", opts.wiki);
   const body = opts.refusal
     ? `<p class="board-note board-error" id="boardRefusal">${escHtml(opts.refusal)}</p>`
@@ -26,7 +33,7 @@ export async function renderWikiBoardPage(opts: { wiki: string; label: string; r
     <div class="board-scroll" id="boardKeylessWrap"></div>`;
   const script = opts.refusal
     ? ""
-    : `<script>window.__WIKI_BOARD__ = ${escJsonScript({ wiki: opts.wiki })};</script>
+    : `<script>window.__WIKI_BOARD__ = ${escJsonScript({ wiki: opts.wiki, cullLabels: opts.cullLabels })};</script>
   <script>${await boardClientScript()}</script>`;
   return `<!DOCTYPE html>
 <html lang="en">

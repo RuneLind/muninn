@@ -646,13 +646,13 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   Also in the gardener: `sourceRelatedPages` drops a culled page before its
   one-backlink cap, and a component whose
   culled members leave one live page is no 8.2 cluster.
-- **Kept in:** the rail listing (hiding is the reader UI's job), the link graph,
+- **Kept in:** the rail listing (the reader hides it — see Reader UI), the link graph,
   the series census (a culled member can head a series and name the fold,
   and a culled bridge
   still joins a component, so 8.2 never re-coins a series), Connections'
   Linked from / Links to and its mini-graph, the issue graph and the board —
-  marked with the ONE label `CULL_LABEL` ("Retired", `wiki-cull-view.ts`), the
-  hook the per-wiki `cullLabels` replaces. A series that Activity moved shows no
+  marked with the wiki's `cullLabels.marker` (`cullLabels()`, `wiki-cull-view.ts`,
+  default "Retired"). A series that Activity moved shows no
   culled member as a row, in `+N more` or in its roll-up; the Series block does.
 - **Wire.** `culled` rides every `toListing` caller; `cullReason` and
   `supersededBy` (resolved in ANY folder, `resolveSupersededBy`) ride the
@@ -660,6 +660,38 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   resolves in the page's own folder first — the markdown page of its stem
   whatever extension it spells (`b.html` → `b.md`, the page rule 4 folds it
   under), then a spelled extension as written — then wiki-wide; a path form resolves across folders.
+- **Reader UI.** The rail draws from a POOL (`railPool`): live pages only,
+  unless the reader checks `Show retired (N)` or types a search (search still
+  reaches a retired page). Every facet count, family roll-up, attachment chip,
+  the start view (stats, Hubs, Timeline — the Timeline with the query — and the
+  Atlas, filtered client-side by `atlasPoolView`, semantic overlay and cluster
+  rail included; the Atlas reads the pool when its tab opens) and `#wikiCount`
+  (`shown / pool`) is over the pool; the series census is NOT —
+  `groupSeries(filtered, allPages)`, so a hidden member reads as `N of M shown`
+  and a retired head still names the fold. The `▸` and `continue at:` are the
+  exception to the census rule: they skip a retired plan
+  (`seriesContinuePlan`), since the rail hides the page they would name;
+  `newestSeriesPlan`/`seriesHead` and lint stay census-inclusive. N counts the
+  retired pages the current facets select, query aside; `#wikiCount`'s hover is
+  the toggle text with that N, and the toggle hides while N is 0 unless it is
+  checked. A folder whose pages are all retired stays in the folder picker (at
+  0), and an empty rail or Hubs tab offers a reveal control worded as the
+  toggle (`retiredRevealHtml`). The Atlas never sends a retired page as a synthesis
+  source: its Draft synthesis sends only live members (`synthesisMembers`),
+  and `POST /api/wiki/atlas/draft-synthesis` refuses a retired member and
+  confirms candidacy on the overlay without retired pages (`overlayWithout`). The weekly
+  consolidation-gardener still clusters the FULL overlay, so it can label a
+  cluster from a retired page's tags and draft retired sources (known limit).
+  The
+  toggle is the `toggle:retired` mode key in the per-wiki folds store. A retired
+  page opens by direct link and carries a banner (`<banner>: <reason>` plus
+  `<successor> <link>` when `supersededBy` resolved); an explainer's head is
+  drawn from the listing first, so its banner is re-rendered when the page
+  payload lands. Labels are `.wiki-reader.json` `cullLabels`
+  (`toggle` with a `{n}` placeholder, `banner`, `marker`, `successor`), parsed
+  per field by `parseCullLabels` (a bad field warns and drops only itself),
+  shipped resolved on `/api/wiki/pages` and on the board shell, and adopted by
+  the client through `setCullLabels`.
 - **Dates.** The three keys are metadata-only (`git-dates.ts`), so a cull does
   not move a page's update date.
 - **Worked date over `aliases:`.** The claude-usage ledger is keyed by path, so
@@ -676,7 +708,8 @@ Acceptance: `culled.test.ts`, plus cases in `lint.test.ts`,
 `worked-ledger.test.ts`, `wiki-routes.test.ts`, `gardener/wire.test.ts`,
 `wiki-recents.test.ts`, `wiki-activity-rank.test.ts` and the marker sites
 (`wiki-cull-view.test.ts`, `wiki-graph-view.test.ts`,
-`wiki-board-view.test.ts`).
+`wiki-board-view.test.ts`); the reader UI in `wiki-cull-view.test.ts`, the
+`cullLabels` cases in `store.test.ts`, and `e2e/wiki-retired.spec.ts`.
 
 ### Families and months (`wiki-groups.ts`)
 

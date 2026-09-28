@@ -1226,8 +1226,9 @@ export const LIST_EMPTY_HTML = '<div class="wiki-conn-empty">No pages match.</di
  * stamped page, pick a facet matching nothing, and the rail showed session rows
  * and no answer to the question the reader had just asked. Whatever a later
  * change wants to put above the rows, it may not stand in for the answer about
- * the filter.
+ * the filter. `emptyExtra` rides BELOW that answer and only with it (the
+ * retired pages' reveal control).
  */
-export function railListHtml(pagesHtml: string): string {
-  return pagesHtml || LIST_EMPTY_HTML;
+export function railListHtml(pagesHtml: string, emptyExtra = ""): string {
+  return pagesHtml || LIST_EMPTY_HTML + emptyExtra;
 }

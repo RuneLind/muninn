@@ -393,3 +393,53 @@ export function computeClusters(overlay: SemanticOverlay, threshold: number): Ra
   clusters.sort((a, b) => b.size - a.size || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return clusters;
 }
+
+// ── Retired (culled) pages ───────────────────────────────────────────────────
+
+/** The overlay without `pages`: their edges and their per-node entries go.
+ *  Communities stay (the legend gates on rendered pills anyway). A copy — the
+ *  served overlay is cached and shared. */
+export function overlayWithout(overlay: SemanticOverlay, pages: ReadonlySet<string>): SemanticOverlay {
+  if (pages.size === 0) return overlay;
+  const keep = <V>(rec: Record<string, V> | undefined): Record<string, V> | undefined =>
+    rec && Object.fromEntries(Object.entries(rec).filter(([k]) => !pages.has(k)));
+  return {
+    ...overlay,
+    edges: overlay.edges.filter(([a, b]) => !pages.has(a) && !pages.has(b)),
+    nodeCommunity: keep(overlay.nodeCommunity)!,
+    nodeType: keep(overlay.nodeType),
+    nodeTags: keep(overlay.nodeTags),
+  };
+}
+
+/**
+ * The rail's clusters when retired pages are SHOWN. A cluster keeps its retired
+ * members (the reader marks them), but a retired page is never a synthesis
+ * source: the badge and label come from the cluster the LIVE members form on
+ * their own, which is what the draft route confirms against. A cluster whose
+ * live members are not one cluster without the retired pages (a retired page
+ * bridged them) is no candidate. With the retired pages hidden, pass an
+ * overlay already without them and an empty set.
+ */
+export function railClusters(
+  overlay: SemanticOverlay,
+  threshold: number,
+  culled: ReadonlySet<string>,
+): RailCluster[] {
+  const clusters = computeClusters(overlay, threshold);
+  if (culled.size === 0 || !clusters.some((c) => c.members.some((m) => culled.has(m)))) return clusters;
+  const liveByMembers = new Map(
+    computeClusters(overlayWithout(overlay, culled), threshold).map((c) => [c.members.join("\u0000"), c]),
+  );
+  return clusters.map((c) => {
+    const live = synthesisMembers(c, culled);
+    if (live.length === c.members.length || c.tooBroad) return c;
+    const match = liveByMembers.get(live.join("\u0000"));
+    return { ...c, candidate: !!match?.candidate, label: match?.label || c.label };
+  });
+}
+
+/** The pages a Draft synthesis sends for a cluster: its members, retired ones left out. */
+export function synthesisMembers(cluster: Pick<RailCluster, "members">, culled: ReadonlySet<string>): string[] {
+  return cluster.members.filter((m) => !culled.has(m));
+}
