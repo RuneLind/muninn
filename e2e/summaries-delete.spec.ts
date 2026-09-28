@@ -48,6 +48,8 @@ const DOC_TITLE = "Delete this summary";
 const TOPIC_DRAFT = "e2e-summaries-delete-draft";
 const TOPIC_APPLIED = "e2e-summaries-delete-applied";
 const USER_ID = "e2e-summaries-delete";
+/** Today's UTC day, so the doc sits in the Latest rail's default window. */
+const TODAY = new Date().toISOString().slice(0, 10);
 
 let server: ChildProcess | undefined;
 let huginn: Server | undefined;
@@ -89,7 +91,7 @@ async function startFakeHuginn(): Promise<Server> {
       return json({
         documents:
           collection === COLLECTION || collection === OTHER_COLLECTION
-            ? [{ id: DOC_ID, title: DOC_TITLE, date: "2026-09-01", url: "https://example.com/v" }]
+            ? [{ id: DOC_ID, title: DOC_TITLE, date: TODAY, url: "https://example.com/v" }]
             : [],
       });
     }
@@ -213,6 +215,10 @@ test.describe("Summaries: doc-panel delete", () => {
     // Same id, other vertical — must survive the delete (doc ids are collection-relative).
     const otherRow = page.locator(`#shelfList [data-doc-id="${DOC_ID}"][data-source="${OTHER_SOURCE}"]`);
     await expect(otherRow).toHaveCount(1);
+    // The Latest rail's Today group: this doc and its other-vertical namesake.
+    const railToday = page.locator(`#sumRailList .sum-latest-day[data-day="${TODAY}"]`);
+    await expect(railToday.locator(".sum-latest-row")).toHaveCount(2);
+    await expect(railToday.locator(".sum-latest-day-count")).toHaveText("2");
 
     const btn = page.locator("#docPanelDelete");
     await expect(btn).toBeVisible();
@@ -252,6 +258,10 @@ test.describe("Summaries: doc-panel delete", () => {
     await page.waitForTimeout(3000);
     await expect(row).toHaveCount(0);
     await expect(otherRow).toHaveCount(1);
+    // The rail too — its row AND its day count, although the lagging listing
+    // still lists the doc.
+    await expect(railToday.locator(".sum-latest-row")).toHaveCount(1);
+    await expect(railToday.locator(".sum-latest-day-count")).toHaveText("1");
   });
 
   test("a delete whose bookkeeping failed says so in the warning tone and links the review gate", async ({ page }, testInfo) => {

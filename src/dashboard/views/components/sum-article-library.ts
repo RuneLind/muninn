@@ -333,9 +333,9 @@ export function sumArticleLibraryScript(): string {
           if (typeof activeSource !== 'undefined') activeSource = null;
           if (typeof activeShelfCategory !== 'undefined') activeShelfCategory = null;
           renderDomainFilter();
-          loadLibrary();  // rebuild docsByCategory (the rail's By category view) for the new domain
+          var library = loadLibrary();  // rebuild docsByCategory (the rail's By category view) for the new domain
           if (typeof loadShelf === 'function') loadShelf();
-          if (typeof refreshLatestRail === 'function') refreshLatestRail();
+          if (typeof railRefresh === 'function') railRefresh(null, library);
         });
       });
     }
@@ -367,19 +367,22 @@ export function sumArticleLibraryScript(): string {
     // throws on an upstream error so callers show a failure instead of a
     // misleading empty state. Pass force=true to refresh after an ingest
     // completes or a delete lands — a forced refresh also rebuilds the Latest
-    // rail (onSummaryListingRefreshed, sum-latest-rail.ts), synchronously, so a
-    // caller awaiting the refresh sees the rebuilt rail.
+    // rail (railRefresh, sum-latest-rail.ts), synchronously, so a caller
+    // awaiting the refresh sees the rebuilt rail. Only the NEWEST fetch
+    // rebuilds it: an older one settling last carries a staler listing.
     var _sumDocsPromise = null;
+    var _sumDocsSeq = 0;
     function getSummaryDocuments(force) {
       if (force || !_sumDocsPromise) {
+        var seq = ++_sumDocsSeq;
         _sumDocsPromise = fetch('/api/summaries/documents').then(function(res) {
           if (!res.ok) throw new Error('HTTP ' + res.status);
           return res.json();
         }).then(function(data) {
           if (data && data.error) throw new Error(data.error);
           var docs = (data && data.documents) || [];
-          if (force && typeof onSummaryListingRefreshed === 'function') {
-            try { onSummaryListingRefreshed(docs); } catch (e) { console.error('rail rebuild failed:', e); }
+          if (force && seq === _sumDocsSeq && typeof railRefresh === 'function') {
+            try { railRefresh(docs, true); } catch (e) { console.error('rail rebuild failed:', e); }
           }
           return docs;
         }).catch(function(err) {
@@ -414,22 +417,27 @@ export function sumArticleLibraryScript(): string {
       document.getElementById('docOverlay').classList.remove('visible');
       document.body.style.overflow = '';
     }
+    /**
+     * Is something up over the doc panel that owns the keyboard? The share
+     * dialog handles its OWN Escape (cancel a run, then close), and without
+     * this guard one Escape closed the dialog AND the panel behind it,
+     * throwing away an un-copied post. (The dialog also calls
+     * stopImmediatePropagation, but the panel's listener is wired at page load
+     * and the dialog's lazily on first open, so the panel's runs first: the
+     * guard is what actually holds.) The prompt modal has its own
+     * document-level Escape listener (traces-prompt-modal.ts), wired after
+     * this one. The panel's Escape and the Latest rail's j / k both defer.
+     */
+    function docPanelOverlayOpen() {
+      if (document.getElementById('${SHARE_DIALOG_ID}')) return true;
+      var promptBackdrop = document.getElementById('promptModalBackdrop');
+      return !!promptBackdrop && promptBackdrop.classList.contains('visible');
+    }
     document.addEventListener('keydown', function(e) {
       if (e.key !== 'Escape') return;
-      // The share dialog handles its OWN Escape (cancel a run, then close), and
-      // both listeners sit on the document — without this guard one Escape closed
-      // the dialog AND the panel behind it, throwing away an un-copied post. (The
-      // dialog also calls stopImmediatePropagation, but THIS listener is wired at
-      // page load and the dialog's lazily on first open, so ours runs first: the
-      // guard is what actually holds today.)
-      if (document.getElementById('${SHARE_DIALOG_ID}')) return;
-      // The re-run menu and the prompt modal are both dismissed by Escape
-      // before the panel is: closing the panel out from under either one takes
-      // away the thing the reader was reading. The prompt modal has its own
-      // document-level Escape listener (traces-prompt-modal.ts) and this one is
-      // wired first, so returning here lets that one run.
-      var promptBackdrop = document.getElementById('promptModalBackdrop');
-      if (promptBackdrop && promptBackdrop.classList.contains('visible')) return;
+      if (docPanelOverlayOpen()) return;
+      // The re-run menu is dismissed by Escape before the panel is: closing
+      // the panel out from under it takes away the thing the reader was reading.
       if (rerunMenuOpen()) { closeRerunMenu(); return; }
       if (document.getElementById('docOverlay').classList.contains('visible')) {
         closeDocPanel();
@@ -966,6 +974,8 @@ export function sumArticleLibraryScript(): string {
       document.querySelectorAll('[data-doc-id][data-source]').forEach(function(el) {
         if (el.getAttribute('data-doc-id') === docId && el.getAttribute('data-source') === source) el.remove();
       });
+      // The rail re-renders instead, so its day counts and empty days follow.
+      if (typeof railForgetDoc === 'function') railForgetDoc(docId, source);
     }
 
     function deleteWikiUrl(path) {
@@ -1375,7 +1385,7 @@ export function sumArticleLibraryScript(): string {
       bodyEl.scrollTop = 0;
 
       // Left column: move .current in the Latest rail (built on first open).
-      if (typeof railOnOpen === 'function') railOnOpen(docId, source);
+      if (typeof railOnOpen === 'function') railOnOpen(docId, source, myRequest);
       else renderArticleCategories(cat, docId, myRequest);
 
       try {

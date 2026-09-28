@@ -50,9 +50,12 @@ export async function contrastOf(locator: Locator): Promise<number> {
  */
 export async function paintedContrast(locator: Locator): Promise<number> {
   return locator.evaluate((el) => {
+    // A color-mix() computes to `color(srgb r g b / a)` with 0–1 channels,
+    // not `rgb()`; read as 0–255 channels it is near-black.
     const rgba = (c: string) => {
       const n = c.match(/[\d.]+/g)!.map(Number);
-      return { r: n[0]!, g: n[1]!, b: n[2]!, a: n.length > 3 ? n[3]! : 1 };
+      const k = c.startsWith("color(srgb") ? 255 : 1;
+      return { r: n[0]! * k, g: n[1]! * k, b: n[2]! * k, a: n.length > 3 ? n[3]! : 1 };
     };
     const layers: ReturnType<typeof rgba>[] = [];
     for (let n: HTMLElement | null = el as HTMLElement; n; n = n.parentElement) {

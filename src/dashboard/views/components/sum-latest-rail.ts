@@ -7,24 +7,26 @@
  *
  * The rail is built ONCE, when the panel first opens, and is not part of the
  * per-open rewrite: opening a summary only moves `.current`. It re-renders —
- * keeping `.current`, collapsed days and scroll position — when the listing
- * memo is force-refreshed (a delete, a finished capture) or the domain filter
- * changes. The pure logic lives in src/summaries/latest-rail.ts and is
- * injected here with `.toString()`; this file is the DOM half. It shares the
- * page scope with sum-article-library.ts (getSummaryDocuments, matchesDomain,
- * docTitle, sourceBadge, openSummaryDoc, esc). */
+ * keeping `.current`, collapsed days, focus and scroll position — when the
+ * listing memo is force-refreshed (a delete, a finished capture), a delete
+ * pulls a row, or the domain filter changes. The pure logic lives in
+ * src/summaries/latest-rail.ts and is injected here with `.toString()`, as
+ * are the reader's shared key guards from wiki-panes.ts; this file is the DOM
+ * half. It shares the page scope with sum-article-library.ts
+ * (getSummaryDocuments, matchesDomain, docCategory, sourceBadge,
+ * openSummaryDoc, renderArticleCategories, loadLibrary, docPanelOverlayOpen,
+ * _docRequestId, SOURCES, esc) and sum-shelf.ts (isShelfDoc). */
 
-import { RAIL_FUNCTIONS } from "../../../summaries/latest-rail.ts";
-import { SHARE_DIALOG_ID } from "./wiki-share-dialog.ts";
+import { RAIL_FUNCTIONS, RAIL_READ_STORAGE_KEY } from "../../../summaries/latest-rail.ts";
+import { MODAL_SELECTOR, modalOpen, readerKeyRefused } from "./wiki-panes.ts";
 
-/** The one localStorage key the rail's read state lives under. */
-export const RAIL_READ_STORAGE_KEY = "muninn-summaries-read";
+export { RAIL_READ_STORAGE_KEY };
 
 export function sumLatestRailStyles(): string {
   return `
     /* --- Latest rail (doc panel, left column) ---
-       Small text uses --text-soft: on --bg-card, --text-muted measures 4.42:1
-       in light (under AA at 11px); --text-soft measures 5.80:1 light, 7.34:1 dark. */
+       Small text uses --text-soft, not --text-muted, which is under AA on
+       --bg-card in light (e2e-pinned contrast, both themes). */
     .sum-rail { padding-top: 0; }
     .sum-rail-head {
       position: sticky;
@@ -105,8 +107,10 @@ export function sumLatestRailStyles(): string {
     }
     .sum-latest-day > summary::-webkit-details-marker { display: none; }
     .sum-latest-day > summary::marker { content: ""; }
-    .sum-latest-day > summary::before { content: '▸'; display: inline-block; width: 0.9em; }
-    .sum-latest-day[open] > summary::before { content: '▾'; }
+    /* The second content value (alt text '') keeps the glyph out of the
+       accessible name where the browser supports it. */
+    .sum-latest-day > summary::before { content: '▸'; content: '▸' / ''; display: inline-block; width: 0.9em; }
+    .sum-latest-day[open] > summary::before { content: '▾'; content: '▾' / ''; }
     .sum-latest-day > summary:hover { color: var(--text-primary); }
     .sum-latest-day-count { font-weight: 500; }
     .sum-latest-rows { display: flex; flex-direction: column; gap: 2px; }
@@ -123,7 +127,9 @@ export function sumLatestRailStyles(): string {
       text-decoration: none;
       color: var(--text-secondary);
     }
-    .sum-rail .sum-latest-row:hover { background: var(--bg-surface); color: var(--text-primary); text-decoration: none; }
+    /* --bg-hover, not --bg-surface: the column paints --bg-card, which is the
+       same value as --bg-surface in both themes. */
+    .sum-rail .sum-latest-row:hover { background: var(--bg-hover); color: var(--text-primary); text-decoration: none; }
     .sum-rail .sum-latest-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     .sum-rail .sum-latest-row.current {
       background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -158,6 +164,11 @@ export function sumLatestRailStyles(): string {
       color: var(--text-soft);
     }
     .sum-latest-meta .source-badge { padding: 0 6px; font-size: 10px; }
+    /* The shelf's status-coloured badge ink is under AA at 10px on its own
+       tint in light; mixed toward --text-primary it passes in both themes
+       (e2e-pinned: summaries-reader, "rail text and source badges"). */
+    .sum-latest-meta .source-badge[data-source="youtube"] { color: color-mix(in srgb, var(--status-error) 70%, var(--text-primary)); }
+    .sum-latest-meta .source-badge[data-source="x-article"] { color: color-mix(in srgb, var(--status-info) 70%, var(--text-primary)); }
     .sum-latest-cat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sum-rail-more {
       display: block;
@@ -189,8 +200,8 @@ export function sumLatestRailStyles(): string {
       text-align: left;
       cursor: pointer;
     }
-    .sum-rail-toggle::before { content: '▸'; display: inline-block; width: 1.1em; }
-    .sum-rail-toggle[aria-expanded="true"]::before { content: '▾'; }
+    .sum-rail-toggle::before { content: '▸'; content: '▸' / ''; display: inline-block; width: 1.1em; }
+    .sum-rail-toggle[aria-expanded="true"]::before { content: '▾'; content: '▾' / ''; }
     @media (max-width: 1000px) {
       .sum-rail-toggle { display: block; }
       .sum-rail.open .sum-rail-toggle { margin-bottom: 4px; }
@@ -207,6 +218,10 @@ export function sumLatestRailScript(): string {
     // --- rail-fns:start ---
 ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")}
     // --- rail-fns:end ---
+    // The reader's shared key guards (wiki-panes.ts).
+    var MODAL_SELECTOR = ${JSON.stringify(MODAL_SELECTOR)};
+    var readerKeyRefused = ${readerKeyRefused.toString()};
+    var modalOpen = ${modalOpen.toString()};
 
     var RAIL_READ_KEY = ${JSON.stringify(RAIL_READ_STORAGE_KEY)};
     var _railView = 'latest';     // 'latest' | 'category'
@@ -217,7 +232,9 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
     var _railCurrent = '';        // railKey of the open summary
     var _railCurrentDoc = null;   // {docId, source} of the open summary
     var _railRead;                // undefined until loaded; null = storage failed
-    var _railBuilt = false;
+    var _railBuilt = false;       // wired and first render requested
+    var _railLoadFailed = false;  // the first render's fetch failed: retry on the next open
+    var _railDeleted = {};        // railKey -> true: deleted here, maybe still in a lagging listing
 
     /** The read state, loaded once per page. Any storage failure is null, and
      *  null shows every row as read. */
@@ -231,6 +248,11 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
         _railRead = null;
       }
       return _railRead;
+    }
+
+    /** What storage holds NOW (another tab may have written), or null. */
+    function railStoredReadState() {
+      try { return railReadStateParse(localStorage.getItem(RAIL_READ_KEY)); } catch (e) { return null; }
     }
 
     function railWriteReadState(state) {
@@ -249,10 +271,9 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
       if (!state) return;
       var key = railKey({ source: source, id: docId });
       // Merged over what is stored NOW, so a second tab's reads are kept.
-      var stored = null;
-      try { stored = railReadStateParse(localStorage.getItem(RAIL_READ_KEY)); } catch (e) {}
-      var base = stored || state;
+      var base = railStoredReadState() || state;
       if (base.opened.indexOf(key) === -1) railWriteReadState(railMarkOpened(base, key));
+      else _railRead = base;
       var rows = document.querySelectorAll('#sumRailList .sum-latest-row');
       Array.prototype.forEach.call(rows, function(row) {
         if (row.getAttribute('data-rail-key') !== key) return;
@@ -261,10 +282,22 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
       });
     }
 
+    /** Prunes the read state against a full listing, over what is stored NOW
+     *  (another tab's reads survive), and returns the state to render with. */
+    function railPruneReadState(docs) {
+      var state = railReadState();
+      if (!state) return null;
+      var base = railStoredReadState() || state;
+      var pruned = railPrune(base, docs);
+      if (pruned !== base) railWriteReadState(pruned);
+      else _railRead = base;
+      return _railRead;
+    }
+
     /** The rail column's markup — built once per page by openSummaryDoc. */
     function railScaffoldHtml() {
       return '<div class="sum-col-left sum-rail" id="sumLatestRail">' +
-        '<button type="button" class="sum-rail-toggle" id="sumRailToggle" aria-expanded="false" aria-controls="sumRailBody">Latest</button>' +
+        '<button type="button" class="sum-rail-toggle" id="sumRailToggle" aria-expanded="false" aria-controls="sumRailBody" aria-label="Latest summaries">Latest</button>' +
         '<div class="sum-rail-collapsible" id="sumRailBody">' +
           '<div class="sum-rail-head">' +
             '<div class="sum-rail-views" role="group" aria-label="Rail view">' +
@@ -274,7 +307,7 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
             '<div class="sum-rail-pane" data-pane="latest">' +
               '<input type="search" class="sum-rail-filter" id="sumRailFilter" placeholder="Filter" aria-label="Filter latest summaries" autocomplete="off">' +
             '</div>' +
-            '<div class="sum-rail-chips sum-rail-pane" id="sumRailChips" data-pane="latest"></div>' +
+            '<div class="sum-rail-chips sum-rail-pane" id="sumRailChips" data-pane="latest" role="group" aria-label="Show"></div>' +
           '</div>' +
           '<div class="sum-rail-pane" id="sumRailList" data-pane="latest"></div>' +
           '<div class="sum-rail-pane" id="sumCatPanel" data-pane="category" hidden></div>' +
@@ -282,26 +315,37 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
       '</div>';
     }
 
+    /** Below the breakpoint the rail is a collapsible block above the article. */
+    function railNarrow() {
+      return window.matchMedia('(max-width: 1000px)').matches;
+    }
+
+    function railSetOpen(open) {
+      var rail = document.getElementById('sumLatestRail');
+      var toggle = document.getElementById('sumRailToggle');
+      if (!rail) return;
+      rail.classList.toggle('open', open);
+      if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
     /** Wires the rail's controls once, by delegation, so a rebuild of the
      *  list never has to re-bind anything. */
     function railWire() {
       var rail = document.getElementById('sumLatestRail');
-      if (!rail || rail.dataset.wired) return;
-      rail.dataset.wired = '1';
+      if (!rail) return;
       rail.addEventListener('click', function(e) {
         var t = e.target;
-        var toggle = t.closest('#sumRailToggle');
-        if (toggle) {
-          var open = rail.classList.toggle('open');
-          toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (t.closest('#sumRailToggle')) {
+          railSetOpen(!rail.classList.contains('open'));
+          if (rail.classList.contains('open')) railReveal(railCurrentRow());
           return;
         }
         var view = t.closest('.sum-rail-view');
         if (view) { railSetView(view.getAttribute('data-view')); return; }
         var chip = t.closest('.sum-rail-chip');
-        if (chip) { _railChip = chip.getAttribute('data-chip') || 'all'; railRebuild(); return; }
+        if (chip) { _railChip = chip.getAttribute('data-chip') || 'all'; railRefresh(); return; }
         var more = t.closest('.sum-rail-more');
-        if (more) { _railCutoff = more.getAttribute('data-cutoff'); railRebuild(); return; }
+        if (more) { _railCutoff = more.getAttribute('data-cutoff'); railRefresh(); return; }
         var row = t.closest('.sum-latest-row');
         if (row) {
           // A modified click keeps the link's own meaning (a new tab).
@@ -318,7 +362,19 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
         if (d.open) delete _railCollapsed[day]; else _railCollapsed[day] = true;
       }, true);
       var input = document.getElementById('sumRailFilter');
-      if (input) input.addEventListener('input', function() { _railQuery = input.value; railRebuild(); });
+      if (!input) return;
+      input.addEventListener('input', function() { _railQuery = input.value; railRefresh(); });
+      // Escape here clears the filter and stops: the panel's own Escape
+      // listener is on the document and would close the panel.
+      input.addEventListener('keydown', function(e) {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (!input.value) return;
+        input.value = '';
+        _railQuery = '';
+        railRefresh();
+      });
     }
 
     function railSetView(view) {
@@ -331,55 +387,91 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
       rail.querySelectorAll('.sum-rail-pane').forEach(function(p) {
         p.hidden = p.getAttribute('data-pane') !== _railView;
       });
-      if (_railView === 'category') railRenderCategories();
+      if (_railView === 'category') railRenderCategories(_docRequestId);
     }
 
-    function railRenderCategories() {
+    /** \`requestId\` is the open the render belongs to: a render that awaits the
+     *  library bails when a newer open has taken the panel. */
+    function railRenderCategories(requestId) {
       if (_railView !== 'category' || !_railCurrentDoc) return;
-      renderArticleCategories(docCategory(_railCurrentDoc.docId), _railCurrentDoc.docId);
+      renderArticleCategories(docCategory(_railCurrentDoc.docId), _railCurrentDoc.docId, requestId);
     }
 
-    /** Re-renders from the memo. Called on a domain-filter change. */
-    function refreshLatestRail() {
+    /**
+     * Re-renders the rail. \`docs\` is a fresh listing (the memo's force-refresh
+     * hook in getSummaryDocuments), or omitted to re-read the memo. In the By
+     * category view, \`library\` is a docsByCategory rebuild already under way
+     * (a promise), or true to start one.
+     */
+    function railRefresh(docs, library) {
       if (!document.getElementById('sumLatestRail')) return;
-      getSummaryDocuments().then(function(docs) { renderLatestRail(docs); }).catch(function() {});
-      if (_railView === 'category') loadLibrary().then(railRenderCategories);
+      if (docs) renderLatestRail(docs);
+      else getSummaryDocuments().then(function(d) { renderLatestRail(d); }).catch(function() {});
+      if (_railView === 'category' && library) {
+        (library === true ? loadLibrary() : library).then(function() { railRenderCategories(_docRequestId); });
+      }
     }
 
-    /** The memo's force-refresh hook (sum-article-library's getSummaryDocuments):
-     *  runs synchronously with the fresh listing, so a caller that awaits the
-     *  refresh sees the rebuilt rail — the delete flow pulls rows after it. */
-    function onSummaryListingRefreshed(docs) {
-      if (!document.getElementById('sumLatestRail')) return;
-      renderLatestRail(docs);
-      if (_railView === 'category') loadLibrary().then(railRenderCategories);
+    /** Called by removeDocRows after a delete: the row goes, and the day
+     *  counts with it, even while huginn's listing still lists the doc. */
+    function railForgetDoc(docId, source) {
+      _railDeleted[railKey({ source: source, id: docId })] = true;
+      railRefresh();
     }
 
-    function railRebuild() {
-      getSummaryDocuments().then(function(docs) { renderLatestRail(docs); }).catch(function() {});
+    /** What has focus inside the rail, as something a rebuild can find again. */
+    function railFocusMark(chipsEl, list) {
+      var ae = document.activeElement;
+      if (!ae || ae === document.body) return null;
+      if (chipsEl.contains(ae)) return { chip: ae.getAttribute('data-chip') };
+      if (!list.contains(ae)) return null;
+      if (ae.classList.contains('sum-rail-more')) return { day: ae.getAttribute('data-newest') };
+      if (ae.classList.contains('sum-latest-row')) return { key: ae.getAttribute('data-rail-key') };
+      var d = ae.closest('.sum-latest-day');
+      return d ? { summary: d.getAttribute('data-day') } : null;
+    }
+
+    function railFocusRestore(mark, chipsEl, list) {
+      if (!mark) return;
+      var target = null;
+      if (mark.chip) {
+        target = Array.prototype.find.call(chipsEl.querySelectorAll('.sum-rail-chip'), function(c) {
+          return c.getAttribute('data-chip') === mark.chip;
+        }) || chipsEl.querySelector('.sum-rail-chip');
+      } else if (mark.day) {
+        // Show older: land on the first row of the day it revealed.
+        target = list.querySelector('.sum-latest-day[data-day="' + mark.day + '"] .sum-latest-row') ||
+          list.querySelector('.sum-rail-more');
+      } else if (mark.key) {
+        target = Array.prototype.find.call(list.querySelectorAll('.sum-latest-row'), function(r) {
+          return r.getAttribute('data-rail-key') === mark.key;
+        });
+      } else if (mark.summary) {
+        target = list.querySelector('.sum-latest-day[data-day="' + mark.summary + '"] > summary');
+      }
+      if (!target) return;
+      target.focus({ preventScroll: true });
+      if (target.classList.contains('sum-latest-row')) railReveal(target);
     }
 
     /** Builds the rail's chips and list from a listing. Keeps .current, the
-     *  closed day groups and the scroll position. */
+     *  closed day groups, focus and the scroll position. */
     function renderLatestRail(allDocs, opts) {
       var rail = document.getElementById('sumLatestRail');
       var list = document.getElementById('sumRailList');
       var chipsEl = document.getElementById('sumRailChips');
       if (!rail || !list || !chipsEl) return;
-      _railBuilt = true;
-      var shelfDocs = (allDocs || []).filter(function(d) {
-        return d && d.id && d.id.indexOf('/') !== -1 && /\\.md$/.test(d.id);
-      });
-      var state = railReadState();
-      if (state && shelfDocs.length) {
-        var pruned = railPrune(state, shelfDocs);
-        if (pruned !== state) railWriteReadState(pruned);
-        state = _railRead;
-      }
-      var docs = shelfDocs.filter(matchesDomain);
-      var today = railLocalDay(new Date());
-      var initialCutoff = railInitialCutoff(today);
+      var shelfDocs = (allDocs || []).filter(isShelfDoc);
+      var listed = {};
+      shelfDocs.forEach(function(d) { listed[railKey(d)] = true; });
+      // A deleted doc the listing has caught up on needs no hiding any more.
+      Object.keys(_railDeleted).forEach(function(k) { if (!listed[k]) delete _railDeleted[k]; });
+      var state = railPruneReadState(shelfDocs);
+      var docs = shelfDocs.filter(function(d) { return !_railDeleted[railKey(d)] && matchesDomain(d); });
+      var today = railUtcDay(new Date());
+      var initialCutoff = railWindowStart(today);
       var cutoff = _railCutoff && _railCutoff < initialCutoff ? _railCutoff : initialCutoff;
+      var focus = railFocusMark(chipsEl, list);
 
       // Chips: All, Unread (only with a read state), the four busiest
       // categories of the last 14 days. A chip that is gone resets to All.
@@ -400,53 +492,91 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
         var rows = g.docs.map(function(d) {
           var key = railKey(d);
           var cur = key === _railCurrent;
+          var t = railTitle(d.id);
           var href = '/summaries?doc=' + encodeURIComponent(d.id) + '&source=' + encodeURIComponent(d.source);
           return '<a class="sum-latest-row' + (cur ? ' current' : '') + '" href="' + esc(href) + '"' +
-            (cur ? ' aria-current="true"' : '') +
+            (cur ? ' aria-current="true"' : '') + ' title="' + esc(t) + '"' +
             ' data-rail-key="' + esc(key) + '" data-doc-id="' + esc(d.id) + '" data-doc-url="' + esc(d.url || '') + '" data-source="' + esc(d.source) + '">' +
             '<span class="sum-latest-title">' +
-              (railIsUnread(state, d) ? '<span class="sum-latest-dot" title="Unread" aria-label="Unread"></span>' : '') +
-              esc(railTitle(d.id)) +
+              (railIsUnread(state, d) ? '<span class="sum-latest-dot" role="img" title="Unread" aria-label="Unread"></span>' : '') +
+              esc(t) +
             '</span>' +
             '<span class="sum-latest-meta">' + sourceBadge(d.source) +
               '<span class="sum-latest-cat">' + esc(railCategoryLabel(railCategory(d.id))) + '</span>' +
             '</span>' +
           '</a>';
         }).join('');
+        var label = railDayLabel(g.day, today);
+        var n = g.docs.length;
         return '<details class="sum-latest-day" data-day="' + esc(g.day) + '"' + (_railCollapsed[g.day] ? '' : ' open') + '>' +
-          '<summary><span>' + esc(railDayLabel(g.day, today)) + '</span>' +
-          '<span class="sum-latest-day-count">' + g.docs.length + '</span></summary>' +
+          '<summary aria-label="' + esc(label + ', ' + n + (n === 1 ? ' summary' : ' summaries')) + '">' +
+            '<span>' + esc(label) + '</span><span class="sum-latest-day-count">' + n + '</span></summary>' +
           '<div class="sum-latest-rows">' + rows + '</div>' +
         '</details>';
       }).join('');
       if (win.newestHidden) {
-        html += '<button type="button" class="sum-rail-more" data-cutoff="' + esc(railNextCutoff(win.newestHidden)) + '">' +
-          'Show older (' + win.hidden + ')</button>';
+        html += '<button type="button" class="sum-rail-more" data-cutoff="' + esc(railWindowStart(win.newestHidden)) + '"' +
+          ' data-newest="' + esc(win.newestHidden) + '">Show older (' + win.hidden + ')</button>';
       }
       if (!html) html = '<div class="sum-rail-empty">No summaries match.</div>';
 
       // Only the list's children are replaced, so the column keeps its own
       // scrollTop (e2e-pinned) and the filter box keeps focus.
       list.innerHTML = html;
-      if (opts && opts.scrollToCurrent) railScrollToCurrent();
+      railFocusRestore(focus, chipsEl, list);
+      if (opts && opts.scrollToCurrent) railReveal(railCurrentRow());
     }
 
-    function railScrollToCurrent() {
-      var cur = document.querySelector('#sumRailList .sum-latest-row.current');
-      if (cur && typeof cur.scrollIntoView === 'function') cur.scrollIntoView({ block: 'nearest' });
+    /** Is the row on screen as far as layout goes? A collapsed narrow rail
+     *  gives it no box; a closed day may still give it one (Chromium hides
+     *  closed details content with content-visibility), so check both. */
+    function railRowShown(row) {
+      return !!row && row.getClientRects().length > 0 && !row.closest('details:not([open])');
+    }
+
+    function railCurrentRow() {
+      return document.querySelector('#sumRailList .sum-latest-row.current');
+    }
+
+    /** Scrolls a row into view in whatever scrolls it: the column when wide,
+     *  where the sticky head sits over the top of the scrollport; the panel
+     *  body when narrow and open. A row that is not rendered (a collapsed
+     *  narrow rail, a closed day) scrolls nothing, so an open never moves the
+     *  panel body away from the article. */
+    function railReveal(row) {
+      var rail = document.getElementById('sumLatestRail');
+      if (!rail || !railRowShown(row)) return;
+      var head = rail.querySelector('.sum-rail-head');
+      rail.style.scrollPaddingTop = head && getComputedStyle(head).position === 'sticky'
+        ? (head.offsetHeight + 4) + 'px' : '';
+      if (typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
     }
 
     /** Called by openSummaryDoc: moves .current, marks the row read, and
-     *  builds the rail the first time the panel opens. */
-    function railOnOpen(docId, source) {
+     *  builds the rail the first time the panel opens. \`requestId\` is that
+     *  open's, for the By category render. */
+    function railOnOpen(docId, source, requestId) {
       _railCurrent = railKey({ source: source, id: docId });
       _railCurrentDoc = { docId: docId, source: source };
       if (SOURCES[source]) railMarkRead(source, docId);
-      if (!_railBuilt) {
-        railWire();
+      var rail = document.getElementById('sumLatestRail');
+      // Narrow: an open from the expanded rail is a choice made — fold the
+      // rail so the article, not the list, is what the reader sees.
+      if (rail && railNarrow() && rail.classList.contains('open')) {
+        var hadFocus = rail.contains(document.activeElement);
+        railSetOpen(false);
+        if (hadFocus) document.getElementById('sumRailToggle').focus({ preventScroll: true });
+        var body = document.getElementById('docPanelBody');
+        if (body) body.scrollTop = 0;
+      }
+      if (!_railBuilt || _railLoadFailed) {
+        if (!_railBuilt) railWire();
+        _railBuilt = true;
+        _railLoadFailed = false;
         getSummaryDocuments().then(function(docs) {
           renderLatestRail(docs, { scrollToCurrent: true });
         }).catch(function(err) {
+          _railLoadFailed = true;
           var list = document.getElementById('sumRailList');
           if (list) list.innerHTML = '<div class="sum-rail-empty">Failed to load: ' + esc(err.message || String(err)) + '</div>';
         });
@@ -456,40 +586,46 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
           row.classList.toggle('current', on);
           if (on) row.setAttribute('aria-current', 'true'); else row.removeAttribute('aria-current');
         });
-        railScrollToCurrent();
+        railReveal(railCurrentRow());
       }
-      railRenderCategories();
+      railRenderCategories(requestId);
     }
 
     // j / k: step through the rows the rail shows, opening each in place.
     document.addEventListener('keydown', function(e) {
       if (e.key !== 'j' && e.key !== 'k') return;
       var overlay = document.getElementById('docOverlay');
-      var ae = document.activeElement;
-      var promptBackdrop = document.getElementById('promptModalBackdrop');
+      var t = e.target;
       var action = railKeyAction({
         key: e.key,
-        altKey: e.altKey,
-        ctrlKey: e.ctrlKey,
-        metaKey: e.metaKey,
-        panelOpen: !!overlay && overlay.classList.contains('visible'),
-        editing: !!ae && (/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) || !!ae.isContentEditable),
-        dialogOpen: !!document.getElementById('${SHARE_DIALOG_ID}') ||
-          (!!promptBackdrop && promptBackdrop.classList.contains('visible')) ||
-          !!document.querySelector('dialog[open]'),
-        menuOpen: Array.prototype.some.call(document.querySelectorAll('[role="menu"]'), function(m) {
-          return !m.hidden && m.offsetParent !== null;
+        refused: readerKeyRefused({
+          key: e.key,
+          ctrlKey: e.ctrlKey,
+          metaKey: e.metaKey,
+          altKey: e.altKey,
+          repeat: e.repeat,
+          targetTag: t && t.tagName,
+          targetEditable: !!(t && t.isContentEditable),
+          targetInDialog: !!(t && t.closest && t.closest('[aria-modal="true"], dialog[open]')) || modalOpen(document),
         }),
+        panelOpen: !!overlay && overlay.classList.contains('visible'),
+        overlayOpen: docPanelOverlayOpen(),
       });
       if (!action || _railView !== 'latest') return;
-      var rows = Array.prototype.slice.call(document.querySelectorAll('#sumRailList details[open] .sum-latest-row'));
+      // Only rows that are rendered: a closed day or a collapsed narrow rail
+      // hides its rows, and j must not open what the reader cannot see.
+      var rows = Array.prototype.filter.call(document.querySelectorAll('#sumRailList .sum-latest-row'), railRowShown);
       var at = -1;
       rows.forEach(function(r, i) { if (r.classList.contains('current')) at = i; });
       var next = railStep(rows.length, at, action);
       if (next < 0) return;
       e.preventDefault();
       var row = rows[next];
+      var ae = document.activeElement;
+      var focusFollows = !!ae && !!ae.classList && ae.classList.contains('sum-latest-row');
       openSummaryDoc(row.getAttribute('data-doc-id'), row.getAttribute('data-doc-url'), row.getAttribute('data-source'));
+      // Focus moves with .current, so Enter opens the row the reader is on.
+      if (focusFollows && railRowShown(row)) row.focus({ preventScroll: true });
     });
   `;
 }

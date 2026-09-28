@@ -7,17 +7,16 @@ import {
   railDayLabel,
   railFilter,
   railGroup,
-  railInitialCutoff,
   railIsUnread,
   railKey,
   railKeyAction,
-  railLocalDay,
   railMarkOpened,
-  railNextCutoff,
   railPrune,
   railReadStateInit,
   railReadStateParse,
   railStep,
+  railUtcDay,
+  railWindowStart,
   type RailDoc,
   type RailKeyContext,
 } from "./latest-rail.ts";
@@ -41,8 +40,8 @@ describe("latest rail: days", () => {
   test("railAddDays crosses month and year ends", () => {
     expect(railAddDays("2026-03-01", -1)).toBe("2026-02-28");
     expect(railAddDays("2026-12-31", 1)).toBe("2027-01-01");
-    expect(railInitialCutoff("2026-09-28")).toBe("2026-09-15");
-    expect(railNextCutoff("2026-08-20")).toBe("2026-08-07");
+    expect(railWindowStart("2026-09-28")).toBe("2026-09-15");
+    expect(railWindowStart("2026-08-20")).toBe("2026-08-07");
   });
 
   test("labels: Today, Yesterday, then a weekday date, with the year only when it differs", () => {
@@ -52,9 +51,9 @@ describe("latest rail: days", () => {
     expect(railDayLabel("2025-12-31", "2026-01-02")).toBe("Wed 31 Dec 2025");
   });
 
-  test("railLocalDay is the local calendar day, not the UTC one", () => {
-    const d = new Date(2026, 8, 28, 0, 30);
-    expect(railLocalDay(d)).toBe("2026-09-28");
+  test("railUtcDay is the UTC day, whatever the local one", () => {
+    expect(railUtcDay(new Date(Date.UTC(2026, 8, 28, 23, 30)))).toBe("2026-09-28");
+    expect(railUtcDay(new Date(Date.UTC(2026, 8, 29, 0, 30)))).toBe("2026-09-29");
   });
 });
 
@@ -89,7 +88,7 @@ describe("latest rail: ordering and grouping", () => {
     expect(win.hidden).toBe(2);
     expect(win.newestHidden).toBe("2026-09-01");
     // Show older reveals the newest hidden day even across a gap.
-    const more = railGroup(docs, railNextCutoff(win.newestHidden!));
+    const more = railGroup(docs, railWindowStart(win.newestHidden!));
     expect(more.days.map((g) => g.day)).toEqual(["2026-09-28", "2026-09-26", "2026-09-01"]);
     expect(more.newestHidden).toBe("2026-08-01");
     expect(railGroup(docs, "2026-01-01").newestHidden).toBeNull();
@@ -110,10 +109,10 @@ describe("latest rail: ordering and grouping", () => {
       doc("ai/old/k.md", "2026-08-01"),
     ];
     expect(railBusiestCategories(docs, "2026-09-15", 4)).toEqual([
-      { key: "ai/agents", label: "agents", count: 3 },
-      { key: "ai/tools", label: "ai/tools", count: 2 },
-      { key: "health/sleep", label: "sleep", count: 1 },
-      { key: "life/tools", label: "life/tools", count: 1 },
+      { key: "ai/agents", label: "agents" },
+      { key: "ai/tools", label: "ai/tools" },
+      { key: "health/sleep", label: "sleep" },
+      { key: "life/tools", label: "life/tools" },
     ]);
   });
 });
@@ -197,31 +196,14 @@ describe("latest rail: filter", () => {
 });
 
 describe("latest rail: j / k", () => {
-  const base: RailKeyContext = {
-    key: "j",
-    altKey: false,
-    ctrlKey: false,
-    metaKey: false,
-    panelOpen: true,
-    editing: false,
-    dialogOpen: false,
-    menuOpen: false,
-  };
+  const base: RailKeyContext = { key: "j", refused: false, panelOpen: true, overlayOpen: false };
 
   test("j is next and k is prev, only with the panel open and nothing else focused", () => {
     expect(railKeyAction(base)).toBe("next");
     expect(railKeyAction({ ...base, key: "k" })).toBe("prev");
     expect(railKeyAction({ ...base, key: "J" })).toBeNull();
     expect(railKeyAction({ ...base, key: "x" })).toBeNull();
-    for (const off of [
-      { panelOpen: false },
-      { editing: true },
-      { dialogOpen: true },
-      { menuOpen: true },
-      { metaKey: true },
-      { ctrlKey: true },
-      { altKey: true },
-    ]) {
+    for (const off of [{ panelOpen: false }, { refused: true }, { overlayOpen: true }]) {
       expect(railKeyAction({ ...base, ...off })).toBeNull();
     }
   });
@@ -234,5 +216,44 @@ describe("latest rail: j / k", () => {
     expect(railStep(5, 4, "next")).toBe(-1);
     expect(railStep(5, 0, "prev")).toBe(-1);
     expect(railStep(0, -1, "next")).toBe(-1);
+  });
+});
+
+describe("latest rail: impossible dates (fix round 1)", () => {
+  test("railDay refuses a day the calendar does not have", () => {
+    expect(railDay("2026-02-30")).toBeNull();
+    expect(railDay("2026-13-01")).toBeNull();
+    expect(railDay("2026-00-10")).toBeNull();
+    expect(railDay("2024-02-29")).toBe("2024-02-29");
+    expect(railDay("2026-02-30T10:00:00Z")).toBeNull();
+  });
+
+  test("day arithmetic is right for years under 100, so Show older reveals them", () => {
+    expect(railAddDays("0099-12-31", -13)).toBe("0099-12-18");
+    expect(railAddDays("0050-01-10", -13)).toBe("0049-12-28");
+    const docs = [doc("ai/a/New.md", "2026-09-28"), doc("ai/a/Ancient.md", "0099-12-31")];
+    const win = railGroup(docs, "2026-09-15");
+    expect(win.newestHidden).toBe("0099-12-31");
+    expect(railGroup(docs, railWindowStart(win.newestHidden!)).hidden).toBe(0);
+  });
+
+  test("a stored watermark that is not a real day starts over", () => {
+    for (const wm of ["2026-99-99", "9999-99-99", "2026-02-30"]) {
+      const raw = JSON.stringify({ watermark: wm, opened: [] });
+      expect(railReadStateParse(raw)).toBeNull();
+      expect(railReadStateInit(raw, "2026-09-28").state.watermark).toBe("2026-09-28");
+    }
+  });
+});
+
+describe("latest rail: prune after a partial listing (fix round 1)", () => {
+  test("keys of a source the listing did not return are kept", () => {
+    const state = {
+      watermark: "2026-09-20",
+      opened: ["youtube|ai/a/Keep.md", "youtube|ai/a/Gone.md", "x-article|ai/a/Tweet.md"],
+    };
+    // x-article timed out: the listing carries youtube rows only.
+    const docs = [doc("ai/a/Keep.md", "2026-09-25")];
+    expect(railPrune(state, docs).opened).toEqual(["youtube|ai/a/Keep.md", "x-article|ai/a/Tweet.md"]);
   });
 });

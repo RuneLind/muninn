@@ -8,13 +8,17 @@
  * with `.toString()`. A function here may call only other functions in this
  * file, and every one of them is in `RAIL_FUNCTIONS` below.
  *
- * Two day notions, on purpose:
- * - A row's day is its stored `date`, a UTC calendar day. The reader's own
- *   "today" (local) only decides the labels and the 14-day window.
- * - The unread watermark is a UTC day, so it compares with `date` directly.
- *   `modifiedTime` is never read for unread state: a re-run or a backfill
- *   rewrites it and must not mark a row unread again.
+ * One day notion: a row's day is its stored `date` prefix, and "Today", the
+ * 14-day window and the unread watermark are all the UTC day, so they compare
+ * with it directly. The stored `date` is usually a UTC day, but not always:
+ * huginn falls back to the file's modifiedTime (host-local) when a document
+ * has no frontmatter date, and the anthropic vertical stores the post's own
+ * date. `modifiedTime` is never read for unread state: a re-run or a backfill
+ * rewrites it and must not mark a row unread again.
  */
+
+/** The one localStorage key the rail's read state lives under. */
+export const RAIL_READ_STORAGE_KEY = "muninn-summaries-read";
 
 export interface RailDoc {
   id: string;
@@ -47,42 +51,47 @@ export interface RailReadState {
 export interface RailCategory {
   key: string;
   label: string;
-  count: number;
+}
+
+/** The UTC midnight of year/month/day. `Date.UTC` maps years 0–99 to the
+ *  1900s; `setUTCFullYear` does not. Out-of-range parts roll over. */
+export function railDate(y: number, m: number, d: number): Date {
+  const dt = new Date(0);
+  dt.setUTCFullYear(y, m - 1, d);
+  return dt;
+}
+
+/** True for a `YYYY-MM-DD` string naming a day the calendar has. */
+export function railValidDay(day: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return false;
+  const dt = railDate(Number(m[1]), Number(m[2]), Number(m[3]));
+  return dt.getUTCFullYear() === Number(m[1]) && dt.getUTCMonth() + 1 === Number(m[2]) && dt.getUTCDate() === Number(m[3]);
 }
 
 /** The `YYYY-MM-DD` day a stored date names, or null for anything else. */
 export function railDay(date: unknown): string | null {
   if (typeof date !== "string") return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(date);
-  return m ? m[1] + "-" + m[2] + "-" + m[3] : null;
+  const day = date.slice(0, 10);
+  return railValidDay(day) ? day : null;
 }
 
 /** `day` moved by `n` calendar days. */
 export function railAddDays(day: string, n: number): string {
   const p = day.split("-").map(Number);
-  return new Date(Date.UTC(p[0]!, p[1]! - 1, p[2]! + n)).toISOString().slice(0, 10);
+  return railDate(p[0]!, p[1]!, p[2]! + n).toISOString().slice(0, 10);
 }
 
-/** The UTC day of an instant — the watermark's unit. */
+/** The UTC day of an instant: the unit of "Today", the window and the watermark. */
 export function railUtcDay(now: Date): string {
   return now.toISOString().slice(0, 10);
 }
 
-/** The reader's local calendar day — what "Today" means in a heading. */
-export function railLocalDay(now: Date): string {
-  const pad = (n: number) => (n < 10 ? "0" : "") + n;
-  return now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate());
-}
-
-/** The first day of the default window: today and the 13 days before it. */
-export function railInitialCutoff(today: string): string {
-  return railAddDays(today, -13);
-}
-
-/** The cutoff after "Show older": the newest hidden day and the 13 before it,
- *  so every click reveals at least one day even across a gap. */
-export function railNextCutoff(newestHidden: string): string {
-  return railAddDays(newestHidden, -13);
+/** The first day of a window ending on `day`: that day and the 13 before it.
+ *  The default window ends today; "Show older" ends one on the newest hidden
+ *  day, so every click reveals at least one day even across a gap. */
+export function railWindowStart(day: string): string {
+  return railAddDays(day, -13);
 }
 
 /** `Today`, `Yesterday`, else `Fri 26 Sep` (with the year when it differs). */
@@ -90,7 +99,7 @@ export function railDayLabel(day: string, today: string): string {
   if (day === today) return "Today";
   if (day === railAddDays(today, -1)) return "Yesterday";
   const p = day.split("-").map(Number);
-  const dt = new Date(Date.UTC(p[0]!, p[1]! - 1, p[2]!));
+  const dt = railDate(p[0]!, p[1]!, p[2]!);
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const year = day.slice(0, 4) === today.slice(0, 4) ? "" : " " + p[0];
@@ -181,7 +190,7 @@ export function railBusiestCategories(docs: RailDoc[], since: string, n: number)
   }
   return top.map((key) => {
     const label = railCategoryLabel(key);
-    return { key, label: labels[label]! > 1 ? key : label, count: counts[key]! };
+    return { key, label: labels[label]! > 1 ? key : label };
   });
 }
 
@@ -225,7 +234,7 @@ export function railReadStateParse(raw: unknown): RailReadState | null {
   }
   if (!v || typeof v !== "object") return null;
   const o = v as { watermark?: unknown; opened?: unknown };
-  if (typeof o.watermark !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(o.watermark)) return null;
+  if (typeof o.watermark !== "string" || !railValidDay(o.watermark)) return null;
   if (!Array.isArray(o.opened)) return null;
   return { watermark: o.watermark, opened: o.opened.filter((k): k is string => typeof k === "string") };
 }
@@ -254,14 +263,19 @@ export function railMarkOpened(state: RailReadState, key: string): RailReadState
 /**
  * Drops opened keys that no longer matter: a row the listing no longer has
  * (deleted), or one dated before the watermark (read anyway). Pass the FULL
- * listing, never a filtered one, and never an empty one — an empty listing is
- * a failed load, not a deleted archive.
+ * listing, never a filtered one. A key whose source has no row in the listing
+ * is kept: the listing answers 200 with the sources that loaded when one
+ * times out, so a missing source is a failed load, not a deleted vertical.
  */
 export function railPrune(state: RailReadState, docs: RailDoc[]): RailReadState {
-  if (docs.length === 0) return state;
   const days: Record<string, string> = {};
-  for (const doc of docs) days[railKey(doc)] = railDay(doc.date) || "";
+  const sources: Record<string, true> = {};
+  for (const doc of docs) {
+    days[railKey(doc)] = railDay(doc.date) || "";
+    sources[doc.source] = true;
+  }
   const opened = state.opened.filter((key) => {
+    if (!Object.prototype.hasOwnProperty.call(sources, key.slice(0, key.indexOf("|")))) return true;
     if (!Object.prototype.hasOwnProperty.call(days, key)) return false;
     const day = days[key];
     return !day || day >= state.watermark;
@@ -271,24 +285,20 @@ export function railPrune(state: RailReadState, docs: RailDoc[]): RailReadState 
 
 export interface RailKeyContext {
   key: string;
-  altKey: boolean;
-  ctrlKey: boolean;
-  metaKey: boolean;
+  /** The reader's shared refusal (`readerKeyRefused` in wiki-panes.ts): a
+   *  modifier, key repeat, a typing target, or a modal dialog or menu. */
+  refused: boolean;
   /** The doc panel is open. */
   panelOpen: boolean;
-  /** Focus is in an input, textarea, select or contenteditable element. */
-  editing: boolean;
-  /** A dialog is open over the panel (share dialog, prompt modal, <dialog>). */
-  dialogOpen: boolean;
-  /** A `role="menu"` popup is open. */
-  menuOpen: boolean;
+  /** Something the doc panel's Escape also defers to is up over the panel
+   *  (the share dialog, the prompt modal). */
+  overlayOpen: boolean;
 }
 
 /** `next` for `j`, `prev` for `k`, null when the key is not the rail's. */
 export function railKeyAction(ctx: RailKeyContext): "next" | "prev" | null {
   if (ctx.key !== "j" && ctx.key !== "k") return null;
-  if (ctx.altKey || ctx.ctrlKey || ctx.metaKey) return null;
-  if (!ctx.panelOpen || ctx.editing || ctx.dialogOpen || ctx.menuOpen) return null;
+  if (ctx.refused || !ctx.panelOpen || ctx.overlayOpen) return null;
   return ctx.key === "j" ? "next" : "prev";
 }
 
@@ -307,12 +317,12 @@ export function railStep(count: number, current: number, action: "next" | "prev"
 /** Every function the page script needs, in dependency order. The injection
  *  and its guard test both read this list. */
 export const RAIL_FUNCTIONS = [
+  railDate,
+  railValidDay,
   railDay,
   railAddDays,
   railUtcDay,
-  railLocalDay,
-  railInitialCutoff,
-  railNextCutoff,
+  railWindowStart,
   railDayLabel,
   railTitle,
   railCategory,

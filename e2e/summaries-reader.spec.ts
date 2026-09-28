@@ -23,7 +23,8 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
-import { railAddDays, railDayLabel } from "../src/summaries/latest-rail.ts";
+import { RAIL_READ_STORAGE_KEY, railAddDays, railDayLabel } from "../src/summaries/latest-rail.ts";
+import { paintedContrast } from "./contrast.ts";
 
 const PORT = e2ePort("summaries-reader");
 const HUGINN_PORT = e2ePort("summaries-reader/huginn");
@@ -47,6 +48,7 @@ interface FakeDoc {
 const COLLECTIONS: Record<string, string> = {
   youtube: "youtube-summaries",
   "x-article": "x-articles",
+  vimeo: "vimeo-summaries",
 };
 
 /** collection -> id -> doc. Mutated by `put`/`drop` and reset per test. */
@@ -200,7 +202,7 @@ test("unread dots: today is unread on a first visit, opening marks read, and it 
   await openDeepLink(page, A1);
   const dot = (id: string) => row(page, id).locator(".sum-latest-dot");
   // The watermark is today's UTC day: today's rows are unread, older rows read.
-  const stored = await page.evaluate(() => localStorage.getItem("muninn-summaries-read"));
+  const stored = await page.evaluate((k) => localStorage.getItem(k), RAIL_READ_STORAGE_KEY);
   expect(JSON.parse(stored!).watermark).toBe(TODAY);
   await expect(dot(A1)).toHaveCount(0); // opened by the deep link
   await expect(dot(A2)).toHaveCount(1);
@@ -346,4 +348,270 @@ test("below 1000px the article comes first and the rail sits behind a Latest tog
   const openRail = (await rail(page).boundingBox())!;
   const openMain = (await page.locator("#sumArticleMain").boundingBox())!;
   expect(openMain.y).toBeGreaterThanOrEqual(openRail.y + openRail.height);
+});
+
+// --- Fix round 1 -----------------------------------------------------------
+
+type PageWindow = Record<string, (...args: unknown[]) => unknown> & { docsByCategory: unknown; __gates: Array<() => void> };
+
+test("narrow: opening a row from the expanded rail collapses it and shows the article", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 700 });
+  await openDeepLink(page, A1);
+  const toggle = page.locator("#sumRailToggle");
+  const main = page.locator("#sumArticleMain");
+  await toggle.click();
+  await row(page, C1).click();
+  await expect(main).toContainText(`Body of ${title(C1)}.`);
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(async () => (await main.boundingBox())!.y).toBeLessThan(200);
+
+  // k from the expanded rail does the same.
+  await toggle.click();
+  await page.locator("#docPanelTitle").click();
+  await page.keyboard.press("k");
+  await expect(main).toContainText(`Body of ${title(B2)}.`);
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(async () => (await main.boundingBox())!.y).toBeLessThan(200);
+});
+
+test("narrow: opening the Latest toggle scrolls the current row into view", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 500 });
+  await openDeepLink(page, C1);
+  await page.locator("#sumRailToggle").click();
+  await expect(row(page, C1)).toBeInViewport();
+});
+
+test("narrow: j and k do nothing while the rail is collapsed", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 900 });
+  await openDeepLink(page, A1);
+  await page.locator("#docPanelTitle").click();
+  await page.keyboard.press("j");
+  await page.waitForTimeout(300);
+  await expect(page.locator("#docPanelTitle")).toHaveText(title(A1));
+  await expect(current(page)).toHaveAttribute("data-doc-id", A1);
+});
+
+test("a delete keeps the day counts right, whether huginn's listing lags or not", async ({ page }) => {
+  await openDeepLink(page, A1);
+  const today = day(page, TODAY);
+  const w = (fn: string, id: string) =>
+    page.evaluate(([f, i]) => (window as unknown as PageWindow)[f]!(i, "youtube"), [fn, id] as const);
+  // Caught up: huginn no longer lists A3, and the delete flow pulls its rows.
+  drop("youtube", A3);
+  await w("removeDocRows", A3);
+  await expect(today.locator(".sum-latest-row")).toHaveCount(3);
+  await expect(today.locator(".sum-latest-day-count")).toHaveText("3");
+  // Lagging: huginn still lists A2 after its delete. The flow pulls the rows,
+  // refetches (which re-lists A2), then pulls them again.
+  await w("removeDocRows", A2);
+  await page.evaluate(() => (window as unknown as PageWindow).getSummaryDocuments!(true));
+  await w("removeDocRows", A2);
+  await expect(today.locator(".sum-latest-row")).toHaveCount(2);
+  await expect(today.locator(".sum-latest-day-count")).toHaveText("2");
+  // A day whose only row goes loses its heading.
+  await w("removeDocRows", C1);
+  await expect(day(page, FIVE_BACK)).toHaveCount(0);
+});
+
+test("a prune merges over what another tab stored", async ({ page }) => {
+  const KEY = RAIL_READ_STORAGE_KEY;
+  const GONE = "ai/agents/Gone soon.md";
+  put("youtube", GONE, TODAY, "07:00:00");
+  await page.goto(`${BASE}/summaries`);
+  await page.evaluate(([k, g, t]) => localStorage.setItem(k, JSON.stringify({ watermark: t, opened: ["youtube|" + g] })), [KEY, GONE, TODAY] as const);
+  await openDeepLink(page, A1);
+  // Another tab opens A2 while this one is up.
+  await page.evaluate(([k, id]) => {
+    const s = JSON.parse(localStorage.getItem(k)!);
+    s.opened.push("youtube|" + id);
+    localStorage.setItem(k, JSON.stringify(s));
+  }, [KEY, A2] as const);
+  drop("youtube", GONE);
+  await page.evaluate(() => (window as unknown as PageWindow).getSummaryDocuments!(true));
+  const stored = JSON.parse((await page.evaluate((k) => localStorage.getItem(k), KEY))!);
+  expect(stored.opened).toContain("youtube|" + A2);
+  expect(stored.opened).not.toContain("youtube|" + GONE);
+  await expect(row(page, A2).locator(".sum-latest-dot")).toHaveCount(0);
+});
+
+test("focus stays on a chip or moves to the revealed day after a rebuild", async ({ page }) => {
+  await openDeepLink(page, A1);
+  const chip = (id: string) => rail(page).locator(`.sum-rail-chip[data-chip="${id}"]`);
+  await chip("unread").focus();
+  await page.keyboard.press("Enter");
+  await expect(chip("unread")).toHaveAttribute("aria-pressed", "true");
+  await expect(chip("unread")).toBeFocused();
+  await chip("all").focus();
+  await page.keyboard.press("Enter");
+  await expect(chip("all")).toBeFocused();
+  await rail(page).locator(".sum-rail-more").focus();
+  await page.keyboard.press("Enter");
+  await expect(row(page, D1)).toBeFocused();
+});
+
+test("the sticky rail head never covers the current row", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await openDeepLink(page, C1);
+  await page.locator("#docPanelTitle").click();
+  const clear = () => page.evaluate(() => {
+    const cur = document.querySelector("#sumRailList .sum-latest-row.current")!.getBoundingClientRect();
+    const head = document.querySelector("#sumLatestRail .sum-rail-head")!.getBoundingClientRect();
+    const col = document.getElementById("sumLatestRail")!.getBoundingClientRect();
+    return cur.top >= head.bottom - 0.5 && cur.bottom <= col.bottom + 0.5;
+  });
+  for (let i = 0; i < 6; i++) {
+    await page.keyboard.press("k");
+    expect(await clear(), `after k #${i + 1}`).toBe(true);
+  }
+  for (let i = 0; i < 6; i++) {
+    await page.keyboard.press("j");
+    expect(await clear(), `after j #${i + 1}`).toBe(true);
+  }
+});
+
+test("Escape in the filter clears it and leaves the panel open", async ({ page }) => {
+  await openDeepLink(page, A1);
+  const filter = page.locator("#sumRailFilter");
+  await filter.fill("zz");
+  await expect(page.locator("#sumRailList .sum-latest-row")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(filter).toHaveValue("");
+  await expect(page.locator("#sumRailList .sum-latest-row")).toHaveCount(7);
+  await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
+});
+
+test("j from a focused row moves focus with .current", async ({ page }) => {
+  await openDeepLink(page, A1);
+  await row(page, A1).focus();
+  await page.keyboard.press("j");
+  await expect(current(page)).toHaveAttribute("data-doc-id", A2);
+  await expect(row(page, A2)).toBeFocused();
+});
+
+test("a hovered row paints a background of its own, and its text still reads at AA", async ({ page }) => {
+  for (const scheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await openDeepLink(page, A1);
+    await row(page, B1).hover();
+    const [rowBg, colBg] = await row(page, B1).evaluate((el) => [
+      getComputedStyle(el).backgroundColor,
+      getComputedStyle(document.getElementById("sumLatestRail")!).backgroundColor,
+    ]);
+    expect(rowBg, scheme).not.toBe(colBg);
+    expect(rowBg, scheme).not.toBe("rgba(0, 0, 0, 0)");
+    expect(await paintedContrast(row(page, B1).locator(".sum-latest-title")), scheme).toBeGreaterThanOrEqual(4.5);
+  }
+});
+
+test("a held j opens one summary, not one per auto-repeat", async ({ page }) => {
+  await openDeepLink(page, A1);
+  await page.locator("#docPanelTitle").click();
+  await page.keyboard.down("j");
+  await page.keyboard.down("j");
+  await page.keyboard.down("j");
+  await page.keyboard.up("j");
+  await expect(current(page)).toHaveAttribute("data-doc-id", A2);
+  await expect(page.locator("#docPanelTitle")).toHaveText(title(A2));
+});
+
+test("By category: an older open's category render never lands over a newer one", async ({ page }) => {
+  await openDeepLink(page, A1);
+  await rail(page).getByRole("button", { name: "By category" }).click();
+  await expect(page.locator("#sumCatPanel .sum-cat-article.current")).toHaveText(title(A1));
+  await page.evaluate(([a, b]) => {
+    const w = window as unknown as PageWindow;
+    const real = w.getSummaryDocuments!;
+    w.__gates = [];
+    w.getSummaryDocuments = (force: unknown) =>
+      (real(force) as Promise<unknown>).then((docs) => new Promise((res) => w.__gates.push(() => res(docs))));
+    w.docsByCategory = {};
+    w.openSummaryDoc!(a, "", "youtube");
+    w.openSummaryDoc!(b, "", "youtube");
+  }, [B1, B2] as const);
+  await page.waitForFunction(() => (window as unknown as PageWindow).__gates.length >= 2);
+  // Release the newer open's fetch first, the older one's last.
+  await page.evaluate(() => (window as unknown as PageWindow).__gates.slice().reverse().forEach((g) => g()));
+  await page.waitForTimeout(300);
+  await expect(page.locator("#sumCatPanel .sum-cat-article.current")).toHaveText(title(B2));
+});
+
+test("an older forced refresh that settles last does not rebuild the rail", async ({ page }) => {
+  await openDeepLink(page, A2);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let fetched!: () => void;
+  const fetchedP = new Promise<void>((r) => { fetched = r; });
+  let n = 0;
+  await page.route("**/api/summaries/documents**", async (route) => {
+    n++;
+    if (n !== 1) return route.continue();
+    const resp = await route.fetch();
+    fetched();
+    await gate;
+    await route.fulfill({ response: resp });
+  });
+  const first = page.evaluate(() => (window as unknown as PageWindow).getSummaryDocuments!(true));
+  await fetchedP; // the older response still lists A3
+  drop("youtube", A3);
+  await page.evaluate(() => (window as unknown as PageWindow).getSummaryDocuments!(true));
+  await expect(row(page, A3)).toHaveCount(0);
+  release();
+  await first;
+  await page.waitForTimeout(200);
+  await expect(row(page, A3)).toHaveCount(0);
+});
+
+for (const [zone, instant] of [
+  ["America/Los_Angeles", "T03:00:00Z"], // 20:00 the evening before, local
+  ["Pacific/Auckland", "T20:00:00Z"], // 08:00 the morning after, local
+] as const) {
+  test.describe(`in ${zone}`, () => {
+    test.use({ timezoneId: zone });
+    test("Today and the window are the UTC day, the day rows are filed under", async ({ page }) => {
+      await page.clock.setFixedTime(new Date(`${TODAY}${instant}`));
+      await openDeepLink(page, A1);
+      const days = page.locator("#sumRailList .sum-latest-day");
+      await expect(days).toHaveCount(3);
+      await expect(days.nth(0).locator("summary")).toHaveText(/^Today\s*4$/);
+      await expect(days.nth(1).locator("summary")).toHaveText(/^Yesterday\s*2$/);
+    });
+  });
+}
+
+test("rail text and source badges read at AA in both themes", async ({ page }) => {
+  const TALK = "ai/talks/A talk.md";
+  put("vimeo", TALK, TODAY, "06:00:00");
+  for (const scheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await openDeepLink(page, A1);
+    await page.mouse.move(0, 0);
+    const checks = {
+      "current title": row(page, A1).locator(".sum-latest-title"),
+      "row title": row(page, B1).locator(".sum-latest-title"),
+      "meta text": row(page, B1).locator(".sum-latest-cat"),
+      "youtube badge": row(page, B1).locator(".sum-latest-meta .source-badge"),
+      "x-article badge": row(page, L1).locator(".sum-latest-meta .source-badge"),
+      "default badge": row(page, TALK).locator(".sum-latest-meta .source-badge"),
+    };
+    for (const [name, loc] of Object.entries(checks)) {
+      expect(await paintedContrast(loc), `${scheme} ${name}`).toBeGreaterThanOrEqual(4.5);
+    }
+  }
+});
+
+test("rows and controls carry names a screen reader can use", async ({ page }) => {
+  await openDeepLink(page, A1);
+  await expect(row(page, A2)).toHaveAttribute("title", title(A2));
+  await expect(row(page, A2).locator(".sum-latest-dot")).toHaveAttribute("role", "img");
+  await expect(day(page, TODAY).locator("summary")).toHaveAttribute("aria-label", "Today, 4 summaries");
+  await expect(page.locator("#sumRailChips")).toHaveAttribute("role", "group");
+  await expect(page.locator("#sumRailChips")).toHaveAttribute("aria-label", /.+/);
+  // Narrow, with the rail open, the toggle and the view button are both on
+  // screen: they need different names.
+  await page.setViewportSize({ width: 800, height: 900 });
+  await page.locator("#sumRailToggle").click();
+  await expect(page.locator("#sumRailList")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Latest", exact: true })).toHaveCount(1);
 });

@@ -42,8 +42,8 @@ describe("sum-latest-rail: the injected functions", () => {
     ];
     const init = api.railReadStateInit(null, "2026-09-27");
     const state = api.railMarkOpened(api.railPrune(init.state, docs), "youtube|ai/agents/A.md");
-    const today = api.railLocalDay(new Date(2026, 8, 28, 12));
-    const cutoff = api.railInitialCutoff(today);
+    const today = api.railUtcDay(new Date(Date.UTC(2026, 8, 28, 12)));
+    const cutoff = api.railWindowStart(today);
     const filtered = api.railFilter(docs, "", "all", state);
     const win = api.railGroup(filtered, cutoff);
 
@@ -52,14 +52,16 @@ describe("sum-latest-rail: the injected functions", () => {
       ["Today", ["B", "A"]],
       ["Sun 20 Sep", ["C"]],
     ]);
-    expect(api.railGroup(docs, api.railNextCutoff(win.newestHidden!)).days).toHaveLength(3);
+    expect(api.railGroup(docs, api.railWindowStart(win.newestHidden!)).days).toHaveLength(3);
     expect(win.days[0]!.docs.map((d) => api.railIsUnread(state, d))).toEqual([true, false]);
     expect(api.railBusiestCategories(docs, cutoff, 4)).toEqual(rail.railBusiestCategories(docs, cutoff, 4));
     expect(api.railCategoryLabel(api.railCategory("ai/agents/A.md"))).toBe("agents");
     expect(api.railReadStateParse(init.write)).toEqual(init.state);
     expect(api.railAddDays("2026-01-01", -1)).toBe("2025-12-31");
     expect(api.railUtcDay(new Date(Date.UTC(2026, 8, 28, 23)))).toBe("2026-09-28");
-    const ctx = { key: "j", altKey: false, ctrlKey: false, metaKey: false, panelOpen: true, editing: false, dialogOpen: false, menuOpen: false };
+    expect(api.railAddDays("0099-12-31", -13)).toBe("0099-12-18");
+    expect(api.railReadStateParse('{"watermark":"2026-02-30","opened":[]}')).toBeNull();
+    const ctx = { key: "j", refused: false, panelOpen: true, overlayOpen: false };
     expect(api.railStep(3, -1, api.railKeyAction(ctx)!)).toBe(0);
     expect(api.railCompare(docs[0]!, docs[1]!)).toBeGreaterThan(0);
   });
