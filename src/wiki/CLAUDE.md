@@ -664,7 +664,8 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   unless the reader checks `Show retired (N)` or types a search (search still
   reaches a retired page). Every facet count, family roll-up, attachment chip,
   the start view (stats, Hubs, Timeline — the Timeline with the query — and the
-  Atlas, filtered client-side by `atlasPoolView`) and `#wikiCount`
+  Atlas, filtered client-side by `atlasPoolView`, semantic overlay and cluster
+  rail included; the Atlas reads the pool when its tab opens) and `#wikiCount`
   (`shown / pool`) is over the pool; the series census is NOT —
   `groupSeries(filtered, allPages)`, so a hidden member reads as `N of M shown`
   and a retired head still names the fold. The `▸` and `continue at:` are the
@@ -675,7 +676,11 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   the toggle text with that N, and the toggle hides while N is 0 unless it is
   checked. A folder whose pages are all retired stays in the folder picker (at
   0), and an empty rail or Hubs tab offers a reveal control worded as the
-  toggle (`retiredRevealHtml`). The
+  toggle (`retiredRevealHtml`). A retired page is never a synthesis source:
+  the Atlas's Draft synthesis sends only live members (`synthesisMembers`),
+  and `POST /api/wiki/atlas/draft-synthesis` refuses a retired member and
+  confirms candidacy on the overlay without retired pages (`overlayWithout`).
+  The
   toggle is the `toggle:retired` mode key in the per-wiki folds store. A retired
   page opens by direct link and carries a banner (`<banner>: <reason>` plus
   `<successor> <link>` when `supersededBy` resolved); an explainer's head is
