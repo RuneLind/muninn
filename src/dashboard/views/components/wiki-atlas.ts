@@ -107,6 +107,9 @@ export interface AtlasCull {
   /** Lowercased names of culled concepts with no live namesake — the topics
    *  row is keyed by concept NAME, not relPath. */
   culledTopicNames: ReadonlySet<string>;
+  /** Culled pages per type, so a capped column's `+ N more` can leave out
+   *  the culled pages the server's cap put there. */
+  culledByType?: Readonly<Record<string, number>>;
   /** True while the rail hides them: the Atlas then drops them too. */
   hide: boolean;
   /** The wiki's marker word, on a culled node's hover when they are shown. */
@@ -117,14 +120,24 @@ export interface AtlasCull {
  * The payload restricted to the rail's pool: culled nodes out, the links and
  * month buckets that named them pruned, a month or type column left empty
  * dropped, and a culled concept's topic dropped. The server's caps are not
- * re-run, so a capped column shows fewer than its cap rather than refilling.
- * Curated trails stay as authored.
+ * re-run, so a capped column shows fewer than its cap rather than refilling;
+ * its `+ N more` drops the culled pages the cap hid (`culledByType`). A
+ * month's `+ N more` cannot be corrected (the listing carries no month key)
+ * and keeps counting them. Curated trails stay as authored.
  */
 export function atlasPoolView(
   data: AtlasPayload,
   culled: ReadonlySet<string>,
   culledTopicNames: ReadonlySet<string>,
+  culledByType: Readonly<Record<string, number>> = {},
 ): AtlasPayload {
+  /** Culled pages of each type the payload drew as nodes. */
+  const drawn: Record<string, number> = {};
+  for (const [k, n] of Object.entries(data.nodes)) if (culled.has(k)) drawn[n.t] = (drawn[n.t] ?? 0) + 1;
+  const byType: Record<string, number> = {};
+  for (const [t, n] of Object.entries(data.omitted.byType)) {
+    byType[t] = Math.max(0, n - Math.max(0, (culledByType[t] ?? 0) - (drawn[t] ?? 0)));
+  }
   const nodes: Record<string, AtlasNode> = {};
   for (const [k, n] of Object.entries(data.nodes)) {
     if (culled.has(k)) continue;
@@ -143,13 +156,14 @@ export function atlasPoolView(
   const present = new Set(Object.values(nodes).map((n) => n.t));
   return {
     ...data,
-    types: data.types.filter((t) => present.has(t.key) || (data.omitted.byType[t.key] ?? 0) > 0),
+    types: data.types.filter((t) => present.has(t.key) || (byType[t.key] ?? 0) > 0),
     nodes,
     monthKeys,
     months,
     topics: data.topics
       .filter((tp) => !culledTopicNames.has(tp.name.toLowerCase()))
       .map((tp) => ({ ...tp, perMonth: keepIdx.map((i) => tp.perMonth[i] ?? 0) })),
+    omitted: { ...data.omitted, byType },
   };
 }
 
@@ -234,7 +248,9 @@ function monthLabel(mk: string): string {
 
 function buildAtlas(root: HTMLElement, served: AtlasPayload, deps: AtlasDeps): void {
   const cull = deps.cull?.();
-  const data = cull?.hide ? atlasPoolView(served, cull.culled, cull.culledTopicNames) : served;
+  const data = cull?.hide
+    ? atlasPoolView(served, cull.culled, cull.culledTopicNames, cull.culledByType)
+    : served;
   culledShown = cull && !cull.hide ? cull.culled : new Set();
   cullMarker = cull?.marker ?? "";
   const nodes = data.nodes;

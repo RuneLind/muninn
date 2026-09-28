@@ -117,3 +117,28 @@ describe("atlasPoolView — the Atlas restricted to the rail's pool (retired pag
     expect(data.nodes["s/live.md"]!.links).toHaveLength(2);
   });
 });
+
+describe("atlasPoolView — a capped column's `+ N more` leaves out the culled pages", () => {
+  const data = {
+    types: [{ key: "archive", label: "Archive" }],
+    nodes: {
+      "a/live.md": { name: "live", t: "archive", hub: false, in: 3, tags: [], links: [] },
+      "a/dead.md": { name: "dead", t: "archive", hub: false, in: 2, tags: [], links: [] },
+    },
+    monthKeys: [],
+    months: {},
+    topics: [],
+    trails: [],
+    omitted: { byType: { archive: 10 }, byMonth: {} },
+  } as unknown as Parameters<typeof atlasPoolView>[0];
+
+  test("5 culled archive pages, 1 drawn: 4 of the 10 hidden by the cap were culled", () => {
+    const view = atlasPoolView(data, new Set(["a/dead.md"]), new Set(), { archive: 5 });
+    expect(view.omitted.byType.archive).toBe(6);
+  });
+
+  test("never below zero, and unchanged without per-type counts", () => {
+    expect(atlasPoolView(data, new Set(["a/dead.md"]), new Set(), { archive: 99 }).omitted.byType.archive).toBe(0);
+    expect(atlasPoolView(data, new Set(["a/dead.md"]), new Set()).omitted.byType.archive).toBe(10);
+  });
+});

@@ -2707,6 +2707,10 @@ function atlasDeps(): AtlasDeps {
             .filter((p) => p.type === "concept" && !live.has(p.name.toLowerCase()))
             .map((p) => p.name.toLowerCase()),
         ),
+        culledByType: culled.reduce<Record<string, number>>((acc, p) => {
+          acc[p.type] = (acc[p.type] ?? 0) + 1;
+          return acc;
+        }, {}),
         hide: !showRetired(),
         marker: cullLabels().marker,
       };
