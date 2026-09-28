@@ -2,14 +2,16 @@
  * The rail follows the open page: every navigation scrolls `#wikiList` to the
  * open page's row, and ⌖ Show in list gives a filtered-out page its row back.
  *
- * Only a browser can answer these: "on screen" is a question about layout, and
- * the deep-link case depends on the listing landing after the article.
+ * Only a browser can answer these: "on screen" is a question about layout.
+ * Not covered: the reveal waiting for a late listing, which happens only when
+ * the boot listing fails and a later refetch heals it.
  *
  * One temp wiki of 80 pages (so the rail scrolls) plus a hub that links to all
- * of them, a retired page, and two pages under a declared project rule. Each
- * test reads the rail's BOTTOM row off the page rather than
- * assuming the sort order puts a given page there. No model calls, no DB rows; `e2eEnv()` blanks the platform
- * tokens and instance-profile flags, as in every spawned muninn.
+ * of them, a retired page, and two pages under a declared project rule. The two
+ * scroll cases read their target off the rail's bottom row rather than assuming
+ * the sort order puts a given page there. No model calls, no DB rows; `e2eEnv()`
+ * blanks the platform tokens and instance-profile flags, as in every spawned
+ * muninn.
  */
 
 import { test, expect, type Page } from "@playwright/test";
