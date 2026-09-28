@@ -6,7 +6,10 @@ interface Shelf {
   thumbnailHtml: (url: unknown) => string;
   shelfWindow: (total: number, filterKey: string) => number;
   shelfMoreHtml: (shown: number, total: number) => string;
-  grow: (by: number) => void;
+  shelfNextLimit: (shown: number, mode: string | null) => number;
+  shelfFilterKey: () => string;
+  setFilters: (domain: string | null, source: string | null, category: string | null) => void;
+  setLimit: (n: number) => void;
 }
 
 function load(): Shelf {
@@ -17,8 +20,11 @@ function load(): Shelf {
   };
   return new Function(
     "ctx",
-    `var document = ctx.document; var esc = ctx.esc;\n${sumShelfScript()}\nreturn { thumbnailHtml: thumbnailHtml, shelfWindow: shelfWindow, shelfMoreHtml: shelfMoreHtml,
-      grow: function(by) { shelfLimit = by === Infinity ? Infinity : shelfLimit + by; } };`,
+    `var document = ctx.document; var esc = ctx.esc; var activeDomain = null;\n${sumShelfScript()}\n` +
+      `return { thumbnailHtml: thumbnailHtml, shelfWindow: shelfWindow, shelfMoreHtml: shelfMoreHtml,
+        shelfNextLimit: shelfNextLimit, shelfFilterKey: shelfFilterKey,
+        setFilters: function(d, s, c) { activeDomain = d; activeSource = s; activeShelfCategory = c; },
+        setLimit: function(n) { shelfLimit = n; } };`,
   )(ctx);
 }
 
@@ -44,17 +50,36 @@ describe("sum-shelf: the thumbnail cell", () => {
 
 describe("sum-shelf: the paging window", () => {
   test("shows the newest 10, grows on demand, and resets when the filters change", () => {
-    const { shelfWindow, grow } = load();
+    const { shelfWindow, shelfNextLimit, setLimit } = load();
     expect(shelfWindow(1500, "||")).toBe(10);
-    grow(50);
+    setLimit(shelfNextLimit(10, "step"));
     expect(shelfWindow(1500, "||")).toBe(60);
     // Same filters, e.g. the refetch after an ingest: the window is kept.
     expect(shelfWindow(1501, "||")).toBe(60);
     // A different filter set starts over at 10.
     expect(shelfWindow(1500, "ai|youtube|")).toBe(10);
-    grow(Infinity);
+    setLimit(shelfNextLimit(10, "all"));
     expect(shelfWindow(1500, "ai|youtube|")).toBe(1500);
     expect(shelfWindow(4, "life||")).toBe(4);
+  });
+
+  test("Show more adds one step past what is shown; Show all lifts the cap", () => {
+    const { shelfNextLimit } = load();
+    expect(shelfNextLimit(10, "step")).toBe(60);
+    expect(shelfNextLimit(60, "step")).toBe(110);
+    expect(shelfNextLimit(10, "all")).toBe(Infinity);
+  });
+
+  test("the window key covers every shelf filter", () => {
+    const { shelfFilterKey, setFilters } = load();
+    setFilters(null, null, null);
+    const base = shelfFilterKey();
+    for (const [d, s, c] of [["life", null, null], [null, "youtube", null], [null, null, "ai/e2e"]] as const) {
+      setFilters(d, s, c);
+      expect(shelfFilterKey()).not.toBe(base);
+    }
+    setFilters(null, null, null);
+    expect(shelfFilterKey()).toBe(base);
   });
 
   test("the footer offers the next step and Show all, and disappears when nothing is hidden", () => {

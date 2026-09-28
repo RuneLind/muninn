@@ -247,17 +247,28 @@ export function sumShelfScript(): string {
     var SHELF_FIRST = 10;
     var SHELF_STEP = 50;
     var shelfLimit = SHELF_FIRST;
-    var shelfFilterKey = null;
+    var shelfWindowKey = null;
 
     // How many of total rows to render. A changed filter set resets the window to
     // SHELF_FIRST; a re-render under the same filters (e.g. the refetch after an
     // ingest) keeps the reader's expanded window.
     function shelfWindow(total, filterKey) {
-      if (filterKey !== shelfFilterKey) {
-        shelfFilterKey = filterKey;
+      if (filterKey !== shelfWindowKey) {
+        shelfWindowKey = filterKey;
         shelfLimit = SHELF_FIRST;
       }
       return Math.min(shelfLimit, total);
+    }
+
+    // The filter set the window is keyed on — every shelf filter, and nothing
+    // derived from the data, so a refetch under the same filters keeps the window.
+    function shelfFilterKey() {
+      return [activeDomain, activeSource, activeShelfCategory].join('|');
+    }
+
+    // The window after a footer click: one more step past what is shown, or all.
+    function shelfNextLimit(shown, mode) {
+      return mode === 'all' ? Infinity : shown + SHELF_STEP;
     }
 
     function shelfMoreHtml(shown, total) {
@@ -316,7 +327,7 @@ export function sumShelfScript(): string {
      * is a frontmatter string off a document, and an <img src> is a fetch the
      * reader's browser makes to whatever it names — https bounds the scheme,
      * no-referrer keeps this page's address out of that request. Lazy, so
-     * a 200-row shelf does not fetch 200 frames on load.
+     * an expanded shelf does not fetch every frame on load.
      */
     function thumbnailHtml(url) {
       if (typeof url !== 'string' || !/^https:\\/\\//i.test(url)) return '';
@@ -450,7 +461,7 @@ export function sumShelfScript(): string {
           doc._bucket = dateBucketLabel(doc._date, now);
           bucketTotals[doc._bucket] = (bucketTotals[doc._bucket] || 0) + 1;
         });
-        var shown = shelfWindow(docs.length, [activeDomain, activeSource, activeShelfCategory].join('|'));
+        var shown = shelfWindow(docs.length, shelfFilterKey());
 
         // Group the visible window into date buckets, preserving sort order.
         var buckets = [];
@@ -485,8 +496,13 @@ export function sumShelfScript(): string {
 
         list.querySelectorAll('.shelf-more-btn').forEach(function(btn) {
           btn.addEventListener('click', function() {
-            shelfLimit = btn.getAttribute('data-more') === 'all' ? Infinity : shown + SHELF_STEP;
-            loadShelf();  // re-render from cache (no force)
+            shelfLimit = shelfNextLimit(shown, btn.getAttribute('data-more'));
+            // The re-render replaces the clicked button; hand keyboard focus to
+            // the new footer's first button so Tab does not restart at the top.
+            loadShelf().then(function() {
+              var next = document.querySelector('#shelfMore .shelf-more-btn');
+              if (next) next.focus();
+            });
           });
         });
 
