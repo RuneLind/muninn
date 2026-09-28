@@ -204,6 +204,9 @@ export const E2E_PORTS = {
   "wiki-retired/huginn": 3082,
   // The rail following the open page, and the ⌖ Show in list control.
   "wiki-rail-reveal": 3083,
+  // The Shelf's 10-newest window and its Show more / Show all footer.
+  "summaries-shelf-paging": 3084,
+  "summaries-shelf-paging/huginn": 3085,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

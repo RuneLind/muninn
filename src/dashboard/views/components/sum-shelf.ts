@@ -130,6 +130,28 @@ export function sumShelfStyles(): string {
       min-width: 64px;
       text-align: right;
     }
+    /* "Showing 10 of 1500 · Show 50 more · Show all" under a truncated list. */
+    .shelf-more {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 8px 12px;
+      margin: 16px 0 4px;
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+    .shelf-more-btn {
+      padding: 6px 14px;
+      border-radius: 20px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    .shelf-more-btn:hover { border-color: var(--accent); color: var(--text-primary); }
     .shelf-empty {
       color: var(--text-dim);
       font-size: 13px;
@@ -220,6 +242,47 @@ export function sumShelfScript(): string {
     // Active category filter (null = all categories). Composes with domain + source.
     var activeShelfCategory = null;
 
+    // The shelf renders the newest SHELF_FIRST rows; "Show more" grows the window
+    // by SHELF_STEP. Rendering all ~1500 rows at once made the tab a wall.
+    var SHELF_FIRST = 10;
+    var SHELF_STEP = 50;
+    var shelfLimit = SHELF_FIRST;
+    var shelfWindowKey = null;
+
+    // How many of total rows to render. A changed filter set resets the window to
+    // SHELF_FIRST; a re-render under the same filters (e.g. the refetch after an
+    // ingest) keeps the reader's expanded window.
+    function shelfWindow(total, filterKey) {
+      if (filterKey !== shelfWindowKey) {
+        shelfWindowKey = filterKey;
+        shelfLimit = SHELF_FIRST;
+      }
+      return Math.min(shelfLimit, total);
+    }
+
+    // The filter set the window is keyed on — every shelf filter, and nothing
+    // derived from the data, so a refetch under the same filters keeps the window.
+    function shelfFilterKey() {
+      return [activeDomain, activeSource, activeShelfCategory].join('|');
+    }
+
+    // The window after a footer click: one more step past what is shown, or all.
+    function shelfNextLimit(shown, mode) {
+      return mode === 'all' ? Infinity : shown + SHELF_STEP;
+    }
+
+    function shelfMoreHtml(shown, total) {
+      if (shown >= total) return '';
+      var next = Math.min(SHELF_STEP, total - shown);
+      return '<div class="shelf-more" id="shelfMore">' +
+        '<span>Showing ' + shown + ' of ' + total + '</span>' +
+        '<button type="button" class="shelf-more-btn" data-more="step">Show ' + next + ' more</button>' +
+        (total - shown > next
+          ? '<button type="button" class="shelf-more-btn" data-more="all">Show all</button>'
+          : '') +
+      '</div>';
+    }
+
     // Parse a doc date ("2026-01-09" or full ISO) to a local-midnight Date.
     // Day-only strings are parsed component-wise to avoid UTC timezone drift.
     function parseDocDate(s) {
@@ -264,7 +327,7 @@ export function sumShelfScript(): string {
      * is a frontmatter string off a document, and an <img src> is a fetch the
      * reader's browser makes to whatever it names — https bounds the scheme,
      * no-referrer keeps this page's address out of that request. Lazy, so
-     * a 200-row shelf does not fetch 200 frames on load.
+     * an expanded shelf does not fetch every frame on load.
      */
     function thumbnailHtml(url) {
       if (typeof url !== 'string' || !/^https:\\/\\//i.test(url)) return '';
@@ -391,13 +454,21 @@ export function sumShelfScript(): string {
         document.getElementById('shelfLead').innerHTML =
           '<strong>' + fresh + ' new</strong> (last 14d) · ' + docs.length + ' on the shelf';
 
-        // Group into date buckets, preserving sort order.
+        // Bucket totals come from every matching doc, so a bucket the window cuts
+        // off reads "3 of 42" rather than a wrong "3".
+        var bucketTotals = {};
+        docs.forEach(function(doc) {
+          doc._bucket = dateBucketLabel(doc._date, now);
+          bucketTotals[doc._bucket] = (bucketTotals[doc._bucket] || 0) + 1;
+        });
+        var shown = shelfWindow(docs.length, shelfFilterKey());
+
+        // Group the visible window into date buckets, preserving sort order.
         var buckets = [];
         var current = null;
-        docs.forEach(function(doc) {
-          var label = dateBucketLabel(doc._date, now);
-          if (!current || current.label !== label) {
-            current = { label: label, docs: [] };
+        docs.slice(0, shown).forEach(function(doc) {
+          if (!current || current.label !== doc._bucket) {
+            current = { label: doc._bucket, docs: [] };
             buckets.push(current);
           }
           current.docs.push(doc);
@@ -416,10 +487,29 @@ export function sumShelfScript(): string {
               '<span class="recent-item-time">' + esc(formatDocDate(doc._date, now)) + '</span>' +
             '</div>';
           }).join('');
+          var total = bucketTotals[bucket.label];
+          var count = bucket.docs.length < total ? bucket.docs.length + ' of ' + total : String(total);
           return '<div class="date-bucket">' + esc(bucket.label) +
-            ' <span class="bucket-count">' + bucket.docs.length + '</span></div>' +
+            ' <span class="bucket-count">' + count + '</span></div>' +
             '<div class="recent-list">' + rows + '</div>';
-        }).join('');
+        }).join('') + shelfMoreHtml(shown, docs.length);
+
+        list.querySelectorAll('.shelf-more-btn').forEach(function(btn) {
+          btn.addEventListener('click', function() {
+            shelfLimit = shelfNextLimit(shown, btn.getAttribute('data-more'));
+            // The re-render replaces the clicked button, so keyboard focus would
+            // fall to <body>. Hand it to the new footer's first button, or — when the
+            // click revealed everything — to the first newly revealed row's link.
+            loadShelf().then(function() {
+              var next = document.querySelector('#shelfMore .shelf-more-btn');
+              if (!next) {
+                var revealed = list.querySelectorAll('.recent-item')[shown];
+                next = revealed && revealed.querySelector('.recent-item-link');
+              }
+              if (next) next.focus();
+            });
+          });
+        });
 
         // Delegate row clicks to the shared doc panel opener.
         list.querySelectorAll('.recent-item').forEach(function(row) {
