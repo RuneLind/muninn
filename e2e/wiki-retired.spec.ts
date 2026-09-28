@@ -612,6 +612,7 @@ test.describe("Wiki: retired pages", () => {
     await expect(member(SEM_DEAD)).toHaveClass(/\bculled\b/);
     await expect(member(SEM_DEAD)).toHaveAttribute("title", /Retired/);
     await expect(member(SEM[0]!)).not.toHaveClass(/\bculled\b/);
+    await expect(cluster.locator(".wiki-atlas-cdraft")).toHaveAttribute("title", /these 4 pages/);
     await cluster.locator(".wiki-atlas-cdraft").click();
     await expect.poll(() => posted.length).toBe(2);
     expect(posted[1]!.slice().sort()).toEqual(SEM.slice(0, 4));

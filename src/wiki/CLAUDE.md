@@ -676,10 +676,12 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   the toggle text with that N, and the toggle hides while N is 0 unless it is
   checked. A folder whose pages are all retired stays in the folder picker (at
   0), and an empty rail or Hubs tab offers a reveal control worded as the
-  toggle (`retiredRevealHtml`). A retired page is never a synthesis source:
-  the Atlas's Draft synthesis sends only live members (`synthesisMembers`),
+  toggle (`retiredRevealHtml`). The Atlas never sends a retired page as a synthesis
+  source: its Draft synthesis sends only live members (`synthesisMembers`),
   and `POST /api/wiki/atlas/draft-synthesis` refuses a retired member and
-  confirms candidacy on the overlay without retired pages (`overlayWithout`).
+  confirms candidacy on the overlay without retired pages (`overlayWithout`). The weekly
+  consolidation-gardener still clusters the FULL overlay, so it can label a
+  cluster from a retired page's tags and draft retired sources (known limit).
   The
   toggle is the `toggle:retired` mode key in the per-wiki folds store. A retired
   page opens by direct link and carries a banner (`<banner>: <reason>` plus

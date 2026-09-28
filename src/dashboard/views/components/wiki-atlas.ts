@@ -974,7 +974,7 @@ function clusterRailHtml(
         } else if (retryTopics.has(topic)) {
           draftCtl = `<button class="wiki-atlas-cdraft err" data-cid="${esc(c.id)}" aria-label="Draft failed — retry" title="The synthesis draft didn't complete — click to try again">retry draft</button>`;
         } else {
-          draftCtl = `<button class="wiki-atlas-cdraft" data-cid="${esc(c.id)}" title="Draft a synthesis page from these ${c.size} pages into the review gate">Draft synthesis</button>`;
+          draftCtl = `<button class="wiki-atlas-cdraft" data-cid="${esc(c.id)}" title="Draft a synthesis page from these ${synthesisMembers(c, culledAll).length} pages into the review gate">Draft synthesis</button>`;
         }
       }
       const head =
