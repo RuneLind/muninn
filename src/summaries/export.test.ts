@@ -251,6 +251,20 @@ describe("renderExportPage", () => {
   });
 });
 
+describe("renderExportPage: YouTube timestamps", () => {
+  test("a YouTube capture's window headings link to that second, like the article view's", () => {
+    const html = renderExportPage({
+      title: "t",
+      url: "https://www.youtube.com/watch?v=rmr-LdARqHE",
+      linkLabel: "YouTube ↗",
+      markdown: "Cited at [12:30]\n\n## Transcript\n### [00:02:00]\nhi",
+      sourceId: "youtube",
+    });
+    expect(html).toContain('href="https://www.youtube.com/watch?v=rmr-LdARqHE&amp;t=750s" target="_blank" rel="noopener"');
+    expect(html).toContain('href="https://www.youtube.com/watch?v=rmr-LdARqHE&amp;t=120s" target="_blank" rel="noopener"');
+  });
+});
+
 describe("exportBaseName", () => {
   test("drops filesystem-hostile characters, keeps hyphens and non-ASCII, caps and never empties", () => {
     expect(exportBaseName('Trust, But Verify: "Skill/Driven" - Totto')).toBe("Trust, But Verify Skill Driven - Totto");

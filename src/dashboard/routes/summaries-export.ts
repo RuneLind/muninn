@@ -46,6 +46,8 @@ import {
   rewriteFrameUrls,
 } from "../../summaries/export.ts";
 import { buildStoredZip, type ZipEntry } from "../../summaries/zip.ts";
+import { readerSourceLinkLabel } from "../../summaries/reader-article.ts";
+import { splitTranscript } from "../../summaries/transcript-split.ts";
 import { summaryDocTitle } from "./summaries-share.ts";
 import { getLog } from "../../logging.ts";
 
@@ -166,7 +168,9 @@ export function registerSummariesExportRoutes(
     const html = renderExportPage({
       title,
       url: doc.url,
-      linkLabel: source.linkLabel,
+      // x-article labels per document (a transcript means an X video), the
+      // same label the doc panel's header shows.
+      linkLabel: readerSourceLinkLabel(source.id, source.linkLabel, splitTranscript(markdown).transcript !== null),
       metadata: doc.metadata,
       markdown,
       sourceId: source.id,

@@ -1,5 +1,6 @@
 /**
- * `/summaries` — the doc panel as a reader: the Latest rail.
+ * `/summaries` — the doc panel as a reader: the Latest rail, and (PR 1b) the
+ * header's ⋯ More menu, the article hero, the outline and the Similar cards.
  *
  * The rail lists the last 14 days of summaries under day headings, keeps its
  * state across opens (it is not part of the per-open rewrite of the panel
@@ -54,15 +55,26 @@ const COLLECTIONS: Record<string, string> = {
 /** collection -> id -> doc. Mutated by `put`/`drop` and reset per test. */
 let listing: Record<string, Map<string, FakeDoc>> = {};
 
-function put(source: string, id: string, date: string, mtime: string): void {
+function put(source: string, id: string, date: string, mtime: string, url?: string): void {
   const coll = COLLECTIONS[source]!;
   (listing[coll] ??= new Map()).set(id, {
     id,
     date,
     modifiedTime: `${date}T${mtime}.000000`,
-    url: `https://example.com/${encodeURIComponent(id)}`,
+    url: url ?? `https://example.com/${encodeURIComponent(id)}`,
   });
 }
+
+/** `<collection>/<id>` -> the stored text and metadata a document answers
+ *  with. A document with no entry answers "Body of <title>." and no metadata. */
+let bodies: Record<string, { text: string; metadata: Record<string, unknown> }> = {};
+
+function putBody(source: string, id: string, text: string, metadata: Record<string, unknown>): void {
+  bodies[`${COLLECTIONS[source]!}/${id}`] = { text, metadata };
+}
+
+/** What the fake /api/search answers (the Similar panel's query). */
+let searchResults: unknown[] = [];
 
 function drop(source: string, id: string): void {
   listing[COLLECTIONS[source]!]?.delete(id);
@@ -85,6 +97,8 @@ const L1 = "health/sleep/Life today.md";
 function seed(): void {
   listing = {};
   failing = new Set();
+  bodies = {};
+  searchResults = [];
   // Today: A1 has the latest modifiedTime, so it leads its day.
   put("youtube", A1, TODAY, "12:00:00");
   put("youtube", A2, TODAY, "11:00:00");
@@ -117,14 +131,16 @@ test.beforeAll(async () => {
     if (p.startsWith("/api/document/")) {
       const rest = p.slice("/api/document/".length);
       const id = rest.slice(rest.indexOf("/") + 1);
-      const body = `Body of ${title(id)}.`;
+      const stored = bodies[rest];
+      const listed = listing[rest.slice(0, rest.indexOf("/"))]?.get(id);
+      const body = stored ? stored.text : `Body of ${title(id)}.`;
       if (url.searchParams.get("raw") === "1") {
         res.writeHead(200, { "content-type": "text/markdown" });
         return res.end(`---\ndate: "${TODAY}"\n---\n\n${body}\n`);
       }
-      return json({ id, text: body });
+      return json({ id, text: body, ...(listed ? { url: listed.url } : {}), ...(stored ? { metadata: stored.metadata } : {}) });
     }
-    if (p === "/api/search") return json({ results: [] });
+    if (p === "/api/search") return json({ results: searchResults });
     return json({});
   });
   await new Promise<void>((resolve) => huginn!.listen(HUGINN_PORT, "127.0.0.1", resolve));
@@ -277,7 +293,7 @@ test("j and k step through the rows, and do nothing from the filter box or an op
 
   // An open role="menu" popup (the Re-run menu) holds the keys too.
   await page.locator("#docPanelRerun").click();
-  await expect(page.locator('[role="menu"]')).toBeVisible();
+  await expect(page.locator("#docPanelRerunMenu")).toBeVisible();
   await page.keyboard.press("j");
   await expect(page.locator("#docPanelTitle")).toHaveText(title(L1));
 });
@@ -765,4 +781,405 @@ test("a rail whose first listing load failed builds on the next open", async ({ 
   await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(B1)}.`);
   await expect(page.locator("#sumRailList .sum-latest-row")).toHaveCount(7);
   await expect(current(page)).toHaveAttribute("data-doc-id", B1);
+});
+
+// --- PR 1b: header, article hero, outline, Similar cards ---------------------
+
+const YT_URL = "https://www.youtube.com/watch?v=rmr-LdARqHE";
+const VIMEO_THUMB = "https://i.vimeocdn.com/video/e2e-295x166.jpg";
+
+/** A new-shape YouTube summary: italic lede, `## Key takeaways`, `##`
+ *  sections, the closing 💬 Takeaway, a windowed transcript. */
+const NEW_DOC = "ai/general/New shape talk.md";
+const NEW_TEXT = [
+  "*A short talk arguing that AI already beats humans at every task.*",
+  "",
+  "## Key takeaways",
+  "- 🧠 Machine learning lets AI build its own intelligence.",
+  "- 🏆 AI is the world champion at every task so far.",
+  "",
+  "## From instructions to learned intelligence",
+  "Telling versus showing. " + "Words fill the section. ".repeat(40),
+  "",
+  "### Collective learning",
+  "Cars learn from each other.",
+  "",
+  "```",
+  "const aVeryLongIdentifierThatDoesNotWrap = someFunctionWithALongName(argumentOne, argumentTwo);",
+  "```",
+  "",
+  "## Why it doesn't matter",
+  "Twice as smart is the turning point. " + "More words here. ".repeat(60),
+  "",
+  "## 💬 Takeaway",
+  "The closer stays where the model put it.",
+  "",
+  "## Transcript",
+  "",
+  "### [00:00:00]",
+  "so today I want to talk about machines",
+  "",
+  "### [00:02:00]",
+  "and that is why it does not matter",
+].join("\n");
+
+/** An old-shape summary: `###` sections, no lede, no kind, no transcript. */
+const OLD_DOC = "ai/claude-code/Old shape tips.md";
+const OLD_TEXT = [
+  "### 🎯 Main Thesis",
+  "- **Claude Code** has a print mode.",
+  "",
+  "### 🏗️ The Four Zones",
+  "Zones of an agent.",
+  "",
+  "### 💡 Key Takeaways",
+  "- Keep it simple.",
+].join("\n");
+
+/** A Vimeo-shaped talk: author, `upload_date` as `YYYY-MM-DD HH:MM:SS`,
+ *  `duration_sec`, a poster frame. */
+const VIMEO_DOC = "ai/talks/Vimeo shaped talk.md";
+const VIMEO_TEXT = "*A conference talk.*\n\n## Opening\nHello.\n\n## Transcript\n\n### [00:00:00]\nhi\n\n### [00:12:00]\nbye";
+
+/** A frames-off capture: a flat transcript under a bare `## Transcript`. */
+const FLAT_DOC = "ai/general/Flat transcript talk.md";
+const FLAT_TEXT = "## Summary\nShort summary.\n\n## Transcript\n\nflat words with no window headings";
+
+function seedReaderDocs(): void {
+  put("youtube", NEW_DOC, TODAY, "05:00:00", YT_URL);
+  putBody("youtube", NEW_DOC, NEW_TEXT, { date: TODAY, url: YT_URL, summary_kind: "deep", category: "ai/general" });
+  put("youtube", OLD_DOC, OLD, "05:00:00");
+  putBody("youtube", OLD_DOC, OLD_TEXT, { date: OLD, category: "ai/claude-code" });
+  put("vimeo", VIMEO_DOC, YESTERDAY, "05:00:00", "https://vimeo.com/424242");
+  putBody("vimeo", VIMEO_DOC, VIMEO_TEXT, {
+    date: YESTERDAY,
+    url: "https://vimeo.com/424242",
+    summary_kind: "deep",
+    category: "ai/talks",
+    author: "JavaZone",
+    upload_date: "2026-09-03 06:49:18",
+    duration_sec: 3220,
+    thumbnail_url: VIMEO_THUMB,
+  });
+  put("youtube", FLAT_DOC, FIVE_BACK, "05:00:00", YT_URL);
+  putBody("youtube", FLAT_DOC, FLAT_TEXT, { date: FIVE_BACK, category: "ai/general" });
+}
+
+/** Thumbnails come from real CDNs; the spec answers them itself. */
+const PNG_1PX = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+  "base64",
+);
+async function stubImages(page: Page): Promise<void> {
+  for (const host of ["https://i.ytimg.com/**", "https://i.vimeocdn.com/**"]) {
+    await page.route(host, (r) => r.fulfill({ status: 200, contentType: "image/png", body: PNG_1PX }));
+  }
+}
+
+async function openReaderDoc(page: Page, id: string, source = "youtube", expectText?: string): Promise<void> {
+  await stubImages(page);
+  await page.goto(`${BASE}/summaries?doc=${encodeURIComponent(id)}&source=${source}`);
+  await expect(page.locator("#sumArticleBody")).toContainText(expectText ?? "");
+}
+
+const pills = (page: Page) => page.locator("#sumArticleMain .sum-pill");
+const pillKeys = (page: Page) => pills(page).evaluateAll((els) => els.map((e) => e.getAttribute("data-pill")));
+const pill = (page: Page, key: string) => page.locator(`#sumArticleMain .sum-pill[data-pill="${key}"] .sum-pill-v`);
+
+test("new shape: pills, TL;DR, takeaways card, outline and transcript links", async ({ page }) => {
+  seedReaderDocs();
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  expect(await pillKeys(page)).toEqual(["source", "captured", "kind", "category", "length", "read"]);
+  await expect(pill(page, "source")).toHaveText("YouTube");
+  await expect(pill(page, "captured")).toHaveText(`${TODAY} · today`);
+  await expect(pill(page, "kind")).toHaveText("deep");
+  await expect(pill(page, "category")).toHaveText("ai/general");
+  // The length is the last window heading, drawn as an estimate.
+  await expect(pill(page, "length")).toHaveText("~2 min");
+  await expect(page.locator('.sum-pill[data-pill="length"] .sum-pill-est')).toHaveText("est.");
+  await expect(pill(page, "read")).toHaveText("2 min read"); // the words before ## Transcript only
+  await expect(page.locator(".sum-hero-thumb")).toHaveAttribute("src", "https://i.ytimg.com/vi/rmr-LdARqHE/mqdefault.jpg");
+  await expect(page.locator(".sum-hero-thumb")).toHaveAttribute("referrerpolicy", "no-referrer");
+
+  // The lede is the TL;DR, and is not repeated in the body.
+  await expect(page.locator(".sum-tldr")).toContainText("A short talk arguing");
+  await expect(page.locator("#sumArticleBody")).not.toContainText("A short talk arguing");
+  // Key takeaways is a card; the closing 💬 Takeaway is not.
+  await expect(page.locator(".sum-takeaways h2")).toHaveText("Key takeaways");
+  await expect(page.locator(".sum-takeaways")).not.toContainText("From instructions");
+  await expect(page.locator("#sumArticleBody > h2", { hasText: "💬 Takeaway" })).toHaveCount(1);
+
+  // The outline: the ## headings, then the transcript.
+  const outline = page.locator("#sumOutline a.sum-outline-link");
+  await expect(outline).toHaveText([
+    "Key takeaways", "From instructions to learned intelligence", "Why it doesn't matter", "💬 Takeaway", "Transcript",
+  ]);
+  // The transcript <details> stays in the article column, closed.
+  const details = page.locator("#sumArticleMain details.sum-transcript");
+  await expect(details).not.toHaveAttribute("open", "");
+  await page.locator("#sumOutline a.sum-outline-transcript").click();
+  await expect(details).toHaveAttribute("open", "");
+  await expect(details.locator("summary")).toBeInViewport();
+  // Window headings link to that second of the video, in a new tab.
+  const stamp = details.locator("h3 a", { hasText: "[00:02:00]" });
+  await expect(stamp).toHaveAttribute("href", `${YT_URL}&t=120s`);
+  await expect(stamp).toHaveAttribute("target", "_blank");
+});
+
+test("old shape: a ### outline, no TL;DR, no card, and no empty pill", async ({ page }) => {
+  seedReaderDocs();
+  await openReaderDoc(page, OLD_DOC, "youtube", "print mode");
+  expect(await pillKeys(page)).toEqual(["source", "captured", "category", "read"]);
+  for (const text of await pills(page).locator(".sum-pill-v").allTextContents()) expect(text.trim()).not.toBe("");
+  await expect(page.locator(".sum-tldr")).toHaveCount(0);
+  await expect(page.locator(".sum-takeaways")).toHaveCount(0);
+  await expect(page.locator("#sumOutline a.sum-outline-link")).toHaveText([
+    "🎯 Main Thesis", "🏗️ The Four Zones", "💡 Key Takeaways",
+  ]);
+  await expect(page.locator("#sumOutline a.sum-outline-transcript")).toHaveCount(0);
+  await expect(page.locator("#sumArticleMain details.sum-transcript")).toHaveCount(0);
+});
+
+test("Vimeo shape: author, published from upload_date's day, measured length, poster frame", async ({ page }) => {
+  seedReaderDocs();
+  await openReaderDoc(page, VIMEO_DOC, "vimeo", "Hello.");
+  expect(await pillKeys(page)).toEqual(["source", "captured", "kind", "category", "author", "published", "length", "read"]);
+  await expect(pill(page, "author")).toHaveText("JavaZone");
+  await expect(pill(page, "published")).toHaveText("2026-09-03");
+  await expect(pill(page, "length")).toHaveText("54 min");
+  await expect(page.locator('.sum-pill[data-pill="length"] .sum-pill-est')).toHaveCount(0);
+  await expect(page.locator(".sum-hero-thumb")).toHaveAttribute("src", VIMEO_THUMB);
+  // The Vimeo window headings still link through linkVimeoTimestamps.
+  await expect(page.locator("#sumArticleMain a[href='https://vimeo.com/424242#t=720s']")).toHaveCount(1);
+});
+
+test("a frames-off capture: a transcript link, but no length pill", async ({ page }) => {
+  seedReaderDocs();
+  await openReaderDoc(page, FLAT_DOC, "youtube", "Short summary.");
+  expect(await pillKeys(page)).toEqual(["source", "captured", "category", "read"]);
+  await expect(page.locator("#sumOutline a.sum-outline-transcript")).toHaveCount(1);
+});
+
+test("a document with no metadata and no data renders no hero pill it cannot fill", async ({ page }) => {
+  await openDeepLink(page, A1);
+  // Default fixture docs carry no metadata and an example.com url.
+  expect(await pillKeys(page)).toEqual(["source", "read"]);
+  await expect(page.locator(".sum-hero-thumb")).toHaveCount(0);
+  await expect(page.locator(".sum-tldr")).toHaveCount(0);
+  await expect(page.locator("#sumOutline")).toBeHidden();
+});
+
+test("⋯ More: Escape closes it and returns focus; a click elsewhere closes it; Copy link copies the deep link", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openDeepLink(page, A2);
+  const more = page.locator("#docPanelMore");
+  const menu = page.locator("#docPanelMoreMenu");
+  await more.click();
+  await expect(menu).toBeVisible();
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await expect(menu.locator('[role="menuitem"]:visible')).toHaveText([/Export/, /Copy link/, /Delete/]);
+  // Focus is in the menu; the arrow keys walk it.
+  await expect(menu.locator("#docPanelExport")).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(menu.locator("#docPanelCopyLink")).toBeFocused();
+  // Escape closes the menu, not the panel, and focus goes back to ⋯ More.
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
+  await expect(more).toBeFocused();
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  // A second Escape closes the panel as before.
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#docOverlay")).not.toHaveClass(/visible/);
+
+  await openDeepLink(page, A2);
+  await more.click();
+  await page.locator("#docPanelTitle").click();
+  await expect(menu).toBeHidden();
+
+  await more.click();
+  await page.locator("#docPanelCopyLink").click();
+  await expect(page.locator("#docPanelCopyLink")).toHaveText(/Link copied/);
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toBe(`${BASE}/summaries?doc=${encodeURIComponent(A2)}&source=youtube`);
+  // The copied link opens that summary.
+  await page.goto(copied);
+  await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(A2)}.`);
+});
+
+test("Export is a menu item carrying the export href", async ({ page }) => {
+  await openDeepLink(page, A2);
+  await page.locator("#docPanelMore").click();
+  await expect(page.locator("#docPanelExport")).toHaveAttribute(
+    "href",
+    `/api/summaries/export?source=youtube&docId=${encodeURIComponent(A2)}`,
+  );
+});
+
+test("Similar cards: why line, transcript mark, relevance bar and an amber age past 60 days", async ({ page }) => {
+  seedReaderDocs();
+  const OLD_DAY = railAddDays(TODAY, -90);
+  searchResults = [
+    { id: NEW_DOC, title: `${title(NEW_DOC)}.md`, url: YT_URL, relevance: 0.9, metadata: { date: TODAY }, matchedChunks: [{ heading: "Key takeaways" }] },
+    {
+      id: "ai/general/Summary match.md", title: "Summary match.md", url: "https://www.youtube.com/watch?v=4B4R2T4w7Kg",
+      relevance: 0.75, metadata: { date: TODAY },
+      matchedChunks: [{ heading: null }, { heading: "Why it doesn't matter" }, { heading: "[00:06:00]" }],
+    },
+    {
+      id: "ai/general/Transcript match.md", title: "Transcript match.md", url: "https://www.youtube.com/watch?v=6xQ8LQfkBg4",
+      relevance: 0.6, metadata: { date: OLD_DAY }, matchedChunks: [{ heading: "[00:06:00]" }],
+    },
+    { id: "ai/general/Flat match.md", title: "Flat match.md", url: "", relevance: 0.4, matchedChunks: [{ heading: "Transcript" }] },
+    { id: "ai/general/No heading.md", title: "No heading.md", relevance: 0.3, matchedChunks: [{ heading: null }] },
+  ];
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  const card = (id: string) => page.locator(`#docSimilarPanel .sum-sim-card[data-doc-id="${id}"]`);
+  // The open document is not its own neighbour.
+  await expect(page.locator("#docSimilarPanel .sum-sim-card")).toHaveCount(4);
+  await expect(card(NEW_DOC)).toHaveCount(0);
+  await expect(card("ai/general/Summary match.md").locator(".sum-sim-why")).toHaveText("Matched: Why it doesn't matter");
+  await expect(card("ai/general/Summary match.md").locator(".sum-sim-thumb")).toHaveAttribute("src", "https://i.ytimg.com/vi/4B4R2T4w7Kg/mqdefault.jpg");
+  const tx = card("ai/general/Transcript match.md");
+  await expect(tx.locator(".sum-sim-why .sum-sim-tag")).toHaveText("transcript");
+  await expect(tx.locator(".sum-sim-why")).toHaveText("transcript[00:06:00]");
+  await expect(tx.locator(".sum-sim-age")).toHaveClass(/stale/);
+  await expect(card("ai/general/Summary match.md").locator(".sum-sim-age")).not.toHaveClass(/stale/);
+  await expect(card("ai/general/Flat match.md").locator(".sum-sim-why")).toHaveText("transcript");
+  // No heading, no date, no url: no why line, no age, no thumbnail.
+  const bare = card("ai/general/No heading.md");
+  await expect(bare.locator(".sum-sim-why")).toHaveCount(0);
+  await expect(bare.locator(".sum-sim-age")).toHaveCount(0);
+  await expect(bare.locator(".sum-sim-thumb")).toHaveCount(0);
+  const bar = await card("ai/general/Summary match.md").locator(".sum-sim-bar > span").evaluate((el) => (el as HTMLElement).style.width);
+  expect(bar).toBe("75%");
+});
+
+test("j stepping through the rail searches once, for the summary it stops on", async ({ page }) => {
+  await openDeepLink(page, A1);
+  await page.waitForTimeout(600); // A1's own search has gone out
+  const searches: string[] = [];
+  page.on("request", (r) => { if (r.url().includes("/similar?")) searches.push(new URL(r.url()).searchParams.get("q")!); });
+  await page.locator("#docPanelTitle").click();
+  // Each step waits for its article, so every open's fetch has landed: only
+  // the wait before the search keeps the passed rows from searching.
+  for (const id of [A2, A3, L1]) {
+    await page.keyboard.press("j");
+    await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(id)}.`);
+  }
+  await page.waitForTimeout(600);
+  expect(searches).toEqual([title(L1)]);
+});
+
+test("the outline marks the section in view", async ({ page }) => {
+  seedReaderDocs();
+  await page.setViewportSize({ width: 1440, height: 600 });
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  const active = page.locator("#sumOutline a.sum-outline-link.active");
+  await expect(active).toHaveText("Key takeaways");
+  await page.locator("#sumOutline a.sum-outline-link", { hasText: "Why it doesn't matter" }).click();
+  await expect(active).toHaveText("Why it doesn't matter");
+  await expect(active).toHaveAttribute("aria-current", "location");
+  await expect(page.locator("#sumArticleBody h2", { hasText: "Why it doesn't matter" })).toBeFocused();
+});
+
+test("newer and older follow the rail's order and its filter", async ({ page }) => {
+  await openDeepLink(page, A2);
+  const nav = page.locator("#sumArticleNav");
+  await expect(nav.locator(".sum-nav-newer")).toHaveAttribute("data-doc-id", A1);
+  await expect(nav.locator(".sum-nav-older")).toHaveAttribute("data-doc-id", A3);
+  // Filter the rail to the "tools" category: A2 (agents) stays as the anchor,
+  // its neighbours are the tools rows around it.
+  await rail(page).locator('.sum-rail-chip[data-chip="cat:ai/tools"]').click();
+  await expect(nav.locator(".sum-nav-newer")).toHaveCount(0);
+  await expect(nav.locator(".sum-nav-older")).toHaveAttribute("data-doc-id", A3);
+  await nav.locator(".sum-nav-older").click();
+  await expect(page.locator("#docPanelTitle")).toHaveText(title(A3));
+  await expect(nav.locator(".sum-nav-older")).toHaveAttribute("data-doc-id", B2);
+  // The oldest summary in the listing has no older link.
+  await rail(page).locator('.sum-rail-chip[data-chip="all"]').click();
+  await page.evaluate((id) => (window as unknown as PageWindow).openSummaryDoc!(id, "", "youtube"), D1);
+  await expect(nav.locator(".sum-nav-newer")).toHaveCount(1);
+  await expect(nav.locator(".sum-nav-older")).toHaveCount(0);
+});
+
+test("x-article labels its source link by transcript presence", async ({ page }) => {
+  const POST = "ai/agents/Pasted post.md";
+  const VIDEO = "ai/agents/X video.md";
+  put("x-article", POST, TODAY, "04:00:00", "https://x.com/a/status/1");
+  put("x-article", VIDEO, TODAY, "03:00:00", "https://x.com/a/status/2");
+  putBody("x-article", VIDEO, "Summary.\n\n## Transcript\n\nwords", { date: TODAY });
+  await openDeepLink(page, POST, "x-article");
+  await expect(page.locator("#docPanelLinks a")).toHaveText("Read on X ↗");
+  await page.evaluate((id) => (window as unknown as PageWindow).openSummaryDoc!(id, "https://x.com/a/status/2", "x-article"), VIDEO);
+  await expect(page.locator("#docPanelLinks a")).toHaveText("Watch on X ↗");
+  await expect(page.locator("#docPanelLinks a")).toHaveCount(1);
+  await expect(page.locator("#docPanelLinks a")).toHaveAttribute("href", "https://x.com/a/status/2");
+});
+
+test("header, pills, TL;DR, cards and the menu read at AA in both themes", async ({ page }) => {
+  seedReaderDocs();
+  searchResults = [
+    { id: "ai/general/Old match.md", title: "Old match.md", relevance: 0.6, metadata: { date: railAddDays(TODAY, -90) }, matchedChunks: [{ heading: "[00:06:00]" }] },
+  ];
+  for (const scheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+    await page.mouse.move(0, 0);
+    await expect(page.locator(".sum-sim-age.stale")).toHaveCount(1);
+    await page.locator("#docPanelMore").click();
+    const checks = {
+      "primary action": page.locator("#docPanelFollowUp"),
+      "pill value": pill(page, "kind"),
+      "pill key": page.locator('.sum-pill[data-pill="kind"] .sum-pill-k'),
+      "estimate mark": page.locator(".sum-pill-est"),
+      "TL;DR label": page.locator(".sum-tldr-k"),
+      "TL;DR text": page.locator(".sum-tldr p"),
+      "outline link": page.locator("#sumOutline a.sum-outline-link").nth(1),
+      "outline active": page.locator("#sumOutline a.sum-outline-link.active"),
+      "similar age (stale)": page.locator(".sum-sim-age.stale"),
+      "similar why": page.locator(".sum-sim-why"),
+      "menu item": page.locator("#docPanelCopyLink"),
+      "newer/older label": page.locator("#sumArticleNav .sum-nav-k").first(),
+    };
+    for (const [name, loc] of Object.entries(checks)) {
+      expect(await paintedContrast(loc), `${scheme} ${name}`).toBeGreaterThanOrEqual(4.5);
+    }
+    await page.keyboard.press("Escape");
+  }
+});
+
+test("narrow (390px): the header wraps inside the viewport and the article starts near the top", async ({ page }) => {
+  seedReaderDocs();
+  // Long nowrap titles in the newer/older links and a Similar card: their
+  // min-content must not widen the one-column grid.
+  const LONG = "ai/general/" + "A very long neighbouring summary title that keeps going ".repeat(3).trim() + ".md";
+  put("youtube", LONG, TODAY, "05:30:00");
+  searchResults = [{ id: LONG, title: `${title(LONG)}.md`, relevance: 0.5, metadata: { date: TODAY }, matchedChunks: [{ heading: "A section heading that is also rather long for a card" }] }];
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  // The panel slides in; measure once it has landed.
+  await expect.poll(async () => (await page.locator(".doc-panel").boundingBox())!.x).toBe(0);
+  const overflow = await page.evaluate(() => {
+    const h = document.querySelector(".doc-panel-header")!;
+    return { scroll: h.scrollWidth, client: h.clientWidth, doc: document.documentElement.scrollWidth };
+  });
+  expect(overflow.scroll).toBeLessThanOrEqual(overflow.client);
+  await expect(page.locator("#sumArticleNav .sum-nav-newer")).toHaveAttribute("data-doc-id", LONG);
+  await expect(page.locator("#docSimilarPanel .sum-sim-card")).toHaveCount(1);
+  const body = await page.locator("#docPanelBody").evaluate((el) => [el.scrollWidth, el.clientWidth]);
+  expect(body[0], "panel body scrolls sideways").toBeLessThanOrEqual(body[1]!);
+  expect(overflow.doc).toBeLessThanOrEqual(390);
+  for (const id of ["docPanelMore", "docPanelFollowUp", "docPanelShare"]) {
+    const box = (await page.locator(`#${id}`).boundingBox())!;
+    expect(box.x + box.width, id).toBeLessThanOrEqual(390);
+  }
+  // The hero and TL;DR are on the first screen, not below the rail or outline.
+  await expect(page.locator(".sum-tldr")).toBeInViewport();
+  await expect(page.locator("#sumOutline")).toBeHidden();
+  // The menu opens inside the viewport.
+  await page.locator("#docPanelMore").click();
+  const menu = (await page.locator("#docPanelMoreMenu").boundingBox())!;
+  expect(menu.x).toBeGreaterThanOrEqual(0);
+  expect(menu.x + menu.width).toBeLessThanOrEqual(390);
 });

@@ -24,6 +24,7 @@ import {
   DOC_PANEL_RERUN_STATUS_ID,
 } from "./doc-panel.ts";
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
+import { SIMILAR_DEBOUNCE_MS } from "./sum-reader.ts";
 
 /**
  * How many times, and how far apart, the doc panel re-reads a document after a
@@ -413,6 +414,7 @@ export function sumArticleLibraryScript(): string {
       // menu and its status line go with the panel.
       handOffRerunStream();
       closeRerunMenu();
+      if (typeof closeMoreMenu === 'function') closeMoreMenu(false);
       setRerunStatus('');
       document.getElementById('docOverlay').classList.remove('visible');
       document.body.style.overflow = '';
@@ -439,6 +441,8 @@ export function sumArticleLibraryScript(): string {
       // The re-run menu is dismissed by Escape before the panel is: closing
       // the panel out from under it takes away the thing the reader was reading.
       if (rerunMenuOpen()) { closeRerunMenu(); return; }
+      // The ⋯ More menu likewise, returning focus to its button.
+      if (typeof moreMenuOpen === 'function' && moreMenuOpen()) { closeMoreMenu(true); return; }
       if (document.getElementById('docOverlay').classList.contains('visible')) {
         closeDocPanel();
       }
@@ -1300,6 +1304,8 @@ export function sumArticleLibraryScript(): string {
       });
     }
 
+    var _similarTimer = 0;
+
     async function openSummaryDoc(docId, url, source) {
       // Take a new request id at the top so any earlier in-flight fetch (slow
       // article A while user clicks B) is invalidated — its post-await
@@ -1345,6 +1351,7 @@ export function sumArticleLibraryScript(): string {
       // job that was started from it. Reset unconditionally, then reveal the
       // control only for a registered source the re-run route can serve.
       resetRerunControl(source);
+      if (typeof closeMoreMenu === 'function') closeMoreMenu(false);
 
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');
@@ -1373,8 +1380,14 @@ export function sumArticleLibraryScript(): string {
             ? railScaffoldHtml()
             : '<div class="sum-col-left" id="sumCatPanel"></div>') +
           '<div class="sum-col-main" id="sumArticleMain"></div>' +
-          '<div class="sum-col-right doc-similar" id="docSimilarPanel"></div>';
+          // The outline (sum-reader.ts) sits above Similar in one column.
+          '<div class="sum-col-right" id="sumRightRail">' +
+            '<nav class="sum-outline" id="sumOutline" aria-label="On this page" hidden></nav>' +
+            '<div class="doc-similar" id="docSimilarPanel"></div>' +
+          '</div>';
       }
+      var outlineEl = document.getElementById('sumOutline');
+      if (outlineEl) { outlineEl.hidden = true; outlineEl.innerHTML = ''; }
       document.getElementById('sumArticleMain').innerHTML =
         '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading...</div>';
       document.getElementById('docSimilarPanel').innerHTML =
@@ -1422,18 +1435,36 @@ export function sumArticleLibraryScript(): string {
         // parameter before the fetch, the ?doc= path had no link at all —
         // for every vertical, since they all hand out that shape on a
         // duplicate paste.
-        if (videoUrl && !url) {
-          linksEl.innerHTML = '<a href="' + esc(videoUrl) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>';
+        // x-article holds X videos and pasted posts: the label is the
+        // document's, read off its transcript (sum-reader.ts).
+        if (typeof readerSourceLinkLabel === 'function') {
+          linkLabel = readerSourceLinkLabel(source, linkLabel, splitTranscript(cleaned).transcript !== null);
         }
-        if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, videoUrl);
+        if (videoUrl && (!url || source === 'x-article')) {
+          linksEl.innerHTML = '<a href="' + esc(url || videoUrl) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>';
+        }
         var mainEl = document.getElementById('sumArticleMain');
         if (mainEl) {
-          mainEl.innerHTML = renderArticleHtml(cleaned);
-          if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
+          if (typeof readerArticleHtml === 'function') {
+            var ctx = { docId: docId, source: source, videoUrl: videoUrl, meta: doc.metadata || {}, requestId: myRequest };
+            mainEl.innerHTML = readerArticleHtml(cleaned, ctx);
+            if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
+            readerAfterRender(mainEl, cleaned, ctx);
+          } else {
+            if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, videoUrl);
+            mainEl.innerHTML = renderArticleHtml(cleaned);
+            if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
+          }
         }
 
-        // Right panel: other articles matching in relevance (within this source)
-        loadDocSimilar(title, docId, myRequest, source);
+        // Right panel: other articles matching in relevance (within this
+        // source). Debounced, so j/k stepping through the rail does not queue
+        // a search per row passed: only the open that is still current after
+        // the wait searches.
+        clearTimeout(_similarTimer);
+        _similarTimer = setTimeout(function() {
+          if (myRequest === _docRequestId) loadDocSimilar(title, docId, myRequest, source);
+        }, ${SIMILAR_DEBOUNCE_MS});
       } catch (err) {
         if (myRequest !== _docRequestId) return;  // superseded
         var failEl = document.getElementById('sumArticleMain');
@@ -1554,15 +1585,17 @@ export function sumArticleLibraryScript(): string {
           panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">No similar articles found</div>';
           return;
         }
-        panel.innerHTML = '<h4>Similar Articles</h4>' + results.map(function(r) {
-          var pct = Math.round((r.relevance || 0) * 100);
-          var rTitle = (r.title || r.id || '').replace(/\\.md$/, '');
-          var rUrl = r.url || '#';
-          return '<div class="doc-similar-item" data-doc-id="' + esc(r.id) + '" data-doc-url="' + esc(rUrl) + '">' +
-            '<a href="#">' + esc(rTitle) + '</a>' +
-            '<span class="doc-similar-relevance">' + pct + '%</span>' +
-          '</div>';
-        }).join('');
+        panel.innerHTML = '<h4>Similar Articles</h4>' + (typeof readerSimilarHtml === 'function'
+          ? readerSimilarHtml(results, source)
+          : results.map(function(r) {
+            var pct = Math.round((r.relevance || 0) * 100);
+            var rTitle = (r.title || r.id || '').replace(/\\.md$/, '');
+            var rUrl = r.url || '#';
+            return '<div class="doc-similar-item" data-doc-id="' + esc(r.id) + '" data-doc-url="' + esc(rUrl) + '">' +
+              '<a href="#">' + esc(rTitle) + '</a>' +
+              '<span class="doc-similar-relevance">' + pct + '%</span>' +
+            '</div>';
+          }).join(''));
         // Wire up click handlers for similar items. With the 3-col layout the
         // panel re-renders in place, so we call openSummaryDoc directly. Similar
         // results live in the opened doc's source collection, so reuse source.

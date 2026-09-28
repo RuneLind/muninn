@@ -548,6 +548,8 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
       list.innerHTML = html;
       railFocusRestore(focus, chipsEl, list);
       if (opts && opts.scrollToCurrent) railReveal(railCurrentRow());
+      // The article's newer/older links follow the rail's filter.
+      if (typeof readerRefreshNav === 'function') readerRefreshNav();
     }
 
     /** Is the row on screen as far as layout goes? A collapsed narrow rail

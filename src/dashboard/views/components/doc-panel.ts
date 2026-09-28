@@ -175,6 +175,21 @@ export function docPanelStyles(animationName = "slideIn"): string {
        item and the notes beside it are where this menu says WHY a run is not on
        offer, so the text that fails contrast is the text carrying the reason. */
     .doc-panel-menu-item:disabled { color: var(--text-muted); cursor: not-allowed; }
+    /* The ⋯ More menu's items: an <a> (Export) and buttons in one list. */
+    a.doc-panel-menu-item { display: block; text-decoration: none; }
+    .doc-panel-menu-item[hidden] { display: none; }
+    .doc-panel-menu-danger:hover:not(:disabled) { color: var(--status-error); }
+    .doc-panel-menu-danger:disabled { opacity: 0.5; cursor: progress; }
+    /* The primary header action. --accent-hover, not --accent, under white
+       text: #fff on the dark --accent measures 4.3:1, on --accent-hover 5.7:1
+       (light: 6.9:1). */
+    .doc-panel-followup.doc-panel-primary {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+      color: #fff;
+      font-weight: 600;
+    }
+    .doc-panel-followup.doc-panel-primary:hover { border-color: var(--accent-light); }
     .doc-panel-menu-rule { height: 1px; background: var(--border-primary); margin: 4px 2px; }
     .doc-panel-menu-note {
       font-size: 11px;
@@ -237,6 +252,13 @@ export const DOC_PANEL_RERUN_BTN_ID = "docPanelRerun";
 export const DOC_PANEL_RERUN_MENU_ID = "docPanelRerunMenu";
 export const DOC_PANEL_RERUN_STATUS_ID = "docPanelRerunStatus";
 
+/** The `⋯ More` menu (opt-in `moreMenu`): its button, its `role="menu"`
+ *  popup, and the Copy link item. Export and Delete keep their own ids
+ *  inside it, so their click handlers and specs address them as before. */
+export const DOC_PANEL_MORE_BTN_ID = "docPanelMore";
+export const DOC_PANEL_MORE_MENU_ID = "docPanelMoreMenu";
+export const DOC_PANEL_COPY_LINK_ID = "docPanelCopyLink";
+
 /**
  * HTML markup for the slide-in doc panel overlay.
  *
@@ -263,6 +285,12 @@ export const DOC_PANEL_RERUN_STATUS_ID = "docPanelRerunStatus";
  * (`GET /api/summaries/export`). It is an ANCHOR, not a button: the browser's
  * own download handling is the whole client, so there is no fetch and no
  * bundle. Rendered hidden; the opener sets its href and reveals it.
+ *
+ * `moreMenu` is the fifth, and it changes the header's LAYOUT rather than
+ * adding one control: the source link moves up next to the title, Export and
+ * Delete move into a `⋯ More` menu beside a Copy link item, and Ask a
+ * follow-up becomes the primary action at the end. Without it every flag
+ * renders exactly as before.
  */
 export function docPanelHtml(
   {
@@ -271,20 +299,48 @@ export function docPanelHtml(
     remove = false,
     exportPage = false,
     rerun = false,
+    moreMenu = false,
   }: {
     askFollowUp?: boolean;
     share?: boolean;
     remove?: boolean;
     exportPage?: boolean;
     rerun?: boolean;
+    moreMenu?: boolean;
   } = {},
 ): string {
+  const linksHtml = `
+        <div class="doc-panel-links" id="docPanelLinks"></div>`;
+  const deleteHtml = moreMenu
+    ? `
+            <button class="doc-panel-menu-item doc-panel-menu-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button" role="menuitem"
+              title="Delete this summary from huginn, and the wiki draft written from it">&#128465; Delete</button>`
+    : `
+        <button class="doc-panel-followup doc-panel-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button"
+          title="Delete this summary from huginn, and the wiki draft written from it">&#128465; Delete</button>`;
+  const exportHtml = moreMenu
+    ? `
+            <a class="doc-panel-menu-item" id="${DOC_PANEL_EXPORT_LINK_ID}" href="#" download hidden role="menuitem"
+              title="Download this summary as a standalone HTML page, with its slides in a folder beside it">&#11015; Export</a>`
+    : `
+        <a class="doc-panel-followup" id="${DOC_PANEL_EXPORT_LINK_ID}" href="#" download hidden
+          title="Download this summary as a standalone HTML page, with its slides in a folder beside it">&#11015; Export</a>`;
+  const moreHtml = `
+        <span class="doc-panel-menu" id="docPanelMoreWrap">
+          <button class="doc-panel-followup" id="${DOC_PANEL_MORE_BTN_ID}" type="button"
+            aria-haspopup="menu" aria-expanded="false" aria-controls="${DOC_PANEL_MORE_MENU_ID}"
+            aria-label="More actions" title="More actions">&#8943; More</button>
+          <div class="doc-panel-menu-pop" id="${DOC_PANEL_MORE_MENU_ID}" role="menu" aria-label="More actions" hidden>${exportPage ? exportHtml : ""}
+            <button class="doc-panel-menu-item" id="${DOC_PANEL_COPY_LINK_ID}" type="button" role="menuitem"
+              title="Copy a link that opens this summary">&#128279; Copy link</button>${remove ? deleteHtml : ""}
+          </div>
+        </span>`;
   return `
   <div class="doc-overlay" id="docOverlay" onclick="if(event.target===this)closeDocPanel()">
     <div class="doc-panel">
       <div class="doc-panel-header">
         <button class="doc-panel-close" onclick="closeDocPanel()">&larr; Back</button>
-        <span class="doc-panel-title" id="docPanelTitle"></span>${rerun ? `
+        <span class="doc-panel-title" id="docPanelTitle"></span>${moreMenu ? linksHtml : ""}${rerun ? `
         <span class="doc-panel-menu" id="${DOC_PANEL_RERUN_WRAP_ID}" hidden>
           <button class="doc-panel-followup" id="${DOC_PANEL_RERUN_BTN_ID}" type="button"
             aria-haspopup="menu" aria-expanded="false" aria-controls="${DOC_PANEL_RERUN_MENU_ID}"
@@ -292,13 +348,8 @@ export function docPanelHtml(
           <div class="doc-panel-menu-pop" id="${DOC_PANEL_RERUN_MENU_ID}" role="menu" hidden></div>
         </span>` : ""}${share ? `
         <button class="doc-panel-followup" id="${DOC_PANEL_SHARE_BTN_ID}" type="button"
-          title="Turn this summary into a post you can paste into Slack or an email">&#128228; Share</button>` : ""}${remove ? `
-        <button class="doc-panel-followup doc-panel-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button"
-          title="Delete this summary from huginn, and the wiki draft written from it">&#128465; Delete</button>` : ""}${exportPage ? `
-        <a class="doc-panel-followup" id="${DOC_PANEL_EXPORT_LINK_ID}" href="#" download hidden
-          title="Download this summary as a standalone HTML page, with its slides in a folder beside it">&#11015; Export</a>` : ""}${askFollowUp ? `
-        <a class="doc-panel-followup" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}
-        <div class="doc-panel-links" id="docPanelLinks"></div>
+          title="Turn this summary into a post you can paste into Slack or an email">&#128228; Share</button>` : ""}${moreMenu ? moreHtml : `${remove ? deleteHtml : ""}${exportPage ? exportHtml : ""}`}${askFollowUp ? `
+        <a class="doc-panel-followup${moreMenu ? " doc-panel-primary" : ""}" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}${moreMenu ? "" : linksHtml}
       </div>${rerun ? `
       <div class="doc-panel-notice" id="${DOC_PANEL_RERUN_STATUS_ID}" hidden></div>` : ""}
       <div class="doc-panel-body" id="docPanelBody"></div>
