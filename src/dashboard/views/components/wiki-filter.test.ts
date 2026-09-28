@@ -6,6 +6,7 @@ import {
   connectionTypeOrder,
   facetKeys,
   filterPages,
+  filtersRevealing,
   jiraChipCounts,
   jiraFacetVisible,
   jiraFilterAfterListing,
@@ -1734,4 +1735,17 @@ test("workedChip: a fallback onto the CREATION date says added, never updated", 
   expect(workedChip({ kind: "fallback" }, "2024-03-01", "added").title).toBe(
     "2024-03-01 (added — no session write recorded)",
   );
+});
+
+test("filtersRevealing: clears only the keys that hide the page", () => {
+  const rag = PAGES[0]!;
+  const f: WikiFilters = { ...NO_FILTER, domain: "ai", type: "entity", tag: "llm", q: "gym" };
+  // domain and tag match rag and stay; type and the query exclude it and clear.
+  expect(filtersRevealing(rag, f)).toEqual({ ...NO_FILTER, domain: "ai", tag: "llm" });
+  expect(filterPages([rag], filtersRevealing(rag, f))).toHaveLength(1);
+});
+
+test("filtersRevealing: a page that already passes keeps every filter", () => {
+  const f: WikiFilters = { ...NO_FILTER, domain: "ai", q: "retrieval" };
+  expect(filtersRevealing(PAGES[0]!, f)).toEqual(f);
 });

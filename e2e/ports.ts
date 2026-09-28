@@ -202,6 +202,8 @@ export const E2E_PORTS = {
   // The same spec's in-process huginn stub: one similarity graph, so the
   // Atlas's semantic cluster rail has a retired member to hide.
   "wiki-retired/huginn": 3082,
+  // The rail following the open page, and the ⌖ Show in list control.
+  "wiki-rail-reveal": 3083,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

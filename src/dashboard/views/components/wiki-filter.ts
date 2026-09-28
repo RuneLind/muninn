@@ -1186,6 +1186,23 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
   });
 }
 
+/**
+ * The filters with every key that hides `page` cleared, and every other key kept —
+ * what the reader's "Show in list" applies so the open page gets a rail row
+ * without discarding the facets it already satisfies. Exact because
+ * `filterPages` is a conjunction: a page passes the whole set iff it passes each
+ * key alone.
+ */
+export function filtersRevealing(page: WikiListing, filters: WikiFilters): WikiFilters {
+  const keys = Object.keys(filters) as (keyof WikiFilters)[];
+  const none = Object.fromEntries(keys.map((k) => [k, ""])) as unknown as WikiFilters;
+  const next = { ...filters };
+  for (const key of keys) {
+    if (filters[key] && filterPages([page], { ...none, [key]: filters[key] }).length === 0) next[key] = "";
+  }
+  return next;
+}
+
 /** Sort a copy of `pages` by the given mode without mutating the input. Recency
  *  ties (two pages stamped the same day by frontmatter alone) fall back to title
  *  so the order is stable rather than scan-order.

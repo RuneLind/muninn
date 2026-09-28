@@ -371,6 +371,13 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-list-item:hover { background: var(--bg-surface); }
     .wiki-list-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+    /* ⌖ Show in list: a brief ring on the row it scrolled to. */
+    .wiki-list-item.reveal-flash { animation: wiki-reveal-flash 1.2s ease-out; }
+    @keyframes wiki-reveal-flash {
+      from { box-shadow: inset 0 0 0 2px var(--accent); }
+      to { box-shadow: inset 0 0 0 2px transparent; }
+    }
+    @media (prefers-reduced-motion: reduce) { .wiki-list-item.reveal-flash { animation: none; } }
     /* The title and the group chip, in the space the row's fixed parts leave.
        Its own width is therefore "what is left on this row", which is the ONE
        question a CSS query can ask that tells a plain row from one carrying a
