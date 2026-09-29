@@ -232,6 +232,14 @@ export function readerTranscriptLength(transcript: string | null): number | null
   return earlier > 0 ? last.start + lastWords * (span / earlier) : last.start;
 }
 
+/** A stored `duration_sec` as seconds: a number, or an all-digit string
+ *  (frontmatter read back as text); anything else is NaN, so `> 0` rejects it.
+ *  An EXACT length only — the caption-end estimate is not one. */
+export function readerDurationSec(v: unknown): number {
+  if (typeof v === "number") return v;
+  return typeof v === "string" && /^\d+$/.test(v.trim()) ? Number(v) : NaN;
+}
+
 /** `54 min`, `1 h 12 min`, `2 h`; under a minute reads as `1 min`. */
 export function readerFormatDuration(sec: number): string {
   const min = Math.max(1, Math.round(sec / 60));
@@ -300,8 +308,7 @@ export function readerPills(input: ReaderPillInput): ReaderPill[] {
   if (author) pills.push({ key: "author", label: "By", value: author });
   const upload = readerDay(input.uploadDate);
   if (upload) pills.push({ key: "published", label: "Published", value: upload });
-  const dur = typeof input.durationSec === "number" ? input.durationSec
-    : typeof input.durationSec === "string" && /^\d+$/.test(input.durationSec.trim()) ? Number(input.durationSec) : NaN;
+  const dur = readerDurationSec(input.durationSec);
   if (dur > 0) {
     pills.push({ key: "length", label: "Length", value: readerFormatDuration(dur) });
   } else {
@@ -548,6 +555,7 @@ export const READER_FUNCTIONS = [
   readerStampSeconds,
   readerTranscriptLength,
   readerFormatDuration,
+  readerDurationSec,
   readerDay,
   readerDaysBetween,
   readerAge,

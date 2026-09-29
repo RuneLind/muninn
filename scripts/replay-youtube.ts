@@ -20,6 +20,10 @@
  * root, and `sourceDraft: false`. It never talks to the real huginn, never
  * writes under `~/.muninn/frames`, and never drafts a wiki page.
  *
+ * One live call besides the model: a frames-OFF replay asks YouTube oEmbed
+ * for the uploader (`fetchAuthor`, one small GET), because no probe ran. A
+ * `--frames` replay does not — the stubbed probe answers `uploader: "replay"`.
+ *
  * The MODEL CALL is real: this runs on the resolved summarizer bot
  * (`SUMMARIZER_BOT`, jarvis on claude-sdk here) and spends money. That is the
  * point — the question it answers is what Deep actually costs and returns.

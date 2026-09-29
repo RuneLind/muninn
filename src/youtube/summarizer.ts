@@ -444,6 +444,17 @@ export async function summarizeVideo(
       }
     }
 
+    // oEmbed's `author`, started NOW so its ≤5 s runs beside the transcript
+    // fetch and the model call instead of after them — and only when no probe
+    // named the uploader. `.then`/`.catch` so neither a synchronous throw nor a
+    // rejection from an injected dep can fail the capture: it omits the key.
+    const oembedAuthor: Promise<string | undefined> =
+      probeAuthor(probe) === undefined
+        ? Promise.resolve()
+            .then(() => resolved.fetchAuthor(videoId))
+            .catch(() => undefined)
+        : Promise.resolve(undefined);
+
     // 1. Fetch transcript
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30_000);
@@ -1085,10 +1096,7 @@ export async function summarizeVideo(
     }
     // What the probe knew, and oEmbed's `author` when it knew nobody (or never
     // ran — a frames-off capture). A failed oEmbed omits the key, never the capture.
-    const videoFields = youtubeVideoFields(
-      probe,
-      probeAuthor(probe) === undefined ? await resolved.fetchAuthor(videoId) : undefined,
-    );
+    const videoFields = youtubeVideoFields(probe, await oembedAuthor);
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/youtube/ingest",

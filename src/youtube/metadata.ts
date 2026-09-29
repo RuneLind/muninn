@@ -23,6 +23,20 @@ export const YOUTUBE_OEMBED_TIMEOUT_MS = 5_000;
 /** A real answer is ~1 KB. */
 const YOUTUBE_OEMBED_MAX_BYTES = 64 * 1024;
 
+/**
+ * huginn's `FRONTMATTER_FIELD_MAX_BYTES` (`main/ingest/_summary_ingest.py`):
+ * a longer `author` is a 422 on the WHOLE ingest, so the value is dropped here
+ * instead — never truncated, since a cut-off name is a wrong name.
+ */
+export const FRONTMATTER_FIELD_MAX_BYTES = 512;
+
+/** `name`, trimmed, when it fits huginn's per-field cap; `undefined` when blank or over it. */
+export function capFrontmatterAuthor(name: string | undefined): string | undefined {
+  const clean = name?.trim();
+  if (!clean) return undefined;
+  return Buffer.byteLength(clean, "utf8") > FRONTMATTER_FIELD_MAX_BYTES ? undefined : clean;
+}
+
 export interface YouTubeVideoFields {
   author?: string;
   /** `YYYY-MM-DD`. huginn does not format-check it, so this is the one place the shape is set. */
@@ -52,7 +66,7 @@ export function youtubeVideoFields(
   oembedAuthor: string | undefined,
 ): YouTubeVideoFields {
   const fields: YouTubeVideoFields = {};
-  const author = probeAuthor(probe) ?? (oembedAuthor?.trim() || undefined);
+  const author = capFrontmatterAuthor(probeAuthor(probe) ?? oembedAuthor);
   if (author !== undefined) fields.author = author;
   if (probe !== null) {
     const day = normalizeUploadDate(probe.uploadDate);
@@ -67,12 +81,16 @@ export function youtubeVideoFields(
 
 /**
  * One oEmbed answer, classified. `unavailable` is a fact about the VIDEO —
- * 401 (private, or embedding off) and 404 (deleted) — and `error` is everything
- * that says nothing about it (a timeout, a 5xx, a 429, a malformed body), which
- * is the class the backfill counts toward its consecutive-failure abort.
+ * 400 (measured for ids that do not exist), 401 (private, or embedding off),
+ * 403 (`LOGIN_REQUIRED`: age-restricted or members-only) and 404 (deleted) —
+ * and `error` is everything that says nothing about it (a timeout, a 5xx, a
+ * 429, a malformed body), which is the class the backfill counts toward its
+ * consecutive-failure abort.
  */
+export const OEMBED_UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([400, 401, 403, 404]);
+
 export type YouTubeOembedResult =
-  | { readonly kind: "ok"; readonly author: string }
+  | { readonly kind: "ok"; readonly author: string; readonly title?: string }
   | { readonly kind: "unavailable"; readonly status: number }
   | { readonly kind: "error"; readonly error: string };
 
@@ -106,7 +124,7 @@ export async function fetchYouTubeOembed(
   });
   const attempt = (async (): Promise<YouTubeOembedResult> => {
     const res = await doFetch(endpoint, { signal: controller.signal, redirect: "follow" });
-    if (res.status === 401 || res.status === 404) {
+    if (OEMBED_UNAVAILABLE_STATUSES.has(res.status)) {
       await res.body?.cancel().catch(() => {});
       return { kind: "unavailable", status: res.status };
     }
@@ -115,10 +133,11 @@ export async function fetchYouTubeOembed(
       return { kind: "error", error: `HTTP ${res.status}` };
     }
     const text = await readBounded(res, YOUTUBE_OEMBED_MAX_BYTES, endpoint);
-    const parsed = JSON.parse(text) as { author_name?: unknown };
+    const parsed = JSON.parse(text) as { author_name?: unknown; title?: unknown };
     const author = typeof parsed.author_name === "string" ? parsed.author_name.trim() : "";
     if (!author) return { kind: "error", error: "no author_name in the answer" };
-    return { kind: "ok", author };
+    const title = typeof parsed.title === "string" ? parsed.title.trim() : "";
+    return title ? { kind: "ok", author, title } : { kind: "ok", author };
   })().catch((err: unknown): YouTubeOembedResult => ({
     kind: "error",
     error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),

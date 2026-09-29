@@ -1,5 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import {
+  capFrontmatterAuthor,
+  FRONTMATTER_FIELD_MAX_BYTES,
   fetchYouTubeOembed,
   fetchYouTubeOembedAuthor,
   normalizeUploadDate,
@@ -49,6 +51,18 @@ describe("youtubeVideoFields", () => {
     expect(probeAuthor(null)).toBeUndefined();
   });
 
+  test("an author over huginn's 512-byte field cap is OMITTED, never truncated", () => {
+    // 256 × "ø" is exactly 512 bytes; one more byte is over.
+    const over = "ø".repeat(256) + "x";
+    expect(Buffer.byteLength(over)).toBe(FRONTMATTER_FIELD_MAX_BYTES + 1);
+    expect(youtubeVideoFields(null, over)).toEqual({});
+    expect(youtubeVideoFields(probe({ uploader: over }), undefined)).not.toHaveProperty("author");
+    const fits = "ø".repeat(256);
+    expect(youtubeVideoFields(null, ` ${fits} `)).toEqual({ author: fits });
+    expect(capFrontmatterAuthor(over)).toBeUndefined();
+    expect(capFrontmatterAuthor("  ")).toBeUndefined();
+  });
+
   test("normalizeUploadDate accepts exactly YYYYMMDD", () => {
     expect(normalizeUploadDate("20240115")).toBe("2024-01-15");
     for (const bad of [undefined, "", "2024-01-15", "2024011", "202401150", "NA"]) {
@@ -74,10 +88,21 @@ describe("fetchYouTubeOembed", () => {
     );
   });
 
-  test("401 and 404 are facts about the video; everything else is an error", async () => {
-    expect(await fetchYouTubeOembed("x", { fetchImpl: answer(401) })).toEqual({ kind: "unavailable", status: 401 });
-    expect(await fetchYouTubeOembed("x", { fetchImpl: answer(404) })).toEqual({ kind: "unavailable", status: 404 });
-    expect((await fetchYouTubeOembed("x", { fetchImpl: answer(429) })).kind).toBe("error");
+  test("the title rides along when the answer has one", async () => {
+    expect(await fetchYouTubeOembed("x", { fetchImpl: answer(200, { author_name: "A", title: " T " }) })).toEqual({
+      kind: "ok",
+      author: "A",
+      title: "T",
+    });
+  });
+
+  test("400, 401, 403 and 404 are facts about the video; everything else is an error", async () => {
+    for (const status of [400, 401, 403, 404]) {
+      expect(await fetchYouTubeOembed("x", { fetchImpl: answer(status) })).toEqual({ kind: "unavailable", status });
+    }
+    for (const status of [429, 500, 503]) {
+      expect(await fetchYouTubeOembed("x", { fetchImpl: answer(status) })).toEqual({ kind: "error", error: `HTTP ${status}` });
+    }
     expect((await fetchYouTubeOembed("x", { fetchImpl: answer(200, {}) })).kind).toBe("error");
     const bad = (async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;
     expect((await fetchYouTubeOembed("x", { fetchImpl: bad })).kind).toBe("error");

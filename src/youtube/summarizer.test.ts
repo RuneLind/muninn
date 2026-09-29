@@ -259,6 +259,10 @@ let probeCalls: string[] = [];
 /** What the fake oEmbed answers (`undefined` = a failed lookup), and who asked. */
 let oembedAuthor: string | undefined = "An Uploader";
 let oembedCalls: string[] = [];
+/** A fetchAuthor dep that breaks its contract: throws synchronously, or rejects. */
+let oembedThrows: "sync" | "async" | null = null;
+/** How many transcript requests had been made each time oEmbed was asked. */
+let transcriptsAtOembed: number[] = [];
 /** Whatever a case wants to know about the world at the moment the probe runs. */
 let atProbe: (() => void) | null = null;
 let downloadCalls: Array<{ url: string; workDir: string; opts: DownloadOptions }> = [];
@@ -304,9 +308,12 @@ function deps() {
       atProbe?.();
       return probeAnswer;
     },
-    fetchAuthor: async (videoId: string) => {
+    fetchAuthor: (videoId: string): Promise<string | undefined> => {
       oembedCalls.push(videoId);
-      return oembedAuthor;
+      transcriptsAtOembed.push(transcriptRequests.length);
+      if (oembedThrows === "sync") throw new Error("oEmbed dep threw");
+      if (oembedThrows === "async") return Promise.reject(new Error("oEmbed dep rejected"));
+      return Promise.resolve(oembedAuthor);
     },
     downloadVideo: async (url: string, workDir: string, opts: DownloadOptions): Promise<DownloadResult> => {
       downloadCalls.push({ url, workDir, opts });
@@ -428,6 +435,8 @@ beforeEach(() => {
   probeCalls = [];
   oembedAuthor = "An Uploader";
   oembedCalls = [];
+  oembedThrows = null;
+  transcriptsAtOembed = [];
   atProbe = null;
   atDownload = null;
   atExtract = null;
@@ -522,6 +531,22 @@ describe("the video fields: author, upload_date, duration_sec", () => {
     await run();
     expect(ingestBodies.length).toBe(1);
     expect(ingestBodies[0]).not.toHaveProperty("author");
+  });
+
+  test("a fetchAuthor dep that throws or rejects still ingests, without author", async () => {
+    for (const mode of ["sync", "async"] as const) {
+      ingestBodies = [];
+      oembedThrows = mode;
+      await run();
+      expect(ingestBodies.length).toBe(1);
+      expect(ingestBodies[0]).not.toHaveProperty("author");
+    }
+  });
+
+  test("oEmbed is asked BEFORE the transcript fetch, so it runs beside it and the model call", async () => {
+    await run();
+    expect(transcriptsAtOembed).toEqual([0]);
+    expect(transcriptRequests.length).toBe(1);
   });
 
   test("frames on: the probe's uploader, rounded duration and dashed date; oEmbed never asked", async () => {
