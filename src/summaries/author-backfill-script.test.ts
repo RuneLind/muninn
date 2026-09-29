@@ -5,9 +5,9 @@
  * `--no-update`, so nothing leaves the machine.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 const SCRIPT = resolve(import.meta.dir, "../../scripts/backfill-youtube-authors.ts");
 const scratch = mkdtempSync(join(tmpdir(), "yt-author-backfill-test-"));
@@ -195,24 +195,36 @@ describe("usage errors never write", () => {
 
 describe("huginn failures exit nonzero", () => {
   test(
-    "a failed /update, and an author mismatch after a good one, each exit 1",
+    "a failed /update, an author mismatch after a good one, and a non-JSON /update-status each exit 1",
     async () => {
       let updateStatus = 500;
+      let statusBody: "json" | "html" = "json";
+      let documentAuthor = "Somebody Else";
       const server = Bun.serve({
         port: 0,
         hostname: "127.0.0.1",
         fetch(req) {
           const u = new URL(req.url);
           if (u.pathname.endsWith("/update")) return new Response("boom", { status: updateStatus });
-          if (u.pathname.endsWith("/update-status")) return Response.json({ status: "succeeded" });
-          if (u.pathname.startsWith("/api/document/")) return Response.json({ metadata: { author: "Somebody Else" } });
+          if (u.pathname.endsWith("/update-status")) {
+            return statusBody === "json" ? Response.json({ status: "succeeded" }) : new Response("<html>proxy error</html>");
+          }
+          if (u.pathname.startsWith("/api/document/")) return Response.json({ metadata: { author: documentAuthor } });
           return new Response("no", { status: 404 });
         },
       });
       try {
         const cache = { AAAAAAAAAAA: { kind: "ok", author: "A" }, BBBBBBBBBBB: { kind: "ok", author: "B" } };
-        for (const [name, status, id] of [["upd500", 500, "AAAAAAAAAAA"], ["mismatch", 200, "BBBBBBBBBBB"]] as const) {
+        const cases = [
+          ["upd500", 500, "AAAAAAAAAAA", "json", "Somebody Else", "update: HTTP 500"],
+          ["mismatch", 200, "BBBBBBBBBBB", "json", "Somebody Else", "MISMATCH a.md"],
+          // The document then matches, so only the unreadable status can fail the run.
+          ["status-not-json", 200, "BBBBBBBBBBB", "html", "B", "update-status: HTTP 200, not JSON"],
+        ] as const;
+        for (const [name, status, id, body, author, expected] of cases) {
           updateStatus = status;
+          statusBody = body;
+          documentAuthor = author;
           const fx = setup(name, [{ path: "a.md", id, ageMs: 1_000 }], cache);
           const proc = Bun.spawn(
             ["bun", SCRIPT, "--root", fx.root, "--state-dir", fx.state, "--huginn", `http://127.0.0.1:${server.port}`],
@@ -220,7 +232,7 @@ describe("huginn failures exit nonzero", () => {
           );
           const out = (await new Response(proc.stdout).text()) + (await new Response(proc.stderr).text());
           expect({ name, code: await proc.exited }).toEqual({ name, code: 1 });
-          expect(out).toContain(status === 500 ? "update: HTTP 500" : "MISMATCH a.md");
+          expect(out).toContain(expected);
         }
       } finally {
         server.stop(true);
@@ -228,4 +240,221 @@ describe("huginn failures exit nonzero", () => {
     },
     30_000,
   );
+});
+
+/** Every file under `dir` whose name ends `.tmp`, dot entries included. */
+function tempsUnder(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const ent of readdirSync(dir, { withFileTypes: true, recursive: true })) {
+    if (ent.isFile() && ent.name.endsWith(".tmp")) out.push(relative(dir, join(ent.parentPath, ent.name)));
+  }
+  return out;
+}
+
+async function spawnIn(cwd: string, args: string[], env: Record<string, string> = { ...(process.env as Record<string, string>) }) {
+  const proc = Bun.spawn(["bun", SCRIPT, ...args], { cwd, env, stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  return { code, out: out + err };
+}
+
+describe("the atomic write's temp file", () => {
+  test(
+    "lives in the state dir, never under the root huginn indexes",
+    async () => {
+      const files: Fixture[] = [1, 2, 3].map((i) => ({ path: `health/Doc ${i}.md`, id: `TMP${String(i).padStart(8, "0")}`, ageMs: i * 1_000 }));
+      const fx = setup("tmp-location", files, Object.fromEntries(files.map((f) => [f.id, { kind: "ok", author: `A ${f.id}` }])));
+      const proc = Bun.spawn(["bun", SCRIPT, "--root", fx.root, "--state-dir", fx.state, "--no-update"], {
+        env: { ...(process.env as Record<string, string>), BACKFILL_DEBUG_TEMP_PAUSE_MS: "1500" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      let inRoot: string[] = [];
+      let inState: string[] = [];
+      const deadline = Date.now() + 20_000;
+      while (inRoot.length === 0 && inState.length === 0 && Date.now() < deadline) {
+        await Bun.sleep(20);
+        inRoot = tempsUnder(fx.root);
+        inState = tempsUnder(fx.state).filter((p) => !p.startsWith("oembed-cache"));
+      }
+      proc.kill("SIGINT");
+      await proc.exited;
+      expect({ inRoot }).toEqual({ inRoot: [] });
+      expect(inState.length).toBe(1);
+      expect(tempsUnder(fx.root)).toEqual([]);
+    },
+    30_000,
+  );
+
+  test(
+    "a temp an earlier build left in the root is removed and reported by every mode",
+    async () => {
+      for (const mode of [["--dry-run"], [], ["--rollback"]]) {
+        const fx = setup(`tmp-sweep${mode.join("")}`, [{ path: "health/Creatine.md", id: "SWEEP000001", ageMs: 1_000, author: "Has" }], {});
+        const leftover = join(fx.root, "health/.Creatine.md.author-backfill.tmp");
+        writeFileSync(leftover, "half a file");
+        const r = await run(mode, fx);
+        expect({ mode, code: r.code }).toEqual({ mode, code: 0 });
+        expect({ mode, left: existsSync(leftover) }).toEqual({ mode, left: false });
+        expect(r.out).toContain("removed a temp file an earlier build left in the root: health/.Creatine.md.author-backfill.tmp");
+      }
+    },
+    30_000,
+  );
+});
+
+describe("the dry run against an oEmbed server", () => {
+  const ID = { ok: "OKOKOKOKOK1", wrong: "WRONGWRONG1", s401: "S401S401S41", s403: "S403S403S43", s404: "S404S404S44", s400: "S400S400S40" };
+  const files: Fixture[] = [
+    { path: "a/Right Title Here.md", id: ID.ok, ageMs: 1_000 },
+    { path: "a/Kubernetes Operators Deep Dive.md", id: ID.wrong, ageMs: 2_000 },
+    { path: "u/Gone 401.md", id: ID.s401, ageMs: 3_000 },
+    { path: "u/Gone 403.md", id: ID.s403, ageMs: 4_000 },
+    { path: "u/Gone 404.md", id: ID.s404, ageMs: 5_000 },
+    { path: "u/Gone 400.md", id: ID.s400, ageMs: 6_000 },
+  ];
+  const hits = new Map<string, number>();
+  let server: ReturnType<typeof Bun.serve>;
+  const env = () => ({ ...(process.env as Record<string, string>), BACKFILL_OEMBED_BASE: `http://127.0.0.1:${server.port}` });
+
+  function startServer() {
+    server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        const id = new URL(new URL(req.url).searchParams.get("url") ?? "").searchParams.get("v") ?? "";
+        hits.set(id, (hits.get(id) ?? 0) + 1);
+        if (id === ID.ok) return Response.json({ author_name: "Chan OK", title: "Right Title Here" });
+        if (id === ID.wrong) return Response.json({ author_name: "Chan Pasta", title: "Cooking Pasta Tonight" });
+        const status = Number(id.slice(1, 4));
+        return new Response("no", { status: Number.isInteger(status) ? status : 500 });
+      },
+    });
+  }
+
+  test(
+    "caches ok (with its title) and 400/401/403/404 as unavailable, and fetches none of them again",
+    async () => {
+      startServer();
+      try {
+        const fx = setup("dry-cache", files, {});
+        const first = await run(["--dry-run"], fx, env());
+        expect(first.code).toBe(0);
+        expect(Object.fromEntries(hits)).toEqual(Object.fromEntries(Object.values(ID).map((id) => [id, 1])));
+        const cache = JSON.parse(readFileSync(join(fx.state, "oembed-cache.json"), "utf8"));
+        expect(cache[ID.ok]).toEqual({ kind: "ok", author: "Chan OK", title: "Right Title Here" });
+        for (const [id, status] of [[ID.s401, 401], [ID.s403, 403], [ID.s404, 404], [ID.s400, 400]] as const) {
+          expect(cache[id]).toEqual({ kind: "unavailable", status });
+        }
+
+        const second = await run(["--dry-run"], fx, env());
+        expect(second.code).toBe(0);
+        expect(second.out).toContain("0 to fetch");
+        expect(Object.fromEntries(hits)).toEqual(Object.fromEntries(Object.values(ID).map((id) => [id, 1])));
+      } finally {
+        server.stop(true);
+        hits.clear();
+      }
+    },
+    30_000,
+  );
+
+  test(
+    "the title review covers every candidate, and never overwrites the operator's pruned file",
+    async () => {
+      startServer();
+      try {
+        const fx = setup("dry-review", files, {});
+        const reviewPath = join(fx.state, "title-review.txt");
+        expect((await run(["--dry-run"], fx, env())).code).toBe(0);
+        const firstReview = readFileSync(reviewPath, "utf8");
+        expect(firstReview).toContain("a/Kubernetes Operators Deep Dive.md\n");
+
+        // The operator keeps the flagged line and passes the file back.
+        const again = await run(["--dry-run", "--exclude", reviewPath], fx, env());
+        expect(again.code).toBe(0);
+        expect(readFileSync(reviewPath, "utf8")).toBe(firstReview);
+        const stamped = readdirSync(fx.state).filter((n) => /^title-review-.+\.txt$/.test(n));
+        expect(stamped.length).toBe(1);
+        const second = readFileSync(join(fx.state, stamped[0]!), "utf8");
+        expect(second).toContain("(already --exclude'd)\na/Kubernetes Operators Deep Dive.md\n");
+        expect(again.out).toContain("title-review.txt exists and was left untouched");
+      } finally {
+        server.stop(true);
+        hits.clear();
+      }
+    },
+    30_000,
+  );
+});
+
+describe("--exclude on the write", () => {
+  test("an excluded document is not written; the rest are", async () => {
+    const fx = setup(
+      "exclude-write",
+      [
+        { path: "a/Keep Out.md", id: "EXCLUDE0001", ageMs: 1_000 },
+        { path: "a/Write Me.md", id: "EXCLUDE0002", ageMs: 2_000 },
+      ],
+      { EXCLUDE0001: { kind: "ok", author: "Wrong Channel" }, EXCLUDE0002: { kind: "ok", author: "Right Channel" } },
+    );
+    const excludeFile = join(fx.state, "exclude.txt");
+    writeFileSync(excludeFile, "# checked by hand\na/Keep Out.md\n");
+    const r = await run(["--exclude", excludeFile], fx);
+    expect(r.code).toBe(0);
+    expect(readFileSync(join(fx.root, "a/Keep Out.md")).equals(fx.original.get("a/Keep Out.md")!)).toBe(true);
+    expect(readFileSync(join(fx.root, "a/Write Me.md"), "utf8")).toContain('author: "Right Channel"');
+  }, 30_000);
+});
+
+describe("relative paths", () => {
+  test(
+    "a write run with a relative --root (trailing slash) and --state-dir rolls back from another cwd",
+    async () => {
+      const fx = setup("relative", [{ path: "a/Doc.md", id: "RELATIVE001", ageMs: 1_000 }], { RELATIVE001: { kind: "ok", author: "Rel" } });
+      const base = dirname(fx.root);
+      const w = await spawnIn(base, ["--root", "tree/", "--state-dir", "state", "--no-update"]);
+      expect(w.code).toBe(0);
+      expect(readFileSync(join(fx.root, "a/Doc.md"), "utf8")).toContain('author: "Rel"');
+
+      const rb = await spawnIn(scratch, ["--rollback", "--root", relative(scratch, fx.root), "--state-dir", relative(scratch, fx.state), "--no-update"]);
+      expect({ code: rb.code, out: rb.out }).toMatchObject({ code: 0 });
+      expect(rb.out).toContain("restored 1,");
+      expect(readFileSync(join(fx.root, "a/Doc.md")).equals(fx.original.get("a/Doc.md")!)).toBe(true);
+
+      const runLine = readFileSync(join(fx.state, "journal.jsonl"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { t: string; root?: string; tarball?: string })
+        .find((l) => l.t === "run")!;
+      expect(runLine.root).toBe(realpathSync(fx.root));
+      expect(runLine.tarball!.startsWith(`${realpathSync(fx.state)}/`)).toBe(true);
+    },
+    30_000,
+  );
+
+  test("a journal made against another root: the refusal names both roots and sends nobody to another state dir", async () => {
+    const fx = setup("other-root", [{ path: "a/Doc.md", id: "OTHERROOT01", ageMs: 1_000 }], { OTHERROOT01: { kind: "ok", author: "O" } });
+    expect((await run([], fx)).code).toBe(0);
+    const otherRoot = join(dirname(fx.root), "other");
+    mkdirSync(otherRoot);
+    const r = await spawnIn(scratch, ["--rollback", "--root", otherRoot, "--state-dir", fx.state, "--no-update"]);
+    expect(r.code).toBe(2);
+    expect(r.out).not.toContain("--state-dir");
+    expect(r.out).toContain(`root ${realpathSync(fx.root)},`);
+    expect(r.out).toContain(`--root is ${realpathSync(otherRoot)}`);
+  }, 30_000);
+});
+
+describe("rollback without its snapshot", () => {
+  test("a missing tarball exits 2 and restores nothing", async () => {
+    const fx = setup("lost-tarball", [{ path: "a/Doc.md", id: "LOSTTARBAL1", ageMs: 1_000 }], { LOSTTARBAL1: { kind: "ok", author: "L" } });
+    expect((await run([], fx)).code).toBe(0);
+    const written = readFileSync(join(fx.root, "a/Doc.md"));
+    for (const n of readdirSync(fx.state)) if (n.startsWith("backup-")) unlinkSync(join(fx.state, n));
+    const r = await run(["--rollback"], fx);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("snapshot tarball(s) missing — nothing restored");
+    expect(readFileSync(join(fx.root, "a/Doc.md")).equals(written)).toBe(true);
+  }, 30_000);
 });

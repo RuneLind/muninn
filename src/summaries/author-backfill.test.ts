@@ -291,4 +291,5 @@ test("the failure streak counts errors and resets on any answer about the video"
   }
   expect(s).toBe(0);
   expect([1, 2, 3, 4].reduce((acc) => nextFailureStreak(acc, { kind: "error" }), 0)).toBe(4);
+  expect(nextFailureStreak(4, { kind: "unavailable" })).toBe(0);
 });

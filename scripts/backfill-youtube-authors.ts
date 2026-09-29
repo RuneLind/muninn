@@ -17,7 +17,11 @@
  *       title shares little with their own title — a legacy `url` can name a
  *       different video — and writes them to `title-review.txt` in the state
  *       dir, which is an `--exclude` file: delete the lines you have checked
- *       and are fine, and pass the rest.
+ *       and are fine, and pass the rest. The review always covers EVERY
+ *       candidate, `--exclude`d or not (marked), and the script never
+ *       overwrites that file: when it exists, a later dry run writes
+ *       `title-review-<time>.txt` beside it and says so, so your pruned copy
+ *       stays exactly as you left it.
  *   bun scripts/backfill-youtube-authors.ts --limit 20 [--exclude <file>]
  *       The pilot: tarballs the tree, writes the 20 NEWEST candidates from the
  *       cache, runs huginn's `/update` and checks `metadata.author` on each.
@@ -41,9 +45,14 @@
  * words and a value flag with no value exit 2 before anything runs.
  *
  * Writes add the key only where it is absent and never touch the body. Each
- * is atomic: a temp file in the same directory, given its stamp, then renamed
+ * is atomic: a temp file in `<state-dir>/tmp/`, given its stamp, then renamed
  * over the target, so no reader sees new bytes with a "now" mtime or a
- * truncated file. A file whose mtime moved between read and write is skipped.
+ * truncated file. The temp is NEVER under the root: huginn's reader indexes
+ * every file there, dotfiles and `.tmp` included. The state dir must be on the
+ * root's filesystem (a rename across devices is not atomic); every mode
+ * refuses otherwise. Every mode also first removes any
+ * `*.author-backfill.tmp` an earlier build of this script left in the root.
+ * A file whose mtime moved between read and write is skipped.
  * Every run re-stamps its sequence (every file from the oldest one it changes
  * onward, changed or not) with increasing mtimes 1 ms apart in original-mtime
  * order, so `/update` reads them and the collection's relative order survives.
@@ -55,7 +64,8 @@
  * rollback and to the next run's original-mtime lookup.
  *
  * Flags: --root <dir> (default huginn's youtube-articles tree), --state-dir <dir>
- * (default ~/.muninn/youtube-author-backfill), --huginn <url> (default
+ * (default ~/.muninn/youtube-author-backfill) — both made canonical (absolute,
+ * symlinks resolved) before anything is journaled, so any cwd can roll back — --huginn <url> (default
  * KNOWLEDGE_API_URL or http://127.0.0.1:8321), --no-update (skip huginn
  * entirely), --collection <name> (default youtube-summaries).
  *
@@ -73,6 +83,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -81,7 +92,7 @@ import {
   writeSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { $ } from "bun";
 import {
   assignStamps,
@@ -123,13 +134,23 @@ if (!parsed.ok) {
   process.exit(2);
 }
 const ARGS = parsed.args;
-const ROOT = ARGS.root ?? join(homedir(), "source/private/huginn/data/sources/youtube-articles");
-const STATE_DIR = ARGS.stateDir ?? join(homedir(), ".muninn/youtube-author-backfill");
+// Canonical (absolute, symlinks resolved, no trailing slash) before anything is
+// journaled, so a rollback from any cwd, or by another spelling, matches.
+const ROOT_ARG = resolve(ARGS.root ?? join(homedir(), "source/private/huginn/data/sources/youtube-articles"));
+if (!existsSync(ROOT_ARG)) {
+  console.error(`root does not exist: ${ROOT_ARG}`);
+  process.exit(2);
+}
+const ROOT = realpathSync(ROOT_ARG);
+const STATE_DIR_ARG = resolve(ARGS.stateDir ?? join(homedir(), ".muninn/youtube-author-backfill"));
+mkdirSync(STATE_DIR_ARG, { recursive: true });
+const STATE_DIR = realpathSync(STATE_DIR_ARG);
 const HUGINN = (ARGS.huginn ?? process.env.KNOWLEDGE_API_URL ?? "http://127.0.0.1:8321").replace(/\/+$/, "");
 const COLLECTION = ARGS.collection ?? "youtube-summaries";
 const REQUEST_SPACING_MS = 500; // 2 requests per second
 const CACHE_PATH = join(STATE_DIR, "oembed-cache.json");
 const JOURNAL_PATH = join(STATE_DIR, "journal.jsonl");
+const TMP_DIR = join(STATE_DIR, "tmp");
 /** Test hook for the interrupted-run drill: sleep this long after each file. */
 const DEBUG_SLEEP_MS = Number(process.env.BACKFILL_DEBUG_SLEEP_MS ?? 0) || 0;
 /** Test hook: hold each atomic write between its temp file and the rename, so a spec can see where the temp lives. */
@@ -143,13 +164,28 @@ const OEMBED_BASE = process.env.BACKFILL_OEMBED_BASE || undefined;
  */
 const TAR_ENV = { ...process.env, LC_ALL: "en_US.UTF-8", LANG: "en_US.UTF-8" };
 
-if (!existsSync(ROOT)) {
-  console.error(`root does not exist: ${ROOT}`);
-  process.exit(2);
-}
-mkdirSync(STATE_DIR, { recursive: true });
 if (existsSync(join(STATE_DIR, "manifest.json"))) {
   console.error(`${STATE_DIR} holds a manifest.json from an earlier version of this script — pass another --state-dir`);
+  process.exit(2);
+}
+
+/** Every `*.author-backfill.tmp` under `dir`, dot entries included — huginn reads those too. */
+function leftoverTemps(dir: string, out: string[] = []): string[] {
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    const abs = join(dir, ent.name);
+    if (ent.isDirectory()) leftoverTemps(abs, out);
+    else if (ent.name.endsWith(".author-backfill.tmp")) out.push(abs);
+  }
+  return out;
+}
+for (const abs of leftoverTemps(ROOT)) {
+  rmSync(abs, { force: true });
+  console.log(`removed a temp file an earlier build left in the root: ${relative(ROOT, abs)}`);
+}
+rmSync(TMP_DIR, { recursive: true, force: true });
+mkdirSync(TMP_DIR);
+if (statSync(TMP_DIR).dev !== statSync(ROOT).dev) {
+  console.error(`${STATE_DIR} is on another filesystem than ${ROOT}: a rename between them is not atomic — put the state dir on the root's filesystem`);
   process.exit(2);
 }
 
@@ -177,7 +213,10 @@ function loadJournal(): JournalRun[] {
   if (badLines > 0) console.warn(`journal: ${badLines} unreadable line(s) ignored (a torn last append?)`);
   const foreign = runs.find((r) => r.root !== ROOT);
   if (foreign) {
-    console.error(`journal ${JOURNAL_PATH} belongs to ${foreign.root}, not ${ROOT} — pass another --state-dir`);
+    console.error(
+      `journal ${JOURNAL_PATH} records runs against the root ${foreign.root}, but this run's --root is ${ROOT} — ` +
+        `rerun with --root ${foreign.root}`,
+    );
     process.exit(2);
   }
   return runs;
@@ -204,12 +243,13 @@ function mtimeOf(abs: string): number {
 }
 
 /**
- * `bytes` onto `abs` atomically, already carrying its stamp: a temp file in the
- * same directory (a dot name the walk skips, no `.md` suffix for huginn), the
- * original mode, fsynced, stamped, then renamed over the target.
+ * `bytes` onto `abs` atomically, already carrying its stamp: a temp file in
+ * `TMP_DIR` (never under the root, which huginn indexes whole; the startup
+ * check put it on the root's filesystem), the original mode, fsynced,
+ * stamped, then renamed over the target.
  */
 function atomicWrite(abs: string, bytes: string | Uint8Array, atime: Date, stampMs: number): void {
-  const tmp = join(dirname(abs), `.${basename(abs)}.author-backfill.tmp`);
+  const tmp = join(TMP_DIR, "write.tmp");
   const mode = statSync(abs).mode & 0o777;
   const fd = openSync(tmp, "w", mode);
   try {
@@ -438,7 +478,10 @@ async function dryRun(): Promise<void> {
   // Title review: a legacy document's `url` can name ANOTHER video, and the
   // write would then give it that video's channel. Not blocked automatically —
   // YouTube retitles are common — but listed, lowest overlap first.
-  const review = toWrite
+  // Over EVERY candidate, `--exclude`d or not: a review built from what is left
+  // after the exclude erases the flags the exclude file came from.
+  const review = okDocs
+    .filter((d) => !overCap.includes(d))
     .flatMap((d) => {
       const entry = cache[d.videoId!] as { author: string; title?: string };
       if (entry.title === undefined) return [];
@@ -446,16 +489,22 @@ async function dryRun(): Promise<void> {
       return score !== null && score < TITLE_REVIEW_THRESHOLD ? [{ d, entry, score }] : [];
     })
     .sort((a, b) => a.score - b.score);
-  const reviewPath = join(STATE_DIR, "title-review.txt");
+  // Never overwritten: the operator prunes this file and passes it back.
+  const firstReview = join(STATE_DIR, "title-review.txt");
+  const reviewPath = existsSync(firstReview)
+    ? join(STATE_DIR, `title-review-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`)
+    : firstReview;
+  const mark = (d: Doc): string => (excludes.has(d.path) ? " (already --exclude'd)" : "");
   writeFileSync(
     reviewPath,
     `# title overlap < ${TITLE_REVIEW_THRESHOLD}: an --exclude file. Delete the lines you checked and are fine.\n` +
-      review.map((r) => `# ${r.score.toFixed(2)} oEmbed: ${JSON.stringify(r.entry.title)} by ${r.entry.author}\n${r.d.path}\n`).join(""),
+      review.map((r) => `# ${r.score.toFixed(2)} oEmbed: ${JSON.stringify(r.entry.title)} by ${r.entry.author}${mark(r.d)}\n${r.d.path}\n`).join(""),
   );
   console.log("");
+  if (reviewPath !== firstReview) console.log(`${firstReview} exists and was left untouched; this review is a new file`);
   console.log(`title review (overlap < ${TITLE_REVIEW_THRESHOLD}): ${review.length} → ${reviewPath}`);
   for (const r of review) {
-    console.log(`  ${r.score.toFixed(2)}  ${r.d.path}\n        oEmbed: ${JSON.stringify(r.entry.title)} — ${r.entry.author}`);
+    console.log(`  ${r.score.toFixed(2)}  ${r.d.path}${mark(r.d)}\n        oEmbed: ${JSON.stringify(r.entry.title)} — ${r.entry.author}`);
   }
   console.log("");
   for (const d of toWrite.slice(0, 20)) {
