@@ -754,3 +754,30 @@ export async function deleteSourceProposalsForDoc(
   `;
   return { deleted: deleted.map(toRow), kept: kept.map(toRow) };
 }
+
+/** One `source` proposal drafted from a captured doc, on any bot. */
+export interface SourceProposalForDoc extends DeletedSourceProposal {
+  bot: string;
+}
+
+/**
+ * Every bot's `source` proposal drafted from one captured doc, newest first —
+ * the read half of {@link deleteSourceProposalsForDoc}'s match (same
+ * containment, same `kind = 'source' AND wiki_name IS NULL`), without its
+ * bot filter.
+ */
+export async function getSourceProposalsForDoc(collection: string, docId: string): Promise<SourceProposalForDoc[]> {
+  const sql = getDb();
+  const match = sql.json([{ collection, docId }] as any);
+  const rows = await sql`
+    SELECT id, bot_name, target_path, status FROM wiki_proposals
+    WHERE wiki_name IS NULL AND kind = 'source' AND source_docs @> ${match}
+    ORDER BY created_at DESC, id
+  `;
+  return rows.map((r) => ({
+    id: r.id as string,
+    bot: r.bot_name as string,
+    targetPath: r.target_path as string,
+    status: r.status as WikiProposalStatus,
+  }));
+}

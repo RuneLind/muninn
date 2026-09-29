@@ -19,6 +19,7 @@ import {
   getLiveOrAppliedTopicKeysByWiki,
   getRecentlyRejectedTopicKeysByWiki,
   deleteSourceProposalsForDoc,
+  getSourceProposalsForDoc,
   listWikiProposalsByGroup,
   approveWikiProposalGroup,
   rejectWikiProposalGroup,
@@ -333,6 +334,30 @@ describe("deleteSourceProposalsForDoc", () => {
   test("a doc with no proposals is a no-op with empty lists", async () => {
     const res = await deleteSourceProposalsForDoc(`delsrc-none-${Date.now()}`, "youtube-summaries", "nope.md");
     expect(res).toEqual({ deleted: [], kept: [] });
+  });
+});
+
+describe("getSourceProposalsForDoc", () => {
+  test("every bot's source rows for the doc; not a wiki-keyed row, another kind, another doc or another collection", async () => {
+    const stamp = Date.now();
+    const docId = `ctx/${stamp}_doc.md`;
+    const doc = { collection: "youtube-summaries", docId, title: "Doc", url: "https://d" };
+    const botA = `ctxa-${stamp}`;
+    const botB = `ctxb-${stamp}`;
+    const mk = (botName: string, topicKey: string, over: Partial<InsertWikiProposalParams> = {}) =>
+      insertWikiProposal(makeProposal({ botName, topicKey, kind: "source", targetPath: `sources/${topicKey}.mdx`, sourceDocs: [doc], ...over }));
+    const a = (await mk(botA, "ctx-a"))!;
+    const b = (await mk(botB, "ctx-b", { status: "applied" }))!;
+    await mk(botA, "ctx-wiki", { wikiName: `mimir-${stamp}` });
+    await mk(botA, "ctx-concept", { kind: "concept" });
+    await mk(botA, "ctx-other-doc", { sourceDocs: [{ ...doc, docId: `ctx/${stamp}_other.md` }] });
+    await mk(botA, "ctx-other-coll", { sourceDocs: [{ ...doc, collection: "x-articles" }] });
+
+    const rows = await getSourceProposalsForDoc("youtube-summaries", docId);
+    expect(rows.map((r) => r.id).sort()).toEqual([a.id, b.id].sort());
+    expect(rows.find((r) => r.id === b.id)).toEqual({ id: b.id, bot: botB, targetPath: "sources/ctx-b.mdx", status: "applied" });
+    expect(rows.find((r) => r.id === a.id)!.bot).toBe(botA);
+    expect(await getSourceProposalsForDoc("youtube-summaries", `ctx/${stamp}_none.md`)).toEqual([]);
   });
 });
 

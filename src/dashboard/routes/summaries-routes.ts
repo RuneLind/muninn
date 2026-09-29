@@ -18,6 +18,7 @@ import { registerSummariesExportRoutes } from "./summaries-export.ts";
 import { registerSummariesPromptRoutes } from "./summaries-prompt.ts";
 import { registerSummariesRerunRoutes } from "./summaries-rerun.ts";
 import { registerFramesRoutes } from "./frames-routes.ts";
+import { registerSummariesContextRoutes } from "./summaries-context.ts";
 
 const log = getLog("dashboard");
 
@@ -203,6 +204,10 @@ export function registerSummariesRoutes(
   // Production reads the real root; a test calls `registerFramesRoutes`
   // directly with a temp one.
   registerFramesRoutes(app, config);
+
+  // The doc panel's right-rail context: Same story this week (one search
+  // across every summary source) and In your wiki (the doc's source proposals).
+  registerSummariesContextRoutes(app, config);
 
   app.get("/api/summaries/stats", async (c) => {
     const botName = c.req.query("bot") || "jarvis";
