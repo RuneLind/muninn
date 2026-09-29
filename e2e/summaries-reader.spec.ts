@@ -1103,7 +1103,32 @@ test("j stepping through the rail searches once, for the summary it stops on", a
     await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(id)}.`);
   }
   await page.waitForTimeout(AFTER_SIMILAR_DEBOUNCE_MS);
-  expect(searches).toEqual([title(L1)]);
+  // Similar searches the summary's opening, not its title.
+  expect(searches).toEqual([`Body of ${title(L1)}.`]);
+});
+
+test("Similar searches the summary's opening without the transcript; the title only when there is none", async ({ page }) => {
+  seedReaderDocs();
+  const calls: URL[] = [];
+  page.on("request", (r) => { if (r.url().includes("/similar?")) calls.push(new URL(r.url())); });
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  await expect.poll(() => calls.length).toBe(1);
+  const q = calls[0]!.searchParams.get("q")!;
+  expect(q.startsWith("*A short talk arguing")).toBe(true);
+  expect(q.length).toBe(2000);
+  expect(q).not.toContain("so today I want to talk about machines");
+  expect(calls[0]!.searchParams.get("corrective")).toBe("off");
+  expect(calls[0]!.searchParams.get("max_chunk_chars")).toBe("200");
+
+  // A summary that is all transcript has no opening: the title goes out, on
+  // huginn's default corrective mode.
+  const ONLY_TX = "ai/general/Only transcript.md";
+  put("youtube", ONLY_TX, TODAY, "04:30:00");
+  putBody("youtube", ONLY_TX, "## Transcript\n\nspoken words only", { date: TODAY });
+  await page.evaluate((id) => (window as unknown as PageWindow).openSummaryDoc!(id, "", "youtube"), ONLY_TX);
+  await expect.poll(() => calls.length).toBe(2);
+  expect(calls[1]!.searchParams.get("q")).toBe(title(ONLY_TX));
+  expect(calls[1]!.searchParams.has("corrective")).toBe(false);
 });
 
 test("the outline marks the section in view", async ({ page }) => {

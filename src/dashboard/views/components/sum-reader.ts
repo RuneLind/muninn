@@ -31,6 +31,8 @@ import {
   SAME_STORY_DAYS,
   SAME_STORY_MAX,
   SAME_STORY_MIN_RELEVANCE,
+  SIMILAR_QUERY_CHARS,
+  SIMILAR_QUERY_MAX_ENCODED,
 } from "../../../summaries/reader-article.ts";
 import { copyText } from "./copy-path.ts";
 import {
@@ -44,6 +46,9 @@ import {
 /** How long the Similar fetch waits after an open, so `j`/`k` stepping
  *  through the rail does not queue one search per row passed. */
 export const SIMILAR_DEBOUNCE_MS = 250;
+
+/** Similar's hits show only a heading from their matched chunks. */
+export const SIMILAR_CHUNK_CHARS = 200;
 
 export function sumReaderStyles(): string {
   return `
@@ -233,6 +238,8 @@ export function sumReaderScript(): string {
     var SAME_STORY_MIN_RELEVANCE = ${SAME_STORY_MIN_RELEVANCE};
     var SAME_STORY_DAYS = ${SAME_STORY_DAYS};
     var SAME_STORY_MAX = ${SAME_STORY_MAX};
+    var SIMILAR_QUERY_CHARS = ${SIMILAR_QUERY_CHARS};
+    var SIMILAR_QUERY_MAX_ENCODED = ${SIMILAR_QUERY_MAX_ENCODED};
 ${[...READER_IMPORTS, ...READER_FUNCTIONS].map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")}
     // --- reader-fns:end ---
     // The clipboard write the dashboard's copy controls share (copy-path.ts).

@@ -23,6 +23,10 @@ import {
   readerWikiContext,
   SAME_STORY_MAX,
   SAME_STORY_MIN_RELEVANCE,
+  readerSimilarQuery,
+  readerCutQuery,
+  SIMILAR_QUERY_CHARS,
+  SIMILAR_QUERY_MAX_ENCODED,
 } from "./reader-article.ts";
 import { splitTranscript } from "./transcript-split.ts";
 
@@ -359,5 +363,44 @@ describe("In your wiki", () => {
     ]);
     expect(items[0]!.label).toBe("In the wiki");
     expect(readerWikiContext(undefined)).toEqual([]);
+  });
+});
+
+describe("Similar query", () => {
+  test("the text before the ## Transcript appendix, trimmed; a fenced heading is not the appendix", () => {
+    const md = "\n\n*Lede.*\n\n## One\nbody\n```\n## Transcript\nquoted\n```\n\n## Transcript\n\n### [00:00:00]\nspoken words";
+    expect(readerSimilarQuery(md)).toBe("*Lede.*\n\n## One\nbody\n```\n## Transcript\nquoted\n```");
+    expect(readerSimilarQuery("no appendix here  ")).toBe("no appendix here");
+    expect(readerSimilarQuery("## Transcript\nonly spoken words")).toBe("");
+    // `## Transcript notes` is a section, not the appendix.
+    expect(readerSimilarQuery("a\n## Transcript notes\nb")).toBe("a\n## Transcript notes\nb");
+  });
+
+  test("cut to SIMILAR_QUERY_CHARS", () => {
+    const md = "x".repeat(SIMILAR_QUERY_CHARS + 500) + "\n\n## Transcript\nspoken";
+    expect(readerSimilarQuery(md)).toBe("x".repeat(SIMILAR_QUERY_CHARS));
+  });
+
+  test("an emoji straddling the cut is dropped whole, and the result encodes", () => {
+    const md = "a".repeat(SIMILAR_QUERY_CHARS - 1) + "🧠 and more";
+    const q = readerSimilarQuery(md);
+    expect(q).toBe("a".repeat(SIMILAR_QUERY_CHARS - 1));
+    expect(() => encodeURIComponent(q)).not.toThrow();
+    expect(readerCutQuery("ab🧠", 3)).toBe("ab");
+    expect(readerCutQuery("ab🧠", 4)).toBe("ab🧠");
+  });
+
+  test("trimmed until the encoded query fits SIMILAR_QUERY_MAX_ENCODED", () => {
+    // 2,000 emoji units encode to 1,000 × 12 bytes; CJK to 2,000 × 9.
+    for (const unit of ["🧠", "漢"]) {
+      const q = readerSimilarQuery(unit.repeat(SIMILAR_QUERY_CHARS));
+      const size = encodeURIComponent(q).length;
+      expect(size).toBeLessThanOrEqual(SIMILAR_QUERY_MAX_ENCODED);
+      expect(size).toBeGreaterThan(SIMILAR_QUERY_MAX_ENCODED - 12);
+      expect(q.length).toBeGreaterThan(0);
+    }
+    // Plain prose is never trimmed by the size rule.
+    const prose = "Words fill the section. ".repeat(100);
+    expect(readerSimilarQuery(prose)).toBe(prose.slice(0, SIMILAR_QUERY_CHARS).trim());
   });
 });

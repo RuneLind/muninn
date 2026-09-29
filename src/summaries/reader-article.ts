@@ -17,8 +17,8 @@
  * summaries library's client copy of the transcript-split.ts function) and
  * `railDate`/`railValidDay` (the Latest rail's script). A second injected
  * declaration would replace the page's copy for every caller.
- * `READER_STALE_DAYS` and the three `SAME_STORY_*` constants are injected
- * as `var`s the same way.
+ * `READER_STALE_DAYS`, the three `SAME_STORY_*` constants and the two
+ * `SIMILAR_QUERY_*` ones are injected as `var`s the same way.
  */
 
 import { mapProseLines } from "./transcript-split.ts";
@@ -43,6 +43,15 @@ export const SAME_STORY_DAYS = 7;
 
 /** Same story this week shows at most this many cards. */
 export const SAME_STORY_MAX = 5;
+
+/** Similar's query: the opening of the summary, as long as the ingest-time
+ *  Similar's `summary[:2000]` (huginn `main/ingest/registry.py`). */
+export const SIMILAR_QUERY_CHARS = 2000;
+
+/** The query rides in a GET twice (browser → muninn → huginn), and huginn's
+ *  request head is capped at 16 KiB: trim until the encoded `q` fits in 6 KB.
+ *  Measured 2026-09-29 on 11 real summaries: 2,873–3,075 bytes. */
+export const SIMILAR_QUERY_MAX_ENCODED = 6144;
 
 export interface ReaderHeading {
   level: number;
@@ -405,6 +414,42 @@ export function readerWikiContext(proposals: unknown): ReaderWikiItem[] {
   return out;
 }
 
+/** The first `n` UTF-16 units of `s`, one fewer when the cut would leave
+ *  half a surrogate pair (an emoji), which `encodeURIComponent` throws on. */
+export function readerCutQuery(s: string, n: number): string {
+  let out = s.slice(0, Math.max(0, n));
+  const last = out.charCodeAt(out.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1);
+  return out;
+}
+
+/**
+ * Similar's query for a stored summary: the text before its `## Transcript`
+ * heading (outside fenced code), trimmed, cut to `SIMILAR_QUERY_CHARS`
+ * UTF-16 units (huginn's cut counts code points; the difference is accepted),
+ * then trimmed further until `encodeURIComponent(q)` is at most
+ * `SIMILAR_QUERY_MAX_ENCODED` bytes. Empty when the summary has no text
+ * before the transcript; the caller then searches the title.
+ */
+export function readerSimilarQuery(markdown: string): string {
+  const text = String(markdown);
+  let at = -1;
+  mapProseLines(text, (line, i) => {
+    if (at === -1 && /^## Transcript\s*$/.test(line)) at = i;
+    return line;
+  });
+  const body = at === -1 ? text : text.split("\n").slice(0, at).join("\n");
+  let q = readerCutQuery(body.trim(), SIMILAR_QUERY_CHARS);
+  let size = encodeURIComponent(q).length;
+  while (size > SIMILAR_QUERY_MAX_ENCODED) {
+    // Shrink in proportion, and always by at least one unit.
+    const keep = Math.min(q.length - 1, Math.floor(q.length * SIMILAR_QUERY_MAX_ENCODED / size));
+    q = readerCutQuery(q, keep);
+    size = encodeURIComponent(q).length;
+  }
+  return q.trim();
+}
+
 /** The 11-character id a YouTube url names (`extractYouTubeVideoId`'s host
  *  rule), or null; only the id charset, since it lands in a url and a src. */
 export function readerYouTubeId(url: unknown): string | null {
@@ -497,6 +542,8 @@ export const READER_FUNCTIONS = [
   readerDocKey,
   readerSameStory,
   readerWikiContext,
+  readerCutQuery,
+  readerSimilarQuery,
   readerYouTubeId,
   readerYouTubeStampBase,
   readerThumbnail,

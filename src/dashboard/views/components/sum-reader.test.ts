@@ -68,5 +68,8 @@ describe("sum-reader: the injected functions", () => {
     expect(api.readerSameStory(hits, open, [], "2026-09-29")).toHaveLength(1);
     const rows = [{ bot: "jarvis", status: "applied", targetPath: "sources/x.mdx" }];
     expect(api.readerWikiContext(rows)).toEqual(reader.readerWikiContext(rows));
+    const long = md + "🧠".repeat(3000);
+    expect(api.readerSimilarQuery(long)).toBe(reader.readerSimilarQuery(long));
+    expect(api.readerSimilarQuery("🧠".repeat(3000)).length).toBeGreaterThan(0);
   });
 });

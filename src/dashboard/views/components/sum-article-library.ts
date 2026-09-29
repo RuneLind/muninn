@@ -26,7 +26,7 @@ import {
   DOC_PANEL_MORE_WRAP_ID,
 } from "./doc-panel.ts";
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
-import { SIMILAR_DEBOUNCE_MS } from "./sum-reader.ts";
+import { SIMILAR_CHUNK_CHARS, SIMILAR_DEBOUNCE_MS } from "./sum-reader.ts";
 import { docPanelMenuScript } from "./doc-panel-menu.ts";
 
 /**
@@ -1438,7 +1438,10 @@ export function sumArticleLibraryScript(): string {
           }
         }
 
-        scheduleRightRail(title, docId, myRequest, source);
+        // Similar searches the summary's opening (readerSimilarQuery), the
+        // query the ingest-time Similar uses; the title only when there is none.
+        var similarQ = typeof readerSimilarQuery === 'function' ? readerSimilarQuery(cleaned) : '';
+        scheduleRightRail(title, docId, myRequest, source, similarQ);
       } catch (err) {
         if (myRequest !== _docRequestId) return;  // superseded
         // No body to read: the rail's searches go out on the title.
@@ -1552,11 +1555,11 @@ export function sumArticleLibraryScript(): string {
      * search per row passed: only the open that is still current after the
      * wait searches.
      */
-    function scheduleRightRail(title, docId, requestId, source) {
+    function scheduleRightRail(title, docId, requestId, source, similarQ) {
       clearTimeout(_similarTimer);
       _similarTimer = setTimeout(function() {
         if (requestId !== _docRequestId) return;
-        var similar = loadDocSimilar(title, docId, requestId, source);
+        var similar = loadDocSimilar(title, docId, requestId, source, similarQ);
         loadSameStory(title, docId, requestId, source, similar);
         loadDocContext(docId, requestId, source);
       }, ${SIMILAR_DEBOUNCE_MS});
@@ -1616,11 +1619,15 @@ export function sumArticleLibraryScript(): string {
 
     /** Resolves to the keys (readerDocKey) of the cards it rendered; [] when
      *  it rendered none or failed, null when a newer open superseded it. */
-    async function loadDocSimilar(title, currentDocId, requestId, source) {
+    async function loadDocSimilar(title, currentDocId, requestId, source, openingQ) {
       var panel = document.getElementById('docSimilarPanel');
       if (!panel) return [];
       try {
-        var res = await fetch(docApiBase(source) + '/similar?q=' + encodeURIComponent(title));
+        // A 2,000-character opening has nothing for corrective rescue to
+        // rescue; the title query keeps huginn's default.
+        var similarUrl = docApiBase(source) + '/similar?q=' + encodeURIComponent(openingQ || title) +
+          (openingQ ? '&corrective=off' : '') + '&max_chunk_chars=${SIMILAR_CHUNK_CHARS}';
+        var res = await fetch(similarUrl);
         if (requestId !== undefined && requestId !== _docRequestId) return null;  // superseded by a newer open
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var data = await res.json();
