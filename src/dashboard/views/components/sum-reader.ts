@@ -14,13 +14,16 @@
  *
  * It shares the page scope with sum-article-library.ts (openSummaryDoc,
  * renderMarkdown, splitTranscript, linkVimeoTimestamps, getSummaryDocuments,
- * matchesDomain, docTitle, SOURCES, esc, _docRequestId, _shareDoc), sum-shelf.ts
- * (isShelfDoc) and sum-latest-rail.ts (railKey, railCompare, railFilter,
- * railReadState, railHidesDeleted, _railQuery, _railChip); every read of the
- * rail's state is guarded, so the article renders without it.
+ * matchesDomain, docTitle, SOURCES, esc, _docRequestId, _shareDoc,
+ * docPanelMenu), sum-shelf.ts (isShelfDoc) and sum-latest-rail.ts (railKey,
+ * railCompare, railFilter, railReadState, railHidesDeleted, _railQuery,
+ * _railChip, and the railDate/railValidDay the injected functions call);
+ * every read of the rail's state is guarded, so the article renders without
+ * it.
  */
 
-import { READER_FUNCTIONS } from "../../../summaries/reader-article.ts";
+import { READER_FUNCTIONS, READER_IMPORTS, READER_STALE_DAYS } from "../../../summaries/reader-article.ts";
+import { copyText } from "./copy-path.ts";
 import {
   DOC_PANEL_COPY_LINK_ID,
   DOC_PANEL_DELETE_BTN_ID,
@@ -32,9 +35,6 @@ import {
 /** How long the Similar fetch waits after an open, so `j`/`k` stepping
  *  through the rail does not queue one search per row passed. */
 export const SIMILAR_DEBOUNCE_MS = 250;
-
-/** A Similar card's age turns amber past this many days. */
-export const SIMILAR_STALE_DAYS = 60;
 
 export function sumReaderStyles(): string {
   return `
@@ -111,6 +111,15 @@ export function sumReaderStyles(): string {
     }
     .doc-panel-body a.sum-nav-link:hover { border-color: var(--accent); color: var(--text-primary); text-decoration: none; }
     .sum-nav-older { text-align: right; margin-left: auto; }
+    /* Newer/Older move focus here (tabindex -1), so Tab continues in the
+       article; the column itself needs no ring. */
+    .sum-col-main:focus { outline: none; }
+    /* A wide table scrolls in its own box, and a long inline code span
+       wraps: measured at 390px, 10 of 103 real documents scrolled the page
+       sideways (up to 113px) on one or the other. */
+    .sum-table-scroll { overflow-x: auto; margin: 0 0 16px; }
+    .doc-panel-body .sum-table-scroll table { margin: 0; }
+    #sumArticleMain :not(pre) > code { overflow-wrap: anywhere; }
     .sum-nav-k { font-size: 11px; color: var(--text-soft); }
     .sum-nav-t { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -133,8 +142,12 @@ export function sumReaderStyles(): string {
     .sum-col-right a.sum-outline-link:hover { background: var(--bg-hover); color: var(--text-primary); }
     .sum-col-right a.sum-outline-link.active { border-left-color: var(--accent); color: var(--accent-light); font-weight: 600; }
     .sum-outline-transcript { margin-top: 6px; }
-    /* Similar cards. */
-    .doc-similar-item.sum-sim-card { display: flex; gap: 10px; padding: 8px 0; }
+    /* Similar cards: each card is one link. */
+    .doc-similar-item.sum-sim-card { display: flex; gap: 10px; padding: 8px 0; color: inherit; text-decoration: none; }
+    .doc-similar-item.sum-sim-card:hover { text-decoration: none; }
+    .sum-sim-title { color: var(--accent-light); font-size: 13px; line-height: 1.4; }
+    .sum-sim-card:hover .sum-sim-title { text-decoration: underline; }
+    .sum-sim-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
     .sum-sim-thumb {
       flex-shrink: 0;
       align-self: flex-start;
@@ -150,7 +163,7 @@ export function sumReaderStyles(): string {
     .sum-sim-bar > span { display: block; height: 100%; background: var(--accent); }
     .sum-sim-card .doc-similar-relevance { margin-left: 0; color: var(--text-soft); }
     .sum-sim-age.stale { color: color-mix(in srgb, var(--status-warning) 65%, var(--text-primary)); }
-    .sum-sim-why { font-size: 11px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sum-sim-why { display: block; font-size: 11px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sum-sim-tag {
       display: inline-block;
       margin-right: 4px;
@@ -183,64 +196,25 @@ export function sumReaderScript(): string {
   return `
     // --- Reader: pure logic, injected from src/summaries/reader-article.ts ---
     // --- reader-fns:start ---
-${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")}
+    var READER_STALE_DAYS = ${READER_STALE_DAYS};
+${[...READER_IMPORTS, ...READER_FUNCTIONS].map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")}
     // --- reader-fns:end ---
+    // The clipboard write the dashboard's copy controls share (copy-path.ts).
+    var copyText = ${copyText.toString()};
 
     function readerToday() { return new Date().toISOString().slice(0, 10); }
 
-    // --- ⋯ More (docPanelHtml({moreMenu:true})) ---
-    function moreMenuEl() { return document.getElementById('${DOC_PANEL_MORE_MENU_ID}'); }
-    function moreBtnEl() { return document.getElementById('${DOC_PANEL_MORE_BTN_ID}'); }
-    function moreMenuOpen() { var p = moreMenuEl(); return !!p && !p.hidden; }
-    /** Closes the menu; \`restoreFocus\` puts focus back on ⋯ More (Escape, an
-     *  item used), and is false for a click elsewhere, which keeps its own. */
-    function closeMoreMenu(restoreFocus) {
-      var pop = moreMenuEl();
-      if (!pop || pop.hidden) return;
-      pop.hidden = true;
-      var btn = moreBtnEl();
-      if (btn) {
-        btn.setAttribute('aria-expanded', 'false');
-        if (restoreFocus) btn.focus();
-      }
-    }
-    function moreMenuItems() {
-      var pop = moreMenuEl();
-      if (!pop) return [];
-      return Array.prototype.filter.call(pop.querySelectorAll('.doc-panel-menu-item'), function(el) {
-        return !el.hidden && !el.disabled;
-      });
-    }
-    function focusMoreItem(delta) {
-      var items = moreMenuItems();
-      if (!items.length) return;
-      var at = items.indexOf(document.activeElement);
-      items[at === -1 ? 0 : (at + delta + items.length) % items.length].focus();
-    }
-    function openMoreMenu() {
-      var pop = moreMenuEl();
-      if (!pop) return;
-      if (typeof closeRerunMenu === 'function' && typeof rerunMenuOpen === 'function' && rerunMenuOpen()) closeRerunMenu();
-      var copy = document.getElementById('${DOC_PANEL_COPY_LINK_ID}');
-      if (copy) copy.textContent = '🔗 Copy link';
-      pop.hidden = false;
-      readerKeepInViewport(pop);
-      var btn = moreBtnEl();
-      if (btn) btn.setAttribute('aria-expanded', 'true');
-      focusMoreItem(0);
-    }
-
-    /** The popup hangs from its button's right edge; on a narrow screen the
-     *  wrapped header can put that edge anywhere, so shift it back inside. */
-    function readerKeepInViewport(pop) {
-      pop.style.transform = '';
-      var r = pop.getBoundingClientRect();
-      var margin = 8;
-      var dx = 0;
-      if (r.left < margin) dx = margin - r.left;
-      else if (r.right > window.innerWidth - margin) dx = window.innerWidth - margin - r.right;
-      if (dx) pop.style.transform = 'translateX(' + Math.round(dx) + 'px)';
-    }
+    // --- ⋯ More (docPanelHtml({moreMenu:true})): click, click-away, keys,
+    // placement and Escape through docPanelMenu (doc-panel-menu.ts). ---
+    var _moreMenu = docPanelMenu({
+      btnId: '${DOC_PANEL_MORE_BTN_ID}',
+      popId: '${DOC_PANEL_MORE_MENU_ID}',
+      onOpen: function(menu) {
+        var copy = document.getElementById('${DOC_PANEL_COPY_LINK_ID}');
+        if (copy) copy.textContent = '🔗 Copy link';
+        menu.focusItem(0);
+      },
+    });
 
     /** The /summaries deep link to the open summary — the shape the page's
      *  init reads (doc + source). */
@@ -250,61 +224,22 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
         '&source=' + encodeURIComponent(_shareDoc.source);
     }
 
-    function readerCopyText(text) {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        return navigator.clipboard.writeText(text).then(function() { return true; }, function() { return readerCopyFallback(text); });
-      }
-      return Promise.resolve(readerCopyFallback(text));
-    }
-    /** An http:// page off loopback has no navigator.clipboard (not a secure
-     *  context), which is how the mini is reached over the tailnet. */
-    function readerCopyFallback(text) {
-      var ta = document.createElement('textarea');
-      ta.value = text;
-      ta.setAttribute('readonly', '');
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      var ok = false;
-      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-      ta.remove();
-      return ok;
-    }
-
     (function() {
-      var btn = moreBtnEl();
-      var pop = moreMenuEl();
-      if (!btn || !pop) return;
-      btn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        if (moreMenuOpen()) closeMoreMenu(true); else openMoreMenu();
-      });
-      document.addEventListener('click', function(e) {
-        if (!moreMenuOpen()) return;
-        if (!pop.contains(e.target) && e.target !== btn && !btn.contains(e.target)) closeMoreMenu(false);
-      });
-      pop.addEventListener('keydown', function(e) {
-        if (e.key === 'ArrowDown') { e.preventDefault(); focusMoreItem(1); }
-        else if (e.key === 'ArrowUp') { e.preventDefault(); focusMoreItem(-1); }
-        else if (e.key === 'Home') { e.preventDefault(); var a = moreMenuItems(); if (a.length) a[0].focus(); }
-        else if (e.key === 'End') { e.preventDefault(); var b = moreMenuItems(); if (b.length) b[b.length - 1].focus(); }
-        else if (e.key === 'Tab') closeMoreMenu(false);
-      });
       // Export downloads and Delete asks first; either way the menu has done
       // its job. Copy link stays open to say it copied.
       var exp = document.getElementById('${DOC_PANEL_EXPORT_LINK_ID}');
-      if (exp) exp.addEventListener('click', function() { closeMoreMenu(true); });
+      if (exp) exp.addEventListener('click', function() { _moreMenu.close(true); });
       var del = document.getElementById('${DOC_PANEL_DELETE_BTN_ID}');
-      if (del) del.addEventListener('click', function() { closeMoreMenu(true); });
+      if (del) del.addEventListener('click', function() { _moreMenu.close(true); });
       var copy = document.getElementById('${DOC_PANEL_COPY_LINK_ID}');
       if (copy) copy.addEventListener('click', function() {
         var link = readerDocLink();
         if (!link) return;
-        readerCopyText(link).then(function(ok) {
-          if (ok) { copy.textContent = '✓ Link copied'; return; }
-          // Neither path could write the clipboard: hand the link over to copy by hand.
-          window.prompt('Copy this link', link);
+        copyText(link).then(function(ok) {
+          copy.textContent = ok ? '✓ Link copied' : '✕ Copy failed';
+          // The execCommand path selects a textarea it then removes, which
+          // leaves focus on <body> with the menu still open.
+          if (_moreMenu.isOpen()) copy.focus();
         });
       });
     })();
@@ -313,6 +248,9 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
     var _readerDoc = null;     // {docId, source, requestId, url, thumb} of the open article
     var _readerSpyWired = false;
     var _readerSpyFrame = 0;
+    // {id, top}: the outline entry just clicked, and the scrollTop its jump
+    // landed on. It stays the active entry until the body scrolls elsewhere.
+    var _readerSpyPin = null;
 
     function readerPillsHtml(pills) {
       if (!pills.length) return '';
@@ -326,10 +264,11 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
       }).join('') + '</ul>';
     }
 
-    function readerThumbHtml(src) {
-      // A video YouTube no longer serves answers 404: the image goes rather
-      // than leaving a broken-image box.
-      return src ? '<img class="sum-hero-thumb" src="' + esc(src) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
+    /** The hero's and a card's thumbnail. \`src\` comes from readerThumbnail
+     *  (https only); a video YouTube no longer serves answers 404, and the
+     *  image goes rather than leaving a broken-image box. */
+    function readerThumbHtml(src, cls) {
+      return src ? '<img class="' + cls + '" src="' + esc(src) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
     }
 
     /**
@@ -341,9 +280,9 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
       var meta = ctx.meta || {};
       var raw = splitTranscript(cleaned);
       var src = SOURCES[ctx.source];
-      var pills = readerPills({
+      var pillInput = {
         sourceLabel: src ? src.badge : null,
-        date: meta.date,
+        date: meta.date,  // the listing row's date fills in later (readerRefreshNav)
         today: readerToday(),
         kind: meta.summary_kind,
         category: meta.category,
@@ -352,7 +291,9 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
         durationSec: meta.duration_sec,
         body: raw.body,
         transcript: raw.transcript,
-      });
+      };
+      ctx.pillInput = pillInput;
+      var pills = readerPills(pillInput);
       var thumb = readerThumbnail(ctx.source, ctx.videoUrl, meta.thumbnail_url);
       var linked = cleaned;
       if (ctx.source === 'vimeo') linked = linkVimeoTimestamps(linked, ctx.videoUrl);
@@ -363,7 +304,7 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
       var tk = readerTakeaways(body);
       var hero = (thumb || pills.length)
         // A <div>, not a <header>: the shared page styles paint every header.
-        ? '<div class="sum-hero" id="sumHero">' + readerThumbHtml(thumb) + readerPillsHtml(pills) + '</div>'
+        ? '<div class="sum-hero" id="sumHero">' + readerThumbHtml(thumb, 'sum-hero-thumb') + readerPillsHtml(pills) + '</div>'
         : '';
       var tldr = lede
         ? '<aside class="sum-tldr" aria-label="TL;DR"><span class="sum-tldr-k">TL;DR</span>' + renderMarkdown(lede.text) + '</aside>'
@@ -385,7 +326,7 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
       if (!container || source !== 'youtube') return;
       var id = readerYouTubeId(videoUrl);
       if (!id) return;
-      var prefix = 'https://www.youtube.com/watch?v=' + id + '&t=';
+      var prefix = readerYouTubeStampBase(id);
       container.querySelectorAll('a[href]').forEach(function(a) {
         if (a.getAttribute('href').indexOf(prefix) === 0) {
           a.setAttribute('target', '_blank');
@@ -397,8 +338,20 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
     /** After the article is in the DOM: heading ids and the outline, the
      *  scroll-spy, the new-tab timestamp links, and the newer/older links. */
     function readerAfterRender(mainEl, cleaned, ctx) {
-      _readerDoc = { docId: ctx.docId, source: ctx.source, requestId: ctx.requestId, url: ctx.videoUrl, hasThumb: !!mainEl.querySelector('.sum-hero-thumb') };
+      _readerDoc = {
+        docId: ctx.docId, source: ctx.source, requestId: ctx.requestId, url: ctx.videoUrl,
+        hasThumb: !!mainEl.querySelector('.sum-hero-thumb'), pillInput: ctx.pillInput || null,
+      };
+      _readerSpyPin = null;
       readerTimestampLinksInNewTab(mainEl, ctx.source, ctx.videoUrl);
+      // Every table in its own scrolling box (.sum-table-scroll).
+      mainEl.querySelectorAll('table').forEach(function(t) {
+        if (t.parentElement && t.parentElement.classList.contains('sum-table-scroll')) return;
+        var box = document.createElement('div');
+        box.className = 'sum-table-scroll';
+        t.parentNode.insertBefore(box, t);
+        box.appendChild(t);
+      });
       var outline = readerOutline(splitTranscript(cleaned).body);
       var level = outline.length ? outline[0].level : 0;
       var bodyEl = document.getElementById('sumArticleBody');
@@ -447,7 +400,17 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
           var nl = e.target.closest && e.target.closest('#sumArticleNav a.sum-nav-link');
           if (!nl || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
           e.preventDefault();
-          openSummaryDoc(nl.getAttribute('data-doc-id'), nl.getAttribute('data-doc-url'), nl.getAttribute('data-source'));
+          var opened = openSummaryDoc(nl.getAttribute('data-doc-id'), nl.getAttribute('data-doc-url'), nl.getAttribute('data-source'));
+          var req = _docRequestId;
+          // The link that had focus is gone with the old article: focus the
+          // new one, so Tab continues in it rather than from <body>.
+          Promise.resolve(opened).then(function() {
+            if (req !== _docRequestId) return;
+            var main = document.getElementById('sumArticleMain');
+            if (!main) return;
+            main.setAttribute('tabindex', '-1');
+            main.focus({ preventScroll: true });
+          });
           return;
         }
         var target = document.getElementById(link.getAttribute('data-target'));
@@ -462,24 +425,45 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
           target.scrollIntoView({ block: 'start' });
           target.focus({ preventScroll: true });
         }
+        // A short last section cannot scroll to the top, so geometry alone
+        // would mark the one above it: the clicked entry is the active one.
+        _readerSpyPin = { id: target.id, top: scroller.scrollTop };
         readerSpy();
       });
     }
 
-    /** Marks the outline entry of the section the reader is in: the last
-     *  target whose top has passed the top of the panel body. */
+    /**
+     * Marks the outline entry of the section the reader is in: the last
+     * target whose top has passed a line a quarter down the panel body. Over
+     * the last screen of scrolling that line sweeps down to the bottom edge,
+     * so short final sections are reached too and, at the bottom, the last
+     * heading in view is the active one. A just-clicked entry wins until the
+     * body scrolls away from where its jump landed.
+     */
     function readerSpy() {
       var nav = document.getElementById('sumOutline');
       var scroller = document.getElementById('docPanelBody');
       if (!nav || nav.hidden || !scroller) return;
       var links = nav.querySelectorAll('a.sum-outline-link');
-      // A section is "in view" once its heading passes the top quarter.
-      var top = scroller.getBoundingClientRect().top + Math.max(80, scroller.clientHeight * 0.25);
       var active = null;
-      Array.prototype.forEach.call(links, function(a) {
-        var t = document.getElementById(a.getAttribute('data-target'));
-        if (t && t.getBoundingClientRect().top <= top) active = a;
-      });
+      if (_readerSpyPin && Math.abs(scroller.scrollTop - _readerSpyPin.top) <= 2) {
+        active = nav.querySelector('a.sum-outline-link[data-target="' + _readerSpyPin.id + '"]');
+      } else {
+        _readerSpyPin = null;
+      }
+      if (!active) {
+        var h = scroller.clientHeight;
+        var base = Math.max(80, h * 0.25);
+        var max = scroller.scrollHeight - h;
+        var zone = Math.min(h * 0.75, max);
+        var left = max - scroller.scrollTop;
+        var line = base + (zone > 0 && left < zone ? (h - base) * (1 - Math.max(0, left) / zone) : 0);
+        var top = scroller.getBoundingClientRect().top + line;
+        Array.prototype.forEach.call(links, function(a) {
+          var t = document.getElementById(a.getAttribute('data-target'));
+          if (t && t.getBoundingClientRect().top <= top) active = a;
+        });
+      }
       if (!active && links.length) active = links[0];
       Array.prototype.forEach.call(links, function(a) {
         var on = a === active;
@@ -527,30 +511,42 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
           (n.older >= 0 ? cell(list[n.older], 'sum-nav-older', 'Older &rarr;') : '');
         nav.innerHTML = html;
         nav.hidden = !html;
+        var row = (docs || []).find(function(d) { return railKey(d) === curKey; });
+        var main = document.getElementById('sumArticleMain');
+        var heroEl = function() {
+          var hero = document.getElementById('sumHero');
+          if (!hero && main) {
+            hero = document.createElement('div');
+            hero.className = 'sum-hero';
+            hero.id = 'sumHero';
+            main.insertBefore(hero, main.firstChild);
+          }
+          return hero;
+        };
         // A Vimeo row the metadata carried no poster for: the listing's.
         if (!cur.hasThumb && cur.source === 'vimeo') {
-          var row = (docs || []).find(function(d) { return railKey(d) === curKey; });
           var src = row ? readerThumbnail('vimeo', cur.url, row.thumbnail_url) : null;
-          var hero = document.getElementById('sumHero');
-          var main = document.getElementById('sumArticleMain');
           if (src && main) {
-            if (!hero) {
-              hero = document.createElement('div');
-              hero.className = 'sum-hero';
-              hero.id = 'sumHero';
-              main.insertBefore(hero, main.firstChild);
-            }
-            hero.insertAdjacentHTML('afterbegin', readerThumbHtml(src));
+            heroEl().insertAdjacentHTML('afterbegin', readerThumbHtml(src, 'sum-hero-thumb'));
             cur.hasThumb = true;
           }
+        }
+        // A document whose metadata carried no date: the listing row's.
+        if (cur.pillInput && !readerDay(cur.pillInput.date) && row && readerDay(row.date) && main) {
+          cur.pillInput.date = row.date;
+          var hero = heroEl();
+          var old = hero.querySelector('.sum-pills');
+          var html = readerPillsHtml(readerPills(cur.pillInput));
+          if (old) old.outerHTML = html; else hero.insertAdjacentHTML('beforeend', html);
         }
       }).catch(function() {});
     }
 
     // --- Similar cards ---
-    /** One card per result: thumbnail, title, relevance bar, age (amber past
-     *  ${SIMILAR_STALE_DAYS} days) and the why line, each only when the
-     *  result carries it. */
+    /** One card per result, the whole card one link (to the result's
+     *  /summaries deep link, opened in place by the panel's click handler):
+     *  thumbnail, title, relevance bar, age (amber past READER_STALE_DAYS)
+     *  and the why line, each only when the result carries it. */
     function readerSimilarHtml(results, source) {
       var today = readerToday();
       return results.map(function(r) {
@@ -562,21 +558,22 @@ ${READER_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\
         var days = readerDaysBetween(meta.date, today);
         var age = readerAge(meta.date, today);
         var why = readerSimilarWhy(r.matchedChunks);
-        return '<div class="doc-similar-item sum-sim-card" data-doc-id="' + esc(r.id) + '" data-doc-url="' + esc(rUrl) + '">' +
-          (thumb ? '<img class="sum-sim-thumb" src="' + esc(thumb) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '') +
-          '<div class="sum-sim-main">' +
-            '<a href="#">' + esc(rTitle) + '</a>' +
-            '<div class="sum-sim-meta">' +
+        var href = '/summaries?doc=' + encodeURIComponent(r.id) + '&source=' + encodeURIComponent(source);
+        return '<a class="doc-similar-item sum-sim-card" href="' + esc(href) + '" data-doc-id="' + esc(r.id) + '" data-doc-url="' + esc(rUrl) + '">' +
+          readerThumbHtml(thumb, 'sum-sim-thumb') +
+          '<span class="sum-sim-main">' +
+            '<span class="sum-sim-title">' + esc(rTitle) + '</span>' +
+            '<span class="sum-sim-meta">' +
               '<span class="sum-sim-bar" aria-hidden="true"><span style="width:' + pct + '%"></span></span>' +
               '<span class="doc-similar-relevance">' + pct + '%</span>' +
-              (age ? '<span class="sum-sim-age' + (days > ${SIMILAR_STALE_DAYS} ? ' stale' : '') + '">' + esc(age) + '</span>' : '') +
-            '</div>' +
-            (why ? '<div class="sum-sim-why" title="' + esc(why.heading) + '"' + (why.transcript ? ' data-transcript="1"' : '') + '>' +
+              (age ? '<span class="sum-sim-age' + (days > READER_STALE_DAYS ? ' stale' : '') + '">' + esc(age) + '</span>' : '') +
+            '</span>' +
+            (why ? '<span class="sum-sim-why" title="' + esc(why.heading) + '"' + (why.transcript ? ' data-transcript="1"' : '') + '>' +
               (why.transcript
                 ? '<span class="sum-sim-tag">transcript</span>' + (/^transcript$/i.test(why.heading) ? '' : esc(why.heading))
-                : 'Matched: ' + esc(why.heading)) + '</div>' : '') +
-          '</div>' +
-        '</div>';
+                : 'Matched: ' + esc(why.heading)) + '</span>' : '') +
+          '</span>' +
+        '</a>';
       }).join('');
     }
   `;

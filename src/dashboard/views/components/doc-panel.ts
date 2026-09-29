@@ -178,7 +178,9 @@ export function docPanelStyles(animationName = "slideIn"): string {
     /* The ⋯ More menu's items: an <a> (Export) and buttons in one list. */
     a.doc-panel-menu-item { display: block; text-decoration: none; }
     .doc-panel-menu-item[hidden] { display: none; }
-    .doc-panel-menu-danger:hover:not(:disabled) { color: var(--status-error); }
+    /* Darkened toward --text-primary: plain --status-error on the hovered
+       item's --bg-surface measured 4.32:1 light. */
+    .doc-panel-menu-danger:hover:not(:disabled) { color: color-mix(in srgb, var(--status-error) 80%, var(--text-primary)); }
     .doc-panel-menu-danger:disabled { opacity: 0.5; cursor: progress; }
     /* The primary header action. --accent-hover, not --accent, under white
        text: #fff on the dark --accent measures 4.3:1, on --accent-hover 5.7:1
@@ -237,10 +239,12 @@ export const DOC_PANEL_SHARE_BTN_ID = "docPanelShare";
 
 /** The 🗑 Delete button's id — the render and the summaries page's click handler. */
 export const DOC_PANEL_DELETE_BTN_ID = "docPanelDelete";
+const DOC_PANEL_DELETE_TITLE = "Delete this summary from huginn, and the wiki draft written from it";
 
 /** The ⬇ Export link's id — a plain download anchor the opener points at
  *  `GET /api/summaries/export?source=&docId=` for the document it shows. */
 export const DOC_PANEL_EXPORT_LINK_ID = "docPanelExport";
+const DOC_PANEL_EXPORT_TITLE = "Download this summary as a standalone HTML page, with its slides in a folder beside it";
 
 /** The `↻ Re-run ▾` control: the wrapper (hidden for a source the re-run route
  *  cannot serve), the button that opens the menu, the popup the client fills
@@ -252,9 +256,11 @@ export const DOC_PANEL_RERUN_BTN_ID = "docPanelRerun";
 export const DOC_PANEL_RERUN_MENU_ID = "docPanelRerunMenu";
 export const DOC_PANEL_RERUN_STATUS_ID = "docPanelRerunStatus";
 
-/** The `⋯ More` menu (opt-in `moreMenu`): its button, its `role="menu"`
- *  popup, and the Copy link item. Export and Delete keep their own ids
- *  inside it, so their click handlers and specs address them as before. */
+/** The `⋯ More` menu (opt-in `moreMenu`): its wrapper (hidden when the
+ *  panel shows no registered summary), its button, its `role="menu"` popup,
+ *  and the Copy link item. Export and Delete keep their own ids inside it,
+ *  so their click handlers and specs address them as before. */
+export const DOC_PANEL_MORE_WRAP_ID = "docPanelMoreWrap";
 export const DOC_PANEL_MORE_BTN_ID = "docPanelMore";
 export const DOC_PANEL_MORE_MENU_ID = "docPanelMoreMenu";
 export const DOC_PANEL_COPY_LINK_ID = "docPanelCopyLink";
@@ -314,19 +320,19 @@ export function docPanelHtml(
   const deleteHtml = moreMenu
     ? `
             <button class="doc-panel-menu-item doc-panel-menu-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button" role="menuitem"
-              title="Delete this summary from huginn, and the wiki draft written from it">&#128465; Delete</button>`
+              title="${DOC_PANEL_DELETE_TITLE}">&#128465; Delete</button>`
     : `
         <button class="doc-panel-followup doc-panel-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button"
-          title="Delete this summary from huginn, and the wiki draft written from it">&#128465; Delete</button>`;
+          title="${DOC_PANEL_DELETE_TITLE}">&#128465; Delete</button>`;
   const exportHtml = moreMenu
     ? `
             <a class="doc-panel-menu-item" id="${DOC_PANEL_EXPORT_LINK_ID}" href="#" download hidden role="menuitem"
-              title="Download this summary as a standalone HTML page, with its slides in a folder beside it">&#11015; Export</a>`
+              title="${DOC_PANEL_EXPORT_TITLE}">&#11015; Export</a>`
     : `
         <a class="doc-panel-followup" id="${DOC_PANEL_EXPORT_LINK_ID}" href="#" download hidden
-          title="Download this summary as a standalone HTML page, with its slides in a folder beside it">&#11015; Export</a>`;
+          title="${DOC_PANEL_EXPORT_TITLE}">&#11015; Export</a>`;
   const moreHtml = `
-        <span class="doc-panel-menu" id="docPanelMoreWrap">
+        <span class="doc-panel-menu" id="${DOC_PANEL_MORE_WRAP_ID}">
           <button class="doc-panel-followup" id="${DOC_PANEL_MORE_BTN_ID}" type="button"
             aria-haspopup="menu" aria-expanded="false" aria-controls="${DOC_PANEL_MORE_MENU_ID}"
             aria-label="More actions" title="More actions">&#8943; More</button>

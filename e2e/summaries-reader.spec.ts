@@ -26,6 +26,10 @@ import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 import { RAIL_READ_STORAGE_KEY, railAddDays, railDayLabel } from "../src/summaries/latest-rail.ts";
 import { paintedContrast } from "./contrast.ts";
+import { SIMILAR_DEBOUNCE_MS } from "../src/dashboard/views/components/sum-reader.ts";
+
+/** Long enough for the debounced Similar search to have gone out. */
+const AFTER_SIMILAR_DEBOUNCE_MS = SIMILAR_DEBOUNCE_MS * 2 + 100;
 
 const PORT = e2ePort("summaries-reader");
 const HUGINN_PORT = e2ePort("summaries-reader/huginn");
@@ -894,8 +898,9 @@ test("new shape: pills, TL;DR, takeaways card, outline and transcript links", as
   await expect(pill(page, "captured")).toHaveText(`${TODAY} · today`);
   await expect(pill(page, "kind")).toHaveText("deep");
   await expect(pill(page, "category")).toHaveText("ai/general");
-  // The length is the last window heading, drawn as an estimate.
-  await expect(pill(page, "length")).toHaveText("~2 min");
+  // The length is estimated from the transcript: the last window's start plus
+  // its words at the earlier window's rate (8 words per 120 s), so 240 s.
+  await expect(pill(page, "length")).toHaveText("~4 min");
   await expect(page.locator('.sum-pill[data-pill="length"] .sum-pill-est')).toHaveText("est.");
   await expect(pill(page, "read")).toHaveText("2 min read"); // the words before ## Transcript only
   await expect(page.locator(".sum-hero-thumb")).toHaveAttribute("src", "https://i.ytimg.com/vi/rmr-LdARqHE/mqdefault.jpg");
@@ -962,8 +967,10 @@ test("a frames-off capture: a transcript link, but no length pill", async ({ pag
 
 test("a document with no metadata and no data renders no hero pill it cannot fill", async ({ page }) => {
   await openDeepLink(page, A1);
-  // Default fixture docs carry no metadata and an example.com url.
-  expect(await pillKeys(page)).toEqual(["source", "read"]);
+  // Default fixture docs carry no metadata and an example.com url; the
+  // captured day comes from the listing row.
+  expect(await pillKeys(page)).toEqual(["source", "captured", "read"]);
+  await expect(pill(page, "captured")).toHaveText(`${TODAY} · today`);
   await expect(page.locator(".sum-hero-thumb")).toHaveCount(0);
   await expect(page.locator(".sum-tldr")).toHaveCount(0);
   await expect(page.locator("#sumOutline")).toBeHidden();
@@ -1057,7 +1064,7 @@ test("Similar cards: why line, transcript mark, relevance bar and an amber age p
 
 test("j stepping through the rail searches once, for the summary it stops on", async ({ page }) => {
   await openDeepLink(page, A1);
-  await page.waitForTimeout(600); // A1's own search has gone out
+  await page.waitForTimeout(AFTER_SIMILAR_DEBOUNCE_MS); // A1's own search has gone out
   const searches: string[] = [];
   page.on("request", (r) => { if (r.url().includes("/similar?")) searches.push(new URL(r.url()).searchParams.get("q")!); });
   await page.locator("#docPanelTitle").click();
@@ -1067,7 +1074,7 @@ test("j stepping through the rail searches once, for the summary it stops on", a
     await page.keyboard.press("j");
     await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(id)}.`);
   }
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(AFTER_SIMILAR_DEBOUNCE_MS);
   expect(searches).toEqual([title(L1)]);
 });
 
@@ -1141,10 +1148,15 @@ test("header, pills, TL;DR, cards and the menu read at AA in both themes", async
       "similar why": page.locator(".sum-sim-why"),
       "menu item": page.locator("#docPanelCopyLink"),
       "newer/older label": page.locator("#sumArticleNav .sum-nav-k").first(),
+      "outline title": page.locator("#sumOutline .sum-side-title"),
+      "similar title": page.locator("#docSimilarPanel h4"),
     };
     for (const [name, loc] of Object.entries(checks)) {
       expect(await paintedContrast(loc), `${scheme} ${name}`).toBeGreaterThanOrEqual(4.5);
     }
+    await page.locator("#docPanelDelete").hover();
+    expect(await paintedContrast(page.locator("#docPanelDelete")), `${scheme} menu danger (hover)`).toBeGreaterThanOrEqual(4.5);
+    await page.mouse.move(0, 0);
     await page.keyboard.press("Escape");
   }
 });
@@ -1182,4 +1194,186 @@ test("narrow (390px): the header wraps inside the viewport and the article start
   const menu = (await page.locator("#docPanelMoreMenu").boundingBox())!;
   expect(menu.x).toBeGreaterThanOrEqual(0);
   expect(menu.x + menu.width).toBeLessThanOrEqual(390);
+});
+
+// --- Fix round 1 ------------------------------------------------------------
+
+test("⋯ More and ↻ Re-run ▾ are never open together, and one Escape closes the open one", async ({ page }) => {
+  await openDeepLink(page, A2);
+  const moreBtn = page.locator("#docPanelMore");
+  const more = page.locator("#docPanelMoreMenu");
+  const rerun = page.locator("#docPanelRerunMenu");
+  await moreBtn.click();
+  await expect(more).toBeVisible();
+  await page.locator("#docPanelRerun").click();
+  await expect(rerun).toBeVisible();
+  await expect(more).toBeHidden();
+  await expect(moreBtn).toHaveAttribute("aria-expanded", "false");
+  await moreBtn.click();
+  await expect(more).toBeVisible();
+  await expect(rerun).toBeHidden();
+  await expect(page.locator("#docPanelRerun")).toHaveAttribute("aria-expanded", "false");
+  // One Escape: the menu goes, the panel stays, focus is back on ⋯ More.
+  await page.keyboard.press("Escape");
+  await expect(more).toBeHidden();
+  await expect(rerun).toBeHidden();
+  await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
+  await expect(moreBtn).toBeFocused();
+});
+
+test("narrow (390px): the Re-run menu opens inside the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openDeepLink(page, A2);
+  await expect.poll(async () => (await page.locator(".doc-panel").boundingBox())!.x).toBe(0);
+  await page.locator("#docPanelRerun").click();
+  const rerun = page.locator("#docPanelRerunMenu");
+  await expect(rerun).toBeVisible();
+  await expect(rerun).not.toContainText("Loading");
+  const box = (await rerun.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+});
+
+test("the outline at a normal viewport: the clicked entry is active, and scrolling down reaches every section", async ({ page }) => {
+  seedReaderDocs();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const active = page.locator("#sumOutline a.sum-outline-link.active");
+  const entry = (text: string) => page.locator("#sumOutline a.sum-outline-link", { hasText: text });
+
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  await entry("💬 Takeaway").click();
+  await expect(active).toHaveText("💬 Takeaway");
+  await entry("Why it doesn't matter").click();
+  await expect(active).toHaveText("Why it doesn't matter");
+  // From the top, in steps, to the bottom: every section is marked on the way.
+  const seen = await page.locator("#docPanelBody").evaluate(async (el) => {
+    const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const out: string[] = [];
+    el.scrollTop = 0;
+    await frame();
+    for (let y = 0; ; y += 40) {
+      el.scrollTop = y;
+      await frame();
+      const a = document.querySelector("#sumOutline a.sum-outline-link.active");
+      const t = a ? (a.textContent || "").trim() : "";
+      if (out[out.length - 1] !== t) out.push(t);
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 1) break;
+    }
+    return out;
+  });
+  expect(seen).toEqual(["Key takeaways", "From instructions to learned intelligence", "Why it doesn't matter", "💬 Takeaway", "Transcript"]);
+
+  await openReaderDoc(page, OLD_DOC, "youtube", "print mode");
+  await entry("💡 Key Takeaways").click();
+  await expect(active).toHaveText("💡 Key Takeaways");
+  await entry("🏗️ The Four Zones").click();
+  await expect(active).toHaveText("🏗️ The Four Zones");
+});
+
+test("Copy link without navigator.clipboard keeps focus on the item and the menu open", async ({ page }) => {
+  // An http:// page off loopback: no secure context, no navigator.clipboard.
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, "clipboard", { get: () => undefined, configurable: true });
+  });
+  page.on("dialog", (d) => void d.dismiss());
+  await openDeepLink(page, A2);
+  await page.locator("#docPanelMore").click();
+  const copy = page.locator("#docPanelCopyLink");
+  await copy.click();
+  await expect(copy).toHaveText(/Link copied|Copy failed/);
+  await expect(page.locator("#docPanelMoreMenu")).toBeVisible();
+  await expect(copy).toBeFocused();
+});
+
+test("an unregistered source: no Copy link, and no ⋯ More with nothing in it", async ({ page }) => {
+  await page.goto(`${BASE}/summaries?doc=${encodeURIComponent(A2)}&source=bogus`);
+  await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(A2)}.`);
+  await expect(page.locator("#docPanelCopyLink")).toHaveAttribute("hidden", "");
+  await expect(page.locator("#docPanelMore")).toBeHidden();
+});
+
+test("Newer and Older keep keyboard focus in the article", async ({ page }) => {
+  await openDeepLink(page, A2);
+  const older = page.locator("#sumArticleNav .sum-nav-older");
+  await expect(older).toHaveAttribute("data-doc-id", A3);
+  await older.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#docPanelTitle")).toHaveText(title(A3));
+  await expect.poll(() => page.evaluate(() => document.activeElement?.id ?? "")).toBe("sumArticleMain");
+  // Tab continues inside the panel, not from the top of the page.
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => !!document.activeElement?.closest("#docPanelBody"))).toBe(true);
+});
+
+test("narrow (390px): a wide table and a long inline code span do not scroll the page sideways", async ({ page }) => {
+  const WIDE_DOC = "ai/general/Wide table talk.md";
+  put("youtube", WIDE_DOC, TODAY, "06:00:00", YT_URL);
+  putBody("youtube", WIDE_DOC, [
+    "## Comparison",
+    "| Model | Memory bandwidth | Unified memory | Neural engine cores | Price in NOK | Verdict for local models |",
+    "| --- | --- | --- | --- | --- | --- |",
+    "| M6 Mac Mini 32GB | 273 GB/s measured | 32 GB LPDDR5X | 16 cores | 14 990 kr | wins on tokens per second |",
+    "",
+    // No space and no hyphen: the browser has no break opportunity in it.
+    "Set `ANTHROPIC_VERTEX_PROJECT_ID_AND_CLOUD_ML_REGION_AND_VERTEX_REGION_CLAUDE_4_5_SONNET_OVERRIDE` first.",
+  ].join("\n"), { date: TODAY });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openReaderDoc(page, WIDE_DOC, "youtube", "first.");
+  await expect.poll(async () => (await page.locator(".doc-panel").boundingBox())!.x).toBe(0);
+  const body = await page.locator("#docPanelBody").evaluate((el) => [el.scrollWidth, el.clientWidth]);
+  expect(body[0], "panel body scrolls sideways").toBeLessThanOrEqual(body[1]!);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  // The table keeps its columns and scrolls inside its own box.
+  const table = await page.locator("#sumArticleBody table").evaluate((t) => {
+    const box = t.parentElement!;
+    return { box: box.scrollWidth > box.clientWidth, overflow: getComputedStyle(box).overflowX };
+  });
+  expect(table).toEqual({ box: true, overflow: "auto" });
+});
+
+test("a Similar card is one link: the thumbnail and the why line open it too", async ({ page }) => {
+  seedReaderDocs();
+  const ID = "ai/general/Summary match.md";
+  searchResults = [{
+    id: ID, title: "Summary match.md", url: "https://www.youtube.com/watch?v=4B4R2T4w7Kg",
+    relevance: 0.75, metadata: { date: TODAY }, matchedChunks: [{ heading: "Why it doesn't matter" }],
+  }];
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  const card = page.locator(`#docSimilarPanel .sum-sim-card[data-doc-id="${ID}"]`);
+  expect(await card.evaluate((el) => el.tagName)).toBe("A");
+  await expect(card.locator("a, button, input")).toHaveCount(0);
+  await card.locator(".sum-sim-why").click();
+  await expect(page.locator("#docPanelTitle")).toHaveText("Summary match");
+
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  await card.locator(".sum-sim-thumb").click();
+  await expect(page.locator("#docPanelTitle")).toHaveText("Summary match");
+
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  await card.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#docPanelTitle")).toHaveText("Summary match");
+});
+
+test("x-article: the header names no source link until the document says which kind it is", async ({ page }) => {
+  const POST = "ai/agents/Slow pasted post.md";
+  const FAILS = "ai/agents/Failing post.md";
+  put("x-article", POST, TODAY, "04:00:00", "https://x.com/a/status/1");
+  put("x-article", FAILS, TODAY, "03:00:00", "https://x.com/a/status/3");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  await page.route(/\/api\/x-articles\/document\/.*Slow/, async (route) => { await gate; await route.continue(); });
+  await page.route(/\/api\/x-articles\/document\/.*Failing/, (route) => route.fulfill({ status: 500, body: "{}" }));
+  await openDeepLink(page, A1);
+  const link = page.locator("#docPanelLinks a");
+  await page.evaluate((id) => void (window as unknown as PageWindow).openSummaryDoc!(id, "https://x.com/a/status/1", "x-article"), POST);
+  await expect(page.locator("#docPanelTitle")).toHaveText(title(POST));
+  await page.waitForTimeout(300);
+  await expect(link).toHaveCount(0);
+  release();
+  await expect(link).toHaveText("Read on X ↗");
+  // A document that cannot be read keeps the registry's neutral label.
+  await page.evaluate((id) => void (window as unknown as PageWindow).openSummaryDoc!(id, "https://x.com/a/status/3", "x-article"), FAILS);
+  await expect(page.locator("#sumArticleMain")).toContainText("Failed to load");
+  await expect(link).toHaveText("View on X ↗");
 });

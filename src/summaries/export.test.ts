@@ -243,11 +243,18 @@ describe("renderExportPage", () => {
     expect(html).not.toContain("javascript:");
     expect(html).not.toContain(">Open<");
   });
-  test("a non-Vimeo source gets no timestamp links and no facts line without metadata", () => {
-    const html = renderExportPage({ title: "t", linkLabel: "x", markdown: "see [00:01:00]", sourceId: "youtube" });
-    expect(html).not.toContain("#t=");
-    expect(html).not.toContain('class="facts"');
-    expect(html).not.toContain("<details");
+  test("YouTube gets &t= links, a text source gets none, and no metadata means no facts line", () => {
+    const url = "https://www.youtube.com/watch?v=rmr-LdARqHE";
+    const yt = renderExportPage({ title: "t", url, linkLabel: "x", markdown: "see [00:01:00]", sourceId: "youtube" });
+    expect(yt).toContain('href="https://www.youtube.com/watch?v=rmr-LdARqHE&amp;t=60s"');
+    const text = renderExportPage({ title: "t", url, linkLabel: "x", markdown: "see [00:01:00]", sourceId: "article" });
+    expect(text).not.toContain("&amp;t=");
+    expect(text).not.toContain("#t=");
+    expect(text).toContain("see [00:01:00]");
+    const bare = renderExportPage({ title: "t", linkLabel: "x", markdown: "see [00:01:00]", sourceId: "youtube" });
+    expect(bare).not.toContain("&amp;t=");
+    expect(bare).not.toContain('class="facts"');
+    expect(bare).not.toContain("<details");
   });
 });
 

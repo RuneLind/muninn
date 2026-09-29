@@ -168,9 +168,9 @@ export function registerSummariesExportRoutes(
     const html = renderExportPage({
       title,
       url: doc.url,
-      // x-article labels per document (a transcript means an X video), the
-      // same label the doc panel's header shows.
-      linkLabel: readerSourceLinkLabel(source.id, source.linkLabel, splitTranscript(markdown).transcript !== null),
+      // Labelled per document where the registry says so (x-article: a
+      // transcript means an X video), the doc panel header's own label.
+      linkLabel: readerSourceLinkLabel(source, splitTranscript(markdown).transcript !== null) ?? source.linkLabel,
       metadata: doc.metadata,
       markdown,
       sourceId: source.id,

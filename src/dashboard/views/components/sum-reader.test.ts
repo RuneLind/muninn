@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import * as reader from "../../../summaries/reader-article.ts";
 import { splitTranscript } from "../../../summaries/transcript-split.ts";
+import { RAIL_FUNCTIONS } from "../../../summaries/latest-rail.ts";
 import { sumReaderScript } from "./sum-reader.ts";
 
 function injectedBlock(): string {
@@ -19,18 +20,23 @@ function injectedBlock(): string {
 }
 
 describe("sum-reader: the injected functions", () => {
-  test("every exported function is injected, and nothing else is", () => {
+  test("every exported function is injected, with the imports it calls, and nothing else is", () => {
     const injected = [...injectedBlock().matchAll(/^\s{4}var (\w+) = function\b/gm)].map((m) => m[1]);
     const exported = Object.entries(reader)
       .filter(([, v]) => typeof v === "function")
-      .map(([k]) => k)
-      .sort();
-    expect(injected.slice().sort()).toEqual(exported);
+      .map(([k]) => k);
+    const imported = reader.READER_IMPORTS.map((f) => f.name);
+    expect(imported.sort()).toEqual(["extractYouTubeVideoId", "mapProseLines"]);
+    expect(injected.slice().sort()).toEqual([...exported, ...imported].sort());
   });
 
   test("the injected copies run standalone and agree with the module", () => {
     const names = reader.READER_FUNCTIONS.map((f) => f.name);
-    const api = new Function(injectedBlock() + "\nreturn {" + names.map((n) => n + ": " + n).join(",") + "};")() as typeof reader;
+    // The rail's date helpers are on the page already (sum-latest-rail.ts,
+    // injected before this block); here they are prepended by hand.
+    const railDeps = RAIL_FUNCTIONS.filter((f) => f.name === "railDate" || f.name === "railValidDay")
+      .map((f) => `var ${f.name} = ${f.toString()};`).join("\n");
+    const api = new Function(railDeps + "\n" + injectedBlock() + "\nreturn {" + names.map((n) => n + ": " + n).join(",") + "};")() as typeof reader;
     const md = "\n*Lede.*\n\n## Key takeaways\n- a\n## Two\ntext [00:01:00]\n\n## Transcript\n### [00:00:00]\nx\n### [00:04:00]\ny";
     const { body, transcript } = splitTranscript(md);
     const input = { sourceLabel: "YouTube", date: "2026-09-27", today: "2026-09-29", kind: "deep", body, transcript };
@@ -43,5 +49,8 @@ describe("sum-reader: the injected functions", () => {
     expect(api.readerSimilarWhy([{ heading: null }, { heading: "[00:06:00]" }])).toEqual({ heading: "[00:06:00]", transcript: true });
     expect(api.readerThumbnail("youtube", url, null)).toBe("https://i.ytimg.com/vi/rmr-LdARqHE/mqdefault.jpg");
     expect(api.readerNeighbours(["a", "b"], "b")).toEqual({ newer: 0, older: -1 });
+    expect(api.readerAge("2024-09-29", "2026-09-29")).toBe(reader.readerAge("2024-09-29", "2026-09-29"));
+    expect(api.readerAge("2026-02-30", "2026-09-29")).toBeNull();
+    expect(api.readerYouTubeId("https://youtu.be/rmr-LdARqHE")).toBe("rmr-LdARqHE");
   });
 });

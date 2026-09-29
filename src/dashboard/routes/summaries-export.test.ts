@@ -51,6 +51,8 @@ beforeAll(() => {
   symlinkSync(outside, join(root, "vimeo", "43"));
   docs.set("linked.md", { text: "![s](/api/frames/vimeo/43/7.jpg)" });
   docs.set("other-source.md", { text: "![s](/api/frames/vimeo/42/187.jpg)" });
+  docs.set("x-video.md", { url: "https://x.com/a/status/2", text: "Summary.\n\n## Transcript\n\nwords" });
+  docs.set("x-post.md", { url: "https://x.com/a/status/1", text: "Summary of a pasted post." });
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -118,6 +120,23 @@ describe("GET /api/summaries/export", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("x-article is labelled per document: a transcript means an X video", async () => {
+    const page = async (docId: string) => {
+      const res = await app().request("/api/summaries/export?source=x-article&docId=" + docId);
+      expect(res.status).toBe(200);
+      const dir = mkdtempSync(join(tmpdir(), "muninn-export-out-"));
+      try {
+        const path = join(dir, "x.zip");
+        writeFileSync(path, new Uint8Array(await res.arrayBuffer()));
+        return await Bun.$`unzip -p ${path} index.html`.text();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    expect(await page("x-video.md")).toContain('<a href="https://x.com/a/status/2" target="_blank" rel="noopener">Watch on X ↗</a>');
+    expect(await page("x-post.md")).toContain('<a href="https://x.com/a/status/1" target="_blank" rel="noopener">Read on X ↗</a>');
   });
 
   test("refusals are JSON and precede any bytes", async () => {

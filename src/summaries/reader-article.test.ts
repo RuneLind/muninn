@@ -15,7 +15,7 @@ import {
   readerSourceLinkLabel,
   readerTakeaways,
   readerThumbnail,
-  readerTranscriptEnd,
+  readerTranscriptLength,
   readerWordCount,
   readerYouTubeId,
 } from "./reader-article.ts";
@@ -128,6 +128,7 @@ describe("readerPills", () => {
   const keys = (p: ReturnType<typeof readerPills>) => p.map((x) => x.key);
 
   test("new shape YouTube: kind, category, estimated length and read time; no author, no published", () => {
+    // Two 2-word windows 120 s apart: the last one runs 120 s too, so ~4 min.
     const { body, transcript } = splitTranscript(NEW_SHAPE);
     const pills = readerPills({
       sourceLabel: "YouTube",
@@ -141,7 +142,7 @@ describe("readerPills", () => {
     expect(keys(pills)).toEqual(["source", "captured", "kind", "category", "length", "read"]);
     expect(pills.find((p) => p.key === "captured")!.value).toBe("2026-09-27 · 2 days ago");
     const length = pills.find((p) => p.key === "length")!;
-    expect(length.value).toBe("~2 min");
+    expect(length.value).toBe("~4 min");
     expect(length.estimated).toBe(true);
     expect(pills.find((p) => p.key === "read")!.value).toBe("1 min read");
   });
@@ -183,7 +184,7 @@ describe("readerPills", () => {
     const pills = readerPills({ today: TODAY, body, transcript });
     expect(keys(pills)).toEqual(["read"]);
     expect(readerWordCount(body)).toBe(3); // "Summary Words here." — the ## mark is not a word
-    expect(readerTranscriptEnd(transcript)).toBeNull();
+    expect(readerTranscriptLength(transcript)).toBeNull();
   });
 
   test("blank or malformed values give no pill", () => {
@@ -245,14 +246,60 @@ describe("thumbnails, timestamps, labels, neighbours", () => {
     );
     expect(linkYouTubeTimestamps(md, "https://vimeo.com/1")).toBe(md);
   });
-  test("readerSourceLinkLabel labels x-article by transcript presence", () => {
-    expect(readerSourceLinkLabel("x-article", "View on X ↗", true)).toBe("Watch on X ↗");
-    expect(readerSourceLinkLabel("x-article", "View on X ↗", false)).toBe("Read on X ↗");
-    expect(readerSourceLinkLabel("youtube", "YouTube ↗", true)).toBe("YouTube ↗");
-  });
   test("readerNeighbours", () => {
     expect(readerNeighbours(["a", "b", "c"], "b")).toEqual({ newer: 0, older: 2 });
     expect(readerNeighbours(["a", "b", "c"], "a")).toEqual({ newer: -1, older: 1 });
     expect(readerNeighbours(["a"], "z")).toEqual({ newer: -1, older: -1 });
+  });
+});
+
+describe("fix round 1", () => {
+  const TODAY = "2026-09-29";
+
+  test("B6: an italic lede with an inner **bold** run is a lede; a whole-bold line is not", () => {
+    const line = "*The M6 wins on memory **bandwidth**, not RAM, for local models.*";
+    expect(readerLede(line + "\n\n## Next")!.text).toBe("The M6 wins on memory **bandwidth**, not RAM, for local models.");
+    expect(readerLede("*Ends in **bold***\nrest")!.text).toBe("Ends in **bold**");
+    expect(readerLede("**Whole bold line**\nrest")).toBeNull();
+    expect(readerLede("***Bold italic***\nrest")).toBeNull();
+    expect(readerLede("*a* and **b** and *c*")).toBeNull();
+    expect(readerLede("*unbalanced**\nrest")).toBeNull();
+  });
+
+  test("B7: the estimated length adds the last window's words at the earlier windows' rate", () => {
+    // Two windows of 8 words: 8 words per 120 s, so the last window runs 120 s.
+    const t = "### [00:00:00]\nso today I want to talk about machines\n\n### [00:02:00]\nand that is why it does not matter";
+    const length = readerPills({ today: TODAY, body: "", transcript: t }).find((p) => p.key === "length")!;
+    expect(length.value).toBe("~4 min");
+    expect(length.estimated).toBe(true);
+    // A one-window transcript has no earlier window to measure a rate on: no pill.
+    expect(readerPills({ today: TODAY, body: "", transcript: "### [00:05:00]\nwords here" }).find((p) => p.key === "length")).toBeUndefined();
+  });
+
+  test("B8: ages cross into years once, in the singular at one year, and impossible days are no day", () => {
+    expect(readerAge("2025-09-30", TODAY)).toBe("12 months ago"); // 364 days
+    expect(readerAge("2025-09-29", TODAY)).toBe("1 year ago"); // 365 days
+    expect(readerAge("2024-09-30", TODAY)).toBe("1 year ago"); // 729 days
+    expect(readerAge("2024-09-29", TODAY)).toBe("2 years ago"); // 730 days
+    expect(readerAge("2024-09-28", TODAY)).toBe("2 years ago"); // 731 days
+    expect(readerAge("2026-02-30", TODAY)).toBeNull();
+    expect(readerAge("2026-99-99", TODAY)).toBeNull();
+    expect(readerAge("2026-09-28T10:00:00Z", TODAY)).toBe("yesterday");
+    const pills = readerPills({ today: TODAY, date: "2026-02-30", uploadDate: "2026-13-45", body: "", transcript: null });
+    expect(pills).toEqual([]);
+  });
+
+  test("B11: a per-document label is unknown until the document is read, then follows the transcript", () => {
+    const x = { linkLabel: "View on X ↗", docLinkLabels: { transcript: "Watch on X ↗", text: "Read on X ↗" } };
+    expect(readerSourceLinkLabel(x, null)).toBeNull();
+    expect(readerSourceLinkLabel(x, true)).toBe("Watch on X ↗");
+    expect(readerSourceLinkLabel(x, false)).toBe("Read on X ↗");
+    expect(readerSourceLinkLabel({ linkLabel: "YouTube ↗", docLinkLabels: null }, null)).toBe("YouTube ↗");
+    expect(readerSourceLinkLabel({ linkLabel: "YouTube ↗" }, true)).toBe("YouTube ↗");
+    expect(readerSourceLinkLabel(undefined, true)).toBe("Open ↗");
+  });
+
+  test("thumbnails are https only", () => {
+    expect(readerThumbnail("vimeo", "https://vimeo.com/1", "http://i.vimeocdn.com/x.jpg")).toBeNull();
   });
 });

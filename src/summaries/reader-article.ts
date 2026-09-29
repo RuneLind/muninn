@@ -10,7 +10,20 @@
  *
  * Every builder degrades to absent: a value the document does not carry gives
  * no pill, no card and no line, never an empty one or a placeholder.
+ *
+ * Four functions from other modules are called here by name: `mapProseLines`
+ * and `extractYouTubeVideoId`, injected beside these (`READER_IMPORTS`), and
+ * `railDate`/`railValidDay`, which the Latest rail's script already puts on
+ * the page. `READER_STALE_DAYS` is injected as a `var` the same way.
  */
+
+import { mapProseLines } from "./transcript-split.ts";
+import { extractYouTubeVideoId } from "../youtube/url.ts";
+import { railDate, railValidDay } from "./latest-rail.ts";
+
+/** Past this many days an age reads in months, and a Similar card's age
+ *  turns amber: "2 months ago" is always amber, "60 days ago" never is. */
+export const READER_STALE_DAYS = 60;
 
 export interface ReaderHeading {
   level: number;
@@ -29,7 +42,7 @@ export interface ReaderPill {
 export interface ReaderPillInput {
   /** The source's badge (`YouTube`), or null for an unregistered source. */
   sourceLabel?: string | null;
-  /** The capture date (`metadata.date`, else the listing's). */
+  /** The capture date: `metadata.date`, else the listing row's. */
   date?: unknown;
   /** Today's UTC day, `YYYY-MM-DD`. */
   today: string;
@@ -49,27 +62,6 @@ export interface ReaderSimilarWhy {
   transcript: boolean;
 }
 
-/** `fn` over every line outside fenced code; fenced lines are kept as they
- *  are. A fence closes only on its own marker, at least as long as the
- *  opener: the rule of `mapProseLines` in `transcript-split.ts`. */
-export function readerMapProse(markdown: string, fn: (line: string, i: number) => string): string {
-  let fence: string | null = null;
-  return String(markdown).split("\n").map((line, i) => {
-    const m = /^\s*(`{3,}|~{3,})/.exec(line);
-    if (m) {
-      if (fence === null) {
-        fence = m[1]!;
-        return line;
-      }
-      if (m[1]!.charAt(0) === fence.charAt(0) && m[1]!.length >= fence.length) {
-        fence = null;
-        return line;
-      }
-    }
-    return fence === null ? fn(line, i) : line;
-  }).join("\n");
-}
-
 /** A heading's text with inline markdown removed: links keep their text,
  *  emphasis and code marks go, a closing `#` run goes. */
 export function readerPlainText(raw: string): string {
@@ -87,7 +79,7 @@ export function readerPlainText(raw: string): string {
  *  not indented four spaces, not inside a blockquote. */
 export function readerHeadings(markdown: string): ReaderHeading[] {
   const out: ReaderHeading[] = [];
-  readerMapProse(markdown, (line) => {
+  mapProseLines(String(markdown), (line) => {
     const m = /^ {0,3}(#{1,6})[ \t]+(.+?)\s*$/.exec(line);
     if (m) {
       const text = readerPlainText(m[2]!);
@@ -108,8 +100,9 @@ export function readerOutline(body: string): ReaderHeading[] {
 
 /**
  * The lede: the body's first non-blank line outside fenced code, when that
- * whole line is italic (`*…*` or `_…_`, not bold). `text` is the line
- * without its marks; `rest` is the body without the line.
+ * whole line is italic (`*…*` or `_…_`, not bold), `**bold**` runs inside it
+ * allowed. `text` is the line without its outer marks; `rest` is the body
+ * without the line.
  */
 export function readerLede(body: string): { text: string; rest: string } | null {
   const lines = String(body).split("\n");
@@ -122,8 +115,11 @@ export function readerLede(body: string): { text: string; rest: string } | null 
   if (at === -1) return null;
   const line = lines[at]!.trim();
   const m = /^\*(?!\*)(\S(?:.*\S)?)\*$/.exec(line) || /^_(?!_)(\S(?:.*\S)?)_$/.exec(line);
-  // Bold, or two italic runs on one line (`*a* and *b*`), is not a lede.
-  if (!m || /^[*_]|[*_]$/.test(m[1]!) || /[*_]\s|\s[*_]/.test(m[1]!)) return null;
+  if (!m) return null;
+  // Bold runs inside are fine; what is left must hold no other mark at an
+  // edge, or the line is bold, or two italic runs (`*a* and *b*`).
+  const inner = m[1]!.replace(/\*\*(?=\S)([^*]*?\S)\*\*/g, "$1");
+  if (/^[*_]|[*_]$/.test(inner) || /[*_]\s|\s[*_]/.test(inner)) return null;
   const rest = lines.slice(0, at).concat(lines.slice(at + 1)).join("\n");
   return { text: m[1]!, rest };
 }
@@ -138,7 +134,7 @@ export function readerTakeaways(body: string): { before: string; section: string
   const lines = String(body).split("\n");
   let start = -1;
   let end = lines.length;
-  readerMapProse(body, (line, i) => {
+  mapProseLines(String(body), (line, i) => {
     if (start === -1) {
       if (/^##[ \t]+(?:💡[ \t]*)?key[ \t]+takeaways?[ \t]*$/i.test(line)) start = i;
     } else if (end === lines.length && i > start && /^#{1,2}[ \t]/.test(line)) {
@@ -180,17 +176,29 @@ export function readerStampSeconds(label: string): number | null {
     : Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
 }
 
-/** The start of a windowed transcript's LAST `### [HH:MM:SS]` window, in
- *  seconds, or null for a flat transcript or none. */
-export function readerTranscriptEnd(transcript: string | null): number | null {
+/**
+ * A windowed transcript's estimated length in seconds: the start of its last
+ * `### [HH:MM:SS]` window, plus that window's words at the rate of the
+ * windows before it (their words over their span). Null for a flat
+ * transcript, none, or a single window, which has no earlier window to
+ * measure a rate on.
+ */
+export function readerTranscriptLength(transcript: string | null): number | null {
   if (transcript === null || transcript === undefined) return null;
-  let last: number | null = null;
-  readerMapProse(transcript, (line) => {
+  const windows: { start: number; text: string }[] = [];
+  mapProseLines(String(transcript), (line) => {
     const m = /^### (\[\d{1,2}:\d{2}:\d{2}\])\s*$/.exec(line);
-    if (m) last = readerStampSeconds(m[1]!);
+    if (m) windows.push({ start: readerStampSeconds(m[1]!) ?? 0, text: "" });
+    else if (windows.length) windows[windows.length - 1]!.text += line + "\n";
     return line;
   });
-  return last;
+  if (windows.length < 2) return null;
+  const last = windows[windows.length - 1]!;
+  const span = last.start - windows[0]!.start;
+  let earlier = 0;
+  for (let i = 0; i < windows.length - 1; i++) earlier += readerWordCount(windows[i]!.text);
+  const lastWords = readerWordCount(last.text);
+  return earlier > 0 ? last.start + lastWords * (span / earlier) : last.start;
 }
 
 /** `54 min`, `1 h 12 min`, `2 h`; under a minute reads as `1 min`. */
@@ -202,31 +210,33 @@ export function readerFormatDuration(sec: number): string {
   return m ? h + " h " + m + " min" : h + " h";
 }
 
-/** Whole days from `day` to `today`, both `YYYY-MM-DD`, or null when either
- *  is not a day. */
-export function readerDaysBetween(day: unknown, today: string): number | null {
-  if (typeof day !== "string") return null;
-  const a = /^(\d{4})-(\d{2})-(\d{2})/.exec(day);
-  const b = /^(\d{4})-(\d{2})-(\d{2})$/.exec(today);
-  if (!a || !b) return null;
-  const ta = Date.UTC(Number(a[1]), Number(a[2]) - 1, Number(a[3]));
-  const tb = Date.UTC(Number(b[1]), Number(b[2]) - 1, Number(b[3]));
-  if (isNaN(ta) || isNaN(tb)) return null;
-  return Math.round((tb - ta) / 86400000);
+/** The `YYYY-MM-DD` day that starts `v`, when the calendar has it; else null. */
+export function readerDay(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const day = v.trim().slice(0, 10);
+  return railValidDay(day) ? day : null;
 }
 
-/** `today`, `yesterday`, `5 days ago`, `3 months ago`, `2 years ago`; null
- *  for a day in the future or no day. */
+/** Whole days from `day` to `today`, or null when either is not a real day. */
+export function readerDaysBetween(day: unknown, today: string): number | null {
+  const a = readerDay(day);
+  const b = readerDay(today);
+  if (!a || !b) return null;
+  const at = (d: string) => railDate(Number(d.slice(0, 4)), Number(d.slice(5, 7)), Number(d.slice(8, 10))).getTime();
+  return Math.round((at(b) - at(a)) / 86400000);
+}
+
+/** `today`, `yesterday`, `5 days ago`, `3 months ago`, `1 year ago`,
+ *  `2 years ago`; null for a day in the future or no day. */
 export function readerAge(day: unknown, today: string): string | null {
   const n = readerDaysBetween(day, today);
   if (n === null || n < 0) return null;
   if (n === 0) return "today";
   if (n === 1) return "yesterday";
-  // Days through 60, the Similar cards' amber line, so "2 months ago" is
-  // always amber and "60 days ago" never is.
-  if (n <= 60) return n + " days ago";
-  if (n < 730) return Math.round(n / 30.44) + " months ago";
-  return Math.floor(n / 365.25) + " years ago";
+  if (n <= READER_STALE_DAYS) return n + " days ago";
+  const years = Math.floor(n / 365);
+  if (years < 1) return Math.round(n / 30.44) + " months ago";
+  return years === 1 ? "1 year ago" : years + " years ago";
 }
 
 /** A non-blank string value, trimmed, or null. */
@@ -238,16 +248,15 @@ export function readerStr(v: unknown): string | null {
  * The hero pills, in display order, each only when its value exists:
  * source, captured (with age), kind, category, author, published (the first
  * 10 characters of `upload_date`, so Vimeo's `YYYY-MM-DD HH:MM:SS` and
- * YouTube's `YYYY-MM-DD` read alike), length (`duration_sec`, else the last
- * window heading of a windowed transcript, marked estimated) and read time
+ * YouTube's `YYYY-MM-DD` read alike), length (`duration_sec`, else
+ * `readerTranscriptLength`, marked estimated) and read time
  * (the words before `## Transcript`).
  */
 export function readerPills(input: ReaderPillInput): ReaderPill[] {
   const pills: ReaderPill[] = [];
   const src = readerStr(input.sourceLabel);
   if (src) pills.push({ key: "source", label: "Source", value: src });
-  const date = readerStr(input.date);
-  const day = date && /^\d{4}-\d{2}-\d{2}/.test(date) ? date.slice(0, 10) : null;
+  const day = readerDay(input.date);
   if (day) {
     const age = readerAge(day, input.today);
     pills.push({ key: "captured", label: "Captured", value: age ? day + " · " + age : day });
@@ -258,15 +267,15 @@ export function readerPills(input: ReaderPillInput): ReaderPill[] {
   if (category) pills.push({ key: "category", label: "Category", value: category });
   const author = readerStr(input.author);
   if (author) pills.push({ key: "author", label: "By", value: author });
-  const upload = readerStr(input.uploadDate);
-  if (upload && /^\d{4}-\d{2}-\d{2}/.test(upload)) pills.push({ key: "published", label: "Published", value: upload.slice(0, 10) });
+  const upload = readerDay(input.uploadDate);
+  if (upload) pills.push({ key: "published", label: "Published", value: upload });
   const dur = typeof input.durationSec === "number" ? input.durationSec
     : typeof input.durationSec === "string" && /^\d+$/.test(input.durationSec.trim()) ? Number(input.durationSec) : NaN;
   if (dur > 0) {
     pills.push({ key: "length", label: "Length", value: readerFormatDuration(dur) });
   } else {
-    const end = readerTranscriptEnd(input.transcript);
-    if (end !== null && end > 0) pills.push({ key: "length", label: "Length", value: "~" + readerFormatDuration(end), estimated: true });
+    const est = readerTranscriptLength(input.transcript);
+    if (est !== null && est > 0) pills.push({ key: "length", label: "Length", value: "~" + readerFormatDuration(est), estimated: true });
   }
   const minutes = readerReadMinutes(readerWordCount(input.body));
   if (minutes > 0) pills.push({ key: "read", label: "Read", value: minutes + " min read" });
@@ -293,36 +302,31 @@ export function readerSimilarWhy(chunks: unknown): ReaderSimilarWhy | null {
   return null;
 }
 
-/** The 11-character id a YouTube url names, or null: `youtu.be/<id>` or a
- *  `v=` on youtube.com or a real subdomain of it (the rule of
- *  `extractYouTubeVideoId`), and only the id charset. */
+/** The 11-character id a YouTube url names (`extractYouTubeVideoId`'s host
+ *  rule), or null; only the id charset, since it lands in a url and a src. */
 export function readerYouTubeId(url: unknown): string | null {
   if (typeof url !== "string") return null;
-  let u: URL;
-  try {
-    u = new URL(url.trim());
-  } catch {
-    return null;
-  }
-  const host = u.hostname.toLowerCase();
-  let id: string | null = null;
-  if (host === "youtu.be") id = u.pathname.slice(1);
-  else if (host === "youtube.com" || host.endsWith(".youtube.com")) id = u.searchParams.get("v");
+  const id = extractYouTubeVideoId(url.trim());
   return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
 }
 
+/** The address a YouTube timestamp link starts with; `<sec>s` follows. */
+export function readerYouTubeStampBase(id: string): string {
+  return "https://www.youtube.com/watch?v=" + id + "&t=";
+}
+
 /** A thumbnail for a document: YouTube from its video id, Vimeo from the
- *  stored `thumbnail_url` (http(s) only); none for any other source. */
+ *  stored `thumbnail_url`; none for any other source. https only, the
+ *  Shelf's rule: an `<img src>` is a fetch the reader's browser makes. */
 export function readerThumbnail(source: string, url: unknown, thumbnailUrl: unknown): string | null {
+  let t: string | null = null;
   if (source === "youtube") {
     const id = readerYouTubeId(url);
-    return id ? "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg" : null;
+    t = id ? "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg" : null;
+  } else if (source === "vimeo") {
+    t = readerStr(thumbnailUrl);
   }
-  if (source === "vimeo") {
-    const t = readerStr(thumbnailUrl);
-    return t && /^https?:\/\//i.test(t) ? t : null;
-  }
-  return null;
+  return t && /^https:\/\//i.test(t) ? t : null;
 }
 
 /**
@@ -334,21 +338,29 @@ export function readerThumbnail(source: string, url: unknown, thumbnailUrl: unkn
 export function linkYouTubeTimestamps(markdown: string, videoUrl: unknown): string {
   const id = readerYouTubeId(videoUrl);
   if (!id) return markdown;
-  const base = "https://www.youtube.com/watch?v=" + id + "&t=";
-  return readerMapProse(markdown, (line) =>
-    line.replace(/\[(\d{1,2}):(\d{2})(?::(\d{2}))?\](?!\()/g, (whole: string, a: string, b: string, c?: string) => {
-      const sec = c === undefined ? Number(a) * 60 + Number(b) : Number(a) * 3600 + Number(b) * 60 + Number(c);
-      return "[\\[" + whole.slice(1, -1) + "\\]](" + base + sec + "s)";
-    }),
+  const base = readerYouTubeStampBase(id);
+  return mapProseLines(String(markdown), (line) =>
+    line.replace(/\[\d{1,2}:\d{2}(?::\d{2})?\](?!\()/g, (whole: string) =>
+      "[\\[" + whole.slice(1, -1) + "\\]](" + base + readerStampSeconds(whole) + "s)"),
   );
 }
 
-/** The header's source link label. `x-article` holds both X videos and
- *  pasted posts, so it is labelled per document: a transcript means a
- *  video. Every other source keeps its registry label. */
-export function readerSourceLinkLabel(sourceId: string, registryLabel: string, hasTranscript: boolean): string {
-  if (sourceId === "x-article") return hasTranscript ? "Watch on X ↗" : "Read on X ↗";
-  return registryLabel;
+/**
+ * The header's source link label. A source with `docLinkLabels` (x-article:
+ * X videos and pasted posts in one collection) is labelled per document, a
+ * transcript meaning a video; `hasTranscript` null means the document has
+ * not been read, and the answer is null, no label yet. Every other source
+ * keeps its registry `linkLabel`.
+ */
+export function readerSourceLinkLabel(
+  source: { linkLabel: string; docLinkLabels?: { transcript: string; text: string } | null } | null | undefined,
+  hasTranscript: boolean | null,
+): string | null {
+  if (!source) return "Open ↗";
+  const per = source.docLinkLabels;
+  if (!per) return source.linkLabel;
+  if (hasTranscript === null) return null;
+  return hasTranscript ? per.transcript : per.text;
 }
 
 /** The rows beside `key` in `keys` (newest first): `newer` is the one
@@ -362,7 +374,6 @@ export function readerNeighbours(keys: string[], key: string): { newer: number; 
 /** Every function the page script needs, in dependency order. The injection
  *  and its guard test both read this list. */
 export const READER_FUNCTIONS = [
-  readerMapProse,
   readerPlainText,
   readerHeadings,
   readerOutline,
@@ -371,8 +382,9 @@ export const READER_FUNCTIONS = [
   readerWordCount,
   readerReadMinutes,
   readerStampSeconds,
-  readerTranscriptEnd,
+  readerTranscriptLength,
   readerFormatDuration,
+  readerDay,
   readerDaysBetween,
   readerAge,
   readerStr,
@@ -380,8 +392,14 @@ export const READER_FUNCTIONS = [
   readerIsTranscriptHeading,
   readerSimilarWhy,
   readerYouTubeId,
+  readerYouTubeStampBase,
   readerThumbnail,
   linkYouTubeTimestamps,
   readerSourceLinkLabel,
   readerNeighbours,
 ] as const;
+
+/** The functions from other modules the ones above call, injected beside
+ *  them. (`railDate` and `railValidDay` are not here: the rail's own script
+ *  puts them on the page.) */
+export const READER_IMPORTS = [mapProseLines, extractYouTubeVideoId] as const;
