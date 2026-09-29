@@ -167,3 +167,17 @@ test("the doc panel renders the Export download link and the opener targets the 
   expect(anchor).toContain("hidden");
   expect(html).toContain("'/api/summaries/export?source=' + encodeURIComponent(source) + '&docId=' + encodeURIComponent(docId)");
 });
+
+/**
+ * The page's scripts share one scope, so a helper declared twice is decided
+ * by whichever declaration runs last, and the other copy (and any test that
+ * pins it) is dead. The reader's injected functions call `mapProseLines` and
+ * the library script declares it; the reader must not inject a second one.
+ */
+test("mapProseLines and the reader's imports are declared once on the page", () => {
+  for (const name of ["mapProseLines", "extractYouTubeVideoId"]) {
+    // A named function expression (`var x = function x(`) is not a declaration.
+    const decls = html.match(new RegExp(`(?<!=\\s*)\\bfunction\\s+${name}\\s*\\(|\\b(?:var|let|const)\\s+${name}\\s*=`, "g")) ?? [];
+    expect(decls.length, name).toBe(1);
+  }
+});

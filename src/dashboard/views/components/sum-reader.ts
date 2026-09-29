@@ -13,7 +13,7 @@
  *  - the Similar cards (`readerSimilarHtml`).
  *
  * It shares the page scope with sum-article-library.ts (openSummaryDoc,
- * renderMarkdown, splitTranscript, linkVimeoTimestamps, getSummaryDocuments,
+ * renderMarkdown, splitTranscript, mapProseLines, linkVimeoTimestamps, getSummaryDocuments,
  * matchesDomain, docTitle, SOURCES, esc, _docRequestId, _shareDoc,
  * docPanelMenu), sum-shelf.ts (isShelfDoc) and sum-latest-rail.ts (railKey,
  * railCompare, railFilter, railReadState, railHidesDeleted, _railQuery,
@@ -115,8 +115,7 @@ export function sumReaderStyles(): string {
        article; the column itself needs no ring. */
     .sum-col-main:focus { outline: none; }
     /* A wide table scrolls in its own box, and a long inline code span
-       wraps: measured at 390px, 10 of 103 real documents scrolled the page
-       sideways (up to 113px) on one or the other. */
+       wraps: at 390px either one scrolled the page sideways. */
     .sum-table-scroll { overflow-x: auto; margin: 0 0 16px; }
     .doc-panel-body .sum-table-scroll table { margin: 0; }
     #sumArticleMain :not(pre) > code { overflow-wrap: anywhere; }
@@ -403,9 +402,13 @@ ${[...READER_IMPORTS, ...READER_FUNCTIONS].map((fn) => `    var ${fn.name} = ${f
           var opened = openSummaryDoc(nl.getAttribute('data-doc-id'), nl.getAttribute('data-doc-url'), nl.getAttribute('data-source'));
           var req = _docRequestId;
           // The link that had focus is gone with the old article: focus the
-          // new one, so Tab continues in it rather than from <body>.
+          // new one, so Tab continues in it rather than from <body>. Only when
+          // focus is still on the link or was dropped with it: a reader who
+          // moved focus while the summary loaded keeps it there.
           Promise.resolve(opened).then(function() {
             if (req !== _docRequestId) return;
+            var at = document.activeElement;
+            if (at && at !== document.body && at !== nl) return;
             var main = document.getElementById('sumArticleMain');
             if (!main) return;
             main.setAttribute('tabindex', '-1');

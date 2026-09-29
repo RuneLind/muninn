@@ -1169,7 +1169,9 @@ export function sumArticleLibraryScript(): string {
      * a fence, as the loop this replaces accepted. Fenced code keeps its text:
      * a timestamp there is source, a \`## Transcript\` there is content.
      * Inline backtick code and 4-space indented code are not skipped (accepted,
-     * rare). Two copies of this loop drifted once; there is one now.
+     * rare). Two copies of this loop drifted once; there is one now. The
+     * reader's injected functions (sum-reader.ts) call this one too, so it is
+     * the page's only declaration.
      */
     function mapProseLines(markdown, fn) {
       var fence = null;

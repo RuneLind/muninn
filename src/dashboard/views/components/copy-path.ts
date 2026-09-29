@@ -1,7 +1,8 @@
 /// <reference lib="dom" />
 /**
  * The clipboard primitive three of the dashboard's copy controls share, the
- * path two of them copy, and the way they report the result.
+ * wiki page path the ⧉ Copy path pair copies, and the way they report the
+ * result.
  *
  * **Scope, stated exactly, because the first version of this comment was wrong
  * twice.** Seven places on the dashboard write the clipboard; this module

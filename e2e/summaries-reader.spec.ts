@@ -1377,3 +1377,89 @@ test("x-article: the header names no source link until the document says which k
   await expect(page.locator("#sumArticleMain")).toContainText("Failed to load");
   await expect(link).toHaveText("View on X ↗");
 });
+
+// --- Fix round 2 ------------------------------------------------------------
+
+test("Older: focus the reader moved while the summary loaded stays where it went", async ({ page }) => {
+  await openDeepLink(page, A2);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  await page.route(/\/document\/.*third/, async (route) => { await gate; await route.continue(); });
+  const older = page.locator("#sumArticleNav .sum-nav-older");
+  await expect(older).toHaveAttribute("data-doc-id", A3);
+  await older.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#docPanelTitle")).toHaveText(title(A3));
+  const filter = page.locator("#sumRailFilter");
+  await filter.focus();
+  release();
+  await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(A3)}.`);
+  await page.waitForTimeout(200);
+  expect(await page.evaluate(() => document.activeElement?.id ?? "")).toBe("sumRailFilter");
+});
+
+test("a modified click on a Similar card opens a new page and leaves the panel alone", async ({ page, context }) => {
+  seedReaderDocs();
+  const ID = "ai/general/Summary match.md";
+  searchResults = [{ id: ID, title: "Summary match.md", url: YT_URL, relevance: 0.75, metadata: { date: TODAY } }];
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  const titleEl = page.locator("#docPanelTitle");
+  const before = await titleEl.textContent();
+  const card = page.locator(`#docSimilarPanel .sum-sim-card[data-doc-id="${ID}"]`);
+  for (const modifiers of [["ControlOrMeta"], ["Shift"]] as const) {
+    const popup = context.waitForEvent("page", { timeout: 5000 });
+    await card.click({ modifiers: [...modifiers] });
+    await page.waitForTimeout(300);
+    await expect(titleEl, `${modifiers[0]}-click`).toHaveText(before!);
+    await (await popup).close();
+  }
+});
+
+test("the header menus: Home and End jump to the first and last item, Tab closes the menu", async ({ page }) => {
+  // Re-run's options, answered here so its items are enabled (this spec has no bot to run one on).
+  await page.route("**/api/summaries/rerun/options**", (r) => r.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ hasTranscript: true, storedKind: "standard", kinds: [{ id: "deep", label: "Deep" }], promptUrl: YT_URL }),
+  }));
+  await openDeepLink(page, A2);
+  for (const [btnId, popId] of [["docPanelMore", "docPanelMoreMenu"], ["docPanelRerun", "docPanelRerunMenu"]]) {
+    const pop = page.locator(`#${popId}`);
+    await page.locator(`#${btnId}`).click();
+    await expect(pop).toBeVisible();
+    await expect(pop).not.toContainText("Loading");
+    const focusedIndex = () => page.evaluate((id) => {
+      const items = Array.from(document.querySelectorAll<HTMLElement & { disabled?: boolean }>(`#${id} .doc-panel-menu-item`))
+        .filter((el) => !el.hidden && !el.disabled);
+      return { at: items.indexOf(document.activeElement as HTMLElement), n: items.length };
+    }, popId);
+    const { n } = await focusedIndex();
+    expect(n, `${popId} has items to walk`).toBeGreaterThan(1);
+    await page.keyboard.press("End");
+    expect((await focusedIndex()).at, `${popId} End`).toBe(n - 1);
+    await page.keyboard.press("Home");
+    expect((await focusedIndex()).at, `${popId} Home`).toBe(0);
+    await page.keyboard.press("Tab");
+    await expect(pop, `${popId} Tab`).toBeHidden();
+    await expect(page.locator(`#${btnId}`)).toHaveAttribute("aria-expanded", "false");
+  }
+});
+
+test("Copy link: a failed copy says so, and asks nothing", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, "clipboard", {
+      get: () => ({ writeText: () => Promise.reject(new Error("denied")) }),
+      configurable: true,
+    });
+    Document.prototype.execCommand = () => false;
+    (window as unknown as { __prompts: number }).__prompts = 0;
+    window.prompt = () => { (window as unknown as { __prompts: number }).__prompts++; return null; };
+  });
+  await openDeepLink(page, A2);
+  await page.locator("#docPanelMore").click();
+  const copy = page.locator("#docPanelCopyLink");
+  await copy.click();
+  await expect(copy).toHaveText("✕ Copy failed");
+  expect(await page.evaluate(() => (window as unknown as { __prompts: number }).__prompts)).toBe(0);
+  await expect(page.locator("#docPanelMoreMenu")).toBeVisible();
+});

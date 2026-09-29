@@ -4,8 +4,8 @@
  *
  * Each had its own copy of the wiring, and the copies drifted: the Re-run
  * button stopped its click from propagating, so ⋯ More's click-away never saw
- * it, and neither open closed the other — both popups stayed up, overlapping,
- * and took two Escapes. Only ⋯ More kept its popup inside the viewport, so
+ * it and opening Re-run over an open ⋯ More left both popups up, overlapping,
+ * and took two Escapes (opening ⋯ More did close Re-run). Only ⋯ More kept its popup inside the viewport, so
  * Re-run opened off-screen left on a phone.
  *
  * `docPanelMenu(cfg)` wires one menu (button click, click-away, the arrow,
@@ -81,9 +81,10 @@ export function docPanelMenuScript(): string {
       var btn = menu.btn();
       var pop = menu.pop();
       if (btn) btn.addEventListener('click', function(e) {
-        // Kept from the Re-run button: the page's other document-level click
-        // listeners (the share dialog's click-away) never see this click.
-        // The other menu is closed by open(), not by its click-away.
+        // Kept from the Re-run button: document listeners in the bubble phase
+        // (the nav's Tools ▾ click-away, the other menu's click-away) never
+        // see this click; the share dialog's capture-phase listener still
+        // does. The other menu is closed by open(), not by its click-away.
         e.stopPropagation();
         if (menu.isOpen()) menu.close(true); else menu.open();
       });

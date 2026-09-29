@@ -9,6 +9,14 @@ import * as reader from "../../../summaries/reader-article.ts";
 import { splitTranscript } from "../../../summaries/transcript-split.ts";
 import { RAIL_FUNCTIONS } from "../../../summaries/latest-rail.ts";
 import { sumReaderScript } from "./sum-reader.ts";
+import { sumArticleLibraryScript } from "./sum-article-library.ts";
+
+/** The page's one `mapProseLines`: the summaries library's, which the
+ *  reader's injected functions call by name. */
+function pageMapProseLines(): (markdown: string, fn: (line: string, i: number) => string) => string {
+  const doc = { addEventListener() {}, getElementById: () => null };
+  return new Function("document", sumArticleLibraryScript() + "\nreturn mapProseLines;")(doc);
+}
 
 function injectedBlock(): string {
   const script = sumReaderScript();
@@ -26,16 +34,18 @@ describe("sum-reader: the injected functions", () => {
       .filter(([, v]) => typeof v === "function")
       .map(([k]) => k);
     const imported = reader.READER_IMPORTS.map((f) => f.name);
-    expect(imported.sort()).toEqual(["extractYouTubeVideoId", "mapProseLines"]);
+    expect(imported.sort()).toEqual(["extractYouTubeVideoId"]);
     expect(injected.slice().sort()).toEqual([...exported, ...imported].sort());
   });
 
   test("the injected copies run standalone and agree with the module", () => {
     const names = reader.READER_FUNCTIONS.map((f) => f.name);
-    // The rail's date helpers are on the page already (sum-latest-rail.ts,
-    // injected before this block); here they are prepended by hand.
+    // The rail's date helpers (sum-latest-rail.ts) and mapProseLines
+    // (sum-article-library.ts) are on the page already; here they are
+    // prepended by hand, mapProseLines as the library declares it.
     const railDeps = RAIL_FUNCTIONS.filter((f) => f.name === "railDate" || f.name === "railValidDay")
-      .map((f) => `var ${f.name} = ${f.toString()};`).join("\n");
+      .map((f) => `var ${f.name} = ${f.toString()};`).join("\n") +
+      `\nvar mapProseLines = ${pageMapProseLines().toString()};`;
     const api = new Function(railDeps + "\n" + injectedBlock() + "\nreturn {" + names.map((n) => n + ": " + n).join(",") + "};")() as typeof reader;
     const md = "\n*Lede.*\n\n## Key takeaways\n- a\n## Two\ntext [00:01:00]\n\n## Transcript\n### [00:00:00]\nx\n### [00:04:00]\ny";
     const { body, transcript } = splitTranscript(md);

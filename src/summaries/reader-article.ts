@@ -11,10 +11,13 @@
  * Every builder degrades to absent: a value the document does not carry gives
  * no pill, no card and no line, never an empty one or a placeholder.
  *
- * Four functions from other modules are called here by name: `mapProseLines`
- * and `extractYouTubeVideoId`, injected beside these (`READER_IMPORTS`), and
- * `railDate`/`railValidDay`, which the Latest rail's script already puts on
- * the page. `READER_STALE_DAYS` is injected as a `var` the same way.
+ * Four functions from other modules are called here by name:
+ * `extractYouTubeVideoId`, injected beside these (`READER_IMPORTS`), and
+ * three the page's other scripts already declare — `mapProseLines` (the
+ * summaries library's client copy of the transcript-split.ts function) and
+ * `railDate`/`railValidDay` (the Latest rail's script). A second injected
+ * declaration would replace the page's copy for every caller.
+ * `READER_STALE_DAYS` is injected as a `var` the same way.
  */
 
 import { mapProseLines } from "./transcript-split.ts";
@@ -400,6 +403,6 @@ export const READER_FUNCTIONS = [
 ] as const;
 
 /** The functions from other modules the ones above call, injected beside
- *  them. (`railDate` and `railValidDay` are not here: the rail's own script
- *  puts them on the page.) */
-export const READER_IMPORTS = [mapProseLines, extractYouTubeVideoId] as const;
+ *  them. (`mapProseLines`, `railDate` and `railValidDay` are not here: the
+ *  page's other scripts declare them.) */
+export const READER_IMPORTS = [extractYouTubeVideoId] as const;
