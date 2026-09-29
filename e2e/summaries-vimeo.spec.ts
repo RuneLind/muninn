@@ -252,6 +252,8 @@ async function startFake(): Promise<Server> {
         }
         return json({ documents: [] });
       }
+      // The doc panel's Same story this week reads the served set first.
+      if (p === "/api/collections") return json({ collections: [{ name: "vimeo-summaries" }] });
       if (p === "/api/search") return json({ results: [] });
       // The one document the shelf row above names, served for the article
       // view: a Vimeo capture with a window heading and a cited timestamp.
@@ -703,6 +705,9 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     // the header link is then the DOCUMENT's.
     await page.goto(`${BASE}/summaries?source=vimeo&doc=${encodeURIComponent("ai/general/E2E shelf talk.md")}&duplicate=1`);
     await expectLinks("https://vimeo.com/424242");
+    // Let the right rail's debounced searches go out, so the fake sees the
+    // traffic an open makes (Similar, and Same story's /api/collections).
+    await expect(page.locator("#docSimilarPanel")).toContainText("No similar articles found");
   });
 
   test("a picker value the server does not offer is a sentence on the card, and starts no job", async ({ request, page }) => {
