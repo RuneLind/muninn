@@ -17,7 +17,7 @@ import type { MuninnProfile } from "../config.ts";
 export const ROUTE_GROUPS = [
   "data", "traces", "memsearch", "logs", "search", "research", "tools",
   "summaries", "anthropic", "article", "youtube", "x-article", "tiktok",
-  "vimeo", "sse", "graph", "wiki", "wiki-gardener", "benchmark", "models",
+  "vimeo", "sse", "graph", "wiki-read", "wiki", "wiki-gardener", "benchmark", "models",
   "indexing", "agents", "sync", "claude-usage", "plans", "jira",
 ] as const;
 
@@ -35,6 +35,10 @@ export type RouteGroup = (typeof ROUTE_GROUPS)[number];
  *    read and WRITE working trees (`WIKI_EXTRA` roots, mimir's `plans/`, the
  *    repo-sync checkouts) that exist on a laptop and on the mini and not in a
  *    pod; `claude-usage` proxies a launchd service on the mini's loopback.
+ *    `wiki` here is everything on the wiki surface EXCEPT the read slice —
+ *    Ask, Explain, fact-check, Similar, share, remember, Stamp, the series
+ *    editor, atlas, digest, reindex — i.e. every wiki route that writes, spends
+ *    a model call or sends a page's text to huginn.
  *    `logs` is here for a different reason with the same shape: `/logs` +
  *    `/api/logs*` serve the JSONL sink verbatim, and those lines carry other
  *    people's message previews.
@@ -51,8 +55,19 @@ export type RouteGroup = (typeof ROUTE_GROUPS)[number];
  * is here despite reading only the job store and huginn: every control on that
  * page POSTs to `/api/anthropic/*`, `/api/articles/summarize` or
  * `/api/wiki/share`, all dropped above, so the page renders and then 404s into a
- * generic error on the first click. The same rule is what removes the `/wiki`,
- * `/plans`, `/logs` and `/benchmark` links from the nav.
+ * generic error on the first click. The same rule is what removes the `/plans`,
+ * `/logs` and `/benchmark` links from the nav; the nav's `/wiki` link maps to
+ * `wiki-read`, so it stays.
+ *
+ * `wiki-read` STAYS: the reader page, the page listing, one page, its
+ * provenance block, explainer HTML and graph mode. It never writes and never
+ * spends a model call; provenance and graph make bounded GET fan-outs to huginn
+ * (the jira-issues corpus, for a page or wiki with `jira:` keys) and to
+ * claude-usage when `CLAUDE_USAGE_URL` is set. It serves only the read-only
+ * roots the pod registers (a mirror, `WIKI_EXTRA` + `WIKI_READONLY_ROOTS`).
+ * Its GET paths are the auth user zone's read-slice entries under this profile
+ * only (`servesWikiReadSliceOnly`), and the reader hides every control that
+ * would reach the dropped `wiki` group (`wikiToolsRegistered`).
  *
  * Everything else STAYS, deliberately: `data`, `traces`, `memsearch`, `sse`,
  * `models`, `agents`, `indexing` and `jira` are DB- or huginn-bound and are the
@@ -73,15 +88,32 @@ export function droppedRouteGroups(profile: MuninnProfile): ReadonlySet<RouteGro
 }
 
 /**
- * Does this profile warm the worked-on ledger memo at boot (`src/index.ts`)?
+ * Is the full wiki tool surface registered? False under `nais`, where only the
+ * `wiki-read` slice is. Three things key on it:
  *
- * A predicate beside the drop set rather than an inline test at the boot site,
- * so the gate is drivable: in a pod there is no `/wiki` reader to warm the axis
- * for, the wiki roots are working trees that do not exist there, and the
- * claude-usage it would dial is a launchd service on another machine's loopback.
+ *  - the reader renders no Ask, Explain, fact-check, Share, Similar, Stamp or
+ *    series control, since each would reach a route with no handler;
+ *  - the worked-on ledger is never dialled — not at boot (`src/index.ts`) and
+ *    not from an index build (`src/wiki/store.ts`): a pod's read-only mirror
+ *    was written by no agent session, and the claude-usage it would dial is a
+ *    launchd service on another machine's loopback;
+ *  - {@link servesWikiReadSliceOnly} is its complement for the auth zone.
+ *
  * Derived from `droppedRouteGroups` rather than from the profile name, so a
- * later profile that drops `wiki` skips the kick without a second edit.
+ * later profile that drops `wiki` follows without a second edit.
  */
-export function shouldKickWorkedLedgerAtBoot(profile: MuninnProfile): boolean {
+export function wikiToolsRegistered(profile: MuninnProfile): boolean {
   return !droppedRouteGroups(profile).has("wiki");
+}
+
+/**
+ * Is the wiki READ slice the whole wiki surface this profile serves — `wiki`
+ * dropped, `wiki-read` kept? Only then are the slice's six GET paths in the
+ * auth user zone (`src/auth/zones.ts`, `WIKI_READ_SLICE_PATHS`), and only then
+ * do the read routes serve read-only roots alone. On `default` the reader is
+ * the operator's full surface and role `user` gets 403 on all of it.
+ */
+export function servesWikiReadSliceOnly(profile: MuninnProfile): boolean {
+  const dropped = droppedRouteGroups(profile);
+  return dropped.has("wiki") && !dropped.has("wiki-read");
 }

@@ -39,7 +39,12 @@ const identity = (userId: string): Identity => ({
 
 /** An app whose identity/role are pinned, so this file tests the ZONE decision
  *  rather than re-testing `createAuthMiddleware`. */
-function appAs(role: AuthRole | null, config: AuthConfig = LOCAL, userId = "operator"): Hono {
+function appAs(
+  role: AuthRole | null,
+  config: AuthConfig = LOCAL,
+  userId = "operator",
+  opts: { wikiReadSlice?: boolean } = {},
+): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     if (role !== null) {
@@ -48,7 +53,7 @@ function appAs(role: AuthRole | null, config: AuthConfig = LOCAL, userId = "oper
     }
     await next();
   });
-  app.use("*", createZoneMiddleware(config));
+  app.use("*", createZoneMiddleware(config, opts));
   app.all("*", (c) => c.text("handler ran"));
   return app;
 }
@@ -61,6 +66,17 @@ beforeEach(() => {
 });
 
 describe("the zone middleware", () => {
+  test("the wiki read slice reaches role `user` only when the mount says the slice is served", async () => {
+    const WIKI = ["/wiki", "/api/wiki/pages", "/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/html", "/api/wiki/graph"];
+    const byDefault = appAs("user");
+    const slice = appAs("user", LOCAL, "operator", { wikiReadSlice: true });
+    for (const path of WIKI) {
+      expect(`${path} default → ${(await get(byDefault, path)).status}`).toBe(`${path} default → 403`);
+      expect(`${path} slice → ${(await get(slice, path)).status}`).toBe(`${path} slice → 200`);
+      expect(`${path} slice POST → ${(await get(slice, path, "POST")).status}`).toBe(`${path} slice POST → 403`);
+    }
+  });
+
   test("role `user` gets 403 on the two admin /chat/bot-preferences routes", async () => {
     const app = appAs("user");
     const path = "/chat/bot-preferences/jarvis/default-user";

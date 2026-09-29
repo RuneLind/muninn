@@ -210,6 +210,14 @@ export const E2E_PORTS = {
   // The doc panel's reader: the Latest rail (and, later, the header and cards).
   "summaries-reader": 3086,
   "summaries-reader/huginn": 3087,
+  // MUNINN_PROFILE=nais + MUNINN_AUTH=local at role `user`: the wiki read slice
+  // as a team member sees it on the pod.
+  "wiki-nais-read": 3088,
+  // The same spec's second muninn: nais at role `admin`, for the zone rows.
+  "wiki-nais-read/admin": 3089,
+  // Not bound by anything: the nais reader's `KNOWLEDGE_API_URL` points here so
+  // the provenance/graph huginn legs meet a closed port, never a live huginn.
+  "wiki-nais-read/dead-huginn": 8795,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
