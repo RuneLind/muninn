@@ -132,6 +132,10 @@ const CACHE_PATH = join(STATE_DIR, "oembed-cache.json");
 const JOURNAL_PATH = join(STATE_DIR, "journal.jsonl");
 /** Test hook for the interrupted-run drill: sleep this long after each file. */
 const DEBUG_SLEEP_MS = Number(process.env.BACKFILL_DEBUG_SLEEP_MS ?? 0) || 0;
+/** Test hook: hold each atomic write between its temp file and the rename, so a spec can see where the temp lives. */
+const DEBUG_TEMP_PAUSE_MS = Number(process.env.BACKFILL_DEBUG_TEMP_PAUSE_MS ?? 0) || 0;
+/** Test hook: the oEmbed host, so a spec can answer the dry run from a local server. */
+const OEMBED_BASE = process.env.BACKFILL_OEMBED_BASE || undefined;
 /**
  * Defensive only: with no locale bsdtar's `-t` listing escapes every non-ASCII
  * byte (measured: 180 of 1,313 names), which is why the rollback never parses
@@ -216,6 +220,7 @@ function atomicWrite(abs: string, bytes: string | Uint8Array, atime: Date, stamp
   }
   chmodSync(tmp, mode);
   utimesSync(tmp, atime, stampMs / 1000);
+  if (DEBUG_TEMP_PAUSE_MS > 0) Bun.sleepSync(DEBUG_TEMP_PAUSE_MS);
   renameSync(tmp, abs);
 }
 
@@ -390,7 +395,7 @@ async function dryRun(): Promise<void> {
   const errors: string[] = [];
   for (const [i, id] of toFetch.entries()) {
     const started = Date.now();
-    const result: YouTubeOembedResult = await fetchYouTubeOembed(id);
+    const result: YouTubeOembedResult = await fetchYouTubeOembed(id, { baseUrl: OEMBED_BASE });
     streak = nextFailureStreak(streak, result);
     if (result.kind === "ok") cache[id] = { kind: "ok", author: result.author, ...(result.title ? { title: result.title } : {}) };
     else if (result.kind === "unavailable") cache[id] = { kind: "unavailable", status: result.status };
