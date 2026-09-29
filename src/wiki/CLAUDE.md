@@ -3324,59 +3324,51 @@ Three accuracy rules the card follows, each closing a way it could lie: the read
 
 ## Bucket mirror (`bucket-mirror.ts`, `WIKI_BUCKET_MIRRORS`)
 
-A read-only wiki fed from a GCS bucket instead of a working tree — for a pod
-with no git checkout (the melosys-muninn nais shape). A curator uploads pages
-(`gcloud storage cp page.mdx gs://<bucket>/plans/`); each mirror entry polls
-the JSON API (list with paging, then `alt=media&generation=` per changed
-object), writes changed files atomically (hidden temp file + rename), deletes
-files whose objects are gone, prunes emptied directories, and busts the index
-with `getWikiIndex({ root, refresh: true })` after any change. First poll at
-boot, then every `WIKI_BUCKET_MIRROR_INTERVAL_MS`; polls never overlap. The
-deploy registers the same root in `WIKI_EXTRA` to browse it.
+A read-only wiki fed from a GCS bucket instead of a working tree, for a pod with
+no git checkout. Each entry polls the bucket's JSON API, downloads objects whose
+`generation` changed, deletes files whose objects are gone, and rebuilds the
+index under the REGISTRY's spelling of the root (the store caches by that
+string). With a prefix, the reader config is the object
+`<prefix>/.wiki-reader.json`. The deploy registers the root in `WIKI_EXTRA` and
+`WIKI_READONLY_ROOTS`; without both the entry is refused.
 
-**It deletes files, so the root is guarded before the first poll**, each
-failure a warn and an inert mirror, never a boot failure:
+Invariants:
 
-- absolute, strictly inside `os.tmpdir()` after symlink resolution (resolved
-  through the deepest existing ancestor, so a root that does not exist yet
-  still resolves), not `/` and not the tmpdir itself;
-- listed in `WIKI_READONLY_ROOTS` (same resolution on both sides);
-- missing or empty (created/claimed, `.bucket-mirror` marker written), or
-  already carrying the marker (adopted: the manifest is rebuilt from the valid
-  file names on disk, stale temp files removed). Non-empty without the marker
-  is refused.
+- **It deletes only manifest files** — paths it wrote or adopted under its own
+  marker — only regular files, never through a symlinked directory.
+- **A failed or empty listing never mass-deletes.** A failed list throws before
+  any write. A listing that would delete every mirrored file and write none is
+  refused with a warn and the copy kept; emptying the wiki on purpose means
+  deleting the root's files by hand (or the pod, whose `/tmp` is an `emptyDir`)
+  and letting the next poll start empty.
+- **The root is re-verified before every poll's writes and deletes**: a plain
+  directory (not a symlink), the realpath `prepare()` claimed, the marker still
+  there, the lock still this process's. Otherwise the entry stops with a warn.
+- **The token goes only to the real host.** A `WIKI_BUCKET_MIRROR_GCS_BASE`
+  other than `https://storage.googleapis.com` gets no Authorization header.
+- **One writer per root**: `.bucket-mirror.lock`, created `O_EXCL` with the
+  owner's pid. A live holder makes the entry wait and retry; a dead pid, or this
+  process's own pid with no mirror here holding it, is reclaimed. The marker
+  names the source (`gs://bucket/prefix`), and a root marked for another source
+  is refused, as are two entries whose realpath-resolved roots are equal or
+  nested.
+- **Not in the wiki write queue**: the mirror is the root's only writer (the
+  lock), and the root is read-only to everything else (`WIKI_READONLY_ROOTS`).
+- **Bounded reads**: downloads ask for `Accept-Encoding: identity` and stream
+  through `readBoundedBytes` with a 2 MB cap (`MAX_OBJECT_BYTES`); a list page is
+  capped at 8 MB; a listing over 2000 objects is refused whole.
+- **Names**: pages only (`.md .mdx .html`) plus the root `.wiki-reader.json`;
+  refused are `.`/`..`/empty segments, backslashes, C0/C1 controls, U+2028/2029,
+  bidi overrides, hidden segments and segments over 211 bytes (255 minus the
+  44-byte temp-file affix). Names that collide under lowercase+NFC keep the
+  code-unit-smallest; every name in a log line is JSON-escaped.
+- **Page dates** are the object's `updated` time, set as the file's mtime.
 
-It deletes only manifest paths, only regular files, never through a symlinked
-directory, and writes never follow one either.
+A failed poll backs off, doubling, capped at the larger of the interval and
+5 min. `stop()` aborts the in-flight poll and releases the lock.
 
-**Object names** map to relPaths under the entry's prefix and are refused
-(warned once per name + generation) for: `..`/`.` or empty segments, absolute
-names, backslashes, control characters, a trailing `/` (folder placeholder), a
-segment over 255 bytes, any hidden segment except a root `.wiki-reader.json`,
-and any extension outside `.md .mdx .html .png .jpg .jpeg .gif .svg .webp`.
-Per object cap `MAX_OBJECT_BYTES` (5 MB, skipped with the old local copy kept);
-a listing over `MAX_OBJECTS` (2000) is refused whole.
-
-**A failed poll changes nothing.** A failed list (401 after one token retry,
-403, 404, network) throws before any download or delete, so it is never read as
-"bucket empty"; the loop backs off (interval × 2^n, capped at 15 min) and warns
-once per distinct error. A failed download keeps the old file and retries next
-poll.
-
-**Credential:** a `GcpTokenProvider` over ADC (`src/gcp/access-token.ts`,
-shared with Vertex). The token is sent only when the base is the real
-`https://storage.googleapis.com`; the test override `WIKI_BUCKET_MIRROR_GCS_BASE`
-gets no Authorization header.
-
-**Restart:** a pod's `/tmp` is an `emptyDir`, so a restart starts empty; the
-mirror recreates the root and the first poll fills it. A restart over a marked
-directory (a laptop) adopts the files and re-downloads each once, since
-generations are not persisted.
-
-Acceptance: `bucket-mirror.test.ts` (config parse, name table, root rules,
-marker/adopt, atomic write, the poll against a `Bun.serve` fake GCS),
-`store-mirror-contract.test.ts` (the store behaviours it relies on) and
-`e2e/wiki-bucket-mirror.spec.ts` (render, update, delete, restart).
+Acceptance: `bucket-mirror.test.ts`, `bucket-mirror-hardening.test.ts`,
+`store-mirror-contract.test.ts` and `e2e/wiki-bucket-mirror.spec.ts`.
 
 ## Repo sync loop (`src/sync/`, `SYNC_REPOS`, `POST /api/sync/run`)
 

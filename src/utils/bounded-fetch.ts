@@ -21,26 +21,27 @@ export const BOUNDED_FETCH_TIMEOUT_MS = 10_000;
 export const BOUNDED_FETCH_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
- * Read a response body without buffering more than `maxBytes`. The declared
- * `content-length` is the cheap check; the read loop is the guarantee, because a
- * chunked response declares no length at all.
+ * Read a response body as BYTES without buffering more than `maxBytes`. The
+ * declared `content-length` is the cheap check; the read loop is the guarantee,
+ * because a chunked response declares no length at all, and a compressed one
+ * declares its compressed length while the stream yields the decoded bytes.
  *
  * Every failure names `url`: the operator's first question about a degraded card
  * is whether it was pointed at the right host, and "fetch failed" cannot answer
  * it.
  */
-export async function readBounded(res: Response, maxBytes: number, url: string): Promise<string> {
+export async function readBoundedBytes(res: Response, maxBytes: number, url: string): Promise<Uint8Array> {
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body?.cancel().catch(() => {});
     throw new Error(
       `response body is ${declared} bytes, over the ${maxBytes}-byte cap (${url})`,
     );
   }
   const body = res.body;
-  if (!body) return await res.text(); // no stream to bound (empty body)
+  if (!body) return new Uint8Array(await res.arrayBuffer()); // no stream to bound (empty body)
   const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let text = "";
+  const chunks: Uint8Array[] = [];
   let total = 0;
   try {
     for (;;) {
@@ -50,11 +51,22 @@ export async function readBounded(res: Response, maxBytes: number, url: string):
       if (total > maxBytes) {
         throw new Error(`response body exceeded the ${maxBytes}-byte cap (${url})`);
       }
-      text += decoder.decode(value, { stream: true });
+      chunks.push(value);
     }
   } finally {
     // Releases the socket on the over-cap path; a no-op once the stream is done.
     await reader.cancel().catch(() => {});
   }
-  return text + decoder.decode();
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
+}
+
+/** {@link readBoundedBytes}, decoded as UTF-8. */
+export async function readBounded(res: Response, maxBytes: number, url: string): Promise<string> {
+  return new TextDecoder().decode(await readBoundedBytes(res, maxBytes, url));
 }

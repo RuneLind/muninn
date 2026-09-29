@@ -159,7 +159,10 @@ if (shouldKickWorkedLedgerAtBoot(config.profile ?? resolveServingProfile())) {
 // profile, when `WIKI_BUCKET_MIRRORS` is set). The loop never blocks boot and
 // never throws — a refused root or a failed poll is a warn.
 let wikiBucketMirrors: { stop(): Promise<void> } | null = null;
-if (config.wikiBucketMirrors.mirrors.length + config.wikiBucketMirrors.refused.length > 0) {
+if (
+  config.wikiBucketMirrors.mirrors.length + config.wikiBucketMirrors.refused.length > 0 ||
+  config.wikiBucketMirrors.intervalRefused
+) {
   try {
     const { startWikiBucketMirrors } = await import("./wiki/bucket-mirror.ts");
     wikiBucketMirrors = startWikiBucketMirrors(config.wikiBucketMirrors);

@@ -213,3 +213,12 @@ export class GcpTokenProvider {
     return { token: fresh, generation };
   }
 }
+
+/**
+ * The process's ONE ADC token cache. The credential belongs to the process, not
+ * to a caller: Vertex (`vertexTokens`) and the wiki bucket mirror authenticate
+ * as the same workload identity with the same `cloud-platform` token, so two
+ * caches would only double the metadata-server / `gcloud` fetches and give a 401
+ * burst two tokens to invalidate.
+ */
+export const adcTokens = new GcpTokenProvider(createAdcTokenFetcher("Google Cloud"), "Google Cloud");

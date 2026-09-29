@@ -10,10 +10,12 @@ import {
   BucketMirror,
   checkMirrorRoot,
   MAX_OBJECT_BYTES,
+  MIRROR_LOCK,
   MIRROR_MARKER,
   objectRelPath,
   prepareMirrorRoot,
   tokenSourceFor,
+  type BucketMirrorDeps,
   type TokenSource,
 } from "./bucket-mirror.ts";
 
@@ -66,11 +68,12 @@ describe("parseWikiBucketMirrors", () => {
       process.env.WIKI_BUCKET_MIRROR_GCS_BASE = "http://127.0.0.1:1234/";
       const c = resolveWikiBucketMirrorConfig();
       expect(c.mirrors).toEqual([{ bucket: "ok-bucket", prefix: "", root: "/tmp/w" }]);
-      expect(c.refused.map((r) => r.entry)).toEqual(["gs://Bad=/tmp/v", "WIKI_BUCKET_MIRROR_INTERVAL_MS=10"]);
+      expect(c.refused.map((r) => r.entry)).toEqual(["gs://Bad=/tmp/v"]);
+      expect(c.intervalRefused).toEqual({ value: "10", reason: expect.stringMatching(/below 1000/) });
       expect(c.intervalMs).toBe(120_000);
       expect(c.gcsBase).toBe("http://127.0.0.1:1234");
       for (const k of keys) delete process.env[k];
-      expect(resolveWikiBucketMirrorConfig()).toEqual({ mirrors: [], refused: [], intervalMs: 120_000, gcsBase: GCS_DEFAULT_BASE });
+      expect(resolveWikiBucketMirrorConfig()).toEqual({ mirrors: [], refused: [], intervalRefused: null, intervalMs: 120_000, gcsBase: GCS_DEFAULT_BASE });
     } finally {
       keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
     }
@@ -90,8 +93,6 @@ describe("objectRelPath", () => {
     ["plans/side.mdx", "", "plans/side.mdx"],
     ["felles/plans/side.md", "felles/", "plans/side.md"],
     ["a/b/c.HTML", "", "a/b/c.HTML"],
-    ["img/x.png", "", "img/x.png"],
-    ["img/x.svg", "", "img/x.svg"],
     [".wiki-reader.json", "", ".wiki-reader.json"],
     ["p/.wiki-reader.json", "p/", ".wiki-reader.json"],
     ["norsk/æøå side.mdx", "", "norsk/æøå side.mdx"],
@@ -121,7 +122,9 @@ describe("objectRelPath", () => {
     ["run.sh", "", /extension/],
     ["README", "", /extension/],
     ["other/x.md", "felles/", /outside the prefix/],
-    [`${"a".repeat(256)}.md`, "", /255 bytes/],
+    [`${"a".repeat(256)}.md`, "", /211 bytes/],
+    ["img/x.png", "", /extension/],
+    ["img/x.svg", "", /extension/],
   ];
   for (const [name, prefix, reason] of refused) {
     test(`refuses ${JSON.stringify(name).slice(0, 40)}`, () => {
@@ -133,27 +136,25 @@ describe("objectRelPath", () => {
 
 // ── Root safety + ownership ──────────────────────────────────────
 
+const SRC = "gs://felles/";
+
 describe("checkMirrorRoot / prepareMirrorRoot", () => {
   let base: string;
   beforeEach(async () => { base = await mkdtemp(path.join(tmpdir(), "bm-root-")); });
   afterEach(async () => { await rm(base, { recursive: true, force: true }); });
 
-  const deps = (roots: string[]) => ({ tmpDir: tmpdir(), readonlyRoots: roots });
-
-  test("a root inside tmpdir and listed read-only passes, even before it exists", () => {
+  test("a root inside tmpdir passes, even before it exists", () => {
     const root = path.join(base, "wikis/felles");
-    const r = checkMirrorRoot(root, deps([root]));
+    const r = checkMirrorRoot(root, tmpdir());
     expect("realRoot" in r).toBe(true);
   });
 
-  test("refuses: not listed, outside tmpdir, the tmpdir itself, /, relative", () => {
-    const root = path.join(base, "w");
-    expect(checkMirrorRoot(root, deps([]))).toEqual({ refused: expect.stringMatching(/WIKI_READONLY_ROOTS/) });
+  test("refuses: outside tmpdir, the tmpdir itself, /, relative", () => {
     const home = path.join(process.env.HOME ?? "/Users/x", "wiki-mirror-test");
-    expect(checkMirrorRoot(home, deps([home]))).toEqual({ refused: expect.stringMatching(/outside the temp/) });
-    expect(checkMirrorRoot(tmpdir(), deps([tmpdir()]))).toEqual({ refused: expect.stringMatching(/temp directory itself/) });
-    expect(checkMirrorRoot("/", deps(["/"]))).toEqual({ refused: expect.stringMatching(/filesystem root/) });
-    expect(checkMirrorRoot("rel/x", deps(["rel/x"]))).toEqual({ refused: expect.stringMatching(/absolute/) });
+    expect(checkMirrorRoot(home, tmpdir())).toEqual({ refused: expect.stringMatching(/outside the temp/) });
+    expect(checkMirrorRoot(tmpdir(), tmpdir())).toEqual({ refused: expect.stringMatching(/temp directory itself/) });
+    expect(checkMirrorRoot("/", tmpdir())).toEqual({ refused: expect.stringMatching(/filesystem root/) });
+    expect(checkMirrorRoot("rel/x", tmpdir())).toEqual({ refused: expect.stringMatching(/absolute/) });
   });
 
   test("refuses a root that escapes tmpdir through a symlink", async () => {
@@ -162,34 +163,26 @@ describe("checkMirrorRoot / prepareMirrorRoot", () => {
       const link = path.join(base, "link");
       await symlink(outside, link);
       const root = path.join(link, "felles");
-      expect(checkMirrorRoot(root, deps([root]))).toEqual({ refused: expect.stringMatching(/outside the temp/) });
+      expect(checkMirrorRoot(root, tmpdir())).toEqual({ refused: expect.stringMatching(/outside the temp/) });
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
   });
 
-  test("the read-only listing matches through symlinks (/tmp vs /private/tmp shape)", async () => {
-    const real = path.join(base, "real");
-    await mkdir(real);
-    await symlink(real, path.join(base, "alias"));
-    const r = checkMirrorRoot(path.join(base, "alias"), deps([real]));
-    expect("realRoot" in r).toBe(true);
-  });
-
   test("missing dir: created and marked", async () => {
     const root = path.join(base, "new/felles");
-    expect(await prepareMirrorRoot(root)).toEqual({ files: [] });
+    expect(await prepareMirrorRoot(root, SRC)).toEqual({ files: [] });
     expect(existsSync(path.join(root, MIRROR_MARKER))).toBe(true);
   });
 
   test("existing EMPTY dir: adopted and marked", async () => {
-    expect(await prepareMirrorRoot(base)).toEqual({ files: [] });
+    expect(await prepareMirrorRoot(base, SRC)).toEqual({ files: [] });
     expect(existsSync(path.join(base, MIRROR_MARKER))).toBe(true);
   });
 
   test("non-empty dir without the marker: refused, nothing touched", async () => {
     await writeFile(path.join(base, "keep.md"), "mine");
-    const r = await prepareMirrorRoot(base);
+    const r = await prepareMirrorRoot(base, SRC);
     expect(r).toEqual({ refused: expect.stringMatching(/not empty/) });
     expect(await readdir(base)).toEqual(["keep.md"]);
   });
@@ -201,7 +194,7 @@ describe("checkMirrorRoot / prepareMirrorRoot", () => {
     await writeFile(path.join(base, ".wiki-reader.json"), "{}");
     await writeFile(path.join(base, "plans/.a.mdx.bmtmp-123"), "partial");
     await writeFile(path.join(base, "notes.txt"), "not managed");
-    const r = await prepareMirrorRoot(base);
+    const r = await prepareMirrorRoot(base, SRC);
     expect("files" in r && r.files.sort()).toEqual([".wiki-reader.json", "plans/a.mdx"]);
     expect(existsSync(path.join(base, "plans/.a.mdx.bmtmp-123"))).toBe(false);
     expect(existsSync(path.join(base, "notes.txt"))).toBe(true);
@@ -285,17 +278,25 @@ describe("BucketMirror.pollOnce against a fake GCS", () => {
     base = await mkdtemp(path.join(tmpdir(), "bm-poll-"));
     root = path.join(base, "wikis/felles");
   });
-  afterEach(async () => { await rm(base, { recursive: true, force: true }); });
+  afterEach(async () => {
+    await Promise.all(live.splice(0).map((m) => m.stop()));
+    await rm(base, { recursive: true, force: true });
+  });
 
+  const live: BucketMirror[] = [];
   const noTokens: TokenSource = { acquire: async () => null, invalidate: () => {} };
-  function mirror(prefix = "", tokens: TokenSource = noTokens) {
-    return new BucketMirror({ bucket: "felles", prefix, root }, {
+  function mirror(prefix = "", tokens: TokenSource = noTokens, extra: Partial<BucketMirrorDeps> = {}) {
+    const m = new BucketMirror({ bucket: "felles", prefix, root }, {
       gcsBase: `http://127.0.0.1:${server.port}`,
       intervalMs: 60_000,
       tokens,
-      rootCheck: { tmpDir: tmpdir(), readonlyRoots: [root] },
+      registeredWikiRoot: (r) => r,
+      isReadonlyRoot: () => true,
       refreshIndex: async (r) => { refreshes.push(r); },
+      ...extra,
     });
+    live.push(m);
+    return m;
   }
   const read = (rel: string) => readFile(path.join(root, rel), "utf8");
 
@@ -304,16 +305,16 @@ describe("BucketMirror.pollOnce against a fake GCS", () => {
     objects.set("plans/b.md", { generation: 1, body: "# B" });
     objects.set("index.md", { generation: 1, body: "# Index" });
     objects.set(".wiki-reader.json", { generation: 1, body: "{}" });
-    objects.set("img/fig.png", { generation: 1, body: new Uint8Array([137, 80, 78, 71]) });
+    objects.set("guide.html", { generation: 1, body: new Uint8Array([60, 112, 62]) });
     const m = mirror();
-    expect(await m.pollOnce()).toEqual({ listed: 5, downloaded: 5, deleted: 0, skipped: 0, failed: 0 });
+    expect(await m.pollOnce()).toEqual({ listed: 5, downloaded: 5, deleted: 0, skipped: 0, failed: 0, refreshed: true });
     expect(await read("plans/a.mdx")).toBe("# A");
     expect(await read(".wiki-reader.json")).toBe("{}");
     expect(requests.filter((r) => !r.url.searchParams.has("alt")).length).toBe(3); // 5 objects / page size 2
     expect(refreshes).toEqual([root]);
 
     requests.length = 0;
-    expect(await m.pollOnce()).toEqual({ listed: 5, downloaded: 0, deleted: 0, skipped: 0, failed: 0 });
+    expect(await m.pollOnce()).toEqual({ listed: 5, downloaded: 0, deleted: 0, skipped: 0, failed: 0, refreshed: false });
     expect(requests.every((r) => !r.url.searchParams.has("alt"))).toBe(true);
     expect(refreshes).toEqual([root]); // no second refresh
   });
@@ -328,7 +329,7 @@ describe("BucketMirror.pollOnce against a fake GCS", () => {
     expect(await m.pollOnce()).toMatchObject({ downloaded: 1, deleted: 1 });
     expect(await read("plans/a.mdx")).toBe("v2");
     expect(existsSync(path.join(root, "deep"))).toBe(false);
-    expect((await readdir(root)).sort()).toEqual([MIRROR_MARKER, "plans"]);
+    expect((await readdir(root)).sort()).toEqual([MIRROR_MARKER, MIRROR_LOCK, "plans"]);
     expect(refreshes.length).toBe(2);
   });
 
@@ -361,7 +362,7 @@ describe("BucketMirror.pollOnce against a fake GCS", () => {
     expect(await mirror().pollOnce()).toMatchObject({ listed: 5, downloaded: 1, skipped: 4 });
     expect(existsSync(path.join(base, "wikis/escape.md"))).toBe(false);
     expect(existsSync(path.join(base, "escape2.md"))).toBe(false);
-    expect((await readdir(root)).sort()).toEqual([MIRROR_MARKER, "ok.md"]);
+    expect((await readdir(root)).sort()).toEqual([MIRROR_MARKER, MIRROR_LOCK, "ok.md"]);
   });
 
   test("a failed download keeps the old copy and is retried on the next poll", async () => {
@@ -387,7 +388,9 @@ describe("BucketMirror.pollOnce against a fake GCS", () => {
   test("restart over a marked dir adopts its files and deletes the ones gone from the bucket", async () => {
     objects.set("a.md", { generation: 1, body: "a" });
     objects.set("b.md", { generation: 1, body: "b" });
-    await mirror().pollOnce();
+    const first = mirror();
+    await first.pollOnce();
+    await first.stop();
     objects.delete("b.md");
     const restarted = mirror();
     expect(await restarted.pollOnce()).toMatchObject({ downloaded: 1, deleted: 1 });

@@ -1,5 +1,6 @@
 import { ConfigError, VERTEX_GLOBAL_HOST, VERTEX_GLOBAL_REGION } from "../config.ts";
 import {
+  adcTokens,
   createAdcTokenFetcher,
   GcpTokenProvider,
   type GcpAccessToken,
@@ -149,17 +150,17 @@ function pathRegion(pathname: string): string | null {
 // mirror. These names are kept so every Vertex caller is unchanged.
 
 export type VertexAccessToken = GcpAccessToken;
-export type VertexTokenFetcher = GcpTokenFetcher;
 
-export const defaultVertexTokenFetcher: VertexTokenFetcher = createAdcTokenFetcher("Vertex");
+export const defaultVertexTokenFetcher: GcpTokenFetcher = createAdcTokenFetcher("Vertex");
 
 /** A {@link GcpTokenProvider} labelled for Vertex, defaulting to ADC. */
 export class VertexTokenProvider extends GcpTokenProvider {
-  constructor(fetcher: VertexTokenFetcher = defaultVertexTokenFetcher) {
+  constructor(fetcher: GcpTokenFetcher = defaultVertexTokenFetcher) {
     super(fetcher, "Vertex");
   }
 }
 
-/** Process-wide, because the credential is the process's, not a bot's: two bots
- *  on Vertex share one ADC identity and must not each hold their own cache. */
-export const vertexTokens = new VertexTokenProvider();
+/** Process-wide, because the credential is the process's, not a bot's: every
+ *  bot on Vertex AND the wiki bucket mirror share one ADC identity, so they share
+ *  the one cache in `src/gcp/access-token.ts` rather than each holding its own. */
+export const vertexTokens: VertexTokenProvider = adcTokens;

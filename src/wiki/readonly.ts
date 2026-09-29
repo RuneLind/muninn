@@ -103,8 +103,12 @@ function normalizeRoot(p: string): string {
 }
 
 /**
- * The symlink-resolved form, or null when the path does not exist / is
- * unreadable. Carried ALONGSIDE the normalized form (never instead of it) for
+ * The symlink-resolved form. A path that does not exist (yet) is resolved
+ * through its deepest existing ancestor, so `/tmp/w` → `/private/tmp/w` on macOS
+ * holds before `w` is created: `currentRoots()` memoizes these forms on first
+ * call, and a root created after that call (the bucket mirror's, which starts
+ * empty) must still match its `/private/tmp` spelling. Null only when not even
+ * `/` resolves. Carried ALONGSIDE the normalized form (never instead of it) for
  * two reasons: a root configured through a symlink must still match the registry
  * entry that named the real path (`wikiWriteQueueKey` takes the same precaution
  * for the same reason), and on a case-insensitive filesystem `realpathSync`
@@ -112,10 +116,18 @@ function normalizeRoot(p: string): string {
  * difference match there and correctly NOT match on a case-sensitive one.
  */
 function realRoot(p: string): string | null {
-  try {
-    return normalizeRoot(realpathSync(p));
-  } catch {
-    return null;
+  const tail: string[] = [];
+  let cur = p;
+  for (;;) {
+    try {
+      const real = realpathSync(cur);
+      return normalizeRoot(tail.length ? path.join(real, ...tail.reverse()) : real);
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return null;
+      tail.push(path.basename(cur));
+      cur = parent;
+    }
   }
 }
 

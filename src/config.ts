@@ -440,8 +440,10 @@ export interface WikiBucketMirrorEntry {
 
 export interface WikiBucketMirrorConfig {
   mirrors: WikiBucketMirrorEntry[];
-  /** Entries (and a too-small interval) refused at parse time, for the boot warn. */
+  /** `WIKI_BUCKET_MIRRORS` entries refused at parse time, for the boot warn. */
   refused: { entry: string; reason: string }[];
+  /** A `WIKI_BUCKET_MIRROR_INTERVAL_MS` value that was ignored, for the boot warn. */
+  intervalRefused: { value: string; reason: string } | null;
   intervalMs: number;
   /** GCS JSON API base, no trailing slash. */
   gcsBase: string;
@@ -449,11 +451,16 @@ export interface WikiBucketMirrorConfig {
 
 export const WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS = 120_000;
 export const WIKI_BUCKET_MIRROR_MIN_INTERVAL_MS = 1_000;
+/** One day. Far under the 2^31-1 ms `setTimeout` ceiling, past which Bun fires
+ *  the timer after 1 ms — a tight list loop instead of a slow one. */
+export const WIKI_BUCKET_MIRROR_MAX_INTERVAL_MS = 24 * 60 * 60_000;
 export const GCS_DEFAULT_BASE = "https://storage.googleapis.com";
 
 /** GCS bucket-name syntax: lowercase alnum, `-`, `_`, `.`; alnum at both ends. */
 const GCS_BUCKET_RE = /^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$/;
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+/** C0, DEL, C1, the Unicode line/paragraph separators and the bidi overrides —
+ *  the same set `bucket-mirror.ts` refuses in object names. */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
 
 /**
  * Parse `WIKI_BUCKET_MIRRORS` — comma-separated `gs://<bucket>[/<prefix>]=<absolute root>`.
@@ -511,16 +518,29 @@ export function parseWikiBucketMirrors(raw: string | undefined): {
  */
 export function resolveWikiBucketMirrorConfig(): WikiBucketMirrorConfig {
   const { mirrors, refused } = parseWikiBucketMirrors(process.env.WIKI_BUCKET_MIRRORS);
-  let intervalMs = optionalEnvInt("WIKI_BUCKET_MIRROR_INTERVAL_MS", WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS);
-  if (intervalMs < WIKI_BUCKET_MIRROR_MIN_INTERVAL_MS) {
-    refused.push({
-      entry: `WIKI_BUCKET_MIRROR_INTERVAL_MS=${intervalMs}`,
-      reason: `below ${WIKI_BUCKET_MIRROR_MIN_INTERVAL_MS} ms — using the default ${WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS}`,
-    });
-    intervalMs = WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS;
-  }
+  const { intervalMs, intervalRefused } = parseWikiBucketMirrorInterval(process.env.WIKI_BUCKET_MIRROR_INTERVAL_MS);
   const gcsBase = (nullableEnv("WIKI_BUCKET_MIRROR_GCS_BASE") ?? GCS_DEFAULT_BASE).replace(/\/+$/, "");
-  return { mirrors, refused, intervalMs, gcsBase };
+  return { mirrors, refused, intervalRefused, intervalMs, gcsBase };
+}
+
+/** Lenient on purpose (not `optionalEnvInt`, which throws): a typo in a poll
+ *  interval must not crashloop the pod. Anything but a plain integer inside
+ *  [min, max] is the default plus a carried refusal. */
+export function parseWikiBucketMirrorInterval(raw: string | undefined): {
+  intervalMs: number;
+  intervalRefused: { value: string; reason: string } | null;
+} {
+  const value = raw?.trim() ?? "";
+  if (!value) return { intervalMs: WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS, intervalRefused: null };
+  const fallback = (reason: string) => ({
+    intervalMs: WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS,
+    intervalRefused: { value, reason: `${reason} — using the default ${WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS} ms` },
+  });
+  if (!/^\d+$/.test(value)) return fallback("not a whole number of milliseconds");
+  const n = Number(value);
+  if (n < WIKI_BUCKET_MIRROR_MIN_INTERVAL_MS) return fallback(`below ${WIKI_BUCKET_MIRROR_MIN_INTERVAL_MS} ms`);
+  if (n > WIKI_BUCKET_MIRROR_MAX_INTERVAL_MS) return fallback(`above ${WIKI_BUCKET_MIRROR_MAX_INTERVAL_MS} ms`);
+  return { intervalMs: n, intervalRefused: null };
 }
 
 /**
