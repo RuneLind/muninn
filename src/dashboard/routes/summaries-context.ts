@@ -118,6 +118,8 @@ export function registerSummariesContextRoutes(
         .map((r: { collection: string }) => ({ ...r, source: byCollection.get(r.collection)! }));
       return c.json({ results, missing });
     } catch (err) {
+      // The reader left: nobody reads this answer, and huginn was not at fault.
+      if (signal.aborted) return c.json({ error: "Request cancelled" }, 503);
       const status = err instanceof KnowledgeApiError ? err.statusCode : 502;
       log.warn("Same-story search failed: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: err instanceof Error ? err.message : String(err) }, status === 503 ? 503 : 502);

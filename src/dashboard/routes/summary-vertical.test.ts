@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import type { Job, JobEvent } from "../../summaries/job-store.ts";
@@ -401,5 +402,34 @@ test("similar: an abandoned request aborts the huginn search", async () => {
     await pending;
   } finally {
     globalThis.fetch = origFetch;
+  }
+});
+
+test("similar: an abandoned request is not logged as a Knowledge API error", async () => {
+  const app = appFor(fixedStore(makeJob({})));
+  const origFetch = globalThis.fetch;
+  const records: LogRecord[] = [];
+  await configure({
+    sinks: { capture: (r: LogRecord) => records.push(r) },
+    loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "warning" }],
+    reset: true,
+  });
+  let started = false;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    started = true;
+    return new Promise<Response>((_resolve, reject) => {
+      (init!.signal as AbortSignal).addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    });
+  }) as typeof fetch;
+  try {
+    const client = new AbortController();
+    const pending = app.request(new Request("http://x/api/test/similar?q=hello", { signal: client.signal }));
+    while (!started) await Bun.sleep(5);
+    client.abort();
+    await pending;
+    expect(records).toEqual([]);
+  } finally {
+    globalThis.fetch = origFetch;
+    await reset();
   }
 });

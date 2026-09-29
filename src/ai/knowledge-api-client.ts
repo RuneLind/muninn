@@ -134,6 +134,8 @@ export async function knowledgeApiHandler(
     const data = await fetchKnowledgeApi(baseUrl, path, { timeoutMs, signal });
     return c.json((transform ? await transform(data) : data) as object);
   } catch (err) {
+    // The caller left: not an upstream failure, so no warn.
+    if (signal?.aborted) return c.json({ error: "Request cancelled" }, 503);
     if (err instanceof KnowledgeApiError) {
       log.warn("Knowledge API error on {path}: {error}", { path, error: err.message });
       return c.json({ error: err.message }, err.statusCode as 502 | 503);

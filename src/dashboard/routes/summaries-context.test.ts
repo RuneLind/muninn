@@ -219,3 +219,16 @@ test("doc-context: the warn log truncates a long docId", async () => {
     expect(String(warn.properties.docId).length).toBeLessThanOrEqual(201);
   });
 });
+
+test("same-story: an abandoned request is not logged as huginn unreachable", async () => {
+  await captureWarns(async (records) => {
+    const signals: AbortSignal[] = [];
+    slowHuginn(signals);
+    const client = new AbortController();
+    const pending = appWith().request(new Request("http://x/api/summaries/same-story?q=Qwen", { signal: client.signal }));
+    while (signals.length === 0) await Bun.sleep(5);
+    client.abort();
+    await pending;
+    expect(records.filter((r) => r.level === "warning")).toEqual([]);
+  });
+});
