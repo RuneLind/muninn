@@ -283,6 +283,8 @@ async function startFake(): Promise<Server> {
         });
       }
 
+      // The doc panel's Same story this week reads the served set first.
+      if (p === "/api/collections") return json({ collections: Object.keys(SOURCE_FILES).map((name) => ({ name })) });
       if (p === "/api/search") return json({ results: [] });
       if (p === "/health") return json({ status: "ok" });
 
