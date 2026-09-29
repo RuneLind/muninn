@@ -43,6 +43,10 @@ beforeAll(() => {
       if (url.pathname === "/notjson") {
         return new Response("this is not JSON", { headers: { "content-type": "text/plain" } });
       }
+      if (url.pathname === "/slower") {
+        await Bun.sleep(3_000);
+        return Response.json({ late: true });
+      }
       if (url.pathname === "/slow") {
         await Bun.sleep(200);
         return new Response("late");
@@ -117,6 +121,25 @@ describe("the request half both share", () => {
       );
       expect(err!.statusCode).toBe(503);
     }
+  });
+
+  test("a caller's signal aborts the fetch, and the timeout still applies beside it", async () => {
+    const attempt = async (timeoutMs: number, abortAfterMs: number | null) => {
+      const caller = new AbortController();
+      if (abortAfterMs !== null) setTimeout(() => caller.abort(), abortAfterMs);
+      const started = Date.now();
+      const err = await fetchKnowledgeApi(base, "/slower", { timeoutMs, signal: caller.signal }).then(
+        () => null,
+        (e: unknown) => e as KnowledgeApiError,
+      );
+      return { status: err?.statusCode, ms: Date.now() - started };
+    };
+    const aborted = await attempt(5_000, 20);
+    expect(aborted.status).toBe(503);
+    expect(aborted.ms).toBeLessThan(1_000);
+    const timedOut = await attempt(20, null);
+    expect(timedOut.status).toBe(503);
+    expect(timedOut.ms).toBeLessThan(1_000);
   });
 
   test("method, body and headers are passed through by both", async () => {
