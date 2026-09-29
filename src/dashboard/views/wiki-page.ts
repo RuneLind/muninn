@@ -27,6 +27,7 @@ import {
   WIKI_READONLY_INPUT_PLACEHOLDER,
 } from "./components/wiki-readonly-client.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
+import { WIKI_READ_SLICE_CLASS, wikiReadSliceStyles } from "./components/wiki-read-slice.ts";
 import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
 
 /* Inline stroke icons for the pane toggles — sized/coloured by .wiki-pane-btn. */
@@ -86,6 +87,12 @@ export async function renderWikiPage(opts?: {
    *  the request names no servable wiki, and the button then copies the relPath
    *  alone (`wikiPagePath`). */
   wikiRoot?: string | null;
+  /** Is the full wiki tool surface registered (`wikiToolsRegistered`)? False
+   *  under `MUNINN_PROFILE=nais`, which serves only the read slice: the page
+   *  then stamps `body.wiki-read-slice`, whose CSS hides every control that
+   *  would reach a dropped route, and the client skips the fetches those
+   *  controls' panels make on load. Default true. */
+  tools?: boolean;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikis = opts?.wikis ?? [];
@@ -98,6 +105,7 @@ export async function renderWikiPage(opts?: {
   const askBot = opts?.askBot ?? null;
   const readonlyWiki = opts?.readonlyWiki ?? false;
   const wikiRoot = opts?.wikiRoot ?? null;
+  const tools = opts?.tools ?? true;
   // "Answered by …" line under the Ask hint — who synthesizes this wiki's
   // answers and why (wiki owner vs the shared research-bot fallback).
   const askBotLine = askBot
@@ -2509,9 +2517,10 @@ export async function renderWikiPage(opts?: {
     ${agentPresenceStyles()}
     ${shareDialogStyles()}
     ${wikiReadonlyStyles()}
+    ${wikiReadSliceStyles()}
   </style>
 </head>
-<body>
+<body${tools ? "" : ` class="${WIKI_READ_SLICE_CLASS}"`}>
   ${renderNav("wiki")}
   <div class="wiki-layout">
     <div class="wiki-pane">
@@ -2521,7 +2530,7 @@ export async function renderWikiPage(opts?: {
             ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${boardLink}${gardenerLink}</div>`
             : ""
         }
-        <div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>
+        ${tools ? `<div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>` : ""}
         <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags, paths…">
         <!-- Domain facet — un-hidden client-side only on a wiki whose pages span
              more than one domain (i.e. one with a life/ subtree). -->
@@ -2658,14 +2667,20 @@ export async function renderWikiPage(opts?: {
     // The wiki's root on THIS host — what makes the breadcrumb's ⧉ Copy path
     // yield a path an agent can open. A boot-time fact for the open wiki; the
     // picker navigates with a full page load, so it cannot go stale in place.
-    window.__WIKI_ROOT__ = ${escJsonScript(wikiRoot)};
+    // Under the read slice (role \`user\` on the pod) the host path is withheld:
+    // "" still says "a wiki is served" (the nav's check) and ⧉ Copy path copies
+    // the relPath alone.
+    window.__WIKI_ROOT__ = ${escJsonScript(tools || wikiRoot === null ? wikiRoot : "")};
+    // False under MUNINN_PROFILE=nais: only the read slice is registered, so the
+    // client makes no request to Ask/Explain/fact-check/Similar/atlas/digest.
+    window.__WIKI_TOOLS__ = ${tools ? "true" : "false"};
   </script>
   <script>
     ${clientScript}
   </script>
-  <script>
+  ${tools ? `<script>
     ${agentPresenceScript("wikiPresence", { kinds: ["gardener_drain", "research"] })}
-  </script>
+  </script>` : ""}
 </body>
 </html>`;
 }

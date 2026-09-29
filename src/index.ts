@@ -413,7 +413,8 @@ if (config.profile === "nais") {
     "spawns (spawnHaiku — the Haiku router's CLI fallback, plus the watchers, which call it directly) refuse with " +
     "HaikuCliUnavailableError (the image is built WITH_CLI=false). NOT covered: the claude-cli CHAT connector and the " +
     "executeOneShot family, which spawn the CLI on their own path — every bot on this deployment must be pinned to a " +
-    "non-CLI connector. /chat, the DB/huginn-bound operator routes and both health paths are unchanged.",
+    "non-CLI connector. /chat, the DB/huginn-bound operator routes and both health paths are unchanged, and the wiki " +
+    "READ slice (wiki-read: /wiki, the page listing, page, provenance, explainer HTML and graph reads) stays registered.",
     { dropped: NAIS_DROPPED_ROUTE_GROUPS.length, groups: NAIS_DROPPED_ROUTE_GROUPS.join(", ") },
   );
 }

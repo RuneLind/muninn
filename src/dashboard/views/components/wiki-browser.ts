@@ -161,6 +161,7 @@ import {
   writeSort,
 } from "./wiki-recents-store.ts";
 import { atlasBodyHtml, atlasCullOf, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
+import { readSliceStartTab, wikiToolsFlag } from "./wiki-read-slice.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
@@ -660,7 +661,10 @@ const filters: WikiFilters = {
 let startTab: StartTab = DEFAULT_START_TAB;
 
 function syncStartTabFromUrl(): void {
-  startTab = resolveStartTab(new URLSearchParams(location.search).get(START_VIEW_PARAM), readStartTab(WIKI));
+  startTab = readSliceStartTab(
+    resolveStartTab(new URLSearchParams(location.search).get(START_VIEW_PARAM), readStartTab(WIKI)),
+    wikiToolsFlag(),
+  );
 }
 /** The overview URL for the CURRENT wiki + tab — what the breadcrumb crumb links
  *  to and what a return-to-overview pushes.
@@ -1920,7 +1924,7 @@ function renderPageFacets(autoOpen: boolean): void {
 // no-collections/degraded/failed response simply hides the footer.
 function loadCoverageFooter(): void {
   const el = document.getElementById("wikiCoverageFoot");
-  if (!el) return;
+  if (!el || !wikiToolsFlag()) return;
   fetch(withWiki("/api/wiki/index-coverage"))
     .then((r) => r.json())
     .then((cov: IndexCoverage) => {
@@ -2800,7 +2804,7 @@ function renderStart(): void {
     '<div class="wiki-tabs">' +
     `<button class="wiki-tab${startTab === "hubs" ? " active" : ""}" data-tab="hubs">Hubs</button>` +
     `<button class="wiki-tab${startTab === "timeline" ? " active" : ""}" data-tab="timeline">Timeline</button>` +
-    `<button class="wiki-tab${startTab === "atlas" ? " active" : ""}" data-tab="atlas">Atlas</button>` +
+    (wikiToolsFlag() ? `<button class="wiki-tab${startTab === "atlas" ? " active" : ""}" data-tab="atlas">Atlas</button>` : "") +
     "</div>" +
     `<div id="startBody">${startBodyHtml()}</div></div>`;
   document.getElementById("articleWrap")!.innerHTML = html;
@@ -2811,8 +2815,8 @@ function renderStart(): void {
     '<div class="wiki-conn-empty">Select a page to see its connections.</div>';
   // Re-attach the "what's new" and index-coverage cards: cached render reused on
   // a tab switch, otherwise a single lazy fetch each, so neither ever blocks the
-  // page list from rendering.
-  mountStartCards();
+  // page list from rendering. Both routes are outside the read slice.
+  if (wikiToolsFlag()) mountStartCards();
   renderList();
 }
 
@@ -2966,6 +2970,8 @@ function renderConnections(data: WikiPageDetail): void {
  *  clicks only) drops the caret into the Ask box; the auto-switch path passes it
  *  false so a follow-up ask can't steal focus from the in-pane follow-up input. */
 function switchConnTab(tab: string, focus?: boolean): void {
+  // No Ask route under the read slice: the rail stays on Connections.
+  if (!wikiToolsFlag()) tab = "conn";
   document.querySelectorAll(".wiki-conn-tab").forEach((b) => {
     b.classList.toggle("active", b.getAttribute("data-conntab") === tab);
   });
@@ -3032,7 +3038,7 @@ function renderSimilarInto(relPath: string, items: SimilarPage[]): void {
  *  request per page open. Deliberately NOT in the readonly click guard: nothing
  *  here is a click. */
 function loadSimilar(page: { relPath: string }): void {
-  if (wikiReadonlyWikiFlag()) return;
+  if (wikiReadonlyWikiFlag() || !wikiToolsFlag()) return;
   const relPath = page.relPath;
   const memo = similarMemo.get(relPath);
   if (memo) {
@@ -4288,7 +4294,7 @@ document.body.addEventListener("click", (e) => {
   }
   const tab = target.closest ? target.closest(".wiki-tab") : null;
   if (tab) {
-    startTab = resolveStartTab(tab.getAttribute("data-tab"), null);
+    startTab = readSliceStartTab(resolveStartTab(tab.getAttribute("data-tab"), null), wikiToolsFlag());
     writeStartTab(WIKI, startTab);
     // REPLACE, never push: Back from the overview should leave it, not walk
     // through every tab the reader tried.

@@ -17,7 +17,7 @@ import type { MuninnProfile } from "../config.ts";
 export const ROUTE_GROUPS = [
   "data", "traces", "memsearch", "logs", "search", "research", "tools",
   "summaries", "anthropic", "article", "youtube", "x-article", "tiktok",
-  "vimeo", "sse", "graph", "wiki", "wiki-gardener", "benchmark", "models",
+  "vimeo", "sse", "graph", "wiki-read", "wiki", "wiki-gardener", "benchmark", "models",
   "indexing", "agents", "sync", "claude-usage", "plans", "jira",
 ] as const;
 
@@ -35,6 +35,10 @@ export type RouteGroup = (typeof ROUTE_GROUPS)[number];
  *    read and WRITE working trees (`WIKI_EXTRA` roots, mimir's `plans/`, the
  *    repo-sync checkouts) that exist on a laptop and on the mini and not in a
  *    pod; `claude-usage` proxies a launchd service on the mini's loopback.
+ *    `wiki` here is everything on the wiki surface EXCEPT the read slice —
+ *    Ask, Explain, fact-check, Similar, share, remember, Stamp, the series
+ *    editor, atlas, digest, reindex — i.e. every wiki route that writes, spends
+ *    a model call or sends a page's text to huginn.
  *    `logs` is here for a different reason with the same shape: `/logs` +
  *    `/api/logs*` serve the JSONL sink verbatim, and those lines carry other
  *    people's message previews.
@@ -53,6 +57,13 @@ export type RouteGroup = (typeof ROUTE_GROUPS)[number];
  * `/api/wiki/share`, all dropped above, so the page renders and then 404s into a
  * generic error on the first click. The same rule is what removes the `/wiki`,
  * `/plans`, `/logs` and `/benchmark` links from the nav.
+ *
+ * `wiki-read` STAYS: the reader page, the page listing, one page, its
+ * provenance block, explainer HTML and graph mode — reads only, over whatever
+ * wikis the pod registers (a read-only mirror, `WIKI_EXTRA` +
+ * `WIKI_READONLY_ROOTS`). Its paths are the wiki entries in the auth user zone
+ * (`src/auth/zones.ts`), and the reader hides every control that would reach
+ * the dropped `wiki` group (`wikiToolsRegistered`).
  *
  * Everything else STAYS, deliberately: `data`, `traces`, `memsearch`, `sse`,
  * `models`, `agents`, `indexing` and `jira` are DB- or huginn-bound and are the
@@ -73,6 +84,16 @@ export function droppedRouteGroups(profile: MuninnProfile): ReadonlySet<RouteGro
 }
 
 /**
+ * Is the full wiki tool surface registered? False under `nais`, where only the
+ * `wiki-read` slice is: the reader renders no Ask, Explain, fact-check, Share,
+ * Similar, Stamp or series control, since each would reach a route with no
+ * handler.
+ */
+export function wikiToolsRegistered(profile: MuninnProfile): boolean {
+  return !droppedRouteGroups(profile).has("wiki");
+}
+
+/**
  * Does this profile warm the worked-on ledger memo at boot (`src/index.ts`)?
  *
  * A predicate beside the drop set rather than an inline test at the boot site,
@@ -80,7 +101,10 @@ export function droppedRouteGroups(profile: MuninnProfile): ReadonlySet<RouteGro
  * for, the wiki roots are working trees that do not exist there, and the
  * claude-usage it would dial is a launchd service on another machine's loopback.
  * Derived from `droppedRouteGroups` rather than from the profile name, so a
- * later profile that drops `wiki` skips the kick without a second edit.
+ * later profile that drops `wiki` skips the kick without a second edit. Keyed
+ * on the full `wiki` group, not `wiki-read`: a pod registers the read slice
+ * over a read-only mirror that no agent session wrote, so it has no worked-on
+ * axis to warm.
  */
 export function shouldKickWorkedLedgerAtBoot(profile: MuninnProfile): boolean {
   return !droppedRouteGroups(profile).has("wiki");

@@ -152,6 +152,20 @@ export const USER_ZONE_PATHS: readonly string[] = [
   "/api/jira/templates",
   "/api/jira/drafts",
   "/api/jira/draft/",
+  // The wiki READ slice — the `wiki-read` route group, i.e. what the reader
+  // needs to list and render a page: the page, the listing, one page, its
+  // provenance block, explainer HTML and graph mode. Exact paths, never an
+  // `/api/wiki/` prefix: that would admit the Stamp write, the series editor
+  // and every other wiki POST, which stay admin by default-deny. These admit
+  // EVERY wiki registered on the instance — on the nais pod that is only the
+  // read-only mirror (`WIKI_EXTRA` + `WIKI_READONLY_ROOTS`). `?refresh=1` on
+  // the listing (a rescan of the index) is a read and stays admitted.
+  "/wiki",
+  "/api/wiki/pages",
+  "/api/wiki/page",
+  "/api/wiki/page/provenance",
+  "/api/wiki/html",
+  "/api/wiki/graph",
 ];
 
 /**
