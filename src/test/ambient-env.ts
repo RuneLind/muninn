@@ -156,6 +156,17 @@ const CLAUDE_USAGE_FLAGS = ["CLAUDE_USAGE_URL", "CLAUDE_USAGE_PUBLIC_URL"];
  *  what a spawn actually runs. */
 const WIKI_STAMP_FLAGS = ["WIKI_STAMP_BIN", "WIKI_STAMP_ROOTS", "WIKI_STAMP_BUN"];
 
+/** The wiki bucket mirror (`src/wiki/bucket-mirror.ts`). A developer's value
+ *  would start a poller that writes and DELETES files inside a spawned server's
+ *  tmpdir, and change what every `loadConfig()` suite parses. The specs that use
+ *  it set what they need explicitly. */
+const WIKI_BUCKET_MIRROR_FLAGS = [
+  "WIKI_BUCKET_MIRRORS",
+  "WIKI_BUCKET_MIRROR_INTERVAL_MS",
+  "WIKI_BUCKET_MIRROR_GCS_BASE",
+  "WIKI_BUCKET_MIRROR_PROJECT_NUMBER",
+];
+
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.
  *
@@ -179,6 +190,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...VIMEO_FLAGS,
   ...CLAUDE_USAGE_FLAGS,
   ...WIKI_STAMP_FLAGS,
+  ...WIKI_BUCKET_MIRROR_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
   // fourteen route groups and turns every Claude-CLI spawn into a throw, so the

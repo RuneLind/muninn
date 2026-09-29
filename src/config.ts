@@ -428,6 +428,141 @@ export function wikiReadonlyRootsFromEnv(): string | undefined {
   return process.env.WIKI_READONLY_ROOTS?.trim() || undefined;
 }
 
+// ── Wiki bucket mirrors (`src/wiki/bucket-mirror.ts`) ─────────────
+
+export interface WikiBucketMirrorEntry {
+  bucket: string;
+  /** Object-name prefix, `""` or ending in `/`. */
+  prefix: string;
+  /** Absolute, normalized local root as configured (not symlink-resolved). */
+  root: string;
+}
+
+export interface WikiBucketMirrorConfig {
+  mirrors: WikiBucketMirrorEntry[];
+  /** `WIKI_BUCKET_MIRRORS` entries refused at parse time, for the boot warn. */
+  refused: { entry: string; reason: string }[];
+  /** A `WIKI_BUCKET_MIRROR_INTERVAL_MS` value that was ignored, for the boot warn. */
+  intervalRefused: { value: string; reason: string } | null;
+  intervalMs: number;
+  /** GCS JSON API base, no trailing slash. */
+  gcsBase: string;
+  /** `WIKI_BUCKET_MIRROR_PROJECT_NUMBER`: the project every mirrored bucket
+   *  must belong to, or null when ownership is not pinned. */
+  projectNumber: string | null;
+  /** A `WIKI_BUCKET_MIRROR_PROJECT_NUMBER` value that was ignored, for the boot warn. */
+  projectNumberRefused: { value: string; reason: string } | null;
+}
+
+export const WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS = 120_000;
+export const WIKI_BUCKET_MIRROR_MIN_INTERVAL_MS = 1_000;
+/** One day. Far under the 2^31-1 ms `setTimeout` ceiling, past which Bun fires
+ *  the timer after 1 ms — a tight list loop instead of a slow one. */
+export const WIKI_BUCKET_MIRROR_MAX_INTERVAL_MS = 24 * 60 * 60_000;
+export const GCS_DEFAULT_BASE = "https://storage.googleapis.com";
+
+/** GCS bucket-name syntax: lowercase alnum, `-`, `_`, `.`; alnum at both ends. */
+const GCS_BUCKET_RE = /^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$/;
+/** C0, DEL, C1, the Unicode line/paragraph separators and the bidi overrides —
+ *  the same set `bucket-mirror.ts` refuses in object names. */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+
+/**
+ * Parse `WIKI_BUCKET_MIRRORS` — comma-separated `gs://<bucket>[/<prefix>]=<absolute root>`.
+ * Pure syntax only; a bad entry is returned in `refused` (the caller warns),
+ * never thrown, so a typo drops one mirror rather than the boot. The filesystem
+ * safety rules (inside tmpdir, listed read-only, marker) are the mirror's own,
+ * applied when it starts.
+ */
+export function parseWikiBucketMirrors(raw: string | undefined): {
+  mirrors: WikiBucketMirrorEntry[];
+  refused: { entry: string; reason: string }[];
+} {
+  const mirrors: WikiBucketMirrorEntry[] = [];
+  const refused: { entry: string; reason: string }[] = [];
+  for (const rawEntry of (raw ?? "").split(",")) {
+    const entry = rawEntry.trim();
+    if (!entry) continue;
+    const refuse = (reason: string) => refused.push({ entry, reason });
+    const eq = entry.indexOf("=");
+    if (eq < 0) { refuse("expected gs://<bucket>[/<prefix>]=<absolute root>"); continue; }
+    const source = entry.slice(0, eq).trim();
+    const rootRaw = entry.slice(eq + 1).trim();
+    if (!source.startsWith("gs://")) { refuse("source must start with gs://"); continue; }
+    const rest = source.slice("gs://".length);
+    const slash = rest.indexOf("/");
+    const bucket = slash < 0 ? rest : rest.slice(0, slash);
+    const prefixRaw = slash < 0 ? "" : rest.slice(slash + 1);
+    if (!GCS_BUCKET_RE.test(bucket)) { refuse(`"${bucket}" is not a valid bucket name`); continue; }
+    const prefixTrim = prefixRaw.replace(/^\/+|\/+$/g, "");
+    if (
+      CONTROL_CHARS.test(prefixTrim) || prefixTrim.includes("\\") ||
+      (prefixTrim !== "" && prefixTrim.split("/").some((s) => s === "" || s === "." || s === ".."))
+    ) { refuse("prefix has an empty, '.' or '..' segment, a backslash or a control character"); continue; }
+    const prefix = prefixTrim === "" ? "" : `${prefixTrim}/`;
+    if (!rootRaw.startsWith("/")) { refuse("root must be an absolute path"); continue; }
+    let root = rootRaw.replace(/\/+$/, "") || "/";
+    // `path.posix.normalize` without importing node:path into the config layer.
+    root = root.split("/").reduce<string[]>((acc, seg) => {
+      if (seg === "" || seg === ".") return acc;
+      if (seg === "..") acc.pop(); else acc.push(seg);
+      return acc;
+    }, []).join("/");
+    root = `/${root}`;
+    if (root === "/") { refuse("root must not be /"); continue; }
+    if (mirrors.some((m) => m.root === root)) { refuse("root is already used by another mirror"); continue; }
+    mirrors.push({ bucket, prefix, root });
+  }
+  return { mirrors, refused };
+}
+
+/**
+ * The bucket-mirror config: one resolver. Refusals are CARRIED, not logged:
+ * `loadConfig()` runs before `setupLogging()`, so a warn here is dropped
+ * (measured in the acceptance sweep). `startWikiBucketMirrors` logs them.
+ */
+export function resolveWikiBucketMirrorConfig(): WikiBucketMirrorConfig {
+  const { mirrors, refused } = parseWikiBucketMirrors(process.env.WIKI_BUCKET_MIRRORS);
+  const { intervalMs, intervalRefused } = parseWikiBucketMirrorInterval(process.env.WIKI_BUCKET_MIRROR_INTERVAL_MS);
+  const gcsBase = (nullableEnv("WIKI_BUCKET_MIRROR_GCS_BASE") ?? GCS_DEFAULT_BASE).replace(/\/+$/, "");
+  const { projectNumber, projectNumberRefused } = parseWikiBucketMirrorProjectNumber(process.env.WIKI_BUCKET_MIRROR_PROJECT_NUMBER);
+  return { mirrors, refused, intervalRefused, intervalMs, gcsBase, projectNumber, projectNumberRefused };
+}
+
+/** Lenient like the interval: a malformed project number is a carried refusal
+ *  and ownership stays unpinned (warned), never a boot failure. */
+export function parseWikiBucketMirrorProjectNumber(raw: string | undefined): {
+  projectNumber: string | null;
+  projectNumberRefused: { value: string; reason: string } | null;
+} {
+  const value = raw?.trim() ?? "";
+  if (!value) return { projectNumber: null, projectNumberRefused: null };
+  if (!/^[1-9]\d{0,19}$/.test(value)) {
+    return { projectNumber: null, projectNumberRefused: { value, reason: "not a project number (digits only) — bucket ownership is not pinned" } };
+  }
+  return { projectNumber: value, projectNumberRefused: null };
+}
+
+/** Lenient on purpose (not `optionalEnvInt`, which throws): a typo in a poll
+ *  interval must not crashloop the pod. Anything but a plain integer inside
+ *  [min, max] is the default plus a carried refusal. */
+export function parseWikiBucketMirrorInterval(raw: string | undefined): {
+  intervalMs: number;
+  intervalRefused: { value: string; reason: string } | null;
+} {
+  const value = raw?.trim() ?? "";
+  if (!value) return { intervalMs: WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS, intervalRefused: null };
+  const fallback = (reason: string) => ({
+    intervalMs: WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS,
+    intervalRefused: { value, reason: `${reason} — using the default ${WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS} ms` },
+  });
+  if (!/^\d+$/.test(value)) return fallback("not a whole number of milliseconds");
+  const n = Number(value);
+  if (n < WIKI_BUCKET_MIRROR_MIN_INTERVAL_MS) return fallback(`below ${WIKI_BUCKET_MIRROR_MIN_INTERVAL_MS} ms`);
+  if (n > WIKI_BUCKET_MIRROR_MAX_INTERVAL_MS) return fallback(`above ${WIKI_BUCKET_MIRROR_MAX_INTERVAL_MS} ms`);
+  return { intervalMs: n, intervalRefused: null };
+}
+
 /**
  * `MUNINN_ADMIN_IDENTS` — the comma-split allowlist `resolveRole` compares a
  * claim against. Trimmed, lowercased and de-duplicated once, here, because the
@@ -595,6 +730,8 @@ export function loadConfig() {
     // Nothing here MOVES a model — it declares which project and region a Vertex
     // call would use, and refuses `global` at boot rather than per turn.
     vertex: resolveVertexConfig(),
+    // GCS buckets mirrored into read-only wiki roots (`src/wiki/bucket-mirror.ts`).
+    wikiBucketMirrors: resolveWikiBucketMirrorConfig(),
     dashboardPort: optionalEnvInt("DASHBOARD_PORT", 3010),
     claudeTimeoutMs: optionalEnvInt("CLAUDE_TIMEOUT_MS", 120000),
     claudeModel: optionalEnv("CLAUDE_MODEL", "sonnet"),

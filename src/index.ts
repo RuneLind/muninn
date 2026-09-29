@@ -156,6 +156,24 @@ if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
   }
 }
 
+// GCS bucket mirrors feeding read-only wiki roots (fire-and-forget; every
+// profile, when `WIKI_BUCKET_MIRRORS` is set). The loop never blocks boot and
+// never throws — a refused root or a failed poll is a warn.
+let wikiBucketMirrors: { stop(): Promise<void> } | null = null;
+if (
+  config.wikiBucketMirrors.mirrors.length + config.wikiBucketMirrors.refused.length > 0 ||
+  config.wikiBucketMirrors.intervalRefused
+) {
+  try {
+    const { startWikiBucketMirrors } = await import("./wiki/bucket-mirror.ts");
+    wikiBucketMirrors = startWikiBucketMirrors(config.wikiBucketMirrors);
+  } catch (err) {
+    log.warn("Failed to start the wiki bucket mirrors: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 // Pre-build browser bundles so the first /traces and /chat request doesn't
 // pay Bun.build latency. The accessors memoize, so this just primes the cache;
 // any build error will resurface on the actual request.
@@ -495,6 +513,7 @@ async function shutdown() {
   log.info("Shutting down...");
   stopScheduler();
   stopStaleHandoffSweep();
+  await wikiBucketMirrors?.stop();
   await waitForPendingTicks(10_000);
   // Let in-flight memory/goal/schedule extractions finish their DB writes
   // before the pool closes below — otherwise their writes race closeDb().
