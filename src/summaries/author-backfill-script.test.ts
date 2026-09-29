@@ -5,7 +5,7 @@
  * `--no-update`, so nothing leaves the machine.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -160,7 +160,8 @@ describe("an interrupted write", () => {
       const deadline = Date.now() + 20_000;
       while (written() < 2 && Date.now() < deadline) await Bun.sleep(20);
       proc.kill("SIGINT");
-      await proc.exited;
+      expect(await proc.exited).toBe(130);
+      expect(existsSync(join(fx.state, "lock"))).toBe(false);
 
       const lines = readFileSync(journal, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { t: string });
       expect(lines.filter((l) => l.t === "plan").length).toBe(8);
@@ -293,9 +294,15 @@ describe("the atomic write's temp file", () => {
         const fx = setup(`tmp-sweep${mode.join("")}`, [{ path: "health/Creatine.md", id: "SWEEP000001", ageMs: 1_000, author: "Has" }], {});
         const leftover = join(fx.root, "health/.Creatine.md.author-backfill.tmp");
         writeFileSync(leftover, "half a file");
+        // Not the backfill's: the sweep's pattern must leave these alone.
+        const notes = join(fx.root, "health/notes.tmp");
+        const dotTmp = join(fx.root, "health/.Creatine.md.tmp");
+        writeFileSync(notes, "mine");
+        writeFileSync(dotTmp, "mine too");
         const r = await run(mode, fx);
         expect({ mode, code: r.code }).toEqual({ mode, code: 0 });
         expect({ mode, left: existsSync(leftover) }).toEqual({ mode, left: false });
+        expect({ mode, notes: existsSync(notes), dotTmp: existsSync(dotTmp) }).toEqual({ mode, notes: true, dotTmp: true });
         expect(r.out).toContain("removed a temp file an earlier build left in the root: health/.Creatine.md.author-backfill.tmp");
       }
     },
@@ -437,9 +444,17 @@ describe("relative paths", () => {
     const fx = setup("other-root", [{ path: "a/Doc.md", id: "OTHERROOT01", ageMs: 1_000 }], { OTHERROOT01: { kind: "ok", author: "O" } });
     expect((await run([], fx)).code).toBe(0);
     const otherRoot = join(dirname(fx.root), "other");
-    mkdirSync(otherRoot);
+    mkdirSync(join(otherRoot, "a"), { recursive: true });
+    // The refusal comes before every mutation: neither the sweep nor the tmp/ clear runs.
+    const leftover = join(otherRoot, "a/.Doc.md.author-backfill.tmp");
+    writeFileSync(leftover, "left by an earlier build");
+    writeFileSync(join(fx.state, "tmp/marker"), "x");
     const r = await spawnIn(scratch, ["--rollback", "--root", otherRoot, "--state-dir", fx.state, "--no-update"]);
-    expect(r.code).toBe(2);
+    expect({ code: r.code, leftover: existsSync(leftover), tmpMarker: existsSync(join(fx.state, "tmp/marker")) }).toEqual({
+      code: 2,
+      leftover: true,
+      tmpMarker: true,
+    });
     expect(r.out).not.toContain("--state-dir");
     expect(r.out).toContain(`root ${realpathSync(fx.root)},`);
     expect(r.out).toContain(`--root is ${realpathSync(otherRoot)}`);
@@ -456,5 +471,267 @@ describe("rollback without its snapshot", () => {
     expect(r.code).toBe(2);
     expect(r.out).toContain("snapshot tarball(s) missing — nothing restored");
     expect(readFileSync(join(fx.root, "a/Doc.md")).equals(written)).toBe(true);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// Class check (round 3): one run per state dir, and every refusal before any
+// side effect. One test per row of the startup table in the script.
+// ---------------------------------------------------------------------------
+
+/** Every entry under `dir` (dot entries and directories included) with its bytes — the whole tree as huginn sees it. */
+function treeSnapshot(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const ent of readdirSync(dir, { withFileTypes: true, recursive: true })) {
+    const rel = relative(dir, join(ent.parentPath, ent.name));
+    out[rel] = ent.isDirectory() ? "<dir>" : readFileSync(join(dir, rel)).toString("base64");
+  }
+  return out;
+}
+
+async function runAt(args: string[], root: string, state: string, env: Record<string, string> = { ...(process.env as Record<string, string>) }) {
+  const proc = Bun.spawn(["bun", SCRIPT, ...args, "--root", root, "--state-dir", state, "--no-update"], { env, stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  return { code, out: out + err, err };
+}
+
+/** A write held inside its temp window per file, so a second run can be started while it is mid-write. */
+function startHeldWrite(fx: { root: string; state: string }, env: Record<string, string>) {
+  const proc = Bun.spawn(["bun", SCRIPT, "--root", fx.root, "--state-dir", fx.state, "--no-update"], {
+    env: { ...(process.env as Record<string, string>), ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const done = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]).then(([o, e, code]) => ({
+    code,
+    out: o + e,
+  }));
+  return { proc, done };
+}
+
+async function until(cond: () => boolean, ms = 20_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond() && Date.now() < deadline) await Bun.sleep(10);
+  if (!cond()) throw new Error("timed out waiting");
+}
+
+const raceFiles: Fixture[] = Array.from({ length: 5 }, (_, i) => ({ path: `r/Talk ${i}.md`, id: `RACE${String(i).padStart(7, "0")}`, ageMs: (i + 1) * 1_000 }));
+const raceCache = Object.fromEntries(raceFiles.map((f) => [f.id, { kind: "ok", author: `Chan ${f.id}`, title: f.path }]));
+const mdOnly = (snap: Record<string, string>) => Object.fromEntries(Object.entries(snap).filter(([k]) => k.endsWith(".md")));
+const runLines = (state: string) => readFileSync(join(state, "journal.jsonl"), "utf8").split("\n").filter((l) => l.includes('"t":"run"')).length;
+
+describe("row: two concurrent write runs on one state dir", () => {
+  test(
+    "a pilot started mid-write exits 2 naming the holder, and the tree ends exactly as the full write alone leaves it",
+    async () => {
+      const control = setup("race-control", raceFiles, raceCache);
+      expect((await run([], control)).code).toBe(0);
+
+      const fx = setup("race", raceFiles, raceCache);
+      const first = startHeldWrite(fx, { BACKFILL_DEBUG_TEMP_PAUSE_MS: "400" });
+      await until(() => tempsUnder(join(fx.state, "tmp")).length > 0);
+      const second = await run(["--limit", "1"], fx);
+      const firstResult = await first.done;
+      expect({
+        second: second.code,
+        namesHolder: second.out.includes(`pid ${first.proc.pid} (write,`),
+        first: firstResult.code,
+        treeAsAlone: JSON.stringify(mdOnly(treeSnapshot(fx.root))) === JSON.stringify(mdOnly(treeSnapshot(control.root))),
+        journaledRuns: runLines(fx.state),
+      }).toEqual({ second: 2, namesHolder: true, first: 0, treeAsAlone: true, journaledRuns: 1 });
+    },
+    60_000,
+  );
+});
+
+describe("row: a dry run or a rollback during a write", () => {
+  test(
+    "exits 2, and the write it met completes with every file written",
+    async () => {
+      for (const mode of [["--dry-run"], ["--rollback"]]) {
+        const fx = setup(`during${mode[0]}`, raceFiles, raceCache);
+        const first = startHeldWrite(fx, { BACKFILL_DEBUG_TEMP_PAUSE_MS: "400" });
+        await until(() => tempsUnder(join(fx.state, "tmp")).length > 0);
+        const second = await run(mode, fx);
+        const firstResult = await first.done;
+        const withAuthor = raceFiles.filter((f) => readFileSync(join(fx.root, f.path), "utf8").includes("author:")).length;
+        expect({
+          mode,
+          second: second.code,
+          refusal: second.out.includes("another backfill run holds"),
+          first: firstResult.code,
+          withAuthor,
+        }).toEqual({ mode, second: 2, refusal: true, first: 0, withAuthor: raceFiles.length });
+      }
+    },
+    60_000,
+  );
+});
+
+describe("row: a stale lock from a killed run", () => {
+  test(
+    "every mode refuses with the stale message and the rm command, touches nothing, and runs once the lock is removed",
+    async () => {
+      const files: Fixture[] = Array.from({ length: 6 }, (_, i) => ({ path: `x/Doc ${i}.md`, id: `KILL${String(i).padStart(7, "0")}`, ageMs: (i + 1) * 1_000 }));
+      const fx = setup("stale", files, Object.fromEntries(files.map((f) => [f.id, { kind: "ok", author: `A ${f.id}`, title: f.path }])));
+      const journal = join(fx.state, "journal.jsonl");
+      const held = startHeldWrite(fx, { BACKFILL_DEBUG_SLEEP_MS: "300" });
+      await until(() => existsSync(journal) && readFileSync(journal, "utf8").includes('"status":"written"'));
+      held.proc.kill("SIGKILL");
+      await held.done;
+
+      const lock = join(realpathSync(fx.state), "lock");
+      const leftover = join(fx.root, "x/.Doc 5.md.author-backfill.tmp");
+      writeFileSync(leftover, "left by an earlier build");
+      writeFileSync(join(fx.state, "tmp/marker"), "x");
+      const before = treeSnapshot(fx.root);
+      for (const mode of [["--dry-run"], [], ["--limit", "1"], ["--rollback"]]) {
+        const r = await run(mode, fx);
+        expect({
+          mode,
+          code: r.code,
+          stale: r.out.includes(`stale lock ${lock}: pid ${held.proc.pid}`),
+          rm: r.out.includes(`rm ${JSON.stringify(lock)}`),
+        }).toEqual({ mode, code: 2, stale: true, rm: true });
+      }
+      expect(treeSnapshot(fx.root)).toEqual(before);
+      expect(existsSync(join(fx.state, "tmp/marker"))).toBe(true);
+
+      rmSync(lock);
+      const rb = await run(["--rollback"], fx);
+      expect(rb.code).toBe(0);
+      for (const f of files) expect(readFileSync(join(fx.root, f.path)).equals(fx.original.get(f.path)!)).toBe(true);
+      expect(existsSync(leftover)).toBe(false);
+      expect(mtimeOrder(fx.root, files.map((f) => f.path))).toEqual(files.map((f) => f.path));
+    },
+    60_000,
+  );
+
+  test("an unreadable lock (a crash while taking it) refuses with the rm command", async () => {
+    const fx = setup("torn-lock", [{ path: "a.md", id: "TORNLOCK001", ageMs: 1_000 }], { TORNLOCK001: { kind: "ok", author: "T" } });
+    writeFileSync(join(fx.state, "lock"), "");
+    const r = await run([], fx);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("is unreadable");
+    expect(readFileSync(join(fx.root, "a.md")).equals(fx.original.get("a.md")!)).toBe(true);
+  }, 30_000);
+});
+
+describe("row: the lock is released", () => {
+  test("on a normal exit and on an exit 2 after the lock was taken", async () => {
+    const fx = setup("release", [{ path: "a.md", id: "RELEASE0001", ageMs: 1_000 }], { RELEASE0001: { kind: "ok", author: "R" } });
+    const dry = await run(["--dry-run"], fx);
+    expect({ code: dry.code, lock: existsSync(join(fx.state, "lock")) }).toEqual({ code: 0, lock: false });
+    // --exclude is read inside the mode, after the lock is taken.
+    const missing = await run(["--exclude", join(fx.state, "no-such-file.txt")], fx);
+    expect({ code: missing.code, lock: existsSync(join(fx.state, "lock")) }).toEqual({ code: 2, lock: false });
+    expect(missing.out).toContain("--exclude file not found");
+  }, 30_000);
+});
+
+describe("row: SIGINT during a write", () => {
+  test(
+    "stops the run between files, exits 130 and releases the lock",
+    async () => {
+      const fx = setup("sigint-between", raceFiles, raceCache);
+      // Sync pauses only: the one event-loop turn per file is the script's own.
+      const held = startHeldWrite(fx, { BACKFILL_DEBUG_TEMP_PAUSE_MS: "300" });
+      await until(() => tempsUnder(join(fx.state, "tmp")).length > 0);
+      held.proc.kill("SIGINT");
+      const r = await held.done;
+      const withAuthor = raceFiles.filter((f) => readFileSync(join(fx.root, f.path), "utf8").includes("author:")).length;
+      expect({ code: r.code, lock: existsSync(join(fx.state, "lock")), stoppedEarly: withAuthor < raceFiles.length }).toEqual({
+        code: 130,
+        lock: false,
+        stoppedEarly: true,
+      });
+    },
+    30_000,
+  );
+});
+
+describe("row: a state dir at or under the root, or holding it", () => {
+  test(
+    "every mode refuses before anything is created, removed or cleared",
+    async () => {
+      const fx = setup("under-root", [{ path: "a/Doc.md", id: "UNDERROOT01", ageMs: 1_000 }], { UNDERROOT01: { kind: "ok", author: "U" } });
+      const leftover = join(fx.root, "a/.Doc.md.author-backfill.tmp");
+      writeFileSync(leftover, "left by an earlier build");
+      const before = treeSnapshot(fx.root);
+      const parent = dirname(fx.root);
+      const parentBefore = readdirSync(parent).sort();
+      const cases: Array<[string, string]> = [
+        [fx.root, "is the root"],
+        [join(fx.root, ".backfill-state"), "is under the root"],
+        [join(fx.root, "a/deeper/state"), "is under the root"],
+        [parent, "is under the state dir"],
+      ];
+      for (const [state, says] of cases) {
+        for (const mode of [["--dry-run"], [], ["--rollback"]]) {
+          const r = await runAt(mode, fx.root, state);
+          expect({ state, mode, code: r.code, says: r.out.includes(says) }).toEqual({ state, mode, code: 2, says: true });
+        }
+      }
+      expect(treeSnapshot(fx.root)).toEqual(before);
+      expect(readdirSync(parent).sort()).toEqual(parentBefore);
+    },
+    60_000,
+  );
+});
+
+describe("row: the root's canonical path, through a symlink", () => {
+  test(
+    "a state dir under the root's real path is refused when the root is named by a symlink, and a rollback by the real path matches",
+    async () => {
+      // Built here rather than relying on macOS's /var → /private/var, so Linux CI pins it too.
+      const base = realpathSync(mkdtempSync(join(scratch, "symlink-")));
+      const real = join(base, "real");
+      const files: Fixture[] = [{ path: "a/Doc.md", id: "SYMLINK0001", ageMs: 1_000 }];
+      const fx = setup(relative(scratch, join(real)), files, { SYMLINK0001: { kind: "ok", author: "S" } });
+      symlinkSync(real, join(base, "link"));
+      const viaLink = join(base, "link", "tree");
+
+      const under = await runAt([], viaLink, join(fx.root, ".state"));
+      expect({ code: under.code, says: under.out.includes("is under the root"), created: existsSync(join(fx.root, ".state")) }).toEqual({
+        code: 2,
+        says: true,
+        created: false,
+      });
+
+      expect((await runAt([], viaLink, fx.state)).code).toBe(0);
+      const rb = await runAt(["--rollback"], fx.root, fx.state);
+      expect({ code: rb.code, restored: rb.out.includes("restored 1,") }).toEqual({ code: 0, restored: true });
+      expect(readFileSync(join(fx.root, "a/Doc.md")).equals(fx.original.get("a/Doc.md")!)).toBe(true);
+    },
+    30_000,
+  );
+});
+
+describe("row: a state dir from an earlier version (manifest.json)", () => {
+  test("refuses before the sweep and the tmp/ clear", async () => {
+    const fx = setup("manifest", [{ path: "a/Doc.md", id: "MANIFEST001", ageMs: 1_000 }], {});
+    writeFileSync(join(fx.state, "manifest.json"), "{}");
+    mkdirSync(join(fx.state, "tmp"));
+    writeFileSync(join(fx.state, "tmp/marker"), "x");
+    const leftover = join(fx.root, "a/.Doc.md.author-backfill.tmp");
+    writeFileSync(leftover, "left by an earlier build");
+    const r = await run(["--dry-run"], fx);
+    expect({ code: r.code, leftover: existsSync(leftover), tmpMarker: existsSync(join(fx.state, "tmp/marker")) }).toEqual({
+      code: 2,
+      leftover: true,
+      tmpMarker: true,
+    });
+  }, 30_000);
+});
+
+describe("the test hooks", () => {
+  test("each one set prints one warning on stderr", async () => {
+    const fx = setup("hooks", [{ path: "a.md", id: "HOOKS000001", ageMs: 1_000, author: "Has" }], {});
+    for (const name of ["BACKFILL_DEBUG_SLEEP_MS", "BACKFILL_DEBUG_TEMP_PAUSE_MS", "BACKFILL_OEMBED_BASE"]) {
+      const r = await runAt(["--dry-run"], fx.root, fx.state, { ...(process.env as Record<string, string>), [name]: name === "BACKFILL_OEMBED_BASE" ? "http://127.0.0.1:9" : "1" });
+      expect({ name, code: r.code, warnings: r.err.split(`warning: test hook ${name}=`).length - 1 }).toEqual({ name, code: 0, warnings: 1 });
+    }
+    const none = await runAt(["--dry-run"], fx.root, fx.state);
+    expect(none.err).not.toContain("warning: test hook");
   }, 30_000);
 });

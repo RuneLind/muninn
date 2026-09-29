@@ -47,17 +47,21 @@
  * Writes add the key only where it is absent and never touch the body. Each
  * is atomic: a temp file in `<state-dir>/tmp/`, given its stamp, then renamed
  * over the target, so no reader sees new bytes with a "now" mtime or a
- * truncated file. The temp is NEVER under the root: huginn's reader indexes
- * every file there, dotfiles and `.tmp` included. The state dir must be on the
- * root's filesystem (a rename across devices is not atomic); every mode
- * refuses otherwise. Every mode also first removes any
- * `*.author-backfill.tmp` an earlier build of this script left in the root.
+ * truncated file. Every mode refuses (exit 2, before it creates or removes
+ * anything) a state dir equal to or under the root — huginn's reader indexes
+ * every file there, dotfiles and `.tmp` included — a root under the state
+ * dir, and a state dir on another filesystem, where the rename fails with
+ * EXDEV. Every mode takes `<state-dir>/lock`; a second run on the same state
+ * dir, dry run included, exits 2 naming the holder. A lock left by a killed
+ * run is reported as stale with the command that removes it, never taken
+ * over. Only with the lock held does a run remove any `*.author-backfill.tmp`
+ * an earlier build of this script left in the root, and clear its `tmp/`.
  * A file whose mtime moved between read and write is skipped.
  * Every run re-stamps its sequence (every file from the oldest one it changes
  * onward, changed or not) with increasing mtimes 1 ms apart in original-mtime
  * order, so `/update` reads them and the collection's relative order survives.
  *
- * State, in the state dir: `oembed-cache.json`, the per-run tarballs, and
+ * State, in the state dir: `lock`, `oembed-cache.json`, the per-run tarballs, and
  * `journal.jsonl` — a run's whole plan (each file's pre-backfill mtime, its
  * stamp, the author it gets) is appended BEFORE its first write, and each
  * file's outcome after it, so a run killed at any point is fully known to the
@@ -92,7 +96,7 @@ import {
   writeSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { $ } from "bun";
 import {
   assignStamps,
@@ -113,6 +117,9 @@ import {
   TITLE_REVIEW_THRESHOLD,
   type JournalEvent,
   type JournalRun,
+  checkStatePlacement,
+  lockRefusal,
+  parseLock,
   type NotRestoredReason,
   type PlannedStamp,
 } from "../src/summaries/author-backfill.ts";
@@ -134,29 +141,18 @@ if (!parsed.ok) {
   process.exit(2);
 }
 const ARGS = parsed.args;
-// Canonical (absolute, symlinks resolved, no trailing slash) before anything is
-// journaled, so a rollback from any cwd, or by another spelling, matches.
-const ROOT_ARG = resolve(ARGS.root ?? join(homedir(), "source/private/huginn/data/sources/youtube-articles"));
-if (!existsSync(ROOT_ARG)) {
-  console.error(`root does not exist: ${ROOT_ARG}`);
-  process.exit(2);
-}
-const ROOT = realpathSync(ROOT_ARG);
-const STATE_DIR_ARG = resolve(ARGS.stateDir ?? join(homedir(), ".muninn/youtube-author-backfill"));
-mkdirSync(STATE_DIR_ARG, { recursive: true });
-const STATE_DIR = realpathSync(STATE_DIR_ARG);
 const HUGINN = (ARGS.huginn ?? process.env.KNOWLEDGE_API_URL ?? "http://127.0.0.1:8321").replace(/\/+$/, "");
 const COLLECTION = ARGS.collection ?? "youtube-summaries";
 const REQUEST_SPACING_MS = 500; // 2 requests per second
-const CACHE_PATH = join(STATE_DIR, "oembed-cache.json");
-const JOURNAL_PATH = join(STATE_DIR, "journal.jsonl");
-const TMP_DIR = join(STATE_DIR, "tmp");
 /** Test hook for the interrupted-run drill: sleep this long after each file. */
 const DEBUG_SLEEP_MS = Number(process.env.BACKFILL_DEBUG_SLEEP_MS ?? 0) || 0;
 /** Test hook: hold each atomic write between its temp file and the rename, so a spec can see where the temp lives. */
 const DEBUG_TEMP_PAUSE_MS = Number(process.env.BACKFILL_DEBUG_TEMP_PAUSE_MS ?? 0) || 0;
 /** Test hook: the oEmbed host, so a spec can answer the dry run from a local server. */
 const OEMBED_BASE = process.env.BACKFILL_OEMBED_BASE || undefined;
+for (const name of ["BACKFILL_DEBUG_SLEEP_MS", "BACKFILL_DEBUG_TEMP_PAUSE_MS", "BACKFILL_OEMBED_BASE"]) {
+  if (process.env[name]) console.error(`warning: test hook ${name}=${process.env[name]} is set`);
+}
 /**
  * Defensive only: with no locale bsdtar's `-t` listing escapes every non-ASCII
  * byte (measured: 180 of 1,313 names), which is why the rollback never parses
@@ -164,9 +160,45 @@ const OEMBED_BASE = process.env.BACKFILL_OEMBED_BASE || undefined;
  */
 const TAR_ENV = { ...process.env, LC_ALL: "en_US.UTF-8", LANG: "en_US.UTF-8" };
 
-if (existsSync(join(STATE_DIR, "manifest.json"))) {
-  console.error(`${STATE_DIR} holds a manifest.json from an earlier version of this script — pass another --state-dir`);
-  process.exit(2);
+// ---------------------------------------------------------------------------
+// Startup — `acquireRun()` is the only code that runs before a mode, and it
+// decides whether this run may touch anything before it touches anything.
+//
+//   instances on the state dir | mode      | state dir                   | outcome
+//   ---------------------------+-----------+-----------------------------+-----------------------------------------
+//   1                          | any       | outside root, same fs       | runs; sweep + clear tmp/ after the lock
+//   1                          | any       | = root, under root          | exit 2, nothing created under the root
+//   1                          | any       | root under it               | exit 2, nothing created
+//   1                          | any       | other filesystem            | exit 2 (EXDEV), nothing created
+//   1                          | any       | journal names another root  | exit 2, nothing swept or cleared
+//   1                          | any       | legacy manifest.json        | exit 2, nothing swept or cleared
+//   2+ concurrent              | any × any | same state dir              | the later one exits 2 naming the holder;
+//                              |           |                             | the holder's temp and tree are untouched
+//   1 after a crash (kill -9)  | any       | stale lock left             | exit 2 "stale", prints the rm command;
+//                              |           |                             | never stolen
+//
+// Order: (a) canonical root and state dir, placement + same-filesystem check
+// (read-only; a missing state dir is resolved through its nearest ancestor,
+// not created); (b) legacy manifest + the journal's root (read-only);
+// (c) create the state dir, take `<state>/lock` with `wx` — every mode, the
+// dry run included (it writes the cache and the review file); re-check (b)
+// under the lock; (d) only then sweep backfill temps from the root and clear
+// `<state>/tmp/`. The lock is released on exit, including exit 2 and SIGINT/
+// SIGTERM; a crash leaves it, and the next run refuses — the safe side.
+// ---------------------------------------------------------------------------
+
+/** Absolute, symlinks resolved — through the nearest existing ancestor when `p` does not exist yet. */
+function canonical(p: string): { path: string; existing: string } {
+  const rest: string[] = [];
+  let cur = resolve(p);
+  while (!existsSync(cur)) {
+    rest.unshift(basename(cur));
+    const up = dirname(cur);
+    if (up === cur) break;
+    cur = up;
+  }
+  const existing = realpathSync(cur);
+  return { path: join(existing, ...rest), existing };
 }
 
 /** Every `*.author-backfill.tmp` under `dir`, dot entries included — huginn reads those too. */
@@ -178,16 +210,107 @@ function leftoverTemps(dir: string, out: string[] = []): string[] {
   }
   return out;
 }
-for (const abs of leftoverTemps(ROOT)) {
-  rmSync(abs, { force: true });
-  console.log(`removed a temp file an earlier build left in the root: ${relative(ROOT, abs)}`);
-}
-rmSync(TMP_DIR, { recursive: true, force: true });
-mkdirSync(TMP_DIR);
-if (statSync(TMP_DIR).dev !== statSync(ROOT).dev) {
-  console.error(`${STATE_DIR} is on another filesystem than ${ROOT}: a rename between them is not atomic — put the state dir on the root's filesystem`);
+
+function refuse(message: string): never {
+  console.error(message);
   process.exit(2);
 }
+
+/** The foreign-root refusal, or the runs. Read-only. */
+function readJournal(journalPath: string, root: string): JournalRun[] {
+  if (!existsSync(journalPath)) return [];
+  const { runs, badLines } = parseJournal(readFileSync(journalPath, "utf8"));
+  if (badLines > 0) console.warn(`journal: ${badLines} unreadable line(s) ignored (a torn last append?)`);
+  const foreign = runs.find((r) => r.root !== root);
+  if (foreign) {
+    refuse(
+      `journal ${journalPath} records runs against the root ${foreign.root}, but this run's --root is ${root} — ` +
+        `rerun with --root ${foreign.root}`,
+    );
+  }
+  return runs;
+}
+
+let heldLock: string | null = null;
+function releaseLock(): void {
+  if (heldLock === null) return;
+  const path = heldLock;
+  heldLock = null;
+  rmSync(path, { force: true });
+}
+process.on("exit", releaseLock);
+process.on("SIGINT", () => process.exit(130));
+process.on("SIGTERM", () => process.exit(143));
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it runs, as someone else.
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function acquireRun(): { root: string; stateDir: string; journal: JournalRun[] } {
+  // (a) placement
+  const rootArg = resolve(ARGS.root ?? join(homedir(), "source/private/huginn/data/sources/youtube-articles"));
+  if (!existsSync(rootArg)) refuse(`root does not exist: ${rootArg}`);
+  const root = realpathSync(rootArg);
+  const state = canonical(ARGS.stateDir ?? join(homedir(), ".muninn/youtube-author-backfill"));
+  const placement = checkStatePlacement({
+    root,
+    stateDir: state.path,
+    rootDev: statSync(root).dev,
+    stateDev: statSync(state.existing).dev,
+  });
+  if (!placement.ok) refuse(placement.error);
+  const stateDir = state.path;
+
+  // (b) state the dir already holds
+  if (existsSync(join(stateDir, "manifest.json"))) {
+    refuse(`${stateDir} holds a manifest.json from an earlier version of this script — pass another --state-dir`);
+  }
+  const journalPath = join(stateDir, "journal.jsonl");
+  readJournal(journalPath, root);
+
+  // (c) the lock
+  mkdirSync(stateDir, { recursive: true });
+  const lockPath = join(stateDir, "lock");
+  let fd: number;
+  try {
+    fd = openSync(lockPath, "wx");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    const holder = parseLock(readFileSync(lockPath, "utf8"));
+    refuse(lockRefusal(lockPath, holder, holder !== null && pidAlive(holder.pid)));
+  }
+  heldLock = lockPath;
+  try {
+    writeSync(fd, JSON.stringify({ pid: process.pid, mode: ARGS.mode, startedAt: new Date().toISOString() }) + "\n");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  // Again under the lock: a run that held it may have journaled since (b).
+  const journal = readJournal(journalPath, root);
+
+  // (d) the only mutations before a mode runs
+  for (const abs of leftoverTemps(root)) {
+    rmSync(abs, { force: true });
+    console.log(`removed a temp file an earlier build left in the root: ${relative(root, abs)}`);
+  }
+  const tmp = join(stateDir, "tmp");
+  rmSync(tmp, { recursive: true, force: true });
+  mkdirSync(tmp);
+  return { root, stateDir, journal };
+}
+
+const { root: ROOT, stateDir: STATE_DIR, journal } = acquireRun();
+const CACHE_PATH = join(STATE_DIR, "oembed-cache.json");
+const JOURNAL_PATH = join(STATE_DIR, "journal.jsonl");
+/** Cleared at startup under the lock; holds the one in-flight write's temp. */
+const TMP_DIR = join(STATE_DIR, "tmp");
 
 // ---------------------------------------------------------------------------
 // State files
@@ -207,21 +330,6 @@ function saveCache(): void {
   renameSync(tmp, CACHE_PATH);
 }
 
-function loadJournal(): JournalRun[] {
-  if (!existsSync(JOURNAL_PATH)) return [];
-  const { runs, badLines } = parseJournal(readFileSync(JOURNAL_PATH, "utf8"));
-  if (badLines > 0) console.warn(`journal: ${badLines} unreadable line(s) ignored (a torn last append?)`);
-  const foreign = runs.find((r) => r.root !== ROOT);
-  if (foreign) {
-    console.error(
-      `journal ${JOURNAL_PATH} records runs against the root ${foreign.root}, but this run's --root is ${ROOT} — ` +
-        `rerun with --root ${foreign.root}`,
-    );
-    process.exit(2);
-  }
-  return runs;
-}
-const journal = loadJournal();
 
 /** Append journal lines and fsync, so a line reported written survives a crash. */
 function appendJournal(events: readonly JournalEvent[]): void {
@@ -244,9 +352,10 @@ function mtimeOf(abs: string): number {
 
 /**
  * `bytes` onto `abs` atomically, already carrying its stamp: a temp file in
- * `TMP_DIR` (never under the root, which huginn indexes whole; the startup
- * check put it on the root's filesystem), the original mode, fsynced,
- * stamped, then renamed over the target.
+ * `TMP_DIR` (the startup check refused a state dir under the root, which
+ * huginn indexes whole, or on another filesystem), the original mode, fsynced,
+ * stamped, then renamed over the target. One temp name is enough: the lock
+ * makes this the only run on the state dir.
  */
 function atomicWrite(abs: string, bytes: string | Uint8Array, atime: Date, stampMs: number): void {
   const tmp = join(TMP_DIR, "write.tmp");
@@ -517,8 +626,12 @@ async function dryRun(): Promise<void> {
 // Write
 // ---------------------------------------------------------------------------
 
+/**
+ * A real event-loop turn after each file, even at 0 ms: a SIGINT handler runs
+ * only on one, so without it Ctrl-C would wait for the whole run to finish.
+ */
 async function debugPause(): Promise<void> {
-  if (DEBUG_SLEEP_MS > 0) await Bun.sleep(DEBUG_SLEEP_MS);
+  await Bun.sleep(DEBUG_SLEEP_MS);
 }
 
 /** Runs one planned sequence: journal the plan, then each file, then `end`. */

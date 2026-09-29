@@ -430,3 +430,85 @@ export function parseBackfillArgs(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Startup: where the state dir may live, and the run lock
+// ---------------------------------------------------------------------------
+
+function isUnder(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent.endsWith("/") ? parent : `${parent}/`);
+}
+
+/**
+ * Whether a run may use `stateDir` for `root`. Both paths canonical (absolute,
+ * symlinks resolved); each `dev` is `statSync().dev` of the dir, or of its
+ * nearest existing ancestor when it does not exist yet.
+ *
+ * Refused: a state dir equal to or under the root (huginn indexes every file
+ * under the root, so it would index the temp, journal, cache and tarballs),
+ * a root under the state dir, and two filesystems — the final `renameSync`
+ * from `<state>/tmp/` onto a document would then fail with EXDEV, mid-run,
+ * after the tarball and the journal's plan are already written.
+ */
+export function checkStatePlacement(input: {
+  root: string;
+  stateDir: string;
+  rootDev: number | bigint;
+  stateDev: number | bigint;
+}): { ok: true } | { ok: false; error: string } {
+  const { root, stateDir } = input;
+  if (isUnder(stateDir, root)) {
+    return {
+      ok: false,
+      error: `the state dir ${stateDir} is ${stateDir === root ? "the root" : "under the root"} ${root}, which huginn indexes whole — pass a --state-dir outside it`,
+    };
+  }
+  if (isUnder(root, stateDir)) {
+    return { ok: false, error: `the root ${root} is under the state dir ${stateDir} — pass a --state-dir outside the root` };
+  }
+  if (BigInt(input.rootDev) !== BigInt(input.stateDev)) {
+    return {
+      ok: false,
+      error:
+        `the state dir ${stateDir} is on another filesystem than the root ${root}: each write renames a temp file from the state dir ` +
+        `onto its document, and that rename fails with EXDEV — put the state dir on the root's filesystem`,
+    };
+  }
+  return { ok: true };
+}
+
+/** What `<state-dir>/lock` holds: the run that took it. */
+export interface LockHolder {
+  pid: number;
+  mode: string;
+  startedAt: string;
+}
+
+/** The lock file's holder, or null when it is unreadable (a crash between create and write). */
+export function parseLock(text: string): LockHolder | null {
+  try {
+    const v = JSON.parse(text) as Partial<LockHolder>;
+    if (typeof v.pid === "number" && Number.isInteger(v.pid) && v.pid > 0 && typeof v.mode === "string" && typeof v.startedAt === "string") {
+      return { pid: v.pid, mode: v.mode, startedAt: v.startedAt };
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+/**
+ * The refusal when the lock exists. `alive` is whether the recorded pid still
+ * runs (`process.kill(pid, 0)` did not throw ESRCH). A lock is never stolen:
+ * a dead pid may have been reused, and a second run on the state dir is the
+ * failure the lock exists to stop, so the operator removes a stale one.
+ */
+export function lockRefusal(lockPath: string, holder: LockHolder | null, alive: boolean): string {
+  const rm = `rm ${JSON.stringify(lockPath)}`;
+  if (holder === null) {
+    return `${lockPath} exists but is unreadable (a run that crashed while taking it?). If no other backfill runs on this state dir, remove it: ${rm}`;
+  }
+  const who = `pid ${holder.pid} (${holder.mode}, started ${holder.startedAt})`;
+  if (alive) return `another backfill run holds ${lockPath}: ${who} — wait for it to finish`;
+  return `stale lock ${lockPath}: ${who} is no longer running. If no other backfill runs on this state dir, remove it: ${rm}`;
+}

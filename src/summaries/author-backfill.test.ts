@@ -1,6 +1,9 @@
 import { test, expect, describe } from "bun:test";
 import {
   assignStamps,
+  checkStatePlacement,
+  lockRefusal,
+  parseLock,
   insertFrontmatterAuthor,
   lastWrites,
   mtimeMsFromNs,
@@ -292,4 +295,52 @@ test("the failure streak counts errors and resets on any answer about the video"
   expect(s).toBe(0);
   expect([1, 2, 3, 4].reduce((acc) => nextFailureStreak(acc, { kind: "error" }), 0)).toBe(4);
   expect(nextFailureStreak(4, { kind: "unavailable" })).toBe(0);
+});
+
+describe("where the state dir may live (checkStatePlacement)", () => {
+  const same = { rootDev: 7, stateDev: 7 };
+  test("outside the root on the same filesystem is allowed, a sibling sharing the root's prefix included", () => {
+    expect(checkStatePlacement({ root: "/data/tree", stateDir: "/home/me/state", ...same })).toEqual({ ok: true });
+    expect(checkStatePlacement({ root: "/data/tree", stateDir: "/data/tree-state", ...same })).toEqual({ ok: true });
+  });
+  test("the root itself, or anything under it, is refused", () => {
+    for (const stateDir of ["/data/tree", "/data/tree/.backfill-state", "/data/tree/a/b"]) {
+      const r = checkStatePlacement({ root: "/data/tree", stateDir, ...same });
+      expect({ stateDir, ok: r.ok }).toEqual({ stateDir, ok: false });
+      expect(r.ok ? "" : r.error).toContain("huginn indexes whole");
+    }
+  });
+  test("a root under the state dir is refused", () => {
+    const r = checkStatePlacement({ root: "/data/tree", stateDir: "/data", ...same });
+    expect(r.ok ? "" : r.error).toContain("is under the state dir /data");
+  });
+  test("another filesystem is refused, and the reason is the EXDEV rename", () => {
+    for (const devs of [{ rootDev: 7, stateDev: 8 }, { rootDev: 7n, stateDev: 8n }]) {
+      const r = checkStatePlacement({ root: "/data/tree", stateDir: "/Volumes/x/state", ...devs });
+      expect(r.ok).toBe(false);
+      expect(r.ok ? "" : r.error).toContain("fails with EXDEV");
+      expect(r.ok ? "" : r.error).not.toContain("not atomic");
+    }
+    expect(checkStatePlacement({ root: "/data/tree", stateDir: "/s", rootDev: 7n, stateDev: 7 })).toEqual({ ok: true });
+  });
+});
+
+describe("the run lock's refusal", () => {
+  const lock = "/s/lock";
+  test("a live holder is named, with no removal advice", () => {
+    const msg = lockRefusal(lock, { pid: 4242, mode: "write", startedAt: "2026-09-29T10:00:00.000Z" }, true);
+    expect(msg).toContain("pid 4242 (write, started 2026-09-29T10:00:00.000Z)");
+    expect(msg).not.toContain("rm ");
+  });
+  test("a dead holder is stale, and the operator gets the exact rm command", () => {
+    const msg = lockRefusal(lock, { pid: 4242, mode: "dry-run", startedAt: "t" }, false);
+    expect(msg).toContain("stale lock /s/lock: pid 4242 (dry-run, started t) is no longer running");
+    expect(msg).toContain('rm "/s/lock"');
+  });
+  test("an unreadable lock gets the rm command too", () => {
+    expect(parseLock("")).toBeNull();
+    expect(parseLock('{"pid":"1","mode":"write","startedAt":"t"}')).toBeNull();
+    expect(parseLock('{"pid":12,"mode":"write","startedAt":"t"}')).toEqual({ pid: 12, mode: "write", startedAt: "t" });
+    expect(lockRefusal(lock, null, false)).toContain('unreadable (a run that crashed while taking it?). If no other backfill runs on this state dir, remove it: rm "/s/lock"');
+  });
 });
