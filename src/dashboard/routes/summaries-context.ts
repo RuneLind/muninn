@@ -24,7 +24,8 @@ const log = getLog("dashboard", "summaries-context");
 export const SAME_STORY_LIMIT = 15;
 /** Chunk content is never shown, only the heading: keep the answer small. */
 export const SAME_STORY_CHUNK_CHARS = 200;
-/** A title is short: the encoded `q` may be at most this many bytes. */
+/** A title is short: `q` may be at most this many bytes, measured in the
+ *  URLSearchParams encoding huginn receives (`!'()~` are 3 bytes there). */
 export const SAME_STORY_MAX_Q_BYTES = 2048;
 /** How much of a docId a warn line carries. */
 const LOG_DOC_ID_CHARS = 200;
@@ -54,11 +55,7 @@ function servedCollections(listed: unknown): { names: Set<string> } | { shape: s
 }
 
 function encodedBytes(q: string): number {
-  try {
-    return encodeURIComponent(q).length;
-  } catch {
-    return Infinity; // a lone surrogate: not a query this route serves
-  }
+  return new URLSearchParams({ q }).toString().length - "q=".length;
 }
 
 export interface SummariesContextDeps {

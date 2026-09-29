@@ -162,6 +162,39 @@ test("same-story: an abandoned request aborts its huginn fetch", async () => {
   await pending;
 });
 
+test("same-story: an abandoned request aborts the /api/collections fetch too", async () => {
+  const signals: AbortSignal[] = [];
+  const paths: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    paths.push(url.pathname);
+    const signal = init?.signal as AbortSignal;
+    signals.push(signal);
+    return new Promise<Response>((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      setTimeout(() => resolve(json({ collections: [] })), 400);
+    });
+  }) as typeof fetch;
+  const client = new AbortController();
+  const pending = appWith().request(new Request("http://x/api/summaries/same-story?q=Qwen", { signal: client.signal }));
+  while (signals.length === 0) await Bun.sleep(5);
+  expect(paths).toEqual(["/api/collections"]);
+  client.abort();
+  await Bun.sleep(20);
+  expect(signals[0]!.aborted).toBe(true);
+  await pending;
+  expect(paths).toEqual(["/api/collections"]);
+});
+
+test("same-story: q is capped in the encoding huginn receives, where !'()~ take three bytes", async () => {
+  const calls: string[] = [];
+  fakeHuginn("", calls);
+  // encodeURIComponent leaves "!" as one byte; URLSearchParams sends %21.
+  expect((await appWith().request(`/api/summaries/same-story?q=${"!".repeat(SAME_STORY_MAX_Q_BYTES)}`)).status).toBe(400);
+  expect(calls).toEqual([]);
+  expect((await appWith().request(`/api/summaries/same-story?q=${"!".repeat(Math.floor(SAME_STORY_MAX_Q_BYTES / 3))}`)).status).toBe(200);
+});
+
 async function captureWarns(fn: (records: LogRecord[]) => Promise<void>): Promise<void> {
   const records: LogRecord[] = [];
   await configure({
