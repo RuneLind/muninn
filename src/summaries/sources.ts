@@ -34,6 +34,13 @@ export interface SummarySource {
   /** Link text for the "open original" anchor on a row (when the doc has a url). */
   linkLabel: string;
   /**
+   * The doc panel header's and the export page's label when it depends on the
+   * document: `transcript` for one that stores a transcript, `text` for one
+   * that does not. Absent ⇒ `linkLabel` everywhere. Shelf and library rows
+   * keep `linkLabel`: they have not read the document.
+   */
+  docLinkLabels?: { transcript: string; text: string };
+  /**
    * Can `POST /api/summaries/rerun` act on this source? (Absent ⇒ no.)
    *
    * The doc panel's `↻ Re-run ▾` control is rendered from this flag, which is
@@ -66,6 +73,8 @@ export const SUMMARY_SOURCES: SummarySource[] = [
     collection: "x-articles",
     apiBase: "/api/x-articles",
     linkLabel: "View on X ↗",
+    // An X video capture stores a transcript; a pasted post does not.
+    docLinkLabels: { transcript: "Watch on X ↗", text: "Read on X ↗" },
     rerun: true,
   },
   {
@@ -147,6 +156,7 @@ export function clientSourcesJson(): string {
       badge: string;
       apiBase: string;
       linkLabel: string;
+      docLinkLabels: { transcript: string; text: string } | null;
       collection: string;
       rerun: boolean;
     }
@@ -164,6 +174,7 @@ export function clientSourcesJson(): string {
       badge: s.badge,
       apiBase: s.apiBase,
       linkLabel: s.linkLabel,
+      docLinkLabels: s.docLinkLabels ?? null,
       collection: s.collection,
       rerun: s.rerun === true,
     };

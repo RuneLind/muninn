@@ -22,8 +22,12 @@ import {
   DOC_PANEL_RERUN_BTN_ID,
   DOC_PANEL_RERUN_MENU_ID,
   DOC_PANEL_RERUN_STATUS_ID,
+  DOC_PANEL_COPY_LINK_ID,
+  DOC_PANEL_MORE_WRAP_ID,
 } from "./doc-panel.ts";
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
+import { SIMILAR_DEBOUNCE_MS } from "./sum-reader.ts";
+import { docPanelMenuScript } from "./doc-panel-menu.ts";
 
 /**
  * How many times, and how far apart, the doc panel re-reads a document after a
@@ -179,12 +183,14 @@ export function sumArticleLibraryStyles(): string {
       border-radius: 10px;
       padding: 14px;
     }
+    /* --text-soft, not --text-dim: --text-dim measured 3.34:1 light and
+       2.97:1 dark behind the outline's title. Same for .doc-similar h4. */
     .sum-side-title {
       font-size: 12px;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: var(--text-dim);
+      color: var(--text-soft);
       margin: 0 0 10px;
     }
     .sum-cat-row {
@@ -236,7 +242,7 @@ export function sumArticleLibraryStyles(): string {
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: var(--text-dim);
+      color: var(--text-soft);
       margin: 0 0 10px;
     }
     .doc-similar-item {
@@ -267,6 +273,8 @@ export function sumArticleLibraryHtml(): string {
 
 export function sumArticleLibraryScript(): string {
   return `
+    ${docPanelMenuScript()}
+
     // --- Shared doc helpers (used across all summaries components) ---
 
     function docTitle(docId) {
@@ -412,7 +420,7 @@ export function sumArticleLibraryScript(): string {
       // the shelf's job card, which is the surface the reader can now see; the
       // menu and its status line go with the panel.
       handOffRerunStream();
-      closeRerunMenu();
+      closeDocPanelMenus(false);
       setRerunStatus('');
       document.getElementById('docOverlay').classList.remove('visible');
       document.body.style.overflow = '';
@@ -436,9 +444,10 @@ export function sumArticleLibraryScript(): string {
     document.addEventListener('keydown', function(e) {
       if (e.key !== 'Escape') return;
       if (docPanelOverlayOpen()) return;
-      // The re-run menu is dismissed by Escape before the panel is: closing
-      // the panel out from under it takes away the thing the reader was reading.
-      if (rerunMenuOpen()) { closeRerunMenu(); return; }
+      // A header menu (↻ Re-run ▾, ⋯ More) is dismissed by Escape before the
+      // panel is, focus going back to its button: closing the panel out from
+      // under it takes away the thing the reader was reading.
+      if (closeDocPanelMenus(true)) return;
       if (document.getElementById('docOverlay').classList.contains('visible')) {
         closeDocPanel();
       }
@@ -522,7 +531,6 @@ export function sumArticleLibraryScript(): string {
     var _rerunStream = null;  // the panel's OWN stream on a running re-run
     var _rerunJob = null;     // {jobId, source} of that run, for the hand-off
     var _rerunBusy = false;
-    var _rerunOpener = null;  // the node focus returns to when the menu closes
 
     function rerunSupported(source) {
       var s = SOURCES[source];
@@ -550,38 +558,19 @@ export function sumArticleLibraryScript(): string {
       el.hidden = false;
     }
 
-    function rerunMenuEl() { return document.getElementById('${DOC_PANEL_RERUN_MENU_ID}'); }
-    function rerunBtnEl() { return document.getElementById('${DOC_PANEL_RERUN_BTN_ID}'); }
-    function rerunMenuOpen() { var p = rerunMenuEl(); return !!p && !p.hidden; }
-    function closeRerunMenu() {
-      var pop = rerunMenuEl();
-      if (pop) pop.hidden = true;
-      var btn = rerunBtnEl();
-      if (btn) btn.setAttribute('aria-expanded', 'false');
-      // Focus goes back where it came from. Without this, dismissing the menu
-      // drops the caret on <body> behind a still-open scrim, which for a
-      // keyboard reader is the end of the road.
-      if (_rerunOpener && typeof _rerunOpener.focus === 'function') _rerunOpener.focus();
-      _rerunOpener = null;
-    }
-
-    /** Every enabled item, in DOM order — what the arrow keys walk. */
-    function rerunMenuItems() {
-      var pop = rerunMenuEl();
-      if (!pop) return [];
-      return Array.prototype.filter.call(
-        pop.querySelectorAll('.doc-panel-menu-item'),
-        function(b) { return !b.disabled; }
-      );
-    }
-
-    function focusRerunItem(delta) {
-      var items = rerunMenuItems();
-      if (items.length === 0) return;
-      var at = items.indexOf(document.activeElement);
-      var next = at === -1 ? 0 : (at + delta + items.length) % items.length;
-      items[next].focus();
-    }
+    // Click, click-away, keys and placement: docPanelMenu (doc-panel-menu.ts).
+    var _rerunMenu = docPanelMenu({
+      btnId: '${DOC_PANEL_RERUN_BTN_ID}',
+      popId: '${DOC_PANEL_RERUN_MENU_ID}',
+      onOpen: function() { openRerunMenu(); },
+    });
+    function rerunMenuEl() { return _rerunMenu.pop(); }
+    function rerunMenuOpen() { return _rerunMenu.isOpen(); }
+    /** restoreFocus puts the caret back on ↻ Re-run (an item used); without
+     *  it, dismissing drops the caret on <body> behind a still-open scrim.
+     *  False when the panel is closed or retargeted under the menu. */
+    function closeRerunMenu(restoreFocus) { _rerunMenu.close(!!restoreFocus); }
+    function focusRerunItem(delta) { _rerunMenu.focusItem(delta); }
 
     /** Called from openSummaryDoc: the panel is being retargeted, so the cached
      *  options, the menu and the status line belong to a document that is no
@@ -592,7 +581,7 @@ export function sumArticleLibraryScript(): string {
       _rerunOpts = null;
       _rerunFor = null;
       _rerunBusy = false;
-      closeRerunMenu();
+      closeRerunMenu(false);
       setRerunStatus('');
       var wrap = document.getElementById('${DOC_PANEL_RERUN_WRAP_ID}');
       if (wrap) wrap.hidden = !(_shareDoc && rerunSupported(source));
@@ -719,15 +708,19 @@ export function sumArticleLibraryScript(): string {
       }
     }
 
+    /** docPanelMenu's onOpen: the popup is showing and placed (its width is
+     *  its min-width whatever it holds, so filling it does not move it); fill
+     *  it from the options route, cached per document, and focus its first
+     *  item. */
     async function openRerunMenu() {
       var pop = rerunMenuEl();
-      var btn = rerunBtnEl();
-      if (!pop || !_shareDoc) return;
-      _rerunOpener = document.activeElement === btn ? btn : null;
-      pop.hidden = false;
-      if (btn) btn.setAttribute('aria-expanded', 'true');
+      if (!pop || !_shareDoc) { closeRerunMenu(false); return; }
       var key = rerunDocKey(_shareDoc);
-      if (_rerunOpts && _rerunFor === key) { renderRerunMenu(_rerunOpts); focusRerunItem(0); return; }
+      if (_rerunOpts && _rerunFor === key) {
+        renderRerunMenu(_rerunOpts);
+        focusRerunItem(0);
+        return;
+      }
       pop.textContent = '';
       pop.appendChild(rerunMenuNote('Loading…'));
       var doc = _shareDoc;
@@ -762,7 +755,7 @@ export function sumArticleLibraryScript(): string {
       // re-indexed document from huginn still serving the old one.
       var before = doc.text || '';
       _rerunBusy = true;
-      closeRerunMenu();
+      closeRerunMenu(true);
       setRerunStatus('Re-running…');
       fetch('/api/summaries/rerun', {
         method: 'POST',
@@ -880,7 +873,7 @@ export function sumArticleLibraryScript(): string {
       var key = rerunDocKey(doc);
       var promptUrl = _rerunOpts && _rerunOpts.promptUrl;
       if (!promptUrl) return;
-      closeRerunMenu();
+      closeRerunMenu(true);
       setRerunStatus('Loading the prompt…');
       fetch('/api/summaries/prompt?url=' + encodeURIComponent(promptUrl))
         .then(async function(res) {
@@ -917,34 +910,6 @@ export function sumArticleLibraryScript(): string {
           setRerunStatus('Could not load the prompt: ' + err.message, 'err');
         });
     }
-
-    (function() {
-      var btn = document.getElementById('${DOC_PANEL_RERUN_BTN_ID}');
-      if (!btn) return;
-      btn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        if (rerunMenuOpen()) closeRerunMenu(); else openRerunMenu();
-      });
-      // Click-away, on the DOCUMENT: the menu floats above the panel header and
-      // a click anywhere else — inside the panel, on the overlay's own scrim —
-      // should dismiss it. The overlay swallows clicks on the page behind it, so
-      // in practice this listener sees the panel and the scrim.
-      document.addEventListener('click', function(e) {
-        if (!rerunMenuOpen()) return;
-        var pop = rerunMenuEl();
-        if (pop && !pop.contains(e.target) && e.target !== btn) closeRerunMenu();
-      });
-      // Arrow keys walk the enabled items; the menu's own Escape is handled by
-      // the panel's document-level keydown listener above, which closes the menu
-      // before it closes the panel.
-      var pop = rerunMenuEl();
-      if (pop) {
-        pop.addEventListener('keydown', function(e) {
-          if (e.key === 'ArrowDown') { e.preventDefault(); focusRerunItem(1); }
-          else if (e.key === 'ArrowUp') { e.preventDefault(); focusRerunItem(-1); }
-        });
-      }
-    })();
 
     // tone: 'ok' | 'warn' | 'err'. A 'warn' notice carries a link to the review
     // gate, where drafts a degraded delete left behind can be rejected.
@@ -1204,7 +1169,9 @@ export function sumArticleLibraryScript(): string {
      * a fence, as the loop this replaces accepted. Fenced code keeps its text:
      * a timestamp there is source, a \`## Transcript\` there is content.
      * Inline backtick code and 4-space indented code are not skipped (accepted,
-     * rare). Two copies of this loop drifted once; there is one now.
+     * rare). Two copies of this loop drifted once; there is one now. The
+     * reader's injected functions (sum-reader.ts) call this one too, so it is
+     * the page's only declaration.
      */
     function mapProseLines(markdown, fn) {
       var fence = null;
@@ -1300,6 +1267,8 @@ export function sumArticleLibraryScript(): string {
       });
     }
 
+    var _similarTimer = 0;
+
     async function openSummaryDoc(docId, url, source) {
       // Take a new request id at the top so any earlier in-flight fetch (slow
       // article A while user clicks B) is invalidated — its post-await
@@ -1339,12 +1308,19 @@ export function sumArticleLibraryScript(): string {
           ? '/api/summaries/export?source=' + encodeURIComponent(source) + '&docId=' + encodeURIComponent(docId)
           : '#';
       }
+      // Copy link names the same registered document; with it hidden, ⋯ More
+      // has nothing left to offer and goes too.
+      var copyLinkEl = document.getElementById('${DOC_PANEL_COPY_LINK_ID}');
+      if (copyLinkEl) copyLinkEl.hidden = !_shareDoc;
+      var moreWrapEl = document.getElementById('${DOC_PANEL_MORE_WRAP_ID}');
+      if (moreWrapEl) moreWrapEl.hidden = !_shareDoc;
       if (typeof closeShareDialogOnNavigate === 'function') closeShareDialogOnNavigate(docId);
       // The ↻ Re-run control belongs to the doc the panel is SHOWING: its
       // options describe that file, and a stream still running belongs to the
       // job that was started from it. Reset unconditionally, then reveal the
       // control only for a registered source the re-run route can serve.
       resetRerunControl(source);
+      closeDocPanelMenus(false);
 
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');
@@ -1353,14 +1329,22 @@ export function sumArticleLibraryScript(): string {
       var title = docTitle(docId);
       var cat = docCategory(docId);
       var src = SOURCES[source];
-      var linkLabel = src ? src.linkLabel : 'Open ↗';
+      // readerSourceLinkLabel (reader-article.ts): null while a source that
+      // labels per document (docLinkLabels) has not been read, so the header
+      // shows no label it would change a moment later.
+      var labelFor = function(hasTranscript) {
+        return typeof readerSourceLinkLabel === 'function'
+          ? readerSourceLinkLabel(src, hasTranscript)
+          : (src ? src.linkLabel : 'Open ↗');
+      };
+      var linkLabel = labelFor(null);
 
       titleEl.textContent = title;
       // Opt-in "Ask a follow-up" header action (Summaries shelf only — see
       // docPanelHtml({askFollowUp:true})). No-op if the button isn't rendered.
       var followEl = document.getElementById('docPanelFollowUp');
       if (followEl) followEl.href = '/research?q=' + encodeURIComponent(title);
-      linksEl.innerHTML = url
+      linksEl.innerHTML = url && linkLabel
         ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>'
         : '';
 
@@ -1373,8 +1357,14 @@ export function sumArticleLibraryScript(): string {
             ? railScaffoldHtml()
             : '<div class="sum-col-left" id="sumCatPanel"></div>') +
           '<div class="sum-col-main" id="sumArticleMain"></div>' +
-          '<div class="sum-col-right doc-similar" id="docSimilarPanel"></div>';
+          // The outline (sum-reader.ts) sits above Similar in one column.
+          '<div class="sum-col-right" id="sumRightRail">' +
+            '<nav class="sum-outline" id="sumOutline" aria-label="On this page" hidden></nav>' +
+            '<div class="doc-similar" id="docSimilarPanel"></div>' +
+          '</div>';
       }
+      var outlineEl = document.getElementById('sumOutline');
+      if (outlineEl) { outlineEl.hidden = true; outlineEl.innerHTML = ''; }
       document.getElementById('sumArticleMain').innerHTML =
         '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading...</div>';
       document.getElementById('docSimilarPanel').innerHTML =
@@ -1422,20 +1412,40 @@ export function sumArticleLibraryScript(): string {
         // parameter before the fetch, the ?doc= path had no link at all —
         // for every vertical, since they all hand out that shape on a
         // duplicate paste.
-        if (videoUrl && !url) {
-          linksEl.innerHTML = '<a href="' + esc(videoUrl) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>';
+        // A per-document label (x-article: a transcript means an X video)
+        // is known now.
+        linkLabel = labelFor(splitTranscript(cleaned).transcript !== null);
+        if (videoUrl && linkLabel && (!url || (src && src.docLinkLabels))) {
+          linksEl.innerHTML = '<a href="' + esc(url || videoUrl) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>';
         }
-        if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, videoUrl);
         var mainEl = document.getElementById('sumArticleMain');
         if (mainEl) {
-          mainEl.innerHTML = renderArticleHtml(cleaned);
-          if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
+          if (typeof readerArticleHtml === 'function') {
+            var ctx = { docId: docId, source: source, videoUrl: videoUrl, meta: doc.metadata || {}, requestId: myRequest };
+            mainEl.innerHTML = readerArticleHtml(cleaned, ctx);
+            if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
+            readerAfterRender(mainEl, cleaned, ctx);
+          } else {
+            if (source === 'vimeo') cleaned = linkVimeoTimestamps(cleaned, videoUrl);
+            mainEl.innerHTML = renderArticleHtml(cleaned);
+            if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
+          }
         }
 
-        // Right panel: other articles matching in relevance (within this source)
-        loadDocSimilar(title, docId, myRequest, source);
+        // Right panel: other articles matching in relevance (within this
+        // source). Debounced, so j/k stepping through the rail does not queue
+        // a search per row passed: only the open that is still current after
+        // the wait searches.
+        clearTimeout(_similarTimer);
+        _similarTimer = setTimeout(function() {
+          if (myRequest === _docRequestId) loadDocSimilar(title, docId, myRequest, source);
+        }, ${SIMILAR_DEBOUNCE_MS});
       } catch (err) {
         if (myRequest !== _docRequestId) return;  // superseded
+        // Unread, a per-document source falls back to its registry label.
+        if (url && src && !linksEl.querySelector('a')) {
+          linksEl.innerHTML = '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(src.linkLabel) + '</a>';
+        }
         var failEl = document.getElementById('sumArticleMain');
         if (failEl) failEl.innerHTML = '<div style="color:var(--status-error);padding:40px;text-align:center">Failed to load: ' + esc(err.message) + '</div>';
       }
@@ -1554,20 +1564,28 @@ export function sumArticleLibraryScript(): string {
           panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">No similar articles found</div>';
           return;
         }
-        panel.innerHTML = '<h4>Similar Articles</h4>' + results.map(function(r) {
-          var pct = Math.round((r.relevance || 0) * 100);
-          var rTitle = (r.title || r.id || '').replace(/\\.md$/, '');
-          var rUrl = r.url || '#';
-          return '<div class="doc-similar-item" data-doc-id="' + esc(r.id) + '" data-doc-url="' + esc(rUrl) + '">' +
-            '<a href="#">' + esc(rTitle) + '</a>' +
-            '<span class="doc-similar-relevance">' + pct + '%</span>' +
-          '</div>';
-        }).join('');
+        panel.innerHTML = '<h4>Similar Articles</h4>' + (typeof readerSimilarHtml === 'function'
+          ? readerSimilarHtml(results, source)
+          : results.map(function(r) {
+            var pct = Math.round((r.relevance || 0) * 100);
+            var rTitle = (r.title || r.id || '').replace(/\\.md$/, '');
+            var rUrl = r.url || '#';
+            return '<div class="doc-similar-item" data-doc-id="' + esc(r.id) + '" data-doc-url="' + esc(rUrl) + '">' +
+              '<a href="#">' + esc(rTitle) + '</a>' +
+              '<span class="doc-similar-relevance">' + pct + '%</span>' +
+            '</div>';
+          }).join(''));
         // Wire up click handlers for similar items. With the 3-col layout the
         // panel re-renders in place, so we call openSummaryDoc directly. Similar
         // results live in the opened doc's source collection, so reuse source.
+        // A reader card (sum-reader.ts) is itself the link; a plain row holds one.
         panel.querySelectorAll('.doc-similar-item').forEach(function(item) {
-          item.querySelector('a').addEventListener('click', function(e) {
+          var link = item.tagName === 'A' ? item : item.querySelector('a');
+          if (!link) return;
+          link.addEventListener('click', function(e) {
+            // The card's href is the /summaries deep link: a modified click
+            // opens it in a new tab as the browser does.
+            if (link === item && (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0)) return;
             e.preventDefault();
             openSummaryDoc(item.getAttribute('data-doc-id'), item.getAttribute('data-doc-url'), source);
           });

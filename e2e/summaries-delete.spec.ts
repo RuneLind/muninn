@@ -220,6 +220,8 @@ test.describe("Summaries: doc-panel delete", () => {
     await expect(railToday.locator(".sum-latest-row")).toHaveCount(2);
     await expect(railToday.locator(".sum-latest-day-count")).toHaveText("2");
 
+    // Delete lives in the header's ⋯ More menu.
+    await page.locator("#docPanelMore").click();
     const btn = page.locator("#docPanelDelete");
     await expect(btn).toBeVisible();
     await btn.click();
@@ -270,6 +272,7 @@ test.describe("Summaries: doc-panel delete", () => {
     try {
       await page.goto(`${BASE}/summaries?source=${SOURCE}&doc=${encodeURIComponent(DOC_ID)}`);
       await expect(page.locator("#docPanelTitle")).toHaveText(DOC_TITLE);
+      await page.locator("#docPanelMore").click();
       await page.locator("#docPanelDelete").click();
       const notice = page.locator("#deleteNotice");
       await expect(notice).toContainText(`Deleted "${DOC_TITLE}"`);
@@ -300,6 +303,7 @@ test.describe("Summaries: doc-panel delete", () => {
     await page.goto(`${BASE}/summaries?source=${SOURCE}&doc=${encodeURIComponent(DOC_ID)}`);
     await expect(page.locator("#docPanelTitle")).toHaveText(DOC_TITLE);
     failListing = true;
+    await page.locator("#docPanelMore").click();
     await page.locator("#docPanelDelete").click();
     const notice = page.locator("#deleteNotice");
     // The delete itself succeeded; the refetch could not — both facts in one line,

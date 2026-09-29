@@ -1,12 +1,16 @@
 /// <reference lib="dom" />
 /**
- * The clipboard primitive two of the dashboard's copy controls share, the path
- * they copy, and the way they report the result.
+ * The clipboard primitive three of the dashboard's copy controls share, the
+ * wiki page path the ⧉ Copy path pair copies, and the way they report the
+ * result.
  *
  * **Scope, stated exactly, because the first version of this comment was wrong
- * twice.** Six places on the dashboard write the clipboard; this module unified
- * TWO — the fenced-code copy button (`code-block-chrome.ts`) and the ⧉ Copy path
- * pair (`plan-board.ts`, `wiki-browser.ts`). The other four keep their own write:
+ * twice.** Seven places on the dashboard write the clipboard; this module
+ * unified THREE — the fenced-code copy button (`code-block-chrome.ts`), the ⧉
+ * Copy path pair (`plan-board.ts`, `wiki-browser.ts`) and the /summaries doc
+ * panel's ⋯ More → Copy link (`sum-reader.ts`, which injects `copyText` with
+ * `.toString()`, so this function must stay free of imports). The other four
+ * keep their own write:
  * `share-dialog.ts` and `chat/views/components/jira-card.ts` report a failure in
  * their own UI, `jira-archive-browser.ts` falls back to selecting the raw pane,
  * and `sum-outcomes.ts` alone swallows it (`.catch(function(){})`, no else

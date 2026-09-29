@@ -44,6 +44,9 @@ import {
 // re-run became their third server-side reader. Imported, never re-exported:
 // one declaration site, and every reader addresses it there.
 import { mapProseLines, splitTranscript } from "./transcript-split.ts";
+// The YouTube twin of the Vimeo transform: ONE declaration, which the article
+// view receives by injection, so there is no client copy to pin against.
+import { linkYouTubeTimestamps } from "./reader-article.ts";
 
 /** The folder the page's `<img>`s point into, beside `index.html` in the archive. */
 export const EXPORT_FRAMES_DIR = "frames";
@@ -243,7 +246,7 @@ export interface ExportPageInput {
   metadata?: Record<string, unknown>;
   /** The markdown AFTER the strips and the frame rewrite. */
   markdown: string;
-  /** Vimeo captures get their timestamps linked; others do not. */
+  /** Vimeo and YouTube captures get their timestamps linked; others do not. */
   sourceId: string;
 }
 
@@ -268,7 +271,12 @@ export function exportBaseName(title: string): string {
 /** One self-contained HTML document: theme tokens, the article styles, the
  *  summary, and the transcript (when there is one) in a closed `<details>`. */
 export function renderExportPage(input: ExportPageInput): string {
-  const md = input.sourceId === "vimeo" ? linkVimeoTimestamps(input.markdown, input.url) : input.markdown;
+  const md =
+    input.sourceId === "vimeo"
+      ? linkVimeoTimestamps(input.markdown, input.url)
+      : input.sourceId === "youtube"
+        ? linkYouTubeTimestamps(input.markdown, input.url)
+        : input.markdown;
   const parts = splitTranscript(md);
   const meta = input.metadata;
   const facts: string[] = [];

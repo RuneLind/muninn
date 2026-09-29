@@ -6,6 +6,10 @@ import {
   DOC_PANEL_DELETE_BTN_ID,
   DOC_PANEL_RERUN_BTN_ID,
   DOC_PANEL_RERUN_MENU_ID,
+  DOC_PANEL_MORE_BTN_ID,
+  DOC_PANEL_MORE_MENU_ID,
+  DOC_PANEL_COPY_LINK_ID,
+  DOC_PANEL_EXPORT_LINK_ID,
 } from "./doc-panel.ts";
 import { MARKED_CDN_SCRIPT } from "./doc-panel.ts";
 
@@ -71,6 +75,70 @@ describe("docPanelHtml askFollowUp", () => {
     expect(script).toContain("setFollowUpHref");
     expect(script).toContain("/research?q=");
   });
+});
+
+describe("docPanelHtml moreMenu", () => {
+  const menuOf = (html: string) => {
+    const start = html.indexOf(`id="${DOC_PANEL_MORE_MENU_ID}"`);
+    return html.slice(start, html.indexOf("</div>", start));
+  };
+
+  test("Export, Copy link and Delete sit inside a role=menu popup opened by ⋯ More", () => {
+    const html = docPanelHtml({ askFollowUp: true, remove: true, exportPage: true, moreMenu: true });
+    expect(html).toContain(`id="${DOC_PANEL_MORE_BTN_ID}"`);
+    expect(html).toContain('aria-haspopup="menu"');
+    expect(html).toContain(`aria-controls="${DOC_PANEL_MORE_MENU_ID}"`);
+    const menu = menuOf(html);
+    expect(menu).toContain('role="menu"');
+    expect(menu).toContain(`id="${DOC_PANEL_EXPORT_LINK_ID}"`);
+    expect(menu).toContain(`id="${DOC_PANEL_COPY_LINK_ID}"`);
+    expect(menu).toContain(`id="${DOC_PANEL_DELETE_BTN_ID}"`);
+    expect((menu.match(/role="menuitem"/g) ?? []).length).toBe(3);
+  });
+
+  test("no delete target: no Delete item; no exportPage: no Export item", () => {
+    const menu = menuOf(docPanelHtml({ moreMenu: true }));
+    expect(menu).not.toContain(DOC_PANEL_DELETE_BTN_ID);
+    expect(menu).not.toContain(DOC_PANEL_EXPORT_LINK_ID);
+    expect(menu).toContain(DOC_PANEL_COPY_LINK_ID);
+  });
+
+  test("the source link moves next to the title and Ask a follow-up is the primary action, last", () => {
+    const html = docPanelHtml({ askFollowUp: true, share: true, rerun: true, moreMenu: true });
+    const at = (needle: string) => html.indexOf(needle);
+    expect(at('id="docPanelTitle"')).toBeLessThan(at('id="docPanelLinks"'));
+    expect(at('id="docPanelLinks"')).toBeLessThan(at(`id="${DOC_PANEL_RERUN_BTN_ID}"`));
+    expect(at(`id="${DOC_PANEL_SHARE_BTN_ID}"`)).toBeLessThan(at(`id="${DOC_PANEL_MORE_BTN_ID}"`));
+    expect(at(`id="${DOC_PANEL_MORE_BTN_ID}"`)).toBeLessThan(at('id="docPanelFollowUp"'));
+    expect(html).toContain('class="doc-panel-followup doc-panel-primary" id="docPanelFollowUp"');
+  });
+
+  test("off, it changes nothing: the /summaries flag set renders as it did before", () => {
+    const flags = { askFollowUp: true, share: true, remove: true, exportPage: true, rerun: true };
+    expect(docPanelHtml(flags)).toBe(docPanelHtml({ ...flags, moreMenu: false }));
+    expect(docPanelHtml(flags)).not.toContain(DOC_PANEL_MORE_BTN_ID);
+  });
+});
+
+/**
+ * The flagless header, pinned byte for byte. /search, /research and chat call
+ * `docPanelHtml()` with no arguments; every /summaries control is an opt-in
+ * flag, and this string is what keeps a new flag from leaking into the others.
+ */
+const FLAGLESS_DOC_PANEL_HTML = `
+  <div class="doc-overlay" id="docOverlay" onclick="if(event.target===this)closeDocPanel()">
+    <div class="doc-panel">
+      <div class="doc-panel-header">
+        <button class="doc-panel-close" onclick="closeDocPanel()">&larr; Back</button>
+        <span class="doc-panel-title" id="docPanelTitle"></span>
+        <div class="doc-panel-links" id="docPanelLinks"></div>
+      </div>
+      <div class="doc-panel-body" id="docPanelBody"></div>
+    </div>
+  </div>`;
+
+test("the flagless docPanelHtml() is byte-identical to the pinned golden string", () => {
+  expect(docPanelHtml()).toBe(FLAGLESS_DOC_PANEL_HTML);
 });
 
 /**
