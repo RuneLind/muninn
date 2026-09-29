@@ -18,6 +18,11 @@ import {
   readerTranscriptLength,
   readerWordCount,
   readerYouTubeId,
+  readerDocKey,
+  readerSameStory,
+  readerWikiContext,
+  SAME_STORY_MAX,
+  SAME_STORY_MIN_RELEVANCE,
 } from "./reader-article.ts";
 import { splitTranscript } from "./transcript-split.ts";
 
@@ -301,5 +306,58 @@ describe("fix round 1", () => {
 
   test("thumbnails are https only", () => {
     expect(readerThumbnail("vimeo", "https://vimeo.com/1", "http://i.vimeocdn.com/x.jpg")).toBeNull();
+  });
+});
+
+describe("Same story this week", () => {
+  const TODAY = "2026-09-29";
+  const open = { source: "youtube", docId: "ai/Open.md" };
+  const hit = (source: string, id: string, relevance: number, date?: string, extra: Record<string, unknown> = {}) =>
+    ({ source, id, relevance, ...(date ? { metadata: { date } } : {}), ...extra });
+
+  test("keeps recent hits at or above the threshold, minus the open doc and Similar's", () => {
+    const hits = [
+      hit("youtube", "ai/Open.md", 1, TODAY),
+      hit("youtube", "ai/InSimilar.md", 0.67, TODAY),
+      hit("anthropic", "ai/InSimilar.md", 0.6, "2026-09-23"), // same id, another source: kept
+      hit("youtube", "ai/Week.md", SAME_STORY_MIN_RELEVANCE, "2026-09-22"), // exactly 7 days, at the threshold
+      hit("youtube", "ai/Old.md", 0.6, "2026-09-21"), // 8 days
+      hit("youtube", "ai/Weak.md", SAME_STORY_MIN_RELEVANCE - 0.001, TODAY),
+      hit("youtube", "ai/Future.md", 0.6, "2026-09-30"),
+      hit("youtube", "ai/Undated.md", 0.6),
+      hit("x-article", "ai/ByMtime.md", 0.5, undefined, { modifiedTime: "2026-09-28T10:00:00.000" }),
+    ];
+    const kept = readerSameStory(hits, open, [readerDocKey("youtube", "ai/InSimilar.md")], TODAY).map((h) => readerDocKey(h.source, h.id));
+    expect(kept).toEqual(["anthropic|ai/InSimilar.md", "youtube|ai/Week.md", "x-article|ai/ByMtime.md"]);
+  });
+
+  test("at most SAME_STORY_MAX, in the search's order, each doc once; junk input is empty", () => {
+    const hits = Array.from({ length: 9 }, (_, i) => hit("youtube", `ai/${i}.md`, 0.6, TODAY));
+    hits.splice(1, 0, hit("youtube", "ai/0.md", 0.6, TODAY));
+    const kept = readerSameStory(hits, open, [], TODAY).map((h) => h.id);
+    expect(kept).toEqual(["ai/0.md", "ai/1.md", "ai/2.md", "ai/3.md", "ai/4.md"].slice(0, SAME_STORY_MAX));
+    expect(readerSameStory(null, open, [], TODAY)).toEqual([]);
+    expect(readerSameStory([null, { id: "x" }, hit("youtube", "a", Number.NaN, TODAY)], open, [], TODAY)).toEqual([]);
+  });
+});
+
+describe("In your wiki", () => {
+  test("applied opens the page, draft and approved open the gate; other statuses and bad rows are dropped", () => {
+    const items = readerWikiContext([
+      { id: "1", bot: "jarvis", status: "applied", targetPath: "sources/A b.mdx" },
+      { id: "2", bot: "capra", status: "draft", targetPath: "sources/c.mdx" },
+      { id: "3", bot: "jarvis", status: "approved", targetPath: "sources/d.mdx" },
+      { id: "4", bot: "jarvis", status: "rejected", targetPath: "sources/e.mdx" },
+      { id: "5", bot: "jarvis", status: "stale", targetPath: "sources/f.mdx" },
+      { id: "6", status: "draft", targetPath: "sources/g.mdx" },
+      null,
+    ]);
+    expect(items.map((i) => [i.bot, i.status, i.href])).toEqual([
+      ["jarvis", "applied", "/wiki?wiki=jarvis&path=sources%2FA%20b.mdx"],
+      ["capra", "draft", "/wiki/gardener?wiki=capra"],
+      ["jarvis", "approved", "/wiki/gardener?wiki=jarvis"],
+    ]);
+    expect(items[0]!.label).toBe("In the wiki");
+    expect(readerWikiContext(undefined)).toEqual([]);
   });
 });

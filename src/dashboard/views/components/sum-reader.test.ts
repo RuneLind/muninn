@@ -62,5 +62,11 @@ describe("sum-reader: the injected functions", () => {
     expect(api.readerAge("2024-09-29", "2026-09-29")).toBe(reader.readerAge("2024-09-29", "2026-09-29"));
     expect(api.readerAge("2026-02-30", "2026-09-29")).toBeNull();
     expect(api.readerYouTubeId("https://youtu.be/rmr-LdARqHE")).toBe("rmr-LdARqHE");
+    const hits = [{ source: "anthropic", id: "a.md", relevance: 0.5, metadata: { date: "2026-09-27" } }, { source: "youtube", id: "b.md", relevance: 0.2, metadata: { date: "2026-09-27" } }];
+    const open = { source: "youtube", docId: "o.md" };
+    expect(api.readerSameStory(hits, open, [], "2026-09-29")).toEqual(reader.readerSameStory(hits, open, [], "2026-09-29"));
+    expect(api.readerSameStory(hits, open, [], "2026-09-29")).toHaveLength(1);
+    const rows = [{ bot: "jarvis", status: "applied", targetPath: "sources/x.mdx" }];
+    expect(api.readerWikiContext(rows)).toEqual(reader.readerWikiContext(rows));
   });
 });

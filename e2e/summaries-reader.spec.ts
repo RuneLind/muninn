@@ -14,10 +14,16 @@
  * Dates are relative to the real UTC today, and the browser runs in UTC, so
  * "Today" in a heading and the watermark's UTC day are the same day here.
  *
- * NO MODEL CALLS, NO DATABASE WRITES. Ports come from `e2e/ports.ts`.
+ * PR 2 adds Same story this week (the fake answers `/api/collections` and a
+ * multi-collection `/api/search`) and In your wiki, which reads wiki_proposals:
+ * this file's only database writes are its own proposal rows (`E2E_BOT`),
+ * inserted and removed around the one test that needs them.
+ *
+ * NO MODEL CALLS. Ports come from `e2e/ports.ts`.
  */
 
 import { test, expect, type Page } from "@playwright/test";
+import postgres from "postgres";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -80,6 +86,16 @@ function putBody(source: string, id: string, text: string, metadata: Record<stri
 /** What the fake /api/search answers (the Similar panel's query). */
 let searchResults: unknown[] = [];
 
+/** What the fake /api/search answers for a MULTI-collection search (the
+ *  same-story route's), and the queries it was asked. */
+let sameStoryResults: unknown[] = [];
+let sameStoryQueries: string[] = [];
+
+/** The collections the fake /api/collections serves: every summary source's
+ *  but article-summaries, so the same-story route has one to leave out. A
+ *  search listing an unserved collection answers 404, as huginn does. */
+const SERVED = ["youtube-summaries", "x-articles", "anthropic-summaries", "tiktok-summaries", "vimeo-summaries", "wiki"];
+
 function drop(source: string, id: string): void {
   listing[COLLECTIONS[source]!]?.delete(id);
 }
@@ -103,6 +119,8 @@ function seed(): void {
   failing = new Set();
   bodies = {};
   searchResults = [];
+  sameStoryResults = [];
+  sameStoryQueries = [];
   // Today: A1 has the latest modifiedTime, so it leads its day.
   put("youtube", A1, TODAY, "12:00:00");
   put("youtube", A2, TODAY, "11:00:00");
@@ -144,7 +162,17 @@ test.beforeAll(async () => {
       }
       return json({ id, text: body, ...(listed ? { url: listed.url } : {}), ...(stored ? { metadata: stored.metadata } : {}) });
     }
-    if (p === "/api/search") return json({ results: searchResults });
+    if (p === "/api/collections") return json({ collections: SERVED.map((name) => ({ name })) });
+    if (p === "/api/search") {
+      const asked = url.searchParams.getAll("collection");
+      const absent = asked.find((c) => !SERVED.includes(c));
+      if (absent) return json({ detail: `Collection '${absent}' not found` }, 404);
+      if (asked.length > 1) {
+        sameStoryQueries.push(url.searchParams.get("q") ?? "");
+        return json({ results: sameStoryResults });
+      }
+      return json({ results: searchResults });
+    }
     return json({});
   });
   await new Promise<void>((resolve) => huginn!.listen(HUGINN_PORT, "127.0.0.1", resolve));
@@ -1462,4 +1490,128 @@ test("Copy link: a failed copy says so, and asks nothing", async ({ page }) => {
   await expect(copy).toHaveText("✕ Copy failed");
   expect(await page.evaluate(() => (window as unknown as { __prompts: number }).__prompts)).toBe(0);
   await expect(page.locator("#docPanelMoreMenu")).toBeVisible();
+});
+
+// --- PR 2: Same story this week, In your wiki --------------------------------
+
+/** The bot names this file's proposal rows are filed under: no real bot has
+ *  them, so the cleanup cannot touch a developer's rows. */
+const E2E_BOTS = ["e2e-reader-wiki", "e2e-reader-wiki-2"];
+
+async function withProposals(rows: Array<{ bot: string; topic: string; status: string; docId: string }>, fn: () => Promise<void>): Promise<void> {
+  const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
+  const clean = () => sql`DELETE FROM wiki_proposals WHERE bot_name IN ${sql(E2E_BOTS)}`;
+  try {
+    await clean();
+    for (const r of rows) {
+      const docs = [{ collection: "youtube-summaries", docId: r.docId, title: title(r.docId), url: YT_URL }];
+      await sql`INSERT INTO wiki_proposals (bot_name, topic_key, kind, mode, target_path, draft, source_docs, status)
+                VALUES (${r.bot}, ${r.topic}, 'source', 'create', ${"sources/" + r.topic + ".mdx"}, '# x', ${sql.json(docs as never)}, ${r.status})`;
+    }
+    await fn();
+  } finally {
+    await clean();
+    await sql.end();
+  }
+}
+
+test("Same story this week and In your wiki: filtered, deduped, linked, in rail order, at AA and 390px", async ({ page }) => {
+  seedReaderDocs();
+  const DUP = "ai/general/Also in Similar.md";
+  const CROSS = "ai/claude/Claude Opus 5.5.md";
+  const X_POST = "ai/general/X post.md";
+  searchResults = [{ id: DUP, title: `${title(DUP)}.md`, relevance: 0.6, metadata: { date: TODAY } }];
+  sameStoryResults = [
+    { collection: "youtube-summaries", source: "youtube", id: NEW_DOC, title: `${title(NEW_DOC)}.md`, relevance: 0.75, metadata: { date: TODAY } },
+    { collection: "youtube-summaries", source: "youtube", id: DUP, title: `${title(DUP)}.md`, relevance: 0.67, metadata: { date: TODAY } },
+    { collection: "anthropic-summaries", source: "anthropic", id: CROSS, title: `${title(CROSS)}.md`, relevance: 0.605, metadata: { date: YESTERDAY }, matchedChunks: [{ heading: "Key takeaways" }] },
+    { collection: "youtube-summaries", source: "youtube", id: "ai/general/Weak.md", title: "Weak.md", relevance: 0.3, metadata: { date: TODAY } },
+    { collection: "youtube-summaries", source: "youtube", id: "ai/general/Last month.md", title: "Last month.md", relevance: 0.55, metadata: { date: railAddDays(TODAY, -10) } },
+    { collection: "x-articles", source: "x-article", id: X_POST, title: `${title(X_POST)}.md`, relevance: 0.5, modifiedTime: `${TODAY}T08:00:00.000000` },
+  ];
+  // The fake's served set has no article-summaries: the route must leave it
+  // out, or the whole search 404s and the section never renders.
+  await withProposals([
+    { bot: E2E_BOTS[0]!, topic: "e2e-reader-applied", status: "applied", docId: NEW_DOC },
+    { bot: E2E_BOTS[1]!, topic: "e2e-reader-draft", status: "draft", docId: NEW_DOC },
+    { bot: E2E_BOTS[0]!, topic: "e2e-reader-rejected", status: "rejected", docId: NEW_DOC },
+    { bot: E2E_BOTS[0]!, topic: "e2e-reader-other", status: "draft", docId: OLD_DOC },
+  ], async () => {
+    await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+    const same = page.locator("#sumSameStory");
+    await expect(same).toBeVisible();
+    await expect(same.locator("h4")).toHaveText("Same story this week");
+    await expect(same.locator(".sum-sim-card")).toHaveCount(2);
+    await expect(same.locator(".sum-sim-card").nth(0)).toHaveAttribute("data-doc-id", CROSS);
+    await expect(same.locator(".sum-sim-card").nth(1)).toHaveAttribute("data-doc-id", X_POST);
+    const cross = same.locator(`.sum-sim-card[data-doc-id="${CROSS}"]`);
+    await expect(cross).toHaveAttribute("data-source", "anthropic");
+    await expect(cross).toHaveAttribute("href", `/summaries?doc=${encodeURIComponent(CROSS)}&source=anthropic`);
+    await expect(cross.locator(".sum-sim-src")).toHaveText("Claude");
+    await expect(page.locator(`#docSimilarPanel .sum-sim-card[data-doc-id="${DUP}"]`)).toHaveCount(1);
+    expect(sameStoryQueries).toEqual([title(NEW_DOC)]);
+
+    const wiki = page.locator("#sumInWiki");
+    await expect(wiki).toBeVisible();
+    await expect(wiki.locator("h4")).toHaveText("In your wiki");
+    const links = wiki.locator("a.sum-wiki-link");
+    await expect(links).toHaveCount(2);
+    await expect(wiki.locator('a[data-status="applied"]')).toHaveAttribute("href", `/wiki?wiki=${E2E_BOTS[0]}&path=${encodeURIComponent("sources/e2e-reader-applied.mdx")}`);
+    await expect(wiki.locator('a[data-status="draft"]')).toHaveAttribute("href", `/wiki/gardener?wiki=${E2E_BOTS[1]}`);
+    await expect(wiki.locator('a[data-status="draft"] .sum-wiki-meta')).toHaveText(`Draft to review · ${E2E_BOTS[1]}`);
+
+    // Rail order: On this page, Similar, Same story, In your wiki.
+    const order = await page.locator("#sumRightRail > *").evaluateAll((els) => els.map((e) => e.id));
+    expect(order).toEqual(["sumOutline", "docSimilarPanel", "sumSameStory", "sumInWiki"]);
+
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.mouse.move(0, 0);
+      const checks = {
+        "same story title": same.locator("h4"),
+        "same story source badge": cross.locator(".sum-sim-src"),
+        "wiki page": wiki.locator(".sum-wiki-page").first(),
+        "wiki meta": wiki.locator(".sum-wiki-meta").first(),
+      };
+      for (const [name, loc] of Object.entries(checks)) {
+        expect(await paintedContrast(loc), `${scheme} ${name}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(same).toBeVisible();
+    const body = await page.locator("#docPanelBody").evaluate((el) => [el.scrollWidth, el.clientWidth]);
+    expect(body[0], "panel body scrolls sideways").toBeLessThanOrEqual(body[1]!);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await page.setViewportSize({ width: 1440, height: 900 });
+
+    // A card opens its own source's document in place.
+    await cross.click();
+    await expect(page.locator("#docPanelTitle")).toHaveText(title(CROSS));
+    await expect(page.locator("#sumArticleMain")).toContainText(`Body of ${title(CROSS)}.`);
+
+    // Nothing left to show: both sections are absent, not empty.
+    sameStoryResults = [];
+    await page.evaluate((id) => (window as unknown as PageWindow).openSummaryDoc!(id, "", "youtube"), OLD_DOC);
+    await expect(page.locator("#sumArticleMain")).toContainText("print mode");
+    await page.waitForTimeout(AFTER_SIMILAR_DEBOUNCE_MS);
+    await expect(page.locator("#sumInWiki")).toBeVisible(); // OLD_DOC's own draft
+    await expect(page.locator("#sumInWiki a.sum-wiki-link")).toHaveCount(1);
+    await expect(same).toBeHidden();
+    await expect(same.locator("*")).toHaveCount(0);
+  });
+});
+
+test("a failed summary body still searches, on the title", async ({ page }) => {
+  seedReaderDocs();
+  const MISSING = "ai/general/Gone body.md";
+  put("youtube", MISSING, TODAY, "04:00:00");
+  const searches: string[] = [];
+  page.on("request", (r) => { if (r.url().includes("/similar?")) searches.push(new URL(r.url()).searchParams.get("q")!); });
+  await page.route(`**/api/youtube/document/**`, (route) => route.fulfill({ status: 500, body: "{}" }));
+  await stubImages(page);
+  await page.goto(`${BASE}/summaries?doc=${encodeURIComponent(MISSING)}&source=youtube`);
+  await expect(page.locator("#sumArticleMain")).toContainText("Failed to load");
+  await expect.poll(() => searches).toEqual([title(MISSING)]);
+  await expect(page.locator("#docSimilarPanel")).not.toContainText("Searching");
 });

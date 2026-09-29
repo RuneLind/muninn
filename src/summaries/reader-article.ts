@@ -17,7 +17,8 @@
  * summaries library's client copy of the transcript-split.ts function) and
  * `railDate`/`railValidDay` (the Latest rail's script). A second injected
  * declaration would replace the page's copy for every caller.
- * `READER_STALE_DAYS` is injected as a `var` the same way.
+ * `READER_STALE_DAYS` and the three `SAME_STORY_*` constants are injected
+ * as `var`s the same way.
  */
 
 import { mapProseLines } from "./transcript-split.ts";
@@ -27,6 +28,21 @@ import { railDate, railValidDay } from "./latest-rail.ts";
 /** Past this many days an age reads in months, and a Similar card's age
  *  turns amber: "2 months ago" is always amber, "60 days ago" never is. */
 export const READER_STALE_DAYS = 60;
+
+/**
+ * Same story this week keeps a hit at or above this relevance. Measured
+ * 2026-09-29 on 7 real same-story anchors with the title query: 8 of the 9
+ * siblings huginn returned scored 0.436–0.67, the ninth 0.229 (rank 20). These
+ * answers were not reranked, so relevance is rank-based
+ * (0.75 / (1 + 0.12·i)): 0.43 keeps the top 7 of the search.
+ */
+export const SAME_STORY_MIN_RELEVANCE = 0.43;
+
+/** Same story this week: captured at most this many days before today. */
+export const SAME_STORY_DAYS = 7;
+
+/** Same story this week shows at most this many cards. */
+export const SAME_STORY_MAX = 5;
 
 export interface ReaderHeading {
   level: number;
@@ -305,6 +321,90 @@ export function readerSimilarWhy(chunks: unknown): ReaderSimilarWhy | null {
   return null;
 }
 
+export interface ReaderSameStoryHit {
+  source?: unknown;
+  id?: unknown;
+  relevance?: unknown;
+  modifiedTime?: unknown;
+  metadata?: { date?: unknown } | null;
+  [key: string]: unknown;
+}
+
+/** One key per document across sources: a doc id is collection-relative. */
+export function readerDocKey(source: unknown, id: unknown): string {
+  return String(source) + "|" + String(id);
+}
+
+/**
+ * The Same story this week cards: the same-story search's hits captured in
+ * the last `SAME_STORY_DAYS` days (`metadata.date`, else `modifiedTime`) at
+ * or above `SAME_STORY_MIN_RELEVANCE`, without the open document and without
+ * any document Similar already shows (`shownKeys`, from `readerDocKey`). In
+ * the search's order, at most `SAME_STORY_MAX`.
+ */
+export function readerSameStory(
+  hits: unknown,
+  open: { source: string; docId: string },
+  shownKeys: string[],
+  today: string,
+): ReaderSameStoryHit[] {
+  if (!Array.isArray(hits)) return [];
+  const skip: Record<string, boolean> = {};
+  skip[readerDocKey(open.source, open.docId)] = true;
+  for (const k of shownKeys) skip[k] = true;
+  const out: ReaderSameStoryHit[] = [];
+  for (const h of hits as ReaderSameStoryHit[]) {
+    if (!h || typeof h.source !== "string" || typeof h.id !== "string") continue;
+    const key = readerDocKey(h.source, h.id);
+    if (skip[key]) continue;
+    if (!(typeof h.relevance === "number" && h.relevance >= SAME_STORY_MIN_RELEVANCE)) continue;
+    const day = readerDay(h.metadata && h.metadata.date) || readerDay(h.modifiedTime);
+    const days = readerDaysBetween(day, today);
+    if (days === null || days < 0 || days > SAME_STORY_DAYS) continue;
+    skip[key] = true;
+    out.push(h);
+    if (out.length >= SAME_STORY_MAX) break;
+  }
+  return out;
+}
+
+export interface ReaderWikiItem {
+  bot: string;
+  status: "draft" | "approved" | "applied";
+  label: string;
+  targetPath: string;
+  href: string;
+}
+
+/**
+ * The In your wiki rows: each `source` proposal drafted from the open
+ * summary, linked into its bot's wiki. An applied page opens in the wiki
+ * reader; a draft or an approved one opens that wiki's review gate. A
+ * rejected, stale or failed proposal is not in the wiki and gets no row.
+ */
+export function readerWikiContext(proposals: unknown): ReaderWikiItem[] {
+  if (!Array.isArray(proposals)) return [];
+  const labels: Record<string, string> = { applied: "In the wiki", draft: "Draft to review", approved: "Approved, not applied" };
+  const out: ReaderWikiItem[] = [];
+  for (const p of proposals) {
+    if (!p || typeof p !== "object") continue;
+    const { bot, status, targetPath } = p as { bot?: unknown; status?: unknown; targetPath?: unknown };
+    if (typeof bot !== "string" || !bot || typeof targetPath !== "string") continue;
+    if (status !== "applied" && status !== "draft" && status !== "approved") continue;
+    const wiki = encodeURIComponent(bot);
+    out.push({
+      bot,
+      status,
+      label: labels[status]!,
+      targetPath,
+      href: status === "applied"
+        ? "/wiki?wiki=" + wiki + "&path=" + encodeURIComponent(targetPath)
+        : "/wiki/gardener?wiki=" + wiki,
+    });
+  }
+  return out;
+}
+
 /** The 11-character id a YouTube url names (`extractYouTubeVideoId`'s host
  *  rule), or null; only the id charset, since it lands in a url and a src. */
 export function readerYouTubeId(url: unknown): string | null {
@@ -394,6 +494,9 @@ export const READER_FUNCTIONS = [
   readerPills,
   readerIsTranscriptHeading,
   readerSimilarWhy,
+  readerDocKey,
+  readerSameStory,
+  readerWikiContext,
   readerYouTubeId,
   readerYouTubeStampBase,
   readerThumbnail,

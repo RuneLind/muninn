@@ -10,7 +10,9 @@
  *    pills, the TL;DR lede, the Key takeaways card, the summary, the
  *    transcript `<details>` and the newer/older links;
  *  - the right rail's "On this page" outline with scroll-spy;
- *  - the Similar cards (`readerSimilarHtml`).
+ *  - the Similar cards (`readerSimilarHtml`), and the Same story this week
+ *    and In your wiki sections under them (`readerSameStoryHtml`,
+ *    `readerWikiHtml`), each absent when it has nothing to show.
  *
  * It shares the page scope with sum-article-library.ts (openSummaryDoc,
  * renderMarkdown, splitTranscript, mapProseLines, linkVimeoTimestamps, getSummaryDocuments,
@@ -22,7 +24,14 @@
  * it.
  */
 
-import { READER_FUNCTIONS, READER_IMPORTS, READER_STALE_DAYS } from "../../../summaries/reader-article.ts";
+import {
+  READER_FUNCTIONS,
+  READER_IMPORTS,
+  READER_STALE_DAYS,
+  SAME_STORY_DAYS,
+  SAME_STORY_MAX,
+  SAME_STORY_MIN_RELEVANCE,
+} from "../../../summaries/reader-article.ts";
 import { copyText } from "./copy-path.ts";
 import {
   DOC_PANEL_COPY_LINK_ID,
@@ -172,6 +181,31 @@ export function sumReaderStyles(): string {
       font-size: 10px;
       color: var(--text-soft);
     }
+    .sum-sim-src {
+      padding: 0 5px;
+      border-radius: 4px;
+      border: 1px solid var(--border-secondary);
+      font-size: 10px;
+      color: var(--text-soft);
+    }
+    /* Same story and In your wiki sit under Similar; absent when empty. */
+    .sum-context { margin-top: 18px; }
+    .sum-context[hidden] { display: none; }
+    .doc-panel-body .sum-wiki-list { list-style: none; margin: 0; padding: 0; }
+    .doc-panel-body .sum-wiki-list li { margin: 0; }
+    .sum-col-right a.sum-wiki-link {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border-primary);
+      text-decoration: none;
+      min-width: 0;
+    }
+    .sum-wiki-page { color: var(--accent-light); font-size: 13px; overflow-wrap: anywhere; }
+    .sum-col-right a.sum-wiki-link:hover .sum-wiki-page { text-decoration: underline; }
+    .sum-col-right a.sum-wiki-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+    .sum-wiki-meta { font-size: 11px; color: var(--text-soft); }
     @media (max-width: 1000px) {
       /* Below the breakpoint the rail sits after the article, where an
          outline of what is above it has nothing left to jump to. */
@@ -196,6 +230,9 @@ export function sumReaderScript(): string {
     // --- Reader: pure logic, injected from src/summaries/reader-article.ts ---
     // --- reader-fns:start ---
     var READER_STALE_DAYS = ${READER_STALE_DAYS};
+    var SAME_STORY_MIN_RELEVANCE = ${SAME_STORY_MIN_RELEVANCE};
+    var SAME_STORY_DAYS = ${SAME_STORY_DAYS};
+    var SAME_STORY_MAX = ${SAME_STORY_MAX};
 ${[...READER_IMPORTS, ...READER_FUNCTIONS].map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n")}
     // --- reader-fns:end ---
     // The clipboard write the dashboard's copy controls share (copy-path.ts).
@@ -553,22 +590,27 @@ ${[...READER_IMPORTS, ...READER_FUNCTIONS].map((fn) => `    var ${fn.name} = ${f
     function readerSimilarHtml(results, source) {
       var today = readerToday();
       return results.map(function(r) {
+        // A Same story hit names its own source; a Similar hit is the open one's.
+        var own = typeof r.source === 'string' ? r.source : null;
+        var srcInfo = own ? SOURCES[own] : null;
         var pct = Math.max(0, Math.min(100, Math.round((r.relevance || 0) * 100)));
         var rTitle = (r.title || r.id || '').replace(/\\.md$/, '');
         var rUrl = r.url || '#';
         var meta = r.metadata || {};
-        var thumb = readerThumbnail(source, r.url, meta.thumbnail_url);
+        var thumb = readerThumbnail(own || source, r.url, meta.thumbnail_url);
         var days = readerDaysBetween(meta.date, today);
         var age = readerAge(meta.date, today);
         var why = readerSimilarWhy(r.matchedChunks);
-        var href = '/summaries?doc=' + encodeURIComponent(r.id) + '&source=' + encodeURIComponent(source);
-        return '<a class="doc-similar-item sum-sim-card" href="' + esc(href) + '" data-doc-id="' + esc(r.id) + '" data-doc-url="' + esc(rUrl) + '">' +
+        var href = '/summaries?doc=' + encodeURIComponent(r.id) + '&source=' + encodeURIComponent(own || source);
+        return '<a class="doc-similar-item sum-sim-card" href="' + esc(href) + '" data-doc-id="' + esc(r.id) + '" data-doc-url="' + esc(rUrl) + '"' +
+            (own ? ' data-source="' + esc(own) + '"' : '') + '>' +
           readerThumbHtml(thumb, 'sum-sim-thumb') +
           '<span class="sum-sim-main">' +
             '<span class="sum-sim-title">' + esc(rTitle) + '</span>' +
             '<span class="sum-sim-meta">' +
               '<span class="sum-sim-bar" aria-hidden="true"><span style="width:' + pct + '%"></span></span>' +
               '<span class="doc-similar-relevance">' + pct + '%</span>' +
+              (srcInfo ? '<span class="sum-sim-src">' + esc(srcInfo.badge) + '</span>' : '') +
               (age ? '<span class="sum-sim-age' + (days > READER_STALE_DAYS ? ' stale' : '') + '">' + esc(age) + '</span>' : '') +
             '</span>' +
             (why ? '<span class="sum-sim-why" title="' + esc(why.heading) + '"' + (why.transcript ? ' data-transcript="1"' : '') + '>' +
@@ -578,6 +620,28 @@ ${[...READER_IMPORTS, ...READER_FUNCTIONS].map((fn) => `    var ${fn.name} = ${f
           '</span>' +
         '</a>';
       }).join('');
+    }
+
+    // --- Same story this week, In your wiki ---
+    /** The Same story section's markup, or '' when no hit survives the
+     *  filter (readerSameStory): the section is then absent. */
+    function readerSameStoryHtml(hits, open, shownKeys) {
+      var keep = readerSameStory(hits, open, shownKeys, readerToday());
+      if (!keep.length) return '';
+      return '<h4>Same story this week</h4>' + readerSimilarHtml(keep, open.source);
+    }
+
+    /** The In your wiki section's markup, or '' when no proposal is in or
+     *  on its way into a wiki (readerWikiContext). */
+    function readerWikiHtml(proposals) {
+      var items = readerWikiContext(proposals);
+      if (!items.length) return '';
+      return '<h4>In your wiki</h4><ul class="sum-wiki-list">' + items.map(function(it) {
+        return '<li><a class="sum-wiki-link" href="' + esc(it.href) + '" data-status="' + esc(it.status) + '">' +
+          '<span class="sum-wiki-page">' + esc(it.targetPath) + '</span>' +
+          '<span class="sum-wiki-meta"><span class="sum-wiki-status">' + esc(it.label) + '</span> · ' + esc(it.bot) + '</span>' +
+        '</a></li>';
+      }).join('') + '</ul>';
     }
   `;
 }
