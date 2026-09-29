@@ -158,7 +158,7 @@ export function sumReaderStyles(): string {
     /* Similar cards: each card is one link. */
     .doc-similar-item.sum-sim-card { display: flex; gap: 10px; padding: 8px 0; color: inherit; text-decoration: none; }
     .doc-similar-item.sum-sim-card:hover { text-decoration: none; }
-    .sum-sim-title { color: var(--accent-light); font-size: 13px; line-height: 1.4; }
+    .sum-sim-title { color: var(--accent-light); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
     .sum-sim-card:hover .sum-sim-title { text-decoration: underline; }
     .sum-sim-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
     .sum-sim-thumb {
@@ -171,7 +171,9 @@ export function sumReaderStyles(): string {
       background: var(--bg-surface);
     }
     .sum-sim-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
-    .sum-sim-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-soft); }
+    .sum-sim-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; font-size: 11px; color: var(--text-soft); }
+    /* A narrow rail moves a whole item to the next line, never half an age. */
+    .sum-sim-meta > * { white-space: nowrap; }
     .sum-sim-bar { flex: 0 0 48px; height: 4px; border-radius: 2px; background: var(--border-primary); overflow: hidden; }
     .sum-sim-bar > span { display: block; height: 100%; background: var(--accent); }
     .sum-sim-card .doc-similar-relevance { margin-left: 0; color: var(--text-soft); }
@@ -635,7 +637,7 @@ ${[...READER_IMPORTS, ...READER_FUNCTIONS].map((fn) => `    var ${fn.name} = ${f
     function readerSameStoryHtml(hits, open, shownKeys) {
       var keep = readerSameStory(hits, open, shownKeys, readerToday());
       if (!keep.length) return '';
-      return '<h4>Same story this week</h4>' + readerSimilarHtml(keep, open.source);
+      return '<h4 id="sumSameStoryTitle">Same story this week</h4>' + readerSimilarHtml(keep, open.source);
     }
 
     /** The In your wiki section's markup, or '' when no proposal is in or
@@ -643,7 +645,7 @@ ${[...READER_IMPORTS, ...READER_FUNCTIONS].map((fn) => `    var ${fn.name} = ${f
     function readerWikiHtml(proposals) {
       var items = readerWikiContext(proposals);
       if (!items.length) return '';
-      return '<h4>In your wiki</h4><ul class="sum-wiki-list">' + items.map(function(it) {
+      return '<h4 id="sumInWikiTitle">In your wiki</h4><ul class="sum-wiki-list">' + items.map(function(it) {
         return '<li><a class="sum-wiki-link" href="' + esc(it.href) + '" data-status="' + esc(it.status) + '">' +
           '<span class="sum-wiki-page">' + esc(it.targetPath) + '</span>' +
           '<span class="sum-wiki-meta"><span class="sum-wiki-status">' + esc(it.label) + '</span> · ' + esc(it.bot) + '</span>' +

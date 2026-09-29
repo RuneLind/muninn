@@ -1559,7 +1559,13 @@ test("Same story this week and In your wiki: filtered, deduped, linked, in rail 
   const DUP = "ai/general/Also in Similar.md";
   const CROSS = "ai/claude/Claude Opus 5.5.md";
   const X_POST = "ai/general/X post.md";
-  searchResults = [{ id: DUP, title: `${title(DUP)}.md`, relevance: 0.6, metadata: { date: TODAY } }];
+  const YT_WEEK = "ai/general/Five days back on YouTube.md";
+  // A title with no break opportunity must wrap, not widen the panel.
+  const UNBROKEN = "ai/general/" + "Unbroken".repeat(20) + ".md";
+  searchResults = [
+    { id: DUP, title: `${title(DUP)}.md`, relevance: 0.6, metadata: { date: TODAY } },
+    { id: UNBROKEN, title: `${title(UNBROKEN)}.md`, relevance: 0.55, metadata: { date: TODAY } },
+  ];
   sameStoryResults = [
     { collection: "youtube-summaries", source: "youtube", id: NEW_DOC, title: `${title(NEW_DOC)}.md`, relevance: 0.75, metadata: { date: TODAY } },
     { collection: "youtube-summaries", source: "youtube", id: DUP, title: `${title(DUP)}.md`, relevance: 0.67, metadata: { date: TODAY } },
@@ -1567,6 +1573,7 @@ test("Same story this week and In your wiki: filtered, deduped, linked, in rail 
     { collection: "youtube-summaries", source: "youtube", id: "ai/general/Weak.md", title: "Weak.md", relevance: 0.3, metadata: { date: TODAY } },
     { collection: "youtube-summaries", source: "youtube", id: "ai/general/Last month.md", title: "Last month.md", relevance: 0.55, metadata: { date: railAddDays(TODAY, -10) } },
     { collection: "x-articles", source: "x-article", id: X_POST, title: `${title(X_POST)}.md`, relevance: 0.5, modifiedTime: `${TODAY}T08:00:00.000000` },
+    { collection: "youtube-summaries", source: "youtube", id: YT_WEEK, title: `${title(YT_WEEK)}.md`, url: YT_URL, relevance: 0.469, metadata: { date: FIVE_BACK } },
   ];
   // The fake's served set has no article-summaries: the route must leave it
   // out, or the whole search 404s and the section never renders.
@@ -1582,19 +1589,38 @@ test("Same story this week and In your wiki: filtered, deduped, linked, in rail 
     const same = page.locator("#sumSameStory");
     await expect(same).toBeVisible();
     await expect(same.locator("h4")).toHaveText("Same story this week");
-    await expect(same.locator(".sum-sim-card")).toHaveCount(2);
+    // Each section is a region named by its own heading, not a second copy.
+    await expect(page.getByRole("region", { name: "Same story this week" })).toBeVisible();
+    await expect(same).not.toHaveAttribute("aria-label", /./);
+    await expect(same).toHaveAttribute("aria-labelledby", (await same.locator("h4").getAttribute("id")) ?? "missing-id");
+    await expect(same.locator(".sum-sim-card")).toHaveCount(3);
     await expect(same.locator(".sum-sim-card").nth(0)).toHaveAttribute("data-doc-id", CROSS);
     await expect(same.locator(".sum-sim-card").nth(1)).toHaveAttribute("data-doc-id", X_POST);
+    await expect(same.locator(".sum-sim-card").nth(2)).toHaveAttribute("data-doc-id", YT_WEEK);
     const cross = same.locator(`.sum-sim-card[data-doc-id="${CROSS}"]`);
     await expect(cross).toHaveAttribute("data-source", "anthropic");
     await expect(cross).toHaveAttribute("href", `/summaries?doc=${encodeURIComponent(CROSS)}&source=anthropic`);
     await expect(cross.locator(".sum-sim-src")).toHaveText("Claude");
+    // The age stays on one line beside the bar, percentage and badge, in the
+    // ~270 px rail of a 1440 window.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const week = same.locator(`.sum-sim-card[data-doc-id="${YT_WEEK}"]`);
+    await expect(week.locator(".sum-sim-thumb")).toBeVisible();
+    await expect(week.locator(".sum-sim-age")).toHaveText("5 days ago");
+    const age = await week.locator(".sum-sim-age").evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      return { height: r.height, line: parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.2 };
+    });
+    expect(age.height, "the age wraps").toBeLessThan(age.line * 1.5);
     await expect(page.locator(`#docSimilarPanel .sum-sim-card[data-doc-id="${DUP}"]`)).toHaveCount(1);
     expect(sameStoryQueries).toEqual([title(NEW_DOC)]);
 
     const wiki = page.locator("#sumInWiki");
     await expect(wiki).toBeVisible();
     await expect(wiki.locator("h4")).toHaveText("In your wiki");
+    await expect(page.getByRole("region", { name: "In your wiki" })).toBeVisible();
+    await expect(wiki).not.toHaveAttribute("aria-label", /./);
+    await expect(wiki).toHaveAttribute("aria-labelledby", (await wiki.locator("h4").getAttribute("id")) ?? "missing-id");
     const links = wiki.locator("a.sum-wiki-link");
     await expect(links).toHaveCount(2);
     await expect(wiki.locator('a[data-status="applied"]')).toHaveAttribute("href", `/wiki?wiki=${E2E_BOTS[0]}&relPath=${encodeURIComponent(APPLIED_PAGE)}`);

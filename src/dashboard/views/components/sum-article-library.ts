@@ -1361,8 +1361,8 @@ export function sumArticleLibraryScript(): string {
           '<div class="sum-col-right" id="sumRightRail">' +
             '<nav class="sum-outline" id="sumOutline" aria-label="On this page" hidden></nav>' +
             '<div class="doc-similar" id="docSimilarPanel"></div>' +
-            '<section class="doc-similar sum-context" id="sumSameStory" aria-label="Same story this week" hidden></section>' +
-            '<section class="doc-similar sum-context" id="sumInWiki" aria-label="In your wiki" hidden></section>' +
+            '<section class="doc-similar sum-context" id="sumSameStory" aria-labelledby="sumSameStoryTitle" hidden></section>' +
+            '<section class="doc-similar sum-context" id="sumInWiki" aria-labelledby="sumInWikiTitle" hidden></section>' +
           '</div>';
       }
       var outlineEl = document.getElementById('sumOutline');
