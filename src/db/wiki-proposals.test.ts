@@ -331,6 +331,24 @@ describe("deleteSourceProposalsForDoc", () => {
     expect(remaining.sort()).toEqual([applied.id, concept.id, stays.id].sort());
   });
 
+  test("another bot's proposals for the same doc survive, and are not reported", async () => {
+    const sql = getDb();
+    const stamp = Date.now();
+    const shared = { collection: "youtube-summaries", docId: `delsrc/${stamp}_shared.md`, title: "Shared", url: "https://sh" };
+    const [botA, botB] = [`delsrc-a-${stamp}`, `delsrc-b-${stamp}`];
+    const mk = (botName: string, topicKey: string, status?: InsertWikiProposalParams["status"]) =>
+      insertWikiProposal(makeProposal({ botName, topicKey, kind: "source", targetPath: `sources/${topicKey}.mdx`, sourceDocs: [shared], status }));
+    const aDraft = (await mk(botA, "a-draft"))!;
+    const bDraft = (await mk(botB, "b-draft"))!;
+    const bApplied = (await mk(botB, "b-applied", "applied"))!;
+
+    const res = await deleteSourceProposalsForDoc(botA, shared.collection, shared.docId);
+    expect(res.deleted.map((r) => r.id)).toEqual([aDraft.id]);
+    expect(res.kept).toEqual([]);
+    const left = (await sql`SELECT id FROM wiki_proposals WHERE bot_name = ${botB}`).map((r) => r.id as string);
+    expect(left.sort()).toEqual([bDraft.id, bApplied.id].sort());
+  });
+
   test("a doc with no proposals is a no-op with empty lists", async () => {
     const res = await deleteSourceProposalsForDoc(`delsrc-none-${Date.now()}`, "youtube-summaries", "nope.md");
     expect(res).toEqual({ deleted: [], kept: [] });
