@@ -1692,3 +1692,44 @@ test("a failed summary body still searches, on the title", async ({ page }) => {
   await expect.poll(() => searches).toEqual([title(MISSING)]);
   await expect(page.locator("#docSimilarPanel")).not.toContainText("Searching");
 });
+
+test("card meta: at the narrowest rail its items wrap whole, inside the card, and an age never splits", async ({ page }) => {
+  seedReaderDocs();
+  // The widest meta rows the rail renders: Similar's "100%" + "12 months ago",
+  // and Same story's percentage + source badge + a days-ago age.
+  const LONG_AGO = "ai/general/Almost a year back.md";
+  const WEEK = "ai/general/Six days back.md";
+  searchResults = [
+    { id: LONG_AGO, title: `${title(LONG_AGO)}.md`, url: "https://www.youtube.com/watch?v=4B4R2T4w7Kg", relevance: 1, metadata: { date: railAddDays(TODAY, -364) } },
+  ];
+  sameStoryResults = [
+    { collection: "youtube-summaries", source: "youtube", id: WEEK, title: `${title(WEEK)}.md`, url: "https://www.youtube.com/watch?v=6xQ8LQfkBg4", relevance: 0.67, metadata: { date: railAddDays(TODAY, -6) } },
+  ];
+  await openReaderDoc(page, NEW_DOC, "youtube", "Telling versus showing");
+  await expect(page.locator(`#docSimilarPanel .sum-sim-card[data-doc-id="${LONG_AGO}"] .sum-sim-age`)).toHaveText("12 months ago");
+  await expect(page.locator(`#sumSameStory .sum-sim-card[data-doc-id="${WEEK}"] .sum-sim-age`)).toHaveText("6 days ago");
+  // 1001 px is the narrowest viewport with the 300 px rail column; below
+  // 1000 px the rail spans the panel.
+  for (const width of [1001, 1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const rows = await page.locator("#sumRightRail .sum-sim-meta").evaluateAll((metas) => metas.map((m) => {
+      const box = m.getBoundingClientRect();
+      const kids = [...m.children].map((k) => k.getBoundingClientRect());
+      const age = m.querySelector(".sum-sim-age") as HTMLElement | null;
+      const line = age ? parseFloat(getComputedStyle(age).lineHeight) || parseFloat(getComputedStyle(age).fontSize) * 1.2 : 0;
+      return {
+        overflow: Math.max(...kids.map((k) => k.right)) - box.right,
+        lines: new Set(kids.map((k) => Math.round(k.top))).size,
+        ageSplit: age ? age.getBoundingClientRect().height >= line * 1.5 : false,
+      };
+    }));
+    expect(rows, `${width}px`).toHaveLength(2);
+    for (const r of rows) {
+      expect(r.overflow, `${width}px: an item overflows the card`).toBeLessThanOrEqual(0.5);
+      expect(r.ageSplit, `${width}px: the age splits across lines`).toBe(false);
+    }
+    // The case the rule is for: at the narrow column the items do not fit
+    // on one line.
+    if (width === 1001) expect(Math.max(...rows.map((r) => r.lines)), "no meta row wrapped at 1001px").toBeGreaterThan(1);
+  }
+});

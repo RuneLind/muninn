@@ -171,9 +171,9 @@ export function sumReaderStyles(): string {
       background: var(--bg-surface);
     }
     .sum-sim-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
+    /* A row that does not fit moves a whole item to the next line: an item
+       splits only when wider than the row (widest 77px, row 188px at least). */
     .sum-sim-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; font-size: 11px; color: var(--text-soft); }
-    /* A narrow rail moves a whole item to the next line, never half an age. */
-    .sum-sim-meta > * { white-space: nowrap; }
     .sum-sim-bar { flex: 0 0 48px; height: 4px; border-radius: 2px; background: var(--border-primary); overflow: hidden; }
     .sum-sim-bar > span { display: block; height: 100%; background: var(--accent); }
     .sum-sim-card .doc-similar-relevance { margin-left: 0; color: var(--text-soft); }
