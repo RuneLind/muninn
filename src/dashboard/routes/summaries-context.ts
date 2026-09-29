@@ -86,7 +86,9 @@ export function registerSummariesContextRoutes(
     if (encodedBytes(q) > SAME_STORY_MAX_Q_BYTES) {
       return c.json({ error: `q is longer than ${SAME_STORY_MAX_Q_BYTES} encoded bytes` }, 400);
     }
-    // A reader who moved on cancels both huginn calls.
+    // A reader who moved on releases both huginn fetches. huginn's sync
+    // /api/search does not see the disconnect and finishes the search anyway
+    // (one unreranked search, ~0.25 s); muninn only stops waiting for it.
     const signal = c.req.raw.signal;
     try {
       const listed = await fetchKnowledgeApi(KNOWLEDGE_API_URL, "/api/collections", { timeoutMs: 10_000, signal });

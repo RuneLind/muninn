@@ -25,7 +25,8 @@ interface KnowledgeApiOptions {
   body?: string;
   headers?: Record<string, string>;
   /** Aborts the fetch as the timeout does: pass the incoming request's
-   *  signal so a caller that went away cancels the upstream work too. */
+   *  signal so a caller that went away frees the upstream connection. The
+   *  upstream may still finish its work (huginn's sync routes do). */
   signal?: AbortSignal;
 }
 

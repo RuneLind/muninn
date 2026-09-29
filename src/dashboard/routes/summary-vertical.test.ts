@@ -379,7 +379,7 @@ test("stream: a reader that CLOSED does not silence the next reader of the same 
   }
 }, 20_000);
 
-test("similar: an abandoned request aborts the huginn search", async () => {
+test("similar: an abandoned request aborts its huginn fetch", async () => {
   const app = appFor(fixedStore(makeJob({})));
   const origFetch = globalThis.fetch;
   const signals: AbortSignal[] = [];

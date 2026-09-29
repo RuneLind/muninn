@@ -149,7 +149,7 @@ function slowHuginn(signals: AbortSignal[], ms = 400): void {
   }) as typeof fetch;
 }
 
-test("same-story: an abandoned request aborts the huginn search", async () => {
+test("same-story: an abandoned request aborts its huginn fetch", async () => {
   const signals: AbortSignal[] = [];
   slowHuginn(signals);
   const client = new AbortController();

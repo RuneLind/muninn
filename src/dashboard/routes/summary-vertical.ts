@@ -202,8 +202,9 @@ export function registerSummaryVertical<S extends string, F>(
     const passed = similarPassThrough(c.req.query("corrective"), c.req.query("max_chunk_chars"));
     if ("error" in passed) return c.json({ error: passed.error }, 400);
     for (const [k, v] of Object.entries(passed.params)) params.set(k, v);
-    // A reader who moved on cancels the search rather than leaving huginn
-    // to finish it.
+    // A reader who moved on releases the huginn fetch. huginn's sync
+    // /api/search does not see the disconnect and finishes the search anyway
+    // (~1 s for an opening-text query); muninn only stops waiting for it.
     return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/search?${params}`, 10000, undefined, c.req.raw.signal);
   });
 }
