@@ -771,7 +771,7 @@ function refreshCrumbHref(): void {
 function goToStart(): void {
   const target = currentStartUrl();
   if (
-    !sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI)) &&
+    !sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI), wikiToolsFlag()) &&
     location.pathname + location.search !== target
   ) {
     history.pushState({}, "", target);

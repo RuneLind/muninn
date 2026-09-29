@@ -2,7 +2,8 @@ import { test, expect, describe } from "bun:test";
 import { Hono } from "hono";
 import type { Config } from "../config.ts";
 import { createDashboardRoutes } from "./routes.ts";
-import { NAIS_DROPPED_ROUTE_GROUPS, shouldKickWorkedLedgerAtBoot, wikiToolsRegistered } from "./route-groups.ts";
+import { NAIS_DROPPED_ROUTE_GROUPS, servesWikiReadSliceOnly, wikiToolsRegistered } from "./route-groups.ts";
+import { wikiRouteTable } from "../test/wiki-route-table.ts";
 import { renderNav } from "./views/shared-styles.ts";
 
 /**
@@ -203,18 +204,11 @@ describe("renderNav under the nais profile", () => {
  * rest on (`src/auth/zones.ts`).
  */
 describe("the wiki read slice under nais", () => {
-  /** Every route the tool half registers, GET and POST — derived from a live
-   *  registration so a route added to that half is asserted here unasked. */
-  async function toolRoutes(): Promise<{ method: string; path: string }[]> {
-    const { registerWikiToolRoutes } = await import("./routes/wiki-routes.ts");
-    const app = new Hono();
-    registerWikiToolRoutes(app, CONFIG);
-    return app.routes.filter((r) => r.method !== "ALL").map((r) => ({ method: r.method, path: r.path }));
-  }
-
   test("the read routes are registered", () => {
+    const read = wikiRouteTable("read", "nais");
+    expect(read.length).toBeGreaterThanOrEqual(6);
     const paths = registeredPaths(build("nais"));
-    for (const path of ["/wiki", "/api/wiki/pages", "/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/html", "/api/wiki/graph"]) {
+    for (const { path } of read) {
       expect(`${path} → ${paths.has(path)}`).toBe(`${path} → true`);
     }
   });
@@ -234,7 +228,7 @@ describe("the wiki read slice under nais", () => {
   });
 
   test("every other wiki route is 404 — Explain, Ask, Stamp and every write", async () => {
-    const routes = await toolRoutes();
+    const routes = wikiRouteTable("tools");
     for (const must of ["/api/wiki/explain", "/api/wiki/ask", "/api/wiki/provenance/stamp", "/api/wiki/series", "/api/wiki/similar"]) {
       expect(routes.some((r) => r.path === must), must).toBe(true);
     }
@@ -250,15 +244,17 @@ describe("the wiki read slice under nais", () => {
 
   test("the default profile registers both halves", async () => {
     const paths = registeredPaths(build("default"));
-    for (const r of await toolRoutes()) {
+    for (const r of wikiRouteTable("tools")) {
       expect(`${r.path} → ${paths.has(r.path)}`).toBe(`${r.path} → true`);
     }
     expect(paths.has("/api/wiki/page")).toBe(true);
   });
 
-  test("wikiToolsRegistered: false under nais, true on default", () => {
+  test("wikiToolsRegistered and servesWikiReadSliceOnly are complements on both profiles", () => {
     expect(wikiToolsRegistered("nais")).toBe(false);
     expect(wikiToolsRegistered("default")).toBe(true);
+    expect(servesWikiReadSliceOnly("nais")).toBe(true);
+    expect(servesWikiReadSliceOnly("default")).toBe(false);
   });
 });
 
@@ -271,8 +267,8 @@ describe("the worked-on ledger's boot kick (fix round 2)", () => {
    * launchd service on another machine's loopback.
    */
   test("the default profile kicks it and `nais` does not", () => {
-    expect(shouldKickWorkedLedgerAtBoot("default")).toBe(true);
-    expect(shouldKickWorkedLedgerAtBoot("nais")).toBe(false);
+    expect(wikiToolsRegistered("default")).toBe(true);
+    expect(wikiToolsRegistered("nais")).toBe(false);
   });
 
   test("…and it is DERIVED from the drop set, not from the profile name", () => {

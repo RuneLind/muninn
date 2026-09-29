@@ -41,12 +41,19 @@ describe("src/index.ts wiring", () => {
     const text = await readFile(INDEX, "utf8");
     const auth = text.indexOf("createAuthMiddleware(auth, introspector)");
     const origin = text.indexOf("createOriginMiddleware(auth.allowedOrigins, config.dashboardPort)");
-    const zones = text.indexOf("createZoneMiddleware(auth)");
+    const zones = text.indexOf("createZoneMiddleware(auth, ");
     expect(auth).toBeGreaterThan(-1);
     expect(origin, "src/index.ts must mount createOriginMiddleware").toBeGreaterThan(-1);
     expect(zones, "src/index.ts must mount createZoneMiddleware").toBeGreaterThan(-1);
     expect(origin).toBeGreaterThan(auth);
     expect(zones).toBeGreaterThan(origin);
+  });
+
+  test("the zone middleware is told whether the wiki read slice is served, from the profile", async () => {
+    // Without this the slice's GET paths are never in the user zone on the pod,
+    // or — passed a constant true — they are on every instance.
+    const text = await readFile(INDEX, "utf8");
+    expect(text).toContain("createZoneMiddleware(auth, { wikiReadSlice: servesWikiReadSliceOnly(config.profile ?? resolveServingProfile()) })");
   });
 
   test("the zone middleware is on the TOP-LEVEL app, before both app.route calls", async () => {
@@ -55,7 +62,7 @@ describe("src/index.ts wiring", () => {
     // Hono matches in registration order, so a `use` after a `route` never runs
     // for those routes.
     const text = await readFile(INDEX, "utf8");
-    const zones = text.indexOf("createZoneMiddleware(auth)");
+    const zones = text.indexOf("createZoneMiddleware(auth, ");
     const firstRoute = text.indexOf("app.route(");
     expect(firstRoute).toBeGreaterThan(-1);
     expect(zones).toBeLessThan(firstRoute);
@@ -72,7 +79,7 @@ describe("src/index.ts wiring", () => {
     const authBranch = branch![0].slice(0, branch![0].indexOf("\n} else {"));
     expect(authBranch).toContain("createAuthMiddleware(auth, introspector)");
     expect(authBranch).toContain("createOriginMiddleware(auth.allowedOrigins, config.dashboardPort)");
-    expect(authBranch).toContain("createZoneMiddleware(auth)");
+    expect(authBranch).toContain("createZoneMiddleware(auth, ");
     const offBranch = branch![1]!;
     expect(offBranch).toContain(`app.use("*", createOriginMiddleware(auth.allowedOrigins, config.dashboardPort, "off"))`);
     expect(offBranch).not.toContain("createAuthMiddleware");

@@ -14,6 +14,8 @@
 import path from "node:path";
 import { readdir, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
+import { resolveServingProfile } from "../config.ts";
+import { wikiToolsRegistered } from "../dashboard/route-groups.ts";
 import {
   isMetaStem,
   pageStemOf,
@@ -3253,7 +3255,10 @@ export async function buildWikiIndex(
   // throttle, per tab) and after every series write, so a hatch keyed on it
   // re-asked a dead service from a hot path (fix rounds 2–4). The back-off is
   // released by time alone: one index TTL.
-  kickWorkedLedgerRefresh(root, { maxAgeMs: CACHE_TTL_MS });
+  // Skipped where the wiki tool surface is not registered (the nais read
+  // slice): a role-`user` listing read must not send the host root to
+  // claude-usage — the same gate as the boot kick in `src/index.ts`.
+  if (wikiToolsRegistered(resolveServingProfile())) kickWorkedLedgerRefresh(root, { maxAgeMs: CACHE_TTL_MS });
 
   const register = (key: string, meta: WikiPageMeta) => {
     const k = key.toLowerCase();
@@ -3854,15 +3859,40 @@ const caches = new Map<string, WikiIndex>();
 const warnedRoots = new Set<string>();
 
 /**
+ * Single-flight per root: at most ONE build running and ONE queued behind it.
+ *
+ * Measured before this existed: 20 parallel `?refresh=1` on a 490-page wiki
+ * blocked the event loop for up to 12.7 s, and a TTL expiry under load
+ * stampeded the same way. A caller that accepts the cache (`refresh` unset)
+ * joins the running build. A `refresh` caller cannot: that build may have read
+ * the disk before the write the caller just made (every programmatic writer
+ * passes `refresh` after it lands), so it gets the QUEUED build, which starts
+ * when the running one settles — after the call — and is shared by every
+ * refresher that arrives meanwhile.
+ */
+interface RootFlight {
+  running: Promise<WikiIndex | null>;
+  queued: Promise<WikiIndex | null> | null;
+}
+const flights = new Map<string, RootFlight>();
+
+/** Test seam: replaces `buildWikiIndex` so a test can hold a build open and
+ *  count how many started. */
+let buildImpl: (root: string) => Promise<WikiIndex> = (root) => buildWikiIndex(root);
+let buildsStarted = 0;
+
+/**
  * TTL-cached index over a wiki root. Pass `root` (a bot's `wikiDir`) to browse a
  * specific bot's wiki; omit it to keep today's behavior (`WIKI_DIR` env → jarvis
  * default). Each root is cached and degraded independently — a missing melosys
  * wiki never affects the jarvis cache. Returns null (and warns once per root)
  * when the directory is missing — the caller renders an empty state.
  *
- * `refresh` busts the index TTL only. It is what every programmatic write passes
- * after it lands, and what the browser sends on tab focus, so it never reaches
- * the worked ledger's TTL gate or back-off (see the kick in `buildWikiIndex`).
+ * `refresh` busts the index TTL only, and is guaranteed a build that STARTED
+ * after the call (see `RootFlight`). It is what every programmatic write passes
+ * after it lands, so it never reaches the worked ledger's TTL gate or back-off
+ * (see the kick in `buildWikiIndex`). The HTTP `?refresh=1` is throttled at the
+ * route; in-process callers are not.
  */
 export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }): Promise<WikiIndex | null> {
   const root = resolveWikiRoot(opts?.root);
@@ -3870,6 +3900,37 @@ export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }):
   if (cached && !opts?.refresh && Date.now() - cached.scannedAt < CACHE_TTL_MS) {
     return cached;
   }
+  const flight = flights.get(root);
+  if (!flight) {
+    const running = runBuild(root);
+    flights.set(root, { running, queued: null });
+    return running;
+  }
+  if (!opts?.refresh) return flight.running;
+  if (flight.queued) return flight.queued;
+  const queued = flight.running.then(
+    () => undefined,
+    () => undefined,
+  ).then(() => {
+    const running = runBuild(root);
+    flight.running = running;
+    flight.queued = null;
+    return running;
+  });
+  flight.queued = queued;
+  return queued;
+}
+
+/** One build, cached; drops the root's flight when nothing is queued behind it. */
+function runBuild(root: string): Promise<WikiIndex | null> {
+  const p: Promise<WikiIndex | null> = buildAndCache(root).finally(() => {
+    const f = flights.get(root);
+    if (f && f.running === p && !f.queued) flights.delete(root);
+  });
+  return p;
+}
+
+async function buildAndCache(root: string): Promise<WikiIndex | null> {
   try {
     const st = await stat(root);
     if (!st.isDirectory()) throw new Error("not a directory");
@@ -3886,7 +3947,8 @@ export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }):
   }
 
   const started = Date.now();
-  const index = await buildWikiIndex(root);
+  buildsStarted++;
+  const index = await buildImpl(root);
   caches.set(root, index);
   warnedRoots.delete(root);
   log.info("Wiki index built: {pages} pages in {ms}ms from {path}", {
@@ -3895,6 +3957,18 @@ export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }):
     path: root,
   });
   return index;
+}
+
+/** Test-only: swap the index builder (null restores the real one) and zero the
+ *  build counter. */
+export function __setWikiIndexBuilderForTest(fn: ((root: string) => Promise<WikiIndex>) | null): void {
+  buildImpl = fn ?? ((root) => buildWikiIndex(root));
+  buildsStarted = 0;
+}
+
+/** Test-only: how many index builds have started since the last reset. */
+export function __wikiIndexBuildsStartedForTest(): number {
+  return buildsStarted;
 }
 
 /** Raw markdown of one page (by resolved meta). Null when the file vanished. */
@@ -3910,4 +3984,5 @@ export async function readWikiPage(index: WikiIndex, meta: WikiPageMeta): Promis
 export function __resetWikiCacheForTest(): void {
   caches.clear();
   warnedRoots.clear();
+  flights.clear();
 }

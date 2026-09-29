@@ -2,11 +2,23 @@
  * The reader under `MUNINN_PROFILE=nais`, where only the `wiki-read` route
  * group is registered (`src/dashboard/route-groups.ts`).
  *
- * A dropped group takes its HTML surface with it: every control here would
- * reach a route with no handler (Hono 404), so the page HIDES them rather than
- * dimming them the way a read-only root does. The server stamps the class on
- * `<body>`; the selector is CSS, so it survives the re-renders that replace the
- * breadcrumb, the answer pane and the rail.
+ * A dropped group takes its HTML surface with it: every control that would
+ * reach a route with no handler (Hono 404) is HIDDEN rather than dimmed the way
+ * a read-only root does. The one signal is the `<body>` class
+ * {@link WIKI_READ_SLICE_CLASS}, stamped by the server. Three layers read it —
+ * this is the index of all three:
+ *
+ *  1. **CSS** — {@link WIKI_READ_SLICE_HIDDEN_SELECTOR}, scoped to the class by
+ *     {@link wikiReadSliceStyles}. CSS survives the re-renders that replace the
+ *     breadcrumb, the answer pane and the rail.
+ *  2. **Client guards** — {@link wikiToolsFlag} reads the same class; the
+ *     reader (`wiki-browser.ts`) uses it to skip the fetches whose panels are
+ *     hidden (index coverage, the start cards, Similar), to leave the Atlas tab
+ *     out and to keep the rail on Connections ({@link readSliceStartTab}).
+ *  3. **Server omissions** — `renderWikiPage({ tools: false })`
+ *     (`views/wiki-page.ts`) renders no agent-presence chip, withholds the host
+ *     path from `window.__WIKI_ROOT__`, and the `/wiki` route resolves no ask
+ *     bot and no gardener badge (`registerWikiReadRoutes`).
  */
 import {
   WIKI_READONLY_BLOCKED_SELECTOR,
@@ -54,11 +66,12 @@ export function wikiReadSliceStyles(): string {
     ${scoped} { display: none !important; }`;
 }
 
-/** Is the full wiki tool surface registered? Reads `window.__WIKI_TOOLS__`,
- *  which the reader page injects; anything but an explicit `false` is the
- *  default instance, so a page that never set it keeps every panel. */
-export function wikiToolsFlag(win: unknown = globalThis): boolean {
-  return (win as { __WIKI_TOOLS__?: unknown })?.__WIKI_TOOLS__ !== false;
+/** Is the full wiki tool surface registered? False exactly when `<body>`
+ *  carries {@link WIKI_READ_SLICE_CLASS} — the one signal the CSS reads too.
+ *  No document (a unit test, the server) is the default instance. */
+export function wikiToolsFlag(doc: unknown = (globalThis as { document?: unknown }).document): boolean {
+  const body = (doc as { body?: { classList?: { contains(c: string): boolean } } } | undefined)?.body;
+  return !body?.classList?.contains(WIKI_READ_SLICE_CLASS);
 }
 
 /** The overview tab to show: Atlas fetches `/api/wiki/atlas`, which the read

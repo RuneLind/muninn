@@ -79,7 +79,7 @@
 /serena | admin-zone |
 /summaries | admin-zone |
 /traces | admin-zone |
-/wiki | user-zone |    # the nav's Wiki link: the wiki read slice (src/dashboard/route-groups.ts), user zone since W1
+/wiki | admin-zone |    # on default; under nais it is a read-slice path (zones.ts WIKI_READ_SLICE_PATHS), user zone
 
 ## path suffixes, from `'/a/' + id + '/b'` concatenation
 

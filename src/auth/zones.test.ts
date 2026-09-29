@@ -8,12 +8,14 @@ import {
   HEALTH_READY_PATH,
   OPEN_ZONE_PATHS,
   USER_ZONE_PATHS,
+  WIKI_READ_SLICE_PATHS,
   decideZone,
   inPathList,
   isAuditedCollectionRead,
   matchPathPattern,
 } from "./zones.ts";
 import { AUTH_EXCLUDED_PATHS } from "./mode.ts";
+import { wikiRouteTable } from "../test/wiki-route-table.ts";
 
 const asUser = (path: string, method = "GET") => decideZone({ method, path, role: "user" });
 const asAdmin = (path: string, method = "GET") => decideZone({ method, path, role: "admin" });
@@ -240,51 +242,58 @@ describe("the deny list", () => {
 });
 
 describe("the wiki read slice in the user zone", () => {
-  /** The route table each half registers — derived, not remembered, so a route
-   *  moved between the halves moves its zone answer with it. */
-  async function wikiRoutes(half: "read" | "tools"): Promise<{ method: string; path: string }[]> {
-    const { Hono } = await import("hono");
-    const { registerWikiReadRoutes, registerWikiToolRoutes } = await import("../dashboard/routes/wiki-routes.ts");
-    const app = new Hono();
-    const config = { profile: "default" } as import("../config.ts").Config;
-    if (half === "read") registerWikiReadRoutes(app, config);
-    else registerWikiToolRoutes(app, config);
-    return app.routes.filter((r) => r.method !== "ALL").map((r) => ({ method: r.method, path: r.path }));
-  }
+  const asSliceUser = (path: string, method = "GET") =>
+    decideZone({ method, path, role: "user", wikiReadSlice: true });
 
-  test("every read-slice route is in the user zone, for role `user`", async () => {
-    const routes = await wikiRoutes("read");
-    expect(routes.map((r) => r.path).sort()).toEqual(
-      ["/api/wiki/graph", "/api/wiki/html", "/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/pages", "/wiki"],
-    );
-    for (const r of routes) {
-      expect(`${r.method} ${r.path} → ${asUser(r.path, r.method).zone}`).toBe(`${r.method} ${r.path} → user`);
-      expect(asUser(r.path, r.method).allowed).toBe(true);
-    }
-  });
-
-  test("every other wiki route — Explain, Ask, Stamp and every POST — stays admin for role `user`", async () => {
-    const routes = await wikiRoutes("tools");
-    // The ones the campaign's acceptance names, so an empty table cannot pass.
-    for (const must of ["/api/wiki/explain", "/api/wiki/ask", "/api/wiki/provenance/stamp", "/api/wiki/series"]) {
-      expect(routes.some((r) => r.path === must), must).toBe(true);
-    }
+  test("default profile: role `user` is refused every read-slice route, exactly as before the slice", () => {
+    const routes = wikiRouteTable("read");
+    expect(routes.map((r) => r.path).sort()).toEqual([...WIKI_READ_SLICE_PATHS].sort());
     for (const r of routes) {
       const d = asUser(r.path, r.method);
       expect(`${r.method} ${r.path} → ${d.allowed ? "allowed" : d.reason}`).toBe(`${r.method} ${r.path} → default deny`);
     }
   });
 
-  test("an admin passes the zone on both halves", async () => {
-    for (const r of [...(await wikiRoutes("read")), ...(await wikiRoutes("tools"))]) {
-      expect(asAdmin(r.path, r.method).allowed, `${r.method} ${r.path}`).toBe(true);
+  test("read slice served: every read-slice route is in the user zone for role `user`", () => {
+    for (const r of wikiRouteTable("read", "nais")) {
+      const d = asSliceUser(r.path, r.method);
+      expect(`${r.method} ${r.path} → ${d.allowed ? d.zone : d.reason}`).toBe(`${r.method} ${r.path} → user`);
     }
   });
 
-  test("the entries are exact — no `/api/wiki/` prefix, no `/wiki/` prefix", () => {
-    expect(USER_ZONE_PATHS.filter((p) => p.startsWith("/api/wiki") || p.startsWith("/wiki")).every((p) => !p.endsWith("/"))).toBe(true);
-    for (const path of ["/api/wiki/pages/x", "/wiki/issues", "/wiki/gardener", "/api/wiki/page/provenance/x"]) {
-      expect(asUser(path).allowed, path).toBe(false);
+  test("read slice served: GET and HEAD only — any other method on those paths stays admin", () => {
+    for (const path of WIKI_READ_SLICE_PATHS) {
+      expect(asSliceUser(path, "HEAD").allowed, `HEAD ${path}`).toBe(true);
+      for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+        expect(asSliceUser(path, method).allowed, `${method} ${path}`).toBe(false);
+      }
+    }
+  });
+
+  test("every other wiki route — Explain, Ask, Stamp and every POST — stays admin, slice or not", () => {
+    const routes = wikiRouteTable("tools");
+    // The ones the campaign's acceptance names, so an empty table cannot pass.
+    for (const must of ["/api/wiki/explain", "/api/wiki/ask", "/api/wiki/provenance/stamp", "/api/wiki/series"]) {
+      expect(routes.some((r) => r.path === must), must).toBe(true);
+    }
+    for (const r of routes) {
+      for (const d of [asUser(r.path, r.method), asSliceUser(r.path, r.method)]) {
+        expect(`${r.method} ${r.path} → ${d.allowed ? "allowed" : d.reason}`).toBe(`${r.method} ${r.path} → default deny`);
+      }
+    }
+  });
+
+  test("an admin passes the zone on both halves, slice or not", () => {
+    for (const r of [...wikiRouteTable("read"), ...wikiRouteTable("tools")]) {
+      expect(asAdmin(r.path, r.method).allowed, `${r.method} ${r.path}`).toBe(true);
+      expect(decideZone({ method: r.method, path: r.path, role: "admin", wikiReadSlice: true }).allowed).toBe(true);
+    }
+  });
+
+  test("the user zone itself carries no wiki path, and the slice entries are exact", () => {
+    expect(USER_ZONE_PATHS.filter((p) => p.startsWith("/api/wiki") || p.startsWith("/wiki"))).toEqual([]);
+    for (const path of ["/api/wiki/pages/x", "/wiki/issues", "/wiki/gardener", "/api/wiki/page/provenance/x", "/wiki/"]) {
+      expect(asSliceUser(path).allowed, path).toBe(false);
     }
   });
 });

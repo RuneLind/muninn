@@ -948,7 +948,13 @@ is the one surface the user zone is written around.
    `/` (role-aware in the HANDLER: a `user` is 302'd to `/chat`), and the
    dashboard routes the composed chat page fetches. All but the two
    `/api/search/` reads were already owner-guarded, so this is enumeration
-   rather than new protection.
+   rather than new protection. **Plus, under `MUNINN_PROFILE=nais` only, the
+   wiki read slice** (`WIKI_READ_SLICE_PATHS`: `/wiki` and
+   `/api/wiki/{pages,page,page/provenance,html,graph}`, GET/HEAD only). The
+   zone middleware is told at mount (`createZoneMiddleware(auth, { wikiReadSlice
+   })`, from `servesWikiReadSliceOnly`); on a default-profile instance those
+   paths stay admin, because there they are the operator's reader over every
+   registered wiki with the host path in the page.
 4. **Everything else is admin**, and default-deny is the point: a route added
    next month arrives CLOSED. That is the inverse of the claimed-id inventory,
    which can only report what it knows to look for.

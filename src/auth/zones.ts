@@ -152,14 +152,20 @@ export const USER_ZONE_PATHS: readonly string[] = [
   "/api/jira/templates",
   "/api/jira/drafts",
   "/api/jira/draft/",
-  // The wiki READ slice — the `wiki-read` route group, i.e. what the reader
-  // needs to list and render a page: the page, the listing, one page, its
-  // provenance block, explainer HTML and graph mode. Exact paths, never an
-  // `/api/wiki/` prefix: that would admit the Stamp write, the series editor
-  // and every other wiki POST, which stay admin by default-deny. These admit
-  // EVERY wiki registered on the instance — on the nais pod that is only the
-  // read-only mirror (`WIKI_EXTRA` + `WIKI_READONLY_ROOTS`). `?refresh=1` on
-  // the listing (a rescan of the index) is a read and stays admitted.
+];
+
+/**
+ * The wiki READ slice — the `wiki-read` route group: the reader page, the
+ * listing, one page, its provenance block, explainer HTML and graph mode.
+ *
+ * In the user zone ONLY when the caller says the read slice is the served wiki
+ * surface (`ZoneDecisionInput.wikiReadSlice`, from `servesWikiReadSliceOnly` —
+ * the `nais` profile). On `default` the same paths are the operator's full
+ * reader over every registered wiki, and role `user` gets 403 there, as before
+ * the slice existed. Exact paths and GET/HEAD only: a later POST on one of
+ * these paths stays admin by default-deny rather than arriving user-reachable.
+ */
+export const WIKI_READ_SLICE_PATHS: readonly string[] = [
   "/wiki",
   "/api/wiki/pages",
   "/api/wiki/page",
@@ -223,6 +229,10 @@ export interface ZoneDecisionInput {
   readonly path: string;
   /** The resolved role, or `null` with auth off (no middleware is mounted). */
   readonly role: AuthRole | null | undefined;
+  /** True when the wiki read slice is the whole wiki surface served
+   *  (`servesWikiReadSliceOnly`). Admits {@link WIKI_READ_SLICE_PATHS} for
+   *  GET/HEAD. Absent ⇒ false. */
+  readonly wikiReadSlice?: boolean;
 }
 
 export function decideZone(input: ZoneDecisionInput): ZoneDecision {
@@ -247,5 +257,8 @@ export function decideZone(input: ZoneDecisionInput): ZoneDecision {
   if (denied) return { allowed: false, zone: "admin", reason: `deny list: ${denied.pattern}` };
   if (inPathList(OPEN_ZONE_PATHS, input.path)) return { allowed: true, zone: "open", reason: "open zone" };
   if (inPathList(USER_ZONE_PATHS, input.path)) return { allowed: true, zone: "user", reason: "user zone" };
+  if (input.wikiReadSlice === true && effective === "GET" && WIKI_READ_SLICE_PATHS.includes(input.path)) {
+    return { allowed: true, zone: "user", reason: "wiki read slice" };
+  }
   return { allowed: false, zone: "admin", reason: "default deny" };
 }

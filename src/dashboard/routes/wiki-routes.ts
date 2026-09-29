@@ -2,7 +2,8 @@ import path from "node:path";
 import { realpath } from "node:fs/promises";
 import type { Context, Hono } from "hono";
 import { resolveServingProfile, type Config } from "../../config.ts";
-import { wikiToolsRegistered } from "../route-groups.ts";
+import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
+import { resolveReadRequest } from "./wiki-read-scope.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
@@ -1241,6 +1242,12 @@ async function getCollectionUpdateStatus(
   }
 }
 
+/** How often the read slice honours an HTTP `?refresh=1` per root. 15 s: one
+ *  rebuild (~0.4 s for the 422-page kode-wiki, measured 2026-09-29) per 15 s
+ *  caps a looping caller at ~3 % of the event loop; the pod's mirror refreshes
+ *  in-process, so a reader loses nothing. */
+export const WIKI_HTTP_REFRESH_MIN_INTERVAL_MS = 15_000;
+
 /** The whole wiki surface — the read slice plus everything else — which is
  *  what the `default` profile registers (as the `wiki-read` and `wiki` groups).
  *  Kept as one call for the route tests, which drive the full surface on a
@@ -1262,12 +1269,17 @@ export function registerWikiRoutes(
  *
  *  The READ SLICE (`wiki-read` group): only what a reader needs to list and
  *  render a page — the page, the listing, one page, its provenance block,
- *  explainer HTML and graph mode. Every route here reads; none reaches a model,
- *  huginn or a write seam. It is the one wiki group `MUNINN_PROFILE=nais`
- *  keeps, and every path it registers is in the auth user zone
- *  (`src/auth/zones.ts`), so adding a route here widens what role `user` can
- *  reach — a route that writes, egresses or spends belongs in
- *  {@link registerWikiToolRoutes}. */
+ *  explainer HTML and graph mode. No route here writes or spends a model call.
+ *  Two make bounded GET fan-outs: `/api/wiki/page/provenance` asks huginn's
+ *  jira-issues corpus about a page's `jira:` keys and claude-usage about its
+ *  sessions (when `CLAUDE_USAGE_URL` is set), and `/api/wiki/graph` does both
+ *  on a tracker wiki — all under one `PROVENANCE_BUDGET_MS` deadline.
+ *
+ *  It is the one wiki group `MUNINN_PROFILE=nais` keeps. There its GET paths
+ *  are in the auth user zone (`WIKI_READ_SLICE_PATHS`, `src/auth/zones.ts`) and
+ *  it serves read-only roots only (`wiki-read-scope.ts`), so adding a route here
+ *  widens what role `user` can reach on the pod — a route that writes, spends
+ *  or sends page text anywhere belongs in {@link registerWikiToolRoutes}. */
 export function registerWikiReadRoutes(
   app: Hono,
   config: Config,
@@ -1277,26 +1289,46 @@ export function registerWikiReadRoutes(
    *  claude-usage happens to be listening on this machine. */
   provenanceCtxOverride?: ProvenanceContext,
 ): void {
-  // Built once per registration: `defaultSessionLedgerDeps` closes over the
-  // resolved claude-usage base URL, and rebuilding it per request would
-  // re-derive the same three values on every page open.
+  // Built per registration, not per request: `defaultSessionLedgerDeps` closes
+  // over the resolved claude-usage base URL. It is stateless, so the tool half
+  // building its own is harmless.
   const provenanceCtx = provenanceCtxOverride ?? defaultProvenanceContext(config);
   // Is the rest of the wiki surface registered beside this slice? False under
   // `nais`: the page then renders no control that would reach a dropped route.
-  const tools = wikiToolsRegistered(config.profile ?? resolveServingProfile());
+  const profile = config.profile ?? resolveServingProfile();
+  const tools = wikiToolsRegistered(profile);
+  // Is this slice the whole wiki surface? Then only read-only roots are served,
+  // for every role (`wiki-read-scope.ts`).
+  const readSliceOnly = servesWikiReadSliceOnly(profile);
 
   // Graph mode's read: it walks one registered wiki's index.
-  registerWikiGraphRoute(app, provenanceCtx);
+  registerWikiGraphRoute(app, provenanceCtx, readSliceOnly);
+
+  // The HTTP `?refresh=1` bound. Under the read slice every team member reaches
+  // the listing, and a rescan is a full index build on the event loop; there
+  // it is honoured at most once per root per `WIKI_HTTP_REFRESH_MIN_INTERVAL_MS`
+  // and otherwise answered from the cache. On the full surface only the
+  // operator reaches it (the client throttles each tab to one per 30 s), and
+  // the e2e suites rewrite fixtures behind the server and rescan within
+  // seconds, so it is not throttled there. In-process `refresh: true` callers
+  // (writers, the mirror) never pass through here.
+  const lastHttpRefresh = new Map<string, number>();
+  const httpRefreshHonored = (root: string): boolean => {
+    if (!readSliceOnly) return true;
+    const now = Date.now();
+    const last = lastHttpRefresh.get(root);
+    if (last !== undefined && now - last < WIKI_HTTP_REFRESH_MIN_INTERVAL_MS) return false;
+    lastHttpRefresh.set(root, now);
+    return true;
+  };
 
   app.get("/wiki", async (c) => {
-    const registry = getWikiRegistry();
-    const wikis = listWikis(registry);
-    const { wiki: selected, envOverride, entry, unknownWiki } = resolveWikiRequest(
-      registry,
+    const { registry, wiki: selected, envOverride, entry, unknownWiki } = resolveReadRequest(
+      readSliceOnly,
       c.req.query("wiki"),
       c.req.query("bot"),
-      process.env.WIKI_DIR,
     );
+    const wikis = listWikis(registry);
     // The gardener is a bot feature — only bot-source wikis carry proposals —
     // and a profile that drops the tool surface drops the gardener with it.
     const isBotWiki = entry?.source === "bot" && tools;
@@ -1384,17 +1416,13 @@ export function registerWikiReadRoutes(
   // listing that is allowed to go stale is a listing that will.
   app.get("/api/wiki/pages", async (c) => {
     c.header("Cache-Control", "no-store");
-    const { entry, unknownWiki } = resolveWikiRequest(
-      getWikiRegistry(),
-      c.req.query("wiki"),
-      c.req.query("bot"),
-      process.env.WIKI_DIR,
-    );
+    const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, c.req.query("wiki"), c.req.query("bot"));
     if (unknownWiki) {
       return c.json({ pages: [], scannedAt: null, error: "no wiki configured for that name" });
     }
     const root = entry?.root;
-    const index = await getWikiIndex({ root, refresh: c.req.query("refresh") === "1" });
+    const refresh = c.req.query("refresh") === "1" && httpRefreshHonored(resolveWikiRoot(root));
+    const index = await getWikiIndex({ root, refresh });
     if (!index) {
       return c.json({ pages: [], scannedAt: null, error: "wiki directory not found" });
     }
@@ -1475,12 +1503,7 @@ export function registerWikiReadRoutes(
     if (!relPathQ && !name) {
       return { ok: false, res: c.json({ error: "name or relPath query param required" }, 400) };
     }
-    const { entry, unknownWiki } = resolveWikiRequest(
-      getWikiRegistry(),
-      c.req.query("wiki"),
-      c.req.query("bot"),
-      process.env.WIKI_DIR,
-    );
+    const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, c.req.query("wiki"), c.req.query("bot"));
     if (unknownWiki) return { ok: false, res: c.json({ error: "no wiki configured for that name" }, 404) };
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return { ok: false, res: c.json({ error: "wiki directory not found" }, 503) };
@@ -1590,12 +1613,7 @@ export function registerWikiReadRoutes(
     const relPathQ = c.req.query("relPath");
     const name = c.req.query("name");
     if (!relPathQ && !name) return c.text("relPath or name query param required", 400);
-    const { entry, unknownWiki } = resolveWikiRequest(
-      getWikiRegistry(),
-      c.req.query("wiki"),
-      c.req.query("bot"),
-      process.env.WIKI_DIR,
-    );
+    const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, c.req.query("wiki"), c.req.query("bot"));
     if (unknownWiki) return c.text("no wiki configured for that name", 404);
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return c.text("wiki directory not found", 503);

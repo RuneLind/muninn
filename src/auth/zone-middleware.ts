@@ -62,7 +62,14 @@ export function __zoneWarningsSizeForTest(): number {
   return warnedRefusals.size;
 }
 
-export function createZoneMiddleware(config: AuthConfig): MiddlewareHandler {
+export interface ZoneMiddlewareOptions {
+  /** `servesWikiReadSliceOnly(config.profile)`, decided once at mount: admits
+   *  the wiki read slice's GET paths to role `user` (`zones.ts`). */
+  readonly wikiReadSlice?: boolean;
+}
+
+export function createZoneMiddleware(config: AuthConfig, opts: ZoneMiddlewareOptions = {}): MiddlewareHandler {
+  const wikiReadSlice = opts.wikiReadSlice === true;
   return async (c: Context, next) => {
     if (AUTH_EXCLUDED_PATHS.includes(c.req.path)) return next();
 
@@ -88,7 +95,7 @@ export function createZoneMiddleware(config: AuthConfig): MiddlewareHandler {
       return c.json({ error: "forbidden", reason: "admin-only route" }, 403);
     }
 
-    const decision = decideZone({ method: c.req.method, path: c.req.path, role });
+    const decision = decideZone({ method: c.req.method, path: c.req.path, role, wikiReadSlice });
 
     if (!decision.allowed) {
       const key = `${c.req.method} ${c.req.path}`;

@@ -2671,9 +2671,6 @@ export async function renderWikiPage(opts?: {
     // "" still says "a wiki is served" (the nav's check) and ⧉ Copy path copies
     // the relPath alone.
     window.__WIKI_ROOT__ = ${escJsonScript(tools || wikiRoot === null ? wikiRoot : "")};
-    // False under MUNINN_PROFILE=nais: only the read slice is registered, so the
-    // client makes no request to Ask/Explain/fact-check/Similar/atlas/digest.
-    window.__WIKI_TOOLS__ = ${tools ? "true" : "false"};
   </script>
   <script>
     ${clientScript}

@@ -8,12 +8,26 @@
  * Norwegian `.mdx` — a `<Callout>` and a client-rendered mermaid SVG — in both
  * colour schemes, the browser makes NO request that answers 4xx/5xx (a control
  * or panel reaching a dropped route would, as Hono's 404 or the zone's 403),
- * logs no console error, and shows none of the controls the profile dropped.
+ * logs no console error, and every visible interactive control in the reader
+ * is on an explicit ALLOWLIST of read controls (`READER_CONTROLS`). The
+ * allowlist is independent of the selector that hides the dropped controls, so
+ * a control that selector forgot shows up here as unexpected.
+ *
+ * The fixture is built to make controls render: a `trackers` block (graph
+ * mode, issue pills), a page with `jira:`/`sessions:`/`prs:` frontmatter (the
+ * provenance strip), an `<Embed>` of a same-stem `.html` (an attachment), and a
+ * series. `CLAUDE_USAGE_URL` is blank and `KNOWLEDGE_API_URL` points at a
+ * closed port, so the provenance and graph legs degrade and never reach a live
+ * service.
+ *
+ * A second muninn at role `admin` carries the zone rows for both roles, next
+ * to a second, WRITABLE wiki that the read slice must not serve.
  *
  * The browser drives 127.0.0.1, which takes the loopback bypass: the pinned
  * identity at role `user` with no credential — exactly the role under test.
- * No model calls and nothing written. The mermaid bundle loads from the
- * CDN, as it does for every reader.
+ * The zone rows go through a forwarding header plus the token instead, as a
+ * request through the pod's proxy would. No model calls and nothing written.
+ * The mermaid bundle loads from the CDN, as it does for every reader.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -23,18 +37,32 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { WIKI_READ_SLICE_HIDDEN_SELECTOR } from "../src/dashboard/views/components/wiki-read-slice.ts";
 
 const PORT = e2ePort("wiki-nais-read");
 const BASE = `http://127.0.0.1:${PORT}`;
+const ADMIN_PORT = e2ePort("wiki-nais-read/admin");
+const ADMIN_BASE = `http://127.0.0.1:${ADMIN_PORT}`;
+const DEAD_HUGINN = `http://127.0.0.1:${e2ePort("wiki-nais-read/dead-huginn")}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "melosys-felles";
+const WRITABLE = "felles-skrivbar";
 const PAGE_REL = "plans/testside.mdx";
+const SECRET = "e2e-wiki-nais-read-secret-not-real";
+
+const READER_CONFIG = JSON.stringify({
+  typeMap: { plans: "plan" },
+  trackers: [{ id: "jira", projects: ["MELOSYS"], hosts: ["jira.example.invalid"] }],
+});
 
 const PAGE = [
   "---",
   "title: Testside for felles wiki",
   "tags: [test, melosys]",
+  "jira: [MELOSYS-7790]",
+  "sessions: [claude-code:0f0e2c1a-5b8e-4c33-9a51-2d8f1e7c9b10]",
+  "prs: [navikt/melosys-api#123]",
+  "series: felles",
+  "series_label: Felles serie",
   "---",
   "",
   "# Testside for felles wiki",
@@ -54,57 +82,83 @@ const PAGE = [
   "  B -->|Nei| D[Avvist]",
   "```",
   "",
-  "Se også [[annen-side]].",
+  "Se også [[annen-side]] og [MELOSYS-7790](https://jira.example.invalid/browse/MELOSYS-7790).",
+  "",
+  '<Embed src="./testside.html" height="200" title="Kart" />',
   "",
 ].join("\n");
+const SECOND = ["---", "title: Andre del", "series: felles", "---", "", "# Andre del", "", "Del to av serien.", ""].join("\n");
+const EXPLAINER = "<!doctype html><html><head><title>Kart</title></head><body><p>Innebygd kart.</p></body></html>";
 const OTHER = ["---", "title: Annen side", "---", "", "# Annen side", "", "Lenker tilbake til [[testside]].", ""].join("\n");
 
-let server: ChildProcess | undefined;
+const servers: ChildProcess[] = [];
 let root = "";
+let writableRoot = "";
 
-test.beforeAll(async ({}, info) => {
-  info.setTimeout(60_000);
-  root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-nais-read-"));
-  await mkdir(path.join(root, "plans"), { recursive: true });
-  await writeFile(path.join(root, PAGE_REL), PAGE, "utf8");
-  await writeFile(path.join(root, "annen-side.md"), OTHER, "utf8");
+function boot(port: number, role: "user" | "admin"): void {
+  const base = `http://127.0.0.1:${port}`;
+  servers.push(
+    spawn("bun", ["run", "src/index.ts"], {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        ...e2eEnv(),
+        DASHBOARD_PORT: String(port),
+        DASHBOARD_HOST: "127.0.0.1",
+        SCHEDULER_ENABLED: "false",
+        MUNINN_PROFILE: "nais",
+        MUNINN_AUTH: "local",
+        MUNINN_LOCAL_TOKEN: SECRET,
+        MUNINN_LOCAL_USER: "e2e-nais-reader",
+        MUNINN_LOCAL_ROLE: role,
+        MUNINN_ADMIN_IDENTS: "A123456",
+        MUNINN_ALLOWED_ORIGINS: base,
+        // The writable wiki FIRST: a bare request would default to it if the
+        // read slice served every registered wiki.
+        WIKI_EXTRA: `${WRITABLE}=${writableRoot},${WIKI}=${root}`,
+        WIKI_READONLY_ROOTS: root,
+        KNOWLEDGE_API_URL: DEAD_HUGINN,
+        CLAUDE_USAGE_URL: "",
+      },
+      stdio: "ignore",
+    }),
+  );
+}
 
-  server = spawn("bun", ["run", "src/index.ts"], {
-    cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      ...e2eEnv(),
-      DASHBOARD_PORT: String(PORT),
-      DASHBOARD_HOST: "127.0.0.1",
-      SCHEDULER_ENABLED: "false",
-      MUNINN_PROFILE: "nais",
-      MUNINN_AUTH: "local",
-      MUNINN_LOCAL_TOKEN: "e2e-wiki-nais-read-secret-not-real",
-      MUNINN_LOCAL_USER: "e2e-nais-reader",
-      MUNINN_LOCAL_ROLE: "user",
-      MUNINN_ADMIN_IDENTS: "A123456",
-      MUNINN_ALLOWED_ORIGINS: BASE,
-      WIKI_EXTRA: `${WIKI}=${root}`,
-      WIKI_READONLY_ROOTS: root,
-    },
-    stdio: "ignore",
-  });
-
+async function waitUp(base: string): Promise<void> {
   const deadline = Date.now() + 40_000;
   for (;;) {
     try {
-      if ((await fetch(`${BASE}/api/live`)).ok) break;
+      if ((await fetch(`${base}/api/live`)).ok) return;
     } catch {
       /* not up yet */
     }
-    if (Date.now() > deadline) throw new Error("nais muninn did not start on port " + PORT);
+    if (Date.now() > deadline) throw new Error("nais muninn did not start on " + base);
     await new Promise((r) => setTimeout(r, 400));
   }
+}
+
+test.beforeAll(async ({}, info) => {
+  info.setTimeout(90_000);
+  root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-nais-read-"));
+  writableRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-nais-rw-"));
+  await mkdir(path.join(root, "plans"), { recursive: true });
+  await writeFile(path.join(root, ".wiki-reader.json"), READER_CONFIG, "utf8");
+  await writeFile(path.join(root, PAGE_REL), PAGE, "utf8");
+  await writeFile(path.join(root, "plans/testside.html"), EXPLAINER, "utf8");
+  await writeFile(path.join(root, "plans/andre-del.mdx"), SECOND, "utf8");
+  await writeFile(path.join(root, "annen-side.md"), OTHER, "utf8");
+  await writeFile(path.join(writableRoot, "hemmelig.md"), "# Hemmelig\n\nSkal ikke vises.\n", "utf8");
+
+  boot(PORT, "user");
+  boot(ADMIN_PORT, "admin");
+  await Promise.all([waitUp(BASE), waitUp(ADMIN_BASE)]);
 });
 
 test.afterAll(async () => {
-  server?.kill("SIGTERM");
+  for (const s of servers) s.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
+  if (writableRoot) await rm(writableRoot, { recursive: true, force: true });
 });
 
 /** Record every same-origin response that failed, and every console error. */
@@ -122,13 +176,85 @@ function watch(page: Page): { failed: string[]; errors: string[] } {
   return { failed, errors };
 }
 
-/** How many controls from the dropped surface are on screen. */
-async function visibleDroppedControls(page: Page): Promise<string[]> {
-  return page.evaluate((selector) => {
-    return Array.from(document.querySelectorAll<HTMLElement>(selector))
+/**
+ * The interactive controls a reader may see under the read slice — each a READ
+ * control (navigation, filters, view toggles, links into the reader or out to
+ * the tracker). Deliberately NOT derived from `WIKI_READ_SLICE_HIDDEN_SELECTOR`:
+ * a control that selector forgot must fail here, not pass by construction.
+ */
+const READER_CONTROLS = [
+  // The rail: wiki picker, search, sort, facets, folds, pins (localStorage), resizer.
+  "#wikiSelect",
+  "#wikiSearch",
+  "#wikiSort",
+  "#wikiGroupFamilies",
+  "#wikiFolder",
+  ".wiki-chip",
+  ".wiki-pin",
+  ".wiki-group-fold",
+  ".wiki-fold-chip",
+  "#wikiRailResizer",
+  // The breadcrumb: overview link, ⧉ Copy path, ⌖ Show in list, graph mode.
+  "a.wiki-bc-wiki",
+  "#wikiCopyPathBtn",
+  "#wikiLocateBtn",
+  "#wikiGraphToggle",
+  // The start view's two tabs (Atlas is absent under the slice).
+  '.wiki-tab[data-tab="hubs"]',
+  '.wiki-tab[data-tab="timeline"]',
+  // Graph mode (a `wiki-read` route): level, depth and the nodes, which open a
+  // client-side card.
+  "#wikiGraphLevel",
+  "#wikiGraphDepth",
+  "[data-graph-node]",
+  "[data-graph-card-close]",
+  "[data-graph-focus]",
+  // The provenance strip: the Jira key narrows the list client-side, the line
+  // opens the chain, ⧉ copies a session id, retry refetches the strip.
+  "[data-prov-jira]",
+  "[data-prov-toggle]",
+  "[data-prov-retry]",
+  "[data-sess-copy]",
+  // In-reader links, the embed's own tab (`/api/wiki/html`), and the rail tabs.
+  "a.wiki-link",
+  "a.embed-open",
+  '.wiki-conn-tab[data-conntab="conn"]',
+  ".wiki-pane-btn",
+  // Out to the tracker.
+  'a[href^="https://"][target="_blank"]',
+];
+
+/** Every visible interactive element inside the reader that is on no allowlist
+ *  entry, described well enough to decide whether to hide it or allow it. */
+async function unexpectedControls(page: Page): Promise<string[]> {
+  return page.evaluate((allow) => {
+    const interactive = 'button, a[href], input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])';
+    const scope = document.querySelector(".wiki-layout") ?? document.body;
+    return Array.from(scope.querySelectorAll<HTMLElement>(interactive))
       .filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden")
-      .map((el) => el.id || el.className || el.tagName);
-  }, WIKI_READ_SLICE_HIDDEN_SELECTOR);
+      .filter((el) => !allow.some((sel) => el.matches(sel)))
+      .map((el) => {
+        const attrs = Array.from(el.attributes)
+          .filter((a) => a.name !== "style")
+          .map((a) => `${a.name}="${a.value.slice(0, 60)}"`)
+          .join(" ");
+        return `<${el.tagName.toLowerCase()} ${attrs}> ${(el.textContent ?? "").trim().slice(0, 40)}`;
+      });
+  }, READER_CONTROLS);
+}
+
+/** Every link or form target in the reader that names an `/api/` path outside
+ *  the read slice. */
+async function apiLinksOutsideSlice(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const slice = ["/api/wiki/pages", "/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/html", "/api/wiki/graph"];
+    return Array.from(document.querySelectorAll<HTMLElement>("a[href], iframe[src], form[action]"))
+      .map((el) => el.getAttribute("href") ?? el.getAttribute("src") ?? el.getAttribute("action") ?? "")
+      .filter((u) => {
+        const p = new URL(u, location.href);
+        return p.origin === location.origin && p.pathname.startsWith("/api/") && !slice.includes(p.pathname);
+      });
+  });
 }
 
 for (const scheme of ["light", "dark"] as const) {
@@ -149,7 +275,16 @@ for (const scheme of ["light", "dark"] as const) {
     // Let lazy loaders (Similar, coverage footer) fire if anything would.
     await page.waitForTimeout(1_500);
 
-    expect(await visibleDroppedControls(page)).toEqual([]);
+    // The attachment's frame and the provenance strip rendered, so their
+    // controls were on screen for the allowlist check below.
+    await expect(page.locator("#articleWrap iframe").first()).toBeVisible();
+    await expect(page.locator("[data-prov-toggle]")).toBeVisible();
+    expect(await unexpectedControls(page)).toEqual([]);
+    expect(await apiLinksOutsideSlice(page)).toEqual([]);
+    // Open the provenance chain: its rows carry controls of their own.
+    await page.locator("[data-prov-toggle]").click();
+    await expect(page.locator("#wikiProvChain")).toBeVisible();
+    expect(await unexpectedControls(page)).toEqual([]);
     expect(seen.failed).toEqual([]);
     expect(seen.errors).toEqual([]);
     // The scheme actually applied: the body background follows it.
@@ -159,6 +294,20 @@ for (const scheme of ["light", "dark"] as const) {
     expect(scheme === "dark" ? luminance < 100 : luminance > 150, `body background ${bg}`).toBe(true);
 
     await info.attach(`reader-${scheme}.png`, { body: await page.screenshot(), contentType: "image/png" });
+
+    // Graph mode is in the slice on a tracker wiki: it answers, and its own
+    // controls are read controls too.
+    await page.locator("#wikiGraphToggle").click();
+    await expect(page.locator("#wikiGraphToggle")).toHaveAttribute("aria-pressed", "true");
+    await page.locator('[data-graph-node^="issue:"]').first().click();
+    await page.waitForTimeout(1_000);
+    const graphControls = await unexpectedControls(page);
+    // Re-rooting refetches the graph: still inside the slice.
+    await page.locator("[data-graph-focus]").first().click();
+    await page.waitForTimeout(1_000);
+    expect(seen.failed).toEqual([]);
+    expect(seen.errors).toEqual([]);
+    expect(graphControls).toEqual([]);
     await context.close();
   });
 }
@@ -177,7 +326,112 @@ test("the overview makes no request outside the read slice, and has no Atlas tab
   await page.waitForTimeout(1_500);
 
   expect(paths.filter((p) => p.startsWith("/api/wiki/") && p !== "/api/wiki/pages")).toEqual([]);
-  expect(await visibleDroppedControls(page)).toEqual([]);
+  expect(await unexpectedControls(page)).toEqual([]);
   expect(seen.failed).toEqual([]);
   expect(seen.errors).toEqual([]);
+});
+
+// ---- the zone rows, both roles, through the proxy path -------------------
+
+/** A forwarding header takes a request out of the loopback bypass, so the
+ *  token and `MUNINN_LOCAL_ROLE` decide the role — as through the pod's proxy. */
+const VIA_PROXY = { "x-forwarded-for": "203.0.113.9", "x-muninn-token": SECRET };
+const ZONE_REFUSAL = { error: "forbidden", reason: "admin-only route" };
+const Q = `wiki=${WIKI}`;
+
+/** All six read-slice paths, each with parameters that make it answer 200. */
+const READS = [
+  `/wiki?${Q}`,
+  `/api/wiki/pages?${Q}`,
+  `/api/wiki/page?${Q}&relPath=${encodeURIComponent(PAGE_REL)}`,
+  `/api/wiki/page/provenance?${Q}&relPath=${encodeURIComponent(PAGE_REL)}`,
+  `/api/wiki/html?${Q}&relPath=plans/testside.html`,
+  `/api/wiki/graph?${Q}&scope=wiki&level=1&depth=0`,
+];
+const TOOL_GETS = [`/api/wiki/explain?${Q}`, `/api/wiki/ask?${Q}`, `/api/wiki/factcheck?${Q}`, `/api/wiki/similar?${Q}`];
+const TOOL_POSTS = [
+  "/api/wiki/provenance/stamp",
+  "/api/wiki/series",
+  "/api/wiki/share",
+  "/api/wiki/remember",
+  "/api/wiki/factcheck/append",
+  "/api/wiki/ask/chat",
+];
+
+async function probe(base: string, p: string, method: "GET" | "POST" = "GET") {
+  const res = await fetch(`${base}${p}`, {
+    method,
+    headers: method === "POST" ? { ...VIA_PROXY, "content-type": "application/json" } : VIA_PROXY,
+    ...(method === "POST" ? { body: "{}" } : {}),
+    redirect: "manual",
+  });
+  const text = await res.text();
+  let body: unknown = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    /* HTML */
+  }
+  return { status: res.status, body, text };
+}
+
+test.describe("zone rows under nais — role `user`", () => {
+  test("all six read-slice paths pass the zone and answer 200", async () => {
+    for (const p of READS) {
+      expect(`${p} → ${(await probe(BASE, p)).status}`).toBe(`${p} → 200`);
+    }
+  });
+
+  test("a POST to a read-slice path is the zone's 403", async () => {
+    for (const p of ["/api/wiki/pages", "/api/wiki/page"]) {
+      const r = await probe(BASE, p, "POST");
+      expect(`${p} → ${r.status}`).toBe(`${p} → 403`);
+      expect(r.body).toEqual(ZONE_REFUSAL);
+    }
+  });
+
+  test("Explain, Ask, Stamp and the wiki writes are the zone's 403", async () => {
+    for (const p of TOOL_GETS) {
+      const r = await probe(BASE, p);
+      expect(`GET ${p} → ${r.status}`).toBe(`GET ${p} → 403`);
+      expect(r.body).toEqual(ZONE_REFUSAL);
+    }
+    for (const p of TOOL_POSTS) {
+      const r = await probe(BASE, p, "POST");
+      expect(`POST ${p} → ${r.status}`).toBe(`POST ${p} → 403`);
+      expect(r.body).toEqual(ZONE_REFUSAL);
+    }
+  });
+
+  test("the writable wiki is not served, and the picker does not list it", async () => {
+    const page = await probe(BASE, `/api/wiki/page?wiki=${WRITABLE}&name=hemmelig`);
+    expect(page.status).toBe(404);
+    const html = (await probe(BASE, "/wiki")).text;
+    expect(html).toContain(WIKI);
+    expect(html).not.toContain(WRITABLE);
+  });
+});
+
+test.describe("zone rows under nais — role `admin`", () => {
+  test("all six read-slice paths answer 200", async () => {
+    for (const p of READS) {
+      expect(`${p} → ${(await probe(ADMIN_BASE, p)).status}`).toBe(`${p} → 200`);
+    }
+  });
+
+  test("the tool routes pass the zone and meet no handler — absent, not denied", async () => {
+    for (const p of TOOL_GETS) {
+      const r = await probe(ADMIN_BASE, p);
+      expect(`GET ${p} → ${r.status}`).toBe(`GET ${p} → 404`);
+      expect(r.body).not.toEqual(ZONE_REFUSAL);
+    }
+    for (const p of TOOL_POSTS) {
+      const r = await probe(ADMIN_BASE, p, "POST");
+      expect(`POST ${p} → ${r.status}`).toBe(`POST ${p} → 404`);
+    }
+  });
+
+  test("the writable wiki is not served to an admin either", async () => {
+    expect((await probe(ADMIN_BASE, `/api/wiki/page?wiki=${WRITABLE}&name=hemmelig`)).status).toBe(404);
+  });
 });

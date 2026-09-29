@@ -9,9 +9,10 @@ import {
 import { renderWikiPage } from "../wiki-page.ts";
 
 describe("the reader under the read slice", () => {
-  test("wikiToolsFlag is false only on an explicit false", () => {
-    expect(wikiToolsFlag({ __WIKI_TOOLS__: false })).toBe(false);
-    expect(wikiToolsFlag({ __WIKI_TOOLS__: true })).toBe(true);
+  test("wikiToolsFlag reads the body class — the one signal the CSS reads too", () => {
+    const docWith = (...classes: string[]) => ({ body: { classList: { contains: (c: string) => classes.includes(c) } } });
+    expect(wikiToolsFlag(docWith(WIKI_READ_SLICE_CLASS))).toBe(false);
+    expect(wikiToolsFlag(docWith("other"))).toBe(true);
     expect(wikiToolsFlag({})).toBe(true);
     expect(wikiToolsFlag(undefined)).toBe(true);
   });
@@ -37,22 +38,21 @@ describe("the reader under the read slice", () => {
     for (const r of rules) expect(r.startsWith(`body.${WIKI_READ_SLICE_CLASS} `), r).toBe(true);
   });
 
-  test("renderWikiPage({tools:false}) stamps the class, the flag, and drops the presence poll", async () => {
+  test("renderWikiPage({tools:false}) stamps the class and drops the presence poll", async () => {
     const html = await renderWikiPage({ wikis: ["felles"], selected: "felles", tools: false, wikiRoot: "/srv/mirror" });
     expect(html).toContain(`<body class="${WIKI_READ_SLICE_CLASS}">`);
     // The host path is withheld from a reader who is not an operator.
     expect(html).not.toContain("/srv/mirror");
     expect(html).toContain('window.__WIKI_ROOT__ = "";');
-    expect(html).toContain("window.__WIKI_TOOLS__ = false;");
+    expect(html).not.toContain("__WIKI_TOOLS__");
     // The agent-presence chip polls /api/agents/overview, which role `user` is refused.
     expect(html).not.toContain('id="wikiPresence"');
   });
 
-  test("the default page is unchanged: no class, the flag true, the presence chip present", async () => {
+  test("the default page is unchanged: no class, the presence chip present", async () => {
     const html = await renderWikiPage({ wikis: ["felles"], selected: "felles", wikiRoot: "/srv/mirror" });
     expect(html).toContain("<body>");
     expect(html).toContain('window.__WIKI_ROOT__ = "/srv/mirror";');
-    expect(html).toContain("window.__WIKI_TOOLS__ = true;");
     expect(html).toContain('id="wikiPresence"');
   });
 });
