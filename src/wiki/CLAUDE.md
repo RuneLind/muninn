@@ -127,7 +127,7 @@ Five things about it are deliberate and easy to undo by accident:
 - ⚠️ **It is ICON-ONLY, the row WRAPS, and the rule is ENFORCED by the spec, not recorded in a comment.** `.wiki-bc-trail` is the row's only shrinkable item, so every action added to that row comes out of the trail's width: a LABELLED button (~104px) rendered it at 27px at 1280 and 0px at 800 with the document scrolling 48px sideways; the glyph costs ~38px (a 30px button plus the row's 8px gap) and `flex: 1 1 160px` + `flex-wrap` catches the rest. **Two earlier rounds wrote measurements into this comment and the CSS's, and a third wrote a full sweep; each was refuted by the next review** — the sweep claiming "260 wraps at every width" about a build where it wraps at 8 of 14. So the invariant is what is stated (the trail stays legible; the row never overflows its pane; it wraps ONLY where a single line would leave the trail cramped — the counterfactual below, not a bare "does one line fit", which the shipped basis deliberately does not satisfy at 960/980 where wrapping buys the trail 214/234px instead of 129/149px) and `e2e/wiki-copy-path.spec.ts` **sweeps 760–1920px in both selection states** to enforce it — both states because ✨ Explain and ✓ Fact check are hidden until text is selected, so every hand sweep measured a row two items shorter than a reader mid-selection sees. With a selection live the row may legitimately wrap where it otherwise does not, so the no-wrap check is scoped to the no-selection case. The no-wrap half is a **counterfactual, not a width list** — the spec forces `nowrap`, reads what the trail would have got, and only then asks whether wrapping bought anything, which is what makes it portable: where a flex row breaks depends on platform font metrics, and CI proved it by failing on Linux at two widths that stay on one line on macOS. Measured against that rule, each mutation shown to apply: basis 0 fails 7 cases, 100 fails 1, 180 fails 3, 200 fails 4, 260 fails 5, removing `flex-wrap` fails 7 — while 120/140/160 all pass, so it brackets the basis from both sides without dictating one value. The detector itself is pinned in both directions (hardwiring it to `false`, and the top-edge form it replaced, each fail one case). Re-tune by changing the basis and running the spec.
 - **A blank path is a REFUSAL, not a copy.** `writeText("")` resolves, so copying nothing would report success while emptying the reader's clipboard — `wikiPagePath` answers `""` for a blank relPath and the click reports "Copy failed". The accessible name carries that verdict too: an `aria-label` overrides a button's text, so a static one silences the only feedback a clipboard write has, hardest on the `execCommand` path that is PRIMARY on the plain-HTTP tailnet deployment.
 
-**It is also a new disclosure**, small but real: `GET /wiki` now ships the host's absolute directory layout for the selected wiki (`window.__WIKI_ROOT__`) to whoever can load the page — `origin/main` shipped no absolute path there, and `/api/wiki/*` still ships none. Bounded by `/wiki` being admin-zone under `src/auth/zones.ts` (default-deny) and dropped entirely under `MUNINN_PROFILE=nais`; `/plans` already ships its wiki root the same way. On the documented `MUNINN_AUTH=off` shape there is no middleware at all, so on a tailnet-served instance it discloses the username and home layout — including for `WIKI_READONLY_ROOTS` entries such as `~/.claude/projects`. Wiki content cannot read it: explainer pages render in an iframe with no `allow-same-origin`.
+**It is also a new disclosure**, small but real: `GET /wiki` now ships the host's absolute directory layout for the selected wiki (`window.__WIKI_ROOT__`) to whoever can load the page — `origin/main` shipped no absolute path there, and `/api/wiki/*` still ships none. Bounded by `/wiki` being admin-zone under `src/auth/zones.ts` on a default-profile instance, whatever `MUNINN_AUTH` says — role `user` (including `local` mode's credential-less loopback identity) gets 403 there. Only under `MUNINN_PROFILE=nais` is `/wiki` a user-zone path (`WIKI_READ_SLICE_PATHS`, GET/HEAD only, admitted by `servesWikiReadSliceOnly`), and there the page withholds the root (`__WIKI_ROOT__ = ""`, so Copy path copies the relPath alone) and the read routes serve read-only roots only (`src/dashboard/routes/wiki-read-scope.ts`); `/plans` already ships its wiki root the same way. On the documented `MUNINN_AUTH=off` shape there is no middleware at all, so on a tailnet-served instance it discloses the username and home layout — including for `WIKI_READONLY_ROOTS` entries such as `~/.claude/projects`. Wiki content cannot read it: explainer pages render in an iframe with no `allow-same-origin`.
 
 Acceptance: `e2e/wiki-copy-path.spec.ts` (two temp wikis in ONE process, the second registered read-only).
 
@@ -1278,8 +1278,11 @@ wrong from outside:
   release is time alone (one index TTL); a process restart is the deliberate
   "ask again now", since boot kicks with no age gate.
 - **The boot kick is gated on the serving profile**: under `MUNINN_PROFILE=nais`
-  the `wiki` route group is dropped, so there is no reader to warm the axis for
-  and nothing is fetched.
+  the `wiki` route group is dropped (only the `wiki-read` slice over a
+  read-only mirror is registered), so there is no worked-on axis to warm and
+  nothing is fetched. The kick inside `buildWikiIndex` shares the gate
+  (`wikiToolsRegistered`), so a listing read on the pod never sends a root to
+  claude-usage either.
 
 **Path matching, and the guard that can actually fire.** Rows key on the
 NORMALIZED wiki-relative path (`normalizeWorkedPath` — the index's own
@@ -2371,9 +2374,12 @@ no `trackers` block has no toggle, `g` does nothing there, and the route answers
   read as a key; 404 for an unknown wiki, page, series, a key no page counts,
   or a bookkeeping page as root. A 404 echoes the root through `echoQuery`
   (`PROVENANCE_ECHO_MAX`, `provenance.ts`). A missing `wiki=` answers 503 when
-  the default wiki directory is absent. Registered inside the `wiki`
-  route group (`MUNINN_PROFILE=nais` drops it) and on `SIDE_EFFECTING_GETS`
-  beside the two provenance paths.
+  the default wiki directory is absent. Registered inside the `wiki-read`
+  route group — the read slice `MUNINN_PROFILE=nais` keeps, a user-zone path
+  there only, over read-only roots only — and on `SIDE_EFFECTING_GETS` beside
+  the two provenance paths. A kode-wiki mirror carries a `trackers` block, so
+  on the pod it answers 200 and its huginn and claude-usage legs run, bounded
+  like every other provenance leg.
 - **Level** picks the lanes: 1 is issues and pages, 2 adds sessions, 3 adds
   PRs. **Depth** is hops from the root, walking only those lanes, over four
   edge kinds: issue–page (the key map, counting relations only), page–session
@@ -3218,6 +3224,10 @@ SAME directories.** The lock is per ROOT, so two processes configured with
 different roots lock at different paths and share nothing. In particular a wiki
 registered at a strict SUBDIRECTORY of a stamp root gets no mutual exclusion:
 the stamper locks the parent, muninn locks the child, and both writes proceed.
+
+## Index single-flight (`getWikiIndex`, `store.ts`)
+
+Builds are single-flight per root: at most one running and one queued. A caller that accepts the cache joins the running build; a `refresh: true` caller never does, because that build may have read the disk before the caller's own write — it gets the queued build (started after the running one settles, shared by every refresher that arrives meanwhile). Every programmatic writer passes `refresh: true` after it lands and relies on that. Measured before it existed: 20 parallel HTTP refreshes on the 422-page kode-wiki under nais stalled `/api/live` for 4.98 s (~395 ms per build). The HTTP `?refresh=1` on `/api/wiki/pages` is additionally throttled under the nais read slice (`WIKI_HTTP_REFRESH_MIN_INTERVAL_MS`, 15 s per root, else answered from the cache); in-process callers and the default profile are not throttled. Pinned in `store-single-flight.test.ts` and `routes/wiki-read-slice-routes.test.ts`.
 
 ## Write queue (`queue.ts`)
 

@@ -24,7 +24,7 @@ import { registerAnthropicRoutes } from "./routes/anthropic-routes.ts";
 import { registerArticleRoutes } from "./routes/article-routes.ts";
 import { registerSSERoutes } from "./routes/sse-routes.ts";
 import { registerGraphRoutes } from "./routes/graph-routes.ts";
-import { registerWikiRoutes } from "./routes/wiki-routes.ts";
+import { registerWikiReadRoutes, registerWikiToolRoutes } from "./routes/wiki-routes.ts";
 import { registerWikiGardenerRoutes } from "./routes/wiki-gardener-routes.ts";
 import { registerBenchmarkRoutes } from "./routes/benchmark-routes.ts";
 import { registerModelsRoutes } from "./routes/models-routes.ts";
@@ -121,7 +121,8 @@ export function createDashboardRoutes(config: Config): Hono {
     ["vimeo", (a) => registerVimeoRoutes(a, config)],
     ["sse", (a) => registerSSERoutes(a)],
     ["graph", (a) => registerGraphRoutes(a, config)],
-    ["wiki", (a) => registerWikiRoutes(a, config)],
+    ["wiki-read", (a) => registerWikiReadRoutes(a, config)],
+    ["wiki", (a) => registerWikiToolRoutes(a, config)],
     ["wiki-gardener", (a) => registerWikiGardenerRoutes(a)],
     ["benchmark", (a) => registerBenchmarkRoutes(a)],
     ["models", (a) => registerModelsRoutes(a)],

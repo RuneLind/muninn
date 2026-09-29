@@ -2,7 +2,8 @@ import { test, expect, describe } from "bun:test";
 import { Hono } from "hono";
 import type { Config } from "../config.ts";
 import { createDashboardRoutes } from "./routes.ts";
-import { NAIS_DROPPED_ROUTE_GROUPS, shouldKickWorkedLedgerAtBoot } from "./route-groups.ts";
+import { NAIS_DROPPED_ROUTE_GROUPS, servesWikiReadSliceOnly, wikiToolsRegistered } from "./route-groups.ts";
+import { wikiRouteTable } from "../test/wiki-route-table.ts";
 import { renderNav } from "./views/shared-styles.ts";
 
 /**
@@ -31,7 +32,7 @@ const CONFIG = { dashboardPort: 3010, profile: "default" } as Config;
 
 /** One representative path per dropped group — the address a client would use. */
 const DROPPED_PATHS: Record<string, string> = {
-  "wiki": "/api/wiki/pages",
+  "wiki": "/api/wiki/similar",
   "wiki-gardener": "/api/wiki/proposals",
   "plans": "/api/plans/board",
   "sync": "/api/sync/status",
@@ -50,7 +51,7 @@ const DROPPED_PATHS: Record<string, string> = {
 /** The page routes that go with them — a dropped group must take its HTML
  *  surface with it, or a `/plans` bookmark renders a shell whose every fetch
  *  404s and reads as a broken page rather than as an absent feature. */
-const DROPPED_PAGES = ["/wiki", "/wiki/gardener", "/plans", "/logs", "/benchmark", "/summaries"];
+const DROPPED_PAGES = ["/wiki/issues", "/wiki/gardener", "/plans", "/logs", "/benchmark", "/summaries"];
 
 function build(profile: "default" | "nais"): Hono {
   const app = new Hono();
@@ -172,7 +173,7 @@ describe("renderNav under the nais profile", () => {
   test("links to dropped groups are absent — on the chat page too", () => {
     for (const page of ["chat", "dashboard"] as const) {
       const linked = hrefs(renderNav(page, { profile: "nais" }));
-      for (const dead of ["/wiki", "/plans", "/logs", "/benchmark", "/summaries"]) {
+      for (const dead of ["/plans", "/logs", "/benchmark", "/summaries"]) {
         expect(`${page} links ${dead}: ${linked.includes(dead)}`).toBe(`${page} links ${dead}: false`);
       }
     }
@@ -180,7 +181,7 @@ describe("renderNav under the nais profile", () => {
 
   test("the kept links — including the Tools ▾ entries — are still there", () => {
     const linked = hrefs(renderNav("chat", { profile: "nais" }));
-    for (const kept of ["/", "/chat", "/agents", "/traces", "/research", "/search", "/graph", "/jira", "/models", "/indexing"]) {
+    for (const kept of ["/", "/chat", "/agents", "/traces", "/research", "/search", "/wiki", "/graph", "/jira", "/models", "/indexing"]) {
       expect(`nais links ${kept}: ${linked.includes(kept)}`).toBe(`nais links ${kept}: true`);
     }
   });
@@ -197,6 +198,66 @@ describe("renderNav under the nais profile", () => {
   });
 });
 
+/**
+ * The wiki READ slice: the one wiki group `nais` keeps. Its routes answer and
+ * every other wiki route is absent — the split the user zone's wiki entries
+ * rest on (`src/auth/zones.ts`).
+ */
+describe("the wiki read slice under nais", () => {
+  test("the read routes are registered", () => {
+    const read = wikiRouteTable("read", "nais");
+    expect(read.length).toBeGreaterThanOrEqual(6);
+    const paths = registeredPaths(build("nais"));
+    for (const { path } of read) {
+      expect(`${path} → ${paths.has(path)}`).toBe(`${path} → true`);
+    }
+  });
+
+  test("…and ANSWER — a handler runs, not Hono's 404", async () => {
+    // Parameters that each handler refuses before any filesystem read, so the
+    // answer is the route's own and does not depend on this machine's wikis.
+    const app = build("nais");
+    const answers: Record<string, number> = {};
+    for (const path of ["/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/html", "/api/wiki/pages?wiki=__no_such_wiki__"]) {
+      answers[path] = (await app.request(path)).status;
+    }
+    expect(answers).toEqual({
+      "/api/wiki/page": 400, "/api/wiki/page/provenance": 400, "/api/wiki/html": 400,
+      "/api/wiki/pages?wiki=__no_such_wiki__": 200,
+    });
+  });
+
+  test("every other wiki route is 404 — Explain, Ask, Stamp and every write", async () => {
+    const routes = wikiRouteTable("tools");
+    for (const must of ["/api/wiki/explain", "/api/wiki/ask", "/api/wiki/provenance/stamp", "/api/wiki/series", "/api/wiki/similar"]) {
+      expect(routes.some((r) => r.path === must), must).toBe(true);
+    }
+    const app = build("nais");
+    for (const r of routes) {
+      const res = await app.request(r.path, {
+        method: r.method,
+        ...(r.method === "POST" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}),
+      });
+      expect(`${r.method} ${r.path} → ${res.status}`).toBe(`${r.method} ${r.path} → 404`);
+    }
+  });
+
+  test("the default profile registers both halves", async () => {
+    const paths = registeredPaths(build("default"));
+    for (const r of wikiRouteTable("tools")) {
+      expect(`${r.path} → ${paths.has(r.path)}`).toBe(`${r.path} → true`);
+    }
+    expect(paths.has("/api/wiki/page")).toBe(true);
+  });
+
+  test("wikiToolsRegistered and servesWikiReadSliceOnly are complements on both profiles", () => {
+    expect(wikiToolsRegistered("nais")).toBe(false);
+    expect(wikiToolsRegistered("default")).toBe(true);
+    expect(servesWikiReadSliceOnly("nais")).toBe(true);
+    expect(servesWikiReadSliceOnly("default")).toBe(false);
+  });
+});
+
 describe("the worked-on ledger's boot kick (fix round 2)", () => {
   /**
    * The gate `src/index.ts` warms the memo behind. A predicate rather than an
@@ -206,8 +267,8 @@ describe("the worked-on ledger's boot kick (fix round 2)", () => {
    * launchd service on another machine's loopback.
    */
   test("the default profile kicks it and `nais` does not", () => {
-    expect(shouldKickWorkedLedgerAtBoot("default")).toBe(true);
-    expect(shouldKickWorkedLedgerAtBoot("nais")).toBe(false);
+    expect(wikiToolsRegistered("default")).toBe(true);
+    expect(wikiToolsRegistered("nais")).toBe(false);
   });
 
   test("…and it is DERIVED from the drop set, not from the profile name", () => {

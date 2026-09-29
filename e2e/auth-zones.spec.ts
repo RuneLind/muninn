@@ -21,9 +21,11 @@
  * real reverse proxy stamps and what takes a request out of it.
  * `ws-scope.spec.ts` carries the same idiom.
  *
- * No model calls and nothing written: it reads status lines. The two Stamp rows
- * POST, but with an EMPTY body, which the route refuses on its own first content
- * check — so no wiki page is ever named, let alone touched.
+ * No model calls and nothing written: it reads status lines. The Stamp rows and
+ * the wiki write rows POST an EMPTY body, which each route refuses on its own
+ * first content check, against a temp wiki registered read-only — so no wiki
+ * page is ever written and no model is called. Both servers run the DEFAULT
+ * profile; the nais wiki rows live in `wiki-nais-read.spec.ts`.
  * `SCHEDULER_ENABLED=false`.
  *
  * SPAWN ENV: `e2eEnv()` blanks the platform tokens and the instance-profile
@@ -34,6 +36,8 @@
 
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
@@ -60,6 +64,45 @@ const STAMP_BODY = {};
 
 const servers: ChildProcess[] = [];
 
+/** One read-only wiki on both servers — the pod's mirror shape — created in
+ *  `beforeAll`, so a Playwright listing (`--list`) writes nothing. */
+let WIKI_ROOT = "";
+const WIKI_Q = "wiki=zones";
+
+/** The six read-slice paths, each with parameters that answer 200 for an admin
+ *  (the wiki carries a `trackers` block, so graph mode answers too). */
+const WIKI_READS = [
+  `/wiki?${WIKI_Q}`,
+  `/api/wiki/pages?${WIKI_Q}`,
+  `/api/wiki/page?${WIKI_Q}&relPath=side.md`,
+  `/api/wiki/page/provenance?${WIKI_Q}&relPath=side.md`,
+  `/api/wiki/html?${WIKI_Q}&relPath=side.html`,
+  `/api/wiki/graph?${WIKI_Q}&scope=wiki&level=1&depth=0`,
+];
+
+/** Outside the read slice: Explain, Ask and the other egress GETs, then the
+ *  writes. Every body is `{}`, which each route refuses on its own first content
+ *  check, and the wiki is read-only — so an admin that passes the zone reaches a
+ *  refusal, never a model call or a write. */
+const WIKI_TOOL_GETS = [
+  `/api/wiki/explain?${WIKI_Q}`,
+  `/api/wiki/ask?${WIKI_Q}`,
+  `/api/wiki/factcheck?${WIKI_Q}`,
+  `/api/wiki/similar?${WIKI_Q}`,
+];
+const WIKI_TOOL_POSTS = [
+  STAMP_PATH,
+  "/api/wiki/series",
+  "/api/wiki/share",
+  "/api/wiki/remember",
+  `/api/wiki/reindex?${WIKI_Q}`,
+  "/api/wiki/ask/chat",
+  "/api/wiki/factcheck/append",
+  "/api/wiki/factcheck/integrate/apply",
+];
+/** The zone middleware's own refusal body — what tells a zone 403 from a route's. */
+const ZONE_REFUSAL = { error: "forbidden", reason: "admin-only route" };
+
 function boot(port: number, extra: Record<string, string>): ChildProcess {
   const proc = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -74,6 +117,8 @@ function boot(port: number, extra: Record<string, string>): ChildProcess {
       MUNINN_LOCAL_USER: PINNED_USER,
       MUNINN_ADMIN_IDENTS: "A123456",
       MUNINN_ALLOWED_ORIGINS: `http://127.0.0.1:${port}`,
+      WIKI_EXTRA: `zones=${WIKI_ROOT}`,
+      WIKI_READONLY_ROOTS: WIKI_ROOT,
       ...extra,
     },
     stdio: "ignore",
@@ -101,6 +146,14 @@ const status = async (base: string, p: string, headers: Record<string, string> =
   (await fetch(`${base}${p}`, { headers, method, redirect: "manual" })).status;
 
 test.beforeAll(async () => {
+  WIKI_ROOT = mkdtempSync(path.join(tmpdir(), "muninn-e2e-zones-wiki-"));
+  writeFileSync(path.join(WIKI_ROOT, "side.md"), "---\ntitle: Side\n---\n\n# Side\n\nÆ, ø og å.\n", "utf8");
+  writeFileSync(path.join(WIKI_ROOT, "side.html"), "<!doctype html><title>Side</title><p>x</p>", "utf8");
+  writeFileSync(
+    path.join(WIKI_ROOT, ".wiki-reader.json"),
+    JSON.stringify({ trackers: [{ id: "jira", projects: ["MELOSYS"], hosts: ["jira.example.invalid"] }] }),
+    "utf8",
+  );
   boot(ADMIN_PORT, { MUNINN_LOCAL_ROLE: "admin" });
   // Deliberately NOT set: the default is `user`, which is what closes the
   // operator surface, and asserting the default is asserting the default.
@@ -110,7 +163,26 @@ test.beforeAll(async () => {
 
 test.afterAll(() => {
   for (const s of servers) s.kill("SIGTERM");
+  if (WIKI_ROOT) rmSync(WIKI_ROOT, { recursive: true, force: true });
 });
+
+/** GET or POST `{}`, returning the status and the parsed body when it is JSON. */
+async function probe(base: string, p: string, headers: Record<string, string>, method: "GET" | "POST") {
+  const res = await fetch(`${base}${p}`, {
+    method,
+    headers: method === "POST" ? { ...headers, "content-type": "application/json" } : headers,
+    ...(method === "POST" ? { body: "{}" } : {}),
+    redirect: "manual",
+  });
+  const text = await res.text();
+  let body: unknown = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    /* HTML or SSE */
+  }
+  return { status: res.status, body };
+}
 
 test.describe("the open zone", () => {
   test("/api/live answers with no credential and does not touch the database", async () => {
@@ -183,6 +255,69 @@ test.describe("role `user` — the default", () => {
     // from the zone rather than from `decideStampRequest`, a read-only guard or
     // a route that is simply not registered.
     expect(await res.json()).toEqual({ error: "forbidden", reason: "admin-only route" });
+  });
+});
+
+// These servers run the DEFAULT profile, where the wiki reader is the
+// operator's full surface: role `user` is refused all of it, the read slice
+// included. The nais rows (the slice in the user zone) are in
+// `wiki-nais-read.spec.ts`, which boots that profile for both roles.
+test.describe("the wiki on the default profile — role `user`", () => {
+  const as = { ...VIA_PROXY, ...TOKEN };
+
+  test("all six read-slice paths are the zone's 403", async () => {
+    for (const p of WIKI_READS) {
+      const r = await probe(USER_BASE, p, as, "GET");
+      expect(`${p} → ${r.status}`).toBe(`${p} → 403`);
+      expect(r.body).toEqual(ZONE_REFUSAL);
+    }
+  });
+
+  test("Explain, Ask and the other egress GETs are the zone's 403", async () => {
+    for (const p of WIKI_TOOL_GETS) {
+      const r = await probe(USER_BASE, p, as, "GET");
+      expect(`${p} → ${r.status}`).toBe(`${p} → 403`);
+      expect(r.body).toEqual(ZONE_REFUSAL);
+    }
+  });
+
+  test("Stamp and every wiki write are the zone's 403", async () => {
+    for (const p of WIKI_TOOL_POSTS) {
+      const r = await probe(USER_BASE, p, as, "POST");
+      expect(`${p} → ${r.status}`).toBe(`${p} → 403`);
+      expect(r.body).toEqual(ZONE_REFUSAL);
+    }
+  });
+
+  test("without a credential the read paths answer 401", async () => {
+    for (const p of WIKI_READS) {
+      expect(`${p} → ${(await probe(USER_BASE, p, VIA_PROXY, "GET")).status}`).toBe(`${p} → 401`);
+    }
+  });
+});
+
+test.describe("the wiki on the default profile — role `admin`", () => {
+  const as = { ...VIA_PROXY, ...TOKEN };
+
+  test("the read paths pass the zone and answer from the wiki", async () => {
+    const got: string[] = [];
+    for (const p of WIKI_READS) got.push(`${p} → ${(await probe(ADMIN_BASE, p, as, "GET")).status}`);
+    expect(got).toEqual(WIKI_READS.map((p) => `${p} → 200`));
+    const page = await probe(ADMIN_BASE, `/api/wiki/page?${WIKI_Q}&relPath=side.md`, as, "GET");
+    expect((page.body as { html?: string }).html).toContain("Æ, ø og å.");
+  });
+
+  test("…and so does every route outside it — the route's own answer, not the zone's", async () => {
+    const answers: string[] = [];
+    for (const p of WIKI_TOOL_GETS) {
+      const r = await probe(ADMIN_BASE, p, as, "GET");
+      if (r.status === 404 || JSON.stringify(r.body) === JSON.stringify(ZONE_REFUSAL)) answers.push(`GET ${p} → ${r.status}`);
+    }
+    for (const p of WIKI_TOOL_POSTS) {
+      const r = await probe(ADMIN_BASE, p, as, "POST");
+      if (r.status === 404 || JSON.stringify(r.body) === JSON.stringify(ZONE_REFUSAL)) answers.push(`POST ${p} → ${r.status}`);
+    }
+    expect(answers).toEqual([]);
   });
 });
 

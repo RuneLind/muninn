@@ -1,7 +1,9 @@
 import path from "node:path";
 import { realpath } from "node:fs/promises";
 import type { Context, Hono } from "hono";
-import type { Config } from "../../config.ts";
+import { resolveServingProfile, type Config } from "../../config.ts";
+import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
+import { resolveReadRequest } from "./wiki-read-scope.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
@@ -1240,12 +1242,45 @@ async function getCollectionUpdateStatus(
   }
 }
 
+/** How often the read slice honours an HTTP `?refresh=1` per root. 15 s: one
+ *  rebuild (~0.4 s for the 422-page kode-wiki, measured 2026-09-29) per 15 s
+ *  caps a looping caller at ~3 % of the event loop. In-process `refresh: true`
+ *  callers (programmatic writers) are not throttled. */
+export const WIKI_HTTP_REFRESH_MIN_INTERVAL_MS = 15_000;
+
+/** The whole wiki surface — the read slice plus everything else — which is
+ *  what the `default` profile registers (as the `wiki-read` and `wiki` groups).
+ *  Kept as one call for the route tests, which drive the full surface on a
+ *  bare `Hono`. */
+export function registerWikiRoutes(
+  app: Hono,
+  config: Config,
+  provenanceCtxOverride?: ProvenanceContext,
+): void {
+  registerWikiReadRoutes(app, config, provenanceCtxOverride);
+  registerWikiToolRoutes(app, config, provenanceCtxOverride);
+}
+
 /** Dashboard /wiki reader: a named knowledge wiki as a browsable site.
  *  `?wiki=<name>` selects which wiki (bot wikis + `WIKI_EXTRA` standalone wikis);
  *  `?bot=<name>` is a legacy alias. A bare `/wiki` renders the default wiki
  *  (jarvis if registered, else the first) — unless `WIKI_DIR` is set, which
- *  stays an explicit legacy override with no wiki claimed in the picker. */
-export function registerWikiRoutes(
+ *  stays an explicit legacy override with no wiki claimed in the picker.
+ *
+ *  The READ SLICE (`wiki-read` group): only what a reader needs to list and
+ *  render a page — the page, the listing, one page, its provenance block,
+ *  explainer HTML and graph mode. No route here writes or spends a model call.
+ *  Two make bounded GET fan-outs: `/api/wiki/page/provenance` asks huginn's
+ *  jira-issues corpus about a page's `jira:` keys and claude-usage about its
+ *  sessions (when `CLAUDE_USAGE_URL` is set), and `/api/wiki/graph` does both
+ *  on a tracker wiki — all under one `PROVENANCE_BUDGET_MS` deadline.
+ *
+ *  It is the one wiki group `MUNINN_PROFILE=nais` keeps. There its GET paths
+ *  are in the auth user zone (`WIKI_READ_SLICE_PATHS`, `src/auth/zones.ts`) and
+ *  it serves read-only roots only (`wiki-read-scope.ts`), so adding a route here
+ *  widens what role `user` can reach on the pod — a route that writes, spends
+ *  or sends page text anywhere belongs in {@link registerWikiToolRoutes}. */
+export function registerWikiReadRoutes(
   app: Hono,
   config: Config,
   /** Test seam: the provenance join's context. Production passes nothing and
@@ -1254,39 +1289,49 @@ export function registerWikiRoutes(
    *  claude-usage happens to be listening on this machine. */
   provenanceCtxOverride?: ProvenanceContext,
 ): void {
-  // Built once per process: `defaultSessionLedgerDeps` closes over the resolved
-  // claude-usage base URL, and rebuilding it per request would re-derive the
-  // same three values on every page open.
+  // Built per registration, not per request: `defaultSessionLedgerDeps` closes
+  // over the resolved claude-usage base URL. It is stateless, so the tool half
+  // building its own is harmless.
   const provenanceCtx = provenanceCtxOverride ?? defaultProvenanceContext(config);
+  // Is the rest of the wiki surface registered beside this slice? False under
+  // `nais`: the page then renders no control that would reach a dropped route.
+  const profile = config.profile ?? resolveServingProfile();
+  const tools = wikiToolsRegistered(profile);
+  // Is this slice the whole wiki surface? Then only read-only roots are served,
+  // for every role (`wiki-read-scope.ts`).
+  const readSliceOnly = servesWikiReadSliceOnly(profile);
 
-  // The reverse lookups live in their own module (they iterate the whole wiki
-  // registry rather than resolving one wiki) but register INSIDE this group, so
-  // `MUNINN_PROFILE=nais` drops them with the rest of the filesystem-bound wiki
-  // surface — see `route-groups.ts`.
-  registerWikiProvenanceRoutes(app, config, provenanceCtx);
-  // The Stamp write, in the same group for the same reason — it resolves a
-  // registered wiki root on this machine's filesystem, so `MUNINN_PROFILE=nais`
-  // must drop it with everything else bound to a working tree.
-  registerWikiStampRoute(app, provenanceCtx);
-  // The series editor's one write, in the same group for the same reason.
-  registerWikiSeriesRoutes(app);
-  // Graph mode's read, in the same group for the same reason: it walks one
-  // registered wiki's index on this machine.
-  registerWikiGraphRoute(app, provenanceCtx);
-  // The issue board's page, in the same group: it reads one wiki's index.
-  registerWikiBoardRoute(app);
+  // Graph mode's read: it walks one registered wiki's index.
+  registerWikiGraphRoute(app, provenanceCtx, readSliceOnly);
+
+  // The HTTP `?refresh=1` bound. Under the read slice every team member reaches
+  // the listing, and a rescan is a full index build on the event loop; there
+  // it is honoured at most once per root per `WIKI_HTTP_REFRESH_MIN_INTERVAL_MS`
+  // and otherwise answered from the cache. On the full surface only the
+  // operator reaches it (the client throttles each tab to one per 30 s), and
+  // the e2e suites rewrite fixtures behind the server and rescan within
+  // seconds, so it is not throttled there. In-process `refresh: true` callers
+  // (writers, the mirror) never pass through here.
+  const lastHttpRefresh = new Map<string, number>();
+  const httpRefreshHonored = (root: string): boolean => {
+    if (!readSliceOnly) return true;
+    const now = Date.now();
+    const last = lastHttpRefresh.get(root);
+    if (last !== undefined && now - last < WIKI_HTTP_REFRESH_MIN_INTERVAL_MS) return false;
+    lastHttpRefresh.set(root, now);
+    return true;
+  };
 
   app.get("/wiki", async (c) => {
-    const registry = getWikiRegistry();
-    const wikis = listWikis(registry);
-    const { wiki: selected, envOverride, entry, unknownWiki } = resolveWikiRequest(
-      registry,
+    const { registry, wiki: selected, envOverride, entry, unknownWiki } = resolveReadRequest(
+      readSliceOnly,
       c.req.query("wiki"),
       c.req.query("bot"),
-      process.env.WIKI_DIR,
     );
-    // The gardener is a bot feature — only bot-source wikis carry proposals.
-    const isBotWiki = entry?.source === "bot";
+    const wikis = listWikis(registry);
+    // The gardener is a bot feature — only bot-source wikis carry proposals —
+    // and a profile that drops the tool surface drops the gardener with it.
+    const isBotWiki = entry?.source === "bot" && tools;
     // Pending-draft count for the selected bot wiki — drives the "Gardener"
     // header badge. Best-effort: a DB hiccup must not take the reader down.
     let gardenerPending = 0;
@@ -1317,7 +1362,7 @@ export function registerWikiRoutes(
     // read-only wiki: nothing there will ever answer, so naming a bot (and a
     // "research-bot fallback" origin) describes a call that cannot happen.
     let askBot: { bot: string; connector: string; model: string; origin: "pinned" | "owner" | "fallback" } | null = null;
-    if (entry && !readonlyWiki) {
+    if (entry && !readonlyWiki && tools) {
       const { bot, origin } = resolveWikiSynthesisBot(entry, discoverAllBots());
       if (bot) {
         askBot = {
@@ -1352,6 +1397,7 @@ export function registerWikiRoutes(
         // answer the same question the same way even if the memo were stale.
         readonlyWiki,
         wikiRoot: servedRoot,
+        tools,
       }),
     );
   });
@@ -1370,17 +1416,13 @@ export function registerWikiRoutes(
   // listing that is allowed to go stale is a listing that will.
   app.get("/api/wiki/pages", async (c) => {
     c.header("Cache-Control", "no-store");
-    const { entry, unknownWiki } = resolveWikiRequest(
-      getWikiRegistry(),
-      c.req.query("wiki"),
-      c.req.query("bot"),
-      process.env.WIKI_DIR,
-    );
+    const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, c.req.query("wiki"), c.req.query("bot"));
     if (unknownWiki) {
       return c.json({ pages: [], scannedAt: null, error: "no wiki configured for that name" });
     }
     const root = entry?.root;
-    const index = await getWikiIndex({ root, refresh: c.req.query("refresh") === "1" });
+    const refresh = c.req.query("refresh") === "1" && httpRefreshHonored(resolveWikiRoot(root));
+    const index = await getWikiIndex({ root, refresh });
     if (!index) {
       return c.json({ pages: [], scannedAt: null, error: "wiki directory not found" });
     }
@@ -1440,6 +1482,228 @@ export function registerWikiRoutes(
       ...(index.workedCoverage ? { workedCoverage: index.workedCoverage } : {}),
     });
   });
+
+  // One page: rendered HTML + connections (outgoing links and backlinks).
+  // Resolves by `relPath` when given (exact, collision-proof — the Atlas tab's
+  // node clicks send the node's normalized relPath so a same-stem page in another
+  // folder can't shadow the intended page), else by `name` (first-stem-match, the
+  // legacy wikilink/list-click path).
+  /**
+   * The ONE resolution `/api/wiki/page` and `/api/wiki/page/provenance` share:
+   * `wiki`/`bot` → registry entry, `relPath` (collision-proof) else `name`
+   * (first-stem-match) → page. The 400/404/503 ladder is the contract both
+   * answer, so it lives once.
+   */
+  type PageResolution =
+    | { ok: true; entry: ReturnType<typeof resolveWikiRequest>["entry"]; index: NonNullable<Awaited<ReturnType<typeof getWikiIndex>>>; meta: WikiPageMeta }
+    | { ok: false; res: Response };
+  async function resolvePageRequest(c: Context): Promise<PageResolution> {
+    const relPathQ = c.req.query("relPath");
+    const name = c.req.query("name");
+    if (!relPathQ && !name) {
+      return { ok: false, res: c.json({ error: "name or relPath query param required" }, 400) };
+    }
+    const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, c.req.query("wiki"), c.req.query("bot"));
+    if (unknownWiki) return { ok: false, res: c.json({ error: "no wiki configured for that name" }, 404) };
+    const index = await getWikiIndex({ root: entry?.root });
+    if (!index) return { ok: false, res: c.json({ error: "wiki directory not found" }, 503) };
+    const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
+    if (!meta) {
+      const which = relPathQ ? `relPath "${relPathQ}"` : `name "${name}"`;
+      return { ok: false, res: c.json({ error: `no wiki page for ${which}` }, 404) };
+    }
+    return { ok: true, entry, index, meta };
+  }
+
+  app.get("/api/wiki/page", async (c) => {
+    const resolved = await resolvePageRequest(c);
+    if (!resolved.ok) return resolved.res;
+    const { entry, index, meta } = resolved;
+    const markdown = await readWikiPage(index, meta);
+    if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
+
+    const listings = (relPaths: string[] | undefined) =>
+      (relPaths ?? [])
+        .map((rp) => index.resolveRelPath(rp))
+        .filter((m): m is WikiPageMeta => m !== undefined)
+        .map((m) => toListing(index, m));
+
+    // The provenance strip's data is NOT joined here. `pageProvenance` fans out
+    // to claude-usage and huginn under a 10 s budget, and awaiting it made every
+    // stamped page open wait for the slowest leg (measured: a plan page with
+    // four sessions and three PRs opened seconds after its markdown was ready).
+    // The page answers with `provenancePending: true` when the page carries
+    // any of the keys, the reader renders a placeholder under the title, and
+    // fetches `GET /api/wiki/page/provenance` for the block itself. ABSENT (not
+    // false) on a page carrying none of the keys, which is most pages — the
+    // client's one gate stays "is this key here at all".
+
+    return c.json({
+      // The two callers that opt fields in — see `toListing`. Deliberately NOT
+      // `listings()` below, whose arrays are the link-heavy pages' bulk.
+      meta: toListing(index, meta, { includeDesc: true, includeProvenance: true, includeCull: true }),
+      // The page's CONTENT hash — the CAS base `POST /api/wiki/series` (and any
+      // later page writer the reader drives) sends back. Beside `meta` rather
+      // than inside it: `toListing` is shared with the hot listing and with the
+      // outgoing/backlink arrays, and a 64-character digest per row there is
+      // payload nothing reads. Computed over the SAME bytes `writeWikiPage`
+      // hashes — `readWikiPage` and `defaultPageWriteIo.readFile` are both a
+      // bare `Bun.file().text()`, so the two cannot disagree.
+      hash: sha256(markdown),
+      ...(hasProvenance(meta) ? { provenancePending: true } : {}),
+      // No network join, so the section renders with the page.
+      ...issueRowsField(index, meta, () => ctxStampable(provenanceCtx, resolveWikiRoot(entry?.root))),
+      // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
+      // a link opened on a non-default wiki lands on the DEFAULT one.
+      html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title, wiki: entry?.name }),
+      outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
+      backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
+      // RELATED WORK — `cites ∪ cited-by ∪ shares ≥2 PR refs, minus hubs, never
+      // transitive`, newest first, one `why` line per row. Computed here rather
+      // than in the browser because its input is `prRefs`, which the listing does
+      // not carry (and must not: see `toListing`) — and because the rule reads the
+      // whole index, which the client holds only as the filtered page list.
+      //
+      // A row is `toListing`-shaped like `outgoing`/`backlinks`, plus `why` — it
+      // cannot use `listings()` itself, which answers a bare listing and would
+      // drop the one field this block exists for. The array is bounded by the
+      // link graph and by the three cuts, not by a cap: measured over the
+      // 547-page mimir clone 2026-09-20, the largest block is 33 rows
+      // (`overview.md`), and the pages that answered hundreds — `index.md` at
+      // 340, `plans/index.md` 246, `log.md` 189 — are bookkeeping or hubs, which
+      // now get no block at all.
+      related: computeRelated(index, meta.relPath).flatMap((r) => {
+        const m = index.resolveRelPath(r.relPath);
+        return m ? [{ ...toListing(index, m), why: r.why }] : [];
+      }),
+    });
+  });
+
+  // The provenance block for ONE page — who wrote it, which issue it serves,
+  // which PRs it landed as, and what those sessions cost — split out of
+  // `/api/wiki/page` so the page open never waits on it. The sessions go to
+  // claude-usage in BATCHES of `SESSION_IDS_PER_CALL` (200) — one call for every
+  // page anyone has actually stamped, but not one by contract — and the whole
+  // enrichment, huginn's Jira corpus included, shares ONE `PROVENANCE_BUDGET_MS`
+  // deadline so a fetch cannot cost the sum of its legs. An unreachable
+  // claude-usage degrades to bare chips rather than failing the request.
+  // Answers `{}` (not 404) for a page carrying none of the keys: the page exists,
+  // it has nothing to say. Same registry resolution as `/api/wiki/page`.
+  // `resolveWikiRoot`, not `entry?.root`: `resolveWikiRequest` returns NO entry
+  // for the `WIKI_DIR` env-override shape, and `stampable` is computed from the
+  // wiki dir — so `undefined` here reported "not stampable" on exactly the
+  // instances configured with `WIKI_DIR`, hiding every Stamp button on a wiki
+  // the CLI covers.
+  app.get("/api/wiki/page/provenance", async (c) => {
+    const resolved = await resolvePageRequest(c);
+    if (!resolved.ok) return resolved.res;
+    const { entry, index, meta } = resolved;
+    const provenance = await pageProvenance(meta, provenanceCtx, resolveWikiRoot(entry?.root), index);
+    return c.json(provenance ? { provenance } : {});
+  });
+
+  // Raw HTML for a standalone explainer, served for the reader's <iframe>. The
+  // page is resolved strictly via its index entry's stored relPath — the `name`
+  // query is only ever a lookup key, never joined into a filesystem path — and
+  // the resolved path is verified to stay under the wiki root before serving.
+  app.get("/api/wiki/html", async (c) => {
+    // Same two keys as `/api/wiki/page` and for the same reason: two explainers in
+    // different folders can share a stem (the precedence drop only fires ACROSS
+    // extensions), and `name` would serve whichever registered first.
+    const relPathQ = c.req.query("relPath");
+    const name = c.req.query("name");
+    if (!relPathQ && !name) return c.text("relPath or name query param required", 400);
+    const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, c.req.query("wiki"), c.req.query("bot"));
+    if (unknownWiki) return c.text("no wiki configured for that name", 404);
+    const index = await getWikiIndex({ root: entry?.root });
+    if (!index) return c.text("wiki directory not found", 503);
+    const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
+    // An `.html` the index does NOT list is still servable by exact relPath — for
+    // `<Embed src>`. The index still drops a same-stem `.html` that a `.md`/`.mdx`
+    // page shadows from ANOTHER folder (`.md` > `.mdx` > `.html`), and one whose
+    // own same-folder markdown twin was itself dropped. The SAME-folder pair
+    // (`x.mdx` + `x.html`, the embed shape) is an attachment since the rail's
+    // groups: it is in the index, so it is served off its own entry and this
+    // fallback is not reached for it. The index's stored relPath is preferred
+    // when it exists; the fallback resolves the query as a path, and the
+    // containment check below is what makes that safe.
+    if (relPathQ && relPathQ.includes("\u0000")) return c.text("invalid path", 400);
+    const shadowed = !meta && !!relPathQ && /\.html$/i.test(relPathQ);
+    if (!shadowed && (!meta || meta.type !== "explainer")) {
+      return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
+    }
+    // meta.relPath is the index's own stored path (never user input); the
+    // shadowed fallback IS user input. Either way — confirm the resolved file
+    // stays under the wiki root, judged on the REAL path of both: `path.resolve`
+    // is lexical, so a symlink sitting under the root but pointing outside it
+    // (a file, or a whole directory) passed the check and was served. The index
+    // never lists a symlink (its scan does not follow them), so before the
+    // fallback existed this was unreachable; with it, the realpath is the guard.
+    const rootAbs = path.resolve(index.root);
+    const fileAbs = path.resolve(rootAbs, meta ? meta.relPath : relPathQ!);
+    if (fileAbs !== rootAbs && !fileAbs.startsWith(rootAbs + path.sep)) {
+      return c.text("invalid path", 400);
+    }
+    let rootReal: string;
+    let fileReal: string;
+    try {
+      rootReal = await realpath(rootAbs);
+      fileReal = await realpath(fileAbs);
+    } catch {
+      return c.text("explainer file not found", 404);
+    }
+    if (fileReal !== rootReal && !fileReal.startsWith(rootReal + path.sep)) {
+      return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
+    }
+    const file = Bun.file(fileReal);
+    if (!(await file.exists())) return c.text("explainer file not found", 404);
+    // Append the Select-to-Explain forwarder. A trailing listener-only script
+    // runs wherever it lands (even after </html>), so no anchor parsing is
+    // needed. Full-text read is fine at explainer sizes (≤ a few hundred KB).
+    const html = (await file.text()) + EXPLAINER_BRIDGE_SCRIPT;
+    // The sandbox travels WITH the bytes. The reader's iframes apply exactly this
+    // sandbox as an attribute, but the <Embed> "open in new tab" link loads the
+    // same response as a TOP-LEVEL document, where an attribute cannot reach: a
+    // CSP `sandbox` makes the document opaque-origin wherever it is loaded, so a
+    // script inside a wiki-hosted .html cannot call /api/* with the reader's
+    // session, read localStorage, or drive a write route. The SAME allowance
+    // list as the frames (`EXPLAINER_SANDBOX`), so the page behaves identically
+    // in both. Only the 200 carries it; the text refusals above do not.
+    return new Response(html, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Security-Policy": `sandbox ${EXPLAINER_SANDBOX}`,
+      },
+    });
+  });
+}
+
+/** Everything on the wiki surface that is not the read slice: Ask, Explain,
+ *  fact-check, Similar, atlas, digest, reindex, share, remember, the chat
+ *  escalation, Stamp, the series editor, the reverse provenance lookups and the
+ *  issue board. The `wiki` route group — which `MUNINN_PROFILE=nais` drops, so
+ *  these are ABSENT (Hono 404) in a pod rather than denied, and none is in the
+ *  auth user zone. */
+export function registerWikiToolRoutes(
+  app: Hono,
+  config: Config,
+  provenanceCtxOverride?: ProvenanceContext,
+): void {
+  const provenanceCtx = provenanceCtxOverride ?? defaultProvenanceContext(config);
+
+  // The reverse lookups live in their own module (they iterate the whole wiki
+  // registry rather than resolving one wiki) but register INSIDE this group, so
+  // `MUNINN_PROFILE=nais` drops them with the rest of the filesystem-bound wiki
+  // surface — see `route-groups.ts`.
+  registerWikiProvenanceRoutes(app, config, provenanceCtx);
+  // The Stamp write, in the same group for the same reason — it resolves a
+  // registered wiki root on this machine's filesystem, so `MUNINN_PROFILE=nais`
+  // must drop it with everything else bound to a working tree.
+  registerWikiStampRoute(app, provenanceCtx);
+  // The series editor's one write, in the same group for the same reason.
+  registerWikiSeriesRoutes(app);
+  // The issue board's page, in the same group: it reads one wiki's index.
+  registerWikiBoardRoute(app);
 
   // Atlas tab data: the hybrid Types/Months graph view + curated trails. A PURE
   // projection (`projectAtlas`) over the TTL-cached index — no per-request reads of
@@ -1874,130 +2138,6 @@ export function registerWikiRoutes(
     return c.json(response);
   });
 
-  // One page: rendered HTML + connections (outgoing links and backlinks).
-  // Resolves by `relPath` when given (exact, collision-proof — the Atlas tab's
-  // node clicks send the node's normalized relPath so a same-stem page in another
-  // folder can't shadow the intended page), else by `name` (first-stem-match, the
-  // legacy wikilink/list-click path).
-  /**
-   * The ONE resolution `/api/wiki/page` and `/api/wiki/page/provenance` share:
-   * `wiki`/`bot` → registry entry, `relPath` (collision-proof) else `name`
-   * (first-stem-match) → page. The 400/404/503 ladder is the contract both
-   * answer, so it lives once.
-   */
-  type PageResolution =
-    | { ok: true; entry: ReturnType<typeof resolveWikiRequest>["entry"]; index: NonNullable<Awaited<ReturnType<typeof getWikiIndex>>>; meta: WikiPageMeta }
-    | { ok: false; res: Response };
-  async function resolvePageRequest(c: Context): Promise<PageResolution> {
-    const relPathQ = c.req.query("relPath");
-    const name = c.req.query("name");
-    if (!relPathQ && !name) {
-      return { ok: false, res: c.json({ error: "name or relPath query param required" }, 400) };
-    }
-    const { entry, unknownWiki } = resolveWikiRequest(
-      getWikiRegistry(),
-      c.req.query("wiki"),
-      c.req.query("bot"),
-      process.env.WIKI_DIR,
-    );
-    if (unknownWiki) return { ok: false, res: c.json({ error: "no wiki configured for that name" }, 404) };
-    const index = await getWikiIndex({ root: entry?.root });
-    if (!index) return { ok: false, res: c.json({ error: "wiki directory not found" }, 503) };
-    const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
-    if (!meta) {
-      const which = relPathQ ? `relPath "${relPathQ}"` : `name "${name}"`;
-      return { ok: false, res: c.json({ error: `no wiki page for ${which}` }, 404) };
-    }
-    return { ok: true, entry, index, meta };
-  }
-
-  app.get("/api/wiki/page", async (c) => {
-    const resolved = await resolvePageRequest(c);
-    if (!resolved.ok) return resolved.res;
-    const { entry, index, meta } = resolved;
-    const markdown = await readWikiPage(index, meta);
-    if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
-
-    const listings = (relPaths: string[] | undefined) =>
-      (relPaths ?? [])
-        .map((rp) => index.resolveRelPath(rp))
-        .filter((m): m is WikiPageMeta => m !== undefined)
-        .map((m) => toListing(index, m));
-
-    // The provenance strip's data is NOT joined here. `pageProvenance` fans out
-    // to claude-usage and huginn under a 10 s budget, and awaiting it made every
-    // stamped page open wait for the slowest leg (measured: a plan page with
-    // four sessions and three PRs opened seconds after its markdown was ready).
-    // The page answers with `provenancePending: true` when the page carries
-    // any of the keys, the reader renders a placeholder under the title, and
-    // fetches `GET /api/wiki/page/provenance` for the block itself. ABSENT (not
-    // false) on a page carrying none of the keys, which is most pages — the
-    // client's one gate stays "is this key here at all".
-
-    return c.json({
-      // The two callers that opt fields in — see `toListing`. Deliberately NOT
-      // `listings()` below, whose arrays are the link-heavy pages' bulk.
-      meta: toListing(index, meta, { includeDesc: true, includeProvenance: true, includeCull: true }),
-      // The page's CONTENT hash — the CAS base `POST /api/wiki/series` (and any
-      // later page writer the reader drives) sends back. Beside `meta` rather
-      // than inside it: `toListing` is shared with the hot listing and with the
-      // outgoing/backlink arrays, and a 64-character digest per row there is
-      // payload nothing reads. Computed over the SAME bytes `writeWikiPage`
-      // hashes — `readWikiPage` and `defaultPageWriteIo.readFile` are both a
-      // bare `Bun.file().text()`, so the two cannot disagree.
-      hash: sha256(markdown),
-      ...(hasProvenance(meta) ? { provenancePending: true } : {}),
-      // No network join, so the section renders with the page.
-      ...issueRowsField(index, meta, () => ctxStampable(provenanceCtx, resolveWikiRoot(entry?.root))),
-      // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
-      // a link opened on a non-default wiki lands on the DEFAULT one.
-      html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title, wiki: entry?.name }),
-      outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
-      backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
-      // RELATED WORK — `cites ∪ cited-by ∪ shares ≥2 PR refs, minus hubs, never
-      // transitive`, newest first, one `why` line per row. Computed here rather
-      // than in the browser because its input is `prRefs`, which the listing does
-      // not carry (and must not: see `toListing`) — and because the rule reads the
-      // whole index, which the client holds only as the filtered page list.
-      //
-      // A row is `toListing`-shaped like `outgoing`/`backlinks`, plus `why` — it
-      // cannot use `listings()` itself, which answers a bare listing and would
-      // drop the one field this block exists for. The array is bounded by the
-      // link graph and by the three cuts, not by a cap: measured over the
-      // 547-page mimir clone 2026-09-20, the largest block is 33 rows
-      // (`overview.md`), and the pages that answered hundreds — `index.md` at
-      // 340, `plans/index.md` 246, `log.md` 189 — are bookkeeping or hubs, which
-      // now get no block at all.
-      related: computeRelated(index, meta.relPath).flatMap((r) => {
-        const m = index.resolveRelPath(r.relPath);
-        return m ? [{ ...toListing(index, m), why: r.why }] : [];
-      }),
-    });
-  });
-
-  // The provenance block for ONE page — who wrote it, which issue it serves,
-  // which PRs it landed as, and what those sessions cost — split out of
-  // `/api/wiki/page` so the page open never waits on it. The sessions go to
-  // claude-usage in BATCHES of `SESSION_IDS_PER_CALL` (200) — one call for every
-  // page anyone has actually stamped, but not one by contract — and the whole
-  // enrichment, huginn's Jira corpus included, shares ONE `PROVENANCE_BUDGET_MS`
-  // deadline so a fetch cannot cost the sum of its legs. An unreachable
-  // claude-usage degrades to bare chips rather than failing the request.
-  // Answers `{}` (not 404) for a page carrying none of the keys: the page exists,
-  // it has nothing to say. Same registry resolution as `/api/wiki/page`.
-  // `resolveWikiRoot`, not `entry?.root`: `resolveWikiRequest` returns NO entry
-  // for the `WIKI_DIR` env-override shape, and `stampable` is computed from the
-  // wiki dir — so `undefined` here reported "not stampable" on exactly the
-  // instances configured with `WIKI_DIR`, hiding every Stamp button on a wiki
-  // the CLI covers.
-  app.get("/api/wiki/page/provenance", async (c) => {
-    const resolved = await resolvePageRequest(c);
-    if (!resolved.ok) return resolved.res;
-    const { entry, index, meta } = resolved;
-    const provenance = await pageProvenance(meta, provenanceCtx, resolveWikiRoot(entry?.root), index);
-    return c.json(provenance ? { provenance } : {});
-  });
-
   // Semantic "Similar" articles for one page: a query built from the page's
   // title + tags + first body paragraph, searched against the wiki's backing
   // collections, then resolved back onto pages in the SAME wiki. Powers the
@@ -2053,86 +2193,6 @@ export function registerWikiRoutes(
     const search: SimilarSearchFn = similarSearchFn ?? ((baseUrl, p) => fetchKnowledgeApi(baseUrl, p));
     const similar = await fetchSimilarPages(entry, index, meta, config, search);
     return c.json({ similar });
-  });
-
-  // Raw HTML for a standalone explainer, served for the reader's <iframe>. The
-  // page is resolved strictly via its index entry's stored relPath — the `name`
-  // query is only ever a lookup key, never joined into a filesystem path — and
-  // the resolved path is verified to stay under the wiki root before serving.
-  app.get("/api/wiki/html", async (c) => {
-    // Same two keys as `/api/wiki/page` and for the same reason: two explainers in
-    // different folders can share a stem (the precedence drop only fires ACROSS
-    // extensions), and `name` would serve whichever registered first.
-    const relPathQ = c.req.query("relPath");
-    const name = c.req.query("name");
-    if (!relPathQ && !name) return c.text("relPath or name query param required", 400);
-    const { entry, unknownWiki } = resolveWikiRequest(
-      getWikiRegistry(),
-      c.req.query("wiki"),
-      c.req.query("bot"),
-      process.env.WIKI_DIR,
-    );
-    if (unknownWiki) return c.text("no wiki configured for that name", 404);
-    const index = await getWikiIndex({ root: entry?.root });
-    if (!index) return c.text("wiki directory not found", 503);
-    const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
-    // An `.html` the index does NOT list is still servable by exact relPath — for
-    // `<Embed src>`. The index still drops a same-stem `.html` that a `.md`/`.mdx`
-    // page shadows from ANOTHER folder (`.md` > `.mdx` > `.html`), and one whose
-    // own same-folder markdown twin was itself dropped. The SAME-folder pair
-    // (`x.mdx` + `x.html`, the embed shape) is an attachment since the rail's
-    // groups: it is in the index, so it is served off its own entry and this
-    // fallback is not reached for it. The index's stored relPath is preferred
-    // when it exists; the fallback resolves the query as a path, and the
-    // containment check below is what makes that safe.
-    if (relPathQ && relPathQ.includes("\u0000")) return c.text("invalid path", 400);
-    const shadowed = !meta && !!relPathQ && /\.html$/i.test(relPathQ);
-    if (!shadowed && (!meta || meta.type !== "explainer")) {
-      return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
-    }
-    // meta.relPath is the index's own stored path (never user input); the
-    // shadowed fallback IS user input. Either way — confirm the resolved file
-    // stays under the wiki root, judged on the REAL path of both: `path.resolve`
-    // is lexical, so a symlink sitting under the root but pointing outside it
-    // (a file, or a whole directory) passed the check and was served. The index
-    // never lists a symlink (its scan does not follow them), so before the
-    // fallback existed this was unreachable; with it, the realpath is the guard.
-    const rootAbs = path.resolve(index.root);
-    const fileAbs = path.resolve(rootAbs, meta ? meta.relPath : relPathQ!);
-    if (fileAbs !== rootAbs && !fileAbs.startsWith(rootAbs + path.sep)) {
-      return c.text("invalid path", 400);
-    }
-    let rootReal: string;
-    let fileReal: string;
-    try {
-      rootReal = await realpath(rootAbs);
-      fileReal = await realpath(fileAbs);
-    } catch {
-      return c.text("explainer file not found", 404);
-    }
-    if (fileReal !== rootReal && !fileReal.startsWith(rootReal + path.sep)) {
-      return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
-    }
-    const file = Bun.file(fileReal);
-    if (!(await file.exists())) return c.text("explainer file not found", 404);
-    // Append the Select-to-Explain forwarder. A trailing listener-only script
-    // runs wherever it lands (even after </html>), so no anchor parsing is
-    // needed. Full-text read is fine at explainer sizes (≤ a few hundred KB).
-    const html = (await file.text()) + EXPLAINER_BRIDGE_SCRIPT;
-    // The sandbox travels WITH the bytes. The reader's iframes apply exactly this
-    // sandbox as an attribute, but the <Embed> "open in new tab" link loads the
-    // same response as a TOP-LEVEL document, where an attribute cannot reach: a
-    // CSP `sandbox` makes the document opaque-origin wherever it is loaded, so a
-    // script inside a wiki-hosted .html cannot call /api/* with the reader's
-    // session, read localStorage, or drive a write route. The SAME allowance
-    // list as the frames (`EXPLAINER_SANDBOX`), so the page behaves identically
-    // in both. Only the 200 carries it; the text refusals above do not.
-    return new Response(html, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Content-Security-Policy": `sandbox ${EXPLAINER_SANDBOX}`,
-      },
-    });
   });
 
   // Wiki Ask tab: research-style cited Q&A scoped to a single wiki's search

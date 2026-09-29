@@ -97,6 +97,14 @@ describe("fix round 1", () => {
   });
 });
 
+describe("sameStartUrl under the read slice", () => {
+  test("`view=atlas` denotes the Hubs overview when the tool surface is absent, so no redundant push", () => {
+    expect(sameStartUrl("?wiki=X&view=atlas", "X", "hubs", null, false)).toBe(true);
+    expect(sameStartUrl("?wiki=X&view=atlas", "X", "hubs", null)).toBe(false);
+    expect(sameStartUrl("?wiki=X&view=atlas", "X", "atlas", null, true)).toBe(true);
+  });
+});
+
 describe("fix round 3: sameStartUrl — does the address bar already DENOTE this overview?", () => {
   test("a bare boot URL with a stored tab denotes the stored tab (the dead-push regression)", () => {
     expect(sameStartUrl("?wiki=X", "X", "timeline", "timeline")).toBe(true);

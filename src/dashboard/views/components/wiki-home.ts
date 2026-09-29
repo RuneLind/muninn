@@ -19,6 +19,7 @@
  */
 
 import { readDisplayParams } from "./wiki-filter.ts";
+import { readSliceStartTab } from "./wiki-read-slice.ts";
 
 /** localStorage key holding the canonical name of the wiki last opened by URL. */
 export const LAST_WIKI_KEY = "muninn.wiki.last.v1";
@@ -110,9 +111,16 @@ export function lastWikiRedirect(input: RedirectInput): string | null {
  * click → Back was a no-op). Enumerated: same wiki (a URL naming none means the
  * rendered one; names compare case-insensitively, as `findWiki` does), no page,
  * and the tab the URL resolves to — through the SAME rule the boot uses, so
- * `stored` is the per-wiki value `resolveStartTab` would read.
+ * `stored` is the per-wiki value `resolveStartTab` would read, and `tools` is
+ * the boot's `wikiToolsFlag()` (under the read slice `view=atlas` boots Hubs).
  */
-export function sameStartUrl(search: string, wiki: string, tab: StartTab, stored: string | null): boolean {
+export function sameStartUrl(
+  search: string,
+  wiki: string,
+  tab: StartTab,
+  stored: string | null,
+  tools = true,
+): boolean {
   const params = new URLSearchParams(search);
   const named = (params.get("wiki") ?? params.get("bot") ?? "").trim();
   if (named && named.toLowerCase() !== wiki.toLowerCase()) return false;
@@ -120,7 +128,7 @@ export function sameStartUrl(search: string, wiki: string, tab: StartTab, stored
   // An issue-only graph names no page, yet is not the overview. Read on meaning
   // (`readDisplayParams`): a `display=` naming no valid issue boots the overview.
   if (readDisplayParams(search).issue) return false;
-  return resolveStartTab(params.get(START_VIEW_PARAM), stored) === tab;
+  return readSliceStartTab(resolveStartTab(params.get(START_VIEW_PARAM), stored), tools) === tab;
 }
 
 /** A param with a non-blank value — the server's own test (`trim() ||`), so

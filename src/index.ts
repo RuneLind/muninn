@@ -9,7 +9,8 @@ import { createDashboardRoutes } from "./dashboard/index.ts";
 import {
   NAIS_DROPPED_ROUTE_GROUPS,
   droppedRouteGroups,
-  shouldKickWorkedLedgerAtBoot,
+  servesWikiReadSliceOnly,
+  wikiToolsRegistered,
 } from "./dashboard/route-groups.ts";
 import { activityLog } from "./observability/activity-log.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
@@ -139,11 +140,11 @@ warmupEmbeddings();
 // instance with no `CLAUDE_USAGE_URL` fetches nothing: the kick returns at its
 // `urlConfigured` gate. See `src/wiki/worked-ledger.ts`.
 //
-// Skipped whole under a profile that drops the `wiki` route group: in a nais pod
-// there is no reader to warm the axis for, the wiki roots are working trees that
-// do not exist there, and the claude-usage this would dial is a launchd service
-// on another machine's loopback.
-if (shouldKickWorkedLedgerAtBoot(config.profile ?? resolveServingProfile())) {
+// Skipped whole under a profile that drops the `wiki` route group: a nais pod
+// serves only the read slice over a read-only mirror no agent session wrote, so
+// it has no worked-on axis to warm, and the claude-usage this would dial is a
+// launchd service on another machine's loopback (`wikiToolsRegistered`).
+if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
   try {
     const { getWikiRegistry } = await import("./wiki/registry-memo.ts");
     const { kickWorkedLedgerRefresh } = await import("./wiki/worked-ledger.ts");
@@ -293,7 +294,9 @@ if (isAuthenticatingMode(auth.mode)) {
   // and after the origin check (or a cross-origin side effect is judged by role
   // rather than refused). Mounting it inside `createDashboardRoutes` would
   // leave the `/chat` sub-app — the second `app.route` below — uncovered.
-  app.use("*", createZoneMiddleware(auth));
+  // The wiki read slice's GET paths join the user zone only when that slice is
+  // the whole wiki surface served (the nais profile).
+  app.use("*", createZoneMiddleware(auth, { wikiReadSlice: servesWikiReadSliceOnly(config.profile ?? resolveServingProfile()) }));
 } else {
   // No session to ride, but any page the user visits can POST to
   // `localhost:3010` and spend model turns or write state. The `off` shape
@@ -431,7 +434,8 @@ if (config.profile === "nais") {
     "spawns (spawnHaiku — the Haiku router's CLI fallback, plus the watchers, which call it directly) refuse with " +
     "HaikuCliUnavailableError (the image is built WITH_CLI=false). NOT covered: the claude-cli CHAT connector and the " +
     "executeOneShot family, which spawn the CLI on their own path — every bot on this deployment must be pinned to a " +
-    "non-CLI connector. /chat, the DB/huginn-bound operator routes and both health paths are unchanged.",
+    "non-CLI connector. /chat, the DB/huginn-bound operator routes and both health paths are unchanged, and the wiki " +
+    "READ slice (wiki-read: /wiki, the page listing, page, provenance, explainer HTML and graph reads) stays registered.",
     { dropped: NAIS_DROPPED_ROUTE_GROUPS.length, groups: NAIS_DROPPED_ROUTE_GROUPS.join(", ") },
   );
 }

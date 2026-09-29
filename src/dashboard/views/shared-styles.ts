@@ -526,7 +526,7 @@ type NavPage = "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-de
 const NAV_PAGE_GROUP: Record<NavPage, RouteGroup | null> = {
   dashboard: null, chat: null,
   agents: "agents", traces: "traces", research: "research", search: "search",
-  summaries: "summaries", wiki: "wiki", graph: "graph", plans: "plans",
+  summaries: "summaries", wiki: "wiki-read", graph: "graph", plans: "plans",
   jira: "jira", logs: "logs", "mcp-debug": "tools", serena: "tools",
   benchmark: "benchmark", models: "models", indexing: "indexing",
 };
@@ -584,7 +584,7 @@ export function renderNav(
   // dropped the reader back to jarvis. Runs on DOMContentLoaded: this script
   // sits ABOVE the nav markup, so at parse time the link is not in the document
   // yet (measured: 0 rewrites). Emitted only when the link is — a profile that
-  // dropped the wiki group must render no `href="/wiki"` at all, script included.
+  // dropped the wiki-read group must render no `href="/wiki"` at all, script included.
   const wikiNavRewrite = !shown("wiki") ? "" : `
       document.addEventListener('DOMContentLoaded', function() {
         try {
