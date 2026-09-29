@@ -34,7 +34,9 @@ export const READER_STALE_DAYS = 60;
  * runs with rerank off, so relevance is rank-derived (0.75 / (1 + 0.12·i) for
  * the hit at index i): 0.43 is a rank cut-off that keeps the top 7. Measured
  * 2026-09-29 on 8 real anchors at limit 15: 7 of the 10 known siblings ranked
- * 2–7 (0.436–0.67); the other three ranked past 15 and are lost at any cut-off.
+ * 2–7 (0.436–0.67), and the other three were not in the top 15. A sibling
+ * inside the 15 can still miss the cut-off: over 11 Opus 5.5 anchors, the
+ * anthropic "Claude Opus 5.5" post cleared it on 5 and sat at index 7–11 on 6.
  */
 export const SAME_STORY_MIN_RELEVANCE = 0.43;
 
