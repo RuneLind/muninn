@@ -119,6 +119,30 @@ describe("wiki read slice — routes", () => {
     expect(bare.error).toBe("no wiki configured for that name");
   });
 
+  describe("the WIKI_DIR override under the slice", () => {
+    // Only the writable wiki is registered, so the registry offers no default:
+    // what a bare request serves is decided by the override alone.
+    beforeEach(() => {
+      process.env.WIKI_EXTRA = `rwwiki=${rw}`;
+      __resetWikiRegistryForTest();
+    });
+
+    test("nais: a WRITABLE WIKI_DIR is not served", async () => {
+      process.env.WIKI_DIR = rw;
+      const bare = (await (await appFor("nais").request("/api/wiki/pages")).json()) as { pages: unknown[]; error?: string };
+      expect(bare.pages).toEqual([]);
+      expect(bare.error).toBe("no wiki configured for that name");
+      expect((await appFor("nais").request("/api/wiki/page?name=Widgets")).status).toBe(404);
+    });
+
+    test("nais: a read-only WIKI_DIR is served", async () => {
+      process.env.WIKI_DIR = ro;
+      const bare = (await (await appFor("nais").request("/api/wiki/pages")).json()) as { pages: { relPath: string }[] };
+      expect(bare.pages.map((p) => p.relPath).sort()).toEqual(["Widgets.md", "x.html"]);
+      expect((await appFor("nais").request("/api/wiki/page?name=Widgets")).status).toBe(200);
+    });
+  });
+
   test("default (control): both wikis are served and listed", async () => {
     const app = appFor("default");
     expect((await app.request("/api/wiki/page?wiki=rwwiki&name=Widgets")).status).toBe(200);

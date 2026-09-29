@@ -1244,8 +1244,8 @@ async function getCollectionUpdateStatus(
 
 /** How often the read slice honours an HTTP `?refresh=1` per root. 15 s: one
  *  rebuild (~0.4 s for the 422-page kode-wiki, measured 2026-09-29) per 15 s
- *  caps a looping caller at ~3 % of the event loop; the pod's mirror refreshes
- *  in-process, so a reader loses nothing. */
+ *  caps a looping caller at ~3 % of the event loop. In-process `refresh: true`
+ *  callers (programmatic writers) are not throttled. */
 export const WIKI_HTTP_REFRESH_MIN_INTERVAL_MS = 15_000;
 
 /** The whole wiki surface — the read slice plus everything else — which is

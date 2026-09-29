@@ -3861,10 +3861,11 @@ const warnedRoots = new Set<string>();
 /**
  * Single-flight per root: at most ONE build running and ONE queued behind it.
  *
- * Measured before this existed: 20 parallel `?refresh=1` on a 490-page wiki
- * blocked the event loop for up to 12.7 s, and a TTL expiry under load
- * stampeded the same way. A caller that accepts the cache (`refresh` unset)
- * joins the running build. A `refresh` caller cannot: that build may have read
+ * Measured before this existed: 20 parallel `?refresh=1` on the 422-page
+ * kode-wiki stalled `/api/live` for 4.98 s (~395 ms per build), and a TTL
+ * expiry under load stampeded the same way. A caller that accepts the cache
+ * (`refresh` unset) joins the running build. A `refresh` caller cannot: that
+ * build may have read
  * the disk before the write the caller just made (every programmatic writer
  * passes `refresh` after it lands), so it gets the QUEUED build, which starts
  * when the running one settles — after the call — and is shared by every
@@ -3891,8 +3892,8 @@ let buildsStarted = 0;
  * `refresh` busts the index TTL only, and is guaranteed a build that STARTED
  * after the call (see `RootFlight`). It is what every programmatic write passes
  * after it lands, so it never reaches the worked ledger's TTL gate or back-off
- * (see the kick in `buildWikiIndex`). The HTTP `?refresh=1` is throttled at the
- * route; in-process callers are not.
+ * (see the kick in `buildWikiIndex`). Under the read slice the HTTP
+ * `?refresh=1` is throttled at the route; in-process callers are not.
  */
 export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }): Promise<WikiIndex | null> {
   const root = resolveWikiRoot(opts?.root);

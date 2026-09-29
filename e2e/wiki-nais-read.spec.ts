@@ -331,6 +331,27 @@ test("the overview makes no request outside the read slice, and has no Atlas tab
   expect(seen.errors).toEqual([]);
 });
 
+test("return-to-overview on a view=atlas overview pushes no history entry", async ({ page }) => {
+  // Under the slice `view=atlas` boots Hubs, so that URL already denotes the
+  // overview and `goToStart` must not push. The overview renders no breadcrumb,
+  // so the test adds a wiki crumb and clicks it through the page's own click
+  // delegate — the one route into `goToStart` where the tools flag decides.
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&view=atlas`);
+  await expect(page.locator(".wiki-tab.active")).toHaveText("Hubs");
+  const before = await page.evaluate(() => history.length);
+  await page.evaluate(() => {
+    const a = document.createElement("a");
+    a.className = "wiki-bc-wiki";
+    a.href = "#";
+    a.textContent = "overview";
+    document.body.appendChild(a);
+  });
+  await page.locator("a.wiki-bc-wiki").click();
+  await expect(page.locator(".wiki-tab.active")).toHaveText("Hubs");
+  expect(await page.evaluate(() => history.length)).toBe(before);
+  expect(new URL(page.url()).searchParams.get("view")).toBe("atlas");
+});
+
 // ---- the zone rows, both roles, through the proxy path -------------------
 
 /** A forwarding header takes a request out of the loopback bypass, so the
