@@ -256,6 +256,13 @@ afterAll(() => {
 
 let probeAnswer: YtDlpInfo | null = { id: VIDEO_ID, title: "A talk", duration: 1200, uploader: "conf" };
 let probeCalls: string[] = [];
+/** What the fake oEmbed answers (`undefined` = a failed lookup), and who asked. */
+let oembedAuthor: string | undefined = "An Uploader";
+let oembedCalls: string[] = [];
+/** A fetchAuthor dep that breaks its contract: throws synchronously, or rejects. */
+let oembedThrows: "sync" | "async" | null = null;
+/** How many transcript requests had been made each time oEmbed was asked. */
+let transcriptsAtOembed: number[] = [];
 /** Whatever a case wants to know about the world at the moment the probe runs. */
 let atProbe: (() => void) | null = null;
 let downloadCalls: Array<{ url: string; workDir: string; opts: DownloadOptions }> = [];
@@ -300,6 +307,13 @@ function deps() {
       probeCalls.push(url);
       atProbe?.();
       return probeAnswer;
+    },
+    fetchAuthor: (videoId: string): Promise<string | undefined> => {
+      oembedCalls.push(videoId);
+      transcriptsAtOembed.push(transcriptRequests.length);
+      if (oembedThrows === "sync") throw new Error("oEmbed dep threw");
+      if (oembedThrows === "async") return Promise.reject(new Error("oEmbed dep rejected"));
+      return Promise.resolve(oembedAuthor);
     },
     downloadVideo: async (url: string, workDir: string, opts: DownloadOptions): Promise<DownloadResult> => {
       downloadCalls.push({ url, workDir, opts });
@@ -419,6 +433,10 @@ beforeEach(() => {
   ingestBodies = [];
   sourceDraftCalls = [];
   probeCalls = [];
+  oembedAuthor = "An Uploader";
+  oembedCalls = [];
+  oembedThrows = null;
+  transcriptsAtOembed = [];
   atProbe = null;
   atDownload = null;
   atExtract = null;
@@ -496,6 +514,61 @@ async function run(
   });
   return jobId;
 }
+
+describe("the video fields: author, upload_date, duration_sec", () => {
+  test("frames off: author from oEmbed, and no probe fields", async () => {
+    await run();
+    expect(probeCalls).toEqual([]);
+    expect(oembedCalls).toEqual([VIDEO_ID]);
+    const body = ingestBodies[0]!;
+    expect(body.author).toBe("An Uploader");
+    expect(body).not.toHaveProperty("duration_sec");
+    expect(body).not.toHaveProperty("upload_date");
+  });
+
+  test("frames off with a failed oEmbed: no author key, and the capture still ingests", async () => {
+    oembedAuthor = undefined;
+    await run();
+    expect(ingestBodies.length).toBe(1);
+    expect(ingestBodies[0]).not.toHaveProperty("author");
+  });
+
+  test("a fetchAuthor dep that throws or rejects still ingests, without author", async () => {
+    for (const mode of ["sync", "async"] as const) {
+      ingestBodies = [];
+      oembedThrows = mode;
+      await run();
+      expect(ingestBodies.length).toBe(1);
+      expect(ingestBodies[0]).not.toHaveProperty("author");
+    }
+  });
+
+  test("oEmbed is asked BEFORE the transcript fetch, so it runs beside it and the model call", async () => {
+    await run();
+    expect(transcriptsAtOembed).toEqual([0]);
+    expect(transcriptRequests.length).toBe(1);
+  });
+
+  test("frames on: the probe's uploader, rounded duration and dashed date; oEmbed never asked", async () => {
+    probeAnswer = { id: VIDEO_ID, title: "A talk", duration: 1199.6, uploader: "conf", uploadDate: "20240115" };
+    await run({ frames: true });
+    expect(oembedCalls).toEqual([]);
+    const body = ingestBodies[0]!;
+    expect(body.author).toBe("conf");
+    expect(body.duration_sec).toBe(1200);
+    expect(body.upload_date).toBe("2024-01-15");
+  });
+
+  test("frames on, probe sentinels (live video): oEmbed author, no length, no date", async () => {
+    probeAnswer = { id: VIDEO_ID, title: "live", duration: 0, uploader: "" };
+    await run({ frames: true });
+    expect(oembedCalls).toEqual([VIDEO_ID]);
+    const body = ingestBodies[0]!;
+    expect(body.author).toBe("An Uploader");
+    expect(body).not.toHaveProperty("duration_sec");
+    expect(body).not.toHaveProperty("upload_date");
+  });
+});
 
 describe("frames off — the capture that shipped before this PR", () => {
   /**

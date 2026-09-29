@@ -33,6 +33,7 @@ import { escapeHtml } from "../format/markdown-core.ts";
 import { inProtectedRegion, markdownCodeRegions } from "../format/markdown-ast.ts";
 import { markdownContentStyles } from "../dashboard/views/components/doc-panel.ts";
 import { themeTokenStyles } from "../dashboard/views/shared-styles.ts";
+import { readerDurationSec, readerFormatDuration } from "./reader-article.ts";
 import {
   FRAME_SOURCES,
   frameAddressRegExp,
@@ -286,6 +287,9 @@ export function renderExportPage(input: ExportPageInput): string {
   if (author && author !== speaker) facts.push(escapeHtml(author));
   const when = metaString(meta, "upload_date") ?? metaString(meta, "date");
   if (when) facts.push(escapeHtml(when.slice(0, 10)));
+  // The EXACT length only — a caption-end estimate is a reader pill, never a fact.
+  const sec = readerDurationSec(meta?.duration_sec);
+  if (sec > 0) facts.push(escapeHtml(readerFormatDuration(sec)));
   const kind = metaString(meta, "summary_kind");
   if (kind) facts.push(`${escapeHtml(kind)} summary`);
   if (input.url && /^https?:\/\//i.test(input.url)) {

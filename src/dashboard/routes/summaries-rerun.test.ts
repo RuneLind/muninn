@@ -244,6 +244,31 @@ describe("the ingest body", () => {
     expect(body.summary_kind).toBe("talk-notes");
   });
 
+  test("a YouTube re-run keeps author, upload_date and duration_sec (a NUMBER)", async () => {
+    const raw = youtubeDoc().replace(
+      'summary_kind: "standard"\n',
+      'summary_kind: "standard"\nauthor: "An \\"Invented\\" Channel"\nupload_date: "2024-01-15"\nduration_sec: 1200\n',
+    );
+    expect(raw).toContain("duration_sec: 1200");
+    const { deps, rec } = makeDeps(raw);
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID, kind: "deep" });
+    expect(res.status).toBe(200);
+    await settle();
+    const body = rec.ingests[0]!.body;
+    expect(body.author).toBe('An "Invented" Channel');
+    expect(body.upload_date).toBe("2024-01-15");
+    expect(body.duration_sec).toBe(1200);
+    expect(body.summary_kind).toBe("deep");
+  });
+
+  test("a YouTube re-run of a document without the three keys sends none of them", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc());
+    await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    const body = rec.ingests[0]!.body;
+    for (const key of ["author", "upload_date", "duration_sec"]) expect(body).not.toHaveProperty(key);
+  });
+
   test("the appendix rides back BYTE-EQUAL under its own heading", async () => {
     const { deps, rec } = makeDeps(youtubeDoc());
     await post(appFor(deps), { source: "youtube", docId: DOC_ID });
