@@ -2,12 +2,21 @@ import { test, expect, describe } from "bun:test";
 import {
   assignStamps,
   insertFrontmatterAuthor,
-  mtimeIsStamp,
+  lastWrites,
   mtimeMsFromNs,
   needsAuthor,
   nextFailureStreak,
+  nfcPath,
+  originalMtimeFor,
+  originalMtimeIndex,
+  parseBackfillArgs,
+  parseExcludeList,
+  parseJournal,
   planSequence,
-  rollbackTargets,
+  rollbackDisposition,
+  titleSimilarity,
+  TITLE_REVIEW_THRESHOLD,
+  type JournalEvent,
 } from "./author-backfill.ts";
 
 /** An invented document in huginn's `write_summary` shape. */
@@ -112,42 +121,166 @@ describe("stamp ordering", () => {
   });
 });
 
-describe("the rollback filter", () => {
-  const stampsByPath = new Map([
-    ["a.md", new Set([100, 200])],
-    ["b.md", new Set([101])],
-    ["c.md", new Set([102])],
-    ["d.md", new Set([103])],
-  ]);
+describe("the rollback predicate: content identity", () => {
+  const enc = (t: string) => new TextEncoder().encode(t);
+  const written = insertFrontmatterAuthor(DOC, "A Channel")!;
 
-  test("restores only files whose current mtime is a stamp on THAT file", () => {
-    const targets = rollbackTargets({
-      tarballMembers: ["a.md", "b.md", "c.md", "d.md", "e.md", "gone.md"],
-      currentMtimeMs: new Map([
-        ["a.md", 200.0003], // the full run's stamp, read back with ns noise
-        ["b.md", 101],
-        ["c.md", 5_000], // re-run since the backfill — survives
-        ["d.md", 102], // another file's stamp — not this one's
-        ["e.md", 103], // never stamped by the backfill
-      ]),
-      stampsByPath,
+  test("restores a file holding exactly the snapshot plus the inserted line", () => {
+    expect(rollbackDisposition({ current: enc(written), preWrite: enc(DOC), author: "A Channel" })).toEqual({ restore: true });
+  });
+
+  test("a capture or re-run since — any other bytes — survives, whatever its mtime", () => {
+    const recaptured = written.replace("- a point", "- a NEW point");
+    expect(rollbackDisposition({ current: enc(recaptured), preWrite: enc(DOC), author: "A Channel" })).toEqual({
+      restore: false,
+      reason: "changed since",
     });
-    expect(targets).toEqual(["a.md", "b.md"]);
+    // Same file, but written with another name than the journal records: not ours.
+    expect(rollbackDisposition({ current: enc(insertFrontmatterAuthor(DOC, "Someone Else")!), preWrite: enc(DOC), author: "A Channel" }))
+      .toEqual({ restore: false, reason: "changed since" });
   });
 
-  test("a stamp read back through utimes (a hair UNDER the integer) is still that stamp", () => {
-    // Measured on APFS: stamp 1790665482540 set via utimesSync, read back as this.
-    const ms = mtimeMsFromNs(1790665482540999889n);
-    expect(ms).toBe(1790665482540.999);
-    expect(mtimeIsStamp(ms, new Set([1790665482541]))).toBe(true);
-    // Sub-ms order survives, where whole-ms `mtimeMs` would tie.
-    expect(mtimeMsFromNs(1788701194409078000n) < mtimeMsFromNs(1788701194409871000n)).toBe(true);
+  test("missing, unchanged, absent from the snapshot, and a snapshot the insert refuses", () => {
+    expect(rollbackDisposition({ current: null, preWrite: enc(DOC), author: "A" })).toEqual({ restore: false, reason: "missing" });
+    expect(rollbackDisposition({ current: enc(DOC), preWrite: enc(DOC), author: "A" })).toEqual({
+      restore: false,
+      reason: "unchanged from snapshot",
+    });
+    expect(rollbackDisposition({ current: enc(written), preWrite: null, author: "A" })).toEqual({
+      restore: false,
+      reason: "not in snapshot",
+    });
+    expect(rollbackDisposition({ current: enc(written), preWrite: enc("no frontmatter\n"), author: "A" })).toEqual({
+      restore: false,
+      reason: "snapshot not writable",
+    });
+  });
+});
+
+describe("NFC matching", () => {
+  test("bsdtar's NFD name and huginn's NFC name are one key", () => {
+    const nfc = "ai/general/What It Actually Takes to Build a Software Factory — Tereza Tížková, Factory.md".normalize("NFC");
+    const nfd = nfc.normalize("NFD");
+    expect(nfd).not.toBe(nfc);
+    expect(nfcPath(nfd)).toBe(nfc);
+    expect(nfcPath(`./${nfd}`)).toBe(nfc);
+    expect(parseExcludeList(`# review\n\n  ./${nfd}  \nb/x.md\n`)).toEqual(new Set([nfc, "b/x.md"]));
+  });
+});
+
+describe("the journal", () => {
+  const lines = (events: JournalEvent[]) => events.map((e) => JSON.stringify(e)).join("\n");
+  const events: JournalEvent[] = [
+    { t: "run", run: 1, kind: "write", at: "t1", root: "/r", tarball: "/s/pilot.tgz" },
+    { t: "plan", run: 1, path: "a.md", originalMtimeMs: 100, stampMs: 900, write: true, author: "A" },
+    { t: "plan", run: 1, path: "b.md", originalMtimeMs: 200, stampMs: 901, write: false },
+    { t: "done", run: 1, path: "a.md", status: "written" },
+    { t: "done", run: 1, path: "b.md", status: "restamped" },
+    { t: "end", run: 1 },
+    // Run 2 was killed after its plan: c.md is pending, never marked done.
+    { t: "run", run: 2, kind: "write", at: "t2", root: "/r", tarball: "/s/full.tgz" },
+    { t: "plan", run: 2, path: "b.md", originalMtimeMs: 200, stampMs: 950, write: false },
+    { t: "plan", run: 2, path: "c.md", originalMtimeMs: 300, stampMs: 951, write: true, author: "C" },
+  ];
+
+  test("a torn last line is counted, not fatal, and a killed run keeps its whole plan", () => {
+    const { runs, badLines } = parseJournal(lines(events) + '\n{"t":"done","run":2,"pa');
+    expect(badLines).toBe(1);
+    expect(runs.map((r) => [r.run, r.plans.size, r.done.size, r.ended])).toEqual([
+      [1, 2, 2, true],
+      [2, 2, 0, false],
+    ]);
   });
 
-  test("mtimeIsStamp rounds and needs a stamp set", () => {
-    expect(mtimeIsStamp(99.6, new Set([100]))).toBe(true);
-    expect(mtimeIsStamp(100.6, new Set([100]))).toBe(false);
-    expect(mtimeIsStamp(100, undefined)).toBe(false);
+  test("lastWrites names each written path's own run tarball, pending plans included", () => {
+    const w = lastWrites(parseJournal(lines(events)).runs);
+    expect([...w.entries()].sort()).toEqual([
+      ["a.md", { run: 1, tarball: "/s/pilot.tgz", author: "A", originalMtimeMs: 100 }],
+      ["c.md", { run: 2, tarball: "/s/full.tgz", author: "C", originalMtimeMs: 300 }],
+    ]);
+  });
+
+  test("a path written again after a rollback answers to its LAST write run", () => {
+    const again = lines([
+      ...events,
+      { t: "run", run: 3, kind: "rollback", at: "t3", root: "/r" },
+      { t: "plan", run: 3, path: "a.md", originalMtimeMs: 100, stampMs: 990, write: true },
+      { t: "run", run: 4, kind: "write", at: "t4", root: "/r", tarball: "/s/again.tgz" },
+      { t: "plan", run: 4, path: "a.md", originalMtimeMs: 100, stampMs: 999, write: true, author: "A2" },
+    ]);
+    expect(lastWrites(parseJournal(again).runs).get("a.md")).toEqual({
+      run: 4,
+      tarball: "/s/again.tgz",
+      author: "A2",
+      originalMtimeMs: 100,
+    });
+  });
+
+  test("the original-mtime lookup reads every run's stamps, rollback runs too", () => {
+    const withRollback = lines([
+      ...events,
+      { t: "run", run: 3, kind: "rollback", at: "t3", root: "/r" },
+      { t: "plan", run: 3, path: "a.md", originalMtimeMs: 100, stampMs: 990, write: true },
+    ]);
+    const idx = originalMtimeIndex(parseJournal(withRollback).runs);
+    expect(originalMtimeFor(idx, "b.md", 950.0004)).toBe(200); // run 2's stamp, ns noise
+    expect(originalMtimeFor(idx, "b.md", 900.999)).toBe(200); // run 1's, a hair under
+    expect(originalMtimeFor(idx, "a.md", 990)).toBe(100); // the rollback's own stamp
+    expect(originalMtimeFor(idx, "a.md", 5000)).toBe(5000); // written since: its own mtime
+    expect(originalMtimeFor(idx, "c.md", 300)).toBe(300); // pending stamp never landed
+  });
+});
+
+describe("the title review", () => {
+  test("a wrong-url document scores low; a retitle with a channel suffix does not", () => {
+    const wrong = titleSimilarity(
+      "Why 80% of People Will Fail at AI Delegation (And How to Be in the 20%)",
+      "Steve Jobs talks about managing people",
+    )!;
+    expect(wrong).toBeLessThan(TITLE_REVIEW_THRESHOLD);
+    expect(titleSimilarity("Claude Code Skills Explained", "Claude Code Skills, Explained | Channel Name")).toBe(1);
+    expect(titleSimilarity("Tížková on factories", "Tizkova on Factories")).toBe(1);
+    expect(titleSimilarity("The a of", "anything")).toBeNull();
+  });
+});
+
+describe("arguments", () => {
+  const err = (argv: string[]) => {
+    const r = parseBackfillArgs(argv);
+    return r.ok ? null : r.error;
+  };
+
+  test("each input that used to fall through to the FULL write is a usage error", () => {
+    expect(err(["--rollback", "/some/backup.tar.gz"])).toBe("unexpected argument /some/backup.tar.gz");
+    expect(err(["--limit"])).toBe("--limit needs a value");
+    expect(err(["--limit", "--no-update"])).toBe("--limit needs a value");
+    expect(err(["--limit", "20x"])).toBe("--limit must be a positive integer, got 20x");
+    expect(err(["--limit", "0"])).toBe("--limit must be a positive integer, got 0");
+    expect(err(["--dryrun"])).toBe("unknown flag --dryrun");
+    expect(err(["--exclude"])).toBe("--exclude needs a value");
+    expect(err(["--no-update", "--no-update"])).toBe("--no-update given twice");
+    expect(err(["--rollback", "--limit", "3"])).toContain("--rollback takes no --limit");
+    expect(err(["--dry-run", "--rollback"])).toBe("--rollback and --dry-run are exclusive");
+  });
+
+  test("the valid forms", () => {
+    expect(parseBackfillArgs([])).toEqual({ ok: true, args: expect.objectContaining({ mode: "write", noUpdate: false }) });
+    expect(parseBackfillArgs(["--dry-run", "--exclude", "x.txt"])).toEqual({
+      ok: true,
+      args: expect.objectContaining({ mode: "dry-run", exclude: "x.txt" }),
+    });
+    expect(parseBackfillArgs(["--limit", "20", "--no-update", "--root", "/r"])).toEqual({
+      ok: true,
+      args: expect.objectContaining({ mode: "write", limit: 20, noUpdate: true, root: "/r" }),
+    });
+    expect(parseBackfillArgs(["--rollback"])).toEqual({ ok: true, args: expect.objectContaining({ mode: "rollback" }) });
+  });
+});
+
+describe("the author cap in the insert", () => {
+  test("a name over huginn's 512-byte field cap is refused, not truncated", () => {
+    expect(insertFrontmatterAuthor(DOC, "x".repeat(513))).toBeNull();
+    expect(insertFrontmatterAuthor(DOC, "x".repeat(512))).toContain(`author: "${"x".repeat(512)}"`);
   });
 });
 
