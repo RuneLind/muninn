@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import type { Job, JobEvent } from "../../summaries/job-store.ts";
@@ -226,6 +227,35 @@ test("similar: 400 without q, else proxies to the collection search", async () =
     expect(capturedUrl).toContain("http://kb.test/api/search?");
     expect(capturedUrl).toContain("collection=test-summaries");
     expect(capturedUrl).toContain("limit=7");
+    // Nothing sent, nothing forwarded: huginn's defaults apply.
+    expect(capturedUrl).not.toContain("corrective");
+    expect(capturedUrl).not.toContain("max_chunk_chars");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("similar: forwards corrective and max_chunk_chars, and refuses values huginn would refuse", async () => {
+  const app = appFor(fixedStore(makeJob({})));
+  const origFetch = globalThis.fetch;
+  const captured: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    captured.push(String(input));
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const ok = await app.request("/api/test/similar?q=hello&corrective=off&max_chunk_chars=200");
+    expect(ok.status).toBe(200);
+    const sent = new URL(captured[0]!).searchParams;
+    expect(sent.get("corrective")).toBe("off");
+    expect(sent.get("max_chunk_chars")).toBe("200");
+    expect(sent.get("q")).toBe("hello");
+
+    for (const bad of ["corrective=never", "max_chunk_chars=0", "max_chunk_chars=-5", "max_chunk_chars=2e3", "max_chunk_chars=100000"]) {
+      const res = await app.request(`/api/test/similar?q=hello&${bad}`);
+      expect(res.status).toBe(400);
+    }
+    expect(captured.length).toBe(1);
   } finally {
     globalThis.fetch = origFetch;
   }
@@ -348,3 +378,58 @@ test("stream: a reader that CLOSED does not silence the next reader of the same 
     server.stop(true);
   }
 }, 20_000);
+
+test("similar: an abandoned request aborts its huginn fetch", async () => {
+  const app = appFor(fixedStore(makeJob({})));
+  const origFetch = globalThis.fetch;
+  const signals: AbortSignal[] = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const signal = init?.signal as AbortSignal;
+    signals.push(signal);
+    return new Promise<Response>((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      setTimeout(() => resolve(new Response(JSON.stringify({ results: [] }), { headers: { "content-type": "application/json" } })), 400);
+    });
+  }) as typeof fetch;
+  try {
+    const client = new AbortController();
+    const pending = app.request(new Request("http://x/api/test/similar?q=hello", { signal: client.signal }));
+    while (signals.length === 0) await Bun.sleep(5);
+    expect(signals[0]!.aborted).toBe(false);
+    client.abort();
+    await Bun.sleep(20);
+    expect(signals[0]!.aborted).toBe(true);
+    await pending;
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("similar: an abandoned request is not logged as a Knowledge API error", async () => {
+  const app = appFor(fixedStore(makeJob({})));
+  const origFetch = globalThis.fetch;
+  const records: LogRecord[] = [];
+  await configure({
+    sinks: { capture: (r: LogRecord) => records.push(r) },
+    loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "warning" }],
+    reset: true,
+  });
+  let started = false;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    started = true;
+    return new Promise<Response>((_resolve, reject) => {
+      (init!.signal as AbortSignal).addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    });
+  }) as typeof fetch;
+  try {
+    const client = new AbortController();
+    const pending = app.request(new Request("http://x/api/test/similar?q=hello", { signal: client.signal }));
+    while (!started) await Bun.sleep(5);
+    client.abort();
+    await pending;
+    expect(records).toEqual([]);
+  } finally {
+    globalThis.fetch = origFetch;
+    await reset();
+  }
+});

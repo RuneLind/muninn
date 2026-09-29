@@ -18,6 +18,15 @@ import {
   readerTranscriptLength,
   readerWordCount,
   readerYouTubeId,
+  readerDocKey,
+  readerSameStory,
+  readerWikiContext,
+  SAME_STORY_MAX,
+  SAME_STORY_MIN_RELEVANCE,
+  readerSimilarQuery,
+  readerCutQuery,
+  SIMILAR_QUERY_CHARS,
+  SIMILAR_QUERY_MAX_ENCODED,
 } from "./reader-article.ts";
 import { splitTranscript } from "./transcript-split.ts";
 
@@ -301,5 +310,115 @@ describe("fix round 1", () => {
 
   test("thumbnails are https only", () => {
     expect(readerThumbnail("vimeo", "https://vimeo.com/1", "http://i.vimeocdn.com/x.jpg")).toBeNull();
+  });
+});
+
+describe("Same story this week", () => {
+  const TODAY = "2026-09-29";
+  const open = { source: "youtube", docId: "ai/Open.md" };
+  const hit = (source: string, id: string, relevance: number, date?: string, extra: Record<string, unknown> = {}) =>
+    ({ source, id, relevance, ...(date ? { metadata: { date } } : {}), ...extra });
+
+  test("keeps recent hits at or above the threshold, minus the open doc and Similar's", () => {
+    const hits = [
+      hit("youtube", "ai/Open.md", 1, TODAY),
+      hit("youtube", "ai/InSimilar.md", 0.67, TODAY),
+      hit("anthropic", "ai/InSimilar.md", 0.6, "2026-09-23"), // same id, another source: kept
+      hit("youtube", "ai/Week.md", SAME_STORY_MIN_RELEVANCE, "2026-09-23"), // 6 days back, at the threshold
+      hit("youtube", "ai/Old.md", 0.6, "2026-09-22"), // 7 days back: an 8th calendar day
+      hit("youtube", "ai/Weak.md", SAME_STORY_MIN_RELEVANCE - 0.001, TODAY),
+      hit("youtube", "ai/Future.md", 0.6, "2026-09-30"),
+      hit("youtube", "ai/Undated.md", 0.6),
+      hit("x-article", "ai/ByMtime.md", 0.5, undefined, { modifiedTime: "2026-09-28T10:00:00.000" }),
+    ];
+    const kept = readerSameStory(hits, open, [readerDocKey("youtube", "ai/InSimilar.md")], TODAY).map((h) => readerDocKey(h.source, h.id));
+    expect(kept).toEqual(["anthropic|ai/InSimilar.md", "youtube|ai/Week.md", "x-article|ai/ByMtime.md"]);
+  });
+
+  test("at most SAME_STORY_MAX, in the search's order, each doc once; junk input is empty", () => {
+    const hits = Array.from({ length: 9 }, (_, i) => hit("youtube", `ai/${i}.md`, 0.6, TODAY));
+    hits.splice(1, 0, hit("youtube", "ai/0.md", 0.6, TODAY));
+    const kept = readerSameStory(hits, open, [], TODAY).map((h) => h.id);
+    expect(kept).toEqual(["ai/0.md", "ai/1.md", "ai/2.md", "ai/3.md", "ai/4.md"].slice(0, SAME_STORY_MAX));
+    expect(readerSameStory(null, open, [], TODAY)).toEqual([]);
+    expect(readerSameStory([null, { id: "x" }, hit("youtube", "a", Number.NaN, TODAY)], open, [], TODAY)).toEqual([]);
+  });
+});
+
+describe("In your wiki", () => {
+  test("one row per bot and page, at its most advanced status, where that page first appears", () => {
+    const items = readerWikiContext([
+      { id: "1", bot: "jarvis", status: "draft", targetPath: "sources/a.mdx" },
+      { id: "2", bot: "capra", status: "draft", targetPath: "sources/a.mdx" },
+      { id: "3", bot: "jarvis", status: "applied", targetPath: "sources/a.mdx" },
+      { id: "4", bot: "jarvis", status: "approved", targetPath: "sources/a.mdx" },
+      { id: "5", bot: "jarvis", status: "approved", targetPath: "sources/b.mdx" },
+      { id: "6", bot: "jarvis", status: "draft", targetPath: "sources/b.mdx" },
+      { id: "7", bot: "capra", status: "draft", targetPath: "sources/a.mdx" },
+    ]);
+    expect(items.map((i) => [i.bot, i.targetPath, i.status, i.label])).toEqual([
+      ["jarvis", "sources/a.mdx", "applied", "In the wiki"],
+      ["capra", "sources/a.mdx", "draft", "Draft to review"],
+      ["jarvis", "sources/b.mdx", "approved", "Approved, not applied"],
+    ]);
+    expect(items[0]!.href).toBe("/wiki?wiki=jarvis&relPath=sources%2Fa.mdx");
+  });
+
+  test("applied opens the page, draft and approved open the gate; other statuses and bad rows are dropped", () => {
+    const items = readerWikiContext([
+      { id: "1", bot: "jarvis", status: "applied", targetPath: "sources/A b.mdx" },
+      { id: "2", bot: "capra", status: "draft", targetPath: "sources/c.mdx" },
+      { id: "3", bot: "jarvis", status: "approved", targetPath: "sources/d.mdx" },
+      { id: "4", bot: "jarvis", status: "rejected", targetPath: "sources/e.mdx" },
+      { id: "5", bot: "jarvis", status: "stale", targetPath: "sources/f.mdx" },
+      { id: "6", status: "draft", targetPath: "sources/g.mdx" },
+      null,
+    ]);
+    expect(items.map((i) => [i.bot, i.status, i.href])).toEqual([
+      ["jarvis", "applied", "/wiki?wiki=jarvis&relPath=sources%2FA%20b.mdx"],
+      ["capra", "draft", "/wiki/gardener?wiki=capra"],
+      ["jarvis", "approved", "/wiki/gardener?wiki=jarvis"],
+    ]);
+    expect(items[0]!.label).toBe("In the wiki");
+    expect(readerWikiContext(undefined)).toEqual([]);
+  });
+});
+
+describe("Similar query", () => {
+  test("the text before the ## Transcript appendix, trimmed; a fenced heading is not the appendix", () => {
+    const md = "\n\n*Lede.*\n\n## One\nbody\n```\n## Transcript\nquoted\n```\n\n## Transcript\n\n### [00:00:00]\nspoken words";
+    expect(readerSimilarQuery(md)).toBe("*Lede.*\n\n## One\nbody\n```\n## Transcript\nquoted\n```");
+    expect(readerSimilarQuery("no appendix here  ")).toBe("no appendix here");
+    expect(readerSimilarQuery("## Transcript\nonly spoken words")).toBe("");
+    // `## Transcript notes` is a section, not the appendix.
+    expect(readerSimilarQuery("a\n## Transcript notes\nb")).toBe("a\n## Transcript notes\nb");
+  });
+
+  test("cut to SIMILAR_QUERY_CHARS", () => {
+    const md = "x".repeat(SIMILAR_QUERY_CHARS + 500) + "\n\n## Transcript\nspoken";
+    expect(readerSimilarQuery(md)).toBe("x".repeat(SIMILAR_QUERY_CHARS));
+  });
+
+  test("an emoji straddling the cut is dropped whole, and the result encodes", () => {
+    const md = "a".repeat(SIMILAR_QUERY_CHARS - 1) + "🧠 and more";
+    const q = readerSimilarQuery(md);
+    expect(q).toBe("a".repeat(SIMILAR_QUERY_CHARS - 1));
+    expect(() => encodeURIComponent(q)).not.toThrow();
+    expect(readerCutQuery("ab🧠", 3)).toBe("ab");
+    expect(readerCutQuery("ab🧠", 4)).toBe("ab🧠");
+  });
+
+  test("trimmed until the encoded query fits SIMILAR_QUERY_MAX_ENCODED", () => {
+    // 2,000 emoji units encode to 1,000 × 12 bytes; CJK to 2,000 × 9.
+    for (const unit of ["🧠", "漢"]) {
+      const q = readerSimilarQuery(unit.repeat(SIMILAR_QUERY_CHARS));
+      const size = encodeURIComponent(q).length;
+      expect(size).toBeLessThanOrEqual(SIMILAR_QUERY_MAX_ENCODED);
+      expect(size).toBeGreaterThan(SIMILAR_QUERY_MAX_ENCODED - 12);
+      expect(q.length).toBeGreaterThan(0);
+    }
+    // Plain prose is never trimmed by the size rule.
+    const prose = "Words fill the section. ".repeat(100);
+    expect(readerSimilarQuery(prose)).toBe(prose.slice(0, SIMILAR_QUERY_CHARS).trim());
   });
 });

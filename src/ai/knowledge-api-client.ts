@@ -24,6 +24,10 @@ interface KnowledgeApiOptions {
   method?: string;
   body?: string;
   headers?: Record<string, string>;
+  /** Aborts the fetch as the timeout does: pass the incoming request's
+   *  signal so a caller that went away frees the upstream connection. The
+   *  upstream may still finish its work (huginn's sync routes do). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -50,7 +54,8 @@ async function fetchKnowledgeApiRes(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const fetchOptions: RequestInit = { signal: controller.signal };
+    const signal = options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+    const fetchOptions: RequestInit = { signal };
     if (options?.method) fetchOptions.method = options.method;
     if (options?.body) fetchOptions.body = options.body;
     if (options?.headers) fetchOptions.headers = options.headers;
@@ -123,11 +128,15 @@ export async function knowledgeApiHandler(
   timeoutMs?: number,
   /** Reshapes the parsed JSON before it is sent; must not throw. */
   transform?: (data: unknown) => unknown | Promise<unknown>,
+  /** Aborts the upstream fetch (see `KnowledgeApiOptions.signal`). */
+  signal?: AbortSignal,
 ): Promise<Response> {
   try {
-    const data = await fetchKnowledgeApi(baseUrl, path, { timeoutMs });
+    const data = await fetchKnowledgeApi(baseUrl, path, { timeoutMs, signal });
     return c.json((transform ? await transform(data) : data) as object);
   } catch (err) {
+    // The caller left: not an upstream failure, so no warn.
+    if (signal?.aborted) return c.json({ error: "Request cancelled" }, 503);
     if (err instanceof KnowledgeApiError) {
       log.warn("Knowledge API error on {path}: {error}", { path, error: err.message });
       return c.json({ error: err.message }, err.statusCode as 502 | 503);

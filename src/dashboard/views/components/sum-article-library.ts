@@ -26,7 +26,7 @@ import {
   DOC_PANEL_MORE_WRAP_ID,
 } from "./doc-panel.ts";
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
-import { SIMILAR_DEBOUNCE_MS } from "./sum-reader.ts";
+import { SIMILAR_CHUNK_CHARS, SIMILAR_DEBOUNCE_MS } from "./sum-reader.ts";
 import { docPanelMenuScript } from "./doc-panel-menu.ts";
 
 /**
@@ -1361,10 +1361,16 @@ export function sumArticleLibraryScript(): string {
           '<div class="sum-col-right" id="sumRightRail">' +
             '<nav class="sum-outline" id="sumOutline" aria-label="On this page" hidden></nav>' +
             '<div class="doc-similar" id="docSimilarPanel"></div>' +
+            '<section class="doc-similar sum-context" id="sumSameStory" aria-labelledby="sumSameStoryTitle" hidden></section>' +
+            '<section class="doc-similar sum-context" id="sumInWiki" aria-labelledby="sumInWikiTitle" hidden></section>' +
           '</div>';
       }
       var outlineEl = document.getElementById('sumOutline');
       if (outlineEl) { outlineEl.hidden = true; outlineEl.innerHTML = ''; }
+      ['sumSameStory', 'sumInWiki'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) { el.hidden = true; el.innerHTML = ''; }
+      });
       document.getElementById('sumArticleMain').innerHTML =
         '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading...</div>';
       document.getElementById('docSimilarPanel').innerHTML =
@@ -1432,16 +1438,14 @@ export function sumArticleLibraryScript(): string {
           }
         }
 
-        // Right panel: other articles matching in relevance (within this
-        // source). Debounced, so j/k stepping through the rail does not queue
-        // a search per row passed: only the open that is still current after
-        // the wait searches.
-        clearTimeout(_similarTimer);
-        _similarTimer = setTimeout(function() {
-          if (myRequest === _docRequestId) loadDocSimilar(title, docId, myRequest, source);
-        }, ${SIMILAR_DEBOUNCE_MS});
+        // Similar searches the summary's opening (readerSimilarQuery), the
+        // query the ingest-time Similar uses; the title only when there is none.
+        var similarQ = typeof readerSimilarQuery === 'function' ? readerSimilarQuery(cleaned) : '';
+        scheduleRightRail(title, docId, myRequest, source, similarQ);
       } catch (err) {
         if (myRequest !== _docRequestId) return;  // superseded
+        // No body to read: the rail's searches go out on the title.
+        scheduleRightRail(title, docId, myRequest, source);
         // Unread, a per-document source falls back to its registry label.
         if (url && src && !linksEl.querySelector('a')) {
           linksEl.innerHTML = '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(src.linkLabel) + '</a>';
@@ -1544,25 +1548,100 @@ export function sumArticleLibraryScript(): string {
       });
     }
 
-    async function loadDocSimilar(title, currentDocId, requestId, source) {
-      var panel = document.getElementById('docSimilarPanel');
-      if (!panel) return;
+    /**
+     * The right rail under the outline: Similar (within this source), Same
+     * story this week (across sources, deduped against Similar) and In your
+     * wiki. Debounced, so j/k stepping through the rail does not queue a
+     * search per row passed: only the open that is still current after the
+     * wait searches.
+     */
+    function scheduleRightRail(title, docId, requestId, source, similarQ) {
+      clearTimeout(_similarTimer);
+      _similarTimer = setTimeout(function() {
+        if (requestId !== _docRequestId) return;
+        var similar = loadDocSimilar(title, docId, requestId, source, similarQ);
+        loadSameStory(title, docId, requestId, source, similar);
+        loadDocContext(docId, requestId, source);
+      }, ${SIMILAR_DEBOUNCE_MS});
+    }
+
+    /** Opens a card (Similar or Same story) in place; a card that names its
+     *  own source (data-source) opens in that one. */
+    function wireSimilarCards(panel, source) {
+      panel.querySelectorAll('.doc-similar-item').forEach(function(item) {
+        var link = item.tagName === 'A' ? item : item.querySelector('a');
+        if (!link) return;
+        link.addEventListener('click', function(e) {
+          // The card's href is the /summaries deep link: a modified click
+          // opens it in a new tab as the browser does.
+          if (link === item && (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0)) return;
+          e.preventDefault();
+          openSummaryDoc(item.getAttribute('data-doc-id'), item.getAttribute('data-doc-url'), item.getAttribute('data-source') || source);
+        });
+      });
+    }
+
+    /** Same story this week: the title searched across every summary source,
+     *  shown once Similar has settled so a document is never in both. Absent
+     *  when nothing is left, or when the search fails. */
+    async function loadSameStory(title, docId, requestId, source, similarDone) {
+      var data = null;
       try {
-        var res = await fetch(docApiBase(source) + '/similar?q=' + encodeURIComponent(title));
-        if (requestId !== undefined && requestId !== _docRequestId) return;  // superseded by a newer open
+        var res = await fetch('/api/summaries/same-story?q=' + encodeURIComponent(title));
+        if (res.ok) data = await res.json();
+      } catch {}
+      var shown = await similarDone;
+      if (requestId !== _docRequestId || !data || typeof readerSameStoryHtml !== 'function') return;
+      var el = document.getElementById('sumSameStory');
+      if (!el) return;
+      var html = readerSameStoryHtml(data.results, { source: source, docId: docId }, shown || []);
+      el.innerHTML = html;
+      el.hidden = !html;
+      if (html) wireSimilarCards(el, source);
+    }
+
+    /** In your wiki: the source proposals drafted from this summary, from
+     *  this instance's own database. Absent when there are none. */
+    async function loadDocContext(docId, requestId, source) {
+      if (!SOURCES[source] || typeof readerWikiHtml !== 'function') return;
+      try {
+        var res = await fetch('/api/summaries/doc-context?source=' + encodeURIComponent(source) + '&docId=' + encodeURIComponent(docId));
+        if (!res.ok || requestId !== _docRequestId) return;
+        var data = await res.json();
+        if (requestId !== _docRequestId) return;
+        var el = document.getElementById('sumInWiki');
+        if (!el) return;
+        var html = readerWikiHtml(data.proposals);
+        el.innerHTML = html;
+        el.hidden = !html;
+      } catch {}
+    }
+
+    /** Resolves to the keys (readerDocKey) of the cards it rendered; [] when
+     *  it rendered none or failed, null when a newer open superseded it. */
+    async function loadDocSimilar(title, currentDocId, requestId, source, openingQ) {
+      var panel = document.getElementById('docSimilarPanel');
+      if (!panel) return [];
+      try {
+        // A 2,000-character opening has nothing for corrective rescue to
+        // rescue; the title query keeps huginn's default.
+        var similarUrl = docApiBase(source) + '/similar?q=' + encodeURIComponent(openingQ || title) +
+          (openingQ ? '&corrective=off' : '') + '&max_chunk_chars=${SIMILAR_CHUNK_CHARS}';
+        var res = await fetch(similarUrl);
+        if (requestId !== undefined && requestId !== _docRequestId) return null;  // superseded by a newer open
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var data = await res.json();
-        if (requestId !== undefined && requestId !== _docRequestId) return;  // superseded by a newer open
+        if (requestId !== undefined && requestId !== _docRequestId) return null;  // superseded by a newer open
         // The panel reference captured before the await may now be detached
         // (a newer openSummaryDoc rewrote bodyEl). Re-query by id to land on
         // the currently-mounted panel — guarded above so we only ever write
         // when we're still the active request.
         panel = document.getElementById('docSimilarPanel');
-        if (!panel) return;
+        if (!panel) return [];
         var results = (data.results || []).filter(function(r) { return r.id !== currentDocId; }).slice(0, 5);
         if (results.length === 0) {
           panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">No similar articles found</div>';
-          return;
+          return [];
         }
         panel.innerHTML = '<h4>Similar Articles</h4>' + (typeof readerSimilarHtml === 'function'
           ? readerSimilarHtml(results, source)
@@ -1575,25 +1654,17 @@ export function sumArticleLibraryScript(): string {
               '<span class="doc-similar-relevance">' + pct + '%</span>' +
             '</div>';
           }).join(''));
-        // Wire up click handlers for similar items. With the 3-col layout the
-        // panel re-renders in place, so we call openSummaryDoc directly. Similar
-        // results live in the opened doc's source collection, so reuse source.
-        // A reader card (sum-reader.ts) is itself the link; a plain row holds one.
-        panel.querySelectorAll('.doc-similar-item').forEach(function(item) {
-          var link = item.tagName === 'A' ? item : item.querySelector('a');
-          if (!link) return;
-          link.addEventListener('click', function(e) {
-            // The card's href is the /summaries deep link: a modified click
-            // opens it in a new tab as the browser does.
-            if (link === item && (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0)) return;
-            e.preventDefault();
-            openSummaryDoc(item.getAttribute('data-doc-id'), item.getAttribute('data-doc-url'), source);
-          });
-        });
+        // With the 3-col layout the panel re-renders in place, so a click
+        // calls openSummaryDoc directly. Similar results live in the opened
+        // doc's source collection, so reuse source. A reader card
+        // (sum-reader.ts) is itself the link; a plain row holds one.
+        wireSimilarCards(panel, source);
+        return results.map(function(r) { return typeof readerDocKey === 'function' ? readerDocKey(source, r.id) : source + '|' + r.id; });
       } catch {
-        if (requestId !== undefined && requestId !== _docRequestId) return;  // superseded by a newer open
+        if (requestId !== undefined && requestId !== _docRequestId) return null;  // superseded by a newer open
         panel = document.getElementById('docSimilarPanel');
         if (panel) panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">Failed to load similar</div>';
+        return [];
       }
     }
   `;

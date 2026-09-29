@@ -708,6 +708,15 @@ function mapRow(r: Record<string, any>): WikiProposal {
   };
 }
 
+/**
+ * The WHERE fragment both doc helpers below share: a bot-level (`wiki_name IS
+ * NULL`) `source` proposal whose `source_docs` contains `{collection, docId}`.
+ */
+function sourceProposalsForDoc(collection: string, docId: string) {
+  const sql = getDb();
+  return sql`wiki_name IS NULL AND kind = 'source' AND source_docs @> ${sql.json([{ collection, docId }] as any)}`;
+}
+
 /** One proposal row a doc delete touched — enough for the client to name it. */
 export interface DeletedSourceProposal {
   id: string;
@@ -735,7 +744,6 @@ export async function deleteSourceProposalsForDoc(
   docId: string,
 ): Promise<{ deleted: DeletedSourceProposal[]; kept: DeletedSourceProposal[] }> {
   const sql = getDb();
-  const match = sql.json([{ collection, docId }] as any);
   const toRow = (r: Record<string, unknown>): DeletedSourceProposal => ({
     id: r.id as string,
     targetPath: r.target_path as string,
@@ -743,14 +751,37 @@ export async function deleteSourceProposalsForDoc(
   });
   const kept = await sql`
     SELECT id, target_path, status FROM wiki_proposals
-    WHERE bot_name = ${botName} AND wiki_name IS NULL AND kind = 'source'
-      AND status = 'applied' AND source_docs @> ${match}
+    WHERE bot_name = ${botName} AND status = 'applied' AND ${sourceProposalsForDoc(collection, docId)}
   `;
   const deleted = await sql`
     DELETE FROM wiki_proposals
-    WHERE bot_name = ${botName} AND wiki_name IS NULL AND kind = 'source'
-      AND status <> 'applied' AND source_docs @> ${match}
+    WHERE bot_name = ${botName} AND status <> 'applied' AND ${sourceProposalsForDoc(collection, docId)}
     RETURNING id, target_path, status
   `;
   return { deleted: deleted.map(toRow), kept: kept.map(toRow) };
+}
+
+/** One `source` proposal drafted from a captured doc, on any bot. */
+export interface SourceProposalForDoc extends DeletedSourceProposal {
+  bot: string;
+}
+
+/**
+ * Every bot's `source` proposal drafted from one captured doc, newest first —
+ * the read half of {@link deleteSourceProposalsForDoc}'s match, without its
+ * bot filter.
+ */
+export async function getSourceProposalsForDoc(collection: string, docId: string): Promise<SourceProposalForDoc[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT id, bot_name, target_path, status FROM wiki_proposals
+    WHERE ${sourceProposalsForDoc(collection, docId)}
+    ORDER BY created_at DESC, id
+  `;
+  return rows.map((r) => ({
+    id: r.id as string,
+    bot: r.bot_name as string,
+    targetPath: r.target_path as string,
+    status: r.status as WikiProposalStatus,
+  }));
 }

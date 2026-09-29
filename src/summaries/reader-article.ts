@@ -17,7 +17,8 @@
  * summaries library's client copy of the transcript-split.ts function) and
  * `railDate`/`railValidDay` (the Latest rail's script). A second injected
  * declaration would replace the page's copy for every caller.
- * `READER_STALE_DAYS` is injected as a `var` the same way.
+ * `READER_STALE_DAYS`, the three `SAME_STORY_*` constants and the two
+ * `SIMILAR_QUERY_*` ones are injected as `var`s the same way.
  */
 
 import { mapProseLines } from "./transcript-split.ts";
@@ -27,6 +28,33 @@ import { railDate, railValidDay } from "./latest-rail.ts";
 /** Past this many days an age reads in months, and a Similar card's age
  *  turns amber: "2 months ago" is always amber, "60 days ago" never is. */
 export const READER_STALE_DAYS = 60;
+
+/**
+ * Same story this week keeps a hit at or above this relevance. The search
+ * runs with rerank off, so relevance is rank-derived (0.75 / (1 + 0.12·i) for
+ * the hit at index i): 0.43 is a rank cut-off that keeps the top 7. Measured
+ * 2026-09-29 on 8 real anchors at limit 15: 7 of the 10 known siblings ranked
+ * 2–7 (0.436–0.67), and the other three were not in the top 15. A sibling
+ * inside the 15 can still miss the cut-off: over 11 Opus 5.5 anchors, the
+ * anthropic "Claude Opus 5.5" post cleared it on 5 and sat at index 7–11 on 6.
+ */
+export const SAME_STORY_MIN_RELEVANCE = 0.43;
+
+/** Same story this week spans this many calendar days: today and the six
+ *  before it, the Latest rail's inclusive count. */
+export const SAME_STORY_DAYS = 7;
+
+/** Same story this week shows at most this many cards. */
+export const SAME_STORY_MAX = 5;
+
+/** Similar's query: the opening of the summary, as long as the ingest-time
+ *  Similar's `summary[:2000]` (huginn `main/ingest/registry.py`). */
+export const SIMILAR_QUERY_CHARS = 2000;
+
+/** The query rides in a GET twice (browser → muninn → huginn), and huginn's
+ *  request head is capped at 16 KiB: trim until the encoded `q` fits in 6 KB.
+ *  Measured 2026-09-29 on 11 real summaries: 2,873–3,075 bytes. */
+export const SIMILAR_QUERY_MAX_ENCODED = 6144;
 
 export interface ReaderHeading {
   level: number;
@@ -305,6 +333,139 @@ export function readerSimilarWhy(chunks: unknown): ReaderSimilarWhy | null {
   return null;
 }
 
+export interface ReaderSameStoryHit {
+  source?: unknown;
+  id?: unknown;
+  relevance?: unknown;
+  modifiedTime?: unknown;
+  metadata?: { date?: unknown } | null;
+  [key: string]: unknown;
+}
+
+/** One key per document across sources: a doc id is collection-relative. */
+export function readerDocKey(source: unknown, id: unknown): string {
+  return String(source) + "|" + String(id);
+}
+
+/**
+ * The Same story this week cards: the same-story search's hits captured in
+ * the last `SAME_STORY_DAYS` calendar days, today included (`metadata.date`, else `modifiedTime`), at
+ * or above `SAME_STORY_MIN_RELEVANCE`, without the open document and without
+ * any document Similar already shows (`shownKeys`, from `readerDocKey`). In
+ * the search's order, at most `SAME_STORY_MAX`.
+ */
+export function readerSameStory(
+  hits: unknown,
+  open: { source: string; docId: string },
+  shownKeys: string[],
+  today: string,
+): ReaderSameStoryHit[] {
+  if (!Array.isArray(hits)) return [];
+  const skip: Record<string, boolean> = {};
+  skip[readerDocKey(open.source, open.docId)] = true;
+  for (const k of shownKeys) skip[k] = true;
+  const out: ReaderSameStoryHit[] = [];
+  for (const h of hits as ReaderSameStoryHit[]) {
+    if (!h || typeof h.source !== "string" || typeof h.id !== "string") continue;
+    const key = readerDocKey(h.source, h.id);
+    if (skip[key]) continue;
+    if (!(typeof h.relevance === "number" && h.relevance >= SAME_STORY_MIN_RELEVANCE)) continue;
+    const day = readerDay(h.metadata && h.metadata.date) || readerDay(h.modifiedTime);
+    const days = readerDaysBetween(day, today);
+    if (days === null || days < 0 || days >= SAME_STORY_DAYS) continue;
+    skip[key] = true;
+    out.push(h);
+    if (out.length >= SAME_STORY_MAX) break;
+  }
+  return out;
+}
+
+export interface ReaderWikiItem {
+  bot: string;
+  status: "draft" | "approved" | "applied";
+  label: string;
+  targetPath: string;
+  href: string;
+}
+
+/**
+ * The In your wiki rows: each `source` proposal drafted from the open
+ * summary, linked into its bot's wiki. An applied page opens in the wiki
+ * reader; a draft or an approved one opens that wiki's review gate. A
+ * rejected, stale or failed proposal is not in the wiki and gets no row.
+ * A page drafted more than once is one row per bot, at its most advanced
+ * status (applied, then approved, then draft), where it first appears.
+ */
+export function readerWikiContext(proposals: unknown): ReaderWikiItem[] {
+  if (!Array.isArray(proposals)) return [];
+  const labels: Record<string, string> = { applied: "In the wiki", draft: "Draft to review", approved: "Approved, not applied" };
+  const rank: Record<string, number> = { draft: 1, approved: 2, applied: 3 };
+  const at: Record<string, number> = {};
+  const out: ReaderWikiItem[] = [];
+  for (const p of proposals) {
+    if (!p || typeof p !== "object") continue;
+    const { bot, status, targetPath } = p as { bot?: unknown; status?: unknown; targetPath?: unknown };
+    if (typeof bot !== "string" || !bot || typeof targetPath !== "string") continue;
+    if (status !== "applied" && status !== "draft" && status !== "approved") continue;
+    const key = bot + "\n" + targetPath;
+    const seen = at[key];
+    if (seen !== undefined && rank[out[seen]!.status]! >= rank[status]!) continue;
+    const wiki = encodeURIComponent(bot);
+    const item: ReaderWikiItem = {
+      bot,
+      status,
+      label: labels[status]!,
+      targetPath,
+      href: status === "applied"
+        ? "/wiki?wiki=" + wiki + "&relPath=" + encodeURIComponent(targetPath)
+        : "/wiki/gardener?wiki=" + wiki,
+    };
+    if (seen === undefined) {
+      at[key] = out.length;
+      out.push(item);
+    } else {
+      out[seen] = item;
+    }
+  }
+  return out;
+}
+
+/** The first `n` UTF-16 units of `s`, one fewer when the cut would leave
+ *  half a surrogate pair (an emoji), which `encodeURIComponent` throws on. */
+export function readerCutQuery(s: string, n: number): string {
+  let out = s.slice(0, Math.max(0, n));
+  const last = out.charCodeAt(out.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1);
+  return out;
+}
+
+/**
+ * Similar's query for a stored summary: the text before its `## Transcript`
+ * heading (outside fenced code), trimmed, cut to `SIMILAR_QUERY_CHARS`
+ * UTF-16 units (huginn's cut counts code points; the difference is accepted),
+ * then trimmed further until `encodeURIComponent(q)` is at most
+ * `SIMILAR_QUERY_MAX_ENCODED` bytes. Empty when the summary has no text
+ * before the transcript; the caller then searches the title.
+ */
+export function readerSimilarQuery(markdown: string): string {
+  const text = String(markdown);
+  let at = -1;
+  mapProseLines(text, (line, i) => {
+    if (at === -1 && /^## Transcript\s*$/.test(line)) at = i;
+    return line;
+  });
+  const body = at === -1 ? text : text.split("\n").slice(0, at).join("\n");
+  let q = readerCutQuery(body.trim(), SIMILAR_QUERY_CHARS);
+  let size = encodeURIComponent(q).length;
+  while (size > SIMILAR_QUERY_MAX_ENCODED) {
+    // Shrink in proportion, and always by at least one unit.
+    const keep = Math.min(q.length - 1, Math.floor(q.length * SIMILAR_QUERY_MAX_ENCODED / size));
+    q = readerCutQuery(q, keep);
+    size = encodeURIComponent(q).length;
+  }
+  return q.trim();
+}
+
 /** The 11-character id a YouTube url names (`extractYouTubeVideoId`'s host
  *  rule), or null; only the id charset, since it lands in a url and a src. */
 export function readerYouTubeId(url: unknown): string | null {
@@ -394,6 +555,11 @@ export const READER_FUNCTIONS = [
   readerPills,
   readerIsTranscriptHeading,
   readerSimilarWhy,
+  readerDocKey,
+  readerSameStory,
+  readerWikiContext,
+  readerCutQuery,
+  readerSimilarQuery,
   readerYouTubeId,
   readerYouTubeStampBase,
   readerThumbnail,

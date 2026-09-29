@@ -38,6 +38,16 @@ describe("sum-reader: the injected functions", () => {
     expect(injected.slice().sort()).toEqual([...exported, ...imported].sort());
   });
 
+  test("the injected In your wiki rows dedupe and link by relPath as the module does", () => {
+    const injected = new Function(injectedBlock() + "\nreturn readerWikiContext;")() as typeof reader.readerWikiContext;
+    const rows = [
+      { bot: "jarvis", status: "draft", targetPath: "sources/x.mdx" },
+      { bot: "jarvis", status: "applied", targetPath: "sources/x.mdx" },
+    ];
+    expect(injected(rows)).toEqual(reader.readerWikiContext(rows));
+    expect(injected(rows).map((i) => i.href)).toEqual(["/wiki?wiki=jarvis&relPath=sources%2Fx.mdx"]);
+  });
+
   test("the injected copies run standalone and agree with the module", () => {
     const names = reader.READER_FUNCTIONS.map((f) => f.name);
     // The rail's date helpers (sum-latest-rail.ts) and mapProseLines
@@ -62,5 +72,14 @@ describe("sum-reader: the injected functions", () => {
     expect(api.readerAge("2024-09-29", "2026-09-29")).toBe(reader.readerAge("2024-09-29", "2026-09-29"));
     expect(api.readerAge("2026-02-30", "2026-09-29")).toBeNull();
     expect(api.readerYouTubeId("https://youtu.be/rmr-LdARqHE")).toBe("rmr-LdARqHE");
+    const hits = [{ source: "anthropic", id: "a.md", relevance: 0.5, metadata: { date: "2026-09-27" } }, { source: "youtube", id: "b.md", relevance: 0.2, metadata: { date: "2026-09-27" } }];
+    const open = { source: "youtube", docId: "o.md" };
+    expect(api.readerSameStory(hits, open, [], "2026-09-29")).toEqual(reader.readerSameStory(hits, open, [], "2026-09-29"));
+    expect(api.readerSameStory(hits, open, [], "2026-09-29")).toHaveLength(1);
+    const rows = [{ bot: "jarvis", status: "applied", targetPath: "sources/x.mdx" }];
+    expect(api.readerWikiContext(rows)).toEqual(reader.readerWikiContext(rows));
+    const long = md + "🧠".repeat(3000);
+    expect(api.readerSimilarQuery(long)).toBe(reader.readerSimilarQuery(long));
+    expect(api.readerSimilarQuery("🧠".repeat(3000)).length).toBeGreaterThan(0);
   });
 });
