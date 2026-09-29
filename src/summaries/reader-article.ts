@@ -38,7 +38,8 @@ export const READER_STALE_DAYS = 60;
  */
 export const SAME_STORY_MIN_RELEVANCE = 0.43;
 
-/** Same story this week: captured at most this many days before today. */
+/** Same story this week spans this many calendar days: today and the six
+ *  before it, the Latest rail's inclusive count. */
 export const SAME_STORY_DAYS = 7;
 
 /** Same story this week shows at most this many cards. */
@@ -346,7 +347,7 @@ export function readerDocKey(source: unknown, id: unknown): string {
 
 /**
  * The Same story this week cards: the same-story search's hits captured in
- * the last `SAME_STORY_DAYS` days (`metadata.date`, else `modifiedTime`) at
+ * the last `SAME_STORY_DAYS` calendar days, today included (`metadata.date`, else `modifiedTime`), at
  * or above `SAME_STORY_MIN_RELEVANCE`, without the open document and without
  * any document Similar already shows (`shownKeys`, from `readerDocKey`). In
  * the search's order, at most `SAME_STORY_MAX`.
@@ -369,7 +370,7 @@ export function readerSameStory(
     if (!(typeof h.relevance === "number" && h.relevance >= SAME_STORY_MIN_RELEVANCE)) continue;
     const day = readerDay(h.metadata && h.metadata.date) || readerDay(h.modifiedTime);
     const days = readerDaysBetween(day, today);
-    if (days === null || days < 0 || days > SAME_STORY_DAYS) continue;
+    if (days === null || days < 0 || days >= SAME_STORY_DAYS) continue;
     skip[key] = true;
     out.push(h);
     if (out.length >= SAME_STORY_MAX) break;
@@ -390,26 +391,39 @@ export interface ReaderWikiItem {
  * summary, linked into its bot's wiki. An applied page opens in the wiki
  * reader; a draft or an approved one opens that wiki's review gate. A
  * rejected, stale or failed proposal is not in the wiki and gets no row.
+ * A page drafted more than once is one row per bot, at its most advanced
+ * status (applied, then approved, then draft), where it first appears.
  */
 export function readerWikiContext(proposals: unknown): ReaderWikiItem[] {
   if (!Array.isArray(proposals)) return [];
   const labels: Record<string, string> = { applied: "In the wiki", draft: "Draft to review", approved: "Approved, not applied" };
+  const rank: Record<string, number> = { draft: 1, approved: 2, applied: 3 };
+  const at: Record<string, number> = {};
   const out: ReaderWikiItem[] = [];
   for (const p of proposals) {
     if (!p || typeof p !== "object") continue;
     const { bot, status, targetPath } = p as { bot?: unknown; status?: unknown; targetPath?: unknown };
     if (typeof bot !== "string" || !bot || typeof targetPath !== "string") continue;
     if (status !== "applied" && status !== "draft" && status !== "approved") continue;
+    const key = bot + "\n" + targetPath;
+    const seen = at[key];
+    if (seen !== undefined && rank[out[seen]!.status]! >= rank[status]!) continue;
     const wiki = encodeURIComponent(bot);
-    out.push({
+    const item: ReaderWikiItem = {
       bot,
       status,
       label: labels[status]!,
       targetPath,
       href: status === "applied"
-        ? "/wiki?wiki=" + wiki + "&path=" + encodeURIComponent(targetPath)
+        ? "/wiki?wiki=" + wiki + "&relPath=" + encodeURIComponent(targetPath)
         : "/wiki/gardener?wiki=" + wiki,
-    });
+    };
+    if (seen === undefined) {
+      at[key] = out.length;
+      out.push(item);
+    } else {
+      out[seen] = item;
+    }
   }
   return out;
 }

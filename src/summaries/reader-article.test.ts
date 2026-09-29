@@ -324,8 +324,8 @@ describe("Same story this week", () => {
       hit("youtube", "ai/Open.md", 1, TODAY),
       hit("youtube", "ai/InSimilar.md", 0.67, TODAY),
       hit("anthropic", "ai/InSimilar.md", 0.6, "2026-09-23"), // same id, another source: kept
-      hit("youtube", "ai/Week.md", SAME_STORY_MIN_RELEVANCE, "2026-09-22"), // exactly 7 days, at the threshold
-      hit("youtube", "ai/Old.md", 0.6, "2026-09-21"), // 8 days
+      hit("youtube", "ai/Week.md", SAME_STORY_MIN_RELEVANCE, "2026-09-23"), // 6 days back, at the threshold
+      hit("youtube", "ai/Old.md", 0.6, "2026-09-22"), // 7 days back: an 8th calendar day
       hit("youtube", "ai/Weak.md", SAME_STORY_MIN_RELEVANCE - 0.001, TODAY),
       hit("youtube", "ai/Future.md", 0.6, "2026-09-30"),
       hit("youtube", "ai/Undated.md", 0.6),
@@ -346,6 +346,24 @@ describe("Same story this week", () => {
 });
 
 describe("In your wiki", () => {
+  test("one row per bot and page, at its most advanced status, where that page first appears", () => {
+    const items = readerWikiContext([
+      { id: "1", bot: "jarvis", status: "draft", targetPath: "sources/a.mdx" },
+      { id: "2", bot: "capra", status: "draft", targetPath: "sources/a.mdx" },
+      { id: "3", bot: "jarvis", status: "applied", targetPath: "sources/a.mdx" },
+      { id: "4", bot: "jarvis", status: "approved", targetPath: "sources/a.mdx" },
+      { id: "5", bot: "jarvis", status: "approved", targetPath: "sources/b.mdx" },
+      { id: "6", bot: "jarvis", status: "draft", targetPath: "sources/b.mdx" },
+      { id: "7", bot: "capra", status: "draft", targetPath: "sources/a.mdx" },
+    ]);
+    expect(items.map((i) => [i.bot, i.targetPath, i.status, i.label])).toEqual([
+      ["jarvis", "sources/a.mdx", "applied", "In the wiki"],
+      ["capra", "sources/a.mdx", "draft", "Draft to review"],
+      ["jarvis", "sources/b.mdx", "approved", "Approved, not applied"],
+    ]);
+    expect(items[0]!.href).toBe("/wiki?wiki=jarvis&relPath=sources%2Fa.mdx");
+  });
+
   test("applied opens the page, draft and approved open the gate; other statuses and bad rows are dropped", () => {
     const items = readerWikiContext([
       { id: "1", bot: "jarvis", status: "applied", targetPath: "sources/A b.mdx" },
@@ -357,7 +375,7 @@ describe("In your wiki", () => {
       null,
     ]);
     expect(items.map((i) => [i.bot, i.status, i.href])).toEqual([
-      ["jarvis", "applied", "/wiki?wiki=jarvis&path=sources%2FA%20b.mdx"],
+      ["jarvis", "applied", "/wiki?wiki=jarvis&relPath=sources%2FA%20b.mdx"],
       ["capra", "draft", "/wiki/gardener?wiki=capra"],
       ["jarvis", "approved", "/wiki/gardener?wiki=jarvis"],
     ]);

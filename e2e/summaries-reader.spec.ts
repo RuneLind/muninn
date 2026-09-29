@@ -17,7 +17,9 @@
  * PR 2 adds Same story this week (the fake answers `/api/collections` and a
  * multi-collection `/api/search`) and In your wiki, which reads wiki_proposals:
  * this file's only database writes are its own proposal rows (`E2E_BOT`),
- * inserted and removed around the one test that needs them.
+ * inserted and removed around the one test that needs them. The first of
+ * those bots has a temp wiki of its own (`WIKI_EXTRA`), so the applied row's
+ * link is followed to the page it names.
  *
  * NO MODEL CALLS. Ports come from `e2e/ports.ts`.
  */
@@ -27,6 +29,8 @@ import postgres from "postgres";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
@@ -136,8 +140,12 @@ const title = (id: string) => id.split("/").pop()!.replace(/\.md$/, "");
 
 let server: ChildProcess | undefined;
 let huginn: Server | undefined;
+let wikiRoot = "";
 
 test.beforeAll(async () => {
+  wikiRoot = mkdtempSync(path.join(tmpdir(), "muninn-e2e-reader-wiki-"));
+  mkdirSync(path.join(wikiRoot, "sources"));
+  writeFileSync(path.join(wikiRoot, APPLIED_PAGE), `---\ntitle: ${APPLIED_TITLE}\n---\n\n# ${APPLIED_TITLE}\n\nDrafted from a summary.\n`);
   huginn = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
     const p = decodeURIComponent(url.pathname);
@@ -187,6 +195,7 @@ test.beforeAll(async () => {
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
       KNOWLEDGE_API_URL: `http://127.0.0.1:${HUGINN_PORT}`,
+      WIKI_EXTRA: `${E2E_BOTS[0]}=${wikiRoot}`,
     },
     stdio: "ignore",
   });
@@ -203,6 +212,7 @@ test.beforeAll(async () => {
 test.afterAll(() => {
   server?.kill("SIGTERM");
   huginn?.close();
+  if (wikiRoot) rmSync(wikiRoot, { recursive: true, force: true });
 });
 
 test.beforeEach(() => seed());
@@ -1523,7 +1533,11 @@ test("Copy link: a failed copy says so, and asks nothing", async ({ page }) => {
  *  them, so the cleanup cannot touch a developer's rows. */
 const E2E_BOTS = ["e2e-reader-wiki", "e2e-reader-wiki-2"];
 
-async function withProposals(rows: Array<{ bot: string; topic: string; status: string; docId: string }>, fn: () => Promise<void>): Promise<void> {
+/** The applied proposal's page, present in E2E_BOTS[0]'s temp wiki. */
+const APPLIED_PAGE = "sources/e2e-reader-applied.mdx";
+const APPLIED_TITLE = "E2E applied source page";
+
+async function withProposals(rows: Array<{ bot: string; topic: string; status: string; docId: string; target?: string }>, fn: () => Promise<void>): Promise<void> {
   const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
   const clean = () => sql`DELETE FROM wiki_proposals WHERE bot_name IN ${sql(E2E_BOTS)}`;
   try {
@@ -1531,7 +1545,7 @@ async function withProposals(rows: Array<{ bot: string; topic: string; status: s
     for (const r of rows) {
       const docs = [{ collection: "youtube-summaries", docId: r.docId, title: title(r.docId), url: YT_URL }];
       await sql`INSERT INTO wiki_proposals (bot_name, topic_key, kind, mode, target_path, draft, source_docs, status)
-                VALUES (${r.bot}, ${r.topic}, 'source', 'create', ${"sources/" + r.topic + ".mdx"}, '# x', ${sql.json(docs as never)}, ${r.status})`;
+                VALUES (${r.bot}, ${r.topic}, 'source', 'create', ${r.target ?? "sources/" + r.topic + ".mdx"}, '# x', ${sql.json(docs as never)}, ${r.status})`;
     }
     await fn();
   } finally {
@@ -1558,6 +1572,8 @@ test("Same story this week and In your wiki: filtered, deduped, linked, in rail 
   // out, or the whole search 404s and the section never renders.
   await withProposals([
     { bot: E2E_BOTS[0]!, topic: "e2e-reader-applied", status: "applied", docId: NEW_DOC },
+    // A second draft of the page that was applied: still one row.
+    { bot: E2E_BOTS[0]!, topic: "e2e-reader-applied-again", status: "draft", docId: NEW_DOC, target: APPLIED_PAGE },
     { bot: E2E_BOTS[1]!, topic: "e2e-reader-draft", status: "draft", docId: NEW_DOC },
     { bot: E2E_BOTS[0]!, topic: "e2e-reader-rejected", status: "rejected", docId: NEW_DOC },
     { bot: E2E_BOTS[0]!, topic: "e2e-reader-other", status: "draft", docId: OLD_DOC },
@@ -1581,7 +1597,7 @@ test("Same story this week and In your wiki: filtered, deduped, linked, in rail 
     await expect(wiki.locator("h4")).toHaveText("In your wiki");
     const links = wiki.locator("a.sum-wiki-link");
     await expect(links).toHaveCount(2);
-    await expect(wiki.locator('a[data-status="applied"]')).toHaveAttribute("href", `/wiki?wiki=${E2E_BOTS[0]}&path=${encodeURIComponent("sources/e2e-reader-applied.mdx")}`);
+    await expect(wiki.locator('a[data-status="applied"]')).toHaveAttribute("href", `/wiki?wiki=${E2E_BOTS[0]}&relPath=${encodeURIComponent(APPLIED_PAGE)}`);
     await expect(wiki.locator('a[data-status="draft"]')).toHaveAttribute("href", `/wiki/gardener?wiki=${E2E_BOTS[1]}`);
     await expect(wiki.locator('a[data-status="draft"] .sum-wiki-meta')).toHaveText(`Draft to review · ${E2E_BOTS[1]}`);
 
@@ -1624,6 +1640,16 @@ test("Same story this week and In your wiki: filtered, deduped, linked, in rail 
     await expect(page.locator("#sumInWiki a.sum-wiki-link")).toHaveCount(1);
     await expect(same).toBeHidden();
     await expect(same.locator("*")).toHaveCount(0);
+
+    // The applied row's link opens that page in the wiki reader, not the
+    // wiki's start page.
+    await page.evaluate((id) => (window as unknown as PageWindow).openSummaryDoc!(id, "", "youtube"), NEW_DOC);
+    const applied = page.locator('#sumInWiki a[data-status="applied"]');
+    await expect(applied).toBeVisible();
+    await applied.click();
+    await expect(page).toHaveURL(/\/wiki\?/);
+    await expect(page.locator("#articleWrap").getByRole("heading", { level: 1, name: APPLIED_TITLE })).toBeVisible();
+    await expect(page.locator("#articleWrap")).toContainText("Drafted from a summary.");
   });
 });
 
