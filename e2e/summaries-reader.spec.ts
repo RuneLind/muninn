@@ -1714,7 +1714,7 @@ test("card meta: at the narrowest rail its items wrap whole, inside the card, an
     await page.setViewportSize({ width, height: 900 });
     const rows = await page.locator("#sumRightRail .sum-sim-meta").evaluateAll((metas) => metas.map((m) => {
       const box = m.getBoundingClientRect();
-      const kids = [...m.children].map((k) => k.getBoundingClientRect());
+      const kids = Array.from(m.children).map((k) => k.getBoundingClientRect());
       const age = m.querySelector(".sum-sim-age") as HTMLElement | null;
       const line = age ? parseFloat(getComputedStyle(age).lineHeight) || parseFloat(getComputedStyle(age).fontSize) * 1.2 : 0;
       return {
