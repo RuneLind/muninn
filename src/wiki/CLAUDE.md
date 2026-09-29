@@ -3355,8 +3355,11 @@ Invariants:
   is resolved in favour of the code-unit-smallest name (warned). The
   lowercase+NFC fold remains as the cheap filter before any download.
 - **A skipped object loses its local copy.** An object that is listed but
-  skipped (oversized, a collision loser) is treated as absent, so a republish
-  meant to strip content never leaves the old version served.
+  skipped (listed size over the cap, a collision loser) is treated as absent,
+  so its old copy is deleted. NOT covered (follow-up): an object whose listed
+  size is under the cap but whose body is over it (a `gcloud storage cp -Z`
+  upload) fails the download and keeps the old copy; the publish script never
+  produces one.
 - **A failed or empty listing never mass-deletes.** A failed list throws before
   any write. A listing that would delete every mirrored file and write none is
   refused with a warn and the copy kept. The guard catches only TOTAL deletion;

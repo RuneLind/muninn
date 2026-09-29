@@ -723,10 +723,10 @@ export class BucketMirror {
     }
     candidates.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
     const byFold = new Map<string, string>();
-    // The names this poll keeps. A listed object that is SKIPPED (oversized, a
-    // collision loser) is not among them: its old local copy is deleted like a
-    // gone object's, so a republish meant to strip content never leaves the
-    // previous version served.
+    // The names this poll keeps. A listed object that is SKIPPED (listed size
+    // over the cap, a collision loser) is not among them: its old local copy is
+    // deleted like a gone object's. A download that FAILS (incl. a body over the
+    // cap behind a small listed size) keeps it — follow-up, see src/wiki/CLAUDE.md.
     const present = new Set<string>();
     const wanted: { rel: string; obj: GcsObject }[] = [];
     for (const { rel, obj } of candidates) {
