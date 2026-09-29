@@ -193,10 +193,39 @@ export function registerSummaryVertical<S extends string, F>(
     );
   });
 
+  // `corrective` and `max_chunk_chars` pass through to huginn's /api/search
+  // when the caller sends them; absent, huginn's own defaults apply.
   app.get(`${apiBase}/similar`, async (c) => {
     const q = c.req.query("q");
     if (!q) return c.json({ error: "Missing query parameter" }, 400);
     const params = new URLSearchParams({ q, collection, limit: "7" });
+    const passed = similarPassThrough(c.req.query("corrective"), c.req.query("max_chunk_chars"));
+    if ("error" in passed) return c.json({ error: passed.error }, 400);
+    for (const [k, v] of Object.entries(passed.params)) params.set(k, v);
     return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/search?${params}`, 10000);
   });
+}
+
+/** The values huginn's `/api/search` accepts for `corrective`. */
+const CORRECTIVE_MODES = new Set(["auto", "off", "force"]);
+
+/**
+ * Validates the two search knobs a Similar caller may set. A value huginn would
+ * refuse with a 422 is refused here with a 400 that names it, rather than
+ * forwarded and reported as a 502.
+ */
+export function similarPassThrough(
+  corrective: string | undefined,
+  maxChunkChars: string | undefined,
+): { params: Record<string, string> } | { error: string } {
+  const params: Record<string, string> = {};
+  if (corrective !== undefined) {
+    if (!CORRECTIVE_MODES.has(corrective)) return { error: "corrective must be auto, off or force" };
+    params.corrective = corrective;
+  }
+  if (maxChunkChars !== undefined) {
+    if (!/^[1-9]\d{0,4}$/.test(maxChunkChars)) return { error: "max_chunk_chars must be a whole number from 1 to 99999" };
+    params.max_chunk_chars = maxChunkChars;
+  }
+  return { params };
 }

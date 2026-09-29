@@ -226,6 +226,35 @@ test("similar: 400 without q, else proxies to the collection search", async () =
     expect(capturedUrl).toContain("http://kb.test/api/search?");
     expect(capturedUrl).toContain("collection=test-summaries");
     expect(capturedUrl).toContain("limit=7");
+    // Nothing sent, nothing forwarded: huginn's defaults apply.
+    expect(capturedUrl).not.toContain("corrective");
+    expect(capturedUrl).not.toContain("max_chunk_chars");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("similar: forwards corrective and max_chunk_chars, and refuses values huginn would refuse", async () => {
+  const app = appFor(fixedStore(makeJob({})));
+  const origFetch = globalThis.fetch;
+  const captured: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    captured.push(String(input));
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const ok = await app.request("/api/test/similar?q=hello&corrective=off&max_chunk_chars=200");
+    expect(ok.status).toBe(200);
+    const sent = new URL(captured[0]!).searchParams;
+    expect(sent.get("corrective")).toBe("off");
+    expect(sent.get("max_chunk_chars")).toBe("200");
+    expect(sent.get("q")).toBe("hello");
+
+    for (const bad of ["corrective=never", "max_chunk_chars=0", "max_chunk_chars=-5", "max_chunk_chars=2e3", "max_chunk_chars=100000"]) {
+      const res = await app.request(`/api/test/similar?q=hello&${bad}`);
+      expect(res.status).toBe(400);
+    }
+    expect(captured.length).toBe(1);
   } finally {
     globalThis.fetch = origFetch;
   }
