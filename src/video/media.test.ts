@@ -286,7 +286,7 @@ test("ytDlpDownloadArgs is byte-identical to the pre-`format` argv when no forma
     "-o",
     "/work/video.%(ext)s",
     "-O",
-    "after_move:%(.{id,title,duration,uploader,webpage_url})j",
+    "after_move:%(.{id,title,duration,uploader,webpage_url,upload_date})j",
     "--break-match-filters",
     "duration <= 3600",
     "https://x.test/v",
@@ -309,16 +309,18 @@ test("neither yt-dlp argv asks for the full info JSON", () => {
 });
 
 test("the info template carries every field parseYtDlpJson reads", () => {
-  // The exact line yt-dlp 2026.08.19 printed for this template on a real video.
+  // The line yt-dlp 2026.08.19 printed on a real video, plus `upload_date` in the
+  // shape it printed on 2026-09-29 (`jNQXAC9IVRw` → "20050424").
   const line =
-    '{"id": "vsGwx28z4jk", "title": "T", "duration": 423, "uploader": "U", "webpage_url": "https://www.youtube.com/watch?v=vsGwx28z4jk"}';
-  expect(YTDLP_INFO_TEMPLATE).toBe("%(.{id,title,duration,uploader,webpage_url})j");
+    '{"id": "vsGwx28z4jk", "title": "T", "duration": 423, "uploader": "U", "webpage_url": "https://www.youtube.com/watch?v=vsGwx28z4jk", "upload_date": "20240115"}';
+  expect(YTDLP_INFO_TEMPLATE).toBe("%(.{id,title,duration,uploader,webpage_url,upload_date})j");
   expect(parseYtDlpJson(line)).toEqual({
     id: "vsGwx28z4jk",
     title: "T",
     duration: 423,
     uploader: "U",
     webpageUrl: "https://www.youtube.com/watch?v=vsGwx28z4jk",
+    uploadDate: "20240115",
   });
 });
 
@@ -400,7 +402,7 @@ test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () =>
     "--ignore-config",
     "--no-plugin-dirs",
     "-O",
-    "%(.{id,title,duration,uploader,webpage_url})j",
+    "%(.{id,title,duration,uploader,webpage_url,upload_date})j",
     "--skip-download",
     "--no-playlist",
     "https://www.youtube.com/watch?v=dQw4w9WgXcQ",

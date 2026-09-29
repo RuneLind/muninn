@@ -256,6 +256,9 @@ afterAll(() => {
 
 let probeAnswer: YtDlpInfo | null = { id: VIDEO_ID, title: "A talk", duration: 1200, uploader: "conf" };
 let probeCalls: string[] = [];
+/** What the fake oEmbed answers (`undefined` = a failed lookup), and who asked. */
+let oembedAuthor: string | undefined = "An Uploader";
+let oembedCalls: string[] = [];
 /** Whatever a case wants to know about the world at the moment the probe runs. */
 let atProbe: (() => void) | null = null;
 let downloadCalls: Array<{ url: string; workDir: string; opts: DownloadOptions }> = [];
@@ -300,6 +303,10 @@ function deps() {
       probeCalls.push(url);
       atProbe?.();
       return probeAnswer;
+    },
+    fetchAuthor: async (videoId: string) => {
+      oembedCalls.push(videoId);
+      return oembedAuthor;
     },
     downloadVideo: async (url: string, workDir: string, opts: DownloadOptions): Promise<DownloadResult> => {
       downloadCalls.push({ url, workDir, opts });
@@ -419,6 +426,8 @@ beforeEach(() => {
   ingestBodies = [];
   sourceDraftCalls = [];
   probeCalls = [];
+  oembedAuthor = "An Uploader";
+  oembedCalls = [];
   atProbe = null;
   atDownload = null;
   atExtract = null;
@@ -496,6 +505,45 @@ async function run(
   });
   return jobId;
 }
+
+describe("the video fields: author, upload_date, duration_sec", () => {
+  test("frames off: author from oEmbed, and no probe fields", async () => {
+    await run();
+    expect(probeCalls).toEqual([]);
+    expect(oembedCalls).toEqual([VIDEO_ID]);
+    const body = ingestBodies[0]!;
+    expect(body.author).toBe("An Uploader");
+    expect(body).not.toHaveProperty("duration_sec");
+    expect(body).not.toHaveProperty("upload_date");
+  });
+
+  test("frames off with a failed oEmbed: no author key, and the capture still ingests", async () => {
+    oembedAuthor = undefined;
+    await run();
+    expect(ingestBodies.length).toBe(1);
+    expect(ingestBodies[0]).not.toHaveProperty("author");
+  });
+
+  test("frames on: the probe's uploader, rounded duration and dashed date; oEmbed never asked", async () => {
+    probeAnswer = { id: VIDEO_ID, title: "A talk", duration: 1199.6, uploader: "conf", uploadDate: "20240115" };
+    await run({ frames: true });
+    expect(oembedCalls).toEqual([]);
+    const body = ingestBodies[0]!;
+    expect(body.author).toBe("conf");
+    expect(body.duration_sec).toBe(1200);
+    expect(body.upload_date).toBe("2024-01-15");
+  });
+
+  test("frames on, probe sentinels (live video): oEmbed author, no length, no date", async () => {
+    probeAnswer = { id: VIDEO_ID, title: "live", duration: 0, uploader: "" };
+    await run({ frames: true });
+    expect(oembedCalls).toEqual([VIDEO_ID]);
+    const body = ingestBodies[0]!;
+    expect(body.author).toBe("An Uploader");
+    expect(body).not.toHaveProperty("duration_sec");
+    expect(body).not.toHaveProperty("upload_date");
+  });
+});
 
 describe("frames off — the capture that shipped before this PR", () => {
   /**

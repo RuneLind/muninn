@@ -347,7 +347,9 @@ const VERTICALS: readonly RerunVertical[] = [
     captureSource: "youtube",
     ingestPath: "/api/youtube/ingest",
     frameSource: YOUTUBE_FRAME_SOURCE,
-    frontmatterFields: ["date", "url", "summary_kind"],
+    // `author`/`upload_date`/`duration_sec` since huginn #139 — a key left off
+    // this list is ERASED by a re-run.
+    frontmatterFields: ["date", "url", "summary_kind", "author", "upload_date", "duration_sec"],
     // `YouTubeIngestRequest` has no `tags` field — see `acceptsTags`.
     acceptsTags: false,
     hasKindPicker: true,

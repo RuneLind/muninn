@@ -238,6 +238,24 @@ describe("renderExportPage", () => {
     expect(html).not.toContain("/api/frames/");
     expect(html).toContain("prefers-color-scheme: light");
   });
+  test("an exact duration_sec is a length fact after the date; YouTube's dashed date reads as is", () => {
+    const html = renderExportPage({
+      title: "t",
+      url: "https://www.youtube.com/watch?v=abcdefghijk",
+      linkLabel: "Watch on YouTube ↗",
+      metadata: { author: "A Channel", upload_date: "2024-01-15", duration_sec: 4320, summary_kind: "standard" },
+      markdown: "x",
+      sourceId: "youtube",
+    });
+    expect(html).toContain("<span>A Channel</span><span>2024-01-15</span><span>1 h 12 min</span><span>standard summary</span>");
+    // A string form (a hand-edited or re-quoted value) reads the same; zero and junk add nothing.
+    const str = renderExportPage({ title: "t", linkLabel: "x", markdown: "x", sourceId: "vimeo", metadata: { duration_sec: "3180" } });
+    expect(str).toContain("<span>53 min</span>");
+    for (const bad of [0, "", "12.5", "abc", null]) {
+      const html = renderExportPage({ title: "t", linkLabel: "x", markdown: "x", sourceId: "vimeo", metadata: { duration_sec: bad } });
+      expect(html).not.toContain(" min</span>");
+    }
+  });
   test("a document url with an executable scheme gets no source link", () => {
     const html = renderExportPage({ title: "t", url: "javascript:alert(1)", linkLabel: "Open", markdown: "x", sourceId: "article" });
     expect(html).not.toContain("javascript:");

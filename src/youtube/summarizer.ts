@@ -15,6 +15,7 @@ import {
 } from "../summaries/summarizer-shared.ts";
 import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "./prompt.ts";
 import { finishYouTubeSummary } from "./finish.ts";
+import { fetchYouTubeOembedAuthor, probeAuthor, youtubeVideoFields } from "./metadata.ts";
 import {
   captureBotConfigFor,
   captureThinkingFor,
@@ -156,6 +157,8 @@ export interface YouTubeSummarizerDeps {
   /** yt-dlp metadata probe — the duration everything on the frames path is sized from. */
   probeVideoInfo: (url: string, opts: { timeoutMs?: number }) => Promise<YtDlpInfo | null>;
   downloadVideo: (url: string, workDir: string, opts: DownloadOptions) => Promise<DownloadResult>;
+  /** oEmbed `author_name`, or `undefined` on any failure — asked only when the probe named nobody. */
+  fetchAuthor: (videoId: string) => Promise<string | undefined>;
   /** One JPEG per cadence tick out of the downloaded file. */
   extractFrames: (input: {
     file: string;
@@ -198,6 +201,7 @@ export interface YouTubeSummarizerDeps {
 const REAL_DEPS: YouTubeSummarizerDeps = {
   probeVideoInfo: (url, opts) => realProbeVideoInfo(url, opts),
   downloadVideo: (url, workDir, opts) => realDownloadVideo(url, workDir, opts),
+  fetchAuthor: (videoId) => fetchYouTubeOembedAuthor(videoId),
   extractFrames: ({ file, durationSec, outDir }) =>
     extractCadenceFramesFromFile(file, durationSec, outDir, { height: CAPTURE_FRAME_HEIGHT }),
   scanVideo: (input) => realRunDenseScan(input),
@@ -417,9 +421,11 @@ export async function summarizeVideo(
     updateStatus(jobId, "fetching_transcript");
     let framesOutcome: FramesOutcome = "off";
     let durationSec = 0;
+    /** The probe's answer, kept for the ingest's `author`/`upload_date`/`duration_sec`. */
+    let probe: YtDlpInfo | null = null;
     if (opts.frames === true) {
       // In the frames queue: a probe is a yt-dlp process too.
-      const probe = await framesQueue.run(FRAMES_QUEUE_KEY, () =>
+      probe = await framesQueue.run(FRAMES_QUEUE_KEY, () =>
         resolved.probeVideoInfo(videoUrl, {}),
       );
       durationSec = probe?.duration ?? 0;
@@ -1077,6 +1083,12 @@ export async function summarizeVideo(
         },
       );
     }
+    // What the probe knew, and oEmbed's `author` when it knew nobody (or never
+    // ran — a frames-off capture). A failed oEmbed omits the key, never the capture.
+    const videoFields = youtubeVideoFields(
+      probe,
+      probeAuthor(probe) === undefined ? await resolved.fetchAuthor(videoId) : undefined,
+    );
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/youtube/ingest",
@@ -1091,6 +1103,7 @@ export async function summarizeVideo(
         // always, including for `standard`: "absent" has to keep meaning
         // "written before kinds existed" rather than "written as standard".
         summary_kind: preset.id,
+        ...videoFields,
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
       onIngested: (info) => {

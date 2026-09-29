@@ -63,6 +63,9 @@ export interface YtDlpInfo {
   duration: number;
   uploader: string;
   webpageUrl?: string;
+  /** yt-dlp's `upload_date`, raw `YYYYMMDD` — `undefined` when absent (a live or
+   *  upcoming video has none). Consumers validate the shape themselves. */
+  uploadDate?: string;
 }
 
 export interface DownloadResult {
@@ -198,7 +201,7 @@ export function summarizeTimeoutFor(frameCount: number, floorMs: number): number
  * measured 11.7 MB (2026-09-24, `vsGwx28z4jk`), past `runProc`'s 8 MB cap, and
  * the capped read closes the pipe — yt-dlp then exits 1 with `Broken pipe`.
  */
-export const YTDLP_INFO_TEMPLATE = "%(.{id,title,duration,uploader,webpage_url})j";
+export const YTDLP_INFO_TEMPLATE = "%(.{id,title,duration,uploader,webpage_url,upload_date})j";
 
 /**
  * Parse a single yt-dlp {@link YTDLP_INFO_TEMPLATE} line into the fields we need. Returns
@@ -223,6 +226,7 @@ export function parseYtDlpJson(line: string): YtDlpInfo | null {
     duration: typeof rec.duration === "number" ? rec.duration : 0,
     uploader: typeof rec.uploader === "string" ? rec.uploader : "",
     webpageUrl: typeof rec.webpage_url === "string" ? rec.webpage_url : undefined,
+    uploadDate: typeof rec.upload_date === "string" && rec.upload_date !== "" ? rec.upload_date : undefined,
   };
 }
 

@@ -463,6 +463,21 @@ parameter at all, so there is no second place to get this wrong. `title` is
 capped at 300 characters (`capYouTubeTitle`) — it is third-party text that
 reaches the job card, the `/agents` run name, the prompt and huginn's file name.
 
+## Author, upload date and length
+
+The ingest carries Vimeo's three video keys (huginn #139), built by
+`youtubeVideoFields` in `metadata.ts`. `author` is the probe's `uploader`, else
+YouTube oEmbed's `author_name` (5 s budget; any failure omits the key, never the
+capture). `upload_date` (`YYYYMMDD` → `YYYY-MM-DD`) and `duration_sec` (rounded;
+huginn 422s a fraction) come from the probe only, so a frames-off capture has
+neither. Probe sentinels are absent: `duration` 0, `uploader` `""`, an
+`upload_date` not matching `^\d{8}$` (live and upcoming videos). Nothing
+estimated is stored — a caption-end length stays a reader pill. The re-run's
+YouTube `frontmatterFields` lists all three, or a re-run erases them.
+Documents captured before this carry no `author`; `scripts/backfill-youtube-authors.ts`
+adds it from oEmbed (dry run → `--limit 20` pilot → full → `--rollback <tarball>`;
+its header has the run order and the mtime-stamp rules).
+
 ## CORS stays
 
 Unlike the Vimeo vertical, `POST /api/youtube/summarize` keeps `applyCors` — the
