@@ -202,7 +202,9 @@ export function registerSummaryVertical<S extends string, F>(
     const passed = similarPassThrough(c.req.query("corrective"), c.req.query("max_chunk_chars"));
     if ("error" in passed) return c.json({ error: passed.error }, 400);
     for (const [k, v] of Object.entries(passed.params)) params.set(k, v);
-    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/search?${params}`, 10000);
+    // A reader who moved on cancels the search rather than leaving huginn
+    // to finish it.
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/search?${params}`, 10000, undefined, c.req.raw.signal);
   });
 }
 

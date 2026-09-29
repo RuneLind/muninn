@@ -30,11 +30,11 @@ import { railDate, railValidDay } from "./latest-rail.ts";
 export const READER_STALE_DAYS = 60;
 
 /**
- * Same story this week keeps a hit at or above this relevance. Measured
- * 2026-09-29 on 7 real same-story anchors with the title query: 8 of the 9
- * siblings huginn returned scored 0.436–0.67, the ninth 0.229 (rank 20). These
- * answers were not reranked, so relevance is rank-based
- * (0.75 / (1 + 0.12·i)): 0.43 keeps the top 7 of the search.
+ * Same story this week keeps a hit at or above this relevance. The search
+ * runs with rerank off, so relevance is rank-derived (0.75 / (1 + 0.12·i) for
+ * the hit at index i): 0.43 is a rank cut-off that keeps the top 7. Measured
+ * 2026-09-29 on 8 real anchors at limit 15: 7 of the 10 known siblings ranked
+ * 2–7 (0.436–0.67); the other three ranked past 15 and are lost at any cut-off.
  */
 export const SAME_STORY_MIN_RELEVANCE = 0.43;
 

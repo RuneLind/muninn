@@ -377,3 +377,29 @@ test("stream: a reader that CLOSED does not silence the next reader of the same 
     server.stop(true);
   }
 }, 20_000);
+
+test("similar: an abandoned request aborts the huginn search", async () => {
+  const app = appFor(fixedStore(makeJob({})));
+  const origFetch = globalThis.fetch;
+  const signals: AbortSignal[] = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const signal = init?.signal as AbortSignal;
+    signals.push(signal);
+    return new Promise<Response>((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      setTimeout(() => resolve(new Response(JSON.stringify({ results: [] }), { headers: { "content-type": "application/json" } })), 400);
+    });
+  }) as typeof fetch;
+  try {
+    const client = new AbortController();
+    const pending = app.request(new Request("http://x/api/test/similar?q=hello", { signal: client.signal }));
+    while (signals.length === 0) await Bun.sleep(5);
+    expect(signals[0]!.aborted).toBe(false);
+    client.abort();
+    await Bun.sleep(20);
+    expect(signals[0]!.aborted).toBe(true);
+    await pending;
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
