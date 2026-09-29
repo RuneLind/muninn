@@ -3322,6 +3322,62 @@ Three accuracy rules the card follows, each closing a way it could lie: the read
 
 **Test hermeticity:** the mini's `.env` carries the flag, and Bun auto-loads `.env` for `bun test` too — 45 pre-existing wiki/gardener write tests failed there because the seams read it through their default. `bunfig.toml`'s `[test] preload` runs `src/test/preload.ts`, which clears `MUNINN_WIKI_READONLY` for tests only. The flag's own tests never relied on the env (they drive `__setWikiReadonlyForTest`), so nothing is lost. **Run the suite from the repo root on a flag-bearing host:** that preload path is resolved against the CWD (not against `bunfig.toml`) and an unresolvable bunfig preload is ignored silently, so `cd src/wiki && bun test ./page-write.test.ts` reintroduces the exact 9 failures the preload exists to prevent — from a subdirectory, pass it yourself (`bun test --preload ../test/preload.ts …`).
 
+## Bucket mirror (`bucket-mirror.ts`, `WIKI_BUCKET_MIRRORS`)
+
+A read-only wiki fed from a GCS bucket instead of a working tree — for a pod
+with no git checkout (the melosys-muninn nais shape). A curator uploads pages
+(`gcloud storage cp page.mdx gs://<bucket>/plans/`); each mirror entry polls
+the JSON API (list with paging, then `alt=media&generation=` per changed
+object), writes changed files atomically (hidden temp file + rename), deletes
+files whose objects are gone, prunes emptied directories, and busts the index
+with `getWikiIndex({ root, refresh: true })` after any change. First poll at
+boot, then every `WIKI_BUCKET_MIRROR_INTERVAL_MS`; polls never overlap. The
+deploy registers the same root in `WIKI_EXTRA` to browse it.
+
+**It deletes files, so the root is guarded before the first poll**, each
+failure a warn and an inert mirror, never a boot failure:
+
+- absolute, strictly inside `os.tmpdir()` after symlink resolution (resolved
+  through the deepest existing ancestor, so a root that does not exist yet
+  still resolves), not `/` and not the tmpdir itself;
+- listed in `WIKI_READONLY_ROOTS` (same resolution on both sides);
+- missing or empty (created/claimed, `.bucket-mirror` marker written), or
+  already carrying the marker (adopted: the manifest is rebuilt from the valid
+  file names on disk, stale temp files removed). Non-empty without the marker
+  is refused.
+
+It deletes only manifest paths, only regular files, never through a symlinked
+directory, and writes never follow one either.
+
+**Object names** map to relPaths under the entry's prefix and are refused
+(warned once per name + generation) for: `..`/`.` or empty segments, absolute
+names, backslashes, control characters, a trailing `/` (folder placeholder), a
+segment over 255 bytes, any hidden segment except a root `.wiki-reader.json`,
+and any extension outside `.md .mdx .html .png .jpg .jpeg .gif .svg .webp`.
+Per object cap `MAX_OBJECT_BYTES` (5 MB, skipped with the old local copy kept);
+a listing over `MAX_OBJECTS` (2000) is refused whole.
+
+**A failed poll changes nothing.** A failed list (401 after one token retry,
+403, 404, network) throws before any download or delete, so it is never read as
+"bucket empty"; the loop backs off (interval × 2^n, capped at 15 min) and warns
+once per distinct error. A failed download keeps the old file and retries next
+poll.
+
+**Credential:** a `GcpTokenProvider` over ADC (`src/gcp/access-token.ts`,
+shared with Vertex). The token is sent only when the base is the real
+`https://storage.googleapis.com`; the test override `WIKI_BUCKET_MIRROR_GCS_BASE`
+gets no Authorization header.
+
+**Restart:** a pod's `/tmp` is an `emptyDir`, so a restart starts empty; the
+mirror recreates the root and the first poll fills it. A restart over a marked
+directory (a laptop) adopts the files and re-downloads each once, since
+generations are not persisted.
+
+Acceptance: `bucket-mirror.test.ts` (config parse, name table, root rules,
+marker/adopt, atomic write, the poll against a `Bun.serve` fake GCS),
+`store-mirror-contract.test.ts` (the store behaviours it relies on) and
+`e2e/wiki-bucket-mirror.spec.ts` (render, update, delete, restart).
+
 ## Repo sync loop (`src/sync/`, `SYNC_REPOS`, `POST /api/sync/run`)
 
 Two machines (laptop + Mac mini) edit the same repos — mimir, huginn-jarvis (a wiki
