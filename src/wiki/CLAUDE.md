@@ -3345,40 +3345,65 @@ string). With a prefix, the reader config is the object
 Invariants:
 
 - **It deletes only manifest files** — paths it wrote or adopted under its own
-  marker — only regular files, never through a symlinked directory.
+  marker — only regular files, never through a symlinked directory. A manifest
+  entry whose file is gone from disk is forgotten at the start of the next poll,
+  so a still-listed object is downloaded again.
+- **Aliases are decided by the filesystem.** APFS folds names further than
+  lowercase+NFC (`ass.md`/`aß.md`, `aσ.md`/`aς.md`, `aﬁ.md`/`afi.md` are one
+  file there), so a delete whose file has the same `dev:ino` as a kept name is
+  only forgotten, never unlinked, and a new name that lands on a kept name's file
+  is resolved in favour of the code-unit-smallest name (warned). The
+  lowercase+NFC fold remains as the cheap filter before any download.
+- **A skipped object loses its local copy.** An object that is listed but
+  skipped (oversized, a collision loser) is treated as absent, so a republish
+  meant to strip content never leaves the old version served.
 - **A failed or empty listing never mass-deletes.** A failed list throws before
   any write. A listing that would delete every mirrored file and write none is
-  refused with a warn and the copy kept; emptying the wiki on purpose means
-  deleting the root's files by hand (or the pod, whose `/tmp` is an `emptyDir`)
-  and letting the next poll start empty.
+  refused with a warn and the copy kept. The guard catches only TOTAL deletion;
+  a listing that drops most files still runs.
+- **Purging a mirror**: remove every object from the bucket, then start a new
+  pod (a fresh `emptyDir`); on a laptop, stop muninn, delete the root, start it.
+  Never delete the root's dotfiles under a running process: without the
+  `.bucket-mirror` marker the entry stops.
 - **The root is re-verified before every poll's writes and deletes**: a plain
   directory (not a symlink), the realpath `prepare()` claimed, the marker still
-  there, the lock still this process's. Otherwise the entry stops with a warn.
+  there. Otherwise the entry stops with a warn. A lock no longer holding this
+  process's pid (a stale-lock reclaim race lost to another process) is not
+  terminal: the entry lets go and claims the root again on a later poll.
 - **The token goes only to the real host.** A `WIKI_BUCKET_MIRROR_GCS_BASE`
   other than `https://storage.googleapis.com` gets no Authorization header.
+- **Bucket ownership can be pinned.** Bucket names are global, so another
+  project can create a name first. With `WIKI_BUCKET_MIRROR_PROJECT_NUMBER` set,
+  `GET /storage/v1/b/<bucket>?fields=projectNumber` must answer that number
+  before anything is listed — on the first poll, then at most hourly, and after
+  any failed poll. A mismatch warns with both numbers and backs off; it is not
+  terminal. Unset against the real host, boot warns once.
 - **One writer per root**: `.bucket-mirror.lock`, created `O_EXCL` with the
-  owner's pid. A live holder makes the entry wait and retry; a dead pid, or this
-  process's own pid with no mirror here holding it, is reclaimed. The marker
-  names the source (`gs://bucket/prefix`), and a root marked for another source
-  is refused, as are two entries whose realpath-resolved roots are equal or
-  nested.
+  owner's pid, released on every exit (refusal, `stop()`, a throw after the lock
+  was taken). A live holder makes the entry wait and retry; a dead pid, or this
+  process's own pid with no mirror here holding it (a container restart keeps the
+  `emptyDir` and repeats pid 1), is reclaimed. The marker names the source
+  (`gs://bucket/prefix`), and a root marked for another source is refused, as are
+  two entries whose realpath-resolved roots are equal or nested.
 - **Not in the wiki write queue**: the mirror is the root's only writer (the
   lock), and the root is read-only to everything else (`WIKI_READONLY_ROOTS`).
 - **Bounded reads**: downloads ask for `Accept-Encoding: identity` and stream
   through `readBoundedBytes` with a 2 MB cap (`MAX_OBJECT_BYTES`); a list page is
-  capped at 8 MB; a listing over 2000 objects is refused whole.
+  capped at 8 MB, an error body at 64 KB; a listing over 2000 objects is refused
+  whole.
 - **Names**: pages only (`.md .mdx .html`) plus the root `.wiki-reader.json`;
   refused are `.`/`..`/empty segments, backslashes, C0/C1 controls, U+2028/2029,
   bidi overrides, hidden segments and segments over 211 bytes (255 minus the
-  44-byte temp-file affix). Names that collide under lowercase+NFC keep the
-  code-unit-smallest; every name in a log line is JSON-escaped.
+  44-byte temp-file affix). Every name in a log line is JSON-escaped.
 - **Page dates** are the object's `updated` time, set as the file's mtime.
 
 A failed poll backs off, doubling, capped at the larger of the interval and
 5 min. `stop()` aborts the in-flight poll and releases the lock.
 
 Acceptance: `bucket-mirror.test.ts`, `bucket-mirror-hardening.test.ts`,
-`store-mirror-contract.test.ts` and `e2e/wiki-bucket-mirror.spec.ts`.
+`bucket-mirror-round2.test.ts`, `store-mirror-contract.test.ts` and
+`e2e/wiki-bucket-mirror.spec.ts`. The round-2 file branches on a filesystem
+probe; run it with `TMPDIR` on a case-sensitive volume for the Linux half.
 
 ## Repo sync loop (`src/sync/`, `SYNC_REPOS`, `POST /api/sync/run`)
 

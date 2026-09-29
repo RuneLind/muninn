@@ -63,6 +63,8 @@ const LIST_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 /** Backoff ceiling: a recovered bucket is picked up within the 5-minute acceptance. */
 const MAX_BACKOFF_MS = 5 * 60_000;
+/** How long a verified bucket owner is trusted before it is asked again. */
+export const OWNERSHIP_RECHECK_MS = 60 * 60_000;
 
 /** C0, DEL, C1, the Unicode line/paragraph separators and the bidi overrides. */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
@@ -365,14 +367,18 @@ async function plainParents(realRoot: string, relPath: string): Promise<boolean>
   return true;
 }
 
-/** Are these two relPaths one file on disk (a case/normalization alias)? */
-async function sameFile(realRoot: string, a: string, b: string): Promise<boolean> {
-  if (!(await plainParents(realRoot, a)) || !(await plainParents(realRoot, b))) return false;
-  const [sa, sb] = await Promise.all([
-    lstat(path.join(realRoot, a)).catch(() => null),
-    lstat(path.join(realRoot, b)).catch(() => null),
-  ]);
-  return !!sa && !!sb && sa.dev === sb.dev && sa.ino === sb.ino;
+/** `dev:ino` of the regular file at `relPath`, or null when there is none (or a
+ *  parent is not a plain directory). Two names with one key are ONE file: APFS
+ *  folds case and normalization further than any fold function here can model
+ *  (`ass.md`/`aß.md`, `aσ.md`/`aς.md`, `aﬁ.md`/`afi.md` are one file there). */
+async function inodeKey(realRoot: string, relPath: string): Promise<string | null> {
+  try {
+    if (!(await plainParents(realRoot, relPath))) return null;
+    const st = await lstat(path.join(realRoot, relPath));
+    return st.isFile() ? `${st.dev}:${st.ino}` : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Delete one managed file (only a regular file) and prune emptied parent dirs. */
@@ -469,15 +475,27 @@ export interface BucketMirrorDeps {
   isReadonlyRoot?: (root: string) => boolean;
   /** Busts the wiki index after a changed poll. */
   refreshIndex?: (root: string) => Promise<unknown>;
+  /** `WIKI_BUCKET_MIRROR_PROJECT_NUMBER`: the project the bucket must belong to. */
+  projectNumber?: string | null;
+  now?: () => number;
 }
 
 class RootLostError extends Error {}
+
+/** The bucket answered with another project's number (or none): a squatted or
+ *  mistyped name. Not terminal — the poll backs off and asks again. */
+export class BucketOwnershipError extends Error {}
 
 export class BucketMirror {
   /** relPath → generation last written ("" = on disk, generation unknown). */
   readonly manifest = new Map<string, string>();
   #realRoot: string | null = null;
   #wikiRoot: string | null = null;
+  /** The root whose lock file THIS mirror created — tracked apart from
+   *  `#realRoot`, which is set only once `prepare()` finishes. */
+  #lockRoot: string | null = null;
+  #ownershipCheckedAt = 0;
+  #lastOwnershipWarn: string | null = null;
   #state: "new" | "ready" | "refused" = "new";
   #timer: ReturnType<typeof setTimeout> | null = null;
   #current: Promise<void> | null = null;
@@ -487,9 +505,10 @@ export class BucketMirror {
   #lastError: string | null = null;
   #refreshOwed = false;
   #lastGuardWarn: string | null = null;
-  /** Per-object warnings already emitted (name + generation + reason), pruned
-   *  to the names in the latest listing. */
-  #warnedObjects = new Set<string>();
+  /** Per-object warnings already emitted: name → `generation\0reason`, pruned
+   *  to the names in the latest listing. Keyed by name, so a name carrying any
+   *  character (a NUL included) prunes exactly. */
+  #warnedObjects = new Map<string, Set<string>>();
 
   constructor(readonly entry: WikiBucketMirrorEntry, private readonly deps: BucketMirrorDeps) {}
 
@@ -501,9 +520,14 @@ export class BucketMirror {
     return this.#state;
   }
 
+  #releaseLock(): void {
+    if (this.#lockRoot) releaseRootLock(this.#lockRoot);
+    this.#lockRoot = null;
+  }
+
   #refuse(reason: string): false {
     this.#state = "refused";
-    if (this.#realRoot) releaseRootLock(this.#realRoot);
+    this.#releaseLock();
     log.warn("Wiki bucket mirror {source} → {root} refused: {reason}", {
       source: this.source, root: this.entry.root, reason,
     });
@@ -536,7 +560,11 @@ export class BucketMirror {
     }
     let prepared;
     try {
-      prepared = await prepareMirrorRoot(realRoot, this.source, () => acquireRootLock(realRoot));
+      prepared = await prepareMirrorRoot(realRoot, this.source, () => {
+        const locked = acquireRootLock(realRoot);
+        if ("ok" in locked) this.#lockRoot = realRoot;
+        return locked;
+      });
     } catch (err) {
       return this.#refuse(errorMessage(err));
     }
@@ -555,16 +583,20 @@ export class BucketMirror {
   }
 
   /** The root must still be the directory `prepare()` claimed — not a symlink,
-   *  not moved, still marked, still locked by us — or this entry stops. */
+   *  not moved, still marked — or this entry stops. A lock no longer holding our
+   *  pid (a stale-lock reclaim race lost to another live process, or a lock file
+   *  removed by hand) is not terminal: the entry lets go and claims the root
+   *  again on a later poll, where a live holder makes it wait. */
   async #verifyRoot(): Promise<void> {
     const realRoot = this.#realRoot!;
     let reason: string | null = null;
+    let lockPid: number | null = process.pid;
     try {
       const st = await lstat(realRoot);
       if (st.isSymbolicLink() || !st.isDirectory()) reason = "root is no longer a plain directory";
       else if (realpathSync(realRoot) !== realRoot) reason = "root now resolves to another directory";
       else if (!(await lstat(path.join(realRoot, MIRROR_MARKER)).catch(() => null))?.isFile()) reason = "marker is gone";
-      else if (readLockPid(path.join(realRoot, MIRROR_LOCK)) !== process.pid) reason = "lock is no longer held by this process";
+      else lockPid = readLockPid(path.join(realRoot, MIRROR_LOCK));
     } catch {
       reason = "root is gone";
     }
@@ -572,24 +604,113 @@ export class BucketMirror {
       this.#refuse(`${reason} — mirroring stopped, nothing written or deleted`);
       throw new RootLostError(reason);
     }
+    if (lockPid !== process.pid) {
+      this.#yieldRoot();
+      throw new Error(`root lock is held by ${lockPid === null ? "no one" : `pid ${lockPid}`}, not this process — nothing written or deleted; retrying`);
+    }
+  }
+
+  /** Let go of the root without refusing it: back to "new", so the next poll
+   *  runs `prepare()` again. The lock file is not ours to delete. */
+  #yieldRoot(): void {
+    this.#releaseLock();
+    this.#realRoot = null;
+    this.#wikiRoot = null;
+    this.manifest.clear();
+    this.#state = "new";
+  }
+
+  /** A manifest entry whose file is gone from disk (deleted by hand, or by
+   *  anything else) is forgotten, so a still-listed object is downloaded again
+   *  and an unlisted one needs no delete. */
+  async #reconcileManifest(realRoot: string): Promise<void> {
+    for (const rel of [...this.manifest.keys()]) {
+      const missing = await lstat(path.join(realRoot, rel)).then(
+        () => false,
+        (err) => (err as NodeJS.ErrnoException).code === "ENOENT",
+      );
+      if (missing) this.manifest.delete(rel);
+    }
+  }
+
+  /** With a pinned project number, the bucket must answer that number before
+   *  anything is listed: first poll, then at most hourly, and after any failure. */
+  async #checkOwnership(signal: AbortSignal): Promise<void> {
+    const want = this.deps.projectNumber;
+    if (!want) return;
+    const now = (this.deps.now ?? Date.now)();
+    if (this.#ownershipCheckedAt > 0 && now - this.#ownershipCheckedAt < OWNERSHIP_RECHECK_MS) return;
+    const what = `get gs://${this.entry.bucket}`;
+    const res = await this.#get(
+      `${this.deps.gcsBase}/storage/v1/b/${encodeURIComponent(this.entry.bucket)}?fields=projectNumber`,
+      LIST_TIMEOUT_MS, signal,
+    );
+    if (!res.ok) throw new GcsHttpError(res.status, what, await this.#errorBody(res, what));
+    const text = await readBounded(res, MAX_ERROR_BODY_BYTES, what);
+    let got: unknown;
+    try {
+      got = (JSON.parse(text) as { projectNumber?: unknown } | null)?.projectNumber;
+    } catch {
+      got = undefined;
+    }
+    const actual = typeof got === "string" || typeof got === "number" ? String(got) : "(none)";
+    if (actual !== want) {
+      if (this.#lastOwnershipWarn !== actual) {
+        this.#lastOwnershipWarn = actual;
+        log.warn(
+          "Wiki bucket mirror {source}: the bucket belongs to project {actual}, not the pinned {expected} (WIKI_BUCKET_MIRROR_PROJECT_NUMBER) — nothing listed, written or deleted; retrying",
+          { source: this.source, actual: logName(actual), expected: want },
+        );
+      }
+      throw new BucketOwnershipError(`bucket belongs to project ${logName(actual)}, not the pinned ${want}`);
+    }
+    this.#lastOwnershipWarn = null;
+    this.#ownershipCheckedAt = now;
+  }
+
+  async #refreshIfOwed(result: PollResult, signal: AbortSignal): Promise<void> {
+    if (!this.#refreshOwed) return;
+    signal.throwIfAborted();
+    try {
+      await (this.deps.refreshIndex ?? ((root) => getWikiIndex({ root, refresh: true })))(this.#wikiRoot!);
+      this.#refreshOwed = false;
+      result.refreshed = true;
+    } catch (err) {
+      result.refreshError = errorMessage(err);
+      log.warn("Wiki bucket mirror {source}: files updated but the wiki index rebuild failed (retried next poll): {error}", {
+        source: this.source, error: result.refreshError,
+      });
+    }
   }
 
   /** One poll. Throws on a failed listing or credential — having changed nothing. */
   async pollOnce(): Promise<PollResult> {
+    try {
+      return await this.#poll();
+    } catch (err) {
+      // Any failure re-asks the bucket's owner on the next poll.
+      this.#ownershipCheckedAt = 0;
+      throw err;
+    }
+  }
+
+  async #poll(): Promise<PollResult> {
     if (!(await this.prepare())) throw new Error("mirror refused");
     const signal = this.#abort.signal;
     const realRoot = this.#realRoot!;
+    await this.#checkOwnership(signal);
     const objects = await this.#listAll(signal);
     const result: PollResult = { listed: objects.length, downloaded: 0, deleted: 0, skipped: 0, failed: 0, refreshed: false };
 
     const listedNames = new Set(objects.map((o) => o.name));
-    for (const key of this.#warnedObjects) {
-      if (!listedNames.has(key.slice(0, key.indexOf("\u0000")))) this.#warnedObjects.delete(key);
+    for (const name of this.#warnedObjects.keys()) {
+      if (!listedNames.has(name)) this.#warnedObjects.delete(name);
     }
+    await this.#reconcileManifest(realRoot);
 
-    // Validate, then drop names that collide on a case-/normalization-insensitive
-    // filesystem: they would share one file, and a delete of one would unlink the
-    // other's live copy. The code-unit-smallest name wins, deterministically.
+    // Validate, then drop names that collide under lowercase+NFC before any
+    // download (the cheap filter; the inode checks below are the real one).
+    // The code-unit-smallest name wins, deterministically.
     const candidates: { rel: string; obj: GcsObject }[] = [];
     for (const obj of objects) {
       const mapped = objectRelPath(obj.name, this.entry.prefix);
@@ -602,8 +723,10 @@ export class BucketMirror {
     }
     candidates.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
     const byFold = new Map<string, string>();
-    // Every validly-named listed object keeps its local file, even one skipped
-    // below (oversized): only an object that is GONE is a delete.
+    // The names this poll keeps. A listed object that is SKIPPED (oversized, a
+    // collision loser) is not among them: its old local copy is deleted like a
+    // gone object's, so a republish meant to strip content never leaves the
+    // previous version served.
     const present = new Set<string>();
     const wanted: { rel: string; obj: GcsObject }[] = [];
     for (const { rel, obj } of candidates) {
@@ -614,18 +737,19 @@ export class BucketMirror {
         continue;
       }
       byFold.set(foldKey(rel), rel);
-      present.add(rel);
       if (obj.size > MAX_OBJECT_BYTES) {
         result.skipped++;
-        this.#warnObject(obj, `larger than ${MAX_OBJECT_BYTES} bytes (${obj.size})`);
+        this.#warnObject(obj, `larger than ${MAX_OBJECT_BYTES} bytes (${obj.size}); any local copy is removed`);
         continue;
       }
+      present.add(rel);
       if (this.manifest.get(rel) !== obj.generation) wanted.push({ rel, obj });
     }
     const toDelete = [...this.manifest.keys()].filter((rel) => !present.has(rel));
 
     // A listing that would empty the wiki is far likelier a wrong prefix, an
     // `rm -r` or a proxy answering `{}` than an intended purge: keep the copy.
+    // Only TOTAL deletion is caught; a listing that drops most files still runs.
     if (this.manifest.size > 0 && toDelete.length === this.manifest.size && wanted.length === 0) {
       result.massDeleteRefused = true;
       const note = `${objects.length}/${this.manifest.size}`;
@@ -636,20 +760,61 @@ export class BucketMirror {
           { source: this.source, listed: objects.length, files: this.manifest.size },
         );
       }
+      await this.#refreshIfOwed(result, signal);
       return result;
     }
     this.#lastGuardWarn = null;
+
+    // `dev:ino` → the live name holding it, built only when a poll writes a new
+    // name or deletes one. Filesystem truth, not a fold function: two names this
+    // map puts on one file are one file, whatever their spelling.
+    let live = null as Map<string, string> | null;
+    const liveInodes = async (): Promise<Map<string, string>> => {
+      if (live) return live;
+      live = new Map();
+      for (const rel of [...this.manifest.keys()].sort()) {
+        if (!present.has(rel)) continue;
+        const key = await inodeKey(realRoot, rel);
+        if (!key) continue;
+        const holder = live.get(key);
+        if (holder !== undefined) {
+          // Two kept names already on one file: the smaller keeps it.
+          this.#dropAlias(rel, holder, present, objects, result);
+          continue;
+        }
+        live.set(key, rel);
+      }
+      return live;
+    };
 
     if (wanted.length > 0) await this.#verifyRoot();
     for (const { rel, obj } of wanted) {
       signal.throwIfAborted();
       try {
+        if (!this.manifest.has(rel)) {
+          // A new name that lands on a file another kept name holds.
+          const inodes = await liveInodes();
+          const key = await inodeKey(realRoot, rel);
+          const holder = key ? inodes.get(key) : undefined;
+          if (holder !== undefined && holder !== rel) {
+            if (holder < rel) {
+              this.#dropAlias(rel, holder, present, objects, result);
+              continue;
+            }
+            this.#dropAlias(holder, rel, present, objects, result);
+            inodes.delete(key!);
+          }
+        }
         const bytes = await this.#download(obj, signal);
         signal.throwIfAborted();
         const updated = obj.updated ? Date.parse(obj.updated) : NaN;
         await atomicWrite(realRoot, rel, bytes, Number.isFinite(updated) ? updated : undefined);
         this.manifest.set(rel, obj.generation);
         result.downloaded++;
+        if (live) {
+          const key = await inodeKey(realRoot, rel);
+          if (key) live.set(key, rel);
+        }
       } catch (err) {
         if (signal.aborted) throw err;
         result.failed++;
@@ -657,14 +822,18 @@ export class BucketMirror {
       }
     }
 
-    if (toDelete.length > 0) await this.#verifyRoot();
+    if (toDelete.length > 0) {
+      await this.#verifyRoot();
+      await liveInodes();
+    }
     for (const rel of toDelete) {
       signal.throwIfAborted();
       try {
-        // A case-only or NFC/NFD rename: the old name is the file just written
-        // under the new one. Forget it; unlinking it would delete the live page.
-        const twin = byFold.get(foldKey(rel));
-        if (twin !== undefined && twin !== rel && (await sameFile(realRoot, rel, twin))) {
+        // The old name of a case/normalization rename, or a loser aliasing a
+        // kept name, IS a live page's file: forget it, never unlink it.
+        const key = await inodeKey(realRoot, rel);
+        const holder = key ? live!.get(key) : undefined;
+        if (holder !== undefined && holder !== rel) {
           this.manifest.delete(rel);
           continue;
         }
@@ -682,25 +851,23 @@ export class BucketMirror {
     // Owed until a rebuild succeeds: the manifest is already current, so a poll
     // after a failed rebuild sees no change and would otherwise never retry it.
     if (result.downloaded + result.deleted > 0) this.#refreshOwed = true;
-    if (this.#refreshOwed) {
-      signal.throwIfAborted();
-      try {
-        await (this.deps.refreshIndex ?? ((root) => getWikiIndex({ root, refresh: true })))(this.#wikiRoot!);
-        this.#refreshOwed = false;
-        result.refreshed = true;
-      } catch (err) {
-        result.refreshError = errorMessage(err);
-        log.warn("Wiki bucket mirror {source}: files updated but the wiki index rebuild failed (retried next poll): {error}", {
-          source: this.source, error: result.refreshError,
-        });
-      }
-    }
+    await this.#refreshIfOwed(result, signal);
     if (result.downloaded + result.deleted > 0) {
       log.info("Wiki bucket mirror {source}: {downloaded} downloaded, {deleted} deleted, {listed} listed", {
         source: this.source, ...result,
       });
     }
     return result;
+  }
+
+  /** `loser` and `winner` name one file on disk: forget `loser` (never unlink
+   *  it — that is `winner`'s file) and warn once. */
+  #dropAlias(loser: string, winner: string, present: Set<string>, objects: GcsObject[], result: PollResult): void {
+    this.manifest.delete(loser);
+    present.delete(loser);
+    result.skipped++;
+    const obj = objects.find((o) => o.name === this.entry.prefix + loser);
+    if (obj) this.#warnObject(obj, `is the same file as ${logName(winner)} on this filesystem`);
   }
 
   /** Start the loop: first poll now, then `intervalMs` after each finishes. */
@@ -719,7 +886,7 @@ export class BucketMirror {
     this.#abort.abort(new Error("wiki bucket mirror stopped"));
     const current = this.#current;
     if (current) await Promise.race([current.catch(() => {}), Bun.sleep(5_000)]);
-    if (this.#realRoot) releaseRootLock(this.#realRoot);
+    this.#releaseLock();
   }
 
   #tick(): void {
@@ -734,6 +901,12 @@ export class BucketMirror {
         if (this.#state === "refused" || this.#stopped) return;
         this.#failures++;
         const message = errorMessage(err);
+        if (err instanceof BucketOwnershipError) {
+          // `#checkOwnership` already warned, naming both project numbers.
+          log.debug("Wiki bucket mirror {source} poll refused: {error}", { source: this.source, error: message });
+          this.#lastError = message;
+          return;
+        }
         // Warn on a NEW error; a repeat of the same one is debug, since the
         // backoff below already spaces them out.
         if (message !== this.#lastError) {
@@ -753,9 +926,11 @@ export class BucketMirror {
   }
 
   #warnObject(obj: GcsObject, reason: string, quiet = false): void {
-    const key = `${obj.name}\u0000${obj.generation}\u0000${reason}`;
-    if (this.#warnedObjects.has(key)) return;
-    this.#warnedObjects.add(key);
+    const key = `${obj.generation}\u0000${reason}`;
+    let seen = this.#warnedObjects.get(obj.name);
+    if (!seen) this.#warnedObjects.set(obj.name, (seen = new Set()));
+    if (seen.has(key)) return;
+    seen.add(key);
     const props = { source: this.source, name: logName(obj.name), reason };
     const message = "Wiki bucket mirror {source}: object {name} skipped: {reason}";
     if (quiet) log.debug(message, props);
@@ -839,7 +1014,7 @@ function registeredWikiRoot(root: string): string | undefined {
 /** Boot entry: one mirror per configured entry, one process-wide ADC token cache. */
 export function startWikiBucketMirrors(
   config: WikiBucketMirrorConfig,
-  deps: Partial<Pick<BucketMirrorDeps, "tmpDir" | "registeredWikiRoot" | "isReadonlyRoot" | "refreshIndex">> & { autostart?: boolean } = {},
+  deps: Partial<Pick<BucketMirrorDeps, "tmpDir" | "registeredWikiRoot" | "isReadonlyRoot" | "refreshIndex" | "now">> & { autostart?: boolean } = {},
 ): { mirrors: BucketMirror[]; stop(): Promise<void> } {
   for (const { entry, reason } of config.refused) {
     log.warn("WIKI_BUCKET_MIRRORS entry {entry} refused: {reason}", { entry: logName(entry), reason });
@@ -849,6 +1024,11 @@ export function startWikiBucketMirrors(
       value: logName(config.intervalRefused.value), reason: config.intervalRefused.reason,
     });
   }
+  if (config.projectNumberRefused) {
+    log.warn("WIKI_BUCKET_MIRROR_PROJECT_NUMBER={value} ignored: {reason}", {
+      value: logName(config.projectNumberRefused.value), reason: config.projectNumberRefused.reason,
+    });
+  }
   const { kept, refused } = refuseOverlappingMirrors(config.mirrors);
   for (const { entry, reason } of refused) {
     log.warn("Wiki bucket mirror gs://{bucket}/{prefix} → {root} refused: {reason}", { ...entry, reason });
@@ -856,7 +1036,13 @@ export function startWikiBucketMirrors(
   const tokens = tokenSourceFor(config.gcsBase, adcTokens);
   const { autostart = true, ...mirrorDeps } = deps;
   const mirrors = kept.map((entry) =>
-    new BucketMirror(entry, { gcsBase: config.gcsBase, intervalMs: config.intervalMs, tokens, ...mirrorDeps }));
+    new BucketMirror(entry, {
+      gcsBase: config.gcsBase, intervalMs: config.intervalMs, tokens, projectNumber: config.projectNumber, ...mirrorDeps,
+    }));
+  if (mirrors.length > 0 && !config.projectNumber && config.gcsBase === GCS_DEFAULT_BASE) {
+    // A bucket name is global and public: another project can create it first.
+    log.warn("Wiki bucket mirrors: bucket ownership is not pinned — set WIKI_BUCKET_MIRROR_PROJECT_NUMBER so a bucket another project created under the same name is not mirrored");
+  }
   if (autostart) for (const m of mirrors) m.start();
   if (mirrors.length > 0) {
     log.info("Wiki bucket mirrors started: {count}, every {intervalMs} ms from {base}", {

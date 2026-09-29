@@ -159,11 +159,12 @@ const WIKI_STAMP_FLAGS = ["WIKI_STAMP_BIN", "WIKI_STAMP_ROOTS", "WIKI_STAMP_BUN"
 /** The wiki bucket mirror (`src/wiki/bucket-mirror.ts`). A developer's value
  *  would start a poller that writes and DELETES files inside a spawned server's
  *  tmpdir, and change what every `loadConfig()` suite parses. The specs that use
- *  it set all three explicitly. */
+ *  it set what they need explicitly. */
 const WIKI_BUCKET_MIRROR_FLAGS = [
   "WIKI_BUCKET_MIRRORS",
   "WIKI_BUCKET_MIRROR_INTERVAL_MS",
   "WIKI_BUCKET_MIRROR_GCS_BASE",
+  "WIKI_BUCKET_MIRROR_PROJECT_NUMBER",
 ];
 
 /**

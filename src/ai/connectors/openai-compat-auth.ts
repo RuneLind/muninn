@@ -1,4 +1,5 @@
-import { isVertexEndpoint, assertVertexEndpointAllowed, VertexTokenProvider, vertexTokens } from "../vertex-access.ts";
+import { isVertexEndpoint, assertVertexEndpointAllowed, vertexTokens } from "../vertex-access.ts";
+import type { GcpTokenProvider } from "../../gcp/access-token.ts";
 import { OpenAiCompatHttpError } from "./openai-compat-stream.ts";
 import { getLog } from "../../logging.ts";
 
@@ -54,7 +55,7 @@ function staticKeyAuthorizer(): RequestAuthorizer {
  * URL does not — measured against a real project on user ADC, which is the
  * weakest credential shape this runs under.
  */
-function vertexAuthorizer(provider: VertexTokenProvider): RequestAuthorizer {
+function vertexAuthorizer(provider: GcpTokenProvider): RequestAuthorizer {
   // The generation the LAST `headers()` call drew from, so a refusal reports the
   // token it actually sent. An authorizer belongs to ONE turn (`createAuthorizer`
   // is called per `executePrompt`) and `requestWithRefresh` pairs the two calls
@@ -93,7 +94,7 @@ function vertexAuthorizer(provider: VertexTokenProvider): RequestAuthorizer {
 export function createAuthorizer(
   baseUrl: string,
   botName: string,
-  provider: VertexTokenProvider = vertexTokens,
+  provider: GcpTokenProvider = vertexTokens,
 ): RequestAuthorizer {
   if (!isVertexEndpoint(baseUrl)) return staticKeyAuthorizer();
   assertVertexEndpointAllowed(baseUrl, botName);

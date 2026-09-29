@@ -3,7 +3,7 @@ import { HAIKU_DEFAULT_MAX_TOKENS, HAIKU_TIMEOUT_MS, trackUsage, type HaikuResul
 import { createAuthorizer, requestWithRefresh } from "./connectors/openai-compat-auth.ts";
 import { OpenAiCompatHttpError } from "./connectors/openai-compat-stream.ts";
 import { VERTEX_GLOBAL_HOST } from "../config.ts";
-import type { VertexTokenProvider } from "./vertex-access.ts";
+import type { GcpTokenProvider } from "../gcp/access-token.ts";
 
 /**
  * The Haiku router's Vertex AI backend — the short async calls (the
@@ -162,7 +162,7 @@ interface ChatCompletion {
  */
 export interface VertexHaikuDeps {
   env?: Record<string, string | undefined>;
-  provider?: VertexTokenProvider;
+  provider?: GcpTokenProvider;
 }
 
 /**

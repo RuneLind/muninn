@@ -278,7 +278,7 @@ describe("D4 overlapping roots and marker source", () => {
     );
     expect(kept).toHaveLength(4); // the exact-string check passes all four
     const started = startWikiBucketMirrors(
-      { mirrors: kept, refused: [], intervalRefused: null, intervalMs: 60_000, gcsBase: `http://127.0.0.1:${server.port}` } as Parameters<typeof startWikiBucketMirrors>[0],
+      { mirrors: kept, refused: [], intervalRefused: null, intervalMs: 60_000, gcsBase: `http://127.0.0.1:${server.port}`, projectNumber: null, projectNumberRefused: null } as Parameters<typeof startWikiBucketMirrors>[0],
       { autostart: false } as Parameters<typeof startWikiBucketMirrors>[1],
     );
     try {

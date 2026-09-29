@@ -107,9 +107,11 @@ function normalizeRoot(p: string): string {
  * through its deepest existing ancestor, so `/tmp/w` → `/private/tmp/w` on macOS
  * holds before `w` is created: `currentRoots()` memoizes these forms on first
  * call, and a root created after that call (the bucket mirror's, which starts
- * empty) must still match its `/private/tmp` spelling. Null only when not even
- * `/` resolves. Carried ALONGSIDE the normalized form (never instead of it) for
- * two reasons: a root configured through a symlink must still match the registry
+ * empty) must still match its `/private/tmp` spelling. Null only when no
+ * ancestor resolves. A relative path resolves against the process cwd; wiki
+ * roots are absolute, since the registry and this list both go through
+ * `resolveConfiguredPath`. Carried ALONGSIDE the normalized form (never instead
+ * of it) for two reasons: a root configured through a symlink must still match the registry
  * entry that named the real path (`wikiWriteQueueKey` takes the same precaution
  * for the same reason), and on a case-insensitive filesystem `realpathSync`
  * returns the canonical on-disk casing — which is what makes a case-only

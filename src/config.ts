@@ -447,6 +447,11 @@ export interface WikiBucketMirrorConfig {
   intervalMs: number;
   /** GCS JSON API base, no trailing slash. */
   gcsBase: string;
+  /** `WIKI_BUCKET_MIRROR_PROJECT_NUMBER`: the project every mirrored bucket
+   *  must belong to, or null when ownership is not pinned. */
+  projectNumber: string | null;
+  /** A `WIKI_BUCKET_MIRROR_PROJECT_NUMBER` value that was ignored, for the boot warn. */
+  projectNumberRefused: { value: string; reason: string } | null;
 }
 
 export const WIKI_BUCKET_MIRROR_DEFAULT_INTERVAL_MS = 120_000;
@@ -520,7 +525,22 @@ export function resolveWikiBucketMirrorConfig(): WikiBucketMirrorConfig {
   const { mirrors, refused } = parseWikiBucketMirrors(process.env.WIKI_BUCKET_MIRRORS);
   const { intervalMs, intervalRefused } = parseWikiBucketMirrorInterval(process.env.WIKI_BUCKET_MIRROR_INTERVAL_MS);
   const gcsBase = (nullableEnv("WIKI_BUCKET_MIRROR_GCS_BASE") ?? GCS_DEFAULT_BASE).replace(/\/+$/, "");
-  return { mirrors, refused, intervalRefused, intervalMs, gcsBase };
+  const { projectNumber, projectNumberRefused } = parseWikiBucketMirrorProjectNumber(process.env.WIKI_BUCKET_MIRROR_PROJECT_NUMBER);
+  return { mirrors, refused, intervalRefused, intervalMs, gcsBase, projectNumber, projectNumberRefused };
+}
+
+/** Lenient like the interval: a malformed project number is a carried refusal
+ *  and ownership stays unpinned (warned), never a boot failure. */
+export function parseWikiBucketMirrorProjectNumber(raw: string | undefined): {
+  projectNumber: string | null;
+  projectNumberRefused: { value: string; reason: string } | null;
+} {
+  const value = raw?.trim() ?? "";
+  if (!value) return { projectNumber: null, projectNumberRefused: null };
+  if (!/^[1-9]\d{0,19}$/.test(value)) {
+    return { projectNumber: null, projectNumberRefused: { value, reason: "not a project number (digits only) — bucket ownership is not pinned" } };
+  }
+  return { projectNumber: value, projectNumberRefused: null };
 }
 
 /** Lenient on purpose (not `optionalEnvInt`, which throws): a typo in a poll

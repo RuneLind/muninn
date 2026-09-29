@@ -73,7 +73,7 @@ describe("parseWikiBucketMirrors", () => {
       expect(c.intervalMs).toBe(120_000);
       expect(c.gcsBase).toBe("http://127.0.0.1:1234");
       for (const k of keys) delete process.env[k];
-      expect(resolveWikiBucketMirrorConfig()).toEqual({ mirrors: [], refused: [], intervalRefused: null, intervalMs: 120_000, gcsBase: GCS_DEFAULT_BASE });
+      expect(resolveWikiBucketMirrorConfig()).toEqual({ mirrors: [], refused: [], intervalRefused: null, intervalMs: 120_000, gcsBase: GCS_DEFAULT_BASE, projectNumber: null, projectNumberRefused: null });
     } finally {
       keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
     }

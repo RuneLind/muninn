@@ -163,4 +163,4 @@ export class VertexTokenProvider extends GcpTokenProvider {
 /** Process-wide, because the credential is the process's, not a bot's: every
  *  bot on Vertex AND the wiki bucket mirror share one ADC identity, so they share
  *  the one cache in `src/gcp/access-token.ts` rather than each holding its own. */
-export const vertexTokens: VertexTokenProvider = adcTokens;
+export const vertexTokens: GcpTokenProvider = adcTokens;
