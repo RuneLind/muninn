@@ -1,6 +1,6 @@
 {
   "connector": "claude-sdk",
-  "model": "claude-sonnet-5",
+  "model": "claude-sonnet-5-5",
   "thinkingMaxTokens": 40000,
   "timeoutMs": 300000,
   "wikiDir": "../../../huginn/huginn-jarvis/data/wiki",

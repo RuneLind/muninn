@@ -449,7 +449,7 @@ export async function getDueWatchers(botName: string): Promise<Watcher[]> {
  * Code") label is always correct regardless of the bot's *chat* connector or the
  * `HAIKU_BACKEND` resolution. Stamping the bot's chat connector/model here (the
  * pre-fix behaviour) was an active lie: jarvis chats on `claude-sdk` /
- * `claude-sonnet-5` but its email watcher spawns the CLI on Haiku.
+ * `claude-sonnet-5-5` but its email watcher spawns the CLI on Haiku.
  *
  * `wiki-gardener` is genuinely mixed — a Haiku cluster (`callHaikuWithFallback`)
  * plus a bot-connector draft (`executeOneShot` on `botConfig.connector`). The

@@ -118,9 +118,14 @@ let copilotUsageEvents: FakeUsage[] = [
 ];
 let copilotSessionThrow: Error | null = null;
 let copilotDeleteSessionCount = 0;
+let copilotCatalog: string[] | Error = ["claude-haiku-4.5", "claude-sonnet-5.5"];
 
 mock.module("./connectors/copilot-sdk.ts", () => ({
   getCopilotClient: async () => ({
+    listModels: async () => {
+      if (copilotCatalog instanceof Error) throw copilotCatalog;
+      return copilotCatalog.map((id) => ({ id }));
+    },
     createSession: async (sessionConfig: unknown) => {
       copilotCalls.push({ sessionConfig, prompt: "", timeout: undefined });
       let handler: ((event: unknown) => void) | null = null;
@@ -171,6 +176,7 @@ beforeEach(() => {
   copilotUsageEvents = [{ inputTokens: 7, outputTokens: 3, model: "claude-haiku-4-5-20251001" }];
   copilotSessionThrow = null;
   copilotDeleteSessionCount = 0;
+  copilotCatalog = ["claude-haiku-4.5", "claude-sonnet-5.5"];
   sdkThrow = null;
   constructorOpts = null;
   _resetClientForTests();
@@ -556,6 +562,18 @@ describe("callHaikuViaCopilot", () => {
     const call = copilotCalls[0]!;
     expect((call.sessionConfig as { model: string }).model).toBe("custom-model");
     expect(call.timeout).toBe(9999);
+  });
+
+  test("maps an explicit dash-form model to the catalog's dotted id", async () => {
+    // Copilot serves its default model for an id not in its catalog, silently.
+    await callHaikuViaCopilot("hi", { source: "test", model: "claude-sonnet-5-5" });
+    expect((copilotCalls[0]!.sessionConfig as { model: string }).model).toBe("claude-sonnet-5.5");
+  });
+
+  test("sends the explicit model as-is when the catalog cannot be listed", async () => {
+    copilotCatalog = new Error("listModels down");
+    await callHaikuViaCopilot("hi", { source: "test", model: "claude-sonnet-5-5" });
+    expect((copilotCalls[0]!.sessionConfig as { model: string }).model).toBe("claude-sonnet-5-5");
   });
 
   test("still returns the result when the served model is not Haiku (warn-only guard)", async () => {

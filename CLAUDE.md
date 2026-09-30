@@ -91,7 +91,7 @@ All fields are optional — falls back to global `.env` values:
 ```json
 {
   "connector": "copilot-sdk",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5.5",
   "thinkingMaxTokens": 16000,
   "timeoutMs": 180000
 }
@@ -101,7 +101,7 @@ All fields are optional — falls back to global `.env` values:
 |---|---|---|---|
 | `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"` |
 | `haikuBackend` | string | derived from `connector` | Per-bot Haiku backend for the `research_knowledge` decomposer and memory/goal/schedule extractors. One of `"cli"`, `"anthropic"`, `"copilot"`, `"vertex"`. Default is `copilot` for `copilot-sdk` bots, `cli` otherwise — **there is no derived default for `vertex`**, deliberately: the connector that would imply it (`openai-compat`) is equally the local-Ollama shape, and telling them apart needs the bot's `baseUrl`, which the router is not given. A deployment that must keep these calls on an approved endpoint sets this field (or `HAIKU_BACKEND`). See "Switching Haiku backend" below. |
-| `model` | string | `CLAUDE_MODEL` env | Model name (e.g. "claude-sonnet-4-6", "qwen3.5:35b") |
+| `model` | string | `CLAUDE_MODEL` env | Model name (e.g. "claude-sonnet-5-5", "qwen3.5:35b"; Copilot takes the dotted "claude-sonnet-5.5") |
 | `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable thinking). For openai-compat: used as max_tokens. |
 | `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
 | `baseUrl` | string | — | Base URL for OpenAI-compatible API (e.g. `"http://localhost:11434/v1"`). A **Vertex AI** host — `https://<region>-aiplatform.googleapis.com/v1/projects/<p>/locations/<region>/endpoints/openapi`, or the multi-region `aiplatform.<mr>.rep.googleapis.com` — switches the credential to Application Default Credentials instead of `OPENAI_API_KEY`; see the connector table below. |

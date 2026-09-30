@@ -319,7 +319,7 @@ function backendDisplay(v: string): string {
 // fabricated "claude-cli") for a truly connector-less claude span, the honesty
 // fix. For any other AI span: keep the name and append "{connector}, {model}"
 // (or just the model when connector is absent — NO "unknown" for named spans),
-// e.g. "claude:claim-0 · claude-sdk, claude-sonnet-5".
+// e.g. "claude:claim-0 · claude-sdk, claude-sonnet-5-5".
 function aiSpanLabel(s: WaterfallSpan): string {
   const a = s.attributes ?? {};
   const model = a.model || a.requestedModel || "";

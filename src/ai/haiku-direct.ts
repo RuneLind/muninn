@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { CopilotClient } from "@github/copilot-sdk";
 import { getLog } from "../logging.ts";
 import {
   DEFAULT_MODEL,
@@ -13,6 +14,7 @@ import type { ConnectorType } from "../bots/config.ts";
 import { getRoleOverride } from "../db/role-overrides.ts";
 import type { HaikuCliFallback } from "./haiku-cli-unavailable.ts";
 import { callHaikuViaVertex, resolveVertexHaikuTarget } from "./haiku-vertex.ts";
+import { resolveCopilotModelId } from "./connectors/copilot-model-id.ts";
 
 // The refusal every path here ends at, re-exported so a caller catching it does
 // not have to know that `spawnHaiku` — not this router — is what throws it.
@@ -295,6 +297,21 @@ export async function callHaikuDirect(
 }
 
 /**
+ * An explicit model id in Copilot's dotted catalog form. Copilot serves its
+ * default model for an unknown id without an error, so a dash-form
+ * `claude-sonnet-5-5` would silently run on another model. Sent as-is when the
+ * catalog cannot be listed.
+ */
+async function copilotCatalogId(cl: CopilotClient, requested: string): Promise<string> {
+  try {
+    const available = (await cl.listModels()).map((m) => m.id);
+    return resolveCopilotModelId(requested, available).id;
+  } catch {
+    return requested;
+  }
+}
+
+/**
  * Routes a one-shot Haiku call through the shared CopilotClient singleton.
  * Reuses the same auth surface the bot's main chat uses. Session is lean —
  * no MCP servers, no custom agents — and is deleted in `finally`.
@@ -306,7 +323,7 @@ export async function callHaikuViaCopilot(
   // Lazy import: avoids pulling @github/copilot-sdk into bots that never use it.
   const { getCopilotClient } = await import("./connectors/copilot-sdk.ts");
   const cl = await getCopilotClient();
-  const model = opts.model ?? COPILOT_HAIKU_MODEL;
+  const model = opts.model ? await copilotCatalogId(cl, opts.model) : COPILOT_HAIKU_MODEL;
   const timeoutMs = opts.timeoutMs ?? HAIKU_TIMEOUT_MS;
 
   const session = await cl.createSession({
