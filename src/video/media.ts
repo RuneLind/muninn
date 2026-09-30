@@ -22,6 +22,12 @@ const FRAMES_TIMEOUT_MS = 60_000;
 // --break-match-filters). We map it to a clear "too long" job error.
 const YTDLP_BREAK_EXIT_CODE = 101;
 
+// A YouTube media URL can answer 403 on one extraction and serve the same
+// format on the next (LlgiOCmFG_w, 2026-09-30: 403 in the capture, a clean
+// download minutes later). One re-run fetches a fresh URL.
+const YTDLP_TRANSIENT_403 = /HTTP Error 403/;
+const YTDLP_403_RETRY_DELAY_MS = 1_000;
+
 /**
  * yt-dlp format selector. Two traps, both measured on TikTok 7646424593388883214
  * (a 353s narrated video our pipeline reported as having no audio):
@@ -436,12 +442,14 @@ export async function downloadVideo(
 ): Promise<DownloadResult> {
   const maxDuration = opts.maxDurationSeconds;
   const args = ytDlpDownloadArgs(url, workDir, opts);
+  const timeoutMs = opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
 
-  const { stdout, stderr, exitCode } = await runProc(
-    args,
-    opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS,
-    "yt-dlp download",
-  );
+  let { stdout, stderr, exitCode } = await runProc(args, timeoutMs, "yt-dlp download");
+  if (exitCode !== 0 && exitCode !== YTDLP_BREAK_EXIT_CODE && YTDLP_TRANSIENT_403.test(stderr)) {
+    log.warn("yt-dlp download of {url} got HTTP 403 — retrying once", { url });
+    await Bun.sleep(YTDLP_403_RETRY_DELAY_MS);
+    ({ stdout, stderr, exitCode } = await runProc(args, timeoutMs, "yt-dlp download"));
+  }
 
   if (exitCode === YTDLP_BREAK_EXIT_CODE) {
     throw new Error(`video too long (max ${Math.round(maxDuration / 60)} min)`);

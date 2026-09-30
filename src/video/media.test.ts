@@ -408,3 +408,68 @@ test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () =>
     "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
   ]);
 });
+
+// -- downloadVideo 403 retry ------------------------------------------------
+// A fake `yt-dlp` plays the capture seen on LlgiOCmFG_w: a 403 on the first
+// run. `Bun.spawn` resolves the binary against the PATH the process started
+// with, so `downloadVideo` runs in a child `bun` whose PATH leads with the fake.
+
+import { mkdtempSync, writeFileSync, readFileSync, chmodSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+
+async function downloadWithFake(failures: number, stderrLine: string) {
+  const bin = mkdtempSync(joinPath(tmpdir(), "fake-ytdlp-"));
+  const counter = joinPath(bin, "count");
+  writeFileSync(
+    joinPath(bin, "yt-dlp"),
+    `#!/bin/sh
+n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "${counter}"
+if [ $n -le ${failures} ]; then echo "${stderrLine}" >&2; exit 1; fi
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+touch "$(dirname "$out")/video.mp4"
+echo '{"id":"abc","title":"t","duration":60,"uploader":"u","webpage_url":"https://example.com/v"}'
+`,
+  );
+  chmodSync(joinPath(bin, "yt-dlp"), 0o755);
+  const work = mkdtempSync(joinPath(tmpdir(), "dl-work-"));
+  const script = `
+    import { downloadVideo } from ${JSON.stringify(joinPath(import.meta.dir, "media.ts"))};
+    try {
+      const r = await downloadVideo("https://www.youtube.com/watch?v=x", ${JSON.stringify(work)}, { maxDurationSeconds: 600 });
+      console.log(JSON.stringify({ ok: true, videoPath: r.videoPath }));
+    } catch (e) {
+      console.log(JSON.stringify({ ok: false, error: e.message }));
+    }`;
+  const proc = Bun.spawn([process.execPath, "-e", script], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    stdout: "pipe",
+  });
+  const out = (await new Response(proc.stdout).text()).trim().split("\n").pop()!;
+  await proc.exited;
+  const spawns = existsSync(counter) ? Number(readFileSync(counter, "utf8").trim()) : 0;
+  return { ...(JSON.parse(out) as { ok: boolean; videoPath?: string; error?: string }), spawns, work };
+}
+
+const FORBIDDEN = "ERROR: unable to download video data: HTTP Error 403: Forbidden";
+
+test("downloadVideo retries once on an HTTP 403 and succeeds", async () => {
+  const r = await downloadWithFake(1, FORBIDDEN);
+  expect(r.spawns).toBe(2);
+  expect(r.ok).toBe(true);
+  expect(r.videoPath).toBe(joinPath(r.work, "video.mp4"));
+}, 15_000);
+
+test("downloadVideo gives up after the one 403 retry", async () => {
+  const r = await downloadWithFake(5, FORBIDDEN);
+  expect(r.spawns).toBe(2);
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/HTTP Error 403/);
+}, 15_000);
+
+test("downloadVideo does not retry a non-403 failure", async () => {
+  const r = await downloadWithFake(5, "ERROR: Video unavailable");
+  expect(r.spawns).toBe(1);
+  expect(r.error).toMatch(/Video unavailable/);
+}, 15_000);
