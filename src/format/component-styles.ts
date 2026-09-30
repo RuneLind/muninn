@@ -121,8 +121,8 @@ export function componentBlockCss(scope: string): string {
       color: var(--text-soft);
     }
     /* A section kept as history, dimmed by COLOUR rather than opacity: opacity
-       multiplies every colour inside, so a --text-soft chip fell to 2.48:1 in
-       light. --text-soft (and --text-secondary for headings) keeps every line
+       multiplies every colour inside, so a --text-soft chip fell to 2.50:1 in
+       light (3.65:1 dark). --text-soft (and --text-secondary for headings) keeps every line
        at >= 4.5:1; the muted dashed rule carries the rest. Full on hover/focus. */
     ${scope} .historic {
       margin: 1.4rem 0;

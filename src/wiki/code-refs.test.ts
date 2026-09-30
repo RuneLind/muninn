@@ -54,11 +54,19 @@ describe("lineRefUrl", () => {
 });
 
 describe("chipLineRefs", () => {
-  test("inline code only — a fence holding the same text stays code", () => {
-    const html = formatWebHtml("See (`:12`) here.\n\n```\n:12\n```");
-    const out = chipLineRefs(html, null);
-    expect(out).toContain('<code class="code-ref">:12</code>');
-    expect(out).toContain("<pre><code>:12</code></pre>");
+  // The fence holds a PATH ref, which chips anywhere in prose: a bare `:12` never
+  // chips outside a group, so it could not see the `<pre>` guard.
+  test("inline code only — a language-less fence holding a path ref stays code", () => {
+    const html = formatWebHtml("See `src/B.kt:12` and (`src/B.kt:12`, `:14`) here.\n\n```\nsrc/B.kt:12\n```");
+    expect(html).toContain("<pre><code>src/B.kt:12</code></pre>");
+    const out = chipLineRefs(html, AT);
+    expect(out).toContain("<pre><code>src/B.kt:12</code></pre>");
+    const pre = out.slice(out.indexOf("<pre>"));
+    expect(pre).not.toContain("code-ref");
+    expect(pre).not.toContain("<a ");
+    const prose = out.slice(0, out.indexOf("<pre>"));
+    expect(prose.match(/class="code-ref-link"/g)?.length).toBe(2);
+    expect(prose).toContain('<span class="code-ref-group">');
   });
   test("a non-ref span is untouched", () =>
     expect(chipLineRefs("<code>foo()</code>", AT)).toBe("<code>foo()</code>"));
@@ -136,6 +144,10 @@ describe("F1: a span already inside a link is never wrapped again", () => {
     expect(out).toMatch(/<a href="https:\/\/example\.com\/x"[^>]*><code class="code-ref">src\/a\/B\.kt:3<\/code><\/a>/);
     expect(out.match(/<a /g)?.length).toBe(1);
   });
+  test("a path ref between two author links still links", () => {
+    const out = wiki("[a](https://example.com/a) then `src/a/B.kt:3` then [b](https://example.com/b).");
+    expect(out).toContain('<a class="code-ref-link" href="https://github.com/navikt/melosys-console/blob/9c09999/src/a/B.kt#L3"');
+  });
 });
 
 describe("F2: host:port and dotted names are not refs", () => {
@@ -181,6 +193,10 @@ describe("F5: ranges", () => {
     expect(isLineRef("src/B.kt:0")).toBe(true);
     expect(lineRefUrl("src/B.kt:0", AT)).toBeNull();
     expect(lineRefUrl("src/B.kt:0-4", AT)).toBeNull();
+    expect(lineRefUrl("a/B.kt:5-0", AT)).toBeNull();
+  });
+  test("a basename whose stem ends in a dot (`B..kt`) is not a ref", () => {
+    for (const no of ["src/a..kt:12", "...kt:12", "src/B..kt:3"]) expect(isLineRef(no)).toBe(false);
   });
 });
 

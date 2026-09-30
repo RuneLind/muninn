@@ -125,7 +125,9 @@ function watch(page: Page): { failed: string[]; errors: string[] } {
     const u = new URL(res.url());
     // `/api/wiki/similar` answers 404 on a wiki with no `wikiCollections` — the
     // Similar section's own degrade, on every reader page, not this feature's.
-    if (u.origin === BASE && res.status() >= 400 && u.pathname !== "/api/wiki/similar") {
+    // Only that 404 is exempt: any other status there is still a failure.
+    const similarDegrade = u.pathname === "/api/wiki/similar" && res.status() === 404;
+    if (u.origin === BASE && res.status() >= 400 && !similarDegrade) {
       failed.push(`${res.status()} ${u.pathname}`);
     }
   });
@@ -350,14 +352,16 @@ test.describe("Wiki reader: report blocks", () => {
       const seen = await open_(page, REPORT_REL);
       await page.mouse.move(0, 0);
       // The token, resolved on a probe OUTSIDE the elements under test.
-      const soft = await page.evaluate(() => {
-        const p = document.createElement("span");
-        p.style.color = "var(--text-soft)";
-        document.body.appendChild(p);
-        const c = getComputedStyle(p).color;
-        p.remove();
-        return c;
-      });
+      const token = (name: string) =>
+        page.evaluate((n) => {
+          const p = document.createElement("span");
+          p.style.color = `var(${n})`;
+          document.body.appendChild(p);
+          const c = getComputedStyle(p).color;
+          p.remove();
+          return c;
+        }, name);
+      const soft = await token("--text-soft");
       const targets = {
         foldSummary: page.locator(".wiki-article .fold-summary"),
         historicStamp: page.locator(".wiki-article .historic-stamp").first(),
@@ -372,6 +376,15 @@ test.describe("Wiki reader: report blocks", () => {
       expect(
         await paintedContrast(page.locator(".wiki-article .historic-body").first(), { withOpacity: true }),
         "historic body text contrast",
+      ).toBeGreaterThanOrEqual(4.5);
+      // A heading inside a Historic body keeps its own, stronger token.
+      const historicHeading = page.locator(".wiki-article .historic-body :is(h1, h2, h3, h4, h5, h6)").first();
+      expect(await historicHeading.evaluate((el) => getComputedStyle(el).color), "historic heading").toBe(
+        await token("--text-secondary"),
+      );
+      expect(
+        await paintedContrast(historicHeading, { withOpacity: true }),
+        "historic heading contrast",
       ).toBeGreaterThanOrEqual(4.5);
       expect(
         await paintedContrast(page.locator(".wiki-article .callout-resolved-date")),

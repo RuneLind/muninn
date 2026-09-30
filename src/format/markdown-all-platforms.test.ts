@@ -1301,6 +1301,17 @@ describe("report blocks — fix round 1 (title trimming, shared lead text, dates
     expect(formatEmailHtml(blank)).not.toContain("font-weight:600");
   });
 
+  test("a resolved callout's lead line trims a padded title and drops the separator for a blank one", () => {
+    const padded = '<Callout title="  T  " resolved="2026-09-28">\n\nb\n\n</Callout>';
+    const blank = '<Callout title="   " resolved="2026-09-28">\n\nb\n\n</Callout>';
+    expect(formatTelegramHtml(padded).startsWith("✓ 2026-09-28 · <b>T</b>\n")).toBe(true);
+    expect(formatTelegramHtml(blank).startsWith("✓ 2026-09-28\n")).toBe(true);
+    expect(formatSlackMrkdwn(padded).startsWith("✓ 2026-09-28 · *T*\n")).toBe(true);
+    expect(formatSlackMrkdwn(blank).startsWith("✓ 2026-09-28\n")).toBe(true);
+    expect(formatEmailHtml(padded)).toContain(">✓ 2026-09-28 · T</div>");
+    expect(formatEmailHtml(blank)).toContain(">✓ 2026-09-28</div>");
+  });
+
   test("resolved= accepts a year below 100 (no 19xx rollover)", () =>
     expect(ast.parseResolvedDate("0099-01-01")).toBe("0099-01-01"));
 });
