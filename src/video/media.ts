@@ -1,4 +1,4 @@
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { unlink } from "node:fs/promises";
 import { Glob } from "bun";
 import type { Config } from "../config.ts";
@@ -21,6 +21,16 @@ const FRAMES_TIMEOUT_MS = 60_000;
 // yt-dlp aborts a download whose match-filter fails with this exit code (from
 // --break-match-filters). We map it to a clear "too long" job error.
 const YTDLP_BREAK_EXIT_CODE = 101;
+
+// A YouTube media URL can answer 403 on one extraction and serve the same
+// format on the next (LlgiOCmFG_w, 2026-09-30: 403 in the capture, a clean
+// download minutes later). One re-run fetches a fresh URL. Anchored on the
+// fatal `ERROR:` line: yt-dlp also logs recovered chunk 403s as warnings.
+const YTDLP_TRANSIENT_403 = /^ERROR:.*HTTP Error 403/m;
+const YTDLP_403_RETRY_DELAY_MS = 1_000;
+// The retry gets what is left of the caller's timeout, not a second full one,
+// and is skipped when less than this remains.
+const YTDLP_403_RETRY_MIN_MS = 10_000;
 
 /**
  * yt-dlp format selector. Two traps, both measured on TikTok 7646424593388883214
@@ -436,12 +446,30 @@ export async function downloadVideo(
 ): Promise<DownloadResult> {
   const maxDuration = opts.maxDurationSeconds;
   const args = ytDlpDownloadArgs(url, workDir, opts);
+  const timeoutMs = opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
 
-  const { stdout, stderr, exitCode } = await runProc(
-    args,
-    opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS,
-    "yt-dlp download",
-  );
+  const deadline = Date.now() + timeoutMs;
+
+  let { stdout, stderr, exitCode } = await runProc(args, timeoutMs, "yt-dlp download");
+  const remainingMs = deadline - Date.now() - YTDLP_403_RETRY_DELAY_MS;
+  if (
+    exitCode !== 0 &&
+    exitCode !== YTDLP_BREAK_EXIT_CODE &&
+    YTDLP_TRANSIENT_403.test(stderr) &&
+    remainingMs >= YTDLP_403_RETRY_MIN_MS
+  ) {
+    log.warn("yt-dlp download of {url} got HTTP 403 — retrying once: {stderr}", {
+      url,
+      stderr: stderr.slice(-300),
+    });
+    await Bun.sleep(YTDLP_403_RETRY_DELAY_MS);
+    ({ stdout, stderr, exitCode } = await runProc(args, remainingMs, "yt-dlp download"));
+  } else if (exitCode !== 0 && YTDLP_TRANSIENT_403.test(stderr)) {
+    log.warn("yt-dlp download of {url} got HTTP 403 with {remainingMs}ms of budget left — not retrying", {
+      url,
+      remainingMs: Math.max(0, remainingMs),
+    });
+  }
 
   if (exitCode === YTDLP_BREAK_EXIT_CODE) {
     throw new Error(`video too long (max ${Math.round(maxDuration / 60)} min)`);
@@ -470,10 +498,15 @@ export async function downloadVideo(
   // can yield a non-mp4 container).
   // Prefer known video containers over a junk-suffix denylist, so intermediate
   // artifacts (`.part`, `.ytdl`, info `.json`, thumbnails) can't be picked up.
+  // The output name `video.<ext>` comes first: a 403 retry can leave a finished
+  // stream intermediate (`video.f136.mp4`, `video.fhls-720p.mp4`) that sorts
+  // ahead of it.
   const candidates = await globAbsolute(workDir, "video.*");
   const videoExts = [".mp4", ".webm", ".mkv", ".mov", ".m4v", ".flv", ".ts", ".avi"];
+  const isVideo = (p: string) => videoExts.some((ext) => p.toLowerCase().endsWith(ext));
   const videoPath =
-    candidates.find((p) => videoExts.some((ext) => p.toLowerCase().endsWith(ext))) ??
+    candidates.find((p) => isVideo(p) && /^video\.[^.]+$/.test(basename(p))) ??
+    candidates.find(isVideo) ??
     candidates.find(
       (p) => !p.endsWith(".part") && !p.endsWith(".json") && !p.endsWith(".ytdl"),
     );
