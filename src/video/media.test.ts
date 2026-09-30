@@ -427,6 +427,9 @@ interface FakeRun {
   okStderr?: boolean;
   /** Extra file a failing run leaves in the work dir. */
   leftover?: string;
+  /** Seconds a failing run, and then a successful one, sleep first. */
+  failSleep?: number;
+  okSleep?: number;
   timeoutMs?: number;
 }
 
@@ -444,10 +447,12 @@ out=""; prev=""
 for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
 dir=$(dirname "$out")
 if [ $n -le ${run.failures} ]; then
+  sleep ${run.failSleep ?? 0}
   ${run.leftover ? `touch "$dir/${run.leftover}"` : ":"}
   cat "${stderrFile}" >&2; exit ${run.failExit ?? 1}
 fi
 ${run.okStderr ? `cat "${stderrFile}" >&2` : ""}
+sleep ${run.okSleep ?? 0}
 touch "$dir/video.mp4"
 echo '{"id":"abc","title":"t","duration":60,"uploader":"u","webpage_url":"https://example.com/v"}'
 `,
@@ -461,7 +466,8 @@ echo '{"id":"abc","title":"t","duration":60,"uploader":"u","webpage_url":"https:
       console.log(JSON.stringify({ ok: true, videoPath: r.videoPath }));
     } catch (e) {
       console.log(JSON.stringify({ ok: false, error: e.message }));
-    }`;
+    }
+    process.exit(0);`;
   try {
     const proc = Bun.spawn([process.execPath, "-e", script], {
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -477,7 +483,7 @@ echo '{"id":"abc","title":"t","duration":60,"uploader":"u","webpage_url":"https:
     if (!last.startsWith("{")) throw new Error(`child produced no result:\n${err}`);
     const spawns = existsSync(counter) ? Number(readFileSync(counter, "utf8").trim()) : 0;
     const result = JSON.parse(last) as { ok: boolean; videoPath?: string; error?: string };
-    return { ...result, spawns, work, leftoverExists: run.leftover ? existsSync(joinPath(work, run.leftover)) : false };
+    return { ...result, spawns, work };
   } finally {
     rmSync(bin, { recursive: true, force: true });
     rmSync(work, { recursive: true, force: true });
@@ -534,11 +540,19 @@ test("downloadVideo skips the retry when the timeout is nearly spent", async () 
   expect(r.ok).toBe(false);
 }, 15_000);
 
-test("downloadVideo removes a first-attempt stream intermediate before retrying", async () => {
-  // `video.f136.mp4` sorts before `video.mp4`, so a leftover would be the file
-  // the post-download glob returns.
-  const r = await downloadWithFake({ failures: 1, stderr: FORBIDDEN, leftover: "video.f136.mp4" });
+test("downloadVideo gives the retry only what is left of the timeout", async () => {
+  // 16 s budget, 3 s spent on the first run plus the 1 s pause: the retry gets
+  // ~12 s and the fake needs 14, so it times out. A retry given the full 16 s
+  // would succeed.
+  const r = await downloadWithFake({ failures: 1, stderr: FORBIDDEN, failSleep: 3, okSleep: 14, timeoutMs: 16_000 });
   expect(r.spawns).toBe(2);
-  expect(r.leftoverExists).toBe(false);
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/timed out/);
+}, 40_000);
+
+test("downloadVideo returns the output file, not a stream intermediate a failed run left", async () => {
+  // `video.fhls-720p.mp4` sorts before `video.mp4`.
+  const r = await downloadWithFake({ failures: 1, stderr: FORBIDDEN, leftover: "video.fhls-720p.mp4" });
+  expect(r.spawns).toBe(2);
   expect(r.videoPath).toBe(joinPath(r.work, "video.mp4"));
 }, 15_000);

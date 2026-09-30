@@ -1,5 +1,5 @@
-import { join, dirname } from "node:path";
-import { readdir, unlink } from "node:fs/promises";
+import { join, dirname, basename } from "node:path";
+import { unlink } from "node:fs/promises";
 import { Glob } from "bun";
 import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
@@ -31,10 +31,6 @@ const YTDLP_403_RETRY_DELAY_MS = 1_000;
 // The retry gets what is left of the caller's timeout, not a second full one,
 // and is skipped when less than this remains.
 const YTDLP_403_RETRY_MIN_MS = 10_000;
-// A completed split-stream intermediate (`video.f136.mp4`). A retry that picks
-// a different format id would leave it beside the merged file, where the
-// post-download glob could pick it.
-const YTDLP_INTERMEDIATE = /^video\.f\d+\./;
 
 /**
  * yt-dlp format selector. Two traps, both measured on TikTok 7646424593388883214
@@ -466,14 +462,13 @@ export async function downloadVideo(
       url,
       stderr: stderr.slice(-300),
     });
-    // `.part` files stay: yt-dlp resumes them.
-    for (const name of await readdir(workDir).catch(() => [])) {
-      if (YTDLP_INTERMEDIATE.test(name) && !name.endsWith(".part")) {
-        await unlink(join(workDir, name)).catch(() => {});
-      }
-    }
     await Bun.sleep(YTDLP_403_RETRY_DELAY_MS);
     ({ stdout, stderr, exitCode } = await runProc(args, remainingMs, "yt-dlp download"));
+  } else if (exitCode !== 0 && YTDLP_TRANSIENT_403.test(stderr)) {
+    log.warn("yt-dlp download of {url} got HTTP 403 with {remainingMs}ms of budget left — not retrying", {
+      url,
+      remainingMs: Math.max(0, remainingMs),
+    });
   }
 
   if (exitCode === YTDLP_BREAK_EXIT_CODE) {
@@ -503,10 +498,15 @@ export async function downloadVideo(
   // can yield a non-mp4 container).
   // Prefer known video containers over a junk-suffix denylist, so intermediate
   // artifacts (`.part`, `.ytdl`, info `.json`, thumbnails) can't be picked up.
+  // The output name `video.<ext>` comes first: a 403 retry can leave a finished
+  // stream intermediate (`video.f136.mp4`, `video.fhls-720p.mp4`) that sorts
+  // ahead of it.
   const candidates = await globAbsolute(workDir, "video.*");
   const videoExts = [".mp4", ".webm", ".mkv", ".mov", ".m4v", ".flv", ".ts", ".avi"];
+  const isVideo = (p: string) => videoExts.some((ext) => p.toLowerCase().endsWith(ext));
   const videoPath =
-    candidates.find((p) => videoExts.some((ext) => p.toLowerCase().endsWith(ext))) ??
+    candidates.find((p) => isVideo(p) && /^video\.[^.]+$/.test(basename(p))) ??
+    candidates.find(isVideo) ??
     candidates.find(
       (p) => !p.endsWith(".part") && !p.endsWith(".json") && !p.endsWith(".ytdl"),
     );
