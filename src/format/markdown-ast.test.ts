@@ -1013,3 +1013,39 @@ describe("the closer scan is not quadratic", () => {
     expect(ms).toBeLessThan(2000);
   });
 });
+
+describe("nested lists in the AST", () => {
+  test("an indented item line is a sublist of the item above it", () => {
+    expect(parseBlocks("- a\n  - b\n- c")).toEqual([
+      { type: "ul", items: ["a", "c"], sublists: [{ type: "ul", items: ["b"] }] },
+    ]);
+  });
+
+  test("a flat list carries no sublists key", () => {
+    expect(Object.keys(parseBlocks("- a\n- b")[0]!)).toEqual(["type", "items"]);
+  });
+
+  test("a nested ordered list keeps its own start", () => {
+    const [ol] = parseBlocks("2. two\n   7. seven\n3. three");
+    expect(ol).toEqual({
+      type: "ol",
+      items: ["two", "three"],
+      start: 2,
+      sublists: [{ type: "ol", items: ["seven"], start: 7 }],
+    });
+  });
+
+  test("parseChecklist returns nested task items as children", () => {
+    const [comp] = parseBlocks("<Checklist>\n- [x] a\n  - [ ] b\n    - [x] c\n- [ ] d\n</Checklist>");
+    expect(comp?.type).toBe("component");
+    if (comp?.type !== "component") return;
+    expect(parseChecklist(comp.children)).toEqual([
+      {
+        checked: true,
+        text: "a",
+        children: [{ checked: false, text: "b", children: [{ checked: true, text: "c" }] }],
+      },
+      { checked: false, text: "d" },
+    ]);
+  });
+});

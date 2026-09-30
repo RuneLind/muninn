@@ -98,6 +98,22 @@ and the next code block into one lang-less block. Everything past the lang token
 is discarded, sentinel included; that is CommonMark's rule, the same one that
 drops `title="x"`.
 
+## Lists and nested lists
+
+`parseList` (`src/format/markdown-ast.ts`) nests an item line indented to its
+parent item's child column: 2+ spaces under a bullet, the content column under an
+ordered item (`1. x` → 3). `sublists[k]` on a `ul`/`ol` block is the list under
+`items[k]`, absent on a flat list. Renderers get it pre-rendered: nested
+`<ul>`/`<ol>` inside the `<li>` on web and email, two spaces per level with a `◦`
+bullet (numbers kept) on Telegram and Slack. Nesting stops at 4 levels; a deeper
+line joins the 4th list. A top-level list may start indented 0–3 spaces; `+`
+opens only child lists. Unchanged: a blank line or a non-marker continuation line
+ends the list, a top-level marker of the other kind starts a new list, and a
+fence ends it too — its placeholder is unindented, so an indented fence inside an
+item still splits the list around the code block (the numbering is kept). Inside
+a child list, a marker of the other kind joins that list (one sublist per item).
+A `<Checklist>` nests its rows the same way (`ChecklistRow.children`).
+
 ## Syntax highlighting in fenced code blocks
 
 `code_block` (and `AnnotatedCode`, through the shared `codeFenceHtml`) runs the body through `highlightCode` (`src/format/highlight.ts`), which emits `<span class="tok-*">` for seven token classes; the colors are `--tok-*` in `shared-styles.ts`, so both themes come from one palette and a theme flip costs nothing at render time. Languages are the ones the wikis actually use (ts/js/kotlin/java, sql, shell, json, yaml); `html`, `mermaid`, `diff` and anything unknown fall through to plain `escapeHtml`.

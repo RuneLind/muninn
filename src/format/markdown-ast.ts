@@ -21,11 +21,26 @@ export type Block =
   | { type: "hr" }
   | { type: "heading"; level: number; content: string }
   | { type: "blockquote"; lines: string[] }
-  | { type: "ul"; items: string[] }
-  | { type: "ol"; items: string[]; start: number }
+  | UlBlock
+  | OlBlock
   | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "component"; name: ComponentName; attrs: Record<string, string>; children: Block[] }
   | { type: "text"; lines: string[] };
+
+/** `sublists[k]` is the list nested under `items[k]`. Absent when no item has
+ *  one, so a flat list keeps the shape it always had. */
+export interface UlBlock {
+  type: "ul";
+  items: string[];
+  sublists?: (ListBlock | undefined)[];
+}
+export interface OlBlock {
+  type: "ol";
+  items: string[];
+  start: number;
+  sublists?: (ListBlock | undefined)[];
+}
+export type ListBlock = UlBlock | OlBlock;
 
 // ── Component blocks ────────────────────────────────────────────────────────
 // A small, whitelisted vocabulary of presentational block components shared with
@@ -562,12 +577,29 @@ export function parseChecklistItem(item: string): { checked: boolean; text: stri
   return { checked: false, text: item };
 }
 
+/** One Checklist row; `children` holds the rows of a list nested under it. */
+export interface ChecklistRow {
+  checked: boolean;
+  text: string;
+  children?: ChecklistRow[];
+}
+
 /** Extract a Checklist's rows from its raw children — the first `ul` block's
- *  items, each parsed for its task marker. Empty when the body has no list. */
-export function parseChecklist(children: Block[]): { checked: boolean; text: string }[] {
+ *  items, each parsed for its task marker, with nested items as `children`.
+ *  Empty when the body has no list. */
+export function parseChecklist(children: Block[]): ChecklistRow[] {
   const ul = children.find((c) => c.type === "ul");
   if (!ul || ul.type !== "ul") return [];
-  return ul.items.map(parseChecklistItem);
+  return checklistRows(ul);
+}
+
+function checklistRows(list: ListBlock): ChecklistRow[] {
+  return list.items.map((item, k) => {
+    const row: ChecklistRow = parseChecklistItem(item);
+    const sub = list.sublists?.[k];
+    if (sub) row.children = checklistRows(sub);
+    return row;
+  });
 }
 
 /**
@@ -722,8 +754,93 @@ function allocateCodeId(store: FenceStore): number {
 const HR_RE = /^---+$/;
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const BLOCKQUOTE_RE = /^>\s?(.*)$/;
-const UL_RE = /^[-*]\s+(.*)$/;
-const OL_RE = /^(\d+)\.\s+(.*)$/;
+/** A list item line: indent, marker (`-`/`*`/`+` or `N.`), the spaces after it, content. */
+const LIST_ITEM_RE = /^( *)([-*+]|\d+\.)(\s+)(.*)$/;
+
+/** Levels a list may nest to. A line indented deeper than the last level's
+ *  child column joins that last list as a sibling. */
+const MAX_LIST_DEPTH = 4;
+
+interface ListLine {
+  indent: number;
+  kind: "ul" | "ol";
+  marker: string;
+  /** The column the item's content starts at — its children's indent (ordered). */
+  contentCol: number;
+  content: string;
+}
+
+function matchListLine(line: string): ListLine | null {
+  const m = line.match(LIST_ITEM_RE);
+  if (!m) return null;
+  const indent = m[1]!.length;
+  const marker = m[2]!;
+  return {
+    indent,
+    kind: /\d/.test(marker) ? "ol" : "ul",
+    marker,
+    contentCol: indent + marker.length + m[3]!.length,
+    content: m[4]!,
+  };
+}
+
+/** One open list while nesting: the block, plus its LAST item's line, which is
+ *  what a deeper line would hang under. */
+interface ListLevel {
+  block: ListBlock;
+  last: ListLine;
+}
+
+/** The indent at which a line becomes a child of `level`'s last item: two
+ *  spaces past a bullet, the content column of an ordered item (CommonMark). */
+function childIndent(level: ListLevel): number {
+  return level.last.kind === "ul" ? level.last.indent + 2 : level.last.contentCol;
+}
+
+function newList(line: ListLine): ListBlock {
+  return line.kind === "ul"
+    ? { type: "ul", items: [line.content] }
+    : { type: "ol", items: [line.content], start: parseInt(line.marker, 10) || 1 };
+}
+
+/**
+ * A list starting at `lines[i]`, with indented item lines nested as child lists,
+ * or null when the line does not open one.
+ *
+ * A top-level list opens on a `-`, `*` or `N.` item indented at most 3 spaces
+ * (CommonMark's bound; `+` opens nothing at the top level, as before). A later
+ * item line indented to the current item's child column opens a child list
+ * (any marker, `+` included); a shallower one closes child lists back to the
+ * level it belongs to. The list ends at the first line that is not an item —
+ * a blank line, a continuation line, a fence placeholder — and at a top-level
+ * item of the other kind, so `- a` then `1. b` stays two lists. Inside a child
+ * list a marker of the other kind joins that list: an item holds one sublist.
+ */
+function parseList(lines: string[], i: number): { block: ListBlock; next: number } | null {
+  const first = matchListLine(lines[i]!);
+  if (!first || first.indent > 3 || first.marker === "+") return null;
+  const root = newList(first);
+  const stack: ListLevel[] = [{ block: root, last: first }];
+  let j = i + 1;
+  for (; j < lines.length; j++) {
+    const line = matchListLine(lines[j]!);
+    if (!line) break;
+    let top = stack[stack.length - 1]!;
+    if (line.indent >= childIndent(top) && stack.length < MAX_LIST_DEPTH) {
+      const child = newList(line);
+      const sublists = (top.block.sublists ??= []);
+      sublists[top.block.items.length - 1] = child;
+      stack.push({ block: child, last: line });
+      continue;
+    }
+    while (stack.length > 1 && line.indent < childIndent(stack[stack.length - 2]!)) stack.pop();
+    top = stack[stack.length - 1]!;
+    if (stack.length === 1 && (line.kind !== root.type || line.marker === "+")) break;
+    top.block.items.push(line.content);
+    top.last = line;
+  }
+  return { block: root, next: j };
+}
 
 export function parseBlocks(text: string): Block[] {
   const normalized = text.replace(/\r\n/g, "\n");
@@ -975,31 +1092,11 @@ function parseBlocksInner(
       continue;
     }
 
-    if (UL_RE.test(line)) {
+    const list = parseList(lines, i);
+    if (list) {
       flushText();
-      const items: string[] = [];
-      while (i < lines.length) {
-        const m = lines[i]!.match(UL_RE);
-        if (!m) break;
-        items.push(m[1]!);
-        i++;
-      }
-      blocks.push({ type: "ul", items });
-      continue;
-    }
-
-    if (OL_RE.test(line)) {
-      flushText();
-      const items: string[] = [];
-      let start = 1;
-      while (i < lines.length) {
-        const m = lines[i]!.match(OL_RE);
-        if (!m) break;
-        if (items.length === 0) start = parseInt(m[1]!, 10) || 1;
-        items.push(m[2]!);
-        i++;
-      }
-      blocks.push({ type: "ol", items, start });
+      blocks.push(list.block);
+      i = list.next;
       continue;
     }
 

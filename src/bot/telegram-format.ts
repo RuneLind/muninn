@@ -11,7 +11,8 @@ import {
   historicLeadText,
   resolvedLeadText,
 } from "../format/markdown-ast.ts";
-import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
+import type { ChecklistRow } from "../format/markdown-ast.ts";
+import { renderBlocks, withTextSublist, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
@@ -27,6 +28,18 @@ export function formatTelegramHtml(text: string): string {
 
 const TG_ALLOWED_TAG = /^\/?(b|i|u|s|code|pre|a|tg-spoiler|tg-emoji|blockquote)(\s|>|$)/i;
 
+/** Checklist rows as `☑`/`☐` lines, nested rows indented two spaces per level. */
+function checklistText(rows: ChecklistRow[]): string {
+  return rows
+    .map((it) =>
+      withTextSublist(
+        `${it.checked ? "☑" : "☐"} ${renderInline(it.text)}`,
+        it.children?.length ? checklistText(it.children) : undefined,
+      ),
+    )
+    .join("\n");
+}
+
 const telegramRenderer: BlockRenderer = {
   code_block(block) {
     const openTag = block.lang ? `<code class="language-${block.lang}">` : "<code>";
@@ -35,8 +48,10 @@ const telegramRenderer: BlockRenderer = {
   hr: () => "",
   heading: (block) => `<b>${renderInline(block.content)}</b>`,
   blockquote: (lines) => lines.map((l) => `> ${renderInline(l)}`).join("\n"),
-  ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
-  ol: (items, start) => items.map((i, idx) => `${start + idx}. ${renderInline(i)}`).join("\n"),
+  ul: (items, sublists, depth) =>
+    items.map((i, k) => withTextSublist(`${depth > 0 ? "◦" : "-"} ${renderInline(i)}`, sublists[k])).join("\n"),
+  ol: (items, start, sublists) =>
+    items.map((i, k) => withTextSublist(`${start + k}. ${renderInline(i)}`, sublists[k])).join("\n"),
   table(headers, rows) {
     const headerRow = `| ${headers.map(renderInline).join(" | ")} |`;
     const sepRow = "|" + headers.map(() => "---").join("|") + "|";
@@ -82,7 +97,7 @@ const telegramRenderer: BlockRenderer = {
       case "Checklist": {
         const items = parseChecklist(rawChildren);
         if (items.length === 0) return children;
-        return items.map((it) => `${it.checked ? "☑" : "☐"} ${renderInline(it.text)}`).join("\n");
+        return checklistText(items);
       }
       case "AnnotatedCode":
         // file line + fence + annotation paragraphs (already in children).

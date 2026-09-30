@@ -211,6 +211,8 @@ export function componentBlockCss(scope: string): string {
       padding: 0.15rem 0;
       line-height: 1.5;
     }
+    ${scope} .check-item.check-parent { display: block; }
+    ${scope} .check-item > .checklist { margin: 0.15rem 0 0 1.5rem; }
     ${scope} .check-mark { flex: none; font-weight: 700; font-variant-numeric: tabular-nums; }
     ${scope} .check-done .check-mark { color: var(--status-success); }
     ${scope} .check-todo .check-mark { color: var(--text-muted); }

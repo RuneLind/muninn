@@ -16,7 +16,7 @@ import {
   diffLineClass,
   parseChecklist,
 } from "../format/markdown-ast.ts";
-import type { Block, FactVerdict } from "../format/markdown-ast.ts";
+import type { Block, ChecklistRow, FactVerdict } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
@@ -182,6 +182,23 @@ function isBlankTextBlock(block: Block): boolean {
   return block.type === "text" && block.lines.every((l) => l.trim() === "");
 }
 
+/** Checklist rows as `<ul class="checklist">`, a nested task list inside its
+ *  parent row (`check-parent`, which the CSS takes out of the flex row). */
+function checklistHtml(rows: ChecklistRow[]): string {
+  const lis = rows
+    .map((it) => {
+      const state = it.checked ? "done" : "todo";
+      const mark = it.checked ? "✓" : "✗";
+      const nested = it.children?.length ? checklistHtml(it.children) : "";
+      return (
+        `<li class="check-item check-${state}${nested ? " check-parent" : ""}">` +
+        `<span class="check-mark">${mark}</span> ${renderInline(it.text)}${nested}</li>`
+      );
+    })
+    .join("");
+  return `<ul class="checklist">${lis}</ul>`;
+}
+
 const webRenderer: BlockRenderer = {
   code_block(block) {
     return codeFenceHtml(block.lang, block.code);
@@ -192,9 +209,12 @@ const webRenderer: BlockRenderer = {
     return `<${tag}>${renderInline(block.content)}</${tag}>`;
   },
   blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
-  ul: (items) => `<ul>${items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ul>`,
-  ol: (items, start) =>
-    `<ol${start !== 1 ? ` start="${start}"` : ""}>${items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ol>`,
+  ul: (items, sublists) =>
+    `<ul>${items.map((i, k) => `<li>${renderInline(i)}${sublists[k] ?? ""}</li>`).join("")}</ul>`,
+  ol: (items, start, sublists) =>
+    `<ol${start !== 1 ? ` start="${start}"` : ""}>` +
+    items.map((i, k) => `<li>${renderInline(i)}${sublists[k] ?? ""}</li>`).join("") +
+    `</ol>`,
   table(headers, rows) {
     const thead = "<thead><tr>" + headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead>";
     const tbody = "<tbody>" + rows.map((row) =>
@@ -278,17 +298,7 @@ const webRenderer: BlockRenderer = {
       case "Checklist": {
         const items = parseChecklist(rawChildren);
         if (items.length === 0) return children; // no task list → render body as-is
-        const rows = items
-          .map((it) => {
-            const state = it.checked ? "done" : "todo";
-            const mark = it.checked ? "✓" : "✗";
-            return (
-              `<li class="check-item check-${state}">` +
-              `<span class="check-mark">${mark}</span> ${renderInline(it.text)}</li>`
-            );
-          })
-          .join("");
-        return `<ul class="checklist">${rows}</ul>`;
+        return checklistHtml(items);
       }
       case "AnnotatedCode": {
         const fence = firstCodeBlock(rawChildren);

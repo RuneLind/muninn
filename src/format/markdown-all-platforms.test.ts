@@ -1315,3 +1315,149 @@ describe("report blocks — fix round 1 (title trimming, shared lead text, dates
   test("resolved= accepts a year below 100 (no 19xx rollover)", () =>
     expect(ast.parseResolvedDate("0099-01-01")).toBe("0099-01-01"));
 });
+
+// ── Nested lists ─────────────────────────────────────────────────────────────
+// An item line indented to its parent item's content column is a CHILD list:
+// nested <ul>/<ol> inside the parent <li> on web and email, two spaces per level
+// with a `◦` bullet (numbers kept) on Telegram and Slack. Before this, the
+// indented lines leaked as literal "  - b" text and split the parent list in two.
+
+/** Email HTML with every inline style removed, so a test can compare structure.
+ *  (`<p>` goes too: email wraps a paragraph where the web leaves bare text.) */
+const unstyled = (html: string) => html.replace(/ style="[^"]*"/g, "").replace(/<\/?p>/g, "");
+
+describe("nested lists", () => {
+  const cases: {
+    name: string;
+    md: string;
+    web: string;
+    text: string; // Telegram and Slack (identical for these inputs)
+  }[] = [
+    {
+      name: "ul in ul, with a sibling after the child list",
+      md: "- a\n  - b\n  - c\n- d",
+      web: "<ul><li>a<ul><li>b</li><li>c</li></ul></li><li>d</li></ul>",
+      text: "- a\n  ◦ b\n  ◦ c\n- d",
+    },
+    {
+      name: "ol in ul",
+      md: "- a\n  1. x\n  2. y\n- b",
+      web: "<ul><li>a<ol><li>x</li><li>y</li></ol></li><li>b</li></ul>",
+      text: "- a\n  1. x\n  2. y\n- b",
+    },
+    {
+      name: "ul in ol, at the ordered item's content column",
+      md: "1. one\n   - sub\n2. two",
+      web: "<ol><li>one<ul><li>sub</li></ul></li><li>two</li></ol>",
+      text: "1. one\n  ◦ sub\n2. two",
+    },
+    {
+      name: "ordered start is kept on the parent and on a nested ol",
+      md: "3. three\n   5. five\n   6. six\n4. four",
+      web: '<ol start="3"><li>three<ol start="5"><li>five</li><li>six</li></ol></li><li>four</li></ol>',
+      text: "3. three\n  5. five\n  6. six\n4. four",
+    },
+    {
+      name: "three levels",
+      md: "- a\n  - b\n    - c\n- d",
+      web: "<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li><li>d</li></ul>",
+      text: "- a\n  ◦ b\n    ◦ c\n- d",
+    },
+    {
+      name: "a sibling after a deeper child returns to its own level",
+      md: "- a\n  - b\n    - c\n  - d\n- e",
+      web: "<ul><li>a<ul><li>b<ul><li>c</li></ul></li><li>d</li></ul></li><li>e</li></ul>",
+      text: "- a\n  ◦ b\n    ◦ c\n  ◦ d\n- e",
+    },
+    {
+      name: "depth cap: a fifth level joins the fourth list",
+      md: "- 1\n  - 2\n    - 3\n      - 4\n        - 5",
+      web: "<ul><li>1<ul><li>2<ul><li>3<ul><li>4</li><li>5</li></ul></li></ul></li></ul></li></ul>",
+      text: "- 1\n  ◦ 2\n    ◦ 3\n      ◦ 4\n      ◦ 5",
+    },
+    {
+      name: "`*` and `+` markers nest",
+      md: "* a\n  + b\n  * c",
+      web: "<ul><li>a<ul><li>b</li><li>c</li></ul></li></ul>",
+      text: "- a\n  ◦ b\n  ◦ c",
+    },
+    {
+      name: "a list indented 1-3 spaces under a paragraph is a list",
+      md: "Intro:\n  - a\n  - b",
+      web: "Intro:\n<ul><li>a</li><li>b</li></ul>",
+      text: "Intro:\n- a\n- b",
+    },
+    {
+      name: "a 2-space bullet under an ordered item is a sibling list, not leaked text",
+      md: "1. one\n  - sub\n2. two",
+      web: '<ol><li>one</li></ol>\n<ul><li>sub</li></ul>\n<ol start="2"><li>two</li></ol>',
+      text: "1. one\n- sub\n2. two",
+    },
+  ];
+
+  for (const c of cases) {
+    describe(c.name, () => {
+      test("web", () => expect(formatWebHtml(c.md)).toBe(c.web));
+      test("telegram", () => expect(formatTelegramHtml(c.md)).toBe(c.text));
+      test("slack", () => expect(formatSlackMrkdwn(c.md)).toBe(c.text));
+      test("email: the web structure, every list and item carrying an inline style", () => {
+        const out = formatEmailHtml(c.md);
+        expect(unstyled(out)).toBe(c.web);
+        for (const tag of out.match(/<(?:ul|ol|li)\b[^>]*>/g) ?? []) expect(tag).toContain(' style="');
+      });
+    });
+  }
+
+  test("inline formatting runs inside nested items", () => {
+    expect(formatWebHtml("- a\n  - **b** `c`")).toBe(
+      "<ul><li>a<ul><li><strong>b</strong> <code>c</code></li></ul></li></ul>",
+    );
+  });
+
+  test("a fence inside a nested item still renders as code, and the list around it nests", () => {
+    const md = "- a\n  - b\n   ```js\n   code()\n   ```\n  - c";
+    const out = formatWebHtml(md);
+    expect(out).toContain("<ul><li>a<ul><li>b</li></ul></li></ul>");
+    expect(out).toContain('<pre><code class="language-js">');
+    expect(out).toContain("<ul><li>c</li></ul>");
+    expect(out).not.toMatch(/^\s*- /m);
+    expect(formatTelegramHtml(md)).toContain("- a\n  ◦ b");
+  });
+
+  test("a Checklist keeps its nested task items, nested under their parent", () => {
+    const md = "<Checklist>\n- [x] a\n  - [ ] b\n- [ ] c\n</Checklist>";
+    expect(formatWebHtml(md)).toBe(
+      '<ul class="checklist">' +
+        '<li class="check-item check-done check-parent"><span class="check-mark">✓</span> a' +
+        '<ul class="checklist"><li class="check-item check-todo"><span class="check-mark">✗</span> b</li></ul></li>' +
+        '<li class="check-item check-todo"><span class="check-mark">✗</span> c</li>' +
+        "</ul>",
+    );
+    expect(formatTelegramHtml(md)).toBe("☑ a\n  ☐ b\n☐ c");
+    expect(formatSlackMrkdwn(md)).toBe("☑ a\n  ☐ b\n☐ c");
+    const email = unstyled(formatEmailHtml(md));
+    expect(email).toMatch(/<li>(?:(?!<\/li>).)*a<ul><li>(?:(?!<\/li>).)*b<\/li><\/ul><\/li>/);
+  });
+
+  test("a mixed marker inside a child list joins that list (one sublist per item)", () => {
+    expect(formatWebHtml("- a\n  - b\n  1. c")).toBe(
+      "<ul><li>a<ul><li>b</li><li>c</li></ul></li></ul>",
+    );
+  });
+
+  describe("unchanged: shapes that are not nested lists", () => {
+    test("a dash inside prose is not a list", () =>
+      expect(formatWebHtml("range 1 - 5\nfoo -bar")).toBe("range 1 - 5\nfoo -bar"));
+    test("a top-level `+` line stays text", () => expect(formatWebHtml("+ plus")).toBe("+ plus"));
+    test("4-space indented text with no list above stays a paragraph", () =>
+      expect(formatWebHtml("para\n    - deep")).toBe("para\n    - deep"));
+    test("a blank line between items still starts a second list", () =>
+      expect(formatWebHtml("- a\n\n- b")).toBe("<ul><li>a</li></ul>\n<ul><li>b</li></ul>"));
+    test("a non-marker continuation line still ends the list", () =>
+      expect(formatWebHtml("- a\n  more\n- b")).toBe("<ul><li>a</li></ul>\n  more\n<ul><li>b</li></ul>"));
+    test("an indented fence under an ordered item keeps its code block and numbering", () =>
+      expect(formatWebHtml("1. one\n   ```js\n   x\n   ```\n2. two")).toBe(
+        '<ol><li>one</li></ol>\n<pre><code class="language-js">x</code></pre>\n<ol start="2"><li>two</li></ol>',
+      ));
+  });
+});

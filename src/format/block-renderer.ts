@@ -1,4 +1,4 @@
-import type { Block, ComponentName, InlineComponentName } from "./markdown-ast.ts";
+import type { Block, ComponentName, InlineComponentName, ListBlock } from "./markdown-ast.ts";
 
 /**
  * Per-platform block rendering strategy. Each platform formatter (web HTML,
@@ -19,10 +19,12 @@ export interface BlockRenderer {
   hr(): string;
   heading(block: { level: number; content: string }): string;
   blockquote(lines: string[]): string;
-  ul(items: string[]): string;
+  /** `sublists[k]` is the list nested under `items[k]`, already rendered by this
+   *  same renderer one `depth` deeper; `depth` is 0 for a top-level list. */
+  ul(items: string[], sublists: (string | undefined)[], depth: number): string;
   /** `start` is the list's first ordinal (from the source markdown) — a list
    *  split across paragraphs must not restart at 1 on every fragment. */
-  ol(items: string[], start: number): string;
+  ol(items: string[], start: number, sublists: (string | undefined)[], depth: number): string;
   table(headers: string[], rows: string[][]): string;
   /** Render a component block. `renderedChildren` is the component body already
    *  walked through this same renderer, so most components only wrap/decorate it.
@@ -65,9 +67,8 @@ function renderBlock(block: Block, r: BlockRenderer): string {
     case "blockquote":
       return r.blockquote(block.lines);
     case "ul":
-      return r.ul(block.items);
     case "ol":
-      return r.ol(block.items, block.start);
+      return renderList(block, r, 0);
     case "table":
       return r.table(block.headers, block.rows);
     case "component":
@@ -79,4 +80,20 @@ function renderBlock(block: Block, r: BlockRenderer): string {
       return _exhaustive;
     }
   }
+}
+
+function renderList(list: ListBlock, r: BlockRenderer, depth: number): string {
+  const sublists = list.items.map((_, k) => {
+    const sub = list.sublists?.[k];
+    return sub ? renderList(sub, r, depth + 1) : undefined;
+  });
+  return list.type === "ul"
+    ? r.ul(list.items, sublists, depth)
+    : r.ol(list.items, list.start, sublists, depth);
+}
+
+/** A plain-text list item line followed by its rendered sublist, indented two
+ *  spaces — the Telegram/Slack nesting, which have no list markup. */
+export function withTextSublist(line: string, sublist: string | undefined): string {
+  return sublist === undefined ? line : `${line}\n${sublist.replace(/^/gm, "  ")}`;
 }

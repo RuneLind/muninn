@@ -34,7 +34,7 @@ import {
   historicLeadText,
   resolvedLeadText,
 } from "./markdown-ast.ts";
-import type { Block, FactVerdict } from "./markdown-ast.ts";
+import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
 import {
@@ -67,6 +67,7 @@ const S = {
   p: `margin:0 0 12px;line-height:1.55;color:${TEXT};`,
   list: `margin:0 0 12px;padding-left:22px;line-height:1.55;color:${TEXT};`,
   li: "margin:0 0 4px;",
+  sublist: `margin:4px 0 0;padding-left:22px;line-height:1.55;color:${TEXT};`,
   pre:
     `margin:0 0 12px;padding:12px;background:${SURFACE};border:1px solid ${BORDER};` +
     `border-radius:6px;overflow-x:auto;font-family:${MONO};font-size:13px;line-height:1.45;`,
@@ -106,6 +107,19 @@ export function formatEmailHtml(text: string): string {
   return renderBlocks(parseBlocks(text), emailRenderer).replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** Checklist rows as a styled `<ul>`, a nested task list inside its parent row. */
+function checklistEmail(rows: ChecklistRow[], depth: number): string {
+  const lis = rows
+    .map(
+      (it) =>
+        `<li style="${S.li}list-style:none;">` +
+        `<span style="color:${it.checked ? VERDICT_COLOR.yes : DIM};">${it.checked ? "☑" : "☐"}</span> ` +
+        `${renderInline(it.text)}${it.children?.length ? checklistEmail(it.children, depth + 1) : ""}</li>`,
+    )
+    .join("");
+  return `<ul style="${depth > 0 ? S.sublist : `${S.list}padding-left:4px;`}">${lis}</ul>`;
+}
+
 const emailRenderer: BlockRenderer = {
   code_block: (block) => `<pre style="${S.pre}"><code>${escapeHtml(block.code)}</code></pre>`,
   hr: () => `<hr style="${S.hr}">`,
@@ -115,11 +129,13 @@ const emailRenderer: BlockRenderer = {
   },
   blockquote: (lines) =>
     `<blockquote style="${S.quote}">${lines.map(renderInline).join("<br>")}</blockquote>`,
-  ul: (items) =>
-    `<ul style="${S.list}">${items.map((i) => `<li style="${S.li}">${renderInline(i)}</li>`).join("")}</ul>`,
-  ol: (items, start) =>
-    `<ol style="${S.list}"${start !== 1 ? ` start="${start}"` : ""}>` +
-    items.map((i) => `<li style="${S.li}">${renderInline(i)}</li>`).join("") +
+  ul: (items, sublists, depth) =>
+    `<ul style="${depth > 0 ? S.sublist : S.list}">` +
+    items.map((i, k) => `<li style="${S.li}">${renderInline(i)}${sublists[k] ?? ""}</li>`).join("") +
+    `</ul>`,
+  ol: (items, start, sublists, depth) =>
+    `<ol style="${depth > 0 ? S.sublist : S.list}"${start !== 1 ? ` start="${start}"` : ""}>` +
+    items.map((i, k) => `<li style="${S.li}">${renderInline(i)}${sublists[k] ?? ""}</li>`).join("") +
     `</ol>`,
   table(headers, rows) {
     const thead =
@@ -184,15 +200,7 @@ const emailRenderer: BlockRenderer = {
       case "Checklist": {
         const items = parseChecklist(rawChildren);
         if (items.length === 0) return children;
-        const rows = items
-          .map(
-            (it) =>
-              `<li style="${S.li}list-style:none;">` +
-              `<span style="color:${it.checked ? VERDICT_COLOR.yes : DIM};">${it.checked ? "☑" : "☐"}</span> ` +
-              `${renderInline(it.text)}</li>`,
-          )
-          .join("");
-        return `<ul style="${S.list}padding-left:4px;">${rows}</ul>`;
+        return checklistEmail(items, 0);
       }
       case "AnnotatedCode": {
         const fence = firstCodeBlock(rawChildren);

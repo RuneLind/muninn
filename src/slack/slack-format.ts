@@ -11,8 +11,9 @@ import {
   historicLeadText,
   resolvedLeadText,
 } from "../format/markdown-ast.ts";
+import type { ChecklistRow } from "../format/markdown-ast.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
-import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
+import { renderBlocks, withTextSublist, type BlockRenderer } from "../format/block-renderer.ts";
 import {
   Placeholders,
   escapeHtml,
@@ -35,13 +36,27 @@ export function formatSlackMrkdwn(text: string): string {
     .trim();
 }
 
+/** Checklist rows as `☑`/`☐` lines, nested rows indented two spaces per level. */
+function checklistText(rows: ChecklistRow[]): string {
+  return rows
+    .map((it) =>
+      withTextSublist(
+        `${it.checked ? "☑" : "☐"} ${renderInline(it.text)}`,
+        it.children?.length ? checklistText(it.children) : undefined,
+      ),
+    )
+    .join("\n");
+}
+
 const slackRenderer: BlockRenderer = {
   code_block: (block) => "```\n" + block.code + "\n```",
   hr: () => "",
   heading: (block) => `*${renderInline(block.content)}*`,
   blockquote: (lines) => lines.map((l) => `> ${renderInline(l)}`).join("\n"),
-  ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
-  ol: (items, start) => items.map((i, idx) => `${start + idx}. ${renderInline(i)}`).join("\n"),
+  ul: (items, sublists, depth) =>
+    items.map((i, k) => withTextSublist(`${depth > 0 ? "◦" : "-"} ${renderInline(i)}`, sublists[k])).join("\n"),
+  ol: (items, start, sublists) =>
+    items.map((i, k) => withTextSublist(`${start + k}. ${renderInline(i)}`, sublists[k])).join("\n"),
   table: (headers, rows) => renderTable(headers, rows),
   component(name, attrs, children, rawChildren) {
     switch (name) {
@@ -82,7 +97,7 @@ const slackRenderer: BlockRenderer = {
       case "Checklist": {
         const items = parseChecklist(rawChildren);
         if (items.length === 0) return children;
-        return items.map((it) => `${it.checked ? "☑" : "☐"} ${renderInline(it.text)}`).join("\n");
+        return checklistText(items);
       }
       case "AnnotatedCode":
         // file line + fence + annotation paragraphs (already in children).
