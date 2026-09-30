@@ -453,6 +453,21 @@ The attribute values (`summary`, `since`, `note`, `title`) are plain text on the
 
 The muted text (`fold-summary`, `historic-stamp`, the chips) uses `--text-soft`: `--text-muted` measures under 4.5:1 on the light `--bg-surface` fold fill. `e2e/wiki-report-blocks.spec.ts` pins the token and the contrast in both themes.
 
+## `<NextMoves>` / `<Lane>` — who has the next move
+
+Block-only, wiki-only (not in `COMPONENT_VOCABULARY_RULES`). A `<NextMoves>` holds `<Lane kind="you|waiting|draft|blocked" who="…" since="YYYY-MM-DD">` blocks whose bodies are ordinary markdown.
+
+- **Reading a lane is one function**, `laneFromAttrs` (`markdown-ast.ts`): `kind` is case-folded, and an unknown or missing kind reads as `waiting` with `known: false`; `who` falls back to `LANE_DEFAULT_LABEL` (English — `who` is where the page's language goes); `since` goes through `parseResolvedDate`, so only a real calendar day survives. `items` is each TOP-LEVEL list item across the lane's lists (nested items are not steps); a lane with prose and no list counts one item, its first line. The web renderer's `data-count`, the reader's pills and the index's `movesYou` all read that one count.
+- **Web**: `<section class="next-moves">` → `.nm-grid` (`repeat(auto-fit, minmax(min(100%, 220px), 1fr))`: one column in a phone-width article, up to four wide) → one `.nm-lane.nm-<kind>` per lane with `data-kind`, `data-count`, `data-since`, a head (`nm-who`, `nm-count`, `nm-since`) and `nm-body`. An unknown kind adds `nm-kind-unknown`. Non-lane blocks inside `<NextMoves>` render above the grid in `nm-intro`. The `you` lane carries the accent left rule; its label is `--accent-light` because `--accent` as text is under 4.5:1 on the dark panel.
+- **Ages are client-side.** The server emits the date only; the reader (`views/components/wiki-report-blocks.ts`, `decorateLaneAges`) turns a waiting lane's date into `since N d` and appends a `not sent · N d` chip (`.nm-age`) to each top-level item of a draft lane, counting the viewer's calendar days (`daysSince`, DST-safe). Cached HTML therefore never carries a stale age, and chat (which runs no enhancer) shows the date.
+- **Degrades**: a `<NextMoves>` with no `<Lane>` renders its body plain; a `<Lane>` outside one renders as a bold label line (`laneLeadText`) over its body, with no card and no count.
+- **Other surfaces**: Slack, Telegram and email render each lane as a bold label line (`Label — since <date>`) followed by its items.
+- **Depth**: `Fold > NextMoves > Lane` renders; one more wrapper (a `Historic > Fold > NextMoves`) hits `MAX_COMPONENT_DEPTH` and the lanes degrade to text.
+- **Chat** renders the grid: the `nm-*` classes are in `COMPONENT_CLASS_ALLOW`.
+- **Header pills** (`enhanceReportBlocks`): `✋ N for you`, `⏳ waiting · N` and `✉ N not sent · <oldest age> d`, summed from the lanes' `data-count`, each opening any closed `<details>` around its first lane and scrolling to it. Blocked lanes get no pill.
+
+`e2e/wiki-next-moves.spec.ts` pins the grid at desktop and phone width, the pills, the ages under a fixed clock and timezone, and the contrast of every lane text and pill in both themes.
+
 ## Fact-check annotation pair
 
 - `<Fact n="4" v="bad">passage</Fact>` (inline, paired + self-closing) marks a fact-checked passage with a verdict-tinted underline plus a `<button class="fc-chip">`.

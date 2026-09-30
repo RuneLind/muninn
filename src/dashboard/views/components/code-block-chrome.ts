@@ -119,6 +119,9 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   Fold: null,
   // Same for a historic section: it dims prose and code alike, no chrome.
   Historic: null,
+  // Next-move lanes hold prose lists; a fence in one is an ordinary fence.
+  NextMoves: null,
+  Lane: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);

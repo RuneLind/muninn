@@ -15,7 +15,10 @@ import {
   computeMeters,
   DEFAULT_VIEW,
   dropIntoColumn,
+  effectiveScope,
+  EMPTY_FILTERS,
   EMPTY_OVERLAY,
+  waitingCardCount,
   familyCounts,
   filterCards,
   formatAge,
@@ -50,6 +53,8 @@ function card(over: Partial<BoardCard> & { slug: string }): BoardCard {
     relPath: `plans/${over.slug}.mdx`,
     hash: "h",
     followupsOpen: false,
+    movesYou: 0,
+    movesYouSteps: [],
     wikiUrl: `/wiki?wiki=mimir&page=${over.slug}`,
     family: "muninn",
     familySource: "slug",
@@ -381,17 +386,17 @@ describe("filters", () => {
   ];
 
   test("family, priority (incl. unset) and free text", () => {
-    expect(filterCards(cards, { families: ["muninn"], priority: null, query: "" }).map((c) => c.slug))
+    expect(filterCards(cards, { families: ["muninn"], priority: null, query: "", waiting: false }).map((c) => c.slug))
       .toEqual(["muninn-a"]);
-    expect(filterCards(cards, { families: [], priority: "unset", query: "" }).map((c) => c.slug))
+    expect(filterCards(cards, { families: [], priority: "unset", query: "", waiting: false }).map((c) => c.slug))
       .toEqual(["huginn-b"]);
-    expect(filterCards(cards, { families: [], priority: "p0", query: "" }).map((c) => c.slug))
+    expect(filterCards(cards, { families: [], priority: "p0", query: "", waiting: false }).map((c) => c.slug))
       .toEqual(["muninn-a"]);
-    expect(filterCards(cards, { families: [], priority: null, query: "search" }).map((c) => c.slug))
+    expect(filterCards(cards, { families: [], priority: null, query: "search", waiting: false }).map((c) => c.slug))
       .toEqual(["huginn-b"]);
-    expect(filterCards(cards, { families: [], priority: null, query: "BOARD" }).map((c) => c.slug))
+    expect(filterCards(cards, { families: [], priority: null, query: "BOARD", waiting: false }).map((c) => c.slug))
       .toEqual(["muninn-a"]);
-    expect(cardMatches(cards[0]!, { families: ["huginn"], priority: null, query: "" })).toBe(false);
+    expect(cardMatches(cards[0]!, { families: ["huginn"], priority: null, query: "", waiting: false })).toBe(false);
   });
 
   test("family chips are counted, most used first", () => {
@@ -525,7 +530,7 @@ describe("the view is in the URL", () => {
       viewStateToQuery({
         scope: "all",
         sort: "cost",
-        filters: { families: ["muninn", "huginn"], priority: "unset", query: " board " },
+        filters: { families: ["muninn", "huginn"], priority: "unset", query: " board ", waiting: false },
       }),
     ).toBe("?scope=all&sort=cost&repo=muninn%2Chuginn&pri=unset&q=board");
   });
@@ -534,7 +539,7 @@ describe("the view is in the URL", () => {
     const view = {
       scope: "followups" as const,
       sort: "age" as const,
-      filters: { families: ["mimir"], priority: "p1" as const, query: "wiki" },
+      filters: { families: ["mimir"], priority: "p1" as const, query: "wiki", waiting: false },
     };
     expect(viewStateFromQuery(viewStateToQuery(view))).toEqual(view);
     expect(viewStateFromQuery("")).toEqual(DEFAULT_VIEW);
@@ -561,5 +566,38 @@ describe("column key coverage", () => {
   test("every BoardColumnKey has metadata", () => {
     const keys: BoardColumnKey[] = ["proposed", "ready", "in-flight", "blocked", "followups", "shipped"];
     for (const k of keys) expect(visibleColumns("all").some((c) => c.key === k)).toBe(true);
+  });
+});
+
+describe("Waiting on you", () => {
+  const cards = [
+    eff({ slug: "shipped-waits", planStatus: "shipped", column: "shipped", movesYou: 2, movesYouSteps: ["a", "b"] }),
+    eff({ slug: "inflight-waits", planStatus: "in-flight", column: "in-flight", movesYou: 1, movesYouSteps: ["c"] }),
+    eff({ slug: "inflight-idle", planStatus: "in-flight", column: "in-flight" }),
+  ];
+
+  test("the toggle keeps only cards with a you-lane step, in any column", () => {
+    const on = { ...EMPTY_FILTERS, waiting: true };
+    expect(filterCards(cards, on).map((c) => c.slug)).toEqual(["shipped-waits", "inflight-waits"]);
+    expect(filterCards(cards, EMPTY_FILTERS).length).toBe(3);
+    // It ANDs with the other filters.
+    expect(filterCards(cards, { ...on, query: "shipped" }).map((c) => c.slug)).toEqual(["shipped-waits"]);
+  });
+
+  test("the count is over every card; the board renders every column while it is on", () => {
+    expect(waitingCardCount(cards)).toBe(2);
+    expect(effectiveScope({ scope: "active", filters: { ...EMPTY_FILTERS, waiting: true } })).toBe("all");
+    expect(effectiveScope({ scope: "active", filters: EMPTY_FILTERS })).toBe("active");
+    // The shipped card is out of the default scope, and back in with the toggle.
+    const waiting = filterCards(cards, { ...EMPTY_FILTERS, waiting: true });
+    expect(cardsInScope(waiting, "active").map((c) => c.slug)).toEqual(["inflight-waits"]);
+    expect(cardsInScope(waiting, effectiveScope({ scope: "active", filters: { ...EMPTY_FILTERS, waiting: true } })).length).toBe(2);
+  });
+
+  test("the toggle round-trips through the URL", () => {
+    const view = { ...DEFAULT_VIEW, filters: { ...EMPTY_FILTERS, waiting: true } };
+    expect(viewStateToQuery(view)).toBe("?waiting=1");
+    expect(viewStateFromQuery("?waiting=1").filters.waiting).toBe(true);
+    expect(viewStateFromQuery("?waiting=yes").filters.waiting).toBe(false);
   });
 });

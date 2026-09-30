@@ -196,6 +196,10 @@ export interface BoardCard {
   relPath: string;
   hash: string;
   followupsOpen: boolean;
+  /** Steps waiting on the reader: the `<NextMoves>` `you` lane item count, and
+   *  their lead sentences (capped). 0 / `[]` when the plan waits on nobody. */
+  movesYou: number;
+  movesYouSteps: string[];
   /** Reader link for the plan page. */
   wikiUrl: string;
   /** Repo family, `"unknown"` when it could not be named. */
@@ -528,11 +532,27 @@ export interface BoardFilters {
   priority: PlanPriority | "unset" | null;
   /** Free text over title, slug and tags. */
   query: string;
+  /** Waiting on you: only cards with a `you`-lane step. Cuts across every
+   *  column — while it is on the board renders all of them (`effectiveScope`),
+   *  since a plan can wait on the reader in any status. */
+  waiting: boolean;
 }
 
-export const EMPTY_FILTERS: BoardFilters = { families: [], priority: null, query: "" };
+export const EMPTY_FILTERS: BoardFilters = { families: [], priority: null, query: "", waiting: false };
+
+/** The scope the board RENDERS: `all` while the Waiting on you toggle is on (a
+ *  shipped plan can still wait on the reader), else the chosen scope. */
+export function effectiveScope(view: { scope: BoardScope; filters: BoardFilters }): BoardScope {
+  return view.filters.waiting ? "all" : view.scope;
+}
+
+/** The Waiting on you toggle's count: every card with a `you`-lane step. */
+export function waitingCardCount(cards: readonly { movesYou: number }[]): number {
+  return cards.filter((c) => c.movesYou > 0).length;
+}
 
 export function cardMatches(card: EffectiveCard, filters: BoardFilters): boolean {
+  if (filters.waiting && !(card.movesYou > 0)) return false;
   if (filters.families.length > 0 && !filters.families.includes(card.family)) return false;
   if (filters.priority === "unset") {
     if (card.effectivePriority !== null) return false;
@@ -589,6 +609,7 @@ export function viewStateToQuery(view: BoardViewState): string {
   if (view.filters.priority) p.set("pri", view.filters.priority);
   const q = view.filters.query.trim();
   if (q) p.set("q", q);
+  if (view.filters.waiting) p.set("waiting", "1");
   const s = p.toString();
   return s ? `?${s}` : "";
 }
@@ -615,6 +636,7 @@ export function viewStateFromQuery(search: string): BoardViewState {
       // would seed a search box whose value no longer matches the URL that
       // produced it.
       query: (p.get("q") ?? "").trim(),
+      waiting: p.get("waiting") === "1",
     },
   };
 }

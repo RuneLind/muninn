@@ -10,6 +10,8 @@ import {
   parseResolvedDate,
   historicLeadText,
   resolvedLeadText,
+  laneFromAttrs,
+  laneLeadText,
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
@@ -130,6 +132,12 @@ const slackRenderer: BlockRenderer = {
       }
       case "Historic":
         return `${renderInline(historicLeadText(attrs))}\n${children}`;
+      // No grid in mrkdwn: each lane is a bold label line (+ " — since <date>")
+      // over its items, the block itself only their sequence.
+      case "NextMoves":
+        return children;
+      case "Lane":
+        return `${laneLeadText(laneFromAttrs(attrs, rawChildren), (l) => `*${renderInline(l)}*`)}\n${children}`;
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.

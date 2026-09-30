@@ -1041,6 +1041,93 @@ describe("Historic — dimmed and stamped on the web, a lead line elsewhere", ()
     expect(formatSlackMrkdwn("<Historic>\n\nbody\n\n</Historic>").startsWith("(historic)\n")).toBe(true));
 });
 
+describe("NextMoves — a lane grid on the web, a label line per lane elsewhere", () => {
+  const md = [
+    "<NextMoves>",
+    "",
+    '<Lane kind="you" who="Du">',
+    "",
+    "1. **Send it.** Blocks Å3.",
+    "   - nested",
+    "2. Create task",
+    "",
+    "</Lane>",
+    "",
+    '<Lane kind="waiting" who="Venter <på> fag" since="2026-09-30">',
+    "",
+    "- Å1",
+    "",
+    "</Lane>",
+    "",
+    '<Lane kind="someday">',
+    "",
+    "- q",
+    "",
+    "</Lane>",
+    "",
+    "</NextMoves>",
+  ].join("\n");
+
+  test("web → one lane card per Lane, count from top-level items, date kept for the client", () => {
+    const out = formatWebHtml(md);
+    expect(out).toContain('<section class="next-moves"><div class="nm-grid">');
+    expect(out).toContain(
+      '<div class="nm-lane nm-you" data-kind="you" data-count="2"><div class="nm-head"><span class="nm-who">Du</span><span class="nm-count">2</span></div>',
+    );
+    // Nested items render inside their step and do not count.
+    expect(out).toContain("<ol><li><strong>Send it.</strong> Blocks Å3.<ul><li>nested</li></ul></li><li>Create task</li></ol>");
+    expect(out).toContain(
+      'data-kind="waiting" data-count="1" data-since="2026-09-30"><div class="nm-head"><span class="nm-who">Venter &lt;på&gt; fag</span>',
+    );
+    expect(out).toContain('<span class="nm-since" data-since="2026-09-30">2026-09-30</span>');
+    // Unknown kind ⇒ waiting plus a marker class, default English label.
+    expect(out).toContain('class="nm-lane nm-waiting nm-kind-unknown" data-kind="waiting" data-count="1"');
+    expect(out).toContain('<span class="nm-who">Waiting</span>');
+    expect(out).not.toContain("&lt;Lane");
+  });
+
+  test("web → a bad since is dropped, never rendered as a date", () => {
+    const out = formatWebHtml('<NextMoves>\n\n<Lane kind="draft" since="2026-02-31">\n\n- x\n\n</Lane>\n\n</NextMoves>');
+    expect(out).not.toContain("data-since");
+    expect(out).toContain('<span class="nm-who">Draft, not sent</span>');
+  });
+
+  test("web → no lanes ⇒ the body plain; a stray Lane ⇒ a label paragraph, no card", () => {
+    expect(formatWebHtml("<NextMoves>\n\n- a\n\n</NextMoves>")).not.toContain("next-moves");
+    const stray = formatWebHtml('<Lane kind="you" since="2026-09-30">\n\n- a\n\n</Lane>');
+    expect(stray).toContain("<p><strong>You — since 2026-09-30</strong></p>");
+    expect(stray).not.toContain("nm-lane");
+  });
+
+  test("web → Fold > NextMoves > Lane renders (depth 3)", () => {
+    const out = formatWebHtml(`<Fold title="F">\n\n${md}\n\n</Fold>`);
+    expect(out).toContain('<details class="fold">');
+    expect(out).toContain('class="nm-lane nm-you"');
+  });
+
+  test("telegram → bold label line (+ since) over the items", () => {
+    const out = formatTelegramHtml(md);
+    expect(out).toContain("<b>Du</b>\n");
+    expect(out).toContain("<b>Venter &lt;på&gt; fag</b> — since 2026-09-30\n");
+    expect(out).toContain("<b>Waiting</b>\n");
+    expect(out.indexOf("<b>Du</b>")).toBeLessThan(out.indexOf("Send it."));
+  });
+
+  test("slack → bold label line (+ since) over the items", () => {
+    const out = formatSlackMrkdwn(md);
+    expect(out.startsWith("*Du*\n")).toBe(true);
+    expect(out).toContain("— since 2026-09-30\n");
+    expect(out).toContain("*Waiting*\n");
+  });
+
+  test("email → bold label line (+ since) over the items", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain(">Du</div>");
+    expect(out).toContain(">Venter &lt;på&gt; fag — since 2026-09-30</div>");
+    expect(out.indexOf(">Du</div>")).toBeLessThan(out.indexOf("Send it."));
+  });
+});
+
 describe("FactCheck appendix renders collapsed, with per-claim sections", () => {
   const md =
     '<FactCheck date="2026-07-29" ok="3" warn="1" bad="2">\n### ✅ Claim 1/3 — the weight\n\nEvidence line.\n</FactCheck>';

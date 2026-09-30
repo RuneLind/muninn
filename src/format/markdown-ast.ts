@@ -97,6 +97,8 @@ export const COMPONENT_NAMES = [
   "Embed",
   "Fold",
   "Historic",
+  "NextMoves",
+  "Lane",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -152,6 +154,12 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // superseded them (free text, e.g. `melosys-console#270`), `note` says how.
   // Wiki-only: not in `COMPONENT_VOCABULARY_RULES`.
   Historic: ["since", "note"],
+  // Who has the next move: a `NextMoves` block holding `Lane` blocks, each a
+  // markdown list. `kind` is you | waiting | draft | blocked (see
+  // `normalizeLaneKind`), `who` the lane's label, `since` a `YYYY-MM-DD` the
+  // reader ages client-side. Wiki-only, like `Historic`.
+  NextMoves: [],
+  Lane: ["kind", "who", "since"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -277,6 +285,81 @@ export function historicLeadText(attrs: Record<string, string>): string {
   const since = attrs.since?.trim();
   const note = attrs.note?.trim();
   return `(historic${since ? `: ${since}` : ""}${note ? ` — ${note}` : ""})`;
+}
+
+// ── NextMoves / Lane ────────────────────────────────────────────────────────
+
+export const LANE_KINDS = ["you", "waiting", "draft", "blocked"] as const;
+export type LaneKind = (typeof LANE_KINDS)[number];
+
+/** The label a lane shows when it carries no `who`. English: `who` is where the
+ *  page's own language goes. */
+export const LANE_DEFAULT_LABEL: Record<LaneKind, string> = {
+  you: "You",
+  waiting: "Waiting",
+  draft: "Draft, not sent",
+  blocked: "Blocked",
+};
+
+/** A `Lane kind=` value. An unknown or missing kind reads as `waiting` (the move
+ *  is someone else's until the page says it is yours); `known: false` lets the
+ *  web renderer mark it. */
+export function normalizeLaneKind(kind: string | undefined): { kind: LaneKind; known: boolean } {
+  const k = kind?.trim().toLowerCase() ?? "";
+  return (LANE_KINDS as readonly string[]).includes(k)
+    ? { kind: k as LaneKind, known: true }
+    : { kind: "waiting", known: false };
+}
+
+/** One lane of a `NextMoves` block, as every surface reads it. */
+export interface NextMovesLane {
+  kind: LaneKind;
+  /** False when the source `kind` was unknown or missing (read as `waiting`). */
+  known: boolean;
+  /** `who`, trimmed, else the kind's default label. Unescaped. */
+  label: string;
+  /** A strict `YYYY-MM-DD` calendar day, or null (any other value is ignored). */
+  since: string | null;
+  /** Each TOP-LEVEL list item's text, in source order across every list in the
+   *  lane. A lane with prose and no list counts as one item: its first line. */
+  items: string[];
+  children: Block[];
+}
+
+export function laneFromAttrs(attrs: Record<string, string>, children: Block[]): NextMovesLane {
+  const { kind, known } = normalizeLaneKind(attrs.kind);
+  const items: string[] = [];
+  for (const b of children) if (b.type === "ul" || b.type === "ol") items.push(...b.items);
+  if (items.length === 0) {
+    for (const b of children) {
+      const line = b.type === "text" ? b.lines.find((l) => l.trim() !== "") : undefined;
+      if (line) {
+        items.push(line.trim());
+        break;
+      }
+    }
+  }
+  const label = attrs.who?.trim() || LANE_DEFAULT_LABEL[kind];
+  return { kind, known, label, since: parseResolvedDate(attrs.since), items, children };
+}
+
+/** The `Lane` blocks directly inside a `NextMoves` body, in source order. */
+export function nextMovesLanes(children: Block[]): NextMovesLane[] {
+  const out: NextMovesLane[] = [];
+  for (const b of children) {
+    if (b.type === "component" && b.name === "Lane") out.push(laneFromAttrs(b.attrs, b.children));
+  }
+  return out;
+}
+
+/** `<label> — since <date>`: a lane's lead line on the surfaces with no grid
+ *  (Slack, Telegram, email, a stray `Lane` on the web). `formatLabel` gets the
+ *  label and returns it escaped/styled for the target; the date is digits. */
+export function laneLeadText(
+  lane: Pick<NextMovesLane, "label" | "since">,
+  formatLabel: (label: string) => string = (l) => l,
+): string {
+  return `${formatLabel(lane.label)}${lane.since ? ` — since ${lane.since}` : ""}`;
 }
 
 /** Normalize an untrusted `tone` attr for Pill. */

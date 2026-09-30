@@ -192,6 +192,12 @@ export const E2E_PORTS = {
   // Report blocks: Fold summary=, Callout resolved=, Historic and line-ref
   // chips over one temp wiki.
   "wiki-report-blocks": 3094,
+  // NextMoves: the lane grid, the header pills and the lane ages over a temp
+  // wiki registered as `mimir`, so the same process serves the /plans board's
+  // Waiting on you toggle and the /wiki ✋ chip.
+  "wiki-next-moves": 3095,
+  // Not bound: the spec's dead claude-usage, so the board renders no money.
+  "wiki-next-moves/dead-ledger": 8794,
   // The gardener strip's error note: one muninn over a throwaway bot with a
   // seeded wiki-gardener watcher; the verb POSTs reach it unmodified or with
   // their content type stripped.

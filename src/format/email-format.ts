@@ -33,6 +33,8 @@ import {
   parseResolvedDate,
   historicLeadText,
   resolvedLeadText,
+  laneFromAttrs,
+  laneLeadText,
 } from "./markdown-ast.ts";
 import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
 import { renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
@@ -296,6 +298,16 @@ const emailRenderer: BlockRenderer = {
           `<div style="margin:0 0 12px;">` +
           `<div style="${S.dim}font-style:italic;margin:0 0 6px;">${escapeHtml(historicLeadText(attrs))}</div>` +
           `${children}</div>`
+        );
+      // No grid in mail: each lane is a bold label line (+ " — since <date>")
+      // over its items, the block itself only their sequence.
+      case "NextMoves":
+        return `<div style="margin:0 0 12px;">${children}</div>`;
+      case "Lane":
+        return (
+          `<div style="margin:0 0 12px;">` +
+          `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">` +
+          `${escapeHtml(laneLeadText(laneFromAttrs(attrs, rawChildren)))}</div>${children}</div>`
         );
       case "FactCheck":
         // No <details> in mail — the appendix renders open, under its summary line.

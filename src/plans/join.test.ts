@@ -11,6 +11,8 @@ function rec(slug: string): PlanRecord {
     statusDate: undefined,
     statusNote: undefined,
     followupsOpen: false,
+    movesYou: 0,
+    movesYouSteps: [],
     priority: undefined,
     tags: [],
     relPath: `plans/${slug}.md`,
