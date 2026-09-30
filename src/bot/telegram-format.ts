@@ -36,7 +36,9 @@ function checklistText(rows: ChecklistRow[], ordered = false, start = 1, values?
   const children = rows.map((r) => r.children?.map((c: ChecklistChild) =>
     c.type === "code_block"
       ? { kind: "code" as const, out: telegramRenderer.code_block(c) }
-      : { kind: "list" as const, out: checklistText(c.rows, c.ordered, c.start, c.values) },
+      : c.type === "paragraph"
+        ? { kind: "para" as const, text: c.text }
+        : { kind: "list" as const, out: checklistText(c.rows, c.ordered, c.start, c.values) },
   ));
   return textListItems(markers, rows.map((r) => r.text), { children, depth: 0, loose: false }, renderInline);
 }

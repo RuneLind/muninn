@@ -17,7 +17,7 @@ import {
   parseChecklist,
 } from "../format/markdown-ast.ts";
 import type { Block, ChecklistRow, FactVerdict } from "../format/markdown-ast.ts";
-import { renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
+import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
@@ -194,8 +194,10 @@ function liValue(values: (number | undefined)[] | undefined, k: number): string 
   return v === undefined ? "" : ` value="${v}"`;
 }
 
+/** What sits under an item: child lists and code as rendered, a further
+ *  paragraph of the item as a `<p>` inside the `<li>`. */
 function childrenHtml(children: RenderedChild[] | undefined): string {
-  return children?.map((c) => c.out).join("") ?? "";
+  return children?.map((c) => (c.kind === "para" ? `<p>${itemHtml(c.text)}</p>` : c.out)).join("") ?? "";
 }
 
 /** Checklist rows as `<ul class="checklist">`, a nested list inside its parent
@@ -204,17 +206,27 @@ function childrenHtml(children: RenderedChild[] | undefined): string {
  *  instead of reaching the rows under it. A nested row with no task marker is a
  *  plain `check-plain` item, and a nested ordered list keeps its numbers. */
 function checklistHtml(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[]): string {
+  // A task row is a flex box, not a list item, so it does not advance an <ol>'s
+  // counter: in an ordered sublist every row carries its number as `value`.
+  const nums = ordered ? ordinals(start, rows.length, values) : undefined;
   const lis = rows
     .map((it, k) => {
       const nested = (it.children ?? [])
-        .map((c) => (c.type === "code_block" ? codeFenceHtml(c.lang, c.code) : checklistHtml(c.rows, c.ordered, c.start, c.values)))
+        .map((c) =>
+          c.type === "code_block"
+            ? codeFenceHtml(c.lang, c.code)
+            : c.type === "paragraph"
+              ? `<p>${itemHtml(c.text)}</p>`
+              : checklistHtml(c.rows, c.ordered, c.start, c.values),
+        )
         .join("");
-      if (it.plain) return `<li class="check-plain"${liValue(values, k)}>${itemHtml(it.text)}${nested}</li>`;
+      const value = nums ? ` value="${nums[k]}"` : "";
+      if (it.plain) return `<li class="check-plain"${value}>${itemHtml(it.text)}${nested}</li>`;
       const state = it.checked ? "done" : "todo";
       const mark = it.checked ? "✓" : "✗";
       const text = nested ? `<span class="check-text">${itemHtml(it.text)}</span>` : itemHtml(it.text);
       return (
-        `<li class="check-item check-${state}${nested ? " check-parent" : ""}">` +
+        `<li class="check-item check-${state}${nested ? " check-parent" : ""}"${value}>` +
         `<span class="check-mark">${mark}</span> ${text}${nested}</li>`
       );
     })

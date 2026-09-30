@@ -36,8 +36,8 @@ export interface CodeBlock {
 /**
  * A list. `items[k]` is one item's text; a continuation line joins it after a
  * `\n`. `nested[k]` holds what sits under `items[k]` in source order: child
- * lists (one per run of a marker kind, so `- b` then `1. c` is two) and fenced
- * code. Absent when no item has any. `loose` is set when a blank line separated
+ * lists (one per run of a marker kind, so `- b` then `1. c` is two), fenced
+ * code, and further paragraphs of the item. Absent when no item has any. `loose` is set when a blank line separated
  * two items, or an item from its nested content; the text platforms then keep a
  * blank line between items.
  */
@@ -61,7 +61,14 @@ export interface OlBlock {
   loose?: true;
 }
 export type ListBlock = UlBlock | OlBlock;
-export type ListChild = ListBlock | CodeBlock;
+/** A further paragraph of a list item: a non-item line indented to the item's
+ *  content column after a blank line or a fence in the item. `text` joins its
+ *  lines with `\n`, as an item's text does. */
+export interface ListParagraph {
+  type: "paragraph";
+  text: string;
+}
+export type ListChild = ListBlock | CodeBlock | ListParagraph;
 
 // ── Component blocks ────────────────────────────────────────────────────────
 // A small, whitelisted vocabulary of presentational block components shared with
@@ -618,7 +625,7 @@ export interface ChecklistList {
   values?: (number | undefined)[];
   rows: ChecklistRow[];
 }
-export type ChecklistChild = ChecklistList | CodeBlock;
+export type ChecklistChild = ChecklistList | CodeBlock | ListParagraph;
 
 /** Extract a Checklist's rows from its raw children — the first `ul` block's
  *  items, each parsed for its task marker, with nested lists and code as
@@ -636,7 +643,7 @@ function checklistRows(list: ListBlock, top: boolean): ChecklistRow[] {
     const nested = list.nested?.[k];
     if (nested?.length) {
       row.children = nested.map((c): ChecklistChild =>
-        c.type === "code_block"
+        c.type === "code_block" || c.type === "paragraph"
           ? c
           : {
               type: "checklist",
@@ -856,9 +863,11 @@ function matchListLine(line: string): ListLine | null {
   };
 }
 
-/** Whether a list opening directly under a line of text may start here —
- *  CommonMark's paragraph-interruption rule: a `-`/`*` bullet, or an ordered
- *  list starting at 1. */
+/** Whether a CHILD list may open directly under an item's text — CommonMark's
+ *  paragraph-interruption rule: a `-`/`*` bullet, or an ordered list starting
+ *  at 1. A top-level list needs no such rule here: an indented opener under a
+ *  line of prose is refused by the block-start rule in {@link parseList}, and a
+ *  column-0 one opens a list whatever its number. */
 function canInterrupt(line: ListLine): boolean {
   return line.kind === "ul" ? line.marker !== "+" : parseInt(line.marker, 10) === 1;
 }
@@ -909,36 +918,37 @@ type ListStep =
   | { kind: "item"; level: number; line: ListLine }
   | { kind: "sublist"; level: number; line: ListLine }
   | { kind: "text"; text: string }
+  | { kind: "para"; level: number; text: string }
   | { kind: "code"; level: number; code: CodeBlock };
 
 /**
  * A list starting at `lines[i]`, or null when the line does not open one.
  *
- * Opening (see `parseBlocksInner` for `atBlockStart`/`afterProse`): a `-`, `*`
- * or `N.` item indented at most 3 spaces (`+` never opens a top-level list). An
- * INDENTED one opens only at a block start — so an indented block under a line
- * of text (unfenced YAML, a wrapped line) stays text — and directly under a
- * line of prose only a bullet or `1.` opens one.
+ * Opening (see `parseBlocksInner` for `atBlockStart`): a `-`, `*` or `N.` item
+ * indented at most 3 spaces (`+` never opens a top-level list). An INDENTED one
+ * opens only at a block start — so an indented block under a line of text
+ * (unfenced YAML, a wrapped `   2024.` line) stays text. A column-0 item opens a
+ * list under prose too, whatever its number: `**Label**` then `4. …` is a list.
  *
  * Inside the list, each line is placed by {@link listStep}: nested items,
- * continuation text, fenced code in an item, and — across a run of blank lines —
- * whatever the next non-blank line continues. Anything else ends the list, the
- * blank lines before it staying outside.
+ * continuation text, fenced code and further paragraphs in an item, and —
+ * across a run of blank lines — whatever the next non-blank line continues.
+ * Anything else ends the list, the blank lines before it staying outside.
  */
 function parseList(
   lines: string[],
   i: number,
   store: FenceStore,
   atBlockStart: boolean,
-  afterProse: boolean,
 ): { block: ListBlock; next: number } | null {
   const first = matchListLine(lines[i]!);
   if (!first || first.indent > 3 || first.marker === "+") return null;
   if (first.indent > 0 && !atBlockStart) return null;
-  if (afterProse && !canInterrupt(first)) return null;
   const stack: ListLevel[] = [openLevel(first)];
   const root = stack[0]!.block;
   let afterCode = false;
+  /** The item paragraph the last line went into, which a lazy line continues. */
+  let para: ListParagraph | undefined;
   /** The level whose item line was the last line consumed, if it was one. */
   let lastItemAt: ListLevel | undefined = stack[0];
   let j = i + 1;
@@ -950,14 +960,21 @@ function parseList(
     const step = listStep(lines[k]!, stack, store, afterBlank, afterCode);
     if (!step) break;
     // A blank line between two items, or between an item and what it holds,
-    // makes the list holding that item loose. (Text never follows a blank.)
+    // makes the list holding that item loose. (After a blank, a non-item line is
+    // a paragraph step, never a text step.)
     if (afterBlank && step.kind !== "text") {
-      const at = step.kind === "item" ? step.level : step.kind === "child" ? stack.length - 1 : step.level - 1;
+      const at =
+        step.kind === "item" || step.kind === "para"
+          ? step.level
+          : step.kind === "child"
+            ? stack.length - 1
+            : step.level - 1;
       stack[at]!.block.loose = true;
     }
-    applyListStep(step, stack, afterBlank ? undefined : lastItemAt);
+    if (step.kind === "text" && para) para.text += "\n" + step.text;
+    else para = applyListStep(step, stack, afterBlank ? undefined : lastItemAt);
     afterCode = step.kind === "code";
-    lastItemAt = step.kind === "text" || step.kind === "code" ? undefined : stack[stack.length - 1];
+    lastItemAt = step.kind === "text" || step.kind === "code" || step.kind === "para" ? undefined : stack[stack.length - 1];
     j = k + 1;
   }
   return { block: root, next: j };
@@ -974,8 +991,11 @@ function parseList(
  *    same kind is the next item; the other kind starts a new sublist under the
  *    same parent item (at the top level it ends the list).
  *  - A non-item line directly under item text, indented into the top-level
- *    item, is continuation text of the deepest item. After a blank line or a
- *    fence it ends the list.
+ *    item, is continuation text of the deepest item (or of the item paragraph
+ *    it follows).
+ *  - After a blank line or a fence, a non-item line indented to an open item's
+ *    content column is a new paragraph of the deepest such item; the list goes
+ *    on after it. Less indented, it ends the list.
  *  - A fence placeholder whose opener was indented into an item is code in the
  *    deepest item it fits (openers indent at most 3, so in practice a
  *    top-level item).
@@ -1013,8 +1033,18 @@ function listStep(
     return level > 0 ? { kind: "sublist", level, line } : null;
   }
 
-  if (afterBlank || afterCode || MARKER_BREAK_RE.test(raw) || isIndentedBlockLine(raw)) return null;
-  if (lineIndent(raw) < childIndent(stack[0]!)) return null;
+  if (MARKER_BREAK_RE.test(raw) || isIndentedBlockLine(raw)) return null;
+  const indent = lineIndent(raw);
+  if (afterBlank || afterCode) {
+    for (let level = stack.length - 1; level >= 0; level--) {
+      const last = stack[level]!.last;
+      if (indent >= last.contentCol) {
+        return { kind: "para", level, text: " ".repeat(indent - last.contentCol) + raw.trim() };
+      }
+    }
+    return null;
+  }
+  if (indent < childIndent(stack[0]!)) return null;
   return { kind: "text", text: continuationText(raw, top) };
 }
 
@@ -1025,10 +1055,15 @@ function continuationText(raw: string, top: ListLevel): string {
   return " ".repeat(extra) + raw.trim();
 }
 
-/** Apply one step. `prevItemAt` is the level whose item line directly
- *  precedes this line, if any: an ordered item that does not directly follow
- *  its previous sibling keeps its source number when that differs. */
-function applyListStep(step: ListStep, stack: ListLevel[], prevItemAt: ListLevel | undefined): void {
+/** Apply one step, returning the item paragraph it opened, if any.
+ *  `prevItemAt` is the level whose item line directly precedes this line, if
+ *  any: an ordered item that does not directly follow its previous sibling
+ *  keeps its source number when that differs. */
+function applyListStep(
+  step: ListStep,
+  stack: ListLevel[],
+  prevItemAt: ListLevel | undefined,
+): ListParagraph | undefined {
   switch (step.kind) {
     case "child": {
       const level = openLevel(step.line);
@@ -1063,6 +1098,12 @@ function applyListStep(step: ListStep, stack: ListLevel[], prevItemAt: ListLevel
       const items = stack[stack.length - 1]!.block.items;
       items[items.length - 1] += "\n" + step.text;
       return;
+    }
+    case "para": {
+      stack.length = step.level + 1;
+      const para: ListParagraph = { type: "paragraph", text: step.text };
+      nestUnder(stack[step.level]!, para);
+      return para;
     }
     case "code": {
       stack.length = step.level;
@@ -1328,10 +1369,7 @@ function parseBlocksInner(
     const prev = i > 0 ? lines[i - 1]! : "";
     const atBlockStart =
       i === 0 || prev.trim() === "" || CODE_PLACEHOLDER_RE.test(prev) || HEADING_RE.test(prev);
-    // A line of prose, not an orphaned indented item that stayed text: after
-    // one of those, `2. c` still continues the numbering it continued before.
-    const afterProse = textBuffer.length > 0 && prev.trim() !== "" && !matchListLine(prev);
-    const list = parseList(lines, i, store, atBlockStart, afterProse);
+    const list = parseList(lines, i, store, atBlockStart);
     if (list) {
       flushText();
       blocks.push(list.block);

@@ -1085,3 +1085,94 @@ describe("nested lists in the AST", () => {
     ]);
   });
 });
+
+describe("nested lists in the AST: fix round 2", () => {
+  test("a paragraph after a blank line is a paragraph child of the item, and the list is loose", () => {
+    expect(parseBlocks("- a\n\n  p1\n  p2\n- b")).toEqual([
+      { type: "ul", items: ["a", "b"], loose: true, nested: [[{ type: "paragraph", text: "p1\np2" }]] },
+    ]);
+  });
+
+  test("an ordered item's paragraph starts at its content column; the numbering counts on after it", () => {
+    expect(parseBlocks("1. a\n2. b\n\n   more\n3. c")).toEqual([
+      { type: "ol", items: ["a", "b", "c"], start: 1, loose: true, nested: [undefined, [{ type: "paragraph", text: "more" }]] },
+    ]);
+  });
+
+  test("an item after a paragraph keeps a source number that does not count on", () => {
+    expect(parseBlocks("1. a\n\n   more\n5. b")).toEqual([
+      { type: "ol", items: ["a", "b"], start: 1, loose: true, values: [undefined, 5], nested: [[{ type: "paragraph", text: "more" }]] },
+    ]);
+  });
+
+  test("a list after a parent's paragraph is a new child list, not more of the list above the paragraph", () => {
+    expect(parseBlocks("- a\n  - b\n\n  more\n  - c")).toEqual([
+      {
+        type: "ul",
+        items: ["a"],
+        loose: true,
+        nested: [[{ type: "ul", items: ["b"] }, { type: "paragraph", text: "more" }, { type: "ul", items: ["c"] }]],
+      },
+    ]);
+  });
+
+  test("a paragraph line indented past the content column keeps the extra indent", () => {
+    expect(parseBlocks("- a\n\n    deeper")).toEqual([
+      { type: "ul", items: ["a"], loose: true, nested: [[{ type: "paragraph", text: "  deeper" }]] },
+    ]);
+  });
+
+  test("a line indented less than the item's content column after a blank line ends the list", () => {
+    expect(parseBlocks("1. a\n\n  b")[0]).toEqual({ type: "ol", items: ["a"], start: 1 });
+  });
+
+  test("a fence indented 4+ spaces under a nested item is not a fence: its lines are a paragraph of the item", () => {
+    // Declared limitation: fence openers indent at most 3 spaces (CommonMark
+    // measures from the item's content column; this parser from column 0).
+    expect(parseBlocks("- a\n  - b\n\n    ```\n    x\n    ```")).toEqual([
+      {
+        type: "ul",
+        items: ["a"],
+        nested: [[{ type: "ul", items: ["b"], loose: true, nested: [[{ type: "paragraph", text: "```\nx\n```" }]] }]],
+      },
+    ]);
+  });
+
+  test("an indented list opens directly under a heading", () => {
+    expect(parseBlocks("# Title\n  - a")).toEqual([
+      { type: "heading", level: 1, content: "Title" },
+      { type: "ul", items: ["a"] },
+    ]);
+  });
+
+  test("an indented list opens directly under a fenced block", () => {
+    expect(parseBlocks("```\nx\n```\n  - a")).toEqual([
+      { type: "code_block", lang: "", code: "x" },
+      { type: "ul", items: ["a"] },
+    ]);
+  });
+
+  test("a closing tag indented like a continuation ends the list", () => {
+    expect(parseBlocks("- a\n  </Foo>")).toEqual([
+      { type: "ul", items: ["a"] },
+      { type: "text", lines: ["  </Foo>"] },
+    ]);
+  });
+
+  test("a column-0 `+` line after a `-` item is not the next item", () => {
+    expect(parseBlocks("- a\n+ b")).toEqual([
+      { type: "ul", items: ["a"] },
+      { type: "text", lines: ["+ b"] },
+    ]);
+  });
+
+  test("a `* * *` indented 4 spaces is text, not a rule", () => {
+    expect(parseBlocks("    * * *")).toEqual([{ type: "text", lines: ["    * * *"] }]);
+  });
+
+  test("a lazy line indented into the top-level item continues the deepest item", () => {
+    expect(parseBlocks("- a\n  - b\n  lazy")).toEqual([
+      { type: "ul", items: ["a"], nested: [[{ type: "ul", items: ["b\nlazy"] }]] },
+    ]);
+  });
+});

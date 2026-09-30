@@ -1,11 +1,9 @@
 import type { Block, ComponentName, InlineComponentName, ListBlock } from "./markdown-ast.ts";
 
-/** What sits under one list item, already rendered by the same renderer: a
- *  child list one `depth` deeper, or a fenced code block. */
-export interface RenderedChild {
-  kind: "list" | "code";
-  out: string;
-}
+/** What sits under one list item: a child list one `depth` deeper or a fenced
+ *  code block, already rendered by the same renderer, or a further paragraph of
+ *  the item as raw text, which each platform lays out itself. */
+export type RenderedChild = { kind: "list" | "code"; out: string } | { kind: "para"; text: string };
 
 /** A list's nesting, handed to `ul`/`ol` beside its items. `children[k]` is
  *  what sits under `items[k]`, in source order; `depth` is 0 for a top-level
@@ -114,7 +112,9 @@ function renderList(list: ListBlock, r: BlockRenderer, depth: number): string {
       list.nested?.[k]?.map((c): RenderedChild =>
         c.type === "code_block"
           ? { kind: "code", out: r.code_block(c) }
-          : { kind: "list", out: renderList(c, r, depth + 1) },
+          : c.type === "paragraph"
+            ? { kind: "para", text: c.text }
+            : { kind: "list", out: renderList(c, r, depth + 1) },
       ),
     ),
     depth,
@@ -127,24 +127,30 @@ function renderList(list: ListBlock, r: BlockRenderer, depth: number): string {
 /**
  * List items as plain-text lines — the Telegram/Slack rendering, which have no
  * list markup. Each item is `marker text`, a continuation line hanging under the
- * text, and a child list indented two spaces; code is not indented (the fence
- * or `<pre>` would carry the spaces into the code). A loose list keeps a blank
- * line between items.
+ * text, a further paragraph after a blank line at the same hanging indent, and
+ * a child list indented two spaces; code is not indented (the fence or `<pre>`
+ * would carry the spaces into the code). A loose list keeps a blank line
+ * between items. With `blankEmpty`, an item with no text renders no marker line
+ * (Slack's rule for a bare `- `), its children still following.
  */
 export function textListItems(
   markers: string[],
   items: string[],
   nest: ListNest,
   inline: (s: string) => string,
+  blankEmpty = false,
 ): string {
   return items
     .map((item, k) => {
       const marker = markers[k]!;
       const hang = " ".repeat(marker.length + 1);
       const [head, ...rest] = item.split("\n");
-      let out = `${marker} ${inline(head!)}`;
+      let out = blankEmpty && item.trim() === "" ? "" : `${marker} ${inline(head!)}`;
       for (const line of rest) out += `\n${hang}${inline(line)}`;
-      for (const c of nest.children[k] ?? []) out += "\n" + (c.kind === "list" ? c.out.replace(/^(?=.)/gm, "  ") : c.out);
+      for (const c of nest.children[k] ?? []) {
+        if (c.kind === "para") out += "\n\n" + c.text.split("\n").map((l) => hang + inline(l)).join("\n");
+        else out += "\n" + (c.kind === "list" ? c.out.replace(/^(?=.)/gm, "  ") : c.out);
+      }
       return out;
     })
     .join(nest.loose ? "\n\n" : "\n");

@@ -1462,7 +1462,7 @@ listCases("continuation lines and what may open a list", [
   },
 ]);
 
-describe("an indented list or a non-1 number under a line of prose stays text", () => {
+describe("an indented list under a line of prose stays text", () => {
   const same = (md: string) => {
     expect(formatWebHtml(md)).toBe(md);
     expect(formatTelegramHtml(md)).toBe(md);
@@ -1470,8 +1470,8 @@ describe("an indented list or a non-1 number under a line of prose stays text", 
   };
   test("unfenced YAML", () => same("config:\n  - name: foo\n    value: bar\n  - name: baz"));
   test("an indented `2024.` under prose", () => same("Price rose in\n   2024. That was big."));
-  test("a column-0 `2024.` under prose", () => same("Price rose in\n2024. That was big."));
 });
+
 
 // R3: Checklist children.
 describe("a Checklist with nested rows", () => {
@@ -1483,7 +1483,7 @@ describe("a Checklist with nested rows", () => {
         '<li class="check-item check-todo check-parent"><span class="check-mark">✗</span> <span class="check-text">a</span>' +
         '<ul class="checklist"><li class="check-item check-done"><span class="check-mark">✓</span> b</li>' +
         '<li class="check-plain">plain</li></ul>' +
-        '<ol class="checklist check-ol"><li class="check-plain">first</li><li class="check-plain">second</li></ol></li>' +
+        '<ol class="checklist check-ol"><li class="check-plain" value="1">first</li><li class="check-plain" value="2">second</li></ol></li>' +
         '<li class="check-item check-done"><span class="check-mark">✓</span> c</li>' +
         "</ul>",
     ));
@@ -1620,6 +1620,99 @@ describe("unchanged: shapes that are not nested lists", () => {
   test("`***` stays text", () => expect(formatWebHtml("***")).toBe("***"));
   test("an indented table under an item is still a table", () =>
     expect(formatWebHtml("- a\n  | x | y |\n  |---|---|\n  | 1 | 2 |")).toContain("<table>"));
-  test("a paragraph after a blank line still ends the list", () =>
-    expect(formatWebHtml("- a\n\n  para\n- b")).toBe("<ul><li>a</li></ul>\n  para\n<ul><li>b</li></ul>"));
+  test("a paragraph after a blank line, indented less than the item's content, still ends the list", () =>
+    expect(formatWebHtml("- a\n\n para\n- b")).toBe("<ul><li>a</li></ul>\n para\n<ul><li>b</li></ul>"));
+});
+
+// Fix round 2 (D1a): after a blank line or a fence in an item, a non-item line
+// indented to the item's content column is a further paragraph of THAT item,
+// and the list goes on after it. Before, it ended the list and the next item
+// (`3. third`) followed a line of prose, where it stayed literal text.
+listCases("item paragraphs", [
+  {
+    name: "a paragraph after a blank line stays in its item; the next items and their children follow",
+    md: "1. first\n2. second\n\n   more about second.\n3. third\n   - nested\n4. fourth",
+    web: "<ol><li>first</li><li>second<p>more about second.</p></li><li>third<ul><li>nested</li></ul></li><li>fourth</li></ol>",
+    text: "1. first\n\n2. second\n\n   more about second.\n\n3. third\n  ◦ nested\n\n4. fourth",
+    email: "<ol><li>first</li><li>secondmore about second.</li><li>third<ul><li>nested</li></ul></li><li>fourth</li></ol>",
+  },
+  {
+    name: "a paragraph after a nested list belongs to the parent item it is indented into",
+    md: "- a\n  - b\n\n  more about a\n- c",
+    web: "<ul><li>a<ul><li>b</li></ul><p>more about a</p></li><li>c</li></ul>",
+    text: "- a\n  ◦ b\n\n  more about a\n\n- c",
+    email: "<ul><li>a<ul><li>b</li></ul>more about a</li><li>c</li></ul>",
+  },
+  {
+    name: "a line directly under an item paragraph continues the paragraph",
+    md: "- a\n\n  p1\n  p2\n- b",
+    web: "<ul><li>a<p>p1\np2</p></li><li>b</li></ul>",
+    text: "- a\n\n  p1\n  p2\n\n- b",
+    email: "<ul><li>ap1<br>p2</li><li>b</li></ul>",
+  },
+]);
+
+describe("item paragraphs: a fence in the item, then text (the chat shape)", () => {
+  const md = "1. Step one:\n   ```bash\n   cmd\n   ```\n   Then check output.\n2. Step two\n3. Step three";
+  test("web: the text is a paragraph of item 1, and there are three items", () => {
+    const out = stripTokenSpans(formatWebHtml(md));
+    expect(out).toBe(
+      '<ol><li>Step one:<pre><code class="language-bash">cmd</code></pre><p>Then check output.</p></li><li>Step two</li><li>Step three</li></ol>',
+    );
+  });
+  test("telegram: a blank line, then the text at the item's hanging indent", () =>
+    expect(formatTelegramHtml(md)).toBe(
+      '1. Step one:\n<pre><code class="language-bash">cmd</code></pre>\n\n   Then check output.\n2. Step two\n3. Step three',
+    ));
+  test("slack", () =>
+    expect(formatSlackMrkdwn(md)).toBe("1. Step one:\n```\ncmd\n```\n\n   Then check output.\n2. Step two\n3. Step three"));
+  test("email: a styled <p> inside the <li>", () =>
+    expect(formatEmailHtml(md)).toMatch(/<li style="[^"]*">Step one:<pre[^>]*><code>cmd<\/code><\/pre><p style="[^"]*">Then check output\.<\/p><\/li>/));
+});
+
+// Fix round 2 (D1b): the interruption rule is for CHILD lists only. A column-0
+// ordered item under a line of prose opens a list whatever its number, as it
+// did before nesting.
+describe("a column-0 ordered item under prose opens a list", () => {
+  const md = "**Next steps**\n4. four\n5. five";
+  test("web", () => expect(formatWebHtml(md)).toBe('<strong>Next steps</strong>\n<ol start="4"><li>four</li><li>five</li></ol>'));
+  test("a column-0 `2024.` under prose is a list too, as before nesting", () =>
+    expect(formatWebHtml("Price rose in\n2024. That was big.")).toBe(
+      'Price rose in\n<ol start="2024"><li>That was big.</li></ol>',
+    ));
+});
+
+// Fix round 2 (D2): Slack's empty-item cleanup never reads code.
+describe("slack: bare marker lines inside code are code", () => {
+  test("a yaml fence keeps its bare `-` lines at every indent", () =>
+    expect(formatSlackMrkdwn("```yaml\nsteps:\n  -\n    run: x\n-\n```")).toBe("```\nsteps:\n  -\n    run: x\n-\n```"));
+  test("an item's fence keeps them too", () =>
+    expect(formatSlackMrkdwn("- a\n  ```\n  -\n  ```")).toBe("- a\n```\n-\n```"));
+  test("a bare `-` line of prose is still blanked", () => expect(formatSlackMrkdwn("a\n-\nb")).toBe("a\n\nb"));
+});
+
+// Fix round 2 (D3): a task row is a flex box and does not advance an <ol>'s
+// counter, so on the web every row of an ordered checklist sublist carries its
+// number — the plain rows after a task row show 2. and 3., as on the text
+// platforms.
+describe("an ordered checklist sublist numbers every row", () => {
+  const md = "<Checklist>\n- [ ] parent\n  1. [x] done\n  2. plain\n  3. plain\n</Checklist>";
+  test("web: value on the task row and on each plain row", () => {
+    const out = formatWebHtml(md);
+    expect(out).toContain('<li class="check-item check-done" value="1">');
+    expect(out).toContain('<li class="check-plain" value="2">plain</li><li class="check-plain" value="3">plain</li>');
+  });
+  test("telegram shows the same numbers", () => expect(formatTelegramHtml(md)).toBe("☐ parent\n  ☑ done\n  2. plain\n  3. plain"));
+  test("email: a plain row that keeps its source number carries it as value", () => {
+    const email = unstyled(formatEmailHtml("<Checklist>\n- [ ] p\n  1. a\n     - x\n  5. b\n</Checklist>"));
+    expect(email).toContain('<li value="5">b</li>');
+  });
+});
+
+test("a Checklist row's further paragraph stays in the row on every platform", () => {
+  const md = "<Checklist>\n- [ ] a\n\n  note\n- [x] b\n</Checklist>";
+  expect(formatWebHtml(md)).toContain('<span class="check-text">a</span><p>note</p></li>');
+  expect(formatTelegramHtml(md)).toBe("☐ a\n\n  note\n☑ b");
+  expect(formatSlackMrkdwn(md)).toBe("☐ a\n\n  note\n☑ b");
+  expect(unstyled(formatEmailHtml(md))).toContain("anote</li>");
 });

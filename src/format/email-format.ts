@@ -68,6 +68,7 @@ const S = {
   list: `margin:0 0 12px;padding-left:22px;line-height:1.55;color:${TEXT};`,
   li: "margin:0 0 4px;",
   sublist: `margin:4px 0 0;padding-left:22px;line-height:1.55;color:${TEXT};`,
+  itemP: "margin:6px 0 0;",
   pre:
     `margin:0 0 12px;padding:12px;background:${SURFACE};border:1px solid ${BORDER};` +
     `border-radius:6px;overflow-x:auto;font-family:${MONO};font-size:13px;line-height:1.45;`,
@@ -112,8 +113,13 @@ function itemEmail(text: string): string {
   return text.split("\n").map(renderInline).join("<br>");
 }
 
+/** A further paragraph of a list item, inside its `<li>`. */
+function itemParaEmail(text: string): string {
+  return `<p style="${S.itemP}">${itemEmail(text)}</p>`;
+}
+
 function childrenEmail(children: RenderedChild[] | undefined): string {
-  return children?.map((c) => c.out).join("") ?? "";
+  return children?.map((c) => (c.kind === "para" ? itemParaEmail(c.text) : c.out)).join("") ?? "";
 }
 
 /** Checklist rows as a styled `<ul>`, a nested list inside its parent row; a
@@ -129,7 +135,11 @@ function checklistEmail(
     .map((it, k) => {
       const nested = (it.children ?? [])
         .map((c) =>
-          c.type === "code_block" ? emailRenderer.code_block(c) : checklistEmail(c.rows, depth + 1, c.ordered, c.start, c.values),
+          c.type === "code_block"
+            ? emailRenderer.code_block(c)
+            : c.type === "paragraph"
+              ? itemParaEmail(c.text)
+              : checklistEmail(c.rows, depth + 1, c.ordered, c.start, c.values),
         )
         .join("");
       const v = values?.[k];

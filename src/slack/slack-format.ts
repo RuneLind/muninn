@@ -30,11 +30,11 @@ import {
  */
 export function formatSlackMrkdwn(text: string): string {
   const rendered = renderBlocks(parseBlocks(text), slackRenderer);
-  // An empty item (a bare marker line) is blanked the same way at every depth.
-  // The trim keeps the indent of a nested list line (`◦`, a number, a task box)
-  // that an empty parent left first; any other leading whitespace goes.
+  // Empty items are blanked where they are rendered (`blankEmpty`), and a bare
+  // marker line of prose in `text` below, so nothing here reads code content.
+  // An empty first parent leaves its child list first: the trim keeps that
+  // line's indent (`◦`, a number, a task box); any other leading whitespace goes.
   return rendered
-    .replace(/^[ \t]*[•◦\-*][ \t]*$/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/^\s*\n/, "")
     .replace(/^[ \t]+(?=[^ \t])(?![◦☐☑] |\d{1,9}\. )/, "")
@@ -49,7 +49,9 @@ function checklistText(rows: ChecklistRow[], ordered = false, start = 1, values?
   const children = rows.map((r) => r.children?.map((c: ChecklistChild) =>
     c.type === "code_block"
       ? { kind: "code" as const, out: slackRenderer.code_block(c) }
-      : { kind: "list" as const, out: checklistText(c.rows, c.ordered, c.start, c.values) },
+      : c.type === "paragraph"
+        ? { kind: "para" as const, text: c.text }
+        : { kind: "list" as const, out: checklistText(c.rows, c.ordered, c.start, c.values) },
   ));
   return textListItems(markers, rows.map((r) => r.text), { children, depth: 0, loose: false }, renderInline);
 }
@@ -59,7 +61,7 @@ const slackRenderer: BlockRenderer = {
   hr: () => "",
   heading: (block) => `*${renderInline(block.content)}*`,
   blockquote: (lines) => lines.map((l) => `> ${renderInline(l)}`).join("\n"),
-  ul: (items, nest) => textListItems(items.map(() => (nest.depth > 0 ? "◦" : "-")), items, nest, renderInline),
+  ul: (items, nest) => textListItems(items.map(() => (nest.depth > 0 ? "◦" : "-")), items, nest, renderInline, true),
   ol: (items, start, nest) =>
     textListItems(ordinals(start, items.length, nest.values).map((n) => `${n}.`), items, nest, renderInline),
   table: (headers, rows) => renderTable(headers, rows),
@@ -155,7 +157,8 @@ const slackRenderer: BlockRenderer = {
       }
     }
   },
-  text: (lines) => lines.map(renderInline).join("\n"),
+  // A bare `-`/`*`/`•` line of prose renders as nothing, as it always has.
+  text: (lines) => lines.map((l) => (/^[•\-*][ \t]*$/.test(l) ? "" : renderInline(l))).join("\n"),
 };
 
 /**

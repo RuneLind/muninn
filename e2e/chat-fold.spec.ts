@@ -170,4 +170,27 @@ test.describe("Chat: ordered-list numbers through the real sanitizer", () => {
     expect(out.nested).toBe(1);
     expect(out.secondStart).toBe(5);
   });
+
+  test("a non-numeric `start` or `value` is stripped; a numeric one survives", async ({ page }) => {
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () => typeof (globalThis as { sanitizeHtml?: unknown }).sanitizeHtml === "function",
+    );
+    const out = await page.evaluate(() => {
+      const g = globalThis as unknown as { sanitizeHtml: (h: string, isWeb: boolean) => string };
+      const host = document.createElement("div");
+      host.innerHTML = g.sanitizeHtml(
+        '<ol start="1 onmouseover=x"><li value="x">a</li><li value="7">b</li></ol><ol start="4"><li value="2e3">c</li></ol>',
+        true,
+      );
+      const ols = Array.from(host.querySelectorAll("ol"));
+      const lis = Array.from(host.querySelectorAll("li"));
+      return {
+        starts: ols.map((o) => o.getAttribute("start")),
+        values: lis.map((li) => li.getAttribute("value")),
+      };
+    });
+    expect(out.starts).toEqual([null, "4"]);
+    expect(out.values).toEqual([null, "7", null]);
+  });
 });
