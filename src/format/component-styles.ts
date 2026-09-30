@@ -41,6 +41,14 @@ export function componentBlockCss(scope: string): string {
     ${scope} .callout-bad .callout-title { color: var(--status-error); }
     ${scope} .callout-warn { border-left-color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 14%, transparent); }
     ${scope} .callout-warn .callout-title { color: var(--status-warning); }
+    /* A resolved callout: one compact good-tone row, body behind the fold. */
+    ${scope} .callout-resolved { padding: 0.45rem 0.9rem; margin: 1rem 0; }
+    ${scope} .callout-resolved > summary { cursor: pointer; color: var(--text-secondary); }
+    ${scope} .callout-resolved > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    ${scope} .callout-resolved-mark { color: var(--status-success); font-weight: 700; }
+    ${scope} .callout-resolved-date { font-variant-numeric: tabular-nums; }
+    ${scope} .callout-resolved-title { font-weight: 600; }
+    ${scope} .callout-resolved > .callout-body { margin-top: 0.6rem; }
     ${scope} .verdict { font-weight: 600; }
     ${scope} .verdict-yes { color: var(--status-success); }
     ${scope} .verdict-no { color: var(--status-error); }
@@ -105,6 +113,26 @@ export function componentBlockCss(scope: string): string {
        a heading tag, so dropping the element would move every following
        paragraph into the previous section. */
     ${scope} .fold-heading-dup { display: none; }
+    /* --text-soft, not --text-muted: muted sits under 4.5:1 on the light fold fill. */
+    ${scope} .fold-summary {
+      margin-left: 0.6rem;
+      font-weight: 400;
+      font-size: 0.88em;
+      color: var(--text-soft);
+    }
+    /* A section kept as history: dimmed until the reader points at it. The
+       stamp stays outside the dimmed body so it reads at full contrast. */
+    ${scope} .historic {
+      margin: 1.4rem 0;
+      padding-left: 0.9rem;
+      border-left: 3px dashed var(--border-secondary);
+    }
+    ${scope} .historic-stamp { font-size: 0.85em; color: var(--text-soft); margin-bottom: 0.4rem; }
+    ${scope} .historic-mark { font-weight: 700; }
+    ${scope} .historic-since { font-family: var(--mono, ui-monospace, monospace); }
+    ${scope} .historic-body { opacity: 0.6; transition: opacity 0.15s; }
+    ${scope} .historic:hover .historic-body,
+    ${scope} .historic:focus-within .historic-body { opacity: 1; }
     ${scope} .diagram {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

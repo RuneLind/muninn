@@ -52,6 +52,7 @@ export const COMPONENT_NAMES = [
   "FactCheck",
   "Embed",
   "Fold",
+  "Historic",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -68,7 +69,9 @@ const SELF_CLOSING_ALLOWED: ReadonlySet<ComponentName> = new Set<ComponentName>(
 
 /** Attribute whitelist per component; any other attribute is dropped. */
 const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
-  Callout: ["tone", "title"],
+  // `resolved="YYYY-MM-DD"` turns the callout into a closed-issue row (see
+  // `parseResolvedDate`); any other value is ignored and it renders as usual.
+  Callout: ["tone", "title", "resolved"],
   Verdict: ["value"],
   Pill: ["tone"],
   Figure: ["caption"],
@@ -99,7 +102,12 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // (double-quoted, like every attribute this grammar parses) renders it
   // expanded; a bare `open` is not a component tag at all and the section
   // degrades to visible escaped text.
-  Fold: ["title", "open"],
+  // `summary` is a one-line teaser shown beside the title, closed or open.
+  Fold: ["title", "open", "summary"],
+  // A wrapper marking sections the page keeps as history: `since` names what
+  // superseded them (free text, e.g. `melosys-console#270`), `note` says how.
+  // Wiki-only: not in `COMPONENT_VOCABULARY_RULES`.
+  Historic: ["since", "note"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -193,6 +201,31 @@ function componentTagSource(attrTail: string, names: readonly string[] = COMPONE
 /** Normalize an untrusted `tone` attr for Callout to the four known tones. */
 export function normalizeCalloutTone(tone: string | undefined): "info" | "warn" | "good" | "bad" {
   return tone === "warn" || tone === "good" || tone === "bad" ? tone : "info";
+}
+
+/**
+ * A `Callout resolved=` date, or null. Strict `YYYY-MM-DD` that names a real
+ * calendar day: anything else is ignored, so a typo renders the callout as an
+ * ordinary open one rather than as closed.
+ */
+export function parseResolvedDate(value: string | undefined): string | null {
+  const raw = value?.trim() ?? "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const date = new Date(Date.UTC(y, mo - 1, d));
+  return date.getUTCFullYear() === y && date.getUTCMonth() === mo - 1 && date.getUTCDate() === d
+    ? raw
+    : null;
+}
+
+/** The `(historic: <since> — <note>)` lead line a `Historic` block gets on the
+ *  surfaces with no CSS to dim it (Slack, Telegram, email). Unescaped: each
+ *  formatter escapes it for its own target. */
+export function historicLeadText(attrs: Record<string, string>): string {
+  const since = attrs.since?.trim();
+  const note = attrs.note?.trim();
+  return `(historic${since ? `: ${since}` : ""}${note ? ` — ${note}` : ""})`;
 }
 
 /** Normalize an untrusted `tone` attr for Pill. */

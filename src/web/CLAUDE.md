@@ -377,6 +377,17 @@ is why `findExclusionZones`' `isMdx` is derived from
 `pageHasComponentVocabulary(relPath, diskBytes)` rather than from the extension:
 see the `wiki-routes.ts` row of `src/dashboard/CLAUDE.md`.
 
+## Report blocks — `Fold summary=`, `Callout resolved=`, `<Historic>`, line-ref chips
+
+Four wiki-authoring additions, all block-only and all outside `COMPONENT_VOCABULARY_RULES`:
+
+- **`<Fold title="…" summary="…">`** — a one-line teaser in `<span class="fold-summary">` INSIDE `<summary>`, so it shows while the fold is closed. The duplicate-heading test still compares the title alone. Email/Telegram/Slack render `title — summary` as the run-in line.
+- **`<Callout … resolved="YYYY-MM-DD">`** — a strict, real calendar date (`parseResolvedDate`) turns the callout into `<details class="callout callout-good callout-resolved">` whose `<summary>` reads `✓ <date> · <title>`, body collapsed. Any other value is ignored and the callout renders as before, in its own tone. The other surfaces put `✓ <date> · <title>` above the open body.
+- **`<Historic since="…" note="…">`** — a new component: `<section class="historic">` with a `historic-stamp` line (`↻ since · note`) and the body in `historic-body`, which the CSS dims to 0.6 until hover/focus-within. The stamp sits OUTSIDE the dimmed box so it reads at full contrast. Other surfaces lead with `(historic: since — note)` (`historicLeadText`). A `Historic > Fold > Callout` renders; one more level hits `MAX_COMPONENT_DEPTH` (3), so a `CodeTabs > Tab` inside a fold inside a Historic degrades to its fallback panel. The reader header shows `↻ N historic` (counted off the rendered article by `views/components/wiki-report-blocks.ts`), and a click scrolls to the first one.
+- **Line-ref chips** — reader only, server-side in `renderWikiHtml` (`src/wiki/code-refs.ts`), never in `formatWebHtml`: an inline `<code>` whose whole text is `:N`, `:N-M`, `:N, :M` or `path/file.ext:N(-M)` becomes `code.code-ref`. With a valid frontmatter `code_at: <owner>/<repo>@<7–40 hex sha>` a ref whose path holds a `/` links to the GitHub blob at that sha. The `line refs` toggle in the header hides every chip (`.wiki-article.code-refs-off`), stored per viewer as `muninn.wiki.lineRefs.v1`.
+
+The muted text (`fold-summary`, `historic-stamp`, the chips) uses `--text-soft`: `--text-muted` measures under 4.5:1 on the light `--bg-surface` fold fill. `e2e/wiki-report-blocks.spec.ts` pins the token and the contrast in both themes.
+
 ## Fact-check annotation pair
 
 - `<Fact n="4" v="bad">passage</Fact>` (inline, paired + self-closing) marks a fact-checked passage with a verdict-tinted underline plus a `<button class="fc-chip">`.

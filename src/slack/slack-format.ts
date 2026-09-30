@@ -7,6 +7,8 @@ import {
   FACT_COUNT_WORD,
   parseMeterAttrs,
   parseChecklist,
+  parseResolvedDate,
+  historicLeadText,
 } from "../format/markdown-ast.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
@@ -42,8 +44,16 @@ const slackRenderer: BlockRenderer = {
   table: (headers, rows) => renderTable(headers, rows),
   component(name, attrs, children, rawChildren) {
     switch (name) {
-      case "Callout":
+      case "Callout": {
+        // Nothing collapses in mrkdwn, so a resolved callout keeps its body open
+        // under a "✓ <date> · <title>" line.
+        const resolved = parseResolvedDate(attrs.resolved);
+        if (resolved) {
+          const t = attrs.title?.trim();
+          return `✓ ${resolved}${t ? ` · *${renderInline(t)}*` : ""}\n${children}`;
+        }
         return attrs.title ? `*${renderInline(attrs.title)}*\n${children}` : children;
+      }
       case "Verdict": {
         const value = normalizeVerdictValue(attrs.value);
         const label = children.trim() || (value === "yes" ? "Yes" : "No");
@@ -86,9 +96,17 @@ const slackRenderer: BlockRenderer = {
         // no plain-text equivalent worth the noise, so only the verdict glyph rides
         // along. Never drop the passage — it is the article's own prose.
         return `${children}${children.trim() ? ` ${FACT_VERDICT_MARK[normalizeFactVerdict(attrs.v)]}` : ""}`;
-      case "Fold":
-        // Nothing collapses in mrkdwn: bold run-in title, body open.
-        return attrs.title ? `*${renderInline(attrs.title)}*\n${children}` : children;
+      case "Fold": {
+        // Nothing collapses in mrkdwn: bold run-in title (then " — summary"), body open.
+        const title = attrs.title?.trim();
+        const teaser = attrs.summary?.trim();
+        const lead = [title ? `*${renderInline(title)}*` : "", teaser ? renderInline(teaser) : ""]
+          .filter(Boolean)
+          .join(" — ");
+        return lead ? `${lead}\n${children}` : children;
+      }
+      case "Historic":
+        return `${renderInline(historicLeadText(attrs))}\n${children}`;
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.

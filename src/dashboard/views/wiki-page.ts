@@ -1886,6 +1886,23 @@ export async function renderWikiPage(opts?: {
     .wiki-article hr { border: none; border-top: 1px solid var(--border-primary); margin: 16px 0; }
     .wiki-article a[target="_blank"] { color: var(--status-info); }
     ${componentBlockCss(".wiki-article")}
+    /* Reader-only: line-ref chips (src/wiki/code-refs.ts) and the header chrome
+       wiki-report-blocks.ts adds. --text-soft: --text-muted is under 4.5:1 on
+       the light fills these sit on. */
+    .wiki-article code.code-ref {
+      font-size: 11px; padding: 0 5px; border-radius: 999px;
+      border: 1px solid var(--border-secondary); color: var(--text-soft); white-space: nowrap;
+    }
+    .wiki-article a.code-ref-link { text-decoration: none; }
+    .wiki-article a.code-ref-link:hover code.code-ref { border-color: var(--accent); color: var(--text-primary); }
+    .wiki-article.code-refs-off code.code-ref,
+    .wiki-article.code-refs-off a.code-ref-link { display: none; }
+    .wiki-historic-pill, .wiki-lineref-toggle {
+      font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; font-family: inherit;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-secondary);
+    }
+    .wiki-historic-pill:hover, .wiki-lineref-toggle:hover { color: var(--text-primary); border-color: var(--accent); }
+    .wiki-lineref-toggle:not(.on) { text-decoration: line-through; }
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */
     ${factcheckReaderCss(".wiki-article")}
