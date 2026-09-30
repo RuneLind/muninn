@@ -131,7 +131,7 @@ All fields are optional — falls back to global `.env` values:
 ```json
 {
   "connector": "claude-cli",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5-5",
   "thinkingMaxTokens": 16000,
   "timeoutMs": 180000,
   "baseUrl": "http://localhost:11434/v1",
@@ -143,7 +143,7 @@ All fields are optional — falls back to global `.env` values:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"` |
-| `model` | string | `CLAUDE_MODEL` env | Model name (e.g. `"claude-sonnet-4-6"`, `"qwen3:32b"`) |
+| `model` | string | `CLAUDE_MODEL` env | Model name (e.g. `"claude-sonnet-5-5"`, `"qwen3:32b"`) |
 | `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable). For openai-compat: used as `max_tokens` |
 | `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
 | `baseUrl` | string | — | Base URL for OpenAI-compatible API (required for `openai-compat`) |
@@ -258,7 +258,7 @@ Uses GitHub Copilot SDK with a shared singleton client. MCP tools from `.mcp.jso
 ```json
 {
   "connector": "copilot-sdk",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5.5",
   "thinkingMaxTokens": 16000,
   "timeoutMs": 180000
 }
@@ -271,7 +271,7 @@ Uses Anthropic's `@anthropic-ai/claude-agent-sdk` `query()` iterable as a direct
 ```json
 {
   "connector": "claude-sdk",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5-5",
   "thinkingMaxTokens": 16000,
   "timeoutMs": 180000
 }

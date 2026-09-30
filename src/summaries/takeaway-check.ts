@@ -35,11 +35,12 @@ const log = getLog("summaries", "takeaway-check");
  * Haiku and Sonnet both flag all three defects, but Haiku's rewrite ran to
  * three sentences that read as a list, while Sonnet's was two sentences the
  * body would sign — and the rewrite is what the reader reads. That was Sonnet
- * 4.6; moved to Sonnet 5 on 2026-09-24 without re-running that comparison
- * (`bun scripts/eval-takeaway.ts --check-only` is the re-measure). The request is
- * honoured by the anthropic and CLI backends and passed through on copilot
- * (where the router's non-Haiku warn line fires — accepted, the summarizer bot
- * is not a copilot bot). It is NOT sent to the vertex backend: that backend
+ * 4.6; moved to Sonnet 5 on 2026-09-24 and to Sonnet 5.5 on 2026-09-30, neither
+ * time re-running that comparison (`bun scripts/eval-takeaway.ts --check-only`
+ * is the re-measure). The request is honoured by the anthropic and CLI backends,
+ * and on copilot `callHaikuViaCopilot` maps it to the catalog's dotted id
+ * (the router's non-Haiku warn line fires — accepted, the summarizer bot is not
+ * a copilot bot). It is NOT sent to the vertex backend: that backend
  * honours a per-call model too (`haiku-vertex.ts`, "an explicit per-call model
  * wins"), the endpoint has no Anthropic model and requires a `<publisher>/`
  * prefix, so the request would 400 and the router would fall back to the local

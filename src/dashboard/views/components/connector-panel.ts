@@ -263,7 +263,7 @@ export function connectorPanelHtml(): string {
           </div>
           <div class="connector-form-group">
             <label>Model</label>
-            <input type="text" id="connectorModel" placeholder="e.g. claude-sonnet-5-5, qwen3.5:35b">
+            <input type="text" id="connectorModel" placeholder="e.g. claude-sonnet-5-5 (Copilot: claude-sonnet-5.5), qwen3.5:35b">
           </div>
           <div class="connector-form-group">
             <label>Base URL</label>
