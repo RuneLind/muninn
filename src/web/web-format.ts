@@ -3,6 +3,7 @@ import {
   scanInlineComponents,
   normalizeCalloutTone,
   normalizePillTone,
+  parseResolvedDate,
   normalizeVerdictValue,
   normalizeFactVerdict,
   factClaimIndex,
@@ -205,8 +206,23 @@ const webRenderer: BlockRenderer = {
     switch (name) {
       case "Callout": {
         const tone = normalizeCalloutTone(attrs.tone);
-        const title = attrs.title
-          ? `<strong class="callout-title">${escapeHtml(attrs.title)}</strong>`
+        const resolved = parseResolvedDate(attrs.resolved);
+        if (resolved) {
+          // A closed issue: one good-tone row, "✓ <date> · <title>", with the
+          // original body kept behind the fold so the history stays readable.
+          // The author's tone is dropped — the row reports the outcome.
+          const t = attrs.title?.trim();
+          const titleHtml = t ? ` · <span class="callout-resolved-title">${escapeHtml(t)}</span>` : "";
+          return (
+            `<details class="callout callout-good callout-resolved">` +
+            `<summary class="callout-resolved-row"><span class="callout-resolved-mark">✓</span> ` +
+            `<span class="callout-resolved-date">${resolved}</span>${titleHtml}</summary>` +
+            `<div class="callout-body">${children}</div></details>`
+          );
+        }
+        const calloutTitle = attrs.title?.trim();
+        const title = calloutTitle
+          ? `<strong class="callout-title">${escapeHtml(calloutTitle)}</strong>`
           : "";
         return `<div class="callout callout-${tone}">${title}<div class="callout-body">${children}</div></div>`;
       }
@@ -355,12 +371,28 @@ const webRenderer: BlockRenderer = {
         const title = (attrs.title ?? "").trim();
         // Closed by default; `open="true"` is the one spelling that expands it.
         const openAttr = attrs.open === "true" ? " open" : "";
+        // The teaser rides INSIDE <summary> so it shows while the fold is
+        // closed; the duplicate-heading test below still compares the title alone.
+        const teaser = (attrs.summary ?? "").trim();
+        const teaserHtml = teaser ? `<span class="fold-summary">${escapeHtml(teaser)}</span>` : "";
         return (
           `<details class="fold"${openAttr}>` +
-          `<summary>${title ? escapeHtml(title) : "Details"}</summary>` +
+          `<summary>${title ? escapeHtml(title) : "Details"}${teaserHtml}</summary>` +
           `<div class="fold-body">${foldBodyHtml(title, children, rawChildren)}</div>` +
           `</details>`
         );
+      }
+      case "Historic": {
+        // Sections the page keeps as history. CSS dims the body; the stamp line
+        // stays at full contrast so the reader sees WHY the body is dimmed.
+        const since = (attrs.since ?? "").trim();
+        const note = (attrs.note ?? "").trim();
+        const stamp =
+          `<div class="historic-stamp"><span class="historic-mark">↻</span>` +
+          (since ? ` <span class="historic-since">${escapeHtml(since)}</span>` : "") +
+          (note ? `${since ? " ·" : ""} <span class="historic-note">${escapeHtml(note)}</span>` : "") +
+          `</div>`;
+        return `<section class="historic">${stamp}<div class="historic-body">${children}</div></section>`;
       }
       case "FactCheck": {
         // Collapsed by DEFAULT — the per-claim evidence is reachable from the

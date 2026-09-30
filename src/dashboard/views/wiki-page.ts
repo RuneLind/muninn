@@ -21,6 +21,14 @@ import {
 } from "./components/wiki-rail-width.ts";
 import { STRIP_WIDTH } from "./components/wiki-panes.ts";
 import {
+  CODE_REF_CLASS,
+  CODE_REF_GROUP_CLASS,
+  CODE_REF_LINK_CLASS,
+  CODE_REFS_OFF_CLASS,
+  HISTORIC_PILL_CLASS,
+  LINE_REFS_TOGGLE_CLASS,
+} from "./components/wiki-report-blocks.ts";
+import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
   WIKI_READONLY_BANNER_TEXT,
@@ -1886,6 +1894,23 @@ export async function renderWikiPage(opts?: {
     .wiki-article hr { border: none; border-top: 1px solid var(--border-primary); margin: 16px 0; }
     .wiki-article a[target="_blank"] { color: var(--status-info); }
     ${componentBlockCss(".wiki-article")}
+    /* Reader-only: line-ref chips (src/wiki/code-refs.ts) and the header chrome
+       wiki-report-blocks.ts adds. Chip text is --text-soft: e2e/wiki-report-blocks
+       measures it at >= 4.5:1 on the article background and inside a Historic
+       body, both schemes. The toggle hides only pure ref groups. */
+    .wiki-article code.${CODE_REF_CLASS} {
+      font-size: 11px; padding: 0 5px; border-radius: 999px;
+      border: 1px solid var(--border-secondary); color: var(--text-soft); white-space: nowrap;
+    }
+    .wiki-article a.${CODE_REF_LINK_CLASS} { text-decoration: none; }
+    .wiki-article a.${CODE_REF_LINK_CLASS}:hover code.${CODE_REF_CLASS} { border-color: var(--accent); color: var(--text-primary); }
+    .wiki-article.${CODE_REFS_OFF_CLASS} .${CODE_REF_GROUP_CLASS} { display: none; }
+    .${HISTORIC_PILL_CLASS}, .${LINE_REFS_TOGGLE_CLASS} {
+      font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; font-family: inherit;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-secondary);
+    }
+    .${HISTORIC_PILL_CLASS}:hover, .${LINE_REFS_TOGGLE_CLASS}:hover { color: var(--text-primary); border-color: var(--accent); }
+    .${LINE_REFS_TOGGLE_CLASS}:not(.on) { text-decoration: line-through; }
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */
     ${factcheckReaderCss(".wiki-article")}

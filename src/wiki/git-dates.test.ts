@@ -389,6 +389,17 @@ test("classifyPageChange: an ADDED or REMOVED metadata key is metadata-only too"
   ).toBe("metadata-only");
 });
 
+test("classifyPageChange: re-pinning `code_at` is metadata-only", () => {
+  // The line-ref chips' commit pin: moving it to a newer sha re-points links,
+  // it does not edit the page.
+  expect(
+    classifyPageChange(
+      pageText(["title: A", "code_at: navikt/r@9c09999"], "Prose."),
+      pageText(["title: A", "code_at: navikt/r@4dc6296"], "Prose."),
+    ),
+  ).toBe("metadata-only");
+});
+
 test("classifyPageChange: one body line is enough to make it a real edit", () => {
   expect(
     classifyPageChange(

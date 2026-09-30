@@ -5,6 +5,7 @@ import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatEmailHtml } from "./email-format.ts";
 import { RAW_EMPHASIS_SOURCES } from "./markdown-core.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
+import * as ast from "./markdown-ast.ts";
 
 // Early-warning system for divergence: the FOUR platform formatters share one
 // block AST + dispatcher, so the same markdown must keep producing each
@@ -881,6 +882,165 @@ describe("Fold — a details on the web, an open run-in section everywhere else"
   });
 });
 
+describe("Fold summary= — a teaser beside the title on every surface", () => {
+  const md =
+    '<Fold title="Runder" summary="4 runder · vårt svar: utkast">\n\n## Runder\n\nBody line.\n\n</Fold>';
+
+  test("web → the teaser rides inside <summary>, after the title, and the dup heading still hides", () => {
+    const out = formatWebHtml(md);
+    expect(out).toContain(
+      '<summary>Runder<span class="fold-summary">4 runder · vårt svar: utkast</span></summary>',
+    );
+    // The suppression compares the TITLE alone, so the summary must not defeat it.
+    expect(out).toContain('<h3 class="fold-heading-dup">Runder</h3>');
+  });
+
+  test("web → the teaser is escaped as text", () => {
+    const out = formatWebHtml('<Fold title="T" summary="a <b>x</b> &amp;">\n\nbody\n\n</Fold>');
+    expect(out).toContain('<span class="fold-summary">a &lt;b&gt;x&lt;/b&gt; &amp;amp;</span>');
+  });
+
+  test("web → an empty or absent summary renders no teaser span", () => {
+    expect(formatWebHtml('<Fold title="T" summary="  ">\n\nbody\n\n</Fold>')).not.toContain("fold-summary");
+    expect(formatWebHtml('<Fold title="T">\n\nbody\n\n</Fold>')).not.toContain("fold-summary");
+  });
+
+  test("telegram → bold title — teaser", () =>
+    expect(formatTelegramHtml(md).startsWith("<b>Runder</b> — 4 runder · vårt svar: utkast\n")).toBe(true));
+
+  test("slack → *title* — teaser", () =>
+    expect(formatSlackMrkdwn(md).startsWith("*Runder* — 4 runder · vårt svar: utkast\n")).toBe(true));
+
+  test("email → teaser in the run-in title line, dimmed", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("Runder — <span");
+    expect(out).toContain("4 runder · vårt svar: utkast</span></div>");
+  });
+
+  test("a summary with no title still shows on the run-in surfaces", () => {
+    const noTitle = '<Fold summary="only a teaser">\n\nbody\n\n</Fold>';
+    expect(formatTelegramHtml(noTitle).startsWith("only a teaser\n")).toBe(true);
+    expect(formatSlackMrkdwn(noTitle).startsWith("only a teaser\n")).toBe(true);
+    expect(formatEmailHtml(noTitle)).toContain("only a teaser</span>");
+  });
+});
+
+describe("Callout resolved= — a closed issue collapses to one ✓ row", () => {
+  const md =
+    '<Callout tone="warn" title="Gate-kjøringer mangler feltene" resolved="2026-09-28">\n\nOld warning body.\n\n</Callout>';
+
+  test("web → a good-tone <details> row with ✓ date · title, body behind it", () => {
+    const out = formatWebHtml(md);
+    expect(out).toContain('<details class="callout callout-good callout-resolved">');
+    expect(out).not.toContain("callout-warn");
+    expect(out).toContain(
+      '<summary class="callout-resolved-row"><span class="callout-resolved-mark">✓</span> ' +
+        '<span class="callout-resolved-date">2026-09-28</span> · ' +
+        '<span class="callout-resolved-title">Gate-kjøringer mangler feltene</span></summary>',
+    );
+    expect(out).not.toContain("<details class=\"callout callout-good callout-resolved\" open");
+    expect(out).toContain('<div class="callout-body">');
+    expect(out).toContain("Old warning body.");
+  });
+
+  test("web → no title renders the date alone", () => {
+    const out = formatWebHtml('<Callout resolved="2026-09-28">\n\nb\n\n</Callout>');
+    expect(out).toContain('<span class="callout-resolved-date">2026-09-28</span></summary>');
+  });
+
+  for (const bad of ["2026-9-28", "2026-02-30", "28.09.2026", "2026-13-01", "yes", "", "2026-09-28x"]) {
+    test(`web → resolved="${bad}" is ignored and the callout renders open, in its own tone`, () => {
+      const out = formatWebHtml(`<Callout tone="warn" title="T" resolved="${bad}">\n\nb\n\n</Callout>`);
+      expect(out).toContain('<div class="callout callout-warn">');
+      expect(out).not.toContain("callout-resolved");
+    });
+  }
+
+  test("web → the title is escaped", () =>
+    expect(formatWebHtml('<Callout title="a <i>" resolved="2026-09-28">\n\nb\n\n</Callout>')).toContain(
+      '<span class="callout-resolved-title">a &lt;i&gt;</span>',
+    ));
+
+  test("telegram → ✓ date · bold title, body open", () => {
+    const out = formatTelegramHtml(md);
+    expect(out.startsWith("✓ 2026-09-28 · <b>Gate-kjøringer mangler feltene</b>\n")).toBe(true);
+    expect(out).toContain("Old warning body.");
+  });
+
+  test("slack → ✓ date · *title*, body open", () => {
+    const out = formatSlackMrkdwn(md);
+    expect(out.startsWith("✓ 2026-09-28 · *Gate-kjøringer mangler feltene*\n")).toBe(true);
+    expect(out).toContain("Old warning body.");
+  });
+
+  test("email → good-tone accent and a ✓ date · title line", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("✓ 2026-09-28 · Gate-kjøringer mangler feltene</div>");
+    expect(out).toContain("Old warning body.");
+    const warn = formatEmailHtml(md.replace(' resolved="2026-09-28"', ""));
+    // The accent differs from the unresolved warn callout's.
+    expect(out.match(/border-left:3px solid (#[0-9a-f]+)/i)![1]).not.toBe(
+      warn.match(/border-left:3px solid (#[0-9a-f]+)/i)![1],
+    );
+  });
+});
+
+describe("Historic — dimmed and stamped on the web, a lead line elsewhere", () => {
+  const md =
+    '<Historic since="melosys-console#270" note="§2 erstattet">\n\n## 2. Foreslått løsning\n\nOld design.\n\n</Historic>';
+
+  test("web → section.historic with a stamp line and the body in historic-body", () => {
+    const out = formatWebHtml(md);
+    expect(out).toContain(
+      '<section class="historic"><div class="historic-stamp"><span class="historic-mark">↻</span> ' +
+        '<span class="historic-since">melosys-console#270</span> · <span class="historic-note">§2 erstattet</span></div>' +
+        '<div class="historic-body">',
+    );
+    expect(out).toContain("<h3>2. Foreslått løsning</h3>");
+    expect(out).toContain("Old design.");
+  });
+
+  test("web → since and note are escaped; both optional", () => {
+    const out = formatWebHtml('<Historic since="<x>" note="a&b">\n\nbody\n\n</Historic>');
+    expect(out).toContain('<span class="historic-since">&lt;x&gt;</span>');
+    expect(out).toContain('<span class="historic-note">a&amp;b</span>');
+    expect(formatWebHtml("<Historic>\n\nbody\n\n</Historic>")).toContain(
+      '<div class="historic-stamp"><span class="historic-mark">↻</span></div>',
+    );
+  });
+
+  test("web → a Fold holding a Callout still renders inside a Historic (depth 3)", () => {
+    const nested =
+      '<Historic since="x">\n\n<Fold title="F">\n\n<Callout tone="warn" title="C">\n\ninner\n\n</Callout>\n\n</Fold>\n\n</Historic>';
+    const out = formatWebHtml(nested);
+    expect(out).toContain('<section class="historic">');
+    expect(out).toContain('<details class="fold">');
+    expect(out).toContain('<div class="callout callout-warn">');
+    expect(out).not.toContain("&lt;Callout");
+  });
+
+  test("telegram → italic (historic: since — note) lead line, body after", () => {
+    const out = formatTelegramHtml(md);
+    expect(out.startsWith("<i>(historic: melosys-console#270 — §2 erstattet)</i>\n")).toBe(true);
+    expect(out).toContain("Old design.");
+  });
+
+  test("slack → (historic: since — note) lead line, body after", () => {
+    const out = formatSlackMrkdwn(md);
+    expect(out.startsWith("(historic: melosys-console#270 — §2 erstattet)\n")).toBe(true);
+    expect(out).toContain("Old design.");
+  });
+
+  test("email → dim lead line, body after", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("(historic: melosys-console#270 — §2 erstattet)</div>");
+    expect(out.indexOf("(historic:")).toBeLessThan(out.indexOf("Old design."));
+  });
+
+  test("no since → (historic)", () =>
+    expect(formatSlackMrkdwn("<Historic>\n\nbody\n\n</Historic>").startsWith("(historic)\n")).toBe(true));
+});
+
 describe("FactCheck appendix renders collapsed, with per-claim sections", () => {
   const md =
     '<FactCheck date="2026-07-29" ok="3" warn="1" bad="2">\n### ✅ Claim 1/3 — the weight\n\nEvidence line.\n</FactCheck>';
@@ -1110,4 +1270,48 @@ describe("a fence's info string can never break an HTML attribute", () => {
     }
     expect(out).not.toContain("<script");
   });
+});
+
+describe("report blocks — fix round 1 (title trimming, shared lead text, dates)", () => {
+  test("email Fold → a whitespace-only title leaves no dangling dash before the summary", () => {
+    const out = formatEmailHtml('<Fold title="   " summary="teaser">\n\nbody\n\n</Fold>');
+    expect(out).not.toContain(" — ");
+    expect(out).toContain(">teaser</span></div>");
+  });
+
+  test("resolvedLeadText trims the title and drops the separator when it is empty", () => {
+    const lead = ast.resolvedLeadText;
+    expect(typeof lead).toBe("function");
+    expect(lead!("2026-09-28", "  T  ")).toBe("✓ 2026-09-28 · T");
+    expect(lead!("2026-09-28", "   ")).toBe("✓ 2026-09-28");
+    expect(lead!("2026-09-28", undefined)).toBe("✓ 2026-09-28");
+    expect(lead!("2026-09-28", " T ", (t) => `*${t}*`)).toBe("✓ 2026-09-28 · *T*");
+  });
+
+  test("an unresolved callout's title is trimmed on all four surfaces", () => {
+    const md = '<Callout tone="warn" title="  T  ">\n\nb\n\n</Callout>';
+    expect(formatWebHtml(md)).toContain('<strong class="callout-title">T</strong>');
+    expect(formatTelegramHtml(md).startsWith("<b>T</b>\n")).toBe(true);
+    expect(formatSlackMrkdwn(md).startsWith("*T*\n")).toBe(true);
+    expect(formatEmailHtml(md)).toContain(">T</div>");
+    const blank = '<Callout tone="warn" title="   ">\n\nb\n\n</Callout>';
+    expect(formatWebHtml(blank)).not.toContain("callout-title");
+    expect(formatTelegramHtml(blank).startsWith("<b>")).toBe(false);
+    expect(formatSlackMrkdwn(blank).startsWith("*")).toBe(false);
+    expect(formatEmailHtml(blank)).not.toContain("font-weight:600");
+  });
+
+  test("a resolved callout's lead line trims a padded title and drops the separator for a blank one", () => {
+    const padded = '<Callout title="  T  " resolved="2026-09-28">\n\nb\n\n</Callout>';
+    const blank = '<Callout title="   " resolved="2026-09-28">\n\nb\n\n</Callout>';
+    expect(formatTelegramHtml(padded).startsWith("✓ 2026-09-28 · <b>T</b>\n")).toBe(true);
+    expect(formatTelegramHtml(blank).startsWith("✓ 2026-09-28\n")).toBe(true);
+    expect(formatSlackMrkdwn(padded).startsWith("✓ 2026-09-28 · *T*\n")).toBe(true);
+    expect(formatSlackMrkdwn(blank).startsWith("✓ 2026-09-28\n")).toBe(true);
+    expect(formatEmailHtml(padded)).toContain(">✓ 2026-09-28 · T</div>");
+    expect(formatEmailHtml(blank)).toContain(">✓ 2026-09-28</div>");
+  });
+
+  test("resolved= accepts a year below 100 (no 19xx rollover)", () =>
+    expect(ast.parseResolvedDate("0099-01-01")).toBe("0099-01-01"));
 });

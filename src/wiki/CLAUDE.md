@@ -116,6 +116,10 @@ The read-only sibling of the two fact-check WRITE routes (`/factcheck/append`, `
 - **The slot's expiry is `acquire + FACTCHECK_RETRY_TIMEOUT_MS + CLAIM_RETRY_SLOT_SLACK_MS` (30s), and the slack is load-bearing.** The one-shot's own 180s budget starts AFTER the acquire (the route still has a page read and an excerpt locate to do) and the run's teardown — failure-path span rebuild, final SSE writes, the scaffold's `finally` — runs after that budget expires. Sized to exactly the budget, the slot frees itself while the holder is still tearing down and a second GET on that boundary starts a CONCURRENT 180s tool-enabled run. The slack only ever delays the LAZY heal of a slot whose `finally` never ran; the ordinary path releases explicitly.
 - **Three blocks are SHARED with `factcheck-sse.ts`, not copied** — `makeClaimToolForwarder` (the tool-progress forwarder: the accumulate-BEFORE-the-gone-guard rule and the `{state, name, label, detail, url?, claimIndex}` payload the client's Consulting chips read), `rebuildToolSpansAfterFailure` (classify → `spanStartedAt` offset origin → fail-soft `attachToolSpans`; each caller keeps its own log line via `onError`) and `makeSafeWrite`. All three carry either a live client contract or a trace invariant, which is exactly what two copies would drift on.
 
+## Line-ref chips (`code-refs.ts`)
+
+`renderWikiHtml` chips line-ref inline `<code>` spans and wraps pure ref groups after the wikilink restore (`chipLineRefs`, with the page's `code_at` pin). Rules, shapes and the toggle: the report-blocks section of `src/web/CLAUDE.md`.
+
 ## ⧉ Copy path (breadcrumb)
 
 The open page's path ON DISK — `wikiPagePath(root, relPath)`, absolute wherever the server named a root (`servedRoot` in `wiki-routes.ts`, injected as `window.__WIKI_ROOT__`, read by `readActiveWikiRoot`) and the relPath alone otherwise. Every registered wiki has a root, so this is not a mimir-only affordance; the /plans drawer's button is the same two functions (`views/components/copy-path.ts` — the clipboard write and the join both live there, one fallback path rather than two that drift).
@@ -155,7 +159,7 @@ of two verdicts, so it dates from git history like a clean page: `metadata-only`
 (the body after the fence is byte-identical and, with every column-0
 `METADATA_ONLY_FRONTMATTER_KEYS` line stripped from both sides — the four
 provenance keys plus `series`/`series_label`/`priority`/`plan_status`/`status_date`
-and the three cull keys `signal`/`signal-reason`/`superseded_by` —
+and the three cull keys `signal`/`signal-reason`/`superseded_by`, plus the line-ref commit pin `code_at` —
 the two frontmatter remainders are identical IN ORDER, so a hand edit that only
 reordered `title:` and `tags:` is an edit)
 and `identical` (equal texts, which `git status` still reports as modified after a

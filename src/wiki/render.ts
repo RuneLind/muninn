@@ -28,6 +28,7 @@ import { escapeHtml } from "../format/markdown-core.ts";
 import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
 import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
+import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
 
 // stripFrontmatter's single home is store.ts (the read-side, which store.ts must
 // not import back from — that would invert layering). Re-exported here so the
@@ -130,7 +131,7 @@ export function renderWikiHtml(
       return rendered[i] ?? "";
     },
   );
-  return paragraphGaps(upgradeObsidianCallouts(html));
+  return paragraphGaps(upgradeObsidianCallouts(chipLineRefs(html, codeAtFromPage(markdown))));
 }
 
 /**

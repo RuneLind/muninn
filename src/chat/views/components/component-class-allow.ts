@@ -67,7 +67,15 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   // the one that carries behaviour rather than looks: it is the ONLY thing
   // hiding the section heading a fold's title repeats, so a stripped class
   // renders the same words twice in chat and once in the reader.
-  "fold", "fold-body", "fold-heading-dup",
+  "fold", "fold-body", "fold-heading-dup", "fold-summary",
+  // `<Callout resolved>` and `<Historic>`: wiki-authoring blocks, outside the
+  // model vocabulary, but chat renders any markdown that reaches it (a pasted
+  // page, a `/research` answer quoting one), and a stripped class drops the
+  // dimming or leaves the resolved row unstyled.
+  "callout-resolved", "callout-resolved-row", "callout-resolved-mark",
+  "callout-resolved-date", "callout-resolved-title",
+  "historic", "historic-stamp", "historic-mark", "historic-since", "historic-note",
+  "historic-body",
   // Syntax highlighting. Imported from the module that EMITS them rather than
   // retyped: a `tok-*` class added there and forgotten here renders colorless
   // in chat while looking perfect in /wiki — a bug visible on one surface only.

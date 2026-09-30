@@ -165,6 +165,7 @@ import { readSliceStartTab, wikiToolsFlag } from "./wiki-read-slice.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
+import { enhanceReportBlocks } from "./wiki-report-blocks.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
@@ -3924,6 +3925,9 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // `<Embed src>` → sandboxed iframe, resolved against THIS page's relPath.
       // No-op on a page without one.
       enhanceEmbeds(articleRoot, data.meta.relPath, withWiki);
+      // Header's `↻ N historic` pill and the `line refs` toggle, both counted
+      // off the rendered article. No-op on a page with neither.
+      enhanceReportBlocks(articleRoot);
       // Fact-check layer: chip → evidence card, the summary strip, and the
       // layer toggle. No-op on a page carrying no annotation.
       enhanceFactCheck(document.getElementById("articleWrap")!);

@@ -117,6 +117,8 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   // A fold wraps PROSE, so a fence inside one is an ordinary fence and keeps its
   // own header bar and Copy button.
   Fold: null,
+  // Same for a historic section: it dims prose and code alike, no chrome.
+  Historic: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);
