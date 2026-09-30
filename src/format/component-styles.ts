@@ -120,8 +120,10 @@ export function componentBlockCss(scope: string): string {
       font-size: 0.88em;
       color: var(--text-soft);
     }
-    /* A section kept as history: dimmed until the reader points at it. The
-       stamp stays outside the dimmed body so it reads at full contrast. */
+    /* A section kept as history, dimmed by COLOUR rather than opacity: opacity
+       multiplies every colour inside, so a --text-soft chip fell to 2.48:1 in
+       light. --text-soft (and --text-secondary for headings) keeps every line
+       at >= 4.5:1; the muted dashed rule carries the rest. Full on hover/focus. */
     ${scope} .historic {
       margin: 1.4rem 0;
       padding-left: 0.9rem;
@@ -130,9 +132,12 @@ export function componentBlockCss(scope: string): string {
     ${scope} .historic-stamp { font-size: 0.85em; color: var(--text-soft); margin-bottom: 0.4rem; }
     ${scope} .historic-mark { font-weight: 700; }
     ${scope} .historic-since { font-family: var(--mono, ui-monospace, monospace); }
-    ${scope} .historic-body { opacity: 0.6; transition: opacity 0.15s; }
+    ${scope} .historic-body { color: var(--text-soft); transition: color 0.15s; }
+    ${scope} .historic-body :is(h1, h2, h3, h4, h5, h6) { color: var(--text-secondary); }
     ${scope} .historic:hover .historic-body,
-    ${scope} .historic:focus-within .historic-body { opacity: 1; }
+    ${scope} .historic:focus-within .historic-body { color: inherit; }
+    ${scope} .historic:hover .historic-body :is(h1, h2, h3, h4, h5, h6),
+    ${scope} .historic:focus-within .historic-body :is(h1, h2, h3, h4, h5, h6) { color: var(--text-primary); }
     ${scope} .diagram {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

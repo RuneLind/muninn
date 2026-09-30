@@ -47,9 +47,13 @@ export async function contrastOf(locator: Locator): Promise<number> {
  * every translucent fill between it and the first opaque one composited, as the
  * browser does — the active row's fill is a 14% tint, which a walk that stops
  * at the first non-transparent colour would read as solid.
+ *
+ * `withOpacity` also fades the text by every ancestor's `opacity` (and its own
+ * colour alpha) over that background — what a reader sees in a dimmed box with
+ * no fill of its own. Off by default, so the rail specs measure what they did.
  */
-export async function paintedContrast(locator: Locator): Promise<number> {
-  return locator.evaluate((el) => {
+export async function paintedContrast(locator: Locator, opts?: { withOpacity?: boolean }): Promise<number> {
+  return locator.evaluate((el, withOpacity) => {
     // A color-mix() computes to `color(srgb r g b / a)` with 0–1 channels,
     // not `rgb()`; read as 0–255 channels it is near-black.
     const rgba = (c: string) => {
@@ -75,8 +79,16 @@ export async function paintedContrast(locator: Locator): Promise<number> {
       };
       return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
     };
-    const a = lum(rgba(getComputedStyle(el).color));
+    let fg = rgba(getComputedStyle(el).color);
+    if (withOpacity) {
+      let alpha = fg.a;
+      for (let n: HTMLElement | null = el as HTMLElement; n; n = n.parentElement) {
+        alpha *= Number(getComputedStyle(n).opacity);
+      }
+      fg = { r: fg.r * alpha + bg.r * (1 - alpha), g: fg.g * alpha + bg.g * (1 - alpha), b: fg.b * alpha + bg.b * (1 - alpha), a: 1 };
+    }
+    const a = lum(fg);
     const b = lum(bg);
     return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  });
+  }, opts?.withOpacity ?? false);
 }

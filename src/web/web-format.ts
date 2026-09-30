@@ -220,8 +220,9 @@ const webRenderer: BlockRenderer = {
             `<div class="callout-body">${children}</div></details>`
           );
         }
-        const title = attrs.title
-          ? `<strong class="callout-title">${escapeHtml(attrs.title)}</strong>`
+        const calloutTitle = attrs.title?.trim();
+        const title = calloutTitle
+          ? `<strong class="callout-title">${escapeHtml(calloutTitle)}</strong>`
           : "";
         return `<div class="callout callout-${tone}">${title}<div class="callout-body">${children}</div></div>`;
       }

@@ -14,6 +14,7 @@
  */
 
 import { lineCodeSpanRanges } from "./code-spans.ts";
+import { isCalendarDay } from "./calendar-day.ts";
 
 export type Block =
   | { type: "code_block"; lang: string; code: string }
@@ -210,13 +211,20 @@ export function normalizeCalloutTone(tone: string | undefined): "info" | "warn" 
  */
 export function parseResolvedDate(value: string | undefined): string | null {
   const raw = value?.trim() ?? "";
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
-  if (!m) return null;
-  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  const date = new Date(Date.UTC(y, mo - 1, d));
-  return date.getUTCFullYear() === y && date.getUTCMonth() === mo - 1 && date.getUTCDate() === d
-    ? raw
-    : null;
+  return isCalendarDay(raw) ? raw : null;
+}
+
+/** The `✓ <date> · <title>` line a resolved `Callout` gets on the surfaces with
+ *  no `<details>` (Slack, Telegram, email). The title is trimmed, and a blank one
+ *  drops the separator. `formatTitle` receives the trimmed title and returns it
+ *  escaped/styled for the target; without it the result is unescaped text. */
+export function resolvedLeadText(
+  resolved: string,
+  title: string | undefined,
+  formatTitle: (title: string) => string = (t) => t,
+): string {
+  const t = title?.trim();
+  return `✓ ${resolved}${t ? ` · ${formatTitle(t)}` : ""}`;
 }
 
 /** The `(historic: <since> — <note>)` lead line a `Historic` block gets on the

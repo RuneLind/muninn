@@ -24,6 +24,7 @@ import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
+import { isCalendarDay } from "../format/calendar-day.ts";
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
 
 const log = getLog("wiki", "digest");
@@ -114,9 +115,7 @@ export function parseLogEntries(logText: string): LogEntry[] {
  *  (which the entry regex still matches, and which would make `shiftDate` throw)
  *  is rejected rather than allowed to anchor or crash the window selection. */
 export function isValidCalendarDate(s: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-  const d = new Date(s + "T00:00:00Z");
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+  return isCalendarDay(s);
 }
 
 /**

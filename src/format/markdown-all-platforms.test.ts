@@ -5,6 +5,7 @@ import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatEmailHtml } from "./email-format.ts";
 import { RAW_EMPHASIS_SOURCES } from "./markdown-core.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
+import * as ast from "./markdown-ast.ts";
 
 // Early-warning system for divergence: the FOUR platform formatters share one
 // block AST + dispatcher, so the same markdown must keep producing each
@@ -1269,4 +1270,37 @@ describe("a fence's info string can never break an HTML attribute", () => {
     }
     expect(out).not.toContain("<script");
   });
+});
+
+describe("report blocks — fix round 1 (title trimming, shared lead text, dates)", () => {
+  test("email Fold → a whitespace-only title leaves no dangling dash before the summary", () => {
+    const out = formatEmailHtml('<Fold title="   " summary="teaser">\n\nbody\n\n</Fold>');
+    expect(out).not.toContain(" — ");
+    expect(out).toContain(">teaser</span></div>");
+  });
+
+  test("resolvedLeadText trims the title and drops the separator when it is empty", () => {
+    const lead = ast.resolvedLeadText;
+    expect(typeof lead).toBe("function");
+    expect(lead!("2026-09-28", "  T  ")).toBe("✓ 2026-09-28 · T");
+    expect(lead!("2026-09-28", "   ")).toBe("✓ 2026-09-28");
+    expect(lead!("2026-09-28", undefined)).toBe("✓ 2026-09-28");
+    expect(lead!("2026-09-28", " T ", (t) => `*${t}*`)).toBe("✓ 2026-09-28 · *T*");
+  });
+
+  test("an unresolved callout's title is trimmed on all four surfaces", () => {
+    const md = '<Callout tone="warn" title="  T  ">\n\nb\n\n</Callout>';
+    expect(formatWebHtml(md)).toContain('<strong class="callout-title">T</strong>');
+    expect(formatTelegramHtml(md).startsWith("<b>T</b>\n")).toBe(true);
+    expect(formatSlackMrkdwn(md).startsWith("*T*\n")).toBe(true);
+    expect(formatEmailHtml(md)).toContain(">T</div>");
+    const blank = '<Callout tone="warn" title="   ">\n\nb\n\n</Callout>';
+    expect(formatWebHtml(blank)).not.toContain("callout-title");
+    expect(formatTelegramHtml(blank).startsWith("<b>")).toBe(false);
+    expect(formatSlackMrkdwn(blank).startsWith("*")).toBe(false);
+    expect(formatEmailHtml(blank)).not.toContain("font-weight:600");
+  });
+
+  test("resolved= accepts a year below 100 (no 19xx rollover)", () =>
+    expect(ast.parseResolvedDate("0099-01-01")).toBe("0099-01-01"));
 });

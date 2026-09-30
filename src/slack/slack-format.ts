@@ -9,6 +9,7 @@ import {
   parseChecklist,
   parseResolvedDate,
   historicLeadText,
+  resolvedLeadText,
 } from "../format/markdown-ast.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
@@ -49,10 +50,10 @@ const slackRenderer: BlockRenderer = {
         // under a "✓ <date> · <title>" line.
         const resolved = parseResolvedDate(attrs.resolved);
         if (resolved) {
-          const t = attrs.title?.trim();
-          return `✓ ${resolved}${t ? ` · *${renderInline(t)}*` : ""}\n${children}`;
+          return `${resolvedLeadText(resolved, attrs.title, (t) => `*${renderInline(t)}*`)}\n${children}`;
         }
-        return attrs.title ? `*${renderInline(attrs.title)}*\n${children}` : children;
+        const title = attrs.title?.trim();
+        return title ? `*${renderInline(title)}*\n${children}` : children;
       }
       case "Verdict": {
         const value = normalizeVerdictValue(attrs.value);

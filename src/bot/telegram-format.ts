@@ -9,6 +9,7 @@ import {
   parseChecklist,
   parseResolvedDate,
   historicLeadText,
+  resolvedLeadText,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
@@ -49,10 +50,10 @@ const telegramRenderer: BlockRenderer = {
         // its body open under a "✓ <date> · <title>" line.
         const resolved = parseResolvedDate(attrs.resolved);
         if (resolved) {
-          const t = attrs.title?.trim();
-          return `✓ ${resolved}${t ? ` · <b>${escapeHtml(t)}</b>` : ""}\n${children}`;
+          return `${resolvedLeadText(resolved, attrs.title, (t) => `<b>${escapeHtml(t)}</b>`)}\n${children}`;
         }
-        return attrs.title ? `<b>${escapeHtml(attrs.title)}</b>\n${children}` : children;
+        const title = attrs.title?.trim();
+        return title ? `<b>${escapeHtml(title)}</b>\n${children}` : children;
       }
       case "Verdict": {
         const value = normalizeVerdictValue(attrs.value);

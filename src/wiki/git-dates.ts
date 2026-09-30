@@ -380,7 +380,7 @@ export function parseGitLog(
  * page: the four provenance keys claude-usage's stamper writes, plus the five
  * muninn's own mechanical writers do — the series editor (`series`/`series_label`,
  * one call per member of a join) and the `/plans` board (`priority`, and
- * `plan_status` + `status_date` together) — plus the three keys of a cull.
+ * `plan_status` + `status_date` together) — plus the three keys of a cull and the `code_at` commit pin.
  *
  * The rule is derived from the KEY SET, not from a claim about its writers: the
  * gardener's lint-proposals path writes `series:` WITH a `log.md` entry, so "every
@@ -405,6 +405,9 @@ export const METADATA_ONLY_FRONTMATTER_KEYS = [
   "signal",
   "signal-reason",
   "superseded_by",
+  // The line-ref chips' commit pin (`src/wiki/code-refs.ts`): re-pinning moves
+  // where the links point, not what the page says.
+  "code_at",
 ] as const;
 
 /** A frontmatter line whose KEY is one a mechanical writer owns. Column 0 and a

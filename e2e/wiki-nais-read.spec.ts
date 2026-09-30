@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { HISTORIC_PILL_CLASS, LINE_REFS_TOGGLE_CLASS } from "../src/dashboard/views/components/wiki-report-blocks.ts";
 
 const PORT = e2ePort("wiki-nais-read");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -85,6 +86,16 @@ const PAGE = [
   "Se også [[annen-side]] og [MELOSYS-7790](https://jira.example.invalid/browse/MELOSYS-7790).",
   "",
   '<Embed src="./testside.html" height="200" title="Kart" />',
+  "",
+  // A pure line-ref group and a Historic block, so the reader's `line refs`
+  // toggle and `↻ N historic` pill render and meet the allowlist below.
+  "Vedtaket lagres (`Vedtak.kt:12`, `:40-44`).",
+  "",
+  '<Historic since="melosys-api#1" note="gammel flyt">',
+  "",
+  "Den gamle flyten.",
+  "",
+  "</Historic>",
   "",
 ].join("\n");
 const SECOND = ["---", "title: Andre del", "series: felles", "---", "", "# Andre del", "", "Del to av serien.", ""].join("\n");
@@ -220,6 +231,10 @@ const READER_CONTROLS = [
   "a.embed-open",
   '.wiki-conn-tab[data-conntab="conn"]',
   ".wiki-pane-btn",
+  // The report-block chrome: the line-ref toggle (localStorage) and the
+  // historic pill (scrolls within the page).
+  `.${LINE_REFS_TOGGLE_CLASS}`,
+  `.${HISTORIC_PILL_CLASS}`,
   // Out to the tracker.
   'a[href^="https://"][target="_blank"]',
 ];
@@ -279,6 +294,8 @@ for (const scheme of ["light", "dark"] as const) {
     // controls were on screen for the allowlist check below.
     await expect(page.locator("#articleWrap iframe").first()).toBeVisible();
     await expect(page.locator("[data-prov-toggle]")).toBeVisible();
+    await expect(page.locator(`.${LINE_REFS_TOGGLE_CLASS}`)).toBeVisible();
+    await expect(page.locator(`.${HISTORIC_PILL_CLASS}`)).toBeVisible();
     expect(await unexpectedControls(page)).toEqual([]);
     expect(await apiLinksOutsideSlice(page)).toEqual([]);
     // Open the provenance chain: its rows carry controls of their own.

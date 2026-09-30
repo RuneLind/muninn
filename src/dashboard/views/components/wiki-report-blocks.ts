@@ -4,16 +4,20 @@
  *
  *  - `↻ N historic` — a pill in the header's meta row, beside the status chip,
  *    counting the page's `<Historic>` sections (`section.historic`); a click
- *    scrolls to the first one.
- *  - `line refs` — a toggle, shown only on a page with line-ref chips
- *    (`code.code-ref`, emitted by `src/wiki/code-refs.ts`), that hides every chip
- *    with one class on `.wiki-article`. The choice is per viewer, in
+ *    opens any closed `<details>` around the first one and scrolls to it.
+ *  - `line refs` — a toggle, shown only on a page with a pure ref group
+ *    (`span.code-ref-group`, emitted by `src/wiki/code-refs.ts`), that hides
+ *    those groups with one class on `.wiki-article`. A chip outside a group is
+ *    never hidden, so hiding cannot delete prose. The choice is per viewer, in
  *    localStorage; default on.
  *
  * Runs at the article render site only, after the article HTML is in place.
  * Idempotent: a re-run removes its own controls before adding them again.
  */
 
+import { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS } from "../../../wiki/code-refs.ts";
+
+export { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS };
 export const LINE_REFS_KEY = "muninn.wiki.lineRefs.v1";
 export const CODE_REFS_OFF_CLASS = "code-refs-off";
 export const HISTORIC_PILL_CLASS = "wiki-historic-pill";
@@ -62,7 +66,14 @@ export function enhanceReportBlocks(wrap: ParentNode): void {
     pill.className = HISTORIC_PILL_CLASS;
     pill.textContent = historicPillLabel(historic.length);
     pill.title = "Jump to the first historic section";
-    pill.addEventListener("click", () => historic[0]!.scrollIntoView({ block: "start" }));
+    pill.addEventListener("click", () => {
+      const first = historic[0]!;
+      // A Historic inside a closed Fold has no box to scroll to.
+      for (let el = first.parentElement; el && el !== article; el = el.parentElement) {
+        if (el instanceof HTMLDetailsElement) el.open = true;
+      }
+      first.scrollIntoView({ block: "start" });
+    });
     // Beside the status chip: after the last badge/status/flag in the row.
     const anchors = row.querySelectorAll(".wiki-badge, .wiki-status, .wiki-followup-flag");
     const after = anchors[anchors.length - 1];
@@ -70,13 +81,13 @@ export function enhanceReportBlocks(wrap: ParentNode): void {
     else row.prepend(pill);
   }
 
-  if (article.querySelector("code.code-ref")) {
+  if (article.querySelector(`span.${CODE_REF_GROUP_CLASS}`)) {
     let on = readLineRefsOn(localStore());
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = LINE_REFS_TOGGLE_CLASS;
     toggle.textContent = "line refs";
-    toggle.title = "Show or hide code line references";
+    toggle.title = "Show or hide the parenthesised code line references";
     const apply = () => {
       article.classList.toggle(CODE_REFS_OFF_CLASS, !on);
       toggle.classList.toggle("on", on);
