@@ -1,5 +1,5 @@
 import { join, dirname } from "node:path";
-import { unlink } from "node:fs/promises";
+import { readdir, unlink } from "node:fs/promises";
 import { Glob } from "bun";
 import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
@@ -24,9 +24,17 @@ const YTDLP_BREAK_EXIT_CODE = 101;
 
 // A YouTube media URL can answer 403 on one extraction and serve the same
 // format on the next (LlgiOCmFG_w, 2026-09-30: 403 in the capture, a clean
-// download minutes later). One re-run fetches a fresh URL.
-const YTDLP_TRANSIENT_403 = /HTTP Error 403/;
+// download minutes later). One re-run fetches a fresh URL. Anchored on the
+// fatal `ERROR:` line: yt-dlp also logs recovered chunk 403s as warnings.
+const YTDLP_TRANSIENT_403 = /^ERROR:.*HTTP Error 403/m;
 const YTDLP_403_RETRY_DELAY_MS = 1_000;
+// The retry gets what is left of the caller's timeout, not a second full one,
+// and is skipped when less than this remains.
+const YTDLP_403_RETRY_MIN_MS = 10_000;
+// A completed split-stream intermediate (`video.f136.mp4`). A retry that picks
+// a different format id would leave it beside the merged file, where the
+// post-download glob could pick it.
+const YTDLP_INTERMEDIATE = /^video\.f\d+\./;
 
 /**
  * yt-dlp format selector. Two traps, both measured on TikTok 7646424593388883214
@@ -444,11 +452,28 @@ export async function downloadVideo(
   const args = ytDlpDownloadArgs(url, workDir, opts);
   const timeoutMs = opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
 
+  const deadline = Date.now() + timeoutMs;
+
   let { stdout, stderr, exitCode } = await runProc(args, timeoutMs, "yt-dlp download");
-  if (exitCode !== 0 && exitCode !== YTDLP_BREAK_EXIT_CODE && YTDLP_TRANSIENT_403.test(stderr)) {
-    log.warn("yt-dlp download of {url} got HTTP 403 — retrying once", { url });
+  const remainingMs = deadline - Date.now() - YTDLP_403_RETRY_DELAY_MS;
+  if (
+    exitCode !== 0 &&
+    exitCode !== YTDLP_BREAK_EXIT_CODE &&
+    YTDLP_TRANSIENT_403.test(stderr) &&
+    remainingMs >= YTDLP_403_RETRY_MIN_MS
+  ) {
+    log.warn("yt-dlp download of {url} got HTTP 403 — retrying once: {stderr}", {
+      url,
+      stderr: stderr.slice(-300),
+    });
+    // `.part` files stay: yt-dlp resumes them.
+    for (const name of await readdir(workDir).catch(() => [])) {
+      if (YTDLP_INTERMEDIATE.test(name) && !name.endsWith(".part")) {
+        await unlink(join(workDir, name)).catch(() => {});
+      }
+    }
     await Bun.sleep(YTDLP_403_RETRY_DELAY_MS);
-    ({ stdout, stderr, exitCode } = await runProc(args, timeoutMs, "yt-dlp download"));
+    ({ stdout, stderr, exitCode } = await runProc(args, remainingMs, "yt-dlp download"));
   }
 
   if (exitCode === YTDLP_BREAK_EXIT_CODE) {
