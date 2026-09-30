@@ -408,3 +408,151 @@ test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () =>
     "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
   ]);
 });
+
+// -- downloadVideo 403 retry ------------------------------------------------
+// A fake `yt-dlp` plays the capture seen on LlgiOCmFG_w: a 403 on the first
+// run. `Bun.spawn` resolves the binary against the PATH the process started
+// with, so `downloadVideo` runs in a child `bun` whose PATH leads with the fake.
+
+import { mkdtempSync, writeFileSync, readFileSync, chmodSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+
+interface FakeRun {
+  /** How many leading runs fail. */
+  failures: number;
+  /** stderr of a failing run; also printed by a successful one when `okStderr`. */
+  stderr: string;
+  failExit?: number;
+  okStderr?: boolean;
+  /** Extra file a failing run leaves in the work dir. */
+  leftover?: string;
+  /** Seconds a failing run, and then a successful one, sleep first. */
+  failSleep?: number;
+  okSleep?: number;
+  timeoutMs?: number;
+}
+
+async function downloadWithFake(run: FakeRun) {
+  const bin = mkdtempSync(joinPath(tmpdir(), "fake-ytdlp-"));
+  const work = mkdtempSync(joinPath(tmpdir(), "dl-work-"));
+  const counter = joinPath(bin, "count");
+  const stderrFile = joinPath(bin, "stderr");
+  writeFileSync(stderrFile, run.stderr + "\n");
+  writeFileSync(
+    joinPath(bin, "yt-dlp"),
+    `#!/bin/sh
+n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "${counter}"
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+dir=$(dirname "$out")
+if [ $n -le ${run.failures} ]; then
+  sleep ${run.failSleep ?? 0}
+  ${run.leftover ? `touch "$dir/${run.leftover}"` : ":"}
+  cat "${stderrFile}" >&2; exit ${run.failExit ?? 1}
+fi
+${run.okStderr ? `cat "${stderrFile}" >&2` : ""}
+sleep ${run.okSleep ?? 0}
+touch "$dir/video.mp4"
+echo '{"id":"abc","title":"t","duration":60,"uploader":"u","webpage_url":"https://example.com/v"}'
+`,
+  );
+  chmodSync(joinPath(bin, "yt-dlp"), 0o755);
+  const opts = { maxDurationSeconds: 600, ...(run.timeoutMs ? { timeoutMs: run.timeoutMs } : {}) };
+  const script = `
+    import { downloadVideo } from ${JSON.stringify(joinPath(import.meta.dir, "media.ts"))};
+    try {
+      const r = await downloadVideo("https://www.youtube.com/watch?v=x", ${JSON.stringify(work)}, ${JSON.stringify(opts)});
+      console.log(JSON.stringify({ ok: true, videoPath: r.videoPath }));
+    } catch (e) {
+      console.log(JSON.stringify({ ok: false, error: e.message }));
+    }
+    process.exit(0);`;
+  try {
+    const proc = Bun.spawn([process.execPath, "-e", script], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    await proc.exited;
+    const last = out.trim().split("\n").pop() ?? "";
+    if (!last.startsWith("{")) throw new Error(`child produced no result:\n${err}`);
+    const spawns = existsSync(counter) ? Number(readFileSync(counter, "utf8").trim()) : 0;
+    const result = JSON.parse(last) as { ok: boolean; videoPath?: string; error?: string };
+    return { ...result, spawns, work };
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+const FORBIDDEN = "ERROR: unable to download video data: HTTP Error 403: Forbidden";
+
+test("downloadVideo retries once on an HTTP 403 and succeeds", async () => {
+  const r = await downloadWithFake({ failures: 1, stderr: FORBIDDEN });
+  expect(r.spawns).toBe(2);
+  expect(r.ok).toBe(true);
+  expect(r.videoPath).toBe(joinPath(r.work, "video.mp4"));
+}, 15_000);
+
+test("downloadVideo gives up after the one 403 retry", async () => {
+  const r = await downloadWithFake({ failures: 5, stderr: FORBIDDEN });
+  expect(r.spawns).toBe(2);
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/HTTP Error 403/);
+}, 15_000);
+
+test("downloadVideo does not retry a non-403 failure", async () => {
+  const r = await downloadWithFake({ failures: 5, stderr: "ERROR: Video unavailable" });
+  expect(r.spawns).toBe(1);
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/Video unavailable/);
+}, 15_000);
+
+test("downloadVideo does not retry when only a warning carried the 403", async () => {
+  const r = await downloadWithFake({
+    failures: 5,
+    stderr: "WARNING: [youtube] x: HTTP Error 403: Forbidden\nERROR: Sign in to confirm you're not a bot",
+  });
+  expect(r.spawns).toBe(1);
+  expect(r.error).toMatch(/Sign in/);
+}, 15_000);
+
+test("downloadVideo does not re-run a success whose stderr logged a 403", async () => {
+  const r = await downloadWithFake({ failures: 0, stderr: FORBIDDEN, okStderr: true });
+  expect(r.spawns).toBe(1);
+  expect(r.ok).toBe(true);
+}, 15_000);
+
+test("downloadVideo does not retry the duration-cap exit", async () => {
+  const r = await downloadWithFake({ failures: 5, stderr: FORBIDDEN, failExit: 101 });
+  expect(r.spawns).toBe(1);
+  expect(r.error).toMatch(/video too long/);
+}, 15_000);
+
+test("downloadVideo skips the retry when the timeout is nearly spent", async () => {
+  const r = await downloadWithFake({ failures: 1, stderr: FORBIDDEN, timeoutMs: 5_000 });
+  expect(r.spawns).toBe(1);
+  expect(r.ok).toBe(false);
+}, 15_000);
+
+test("downloadVideo gives the retry only what is left of the timeout", async () => {
+  // 16 s budget, 3 s spent on the first run plus the 1 s pause: the retry gets
+  // ~12 s and the fake needs 14, so it times out. A retry given the full 16 s
+  // would succeed.
+  const r = await downloadWithFake({ failures: 1, stderr: FORBIDDEN, failSleep: 3, okSleep: 14, timeoutMs: 16_000 });
+  expect(r.spawns).toBe(2);
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/timed out/);
+}, 40_000);
+
+test("downloadVideo returns the output file, not a stream intermediate a failed run left", async () => {
+  // `video.fhls-720p.mp4` sorts before `video.mp4`.
+  const r = await downloadWithFake({ failures: 1, stderr: FORBIDDEN, leftover: "video.fhls-720p.mp4" });
+  expect(r.spawns).toBe(2);
+  expect(r.videoPath).toBe(joinPath(r.work, "video.mp4"));
+}, 15_000);
