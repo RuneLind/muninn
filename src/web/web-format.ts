@@ -16,8 +16,8 @@ import {
   diffLineClass,
   parseChecklist,
 } from "../format/markdown-ast.ts";
-import type { Block, FactVerdict } from "../format/markdown-ast.ts";
-import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
+import type { Block, ChecklistRow, FactVerdict } from "../format/markdown-ast.ts";
+import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
@@ -182,6 +182,59 @@ function isBlankTextBlock(block: Block): boolean {
   return block.type === "text" && block.lines.every((l) => l.trim() === "");
 }
 
+/** A list item's text: a continuation line after a `\n`, which the chat's
+ *  `pre-wrap` shows as a line break and the wiki reader as a space. */
+function itemHtml(text: string): string {
+  return text.split("\n").map(renderInline).join("\n");
+}
+
+/** ` value="n"` on an ordered item that keeps its own source number. */
+function liValue(values: (number | undefined)[] | undefined, k: number): string {
+  const v = values?.[k];
+  return v === undefined ? "" : ` value="${v}"`;
+}
+
+/** What sits under an item: child lists and code as rendered, a further
+ *  paragraph of the item as a `<p>` inside the `<li>`. */
+function childrenHtml(children: RenderedChild[] | undefined): string {
+  return children?.map((c) => (c.kind === "para" ? `<p>${itemHtml(c.text)}</p>` : c.out)).join("") ?? "";
+}
+
+/** Checklist rows as `<ul class="checklist">`, a nested list inside its parent
+ *  row. A parent row (`check-parent`, taken out of the flex row by the CSS) wraps
+ *  its text in `check-text`, so the todo colour stops at the row's own words
+ *  instead of reaching the rows under it. A nested row with no task marker is a
+ *  plain `check-plain` item, and a nested ordered list keeps its numbers. */
+function checklistHtml(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[]): string {
+  // A task row is a flex box, not a list item, so it does not advance an <ol>'s
+  // counter: in an ordered sublist every row carries its number as `value`.
+  const nums = ordered ? ordinals(start, rows.length, values) : undefined;
+  const lis = rows
+    .map((it, k) => {
+      const nested = (it.children ?? [])
+        .map((c) =>
+          c.type === "code_block"
+            ? codeFenceHtml(c.lang, c.code)
+            : c.type === "paragraph"
+              ? `<p>${itemHtml(c.text)}</p>`
+              : checklistHtml(c.rows, c.ordered, c.start, c.values),
+        )
+        .join("");
+      const value = nums ? ` value="${nums[k]}"` : "";
+      if (it.plain) return `<li class="check-plain"${value}>${itemHtml(it.text)}${nested}</li>`;
+      const state = it.checked ? "done" : "todo";
+      const mark = it.checked ? "✓" : "✗";
+      const text = nested ? `<span class="check-text">${itemHtml(it.text)}</span>` : itemHtml(it.text);
+      return (
+        `<li class="check-item check-${state}${nested ? " check-parent" : ""}"${value}>` +
+        `<span class="check-mark">${mark}</span> ${text}${nested}</li>`
+      );
+    })
+    .join("");
+  if (!ordered) return `<ul class="checklist">${lis}</ul>`;
+  return `<ol class="checklist check-ol"${start !== 1 ? ` start="${start}"` : ""}>${lis}</ol>`;
+}
+
 const webRenderer: BlockRenderer = {
   code_block(block) {
     return codeFenceHtml(block.lang, block.code);
@@ -192,9 +245,12 @@ const webRenderer: BlockRenderer = {
     return `<${tag}>${renderInline(block.content)}</${tag}>`;
   },
   blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
-  ul: (items) => `<ul>${items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ul>`,
-  ol: (items, start) =>
-    `<ol${start !== 1 ? ` start="${start}"` : ""}>${items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ol>`,
+  ul: (items, nest) =>
+    `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`,
+  ol: (items, start, nest) =>
+    `<ol${start !== 1 ? ` start="${start}"` : ""}>` +
+    items.map((i, k) => `<li${liValue(nest.values, k)}>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("") +
+    `</ol>`,
   table(headers, rows) {
     const thead = "<thead><tr>" + headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead>";
     const tbody = "<tbody>" + rows.map((row) =>
@@ -278,17 +334,7 @@ const webRenderer: BlockRenderer = {
       case "Checklist": {
         const items = parseChecklist(rawChildren);
         if (items.length === 0) return children; // no task list → render body as-is
-        const rows = items
-          .map((it) => {
-            const state = it.checked ? "done" : "todo";
-            const mark = it.checked ? "✓" : "✗";
-            return (
-              `<li class="check-item check-${state}">` +
-              `<span class="check-mark">${mark}</span> ${renderInline(it.text)}</li>`
-            );
-          })
-          .join("");
-        return `<ul class="checklist">${rows}</ul>`;
+        return checklistHtml(items);
       }
       case "AnnotatedCode": {
         const fence = firstCodeBlock(rawChildren);

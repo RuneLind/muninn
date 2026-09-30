@@ -11,8 +11,9 @@ import {
   historicLeadText,
   resolvedLeadText,
 } from "../format/markdown-ast.ts";
+import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
-import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
+import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import {
   Placeholders,
   escapeHtml,
@@ -29,10 +30,30 @@ import {
  */
 export function formatSlackMrkdwn(text: string): string {
   const rendered = renderBlocks(parseBlocks(text), slackRenderer);
+  // Empty items are blanked where they are rendered (`blankEmpty`), and a bare
+  // marker line of prose in `text` below, so nothing here reads code content.
+  // An empty first parent leaves its child list first: the trim keeps that
+  // line's indent (`◦`, a number, a task box); any other leading whitespace goes.
   return rendered
-    .replace(/^[•\-\*]\s*$/gm, "")
     .replace(/\n{3,}/g, "\n\n")
-    .trim();
+    .replace(/^\s*\n/, "")
+    .replace(/^[ \t]+(?=[^ \t])(?![◦☐☑] |\d{1,9}\. )/, "")
+    .trimEnd();
+}
+
+/** Checklist rows as `☑`/`☐` lines, nested lists indented two spaces per level;
+ *  a nested row without a task marker is a `◦` (or its number), not a `☐`. */
+function checklistText(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[]): string {
+  const nums = ordinals(start, rows.length, values);
+  const markers = rows.map((r, k) => (r.plain ? (ordered ? `${nums[k]}.` : "◦") : r.checked ? "☑" : "☐"));
+  const children = rows.map((r) => r.children?.map((c: ChecklistChild) =>
+    c.type === "code_block"
+      ? { kind: "code" as const, out: slackRenderer.code_block(c) }
+      : c.type === "paragraph"
+        ? { kind: "para" as const, text: c.text }
+        : { kind: "list" as const, out: checklistText(c.rows, c.ordered, c.start, c.values) },
+  ));
+  return textListItems(markers, rows.map((r) => r.text), { children, depth: 0, loose: false }, renderInline);
 }
 
 const slackRenderer: BlockRenderer = {
@@ -40,8 +61,9 @@ const slackRenderer: BlockRenderer = {
   hr: () => "",
   heading: (block) => `*${renderInline(block.content)}*`,
   blockquote: (lines) => lines.map((l) => `> ${renderInline(l)}`).join("\n"),
-  ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
-  ol: (items, start) => items.map((i, idx) => `${start + idx}. ${renderInline(i)}`).join("\n"),
+  ul: (items, nest) => textListItems(items.map(() => (nest.depth > 0 ? "◦" : "-")), items, nest, renderInline, true),
+  ol: (items, start, nest) =>
+    textListItems(ordinals(start, items.length, nest.values).map((n) => `${n}.`), items, nest, renderInline),
   table: (headers, rows) => renderTable(headers, rows),
   component(name, attrs, children, rawChildren) {
     switch (name) {
@@ -82,7 +104,7 @@ const slackRenderer: BlockRenderer = {
       case "Checklist": {
         const items = parseChecklist(rawChildren);
         if (items.length === 0) return children;
-        return items.map((it) => `${it.checked ? "☑" : "☐"} ${renderInline(it.text)}`).join("\n");
+        return checklistText(items);
       }
       case "AnnotatedCode":
         // file line + fence + annotation paragraphs (already in children).
@@ -135,7 +157,8 @@ const slackRenderer: BlockRenderer = {
       }
     }
   },
-  text: (lines) => lines.map(renderInline).join("\n"),
+  // A bare `-`/`*`/`•` line of prose renders as nothing, as it always has.
+  text: (lines) => lines.map((l) => (/^[•\-*][ \t]*$/.test(l) ? "" : renderInline(l))).join("\n"),
 };
 
 /**

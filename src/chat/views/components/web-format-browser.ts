@@ -87,6 +87,9 @@ function sanitizeHtml(html: string, isWeb: boolean): string {
         // collapsed in chat. Scoped to `details`: `open` on anything else is not
         // ours to keep.
         if (tag === "details" && attr.name === "open") continue;
+        // An ordered list's own numbers: `start` on a list that does not begin
+        // at 1, `value` on an item that keeps its source number. Digits only.
+        if (((tag === "ol" && attr.name === "start") || (tag === "li" && attr.name === "value")) && /^\d{1,9}$/.test(attr.value)) continue;
         el.removeAttribute(attr.name);
       }
       if (tag === "a") {

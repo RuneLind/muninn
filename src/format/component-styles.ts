@@ -211,10 +211,17 @@ export function componentBlockCss(scope: string): string {
       padding: 0.15rem 0;
       line-height: 1.5;
     }
+    ${scope} .check-item.check-parent { display: block; }
+    ${scope} :is(.check-item, .check-plain) > .checklist { margin: 0.15rem 0 0 1.5rem; }
+    ${scope} .checklist > .check-plain { list-style-type: disc; margin-left: 1.25rem; padding: 0.15rem 0; }
+    ${scope} .check-ol > .check-plain { list-style-type: decimal; }
     ${scope} .check-mark { flex: none; font-weight: 700; font-variant-numeric: tabular-nums; }
-    ${scope} .check-done .check-mark { color: var(--status-success); }
-    ${scope} .check-todo .check-mark { color: var(--text-muted); }
-    ${scope} .check-todo { color: var(--text-muted); }
+    /* Child combinators: a row's colours come from its OWN state, never from a
+       parent row it is nested in (a parent's todo text colour sits on its
+       .check-text, not on the <li> that also holds the child rows). */
+    ${scope} .check-done > .check-mark { color: var(--status-success); }
+    ${scope} .check-todo > .check-mark { color: var(--text-muted); }
+    ${scope} .check-todo:not(.check-parent), ${scope} .check-todo > .check-text { color: var(--text-muted); }
     ${scope} .annotated-code {
       margin: 1.2rem 0;
       border: 1px solid var(--border-secondary);

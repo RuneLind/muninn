@@ -12,6 +12,8 @@
  *  3. **A `[[wikilink]]` inside a fold body is still a link.** `renderWikiHtml`
  *     restores wikilinks over the RENDERED html, so a new container is exactly
  *     the kind of thing that can silently swallow one.
+ *  4. **Nested lists nest in the DOM**, inside a fold, with no `- ` text left
+ *     over and the child visibly indented under its parent.
  *
  * No model calls, no DB rows. ENV / SPAWN ENV: no `.env` is required — the spawn
  * inherits `DATABASE_URL` (CI passes it inline) and `e2eEnv()` blanks the platform
@@ -81,6 +83,44 @@ const MD = [
   "",
 ].join("\n");
 
+// Nested lists inside a fold: ul in ul, ul in ol (at the ordered content column,
+// the gate page's "   - **Blokker**" shape), a wikilink in a nested item, and a
+// Checklist with a nested task.
+const NESTED_REL = "plans/nested-lists.mdx";
+const NESTED = [
+  "---",
+  "title: Nested lists",
+  "---",
+  "",
+  "# Nested lists",
+  "",
+  '<Fold title="Rules" open="true">',
+  "",
+  "- top one",
+  "  - child a",
+  "  - child b links [[target-page]]",
+  "- top two",
+  "",
+  "1. **Published wins.**",
+  "2. **Wait.**",
+  "   - **Block (rule 2b).** No gate run counts.",
+  "3. **Otherwise** the last green run counts.",
+  "",
+  "<Checklist>",
+  "- [x] parent task",
+  "  - [ ] child task",
+  "</Checklist>",
+  "",
+  "<Checklist>",
+  "- [ ] open parent",
+  "  - [x] done child",
+  "  - plain child",
+  "</Checklist>",
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -93,6 +133,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, TARGET_REL), TARGET, "utf8");
   await writeFile(path.join(root, MDX_REL), MDX, "utf8");
   await writeFile(path.join(root, MD_REL), MD, "utf8");
+  await writeFile(path.join(root, NESTED_REL), NESTED, "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -189,5 +230,83 @@ test.describe("Wiki reader: <Fold>", () => {
     const dup = fold.locator("h3.fold-heading-dup");
     await expect(dup).toHaveCount(1);
     await expect(dup).toBeHidden();
+  });
+});
+
+test.describe("Wiki reader: nested lists", () => {
+  test("indented items render as child lists inside their parent item", async ({ page }) => {
+    await open_(page, NESTED_REL);
+    const body = page.locator(".wiki-article details.fold .fold-body");
+    await expect(body).toBeVisible();
+
+    // One top-level <ul> holding both top items, the children inside the first.
+    const topUl = body.locator(":scope > ul:not(.checklist)");
+    await expect(topUl).toHaveCount(1);
+    await expect(topUl.locator(":scope > li")).toHaveCount(2);
+    const childItems = topUl.locator(":scope > li > ul > li");
+    await expect(childItems).toHaveCount(2);
+    await expect(childItems.nth(0)).toHaveText("child a");
+
+    // The gate-page shape: a bullet under an ordered item, and the ordered list
+    // stays ONE list (3 items), not split around the bullet.
+    const ol = body.locator(":scope > ol");
+    await expect(ol).toHaveCount(1);
+    await expect(ol.locator(":scope > li")).toHaveCount(3);
+    await expect(ol.locator(":scope > li").nth(1).locator(":scope > ul > li")).toContainText("Block (rule 2b).");
+
+    // A nested checklist row sits inside its parent row.
+    await expect(body.locator("ul.checklist > li.check-parent > ul.checklist > li.check-todo")).toContainText(
+      "child task",
+    );
+
+    // No literal list markers leak as text.
+    const text = await body.innerText();
+    expect(text).not.toMatch(/^\s*[-*] /m);
+    expect(text).not.toMatch(/^\s+\d+\. /m);
+
+    // The child is visibly indented under its parent, in both lists.
+    const left = (l: import("@playwright/test").Locator) => l.evaluate((el) => el.getBoundingClientRect().left);
+    expect(await left(childItems.nth(0))).toBeGreaterThan((await left(topUl.locator(":scope > li").nth(0))) + 8);
+    const checkChild = body.locator("li.check-parent > ul.checklist > li").first();
+    expect(await left(checkChild)).toBeGreaterThan((await left(body.locator("li.check-parent").first())) + 8);
+  });
+
+  test("a done row under a todo row takes its OWN colours, and an unmarked child is a plain item", async ({ page }) => {
+    await open_(page, NESTED_REL);
+    const parent = page.locator(".wiki-article li.check-todo.check-parent").filter({ hasText: "open parent" });
+    const child = parent.locator(":scope > ul.checklist > li").filter({ hasText: "done child" });
+    await expect(child).toHaveClass(/check-done/);
+    // Tokens resolved on a probe in this document, so the assertion follows the
+    // theme instead of pinning a literal colour.
+    const token = (name: string) =>
+      page.evaluate((n) => {
+        const probe = document.createElement("span");
+        probe.style.color = `var(${n})`;
+        document.body.appendChild(probe);
+        const c = getComputedStyle(probe).color;
+        probe.remove();
+        return c;
+      }, name);
+    const success = await token("--status-success");
+    const muted = await token("--text-muted");
+    expect(success).not.toBe(muted);
+    await expect(child.locator(":scope > .check-mark")).toHaveCSS("color", success);
+    // The parent's todo colour stays on its own words.
+    await expect(parent.locator(":scope > .check-mark")).toHaveCSS("color", muted);
+    await expect(parent.locator(":scope > .check-text")).toHaveCSS("color", muted);
+    await expect(child).not.toHaveCSS("color", muted);
+
+    const plain = parent.locator(":scope > ul.checklist > li").filter({ hasText: "plain child" });
+    await expect(plain).toHaveClass("check-plain");
+    await expect(plain.locator(".check-mark")).toHaveCount(0);
+    await expect(plain).toHaveCSS("list-style-type", "disc");
+  });
+
+  test("a wikilink inside a nested item is still a link", async ({ page }) => {
+    await open_(page, NESTED_REL);
+    const link = page.locator(".wiki-article li > ul > li a.wiki-link");
+    await expect(link).toHaveCount(1);
+    await link.click();
+    await expect(page.locator(".wiki-article")).toContainText("The page a fold body links to.");
   });
 });

@@ -11,7 +11,8 @@ import {
   historicLeadText,
   resolvedLeadText,
 } from "../format/markdown-ast.ts";
-import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
+import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
+import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
@@ -27,6 +28,21 @@ export function formatTelegramHtml(text: string): string {
 
 const TG_ALLOWED_TAG = /^\/?(b|i|u|s|code|pre|a|tg-spoiler|tg-emoji|blockquote)(\s|>|$)/i;
 
+/** Checklist rows as `☑`/`☐` lines, nested lists indented two spaces per level;
+ *  a nested row without a task marker is a `◦` (or its number), not a `☐`. */
+function checklistText(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[]): string {
+  const nums = ordinals(start, rows.length, values);
+  const markers = rows.map((r, k) => (r.plain ? (ordered ? `${nums[k]}.` : "◦") : r.checked ? "☑" : "☐"));
+  const children = rows.map((r) => r.children?.map((c: ChecklistChild) =>
+    c.type === "code_block"
+      ? { kind: "code" as const, out: telegramRenderer.code_block(c) }
+      : c.type === "paragraph"
+        ? { kind: "para" as const, text: c.text }
+        : { kind: "list" as const, out: checklistText(c.rows, c.ordered, c.start, c.values) },
+  ));
+  return textListItems(markers, rows.map((r) => r.text), { children, depth: 0, loose: false }, renderInline);
+}
+
 const telegramRenderer: BlockRenderer = {
   code_block(block) {
     const openTag = block.lang ? `<code class="language-${block.lang}">` : "<code>";
@@ -35,8 +51,9 @@ const telegramRenderer: BlockRenderer = {
   hr: () => "",
   heading: (block) => `<b>${renderInline(block.content)}</b>`,
   blockquote: (lines) => lines.map((l) => `> ${renderInline(l)}`).join("\n"),
-  ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
-  ol: (items, start) => items.map((i, idx) => `${start + idx}. ${renderInline(i)}`).join("\n"),
+  ul: (items, nest) => textListItems(items.map(() => (nest.depth > 0 ? "◦" : "-")), items, nest, renderInline),
+  ol: (items, start, nest) =>
+    textListItems(ordinals(start, items.length, nest.values).map((n) => `${n}.`), items, nest, renderInline),
   table(headers, rows) {
     const headerRow = `| ${headers.map(renderInline).join(" | ")} |`;
     const sepRow = "|" + headers.map(() => "---").join("|") + "|";
@@ -82,7 +99,7 @@ const telegramRenderer: BlockRenderer = {
       case "Checklist": {
         const items = parseChecklist(rawChildren);
         if (items.length === 0) return children;
-        return items.map((it) => `${it.checked ? "☑" : "☐"} ${renderInline(it.text)}`).join("\n");
+        return checklistText(items);
       }
       case "AnnotatedCode":
         // file line + fence + annotation paragraphs (already in children).

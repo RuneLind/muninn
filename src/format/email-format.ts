@@ -34,8 +34,8 @@ import {
   historicLeadText,
   resolvedLeadText,
 } from "./markdown-ast.ts";
-import type { Block, FactVerdict } from "./markdown-ast.ts";
-import { renderBlocks, type BlockRenderer } from "./block-renderer.ts";
+import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
+import { renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
 import {
   Placeholders,
@@ -67,6 +67,8 @@ const S = {
   p: `margin:0 0 12px;line-height:1.55;color:${TEXT};`,
   list: `margin:0 0 12px;padding-left:22px;line-height:1.55;color:${TEXT};`,
   li: "margin:0 0 4px;",
+  sublist: `margin:4px 0 0;padding-left:22px;line-height:1.55;color:${TEXT};`,
+  itemP: "margin:6px 0 0;",
   pre:
     `margin:0 0 12px;padding:12px;background:${SURFACE};border:1px solid ${BORDER};` +
     `border-radius:6px;overflow-x:auto;font-family:${MONO};font-size:13px;line-height:1.45;`,
@@ -106,6 +108,54 @@ export function formatEmailHtml(text: string): string {
   return renderBlocks(parseBlocks(text), emailRenderer).replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** A list item's text, a continuation line after a `<br>`. */
+function itemEmail(text: string): string {
+  return text.split("\n").map(renderInline).join("<br>");
+}
+
+/** A further paragraph of a list item, inside its `<li>`. */
+function itemParaEmail(text: string): string {
+  return `<p style="${S.itemP}">${itemEmail(text)}</p>`;
+}
+
+function childrenEmail(children: RenderedChild[] | undefined): string {
+  return children?.map((c) => (c.kind === "para" ? itemParaEmail(c.text) : c.out)).join("") ?? "";
+}
+
+/** Checklist rows as a styled `<ul>`, a nested list inside its parent row; a
+ *  nested row with no task marker is an ordinary bullet (or number). */
+function checklistEmail(
+  rows: ChecklistRow[],
+  depth: number,
+  ordered = false,
+  start = 1,
+  values?: (number | undefined)[],
+): string {
+  const lis = rows
+    .map((it, k) => {
+      const nested = (it.children ?? [])
+        .map((c) =>
+          c.type === "code_block"
+            ? emailRenderer.code_block(c)
+            : c.type === "paragraph"
+              ? itemParaEmail(c.text)
+              : checklistEmail(c.rows, depth + 1, c.ordered, c.start, c.values),
+        )
+        .join("");
+      const v = values?.[k];
+      if (it.plain) return `<li style="${S.li}"${v === undefined ? "" : ` value="${v}"`}>${itemEmail(it.text)}${nested}</li>`;
+      return (
+        `<li style="${S.li}list-style:none;">` +
+        `<span style="color:${it.checked ? VERDICT_COLOR.yes : DIM};">${it.checked ? "☑" : "☐"}</span> ` +
+        `${itemEmail(it.text)}${nested}</li>`
+      );
+    })
+    .join("");
+  const tag = ordered ? "ol" : "ul";
+  const style = depth > 0 ? S.sublist : `${S.list}padding-left:4px;`;
+  return `<${tag} style="${style}"${ordered && start !== 1 ? ` start="${start}"` : ""}>${lis}</${tag}>`;
+}
+
 const emailRenderer: BlockRenderer = {
   code_block: (block) => `<pre style="${S.pre}"><code>${escapeHtml(block.code)}</code></pre>`,
   hr: () => `<hr style="${S.hr}">`,
@@ -115,11 +165,18 @@ const emailRenderer: BlockRenderer = {
   },
   blockquote: (lines) =>
     `<blockquote style="${S.quote}">${lines.map(renderInline).join("<br>")}</blockquote>`,
-  ul: (items) =>
-    `<ul style="${S.list}">${items.map((i) => `<li style="${S.li}">${renderInline(i)}</li>`).join("")}</ul>`,
-  ol: (items, start) =>
-    `<ol style="${S.list}"${start !== 1 ? ` start="${start}"` : ""}>` +
-    items.map((i) => `<li style="${S.li}">${renderInline(i)}</li>`).join("") +
+  ul: (items, nest) =>
+    `<ul style="${nest.depth > 0 ? S.sublist : S.list}">` +
+    items.map((i, k) => `<li style="${S.li}">${itemEmail(i)}${childrenEmail(nest.children[k])}</li>`).join("") +
+    `</ul>`,
+  ol: (items, start, nest) =>
+    `<ol style="${nest.depth > 0 ? S.sublist : S.list}"${start !== 1 ? ` start="${start}"` : ""}>` +
+    items
+      .map((i, k) => {
+        const v = nest.values?.[k];
+        return `<li style="${S.li}"${v === undefined ? "" : ` value="${v}"`}>${itemEmail(i)}${childrenEmail(nest.children[k])}</li>`;
+      })
+      .join("") +
     `</ol>`,
   table(headers, rows) {
     const thead =
@@ -184,15 +241,7 @@ const emailRenderer: BlockRenderer = {
       case "Checklist": {
         const items = parseChecklist(rawChildren);
         if (items.length === 0) return children;
-        const rows = items
-          .map(
-            (it) =>
-              `<li style="${S.li}list-style:none;">` +
-              `<span style="color:${it.checked ? VERDICT_COLOR.yes : DIM};">${it.checked ? "☑" : "☐"}</span> ` +
-              `${renderInline(it.text)}</li>`,
-          )
-          .join("");
-        return `<ul style="${S.list}padding-left:4px;">${rows}</ul>`;
+        return checklistEmail(items, 0);
       }
       case "AnnotatedCode": {
         const fence = firstCodeBlock(rawChildren);

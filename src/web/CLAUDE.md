@@ -98,6 +98,69 @@ and the next code block into one lang-less block. Everything past the lang token
 is discarded, sentinel included; that is CommonMark's rule, the same one that
 drops `title="x"`.
 
+## Lists and nested lists
+
+`parseList` (`src/format/markdown-ast.ts`) builds one `ul`/`ol` block per list.
+`items[k]` is an item's text; `nested[k]` is what sits under it, in source order:
+child lists, fenced code and further paragraphs of the item. Renderers get it
+through `ListNest`: nested `<ul>`/`<ol>`/`<pre>`/`<p>` inside the `<li>` on web
+and email, two spaces per level with a `◦` bullet (numbers kept) on Telegram and
+Slack, where code stays unindented and a paragraph follows a blank line at the
+item's hanging indent.
+
+- **Opening.** A top-level list opens on `-`, `*` or `N.` (1–9 digits; `+` never
+  opens one) indented at most 3 spaces. An indented one opens only at a block
+  start (first line, after a blank line, a fence or a heading), so unfenced YAML
+  under `config:` and a wrapped `   2024. That…` line stay text. A column-0 item
+  opens a list under prose whatever its number (`**Label**` / `4. …` is a list,
+  as before nesting); the interruption rule below is for child lists only.
+- **Nesting.** An item line indented to the deepest item's child column (2+
+  spaces under a bullet, the content column under `N.`) opens a child list.
+  Directly under item text the same interruption rule applies, so a wrapped
+  `  2024. …` or `  + …` line is text of the item. After a blank line any marker
+  opens one. The other marker kind at the same depth starts a second sublist
+  under the same item. Nesting stops at 4 levels.
+- **Continuation.** A non-item line directly under an item, indented into the
+  top-level item, joins the deepest item after a `\n` (a line break in the chat's
+  `pre-wrap`, a space in the wiki reader, `<br>` in email, a hanging indent on
+  Telegram/Slack). Indent past the content column is kept. An unindented line, a
+  table row or a component tag ends the list, as before.
+- **Item paragraphs.** After a blank line or a fence in an item, a non-item line
+  indented to an open item's content column is a new paragraph (`ListParagraph`)
+  of the deepest such item, and the list goes on after it: `2. second` / blank /
+  `   more.` / `3. third` is one list of three. Lines directly under it continue
+  the paragraph. Indented less than the top-level item's content column, it ends
+  the list.
+- **Blank lines.** A blank line ends the list unless the next line is an item
+  that nests or is a sibling, a fence indented into an item, or an item
+  paragraph. Such a list is `loose`: Telegram/Slack keep a blank line between its
+  items; web and email render it tight.
+- **Fences.** A fence whose opener is indented to an item's child column is code
+  in that item, and the list continues after it. Openers indent at most 3
+  spaces from column 0, so a fence under a NESTED item (opener at 4+) is not a
+  fence: after a blank line its lines, backticks included, are a paragraph of
+  that item; directly under the item they are continuation text.
+- **Numbers.** `start` is the first item's number (`0.` included). An item that
+  does not directly follow its previous item's line keeps its source number in
+  `values[k]` (`<li value>`), which is where the old parser split the list and
+  restarted. Directly consecutive items count on, as before. The chat sanitizer
+  (`web-format-browser.ts`) keeps a numeric `start` and `value`.
+- **Columns.** Tabs expand to the next multiple of 4; 5+ spaces after a marker
+  put the content column one past the marker (CommonMark).
+- **Not items.** `* * *` and `- - -` are rules (at most 3 spaces of indent);
+  `***` stays text.
+
+A `<Checklist>` nests the same way (`ChecklistRow.children`): a nested row
+without `[ ]`/`[x]` is a plain item (`check-plain`), a nested ordered list keeps
+its numbers, and a parent row wraps its text in `check-text` so its todo colour
+does not reach the rows under it (the mark rules use child combinators). A task
+row is a flex box and does not advance an `<ol>` counter, so on the web every row
+of an ordered sublist carries its number as `value`.
+
+Slack blanks an empty bullet item where it renders it (`textListItems`'
+`blankEmpty`) and a bare `-`/`*`/`•` prose line in the `text` renderer; nothing
+after rendering reads code content.
+
 ## Syntax highlighting in fenced code blocks
 
 `code_block` (and `AnnotatedCode`, through the shared `codeFenceHtml`) runs the body through `highlightCode` (`src/format/highlight.ts`), which emits `<span class="tok-*">` for seven token classes; the colors are `--tok-*` in `shared-styles.ts`, so both themes come from one palette and a theme flip costs nothing at render time. Languages are the ones the wikis actually use (ts/js/kotlin/java, sql, shell, json, yaml); `html`, `mermaid`, `diff` and anything unknown fall through to plain `escapeHtml`.
