@@ -274,7 +274,7 @@ Sonnet times out at 60s with large prompts. The collection path must send **comp
 | Field | Default | Description |
 |---|---|---|
 | `collection` | `"x-feed"` | Collection name. Required for the active collection path. |
-| `model` | Haiku | Model for summarization (e.g. "claude-sonnet-4-6") |
+| `model` | Haiku | Model for summarization (e.g. "claude-sonnet-5-5") |
 | `timeoutMs` | 300000 | Model call timeout (ms). Set 600000+ for Sonnet with large backlogs. Read by BOTH legs off the same default: the digest call, and the capture leg's completion budget (`min(timeoutMs + 30s, tick 600s) − 60s`). |
 | `maxDocs` | 80 | Max documents to fetch from collection per run. The cap is **score-ordered** (see "Score-ordered document cap"), so at full listing-score coverage it no longer shapes digest content — only fetch cost and the capture batch. Below full coverage it still selects which docs are fetched at all. **Calibrated 2026-07-25 and deliberately kept at 80** for the X-Article work: the live 2-day window held 476 docs at **100%** listing-score coverage, 80th-place `combined_score` = **0.5794**, and every article-class doc in the capture band sat at ranks 1/15/26/38/57/67 (0.7493 → 0.5903) — all inside 80. Raising to 200 (cut ≈ 0.500) would admit 10 more articles, all from the low-engagement tail the gate's 0.6 floor rejects anyway, at ~200 doc fetches per 2h run. Revisit only if a `Collection: …` log line shows `newCount` regularly above 80 (the first post-quiet-hours run is the one binding case). |
 | `topN` | 30 | Max tweets sent to LLM after engagement ranking |
