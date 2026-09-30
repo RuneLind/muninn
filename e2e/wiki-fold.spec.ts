@@ -111,6 +111,12 @@ const NESTED = [
   "  - [ ] child task",
   "</Checklist>",
   "",
+  "<Checklist>",
+  "- [ ] open parent",
+  "  - [x] done child",
+  "  - plain child",
+  "</Checklist>",
+  "",
   "</Fold>",
   "",
 ].join("\n");
@@ -262,7 +268,38 @@ test.describe("Wiki reader: nested lists", () => {
     const left = (l: import("@playwright/test").Locator) => l.evaluate((el) => el.getBoundingClientRect().left);
     expect(await left(childItems.nth(0))).toBeGreaterThan((await left(topUl.locator(":scope > li").nth(0))) + 8);
     const checkChild = body.locator("li.check-parent > ul.checklist > li").first();
-    expect(await left(checkChild)).toBeGreaterThan((await left(body.locator("li.check-parent"))) + 8);
+    expect(await left(checkChild)).toBeGreaterThan((await left(body.locator("li.check-parent").first())) + 8);
+  });
+
+  test("a done row under a todo row takes its OWN colours, and an unmarked child is a plain item", async ({ page }) => {
+    await open_(page, NESTED_REL);
+    const parent = page.locator(".wiki-article li.check-todo.check-parent").filter({ hasText: "open parent" });
+    const child = parent.locator(":scope > ul.checklist > li").filter({ hasText: "done child" });
+    await expect(child).toHaveClass(/check-done/);
+    // Tokens resolved on a probe in this document, so the assertion follows the
+    // theme instead of pinning a literal colour.
+    const token = (name: string) =>
+      page.evaluate((n) => {
+        const probe = document.createElement("span");
+        probe.style.color = `var(${n})`;
+        document.body.appendChild(probe);
+        const c = getComputedStyle(probe).color;
+        probe.remove();
+        return c;
+      }, name);
+    const success = await token("--status-success");
+    const muted = await token("--text-muted");
+    expect(success).not.toBe(muted);
+    await expect(child.locator(":scope > .check-mark")).toHaveCSS("color", success);
+    // The parent's todo colour stays on its own words.
+    await expect(parent.locator(":scope > .check-mark")).toHaveCSS("color", muted);
+    await expect(parent.locator(":scope > .check-text")).toHaveCSS("color", muted);
+    await expect(child).not.toHaveCSS("color", muted);
+
+    const plain = parent.locator(":scope > ul.checklist > li").filter({ hasText: "plain child" });
+    await expect(plain).toHaveClass("check-plain");
+    await expect(plain.locator(".check-mark")).toHaveCount(0);
+    await expect(plain).toHaveCSS("list-style-type", "disc");
   });
 
   test("a wikilink inside a nested item is still a link", async ({ page }) => {

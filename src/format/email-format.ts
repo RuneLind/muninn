@@ -35,7 +35,7 @@ import {
   resolvedLeadText,
 } from "./markdown-ast.ts";
 import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
-import { renderBlocks, type BlockRenderer } from "./block-renderer.ts";
+import { renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
 import {
   Placeholders,
@@ -107,17 +107,43 @@ export function formatEmailHtml(text: string): string {
   return renderBlocks(parseBlocks(text), emailRenderer).replace(/\n{3,}/g, "\n\n").trim();
 }
 
-/** Checklist rows as a styled `<ul>`, a nested task list inside its parent row. */
-function checklistEmail(rows: ChecklistRow[], depth: number): string {
+/** A list item's text, a continuation line after a `<br>`. */
+function itemEmail(text: string): string {
+  return text.split("\n").map(renderInline).join("<br>");
+}
+
+function childrenEmail(children: RenderedChild[] | undefined): string {
+  return children?.map((c) => c.out).join("") ?? "";
+}
+
+/** Checklist rows as a styled `<ul>`, a nested list inside its parent row; a
+ *  nested row with no task marker is an ordinary bullet (or number). */
+function checklistEmail(
+  rows: ChecklistRow[],
+  depth: number,
+  ordered = false,
+  start = 1,
+  values?: (number | undefined)[],
+): string {
   const lis = rows
-    .map(
-      (it) =>
+    .map((it, k) => {
+      const nested = (it.children ?? [])
+        .map((c) =>
+          c.type === "code_block" ? emailRenderer.code_block(c) : checklistEmail(c.rows, depth + 1, c.ordered, c.start, c.values),
+        )
+        .join("");
+      const v = values?.[k];
+      if (it.plain) return `<li style="${S.li}"${v === undefined ? "" : ` value="${v}"`}>${itemEmail(it.text)}${nested}</li>`;
+      return (
         `<li style="${S.li}list-style:none;">` +
         `<span style="color:${it.checked ? VERDICT_COLOR.yes : DIM};">${it.checked ? "☑" : "☐"}</span> ` +
-        `${renderInline(it.text)}${it.children?.length ? checklistEmail(it.children, depth + 1) : ""}</li>`,
-    )
+        `${itemEmail(it.text)}${nested}</li>`
+      );
+    })
     .join("");
-  return `<ul style="${depth > 0 ? S.sublist : `${S.list}padding-left:4px;`}">${lis}</ul>`;
+  const tag = ordered ? "ol" : "ul";
+  const style = depth > 0 ? S.sublist : `${S.list}padding-left:4px;`;
+  return `<${tag} style="${style}"${ordered && start !== 1 ? ` start="${start}"` : ""}>${lis}</${tag}>`;
 }
 
 const emailRenderer: BlockRenderer = {
@@ -129,13 +155,18 @@ const emailRenderer: BlockRenderer = {
   },
   blockquote: (lines) =>
     `<blockquote style="${S.quote}">${lines.map(renderInline).join("<br>")}</blockquote>`,
-  ul: (items, sublists, depth) =>
-    `<ul style="${depth > 0 ? S.sublist : S.list}">` +
-    items.map((i, k) => `<li style="${S.li}">${renderInline(i)}${sublists[k] ?? ""}</li>`).join("") +
+  ul: (items, nest) =>
+    `<ul style="${nest.depth > 0 ? S.sublist : S.list}">` +
+    items.map((i, k) => `<li style="${S.li}">${itemEmail(i)}${childrenEmail(nest.children[k])}</li>`).join("") +
     `</ul>`,
-  ol: (items, start, sublists, depth) =>
-    `<ol style="${depth > 0 ? S.sublist : S.list}"${start !== 1 ? ` start="${start}"` : ""}>` +
-    items.map((i, k) => `<li style="${S.li}">${renderInline(i)}${sublists[k] ?? ""}</li>`).join("") +
+  ol: (items, start, nest) =>
+    `<ol style="${nest.depth > 0 ? S.sublist : S.list}"${start !== 1 ? ` start="${start}"` : ""}>` +
+    items
+      .map((i, k) => {
+        const v = nest.values?.[k];
+        return `<li style="${S.li}"${v === undefined ? "" : ` value="${v}"`}>${itemEmail(i)}${childrenEmail(nest.children[k])}</li>`;
+      })
+      .join("") +
     `</ol>`,
   table(headers, rows) {
     const thead =

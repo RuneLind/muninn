@@ -100,19 +100,51 @@ drops `title="x"`.
 
 ## Lists and nested lists
 
-`parseList` (`src/format/markdown-ast.ts`) nests an item line indented to its
-parent item's child column: 2+ spaces under a bullet, the content column under an
-ordered item (`1. x` → 3). `sublists[k]` on a `ul`/`ol` block is the list under
-`items[k]`, absent on a flat list. Renderers get it pre-rendered: nested
-`<ul>`/`<ol>` inside the `<li>` on web and email, two spaces per level with a `◦`
-bullet (numbers kept) on Telegram and Slack. Nesting stops at 4 levels; a deeper
-line joins the 4th list. A top-level list may start indented 0–3 spaces; `+`
-opens only child lists. Unchanged: a blank line or a non-marker continuation line
-ends the list, a top-level marker of the other kind starts a new list, and a
-fence ends it too — its placeholder is unindented, so an indented fence inside an
-item still splits the list around the code block (the numbering is kept). Inside
-a child list, a marker of the other kind joins that list (one sublist per item).
-A `<Checklist>` nests its rows the same way (`ChecklistRow.children`).
+`parseList` (`src/format/markdown-ast.ts`) builds one `ul`/`ol` block per list.
+`items[k]` is an item's text; `nested[k]` is what sits under it, in source order:
+child lists and fenced code. Renderers get it pre-rendered (`ListNest`): nested
+`<ul>`/`<ol>`/`<pre>` inside the `<li>` on web and email, two spaces per level
+with a `◦` bullet (numbers kept) on Telegram and Slack, where code stays
+unindented.
+
+- **Opening.** A top-level list opens on `-`, `*` or `N.` (1–9 digits; `+` never
+  opens one) indented at most 3 spaces. An indented one opens only at a block
+  start (first line, after a blank line, a fence or a heading), so unfenced YAML
+  under `config:` stays text. Directly under a line of prose only a bullet or
+  `1.` opens a list (CommonMark's interruption rule): `Price rose in` /
+  `2024. That…` stays text.
+- **Nesting.** An item line indented to the deepest item's child column (2+
+  spaces under a bullet, the content column under `N.`) opens a child list.
+  Directly under item text the same interruption rule applies, so a wrapped
+  `  2024. …` or `  + …` line is text of the item. After a blank line any marker
+  opens one. The other marker kind at the same depth starts a second sublist
+  under the same item. Nesting stops at 4 levels.
+- **Continuation.** A non-item line directly under an item, indented into the
+  top-level item, joins the deepest item after a `\n` (a line break in the chat's
+  `pre-wrap`, a space in the wiki reader, `<br>` in email, a hanging indent on
+  Telegram/Slack). Indent past the content column is kept. An unindented line, a
+  table row or a component tag ends the list, as before.
+- **Blank lines.** A blank line ends the list unless the next line is an item
+  that nests or is a sibling, or a fence indented into an item. Such a list is
+  `loose`: Telegram/Slack keep a blank line between its items; web and email
+  render it tight. A paragraph after a blank line still ends the list.
+- **Fences.** A fence whose opener is indented to an item's child column is code
+  in that item (openers indent at most 3, so in practice a top-level item), and
+  the list continues after it.
+- **Numbers.** `start` is the first item's number (`0.` included). An item that
+  does not directly follow its previous item's line keeps its source number in
+  `values[k]` (`<li value>`), which is where the old parser split the list and
+  restarted. Directly consecutive items count on, as before. The chat sanitizer
+  (`web-format-browser.ts`) keeps a numeric `start` and `value`.
+- **Columns.** Tabs expand to the next multiple of 4; 5+ spaces after a marker
+  put the content column one past the marker (CommonMark).
+- **Not items.** `* * *` and `- - -` are rules (at most 3 spaces of indent);
+  `***` stays text.
+
+A `<Checklist>` nests the same way (`ChecklistRow.children`): a nested row
+without `[ ]`/`[x]` is a plain item (`check-plain`), a nested ordered list keeps
+its numbers, and a parent row wraps its text in `check-text` so its todo colour
+does not reach the rows under it (the mark rules use child combinators).
 
 ## Syntax highlighting in fenced code blocks
 

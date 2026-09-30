@@ -616,12 +616,13 @@ const hasCodeBlock = (blocks: Block[]) => blocks.some((b) => b.type === "code_bl
 // fence that did not own its line lost its code block and served a raw U+0000.
 describe("parseBlocks fence grammar", () => {
   test("an indented fence is a code block, dedented by its opener's indent", () => {
-    // The ordinary "code block inside a numbered list" shape.
-    const blocks = parseBlocks("1. Step\n\n   ```bash\n   echo hi\n     nested\n   ```\n");
-    expect(blocks).toContainEqual({
-      type: "code_block",
-      lang: "bash",
-      code: "echo hi\n  nested",
+    // The ordinary "code block inside a numbered list" shape. The fence is
+    // indented into the item, so the block is nested under it.
+    const [ol] = parseBlocks("1. Step\n\n   ```bash\n   echo hi\n     nested\n   ```\n");
+    expect(ol).toMatchObject({
+      type: "ol",
+      items: ["Step"],
+      nested: [[{ type: "code_block", lang: "bash", code: "echo hi\n  nested" }]],
     });
   });
 
@@ -1017,34 +1018,69 @@ describe("the closer scan is not quadratic", () => {
 describe("nested lists in the AST", () => {
   test("an indented item line is a sublist of the item above it", () => {
     expect(parseBlocks("- a\n  - b\n- c")).toEqual([
-      { type: "ul", items: ["a", "c"], sublists: [{ type: "ul", items: ["b"] }] },
+      { type: "ul", items: ["a", "c"], nested: [[{ type: "ul", items: ["b"] }]] },
     ]);
   });
 
-  test("a flat list carries no sublists key", () => {
+  test("a flat list carries no nested key", () => {
     expect(Object.keys(parseBlocks("- a\n- b")[0]!)).toEqual(["type", "items"]);
   });
 
-  test("a nested ordered list keeps its own start", () => {
-    const [ol] = parseBlocks("2. two\n   7. seven\n3. three");
+  test("a nested ordered list after a blank line keeps its own start, and the list is loose", () => {
+    const [ol] = parseBlocks("2. two\n\n   7. seven\n3. three");
     expect(ol).toEqual({
       type: "ol",
       items: ["two", "three"],
       start: 2,
-      sublists: [{ type: "ol", items: ["seven"], start: 7 }],
+      loose: true,
+      nested: [[{ type: "ol", items: ["seven"], start: 7 }]],
     });
   });
 
-  test("parseChecklist returns nested task items as children", () => {
-    const [comp] = parseBlocks("<Checklist>\n- [x] a\n  - [ ] b\n    - [x] c\n- [ ] d\n</Checklist>");
+  test("a continuation line joins the item after a newline, keeping indent past the content column", () => {
+    expect(parseBlocks("1. a\n   b\n     c")).toEqual([{ type: "ol", items: ["a\nb\n  c"], start: 1 }]);
+  });
+
+  test("the other marker kind under the same item is a second sublist", () => {
+    expect(parseBlocks("- a\n  - b\n  1. c")).toEqual([
+      { type: "ul", items: ["a"], nested: [[{ type: "ul", items: ["b"] }, { type: "ol", items: ["c"], start: 1 }]] },
+    ]);
+  });
+
+  test("an item after a continuation keeps its source number as a value", () => {
+    expect(parseBlocks("1. a\n   more\n5. b")).toEqual([
+      { type: "ol", items: ["a\nmore", "b"], start: 1, values: [undefined, 5] },
+    ]);
+  });
+
+  test("parseChecklist: nested rows, plain rows and a numbered sublist", () => {
+    const [comp] = parseBlocks(
+      "<Checklist>\n- [x] a\n  - [ ] b\n    - [x] c\n  - plain\n  1. one\n- d\n</Checklist>",
+    );
     expect(comp?.type).toBe("component");
     if (comp?.type !== "component") return;
     expect(parseChecklist(comp.children)).toEqual([
       {
         checked: true,
         text: "a",
-        children: [{ checked: false, text: "b", children: [{ checked: true, text: "c" }] }],
+        children: [
+          {
+            type: "checklist",
+            ordered: false,
+            start: 1,
+            rows: [
+              {
+                checked: false,
+                text: "b",
+                children: [{ type: "checklist", ordered: false, start: 1, rows: [{ checked: true, text: "c" }] }],
+              },
+              { checked: false, text: "plain", plain: true },
+            ],
+          },
+          { type: "checklist", ordered: true, start: 1, rows: [{ checked: false, text: "one", plain: true }] },
+        ],
       },
+      // A TOP-level row without a marker keeps rendering as a todo, as before.
       { checked: false, text: "d" },
     ]);
   });

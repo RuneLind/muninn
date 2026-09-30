@@ -17,7 +17,7 @@ import {
   parseChecklist,
 } from "../format/markdown-ast.ts";
 import type { Block, ChecklistRow, FactVerdict } from "../format/markdown-ast.ts";
-import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
+import { renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
@@ -182,21 +182,45 @@ function isBlankTextBlock(block: Block): boolean {
   return block.type === "text" && block.lines.every((l) => l.trim() === "");
 }
 
-/** Checklist rows as `<ul class="checklist">`, a nested task list inside its
- *  parent row (`check-parent`, which the CSS takes out of the flex row). */
-function checklistHtml(rows: ChecklistRow[]): string {
+/** A list item's text: a continuation line after a `\n`, which the chat's
+ *  `pre-wrap` shows as a line break and the wiki reader as a space. */
+function itemHtml(text: string): string {
+  return text.split("\n").map(renderInline).join("\n");
+}
+
+/** ` value="n"` on an ordered item that keeps its own source number. */
+function liValue(values: (number | undefined)[] | undefined, k: number): string {
+  const v = values?.[k];
+  return v === undefined ? "" : ` value="${v}"`;
+}
+
+function childrenHtml(children: RenderedChild[] | undefined): string {
+  return children?.map((c) => c.out).join("") ?? "";
+}
+
+/** Checklist rows as `<ul class="checklist">`, a nested list inside its parent
+ *  row. A parent row (`check-parent`, taken out of the flex row by the CSS) wraps
+ *  its text in `check-text`, so the todo colour stops at the row's own words
+ *  instead of reaching the rows under it. A nested row with no task marker is a
+ *  plain `check-plain` item, and a nested ordered list keeps its numbers. */
+function checklistHtml(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[]): string {
   const lis = rows
-    .map((it) => {
+    .map((it, k) => {
+      const nested = (it.children ?? [])
+        .map((c) => (c.type === "code_block" ? codeFenceHtml(c.lang, c.code) : checklistHtml(c.rows, c.ordered, c.start, c.values)))
+        .join("");
+      if (it.plain) return `<li class="check-plain"${liValue(values, k)}>${itemHtml(it.text)}${nested}</li>`;
       const state = it.checked ? "done" : "todo";
       const mark = it.checked ? "✓" : "✗";
-      const nested = it.children?.length ? checklistHtml(it.children) : "";
+      const text = nested ? `<span class="check-text">${itemHtml(it.text)}</span>` : itemHtml(it.text);
       return (
         `<li class="check-item check-${state}${nested ? " check-parent" : ""}">` +
-        `<span class="check-mark">${mark}</span> ${renderInline(it.text)}${nested}</li>`
+        `<span class="check-mark">${mark}</span> ${text}${nested}</li>`
       );
     })
     .join("");
-  return `<ul class="checklist">${lis}</ul>`;
+  if (!ordered) return `<ul class="checklist">${lis}</ul>`;
+  return `<ol class="checklist check-ol"${start !== 1 ? ` start="${start}"` : ""}>${lis}</ol>`;
 }
 
 const webRenderer: BlockRenderer = {
@@ -209,11 +233,11 @@ const webRenderer: BlockRenderer = {
     return `<${tag}>${renderInline(block.content)}</${tag}>`;
   },
   blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
-  ul: (items, sublists) =>
-    `<ul>${items.map((i, k) => `<li>${renderInline(i)}${sublists[k] ?? ""}</li>`).join("")}</ul>`,
-  ol: (items, start, sublists) =>
+  ul: (items, nest) =>
+    `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`,
+  ol: (items, start, nest) =>
     `<ol${start !== 1 ? ` start="${start}"` : ""}>` +
-    items.map((i, k) => `<li>${renderInline(i)}${sublists[k] ?? ""}</li>`).join("") +
+    items.map((i, k) => `<li${liValue(nest.values, k)}>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("") +
     `</ol>`,
   table(headers, rows) {
     const thead = "<thead><tr>" + headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead>";

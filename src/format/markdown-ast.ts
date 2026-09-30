@@ -17,7 +17,7 @@ import { lineCodeSpanRanges } from "./code-spans.ts";
 import { isCalendarDay } from "./calendar-day.ts";
 
 export type Block =
-  | { type: "code_block"; lang: string; code: string }
+  | CodeBlock
   | { type: "hr" }
   | { type: "heading"; level: number; content: string }
   | { type: "blockquote"; lines: string[] }
@@ -27,20 +27,41 @@ export type Block =
   | { type: "component"; name: ComponentName; attrs: Record<string, string>; children: Block[] }
   | { type: "text"; lines: string[] };
 
-/** `sublists[k]` is the list nested under `items[k]`. Absent when no item has
- *  one, so a flat list keeps the shape it always had. */
+export interface CodeBlock {
+  type: "code_block";
+  lang: string;
+  code: string;
+}
+
+/**
+ * A list. `items[k]` is one item's text; a continuation line joins it after a
+ * `\n`. `nested[k]` holds what sits under `items[k]` in source order: child
+ * lists (one per run of a marker kind, so `- b` then `1. c` is two) and fenced
+ * code. Absent when no item has any. `loose` is set when a blank line separated
+ * two items, or an item from its nested content; the text platforms then keep a
+ * blank line between items.
+ */
 export interface UlBlock {
   type: "ul";
   items: string[];
-  sublists?: (ListBlock | undefined)[];
+  nested?: (ListChild[] | undefined)[];
+  loose?: true;
 }
 export interface OlBlock {
   type: "ol";
   items: string[];
   start: number;
-  sublists?: (ListBlock | undefined)[];
+  /** `values[k]` is `items[k]`'s source number where it does not count on from
+   *  the item before (HTML's `<li value>`); later items count on from it. Set
+   *  only on an item that does not directly follow the previous item's line —
+   *  after a blank line, a continuation or nested content — which is where the
+   *  parser used to split the list and restart at the source number. */
+  values?: (number | undefined)[];
+  nested?: (ListChild[] | undefined)[];
+  loose?: true;
 }
 export type ListBlock = UlBlock | OlBlock;
+export type ListChild = ListBlock | CodeBlock;
 
 // ── Component blocks ────────────────────────────────────────────────────────
 // A small, whitelisted vocabulary of presentational block components shared with
@@ -569,35 +590,63 @@ export function diffLineClass(line: string): "add" | "del" | "ctx" {
   return "ctx";
 }
 
+const CHECKLIST_MARK_RE = /^\[([ xX])\][ \t]*([\s\S]*)$/;
+
 /** Parse one Checklist list item's leading `[x]`/`[ ]` marker. Anchored, linear:
  *  an unmarked item is treated as unchecked with its full text. */
 export function parseChecklistItem(item: string): { checked: boolean; text: string } {
-  const m = item.match(/^\[([ xX])\]\s*(.*)$/);
+  const m = item.match(CHECKLIST_MARK_RE);
   if (m) return { checked: m[1] !== " ", text: m[2]! };
   return { checked: false, text: item };
 }
 
-/** One Checklist row; `children` holds the rows of a list nested under it. */
+/** One Checklist row. A top-level row always renders a mark (an unmarked one as
+ *  a todo); a NESTED row without `[ ]`/`[x]` has `plain: true` and renders as an
+ *  ordinary list item. `children` is what sits under the row, in source order. */
 export interface ChecklistRow {
   checked: boolean;
   text: string;
-  children?: ChecklistRow[];
+  plain?: true;
+  children?: ChecklistChild[];
 }
+/** A list nested under a Checklist row, ordered lists keeping their numbers. */
+export interface ChecklistList {
+  type: "checklist";
+  ordered: boolean;
+  start: number;
+  /** As `OlBlock.values`. */
+  values?: (number | undefined)[];
+  rows: ChecklistRow[];
+}
+export type ChecklistChild = ChecklistList | CodeBlock;
 
 /** Extract a Checklist's rows from its raw children — the first `ul` block's
- *  items, each parsed for its task marker, with nested items as `children`.
- *  Empty when the body has no list. */
+ *  items, each parsed for its task marker, with nested lists and code as
+ *  `children`. Empty when the body has no list. */
 export function parseChecklist(children: Block[]): ChecklistRow[] {
   const ul = children.find((c) => c.type === "ul");
   if (!ul || ul.type !== "ul") return [];
-  return checklistRows(ul);
+  return checklistRows(ul, true);
 }
 
-function checklistRows(list: ListBlock): ChecklistRow[] {
+function checklistRows(list: ListBlock, top: boolean): ChecklistRow[] {
   return list.items.map((item, k) => {
     const row: ChecklistRow = parseChecklistItem(item);
-    const sub = list.sublists?.[k];
-    if (sub) row.children = checklistRows(sub);
+    if (!top && !CHECKLIST_MARK_RE.test(item)) row.plain = true;
+    const nested = list.nested?.[k];
+    if (nested?.length) {
+      row.children = nested.map((c): ChecklistChild =>
+        c.type === "code_block"
+          ? c
+          : {
+              type: "checklist",
+              ordered: c.type === "ol",
+              start: c.type === "ol" ? c.start : 1,
+              ...(c.type === "ol" && c.values ? { values: c.values } : {}),
+              rows: checklistRows(c, false),
+            },
+      );
+    }
     return row;
   });
 }
@@ -728,7 +777,9 @@ function takenCodeIds(text: string): Set<number> {
  * from a one-line page.
  */
 interface FenceStore {
-  blocks: Map<number, { lang: string; code: string }>;
+  /** `indent` is the opener's indent, which a list uses to decide whether the
+   *  fence sits inside one of its items. */
+  blocks: Map<number, { lang: string; code: string; indent: number }>;
   /** Ids the input already spells; never allocated. */
   taken: Set<number>;
   /** Next candidate id. Monotone, so allocation is amortised O(1). */
@@ -754,8 +805,14 @@ function allocateCodeId(store: FenceStore): number {
 const HR_RE = /^---+$/;
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const BLOCKQUOTE_RE = /^>\s?(.*)$/;
-/** A list item line: indent, marker (`-`/`*`/`+` or `N.`), the spaces after it, content. */
-const LIST_ITEM_RE = /^( *)([-*+]|\d+\.)(\s+)(.*)$/;
+/** A list item line: leading whitespace, marker (`-`/`*`/`+`, or 1–9 digits and
+ *  `.`, CommonMark's bound), the whitespace after it, content. */
+const LIST_ITEM_RE = /^([ \t]*)([-*+]|\d{1,9}\.)([ \t]+)(.*)$/;
+
+/** A thematic break spelled with list markers — `* * *`, `- - -`. Never an
+ *  item; a spaced one (which the item pattern would match) indented at most 3
+ *  is a rule, and `***` stays the text it was. */
+const MARKER_BREAK_RE = /^[ \t]*([-*])(?:[ \t]*\1){2,}[ \t]*$/;
 
 /** Levels a list may nest to. A line indented deeper than the last level's
  *  child column joins that last list as a sibling. */
@@ -765,23 +822,45 @@ interface ListLine {
   indent: number;
   kind: "ul" | "ol";
   marker: string;
-  /** The column the item's content starts at — its children's indent (ordered). */
+  /** The column the item's content starts at. */
   contentCol: number;
   content: string;
 }
 
+/** The column after `ws` when it starts at column `col`: a tab advances to the
+ *  next multiple of 4 (CommonMark's tab stop), anything else by one. */
+function advanceColumns(ws: string, col: number): number {
+  for (const ch of ws) col = ch === "\t" ? col + 4 - (col % 4) : col + 1;
+  return col;
+}
+
+/** The indent of a line, in columns. */
+function lineIndent(line: string): number {
+  return advanceColumns(line.match(/^[ \t]*/)![0], 0);
+}
+
 function matchListLine(line: string): ListLine | null {
   const m = line.match(LIST_ITEM_RE);
-  if (!m) return null;
-  const indent = m[1]!.length;
+  if (!m || MARKER_BREAK_RE.test(line)) return null;
+  const indent = advanceColumns(m[1]!, 0);
   const marker = m[2]!;
+  const markerEnd = indent + marker.length;
+  const gap = advanceColumns(m[3]!, markerEnd) - markerEnd;
   return {
     indent,
     kind: /\d/.test(marker) ? "ol" : "ul",
     marker,
-    contentCol: indent + marker.length + m[3]!.length,
+    // 5+ columns after the marker: the content column is one past it (CommonMark).
+    contentCol: markerEnd + (gap >= 5 ? 1 : gap),
     content: m[4]!,
   };
+}
+
+/** Whether a list opening directly under a line of text may start here —
+ *  CommonMark's paragraph-interruption rule: a `-`/`*` bullet, or an ordered
+ *  list starting at 1. */
+function canInterrupt(line: ListLine): boolean {
+  return line.kind === "ul" ? line.marker !== "+" : parseInt(line.marker, 10) === 1;
 }
 
 /** One open list while nesting: the block, plus its LAST item's line, which is
@@ -789,10 +868,17 @@ function matchListLine(line: string): ListLine | null {
 interface ListLevel {
   block: ListBlock;
   last: ListLine;
+  /** The number the next item of an ordered list shows when it counts on. */
+  next: number;
 }
 
-/** The indent at which a line becomes a child of `level`'s last item: two
- *  spaces past a bullet, the content column of an ordered item (CommonMark). */
+function openLevel(line: ListLine): ListLevel {
+  const block = newList(line);
+  return { block, last: line, next: (block.type === "ol" ? block.start : 0) + 1 };
+}
+
+/** The indent at which a line belongs inside `level`'s last item: two spaces
+ *  past a bullet, the content column of an ordered item (CommonMark). */
 function childIndent(level: ListLevel): number {
   return level.last.kind === "ul" ? level.last.indent + 2 : level.last.contentCol;
 }
@@ -800,46 +886,190 @@ function childIndent(level: ListLevel): number {
 function newList(line: ListLine): ListBlock {
   return line.kind === "ul"
     ? { type: "ul", items: [line.content] }
-    : { type: "ol", items: [line.content], start: parseInt(line.marker, 10) || 1 };
+    : { type: "ol", items: [line.content], start: parseInt(line.marker, 10) };
+}
+
+/** Append `child` under `level`'s last item. */
+function nestUnder(level: ListLevel, child: ListChild): void {
+  const nested = (level.block.nested ??= []);
+  (nested[level.block.items.length - 1] ??= []).push(child);
+}
+
+/** A line that must end a list even when indented like a continuation: the
+ *  block parser reads a table row or a component tag at ANY indent, and a
+ *  continuation would swallow it into the item text. */
+function isIndentedBlockLine(line: string): boolean {
+  const t = line.trim();
+  return isTableRow(line) || COMPONENT_OPEN_RE.test(t) || /^<\/[A-Za-z]/.test(t);
+}
+
+/** What the next list line does to the open levels. */
+type ListStep =
+  | { kind: "child"; line: ListLine }
+  | { kind: "item"; level: number; line: ListLine }
+  | { kind: "sublist"; level: number; line: ListLine }
+  | { kind: "text"; text: string }
+  | { kind: "code"; level: number; code: CodeBlock };
+
+/**
+ * A list starting at `lines[i]`, or null when the line does not open one.
+ *
+ * Opening (see `parseBlocksInner` for `atBlockStart`/`afterProse`): a `-`, `*`
+ * or `N.` item indented at most 3 spaces (`+` never opens a top-level list). An
+ * INDENTED one opens only at a block start — so an indented block under a line
+ * of text (unfenced YAML, a wrapped line) stays text — and directly under a
+ * line of prose only a bullet or `1.` opens one.
+ *
+ * Inside the list, each line is placed by {@link listStep}: nested items,
+ * continuation text, fenced code in an item, and — across a run of blank lines —
+ * whatever the next non-blank line continues. Anything else ends the list, the
+ * blank lines before it staying outside.
+ */
+function parseList(
+  lines: string[],
+  i: number,
+  store: FenceStore,
+  atBlockStart: boolean,
+  afterProse: boolean,
+): { block: ListBlock; next: number } | null {
+  const first = matchListLine(lines[i]!);
+  if (!first || first.indent > 3 || first.marker === "+") return null;
+  if (first.indent > 0 && !atBlockStart) return null;
+  if (afterProse && !canInterrupt(first)) return null;
+  const stack: ListLevel[] = [openLevel(first)];
+  const root = stack[0]!.block;
+  let afterCode = false;
+  /** The level whose item line was the last line consumed, if it was one. */
+  let lastItemAt: ListLevel | undefined = stack[0];
+  let j = i + 1;
+  while (j < lines.length) {
+    let k = j;
+    while (k < lines.length && lines[k]!.trim() === "") k++;
+    if (k === lines.length) break;
+    const afterBlank = k > j;
+    const step = listStep(lines[k]!, stack, store, afterBlank, afterCode);
+    if (!step) break;
+    // A blank line between two items, or between an item and what it holds,
+    // makes the list holding that item loose. (Text never follows a blank.)
+    if (afterBlank && step.kind !== "text") {
+      const at = step.kind === "item" ? step.level : step.kind === "child" ? stack.length - 1 : step.level - 1;
+      stack[at]!.block.loose = true;
+    }
+    applyListStep(step, stack, afterBlank ? undefined : lastItemAt);
+    afterCode = step.kind === "code";
+    lastItemAt = step.kind === "text" || step.kind === "code" ? undefined : stack[stack.length - 1];
+    j = k + 1;
+  }
+  return { block: root, next: j };
 }
 
 /**
- * A list starting at `lines[i]`, with indented item lines nested as child lists,
- * or null when the line does not open one.
+ * Place one line in the open list, or null when it ends the list.
  *
- * A top-level list opens on a `-`, `*` or `N.` item indented at most 3 spaces
- * (CommonMark's bound; `+` opens nothing at the top level, as before). A later
- * item line indented to the current item's child column opens a child list
- * (any marker, `+` included); a shallower one closes child lists back to the
- * level it belongs to. The list ends at the first line that is not an item —
- * a blank line, a continuation line, a fence placeholder — and at a top-level
- * item of the other kind, so `- a` then `1. b` stays two lists. Inside a child
- * list a marker of the other kind joins that list: an item holds one sublist.
+ *  - An item line indented to the deepest item's child column opens a child
+ *    list under it — directly under that item's text only when it may
+ *    interrupt a paragraph (a `+`, or `2.`, there is a wrapped line), and
+ *    never past {@link MAX_LIST_DEPTH}, where it joins the deepest list.
+ *  - A shallower item line closes levels back to the one it belongs to: the
+ *    same kind is the next item; the other kind starts a new sublist under the
+ *    same parent item (at the top level it ends the list).
+ *  - A non-item line directly under item text, indented into the top-level
+ *    item, is continuation text of the deepest item. After a blank line or a
+ *    fence it ends the list.
+ *  - A fence placeholder whose opener was indented into an item is code in the
+ *    deepest item it fits (openers indent at most 3, so in practice a
+ *    top-level item).
  */
-function parseList(lines: string[], i: number): { block: ListBlock; next: number } | null {
-  const first = matchListLine(lines[i]!);
-  if (!first || first.indent > 3 || first.marker === "+") return null;
-  const root = newList(first);
-  const stack: ListLevel[] = [{ block: root, last: first }];
-  let j = i + 1;
-  for (; j < lines.length; j++) {
-    const line = matchListLine(lines[j]!);
-    if (!line) break;
-    let top = stack[stack.length - 1]!;
-    if (line.indent >= childIndent(top) && stack.length < MAX_LIST_DEPTH) {
-      const child = newList(line);
-      const sublists = (top.block.sublists ??= []);
-      sublists[top.block.items.length - 1] = child;
-      stack.push({ block: child, last: line });
-      continue;
+function listStep(
+  raw: string,
+  stack: ListLevel[],
+  store: FenceStore,
+  afterBlank: boolean,
+  afterCode: boolean,
+): ListStep | null {
+  const top = stack[stack.length - 1]!;
+  const ph = raw.match(CODE_PLACEHOLDER_RE);
+  const fence = ph ? store.blocks.get(parseInt(ph[1]!, 10)) : undefined;
+  if (fence) {
+    for (let level = stack.length - 1; level >= 0; level--) {
+      if (fence.indent >= childIndent(stack[level]!)) {
+        return { kind: "code", level: level + 1, code: { type: "code_block", lang: fence.lang, code: fence.code } };
+      }
     }
-    while (stack.length > 1 && line.indent < childIndent(stack[stack.length - 2]!)) stack.pop();
-    top = stack[stack.length - 1]!;
-    if (stack.length === 1 && (line.kind !== root.type || line.marker === "+")) break;
-    top.block.items.push(line.content);
-    top.last = line;
+    return null;
   }
-  return { block: root, next: j };
+
+  const line = matchListLine(raw);
+  if (line) {
+    if (line.indent >= childIndent(top)) {
+      if (stack.length >= MAX_LIST_DEPTH) return { kind: "item", level: stack.length - 1, line };
+      if (afterBlank || afterCode || canInterrupt(line)) return { kind: "child", line };
+      return { kind: "text", text: continuationText(raw, top) };
+    }
+    let level = stack.length - 1;
+    while (level > 0 && line.indent < childIndent(stack[level - 1]!)) level--;
+    const at = stack[level]!;
+    if (line.kind === at.block.type && !(level === 0 && line.marker === "+")) return { kind: "item", level, line };
+    return level > 0 ? { kind: "sublist", level, line } : null;
+  }
+
+  if (afterBlank || afterCode || MARKER_BREAK_RE.test(raw) || isIndentedBlockLine(raw)) return null;
+  if (lineIndent(raw) < childIndent(stack[0]!)) return null;
+  return { kind: "text", text: continuationText(raw, top) };
+}
+
+/** A continuation line's text: trimmed to the deepest item's content column,
+ *  any deeper indent kept so the text platforms can show it. */
+function continuationText(raw: string, top: ListLevel): string {
+  const extra = Math.max(0, lineIndent(raw) - top.last.contentCol);
+  return " ".repeat(extra) + raw.trim();
+}
+
+/** Apply one step. `prevItemAt` is the level whose item line directly
+ *  precedes this line, if any: an ordered item that does not directly follow
+ *  its previous sibling keeps its source number when that differs. */
+function applyListStep(step: ListStep, stack: ListLevel[], prevItemAt: ListLevel | undefined): void {
+  switch (step.kind) {
+    case "child": {
+      const level = openLevel(step.line);
+      nestUnder(stack[stack.length - 1]!, level.block);
+      stack.push(level);
+      return;
+    }
+    case "item": {
+      stack.length = step.level + 1;
+      const at = stack[step.level]!;
+      const block = at.block;
+      block.items.push(step.line.content);
+      if (block.type === "ol") {
+        const n = parseInt(step.line.marker, 10);
+        if (prevItemAt !== at && n !== at.next) {
+          (block.values ??= [])[block.items.length - 1] = n;
+          at.next = n;
+        }
+        at.next++;
+      }
+      at.last = step.line;
+      return;
+    }
+    case "sublist": {
+      stack.length = step.level;
+      const level = openLevel(step.line);
+      nestUnder(stack[step.level - 1]!, level.block);
+      stack.push(level);
+      return;
+    }
+    case "text": {
+      const items = stack[stack.length - 1]!.block.items;
+      items[items.length - 1] += "\n" + step.text;
+      return;
+    }
+    case "code": {
+      stack.length = step.level;
+      nestUnder(stack[step.level - 1]!, step.code);
+      return;
+    }
+  }
 }
 
 export function parseBlocks(text: string): Block[] {
@@ -984,6 +1214,7 @@ function extractFences(text: string, store: FenceStore): string {
     store.blocks.set(id, {
       lang: info.trim().match(FENCE_LANG_RE)![0],
       code: body.join("\n").trimEnd(),
+      indent,
     });
     out.push(`\x00CB${id}\x00`);
     i = close + 1;
@@ -1064,7 +1295,7 @@ function parseBlocksInner(
       continue;
     }
 
-    if (HR_RE.test(line)) {
+    if (HR_RE.test(line) || (MARKER_BREAK_RE.test(line) && LIST_ITEM_RE.test(line) && lineIndent(line) <= 3)) {
       flushText();
       blocks.push({ type: "hr" });
       i++;
@@ -1092,7 +1323,15 @@ function parseBlocksInner(
       continue;
     }
 
-    const list = parseList(lines, i);
+    // `lines[i - 1]` is the last buffered text line whenever the buffer is
+    // non-empty: every other block flushes it.
+    const prev = i > 0 ? lines[i - 1]! : "";
+    const atBlockStart =
+      i === 0 || prev.trim() === "" || CODE_PLACEHOLDER_RE.test(prev) || HEADING_RE.test(prev);
+    // A line of prose, not an orphaned indented item that stayed text: after
+    // one of those, `2. c` still continues the numbering it continued before.
+    const afterProse = textBuffer.length > 0 && prev.trim() !== "" && !matchListLine(prev);
+    const list = parseList(lines, i, store, atBlockStart, afterProse);
     if (list) {
       flushText();
       blocks.push(list.block);

@@ -1,5 +1,32 @@
 import type { Block, ComponentName, InlineComponentName, ListBlock } from "./markdown-ast.ts";
 
+/** What sits under one list item, already rendered by the same renderer: a
+ *  child list one `depth` deeper, or a fenced code block. */
+export interface RenderedChild {
+  kind: "list" | "code";
+  out: string;
+}
+
+/** A list's nesting, handed to `ul`/`ol` beside its items. `children[k]` is
+ *  what sits under `items[k]`, in source order; `depth` is 0 for a top-level
+ *  list; `loose` is set when a blank line separated items in the source. */
+export interface ListNest {
+  children: (RenderedChild[] | undefined)[];
+  depth: number;
+  loose: boolean;
+  /** Ordered lists: an item's own number where it does not count on from the
+   *  item before (`OlBlock.values`). */
+  values?: (number | undefined)[];
+}
+
+/** The number each of `count` ordered items shows: `values[k]` where set, else
+ *  one past the item before, the first counting from `start`. */
+export function ordinals(start: number, count: number, values?: (number | undefined)[]): number[] {
+  const out: number[] = [];
+  for (let k = 0; k < count; k++) out.push(values?.[k] ?? (k === 0 ? start : out[k - 1]! + 1));
+  return out;
+}
+
 /**
  * Per-platform block rendering strategy. Each platform formatter (web HTML,
  * telegram HTML, slack mrkdwn) supplies one of these; {@link renderBlocks}
@@ -19,12 +46,11 @@ export interface BlockRenderer {
   hr(): string;
   heading(block: { level: number; content: string }): string;
   blockquote(lines: string[]): string;
-  /** `sublists[k]` is the list nested under `items[k]`, already rendered by this
-   *  same renderer one `depth` deeper; `depth` is 0 for a top-level list. */
-  ul(items: string[], sublists: (string | undefined)[], depth: number): string;
+  /** An item's text may hold `\n`-joined continuation lines. */
+  ul(items: string[], nest: ListNest): string;
   /** `start` is the list's first ordinal (from the source markdown) — a list
    *  split across paragraphs must not restart at 1 on every fragment. */
-  ol(items: string[], start: number, sublists: (string | undefined)[], depth: number): string;
+  ol(items: string[], start: number, nest: ListNest): string;
   table(headers: string[], rows: string[][]): string;
   /** Render a component block. `renderedChildren` is the component body already
    *  walked through this same renderer, so most components only wrap/decorate it.
@@ -83,17 +109,43 @@ function renderBlock(block: Block, r: BlockRenderer): string {
 }
 
 function renderList(list: ListBlock, r: BlockRenderer, depth: number): string {
-  const sublists = list.items.map((_, k) => {
-    const sub = list.sublists?.[k];
-    return sub ? renderList(sub, r, depth + 1) : undefined;
-  });
-  return list.type === "ul"
-    ? r.ul(list.items, sublists, depth)
-    : r.ol(list.items, list.start, sublists, depth);
+  const nest: ListNest = {
+    children: list.items.map((_, k) =>
+      list.nested?.[k]?.map((c): RenderedChild =>
+        c.type === "code_block"
+          ? { kind: "code", out: r.code_block(c) }
+          : { kind: "list", out: renderList(c, r, depth + 1) },
+      ),
+    ),
+    depth,
+    loose: list.loose === true,
+    ...(list.type === "ol" && list.values ? { values: list.values } : {}),
+  };
+  return list.type === "ul" ? r.ul(list.items, nest) : r.ol(list.items, list.start, nest);
 }
 
-/** A plain-text list item line followed by its rendered sublist, indented two
- *  spaces — the Telegram/Slack nesting, which have no list markup. */
-export function withTextSublist(line: string, sublist: string | undefined): string {
-  return sublist === undefined ? line : `${line}\n${sublist.replace(/^/gm, "  ")}`;
+/**
+ * List items as plain-text lines — the Telegram/Slack rendering, which have no
+ * list markup. Each item is `marker text`, a continuation line hanging under the
+ * text, and a child list indented two spaces; code is not indented (the fence
+ * or `<pre>` would carry the spaces into the code). A loose list keeps a blank
+ * line between items.
+ */
+export function textListItems(
+  markers: string[],
+  items: string[],
+  nest: ListNest,
+  inline: (s: string) => string,
+): string {
+  return items
+    .map((item, k) => {
+      const marker = markers[k]!;
+      const hang = " ".repeat(marker.length + 1);
+      const [head, ...rest] = item.split("\n");
+      let out = `${marker} ${inline(head!)}`;
+      for (const line of rest) out += `\n${hang}${inline(line)}`;
+      for (const c of nest.children[k] ?? []) out += "\n" + (c.kind === "list" ? c.out.replace(/^(?=.)/gm, "  ") : c.out);
+      return out;
+    })
+    .join(nest.loose ? "\n\n" : "\n");
 }

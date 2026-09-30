@@ -138,3 +138,36 @@ test.describe("Chat: <Fold> through the real sanitizer", () => {
     expect(out.diff.headingVisible).toBe(true);
   });
 });
+
+test.describe("Chat: ordered-list numbers through the real sanitizer", () => {
+  test("`start` and an item's own `value` survive, and a nested list stays nested", async ({ page }) => {
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () =>
+        typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function" &&
+        typeof (globalThis as { sanitizeHtml?: unknown }).sanitizeHtml === "function",
+    );
+    // `3.` after a continuation line keeps its number (value="3"); the list
+    // starting at 5 keeps its start; the bullet under item 1 nests.
+    const md = "1. one\n   more about one\n   - detail\n3. three\n\nText.\n\n5. five\n6. six";
+    const out = await page.evaluate((src) => {
+      const g = globalThis as unknown as {
+        formatWebHtml: (s: string) => string;
+        sanitizeHtml: (h: string, isWeb: boolean) => string;
+      };
+      const host = document.createElement("div");
+      host.innerHTML = g.sanitizeHtml(g.formatWebHtml(src), true);
+      const ols = Array.from(host.querySelectorAll(":scope > ol")) as HTMLOListElement[];
+      return {
+        lists: ols.length,
+        firstItems: ols[0] ? Array.from(ols[0].children).map((li) => (li as HTMLLIElement).value) : [],
+        nested: host.querySelectorAll(":scope > ol > li > ul > li").length,
+        secondStart: ols[1]?.start ?? null,
+      };
+    }, md);
+    expect(out.lists).toBe(2);
+    expect(out.firstItems).toEqual([0, 3]);
+    expect(out.nested).toBe(1);
+    expect(out.secondStart).toBe(5);
+  });
+});
