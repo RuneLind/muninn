@@ -1,5 +1,3 @@
-import path from "node:path";
-import { realpath } from "node:fs/promises";
 import type { Context, Hono } from "hono";
 import { resolveServingProfile, type Config } from "../../config.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
@@ -24,6 +22,7 @@ import {
 import { getLiveOrAppliedTopicKeysByWiki } from "../../db/wiki-proposals.ts";
 import { draftAndPersistSynthesis } from "../../gardener/synthesis-drafter.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
+import { loadPageFiles, resolveContainedFile } from "../../wiki/page-files.ts";
 import {
   listWikis,
   resolveWikiRequest,
@@ -1560,7 +1559,13 @@ export function registerWikiReadRoutes(
       ...issueRowsField(index, meta, () => ctxStampable(provenanceCtx, resolveWikiRoot(entry?.root))),
       // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
       // a link opened on a non-default wiki lands on the DEFAULT one.
-      html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title, wiki: entry?.name }),
+      // `files`: the `<Query>` cards' csv/sql, read beside the page under the
+      // index root's containment check (`loadPageFiles`) before the sync render.
+      html: renderWikiHtml(markdown, index.resolve, {
+        stripTitle: meta.title,
+        wiki: entry?.name,
+        files: await loadPageFiles(index.root, meta.relPath, markdown),
+      }),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
       // RELATED WORK — `cites ∪ cited-by ∪ shares ≥2 PR refs, minus hubs, never
@@ -1644,23 +1649,14 @@ export function registerWikiReadRoutes(
     // (a file, or a whole directory) passed the check and was served. The index
     // never lists a symlink (its scan does not follow them), so before the
     // fallback existed this was unreachable; with it, the realpath is the guard.
-    const rootAbs = path.resolve(index.root);
-    const fileAbs = path.resolve(rootAbs, meta ? meta.relPath : relPathQ!);
-    if (fileAbs !== rootAbs && !fileAbs.startsWith(rootAbs + path.sep)) {
-      return c.text("invalid path", 400);
-    }
-    let rootReal: string;
-    let fileReal: string;
-    try {
-      rootReal = await realpath(rootAbs);
-      fileReal = await realpath(fileAbs);
-    } catch {
-      return c.text("explainer file not found", 404);
-    }
-    if (fileReal !== rootReal && !fileReal.startsWith(rootReal + path.sep)) {
+    // `resolveContainedFile` is that check, shared with the `<Query>` file reader.
+    const contained = await resolveContainedFile(index.root, meta ? meta.relPath : relPathQ!);
+    if (!contained.ok) {
+      if (contained.reason === "outside") return c.text("invalid path", 400);
+      if (contained.reason === "missing") return c.text("explainer file not found", 404);
       return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
     }
-    const file = Bun.file(fileReal);
+    const file = Bun.file(contained.real);
     if (!(await file.exists())) return c.text("explainer file not found", 404);
     // Append the Select-to-Explain forwarder. A trailing listener-only script
     // runs wherever it lands (even after </html>), so no anchor parsing is

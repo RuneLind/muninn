@@ -183,6 +183,57 @@ export function componentBlockCss(scope: string): string {
     ${scope} .nm-body > :first-child { margin-top: 0; }
     ${scope} .nm-body > :last-child { margin-bottom: 0; }
     ${scope} .nm-body > ul, ${scope} .nm-body > ol { margin: 0; padding-left: 1.2rem; }
+    /* Query: one card per prod query. Muted lines are --text-soft (4.5:1 on
+       --bg-surface in both schemes, pinned by e2e/wiki-query.spec.ts). The
+       table scrolls inside its own box; the header row stays put. */
+    ${scope} .query {
+      margin: 1.4rem 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 10px;
+      background: var(--bg-surface);
+      padding: 0.8rem 1rem;
+      scroll-margin-top: 1rem;
+    }
+    ${scope} .query-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem; font-weight: 600; }
+    ${scope} .query-id { font-family: var(--mono, ui-monospace, monospace); color: var(--accent-light); text-decoration: none; }
+    ${scope} .query-id:hover { text-decoration: underline; }
+    ${scope} .query-answer { margin-top: 0.35rem; }
+    ${scope} .query-meta {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.9rem;
+      margin-top: 0.4rem; font-size: 0.85em; color: var(--text-soft);
+    }
+    ${scope} .query-run { font-variant-numeric: tabular-nums; }
+    ${scope} .query-use {
+      display: inline-block; margin-left: 0.35rem; padding: 0 0.45rem;
+      border: 1px solid var(--border-secondary); border-radius: 999px;
+      font-family: var(--mono, ui-monospace, monospace);
+    }
+    ${scope} .query-body { margin-top: 0.7rem; }
+    ${scope} .query-body > :first-child { margin-top: 0; }
+    ${scope} .query-result { margin-top: 0.8rem; }
+    ${scope} .query-result-head { display: flex; gap: 0.6rem; align-items: baseline; font-size: 0.85em; margin-bottom: 0.3rem; }
+    ${scope} .query-rows, ${scope} .query-truncated, ${scope} .query-unavailable, ${scope} .query-warning { color: var(--text-soft); font-size: 0.85em; }
+    ${scope} .query-unavailable, ${scope} .query-warning { font-style: italic; margin: 0.3rem 0; }
+    ${scope} .query-truncated { margin: 0.3rem 0 0; }
+    ${scope} .query-table-wrap {
+      max-height: 24rem; overflow: auto;
+      border: 1px solid var(--border-secondary); border-radius: 6px;
+    }
+    ${scope} .query-table { margin: 0; border-collapse: collapse; width: max-content; min-width: 100%; font-size: 0.85em; }
+    ${scope} .query-table th {
+      position: sticky; top: 0; background: var(--bg-surface); text-align: left; white-space: pre-line;
+    }
+    ${scope} .query-table th button {
+      all: unset; cursor: pointer; display: inline-flex; gap: 0.3rem; align-items: baseline;
+    }
+    ${scope} .query-table th button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    ${scope} .query-sort-mark { color: var(--text-soft); font-size: 0.85em; }
+    ${scope} .query-table td { font-variant-numeric: tabular-nums; white-space: pre-line; vertical-align: top; }
+    ${scope} .query-table .query-num { text-align: right; }
+    ${scope} .query-sql { margin-top: 0.8rem; }
+    ${scope} .query-sql > summary { cursor: pointer; font-weight: 600; color: var(--text-secondary); }
+    ${scope} .query-sql > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    ${scope} .query-sql-body { margin-top: 0.4rem; }
     ${scope} .diagram {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

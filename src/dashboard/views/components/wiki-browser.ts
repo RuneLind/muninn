@@ -166,6 +166,8 @@ import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
 import { enhanceReportBlocks } from "./wiki-report-blocks.ts";
+import { enhanceQueryTables } from "./wiki-query-table.ts";
+import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
@@ -3838,7 +3840,7 @@ function openNavTarget(target: NavTarget, push: boolean): void {
   else loadPage(target.name, push);
 }
 
-function loadPage(name: string, push: boolean): void {
+function loadPage(name: string, push: boolean, revealHash = true): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
   // Raised BEFORE anything else: `currentName` is only set from the response, so
   // without this signal the whole round-trip reads as the "start" view and a
@@ -3858,7 +3860,7 @@ function loadPage(name: string, push: boolean): void {
     loadExplainer(listing, push);
     return;
   }
-  fetchAndRenderPage(withWiki("/api/wiki/page?name=" + encodeURIComponent(name)), push);
+  fetchAndRenderPage(withWiki("/api/wiki/page?name=" + encodeURIComponent(name)), push, revealHash);
 }
 
 /** Open a page by its exact relPath — the collision-proof route, and now the
@@ -3867,7 +3869,7 @@ function loadPage(name: string, push: boolean): void {
  *  with same-stem pages opens the wrong page entirely. The relPath rides into the
  *  pushed history entry so Back/reload/share re-resolve the SAME page;
  *  `push=false` on popstate/boot replays without re-pushing. */
-function loadPageByRelPath(relPath: string, push = true): void {
+function loadPageByRelPath(relPath: string, push = true, revealHash = true): void {
   hideExplainPill();
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
@@ -3883,14 +3885,14 @@ function loadPageByRelPath(relPath: string, push = true): void {
     loadExplainer(listing, push);
     return;
   }
-  fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), push);
+  fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), push, revealHash);
 }
 
 /** Shared fetch + article render for both by-name and by-relPath navigation.
  *  History is pushed as `?relPath=<relPath>` off the RESOLVED page (see below), so
  *  the round-trip survives Back/reload/share even where stems collide; a response
  *  carrying no relPath at all falls back to the name-based `?page=<name>` URL. */
-function fetchAndRenderPage(url: string, push: boolean): void {
+function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): void {
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -3957,10 +3959,16 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // Header's `↻ N historic` pill and the `line refs` toggle, both counted
       // off the rendered article. No-op on a page with neither.
       enhanceReportBlocks(articleRoot);
+      // `<Query>` result tables: header-click sorting. No-op without one.
+      enhanceQueryTables(articleRoot);
       // Fact-check layer: chip → evidence card, the summary strip, and the
       // layer toggle. No-op on a page carrying no annotation.
       enhanceFactCheck(document.getElementById("articleWrap")!);
       applyDisplay();
+      // A `#id` in the URL (a shared `#q-8`): open the folds around it, scroll to
+      // it. Not on an in-place reload (`reloadCheckedPage`): the URL keeps the
+      // hash, and the reader may have closed that fold since.
+      if (revealHash) revealHashTarget(articleRoot);
       renderConnections(data);
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
@@ -4736,6 +4744,12 @@ if (wikiSel) {
     location.href = value ? "/wiki?wiki=" + encodeURIComponent(value) : "/wiki";
   });
 }
+
+// An in-article `#id` link to a card inside a closed fold: open it on the way.
+window.addEventListener("hashchange", () => {
+  const article = document.querySelector("#articleWrap > .wiki-article");
+  if (article) revealHashTarget(article);
+});
 
 window.addEventListener("popstate", () => {
   const params = new URLSearchParams(location.search);
@@ -6645,8 +6659,8 @@ function openArticleShare(): void {
  * must not add a history entry.
  */
 function reloadCheckedPage(turn: AskTurn): void {
-  if (turn.pageRelPath) loadPageByRelPath(turn.pageRelPath, false);
-  else if (turn.page) loadPage(turn.page, false);
+  if (turn.pageRelPath) loadPageByRelPath(turn.pageRelPath, false, false);
+  else if (turn.page) loadPage(turn.page, false, false);
 }
 
 /** Persist the shown fact-check answer onto the page as a `> [!factcheck]` callout

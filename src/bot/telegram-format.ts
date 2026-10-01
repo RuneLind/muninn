@@ -17,6 +17,7 @@ import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+import { parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 
 /**
  * Converts Claude's markdown output to Telegram-safe HTML.
@@ -135,6 +136,16 @@ const telegramRenderer: BlockRenderer = {
         return children;
       case "Lane":
         return `${laneLeadText(laneFromAttrs(attrs, rawChildren), (l) => `<b>${escapeHtml(l)}</b>`, escapeHtml)}\n${children}`;
+      case "Query": {
+        // No card and no file read: lead lines, the body, then the result's name.
+        const q = parseQueryAttrs(attrs);
+        const { head, answer } = queryLead(q);
+        const inline = (s: string) => renderCodeSpans(s, escapeHtml, (c) => `<code>${escapeHtml(c)}</code>`);
+        const result = queryResultLine(q);
+        return [head ? `<b>${inline(head)}</b>` : "", inline(answer), children, result ? escapeHtml(result) : ""]
+          .filter(Boolean)
+          .join("\n");
+      }
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.

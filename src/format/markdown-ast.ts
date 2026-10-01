@@ -99,6 +99,7 @@ export const COMPONENT_NAMES = [
   "Historic",
   "NextMoves",
   "Lane",
+  "Query",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -111,6 +112,8 @@ const SELF_CLOSING_ALLOWED: ReadonlySet<ComponentName> = new Set<ComponentName>(
   "Pill",
   "Fact",
   "Embed",
+  // A result-only query has no body.
+  "Query",
 ]);
 
 /** Attribute whitelist per component; any other attribute is dropped. */
@@ -160,6 +163,9 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // reader ages client-side. Wiki-only, like `Historic`.
   NextMoves: [],
   Lane: ["kind", "who", "since"],
+  // One prod query: `csv`/`sql` name files beside the page, `uses` is a
+  // comma-separated list. Wiki-only; see `src/format/query-block.ts`.
+  Query: ["id", "question", "answer", "csv", "sql", "run", "uses"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the

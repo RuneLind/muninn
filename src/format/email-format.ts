@@ -39,6 +39,7 @@ import {
 import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
 import { renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
+import { parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "./query-block.ts";
 import {
   Placeholders,
   escapeHtml,
@@ -309,6 +310,21 @@ const emailRenderer: BlockRenderer = {
           `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">` +
           `${escapeHtml(laneLeadText(laneFromAttrs(attrs, rawChildren)))}</div>${children}</div>`
         );
+      case "Query": {
+        // No card and no file read in mail: lead lines, the body, the result's name.
+        const q = parseQueryAttrs(attrs);
+        const { head, answer } = queryLead(q);
+        const inline = (s: string) => renderCodeSpans(s, escapeHtml, (c) => `<code style="${S.code}">${escapeHtml(c)}</code>`);
+        const result = queryResultLine(q);
+        return (
+          `<div style="margin:0 0 12px;">` +
+          (head ? `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">${inline(head)}</div>` : "") +
+          (answer ? `<div style="margin:0 0 6px;">${inline(answer)}</div>` : "") +
+          children +
+          (result ? `<div style="${S.dim}margin:6px 0 0;">${escapeHtml(result)}</div>` : "") +
+          `</div>`
+        );
+      }
       case "FactCheck":
         // No <details> in mail — the appendix renders open, under its summary line.
         return (

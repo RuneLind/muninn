@@ -15,6 +15,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
+import { parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import {
   Placeholders,
@@ -140,6 +141,19 @@ const slackRenderer: BlockRenderer = {
         // The label is the author's plain text, not markdown: escaped, never
         // run through `renderInline` (see `slackLiteral`).
         return `${laneLeadText(laneFromAttrs(attrs, rawChildren), (l) => `*${slackLiteral(l)}*`, slackLiteral)}\n${children}`;
+      case "Query": {
+        // No card and no file read: lead lines, the body, then the result's
+        // name. Attribute text is the author's plain text (`slackLiteral`).
+        // A code span keeps its backticks; inside one only `&<>` are escaped,
+        // since Slack formats nothing there.
+        const q = parseQueryAttrs(attrs);
+        const { head, answer } = queryLead(q);
+        const inline = (s: string) => renderCodeSpans(s, slackLiteral, (c) => `\`${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}\``);
+        const result = queryResultLine(q);
+        return [head ? `*${inline(head)}*` : "", inline(answer), children, result ? slackLiteral(result) : ""]
+          .filter(Boolean)
+          .join("\n");
+      }
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.

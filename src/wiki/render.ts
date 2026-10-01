@@ -29,6 +29,7 @@ import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts"
 import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
+import type { PageFiles } from "../format/query-block.ts";
 
 // stripFrontmatter's single home is store.ts (the read-side, which store.ts must
 // not import back from — that would invert layering). Re-exported here so the
@@ -74,6 +75,9 @@ export function renderWikiHtml(
      *  uses carry no wiki, because a wikilink can only ever resolve inside the
      *  wiki it was rendered from. */
     wiki?: string;
+    /** The page's `<Query>` sibling files, read by the route beforehand
+     *  (`loadPageFiles`). Absent ⇒ each card says its result is not loaded here. */
+    files?: PageFiles;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -116,7 +120,7 @@ export function renderWikiHtml(
     return `\x00WIKIPAGELINK${idx}\x00`;
   });
 
-  const renderedHtml = formatWebHtml(withTokens);
+  const renderedHtml = formatWebHtml(withTokens, { files: opts?.files });
   const codeRegions = renderedCodeRegions(renderedHtml);
   const html = renderedHtml.replace(
     /\x00WIKIPAGELINK(\d+)\x00/g,

@@ -27,6 +27,16 @@ import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
+import { parseCsv } from "../format/csv.ts";
+import {
+  QUERY_CSV_MAX_ROWS,
+  lookupPageFile,
+  pageFileFailureText,
+  pageFileName,
+  parseQueryAttrs,
+  splitQuerySql,
+  type PageFiles,
+} from "../format/query-block.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
 const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.name === "Tab";
@@ -133,9 +143,98 @@ function factCheckSections(children: Block[]): string {
  * `renderInline`. The chat-page client picks this up automatically via
  * `web-format-browser.ts`'s bundle.
  */
-export function formatWebHtml(text: string): string {
-  const rendered = renderBlocks(parseBlocks(text), webRenderer);
-  return collapseBlockSpacing(rendered).trim();
+export function formatWebHtml(text: string, opts?: { files?: PageFiles }): string {
+  // `files` is read by the `Query` case, deep inside the shared renderer, so it
+  // rides a module slot for the length of this synchronous call.
+  const prev = currentPageFiles;
+  currentPageFiles = opts?.files;
+  try {
+    const rendered = renderBlocks(parseBlocks(text), webRenderer);
+    return uniqueQueryAnchors(collapseBlockSpacing(rendered).trim());
+  } finally {
+    currentPageFiles = prev;
+  }
+}
+
+/** The page's sibling files for the call in progress; absent ⇒ the `Query`
+ *  cards say their result is not loaded here. */
+let currentPageFiles: PageFiles | undefined;
+
+const QUERY_ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
+
+/** Each `Query` card's anchor made unique in the finished HTML: a repeat gets
+ *  the first free `-2`, `-3`, and its id link follows. A pass over the OUTPUT, because some
+ *  components render a body twice and keep one copy (`foldBodyHtml`). */
+function uniqueQueryAnchors(html: string): string {
+  if (!html.includes('<section class="query" id="')) return html;
+  // Every card's own slug is reserved first, so a repeat's suffix never takes
+  // an id an author wrote (`Q-8`, `Q-8`, `Q-8-2` → `q-8`, `q-8-3`, `q-8-2`).
+  const reserved = new Set([...html.matchAll(QUERY_ANCHOR_RE)].map((m) => m[1]!));
+  const used = new Set<string>();
+  return html.replace(QUERY_ANCHOR_RE, (_m, slug: string, between: string) => {
+    let anchor = slug;
+    if (used.has(anchor)) {
+      let k = 2;
+      while (used.has(`${slug}-${k}`) || reserved.has(`${slug}-${k}`)) k++;
+      anchor = `${slug}-${k}`;
+    }
+    used.add(anchor);
+    return `<section class="query" id="${anchor}">${between}<a class="query-id" href="#${anchor}">`;
+  });
+}
+
+/** A `Query` card's unavailable line, in place of a table or the SQL. */
+function queryFileNote(text: string): string {
+  return `<p class="query-unavailable">${escapeHtml(text)}</p>`;
+}
+
+/** A cell's text: escaped, with each line end as `&#10;` so the cell's
+ *  `white-space: pre-line` shows it and `collapseBlockSpacing` cannot fold it. */
+function queryCellHtml(text: string): string {
+  return escapeHtml(text).replace(/\r\n|\r|\n/g, "&#10;");
+}
+
+/** The result table from a `csv=` file: escaped cells, header verbatim, at most
+ *  `QUERY_CSV_MAX_ROWS` rows. The reader's enhancer adds header-click sorting. */
+function queryResultHtml(ref: string): string {
+  const file = lookupPageFile(currentPageFiles, ref);
+  if (!file.ok) return `<div class="query-result">${queryFileNote(pageFileFailureText(file.reason, ref))}</div>`;
+  const { header, rows, warning } = parseCsv(file.text);
+  const name = pageFileName(ref);
+  if (header.length === 0) return `<div class="query-result">${queryFileNote(`Empty file: ${name}`)}</div>`;
+  const shown = rows.slice(0, QUERY_CSV_MAX_ROWS);
+  const th = header.map((h) => `<th scope="col">${queryCellHtml(h)}</th>`).join("");
+  const trs = shown.map((r) => `<tr>${r.map((c) => `<td>${queryCellHtml(c)}</td>`).join("")}</tr>`).join("");
+  const n = (v: number) => v.toLocaleString("en-US");
+  // The reader sorts the rows it has; a truncated table says so.
+  const more = rows.length > shown.length
+    ? `<p class="query-truncated">showing ${n(shown.length)} of ${n(rows.length)} rows — sorting reorders the rows shown</p>`
+    : "";
+  const warn = warning === "unterminated-quote"
+    ? `<p class="query-warning">${escapeHtml(`Unterminated quote — the rest of the file is one cell: ${name}`)}</p>`
+    : "";
+  return (
+    `<div class="query-result"><div class="query-result-head"><code>${escapeHtml(name)}</code>` +
+    `<span class="query-rows">${n(rows.length)} ${rows.length === 1 ? "row" : "rows"}</span></div>${warn}` +
+    `<div class="query-table-wrap"><table class="query-table"><thead><tr>${th}</tr></thead>` +
+    `<tbody>${trs}</tbody></table></div>${more}</div>`
+  );
+}
+
+/** A `Query` card's SQL disclosure: the `sql=` file when set, else the fence
+ *  `splitQuerySql` moved out of the body; nothing when there is neither. */
+function querySqlHtml(sqlRef: string, fence: { lang: string; code: string } | null): string {
+  let inner = "";
+  let source = "";
+  if (sqlRef) {
+    const file = lookupPageFile(currentPageFiles, sqlRef);
+    inner = file.ok ? codeFenceHtml("sql", file.text.trimEnd()) : queryFileNote(pageFileFailureText(file.reason, sqlRef));
+    source = ` <code>${escapeHtml(pageFileName(sqlRef))}</code>`;
+  } else if (fence) {
+    inner = codeFenceHtml(fence.lang, fence.code);
+  }
+  if (!inner) return "";
+  return `<details class="query-sql"><summary>SQL${source}</summary><div class="query-sql-body">${inner}</div></details>`;
 }
 
 /**
@@ -511,6 +610,38 @@ const webRenderer: BlockRenderer = {
         // A lane outside `<NextMoves>` renders plain: its label line, then its body.
         const lane = laneFromAttrs(attrs, rawChildren);
         return `<p><strong>${laneLeadText(lane, escapeHtml, escapeHtml)}</strong></p>${children}`;
+      }
+      case "Query": {
+        // One card per query: header (id, question, answer, run date, uses),
+        // the reading, the result table, the SQL behind a closed disclosure.
+        const q = parseQueryAttrs(attrs);
+        // Made unique across the page by `uniqueQueryAnchors`, after rendering.
+        const anchor = q.anchor;
+        const { sql, body } = splitQuerySql(rawChildren, q.sql !== "");
+        const idHtml = !q.id
+          ? ""
+          : anchor
+            ? `<a class="query-id" href="#${anchor}">${escapeHtml(q.id)}</a>`
+            : `<span class="query-id">${escapeHtml(q.id)}</span>`;
+        // `id` is required: a card without one still renders, and says so.
+        const noId = q.id ? "" : `<p class="query-warning">Query without id</p>`;
+        const question = q.question ? `<span class="query-question">${renderInline(q.question)}</span>` : "";
+        const answer = q.answer ? `<div class="query-answer">${renderInline(q.answer)}</div>` : "";
+        const uses = q.uses.map((u) => `<span class="query-use">${escapeHtml(u)}</span>`).join("");
+        const meta =
+          (q.run ? `<span class="query-run">run ${escapeHtml(q.run)}</span>` : "") +
+          (uses ? `<span class="query-uses">uses ${uses}</span>` : "");
+        const head =
+          `<div class="query-head">${noId}<div class="query-title">${idHtml}${question}</div>${answer}` +
+          `${meta ? `<div class="query-meta">${meta}</div>` : ""}</div>`;
+        const bodyHtml = body.some((b) => !isBlankTextBlock(b))
+          ? `<div class="query-body">${renderBlocks(body, webRenderer)}</div>`
+          : "";
+        const result = q.csv ? queryResultHtml(q.csv) : "";
+        return (
+          `<section class="query"${anchor ? ` id="${anchor}"` : ""}>` +
+          `${head}${bodyHtml}${result}${querySqlHtml(q.sql, sql)}</section>`
+        );
       }
       case "FactCheck": {
         // Collapsed by DEFAULT — the per-claim evidence is reachable from the
