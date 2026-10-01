@@ -470,6 +470,20 @@ Block-only, wiki-only (not in `COMPONENT_VOCABULARY_RULES`). A `<NextMoves>` hol
 
 `e2e/wiki-next-moves.spec.ts` pins the layout (three cards in one row plus the blocked strip at 1440, one column at 390 in focus mode), the pills, the ages under a fixed clock and timezone, settled (Historic and resolved Callout), nested and prose-only lanes, the pill = `movesYou` = board badge agreement, task marks, the superseded/abandoned board cards, and the contrast of every lane text and pill in both themes.
 
+## `<Query>` — one prod query as a card
+
+Block-only, wiki-only (not in `COMPONENT_VOCABULARY_RULES`). `<Query id question answer csv sql run uses>` wraps the reading (any markdown). Pure helpers: `src/format/query-block.ts`; CSV parser: `src/format/csv.ts`.
+
+- **Web**: `<section class="query" id="<anchor>">` (`Q-8` → `q-8`) with a header (id link, question, answer, `run`, `uses` chips), the body, the result table and a closed `<details class="query-sql">`.
+- **SQL source**: the `sql=` file when set (every body fence stays); otherwise the FIRST `sql` fence that is a direct child of the body moves into the disclosure (`splitQuerySql`).
+- **Files come from a lookup, never from IO here.** `formatWebHtml(text, { files })` holds the page's `PageFiles` in a module slot for the synchronous call; `renderWikiHtml` forwards `opts.files`, which only `GET /api/wiki/page` builds (`src/wiki/page-files.ts`). No lookup (chat, gardener preview, digest) ⇒ `Result not loaded here: <file>`. A missing file and one outside the root both read `File not available: <file>`.
+- **Table**: escaped cells, header verbatim, at most `QUERY_CSV_MAX_ROWS` (2,000) rows plus a `showing 2,000 of N rows` line, inside a 24rem scroll box with a sticky header. Header-click sorting is the reader's `enhanceQueryTables` (`views/components/wiki-query-table.ts`): numeric when every non-empty cell is a number, else `localeCompare(…, "nb")`, stable, empties last, `aria-sort` on the sorted header, idempotent.
+- **Other surfaces** read no file: `Q-8 — <question>`, `Svar: <answer>`, the body, `Resultat: Q-8.csv`.
+- **Depth**: `Fold > Query > Fold` parses (depth 0–2).
+- **Chat** renders the card (the `query-*` classes are in `COMPONENT_CLASS_ALLOW`) with the not-loaded line.
+
+Muted lines (`query-meta`, `query-rows`, `query-unavailable`, `query-truncated`, the sort mark) use `--text-soft`; `e2e/wiki-query.spec.ts` pins token and 4.5:1 in both themes, the sort, and the containment refusals.
+
 ## Fact-check annotation pair
 
 - `<Fact n="4" v="bad">passage</Fact>` (inline, paired + self-closing) marks a fact-checked passage with a verdict-tinted underline plus a `<button class="fc-chip">`.

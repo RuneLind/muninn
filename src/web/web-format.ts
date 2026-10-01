@@ -27,6 +27,16 @@ import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
+import { parseCsv } from "../format/csv.ts";
+import {
+  QUERY_CSV_MAX_ROWS,
+  lookupPageFile,
+  pageFileFailureText,
+  pageFileName,
+  parseQueryAttrs,
+  splitQuerySql,
+  type PageFiles,
+} from "../format/query-block.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
 const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.name === "Tab";
@@ -133,9 +143,63 @@ function factCheckSections(children: Block[]): string {
  * `renderInline`. The chat-page client picks this up automatically via
  * `web-format-browser.ts`'s bundle.
  */
-export function formatWebHtml(text: string): string {
-  const rendered = renderBlocks(parseBlocks(text), webRenderer);
-  return collapseBlockSpacing(rendered).trim();
+export function formatWebHtml(text: string, opts?: { files?: PageFiles }): string {
+  // `files` is read by the `Query` case, deep inside the shared renderer, so it
+  // rides a module slot for the length of this synchronous call.
+  const prev = currentPageFiles;
+  currentPageFiles = opts?.files;
+  try {
+    const rendered = renderBlocks(parseBlocks(text), webRenderer);
+    return collapseBlockSpacing(rendered).trim();
+  } finally {
+    currentPageFiles = prev;
+  }
+}
+
+/** The page's sibling files for the call in progress; absent ⇒ the `Query`
+ *  cards say their result is not loaded here. */
+let currentPageFiles: PageFiles | undefined;
+
+/** A `Query` card's unavailable line, in place of a table or the SQL. */
+function queryFileNote(text: string): string {
+  return `<p class="query-unavailable">${escapeHtml(text)}</p>`;
+}
+
+/** The result table from a `csv=` file: escaped cells, header verbatim, at most
+ *  `QUERY_CSV_MAX_ROWS` rows. The reader's enhancer adds header-click sorting. */
+function queryResultHtml(ref: string): string {
+  const file = lookupPageFile(currentPageFiles, ref);
+  if (!file.ok) return `<div class="query-result">${queryFileNote(pageFileFailureText(file.reason, ref))}</div>`;
+  const { header, rows } = parseCsv(file.text);
+  const shown = rows.slice(0, QUERY_CSV_MAX_ROWS);
+  const th = header.map((h) => `<th scope="col">${escapeHtml(h)}</th>`).join("");
+  const trs = shown.map((r) => `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join("")}</tr>`).join("");
+  const n = (v: number) => v.toLocaleString("en-US");
+  const more = rows.length > shown.length
+    ? `<p class="query-truncated">showing ${n(shown.length)} of ${n(rows.length)} rows</p>`
+    : "";
+  return (
+    `<div class="query-result"><div class="query-result-head"><code>${escapeHtml(pageFileName(ref))}</code>` +
+    `<span class="query-rows">${n(rows.length)} ${rows.length === 1 ? "row" : "rows"}</span></div>` +
+    `<div class="query-table-wrap"><table class="query-table"><thead><tr>${th}</tr></thead>` +
+    `<tbody>${trs}</tbody></table></div>${more}</div>`
+  );
+}
+
+/** A `Query` card's SQL disclosure: the `sql=` file when set, else the fence
+ *  `splitQuerySql` moved out of the body; nothing when there is neither. */
+function querySqlHtml(sqlRef: string, fence: { lang: string; code: string } | null): string {
+  let inner = "";
+  let source = "";
+  if (sqlRef) {
+    const file = lookupPageFile(currentPageFiles, sqlRef);
+    inner = file.ok ? codeFenceHtml("sql", file.text.trimEnd()) : queryFileNote(pageFileFailureText(file.reason, sqlRef));
+    source = ` <code>${escapeHtml(pageFileName(sqlRef))}</code>`;
+  } else if (fence) {
+    inner = codeFenceHtml(fence.lang, fence.code);
+  }
+  if (!inner) return "";
+  return `<details class="query-sql"><summary>SQL${source}</summary><div class="query-sql-body">${inner}</div></details>`;
 }
 
 /**
@@ -511,6 +575,34 @@ const webRenderer: BlockRenderer = {
         // A lane outside `<NextMoves>` renders plain: its label line, then its body.
         const lane = laneFromAttrs(attrs, rawChildren);
         return `<p><strong>${laneLeadText(lane, escapeHtml, escapeHtml)}</strong></p>${children}`;
+      }
+      case "Query": {
+        // One card per query: header (id, question, answer, run date, uses),
+        // the reading, the result table, the SQL behind a closed disclosure.
+        const q = parseQueryAttrs(attrs);
+        const { sql, body } = splitQuerySql(rawChildren, q.sql !== "");
+        const idHtml = !q.id
+          ? ""
+          : q.anchor
+            ? `<a class="query-id" href="#${q.anchor}">${escapeHtml(q.id)}</a>`
+            : `<span class="query-id">${escapeHtml(q.id)}</span>`;
+        const question = q.question ? `<span class="query-question">${renderInline(q.question)}</span>` : "";
+        const answer = q.answer ? `<div class="query-answer">${renderInline(q.answer)}</div>` : "";
+        const uses = q.uses.map((u) => `<span class="query-use">${escapeHtml(u)}</span>`).join("");
+        const meta =
+          (q.run ? `<span class="query-run">run ${escapeHtml(q.run)}</span>` : "") +
+          (uses ? `<span class="query-uses">uses ${uses}</span>` : "");
+        const head =
+          `<div class="query-head"><div class="query-title">${idHtml}${question}</div>${answer}` +
+          `${meta ? `<div class="query-meta">${meta}</div>` : ""}</div>`;
+        const bodyHtml = body.some((b) => !isBlankTextBlock(b))
+          ? `<div class="query-body">${renderBlocks(body, webRenderer)}</div>`
+          : "";
+        const result = q.csv ? queryResultHtml(q.csv) : "";
+        return (
+          `<section class="query"${q.anchor ? ` id="${q.anchor}"` : ""}>` +
+          `${head}${bodyHtml}${result}${querySqlHtml(q.sql, sql)}</section>`
+        );
       }
       case "FactCheck": {
         // Collapsed by DEFAULT — the per-claim evidence is reachable from the

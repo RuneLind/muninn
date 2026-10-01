@@ -122,6 +122,8 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   // Next-move lanes hold prose lists; a fence in one is an ordinary fence.
   NextMoves: null,
   Lane: null,
+  // A query card's body fences and its SQL disclosure are ordinary fences.
+  Query: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);

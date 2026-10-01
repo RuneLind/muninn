@@ -81,6 +81,12 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "next-moves", "nm-intro", "nm-grid", "nm-lane", "nm-you", "nm-waiting", "nm-draft", "nm-blocked",
   "nm-kind-unknown", "nm-head", "nm-who", "nm-count", "nm-since", "nm-since-raw", "nm-body",
   "nm-cols-1", "nm-cols-2", "nm-cols-3", "nm-cols-auto", "nm-strips",
+  // `<Query>`: same reason. Chat has no file reader, so its cards say the
+  // result is not loaded here.
+  "query", "query-head", "query-title", "query-id", "query-question", "query-answer",
+  "query-meta", "query-run", "query-uses", "query-use", "query-body", "query-result",
+  "query-result-head", "query-rows", "query-table-wrap", "query-table", "query-truncated",
+  "query-unavailable", "query-sql", "query-sql-body",
   // Syntax highlighting. Imported from the module that EMITS them rather than
   // retyped: a `tok-*` class added there and forgotten here renders colorless
   // in chat while looking perfect in /wiki — a bug visible on one surface only.

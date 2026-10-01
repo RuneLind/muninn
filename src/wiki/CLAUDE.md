@@ -124,6 +124,10 @@ The read-only sibling of the two fact-check WRITE routes (`/factcheck/append`, `
 
 `renderWikiHtml` chips line-ref inline `<code>` spans and wraps pure ref groups after the wikilink restore (`chipLineRefs`, with the page's `code_at` pin). Rules, shapes and the toggle: the report-blocks section of `src/web/CLAUDE.md`.
 
+## Query files (`page-files.ts`)
+
+`loadPageFiles(root, relPath, markdown)` reads every `csv=`/`sql=` a page's `<Query>` blocks name — collected from the parsed AST (`queryFileRefs`), so a tag inside a code fence or the frontmatter reads nothing — and returns the synchronous lookup `renderWikiHtml` takes as `files`. Only `GET /api/wiki/page` calls it; no new route, so the nais read slice is unchanged. Rules: a ref is relative to the page's folder with `/` separators (absolute, backslash, `\0`, drive ⇒ `invalid`); extension allowlist `PAGE_FILE_EXTENSIONS` (`.csv`, `.sql`) checked on the ref AND on the realpath; `stat` ≤ 1 MB before the read; at most 50 distinct refs per page (`limit`); a NUL in the file becomes U+FFFD (it is the wikilink sentinel delimiter). Containment is `resolveContainedFile` — lexical prefix under `path.resolve(root)`, then realpath of both and the prefix again — which `/api/wiki/html` also calls, mapping its three reasons to its old 400/404/404. Missing and outside both answer `unavailable`, so a page cannot probe the disk. Card rendering: the `<Query>` section of `src/web/CLAUDE.md`.
+
 ## ⧉ Copy path (breadcrumb)
 
 The open page's path ON DISK — `wikiPagePath(root, relPath)`, absolute wherever the server named a root (`servedRoot` in `wiki-routes.ts`, injected as `window.__WIKI_ROOT__`, read by `readActiveWikiRoot`) and the relPath alone otherwise. Every registered wiki has a root, so this is not a mimir-only affordance; the /plans drawer's button is the same two functions (`views/components/copy-path.ts` — the clipboard write and the join both live there, one fallback path rather than two that drift).
