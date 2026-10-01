@@ -64,8 +64,8 @@ const UNAVAILABLE: PageFileResult = { ok: false, reason: "unavailable" };
  * that real path with `O_NOFOLLOW` (a file swapped for a symlink after the
  * check is refused, not followed) and `O_NONBLOCK` (a FIFO does not hang the
  * open). Type, link count and size are read off the handle, and at most
- * min(size, cap) + 1 bytes are read from it, so a file grown after `fstat` is
- * still refused. Two residuals, both needing write access to the wiki tree: a
+ * cap + 1 bytes are read from it, so a file grown past the cap after `fstat`
+ * is still refused; whatever was read up to the cap is served. Two residuals, both needing write access to the wiki tree: a
  * DIRECTORY on the path swapped for a symlink between the realpath and the
  * open (`O_NOFOLLOW` covers the last segment only), and a hard link to an
  * outside file once nlink reads 1 (see the check below).
@@ -100,8 +100,8 @@ async function readPageFile(
     if (!st.isFile() || st.nlink > 1) return UNAVAILABLE;
     if (st.size > PAGE_FILE_MAX_BYTES) return { ok: false, reason: "too-large" };
     if (st.size > budget.left) return { ok: false, reason: "budget" };
-    // One byte past the size `fstat` reported shows a file grown since.
-    const buf = Buffer.alloc(Math.min(st.size, PAGE_FILE_MAX_BYTES) + 1);
+    // One byte past the cap shows a file grown past it since `fstat`.
+    const buf = Buffer.allocUnsafe(PAGE_FILE_MAX_BYTES + 1);
     let n = 0;
     for (;;) {
       const { bytesRead } = await fh.read(buf, n, buf.length - n, n);
@@ -110,7 +110,6 @@ async function readPageFile(
       if (n === buf.length) break;
     }
     if (n > PAGE_FILE_MAX_BYTES) return { ok: false, reason: "too-large" };
-    if (n > st.size) return UNAVAILABLE;
     if (n > budget.left) return { ok: false, reason: "budget" };
     budget.left -= n;
     // A NUL is the wikilink sentinel's delimiter in `renderWikiHtml`; a
