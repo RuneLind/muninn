@@ -15,6 +15,7 @@
 
 import { lineCodeSpanRanges } from "./code-spans.ts";
 import { isCalendarDay } from "./calendar-day.ts";
+import { ordinals } from "./block-renderer.ts";
 
 export type Block =
   | CodeBlock
@@ -398,21 +399,25 @@ export function parseLaneSince(value: string | undefined): string | null {
 /** The open steps of a lane's body (see `NextMovesLane.items`). */
 function laneSteps(children: Block[]): string[] {
   const items: string[] = [];
+  // An empty item (`- [ ]` with nothing after it) is no step to take.
+  const push = (text: string) => {
+    if (text.trim() !== "") items.push(text);
+  };
   for (const b of children) {
     if (b.type === "ul" || b.type === "ol") {
       for (const item of b.items) {
         const m = CHECKLIST_MARK_RE.exec(item);
-        if (!m) items.push(item);
-        else if (m[1] === " ") items.push(m[2]!);
+        if (!m) push(item);
+        else if (m[1] === " ") push(m[2]!);
       }
     } else if (b.type === "component" && b.name === "Checklist") {
-      for (const row of parseChecklist(b.children)) if (!row.checked) items.push(row.text);
+      for (const row of parseChecklist(b.children)) if (!row.checked) push(row.text);
     } else if (b.type === "component" && b.name === "RunChecklist") {
+      // The header's own steps: an empty one with entries under it counts.
       for (const row of runChecklistSteps(b.children)) if (!row.checked) items.push(row.text);
     }
   }
-  // An empty item (`- [ ]` with nothing after it) is no step to take.
-  return items.filter((item) => item.trim() !== "");
+  return items;
 }
 
 export function laneFromAttrs(attrs: Record<string, string>, children: Block[]): NextMovesLane {
@@ -851,31 +856,28 @@ export function parseChecklist(children: Block[]): ChecklistRow[] {
 
 /** A `RunChecklist` body in source order: every direct-child list (`ul` or
  *  `ol`) is a step list of top-level rows, an ordered one keeping its numbers;
- *  any other block stays a block, rendered in place. */
+ *  any other block stays a block, rendered in place. A row with no text and
+ *  nothing under it (`- [ ]`) is dropped; the rows after it keep their source
+ *  numbers. */
 export type RunChecklistPart = { kind: "steps"; list: ChecklistList } | { kind: "block"; block: Block };
 
 export function runChecklistBody(children: Block[]): RunChecklistPart[] {
-  return children.map((b): RunChecklistPart =>
-    b.type === "ul" || b.type === "ol"
-      ? {
-          kind: "steps",
-          list: {
-            type: "checklist",
-            ordered: b.type === "ol",
-            start: b.type === "ol" ? b.start : 1,
-            ...(b.type === "ol" && b.values ? { values: b.values } : {}),
-            rows: checklistRows(b, true),
-          },
-        }
-      : { kind: "block", block: b },
-  );
+  return children.map((b): RunChecklistPart => {
+    if (b.type !== "ul" && b.type !== "ol") return { kind: "block", block: b };
+    const all = checklistRows(b, true);
+    const kept = all.flatMap((r, k) => (r.text.trim() !== "" || r.children?.length ? [k] : []));
+    const rows = kept.map((k) => all[k]!);
+    if (b.type === "ul") return { kind: "steps", list: { type: "checklist", ordered: false, start: 1, rows } };
+    const nums = ordinals(b.start, all.length, b.values);
+    const values = kept.map((k) => nums[k]!);
+    return { kind: "steps", list: { type: "checklist", ordered: true, start: values[0] ?? b.start, values, rows } };
+  });
 }
 
-/** A `RunChecklist`'s steps: the top-level rows of every step list, minus
- *  empty ones (`- [ ]` with no text). The header count and a NextMoves lane's
- *  open steps both read this. */
+/** A `RunChecklist`'s steps: the top-level rows of every step list. The header
+ *  count and a NextMoves lane's open steps both read this. */
 export function runChecklistSteps(children: Block[]): ChecklistRow[] {
-  return runChecklistBody(children).flatMap((p) => (p.kind === "steps" ? p.list.rows : [])).filter((r) => r.text.trim() !== "");
+  return runChecklistBody(children).flatMap((p) => (p.kind === "steps" ? p.list.rows : []));
 }
 
 function checklistRows(list: ListBlock, top: boolean): ChecklistRow[] {

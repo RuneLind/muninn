@@ -86,6 +86,13 @@ const PAGE = [
   "",
   "</RunChecklist>",
   "",
+  "<RunChecklist>",
+  "",
+  "3. [x] Tredje steg",
+  "4. [ ] Fjerde steg",
+  "",
+  "</RunChecklist>",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -205,7 +212,7 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
 
   test("RunChecklist: the step count, labelled rows, and the command's copy button", async ({ page }) => {
     const seen = await openPage(page);
-    const rc = page.locator("section.run-checklist");
+    const rc = page.locator("section.run-checklist").first();
     await expect(rc.locator(".rc-count")).toHaveText("2 av 3 steg");
     await expect(rc.locator(".rc-label")).toHaveText(["Kommando", "Forventet", "Stopp hvis", "Kommando"]);
     const command = rc.locator(".rc-row.rc-command").first();
@@ -215,6 +222,23 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
     await expect(rc.locator(".rc-row.rc-command").nth(1).locator(".fence-copy")).toHaveCount(0);
     await expect(rc.locator(".rc-row.rc-command").nth(1).locator("code")).toHaveText("run-skarp.json");
     await expect(rc.locator(".check-plain")).toHaveText("en vanlig note");
+    expectClean(seen);
+  });
+
+  test("RunChecklist: an ordered step list shows its numbers from its start", async ({ page }) => {
+    const seen = await openPage(page);
+    const steps = page.locator("section.run-checklist").nth(1).locator(".check-item");
+    await expect(steps).toHaveCount(2);
+    // The rendered text carries the number, painted before the mark.
+    const shown = await steps.evaluateAll((lis) => lis.map((li) => (li as HTMLElement).innerText.replace(/\s+/g, " ").trim()));
+    expect(shown).toEqual(["3. ✓ Tredje steg", "4. ✗ Fjerde steg"]);
+    for (const n of await steps.locator(".rc-num").all()) {
+      await expect(n).toBeVisible();
+      const box = (await n.boundingBox())!;
+      const mark = (await n.locator("xpath=following-sibling::*[1]").boundingBox())!;
+      expect(box.width).toBeGreaterThan(4);
+      expect(box.x + box.width).toBeLessThanOrEqual(mark.x + 1);
+    }
     expectClean(seen);
   });
 
@@ -265,7 +289,7 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
         return c;
       });
       const muted = {
-        count: page.locator(".rc-count"),
+        count: page.locator(".rc-count").first(),
         label: page.locator(".rc-label").first(),
         dimmed: page.locator(".dl-item.dl-dim .dl-text").first(),
         dimmedChip: page.locator(".dl-item.dl-dim .dl-id").first(),
@@ -282,6 +306,7 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
         chip: page.locator(".dl-item:not(.dl-dim) .dl-id").first(),
         decision: page.locator(".dl-item:not(.dl-dim) .dl-text").first(),
         command: page.locator(".rc-command pre code").first(),
+        stepNumber: page.locator(".rc-num").first(),
       };
       for (const [name, loc] of Object.entries(read)) {
         expect(await paintedContrast(loc), `${name} contrast`).toBeGreaterThanOrEqual(4.5);

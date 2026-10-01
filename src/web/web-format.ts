@@ -556,6 +556,9 @@ function checklistHtml(
   values?: (number | undefined)[],
   /** How a list nested directly under a row renders; `RunChecklist`'s labelled rows. */
   nestedList?: (list: ChecklistList) => string,
+  /** A `RunChecklist` step list: an ordered one paints each step's number,
+   *  since a flex row shows no list marker. */
+  stepNumbers = false,
 ): string {
   // A task row is a flex box, not a list item, so it does not advance an <ol>'s
   // counter: in an ordered sublist every row carries its number as `value`.
@@ -578,9 +581,10 @@ function checklistHtml(
       const state = it.checked ? "done" : "todo";
       const mark = it.checked ? "✓" : "✗";
       const text = nested ? `<span class="check-text">${itemHtml(it.text)}</span>` : itemHtml(it.text);
+      const num = stepNumbers && nums ? `<span class="rc-num">${nums[k]}.</span>` : "";
       return (
         `<li class="check-item check-${state}${nested ? " check-parent" : ""}"${value}>` +
-        `<span class="check-mark">${mark}</span> ${text}${nested}</li>`
+        `${num}<span class="check-mark">${mark}</span> ${text}${nested}</li>`
       );
     })
     .join("");
@@ -1007,7 +1011,7 @@ const webRenderer: BlockRenderer = {
         const body = parts
           .map((p) =>
             p.kind === "steps"
-              ? checklistHtml(p.list.rows, p.list.ordered, p.list.start, p.list.values, runListHtml)
+              ? checklistHtml(p.list.rows, p.list.ordered, p.list.start, p.list.values, runListHtml, true)
               : renderBlocks([p.block], webRenderer),
           )
           .join("\n");

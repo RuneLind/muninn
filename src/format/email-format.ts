@@ -39,7 +39,7 @@ import {
 } from "./markdown-ast.ts";
 import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
 import { tldrFallbackLabel } from "./genre-lists.ts";
-import { renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
+import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "./query-block.ts";
 import {
@@ -135,7 +135,10 @@ function checklistEmail(
   ordered = false,
   start = 1,
   values?: (number | undefined)[],
+  /** A `RunChecklist` step list: an ordered one writes each step's number. */
+  steps = false,
 ): string {
+  const nums = steps && ordered ? ordinals(start, rows.length, values) : undefined;
   const lis = rows
     .map((it, k) => {
       const nested = (it.children ?? [])
@@ -151,6 +154,7 @@ function checklistEmail(
       if (it.plain) return `<li style="${S.li}"${v === undefined ? "" : ` value="${v}"`}>${itemEmail(it.text)}${nested}</li>`;
       return (
         `<li style="${S.li}list-style:none;">` +
+        (nums ? `<span style="color:${DIM};">${nums[k]}.</span> ` : "") +
         `<span style="color:${it.checked ? VERDICT_COLOR.yes : DIM};">${it.checked ? "☑" : "☐"}</span> ` +
         `${itemEmail(it.text)}${nested}</li>`
       );
@@ -349,7 +353,7 @@ const emailRenderer: BlockRenderer = {
         const parts = runChecklistBody(rawChildren);
         if (!parts.some((p) => p.kind === "steps")) return children;
         return parts
-          .map((p) => (p.kind === "steps" ? checklistEmail(p.list.rows, 0, p.list.ordered, p.list.start, p.list.values) : renderBlocks([p.block], emailRenderer)))
+          .map((p) => (p.kind === "steps" ? checklistEmail(p.list.rows, 0, p.list.ordered, p.list.start, p.list.values, true) : renderBlocks([p.block], emailRenderer)))
           .filter((out) => out.trim() !== "")
           .join("\n");
       }

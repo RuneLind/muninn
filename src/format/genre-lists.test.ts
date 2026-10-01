@@ -35,6 +35,10 @@ describe("Timeline date grammar", () => {
     ["2026-09-28 20:50 deploy", "2026-09-28 20:50", "deploy"],
     ["2026-09-28 20:50Z: deploy", "2026-09-28 20:50Z", "deploy"],
     ["2026-09-28 25:00 ikke et klokkeslett", "2026-09-28", "25:00 ikke et klokkeslett"],
+    // A time followed by a dash and a digit is a range: it stays in the text.
+    ["2026-09-28 20:50–21:10: deploy", "2026-09-28", "20:50–21:10: deploy"],
+    // A dash right before a digit is a minus sign, not a separator.
+    ["2026-09-30 -5 grader", "2026-09-30", "-5 grader"],
     // The colon inside the bold, the house label style.
     ["**30.09.2026:** Fag svarte", "30.09.2026", "Fag svarte"],
     ["**2026-09-30:** kolon i fet", "2026-09-30", "kolon i fet"],
@@ -72,6 +76,11 @@ describe("Timeline date grammar", () => {
     ["2026-09-30x", null, "2026-09-30x"],
     ["2026-09-301", null, "2026-09-301"],
     ["2026-09-30, komma", null, "2026-09-30, komma"],
+    // A dash right before a digit is a range, never a separator.
+    ["27.09–28.09: sprint", null, "27.09–28.09: sprint"],
+    ["2026-09-28–30 sprint", null, "2026-09-28–30 sprint"],
+    ["27.09-28.09", null, "27.09-28.09"],
+    ["**2026-09-28**—30 sprint", null, "**2026-09-28**—30 sprint"],
     ["**2026-09-30 — inne i fet**", null, "**2026-09-30 — inne i fet**"],
     ["*2026-09-30* kursiv", null, "*2026-09-30* kursiv"],
     ["Fag svarte 2026-09-30", null, "Fag svarte 2026-09-30"],
@@ -101,6 +110,12 @@ describe("DecisionLog id grammar", () => {
     ["**D3**:tett kolon", "D3", "tett kolon", false],
     ["**D2**\u00a0—\u00a0hardt mellomrom", "D2", "hardt mellomrom", false],
     ["**D1**\nfortsetter", "D1", "fortsetter", false],
+    // A dash right before a digit is a minus sign: it stays in the text.
+    ["**D1** -1 stemme", "D1", "-1 stemme", false],
+    ["**D1** —2 til", "D1", "—2 til", false],
+    ["**D1**-1", null, "**D1**-1", false],
+    ["**D3**—x", "D3", "x", false],
+    ["**D2** — tekst", "D2", "tekst", false],
     // A struck id: the id, dimmed.
     ["~~**D1**~~ — flyttet", "D1", "flyttet", true],
     ["~~**D1**~~", "D1", "", true],
@@ -168,6 +183,9 @@ describe("RunChecklist label grammar", () => {
     ["**Command:** `make`", "command", "Command", "`make`"],
     ["**Forventet**: 0 feil", "expect", "Forventet", "0 feil"],
     ["**forventet:**", "expect", "forventet", ""],
+    // A hard space after the label counts as a space.
+    ["Forventet:\u00a0x", "expect", "Forventet", "x"],
+    ["**Kommando:**\u00a0`make`", "command", "Kommando", "`make`"],
     // Not a label: case past the first letter, a missing colon, no space after
     // it, a longer word, or a leading word.
     ["KOMMANDO: x", null],
@@ -179,6 +197,7 @@ describe("RunChecklist label grammar", () => {
     ["*Kommando:* x", null],
     ["Kommando x", null],
     ["Kommando:x", null],
+    ["Forventet:\u2003x", null],
     ["Stopp Hvis: x", null],
     ["Stop If: x", null],
     ["Kjør Kommando: x", null],
@@ -362,10 +381,36 @@ describe("web: RunChecklist", () => {
     );
   });
 
-  test("an empty step row is not a step", () => {
-    expect(formatWebHtml("<RunChecklist>\n\n- [x] a\n- [ ]\n- [ ] b\n\n</RunChecklist>")).toContain(
-      '<span class="rc-count">1 of 2 steps</span>',
-    );
+  test("an empty step row is neither a step nor a row", () => {
+    const html = formatWebHtml("<RunChecklist>\n\n- [x] a\n- [ ]\n- [ ] b\n\n</RunChecklist>");
+    expect(html).toContain('<span class="rc-count">1 of 2 steps</span>');
+    expect(html.match(/class="check-item/g)).toHaveLength(2);
+  });
+
+  test("an empty step with entries under it is a step and a row", () => {
+    const html = formatWebHtml("<RunChecklist>\n\n- [ ]\n  - Kommando: `x`\n- [x] b\n\n</RunChecklist>");
+    expect(html).toContain('<span class="rc-count">1 av 2 steg</span>');
+    expect(html.match(/class="check-item/g)).toHaveLength(2);
+    expect(html).toContain('<div class="rc-row rc-command">');
+  });
+
+  test("an ordered step list shows its numbers, from its start and its per-item values", () => {
+    const html = formatWebHtml("<RunChecklist>\n\n3. [x] a\n4. [ ] b\n\n</RunChecklist>");
+    expect(html).toContain('<ol class="checklist check-ol" start="3">');
+    expect(html).toContain('<span class="rc-num">3.</span><span class="check-mark">✓</span> a</li>');
+    expect(html).toContain('<span class="rc-num">4.</span><span class="check-mark">✗</span> b</li>');
+    const jump = formatWebHtml("<RunChecklist>\n\n1. [x] a\n\n7. [ ] b\n\n</RunChecklist>");
+    expect(jump).toContain('<span class="rc-num">1.</span>');
+    expect(jump).toContain('<span class="rc-num">7.</span>');
+    // A dropped empty row keeps the numbers of the rows after it.
+    const gap = formatWebHtml("<RunChecklist>\n\n1. [x] a\n2. [ ]\n3. [ ] c\n\n</RunChecklist>");
+    expect(gap).toContain('<span class="rc-num">3.</span><span class="check-mark">✗</span> c');
+    expect(gap).not.toContain('<span class="rc-num">2.</span>');
+  });
+
+  test("an unordered step list and a plain Checklist carry no numbers", () => {
+    expect(formatWebHtml("<RunChecklist>\n\n- [x] a\n\n</RunChecklist>")).not.toContain("rc-num");
+    expect(formatWebHtml("<Checklist>\n\n- [x] a\n  1. [ ] b\n\n</Checklist>")).not.toContain("rc-num");
   });
 
   test("every direct-child list is a step list; prose between renders in place; the count runs over all", () => {
@@ -436,6 +481,12 @@ describe("NextMoves lane: a RunChecklist's open steps", () => {
     const md = "<RunChecklist>\n\n- [x] a\n- [ ] b\n  - Kommando: `x`\n- [ ]\n\nMellom.\n\n1. [ ] c\n\n</RunChecklist>";
     expect(lane(md)).toEqual(["b", "c"]);
     expect(formatWebHtml(md)).toContain('<span class="rc-count">1 av 3 steg</span>');
+  });
+
+  test("an empty step counts only with entries under it, as the header does", () => {
+    const md = "<RunChecklist>\n\n- [ ]\n- [ ]\n  - Kommando: `x`\n- [ ] b\n\n</RunChecklist>";
+    expect(lane(md)).toEqual(["", "b"]);
+    expect(formatWebHtml(md)).toContain('<span class="rc-count">0 av 2 steg</span>');
   });
 
   test("a plain Checklist still counts its first list only", () => {
@@ -549,5 +600,28 @@ describe("plain-text fallbacks", () => {
     expect(email.indexOf("Innledning.")).toBeLessThan(email.indexOf("☑</span> a"));
     expect(email.indexOf("☑</span> a")).toBeLessThan(email.indexOf("Mellom."));
     expect(email.indexOf("Mellom.")).toBeLessThan(email.indexOf("☐</span> b"));
+  });
+
+  test("RunChecklist: an ordered step list keeps its numbers, from its start", () => {
+    const md = "<RunChecklist>\n\n3. [x] a\n4. [ ] b\n\n</RunChecklist>";
+    expect(formatSlackMrkdwn(md)).toBe("3. ☑ a\n4. ☐ b");
+    expect(formatTelegramHtml(md)).toBe("3. ☑ a\n4. ☐ b");
+    const email = formatEmailHtml(md);
+    expect(email).toMatch(/>3\.<\/span> <span[^>]*>☑<\/span> a/);
+    expect(email).toMatch(/>4\.<\/span> <span[^>]*>☐<\/span> b/);
+    const jump = "<RunChecklist>\n\n1. [x] a\n\n7. [ ] b\n\n</RunChecklist>";
+    expect(formatSlackMrkdwn(jump)).toContain("7. ☐ b");
+    expect(formatTelegramHtml(jump)).toContain("7. ☐ b");
+    expect(formatEmailHtml(jump)).toMatch(/>7\.<\/span> <span[^>]*>☐<\/span> b/);
+  });
+
+  test("RunChecklist: an empty step is dropped, one with entries kept", () => {
+    const md = "<RunChecklist>\n\n- [x] a\n- [ ]\n- [ ] b\n\n</RunChecklist>";
+    expect(formatSlackMrkdwn(md)).toBe("☑ a\n☐ b");
+    expect(formatTelegramHtml(md)).toBe("☑ a\n☐ b");
+    expect(formatEmailHtml(md).match(/[☐☑]<\/span>/g)).toHaveLength(2);
+    const kept = "<RunChecklist>\n\n- [ ]\n  - Kommando: x\n- [ ] b\n\n</RunChecklist>";
+    expect(formatSlackMrkdwn(kept)).toBe("☐ \n  ◦ Kommando: x\n☐ b");
+    expect(formatEmailHtml(kept).match(/[☐☑]<\/span>/g)).toHaveLength(2);
   });
 });

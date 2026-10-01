@@ -12,19 +12,21 @@ import type { ChecklistList, ChecklistRow } from "./markdown-ast.ts";
 
 /** The separator after a leading date or id. The tail after the token must be
  *  one of: nothing; whitespace (a newline and U+00A0 included), then text; or
- *  one of `—` `–` `-` `:`, with optional whitespace on either side. Anything
- *  else (`x`, `,`, `.` right after the token) is not a match. Returns the text
- *  after it. */
+ *  one of `—` `–` `-` `:`, with optional whitespace on either side. A dash
+ *  right before a digit is a range or a minus sign, never a separator
+ *  (`27.09–28.09`, `-1`). Anything else (`x`, `,`, `.` right after the token)
+ *  is not a match. Returns the text after it. */
 function afterSeparator(tail: string): string | null {
   if (tail === "") return "";
-  const m = /^(?:\s*[—–:-]|\s)\s*([\s\S]*)$/.exec(tail);
+  const m = /^(?:\s*(?::|[—–-](?!\d))|\s)\s*([\s\S]*)$/.exec(tail);
   return m ? m[1]! : null;
 }
 
 // ── Timeline ────────────────────────────────────────────────────────────────
 
-/** `YYYY-MM-DD`, optionally with a ` HH:MM` time and a `Z`. */
-const ISO_DATE = String.raw`\d{4}-\d{2}-\d{2}(?: (?:[01]\d|2[0-3]):[0-5]\dZ?)?`;
+/** `YYYY-MM-DD`, optionally with a ` HH:MM` time and a `Z`. A time that starts
+ *  a range (`20:50–21:10`) stays in the text. */
+const ISO_DATE = String.raw`\d{4}-\d{2}-\d{2}(?: (?:[01]\d|2[0-3]):[0-5]\dZ?(?![—–-]\d))?`;
 /** `D.M.YYYY` to `DD.MM.YYYY`. */
 const DAY_FIRST_DATE = String.raw`\d{1,2}\.\d{1,2}\.\d{4}`;
 /** `D.M` to `DD.MM`, no year. */
@@ -161,7 +163,7 @@ export interface RunEntry {
 
 /** A nested entry's label: the row must be plain (no `[ ]`/`[x]` marker) and
  *  start with a {@link RUN_LABELS} word in one of {@link RUN_LABEL_FORMS}, then
- *  a space, a tab or the end. */
+ *  a space, a tab, U+00A0 or the end. */
 export function parseRunEntry(row: ChecklistRow): RunEntry | null {
   if (!row.plain) return null;
   for (const l of RUN_LABELS) {
@@ -170,7 +172,7 @@ export function parseRunEntry(row: ChecklistRow): RunEntry | null {
         const head = form(word);
         if (!row.text.startsWith(head)) continue;
         const tail = row.text.slice(head.length);
-        if (tail !== "" && !/^[ \t]/.test(tail)) return null;
+        if (tail !== "" && !/^[ \t\u00a0]/.test(tail)) return null;
         return { kind: l.kind, label: word, value: tail.trim(), nb: l.nb };
       }
     }

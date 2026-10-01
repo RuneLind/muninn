@@ -369,6 +369,7 @@ export function componentBlockCss(scope: string): string {
     ${scope} .run-checklist { margin: 1.2rem 0; }
     ${scope} .rc-count { color: var(--text-soft); font-size: 0.85em; font-variant-numeric: tabular-nums; }
     ${scope} .run-checklist > .checklist { margin-top: 0.3rem; }
+    ${scope} .rc-num { flex: none; margin-right: 0.4rem; font-variant-numeric: tabular-nums; }
     ${scope} .rc-row {
       display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 0.1rem 0.6rem; align-items: baseline;
       margin: 0.25rem 0 0 1.5rem;

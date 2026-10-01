@@ -47,10 +47,12 @@ export function formatSlackMrkdwn(text: string): string {
 }
 
 /** Checklist rows as `☑`/`☐` lines, nested lists indented two spaces per level;
- *  a nested row without a task marker is a `◦` (or its number), not a `☐`. */
-function checklistText(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[]): string {
+ *  a nested row without a task marker is a `◦` (or its number), not a `☐`. An
+ *  ordered `RunChecklist` step list (`steps`) puts each step's number first. */
+function checklistText(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[], steps = false): string {
   const nums = ordinals(start, rows.length, values);
-  const markers = rows.map((r, k) => (r.plain ? (ordered ? `${nums[k]}.` : "◦") : r.checked ? "☑" : "☐"));
+  const num = (k: number) => (steps && ordered ? `${nums[k]}. ` : "");
+  const markers = rows.map((r, k) => (r.plain ? (ordered ? `${nums[k]}.` : "◦") : `${num(k)}${r.checked ? "☑" : "☐"}`));
   const children = rows.map((r) => r.children?.map((c: ChecklistChild) =>
     c.type === "code_block"
       ? { kind: "code" as const, out: slackRenderer.code_block(c) }
@@ -174,7 +176,7 @@ const slackRenderer: BlockRenderer = {
         const parts = runChecklistBody(rawChildren);
         if (!parts.some((p) => p.kind === "steps")) return children;
         return parts
-          .map((p) => (p.kind === "steps" ? checklistText(p.list.rows, p.list.ordered, p.list.start, p.list.values) : renderBlocks([p.block], slackRenderer)))
+          .map((p) => (p.kind === "steps" ? checklistText(p.list.rows, p.list.ordered, p.list.start, p.list.values, true) : renderBlocks([p.block], slackRenderer)))
           .filter((out) => out.trim() !== "")
           .join("\n\n");
       }
