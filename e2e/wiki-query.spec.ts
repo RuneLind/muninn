@@ -57,6 +57,27 @@ const PAGE = [
   "",
   "</Query>",
   "",
+  '<Query id="Q-4" question="Saker med beløp?" csv="report-res/Q-4.csv">',
+  "",
+  "Saksnummer, beløp og et notat over to linjer.",
+  "",
+  "</Query>",
+  "",
+  // Enough prose that the card at the bottom starts below the fold.
+  ...Array.from({ length: 40 }, (_, i) => `Avsnitt ${i + 1} med fylltekst om sakene.\n`),
+  '<Fold title="Spørringer">',
+  "",
+  // The fold's own heading: `foldBodyHtml` then renders the body twice.
+  "## Spørringer",
+  "",
+  '<Query id="Q-8" question="I en lukket fold?" answer="Ja.">',
+  "",
+  "Kortet ligger i en lukket fold.",
+  "",
+  "</Query>",
+  "",
+  "</Fold>",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -98,6 +119,14 @@ test.beforeAll(async () => {
   await writeFile(
     path.join(root, "plans", "report-res", "Q-1.csv"),
     'N,TYPE,NOTE\r\n10,beta,"a, b"\r\n9,alfa,x\r\n100,gamma,y\r\n',
+    "utf8",
+  );
+  await writeFile(
+    path.join(root, "plans", "report-res", "Q-4.csv"),
+    // KOMMENTAR is long on purpose: the table is wider than a phone column.
+    'SAKSNUMMER,BELOP,NOTE,KOMMENTAR\n' +
+      'MEL-1172008,1 000,"linje1\nlinje2",årsavregning ikke opprettet for perioden før vedtaket ble fattet\n' +
+      "MEL-368918,NULL,x,-\nMEL-232147,-16422,y,-\n",
     "utf8",
   );
   await writeFile(path.join(base, "outside.csv"), `SECRET\n${SECRET}\n`, "utf8");
@@ -176,6 +205,77 @@ test.describe("Wiki reader: Query cards", () => {
     await expect(th(0)).not.toHaveAttribute("aria-sort", /.*/);
     await th(1).locator("button").click();
     await expect(firstCell(1)).toHaveText("gamma");
+    expectClean(seen);
+  });
+
+  test("the SQL moved into the disclosure keeps its Copy button", async ({ page }) => {
+    const seen = await openPage(page);
+    const sql = page.locator("section.query#q-1 details.query-sql");
+    await sql.locator("summary").click();
+    await expect(sql.locator(".fence-copy")).toBeVisible();
+    expectClean(seen);
+  });
+
+  test("a header sorts from the keyboard: Enter on its button", async ({ page }) => {
+    const seen = await openPage(page);
+    const card = page.locator("section.query#q-1");
+    await card.locator("thead th").first().locator("button").focus();
+    await page.keyboard.press("Enter");
+    await expect(card.locator("tbody tr").first().locator("td").first()).toHaveText("9");
+    await expect(card.locator("thead th").first()).toHaveAttribute("aria-sort", "ascending");
+    expectClean(seen);
+  });
+
+  test("keys sort naturally, numbers right-align, NULL sorts last, a cell keeps its line break", async ({ page }) => {
+    const seen = await openPage(page);
+    const card = page.locator("section.query#q-4");
+    const col = (k: number) => card.locator("tbody tr").locator(`td:nth-child(${k + 1})`);
+    await card.locator("thead th").nth(0).locator("button").click();
+    await expect(col(0)).toHaveText(["MEL-232147", "MEL-368918", "MEL-1172008"]);
+    // BELOP is numeric (space-grouped thousands, a negative, a NULL): marked and right-aligned.
+    const belopTh = card.locator("thead th").nth(1);
+    await expect(belopTh).toHaveClass(/query-num/);
+    expect(await col(1).first().evaluate((el) => getComputedStyle(el).textAlign)).toBe("right");
+    await expect(card.locator("thead th").nth(2)).not.toHaveClass(/query-num/);
+    await belopTh.locator("button").click();
+    await expect(col(1)).toHaveText(["-16422", "1 000", "NULL"]);
+    const note = card.locator("td", { hasText: "linje1" });
+    expect(await note.evaluate((el) => (el as HTMLElement).innerText)).toBe("linje1\nlinje2");
+    expectClean(seen);
+  });
+
+  test("a #q-8 deep link on a fresh load opens the fold around the card and scrolls to it", async ({ page }) => {
+    const seen = watch(page);
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PAGE_REL)}#q-8`);
+    const card = page.locator("section.query#q-8");
+    await expect(card).toBeVisible();
+    expect(await card.evaluate((el) => (el.closest("details") as HTMLDetailsElement).open)).toBe(true);
+    await expect(card).toBeInViewport();
+    expectClean(seen);
+  });
+
+  test("at 390px in focus mode the table scrolls inside its box, the page does not scroll sideways", async ({ page }) => {
+    const seen = await openPage(page);
+    // At 390 px the reader's three panes leave the article no width (see
+    // wiki-next-moves.spec.ts): a phone reads a page in focus mode.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("f");
+    await expect.poll(async () => (await page.locator(".wiki-article").boundingBox())!.width).toBeGreaterThan(250);
+    const wrap = page.locator("section.query#q-4 .query-table-wrap");
+    await expect(wrap).toBeVisible();
+    const m = await wrap.evaluate((el) => {
+      el.scrollLeft = 80;
+      return {
+        // Wider than its box, and the box itself scrolls sideways.
+        inner: el.scrollWidth > el.clientWidth && el.scrollLeft > 0,
+        card: el.closest("section.query")!.getBoundingClientRect().right,
+        article: el.closest(".wiki-article")!.getBoundingClientRect().right,
+      };
+    });
+    expect(m.inner).toBe(true);
+    expect(m.card).toBeLessThanOrEqual(m.article + 1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
     expectClean(seen);
   });
 

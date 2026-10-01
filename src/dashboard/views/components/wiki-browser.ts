@@ -167,6 +167,7 @@ import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
 import { enhanceReportBlocks } from "./wiki-report-blocks.ts";
 import { enhanceQueryTables } from "./wiki-query-table.ts";
+import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
@@ -3964,6 +3965,8 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // layer toggle. No-op on a page carrying no annotation.
       enhanceFactCheck(document.getElementById("articleWrap")!);
       applyDisplay();
+      // A `#id` in the URL (a shared `#q-8`): open the folds around it, scroll to it.
+      revealHashTarget(articleRoot);
       renderConnections(data);
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
@@ -4739,6 +4742,12 @@ if (wikiSel) {
     location.href = value ? "/wiki?wiki=" + encodeURIComponent(value) : "/wiki";
   });
 }
+
+// An in-article `#id` link to a card inside a closed fold: open it on the way.
+window.addEventListener("hashchange", () => {
+  const article = document.querySelector("#articleWrap > .wiki-article");
+  if (article) revealHashTarget(article);
+});
 
 window.addEventListener("popstate", () => {
   const params = new URLSearchParams(location.search);
