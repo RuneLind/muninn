@@ -1595,6 +1595,33 @@ the head's spelling and the rail census), `src/gardener/lint-proposals.test.ts`
 bytes an Accept writes, the simultaneous overlap, the sequential self-heal and
 the stopped path).
 
+### Lint check 9 — report-page drift (`lint-drift.ts`)
+
+Five report-only checks over REPORT pages (a `plan_status` key, or a page under
+`plans/` or `archive/`; reserved and culled pages excluded). None proposes a fix.
+Rules, constants and the measured tuning live in the module's docblock; the parts
+a caller can get wrong:
+
+- **Every structural test walks `parseBlocks`**, so a lane, fence, table,
+  `<CaseBoard>` or `<Fold>` quoted in a code fence counts as nothing.
+- **Days are Europe/Oslo** (`todayOslo`): "today" for `draft-lane-stale`, and the
+  day of `gitTouchedMs` for `status-date-behind`.
+- **`status-date-behind` reads the index's `gitTouchedMs`** — no git call of its
+  own; sweeps and metadata-only commits are already set aside by `git-dates.ts`,
+  and a wiki with no git history gets no finding. It checks LIVE statuses only
+  (`proposed`/`ready`/`in-flight`/`blocked`). On a wiki carrying mimir's
+  `scripts/plan-status-stale.ts` (check 10) it skips that check's population —
+  top-level `plans/` pages in `in-flight`/`ready` — so the two never report one
+  page twice.
+- **`loose-sql` counts read queries** (`SELECT`/`WITH`) outside any `<Query>`, on
+  `plans/` or live-status pages only.
+- **`long-page-no-fold` is the one finding with `severity: "info"`.** `line` is
+  set on the lane and `status_date` findings.
+
+Acceptance: `lint-drift.test.ts` (each rule as accepted/rejected rows, the
+boundaries, the Oslo day, the check-10 split, and `lintWiki` over a temp git repo
+with backdated commits) and the drift case in `wiki-gardener-routes.test.ts`.
+
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 
 The Connections panel's first section: the pages one hop from the open page,

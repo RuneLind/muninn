@@ -79,6 +79,7 @@ interface LintFinding {
   relPath: string;
   message: string;
   detail?: string;
+  line?: number;
 }
 interface LintResponse {
   findings: LintFinding[];
@@ -481,6 +482,11 @@ const LINT_LABELS: Record<LintCheck, string> = {
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",
+  "draft-lane-stale": "Draft lanes older than 2 days",
+  "status-date-behind": "status_date older than the last content commit",
+  "loose-sql": "SQL fences outside a <Query>",
+  "case-table": "Case tables with statuses and no <CaseBoard>",
+  "long-page-no-fold": "Long pages with no <Fold> (info)",
 };
 
 function renderLint(findings: LintFinding[]): void {
@@ -500,7 +506,7 @@ function renderLint(findings: LintFinding[]): void {
       ` <span class="lint-count">${items.length}</span></div><ul class="lint-items">`;
     items.forEach((f) => {
       html +=
-        `<li><span class="lint-path">${esc(f.relPath)}</span><span class="lint-msg">${esc(f.message)}</span></li>`;
+        `<li><span class="lint-path">${esc(f.relPath)}${f.line ? `:${f.line}` : ""}</span><span class="lint-msg">${esc(f.message)}</span></li>`;
     });
     html += "</ul></div>";
   }
