@@ -545,9 +545,10 @@ function childrenHtml(children: RenderedChild[] | undefined): string {
 }
 
 /** Checklist rows as `<ul class="checklist">`, a nested list inside its parent
- *  row. A parent row (`check-parent`, taken out of the flex row by the CSS) wraps
- *  its text in `check-text`, so the todo colour stops at the row's own words
- *  instead of reaching the rows under it. A nested row with no task marker is a
+ *  row. Every task row wraps its text in `check-text`: a flat row is a flex box,
+ *  so the wrapper keeps its text one flex item, and on a parent row (`check-parent`,
+ *  taken out of the flex row by the CSS) it stops the todo colour at the row's own
+ *  words instead of reaching the rows under it. A nested row with no task marker is a
  *  plain `check-plain` item, and a nested ordered list keeps its numbers. */
 function checklistHtml(
   rows: ChecklistRow[],
@@ -580,7 +581,9 @@ function checklistHtml(
       if (it.plain) return `<li class="check-plain"${value}>${itemHtml(it.text)}${nested}</li>`;
       const state = it.checked ? "done" : "todo";
       const mark = it.checked ? "✓" : "✗";
-      const text = nested ? `<span class="check-text">${itemHtml(it.text)}</span>` : itemHtml(it.text);
+      // Always one wrapper: the row is a flex box, so unwrapped text runs, <code>
+      // and <strong> each became a flex item and a long row split into columns.
+      const text = `<span class="check-text">${itemHtml(it.text)}</span>`;
       const num = stepNumbers && nums ? `<span class="rc-num">${nums[k]}.</span>` : "";
       return (
         `<li class="check-item check-${state}${nested ? " check-parent" : ""}"${value}>` +

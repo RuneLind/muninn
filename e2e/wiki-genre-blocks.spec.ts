@@ -112,6 +112,13 @@ const PAGE = [
   "",
   "</RunChecklist>",
   "",
+  // A flat row of mixed inline content (the 8045 runbook's shape): one flex item.
+  "<RunChecklist>",
+  "",
+  "- [ ] Toggle `MELOSYS_SKATTEHENDELSE_CONSUMER` i prod-Unleash — står den på, har **Kafka-stien** kanskje allerede opprettet årsavregninger for deler av populasjonen; rapport 0 skal vise dem under `antallMedEksisterendeAarsavregning`, og tallet må gi mening.",
+  "",
+  "</RunChecklist>",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -241,6 +248,28 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
     await expect(rc.locator(".rc-row.rc-command").nth(1).locator(".fence-copy")).toHaveCount(0);
     await expect(rc.locator(".rc-row.rc-command").nth(1).locator("code")).toHaveText("run-skarp.json");
     await expect(rc.locator(".check-plain")).toHaveText("en vanlig note");
+    expectClean(seen);
+  });
+
+  test("a flat row with code and bold reads as one text block, not columns", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const seen = await openPage(page);
+    const row = page.locator("section.run-checklist").nth(3).locator(".check-item");
+    await expect(row).toHaveCount(1);
+    // Mark + one text element: nothing else may become its own flex item.
+    expect(await row.evaluate((li) => Array.from(li.children).map((c) => c.className))).toEqual([
+      "check-mark",
+      "check-text",
+    ]);
+    // The text takes the row's width, so the code span sits inside one wrapped
+    // paragraph instead of in a squeezed column of its own.
+    const [rowBox, textBox, codeBox] = await Promise.all([
+      row.boundingBox(),
+      row.locator(".check-text").boundingBox(),
+      row.locator("code").first().boundingBox(),
+    ]);
+    expect(textBox!.width).toBeGreaterThan(rowBox!.width * 0.8);
+    expect(codeBox!.width).toBeGreaterThan(200);
     expectClean(seen);
   });
 

@@ -470,7 +470,8 @@ export function componentBlockCss(scope: string): string {
     ${scope} .check-mark { flex: none; font-weight: 700; font-variant-numeric: tabular-nums; }
     /* Child combinators: a row's colours come from its OWN state, never from a
        parent row it is nested in (a parent's todo text colour sits on its
-       .check-text, not on the <li> that also holds the child rows). */
+       .check-text, not on the <li> that also holds the child rows; a flat row
+       carries a .check-text too, in the same colour as its <li>). */
     ${scope} .check-done > .check-mark { color: var(--status-success); }
     ${scope} .check-todo > .check-mark { color: var(--text-muted); }
     ${scope} .check-todo:not(.check-parent), ${scope} .check-todo > .check-text { color: var(--text-muted); }
