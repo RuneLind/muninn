@@ -15,7 +15,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
-import { parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
+import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import {
   Placeholders,
@@ -153,6 +153,13 @@ const slackRenderer: BlockRenderer = {
         return [head ? `*${inline(head)}*` : "", inline(answer), children, result ? slackLiteral(result) : ""]
           .filter(Boolean)
           .join("\n");
+      }
+      case "CaseBoard":
+      case "DeltaTable": {
+        // No file read: the body (a DeltaTable's pipe table renders as a
+        // table, with no delta), then the file's name as plain text.
+        const line = blockFileLine(name, attrs);
+        return [children, line ? slackLiteral(line) : ""].filter(Boolean).join("\n");
       }
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary

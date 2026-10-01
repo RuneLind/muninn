@@ -100,6 +100,8 @@ export const COMPONENT_NAMES = [
   "NextMoves",
   "Lane",
   "Query",
+  "CaseBoard",
+  "DeltaTable",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -114,6 +116,9 @@ const SELF_CLOSING_ALLOWED: ReadonlySet<ComponentName> = new Set<ComponentName>(
   "Embed",
   // A result-only query has no body.
   "Query",
+  // Both read a file beside the page; a DeltaTable may instead carry a pipe table.
+  "CaseBoard",
+  "DeltaTable",
 ]);
 
 /** Attribute whitelist per component; any other attribute is dropped. */
@@ -166,6 +171,12 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // One prod query: `csv`/`sql` name files beside the page, `uses` is a
   // comma-separated list. Wiki-only; see `src/format/query-block.ts`.
   Query: ["id", "question", "answer", "csv", "sql", "run", "uses"],
+  // Tracked cases from a YAML list beside the page. Wiki-only; see
+  // `src/format/case-board.ts`.
+  CaseBoard: ["src"],
+  // Run-to-run numbers from a CSV beside the page or a pipe-table body, with a
+  // computed delta column. Wiki-only; see `src/format/delta-table.ts`.
+  DeltaTable: ["src", "better"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the

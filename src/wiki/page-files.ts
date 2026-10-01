@@ -1,6 +1,7 @@
 /**
  * Files a page reads from beside itself — the `csv=`/`sql=` of its `<Query>`
- * blocks — read BEFORE `renderWikiHtml`, which stays synchronous and gets the
+ * blocks, the `src=` of its `<CaseBoard>` and `<DeltaTable>` blocks — read
+ * BEFORE `renderWikiHtml`, which stays synchronous and gets the
  * answers as a {@link PageFiles} lookup.
  *
  * Every read goes through {@link resolveContainedFile}, the containment check
@@ -21,7 +22,8 @@ import {
   checkPageFileRef,
   hasExcludedSegment,
   pageFileExtension,
-  queryFileRefs,
+  PAGE_FILE_COMPONENTS,
+  pageFileRefs,
   type PageFileResult,
 } from "../format/query-block.ts";
 import { splitFrontmatter } from "./page-text.ts";
@@ -124,12 +126,13 @@ async function readPageFile(
 }
 
 /**
- * Read every file the page's `<Query>` blocks name. The refs come from the
- * parsed AST (`queryFileRefs`), so a tag inside a code fence reads nothing.
+ * Read every file the page's `<Query>`, `<CaseBoard>` and `<DeltaTable>`
+ * blocks name. The refs come from the parsed AST (`pageFileRefs`), so a tag
+ * inside a code fence reads nothing.
  * Read one at a time in source order, so the per-page byte budget
  * (`PAGE_FILE_PAGE_BUDGET_BYTES`) cuts the same refs on every open. Past
  * `PAGE_FILE_MAX_PER_PAGE` distinct refs, the rest answer `limit` unread. A
- * page with no `<Query` substring parses nothing.
+ * page naming none of the three tags parses nothing.
  */
 export async function loadPageFiles(
   root: string,
@@ -137,8 +140,8 @@ export async function loadPageFiles(
   markdown: string,
 ): Promise<ReadonlyMap<string, PageFileResult>> {
   const out = new Map<string, PageFileResult>();
-  if (!markdown.includes("<Query")) return out;
-  const refs = queryFileRefs(parseBlocks(splitFrontmatter(markdown).body));
+  if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return out;
+  const refs = pageFileRefs(parseBlocks(splitFrontmatter(markdown).body));
   const budget = { left: PAGE_FILE_PAGE_BUDGET_BYTES };
   for (const [k, ref] of refs.entries()) {
     out.set(ref, k < PAGE_FILE_MAX_PER_PAGE ? await readPageFile(root, pageRelPath, ref, budget) : { ok: false, reason: "limit" });

@@ -37,6 +37,8 @@ import {
   splitQuerySql,
   type PageFiles,
 } from "../format/query-block.ts";
+import { caseCountParts, groupCases, parseCaseBoard, type BoardCase } from "../format/case-board.ts";
+import { computeDelta, deltaGrid, parseDeltaAttrs, type DeltaBetter, type DeltaGrid } from "../format/delta-table.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
 const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.name === "Tab";
@@ -150,28 +152,32 @@ export function formatWebHtml(text: string, opts?: { files?: PageFiles }): strin
   currentPageFiles = opts?.files;
   try {
     const rendered = renderBlocks(parseBlocks(text), webRenderer);
-    return uniqueQueryAnchors(collapseBlockSpacing(rendered).trim());
+    return uniqueAnchors(collapseBlockSpacing(rendered).trim());
   } finally {
     currentPageFiles = prev;
   }
 }
 
-/** The page's sibling files for the call in progress; absent ⇒ the `Query`
- *  cards say their result is not loaded here. */
+/** The page's sibling files for the call in progress; absent ⇒ the `Query`,
+ *  `CaseBoard` and `DeltaTable` blocks say their file is not loaded here. */
 let currentPageFiles: PageFiles | undefined;
 
-const QUERY_ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
+/** An anchored `Query` card or `CaseBoard` row, up to its own id link. The two
+ *  share one id namespace: they land in one document. */
+const ANCHOR_RE =
+  /<(section class="query"|div class="cb-row") id="([^"]+)">([\s\S]*?)<a class="(query-id|cb-id)" href="#\2">/g;
 
-/** Each `Query` card's anchor made unique in the finished HTML: a repeat gets
- *  the first free `-2`, `-3`, and its id link follows. A pass over the OUTPUT, because some
- *  components render a body twice and keep one copy (`foldBodyHtml`). */
-function uniqueQueryAnchors(html: string): string {
-  if (!html.includes('<section class="query" id="')) return html;
-  // Every card's own slug is reserved first, so a repeat's suffix never takes
-  // an id an author wrote (`Q-8`, `Q-8`, `Q-8-2` → `q-8`, `q-8-3`, `q-8-2`).
-  const reserved = new Set([...html.matchAll(QUERY_ANCHOR_RE)].map((m) => m[1]!));
+/** Each `Query` card's and `CaseBoard` row's anchor made unique in the finished
+ *  HTML: a repeat gets the first free `-2`, `-3`, and its id link follows. A
+ *  pass over the OUTPUT, because some components render a body twice and keep
+ *  one copy (`foldBodyHtml`). */
+function uniqueAnchors(html: string): string {
+  if (!html.includes('<section class="query" id="') && !html.includes('<div class="cb-row" id="')) return html;
+  // Every own slug is reserved first, so a repeat's suffix never takes an id
+  // an author wrote (`Q-8`, `Q-8`, `Q-8-2` → `q-8`, `q-8-3`, `q-8-2`).
+  const reserved = new Set([...html.matchAll(ANCHOR_RE)].map((m) => m[2]!));
   const used = new Set<string>();
-  return html.replace(QUERY_ANCHOR_RE, (_m, slug: string, between: string) => {
+  return html.replace(ANCHOR_RE, (_m, open: string, slug: string, between: string, link: string) => {
     let anchor = slug;
     if (used.has(anchor)) {
       let k = 2;
@@ -179,8 +185,133 @@ function uniqueQueryAnchors(html: string): string {
       anchor = `${slug}-${k}`;
     }
     used.add(anchor);
-    return `<section class="query" id="${anchor}">${between}<a class="query-id" href="#${anchor}">`;
+    return `<${open} id="${anchor}">${between}<a class="${link}" href="#${anchor}">`;
   });
+}
+
+/** A `CaseBoard` or `DeltaTable` line in place of its file or its data. */
+function blockNote(cls: string, text: string): string {
+  return `<p class="${cls}">${escapeHtml(text)}</p>`;
+}
+
+/** One `CaseBoard` row: id link, status pill, owner, note (inline markdown),
+ *  refs. Every value comes from the file and is escaped. */
+function caseRowHtml(c: BoardCase): string {
+  const id = c.anchor
+    ? `<a class="cb-id" href="#${c.anchor}">${escapeHtml(c.id)}</a>`
+    : `<span class="cb-id">${escapeHtml(c.id)}</span>`;
+  const pill =
+    c.status === "unknown"
+      ? `<span class="cb-pill cb-unknown" title="${escapeHtml(`status: ${c.rawStatus || "(none)"}`)}">unknown</span>`
+      : `<span class="cb-pill cb-${c.status}">${c.status}</span>`;
+  const owner = c.owner ? `<span class="cb-owner">${escapeHtml(c.owner)}</span>` : "";
+  const note = c.note ? `<span class="cb-note">${renderInline(c.note)}</span>` : "";
+  const refs = c.refs.length
+    ? `<span class="cb-refs">${c.refs.map((r) => `<span class="cb-ref">${escapeHtml(r)}</span>`).join("")}</span>`
+    : "";
+  // An id link comes first in the row: `ANCHOR_RE` reads up to it.
+  return `<div class="cb-row"${c.anchor ? ` id="${c.anchor}"` : ""}>${id}${pill}${owner}${note}${refs}</div>`;
+}
+
+/** A `<CaseBoard src>`: the count strip, then the rows grouped by status. */
+function caseBoardHtml(src: string): string {
+  if (!src) return `<section class="caseboard">${blockNote("cb-unavailable", "CaseBoard without src")}</section>`;
+  const file = lookupPageFile(currentPageFiles, src);
+  if (!file.ok) {
+    return `<section class="caseboard">${blockNote("cb-unavailable", pageFileFailureText(file.reason, src, "Cases"))}</section>`;
+  }
+  const name = pageFileName(src);
+  const board = parseCaseBoard(file.text);
+  if (!board.ok) return `<section class="caseboard">${blockNote("cb-unavailable", `${board.reason}: ${name}`)}</section>`;
+  const parts = caseCountParts(board.counts);
+  const strip = parts.length
+    ? parts
+        .map(([n, s]) => `<span class="cb-count cb-count-${s}"><span class="cb-n">${n}</span> ${s}</span>`)
+        .join(`<span class="cb-sep"> · </span>`)
+    : `<span class="cb-count">0 cases</span>`;
+  const n = (v: number) => v.toLocaleString("en-US");
+  const notes =
+    (board.total > board.cases.length
+      ? blockNote("cb-truncated", `showing ${n(board.cases.length)} of ${n(board.total)} cases`)
+      : "") +
+    (board.skipped > 0
+      ? blockNote("cb-warning", `${n(board.skipped)} ${board.skipped === 1 ? "entry" : "entries"} without an id skipped`)
+      : "");
+  const groups = groupCases(board.cases)
+    .map((g) => `<div class="cb-group" data-status="${g.status}">${g.cases.map(caseRowHtml).join("")}</div>`)
+    .join("");
+  return `<section class="caseboard"><p class="cb-strip">${strip}</p>${notes}${groups}</section>`;
+}
+
+/** A `<DeltaTable>`'s table: the label column, every run, and the delta
+ *  between the last two runs. `cell` renders one cell's text (escaped for a
+ *  CSV, inline markdown for a pipe table); the delta is computed from the raw
+ *  text, so a cell written `**12**` gets none. */
+function deltaTableHtml(grid: DeltaGrid, better: DeltaBetter, cell: (s: string) => string): string {
+  const { header, rows } = grid;
+  const runs = header.length - 1;
+  const hasDelta = runs >= 2;
+  const prevLabel = header[header.length - 2] ?? "";
+  const lastLabel = header[header.length - 1] ?? "";
+  const th =
+    header.map((h, k) => `<th scope="col"${k > 0 ? ` class="dt-run"` : ""}>${cell(h)}</th>`).join("") +
+    (hasDelta
+      ? `<th scope="col" class="dt-delta">Δ <span class="dt-delta-runs">${cell(prevLabel)} → ${cell(lastLabel)}</span></th>`
+      : "");
+  const trs = rows
+    .map((r) => {
+      const tds = r.map((c, k) => (k === 0 ? `<th scope="row">${cell(c)}</th>` : `<td class="dt-run">${cell(c)}</td>`)).join("");
+      if (!hasDelta) return `<tr>${tds}</tr>`;
+      const d = computeDelta(r[r.length - 2] ?? "", r[r.length - 1] ?? "", better);
+      const dHtml = d
+        ? `<td class="dt-delta${d.tone ? ` dt-${d.tone}` : ""}"><span class="dt-abs">${escapeHtml(d.abs)}</span>` +
+          (d.pct ? ` <span class="dt-pct">(${escapeHtml(d.pct)})</span>` : "") +
+          `</td>`
+        : `<td class="dt-delta dt-none"></td>`;
+      return `<tr>${tds}${dHtml}</tr>`;
+    })
+    .join("");
+  const note = hasDelta ? "" : blockNote("dt-note", "Two runs are needed for a delta");
+  return (
+    `<div class="dt-wrap"><table class="dt-table"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>${note}`
+  );
+}
+
+/** A `<DeltaTable>`: from its `src=` CSV, else from the first pipe table
+ *  that is a direct child of its body. The rest of the body renders above the
+ *  table. */
+function deltaBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): string {
+  const { src, better } = parseDeltaAttrs(attrs);
+  const bClass = better ? ` dt-better-${better}` : "";
+  const k = src ? -1 : rawChildren.findIndex((b) => b.type === "table");
+  const rest = k === -1 ? rawChildren : [...rawChildren.slice(0, k), ...rawChildren.slice(k + 1)];
+  const intro = rest.some((b) => !isBlankTextBlock(b)) ? `<div class="dt-body">${renderBlocks(rest, webRenderer)}</div>` : "";
+  let table: string;
+  if (src) {
+    const file = lookupPageFile(currentPageFiles, src);
+    const name = pageFileName(src);
+    if (!file.ok) table = blockNote("dt-unavailable", pageFileFailureText(file.reason, src, "Table"));
+    else {
+      const { header, rows, warning } = parseCsv(file.text);
+      if (header.length === 0) table = blockNote("dt-unavailable", `Empty file: ${name}`);
+      else {
+        const shown = rows.slice(0, QUERY_CSV_MAX_ROWS);
+        const n = (v: number) => v.toLocaleString("en-US");
+        table =
+          (warning === "unterminated-quote"
+            ? blockNote("dt-warning", `Unterminated quote — the rest of the file is one cell: ${name}`)
+            : "") +
+          deltaTableHtml(deltaGrid(header, shown), better, queryCellHtml) +
+          (rows.length > shown.length ? blockNote("dt-truncated", `showing ${n(shown.length)} of ${n(rows.length)} rows`) : "");
+      }
+    }
+  } else if (k !== -1) {
+    const t = rawChildren[k] as Extract<Block, { type: "table" }>;
+    table = deltaTableHtml(deltaGrid(t.headers, t.rows), better, renderInline);
+  } else {
+    table = blockNote("dt-unavailable", "DeltaTable without src or a table");
+  }
+  return `<section class="delta-table${bClass}">${intro}${table}</section>`;
 }
 
 /** A `Query` card's unavailable line, in place of a table or the SQL. */
@@ -643,6 +774,13 @@ const webRenderer: BlockRenderer = {
           `${head}${bodyHtml}${result}${querySqlHtml(q.sql, sql)}</section>`
         );
       }
+      case "CaseBoard": {
+        // Self-closing in the authoring rule; a body, if written, follows the board.
+        const board = caseBoardHtml((attrs.src ?? "").trim());
+        return rawChildren.some((b) => !isBlankTextBlock(b)) ? `${board}${children}` : board;
+      }
+      case "DeltaTable":
+        return deltaBlockHtml(attrs, rawChildren);
       case "FactCheck": {
         // Collapsed by DEFAULT — the per-claim evidence is reachable from the
         // chips in the prose, so the appendix that used to add 74 lines to the

@@ -39,7 +39,7 @@ import {
 import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
 import { renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
-import { parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "./query-block.ts";
+import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "./query-block.ts";
 import {
   Placeholders,
   escapeHtml,
@@ -324,6 +324,13 @@ const emailRenderer: BlockRenderer = {
           (result ? `<div style="${S.dim}margin:6px 0 0;">${escapeHtml(result)}</div>` : "") +
           `</div>`
         );
+      }
+      case "CaseBoard":
+      case "DeltaTable": {
+        // No file read in mail: the body (a DeltaTable's pipe table renders as
+        // a table, with no delta), then the file's name.
+        const line = blockFileLine(name, attrs);
+        return children + (line ? `<div style="${S.dim}margin:6px 0 12px;">${escapeHtml(line)}</div>` : "");
       }
       case "FactCheck":
         // No <details> in mail — the appendix renders open, under its summary line.

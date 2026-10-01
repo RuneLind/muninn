@@ -22,8 +22,9 @@ export interface PageFiles {
   get(ref: string): PageFileResult | undefined;
 }
 
-/** Extensions a page may read beside itself. */
-export const PAGE_FILE_EXTENSIONS: readonly string[] = [".csv", ".sql"];
+/** Extensions a page may read beside itself: `<Query>`'s csv/sql,
+ *  `<DeltaTable>`'s csv and `<CaseBoard>`'s yaml. */
+export const PAGE_FILE_EXTENSIONS: readonly string[] = [".csv", ".sql", ".yaml", ".yml"];
 export const PAGE_FILE_MAX_BYTES = 1024 * 1024;
 export const PAGE_FILE_MAX_PER_PAGE = 50;
 /** Bytes one page open may read across all its files; refs past it answer `budget`. */
@@ -74,11 +75,17 @@ export interface QueryAttrs {
   uses: string[];
 }
 
+/** An id as an anchor slug — the `QueryAttrs.anchor` rule, shared with the
+ *  `<CaseBoard>` rows. */
+export function anchorSlug(id: string): string {
+  return id.normalize("NFC").toLowerCase().replace(/[^\p{L}\p{M}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, "");
+}
+
 export function parseQueryAttrs(attrs: Record<string, string>): QueryAttrs {
   const id = (attrs.id ?? "").trim();
   return {
     id,
-    anchor: id.normalize("NFC").toLowerCase().replace(/[^\p{L}\p{M}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, ""),
+    anchor: anchorSlug(id),
     question: (attrs.question ?? "").trim(),
     answer: (attrs.answer ?? "").trim(),
     csv: (attrs.csv ?? "").trim(),
@@ -98,10 +105,15 @@ export function splitQuerySql(children: Block[], hasSqlFile: boolean): { sql: Co
   return { sql: children[k] as CodeBlock, body: [...children.slice(0, k), ...children.slice(k + 1)] };
 }
 
-/** Every `csv=`/`sql=` value on a `Query` in `blocks`, at any depth, in source
- *  order, deduplicated. Walks the AST, so a `<Query>` written inside a code
- *  fence (a `code_block`) contributes nothing. */
-export function queryFileRefs(blocks: Block[]): string[] {
+/** The components that name a file beside the page, and the tag text a page
+ *  must contain for the loader to parse it at all. */
+export const PAGE_FILE_COMPONENTS = ["Query", "CaseBoard", "DeltaTable"] as const;
+
+/** Every file value in `blocks`, at any depth, in source order, deduplicated:
+ *  a `Query`'s `csv=`/`sql=`, a `CaseBoard`'s or `DeltaTable`'s `src=`. Walks
+ *  the AST, so a tag written inside a code fence (a `code_block`) contributes
+ *  nothing. */
+export function pageFileRefs(blocks: Block[]): string[] {
   const out = new Set<string>();
   const walk = (bs: Block[]) => {
     for (const b of bs) {
@@ -110,6 +122,9 @@ export function queryFileRefs(blocks: Block[]): string[] {
         const q = parseQueryAttrs(b.attrs);
         if (q.csv) out.add(q.csv);
         if (q.sql) out.add(q.sql);
+      } else if (b.name === "CaseBoard" || b.name === "DeltaTable") {
+        const src = (b.attrs.src ?? "").trim();
+        if (src) out.add(src);
       }
       walk(b.children);
     }
@@ -127,12 +142,13 @@ const mb = (bytes: number) => `${+(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
 /** The text a card shows in place of a file it could not use. English: the
  *  page's language is unknown here. The same text for a missing file and one
- *  outside the root. */
-export function pageFileFailureText(reason: PageFileFailure | "not-loaded", ref: string): string {
+ *  outside the root. `what` names the content on the not-loaded line
+ *  (`Result`, `Cases`, `Table`). */
+export function pageFileFailureText(reason: PageFileFailure | "not-loaded", ref: string, what = "Result"): string {
   const name = pageFileName(ref);
   switch (reason) {
     case "not-loaded":
-      return `Result not loaded here: ${name}`;
+      return `${what} not loaded here: ${name}`;
     case "unavailable":
       return `File not available: ${name}`;
     case "invalid":
@@ -185,4 +201,12 @@ export function renderCodeSpans(text: string, plain: (s: string) => string, code
 
 export function queryResultLine(q: QueryAttrs): string {
   return q.csv ? `Resultat: ${pageFileName(q.csv)}` : "";
+}
+
+/** The plain-text surfaces' line for a `<CaseBoard>` or a `<DeltaTable src>`,
+ *  unescaped: `Cases: cases.yaml`, `Table: runs.csv`. Those surfaces read no
+ *  file, so the line names it; empty without a `src`. */
+export function blockFileLine(name: "CaseBoard" | "DeltaTable", attrs: Record<string, string>): string {
+  const src = (attrs.src ?? "").trim();
+  return src ? `${name === "CaseBoard" ? "Cases" : "Table"}: ${pageFileName(src)}` : "";
 }

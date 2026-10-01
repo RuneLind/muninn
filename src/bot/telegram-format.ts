@@ -17,7 +17,7 @@ import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
-import { parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
+import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 
 /**
  * Converts Claude's markdown output to Telegram-safe HTML.
@@ -145,6 +145,13 @@ const telegramRenderer: BlockRenderer = {
         return [head ? `<b>${inline(head)}</b>` : "", inline(answer), children, result ? escapeHtml(result) : ""]
           .filter(Boolean)
           .join("\n");
+      }
+      case "CaseBoard":
+      case "DeltaTable": {
+        // No file read: the body (a DeltaTable's pipe table renders as a
+        // table, with no delta), then the file's name.
+        const line = blockFileLine(name, attrs);
+        return [children, line ? escapeHtml(line) : ""].filter(Boolean).join("\n");
       }
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary

@@ -201,6 +201,8 @@ export const E2E_PORTS = {
   // Query cards: a CSV beside the page, header sorting, and the containment
   // refusals (`../` and a symlink out of the temp wiki root).
   "wiki-query": 3096,
+  // CaseBoard, DeltaTable and the Query explorer over a temp wiki.
+  "wiki-caseboard": 3097,
   // The gardener strip's error note: one muninn over a throwaway bot with a
   // seeded wiki-gardener watcher; the verb POSTs reach it unmodified or with
   // their content type stripped.

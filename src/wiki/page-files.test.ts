@@ -107,6 +107,25 @@ describe("loadPageFiles", () => {
     expect((await loadPageFiles(root, PAGE, md)).size).toBe(0);
   });
 
+  test("reads a CaseBoard's yaml and a DeltaTable's csv; a page with only those tags is parsed", async () => {
+    await writeFile(path.join(root, "plans", "res", "cases.yml"), "- {id: MEL-1, status: hold}\n");
+    await writeFile(path.join(root, "plans", "res", "runs.csv"), "T,a,b\nx,1,2\n");
+    const md = '<CaseBoard src="res/cases.yml" />\n\n<DeltaTable src="res/runs.csv" />';
+    const files = await loadPageFiles(root, PAGE, md);
+    expect([...files.keys()]).toEqual(["res/cases.yml", "res/runs.csv"]);
+    const html = renderWikiHtml(md, () => undefined, { files });
+    expect(html).toContain('<div class="cb-row" id="mel-1">');
+    expect(html).toContain('<td class="dt-delta"><span class="dt-abs">+1</span> <span class="dt-pct">(+100.0%)</span></td>');
+  });
+
+  test("a CaseBoard src outside the root is unavailable, like a Query's", async () => {
+    await writeFile(path.join(base, "outside.yaml"), "- {id: SECRET, status: ok}\n");
+    const md = '<CaseBoard src="../../outside.yaml" />';
+    const html = renderWikiHtml(md, () => undefined, { files: await loadPageFiles(root, PAGE, md) });
+    expect(html).not.toContain("SECRET");
+    expect(html).toContain("File not available: outside.yaml");
+  });
+
   test("end to end: the outside file's content never reaches the rendered page", async () => {
     const md = `${q("../../outside.csv")}\n\n${q("link.csv")}`;
     const html = renderWikiHtml(md, () => undefined, { files: await loadPageFiles(root, PAGE, md) });

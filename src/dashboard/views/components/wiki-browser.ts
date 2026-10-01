@@ -167,6 +167,7 @@ import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
 import { enhanceReportBlocks } from "./wiki-report-blocks.ts";
 import { enhanceQueryTables } from "./wiki-query-table.ts";
+import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
 import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
@@ -3961,6 +3962,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       enhanceReportBlocks(articleRoot);
       // `<Query>` result tables: header-click sorting. No-op without one.
       enhanceQueryTables(articleRoot);
+      // Two or more adjacent `<Query>` cards: a search box and `uses` chips.
+      enhanceQueryExplorer(articleRoot);
       // Fact-check layer: chip → evidence card, the summary strip, and the
       // layer toggle. No-op on a page carrying no annotation.
       enhanceFactCheck(document.getElementById("articleWrap")!);

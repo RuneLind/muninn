@@ -124,6 +124,9 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   Lane: null,
   // A query card's body fences and its SQL disclosure are ordinary fences.
   Query: null,
+  // A case board holds no fence; a delta table's body prose is ordinary markdown.
+  CaseBoard: null,
+  DeltaTable: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);

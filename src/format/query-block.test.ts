@@ -6,7 +6,7 @@ import {
   QUERY_CSV_MAX_ROWS,
   checkPageFileRef,
   parseQueryAttrs,
-  queryFileRefs,
+  pageFileRefs,
   splitQuerySql,
   type PageFileResult,
 } from "./query-block.ts";
@@ -97,14 +97,14 @@ describe("Query grammar", () => {
     const query = component(outer.children);
     const inner = component(query.children);
     expect([outer.name, query.name, inner.name]).toEqual(["Fold", "Query", "Fold"]);
-    expect(queryFileRefs(parseBlocks(md))).toEqual(["a.csv"]);
+    expect(pageFileRefs(parseBlocks(md))).toEqual(["a.csv"]);
     const html = formatWebHtml(md);
     expect(html).toContain('<section class="query" id="q-2">');
     expect(html.match(/<details class="fold">/g)).toHaveLength(2);
   });
 });
 
-describe("queryFileRefs", () => {
+describe("pageFileRefs", () => {
   test("csv and sql at any depth, deduplicated, in source order", () => {
     const md = [
       '<Query id="A" csv="r/a.csv" sql="r/a.sql">',
@@ -123,12 +123,12 @@ describe("queryFileRefs", () => {
       "",
       "</Historic>",
     ].join("\n");
-    expect(queryFileRefs(parseBlocks(md))).toEqual(["r/a.csv", "r/a.sql", "r/b.csv"]);
+    expect(pageFileRefs(parseBlocks(md))).toEqual(["r/a.csv", "r/a.sql", "r/b.csv"]);
   });
 
   test("a Query written inside a code fence names nothing", () => {
     const md = fence("mdx", '<Query id="Q-X" csv="../../etc/hosts.csv">\n\n</Query>');
-    expect(queryFileRefs(parseBlocks(md))).toEqual([]);
+    expect(pageFileRefs(parseBlocks(md))).toEqual([]);
   });
 });
 
@@ -150,7 +150,11 @@ describe("checkPageFileRef", () => {
     expect(checkPageFileRef("./x.csv")).toBe("ok");
   });
   test("any other extension is refused", () => {
-    for (const ref of ["x.env", "res/x", "a.csv/b", "x.yaml", "../../../../etc/hosts"]) expect(checkPageFileRef(ref)).toBe("extension");
+    for (const ref of ["x.env", "res/x", "a.csv/b", "x.json", "x.yaml.bak", "../../../../etc/hosts"]) expect(checkPageFileRef(ref)).toBe("extension");
+  });
+
+  test("a CaseBoard's .yaml and .yml are allowed, in any case", () => {
+    for (const ref of ["cases.yaml", "res/cases.yml", "C.YAML"]) expect(checkPageFileRef(ref)).toBe("ok");
   });
 });
 
