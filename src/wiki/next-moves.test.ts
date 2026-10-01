@@ -139,6 +139,55 @@ describe("extractNextMoves", () => {
     expect(m.counts.you).toBe(8);
     expect(m.youSteps.length).toBe(MOVES_STEPS_MAX);
   });
+
+  // A `<NextMoves>` inside another (in a lane, at any depth) is not a block: its
+  // tag lines are literal text and its lanes stray lanes, so the reader's pill
+  // (the rendered `data-count`s) and the index agree.
+  const NESTED = [
+    "<NextMoves>",
+    "",
+    '<Lane kind="you">',
+    "",
+    "- **Outer step.**",
+    "",
+    "<NextMoves>",
+    "",
+    '<Lane kind="you">',
+    "",
+    "- Inner one.",
+    "- Inner two.",
+    "",
+    "</Lane>",
+    "",
+    "</NextMoves>",
+    "",
+    "</Lane>",
+    "",
+    "</NextMoves>",
+  ].join("\n");
+  const renderedYou = (html: string) =>
+    [...html.matchAll(/class="nm-lane [^"]*" data-kind="you" data-count="(\d+)"/g)].reduce((n, m) => n + Number(m[1]), 0);
+
+  for (const [name, page] of [
+    ["NextMoves > Lane > NextMoves > Lane", NESTED],
+    ["the same inside a Fold", `<Fold title="F">\n\n${NESTED}\n\n</Fold>`],
+  ] as const) {
+    test(`a nested NextMoves is not a block; index and reader agree: ${name}`, () => {
+      const html = renderWikiHtml(page, () => undefined);
+      expect(extractNextMoves(page)!.counts.you).toBe(1);
+      expect(renderedYou(html)).toBe(1);
+      expect(html.match(/class="next-moves"/g)?.length).toBe(1);
+      expect(html).toContain("&lt;NextMoves&gt;");
+    });
+  }
+
+  test("an empty task item is not a step: not counted, not on the card", () => {
+    const m = extractNextMoves(
+      '<NextMoves>\n\n<Lane kind="you">\n\n- [ ]\n- [ ] Real step.\n\n<Checklist>\n- [ ]\n- [ ] Row step.\n</Checklist>\n\n</Lane>\n\n</NextMoves>',
+    )!;
+    expect(m.counts.you).toBe(2);
+    expect(m.youSteps).toEqual(["Real step.", "Row step."]);
+  });
 });
 
 describe("leadSentence", () => {
@@ -158,6 +207,19 @@ describe("leadSentence", () => {
   test("an abbreviation's dot is not a sentence end", () => {
     expect(leadSentence("Use a tool, e.g. ripgrep, here. Then more.")).toBe("Use a tool, e.g. ripgrep, here.");
     expect(leadSentence("Kjør f.eks. skarp og bl.a. tørr. Så mer.")).toBe("Kjør f.eks. skarp og bl.a. tørr.");
+  });
+
+  test("a word ending a sentence is not an abbreviation; kl. is", () => {
+    expect(leadSentence("Say no. Then go.")).toBe("Say no.");
+    expect(leadSentence("Møt kl. 10 i morgen. Så mer.")).toBe("Møt kl. 10 i morgen.");
+  });
+
+  test("an abbreviation after an opening paren is still one", () => {
+    expect(leadSentence("Use a tool (e.g. ripgrep) here. Then more.")).toBe("Use a tool (e.g. ripgrep) here.");
+  });
+
+  test("a label is the FIRST bold run at the start of the item, never a later one", () => {
+    expect(leadSentence("**Send** the draft to **Rune:** now.")).toBe("Send");
   });
 
   test("component tags and a task marker are stripped", () => {

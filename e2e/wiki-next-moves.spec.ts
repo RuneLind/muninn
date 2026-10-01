@@ -69,6 +69,29 @@ const LANES = [
   "</NextMoves>",
 ];
 
+const NESTED = [
+  "<NextMoves>",
+  "",
+  '<Lane kind="you">',
+  "",
+  "- **Outer step.**",
+  "",
+  "<NextMoves>",
+  "",
+  '<Lane kind="you">',
+  "",
+  "- Inner one.",
+  "- Inner two.",
+  "",
+  "</Lane>",
+  "",
+  "</NextMoves>",
+  "",
+  "</Lane>",
+  "",
+  "</NextMoves>",
+];
+
 const plan = (title: string, status: string, body: string[]) =>
   ["---", `title: ${title}`, `plan_status: ${status}`, SETTLED_CREATED_LINE, "---", "", `# ${title}`, "", ...body, ""].join(
     "\n",
@@ -141,6 +164,24 @@ const FILES: Record<string, string> = {
     '<Lane kind="you" who="Du">',
     "",
     "Ingenting å gjøre nå.",
+    "",
+    "</Lane>",
+    "",
+    "</NextMoves>",
+  ]),
+  // A NextMoves nested inside a lane is not a block: the reader's pill, the
+  // index and the board count the outer lane alone (1), in and out of a Fold.
+  "plans/nested.mdx": plan("Nested block", "in-flight", NESTED),
+  "plans/nested-fold.mdx": plan("Nested block in a fold", "in-flight", ['<Fold title="Status" open="true">', "", ...NESTED, "", "</Fold>"]),
+  // A lane inside a resolved Callout renders but counts nowhere.
+  "plans/resolved.mdx": plan("Resolved page", "in-flight", ['<Callout resolved="2026-09-01" title="Done">', "", ...LANES, "", "</Callout>"]),
+  // Abandoned with a you step: like superseded, history on the board.
+  "plans/abandoned-waits.mdx": plan("Abandoned but waiting", "abandoned", [
+    "<NextMoves>",
+    "",
+    '<Lane kind="you">',
+    "",
+    "- **Dead step.**",
     "",
     "</Lane>",
     "",
@@ -291,6 +332,29 @@ test.describe("NextMoves in the reader", () => {
     await expect(page.locator(`.${MOVES_PILL_CLASS}`)).toHaveCount(0);
   });
 
+  test("a lane inside a resolved Callout renders but counts in no pill", async ({ page }) => {
+    await open(page, "plans/resolved.mdx");
+    await expect(page.locator(".wiki-article details.callout-resolved .nm-lane")).toHaveCount(4);
+    await expect(page.locator(`.${MOVES_PILL_CLASS}`)).toHaveCount(0);
+  });
+
+  for (const rel of ["plans/nested.mdx", "plans/nested-fold.mdx"]) {
+    test(`a NextMoves nested in a lane is text, and the pill, the index and the board agree: ${rel}`, async ({ page }) => {
+      await open(page, rel);
+      await expect(page.locator(".wiki-article .next-moves")).toHaveCount(1);
+      await expect(page.locator(".wiki-article .nm-lane")).toHaveCount(1);
+      await expect(page.locator(".wiki-article .nm-lane")).toContainText("<NextMoves>");
+      await expect(page.locator(`.${MOVES_PILL_CLASS}`)).toHaveText(["✋ 1 for you"]);
+      const pages = (await (await page.request.get(`${BASE}/api/wiki/pages?wiki=${WIKI}`)).json()) as {
+        pages: { relPath: string; movesYou?: number }[];
+      };
+      expect(pages.pages.find((p) => p.relPath === rel)?.movesYou).toBe(1);
+      await page.goto(`${BASE}/plans?waiting=1`);
+      const slug = rel.slice("plans/".length, -".mdx".length);
+      await expect(page.locator(`.pb-cardwrap[data-slug="${slug}"] .pb-hand`)).toHaveText("✋ 1");
+    });
+  }
+
   test("[x] steps are done, [ ] steps count, a Callout in a lane renders, DD.MM.YYYY is aged", async ({ page }) => {
     await open(page, "plans/tasks.mdx");
     const you = page.locator('.nm-lane[data-kind="you"]');
@@ -332,15 +396,19 @@ test.describe("NextMoves in the reader", () => {
     await expect(page.locator('.wiki-list-item[data-relpath="plans/report.mdx"] .wiki-moves-flag')).toHaveCount(1);
     await expect(page.locator('.wiki-list-item[data-relpath="plans/idle.mdx"] .wiki-moves-flag')).toHaveCount(0);
     await expect(page.locator('.wiki-list-item[data-relpath="plans/settled.mdx"] .wiki-moves-flag')).toHaveCount(0);
+    await expect(page.locator('.wiki-list-item[data-relpath="plans/resolved.mdx"] .wiki-moves-flag')).toHaveCount(0);
     await expect(page.locator('.wiki-list-item[data-relpath="plans/report.mdx"] .wiki-moves-flag')).toHaveAttribute("aria-hidden", "true");
     await page.locator("#wikiFilters summary").click();
     const chip = page.locator("#statusChips [data-waiting]");
-    await expect(chip).toHaveText("✋ waiting on you 5");
+    await expect(chip).toHaveText("✋ waiting on you 8");
     await chip.click();
     await expect(chip).toHaveClass(/active/);
     const rows = page.locator(".wiki-list-item[data-relpath]");
     await expect.poll(async () => (await rows.evaluateAll((els) => els.map((e) => e.getAttribute("data-relpath")))).sort()).toEqual([
+      "plans/abandoned-waits.mdx",
       "plans/folded.mdx",
+      "plans/nested-fold.mdx",
+      "plans/nested.mdx",
       "plans/report.mdx",
       "plans/shipped-waits.mdx",
       "plans/superseded-waits.mdx",
@@ -398,7 +466,7 @@ test.describe("NextMoves on the /plans board", () => {
     await expect(page.locator('.pb-cardwrap[data-slug="shipped-waits"]')).toHaveCount(0);
     const toggle = page.locator(".pb-waiting-toggle");
     // Superseded is history: not counted, not listed. Shipped still waits.
-    await expect(toggle).toHaveText("✋ Waiting on you4");
+    await expect(toggle).toHaveText("✋ Waiting on you6");
     await expect(toggle).toHaveAttribute("aria-pressed", "false");
     await expect(page.locator('[data-key="Show:active"]')).toHaveAttribute("aria-pressed", "true");
     await toggle.click();
@@ -406,7 +474,7 @@ test.describe("NextMoves on the /plans board", () => {
     const cards = page.locator(".pb-cardwrap[data-slug]");
     await expect
       .poll(async () => (await cards.evaluateAll((els) => els.map((e) => e.getAttribute("data-slug")))).sort())
-      .toEqual(["folded", "report", "shipped-waits", "tasks"]);
+      .toEqual(["folded", "nested", "nested-fold", "report", "shipped-waits", "tasks"]);
     // The scope segment shows what renders: every status, locked while the toggle is on.
     await expect(page.locator('[data-key="Show:all"]')).toHaveAttribute("aria-pressed", "true");
     await expect(page.locator('[data-key="Show:active"]')).toHaveAttribute("aria-pressed", "false");
@@ -424,6 +492,21 @@ test.describe("NextMoves on the /plans board", () => {
     await page.reload();
     await expect(page.locator(".pb-waiting-toggle")).toHaveAttribute("aria-pressed", "true");
     await expect(page.locator('.pb-cardwrap[data-slug="idle"]')).toHaveCount(0);
+  });
+
+  test("superseded and abandoned cards carry no ✋ and no steps with the toggle off, under every status", async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.goto(`${BASE}/plans`);
+    await page.locator('[data-key="Show:all"]').click();
+    await expect(page.locator(".pb-waiting-toggle")).toHaveAttribute("aria-pressed", "false");
+    for (const slug of ["superseded-waits", "abandoned-waits"]) {
+      const card = page.locator(`.pb-cardwrap[data-slug="${slug}"]`);
+      await expect(card).toHaveCount(1);
+      await expect(card.locator(".pb-hand")).toHaveCount(0);
+      await expect(card.locator(".pb-steps")).toHaveCount(0);
+    }
+    // The control: a live plan's card does carry its badge under the same scope.
+    await expect(page.locator('.pb-cardwrap[data-slug="shipped-waits"] .pb-hand')).toHaveText("✋ 1");
   });
 
   for (const scheme of ["light", "dark"] as const) {

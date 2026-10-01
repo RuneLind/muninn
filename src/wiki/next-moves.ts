@@ -54,10 +54,11 @@ export function extractNextMoves(content: string): PageNextMoves | null {
 }
 
 /** Abbreviations whose dot is not a sentence end, lowercased, dot included —
- *  English and Norwegian, the two languages the wikis are written in. */
+ *  English and Norwegian, the two languages the wikis are written in. Not
+ *  `no.`: it is far more often the word ending "Say no." than "No. 5". */
 const ABBREVIATIONS = new Set([
-  "e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "incl.", "excl.", "no.",
-  "f.eks.", "bl.a.", "dvs.", "osv.", "ca.", "jf.", "evt.", "nr.", "pkt.", "inkl.", "ekskl.", "mht.", "mtp.", "ref.", "kap.", "o.l.", "m.m.", "mv.",
+  "e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "incl.", "excl.",
+  "f.eks.", "bl.a.", "dvs.", "osv.", "ca.", "jf.", "evt.", "nr.", "pkt.", "inkl.", "ekskl.", "mht.", "mtp.", "ref.", "kap.", "o.l.", "m.m.", "mv.", "kl.",
 ]);
 
 /** Where the first sentence of `text` ends (the index after its `.`/`!`/`?`),
@@ -90,7 +91,9 @@ export function leadSentence(item: string): string {
     .replace(COMPONENT_TAG_RE, "")
     .trim()
     .replace(/^\[[ xX]\][ \t]*/, "");
-  const label = /^(\*\*|__)(.+?)(?::\1|\1:)\s*(.*)$/.exec(first);
+  // The label run may not contain its own delimiter: only the FIRST bold run
+  // can be a label, never a later one ending in a colon.
+  const label = /^(\*\*|__)((?:(?!\1).)+?)(?::\1|\1:)\s*(.*)$/.exec(first);
   if (label && label[3]) first = label[3];
   const bold = /^(\*\*|__)(.+?)\1/.exec(first);
   let text = bold ? bold[2]! : first;

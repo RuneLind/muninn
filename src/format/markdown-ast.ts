@@ -183,9 +183,9 @@ const MAX_COMPONENT_DEPTH = 3;
  * The `<NextMoves>`/`<Lane>` pair costs NO depth level, once per path: it is
  * one structure spelled as two tags, and charging it two levels made
  * `<Fold><Historic><NextMoves><Lane>` (and a `<Callout>` inside a lane under one
- * `<Fold>`) degrade to plain text. A block nested inside a lane pays like any
- * other component, so the free pair cannot repeat and the cap still bounds the
- * parse.
+ * `<Fold>`) degrade to plain text. A second `<NextMoves>` on the path is not a
+ * block at all (`tryParseComponent`), so the free pair cannot repeat and the cap
+ * still bounds the parse.
  */
 type NextMovesNesting = 0 | 1 | 2;
 
@@ -349,7 +349,8 @@ export interface NextMovesLane {
   /** The lane's OPEN steps, each one's text with any `[ ]` marker stripped, in
    *  source order: every top-level list item that is not `[x]`, and every
    *  unchecked top-level row of a `<Checklist>` directly in the lane. Prose, a
-   *  table or a callout is not a step — a lane holding only those counts 0. */
+   *  table or a callout is not a step — a lane holding only those counts 0 —
+   *  and neither is an empty item. */
   items: string[];
   children: Block[];
 }
@@ -380,7 +381,8 @@ function laneSteps(children: Block[]): string[] {
       for (const row of parseChecklist(b.children)) if (!row.checked) items.push(row.text);
     }
   }
-  return items;
+  // An empty item (`- [ ]` with nothing after it) is no step to take.
+  return items.filter((item) => item.trim() !== "");
 }
 
 export function laneFromAttrs(attrs: Record<string, string>, children: Block[]): NextMovesLane {
@@ -1606,6 +1608,11 @@ function tryParseComponent(
 
   const name = m[1]!;
   if (!COMPONENT_NAME_SET.has(name)) return null; // unknown tag → not a component
+  // A `<NextMoves>` inside another, at any depth, is not a block: its tag lines
+  // stay literal text and its lanes render as stray lanes. Two levels of lanes
+  // would put inner lanes in the outer block's count on one surface and not on
+  // another; one block per path keeps the reader's pills and the index equal.
+  if (name === "NextMoves" && nm !== 0) return null;
   const cname = name as ComponentName;
   const attrs = parseAttrs(m[2]!, cname);
   const selfClosing = m[3] === "/";

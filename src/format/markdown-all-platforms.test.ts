@@ -1159,15 +1159,33 @@ describe("NextMoves — a lane grid on the web, a label line per lane elsewhere"
     expect(out).not.toContain("&lt;Callout");
   });
 
-  test("the free NextMoves/Lane level is spent once per path: a nested pair pays", () => {
-    // Fold(1) > NextMoves+Lane(free) > Callout(2) > NextMoves(3): the inner
-    // block pays its level, so its Lane is past the cap and stays text.
-    const inner = "<NextMoves>\n\n<Lane kind=\"you\">\n\n- deep\n\n</Lane>\n\n</NextMoves>";
-    const out = formatWebHtml(
-      `<Fold title="F">\n\n<NextMoves>\n\n<Lane kind="you">\n\n<Callout>\n\n${inner}\n\n</Callout>\n\n</Lane>\n\n</NextMoves>\n\n</Fold>`,
+  test("a NextMoves inside a NextMoves is not a block, at any depth: its tags are text, its lanes stray", () => {
+    const inner = '<NextMoves>\n\n<Lane kind="you">\n\n- deep\n\n</Lane>\n\n</NextMoves>';
+    for (const wrap of [(x: string) => x, (x: string) => `<Callout>\n\n${x}\n\n</Callout>`]) {
+      const out = formatWebHtml(
+        `<Fold title="F">\n\n<NextMoves>\n\n<Lane kind="you">\n\n${wrap(inner)}\n\n</Lane>\n\n</NextMoves>\n\n</Fold>`,
+      );
+      expect(out.match(/class="next-moves"/g)?.length).toBe(1);
+      expect(out.match(/class="nm-lane /g)?.length).toBe(1);
+      expect(out).toContain("&lt;NextMoves&gt;");
+      expect(out).toContain("<p><strong>You</strong></p>");
+    }
+  });
+
+  const oddSince = '<NextMoves>\n\n<Lane kind="waiting" who="Du" since="<b>x & y">\n\n- a\n\n</Lane>\n\n</NextMoves>';
+
+  test("telegram → a free-text since is escaped", () => {
+    expect(formatTelegramHtml(oddSince)).toContain("<b>Du</b> — since &lt;b&gt;x &amp; y\n");
+  });
+
+  test("web → a stray Lane's free-text since is escaped", () => {
+    expect(formatWebHtml('<Lane kind="you" since="<b>x & y">\n\n- a\n\n</Lane>')).toContain(
+      "<p><strong>You — since &lt;b&gt;x &amp; y</strong></p>",
     );
-    expect(out.match(/class="nm-lane /g)?.length).toBe(1);
-    expect(out).toContain("&lt;Lane kind=&quot;you&quot;&gt;");
+  });
+
+  test("slack → a free-text since is literal", () => {
+    expect(formatSlackMrkdwn(oddSince).split("\n")[0]).toBe("*Du* — since &lt;b&gt;x &amp; y");
   });
 
   test("web → a lane inside Historic or a resolved Callout still renders", () => {
@@ -1177,9 +1195,10 @@ describe("NextMoves — a lane grid on the web, a label line per lane elsewhere"
   });
 
   test("slack → the lane label is literal text: no mention, no broken bold", () => {
-    const out = formatSlackMrkdwn('<NextMoves>\n\n<Lane kind="you" who="<!channel> Rune & <Co> *and* _x_">\n\n- a\n\n</Lane>\n\n</NextMoves>');
+    const out = formatSlackMrkdwn('<NextMoves>\n\n<Lane kind="you" who="<!channel> Rune & <Co> *and* _x_ ~y~ `z`">\n\n- a\n\n</Lane>\n\n</NextMoves>');
     const head = out.split("\n")[0]!;
-    expect(head).toBe("*&lt;!channel&gt; Rune &amp; &lt;Co&gt; \u2217and\u2217 \uFF3Fx\uFF3F*");
+    expect(head).toBe("*&lt;!channel&gt; Rune &amp; &lt;Co&gt; \u2217and\u2217 \uFF3Fx\uFF3F \u223Cy\u223C \u02CBz\u02CB*");
+    expect(head).not.toMatch(/[~`]/);
     // Exactly the two bold delimiters the label line adds.
     expect(head.match(/\*/g)?.length).toBe(2);
   });

@@ -53,6 +53,11 @@ describe("NextMoves ages and pills", () => {
   test("the settled-section selector matches the markup the web renderer gives Historic and a resolved Callout", () => {
     const html =
       formatWebHtml("<Historic>\n\nx\n\n</Historic>") + formatWebHtml('<Callout resolved="2026-09-01">\n\nx\n\n</Callout>');
+    // Both settled sections, no more and no fewer.
+    expect(SETTLED_SECTION_SELECTOR.split(",").map((p) => p.trim()).sort()).toEqual([
+      "details.callout-resolved",
+      "section.historic",
+    ]);
     for (const part of SETTLED_SECTION_SELECTOR.split(",")) {
       const [tag, cls] = part.trim().split(".");
       expect(html).toMatch(new RegExp(`<${tag} class="[^"]*\\b${cls}\\b`));

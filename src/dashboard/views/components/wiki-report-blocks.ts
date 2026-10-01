@@ -118,12 +118,16 @@ interface MovesTally {
   oldestAgeDays: number | null;
 }
 
-/** The lanes that count: every `.nm-lane` of a `.next-moves` block that is not
- *  inside a settled section (`SETTLED_SECTION_SELECTOR`). */
+/** The lanes that count: the block's OWN lanes (its grid and strips) of every
+ *  `.next-moves` block that is neither inside another block nor inside a
+ *  settled section (`SETTLED_SECTION_SELECTOR`). The index walk
+ *  (`countedNextMovesLanes`) never descends into a block either. */
 function countedLanes(article: HTMLElement): HTMLElement[] {
-  return Array.from(article.querySelectorAll<HTMLElement>(".next-moves .nm-lane")).filter(
-    (lane) => !lane.closest(SETTLED_SECTION_SELECTOR),
-  );
+  return Array.from(article.querySelectorAll<HTMLElement>(".next-moves"))
+    .filter((block) => !block.parentElement?.closest(".next-moves") && !block.closest(SETTLED_SECTION_SELECTOR))
+    .flatMap((block) =>
+      Array.from(block.querySelectorAll<HTMLElement>(":scope > .nm-grid > .nm-lane, :scope > .nm-strips > .nm-lane")),
+    );
 }
 
 /** Sum the lanes' server-computed `data-count` per kind. An unknown kind was
