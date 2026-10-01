@@ -19,9 +19,11 @@ import {
   laneFromAttrs,
   laneLeadText,
   isTaskList,
+  runChecklistBody,
+  runChecklistSteps,
   taskListRows,
 } from "../format/markdown-ast.ts";
-import type { Block, ChecklistRow, FactVerdict, NextMovesLane } from "../format/markdown-ast.ts";
+import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
@@ -31,6 +33,7 @@ import { parseCsv } from "../format/csv.ts";
 import {
   CASEBOARD_NO_SRC,
   QUERY_CSV_MAX_ROWS,
+  anchorSlug,
   formatCount,
   lookupPageFile,
   pageFileFailureText,
@@ -39,6 +42,7 @@ import {
   splitQuerySql,
   type PageFiles,
 } from "../format/query-block.ts";
+import { commandCode, parseLogItem, parseTimelineItem, runParts, runStepLine, type RunEntry } from "../format/genre-lists.ts";
 import { caseBoardWarnings, caseCountParts, groupCases, parseCaseBoard, type BoardCase } from "../format/case-board.ts";
 import {
   betterLabelWarnings,
@@ -166,8 +170,9 @@ export function formatWebHtml(text: string, opts?: { files?: PageFiles }): strin
   currentPageFiles = opts?.files;
   try {
     const rendered = renderBlocks(parseBlocks(text), webRenderer);
-    // Cases first: a Query card that collides with a case anchor yields.
-    return uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim()));
+    // Cases first: a Query card that collides with a case anchor yields; a
+    // DecisionLog item yields to both.
+    return uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
   } finally {
     currentPageFiles = prev;
   }
@@ -225,6 +230,23 @@ function uniqueCaseAnchors(html: string): string {
     });
     for (const a of own) taken.add(a);
     return out;
+  });
+}
+
+const LOG_ITEM_RE = /<li class="(dl-item[^"]*)"((?: value="\d+")?) id="([^"]+)"><a class="dl-id" href="#\3">/g;
+
+/** Each `DecisionLog` item's anchor made unique in the finished HTML: the
+ *  first `d1` on the page keeps it, a repeat (a second log, or an id any other
+ *  element already holds) gets the first free `-2`, `-3`, and its id link
+ *  follows. Runs last, so a log item yields to cards and cases. */
+function uniqueLogAnchors(html: string): string {
+  if (!html.includes('<a class="dl-id" href="#')) return html;
+  const used = new Set([...html.replace(LOG_ITEM_RE, "").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]!));
+  return html.replace(LOG_ITEM_RE, (_m, cls: string, value: string, slug: string) => {
+    let anchor = slug;
+    for (let k = 2; used.has(anchor); k++) anchor = `${slug}-${k}`;
+    used.add(anchor);
+    return `<li class="${cls}"${value} id="${anchor}"><a class="dl-id" href="#${anchor}">`;
   });
 }
 
@@ -527,7 +549,17 @@ function childrenHtml(children: RenderedChild[] | undefined): string {
  *  its text in `check-text`, so the todo colour stops at the row's own words
  *  instead of reaching the rows under it. A nested row with no task marker is a
  *  plain `check-plain` item, and a nested ordered list keeps its numbers. */
-function checklistHtml(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[]): string {
+function checklistHtml(
+  rows: ChecklistRow[],
+  ordered = false,
+  start = 1,
+  values?: (number | undefined)[],
+  /** How a list nested directly under a row renders; `RunChecklist`'s labelled rows. */
+  nestedList?: (list: ChecklistList) => string,
+  /** A `RunChecklist` step list: an ordered one paints each step's number,
+   *  since a flex row shows no list marker. */
+  stepNumbers = false,
+): string {
   // A task row is a flex box, not a list item, so it does not advance an <ol>'s
   // counter: in an ordered sublist every row carries its number as `value`.
   const nums = ordered ? ordinals(start, rows.length, values) : undefined;
@@ -539,7 +571,9 @@ function checklistHtml(rows: ChecklistRow[], ordered = false, start = 1, values?
             ? codeFenceHtml(c.lang, c.code)
             : c.type === "paragraph"
               ? `<p>${itemHtml(c.text)}</p>`
-              : checklistHtml(c.rows, c.ordered, c.start, c.values),
+              : nestedList
+                ? nestedList(c)
+                : checklistHtml(c.rows, c.ordered, c.start, c.values),
         )
         .join("");
       const value = nums ? ` value="${nums[k]}"` : "";
@@ -547,9 +581,10 @@ function checklistHtml(rows: ChecklistRow[], ordered = false, start = 1, values?
       const state = it.checked ? "done" : "todo";
       const mark = it.checked ? "✓" : "✗";
       const text = nested ? `<span class="check-text">${itemHtml(it.text)}</span>` : itemHtml(it.text);
+      const num = stepNumbers && nums ? `<span class="rc-num">${nums[k]}.</span>` : "";
       return (
         `<li class="check-item check-${state}${nested ? " check-parent" : ""}"${value}>` +
-        `<span class="check-mark">${mark}</span> ${text}${nested}</li>`
+        `${num}<span class="check-mark">${mark}</span> ${text}${nested}</li>`
       );
     })
     .join("");
@@ -596,6 +631,96 @@ function laneHtml(lane: NextMovesLane): string {
  *  one column (`component-styles.ts`). */
 function laneColsClass(n: number): string {
   return n === 4 ? "nm-cols-2" : n <= 3 ? `nm-cols-${n}` : "nm-cols-auto";
+}
+
+/** What sits under a `Timeline` or `DecisionLog` item, as the list renderer
+ *  draws it. */
+function listChildHtml(c: ListChild): string {
+  if (c.type === "code_block") return codeFenceHtml(c.lang, c.code);
+  if (c.type === "paragraph") return `<p>${itemHtml(c.text)}</p>`;
+  return renderBlocks([c], webRenderer);
+}
+
+/** A `Timeline` or `DecisionLog` body: every top-level item of every list
+ *  directly in it goes through `li` (its text, what sits under it, and an
+ *  ordered item's ` value`); any other block renders as markdown in place. */
+function wrappedListsHtml(
+  blocks: Block[],
+  listClass: string,
+  li: (text: string, nested: string, value: string) => string,
+): string {
+  return blocks
+    .map((b) => {
+      if (b.type !== "ul" && b.type !== "ol") return renderBlocks([b], webRenderer);
+      const lis = b.items
+        .map((text, k) =>
+          li(text, (b.nested?.[k] ?? []).map(listChildHtml).join(""), b.type === "ol" ? liValue(b.values, k) : ""),
+        )
+        .join("");
+      return b.type === "ul"
+        ? `<ul class="${listClass}">${lis}</ul>`
+        : `<ol class="${listClass}"${b.start !== 1 ? ` start="${b.start}"` : ""}>${lis}</ol>`;
+    })
+    .join("\n");
+}
+
+/** One `Timeline` item: a dated one sits on the rail with its date, as
+ *  written, for a marker; an undated one has no marker. */
+function timelineItemHtml(text: string, nested: string, value: string): string {
+  const t = parseTimelineItem(text);
+  if (!t.date) return `<li class="gtl-item gtl-undated"${value}>${itemHtml(t.text)}${nested}</li>`;
+  return (
+    `<li class="gtl-item gtl-dated"${value}><span class="gtl-date">${escapeHtml(t.date)}</span>` +
+    `<span class="gtl-text">${itemHtml(t.text)}</span>${nested}</li>`
+  );
+}
+
+/** One `DecisionLog` item: the id as a chip linking its own anchor (made
+ *  unique by `uniqueLogAnchors`), dimmed when struck or superseded. An item
+ *  with no id is a plain item. The id link must follow the `<li>` directly:
+ *  `LOG_ITEM_RE` reads it there. */
+function logItemHtml(text: string, nested: string, value: string): string {
+  const p = parseLogItem(text);
+  const dim = p.dim ? " dl-dim" : "";
+  if (!p.id) return `<li class="dl-item dl-noid${dim}"${value}>${itemHtml(p.text)}${nested}</li>`;
+  const anchor = anchorSlug(p.id);
+  return (
+    `<li class="dl-item${dim}"${value} id="${anchor}"><a class="dl-id" href="#${anchor}">${escapeHtml(p.id)}</a>` +
+    `<span class="dl-text">${itemHtml(p.text)}</span>${nested}</li>`
+  );
+}
+
+/** A list nested under a `RunChecklist` step: labelled entries as rows, the
+ *  unlabelled ones between them as an ordinary nested list. */
+function runListHtml(list: ChecklistList): string {
+  const nums = ordinals(list.start, list.rows.length, list.values);
+  return runParts(list, nums)
+    .map((p) =>
+      p.kind === "list" ? checklistHtml(p.list.rows, p.list.ordered, p.list.start, p.list.values) : runEntryHtml(p.entry, p.row),
+    )
+    .join("");
+}
+
+/** One labelled row. A command that is one code span renders as a one-line
+ *  code block, so the reader's copy button reaches it; anything under the
+ *  entry follows as written. (A fence cannot sit this deep; one directly under
+ *  the step is an ordinary fence beside the rows.) */
+function runEntryHtml(e: RunEntry, row: ChecklistRow): string {
+  const code = e.kind === "command" ? commandCode(e.value) : null;
+  const value = code !== null ? codeFenceHtml("", code) : itemHtml(e.value);
+  const under = (row.children ?? [])
+    .map((c) =>
+      c.type === "code_block"
+        ? codeFenceHtml(c.lang, c.code)
+        : c.type === "paragraph"
+          ? `<p>${itemHtml(c.text)}</p>`
+          : checklistHtml(c.rows, c.ordered, c.start, c.values),
+    )
+    .join("");
+  return (
+    `<div class="rc-row rc-${e.kind}"><span class="rc-label">${escapeHtml(e.label)}</span>` +
+    `<div class="rc-value">${value}${under}</div></div>`
+  );
 }
 
 const webRenderer: BlockRenderer = {
@@ -868,6 +993,33 @@ const webRenderer: BlockRenderer = {
       }
       case "DeltaTable":
         return deltaBlockHtml(attrs, rawChildren);
+      case "Tldr": {
+        // The page's lead box, where the author put it.
+        const label = attrs.label?.trim() || "TL;DR";
+        return `<section class="tldr"><div class="tldr-label">${escapeHtml(label)}</div><div class="tldr-body">${children}</div></section>`;
+      }
+      case "Timeline":
+        // `gtl-`, not `timeline`/`tl-`: chat's inspector styles those unscoped.
+        return `<section class="gtl">${wrappedListsHtml(rawChildren, "gtl-list", timelineItemHtml)}</section>`;
+      case "DecisionLog":
+        return `<section class="decision-log">${wrappedListsHtml(rawChildren, "dl-list", logItemHtml)}</section>`;
+      case "RunChecklist": {
+        // A Checklist whose steps carry Command / Expect / Stop-if rows. Every
+        // direct-child list is a step list; other blocks render in place.
+        const parts = runChecklistBody(rawChildren);
+        if (!parts.some((p) => p.kind === "steps")) return children;
+        const body = parts
+          .map((p) =>
+            p.kind === "steps"
+              ? checklistHtml(p.list.rows, p.list.ordered, p.list.start, p.list.values, runListHtml, true)
+              : renderBlocks([p.block], webRenderer),
+          )
+          .join("\n");
+        return (
+          `<section class="run-checklist"><div class="rc-head"><span class="rc-count">${runStepLine(runChecklistSteps(rawChildren))}</span></div>` +
+          `${body}</section>`
+        );
+      }
       case "FactCheck": {
         // Collapsed by DEFAULT — the per-claim evidence is reachable from the
         // chips in the prose, so the appendix that used to add 74 lines to the

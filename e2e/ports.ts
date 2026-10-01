@@ -203,6 +203,8 @@ export const E2E_PORTS = {
   "wiki-query": 3096,
   // CaseBoard, DeltaTable and the Query explorer over a temp wiki.
   "wiki-caseboard": 3097,
+  // <Tldr>, <Timeline>, <DecisionLog> and <RunChecklist> over a temp wiki.
+  "wiki-genre-blocks": 3098,
   // The gardener strip's error note: one muninn over a throwaway bot with a
   // seeded wiki-gardener watcher; the verb POSTs reach it unmodified or with
   // their content type stripped.

@@ -30,6 +30,7 @@ import {
   parseMeterAttrs,
   firstCodeBlock,
   parseChecklist,
+  runChecklistBody,
   parseResolvedDate,
   historicLeadText,
   resolvedLeadText,
@@ -37,7 +38,8 @@ import {
   laneLeadText,
 } from "./markdown-ast.ts";
 import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
-import { renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
+import { tldrFallbackLabel } from "./genre-lists.ts";
+import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "./query-block.ts";
 import {
@@ -133,7 +135,10 @@ function checklistEmail(
   ordered = false,
   start = 1,
   values?: (number | undefined)[],
+  /** A `RunChecklist` step list: an ordered one writes each step's number. */
+  steps = false,
 ): string {
+  const nums = steps && ordered ? ordinals(start, rows.length, values) : undefined;
   const lis = rows
     .map((it, k) => {
       const nested = (it.children ?? [])
@@ -149,6 +154,7 @@ function checklistEmail(
       if (it.plain) return `<li style="${S.li}"${v === undefined ? "" : ` value="${v}"`}>${itemEmail(it.text)}${nested}</li>`;
       return (
         `<li style="${S.li}list-style:none;">` +
+        (nums ? `<span style="color:${DIM};">${nums[k]}.</span> ` : "") +
         `<span style="color:${it.checked ? VERDICT_COLOR.yes : DIM};">${it.checked ? "☑" : "☐"}</span> ` +
         `${itemEmail(it.text)}${nested}</li>`
       );
@@ -331,6 +337,25 @@ const emailRenderer: BlockRenderer = {
         // a table, with no delta), then the file's name.
         const line = blockFileLine(name, attrs);
         return children + (line ? `<div style="${S.dim}margin:6px 0 12px;">${escapeHtml(line)}</div>` : "");
+      }
+      case "Tldr":
+        return (
+          `<div style="margin:0 0 12px;">` +
+          `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">${escapeHtml(tldrFallbackLabel(attrs.label))}:</div>` +
+          `${children}</div>`
+        );
+      // The list as written: dates and ids stay text, labelled rows stay items.
+      case "Timeline":
+      case "DecisionLog":
+        return children;
+      case "RunChecklist": {
+        // Every step list and the blocks between them, in source order.
+        const parts = runChecklistBody(rawChildren);
+        if (!parts.some((p) => p.kind === "steps")) return children;
+        return parts
+          .map((p) => (p.kind === "steps" ? checklistEmail(p.list.rows, 0, p.list.ordered, p.list.start, p.list.values, true) : renderBlocks([p.block], emailRenderer)))
+          .filter((out) => out.trim() !== "")
+          .join("\n");
       }
       case "FactCheck":
         // No <details> in mail — the appendix renders open, under its summary line.

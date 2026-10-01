@@ -132,6 +132,38 @@ const PAGE = [
   "",
   "</Query>",
   "",
+  // The four list wrappers, so the DecisionLog id chips (in-page anchors)
+  // render and meet the allowlist below.
+  '<Tldr label="Kort fortalt">',
+  "",
+  "Fag har svart.",
+  "",
+  "</Tldr>",
+  "",
+  "<Timeline>",
+  "",
+  "- **2026-09-28** — Runde 1",
+  "- **29.09:** Runde 2",
+  "",
+  "</Timeline>",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D1** — Ikke-yrkesaktive betaler ikke.",
+  "- ~~**D2**~~ — Flyttet.",
+  "",
+  "</DecisionLog>",
+  "",
+  "<RunChecklist>",
+  "",
+  "- [x] Simuler",
+  // Prose around the span keeps the command inline: a one-span command is a
+  // fence, and the fence Copy button is outside this allowlist's question.
+  "  - Kommando: kjør `POST /run` én gang",
+  "- [ ] Skarp kjøring",
+  "",
+  "</RunChecklist>",
+  "",
 ].join("\n");
 const CASES = "- id: MEL-1\n  status: hold\n  owner: Fag\n- id: MEL-2\n  status: ok\n";
 const RUNS = "Teller,08.09,18.09\nKandidater,132,16\n";
@@ -281,6 +313,8 @@ const READER_CONTROLS = [
   // explorer's search box and uses chips (client-side filters).
   "a.cb-id",
   "a.query-id",
+  // DecisionLog id chips (in-page anchors).
+  "a.dl-id",
   ".qx-search",
   ".qx-chip",
   // Out to the tracker.
@@ -352,6 +386,12 @@ for (const scheme of ["light", "dark"] as const) {
     await expect(page.locator(".wiki-article td.dt-delta.dt-good")).toHaveText("✓ -116 (-87.9%)");
     await expect(page.locator(".wiki-article .qx-search")).toBeVisible();
     await expect(page.locator(".wiki-article .qx-chip")).toHaveCount(2);
+    // The list wrappers rendered, so the id chips are on screen too.
+    await expect(page.locator(".wiki-article section.tldr .tldr-label")).toHaveText("Kort fortalt");
+    await expect(page.locator(".wiki-article section.gtl .gtl-date")).toHaveText(["2026-09-28", "29.09"]);
+    await expect(page.locator(".wiki-article .dl-item#d1 a.dl-id")).toBeVisible();
+    await expect(page.locator(".wiki-article .dl-item.dl-dim#d2")).toBeVisible();
+    await expect(page.locator(".wiki-article .rc-count")).toHaveText("1 av 2 steg");
     // The personal ✋ surfaces are absent on a shared instance: the page's row
     // in the rail carries no flag, and the status row offers no chip.
     await expect(page.locator(`.wiki-list-item[data-relpath="${PAGE_REL}"]`)).toBeVisible();

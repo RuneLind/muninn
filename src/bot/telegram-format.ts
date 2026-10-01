@@ -7,6 +7,7 @@ import {
   FACT_COUNT_WORD,
   parseMeterAttrs,
   parseChecklist,
+  runChecklistBody,
   parseResolvedDate,
   historicLeadText,
   resolvedLeadText,
@@ -14,6 +15,7 @@ import {
   laneLeadText,
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
+import { tldrFallbackLabel } from "../format/genre-lists.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
@@ -32,10 +34,12 @@ export function formatTelegramHtml(text: string): string {
 const TG_ALLOWED_TAG = /^\/?(b|i|u|s|code|pre|a|tg-spoiler|tg-emoji|blockquote)(\s|>|$)/i;
 
 /** Checklist rows as `☑`/`☐` lines, nested lists indented two spaces per level;
- *  a nested row without a task marker is a `◦` (or its number), not a `☐`. */
-function checklistText(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[]): string {
+ *  a nested row without a task marker is a `◦` (or its number), not a `☐`. An
+ *  ordered `RunChecklist` step list (`steps`) puts each step's number first. */
+function checklistText(rows: ChecklistRow[], ordered = false, start = 1, values?: (number | undefined)[], steps = false): string {
   const nums = ordinals(start, rows.length, values);
-  const markers = rows.map((r, k) => (r.plain ? (ordered ? `${nums[k]}.` : "◦") : r.checked ? "☑" : "☐"));
+  const num = (k: number) => (steps && ordered ? `${nums[k]}. ` : "");
+  const markers = rows.map((r, k) => (r.plain ? (ordered ? `${nums[k]}.` : "◦") : `${num(k)}${r.checked ? "☑" : "☐"}`));
   const children = rows.map((r) => r.children?.map((c: ChecklistChild) =>
     c.type === "code_block"
       ? { kind: "code" as const, out: telegramRenderer.code_block(c) }
@@ -152,6 +156,21 @@ const telegramRenderer: BlockRenderer = {
         // table, with no delta), then the file's name.
         const line = blockFileLine(name, attrs);
         return [children, line ? escapeHtml(line) : ""].filter(Boolean).join("\n");
+      }
+      case "Tldr":
+        return `<b>${escapeHtml(tldrFallbackLabel(attrs.label))}:</b>\n${children}`;
+      // The list as written: dates and ids stay text, labelled rows stay items.
+      case "Timeline":
+      case "DecisionLog":
+        return children;
+      case "RunChecklist": {
+        // Every step list and the blocks between them, in source order.
+        const parts = runChecklistBody(rawChildren);
+        if (!parts.some((p) => p.kind === "steps")) return children;
+        return parts
+          .map((p) => (p.kind === "steps" ? checklistText(p.list.rows, p.list.ordered, p.list.start, p.list.values, true) : renderBlocks([p.block], telegramRenderer)))
+          .filter((out) => out.trim() !== "")
+          .join("\n\n");
       }
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary

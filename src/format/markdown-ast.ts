@@ -15,6 +15,7 @@
 
 import { lineCodeSpanRanges } from "./code-spans.ts";
 import { isCalendarDay } from "./calendar-day.ts";
+import { ordinals } from "./block-renderer.ts";
 
 export type Block =
   | CodeBlock
@@ -102,6 +103,10 @@ export const COMPONENT_NAMES = [
   "Query",
   "CaseBoard",
   "DeltaTable",
+  "Tldr",
+  "Timeline",
+  "DecisionLog",
+  "RunChecklist",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -177,6 +182,12 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // Run-to-run numbers from a CSV beside the page or a pipe-table body, with a
   // computed delta column. Wiki-only; see `src/format/delta-table.ts`.
   DeltaTable: ["src", "better", "decimal"],
+  // Four wrappers over markdown lists, read by `src/format/genre-lists.ts`.
+  // Wiki-only. `label` is the lead box's heading (default `TL;DR`).
+  Tldr: ["label"],
+  Timeline: [],
+  DecisionLog: [],
+  RunChecklist: [],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -364,8 +375,9 @@ export interface NextMovesLane {
    *  as given, with no age, so a typo never silently disappears. Else null. */
   sinceRaw: string | null;
   /** The lane's OPEN steps, each one's text with any `[ ]` marker stripped, in
-   *  source order: every top-level list item that is not `[x]`, and every
-   *  unchecked top-level row of a `<Checklist>` directly in the lane. Prose, a
+   *  source order: every top-level list item that is not `[x]`, every
+   *  unchecked top-level row of a `<Checklist>` directly in the lane, and every
+   *  unchecked step of a `<RunChecklist>` (`runChecklistSteps`). Prose, a
    *  table or a callout is not a step — a lane holding only those counts 0 —
    *  and neither is an empty item. */
   items: string[];
@@ -387,19 +399,25 @@ export function parseLaneSince(value: string | undefined): string | null {
 /** The open steps of a lane's body (see `NextMovesLane.items`). */
 function laneSteps(children: Block[]): string[] {
   const items: string[] = [];
+  // An empty item (`- [ ]` with nothing after it) is no step to take.
+  const push = (text: string) => {
+    if (text.trim() !== "") items.push(text);
+  };
   for (const b of children) {
     if (b.type === "ul" || b.type === "ol") {
       for (const item of b.items) {
         const m = CHECKLIST_MARK_RE.exec(item);
-        if (!m) items.push(item);
-        else if (m[1] === " ") items.push(m[2]!);
+        if (!m) push(item);
+        else if (m[1] === " ") push(m[2]!);
       }
     } else if (b.type === "component" && b.name === "Checklist") {
-      for (const row of parseChecklist(b.children)) if (!row.checked) items.push(row.text);
+      for (const row of parseChecklist(b.children)) if (!row.checked) push(row.text);
+    } else if (b.type === "component" && b.name === "RunChecklist") {
+      // The header's own steps: an empty one with entries under it counts.
+      for (const row of runChecklistSteps(b.children)) if (!row.checked) items.push(row.text);
     }
   }
-  // An empty item (`- [ ]` with nothing after it) is no step to take.
-  return items.filter((item) => item.trim() !== "");
+  return items;
 }
 
 export function laneFromAttrs(attrs: Record<string, string>, children: Block[]): NextMovesLane {
@@ -834,6 +852,32 @@ export function parseChecklist(children: Block[]): ChecklistRow[] {
   const ul = children.find((c) => c.type === "ul");
   if (!ul || ul.type !== "ul") return [];
   return checklistRows(ul, true);
+}
+
+/** A `RunChecklist` body in source order: every direct-child list (`ul` or
+ *  `ol`) is a step list of top-level rows, an ordered one keeping its numbers;
+ *  any other block stays a block, rendered in place. A row with no text and
+ *  nothing under it (`- [ ]`) is dropped; the rows after it keep their source
+ *  numbers. */
+export type RunChecklistPart = { kind: "steps"; list: ChecklistList } | { kind: "block"; block: Block };
+
+export function runChecklistBody(children: Block[]): RunChecklistPart[] {
+  return children.map((b): RunChecklistPart => {
+    if (b.type !== "ul" && b.type !== "ol") return { kind: "block", block: b };
+    const all = checklistRows(b, true);
+    const kept = all.flatMap((r, k) => (r.text.trim() !== "" || r.children?.length ? [k] : []));
+    const rows = kept.map((k) => all[k]!);
+    if (b.type === "ul") return { kind: "steps", list: { type: "checklist", ordered: false, start: 1, rows } };
+    const nums = ordinals(b.start, all.length, b.values);
+    const values = kept.map((k) => nums[k]!);
+    return { kind: "steps", list: { type: "checklist", ordered: true, start: values[0] ?? b.start, values, rows } };
+  });
+}
+
+/** A `RunChecklist`'s steps: the top-level rows of every step list. The header
+ *  count and a NextMoves lane's open steps both read this. */
+export function runChecklistSteps(children: Block[]): ChecklistRow[] {
+  return runChecklistBody(children).flatMap((p) => (p.kind === "steps" ? p.list.rows : []));
 }
 
 function checklistRows(list: ListBlock, top: boolean): ChecklistRow[] {
