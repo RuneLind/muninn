@@ -234,6 +234,94 @@ export function componentBlockCss(scope: string): string {
     ${scope} .query-sql > summary { cursor: pointer; font-weight: 600; color: var(--text-secondary); }
     ${scope} .query-sql > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     ${scope} .query-sql-body { margin-top: 0.4rem; }
+    /* Query explorer (reader only): a search box and uses chips above a run of
+       two or more cards. Muted text is --text-soft, pinned by
+       e2e/wiki-caseboard.spec.ts. */
+    ${scope} .query[hidden] { display: none; }
+    ${scope} .qx-bar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.6rem;
+      margin: 1.4rem 0 -0.6rem;
+    }
+    ${scope} .qx-search {
+      flex: 1 1 12rem; min-width: 0; padding: 0.3rem 0.55rem; font: inherit; font-size: 0.9em;
+      color: var(--text-primary); background: var(--bg-surface);
+      border: 1px solid var(--border-secondary); border-radius: 6px;
+    }
+    ${scope} .qx-search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    ${scope} .qx-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+    ${scope} .qx-chip {
+      font: inherit; font-size: 0.8em; font-family: var(--mono, ui-monospace, monospace); cursor: pointer;
+      padding: 0.05rem 0.5rem; border-radius: 999px; color: var(--text-secondary);
+      background: transparent; border: 1px solid var(--border-secondary);
+    }
+    ${scope} .qx-chip[aria-pressed="true"] { color: var(--text-primary); border-color: var(--accent); background: var(--tint-purple); }
+    ${scope} .qx-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    ${scope} .qx-count { color: var(--text-soft); font-size: 0.85em; font-variant-numeric: tabular-nums; }
+    /* CaseBoard: a count strip, then one row per case grouped by status. The
+       pill carries the status in words; its tint only helps the scan. */
+    ${scope} .caseboard {
+      margin: 1.4rem 0; border: 1px solid var(--border-secondary); border-radius: 10px;
+      background: var(--bg-surface); padding: 0.7rem 1rem;
+    }
+    ${scope} .cb-strip { margin: 0 0 0.5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    ${scope} .cb-sep { color: var(--text-soft); font-weight: 400; }
+    ${scope} .cb-unavailable, ${scope} .cb-truncated, ${scope} .cb-warning {
+      color: var(--text-soft); font-size: 0.85em; margin: 0.3rem 0;
+    }
+    ${scope} .cb-unavailable, ${scope} .cb-warning { font-style: italic; }
+    ${scope} .cb-group + .cb-group { border-top: 1px solid var(--border-secondary); }
+    ${scope} .cb-row {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 0.6rem;
+      padding: 0.35rem 0; scroll-margin-top: 1rem;
+    }
+    ${scope} .cb-row + .cb-row { border-top: 1px dashed var(--border-secondary); }
+    ${scope} .cb-row:target { background: var(--tint-purple); }
+    ${scope} .cb-id {
+      font-family: var(--mono, ui-monospace, monospace); font-weight: 600; color: var(--accent-light);
+      text-decoration: none; white-space: nowrap;
+    }
+    ${scope} a.cb-id:hover { text-decoration: underline; }
+    ${scope} .cb-pill {
+      font-size: 0.8em; padding: 0 0.5rem; border-radius: 999px; color: var(--text-primary);
+      border: 1px solid var(--border-secondary);
+    }
+    ${scope} .cb-hold { background: var(--tint-warning); }
+    ${scope} .cb-wait { background: var(--tint-info); }
+    ${scope} .cb-wrong { background: var(--tint-error); }
+    ${scope} .cb-none { background: var(--tint-neutral); }
+    ${scope} .cb-ok { background: var(--tint-success); }
+    ${scope} .cb-unknown { background: var(--tint-magenta); border-style: dashed; }
+    ${scope} .cb-owner { color: var(--text-soft); font-size: 0.85em; }
+    ${scope} .cb-note { flex: 1 1 18rem; min-width: 0; }
+    ${scope} .cb-refs { display: inline-flex; flex-wrap: wrap; gap: 0.3rem; }
+    ${scope} .cb-ref {
+      font-family: var(--mono, ui-monospace, monospace); font-size: 0.8em; color: var(--text-soft);
+      padding: 0 0.4rem; border: 1px solid var(--border-secondary); border-radius: 999px;
+    }
+    /* DeltaTable: runs right-aligned, the delta last. better= colours a change
+       good or bad; a change with no better= and no change stay uncoloured. */
+    ${scope} .delta-table { margin: 1.2rem 0; --dt-good: var(--tok-str); --dt-bad: var(--status-error); }
+    ${scope} .dt-body > :first-child { margin-top: 0; }
+    ${scope} .dt-wrap { overflow-x: auto; }
+    ${scope} .dt-table { margin: 0; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    ${scope} .dt-table th[scope="row"] { text-align: left; font-weight: 400; }
+    ${scope} .dt-table .dt-run, ${scope} .dt-table .dt-delta { text-align: right; }
+    ${scope} .dt-table td.dt-run, ${scope} .dt-table td.dt-delta { white-space: nowrap; }
+    /* Run labels can be long ("08.09 simulering"): only the cells above keep
+       one line, so a header wraps and the delta column stays inside the
+       article (e2e/wiki-caseboard.spec.ts fails with th nowrap). */
+    ${scope} .dt-table thead th { vertical-align: bottom; }
+    ${scope} .dt-delta-runs, ${scope} .dt-delta-dir { display: block; font-size: 0.85em; }
+    ${scope} .dt-delta-dir { color: var(--text-soft); font-weight: 400; }
+    ${scope} .dt-mark { font-weight: 600; }
+    ${scope} .dt-overflow { color: var(--text-soft); font-size: 0.85em; font-style: italic; }
+    ${scope} .dt-delta-runs, ${scope} .dt-pct { color: var(--text-soft); font-weight: 400; }
+    ${scope} .dt-good, ${scope} .dt-good .dt-pct { color: var(--dt-good); }
+    ${scope} .dt-bad, ${scope} .dt-bad .dt-pct { color: var(--dt-bad); }
+    ${scope} .dt-unavailable, ${scope} .dt-note, ${scope} .dt-warning, ${scope} .dt-truncated {
+      color: var(--text-soft); font-size: 0.85em; margin: 0.3rem 0;
+    }
+    ${scope} .dt-unavailable, ${scope} .dt-warning { font-style: italic; }
     ${scope} .diagram {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

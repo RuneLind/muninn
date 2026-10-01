@@ -205,6 +205,7 @@ describe("Query table sorting — the column rule (enumerated)", () => {
     ["number + unit, grouped and decimal comma", ["1 500 NOK", "900 NOK", "-2,5 NOK"],
       ["-2,5 NOK", "900 NOK", "1 500 NOK"]],
     ["plain numbers with one shared unit", ["10 %", "9", "-1 %"], ["-1 %", "9", "10 %"]],
+    ["glued percent sorts by value", ["0.5%", "0.25%", "-3%"], ["-3%", "0.25%", "0.5%"]],
     ["mixed units fall to collation", ["0.25 x", "0.5 kr"], ["0.5 kr", "0.25 x"]],
     ["words with æøå", ["Ås", "Zebra", "Øst", "Ærlig", "Alfa"], ["Alfa", "Zebra", "Ærlig", "Øst", "Ås"]],
     ["empty and NULL cells", ["MEL-10", "", "MEL-9", "NULL", "[NULL]"], ["MEL-9", "MEL-10", "", "NULL", "[NULL]"]],
@@ -234,5 +235,19 @@ describe("Query table sorting — the column rule (enumerated)", () => {
     enhanceQueryTables(root as unknown as ParentNode);
     const ths = root.all().filter((n) => n.tag === "th");
     expect(ths.map((t) => t.classes.has("query-num"))).toEqual([true, false]);
+  });
+});
+
+describe("fix round 1: the sort reads a column in its own decimal context", () => {
+  test("a column that writes a decimal comma reads 1,500 as 1.5", () => {
+    expect(sortOrder(["1,500", "0,5", "2"], "ascending")).toEqual([1, 0, 2]);
+  });
+
+  test("a column with no unambiguous decimal comma keeps 1,500 as thousands", () => {
+    expect(sortOrder(["1,500", "999", "2"], "ascending")).toEqual([2, 1, 0]);
+  });
+
+  test("0,ddd is a decimal on its own", () => {
+    expect(sortOrder(["0,125", "1", "0,2"], "ascending")).toEqual([0, 2, 1]);
   });
 });

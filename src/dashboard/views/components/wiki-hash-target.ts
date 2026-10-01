@@ -8,6 +8,11 @@
  * Generic: any id in the article, not only a `<Query>` card. Returns whether a
  * target was found.
  */
+
+/** Dispatched (bubbling) on the element a hash names, before the folds open:
+ *  a filter that hid it (the Query explorer) shows it again. */
+export const REVEAL_EVENT = "wiki:reveal";
+
 export function revealHashTarget(root: Element, hash: string = location.hash): boolean {
   if (hash.length < 2) return false;
   let id: string;
@@ -18,6 +23,8 @@ export function revealHashTarget(root: Element, hash: string = location.hash): b
   }
   const el = document.getElementById(id);
   if (!el || !root.contains(el)) return false;
+  // A filter that hid the target (the Query explorer) shows it again first.
+  el.dispatchEvent(new CustomEvent(REVEAL_EVENT, { bubbles: true }));
   for (let p = el.parentElement; p && p !== root; p = p.parentElement) {
     if (p instanceof HTMLDetailsElement) p.open = true;
   }

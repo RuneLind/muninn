@@ -87,6 +87,16 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "query-meta", "query-run", "query-uses", "query-use", "query-body", "query-result",
   "query-result-head", "query-rows", "query-table-wrap", "query-table", "query-truncated",
   "query-unavailable", "query-warning", "query-sql", "query-sql-body",
+  // `<CaseBoard>` and `<DeltaTable>`: same reason. Chat has no file reader, so
+  // a board and a `src=` table say they are not loaded here; a pipe-table
+  // DeltaTable renders whole.
+  "caseboard", "cb-strip", "cb-count", "cb-n", "cb-sep", "cb-unavailable", "cb-truncated", "cb-warning",
+  "cb-group", "cb-row", "cb-id", "cb-pill", "cb-hold", "cb-wait", "cb-wrong", "cb-none", "cb-ok", "cb-unknown",
+  "cb-count-hold", "cb-count-wait", "cb-count-wrong", "cb-count-none", "cb-count-ok", "cb-count-unknown",
+  "cb-owner", "cb-note", "cb-refs", "cb-ref",
+  "delta-table", "dt-better-lower", "dt-better-higher", "dt-body", "dt-wrap", "dt-table", "dt-run",
+  "dt-delta", "dt-delta-runs", "dt-abs", "dt-pct", "dt-good", "dt-bad", "dt-flat", "dt-none",
+  "dt-unavailable", "dt-note", "dt-warning", "dt-truncated", "dt-mark", "dt-delta-dir", "dt-overflow",
   // Syntax highlighting. Imported from the module that EMITS them rather than
   // retyped: a `tok-*` class added there and forgotten here renders colorless
   // in chat while looking perfect in /wiki — a bug visible on one surface only.

@@ -29,7 +29,9 @@ import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
 import {
+  CASEBOARD_NO_SRC,
   QUERY_CSV_MAX_ROWS,
+  formatCount,
   lookupPageFile,
   pageFileFailureText,
   pageFileName,
@@ -37,6 +39,19 @@ import {
   splitQuerySql,
   type PageFiles,
 } from "../format/query-block.ts";
+import { caseBoardWarnings, caseCountParts, groupCases, parseCaseBoard, type BoardCase } from "../format/case-board.ts";
+import {
+  betterLabelWarnings,
+  computeDelta,
+  deltaGrid,
+  deltaRowContexts,
+  gridWritesComma,
+  parseDeltaAttrs,
+  rowBetter,
+  stripEmphasis,
+  type DeltaAttrs,
+  type DeltaGrid,
+} from "../format/delta-table.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
 const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.name === "Tab";
@@ -144,34 +159,40 @@ function factCheckSections(children: Block[]): string {
  * `web-format-browser.ts`'s bundle.
  */
 export function formatWebHtml(text: string, opts?: { files?: PageFiles }): string {
-  // `files` is read by the `Query` case, deep inside the shared renderer, so it
-  // rides a module slot for the length of this synchronous call.
+  // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
+  // inside the shared renderer, so it rides a module slot for the length of
+  // this synchronous call.
   const prev = currentPageFiles;
   currentPageFiles = opts?.files;
   try {
     const rendered = renderBlocks(parseBlocks(text), webRenderer);
-    return uniqueQueryAnchors(collapseBlockSpacing(rendered).trim());
+    // Cases first: a Query card that collides with a case anchor yields.
+    return uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim()));
   } finally {
     currentPageFiles = prev;
   }
 }
 
-/** The page's sibling files for the call in progress; absent ⇒ the `Query`
- *  cards say their result is not loaded here. */
+/** The page's sibling files for the call in progress; absent ⇒ the `Query`,
+ *  `CaseBoard` and `DeltaTable` blocks say their file is not loaded here. */
 let currentPageFiles: PageFiles | undefined;
 
-const QUERY_ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
+const ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
 
-/** Each `Query` card's anchor made unique in the finished HTML: a repeat gets
- *  the first free `-2`, `-3`, and its id link follows. A pass over the OUTPUT, because some
- *  components render a body twice and keep one copy (`foldBodyHtml`). */
-function uniqueQueryAnchors(html: string): string {
+/** Each `Query` card's anchor made unique in the finished HTML, across the
+ *  cards and the `CaseBoard` rows (made unique first, {@link
+ *  uniqueCaseAnchors}): a repeat, or a card whose slug a case holds
+ *  (`<Query id="Case-A">` beside case `A`), gets the first free `-2`, `-3`,
+ *  and its id link follows. A pass over the OUTPUT, because some components
+ *  render a body twice and keep one copy (`foldBodyHtml`). */
+function uniqueAnchors(html: string): string {
   if (!html.includes('<section class="query" id="')) return html;
+  const cases = [...html.matchAll(CASE_ROW_RE)].map((m) => m[1]!);
   // Every card's own slug is reserved first, so a repeat's suffix never takes
   // an id an author wrote (`Q-8`, `Q-8`, `Q-8-2` → `q-8`, `q-8-3`, `q-8-2`).
-  const reserved = new Set([...html.matchAll(QUERY_ANCHOR_RE)].map((m) => m[1]!));
-  const used = new Set<string>();
-  return html.replace(QUERY_ANCHOR_RE, (_m, slug: string, between: string) => {
+  const reserved = new Set([...[...html.matchAll(ANCHOR_RE)].map((m) => m[1]!), ...cases]);
+  const used = new Set<string>(cases);
+  return html.replace(ANCHOR_RE, (_m, slug: string, between: string) => {
     let anchor = slug;
     if (used.has(anchor)) {
       let k = 2;
@@ -181,6 +202,209 @@ function uniqueQueryAnchors(html: string): string {
     used.add(anchor);
     return `<section class="query" id="${anchor}">${between}<a class="query-id" href="#${anchor}">`;
   });
+}
+
+const CASEBOARD_RE = /<section class="caseboard">[\s\S]*?<\/section>/g;
+const CASE_ROW_RE = /<div class="cb-row" id="([^"]+)">([\s\S]*?)<a class="cb-id" href="#\1">/g;
+
+/** A second `CaseBoard` on the page repeating an anchor of an earlier one:
+ *  the repeat gets the first free `-2`, `-3` past every anchor either board
+ *  holds. Within one board the anchors are already unique, in file order
+ *  (`parseCaseBoard`), so a status change never moves a suffix there. */
+function uniqueCaseAnchors(html: string): string {
+  if (!html.includes('<div class="cb-row" id="')) return html;
+  const taken = new Set<string>();
+  return html.replace(CASEBOARD_RE, (board) => {
+    const own = new Set([...board.matchAll(CASE_ROW_RE)].map((m) => m[1]!));
+    const out = board.replace(CASE_ROW_RE, (m, slug: string, between: string) => {
+      if (!taken.has(slug)) return m;
+      let k = 2;
+      while (taken.has(`${slug}-${k}`) || own.has(`${slug}-${k}`)) k++;
+      own.add(`${slug}-${k}`);
+      return `<div class="cb-row" id="${slug}-${k}">${between}<a class="cb-id" href="#${slug}-${k}">`;
+    });
+    for (const a of own) taken.add(a);
+    return out;
+  });
+}
+
+/** A `CaseBoard` or `DeltaTable` line in place of its file or its data. */
+function blockNote(cls: string, text: string): string {
+  return `<p class="${cls}">${escapeHtml(text)}</p>`;
+}
+
+/** One `CaseBoard` row: id link, status pill, owner, note (inline markdown),
+ *  refs. Every value comes from the file and is escaped. */
+function caseRowHtml(c: BoardCase): string {
+  const id = c.anchor
+    ? `<a class="cb-id" href="#${c.anchor}">${escapeHtml(c.id)}</a>`
+    : `<span class="cb-id">${escapeHtml(c.id)}</span>`;
+  const pill =
+    c.status === "unknown"
+      ? `<span class="cb-pill cb-unknown" title="${escapeHtml(`status: ${c.rawStatus || "(none)"}`)}">unknown</span>`
+      : `<span class="cb-pill cb-${c.status}">${c.status}</span>`;
+  const owner = c.owner ? `<span class="cb-owner">${escapeHtml(c.owner)}</span>` : "";
+  const note = c.note ? `<span class="cb-note">${renderInline(c.note)}</span>` : "";
+  const refs = c.refs.length
+    ? `<span class="cb-refs">${c.refs.map((r) => `<span class="cb-ref">${escapeHtml(r)}</span>`).join("")}</span>`
+    : "";
+  // An id link comes first in the row: `CASE_ROW_RE` reads up to it.
+  return `<div class="cb-row"${c.anchor ? ` id="${c.anchor}"` : ""}>${id}${pill}${owner}${note}${refs}</div>`;
+}
+
+/** A `<CaseBoard src>`: the count strip, then the rows grouped by status. */
+function caseBoardHtml(src: string): string {
+  const section = (inner: string) => `<section class="caseboard">${inner}</section>`;
+  if (!src) return section(blockNote("cb-unavailable", CASEBOARD_NO_SRC));
+  const file = lookupPageFile(currentPageFiles, src, "yaml");
+  if (!file.ok) return section(blockNote("cb-unavailable", pageFileFailureText(file.reason, src, "Cases")));
+  const board = parseCaseBoard(file.text);
+  if (!board.ok) return section(blockNote("cb-unavailable", `${board.reason}: ${pageFileName(src)}`));
+  const parts = caseCountParts(board.counts);
+  const strip = parts.length
+    ? parts
+        .map(([n, s]) => `<span class="cb-count cb-count-${s}"><span class="cb-n">${formatCount(n)}</span> ${s}</span>`)
+        .join(`<span class="cb-sep"> · </span>`)
+    : `<span class="cb-count">0 cases</span>`;
+  const notes =
+    (board.total > board.cases.length
+      ? blockNote("cb-truncated", `showing ${formatCount(board.cases.length)} of ${formatCount(board.total)} cases`)
+      : "") + caseBoardWarnings(board).map((w) => blockNote("cb-warning", w)).join("");
+  const groups = groupCases(board.cases)
+    .map((g) => `<div class="cb-group" data-status="${g.status}">${g.cases.map(caseRowHtml).join("")}</div>`)
+    .join("");
+  return section(`<p class="cb-strip">${strip}</p>${notes}${groups}`);
+}
+
+/** A toned delta's marker: a sign and an accessible name, so good and bad do
+ *  not rest on colour alone. */
+const DELTA_MARK: Record<"good" | "bad", string> = {
+  good: `<span class="dt-mark" role="img" aria-label="better">✓</span> `,
+  bad: `<span class="dt-mark" role="img" aria-label="worse">✗</span> `,
+};
+
+/** A `<DeltaTable>`'s table: the label column, every run, and the delta
+ *  between the last two runs. `cell` renders one cell's text (escaped for a
+ *  CSV, inline markdown for a pipe table); `value` is the text a number is
+ *  read from (a pipe cell past its emphasis, so a bold Sum row keeps its
+ *  delta). A bare `d,ddd` cell is read by {@link deltaRowContexts}; the
+ *  percents write a comma when any cell of the table writes an unambiguous
+ *  decimal comma, or with `decimal="comma"`. A row wider than
+ *  the header gets a marker cell whether or not there is a delta column. */
+function deltaTableHtml(
+  grid: DeltaGrid,
+  attrs: DeltaAttrs,
+  cell: (s: string) => string,
+  value: (s: string) => string,
+): string {
+  const { header, rows, overflow, runs } = grid;
+  const markerColumn = runs !== null || overflow.some(Boolean);
+  const pctComma = gridWritesComma(grid, value) || attrs.decimal === "comma";
+  const ctxs = deltaRowContexts(grid, attrs.decimal, value);
+  const dir = attrs.better ? `${attrs.better} is better` : attrs.rows?.size ? "✓ better, ✗ worse — per row" : "";
+  const th =
+    header.map((h, k) => `<th scope="col"${k > 0 ? ` class="dt-run"` : ""}>${cell(h)}</th>`).join("") +
+    (runs
+      ? `<th scope="col" class="dt-delta">Δ <span class="dt-delta-runs">${cell(header[runs[0]]!)} → ` +
+        `${cell(header[runs[1]]!)}</span>${dir ? `<span class="dt-delta-dir">${escapeHtml(dir)}</span>` : ""}</th>`
+      : markerColumn
+        ? `<th scope="col" class="dt-delta"></th>`
+        : "");
+  const trs = rows
+    .map((r, i) => {
+      const tds = r.map((c, k) => (k === 0 ? `<th scope="row">${cell(c)}</th>` : `<td class="dt-run">${cell(c)}</td>`)).join("");
+      if (overflow[i]) return `<tr>${tds}<td class="dt-delta dt-overflow">more cells than the header</td></tr>`;
+      if (!markerColumn) return `<tr>${tds}</tr>`;
+      if (!runs) return `<tr>${tds}<td class="dt-delta dt-none"></td></tr>`;
+      const d = computeDelta(
+        value(r[runs[0]]!),
+        value(r[runs[1]]!),
+        rowBetter(attrs, r[0] ?? ""),
+        ctxs[i],
+        pctComma,
+      );
+      const dHtml = d
+        ? `<td class="dt-delta${d.tone ? ` dt-${d.tone}` : ""}">` +
+          (d.tone === "good" || d.tone === "bad" ? DELTA_MARK[d.tone] : "") +
+          `<span class="dt-abs">${escapeHtml(d.abs)}</span>` +
+          (d.pct ? ` <span class="dt-pct">(${escapeHtml(d.pct)})</span>` : "") +
+          `</td>`
+        : `<td class="dt-delta dt-none"></td>`;
+      return `<tr>${tds}${dHtml}</tr>`;
+    })
+    .join("");
+  const note = runs ? "" : blockNote("dt-note", "Two runs are needed for a delta");
+  // Checked against the rows shown: a label past a CSV's row cap reads as no row.
+  const labelWarnings = betterLabelWarnings(attrs, rows.map((r) => r[0] ?? ""))
+    .map((w) => blockNote("dt-warning", w))
+    .join("");
+  return (
+    `${labelWarnings}<div class="dt-wrap"><table class="dt-table"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>${note}`
+  );
+}
+
+/** A `<DeltaTable>`: from its `src=` CSV, else from the first pipe table
+ *  that is a direct child of its body. The rest of the body renders above the
+ *  table. */
+function deltaBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): string {
+  const d = parseDeltaAttrs(attrs);
+  const bClass = d.better ? ` dt-better-${d.better}` : "";
+  const k = d.src ? -1 : rawChildren.findIndex((b) => b.type === "table");
+  const rest = k === -1 ? rawChildren : [...rawChildren.slice(0, k), ...rawChildren.slice(k + 1)];
+  const intro = rest.some((b) => !isBlankTextBlock(b)) ? `<div class="dt-body">${renderBlocks(rest, webRenderer)}</div>` : "";
+  const warn = [d.warning, d.decimalWarning].filter(Boolean).map((w) => blockNote("dt-warning", w)).join("");
+  let table: string;
+  if (d.src) {
+    const csv = readCsvFile(d.src, "Table");
+    table = !csv.ok
+      ? blockNote("dt-unavailable", csv.note)
+      : (csv.warning ? blockNote("dt-warning", csv.warning) : "") +
+        deltaTableHtml(deltaGrid(csv.header, csv.shown, csv.headerWidth), d, queryCellHtml, (s) => s) +
+        (csv.truncated ? blockNote("dt-truncated", csv.truncated) : "");
+  } else if (k !== -1) {
+    const t = rawChildren[k] as Extract<Block, { type: "table" }>;
+    table = deltaTableHtml(deltaGrid(t.headers, t.rows), d, renderInline, stripEmphasis);
+  } else {
+    table = blockNote("dt-unavailable", "DeltaTable without src or a table");
+  }
+  return `<section class="delta-table${bClass}">${intro}${warn}${table}</section>`;
+}
+
+/** A `csv=`/`src=` file read for a table: the parsed rows, at most
+ *  `QUERY_CSV_MAX_ROWS` of them `shown`, and the warning and truncation lines
+ *  as text; or the one line shown in place of the table. Shared by the
+ *  `Query` result and the `DeltaTable`. */
+type CsvFile =
+  | { ok: false; note: string }
+  | {
+      ok: true;
+      name: string;
+      header: string[];
+      /** The header's cells as written, before padding to the widest row. */
+      headerWidth: number;
+      rows: string[][];
+      shown: string[][];
+      warning: string;
+      truncated: string;
+    };
+
+function readCsvFile(ref: string, what: string): CsvFile {
+  const file = lookupPageFile(currentPageFiles, ref, "csv");
+  if (!file.ok) return { ok: false, note: pageFileFailureText(file.reason, ref, what) };
+  const { header, headerWidth, rows, warning } = parseCsv(file.text);
+  const name = pageFileName(ref);
+  if (header.length === 0) return { ok: false, note: `Empty file: ${name}` };
+  const shown = rows.slice(0, QUERY_CSV_MAX_ROWS);
+  return {
+    ok: true,
+    name,
+    header,
+    headerWidth: headerWidth ?? header.length,
+    rows,
+    shown,
+    warning: warning === "unterminated-quote" ? `Unterminated quote — the rest of the file is one cell: ${name}` : "",
+    truncated: rows.length > shown.length ? `showing ${formatCount(shown.length)} of ${formatCount(rows.length)} rows` : "",
+  };
 }
 
 /** A `Query` card's unavailable line, in place of a table or the SQL. */
@@ -197,25 +421,19 @@ function queryCellHtml(text: string): string {
 /** The result table from a `csv=` file: escaped cells, header verbatim, at most
  *  `QUERY_CSV_MAX_ROWS` rows. The reader's enhancer adds header-click sorting. */
 function queryResultHtml(ref: string): string {
-  const file = lookupPageFile(currentPageFiles, ref);
-  if (!file.ok) return `<div class="query-result">${queryFileNote(pageFileFailureText(file.reason, ref))}</div>`;
-  const { header, rows, warning } = parseCsv(file.text);
-  const name = pageFileName(ref);
-  if (header.length === 0) return `<div class="query-result">${queryFileNote(`Empty file: ${name}`)}</div>`;
-  const shown = rows.slice(0, QUERY_CSV_MAX_ROWS);
-  const th = header.map((h) => `<th scope="col">${queryCellHtml(h)}</th>`).join("");
-  const trs = shown.map((r) => `<tr>${r.map((c) => `<td>${queryCellHtml(c)}</td>`).join("")}</tr>`).join("");
-  const n = (v: number) => v.toLocaleString("en-US");
+  const csv = readCsvFile(ref, "Result");
+  if (!csv.ok) return `<div class="query-result">${queryFileNote(csv.note)}</div>`;
+  const th = csv.header.map((h) => `<th scope="col">${queryCellHtml(h)}</th>`).join("");
+  const trs = csv.shown.map((r) => `<tr>${r.map((c) => `<td>${queryCellHtml(c)}</td>`).join("")}</tr>`).join("");
   // The reader sorts the rows it has; a truncated table says so.
-  const more = rows.length > shown.length
-    ? `<p class="query-truncated">showing ${n(shown.length)} of ${n(rows.length)} rows — sorting reorders the rows shown</p>`
+  const more = csv.truncated
+    ? `<p class="query-truncated">${escapeHtml(`${csv.truncated} — sorting reorders the rows shown`)}</p>`
     : "";
-  const warn = warning === "unterminated-quote"
-    ? `<p class="query-warning">${escapeHtml(`Unterminated quote — the rest of the file is one cell: ${name}`)}</p>`
-    : "";
+  const warn = csv.warning ? `<p class="query-warning">${escapeHtml(csv.warning)}</p>` : "";
+  const n = csv.rows.length;
   return (
-    `<div class="query-result"><div class="query-result-head"><code>${escapeHtml(name)}</code>` +
-    `<span class="query-rows">${n(rows.length)} ${rows.length === 1 ? "row" : "rows"}</span></div>${warn}` +
+    `<div class="query-result"><div class="query-result-head"><code>${escapeHtml(csv.name)}</code>` +
+    `<span class="query-rows">${formatCount(n)} ${n === 1 ? "row" : "rows"}</span></div>${warn}` +
     `<div class="query-table-wrap"><table class="query-table"><thead><tr>${th}</tr></thead>` +
     `<tbody>${trs}</tbody></table></div>${more}</div>`
   );
@@ -227,7 +445,7 @@ function querySqlHtml(sqlRef: string, fence: { lang: string; code: string } | nu
   let inner = "";
   let source = "";
   if (sqlRef) {
-    const file = lookupPageFile(currentPageFiles, sqlRef);
+    const file = lookupPageFile(currentPageFiles, sqlRef, "sql");
     inner = file.ok ? codeFenceHtml("sql", file.text.trimEnd()) : queryFileNote(pageFileFailureText(file.reason, sqlRef));
     source = ` <code>${escapeHtml(pageFileName(sqlRef))}</code>`;
   } else if (fence) {
@@ -615,7 +833,7 @@ const webRenderer: BlockRenderer = {
         // One card per query: header (id, question, answer, run date, uses),
         // the reading, the result table, the SQL behind a closed disclosure.
         const q = parseQueryAttrs(attrs);
-        // Made unique across the page by `uniqueQueryAnchors`, after rendering.
+        // Made unique across the page by `uniqueAnchors`, after rendering.
         const anchor = q.anchor;
         const { sql, body } = splitQuerySql(rawChildren, q.sql !== "");
         const idHtml = !q.id
@@ -643,6 +861,13 @@ const webRenderer: BlockRenderer = {
           `${head}${bodyHtml}${result}${querySqlHtml(q.sql, sql)}</section>`
         );
       }
+      case "CaseBoard": {
+        // Self-closing in the authoring rule; a body, if written, follows the board.
+        const board = caseBoardHtml((attrs.src ?? "").trim());
+        return rawChildren.some((b) => !isBlankTextBlock(b)) ? `${board}${children}` : board;
+      }
+      case "DeltaTable":
+        return deltaBlockHtml(attrs, rawChildren);
       case "FactCheck": {
         // Collapsed by DEFAULT — the per-claim evidence is reachable from the
         // chips in the prose, so the appendix that used to add 74 lines to the

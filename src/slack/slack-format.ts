@@ -15,7 +15,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
-import { parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
+import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import {
   Placeholders,
@@ -150,9 +150,16 @@ const slackRenderer: BlockRenderer = {
         const { head, answer } = queryLead(q);
         const inline = (s: string) => renderCodeSpans(s, slackLiteral, (c) => `\`${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}\``);
         const result = queryResultLine(q);
-        return [head ? `*${inline(head)}*` : "", inline(answer), children, result ? slackLiteral(result) : ""]
+        return [head ? `*${inline(head)}*` : "", inline(answer), children, result ? slackFileLine(result) : ""]
           .filter(Boolean)
           .join("\n");
+      }
+      case "CaseBoard":
+      case "DeltaTable": {
+        // No file read: the body (a DeltaTable's pipe table renders as a
+        // table, with no delta), then the file's name.
+        const line = blockFileLine(name, attrs);
+        return [children, line ? slackFileLine(line) : ""].filter(Boolean).join("\n");
       }
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
@@ -256,6 +263,20 @@ export function slackLiteral(text: string): string {
     .replace(/_/g, "\uFF3F")
     .replace(/~/g, "\u223C")
     .replace(/`/g, "\u02CB");
+}
+
+/**
+ * A `Label: file.csv` line (`Resultat:`, `Cases:`, `Table:`): the label as
+ * {@link slackLiteral}, the file name in a code span, where Slack formats
+ * nothing — so `a_b*.csv` stays `a_b*.csv` instead of look-alike glyphs a
+ * reader would copy. A name holding a backtick cannot sit in a span and falls
+ * back to the literal line; so does a line with no `: `.
+ */
+function slackFileLine(line: string): string {
+  const k = line.indexOf(": ");
+  const name = k === -1 ? "" : line.slice(k + 2);
+  if (!name || name.includes("`")) return slackLiteral(line);
+  return `${slackLiteral(line.slice(0, k + 2))}\`${name.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}\``;
 }
 
 function renderInline(text: string): string {

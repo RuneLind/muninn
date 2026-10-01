@@ -107,6 +107,46 @@ describe("loadPageFiles", () => {
     expect((await loadPageFiles(root, PAGE, md)).size).toBe(0);
   });
 
+  test("reads a CaseBoard's yaml and a DeltaTable's csv; a page with only those tags is parsed", async () => {
+    await writeFile(path.join(root, "plans", "res", "cases.yml"), "- {id: MEL-1, status: hold}\n");
+    await writeFile(path.join(root, "plans", "res", "runs.csv"), "T,a,b\nx,1,2\n");
+    const md = '<CaseBoard src="res/cases.yml" />\n\n<DeltaTable src="res/runs.csv" />';
+    const files = await loadPageFiles(root, PAGE, md);
+    expect([...files.keys()]).toEqual(["res/cases.yml", "res/runs.csv"]);
+    const html = renderWikiHtml(md, () => undefined, { files });
+    expect(html).toContain('<div class="cb-row" id="case-mel-1">');
+    expect(html).toContain('<td class="dt-delta"><span class="dt-abs">+1</span> <span class="dt-pct">(+100.0%)</span></td>');
+  });
+
+  test("fix round 1: each component reads only its own file type, on the ref and on the real file", async () => {
+    await writeFile(path.join(root, "plans", "res", "secret.yml"), "password: hunter2\n");
+    await writeFile(path.join(root, "plans", "res", "secret.sql"), "SELECT 'hunter2';\n");
+    await symlink(path.join(root, "plans", "res", "secret.yml"), path.join(root, "plans", "res", "yaml-link.csv"));
+    await symlink(path.join(root, "plans", "res", "secret.sql"), path.join(root, "plans", "res", "sql-link.yaml"));
+    const md = [
+      '<Query id="Q-1" sql="res/secret.yml" />',
+      '<Query id="Q-2" csv="res/secret.sql" />',
+      '<DeltaTable src="res/yaml-link.csv" />',
+      '<CaseBoard src="res/sql-link.yaml" />',
+    ].join("\n\n");
+    const files = await loadPageFiles(root, PAGE, md);
+    expect(files.get("res/secret.yml")).toEqual({ ok: false, reason: "extension" });
+    expect(files.get("res/secret.sql")).toEqual({ ok: false, reason: "extension" });
+    expect(files.get("res/yaml-link.csv")).toEqual({ ok: false, reason: "extension" });
+    expect(files.get("res/sql-link.yaml")).toEqual({ ok: false, reason: "extension" });
+    const html = renderWikiHtml(md, () => undefined, { files });
+    expect(html).not.toContain("hunter2");
+    expect(html.match(/File type not allowed/g)).toHaveLength(4);
+  });
+
+  test("a CaseBoard src outside the root is unavailable, like a Query's", async () => {
+    await writeFile(path.join(base, "outside.yaml"), "- {id: SECRET, status: ok}\n");
+    const md = '<CaseBoard src="../../outside.yaml" />';
+    const html = renderWikiHtml(md, () => undefined, { files: await loadPageFiles(root, PAGE, md) });
+    expect(html).not.toContain("SECRET");
+    expect(html).toContain("File not available: outside.yaml");
+  });
+
   test("end to end: the outside file's content never reaches the rendered page", async () => {
     const md = `${q("../../outside.csv")}\n\n${q("link.csv")}`;
     const html = renderWikiHtml(md, () => undefined, { files: await loadPageFiles(root, PAGE, md) });

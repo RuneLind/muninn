@@ -27,6 +27,7 @@ describe("parseCsv (RFC 4180)", () => {
     expect(parseCsv("a,b,c\n1\n1,2,3,4\n")).toEqual({
       header: ["a", "b", "c", ""],
       rows: [["1", "", "", ""], ["1", "2", "3", "4"]],
+      headerWidth: 3,
     });
   });
 
