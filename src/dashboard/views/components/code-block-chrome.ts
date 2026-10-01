@@ -127,6 +127,12 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   // A case board holds no fence; a delta table's body prose is ordinary markdown.
   CaseBoard: null,
   DeltaTable: null,
+  // List wrappers: a fence in one is an ordinary fence, and a RunChecklist
+  // command keeps its copy button.
+  Tldr: null,
+  Timeline: null,
+  DecisionLog: null,
+  RunChecklist: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);

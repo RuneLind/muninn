@@ -102,6 +102,10 @@ export const COMPONENT_NAMES = [
   "Query",
   "CaseBoard",
   "DeltaTable",
+  "Tldr",
+  "Timeline",
+  "DecisionLog",
+  "RunChecklist",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -177,6 +181,12 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // Run-to-run numbers from a CSV beside the page or a pipe-table body, with a
   // computed delta column. Wiki-only; see `src/format/delta-table.ts`.
   DeltaTable: ["src", "better", "decimal"],
+  // Four wrappers over markdown lists, read by `src/format/genre-lists.ts`.
+  // Wiki-only. `label` is the lead box's heading (default `TL;DR`).
+  Tldr: ["label"],
+  Timeline: [],
+  DecisionLog: [],
+  RunChecklist: [],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the

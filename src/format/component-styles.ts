@@ -322,6 +322,59 @@ export function componentBlockCss(scope: string): string {
       color: var(--text-soft); font-size: 0.85em; margin: 0.3rem 0;
     }
     ${scope} .dt-unavailable, ${scope} .dt-warning { font-style: italic; }
+    /* Tldr: the page's lead box. A full border with an accent top rule, so it
+       does not read as a callout's left bar. */
+    ${scope} .tldr {
+      margin: 1.4rem 0; padding: 0.8rem 1.1rem; border-radius: 10px; background: var(--bg-surface);
+      border: 1px solid var(--border-secondary); border-top: 3px solid var(--accent);
+    }
+    ${scope} .tldr-label {
+      font-size: 0.78em; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--accent-light); margin-bottom: 0.35rem;
+    }
+    ${scope} .tldr-body > :first-child { margin-top: 0; }
+    ${scope} .tldr-body > :last-child { margin-bottom: 0; }
+    /* Timeline: dated items on a vertical rail, the date as the marker. */
+    ${scope} .timeline { margin: 1.2rem 0; }
+    ${scope} .tl-list {
+      list-style: none; margin: 0.6rem 0 0.6rem 0.4rem; padding: 0 0 0 1.1rem;
+      border-left: 2px solid var(--border-secondary);
+    }
+    ${scope} .tl-item { position: relative; padding: 0.2rem 0; }
+    ${scope} .tl-dated::before {
+      content: ""; position: absolute; box-sizing: border-box; width: 10px; height: 10px; border-radius: 50%;
+      left: calc(-1.1rem - 6px); top: 0.75em; background: var(--accent);
+    }
+    ${scope} .tl-date {
+      font-family: var(--mono, ui-monospace, monospace); font-weight: 600; font-variant-numeric: tabular-nums;
+      color: var(--text-secondary); margin-right: 0.5rem; white-space: nowrap;
+    }
+    /* DecisionLog: the id as a chip with its own anchor; a struck or
+       superseded item dims to --text-soft, which keeps 4.5:1. */
+    ${scope} .decision-log { margin: 1.2rem 0; }
+    ${scope} .dl-list { list-style: none; margin: 0.6rem 0; padding: 0; }
+    ${scope} .dl-item { padding: 0.25rem 0; scroll-margin-top: 1rem; }
+    ${scope} .dl-item:target { background: var(--tint-purple); }
+    ${scope} .dl-list > .dl-noid { list-style: disc; margin-left: 1.25rem; }
+    ${scope} .dl-id {
+      display: inline-block; font-family: var(--mono, ui-monospace, monospace); font-size: 0.8em; font-weight: 700;
+      padding: 0 0.45rem; margin-right: 0.5rem; border-radius: 999px; border: 1px solid var(--border-secondary);
+      background: var(--bg-surface); color: var(--accent-light); text-decoration: none;
+    }
+    ${scope} a.dl-id:hover { text-decoration: underline; }
+    ${scope} .dl-dim, ${scope} .dl-dim .dl-id { color: var(--text-soft); }
+    /* RunChecklist: a step count, then labelled Command / Expect / Stop-if rows
+       under each step. */
+    ${scope} .run-checklist { margin: 1.2rem 0; }
+    ${scope} .rc-count { color: var(--text-soft); font-size: 0.85em; font-variant-numeric: tabular-nums; }
+    ${scope} .run-checklist > .checklist { margin-top: 0.3rem; }
+    ${scope} .rc-row {
+      display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 0.1rem 0.6rem; align-items: baseline;
+      margin: 0.25rem 0 0 1.5rem;
+    }
+    ${scope} .rc-label { color: var(--text-soft); font-size: 0.85em; font-weight: 600; }
+    ${scope} .rc-value { min-width: 0; }
+    ${scope} .rc-value > :is(pre, .fence) { margin: 0.1rem 0; }
     ${scope} .diagram {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

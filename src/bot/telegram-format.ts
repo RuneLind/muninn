@@ -153,6 +153,16 @@ const telegramRenderer: BlockRenderer = {
         const line = blockFileLine(name, attrs);
         return [children, line ? escapeHtml(line) : ""].filter(Boolean).join("\n");
       }
+      case "Tldr":
+        return `<b>${escapeHtml(attrs.label?.trim() || "TL;DR")}:</b>\n${children}`;
+      // The list as written: dates and ids stay text, labelled rows stay items.
+      case "Timeline":
+      case "DecisionLog":
+        return children;
+      case "RunChecklist": {
+        const items = parseChecklist(rawChildren);
+        return items.length === 0 ? children : checklistText(items);
+      }
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.

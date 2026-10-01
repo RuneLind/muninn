@@ -97,6 +97,11 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "delta-table", "dt-better-lower", "dt-better-higher", "dt-body", "dt-wrap", "dt-table", "dt-run",
   "dt-delta", "dt-delta-runs", "dt-abs", "dt-pct", "dt-good", "dt-bad", "dt-flat", "dt-none",
   "dt-unavailable", "dt-note", "dt-warning", "dt-truncated", "dt-mark", "dt-delta-dir", "dt-overflow",
+  // `<Tldr>`, `<Timeline>`, `<DecisionLog>`, `<RunChecklist>`: same reason.
+  "tldr", "tldr-label", "tldr-body", "timeline", "tl-list", "tl-item", "tl-dated", "tl-undated",
+  "tl-date", "tl-text", "decision-log", "dl-list", "dl-item", "dl-dim", "dl-noid", "dl-id", "dl-text",
+  "run-checklist", "rc-head", "rc-count", "rc-row", "rc-command", "rc-expect", "rc-stop", "rc-label",
+  "rc-value",
   // Syntax highlighting. Imported from the module that EMITS them rather than
   // retyped: a `tok-*` class added there and forgotten here renders colorless
   // in chat while looking perfect in /wiki — a bug visible on one surface only.

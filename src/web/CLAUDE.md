@@ -498,6 +498,18 @@ Block-only, wiki-only (not in `COMPONENT_VOCABULARY_RULES`). Both read their fil
 
 Muted text (`cb-owner`, `cb-ref`, `cb-sep`, `dt-delta-runs`, `dt-delta-dir`, `dt-pct`, `dt-overflow`, `qx-count`) uses `--text-soft`; `e2e/wiki-caseboard.spec.ts` pins token and 4.5:1 in both themes, plus distinct good/bad/flat colours, the markers, pills, chips and the 390px focus layout (the explorer's own children included).
 
+## `<Tldr>`, `<Timeline>`, `<DecisionLog>`, `<RunChecklist>` — list wrappers
+
+Block-only, wiki-only (not in `COMPONENT_VOCABULARY_RULES`), no file read. The grammars are enumerated tables in `src/format/genre-lists.ts`, and its test file holds them as accepted/rejected rows.
+
+- **`<Tldr label="…">`**: the body in a lead box (`section.tldr`, full border with an accent top rule, not a callout's left bar); `label` defaults to `TL;DR`. Placed where the author wrote it.
+- **`<Timeline>`**: every top-level item of every list directly in the body. An item starting with `YYYY-MM-DD` or `DD.MM.YYYY` (optionally in one `**…**`), a real calendar day, then end / `:` / ` — ` ` – ` ` - ` / a space, sits on the rail with the date as written as its marker (`tl-dated`); anything else is `tl-undated`. Other body blocks render in place.
+- **`<DecisionLog>`**: same walk. An item starting with `**<1–3 letters><1–4 digits>**` plus the same separators gets the id as a chip and `id="<lower-cased id>"`; a whole-item or whole-text `~~strike~~`, or `superseded by Dn` / `erstattet av Dn` (any case), adds `dl-dim`. An item without an id is `dl-noid`, with no anchor. `uniqueLogAnchors` runs last over the output: a repeated id, or one any other element holds (a Query card, a case row), gets `-2`, `-3`.
+- **`<RunChecklist>`**: a `<Checklist>` (first list only) with a `N of M steps` header over the top-level rows. A plain nested entry starting `Kommando:`/`Command:`, `Forventet:`/`Expect:` or `Stopp hvis:`/`Stop if:` (exact case, then `:` and a space or the end) is a labelled `rc-row`; other entries stay a nested list, keeping their numbers. A command that is exactly one single-backtick span renders as a one-line `<pre><code>`, so the reader's fence chrome gives it a copy button; a fence must sit directly under the step (the list parser does not take one deeper).
+- **Other surfaces**: Tldr is `<label>:` then the body; Timeline and DecisionLog are the list as written; RunChecklist is the checklist fallback, labelled entries as ordinary items. Chat renders all four (classes in `COMPONENT_CLASS_ALLOW`); the sanitizer strips the `id`s.
+
+Muted text (`rc-count`, `rc-label`, `dl-dim`) uses `--text-soft`; `e2e/wiki-genre-blocks.spec.ts` pins token and 4.5:1 in both themes, the rail markers, the anchors and the 390px focus layout.
+
 ## Fact-check annotation pair
 
 - `<Fact n="4" v="bad">passage</Fact>` (inline, paired + self-closing) marks a fact-checked passage with a verdict-tinted underline plus a `<button class="fc-chip">`.
