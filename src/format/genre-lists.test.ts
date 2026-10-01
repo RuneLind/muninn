@@ -414,14 +414,14 @@ describe("web: RunChecklist", () => {
   test("an ordered step list shows its numbers, from its start and its per-item values", () => {
     const html = formatWebHtml("<RunChecklist>\n\n3. [x] a\n4. [ ] b\n\n</RunChecklist>");
     expect(html).toContain('<ol class="checklist check-ol" start="3">');
-    expect(html).toContain('<span class="rc-num">3.</span><span class="check-mark">✓</span> a</li>');
-    expect(html).toContain('<span class="rc-num">4.</span><span class="check-mark">✗</span> b</li>');
+    expect(html).toContain('<span class="rc-num">3.</span><span class="check-mark">✓</span> <span class="check-text">a</span></li>');
+    expect(html).toContain('<span class="rc-num">4.</span><span class="check-mark">✗</span> <span class="check-text">b</span></li>');
     const jump = formatWebHtml("<RunChecklist>\n\n1. [x] a\n\n7. [ ] b\n\n</RunChecklist>");
     expect(jump).toContain('<span class="rc-num">1.</span>');
     expect(jump).toContain('<span class="rc-num">7.</span>');
     // A dropped empty row keeps the numbers of the rows after it.
     const gap = formatWebHtml("<RunChecklist>\n\n1. [x] a\n2. [ ]\n3. [ ] c\n\n</RunChecklist>");
-    expect(gap).toContain('<span class="rc-num">3.</span><span class="check-mark">✗</span> c');
+    expect(gap).toContain('<span class="rc-num">3.</span><span class="check-mark">✗</span> <span class="check-text">c</span>');
     expect(gap).not.toContain('<span class="rc-num">2.</span>');
   });
 
@@ -469,7 +469,7 @@ describe("web: RunChecklist", () => {
   });
 
   test("a step with no nested list is an ordinary checklist row", () => {
-    expect(formatWebHtml(md)).toContain('<li class="check-item check-done"><span class="check-mark">✓</span> Uten underliste</li>');
+    expect(formatWebHtml(md)).toContain('<li class="check-item check-done"><span class="check-mark">✓</span> <span class="check-text">Uten underliste</span></li>');
   });
 
   test("an ordered nested list split by a label keeps its numbers", () => {

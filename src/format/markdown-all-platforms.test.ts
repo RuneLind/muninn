@@ -1104,8 +1104,8 @@ describe("NextMoves — a lane grid on the web, a label line per lane elsewhere"
       '<NextMoves>\n\n<Lane kind="you">\n\n- [x] Sent the draft\n- [ ] Open the task\n- plain step\n\n</Lane>\n\n</NextMoves>',
     );
     expect(out).toContain('data-kind="you" data-count="2"');
-    expect(out).toContain('<li class="check-item check-done"><span class="check-mark">✓</span> Sent the draft</li>');
-    expect(out).toContain('<li class="check-item check-todo"><span class="check-mark">✗</span> Open the task</li>');
+    expect(out).toContain('<li class="check-item check-done"><span class="check-mark">✓</span> <span class="check-text">Sent the draft</span></li>');
+    expect(out).toContain('<li class="check-item check-todo"><span class="check-mark">✗</span> <span class="check-text">Open the task</span></li>');
     expect(out).toContain('<li class="check-plain">plain step</li>');
     expect(out).not.toContain("[x]");
     expect(out).not.toContain("[ ]");
@@ -1666,10 +1666,10 @@ describe("a Checklist with nested rows", () => {
     expect(formatWebHtml(md)).toBe(
       '<ul class="checklist">' +
         '<li class="check-item check-todo check-parent"><span class="check-mark">✗</span> <span class="check-text">a</span>' +
-        '<ul class="checklist"><li class="check-item check-done"><span class="check-mark">✓</span> b</li>' +
+        '<ul class="checklist"><li class="check-item check-done"><span class="check-mark">✓</span> <span class="check-text">b</span></li>' +
         '<li class="check-plain">plain</li></ul>' +
         '<ol class="checklist check-ol"><li class="check-plain" value="1">first</li><li class="check-plain" value="2">second</li></ol></li>' +
-        '<li class="check-item check-done"><span class="check-mark">✓</span> c</li>' +
+        '<li class="check-item check-done"><span class="check-mark">✓</span> <span class="check-text">c</span></li>' +
         "</ul>",
     ));
   test("telegram and slack: a plain child is a bullet, numbers are kept", () => {

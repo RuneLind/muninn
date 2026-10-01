@@ -483,9 +483,18 @@ describe("formatWebHtml — component blocks", () => {
     const out = formatWebHtml("<Checklist>\n- [x] Done thing\n- [ ] Todo thing\n</Checklist>");
     expect(out).toBe(
       '<ul class="checklist">' +
-        '<li class="check-item check-done"><span class="check-mark">✓</span> Done thing</li>' +
-        '<li class="check-item check-todo"><span class="check-mark">✗</span> Todo thing</li>' +
+        '<li class="check-item check-done"><span class="check-mark">✓</span> <span class="check-text">Done thing</span></li>' +
+        '<li class="check-item check-todo"><span class="check-mark">✗</span> <span class="check-text">Todo thing</span></li>' +
         "</ul>",
+    );
+  });
+
+  test("a flat Checklist row keeps its inline content in ONE flex item", () => {
+    // The row is a flex box: unwrapped, every text run, <code> and <strong> was
+    // its own flex item and a long row rendered as squeezed columns.
+    const out = formatWebHtml("<Checklist>\n- [ ] Toggle `X_Y` i **prod** — står den på\n</Checklist>");
+    expect(out).toContain(
+      '<span class="check-mark">✗</span> <span class="check-text">Toggle <code>X_Y</code> i <strong>prod</strong> — står den på</span></li>',
     );
   });
 

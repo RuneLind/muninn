@@ -152,8 +152,10 @@ item's hanging indent.
 
 A `<Checklist>` nests the same way (`ChecklistRow.children`): a nested row
 without `[ ]`/`[x]` is a plain item (`check-plain`), a nested ordered list keeps
-its numbers, and a parent row wraps its text in `check-text` so its todo colour
-does not reach the rows under it (the mark rules use child combinators). A task
+its numbers, and every task row wraps its text in `check-text`: the row is a flex
+box, so unwrapped text runs, `<code>` and `<strong>` each became a flex item and a
+long row rendered as columns; on a parent row the wrapper also keeps its todo
+colour from reaching the rows under it (the mark rules use child combinators). A task
 row is a flex box and does not advance an `<ol>` counter, so on the web every row
 of an ordered sublist carries its number as `value`.
 
