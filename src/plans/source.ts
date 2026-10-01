@@ -85,7 +85,7 @@ export interface PlanRecord {
   statusNote: string | undefined;
   /** True for `followups: open`, in any casing. */
   followupsOpen: boolean;
-  /** Top-level items in the body's `<NextMoves>` `you` lanes (0 when none) and
+  /** Open steps in the body's `<NextMoves>` `you` lanes (0 when none) and
    *  their lead sentences, capped. Derived from the body — there is no
    *  frontmatter flag, and a legacy `owner_actions:` key is ignored. */
   movesYou: number;

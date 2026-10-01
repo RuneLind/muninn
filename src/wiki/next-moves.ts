@@ -10,14 +10,21 @@
  * sums off the rendered `data-count`.
  */
 
-import { parseBlocks, nextMovesLanes, type Block, type LaneKind } from "../format/markdown-ast.ts";
+import {
+  COMPONENT_TAG_SOURCE_SINGLE_LINE,
+  parseBlocks,
+  countedNextMovesLanes,
+  type LaneKind,
+} from "../format/markdown-ast.ts";
+import { splitFrontmatter } from "./page-text.ts";
 
 /** Lead sentences kept per page, and their length cap. */
 export const MOVES_STEPS_MAX = 5;
 export const MOVES_STEP_CHARS = 160;
 
 export interface PageNextMoves {
-  /** Top-level items per lane kind, summed over every `<NextMoves>` block. */
+  /** Open steps per lane kind (`NextMovesLane.items`), summed over every
+   *  counted `<NextMoves>` block. */
   counts: Record<LaneKind, number>;
   /** The `you` lanes' item lead sentences, plain text, first `MOVES_STEPS_MAX`. */
   youSteps: string[];
@@ -25,47 +32,71 @@ export interface PageNextMoves {
 
 /** Every `<NextMoves>` block in `content`, or null when there is none (the
  *  common case, answered by a substring test before any parse). A block with no
- *  `<Lane>` counts as nothing. */
+ *  `<Lane>`, or one inside a `<Historic>` or a resolved `<Callout>`
+ *  (`countedNextMovesLanes`), counts as nothing. */
 export function extractNextMoves(content: string): PageNextMoves | null {
   if (!content.includes("<NextMoves")) return null;
+  // The frontmatter is not body: a `description:` quoting the grammar is not a
+  // block. The renderer's own split (`stripFrontmatter` is this function), so
+  // the index and the reader agree on where the body starts.
+  const { lanes, found } = countedNextMovesLanes(parseBlocks(splitFrontmatter(content).body));
+  if (!found) return null;
   const counts: Record<LaneKind, number> = { you: 0, waiting: 0, draft: 0, blocked: 0 };
   const youSteps: string[] = [];
-  let found = false;
-  const walk = (blocks: Block[]) => {
-    for (const b of blocks) {
-      if (b.type !== "component") continue;
-      if (b.name !== "NextMoves") {
-        walk(b.children);
-        continue;
-      }
-      found = true;
-      for (const lane of nextMovesLanes(b.children)) {
-        counts[lane.kind] += lane.items.length;
-        if (lane.kind !== "you") continue;
-        for (const item of lane.items) {
-          if (youSteps.length < MOVES_STEPS_MAX) youSteps.push(leadSentence(item));
-        }
-      }
+  for (const lane of lanes) {
+    counts[lane.kind] += lane.items.length;
+    if (lane.kind !== "you") continue;
+    for (const item of lane.items) {
+      if (youSteps.length < MOVES_STEPS_MAX) youSteps.push(leadSentence(item));
     }
-  };
-  // The frontmatter is not body: a `description:` quoting the grammar is not a block.
-  walk(parseBlocks(content.replace(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/, "")));
-  return found ? { counts, youSteps } : null;
+  }
+  return { counts, youSteps };
 }
+
+/** Abbreviations whose dot is not a sentence end, lowercased, dot included —
+ *  English and Norwegian, the two languages the wikis are written in. */
+const ABBREVIATIONS = new Set([
+  "e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "incl.", "excl.", "no.",
+  "f.eks.", "bl.a.", "dvs.", "osv.", "ca.", "jf.", "evt.", "nr.", "pkt.", "inkl.", "ekskl.", "mht.", "mtp.", "ref.", "kap.", "o.l.", "m.m.", "mv.",
+]);
+
+/** Where the first sentence of `text` ends (the index after its `.`/`!`/`?`),
+ *  or -1. A dot closing a known abbreviation is not an end. */
+function sentenceEnd(text: string): number {
+  const re = /[.!?](?=\s|$)/g;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m[0] === ".") {
+      const word = text.slice(text.lastIndexOf(" ", m.index) + 1, m.index + 1).toLowerCase();
+      if (ABBREVIATIONS.has(word.replace(/^[("'\[]+/, ""))) continue;
+    }
+    return m.index + 1;
+  }
+  return -1;
+}
+
+const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
 
 /**
  * An item's lead sentence as plain text: the bold run it opens with (the house
  * shape, `**Send the draft.** Blocks Å3.`), else its first line up to the first
- * sentence end. Markdown emphasis, code ticks and link syntax are flattened;
- * capped at `MOVES_STEP_CHARS` with an ellipsis.
+ * sentence end. A leading `[ ]` task marker is dropped. A bold LABEL ending in a colon (`**Rune:** send the draft`)
+ * names who, not what, so the sentence after it is taken instead. Component
+ * tags, markdown emphasis, code ticks and link syntax are flattened; capped at
+ * `MOVES_STEP_CHARS` with an ellipsis.
  */
 export function leadSentence(item: string): string {
-  const first = item.split("\n")[0]!.trim();
+  let first = item
+    .split("\n")[0]!
+    .replace(COMPONENT_TAG_RE, "")
+    .trim()
+    .replace(/^\[[ xX]\][ \t]*/, "");
+  const label = /^(\*\*|__)(.+?)(?::\1|\1:)\s*(.*)$/.exec(first);
+  if (label && label[3]) first = label[3];
   const bold = /^(\*\*|__)(.+?)\1/.exec(first);
   let text = bold ? bold[2]! : first;
   if (!bold) {
-    const end = /[.!?](\s|$)/.exec(text);
-    if (end) text = text.slice(0, end.index + 1);
+    const end = sentenceEnd(text);
+    if (end !== -1) text = text.slice(0, end);
   }
   text = text
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")

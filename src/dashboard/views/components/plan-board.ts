@@ -62,6 +62,7 @@ import {
   computeMeters,
   effectiveScope,
   waitingCardCount,
+  waitsOnYou,
   familyCounts,
   filterCards,
   formatAge,
@@ -954,12 +955,25 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       ["followups", "+ Follow-ups"],
       ["all", "Everything"],
     ];
-    controlsBox.append(
-      segment("Show", scopes, view.scope, (k) => {
+    // While Waiting on you is on, the board renders every status
+    // (`effectiveScope`), so the segment shows that — "Everything" pressed,
+    // every option disabled with the reason — instead of a stale "Active".
+    const waitingOn = view.filters.waiting;
+    const scopeLock = waitingOn
+      ? new Map(scopes.map(([k]) => [k, "Waiting on you shows plans in every status — turn it off to pick a scope"]))
+      : undefined;
+    const scopeBox = segment(
+      "Show",
+      scopes,
+      effectiveScope(view),
+      (k) => {
         view.scope = k;
         render();
-      }),
+      },
+      scopeLock,
     );
+    if (waitingOn) scopeBox.append(el("span", "pb-scope-note", "all statuses"));
+    controlsBox.append(scopeBox);
 
     const famBox = el("div", "pb-ctl");
     famBox.append(el("span", "pb-lab", "Repo"));
@@ -1021,7 +1035,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     wait.dataset.key = "waiting";
     wait.append(document.createTextNode("✋ Waiting on you"), el("span", "pb-c", String(waitingCardCount(cards))));
     wait.setAttribute("aria-pressed", String(view.filters.waiting));
-    wait.title = "Plans with a step in a NextMoves \"you\" lane, in any status";
+    wait.title = "Plans with a step in a NextMoves \"you\" lane, in any status but superseded or abandoned";
     wait.onclick = () => {
       view.filters = { ...view.filters, waiting: !view.filters.waiting };
       render();
@@ -1218,7 +1232,8 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       flag.title = "followups: open";
       r1.append(flag);
     }
-    if (card.movesYou > 0) {
+    const waits = waitsOnYou(card);
+    if (waits) {
       const hand = el("span", "pb-hand", `✋ ${card.movesYou}`);
       hand.title = `${card.movesYou} step${card.movesYou === 1 ? "" : "s"} waiting on you`;
       r1.append(hand);
@@ -1231,7 +1246,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     if (card.title !== card.slug) button.append(el("div", "pb-slug", card.slug));
     // The steps themselves, from the page's `you` lane — the text lives there
     // once; the card only quotes each step's lead sentence.
-    if (card.movesYouSteps.length > 0) {
+    if (waits && card.movesYouSteps.length > 0) {
       const steps = el("ol", "pb-steps");
       for (const s of card.movesYouSteps) steps.append(el("li", null, s));
       const more = card.movesYou - card.movesYouSteps.length;

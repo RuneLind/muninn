@@ -367,6 +367,10 @@ const PLAN_BOARD_STYLES = `
     .pb-steps { margin: 5px 0 0; padding-left: 18px; font-size: 11.5px; color: var(--pb-ink-2); text-align: left; }
     .pb-steps li { margin: 1px 0; }
     .pb-steps .pb-steps-more { list-style: none; margin-left: -18px; color: var(--pb-muted); }
+    /* The toggle's count inherits the button's own ink: the shared .pb-c
+       (--pb-faint) measured 2.83:1 light / 3.05:1 dark on it. */
+    .pb-chip.pb-waiting-toggle .pb-c { color: inherit; }
+    .pb-scope-note { font-size: 11px; color: var(--pb-ink-2); }
     .pb-est { font-family: var(--pb-mono); font-size: 11.5px; color: var(--pb-ink-2); }
     .pb-est-guess, .pb-prs-guess { color: var(--pb-muted); font-style: italic; }
     .pb-prs { font-family: var(--pb-mono); font-size: 11.5px; }

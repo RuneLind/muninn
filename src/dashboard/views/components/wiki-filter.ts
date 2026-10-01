@@ -139,7 +139,7 @@ export interface WikiListing {
   /** `"open"` | `"none"` — whether the plan has open follow-ups. Absent ⇒ treat as
    *  `none` (both an undeclared field and a rejected value arrive absent). */
   followups?: string;
-  /** Top-level items in the body's `<NextMoves>` `you` lanes (the ✋ flag and the
+  /** Open steps in the body's `<NextMoves>` `you` lanes (the ✋ flag and the
    *  "waiting on you" chip). Derived server-side; absent ⇒ 0. */
   movesYou?: number;
   /** One line of free prose qualifying the status. Unvalidated by nature; absent
@@ -1409,12 +1409,17 @@ export function hasPlanStatus(pages: WikiListing[]): boolean {
  * them — the flags are correct, the missing toggle was the bug. So the facet opens
  * on EITHER axis being in use.
  *
+ * `movesPersonal` false (a shared instance, `MUNINN_PROFILE=nais`) takes the
+ * ✋ waiting-on-you axis out: "you" there is whoever reads, not the author.
+ *
  * Deliberately unscoped (whole wiki, not the active domain/type): this decides
  * whether the row exists for this wiki, while `renderStatusChips` separately hides
  * an empty row for the current scope.
  */
-export function statusFacetVisible(pages: WikiListing[]): boolean {
-  return hasPlanStatus(pages) || followupCount(pages, "", "") > 0 || waitingCount(pages, "", "") > 0;
+export function statusFacetVisible(pages: WikiListing[], movesPersonal = true): boolean {
+  return (
+    hasPlanStatus(pages) || followupCount(pages, "", "") > 0 || (movesPersonal && waitingCount(pages, "", "") > 0)
+  );
 }
 
 /**

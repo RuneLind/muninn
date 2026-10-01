@@ -134,7 +134,7 @@ const telegramRenderer: BlockRenderer = {
       case "NextMoves":
         return children;
       case "Lane":
-        return `${laneLeadText(laneFromAttrs(attrs, rawChildren), (l) => `<b>${escapeHtml(l)}</b>`)}\n${children}`;
+        return `${laneLeadText(laneFromAttrs(attrs, rawChildren), (l) => `<b>${escapeHtml(l)}</b>`, escapeHtml)}\n${children}`;
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.

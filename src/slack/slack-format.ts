@@ -137,7 +137,9 @@ const slackRenderer: BlockRenderer = {
       case "NextMoves":
         return children;
       case "Lane":
-        return `${laneLeadText(laneFromAttrs(attrs, rawChildren), (l) => `*${renderInline(l)}*`)}\n${children}`;
+        // The label is the author's plain text, not markdown: escaped, never
+        // run through `renderInline` (see `slackLiteral`).
+        return `${laneLeadText(laneFromAttrs(attrs, rawChildren), (l) => `*${slackLiteral(l)}*`, slackLiteral)}\n${children}`;
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.
@@ -222,6 +224,25 @@ const SLACK_TRIPLE_RE = new RegExp(RAW_EMPHASIS_SOURCES.triple, "gu");
  *  inverted). Same guards as the rules above; see `markdown-core.ts`. */
 const SLACK_BOLD_THEN_ITALIC_RE = new RegExp(RAW_EMPHASIS_SOURCES.boldThenItalic, "gu");
 const SLACK_ITALIC_THEN_BOLD_RE = new RegExp(RAW_EMPHASIS_SOURCES.italicThenBold, "gu");
+
+/**
+ * Free text as LITERAL mrkdwn: `&`, `<` and `>` as the three entities Slack
+ * decodes (so `<!channel>` is text, not a mention, and `Rune & <Co>` survives),
+ * and the four emphasis/code delimiters swapped for look-alikes that are not
+ * delimiters — mrkdwn has no backslash escape, so a literal `*and*` inside a
+ * bold label would otherwise close the bold early. The rule the other three
+ * targets apply with `escapeHtml`, for a lane label.
+ */
+export function slackLiteral(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\*/g, "\u2217")
+    .replace(/_/g, "\uFF3F")
+    .replace(/~/g, "\u223C")
+    .replace(/`/g, "\u02CB");
+}
 
 function renderInline(text: string): string {
   const ph = new Placeholders();

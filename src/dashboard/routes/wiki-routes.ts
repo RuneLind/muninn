@@ -1111,6 +1111,11 @@ export function toListing(
   // that carry it. `cullReason` (free prose, up to a paragraph) and the resolved
   // `supersededBy` are what the open page's banner renders, so they are the
   // THIRD opt-in, `includeCull`, passed by caller 2 alone.
+  //
+  // `movesYou` (the open steps in the body's `<NextMoves>` `you` lanes) rides
+  // the rest spread on EVERY caller: one number, set only on a page that has
+  // any, read by the rail's ✋ row flag and "waiting on you" chip. The client,
+  // not this function, hides those two on a shared instance (nais).
   const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, cullReason, supersededBy, ...rest } =
     meta;
   void pubDate;

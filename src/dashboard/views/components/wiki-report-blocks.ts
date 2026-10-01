@@ -5,10 +5,12 @@
  *  - `↻ N historic` — a pill in the header's meta row, beside the status chip,
  *    counting the page's `<Historic>` sections (`section.historic`); a click
  *    opens any closed `<details>` around the first one and scrolls to it.
- *  - `✋ N for you` / `⏳ waiting · N` / `✉ N not sent · age` — the same kind of
- *    pill per `<NextMoves>` lane kind, summing the lanes' `data-count` (the
- *    renderer's count, the one the index uses too), plus the lane ages
- *    (`decorateLaneAges`), computed here from `data-since`.
+ *  - `✋ Du · 3` / `⏳ Venter på fag · 2` / `✉ Utkast, ikke sendt · 2 · 1 d` —
+ *    the same kind of pill per `<NextMoves>` lane kind, labelled with the
+ *    lane's own `who` (the English `✋ N for you` default only when it has
+ *    none), summing the counted lanes' `data-count` (the renderer's count, the
+ *    one the index uses too; a lane in a settled section counts nowhere), plus
+ *    the lane ages (`decorateLaneAges`), computed here from `data-since`.
  *  - `line refs` — a toggle, shown only on a page with a pure ref group
  *    (`span.code-ref-group`, emitted by `src/wiki/code-refs.ts`), that hides
  *    those groups with one class on `.wiki-article`. A chip outside a group is
@@ -64,56 +66,90 @@ export const MOVES_AGE_CLASS = "nm-age";
 type PillKind = "you" | "waiting" | "draft";
 
 const MOVES_PILL_TITLE: Record<PillKind, string> = {
-  you: "Jump to the steps waiting on you",
+  you: "Jump to the next steps",
   waiting: "Jump to what this page is waiting on",
   draft: "Jump to the drafts not sent yet",
 };
 
+/**
+ * The settled sections a lane can sit in — a `<Historic>` and a resolved
+ * `<Callout>`, as the web renderer marks them up. A lane inside one still
+ * renders but counts in no pill: the twin of `isSettledSection` in
+ * `src/format/markdown-ast.ts`, which keeps the index to the same rule.
+ */
+export const SETTLED_SECTION_SELECTOR = "section.historic, details.callout-resolved";
+
 /** Whole days from the calendar day `since` (`YYYY-MM-DD`) to `now`'s day, both
- *  in the viewer's timezone; 0 for today or a future day, null for a bad date. */
+ *  in the viewer's timezone; 0 for today, null for a FUTURE day (there is no
+ *  age to show yet, so the lane shows the date) and for a bad date. */
 export function daysSince(since: string, now: Date): number | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(since);
   if (!m) return null;
-  const day = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  if (Number.isNaN(day.getTime()) || day.getDate() !== Number(m[3])) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  // `setFullYear`, not the constructor, which maps years 0–99 to the 1900s.
+  const day = new Date(2000, 0, 1);
+  day.setFullYear(y, mo - 1, d);
+  if (day.getFullYear() !== y || day.getMonth() !== mo - 1 || day.getDate() !== d) return null;
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   // Rounded, not floored: a DST day is 23 or 25 hours long.
-  return Math.max(0, Math.round((today.getTime() - day.getTime()) / 86_400_000));
+  const days = Math.round((today.getTime() - day.getTime()) / 86_400_000);
+  return days < 0 ? null : days;
 }
 
-export function movesPillLabel(kind: PillKind, n: number, ageDays: number | null): string {
+/** A kind's header pill. With an authored `who` the label is the author's own
+ *  words (`✋ Du · 3`), so the pill reads from the page's perspective rather
+ *  than claiming the step is the VIEWER's; without one, the English default. */
+export function movesPillLabel(kind: PillKind, n: number, ageDays: number | null, who?: string | null): string {
+  const age = kind === "draft" && ageDays !== null ? ` · ${ageDays} d` : "";
+  if (who) return `${MOVES_PILL_GLYPH[kind]} ${who} · ${n}${age}`;
   if (kind === "you") return `✋ ${n} for you`;
   if (kind === "waiting") return `⏳ waiting · ${n}`;
-  return `✉ ${n} not sent${ageDays === null ? "" : ` · ${ageDays} d`}`;
+  return `✉ ${n} not sent${age}`;
 }
+
+const MOVES_PILL_GLYPH: Record<PillKind, string> = { you: "✋", waiting: "⏳", draft: "✉" };
 
 interface MovesTally {
   count: number;
   first: HTMLElement | null;
+  /** The first counted lane's authored `who`, or null. */
+  who: string | null;
   /** The oldest valid `since` among the kind's lanes, as an age in days. */
   oldestAgeDays: number | null;
+}
+
+/** The lanes that count: every `.nm-lane` of a `.next-moves` block that is not
+ *  inside a settled section (`SETTLED_SECTION_SELECTOR`). */
+function countedLanes(article: HTMLElement): HTMLElement[] {
+  return Array.from(article.querySelectorAll<HTMLElement>(".next-moves .nm-lane")).filter(
+    (lane) => !lane.closest(SETTLED_SECTION_SELECTOR),
+  );
 }
 
 /** Sum the lanes' server-computed `data-count` per kind. An unknown kind was
  *  already folded to `waiting` by the renderer. */
 function readMoves(article: HTMLElement, now: Date): Record<PillKind | "blocked", MovesTally> {
-  const tally = (): MovesTally => ({ count: 0, first: null, oldestAgeDays: null });
+  const tally = (): MovesTally => ({ count: 0, first: null, who: null, oldestAgeDays: null });
   const out = { you: tally(), waiting: tally(), draft: tally(), blocked: tally() };
-  article.querySelectorAll<HTMLElement>(".next-moves .nm-lane").forEach((lane) => {
+  for (const lane of countedLanes(article)) {
     const t = out[lane.dataset.kind as keyof typeof out];
-    if (!t) return;
+    if (!t) continue;
     const n = Number(lane.dataset.count) || 0;
     t.count += n;
-    if (n > 0 && !t.first) t.first = lane;
+    if (n > 0 && !t.first) {
+      t.first = lane;
+      t.who = lane.dataset.who ?? null;
+    }
     const age = lane.dataset.since ? daysSince(lane.dataset.since, now) : null;
     if (age !== null && n > 0) t.oldestAgeDays = Math.max(t.oldestAgeDays ?? 0, age);
-  });
+  }
   return out;
 }
 
 /** Ages computed here, never server-side, so cached HTML cannot carry a stale
- *  one: a waiting lane's head reads `since N d`, and each top-level item of a
- *  draft lane gets a `not sent · N d` chip. Idempotent. */
+ *  one: a lane's head reads `since N d` (the date itself for a future day), and
+ *  each open top-level item of a draft lane gets a `not sent · N d` chip.
+ *  Idempotent. */
 function decorateLaneAges(article: HTMLElement, now: Date): void {
   article.querySelectorAll(`.nm-lane .${MOVES_AGE_CLASS}`).forEach((el) => el.remove());
   article.querySelectorAll<HTMLElement>(".next-moves .nm-lane[data-since]").forEach((lane) => {
@@ -121,7 +157,7 @@ function decorateLaneAges(article: HTMLElement, now: Date): void {
     const age = daysSince(since, now);
     const sinceEl = lane.querySelector<HTMLElement>(":scope > .nm-head > .nm-since");
     if (sinceEl) {
-      sinceEl.textContent = age !== null && lane.dataset.kind === "waiting" ? `since ${age} d` : since;
+      sinceEl.textContent = age !== null ? `since ${age} d` : since;
       sinceEl.title = since;
     }
     if (age === null || lane.dataset.kind !== "draft") return;
@@ -132,11 +168,10 @@ function decorateLaneAges(article: HTMLElement, now: Date): void {
       c.title = `drafted ${since}`;
       return c;
     };
-    const items = lane.querySelectorAll<HTMLElement>(":scope > .nm-body > ul > li, :scope > .nm-body > ol > li");
-    if (items.length === 0) {
-      lane.querySelector(":scope > .nm-head")?.append(chip());
-      return;
-    }
+    const items = lane.querySelectorAll<HTMLElement>(
+      ":scope > .nm-body > ul > li:not(.check-done), :scope > .nm-body > ol > li:not(.check-done)",
+    );
+    if (items.length === 0) return;
     items.forEach((li) => {
       // After the item's own text, before anything nested under it.
       const nested = Array.from(li.children).find((c) => /^(UL|OL|P|PRE|DIV)$/.test(c.tagName));
@@ -182,7 +217,12 @@ export function enhanceReportBlocks(wrap: ParentNode): void {
   for (const kind of ["you", "waiting", "draft"] as const) {
     const m = moves[kind];
     if (m.count === 0 || !m.first) continue;
-    jumpPill(`${MOVES_PILL_CLASS} ${MOVES_PILL_CLASS}-${kind}`, movesPillLabel(kind, m.count, m.oldestAgeDays), MOVES_PILL_TITLE[kind], m.first);
+    jumpPill(
+      `${MOVES_PILL_CLASS} ${MOVES_PILL_CLASS}-${kind}`,
+      movesPillLabel(kind, m.count, m.oldestAgeDays, m.who),
+      MOVES_PILL_TITLE[kind],
+      m.first,
+    );
   }
   decorateLaneAges(article, now);
 

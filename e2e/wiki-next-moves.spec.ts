@@ -97,6 +97,67 @@ const FILES: Record<string, string> = {
   "plans/idle.mdx": plan("Idle plan", "in-flight", ["Nothing to do."]),
   // A lane quoted in a code fence is documentation, not a block.
   "plans/quoted.mdx": plan("Quoted grammar", "proposed", ["```mdx", ...LANES, "```"]),
+  // Settled: lanes two components deep (Fold > Historic) render but count nowhere.
+  "plans/settled.mdx": plan("Settled page", "in-flight", ['<Fold title="Old">', "", '<Historic since="x">', "", ...LANES, "", "</Historic>", "", "</Fold>"]),
+  // Task markers: [x] is done, [ ] counts; a Callout inside a lane under a Fold
+  // renders; the house DD.MM.YYYY date is aged like an ISO one.
+  "plans/tasks.mdx": plan("Task lane", "in-flight", [
+    '<Fold title="Status" open="true">',
+    "",
+    "<NextMoves>",
+    "",
+    '<Lane kind="you" who="Du">',
+    "",
+    "- [x] Sendte utkastet.",
+    "- [ ] **Opprett oppgaven.**",
+    "",
+    '<Callout tone="warn" title="Merk">',
+    "Fristen er fredag.",
+    "</Callout>",
+    "",
+    "</Lane>",
+    "",
+    '<Lane kind="waiting" who="Venter på fag" since="28.09.2026">',
+    "",
+    "- Svar på Å1",
+    "",
+    "</Lane>",
+    "",
+    '<Lane kind="draft" since="2026-09-29">',
+    "",
+    "- [x] Å2 — sendt",
+    "- [ ] Å3 — utkast",
+    "",
+    "</Lane>",
+    "",
+    "</NextMoves>",
+    "",
+    "</Fold>",
+  ]),
+  // An empty-state line is not a step: the you lane counts 0.
+  "plans/prose.mdx": plan("Prose lane", "in-flight", [
+    "<NextMoves>",
+    "",
+    '<Lane kind="you" who="Du">',
+    "",
+    "Ingenting å gjøre nå.",
+    "",
+    "</Lane>",
+    "",
+    "</NextMoves>",
+  ]),
+  // Superseded with a you step: history on the board, still a page on /wiki.
+  "plans/superseded-waits.mdx": plan("Superseded but waiting", "superseded", [
+    "<NextMoves>",
+    "",
+    '<Lane kind="you">',
+    "",
+    "- **Old step.**",
+    "",
+    "</Lane>",
+    "",
+    "</NextMoves>",
+  ]),
 };
 
 let server: ChildProcess | undefined;
@@ -148,8 +209,8 @@ test.afterAll(async () => {
 });
 
 test.describe("NextMoves in the reader", () => {
-  test("four lanes render as a grid: several columns on a desktop, one at phone width", async ({ page }) => {
-    await page.setViewportSize({ width: 1400, height: 900 });
+  test("four lanes: three cards in one row and the blocked strip below at 1440, one column at 390", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
     await open(page, "plans/report.mdx");
     const lanes = page.locator(".wiki-article .next-moves .nm-lane");
     await expect(lanes).toHaveCount(4);
@@ -159,8 +220,19 @@ test.describe("NextMoves in the reader", () => {
     // A nested item renders inside its step and is not counted.
     await expect(lanes.nth(0).locator(".nm-body > ol > li")).toHaveCount(2);
     await expect(lanes.nth(0).locator(".nm-body > ol > li ul li")).toHaveText("a nested note, not a step");
-    const top = async (i: number) => (await lanes.nth(i).boundingBox())!;
-    expect(Math.abs((await top(0)).y - (await top(1)).y)).toBeLessThan(2);
+    const box = async (i: number) => (await lanes.nth(i).boundingBox())!;
+    // No card alone on a row: the three cards share one row…
+    const rows = new Map<number, number>();
+    for (const i of [0, 1, 2]) {
+      const y = Math.round((await box(i)).y);
+      rows.set(y, (rows.get(y) ?? 0) + 1);
+    }
+    expect([...rows.values()], "cards per row").toEqual([3]);
+    // …and the blocked lane is the full-width strip below them.
+    await expect(lanes.nth(3)).toHaveAttribute("data-kind", "blocked");
+    const grid = (await page.locator(".wiki-article .nm-grid").boundingBox())!;
+    expect((await box(3)).y).toBeGreaterThan((await box(0)).y + (await box(0)).height);
+    expect(Math.abs((await box(3)).width - grid.width)).toBeLessThan(2);
 
     await page.setViewportSize({ width: 390, height: 844 });
     // At 390 px the reader's rail and pane leave the article no width at all
@@ -169,8 +241,11 @@ test.describe("NextMoves in the reader", () => {
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("f");
     await expect.poll(async () => (await page.locator(".wiki-article").boundingBox())!.width).toBeGreaterThan(250);
-    await expect.poll(async () => Math.abs((await top(0)).x - (await top(1)).x)).toBeLessThan(2);
-    expect((await top(1)).y).toBeGreaterThan((await top(0)).y + 10);
+    // One column: every card starts at the same x, each below the one before.
+    await expect.poll(async () => Math.abs((await box(0)).x - (await box(1)).x)).toBeLessThan(2);
+    expect(Math.abs((await box(1)).x - (await box(2)).x)).toBeLessThan(2);
+    expect((await box(1)).y).toBeGreaterThan((await box(0)).y + 10);
+    expect((await box(2)).y).toBeGreaterThan((await box(1)).y + 10);
     // The grid never overflows the article column (the reader's own 390 px
     // layout is a separate matter: its three panes do not fit a phone).
     const fits = await page.locator(".wiki-article .next-moves").evaluate((el) => {
@@ -185,12 +260,15 @@ test.describe("NextMoves in the reader", () => {
   test("pills count the lanes, ages come from the viewer's clock", async ({ page }) => {
     await open(page, "plans/report.mdx");
     const pills = page.locator(`.wiki-article-head .wiki-meta-row .${MOVES_PILL_CLASS}`);
-    await expect(pills).toHaveText(["✋ 2 for you", "⏳ waiting · 1", "✉ 2 not sent · 2 d"]);
+    // Labelled with each lane's own who: the author's words, not "for you".
+    await expect(pills).toHaveText(["✋ Du · 2", "⏳ Venter på fag · 1", "✉ Utkast, ikke sendt · 2 · 2 d"]);
     // Beside the status chip.
     expect(await pills.first().evaluate((el) => el.previousElementSibling?.className)).toContain("wiki-status");
     const waiting = page.locator('.nm-lane[data-kind="waiting"] .nm-since');
     await expect(waiting).toHaveText("since 1 d");
     await expect(waiting).toHaveAttribute("title", "2026-09-30");
+    // The draft lane's head carries the same age as the waiting lane's.
+    await expect(page.locator('.nm-lane[data-kind="draft"] .nm-since')).toHaveText("since 2 d");
     const chips = page.locator(`.nm-lane[data-kind="draft"] .${MOVES_AGE_CLASS}`);
     await expect(chips).toHaveText(["not sent · 2 d", "not sent · 2 d"]);
     // The chip sits after the item's own text.
@@ -207,6 +285,40 @@ test.describe("NextMoves in the reader", () => {
     await expect(page.locator('.nm-lane[data-kind="draft"]')).toBeInViewport();
   });
 
+  test("a lane inside Fold > Historic renders but counts in no pill", async ({ page }) => {
+    await open(page, "plans/settled.mdx");
+    await expect(page.locator(".wiki-article section.historic .nm-lane")).toHaveCount(4);
+    await expect(page.locator(`.${MOVES_PILL_CLASS}`)).toHaveCount(0);
+  });
+
+  test("[x] steps are done, [ ] steps count, a Callout in a lane renders, DD.MM.YYYY is aged", async ({ page }) => {
+    await open(page, "plans/tasks.mdx");
+    const you = page.locator('.nm-lane[data-kind="you"]');
+    await expect(you).toHaveAttribute("data-count", "1");
+    await expect(you.locator("li.check-done .check-mark")).toHaveText("✓");
+    await expect(you.locator("li.check-todo")).toContainText("Opprett oppgaven.");
+    await expect(you).not.toContainText("[x]");
+    await expect(you).not.toContainText("[ ]");
+    await expect(you.locator(".callout-warn .callout-title")).toHaveText("Merk");
+    await expect(page.locator(`.${MOVES_PILL_CLASS}-you`)).toHaveText("✋ Du · 1");
+    const waiting = page.locator('.nm-lane[data-kind="waiting"] .nm-since');
+    await expect(waiting).toHaveText("since 3 d");
+    await expect(waiting).toHaveAttribute("title", "2026-09-28");
+    // A done draft was sent: only the open one carries "not sent".
+    const draft = page.locator('.nm-lane[data-kind="draft"]');
+    await expect(draft).toHaveAttribute("data-count", "1");
+    await expect(draft.locator(`.${MOVES_AGE_CLASS}`)).toHaveCount(1);
+    await expect(draft.locator(`li.check-todo .${MOVES_AGE_CLASS}`)).toHaveText("not sent · 2 d");
+  });
+
+  test("a lane of prose alone counts 0: the page has no pill and no ✋", async ({ page }) => {
+    await open(page, "plans/prose.mdx");
+    await expect(page.locator('.nm-lane[data-kind="you"]')).toContainText("Ingenting å gjøre nå.");
+    await expect(page.locator('.nm-lane[data-kind="you"]')).toHaveAttribute("data-count", "0");
+    await expect(page.locator(`.${MOVES_PILL_CLASS}`)).toHaveCount(0);
+    await expect(page.locator('.wiki-list-item[data-relpath="plans/prose.mdx"] .wiki-moves-flag')).toHaveCount(0);
+  });
+
   test("a page with no block, and a block inside a code fence, have no pills", async ({ page }) => {
     await open(page, "plans/idle.mdx");
     await expect(page.locator(`.${MOVES_PILL_CLASS}`)).toHaveCount(0);
@@ -219,9 +331,11 @@ test.describe("NextMoves in the reader", () => {
     await open(page, "plans/idle.mdx");
     await expect(page.locator('.wiki-list-item[data-relpath="plans/report.mdx"] .wiki-moves-flag')).toHaveCount(1);
     await expect(page.locator('.wiki-list-item[data-relpath="plans/idle.mdx"] .wiki-moves-flag')).toHaveCount(0);
+    await expect(page.locator('.wiki-list-item[data-relpath="plans/settled.mdx"] .wiki-moves-flag')).toHaveCount(0);
+    await expect(page.locator('.wiki-list-item[data-relpath="plans/report.mdx"] .wiki-moves-flag')).toHaveAttribute("aria-hidden", "true");
     await page.locator("#wikiFilters summary").click();
     const chip = page.locator("#statusChips [data-waiting]");
-    await expect(chip).toHaveText("✋ waiting on you 3");
+    await expect(chip).toHaveText("✋ waiting on you 5");
     await chip.click();
     await expect(chip).toHaveClass(/active/);
     const rows = page.locator(".wiki-list-item[data-relpath]");
@@ -229,6 +343,8 @@ test.describe("NextMoves in the reader", () => {
       "plans/folded.mdx",
       "plans/report.mdx",
       "plans/shipped-waits.mdx",
+      "plans/superseded-waits.mdx",
+      "plans/tasks.mdx",
     ]);
   });
 
@@ -281,14 +397,21 @@ test.describe("NextMoves on the /plans board", () => {
     await expect(page.locator('.pb-cardwrap[data-slug="report"]')).toHaveCount(1);
     await expect(page.locator('.pb-cardwrap[data-slug="shipped-waits"]')).toHaveCount(0);
     const toggle = page.locator(".pb-waiting-toggle");
-    await expect(toggle).toHaveText("✋ Waiting on you3");
+    // Superseded is history: not counted, not listed. Shipped still waits.
+    await expect(toggle).toHaveText("✋ Waiting on you4");
     await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator('[data-key="Show:active"]')).toHaveAttribute("aria-pressed", "true");
     await toggle.click();
     await expect(page.locator(".pb-waiting-toggle")).toHaveAttribute("aria-pressed", "true");
     const cards = page.locator(".pb-cardwrap[data-slug]");
     await expect
       .poll(async () => (await cards.evaluateAll((els) => els.map((e) => e.getAttribute("data-slug")))).sort())
-      .toEqual(["folded", "report", "shipped-waits"]);
+      .toEqual(["folded", "report", "shipped-waits", "tasks"]);
+    // The scope segment shows what renders: every status, locked while the toggle is on.
+    await expect(page.locator('[data-key="Show:all"]')).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator('[data-key="Show:active"]')).toHaveAttribute("aria-pressed", "false");
+    for (const k of ["active", "followups", "all"]) await expect(page.locator(`[data-key="Show:${k}"]`)).toBeDisabled();
+    await expect(page.locator(".pb-scope-note")).toHaveText("all statuses");
     expect(page.url()).toContain("waiting=1");
     // The card carries its steps, lead sentence only.
     const report = page.locator('.pb-cardwrap[data-slug="report"]');
@@ -311,6 +434,14 @@ test.describe("NextMoves on the /plans board", () => {
       await expect(report.locator(".pb-steps li").first()).toBeVisible();
       expect(await paintedContrast(report.locator(".pb-steps li").first()), "step").toBeGreaterThanOrEqual(4.5);
       expect(await paintedContrast(report.locator(".pb-hand")), "badge").toBeGreaterThanOrEqual(4.5);
+      // The toggle's count, pressed and not.
+      const count = page.locator(".pb-waiting-toggle .pb-c");
+      expect(await paintedContrast(count), "toggle count, pressed").toBeGreaterThanOrEqual(4.5);
+      expect(await paintedContrast(page.locator(".pb-scope-note")), "scope note").toBeGreaterThanOrEqual(4.5);
+      await page.locator(".pb-waiting-toggle").click();
+      await expect(page.locator(".pb-waiting-toggle")).toHaveAttribute("aria-pressed", "false");
+      await page.mouse.move(0, 0);
+      expect(await paintedContrast(page.locator(".pb-waiting-toggle .pb-c")), "toggle count").toBeGreaterThanOrEqual(4.5);
     });
   }
 });

@@ -932,13 +932,23 @@ function followupFlagHtml(p: WikiListing): string {
     : "";
 }
 
+/** Are the ✋ "waiting on you" chip and row flag shown? Not on a shared
+ *  instance (the nais read slice, `wikiToolsFlag()` false): a `you` lane is the
+ *  AUTHOR's next step, and on a pod every colleague reading the wiki would be
+ *  told it waits on them. The page's own lane pills still render there — they
+ *  carry the lane's `who` label, the author's perspective. */
+function movesPersonal(): boolean {
+  return wikiToolsFlag();
+}
+
 /** The ✋ mark on a rail row whose page has a step waiting on the reader. An
  *  inline span INSIDE `.wiki-list-title` (the `▸` rule): the row's six flex
- *  items are each budgeted, and a seventh would cost the title its floor. */
+ *  items are each budgeted, and a seventh would cost the title its floor.
+ *  `aria-hidden`: the row's title attribute is what a screen reader gets. */
 function movesFlagHtml(p: WikiListing): string {
   const n = p.movesYou ?? 0;
-  return n > 0
-    ? `<span class="wiki-moves-flag" title="${n} step${n === 1 ? "" : "s"} waiting on you">✋</span>`
+  return n > 0 && movesPersonal()
+    ? `<span class="wiki-moves-flag" aria-hidden="true" title="${n} step${n === 1 ? "" : "s"} waiting on you">✋</span>`
     : "";
 }
 
@@ -977,13 +987,13 @@ function renderStatusChips(): void {
     row.innerHTML = "";
     row.style.display = "none";
   };
-  if (!statusFacetVisible(allPages)) {
+  if (!statusFacetVisible(allPages, movesPersonal())) {
     hide();
     return;
   }
   const counts = statusCounts(railPages(), filters.domain, filters.type);
   const open = followupCount(railPages(), filters.domain, filters.type);
-  const waiting = waitingCount(railPages(), filters.domain, filters.type);
+  const waiting = movesPersonal() ? waitingCount(railPages(), filters.domain, filters.type) : 0;
   // The whole-wiki gate above says the facet EXISTS here; this says whether it has
   // anything to offer in the CURRENT domain/type scope. Without it a type switch
   // could leave a row holding nothing but the inert "All status" chip. An active

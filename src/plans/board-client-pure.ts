@@ -546,13 +546,21 @@ export function effectiveScope(view: { scope: BoardScope; filters: BoardFilters 
   return view.filters.waiting ? "all" : view.scope;
 }
 
-/** The Waiting on you toggle's count: every card with a `you`-lane step. */
-export function waitingCardCount(cards: readonly { movesYou: number }[]): number {
-  return cards.filter((c) => c.movesYou > 0).length;
+/** Does this card wait on the reader? A `you`-lane step on a plan that is not
+ *  superseded or abandoned: those two are closed without shipping, so a step
+ *  left in one is history. A SHIPPED plan still counts — its follow-up steps
+ *  are real. */
+export function waitsOnYou(card: { movesYou: number; planStatus: PlanStatus | null }): boolean {
+  return card.movesYou > 0 && card.planStatus !== "superseded" && card.planStatus !== "abandoned";
+}
+
+/** The Waiting on you toggle's count: every card that {@link waitsOnYou}. */
+export function waitingCardCount(cards: readonly { movesYou: number; planStatus: PlanStatus | null }[]): number {
+  return cards.filter(waitsOnYou).length;
 }
 
 export function cardMatches(card: EffectiveCard, filters: BoardFilters): boolean {
-  if (filters.waiting && !(card.movesYou > 0)) return false;
+  if (filters.waiting && !waitsOnYou(card)) return false;
   if (filters.families.length > 0 && !filters.families.includes(card.family)) return false;
   if (filters.priority === "unset") {
     if (card.effectivePriority !== null) return false;

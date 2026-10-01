@@ -711,7 +711,7 @@ export interface WikiPageMeta {
    *  an unrecognized value is dropped at parse time (also ⇒ absent). */
   followups?: PlanFollowups;
   /**
-   * WAITING ON YOU — the number of top-level items in the page body's
+   * WAITING ON YOU — the number of open steps in the page body's
    * `<NextMoves>` `you` lanes (`src/wiki/next-moves.ts`). DERIVED, never
    * authored: the steps live once, in the body, and there is no frontmatter
    * flag (a legacy `owner_actions:` key is ignored). Absent, not 0, on a page

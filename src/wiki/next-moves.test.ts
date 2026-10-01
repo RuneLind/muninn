@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { extractNextMoves, leadSentence, MOVES_STEP_CHARS, MOVES_STEPS_MAX } from "./next-moves.ts";
-import { laneFromAttrs, normalizeLaneKind, parseBlocks } from "../format/markdown-ast.ts";
+import { laneFromAttrs, normalizeLaneKind, parseBlocks, parseLaneSince } from "../format/markdown-ast.ts";
+import { renderWikiHtml } from "./render.ts";
 
 const BLOCK = [
   "<NextMoves>",
@@ -88,10 +89,48 @@ describe("extractNextMoves", () => {
     expect(m.counts).toEqual({ you: 0, waiting: 1, draft: 0, blocked: 0 });
   });
 
-  test("a you lane of prose with no list counts one step: its first line", () => {
-    const m = extractNextMoves('<NextMoves>\n\n<Lane kind="you">\n\nSend the draft today.\nMore.\n\n</Lane>\n\n</NextMoves>')!;
-    expect(m.counts.you).toBe(1);
-    expect(m.youSteps).toEqual(["Send the draft today."]);
+  test("a lane of prose alone counts nothing: an empty-state line is not a step", () => {
+    const m = extractNextMoves('<NextMoves>\n\n<Lane kind="you">\n\nIngenting å gjøre nå.\n\n</Lane>\n\n</NextMoves>')!;
+    expect(m.counts.you).toBe(0);
+    expect(m.youSteps).toEqual([]);
+    const table = "| a | b |\n|---|---|\n| 1 | 2 |";
+    expect(extractNextMoves(`<NextMoves>\n\n<Lane kind="you">\n\n${table}\n\n</Lane>\n\n</NextMoves>`)!.counts.you).toBe(0);
+  });
+
+  test("[x] items are done and do not count; [ ] items count with the marker stripped", () => {
+    const m = extractNextMoves(
+      '<NextMoves>\n\n<Lane kind="you">\n\n- [x] Sent the draft.\n- [ ] **Open the task.** Then wait.\n- [X] Also done\n- Plain step.\n\n</Lane>\n\n</NextMoves>',
+    )!;
+    expect(m.counts.you).toBe(2);
+    expect(m.youSteps).toEqual(["Open the task.", "Plain step."]);
+  });
+
+  test("a Checklist inside a lane counts its open rows", () => {
+    const m = extractNextMoves(
+      '<NextMoves>\n\n<Lane kind="you">\n\n<Checklist>\n- [x] done\n- [ ] Open one.\n- [ ] Open two.\n</Checklist>\n\n</Lane>\n\n</NextMoves>',
+    )!;
+    expect(m.counts.you).toBe(2);
+    expect(m.youSteps).toEqual(["Open one.", "Open two."]);
+  });
+
+  test("lanes inside a Historic or a resolved Callout count nothing; an open Callout still counts", () => {
+    expect(extractNextMoves(`<Historic since="x">\n\n${BLOCK}\n\n</Historic>`)!.counts).toEqual({ you: 0, waiting: 0, draft: 0, blocked: 0 });
+    expect(extractNextMoves(`<Fold title="F">\n\n<Callout resolved="2026-09-01">\n\n${BLOCK}\n\n</Callout>\n\n</Fold>`)!.counts.you).toBe(0);
+    expect(extractNextMoves(`<Callout tone="warn">\n\n${BLOCK}\n\n</Callout>`)!.counts.you).toBe(2);
+    // A typo'd resolved date is an open callout, as the renderer reads it.
+    expect(extractNextMoves(`<Callout resolved="2026-02-31">\n\n${BLOCK}\n\n</Callout>`)!.counts.you).toBe(2);
+  });
+
+  test("two enclosing components plus one inside the lane still count", () => {
+    const lane = '<NextMoves>\n\n<Lane kind="you">\n\n<Checklist>\n- [ ] Deep step.\n</Checklist>\n\n</Lane>\n\n</NextMoves>';
+    expect(extractNextMoves(`<Fold title="F">\n\n<Callout>\n\n${lane}\n\n</Callout>\n\n</Fold>`)!.counts.you).toBe(1);
+  });
+
+  test("the frontmatter split is the renderer's: a `----` closing fence", () => {
+    const page = ["---", "title: x", "----", "", BLOCK, "", "---", "", "after"].join("\n");
+    expect(extractNextMoves(page)!.counts.you).toBe(2);
+    const html = renderWikiHtml(page, () => undefined);
+    expect(html.match(/data-kind="you" data-count="2"/g)?.length).toBe(1);
   });
 
   test("steps are capped at MOVES_STEPS_MAX while the count is not", () => {
@@ -110,6 +149,22 @@ describe("leadSentence", () => {
     expect(leadSentence("first line\nsecond")).toBe("first line");
   });
 
+  test("a bold label ending in a colon names who; the step after it is the sentence", () => {
+    expect(leadSentence("**Rune:** send the draft. Then wait.")).toBe("send the draft.");
+    expect(leadSentence("**Rune**: send the draft")).toBe("send the draft");
+    expect(leadSentence("**Rune:** **Send it.** Later.")).toBe("Send it.");
+  });
+
+  test("an abbreviation's dot is not a sentence end", () => {
+    expect(leadSentence("Use a tool, e.g. ripgrep, here. Then more.")).toBe("Use a tool, e.g. ripgrep, here.");
+    expect(leadSentence("Kjør f.eks. skarp og bl.a. tørr. Så mer.")).toBe("Kjør f.eks. skarp og bl.a. tørr.");
+  });
+
+  test("component tags and a task marker are stripped", () => {
+    expect(leadSentence('<Pill tone="warn">Haster</Pill> Send it. More.')).toBe("Haster Send it.");
+    expect(leadSentence("[ ] Open the task. Then.")).toBe("Open the task.");
+  });
+
   test("capped with an ellipsis", () => {
     const s = leadSentence("x".repeat(400));
     expect([...s].length).toBe(MOVES_STEP_CHARS);
@@ -124,14 +179,25 @@ describe("Lane attributes", () => {
     expect(normalizeLaneKind(undefined)).toEqual({ kind: "waiting", known: false });
   });
 
-  test("since is a strict calendar day; who falls back to the kind's label", () => {
+  test("since is ISO or DD.MM.YYYY, as an ISO day; anything else is kept raw; who falls back to the kind's label", () => {
     const body = parseBlocks("- a");
     expect(laneFromAttrs({ kind: "draft", since: "2026-09-30" }, body)).toMatchObject({
       since: "2026-09-30",
+      sinceRaw: null,
       label: "Draft, not sent",
+      who: null,
     });
-    expect(laneFromAttrs({ kind: "draft", since: "2026-02-31" }, body).since).toBeNull();
-    expect(laneFromAttrs({ kind: "draft", since: "30.09.2026" }, body).since).toBeNull();
-    expect(laneFromAttrs({ kind: "you", who: "  Du " }, body).label).toBe("Du");
+    expect(laneFromAttrs({ kind: "draft", since: "30.09.2026" }, body).since).toBe("2026-09-30");
+    expect(laneFromAttrs({ kind: "draft", since: "2026-02-31" }, body)).toMatchObject({ since: null, sinceRaw: "2026-02-31" });
+    expect(laneFromAttrs({ kind: "draft", since: " i forrige uke " }, body)).toMatchObject({ since: null, sinceRaw: "i forrige uke" });
+    expect(laneFromAttrs({ kind: "draft" }, body)).toMatchObject({ since: null, sinceRaw: null });
+    expect(laneFromAttrs({ kind: "you", who: "  Du " }, body)).toMatchObject({ label: "Du", who: "Du" });
+  });
+
+  test("parseLaneSince", () => {
+    expect(parseLaneSince("1.9.2026")).toBe("2026-09-01");
+    expect(parseLaneSince("31.02.2026")).toBeNull();
+    expect(parseLaneSince("30.09.26")).toBeNull();
+    expect(parseLaneSince("0099-01-05")).toBe("0099-01-05");
   });
 });

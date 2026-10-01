@@ -852,6 +852,9 @@ test("waiting on you: count, filter and facet gate, independent of the other axe
   // A wiki whose only signal is a you lane still gets the row with its toggle.
   expect(statusFacetVisible([page({ name: "w", movesYou: 1 })])).toBe(true);
   expect(statusFacetVisible([page({ name: "w", movesYou: 0 })])).toBe(false);
+  // On a shared instance the you axis is personal to nobody: it opens no row.
+  expect(statusFacetVisible([page({ name: "w", movesYou: 1 })], false)).toBe(false);
+  expect(statusFacetVisible([page({ name: "w", movesYou: 1, followups: "open" })], false)).toBe(true);
 });
 
 test("statusFacetVisible: opens on EITHER axis, so ⚑ flags are never orphaned", () => {

@@ -1070,14 +1070,14 @@ describe("NextMoves — a lane grid on the web, a label line per lane elsewhere"
 
   test("web → one lane card per Lane, count from top-level items, date kept for the client", () => {
     const out = formatWebHtml(md);
-    expect(out).toContain('<section class="next-moves"><div class="nm-grid">');
+    expect(out).toContain('<section class="next-moves"><div class="nm-grid nm-cols-3">');
     expect(out).toContain(
-      '<div class="nm-lane nm-you" data-kind="you" data-count="2"><div class="nm-head"><span class="nm-who">Du</span><span class="nm-count">2</span></div>',
+      '<div class="nm-lane nm-you" data-kind="you" data-count="2" data-who="Du"><div class="nm-head"><span class="nm-who">Du</span><span class="nm-count">2</span></div>',
     );
     // Nested items render inside their step and do not count.
     expect(out).toContain("<ol><li><strong>Send it.</strong> Blocks Å3.<ul><li>nested</li></ul></li><li>Create task</li></ol>");
     expect(out).toContain(
-      'data-kind="waiting" data-count="1" data-since="2026-09-30"><div class="nm-head"><span class="nm-who">Venter &lt;på&gt; fag</span>',
+      'data-kind="waiting" data-count="1" data-since="2026-09-30" data-who="Venter &lt;på&gt; fag"><div class="nm-head"><span class="nm-who">Venter &lt;på&gt; fag</span>',
     );
     expect(out).toContain('<span class="nm-since" data-since="2026-09-30">2026-09-30</span>');
     // Unknown kind ⇒ waiting plus a marker class, default English label.
@@ -1086,10 +1086,44 @@ describe("NextMoves — a lane grid on the web, a label line per lane elsewhere"
     expect(out).not.toContain("&lt;Lane");
   });
 
-  test("web → a bad since is dropped, never rendered as a date", () => {
-    const out = formatWebHtml('<NextMoves>\n\n<Lane kind="draft" since="2026-02-31">\n\n- x\n\n</Lane>\n\n</NextMoves>');
+  test("web → a bad since renders as written, with no date for the client to age", () => {
+    const out = formatWebHtml('<NextMoves>\n\n<Lane kind="draft" since="2026-02-31 <b>">\n\n- x\n\n</Lane>\n\n</NextMoves>');
     expect(out).not.toContain("data-since");
     expect(out).toContain('<span class="nm-who">Draft, not sent</span>');
+    expect(out).toContain('<span class="nm-since nm-since-raw">2026-02-31 &lt;b&gt;</span>');
+  });
+
+  test("web → since in the house DD.MM.YYYY is normalised to ISO", () => {
+    const out = formatWebHtml('<NextMoves>\n\n<Lane kind="waiting" since="30.09.2026">\n\n- x\n\n</Lane>\n\n</NextMoves>');
+    expect(out).toContain('data-since="2026-09-30"');
+    expect(out).toContain('<span class="nm-since" data-since="2026-09-30">2026-09-30</span>');
+  });
+
+  test("web → [x]/[ ] items render with the checklist marks; only the open ones count", () => {
+    const out = formatWebHtml(
+      '<NextMoves>\n\n<Lane kind="you">\n\n- [x] Sent the draft\n- [ ] Open the task\n- plain step\n\n</Lane>\n\n</NextMoves>',
+    );
+    expect(out).toContain('data-kind="you" data-count="2"');
+    expect(out).toContain('<li class="check-item check-done"><span class="check-mark">✓</span> Sent the draft</li>');
+    expect(out).toContain('<li class="check-item check-todo"><span class="check-mark">✗</span> Open the task</li>');
+    expect(out).toContain('<li class="check-plain">plain step</li>');
+    expect(out).not.toContain("[x]");
+    expect(out).not.toContain("[ ]");
+  });
+
+  test("web → a lane of prose alone counts 0 and still renders", () => {
+    const out = formatWebHtml('<NextMoves>\n\n<Lane kind="you" who="Du">\n\nIngenting å gjøre nå.\n\n</Lane>\n\n</NextMoves>');
+    expect(out).toContain('data-kind="you" data-count="0"');
+    expect(out).toContain("Ingenting å gjøre nå.");
+  });
+
+  test("web → four lanes: three cards in a row and the blocked lane as a strip below", () => {
+    const four = md.replace("</NextMoves>", '<Lane kind="blocked" who="Blokkert">\n\n- b\n\n</Lane>\n\n<Lane kind="draft">\n\n- d\n\n</Lane>\n\n</NextMoves>');
+    const out = formatWebHtml(four);
+    // four cards (you, waiting, someday→waiting, draft) ⇒ 2×2
+    expect(out).toContain('<div class="nm-grid nm-cols-2">');
+    expect(out).toContain('<div class="nm-strips"><div class="nm-lane nm-blocked"');
+    expect(out.indexOf("nm-blocked")).toBeGreaterThan(out.indexOf("nm-draft"));
   });
 
   test("web → no lanes ⇒ the body plain; a stray Lane ⇒ a label paragraph, no card", () => {
@@ -1103,6 +1137,51 @@ describe("NextMoves — a lane grid on the web, a label line per lane elsewhere"
     const out = formatWebHtml(`<Fold title="F">\n\n${md}\n\n</Fold>`);
     expect(out).toContain('<details class="fold">');
     expect(out).toContain('class="nm-lane nm-you"');
+  });
+
+  test("web → Fold > Historic > NextMoves > Lane > Checklist renders every level", () => {
+    const lane =
+      '<NextMoves>\n\n<Lane kind="you">\n\n<Checklist>\n- [ ] Open step\n- [x] Done step\n</Checklist>\n\n</Lane>\n\n</NextMoves>';
+    const out = formatWebHtml(`<Fold title="F">\n\n<Historic since="x">\n\n${lane}\n\n</Historic>\n\n</Fold>`);
+    expect(out).toContain('<section class="historic">');
+    expect(out).toContain('class="nm-lane nm-you" data-kind="you" data-count="1"');
+    expect(out).toContain('<ul class="checklist">');
+    expect(out).not.toContain("&lt;Lane");
+    expect(out).not.toContain("&lt;Checklist");
+  });
+
+  test("web → Fold > NextMoves > Lane > Callout, and Pill inside a lane, render", () => {
+    const out = formatWebHtml(
+      '<Fold title="F">\n\n<NextMoves>\n\n<Lane kind="waiting">\n\n<Callout tone="warn" title="T">\nInside.\n</Callout>\n\n- step <Pill tone="warn">haster</Pill>\n\n</Lane>\n\n</NextMoves>\n\n</Fold>',
+    );
+    expect(out).toContain('<div class="callout callout-warn"><strong class="callout-title">T</strong>');
+    expect(out).toContain('<span class="pill pill-warn">haster</span>');
+    expect(out).not.toContain("&lt;Callout");
+  });
+
+  test("the free NextMoves/Lane level is spent once per path: a nested pair pays", () => {
+    // Fold(1) > NextMoves+Lane(free) > Callout(2) > NextMoves(3): the inner
+    // block pays its level, so its Lane is past the cap and stays text.
+    const inner = "<NextMoves>\n\n<Lane kind=\"you\">\n\n- deep\n\n</Lane>\n\n</NextMoves>";
+    const out = formatWebHtml(
+      `<Fold title="F">\n\n<NextMoves>\n\n<Lane kind="you">\n\n<Callout>\n\n${inner}\n\n</Callout>\n\n</Lane>\n\n</NextMoves>\n\n</Fold>`,
+    );
+    expect(out.match(/class="nm-lane /g)?.length).toBe(1);
+    expect(out).toContain("&lt;Lane kind=&quot;you&quot;&gt;");
+  });
+
+  test("web → a lane inside Historic or a resolved Callout still renders", () => {
+    const lane = '<NextMoves>\n\n<Lane kind="you">\n\n- old step\n\n</Lane>\n\n</NextMoves>';
+    expect(formatWebHtml(`<Historic>\n\n${lane}\n\n</Historic>`)).toContain('class="nm-lane nm-you"');
+    expect(formatWebHtml(`<Callout resolved="2026-09-01">\n\n${lane}\n\n</Callout>`)).toContain('class="nm-lane nm-you"');
+  });
+
+  test("slack → the lane label is literal text: no mention, no broken bold", () => {
+    const out = formatSlackMrkdwn('<NextMoves>\n\n<Lane kind="you" who="<!channel> Rune & <Co> *and* _x_">\n\n- a\n\n</Lane>\n\n</NextMoves>');
+    const head = out.split("\n")[0]!;
+    expect(head).toBe("*&lt;!channel&gt; Rune &amp; &lt;Co&gt; \u2217and\u2217 \uFF3Fx\uFF3F*");
+    // Exactly the two bold delimiters the label line adds.
+    expect(head.match(/\*/g)?.length).toBe(2);
   });
 
   test("telegram → bold label line (+ since) over the items", () => {

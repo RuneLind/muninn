@@ -19,6 +19,7 @@ import {
   EMPTY_FILTERS,
   EMPTY_OVERLAY,
   waitingCardCount,
+  waitsOnYou,
   familyCounts,
   filterCards,
   formatAge,
@@ -592,6 +593,18 @@ describe("Waiting on you", () => {
     const waiting = filterCards(cards, { ...EMPTY_FILTERS, waiting: true });
     expect(cardsInScope(waiting, "active").map((c) => c.slug)).toEqual(["inflight-waits"]);
     expect(cardsInScope(waiting, effectiveScope({ scope: "active", filters: { ...EMPTY_FILTERS, waiting: true } })).length).toBe(2);
+  });
+
+  test("superseded and abandoned plans do not wait on you; shipped does", () => {
+    const closed = [
+      ...cards,
+      eff({ slug: "superseded-waits", planStatus: "superseded", column: "shipped", movesYou: 1, movesYouSteps: ["s"] }),
+      eff({ slug: "abandoned-waits", planStatus: "abandoned", column: "shipped", movesYou: 3, movesYouSteps: ["a"] }),
+    ];
+    expect(waitingCardCount(closed)).toBe(2);
+    expect(filterCards(closed, { ...EMPTY_FILTERS, waiting: true }).map((c) => c.slug)).toEqual(["shipped-waits", "inflight-waits"]);
+    expect(waitsOnYou(closed[3]!)).toBe(false);
+    expect(waitsOnYou(closed[0]!)).toBe(true);
   });
 
   test("the toggle round-trips through the URL", () => {
