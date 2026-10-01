@@ -18,6 +18,7 @@ import {
   folderCounts,
   FUTURE_DATE_SKEW_MS,
   followupCount,
+  waitingCount,
   hasPlanStatus,
   hasTypedHubs,
   isRecencySort,
@@ -96,6 +97,7 @@ const NO_FILTER: WikiFilters = {
   tag: "",
   status: "",
   followups: "",
+  waiting: "",
   project: "",
   jira: "",
 };
@@ -834,6 +836,25 @@ test("domainFacetVisible: only a wiki spanning both domains gets the row", () =>
 
 test("STATUS_ORDER has not drifted from the store's PLAN_STATUS_VALUES", () => {
   expect(STATUS_ORDER).toEqual([...PLAN_STATUS_VALUES]);
+});
+
+test("waiting on you: count, filter and facet gate, independent of the other axes", () => {
+  const pages = [
+    page({ name: "a", movesYou: 2, domain: "ai", type: "plan" }),
+    page({ name: "b", movesYou: 1, domain: "life", type: "note" }),
+    page({ name: "c", followups: "open" }),
+  ];
+  expect(waitingCount(pages, "", "")).toBe(2);
+  expect(waitingCount(pages, "life", "")).toBe(1);
+  expect(waitingCount(pages, "", "plan")).toBe(1);
+  expect(filterPages(pages, { ...NO_FILTER, waiting: "you" }).map((p) => p.name)).toEqual(["a", "b"]);
+  expect(filterPages(pages, { ...NO_FILTER, waiting: "you", followups: "open" })).toEqual([]);
+  // A wiki whose only signal is a you lane still gets the row with its toggle.
+  expect(statusFacetVisible([page({ name: "w", movesYou: 1 })])).toBe(true);
+  expect(statusFacetVisible([page({ name: "w", movesYou: 0 })])).toBe(false);
+  // On a shared instance the you axis is personal to nobody: it opens no row.
+  expect(statusFacetVisible([page({ name: "w", movesYou: 1 })], false)).toBe(false);
+  expect(statusFacetVisible([page({ name: "w", movesYou: 1, followups: "open" })], false)).toBe(true);
 });
 
 test("statusFacetVisible: opens on EITHER axis, so ⚑ flags are never orphaned", () => {

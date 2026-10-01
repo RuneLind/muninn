@@ -30,6 +30,7 @@ import path from "node:path";
 import { readdir, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
+import { extractNextMoves } from "../wiki/next-moves.ts";
 import { sha256 } from "../gardener/util.ts";
 import { getWikiRegistry } from "../wiki/registry-memo.ts";
 import { findWiki } from "../wiki/registry.ts";
@@ -84,6 +85,11 @@ export interface PlanRecord {
   statusNote: string | undefined;
   /** True for `followups: open`, in any casing. */
   followupsOpen: boolean;
+  /** Open steps in the body's `<NextMoves>` `you` lanes (0 when none) and
+   *  their lead sentences, capped. Derived from the body — there is no
+   *  frontmatter flag, and a legacy `owner_actions:` key is ignored. */
+  movesYou: number;
+  movesYouSteps: string[];
   priority: PlanPriority | undefined;
   tags: string[];
   /** Relative to the wiki ROOT (e.g. `plans/foo.mdx`) — the shape
@@ -236,6 +242,7 @@ export function planRecordFromContent(
     warnings.push(`${relPath}: followups "${rawFollowups}" is neither open nor none — read as none`);
   }
 
+  const moves = extractNextMoves(content);
   return {
     slug,
     title: firstString(fm.title) ?? slug,
@@ -243,6 +250,8 @@ export function planRecordFromContent(
     statusDate,
     statusNote: firstString(fm.status_note),
     followupsOpen: followups === "open",
+    movesYou: moves?.counts.you ?? 0,
+    movesYouSteps: moves?.youSteps ?? [],
     priority,
     tags: asList(fm.tags),
     relPath,

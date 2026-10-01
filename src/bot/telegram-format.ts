@@ -10,6 +10,8 @@ import {
   parseResolvedDate,
   historicLeadText,
   resolvedLeadText,
+  laneFromAttrs,
+  laneLeadText,
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
@@ -127,6 +129,12 @@ const telegramRenderer: BlockRenderer = {
       }
       case "Historic":
         return `<i>${escapeHtml(historicLeadText(attrs))}</i>\n${children}`;
+      // No grid in a message: each lane is a bold label line (+ " — since
+      // <date>") over its items, the block itself only their sequence.
+      case "NextMoves":
+        return children;
+      case "Lane":
+        return `${laneLeadText(laneFromAttrs(attrs, rawChildren), (l) => `<b>${escapeHtml(l)}</b>`, escapeHtml)}\n${children}`;
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.

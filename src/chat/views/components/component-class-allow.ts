@@ -76,6 +76,11 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "callout-resolved-date", "callout-resolved-title",
   "historic", "historic-stamp", "historic-mark", "historic-since", "historic-note",
   "historic-body",
+  // `<NextMoves>` / `<Lane>`: same reason. Chat renders the lane grid (without
+  // the reader's age chips, which are a client enhancer the chat does not run).
+  "next-moves", "nm-intro", "nm-grid", "nm-lane", "nm-you", "nm-waiting", "nm-draft", "nm-blocked",
+  "nm-kind-unknown", "nm-head", "nm-who", "nm-count", "nm-since", "nm-since-raw", "nm-body",
+  "nm-cols-1", "nm-cols-2", "nm-cols-3", "nm-cols-auto", "nm-strips",
   // Syntax highlighting. Imported from the module that EMITS them rather than
   // retyped: a `tok-*` class added there and forgotten here renders colorless
   // in chat while looking perfect in /wiki — a bug visible on one surface only.

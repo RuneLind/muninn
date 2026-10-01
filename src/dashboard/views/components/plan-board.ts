@@ -60,6 +60,9 @@ import {
   canNudge,
   cardsInScope,
   computeMeters,
+  effectiveScope,
+  waitingCardCount,
+  waitsOnYou,
   familyCounts,
   filterCards,
   formatAge,
@@ -884,10 +887,10 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
    *     scope with no follow-ups column, because absent is not zero.
    */
   function renderMeters(shown: readonly EffectiveCard[]): void {
-    const inScope = cardsInScope(shown, view.scope);
+    const inScope = cardsInScope(shown, effectiveScope(view));
     const m = computeMeters(inScope, money.available);
     const corpus = computeMeters(shown, money.available);
-    const showsFollowups = visibleColumns(view.scope).some((c) => c.key === "followups");
+    const showsFollowups = visibleColumns(effectiveScope(view)).some((c) => c.key === "followups");
     metersBox.textContent = "";
     const tiles: Array<{ k: string; v: string; sub?: string; note: string }> = [
       {
@@ -895,8 +898,8 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         v: String(m.activeCount),
         // Under the default scope every shown card IS active, so "N of N" would be a tautology;
         // the corpus size is the denominator that carries information there.
-        sub: view.scope === "active" ? `of ${corpus.totalCount} in the corpus` : `of ${m.totalCount} shown`,
-        note: `proposed · ready · in flight · blocked — ${view.scope === "active" ? `the whole corpus holds ${corpus.totalCount} card(s)` : `of the ${m.totalCount} card(s) this scope shows`}`,
+        sub: effectiveScope(view) === "active" ? `of ${corpus.totalCount} in the corpus` : `of ${m.totalCount} shown`,
+        note: `proposed · ready · in flight · blocked — ${effectiveScope(view) === "active" ? `the whole corpus holds ${corpus.totalCount} card(s)` : `of the ${m.totalCount} card(s) this scope shows`}`,
       },
       {
         k: "In flight",
@@ -952,17 +955,30 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       ["followups", "+ Follow-ups"],
       ["all", "Everything"],
     ];
-    controlsBox.append(
-      segment("Show", scopes, view.scope, (k) => {
+    // While Waiting on you is on, the board renders every status
+    // (`effectiveScope`), so the segment shows that — "Everything" pressed,
+    // every option disabled with the reason — instead of a stale "Active".
+    const waitingOn = view.filters.waiting;
+    const scopeLock = waitingOn
+      ? new Map(scopes.map(([k]) => [k, "Waiting on you shows plans in every status — turn it off to pick a scope"]))
+      : undefined;
+    const scopeBox = segment(
+      "Show",
+      scopes,
+      effectiveScope(view),
+      (k) => {
         view.scope = k;
         render();
-      }),
+      },
+      scopeLock,
     );
+    if (waitingOn) scopeBox.append(el("span", "pb-scope-note", "all statuses"));
+    controlsBox.append(scopeBox);
 
     const famBox = el("div", "pb-ctl");
     famBox.append(el("span", "pb-lab", "Repo"));
     const chips = el("div", "pb-chips");
-    const visible = new Set(visibleColumns(view.scope).map((c) => c.key));
+    const visible = new Set(visibleColumns(effectiveScope(view)).map((c) => c.key));
     const counts = familyCounts(cards.filter((c) => visible.has(c.column)));
     // A selected family with no chip in the current scope still gets one, at
     // count 0. Without it, narrowing the scope deletes the very control that
@@ -1009,6 +1025,23 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     }
     priBox.append(pchips);
     controlsBox.append(priBox);
+
+    // Waiting on you: cuts across every column, so while it is on the board
+    // renders all of them (`effectiveScope`) — a shipped plan can still wait on
+    // the reader. The count is over the whole corpus for the same reason.
+    const waitBox = el("div", "pb-ctl");
+    const wait = el("button", "pb-chip pb-waiting-toggle") as HTMLButtonElement;
+    wait.type = "button";
+    wait.dataset.key = "waiting";
+    wait.append(document.createTextNode("✋ Waiting on you"), el("span", "pb-c", String(waitingCardCount(cards))));
+    wait.setAttribute("aria-pressed", String(view.filters.waiting));
+    wait.title = "Plans with a step in a NextMoves \"you\" lane, in any status but superseded or abandoned";
+    wait.onclick = () => {
+      view.filters = { ...view.filters, waiting: !view.filters.waiting };
+      render();
+    };
+    waitBox.append(wait);
+    controlsBox.append(waitBox);
 
     const sorts: Array<[BoardSort, string]> = [
       ["rank", "My order"],
@@ -1102,7 +1135,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       if (key && stack && stack.scrollTop > 0) scrollTops.set(key, stack.scrollTop);
     });
     boardBox.textContent = "";
-    for (const col of visibleColumns(view.scope)) {
+    for (const col of visibleColumns(effectiveScope(view))) {
       const inColumn = sortCards(
         shown.filter((c) => c.column === col.key),
         view.sort,
@@ -1199,12 +1232,27 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       flag.title = "followups: open";
       r1.append(flag);
     }
+    const waits = waitsOnYou(card);
+    if (waits) {
+      const hand = el("span", "pb-hand", `✋ ${card.movesYou}`);
+      hand.title = `${card.movesYou} step${card.movesYou === 1 ? "" : "s"} waiting on you`;
+      r1.append(hand);
+    }
     button.append(r1);
 
     button.append(el("div", "pb-title", card.title));
     // 91 of mimir's 185 plans carry no title, so the store falls back to the
     // slug — printing it twice is noise on half the board.
     if (card.title !== card.slug) button.append(el("div", "pb-slug", card.slug));
+    // The steps themselves, from the page's `you` lane — the text lives there
+    // once; the card only quotes each step's lead sentence.
+    if (waits && card.movesYouSteps.length > 0) {
+      const steps = el("ol", "pb-steps");
+      for (const s of card.movesYouSteps) steps.append(el("li", null, s));
+      const more = card.movesYou - card.movesYouSteps.length;
+      if (more > 0) steps.append(el("li", "pb-steps-more", `+${more} more`));
+      button.append(steps);
+    }
 
     const r2 = el("div", "pb-r2");
     if (money.available) {

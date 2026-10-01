@@ -64,6 +64,7 @@ const INERT: WikiFilters = {
   tag: "",
   status: "",
   followups: "",
+  waiting: "",
   project: "",
   jira: "",
 };
@@ -362,6 +363,7 @@ describe("railSectionsVisible", () => {
     ["tag", "jira"],
     ["status", "shipped"],
     ["followups", "open"],
+    ["waiting", "you"],
     ["project", "pomme-core"],
   ];
   for (const [axis, value] of facets) {
@@ -414,6 +416,7 @@ describe("buildRail", () => {
       ["tag", "jira"],
       ["status", "shipped"],
       ["followups", "open"],
+      ["waiting", "you"],
       ["project", "pomme-core"],
     ];
     for (const [axis, value] of facets) {

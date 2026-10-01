@@ -27,6 +27,8 @@ import {
   CODE_REFS_OFF_CLASS,
   HISTORIC_PILL_CLASS,
   LINE_REFS_TOGGLE_CLASS,
+  MOVES_AGE_CLASS,
+  MOVES_PILL_CLASS,
 } from "./components/wiki-report-blocks.ts";
 import {
   wikiReadonlyStyles,
@@ -668,6 +670,8 @@ export async function renderWikiPage(opts?: {
        swap .wiki-act-glyph's green made, and the token the series group row
        already carries — the glyph and its fold now read as one colour). */
     .wiki-latest-glyph { color: var(--accent-light); margin-right: 4px; font-size: 11px; }
+    /* ✋ = a NextMoves step waiting on the reader: an inline mark, the ▸ rule. */
+    .wiki-moves-flag { margin-right: 4px; font-size: 11px; }
     /* Issue pills: a COLUMN of their own inside .wiki-list-title, never inside
        the clamp — inline, a pill run wrapped to a third line and was clipped on
        80 of 96 keyed rows of a real wiki. The title element stays ONE row item
@@ -1905,11 +1909,18 @@ export async function renderWikiPage(opts?: {
     .wiki-article a.${CODE_REF_LINK_CLASS} { text-decoration: none; }
     .wiki-article a.${CODE_REF_LINK_CLASS}:hover code.${CODE_REF_CLASS} { border-color: var(--accent); color: var(--text-primary); }
     .wiki-article.${CODE_REFS_OFF_CLASS} .${CODE_REF_GROUP_CLASS} { display: none; }
-    .${HISTORIC_PILL_CLASS}, .${LINE_REFS_TOGGLE_CLASS} {
+    .${HISTORIC_PILL_CLASS}, .${MOVES_PILL_CLASS}, .${LINE_REFS_TOGGLE_CLASS} {
       font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; font-family: inherit;
       border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-secondary);
     }
-    .${HISTORIC_PILL_CLASS}:hover, .${LINE_REFS_TOGGLE_CLASS}:hover { color: var(--text-primary); border-color: var(--accent); }
+    .${HISTORIC_PILL_CLASS}:hover, .${MOVES_PILL_CLASS}:hover, .${LINE_REFS_TOGGLE_CLASS}:hover { color: var(--text-primary); border-color: var(--accent); }
+    /* The you pill is the one that names an action for the reader: accent rule. */
+    .${MOVES_PILL_CLASS}-you { border-color: var(--accent); color: var(--text-primary); font-weight: 600; }
+    /* Lane ages, added client-side by wiki-report-blocks.ts (never cached). */
+    .wiki-article .${MOVES_AGE_CLASS} {
+      display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px; white-space: nowrap;
+      font-size: 11px; border: 1px solid var(--status-warning); color: var(--text-soft);
+    }
     .${LINE_REFS_TOGGLE_CLASS}:not(.on) { text-decoration: line-through; }
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */

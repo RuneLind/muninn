@@ -97,6 +97,8 @@ export const COMPONENT_NAMES = [
   "Embed",
   "Fold",
   "Historic",
+  "NextMoves",
+  "Lane",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -152,6 +154,12 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // superseded them (free text, e.g. `melosys-console#270`), `note` says how.
   // Wiki-only: not in `COMPONENT_VOCABULARY_RULES`.
   Historic: ["since", "note"],
+  // Who has the next move: a `NextMoves` block holding `Lane` blocks, each a
+  // markdown list. `kind` is you | waiting | draft | blocked (see
+  // `normalizeLaneKind`), `who` the lane's label, `since` a `YYYY-MM-DD` the
+  // reader ages client-side. Wiki-only, like `Historic`.
+  NextMoves: [],
+  Lane: ["kind", "who", "since"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -166,6 +174,26 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
  *  and the SIGN flips between replays, at ~0.1–0.25 ms per delta either way.
  *  Measured 2026-09-07 — no direction is claimed, because none held up. */
 const MAX_COMPONENT_DEPTH = 3;
+
+/**
+ * Where a body sits relative to a `<NextMoves>` block: 0 — no block on the
+ * path; 1 — directly in a block's body, where its `<Lane>`s are; 2 — inside a
+ * lane, or anywhere deeper once a block is on the path.
+ *
+ * The `<NextMoves>`/`<Lane>` pair costs NO depth level, once per path: it is
+ * one structure spelled as two tags, and charging it two levels made
+ * `<Fold><Historic><NextMoves><Lane>` (and a `<Callout>` inside a lane under one
+ * `<Fold>`) degrade to plain text. A second `<NextMoves>` on the path is not a
+ * block at all (`tryParseComponent`), so the free pair cannot repeat and the cap
+ * still bounds the parse.
+ */
+type NextMovesNesting = 0 | 1 | 2;
+
+function childNesting(name: ComponentName, depth: number, nm: NextMovesNesting): { depth: number; nm: NextMovesNesting } {
+  if (name === "NextMoves" && nm === 0) return { depth, nm: 1 };
+  if (name === "Lane" && nm === 1) return { depth, nm: 2 };
+  return { depth: depth + 1, nm: nm === 0 ? 0 : 2 };
+}
 
 // Anchored to the start of a (trimmed) line and gated on a leading `<`, so the
 // common case (a line not starting with `<`) fails the match cheaply — the
@@ -277,6 +305,161 @@ export function historicLeadText(attrs: Record<string, string>): string {
   const since = attrs.since?.trim();
   const note = attrs.note?.trim();
   return `(historic${since ? `: ${since}` : ""}${note ? ` — ${note}` : ""})`;
+}
+
+// ── NextMoves / Lane ────────────────────────────────────────────────────────
+
+export const LANE_KINDS = ["you", "waiting", "draft", "blocked"] as const;
+export type LaneKind = (typeof LANE_KINDS)[number];
+
+/** The label a lane shows when it carries no `who`. English: `who` is where the
+ *  page's own language goes. */
+export const LANE_DEFAULT_LABEL: Record<LaneKind, string> = {
+  you: "You",
+  waiting: "Waiting",
+  draft: "Draft, not sent",
+  blocked: "Blocked",
+};
+
+/** A `Lane kind=` value. An unknown or missing kind reads as `waiting` (the move
+ *  is someone else's until the page says it is yours); `known: false` lets the
+ *  web renderer mark it. */
+export function normalizeLaneKind(kind: string | undefined): { kind: LaneKind; known: boolean } {
+  const k = kind?.trim().toLowerCase() ?? "";
+  return (LANE_KINDS as readonly string[]).includes(k)
+    ? { kind: k as LaneKind, known: true }
+    : { kind: "waiting", known: false };
+}
+
+/** One lane of a `NextMoves` block, as every surface reads it. */
+export interface NextMovesLane {
+  kind: LaneKind;
+  /** False when the source `kind` was unknown or missing (read as `waiting`). */
+  known: boolean;
+  /** `who`, trimmed, else the kind's default label. Unescaped. */
+  label: string;
+  /** `who` as authored (trimmed), or null when the lane has none. */
+  who: string | null;
+  /** `since` as a `YYYY-MM-DD` calendar day (an ISO value, or the house
+   *  `DD.MM.YYYY` normalised), else null. */
+  since: string | null;
+  /** `since` exactly as written (trimmed) when it is set but NOT a date — shown
+   *  as given, with no age, so a typo never silently disappears. Else null. */
+  sinceRaw: string | null;
+  /** The lane's OPEN steps, each one's text with any `[ ]` marker stripped, in
+   *  source order: every top-level list item that is not `[x]`, and every
+   *  unchecked top-level row of a `<Checklist>` directly in the lane. Prose, a
+   *  table or a callout is not a step — a lane holding only those counts 0 —
+   *  and neither is an empty item. */
+  items: string[];
+  children: Block[];
+}
+
+/**
+ * A `Lane since=` value: an ISO `YYYY-MM-DD` or the kode-wiki's house
+ * `DD.MM.YYYY` (one or two digits for day and month), as an ISO calendar day.
+ * Null for anything else, a day the calendar does not have included.
+ */
+export function parseLaneSince(value: string | undefined): string | null {
+  const raw = value?.trim() ?? "";
+  const nb = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(raw);
+  const iso = nb ? `${nb[3]}-${nb[2]!.padStart(2, "0")}-${nb[1]!.padStart(2, "0")}` : raw;
+  return isCalendarDay(iso) ? iso : null;
+}
+
+/** The open steps of a lane's body (see `NextMovesLane.items`). */
+function laneSteps(children: Block[]): string[] {
+  const items: string[] = [];
+  for (const b of children) {
+    if (b.type === "ul" || b.type === "ol") {
+      for (const item of b.items) {
+        const m = CHECKLIST_MARK_RE.exec(item);
+        if (!m) items.push(item);
+        else if (m[1] === " ") items.push(m[2]!);
+      }
+    } else if (b.type === "component" && b.name === "Checklist") {
+      for (const row of parseChecklist(b.children)) if (!row.checked) items.push(row.text);
+    }
+  }
+  // An empty item (`- [ ]` with nothing after it) is no step to take.
+  return items.filter((item) => item.trim() !== "");
+}
+
+export function laneFromAttrs(attrs: Record<string, string>, children: Block[]): NextMovesLane {
+  const { kind, known } = normalizeLaneKind(attrs.kind);
+  const who = attrs.who?.trim() || null;
+  const label = who ?? LANE_DEFAULT_LABEL[kind];
+  const since = parseLaneSince(attrs.since);
+  const sinceRaw = since === null && attrs.since?.trim() ? attrs.since.trim() : null;
+  return { kind, known, label, who, since, sinceRaw, items: laneSteps(children), children };
+}
+
+/** Does a lane list carry a task marker? The web renders such a list with the
+ *  checklist marks instead of a literal `[x]`. */
+export function isTaskList(list: ListBlock): boolean {
+  return list.items.some((item) => CHECKLIST_MARK_RE.test(item));
+}
+
+/** A lane task list's rows. A top-level item with no marker is a plain row (an
+ *  ordinary list item), not a todo: the `<Checklist>` rule for nested rows. */
+export function taskListRows(list: ListBlock): ChecklistRow[] {
+  return checklistRows(list, false);
+}
+
+/** The `Lane` blocks directly inside a `NextMoves` body, in source order. */
+export function nextMovesLanes(children: Block[]): NextMovesLane[] {
+  const out: NextMovesLane[] = [];
+  for (const b of children) {
+    if (b.type === "component" && b.name === "Lane") out.push(laneFromAttrs(b.attrs, b.children));
+  }
+  return out;
+}
+
+/**
+ * Is this block a SETTLED section — a `<Historic>` or a resolved `<Callout>`?
+ * A `<NextMoves>` inside one still renders, but its steps are history and count
+ * nowhere: not in the index (`src/wiki/next-moves.ts`), not in the reader's
+ * pills. The reader's twin is `SETTLED_SECTION_SELECTOR` in
+ * `wiki-report-blocks.ts`, matched against the markup the web renderer gives
+ * these two blocks.
+ */
+export function isSettledSection(b: Block): boolean {
+  return b.type === "component" && (b.name === "Historic" || (b.name === "Callout" && parseResolvedDate(b.attrs.resolved) !== null));
+}
+
+/** Every lane of every `<NextMoves>` block that COUNTS in `blocks`, at any
+ *  depth: not quoted in code (the parser's rule) and not inside a settled
+ *  section ({@link isSettledSection}). `found` is whether any block was seen at
+ *  all, counted or not. The one walk the index and the board read. */
+export function countedNextMovesLanes(blocks: Block[]): { lanes: NextMovesLane[]; found: boolean } {
+  const lanes: NextMovesLane[] = [];
+  let found = false;
+  const walk = (bs: Block[], settled: boolean) => {
+    for (const b of bs) {
+      if (b.type !== "component") continue;
+      if (b.name === "NextMoves") {
+        found = true;
+        if (!settled) lanes.push(...nextMovesLanes(b.children));
+        continue;
+      }
+      walk(b.children, settled || isSettledSection(b));
+    }
+  };
+  walk(blocks, false);
+  return { lanes, found };
+}
+
+/** `<label> — since <date>`: a lane's lead line on the surfaces with no grid
+ *  (Slack, Telegram, email, a stray `Lane` on the web). `formatLabel` gets the
+ *  label and returns it escaped/styled for the target; `escapeText` escapes the
+ *  `since` text, which is free text when it is not a date. */
+export function laneLeadText(
+  lane: Pick<NextMovesLane, "label" | "since" | "sinceRaw">,
+  formatLabel: (label: string) => string = (l) => l,
+  escapeText: (text: string) => string = (t) => t,
+): string {
+  const since = lane.since ?? lane.sinceRaw;
+  return `${formatLabel(lane.label)}${since ? ` — since ${escapeText(since)}` : ""}`;
 }
 
 /** Normalize an untrusted `tone` attr for Pill. */
@@ -1280,6 +1463,7 @@ function parseBlocksInner(
   protectedText: string,
   store: FenceStore,
   depth: number,
+  nm: NextMovesNesting = 0,
 ): Block[] {
   const lines = protectedText.split("\n");
   const blocks: Block[] = [];
@@ -1306,7 +1490,7 @@ function parseBlocksInner(
     const line = lines[i]!;
 
     if (depth < MAX_COMPONENT_DEPTH) {
-      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom);
+      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom, nm);
       if (comp) {
         flushText();
         blocks.push(comp.block);
@@ -1417,12 +1601,18 @@ function tryParseComponent(
   store: FenceStore,
   depth: number,
   noCloseFrom: Map<string, number>,
+  nm: NextMovesNesting,
 ): { block: Block; next: number } | null {
   const m = lines[i]!.trim().match(COMPONENT_OPEN_RE);
   if (!m) return null;
 
   const name = m[1]!;
   if (!COMPONENT_NAME_SET.has(name)) return null; // unknown tag → not a component
+  // A `<NextMoves>` inside another, at any depth, is not a block: its tag lines
+  // stay literal text and its lanes render as stray lanes. Two levels of lanes
+  // would put inner lanes in the outer block's count on one surface and not on
+  // another; one block per path keeps the reader's pills and the index equal.
+  if (name === "NextMoves" && nm !== 0) return null;
   const cname = name as ComponentName;
   const attrs = parseAttrs(m[2]!, cname);
   const selfClosing = m[3] === "/";
@@ -1440,7 +1630,8 @@ function tryParseComponent(
   if (inlineClose !== -1) {
     if (rest.slice(inlineClose + closeTag.length).trim() !== "") return null; // trailing junk
     const content = rest.slice(0, inlineClose);
-    const children = parseBlocksInner(content, store, depth + 1);
+    const inner = childNesting(cname, depth, nm);
+    const children = parseBlocksInner(content, store, inner.depth, inner.nm);
     return { block: { type: "component", name: cname, attrs, children }, next: i + 1 };
   }
 
@@ -1481,7 +1672,8 @@ function tryParseComponent(
     return null; // unclosed → fall through as text
   }
 
-  const children = parseBlocksInner(body.join("\n"), store, depth + 1);
+  const inner = childNesting(cname, depth, nm);
+  const children = parseBlocksInner(body.join("\n"), store, inner.depth, inner.nm);
   return { block: { type: "component", name: cname, attrs, children }, next: j + 1 };
 }
 

@@ -15,8 +15,13 @@ import {
   firstCodeBlock,
   diffLineClass,
   parseChecklist,
+  nextMovesLanes,
+  laneFromAttrs,
+  laneLeadText,
+  isTaskList,
+  taskListRows,
 } from "../format/markdown-ast.ts";
-import type { Block, ChecklistRow, FactVerdict } from "../format/markdown-ast.ts";
+import type { Block, ChecklistRow, FactVerdict, NextMovesLane } from "../format/markdown-ast.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
@@ -235,6 +240,47 @@ function checklistHtml(rows: ChecklistRow[], ordered = false, start = 1, values?
   return `<ol class="checklist check-ol"${start !== 1 ? ` start="${start}"` : ""}>${lis}</ol>`;
 }
 
+/** One `<Lane>` card of a `NextMoves` grid. `data-count` is the lane's OPEN
+ *  step count (`NextMovesLane.items`), which the reader's header pills sum, so
+ *  the pill and the index-time count come from one function. `data-since` stays
+ *  an ISO date: the reader turns it into an age client-side, so cached HTML
+ *  never carries a stale one. A `since` that is not a date renders as written,
+ *  with no `data-since` and so no age. A list carrying `[x]`/`[ ]` markers
+ *  renders with the checklist marks. */
+function laneHtml(lane: NextMovesLane): string {
+  const since = lane.since ? ` data-since="${lane.since}"` : "";
+  const unknown = lane.known ? "" : " nm-kind-unknown";
+  // The authored label, for the reader's header pill; absent ⇒ the pill's
+  // English default.
+  const who = lane.who ? ` data-who="${escapeHtml(lane.who)}"` : "";
+  const sinceHtml = lane.since
+    ? `<span class="nm-since"${since}>${lane.since}</span>`
+    : lane.sinceRaw
+      ? `<span class="nm-since nm-since-raw">${escapeHtml(lane.sinceRaw)}</span>`
+      : "";
+  const body = lane.children
+    .map((b) =>
+      (b.type === "ul" || b.type === "ol") && isTaskList(b)
+        ? checklistHtml(taskListRows(b), b.type === "ol", b.type === "ol" ? b.start : 1, b.type === "ol" ? b.values : undefined)
+        : renderBlocks([b], webRenderer),
+    )
+    .join("\n");
+  return (
+    `<div class="nm-lane nm-${lane.kind}${unknown}" data-kind="${lane.kind}" data-count="${lane.items.length}"${since}${who}>` +
+    `<div class="nm-head"><span class="nm-who">${escapeHtml(lane.label)}</span>` +
+    `<span class="nm-count">${lane.items.length}</span>${sinceHtml}</div>` +
+    `<div class="nm-body">${body}</div></div>`
+  );
+}
+
+/** The grid's column class for `n` card lanes: one row of up to three, and
+ *  four as 2×2, so no count leaves a lone card on a row of its own at the
+ *  reader's width. Five or more fall back to auto-fit. Narrow containers go to
+ *  one column (`component-styles.ts`). */
+function laneColsClass(n: number): string {
+  return n === 4 ? "nm-cols-2" : n <= 3 ? `nm-cols-${n}` : "nm-cols-auto";
+}
+
 const webRenderer: BlockRenderer = {
   code_block(block) {
     return codeFenceHtml(block.lang, block.code);
@@ -439,6 +485,32 @@ const webRenderer: BlockRenderer = {
           (note ? `${since ? " ·" : ""} <span class="historic-note">${escapeHtml(note)}</span>` : "") +
           `</div>`;
         return `<section class="historic">${stamp}<div class="historic-body">${children}</div></section>`;
+      }
+      case "NextMoves": {
+        // Who has the next move: one card per `<Lane>` in a grid. A `blocked`
+        // lane is a full-width, quieter strip below the cards: it is the one
+        // lane nobody can act on, and taking it out of the grid keeps a
+        // four-lane block from leaving one card alone on a row.
+        // No lane ⇒ the body renders as plain markdown, with no grid.
+        const lanes = nextMovesLanes(rawChildren);
+        if (lanes.length === 0) return children;
+        // Anything in the block that is not a lane (an intro line) sits above the grid.
+        const rest = rawChildren.filter(
+          (b) => !(b.type === "component" && b.name === "Lane") && !isBlankTextBlock(b),
+        );
+        const intro = rest.length ? `<div class="nm-intro">${renderBlocks(rest, webRenderer)}</div>` : "";
+        const cards = lanes.filter((l) => l.kind !== "blocked");
+        const strips = lanes.filter((l) => l.kind === "blocked");
+        const grid = cards.length
+          ? `<div class="nm-grid ${laneColsClass(cards.length)}">${cards.map(laneHtml).join("")}</div>`
+          : "";
+        const stripHtml = strips.length ? `<div class="nm-strips">${strips.map(laneHtml).join("")}</div>` : "";
+        return `<section class="next-moves">${intro}${grid}${stripHtml}</section>`;
+      }
+      case "Lane": {
+        // A lane outside `<NextMoves>` renders plain: its label line, then its body.
+        const lane = laneFromAttrs(attrs, rawChildren);
+        return `<p><strong>${laneLeadText(lane, escapeHtml, escapeHtml)}</strong></p>${children}`;
       }
       case "FactCheck": {
         // Collapsed by DEFAULT — the per-claim evidence is reachable from the

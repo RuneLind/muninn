@@ -37,7 +37,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { HISTORIC_PILL_CLASS, LINE_REFS_TOGGLE_CLASS } from "../src/dashboard/views/components/wiki-report-blocks.ts";
+import {
+  HISTORIC_PILL_CLASS,
+  LINE_REFS_TOGGLE_CLASS,
+  MOVES_PILL_CLASS,
+} from "../src/dashboard/views/components/wiki-report-blocks.ts";
 
 const PORT = e2ePort("wiki-nais-read");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -96,6 +100,18 @@ const PAGE = [
   "Den gamle flyten.",
   "",
   "</Historic>",
+  "",
+  // A NextMoves block: the lane pills render (they carry the lane's own `who`),
+  // while the /wiki ✋ chip and row flag — personal, "waiting on YOU" — do not.
+  "<NextMoves>",
+  "",
+  '<Lane kind="you" who="Fag">',
+  "",
+  "- **Avklar regelen.**",
+  "",
+  "</Lane>",
+  "",
+  "</NextMoves>",
   "",
 ].join("\n");
 const SECOND = ["---", "title: Andre del", "series: felles", "---", "", "# Andre del", "", "Del to av serien.", ""].join("\n");
@@ -235,6 +251,8 @@ const READER_CONTROLS = [
   // historic pill (scrolls within the page).
   `.${LINE_REFS_TOGGLE_CLASS}`,
   `.${HISTORIC_PILL_CLASS}`,
+  // The NextMoves lane pills (scroll within the page).
+  `.${MOVES_PILL_CLASS}`,
   // Out to the tracker.
   'a[href^="https://"][target="_blank"]',
 ];
@@ -296,6 +314,13 @@ for (const scheme of ["light", "dark"] as const) {
     await expect(page.locator("[data-prov-toggle]")).toBeVisible();
     await expect(page.locator(`.${LINE_REFS_TOGGLE_CLASS}`)).toBeVisible();
     await expect(page.locator(`.${HISTORIC_PILL_CLASS}`)).toBeVisible();
+    await expect(page.locator(".wiki-article .nm-lane.nm-you")).toBeVisible();
+    await expect(page.locator(`.${MOVES_PILL_CLASS}-you`)).toHaveText("✋ Fag · 1");
+    // The personal ✋ surfaces are absent on a shared instance: the page's row
+    // in the rail carries no flag, and the status row offers no chip.
+    await expect(page.locator(`.wiki-list-item[data-relpath="${PAGE_REL}"]`)).toBeVisible();
+    await expect(page.locator(".wiki-moves-flag")).toHaveCount(0);
+    await expect(page.locator("#statusChips [data-waiting]")).toHaveCount(0);
     expect(await unexpectedControls(page)).toEqual([]);
     expect(await apiLinksOutsideSlice(page)).toEqual([]);
     // Open the provenance chain: its rows carry controls of their own.

@@ -254,6 +254,7 @@ import {
   folderCounts,
   folderLabelOf,
   followupCount,
+  waitingCount,
   hasTypedHubs,
   hubTypeList,
   isRecencySort,
@@ -651,6 +652,7 @@ const filters: WikiFilters = {
   tag: "",
   status: "",
   followups: "",
+  waiting: "",
   project: "",
   jira: "",
 };
@@ -930,6 +932,26 @@ function followupFlagHtml(p: WikiListing): string {
     : "";
 }
 
+/** Are the ✋ "waiting on you" chip and row flag shown? Not on a shared
+ *  instance (the nais read slice, `wikiToolsFlag()` false): a `you` lane is the
+ *  AUTHOR's next step, and on a pod every colleague reading the wiki would be
+ *  told it waits on them. The page's own lane pills still render there — they
+ *  carry the lane's `who` label, the author's perspective. */
+function movesPersonal(): boolean {
+  return wikiToolsFlag();
+}
+
+/** The ✋ mark on a rail row whose page has a step waiting on the reader. An
+ *  inline span INSIDE `.wiki-list-title` (the `▸` rule): the row's six flex
+ *  items are each budgeted, and a seventh would cost the title its floor.
+ *  `aria-hidden`: the row's title attribute is what a screen reader gets. */
+function movesFlagHtml(p: WikiListing): string {
+  const n = p.movesYou ?? 0;
+  return n > 0 && movesPersonal()
+    ? `<span class="wiki-moves-flag" aria-hidden="true" title="${n} step${n === 1 ? "" : "s"} waiting on you">✋</span>`
+    : "";
+}
+
 /** The domain (All/AI/Life) chip row. The three chips are static markup, so this
  *  only owns the row's `display` and which chip is active — the `renderStatusChips`
  *  shape, one level simpler because there is nothing to build.
@@ -965,17 +987,18 @@ function renderStatusChips(): void {
     row.innerHTML = "";
     row.style.display = "none";
   };
-  if (!statusFacetVisible(allPages)) {
+  if (!statusFacetVisible(allPages, movesPersonal())) {
     hide();
     return;
   }
   const counts = statusCounts(railPages(), filters.domain, filters.type);
   const open = followupCount(railPages(), filters.domain, filters.type);
+  const waiting = movesPersonal() ? waitingCount(railPages(), filters.domain, filters.type) : 0;
   // The whole-wiki gate above says the facet EXISTS here; this says whether it has
   // anything to offer in the CURRENT domain/type scope. Without it a type switch
   // could leave a row holding nothing but the inert "All status" chip. An active
   // filter keeps the row up regardless — it is the only way back out of it.
-  if (!Object.keys(counts).length && !open && !filters.status && !filters.followups) {
+  if (!Object.keys(counts).length && !open && !waiting && !filters.status && !filters.followups && !filters.waiting) {
     hide();
     return;
   }
@@ -992,6 +1015,9 @@ function renderStatusChips(): void {
   });
   if (open || filters.followups) {
     html += `<button class="wiki-chip${filters.followups ? " active" : ""}" data-followups="open" title="Only pages with open follow-ups">⚑ has follow-ups ${open}</button>`;
+  }
+  if (waiting || filters.waiting) {
+    html += `<button class="wiki-chip${filters.waiting ? " active" : ""}" data-waiting="you" title="Only pages with a step waiting on you (a NextMoves you lane)">✋ waiting on you ${waiting}</button>`;
   }
   row.innerHTML = html;
   row.style.display = "";
@@ -1197,6 +1223,7 @@ function activeFilterCount(): number {
   if (filters.tag) n++;
   if (filters.status) n++;
   if (filters.followups) n++;
+  if (filters.waiting) n++;
   if (filters.project) n++;
   if (filters.jira) n++;
   return n;
@@ -1740,11 +1767,13 @@ function renderList(): void {
           `<div class="wiki-list-title has-issues" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
           `<span class="wiki-list-title-text">` +
           (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
+          movesFlagHtml(p) +
           `${esc(displayTitleOf(p))}</span>` +
           pills +
           `</div>`
         : `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
           (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
+          movesFlagHtml(p) +
           `${esc(displayTitleOf(p))}</div>`) +
       // The group CHIP: what is folded under this row, and the control that
       // opens it. A click here toggles; a click anywhere else on the row opens
@@ -4606,6 +4635,8 @@ document.getElementById("statusChips")!.addEventListener("click", (e) => {
   if (!chip) return;
   if (chip.hasAttribute("data-followups")) {
     filters.followups = filters.followups ? "" : "open";
+  } else if (chip.hasAttribute("data-waiting")) {
+    filters.waiting = filters.waiting ? "" : "you";
   } else {
     const status = chip.getAttribute("data-status") || "";
     // Re-clicking the active chip clears it (the tag-row convention); "All status"

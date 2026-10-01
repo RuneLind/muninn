@@ -106,6 +106,33 @@ describe("planRecordFromContent", () => {
     expect(rec.title).toBe("some-plan");
   });
 
+  test("waiting on you is derived from the body's NextMoves you lane; owner_actions is ignored", () => {
+    const body = [
+      "---",
+      "plan_status: shipped",
+      "owner_actions: open",
+      "---",
+      "",
+      "<NextMoves>",
+      "",
+      '<Lane kind="you">',
+      "",
+      "1. **Run the backfill.** On a quiet day.",
+      "2. **Look at /summaries.**",
+      "",
+      "</Lane>",
+      "",
+      "</NextMoves>",
+    ].join("\n");
+    const rec = planRecordFromContent("plans/x.mdx", body, 0, [])!;
+    expect(rec.movesYou).toBe(2);
+    expect(rec.movesYouSteps).toEqual(["Run the backfill.", "Look at /summaries."]);
+    // A legacy flag with no lane is not "waiting".
+    const legacy = planRecordFromContent("plans/y.mdx", "---\nplan_status: ready\nowner_actions: open\n---\n", 0, [])!;
+    expect(legacy.movesYou).toBe(0);
+    expect(legacy.movesYouSteps).toEqual([]);
+  });
+
   test("followups is open ONLY for the literal value", () => {
     const mk = (v: string) =>
       planRecordFromContent("plans/x.md", `---\nplan_status: shipped\nfollowups: ${v}\n---\n`, 0, [])!;

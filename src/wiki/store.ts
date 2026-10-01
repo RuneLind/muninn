@@ -38,6 +38,7 @@ import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { normalizeRelPath } from "./rel-path.ts";
+import { extractNextMoves } from "./next-moves.ts";
 import {
   inferIssues,
   parseTrackersConfig,
@@ -709,6 +710,14 @@ export interface WikiPageMeta {
   /** Whether the plan has open follow-ups. Absent ⇒ consumers treat it as `none`;
    *  an unrecognized value is dropped at parse time (also ⇒ absent). */
   followups?: PlanFollowups;
+  /**
+   * WAITING ON YOU — the number of open steps in the page body's
+   * `<NextMoves>` `you` lanes (`src/wiki/next-moves.ts`). DERIVED, never
+   * authored: the steps live once, in the body, and there is no frontmatter
+   * flag (a legacy `owner_actions:` key is ignored). Absent, not 0, on a page
+   * with no such item. Rides the listing (the `/wiki` ✋ chip and row flag).
+   */
+  movesYou?: number;
   /**
    * SERIES — the piece of work this page belongs to, from the frontmatter key
    * `series:`. One authored slug per member, spread over folders and stems: the
@@ -3351,6 +3360,9 @@ export async function buildWikiIndex(
         // The retired bit. Only `signal: none` culls; see `readCull`.
         ...readCull(fm.signal, fm["signal-reason"]),
       };
+      // Waiting on you, from the body's `<NextMoves>` you lanes.
+      const movesYou = extractNextMoves(content)?.counts.you ?? 0;
+      if (movesYou > 0) meta.movesYou = movesYou;
       // Issue refs, where the body is already in hand (the `pagePrRefs`
       // precedent). The TITLE rule reads the authored `title:` line only, never
       // the stem fallback `titleFromFrontmatter` answers with.

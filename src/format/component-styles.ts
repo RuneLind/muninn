@@ -138,6 +138,51 @@ export function componentBlockCss(scope: string): string {
     ${scope} .historic:focus-within .historic-body { color: inherit; }
     ${scope} .historic:hover .historic-body :is(h1, h2, h3, h4, h5, h6),
     ${scope} .historic:focus-within .historic-body :is(h1, h2, h3, h4, h5, h6) { color: var(--text-primary); }
+    /* NextMoves: one card per lane. The renderer picks the column count from
+       the number of cards (nm-cols-N: up to three in a row, four as 2×2), so
+       no count leaves a card alone on a row; a narrow container goes to one
+       column. A blocked lane is a full-width strip below (nm-strips).
+       Label text on the you lane is --accent-light: --accent itself measures
+       under 4.5:1 as text on the dark panel. */
+    ${scope} .next-moves { margin: 1.4rem 0; container-type: inline-size; }
+    ${scope} .nm-intro { margin-bottom: 0.6rem; }
+    ${scope} .nm-grid { display: grid; gap: 0.75rem; }
+    ${scope} .nm-cols-1 { grid-template-columns: minmax(0, 1fr); }
+    ${scope} .nm-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    ${scope} .nm-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    ${scope} .nm-cols-auto { grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+    @container (max-width: 520px) {
+      ${scope} .nm-grid { grid-template-columns: minmax(0, 1fr); }
+    }
+    ${scope} .nm-strips { display: grid; gap: 0.5rem; margin-top: 0.75rem; }
+    ${scope} .nm-strips .nm-lane {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.85rem;
+      padding: 0.4rem 0.85rem; background: transparent; border-style: dashed;
+    }
+    ${scope} .nm-strips .nm-head { margin-bottom: 0; }
+    ${scope} .nm-strips .nm-body { flex: 1 1 16rem; min-width: 0; }
+    ${scope} .nm-since-raw { font-style: italic; }
+    ${scope} .nm-lane {
+      min-width: 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 8px;
+      padding: 0.6rem 0.85rem;
+      background: var(--bg-surface);
+    }
+    ${scope} .nm-lane.nm-you {
+      border-left: 4px solid var(--accent);
+      background: color-mix(in srgb, var(--accent) 10%, var(--bg-surface));
+    }
+    ${scope} .nm-head {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.45rem;
+      font-size: 0.85em; color: var(--text-secondary); margin-bottom: 0.35rem;
+    }
+    ${scope} .nm-who { font-weight: 700; }
+    ${scope} .nm-you .nm-who { color: var(--accent-light); }
+    ${scope} .nm-count, ${scope} .nm-since { color: var(--text-soft); font-variant-numeric: tabular-nums; }
+    ${scope} .nm-body > :first-child { margin-top: 0; }
+    ${scope} .nm-body > :last-child { margin-bottom: 0; }
+    ${scope} .nm-body > ul, ${scope} .nm-body > ol { margin: 0; padding-left: 1.2rem; }
     ${scope} .diagram {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

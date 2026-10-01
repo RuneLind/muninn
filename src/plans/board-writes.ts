@@ -809,6 +809,8 @@ function parseCard(raw: unknown): BoardCard | null {
     relPath,
     hash,
     followupsOpen: c.followupsOpen === true,
+    movesYou: typeof c.movesYou === "number" && Number.isFinite(c.movesYou) && c.movesYou > 0 ? c.movesYou : 0,
+    movesYouSteps: strings(c.movesYouSteps) ?? [],
     wikiUrl,
     family,
     familySource,

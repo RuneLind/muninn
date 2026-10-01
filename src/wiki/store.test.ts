@@ -3888,6 +3888,43 @@ describe("buildWikiIndex — series", () => {
       ["---", `title: ${name}`, ...fmLines, "---", "", "Plan body."].join("\n"),
     );
 
+  test("derives movesYou from the body's NextMoves you lanes; absent when none", async () => {
+    await Bun.write(
+      path.join(root, "plans/Waits.md"),
+      [
+        "---",
+        "title: Waits",
+        "---",
+        "",
+        "<NextMoves>",
+        "",
+        '<Lane kind="you">',
+        "",
+        "- one",
+        "- two",
+        "",
+        "</Lane>",
+        "",
+        '<Lane kind="waiting">',
+        "",
+        "- not mine",
+        "",
+        "</Lane>",
+        "",
+        "</NextMoves>",
+      ].join("\n"),
+    );
+    await Bun.write(
+      path.join(root, "plans/Quoted.md"),
+      ["---", "title: Quoted", "owner_actions: open", "---", "", "```mdx", "<NextMoves>", '<Lane kind="you">', "- x", "</Lane>", "</NextMoves>", "```"].join("\n"),
+    );
+    await page("Plain", []);
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("Waits")!.movesYou).toBe(2);
+    expect(index.resolve("Quoted")!.movesYou).toBeUndefined();
+    expect(index.resolve("Plain")!.movesYou).toBeUndefined();
+  });
+
   test("reads `series:` and `series_label:` off the frontmatter", async () => {
     await page("Head", ["series: wiki-provenance", "series_label: Wiki provenance"]);
     await page("Member", ["series: wiki-provenance"]);

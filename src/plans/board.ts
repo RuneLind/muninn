@@ -283,6 +283,8 @@ function buildCard(
     relPath: plan.relPath,
     hash: plan.hash,
     followupsOpen: plan.followupsOpen,
+    movesYou: plan.movesYou,
+    movesYouSteps: plan.movesYouSteps,
     wikiUrl: planWikiUrl(plan.relPath),
     family: fam.family ?? UNKNOWN_REPO,
     familySource: fam.familySource,

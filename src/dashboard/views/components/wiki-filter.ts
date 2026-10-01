@@ -139,6 +139,9 @@ export interface WikiListing {
   /** `"open"` | `"none"` — whether the plan has open follow-ups. Absent ⇒ treat as
    *  `none` (both an undeclared field and a rejected value arrive absent). */
   followups?: string;
+  /** Open steps in the body's `<NextMoves>` `you` lanes (the ✋ flag and the
+   *  "waiting on you" chip). Derived server-side; absent ⇒ 0. */
+  movesYou?: number;
   /** One line of free prose qualifying the status. Unvalidated by nature; absent
    *  when empty or undeclared. Arrives **unescaped** — the first renderer of this
    *  field owns escaping it at its own sink. */
@@ -234,6 +237,9 @@ export interface WikiFilters {
   /** `"open"` (the ⚑ toggle) or "" for all. Compared against the page's
    *  `followups` with an ABSENT value read as `"none"`, per the field contract. */
   followups: string;
+  /** `"you"` (the ✋ toggle) or "" for all: only pages whose `<NextMoves>` block
+   *  has a `you` lane item. A third axis beside status and follow-ups. */
+  waiting: string;
   /** Exact `project` value, "" for all. The only facet that is also URL state
    *  (`?project=`), so a narrowed reader can share what they are looking at —
    *  see `resolveProjectParam` for what happens to a value this wiki doesn't
@@ -1163,6 +1169,7 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
     if (filters.tag && p.tags.indexOf(filters.tag) === -1) return false;
     if (filters.status && p.plan_status !== filters.status) return false;
     if (filters.followups && pageFollowups(p) !== filters.followups) return false;
+    if (filters.waiting && !((p.movesYou ?? 0) > 0)) return false;
     // Exact, not prefix: the store already answered in the canonical spelling, so
     // `netgate-monitoring` must never also select a hypothetical
     // `netgate-monitoring-v2`.
@@ -1402,12 +1409,17 @@ export function hasPlanStatus(pages: WikiListing[]): boolean {
  * them — the flags are correct, the missing toggle was the bug. So the facet opens
  * on EITHER axis being in use.
  *
+ * `movesPersonal` false (a shared instance, `MUNINN_PROFILE=nais`) takes the
+ * ✋ waiting-on-you axis out: "you" there is whoever reads, not the author.
+ *
  * Deliberately unscoped (whole wiki, not the active domain/type): this decides
  * whether the row exists for this wiki, while `renderStatusChips` separately hides
  * an empty row for the current scope.
  */
-export function statusFacetVisible(pages: WikiListing[]): boolean {
-  return hasPlanStatus(pages) || followupCount(pages, "", "") > 0;
+export function statusFacetVisible(pages: WikiListing[], movesPersonal = true): boolean {
+  return (
+    hasPlanStatus(pages) || followupCount(pages, "", "") > 0 || (movesPersonal && waitingCount(pages, "", "") > 0)
+  );
 }
 
 /**
@@ -1802,6 +1814,18 @@ export function followupCount(pages: WikiListing[], domain: string, type: string
     if (domain && p.domain !== domain) return;
     if (type && p.type !== type) return;
     if (pageFollowups(p) === "open") n++;
+  });
+  return n;
+}
+
+/** How many pages have a step waiting on the reader (`movesYou > 0`) — the ✋
+ *  chip's count. Scoped like `followupCount`, and independent of both facets. */
+export function waitingCount(pages: WikiListing[], domain: string, type: string): number {
+  let n = 0;
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if ((p.movesYou ?? 0) > 0) n++;
   });
   return n;
 }

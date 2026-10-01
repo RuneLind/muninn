@@ -362,6 +362,15 @@ const PLAN_BOARD_STYLES = `
     .pb-fam { font-size: 10.5px; color: var(--pb-muted); background: var(--pb-surface-3); border-radius: 3px; padding: 1px 6px; }
     .pb-fam-soft { color: var(--pb-muted); font-style: italic; }
     .pb-flag { font-size: 11px; color: var(--pb-followups); font-weight: 600; }
+    /* Waiting on you: the ✋ badge and the you-lane step list on a card. */
+    .pb-hand { font-size: 10.5px; font-weight: 700; color: var(--pb-accent-ink); background: var(--pb-accent-wash); border-radius: 3px; padding: 1px 5px; flex: none; }
+    .pb-steps { margin: 5px 0 0; padding-left: 18px; font-size: 11.5px; color: var(--pb-ink-2); text-align: left; }
+    .pb-steps li { margin: 1px 0; }
+    .pb-steps .pb-steps-more { list-style: none; margin-left: -18px; color: var(--pb-muted); }
+    /* The toggle's count inherits the button's own ink: the shared .pb-c
+       (--pb-faint) measured 2.83:1 light / 3.05:1 dark on it. */
+    .pb-chip.pb-waiting-toggle .pb-c { color: inherit; }
+    .pb-scope-note { font-size: 11px; color: var(--pb-ink-2); }
     .pb-est { font-family: var(--pb-mono); font-size: 11.5px; color: var(--pb-ink-2); }
     .pb-est-guess, .pb-prs-guess { color: var(--pb-muted); font-style: italic; }
     .pb-prs { font-family: var(--pb-mono); font-size: 11.5px; }

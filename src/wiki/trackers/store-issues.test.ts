@@ -114,6 +114,7 @@ const NO_FILTERS: WikiFilters = {
   tag: "",
   status: "",
   followups: "",
+  waiting: "",
   project: "",
   jira: "",
 };
