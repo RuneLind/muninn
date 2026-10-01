@@ -193,6 +193,30 @@ describe("check 1 — draft-lane-stale", () => {
         expect(line).toBe(want === "exact" ? real : undefined);
       });
     }
+
+    // A lane the parser builds with no opener line of its own cancels out a later
+    // unclosed decoy in the count; only the attributes tell the two apart.
+    const fm = ["---", "title: t", "---", ""];
+    const realLane = ['<Lane kind="draft" since="2026-09-01">', "", "- [ ] send it", "", "</Lane>"];
+    const strayThenDecoy = (strayAttrs: string, decoy: string) => [
+      ...fm, `<Fold><Lane ${strayAttrs}>- a</Lane></Fold>`, "", "<NextMoves>", "", ...realLane, "", "</NextMoves>", "", decoy, "",
+    ];
+    const attrRows: [string, string[]][] = [
+      ["a one-line <NextMoves> lane, then an unclosed decoy", [
+        ...fm, '<NextMoves><Lane kind="draft" since="2026-01-01">- send it</Lane></NextMoves>', "", '<Lane kind="you">', "",
+      ]],
+      ["a one-line stray lane in a <Fold>, the real lane, then an unclosed decoy", strayThenDecoy('kind="you" since="2026-01-01"', '<Lane kind="you">')],
+      // the stray lane differs from the real one in a single attribute; the decoy is the real lane's twin
+      ["… the stray lane differs only in who", strayThenDecoy('kind="draft" who="Ola" since="2026-09-01"', realLane[0]!)],
+      ["… the stray lane differs only in since", strayThenDecoy('kind="draft" since="2026-01-01"', realLane[0]!)],
+    ];
+    for (const [what, lines] of attrRows) {
+      test(`${what} → absent`, () => {
+        const f = only(run("plans/a.mdx", lines.join("\n")), "draft-lane-stale");
+        expect(f).toHaveLength(1);
+        expect(f[0]!.line).toBeUndefined();
+      });
+    }
   });
 
   test("the line names the stale lane's own opener, past a quoted lane and an earlier lane", () => {
@@ -295,6 +319,8 @@ describe("check 4 — case-table", () => {
     [["MEL-1", "looks ok to me but untested"], false],
     [["MEL-1", "Ingen vedtak i Melosys; ikke kandidat"], false], // the status is not the cell's lead
     [["MEL-1", "kandidater"], false],
+    [["MEL-1", "Kandidat 18.09 etter 8173"], false], // a date tail must be the whole tail
+    [["MEL-1", "okai etter x"], false], // a phrase is a whole word
     [["MEL-436385", "1658", "2024"], false], // no status cell
     [["MEL-436385", "Okay then"], false],
     [["Sak MEL-1", "ok"], false], // the id must open the cell

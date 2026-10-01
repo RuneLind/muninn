@@ -1608,7 +1608,8 @@ live in the module's docblock; the parts a caller can get wrong:
 - **`draft-lane-stale` counts what `countedNextMovesLanes` counts** (lanes
   directly inside an unsettled `<NextMoves>`), with ≥ 1 open item. Its `line`
   is exact or absent: the line scan maps onto the parser's lanes only when
-  candidates and lanes match one-to-one, attributes included.
+  candidates and lanes match one-to-one: the same count, and each
+  candidate's `kind`/`who`/`since` equal to the parser lane's at its index.
 - **`case-table` needs a status CELL**: a later cell whose leading clause is a
   `CASE_STATUS_PHRASES` entry, alone or followed by a date or a
   `CASE_STATUS_TAIL_WORDS` word. A first-cell wikilink is read by its target.

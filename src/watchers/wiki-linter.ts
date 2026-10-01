@@ -148,7 +148,7 @@ export async function checkWikiLinter(
   // reaches the alert, its count or its sentence.
   const alerting = findings.filter((f) => f.severity !== "info");
   if (alerting.length === 0) {
-    log.info("Wiki-linter: no findings for \"{name}\" — wiki is clean", {
+    log.info("Wiki-linter: no actionable findings for \"{name}\" ({info} info)", {
       botName: name,
       name,
       info: findings.length,

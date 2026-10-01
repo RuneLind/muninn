@@ -7,6 +7,7 @@ import { __resetWikiCacheForTest } from "../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest } from "../wiki/readonly.ts";
 import type { Watcher } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 
 /**
  * Checker guards + alert shape. Uses real temp-dir wikis via the store (the
@@ -156,6 +157,25 @@ describe("checkWikiLinter", () => {
     test("a wiki whose only finding is info raises no alert", async () => {
       await longPlan();
       expect(await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed })).toEqual([]);
+    });
+
+    test("a wiki whose only finding is info does not log as clean", async () => {
+      await longPlan();
+      const records: LogRecord[] = [];
+      await configure({
+        sinks: { capture: (r: LogRecord) => records.push(r) },
+        loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+        reset: true,
+      });
+      try {
+        await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed });
+      } finally {
+        await reset();
+      }
+      const text = records.map((r) => r.message.map((m) => String(m)).join("")).join("\n");
+      expect(text).not.toContain("clean");
+      expect(text).toContain("no actionable findings");
+      expect(text).toContain("1 info");
     });
 
     test("beside a warning, the info finding is left out of the sentence", async () => {

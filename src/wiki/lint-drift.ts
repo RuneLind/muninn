@@ -34,6 +34,7 @@
 
 import {
   countedNextMovesLanes,
+  parseAttrs,
   parseBlocks,
   type Block,
   type ListChild,
@@ -229,19 +230,24 @@ export interface DriftContext {
  *  one `</Lane>` that ends the line. Group 1 is the attribute run. */
 const LANE_OPENER_RE = /^<Lane((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*>(.*)$/;
 
+/** The attributes that tell lanes apart, as the parser reads them. */
+const LANE_KEY_ATTRS = ["kind", "who", "since"] as const;
+
 /**
  * The 1-based source line of every `Lane` component the parser produced, in
- * source order, or null when that mapping is not one-to-one. Candidates are the
- * unfenced lines after the frontmatter that open a lane the way the parser
- * would ({@link LANE_OPENER_RE}, the reader's own fence rule), so every lane
- * the parser built has its opener among them; a candidate the parser read as
- * text instead (an opener never closed) makes the counts differ, and then no
- * lane gets a line.
+ * source order, or null when that mapping is not provably one-to-one.
+ * Candidates are the unfenced lines after the frontmatter that open a lane the
+ * way the parser would ({@link LANE_OPENER_RE}, the reader's own fence rule).
+ * A lane can have no such line (one opened mid-line, `<Fold><Lane …>`) and a
+ * candidate can be text to the parser (an opener never closed), so the two
+ * can cancel out in a count: a line is given only when the counts match AND
+ * each candidate's `kind`/`who`/`since` equal those of the lane at its index.
  */
-function laneLines(content: string, laneCount: number): number[] | null {
+function laneLines(content: string, lanes: readonly Block[]): number[] | null {
   const lines = content.split("\n");
   const states = fenceLineStates(lines, "literal");
   const found: number[] = [];
+  const attrs: Record<string, string>[] = [];
   for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
     if (states[i] !== "outside") continue;
     const m = LANE_OPENER_RE.exec(lines[i]!.trim());
@@ -249,8 +255,12 @@ function laneLines(content: string, laneCount: number): number[] | null {
     const rest = m[2]!;
     if (rest.trim() !== "" && !(rest.endsWith("</Lane>") && rest.indexOf("</Lane>") === rest.length - 7)) continue;
     found.push(i + 1);
+    attrs.push(parseAttrs(m[1]!, "Lane"));
   }
-  return found.length === laneCount ? found : null;
+  if (found.length !== lanes.length) return null;
+  const same = lanes.every((b, k) =>
+    b.type === "component" && LANE_KEY_ATTRS.every((key) => b.attrs[key] === attrs[k]![key]));
+  return same ? found : null;
 }
 
 /** The four drift checks over one page. Pure given its inputs. */
@@ -274,7 +284,7 @@ export function checkDrift(page: WikiPageMeta, content: string, ctx: DriftContex
   for (const lane of countedNextMovesLanes(blocks).lanes) {
     const age = lane.since === null ? 0 : daysBetween(lane.since, ctx.today);
     if (lane.kind !== "draft" || lane.items.length === 0 || age <= DRAFT_LANE_MAX_DAYS) continue;
-    lineOf ??= laneLines(content, allLanes.length);
+    lineOf ??= laneLines(content, allLanes);
     const at = allLanes.findIndex((b) => b.type === "component" && b.children === lane.children);
     out.push({
       check: "draft-lane-stale",
