@@ -17,7 +17,7 @@ import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
-import { parseQueryAttrs, queryLeadLines, queryResultLine } from "../format/query-block.ts";
+import { parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 
 /**
  * Converts Claude's markdown output to Telegram-safe HTML.
@@ -139,9 +139,10 @@ const telegramRenderer: BlockRenderer = {
       case "Query": {
         // No card and no file read: lead lines, the body, then the result's name.
         const q = parseQueryAttrs(attrs);
-        const [head, ...lead] = queryLeadLines(q).map(escapeHtml);
+        const { head, answer } = queryLead(q);
+        const inline = (s: string) => renderCodeSpans(s, escapeHtml, (c) => `<code>${escapeHtml(c)}</code>`);
         const result = queryResultLine(q);
-        return [head ? `<b>${head}</b>` : "", ...lead, children, result ? escapeHtml(result) : ""]
+        return [head ? `<b>${inline(head)}</b>` : "", inline(answer), children, result ? escapeHtml(result) : ""]
           .filter(Boolean)
           .join("\n");
       }

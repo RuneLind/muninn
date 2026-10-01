@@ -150,7 +150,7 @@ export function formatWebHtml(text: string, opts?: { files?: PageFiles }): strin
   currentPageFiles = opts?.files;
   try {
     const rendered = renderBlocks(parseBlocks(text), webRenderer);
-    return collapseBlockSpacing(rendered).trim();
+    return uniqueQueryAnchors(collapseBlockSpacing(rendered).trim());
   } finally {
     currentPageFiles = prev;
   }
@@ -160,9 +160,31 @@ export function formatWebHtml(text: string, opts?: { files?: PageFiles }): strin
  *  cards say their result is not loaded here. */
 let currentPageFiles: PageFiles | undefined;
 
+const QUERY_ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
+
+/** Each `Query` card's anchor made unique in the finished HTML: a repeat gets
+ *  `-2`, `-3`, and its id link follows. A pass over the OUTPUT, because some
+ *  components render a body twice and keep one copy (`foldBodyHtml`). */
+function uniqueQueryAnchors(html: string): string {
+  if (!html.includes('<section class="query" id="')) return html;
+  const used = new Set<string>();
+  return html.replace(QUERY_ANCHOR_RE, (_m, slug: string, between: string) => {
+    let anchor = slug;
+    for (let k = 2; used.has(anchor); k++) anchor = `${slug}-${k}`;
+    used.add(anchor);
+    return `<section class="query" id="${anchor}">${between}<a class="query-id" href="#${anchor}">`;
+  });
+}
+
 /** A `Query` card's unavailable line, in place of a table or the SQL. */
 function queryFileNote(text: string): string {
   return `<p class="query-unavailable">${escapeHtml(text)}</p>`;
+}
+
+/** A cell's text: escaped, with each line end as `&#10;` so the cell's
+ *  `white-space: pre-line` shows it and `collapseBlockSpacing` cannot fold it. */
+function queryCellHtml(text: string): string {
+  return escapeHtml(text).replace(/\r\n|\r|\n/g, "&#10;");
 }
 
 /** The result table from a `csv=` file: escaped cells, header verbatim, at most
@@ -170,17 +192,23 @@ function queryFileNote(text: string): string {
 function queryResultHtml(ref: string): string {
   const file = lookupPageFile(currentPageFiles, ref);
   if (!file.ok) return `<div class="query-result">${queryFileNote(pageFileFailureText(file.reason, ref))}</div>`;
-  const { header, rows } = parseCsv(file.text);
+  const { header, rows, warning } = parseCsv(file.text);
+  const name = pageFileName(ref);
+  if (header.length === 0) return `<div class="query-result">${queryFileNote(`Empty file: ${name}`)}</div>`;
   const shown = rows.slice(0, QUERY_CSV_MAX_ROWS);
-  const th = header.map((h) => `<th scope="col">${escapeHtml(h)}</th>`).join("");
-  const trs = shown.map((r) => `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join("")}</tr>`).join("");
+  const th = header.map((h) => `<th scope="col">${queryCellHtml(h)}</th>`).join("");
+  const trs = shown.map((r) => `<tr>${r.map((c) => `<td>${queryCellHtml(c)}</td>`).join("")}</tr>`).join("");
   const n = (v: number) => v.toLocaleString("en-US");
+  // The reader sorts the rows it has; a truncated table says so.
   const more = rows.length > shown.length
-    ? `<p class="query-truncated">showing ${n(shown.length)} of ${n(rows.length)} rows</p>`
+    ? `<p class="query-truncated">showing ${n(shown.length)} of ${n(rows.length)} rows — sorting reorders the rows shown</p>`
+    : "";
+  const warn = warning === "unterminated-quote"
+    ? `<p class="query-warning">${escapeHtml(`Unterminated quote — the rest of the file is one cell: ${name}`)}</p>`
     : "";
   return (
-    `<div class="query-result"><div class="query-result-head"><code>${escapeHtml(pageFileName(ref))}</code>` +
-    `<span class="query-rows">${n(rows.length)} ${rows.length === 1 ? "row" : "rows"}</span></div>` +
+    `<div class="query-result"><div class="query-result-head"><code>${escapeHtml(name)}</code>` +
+    `<span class="query-rows">${n(rows.length)} ${rows.length === 1 ? "row" : "rows"}</span></div>${warn}` +
     `<div class="query-table-wrap"><table class="query-table"><thead><tr>${th}</tr></thead>` +
     `<tbody>${trs}</tbody></table></div>${more}</div>`
   );
@@ -580,12 +608,16 @@ const webRenderer: BlockRenderer = {
         // One card per query: header (id, question, answer, run date, uses),
         // the reading, the result table, the SQL behind a closed disclosure.
         const q = parseQueryAttrs(attrs);
+        // Made unique across the page by `uniqueQueryAnchors`, after rendering.
+        const anchor = q.anchor;
         const { sql, body } = splitQuerySql(rawChildren, q.sql !== "");
         const idHtml = !q.id
           ? ""
-          : q.anchor
-            ? `<a class="query-id" href="#${q.anchor}">${escapeHtml(q.id)}</a>`
+          : anchor
+            ? `<a class="query-id" href="#${anchor}">${escapeHtml(q.id)}</a>`
             : `<span class="query-id">${escapeHtml(q.id)}</span>`;
+        // `id` is required: a card without one still renders, and says so.
+        const noId = q.id ? "" : `<p class="query-warning">Query without id</p>`;
         const question = q.question ? `<span class="query-question">${renderInline(q.question)}</span>` : "";
         const answer = q.answer ? `<div class="query-answer">${renderInline(q.answer)}</div>` : "";
         const uses = q.uses.map((u) => `<span class="query-use">${escapeHtml(u)}</span>`).join("");
@@ -593,14 +625,14 @@ const webRenderer: BlockRenderer = {
           (q.run ? `<span class="query-run">run ${escapeHtml(q.run)}</span>` : "") +
           (uses ? `<span class="query-uses">uses ${uses}</span>` : "");
         const head =
-          `<div class="query-head"><div class="query-title">${idHtml}${question}</div>${answer}` +
+          `<div class="query-head">${noId}<div class="query-title">${idHtml}${question}</div>${answer}` +
           `${meta ? `<div class="query-meta">${meta}</div>` : ""}</div>`;
         const bodyHtml = body.some((b) => !isBlankTextBlock(b))
           ? `<div class="query-body">${renderBlocks(body, webRenderer)}</div>`
           : "";
         const result = q.csv ? queryResultHtml(q.csv) : "";
         return (
-          `<section class="query"${q.anchor ? ` id="${q.anchor}"` : ""}>` +
+          `<section class="query"${anchor ? ` id="${anchor}"` : ""}>` +
           `${head}${bodyHtml}${result}${querySqlHtml(q.sql, sql)}</section>`
         );
       }

@@ -112,6 +112,8 @@ const SELF_CLOSING_ALLOWED: ReadonlySet<ComponentName> = new Set<ComponentName>(
   "Pill",
   "Fact",
   "Embed",
+  // A result-only query has no body.
+  "Query",
 ]);
 
 /** Attribute whitelist per component; any other attribute is dropped. */

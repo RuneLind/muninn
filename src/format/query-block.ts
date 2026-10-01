@@ -15,7 +15,7 @@ import type { Block, CodeBlock } from "./markdown-ast.ts";
 export type PageFileResult =
   | { ok: true; text: string }
   | { ok: false; reason: PageFileFailure };
-export type PageFileFailure = "unavailable" | "invalid" | "extension" | "too-large" | "limit";
+export type PageFileFailure = "unavailable" | "invalid" | "extension" | "too-large" | "limit" | "budget";
 
 /** The loader's answer, keyed by the attribute value as written (trimmed). */
 export interface PageFiles {
@@ -26,24 +26,44 @@ export interface PageFiles {
 export const PAGE_FILE_EXTENSIONS: readonly string[] = [".csv", ".sql"];
 export const PAGE_FILE_MAX_BYTES = 1024 * 1024;
 export const PAGE_FILE_MAX_PER_PAGE = 50;
+/** Bytes one page open may read across all its files; refs past it answer `budget`. */
+export const PAGE_FILE_PAGE_BUDGET_BYTES = 8 * 1024 * 1024;
 export const QUERY_CSV_MAX_ROWS = 2000;
 
+/** A path's extension, lower-cased: from the last `.` of its last segment, and
+ *  none for a dotfile (`.csv`), as `path.extname` reads it. The ONE rule the
+ *  lexical gate and the loader's realpath check share. */
+export function pageFileExtension(p: string): string {
+  const name = p.slice(p.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot).toLowerCase() : "";
+}
+
+/** True when a segment of `p` is one the wiki index never scans: a dot
+ *  segment (`.git`, `.hidden`, a dotfile) or `node_modules`. `.` and `..` are
+ *  navigation, not names. */
+export function hasExcludedSegment(p: string): boolean {
+  return p.split("/").some((s) => s !== "." && s !== ".." && (s.startsWith(".") || s === "node_modules"));
+}
+
 /** The lexical gate on a `csv=`/`sql=` value, before any IO: relative to the
- *  page's folder with `/` separators. An absolute path, a backslash, a `\0` or
- *  a disallowed extension is refused. `..` passes here; containment is the
- *  loader's realpath check. */
+ *  page's folder with `/` separators. An absolute path, a backslash, a `\0`, a
+ *  segment the index never scans (`hasExcludedSegment`) or a disallowed
+ *  extension is refused. `..` passes here; the loader refuses one that climbs
+ *  above the root, then checks containment on the realpath. */
 export function checkPageFileRef(ref: string): "ok" | "invalid" | "extension" {
   if (!ref || ref.startsWith("/") || ref.includes("\\") || ref.includes("\0") || /^[A-Za-z]:/.test(ref)) {
     return "invalid";
   }
-  const dot = ref.lastIndexOf(".");
-  const ext = dot > ref.lastIndexOf("/") ? ref.slice(dot).toLowerCase() : "";
-  return PAGE_FILE_EXTENSIONS.includes(ext) ? "ok" : "extension";
+  if (hasExcludedSegment(ref)) return "invalid";
+  return PAGE_FILE_EXTENSIONS.includes(pageFileExtension(ref)) ? "ok" : "extension";
 }
 
 export interface QueryAttrs {
   id: string;
-  /** The card's `id`: `Q-8` → `q-8`. Empty when `id` has no usable character. */
+  /** The card's `id` as a slug: Unicode letters, digits, `_` and `-`, lower-cased
+   *  (`Spørring 8` → `spørring-8`). Empty when `id` has no usable character.
+   *  Not unique: the web renderer suffixes a repeat within one render. */
   anchor: string;
   question: string;
   answer: string;
@@ -57,7 +77,7 @@ export function parseQueryAttrs(attrs: Record<string, string>): QueryAttrs {
   const id = (attrs.id ?? "").trim();
   return {
     id,
-    anchor: id.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, ""),
+    anchor: id.toLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, ""),
     question: (attrs.question ?? "").trim(),
     answer: (attrs.answer ?? "").trim(),
     csv: (attrs.csv ?? "").trim(),
@@ -102,6 +122,8 @@ export function pageFileName(ref: string): string {
   return ref.slice(ref.lastIndexOf("/") + 1);
 }
 
+const mb = (bytes: number) => `${+(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
 /** The text a card shows in place of a file it could not use. English: the
  *  page's language is unknown here. The same text for a missing file and one
  *  outside the root. */
@@ -117,9 +139,11 @@ export function pageFileFailureText(reason: PageFileFailure | "not-loaded", ref:
     case "extension":
       return `File type not allowed: ${name}`;
     case "too-large":
-      return `File over 1 MB, not shown: ${name}`;
+      return `File over ${mb(PAGE_FILE_MAX_BYTES)}, not shown: ${name}`;
     case "limit":
       return `Over ${PAGE_FILE_MAX_PER_PAGE} files on this page, not loaded: ${name}`;
+    case "budget":
+      return `Over ${mb(PAGE_FILE_PAGE_BUDGET_BYTES)} of files on this page, not loaded: ${name}`;
   }
 }
 
@@ -134,11 +158,28 @@ export function lookupPageFile(
   return files.get(ref) ?? { ok: false, reason: "unavailable" };
 }
 
-/** The plain-text surfaces' lead lines (Slack, Telegram, email): `Q-8 — <question>`
- *  and `Svar: <answer>`, unescaped. The `Resultat:` line goes after the body. */
-export function queryLeadLines(q: QueryAttrs): string[] {
-  const head = [q.id, q.question].filter(Boolean).join(" — ");
-  return [head, q.answer ? `Svar: ${q.answer}` : ""].filter(Boolean);
+/** The plain-text surfaces' lead lines (Slack, Telegram, email), unescaped:
+ *  `head` is `Q-8 — <question>` (empty with neither; the one line a surface
+ *  bolds), `answer` is `Svar: <answer>` (empty without one). The `Resultat:`
+ *  line goes after the body. */
+export function queryLead(q: QueryAttrs): { head: string; answer: string } {
+  return {
+    head: [q.id, q.question].filter(Boolean).join(" — "),
+    answer: q.answer ? `Svar: ${q.answer}` : "",
+  };
+}
+
+/** `text` with each `` `code` `` span rendered by `code` and every other run by
+ *  `plain` — the inline-code rule `renderInline` uses, for the surfaces that
+ *  render attribute text without it. */
+export function renderCodeSpans(text: string, plain: (s: string) => string, code: (s: string) => string): string {
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(/`([^`]+)`/g)) {
+    out += plain(text.slice(last, m.index)) + code(m[1]!);
+    last = m.index! + m[0].length;
+  }
+  return out + plain(text.slice(last));
 }
 
 export function queryResultLine(q: QueryAttrs): string {

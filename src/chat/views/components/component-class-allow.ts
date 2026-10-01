@@ -86,7 +86,7 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "query", "query-head", "query-title", "query-id", "query-question", "query-answer",
   "query-meta", "query-run", "query-uses", "query-use", "query-body", "query-result",
   "query-result-head", "query-rows", "query-table-wrap", "query-table", "query-truncated",
-  "query-unavailable", "query-sql", "query-sql-body",
+  "query-unavailable", "query-warning", "query-sql", "query-sql-body",
   // Syntax highlighting. Imported from the module that EMITS them rather than
   // retyped: a `tok-*` class added there and forgotten here renders colorless
   // in chat while looking perfect in /wiki — a bug visible on one surface only.

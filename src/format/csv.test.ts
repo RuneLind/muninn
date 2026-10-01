@@ -41,4 +41,25 @@ describe("parseCsv (RFC 4180)", () => {
   test("empty input", () => {
     expect(parseCsv("")).toEqual({ header: [], rows: [] });
   });
+
+  test("one column: an empty line is an empty value (psql writes NULL that way); the final newline is not a row", () => {
+    expect(parseCsv("n\n1\n\n3\n").rows).toEqual([["1"], [""], ["3"]]);
+    expect(parseCsv("n\n1\n").rows).toEqual([["1"]]);
+  });
+
+  test('a quoted "" record is always kept, whatever the width', () => {
+    expect(parseCsv('n\n""\n2\n').rows).toEqual([[""], ["2"]]);
+    expect(parseCsv('a,b\n1,2\n""\n').rows).toEqual([["1", "2"], ["", ""]]);
+  });
+
+  test("a lone CR ends a row, like CRLF; a trailing CR stays out of the cell", () => {
+    expect(parseCsv("a,b\r1,2\r3,4\r")).toEqual({ header: ["a", "b"], rows: [["1", "2"], ["3", "4"]] });
+    expect(parseCsv("a,b\r\n1,2\r").rows).toEqual([["1", "2"]]);
+  });
+
+  test("an unterminated quote at the end of the file is a warning, not silence", () => {
+    const csv = parseCsv('a,b\n1,"open\n2,3\n');
+    expect(csv.warning).toBe("unterminated-quote");
+    expect(parseCsv("a\n1\n").warning).toBeUndefined();
+  });
 });

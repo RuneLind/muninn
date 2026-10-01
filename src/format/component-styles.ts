@@ -212,8 +212,8 @@ export function componentBlockCss(scope: string): string {
     ${scope} .query-body > :first-child { margin-top: 0; }
     ${scope} .query-result { margin-top: 0.8rem; }
     ${scope} .query-result-head { display: flex; gap: 0.6rem; align-items: baseline; font-size: 0.85em; margin-bottom: 0.3rem; }
-    ${scope} .query-rows, ${scope} .query-truncated, ${scope} .query-unavailable { color: var(--text-soft); font-size: 0.85em; }
-    ${scope} .query-unavailable { font-style: italic; margin: 0.3rem 0; }
+    ${scope} .query-rows, ${scope} .query-truncated, ${scope} .query-unavailable, ${scope} .query-warning { color: var(--text-soft); font-size: 0.85em; }
+    ${scope} .query-unavailable, ${scope} .query-warning { font-style: italic; margin: 0.3rem 0; }
     ${scope} .query-truncated { margin: 0.3rem 0 0; }
     ${scope} .query-table-wrap {
       max-height: 24rem; overflow: auto;
@@ -228,7 +228,8 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .query-table th button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     ${scope} .query-sort-mark { color: var(--text-soft); font-size: 0.85em; }
-    ${scope} .query-table td { font-variant-numeric: tabular-nums; }
+    ${scope} .query-table td { font-variant-numeric: tabular-nums; white-space: pre-line; vertical-align: top; }
+    ${scope} .query-table .query-num { text-align: right; }
     ${scope} .query-sql { margin-top: 0.8rem; }
     ${scope} .query-sql > summary { cursor: pointer; font-weight: 600; color: var(--text-secondary); }
     ${scope} .query-sql > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
