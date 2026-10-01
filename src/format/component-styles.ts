@@ -369,7 +369,14 @@ export function componentBlockCss(scope: string): string {
     ${scope} .run-checklist { margin: 1.2rem 0; }
     ${scope} .rc-count { color: var(--text-soft); font-size: 0.85em; font-variant-numeric: tabular-nums; }
     ${scope} .run-checklist > .checklist { margin-top: 0.3rem; }
-    ${scope} .rc-num { flex: none; margin-right: 0.4rem; font-variant-numeric: tabular-nums; }
+    /* A step number sits in a fixed right-aligned box in the row's left
+       padding, out of flow, so a flex row (gap) and a block parent row (no
+       gap) put the mark at the same x, whatever the number's width. */
+    ${scope} .check-item:has(> .rc-num) { position: relative; padding-left: calc(3ch + 0.5rem); }
+    ${scope} .rc-num {
+      position: absolute; left: 0; top: 0.15rem; width: 3ch; text-align: right;
+      color: var(--text-soft); font-weight: 400; font-variant-numeric: tabular-nums;
+    }
     ${scope} .rc-row {
       display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 0.1rem 0.6rem; align-items: baseline;
       margin: 0.25rem 0 0 1.5rem;

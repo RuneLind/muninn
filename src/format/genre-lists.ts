@@ -24,25 +24,56 @@ function afterSeparator(tail: string): string | null {
 
 // ── Timeline ────────────────────────────────────────────────────────────────
 
-/** `YYYY-MM-DD`, optionally with a ` HH:MM` time and a `Z`. A time that starts
- *  a range (`20:50–21:10`) stays in the text. */
-const ISO_DATE = String.raw`\d{4}-\d{2}-\d{2}(?: (?:[01]\d|2[0-3]):[0-5]\dZ?(?![—–-]\d))?`;
+/** `YYYY-MM-DD`. */
+const ISO_DATE = String.raw`\d{4}-\d{2}-\d{2}`;
+/** ` HH:MM`, one space, 00–23 and 00–59. */
+const TIME = String.raw` (?:[01]\d|2[0-3]):[0-5]\d`;
 /** `D.M.YYYY` to `DD.MM.YYYY`. */
 const DAY_FIRST_DATE = String.raw`\d{1,2}\.\d{1,2}\.\d{4}`;
 /** `D.M` to `DD.MM`, no year. */
 const DAY_MONTH = String.raw`\d{1,2}\.\d{1,2}`;
 
-/** The date shapes a Timeline item may start with. Each may be wrapped in one
- *  `**…**`, which may hold a trailing `:` (`**30.09.2026:**`); a date without a
- *  year counts only in bold or right before `:`, `—` or `–`, so `1.2 million`
- *  stays text. `tail` is the rule for what follows the token. */
+/** One marker shape: the date (and time) alone, or the same wrapped in one
+ *  `**…**` that may hold a trailing `:` (`**30.09.2026:**`). */
+const plain = (shape: string) => new RegExp(`^(${shape})`);
+const bold = (shape: string) => new RegExp(`^\\*\\*(${shape}):?\\*\\*`);
+
+/**
+ * The marker shapes a Timeline item may start with, longest first. The parser
+ * takes the first row that matches AND is followed by a tail
+ * {@link afterSeparator} accepts; a refused tail falls through to the next,
+ * shorter row. `tail: "yearless"` also requires `:`, `—` or `–` after the
+ * token, so `1.2 million` stays text.
+ *
+ * | # | shape                       | example                 |
+ * |---|-----------------------------|-------------------------|
+ * | 1 | `**YYYY-MM-DD HH:MMZ:?**`   | `**2026-09-28 20:50Z**` |
+ * | 2 | `**YYYY-MM-DD HH:MM:?**`    | `**2026-09-28 20:50**`  |
+ * | 3 | `**YYYY-MM-DD:?**`          | `**2026-09-28:**`       |
+ * | 4 | `**D.M.YYYY:?**`            | `**30.09.2026**`        |
+ * | 5 | `**D.M:?**`                 | `**29.09:**`            |
+ * | 6 | `YYYY-MM-DD HH:MMZ`         | `2026-09-28 20:50Z`     |
+ * | 7 | `YYYY-MM-DD HH:MM`          | `2026-09-28 20:50`      |
+ * | 8 | `YYYY-MM-DD`                | `2026-09-28`            |
+ * | 9 | `D.M.YYYY`                  | `30.09.2026`            |
+ * |10 | `D.M` (yearless)            | `29.09:`                |
+ *
+ * So a time that starts a range (`20:50–21:10`, `20:50Z-21:10`) is refused
+ * by rows 6–7 and the date-only row 8 takes the item, leaving the range in
+ * the text. A bold wrap closes the token: `**2026-09-28 20:50**–21:10` has no
+ * shorter bold row to fall back to and stays undated.
+ */
 const TIMELINE_DATE_TABLE: readonly { re: RegExp; tail: "separator" | "yearless" }[] = [
-  { re: new RegExp(`^\\*\\*(${ISO_DATE}):?\\*\\*`), tail: "separator" },
-  { re: new RegExp(`^\\*\\*(${DAY_FIRST_DATE}):?\\*\\*`), tail: "separator" },
-  { re: new RegExp(`^\\*\\*(${DAY_MONTH}):?\\*\\*`), tail: "separator" },
-  { re: new RegExp(`^(${ISO_DATE})`), tail: "separator" },
-  { re: new RegExp(`^(${DAY_FIRST_DATE})`), tail: "separator" },
-  { re: new RegExp(`^(${DAY_MONTH})`), tail: "yearless" },
+  { re: bold(`${ISO_DATE}${TIME}Z`), tail: "separator" },
+  { re: bold(`${ISO_DATE}${TIME}`), tail: "separator" },
+  { re: bold(ISO_DATE), tail: "separator" },
+  { re: bold(DAY_FIRST_DATE), tail: "separator" },
+  { re: bold(DAY_MONTH), tail: "separator" },
+  { re: plain(`${ISO_DATE}${TIME}Z`), tail: "separator" },
+  { re: plain(`${ISO_DATE}${TIME}`), tail: "separator" },
+  { re: plain(ISO_DATE), tail: "separator" },
+  { re: plain(DAY_FIRST_DATE), tail: "separator" },
+  { re: plain(DAY_MONTH), tail: "yearless" },
 ];
 
 /** True for a date the calendar has. A date without a year is checked
@@ -60,16 +91,17 @@ export interface TimelineItem {
   text: string;
 }
 
-/** One Timeline item: a leading date from {@link TIMELINE_DATE_TABLE} that is
- *  a real calendar day, followed by a separator ({@link afterSeparator}). The
- *  first shape that matches decides. */
+/** One Timeline item: the first {@link TIMELINE_DATE_TABLE} row whose tail is
+ *  accepted decides; its date must be a real calendar day, else the item is
+ *  undated. */
 export function parseTimelineItem(item: string): TimelineItem {
   for (const { re, tail } of TIMELINE_DATE_TABLE) {
     const m = re.exec(item);
     if (!m) continue;
     const after = item.slice(m[0].length);
     const rest = tail === "yearless" && !/^\s*[—–:]/.test(after) ? null : afterSeparator(after);
-    if (rest === null || !isTimelineDate(m[1]!)) return { date: null, text: item };
+    if (rest === null) continue;
+    if (!isTimelineDate(m[1]!)) return { date: null, text: item };
     return { date: m[1]!, text: rest };
   }
   return { date: null, text: item };

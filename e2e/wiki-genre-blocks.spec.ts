@@ -93,6 +93,25 @@ const PAGE = [
   "",
   "</RunChecklist>",
   "",
+  // Every step-number cell: {flex row, parent row} × {done, todo} ×
+  // {one digit, two digits}.
+  "<RunChecklist>",
+  "",
+  "6. [x] Seks",
+  "7. [ ] Sju",
+  "8. [x] Åtte",
+  "   - Kommando: `a`",
+  "9. [ ] Ni",
+  "   - Forventet: b",
+  "10. [x] Ti",
+  "11. [ ] Elleve",
+  "12. [x] Tolv",
+  "    - Kommando: `c`",
+  "13. [ ] Tretten",
+  "    - Stopp hvis: d",
+  "",
+  "</RunChecklist>",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -241,6 +260,66 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
     }
     expectClean(seen);
   });
+
+  for (const scheme of ["light", "dark"] as const) {
+    for (const width of [1280, 390]) {
+      test(`RunChecklist: every step's mark at one x and every number one colour, ${scheme} ${width}px`, async ({ page }) => {
+        await page.emulateMedia({ colorScheme: scheme });
+        const seen = await openPage(page);
+        if (width === 390) {
+          // The narrow reader shows the article in focus mode, as the 390px test below.
+          await page.setViewportSize({ width, height: 844 });
+          await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+          await page.keyboard.press("f");
+          await expect.poll(async () => (await page.locator(".wiki-article").boundingBox())!.width).toBeGreaterThan(250);
+        }
+        const steps = page.locator("section.run-checklist").nth(2).locator(":scope > .checklist > .check-item");
+        await expect(steps).toHaveCount(8);
+        // Ink, not boxes: a Range over an element's text measures the glyphs,
+        // so a number overflowing a too-narrow box still counts, and a flex
+        // item's line-height box does not skew the line check.
+        const cells = await steps.evaluateAll((lis) =>
+          lis.map((li) => {
+            const ink = (el: Element) => {
+              const r = document.createRange();
+              r.selectNodeContents(el);
+              return r.getBoundingClientRect();
+            };
+            const num = li.querySelector(":scope > .rc-num")!;
+            const mark = li.querySelector(":scope > .check-mark")!;
+            return {
+              num: num.textContent,
+              parent: li.classList.contains("check-parent"),
+              done: li.classList.contains("check-done"),
+              markX: ink(mark).left,
+              numRight: ink(num).right,
+              numLeft: ink(num).left,
+              liLeft: li.getBoundingClientRect().left,
+              dy: ink(num).top - ink(mark).top,
+              numColor: getComputedStyle(num).color,
+            };
+          }),
+        );
+        // The fixture holds every cell.
+        expect(cells.map((c) => `${c.num}${c.parent ? "p" : "f"}${c.done ? "d" : "t"}`)).toEqual([
+          "6.fd", "7.ft", "8.pd", "9.pt", "10.fd", "11.ft", "12.pd", "13.pt",
+        ]);
+        const x0 = cells[0]!.markX;
+        for (const c of cells) {
+          expect(Math.abs(c.markX - x0), `${c.num} mark x`).toBeLessThanOrEqual(1);
+          expect(Math.abs(c.numRight - cells[0]!.numRight), `${c.num} right edge`).toBeLessThanOrEqual(1);
+          expect(c.markX - c.numRight, `${c.num} gap to its mark`).toBeGreaterThanOrEqual(4);
+          expect(c.numLeft, `${c.num} inside its row`).toBeGreaterThanOrEqual(c.liLeft - 0.5);
+          expect(Math.abs(c.dy), `${c.num} on the mark's line`).toBeLessThanOrEqual(1);
+        }
+        expect(new Set(cells.map((c) => c.numColor)).size).toBe(1);
+        for (const n of await steps.locator(":scope > .rc-num").all()) {
+          expect(await paintedContrast(n), "step number contrast").toBeGreaterThanOrEqual(4.5);
+        }
+        expectClean(seen);
+      });
+    }
+  }
 
   test("at 390px in focus mode nothing scrolls the page sideways", async ({ page }) => {
     const seen = await openPage(page);

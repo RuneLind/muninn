@@ -35,8 +35,21 @@ describe("Timeline date grammar", () => {
     ["2026-09-28 20:50 deploy", "2026-09-28 20:50", "deploy"],
     ["2026-09-28 20:50Z: deploy", "2026-09-28 20:50Z", "deploy"],
     ["2026-09-28 25:00 ikke et klokkeslett", "2026-09-28", "25:00 ikke et klokkeslett"],
-    // A time followed by a dash and a digit is a range: it stays in the text.
+    // The shape table, longest first: a with-time row whose tail is refused
+    // (a dash and a digit: a range) falls through to the date-only row, and
+    // the range stays in the text, with or without a Z.
     ["2026-09-28 20:50–21:10: deploy", "2026-09-28", "20:50–21:10: deploy"],
+    ["2026-09-28 20:50Z–21:10Z: deploy", "2026-09-28", "20:50Z–21:10Z: deploy"],
+    ["2026-09-28 20:50Z-21:10 deploy", "2026-09-28", "20:50Z-21:10 deploy"],
+    ["2026-09-28 20:50-21:10 deploy", "2026-09-28", "20:50-21:10 deploy"],
+    ["2026-09-28 20:50—21:10 x", "2026-09-28", "20:50—21:10 x"],
+    ["2026-09-28 20:50Z—21:10 x", "2026-09-28", "20:50Z—21:10 x"],
+    ["2026-09-28 20:50Z deploy", "2026-09-28 20:50Z", "deploy"],
+    ["**2026-09-28 20:50Z**", "2026-09-28 20:50Z", ""],
+    ["**2026-09-28 20:50**", "2026-09-28 20:50", ""],
+    ["**2026-09-28 20:50:** deploy", "2026-09-28 20:50", "deploy"],
+    ["2026-09-28 20:50: x", "2026-09-28 20:50", "x"],
+    ["2026-09-28 20:50Zx", "2026-09-28", "20:50Zx"],
     // A dash right before a digit is a minus sign, not a separator.
     ["2026-09-30 -5 grader", "2026-09-30", "-5 grader"],
     // The colon inside the bold, the house label style.
@@ -81,6 +94,10 @@ describe("Timeline date grammar", () => {
     ["2026-09-28–30 sprint", null, "2026-09-28–30 sprint"],
     ["27.09-28.09", null, "27.09-28.09"],
     ["**2026-09-28**—30 sprint", null, "**2026-09-28**—30 sprint"],
+    // A bold wrap closes the token, so no shorter bold row can take the
+    // date alone: a range after a bold time stays undated.
+    ["**2026-09-28 20:50**–21:10 x", null, "**2026-09-28 20:50**–21:10 x"],
+    ["**2026-09-28 20:50Z**-21:10 x", null, "**2026-09-28 20:50Z**-21:10 x"],
     ["**2026-09-30 — inne i fet**", null, "**2026-09-30 — inne i fet**"],
     ["*2026-09-30* kursiv", null, "*2026-09-30* kursiv"],
     ["Fag svarte 2026-09-30", null, "Fag svarte 2026-09-30"],
@@ -489,6 +506,20 @@ describe("NextMoves lane: a RunChecklist's open steps", () => {
     expect(formatWebHtml(md)).toContain('<span class="rc-count">0 av 2 steg</span>');
   });
 
+  test("a step of only spaces or U+00A0 is empty: dropped from the render and the count", () => {
+    for (const blank of ["   ", "\u00a0", " \u00a0 "]) {
+      const md = `<RunChecklist>\n\n- [x] a\n- [ ] ${blank}\n- [ ] b\n\n</RunChecklist>`;
+      expect(lane(md)).toEqual(["b"]);
+      expect(formatWebHtml(md)).toContain('<span class="rc-count">1 of 2 steps</span>');
+      expect(formatSlackMrkdwn(md)).toBe("☑ a\n☐ b");
+    }
+  });
+
+  test("an empty plain item in a lane list is no step", () => {
+    expect(lane("- a\n- \n- b")).toEqual(["a", "b"]);
+    expect(lane("- a\n- \u00a0\n- b")).toEqual(["a", "b"]);
+  });
+
   test("a plain Checklist still counts its first list only", () => {
     expect(lane("<Checklist>\n\n- [x] a\n- [ ] b\n- [ ]\n\nMellom.\n\n- [ ] c\n\n</Checklist>")).toEqual(["b"]);
   });
@@ -613,6 +644,15 @@ describe("plain-text fallbacks", () => {
     expect(formatSlackMrkdwn(jump)).toContain("7. ☐ b");
     expect(formatTelegramHtml(jump)).toContain("7. ☐ b");
     expect(formatEmailHtml(jump)).toMatch(/>7\.<\/span> <span[^>]*>☐<\/span> b/);
+  });
+
+  test("a plain Checklist's ordered task list carries no numbers in any fallback", () => {
+    const md = "<Checklist>\n\n- [x] a\n  1. [ ] b\n  2. [x] c\n\n</Checklist>";
+    expect(formatSlackMrkdwn(md)).toBe("☑ a\n  ☐ b\n  ☑ c");
+    expect(formatTelegramHtml(md)).toBe("☑ a\n  ☐ b\n  ☑ c");
+    const email = formatEmailHtml(md);
+    expect(email).toContain("☐</span> b");
+    expect(email).not.toMatch(/>[12]\.<\/span>/);
   });
 
   test("RunChecklist: an empty step is dropped, one with entries kept", () => {
