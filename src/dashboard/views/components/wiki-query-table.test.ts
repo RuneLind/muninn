@@ -236,3 +236,17 @@ describe("Query table sorting — the column rule (enumerated)", () => {
     expect(ths.map((t) => t.classes.has("query-num"))).toEqual([true, false]);
   });
 });
+
+describe("fix round 1: the sort reads a column in its own decimal context", () => {
+  test("a column that writes a decimal comma reads 1,500 as 1.5", () => {
+    expect(sortOrder(["1,500", "0,5", "2"], "ascending")).toEqual([1, 0, 2]);
+  });
+
+  test("a column with no unambiguous decimal comma keeps 1,500 as thousands", () => {
+    expect(sortOrder(["1,500", "999", "2"], "ascending")).toEqual([2, 1, 0]);
+  });
+
+  test("0,ddd is a decimal on its own", () => {
+    expect(sortOrder(["0,125", "1", "0,2"], "ascending")).toEqual([0, 2, 1]);
+  });
+});

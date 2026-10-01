@@ -46,7 +46,7 @@ describe("CaseBoard grammar", () => {
       ["MEL-4", "hold"],
       ["545776", "ok"],
     ]);
-    expect(b.cases[1]).toMatchObject({ owner: "Fag", note: "Holdt **ute** til S4", refs: ["Q-14", "D6"], anchor: "mel-2" });
+    expect(b.cases[1]).toMatchObject({ owner: "Fag", note: "Holdt **ute** til S4", refs: ["Q-14", "D6"], anchor: "case-mel-2" });
     expect(b.counts).toEqual({ hold: 2, wait: 1, wrong: 0, none: 1, ok: 1, unknown: 0 });
   });
 
@@ -65,10 +65,11 @@ describe("CaseBoard grammar", () => {
     expect(ok("- id: A\n  status: ok\n  note: |\n    linje en\n    linje to\n").cases[0]!.note).toBe("linje en linje to");
   });
 
-  test("an entry without an id, or not a mapping, is skipped and counted", () => {
+  test("an entry without an id, or not a mapping, is skipped and counted; an empty id apart", () => {
     const b = ok("- id: A\n  status: ok\n- status: hold\n- just text\n- id: ''\n  status: hold\n- [1, 2]\n");
     expect(b.cases.map((c) => c.id)).toEqual(["A"]);
-    expect(b.skipped).toBe(4);
+    expect(b.skipped).toBe(3);
+    expect(b.emptyIds).toBe(1);
     expect(b.counts.hold).toBe(0);
   });
 
@@ -145,8 +146,8 @@ describe("CaseBoard on the web", () => {
       '<p class="cb-strip"><span class="cb-count cb-count-hold"><span class="cb-n">2</span> hold</span><span class="cb-sep"> · </span>',
     );
     const order = [...html.matchAll(/<div class="cb-row" id="([^"]+)">/g)].map((m) => m[1]);
-    expect(order).toEqual(["mel-2", "mel-4", "mel-3", "mel-1", "545776"]);
-    expect(html).toContain('<a class="cb-id" href="#mel-2">MEL-2</a><span class="cb-pill cb-hold">hold</span>');
+    expect(order).toEqual(["case-mel-2", "case-mel-4", "case-mel-3", "case-mel-1", "case-545776"]);
+    expect(html).toContain('<a class="cb-id" href="#case-mel-2">MEL-2</a><span class="cb-pill cb-hold">hold</span>');
     expect(html).toContain('<span class="cb-note">Holdt <strong>ute</strong> til S4</span>');
     expect(html).toContain('<span class="cb-refs"><span class="cb-ref">Q-14</span><span class="cb-ref">D6</span></span>');
   });
@@ -185,13 +186,24 @@ describe("CaseBoard on the web", () => {
     expect(html).toContain('<div class="cb-row"><span class="cb-id">—</span>');
   });
 
-  test("a repeated id gets a suffixed anchor, and a case and a query share the namespace", () => {
+  test("a repeated id gets a suffixed anchor in file order; a query keeps its own", () => {
     const html = formatWebHtml('<CaseBoard src="c.yaml" />\n\n<Query id="Q-1" question="x">\n\ny\n\n</Query>', {
       files: files({ "c.yaml": { ok: true, text: "- {id: Q-1, status: ok}\n- {id: Q-1, status: hold}\n" } }),
     });
-    // Document order: the hold row, the ok row, then the query card.
-    expect([...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1])).toEqual(["q-1", "q-1-2", "q-1-3"]);
-    for (const id of ["q-1", "q-1-2", "q-1-3"]) expect(html).toContain(`href="#${id}"`);
+    // Document order: the hold row (second in the file), the ok row, then the query card.
+    expect([...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1])).toEqual(["case-q-1-2", "case-q-1", "q-1"]);
+    for (const id of ["case-q-1", "case-q-1-2", "q-1"]) expect(html).toContain(`href="#${id}"`);
+  });
+
+  test("a second board repeating an earlier board's id gets the next free suffix", () => {
+    const html = formatWebHtml('<CaseBoard src="a.yaml" />\n\n<CaseBoard src="b.yaml" />', {
+      files: files({
+        "a.yaml": { ok: true, text: "- {id: A, status: ok}\n" },
+        "b.yaml": { ok: true, text: "- {id: A, status: ok}\n- {id: A, status: ok}\n" },
+      }),
+    });
+    expect([...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1])).toEqual(["case-a", "case-a-3", "case-a-2"]);
+    for (const id of ["case-a", "case-a-2", "case-a-3"]) expect(html).toContain(`href="#${id}"`);
   });
 
   test("no lookup (chat, the gardener preview) says the cases are not loaded here", () => {
@@ -227,9 +239,85 @@ describe("CaseBoard on the text surfaces (no file read)", () => {
   const md = '<CaseBoard src="res/<cases>.yaml" />';
   test("telegram, slack and email name the file, escaped", () => {
     expect(formatTelegramHtml(md)).toBe("Cases: &lt;cases&gt;.yaml");
-    expect(formatSlackMrkdwn(md)).toBe("Cases: &lt;cases&gt;.yaml");
+    expect(formatSlackMrkdwn(md)).toBe("Cases: `&lt;cases&gt;.yaml`");
     const mail = formatEmailHtml(md);
     expect(mail).toContain("Cases: &lt;cases&gt;.yaml");
     expect(mail).not.toContain("<cases>");
+  });
+});
+
+describe("fix round 1: CaseBoard", () => {
+  const rowIds = (html: string) => [...html.matchAll(/<div class="cb-row" id="([^"]+)"/g)].map((m) => m[1]);
+
+  test("case anchors take a case- prefix, so a case never renames a Query anchor", () => {
+    const html = formatWebHtml('<Query id="Q-1" question="x">\n\ny\n\n</Query>\n\n<CaseBoard src="c.yaml" />', {
+      files: files({ "c.yaml": { ok: true, text: "- {id: Q-1, status: ok}\n" } }),
+    });
+    expect(html).toContain('<section class="query" id="q-1">');
+    expect(html).toContain('<a class="query-id" href="#q-1">');
+    expect(rowIds(html)).toEqual(["case-q-1"]);
+    expect(html).toContain('<a class="cb-id" href="#case-q-1">Q-1</a>');
+  });
+
+  test("repeats are suffixed in FILE order, so a status change never swaps suffixes", () => {
+    // File order: A (none), A (hold). The hold group renders first.
+    const html = board("- {id: A, status: none}\n- {id: A, status: hold}\n");
+    expect(rowIds(html)).toEqual(["case-a-2", "case-a"]);
+    expect(html).toContain('<a class="cb-id" href="#case-a-2">A</a><span class="cb-pill cb-hold">');
+    const flipped = board("- {id: A, status: hold}\n- {id: A, status: hold}\n");
+    expect(rowIds(flipped)).toEqual(["case-a", "case-a-2"]);
+  });
+
+  test("several YAML documents are reported as such", () => {
+    expect(parseCaseBoard("- id: a\n---\n- id: b\n")).toEqual({ ok: false, reason: "Multiple YAML documents (---); use one list" });
+    expect(parseCaseBoard("---\n- id: a\n")).toMatchObject({ ok: true, total: 1 });
+    expect(parseCaseBoard("# head\n---\n- id: a\n")).toMatchObject({ ok: true, total: 1 });
+  });
+
+  test("an id YAML reads as a number or other non-text still renders, under one warning to quote it", () => {
+    const html = board("- {id: 0123, status: ok}\n- {id: 0x1F, status: ok}\n- {id: 1e3, status: ok}\n- {id: .inf, status: ok}\n- {id: MEL-1, status: ok}\n");
+    expect(html.match(/<div class="cb-row"/g)).toHaveLength(5);
+    expect(html).toContain('<a class="cb-id" href="#case-123">123</a>');
+    expect(html).toContain(
+      '<p class="cb-warning">Read as numbers or other non-text, quote them to keep them as written: id 123, id 31, id 1000, id .inf</p>',
+    );
+    expect(html).not.toContain("without an id");
+  });
+
+  test("an empty id (~, null or nothing) is skipped under its own reason", () => {
+    const html = board("- {id: ~, status: ok}\n- {id: A, status: ok}\n");
+    expect(html).toContain('<p class="cb-warning">1 entry with an empty id skipped</p>');
+    expect(html).not.toContain("without an id");
+  });
+
+  test("a non-text owner or ref is named in the warning; a list or mapping note/owner/ref is counted", () => {
+    const html = board("- {id: A, status: ok, owner: 7, refs: [12, Q-1, [x]], note: {a: b}}\n");
+    expect(html).toContain("quote them to keep them as written: owner 7, refs 12</p>");
+    expect(html).toContain('<p class="cb-warning">2 values that are a list or mapping dropped (note, owner or refs)</p>');
+  });
+
+  test("every count on the board uses one formatter", () => {
+    const yaml = Array.from({ length: 1500 }, (_, i) => `- {id: C-${i}, status: ok}`).join("\n");
+    const html = board(yaml);
+    expect(html).toContain('<span class="cb-n">1,500</span> ok');
+    expect(html).toContain("showing 500 of 1,500 cases");
+  });
+
+  test("a CaseBoard src must be .yaml or .yml", () => {
+    const html = formatWebHtml('<CaseBoard src="runs.csv" />', { files: files({ "runs.csv": { ok: true, text: "- id: A\n" } }) });
+    expect(html).toContain("File type not allowed: runs.csv");
+    expect(html).not.toContain("cb-row");
+  });
+
+  test("the text surfaces say a CaseBoard has no src, as the web does", () => {
+    expect(formatTelegramHtml("<CaseBoard />")).toBe("CaseBoard without src");
+    expect(formatSlackMrkdwn("<CaseBoard />")).toBe("CaseBoard without src");
+    expect(formatEmailHtml("<CaseBoard />")).toContain("CaseBoard without src");
+  });
+
+  test("Slack names the file in a code span, so _ and * stay as written", () => {
+    expect(formatSlackMrkdwn('<CaseBoard src="a_b*.yaml" />')).toBe("Cases: `a_b*.yaml`");
+    expect(formatSlackMrkdwn('<DeltaTable src="r_1*.csv" />')).toBe("Table: `r_1*.csv`");
+    expect(formatSlackMrkdwn('<Query id="Q-1" csv="q_1*.csv" />')).toContain("Resultat: `q_1*.csv`");
   });
 });

@@ -165,43 +165,61 @@ test.describe("Wiki reader: CaseBoard, DeltaTable, Query explorer", () => {
     const board = page.locator("section.caseboard");
     await expect(board.locator(".cb-strip")).toHaveText("2 hold · 1 wait · 1 none · 1 ok · 1 unknown");
     const ids = await board.locator(".cb-row").evaluateAll((rows) => rows.map((r) => r.id));
-    expect(ids).toEqual(["mel-545776", "mel-368918", "mel-720043", "mel-616226", "mel-589684", "mel-1"]);
-    const first = board.locator(".cb-row#mel-545776");
+    expect(ids).toEqual(["case-mel-545776", "case-mel-368918", "case-mel-720043", "case-mel-616226", "case-mel-589684", "case-mel-1"]);
+    const first = board.locator(".cb-row#case-mel-545776");
     await expect(first.locator(".cb-pill")).toHaveText("hold");
     await expect(first.locator(".cb-owner")).toHaveText("Fag");
     await expect(first.locator(".cb-note strong")).toHaveText("ute");
     await expect(first.locator(".cb-ref")).toHaveText("Q-14");
-    await expect(board.locator(".cb-row#mel-1 .cb-pill")).toHaveText("unknown");
-    await expect(board.locator(".cb-row#mel-1 .cb-pill")).toHaveAttribute("title", "status: blocked");
+    await expect(board.locator(".cb-row#case-mel-1 .cb-pill")).toHaveText("unknown");
+    await expect(board.locator(".cb-row#case-mel-1 .cb-pill")).toHaveAttribute("title", "status: blocked");
     expectClean(seen);
   });
 
   test("a #case link scrolls to the row", async ({ page }) => {
-    const seen = await openPage(page, "#mel-589684");
-    await expect(page.locator(".cb-row#mel-589684")).toBeInViewport();
+    const seen = await openPage(page, "#case-mel-589684");
+    await expect(page.locator(".cb-row#case-mel-589684")).toBeInViewport();
     expectClean(seen);
   });
 
   test("the CSV table: the delta between the last two runs, coloured by better=lower", async ({ page }) => {
     const seen = await openPage(page);
     const t = page.locator("section.delta-table").first();
-    await expect(t.locator("thead th").last()).toHaveText("Δ 08.09 → 18.09");
+    await expect(t.locator("thead th.dt-delta .dt-delta-runs")).toHaveText("08.09 → 18.09");
+    // The header names the direction, so the colours are not the only key.
+    await expect(t.locator("thead th.dt-delta .dt-delta-dir")).toHaveText("lower is better");
     const row = (label: string) => t.locator("tbody tr", { has: page.locator(`th:text-is("${label}")`) }).locator("td.dt-delta");
-    await expect(row("Kandidater")).toHaveText("-116 (-87.9%)");
+    await expect(row("Kandidater")).toHaveText("✓ -116 (-87.9%)");
     await expect(row("Kandidater")).toHaveClass(/dt-good/);
-    await expect(row("Metadatafeil")).toHaveText("+1 (+11.1%)");
+    await expect(row("Kandidater").getByRole("img", { name: "better" })).toBeVisible();
+    await expect(row("Metadatafeil")).toHaveText("✗ +1 (+11.1%)");
     await expect(row("Metadatafeil")).toHaveClass(/dt-bad/);
+    await expect(row("Metadatafeil").getByRole("img", { name: "worse" })).toBeVisible();
     await expect(row("Uten treff")).toHaveText("0 (0.0%)");
     await expect(row("Uten treff")).toHaveClass(/dt-flat/);
     expectClean(seen);
   });
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`good and bad deltas paint in different colours, ${scheme}`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      const seen = await openPage(page);
+      const color = (sel: string) => page.locator(sel).first().evaluate((el) => getComputedStyle(el).color);
+      const [good, bad, plain] = [await color("td.dt-good .dt-abs"), await color("td.dt-bad .dt-abs"), await color("td.dt-flat .dt-abs")];
+      expect(good).not.toBe(bad);
+      expect(good).not.toBe(plain);
+      expect(bad).not.toBe(plain);
+      expectClean(seen);
+    });
+  }
 
   test("the pipe-table body: inline markdown cells, units and a decimal comma, no delta for text", async ({ page }) => {
     const seen = await openPage(page);
     const t = page.locator("section.delta-table").nth(1);
     await expect(t.locator("tbody th code")).toHaveText("antallVilleOpprettetProsessinstans");
     const deltas = t.locator("tbody td.dt-delta");
-    await expect(deltas).toHaveText(["+45 (+9.8%)", "+5,71 sek (+25,8%)", ""]);
+    // A decimal comma in the table writes every delta in commas.
+    await expect(deltas).toHaveText(["✓ +45 (+9,8%)", "✓ +5,71 sek (+25,8%)", ""]);
     await expect(deltas.first()).toHaveClass(/dt-good/);
     expectClean(seen);
   });
@@ -227,6 +245,7 @@ test.describe("Wiki reader: CaseBoard, DeltaTable, Query explorer", () => {
     // The bar sits right above the first card of the run.
     expect(await bar.evaluate((el) => el.nextElementSibling?.id)).toBe("q-1");
     await expect(bar.locator(".qx-chip")).toHaveText(["8045", "8306", "8174"]);
+    await expect(bar.getByRole("group", { name: "Filter by uses" }).locator(".qx-chip")).toHaveCount(3);
     await expect(bar.locator(".qx-count")).toHaveText("3 of 3 queries");
     const visible = () => page.locator("section.query:visible").evaluateAll((s) => s.map((e) => e.id));
 
@@ -266,6 +285,20 @@ test.describe("Wiki reader: CaseBoard, DeltaTable, Query explorer", () => {
     expectClean(seen);
   });
 
+  test("a #q-n link to a card the SEARCH hid clears the search box too", async ({ page }) => {
+    const seen = await openPage(page);
+    const bar = page.locator(".qx-bar");
+    await bar.locator(".qx-search").fill("sakstype");
+    await expect(page.locator("section.query#q-2")).toBeHidden();
+    await page.evaluate(() => {
+      location.hash = "#q-2";
+    });
+    await expect(page.locator("section.query#q-2")).toBeVisible();
+    await expect(bar.locator(".qx-search")).toHaveValue("");
+    await expect(bar.locator(".qx-count")).toHaveText("3 of 3 queries");
+    expectClean(seen);
+  });
+
   test("an article swap away and back builds one fresh bar", async ({ page }) => {
     const seen = await openPage(page);
     await expect(page.locator(".qx-bar")).toHaveCount(1);
@@ -287,7 +320,9 @@ test.describe("Wiki reader: CaseBoard, DeltaTable, Query explorer", () => {
     await expect.poll(async () => (await page.locator(".wiki-article").boundingBox())!.width).toBeGreaterThan(250);
     const m = await page.evaluate(() => {
       const art = document.querySelector(".wiki-article")!.getBoundingClientRect().right;
-      const sel = ["section.caseboard", "section.delta-table", ".qx-bar", "section.query"];
+      // The bar's own children too: a flex child with a min-width can overflow
+      // a bar that itself stays inside the article.
+      const sel = ["section.caseboard", "section.delta-table", ".qx-bar", ".qx-search", ".qx-chips", ".qx-chip", ".qx-count", "section.query"];
       return {
         page: document.documentElement.scrollWidth <= window.innerWidth + 1,
         overflow: sel.flatMap((s) => Array.from(document.querySelectorAll(s))).filter((e) => e.getBoundingClientRect().right > art + 1).length,
@@ -316,6 +351,7 @@ test.describe("Wiki reader: CaseBoard, DeltaTable, Query explorer", () => {
         ref: page.locator(".cb-ref").first(),
         sep: page.locator(".cb-sep").first(),
         deltaRuns: page.locator(".dt-delta-runs").first(),
+        deltaDir: page.locator(".dt-delta-dir").first(),
         pct: page.locator("section.delta-table").first().locator("td.dt-delta:not(.dt-good):not(.dt-bad) .dt-pct").first(),
         count: page.locator(".qx-count"),
       };

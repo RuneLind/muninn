@@ -382,7 +382,7 @@ describe("Query on the text surfaces (no file read)", () => {
     const out = formatSlackMrkdwn(QUERY);
     expect(out.startsWith("*Q-8 — Har de 46 sakene fått årsavregning?*\nSvar: Tre saker (→ S1, S2).\n")).toBe(true);
     expect(out).toContain("Fag sa 30.09 at *dette* gjelder.");
-    expect(out.endsWith("\nResultat: Q-8.csv")).toBe(true);
+    expect(out.endsWith("\nResultat: `Q-8.csv`")).toBe(true);
   });
 
   test("email", () => {

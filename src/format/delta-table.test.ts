@@ -71,9 +71,11 @@ describe("delta arithmetic", () => {
     }
   });
 
-  test("better takes lower or higher in any case; anything else is none", () => {
-    expect(parseDeltaAttrs({ src: " r.csv ", better: "Lower" })).toEqual({ src: "r.csv", better: "lower" });
-    expect(parseDeltaAttrs({ better: "less" })).toEqual({ src: "", better: "" });
+  test("better takes lower or higher in any case; anything else is none, with a warning", () => {
+    expect(parseDeltaAttrs({ src: " r.csv ", better: "Lower" })).toEqual({ src: "r.csv", better: "lower", rows: null, warning: "" });
+    expect(parseDeltaAttrs({ better: "less" })).toMatchObject({ src: "", better: "", rows: null });
+    expect(parseDeltaAttrs({ better: "less" }).warning).toContain("Unknown better value: less");
+    expect(parseDeltaAttrs({})).toEqual({ src: "", better: "", rows: null, warning: "" });
   });
 
   test("rows are padded or cut to the header's width", () => {
@@ -98,11 +100,11 @@ describe("DeltaTable on the web", () => {
     const html = fromCsv("Teller,07.09,08.09,18.09\nKandidater,140,132,16\n", ' better="lower"');
     expect(html).toContain('<section class="delta-table dt-better-lower">');
     expect(html).toContain(
-      '<th scope="col" class="dt-delta">Δ <span class="dt-delta-runs">08.09 → 18.09</span></th>',
+      '<th scope="col" class="dt-delta">Δ <span class="dt-delta-runs">08.09 → 18.09</span><span class="dt-delta-dir">lower is better</span></th>',
     );
     expect(html).toContain(
       '<tr><th scope="row">Kandidater</th><td class="dt-run">140</td><td class="dt-run">132</td><td class="dt-run">16</td>' +
-        '<td class="dt-delta dt-good"><span class="dt-abs">-116</span> <span class="dt-pct">(-87.9%)</span></td></tr>',
+        '<td class="dt-delta dt-good"><span class="dt-mark" role="img" aria-label="better">✓</span> <span class="dt-abs">-116</span> <span class="dt-pct">(-87.9%)</span></td></tr>',
     );
   });
 
@@ -118,7 +120,9 @@ describe("DeltaTable on the web", () => {
     );
     expect(html.indexOf("Simulering mot simulering.")).toBeLessThan(html.indexOf("<table"));
     expect(html).toContain('<th scope="row"><code>antallInputHendelser</code></th>');
-    expect(html).toContain('<td class="dt-delta dt-good"><span class="dt-abs">+45</span> <span class="dt-pct">(+9.8%)</span></td>');
+    expect(html).toContain(
+      '<td class="dt-delta dt-good"><span class="dt-mark" role="img" aria-label="better">✓</span> <span class="dt-abs">+45</span> <span class="dt-pct">(+9.8%)</span></td>',
+    );
   });
 
   test("one run: the table renders, no delta column, and says why", () => {
@@ -162,7 +166,7 @@ describe("DeltaTable on the text surfaces (no file read)", () => {
   test("a src table names the file, escaped", () => {
     const md = '<DeltaTable src="<r>.csv" />';
     expect(formatTelegramHtml(md)).toBe("Table: &lt;r&gt;.csv");
-    expect(formatSlackMrkdwn(md)).toBe("Table: &lt;r&gt;.csv");
+    expect(formatSlackMrkdwn(md)).toBe("Table: `&lt;r&gt;.csv`");
     expect(formatEmailHtml(md)).toContain("Table: &lt;r&gt;.csv");
   });
 
@@ -170,5 +174,134 @@ describe("DeltaTable on the text surfaces (no file read)", () => {
     const md = "<DeltaTable>\n\n| A | x | y |\n|---|---|---|\n| a | 1 | 2 |\n\n</DeltaTable>";
     expect(formatTelegramHtml(md)).toContain("a");
     expect(formatEmailHtml(md)).toContain("<table");
+  });
+});
+
+/** The delta cells of a rendered table, as `[class, text]` with tags dropped. */
+const deltaCells = (html: string) =>
+  [...html.matchAll(/<td class="(dt-delta[^"]*)"[^>]*>([\s\S]*?)<\/td>/g)].map((m) => [m[1]!, m[2]!.replace(/<[^>]+>/g, "")]);
+const pipe = (rows: string[], attrs = "") =>
+  formatWebHtml([`<DeltaTable${attrs}>`, "", ...rows, "", "</DeltaTable>"].join("\n"));
+
+describe("fix round 1: numbers read in the table's context", () => {
+  test("a 0,ddd cell is a decimal, so 0,125 → 0,250 is +0,125", () => {
+    expect(deltaCells(fromCsv('T,a,b\nX,"0,125","0,250"\n'))).toEqual([["dt-delta", "+0,125 (+100,0%)"]]);
+  });
+
+  test("a d,ddd cell in a table that writes decimal commas is a decimal", () => {
+    expect(deltaCells(pipe(["| T | a | b |", "|---|---|---|", "| X | 1,250 sek | 0,980 sek |"]))).toEqual([
+      ["dt-delta", "-0,270 sek (-21,6%)"],
+    ]);
+    expect(deltaCells(pipe(["| T | a | b |", "|---|---|---|", "| X | 22,10 | 22,100 |"]))).toEqual([["dt-delta dt-flat", "0,000 (0,0%)"]]);
+  });
+
+  test("an English table keeps 1,500 as thousands", () => {
+    expect(deltaCells(fromCsv('T,a,b\nX,"1,500","1,750"\nY,2,3\n'))).toEqual([
+      ["dt-delta", "+250 (+16.7%)"],
+      ["dt-delta", "+1 (+50.0%)"],
+    ]);
+  });
+
+  test("the percent separator follows the table: a comma table writes commas in every row", () => {
+    expect(deltaCells(pipe(["| T | a | b |", "|---|---|---|", "| Tid | 22,10 | 27,81 |", "| Antall | 459 | 504 |"]))).toEqual([
+      ["dt-delta", "+5,71 (+25,8%)"],
+      ["dt-delta", "+45 (+9,8%)"],
+    ]);
+  });
+
+  test("a decimal comma in either cell gives a comma: 9 → 9,5 is +0,5", () => {
+    expect(computeDelta("9", "9,5", "")).toEqual({ abs: "+0,5", pct: "+5,6%", tone: "" });
+  });
+});
+
+describe("fix round 1: the grid", () => {
+  test("columns empty in every row, header included, are dropped before the last two runs are chosen", () => {
+    expect(deltaCells(fromCsv("T,a,b,\nX,1,2,\nY,3,5,\n"))).toEqual([
+      ["dt-delta", "+1 (+100.0%)"],
+      ["dt-delta", "+2 (+66.7%)"],
+    ]);
+    // One row with a trailing comma widens the file by an empty column.
+    expect(deltaCells(fromCsv("T,a,b\nX,1,2,\nY,3,5\n"))).toEqual([
+      ["dt-delta", "+1 (+100.0%)"],
+      ["dt-delta", "+2 (+66.7%)"],
+    ]);
+  });
+
+  test("a row wider than the header gets no delta and a visible marker", () => {
+    const csv = deltaCells(fromCsv("T,a,b\nX,1,2,9\nY,3,5\n"));
+    expect(csv[0]![0]).toBe("dt-delta dt-overflow");
+    expect(csv[0]![1]).toBe("more cells than the header");
+    expect(csv[1]).toEqual(["dt-delta", "+2 (+66.7%)"]);
+    const esc = deltaCells(pipe(["| T | a | b |", "|---|---|---|", "| a \\| b | 1 | 2 |", "| c | 1 | 2 |"]));
+    expect(esc[0]).toEqual(["dt-delta dt-overflow", "more cells than the header"]);
+    expect(esc[1]).toEqual(["dt-delta", "+1 (+100.0%)"]);
+  });
+
+  test("the pipe-body table renders exactly once", () => {
+    const html = pipe(["Intro.", "", "| T | a | b |", "|---|---|---|", "| X | 1 | 2 |"]);
+    expect(html.match(/<table/g)).toHaveLength(1);
+  });
+});
+
+describe("fix round 1: cell shapes", () => {
+  test("an exponent change that rounds to 0 at its decimals still shows, and is not flat", () => {
+    expect(computeDelta("1e-7", "2e-7", "lower")).toEqual({ abs: "+1e-7", pct: "+100.0%", tone: "bad" });
+    expect(computeDelta("2e-7", "2e-7", "lower")).toEqual({ abs: "0", pct: "0.0%", tone: "flat" });
+  });
+
+  test("a bold pipe-body cell keeps its delta and renders as authored", () => {
+    const html = pipe(["| T | a | b |", "|---|---|---|", "| **Sum** | **1848** | **1804** |"]);
+    expect(html).toContain('<td class="dt-run"><strong>1804</strong></td>');
+    expect(deltaCells(html)).toEqual([["dt-delta", "-44 (-2.4%)"]]);
+    expect(deltaCells(pipe(["| T | a | b |", "|---|---|---|", "| x | __3__ | *4* |"]))).toEqual([["dt-delta", "+1 (+33.3%)"]]);
+  });
+
+  test("a glued % reads as a unit; a % delta is in percentage points", () => {
+    expect(computeDelta("12%", "15%", "")).toEqual({ abs: "+3 pp", pct: "+25.0%", tone: "" });
+    expect(computeDelta("12 %", "11,5 %", "")).toEqual({ abs: "-0,5 pp", pct: "-4,2%", tone: "" });
+  });
+});
+
+describe("fix round 1: better", () => {
+  const RUNS = "Teller,a,b\nKandidater,132,16\nMetadatafeil,9,10\nUten treff,322,330\n";
+
+  test("a per-row list colours only the rows it names, matched trimmed, case-insensitive, past emphasis", () => {
+    const cells = deltaCells(fromCsv(RUNS, ' better="metadatafeil=lower;  **KANDIDATER** = higher"'));
+    expect(cells.map((c) => c[0])).toEqual(["dt-delta dt-bad", "dt-delta dt-bad", "dt-delta"]);
+  });
+
+  test("a per-row label matches a code-span row label", () => {
+    const html = pipe(["| T | a | b |", "|---|---|---|", "| `antallUtenTreff` | 322 | 355 |"], ' better="antallUtenTreff=lower"');
+    expect(deltaCells(html)[0]![0]).toBe("dt-delta dt-bad");
+  });
+
+  test("an unknown better value is a warning line, not silently no tone", () => {
+    const html = fromCsv(RUNS, ' better="lavere"');
+    expect(html).toContain('<p class="dt-warning">Unknown better value: lavere');
+    expect(deltaCells(html).map((c) => c[0])).toEqual(["dt-delta", "dt-delta", "dt-delta"]);
+    expect(fromCsv(RUNS, ' better="Kandidater=lavere"')).toContain('<p class="dt-warning">Unknown better value: Kandidater=lavere');
+  });
+
+  test("a toned delta carries a marker with an accessible name; the Δ header names the direction", () => {
+    const html = fromCsv(RUNS, ' better="lower"');
+    expect(html).toContain('<td class="dt-delta dt-good"><span class="dt-mark" role="img" aria-label="better">✓</span> <span class="dt-abs">-116</span>');
+    expect(html).toContain('<td class="dt-delta dt-bad"><span class="dt-mark" role="img" aria-label="worse">✗</span> <span class="dt-abs">+1</span>');
+    expect(html).toContain('<span class="dt-delta-dir">lower is better</span>');
+    expect(fromCsv(RUNS, ' better="higher"')).toContain('<span class="dt-delta-dir">higher is better</span>');
+    expect(fromCsv(RUNS, ' better="Kandidater=lower"')).toContain('<span class="dt-delta-dir">✓ better, ✗ worse — per row</span>');
+    expect(fromCsv(RUNS)).not.toContain("dt-delta-dir");
+  });
+});
+
+describe("fix round 1: counts and files", () => {
+  test("the truncation line and the row count share one formatter", () => {
+    const csv = "T,a,b\n" + Array.from({ length: QUERY_CSV_MAX_ROWS + 3 }, (_, i) => `r${i},1,2`).join("\n");
+    expect(fromCsv(csv)).toContain("showing 2,000 of 2,003 rows");
+  });
+
+  test("a DeltaTable src must be a .csv", () => {
+    const html = formatWebHtml('<DeltaTable src="cases.yaml" />', { files: files({ "cases.yaml": { ok: true, text: "- id: A\n" } }) });
+    expect(html).toContain("File type not allowed: cases.yaml");
+    expect(html).not.toContain("<table");
   });
 });

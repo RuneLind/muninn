@@ -12,7 +12,13 @@
  * over the same article adds nothing.
  */
 
-import { isEmptyCell, parseCellNumber, parseCellValue, type CellValue } from "../../../format/cell-number.ts";
+import {
+  isEmptyCell,
+  parseCellNumber,
+  parseCellValue,
+  tableDecimalComma,
+  type CellValue,
+} from "../../../format/cell-number.ts";
 
 export type SortDir = "ascending" | "descending";
 
@@ -57,11 +63,14 @@ const TEXT_ORDER = new Intl.Collator("nb", { numeric: true });
 /** The row order (indices into `cells`) for one column and direction. */
 export function sortOrder(cells: string[], dir: SortDir): number[] {
   const numeric = isNumericColumn(cells);
+  // The column's own decimal context, as a DeltaTable reads its table: one
+  // `0,5` makes `1,500` 1.5 rather than 1500.
+  const ctx = numeric ? tableDecimalComma(cells) : {};
   const sign = dir === "ascending" ? 1 : -1;
   return cells
     .map((c, i) => {
       const e = isEmptyCell(c);
-      return { c: c.trim(), e, i, v: numeric && !e ? cellValue(c) : null };
+      return { c: c.trim(), e, i, v: numeric && !e ? cellValue(c, ctx) : null };
     })
     .sort((a, b) => {
       if (a.e || b.e) return a.e === b.e ? a.i - b.i : a.e ? 1 : -1;

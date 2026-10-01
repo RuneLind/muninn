@@ -2,9 +2,11 @@
 /**
  * The Query explorer: a run of two or more `<Query>` cards (`section.query`)
  * with only whitespace between them gets a bar above the first card — a search
- * box matching each card's id, question, answer and body, and one chip per
- * `uses` value across the run. Client-side only; the server renders the cards
- * as before.
+ * box matching each card's id, question, answer, body and `uses` values, and
+ * one chip per `uses` value across the run. Client-side only; the server
+ * renders the cards as before. A heading or any text between two cards splits
+ * the run; cards inside a `<Fold>` are siblings of each other only, so they
+ * form a run of their own.
  *
  * - Search: every whitespace-separated term must occur (case-insensitive).
  * - Chips: none pressed shows every card; pressed chips show a card that uses
@@ -17,10 +19,11 @@
 
 import { REVEAL_EVENT } from "./wiki-hash-target.ts";
 
-const isBlankText = (n: Node): boolean =>
-  n.nodeType === 8 /* comment */ || (n.nodeType === 3 /* text */ && !(n.textContent ?? "").trim());
+/** A whitespace-only text node. A comment never reaches the reader as a node:
+ *  the renderer escapes `<!-- … -->` into visible text. */
+const isBlankText = (n: Node): boolean => n.nodeType === 3 /* text */ && !(n.textContent ?? "").trim();
 
-/** The card directly before `card`, past whitespace and comments only. */
+/** The card directly before `card`, past whitespace only. */
 function previousCard(card: Element): Element | null {
   let n = card.previousSibling;
   while (n && isBlankText(n)) n = n.previousSibling;
@@ -44,13 +47,14 @@ export function queryRuns(root: ParentNode): HTMLElement[][] {
 
 const fold = (s: string) => s.normalize("NFC").toLowerCase();
 
-/** The text a card is searched by: its id, question, answer and body. */
+/** The text a card is searched by: its id, question, answer, body and every
+ *  `uses` value. */
 export function cardSearchText(card: Element): string {
-  return fold(
-    [".query-id", ".query-question", ".query-answer", ".query-body"]
-      .map((sel) => card.querySelector(sel)?.textContent ?? "")
-      .join("\n"),
+  const parts = [".query-id", ".query-question", ".query-answer", ".query-body"].map(
+    (sel) => card.querySelector(sel)?.textContent ?? "",
   );
+  const uses = Array.from(card.querySelectorAll(".query-use"), (u) => u.textContent ?? "");
+  return fold([...parts, ...uses].join("\n"));
 }
 
 /** True when `text` holds every term of `query`. */
@@ -93,6 +97,8 @@ function enhanceRun(cards: HTMLElement[]): void {
   if (chips.length) {
     const box = document.createElement("div");
     box.className = "qx-chips";
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", "Filter by uses");
     box.append(...chips);
     bar.append(box);
   }

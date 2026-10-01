@@ -15,15 +15,15 @@ import path from "node:path";
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { resolveEmbedRelPath } from "../format/embed.ts";
 import {
-  PAGE_FILE_EXTENSIONS,
   PAGE_FILE_MAX_BYTES,
   PAGE_FILE_MAX_PER_PAGE,
   PAGE_FILE_PAGE_BUDGET_BYTES,
   checkPageFileRef,
   hasExcludedSegment,
-  pageFileExtension,
+  pageFileKind,
   PAGE_FILE_COMPONENTS,
-  pageFileRefs,
+  pageFileRefKinds,
+  type PageFileKind,
   type PageFileResult,
 } from "../format/query-block.ts";
 import { splitFrontmatter } from "./page-text.ts";
@@ -76,9 +76,12 @@ async function readPageFile(
   root: string,
   pageRelPath: string,
   ref: string,
+  kinds: ReadonlySet<PageFileKind>,
   budget: { left: number },
 ): Promise<PageFileResult> {
-  const lexical = checkPageFileRef(ref);
+  // Only a kind some component names this ref for: `<Query sql="x.yml">`
+  // reads nothing, though `.yml` is a CaseBoard's.
+  const lexical = checkPageFileRef(ref, kinds);
   if (lexical !== "ok") return { ok: false, reason: lexical };
   // `null` when a `..` climbs above the root at any point, even one that
   // comes back in: `../<root's name>/x.csv` would otherwise tell a page what
@@ -90,7 +93,9 @@ async function readPageFile(
   // The REAL file is judged by the same rules as the ref: `a.csv` linking to
   // a `.env` or into `.git/` inside the root serves nothing the index serves.
   const realRel = path.relative(found.rootReal, found.real).split(path.sep).join("/");
-  if (!PAGE_FILE_EXTENSIONS.includes(pageFileExtension(realRel))) return { ok: false, reason: "extension" };
+  // …and must be of the SAME kind as the ref: `runs.csv` linking to a `.yaml`
+  // is refused, though a page may read `.yaml` files.
+  if (pageFileKind(realRel) !== pageFileKind(ref)) return { ok: false, reason: "extension" };
   if (hasExcludedSegment(realRel)) return UNAVAILABLE;
   let fh: Awaited<ReturnType<typeof open>> | undefined;
   try {
@@ -141,10 +146,13 @@ export async function loadPageFiles(
 ): Promise<ReadonlyMap<string, PageFileResult>> {
   const out = new Map<string, PageFileResult>();
   if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return out;
-  const refs = pageFileRefs(parseBlocks(splitFrontmatter(markdown).body));
+  const refs = [...pageFileRefKinds(parseBlocks(splitFrontmatter(markdown).body))];
   const budget = { left: PAGE_FILE_PAGE_BUDGET_BYTES };
-  for (const [k, ref] of refs.entries()) {
-    out.set(ref, k < PAGE_FILE_MAX_PER_PAGE ? await readPageFile(root, pageRelPath, ref, budget) : { ok: false, reason: "limit" });
+  for (const [k, [ref, kinds]] of refs.entries()) {
+    out.set(
+      ref,
+      k < PAGE_FILE_MAX_PER_PAGE ? await readPageFile(root, pageRelPath, ref, kinds, budget) : { ok: false, reason: "limit" },
+    );
   }
   return out;
 }

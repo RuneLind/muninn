@@ -307,10 +307,14 @@ export function componentBlockCss(scope: string): string {
     ${scope} .dt-table th[scope="row"] { text-align: left; font-weight: 400; }
     ${scope} .dt-table .dt-run, ${scope} .dt-table .dt-delta { text-align: right; }
     ${scope} .dt-table td.dt-run, ${scope} .dt-table td.dt-delta { white-space: nowrap; }
-    /* Run labels can be long ("08.09 simulering"): headers wrap, so the delta
-       column stays inside the article; cells keep one line. */
-    ${scope} .dt-table thead th { white-space: normal; vertical-align: bottom; }
-    ${scope} .dt-delta-runs { display: block; font-size: 0.85em; }
+    /* Run labels can be long ("08.09 simulering"): only the cells above keep
+       one line, so a header wraps and the delta column stays inside the
+       article (e2e/wiki-caseboard.spec.ts fails with th nowrap). */
+    ${scope} .dt-table thead th { vertical-align: bottom; }
+    ${scope} .dt-delta-runs, ${scope} .dt-delta-dir { display: block; font-size: 0.85em; }
+    ${scope} .dt-delta-dir { color: var(--text-soft); font-weight: 400; }
+    ${scope} .dt-mark { font-weight: 600; }
+    ${scope} .dt-overflow { color: var(--text-soft); font-size: 0.85em; font-style: italic; }
     ${scope} .dt-delta-runs, ${scope} .dt-pct { color: var(--text-soft); font-weight: 400; }
     ${scope} .dt-good, ${scope} .dt-good .dt-pct { color: var(--dt-good); }
     ${scope} .dt-bad, ${scope} .dt-bad .dt-pct { color: var(--dt-bad); }

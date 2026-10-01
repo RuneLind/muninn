@@ -113,7 +113,28 @@ const PAGE = [
   "",
   "</NextMoves>",
   "",
+  // A CaseBoard and a DeltaTable read from files beside the page, and a run of
+  // two Query cards, so the case links and the explorer's search box and
+  // chips render and meet the allowlist below.
+  '<CaseBoard src="testside-res/saker.yaml" />',
+  "",
+  '<DeltaTable src="testside-res/kjoringer.csv" better="lower" />',
+  "",
+  '<Query id="Q-1" question="Hvor mange saker?" answer="Tre." uses="8045, 8306">',
+  "",
+  "Telling per måned.",
+  "",
+  "</Query>",
+  "",
+  '<Query id="Q-2" question="Hvilke saker har avgift?" answer="To." uses="8306">',
+  "",
+  "Saker med avgift.",
+  "",
+  "</Query>",
+  "",
 ].join("\n");
+const CASES = "- id: MEL-1\n  status: hold\n  owner: Fag\n- id: MEL-2\n  status: ok\n";
+const RUNS = "Teller,08.09,18.09\nKandidater,132,16\n";
 const SECOND = ["---", "title: Andre del", "series: felles", "---", "", "# Andre del", "", "Del to av serien.", ""].join("\n");
 const EXPLAINER = "<!doctype html><html><head><title>Kart</title></head><body><p>Innebygd kart.</p></body></html>";
 const OTHER = ["---", "title: Annen side", "---", "", "# Annen side", "", "Lenker tilbake til [[testside]].", ""].join("\n");
@@ -173,6 +194,9 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(root, ".wiki-reader.json"), READER_CONFIG, "utf8");
   await writeFile(path.join(root, PAGE_REL), PAGE, "utf8");
   await writeFile(path.join(root, "plans/testside.html"), EXPLAINER, "utf8");
+  await mkdir(path.join(root, "plans", "testside-res"), { recursive: true });
+  await writeFile(path.join(root, "plans/testside-res/saker.yaml"), CASES, "utf8");
+  await writeFile(path.join(root, "plans/testside-res/kjoringer.csv"), RUNS, "utf8");
   await writeFile(path.join(root, "plans/andre-del.mdx"), SECOND, "utf8");
   await writeFile(path.join(root, "annen-side.md"), OTHER, "utf8");
   await writeFile(path.join(writableRoot, "hemmelig.md"), "# Hemmelig\n\nSkal ikke vises.\n", "utf8");
@@ -253,6 +277,12 @@ const READER_CONTROLS = [
   `.${HISTORIC_PILL_CLASS}`,
   // The NextMoves lane pills (scroll within the page).
   `.${MOVES_PILL_CLASS}`,
+  // CaseBoard row links and Query id links (in-page anchors), and the Query
+  // explorer's search box and uses chips (client-side filters).
+  "a.cb-id",
+  "a.query-id",
+  ".qx-search",
+  ".qx-chip",
   // Out to the tracker.
   'a[href^="https://"][target="_blank"]',
 ];
@@ -316,6 +346,12 @@ for (const scheme of ["light", "dark"] as const) {
     await expect(page.locator(`.${HISTORIC_PILL_CLASS}`)).toBeVisible();
     await expect(page.locator(".wiki-article .nm-lane.nm-you")).toBeVisible();
     await expect(page.locator(`.${MOVES_PILL_CLASS}-you`)).toHaveText("✋ Fag · 1");
+    // The file-backed blocks rendered from their files, and the explorer's
+    // controls are on screen for the allowlist check.
+    await expect(page.locator(".wiki-article .cb-row#case-mel-1 a.cb-id")).toBeVisible();
+    await expect(page.locator(".wiki-article td.dt-delta.dt-good")).toHaveText("✓ -116 (-87.9%)");
+    await expect(page.locator(".wiki-article .qx-search")).toBeVisible();
+    await expect(page.locator(".wiki-article .qx-chip")).toHaveCount(2);
     // The personal ✋ surfaces are absent on a shared instance: the page's row
     // in the rail carries no flag, and the status row offers no chip.
     await expect(page.locator(`.wiki-list-item[data-relpath="${PAGE_REL}"]`)).toBeVisible();

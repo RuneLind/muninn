@@ -96,7 +96,7 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "cb-owner", "cb-note", "cb-refs", "cb-ref",
   "delta-table", "dt-better-lower", "dt-better-higher", "dt-body", "dt-wrap", "dt-table", "dt-run",
   "dt-delta", "dt-delta-runs", "dt-abs", "dt-pct", "dt-good", "dt-bad", "dt-flat", "dt-none",
-  "dt-unavailable", "dt-note", "dt-warning", "dt-truncated",
+  "dt-unavailable", "dt-note", "dt-warning", "dt-truncated", "dt-mark", "dt-delta-dir", "dt-overflow",
   // Syntax highlighting. Imported from the module that EMITS them rather than
   // retyped: a `tok-*` class added there and forgotten here renders colorless
   // in chat while looking perfect in /wiki — a bug visible on one surface only.
