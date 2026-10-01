@@ -37,7 +37,7 @@ const PAGE = [
   "",
   '<Tldr label="Kort fortalt">',
   "",
-  "Fag har svart på grunnlaget. **Tre** oppgaver gjenstår.",
+  "Fag har svart på grunnlaget. **Tre** oppgaver gjenstår, se `antallVilleOppdatertStatusForSkattepliktigeSakerUtenAvgift`.",
   "",
   "</Tldr>",
   "",
@@ -77,7 +77,7 @@ const PAGE = [
   "",
   "- [x] Simuler",
   "  - Kommando: `POST /admin/aarsavregninger/saker/skattepliktige/run`",
-  "  - Forventet: `antallVilleOppdatertStatus` er 0",
+  "  - Forventet: `antallVilleOppdatertStatusForSkattepliktigeSaker` er 0",
   "  - Stopp hvis: `feilVedHenting` er satt",
   "- [x] Gå gjennom de nye sakene",
   "- [ ] Skarp kjøring",
@@ -172,9 +172,9 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
 
   test("Timeline: dated items carry the date and a rail marker; the undated one neither", async ({ page }) => {
     const seen = await openPage(page);
-    const items = page.locator("section.timeline .tl-item");
+    const items = page.locator("section.gtl .gtl-item");
     await expect(items).toHaveCount(3);
-    await expect(items.locator(".tl-date")).toHaveText(["2026-09-28", "30.09.2026"]);
+    await expect(items.locator(".gtl-date")).toHaveText(["2026-09-28", "30.09.2026"]);
     const markers = await items.evaluateAll((lis) => lis.map((li) => getComputedStyle(li, "::before").content));
     expect(markers).toEqual(['""', '""', "none"]);
     await expect(items.nth(2)).toHaveText("Uten dato, venter på fag");
@@ -206,7 +206,7 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
   test("RunChecklist: the step count, labelled rows, and the command's copy button", async ({ page }) => {
     const seen = await openPage(page);
     const rc = page.locator("section.run-checklist");
-    await expect(rc.locator(".rc-count")).toHaveText("2 of 3 steps");
+    await expect(rc.locator(".rc-count")).toHaveText("2 av 3 steg");
     await expect(rc.locator(".rc-label")).toHaveText(["Kommando", "Forventet", "Stopp hvis", "Kommando"]);
     const command = rc.locator(".rc-row.rc-command").first();
     await expect(command.locator("pre code")).toHaveText("POST /admin/aarsavregninger/saker/skattepliktige/run");
@@ -226,14 +226,28 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
     await expect.poll(async () => (await page.locator(".wiki-article").boundingBox())!.width).toBeGreaterThan(250);
     const m = await page.evaluate(() => {
       const art = document.querySelector(".wiki-article")!.getBoundingClientRect().right;
-      const sel = ["section.tldr", "section.timeline", "section.decision-log", "section.run-checklist", ".rc-row", ".rc-value", ".tl-item", ".dl-item"];
+      // Every block and every descendant, inline code included. A `pre` is a
+      // scroll box, so it counts and what is inside it does not.
+      const blocks = Array.from(document.querySelectorAll("section.tldr, section.gtl, section.decision-log, section.run-checklist"));
+      const all = blocks.flatMap((b) => [b, ...Array.from(b.querySelectorAll("*"))]).filter((e) => !e.parentElement?.closest("pre"));
+      const label = document.querySelector(".rc-label")!.getBoundingClientRect();
+      const value = document.querySelector(".rc-value")!.getBoundingClientRect();
       return {
         page: document.documentElement.scrollWidth <= window.innerWidth + 1,
-        overflow: sel.flatMap((s) => Array.from(document.querySelectorAll(s))).filter((e) => e.getBoundingClientRect().right > art + 1).length,
+        checked: all.length,
+        inlineCode: all.filter((e) => e.matches(":not(pre) > code")).length,
+        overflow: all
+          .filter((e) => e.getBoundingClientRect().right > art + 1)
+          .map((e) => `${e.tagName.toLowerCase()}.${e.className} +${Math.round(e.getBoundingClientRect().right - art)}px`),
+        stacked: label.bottom <= value.top + 1,
       };
     });
     expect(m.page).toBe(true);
-    expect(m.overflow).toBe(0);
+    expect(m.checked).toBeGreaterThan(40);
+    expect(m.inlineCode).toBeGreaterThanOrEqual(3);
+    expect(m.overflow).toEqual([]);
+    // Below 520px the label sits above its value.
+    expect(m.stacked).toBe(true);
     expectClean(seen);
   });
 
@@ -263,8 +277,8 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
       const read = {
         tldrLabel: page.locator(".tldr-label"),
         tldrBody: page.locator(".tldr-body"),
-        date: page.locator(".tl-date").first(),
-        undated: page.locator(".tl-undated"),
+        date: page.locator(".gtl-date").first(),
+        undated: page.locator(".gtl-undated"),
         chip: page.locator(".dl-item:not(.dl-dim) .dl-id").first(),
         decision: page.locator(".dl-item:not(.dl-dim) .dl-text").first(),
         command: page.locator(".rc-command pre code").first(),

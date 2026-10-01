@@ -1,6 +1,8 @@
 import { test, expect, describe } from "bun:test";
-import { parseBlocks, type Block, type ChecklistRow } from "./markdown-ast.ts";
+import { laneFromAttrs, parseBlocks, type Block, type ChecklistRow } from "./markdown-ast.ts";
 import { commandCode, parseLogItem, parseRunEntry, parseTimelineItem, runStepLine } from "./genre-lists.ts";
+import { componentBlockCss } from "./component-styles.ts";
+import { chatStyles } from "../chat/views/components/chat-styles.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
@@ -21,14 +23,48 @@ describe("Timeline date grammar", () => {
     ["2026-09-30 – tankestrek", "2026-09-30", "tankestrek"],
     ["2026-09-30 - bindestrek", "2026-09-30", "bindestrek"],
     ["2026-09-30 uten skilletegn", "2026-09-30", "uten skilletegn"],
-    // A dash with no space after it is not the separator: the text keeps it.
-    ["2026-09-30 -x", "2026-09-30", "-x"],
+    // A separator may sit tight against the date or the text.
+    ["2026-09-30 -x", "2026-09-30", "x"],
+    ["2026-09-30—tett", "2026-09-30", "tett"],
+    ["2026-09-30\u00a0—\u00a0hardt mellomrom", "2026-09-30", "hardt mellomrom"],
+    ["2026-09-30\u00a0hardt mellomrom", "2026-09-30", "hardt mellomrom"],
+    // The date alone on the item's first line.
+    ["2026-09-30\nneste linje", "2026-09-30", "neste linje"],
+    // A time belongs to the marker.
+    ["**2026-09-28 20:50Z** — deploy", "2026-09-28 20:50Z", "deploy"],
+    ["2026-09-28 20:50 deploy", "2026-09-28 20:50", "deploy"],
+    ["2026-09-28 20:50Z: deploy", "2026-09-28 20:50Z", "deploy"],
+    ["2026-09-28 25:00 ikke et klokkeslett", "2026-09-28", "25:00 ikke et klokkeslett"],
+    // The colon inside the bold, the house label style.
+    ["**30.09.2026:** Fag svarte", "30.09.2026", "Fag svarte"],
+    ["**2026-09-30:** kolon i fet", "2026-09-30", "kolon i fet"],
+    // One-digit day and month.
+    ["3.9.2026 kort", "3.9.2026", "kort"],
+    ["**3.10.2026** kort", "3.10.2026", "kort"],
+    // No year: bold, or a separator right after it.
+    ["**27.09** Runde 2", "27.09", "Runde 2"],
+    ["**29.09:** Runde 3", "29.09", "Runde 3"],
+    ["**29.09**: Runde 3", "29.09", "Runde 3"],
+    ["29.09: Runde 3", "29.09", "Runde 3"],
+    ["29.09 — Runde 3", "29.09", "Runde 3"],
+    ["2.10– kort", "2.10", "kort"],
+    ["**29.02** skuddag uten år", "29.02", "skuddag uten år"],
     ["2026-09-30", "2026-09-30", ""],
     ["**2026-09-30**", "2026-09-30", ""],
     ["2024-02-29 skuddår", "2024-02-29", "skuddår"],
     // Undated: outside the four shapes, or not a calendar day.
     ["Uten dato", null, "Uten dato"],
     ["30.09 uten år", null, "30.09 uten år"],
+    ["1.2 million", null, "1.2 million"],
+    ["29.09 - bindestrek uten år", null, "29.09 - bindestrek uten år"],
+    ["**27.–28.09** spenn", null, "**27.–28.09** spenn"],
+    ["**31.04** finnes ikke", null, "**31.04** finnes ikke"],
+    ["**32.01** finnes ikke", null, "**32.01** finnes ikke"],
+    ["**30.13** finnes ikke", null, "**30.13** finnes ikke"],
+    ["**30.09**x", null, "**30.09**x"],
+    ["30.09.26 kort år", null, "30.09.26 kort år"],
+    ["31.09.2026 finnes ikke", null, "31.09.2026 finnes ikke"],
+    ["**2026-09-30:**x", null, "**2026-09-30:**x"],
     ["2026-9-3 kort", null, "2026-9-3 kort"],
     ["2026-02-30 finnes ikke", null, "2026-02-30 finnes ikke"],
     ["31.04.2026 finnes ikke", null, "31.04.2026 finnes ikke"],
@@ -60,6 +96,14 @@ describe("DecisionLog id grammar", () => {
     ["**Q1** tre bokstaver tillatt? én", "Q1", "tre bokstaver tillatt? én", false],
     ["**ABC1234** grensen", "ABC1234", "grensen", false],
     ["**d4** liten bokstav", "d4", "liten bokstav", false],
+    // Separators tight or with a hard space, and the id alone on its line.
+    ["**D3**—tett", "D3", "tett", false],
+    ["**D3**:tett kolon", "D3", "tett kolon", false],
+    ["**D2**\u00a0—\u00a0hardt mellomrom", "D2", "hardt mellomrom", false],
+    ["**D1**\nfortsetter", "D1", "fortsetter", false],
+    // A struck id: the id, dimmed.
+    ["~~**D1**~~ — flyttet", "D1", "flyttet", true],
+    ["~~**D1**~~", "D1", "", true],
     // No id: the item stays as written.
     ["Uten id", null, "Uten id", false],
     ["D1 — uten fet", null, "D1 — uten fet", false],
@@ -85,6 +129,13 @@ describe("DecisionLog id grammar", () => {
     ["**D3** — erstattet av fag", "D3", "erstattet av fag", false],
     ["**D3** — uerstattet av D4", "D3", "uerstattet av D4", false],
     ["**D3** — erstattet av D4x", "D3", "erstattet av D4x", false],
+    // The phrase inside a code span is not the rule.
+    ["**D4** — se `superseded by D3`", "D4", "se `superseded by D3`", false],
+    ["**D4** — se ``erstattet av D3``", "D4", "se ``erstattet av D3``", false],
+    ["**D4** — `kode`, superseded by D5", "D4", "`kode`, superseded by D5", true],
+    // A self-reference has no rule of its own.
+    ["**D2** superseded by D2", "D2", "superseded by D2", true],
+    ["~~**D1**~~x", null, "~~**D1**~~x", false],
   ];
   for (const [item, id, text, dim] of rows) {
     test(`${JSON.stringify(item)} → ${id ?? "no id"}${dim ? ", dim" : ""}`, () => {
@@ -104,19 +155,39 @@ describe("RunChecklist label grammar", () => {
     ["Stopp hvis: feil > 0", "stop", "Stopp hvis", "feil > 0"],
     ["Stop if: errors > 0", "stop", "Stop if", "errors > 0"],
     ["Kommando:", "command", "Kommando", ""],
-    // Not a label: case, a missing colon, no space after it, or a leading word.
-    ["kommando: x", null],
+    ["Expected: 0 errors", "expect", "Expected", "0 errors"],
+    // First letter in either case, the label as written.
+    ["kommando: x", "command", "kommando", "x"],
+    ["forventet: 0 feil", "expect", "forventet", "0 feil"],
+    ["expected: 0", "expect", "expected", "0"],
+    ["stopp hvis: feil", "stop", "stopp hvis", "feil"],
+    ["stop if: x", "stop", "stop if", "x"],
+    // In bold, the colon inside or after it.
+    ["**Forventet:** 0 feil", "expect", "Forventet", "0 feil"],
+    ["**Expected:** 0", "expect", "Expected", "0"],
+    ["**Command:** `make`", "command", "Command", "`make`"],
+    ["**Forventet**: 0 feil", "expect", "Forventet", "0 feil"],
+    ["**forventet:**", "expect", "forventet", ""],
+    // Not a label: case past the first letter, a missing colon, no space after
+    // it, a longer word, or a leading word.
     ["KOMMANDO: x", null],
+    ["**KOMMANDO:** x", null],
+    ["Kommandoer: x", null],
+    ["Expect:no-space", null],
+    ["**Kommando:**x", null],
+    ["**Kommando** : x", null],
+    ["*Kommando:* x", null],
     ["Kommando x", null],
     ["Kommando:x", null],
     ["Stopp Hvis: x", null],
     ["Stop If: x", null],
     ["Kjør Kommando: x", null],
-    ["**Kommando:** x", null],
   ];
   for (const [text, kind, label, value] of rows) {
     test(`${JSON.stringify(text)} → ${kind ?? "plain entry"}`, () => {
-      expect(parseRunEntry(row(text))).toEqual(kind ? { kind: kind as "command", label: label!, value: value! } : null);
+      const got = parseRunEntry(row(text));
+      if (kind) expect(got).toMatchObject({ kind, label: label!, value: value! });
+      else expect(got).toBeNull();
     });
   }
 
@@ -132,10 +203,22 @@ describe("RunChecklist label grammar", () => {
     expect(commandCode("``")).toBeNull();
   });
 
-  test("the count is over top-level rows", () => {
-    const r = (checked: boolean): ChecklistRow => ({ checked, text: "x" });
+  test("the count is over top-level rows, English unless a label is Norwegian", () => {
+    const r = (checked: boolean, label?: string): ChecklistRow => ({
+      checked,
+      text: "x",
+      ...(label
+        ? { children: [{ type: "checklist" as const, ordered: false, start: 1, rows: [{ checked: false, text: `${label} y`, plain: true as const }] }] }
+        : {}),
+    });
     expect(runStepLine([r(true), r(true), r(true), r(false), r(false), r(false), r(false)])).toBe("3 of 7 steps");
     expect(runStepLine([r(false)])).toBe("0 of 1 step");
+    expect(runStepLine([r(true, "Command:"), r(false, "Expected:")])).toBe("1 of 2 steps");
+    expect(runStepLine([r(true, "Kommando:"), r(true), r(true), r(false), r(false), r(false), r(false)])).toBe("3 av 7 steg");
+    expect(runStepLine([r(true, "**Forventet:**")])).toBe("1 av 1 steg");
+    expect(runStepLine([r(true, "Command:"), r(false, "stopp hvis:")])).toBe("1 av 2 steg");
+    // An unlabelled nested row with a Norwegian word is not a label.
+    expect(runStepLine([r(true, "Kommandoer:")])).toBe("1 of 1 step");
   });
 });
 
@@ -180,20 +263,21 @@ describe("web: Timeline", () => {
   test("dated items get the date as marker; undated ones none; author's order", () => {
     const html = formatWebHtml(md);
     expect(html).toContain(
-      '<ul class="tl-list"><li class="tl-item tl-dated"><span class="tl-date">2026-09-30</span><span class="tl-text">Fag svarte <em>skriftlig</em></span></li>' +
-        '<li class="tl-item tl-undated">Uten dato<ul><li>under</li></ul></li>' +
-        '<li class="tl-item tl-dated"><span class="tl-date">28.09.2026</span><span class="tl-text">Runde 1</span></li></ul>',
+      '<ul class="gtl-list"><li class="gtl-item gtl-dated"><span class="gtl-date">2026-09-30</span><span class="gtl-text">Fag svarte <em>skriftlig</em></span></li>' +
+        '<li class="gtl-item gtl-undated">Uten dato<ul><li>under</li></ul></li>' +
+        '<li class="gtl-item gtl-dated"><span class="gtl-date">28.09.2026</span><span class="gtl-text">Runde 1</span></li></ul>',
     );
   });
 
   test("other body content renders in place", () => {
     const html = formatWebHtml(md);
     expect(html.indexOf("Innledning.")).toBeGreaterThan(-1);
-    expect(html.indexOf("Innledning.")).toBeLessThan(html.indexOf("tl-list"));
+    expect(html.indexOf("Innledning.")).toBeLessThan(html.indexOf("gtl-list"));
+    expect(html).toStartWith('<section class="gtl">');
   });
 
   test("an ordered list keeps its numbers", () => {
-    expect(formatWebHtml("<Timeline>\n\n3. 2026-01-02 a\n4. b\n\n</Timeline>")).toContain('<ol class="tl-list" start="3">');
+    expect(formatWebHtml("<Timeline>\n\n3. 2026-01-02 a\n4. b\n\n</Timeline>")).toContain('<ol class="gtl-list" start="3">');
   });
 });
 
@@ -271,8 +355,42 @@ describe("web: RunChecklist", () => {
     "</RunChecklist>",
   ].join("\n");
 
-  test("the header counts done of all top-level steps", () => {
-    expect(formatWebHtml(md)).toContain('<div class="rc-head"><span class="rc-count">2 of 3 steps</span></div>');
+  test("the header counts done of all top-level steps, in Norwegian when a label is", () => {
+    expect(formatWebHtml(md)).toContain('<div class="rc-head"><span class="rc-count">2 av 3 steg</span></div>');
+    expect(formatWebHtml("<RunChecklist>\n\n- [x] a\n  - Command: `x`\n- [ ] b\n\n</RunChecklist>")).toContain(
+      '<span class="rc-count">1 of 2 steps</span>',
+    );
+  });
+
+  test("an empty step row is not a step", () => {
+    expect(formatWebHtml("<RunChecklist>\n\n- [x] a\n- [ ]\n- [ ] b\n\n</RunChecklist>")).toContain(
+      '<span class="rc-count">1 of 2 steps</span>',
+    );
+  });
+
+  test("every direct-child list is a step list; prose between renders in place; the count runs over all", () => {
+    const html = formatWebHtml(
+      "<RunChecklist>\n\nInnledning.\n\n- [x] Simuler\n  - Kommando: `POST /run`\n\nMellom stegene.\n\n- [ ] Skarp\n- [ ] Rydd\n\n</RunChecklist>",
+    );
+    expect(html).toContain('<span class="rc-count">1 av 3 steg</span>');
+    const at = (s: string) => html.indexOf(s);
+    expect(at("rc-head")).toBeLessThan(at("Innledning."));
+    expect(at("Innledning.")).toBeLessThan(at("Simuler"));
+    expect(at("Simuler")).toBeLessThan(at("Mellom stegene."));
+    expect(at("Mellom stegene.")).toBeLessThan(at("Skarp"));
+    expect(html).toContain("Rydd");
+    expect(html).toContain('<div class="rc-row rc-command"><span class="rc-label">Kommando</span>');
+  });
+
+  test("an ordered runbook keeps its numbers and its labelled rows", () => {
+    const html = formatWebHtml(
+      "<RunChecklist>\n\n1. [x] Simuler\n   - Kommando: `POST /run`\n   - Forventet: 0 feil\n2. [ ] Skarp\n   - Kommando: `POST /run?dry=false`\n\n</RunChecklist>",
+    );
+    expect(html).toContain('<span class="rc-count">1 av 2 steg</span>');
+    expect(html).toMatch(/<ol class="checklist[^"]*"><li class="check-item check-done check-parent" value="1">/);
+    expect(html).toContain('value="2"');
+    expect(html.match(/rc-row rc-command/g)).toHaveLength(2);
+    expect(html).toContain('<div class="rc-row rc-expect"><span class="rc-label">Forventet</span>');
   });
 
   test("labelled entries are rows; an unlabelled entry stays a nested list item", () => {
@@ -308,6 +426,41 @@ describe("web: RunChecklist", () => {
 
   test("no task list: the body renders as is", () => {
     expect(formatWebHtml("<RunChecklist>\n\nBare tekst.\n\n</RunChecklist>")).not.toContain("run-checklist");
+  });
+});
+
+describe("NextMoves lane: a RunChecklist's open steps", () => {
+  const lane = (md: string) => laneFromAttrs({ kind: "you" }, parseBlocks(md)).items;
+
+  test("counts the unchecked steps of every step list, as the header does", () => {
+    const md = "<RunChecklist>\n\n- [x] a\n- [ ] b\n  - Kommando: `x`\n- [ ]\n\nMellom.\n\n1. [ ] c\n\n</RunChecklist>";
+    expect(lane(md)).toEqual(["b", "c"]);
+    expect(formatWebHtml(md)).toContain('<span class="rc-count">1 av 3 steg</span>');
+  });
+
+  test("a plain Checklist still counts its first list only", () => {
+    expect(lane("<Checklist>\n\n- [x] a\n- [ ] b\n- [ ]\n\nMellom.\n\n- [ ] c\n\n</Checklist>")).toEqual(["b"]);
+  });
+});
+
+describe("chat: no stylesheet rule outside the block CSS reaches the four blocks", () => {
+  const md = [
+    '<Tldr label="L">\n\nx\n\n</Tldr>',
+    "<Timeline>\n\n- 2026-09-30 a\n- b\n\n</Timeline>",
+    "<DecisionLog>\n\n- **D1** a\n- ~~**D2** b~~\n- c\n\n</DecisionLog>",
+    "<RunChecklist>\n\n- [x] a\n  - Kommando: `x`\n  - Forventet: y\n  - Stopp hvis: z\n  - note\n\n</RunChecklist>",
+  ].join("\n\n");
+  const classes = (html: string) => new Set([...html.matchAll(/class="([^"]*)"/g)].flatMap((m) => m[1]!.split(/\s+/)));
+
+  test("every class the blocks add is free in chat's own rules", () => {
+    const unwrapped = md.replace(/^<\/?(?:Tldr|Timeline|DecisionLog|RunChecklist)[^>]*>$/gm, "");
+    const plain = classes(formatWebHtml(unwrapped));
+    const own = [...classes(formatWebHtml(md))].filter((c) => !plain.has(c));
+    // The fixture reaches every block's classes.
+    for (const c of ["tldr", "gtl-dated", "gtl-undated", "dl-dim", "dl-noid", "rc-command", "rc-expect", "rc-stop"]) expect(own).toContain(c);
+    const chatOwn = chatStyles().replace(componentBlockCss(".web-content"), "");
+    const hits = own.filter((c) => new RegExp(`\\.${c.replace(/-/g, "\\-")}(?![\\w-])`).test(chatOwn));
+    expect(hits).toEqual([]);
   });
 });
 
@@ -379,5 +532,22 @@ describe("plain-text fallbacks", () => {
 
   test("Tldr without a label says TL;DR", () => {
     expect(formatSlackMrkdwn("<Tldr>\n\nx\n\n</Tldr>")).toStartWith("*TL;DR:*");
+  });
+
+  test("a label ending in a colon gets no second one", () => {
+    const md = '<Tldr label="Kort sagt: ">\n\nx\n\n</Tldr>';
+    expect(formatSlackMrkdwn(md)).toStartWith("*Kort sagt:*\n");
+    expect(formatTelegramHtml(md)).toStartWith("<b>Kort sagt:</b>\n");
+    expect(formatEmailHtml(md)).toContain(">Kort sagt:</div>");
+  });
+
+  test("RunChecklist: every step list and the prose between them", () => {
+    const md = "<RunChecklist>\n\nInnledning.\n\n- [x] a\n\nMellom.\n\n- [ ] b\n\n</RunChecklist>";
+    expect(formatSlackMrkdwn(md)).toBe("Innledning.\n\n☑ a\n\nMellom.\n\n☐ b");
+    expect(formatTelegramHtml(md)).toBe("Innledning.\n\n☑ a\n\nMellom.\n\n☐ b");
+    const email = formatEmailHtml(md);
+    expect(email.indexOf("Innledning.")).toBeLessThan(email.indexOf("☑</span> a"));
+    expect(email.indexOf("☑</span> a")).toBeLessThan(email.indexOf("Mellom."));
+    expect(email.indexOf("Mellom.")).toBeLessThan(email.indexOf("☐</span> b"));
   });
 });

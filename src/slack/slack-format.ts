@@ -7,6 +7,7 @@ import {
   FACT_COUNT_WORD,
   parseMeterAttrs,
   parseChecklist,
+  runChecklistBody,
   parseResolvedDate,
   historicLeadText,
   resolvedLeadText,
@@ -14,6 +15,7 @@ import {
   laneLeadText,
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
+import { tldrFallbackLabel } from "../format/genre-lists.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
@@ -162,14 +164,19 @@ const slackRenderer: BlockRenderer = {
         return [children, line ? slackFileLine(line) : ""].filter(Boolean).join("\n");
       }
       case "Tldr":
-        return `*${renderInline(attrs.label?.trim() || "TL;DR")}:*\n${children}`;
+        return `*${renderInline(tldrFallbackLabel(attrs.label))}:*\n${children}`;
       // The list as written: dates and ids stay text, labelled rows stay items.
       case "Timeline":
       case "DecisionLog":
         return children;
       case "RunChecklist": {
-        const items = parseChecklist(rawChildren);
-        return items.length === 0 ? children : checklistText(items);
+        // Every step list and the blocks between them, in source order.
+        const parts = runChecklistBody(rawChildren);
+        if (!parts.some((p) => p.kind === "steps")) return children;
+        return parts
+          .map((p) => (p.kind === "steps" ? checklistText(p.list.rows, p.list.ordered, p.list.start, p.list.values) : renderBlocks([p.block], slackRenderer)))
+          .filter((out) => out.trim() !== "")
+          .join("\n\n");
       }
       case "FactCheck":
         // The collapsed appendix has no fold here, so it degrades to its summary

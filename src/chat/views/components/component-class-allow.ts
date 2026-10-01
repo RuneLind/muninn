@@ -98,8 +98,8 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "dt-delta", "dt-delta-runs", "dt-abs", "dt-pct", "dt-good", "dt-bad", "dt-flat", "dt-none",
   "dt-unavailable", "dt-note", "dt-warning", "dt-truncated", "dt-mark", "dt-delta-dir", "dt-overflow",
   // `<Tldr>`, `<Timeline>`, `<DecisionLog>`, `<RunChecklist>`: same reason.
-  "tldr", "tldr-label", "tldr-body", "timeline", "tl-list", "tl-item", "tl-dated", "tl-undated",
-  "tl-date", "tl-text", "decision-log", "dl-list", "dl-item", "dl-dim", "dl-noid", "dl-id", "dl-text",
+  "tldr", "tldr-label", "tldr-body", "gtl", "gtl-list", "gtl-item", "gtl-dated", "gtl-undated",
+  "gtl-date", "gtl-text", "decision-log", "dl-list", "dl-item", "dl-dim", "dl-noid", "dl-id", "dl-text",
   "run-checklist", "rc-head", "rc-count", "rc-row", "rc-command", "rc-expect", "rc-stop", "rc-label",
   "rc-value",
   // Syntax highlighting. Imported from the module that EMITS them rather than

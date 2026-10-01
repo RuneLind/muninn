@@ -30,6 +30,7 @@ import {
   parseMeterAttrs,
   firstCodeBlock,
   parseChecklist,
+  runChecklistBody,
   parseResolvedDate,
   historicLeadText,
   resolvedLeadText,
@@ -37,6 +38,7 @@ import {
   laneLeadText,
 } from "./markdown-ast.ts";
 import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
+import { tldrFallbackLabel } from "./genre-lists.ts";
 import { renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "./query-block.ts";
@@ -335,7 +337,7 @@ const emailRenderer: BlockRenderer = {
       case "Tldr":
         return (
           `<div style="margin:0 0 12px;">` +
-          `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">${escapeHtml(attrs.label?.trim() || "TL;DR")}:</div>` +
+          `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">${escapeHtml(tldrFallbackLabel(attrs.label))}:</div>` +
           `${children}</div>`
         );
       // The list as written: dates and ids stay text, labelled rows stay items.
@@ -343,8 +345,13 @@ const emailRenderer: BlockRenderer = {
       case "DecisionLog":
         return children;
       case "RunChecklist": {
-        const items = parseChecklist(rawChildren);
-        return items.length === 0 ? children : checklistEmail(items, 0);
+        // Every step list and the blocks between them, in source order.
+        const parts = runChecklistBody(rawChildren);
+        if (!parts.some((p) => p.kind === "steps")) return children;
+        return parts
+          .map((p) => (p.kind === "steps" ? checklistEmail(p.list.rows, 0, p.list.ordered, p.list.start, p.list.values) : renderBlocks([p.block], emailRenderer)))
+          .filter((out) => out.trim() !== "")
+          .join("\n");
       }
       case "FactCheck":
         // No <details> in mail — the appendix renders open, under its summary line.

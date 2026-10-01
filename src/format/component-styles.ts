@@ -334,18 +334,19 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .tldr-body > :first-child { margin-top: 0; }
     ${scope} .tldr-body > :last-child { margin-bottom: 0; }
-    /* Timeline: dated items on a vertical rail, the date as the marker. */
-    ${scope} .timeline { margin: 1.2rem 0; }
-    ${scope} .tl-list {
+    /* Timeline: dated items on a vertical rail, the date as the marker. The gtl-
+       prefix, because chat's inspector styles timeline/tl-item unscoped. */
+    ${scope} .gtl { margin: 1.2rem 0; }
+    ${scope} .gtl-list {
       list-style: none; margin: 0.6rem 0 0.6rem 0.4rem; padding: 0 0 0 1.1rem;
       border-left: 2px solid var(--border-secondary);
     }
-    ${scope} .tl-item { position: relative; padding: 0.2rem 0; }
-    ${scope} .tl-dated::before {
+    ${scope} .gtl-item { position: relative; padding: 0.2rem 0; }
+    ${scope} .gtl-dated::before {
       content: ""; position: absolute; box-sizing: border-box; width: 10px; height: 10px; border-radius: 50%;
       left: calc(-1.1rem - 6px); top: 0.75em; background: var(--accent);
     }
-    ${scope} .tl-date {
+    ${scope} .gtl-date {
       font-family: var(--mono, ui-monospace, monospace); font-weight: 600; font-variant-numeric: tabular-nums;
       color: var(--text-secondary); margin-right: 0.5rem; white-space: nowrap;
     }
@@ -375,6 +376,12 @@ export function componentBlockCss(scope: string): string {
     ${scope} .rc-label { color: var(--text-soft); font-size: 0.85em; font-weight: 600; }
     ${scope} .rc-value { min-width: 0; }
     ${scope} .rc-value > :is(pre, .fence) { margin: 0.1rem 0; }
+    /* A long identifier in inline code wraps instead of widening the page. */
+    ${scope} :is(.tldr, .gtl, .decision-log, .run-checklist) :not(pre) > code { overflow-wrap: anywhere; }
+    /* Narrow screens: the label stacks above its value. */
+    @media (max-width: 520px) {
+      ${scope} .rc-row { grid-template-columns: minmax(0, 1fr); margin-left: 0.75rem; }
+    }
     ${scope} .diagram {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

@@ -19,6 +19,8 @@ import {
   laneFromAttrs,
   laneLeadText,
   isTaskList,
+  runChecklistBody,
+  runChecklistSteps,
   taskListRows,
 } from "../format/markdown-ast.ts";
 import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
@@ -662,10 +664,10 @@ function wrappedListsHtml(
  *  written, for a marker; an undated one has no marker. */
 function timelineItemHtml(text: string, nested: string, value: string): string {
   const t = parseTimelineItem(text);
-  if (!t.date) return `<li class="tl-item tl-undated"${value}>${itemHtml(t.text)}${nested}</li>`;
+  if (!t.date) return `<li class="gtl-item gtl-undated"${value}>${itemHtml(t.text)}${nested}</li>`;
   return (
-    `<li class="tl-item tl-dated"${value}><span class="tl-date">${escapeHtml(t.date)}</span>` +
-    `<span class="tl-text">${itemHtml(t.text)}</span>${nested}</li>`
+    `<li class="gtl-item gtl-dated"${value}><span class="gtl-date">${escapeHtml(t.date)}</span>` +
+    `<span class="gtl-text">${itemHtml(t.text)}</span>${nested}</li>`
   );
 }
 
@@ -993,16 +995,25 @@ const webRenderer: BlockRenderer = {
         return `<section class="tldr"><div class="tldr-label">${escapeHtml(label)}</div><div class="tldr-body">${children}</div></section>`;
       }
       case "Timeline":
-        return `<section class="timeline">${wrappedListsHtml(rawChildren, "tl-list", timelineItemHtml)}</section>`;
+        // `gtl-`, not `timeline`/`tl-`: chat's inspector styles those unscoped.
+        return `<section class="gtl">${wrappedListsHtml(rawChildren, "gtl-list", timelineItemHtml)}</section>`;
       case "DecisionLog":
         return `<section class="decision-log">${wrappedListsHtml(rawChildren, "dl-list", logItemHtml)}</section>`;
       case "RunChecklist": {
-        // A Checklist whose steps carry Command / Expect / Stop-if rows.
-        const rows = parseChecklist(rawChildren);
-        if (rows.length === 0) return children;
+        // A Checklist whose steps carry Command / Expect / Stop-if rows. Every
+        // direct-child list is a step list; other blocks render in place.
+        const parts = runChecklistBody(rawChildren);
+        if (!parts.some((p) => p.kind === "steps")) return children;
+        const body = parts
+          .map((p) =>
+            p.kind === "steps"
+              ? checklistHtml(p.list.rows, p.list.ordered, p.list.start, p.list.values, runListHtml)
+              : renderBlocks([p.block], webRenderer),
+          )
+          .join("\n");
         return (
-          `<section class="run-checklist"><div class="rc-head"><span class="rc-count">${runStepLine(rows)}</span></div>` +
-          `${checklistHtml(rows, false, 1, undefined, runListHtml)}</section>`
+          `<section class="run-checklist"><div class="rc-head"><span class="rc-count">${runStepLine(runChecklistSteps(rawChildren))}</span></div>` +
+          `${body}</section>`
         );
       }
       case "FactCheck": {

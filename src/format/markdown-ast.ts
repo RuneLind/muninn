@@ -374,8 +374,9 @@ export interface NextMovesLane {
    *  as given, with no age, so a typo never silently disappears. Else null. */
   sinceRaw: string | null;
   /** The lane's OPEN steps, each one's text with any `[ ]` marker stripped, in
-   *  source order: every top-level list item that is not `[x]`, and every
-   *  unchecked top-level row of a `<Checklist>` directly in the lane. Prose, a
+   *  source order: every top-level list item that is not `[x]`, every
+   *  unchecked top-level row of a `<Checklist>` directly in the lane, and every
+   *  unchecked step of a `<RunChecklist>` (`runChecklistSteps`). Prose, a
    *  table or a callout is not a step — a lane holding only those counts 0 —
    *  and neither is an empty item. */
   items: string[];
@@ -406,6 +407,8 @@ function laneSteps(children: Block[]): string[] {
       }
     } else if (b.type === "component" && b.name === "Checklist") {
       for (const row of parseChecklist(b.children)) if (!row.checked) items.push(row.text);
+    } else if (b.type === "component" && b.name === "RunChecklist") {
+      for (const row of runChecklistSteps(b.children)) if (!row.checked) items.push(row.text);
     }
   }
   // An empty item (`- [ ]` with nothing after it) is no step to take.
@@ -844,6 +847,35 @@ export function parseChecklist(children: Block[]): ChecklistRow[] {
   const ul = children.find((c) => c.type === "ul");
   if (!ul || ul.type !== "ul") return [];
   return checklistRows(ul, true);
+}
+
+/** A `RunChecklist` body in source order: every direct-child list (`ul` or
+ *  `ol`) is a step list of top-level rows, an ordered one keeping its numbers;
+ *  any other block stays a block, rendered in place. */
+export type RunChecklistPart = { kind: "steps"; list: ChecklistList } | { kind: "block"; block: Block };
+
+export function runChecklistBody(children: Block[]): RunChecklistPart[] {
+  return children.map((b): RunChecklistPart =>
+    b.type === "ul" || b.type === "ol"
+      ? {
+          kind: "steps",
+          list: {
+            type: "checklist",
+            ordered: b.type === "ol",
+            start: b.type === "ol" ? b.start : 1,
+            ...(b.type === "ol" && b.values ? { values: b.values } : {}),
+            rows: checklistRows(b, true),
+          },
+        }
+      : { kind: "block", block: b },
+  );
+}
+
+/** A `RunChecklist`'s steps: the top-level rows of every step list, minus
+ *  empty ones (`- [ ]` with no text). The header count and a NextMoves lane's
+ *  open steps both read this. */
+export function runChecklistSteps(children: Block[]): ChecklistRow[] {
+  return runChecklistBody(children).flatMap((p) => (p.kind === "steps" ? p.list.rows : [])).filter((r) => r.text.trim() !== "");
 }
 
 function checklistRows(list: ListBlock, top: boolean): ChecklistRow[] {
