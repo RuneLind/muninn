@@ -197,8 +197,6 @@ describe("Query table sorting — the column rule (enumerated)", () => {
       ["2026-09-08 09:05:00.000", "2026-09-08 17:24:05.120", "2026-09-08 17:24:05.500", "2026-09-08 17:24:05.900"]],
     ["19-digit ids in text", ["ID-1234567890123456789", "ID-1234567890123456788"],
       ["ID-1234567890123456788", "ID-1234567890123456789"]],
-    ["19-digit plain ids", ["1234567890123456789", "1234567890123456788"],
-      ["1234567890123456788", "1234567890123456789"]],
     ["400-digit runs", [`x${big("9")}`, `x${big("1")}`, "x5"], ["x5", `x${big("1")}`, `x${big("9")}`]],
     ["plain numbers", ["10", "-1.5", "2,5", "1 000", "−5", "1,234.5", "0.25"],
       ["−5", "-1.5", "0.25", "2,5", "10", "1 000", "1,234.5"]],
@@ -211,6 +209,13 @@ describe("Query table sorting — the column rule (enumerated)", () => {
     ["words with æøå", ["Ås", "Zebra", "Øst", "Ærlig", "Alfa"], ["Alfa", "Zebra", "Ærlig", "Øst", "Ås"]],
     ["empty and NULL cells", ["MEL-10", "", "MEL-9", "NULL", "[NULL]"], ["MEL-9", "MEL-10", "", "NULL", "[NULL]"]],
   ];
+  // Declared cost: past 2^53 two integers round to one Number, tie, and keep
+  // file order in both directions.
+  test("19-digit plain ids tie and keep file order", () => {
+    const cells = ["1234567890123456789", "1234567890123456788"];
+    expect(sorted(cells)).toEqual(cells);
+    expect(sorted(cells, "descending")).toEqual(cells);
+  });
   for (const [name, cells, asc] of TABLE) {
     test(`${name}: ascending, then descending, every comparison finite`, () => {
       expect(sorted(cells)).toEqual(asc);

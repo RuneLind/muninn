@@ -43,18 +43,18 @@ export function parseCellNumber(cell: string): number | null {
 /** A unit token: letters, `%` or currency symbols (`kr`, `x`, `%`, `NOK`, `€`). */
 const UNIT_RE = /^[\p{L}%\p{Sc}]+$/u;
 
-type CellValue = { n: number; unit: string; text: string };
+type CellValue = { n: number; unit: string };
 
 /** A cell as (a) a plain number (`unit` ""), or (b) a plain number, white
- *  space and ONE unit token; null for anything else. `text` is the number. */
+ *  space and ONE unit token; null for anything else. */
 function cellValue(cell: string): CellValue | null {
   const t = cell.trim();
   const n = parseCellNumber(t);
-  if (n !== null) return { n, unit: "", text: t };
+  if (n !== null) return { n, unit: "" };
   const m = /^(.*\S)\s+(\S+)$/u.exec(t);
   if (!m || !UNIT_RE.test(m[2]!)) return null;
   const v = parseCellNumber(m[1]!);
-  return v === null ? null : { n: v, unit: m[2]!, text: m[1]! };
+  return v === null ? null : { n: v, unit: m[2]! };
 }
 
 /** The column's unit: "" when every non-empty cell is a plain number, the
@@ -81,24 +81,13 @@ export function isNumericColumn(cells: string[]): boolean {
   return columnUnit(cells) !== null;
 }
 
-/** An integer cell as a BigInt, for a tie past 2^53 (`Number` rounds two
- *  19-digit ids to one value); null for a fraction or an exponent. */
-function exactInteger(text: string): bigint | null {
-  const t = text.replace(/^−/, "-").replace(/[   ,]/g, "");
-  return /^[+-]?\d+$/.test(t) ? BigInt(t) : null;
-}
-
 /** -1, 0 or 1 — never a difference, which overflows to ±Infinity. */
 function compareNumbers(a: CellValue, b: CellValue): number {
-  if (a.n !== b.n) return a.n < b.n ? -1 : 1;
-  if (Math.abs(a.n) <= Number.MAX_SAFE_INTEGER) return 0;
-  const x = exactInteger(a.text);
-  const y = exactInteger(b.text);
-  return x === null || y === null || x === y ? 0 : x < y ? -1 : 1;
+  return a.n === b.n ? 0 : a.n < b.n ? -1 : 1;
 }
 
-/** Text order: Norwegian collation, each digit run compared as a whole number
- *  by ICU (exact at any length): `MEL-9` < `MEL-10`, `10.0.0.9` < `10.0.0.10`. */
+/** Text order: Norwegian collation, each digit run compared as a number by ICU
+ *  (runs up to 254 digits): `MEL-9` < `MEL-10`, `10.0.0.9` < `10.0.0.10`. */
 const TEXT_ORDER = new Intl.Collator("nb", { numeric: true });
 
 /** The row order (indices into `cells`) for one column and direction. */
