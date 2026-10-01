@@ -64,10 +64,11 @@ const UNAVAILABLE: PageFileResult = { ok: false, reason: "unavailable" };
  * that real path with `O_NOFOLLOW` (a file swapped for a symlink after the
  * check is refused, not followed) and `O_NONBLOCK` (a FIFO does not hang the
  * open). Type, link count and size are read off the handle, and at most
- * cap + 1 bytes are read from it, so a file grown after `fstat` is still
- * refused. Residual: a DIRECTORY on the path swapped for a symlink between the
- * realpath and the open is not caught — `O_NOFOLLOW` covers the last segment
- * only.
+ * min(size, cap) + 1 bytes are read from it, so a file grown after `fstat` is
+ * still refused. Two residuals, both needing write access to the wiki tree: a
+ * DIRECTORY on the path swapped for a symlink between the realpath and the
+ * open (`O_NOFOLLOW` covers the last segment only), and a hard link to an
+ * outside file once nlink reads 1 (see the check below).
  */
 async function readPageFile(
   root: string,
@@ -93,12 +94,14 @@ async function readPageFile(
   try {
     fh = await open(found.real, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
     const st = await fh.stat();
-    // A hard link is invisible to realpath; one with a second name may be an
-    // outside file linked in, so it reads like an outside file.
+    // A hard link is invisible to realpath. Best effort only: a file with a
+    // second name may be an outside file linked in, but once the outside name
+    // is gone (or under a rename race) nlink reads 1 and the file is served.
     if (!st.isFile() || st.nlink > 1) return UNAVAILABLE;
     if (st.size > PAGE_FILE_MAX_BYTES) return { ok: false, reason: "too-large" };
     if (st.size > budget.left) return { ok: false, reason: "budget" };
-    const buf = Buffer.alloc(PAGE_FILE_MAX_BYTES + 1);
+    // One byte past the size `fstat` reported shows a file grown since.
+    const buf = Buffer.alloc(Math.min(st.size, PAGE_FILE_MAX_BYTES) + 1);
     let n = 0;
     for (;;) {
       const { bytesRead } = await fh.read(buf, n, buf.length - n, n);
@@ -107,10 +110,13 @@ async function readPageFile(
       if (n === buf.length) break;
     }
     if (n > PAGE_FILE_MAX_BYTES) return { ok: false, reason: "too-large" };
+    if (n > st.size) return UNAVAILABLE;
     if (n > budget.left) return { ok: false, reason: "budget" };
     budget.left -= n;
-    // A NUL is the wikilink sentinel's delimiter in `renderWikiHtml`.
-    return { ok: true, text: buf.toString("utf8", 0, n).replace(/\0/g, "�") };
+    // A NUL is the wikilink sentinel's delimiter in `renderWikiHtml`; a
+    // leading BOM would reach the SQL disclosure and its Copy text.
+    const text = buf.toString("utf8", 0, n).replace(/^\uFEFF/, "").replace(/\0/g, "�");
+    return { ok: true, text };
   } catch {
     return UNAVAILABLE;
   } finally {

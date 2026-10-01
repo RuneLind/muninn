@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { link, mkdir, mkdtemp, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { constants as fsc } from "node:fs";
+import { link, mkdir, mkdtemp, open, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadPageFiles, resolveContainedFile } from "./page-files.ts";
@@ -115,7 +116,7 @@ describe("loadPageFiles", () => {
 });
 
 describe("loadPageFiles — containment beyond the realpath", () => {
-  test("a hard link to a file outside the root is unavailable", async () => {
+  test("a hard link to a file outside the root is unavailable while the outside name exists (best effort)", async () => {
     await link(path.join(base, "outside.csv"), path.join(root, "plans", "hard.csv"));
     try {
       expect((await load("hard.csv")).get("hard.csv")).toEqual({ ok: false, reason: "unavailable" });
@@ -141,6 +142,45 @@ describe("loadPageFiles — containment beyond the realpath", () => {
     const files = await loadPageFiles(root, "plans/sub/page.mdx", md);
     expect(files.get("../.hidden/s.csv")).toEqual({ ok: false, reason: "invalid" });
     expect(files.get("../../node_modules/n.csv")).toEqual({ ok: false, reason: "invalid" });
+  });
+
+  test("an in-root symlink whose real path has a dot or node_modules segment is unavailable", async () => {
+    await mkdir(path.join(root, ".git"), { recursive: true });
+    await mkdir(path.join(root, "node_modules"), { recursive: true });
+    await writeFile(path.join(root, ".git", "x.csv"), "G\n1\n");
+    await writeFile(path.join(root, "node_modules", "n.csv"), "N\n1\n");
+    await symlink(path.join(root, ".git", "x.csv"), path.join(root, "plans", "a.csv"));
+    await symlink(path.join(root, "node_modules", "n.csv"), path.join(root, "plans", "b.csv"));
+    try {
+      const files = await load("a.csv", "b.csv");
+      expect(files.get("a.csv")).toEqual({ ok: false, reason: "unavailable" });
+      expect(files.get("b.csv")).toEqual({ ok: false, reason: "unavailable" });
+    } finally {
+      await unlink(path.join(root, "plans", "a.csv"));
+      await unlink(path.join(root, "plans", "b.csv"));
+    }
+  });
+
+  test("a FIFO named like a csv answers unavailable at once, without blocking", async () => {
+    const fifo = path.join(root, "plans", "x.csv");
+    await Bun.$`mkfifo ${fifo}`.quiet();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<"timeout">((resolve) => (timer = setTimeout(() => resolve("timeout"), 1000)));
+      const got = await Promise.race([load("x.csv").then((m) => m.get("x.csv")), timeout]);
+      expect(got).toEqual({ ok: false, reason: "unavailable" });
+    } finally {
+      clearTimeout(timer);
+      // A blocked reader (the regression) is released by a writer opening the FIFO.
+      await open(fifo, fsc.O_WRONLY | fsc.O_NONBLOCK).then((fh) => fh.close()).catch(() => {});
+      await unlink(fifo);
+    }
+  });
+
+  test("a leading byte-order mark is dropped from the text", async () => {
+    await writeFile(path.join(root, "plans", "res", "bom.sql"), "\uFEFFSELECT 1;\n");
+    const files = await loadPageFiles(root, PAGE, '<Query id="Q" sql="res/bom.sql">\n\n</Query>');
+    expect(files.get("res/bom.sql")).toEqual({ ok: true, text: "SELECT 1;\n" });
   });
 
   test(`past ${PAGE_FILE_PAGE_BUDGET_BYTES / 1024 / 1024} MB of files on one page the rest are not read`, async () => {

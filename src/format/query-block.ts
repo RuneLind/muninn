@@ -61,8 +61,9 @@ export function checkPageFileRef(ref: string): "ok" | "invalid" | "extension" {
 
 export interface QueryAttrs {
   id: string;
-  /** The card's `id` as a slug: Unicode letters, digits, `_` and `-`, lower-cased
-   *  (`Spørring 8` → `spørring-8`). Empty when `id` has no usable character.
+  /** The card's `id` as a slug: NFC, then Unicode letters, combining marks,
+   *  digits, `_` and `-`, lower-cased (`Spørring 8` → `spørring-8`, whether the
+   *  file spells `ø` precomposed or not). Empty when `id` has no usable character.
    *  Not unique: the web renderer suffixes a repeat within one render. */
   anchor: string;
   question: string;
@@ -77,7 +78,7 @@ export function parseQueryAttrs(attrs: Record<string, string>): QueryAttrs {
   const id = (attrs.id ?? "").trim();
   return {
     id,
-    anchor: id.toLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, ""),
+    anchor: id.normalize("NFC").toLowerCase().replace(/[^\p{L}\p{M}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, ""),
     question: (attrs.question ?? "").trim(),
     answer: (attrs.answer ?? "").trim(),
     csv: (attrs.csv ?? "").trim(),

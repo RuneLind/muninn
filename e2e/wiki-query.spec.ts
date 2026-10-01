@@ -14,6 +14,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
@@ -80,6 +81,29 @@ const PAGE = [
   "",
 ].join("\n");
 
+// A page of its own for the in-place reload: the fact-check ➕ writes into it.
+const RELOAD_REL = "plans/reload.mdx";
+const RELOAD_PAGE = [
+  "---",
+  "title: Reload page",
+  "type: plan",
+  "---",
+  "",
+  "# Reload page",
+  "",
+  ...Array.from({ length: 40 }, (_, i) => `Avsnitt ${i + 1} med fylltekst.\n`),
+  '<Fold title="Kort">',
+  "",
+  '<Query id="R-1" question="I en lukket fold?" answer="Ja.">',
+  "",
+  "Kortet ligger i en lukket fold.",
+  "",
+  "</Query>",
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let base = "";
 
@@ -116,6 +140,7 @@ test.beforeAll(async () => {
   const root = path.join(base, "wiki");
   await mkdir(path.join(root, "plans", "report-res"), { recursive: true });
   await writeFile(path.join(root, PAGE_REL), PAGE, "utf8");
+  await writeFile(path.join(root, RELOAD_REL), RELOAD_PAGE, "utf8");
   await writeFile(
     path.join(root, "plans", "report-res", "Q-1.csv"),
     'N,TYPE,NOTE\r\n10,beta,"a, b"\r\n9,alfa,x\r\n100,gamma,y\r\n',
@@ -251,6 +276,51 @@ test.describe("Wiki reader: Query cards", () => {
     await expect(card).toBeVisible();
     expect(await card.evaluate((el) => (el.closest("details") as HTMLDetailsElement).open)).toBe(true);
     await expect(card).toBeInViewport();
+    expectClean(seen);
+  });
+
+  test("an in-place reload of the same page (fact-check ➕) keeps a fold the reader closed closed", async ({ page }) => {
+    const seen = watch(page);
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(RELOAD_REL)}#r-1`);
+    const card = page.locator("section.query#r-1");
+    const foldOpen = () => card.evaluate((el) => (el.closest("details") as HTMLDetailsElement).open);
+    await expect(card).toBeVisible();
+    expect(await foldOpen()).toBe(true);
+    // A committed fact-check turn on this page, seeded the way the reader persists one.
+    const wikiName = await page.evaluate(() => (window as { __WIKI_NAME__?: string }).__WIKI_NAME__ ?? "");
+    const turn = {
+      question: "Fact check: Reload page",
+      answer: "### ❌ Claim 1/1 — Kortet finnes\n\nIkke helt.",
+      citations: [],
+      cited: [],
+      html: null,
+      askedAt: 1_700_000_000_000,
+      kind: "factcheck",
+      page: "reload",
+      pageRelPath: RELOAD_REL,
+      pageType: "plan",
+      baseHash: createHash("sha256").update(RELOAD_PAGE).digest("hex"),
+      bodyLen: RELOAD_PAGE.length,
+      claimCount: 1,
+    };
+    await page.evaluate(
+      ([key, json]) => localStorage.setItem(key!, json!),
+      [`wikiAskSession:${wikiName || "__default__"}`, JSON.stringify([turn])],
+    );
+    await page.reload(); // the URL keeps #r-1: the boot reveal opens the fold again
+    await expect(card).toBeVisible();
+    expect(await foldOpen()).toBe(true);
+    await card.evaluate((el) => {
+      (el.closest("details") as HTMLDetailsElement).open = false;
+    });
+    await page.locator('.wiki-conn-tab[data-conntab="ask"]').click();
+    await page.locator(".wiki-ask-hist-item").first().click();
+    await page.locator("#wikiFactcheckAppendBtn").click();
+    // The append reloads the page in place; the URL still carries #r-1.
+    await expect(page.locator(".wiki-article")).toContainText("Kortet finnes");
+    await expect(card).toBeAttached();
+    expect(new URL(page.url()).hash).toBe("#r-1");
+    expect(await foldOpen()).toBe(false);
     expectClean(seen);
   });
 

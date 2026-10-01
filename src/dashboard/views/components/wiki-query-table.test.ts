@@ -157,3 +157,34 @@ describe("Query table sorting", () => {
     expect(sortOrder(cells, "descending")).toEqual([0, 3, 2, 4, 1]);
   });
 });
+
+describe("Query table sorting — mixed text and numbers (enumerated)", () => {
+  const sorted = (cells: string[], dir: "ascending" | "descending" = "ascending") =>
+    sortOrder(cells, dir).map((i) => cells[i]);
+  const isBlank = (c: string) => c === "" || c === "NULL";
+  // Each row: input cells, expected ascending order. Descending is the reverse
+  // of the non-empty cells, with the empty cells still last.
+  const TABLE: Array<[string, string[], string[]]> = [
+    ["identifier + integer", ["MEL-100", "MEL-9", "MEL-10"], ["MEL-9", "MEL-10", "MEL-100"]],
+    ["identifier + integer, real ids", ["MEL-1018756", "MEL-232147"], ["MEL-232147", "MEL-1018756"]],
+    ["decimals with a unit", ["0.5 kr", "0.25 kr", "0.125 kr"], ["0.125 kr", "0.25 kr", "0.5 kr"]],
+    ["decimal comma with a unit", ["1,5 t", "1,25 t", "10 t"], ["1,25 t", "1,5 t", "10 t"]],
+    ["negatives with a unit", ["-5 x", "-10 x", "3 x"], ["-10 x", "-5 x", "3 x"]],
+    ["ISO dates", ["2026-10-01", "2026-09-08", "2025-12-31"], ["2025-12-31", "2026-09-08", "2026-10-01"]],
+    [
+      "ISO datetimes",
+      ["2026-09-08 17:24", "2026-09-08 9:05", "2026-09-08 17:03"],
+      ["2026-09-08 9:05", "2026-09-08 17:03", "2026-09-08 17:24"],
+    ],
+    ["plain words with æøå", ["Ås", "Zebra", "Øst", "Ærlig", "Alfa"], ["Alfa", "Zebra", "Ærlig", "Øst", "Ås"]],
+    ["mixed empty cells", ["MEL-10", "", "MEL-9", "NULL", "0.5 kr"], ["0.5 kr", "MEL-9", "MEL-10", "", "NULL"]],
+  ];
+  for (const [name, cells, asc] of TABLE) {
+    test(`${name}: ascending, then descending`, () => {
+      expect(sorted(cells)).toEqual(asc);
+      const filled = asc.filter((c) => !isBlank(c));
+      const empties = asc.filter(isBlank);
+      expect(sorted(cells, "descending")).toEqual([...filled.reverse(), ...empties]);
+    });
+  }
+});

@@ -221,7 +221,7 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .query-table { margin: 0; border-collapse: collapse; width: max-content; min-width: 100%; font-size: 0.85em; }
     ${scope} .query-table th {
-      position: sticky; top: 0; background: var(--bg-surface); text-align: left; white-space: nowrap;
+      position: sticky; top: 0; background: var(--bg-surface); text-align: left; white-space: pre-line;
     }
     ${scope} .query-table th button {
       all: unset; cursor: pointer; display: inline-flex; gap: 0.3rem; align-items: baseline;

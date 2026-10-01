@@ -163,14 +163,21 @@ let currentPageFiles: PageFiles | undefined;
 const QUERY_ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
 
 /** Each `Query` card's anchor made unique in the finished HTML: a repeat gets
- *  `-2`, `-3`, and its id link follows. A pass over the OUTPUT, because some
+ *  the first free `-2`, `-3`, and its id link follows. A pass over the OUTPUT, because some
  *  components render a body twice and keep one copy (`foldBodyHtml`). */
 function uniqueQueryAnchors(html: string): string {
   if (!html.includes('<section class="query" id="')) return html;
+  // Every card's own slug is reserved first, so a repeat's suffix never takes
+  // an id an author wrote (`Q-8`, `Q-8`, `Q-8-2` → `q-8`, `q-8-3`, `q-8-2`).
+  const reserved = new Set([...html.matchAll(QUERY_ANCHOR_RE)].map((m) => m[1]!));
   const used = new Set<string>();
   return html.replace(QUERY_ANCHOR_RE, (_m, slug: string, between: string) => {
     let anchor = slug;
-    for (let k = 2; used.has(anchor); k++) anchor = `${slug}-${k}`;
+    if (used.has(anchor)) {
+      let k = 2;
+      while (used.has(`${slug}-${k}`) || reserved.has(`${slug}-${k}`)) k++;
+      anchor = `${slug}-${k}`;
+    }
     used.add(anchor);
     return `<section class="query" id="${anchor}">${between}<a class="query-id" href="#${anchor}">`;
   });

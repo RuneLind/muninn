@@ -3,7 +3,7 @@
  * Header-click sorting for a `<Query>` card's result table (`table.query-table`,
  * server-rendered by `web-format.ts`). Numeric when every non-empty cell of the
  * column parses as a number (such a column is marked `query-num`, right-aligned),
- * else `localeCompare(…, "nb", { numeric: true })`, so `MEL-368918` sorts before
+ * else natural order (`naturalCompare`), so `MEL-368918` sorts before
  * `MEL-1172008`; a second click on the same header reverses. Stable, empty and
  * NULL cells last in both directions, `aria-sort` on the sorted header.
  *
@@ -45,6 +45,44 @@ export function isNumericColumn(cells: string[]): boolean {
   return filled.length > 0 && filled.every((c) => parseCellNumber(c) !== null);
 }
 
+/** A number inside a text cell: an optional sign only where it cannot be a
+ *  separator (start of the cell, or after a space or `(`), then digits with at
+ *  most one `.`/`,` fraction. `MEL-10` is `MEL-` + 10; `-5 x` is -5 + ` x`. */
+const NUMBER_RUN_RE = /(?:(?<=^|[\s(])[-−])?\d+(?:[.,]\d+)?/gu;
+
+type Run = string | number;
+
+/** A cell split into text runs and number runs. */
+function naturalRuns(cell: string): Run[] {
+  const runs: Run[] = [];
+  let last = 0;
+  for (const m of cell.matchAll(NUMBER_RUN_RE)) {
+    if (m.index! > last) runs.push(cell.slice(last, m.index));
+    runs.push(Number(m[0].replace("−", "-").replace(",", ".")));
+    last = m.index! + m[0].length;
+  }
+  if (last < cell.length) runs.push(cell.slice(last));
+  return runs;
+}
+
+/** Natural order for a text column: run by run, numbers by value, text by
+ *  Norwegian collation, a number before text; a tie falls back to collation. */
+export function naturalCompare(a: string, b: string): number {
+  const ra = naturalRuns(a);
+  const rb = naturalRuns(b);
+  for (let k = 0; k < Math.min(ra.length, rb.length); k++) {
+    const x = ra[k]!;
+    const y = rb[k]!;
+    let d: number;
+    if (typeof x === "number" && typeof y === "number") d = x - y;
+    else if (typeof x === "number") d = -1;
+    else if (typeof y === "number") d = 1;
+    else d = x.localeCompare(y, "nb");
+    if (d !== 0) return d;
+  }
+  return ra.length - rb.length || a.localeCompare(b, "nb");
+}
+
 /** The row order (indices into `cells`) for one column and direction. */
 export function sortOrder(cells: string[], dir: SortDir): number[] {
   const numeric = isNumericColumn(cells);
@@ -55,7 +93,7 @@ export function sortOrder(cells: string[], dir: SortDir): number[] {
       if (a.e || b.e) return a.e === b.e ? a.i - b.i : a.e ? 1 : -1;
       const d = numeric
         ? parseCellNumber(a.c)! - parseCellNumber(b.c)!
-        : a.c.localeCompare(b.c, "nb", { numeric: true });
+        : naturalCompare(a.c, b.c);
       return d !== 0 ? sign * d : a.i - b.i;
     })
     .map((x) => x.i);

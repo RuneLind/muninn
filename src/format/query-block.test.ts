@@ -1,6 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import { parseBlocks, type Block } from "./markdown-ast.ts";
 import {
+  PAGE_FILE_MAX_BYTES,
+  PAGE_FILE_PAGE_BUDGET_BYTES,
   QUERY_CSV_MAX_ROWS,
   checkPageFileRef,
   parseQueryAttrs,
@@ -13,6 +15,7 @@ import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatEmailHtml } from "./email-format.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
+import { componentBlockCss } from "./component-styles.ts";
 
 const fence = (lang: string, code: string) => ["```" + lang, code, "```"].join("\n");
 
@@ -212,6 +215,14 @@ describe("Query on the web", () => {
     expect(html("limit")).toContain("Over 50 files on this page, not loaded: Q-8.csv");
   });
 
+  test("the size texts name the numbers the constants hold", () => {
+    const mb = (bytes: number) => `${+(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    const html = (reason: "too-large" | "budget") =>
+      formatWebHtml(QUERY, { files: files({ "res/Q-8.csv": { ok: false, reason } }) });
+    expect(html("too-large")).toContain(`File over ${mb(PAGE_FILE_MAX_BYTES)}, not shown: Q-8.csv`);
+    expect(html("budget")).toContain(`Over ${mb(PAGE_FILE_PAGE_BUDGET_BYTES)} of files on this page, not loaded: Q-8.csv`);
+  });
+
   test(`at most ${QUERY_CSV_MAX_ROWS} rows render, with a count of the rest`, () => {
     const rows = Array.from({ length: QUERY_CSV_MAX_ROWS + 5 }, (_, i) => String(i)).join("\n");
     const html = formatWebHtml(QUERY, { files: files({ "res/Q-8.csv": { ok: true, text: `N\n${rows}\n` } }) });
@@ -271,6 +282,11 @@ describe("Query card — anchors", () => {
     expect(parseQueryAttrs({ id: "ÆØÅ" }).anchor).toBe("æøå");
   });
 
+  test("combining marks survive: an NFD id slugs like its NFC spelling, İ keeps its dot", () => {
+    expect(parseQueryAttrs({ id: "Spörring 8" }).anchor).toBe("spörring-8");
+    expect(parseQueryAttrs({ id: "İD" }).anchor).toBe("i̇d");
+  });
+
   test("two cards whose ids slug alike get distinct anchors in one render, and the link follows", () => {
     const html = formatWebHtml([card("Q 8"), card("q-8"), card("Q-8")].join("\n\n"));
     expect(html.match(/<section class="query" id="([^"]+)"/g)).toEqual([
@@ -281,6 +297,14 @@ describe("Query card — anchors", () => {
     expect(html).toContain('<a class="query-id" href="#q-8-2">q-8</a>');
     // Per render: a second call starts over.
     expect(formatWebHtml(card("q-8"))).toContain('id="q-8"');
+  });
+
+  test("an explicit id is reserved: a repeat skips past it rather than taking it", () => {
+    const html = formatWebHtml([card("Q-8"), card("Q-8"), card("Q-8-2")].join("\n\n"));
+    const ids = [...html.matchAll(/<section class="query" id="([^"]+)">/g)].map((m) => m[1]);
+    const hrefs = [...html.matchAll(/<a class="query-id" href="#([^"]+)">/g)].map((m) => m[1]);
+    expect(ids).toEqual(["q-8", "q-8-3", "q-8-2"]);
+    expect(hrefs).toEqual(ids);
   });
 
   test("a card under a fold that renders its body twice keeps its own anchor", () => {
@@ -310,6 +334,13 @@ describe("Query card — result table", () => {
   test("an unterminated quote renders a warning line above the table", () => {
     const html = withCsv('A,B\n1,"open\n2,3\n');
     expect(html).toContain('<p class="query-warning">Unterminated quote — the rest of the file is one cell: Q-8.csv</p>');
+  });
+
+  test("a header cell shows its line ends too: th has white-space: pre-line, like td", () => {
+    const css = componentBlockCss(".x");
+    const rule = (sel: string) => css.match(new RegExp(`\\.x ${sel} \\{([^}]*)\\}`))?.[1] ?? "";
+    expect(rule("\\.query-table td")).toContain("white-space: pre-line");
+    expect(rule("\\.query-table th")).toContain("white-space: pre-line");
   });
 
   test("a newline inside a quoted cell survives as a character reference, blank lines included", () => {
@@ -380,6 +411,32 @@ describe("Query on the text surfaces (no file read)", () => {
     expect(out).toContain(">OPPRETTET_X</code> &lt;b&gt;?</div>");
     expect(out).toContain(">Svar: Status <code");
     expect(out).not.toContain("`");
+  });
+
+  // Markup INSIDE a code span: HTML tags, `&`, and Slack's control sequences.
+  const SPAN = "`<b>&<!channel><@U123>`";
+  const SPAN_MD = `<Query id="Q-9" question="Hvorfor ${SPAN}?" answer="Fordi ${SPAN}.">\n\nbody\n\n</Query>`;
+  const SPAN_ESC = "&lt;b&gt;&amp;&lt;!channel&gt;&lt;@U123&gt;";
+
+  test("telegram: markup inside a code span is escaped", () => {
+    const out = formatTelegramHtml(SPAN_MD);
+    expect(out).toContain(`<b>Q-9 — Hvorfor <code>${SPAN_ESC}</code>?</b>`);
+    expect(out).toContain(`Svar: Fordi <code>${SPAN_ESC}</code>.`);
+    expect(out).not.toContain("<!channel>");
+  });
+
+  test("slack: markup inside a code span is escaped, so no mention fires", () => {
+    const out = formatSlackMrkdwn(SPAN_MD);
+    expect(out).toContain(`*Q-9 — Hvorfor \`${SPAN_ESC}\`?*`);
+    expect(out).toContain(`Svar: Fordi \`${SPAN_ESC}\`.`);
+    expect(out).not.toContain("<!channel>");
+    expect(out).not.toContain("<@U123>");
+  });
+
+  test("email: markup inside a code span is escaped", () => {
+    const out = formatEmailHtml(SPAN_MD);
+    expect(out.match(new RegExp(`<code[^>]*>${SPAN_ESC}</code>`, "g"))).toHaveLength(2);
+    expect(out).not.toContain("<!channel>");
   });
 
   test("with no id and no question, nothing is bolded — the answer line stays plain", () => {

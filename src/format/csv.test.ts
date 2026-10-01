@@ -62,4 +62,16 @@ describe("parseCsv (RFC 4180)", () => {
     expect(csv.warning).toBe("unterminated-quote");
     expect(parseCsv("a\n1\n").warning).toBeUndefined();
   });
+
+  test("a one-column CRLF file: the LF of a CRLF is no second, empty row", () => {
+    expect(parseCsv("n\r\n1\r\n2\r\n")).toEqual({ header: ["n"], rows: [["1"], ["2"]] });
+  });
+
+  test('a final quoted "" with no trailing line end is a row', () => {
+    expect(parseCsv('n\n1\n""').rows).toEqual([["1"], [""]]);
+  });
+
+  test("leading blank lines are skipped, so the first record is the header", () => {
+    expect(parseCsv("\n\na,b\n1,2")).toEqual({ header: ["a", "b"], rows: [["1", "2"]] });
+  });
 });
