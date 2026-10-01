@@ -158,33 +158,76 @@ describe("Query table sorting", () => {
   });
 });
 
-describe("Query table sorting — mixed text and numbers (enumerated)", () => {
+describe("Query table sorting — the column rule (enumerated)", () => {
   const sorted = (cells: string[], dir: "ascending" | "descending" = "ascending") =>
     sortOrder(cells, dir).map((i) => cells[i]);
-  const isBlank = (c: string) => c === "" || c === "NULL";
+  const isBlank = (c: string) => c === "" || c === "NULL" || c === "[NULL]";
+  /** Every value the sort's comparator returns during one `sortOrder` call,
+   *  captured by wrapping `Array.prototype.sort` for that call only. */
+  function comparatorResults(cells: string[], dir: "ascending" | "descending"): number[] {
+    const seen: number[] = [];
+    const real = Array.prototype.sort;
+    Array.prototype.sort = function (this: unknown[], cmp?: (a: unknown, b: unknown) => number) {
+      const wrapped = cmp && ((a: unknown, b: unknown) => {
+        const r = cmp(a, b);
+        seen.push(r);
+        return r;
+      });
+      return real.call(this, wrapped);
+    } as typeof real;
+    try {
+      sortOrder(cells, dir);
+    } finally {
+      Array.prototype.sort = real;
+    }
+    return seen;
+  }
+  const big = (d: string) => d.repeat(400);
   // Each row: input cells, expected ascending order. Descending is the reverse
-  // of the non-empty cells, with the empty cells still last.
+  // of the non-empty cells, with the empty cells still last in input order.
   const TABLE: Array<[string, string[], string[]]> = [
-    ["identifier + integer", ["MEL-100", "MEL-9", "MEL-10"], ["MEL-9", "MEL-10", "MEL-100"]],
-    ["identifier + integer, real ids", ["MEL-1018756", "MEL-232147"], ["MEL-232147", "MEL-1018756"]],
-    ["decimals with a unit", ["0.5 kr", "0.25 kr", "0.125 kr"], ["0.125 kr", "0.25 kr", "0.5 kr"]],
-    ["decimal comma with a unit", ["1,5 t", "1,25 t", "10 t"], ["1,25 t", "1,5 t", "10 t"]],
-    ["negatives with a unit", ["-5 x", "-10 x", "3 x"], ["-10 x", "-5 x", "3 x"]],
-    ["ISO dates", ["2026-10-01", "2026-09-08", "2025-12-31"], ["2025-12-31", "2026-09-08", "2026-10-01"]],
-    [
-      "ISO datetimes",
-      ["2026-09-08 17:24", "2026-09-08 9:05", "2026-09-08 17:03"],
-      ["2026-09-08 9:05", "2026-09-08 17:03", "2026-09-08 17:24"],
-    ],
-    ["plain words with æøå", ["Ås", "Zebra", "Øst", "Ærlig", "Alfa"], ["Alfa", "Zebra", "Ærlig", "Øst", "Ås"]],
-    ["mixed empty cells", ["MEL-10", "", "MEL-9", "NULL", "0.5 kr"], ["0.5 kr", "MEL-9", "MEL-10", "", "NULL"]],
+    ["MEL ids", ["MEL-1018756", "MEL-100", "MEL-232147", "MEL-9", "MEL-10"],
+      ["MEL-9", "MEL-10", "MEL-100", "MEL-232147", "MEL-1018756"]],
+    ["IPv4 addresses", ["10.0.0.12", "10.0.0.9", "10.0.0.10"], ["10.0.0.9", "10.0.0.10", "10.0.0.12"]],
+    ["host + IPv4", ["host 192.168.1.100", "host 192.168.1.20"], ["host 192.168.1.20", "host 192.168.1.100"]],
+    ["dotted dates", ["1.10.2026", "1.9.2026"], ["1.9.2026", "1.10.2026"]],
+    ["versions", ["v1.10", "v1.9", "v1.2"], ["v1.2", "v1.9", "v1.10"]],
+    ["ISO datetimes with fractional seconds",
+      ["2026-09-08 17:24:05.500", "2026-09-08 17:24:05.120", "2026-09-08 09:05:00.000", "2026-09-08 17:24:05.900"],
+      ["2026-09-08 09:05:00.000", "2026-09-08 17:24:05.120", "2026-09-08 17:24:05.500", "2026-09-08 17:24:05.900"]],
+    ["19-digit ids in text", ["ID-1234567890123456789", "ID-1234567890123456788"],
+      ["ID-1234567890123456788", "ID-1234567890123456789"]],
+    ["19-digit plain ids", ["1234567890123456789", "1234567890123456788"],
+      ["1234567890123456788", "1234567890123456789"]],
+    ["400-digit runs", [`x${big("9")}`, `x${big("1")}`, "x5"], ["x5", `x${big("1")}`, `x${big("9")}`]],
+    ["plain numbers", ["10", "-1.5", "2,5", "1 000", "−5", "1,234.5", "0.25"],
+      ["−5", "-1.5", "0.25", "2,5", "10", "1 000", "1,234.5"]],
+    ["number + unit, decimals", ["0.5 kr", "0.25 kr", "0.125 kr"], ["0.125 kr", "0.25 kr", "0.5 kr"]],
+    ["number + unit, negatives", ["-5 x", "-10 x", "3 x"], ["-10 x", "-5 x", "3 x"]],
+    ["number + unit, grouped and decimal comma", ["1 500 NOK", "900 NOK", "-2,5 NOK"],
+      ["-2,5 NOK", "900 NOK", "1 500 NOK"]],
+    ["plain numbers with one shared unit", ["10 %", "9", "-1 %"], ["-1 %", "9", "10 %"]],
+    ["mixed units fall to collation", ["0.25 x", "0.5 kr"], ["0.5 kr", "0.25 x"]],
+    ["words with æøå", ["Ås", "Zebra", "Øst", "Ærlig", "Alfa"], ["Alfa", "Zebra", "Ærlig", "Øst", "Ås"]],
+    ["empty and NULL cells", ["MEL-10", "", "MEL-9", "NULL", "[NULL]"], ["MEL-9", "MEL-10", "", "NULL", "[NULL]"]],
   ];
   for (const [name, cells, asc] of TABLE) {
-    test(`${name}: ascending, then descending`, () => {
+    test(`${name}: ascending, then descending, every comparison finite`, () => {
       expect(sorted(cells)).toEqual(asc);
       const filled = asc.filter((c) => !isBlank(c));
       const empties = asc.filter(isBlank);
       expect(sorted(cells, "descending")).toEqual([...filled.reverse(), ...empties]);
+      for (const dir of ["ascending", "descending"] as const) {
+        expect(comparatorResults(cells, dir).every(Number.isFinite)).toBe(true);
+      }
     });
   }
+
+  test("a number + shared-unit column is right-aligned; a mixed-unit one is not", () => {
+    (globalThis as { document?: unknown }).document = { createElement: (t: string) => new FakeNode(t) };
+    const root = fakeTable(["KR", "MIX"], [["0.5 kr", "5 kr"], ["0.25 kr", "3 x"]]);
+    enhanceQueryTables(root as unknown as ParentNode);
+    const ths = root.all().filter((n) => n.tag === "th");
+    expect(ths.map((t) => t.classes.has("query-num"))).toEqual([true, false]);
+  });
 });

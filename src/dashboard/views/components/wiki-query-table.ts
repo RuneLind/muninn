@@ -1,9 +1,10 @@
 /// <reference lib="dom" />
 /**
  * Header-click sorting for a `<Query>` card's result table (`table.query-table`,
- * server-rendered by `web-format.ts`). Numeric when every non-empty cell of the
- * column parses as a number (such a column is marked `query-num`, right-aligned),
- * else natural order (`naturalCompare`), so `MEL-368918` sorts before
+ * server-rendered by `web-format.ts`). By value when every non-empty cell is a
+ * number, or a number plus one unit the whole column shares (`0.5 kr`); such a
+ * column is marked `query-num`, right-aligned. Otherwise Norwegian collation
+ * with digit runs compared as numbers, so `MEL-368918` sorts before
  * `MEL-1172008`; a second click on the same header reverses. Stable, empty and
  * NULL cells last in both directions, `aria-sort` on the sorted header.
  *
@@ -39,61 +40,79 @@ export function parseCellNumber(cell: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** True when every non-empty cell parses as a number (and one is non-empty). */
+/** A unit token: letters, `%` or currency symbols (`kr`, `x`, `%`, `NOK`, `€`). */
+const UNIT_RE = /^[\p{L}%\p{Sc}]+$/u;
+
+type CellValue = { n: number; unit: string; text: string };
+
+/** A cell as (a) a plain number (`unit` ""), or (b) a plain number, white
+ *  space and ONE unit token; null for anything else. `text` is the number. */
+function cellValue(cell: string): CellValue | null {
+  const t = cell.trim();
+  const n = parseCellNumber(t);
+  if (n !== null) return { n, unit: "", text: t };
+  const m = /^(.*\S)\s+(\S+)$/u.exec(t);
+  if (!m || !UNIT_RE.test(m[2]!)) return null;
+  const v = parseCellNumber(m[1]!);
+  return v === null ? null : { n: v, unit: m[2]!, text: m[1]! };
+}
+
+/** The column's unit: "" when every non-empty cell is a plain number, the
+ *  unit when the others carry one and the same unit, null when the column is
+ *  text (any other cell, two different units, or no non-empty cell). */
+function columnUnit(cells: string[]): string | null {
+  let unit = "";
+  let filled = 0;
+  for (const c of cells) {
+    if (isEmptyCell(c)) continue;
+    filled++;
+    const v = cellValue(c);
+    if (!v) return null;
+    if (v.unit === "") continue;
+    if (unit !== "" && unit !== v.unit) return null;
+    unit = v.unit;
+  }
+  return filled > 0 ? unit : null;
+}
+
+/** True when the column sorts by value: every non-empty cell is a number, or
+ *  a number plus one unit the whole column shares (and one is non-empty). */
 export function isNumericColumn(cells: string[]): boolean {
-  const filled = cells.filter((c) => !isEmptyCell(c));
-  return filled.length > 0 && filled.every((c) => parseCellNumber(c) !== null);
+  return columnUnit(cells) !== null;
 }
 
-/** A number inside a text cell: an optional sign only where it cannot be a
- *  separator (start of the cell, or after a space or `(`), then digits with at
- *  most one `.`/`,` fraction. `MEL-10` is `MEL-` + 10; `-5 x` is -5 + ` x`. */
-const NUMBER_RUN_RE = /(?:(?<=^|[\s(])[-−])?\d+(?:[.,]\d+)?/gu;
-
-type Run = string | number;
-
-/** A cell split into text runs and number runs. */
-function naturalRuns(cell: string): Run[] {
-  const runs: Run[] = [];
-  let last = 0;
-  for (const m of cell.matchAll(NUMBER_RUN_RE)) {
-    if (m.index! > last) runs.push(cell.slice(last, m.index));
-    runs.push(Number(m[0].replace("−", "-").replace(",", ".")));
-    last = m.index! + m[0].length;
-  }
-  if (last < cell.length) runs.push(cell.slice(last));
-  return runs;
+/** An integer cell as a BigInt, for a tie past 2^53 (`Number` rounds two
+ *  19-digit ids to one value); null for a fraction or an exponent. */
+function exactInteger(text: string): bigint | null {
+  const t = text.replace(/^−/, "-").replace(/[   ,]/g, "");
+  return /^[+-]?\d+$/.test(t) ? BigInt(t) : null;
 }
 
-/** Natural order for a text column: run by run, numbers by value, text by
- *  Norwegian collation, a number before text; a tie falls back to collation. */
-export function naturalCompare(a: string, b: string): number {
-  const ra = naturalRuns(a);
-  const rb = naturalRuns(b);
-  for (let k = 0; k < Math.min(ra.length, rb.length); k++) {
-    const x = ra[k]!;
-    const y = rb[k]!;
-    let d: number;
-    if (typeof x === "number" && typeof y === "number") d = x - y;
-    else if (typeof x === "number") d = -1;
-    else if (typeof y === "number") d = 1;
-    else d = x.localeCompare(y, "nb");
-    if (d !== 0) return d;
-  }
-  return ra.length - rb.length || a.localeCompare(b, "nb");
+/** -1, 0 or 1 — never a difference, which overflows to ±Infinity. */
+function compareNumbers(a: CellValue, b: CellValue): number {
+  if (a.n !== b.n) return a.n < b.n ? -1 : 1;
+  if (Math.abs(a.n) <= Number.MAX_SAFE_INTEGER) return 0;
+  const x = exactInteger(a.text);
+  const y = exactInteger(b.text);
+  return x === null || y === null || x === y ? 0 : x < y ? -1 : 1;
 }
+
+/** Text order: Norwegian collation, each digit run compared as a whole number
+ *  by ICU (exact at any length): `MEL-9` < `MEL-10`, `10.0.0.9` < `10.0.0.10`. */
+const TEXT_ORDER = new Intl.Collator("nb", { numeric: true });
 
 /** The row order (indices into `cells`) for one column and direction. */
 export function sortOrder(cells: string[], dir: SortDir): number[] {
   const numeric = isNumericColumn(cells);
   const sign = dir === "ascending" ? 1 : -1;
   return cells
-    .map((c, i) => ({ c: c.trim(), e: isEmptyCell(c), i }))
+    .map((c, i) => {
+      const e = isEmptyCell(c);
+      return { c: c.trim(), e, i, v: numeric && !e ? cellValue(c) : null };
+    })
     .sort((a, b) => {
       if (a.e || b.e) return a.e === b.e ? a.i - b.i : a.e ? 1 : -1;
-      const d = numeric
-        ? parseCellNumber(a.c)! - parseCellNumber(b.c)!
-        : naturalCompare(a.c, b.c);
+      const d = numeric ? compareNumbers(a.v!, b.v!) : TEXT_ORDER.compare(a.c, b.c);
       return d !== 0 ? sign * d : a.i - b.i;
     })
     .map((x) => x.i);
