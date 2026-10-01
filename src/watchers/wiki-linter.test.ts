@@ -7,6 +7,7 @@ import { __resetWikiCacheForTest } from "../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest } from "../wiki/readonly.ts";
 import type { Watcher } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 
 /**
  * Checker guards + alert shape. Uses real temp-dir wikis via the store (the
@@ -131,6 +132,63 @@ describe("checkWikiLinter", () => {
     );
     const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed });
     expect(alerts[0]!.summary).toContain("1 truncated wikilink");
+  });
+
+  // An info-severity finding (check 9's long-page-no-fold) is a suggestion:
+  // it stays on /wiki/gardener and never reaches the alert.
+  describe("info-severity findings stay out of the alert", () => {
+    const longPlan = async () => {
+      const filler = Array.from({ length: 700 }, (_, i) => `line ${i}`).join("\n");
+      await Bun.write(
+        path.join(root, "concepts/A.md"),
+        "---\ntype: concept\ntitle: A\nupdated: 2026-06-01\nseries: ab\nsources: [x]\n---\n\nSee [[B]] and [[Long]].",
+      );
+      await Bun.write(
+        path.join(root, "concepts/B.md"),
+        "---\ntype: concept\ntitle: B\nupdated: 2026-06-01\nseries: ab\nsources: [x]\n---\n\nSee [[A]].",
+      );
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await Bun.write(
+        path.join(root, "plans/Long.md"),
+        `---\ntitle: Long\nupdated: 2026-06-01\nsources: [x]\n---\n\nSee [[A]].\n\n${filler}\n`,
+      );
+    };
+
+    test("a wiki whose only finding is info raises no alert", async () => {
+      await longPlan();
+      expect(await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed })).toEqual([]);
+    });
+
+    test("a wiki whose only finding is info does not log as clean", async () => {
+      await longPlan();
+      const records: LogRecord[] = [];
+      await configure({
+        sinks: { capture: (r: LogRecord) => records.push(r) },
+        loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+        reset: true,
+      });
+      try {
+        await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed });
+      } finally {
+        await reset();
+      }
+      const text = records.map((r) => r.message.map((m) => String(m)).join("")).join("\n");
+      expect(text).not.toContain("clean");
+      expect(text).toContain("no actionable findings");
+      expect(text).toContain("1 info");
+    });
+
+    test("beside a warning, the info finding is left out of the sentence", async () => {
+      await longPlan();
+      await Bun.write(
+        path.join(root, "concepts/Cut.md"),
+        "---\ntype: concept\ntitle: Cut\nupdated: 2026-06-01\nsources: [x]\n---\n\nSee [[A]]. A line cut at [[Some Long Page",
+      );
+      const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed });
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]!.summary).toContain("truncated wikilink");
+      expect(alerts[0]!.summary).not.toContain("Fold");
+    });
   });
 
   test("pluralizes counts in the summary", async () => {

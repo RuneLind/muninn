@@ -1798,7 +1798,7 @@ export function scanInlineComponents(text: string): InlineSegment[] {
 }
 
 /** Extract whitelisted double-quoted attributes for `name`; drop the rest. */
-function parseAttrs(attrStr: string, name: ComponentName): Record<string, string> {
+export function parseAttrs(attrStr: string, name: ComponentName): Record<string, string> {
   const allowed = COMPONENT_ATTRS[name];
   const out: Record<string, string> = {};
   if (allowed.length === 0) return out;

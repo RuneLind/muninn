@@ -3371,3 +3371,88 @@ describe("gardener backlog + source-draft POSTs — 415 before any side effect",
     }
   });
 });
+
+/**
+ * Lint check 9 (report-page drift, `src/wiki/lint-drift.ts`) through the route,
+ * over a temp GIT repo with backdated commits. The dropped `status-date-behind`
+ * must not come back: a body edit after `status_date` is not a finding.
+ */
+describe("GET /api/wiki/linter-findings — check 9 drift over a git wiki", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  function git(args: string[], iso?: string): void {
+    Bun.spawnSync(["git", "-C", root, ...args], {
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.invalid",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.invalid",
+        ...(iso ? { GIT_AUTHOR_DATE: iso, GIT_COMMITTER_DATE: iso } : {}),
+      },
+    });
+  }
+  const commit = (iso: string) => {
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", iso], iso);
+  };
+  const plan = (body: string) => `---\ntitle: P\nplan_status: in-flight\nstatus_date: 2026-01-10\n---\n\n${body}\n`;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-linter-drift-"));
+    git(["init", "-q"]);
+    await Bun.write(path.join(root, "plans", "drift.md"), plan("First."));
+    commit("2026-01-10T09:00:00Z");
+    // A body edit five days after the status was set, with the date untouched;
+    // plus a stale draft lane and two loose read queries on a second page.
+    await Bun.write(path.join(root, "plans", "drift.md"), plan("First. Then more work."));
+    await Bun.write(
+      path.join(root, "plans", "lanes.mdx"),
+      [
+        "---", "title: L", "---", "",
+        "<NextMoves>", "", '<Lane kind="draft" since="2026-01-02">', "", "- **Send the draft.**", "", "</Lane>", "", "</NextMoves>", "",
+        "```sql", "SELECT 1", "```", "", "```sql", "SELECT 2", "```",
+      ].join("\n"),
+    );
+    commit("2026-01-15T09:00:00Z");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `driftwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiGardenerRoutes(app);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("reports each drift check with its page, line and severity", async () => {
+    const res = await app.request("/api/wiki/linter-findings?wiki=driftwiki");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      findings: { check: string; relPath: string; line?: number; severity?: string; message: string }[];
+      counts: Record<string, number>;
+      error?: string;
+    };
+    expect(body.error).toBeUndefined();
+    const drift = body.findings
+      .filter((f) => ["draft-lane-stale", "status-date-behind", "loose-sql", "case-table", "long-page-no-fold"].includes(f.check))
+      .map((f) => `${f.check} ${f.relPath}${f.line ? `:${f.line}` : ""}`)
+      .sort();
+    expect(drift).toEqual([
+      "draft-lane-stale plans/lanes.mdx:7",
+      "loose-sql plans/lanes.mdx",
+    ]);
+    expect(body.counts["status-date-behind"]).toBeUndefined();
+    expect(body.counts["draft-lane-stale"]).toBe(1);
+    expect(body.counts["case-table"]).toBe(0);
+    expect(body.counts["long-page-no-fold"]).toBe(0);
+  });
+});

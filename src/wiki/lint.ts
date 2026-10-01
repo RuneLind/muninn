@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Eleven checks, each finding `{ check, relPath, message, detail?, fix? }`:
+ * Fifteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -40,6 +40,10 @@
  *                      checks, and the only ones carrying a `fix` the gardener
  *                      turns into `wiki_proposals` rows. Rules, cuts and the
  *                      one-clustering split between 8.2 and 8.3: `lint-series.ts`.
+ *  9. draft-lane-stale / loose-sql / case-table / long-page-no-fold —
+ *                      report-page DRIFT, on LIVE report pages only (a live
+ *                      `plan_status`, or none under `plans/`); report-only.
+ *                      Rules and the scope: `lint-drift.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -68,6 +72,7 @@ import {
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
+import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { countFactWrappers } from "../format/markdown-ast.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
@@ -81,6 +86,7 @@ export const LINT_CHECKS = [
   "unrendered-fact-mark",
   "stem-collision",
   ...SERIES_LINT_CHECKS,
+  ...DRIFT_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -91,6 +97,11 @@ export interface LintFinding {
   message: string;
   /** Optional secondary context (e.g. link kind). */
   detail?: string;
+  /** 1-based line the finding points at, where one is meaningful (check 9). */
+  line?: number;
+  /** `info` for a suggestion rather than a defect; absent means a warning.
+   *  Only check 9's `long-page-no-fold` sets it. */
+  severity?: "info";
   /**
    * The machine-readable remedy, on check 8's findings alone — which pages to
    * edit and the group id the resulting proposal rows share.
@@ -577,6 +588,7 @@ export async function lintWiki(
   const now = deps?.now ?? (() => Date.now());
   const nowMs = now();
   const findings: LintFinding[] = [];
+  const drift = driftContext(nowMs);
 
   for (const page of index.pages) {
     if (page.type === "explainer") continue; // no frontmatter, no links
@@ -602,6 +614,8 @@ export async function lintWiki(
       findings.push(...checkStaleUpdated(page, content, nowMs));
       const sources = checkMissingSources(page, content);
       if (sources) findings.push(sources);
+      // Check 9 — live report pages only (`isLiveReportPage`).
+      findings.push(...checkDrift(page, content, drift));
     }
   }
 
