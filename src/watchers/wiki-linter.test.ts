@@ -133,6 +133,44 @@ describe("checkWikiLinter", () => {
     expect(alerts[0]!.summary).toContain("1 truncated wikilink");
   });
 
+  // An info-severity finding (check 9's long-page-no-fold) is a suggestion:
+  // it stays on /wiki/gardener and never reaches the alert.
+  describe("info-severity findings stay out of the alert", () => {
+    const longPlan = async () => {
+      const filler = Array.from({ length: 700 }, (_, i) => `line ${i}`).join("\n");
+      await Bun.write(
+        path.join(root, "concepts/A.md"),
+        "---\ntype: concept\ntitle: A\nupdated: 2026-06-01\nseries: ab\nsources: [x]\n---\n\nSee [[B]] and [[Long]].",
+      );
+      await Bun.write(
+        path.join(root, "concepts/B.md"),
+        "---\ntype: concept\ntitle: B\nupdated: 2026-06-01\nseries: ab\nsources: [x]\n---\n\nSee [[A]].",
+      );
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await Bun.write(
+        path.join(root, "plans/Long.md"),
+        `---\ntitle: Long\nupdated: 2026-06-01\nsources: [x]\n---\n\nSee [[A]].\n\n${filler}\n`,
+      );
+    };
+
+    test("a wiki whose only finding is info raises no alert", async () => {
+      await longPlan();
+      expect(await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed })).toEqual([]);
+    });
+
+    test("beside a warning, the info finding is left out of the sentence", async () => {
+      await longPlan();
+      await Bun.write(
+        path.join(root, "concepts/Cut.md"),
+        "---\ntype: concept\ntitle: Cut\nupdated: 2026-06-01\nsources: [x]\n---\n\nSee [[A]]. A line cut at [[Some Long Page",
+      );
+      const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }), { seed: seedSpy().seed });
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]!.summary).toContain("truncated wikilink");
+      expect(alerts[0]!.summary).not.toContain("Fold");
+    });
+  });
+
   test("pluralizes counts in the summary", async () => {
     // Two orphans, each with a distinct broken link.
     await Bun.write(

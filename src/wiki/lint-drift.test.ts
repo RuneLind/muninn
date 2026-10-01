@@ -15,10 +15,13 @@ import {
   checkDrift,
   driftContext,
   isCaseRow,
+  isLiveReportPage,
   isReadQueryFence,
   isReportPage,
+  pageLineCount,
   type DriftContext,
 } from "./lint-drift.ts";
+import { __setClassifyBudgetForTest, classifyContentChange, classifyPageChange } from "./git-dates.ts";
 
 const TODAY = "2026-10-01";
 const CTX: DriftContext = { today: TODAY, hasPlanStaleCheck: false };
@@ -61,6 +64,50 @@ describe("isReportPage — the scope rule", () => {
   });
 });
 
+describe("isLiveReportPage — the drift scope, one rule for all five checks", () => {
+  // [relPath, raw frontmatter, validated plan_status, in scope]
+  const rows: [string, Record<string, unknown>, string | undefined, boolean][] = [
+    ["plans/x.mdx", {}, undefined, true], // no plan_status, under plans/
+    ["plans/sub/x.md", {}, undefined, true],
+    ["plans/x.md", { plan_status: "proposed" }, "proposed", true],
+    ["plans/x.md", { plan_status: "ready" }, "ready", true],
+    ["plans/x.md", { plan_status: "in-flight" }, "in-flight", true],
+    ["plans/x.md", { plan_status: "blocked" }, "blocked", true],
+    ["archive/x.md", { plan_status: "in-flight" }, "in-flight", true], // a live status anywhere
+    ["projects/x.md", { plan_status: "blocked" }, "blocked", true],
+    ["plans/x.md", { plan_status: "shipped" }, "shipped", false], // settled
+    ["plans/x.md", { plan_status: "superseded" }, "superseded", false],
+    ["plans/x.md", { plan_status: "abandoned" }, "abandoned", false],
+    ["plans/x.md", { plan_status: "bogus" }, undefined, false], // present but not live
+    ["archive/x.md", {}, undefined, false], // archived
+    ["archive/muninn/x.mdx", {}, undefined, false],
+    ["projects/x.md", { plan_status: "shipped" }, "shipped", false],
+    ["projects/x.md", {}, undefined, false], // not a report page
+    ["myplans/x.md", {}, undefined, false],
+  ];
+  for (const [rel, fm, status, want] of rows) {
+    test(`${rel} ${JSON.stringify(fm)} → ${want}`, () => expect(isLiveReportPage(rel, fm, status)).toBe(want));
+  }
+
+  // The same page body trips all five checks; only the scope differs.
+  const everything = (() => {
+    const lane = ["<NextMoves>", "", '<Lane kind="draft" since="2026-01-01">', "", "- [ ] send it", "", "</Lane>", "", "</NextMoves>", ""].join("\n");
+    const cases = ["| Sak | Status |", "|---|---|", ...[1, 2, 3, 4, 5].map((n) => `| MEL-${n} | ferdig |`), ""].join("\n");
+    const filler = Array.from({ length: 700 }, (_, i) => `line ${i}`).join("\n");
+    return (fm: string) => `---\ntitle: t\n${fm}---\n\n${lane}\n${sql("SELECT 1")}${sql("SELECT 2")}\n${cases}\n${filler}\n`;
+  })();
+  const checksOf = (f: LintFinding[]): string[] => [...new Set(f.map((x) => x.check as string))].sort();
+
+  test("a live page gets every structural check; an archived or settled one gets none", () => {
+    const all = ["case-table", "draft-lane-stale", "long-page-no-fold", "loose-sql"];
+    expect(checksOf(run("plans/a.mdx", everything("")))).toEqual(all);
+    expect(checksOf(run("archive/a.mdx", everything("plan_status: in-flight\n"), { plan_status: "in-flight" }))).toEqual(all);
+    expect(run("archive/a.mdx", everything(""))).toEqual([]);
+    expect(run("plans/a.mdx", everything("plan_status: shipped\n"), { plan_status: "shipped" })).toEqual([]);
+    expect(run("archive/a.mdx", everything("plan_status: superseded\n"), { plan_status: "superseded" })).toEqual([]);
+  });
+});
+
 describe("check 1 — draft-lane-stale", () => {
   const lanes = (kind: string, since: string, wrap = (s: string) => s) =>
     ["---", "title: t", "---", "", "# T", "", wrap(["<NextMoves>", "", `<Lane kind="${kind}" since="${since}">`, "", "- **Send it.**", "", "</Lane>", "", "</NextMoves>"].join("\n"))].join("\n");
@@ -99,6 +146,54 @@ describe("check 1 — draft-lane-stale", () => {
     expect(only(run("plans/a.mdx", lanes("draft", "2026-01-01", quoted)), "draft-lane-stale")).toEqual([]);
   });
 
+  test("only a lane that COUNTS: directly inside an unsettled <NextMoves>, with an open item", () => {
+    const fm = "---\ntitle: t\n---\n\n";
+    const lane = (items: string) => `<Lane kind="draft" since="2026-01-01">\n\n${items}\n\n</Lane>`;
+    const nm = (s: string) => `<NextMoves>\n\n${s}\n\n</NextMoves>`;
+    const fold = (s: string) => `<Fold title="older">\n\n${s}\n\n</Fold>`;
+    const stale = (body: string) => only(run("plans/a.mdx", fm + body), "draft-lane-stale").length;
+    // [what, body, findings]
+    const rows: [string, string, number][] = [
+      ["open item", nm(lane("- [ ] send it")), 1],
+      ["plain item", nm(lane("- send it")), 1],
+      ["one open, one done", nm(lane("- [x] drafted\n- [ ] send it")), 1],
+      ["stray lane, no <NextMoves>", lane("- [ ] send it"), 0],
+      ["lane in a <Fold> under <NextMoves>", nm(fold(lane("- [ ] send it"))), 0],
+      ["every item done", nm(lane("- [x] drafted\n- [X] sent")), 0],
+      ["no items at all", nm(lane("Prose only.")), 0],
+    ];
+    for (const [what, body, want] of rows) expect([what, stale(body)]).toEqual([what, want]);
+  });
+
+  describe("the line is exact or absent, never another line", () => {
+    // The real stale lane; `decoy` sits above it. Returns [finding count, line,
+    // the real opener's line].
+    const probe = (decoy: string): [number, number | undefined, number] => {
+      const head = ["---", "title: t", "---", "", ...decoy.split("\n"), ""];
+      const real = head.length + 3; // after "<NextMoves>" and a blank line
+      const body = [...head, "<NextMoves>", "", '<Lane kind="draft" since="2026-09-01">', "", "- [ ] send it", "", "</Lane>", "", "</NextMoves>", ""].join("\n");
+      const f = only(run("plans/a.mdx", body), "draft-lane-stale");
+      return [f.length, f[0]?.line, real];
+    };
+    // [decoy, the decoy line, exact | absent]. "absent" where the decoy looks
+    // like a lane opener to a line scan but the parser read it as text, so the
+    // scan's candidates no longer map one-to-one onto the parser's lanes.
+    const decoys: [string, string, "exact" | "absent"][] = [
+      ["a prose line opening with <Lane>", "<Lane> blocks are how this page tracks moves.", "exact"],
+      ["a 4-space indented line", '    <Lane kind="draft" since="2026-01-01">', "absent"],
+      ["a self-closing <Lane />", '<Lane kind="draft" since="2026-01-01" />', "exact"],
+      ["two lanes on one line", '<Lane kind="you">a</Lane><Lane kind="draft" since="2026-01-01">b</Lane>', "exact"],
+      ["a <Lane> in a list item", '- item one\n  <Lane kind="draft" since="2026-01-01">\n- item two', "absent"],
+    ];
+    for (const [what, decoy, want] of decoys) {
+      test(`${what} → ${want}`, () => {
+        const [n, line, real] = probe(decoy);
+        expect(n).toBe(1);
+        expect(line).toBe(want === "exact" ? real : undefined);
+      });
+    }
+  });
+
   test("the line names the stale lane's own opener, past a quoted lane and an earlier lane", () => {
     const body = [
       "---", "title: t", "---", // 1-3
@@ -116,9 +211,11 @@ describe("check 1 — draft-lane-stale", () => {
 describe("check 2 — status-date-behind", () => {
   const body = ["---", "title: t", "plan_status: in-flight", "status_date: 2026-09-20", "---", "", "Body."].join("\n");
   const at = (iso: string) => Date.parse(iso);
+  /** The two touch dates the index stamps: the rail's and the content one. */
+  const touch = (ms: number) => ({ gitTouchedMs: ms, gitContentTouchedMs: ms });
 
   test("a content commit on a later day is reported, with the status_date line", () => {
-    const f = only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", gitTouchedMs: at("2026-09-22T10:00:00Z") }), "status-date-behind");
+    const f = only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", ...touch(at("2026-09-22T10:00:00Z")) }), "status-date-behind");
     expect(f).toHaveLength(1);
     expect(f[0]!.line).toBe(4);
     expect(f[0]!.message).toContain("status_date 2026-09-20 is older than the last content commit (2026-09-22)");
@@ -126,13 +223,13 @@ describe("check 2 — status-date-behind", () => {
 
   test("a commit on the same day, or earlier, is not", () => {
     for (const iso of ["2026-09-20T21:00:00Z", "2026-09-19T08:00:00Z"]) {
-      expect(only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", gitTouchedMs: at(iso) }), "status-date-behind")).toEqual([]);
+      expect(only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", ...touch(at(iso)) }), "status-date-behind")).toEqual([]);
     }
   });
 
   test("the commit's day is the Europe/Oslo day, not the UTC day", () => {
     // 22:30 UTC on the 20th is 00:30 on the 21st in Oslo (CEST, +2).
-    const f = only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", gitTouchedMs: at("2026-09-20T22:30:00Z") }), "status-date-behind");
+    const f = only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", ...touch(at("2026-09-20T22:30:00Z")) }), "status-date-behind");
     expect(f).toHaveLength(1);
     expect(f[0]!.message).toContain("(2026-09-21)");
   });
@@ -140,24 +237,24 @@ describe("check 2 — status-date-behind", () => {
   test("only a LIVE plan_status is checked", () => {
     const touched = at("2026-09-25T10:00:00Z");
     for (const s of ["proposed", "ready", "in-flight", "blocked"] as const) {
-      expect(only(run("plans/a.md", body, { plan_status: s, status_date: "2026-09-20", gitTouchedMs: touched }), "status-date-behind")).toHaveLength(1);
+      expect(only(run("plans/a.md", body, { plan_status: s, status_date: "2026-09-20", ...touch(touched) }), "status-date-behind")).toHaveLength(1);
     }
     for (const s of ["shipped", "superseded", "abandoned"] as const) {
-      expect(only(run("plans/a.md", body, { plan_status: s, status_date: "2026-09-20", gitTouchedMs: touched }), "status-date-behind")).toEqual([]);
+      expect(only(run("plans/a.md", body, { plan_status: s, status_date: "2026-09-20", ...touch(touched) }), "status-date-behind")).toEqual([]);
     }
-    expect(only(run("plans/a.md", body, { status_date: "2026-09-20", gitTouchedMs: touched }), "status-date-behind")).toEqual([]);
+    expect(only(run("plans/a.md", body, { status_date: "2026-09-20", ...touch(touched) }), "status-date-behind")).toEqual([]);
   });
 
   test("no git date (non-git wiki, or every commit a sweep) or no status_date ⇒ no finding", () => {
     expect(only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20" }), "status-date-behind")).toEqual([]);
-    expect(only(run("plans/a.md", body, { plan_status: "in-flight", gitTouchedMs: at("2026-09-25T10:00:00Z") }), "status-date-behind")).toEqual([]);
+    expect(only(run("plans/a.md", body, { plan_status: "in-flight", ...touch(at("2026-09-25T10:00:00Z")) }), "status-date-behind")).toEqual([]);
   });
 
   test("on a wiki carrying mimir's check 10, its population (top-level plans/, in-flight or ready) is left to it", () => {
     const ctx = { ...CTX, hasPlanStaleCheck: true };
     const touched = at("2026-09-25T10:00:00Z");
     const f = (rel: string, s: "in-flight" | "ready" | "blocked" | "proposed") =>
-      only(run(rel, body, { plan_status: s, status_date: "2026-09-20", gitTouchedMs: touched }, ctx), "status-date-behind");
+      only(run(rel, body, { plan_status: s, status_date: "2026-09-20", ...touch(touched) }, ctx), "status-date-behind");
     expect(f("plans/a.md", "in-flight")).toEqual([]);
     expect(f("plans/a.mdx", "ready")).toEqual([]);
     expect(f("plans/a.md", "blocked")).toHaveLength(1);
@@ -165,6 +262,52 @@ describe("check 2 — status-date-behind", () => {
     expect(f("plans/sub/a.md", "in-flight")).toHaveLength(1);
     expect(f("archive/a.md", "in-flight")).toHaveLength(1);
   });
+  test("the CONTENT touch decides, not the rail's: a later tags-only commit moves only the rail date", () => {
+    const f = only(
+      run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", gitTouchedMs: at("2026-09-25T10:00:00Z"), gitContentTouchedMs: at("2026-09-20T10:00:00Z") }),
+      "status-date-behind",
+    );
+    expect(f).toEqual([]);
+  });
+
+  test("the page's creation commit is never a content touch", () => {
+    const created = at("2026-09-24T10:00:00Z");
+    const base = { plan_status: "in-flight" as const, status_date: "2026-09-20" };
+    expect(only(run("plans/a.md", body, { ...base, gitCreatedMs: created, ...touch(created) }), "status-date-behind")).toEqual([]);
+    expect(only(run("plans/a.md", body, { ...base, gitCreatedMs: created - 86_400_000, ...touch(created) }), "status-date-behind")).toHaveLength(1);
+  });
+
+  test("an unverified touch (metadata step-back ran out, or its budget) gives no finding", () => {
+    const base = { plan_status: "in-flight" as const, status_date: "2026-09-20", ...touch(at("2026-09-25T10:00:00Z")) };
+    expect(only(run("plans/a.md", body, { ...base, gitTouchUnverified: true }), "status-date-behind")).toEqual([]);
+    expect(only(run("plans/a.md", body, base), "status-date-behind")).toHaveLength(1);
+  });
+});
+
+describe("the content touch — which commits status-date-behind sets aside", () => {
+  const page = (fm: string, body = "Body.") => `---\ntitle: t\n${fm}---\n\n${body}\n`;
+  // [what, before, after, rail verdict, content verdict]
+  const rows: [string, string, string, string, string][] = [
+    ["a tags: rewrite", page("tags: [a]\n"), page("tags: [a, b]\n"), "edit", "metadata-only"],
+    ["a tags: line added", page(""), page("tags: [a]\n"), "edit", "metadata-only"],
+    ["a priority: rewrite", page("priority: p1\n"), page("priority: p2\n"), "metadata-only", "metadata-only"],
+    ["tags: and priority: together", page("tags: [a]\npriority: p1\n"), page("tags: [b]\npriority: p2\n"), "edit", "metadata-only"],
+    ["no change", page("tags: [a]\n"), page("tags: [a]\n"), "identical", "identical"],
+    ["tags: with a body edit", page("tags: [a]\n"), page("tags: [b]\n", "Body. More."), "edit", "edit"],
+    ["a title: rewrite", page("tags: [a]\n"), page("tags: [a]\n").replace("title: t", "title: u"), "edit", "edit"],
+    ["a block-list tag item", page("tags:\n  - a\n"), page("tags:\n  - b\n"), "edit", "edit"],
+    // mimir's auto-tagger adds a whole fence to a page that had none
+    ["a tags:-only fence added", "# T\n\nBody.\n", "---\ntags: [a]\n---\n# T\n\nBody.\n", "edit", "metadata-only"],
+    ["a fence with title: added", "# T\n\nBody.\n", "---\ntitle: T\ntags: [a]\n---\n# T\n\nBody.\n", "edit", "edit"],
+    ["a tags:-only fence added with a body edit", "# T\n\nBody.\n", "---\ntags: [a]\n---\n# T\n\nBody. More.\n", "edit", "edit"],
+    ["no fence either side, body edit", "# T\n\nBody.\n", "# T\n\nBody. More.\n", "edit", "edit"],
+  ];
+  for (const [what, before, after, rail, content] of rows) {
+    test(`${what}: rail ${rail}, content ${content}`, () => {
+      expect(classifyPageChange(before, after)).toBe(rail as never);
+      expect(classifyContentChange(before, after)).toBe(content as never);
+    });
+  }
 });
 
 describe("check 3 — loose-sql", () => {
@@ -210,26 +353,53 @@ describe("check 3 — loose-sql", () => {
     expect(only(run("plans/a.md", body), "loose-sql")).toEqual([]);
   });
 
-  test("only a LIVE report page: plans/, or a live plan_status elsewhere", () => {
+  test("only a LIVE report page: plans/ with no plan_status, or a live plan_status anywhere", () => {
     const body = fm + sql("SELECT 1") + sql("SELECT 2");
     expect(only(run("archive/a.md", body), "loose-sql")).toEqual([]);
     expect(only(run("archive/a.md", body, { plan_status: "shipped" }), "loose-sql")).toEqual([]);
     expect(only(run("archive/a.md", body, { plan_status: "in-flight" }), "loose-sql")).toHaveLength(1);
-    expect(only(run("plans/a.md", body, { plan_status: "shipped" }), "loose-sql")).toHaveLength(1);
+    expect(only(run("plans/a.md", body, { plan_status: "shipped" }), "loose-sql")).toEqual([]);
   });
 });
 
 describe("check 4 — case-table", () => {
+  // [row, is a case row]. A case row: the first cell opens with a case id (a
+  // wikilink's TARGET or its alias), and some later cell is a STATUS CELL — its
+  // leading clause is a status phrase, alone or followed by a date or a
+  // preposition-led tail.
   const caseRows: [string[], boolean][] = [
+    // accepted
     [["MEL-436385", "1658", "Kandidat siden 03.07"], true],
+    [["MEL-1", "Kandidat siden 03.07, på 2024-lista"], true],
     [["[MELOSYS-8306](https://x/browse/MELOSYS-8306) — A1", "Venter på møte"], true],
     [["**MEL-483333**", "ok"], true],
     [["`MEL-1`", "Holdt ute, wait"], true],
-    [["[[plans/x|MEL-2]]", "done"], true],
+    [["[[plans/x|MEL-2]]", "done"], true], // the alias
+    [["[[MEL-123|the bug]]", "done"], true], // the target
     [["MEL-1, MEL-2", "Blokkert"], true],
-    [["MEL-436385", "1658", "2024"], false], // no status word
-    [["MEL-436385", "Okay then"], false], // `ok` must be a whole word
+    [["MEL-1", "**Holdt ute av lista til S4.** Mer tekst her"], true],
+    [["MEL-1", "**Blokkert til oppgave 3 er i prod.** Mer"], true],
+    [["MEL-1", "Ny kandidat 29.09. Holdt ute"], true],
+    [["MEL-1", "Ikke kandidat («uten treff»). Mer"], true],
+    [["MEL-1", "Ikke i rapporten. Grunnlaget er vedtaket"], true],
+    [["MEL-1", "Datafikset 07.09 (rad 1)"], true],
+    [["MEL-1", "Hoppet over, har en annen"], true],
+    [["MELOSYS-1", "I prod"], true],
+    [["MEL-1", "✅ done"], true],
+    [["MEL-1", "Done ✅"], true],
+    [["MEL-1", "ferdig."], true],
+    [["MEL-1", "Pending (waiting for review)"], true],
+    [["MEL-1", "2024", "Fikset 2026-09-01"], true],
+    // rejected
+    [["UTF-8", "hold the line"], false],
+    [["SHA-256", "ok so far"], false],
+    [["MEL-1", "looks ok to me but untested"], false],
+    [["MEL-1", "Ingen vedtak i Melosys; ikke kandidat"], false], // the status is not the cell's lead
+    [["MEL-1", "kandidater"], false],
+    [["MEL-436385", "1658", "2024"], false], // no status cell
+    [["MEL-436385", "Okay then"], false],
     [["Sak MEL-1", "ok"], false], // the id must open the cell
+    [["[[plans/x|the bug]]", "done"], false], // neither target nor alias is an id
     [["M-1", "ok"], false], // one capital is not a project
     [["mel-1", "ok"], false],
     [["MEL-12x", "ok"], false],
@@ -245,25 +415,25 @@ describe("check 4 — case-table", () => {
   const fm = "---\ntitle: t\n---\n";
 
   test(`${CASE_ROWS_MIN} case rows are reported; ${CASE_ROWS_MIN - 1} are not; rows add up across tables`, () => {
-    expect(only(run("archive/a.md", fm + table(CASE_ROWS_MIN - 1)), "case-table")).toEqual([]);
-    const f = only(run("archive/a.md", fm + table(CASE_ROWS_MIN)), "case-table");
+    expect(only(run("plans/a.md", fm + table(CASE_ROWS_MIN - 1)), "case-table")).toEqual([]);
+    const f = only(run("plans/a.md", fm + table(CASE_ROWS_MIN)), "case-table");
     expect(f).toHaveLength(1);
     expect(f[0]!.message).toContain("MEL-1, MEL-2, MEL-3");
-    expect(only(run("archive/a.md", fm + table(3) + "\ntext\n\n" + table(2)), "case-table")).toHaveLength(1);
+    expect(only(run("plans/a.md", fm + table(3) + "\ntext\n\n" + table(2)), "case-table")).toHaveLength(1);
   });
 
   test("a <CaseBoard> anywhere on the page silences it", () => {
-    expect(only(run("archive/a.md", fm + table(9) + '\n<CaseBoard src="cases.yaml" />\n'), "case-table")).toEqual([]);
-    expect(only(run("archive/a.md", fm + table(9) + '\n<Fold title="x">\n\n<CaseBoard src="cases.yaml" />\n\n</Fold>\n'), "case-table")).toEqual([]);
+    expect(only(run("plans/a.md", fm + table(9) + '\n<CaseBoard src="cases.yaml" />\n'), "case-table")).toEqual([]);
+    expect(only(run("plans/a.md", fm + table(9) + '\n<Fold title="x">\n\n<CaseBoard src="cases.yaml" />\n\n</Fold>\n'), "case-table")).toEqual([]);
   });
 
   test("a CaseBoard or a table quoted in a code fence does not count", () => {
-    expect(only(run("archive/a.md", fm + table(9) + '\n```mdx\n<CaseBoard src="cases.yaml" />\n```\n'), "case-table")).toHaveLength(1);
-    expect(only(run("archive/a.md", fm + "```md\n" + table(9) + "```\n"), "case-table")).toEqual([]);
+    expect(only(run("plans/a.md", fm + table(9) + '\n```mdx\n<CaseBoard src="cases.yaml" />\n```\n'), "case-table")).toHaveLength(1);
+    expect(only(run("plans/a.md", fm + "```md\n" + table(9) + "```\n"), "case-table")).toEqual([]);
   });
 
   test("a table of ids with no status word is not a case table", () => {
-    expect(only(run("archive/a.md", fm + table(9, "1658")), "case-table")).toEqual([]);
+    expect(only(run("plans/a.md", fm + table(9, "1658")), "case-table")).toEqual([]);
   });
 });
 
@@ -278,6 +448,17 @@ describe("check 5 — long-page-no-fold (info)", () => {
     const f = only(run("plans/a.md", lines(LONG_PAGE_LINES + 1)), "long-page-no-fold");
     expect(f).toHaveLength(1);
     expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.message).toStartWith(`${LONG_PAGE_LINES + 1} lines`);
+  });
+
+  test("lines are counted like wc -l: a trailing newline adds no line", () => {
+    const nl = (n: number) => lines(n) + "\n";
+    expect(pageLineCount(nl(LONG_PAGE_LINES))).toBe(LONG_PAGE_LINES);
+    expect(pageLineCount(lines(LONG_PAGE_LINES))).toBe(LONG_PAGE_LINES); // a last line with no newline still counts
+    expect(pageLineCount("")).toBe(0);
+    expect(only(run("plans/a.md", nl(LONG_PAGE_LINES)), "long-page-no-fold")).toEqual([]);
+    const f = only(run("plans/a.md", nl(LONG_PAGE_LINES + 1)), "long-page-no-fold");
+    expect(f).toHaveLength(1);
     expect(f[0]!.message).toStartWith(`${LONG_PAGE_LINES + 1} lines`);
   });
 
@@ -358,6 +539,108 @@ describe("lintWiki — drift checks over a real git repo", () => {
     const f = await drift();
     expect(f.map((x) => `${x.check} ${x.relPath}:${x.line}`)).toEqual(["status-date-behind plans/body.md:4"]);
     expect(f[0]!.message).toContain("(2026-09-15)");
+  });
+
+  test("a page committed once, after its status_date, is not behind: the creation commit is no content touch", async () => {
+    await write("plans/late.md", plan("in-flight", "2026-09-01", "Written earlier, committed late."));
+    commit("2026-09-05T09:00:00Z");
+    await write("plans/edited.md", plan("in-flight", "2026-09-01", "First."));
+    commit("2026-09-05T09:00:00Z");
+    await write("plans/edited.md", plan("in-flight", "2026-09-01", "First. Then more."));
+    commit("2026-09-07T09:00:00Z");
+    expect((await drift()).map((x) => x.relPath)).toEqual(["plans/edited.md"]);
+  });
+
+  test("a page merged onto the main line later, unchanged, is not behind; one changed in the merge is", async () => {
+    await write("README.md", "root\n");
+    commit("2026-09-01T08:00:00Z");
+    git(["branch", "-M", "main"]);
+    git(["checkout", "-q", "-b", "side"]);
+    await write("plans/same.md", plan("in-flight", "2026-09-01", "Written on a branch."));
+    await write("plans/changed.md", plan("in-flight", "2026-09-01", "Written on a branch."));
+    commit("2026-09-01T09:00:00Z");
+    git(["checkout", "-q", "main"]);
+    await write("other.md", "main moves on\n");
+    commit("2026-09-05T09:00:00Z");
+    git(["merge", "-q", "--no-ff", "--no-commit", "side"]);
+    await write("plans/changed.md", plan("in-flight", "2026-09-01", "Written on a branch. Edited in the merge."));
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "merge side"], "2026-09-10T09:00:00Z");
+
+    expect((await drift()).map((x) => x.relPath)).toEqual(["plans/changed.md"]);
+    const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/same.md")!;
+    expect(page.gitTouchedMs).toBe(Date.parse("2026-09-10T09:00:00Z")); // rail: the merge, as before
+    expect(page.gitContentTouchedMs).toBe(Date.parse("2026-09-01T09:00:00Z"));
+  });
+
+  test("a tags-only commit is not a content touch for this check, and the rail date still moves", async () => {
+    const tagged = (tags: string, body: string, date = "2026-09-03") => plan("in-flight", date, body, `tags: [${tags}]\n`);
+    await write("plans/a.md", tagged("a", "First."));
+    await write("plans/b.md", tagged("a", "First."));
+    commit("2026-09-01T09:00:00Z");
+    await write("plans/a.md", tagged("a", "First. More."));
+    await write("plans/b.md", tagged("a", "First. More."));
+    commit("2026-09-03T09:00:00Z");
+    await write("plans/a.md", tagged("a, b", "First. More."));
+    await write("plans/b.md", tagged("a, b", "First. More. And a body edit with it."));
+    commit("2026-09-10T09:00:00Z");
+
+    expect((await drift()).map((x) => x.relPath)).toEqual(["plans/b.md"]);
+    const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/a.md")!;
+    expect(page.gitTouchedMs).toBe(Date.parse("2026-09-10T09:00:00Z")); // rail: unchanged rule
+    expect(page.gitContentTouchedMs).toBe(Date.parse("2026-09-03T09:00:00Z"));
+  });
+
+  test("more metadata-only commits than the step-back walks: the touch is unverified, so no finding", async () => {
+    // status_date matches the last body edit; then N priority-only commits.
+    const build = async (n: number) => {
+      await write("plans/a.md", plan("in-flight", "2026-09-01", "First."));
+      commit("2026-09-01T09:00:00Z");
+      await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More."));
+      commit("2026-09-05T09:00:00Z");
+      for (let i = 1; i <= n; i++) {
+        await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More.", `priority: p${i}\n`));
+        commit(`2026-09-${String(5 + i).padStart(2, "0")}T09:00:00Z`);
+      }
+    };
+    await build(9); // > METADATA_TOUCH_MAX_STEPS (8)
+    expect(await drift()).toEqual([]);
+    const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/a.md")!;
+    expect(page.gitTouchUnverified).toBe(true);
+    expect(page.gitTouchedMs).toBe(Date.parse("2026-09-06T09:00:00Z")); // rail keeps the commit it reached
+  });
+
+  test("seven metadata-only commits resolve within the walk: verified, and not behind", async () => {
+    await write("plans/a.md", plan("in-flight", "2026-09-01", "First."));
+    commit("2026-09-01T09:00:00Z");
+    await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More."));
+    commit("2026-09-05T09:00:00Z");
+    for (let i = 1; i <= 7; i++) {
+      await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More.", `priority: p${i}\n`));
+      commit(`2026-09-${String(5 + i).padStart(2, "0")}T09:00:00Z`);
+    }
+    const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/a.md")!;
+    expect(page.gitTouchUnverified).toBeUndefined();
+    expect(page.gitContentTouchedMs).toBe(Date.parse("2026-09-05T09:00:00Z"));
+    expect(await drift()).toEqual([]);
+  });
+
+  test("a classification that runs out of budget leaves the touch unverified: no finding", async () => {
+    await write("plans/a.md", plan("in-flight", "2026-09-05", "First."));
+    commit("2026-09-01T09:00:00Z");
+    await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More."));
+    commit("2026-09-05T09:00:00Z");
+    await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More.", "priority: p1\n"));
+    commit("2026-09-08T09:00:00Z");
+    __setClassifyBudgetForTest(0);
+    try {
+      expect(await drift()).toEqual([]);
+      const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/a.md")!;
+      expect(page.gitTouchedMs).toBe(Date.parse("2026-09-08T09:00:00Z")); // unfiltered, as before
+      expect(page.gitTouchUnverified).toBe(true);
+    } finally {
+      __setClassifyBudgetForTest(null);
+    }
   });
 
   test("a status_date bumped in the same commit as the work is not behind", async () => {

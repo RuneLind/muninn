@@ -107,6 +107,19 @@ export interface WikiGitDates {
    */
   touched: Map<string, number>;
   /**
+   * Like `touched`, with {@link CONTENT_TOUCH_EXTRA_KEYS} (`tags`) also set
+   * aside — the lint's `status-date-behind` reads it, the rail never does.
+   * Computed in the same step-back walk as `touched`, so it costs no git call of
+   * its own; absent where every non-sweep touch only rewrote metadata.
+   */
+  contentTouched: Map<string, number>;
+  /**
+   * Pages whose `contentTouched` date is NOT verified: the step-back was still
+   * stepping after {@link METADATA_TOUCH_MAX_STEPS}, or the classification
+   * failed or ran out of its budget (then every page it would have judged).
+   */
+  touchUnverified: Set<string>;
+  /**
    * Paths `git status` reports as dirty (modified / untracked / deleted) inside the
    * wiki subtree — the ONLY pages whose mtime still carries information. A clean
    * file's mtime is a checkout or sweep artifact; a dirty file's mtime is a real
@@ -420,6 +433,19 @@ const METADATA_FRONTMATTER_LINE_RE = new RegExp(
   `^(?:${METADATA_ONLY_FRONTMATTER_KEYS.join("|")}):`,
 );
 
+/**
+ * Keys set aside for the CONTENT touch only (`WikiGitDates.contentTouched`), on
+ * top of {@link METADATA_ONLY_FRONTMATTER_KEYS}. Not in that set, because adding
+ * a key there moves every rail date: `tags:` re-tagging (mimir's
+ * `chore: auto-tag N pages`) is not work a plan's `status_date` must follow, but
+ * a reader may still want it to count as an update.
+ */
+export const CONTENT_TOUCH_EXTRA_KEYS = ["tags"] as const;
+
+const CONTENT_TOUCH_LINE_RE = new RegExp(
+  `^(?:${[...METADATA_ONLY_FRONTMATTER_KEYS, ...CONTENT_TOUCH_EXTRA_KEYS].join("|")}):`,
+);
+
 /** What a dirty page's two texts say about each other. See the section comment
  *  above for the full rule; `edit` is the default and the only one that keeps the
  *  page's mtime. */
@@ -435,12 +461,32 @@ export type PageChangeVerdict = "identical" | "metadata-only" | "edit";
  * so a frontmatter-less page that did not change is still dropped.)
  */
 export function classifyPageChange(headText: string, workText: string): PageChangeVerdict {
+  return classifyWith(headText, workText, METADATA_FRONTMATTER_LINE_RE, false);
+}
+
+/**
+ * {@link classifyPageChange} with {@link CONTENT_TOUCH_EXTRA_KEYS} also read as
+ * metadata, and with a page that has NO frontmatter read as an empty block — so
+ * a commit that adds a fence holding only metadata keys (mimir's auto-tagger:
+ * `---` / `tags: [a, b]` / `---` over a page with none) is metadata-only. Never
+ * `edit` where `classifyPageChange` is not: it strips a superset of lines and
+ * turns one of that function's `edit` cases into a comparison.
+ */
+export function classifyContentChange(headText: string, workText: string): PageChangeVerdict {
+  return classifyWith(headText, workText, CONTENT_TOUCH_LINE_RE, true);
+}
+
+function classifyWith(headText: string, workText: string, keyLine: RegExp, noBlockIsEmpty: boolean): PageChangeVerdict {
   if (headText === workText) return "identical";
-  const head = splitFrontmatter(headText);
-  const work = splitFrontmatter(workText);
+  const split = (text: string) => {
+    const parts = splitFrontmatter(text);
+    return parts.frontmatter === null && noBlockIsEmpty ? { frontmatter: "", body: text } : parts;
+  };
+  const head = split(headText);
+  const work = split(workText);
   if (head.frontmatter === null || work.frontmatter === null) return "edit";
   if (head.body !== work.body) return "edit";
-  return frontmatterDiffIsMetadataOnly(head.frontmatter, work.frontmatter)
+  return frontmatterDiffIsMetadataOnly(head.frontmatter, work.frontmatter, keyLine)
     ? "metadata-only"
     : "edit";
 }
@@ -462,11 +508,11 @@ export function classifyPageChange(headText: string, workText: string): PageChan
  * A trailing `\r` needs no trimming: the key regex is anchored at column 0 and
  * open at the end, so a CRLF page's metadata lines match with it in place.
  */
-function frontmatterDiffIsMetadataOnly(head: string, work: string): boolean {
+function frontmatterDiffIsMetadataOnly(head: string, work: string, keyLine: RegExp): boolean {
   const remainder = (block: string) =>
     block
       .split("\n")
-      .filter((line) => !METADATA_FRONTMATTER_LINE_RE.test(line))
+      .filter((line) => !keyLine.test(line))
       .join("\n");
   return remainder(head) === remainder(work);
 }
@@ -694,9 +740,16 @@ export const METADATA_TOUCH_MAX_STEPS = 8;
  * whose every touch steps back leaves the map, which is what a page touched only
  * by sweeps already does.
  *
+ * The same walk answers `contentTouched` with {@link classifyContentChange}:
+ * that verdict is `edit` only where the rail's is, so a page keeps stepping for
+ * the content date after its rail date has stopped, over the same blobs. The
+ * rail date is decided exactly as before; the content walk can only add rounds
+ * for pages whose newest touch was a `tags:` edit.
+ *
  * Keys are repo-relative, as {@link parseGitLog} returns them; only markdown
  * pages under `prefix` are judged. Every degrade — a failed read, a thrown error,
- * {@link GIT_DATES_CLASSIFY_TIMEOUT_MS} expiring — answers `touched` unchanged.
+ * {@link GIT_DATES_CLASSIFY_TIMEOUT_MS} expiring — answers `touched` unchanged
+ * for both dates and marks every judged page `unverified`.
  */
 async function resolveMetadataOnlyTouches(
   root: string,
@@ -704,45 +757,64 @@ async function resolveMetadataOnlyTouches(
   prefix: string,
   touched: Map<string, number>,
   touches: Map<string, TouchRecord[]>,
-): Promise<Map<string, number>> {
+): Promise<{ touched: Map<string, number>; contentTouched: Map<string, number>; unverified: Set<string> }> {
   // Set when the budget race is lost, so the loser spawns no further rounds.
   let aborted = false;
-  const run = async (): Promise<Map<string, number>> => {
-    const out = new Map(touched);
-    let pending: { key: string; list: TouchRecord[]; i: number }[] = [];
-    for (const [key, list] of touches) {
-      if (!key.startsWith(prefix) || !isMarkdownWikiPath(key)) continue;
-      const last = list[list.length - 1];
-      // `touched` and the newest record are set by the same commit; a mismatch is
-      // a shape this rule was not built for, so the page keeps its date.
-      if (!last || out.get(key) !== last.ts) continue;
-      pending.push({ key, list, i: list.length - 1 });
-    }
+  type Cand = { key: string; list: TouchRecord[]; i: number; railOpen: boolean };
+  const candidates: Cand[] = [];
+  for (const [key, list] of touches) {
+    if (!key.startsWith(prefix) || !isMarkdownWikiPath(key)) continue;
+    const last = list[list.length - 1];
+    // `touched` and the newest record are set by the same commit; a mismatch is
+    // a shape this rule was not built for, so the page keeps its date.
+    if (!last || touched.get(key) !== last.ts) continue;
+    candidates.push({ key, list, i: list.length - 1, railOpen: true });
+  }
+  const run = async () => {
+    const rail = new Map(touched);
+    const content = new Map(touched);
+    let pending = candidates;
     let moved = 0;
     for (let step = 0; step < METADATA_TOUCH_MAX_STEPS && pending.length > 0 && !aborted; step++) {
-      const judged = pending.filter((c) => {
+      // What each touch is compared against: its parent's blob, or — for the
+      // CONTENT date only — an ADD record's previous touch. An add with history
+      // before it is a page arriving on the first-parent line through a merge
+      // (measured on mimir: a plan written on a branch on 05-30, merged 07-28 as
+      // the identical blob), and the rail date never steps past an add.
+      const baseOf = (c: Cand): string | null => {
         const r = c.list[c.i]!;
-        return r.parentPath !== undefined && !r.path.includes("\n") && !r.parentPath.includes("\n");
-      });
-      const names = judged.flatMap((c) => {
-        const r = c.list[c.i]!;
-        return [`${r.commit}^:${r.parentPath}`, `${r.commit}:${r.path}`];
-      });
+        if (r.path.includes("\n")) return null;
+        if (r.parentPath !== undefined) return r.parentPath.includes("\n") ? null : `${r.commit}^:${r.parentPath}`;
+        const prev = c.i > 0 ? c.list[c.i - 1]! : undefined;
+        if (!prev || prev.path.includes("\n")) return null;
+        c.railOpen = false;
+        return `${prev.commit}:${prev.path}`;
+      };
+      const bases = new Map<Cand, string>();
+      for (const c of pending) {
+        const base = baseOf(c);
+        if (base !== null) bases.set(c, base);
+      }
+      const judged = pending.filter((c) => bases.has(c));
+      const names = judged.flatMap((c) => [bases.get(c)!, `${c.list[c.i]!.commit}:${c.list[c.i]!.path}`]);
       const texts = names.length ? await readObjectTexts(toplevel, names) : [];
       if (texts === null) throw new Error("cat-file read failed");
-      const next: typeof pending = [];
+      const next: Cand[] = [];
       judged.forEach((c, j) => {
         const before = texts[2 * j];
         const after = texts[2 * j + 1];
         if (typeof before !== "string" || typeof after !== "string") return;
-        if (classifyPageChange(before, after) === "edit") return;
-        moved++;
+        if (c.railOpen && classifyPageChange(before, after) === "edit") c.railOpen = false;
+        if (!c.railOpen && classifyContentChange(before, after) === "edit") return;
+        if (c.railOpen) moved++;
         c.i--;
         if (c.i < 0) {
-          out.delete(c.key);
+          content.delete(c.key);
+          if (c.railOpen) rail.delete(c.key);
           return;
         }
-        out.set(c.key, c.list[c.i]!.ts);
+        content.set(c.key, c.list[c.i]!.ts);
+        if (c.railOpen) rail.set(c.key, c.list[c.i]!.ts);
         next.push(c);
       });
       pending = next;
@@ -750,7 +822,8 @@ async function resolveMetadataOnlyTouches(
     if (moved > 0) {
       log.debug("wiki {root}: {n} metadata-only commit touch(es) set aside", { root, n: moved });
     }
-    return out;
+    // Still stepping when the walk stopped: the date reached is unverified.
+    return { touched: rail, contentTouched: content, unverified: new Set(pending.map((c) => c.key)) };
   };
 
   const resolved = await Promise.race([
@@ -767,7 +840,7 @@ async function resolveMetadataOnlyTouches(
       "wiki {root}: metadata-only commit classification failed or exceeded its budget — touch dates unfiltered",
       { root },
     );
-    return touched;
+    return { touched, contentTouched: touched, unverified: new Set(candidates.map((c) => c.key)) };
   }
   return resolved;
 }
@@ -872,7 +945,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
 
   const parsed = parseGitLog(stdout);
   const created = parsed.created;
-  const touched = await resolveMetadataOnlyTouches(
+  const { touched, contentTouched, unverified } = await resolveMetadataOnlyTouches(
     root,
     toplevel,
     prefix,
@@ -881,7 +954,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   );
   // `listWikiSubtreeDirty` already returns WIKI-relative paths, so it needs no strip.
   const dirty = new Set(await dirtyPromise);
-  if (!rel) return { created, touched, dirty };
+  if (!rel) return { created, touched, contentTouched, touchUnverified: unverified, dirty };
 
   // Translate repo-relative → wiki-relative, dropping anything outside the subtree
   // (the pathspec makes that rare, but a rename's SOURCE can legitimately sit
@@ -891,7 +964,15 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     for (const [p, ms] of m) if (p.startsWith(prefix)) out.set(p.slice(prefix.length), ms);
     return out;
   };
-  const out = { created: strip(created), touched: strip(touched), dirty };
+  const touchUnverified = new Set<string>();
+  for (const p of unverified) if (p.startsWith(prefix)) touchUnverified.add(p.slice(prefix.length));
+  const out = {
+    created: strip(created),
+    touched: strip(touched),
+    contentTouched: strip(contentTouched),
+    touchUnverified,
+    dirty,
+  };
   // The strip is the one step that can throw away EVERYTHING while git reported
   // success — a wrong prefix, or paths in a spelling the prefix can't match (the
   // `core.quotePath` class of bug). Distinguished here from the innocent

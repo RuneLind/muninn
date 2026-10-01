@@ -571,6 +571,18 @@ export interface WikiPageMeta {
    */
   gitTouchedMs?: number;
   /**
+   * The CONTENT touch: `gitTouchedMs` with `tags:`-only commits also set aside
+   * (`CONTENT_TOUCH_EXTRA_KEYS`, `git-dates.ts`). Read by lint check 9's
+   * `status-date-behind` only; stripped from every listing by `toListing`.
+   */
+  gitContentTouchedMs?: number;
+  /**
+   * True when `gitContentTouchedMs` is not verified — the metadata step-back ran
+   * out of steps, or its classification failed or ran out of budget. Absent
+   * otherwise. Lint-only, stripped from every listing like its sibling.
+   */
+  gitTouchUnverified?: boolean;
+  /**
    * WORKED-ON time (epoch ms) — the newest write to this page by an AGENT SESSION,
    * read out of claude-usage's `session_files` ledger and stamped from a warm memo
    * (`src/wiki/worked-ledger.ts`). The third date axis, beside the two git ones.
@@ -3419,6 +3431,9 @@ export async function buildWikiIndex(
         meta.gitTouchedMs = t;
         touchedHits++;
       }
+      const ct = gitDates.contentTouched.get(meta.relPath);
+      if (ct !== undefined) meta.gitContentTouchedMs = ct;
+      if (gitDates.touchUnverified.has(meta.relPath)) meta.gitTouchUnverified = true;
       if (gitDates.dirty.has(meta.relPath)) meta.gitDirty = true;
       // A page git has never heard of is either genuinely new — and then the DIRTY
       // probe knows it, since `git status` lists untracked files — or the walk's keys

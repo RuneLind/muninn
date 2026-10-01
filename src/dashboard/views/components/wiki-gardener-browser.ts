@@ -12,6 +12,7 @@ import { escHtml as esc } from "./escape.ts";
 // into this browser bundle.
 import type { LintCheck } from "../../../wiki/lint.ts";
 import { installWikiReadonlyGuard } from "./wiki-readonly-client.ts";
+import { LINT_LABELS, lintGroupLabel } from "./wiki-lint-labels.ts";
 import {
   backlogStripModel,
   backlogStripHtml,
@@ -80,6 +81,7 @@ interface LintFinding {
   message: string;
   detail?: string;
   line?: number;
+  severity?: "info";
 }
 interface LintResponse {
   findings: LintFinding[];
@@ -467,28 +469,6 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
 
 // ── Lint findings (report-only) ─────────────────────────────────────────────
 
-// Grouped display order + labels. `Record<LintCheck, string>` so a check added to
-// the engine cannot compile without a label here — `renderLint` iterates THIS map,
-// so an unlabelled check renders nothing at all, findings and count included.
-const LINT_LABELS: Record<LintCheck, string> = {
-  "broken-link": "Broken links",
-  orphan: "Orphan pages",
-  "stale-updated": "Unusable updated: (missing / unparseable / future)",
-  "missing-sources": "Missing sources",
-  "index-truncation": "Truncated wikilinks (unclosed [[)",
-  "nested-annotation": "Markup nested inside a wikilink",
-  "unrendered-fact-mark": "Fact-check marks that render as literal markup",
-  "stem-collision": "Same-stem pages (one is hidden from the wiki)",
-  "same-work-no-link": "Same work, no link between the pages",
-  "series-unnamed": "Linked pages that declare no series:",
-  "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",
-  "draft-lane-stale": "Draft lanes older than 2 days",
-  "status-date-behind": "status_date older than the last content commit",
-  "loose-sql": "SQL fences outside a <Query>",
-  "case-table": "Case tables with statuses and no <CaseBoard>",
-  "long-page-no-fold": "Long pages with no <Fold> (info)",
-};
-
 function renderLint(findings: LintFinding[]): void {
   const el = document.getElementById("lintList");
   if (!el) return;
@@ -502,7 +482,7 @@ function renderLint(findings: LintFinding[]): void {
     if (!items.length) continue;
     html +=
       '<div class="lint-group"><div class="lint-group-head">' +
-      esc(LINT_LABELS[check]) +
+      esc(lintGroupLabel(check, items)) +
       ` <span class="lint-count">${items.length}</span></div><ul class="lint-items">`;
     items.forEach((f) => {
       html +=

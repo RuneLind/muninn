@@ -145,16 +145,25 @@ export async function checkWikiLinter(
     }
   }
 
-  if (findings.length === 0) {
-    log.info("Wiki-linter: no findings for \"{name}\" — wiki is clean", { botName: name, name });
+  // An `info` finding is a suggestion: it stays on /wiki/gardener and never
+  // reaches the alert, its count or its sentence.
+  const alerting = findings.filter((f) => f.severity !== "info");
+  if (alerting.length === 0) {
+    log.info("Wiki-linter: no findings for \"{name}\" — wiki is clean", {
+      botName: name,
+      name,
+      info: findings.length,
+    });
     return [];
   }
+  const alertCounts = { ...counts };
+  for (const f of findings) if (f.severity === "info") alertCounts[f.check]--;
 
-  const summary = `Wiki lint: ${summarizeCounts(counts)} — review at /wiki/gardener`;
+  const summary = `Wiki lint: ${summarizeCounts(alertCounts)} — review at /wiki/gardener`;
   log.info("Wiki-linter: {count} finding(s) for \"{name}\"", {
     botName: name,
     name,
-    count: findings.length,
+    count: alerting.length,
   });
 
   // Per-run-stable dated id: at most one lint alert per day (a same-day re-run
